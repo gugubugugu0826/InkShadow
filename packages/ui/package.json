@@ -1,0 +1,52 @@
+{
+  "name": "@inkshadow/ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "InkShadow accessible React UI primitives and design tokens",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./styles.css": "./src/styles/index.css"
+  },
+  "files": [
+    "dist",
+    "src/styles"
+  ],
+  "sideEffects": [
+    "./src/styles/*.css"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --config vitest.config.ts --configLoader runner",
+    "test:watch": "vitest --config vitest.config.ts --configLoader runner",
+    "lint": "eslint src tests vitest.config.ts --max-warnings 0"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "^1.1.0",
+    "@radix-ui/react-dropdown-menu": "^2.1.0",
+    "@radix-ui/react-select": "^2.2.0",
+    "@radix-ui/react-tabs": "^1.1.0",
+    "@radix-ui/react-tooltip": "^1.2.0",
+    "lucide-react": "^0.468.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "jsdom": "^29.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0"
+  }
+}

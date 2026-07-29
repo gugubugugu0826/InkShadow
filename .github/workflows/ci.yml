@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Type, lint, test and web build
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.13.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      - name: Check architecture boundaries
+        run: pnpm check:boundaries
+
+      - name: Scan for committed credentials
+        run: pnpm check:secrets
+
+      - name: Enforce runtime license policy
+        run: pnpm check:licenses
+
+      - name: Check types
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Install Playwright browser
+        run: pnpm exec playwright install chromium
+
+      - name: Run browser journeys
+        run: pnpm test:e2e
+
+      - name: Upload browser report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report
+          if-no-files-found: ignore
+          retention-days: 7
+
+  cloud-postgres:
+    name: Cloud PostgreSQL and forced RLS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CI: "true"
+      INKSHADOW_TEST_POSTGRES_URL: postgresql://inkshadow_ci@127.0.0.1:5432/inkshadow_ci
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: inkshadow_ci
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: inkshadow_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U inkshadow_ci -d inkshadow_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.13.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts=false
+
+      - name: Run every cloud API suite against PostgreSQL
+        run: pnpm --filter @inkshadow/cloud-api test
+
+  native:
+    name: Windows native shell
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.13.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+
+      - name: Lint Rust
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test Rust
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+      - name: Install Playwright browser
+        run: pnpm exec playwright install chromium
+
+      - name: Build, audit and exercise release frontend
+        run: pnpm test:e2e:release
+
+      - name: Package the exercised frontend as an unsigned NSIS installer
+        run: pnpm --filter @inkshadow/desktop tauri:package:unsigned:prebuilt
+
+      - name: Upload unsigned installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: inkshadow-community-windows-unsigned
+          path: apps/desktop/src-tauri/target/release/bundle/nsis/*
+          if-no-files-found: error
+          retention-days: 7

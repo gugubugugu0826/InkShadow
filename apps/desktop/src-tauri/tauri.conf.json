@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "墨影 InkShadow",
+  "version": "0.1.0",
+  "identifier": "com.inkshadow.desktop",
+  "build": {
+    "beforeBuildCommand": "pnpm build:web",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "墨影 InkShadow",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 720,
+        "minHeight": 560,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; base-uri 'none'; connect-src 'self' ipc: http://ipc.localhost; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' asset: data: blob:; media-src 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "category": "Productivity",
+    "shortDescription": "本地优先的 AI 长篇创作工作台",
+    "longDescription": "InkShadow 墨影是本地优先、隐私优先、可选云同步的 AI 长篇内容创作工作台。",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+DESIGN/
+node_modules/
+dist/
+dist-gate/
+coverage/
+.vite-cache/
+**/.tmp/
+target/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+playwright-report/
+test-results/
+.tmp-*/
+pnpm-lock.yaml
+
+# Frozen source documents are inputs, not generated code.
+docs/PROJECT.md
+docs/PLAN.md
+docs/PRD.md
+docs/SPEC.md
+docs/README.md

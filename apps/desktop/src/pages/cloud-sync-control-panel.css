@@ -1,0 +1,32 @@
+.cloud-sync-control__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.cloud-sync-control__header > div,
+.cloud-sync-control__content,
+.cloud-sync-control__summary {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.cloud-sync-control__summary {
+  padding: var(--space-4);
+  border: 0.0625rem solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-sunken);
+}
+
+.cloud-sync-control__summary p,
+.cloud-sync-control__summary small {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.cloud-sync-control__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}

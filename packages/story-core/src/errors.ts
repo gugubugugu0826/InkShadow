@@ -1,0 +1,109 @@
+export const STORY_CORE_ERROR_CODES = [
+  "STORY_VALIDATION_FAILED",
+  "STORY_INVALID_UUID",
+  "STORY_INVALID_TIMESTAMP",
+  "STORY_SENSITIVE_DATA_REJECTED",
+  "STORY_EVIDENCE_TOO_LONG",
+  "STORY_EVIDENCE_RANGE_INVALID",
+  "STORY_REVISION_CONFLICT",
+  "OUTLINE_NOT_FOUND",
+  "OUTLINE_NODE_NOT_FOUND",
+  "OUTLINE_NODE_LOCKED",
+  "OUTLINE_INVALID_HIERARCHY",
+  "IDEATION_DRAFT_NOT_FOUND",
+  "IDEATION_STEP_LOCKED",
+  "IDEATION_SUGGESTION_NOT_FOUND",
+  "IDEATION_INVALID_TRANSITION",
+  "FORMAL_RECORD_NOT_FOUND",
+  "FORMAL_RECORD_PLAN_REQUIRED",
+  "FORMAL_RECORD_PLAN_MISMATCH",
+  "FORMAL_RECORD_VERSION_NOT_FOUND",
+  "REVIEW_ITEM_NOT_FOUND",
+  "REVIEW_INVALID_TRANSITION",
+  "HUMAN_DECISION_REQUIRED",
+  "REVIEW_SOURCE_CHANGED",
+  "EXTRACTION_DISABLED",
+  "EXTRACTION_JOB_NOT_FOUND",
+  "EXTRACTION_CANDIDATE_NOT_FOUND",
+  "EXTRACTION_OUTPUT_INVALID",
+  "EXTRACTION_INVALID_TRANSITION",
+  "EXTRACTION_SOURCE_CHANGED",
+  "EXTRACTION_EVALUATION_BLOCKED",
+  "EXTRACTION_PROVIDER_UNAVAILABLE",
+  "EXTRACTION_CANCELLED",
+  "MEMORY_RECORD_NOT_FOUND",
+  "MEMORY_AUTO_LEARNING_DISABLED",
+  "MEMORY_INVALID_GOVERNANCE",
+  "WHAT_IF_NOT_FOUND",
+  "WHAT_IF_INVALID_TRANSITION",
+  "WHAT_IF_FORMAL_COMMIT_FORBIDDEN",
+  "MATERIAL_NOT_FOUND",
+  "MATERIAL_DUPLICATE_FOUND",
+  "MATERIAL_RIGHTS_NOT_CONFIRMED",
+  "MATERIAL_USAGE_FORBIDDEN",
+  "MATERIAL_REFERENCE_IMPACT_CHANGED",
+  "MATERIAL_INVALID_TRANSITION",
+  "FINE_TUNING_VALIDATION_FAILED",
+  "FINE_TUNING_SOURCE_CHANGED",
+  "FINE_TUNING_DATASET_CHANGED",
+  "FINE_TUNING_HUMAN_APPROVAL_REQUIRED",
+  "FINE_TUNING_INVALID_TRANSITION",
+  "FINE_TUNING_NOT_FOUND",
+  "FINE_TUNING_IDEMPOTENCY_CONFLICT",
+  "FINE_TUNING_QUOTA_EXCEEDED",
+  "FINE_TUNING_PROVIDER_UNAVAILABLE",
+  "FINE_TUNING_REMOTE_SUBMISSION_FORBIDDEN",
+  "STORY_REPOSITORY_ERROR",
+] as const;
+
+export type StoryCoreErrorCode = (typeof STORY_CORE_ERROR_CODES)[number];
+
+export const STORY_ERROR_ACTIONS = [
+  "RETRY",
+  "UNLOCK_NODE",
+  "OPEN_SOURCE",
+  "REVIEW_EVIDENCE",
+  "RECOMPARE",
+  "UNDO",
+  "ENABLE_MEMORY",
+  "DISCARD_BRANCH",
+  "REVIEW_RIGHTS",
+  "OPEN_REFERENCES",
+  "RESTORE_MATERIAL",
+  "USE_EXISTING_MATERIAL",
+  "RESUME_IDEATION",
+  "UNLOCK_IDEATION_STEP",
+  "REGENERATE_IDEATION",
+  "REVIEW_FINE_TUNING_GOVERNANCE",
+  "OPEN_FINE_TUNING_JOB",
+  "OPEN_FINE_TUNING_EVALUATION",
+  "CONFIGURE_LOCAL_TRAINER",
+  "CONTACT_SUPPORT",
+] as const;
+
+export type StoryErrorAction = (typeof STORY_ERROR_ACTIONS)[number];
+
+export interface StoryCoreErrorOptions {
+  readonly code: StoryCoreErrorCode;
+  readonly message: string;
+  readonly retryable?: boolean;
+  readonly actions?: readonly StoryErrorAction[];
+  readonly details?: Readonly<Record<string, string | number | boolean | null>>;
+}
+
+export class StoryCoreError extends Error {
+  public override name = "StoryCoreError";
+
+  public readonly code: StoryCoreErrorCode;
+  public readonly retryable: boolean;
+  public readonly actions: readonly StoryErrorAction[];
+  public readonly details: Readonly<Record<string, string | number | boolean | null>>;
+
+  public constructor(options: StoryCoreErrorOptions) {
+    super(options.message);
+    this.code = options.code;
+    this.retryable = options.retryable ?? false;
+    this.actions = Object.freeze([...(options.actions ?? [])]);
+    this.details = Object.freeze({ ...(options.details ?? {}) });
+  }
+}

@@ -1,0 +1,18 @@
+packages:
+  - apps/*
+  - packages/*
+
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true
+
+autoInstallPeers: false
+engineStrict: true
+savePrefix: ""
+strictPeerDependencies: true
+
+catalog:
+  react: ^19.2.8
+  react-dom: ^19.2.8
+  typescript: ^5.9.2
+  zod: ^4.0.0

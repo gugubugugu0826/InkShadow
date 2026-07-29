@@ -1,0 +1,41 @@
+{
+  "name": "@inkshadow/import-export",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./docx-export": {
+      "types": "./dist/docx-export.d.ts",
+      "import": "./dist/docx-export.js"
+    },
+    "./pdf-export": {
+      "types": "./dist/pdf-export.d.ts",
+      "import": "./dist/pdf-export.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run tests"
+  },
+  "dependencies": {
+    "jszip": "3.10.1",
+    "mammoth": "1.12.0",
+    "pdfjs-dist": "6.1.200",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "vitest": "^4.1.10"
+  }
+}

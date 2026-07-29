@@ -1,0 +1,37 @@
+{
+  "name": "@inkshadow/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "InkShadow independent encrypted Web guest workspace",
+  "scripts": {
+    "build": "tsc --noEmit -p tsconfig.json --pretty false && vite build --configLoader runner",
+    "dev": "vite --host 127.0.0.1 --port 1430 --strictPort --configLoader runner",
+    "lint": "eslint src tests vite.config.ts vitest.config.ts playwright.config.ts --max-warnings 0",
+    "test": "vitest run --config vitest.config.ts --configLoader runner",
+    "test:e2e": "playwright test --config playwright.config.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json --pretty false"
+  },
+  "dependencies": {
+    "@inkshadow/contracts": "workspace:*",
+    "@inkshadow/domain": "workspace:*",
+    "@inkshadow/platform": "workspace:*",
+    "@inkshadow/ui": "workspace:*",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.0",
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^26.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "jsdom": "^29.1.1",
+    "typescript": "catalog:",
+    "vite": "^7.0.0",
+    "vitest": "^4.1.10"
+  }
+}

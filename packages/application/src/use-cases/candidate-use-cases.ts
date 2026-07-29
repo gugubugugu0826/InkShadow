@@ -1,0 +1,361 @@
+import {
+  type AiCandidate,
+  AppError,
+  ChapterVersion,
+  err,
+  ok,
+  type Chapter,
+  type ChapterVersionSnapshot,
+  type Clock,
+  type Result,
+  type UuidV7,
+  type UuidV7Generator,
+} from "@inkshadow/domain";
+import type { SaveState } from "@inkshadow/contracts/states";
+
+import type {
+  AiCandidateRepository,
+  ChapterRepository,
+  ChapterVersionRepository,
+  ContentCommitRepository,
+} from "../ports/chapter-repositories.js";
+import type { ContentHasher } from "../ports/content-hasher.js";
+import {
+  planCandidateApplication,
+  type CandidateApplicationPlan,
+  type CandidateApplicationStrategy,
+  type CandidateMergePlanningError,
+  type CandidateMergeSnapshot,
+} from "./candidate-merge-planner.js";
+
+export interface CandidateCommand {
+  readonly candidateId: UuidV7;
+}
+
+export interface AcceptCandidateCommand extends CandidateCommand {
+  readonly strategy?: CandidateApplicationStrategy;
+}
+
+export interface AcceptCandidateOutcome {
+  readonly chapter: Chapter;
+  readonly version: ChapterVersion;
+  readonly candidate: AiCandidate;
+  readonly plan: CandidateApplicationPlan;
+  readonly saveState: SaveState;
+}
+
+export class AcceptAiCandidate {
+  constructor(
+    private readonly candidates: AiCandidateRepository,
+    private readonly chapters: ChapterRepository,
+    private readonly commits: ContentCommitRepository,
+    private readonly ids: UuidV7Generator,
+    private readonly clock: Clock,
+    private readonly hasher: ContentHasher,
+    /**
+     * Optional only for the legacy whole-accept constructor. Without a version
+     * reader, acceptance is allowed solely when the candidate base id is still
+     * the chapter's current version id; stale baselines always fail closed.
+     */
+    private readonly versions?: ChapterVersionRepository,
+  ) {}
+
+  async execute(
+    command: AcceptCandidateCommand,
+  ): Promise<Result<AcceptCandidateOutcome, AppError>> {
+    const candidate = await findCandidate(this.candidates, command.candidateId);
+    if (!candidate.ok) {
+      return candidate;
+    }
+    if (candidate.value.status !== "ready") {
+      return err(
+        new AppError({
+          code:
+            candidate.value.status === "streaming"
+              ? "CANDIDATE_NOT_READY"
+              : "CANDIDATE_ALREADY_DECIDED",
+          message: "Only a ready, undecided candidate can be accepted.",
+        }),
+      );
+    }
+
+    if (candidate.value.chapterId === null) {
+      return err(
+        new AppError({
+          code: "CANDIDATE_TARGET_MISSING",
+          message: "This candidate is not bound to a chapter.",
+        }),
+      );
+    }
+
+    const chapterResult = await this.chapters.findById(candidate.value.chapterId);
+    if (!chapterResult.ok) {
+      return chapterResult;
+    }
+    if (chapterResult.value === null) {
+      return err(
+        new AppError({
+          code: "CHAPTER_NOT_FOUND",
+          message: "The candidate chapter does not exist.",
+        }),
+      );
+    }
+    const chapter = chapterResult.value;
+    const editable = chapter.assertEditable();
+    if (!editable.ok) {
+      return editable;
+    }
+
+    if (candidate.value.projectId !== chapter.projectId || candidate.value.baseVersionId === null) {
+      return err(
+        baseVersionChanged("The candidate baseline does not belong to this chapter.", {
+          candidateProjectId: candidate.value.projectId,
+          chapterProjectId: chapter.projectId,
+        }),
+      );
+    }
+
+    const loadedBaseline = await this.loadBaseline(candidate.value, chapter);
+    if (!loadedBaseline.ok) {
+      return loadedBaseline;
+    }
+    const currentChecksum = await this.hasher.sha256(chapter.content);
+    if (!currentChecksum.ok) {
+      return currentChecksum;
+    }
+    const baseline: CandidateMergeSnapshot = loadedBaseline.value ?? {
+      revision: chapter.revision,
+      contentDigest: currentChecksum.value,
+      content: chapter.content,
+    };
+    const planned = planCandidateApplication({
+      baseline,
+      current: {
+        revision: chapter.revision,
+        contentDigest: currentChecksum.value,
+        content: chapter.content,
+      },
+      candidateContent: candidate.value.content,
+      strategy: command.strategy ?? { kind: "accept_all" },
+    });
+    if (planned.status === "conflict") {
+      return err(
+        baseVersionChanged("The chapter changed after this candidate was created.", {
+          baselineRevision: planned.conflict.baseline.revision,
+          currentRevision: planned.conflict.current.revision,
+          contentDigestChanged: planned.conflict.contentDigestChanged,
+          revisionChanged: planned.conflict.revisionChanged,
+        }),
+      );
+    }
+    if (planned.status === "error") {
+      return err(planningErrorToAppError(planned.error));
+    }
+    if (planned.plan.resultContent === chapter.content) {
+      return err(
+        new AppError({
+          code: "NO_CHANGES",
+          message: "The candidate application does not change the stable chapter.",
+          details: { strategy: planned.plan.strategy },
+        }),
+      );
+    }
+
+    const checksum = await this.hasher.sha256(planned.plan.resultContent);
+    if (!checksum.ok) {
+      return checksum;
+    }
+
+    const now = this.clock.now();
+    const versionId = this.ids.next();
+    const savedChapter = chapter.saveContent({
+      content: planned.plan.resultContent,
+      expectedRevision: chapter.revision,
+      newVersionId: versionId,
+      now,
+    });
+    if (!savedChapter.ok) {
+      return savedChapter;
+    }
+
+    const version = ChapterVersion.create({
+      id: versionId,
+      projectId: chapter.projectId,
+      chapterId: chapter.id,
+      parentVersionId: chapter.currentVersionId,
+      sequence: savedChapter.value.revision,
+      content: planned.plan.resultContent,
+      contentChecksum: checksum.value,
+      reason: "candidate_accept",
+      sourceCandidateId: candidate.value.id,
+      createdAt: now,
+    });
+    if (!version.ok) {
+      return version;
+    }
+
+    const acceptedCandidate = candidate.value.accept(now);
+    if (!acceptedCandidate.ok) {
+      return acceptedCandidate;
+    }
+
+    const committed = await this.commits.acceptCandidate({
+      chapter: savedChapter.value,
+      version: version.value,
+      candidate: acceptedCandidate.value,
+      expectedChapterRevision: chapter.revision,
+      expectedCandidateStatus: "ready",
+    });
+    return committed.ok
+      ? ok({
+          chapter: savedChapter.value,
+          version: version.value,
+          candidate: acceptedCandidate.value,
+          plan: planned.plan,
+          saveState: committed.value.syncQueued ? "pending_sync" : "saved_local",
+        })
+      : committed;
+  }
+
+  private async loadBaseline(
+    candidate: AiCandidate,
+    chapter: Chapter,
+  ): Promise<Result<CandidateMergeSnapshot | null, AppError>> {
+    const baseVersionId = candidate.baseVersionId;
+    if (baseVersionId === null) {
+      return err(
+        baseVersionChanged("The candidate baseline version is missing.", {
+          reason: "BASE_VERSION_ID_MISSING",
+        }),
+      );
+    }
+    if (this.versions === undefined) {
+      return baseVersionId === chapter.currentVersionId
+        ? ok(null)
+        : err(
+            baseVersionChanged("The chapter changed after this candidate was created.", {
+              reason: "VERSION_REPOSITORY_REQUIRED_FOR_STALE_BASELINE",
+            }),
+          );
+    }
+
+    const loaded = await this.versions.findVersionById(baseVersionId);
+    if (!loaded.ok) {
+      return loaded;
+    }
+    if (loaded.value === null) {
+      return err(
+        baseVersionChanged("The candidate baseline version is no longer available.", {
+          baseVersionId: candidate.baseVersionId ?? "missing",
+          reason: "BASE_VERSION_NOT_FOUND",
+        }),
+      );
+    }
+    const snapshot = loaded.value.toSnapshot();
+    const identityError = validateBaseVersionIdentity(snapshot, candidate, chapter);
+    if (identityError !== null) {
+      return err(identityError);
+    }
+    const verifiedChecksum = await this.hasher.sha256(snapshot.content);
+    if (!verifiedChecksum.ok) {
+      return verifiedChecksum;
+    }
+    if (verifiedChecksum.value !== snapshot.contentChecksum) {
+      return err(
+        new AppError({
+          code: "REPOSITORY_ERROR",
+          message: "The candidate baseline version failed its content checksum.",
+          details: {
+            baseVersionId: snapshot.id,
+            reason: "BASE_VERSION_CHECKSUM_MISMATCH",
+          },
+        }),
+      );
+    }
+    return ok({
+      revision: snapshot.sequence,
+      contentDigest: snapshot.contentChecksum,
+      content: snapshot.content,
+    });
+  }
+}
+
+export class RejectAiCandidate {
+  constructor(
+    private readonly candidates: AiCandidateRepository,
+    private readonly clock: Clock,
+  ) {}
+
+  async execute(command: CandidateCommand): Promise<Result<AiCandidate, AppError>> {
+    const candidate = await findCandidate(this.candidates, command.candidateId);
+    if (!candidate.ok) {
+      return candidate;
+    }
+
+    const rejected = candidate.value.reject(this.clock.now());
+    if (!rejected.ok) {
+      return rejected;
+    }
+
+    const persisted = await this.candidates.save(rejected.value, "ready");
+    return persisted.ok ? rejected : persisted;
+  }
+}
+
+async function findCandidate(
+  repository: AiCandidateRepository,
+  candidateId: UuidV7,
+): Promise<Result<AiCandidate, AppError>> {
+  const found = await repository.findById(candidateId);
+  if (!found.ok) {
+    return found;
+  }
+  if (found.value === null) {
+    return err(
+      new AppError({
+        code: "CANDIDATE_NOT_FOUND",
+        message: "The AI candidate does not exist.",
+      }),
+    );
+  }
+  return ok(found.value);
+}
+
+function validateBaseVersionIdentity(
+  version: ChapterVersionSnapshot,
+  candidate: AiCandidate,
+  chapter: Chapter,
+): AppError | null {
+  if (
+    version.id !== candidate.baseVersionId ||
+    version.chapterId !== chapter.id ||
+    version.projectId !== chapter.projectId
+  ) {
+    return baseVersionChanged("The candidate baseline version has inconsistent ownership.", {
+      reason: "BASE_VERSION_IDENTITY_MISMATCH",
+    });
+  }
+  return null;
+}
+
+function planningErrorToAppError(error: CandidateMergePlanningError): AppError {
+  const code =
+    error.code === "SNAPSHOT_IDENTITY_MISMATCH" ? "REPOSITORY_ERROR" : "VALIDATION_FAILED";
+  return new AppError({
+    code,
+    message: error.message,
+    details: {
+      candidatePlanningCode: error.code,
+      ...error.context,
+    },
+  });
+}
+
+function baseVersionChanged(message: string, details: Readonly<Record<string, unknown>>): AppError {
+  return new AppError({
+    code: "BASE_VERSION_CHANGED",
+    message,
+    actions: ["RESOLVE_CONFLICT", "EXPORT_DRAFT"],
+    details,
+  });
+}

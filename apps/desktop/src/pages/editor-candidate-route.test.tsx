@@ -1,0 +1,181 @@
+import { render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
+import { AiCandidate, type Chapter, type Project } from "@inkshadow/domain";
+import { ToastProvider } from "@inkshadow/ui";
+import { describe, expect, it } from "vitest";
+
+import { DesktopRoutes } from "../app";
+import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
+import { RuntimeProvider } from "../runtime-context";
+
+describe("editor candidate route selection", () => {
+  it("opens the exact ready UUIDv7 candidate requested by the query", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime);
+    const requested = await createReadyCandidate(
+      runtime,
+      project,
+      chapter,
+      "路由明确指定的候选正文",
+    );
+    await createReadyCandidate(runtime, project, chapter, "不应替代指定候选的其他正文");
+
+    renderEditor(runtime, project, chapter, `?candidate=${requested.id}`);
+
+    expect(await screen.findByText("路由明确指定的候选正文")).toBeVisible();
+    expect(screen.queryByText("不应替代指定候选的其他正文")).not.toBeInTheDocument();
+  });
+
+  it("shows a visible error and does not fall back for an invalid candidate query", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime);
+    await createReadyCandidate(runtime, project, chapter, "不可静默打开的默认候选");
+
+    renderEditor(runtime, project, chapter, "?candidate=not-a-uuid");
+
+    expect(
+      await screen.findByText("候选链接无效；未自动打开其他候选。请从多 Agent 审查页重新选择。"),
+    ).toBeVisible();
+    expect(screen.queryByText("不可静默打开的默认候选")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "还没有候选" })).toBeVisible();
+  });
+
+  it("rejects a ready candidate from another chapter without opening the local default", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime);
+    const otherChapterResult = await runtime.useCases.createChapter.execute({
+      projectId: project.id,
+      title: "第二章",
+      content: "第二章稳定正文",
+    });
+    if (!otherChapterResult.ok) {
+      throw otherChapterResult.error;
+    }
+    const crossChapter = await createReadyCandidate(
+      runtime,
+      project,
+      otherChapterResult.value.chapter,
+      "其他章节候选",
+    );
+    await createReadyCandidate(runtime, project, chapter, "当前章节默认候选");
+
+    renderEditor(runtime, project, chapter, `?candidate=${crossChapter.id}`);
+
+    expect(
+      await screen.findByText(
+        "链接指定的候选不存在、已处理，或不属于当前项目与章节；未自动打开其他候选。",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText("当前章节默认候选")).not.toBeInTheDocument();
+    expect(screen.queryByText("其他章节候选")).not.toBeInTheDocument();
+  });
+
+  it("rejects a non-ready candidate and exposes the multi-agent review link only when enabled", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime);
+    const streaming = AiCandidate.createStreaming({
+      id: runtime.ids.next(),
+      projectId: project.id,
+      chapterId: chapter.id,
+      source: "agent",
+      baseVersionId: chapter.currentVersionId,
+      now: runtime.clock.now(),
+    });
+    if (!streaming.ok) {
+      throw streaming.error;
+    }
+    const created = await runtime.repositories.aiCandidates.create(streaming.value);
+    if (!created.ok) {
+      throw created.error;
+    }
+    Object.assign(runtime, {
+      featureFlags: Object.freeze({ ...runtime.featureFlags, multiAgent: true }),
+      multiAgentReview: Object.freeze({}),
+    });
+
+    renderEditor(runtime, project, chapter, `?candidate=${streaming.value.id}`);
+
+    expect(
+      await screen.findByText(
+        "链接指定的候选不存在、已处理，或不属于当前项目与章节；未自动打开其他候选。",
+      ),
+    ).toBeVisible();
+    expect(
+      screen
+        .getAllByRole("link", { name: "多 Agent 审查" })
+        .find(
+          (link) =>
+            link.getAttribute("href") ===
+            `/projects/${project.id}/chapters/${chapter.id}/multi-agent-review`,
+        ),
+    ).toBeVisible();
+  });
+});
+
+function renderEditor(
+  runtime: DesktopRuntime,
+  project: Project,
+  chapter: Chapter,
+  search = "",
+): ReturnType<typeof render> {
+  return render(
+    <MemoryRouter initialEntries={[`/projects/${project.id}/chapters/${chapter.id}${search}`]}>
+      <RuntimeProvider runtime={runtime}>
+        <ToastProvider>
+          <DesktopRoutes />
+        </ToastProvider>
+      </RuntimeProvider>
+    </MemoryRouter>,
+  );
+}
+
+async function seedChapter(runtime: DesktopRuntime): Promise<{
+  readonly project: Project;
+  readonly chapter: Chapter;
+}> {
+  const project = await runtime.useCases.createProject.execute({ name: "候选路由测试项目" });
+  if (!project.ok) {
+    throw project.error;
+  }
+  const chapter = await runtime.useCases.createChapter.execute({
+    projectId: project.value.id,
+    title: "第一章",
+    content: "稳定正文",
+  });
+  if (!chapter.ok) {
+    throw chapter.error;
+  }
+  return { project: project.value, chapter: chapter.value.chapter };
+}
+
+async function createReadyCandidate(
+  runtime: DesktopRuntime,
+  project: Project,
+  chapter: Chapter,
+  content: string,
+): Promise<AiCandidate> {
+  const streaming = AiCandidate.createStreaming({
+    id: runtime.ids.next(),
+    projectId: project.id,
+    chapterId: chapter.id,
+    source: "agent",
+    baseVersionId: chapter.currentVersionId,
+    now: runtime.clock.now(),
+  });
+  if (!streaming.ok) {
+    throw streaming.error;
+  }
+  const checksum = await runtime.hasher.sha256(content);
+  if (!checksum.ok) {
+    throw checksum.error;
+  }
+  const ready = streaming.value.markReady(content, checksum.value, runtime.clock.now());
+  if (!ready.ok) {
+    throw ready.error;
+  }
+  const created = await runtime.repositories.aiCandidates.create(ready.value);
+  if (!created.ok) {
+    throw created.error;
+  }
+  return ready.value;
+}

@@ -1,0 +1,28 @@
+{
+  "name": "@inkshadow/cloud-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/cloud-api.mjs",
+  "scripts": {
+    "build": "tsc --noEmit -p tsconfig.json && node build.mjs",
+    "start": "node dist/cloud-api.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --config vitest.config.ts --configLoader runner"
+  },
+  "dependencies": {
+    "@inkshadow/access-core": "workspace:*",
+    "@inkshadow/contracts": "workspace:*",
+    "fastify": "^5.10.0",
+    "pg": "^8.16.0",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "@types/pg": "^8.15.0",
+    "esbuild": "^0.28.1",
+    "typescript": "catalog:",
+    "vitest": "^4.1.10"
+  }
+}

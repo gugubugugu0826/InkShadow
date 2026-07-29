@@ -1,0 +1,80 @@
+{
+  "name": "@inkshadow/data",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./access-sqlite-store": {
+      "types": "./src/access-sqlite-store.ts",
+      "import": "./src/access-sqlite-store.ts"
+    },
+    "./cloud-deletion-journal-sqlite-store": {
+      "types": "./src/cloud-deletion-journal-sqlite-store.ts",
+      "import": "./src/cloud-deletion-journal-sqlite-store.ts"
+    },
+    "./graph-rag-sqlite-store": {
+      "types": "./src/graph-rag-sqlite-store.ts",
+      "import": "./src/graph-rag-sqlite-store.ts"
+    },
+    "./fine-tuning-governance-sqlite-store": {
+      "types": "./src/fine-tuning-governance-sqlite-store.ts",
+      "import": "./src/fine-tuning-governance-sqlite-store.ts"
+    },
+    "./migrations/*": "./migrations/*",
+    "./project-key-sqlite-store": {
+      "types": "./src/project-key-sqlite-store.ts",
+      "import": "./src/project-key-sqlite-store.ts"
+    },
+    "./search-vector-sqlite-store": {
+      "types": "./src/search-vector-sqlite-store.ts",
+      "import": "./src/search-vector-sqlite-store.ts"
+    },
+    "./sync-access-schema": {
+      "types": "./src/sync-access-schema.ts",
+      "import": "./src/sync-access-schema.ts"
+    },
+    "./sync-materialization-sqlite-store": {
+      "types": "./src/sync-materialization-sqlite-store.ts",
+      "import": "./src/sync-materialization-sqlite-store.ts"
+    },
+    "./sync-incremental-settlement-sqlite-store": {
+      "types": "./src/sync-incremental-settlement-sqlite-store.ts",
+      "import": "./src/sync-incremental-settlement-sqlite-store.ts"
+    },
+    "./sync-snapshot-materialization-sqlite-store": {
+      "types": "./src/sync-snapshot-materialization-sqlite-store.ts",
+      "import": "./src/sync-snapshot-materialization-sqlite-store.ts"
+    },
+    "./sync-sqlite-store": {
+      "types": "./src/sync-sqlite-store.ts",
+      "import": "./src/sync-sqlite-store.ts"
+    },
+    "./team-template-application-sqlite-store": {
+      "types": "./src/team-template-application-sqlite-store.ts",
+      "import": "./src/team-template-application-sqlite-store.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@inkshadow/access-core": "workspace:*",
+    "@inkshadow/application": "workspace:*",
+    "@inkshadow/contracts": "workspace:*",
+    "@inkshadow/domain": "workspace:*",
+    "@inkshadow/search-core": "workspace:*",
+    "@inkshadow/sync-core": "workspace:*",
+    "@inkshadow/task-engine": "workspace:*",
+    "@tauri-apps/api": "^2.0.0",
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "@inkshadow/story-core": "workspace:*"
+  }
+}

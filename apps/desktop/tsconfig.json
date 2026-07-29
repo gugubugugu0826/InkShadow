@@ -1,0 +1,27 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@inkshadow/ai-core": ["../../packages/ai-core/src/index.ts"],
+      "@inkshadow/cloud-client": ["../../packages/cloud-client/src/index.ts"],
+      "@inkshadow/config": ["../../packages/config/src/index.ts"],
+      "@inkshadow/platform": ["../../packages/platform/src/index.ts"],
+      "@inkshadow/import-export": ["../../packages/import-export/src/index.ts"],
+      "@inkshadow/import-export/docx-export": ["../../packages/import-export/src/docx-export.ts"],
+      "@inkshadow/import-export/pdf-export": ["../../packages/import-export/src/pdf-export.ts"],
+      "@inkshadow/observability": ["../../packages/observability/src/index.ts"],
+      "@inkshadow/search-core": ["../../packages/search-core/src/index.ts"],
+      "@inkshadow/story-core": ["../../packages/story-core/src/index.ts"],
+      "@inkshadow/sync-core": ["../../packages/sync-core/src/index.ts"],
+      "@inkshadow/task-engine": ["../../packages/task-engine/src/index.ts"],
+      "@inkshadow/ui": ["../../packages/ui/src/index.ts"],
+      "@inkshadow/ui/styles.css": ["../../packages/ui/src/styles/index.css"]
+    },
+    "types": ["vite/client", "vitest/globals", "@testing-library/jest-dom"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts", "vitest.config.ts"],
+  "exclude": ["dist", "src-tauri"]
+}

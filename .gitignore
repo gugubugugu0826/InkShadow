@@ -1,0 +1,97 @@
+# Dependencies and build output
+node_modules/
+.pnpm-store/
+dist/
+dist-gate/
+dist-release/
+coverage/
+.vite-cache/
+*.tsbuildinfo
+apps/desktop/src-tauri/target/
+target/
+*.exe
+*.msi
+*.msix
+*.dmg
+*.AppImage
+*.deb
+
+# Local databases, recovery data and backups
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.backup
+*.inkshadow-backup
+recovery/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.p12
+*.p8
+*.key
+*.crt
+*.jks
+*.keystore
+*.mobileprovision
+.netrc
+.npmrc
+.cargo/credentials*
+keystore.properties
+credentials*.json
+service-account*.json
+**/google-services.json
+**/GoogleService-Info.plist
+secrets/
+
+# Logs and diagnostics
+*.log
+logs/
+diagnostics/
+
+# Test artifacts
+playwright-report/
+test-results/
+blob-report/
+.tmp/
+.tmp-*/
+.enterprise-postgres-*/
+
+# Local delivery archives
+archive/
+
+# Repository publication scope
+# Only the root README is published; product/design/execution documents stay local.
+/docs/
+/DESIGN/
+*.md
+!/README.md
+*.mdx
+*.doc
+*.docx
+*.pdf
+*.ppt
+*.pptx
+*.rtf
+*.odt
+*.xls
+*.xlsx
+
+# Editors and operating systems
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.codex/
+.agents/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Tauri signing/update secrets
+*.sig
+*.pub

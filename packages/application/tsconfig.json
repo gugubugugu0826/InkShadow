@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "noEmit": true,
+    "paths": {
+      "@inkshadow/contracts/states": ["../contracts/src/states.ts"],
+      "@inkshadow/domain": ["../domain/src/index.ts"],
+      "@inkshadow/search-core": ["../search-core/src/index.ts"],
+      "@inkshadow/story-core": ["../story-core/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["tests"]
+}

@@ -1,0 +1,535 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { createDevelopmentRuntime } from "../infrastructure/runtime";
+import { RuntimeProvider } from "../runtime-context";
+import { DataTransferPanel } from "./data-transfer-panel";
+
+describe("DataTransferPanel import journey", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("shows the five formats, previews bytes without writing, then commits edited candidates", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    const view = render(
+      <MemoryRouter>
+        <RuntimeProvider runtime={runtime}>
+          <DataTransferPanel />
+        </RuntimeProvider>
+      </MemoryRouter>,
+    );
+
+    for (const format of ["MD", "DOCX", "HTML", "PDF", "TXT"]) {
+      expect(screen.getByText(format)).toBeInTheDocument();
+    }
+    expect(screen.getByText(/单文件与单次选择均不超过 50 MiB/)).toBeInTheDocument();
+
+    const fileInput = view.container.querySelector<HTMLInputElement>('input[type="file"]');
+    if (fileInput === null) {
+      throw new Error("Expected the import file input.");
+    }
+    const file = new File(
+      [new TextEncoder().encode("<article><h1>雨夜</h1><p>门开了。</p></article>")],
+      "opening.html",
+      { type: "text/html" },
+    );
+    await user.upload(fileInput, file);
+
+    await screen.findByText("预检通过，尚未写入项目");
+    await expect(
+      runtime.useCases.listProjects.execute({ statuses: ["active"] }),
+    ).resolves.toMatchObject({ ok: true, value: [] });
+
+    const chapterTitle = screen.getByRole("textbox", { name: "章节标题" });
+    await user.clear(chapterTitle);
+    await user.type(chapterTitle, "第一章 雨夜");
+    await user.clear(screen.getByRole("textbox", { name: "导入为项目名称" }));
+    await user.type(screen.getByRole("textbox", { name: "导入为项目名称" }), "雨夜长篇");
+    await user.click(screen.getByRole("button", { name: "确认导入" }));
+
+    await screen.findByText(/雨夜长篇 已写入 1 个章节/);
+    await waitFor(async () => {
+      const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
+      expect(projects).toMatchObject({ ok: true });
+      if (!projects.ok) {
+        return;
+      }
+      expect(projects.value.map(({ name }) => name)).toEqual(["雨夜长篇"]);
+      const project = projects.value[0];
+      if (project === undefined) {
+        return;
+      }
+      const chapters = await runtime.repositories.chapters.listByProjectId(project.id);
+      expect(chapters).toMatchObject({ ok: true });
+      if (chapters.ok) {
+        expect(chapters.value[0]).toMatchObject({
+          title: "第一章 雨夜",
+        });
+        expect(chapters.value[0]?.content).toContain("门开了");
+      }
+    });
+  });
+
+  it("requires every low-confidence chapter boundary to be reviewed across preview pages", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    const view = render(
+      <MemoryRouter>
+        <RuntimeProvider runtime={runtime}>
+          <DataTransferPanel />
+        </RuntimeProvider>
+      </MemoryRouter>,
+    );
+
+    const fileInput = view.container.querySelector<HTMLInputElement>('input[type="file"]');
+    if (fileInput === null) {
+      throw new Error("Expected the import file input.");
+    }
+    const files = Array.from({ length: 6 }, (_, index) => {
+      const bytes = createDocxFixture([`这是第 ${String(index + 1)} 个没有章节标题的正文。`]);
+      return new File([new Uint8Array(bytes)], `part-${String(index + 1)}.docx`, {
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+    });
+    await user.upload(fileInput, files);
+
+    await screen.findByText("预检通过，尚未写入项目");
+    const commitButton = screen.getByRole("button", { name: "确认导入" });
+    expect(commitButton).toBeDisabled();
+    expect(screen.getAllByRole("checkbox", { name: /我已检查此章节/ })).toHaveLength(5);
+
+    for (const checkbox of screen.getAllByRole("checkbox", { name: /我已检查此章节/ })) {
+      await user.click(checkbox);
+    }
+    expect(commitButton).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "下一组章节" }));
+    expect(screen.getByText("第 2 / 2 组")).toBeInTheDocument();
+    const finalCheckbox = screen.getByRole("checkbox", { name: /我已检查此章节/ });
+    await user.click(finalCheckbox);
+    expect(commitButton).toBeEnabled();
+
+    await user.click(commitButton);
+    await screen.findByText(/已写入 6 个章节/);
+    const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
+    expect(projects).toMatchObject({ ok: true });
+    if (projects.ok) {
+      const project = projects.value[0];
+      if (project === undefined) {
+        throw new Error("Expected an imported project.");
+      }
+      const chapters = await runtime.repositories.chapters.listByProjectId(project.id);
+      expect(chapters).toMatchObject({ ok: true });
+      if (chapters.ok) {
+        expect(chapters.value).toHaveLength(6);
+        expect(chapters.value.some(({ content }) => content.includes("第 6 个"))).toBe(true);
+      }
+    }
+  });
+
+  it("downloads a selected project-scoped domain report", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const created = await runtime.useCases.createProject.execute({ name: "可导出项目" });
+    if (!created.ok) {
+      throw created.error;
+    }
+    const createObjectUrl = vi.fn(() => "blob:inkshadow-report");
+    const revokeObjectUrl = vi.fn();
+    const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectUrl,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: revokeObjectUrl,
+    });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+
+    try {
+      const user = userEvent.setup();
+      render(
+        <MemoryRouter>
+          <RuntimeProvider runtime={runtime}>
+            <DataTransferPanel />
+          </RuntimeProvider>
+        </MemoryRouter>,
+      );
+
+      await screen.findByRole("option", { name: "可导出项目" });
+      await user.selectOptions(screen.getByRole("combobox", { name: /^领域报告/u }), "ai_usage");
+      await user.click(screen.getByRole("button", { name: "下载领域报告" }));
+
+      await screen.findByText(/可导出项目-AI用量报告\.json（0 条记录）/);
+      expect(createObjectUrl).toHaveBeenCalledWith(expect.any(Blob));
+      expect(click).toHaveBeenCalledOnce();
+    } finally {
+      restoreProperty(URL, "createObjectURL", originalCreate);
+      restoreProperty(URL, "revokeObjectURL", originalRevoke);
+    }
+  });
+
+  it("generates and downloads a project as a real DOCX package", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const created = await runtime.useCases.createProject.execute({ name: "雾港交付稿" });
+    if (!created.ok) {
+      throw created.error;
+    }
+    const createObjectUrl = vi.fn((artifact: Blob | MediaSource) => {
+      void artifact;
+      return "blob:inkshadow-docx";
+    });
+    const revokeObjectUrl = vi.fn();
+    const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectUrl,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: revokeObjectUrl,
+    });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+
+    try {
+      const user = userEvent.setup();
+      render(
+        <MemoryRouter>
+          <RuntimeProvider runtime={runtime}>
+            <DataTransferPanel />
+          </RuntimeProvider>
+        </MemoryRouter>,
+      );
+
+      await screen.findByRole("option", { name: "雾港交付稿" });
+      await user.click(screen.getByRole("button", { name: "下载 DOCX" }));
+
+      await screen.findByText(/已下载 雾港交付稿\.docx/);
+      expect(click).toHaveBeenCalledOnce();
+      const downloaded = createObjectUrl.mock.calls[0]?.[0];
+      expect(downloaded).toBeInstanceOf(Blob);
+      if (downloaded instanceof Blob) {
+        expect(downloaded.type).toBe(
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        );
+        expect(downloaded.size).toBeGreaterThan(0);
+      }
+    } finally {
+      restoreProperty(URL, "createObjectURL", originalCreate);
+      restoreProperty(URL, "revokeObjectURL", originalRevoke);
+    }
+  });
+
+  it("rasterizes Chinese locally and downloads a validated image-based PDF", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const created = await runtime.useCases.createProject.execute({ name: "雾港定稿" });
+    if (!created.ok) {
+      throw created.error;
+    }
+    const createObjectUrl = vi.fn((artifact: Blob | MediaSource) => {
+      void artifact;
+      return "blob:inkshadow-pdf";
+    });
+    const revokeObjectUrl = vi.fn();
+    const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    const originalGetContext = Object.getOwnPropertyDescriptor(
+      HTMLCanvasElement.prototype,
+      "getContext",
+    );
+    const originalToBlob = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, "toBlob");
+    const fillText = vi.fn();
+    const drawingContext = createPdfCanvasContextFixture(fillText);
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectUrl,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: revokeObjectUrl,
+    });
+    Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
+      configurable: true,
+      value: vi.fn(() => drawingContext),
+    });
+    Object.defineProperty(HTMLCanvasElement.prototype, "toBlob", {
+      configurable: true,
+      value: vi.fn((callback: BlobCallback) => {
+        const jpeg = createPdfJpegFixture();
+        callback(new Blob([jpeg.buffer as ArrayBuffer], { type: "image/jpeg" }));
+      }),
+    });
+    let suggestedFilename = "";
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      suggestedFilename = this.download;
+    });
+
+    try {
+      const user = userEvent.setup();
+      render(
+        <MemoryRouter>
+          <RuntimeProvider runtime={runtime}>
+            <DataTransferPanel />
+          </RuntimeProvider>
+        </MemoryRouter>,
+      );
+
+      await screen.findByRole("option", { name: "雾港定稿" });
+      await user.click(screen.getByRole("button", { name: "下载 PDF" }));
+
+      await screen.findByText(/已下载 雾港定稿\.pdf（1 页图像型 PDF/);
+      expect(click).toHaveBeenCalledOnce();
+      expect(suggestedFilename).toBe("雾港定稿.pdf");
+      expect(fillText).toHaveBeenCalledWith("雾港定稿", expect.any(Number), expect.any(Number));
+      const downloaded = createObjectUrl.mock.calls[0]?.[0];
+      expect(downloaded).toBeInstanceOf(Blob);
+      if (downloaded instanceof Blob) {
+        expect(downloaded.type).toBe("application/pdf");
+        const bytes = new Uint8Array(await downloaded.arrayBuffer());
+        expect([...bytes.subarray(0, 8)]).toEqual([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]);
+        expect(new TextDecoder("windows-1252").decode(bytes)).toContain(
+          "/Subject <FEFF0049006D006100670065002D00620061007300650064",
+        );
+      }
+    } finally {
+      restoreProperty(URL, "createObjectURL", originalCreate);
+      restoreProperty(URL, "revokeObjectURL", originalRevoke);
+      restorePrototypeProperty(HTMLCanvasElement.prototype, "getContext", originalGetContext);
+      restorePrototypeProperty(HTMLCanvasElement.prototype, "toBlob", originalToBlob);
+    }
+  });
+});
+
+function restoreProperty(
+  target: typeof URL,
+  property: "createObjectURL" | "revokeObjectURL",
+  descriptor: PropertyDescriptor | undefined,
+): void {
+  if (descriptor === undefined) {
+    Reflect.deleteProperty(target, property);
+  } else {
+    Object.defineProperty(target, property, descriptor);
+  }
+}
+
+function restorePrototypeProperty(
+  target: HTMLCanvasElement,
+  property: "getContext" | "toBlob",
+  descriptor: PropertyDescriptor | undefined,
+): void;
+function restorePrototypeProperty(
+  target: typeof HTMLCanvasElement.prototype,
+  property: "getContext" | "toBlob",
+  descriptor: PropertyDescriptor | undefined,
+): void {
+  if (descriptor === undefined) {
+    Reflect.deleteProperty(target, property);
+  } else {
+    Object.defineProperty(target, property, descriptor);
+  }
+}
+
+function createPdfCanvasContextFixture(
+  fillText: ReturnType<typeof vi.fn>,
+): CanvasRenderingContext2D {
+  return {
+    beginPath: vi.fn(),
+    fillRect: vi.fn(),
+    fillText,
+    lineTo: vi.fn(),
+    measureText: vi.fn((value: string) => ({ width: Array.from(value).length * 20 })),
+    moveTo: vi.fn(),
+    restore: vi.fn(),
+    save: vi.fn(),
+    setTransform: vi.fn(),
+    stroke: vi.fn(),
+  } as unknown as CanvasRenderingContext2D;
+}
+
+function createPdfJpegFixture(): Uint8Array {
+  const width = 1_240;
+  const height = 1_754;
+  const components = 3;
+  const componentTable = Array.from({ length: components }, (_value, index) => [
+    index + 1,
+    0x11,
+    0,
+  ]).flat();
+  const frameLength = 8 + componentTable.length;
+  const scanComponents = Array.from({ length: components }, (_value, index) => [
+    index + 1,
+    0,
+  ]).flat();
+  const scanLength = 6 + scanComponents.length;
+  const quantizationTable = Array.from({ length: 64 }, () => 1);
+  const singleCodeLengths = [1, ...Array.from({ length: 15 }, () => 0)];
+  const huffmanTables = [0, ...singleCodeLengths, 0, 0x10, ...singleCodeLengths, 0];
+  const huffmanLength = 2 + huffmanTables.length;
+  return Uint8Array.from([
+    0xff,
+    0xd8,
+    0xff,
+    0xdb,
+    0,
+    67,
+    0,
+    ...quantizationTable,
+    0xff,
+    0xc4,
+    (huffmanLength >> 8) & 0xff,
+    huffmanLength & 0xff,
+    ...huffmanTables,
+    0xff,
+    0xc0,
+    (frameLength >> 8) & 0xff,
+    frameLength & 0xff,
+    8,
+    (height >> 8) & 0xff,
+    height & 0xff,
+    (width >> 8) & 0xff,
+    width & 0xff,
+    components,
+    ...componentTable,
+    0xff,
+    0xda,
+    (scanLength >> 8) & 0xff,
+    scanLength & 0xff,
+    components,
+    ...scanComponents,
+    0,
+    63,
+    0,
+    0x20,
+    0x11,
+    0x22,
+    0xff,
+    0xd9,
+  ]);
+}
+
+function createDocxFixture(paragraphs: readonly string[]): Uint8Array {
+  return createStoredZip([
+    [
+      "[Content_Types].xml",
+      [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+        '<Default Extension="xml" ContentType="application/xml"/>',
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>',
+        "</Types>",
+      ].join(""),
+    ],
+    [
+      "_rels/.rels",
+      [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>',
+        "</Relationships>",
+      ].join(""),
+    ],
+    [
+      "word/document.xml",
+      [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>',
+        ...paragraphs.map(
+          (paragraph) => `<w:p><w:r><w:t>${escapeXml(paragraph)}</w:t></w:r></w:p>`,
+        ),
+        "</w:body></w:document>",
+      ].join(""),
+    ],
+  ]);
+}
+
+function createStoredZip(entries: readonly (readonly [string, string])[]): Uint8Array {
+  const encoder = new TextEncoder();
+  const localParts: Uint8Array[] = [];
+  const centralParts: Uint8Array[] = [];
+  let localOffset = 0;
+
+  for (const [name, content] of entries) {
+    const nameBytes = encoder.encode(name);
+    const contentBytes = encoder.encode(content);
+    const checksum = crc32(contentBytes);
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    const localView = new DataView(localHeader.buffer);
+    localView.setUint32(0, 0x04034b50, true);
+    localView.setUint16(4, 20, true);
+    localView.setUint16(6, 0x0800, true);
+    localView.setUint32(14, checksum, true);
+    localView.setUint32(18, contentBytes.length, true);
+    localView.setUint32(22, contentBytes.length, true);
+    localView.setUint16(26, nameBytes.length, true);
+    localHeader.set(nameBytes, 30);
+    localParts.push(localHeader, contentBytes);
+
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    const centralView = new DataView(centralHeader.buffer);
+    centralView.setUint32(0, 0x02014b50, true);
+    centralView.setUint16(4, 20, true);
+    centralView.setUint16(6, 20, true);
+    centralView.setUint16(8, 0x0800, true);
+    centralView.setUint32(16, checksum, true);
+    centralView.setUint32(20, contentBytes.length, true);
+    centralView.setUint32(24, contentBytes.length, true);
+    centralView.setUint16(28, nameBytes.length, true);
+    centralView.setUint32(42, localOffset, true);
+    centralHeader.set(nameBytes, 46);
+    centralParts.push(centralHeader);
+    localOffset += localHeader.length + contentBytes.length;
+  }
+
+  const centralSize = centralParts.reduce((total, part) => total + part.length, 0);
+  const end = new Uint8Array(22);
+  const endView = new DataView(end.buffer);
+  endView.setUint32(0, 0x06054b50, true);
+  endView.setUint16(8, entries.length, true);
+  endView.setUint16(10, entries.length, true);
+  endView.setUint32(12, centralSize, true);
+  endView.setUint32(16, localOffset, true);
+  return concatenateBytes([...localParts, ...centralParts, end]);
+}
+
+function concatenateBytes(parts: readonly Uint8Array[]): Uint8Array {
+  const result = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.length;
+  }
+  return result;
+}
+
+function crc32(bytes: Uint8Array): number {
+  let checksum = 0xffffffff;
+  for (const byte of bytes) {
+    checksum ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      checksum = (checksum >>> 1) ^ (checksum & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (checksum ^ 0xffffffff) >>> 0;
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}

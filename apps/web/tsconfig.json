@@ -1,0 +1,35 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@inkshadow/contracts": ["../../packages/contracts/src/index.ts"],
+      "@inkshadow/domain": ["../../packages/domain/src/index.ts"],
+      "@inkshadow/platform": ["../../packages/platform/src/index.ts"],
+      "@inkshadow/ui": ["../../packages/ui/src/index.ts"],
+      "@inkshadow/ui/styles.css": ["../../packages/ui/src/styles/index.css"],
+      "react": ["../../node_modules/.pnpm/node_modules/@types/react/index.d.ts"],
+      "react/*": ["../../node_modules/.pnpm/node_modules/@types/react/*"],
+      "react-dom": ["../../node_modules/.pnpm/node_modules/@types/react-dom/index.d.ts"],
+      "react-dom/*": ["../../node_modules/.pnpm/node_modules/@types/react-dom/*"]
+    },
+    "typeRoots": [
+      "./node_modules/@types",
+      "../../node_modules/@types",
+      "../../node_modules/.pnpm/node_modules/@types"
+    ],
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "tests/**/*.ts",
+    "tests/**/*.tsx",
+    "vite.config.ts",
+    "vitest.config.ts",
+    "playwright.config.ts"
+  ],
+  "exclude": ["dist"]
+}

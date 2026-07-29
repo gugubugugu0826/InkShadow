@@ -1,0 +1,1 @@
+{"desktop-default":{"identifier":"desktop-default","description":"Minimum capabilities for the InkShadow desktop window","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-destroy","log:default"]}}

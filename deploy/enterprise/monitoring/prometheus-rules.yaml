@@ -1,0 +1,102 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: inkshadow-enterprise
+  labels:
+    app.kubernetes.io/name: inkshadow-cloud-api
+spec:
+  groups:
+    - name: inkshadow.availability
+      rules:
+        - alert: InkShadowApiTargetMissing
+          expr: absent(up{job="inkshadow-cloud-api"} == 1)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: InkShadow API metrics target is missing
+            runbook: docs/runbooks/ENTERPRISE_PRIVATE_OPERATIONS.md#availability
+        - alert: InkShadowApiNotReady
+          expr: min_over_time(inkshadow_ready[5m]) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: InkShadow API readiness is failing
+            runbook: docs/runbooks/ENTERPRISE_PRIVATE_OPERATIONS.md#availability
+        - alert: InkShadowApiElevatedServerErrors
+          expr: |
+            (
+              sum(rate(inkshadow_http_requests_total{status_class="5xx"}[10m]))
+              /
+              clamp_min(sum(rate(inkshadow_http_requests_total[10m])), 0.001)
+            ) > 0.02
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: InkShadow API 5xx ratio exceeds 2%
+            runbook: docs/runbooks/ENTERPRISE_PRIVATE_OPERATIONS.md#availability
+        - alert: InkShadowPostgresPoolWaiting
+          expr: inkshadow_postgres_connections{state="waiting"} > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: InkShadow requests are waiting for PostgreSQL connections
+            runbook: docs/runbooks/ENTERPRISE_PRIVATE_OPERATIONS.md#capacity
+    - name: inkshadow.enterprise
+      rules:
+        - alert: InkShadowEnterpriseLicenseMetricsMissing
+          expr: absent(inkshadow_enterprise_license_valid)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: InkShadow Enterprise license metrics are missing
+            runbook: docs/runbooks/ENTERPRISE_PRIVATE_OPERATIONS.md#license
+        - alert: InkShadowEnterpriseLicenseInvalid
+          expr: inkshadow_enterprise_license_valid == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: InkShadow Enterprise license is outside its validity window
+            runbook: docs/runbooks/ENTERPRISE_PRIVATE_OPERATIONS.md#license
+        - alert: InkShadowEnterpriseLicenseExpiring
+          expr: |
+            inkshadow_enterprise_license_expiry_timestamp_seconds - time()
+              < 30 * 24 * 60 * 60
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: InkShadow Enterprise license expires within 30 days
+            runbook: docs/runbooks/ENTERPRISE_PRIVATE_OPERATIONS.md#license
+    - name: inkshadow.recovery
+      rules:
+        - alert: InkShadowBackupStale
+          expr: |
+            absent(inkshadow_backup_last_success_timestamp_seconds)
+              or
+            time() - inkshadow_backup_last_success_timestamp_seconds > 15 * 60
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: InkShadow backup/PITR freshness exceeds the 15-minute engineering objective
+            runbook: docs/runbooks/ENTERPRISE_PRIVATE_OPERATIONS.md#backup-and-restore
+        - alert: InkShadowRestoreDrillStale
+          expr: |
+            absent(inkshadow_restore_drill_last_success_timestamp_seconds)
+              or
+            (
+              time() - inkshadow_restore_drill_last_success_timestamp_seconds
+                > 92 * 24 * 60 * 60
+            )
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: No successful isolated restore drill has been recorded this quarter
+            runbook: docs/runbooks/ENTERPRISE_PRIVATE_OPERATIONS.md#backup-and-restore

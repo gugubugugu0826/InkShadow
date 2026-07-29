@@ -1,0 +1,541 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { Project } from "@inkshadow/domain";
+import { parseUuidV7 as parseDomainUuid } from "@inkshadow/domain";
+import {
+  type Outline,
+  type OutlineNodeSnapshot,
+  parseUuidV7 as parseStoryUuid,
+} from "@inkshadow/story-core";
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  Dialog,
+  EmptyState,
+  ErrorState,
+  FormField,
+  InlineAlert,
+  Input,
+  PageStateBoundary,
+} from "@inkshadow/ui";
+import { Link, useParams } from "react-router-dom";
+
+import { normalizeUiError } from "../infrastructure/ui-error";
+import { useRuntime } from "../runtime-context";
+
+interface AddTarget {
+  readonly kind: "volume" | "chapter";
+  readonly parentId: string;
+}
+
+export function StoryOutlinePage() {
+  const runtime = useRuntime();
+  const params = useParams<{ projectId: string }>();
+  const projectIdParameter = params.projectId ?? "";
+  const domainProjectId = useMemo(() => parseDomainUuid(projectIdParameter), [projectIdParameter]);
+  const storyProjectId = useMemo(() => parseStoryUuid(projectIdParameter), [projectIdParameter]);
+  const identifierError = !domainProjectId.ok
+    ? domainProjectId.error
+    : !storyProjectId.ok
+      ? storyProjectId.error
+      : null;
+  const [project, setProject] = useState<Project | null>(null);
+  const [outline, setOutline] = useState<Outline | null>(null);
+  const [pageState, setPageState] = useState<"loading" | "ready" | "empty" | "fatal_error">(
+    "loading",
+  );
+  const [error, setError] = useState<unknown>(identifierError);
+  const [busy, setBusy] = useState(false);
+  const [addTarget, setAddTarget] = useState<AddTarget | null>(null);
+  const [editingNode, setEditingNode] = useState<OutlineNodeSnapshot | null>(null);
+  const [title, setTitle] = useState("");
+
+  const load = useCallback(async () => {
+    if (!domainProjectId.ok || !storyProjectId.ok) {
+      setPageState("fatal_error");
+      return;
+    }
+    setPageState("loading");
+    const [projectResult, outlineResult] = await Promise.all([
+      runtime.repositories.projects.findById(domainProjectId.value),
+      runtime.story.outlines.findByProjectId(storyProjectId.value),
+    ]);
+    if (!projectResult.ok) {
+      setError(projectResult.error);
+      setPageState("fatal_error");
+      return;
+    }
+    if (projectResult.value === null) {
+      setError(new Error("项目不存在"));
+      setPageState("fatal_error");
+      return;
+    }
+    if (!outlineResult.ok) {
+      setError(outlineResult.error);
+      setPageState("fatal_error");
+      return;
+    }
+    setProject(projectResult.value);
+    setOutline(outlineResult.value);
+    setError(null);
+    setPageState(outlineResult.value === null ? "empty" : "ready");
+  }, [domainProjectId, runtime, storyProjectId]);
+
+  useEffect(() => {
+    void Promise.resolve().then(load);
+  }, [load]);
+
+  const snapshot = outline?.toSnapshot() ?? null;
+  const book = snapshot?.nodes.find((node) => node.kind === "book") ?? null;
+  const volumes = useMemo(
+    () => (outline === null || book === null ? [] : outline.orderedChildren(book.id)),
+    [book, outline],
+  );
+  const readonly = project?.status !== "active";
+  const normalizedError = error === null ? null : normalizeUiError(error);
+  const currentOutline = outline;
+
+  async function createOutline(): Promise<void> {
+    if (project === null || busy) {
+      return;
+    }
+    setBusy(true);
+    const result = await runtime.story.outlineService.create({
+      projectId: project.id,
+      title: project.name,
+      synopsis: "在这里把长篇拆分为卷与章节；不使用 AI 也可完整编辑。",
+    });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setOutline(result.value);
+    setPageState("ready");
+  }
+
+  async function applyChange(
+    change: Parameters<typeof runtime.story.outlineService.apply>[0]["change"],
+  ): Promise<boolean> {
+    if (outline === null || project === null || readonly) {
+      return false;
+    }
+    setBusy(true);
+    const result = await runtime.story.outlineService.apply({
+      projectId: project.id,
+      expectedRevision: outline.revision,
+      change,
+    });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return false;
+    }
+    setOutline(result.value);
+    setError(null);
+    return true;
+  }
+
+  async function submitAdd(): Promise<void> {
+    if (addTarget === null) {
+      return;
+    }
+    const completed = await applyChange({
+      kind: "add",
+      nodeKind: addTarget.kind,
+      parentId: addTarget.parentId,
+      title,
+    });
+    if (completed) {
+      setAddTarget(null);
+      setTitle("");
+    }
+  }
+
+  async function submitRename(): Promise<void> {
+    if (editingNode === null) {
+      return;
+    }
+    const completed = await applyChange({
+      kind: "rename",
+      nodeId: editingNode.id,
+      title,
+    });
+    if (completed) {
+      setEditingNode(null);
+      setTitle("");
+    }
+  }
+
+  function openAdd(target: AddTarget): void {
+    setTitle("");
+    setAddTarget(target);
+  }
+
+  function openRename(node: OutlineNodeSnapshot): void {
+    setTitle(node.title);
+    setEditingNode(node);
+  }
+
+  return (
+    <div className="desktop-page story-outline-page">
+      <header className="page-heading">
+        <div>
+          <Link className="back-link" to={`/projects/${params.projectId ?? ""}`}>
+            返回工作区
+          </Link>
+          <h1>{project?.name ?? "故事大纲"}</h1>
+          <p>稳定三层结构：书 → 卷 → 章。锁定节点后不会被误改或重排。</p>
+        </div>
+        <div className="story-outline-summary">
+          {outline !== null && <Badge>修订 {String(outline.revision)}</Badge>}
+          {outline !== null && book !== null && (
+            <Button
+              disabled={readonly || busy || book.locked}
+              onClick={() =>
+                openAdd({
+                  kind: "volume",
+                  parentId: book.id,
+                })
+              }
+            >
+              新增卷
+            </Button>
+          )}
+        </div>
+      </header>
+
+      {runtime.mode === "browser-development" && (
+        <InlineAlert
+          tone="warning"
+          title="浏览器开发模式"
+          description="此处仅用 localStorage 验证交互；桌面发行版使用同一领域规则和 SQLite 事务。"
+        />
+      )}
+
+      {readonly && project !== null && (
+        <InlineAlert
+          tone="info"
+          title={project.status === "archived" ? "项目已归档" : "项目位于回收站"}
+          description="大纲保持可读，恢复项目后才能修改。"
+        />
+      )}
+
+      {normalizedError !== null && pageState !== "fatal_error" && (
+        <InlineAlert
+          tone="error"
+          title={normalizedError.title}
+          description={`${normalizedError.description}（${normalizedError.code}）`}
+          onDismiss={() => setError(null)}
+        />
+      )}
+
+      <PageStateBoundary
+        state={pageState}
+        preserveContent={false}
+        fallbacks={{
+          empty: (
+            <EmptyState
+              title="还没有故事大纲"
+              description="创建后可完全手工添加卷和章节，AI 不是前置条件。"
+              {...(readonly
+                ? {}
+                : {
+                    primaryAction: {
+                      label: busy ? "正在创建…" : "创建三层大纲",
+                      onClick: () => void createOutline(),
+                    },
+                  })}
+            />
+          ),
+          fatal_error:
+            normalizedError === null ? undefined : (
+              <ErrorState
+                title={normalizedError.title}
+                description={normalizedError.description}
+                errorCode={normalizedError.code}
+                primaryAction={{ label: "重试", onClick: () => void load() }}
+              />
+            ),
+        }}
+      >
+        {book !== null && currentOutline !== null && (
+          <section aria-labelledby="outline-structure-title">
+            <div className="section-heading">
+              <div>
+                <h2 id="outline-structure-title">{book.title}</h2>
+                {book.synopsis.length > 0 && <p>{book.synopsis}</p>}
+              </div>
+              <Badge tone={book.locked ? "warning" : "success"}>
+                {book.locked ? "全书结构已锁定" : "可编辑"}
+              </Badge>
+            </div>
+
+            {volumes.length === 0 ? (
+              <EmptyState
+                title="还没有卷"
+                description="先添加第一卷，再在卷下安排章节。"
+                {...(readonly || book.locked
+                  ? {}
+                  : {
+                      primaryAction: {
+                        label: "新增卷",
+                        onClick: () => openAdd({ kind: "volume", parentId: book.id }),
+                      },
+                    })}
+              />
+            ) : (
+              <div className="outline-volume-list">
+                {volumes.map((volume, volumeIndex) => (
+                  <OutlineVolumeCard
+                    key={volume.id}
+                    outline={currentOutline}
+                    volume={volume}
+                    index={volumeIndex}
+                    total={volumes.length}
+                    readonly={readonly || busy || book.locked}
+                    onAddChapter={() => openAdd({ kind: "chapter", parentId: volume.id })}
+                    onRename={openRename}
+                    onMove={(newIndex) =>
+                      void applyChange({ kind: "move", nodeId: volume.id, newIndex })
+                    }
+                    onToggleLock={() =>
+                      void applyChange({
+                        kind: volume.locked ? "unlock" : "lock",
+                        nodeId: volume.id,
+                      })
+                    }
+                    onChapterMove={(nodeId, newIndex) =>
+                      void applyChange({ kind: "move", nodeId, newIndex })
+                    }
+                    onChapterToggleLock={(chapter) =>
+                      void applyChange({
+                        kind: chapter.locked ? "unlock" : "lock",
+                        nodeId: chapter.id,
+                      })
+                    }
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+      </PageStateBoundary>
+
+      <Dialog
+        open={addTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setAddTarget(null);
+          }
+        }}
+        title={addTarget?.kind === "chapter" ? "新增章节节点" : "新增卷"}
+        description="这里只规划结构；正式正文仍在写作编辑器中保存。"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setAddTarget(null)}>
+              取消
+            </Button>
+            <Button
+              loading={busy}
+              disabled={title.trim().length === 0}
+              onClick={() => void submitAdd()}
+            >
+              添加
+            </Button>
+          </>
+        }
+      >
+        <FormField label={addTarget?.kind === "chapter" ? "章节标题" : "卷标题"} required>
+          {(fieldProps) => (
+            <Input
+              {...fieldProps}
+              maxLength={200}
+              value={title}
+              onChange={(event) => setTitle(event.currentTarget.value)}
+            />
+          )}
+        </FormField>
+      </Dialog>
+
+      <Dialog
+        open={editingNode !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setEditingNode(null);
+          }
+        }}
+        title="重命名大纲节点"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setEditingNode(null)}>
+              取消
+            </Button>
+            <Button
+              loading={busy}
+              disabled={title.trim().length === 0}
+              onClick={() => void submitRename()}
+            >
+              保存
+            </Button>
+          </>
+        }
+      >
+        <FormField label="节点标题" required>
+          {(fieldProps) => (
+            <Input
+              {...fieldProps}
+              maxLength={200}
+              value={title}
+              onChange={(event) => setTitle(event.currentTarget.value)}
+            />
+          )}
+        </FormField>
+      </Dialog>
+    </div>
+  );
+}
+
+interface OutlineVolumeCardProps {
+  readonly outline: Outline;
+  readonly volume: OutlineNodeSnapshot;
+  readonly index: number;
+  readonly total: number;
+  readonly readonly: boolean;
+  readonly onAddChapter: () => void;
+  readonly onRename: (node: OutlineNodeSnapshot) => void;
+  readonly onMove: (newIndex: number) => void;
+  readonly onToggleLock: () => void;
+  readonly onChapterMove: (nodeId: string, newIndex: number) => void;
+  readonly onChapterToggleLock: (chapter: OutlineNodeSnapshot) => void;
+}
+
+function OutlineVolumeCard({
+  index,
+  onAddChapter,
+  onChapterMove,
+  onChapterToggleLock,
+  onMove,
+  onRename,
+  onToggleLock,
+  outline,
+  readonly,
+  total,
+  volume,
+}: OutlineVolumeCardProps) {
+  const chapters = outline.orderedChildren(volume.id);
+  const controlsDisabled = readonly || volume.locked;
+  return (
+    <Card className="outline-volume-card">
+      <CardHeader>
+        <div className="card-heading-row">
+          <div>
+            <CardTitle>
+              第 {String(index + 1)} 卷 · {volume.title}
+            </CardTitle>
+            <CardDescription>
+              {String(chapters.length)} 个章节节点 · {volume.locked ? "已锁定" : "可编辑"}
+            </CardDescription>
+          </div>
+          <Badge tone={volume.locked ? "warning" : "neutral"}>
+            {volume.locked ? "锁定" : "草稿"}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="outline-node-actions">
+          <Button size="sm" variant="secondary" disabled={controlsDisabled} onClick={onAddChapter}>
+            添加章节
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={controlsDisabled}
+            onClick={() => onRename(volume)}
+          >
+            重命名
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={controlsDisabled || index === 0}
+            onClick={() => onMove(index - 1)}
+          >
+            上移
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={controlsDisabled || index === total - 1}
+            onClick={() => onMove(index + 1)}
+          >
+            下移
+          </Button>
+          <Button size="sm" variant="ghost" disabled={readonly} onClick={onToggleLock}>
+            {volume.locked ? "解锁" : "锁定"}
+          </Button>
+        </div>
+
+        {chapters.length === 0 ? (
+          <p className="outline-empty-chapters">本卷还没有章节节点。</p>
+        ) : (
+          <ol className="outline-chapter-list">
+            {chapters.map((chapter, chapterIndex) => (
+              <li key={chapter.id}>
+                <div>
+                  <span className="chapter-number">
+                    {String(chapterIndex + 1).padStart(2, "0")}
+                  </span>
+                  <strong>{chapter.title}</strong>
+                </div>
+                <div className="outline-chapter-actions">
+                  <Badge tone={chapter.locked ? "warning" : "neutral"}>
+                    {chapter.locked ? "锁定" : "计划"}
+                  </Badge>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={controlsDisabled || chapter.locked}
+                    onClick={() => onRename(chapter)}
+                  >
+                    重命名
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={controlsDisabled || chapter.locked || chapterIndex === 0}
+                    onClick={() => onChapterMove(chapter.id, chapterIndex - 1)}
+                  >
+                    上移
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={
+                      controlsDisabled || chapter.locked || chapterIndex === chapters.length - 1
+                    }
+                    onClick={() => onChapterMove(chapter.id, chapterIndex + 1)}
+                  >
+                    下移
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={readonly || volume.locked}
+                    onClick={() => onChapterToggleLock(chapter)}
+                  >
+                    {chapter.locked ? "解锁" : "锁定"}
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+      </CardContent>
+    </Card>
+  );
+}

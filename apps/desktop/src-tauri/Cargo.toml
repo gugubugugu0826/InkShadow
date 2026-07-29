@@ -1,0 +1,62 @@
+[package]
+name = "inkshadow-desktop"
+version = "0.1.0"
+description = "InkShadow desktop application"
+authors = ["InkShadow"]
+edition = "2021"
+publish = false
+rust-version = "1.85"
+
+[lib]
+name = "inkshadow_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+aes-gcm = "0.10"
+argon2 = "0.5"
+base64 = "0.22"
+bytes = "1"
+futures-util = "0.3"
+hmac = "0.12"
+hpke = { version = "0.13", default-features = false, features = ["alloc", "p256"] }
+keyring = "4"
+log = "0.4"
+rand = "0.9"
+reqwest = { version = "0.13", default-features = false, features = [
+  "http2",
+  "json",
+  "rustls",
+  "stream",
+] }
+ring = "0.17"
+same-file = "1"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8.6", default-features = false, features = [
+  "migrate",
+  "runtime-tokio",
+  "sqlite",
+] }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-log = "2"
+tauri-plugin-single-instance = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+uuid = { version = "1", features = ["serde", "v7"] }
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+] }
