@@ -61,10 +61,14 @@ describe("PersistenceRouteBoundary", () => {
       await user.click(screen.getByRole("link", { name: "Link 跳转" }));
       expect(screen.getByTestId("route-path")).toHaveTextContent("/start");
       expect(flush).toHaveBeenCalledOnce();
+      expect(screen.getByRole("status", { name: "正在保存并切换页面" })).toHaveTextContent(
+        "正在保存本地更改",
+      );
       releaseFirstFlush?.();
       await waitFor(() => {
         expect(screen.getByTestId("route-path")).toHaveTextContent("/linked");
       });
+      expect(screen.queryByRole("status", { name: "正在保存并切换页面" })).not.toBeInTheDocument();
 
       pending = true;
       await user.click(screen.getByRole("button", { name: "navigate 跳转" }));

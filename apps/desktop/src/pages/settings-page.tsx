@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { MODEL_ROUTE_ROLES, type ModelRouteRole } from "@inkshadow/ai-core";
 import type { DatabaseIntegrityReport, NativePathTicket } from "@inkshadow/data";
 import {
@@ -18,7 +18,10 @@ import {
 } from "@inkshadow/ui";
 import { Link, useLocation } from "react-router-dom";
 
+import { useAppearancePreference } from "../appearance-preference";
 import { DataTransferPanel } from "../components/data-transfer-panel";
+import { ModelHubEvaluationPanel } from "../components/model-hub-evaluation-panel";
+import { ModelHubImageGenerationPanel } from "../components/model-hub-image-generation-panel";
 import { useOnlineStatus } from "../hooks/use-online-status";
 import { collectDesktopDiagnosticArtifact } from "../infrastructure/diagnostics";
 import { downloadBrowserExportArtifact } from "../infrastructure/export-artifact-download";
@@ -27,6 +30,43 @@ import {
   canCheckModelEndpointWhileOffline,
   type LocalModelCapacityAssessment,
 } from "../infrastructure/model-capacity";
+import {
+  MODEL_HUB_CAPABILITIES,
+  MODEL_HUB_DEFAULT_REQUEST_TIMEOUT_MS,
+  MODEL_HUB_MAX_REQUEST_TIMEOUT_MS,
+  MODEL_HUB_MAX_RETRY_LIMIT,
+  MODEL_HUB_MIN_REQUEST_TIMEOUT_MS,
+  MODEL_PROVIDER_KINDS,
+  NOVEL_AI_TASKS,
+  getModelProviderPreset,
+  isLoopbackModelBaseUrl,
+  normalizeCredentialHeaderName,
+  normalizeModelHubApiPath,
+  normalizeModelHubRequestTimeoutMs,
+  normalizeModelHubRetryLimit,
+  resolveProviderBaseUrl,
+  type ModelHubCapability,
+  type ModelHubScheme,
+  type ModelProviderKind,
+  type NovelAiTask,
+} from "../infrastructure/model-hub-provider-registry";
+import { modelHubNativeEndpointConfig } from "../infrastructure/model-hub-native-config";
+import { applyAutomaticModelHubRouting } from "../infrastructure/model-hub-routing-service";
+import { bridgeLegacyModelProfilesToModelHub } from "../infrastructure/model-hub-legacy-bridge";
+import { ModelHubLocalEvaluationService } from "../infrastructure/model-hub-local-evaluation-service";
+import {
+  ModelHubStoreError,
+  type ModelCatalogEntry,
+  type ModelCostPrivacyProfile,
+  type ModelHubPrivacyPolicy,
+  type ModelHubStore,
+  type ModelProviderConnection,
+  type NovelTaskRoute,
+} from "../infrastructure/model-hub-store";
+import type {
+  NativeGatewayAuthenticationMode,
+  NativeGatewayProviderKind,
+} from "../infrastructure/native-model-gateway-contract";
 import {
   type NativeModelConnectionResponse,
   type NativeModelCapacityResponse,
@@ -52,8 +92,53 @@ const DEFAULT_OPENAI_PROFILE = {
   selectedModel: null,
 } as const;
 
+const CONNECTABLE_PROVIDER_KINDS = MODEL_PROVIDER_KINDS;
+
+type ConnectableProviderKind = (typeof CONNECTABLE_PROVIDER_KINDS)[number];
+
+const MODEL_HUB_SCHEME_OPTIONS = [
+  {
+    value: "smart",
+    label: "智能推荐",
+    description: "按写作、规划和检查任务自动使用当前已连接的模型。",
+  },
+  {
+    value: "quality",
+    label: "高质量",
+    description: "优先把正文和深度检查交给当前高质量模型。",
+  },
+  {
+    value: "economy",
+    label: "经济模式",
+    description: "优先把高频轻量任务交给低延迟、低成本模型。",
+  },
+  {
+    value: "local_privacy",
+    label: "本地隐私",
+    description: "只使用已连接的本机 Ollama；没有本地模型时不会回退到云端。",
+  },
+  {
+    value: "custom",
+    label: "完全自定义",
+    description: "在专家设置中逐项调整兼容路由。",
+  },
+] as const satisfies readonly {
+  readonly value: ModelHubScheme;
+  readonly label: string;
+  readonly description: string;
+}[];
+
 export function SettingsPage() {
   const runtime = useRuntime();
+  const {
+    preference: appearance,
+    resolvedSurface,
+    setPreference: setAppearance,
+  } = useAppearancePreference();
+  const modelEvaluation = useMemo(
+    () => new ModelHubLocalEvaluationService(runtime, runtime.modelHub, runtime.ids, runtime.clock),
+    [runtime],
+  );
   const location = useLocation();
   const online = useOnlineStatus();
   const [summary, setSummary] = useState<SecretSummary>({
@@ -61,19 +146,53 @@ export function SettingsPage() {
     lastFour: null,
   });
   const [profiles, setProfiles] = useState<readonly ModelProfile[]>([]);
-  const [profile, setProfile] = useState<ModelProfile | null>(null);
+  const [, setProfile] = useState<ModelProfile | null>(null);
+  const [hubConnections, setHubConnections] = useState<readonly ModelProviderConnection[]>([]);
+  const [hubConnection, setHubConnection] = useState<ModelProviderConnection | null>(null);
+  const [hubCatalog, setHubCatalog] = useState<readonly ModelCatalogEntry[]>([]);
+  const [routingCatalog, setRoutingCatalog] = useState<readonly ModelCatalogEntry[]>([]);
+  const [localCatalogEntryIds, setLocalCatalogEntryIds] = useState<readonly string[]>([]);
+  const [novelTaskRoutes, setNovelTaskRoutes] = useState<readonly NovelTaskRoute[]>([]);
+  const [novelTaskRouteCount, setNovelTaskRouteCount] = useState(0);
   const [roleRoutes, setRoleRoutes] = useState<readonly ModelRoleRoute[]>([]);
+  const [providerPreset, setProviderPreset] = useState<ConnectableProviderKind>("openai");
+  const [expertMode, setExpertMode] = useState(false);
+  const [modelHubScheme, setModelHubScheme] = useState<ModelHubScheme>("smart");
+  const [schemeSaving, setSchemeSaving] = useState(false);
+  const [schemeMessage, setSchemeMessage] = useState<string | null>(null);
+  const [connectionChecked, setConnectionChecked] = useState(false);
   const [routeRole, setRouteRole] = useState<ModelRouteRole>("high_quality");
   const [routePrimaryProviderId, setRoutePrimaryProviderId] = useState("");
   const [routeFallbackProviderId, setRouteFallbackProviderId] = useState("");
   const [routeSaving, setRouteSaving] = useState(false);
   const [routeError, setRouteError] = useState<unknown>(null);
+  const [novelRouteTask, setNovelRouteTask] = useState<NovelAiTask>("prose_generation");
+  const [novelRoutePrimaryCatalogId, setNovelRoutePrimaryCatalogId] = useState("");
+  const [novelRouteFallbackCatalogId, setNovelRouteFallbackCatalogId] = useState("");
+  const [novelRouteMaximumCost, setNovelRouteMaximumCost] = useState("");
+  const [novelRouteCurrency, setNovelRouteCurrency] = useState("USD");
+  const [novelRoutePrivacy, setNovelRoutePrivacy] =
+    useState<ModelHubPrivacyPolicy>("cloud_allowed");
+  const [novelRouteFailure, setNovelRouteFailure] =
+    useState<NovelTaskRoute["failurePolicy"]>("use_fallback");
+  const [novelRouteRemoteContentConsent, setNovelRouteRemoteContentConsent] = useState(false);
   const [providerId, setProviderId] = useState<string>(DEFAULT_OPENAI_PROFILE.providerId);
   const [provider, setProvider] = useState<NativeProviderKind>(DEFAULT_OPENAI_PROFILE.provider);
   const [baseUrl, setBaseUrl] = useState<string>(DEFAULT_OPENAI_PROFILE.baseUrl);
-  const [authentication, setAuthentication] = useState<NativeAuthenticationMode>(
+  const [region, setRegion] = useState("china_beijing");
+  const [workspaceId, setWorkspaceId] = useState("");
+  const [endpointId, setEndpointId] = useState("");
+  const [authentication, setAuthentication] = useState<NativeGatewayAuthenticationMode>(
     DEFAULT_OPENAI_PROFILE.authentication,
   );
+  const [credentialHeaderName, setCredentialHeaderName] = useState("");
+  const [modelDiscoveryPath, setModelDiscoveryPath] = useState("");
+  const [textGenerationPath, setTextGenerationPath] = useState("");
+  const [embeddingPath, setEmbeddingPath] = useState("");
+  const [requestTimeoutMs, setRequestTimeoutMs] = useState(
+    String(MODEL_HUB_DEFAULT_REQUEST_TIMEOUT_MS),
+  );
+  const [retryLimit, setRetryLimit] = useState("0");
   const [selectedModel, setSelectedModel] = useState("");
   const [contextWindowTokens, setContextWindowTokens] = useState("");
   const [pricingCurrency, setPricingCurrency] = useState("USD");
@@ -86,9 +205,15 @@ export function SettingsPage() {
   const [connection, setConnection] = useState<NativeModelConnectionResponse | null>(null);
   const [modelCapacity, setModelCapacity] = useState<NativeModelCapacityResponse | null>(null);
   const [secret, setSecret] = useState("");
+  const [confirmedCapabilities, setConfirmedCapabilities] = useState<readonly ModelHubCapability[]>(
+    [],
+  );
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [checkingModel, setCheckingModel] = useState(false);
+  const [probingCapability, setProbingCapability] = useState(false);
+  const [capabilityProbeMessage, setCapabilityProbeMessage] = useState<string | null>(null);
+  const [capabilityProbeError, setCapabilityProbeError] = useState<unknown>(null);
   const [credentialError, setCredentialError] = useState<unknown>(null);
   const [integrity, setIntegrity] = useState<DatabaseIntegrityReport | null>(null);
   const [maintenanceBusy, setMaintenanceBusy] = useState<"inspect" | "backup" | "restore" | null>(
@@ -102,35 +227,107 @@ export function SettingsPage() {
   const [diagnosticError, setDiagnosticError] = useState<unknown>(null);
   const [diagnosticId, setDiagnosticId] = useState<string | null>(null);
 
-  const applyPricingToForm = useCallback((pricing: ModelPricingProfile | null): void => {
-    setContextWindowTokens(pricing === null ? "" : String(pricing.contextWindowTokens));
-    setPricingCurrency(pricing?.currency ?? "USD");
-    setInputPricePerMillion(
-      pricing === null ? "" : formatMicrosAsCurrency(pricing.inputMicrosPerMillionTokens),
-    );
-    setOutputPricePerMillion(
-      pricing === null ? "" : formatMicrosAsCurrency(pricing.outputMicrosPerMillionTokens),
-    );
-    setCachedInputPricePerMillion(
-      pricing?.cachedInputMicrosPerMillionTokens === null ||
-        pricing?.cachedInputMicrosPerMillionTokens === undefined
-        ? ""
-        : formatMicrosAsCurrency(pricing.cachedInputMicrosPerMillionTokens),
-    );
-    setPricingVersion(pricing?.pricingVersion ?? "");
-    setPriceUpdatedDate(pricing?.priceUpdatedAt.slice(0, 10) ?? "");
-  }, []);
+  const applyHubModelToForm = useCallback(
+    (catalogEntry: ModelCatalogEntry | null, costPrivacy: ModelCostPrivacyProfile | null): void => {
+      setContextWindowTokens(
+        catalogEntry?.inputTokenLimit === null || catalogEntry?.inputTokenLimit === undefined
+          ? ""
+          : String(catalogEntry.inputTokenLimit),
+      );
+      setPricingCurrency(costPrivacy?.currency ?? "USD");
+      setInputPricePerMillion(
+        costPrivacy?.inputMicrosPerMillionTokens === null ||
+          costPrivacy?.inputMicrosPerMillionTokens === undefined
+          ? ""
+          : formatMicrosStringAsCurrency(costPrivacy.inputMicrosPerMillionTokens),
+      );
+      setOutputPricePerMillion(
+        costPrivacy?.outputMicrosPerMillionTokens === null ||
+          costPrivacy?.outputMicrosPerMillionTokens === undefined
+          ? ""
+          : formatMicrosStringAsCurrency(costPrivacy.outputMicrosPerMillionTokens),
+      );
+      setCachedInputPricePerMillion(
+        costPrivacy?.cachedInputMicrosPerMillionTokens === null ||
+          costPrivacy?.cachedInputMicrosPerMillionTokens === undefined
+          ? ""
+          : formatMicrosStringAsCurrency(costPrivacy.cachedInputMicrosPerMillionTokens),
+      );
+      setPricingVersion(costPrivacy?.pricingVersion ?? "");
+      setPriceUpdatedDate(costPrivacy?.priceUpdatedAt?.slice(0, 10) ?? "");
+    },
+    [],
+  );
 
   const loadModelCenter = useCallback(async () => {
     setLoading(true);
     try {
-      const [storedProfiles, storedRoutes] = await Promise.all([
-        runtime.modelCenter.listProfiles(),
-        runtime.modelRouting.listRoutes(),
-      ]);
-      const selectedProfile = storedProfiles[0] ?? null;
+      await bridgeLegacyModelProfilesToModelHub({
+        modelCenter: runtime.modelCenter,
+        modelHub: runtime.modelHub,
+        credentials: runtime.credentials,
+        clock: runtime.clock,
+      });
+      const [storedConnections, storedProfiles, storedRoutes, storedNovelRoutes, activePreset] =
+        await Promise.all([
+          runtime.modelHub.listConnections(),
+          runtime.modelCenter.listProfiles(),
+          runtime.modelRouting.listRoutes(),
+          Promise.all(NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task))),
+          runtime.modelHub.findActivePreset(),
+        ]);
+      const selectedConnection = storedConnections[0] ?? null;
+      const selectedProfile =
+        storedProfiles.find(({ providerId: id }) => id === selectedConnection?.id) ?? null;
+      const catalog =
+        selectedConnection === null
+          ? []
+          : await runtime.modelHub.listCatalog(selectedConnection.id);
+      const allCatalogEntries = (
+        await Promise.all(
+          storedConnections.map((connection) => runtime.modelHub.listCatalog(connection.id)),
+        )
+      ).flat();
+      const confirmedLocalIds = await loadEvidenceConfirmedLocalCatalogIds(
+        runtime.modelHub,
+        allCatalogEntries,
+      );
+      const persistedNovelRoutes = storedNovelRoutes.filter(
+        (route): route is NovelTaskRoute => route !== null,
+      );
+      const proseRoute = storedNovelRoutes.find((route) => route?.task === "prose_generation");
+      const selectedCatalogEntry =
+        catalog.find(({ id }) => id === proseRoute?.primaryCatalogEntryId) ??
+        catalog.find(({ availability }) => availability === "available") ??
+        null;
+      const [costPrivacy, capabilities] =
+        selectedCatalogEntry === null
+          ? [null, []]
+          : await Promise.all([
+              runtime.modelHub.findCostPrivacyProfile(selectedCatalogEntry.id),
+              runtime.modelHub.listCapabilityEvidence(selectedCatalogEntry.id),
+            ]);
+      setHubConnections(storedConnections);
+      setHubConnection(selectedConnection);
+      setHubCatalog(catalog);
+      setRoutingCatalog(allCatalogEntries);
+      setLocalCatalogEntryIds(confirmedLocalIds);
+      setNovelTaskRoutes(persistedNovelRoutes);
       setProfiles(storedProfiles);
       setRoleRoutes(storedRoutes);
+      setNovelTaskRouteCount(persistedNovelRoutes.length);
+      setNovelRoutePrimaryCatalogId(proseRoute?.primaryCatalogEntryId ?? "");
+      setNovelRouteFallbackCatalogId(proseRoute?.fallbackCatalogEntryId ?? "");
+      setNovelRouteMaximumCost(
+        proseRoute?.maximumCostMicros === null || proseRoute?.maximumCostMicros === undefined
+          ? ""
+          : formatMicrosStringAsCurrency(proseRoute.maximumCostMicros),
+      );
+      setNovelRouteCurrency(proseRoute?.currency ?? "USD");
+      setNovelRoutePrivacy(proseRoute?.privacyPolicy ?? "cloud_allowed");
+      setNovelRouteFailure(proseRoute?.failurePolicy ?? "use_fallback");
+      setNovelRouteRemoteContentConsent(false);
+      setModelHubScheme(activePreset?.scheme ?? inferModelHubScheme(storedRoutes));
       const selectedRoute = storedRoutes.find(({ role }) => role === "high_quality");
       setRoutePrimaryProviderId(
         selectedRoute?.primaryProviderId ??
@@ -139,29 +336,58 @@ export function SettingsPage() {
       );
       setRouteFallbackProviderId(selectedRoute?.fallbackProviderId ?? "");
       setProfile(selectedProfile);
-      setProviderId(selectedProfile?.providerId ?? DEFAULT_OPENAI_PROFILE.providerId);
-      setProvider(selectedProfile?.provider ?? DEFAULT_OPENAI_PROFILE.provider);
-      setBaseUrl(selectedProfile?.baseUrl ?? DEFAULT_OPENAI_PROFILE.baseUrl);
-      setAuthentication(selectedProfile?.authentication ?? DEFAULT_OPENAI_PROFILE.authentication);
-      setSelectedModel(selectedProfile?.selectedModel ?? "");
-      applyPricingToForm(selectedProfile?.pricing ?? null);
-      setModels([]);
+      setProviderPreset(selectedConnection?.providerKind ?? "openai");
+      setProviderId(selectedConnection?.id ?? DEFAULT_OPENAI_PROFILE.providerId);
+      setProvider(
+        selectedConnection === null
+          ? DEFAULT_OPENAI_PROFILE.provider
+          : legacyProviderKind(selectedConnection.providerKind),
+      );
+      setBaseUrl(selectedConnection?.baseUrl ?? DEFAULT_OPENAI_PROFILE.baseUrl);
+      setRegion(selectedConnection?.region ?? "china_beijing");
+      setWorkspaceId(selectedConnection?.workspaceId ?? "");
+      setEndpointId(selectedConnection?.endpointId ?? "");
+      setAuthentication(selectedConnection?.authenticationMode ?? "bearer_keyring");
+      setCredentialHeaderName(selectedConnection?.credentialHeaderName ?? "");
+      setModelDiscoveryPath(selectedConnection?.modelDiscoveryPath ?? "");
+      setTextGenerationPath(selectedConnection?.textGenerationPath ?? "");
+      setEmbeddingPath(selectedConnection?.embeddingPath ?? "");
+      setRequestTimeoutMs(
+        String(selectedConnection?.requestTimeoutMs ?? MODEL_HUB_DEFAULT_REQUEST_TIMEOUT_MS),
+      );
+      setRetryLimit(String(selectedConnection?.retryLimit ?? 0));
+      setSelectedModel(selectedCatalogEntry?.providerModelId ?? "");
+      applyHubModelToForm(selectedCatalogEntry, costPrivacy);
+      setConfirmedCapabilities(
+        capabilities
+          .filter(
+            ({ evidenceSource, verdict, expiresAt }) =>
+              evidenceSource === "user_confirmed" &&
+              verdict === "supported" &&
+              (expiresAt === null || expiresAt > new Date().toISOString()),
+          )
+          .map(({ capability }) => capability),
+      );
+      setModels(catalog.map(catalogEntryToDescriptor));
       setConnection(null);
+      setConnectionChecked(false);
       setModelCapacity(null);
       setSummary(
         runtime.mode === "tauri"
           ? await runtime.credentials.getSummary(
-              selectedProfile?.providerId ?? DEFAULT_OPENAI_PROFILE.providerId,
+              selectedConnection?.id ?? DEFAULT_OPENAI_PROFILE.providerId,
             )
           : { configured: false, lastFour: null },
       );
       setCredentialError(null);
+      setCapabilityProbeError(null);
+      setCapabilityProbeMessage(null);
     } catch (reason: unknown) {
       setCredentialError(reason);
     } finally {
       setLoading(false);
     }
-  }, [applyPricingToForm, runtime]);
+  }, [applyHubModelToForm, runtime]);
 
   const inspectDatabase = useCallback(async () => {
     if (runtime.maintenance === null) {
@@ -191,31 +417,76 @@ export function SettingsPage() {
       return;
     }
     const timeout = window.setTimeout(() => {
-      document.getElementById(targetId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      const target = document.getElementById(targetId);
+      if (target === null) {
+        return;
+      }
+      const reduceMotion =
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+      if (!target.hasAttribute("tabindex")) {
+        target.setAttribute("tabindex", "-1");
+      }
+      target.focus({ preventScroll: true });
     }, 0);
     return () => window.clearTimeout(timeout);
   }, [location.hash]);
 
   async function selectStoredProfile(providerIdValue: string): Promise<void> {
-    const selected = profiles.find((candidate) => candidate.providerId === providerIdValue);
+    const selected = hubConnections.find((candidate) => candidate.id === providerIdValue);
     if (selected === undefined) {
       return;
     }
-    setProfile(selected);
-    setProviderId(selected.providerId);
-    setProvider(selected.provider);
+    const catalog = await runtime.modelHub.listCatalog(selected.id);
+    const selectedCatalogEntry =
+      catalog.find(({ availability }) => availability === "available") ?? null;
+    const [costPrivacy, capabilities] =
+      selectedCatalogEntry === null
+        ? [null, []]
+        : await Promise.all([
+            runtime.modelHub.findCostPrivacyProfile(selectedCatalogEntry.id),
+            runtime.modelHub.listCapabilityEvidence(selectedCatalogEntry.id),
+          ]);
+    const legacyProfile = profiles.find(({ providerId: id }) => id === selected.id) ?? null;
+    setHubConnection(selected);
+    setHubCatalog(catalog);
+    setProfile(legacyProfile);
+    setProviderPreset(selected.providerKind);
+    setProviderId(selected.id);
+    setProvider(legacyProviderKind(selected.providerKind));
     setBaseUrl(selected.baseUrl);
-    setAuthentication(selected.authentication);
-    setSelectedModel(selected.selectedModel ?? "");
-    applyPricingToForm(selected.pricing);
-    setModels([]);
+    setRegion(selected.region ?? "china_beijing");
+    setWorkspaceId(selected.workspaceId ?? "");
+    setEndpointId(selected.endpointId ?? "");
+    setAuthentication(selected.authenticationMode);
+    setCredentialHeaderName(selected.credentialHeaderName ?? "");
+    setModelDiscoveryPath(selected.modelDiscoveryPath ?? "");
+    setTextGenerationPath(selected.textGenerationPath ?? "");
+    setEmbeddingPath(selected.embeddingPath ?? "");
+    setRequestTimeoutMs(String(selected.requestTimeoutMs));
+    setRetryLimit(String(selected.retryLimit));
+    setSelectedModel(selectedCatalogEntry?.providerModelId ?? "");
+    applyHubModelToForm(selectedCatalogEntry, costPrivacy);
+    setConfirmedCapabilities(
+      capabilities
+        .filter(
+          ({ evidenceSource, verdict }) =>
+            evidenceSource === "user_confirmed" && verdict === "supported",
+        )
+        .map(({ capability }) => capability),
+    );
+    setModels(catalog.map(catalogEntryToDescriptor));
     setConnection(null);
+    setConnectionChecked(false);
+    setCapabilityProbeError(null);
+    setCapabilityProbeMessage(null);
     setModelCapacity(null);
     setSecret("");
     try {
       setSummary(
         runtime.mode === "tauri"
-          ? await runtime.credentials.getSummary(selected.providerId)
+          ? await runtime.credentials.getSummary(selected.id)
           : { configured: false, lastFour: null },
       );
       setCredentialError(null);
@@ -224,52 +495,255 @@ export function SettingsPage() {
     }
   }
 
-  function applyProviderPreset(nextProvider: NativeProviderKind): void {
-    setProvider(nextProvider);
+  async function selectCatalogModel(providerModelId: string): Promise<void> {
+    setSelectedModel(providerModelId);
+    const catalogEntry = hubCatalog.find(
+      (candidate) => candidate.providerModelId === providerModelId,
+    );
+    if (catalogEntry === undefined) {
+      setConfirmedCapabilities([]);
+      return;
+    }
+    const [costPrivacy, capabilities] = await Promise.all([
+      runtime.modelHub.findCostPrivacyProfile(catalogEntry.id),
+      runtime.modelHub.listCapabilityEvidence(catalogEntry.id),
+    ]);
+    applyHubModelToForm(catalogEntry, costPrivacy);
+    setConfirmedCapabilities(
+      capabilities
+        .filter(
+          ({ evidenceSource, verdict }) =>
+            evidenceSource === "user_confirmed" && verdict === "supported",
+        )
+        .map(({ capability }) => capability),
+    );
+  }
+
+  function applyProviderPreset(nextProvider: ConnectableProviderKind): void {
+    const preset = getModelProviderPreset(nextProvider);
+    const nativeProvider = legacyProviderKind(nextProvider);
+    const nextBaseUrl =
+      nextProvider === "custom_openai_compatible" ? "" : resolveProviderBaseUrl(nextProvider);
+    setProviderPreset(nextProvider);
+    setProvider(nativeProvider);
+    setHubConnection(null);
+    setHubCatalog([]);
     setProfile(null);
     setModels([]);
     setConnection(null);
+    setConnectionChecked(false);
     setModelCapacity(null);
     setSelectedModel("");
-    setContextWindowTokens(nextProvider === "ollama" ? "32768" : "");
+    setRegion(nextProvider === "alibaba_qwen" ? "china_beijing" : "");
+    setWorkspaceId("");
+    setEndpointId("");
+    setCredentialHeaderName("");
+    setModelDiscoveryPath("");
+    setTextGenerationPath("");
+    setEmbeddingPath("");
+    setRequestTimeoutMs(String(MODEL_HUB_DEFAULT_REQUEST_TIMEOUT_MS));
+    setRetryLimit("0");
+    setConfirmedCapabilities([]);
+    setContextWindowTokens(nativeProvider === "ollama" ? "32768" : "");
     setPricingCurrency("USD");
-    setInputPricePerMillion(nextProvider === "ollama" ? "0" : "");
-    setOutputPricePerMillion(nextProvider === "ollama" ? "0" : "");
+    setInputPricePerMillion(nativeProvider === "ollama" ? "0" : "");
+    setOutputPricePerMillion(nativeProvider === "ollama" ? "0" : "");
     setCachedInputPricePerMillion("");
-    setPricingVersion(nextProvider === "ollama" ? "local-zero-cost" : "");
-    setPriceUpdatedDate(new Date().toISOString().slice(0, 10));
-    if (nextProvider === "ollama") {
-      setProviderId("ollama-local");
-      setBaseUrl("http://127.0.0.1:11434");
-      setAuthentication("none");
-      setSummary({ configured: false, lastFour: null });
-    } else {
-      setProviderId(DEFAULT_OPENAI_PROFILE.providerId);
-      setBaseUrl(DEFAULT_OPENAI_PROFILE.baseUrl);
-      setAuthentication(DEFAULT_OPENAI_PROFILE.authentication);
-      setSummary({ configured: false, lastFour: null });
+    setPricingVersion(nativeProvider === "ollama" ? "local-zero-cost" : "");
+    setPriceUpdatedDate(nativeProvider === "ollama" ? new Date().toISOString().slice(0, 10) : "");
+    setProviderId(nextProvider === "custom_openai_compatible" ? "custom-provider" : nextProvider);
+    setBaseUrl(nextBaseUrl);
+    setAuthentication(preset.credentialRequired ? "bearer_keyring" : "none");
+    setSummary({ configured: false, lastFour: null });
+    setSchemeMessage(null);
+    setCapabilityProbeError(null);
+    setCapabilityProbeMessage(null);
+  }
+
+  async function persistModelHubConnection(
+    credentialConfigured = summary.configured,
+    authenticationOverride: NativeGatewayAuthenticationMode = authentication,
+  ): Promise<ModelProviderConnection> {
+    const existing = await findOwnedConnectionTarget();
+    const resolvedBaseUrl = resolveProviderBaseUrl(providerPreset, {
+      region,
+      workspaceId,
+      baseUrlOverride: baseUrl,
+    });
+    return runtime.modelHub.saveConnection({
+      id: providerId,
+      providerKind: providerPreset,
+      displayName: getModelProviderPreset(providerPreset).displayName,
+      region: region.trim().length === 0 ? null : region,
+      workspaceId: workspaceId.trim().length === 0 ? null : workspaceId,
+      endpointId: endpointId.trim().length === 0 ? null : endpointId,
+      baseUrlOverride: resolvedBaseUrl,
+      credentialRef:
+        credentialConfigured && authenticationOverride !== "none"
+          ? `keyring:model-hub:${providerId}`
+          : null,
+      credentialState:
+        credentialConfigured && authenticationOverride !== "none" ? "present" : "missing",
+      authenticationMode: authenticationOverride,
+      credentialHeaderName:
+        providerPreset === "custom_openai_compatible" &&
+        authenticationOverride === "custom_header_keyring"
+          ? credentialHeaderName
+          : null,
+      modelDiscoveryPath: providerPreset === "custom_openai_compatible" ? modelDiscoveryPath : null,
+      textGenerationPath: providerPreset === "custom_openai_compatible" ? textGenerationPath : null,
+      embeddingPath: providerPreset === "custom_openai_compatible" ? embeddingPath : null,
+      requestTimeoutMs: Number(requestTimeoutMs),
+      retryLimit: Number(retryLimit),
+      enabled: authenticationOverride === "none" || credentialConfigured,
+      expectedRevision: existing?.revision ?? null,
+    });
+  }
+
+  function assertConnectionTargetIsOwned(existingConnection: ModelProviderConnection | null): void {
+    if (existingConnection !== null && existingConnection.providerKind !== providerPreset) {
+      throw new ModelHubStoreError(
+        "MODEL_HUB_PROVIDER_KIND_IMMUTABLE",
+        "这个配置标识已经属于另一家供应商。请使用新的配置标识，原配置和凭据不会被覆盖。",
+      );
     }
+    if (existingConnection !== null && hubConnection?.id !== existingConnection.id) {
+      throw new ModelHubStoreError(
+        "MODEL_HUB_CONNECTION_ID_CONFLICT",
+        "这个配置标识已经属于另一项已保存配置。请先从已保存配置中加载它，原配置和凭据不会被覆盖。",
+      );
+    }
+  }
+
+  async function findOwnedConnectionTarget(): Promise<ModelProviderConnection | null> {
+    const existingConnection = await runtime.modelHub.findConnection(providerId);
+    assertConnectionTargetIsOwned(existingConnection);
+    return existingConnection;
+  }
+
+  async function assertCredentialMutationTarget(
+    operation: "save" | "delete",
+  ): Promise<ModelProviderConnection | null> {
+    const existingConnection = await findOwnedConnectionTarget();
+    if (
+      operation === "delete" &&
+      (existingConnection === null ||
+        hubConnection?.id !== existingConnection.id ||
+        hubConnection.providerKind !== providerPreset ||
+        !summary.configured)
+    ) {
+      throw new ModelHubStoreError(
+        "MODEL_HUB_CREDENTIAL_TARGET_MISMATCH",
+        "只能删除当前已加载配置的密钥。请先从已保存配置中重新选择它。",
+      );
+    }
+    return existingConnection;
   }
 
   async function saveModelProfile(): Promise<void> {
     setSaving(true);
     try {
-      const saved = await runtime.modelCenter.save({
-        providerId,
-        provider,
-        baseUrl,
-        authentication,
-        selectedModel: selectedModel.trim().length === 0 ? null : selectedModel,
-        pricing: buildPricingProfile(),
-        expectedRevision: profile?.providerId === providerId ? profile.revision : null,
-      });
-      const nextProfiles = await runtime.modelCenter.listProfiles();
+      const savedConnection = await persistModelHubConnection();
+      const pricing = buildPricingProfile();
+      let nextCatalog = await runtime.modelHub.listCatalog(savedConnection.id);
+      let selectedCatalogEntry = nextCatalog.find(
+        ({ providerModelId }) => providerModelId === selectedModel,
+      );
+      if (selectedModel.trim().length > 0 && selectedCatalogEntry === undefined) {
+        nextCatalog = await runtime.modelHub.syncCatalog({
+          syncId: createModelHubId("manual-sync"),
+          connectionId: savedConnection.id,
+          source: "manual",
+          status: "succeeded",
+          models: [
+            {
+              id: createModelHubId("catalog"),
+              providerModelId: selectedModel,
+              inputTokenLimit:
+                contextWindowTokens.trim().length === 0 ? null : Number(contextWindowTokens),
+            },
+          ],
+        });
+        selectedCatalogEntry = nextCatalog.find(
+          ({ providerModelId }) => providerModelId === selectedModel,
+        );
+      }
+      if (selectedCatalogEntry !== undefined) {
+        const existingCostPrivacy = await runtime.modelHub.findCostPrivacyProfile(
+          selectedCatalogEntry.id,
+        );
+        await runtime.modelHub.saveCostPrivacyProfile({
+          catalogEntryId: selectedCatalogEntry.id,
+          ...(pricing === null
+            ? {}
+            : {
+                currency: pricing.currency,
+                inputMicrosPerMillionTokens: String(pricing.inputMicrosPerMillionTokens),
+                outputMicrosPerMillionTokens: String(pricing.outputMicrosPerMillionTokens),
+                cachedInputMicrosPerMillionTokens:
+                  pricing.cachedInputMicrosPerMillionTokens === null
+                    ? null
+                    : String(pricing.cachedInputMicrosPerMillionTokens),
+                pricingVersion: pricing.pricingVersion,
+                priceUpdatedAt: pricing.priceUpdatedAt,
+              }),
+          dataDestination: isLoopbackModelBaseUrl(savedConnection.baseUrl) ? "local" : "remote",
+          retentionPolicy: isLoopbackModelBaseUrl(savedConnection.baseUrl)
+            ? "none"
+            : "provider_default",
+          trainingPolicy: isLoopbackModelBaseUrl(savedConnection.baseUrl) ? "not_used" : "unknown",
+          evidenceSource: "user_confirmed",
+          evidenceVersion: "settings-confirmation-v1",
+          expectedRevision: existingCostPrivacy?.revision ?? null,
+        });
+        if (confirmedCapabilities.length > 0) {
+          const evidenceVersion = createModelHubId("user-capabilities");
+          await runtime.modelHub.recordCapabilityScan({
+            scanId: createModelHubId("user-scan"),
+            catalogEntryId: selectedCatalogEntry.id,
+            scanKind: "user_review",
+            status: "succeeded",
+            evidenceVersion,
+            evidence: confirmedCapabilities.map((capability) => ({
+              id: createModelHubId("capability"),
+              capability,
+              verdict: "supported",
+              evidenceSource: "user_confirmed",
+            })),
+          });
+        }
+      }
+
+      let savedLegacyProfile: ModelProfile | null = null;
+      if (supportsLegacyModelProfile(providerPreset)) {
+        const existingLegacyProfile = await runtime.modelCenter.findByProviderId(providerId);
+        const legacyAuthentication: NativeAuthenticationMode =
+          authentication === "none" ? "none" : "bearer_keyring";
+        savedLegacyProfile = await runtime.modelCenter.save({
+          providerId,
+          provider,
+          baseUrl: savedConnection.baseUrl,
+          authentication: legacyAuthentication,
+          selectedModel: selectedModel.trim().length === 0 ? null : selectedModel,
+          pricing,
+          expectedRevision: existingLegacyProfile?.revision ?? null,
+        });
+      }
+
+      const [nextConnections, nextProfiles] = await Promise.all([
+        runtime.modelHub.listConnections(),
+        runtime.modelCenter.listProfiles(),
+      ]);
+      setHubConnections(nextConnections);
+      setHubConnection(
+        nextConnections.find(({ id }) => id === savedConnection.id) ?? savedConnection,
+      );
+      setHubCatalog(nextCatalog);
+      await refreshRoutingCatalogState(nextConnections);
       setProfiles(nextProfiles);
-      setProfile(saved);
-      setProviderId(saved.providerId);
-      setBaseUrl(saved.baseUrl);
-      setSelectedModel(saved.selectedModel ?? "");
-      applyPricingToForm(saved.pricing);
+      setProfile(savedLegacyProfile);
+      setProviderId(savedConnection.id);
+      setBaseUrl(savedConnection.baseUrl);
       setCredentialError(null);
     } catch (reason: unknown) {
       setCredentialError(reason);
@@ -309,8 +783,113 @@ export function SettingsPage() {
     }
   }
 
+  function selectNovelTaskRoute(nextTask: NovelAiTask): void {
+    const stored = novelTaskRoutes.find(({ task }) => task === nextTask);
+    setNovelRouteTask(nextTask);
+    setNovelRoutePrimaryCatalogId(stored?.primaryCatalogEntryId ?? "");
+    setNovelRouteFallbackCatalogId(stored?.fallbackCatalogEntryId ?? "");
+    setNovelRouteMaximumCost(
+      stored?.maximumCostMicros === null || stored?.maximumCostMicros === undefined
+        ? ""
+        : formatMicrosStringAsCurrency(stored.maximumCostMicros),
+    );
+    setNovelRouteCurrency(stored?.currency ?? "USD");
+    setNovelRoutePrivacy(stored?.privacyPolicy ?? "cloud_allowed");
+    setNovelRouteFailure(stored?.failurePolicy ?? "use_fallback");
+    setNovelRouteRemoteContentConsent(stored?.parameterPolicy.remoteContentConsent === true);
+    setRouteError(null);
+  }
+
+  async function saveNovelTaskRoute(): Promise<void> {
+    const existing = novelTaskRoutes.find(({ task }) => task === novelRouteTask);
+    const fallbackCatalogEntryId =
+      novelRouteFallbackCatalogId.trim().length === 0 ? null : novelRouteFallbackCatalogId;
+    setRouteSaving(true);
+    setRouteError(null);
+    try {
+      if (novelRoutePrimaryCatalogId === fallbackCatalogEntryId) {
+        throw new Error("主模型和备用模型不能相同。");
+      }
+      if (novelRoutePrivacy === "local_only") {
+        for (const catalogEntryId of [
+          novelRoutePrimaryCatalogId,
+          ...(fallbackCatalogEntryId === null ? [] : [fallbackCatalogEntryId]),
+        ]) {
+          const privacy = await runtime.modelHub.findCostPrivacyProfile(catalogEntryId);
+          if (privacy?.dataDestination !== "local") {
+            throw new Error("本地隐私任务只能选择已明确标记为本机的模型。");
+          }
+        }
+      }
+      const customPreset = (await runtime.modelHub.listPresets()).find(
+        ({ id }) => id === "custom-user",
+      );
+      const preset = await runtime.modelHub.savePreset({
+        id: "custom-user",
+        scheme: "custom",
+        displayName: "完全自定义",
+        status: "active",
+        privacyPolicy: novelRoutePrivacy,
+        costPriority: "balanced",
+        routeGenerationVersion: "user-route-v1",
+        expectedRevision: customPreset?.revision ?? null,
+      });
+      const maximumCostMicros =
+        novelRouteMaximumCost.trim().length === 0
+          ? null
+          : String(parseCurrencyAsMicros(novelRouteMaximumCost));
+      const saved = await runtime.modelHub.saveTaskRoute({
+        task: novelRouteTask,
+        primaryCatalogEntryId: novelRoutePrimaryCatalogId,
+        fallbackCatalogEntryId,
+        presetId: preset.id,
+        parameterPolicy: rerankParameterPolicy(
+          removeLegacyTemperature(existing?.parameterPolicy ?? {}),
+          novelRouteTask,
+          novelRouteRemoteContentConsent,
+        ),
+        maximumCostMicros,
+        currency: maximumCostMicros === null ? null : novelRouteCurrency.trim().toUpperCase(),
+        privacyPolicy: novelRoutePrivacy,
+        failurePolicy:
+          fallbackCatalogEntryId === null && novelRouteFailure === "use_fallback"
+            ? "ask_user"
+            : novelRouteFailure,
+        routeOrigin: "user",
+        enabled: true,
+        expectedRevision: existing?.revision ?? null,
+      });
+      const nextRoutes = await Promise.all(
+        NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task)),
+      );
+      const persisted = nextRoutes.filter((route): route is NovelTaskRoute => route !== null);
+      setNovelTaskRoutes(persisted);
+      setNovelTaskRouteCount(persisted.length);
+      setModelHubScheme("custom");
+      setNovelRoutePrimaryCatalogId(saved.primaryCatalogEntryId);
+      setNovelRouteFallbackCatalogId(saved.fallbackCatalogEntryId ?? "");
+      setNovelRouteFailure(saved.failurePolicy);
+      setSchemeMessage(`已保存“${novelAiTaskLabel(saved.task)}”的自定义分工。`);
+    } catch (cause: unknown) {
+      setRouteError(cause);
+    } finally {
+      setRouteSaving(false);
+    }
+  }
+
   function buildPricingProfile(): ModelPricingProfile | null {
     if (selectedModel.trim().length === 0) {
+      return null;
+    }
+    const pricingFields = [
+      contextWindowTokens,
+      inputPricePerMillion,
+      outputPricePerMillion,
+      cachedInputPricePerMillion,
+      pricingVersion,
+      priceUpdatedDate,
+    ];
+    if (pricingFields.every((value) => value.trim().length === 0)) {
       return null;
     }
     const parsedContext = Number(contextWindowTokens);
@@ -336,41 +915,278 @@ export function SettingsPage() {
     };
   }
 
+  async function refreshRoutingCatalogState(
+    connections: readonly ModelProviderConnection[],
+  ): Promise<readonly ModelCatalogEntry[]> {
+    const entries = (
+      await Promise.all(connections.map((candidate) => runtime.modelHub.listCatalog(candidate.id)))
+    ).flat();
+    setRoutingCatalog(entries);
+    setLocalCatalogEntryIds(await loadEvidenceConfirmedLocalCatalogIds(runtime.modelHub, entries));
+    return entries;
+  }
+
+  async function ensureCatalogEntryForModel(
+    savedConnection: ModelProviderConnection,
+    modelIdValue: string,
+  ): Promise<Readonly<{ catalog: readonly ModelCatalogEntry[]; entry: ModelCatalogEntry }>> {
+    const modelId = modelIdValue.normalize("NFKC").trim();
+    if (modelId.length === 0) {
+      throw new Error("请先填写模型标识；豆包也可以填写 Endpoint ID。");
+    }
+    let catalog = await runtime.modelHub.listCatalog(savedConnection.id);
+    let entry = catalog.find(({ providerModelId }) => providerModelId === modelId);
+    if (entry === undefined) {
+      catalog = await runtime.modelHub.syncCatalog({
+        syncId: createModelHubId("manual-sync"),
+        connectionId: savedConnection.id,
+        source: "manual",
+        status: "succeeded",
+        models: [
+          {
+            id: createModelHubId("catalog"),
+            providerModelId: modelId,
+            displayName: modelId,
+          },
+        ],
+      });
+      entry = catalog.find(({ providerModelId }) => providerModelId === modelId);
+    }
+    if (entry === undefined) {
+      throw new Error("模型目录没有保存所选模型，请重新保存后再试。");
+    }
+    return Object.freeze({ catalog, entry });
+  }
+
+  async function performLightweightTextProbe(
+    savedConnection: ModelProviderConnection,
+    catalogEntry: ModelCatalogEntry,
+  ): Promise<Readonly<{ streamed: boolean; latencyMs: number }>> {
+    const scanId = createModelHubId("probe-scan");
+    const evidenceVersion = createModelHubId("lightweight-probe-v1");
+    const startedAt = Date.now();
+    const probeObservation = { streamed: false };
+    try {
+      const result = await runtime.modelGateway.generate({
+        generationId: createModelHubId("capability-probe"),
+        config: modelHubNativeEndpointConfig(savedConnection),
+        model: catalogEntry.providerModelId,
+        messages: [{ role: "user", content: "只回复：OK" }],
+        maxOutputTokens: 8,
+        onDelta: (text) => {
+          if (text.trim().length > 0) {
+            probeObservation.streamed = true;
+          }
+        },
+      });
+      if (result.text.trim().length === 0) {
+        throw new Error("模型已连接，但没有返回可用文字。请检查模型或接入点是否支持文本生成。");
+      }
+      await runtime.modelHub.recordCapabilityScan({
+        scanId,
+        catalogEntryId: catalogEntry.id,
+        scanKind: "lightweight_probe",
+        status: "succeeded",
+        evidenceVersion,
+        evidence: [
+          {
+            id: createModelHubId("capability"),
+            capability: "text_generation",
+            verdict: "supported",
+            evidenceSource: "lightweight_probe",
+            evidenceSummary: "固定短文本探测成功；未保存探测输入或模型输出。",
+          },
+          ...(probeObservation.streamed
+            ? [
+                {
+                  id: createModelHubId("capability"),
+                  capability: "streaming" as const,
+                  verdict: "supported" as const,
+                  evidenceSource: "lightweight_probe" as const,
+                  evidenceSummary: "固定短文本探测观察到流式增量；未保存增量内容。",
+                },
+              ]
+            : []),
+        ],
+      });
+      return Object.freeze({
+        streamed: probeObservation.streamed,
+        latencyMs: Math.max(0, Date.now() - startedAt),
+      });
+    } catch (cause: unknown) {
+      const normalized = normalizeUiError(cause);
+      await runtime.modelHub
+        .recordCapabilityScan({
+          scanId,
+          catalogEntryId: catalogEntry.id,
+          scanKind: "lightweight_probe",
+          status: "failed",
+          evidenceVersion,
+          errorCode: normalized.code,
+          errorSummary: normalized.description,
+        })
+        .catch(() => undefined);
+      throw cause;
+    }
+  }
+
+  async function probeSelectedModelCapability(): Promise<void> {
+    if (!runtime.modelGateway.available || selectedModel.trim().length === 0) {
+      return;
+    }
+    setProbingCapability(true);
+    setCapabilityProbeError(null);
+    setCapabilityProbeMessage(null);
+    try {
+      const savedConnection = await persistModelHubConnection();
+      const { catalog, entry } = await ensureCatalogEntryForModel(savedConnection, selectedModel);
+      const result = await performLightweightTextProbe(savedConnection, entry);
+      setHubCatalog(catalog);
+      setModels(catalog.map(catalogEntryToDescriptor));
+      const nextConnections = await runtime.modelHub.listConnections();
+      setHubConnections(nextConnections);
+      await refreshRoutingCatalogState(nextConnections);
+      setCapabilityProbeMessage(
+        result.streamed
+          ? `已验证“${entry.displayName}”可生成文字并支持流式返回。`
+          : `已验证“${entry.displayName}”可生成文字；本次没有观察到流式增量。`,
+      );
+    } catch (cause: unknown) {
+      setCapabilityProbeError(cause);
+    } finally {
+      setProbingCapability(false);
+    }
+  }
+
   async function checkModelConnection(): Promise<void> {
     if (!runtime.modelGateway.available) {
       return;
     }
     setCheckingModel(true);
+    setConnectionChecked(false);
     setConnection(null);
     setModelCapacity(null);
+    setCapabilityProbeError(null);
+    setCapabilityProbeMessage(null);
+    let savedConnection: ModelProviderConnection | null = null;
     try {
-      const config = {
-        providerId,
-        provider,
-        baseUrl,
-        authentication,
-      } as const;
+      savedConnection = await persistModelHubConnection();
+      const config = modelHubNativeEndpointConfig(savedConnection);
       const capacityInspection =
-        provider === "ollama" && runtime.modelGateway.inspectCapacity !== undefined
+        providerPreset === "ollama" && runtime.modelGateway.inspectCapacity !== undefined
           ? runtime.modelGateway.inspectCapacity().catch(() => null)
           : Promise.resolve(null);
+      if (!getModelProviderPreset(providerPreset).modelDiscovery.automatic) {
+        const modelId = (endpointId.trim() || selectedModel.trim()).normalize("NFKC");
+        const { catalog, entry } = await ensureCatalogEntryForModel(savedConnection, modelId);
+        const result = await performLightweightTextProbe(savedConnection, entry);
+        const current = await runtime.modelHub.findConnection(savedConnection.id);
+        if (current === null) {
+          throw new Error("供应商连接在验证过程中被移除，请重新保存后再试。");
+        }
+        const testedConnection = await runtime.modelHub.recordConnectionTest({
+          connectionId: current.id,
+          status: "ready",
+          expectedRevision: current.revision,
+        });
+        const descriptors = catalog.map(catalogEntryToDescriptor);
+        setConnection({
+          provider: gatewayProviderKind(providerPreset),
+          endpointOrigin: new URL(savedConnection.baseUrl).origin,
+          modelCount: descriptors.length,
+          latencyMs: result.latencyMs,
+        });
+        setModels(descriptors);
+        setHubCatalog(catalog);
+        setHubConnection(testedConnection);
+        setSelectedModel(entry.providerModelId);
+        const nextConnections = await runtime.modelHub.listConnections();
+        setHubConnections(nextConnections);
+        await refreshRoutingCatalogState(nextConnections);
+        setCapabilityProbeMessage(
+          result.streamed
+            ? `连接成功，并已验证“${entry.displayName}”可生成文字和流式返回。`
+            : `连接成功，并已验证“${entry.displayName}”可生成文字。`,
+        );
+        setCredentialError(null);
+        return;
+      }
       const [checked, listed, capacity] = await Promise.all([
         runtime.modelGateway.checkConnection(config),
         runtime.modelGateway.listModels(config),
         capacityInspection,
       ]);
+      const testedConnection = await runtime.modelHub.recordConnectionTest({
+        connectionId: savedConnection.id,
+        status: "ready",
+        expectedRevision: savedConnection.revision,
+      });
+      const syncId = createModelHubId("provider-sync");
+      const catalog = await runtime.modelHub.syncCatalog({
+        syncId,
+        connectionId: savedConnection.id,
+        source: "provider_api",
+        status: "succeeded",
+        models: listed.models.map((model) => ({
+          id: createModelHubId("catalog"),
+          providerModelId: model.id,
+          displayName: model.displayName,
+        })),
+      });
+      for (const catalogEntry of catalog.filter(
+        ({ lastSyncId, availability }) => lastSyncId === syncId && availability === "available",
+      )) {
+        await runtime.modelHub.recordCapabilityScan({
+          scanId: createModelHubId("metadata-scan"),
+          catalogEntryId: catalogEntry.id,
+          scanKind: "provider_metadata",
+          status: "succeeded",
+          evidenceVersion: syncId,
+          evidence: MODEL_HUB_CAPABILITIES.map((capability) => ({
+            id: createModelHubId("capability"),
+            capability,
+            verdict: "unknown",
+            evidenceSource: "provider_metadata",
+            evidenceSummary: "供应商目录没有返回可验证的模型能力结论。",
+          })),
+        });
+      }
       setConnection(checked);
       setModels(listed.models);
+      setHubCatalog(catalog);
+      setHubConnection(
+        (await runtime.modelHub.findConnection(savedConnection.id)) ?? testedConnection,
+      );
+      const nextConnections = await runtime.modelHub.listConnections();
+      setHubConnections(nextConnections);
+      await refreshRoutingCatalogState(nextConnections);
       setModelCapacity(capacity);
       if (selectedModel.length === 0 && listed.models[0] !== undefined) {
         setSelectedModel(listed.models[0].id);
       }
       setCredentialError(null);
     } catch (reason: unknown) {
+      if (savedConnection !== null) {
+        const current = await runtime.modelHub.findConnection(savedConnection.id).catch(() => null);
+        if (current !== null) {
+          const normalized = normalizeUiError(reason);
+          await runtime.modelHub
+            .recordConnectionTest({
+              connectionId: current.id,
+              status: "error",
+              errorCode: normalized.code,
+              errorSummary: normalized.description,
+              expectedRevision: current.revision,
+            })
+            .catch(() => undefined);
+          setHubConnections(await runtime.modelHub.listConnections().catch(() => hubConnections));
+        }
+      }
       setCredentialError(reason);
       setModels([]);
       setModelCapacity(null);
     } finally {
+      setConnectionChecked(true);
       setCheckingModel(false);
     }
   }
@@ -381,7 +1197,29 @@ export function SettingsPage() {
     }
     setSaving(true);
     try {
+      validateExpertConnectionDraft({
+        provider: providerPreset,
+        baseUrl,
+        region,
+        workspaceId,
+        authentication,
+        credentialHeaderName,
+        modelDiscoveryPath,
+        textGenerationPath,
+        embeddingPath,
+        requestTimeoutMs,
+        retryLimit,
+      });
+      await assertCredentialMutationTarget("save");
       const nextSummary = await runtime.credentials.save(providerId, secret);
+      const nextAuthentication =
+        providerPreset === "custom_openai_compatible" && authentication === "none"
+          ? "bearer_keyring"
+          : authentication;
+      setAuthentication(nextAuthentication);
+      const savedConnection = await persistModelHubConnection(true, nextAuthentication);
+      setHubConnection(savedConnection);
+      setHubConnections(await runtime.modelHub.listConnections());
       setSummary(nextSummary);
       setSecret("");
       setCredentialError(null);
@@ -392,13 +1230,70 @@ export function SettingsPage() {
     }
   }
 
+  async function applyModelHubScheme(): Promise<void> {
+    setSchemeMessage(null);
+    if (modelHubScheme === "custom") {
+      setExpertMode(true);
+      setSchemeMessage("已打开专家设置，可逐项调整模型能力和兼容路由。");
+      return;
+    }
+    setSchemeSaving(true);
+    setRouteError(null);
+    try {
+      const applied = await applyAutomaticModelHubRouting({
+        modelHub: runtime.modelHub,
+        legacyRouting: runtime.modelRouting,
+        legacyReadyModels: profiles.flatMap(
+          ({ providerId: connectionId, selectedModel: modelId }) =>
+            modelId === null ? [] : [{ connectionId, modelId }],
+        ),
+        scheme: modelHubScheme,
+        now: new Date().toISOString(),
+      });
+      const nextRoleRoutes = await runtime.modelRouting.listRoutes();
+      setRoleRoutes(nextRoleRoutes);
+      setNovelTaskRouteCount(applied.savedNovelTaskCount);
+      const missing = applied.plan.unroutableTasks.length;
+      setSchemeMessage(
+        modelHubScheme === "local_privacy"
+          ? missing === 0
+            ? `本地隐私方案已覆盖 ${String(applied.savedNovelTaskCount)} 类任务；主模型和备用模型都只会使用本机连接。`
+            : `本地隐私方案已安全应用；${String(applied.savedNovelTaskCount)} 类任务可用，${String(missing)} 类缺少本机能力证据，且不会回退到云端。`
+          : `已按能力、评测、成本和隐私证据配置 ${String(applied.savedNovelTaskCount)} 类任务；${String(missing)} 类任务等待能力证据。`,
+      );
+    } catch (cause: unknown) {
+      setRouteError(cause);
+    } finally {
+      setSchemeSaving(false);
+    }
+  }
+
   async function deleteSecret(): Promise<void> {
     if (runtime.mode !== "tauri") {
       return;
     }
     setSaving(true);
     try {
-      setSummary(await runtime.credentials.delete(providerId));
+      const targetConnection = await assertCredentialMutationTarget("delete");
+      if (targetConnection === null) {
+        throw new ModelHubStoreError(
+          "MODEL_HUB_CREDENTIAL_TARGET_MISMATCH",
+          "只能删除当前已加载配置的密钥。请先从已保存配置中重新选择它。",
+        );
+      }
+      const nextSummary = await runtime.credentials.delete(targetConnection.id);
+      const nextAuthentication =
+        providerPreset === "custom_openai_compatible" && authentication === "custom_header_keyring"
+          ? "none"
+          : authentication;
+      if (nextAuthentication !== authentication) {
+        setAuthentication(nextAuthentication);
+        setCredentialHeaderName("");
+      }
+      const savedConnection = await persistModelHubConnection(false, nextAuthentication);
+      setHubConnection(savedConnection);
+      setHubConnections(await runtime.modelHub.listConnections());
+      setSummary(nextSummary);
       setSecret("");
       setCredentialError(null);
     } catch (reason: unknown) {
@@ -505,6 +1400,8 @@ export function SettingsPage() {
 
   const normalizedCredentialError =
     credentialError === null ? null : normalizeUiError(credentialError);
+  const normalizedCapabilityProbeError =
+    capabilityProbeError === null ? null : normalizeUiError(capabilityProbeError);
   const normalizedRouteError = routeError === null ? null : normalizeUiError(routeError);
   const normalizedMaintenanceError =
     maintenanceError === null ? null : normalizeUiError(maintenanceError);
@@ -512,6 +1409,11 @@ export function SettingsPage() {
     diagnosticError === null ? null : normalizeUiError(diagnosticError);
   const selectedModelDescriptor = models.find(({ id }) => id === selectedModel) ?? null;
   const localCapacityAssessment = assessLocalModelCapacity(selectedModelDescriptor, modelCapacity);
+  const selectableRoutingCatalog = routingCatalog.filter(
+    ({ id, availability }) =>
+      availability === "available" &&
+      (novelRoutePrivacy !== "local_only" || localCatalogEntryIds.includes(id)),
+  );
 
   return (
     <div className="desktop-page settings-page">
@@ -524,6 +1426,36 @@ export function SettingsPage() {
         <Badge tone="success">本地优先</Badge>
       </header>
 
+      <nav className="settings-actions settings-section-nav" aria-label="设置分区">
+        <Link className="button-link button-link--secondary" to="/settings#appearance">
+          外观
+        </Link>
+        <Link className="button-link button-link--secondary" to="/settings#data-privacy">
+          数据与隐私
+        </Link>
+        <Link className="button-link button-link--secondary" to="/settings#model-center">
+          AI 与模型
+        </Link>
+        <Link className="button-link button-link--secondary" to="/settings#model-routing">
+          AI 分工
+        </Link>
+        <Link className="button-link button-link--secondary" to="/settings#sync-security">
+          同步安全
+        </Link>
+        <Link className="button-link button-link--secondary" to="/settings#local-maintenance">
+          本地维护
+        </Link>
+        <Link className="button-link button-link--secondary" to="/settings#secure-updates">
+          安全更新
+        </Link>
+        <Link className="button-link button-link--secondary" to="/settings#diagnostics">
+          诊断
+        </Link>
+        <Link className="button-link button-link--secondary" to="/settings#data-transfer">
+          导入与导出
+        </Link>
+      </nav>
+
       {!online && (
         <InlineAlert
           tone="warning"
@@ -533,9 +1465,48 @@ export function SettingsPage() {
       )}
 
       <div className="settings-grid">
-        <Card>
+        <Card id="appearance">
           <CardHeader>
-            <CardTitle>数据与隐私</CardTitle>
+            <CardTitle headingLevel={2}>外观</CardTitle>
+            <CardDescription>选择舒适的阅读与写作界面，不会改变作品内容。</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <FormField label="外观模式" hint="跟随系统时，电脑的浅色或深色外观变化会立即同步。">
+              {(fieldProps) => (
+                <Select
+                  {...fieldProps}
+                  value={appearance}
+                  options={[
+                    { value: "system", label: "跟随系统" },
+                    { value: "light", label: "浅色" },
+                    { value: "dark", label: "深色" },
+                  ]}
+                  onChange={(event) => {
+                    const selected = event.currentTarget.value;
+                    if (selected === "system" || selected === "light" || selected === "dark") {
+                      setAppearance(selected);
+                    }
+                  }}
+                />
+              )}
+            </FormField>
+            <InlineAlert
+              tone="info"
+              title="当前显示"
+              description={
+                appearance === "system"
+                  ? `正在跟随系统，当前为${resolvedSurface === "dark" ? "深色" : "浅色"}。`
+                  : appearance === "dark"
+                    ? "当前固定为深色。"
+                    : "当前固定为浅色。"
+              }
+            />
+          </CardContent>
+        </Card>
+
+        <Card id="data-privacy">
+          <CardHeader>
+            <CardTitle headingLevel={2}>数据与隐私</CardTitle>
             <CardDescription>核心写作能力不要求登录，也不依赖云端账户。</CardDescription>
           </CardHeader>
           <CardContent>
@@ -543,7 +1514,7 @@ export function SettingsPage() {
               <li>项目、章节、恢复草稿与版本默认存储在当前设备。</li>
               <li>候选内容在明确接受前不会写入正式正文。</li>
               <li>浏览器开发模式仅用于本地调试，不代表桌面生产数据层。</li>
-              <li>API Key 不写入项目数据库、localStorage、日志或通知。</li>
+              <li>模型密钥不写入项目数据库、浏览器调试存储、日志或通知。</li>
             </ul>
           </CardContent>
         </Card>
@@ -552,16 +1523,16 @@ export function SettingsPage() {
           <CardHeader>
             <div className="card-heading-row">
               <div>
-                <CardTitle>模型中心</CardTitle>
+                <CardTitle headingLevel={2}>InkShadow Model Hub</CardTitle>
                 <CardDescription>
-                  配置 OpenAI 兼容接口或 Ollama；远程端点强制 HTTPS，本机回环地址可使用 HTTP。
+                  连接供应商、测试连接并发现模型。普通模式只显示开始写作真正需要的选项。
                 </CardDescription>
               </div>
               <SaveStatus
-                state={saving ? "saving" : profile === null ? "clean" : "saved_local"}
+                state={saving ? "saving" : hubConnection === null ? "clean" : "saved_local"}
                 labels={{
                   clean: "配置未保存",
-                  saved_local: `配置修订 ${String(profile?.revision ?? 0)}`,
+                  saved_local: `配置修订 ${String(hubConnection?.revision ?? 0)}`,
                 }}
               />
             </div>
@@ -584,227 +1555,586 @@ export function SettingsPage() {
                 />
               )}
 
-              {profiles.length > 0 && (
-                <FormField label="已保存配置">
-                  {(fieldProps) => (
-                    <Select
-                      {...fieldProps}
-                      value={profile?.providerId ?? ""}
-                      placeholder="选择已保存配置"
-                      options={profiles.map((candidate) => ({
-                        value: candidate.providerId,
-                        label: `${candidate.providerId} · ${providerLabel(candidate.provider)}`,
-                      }))}
-                      onChange={(event) => void selectStoredProfile(event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-              )}
-
-              <div className="model-center-grid">
-                <FormField label="协议" required>
-                  {(fieldProps) => (
-                    <Select
-                      {...fieldProps}
-                      value={provider}
-                      options={[
-                        {
-                          value: "open_ai_compatible",
-                          label: "OpenAI 兼容",
-                        },
-                        { value: "ollama", label: "Ollama" },
-                      ]}
-                      disabled={loading || saving || checkingModel}
-                      onChange={(event) =>
-                        applyProviderPreset(event.currentTarget.value as NativeProviderKind)
-                      }
-                    />
-                  )}
-                </FormField>
-                <FormField
-                  label="配置标识"
-                  hint="只允许小写字母、数字、点、下划线和连字符。"
-                  required
+              <div className="settings-actions">
+                <Button
+                  variant="secondary"
+                  aria-expanded={expertMode}
+                  aria-controls="model-hub-expert-settings"
+                  onClick={() => setExpertMode((current) => !current)}
                 >
-                  {(fieldProps) => (
-                    <Input
-                      {...fieldProps}
-                      value={providerId}
-                      maxLength={128}
-                      disabled={loading || saving || checkingModel}
-                      onChange={(event) => {
-                        setProviderId(event.currentTarget.value);
-                        setProfile(null);
-                        setConnection(null);
-                      }}
-                    />
-                  )}
-                </FormField>
-                <FormField label="基础地址" required>
-                  {(fieldProps) => (
-                    <Input
-                      {...fieldProps}
-                      type="url"
-                      value={baseUrl}
-                      maxLength={2048}
-                      disabled={loading || saving || checkingModel}
-                      onChange={(event) => {
-                        setBaseUrl(event.currentTarget.value);
-                        setConnection(null);
-                      }}
-                    />
-                  )}
-                </FormField>
-                <FormField label="认证方式" required>
-                  {(fieldProps) => (
-                    <Select
-                      {...fieldProps}
-                      value={authentication}
-                      options={[
-                        { value: "none", label: "无认证" },
-                        {
-                          value: "bearer_keyring",
-                          label: "Bearer 密钥（系统凭据库）",
-                        },
-                      ]}
-                      disabled={loading || saving || checkingModel}
-                      onChange={(event) =>
-                        setAuthentication(event.currentTarget.value as NativeAuthenticationMode)
-                      }
-                    />
-                  )}
-                </FormField>
+                  {expertMode ? "收起专家设置" : "专家设置"}
+                </Button>
               </div>
 
-              {models.length > 0 ? (
-                <FormField
-                  label="模型"
-                  hint={`本次从端点读取 ${String(models.length)} 个模型。`}
-                  required
-                >
-                  {(fieldProps) => (
-                    <Select
-                      {...fieldProps}
-                      value={selectedModel}
-                      placeholder="选择模型"
-                      options={models.map((model) => ({
-                        value: model.id,
-                        label:
-                          model.sizeBytes === null || model.sizeBytes === undefined
-                            ? model.displayName
-                            : `${model.displayName} · ${formatBytes(model.sizeBytes)}`,
-                      }))}
-                      onChange={(event) => setSelectedModel(event.currentTarget.value)}
+              <section aria-labelledby="provider-choice-title">
+                <h3 id="provider-choice-title">1. 连接供应商</h3>
+                <p>选择供应商后只填写必要信息；模型列表和能力证据会在连接测试后更新。</p>
+                <div className="model-center-grid">
+                  <FormField label="供应商" required>
+                    {(fieldProps) => (
+                      <Select
+                        {...fieldProps}
+                        value={providerPreset}
+                        options={CONNECTABLE_PROVIDER_KINDS.map((kind) => {
+                          const preset = getModelProviderPreset(kind);
+                          return { value: kind, label: preset.displayName };
+                        })}
+                        disabled={loading || saving || checkingModel}
+                        onChange={(event) =>
+                          applyProviderPreset(event.currentTarget.value as ConnectableProviderKind)
+                        }
+                      />
+                    )}
+                  </FormField>
+                  {hubConnections.length > 0 && (
+                    <FormField label="已连接的供应商">
+                      {(fieldProps) => (
+                        <Select
+                          {...fieldProps}
+                          value={hubConnection?.id ?? ""}
+                          placeholder="选择已有连接"
+                          options={hubConnections.map((candidate) => ({
+                            value: candidate.id,
+                            label: `${getModelProviderPreset(candidate.providerKind).displayName} · ${connectionStatusLabel(candidate.connectionStatus)}`,
+                          }))}
+                          onChange={(event) => void selectStoredProfile(event.currentTarget.value)}
+                        />
+                      )}
+                    </FormField>
+                  )}
+                  {providerPreset === "custom_openai_compatible" && (
+                    <FormField
+                      label="Base URL"
+                      hint="自定义兼容接口必须提供地址；远程地址必须使用 HTTPS。"
+                      required
+                    >
+                      {(fieldProps) => (
+                        <Input
+                          {...fieldProps}
+                          type="url"
+                          value={baseUrl}
+                          maxLength={2048}
+                          disabled={loading || saving || checkingModel}
+                          onChange={(event) => {
+                            setBaseUrl(event.currentTarget.value);
+                            setConnection(null);
+                            setConnectionChecked(false);
+                          }}
+                        />
+                      )}
+                    </FormField>
+                  )}
+                  {providerPreset === "alibaba_qwen" && (
+                    <>
+                      <FormField label="地域" required>
+                        {(fieldProps) => (
+                          <Select
+                            {...fieldProps}
+                            value={region}
+                            options={qwenRegionOptions()}
+                            disabled={loading || saving || checkingModel}
+                            onChange={(event) => {
+                              const nextRegion = event.currentTarget.value;
+                              setRegion(nextRegion);
+                              setBaseUrl(resolveQwenBaseUrl(nextRegion, workspaceId));
+                              setConnection(null);
+                              setConnectionChecked(false);
+                            }}
+                          />
+                        )}
+                      </FormField>
+                      {qwenRegionShowsWorkspace(region) && (
+                        <FormField
+                          label="Workspace ID"
+                          hint={
+                            qwenRegionNeedsWorkspace(region)
+                              ? "日本和德国地域必须填写。"
+                              : region === "china_beijing"
+                                ? "北京地域可留空使用普通文本接口；如需使用已验证的官方文本重排协议，请填写 Workspace ID。"
+                                : "新加坡可留空使用共享端点；填写后使用专属 Workspace 端点。"
+                          }
+                          required={qwenRegionNeedsWorkspace(region)}
+                        >
+                          {(fieldProps) => (
+                            <Input
+                              {...fieldProps}
+                              value={workspaceId}
+                              maxLength={256}
+                              disabled={loading || saving || checkingModel}
+                              onChange={(event) => {
+                                const nextWorkspaceId = event.currentTarget.value;
+                                setWorkspaceId(nextWorkspaceId);
+                                setBaseUrl(resolveQwenBaseUrl(region, nextWorkspaceId));
+                                setConnection(null);
+                                setConnectionChecked(false);
+                              }}
+                            />
+                          )}
+                        </FormField>
+                      )}
+                    </>
+                  )}
+                  {providerPreset === "volcengine_doubao" && (
+                    <FormField label="Endpoint ID" hint="仅专属推理接入点需要填写。">
+                      {(fieldProps) => (
+                        <Input
+                          {...fieldProps}
+                          value={endpointId}
+                          maxLength={512}
+                          disabled={loading || saving || checkingModel}
+                          onChange={(event) => setEndpointId(event.currentTarget.value)}
+                        />
+                      )}
+                    </FormField>
+                  )}
+                </div>
+              </section>
+
+              {expertMode && (
+                <section id="model-hub-expert-settings" aria-labelledby="model-connection-title">
+                  <h3 id="model-connection-title">专家连接设置</h3>
+                  {hubConnections.length > 0 && (
+                    <FormField label="已保存配置">
+                      {(fieldProps) => (
+                        <Select
+                          {...fieldProps}
+                          value={hubConnection?.id ?? ""}
+                          placeholder="选择已保存配置"
+                          options={hubConnections.map((candidate) => ({
+                            value: candidate.id,
+                            label: `${candidate.id} · ${getModelProviderPreset(candidate.providerKind).displayName}`,
+                          }))}
+                          onChange={(event) => void selectStoredProfile(event.currentTarget.value)}
+                        />
+                      )}
+                    </FormField>
+                  )}
+
+                  <div className="model-center-grid">
+                    <FormField label="协议" required>
+                      {(fieldProps) => (
+                        <Select
+                          {...fieldProps}
+                          value={gatewayProviderKind(providerPreset)}
+                          options={[
+                            {
+                              value: "open_ai_compatible",
+                              label: "OpenAI 兼容",
+                            },
+                            { value: "ollama", label: "Ollama" },
+                            { value: "anthropic", label: "Anthropic" },
+                            { value: "gemini", label: "Gemini" },
+                          ]}
+                          disabled
+                        />
+                      )}
+                    </FormField>
+                    <FormField
+                      label="配置标识"
+                      hint="只允许小写字母、数字、点、下划线和连字符。"
+                      required
+                    >
+                      {(fieldProps) => (
+                        <Input
+                          {...fieldProps}
+                          value={providerId}
+                          maxLength={128}
+                          disabled={loading || saving || checkingModel}
+                          onChange={(event) => {
+                            const nextProviderId = event.currentTarget.value;
+                            setProviderId(nextProviderId);
+                            if (nextProviderId !== hubConnection?.id) {
+                              setSummary({ configured: false, lastFour: null });
+                            }
+                            setProfile(null);
+                            setConnection(null);
+                          }}
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="基础地址" required>
+                      {(fieldProps) => (
+                        <Input
+                          {...fieldProps}
+                          type="url"
+                          value={baseUrl}
+                          maxLength={2048}
+                          disabled={loading || saving || checkingModel}
+                          onChange={(event) => {
+                            setBaseUrl(event.currentTarget.value);
+                            setConnection(null);
+                          }}
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="认证方式" required>
+                      {(fieldProps) => (
+                        <Select
+                          {...fieldProps}
+                          value={authentication}
+                          options={authenticationOptions(providerPreset)}
+                          disabled={loading || saving || checkingModel}
+                          onChange={(event) => {
+                            const nextAuthentication = event.currentTarget
+                              .value as NativeGatewayAuthenticationMode;
+                            setAuthentication(nextAuthentication);
+                            if (nextAuthentication !== "custom_header_keyring") {
+                              setCredentialHeaderName("");
+                            }
+                            setConnection(null);
+                            setConnectionChecked(false);
+                          }}
+                        />
+                      )}
+                    </FormField>
+                    {providerPreset === "custom_openai_compatible" && (
+                      <>
+                        <FormField
+                          label="模型目录路径"
+                          hint="留空使用 /models；必须是无查询参数的绝对路径。"
+                        >
+                          {(fieldProps) => (
+                            <Input
+                              {...fieldProps}
+                              value={modelDiscoveryPath}
+                              placeholder="/models"
+                              maxLength={1024}
+                              disabled={loading || saving || checkingModel}
+                              onChange={(event) => {
+                                setModelDiscoveryPath(event.currentTarget.value);
+                                setConnection(null);
+                              }}
+                            />
+                          )}
+                        </FormField>
+                        <FormField label="文本生成路径" hint="留空使用 /chat/completions。">
+                          {(fieldProps) => (
+                            <Input
+                              {...fieldProps}
+                              value={textGenerationPath}
+                              placeholder="/chat/completions"
+                              maxLength={1024}
+                              disabled={loading || saving || checkingModel}
+                              onChange={(event) => {
+                                setTextGenerationPath(event.currentTarget.value);
+                                setConnection(null);
+                              }}
+                            />
+                          )}
+                        </FormField>
+                        <FormField label="Embedding 路径" hint="留空使用 /embeddings。">
+                          {(fieldProps) => (
+                            <Input
+                              {...fieldProps}
+                              value={embeddingPath}
+                              placeholder="/embeddings"
+                              maxLength={1024}
+                              disabled={loading || saving || checkingModel}
+                              onChange={(event) => {
+                                setEmbeddingPath(event.currentTarget.value);
+                                setConnection(null);
+                              }}
+                            />
+                          )}
+                        </FormField>
+                        {authentication === "custom_header_keyring" && (
+                          <FormField
+                            label="认证 Header 名称"
+                            hint="这里只保存名称；值使用下方同一份系统凭据。"
+                            required
+                          >
+                            {(fieldProps) => (
+                              <Input
+                                {...fieldProps}
+                                value={credentialHeaderName}
+                                placeholder="x-api-key"
+                                maxLength={128}
+                                autoComplete="off"
+                                disabled={loading || saving || checkingModel}
+                                onChange={(event) => {
+                                  setCredentialHeaderName(event.currentTarget.value);
+                                  setConnection(null);
+                                }}
+                              />
+                            )}
+                          </FormField>
+                        )}
+                      </>
+                    )}
+                    <FormField
+                      label="请求超时（毫秒）"
+                      hint={`${String(MODEL_HUB_MIN_REQUEST_TIMEOUT_MS)}–${String(MODEL_HUB_MAX_REQUEST_TIMEOUT_MS)}；生成仅约束发出请求阶段，流式读取仍有独立空闲保护。`}
+                      required
+                    >
+                      {(fieldProps) => (
+                        <Input
+                          {...fieldProps}
+                          type="number"
+                          min={MODEL_HUB_MIN_REQUEST_TIMEOUT_MS}
+                          max={MODEL_HUB_MAX_REQUEST_TIMEOUT_MS}
+                          step={1000}
+                          value={requestTimeoutMs}
+                          disabled={loading || saving || checkingModel}
+                          onChange={(event) => {
+                            setRequestTimeoutMs(event.currentTarget.value);
+                            setConnection(null);
+                          }}
+                        />
+                      )}
+                    </FormField>
+                    <FormField
+                      label="安全重试次数"
+                      hint={`0–${String(MODEL_HUB_MAX_RETRY_LIMIT)}；只用于连接测试和模型目录 GET。`}
+                      required
+                    >
+                      {(fieldProps) => (
+                        <Input
+                          {...fieldProps}
+                          type="number"
+                          min={0}
+                          max={MODEL_HUB_MAX_RETRY_LIMIT}
+                          step={1}
+                          value={retryLimit}
+                          disabled={loading || saving || checkingModel}
+                          onChange={(event) => {
+                            setRetryLimit(event.currentTarget.value);
+                            setConnection(null);
+                          }}
+                        />
+                      )}
+                    </FormField>
+                  </div>
+                  <InlineAlert
+                    tone="info"
+                    title="重试不会重复计费请求"
+                    description="这里只会自动重试读取连接和模型目录。文本生成、Embedding、Rerank 与图片生成一旦发送都不会自动重试，避免重复生成或重复计费。温度、Top P、结构化输出与推理强度仍由任务预设管理。"
+                  />
+                  {providerPreset === "custom_openai_compatible" && (
+                    <InlineAlert
+                      tone="info"
+                      title="当前只支持一个认证 Header"
+                      description="Header 值只保存到系统凭据库。图片生成路径暂不支持自定义；图片任务仍使用经过验证的固定 /images/generations 路径。"
                     />
                   )}
-                </FormField>
-              ) : (
-                <FormField label="模型标识" hint="可手工填写；连接检查后会改为端点返回的模型列表。">
-                  {(fieldProps) => (
-                    <Input
-                      {...fieldProps}
-                      value={selectedModel}
-                      maxLength={512}
-                      onChange={(event) => setSelectedModel(event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
+                </section>
               )}
 
-              <InlineAlert
-                tone="info"
-                title="费用预估依据"
-                description="为已选模型填写上下文上限和每百万输入、输出 token 的价格。墨影会在生成前显示估算、价格版本与更新时间；Ollama 等本地免费模型可明确填写 0。"
-              />
-              <div className="model-center-grid">
-                <FormField label="上下文窗口（token）" required>
-                  {(fieldProps) => (
-                    <Input
-                      {...fieldProps}
-                      type="number"
-                      min={1}
-                      max={100_000_000}
-                      step={1}
-                      value={contextWindowTokens}
-                      disabled={selectedModel.trim().length === 0}
-                      onChange={(event) => setContextWindowTokens(event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-                <FormField label="计价币种" hint="三位大写代码，例如 USD。" required>
-                  {(fieldProps) => (
-                    <Input
-                      {...fieldProps}
-                      value={pricingCurrency}
-                      minLength={3}
-                      maxLength={3}
-                      disabled={selectedModel.trim().length === 0}
-                      onChange={(event) => setPricingCurrency(event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-                <FormField label="输入价 / 百万 token" required>
-                  {(fieldProps) => (
-                    <Input
-                      {...fieldProps}
-                      type="number"
-                      min={0}
-                      step="0.000001"
-                      value={inputPricePerMillion}
-                      disabled={selectedModel.trim().length === 0}
-                      onChange={(event) => setInputPricePerMillion(event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-                <FormField label="输出价 / 百万 token" required>
-                  {(fieldProps) => (
-                    <Input
-                      {...fieldProps}
-                      type="number"
-                      min={0}
-                      step="0.000001"
-                      value={outputPricePerMillion}
-                      disabled={selectedModel.trim().length === 0}
-                      onChange={(event) => setOutputPricePerMillion(event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-                <FormField label="缓存输入价 / 百万 token" hint="供应商未区分时可留空。">
-                  {(fieldProps) => (
-                    <Input
-                      {...fieldProps}
-                      type="number"
-                      min={0}
-                      step="0.000001"
-                      value={cachedInputPricePerMillion}
-                      disabled={selectedModel.trim().length === 0}
-                      onChange={(event) => setCachedInputPricePerMillion(event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-                <FormField label="价格版本" hint="例如 provider-2026-07。" required>
-                  {(fieldProps) => (
-                    <Input
-                      {...fieldProps}
-                      value={pricingVersion}
-                      maxLength={128}
-                      disabled={selectedModel.trim().length === 0}
-                      onChange={(event) => setPricingVersion(event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-                <FormField label="价格更新时间" required>
-                  {(fieldProps) => (
-                    <Input
-                      {...fieldProps}
-                      type="date"
-                      value={priceUpdatedDate}
-                      disabled={selectedModel.trim().length === 0}
-                      onChange={(event) => setPriceUpdatedDate(event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-              </div>
+              <section id="model-selection" aria-labelledby="model-selection-title">
+                <h3 id="model-selection-title">2. 测试连接并选择模型</h3>
+                {models.length > 0 ? (
+                  <FormField
+                    label="模型"
+                    hint={`本次从端点读取 ${String(models.length)} 个模型。`}
+                    required
+                  >
+                    {(fieldProps) => (
+                      <Select
+                        {...fieldProps}
+                        value={selectedModel}
+                        placeholder="选择模型"
+                        options={models.map((model) => ({
+                          value: model.id,
+                          label:
+                            model.sizeBytes === null || model.sizeBytes === undefined
+                              ? model.displayName
+                              : `${model.displayName} · ${formatBytes(model.sizeBytes)}`,
+                        }))}
+                        onChange={(event) => void selectCatalogModel(event.currentTarget.value)}
+                      />
+                    )}
+                  </FormField>
+                ) : expertMode ||
+                  !getModelProviderPreset(providerPreset).modelDiscovery.automatic ? (
+                  <FormField
+                    label={
+                      providerPreset === "volcengine_doubao" ? "模型或 Endpoint ID" : "模型标识"
+                    }
+                    hint="该供应商不保证提供模型列表，请填写控制台显示的真实模型或接入点标识。"
+                    required={!getModelProviderPreset(providerPreset).modelDiscovery.automatic}
+                  >
+                    {(fieldProps) => (
+                      <Input
+                        {...fieldProps}
+                        value={selectedModel}
+                        maxLength={512}
+                        onChange={(event) => setSelectedModel(event.currentTarget.value)}
+                      />
+                    )}
+                  </FormField>
+                ) : (
+                  <InlineAlert
+                    tone={connectionChecked ? "warning" : "info"}
+                    title={connectionChecked ? "没有发现可用模型" : "还没有读取模型"}
+                    description={
+                      connectionChecked
+                        ? "请检查密钥权限和供应商服务状态后重试；如供应商确实不提供模型目录，可在专家设置中手动填写模型标识。"
+                        : provider === "ollama"
+                          ? "请先启动本机 Ollama，然后点击“测试连接并发现模型”。"
+                          : summary.configured
+                            ? "密钥已保存。点击“测试连接并发现模型”读取当前账号真正可用的模型。"
+                            : "先把 API Key 保存到系统凭据库，再测试连接；密钥不会写入普通数据库。"
+                    }
+                  />
+                )}
+              </section>
+
+              {expertMode && (
+                <section id="model-pricing" aria-labelledby="model-pricing-title">
+                  <h3 id="model-pricing-title">计价信息</h3>
+                  <InlineAlert
+                    tone="info"
+                    title="费用预估依据"
+                    description="为已选模型填写上下文上限和每百万输入、输出 token 的价格。墨影会在生成前显示估算、价格版本与更新时间；Ollama 等本地免费模型可明确填写 0。"
+                  />
+                  <div className="model-center-grid">
+                    <FormField label="上下文窗口（token）" required>
+                      {(fieldProps) => (
+                        <Input
+                          {...fieldProps}
+                          type="number"
+                          min={1}
+                          max={100_000_000}
+                          step={1}
+                          value={contextWindowTokens}
+                          disabled={selectedModel.trim().length === 0}
+                          onChange={(event) => setContextWindowTokens(event.currentTarget.value)}
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="计价币种" hint="三位大写代码，例如 USD。" required>
+                      {(fieldProps) => (
+                        <Input
+                          {...fieldProps}
+                          value={pricingCurrency}
+                          minLength={3}
+                          maxLength={3}
+                          disabled={selectedModel.trim().length === 0}
+                          onChange={(event) => setPricingCurrency(event.currentTarget.value)}
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="输入价 / 百万 token" required>
+                      {(fieldProps) => (
+                        <Input
+                          {...fieldProps}
+                          type="number"
+                          min={0}
+                          step="0.000001"
+                          value={inputPricePerMillion}
+                          disabled={selectedModel.trim().length === 0}
+                          onChange={(event) => setInputPricePerMillion(event.currentTarget.value)}
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="输出价 / 百万 token" required>
+                      {(fieldProps) => (
+                        <Input
+                          {...fieldProps}
+                          type="number"
+                          min={0}
+                          step="0.000001"
+                          value={outputPricePerMillion}
+                          disabled={selectedModel.trim().length === 0}
+                          onChange={(event) => setOutputPricePerMillion(event.currentTarget.value)}
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="缓存输入价 / 百万 token" hint="供应商未区分时可留空。">
+                      {(fieldProps) => (
+                        <Input
+                          {...fieldProps}
+                          type="number"
+                          min={0}
+                          step="0.000001"
+                          value={cachedInputPricePerMillion}
+                          disabled={selectedModel.trim().length === 0}
+                          onChange={(event) =>
+                            setCachedInputPricePerMillion(event.currentTarget.value)
+                          }
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="价格版本" hint="例如 provider-2026-07。" required>
+                      {(fieldProps) => (
+                        <Input
+                          {...fieldProps}
+                          value={pricingVersion}
+                          maxLength={128}
+                          disabled={selectedModel.trim().length === 0}
+                          onChange={(event) => setPricingVersion(event.currentTarget.value)}
+                        />
+                      )}
+                    </FormField>
+                    <FormField label="价格更新时间" required>
+                      {(fieldProps) => (
+                        <Input
+                          {...fieldProps}
+                          type="date"
+                          value={priceUpdatedDate}
+                          disabled={selectedModel.trim().length === 0}
+                          onChange={(event) => setPriceUpdatedDate(event.currentTarget.value)}
+                        />
+                      )}
+                    </FormField>
+                  </div>
+                </section>
+              )}
+
+              {expertMode && (
+                <section id="model-capabilities" aria-labelledby="model-capabilities-title">
+                  <h3 id="model-capabilities-title">模型能力确认</h3>
+                  <InlineAlert
+                    tone="info"
+                    title="只确认实际验证过的能力"
+                    description="模型目录无法证明的能力会保持“未知”。这里的勾选会作为用户确认的路由证据；取消勾选不会自动写成“不支持”。"
+                  />
+                  <div className="model-center-grid" role="group" aria-label="模型能力">
+                    {MODEL_HUB_CAPABILITIES.map((capability) => (
+                      <label key={capability} className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={confirmedCapabilities.includes(capability)}
+                          disabled={selectedModel.trim().length === 0}
+                          onChange={(event) => {
+                            setConfirmedCapabilities((current) =>
+                              event.currentTarget.checked
+                                ? Object.freeze([...new Set([...current, capability])])
+                                : Object.freeze(
+                                    current.filter((candidate) => candidate !== capability),
+                                  ),
+                            );
+                          }}
+                        />
+                        <span>{modelHubCapabilityLabel(capability)}</span>
+                      </label>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {selectedModel.trim().length > 0 && runtime.modelGateway.available && (
+                <InlineAlert
+                  tone="warning"
+                  title="能力验证会调用一次模型"
+                  description="点击“验证写作能力”会发送一条不含作品内容的固定短测试，最多请求 8 个输出 token，供应商可能收取极少费用。测试输入和输出不会写入能力记录。"
+                />
+              )}
+
+              {normalizedCapabilityProbeError !== null && (
+                <InlineAlert
+                  tone="error"
+                  title="写作能力验证失败"
+                  description={`${normalizedCapabilityProbeError.description}（${normalizedCapabilityProbeError.code}）连接和模型目录会保留，修正模型或接入点后可以重试。`}
+                />
+              )}
+
+              {capabilityProbeMessage !== null && (
+                <InlineAlert
+                  tone="info"
+                  title="写作能力已验证"
+                  description={capabilityProbeMessage}
+                />
+              )}
 
               <div className="settings-actions">
                 <Button
@@ -812,12 +2142,19 @@ export function SettingsPage() {
                   disabled={
                     loading ||
                     checkingModel ||
+                    probingCapability ||
                     providerId.trim().length === 0 ||
-                    baseUrl.trim().length === 0
+                    baseUrl.trim().length === 0 ||
+                    !expertConnectionInputsAreComplete(
+                      authentication,
+                      credentialHeaderName,
+                      requestTimeoutMs,
+                      retryLimit,
+                    )
                   }
                   onClick={() => void saveModelProfile()}
                 >
-                  保存非敏感配置
+                  保存供应商与模型
                 </Button>
                 <Button
                   variant="secondary"
@@ -827,23 +2164,62 @@ export function SettingsPage() {
                     (!online && !canCheckModelEndpointWhileOffline(provider, baseUrl)) ||
                     loading ||
                     saving ||
-                    (authentication === "bearer_keyring" && !summary.configured)
+                    probingCapability ||
+                    (!getModelProviderPreset(providerPreset).modelDiscovery.automatic &&
+                      selectedModel.trim().length === 0 &&
+                      endpointId.trim().length === 0) ||
+                    (authentication !== "none" && !summary.configured) ||
+                    !expertConnectionInputsAreComplete(
+                      authentication,
+                      credentialHeaderName,
+                      requestTimeoutMs,
+                      retryLimit,
+                    )
                   }
                   onClick={() => void checkModelConnection()}
                 >
-                  检查连接并读取模型
+                  {getModelProviderPreset(providerPreset).modelDiscovery.automatic
+                    ? "测试连接并发现模型"
+                    : "验证连接与写作能力"}
                 </Button>
+                {getModelProviderPreset(providerPreset).modelDiscovery.automatic && (
+                  <Button
+                    variant="secondary"
+                    loading={probingCapability}
+                    disabled={
+                      !runtime.modelGateway.available ||
+                      selectedModel.trim().length === 0 ||
+                      loading ||
+                      saving ||
+                      checkingModel ||
+                      (authentication !== "none" && !summary.configured) ||
+                      !expertConnectionInputsAreComplete(
+                        authentication,
+                        credentialHeaderName,
+                        requestTimeoutMs,
+                        retryLimit,
+                      )
+                    }
+                    onClick={() => void probeSelectedModelCapability()}
+                  >
+                    验证写作能力
+                  </Button>
+                )}
               </div>
 
               {connection !== null && (
                 <InlineAlert
                   tone="info"
-                  title="模型目录连接成功"
-                  description={`${connection.endpointOrigin} · ${String(connection.modelCount)} 个模型 · ${String(connection.latencyMs)} ms。生成与流式输出尚未在这次目录检查中执行。`}
+                  title={
+                    getModelProviderPreset(providerPreset).modelDiscovery.automatic
+                      ? "模型目录连接成功"
+                      : "供应商连接成功"
+                  }
+                  description={`${connection.endpointOrigin} · ${String(connection.modelCount)} 个模型 · ${String(connection.latencyMs)} ms。${getModelProviderPreset(providerPreset).modelDiscovery.automatic ? "目录检查不会自动证明模型可生成正文，请按需继续验证写作能力。" : "已通过固定短文本验证模型可生成文字。"}`}
                 />
               )}
 
-              {connection !== null && provider === "ollama" && (
+              {connection !== null && providerPreset === "ollama" && (
                 <InlineAlert
                   tone={localCapacityAssessment.status === "warning" ? "warning" : "info"}
                   title="本地模型容量初步体检"
@@ -851,12 +2227,13 @@ export function SettingsPage() {
                 />
               )}
 
-              {authentication === "bearer_keyring" &&
+              {(authentication === "bearer_keyring" ||
+                providerPreset === "custom_openai_compatible") &&
                 (runtime.mode === "browser-development" ? (
                   <InlineAlert
                     tone="warning"
                     title="浏览器开发模式不接受模型密钥"
-                    description="请在 Tauri 桌面应用中配置。页面不会把密钥写入 localStorage 或模型配置表。"
+                    description="请在桌面应用中配置。页面不会把密钥写入浏览器调试存储或模型配置表。"
                   />
                 ) : (
                   <div className="secret-settings">
@@ -871,14 +2248,21 @@ export function SettingsPage() {
                       />
                     </div>
                     <FormField
-                      label="API Key"
-                      hint="保存后仅显示末四位；页面不会再次读取完整密钥。"
-                      required
+                      label={
+                        authentication === "custom_header_keyring"
+                          ? "认证 Header 值"
+                          : "API Key（接口访问密钥）"
+                      }
+                      hint="保存后仅显示末四位；页面不会再次读取完整密钥，也不会写入配置数据库或日志。"
+                      required={authentication !== "none"}
                     >
                       {(fieldProps) => (
                         <Input
                           {...fieldProps}
                           type="password"
+                          revealable
+                          revealLabel="显示接口访问密钥"
+                          concealLabel="隐藏接口访问密钥"
                           autoComplete="off"
                           value={secret}
                           disabled={loading || saving || checkingModel}
@@ -894,15 +2278,17 @@ export function SettingsPage() {
                       >
                         保存到系统凭据库
                       </Button>
-                      {summary.configured && (
-                        <Button
-                          variant="danger"
-                          loading={saving}
-                          onClick={() => void deleteSecret()}
-                        >
-                          删除密钥
-                        </Button>
-                      )}
+                      {summary.configured &&
+                        hubConnection?.id === providerId &&
+                        hubConnection.providerKind === providerPreset && (
+                          <Button
+                            variant="danger"
+                            loading={saving}
+                            onClick={() => void deleteSecret()}
+                          >
+                            删除密钥
+                          </Button>
+                        )}
                     </div>
                   </div>
                 ))}
@@ -914,25 +2300,20 @@ export function SettingsPage() {
           <CardHeader>
             <div className="card-heading-row">
               <div>
-                <CardTitle>模型角色路由</CardTitle>
+                <CardTitle headingLevel={2}>AI 分工</CardTitle>
                 <CardDescription>
-                  为七类任务绑定精确的供应商与模型；配置变化使用修订号保护。
+                  选择一种使用方案，让写作、规划和检查使用合适的已连接模型。
                 </CardDescription>
               </div>
-              <Badge tone={roleRoutes.length > 0 ? "success" : "neutral"}>
-                {roleRoutes.length > 0
-                  ? `${String(roleRoutes.length)} / ${String(MODEL_ROUTE_ROLES.length)} 已配置`
+              <Badge tone={novelTaskRouteCount > 0 ? "success" : "neutral"}>
+                {novelTaskRouteCount > 0
+                  ? `${String(novelTaskRouteCount)} / ${String(NOVEL_AI_TASKS.length)} 类任务已配置`
                   : "尚未配置"}
               </Badge>
             </div>
           </CardHeader>
           <CardContent>
             <div className="model-center-settings">
-              <InlineAlert
-                tone="info"
-                title="路由不会静默改变数据去向"
-                description="每次执行仍会重新核验模型目录、凭据和网络。主模型不可用时，只有已明确配置的备用模型可进入生成前确认；Embedding 在真实能力接通前不会被伪装为可用。"
-              />
               {normalizedRouteError !== null && (
                 <InlineAlert
                   tone="error"
@@ -940,102 +2321,354 @@ export function SettingsPage() {
                   description={`${normalizedRouteError.description}（${normalizedRouteError.code}）`}
                 />
               )}
-              {profiles.every(({ selectedModel: model }) => model === null) ? (
+
+              <FormField label="使用方案" required>
+                {(fieldProps) => (
+                  <Select
+                    {...fieldProps}
+                    value={modelHubScheme}
+                    options={MODEL_HUB_SCHEME_OPTIONS.map((option) => ({
+                      value: option.value,
+                      label: option.label,
+                    }))}
+                    disabled={schemeSaving || routeSaving}
+                    onChange={(event) => {
+                      setModelHubScheme(event.currentTarget.value as ModelHubScheme);
+                      setSchemeMessage(null);
+                    }}
+                  />
+                )}
+              </FormField>
+              <p>
+                {MODEL_HUB_SCHEME_OPTIONS.find(({ value }) => value === modelHubScheme)
+                  ?.description ?? ""}
+              </p>
+              <ul className="privacy-list" aria-label="小说任务分工示例">
+                <li>正文：开书引导、正文生成、续写、改写与润色。</li>
+                <li>规划：大纲、场景拆解、章节摘要与长期记忆压缩。</li>
+                <li>检查：矛盾、视角边界、人物说话一致性与深度复核。</li>
+              </ul>
+              <div className="settings-actions">
+                <Button
+                  loading={schemeSaving}
+                  disabled={routeSaving}
+                  onClick={() => void applyModelHubScheme()}
+                >
+                  应用 AI 分工
+                </Button>
+              </div>
+              {schemeMessage !== null && (
+                <InlineAlert
+                  tone={schemeMessage.startsWith("还没有") ? "warning" : "info"}
+                  title={schemeMessage.startsWith("还没有") ? "暂时无法应用" : "AI 分工已更新"}
+                  description={schemeMessage}
+                />
+              )}
+
+              {hubCatalog.every(({ availability }) => availability !== "available") && (
                 <InlineAlert
                   tone="warning"
-                  title="先选择至少一个模型"
-                  description="角色路由只能引用已经保存且具有模型标识的配置。"
+                  title="还没有可用模型"
+                  description="请先在上方连接供应商、测试连接并保存一个模型。基础写作仍可使用，但需要 AI 的功能会明确提示尚未就绪。"
                 />
-              ) : (
+              )}
+
+              {expertMode && (
                 <>
-                  <div className="model-center-grid">
-                    <FormField label="任务角色" required>
-                      {(fieldProps) => (
-                        <Select
-                          {...fieldProps}
-                          value={routeRole}
-                          options={MODEL_ROUTE_ROLES.map((role) => ({
-                            value: role,
-                            label: modelRouteRoleLabel(role),
-                          }))}
-                          disabled={routeSaving}
-                          onChange={(event) =>
-                            selectRouteRole(event.currentTarget.value as ModelRouteRole)
-                          }
-                        />
-                      )}
-                    </FormField>
-                    <FormField label="主模型" required>
-                      {(fieldProps) => (
-                        <Select
-                          {...fieldProps}
-                          value={routePrimaryProviderId}
-                          placeholder="选择主模型"
-                          options={profiles
-                            .filter(
-                              (
-                                candidate,
-                              ): candidate is ModelProfile & { readonly selectedModel: string } =>
-                                candidate.selectedModel !== null,
-                            )
-                            .map((candidate) => ({
-                              value: candidate.providerId,
-                              label: `${candidate.providerId} · ${candidate.selectedModel}`,
-                            }))}
-                          disabled={routeSaving}
-                          onChange={(event) => {
-                            const next = event.currentTarget.value;
-                            setRoutePrimaryProviderId(next);
-                            if (routeFallbackProviderId === next) {
-                              setRouteFallbackProviderId("");
+                  <InlineAlert
+                    tone="info"
+                    title="小说任务路由"
+                    description={`逐项覆盖 ${String(NOVEL_AI_TASKS.length)} 类小说任务的主模型、备用模型、费用上限、隐私与失败处理。未明确保存的任务继续使用当前自动方案。`}
+                  />
+                  {routingCatalog.some(({ availability }) => availability === "available") && (
+                    <>
+                      <div className="model-center-grid">
+                        <FormField label="小说任务" required>
+                          {(fieldProps) => (
+                            <Select
+                              {...fieldProps}
+                              value={novelRouteTask}
+                              options={NOVEL_AI_TASKS.map((task) => ({
+                                value: task,
+                                label: novelAiTaskLabel(task),
+                              }))}
+                              disabled={routeSaving}
+                              onChange={(event) =>
+                                selectNovelTaskRoute(event.currentTarget.value as NovelAiTask)
+                              }
+                            />
+                          )}
+                        </FormField>
+                        <FormField label="主模型" required>
+                          {(fieldProps) => (
+                            <Select
+                              {...fieldProps}
+                              value={novelRoutePrimaryCatalogId}
+                              placeholder="选择主模型"
+                              options={selectableRoutingCatalog.map((catalogEntry) => ({
+                                value: catalogEntry.id,
+                                label: catalogEntryLabel(catalogEntry, hubConnections),
+                              }))}
+                              disabled={routeSaving}
+                              onChange={(event) => {
+                                const next = event.currentTarget.value;
+                                setNovelRoutePrimaryCatalogId(next);
+                                if (novelRouteFallbackCatalogId === next) {
+                                  setNovelRouteFallbackCatalogId("");
+                                }
+                              }}
+                            />
+                          )}
+                        </FormField>
+                        <FormField
+                          label="备用模型"
+                          hint="建议选择不同连接；本地隐私只能选择本机模型。"
+                        >
+                          {(fieldProps) => (
+                            <Select
+                              {...fieldProps}
+                              value={novelRouteFallbackCatalogId}
+                              options={[
+                                { value: "", label: "不配置备用模型" },
+                                ...selectableRoutingCatalog
+                                  .filter(({ id }) => id !== novelRoutePrimaryCatalogId)
+                                  .map((catalogEntry) => ({
+                                    value: catalogEntry.id,
+                                    label: catalogEntryLabel(catalogEntry, hubConnections),
+                                  })),
+                              ]}
+                              disabled={routeSaving}
+                              onChange={(event) =>
+                                setNovelRouteFallbackCatalogId(event.currentTarget.value)
+                              }
+                            />
+                          )}
+                        </FormField>
+                        <FormField label="单次费用上限" hint="留空表示不设置；按所选币种填写。">
+                          {(fieldProps) => (
+                            <Input
+                              {...fieldProps}
+                              type="number"
+                              min={0}
+                              step="0.000001"
+                              value={novelRouteMaximumCost}
+                              disabled={routeSaving}
+                              onChange={(event) =>
+                                setNovelRouteMaximumCost(event.currentTarget.value)
+                              }
+                            />
+                          )}
+                        </FormField>
+                        <FormField label="费用币种">
+                          {(fieldProps) => (
+                            <Input
+                              {...fieldProps}
+                              value={novelRouteCurrency}
+                              minLength={3}
+                              maxLength={3}
+                              disabled={routeSaving || novelRouteMaximumCost.trim().length === 0}
+                              onChange={(event) => setNovelRouteCurrency(event.currentTarget.value)}
+                            />
+                          )}
+                        </FormField>
+                        <FormField label="隐私限制" required>
+                          {(fieldProps) => (
+                            <Select
+                              {...fieldProps}
+                              value={novelRoutePrivacy}
+                              options={[
+                                { value: "cloud_allowed", label: "允许云端" },
+                                { value: "local_preferred", label: "优先本机" },
+                                { value: "local_only", label: "仅限本机" },
+                              ]}
+                              disabled={routeSaving}
+                              onChange={(event) => {
+                                const nextPrivacy = event.currentTarget
+                                  .value as ModelHubPrivacyPolicy;
+                                setNovelRoutePrivacy(nextPrivacy);
+                                if (nextPrivacy === "local_only") {
+                                  setNovelRouteRemoteContentConsent(false);
+                                  if (!localCatalogEntryIds.includes(novelRoutePrimaryCatalogId)) {
+                                    setNovelRoutePrimaryCatalogId("");
+                                  }
+                                  if (!localCatalogEntryIds.includes(novelRouteFallbackCatalogId)) {
+                                    setNovelRouteFallbackCatalogId("");
+                                  }
+                                }
+                              }}
+                            />
+                          )}
+                        </FormField>
+                        <FormField label="失败处理" required>
+                          {(fieldProps) => (
+                            <Select
+                              {...fieldProps}
+                              value={novelRouteFailure}
+                              options={[
+                                { value: "use_fallback", label: "使用备用模型" },
+                                { value: "ask_user", label: "询问我" },
+                                { value: "stop", label: "停止任务" },
+                              ]}
+                              disabled={routeSaving}
+                              onChange={(event) =>
+                                setNovelRouteFailure(
+                                  event.currentTarget.value as NovelTaskRoute["failurePolicy"],
+                                )
+                              }
+                            />
+                          )}
+                        </FormField>
+                      </div>
+                      {novelRouteTask === "rerank" && (
+                        <div className="maintenance-settings">
+                          <label className="checkbox-row">
+                            <input
+                              type="checkbox"
+                              checked={novelRouteRemoteContentConsent}
+                              disabled={routeSaving || novelRoutePrivacy !== "cloud_allowed"}
+                              onChange={(event) =>
+                                setNovelRouteRemoteContentConsent(event.currentTarget.checked)
+                              }
+                            />
+                            <span>
+                              允许检索重排任务把一次写作所需的查询与候选片段发送到所选云端供应商
+                            </span>
+                          </label>
+                          <InlineAlert
+                            tone={novelRouteRemoteContentConsent ? "warning" : "info"}
+                            title={
+                              novelRouteRemoteContentConsent
+                                ? "已明确允许远程候选片段发送"
+                                : "远程重排默认关闭"
                             }
-                          }}
-                        />
+                            description={
+                              novelRouteRemoteContentConsent
+                                ? "保存后，仅在已验证的阿里云百炼北京地域 Workspace、重排能力、隐私与费用检查全部通过时发送；失败会继续使用本地排序。"
+                                : "不勾选时，正文续写只使用本地确定性复核，不会为了重排把候选片段发送到云端。"
+                            }
+                          />
+                        </div>
                       )}
-                    </FormField>
-                    <FormField label="备用模型" hint="可选；切换前仍需在预检中确认。">
-                      {(fieldProps) => (
-                        <Select
-                          {...fieldProps}
-                          value={routeFallbackProviderId}
-                          options={[
-                            { value: "", label: "不配置备用模型" },
-                            ...profiles
-                              .filter(
-                                (
-                                  candidate,
-                                ): candidate is ModelProfile & {
-                                  readonly selectedModel: string;
-                                } =>
-                                  candidate.selectedModel !== null &&
-                                  candidate.providerId !== routePrimaryProviderId,
-                              )
-                              .map((candidate) => ({
-                                value: candidate.providerId,
-                                label: `${candidate.providerId} · ${candidate.selectedModel}`,
-                              })),
-                          ]}
-                          disabled={routeSaving}
-                          onChange={(event) =>
-                            setRouteFallbackProviderId(event.currentTarget.value)
+                      {novelRoutePrivacy === "local_only" && (
+                        <InlineAlert
+                          tone={selectableRoutingCatalog.length === 0 ? "warning" : "info"}
+                          title="仅显示证据确认的本机模型"
+                          description={
+                            selectableRoutingCatalog.length === 0
+                              ? "当前没有已确认数据仅在本机处理的可用模型。请先保存本机连接的隐私信息；墨影不会用云端模型补位。"
+                              : "主模型和备用模型列表已过滤为数据去向明确为本机、且证据来源不是未知的模型。"
                           }
                         />
                       )}
-                    </FormField>
-                  </div>
-                  <div className="settings-actions">
-                    <Button
-                      loading={routeSaving}
-                      disabled={routePrimaryProviderId.length === 0}
-                      onClick={() => void saveModelRoleRoute()}
-                    >
-                      保存角色路由
-                    </Button>
-                  </div>
+                      <div className="settings-actions">
+                        <Button
+                          loading={routeSaving}
+                          disabled={novelRoutePrimaryCatalogId.length === 0}
+                          onClick={() => void saveNovelTaskRoute()}
+                        >
+                          保存小说任务分工
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                  <InlineAlert
+                    tone="info"
+                    title="专家兼容设置：旧 7 角色路由"
+                    description={`${String(NOVEL_AI_TASKS.length)} 类小说任务由 Model Hub 负责；这组旧角色仅桥接尚未迁移的生成链路。应用方案时会完整刷新，无法安全映射的旧角色会被清除。`}
+                  />
+                  {profiles.some(({ selectedModel: model }) => model !== null) && (
+                    <>
+                      <div className="model-center-grid">
+                        <FormField label="任务角色" required>
+                          {(fieldProps) => (
+                            <Select
+                              {...fieldProps}
+                              value={routeRole}
+                              options={MODEL_ROUTE_ROLES.map((role) => ({
+                                value: role,
+                                label: modelRouteRoleLabel(role),
+                              }))}
+                              disabled={routeSaving}
+                              onChange={(event) =>
+                                selectRouteRole(event.currentTarget.value as ModelRouteRole)
+                              }
+                            />
+                          )}
+                        </FormField>
+                        <FormField label="兼容主模型" required>
+                          {(fieldProps) => (
+                            <Select
+                              {...fieldProps}
+                              value={routePrimaryProviderId}
+                              placeholder="选择主模型"
+                              options={profiles
+                                .filter(
+                                  (
+                                    candidate,
+                                  ): candidate is ModelProfile & {
+                                    readonly selectedModel: string;
+                                  } => candidate.selectedModel !== null,
+                                )
+                                .map((candidate) => ({
+                                  value: candidate.providerId,
+                                  label: `${candidate.providerId} · ${candidate.selectedModel}`,
+                                }))}
+                              disabled={routeSaving}
+                              onChange={(event) => {
+                                const next = event.currentTarget.value;
+                                setRoutePrimaryProviderId(next);
+                                if (routeFallbackProviderId === next) {
+                                  setRouteFallbackProviderId("");
+                                }
+                              }}
+                            />
+                          )}
+                        </FormField>
+                        <FormField label="兼容备用模型" hint="可选；切换前仍需在预检中确认。">
+                          {(fieldProps) => (
+                            <Select
+                              {...fieldProps}
+                              value={routeFallbackProviderId}
+                              options={[
+                                { value: "", label: "不配置备用模型" },
+                                ...profiles
+                                  .filter(
+                                    (
+                                      candidate,
+                                    ): candidate is ModelProfile & {
+                                      readonly selectedModel: string;
+                                    } =>
+                                      candidate.selectedModel !== null &&
+                                      candidate.providerId !== routePrimaryProviderId,
+                                  )
+                                  .map((candidate) => ({
+                                    value: candidate.providerId,
+                                    label: `${candidate.providerId} · ${candidate.selectedModel}`,
+                                  })),
+                              ]}
+                              disabled={routeSaving}
+                              onChange={(event) =>
+                                setRouteFallbackProviderId(event.currentTarget.value)
+                              }
+                            />
+                          )}
+                        </FormField>
+                      </div>
+                      <div className="settings-actions">
+                        <Button
+                          loading={routeSaving}
+                          disabled={routePrimaryProviderId.length === 0}
+                          onClick={() => void saveModelRoleRoute()}
+                        >
+                          保存角色路由
+                        </Button>
+                      </div>
+                    </>
+                  )}
                 </>
               )}
 
-              {roleRoutes.length > 0 && (
+              {expertMode && roleRoutes.length > 0 && (
                 <ul className="privacy-list" aria-label="已配置模型角色">
                   {roleRoutes.map((route) => (
                     <li key={route.role}>
@@ -1054,11 +2687,25 @@ export function SettingsPage() {
           </CardContent>
         </Card>
 
+        <section id="model-evaluation" className="settings-card--wide">
+          <ModelHubEvaluationPanel
+            service={modelEvaluation}
+            disabled={!runtime.modelGateway.available || hubCatalog.length === 0}
+          />
+        </section>
+
+        <section id="image-generation" className="settings-card--wide">
+          <ModelHubImageGenerationPanel
+            service={runtime.imageGeneration}
+            disabled={!runtime.modelGateway.available}
+          />
+        </section>
+
         <Card id="sync-security" className="settings-card--wide">
           <CardHeader>
             <div className="card-heading-row">
               <div>
-                <CardTitle>同步安全</CardTitle>
+                <CardTitle headingLevel={2}>同步安全</CardTitle>
                 <CardDescription>
                   逐设备、逐项目准备端到端加密密钥，并确认只显示一次的恢复码。
                 </CardDescription>
@@ -1085,9 +2732,9 @@ export function SettingsPage() {
           <CardHeader>
             <div className="card-heading-row">
               <div>
-                <CardTitle>本地数据维护</CardTitle>
+                <CardTitle headingLevel={2}>本地数据维护</CardTitle>
                 <CardDescription>
-                  检查 SQLite 数据完整性，并创建可独立恢复的一致性备份。
+                  检查本地数据库（SQLite）的数据完整性，并创建可独立恢复的一致性备份。
                 </CardDescription>
               </div>
               {runtime.maintenance !== null && (
@@ -1104,7 +2751,7 @@ export function SettingsPage() {
               <InlineAlert
                 tone="warning"
                 title="桌面应用专属能力"
-                description="SQLite 一致性检查与文件备份仅在 Tauri 桌面应用中可用。浏览器开发数据保存在 localStorage。"
+                description="本地数据库一致性检查与文件备份仅在桌面应用中可用。浏览器开发数据保存在调试存储中。"
               />
             ) : (
               <div className="maintenance-settings">
@@ -1176,11 +2823,11 @@ export function SettingsPage() {
 
         <SecureUpdateCard updater={runtime.secureUpdater} online={online} />
 
-        <Card className="settings-card--wide">
+        <Card id="diagnostics" className="settings-card--wide">
           <CardHeader>
             <div className="card-heading-row">
               <div>
-                <CardTitle>脱敏诊断包</CardTitle>
+                <CardTitle headingLevel={2}>脱敏诊断包</CardTitle>
                 <CardDescription>
                   汇总版本、运行环境、任务状态和数据库/索引健康，供故障排查使用。
                 </CardDescription>
@@ -1201,13 +2848,13 @@ export function SettingsPage() {
                 <InlineAlert
                   tone="info"
                   title="诊断包已下载"
-                  description={`支持编号：${diagnosticId}。发送前仍可自行打开 JSON 检查内容。`}
+                  description={`支持编号：${diagnosticId}。发送前仍可自行打开结构化文件（JSON）检查内容。`}
                 />
               )}
               <ul className="privacy-list">
-                <li>明确排除正文、Prompt、API Key、密码、恢复码和上传文件。</li>
-                <li>当前未启用持久日志采集，诊断包会如实记录 recentLogs 为空。</li>
-                <li>本地搜索索引从稳定章节与大纲按需重建；未执行过重建时健康状态为 unknown。</li>
+                <li>明确排除正文、提示词、模型密钥、密码、恢复码和上传文件。</li>
+                <li>当前未启用持久日志采集，诊断包会如实记录“最近日志”列表为空。</li>
+                <li>本地搜索索引从稳定章节与大纲按需重建；未执行过重建时标记为“尚未检查”。</li>
               </ul>
               <div className="settings-actions">
                 <Button loading={diagnosticBusy} onClick={() => void downloadDiagnostics()}>
@@ -1272,12 +2919,13 @@ function parseCurrencyAsMicros(value: string): number {
   return Number(micros);
 }
 
-function formatMicrosAsCurrency(value: number): string {
-  const whole = Math.floor(value / 1_000_000);
-  const fraction = String(value % 1_000_000)
+function formatMicrosStringAsCurrency(value: string): string {
+  const micros = BigInt(value);
+  const whole = micros / 1_000_000n;
+  const fraction = String(micros % 1_000_000n)
     .padStart(6, "0")
     .replace(/0+$/u, "");
-  return fraction.length === 0 ? String(whole) : `${String(whole)}.${fraction}`;
+  return fraction.length === 0 ? whole.toString() : `${whole.toString()}.${fraction}`;
 }
 
 function describeLocalModelCapacity(
@@ -1319,8 +2967,268 @@ function formatBytes(value: number | null): string {
   return `${gibibytes >= 10 ? gibibytes.toFixed(0) : gibibytes.toFixed(1)} GiB`;
 }
 
-function providerLabel(provider: NativeProviderKind): string {
-  return provider === "open_ai_compatible" ? "OpenAI 兼容" : "Ollama";
+function legacyProviderKind(provider: ModelProviderKind): NativeProviderKind {
+  return provider === "ollama" ? "ollama" : "open_ai_compatible";
+}
+
+function gatewayProviderKind(provider: ModelProviderKind): NativeGatewayProviderKind {
+  const protocol = getModelProviderPreset(provider).protocol;
+  return protocol === "openai_compatible" ? "open_ai_compatible" : protocol;
+}
+
+function supportsLegacyModelProfile(provider: ModelProviderKind): boolean {
+  const protocol = getModelProviderPreset(provider).protocol;
+  return (
+    provider !== "custom_openai_compatible" &&
+    (protocol === "openai_compatible" || protocol === "ollama")
+  );
+}
+
+function authenticationOptions(
+  provider: ModelProviderKind,
+): readonly { readonly value: NativeGatewayAuthenticationMode; readonly label: string }[] {
+  if (provider === "custom_openai_compatible") {
+    return [
+      { value: "none", label: "无认证" },
+      { value: "bearer_keyring", label: "Bearer（系统凭据库）" },
+      { value: "custom_header_keyring", label: "单一自定义认证 Header（系统凭据库）" },
+    ];
+  }
+  if (getModelProviderPreset(provider).credentialRequired) {
+    return [{ value: "bearer_keyring", label: "接口访问密钥（系统凭据库）" }];
+  }
+  return [
+    { value: "none", label: "无认证" },
+    { value: "bearer_keyring", label: "Bearer（系统凭据库）" },
+  ];
+}
+
+function expertConnectionInputsAreComplete(
+  authentication: NativeGatewayAuthenticationMode,
+  credentialHeaderName: string,
+  requestTimeoutMs: string,
+  retryLimit: string,
+): boolean {
+  const timeout = Number(requestTimeoutMs);
+  const retries = Number(retryLimit);
+  return (
+    (authentication !== "custom_header_keyring" || credentialHeaderName.trim().length > 0) &&
+    Number.isSafeInteger(timeout) &&
+    timeout >= MODEL_HUB_MIN_REQUEST_TIMEOUT_MS &&
+    timeout <= MODEL_HUB_MAX_REQUEST_TIMEOUT_MS &&
+    Number.isSafeInteger(retries) &&
+    retries >= 0 &&
+    retries <= MODEL_HUB_MAX_RETRY_LIMIT
+  );
+}
+
+function validateExpertConnectionDraft(
+  input: Readonly<{
+    provider: ModelProviderKind;
+    baseUrl: string;
+    region: string;
+    workspaceId: string;
+    authentication: NativeGatewayAuthenticationMode;
+    credentialHeaderName: string;
+    modelDiscoveryPath: string;
+    textGenerationPath: string;
+    embeddingPath: string;
+    requestTimeoutMs: string;
+    retryLimit: string;
+  }>,
+): void {
+  resolveProviderBaseUrl(input.provider, {
+    region: input.region,
+    workspaceId: input.workspaceId,
+    baseUrlOverride: input.baseUrl,
+  });
+  const custom = input.provider === "custom_openai_compatible";
+  const headerName = normalizeCredentialHeaderName(input.credentialHeaderName);
+  const paths = [
+    normalizeModelHubApiPath(input.modelDiscoveryPath, "Model discovery path"),
+    normalizeModelHubApiPath(input.textGenerationPath, "Text generation path"),
+    normalizeModelHubApiPath(input.embeddingPath, "Embedding path"),
+  ];
+  if (
+    !custom &&
+    (input.authentication === "custom_header_keyring" ||
+      headerName !== null ||
+      paths.some((path) => path !== null))
+  ) {
+    throw new Error("只有自定义 OpenAI-compatible 连接可以覆盖 API 路径或认证 Header。");
+  }
+  if ((input.authentication === "custom_header_keyring") !== (headerName !== null)) {
+    throw new Error("自定义 Header 认证必须填写且只能填写一个安全的 Header 名称。");
+  }
+  if (
+    getModelProviderPreset(input.provider).credentialRequired &&
+    input.authentication !== "bearer_keyring"
+  ) {
+    throw new Error("这个供应商必须使用系统凭据库中的接口访问密钥。");
+  }
+  normalizeModelHubRequestTimeoutMs(Number(input.requestTimeoutMs));
+  normalizeModelHubRetryLimit(Number(input.retryLimit));
+}
+
+function createModelHubId(prefix: string): string {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+function catalogEntryToDescriptor(catalogEntry: ModelCatalogEntry): NativeModelDescriptor {
+  return Object.freeze({
+    id: catalogEntry.providerModelId,
+    displayName: catalogEntry.displayName,
+    sizeBytes: null,
+  });
+}
+
+function qwenRegionOptions(): readonly { readonly value: string; readonly label: string }[] {
+  return (
+    getModelProviderPreset("alibaba_qwen").basicFields.find(({ key }) => key === "region")
+      ?.options ?? []
+  );
+}
+
+function qwenRegionNeedsWorkspace(region: string): boolean {
+  return ["japan_tokyo", "germany_frankfurt"].includes(region);
+}
+
+function qwenRegionShowsWorkspace(region: string): boolean {
+  return ["china_beijing", "singapore", "japan_tokyo", "germany_frankfurt"].includes(region);
+}
+
+function resolveQwenBaseUrl(region: string, workspaceId: string): string {
+  try {
+    return resolveProviderBaseUrl("alibaba_qwen", { region, workspaceId });
+  } catch {
+    return "";
+  }
+}
+
+function connectionStatusLabel(status: ModelProviderConnection["connectionStatus"]): string {
+  const labels: Record<ModelProviderConnection["connectionStatus"], string> = {
+    not_tested: "尚未测试",
+    checking: "正在检查",
+    ready: "已连接",
+    degraded: "部分能力可用",
+    error: "连接失败",
+    disabled: "已停用",
+  };
+  return labels[status];
+}
+
+function catalogEntryLabel(
+  catalogEntry: ModelCatalogEntry,
+  connections: readonly ModelProviderConnection[],
+): string {
+  const connection = connections.find(({ id }) => id === catalogEntry.connectionId);
+  const providerName =
+    connection === undefined
+      ? catalogEntry.connectionId
+      : getModelProviderPreset(connection.providerKind).displayName;
+  return `${providerName} · ${catalogEntry.displayName}`;
+}
+
+function removeLegacyTemperature(
+  policy: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  const sanitized: Record<string, unknown> = { ...policy };
+  delete sanitized.temperature;
+  return Object.freeze(sanitized);
+}
+
+function rerankParameterPolicy(
+  policy: Readonly<Record<string, unknown>>,
+  task: NovelAiTask,
+  remoteContentConsent: boolean,
+): Readonly<Record<string, unknown>> {
+  const sanitized: Record<string, unknown> = { ...policy };
+  if (task === "rerank" && remoteContentConsent) {
+    sanitized.remoteContentConsent = true;
+  } else {
+    delete sanitized.remoteContentConsent;
+  }
+  return Object.freeze(sanitized);
+}
+
+async function loadEvidenceConfirmedLocalCatalogIds(
+  modelHub: ModelHubStore,
+  catalog: readonly ModelCatalogEntry[],
+): Promise<readonly string[]> {
+  const profiles = await Promise.all(
+    catalog.map((entry) => modelHub.findCostPrivacyProfile(entry.id)),
+  );
+  return Object.freeze(
+    catalog.flatMap((entry, index) => {
+      const profile = profiles[index];
+      return profile?.dataDestination === "local" && profile.evidenceSource !== "unknown"
+        ? [entry.id]
+        : [];
+    }),
+  );
+}
+
+function modelHubCapabilityLabel(capability: ModelHubCapability): string {
+  const labels: Record<ModelHubCapability, string> = {
+    text_generation: "文本生成",
+    reasoning: "推理",
+    structured_output: "结构化输出",
+    embedding: "语义向量",
+    rerank: "结果重排",
+    image_generation: "图片生成",
+    vision: "图片理解",
+    translation: "翻译",
+    tool_calling: "工具调用",
+    token_counting: "Token 计数",
+    streaming: "流式输出",
+    long_context: "长上下文",
+  };
+  return labels[capability];
+}
+
+function novelAiTaskLabel(task: NovelAiTask): string {
+  const labels: Record<NovelAiTask, string> = {
+    idea_discussion: "灵感讨论",
+    book_start_guidance: "开书引导",
+    prose_generation: "正文生成",
+    continuation: "续写",
+    rewrite: "改写",
+    polish: "润色",
+    outline_planning: "大纲规划",
+    scene_breakdown: "场景拆解",
+    chapter_summary: "章节摘要",
+    long_memory_compression: "长期记忆压缩",
+    character_extraction: "人物提取",
+    world_extraction: "世界设定提取",
+    contradiction_check: "矛盾检查",
+    pov_check: "POV 检查",
+    character_voice_check: "人物声纹检查",
+    content_quality_check: "内容质量复核",
+    what_if_simulation: "剧情试演",
+    embedding: "语义记忆",
+    rerank: "检索重排",
+    image_generation: "图片生成",
+    vision_understanding: "图片理解",
+    translation: "翻译",
+  };
+  return labels[task];
+}
+
+function inferModelHubScheme(routes: readonly ModelRoleRoute[]): ModelHubScheme {
+  if (routes.some(({ role }) => role === "local_private")) {
+    return "local_privacy";
+  }
+  const roles = new Set(routes.map(({ role }) => role));
+  if (roles.has("fast") && roles.has("high_quality") && roles.has("validation")) {
+    return "smart";
+  }
+  if (roles.has("high_quality") && roles.has("validation")) {
+    return "quality";
+  }
+  if (roles.has("fast")) {
+    return "economy";
+  }
+  return routes.length === 0 ? "smart" : "custom";
 }
 
 function modelRouteRoleLabel(role: ModelRouteRole): string {

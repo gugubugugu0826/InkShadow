@@ -84,12 +84,12 @@ describe("SecureUpdateCard", () => {
 
     await user.click(await screen.findByRole("button", { name: "检查签名更新" }));
     expect(await screen.findByText("发现签名更新")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "校验并暂存更新包" }));
+    await user.click(screen.getByRole("button", { name: "下载并校验更新包（不安装）" }));
 
     expect(await screen.findByText("更新包已完成摘要校验并隔离暂存")).toBeVisible();
     expect(stageUpdate).toHaveBeenCalledWith("a".repeat(64));
     expect(screen.queryByRole("button", { name: /安装/u })).not.toBeInTheDocument();
-    expect(screen.getByText(/安装仍被禁止/u)).toBeVisible();
+    expect(screen.getByText(/当前版本不具备安装能力/u)).toBeVisible();
   });
 
   it("fails closed for a signed rollback until native confirmation exists", async () => {
@@ -120,8 +120,10 @@ describe("SecureUpdateCard", () => {
     render(<SecureUpdateCard updater={updater} online />);
 
     await user.click(await screen.findByRole("button", { name: "检查签名更新" }));
-    expect(await screen.findByText("签名回退需要原生确认")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "校验并暂存更新包" })).not.toBeInTheDocument();
+    expect(await screen.findByText("当前版本不能自动回退")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "下载并校验更新包（不安装）" }),
+    ).not.toBeInTheDocument();
     await waitFor(() => expect(stageRollback).not.toHaveBeenCalled());
   });
 });

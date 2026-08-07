@@ -21,6 +21,26 @@ describe("Button", () => {
     await user.click(button);
     expect(onClick).not.toHaveBeenCalled();
   });
+
+  it("keeps both normal and loading labels in the same layout slot", () => {
+    const { rerender } = render(<Button loadingLabel="保存中">保存这一章</Button>);
+
+    const button = screen.getByRole("button", { name: "保存这一章" });
+    const labels = button.querySelectorAll(".ink-button__label-copy");
+    expect(labels).toHaveLength(2);
+    expect(labels[0]).toHaveAttribute("data-visible");
+    expect(labels[1]).not.toHaveAttribute("data-visible");
+
+    rerender(
+      <Button loading loadingLabel="保存中">
+        保存这一章
+      </Button>,
+    );
+    expect(screen.getByRole("button", { name: "保存中" })).toBeInTheDocument();
+    const loadingLabels = button.querySelectorAll(".ink-button__label-copy");
+    expect(loadingLabels[0]).not.toHaveAttribute("data-visible");
+    expect(loadingLabels[1]).toHaveAttribute("data-visible");
+  });
 });
 
 describe("form controls", () => {
@@ -57,5 +77,31 @@ describe("form controls", () => {
     expect(screen.getByRole("option", { name: "English" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "简介" })).toHaveAttribute("maxlength", "20");
     expect(screen.getByText("3 / 20 字符")).toBeInTheDocument();
+  });
+
+  it("lets users reveal and verify password-style values", async () => {
+    const user = userEvent.setup();
+    render(<Input aria-label="API Key" type="password" defaultValue="sk-test-secret" />);
+
+    const input = screen.getByLabelText("API Key");
+    const reveal = screen.getByRole("button", { name: "显示内容" });
+    expect(input).toHaveAttribute("type", "password");
+
+    await user.click(reveal);
+    expect(input).toHaveAttribute("type", "text");
+    expect(screen.getByRole("button", { name: "隐藏内容" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("does not add a reveal control to non-password inputs", () => {
+    render(<Input aria-label="普通字段" revealable />);
+
+    expect(screen.queryByRole("button", { name: "显示内容" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "普通字段" })).not.toHaveAttribute(
+      "type",
+      "password",
+    );
   });
 });

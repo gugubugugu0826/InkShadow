@@ -24,6 +24,8 @@ import { StudioTeamPage } from "./studio-team-page";
 const ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000201";
 const TEAM_ID = "019f9f4a-b3c7-7350-9226-000000000202";
 const MEMBERSHIP_ID = "019f9f4a-b3c7-7350-9226-000000000203";
+const SECOND_ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000223";
+const SECOND_MEMBERSHIP_ID = "019f9f4a-b3c7-7350-9226-000000000224";
 const INVITATION_ID = "019f9f4a-b3c7-7350-9226-000000000204";
 const PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000210";
 const ASSIGNMENT_ID = "019f9f4a-b3c7-7350-9226-000000000211";
@@ -119,6 +121,51 @@ describe("StudioTeamPage", () => {
     expect(document.body.textContent).not.toContain("untrusted server detail");
   });
 
+  it("requires an impact confirmation before changing roles or project access", async () => {
+    const service = createService();
+    vi.mocked(service.listTeamMembers).mockResolvedValue({
+      schemaVersion: 1,
+      requestId: "019f9f4a-b3c7-7350-9226-000000000225",
+      memberships: [membership(), secondaryMembership()],
+      nextCursor: null,
+    });
+    renderPage(service);
+    const user = userEvent.setup();
+
+    const roleSelect = await screen.findByLabelText(`更改 ${SECOND_ACCOUNT_ID} 的角色`);
+    await user.selectOptions(roleSelect, "reviewer");
+
+    expect(service.changeMemberRole).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "确认更改成员角色" })).toBeVisible();
+    expect(screen.getByText(/提交后会立即影响该成员的团队权限/u)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "确认提交" }));
+    await waitFor(() =>
+      expect(service.changeMemberRole).toHaveBeenCalledWith(
+        TEAM_ID,
+        SECOND_MEMBERSHIP_ID,
+        1,
+        "reviewer",
+      ),
+    );
+
+    await loadProjectAssignments(user);
+    await user.click(screen.getByRole("button", { name: "启用分配" }));
+
+    expect(service.setProjectAssignment).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "确认授予项目权限" })).toBeVisible();
+    expect(screen.getByText(/端到端密钥仍需单独发放/u)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "确认提交" }));
+    await waitFor(() =>
+      expect(service.setProjectAssignment).toHaveBeenCalledWith(
+        TEAM_ID,
+        PROJECT_ID,
+        SECOND_MEMBERSHIP_ID,
+        null,
+        "active",
+      ),
+    );
+  });
+
   it("auto-resolves the active local key version and publishes every eligible device", async () => {
     const service = createService();
     const keys = createKeyRuntime();
@@ -128,7 +175,7 @@ describe("StudioTeamPage", () => {
     await loadProjectAssignments(user);
     expect(keys.getStatus).toHaveBeenCalledTimes(1);
     expect(keys.loadProjectKeyBundle).toHaveBeenCalledWith(PROJECT_ID, DEVICE_ID);
-    expect(screen.getByText("已验证本地 active 密钥版本 3。")).toBeInTheDocument();
+    expect(screen.getByText("已验证本地有效密钥版本 3。")).toBeInTheDocument();
     expect(screen.queryByLabelText(/密钥版本/u)).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "为全部合资格设备发放密钥" }));
@@ -136,7 +183,7 @@ describe("StudioTeamPage", () => {
     const publishCall = vi.mocked(keys.keyService.publishAllEligibleRecipients).mock.calls[0];
     expect(publishCall?.slice(0, 3)).toEqual([TEAM_ID, PROJECT_ID, 3]);
     expect(publishCall?.[3]?.signal).toBeInstanceOf(AbortSignal);
-    expect(await screen.findByText("已完成（published）")).toBeInTheDocument();
+    expect(await screen.findByText("已完成")).toBeInTheDocument();
     expect(screen.getByText("已发布 2 / 2 个合资格设备")).toBeInTheDocument();
     expect(screen.getByText("团队项目密钥已发放至 2 个合资格设备。")).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("A".repeat(87));
@@ -152,15 +199,15 @@ describe("StudioTeamPage", () => {
     const user = userEvent.setup();
 
     await loadProjectAssignments(user);
-    await user.click(screen.getByRole("button", { name: "验收并保存当前设备云信封" }));
+    await user.click(screen.getByRole("button", { name: "验证并保存当前设备授权" }));
 
     const verifyCall = vi.mocked(keys.keyService.verifyCurrentDeviceEnvelope).mock.calls[0];
     expect(verifyCall?.slice(0, 2)).toEqual([TEAM_ID, PROJECT_ID]);
     expect(verifyCall?.[2]?.signal).toBeInstanceOf(AbortSignal);
-    expect(await screen.findByText("当前设备信封已验真、持久化且可开启")).toBeInTheDocument();
-    expect(screen.getByText(/权威当前版本 3（服务端修订 9/u)).toBeInTheDocument();
-    expect(screen.getByText(/本机写入状态 created/u)).toBeInTheDocument();
-    expect(screen.getByText(/项目密钥指纹 cccccccccccccccc…/u)).toBeInTheDocument();
+    expect(await screen.findByText("当前设备的团队密钥授权已验证")).toBeInTheDocument();
+    expect(screen.getByText(/授权版本 3，云端安全记录修订 9/u)).toBeInTheDocument();
+    expect(screen.getByText(/本机状态 已新建/u)).toBeInTheDocument();
+    expect(screen.getByText(/cccccccccccccccc…/u)).toBeInTheDocument();
     expect(screen.getByText(/撤销会阻止未来同步与新版本授权/u)).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("ciphertext");
     expect(document.body.textContent).not.toContain("encapsulatedKey");
@@ -190,13 +237,13 @@ describe("StudioTeamPage", () => {
     const publish = screen.getByRole("button", { name: "为全部合资格设备发放密钥" });
 
     await user.click(publish);
-    expect(await screen.findByText("部分完成（partial）")).toBeInTheDocument();
+    expect(await screen.findByText("部分完成")).toBeInTheDocument();
     expect(screen.getByText("已发布 1 / 2 个合资格设备")).toBeInTheDocument();
     expect(screen.queryByText(/团队项目密钥已发放至/u)).not.toBeInTheDocument();
     expect(publish).toBeEnabled();
 
     await user.click(publish);
-    expect(await screen.findByText("可安全重试（retryable）")).toBeInTheDocument();
+    expect(await screen.findByText("可安全重试")).toBeInTheDocument();
     expect(screen.getByText("已发布 1 / 2 个合资格设备")).toBeInTheDocument();
     expect(screen.queryByText(/团队项目密钥已发放至/u)).not.toBeInTheDocument();
   });
@@ -209,18 +256,16 @@ describe("StudioTeamPage", () => {
 
     await loadProjectAssignments(user);
 
-    expect(
-      await screen.findByText("当前设备没有该项目的 active 本地密钥 bundle。"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("当前设备没有该项目的有效本地密钥包。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "为全部合资格设备发放密钥" })).toBeDisabled();
     expect(keys.keyService.publishAllEligibleRecipients).not.toHaveBeenCalled();
-    const verify = screen.getByRole("button", { name: "验收并保存当前设备云信封" });
+    const verify = screen.getByRole("button", { name: "验证并保存当前设备授权" });
     expect(verify).toBeEnabled();
-    expect(screen.getByText(/当前设备验收不依赖本地 key bundle/u)).toBeInTheDocument();
+    expect(screen.getByText(/当前设备验收不依赖本地密钥包/u)).toBeInTheDocument();
     expect(screen.queryByLabelText(/密钥版本/u)).not.toBeInTheDocument();
 
     await user.click(verify);
-    expect(await screen.findByText("当前设备信封已验真、持久化且可开启")).toBeInTheDocument();
+    expect(await screen.findByText("当前设备的团队密钥授权已验证")).toBeInTheDocument();
     const verifyCall = vi.mocked(keys.keyService.verifyCurrentDeviceEnvelope).mock.calls[0];
     expect(verifyCall?.slice(0, 2)).toEqual([TEAM_ID, PROJECT_ID]);
     expect(verifyCall?.[2]?.signal).toBeInstanceOf(AbortSignal);
@@ -236,7 +281,7 @@ describe("StudioTeamPage", () => {
     await loadProjectAssignments(user);
 
     expect(await screen.findByText("团队密钥已持久化且可离线开启")).toBeInTheDocument();
-    expect(screen.getByText(/本机收据版本 3，状态 active/u)).toBeInTheDocument();
+    expect(screen.getByText(/本机授权版本 3，状态 有效/u)).toBeInTheDocument();
     expect(keys.loadTeamProjectKeyReceipt).toHaveBeenCalledWith({
       teamId: TEAM_ID,
       projectId: PROJECT_ID,
@@ -281,10 +326,10 @@ describe("StudioTeamPage", () => {
     expect(
       await screen.findByText("当前运行环境未配置团队密钥发放所需的原生云身份与本地密钥存储。"),
     ).toBeInTheDocument();
-    expect(screen.getByText("assignment 不等于端到端密钥授权")).toBeInTheDocument();
+    expect(screen.getByText("项目权限不等于端到端密钥授权")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "当前仅能管理服务端业务访问范围，未配置团队项目密钥 envelope 服务。assignment 不会自动产生端到端密钥授权。",
+        "当前仅能管理云端业务访问范围，未配置团队项目密钥授权服务。项目权限不会自动产生端到端密钥授权。",
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "为全部合资格设备发放密钥" })).toBeDisabled();
@@ -383,7 +428,7 @@ async function loadProjectAssignments(user: ReturnType<typeof userEvent.setup>):
   await user.type(screen.getByLabelText("项目 ID"), PROJECT_ID);
   await waitFor(() => expect(screen.getByRole("button", { name: "读取分配" })).toBeEnabled());
   await user.click(screen.getByRole("button", { name: "读取分配" }));
-  await screen.findByText("设置成员 assignment");
+  await screen.findByText("设置成员项目权限");
 }
 
 function createKeyRuntime(
@@ -641,6 +686,15 @@ function membership(): CloudTeamMembership {
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     revokedAt: null,
+  };
+}
+
+function secondaryMembership(): CloudTeamMembership {
+  return {
+    ...membership(),
+    membershipId: SECOND_MEMBERSHIP_ID,
+    accountId: SECOND_ACCOUNT_ID,
+    role: "author",
   };
 }
 

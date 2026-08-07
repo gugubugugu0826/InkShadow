@@ -5,9 +5,11 @@ import { describe, expect, it } from "vitest";
 import type { Clock } from "@inkshadow/domain";
 
 import {
+  computeMultiAgentReviewConfirmedStoryFactChecksum,
   MultiAgentReviewSqliteStore,
   computeMultiAgentReviewCompletionFingerprint,
   computeMultiAgentReviewRequestFingerprint,
+  createMultiAgentReviewConfirmedStoryFactAuthority,
   type CompleteMultiAgentReviewTurnInput,
   type CreateMultiAgentReviewSessionInput,
 } from "../src/index.js";
@@ -18,6 +20,7 @@ const migration = [
   readFileSync(new URL("../../story-core/migrations/0001_story_core.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../../story-core/migrations/0002_materials.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../migrations/0024_multi_agent_review.sql", import.meta.url), "utf8"),
+  readFileSync(new URL("../migrations/0032_unified_story_facts.sql", import.meta.url), "utf8"),
 ].join("\n");
 
 const ids = {
@@ -37,6 +40,9 @@ const ids = {
   acceptAudit: "019fa024-0000-7000-8000-00000000000e",
   rejectAudit: "019fa024-0000-7000-8000-00000000000f",
   expireAudit: "019fa024-0000-7000-8000-000000000010",
+  storyFact: "019fa024-0000-7000-8000-000000000011",
+  unconfirmedStoryFact: "019fa024-0000-7000-8000-000000000012",
+  factActor: "019fa024-0000-7000-8000-000000000013",
 } as const;
 
 const startedAt = "2026-07-28T08:00:00.000Z";
@@ -269,6 +275,104 @@ describe("0024 bounded multi-agent review SQLite vertical", () => {
     await expect(store.completeTurn(invalidCompletion)).rejects.toMatchObject({
       code: "MULTI_AGENT_AUTHORITY_MISMATCH",
     });
+    await expect(store.findSessionById(ids.session)).resolves.toMatchObject({
+      revision: 2,
+      turns: [{ status: "working" }],
+    });
+  });
+
+  it("validates project_rule citations against confirmed StoryFacts and their exact chapter span", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    seedAuthorities(executor);
+    const authority = await insertReviewStoryFact(executor, ids.storyFact, "formal");
+    const store = createStore(executor);
+    await store.createSession(await outlineCreateInput());
+    await store.claimTurn(claim());
+    const sourceReference = {
+      kind: "project_rule" as const,
+      sourceId: authority.id,
+      sourceRevision: authority.revision,
+      sourceVersionId: null,
+      sourceChecksum: await computeMultiAgentReviewConfirmedStoryFactChecksum(authority),
+      modelLabel: "已确认故事事实",
+      authoritativeLabel: null,
+      excerpt: null,
+    };
+    const { authoritativeLabel: _authoritativeLabel, ...publicSourceReference } = sourceReference;
+    void _authoritativeLabel;
+    const baseResponse = outlineResponse();
+    const publicConclusion = {
+      ...baseResponse.conclusions[0],
+      sourceReferences: [publicSourceReference],
+    };
+    const persistedConclusion = {
+      id: ids.conclusion,
+      ...publicConclusion,
+      sourceReferences: [sourceReference],
+    };
+
+    const completed = await store.completeTurn(
+      await completion(
+        { ...baseResponse, conclusions: [publicConclusion] },
+        {
+          conclusions: [persistedConclusion],
+        },
+      ),
+    );
+
+    expect(completed.turns[0]?.conclusions[0]?.sourceReferences[0]).toMatchObject({
+      kind: "project_rule",
+      sourceId: ids.storyFact,
+      sourceRevision: 1,
+      sourceChecksum: sourceReference.sourceChecksum,
+    });
+  });
+
+  it("rejects a project_rule citation when the matching StoryFact is unconfirmed", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    seedAuthorities(executor);
+    const claimedAuthority = await insertReviewStoryFact(
+      executor,
+      ids.unconfirmedStoryFact,
+      "unconfirmed",
+    );
+    const store = createStore(executor);
+    await store.createSession(await outlineCreateInput());
+    await store.claimTurn(claim());
+    const invalidSourceReference = {
+      kind: "project_rule" as const,
+      sourceId: claimedAuthority.id,
+      sourceRevision: claimedAuthority.revision,
+      sourceVersionId: null,
+      sourceChecksum: await computeMultiAgentReviewConfirmedStoryFactChecksum(claimedAuthority),
+      modelLabel: "未确认事实",
+      authoritativeLabel: null,
+      excerpt: null,
+    };
+    const { authoritativeLabel: _authoritativeLabel, ...publicSourceReference } =
+      invalidSourceReference;
+    void _authoritativeLabel;
+    const baseResponse = outlineResponse();
+    const publicConclusion = {
+      ...baseResponse.conclusions[0],
+      sourceReferences: [publicSourceReference],
+    };
+    const persistedConclusion = {
+      id: ids.conclusion,
+      ...publicConclusion,
+      sourceReferences: [invalidSourceReference],
+    };
+
+    await expect(
+      store.completeTurn(
+        await completion(
+          { ...baseResponse, conclusions: [publicConclusion] },
+          {
+            conclusions: [persistedConclusion],
+          },
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "MULTI_AGENT_AUTHORITY_MISMATCH" });
     await expect(store.findSessionById(ids.session)).resolves.toMatchObject({
       revision: 2,
       turns: [{ status: "working" }],
@@ -824,8 +928,8 @@ function claim() {
   } as const;
 }
 
-async function completion(
-  response: ReturnType<typeof outlineResponse> | ReturnType<typeof chapterResponse>,
+async function completion<Response extends { readonly publicMessage: string }>(
+  response: Response,
   override: Partial<Omit<CompleteMultiAgentReviewTurnInput, "resultFingerprint">> = {},
 ): Promise<CompleteMultiAgentReviewTurnInput> {
   const withoutFingerprint = {
@@ -993,6 +1097,78 @@ function insertChapter(
     executor.database.exec("ROLLBACK");
     throw error;
   }
+}
+
+async function insertReviewStoryFact(
+  executor: NodeSqliteExecutor,
+  factId: string,
+  status: "formal" | "unconfirmed",
+) {
+  const version = executor.database
+    .prepare(
+      `SELECT content, content_checksum AS contentChecksum
+       FROM chapter_versions
+       WHERE id = ?`,
+    )
+    .get(ids.version) as { readonly content: string; readonly contentChecksum: string };
+  const confirmed = status === "formal";
+  await executor.execute(
+    `INSERT INTO story_facts (
+       id, project_id, fact_type, content_text, value_json,
+       source_kind, evidence_reference, source_chapter_id, source_version_id,
+       source_start_offset, source_end_offset, source_length, source_excerpt,
+       effective_at, invalidated_at, branch_id, confidence, status, origin,
+       user_confirmed, locked, deprecated, needs_review,
+       confirmed_by_actor_id, confirmed_at, revision, created_at, updated_at
+     ) VALUES (
+       ?, ?, 'story.rule', '必须尊重正文中的既定事实', ?,
+       'chapter_span', '完整章节证据', ?, ?, 0, ?, ?, ?,
+       NULL, NULL, NULL, 1.0, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?
+     )`,
+    [
+      factId,
+      ids.project,
+      JSON.stringify({ rule: "respect-established-facts" }),
+      ids.chapter,
+      ids.version,
+      version.content.length,
+      version.content.length,
+      version.content,
+      status,
+      confirmed ? "user" : "ai_extraction",
+      confirmed ? 1 : 0,
+      confirmed ? 1 : 0,
+      confirmed ? 0 : 1,
+      confirmed ? ids.factActor : null,
+      confirmed ? startedAt : null,
+      startedAt,
+      startedAt,
+    ],
+  );
+  return createMultiAgentReviewConfirmedStoryFactAuthority({
+    id: factId,
+    projectId: ids.project,
+    factType: "story.rule",
+    contentText: "必须尊重正文中的既定事实",
+    structuredValue: { rule: "respect-established-facts" },
+    source: {
+      kind: "chapter_span",
+      reference: "完整章节证据",
+      chapterId: ids.chapter,
+      versionId: ids.version,
+      startOffset: 0,
+      endOffset: version.content.length,
+      sourceLength: version.content.length,
+      excerpt: version.content,
+      contentChecksum: version.contentChecksum,
+    },
+    effectiveAt: null,
+    invalidatedAt: null,
+    confidence: 1,
+    origin: confirmed ? "user" : "ai_extraction",
+    locked: confirmed,
+    revision: 1,
+  });
 }
 
 async function sha256(value: string): Promise<string> {

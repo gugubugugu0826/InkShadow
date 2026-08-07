@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum ProviderKind {
     OpenAiCompatible,
     Ollama,
+    Anthropic,
+    Gemini,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -12,6 +14,7 @@ pub(crate) enum ProviderKind {
 pub(crate) enum AuthenticationMode {
     None,
     BearerKeyring,
+    CustomHeaderKeyring,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -21,6 +24,18 @@ pub(crate) struct ModelEndpointConfig {
     pub(crate) provider: ProviderKind,
     pub(crate) base_url: String,
     pub(crate) authentication: AuthenticationMode,
+    #[serde(default)]
+    pub(crate) credential_header_name: Option<String>,
+    #[serde(default)]
+    pub(crate) model_discovery_path: Option<String>,
+    #[serde(default)]
+    pub(crate) text_generation_path: Option<String>,
+    #[serde(default)]
+    pub(crate) embedding_path: Option<String>,
+    #[serde(default)]
+    pub(crate) request_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) retry_limit: Option<u8>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -41,6 +56,23 @@ pub(crate) struct EmbeddingRequest {
     pub(crate) config: ModelEndpointConfig,
     pub(crate) model: String,
     pub(crate) inputs: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RerankProtocol {
+    QwenOpenAiCompatible,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RerankRequest {
+    pub(crate) config: ModelEndpointConfig,
+    pub(crate) protocol: RerankProtocol,
+    pub(crate) model: String,
+    pub(crate) query: String,
+    pub(crate) documents: Vec<String>,
+    pub(crate) top_n: usize,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -110,6 +142,24 @@ pub(crate) struct EmbeddingResponse {
     pub(crate) embeddings: Vec<Vec<f32>>,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RerankScore {
+    pub(crate) index: usize,
+    pub(crate) relevance_score: f64,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RerankResponse {
+    pub(crate) provider: ProviderKind,
+    pub(crate) protocol: RerankProtocol,
+    pub(crate) endpoint_origin: String,
+    pub(crate) model: String,
+    pub(crate) rankings: Vec<RerankScore>,
+    pub(crate) input_tokens: Option<u32>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GenerationAccepted {
@@ -173,5 +223,38 @@ mod tests {
         assert!(object.contains_key("status"));
         assert!(!value.to_string().contains("prompt"));
         assert!(!value.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn provider_protocol_names_are_stable_for_the_frontend_contract() {
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Anthropic).expect("serialize Anthropic"),
+            "\"anthropic\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Gemini).expect("serialize Gemini"),
+            "\"gemini\""
+        );
+    }
+
+    #[test]
+    fn rerank_response_contract_cannot_echo_query_documents_or_credentials() {
+        let response = RerankResponse {
+            provider: ProviderKind::OpenAiCompatible,
+            protocol: RerankProtocol::QwenOpenAiCompatible,
+            endpoint_origin: "https://workspace.cn-beijing.maas.aliyuncs.com".to_owned(),
+            model: "qwen3-rerank".to_owned(),
+            rankings: vec![RerankScore {
+                index: 1,
+                relevance_score: 0.8,
+            }],
+            input_tokens: Some(10),
+        };
+        let value = serde_json::to_value(response).expect("rerank response should serialize");
+        let serialized = value.to_string();
+        assert!(!serialized.contains("query"));
+        assert!(!serialized.contains("document"));
+        assert!(!serialized.contains("credential"));
+        assert!(!serialized.contains("secret"));
     }
 }

@@ -123,7 +123,23 @@ export function PersistenceRouteBoundary({ children }: { readonly children: Reac
     processingRef.current = cycle;
   }, [blocker, toast]);
 
-  return children;
+  return (
+    <>
+      {children}
+      {blocker.state === "blocked" && (
+        <div
+          className="ink-navigation-save-status"
+          role="status"
+          aria-label="正在保存并切换页面"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          <span className="ink-spinner" aria-hidden="true" />
+          <span>正在保存本地更改，保存完成后将自动切换页面…</span>
+        </div>
+      )}
+    </>
+  );
 }
 
 function showPersistentNotice(

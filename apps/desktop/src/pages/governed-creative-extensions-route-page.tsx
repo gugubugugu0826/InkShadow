@@ -1,7 +1,7 @@
 import { EmptyState, ErrorState } from "@inkshadow/ui";
 import { parseUuidV7, type UuidV7 } from "@inkshadow/domain";
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 
 import { downloadBrowserExportArtifact } from "../infrastructure/export-artifact-download";
 import type { GovernedCreativeExtensionSource } from "../infrastructure/governed-creative-extensions-runtime";
@@ -16,6 +16,7 @@ type SourceState =
 
 export function GovernedCreativeExtensionsRoutePage() {
   const runtime = useRuntime();
+  const navigate = useNavigate();
   const params = useParams<{ projectId: string; chapterId: string }>();
   const projectId = parseUuidV7(params.projectId ?? "");
   const chapterId = parseUuidV7(params.chapterId ?? "");
@@ -58,42 +59,48 @@ export function GovernedCreativeExtensionsRoutePage() {
 
   if (projectIdValue === null || chapterIdValue === null || source.state === "failed") {
     return (
-      <main className="desktop-page">
+      <div className="desktop-page">
         <ErrorState
+          headingLevel={1}
           title="无法打开创作扩展"
-          description="项目、章节或当前权威版本无效。"
+          description="项目、章节或当前权威版本无效。请返回项目列表并重新选择仍存在的章节。"
           errorCode="EXTENSION_ROUTE_INVALID"
+          primaryAction={{ label: "返回项目列表", onClick: () => void navigate("/projects") }}
         />
-      </main>
+      </div>
     );
   }
   if (runtime.governedCreativeExtensions === null) {
     return (
-      <main className="desktop-page">
+      <div className="desktop-page">
         <EmptyState
+          headingLevel={1}
           kind="feature_limited"
           title="创作扩展仅在桌面安全运行时可用"
-          description="浏览器开发模式不会伪装 SQLite 审计、预算或原生模型出口。"
+          description="浏览器开发模式不会伪装桌面数据库审计、预算或本机模型出口。"
+          primaryAction={{ label: "返回项目列表", onClick: () => void navigate("/projects") }}
         />
-      </main>
+      </div>
     );
   }
   if (source.state === "loading") {
     return (
-      <main className="desktop-page">
+      <div className="desktop-page">
         <p role="status">正在校验章节来源版本…</p>
-      </main>
+      </div>
     );
   }
   if (source.state === "missing") {
     return (
-      <main className="desktop-page">
+      <div className="desktop-page">
         <EmptyState
+          headingLevel={1}
           kind="no_data"
           title="章节来源不存在"
           description="请返回项目并选择一个仍存在的章节。"
+          primaryAction={{ label: "返回项目列表", onClick: () => void navigate("/projects") }}
         />
-      </main>
+      </div>
     );
   }
 

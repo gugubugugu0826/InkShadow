@@ -87,6 +87,13 @@ const CONCLUSION_LABELS = {
   convertible_task: "可转任务",
 } as const;
 
+const TASK_PRIORITY_LABELS = {
+  p0: "立即处理",
+  p1: "高优先级",
+  p2: "普通优先级",
+  p3: "低优先级",
+} as const;
+
 const DEFAULT_ROLES = new Set<PersistedMultiAgentReviewRole>(["planner", "critic", "editor"]);
 
 export function MultiAgentReviewPage({
@@ -330,11 +337,11 @@ export function MultiAgentReviewPage({
   }
 
   return (
-    <main className="multi-agent-page">
+    <div className="multi-agent-page">
       <header className="multi-agent-page__header">
         <div>
-          <p className="multi-agent-page__eyebrow">P29 · 本地 AI 工作台</p>
-          <h1>多 Agent 审查</h1>
+          <p className="multi-agent-page__eyebrow">本地 AI 协作工作台</p>
+          <h1>多智能体审查</h1>
           <p>多个本地模型角色按固定轮次讨论，只保存公开结论、来源凭据与隔离候选。</p>
         </div>
         <div className="multi-agent-page__header-actions">
@@ -350,7 +357,7 @@ export function MultiAgentReviewPage({
       {!featureEnabled && (
         <InlineAlert
           tone="warning"
-          title="多 Agent 创建功能当前关闭"
+          title="多智能体创建功能当前关闭"
           description="你仍可只读查看并导出既有本地历史。团队云执行尚未接入权威配额与预留，因此不会在此页面启用。"
         />
       )}
@@ -363,7 +370,7 @@ export function MultiAgentReviewPage({
       {failure !== null && (
         <InlineAlert
           tone="error"
-          title="多 Agent 操作未完成"
+          title="多智能体操作未完成"
           description={failure}
           onDismiss={() => setFailure(null)}
         />
@@ -388,7 +395,7 @@ export function MultiAgentReviewPage({
               description={
                 featureEnabled
                   ? "在右侧设置角色与轮次后开始第一次本地审查。"
-                  : "此项目当前没有可供只读查看的多 Agent 历史。"
+                  : "此项目当前没有可供只读查看的多智能体历史。"
               }
               icon="◎"
             />
@@ -400,6 +407,7 @@ export function MultiAgentReviewPage({
                   type="button"
                   className="multi-agent-history__item"
                   data-selected={selected?.id === session.id || undefined}
+                  aria-pressed={selected?.id === session.id}
                   onClick={() => setSelected(session)}
                 >
                   <StatusBadge status={session.status} />
@@ -751,7 +759,7 @@ export function MultiAgentReviewPage({
           )}
         </section>
       </div>
-    </main>
+    </div>
   );
 }
 
@@ -810,9 +818,9 @@ function ConclusionList({
               {conclusion.sourceReferences.map((reference, index) => (
                 <span
                   key={`${conclusion.id}-source-${String(index)}`}
-                  title={`${reference.kind} · ${reference.sourceId} · revision ${String(
-                    reference.sourceRevision,
-                  )}`}
+                  title={`来源类型：${sourceReferenceKindLabel(reference.kind)}；来源记录：${
+                    reference.sourceId
+                  }；来源修订：${String(reference.sourceRevision)}`}
                 >
                   〔{reference.authoritativeLabel ?? reference.modelLabel}〕
                   {reference.authoritativeLabel !== null &&
@@ -824,7 +832,7 @@ function ConclusionList({
           )}
           {conclusion.taskProposal !== null && (
             <p className="multi-agent-task-proposal">
-              可转任务 · {conclusion.taskProposal.priority.toUpperCase()} ·{" "}
+              可转任务 · {TASK_PRIORITY_LABELS[conclusion.taskProposal.priority]} ·{" "}
               {conclusion.taskProposal.title}
             </p>
           )}
@@ -922,6 +930,18 @@ function conclusionTone(category: MultiAgentReviewConclusion["category"]) {
     case "disputed_opinion":
       return "neutral" as const;
   }
+}
+
+function sourceReferenceKindLabel(
+  kind: MultiAgentReviewConclusion["sourceReferences"][number]["kind"],
+): string {
+  return {
+    chapter: "章节",
+    outline_node: "大纲节点",
+    material: "项目素材",
+    project_rule: "项目规则",
+    turn: "审查轮次",
+  }[kind];
 }
 
 function candidateStatusLabel(

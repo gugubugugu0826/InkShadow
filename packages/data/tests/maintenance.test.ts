@@ -93,6 +93,22 @@ const inkShadowMigration = [
     new URL("../migrations/0029_community_marketplace_installs.sql", import.meta.url),
     "utf8",
   ),
+  readFileSync(new URL("../migrations/0031_model_hub.sql", import.meta.url), "utf8"),
+  readFileSync(new URL("../migrations/0032_unified_story_facts.sql", import.meta.url), "utf8"),
+  readFileSync(new URL("../migrations/0033_causal_event_graph.sql", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../migrations/0034_context_compilation_trace.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0035_writing_feedback_learning.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0036_story_planning_candidates.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(new URL("../migrations/0037_model_hub_expert_options.sql", import.meta.url), "utf8"),
 ].join("\n");
 const BACKUP_PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const BACKUP_ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
@@ -102,6 +118,8 @@ const BACKUP_FINE_TUNING_DATASET_ID = "maintenance-fine-tuning-dataset";
 const BACKUP_FINE_TUNING_JOB_ID = "maintenance-fine-tuning-job";
 const BACKUP_FINE_TUNING_ARTIFACT_ID = "maintenance-fine-tuning-artifact";
 const BACKUP_MARKETPLACE_ARTIFACT_ID = "maintenance-marketplace-artifact";
+const BACKUP_CHAPTER_ID = "019f9f4a-b3c7-7350-9226-000000000201";
+const BACKUP_CHAPTER_VERSION_ID = "019f9f4a-b3c7-7350-9226-000000000202";
 
 afterEach(() => {
   rmSync(backupPath, { force: true });
@@ -193,16 +211,28 @@ describe("DatabaseMaintenanceService", () => {
     await insertProject(executor, BACKUP_PROJECT_ID, "备份中的项目");
     await insertTeamTemplateApplication(executor);
     await insertGovernedExtensionMetadata(executor);
+    await insertCausalEventGraph(executor);
+    await insertContextCompilationTrace(executor);
     await insertSyncAndAccessMetadata(executor);
     await insertProjectKeyMetadata(executor);
     await insertModelProfile(executor);
+    await insertModelHubExpertConnection(executor);
     await insertSearchSnapshot(executor, "备份中的派生索引");
     await insertVectorProjection(executor);
     await insertGraphProjectionState(executor);
     await insertFineTuningGovernance(executor);
     await insertMarketplaceInstall(executor);
+    await insertUnifiedStoryFact(executor);
+    await insertWritingFeedbackLearning(executor);
     const backup = await service.createConsistentBackup(backupPath);
     expect(backup.ok).toBe(true);
+    await executor.execute(
+      "DELETE FROM context_compilation_runs WHERE id = 'maintenance-context-run'",
+    );
+    await executor.execute("DELETE FROM causal_events WHERE project_id = ?", [BACKUP_PROJECT_ID]);
+    await executor.execute("DELETE FROM causal_evidence_sources WHERE project_id = ?", [
+      BACKUP_PROJECT_ID,
+    ]);
     await insertProject(executor, "019f9f4a-b3c7-7350-9226-000000000002", "恢复前新增");
     await executor.execute(
       "UPDATE sync_tombstones SET acknowledged_device_ids_json = ? WHERE project_id = ?",
@@ -213,6 +243,14 @@ describe("DatabaseMaintenanceService", () => {
     ]);
     await executor.execute(
       "UPDATE model_profiles SET selected_model = 'changed-model' WHERE provider_id = 'openai'",
+    );
+    await executor.execute(
+      `UPDATE model_provider_connections
+       SET authentication_mode = 'bearer_keyring', credential_header_name = NULL,
+           model_discovery_path = '/changed/models',
+           text_generation_path = '/changed/chat', embedding_path = '/changed/embed',
+           request_timeout_ms = 120000, retry_limit = 0
+       WHERE id = 'maintenance-custom-model'`,
     );
     await executor.execute(
       `UPDATE device_public_key_records
@@ -257,6 +295,20 @@ describe("DatabaseMaintenanceService", () => {
         BACKUP_MARKETPLACE_ARTIFACT_ID,
       ],
     );
+    await executor.execute(
+      `UPDATE story_facts
+       SET locked = 1, revision = 3, updated_at = '2026-07-27T00:01:00.000Z'
+      WHERE id = 'maintenance-story-fact' AND revision = 2`,
+    );
+    await executor.execute(
+      `UPDATE writing_preferences
+       SET preference_text = '恢复前被修改', revision = 2,
+           updated_at = '2026-07-27T00:01:00.000Z'
+       WHERE id = 'maintenance-writing-preference'`,
+    );
+    await executor.execute(
+      "DELETE FROM writing_feedback_events WHERE id = 'maintenance-feedback-event'",
+    );
 
     const restored = await service.restoreConsistentBackup(backupPath);
 
@@ -265,9 +317,30 @@ describe("DatabaseMaintenanceService", () => {
       value: {
         sourceKind: "user_selected_file",
         integrityVerified: true,
-        restoredTableCount: 97,
+        restoredTableCount: 128,
       },
     });
+    await expect(
+      executor.select<{ text: string; revision: number }>(
+        `SELECT preference_text AS text, revision
+         FROM writing_preferences
+         WHERE id = 'maintenance-writing-preference'`,
+      ),
+    ).resolves.toEqual([{ text: "减少环境描写。", revision: 1 }]);
+    await expect(
+      executor.select<{ revision: number; kind: string }>(
+        `SELECT revision, change_kind AS kind
+         FROM writing_preference_revisions
+         WHERE preference_id = 'maintenance-writing-preference'`,
+      ),
+    ).resolves.toEqual([{ revision: 1, kind: "created" }]);
+    await expect(
+      executor.select<{ code: string }>(
+        `SELECT feedback_code AS code
+         FROM writing_feedback_events
+         WHERE id = 'maintenance-feedback-event'`,
+      ),
+    ).resolves.toEqual([{ code: "less_environment_description" }]);
     await expect(executor.select<{ name: string }>("SELECT name FROM projects")).resolves.toEqual([
       { name: "备份中的项目" },
     ]);
@@ -289,6 +362,37 @@ describe("DatabaseMaintenanceService", () => {
         "SELECT selected_model AS selectedModel FROM model_profiles WHERE provider_id = 'openai'",
       ),
     ).resolves.toEqual([{ selectedModel: "gpt-test" }]);
+    await expect(
+      executor.select<{
+        authenticationMode: string;
+        credentialHeaderName: string;
+        modelDiscoveryPath: string;
+        textGenerationPath: string;
+        embeddingPath: string;
+        requestTimeoutMs: number;
+        retryLimit: number;
+      }>(
+        `SELECT authentication_mode AS authenticationMode,
+                credential_header_name AS credentialHeaderName,
+                model_discovery_path AS modelDiscoveryPath,
+                text_generation_path AS textGenerationPath,
+                embedding_path AS embeddingPath,
+                request_timeout_ms AS requestTimeoutMs,
+                retry_limit AS retryLimit
+         FROM model_provider_connections
+         WHERE id = 'maintenance-custom-model'`,
+      ),
+    ).resolves.toEqual([
+      {
+        authenticationMode: "custom_header_keyring",
+        credentialHeaderName: "x-api-key",
+        modelDiscoveryPath: "/catalog/models",
+        textGenerationPath: "/text/chat",
+        embeddingPath: "/vectors/embed",
+        requestTimeoutMs: 47_000,
+        retryLimit: 2,
+      },
+    ]);
     await expect(
       executor.select<{ state: string; displayName: string }>(
         `SELECT state, display_name AS displayName
@@ -448,6 +552,146 @@ describe("DatabaseMaintenanceService", () => {
     expect(JSON.parse(restoredMarketplace[0]?.payloadJson ?? "{}")).toMatchObject({
       label: "backed-up",
     });
+    await expect(
+      executor.select<{ revision: number; locked: number }>(
+        `SELECT revision, locked
+         FROM story_facts
+         WHERE id = 'maintenance-story-fact'`,
+      ),
+    ).resolves.toEqual([{ revision: 2, locked: 0 }]);
+    await expect(
+      executor.select<{ revisionCount: number; linkCount: number }>(
+        `SELECT
+           (SELECT COUNT(*) FROM story_fact_revisions
+            WHERE fact_id = 'maintenance-story-fact') AS revisionCount,
+           (SELECT COUNT(*) FROM story_fact_legacy_links
+            WHERE fact_id = 'maintenance-story-fact') AS linkCount`,
+      ),
+    ).resolves.toEqual([{ revisionCount: 2, linkCount: 1 }]);
+    await expect(
+      executor.select<{ tableName: string; count: number }>(
+        `SELECT 'causal_evidence_sources' AS tableName, COUNT(*) AS count
+           FROM causal_evidence_sources
+         UNION ALL
+         SELECT 'causal_events', COUNT(*) FROM causal_events
+         UNION ALL
+         SELECT 'causal_event_participants', COUNT(*) FROM causal_event_participants
+         UNION ALL
+         SELECT 'causal_event_prerequisites', COUNT(*) FROM causal_event_prerequisites
+         UNION ALL
+         SELECT 'causal_event_character_changes', COUNT(*) FROM causal_event_character_changes
+         UNION ALL
+         SELECT 'causal_event_relationship_changes', COUNT(*) FROM causal_event_relationship_changes
+         UNION ALL
+         SELECT 'causal_event_item_changes', COUNT(*) FROM causal_event_item_changes
+         UNION ALL
+         SELECT 'causal_event_informed_characters', COUNT(*) FROM causal_event_informed_characters
+         UNION ALL
+         SELECT 'causal_event_foreshadow_progress', COUNT(*) FROM causal_event_foreshadow_progress
+         UNION ALL
+         SELECT 'causal_event_relations', COUNT(*) FROM causal_event_relations`,
+      ),
+    ).resolves.toEqual([
+      { tableName: "causal_evidence_sources", count: 1 },
+      { tableName: "causal_events", count: 2 },
+      { tableName: "causal_event_participants", count: 1 },
+      { tableName: "causal_event_prerequisites", count: 1 },
+      { tableName: "causal_event_character_changes", count: 1 },
+      { tableName: "causal_event_relationship_changes", count: 1 },
+      { tableName: "causal_event_item_changes", count: 1 },
+      { tableName: "causal_event_informed_characters", count: 1 },
+      { tableName: "causal_event_foreshadow_progress", count: 1 },
+      { tableName: "causal_event_relations", count: 1 },
+    ]);
+    await expect(
+      executor.select<{
+        eventText: string;
+        evidenceLocator: string;
+        prerequisiteEventId: string;
+        relationKind: string;
+      }>(
+        `SELECT
+           event.event_text AS eventText,
+           evidence.locator AS evidenceLocator,
+           prerequisite.referenced_event_id AS prerequisiteEventId,
+           relation.relation_kind AS relationKind
+         FROM causal_events AS event
+         INNER JOIN causal_evidence_sources AS evidence
+           ON evidence.id = event.evidence_id
+         INNER JOIN causal_event_prerequisites AS prerequisite
+           ON prerequisite.event_id = event.id
+         INNER JOIN causal_event_relations AS relation
+           ON relation.to_event_id = event.id
+         WHERE event.id = 'maintenance-causal-event-b'`,
+      ),
+    ).resolves.toEqual([
+      {
+        eventText: "The guide opens the sealed gate.",
+        evidenceLocator: "chapter:maintenance#causal-span",
+        prerequisiteEventId: "maintenance-causal-event-a",
+        relationKind: "causes",
+      },
+    ]);
+    await expect(
+      executor.select<{
+        taskType: string;
+        layer: string;
+        included: number;
+        sourceType: string;
+        sourceId: string;
+        locator: string | null;
+      }>(
+        `SELECT
+           run.task_type AS taskType,
+           entry.layer,
+           entry.included,
+           source.source_type AS sourceType,
+           source.source_id AS sourceId,
+           source.locator
+         FROM context_compilation_runs AS run
+         INNER JOIN context_compilation_entries AS entry
+           ON entry.run_id = run.id
+         INNER JOIN context_compilation_entry_sources AS source
+           ON source.run_id = entry.run_id
+          AND source.candidate_id = entry.candidate_id
+         WHERE run.id = 'maintenance-context-run'
+         ORDER BY entry.evaluation_order`,
+      ),
+    ).resolves.toEqual([
+      {
+        taskType: "next_scene",
+        layer: "related_causal_chain",
+        included: 1,
+        sourceType: "causal_event",
+        sourceId: "maintenance-causal-event-b",
+        locator: "causal-event:maintenance-causal-event-b",
+      },
+      {
+        taskType: "next_scene",
+        layer: "semantic_retrieval",
+        included: 0,
+        sourceType: "search_document",
+        sourceId: "maintenance-search-document",
+        locator: "search-document:maintenance-search-document",
+      },
+    ]);
+    await expect(
+      executor.select<{ tableName: string; columnName: string }>(
+        `SELECT m.name AS tableName, p.name AS columnName
+         FROM sqlite_schema AS m
+         INNER JOIN pragma_table_info(m.name) AS p
+         WHERE m.type = 'table'
+           AND m.name IN (
+             'context_compilation_runs',
+             'context_compilation_entries',
+             'context_compilation_entry_sources'
+           )
+           AND lower(p.name) IN (
+             'prompt', 'prompt_text', 'content', 'content_text', 'excerpt',
+             'embedding', 'vector', 'payload_json', 'body', 'body_text'
+           )`,
+      ),
+    ).resolves.toEqual([]);
     await executor.close();
   });
 
@@ -744,6 +988,234 @@ async function insertMarketplaceInstall(executor: NodeSqliteExecutor): Promise<v
   );
 }
 
+async function insertUnifiedStoryFact(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  await executor.execute(
+    `INSERT INTO story_facts (
+       id, project_id, fact_type, content_text, value_json,
+       source_kind, evidence_reference, source_chapter_id, source_version_id,
+       source_start_offset, source_end_offset, source_length, source_excerpt,
+       effective_at, invalidated_at, branch_id, confidence, status, origin,
+       user_confirmed, locked, deprecated, needs_review,
+       confirmed_by_actor_id, confirmed_at, revision, created_at, updated_at
+     ) VALUES (
+       'maintenance-story-fact', ?, 'world_rule', '施法会遗忘一个名字。', NULL,
+       'legacy_record', 'legacy:story_formal_records:maintenance-formal:r1',
+       NULL, NULL, NULL, NULL, NULL, NULL,
+       NULL, NULL, NULL, 0.5, 'formal', 'legacy',
+       1, 0, 0, 0, ?, ?, 2, ?, ?
+     )`,
+    [BACKUP_PROJECT_ID, "019f9f4a-b3c7-7350-9226-000000000170", now, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO story_fact_revisions (
+       fact_id, project_id, revision, change_kind, recorded_at, snapshot_json
+     ) VALUES
+       ('maintenance-story-fact', ?, 1, 'legacy_backfill', ?, '{"revision":1}'),
+       ('maintenance-story-fact', ?, 2, 'confirmed', ?, '{"revision":2}')`,
+    [BACKUP_PROJECT_ID, now, BACKUP_PROJECT_ID, now],
+  );
+  await executor.execute(
+    `INSERT INTO story_fact_legacy_links (
+       fact_id, project_id, legacy_kind, legacy_id, legacy_revision,
+       link_mode, created_at
+     ) VALUES (
+       'maintenance-story-fact', ?, 'formal_record', 'maintenance-formal',
+       1, 'backfill', ?
+     )`,
+    [BACKUP_PROJECT_ID, now],
+  );
+}
+
+async function insertWritingFeedbackLearning(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  await executor.execute(
+    `INSERT INTO writing_feedback_policies (
+       project_id, learning_enabled, revision, created_at, updated_at
+     ) VALUES (?, 1, 1, ?, ?)`,
+    [BACKUP_PROJECT_ID, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO writing_preferences (
+       id, project_id, preference_text, source, source_feedback_code,
+       evidence_count, enabled, revision, created_at, updated_at, deleted_at
+     ) VALUES (
+       'maintenance-writing-preference', ?, '减少环境描写。', 'feedback_pattern',
+       'less_environment_description', 2, 1, 1, ?, ?, NULL
+     )`,
+    [BACKUP_PROJECT_ID, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO writing_feedback_events (
+       id, project_id, chapter_id, candidate_id, action, feedback_code,
+       custom_feedback, application_strategy, accepted_change_count,
+       rejected_change_count, created_at
+     ) VALUES (
+       'maintenance-feedback-event', ?, NULL, NULL, 'explicit_feedback',
+       'less_environment_description', NULL, NULL, NULL, NULL, ?
+     )`,
+    [BACKUP_PROJECT_ID, now],
+  );
+}
+
+async function insertCausalEventGraph(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  const evidenceId = "maintenance-causal-evidence";
+  const evidenceExcerpt = "causal evidence";
+  await executor.transaction(async (transaction) => {
+    await transaction.execute(
+      `INSERT INTO causal_evidence_sources (
+         id, project_id, chapter_id, chapter_version_id, content_hash,
+         locator, excerpt, start_offset, end_offset, source_length, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+      [
+        evidenceId,
+        BACKUP_PROJECT_ID,
+        BACKUP_CHAPTER_ID,
+        BACKUP_CHAPTER_VERSION_ID,
+        "1".repeat(64),
+        "chapter:maintenance#causal-span",
+        evidenceExcerpt,
+        evidenceExcerpt.length,
+        evidenceExcerpt.length,
+        now,
+      ],
+    );
+    await transaction.execute(
+      `INSERT INTO causal_events (
+         id, project_id, branch_id, status, narrative_order, narrative_label,
+         location_id, location_label, event_text, result_text, evidence_id,
+         created_at, updated_at
+       ) VALUES
+         ('maintenance-causal-event-a', ?, 'main', 'confirmed', 1, 'First bell',
+          'sealed-gate', 'The sealed gate', 'The hero presents the seal.',
+          'The guide recognizes the royal mark.', ?, ?, ?),
+         ('maintenance-causal-event-b', ?, 'main', 'confirmed', 2, 'Second bell',
+          'sealed-gate', 'The sealed gate', 'The guide opens the sealed gate.',
+          'The hero enters the old city.', ?, ?, ?)`,
+      [BACKUP_PROJECT_ID, evidenceId, now, now, BACKUP_PROJECT_ID, evidenceId, now, now],
+    );
+    await transaction.execute(
+      `INSERT INTO causal_event_participants (
+         event_id, project_id, branch_id, character_id
+       ) VALUES ('maintenance-causal-event-a', ?, 'main', 'character-hero')`,
+      [BACKUP_PROJECT_ID],
+    );
+    await transaction.execute(
+      `INSERT INTO causal_event_prerequisites (
+         id, event_id, project_id, branch_id, prerequisite_kind,
+         reference_id, referenced_event_id, description, evidence_id
+       ) VALUES (
+         'maintenance-causal-prerequisite', 'maintenance-causal-event-b', ?, 'main',
+         'event', 'maintenance-causal-event-a', 'maintenance-causal-event-a',
+         'The seal must be presented before the gate opens.', ?
+       )`,
+      [BACKUP_PROJECT_ID, evidenceId],
+    );
+    await transaction.execute(
+      `INSERT INTO causal_event_character_changes (
+         id, event_id, project_id, branch_id, character_id, attribute_key,
+         before_value_json, after_value_json, evidence_id
+       ) VALUES (
+         'maintenance-causal-character-change', 'maintenance-causal-event-a', ?, 'main',
+         'character-hero', 'location', '"outside"', '"at_gate"', ?
+       )`,
+      [BACKUP_PROJECT_ID, evidenceId],
+    );
+    await transaction.execute(
+      `INSERT INTO causal_event_relationship_changes (
+         id, event_id, project_id, branch_id, from_character_id, to_character_id,
+         relationship_key, before_value_json, after_value_json, evidence_id
+       ) VALUES (
+         'maintenance-causal-relationship-change', 'maintenance-causal-event-a', ?, 'main',
+         'character-guide', 'character-hero', 'trust', '0', '1', ?
+       )`,
+      [BACKUP_PROJECT_ID, evidenceId],
+    );
+    await transaction.execute(
+      `INSERT INTO causal_event_item_changes (
+         id, event_id, project_id, branch_id, item_id, change_kind,
+         from_character_id, to_character_id, evidence_id
+       ) VALUES (
+         'maintenance-causal-item-change', 'maintenance-causal-event-a', ?, 'main',
+         'royal-seal', 'acquired', NULL, 'character-hero', ?
+       )`,
+      [BACKUP_PROJECT_ID, evidenceId],
+    );
+    await transaction.execute(
+      `INSERT INTO causal_event_informed_characters (
+         event_id, project_id, branch_id, character_id
+       ) VALUES ('maintenance-causal-event-a', ?, 'main', 'character-guide')`,
+      [BACKUP_PROJECT_ID],
+    );
+    await transaction.execute(
+      `INSERT INTO causal_event_foreshadow_progress (
+         id, event_id, project_id, branch_id, foreshadow_id,
+         progress_kind, description, evidence_id
+       ) VALUES (
+         'maintenance-causal-foreshadow', 'maintenance-causal-event-a', ?, 'main',
+         'missing-prince', 'advanced', 'The guide recognizes the royal seal.', ?
+       )`,
+      [BACKUP_PROJECT_ID, evidenceId],
+    );
+    await transaction.execute(
+      `INSERT INTO causal_event_relations (
+         id, project_id, branch_id, from_event_id, to_event_id,
+         relation_kind, evidence_id, created_at
+       ) VALUES (
+         'maintenance-causal-relation', ?, 'main', 'maintenance-causal-event-a',
+         'maintenance-causal-event-b', 'causes', ?, ?
+       )`,
+      [BACKUP_PROJECT_ID, evidenceId, now],
+    );
+  });
+}
+
+async function insertContextCompilationTrace(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  await executor.transaction(async (transaction) => {
+    await transaction.execute(
+      `INSERT INTO context_compilation_runs (
+         id, project_id, chapter_id, task_type, maximum_context_tokens,
+         required_tokens, used_tokens, remaining_tokens, discarded_tokens,
+         token_estimate_source, candidate_count, included_count, discarded_count,
+         created_at
+       ) VALUES (
+         'maintenance-context-run', ?, ?, 'next_scene', 1000,
+         300, 300, 700, 100, 'utf8_conservative', 2, 1, 1, ?
+       )`,
+      [BACKUP_PROJECT_ID, BACKUP_CHAPTER_ID, now],
+    );
+    await transaction.execute(
+      `INSERT INTO context_compilation_entries (
+         run_id, candidate_id, layer, selection_reason, included,
+         discarded_reason, estimated_tokens, evaluation_order, layer_order,
+         priority, relevance_score, required, budget_remaining_before,
+         budget_remaining_after
+       ) VALUES
+         ('maintenance-context-run', 'maintenance-context-causal',
+          'related_causal_chain', 'Directly affects the requested next scene.',
+          1, NULL, 300, 1, 7, 100, 0.95, 1, 1000, 700),
+         ('maintenance-context-run', 'maintenance-context-search',
+          'semantic_retrieval', 'Relevant but outside the remaining token budget.',
+          0, 'token_budget_exceeded', 100, 2, 11, 10, 0.60, 0, 700, 700)`,
+    );
+    await transaction.execute(
+      `INSERT INTO context_compilation_entry_sources (
+         run_id, candidate_id, source_order, source_type, source_id,
+         source_version_id, locator, content_hash
+       ) VALUES
+         ('maintenance-context-run', 'maintenance-context-causal', 1,
+          'causal_event', 'maintenance-causal-event-b', NULL,
+          'causal-event:maintenance-causal-event-b', ?),
+         ('maintenance-context-run', 'maintenance-context-search', 1,
+          'search_document', 'maintenance-search-document', NULL,
+          'search-document:maintenance-search-document', ?)`,
+      ["1".repeat(64), "2".repeat(64)],
+    );
+  });
+}
+
 function marketplaceInstallPayload(input: {
   readonly artifactId: string;
   readonly versionId: string;
@@ -991,6 +1463,26 @@ async function insertModelProfile(executor: NodeSqliteExecutor): Promise<void> {
       created_at,
       updated_at
     ) VALUES ('openai', 'open_ai_compatible', 'https://api.openai.com/v1', 'bearer_keyring', 'gpt-test', 1, ?, ?)`,
+    [now, now],
+  );
+}
+
+async function insertModelHubExpertConnection(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  await executor.execute(
+    `INSERT INTO model_provider_connections (
+       id, provider_kind, display_name, protocol, base_url,
+       credential_ref, credential_state, authentication_mode,
+       credential_header_name, model_discovery_path, text_generation_path,
+       embedding_path, request_timeout_ms, retry_limit, enabled,
+       revision, created_at, updated_at
+     ) VALUES (
+       'maintenance-custom-model', 'custom_openai_compatible', 'Maintenance custom model',
+       'openai_compatible', 'https://models.example.test/v1',
+       'keyring:model-hub:maintenance-custom-model', 'present', 'custom_header_keyring',
+       'x-api-key', '/catalog/models', '/text/chat', '/vectors/embed',
+       47000, 2, 1, 1, ?, ?
+     )`,
     [now, now],
   );
 }

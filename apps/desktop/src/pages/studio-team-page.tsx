@@ -6,6 +6,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Dialog,
   EmptyState,
   ErrorState,
   FormField,
@@ -108,6 +109,22 @@ interface VisibleError {
   readonly status?: number;
 }
 
+type PendingTeamChange =
+  | Readonly<{
+      kind: "role";
+      target: CloudTeamMembership;
+      nextRole: StudioTeamRole;
+    }>
+  | Readonly<{
+      kind: "assignment";
+      target: CloudTeamMembership;
+      existing: CloudProjectAssignment | undefined;
+    }>
+  | Readonly<{
+      kind: "remove";
+      target: CloudTeamMembership;
+    }>;
+
 export function StudioTeamPage() {
   const runtime = useRuntime();
   const navigate = useNavigate();
@@ -145,6 +162,7 @@ export function StudioTeamPage() {
   const keyPublicationAbort = useRef<AbortController | null>(null);
   const keyVerificationAbort = useRef<AbortController | null>(null);
   const [projectId, setProjectId] = useState("");
+  const [pendingTeamChange, setPendingTeamChange] = useState<PendingTeamChange | null>(null);
 
   const loadWorkspace = useCallback(
     async (signal?: AbortSignal) => {
@@ -303,7 +321,7 @@ export function StudioTeamPage() {
           setLocalTeamProjectKey({
             status: "unavailable",
             projectId: nextProjectId,
-            reason: "当前设备没有该项目的 active 本地密钥 bundle。",
+            reason: "当前设备没有该项目的有效本地密钥包。",
           });
           return;
         }
@@ -436,77 +454,77 @@ export function StudioTeamPage() {
           assignments: assignments.assignments,
           assignmentsComplete: assignments.complete,
         })
-      : denied("请先完整读取项目 assignment，再执行团队密钥发放。");
+      : denied("请先完整读取项目权限，再执行团队密钥授权。");
 
   const envelopeVerificationDecision: PermissionDecision =
     keyService === null
       ? denied("当前运行环境没有可用的原生项目密钥验收边界。")
       : assignments.status !== "ready" || !assignments.complete
-        ? denied("请先完整读取项目 assignment，再验证当前设备的团队密钥信封。")
+        ? denied("请先完整读取项目权限，再验证当前设备的团队密钥授权。")
         : actor === null ||
             !assignments.assignments.some(
               (assignment) =>
                 assignment.membershipId === actor.membershipId && assignment.state === "active",
             )
-          ? denied("当前成员没有该项目的有效 assignment，不能读取当前设备密钥信封。")
+          ? denied("当前成员没有该项目的有效权限，不能读取当前设备的团队密钥授权。")
           : { allowed: true, reason: "" };
   const studioReviewDecision: PermissionDecision =
     runtime.studioReview === null
       ? denied("当前运行环境没有完整的原生团队加密审阅能力。")
       : assignments.status !== "ready" || !assignments.complete
-        ? denied("请先完整读取项目 assignment，再打开团队审阅。")
+        ? denied("请先完整读取项目权限，再打开团队审阅。")
         : actor === null ||
             !assignments.assignments.some(
               (assignment) =>
                 assignment.membershipId === actor.membershipId && assignment.state === "active",
             )
-          ? denied("当前成员没有该项目的有效 assignment，不能打开团队审阅。")
+          ? denied("当前成员没有该项目的有效权限，不能打开团队审阅。")
           : { allowed: true, reason: "" };
   const teamTemplateDecision: PermissionDecision =
     runtime.studioTeamTemplates === null
       ? denied("当前运行环境没有完整的项目密钥、云会话与本地模板事务能力。")
       : assignments.status !== "ready" || !assignments.complete
-        ? denied("请先完整读取项目 assignment，再打开加密团队模板。")
+        ? denied("请先完整读取项目权限，再打开加密团队模板。")
         : actor === null ||
             actor.role === "finance_admin" ||
             !assignments.assignments.some(
               (assignment) =>
                 assignment.membershipId === actor.membershipId && assignment.state === "active",
             )
-          ? denied("当前成员没有该项目的模板读取权限或有效 assignment。")
+          ? denied("当前成员没有该项目的模板读取权限或有效项目权限。")
           : { allowed: true, reason: "" };
 
   if (service === null) {
     return (
-      <main className="studio-team-page">
+      <div className="studio-team-page">
         <PageIntro />
         <EmptyState
           kind="feature_limited"
           title="团队云服务未配置"
-          description="当前运行环境没有安全的原生云会话边界。团队操作不会在本地伪造成功，也不会要求前端保存 access token。"
+          description="当前运行环境没有安全的原生云会话边界。团队操作不会在本地伪造成功，也不会要求前端保存访问令牌。"
           primaryAction={{
             label: "返回项目",
             onClick: () => void navigate("/projects"),
           }}
         />
-      </main>
+      </div>
     );
   }
 
   if (bootstrap.status === "loading") {
     return (
-      <main className="studio-team-page">
+      <div className="studio-team-page">
         <PageIntro />
         <PageStateBoundary state="loading" loadingLabel="正在读取团队工作区">
           <span />
         </PageStateBoundary>
-      </main>
+      </div>
     );
   }
 
   if (bootstrap.status === "signed_out") {
     return (
-      <main className="studio-team-page">
+      <div className="studio-team-page">
         <PageIntro />
         <EmptyState
           kind="forbidden"
@@ -521,20 +539,20 @@ export function StudioTeamPage() {
             onClick: () => void loadWorkspace(),
           }}
         />
-      </main>
+      </div>
     );
   }
 
   if (bootstrap.status === "error") {
     return (
-      <main className="studio-team-page">
+      <div className="studio-team-page">
         <PageIntro />
         <VisibleErrorState
           title="无法读取团队列表"
           error={bootstrap.error}
           retry={() => void loadWorkspace()}
         />
-      </main>
+      </div>
     );
   }
 
@@ -724,9 +742,6 @@ export function StudioTeamPage() {
       setOperationError({ code: "ACTION_FORBIDDEN", description: decision.reason });
       return;
     }
-    if (!window.confirm(`确认移除成员 ${target.accountId}？此操作会使其团队身份失效。`)) {
-      return;
-    }
     setBusy(`remove:${target.membershipId}`);
     setOperationError(null);
     setNotice(null);
@@ -892,7 +907,7 @@ export function StudioTeamPage() {
         openReady: true,
         receiptState: result.receipt.state,
       });
-      setNotice("当前设备的团队项目密钥信封已在原生凭据边界内完成验真。");
+      setNotice("当前设备的团队项目密钥授权已在系统安全边界内完成验证。");
     } catch (error: unknown) {
       if (controller.signal.aborted) {
         return;
@@ -911,7 +926,7 @@ export function StudioTeamPage() {
   }
 
   return (
-    <main className="studio-team-page">
+    <div className="studio-team-page">
       <PageIntro />
 
       {operationError !== null && (
@@ -936,7 +951,7 @@ export function StudioTeamPage() {
       <div className="studio-team-page__grid">
         <Card>
           <CardHeader>
-            <CardTitle>我的团队</CardTitle>
+            <CardTitle headingLevel={2}>我的团队</CardTitle>
             <CardDescription>创建团队或选择一个团队管理成员。</CardDescription>
           </CardHeader>
           <CardContent className="studio-team-page__stack">
@@ -1009,7 +1024,7 @@ export function StudioTeamPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>手动接受邀请</CardTitle>
+            <CardTitle headingLevel={2}>手动接受邀请</CardTitle>
             <CardDescription>
               邀请 token 只存在于此输入框的组件内存中，提交开始后立即清空。
             </CardDescription>
@@ -1080,7 +1095,7 @@ export function StudioTeamPage() {
             <CardHeader>
               <div className="studio-team-page__heading-row">
                 <div>
-                  <CardTitle>{selectedTeam.displayName} · 成员</CardTitle>
+                  <CardTitle headingLevel={2}>{selectedTeam.displayName} · 成员</CardTitle>
                   <CardDescription>
                     服务端角色和修订号共同约束每项变更；无法验证权限时操作会关闭。
                   </CardDescription>
@@ -1095,8 +1110,10 @@ export function StudioTeamPage() {
                 ownerCount={ownerCount}
                 busy={busy}
                 reload={() => void loadMembers(selectedTeam.teamId)}
-                changeRole={(target, role) => void changeRole(target, role)}
-                remove={(target) => void removeMember(target)}
+                changeRole={(target, role) =>
+                  setPendingTeamChange({ kind: "role", target, nextRole: role })
+                }
+                remove={(target) => setPendingTeamChange({ kind: "remove", target })}
               />
 
               <form
@@ -1167,7 +1184,7 @@ export function StudioTeamPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>项目 assignment</CardTitle>
+              <CardTitle headingLevel={2}>项目权限</CardTitle>
               <CardDescription>
                 查看和设置团队成员的项目业务授权。需要当前角色为所有者或管理员，且当前成员已分配到该项目。
               </CardDescription>
@@ -1229,7 +1246,9 @@ export function StudioTeamPage() {
                 actor={actor}
                 busy={busy}
                 reload={() => void loadAssignments(selectedTeam.teamId, projectId)}
-                setAssignment={(target, existing) => void setAssignment(target, existing)}
+                setAssignment={(target, existing) =>
+                  setPendingTeamChange({ kind: "assignment", target, existing })
+                }
               />
 
               {assignments.status === "ready" && (
@@ -1309,18 +1328,109 @@ export function StudioTeamPage() {
 
               <InlineAlert
                 tone="warning"
-                title="assignment 不等于端到端密钥授权"
+                title="项目权限不等于端到端密钥授权"
                 description={
                   keyService === null || cloudIdentity === null || projectKeys === null
-                    ? "当前仅能管理服务端业务访问范围，未配置团队项目密钥 envelope 服务。assignment 不会自动产生端到端密钥授权。"
-                    : "assignment 只定义服务端业务访问范围。密钥 envelope 必须通过上方独立操作，按服务端返回的精确合资格设备快照发放。"
+                    ? "当前仅能管理云端业务访问范围，未配置团队项目密钥授权服务。项目权限不会自动产生端到端密钥授权。"
+                    : "项目权限只定义云端业务访问范围。端到端密钥授权必须通过上方独立操作，按云端确认的合资格设备清单发放。"
                 }
               />
             </CardContent>
           </Card>
         </>
       )}
-    </main>
+      <TeamChangeConfirmation
+        change={pendingTeamChange}
+        busy={busy !== null}
+        onCancel={() => setPendingTeamChange(null)}
+        onConfirm={() => {
+          const change = pendingTeamChange;
+          if (change === null) {
+            return;
+          }
+          setPendingTeamChange(null);
+          if (change.kind === "role") {
+            void changeRole(change.target, change.nextRole);
+          } else if (change.kind === "assignment") {
+            void setAssignment(change.target, change.existing);
+          } else {
+            void removeMember(change.target);
+          }
+        }}
+      />
+    </div>
+  );
+}
+
+function TeamChangeConfirmation(props: {
+  readonly change: PendingTeamChange | null;
+  readonly busy: boolean;
+  readonly onCancel: () => void;
+  readonly onConfirm: () => void;
+}) {
+  const change = props.change;
+  const title =
+    change?.kind === "role"
+      ? "确认更改成员角色"
+      : change?.kind === "assignment"
+        ? change.existing?.state === "active"
+          ? "确认撤销项目权限"
+          : "确认授予项目权限"
+        : "确认移除团队成员";
+  const description =
+    change?.kind === "role"
+      ? `将 ${change.target.accountId} 从“${roleLabel(change.target.role)}”改为“${roleLabel(change.nextRole)}”。提交后会立即影响该成员的团队权限。`
+      : change?.kind === "assignment"
+        ? change.existing?.state === "active"
+          ? `撤销 ${change.target.accountId} 的当前项目权限后，该成员将无法继续访问该项目的团队云功能。`
+          : `授予 ${change.target.accountId} 当前项目权限。端到端密钥仍需单独发放。`
+        : change === null
+          ? ""
+          : `移除 ${change.target.accountId} 后，该成员的团队身份会立即失效。`;
+
+  return (
+    <Dialog
+      open={change !== null}
+      dismissible={!props.busy}
+      onOpenChange={(open) => {
+        if (!open && !props.busy) {
+          props.onCancel();
+        }
+      }}
+      title={title}
+      description={description}
+      footer={
+        <>
+          <Button variant="secondary" disabled={props.busy} onClick={props.onCancel}>
+            取消
+          </Button>
+          <Button
+            variant={
+              change?.kind === "remove" ||
+              (change?.kind === "assignment" && change.existing?.state === "active")
+                ? "danger"
+                : "primary"
+            }
+            disabled={change === null}
+            loading={props.busy}
+            onClick={props.onConfirm}
+          >
+            确认提交
+          </Button>
+        </>
+      }
+    >
+      <InlineAlert
+        tone={
+          change?.kind === "remove" ||
+          (change?.kind === "assignment" && change.existing?.state === "active")
+            ? "warning"
+            : "info"
+        }
+        title="提交前复核影响"
+        description="服务端会再次校验当前操作者权限和修订号；校验失败时不会应用任何变更。"
+      />
+    </Dialog>
   );
 }
 
@@ -1328,9 +1438,9 @@ function PageIntro() {
   return (
     <header className="studio-team-page__intro">
       <div>
-        <p className="studio-team-page__eyebrow">Studio Cloud</p>
+        <p className="studio-team-page__eyebrow">团队云空间</p>
         <h1>团队与权限</h1>
-        <p>管理团队成员、邀请与项目范围；所有写操作都使用真实云接口和服务端修订检查。</p>
+        <p>管理团队成员、邀请与项目范围；所有写操作都使用真实云接口和云端版本冲突保护。</p>
       </div>
     </header>
   );
@@ -1517,7 +1627,7 @@ function AssignmentPanel(props: {
       )}
       {readyAssignments.assignments.length === 0 ? (
         <EmptyState
-          title="该项目没有 assignment"
+          title="该项目没有成员权限"
           description="当前项目尚未返回任何团队成员分配。只有具备已验证项目范围的管理者才能创建首个可见分配。"
           primaryAction={{ label: "重试", onClick: props.reload }}
         />
@@ -1550,7 +1660,7 @@ function AssignmentPanel(props: {
 
       {props.memberships.length > 0 && (
         <section className="studio-team-page__assignment-actions">
-          <h3>设置成员 assignment</h3>
+          <h3>设置成员项目权限</h3>
           <div className="studio-team-page__assignment-list">
             {props.memberships
               .filter((membership) => membership.state === "active")
@@ -1604,13 +1714,12 @@ function TeamProjectKeyEnvelopePanel(props: {
   const verificationEnabled = !props.verificationRunning && props.verificationDecision.allowed;
 
   return (
-    <section className="studio-team-page__assignment-actions" aria-label="项目密钥 envelope 发放">
+    <section className="studio-team-page__assignment-actions" aria-label="团队项目密钥授权">
       <div className="studio-team-page__heading-row">
         <div>
-          <h3>项目密钥 envelope 发放</h3>
+          <h3>团队项目密钥授权</h3>
           <p>
-            发放版本从本地 active key bundle 读取；当前设备验收版本由云端权威 current-key
-            元数据自动发现。两者均不接受手动输入。
+            把当前项目的加密访问权安全发放给合资格设备。授权版本由本机和云端安全记录自动确认，无需手动输入。
           </p>
         </div>
         {phase !== null && (
@@ -1619,10 +1728,10 @@ function TeamProjectKeyEnvelopePanel(props: {
       </div>
 
       {props.localKey.status === "idle" && (
-        <p role="note">完整读取项目 assignment 后，才能验证用于发放的本地 active 项目密钥。</p>
+        <p role="note">完整读取项目权限后，才能验证用于发放的本地有效项目密钥。</p>
       )}
       {props.localKey.status === "checking" && (
-        <p role="status">正在验证当前云设备与本地 active 项目密钥…</p>
+        <p role="status">正在验证当前云设备与本地有效项目密钥…</p>
       )}
       {props.localKey.status === "unavailable" && (
         <InlineAlert
@@ -1632,21 +1741,21 @@ function TeamProjectKeyEnvelopePanel(props: {
         />
       )}
       {props.localKey.status === "available" && (
-        <p role="note">已验证本地 active 密钥版本 {String(props.localKey.keyVersion)}。</p>
+        <p role="note">已验证本地有效密钥版本 {String(props.localKey.keyVersion)}。</p>
       )}
       {props.localKey.status === "team_receipt" && (
         <InlineAlert
           tone={props.localKey.openReady ? "info" : "warning"}
           title={props.localKey.openReady ? "团队密钥已持久化且可离线开启" : "团队密钥需重新下载"}
-          description={`本机收据版本 ${String(props.localKey.keyVersion)}，状态 ${props.localKey.receiptState}。加密信封仅保存在系统凭据存储中，SQLite 只保留无密钥元数据。`}
+          description={`本机授权版本 ${String(props.localKey.keyVersion)}，状态 ${teamReceiptStateLabel(props.localKey.receiptState)}。安全凭据只保存在操作系统保护区，本地数据库不保存项目密钥。`}
         />
       )}
-      <p role="note">
-        当前设备验收不依赖本地 key bundle：原生命令先读取无密文的权威 current-key
-        元数据，拉取对应设备信封后再复核版本、服务端修订与更新时间。密文和明文密钥不会进入 普通
-        UI；验真后的加密信封持久化到系统凭据存储，SQLite
-        仅记录无密钥收据。恢复方式仅为重新下载当前设备信封。
-      </p>
+      <details>
+        <summary>查看安全验证详情</summary>
+        <p role="note">
+          当前设备验收不依赖本地密钥包：原生能力会先读取不含密文的权威密钥元数据，拉取对应设备信封后再复核版本、服务端修订与更新时间。密文和明文密钥不会进入普通界面；验真后的加密信封持久化到系统凭据存储，本地数据库仅记录无密钥收据。恢复方式仅为重新下载当前设备信封。
+        </p>
+      </details>
       <p role="note">
         撤销会阻止未来同步与新版本授权，但不能远程擦除已经授权并在本机解密过的内容。
       </p>
@@ -1676,11 +1785,17 @@ function TeamProjectKeyEnvelopePanel(props: {
         </p>
       )}
       {props.verification !== null && (
-        <InlineAlert
-          tone="info"
-          title="当前设备信封已验真、持久化且可开启"
-          description={`权威当前版本 ${String(props.verification.receipt.keyVersion)}（服务端修订 ${String(props.verification.receipt.currentServerRevision)}，更新时间 ${props.verification.receipt.currentKeyUpdatedAt}）；项目密钥指纹 ${props.verification.receipt.projectKeyFingerprint.slice(0, 16)}…；本机写入状态 ${props.verification.nativeWriteState}。`}
-        />
+        <>
+          <InlineAlert
+            tone="info"
+            title="当前设备的团队密钥授权已验证"
+            description={`授权版本 ${String(props.verification.receipt.keyVersion)}，云端安全记录修订 ${String(props.verification.receipt.currentServerRevision)}，更新时间 ${props.verification.receipt.currentKeyUpdatedAt}；本机状态 ${nativeWriteStateLabel(props.verification.nativeWriteState)}。`}
+          />
+          <details>
+            <summary>查看密钥校验标识</summary>
+            <code>{props.verification.receipt.projectKeyFingerprint.slice(0, 16)}…</code>
+          </details>
+        </>
       )}
       {props.verificationError !== null && (
         <InlineAlert
@@ -1706,12 +1821,12 @@ function TeamProjectKeyEnvelopePanel(props: {
         disabled={!verificationEnabled}
         title={
           props.verificationDecision.allowed
-            ? "原生发现并复核权威 active 版本；验真后的加密信封仅写入系统凭据存储。"
+            ? "自动发现并复核云端有效授权版本；验证后的安全凭据只写入操作系统保护区。"
             : props.verificationDecision.reason
         }
         onClick={props.onVerify}
       >
-        验收并保存当前设备云信封
+        验证并保存当前设备授权
       </Button>
     </section>
   );
@@ -1733,20 +1848,39 @@ function VisibleErrorState(props: {
   );
 }
 
+function teamReceiptStateLabel(value: string): string {
+  const labels: Record<string, string> = {
+    active: "有效",
+    authority_unavailable: "暂时无法验证授权",
+    credential_missing: "本机凭据缺失",
+    superseded: "已被新版本替代",
+  };
+  return labels[value] ?? "未知";
+}
+
+function nativeWriteStateLabel(value: string): string {
+  const labels: Record<string, string> = {
+    created: "已新建",
+    replaced: "已更新",
+    unchanged: "无需更新",
+  };
+  return labels[value] ?? "已安全写入";
+}
+
 function publicationPhaseLabel(phase: CloudTeamProjectKeyPublicationState["phase"]): string {
   switch (phase) {
     case "preparing":
-      return "准备中（preparing）";
+      return "准备中";
     case "publishing":
-      return "发布中（publishing）";
+      return "发布中";
     case "partial":
-      return "部分完成（partial）";
+      return "部分完成";
     case "retryable":
-      return "可安全重试（retryable）";
+      return "可安全重试";
     case "conflicted":
-      return "冲突（conflicted）";
+      return "存在冲突";
     case "published":
-      return "已完成（published）";
+      return "已完成";
   }
 }
 
@@ -1806,7 +1940,7 @@ function normalizeError(error: unknown): VisibleError {
       case "REVISION_CONFLICT":
         return {
           ...common,
-          description: "服务端修订已变化（也可能涉及最后一位所有者保护）。请重新读取列表后再操作。",
+          description: "云端记录已经更新（也可能涉及最后一位所有者保护）。请重新读取列表后再操作。",
         };
       case "IDEMPOTENCY_CONFLICT":
         return {

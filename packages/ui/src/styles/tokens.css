@@ -1,4 +1,3 @@
-:root,
 [data-surface="dark"] {
   color-scheme: dark;
 
@@ -38,6 +37,7 @@
   --caret: #7180e6;
 }
 
+:root:not([data-surface]),
 [data-surface="light"] {
   color-scheme: light;
 
@@ -77,6 +77,61 @@
   --caret: #4655c4;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root:not([data-surface]) {
+    color-scheme: dark;
+
+    --bg-app: #0e1116;
+    --bg-surface: #161b22;
+    --bg-sunken: #0a0c10;
+    --bg-overlay: #1b2129;
+    --bg-hover: #202731;
+    --bg-active: #28313d;
+    --overlay-scrim: rgb(4 7 11 / 72%);
+
+    --border-subtle: #232a33;
+    --border-strong: #313b47;
+
+    --text-primary: #e7eaf0;
+    --text-secondary: #9aa3b2;
+    --text-tertiary: #828c9c;
+    --text-disabled: #697384;
+
+    --accent-fill: #5b6bd9;
+    --accent-soft: rgb(91 107 217 / 14%);
+    --accent-text: #7180e6;
+    --accent-on-fill: #ffffff;
+
+    --ai-fill: #2bc6e0;
+    --ai-soft: rgb(43 198 224 / 14%);
+    --ai-text: #2bc6e0;
+    --ai-on-fill: #06222a;
+
+    --success-text: #48dfa9;
+    --warning-text: #ffc35b;
+    --danger-text: #ff7379;
+    --info-text: #6bb5f7;
+
+    --focus-ring: #7180e6;
+    --selection: rgb(91 107 217 / 24%);
+    --caret: #7180e6;
+  }
+}
+
+:root,
+[data-surface="dark"],
+[data-surface="light"] {
+  /* Re-declare aliases on local surfaces so nested paper themes resolve locally. */
+  --bg-canvas: var(--bg-app);
+  --bg-elevated: var(--bg-overlay);
+  --bg-muted: var(--bg-sunken);
+  --bg-subtle: var(--bg-hover);
+  --border-default: var(--border-subtle);
+  --accent-border: color-mix(in srgb, var(--accent-fill) 38%, transparent);
+  --accent-solid: var(--accent-fill);
+  --text-accent: var(--accent-text);
+}
+
 :root {
   --success: #34d399;
   --warning: #f5a524;
@@ -99,6 +154,7 @@
   --font-ui:
     Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
     "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-sans: var(--font-ui);
   --font-mono: "JetBrains Mono", "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
   --font-serif: "Noto Serif SC", "Songti SC", "Source Han Serif SC", Georgia, serif;
 
@@ -110,12 +166,17 @@
   --font-ui-size: 0.875rem;
   --font-caption-size: 0.8125rem;
   --font-micro-size: 0.75rem;
+  --font-size-sm: var(--font-ui-size);
+  --text-xl: 1.25rem;
+  --text-xs: var(--font-micro-size);
 
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 0.75rem;
   --space-4: 1rem;
+  --space-5: 1.25rem;
   --space-6: 1.5rem;
+  --space-7: 1.75rem;
   --space-8: 2rem;
   --space-12: 3rem;
 
@@ -124,6 +185,7 @@
   --radius-md: 0.75rem;
   --radius-lg: 1rem;
   --radius-xl: 1.375rem;
+  --radius-full: 9999px;
 
   --control-sm: 2rem;
   --control-md: 2.25rem;
@@ -140,6 +202,11 @@
 
   --shadow-floating: 0 0.5rem 1.5rem rgb(0 0 0 / 45%);
   --shadow-overlay: 0 0.75rem 2.5rem rgb(0 0 0 / 55%);
+  --shadow-card: 0 0.5rem 1.5rem rgb(0 0 0 / 14%);
+  --shadow-raised: 0 1rem 2.5rem rgb(0 0 0 / 24%);
+
+  --editor-font-size: 1.0625rem;
+  --editor-line-height: 1.95;
 
   --duration-instant: 75ms;
   --duration-hover: 150ms;

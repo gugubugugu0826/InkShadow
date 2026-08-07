@@ -36,6 +36,7 @@ import type {
   GuestEncryptedProjectDescriptor,
   GuestProjectSession,
 } from "./application/guest-workspace-service";
+import { MAX_ENCRYPTED_PROJECT_IMPORT_BYTES } from "./application/guest-workspace-service";
 import { GuestWorkspaceError, type GuestWorkspaceErrorCode } from "./domain/guest-workspace-error";
 
 export interface AppProps {
@@ -46,6 +47,8 @@ interface VisibleError {
   readonly code: GuestWorkspaceErrorCode;
   readonly message: string;
 }
+
+type BusyAction = "create" | "commit" | "import" | "unlock" | "save";
 
 export function App({ service }: AppProps): ReactNode {
   return (
@@ -58,6 +61,7 @@ export function App({ service }: AppProps): ReactNode {
 function GuestWorkspaceApp({ service }: AppProps): ReactNode {
   const { toast } = useToast();
   const [riskAccepted, setRiskAccepted] = useState(false);
+  const [riskDeclined, setRiskDeclined] = useState(false);
   const [pageState, setPageState] = useState<"loading" | "ready" | "fatal_error">("loading");
   const [projects, setProjects] = useState<readonly GuestEncryptedProjectDescriptor[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<UuidV7 | null>(null);
@@ -68,16 +72,35 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
     null,
   );
   const [recoveryConfirmed, setRecoveryConfirmed] = useState(false);
-  const [busyAction, setBusyAction] = useState<"create" | "commit" | "unlock" | "save" | null>(
-    null,
-  );
+  const [busyAction, setBusyAction] = useState<BusyAction | null>(null);
   const [visibleError, setVisibleError] = useState<VisibleError | null>(null);
+  const [lockConfirmationOpen, setLockConfirmationOpen] = useState(false);
   const [lockGeneration, setLockGeneration] = useState(0);
   const securityEpoch = useRef(0);
+  const sessionRef = useRef<GuestProjectSession | null>(null);
+  const editorContentRef = useRef("");
+  const saveStateRef = useRef<SaveState>("clean");
+  const savePromiseRef = useRef<Promise<GuestProjectSession> | null>(null);
+  const automaticLockPromiseRef = useRef<Promise<void> | null>(null);
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  useEffect(() => {
+    editorContentRef.current = editorContent;
+  }, [editorContent]);
+
+  useEffect(() => {
+    saveStateRef.current = saveState;
+  }, [saveState]);
 
   const secureLock = useCallback((): void => {
     securityEpoch.current += 1;
     service.lockAll();
+    sessionRef.current = null;
+    editorContentRef.current = "";
+    saveStateRef.current = "clean";
     setSession(null);
     setEditorContent("");
     setSaveState("clean");
@@ -85,8 +108,141 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
     setRecoveryConfirmed(false);
     setBusyAction(null);
     setVisibleError(null);
+    setLockConfirmationOpen(false);
     setLockGeneration((current) => current + 1);
   }, [service]);
+
+  const saveLatestDraft = useCallback(async (): Promise<GuestProjectSession> => {
+    if (savePromiseRef.current !== null) {
+      await savePromiseRef.current;
+    }
+
+    const currentSession = sessionRef.current;
+    if (currentSession === null) {
+      throw new GuestWorkspaceError("WEB_PROJECT_LOCKED", "项目已经锁定，无需再次保存。");
+    }
+    const currentContent = editorContentRef.current;
+    if (currentContent === currentSession.chapter.content) {
+      return currentSession;
+    }
+
+    const operationEpoch = securityEpoch.current;
+    const savePromise = service.saveChapter({
+      projectId: currentSession.project.id,
+      expectedRevision: currentSession.chapter.revision,
+      content: currentContent,
+    });
+    savePromiseRef.current = savePromise;
+    try {
+      const saved = await savePromise;
+      if (securityEpoch.current !== operationEpoch) {
+        throw new GuestWorkspaceError(
+          "WEB_PROJECT_LOCKED",
+          "页面已锁定，本次保存没有重新载入正文。",
+        );
+      }
+      sessionRef.current = saved;
+      setSession(saved);
+      const latestIsSaved = editorContentRef.current === saved.chapter.content;
+      saveStateRef.current = latestIsSaved ? "saved_local" : "dirty";
+      setSaveState(latestIsSaved ? "saved_local" : "dirty");
+      return saved;
+    } finally {
+      if (savePromiseRef.current === savePromise) {
+        savePromiseRef.current = null;
+      }
+    }
+  }, [service]);
+
+  const saveAndSecureLock = useCallback(
+    async (automatic: boolean): Promise<void> => {
+      if (automaticLockPromiseRef.current !== null) {
+        return automaticLockPromiseRef.current;
+      }
+
+      const operation = (async (): Promise<void> => {
+        const lockedProjectId = sessionRef.current?.project.id ?? null;
+        if (lockedProjectId === null) {
+          secureLock();
+          return;
+        }
+
+        const needsSave =
+          saveStateRef.current === "dirty" ||
+          saveStateRef.current === "saving" ||
+          saveStateRef.current === "save_failed";
+        if (!needsSave) {
+          setSelectedProjectId(lockedProjectId);
+          secureLock();
+          return;
+        }
+
+        setBusyAction("save");
+        saveStateRef.current = "saving";
+        setSaveState("saving");
+        setVisibleError(null);
+        let temporaryDraftPreserved = false;
+        let temporaryDraftError: VisibleError | null = null;
+        if (automatic) {
+          const currentSession = sessionRef.current;
+          if (currentSession !== null) {
+            try {
+              await service.preserveTemporaryDraft({
+                projectId: currentSession.project.id,
+                expectedRevision: currentSession.chapter.revision,
+                content: editorContentRef.current,
+              });
+              temporaryDraftPreserved = true;
+            } catch (error) {
+              temporaryDraftError = toVisibleError(error);
+            }
+          }
+        }
+        try {
+          await saveLatestDraft();
+          setSelectedProjectId(lockedProjectId);
+          secureLock();
+          if (!automatic) {
+            toast({
+              title: "最新修改已保存并锁定",
+              description: "正文已加密保存，项目密钥已从当前页面清除。",
+              tone: "success",
+            });
+          }
+        } catch (error) {
+          const visible = toVisibleError(error);
+          if (automatic) {
+            secureLock();
+            setVisibleError({
+              code: visible.code,
+              message: temporaryDraftPreserved
+                ? `页面已安全锁定。正式保存失败，但未保存修改已写入仅含密文的临时恢复副本；下次使用恢复材料解锁时会自动恢复。失败原因：${visible.message}`
+                : `页面已安全锁定；正式保存和临时恢复密文均未能写入，最近修改可能无法恢复。正式保存失败：${visible.message}${
+                    temporaryDraftError === null
+                      ? ""
+                      : `；临时恢复失败：${temporaryDraftError.message}`
+                  }`,
+            });
+          } else {
+            saveStateRef.current = "save_failed";
+            setSaveState("save_failed");
+            setBusyAction(null);
+            setVisibleError(visible);
+            setLockConfirmationOpen(false);
+          }
+        }
+      })();
+      automaticLockPromiseRef.current = operation;
+      try {
+        await operation;
+      } finally {
+        if (automaticLockPromiseRef.current === operation) {
+          automaticLockPromiseRef.current = null;
+        }
+      }
+    },
+    [saveLatestDraft, secureLock, service, toast],
+  );
 
   const refreshProjects = useCallback(async (): Promise<void> => {
     try {
@@ -113,7 +269,7 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
   useEffect(() => {
     const lockOnVisibilityChange = (): void => {
       if (document.visibilityState === "hidden") {
-        secureLock();
+        void saveAndSecureLock(true);
       }
     };
     const lockOnPageShow = (event: PageTransitionEvent): void => {
@@ -121,16 +277,30 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
         secureLock();
       }
     };
-    window.addEventListener("pagehide", secureLock);
+    const warnBeforeUnload = (event: BeforeUnloadEvent): void => {
+      if (
+        saveStateRef.current === "dirty" ||
+        saveStateRef.current === "saving" ||
+        saveStateRef.current === "save_failed"
+      ) {
+        event.preventDefault();
+      }
+    };
+    const lockOnPageHide = (): void => {
+      void saveAndSecureLock(true);
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    window.addEventListener("pagehide", lockOnPageHide);
     window.addEventListener("pageshow", lockOnPageShow);
     document.addEventListener("visibilitychange", lockOnVisibilityChange);
     return () => {
-      window.removeEventListener("pagehide", secureLock);
+      window.removeEventListener("beforeunload", warnBeforeUnload);
+      window.removeEventListener("pagehide", lockOnPageHide);
       window.removeEventListener("pageshow", lockOnPageShow);
       document.removeEventListener("visibilitychange", lockOnVisibilityChange);
       service.lockAll();
     };
-  }, [secureLock, service]);
+  }, [saveAndSecureLock, secureLock, service]);
 
   async function handleCreate(input: {
     projectName: string;
@@ -170,6 +340,9 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
       if (securityEpoch.current !== operationEpoch) {
         return;
       }
+      sessionRef.current = committed;
+      editorContentRef.current = committed.chapter.content;
+      saveStateRef.current = "saved_local";
       setSession(committed);
       setEditorContent(committed.chapter.content);
       setSaveState("saved_local");
@@ -197,14 +370,21 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
       if (securityEpoch.current !== operationEpoch) {
         return;
       }
+      const restoredContent = unlocked.recoveredDraft?.content ?? unlocked.chapter.content;
+      const restoredTemporaryDraft = unlocked.recoveredDraft !== undefined;
+      sessionRef.current = unlocked;
+      editorContentRef.current = restoredContent;
+      saveStateRef.current = restoredTemporaryDraft ? "dirty" : "clean";
       setSession(unlocked);
-      setEditorContent(unlocked.chapter.content);
-      setSaveState("clean");
+      setEditorContent(restoredContent);
+      setSaveState(restoredTemporaryDraft ? "dirty" : "clean");
       setSelectedProjectId(projectId);
       toast({
-        title: "项目已在当前会话解锁",
-        description: "刷新或关闭页面后仍需再次提供恢复材料。",
-        tone: "success",
+        title: restoredTemporaryDraft ? "已恢复临时加密草稿" : "项目已在当前会话解锁",
+        description: restoredTemporaryDraft
+          ? "上次自动锁定时未能正式保存的正文已恢复，请尽快保存密文版本。"
+          : "刷新或关闭页面后仍需再次提供恢复材料。",
+        tone: restoredTemporaryDraft ? "warning" : "success",
       });
     } catch (error) {
       if (securityEpoch.current === operationEpoch) {
@@ -220,32 +400,28 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
   }
 
   async function handleSave(): Promise<void> {
-    if (session === null || saveState !== "dirty") {
+    if (session === null || (saveState !== "dirty" && saveState !== "save_failed")) {
       return;
     }
     const operationEpoch = securityEpoch.current;
     setBusyAction("save");
+    saveStateRef.current = "saving";
     setSaveState("saving");
     setVisibleError(null);
     try {
-      const saved = await service.saveChapter({
-        projectId: session.project.id,
-        expectedRevision: session.chapter.revision,
-        content: editorContent,
-      });
+      const saved = await saveLatestDraft();
       if (securityEpoch.current !== operationEpoch) {
         return;
       }
-      setSession(saved);
-      setSaveState("saved_local");
       await refreshProjects();
       toast({
         title: "密文版本已保存",
-        description: `章节版本 ${String(saved.chapter.revision)} 已写入浏览器 IndexedDB。`,
+        description: `章节版本 ${String(saved.chapter.revision)} 已写入浏览器加密存储。`,
         tone: "success",
       });
     } catch (error) {
       if (securityEpoch.current === operationEpoch) {
+        saveStateRef.current = "save_failed";
         setSaveState("save_failed");
         setVisibleError(toVisibleError(error));
       }
@@ -258,6 +434,10 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
 
   function handleLock(): void {
     if (session === null) {
+      return;
+    }
+    if (saveState === "dirty" || saveState === "saving" || saveState === "save_failed") {
+      setLockConfirmationOpen(true);
       return;
     }
     setSelectedProjectId(session.project.id);
@@ -276,6 +456,46 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
       });
     } catch (error) {
       setVisibleError(toVisibleError(error));
+    }
+  }
+
+  async function handleImport(file: File, recoveryMaterial: string): Promise<void> {
+    setBusyAction("import");
+    setVisibleError(null);
+    const operationEpoch = securityEpoch.current;
+    try {
+      if (file.size === 0 || file.size > MAX_ENCRYPTED_PROJECT_IMPORT_BYTES) {
+        throw new GuestWorkspaceError(
+          "WEB_VALIDATION_FAILED",
+          "请选择不超过 32 MB 的墨影加密副本文件。",
+        );
+      }
+      const payload = await file.text();
+      const imported = await service.importEncryptedProject(payload, recoveryMaterial);
+      if (securityEpoch.current !== operationEpoch) {
+        return;
+      }
+      sessionRef.current = imported;
+      editorContentRef.current = imported.chapter.content;
+      saveStateRef.current = "clean";
+      setSession(imported);
+      setEditorContent(imported.chapter.content);
+      setSaveState("clean");
+      setSelectedProjectId(imported.project.id);
+      await refreshProjects();
+      toast({
+        title: "加密副本已恢复",
+        description: `“${imported.project.name}”已导入当前浏览器并在本次会话解锁。`,
+        tone: "success",
+      });
+    } catch (error) {
+      if (securityEpoch.current === operationEpoch) {
+        setVisibleError(toVisibleError(error));
+      }
+    } finally {
+      if (securityEpoch.current === operationEpoch) {
+        setBusyAction(null);
+      }
     }
   }
 
@@ -304,11 +524,11 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
       <header className="web-topbar">
         <div>
           <span className="web-wordmark">墨影 InkShadow</span>
-          <span className="web-product-name">Web Guest</span>
+          <span className="web-product-name">浏览器访客版</span>
         </div>
         <div className="web-session-state" aria-label="会话安全状态">
           <Badge tone="success">密钥仅在内存</Badge>
-          <Badge tone="info">独立 Web 客户端</Badge>
+          <Badge tone="info">独立浏览器工作区</Badge>
         </div>
       </header>
 
@@ -316,10 +536,10 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
         <section className="web-workspace" aria-labelledby="workspace-title">
           <div className="web-heading">
             <div>
-              <p className="web-eyebrow">浏览器本地 · 加密纵切</p>
-              <h1 id="workspace-title">Guest 写作工作区</h1>
+              <p className="web-eyebrow">浏览器本地 · 加密写作</p>
+              <h1 id="workspace-title">访客写作工作区</h1>
               <p>
-                项目与章节在浏览器内加密后再保存。项目名、章节标题和正文不会以明文进入 IndexedDB。
+                项目与章节会先在浏览器内加密再保存。项目名、章节标题和正文不会以明文写入浏览器存储。
               </p>
             </div>
           </div>
@@ -327,7 +547,7 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
           <InlineAlert
             tone="warning"
             title="浏览器存储不是桌面备份"
-            description="清理站点数据会删除这里的密文副本；共享浏览器配置文件也会共享这份密文。恢复材料不会被本站保存。"
+            description="清理站点数据会删除这里的加密副本；共享浏览器配置文件也会共享这份密文。请分别下载加密副本和恢复材料，本站不会保存恢复材料。"
           />
 
           {visibleError !== null && pageState !== "fatal_error" && (
@@ -352,8 +572,10 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
                 selectedProjectId={selectedProjectId}
                 busy={busyAction !== null}
                 creating={busyAction === "create"}
+                importing={busyAction === "import"}
                 unlocking={busyAction === "unlock"}
                 onCreate={handleCreate}
+                onImport={handleImport}
                 onSelect={setSelectedProjectId}
                 onUnlock={handleUnlock}
                 onExport={handleExport}
@@ -365,8 +587,11 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
                 saveState={saveState}
                 saving={busyAction === "save"}
                 onContentChange={(content) => {
+                  editorContentRef.current = content;
+                  const nextSaveState = content === session.chapter.content ? "clean" : "dirty";
+                  saveStateRef.current = nextSaveState;
                   setEditorContent(content);
-                  setSaveState(content === session.chapter.content ? "clean" : "dirty");
+                  setSaveState(nextSaveState);
                 }}
                 onSave={handleSave}
                 onLock={handleLock}
@@ -380,24 +605,52 @@ function GuestWorkspaceApp({ service }: AppProps): ReactNode {
       </main>
 
       <footer className="web-footer">
-        <span>无账号 · 无云请求 · 无遥测 · 无 Web Storage 密钥</span>
+        <span>无账号 · 无云请求 · 无遥测 · 不在浏览器常规存储中保存密钥</span>
         <span>刷新后自动回到锁定状态</span>
       </footer>
 
       <RiskDialog
-        open={!riskAccepted}
+        open={!riskAccepted && !riskDeclined}
         onAccept={() => {
           setRiskAccepted(true);
+        }}
+        onDecline={() => {
+          secureLock();
+          setRiskDeclined(true);
+        }}
+      />
+      <RiskDeclinedDialog
+        open={riskDeclined}
+        onReview={() => {
+          setRiskDeclined(false);
         }}
       />
       <RecoveryMaterialDialog
         key={pendingCreation?.session.project.id ?? "no-pending-project"}
+        project={pendingCreation?.session.project ?? null}
         material={pendingCreation?.recoveryMaterial ?? null}
         confirmed={recoveryConfirmed}
         committing={busyAction === "commit"}
         error={pendingCreation === null ? null : visibleError}
         onConfirmedChange={setRecoveryConfirmed}
         onCommit={handleCommitPreparedProject}
+      />
+      <UnsavedLockDialog
+        open={lockConfirmationOpen}
+        saving={busyAction === "save"}
+        onCancel={() => {
+          setLockConfirmationOpen(false);
+        }}
+        onDiscard={() => {
+          const projectId = sessionRef.current?.project.id;
+          if (projectId !== undefined) {
+            setSelectedProjectId(projectId);
+          }
+          secureLock();
+        }}
+        onSaveAndLock={() => {
+          void saveAndSecureLock(false);
+        }}
       />
     </div>
   );
@@ -408,12 +661,14 @@ interface LockedWorkspaceProps {
   readonly selectedProjectId: UuidV7 | null;
   readonly busy: boolean;
   readonly creating: boolean;
+  readonly importing: boolean;
   readonly unlocking: boolean;
   readonly onCreate: (input: {
     projectName: string;
     chapterTitle: string;
     chapterContent: string;
   }) => Promise<void>;
+  readonly onImport: (file: File, recoveryMaterial: string) => Promise<void>;
   readonly onSelect: (projectId: UuidV7) => void;
   readonly onUnlock: (projectId: UuidV7, recoveryMaterial: string) => Promise<void>;
   readonly onExport: (projectId: UuidV7) => Promise<void>;
@@ -422,8 +677,10 @@ interface LockedWorkspaceProps {
 function LockedWorkspace({
   busy,
   creating,
+  importing,
   onCreate,
   onExport,
+  onImport,
   onSelect,
   onUnlock,
   projects,
@@ -432,19 +689,21 @@ function LockedWorkspace({
 }: LockedWorkspaceProps): ReactNode {
   return (
     <div className="web-locked-grid">
-      <CreateProjectCard busy={busy} creating={creating} onCreate={onCreate} />
+      <div className="web-locked-actions">
+        <CreateProjectCard busy={busy} creating={creating} onCreate={onCreate} />
+        <ImportProjectCard busy={busy} importing={importing} onImport={onImport} />
+      </div>
       <Card className="web-project-list">
         <CardHeader>
-          <CardTitle>浏览器中的加密项目</CardTitle>
-          <CardDescription>
-            锁定列表只显示密文 envelope 的标识和版本，不读取项目名或正文。
-          </CardDescription>
+          <CardTitle headingLevel={2}>浏览器中的加密项目</CardTitle>
+          <CardDescription>锁定时只显示项目标识和加密版本，不读取项目名或正文。</CardDescription>
         </CardHeader>
         <CardContent>
           {projects.length === 0 ? (
             <EmptyState
               title="还没有加密项目"
-              description="创建后，IndexedDB 只会收到版本化密文和恢复 envelope。"
+              description="你可以创建新项目，或用加密副本和配套恢复材料找回已有项目。"
+              headingLevel={3}
             />
           ) : (
             <div className="web-project-cards">
@@ -459,6 +718,7 @@ function LockedWorkspace({
                     <div className="web-encrypted-project__summary">
                       <div>
                         <strong>加密项目 · {shortProjectId(project.projectId)}</strong>
+                        <code className="web-project-id">{project.projectId}</code>
                         <span>
                           密钥版本 {String(project.keyVersion)} · 章节密文版本{" "}
                           {String(project.chapterVersion)}
@@ -506,6 +766,97 @@ function LockedWorkspace({
   );
 }
 
+interface ImportProjectCardProps {
+  readonly busy: boolean;
+  readonly importing: boolean;
+  readonly onImport: LockedWorkspaceProps["onImport"];
+}
+
+function ImportProjectCard({ busy, importing, onImport }: ImportProjectCardProps): ReactNode {
+  const [file, setFile] = useState<File | null>(null);
+  const [recoveryMaterial, setRecoveryMaterial] = useState("");
+  const fileError =
+    file !== null && (file.size === 0 || file.size > MAX_ENCRYPTED_PROJECT_IMPORT_BYTES)
+      ? "文件必须大于 0 字节且不超过 32 MB。"
+      : undefined;
+  const canImport =
+    file !== null && fileError === undefined && recoveryMaterial.trim().length > 0 && !busy;
+
+  function handleSubmit(event: SyntheticEvent<HTMLFormElement>): void {
+    event.preventDefault();
+    if (!canImport) {
+      return;
+    }
+    void onImport(file, recoveryMaterial.trim());
+  }
+
+  return (
+    <Card className="web-import-card">
+      <CardHeader>
+        <CardTitle headingLevel={2}>从加密副本恢复</CardTitle>
+        <CardDescription>
+          同时提供下载过的加密副本和对应恢复材料。验证成功后才会写入当前浏览器。
+        </CardDescription>
+      </CardHeader>
+      <form onSubmit={handleSubmit}>
+        <CardContent className="web-form-stack">
+          <FormField
+            label="墨影加密副本"
+            required
+            error={fileError}
+            hint="支持由本页面下载的 .encrypted.json 文件，最大 32 MB。"
+          >
+            {(fieldProps) => (
+              <Input
+                {...fieldProps}
+                required
+                type="file"
+                accept=".json,application/json"
+                disabled={busy}
+                onChange={(event) => {
+                  setFile(event.currentTarget.files?.[0] ?? null);
+                }}
+              />
+            )}
+          </FormField>
+          <FormField
+            label="对应的恢复材料"
+            required
+            hint="只在内存中用于验证和解锁，不会保存在浏览器中。"
+          >
+            {(fieldProps) => (
+              <Input
+                {...fieldProps}
+                required
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                disabled={busy}
+                value={recoveryMaterial}
+                onChange={(event) => {
+                  setRecoveryMaterial(event.currentTarget.value);
+                }}
+                placeholder="粘贴与副本配套的完整恢复材料"
+              />
+            )}
+          </FormField>
+        </CardContent>
+        <CardFooter>
+          <Button
+            size="lg"
+            type="submit"
+            disabled={!canImport}
+            loading={importing}
+            loadingLabel="正在验证并恢复"
+          >
+            验证并恢复项目
+          </Button>
+        </CardFooter>
+      </form>
+    </Card>
+  );
+}
+
 interface CreateProjectCardProps {
   readonly busy: boolean;
   readonly creating: boolean;
@@ -516,18 +867,26 @@ function CreateProjectCard({ busy, creating, onCreate }: CreateProjectCardProps)
   const [projectName, setProjectName] = useState("");
   const [chapterTitle, setChapterTitle] = useState("第一章");
   const [chapterContent, setChapterContent] = useState("");
+  const canCreate =
+    isValidVisibleText(projectName, 120) &&
+    isValidVisibleText(chapterTitle, 200) &&
+    !chapterContent.includes("\u0000") &&
+    !busy;
 
   function handleSubmit(event: SyntheticEvent<HTMLFormElement>): void {
     event.preventDefault();
+    if (!canCreate) {
+      return;
+    }
     void onCreate({ projectName, chapterTitle, chapterContent });
   }
 
   return (
     <Card className="web-create-card" surface="light">
       <CardHeader>
-        <CardTitle>创建加密项目</CardTitle>
+        <CardTitle headingLevel={2}>创建加密项目</CardTitle>
         <CardDescription>
-          浏览器会生成独立 256-bit 项目密钥；密钥导入后不可导出，仅当前内存会话可用。
+          浏览器会生成独立的 256 位项目密钥。项目密钥不能导出，只在当前页面会话中使用。
         </CardDescription>
       </CardHeader>
       <form onSubmit={handleSubmit}>
@@ -538,6 +897,7 @@ function CreateProjectCard({ busy, creating, onCreate }: CreateProjectCardProps)
                 {...fieldProps}
                 required
                 autoComplete="off"
+                maxLength={120}
                 value={projectName}
                 onChange={(event) => {
                   setProjectName(event.currentTarget.value);
@@ -552,6 +912,7 @@ function CreateProjectCard({ busy, creating, onCreate }: CreateProjectCardProps)
                 {...fieldProps}
                 required
                 autoComplete="off"
+                maxLength={200}
                 value={chapterTitle}
                 onChange={(event) => {
                   setChapterTitle(event.currentTarget.value);
@@ -561,7 +922,7 @@ function CreateProjectCard({ busy, creating, onCreate }: CreateProjectCardProps)
           </FormField>
           <FormField
             label="首章正文"
-            hint="正文先在当前页面内存中编辑，提交时加密后才进入 IndexedDB。"
+            hint="正文先在当前页面内存中编辑，确认恢复材料已另存后才会加密写入浏览器。"
           >
             {(fieldProps) => (
               <Textarea
@@ -582,9 +943,9 @@ function CreateProjectCard({ busy, creating, onCreate }: CreateProjectCardProps)
           <Button
             size="lg"
             type="submit"
-            disabled={busy}
+            disabled={!canCreate}
             loading={creating}
-            loadingLabel="正在加密并保存"
+            loadingLabel="正在生成加密项目"
           >
             创建加密项目
           </Button>
@@ -603,10 +964,14 @@ interface UnlockFormProps {
 
 function UnlockForm({ busy, onUnlock, projectId, unlocking }: UnlockFormProps): ReactNode {
   const [material, setMaterial] = useState("");
+  const canUnlock = material.trim().length > 0 && !busy;
 
   function handleSubmit(event: SyntheticEvent<HTMLFormElement>): void {
     event.preventDefault();
-    void onUnlock(projectId, material);
+    if (!canUnlock) {
+      return;
+    }
+    void onUnlock(projectId, material.trim());
   }
 
   return (
@@ -614,7 +979,7 @@ function UnlockForm({ busy, onUnlock, projectId, unlocking }: UnlockFormProps): 
       <FormField
         label="恢复材料"
         required
-        hint="只在当前内存会话使用；不会写入 localStorage、sessionStorage 或 IndexedDB。"
+        hint="只在当前页面会话的内存中使用，不会写入任何浏览器存储。"
       >
         {(fieldProps) => (
           <Input
@@ -634,7 +999,7 @@ function UnlockForm({ busy, onUnlock, projectId, unlocking }: UnlockFormProps): 
       <Button
         size="lg"
         type="submit"
-        disabled={busy}
+        disabled={!canUnlock}
         loading={unlocking}
         loadingLabel="正在验证密文"
       >
@@ -670,7 +1035,7 @@ function UnlockedEditor({
       <CardHeader className="web-editor-header">
         <div>
           <p className="web-eyebrow">当前会话已解锁</p>
-          <CardTitle>{session.project.name}</CardTitle>
+          <CardTitle headingLevel={2}>{session.project.name}</CardTitle>
           <CardDescription>
             {session.chapter.title} · 版本 {String(session.chapter.revision)}
           </CardDescription>
@@ -680,7 +1045,7 @@ function UnlockedEditor({
       <CardContent className="web-editor-content">
         <FormField
           label="章节正文"
-          hint="保存会追加新的 AES-256-GCM 密文版本；旧密文版本保留在浏览器中。"
+          hint="每次保存都会追加一个新的加密版本，旧的加密版本仍保留在浏览器中。"
         >
           {(fieldProps) => (
             <Textarea
@@ -703,7 +1068,7 @@ function UnlockedEditor({
           onClick={() => {
             void onSave();
           }}
-          disabled={saveState !== "dirty"}
+          disabled={saveState !== "dirty" && saveState !== "save_failed"}
           loading={saving}
           loadingLabel="正在生成密文版本"
         >
@@ -731,32 +1096,32 @@ function CapabilityPanel(): ReactNode {
     {
       name: "浏览器加密写作",
       available: true,
-      detail: "可用：WebCrypto + IndexedDB 密文版本",
+      detail: "可用：浏览器内完成加密，只将加密版本写入本地",
     },
     {
-      name: "加密副本下载",
+      name: "加密副本备份与恢复",
       available: true,
-      detail: "可用：只下载密文 envelope，不含恢复材料",
+      detail: "可用：加密副本可下载并重新导入，恢复材料需分开保管",
     },
     {
       name: "云同步",
       available: false,
-      detail: "未连接云 API；不会伪装已同步",
+      detail: "未连接云服务，不会显示虚假的同步状态",
     },
     {
       name: "团队协作",
       available: false,
-      detail: "Guest 无身份、成员或项目授权 envelope",
+      detail: "访客版没有账号、成员和项目权限能力",
     },
     {
       name: "明文外发",
       available: false,
-      detail: "此纵切不向任何外部服务发送正文",
+      detail: "访客版不会向任何外部服务发送正文",
     },
     {
-      name: "桌面项目文件夹 / SQLite",
+      name: "桌面项目文件夹与本地数据库",
       available: false,
-      detail: "Web 不读取、镜像或伪装桌面工作区",
+      detail: "浏览器访客版不读取、复制或伪装桌面工作区",
     },
   ] as const;
 
@@ -764,8 +1129,10 @@ function CapabilityPanel(): ReactNode {
     <aside className="web-capabilities" aria-labelledby="capability-title">
       <Card>
         <CardHeader>
-          <CardTitle id="capability-title">能力边界</CardTitle>
-          <CardDescription>只呈现当前 Web 纵切真实具备的能力。</CardDescription>
+          <CardTitle id="capability-title" headingLevel={2}>
+            能力边界
+          </CardTitle>
+          <CardDescription>这里只列出浏览器访客版真实具备的能力。</CardDescription>
         </CardHeader>
         <CardContent>
           <ul className="web-capability-list">
@@ -785,21 +1152,21 @@ function CapabilityPanel(): ReactNode {
       </Card>
       <Card>
         <CardHeader>
-          <CardTitle>存储边界</CardTitle>
+          <CardTitle headingLevel={2}>存储边界</CardTitle>
         </CardHeader>
         <CardContent>
           <dl className="web-boundary-list">
             <div>
-              <dt>IndexedDB</dt>
-              <dd>版本化密文、nonce、AAD 绑定元数据、恢复 key envelope</dd>
+              <dt>浏览器加密存储</dt>
+              <dd>版本化密文、完整性校验信息和加密后的项目密钥</dd>
             </div>
             <div>
-              <dt>页面内存</dt>
-              <dd>不可导出的 CryptoKey、当前解锁正文、临时恢复材料</dd>
+              <dt>页面临时内存</dt>
+              <dd>不可导出的项目密钥、当前解锁正文和临时恢复材料</dd>
             </div>
             <div>
-              <dt>Web Storage</dt>
-              <dd>不使用 localStorage 或 sessionStorage 保存密钥、恢复材料、项目或章节</dd>
+              <dt>浏览器常规存储</dt>
+              <dd>不会使用浏览器常规存储保存密钥、恢复材料、项目或章节</dd>
             </div>
           </dl>
         </CardContent>
@@ -811,33 +1178,122 @@ function CapabilityPanel(): ReactNode {
 interface RiskDialogProps {
   readonly open: boolean;
   readonly onAccept: () => void;
+  readonly onDecline: () => void;
 }
 
-function RiskDialog({ onAccept, open }: RiskDialogProps): ReactNode {
+function RiskDialog({ onAccept, onDecline, open }: RiskDialogProps): ReactNode {
+  const acceptButtonRef = useRef<HTMLButtonElement>(null);
+
   return (
     <Dialog
       open={open}
-      onOpenChange={() => undefined}
-      dismissible={false}
-      title="进入浏览器 Guest 工作区前"
-      description="这是独立 Web 客户端，不是桌面数据的镜像或从库。"
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          onDecline();
+        }
+      }}
+      initialFocusRef={acceptButtonRef}
+      title="进入浏览器访客工作区前"
+      description="这是独立的浏览器工作区，不是桌面数据的镜像或副本。"
       footer={
-        <Button size="lg" onClick={onAccept}>
-          我理解风险，进入工作区
-        </Button>
+        <div className="web-dialog-actions">
+          <Button ref={acceptButtonRef} size="lg" onClick={onAccept}>
+            我理解风险，进入工作区
+          </Button>
+          <Button size="lg" variant="secondary" onClick={onDecline}>
+            暂不进入
+          </Button>
+        </div>
       }
     >
       <ul className="web-risk-list">
-        <li>浏览器或你本人清理站点数据后，IndexedDB 中的密文副本会消失。</li>
+        <li>浏览器或你本人清理站点数据后，保存在本机的加密副本会消失。</li>
         <li>同一浏览器配置文件中的其他使用者可看到密文记录；解锁期间页面会显示正文。</li>
         <li>恢复材料只在创建时显示，本站不保存；刷新后必须再次提供才能解锁。</li>
         <li>恢复材料不能单独重建已被清理的密文，请将密文副本与恢复材料分开保管。</li>
+        <li>
+          切换标签页或离开时会先尝试保存再锁定；如果浏览器来不及完成或写入失败，最近修改可能未保存。
+        </li>
       </ul>
     </Dialog>
   );
 }
 
+interface RiskDeclinedDialogProps {
+  readonly open: boolean;
+  readonly onReview: () => void;
+}
+
+function RiskDeclinedDialog({ onReview, open }: RiskDeclinedDialogProps): ReactNode {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={() => undefined}
+      dismissible={false}
+      title="尚未进入工作区"
+      description="你没有接受浏览器访客版的风险说明，项目密钥和正文均未载入。"
+      footer={
+        <Button size="lg" variant="secondary" onClick={onReview}>
+          重新查看风险说明
+        </Button>
+      }
+    >
+      <p className="web-dialog-copy">可以安全关闭此标签页，或重新阅读说明后再决定是否进入。</p>
+    </Dialog>
+  );
+}
+
+interface UnsavedLockDialogProps {
+  readonly open: boolean;
+  readonly saving: boolean;
+  readonly onCancel: () => void;
+  readonly onDiscard: () => void;
+  readonly onSaveAndLock: () => void;
+}
+
+function UnsavedLockDialog({
+  onCancel,
+  onDiscard,
+  onSaveAndLock,
+  open,
+  saving,
+}: UnsavedLockDialogProps): ReactNode {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && !saving) {
+          onCancel();
+        }
+      }}
+      dismissible={!saving}
+      title="有修改尚未保存"
+      description="锁定会清除当前页面中的正文和项目密钥。你可以先保存，也可以明确放弃本次修改。"
+      footer={
+        <div className="web-dialog-actions">
+          <Button size="lg" loading={saving} loadingLabel="正在保存并锁定" onClick={onSaveAndLock}>
+            保存并锁定
+          </Button>
+          <Button size="lg" variant="secondary" disabled={saving} onClick={onCancel}>
+            继续编辑
+          </Button>
+          <Button size="lg" variant="danger" disabled={saving} onClick={onDiscard}>
+            放弃修改并锁定
+          </Button>
+        </div>
+      }
+    >
+      <InlineAlert
+        tone="warning"
+        title="放弃修改无法撤销"
+        description="选择“放弃修改并锁定”后，最近一次成功保存之后的内容不会写入加密副本。"
+      />
+    </Dialog>
+  );
+}
+
 interface RecoveryMaterialDialogProps {
+  readonly project: GuestProjectSession["project"] | null;
   readonly material: string | null;
   readonly confirmed: boolean;
   readonly committing: boolean;
@@ -853,6 +1309,7 @@ function RecoveryMaterialDialog({
   material,
   onConfirmedChange,
   onCommit,
+  project,
 }: RecoveryMaterialDialogProps): ReactNode {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "manual">("idle");
 
@@ -872,7 +1329,7 @@ function RecoveryMaterialDialog({
 
   return (
     <Dialog
-      open={material !== null}
+      open={material !== null && project !== null}
       onOpenChange={() => undefined}
       dismissible={false}
       title="现在保存恢复材料"
@@ -899,6 +1356,24 @@ function RecoveryMaterialDialog({
             description={error.message}
           />
         )}
+        {project !== null && (
+          <dl className="web-recovery-project">
+            <div>
+              <dt>项目名称</dt>
+              <dd>{project.name}</dd>
+            </div>
+            <div>
+              <dt>完整项目标识</dt>
+              <dd>
+                <code>{project.id}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>创建时间</dt>
+              <dd>{formatLocalTimestamp(project.toSnapshot().createdAt)}</dd>
+            </div>
+          </dl>
+        )}
         <output
           className="web-recovery-material"
           aria-label="项目恢复材料"
@@ -914,6 +1389,18 @@ function RecoveryMaterialDialog({
           }}
         >
           复制恢复材料
+        </Button>
+        <Button
+          size="lg"
+          variant="secondary"
+          disabled={project === null || material === null}
+          onClick={() => {
+            if (project !== null && material !== null) {
+              downloadRecoveryMaterial(project, material);
+            }
+          }}
+        >
+          下载带项目标识的恢复文件
         </Button>
         {copyState !== "idle" && (
           <p role="status">
@@ -931,7 +1418,7 @@ function RecoveryMaterialDialog({
               onConfirmedChange(event.currentTarget.checked);
             }}
           />
-          <span>我已把恢复材料保存到浏览器之外，并理解丢失后无法解锁。</span>
+          <span>我已把带项目名称和完整标识的恢复材料保存到浏览器之外，并理解丢失后无法解锁。</span>
         </label>
       </div>
     </Dialog>
@@ -944,7 +1431,7 @@ function toVisibleError(error: unknown): VisibleError {
   }
   return {
     code: "WEB_STORAGE_FAILED",
-    message: "操作未完成。项目密钥和正文均未写入 Web Storage；请重试。",
+    message: "操作未完成。项目密钥和正文均未写入浏览器存储，请重试。",
   };
 }
 
@@ -953,11 +1440,40 @@ function shortProjectId(projectId: UuidV7): string {
 }
 
 function downloadEncryptedEnvelope(projectId: UuidV7, payload: string): void {
-  const blob = new Blob([payload], { type: "application/json" });
+  downloadBlob(
+    `inkshadow-${projectId}.encrypted.json`,
+    new Blob([payload], { type: "application/json" }),
+  );
+}
+
+function downloadRecoveryMaterial(
+  project: GuestProjectSession["project"],
+  recoveryMaterial: string,
+): void {
+  const createdAt = project.toSnapshot().createdAt;
+  const content = [
+    "墨影浏览器访客版恢复材料",
+    "",
+    `项目名称：${project.name}`,
+    `完整项目标识：${project.id}`,
+    `创建时间：${createdAt}`,
+    `恢复材料：${recoveryMaterial}`,
+    "",
+    "重要：此文件不能单独恢复项目。请与对应的 .encrypted.json 加密副本分开保管。",
+    "任何获得这两份文件的人都可能解锁项目，请勿通过不可信渠道发送。",
+  ].join("\n");
+  const safeProjectName = sanitizeDownloadName(project.name);
+  downloadBlob(
+    `inkshadow-${safeProjectName}-${project.id}.recovery.txt`,
+    new Blob([content], { type: "text/plain;charset=utf-8" }),
+  );
+}
+
+function downloadBlob(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `inkshadow-${projectId}.encrypted.json`;
+  anchor.download = filename;
   anchor.rel = "noopener";
   anchor.hidden = true;
   document.body.append(anchor);
@@ -966,6 +1482,36 @@ function downloadEncryptedEnvelope(projectId: UuidV7, payload: string): void {
   window.setTimeout(() => {
     URL.revokeObjectURL(url);
   }, 0);
+}
+
+function sanitizeDownloadName(value: string): string {
+  const normalized = value
+    .normalize("NFKC")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/gu, "-")
+    .replace(/\s+/gu, "-")
+    .replace(/-+/gu, "-")
+    .replace(/^[.-]+|[.-]+$/gu, "")
+    .slice(0, 48);
+  return normalized.length === 0 ? "project" : normalized;
+}
+
+function formatLocalTimestamp(value: string): string {
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime())
+    ? value
+    : new Intl.DateTimeFormat("zh-CN", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }).format(timestamp);
+}
+
+function isValidVisibleText(value: string, maxLength: number): boolean {
+  const normalized = value.trim();
+  return (
+    normalized.length > 0 &&
+    normalized.length <= maxLength &&
+    !/[\u0000-\u001f\u007f]/u.test(normalized)
+  );
 }
 
 function browserClipboard(): Clipboard | null {

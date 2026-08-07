@@ -14,6 +14,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Dialog,
   EmptyState,
   InlineAlert,
   PageStateBoundary,
@@ -91,6 +92,7 @@ export function TaskCenterPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [cancelTarget, setCancelTarget] = useState<TaskSnapshot | null>(null);
 
   const load = useCallback(
     async (background = false): Promise<void> => {
@@ -235,7 +237,7 @@ export function TaskCenterPage() {
         <InlineAlert
           tone="warning"
           title="当前是浏览器开发数据"
-          description="任务与通知仅保存在当前浏览器 localStorage；桌面发行版使用 SQLite。"
+          description="任务与通知仅保存在当前浏览器的调试存储中；桌面发行版使用本地数据库。"
         />
       )}
 
@@ -262,11 +264,7 @@ export function TaskCenterPage() {
           </TabsList>
 
           <TabsContent value="tasks">
-            <TaskList
-              tasks={snapshot.tasks}
-              busyId={busyId}
-              onCancel={(task) => void cancelTask(task)}
-            />
+            <TaskList tasks={snapshot.tasks} busyId={busyId} onCancel={setCancelTarget} />
           </TabsContent>
 
           <TabsContent value="notifications">
@@ -290,6 +288,54 @@ export function TaskCenterPage() {
           </TabsContent>
         </Tabs>
       </PageStateBoundary>
+      <Dialog
+        open={cancelTarget !== null}
+        dismissible={busyId === null}
+        onOpenChange={(open) => {
+          if (!open && busyId === null) {
+            setCancelTarget(null);
+          }
+        }}
+        title="确认取消任务"
+        description={
+          cancelTarget === null
+            ? undefined
+            : cancelTarget.status === "running"
+              ? `“${taskTypeLabel(cancelTarget.type)}”正在执行。取消请求会在下一个安全边界停止，已经安全提交的结果不会回滚。`
+              : `“${taskTypeLabel(cancelTarget.type)}”尚未完成。确认后它不会继续执行或自动重试。`
+        }
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              disabled={busyId !== null}
+              onClick={() => setCancelTarget(null)}
+            >
+              继续任务
+            </Button>
+            <Button
+              variant="danger"
+              loading={cancelTarget !== null && busyId === cancelTarget.id}
+              disabled={cancelTarget === null || busyId !== null}
+              onClick={() => {
+                const task = cancelTarget;
+                if (task !== null) {
+                  setCancelTarget(null);
+                  void cancelTask(task);
+                }
+              }}
+            >
+              确认取消
+            </Button>
+          </>
+        }
+      >
+        <InlineAlert
+          tone="warning"
+          title="取消不会删除已有项目内容"
+          description="只停止这条后台任务；项目、章节、稳定版本和已完成的导出仍会保留。"
+        />
+      </Dialog>
     </div>
   );
 }
@@ -356,10 +402,16 @@ function TaskList({ busyId, onCancel, tasks }: TaskListProps) {
                       </span>
                     </div>
                     {progress === null ? (
-                      <div className="task-progress__indeterminate" role="progressbar" />
+                      <div
+                        className="task-progress__indeterminate"
+                        role="progressbar"
+                        aria-label={`${taskTypeLabel(task.type)}进度`}
+                        aria-valuetext={`${progressStepLabel(task.progress.step)}，正在执行，尚未提供完成比例`}
+                      />
                     ) : (
                       <progress
                         aria-label={`${taskTypeLabel(task.type)}进度`}
+                        aria-valuetext={`${progressStepLabel(task.progress.step)}，已完成 ${String(progress)}%`}
                         max={100}
                         value={progress}
                       />

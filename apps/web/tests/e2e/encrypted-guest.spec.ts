@@ -1,7 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const DATABASE_NAME = "inkshadow-web-guest-v1";
-const OBJECT_STORE_NAME = "encrypted-projects";
+import {
+  WEB_GUEST_DATABASE_NAME as DATABASE_NAME,
+  WEB_GUEST_DATABASE_VERSION as DATABASE_VERSION,
+  WEB_GUEST_OBJECT_STORE_NAME as OBJECT_STORE_NAME,
+} from "../../src/infrastructure/indexed-db-encrypted-project-store";
 const PROJECT_CANARY = "E2E_PROJECT_CANARY_18ce";
 const BODY_CANARY = "E2E_BODY_CANARY_d92a：雨线把远山切成了灰色的层次。";
 const UPDATED_CANARY = "E2E_UPDATED_CANARY_66ab：灯塔在第三次潮汐前熄灭。";
@@ -29,7 +32,7 @@ test.beforeEach(async ({ page }) => {
 
 test("persists ciphertext only and refreshes back to a locked project", async ({ page }) => {
   const riskDialog = page.getByRole("dialog", {
-    name: "进入浏览器 Guest 工作区前",
+    name: "进入浏览器访客工作区前",
   });
   await expect(riskDialog).toContainText("清理站点数据");
   await riskDialog.getByRole("button", { name: "我理解风险，进入工作区" }).click();
@@ -45,7 +48,7 @@ test("persists ciphertext only and refreshes back to a locked project", async ({
   )?.trim();
   expect(recoveryMaterial).toMatch(/^[A-Za-z0-9_-]{43}$/u);
   expect((await inspectBrowserStorage(page)).recordCount).toBe(0);
-  await recoveryDialog.getByRole("checkbox", { name: /我已把恢复材料保存到浏览器之外/u }).check();
+  await recoveryDialog.getByRole("checkbox", { name: /我已把.*恢复材料保存到浏览器之外/u }).check();
   await recoveryDialog.getByRole("button", { name: "我已另存，保存密文项目" }).click();
 
   const initialStorage = await inspectBrowserStorage(page);
@@ -90,13 +93,13 @@ test("persists ciphertext only and refreshes back to a locked project", async ({
 
   await page.reload();
   const refreshedRiskDialog = page.getByRole("dialog", {
-    name: "进入浏览器 Guest 工作区前",
+    name: "进入浏览器访客工作区前",
   });
   await refreshedRiskDialog.getByRole("button", { name: "我理解风险，进入工作区" }).click();
   await expect(page.getByText("已锁定")).toBeVisible();
   await expect(page.getByRole("textbox", { name: /^章节正文/u })).toHaveCount(0);
 
-  const recoveryInput = page.getByLabel("恢复材料");
+  const recoveryInput = page.getByLabel("恢复材料", { exact: true });
   await recoveryInput.fill(changeLastCharacter(recoveryMaterial ?? ""));
   await page.getByRole("button", { name: "仅本次会话解锁" }).click();
   await expect(page.getByText(/WEB_UNLOCK_FAILED/u)).toBeVisible();
@@ -118,7 +121,7 @@ test("keeps the first-use workflow keyboard-operable at a 320px viewport", async
   await page.goto("/");
 
   const riskDialog = page.getByRole("dialog", {
-    name: "进入浏览器 Guest 工作区前",
+    name: "进入浏览器访客工作区前",
   });
   const acceptButton = riskDialog.getByRole("button", {
     name: "我理解风险，进入工作区",
@@ -126,7 +129,7 @@ test("keeps the first-use workflow keyboard-operable at a 320px viewport", async
   await expect(acceptButton).toBeFocused();
   await page.keyboard.press("Enter");
 
-  await expect(page.getByRole("heading", { name: "Guest 写作工作区" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "访客写作工作区" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "项目名称" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "首章标题" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: /^首章正文/u })).toBeVisible();
@@ -147,9 +150,9 @@ async function inspectBrowserStorage(page: Page): Promise<{
   sessionStorage: Record<string, string>;
 }> {
   return page.evaluate(
-    async ({ databaseName, objectStoreName }) => {
+    async ({ databaseName, databaseVersion, objectStoreName }) => {
       const records = await new Promise<unknown[]>((resolve, reject) => {
-        const open = indexedDB.open(databaseName, 1);
+        const open = indexedDB.open(databaseName, databaseVersion);
         open.onerror = () => {
           reject(open.error ?? new Error("Test database could not be opened."));
         };
@@ -194,6 +197,7 @@ async function inspectBrowserStorage(page: Page): Promise<{
     },
     {
       databaseName: DATABASE_NAME,
+      databaseVersion: DATABASE_VERSION,
       objectStoreName: OBJECT_STORE_NAME,
     },
   );

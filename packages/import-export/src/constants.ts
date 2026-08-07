@@ -21,7 +21,7 @@ export const IMPORT_LIMITS = Object.freeze({
 
 export const ALLOWED_TEXT_EXTENSIONS = [".htm", ".html", ".md", ".markdown", ".txt"] as const;
 
-export const ALLOWED_BINARY_DOCUMENT_EXTENSIONS = [".docx", ".pdf"] as const;
+export const ALLOWED_BINARY_DOCUMENT_EXTENSIONS = [".docx", ".epub", ".pdf"] as const;
 
 export const ALLOWED_BUNDLE_EXTENSIONS = [".inkshadow.json", ".json"] as const;
 

@@ -204,7 +204,9 @@ export function CloudSyncControlPanel({
     <Card className="cloud-sync-control" aria-labelledby="cloud-sync-control-title">
       <CardHeader className="cloud-sync-control__header">
         <div>
-          <CardTitle id="cloud-sync-control-title">加密同步</CardTitle>
+          <CardTitle id="cloud-sync-control-title" headingLevel={2}>
+            加密同步
+          </CardTitle>
           <CardDescription>云端只接收加密对象；本机编辑能力不依赖同步状态。</CardDescription>
         </div>
         {copy !== null && <Badge tone={copy.tone}>{copy.label}</Badge>}

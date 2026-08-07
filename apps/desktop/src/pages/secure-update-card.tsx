@@ -108,7 +108,7 @@ export function SecureUpdateCard({ updater, online }: SecureUpdateCardProps) {
       <CardHeader>
         <div className="card-heading-row">
           <div>
-            <CardTitle>安全更新</CardTitle>
+            <CardTitle headingLevel={2}>安全更新</CardTitle>
             <CardDescription>
               仅接受内置公钥签名、未过期且同源的更新清单；下载后再次核对大小与 SHA-256。
             </CardDescription>
@@ -140,13 +140,12 @@ export function SecureUpdateCard({ updater, online }: SecureUpdateCardProps) {
             <>
               <ul className="privacy-list">
                 <li>
-                  当前版本 {configuration.currentVersion}，{configuration.channel} 通道。
+                  当前版本 {configuration.currentVersion}，{channelLabel(configuration.channel)}。
                 </li>
-                <li>更新请求不携带账户、项目、正文、Prompt、密钥或设备标识。</li>
+                <li>更新请求不携带账户、项目、正文、提示词、密钥或设备标识。</li>
                 <li>重定向、跨源下载、私网目标、超限响应和摘要不一致均会失败关闭。</li>
                 <li>
-                  当前切片只把包暂存为应用不会执行的 .pending 文件；完成 Authenticode
-                  发布者校验前不会显示安装动作。
+                  当前版本只能下载并验证更新包，不能自动安装；页面不会显示无法执行的安装按钮。
                 </li>
               </ul>
               {!online && (
@@ -181,7 +180,7 @@ export function SecureUpdateCard({ updater, online }: SecureUpdateCardProps) {
                   disabled={busy !== null || !online}
                   onClick={() => void stage()}
                 >
-                  校验并暂存更新包
+                  下载并校验更新包（不安装）
                 </Button>
               </div>
             )}
@@ -190,13 +189,43 @@ export function SecureUpdateCard({ updater, online }: SecureUpdateCardProps) {
             <InlineAlert
               tone="info"
               title="更新包已完成摘要校验并隔离暂存"
-              description={`版本 ${receipt.releaseVersion}，${formatBytes(receipt.artifactSizeBytes)}。平台发布者签名尚未验证，因此安装仍被禁止；本页面没有执行入口。`}
+              description={`版本 ${receipt.releaseVersion}，${formatBytes(receipt.artifactSizeBytes)}。当前版本不具备安装能力，已验证的下载包不会被自动执行；请按照官方发行说明完成后续安装。`}
             />
           )}
+          {plan !== null && <ReleaseNotesLink url={plan.releaseNotesUrl} />}
         </div>
       </CardContent>
     </Card>
   );
+}
+
+function ReleaseNotesLink({ url }: Readonly<{ url: string | null }>) {
+  if (url === null || !isSafeReleaseUrl(url)) {
+    return (
+      <p role="note">
+        此发行清单没有提供可验证的官方说明链接；墨影不会猜测下载地址或引导安装未核验的软件包。
+      </p>
+    );
+  }
+  return (
+    <p>
+      <a href={url} target="_blank" rel="noreferrer">
+        查看官方发行说明
+      </a>
+    </p>
+  );
+}
+
+function isSafeReleaseUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function channelLabel(channel: SecureUpdateConfiguration["channel"]): string {
+  return channel === "stable" ? "稳定通道" : channel === "beta" ? "测试通道" : "无效通道";
 }
 
 function UpdatePlanSummary({ plan }: Readonly<{ plan: SignedUpdateCheck }>) {
@@ -214,15 +243,15 @@ function UpdatePlanSummary({ plan }: Readonly<{ plan: SignedUpdateCheck }>) {
         <InlineAlert
           tone="warning"
           title="需要人工更新"
-          description={`当前版本低于安全更新器兼容下限，应用不会尝试自行暂存 ${plan.releaseVersion}。请仅从官方发布渠道获取安装包。`}
+          description={`当前版本低于安全更新器兼容下限，应用不会下载或运行 ${plan.releaseVersion}。请仅按照下方已验证的官方发行说明手动更新。`}
         />
       );
     case "rollback_available":
       return (
         <InlineAlert
           tone="warning"
-          title="签名回退需要原生确认"
-          description={`目标 ${plan.releaseVersion} 已通过清单验证，但当前版本尚未实现系统原生二次确认，因此不会下载、暂存或执行回退包。`}
+          title="当前版本不能自动回退"
+          description={`目标 ${plan.releaseVersion} 已通过清单验证，但当前版本没有安全的系统确认流程，因此不会下载或执行回退包。`}
         />
       );
     case "update_available":

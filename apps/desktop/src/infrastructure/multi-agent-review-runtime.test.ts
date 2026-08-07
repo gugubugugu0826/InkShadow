@@ -851,6 +851,7 @@ function fakeModelRouting(): ModelRoutingStore {
     listRoutes: vi.fn<ModelRoutingStore["listRoutes"]>(),
     findRoute: vi.fn<ModelRoutingStore["findRoute"]>(),
     saveRoute: vi.fn<ModelRoutingStore["saveRoute"]>(),
+    deleteRoute: vi.fn<ModelRoutingStore["deleteRoute"]>(),
   };
 }
 

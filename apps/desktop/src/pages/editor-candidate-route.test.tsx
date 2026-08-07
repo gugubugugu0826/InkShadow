@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { AiCandidate, type Chapter, type Project } from "@inkshadow/domain";
 import { ToastProvider } from "@inkshadow/ui";
@@ -34,10 +35,10 @@ describe("editor candidate route selection", () => {
     renderEditor(runtime, project, chapter, "?candidate=not-a-uuid");
 
     expect(
-      await screen.findByText("候选链接无效；未自动打开其他候选。请从多 Agent 审查页重新选择。"),
+      await screen.findByText("AI 建议链接无效；未自动打开其他建议。请从深度审稿页重新选择。"),
     ).toBeVisible();
     expect(screen.queryByText("不可静默打开的默认候选")).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "还没有候选" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "还没有 AI 建议版本" })).toBeVisible();
   });
 
   it("rejects a ready candidate from another chapter without opening the local default", async () => {
@@ -63,7 +64,7 @@ describe("editor candidate route selection", () => {
 
     expect(
       await screen.findByText(
-        "链接指定的候选不存在、已处理，或不属于当前项目与章节；未自动打开其他候选。",
+        "链接指定的 AI 建议不存在、已处理，或不属于当前项目与章节；未自动打开其他建议。",
       ),
     ).toBeVisible();
     expect(screen.queryByText("当前章节默认候选")).not.toBeInTheDocument();
@@ -97,12 +98,13 @@ describe("editor candidate route selection", () => {
 
     expect(
       await screen.findByText(
-        "链接指定的候选不存在、已处理，或不属于当前项目与章节；未自动打开其他候选。",
+        "链接指定的 AI 建议不存在、已处理，或不属于当前项目与章节；未自动打开其他建议。",
       ),
     ).toBeVisible();
+    await userEvent.setup().click(screen.getByText("高级工具"));
     expect(
       screen
-        .getAllByRole("link", { name: "多 Agent 审查" })
+        .getAllByRole("link", { name: "深度审稿" })
         .find(
           (link) =>
             link.getAttribute("href") ===

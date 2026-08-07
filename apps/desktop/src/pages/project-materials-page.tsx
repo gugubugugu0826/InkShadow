@@ -483,7 +483,12 @@ export function ProjectMaterialsPage() {
 
       <Dialog
         open={createOpen}
-        onOpenChange={setCreateOpen}
+        dismissible={!busy}
+        onOpenChange={(open) => {
+          if (!busy) {
+            setCreateOpen(open);
+          }
+        }}
         title="录入治理素材"
         description="来源、权利依据与用途权限会和正文一起保存；提交前请按实际情况确认。"
         footer={
@@ -638,8 +643,9 @@ export function ProjectMaterialsPage() {
 
       <Dialog
         open={referenceMaterial !== null}
+        dismissible={!busy}
         onOpenChange={(open) => {
-          if (!open) {
+          if (!open && !busy) {
             setReferenceMaterial(null);
           }
         }}
@@ -692,8 +698,9 @@ export function ProjectMaterialsPage() {
 
       <Dialog
         open={deleteMaterial !== null}
+        dismissible={!busy}
         onOpenChange={(open) => {
-          if (!open) {
+          if (!open && !busy) {
             setDeleteMaterial(null);
           }
         }}
@@ -721,8 +728,9 @@ export function ProjectMaterialsPage() {
 
       <Dialog
         open={mergeMaterial !== null}
+        dismissible={!busy}
         onOpenChange={(open) => {
-          if (!open) {
+          if (!open && !busy) {
             setMergeMaterial(null);
           }
         }}

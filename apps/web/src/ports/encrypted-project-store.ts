@@ -2,6 +2,7 @@ import type {
   CipherEnvelopeV1,
   EncryptedGuestProjectRecordV1,
 } from "../contracts/encrypted-guest-project";
+import type { EncryptedGuestDraftRecordV1 } from "../contracts/encrypted-guest-draft";
 
 export interface EncryptedProjectStore {
   list(): Promise<readonly EncryptedGuestProjectRecordV1[]>;
@@ -12,4 +13,7 @@ export interface EncryptedProjectStore {
     expectedContentVersion: number,
     envelope: CipherEnvelopeV1,
   ): Promise<void>;
+  getTemporaryDraft(projectId: string): Promise<EncryptedGuestDraftRecordV1 | null>;
+  putTemporaryDraft(record: EncryptedGuestDraftRecordV1): Promise<void>;
+  deleteTemporaryDraft(projectId: string): Promise<void>;
 }

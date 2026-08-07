@@ -1,6 +1,7 @@
 import { lazy, Suspense, useMemo } from "react";
 import {
   createHashRouter,
+  Link,
   Navigate,
   Outlet,
   Route,
@@ -29,6 +30,11 @@ const ProjectSearchPage = lazy(() =>
 );
 const ProjectMaterialsPage = lazy(() =>
   import("./pages/project-materials-page").then(({ ProjectMaterialsPage: Page }) => ({
+    default: Page,
+  })),
+);
+const ProjectChecksPage = lazy(() =>
+  import("./pages/project-checks-page").then(({ ProjectChecksPage: Page }) => ({
     default: Page,
   })),
 );
@@ -87,6 +93,17 @@ const WorkspacePage = lazy(() =>
 );
 const StartPage = lazy(() =>
   import("./pages/start-page").then(({ StartPage: Page }) => ({ default: Page })),
+);
+const IdeaJourneyPage = lazy(() =>
+  import("./pages/idea-journey-page").then(({ IdeaJourneyPage: Page }) => ({ default: Page })),
+);
+const ImportJourneyPage = lazy(() =>
+  import("./pages/import-journey-page").then(({ ImportJourneyPage: Page }) => ({ default: Page })),
+);
+const ProfessionalCreatePage = lazy(() =>
+  import("./pages/professional-create-page").then(({ ProfessionalCreatePage: Page }) => ({
+    default: Page,
+  })),
 );
 const CloudLoginPage = lazy(() =>
   import("./pages/cloud-login-page").then(({ CloudLoginPage: Page }) => ({ default: Page })),
@@ -154,13 +171,37 @@ function CloudIdentityRoute() {
 
 function TeamFeatureLimitedState() {
   return (
-    <main className="studio-usage-page">
+    <div className="studio-usage-page">
       <EmptyState
+        headingLevel={1}
         kind="feature_limited"
         title="团队协作尚未启用"
         description="此构建没有获得 Studio 团队协作授权，因此不会发起团队、预算或评审云请求。现有本地个人项目与离线编辑不受影响。"
       />
-    </main>
+      <div className="settings-actions">
+        <Link className="button-link" to="/projects">
+          返回项目
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+function NotFoundState() {
+  return (
+    <div className="desktop-page">
+      <EmptyState
+        headingLevel={1}
+        kind="no_results"
+        title="找不到这个页面"
+        description="链接可能已经过期、地址不完整，或对应功能在当前版本中不可用。"
+      />
+      <div className="settings-actions">
+        <Link className="button-link" to="/projects">
+          返回项目
+        </Link>
+      </div>
+    </div>
   );
 }
 
@@ -205,6 +246,9 @@ export function DesktopRoutes() {
       <Routes>
         <Route path="/" element={<StartPage />} />
         <Route path="/start" element={<StartPage />} />
+        <Route path="/create/idea" element={<IdeaJourneyPage />} />
+        <Route path="/create/import" element={<ImportJourneyPage />} />
+        <Route path="/create/professional" element={<ProfessionalCreatePage />} />
         <Route path="/auth/login" element={<CloudIdentityRoute />} />
         <Route
           element={
@@ -226,6 +270,7 @@ export function DesktopRoutes() {
           <Route path="/projects/:projectId/materials" element={<ProjectMaterialsPage />} />
           <Route path="/projects/:projectId/outline" element={<StoryOutlinePage />} />
           <Route path="/projects/:projectId/story" element={<StoryGovernancePage />} />
+          <Route path="/projects/:projectId/checks" element={<ProjectChecksPage />} />
           <Route path="/projects/:projectId/sync" element={<ProjectSyncRoutePage />} />
           <Route
             path="/projects/:projectId/sync/conflicts"
@@ -261,7 +306,7 @@ export function DesktopRoutes() {
             element={<StudioTeamTemplatesFeatureRoute />}
           />
           <Route path="/tasks" element={<TaskCenterPage />} />
-          <Route path="*" element={<Navigate to="/projects" replace />} />
+          <Route path="*" element={<NotFoundState />} />
         </Route>
       </Routes>
     </Suspense>

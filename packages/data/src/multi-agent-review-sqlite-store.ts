@@ -86,6 +86,81 @@ export interface MultiAgentReviewSourceReference {
   readonly excerpt: string | null;
 }
 
+export const MULTI_AGENT_CONFIRMED_STORY_FACT_AUTHORITY_SCHEMA =
+  "inkshadow.multi-agent.confirmed-story-fact.v1" as const;
+
+export interface MultiAgentReviewConfirmedStoryFactAuthorityInput {
+  readonly id: string;
+  readonly projectId: string;
+  readonly factType: string;
+  readonly contentText: string | null;
+  readonly structuredValue: unknown;
+  readonly source: Readonly<{
+    readonly kind: string;
+    readonly reference: string;
+    readonly chapterId: string | null;
+    readonly versionId: string | null;
+    readonly startOffset: number | null;
+    readonly endOffset: number | null;
+    readonly sourceLength: number | null;
+    readonly excerpt: string | null;
+    readonly contentChecksum: string | null;
+  }>;
+  readonly effectiveAt: string | null;
+  readonly invalidatedAt: string | null;
+  readonly confidence: number;
+  readonly origin: string;
+  readonly locked: boolean;
+  readonly revision: number;
+}
+
+/**
+ * Canonical public authority shared by local multi-agent prompts and the
+ * persistence-time citation verifier. It deliberately represents only a
+ * main-branch, formal, user-confirmed and non-deprecated StoryFact.
+ */
+export interface MultiAgentReviewConfirmedStoryFactAuthority extends MultiAgentReviewConfirmedStoryFactAuthorityInput {
+  readonly schemaVersion: typeof MULTI_AGENT_CONFIRMED_STORY_FACT_AUTHORITY_SCHEMA;
+  readonly authorityKind: "confirmed_story_fact";
+  readonly status: "formal";
+  readonly branchId: null;
+  readonly userConfirmed: true;
+  readonly deprecated: false;
+  readonly needsReview: false;
+}
+
+export function createMultiAgentReviewConfirmedStoryFactAuthority(
+  input: MultiAgentReviewConfirmedStoryFactAuthorityInput,
+): MultiAgentReviewConfirmedStoryFactAuthority {
+  return Object.freeze({
+    schemaVersion: MULTI_AGENT_CONFIRMED_STORY_FACT_AUTHORITY_SCHEMA,
+    authorityKind: "confirmed_story_fact" as const,
+    id: input.id,
+    projectId: input.projectId,
+    factType: input.factType,
+    contentText: input.contentText,
+    structuredValue: input.structuredValue,
+    source: Object.freeze({ ...input.source }),
+    effectiveAt: input.effectiveAt,
+    invalidatedAt: input.invalidatedAt,
+    confidence: input.confidence,
+    status: "formal" as const,
+    branchId: null,
+    origin: input.origin,
+    userConfirmed: true as const,
+    locked: input.locked,
+    deprecated: false as const,
+    needsReview: false as const,
+    revision: input.revision,
+  });
+}
+
+export function computeMultiAgentReviewConfirmedStoryFactChecksum(
+  authority: MultiAgentReviewConfirmedStoryFactAuthority,
+): Promise<string> {
+  return sha256Hex(canonicalJson(authority));
+}
+
 export interface MultiAgentReviewConclusion {
   readonly id: string;
   readonly ordinal: number;
@@ -443,6 +518,50 @@ interface OutlineRow {
   project_id: string;
   revision: number;
   snapshot_json: string;
+}
+
+interface ConfirmedStoryFactAuthorityRow {
+  readonly id: string;
+  readonly project_id: string;
+  readonly fact_type: string;
+  readonly content_text: string | null;
+  readonly value_json: string | null;
+  readonly source_kind: string;
+  readonly evidence_reference: string;
+  readonly source_chapter_id: string | null;
+  readonly source_version_id: string | null;
+  readonly source_start_offset: number | null;
+  readonly source_end_offset: number | null;
+  readonly source_length: number | null;
+  readonly source_excerpt: string | null;
+  readonly effective_at: string | null;
+  readonly invalidated_at: string | null;
+  readonly branch_id: string | null;
+  readonly confidence: number;
+  readonly status: string;
+  readonly origin: string;
+  readonly user_confirmed: number;
+  readonly locked: number;
+  readonly deprecated: number;
+  readonly needs_review: number;
+  readonly revision: number;
+}
+
+interface StoryFactChapterEvidenceRow {
+  readonly project_id: string;
+  readonly chapter_id: string;
+  readonly content: string;
+  readonly content_checksum: string;
+}
+
+interface ReviewCausalEvidenceRow {
+  readonly id: string;
+  readonly excerpt: string;
+  readonly start_offset: number;
+  readonly end_offset: number;
+  readonly source_length: number;
+  readonly content: string;
+  readonly content_checksum: string;
 }
 
 type StrictMultiAgentCandidate =
@@ -3030,30 +3149,34 @@ async function validateSourceReferences(
         const rows = await executor.select<{
           title: string;
           content: string;
-          current_version_id: string;
           sequence: number;
           content_checksum: string;
         }>(
           `SELECT
-             chapter.title, chapter.content, chapter.current_version_id,
-             version.sequence, version.content_checksum
-           FROM chapters AS chapter
-           JOIN chapter_versions AS version
-             ON version.id = chapter.current_version_id
-            AND version.chapter_id = chapter.id
-            AND version.project_id = chapter.project_id
-           WHERE chapter.id = ?
-             AND chapter.project_id = ?
+             chapter.title, version.content, version.sequence, version.content_checksum
+           FROM chapter_versions AS version
+           JOIN chapters AS chapter
+             ON chapter.id = version.chapter_id
+            AND chapter.project_id = version.project_id
+           WHERE version.id = ?
+             AND version.chapter_id = ?
+             AND version.project_id = ?
              AND chapter.status = 'active'`,
-          [reference.sourceId, session.project_id],
+          [reference.sourceVersionId, reference.sourceId, session.project_id],
         );
         const row = rows[0];
+        const targetBaseline =
+          reference.sourceId === session.chapter_id &&
+          reference.sourceVersionId === session.base_version_id;
+        const verifiedCausalEvidence =
+          reference.excerpt === null
+            ? false
+            : await matchesVerifiedMainCausalEvidence(executor, session.project_id, reference);
         if (
-          row?.current_version_id !== reference.sourceVersionId ||
-          reference.sourceRevision !== row.sequence ||
+          reference.sourceRevision !== row?.sequence ||
           reference.sourceChecksum !== row.content_checksum ||
-          (reference.sourceId === session.chapter_id &&
-            row.current_version_id !== session.base_version_id) ||
+          (await sha256Hex(row.content)) !== row.content_checksum ||
+          (!targetBaseline && !verifiedCausalEvidence) ||
           !referenceExcerptMatches(reference.excerpt, row.content)
         ) {
           throw storeError(
@@ -3145,6 +3268,29 @@ async function validateSourceReferences(
         break;
       }
       case "project_rule": {
+        const storyFact = await loadConfirmedStoryFactReviewAuthority(
+          executor,
+          session.project_id,
+          reference.sourceId,
+        );
+        if (storyFact !== null) {
+          if (
+            reference.sourceVersionId !== null ||
+            reference.sourceRevision !== storyFact.revision ||
+            reference.sourceChecksum !==
+              (await computeMultiAgentReviewConfirmedStoryFactChecksum(storyFact)) ||
+            !referenceExcerptMatches(reference.excerpt, storyFact)
+          ) {
+            throw projectRuleAuthorityMismatch();
+          }
+          validated.push({
+            ...reference,
+            authoritativeLabel: storyFactAuthorityLabel(storyFact),
+          });
+          break;
+        }
+
+        // Compatibility path for pre-unified enabled L4 memory records.
         const rows = await executor.select<{
           snapshot_json: string;
           revision: number;
@@ -3222,6 +3368,282 @@ async function validateSourceReferences(
     }
   }
   return Object.freeze(validated);
+}
+
+async function matchesVerifiedMainCausalEvidence(
+  executor: TransactionExecutor,
+  projectId: string,
+  reference: MultiAgentReviewSourceReference,
+): Promise<boolean> {
+  if (reference.sourceVersionId === null || reference.excerpt === null) {
+    return false;
+  }
+  let rows: ReviewCausalEvidenceRow[];
+  try {
+    rows = await executor.select<ReviewCausalEvidenceRow>(
+      `SELECT
+         evidence.id, evidence.excerpt, evidence.start_offset,
+         evidence.end_offset, evidence.source_length,
+         version.content, version.content_checksum
+       FROM causal_evidence_sources AS evidence
+       INNER JOIN chapter_versions AS version
+         ON version.id = evidence.chapter_version_id
+        AND version.chapter_id = evidence.chapter_id
+        AND version.project_id = evidence.project_id
+       WHERE evidence.project_id = ?
+         AND evidence.chapter_id = ?
+         AND evidence.chapter_version_id = ?
+         AND evidence.content_hash = ?`,
+      [projectId, reference.sourceId, reference.sourceVersionId, reference.sourceChecksum],
+    );
+  } catch (cause: unknown) {
+    if (isMissingSqliteTable(cause, "causal_evidence_sources")) {
+      return false;
+    }
+    throw cause;
+  }
+  for (const row of rows) {
+    if (
+      row.content_checksum !== reference.sourceChecksum ||
+      row.content.length !== row.source_length ||
+      row.start_offset < 0 ||
+      row.end_offset <= row.start_offset ||
+      row.end_offset > row.source_length ||
+      row.content.slice(row.start_offset, row.end_offset) !== row.excerpt ||
+      !row.excerpt.includes(reference.excerpt) ||
+      (await sha256Hex(row.content)) !== reference.sourceChecksum
+    ) {
+      continue;
+    }
+    if (await causalEvidenceIsUsedByMainGraph(executor, projectId, row.id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function causalEvidenceIsUsedByMainGraph(
+  executor: TransactionExecutor,
+  projectId: string,
+  evidenceId: string,
+): Promise<boolean> {
+  const rows = await executor.select<{ matched: number }>(
+    `SELECT 1 AS matched
+     FROM (
+       SELECT event.evidence_id
+       FROM causal_events AS event
+       WHERE event.project_id = ? AND event.branch_id = 'main'
+       UNION
+       SELECT prerequisite.evidence_id
+       FROM causal_event_prerequisites AS prerequisite
+       INNER JOIN causal_events AS event
+         ON event.id = prerequisite.event_id
+        AND event.project_id = prerequisite.project_id
+        AND event.branch_id = prerequisite.branch_id
+       WHERE event.project_id = ? AND event.branch_id = 'main'
+       UNION
+       SELECT change.evidence_id
+       FROM causal_event_character_changes AS change
+       INNER JOIN causal_events AS event
+         ON event.id = change.event_id
+        AND event.project_id = change.project_id
+        AND event.branch_id = change.branch_id
+       WHERE event.project_id = ? AND event.branch_id = 'main'
+       UNION
+       SELECT change.evidence_id
+       FROM causal_event_relationship_changes AS change
+       INNER JOIN causal_events AS event
+         ON event.id = change.event_id
+        AND event.project_id = change.project_id
+        AND event.branch_id = change.branch_id
+       WHERE event.project_id = ? AND event.branch_id = 'main'
+       UNION
+       SELECT change.evidence_id
+       FROM causal_event_item_changes AS change
+       INNER JOIN causal_events AS event
+         ON event.id = change.event_id
+        AND event.project_id = change.project_id
+        AND event.branch_id = change.branch_id
+       WHERE event.project_id = ? AND event.branch_id = 'main'
+       UNION
+       SELECT progress.evidence_id
+       FROM causal_event_foreshadow_progress AS progress
+       INNER JOIN causal_events AS event
+         ON event.id = progress.event_id
+        AND event.project_id = progress.project_id
+        AND event.branch_id = progress.branch_id
+       WHERE event.project_id = ? AND event.branch_id = 'main'
+       UNION
+       SELECT relation.evidence_id
+       FROM causal_event_relations AS relation
+       WHERE relation.project_id = ? AND relation.branch_id = 'main'
+     ) AS graph_evidence
+     WHERE graph_evidence.evidence_id = ?
+     LIMIT 1`,
+    [projectId, projectId, projectId, projectId, projectId, projectId, projectId, evidenceId],
+  );
+  return rows[0]?.matched === 1;
+}
+
+async function loadConfirmedStoryFactReviewAuthority(
+  executor: TransactionExecutor,
+  projectId: string,
+  sourceId: string,
+): Promise<MultiAgentReviewConfirmedStoryFactAuthority | null> {
+  let rows: ConfirmedStoryFactAuthorityRow[];
+  try {
+    rows = await executor.select<ConfirmedStoryFactAuthorityRow>(
+      `SELECT
+         id, project_id, fact_type, content_text, value_json, source_kind,
+         evidence_reference, source_chapter_id, source_version_id,
+         source_start_offset, source_end_offset, source_length, source_excerpt,
+         effective_at, invalidated_at, branch_id, confidence, status, origin,
+         user_confirmed, locked, deprecated, needs_review, revision
+       FROM story_facts
+       WHERE id = ? AND project_id = ?
+       LIMIT 2`,
+      [sourceId, projectId],
+    );
+  } catch (cause: unknown) {
+    if (isMissingSqliteTable(cause, "story_facts")) {
+      return null;
+    }
+    throw cause;
+  }
+  const row = rows[0];
+  if (row === undefined) {
+    return null;
+  }
+  if (
+    rows.length !== 1 ||
+    row.status !== "formal" ||
+    row.user_confirmed !== 1 ||
+    row.deprecated !== 0 ||
+    row.needs_review !== 0 ||
+    row.branch_id !== null ||
+    ![0, 1].includes(row.locked) ||
+    !Number.isSafeInteger(row.revision) ||
+    row.revision < 1 ||
+    !Number.isFinite(row.confidence) ||
+    row.confidence < 0 ||
+    row.confidence > 1 ||
+    (row.content_text === null && row.value_json === null)
+  ) {
+    throw projectRuleAuthorityMismatch();
+  }
+  const structuredValue =
+    row.value_json === null ? null : parseJson(row.value_json, "story-fact structured value");
+  const contentChecksum = await verifyStoryFactChapterEvidence(executor, row);
+  return createMultiAgentReviewConfirmedStoryFactAuthority({
+    id: row.id,
+    projectId: row.project_id,
+    factType: row.fact_type,
+    contentText: row.content_text,
+    structuredValue,
+    source: {
+      kind: row.source_kind,
+      reference: row.evidence_reference,
+      chapterId: row.source_chapter_id,
+      versionId: row.source_version_id,
+      startOffset: row.source_start_offset,
+      endOffset: row.source_end_offset,
+      sourceLength: row.source_length,
+      excerpt: row.source_excerpt,
+      contentChecksum,
+    },
+    effectiveAt: row.effective_at,
+    invalidatedAt: row.invalidated_at,
+    confidence: row.confidence,
+    origin: row.origin,
+    locked: row.locked === 1,
+    revision: row.revision,
+  });
+}
+
+async function verifyStoryFactChapterEvidence(
+  executor: TransactionExecutor,
+  row: ConfirmedStoryFactAuthorityRow,
+): Promise<string | null> {
+  const sourceFields = [
+    row.source_chapter_id,
+    row.source_version_id,
+    row.source_start_offset,
+    row.source_end_offset,
+    row.source_length,
+    row.source_excerpt,
+  ];
+  if (row.source_kind !== "chapter_span") {
+    if (sourceFields.some((value) => value !== null)) {
+      throw storeError(
+        "MULTI_AGENT_CORRUPT",
+        "A non-chapter StoryFact contains chapter evidence fields.",
+      );
+    }
+    return null;
+  }
+  const sourceVersionId = row.source_version_id;
+  const startOffset = row.source_start_offset;
+  const endOffset = row.source_end_offset;
+  const sourceLength = row.source_length;
+  if (
+    typeof row.source_chapter_id !== "string" ||
+    typeof sourceVersionId !== "string" ||
+    typeof startOffset !== "number" ||
+    !Number.isSafeInteger(startOffset) ||
+    typeof endOffset !== "number" ||
+    !Number.isSafeInteger(endOffset) ||
+    typeof sourceLength !== "number" ||
+    !Number.isSafeInteger(sourceLength) ||
+    typeof row.source_excerpt !== "string"
+  ) {
+    throw projectRuleAuthorityMismatch();
+  }
+  const versionRows = await executor.select<StoryFactChapterEvidenceRow>(
+    `SELECT
+       version.project_id, version.chapter_id, version.content,
+       version.content_checksum
+     FROM chapter_versions AS version
+     INNER JOIN chapters AS chapter
+       ON chapter.id = version.chapter_id
+      AND chapter.project_id = version.project_id
+     WHERE version.id = ?
+     LIMIT 2`,
+    [sourceVersionId],
+  );
+  const version = versionRows[0];
+  if (
+    versionRows.length !== 1 ||
+    version?.project_id !== row.project_id ||
+    version.chapter_id !== row.source_chapter_id ||
+    startOffset < 0 ||
+    endOffset <= startOffset ||
+    endOffset > sourceLength ||
+    version.content.length !== sourceLength ||
+    version.content.slice(startOffset, endOffset) !== row.source_excerpt ||
+    (await sha256Hex(version.content)) !== version.content_checksum
+  ) {
+    throw projectRuleAuthorityMismatch();
+  }
+  return version.content_checksum;
+}
+
+function storyFactAuthorityLabel(authority: MultiAgentReviewConfirmedStoryFactAuthority): string {
+  const content = authority.contentText?.trim();
+  return content === undefined || content.length === 0
+    ? `StoryFact ${authority.factType}`
+    : content.slice(0, 240);
+}
+
+function projectRuleAuthorityMismatch(): MultiAgentReviewStoreError {
+  return storeError(
+    "MULTI_AGENT_AUTHORITY_MISMATCH",
+    "A project-rule source reference is missing, stale, unconfirmed, or belongs to another project.",
+  );
+}
+
+function isMissingSqliteTable(cause: unknown, tableName: string): boolean {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  return new RegExp(`no such table:\\s*(?:main\\.)?${tableName}`, "iu").test(message);
 }
 
 function deriveAuthorityLabel(

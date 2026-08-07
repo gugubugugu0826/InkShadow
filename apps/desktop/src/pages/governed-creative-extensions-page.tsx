@@ -464,7 +464,7 @@ export function GovernedCreativeExtensionsPage({
     (!preflight.requiresRemoteConsent || consentToken !== null);
 
   return (
-    <main className="governed-extensions-page">
+    <div className="governed-extensions-page">
       <header className="governed-extensions-page__header">
         <div>
           <p className="governed-extensions-page__eyebrow">受治理的创作扩展</p>
@@ -785,6 +785,7 @@ export function GovernedCreativeExtensionsPage({
                       type="button"
                       className="governed-extensions-history__item"
                       data-selected={request.id === selectedRequestId ? true : undefined}
+                      aria-pressed={request.id === selectedRequestId}
                       onClick={() => {
                         setSelectedRequestId(request.id);
                         setSelectedCandidateId(request.candidateId);
@@ -907,7 +908,7 @@ export function GovernedCreativeExtensionsPage({
           </Card>
         )}
       </section>
-    </main>
+    </div>
   );
 }
 

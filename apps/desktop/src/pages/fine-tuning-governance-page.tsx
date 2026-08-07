@@ -156,7 +156,7 @@ export function FineTuningGovernancePage({
             description: "浏览器开发模式不会伪装生产级数据集、配额、训练队列、评测或部署记录。",
           };
     return (
-      <main className="desktop-page fine-tuning-governance-page">
+      <div className="desktop-page fine-tuning-governance-page">
         <header className="page-heading">
           <div>
             <h1>微调治理（实验）</h1>
@@ -165,7 +165,7 @@ export function FineTuningGovernancePage({
           <Badge tone="neutral">默认关闭</Badge>
         </header>
         <EmptyState kind="feature_limited" title={copy.title} description={copy.description} />
-      </main>
+      </div>
     );
   }
 
@@ -235,7 +235,7 @@ export function FineTuningGovernancePage({
   }
 
   return (
-    <main className="desktop-page fine-tuning-governance-page">
+    <div className="desktop-page fine-tuning-governance-page">
       <header className="page-heading">
         <div>
           <p className="fine-tuning-governance-page__eyebrow">实验性 · 本地优先</p>
@@ -243,7 +243,7 @@ export function FineTuningGovernancePage({
           <p>先冻结来源与许可，再审批数据集、控制配额、评测候选，最后人工登记与部署。</p>
         </div>
         <div className="fine-tuning-governance-page__header-actions">
-          <Badge tone="success">原生 SQLite</Badge>
+          <Badge tone="success">桌面本地数据库</Badge>
           <Badge tone={trainerAvailable ? "ai" : "warning"}>
             {trainerAvailable
               ? `本地训练器：${runtime.availability.localTrainer.providerId}`
@@ -644,7 +644,7 @@ export function FineTuningGovernancePage({
           </section>
         </>
       )}
-    </main>
+    </div>
   );
 }
 
@@ -1473,7 +1473,7 @@ function JobCard({ job, busyKey, onCancel, onRetry }: JobCardProps) {
           <div>
             <CardTitle>{shortId(job.id)}</CardTitle>
             <CardDescription>
-              {job.plan.method.toUpperCase()} · 尝试 {String(job.attemptCount)}/
+              {trainingMethodLabel(job.plan.method)} · 尝试 {String(job.attemptCount)}/
               {String(job.maximumAttempts)}
             </CardDescription>
           </div>
@@ -1805,6 +1805,10 @@ function datasetStateLabel(state: FineTuningDatasetSnapshot["state"]): string {
     approved: "已批准",
     archived: "已归档",
   }[state];
+}
+
+function trainingMethodLabel(method: FineTuningJobRecord["plan"]["method"]): string {
+  return method === "lora" ? "低秩适配（LoRA）" : "量化低秩适配（QLoRA）";
 }
 
 function jobStateLabel(state: FineTuningJobRecord["status"]): string {

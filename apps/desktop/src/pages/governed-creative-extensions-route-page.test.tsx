@@ -38,7 +38,7 @@ describe("GovernedCreativeExtensionsRoutePage", () => {
     );
 
     expect(await screen.findByText("创作扩展仅在桌面安全运行时可用")).toBeVisible();
-    expect(screen.getByText(/不会伪装 SQLite 审计/)).toBeVisible();
+    expect(screen.getByText(/不会伪装桌面数据库审计/)).toBeVisible();
   });
 });
 

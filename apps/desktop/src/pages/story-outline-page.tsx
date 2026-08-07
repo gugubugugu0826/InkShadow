@@ -24,6 +24,7 @@ import {
 } from "@inkshadow/ui";
 import { Link, useParams } from "react-router-dom";
 
+import { StoryPlanningPanel } from "../components/story-planning-panel";
 import { normalizeUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
@@ -213,7 +214,7 @@ export function StoryOutlinePage() {
         <InlineAlert
           tone="warning"
           title="浏览器开发模式"
-          description="此处仅用 localStorage 验证交互；桌面发行版使用同一领域规则和 SQLite 事务。"
+          description="此处仅使用浏览器调试存储验证交互；桌面发行版使用同一领域规则和本地数据库事务。"
         />
       )}
 
@@ -263,66 +264,75 @@ export function StoryOutlinePage() {
             ),
         }}
       >
-        {book !== null && currentOutline !== null && (
-          <section aria-labelledby="outline-structure-title">
-            <div className="section-heading">
-              <div>
-                <h2 id="outline-structure-title">{book.title}</h2>
-                {book.synopsis.length > 0 && <p>{book.synopsis}</p>}
+        {book !== null && currentOutline !== null && project !== null && (
+          <>
+            <StoryPlanningPanel
+              projectId={project.id}
+              outline={currentOutline}
+              service={runtime.story.storyPlanning}
+              disabled={readonly || busy}
+              onOutlineChanged={load}
+            />
+            <section aria-labelledby="outline-structure-title">
+              <div className="section-heading">
+                <div>
+                  <h2 id="outline-structure-title">{book.title}</h2>
+                  {book.synopsis.length > 0 && <p>{book.synopsis}</p>}
+                </div>
+                <Badge tone={book.locked ? "warning" : "success"}>
+                  {book.locked ? "全书结构已锁定" : "可编辑"}
+                </Badge>
               </div>
-              <Badge tone={book.locked ? "warning" : "success"}>
-                {book.locked ? "全书结构已锁定" : "可编辑"}
-              </Badge>
-            </div>
 
-            {volumes.length === 0 ? (
-              <EmptyState
-                title="还没有卷"
-                description="先添加第一卷，再在卷下安排章节。"
-                {...(readonly || book.locked
-                  ? {}
-                  : {
-                      primaryAction: {
-                        label: "新增卷",
-                        onClick: () => openAdd({ kind: "volume", parentId: book.id }),
-                      },
-                    })}
-              />
-            ) : (
-              <div className="outline-volume-list">
-                {volumes.map((volume, volumeIndex) => (
-                  <OutlineVolumeCard
-                    key={volume.id}
-                    outline={currentOutline}
-                    volume={volume}
-                    index={volumeIndex}
-                    total={volumes.length}
-                    readonly={readonly || busy || book.locked}
-                    onAddChapter={() => openAdd({ kind: "chapter", parentId: volume.id })}
-                    onRename={openRename}
-                    onMove={(newIndex) =>
-                      void applyChange({ kind: "move", nodeId: volume.id, newIndex })
-                    }
-                    onToggleLock={() =>
-                      void applyChange({
-                        kind: volume.locked ? "unlock" : "lock",
-                        nodeId: volume.id,
-                      })
-                    }
-                    onChapterMove={(nodeId, newIndex) =>
-                      void applyChange({ kind: "move", nodeId, newIndex })
-                    }
-                    onChapterToggleLock={(chapter) =>
-                      void applyChange({
-                        kind: chapter.locked ? "unlock" : "lock",
-                        nodeId: chapter.id,
-                      })
-                    }
-                  />
-                ))}
-              </div>
-            )}
-          </section>
+              {volumes.length === 0 ? (
+                <EmptyState
+                  title="还没有卷"
+                  description="先添加第一卷，再在卷下安排章节。"
+                  {...(readonly || book.locked
+                    ? {}
+                    : {
+                        primaryAction: {
+                          label: "新增卷",
+                          onClick: () => openAdd({ kind: "volume", parentId: book.id }),
+                        },
+                      })}
+                />
+              ) : (
+                <div className="outline-volume-list">
+                  {volumes.map((volume, volumeIndex) => (
+                    <OutlineVolumeCard
+                      key={volume.id}
+                      outline={currentOutline}
+                      volume={volume}
+                      index={volumeIndex}
+                      total={volumes.length}
+                      readonly={readonly || busy || book.locked}
+                      onAddChapter={() => openAdd({ kind: "chapter", parentId: volume.id })}
+                      onRename={openRename}
+                      onMove={(newIndex) =>
+                        void applyChange({ kind: "move", nodeId: volume.id, newIndex })
+                      }
+                      onToggleLock={() =>
+                        void applyChange({
+                          kind: volume.locked ? "unlock" : "lock",
+                          nodeId: volume.id,
+                        })
+                      }
+                      onChapterMove={(nodeId, newIndex) =>
+                        void applyChange({ kind: "move", nodeId, newIndex })
+                      }
+                      onChapterToggleLock={(chapter) =>
+                        void applyChange({
+                          kind: chapter.locked ? "unlock" : "lock",
+                          nodeId: chapter.id,
+                        })
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          </>
         )}
       </PageStateBoundary>
 

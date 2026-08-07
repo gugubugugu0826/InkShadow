@@ -6,7 +6,22 @@ export interface NormalizedUiError {
   readonly code: string;
 }
 
+/** A source-authored recovery message that is explicitly safe to show verbatim. */
+export class UiActionError extends Error {
+  public constructor(
+    public readonly code: string,
+    description: string,
+    public readonly title = "操作未完成",
+  ) {
+    super(description);
+    this.name = "UiActionError";
+  }
+}
+
 export function normalizeUiError(error: unknown): NormalizedUiError {
+  if (error instanceof UiActionError) {
+    return { title: error.title, description: error.message, code: error.code };
+  }
   if (error instanceof AppError) {
     const databaseDescription = databaseErrorDescription(error);
     return {
@@ -17,14 +32,16 @@ export function normalizeUiError(error: unknown): NormalizedUiError {
   }
   if (isRecord(error)) {
     const code = typeof error.code === "string" ? error.code : "UNEXPECTED_ERROR";
-    const message =
-      nativeDatabaseBootstrapDescription(code) ??
-      (typeof error.message === "string" ? error.message : "发生了未预期的本地错误。");
-    return { title: "操作未完成", description: message, code };
+    return {
+      title: "操作未完成",
+      description: nativeDatabaseBootstrapDescription(code) ?? recordErrorDescription(code),
+      code,
+    };
   }
   return {
     title: "操作未完成",
-    description: "发生了未预期的本地错误。",
+    description:
+      "发生了未预期的本地错误。请先重试；若问题持续，请保留当前窗口中的内容，并在设置中下载脱敏诊断包后联系支持。",
     code: "UNEXPECTED_ERROR",
   };
 }
@@ -42,30 +59,55 @@ function databaseErrorDescription(error: AppError): string | null {
 function chineseErrorDescription(code: AppError["code"]): string {
   const descriptions: Record<AppError["code"], string> = {
     VALIDATION_FAILED: "请检查输入内容后重试。",
-    INVALID_UUID: "页面地址中的标识无效。",
-    INVALID_TIMESTAMP: "本地时间格式无效。",
-    INVALID_CHECKSUM: "内容校验失败。",
-    INVALID_STATE_TRANSITION: "当前状态不允许执行此操作。",
-    PROJECT_NOT_FOUND: "找不到这个项目。",
-    PROJECT_DELETED: "项目位于回收站，请先恢复。",
-    PROJECT_ARCHIVED: "项目已归档，不能继续写入。",
+    INVALID_UUID: "页面地址中的标识无效。请返回项目列表后重新打开。",
+    INVALID_TIMESTAMP: "本地时间格式无效。请检查系统日期和时区后重试。",
+    INVALID_CHECKSUM: "内容校验失败。请停止覆盖，并从版本历史或已验证备份恢复。",
+    INVALID_STATE_TRANSITION: "当前状态不允许执行此操作。请刷新页面并按当前可用操作继续。",
+    PROJECT_NOT_FOUND: "找不到这个项目。请返回项目列表，或从备份恢复。",
+    PROJECT_DELETED: "项目位于回收站，请先恢复后再继续。",
+    PROJECT_ARCHIVED: "项目已归档，请先恢复为进行中项目再写入。",
     PROJECT_NAME_CONFLICT: "已有同名项目，请换一个名称。",
-    PROJECT_RETENTION_EXPIRED: "项目恢复期限已过。",
-    CHAPTER_NOT_FOUND: "找不到这个章节。",
-    CHAPTER_DELETED: "章节已删除，不能继续编辑。",
+    PROJECT_RETENTION_EXPIRED: "项目恢复期限已过。请从已有备份或导出文件重新导入。",
+    CHAPTER_NOT_FOUND: "找不到这个章节。请返回章节列表后重新选择。",
+    CHAPTER_DELETED: "章节已删除，请先从回收站恢复后再编辑。",
     VERSION_CONFLICT: "内容已在其他操作中变化，请重新加载并比较版本。",
     BASE_VERSION_CHANGED: "恢复草稿或候选基于旧版本，请先解决冲突。",
-    RECOVERY_DRAFT_NOT_FOUND: "没有找到可保存的恢复草稿。",
-    CANDIDATE_NOT_FOUND: "找不到这个候选。",
-    CANDIDATE_NOT_READY: "候选尚未准备完成。",
-    CANDIDATE_ALREADY_DECIDED: "候选已经接受或拒绝。",
-    CANDIDATE_TARGET_MISSING: "候选没有关联章节。",
-    READONLY_RESOURCE: "当前内容为只读。",
+    RECOVERY_DRAFT_NOT_FOUND: "没有找到可保存的恢复草稿。请返回当前章节检查最新保存版本。",
+    CANDIDATE_NOT_FOUND: "找不到这个 AI 建议版本。请刷新候选列表后重试。",
+    CANDIDATE_NOT_READY: "AI 建议版本尚未准备完成。请稍后刷新，或重新生成。",
+    CANDIDATE_ALREADY_DECIDED: "AI 建议版本已经处理。请刷新页面查看当前正文与版本历史。",
+    CANDIDATE_TARGET_MISSING: "AI 建议版本没有关联章节。请返回章节后重新生成。",
+    READONLY_RESOURCE: "当前内容为只读。请另存为新版本或返回可编辑章节。",
     SAVE_FAILED: "本地保存失败，请重试或导出草稿。",
-    REPOSITORY_ERROR: "本地数据暂时无法访问，请重试。",
-    NO_CHANGES: "内容没有变化。",
+    REPOSITORY_ERROR: "本地数据暂时无法访问，请重试；若问题持续，请先备份并下载脱敏诊断包。",
+    NO_CHANGES: "内容没有变化，无需保存；如要保留另一方案，请先修改或另存版本。",
   };
   return descriptions[code];
+}
+
+function recordErrorDescription(code: string): string {
+  if (code === "MATERIAL_DUPLICATE_FOUND") {
+    return "已存在正文内容相同的有效素材。请取消本次录入并使用已有素材，或修改正文后再保存。";
+  }
+  if (/MODEL|PROVIDER|EMBEDDING|RERANK|IMAGE_GENERATION/u.test(code)) {
+    return "AI 服务暂未完成本次操作。请到设置中的 AI 模型检查连接、能力确认和任务分工后重试；正文与已有版本不会因此被覆盖。";
+  }
+  if (/NETWORK|TIMEOUT|HTTP|DNS|TLS/u.test(code)) {
+    return "网络请求未完成。请检查网络和供应商服务状态后重试；若已产生费用，请先查看供应商调用记录，避免重复提交。";
+  }
+  if (/SQLITE|DATABASE|REPOSITORY|STORAGE/u.test(code)) {
+    return "本地数据访问失败。请保留当前窗口中的内容并重试；若问题持续，请先创建备份或导出草稿，再下载脱敏诊断包。";
+  }
+  if (/IMPORT|PARSE|FORMAT/u.test(code)) {
+    return "文件处理未完成。请确认文件格式、大小和内容完整性后重新选择；原项目数据没有被静默覆盖。";
+  }
+  if (/EXPORT|WRITE_FILE|PATH_TICKET/u.test(code)) {
+    return "文件尚未导出。请重新选择一个可写的新文件位置并重试，且不要覆盖唯一副本。";
+  }
+  if (/SYNC|CLOUD|SESSION|AUTH|ENTITLEMENT/u.test(code)) {
+    return "云端操作未完成。本地正文仍可使用；请检查网络、登录状态和同步授权后重试。";
+  }
+  return "发生了未预期的本地错误。请先重试；若问题持续，请保留当前窗口中的内容，并在设置中下载脱敏诊断包后联系支持。";
 }
 
 export function isUiErrorRetryable(error: unknown): boolean {

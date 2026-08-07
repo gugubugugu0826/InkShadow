@@ -5,6 +5,7 @@ use super::types::ModelEndpointConfig;
 use crate::network_egress::{host_is_explicit_loopback, host_is_ip_literal, literal_ip_is_allowed};
 
 const MAX_ENDPOINT_LENGTH: usize = 2_048;
+const MAX_API_PATH_LENGTH: usize = 1_024;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ValidatedEndpoint {
@@ -74,7 +75,19 @@ impl ValidatedEndpoint {
     }
 
     pub(crate) fn api_url(&self, suffix: &str) -> Result<Url, CommandError> {
-        if !suffix.starts_with('/') || suffix.contains('?') || suffix.contains('#') {
+        if suffix.is_empty()
+            || suffix.len() > MAX_API_PATH_LENGTH
+            || !suffix.starts_with('/')
+            || suffix.starts_with("//")
+            || suffix.contains('?')
+            || suffix.contains('#')
+            || suffix.contains('\\')
+            || suffix.contains('%')
+            || suffix.chars().any(char::is_control)
+            || suffix
+                .split('/')
+                .any(|segment| segment == "." || segment == "..")
+        {
             return Err(CommandError::endpoint_invalid());
         }
 
@@ -102,6 +115,12 @@ mod tests {
             provider: ProviderKind::OpenAiCompatible,
             base_url: base_url.to_owned(),
             authentication: AuthenticationMode::None,
+            credential_header_name: None,
+            model_discovery_path: None,
+            text_generation_path: None,
+            embedding_path: None,
+            request_timeout_ms: None,
+            retry_limit: None,
         }
     }
 
@@ -146,5 +165,28 @@ mod tests {
 
         assert_eq!(url.as_str(), "https://models.example/v1/chat/completions");
         assert_eq!(endpoint.origin(), "https://models.example");
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_traversing_api_paths() {
+        let endpoint = ValidatedEndpoint::parse(&config("https://models.example/v1"))
+            .expect("endpoint should be valid");
+        let oversized = format!("/{}", "a".repeat(MAX_API_PATH_LENGTH));
+        for path in [
+            "//attacker.example/models",
+            "/models?key=value",
+            "/models#fragment",
+            "/models\\escape",
+            "/%2e%2e/admin",
+            "/models/../admin",
+            "/models/./list",
+            "/models\nnext",
+            oversized.as_str(),
+        ] {
+            assert!(
+                endpoint.api_url(path).is_err(),
+                "{path:?} should be rejected"
+            );
+        }
     }
 }

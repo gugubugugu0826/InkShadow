@@ -288,7 +288,7 @@ export class WebCryptoEnvelopeService {
     }
     throw new GuestWorkspaceError(
       "WEB_CRYPTO_UNAVAILABLE",
-      "浏览器未能生成唯一加密 nonce，已停止保存。",
+      "浏览器未能生成安全且不重复的加密随机值，已停止保存。",
     );
   }
 
@@ -345,10 +345,7 @@ function encodeBase64Url(value: Uint8Array): string {
 
 function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
   if (!BASE64URL_PATTERN.test(value)) {
-    throw new GuestWorkspaceError(
-      "WEB_ENVELOPE_INVALID",
-      "加密 envelope 使用了无效编码，未尝试解密。",
-    );
+    throw new GuestWorkspaceError("WEB_ENVELOPE_INVALID", "加密数据的编码格式无效，未尝试解密。");
   }
 
   const padded = value
@@ -365,15 +362,12 @@ function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
       bytes.fill(0);
       throw new GuestWorkspaceError(
         "WEB_ENVELOPE_INVALID",
-        "加密 envelope 使用了非规范 Base64URL 编码，未尝试解密。",
+        "加密数据的编码格式不规范，未尝试解密。",
       );
     }
     return bytes;
   } catch {
-    throw new GuestWorkspaceError(
-      "WEB_ENVELOPE_INVALID",
-      "加密 envelope 使用了无效编码，未尝试解密。",
-    );
+    throw new GuestWorkspaceError("WEB_ENVELOPE_INVALID", "加密数据的编码格式无效，未尝试解密。");
   }
 }
 
@@ -409,7 +403,7 @@ function assertNonExtractableAesGcmKey(key: CryptoKey): void {
   ) {
     throw new GuestWorkspaceError(
       "WEB_CRYPTO_UNAVAILABLE",
-      "项目密钥未满足不可导出的 AES-GCM 会话密钥要求。",
+      "浏览器生成的项目密钥不符合不可导出的安全要求。",
     );
   }
 }
@@ -431,7 +425,7 @@ function requireWebCrypto(): Crypto {
   ) {
     throw new GuestWorkspaceError(
       "WEB_CRYPTO_UNAVAILABLE",
-      "当前浏览器不支持安全 WebCrypto，无法打开 Guest 工作区。",
+      "当前浏览器不支持所需的安全加密能力，无法打开访客工作区。",
     );
   }
   return provider as Crypto;

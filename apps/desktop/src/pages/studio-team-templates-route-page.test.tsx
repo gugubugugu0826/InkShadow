@@ -110,10 +110,8 @@ describe("StudioTeamTemplatesRoutePage", () => {
 
     renderRoute(runtime, `/teams/${TEAM_ID}/projects/${created.value.id}/templates`);
 
-    expect(
-      await screen.findByRole("heading", { name: "Encrypted team templates", level: 1 }),
-    ).toBeVisible();
-    expect(screen.getByText("No team templates yet")).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "加密团队模板", level: 1 })).toBeVisible();
+    expect(screen.getByText("还没有团队模板")).toBeVisible();
     await waitFor(() => expect(resolveContext).toHaveBeenCalledTimes(1));
     const resolveCall = resolveContext.mock.calls[0];
     expect(resolveCall?.[0]).toBe(TEAM_ID);

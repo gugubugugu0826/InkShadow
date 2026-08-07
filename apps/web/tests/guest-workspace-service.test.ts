@@ -5,6 +5,7 @@ import type {
   CipherEnvelopeV1,
   EncryptedGuestProjectRecordV1,
 } from "../src/contracts/encrypted-guest-project";
+import type { EncryptedGuestDraftRecordV1 } from "../src/contracts/encrypted-guest-draft";
 import type { EncryptedProjectStore } from "../src/ports/encrypted-project-store";
 import { MemoryEncryptedProjectStore } from "./helpers/memory-encrypted-project-store";
 
@@ -66,6 +67,58 @@ describe("encrypted Guest workspace integration", () => {
     expect(localStorage).toHaveLength(0);
     expect(sessionStorage).toHaveLength(0);
     expect(created.session.chapter.content).toBe(ORIGINAL_BODY_CANARY);
+  });
+
+  it("recovers a ciphertext-only temporary draft after locking and clears it after commit", async () => {
+    const store = new MemoryEncryptedProjectStore();
+    const firstPage = new GuestWorkspaceService(store);
+    const created = await firstPage.createEncryptedProject({
+      projectName: "临时草稿恢复",
+      chapterTitle: "第一章",
+      chapterContent: ORIGINAL_BODY_CANARY,
+    });
+
+    await firstPage.preserveTemporaryDraft({
+      projectId: created.session.project.id,
+      expectedRevision: created.session.chapter.revision,
+      content: UPDATED_BODY_CANARY,
+    });
+    const encryptedDraft = store.inspectTemporaryDraft(created.session.project.id);
+    expect(encryptedDraft).not.toBeNull();
+    const serializedDraft = JSON.stringify(encryptedDraft);
+    expect(serializedDraft).not.toContain(UPDATED_BODY_CANARY);
+    expect(serializedDraft).not.toContain(created.recoveryMaterial);
+    expect(localStorage).toHaveLength(0);
+    expect(sessionStorage).toHaveLength(0);
+
+    firstPage.lockAll();
+    const nextPage = new GuestWorkspaceService(store);
+    const unlocked = await nextPage.unlockProject(
+      created.session.project.id,
+      created.recoveryMaterial,
+    );
+    expect(unlocked.chapter.content).toBe(ORIGINAL_BODY_CANARY);
+    expect(unlocked.recoveredDraft).toEqual({
+      baseRevision: 1,
+      content: UPDATED_BODY_CANARY,
+    });
+
+    const saved = await nextPage.saveChapter({
+      projectId: created.session.project.id,
+      expectedRevision: unlocked.chapter.revision,
+      content: unlocked.recoveredDraft?.content ?? "",
+    });
+    expect(saved.chapter.content).toBe(UPDATED_BODY_CANARY);
+    expect(store.inspectTemporaryDraft(created.session.project.id)).toBeNull();
+
+    nextPage.lockAll();
+    const finalPage = new GuestWorkspaceService(store);
+    const finalUnlock = await finalPage.unlockProject(
+      created.session.project.id,
+      created.recoveryMaterial,
+    );
+    expect(finalUnlock.chapter.content).toBe(UPDATED_BODY_CANARY);
+    expect(finalUnlock.recoveredDraft).toBeUndefined();
   });
 
   it("appends unique encrypted chapter versions and locks a fresh page session", async () => {
@@ -225,6 +278,91 @@ describe("encrypted Guest workspace integration", () => {
     await expect(unlock).rejects.toMatchObject({ code: "WEB_UNLOCK_FAILED" });
     expect(unlockingPage.isUnlocked(created.session.project.id)).toBe(false);
   });
+
+  it("imports a validated encrypted backup only when its recovery material matches", async () => {
+    const sourceStore = new MemoryEncryptedProjectStore();
+    const source = new GuestWorkspaceService(sourceStore);
+    const created = await source.createEncryptedProject({
+      projectName: "离线恢复闭环",
+      chapterTitle: "归航",
+      chapterContent: ORIGINAL_BODY_CANARY,
+    });
+    const backup = await source.exportEncryptedProject(created.session.project.id);
+
+    const restoredStore = new MemoryEncryptedProjectStore();
+    const restoredPage = new GuestWorkspaceService(restoredStore);
+    const restored = await restoredPage.importEncryptedProject(backup, created.recoveryMaterial);
+
+    expect(restored.project.name).toBe("离线恢复闭环");
+    expect(restored.chapter.title).toBe("归航");
+    expect(restored.chapter.content).toBe(ORIGINAL_BODY_CANARY);
+    expect(restoredPage.isUnlocked(created.session.project.id)).toBe(true);
+    expect(await restoredStore.list()).toHaveLength(1);
+    expect(JSON.stringify(restoredStore.inspect(created.session.project.id))).not.toContain(
+      ORIGINAL_BODY_CANARY,
+    );
+  });
+
+  it("rejects invalid, mismatched and tampered imports without persisting a record", async () => {
+    const source = new GuestWorkspaceService(new MemoryEncryptedProjectStore());
+    const created = await source.createEncryptedProject({
+      projectName: "拒绝损坏备份",
+      chapterTitle: "第一章",
+      chapterContent: ORIGINAL_BODY_CANARY,
+    });
+    const backup = await source.exportEncryptedProject(created.session.project.id);
+    const parsed = JSON.parse(backup) as EncryptedGuestProjectRecordV1;
+    const latest = parsed.chapterEnvelopes.at(-1);
+    if (latest === undefined) {
+      throw new Error("Test chapter envelope is missing.");
+    }
+    const tampered = JSON.stringify({
+      ...parsed,
+      chapterEnvelopes: [
+        ...parsed.chapterEnvelopes.slice(0, -1),
+        {
+          ...latest,
+          ciphertext: flipBase64UrlCharacter(latest.ciphertext),
+        },
+      ],
+    });
+
+    const store = new MemoryEncryptedProjectStore();
+    const importer = new GuestWorkspaceService(store);
+    await expect(
+      importer.importEncryptedProject("{not-json", created.recoveryMaterial),
+    ).rejects.toMatchObject({ code: "WEB_ENVELOPE_INVALID" });
+    await expect(
+      importer.importEncryptedProject(backup, flipBase64UrlCharacter(created.recoveryMaterial)),
+    ).rejects.toMatchObject({ code: "WEB_UNLOCK_FAILED" });
+    await expect(
+      importer.importEncryptedProject(tampered, created.recoveryMaterial),
+    ).rejects.toMatchObject({ code: "WEB_UNLOCK_FAILED" });
+
+    expect(await store.list()).toHaveLength(0);
+    expect(importer.isUnlocked(created.session.project.id)).toBe(false);
+  });
+
+  it("rejects importing a duplicate project identifier without replacing existing ciphertext", async () => {
+    const store = new MemoryEncryptedProjectStore();
+    const service = new GuestWorkspaceService(store);
+    const created = await service.createEncryptedProject({
+      projectName: "重复导入",
+      chapterTitle: "第一章",
+      chapterContent: ORIGINAL_BODY_CANARY,
+    });
+    const original = store.inspect(created.session.project.id);
+    const backup = await service.exportEncryptedProject(created.session.project.id);
+    service.lockAll();
+
+    await expect(
+      service.importEncryptedProject(backup, created.recoveryMaterial),
+    ).rejects.toMatchObject({ code: "WEB_PROJECT_ALREADY_EXISTS" });
+
+    expect(await store.list()).toHaveLength(1);
+    expect(store.inspect(created.session.project.id)).toEqual(original);
+    expect(service.isUnlocked(created.session.project.id)).toBe(false);
+  });
 });
 
 function flipBase64UrlCharacter(value: string): string {
@@ -261,6 +399,18 @@ class DelayedGetEncryptedProjectStore implements EncryptedProjectStore {
     envelope: CipherEnvelopeV1,
   ): Promise<void> {
     return this.delegate.appendChapter(projectId, expectedContentVersion, envelope);
+  }
+
+  public getTemporaryDraft(projectId: string): Promise<EncryptedGuestDraftRecordV1 | null> {
+    return this.delegate.getTemporaryDraft(projectId);
+  }
+
+  public putTemporaryDraft(record: EncryptedGuestDraftRecordV1): Promise<void> {
+    return this.delegate.putTemporaryDraft(record);
+  }
+
+  public deleteTemporaryDraft(projectId: string): Promise<void> {
+    return this.delegate.deleteTemporaryDraft(projectId);
   }
 
   public waitUntilGetStarts(): Promise<void> {

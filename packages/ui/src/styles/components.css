@@ -74,9 +74,26 @@
 }
 
 .ink-button:disabled {
-  color: var(--text-disabled);
   cursor: not-allowed;
-  opacity: 0.72;
+  opacity: 1;
+}
+
+.ink-button--primary:disabled,
+.ink-button--ai-primary:disabled {
+  border-color: var(--border-strong);
+  background: var(--bg-active);
+  color: var(--text-secondary);
+}
+
+.ink-button--secondary:disabled,
+.ink-button--ghost:disabled {
+  color: var(--text-secondary);
+}
+
+.ink-button--danger:disabled {
+  border-color: var(--border-strong);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
 }
 
 .ink-button--sm {
@@ -130,8 +147,18 @@
 }
 
 .ink-button__label {
+  display: grid;
   min-width: 0;
   white-space: nowrap;
+}
+
+.ink-button__label-copy {
+  grid-area: 1 / 1;
+  visibility: hidden;
+}
+
+.ink-button__label-copy[data-visible] {
+  visibility: visible;
 }
 
 .ink-button__icon,
@@ -257,6 +284,35 @@
 .ink-field-control__adornment > svg {
   width: 1rem;
   height: 1rem;
+}
+
+.ink-field-control__reveal {
+  min-width: var(--control-sm);
+  height: var(--control-sm);
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--accent-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-caption-size);
+  font-weight: 600;
+}
+
+.ink-field-control__reveal:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.ink-field-control__reveal:focus-visible {
+  outline: 0.125rem solid var(--focus-ring);
+  outline-offset: 0.125rem;
+}
+
+.ink-field-control__reveal:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
 }
 
 .ink-input {
@@ -1114,6 +1170,8 @@
 }
 
 button.ink-save-status {
+  border: 0.0625rem solid var(--border-subtle);
+  background: var(--bg-surface);
   cursor: pointer;
 }
 
@@ -1195,12 +1253,14 @@ button.ink-save-status:hover {
   display: grid;
   width: 100%;
   min-width: 0;
-  min-height: 100dvh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   grid-template:
-    "topbar topbar topbar" var(--topbar-height)
-    "navigation main inspector" minmax(0, 1fr)
-    "status status status" var(--statusbar-height)
-    / var(--navigation-width) minmax(0, 1fr) var(--inspector-width);
+    "topbar topbar" var(--topbar-height)
+    "navigation main" minmax(0, 1fr)
+    "status status" var(--statusbar-height)
+    / var(--navigation-width) minmax(0, 1fr);
   overflow: hidden;
   background: var(--bg-app);
   color: var(--text-primary);
@@ -1208,6 +1268,18 @@ button.ink-save-status:hover {
 }
 
 .ink-app-shell[data-navigation-collapsed] {
+  grid-template-columns: var(--navigation-collapsed-width) minmax(0, 1fr);
+}
+
+.ink-app-shell[data-inspector-present] {
+  grid-template:
+    "topbar topbar topbar" var(--topbar-height)
+    "navigation main inspector" minmax(0, 1fr)
+    "status status status" var(--statusbar-height)
+    / var(--navigation-width) minmax(0, 1fr) var(--inspector-width);
+}
+
+.ink-app-shell[data-inspector-present][data-navigation-collapsed] {
   grid-template-columns:
     var(--navigation-collapsed-width) minmax(0, 1fr)
     var(--inspector-width);
@@ -1247,11 +1319,16 @@ button.ink-save-status:hover {
   background: var(--bg-surface);
 }
 
+.ink-app-shell__backdrop {
+  display: none;
+}
+
 .ink-app-shell__main {
   grid-area: main;
   min-width: 0;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   outline: 0;
   background: var(--bg-app);
 }
@@ -1281,7 +1358,10 @@ button.ink-save-status:hover {
 }
 
 @media (max-width: 79.9375rem) {
-  .ink-app-shell {
+  .ink-app-shell,
+  .ink-app-shell[data-navigation-collapsed],
+  .ink-app-shell[data-inspector-present],
+  .ink-app-shell[data-inspector-present][data-navigation-collapsed] {
     grid-template:
       "topbar topbar" var(--topbar-height)
       "navigation main" minmax(0, 1fr)
@@ -1306,7 +1386,10 @@ button.ink-save-status:hover {
 }
 
 @media (max-width: 59.9375rem) {
-  .ink-app-shell {
+  .ink-app-shell,
+  .ink-app-shell[data-navigation-collapsed],
+  .ink-app-shell[data-inspector-present],
+  .ink-app-shell[data-inspector-present][data-navigation-collapsed] {
     grid-template:
       "topbar" var(--topbar-height)
       "main" minmax(0, 1fr)
@@ -1325,9 +1408,42 @@ button.ink-save-status:hover {
     box-shadow: var(--shadow-overlay);
   }
 
+  .ink-app-shell[data-navigation-open] .ink-app-shell__backdrop {
+    position: fixed;
+    z-index: calc(var(--z-drawer) - 1);
+    top: var(--topbar-height);
+    right: 0;
+    bottom: var(--statusbar-height);
+    left: 0;
+    display: block;
+    padding: 0;
+    border: 0;
+    background: var(--overlay-scrim);
+    cursor: pointer;
+  }
+
   .ink-app-shell[data-navigation-open] .ink-app-shell__navigation {
     display: block;
   }
+}
+
+.ink-navigation-save-status {
+  position: fixed;
+  z-index: var(--z-toast);
+  right: var(--space-4);
+  bottom: calc(var(--statusbar-height) + var(--space-4));
+  display: inline-flex;
+  max-width: min(28rem, calc(100vw - (2 * var(--space-4))));
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 0.0625rem solid var(--info-text);
+  border-radius: var(--radius-md);
+  background: var(--bg-overlay);
+  box-shadow: var(--shadow-floating);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-ui-size);
 }
 
 @media (max-width: 44.9375rem) {

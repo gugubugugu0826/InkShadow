@@ -1,0 +1,243 @@
+import { describe, expect, it, vi } from "vitest";
+import { parseIsoUtcTimestamp } from "@inkshadow/domain";
+
+import {
+  ChapterSummaryModelUnavailableError,
+  type ChapterSummaryModelInput,
+} from "./chapter-summary-service";
+import {
+  ModelHubChapterSummaryModel,
+  parseChapterSummaryResponse,
+} from "./model-hub-chapter-summary-model";
+import type {
+  ExecuteModelHubTextTaskInput,
+  ModelHubTextExecutionDependencies,
+  ModelHubTextTaskExecutionResult,
+  ModelHubTextTaskInspection,
+} from "./model-hub-execution-service";
+import type { ModelHubStore } from "./model-hub-store";
+
+const PROJECT_ID = uuid(1);
+const CHAPTER_ID = uuid(2);
+const VERSION_ID = uuid(3);
+const HASH = "a".repeat(64);
+const EVIDENCE_ID = `chapter:${CHAPTER_ID}:version:${VERSION_ID}:sha256:${HASH}:utf16:0-4`;
+
+describe("ModelHubChapterSummaryModel", () => {
+  it("checks routing and both capabilities before dispatch and after response", async () => {
+    const inspection = modelInspection();
+    const inspectText = vi.fn().mockResolvedValue(inspection);
+    const sourceCheck = vi.fn().mockResolvedValue(undefined);
+    const executeText = vi.fn(
+      async (
+        _dependencies: ModelHubTextExecutionDependencies,
+        request: ExecuteModelHubTextTaskInput,
+      ) => {
+        await request.onBeforeDispatch?.({
+          generationId: uuid(20),
+          invocationId: uuid(21),
+          connectionId: inspection.connectionId,
+          catalogEntryId: inspection.catalogEntryId,
+          modelId: inspection.modelId,
+          usedFallback: inspection.usedFallback,
+        });
+        return modelExecution();
+      },
+    );
+    const listCapabilityEvidence = vi
+      .fn()
+      .mockResolvedValue([capability("text_generation", 30), capability("structured_output", 31)]);
+    const model = new ModelHubChapterSummaryModel({
+      modelHub: { listCapabilityEvidence } as unknown as ModelHubStore,
+      modelGateway: { available: true, generate: vi.fn() },
+      credentials: { getSummary: vi.fn().mockResolvedValue({ configured: true }) },
+      clock: { now: () => timestamp("2026-08-01T00:00:00.000Z") },
+      ids: { next: () => uuid(40) as never },
+      inspectText: inspectText as never,
+      executeText,
+    });
+
+    const output = await model.summarize(input(sourceCheck));
+
+    expect(output).toMatchObject({
+      summary: "A concise summary.",
+      providerKind: "ollama",
+      modelId: "model-a",
+      invocationId: uuid(21),
+      estimatedInputTokens: 500,
+    });
+    expect(inspectText).toHaveBeenCalledTimes(2);
+    expect(executeText).toHaveBeenCalledTimes(1);
+    expect(listCapabilityEvidence).toHaveBeenCalledTimes(3);
+    expect(sourceCheck.mock.calls.length).toBeGreaterThanOrEqual(5);
+    expect(executeText.mock.calls[0]?.[1]).toMatchObject({
+      task: "long_memory_compression",
+      maximumOutputTokens: 3500,
+      temperature: 0.1,
+    });
+  });
+
+  it("skips before dispatch when structured output is not verified", async () => {
+    const executeText = vi.fn();
+    const model = new ModelHubChapterSummaryModel({
+      modelHub: {
+        listCapabilityEvidence: vi.fn().mockResolvedValue([capability("text_generation", 30)]),
+      } as unknown as ModelHubStore,
+      modelGateway: { available: true, generate: vi.fn() },
+      credentials: { getSummary: vi.fn().mockResolvedValue({ configured: true }) },
+      clock: { now: () => timestamp("2026-08-01T00:00:00.000Z") },
+      ids: { next: () => uuid(40) as never },
+      inspectText: vi.fn().mockResolvedValue(modelInspection()) as never,
+      executeText: executeText as never,
+    });
+
+    await expect(
+      model.summarize(input(vi.fn().mockResolvedValue(undefined))),
+    ).rejects.toBeInstanceOf(ChapterSummaryModelUnavailableError);
+    expect(executeText).not.toHaveBeenCalled();
+  });
+
+  it("rejects extra fields and invented evidence identifiers", () => {
+    const valid = response();
+    expect(parseChapterSummaryResponse(valid, new Set([EVIDENCE_ID]))).toMatchObject({
+      summary: "A concise summary.",
+    });
+    expect(() =>
+      parseChapterSummaryResponse(
+        JSON.stringify({ ...JSON.parse(valid), extra: true }),
+        new Set([EVIDENCE_ID]),
+      ),
+    ).toThrow(/未声明|缺失/u);
+    expect(() =>
+      parseChapterSummaryResponse(response("invented-evidence"), new Set([EVIDENCE_ID])),
+    ).toThrow(/不存在|改写/u);
+    expect(() =>
+      parseChapterSummaryResponse(`\`\`\`json\n${valid}\n\`\`\``, new Set([EVIDENCE_ID])),
+    ).toThrow(/严格 JSON/u);
+  });
+});
+
+function input(assertSourceCurrent: () => Promise<void>): ChapterSummaryModelInput {
+  return Object.freeze({
+    projectId: PROJECT_ID,
+    chapterId: CHAPTER_ID,
+    versionId: VERSION_ID,
+    sourceContentHash: HASH,
+    sourceLength: 4,
+    segments: Object.freeze([
+      Object.freeze({ evidenceId: EVIDENCE_ID, startOffset: 0, endOffset: 4, text: "ABCD" }),
+    ]),
+    assertSourceCurrent,
+  });
+}
+
+function response(evidenceId = EVIDENCE_ID): string {
+  return JSON.stringify({
+    schemaVersion: 1,
+    summary: "A concise summary.",
+    keyEvents: [{ text: "An event.", evidenceIds: [evidenceId] }],
+    continuityNotes: [{ text: "Keep this detail.", evidenceIds: [evidenceId] }],
+    evidenceIds: [evidenceId],
+  });
+}
+
+function modelInspection(): ModelHubTextTaskInspection {
+  return {
+    task: "long_memory_compression",
+    configuredPrimaryCatalogEntryId: "catalog-a",
+    configuredFallbackCatalogEntryId: null,
+    selectionKind: "task_primary",
+    usedFallback: false,
+    attempt: 1,
+    connectionId: "connection-a",
+    catalogEntryId: "catalog-a",
+    providerKind: "ollama",
+    modelId: "model-a",
+    dataDestination: "local",
+    privacyPolicy: "cloud_allowed",
+    failurePolicy: "stop",
+    maximumOutputTokens: 3_500,
+    temperature: 0.1,
+    estimatedInputTokens: 500,
+    estimatedTotalTokens: 4_000,
+    inputTokenLimit: 10_000,
+    outputTokenLimit: 4_000,
+    pricing: {
+      currency: null,
+      inputMicrosPerMillionTokens: null,
+      outputMicrosPerMillionTokens: null,
+      cachedInputMicrosPerMillionTokens: null,
+      pricingVersion: null,
+      priceUpdatedAt: null,
+      evidenceSource: "user_confirmed",
+      evidenceVersion: null,
+      evidenceUpdatedAt: "2026-08-01T00:00:00.000Z",
+      estimatedMaximumCostMicros: null,
+      maximumCostMicros: null,
+      maximumCostCurrency: null,
+    },
+  };
+}
+
+function modelExecution(): ModelHubTextTaskExecutionResult {
+  return {
+    text: response(),
+    usage: { inputTokens: 100, outputTokens: 40, cachedInputTokens: null },
+    invocation: {
+      id: uuid(21),
+      task: "long_memory_compression",
+      routeTask: "long_memory_compression",
+      connectionId: "connection-a",
+      catalogEntryId: "catalog-a",
+      providerKindSnapshot: "ollama",
+      modelIdSnapshot: "model-a",
+      routeReason: "task_primary",
+      attempt: 1,
+      privacyPolicy: "cloud_allowed",
+      dataDestination: "local",
+      maximumCostMicros: null,
+      currency: null,
+      status: "succeeded",
+      inputTokens: 100,
+      outputTokens: 40,
+      cachedInputTokens: null,
+      estimatedCostMicros: null,
+      errorCode: null,
+      errorSummary: null,
+      startedAt: "2026-08-01T00:00:00.000Z",
+      completedAt: "2026-08-01T00:00:01.000Z",
+      revision: 2,
+    },
+    connectionId: "connection-a",
+    catalogEntryId: "catalog-a",
+    providerKind: "ollama",
+    modelId: "model-a",
+    usedFallback: false,
+    costCeilingExceededAfterDispatch: false,
+  } as unknown as ModelHubTextTaskExecutionResult;
+}
+
+function capability(capabilityName: "text_generation" | "structured_output", sequence: number) {
+  return {
+    id: uuid(sequence),
+    catalogEntryId: "catalog-a",
+    scanId: uuid(sequence + 100),
+    capability: capabilityName,
+    verdict: "supported",
+    evidenceSource: "lightweight_probe",
+    evidenceVersion: "probe-v1",
+    evidenceSummary: "verified in test",
+    observedAt: "2026-08-01T00:00:00.000Z",
+    expiresAt: null,
+  };
+}
+
+function uuid(sequence: number): string {
+  return `018f0f00-0000-7000-8000-${sequence.toString(16).padStart(12, "0")}`;
+}
+
+function timestamp(value: string) {
+  const parsed = parseIsoUtcTimestamp(value);
+  if (!parsed.ok) throw parsed.error;
+  return parsed.value;
+}

@@ -25,9 +25,13 @@ import {
 } from "@inkshadow/application";
 import {
   estimateGenerationCost,
+  rerankWithLocalEvidence,
   resolveModelRoute,
   runGenerationPreflight,
+  type ContextCandidateDraft,
+  type CandidateQualityGateResult,
   type GenerationPreflightSnapshot,
+  type ModelPricing,
   type ModelRouteCandidate,
   type ModelRouteRole,
 } from "@inkshadow/ai-core";
@@ -64,6 +68,7 @@ import type { AccessSqliteStore } from "@inkshadow/data/access-sqlite-store";
 import type { ProjectKeySqliteStore } from "@inkshadow/data/project-key-sqlite-store";
 import type { SyncSqliteStore } from "@inkshadow/data/sync-sqlite-store";
 import { CryptoContentHasher, CryptoUuidV7Generator, SystemClock } from "@inkshadow/platform";
+import type { HybridSearchHit } from "@inkshadow/search-core";
 import {
   FormalRecordApplicationService,
   IdeationApplicationService,
@@ -85,8 +90,10 @@ import {
   SqliteOutlineRepository,
   SqliteReviewDecisionUnitOfWork,
   SqliteReviewItemRepository,
+  SqliteStoryFactStore,
   SqliteWhatIfPromotionUnitOfWork,
   SqliteWhatIfRepository,
+  StoryFactApplicationService,
   StoryCoreError,
   WhatIfApplicationService,
   err as storyErr,
@@ -115,6 +122,7 @@ import {
   type ReviewDecisionUnitOfWork,
   type ReviewItemListReader,
   type ReviewItemRepository,
+  type StoryFactStore,
   type WhatIfBranchListReader,
   type WhatIfPromotionUnitOfWork,
   type WhatIfRepository,
@@ -124,6 +132,17 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { createDevelopmentRepositories } from "./development-storage";
+import {
+  BrowserCreativeJourneyStore,
+  SqliteCreativeJourneyStore,
+  type CreativeJourneyStore,
+} from "./creative-journey-store";
+import {
+  BrowserDevelopmentContextCompilationTraceStore,
+  SqliteContextCompilationTraceStore,
+  createContextCompilationTrace,
+  type ContextCompilationTraceStore,
+} from "./context-compilation-trace-store";
 import { createIdempotentAsyncCloser } from "./desktop-close-coordinator";
 import { CloudAiUsageService, type CloudAiUsageRuntimePort } from "./cloud-ai-usage-service";
 import { CloudAccountManagementService } from "./cloud-account-management-service";
@@ -175,14 +194,35 @@ import {
   TauriModelCenterStore,
   type ModelCenterStore,
   type ModelProfile,
-  type NativeAuthenticationMode,
-  type NativeProviderKind,
 } from "./model-center-store";
+import {
+  isNativeGatewayProviderKind,
+  type NativeGatewayEndpointConfig,
+  type NativeGatewayProviderKind,
+} from "./native-model-gateway-contract";
 import {
   BrowserDevelopmentModelRoutingStore,
   TauriModelRoutingStore,
   type ModelRoutingStore,
 } from "./model-routing-store";
+import {
+  BrowserDevelopmentModelHubStore,
+  TauriModelHubStore,
+  type ModelHubStore,
+} from "./model-hub-store";
+import { bridgeLegacyModelProfilesToModelHub } from "./model-hub-legacy-bridge";
+import {
+  executeModelHubTextTask,
+  inspectModelHubTextTask,
+  ModelHubExecutionError,
+  type ModelHubTextTaskInspection,
+} from "./model-hub-execution-service";
+import {
+  compileStoryContextForGeneration,
+  formatStoryContextPrompt,
+  StoryContextRuntimeError,
+  type StoryContextCompilationReceipt,
+} from "./story-context-runtime";
 import {
   MultiAgentReviewRuntime,
   SqliteMultiAgentReviewContextReader,
@@ -197,6 +237,11 @@ import type {
   NativeEmbeddingInput,
   NativeEmbeddingResult,
 } from "./native-embedding-gateway";
+import type {
+  NativeRerankGatewayClient,
+  NativeRerankInput,
+  NativeRerankResult,
+} from "./native-rerank-gateway";
 import { LocalProjectSearchService, type ProjectSearchService } from "./project-search";
 import {
   BrowserDevelopmentProjectSearchSnapshotStore,
@@ -224,6 +269,54 @@ import {
   BrowserDevelopmentWhatIfPromotionUnitOfWork,
   BrowserDevelopmentWhatIfRepository,
 } from "./story-storage";
+import { BrowserDevelopmentStoryFactStore } from "./story-fact-store";
+import {
+  BrowserDevelopmentCausalEventGraphStore,
+  SqliteCausalEventGraphStore,
+  type CausalChapterVersionSource,
+  type CausalEvidenceReader,
+  type CausalEventGraphStore,
+} from "./causal-event-graph-store";
+import { selectCausalContextCandidates } from "./causal-context-adapter";
+import { CausalStoryFactProjector } from "./causal-story-fact-projector";
+import { CausalWhatIfSimulationService } from "./causal-what-if-simulation-service";
+import { ModelHubCausalWhatIfModelPort } from "./model-hub-causal-what-if-model";
+import { ContinuousStoryStateExtractionService } from "./continuous-story-state-extraction";
+import { ContinuousStoryStateProjectionAdapter } from "./continuous-story-state-projection-adapter";
+import { ModelHubContinuousStoryStateModel } from "./model-hub-continuous-story-state-model";
+import {
+  BrowserChapterSummaryPreferenceStore,
+  ChapterSummaryService,
+} from "./chapter-summary-service";
+import { ModelHubChapterSummaryModel } from "./model-hub-chapter-summary-model";
+import { ModelHubImageGenerationService } from "./model-hub-image-generation-service";
+import {
+  mergeRemoteRerankWithLocalFallback,
+  ModelHubRerankService,
+} from "./model-hub-rerank-service";
+import { ModelHubStoryPlanningService } from "./model-hub-story-planning-service";
+import {
+  BrowserDevelopmentStoryPlanningCandidateStore,
+  SqliteStoryPlanningCandidateStore,
+  type StoryPlanningCandidateStore,
+} from "./story-planning-candidate-store";
+import {
+  TauriNativeImageGenerationGateway,
+  UnavailableNativeImageGenerationGateway,
+} from "./native-image-generation-gateway";
+import { evaluateGeneratedCandidateQuality } from "./candidate-quality-evaluator";
+import { ChapterNarrativeAnalysisRuntime } from "./narrative-analysis-runtime";
+import { ChapterNovelValidationRuntime } from "./novel-validation-runtime";
+import { CharacterVoicePovEvidenceAdapter } from "./character-voice-pov-evidence-adapter";
+import { ChapterCharacterVoicePovRuntime } from "./chapter-character-voice-pov-runtime";
+import { AmbiguousNovelReviewService } from "./ambiguous-novel-review-service";
+import { WritingFeedbackLearningService } from "./writing-feedback-learning-service";
+import {
+  BrowserDevelopmentWritingFeedbackStore,
+  SqliteWritingFeedbackStore,
+  type WritingFeedbackStore,
+} from "./writing-feedback-store";
+import { selectWritingPreferenceContextCandidates } from "./writing-preference-context-adapter";
 import { BrowserDevelopmentIdeationProjectCommitUnitOfWork } from "./development-ideation-project-commit";
 import { SqliteIdeationProjectCommitUnitOfWork } from "./ideation-project-commit";
 import {
@@ -329,12 +422,7 @@ export interface RuntimeInformation {
   readonly environment: "development" | "production";
 }
 
-export interface NativeModelEndpointConfig {
-  readonly providerId: string;
-  readonly provider: NativeProviderKind;
-  readonly baseUrl: string;
-  readonly authentication: NativeAuthenticationMode;
-}
+export type NativeModelEndpointConfig = NativeGatewayEndpointConfig;
 
 export interface NativeModelDescriptor {
   readonly id: string;
@@ -343,12 +431,12 @@ export interface NativeModelDescriptor {
 }
 
 export interface NativeModelListResponse {
-  readonly provider: NativeProviderKind;
+  readonly provider: NativeGatewayProviderKind;
   readonly models: readonly NativeModelDescriptor[];
 }
 
 export interface NativeModelConnectionResponse {
-  readonly provider: NativeProviderKind;
+  readonly provider: NativeGatewayProviderKind;
   readonly endpointOrigin: string;
   readonly modelCount: number;
   readonly latencyMs: number;
@@ -401,13 +489,27 @@ export interface NativeModelGatewayClient extends NativeEmbeddingGatewayClient {
   inspectCapacity?(): Promise<NativeModelCapacityResponse>;
   generate(input: NativeModelGenerationInput): Promise<NativeModelGenerationResult>;
   cancelGeneration(generationId: string): Promise<boolean>;
+  readonly rerank?: NativeRerankGatewayClient["rerank"];
 }
 
 export interface RuntimeStory {
+  readonly facts: StoryFactStore;
+  readonly factService: StoryFactApplicationService;
+  readonly chapterValidation: ChapterNovelValidationRuntime;
+  readonly characterVoicePov: ChapterCharacterVoicePovRuntime;
+  readonly ambiguousReview: AmbiguousNovelReviewService;
+  readonly continuousState: ContinuousStoryStateExtractionService;
+  readonly chapterSummaries: ChapterSummaryService;
+  readonly narrativeAnalysis: ChapterNarrativeAnalysisRuntime;
+  readonly causalGraph: CausalEventGraphStore;
+  readonly causalProjector: CausalStoryFactProjector;
+  readonly causalWhatIf: CausalWhatIfSimulationService;
+  readonly writingFeedback: WritingFeedbackLearningService;
   readonly ideationDrafts: IdeationDraftRepository;
   readonly ideationService: IdeationApplicationService;
   readonly outlines: OutlineRepository;
   readonly outlineService: OutlineApplicationService;
+  readonly storyPlanning: ModelHubStoryPlanningService;
   readonly formalRecords: FormalStoryRecordRepository &
     FormalStoryRecordListReader &
     FormalTimelineReader;
@@ -445,7 +547,12 @@ export interface DesktopRuntime {
   readonly generationGovernance: GenerationGovernanceStore;
   readonly modelCenter: ModelCenterStore;
   readonly modelRouting: ModelRoutingStore;
+  readonly modelHub: ModelHubStore;
   readonly modelGateway: NativeModelGatewayClient;
+  readonly imageGeneration: ModelHubImageGenerationService;
+  readonly rerank: ModelHubRerankService;
+  readonly creativeJourneys: CreativeJourneyStore;
+  readonly contextTraces: ContextCompilationTraceStore;
   readonly multiAgentReview: MultiAgentReviewRuntime | null;
   readonly governedCreativeExtensions: GovernedCreativeExtensionsRuntime | null;
   readonly projectKeyVault: ProjectKeyVault;
@@ -535,18 +642,28 @@ interface NativeGenerationEvent {
 export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
   public readonly available = true;
 
-  public listModels(config: NativeModelEndpointConfig): Promise<NativeModelListResponse> {
-    return invoke<NativeModelListResponse>("list_native_models", {
-      request: { config },
-    });
+  public async listModels(config: NativeModelEndpointConfig): Promise<NativeModelListResponse> {
+    try {
+      const response = await invoke<unknown>("list_native_models", {
+        request: { config },
+      });
+      return validateNativeModelListResponse(response, config);
+    } catch (cause) {
+      throw normalizeNativeModelGatewayError(cause);
+    }
   }
 
-  public checkConnection(
+  public async checkConnection(
     config: NativeModelEndpointConfig,
   ): Promise<NativeModelConnectionResponse> {
-    return invoke<NativeModelConnectionResponse>("check_native_model_connection", {
-      request: { config },
-    });
+    try {
+      const response = await invoke<unknown>("check_native_model_connection", {
+        request: { config },
+      });
+      return validateNativeModelConnectionResponse(response, config);
+    } catch (cause) {
+      throw normalizeNativeModelGatewayError(cause);
+    }
   }
 
   public inspectCapacity(): Promise<NativeModelCapacityResponse> {
@@ -554,17 +671,65 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
   }
 
   public async embed(input: NativeEmbeddingInput): Promise<NativeEmbeddingResult> {
-    const result = await invoke<NativeEmbeddingResult>("embed_native_model", {
-      request: {
-        config: input.config,
-        model: input.model,
-        inputs: input.inputs,
-      },
-    });
-    return validateNativeEmbeddingResult(result, input);
+    if (input.config.provider === "anthropic") {
+      throw new ModelCenterError(
+        "MODEL_OPERATION_UNSUPPORTED",
+        "Anthropic Claude does not provide an embedding API. Choose an embedding-capable provider such as Gemini or Ollama.",
+      );
+    }
+    try {
+      const result = await invoke<NativeEmbeddingResult>("embed_native_model", {
+        request: {
+          config: input.config,
+          model: input.model,
+          inputs: input.inputs,
+        },
+      });
+      return validateNativeEmbeddingResult(result, input);
+    } catch (cause) {
+      throw normalizeNativeModelGatewayError(cause);
+    }
+  }
+
+  public async rerank(input: NativeRerankInput): Promise<NativeRerankResult> {
+    if (input.config.provider !== "open_ai_compatible") {
+      throw new ModelCenterError(
+        "MODEL_OPERATION_UNSUPPORTED",
+        "The native gateway supports reranking only through the explicit Alibaba Qwen protocol.",
+      );
+    }
+    try {
+      const result = await invoke<unknown>("rerank_native_model", {
+        request: {
+          config: input.config,
+          protocol: input.protocol,
+          model: input.model,
+          query: input.query,
+          documents: input.documents,
+          topN: input.topN,
+        },
+      });
+      return validateNativeRerankResult(result, input);
+    } catch (cause) {
+      throw normalizeNativeModelGatewayError(cause);
+    }
   }
 
   public generate(input: NativeModelGenerationInput): Promise<NativeModelGenerationResult> {
+    if (
+      input.config.provider === "anthropic" &&
+      input.temperature !== undefined &&
+      input.temperature !== 1
+    ) {
+      return Promise.reject(
+        new ModelCenterError(
+          "MODEL_OPERATION_UNSUPPORTED",
+          "Current Claude models accept only the provider default temperature. Remove the temperature setting or use 1.0.",
+        ),
+      );
+    }
+    const includeTemperature =
+      input.config.provider !== "anthropic" && input.temperature !== undefined;
     return new Promise<NativeModelGenerationResult>((resolve, reject) => {
       let unlisten: UnlistenFn | null = null;
       let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -686,7 +851,7 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
             model: input.model,
             messages: input.messages,
             maxOutputTokens: input.maxOutputTokens,
-            ...(input.temperature === undefined ? {} : { temperature: input.temperature }),
+            ...(includeTemperature ? { temperature: input.temperature } : {}),
           },
         });
         if (accepted.generationId !== input.generationId || !accepted.accepted) {
@@ -751,6 +916,15 @@ class BrowserDevelopmentModelGatewayClient implements NativeModelGatewayClient {
     );
   }
 
+  public rerank(): Promise<NativeRerankResult> {
+    return Promise.reject(
+      new ModelCenterError(
+        "MODEL_NATIVE_GATEWAY_UNAVAILABLE",
+        "Native reranking is available only in the Tauri desktop app.",
+      ),
+    );
+  }
+
   public cancelGeneration(): Promise<boolean> {
     return Promise.resolve(false);
   }
@@ -806,15 +980,47 @@ class RepositoryChapterVersionReader implements ChapterVersionReader {
   }
 }
 
+class RepositoryCausalEvidenceReader implements CausalEvidenceReader {
+  public constructor(private readonly versions: ChapterVersionRepository) {}
+
+  public async readChapterVersion(
+    chapterVersionIdValue: string,
+  ): Promise<CausalChapterVersionSource | null> {
+    const chapterVersionId = parseDomainUuid(chapterVersionIdValue);
+    if (!chapterVersionId.ok) {
+      return null;
+    }
+    const loaded = await this.versions.findVersionById(chapterVersionId.value);
+    if (!loaded.ok) {
+      throw loaded.error;
+    }
+    if (loaded.value === null) {
+      return null;
+    }
+    const snapshot = loaded.value.toSnapshot();
+    return Object.freeze({
+      chapterVersionId: snapshot.id,
+      projectId: snapshot.projectId,
+      chapterId: snapshot.chapterId,
+      content: snapshot.content,
+      contentChecksum: snapshot.contentChecksum,
+    });
+  }
+}
+
 function buildRuntime(
   mode: RuntimeMode,
   repositories: RuntimeRepositories,
+  creativeJourneys: CreativeJourneyStore,
   close: () => Promise<void>,
   maintenance: RuntimeMaintenance | null,
   createTaskCenter: (clock: Clock) => TaskCenterStore,
   createGenerationGovernance: (clock: Clock) => GenerationGovernanceStore,
   createModelCenter: (clock: Clock) => ModelCenterStore,
   createModelRouting: (clock: Clock, modelCenter: ModelCenterStore) => ModelRoutingStore,
+  createModelHub: (clock: Clock) => ModelHubStore,
+  createContextTraces: (clock: Clock) => ContextCompilationTraceStore,
+  createWritingFeedback: () => WritingFeedbackStore,
   createStoryPersistence: (
     ids: UuidV7Generator,
     clock: Clock,
@@ -829,12 +1035,45 @@ function buildRuntime(
   const hasher = new CryptoContentHasher();
   const modelCenter = createModelCenter(clock);
   const modelRouting = createModelRouting(clock, modelCenter);
+  const modelHub = createModelHub(clock);
+  const contextTraces = createContextTraces(clock);
+  const writingFeedback = new WritingFeedbackLearningService(createWritingFeedback(), ids, clock);
   const modelGateway: NativeModelGatewayClient =
     mode === "tauri"
       ? new TauriNativeModelGatewayClient()
       : new BrowserDevelopmentModelGatewayClient();
   const credentials: CredentialStore =
     mode === "tauri" ? new TauriCredentialStore() : new BrowserDevelopmentCredentialStore();
+  const imageGeneration = new ModelHubImageGenerationService({
+    modelHub,
+    imageGateway:
+      mode === "tauri"
+        ? new TauriNativeImageGenerationGateway()
+        : new UnavailableNativeImageGenerationGateway(),
+    credentials,
+    ids,
+    clock,
+  });
+  const rerank = new ModelHubRerankService({
+    modelHub,
+    gateway: {
+      available: mode === "tauri" && modelGateway.rerank !== undefined,
+      rerank: (input) => {
+        if (modelGateway.rerank === undefined) {
+          return Promise.reject(
+            new ModelCenterError(
+              "MODEL_NATIVE_GATEWAY_UNAVAILABLE",
+              "Native reranking is unavailable in this runtime.",
+            ),
+          );
+        }
+        return modelGateway.rerank(input);
+      },
+    },
+    credentials,
+    ids,
+    clock,
+  });
   const secureUpdater: SecureUpdaterPort =
     mode === "tauri" ? new TauriSecureUpdater() : new BrowserDevelopmentSecureUpdater();
   const projectKeyVault: ProjectKeyVault =
@@ -1050,6 +1289,106 @@ function buildRuntime(
     graphRag: storyGraph !== null,
   });
   const actorId = ids.next();
+  const factService = new StoryFactApplicationService({
+    facts: storyPersistence.facts,
+    clock,
+    ids,
+  });
+  const continuousProjection = new ContinuousStoryStateProjectionAdapter({
+    chapters: repositories.chapters,
+    chapterVersions: repositories.chapterVersions,
+    storyFacts: storyPersistence.facts,
+    hasher,
+  });
+  const chapterValidation = new ChapterNovelValidationRuntime({
+    chapters: repositories.chapters,
+    chapterVersions: repositories.chapterVersions,
+    storyFacts: storyPersistence.facts,
+    hasher,
+    continuousProjection,
+    mutations: { factService, actorId },
+  });
+  const characterEvidence = new CharacterVoicePovEvidenceAdapter({
+    chapters: repositories.chapters,
+    chapterVersions: repositories.chapterVersions,
+    storyFacts: storyPersistence.facts,
+    hasher,
+    continuousProjection,
+  });
+  const characterVoicePov = new ChapterCharacterVoicePovRuntime(characterEvidence);
+  const ambiguousReview = new AmbiguousNovelReviewService({
+    chapters: repositories.chapters,
+    chapterVersions: repositories.chapterVersions,
+    storyFacts: storyPersistence.facts,
+    hasher,
+    characterEvidence,
+    modelHub: { modelHub, modelGateway, credentials, clock, ids },
+  });
+  const storyProcessingPreferences = new BrowserChapterSummaryPreferenceStore(
+    typeof globalThis.localStorage === "undefined" ? null : globalThis.localStorage,
+  );
+  const continuousState = new ContinuousStoryStateExtractionService({
+    chapters: repositories.chapters,
+    chapterVersions: repositories.chapterVersions,
+    facts: storyPersistence.facts,
+    factService,
+    model: new ModelHubContinuousStoryStateModel({
+      modelHub,
+      modelGateway,
+      credentials,
+      clock,
+      ids,
+    }),
+    hasher,
+    ids,
+    preferences: storyProcessingPreferences,
+  });
+  const chapterSummaries = new ChapterSummaryService({
+    chapters: repositories.chapters,
+    chapterVersions: repositories.chapterVersions,
+    facts: storyPersistence.facts,
+    factService,
+    hasher,
+    model: new ModelHubChapterSummaryModel({
+      modelHub,
+      modelGateway,
+      credentials,
+      clock,
+      ids,
+    }),
+    preferences: storyProcessingPreferences,
+  });
+  const narrativeAnalysis = new ChapterNarrativeAnalysisRuntime({
+    storyFacts: storyPersistence.facts,
+    chapterVersions: repositories.chapterVersions,
+    causalGraph: storyPersistence.causalGraph,
+    hasher,
+    continuousProjection,
+  });
+  const causalWhatIf = new CausalWhatIfSimulationService(
+    storyPersistence.causalGraph,
+    storyPersistence.facts,
+    new ModelHubCausalWhatIfModelPort({ modelHub, modelGateway, credentials, clock, ids }),
+    ids,
+    clock,
+  );
+  const outlineService = new OutlineApplicationService({
+    outlines: storyPersistence.outlines,
+    clock,
+    ids,
+  });
+  const storyPlanning = new ModelHubStoryPlanningService({
+    modelHub,
+    modelGateway,
+    credentials,
+    clock,
+    ids,
+    facts: storyPersistence.facts,
+    causalGraph: storyPersistence.causalGraph,
+    outlines: storyPersistence.outlines,
+    outlineService,
+    candidates: storyPersistence.planningCandidates,
+  });
   const searchVectors = new PersistentProjectEmbeddingService(
     cloudExecutor === null ? null : new SearchVectorSqliteStore(cloudExecutor),
     modelRouting,
@@ -1057,6 +1396,13 @@ function buildRuntime(
     modelGateway,
     hasher,
     clock,
+    {
+      modelHub,
+      modelGateway,
+      credentials,
+      clock,
+      ids,
+    },
   );
   const search = new LocalProjectSearchService({
     projects: repositories.projects,
@@ -1131,17 +1477,38 @@ function buildRuntime(
   return {
     mode,
     repositories,
+    creativeJourneys,
+    contextTraces,
     taskCenter: createTaskCenter(clock),
     generationGovernance: createGenerationGovernance(clock),
     modelCenter,
     modelRouting,
+    modelHub,
     modelGateway,
+    imageGeneration,
+    rerank,
     multiAgentReview,
     governedCreativeExtensions,
     projectKeyVault,
     projectSecurity,
     story: {
       actorId,
+      facts: storyPersistence.facts,
+      factService,
+      chapterValidation,
+      characterVoicePov,
+      ambiguousReview,
+      continuousState,
+      chapterSummaries,
+      narrativeAnalysis,
+      causalGraph: storyPersistence.causalGraph,
+      causalProjector: new CausalStoryFactProjector({
+        facts: storyPersistence.facts,
+        chapterVersions: repositories.chapterVersions,
+        graph: storyPersistence.causalGraph,
+      }),
+      causalWhatIf,
+      writingFeedback,
       ideationDrafts: storyPersistence.ideationDrafts,
       ideationService: new IdeationApplicationService({
         drafts: storyPersistence.ideationDrafts,
@@ -1150,11 +1517,8 @@ function buildRuntime(
         ids,
       }),
       outlines: storyPersistence.outlines,
-      outlineService: new OutlineApplicationService({
-        outlines: storyPersistence.outlines,
-        clock,
-        ids,
-      }),
+      outlineService,
+      storyPlanning,
       formalRecords: storyPersistence.formalRecords,
       formalRecordService: new FormalRecordApplicationService({
         records: storyPersistence.formalRecords,
@@ -1298,6 +1662,9 @@ function buildRuntime(
 }
 
 interface StoryPersistence {
+  readonly facts: StoryFactStore;
+  readonly causalGraph: CausalEventGraphStore;
+  readonly planningCandidates: StoryPlanningCandidateStore;
   readonly ideationDrafts: IdeationDraftRepository;
   readonly ideationProjects: IdeationProjectCommitUnitOfWork;
   readonly outlines: OutlineRepository;
@@ -1366,7 +1733,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.1.0",
+    appVersion: "0.2.0",
     platform: "browser",
     architecture: "web",
     environment: "development",
@@ -1518,16 +1885,23 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
     const baseRuntime = buildRuntime(
       "tauri",
       repositories,
+      new SqliteCreativeJourneyStore(executor),
       () => executor.close(),
       createTauriRuntimeMaintenance(executor),
       (clock) => new TauriTaskCenterStore(executor, clock),
       (clock) => new TauriGenerationGovernanceStore(executor, clock),
       (clock) => new TauriModelCenterStore(executor, clock),
       (clock) => new TauriModelRoutingStore(executor, clock),
+      (clock) => new TauriModelHubStore(executor, clock),
+      () => new SqliteContextCompilationTraceStore(executor),
+      () => new SqliteWritingFeedbackStore(executor),
       (ids, clock, hasher) => {
         const extractionItems = new SqliteReviewItemRepository(executor, "extraction");
         const consistencyItems = new SqliteReviewItemRepository(executor, "consistency");
         return {
+          facts: new SqliteStoryFactStore(executor),
+          causalGraph: new SqliteCausalEventGraphStore(executor),
+          planningCandidates: new SqliteStoryPlanningCandidateStore(executor),
           ideationDrafts: new SqliteIdeationDraftRepository(executor),
           ideationProjects: new SqliteIdeationProjectCommitUnitOfWork(executor, ids, clock, hasher),
           outlines: new SqliteOutlineRepository(executor),
@@ -1563,6 +1937,18 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
         executor,
         runtime: baseRuntime,
       }),
+    });
+    await bridgeLegacyModelProfilesToModelHub({
+      modelCenter: runtime.modelCenter,
+      modelHub: runtime.modelHub,
+      credentials: runtime.credentials,
+      clock: runtime.clock,
+    }).catch(() => {
+      // Compatibility import is additive. A damaged legacy profile must not
+      // prevent the local workspace or the unchanged legacy route from opening.
+      globalThis.console.error(
+        "[MODEL_HUB_LEGACY_BRIDGE_FAILED] Legacy model configuration remains available through the compatibility runtime.",
+      );
     });
     if (runtime.cloudIdentity !== null) {
       try {
@@ -1661,17 +2047,27 @@ export function createDevelopmentRuntime(storage: Storage): DesktopRuntime {
   return buildRuntime(
     "browser-development",
     repositories,
+    new BrowserCreativeJourneyStore(storage),
     () => Promise.resolve(),
     null,
     (clock) => new BrowserDevelopmentTaskCenterStore(storage, clock),
     (clock) => new BrowserDevelopmentGenerationGovernanceStore(storage, clock),
     (clock) => new BrowserDevelopmentModelCenterStore(storage, clock),
     (clock, modelCenter) => new BrowserDevelopmentModelRoutingStore(storage, clock, modelCenter),
+    (clock) => new BrowserDevelopmentModelHubStore(storage, clock),
+    () => new BrowserDevelopmentContextCompilationTraceStore(storage),
+    () => new BrowserDevelopmentWritingFeedbackStore(storage),
     (ids, clock, hasher) => {
       const sourceVersions = new RepositoryChapterVersionReader(repositories.chapters);
       const extractionItems = new BrowserDevelopmentReviewItemRepository(storage, "extraction");
       const consistencyItems = new BrowserDevelopmentReviewItemRepository(storage, "consistency");
       return {
+        facts: new BrowserDevelopmentStoryFactStore(storage),
+        causalGraph: new BrowserDevelopmentCausalEventGraphStore(
+          storage,
+          new RepositoryCausalEvidenceReader(repositories.chapterVersions),
+        ),
+        planningCandidates: new BrowserDevelopmentStoryPlanningCandidateStore(storage),
         ideationDrafts: new BrowserDevelopmentIdeationDraftRepository(storage),
         ideationProjects: new BrowserDevelopmentIdeationProjectCommitUnitOfWork(
           storage,
@@ -1724,7 +2120,13 @@ export interface PreparedGenerationPlan {
   readonly providerId: string;
   readonly modelId: string;
   readonly modelRole: ModelRouteRole;
-  readonly routeReason: "legacy_default" | "role_primary" | "role_fallback" | "local_demo";
+  readonly routeReason:
+    | "legacy_default"
+    | "role_primary"
+    | "role_fallback"
+    | "model_hub_primary"
+    | "model_hub_fallback"
+    | "local_demo";
   readonly routeFallback: Readonly<{
     providerId: string;
     modelId: string;
@@ -1735,10 +2137,18 @@ export interface PreparedGenerationPlan {
   readonly tokenEstimateSource: "utf8_conservative" | "local_demo";
   readonly preflight: GenerationPreflightSnapshot;
   readonly profile: ModelProfile | null;
+  /** In-memory only. Deferred/task persistence deliberately excludes prompt content. */
+  readonly messages: readonly NativeModelMessage[];
+  readonly contextCompilation: StoryContextCompilationReceipt | null;
+  readonly executionMode: "local_demo" | "model_hub" | "legacy_profile";
+  readonly modelHubInspection: ModelHubTextTaskInspection | null;
+  readonly approvedPricing: ModelPricing | null;
 }
 
 export interface GovernedGenerationOutcome {
   readonly candidate: AiCandidate | null;
+  /** A synchronous, evidence-bounded gate; null for cancelled partial output. */
+  readonly qualityGate: CandidateQualityGateResult | null;
   readonly cancelled: boolean;
   readonly reused: boolean;
   readonly taskId: string;
@@ -1780,7 +2190,7 @@ export async function prepareGenerationPlan(
   let routeResolved = true;
   let routeReason: PreparedGenerationPlan["routeReason"] = demo ? "local_demo" : "legacy_default";
   let routeRequiresConfirmation = false;
-  const routeFallback =
+  let routeFallback =
     roleRoute?.fallbackProviderId === null ||
     roleRoute?.fallbackProviderId === undefined ||
     roleRoute.fallbackModelId === null
@@ -1854,29 +2264,72 @@ export async function prepareGenerationPlan(
     }
   }
 
-  const providerId = demo ? "local-demo" : (profile?.providerId ?? "unconfigured");
-  const modelId = demo ? "built-in-demo" : (profile?.selectedModel ?? "unselected");
-  const maximumOutputTokens = 2_048;
-  const messages = chapter === null ? [] : buildContinuationMessages(chapter);
+  let providerId = demo ? "local-demo" : (profile?.providerId ?? "unconfigured");
+  let modelId = demo ? "built-in-demo" : (profile?.selectedModel ?? "unselected");
+  let maximumOutputTokens = 2_048;
+  let messages: readonly NativeModelMessage[] = [];
+  let contextCompilation: StoryContextCompilationReceipt | null = null;
+  if (chapter !== null) {
+    if (demo) {
+      messages = buildContinuationMessages(chapter);
+    } else {
+      try {
+        const preparedContext = await buildContextualContinuationMessages(runtime, chapter);
+        messages = preparedContext.messages;
+        contextCompilation = preparedContext.contextCompilation;
+      } catch (cause: unknown) {
+        throw normalizeStoryContextFailure(cause);
+      }
+    }
+  }
+  let modelHubInspection: ModelHubTextTaskInspection | null = null;
+  let executionMode: PreparedGenerationPlan["executionMode"] = demo
+    ? "local_demo"
+    : "legacy_profile";
+  if (!demo && chapter !== null) {
+    try {
+      modelHubInspection = await inspectModelHubTextTask(runtime, {
+        task: "continuation",
+        messages,
+        maximumOutputTokens,
+        temperature: 0.8,
+      });
+    } catch (cause: unknown) {
+      if (
+        !(cause instanceof ModelHubExecutionError) ||
+        cause.code !== "MODEL_HUB_ROUTE_NOT_CONFIGURED"
+      ) {
+        throw new ModelCenterError(
+          cause instanceof ModelHubExecutionError ? cause.code : "MODEL_HUB_PREFLIGHT_FAILED",
+          cause instanceof Error ? cause.message : "AI 分工检查失败，请检查模型、隐私和费用设置。",
+          cause instanceof ModelHubExecutionError ? cause.retryable : true,
+        );
+      }
+    }
+    if (modelHubInspection !== null) {
+      executionMode = "model_hub";
+      providerId = modelHubInspection.connectionId;
+      modelId = modelHubInspection.modelId;
+      maximumOutputTokens = modelHubInspection.maximumOutputTokens;
+      routeResolved = true;
+      routeReason = modelHubInspection.usedFallback ? "model_hub_fallback" : "model_hub_primary";
+      routeRequiresConfirmation = modelHubInspection.usedFallback;
+      routeFallback = null;
+      credentialConfigured = true;
+      connectionStatus = "verified";
+      selectedModelAvailable = true;
+      profile = null;
+    }
+  }
   const inputBytes = demo ? 0 : measureMessageBytes(messages);
-  const inputTokens = demo ? 0 : Math.ceil(inputBytes / 3);
-  const pricing =
-    profile?.pricing === null || profile?.pricing === undefined
-      ? null
-      : {
-          currency: profile.pricing.currency,
-          pricingVersion: profile.pricing.pricingVersion,
-          updatedAt: profile.pricing.priceUpdatedAt,
-          inputMicrosPerMillionTokens: BigInt(profile.pricing.inputMicrosPerMillionTokens),
-          outputMicrosPerMillionTokens: BigInt(profile.pricing.outputMicrosPerMillionTokens),
-          ...(profile.pricing.cachedInputMicrosPerMillionTokens === null
-            ? {}
-            : {
-                cachedInputMicrosPerMillionTokens: BigInt(
-                  profile.pricing.cachedInputMicrosPerMillionTokens,
-                ),
-              }),
-        };
+  const inputTokens = demo
+    ? 0
+    : (modelHubInspection?.estimatedInputTokens ?? Math.ceil(inputBytes / 3));
+  const pricing = resolvePreparedGenerationPricing(
+    runtime.clock.now(),
+    profile,
+    modelHubInspection,
+  );
   const monthKey = runtime.clock.now().slice(0, 7);
   const budgets =
     chapter === null || pricing === null
@@ -1894,10 +2347,14 @@ export async function prepareGenerationPlan(
     projectWritable: project?.status === "active",
     gatewayAvailable: demo || runtime.modelGateway.available,
     networkAvailable: input.networkAvailable,
-    providerLocation: demo ? "demo" : profile?.provider === "ollama" ? "local" : "remote",
+    providerLocation: demo
+      ? "demo"
+      : modelHubInspection?.dataDestination === "local" || profile?.provider === "ollama"
+        ? "local"
+        : "remote",
     routeResolved,
-    profileConfigured: demo || profile !== null,
-    modelSelected: demo || profile?.selectedModel !== null,
+    profileConfigured: demo || modelHubInspection !== null || profile !== null,
+    modelSelected: demo || modelHubInspection !== null || profile?.selectedModel !== null,
     credentialConfigured,
     connectionStatus,
     selectedModelAvailable,
@@ -1905,7 +2362,9 @@ export async function prepareGenerationPlan(
     maximumInputBytes: 1_000_000,
     inputTokens,
     maximumOutputTokens,
-    contextWindowTokens: demo ? null : (profile?.pricing?.contextWindowTokens ?? null),
+    contextWindowTokens: demo
+      ? null
+      : (modelHubInspection?.inputTokenLimit ?? profile?.pricing?.contextWindowTokens ?? null),
     pricing,
     budgets,
   });
@@ -1969,6 +2428,69 @@ export async function prepareGenerationPlan(
     tokenEstimateSource: demo ? "local_demo" : "utf8_conservative",
     preflight,
     profile,
+    messages,
+    contextCompilation,
+    executionMode,
+    modelHubInspection,
+    approvedPricing: pricing,
+  });
+}
+
+function resolvePreparedGenerationPricing(
+  now: string,
+  profile: ModelProfile | null,
+  inspection: ModelHubTextTaskInspection | null,
+): ModelPricing | null {
+  if (inspection !== null) {
+    const source = inspection.pricing;
+    if (
+      source.currency !== null &&
+      source.inputMicrosPerMillionTokens !== null &&
+      source.outputMicrosPerMillionTokens !== null &&
+      source.pricingVersion !== null &&
+      source.priceUpdatedAt !== null
+    ) {
+      return Object.freeze({
+        currency: source.currency,
+        pricingVersion: source.pricingVersion,
+        updatedAt: source.priceUpdatedAt,
+        inputMicrosPerMillionTokens: BigInt(source.inputMicrosPerMillionTokens),
+        outputMicrosPerMillionTokens: BigInt(source.outputMicrosPerMillionTokens),
+        ...(source.cachedInputMicrosPerMillionTokens === null
+          ? {}
+          : {
+              cachedInputMicrosPerMillionTokens: BigInt(source.cachedInputMicrosPerMillionTokens),
+            }),
+      });
+    }
+    if (inspection.dataDestination === "local") {
+      return Object.freeze({
+        currency: source.currency ?? "USD",
+        pricingVersion: source.pricingVersion ?? "model-hub-local-zero-cost",
+        updatedAt: source.priceUpdatedAt ?? now,
+        inputMicrosPerMillionTokens: 0n,
+        outputMicrosPerMillionTokens: 0n,
+        cachedInputMicrosPerMillionTokens: 0n,
+      });
+    }
+    return null;
+  }
+  if (profile?.pricing === null || profile?.pricing === undefined) {
+    return null;
+  }
+  return Object.freeze({
+    currency: profile.pricing.currency,
+    pricingVersion: profile.pricing.pricingVersion,
+    updatedAt: profile.pricing.priceUpdatedAt,
+    inputMicrosPerMillionTokens: BigInt(profile.pricing.inputMicrosPerMillionTokens),
+    outputMicrosPerMillionTokens: BigInt(profile.pricing.outputMicrosPerMillionTokens),
+    ...(profile.pricing.cachedInputMicrosPerMillionTokens === null
+      ? {}
+      : {
+          cachedInputMicrosPerMillionTokens: BigInt(
+            profile.pricing.cachedInputMicrosPerMillionTokens,
+          ),
+        }),
   });
 }
 
@@ -2106,7 +2628,12 @@ export async function executeGenerationPlan(
       modelId: plan.modelId,
       route: {
         role: plan.modelRole,
-        reason: plan.routeReason,
+        reason:
+          plan.routeReason === "model_hub_primary"
+            ? "role_primary"
+            : plan.routeReason === "model_hub_fallback"
+              ? "role_fallback"
+              : plan.routeReason,
         fallbackProviderId: plan.routeFallback?.providerId ?? null,
         fallbackModelId: plan.routeFallback?.modelId ?? null,
       },
@@ -2146,8 +2673,15 @@ export async function executeGenerationPlan(
         );
       }
       await publishGenerationNotification(runtime, plan, "completed", run.attempt);
+      const qualityGate = await evaluateCandidateAgainstLocalGate(
+        runtime,
+        plan,
+        candidate.value,
+        chapter.content,
+      );
       return ok({
         candidate: candidate.value,
+        qualityGate,
         cancelled: false,
         reused: true,
         taskId: enqueued.task.id,
@@ -2200,6 +2734,7 @@ export async function executeGenerationPlan(
       1,
       5,
     );
+    await persistPreparedContextTrace(runtime, plan);
     run = await runtime.generationGovernance.transitionRun({
       runId: run.id,
       expectedRevision: run.revision,
@@ -2237,29 +2772,32 @@ export async function executeGenerationPlan(
           usagePricedEstimateMicros: "0",
         };
       } else {
-        if (plan.profile?.selectedModel === null || plan.profile === null) {
-          throw new ModelCenterError(
-            "MODEL_PROFILE_NOT_READY",
-            "The preflight model profile is no longer ready.",
-          );
-        }
-        const generated = await runtime.modelGateway.generate({
-          generationId: plan.generationId,
-          config: {
-            providerId: plan.profile.providerId,
-            provider: plan.profile.provider,
-            baseUrl: plan.profile.baseUrl,
-            authentication: plan.profile.authentication,
-          },
-          model: plan.profile.selectedModel,
-          messages: buildContinuationMessages(chapter),
-          maxOutputTokens: plan.maximumOutputTokens,
-          temperature: 0.8,
-          onDelta: (next) => {
-            accumulated = next;
-            onDelta?.(next);
-          },
-        });
+        const generated =
+          plan.executionMode === "model_hub"
+            ? await executeModelHubTextTask(runtime, {
+                task: "continuation",
+                messages: plan.messages,
+                maximumOutputTokens: plan.maximumOutputTokens,
+                temperature: 0.8,
+                generationId: plan.generationId,
+                onBeforeDispatch: ({ connectionId, modelId }) => {
+                  if (connectionId !== plan.providerId || modelId !== plan.modelId) {
+                    throw new ModelHubExecutionError(
+                      "MODEL_HUB_PLAN_CHANGED",
+                      "AI 分工在生成前发生变化。为避免使用未经本次检查的模型，请重新执行生成前检查。",
+                      true,
+                    );
+                  }
+                },
+                onDelta: (next) => {
+                  accumulated = next;
+                  onDelta?.(next);
+                },
+              })
+            : await generateLegacyContinuation(runtime, plan, (next) => {
+                accumulated = next;
+                onDelta?.(next);
+              });
         attemptUsage = priceProviderReportedUsage(plan, generated.usage);
         accumulated = generated.text;
         const persisted = await persistGeneratedCandidate(runtime, chapter, generated.text, false);
@@ -2293,6 +2831,7 @@ export async function executeGenerationPlan(
         await publishGenerationNotification(runtime, plan, "cancelled", run.attempt);
         return ok({
           candidate: partialCandidate,
+          qualityGate: null,
           cancelled: true,
           reused: false,
           taskId: plan.taskId,
@@ -2345,6 +2884,12 @@ export async function executeGenerationPlan(
       3,
       5,
     );
+    const qualityGate = await evaluateCandidateAgainstLocalGate(
+      runtime,
+      plan,
+      candidate,
+      chapter.content,
+    );
     run = await runtime.generationGovernance.transitionRun({
       runId: run.id,
       expectedRevision: run.revision,
@@ -2383,6 +2928,7 @@ export async function executeGenerationPlan(
         await publishGenerationNotification(runtime, plan, "cancelled", run.attempt);
         return ok({
           candidate,
+          qualityGate,
           cancelled: true,
           reused: false,
           taskId: plan.taskId,
@@ -2400,6 +2946,7 @@ export async function executeGenerationPlan(
     await publishGenerationNotification(runtime, plan, "completed", run.attempt);
     return ok({
       candidate,
+      qualityGate,
       cancelled: false,
       reused: false,
       taskId: plan.taskId,
@@ -2426,6 +2973,50 @@ export async function cancelGenerationPlan(
   return taskCancelled || gatewayCancelled;
 }
 
+async function persistPreparedContextTrace(
+  runtime: DesktopRuntime,
+  plan: PreparedGenerationPlan,
+): Promise<void> {
+  if (plan.contextCompilation === null || plan.projectId === null) {
+    return;
+  }
+  await runtime.contextTraces.save(
+    createContextCompilationTrace({
+      id: runtime.ids.next(),
+      projectId: plan.projectId,
+      chapterId: plan.chapterId,
+      taskType: "continuation",
+      compiled: plan.contextCompilation.compiled,
+      createdAt: runtime.clock.now(),
+    }),
+  );
+}
+
+async function saveDirectContinuationContextTrace(
+  runtime: DesktopRuntime,
+  chapter: Chapter,
+  receipt: StoryContextCompilationReceipt,
+): Promise<void> {
+  try {
+    await runtime.contextTraces.save(
+      createContextCompilationTrace({
+        id: runtime.ids.next(),
+        projectId: chapter.projectId,
+        chapterId: chapter.id,
+        taskType: "continuation",
+        compiled: receipt.compiled,
+        createdAt: runtime.clock.now(),
+      }),
+    );
+  } catch {
+    throw new ModelCenterError(
+      "CONTEXT_TRACE_UNAVAILABLE",
+      "无法保存本次上下文来源记录，因此没有调用模型。正文和已有 AI 建议版本均未改变。",
+      true,
+    );
+  }
+}
+
 interface InspectedModelRouteProfile {
   readonly profile: ModelProfile;
   readonly candidate: ModelRouteCandidate;
@@ -2441,6 +3032,95 @@ const TEXT_GENERATION_MODEL_ROLES = [
   "validation",
   "translation",
 ] as const satisfies readonly ModelRouteRole[];
+
+function validateNativeModelListResponse(
+  response: unknown,
+  config: NativeModelEndpointConfig,
+): NativeModelListResponse {
+  if (
+    !isRecord(response) ||
+    !isNativeGatewayProviderKind(response.provider) ||
+    response.provider !== config.provider ||
+    !Array.isArray(response.models) ||
+    response.models.length > 10_000
+  ) {
+    throw invalidNativeModelResponse("model discovery");
+  }
+
+  const modelIds = new Set<string>();
+  const models: NativeModelDescriptor[] = response.models.map((model: unknown) => {
+    if (
+      !isRecord(model) ||
+      !isSafeNativeModelText(model.id, 512) ||
+      !isSafeNativeModelText(model.displayName, 1_024) ||
+      modelIds.has(model.id) ||
+      (model.sizeBytes !== undefined &&
+        model.sizeBytes !== null &&
+        (typeof model.sizeBytes !== "number" ||
+          !Number.isSafeInteger(model.sizeBytes) ||
+          model.sizeBytes < 0))
+    ) {
+      throw invalidNativeModelResponse("model discovery");
+    }
+    modelIds.add(model.id);
+    return Object.freeze({
+      id: model.id,
+      displayName: model.displayName,
+      ...(model.sizeBytes === undefined ? {} : { sizeBytes: model.sizeBytes }),
+    });
+  });
+
+  return Object.freeze({
+    provider: response.provider,
+    models: Object.freeze(models),
+  });
+}
+
+function validateNativeModelConnectionResponse(
+  response: unknown,
+  config: NativeModelEndpointConfig,
+): NativeModelConnectionResponse {
+  const expectedOrigin = new URL(config.baseUrl).origin;
+  if (
+    !isRecord(response) ||
+    !isNativeGatewayProviderKind(response.provider) ||
+    response.provider !== config.provider ||
+    response.endpointOrigin !== expectedOrigin ||
+    typeof response.modelCount !== "number" ||
+    !Number.isSafeInteger(response.modelCount) ||
+    response.modelCount < 0 ||
+    response.modelCount > 10_000 ||
+    typeof response.latencyMs !== "number" ||
+    !Number.isSafeInteger(response.latencyMs) ||
+    response.latencyMs < 0
+  ) {
+    throw invalidNativeModelResponse("connection check");
+  }
+
+  return Object.freeze({
+    provider: response.provider,
+    endpointOrigin: response.endpointOrigin,
+    modelCount: response.modelCount,
+    latencyMs: response.latencyMs,
+  });
+}
+
+function isSafeNativeModelText(value: unknown, maximumLength: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= maximumLength &&
+    value === value.trim() &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}
+
+function invalidNativeModelResponse(operation: string): ModelCenterError {
+  return new ModelCenterError(
+    "MODEL_RESPONSE_INVALID",
+    `The native ${operation} response is invalid.`,
+  );
+}
 
 function validateNativeEmbeddingResult(
   result: NativeEmbeddingResult,
@@ -2496,6 +3176,68 @@ function invalidNativeEmbeddingResponse(): ModelCenterError {
   );
 }
 
+function validateNativeRerankResult(result: unknown, input: NativeRerankInput): NativeRerankResult {
+  const expectedOrigin = new URL(input.config.baseUrl).origin;
+  if (
+    !isRecord(result) ||
+    !isNativeGatewayProviderKind(result.provider) ||
+    result.provider !== input.config.provider ||
+    result.protocol !== "qwen_open_ai_compatible" ||
+    result.endpointOrigin !== expectedOrigin ||
+    result.model !== input.model ||
+    !Array.isArray(result.rankings) ||
+    result.rankings.length < 1 ||
+    result.rankings.length > input.topN ||
+    !(
+      result.inputTokens === null ||
+      (typeof result.inputTokens === "number" &&
+        Number.isSafeInteger(result.inputTokens) &&
+        result.inputTokens >= 0)
+    )
+  ) {
+    throw invalidNativeRerankResponse();
+  }
+  const seen = new Set<number>();
+  const rankings = result.rankings.map((ranking: unknown) => {
+    if (
+      !isRecord(ranking) ||
+      typeof ranking.index !== "number" ||
+      !Number.isSafeInteger(ranking.index) ||
+      ranking.index < 0 ||
+      ranking.index >= input.documents.length ||
+      seen.has(ranking.index) ||
+      typeof ranking.relevanceScore !== "number" ||
+      !Number.isFinite(ranking.relevanceScore) ||
+      ranking.relevanceScore < 0 ||
+      ranking.relevanceScore > 1
+    ) {
+      throw invalidNativeRerankResponse();
+    }
+    const index = ranking.index;
+    const relevanceScore = ranking.relevanceScore;
+    seen.add(index);
+    return Object.freeze({
+      index,
+      relevanceScore,
+    });
+  });
+  rankings.sort(
+    (left, right) => right.relevanceScore - left.relevanceScore || left.index - right.index,
+  );
+  return Object.freeze({
+    provider: result.provider,
+    protocol: "qwen_open_ai_compatible",
+    endpointOrigin: result.endpointOrigin,
+    model: result.model,
+    rankings: Object.freeze(rankings),
+    inputTokens: result.inputTokens,
+  });
+}
+
+function invalidNativeRerankResponse(): ModelCenterError {
+  return new ModelCenterError("MODEL_RESPONSE_INVALID", "The native rerank response is invalid.");
+}
+
 function validateNativeGenerationUsage(
   usage: NativeModelGenerationUsage,
 ): NativeModelGenerationUsage {
@@ -2528,8 +3270,8 @@ function priceProviderReportedUsage(
       usagePricedEstimateMicros: null,
     });
   }
-  const pricing = plan.profile?.pricing;
-  if (pricing === null || pricing === undefined) {
+  const pricing = plan.approvedPricing;
+  if (pricing === null) {
     throw new ModelCenterError(
       "MODEL_PRICING_MISSING",
       "Provider usage cannot be priced without the approved pricing snapshot.",
@@ -2542,16 +3284,7 @@ function priceProviderReportedUsage(
       ...(usage.cachedInputTokens === null ? {} : { cachedInputTokens: usage.cachedInputTokens }),
     },
     {
-      currency: pricing.currency,
-      pricingVersion: pricing.pricingVersion,
-      updatedAt: pricing.priceUpdatedAt,
-      inputMicrosPerMillionTokens: BigInt(pricing.inputMicrosPerMillionTokens),
-      outputMicrosPerMillionTokens: BigInt(pricing.outputMicrosPerMillionTokens),
-      ...(pricing.cachedInputMicrosPerMillionTokens === null
-        ? {}
-        : {
-            cachedInputMicrosPerMillionTokens: BigInt(pricing.cachedInputMicrosPerMillionTokens),
-          }),
+      ...pricing,
     },
   );
   return Object.freeze({
@@ -2560,6 +3293,33 @@ function priceProviderReportedUsage(
     outputTokens: usage.outputTokens,
     cachedInputTokens: usage.cachedInputTokens,
     usagePricedEstimateMicros: estimate.micros.toString(),
+  });
+}
+
+function generateLegacyContinuation(
+  runtime: DesktopRuntime,
+  plan: PreparedGenerationPlan,
+  onDelta: (next: string) => void,
+): Promise<NativeModelGenerationResult> {
+  if (plan.profile?.selectedModel === null || plan.profile === null) {
+    throw new ModelCenterError(
+      "MODEL_PROFILE_NOT_READY",
+      "The preflight model profile is no longer ready.",
+    );
+  }
+  return runtime.modelGateway.generate({
+    generationId: plan.generationId,
+    config: {
+      providerId: plan.profile.providerId,
+      provider: plan.profile.provider,
+      baseUrl: plan.profile.baseUrl,
+      authentication: plan.profile.authentication,
+    },
+    model: plan.profile.selectedModel,
+    messages: plan.messages,
+    maxOutputTokens: plan.maximumOutputTokens,
+    temperature: 0.8,
+    onDelta,
   });
 }
 
@@ -2642,6 +3402,313 @@ function buildContinuationMessages(chapter: Chapter): readonly NativeModelMessag
   ];
 }
 
+interface ContextualContinuationMessages {
+  readonly messages: readonly NativeModelMessage[];
+  readonly contextCompilation: StoryContextCompilationReceipt;
+}
+
+async function buildContextualContinuationMessages(
+  runtime: DesktopRuntime,
+  chapter: Chapter,
+): Promise<ContextualContinuationMessages> {
+  const [retrieval, causalCandidates, preferenceCandidates, currentChapterVersions] =
+    await Promise.all([
+      retrieveSemanticContinuationCandidates(runtime, chapter),
+      retrieveCausalContinuationCandidates(runtime, chapter),
+      runtime.story.writingFeedback
+        .loadDashboard(chapter.projectId)
+        .then(({ preferences }) => selectWritingPreferenceContextCandidates(preferences))
+        .catch(() => Object.freeze([])),
+      buildVerifiedCurrentChapterVersionRegistry(runtime, chapter.projectId),
+    ]);
+  const contextCompilation = await compileStoryContextForGeneration(runtime.story.facts, {
+    projectId: chapter.projectId,
+    currentTask: {
+      id: `continuation-task:${chapter.id}:${chapter.currentVersionId}`,
+      content: `续写《${chapter.title}》的下一场景，保持已保存正文、正式设定与锁定规则连续。`,
+      selectionReason: "The author explicitly requested a continuation of the current chapter.",
+      evidence: [
+        {
+          sourceType: "generation_task",
+          sourceId: `continuation:${chapter.id}`,
+          sourceVersionId: chapter.currentVersionId,
+          locator: null,
+          contentHash: null,
+          excerpt: null,
+        },
+      ],
+      priority: 1_000,
+    },
+    currentTaskSupplements: preferenceCandidates,
+    currentChapter: {
+      chapterId: chapter.id,
+      versionId: chapter.currentVersionId,
+      title: chapter.title,
+      content: chapter.content,
+    },
+    currentChapterVersions,
+    causalCandidates,
+    semanticCandidates: retrieval.semanticCandidates,
+    rerankCandidates: retrieval.rerankCandidates,
+    maximumContextTokens: 7_000,
+  });
+  return Object.freeze({
+    contextCompilation,
+    messages: Object.freeze([
+      Object.freeze({
+        role: "system" as const,
+        content:
+          "你是长篇小说续写助手。只输出可直接追加到章节末尾的新正文，不要解释、标题、Markdown 代码围栏或元评论。保持既有人称、时态、语气和事实连续性；不要把推测或 AI 建议直接写成正式设定。",
+      }),
+      Object.freeze({
+        role: "user" as const,
+        content: formatStoryContextPrompt(contextCompilation),
+      }),
+      Object.freeze({
+        role: "user" as const,
+        content:
+          "请依据以上资料续写下一段情节。若资料之间存在未确认或无法消解的冲突，优先遵守已确认并锁定的规则。只输出新增正文。",
+      }),
+    ]),
+  });
+}
+
+async function buildVerifiedCurrentChapterVersionRegistry(
+  runtime: DesktopRuntime,
+  projectId: UuidV7,
+): Promise<Readonly<Record<string, Readonly<{ versionId: string; contentHash: string }>>>> {
+  const chapters = await runtime.repositories.chapters.listByProjectId(projectId).catch(() => null);
+  if (!chapters?.ok) {
+    return Object.freeze({});
+  }
+  const verified = await Promise.all(
+    chapters.value
+      .filter((candidate) => candidate.status === "active")
+      .map(async (candidate) => {
+        const version = await runtime.repositories.chapterVersions
+          .findVersionById(candidate.currentVersionId)
+          .catch(() => null);
+        if (version === null || !version.ok || version.value === null) {
+          return null;
+        }
+        const snapshot = version.value.toSnapshot();
+        if (
+          snapshot.projectId !== projectId ||
+          snapshot.chapterId !== candidate.id ||
+          snapshot.id !== candidate.currentVersionId ||
+          snapshot.content !== candidate.content
+        ) {
+          return null;
+        }
+        const hash = await runtime.hasher.sha256(snapshot.content).catch(() => null);
+        if (hash === null || !hash.ok || hash.value !== snapshot.contentChecksum) {
+          return null;
+        }
+        return [
+          candidate.id,
+          Object.freeze({ versionId: snapshot.id, contentHash: hash.value }),
+        ] as const;
+      }),
+  );
+  return Object.freeze(
+    Object.fromEntries(
+      verified.filter((entry): entry is NonNullable<typeof entry> => entry !== null),
+    ),
+  );
+}
+
+async function retrieveCausalContinuationCandidates(
+  runtime: DesktopRuntime,
+  chapter: Chapter,
+): Promise<readonly ContextCandidateDraft[]> {
+  try {
+    const graph = await runtime.story.causalGraph.loadProjectBranch(chapter.projectId, "main");
+    const source = chapter.content.trim();
+    const query = (source.length === 0 ? chapter.title : source.slice(-480)).trim();
+    return selectCausalContextCandidates({
+      graph,
+      query: query.length === 0 ? "继续创作" : query,
+      maximumEvents: 8,
+    });
+  } catch {
+    // A corrupt or unavailable derived graph must not block access to the
+    // saved chapter. Other governed context layers remain usable, while the
+    // graph store itself fails closed and can be rebuilt from verified facts.
+    return Object.freeze([]);
+  }
+}
+
+interface SemanticContinuationCandidates {
+  readonly semanticCandidates: readonly ContextCandidateDraft[];
+  readonly rerankCandidates: readonly ContextCandidateDraft[];
+}
+
+const EMPTY_SEMANTIC_CONTINUATION_CANDIDATES: SemanticContinuationCandidates = Object.freeze({
+  semanticCandidates: Object.freeze([]),
+  rerankCandidates: Object.freeze([]),
+});
+
+async function retrieveSemanticContinuationCandidates(
+  runtime: DesktopRuntime,
+  chapter: Chapter,
+): Promise<SemanticContinuationCandidates> {
+  // Context preparation must not create an unreviewed remote data transfer.
+  // Remote embedding is enabled only through the explicit Model Hub rebuild flow.
+  if (runtime.search.embeddingDiagnostics().destination !== "local_ollama") {
+    return EMPTY_SEMANTIC_CONTINUATION_CANDIDATES;
+  }
+  const querySource = chapter.content.trim();
+  const query = (querySource.length === 0 ? chapter.title : querySource.slice(-480)).trim();
+  if (query.length === 0) {
+    return EMPTY_SEMANTIC_CONTINUATION_CANDIDATES;
+  }
+  const searched = await runtime.search.search(chapter.projectId, query, 32).catch(() => null);
+  if (!searched?.ok || searched.value.capabilities.vector !== "ready") {
+    return EMPTY_SEMANTIC_CONTINUATION_CANDIDATES;
+  }
+  const eligibleHits = searched.value.hits.filter(
+    (hit) =>
+      !(
+        hit.document.sourceType === "chapter" &&
+        hit.document.sourceId === chapter.id &&
+        hit.document.sourceVersionId === chapter.currentVersionId
+      ) && hit.document.text.trim().length > 0,
+  );
+  if (eligibleHits.length === 0) {
+    return EMPTY_SEMANTIC_CONTINUATION_CANDIDATES;
+  }
+  const semanticHits = eligibleHits.slice(0, 6);
+  const semanticHitIds = new Set(semanticHits.map(({ document }) => document.id));
+  const semanticCandidates = semanticHits.map((hit) => searchHitContextCandidate(hit, "none"));
+  const rerankInputs = eligibleHits.map((hit) => ({
+    id: hit.document.id,
+    text: hit.document.text.trim().slice(0, 4_000),
+    retrievalScore: clampNormalizedScore(hit.scores.total),
+    importance: clampNormalizedScore(hit.document.importance ?? 0),
+    pinned: hit.document.pinned ?? false,
+    evidence: {
+      sourceType: searchContextSourceType(hit.document.sourceType),
+      sourceId: hit.document.sourceId,
+      sourceVersionId: hit.document.sourceVersionId,
+      locator: `search-document:${hit.document.id}`,
+      contentHash: hit.document.contentHash,
+    },
+  }));
+  const localReranked = rerankWithLocalEvidence({
+    query,
+    candidates: rerankInputs,
+    limit: Math.min(8, Math.max(1, eligibleHits.length)),
+  });
+  const remoteAttempt = await runtime.rerank.tryRerank({
+    query,
+    documents: rerankInputs.map(({ text }) => text),
+    topN: Math.min(12, rerankInputs.length),
+  });
+  const indexById = new Map(rerankInputs.map(({ id }, index) => [id, index] as const));
+  const localReasonByIndex = new Map<number, string>();
+  const localRankings = localReranked.ranked.flatMap((ranked) => {
+    const index = indexById.get(ranked.candidate.id);
+    if (index === undefined) {
+      return [];
+    }
+    localReasonByIndex.set(index, ranked.selectionReason);
+    return [{ index, score: ranked.scores.total }];
+  });
+  const mergedRankings = mergeRemoteRerankWithLocalFallback({
+    documentCount: rerankInputs.length,
+    remoteRankings:
+      remoteAttempt.status === "applied" ? remoteAttempt.result.rankings : Object.freeze([]),
+    localRankings,
+  });
+  const rankedSupplements = mergedRankings.map((ranking) => ({
+    id: rerankInputs[ranking.index]?.id ?? "",
+    score: ranking.score,
+    source: ranking.source,
+    reason:
+      ranking.source === "qwen_remote"
+        ? "The author explicitly enabled Alibaba Qwen remote reranking for this task; only the bounded candidate set was sent."
+        : `${localReasonByIndex.get(ranking.index) ?? "The local retrieval order preserved this source."} ${
+            remoteAttempt.status === "skipped" ? remoteAttempt.message : ""
+          }`.trim(),
+  }));
+  const hitsById = new Map(eligibleHits.map((hit) => [hit.document.id, hit]));
+  const rerankCandidates: ContextCandidateDraft[] = [];
+  for (const ranked of rankedSupplements) {
+    if (semanticHitIds.has(ranked.id)) {
+      continue;
+    }
+    const hit = hitsById.get(ranked.id);
+    if (hit === undefined) {
+      continue;
+    }
+    rerankCandidates.push(
+      searchHitContextCandidate(hit, ranked.source, ranked.reason, ranked.score),
+    );
+    if (rerankCandidates.length >= 4) {
+      break;
+    }
+  }
+  return Object.freeze({
+    semanticCandidates: Object.freeze(semanticCandidates),
+    rerankCandidates: Object.freeze(rerankCandidates),
+  });
+}
+
+function searchHitContextCandidate(
+  hit: HybridSearchHit,
+  rerankSource: "none" | "local" | "qwen_remote",
+  rerankReason?: string,
+  rerankScore?: number,
+): ContextCandidateDraft {
+  const content = hit.document.text.trim().slice(0, 4_000);
+  const score = clampNormalizedScore(rerankScore ?? hit.scores.total);
+  const reranked = rerankSource !== "none";
+  return Object.freeze({
+    id: `${rerankSource === "qwen_remote" ? "qwen-rerank" : reranked ? "local-rerank" : "semantic-search"}:${hit.document.id}`,
+    content: `[${hit.document.title}]\n${content}`,
+    selectionReason: reranked
+      ? `${
+          rerankSource === "qwen_remote"
+            ? "The explicit Alibaba Qwen remote reranker selected this additional source."
+            : "The local deterministic evidence reranker selected this additional source."
+        } ${rerankReason ?? ""}`.trim()
+      : "The local hybrid index found this source relevant and its vector capability was ready.",
+    evidence: Object.freeze([
+      Object.freeze({
+        sourceType: reranked ? "rerank_result" : searchContextSourceType(hit.document.sourceType),
+        sourceId: hit.document.sourceId,
+        sourceVersionId: hit.document.sourceVersionId,
+        locator: `search-document:${hit.document.id}`,
+        contentHash: hit.document.contentHash,
+        excerpt: null,
+      }),
+    ]),
+    priority: Math.round(score * 1_000),
+    relevanceScore: score,
+  });
+}
+
+function clampNormalizedScore(value: number): number {
+  return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
+}
+
+function searchContextSourceType(
+  sourceType: "chapter" | "outline" | "character" | "world" | "foreshadow" | "material" | "memory",
+): "chapter" | "outline" | "character" | "world" | "foreshadow" | "memory" | "other" {
+  return sourceType === "material" ? "other" : sourceType;
+}
+
+function normalizeStoryContextFailure(cause: unknown): ModelCenterError {
+  if (cause instanceof StoryContextRuntimeError) {
+    return new ModelCenterError(cause.code, cause.message, cause.retryable);
+  }
+  return new ModelCenterError(
+    "STORY_CONTEXT_COMPILATION_FAILED",
+    "无法安全整理本次续写所需的故事资料。请检查正式设定和上下文预算后重试；正文没有改变。",
+    false,
+  );
+}
+
 function measureMessageBytes(messages: readonly NativeModelMessage[]): number {
   return new TextEncoder().encode(messages.map(({ content }) => content).join("\n")).length;
 }
@@ -2680,7 +3747,32 @@ async function persistGeneratedCandidate(
   return persisted.ok ? ok(ready.value) : persisted;
 }
 
+async function evaluateCandidateAgainstLocalGate(
+  runtime: DesktopRuntime,
+  plan: PreparedGenerationPlan,
+  candidate: AiCandidate,
+  baselineContent: string,
+): Promise<CandidateQualityGateResult> {
+  const promptEnvelope = plan.messages
+    .map(({ role, content }) => `${role}:${String(content.length)}:${content}`)
+    .join("\n");
+  const hashed = await runtime.hasher.sha256(promptEnvelope);
+  if (!hashed.ok) {
+    throw hashed.error;
+  }
+  return evaluateGeneratedCandidateQuality({
+    candidate,
+    baselineContent,
+    promptTraceId: `generation-run.${plan.runId}`,
+    promptContentHashSha256: hashed.value,
+    measuredAt: runtime.clock.now(),
+  });
+}
+
 function normalizeGovernedGenerationError(cause: unknown): GovernedGenerationError {
+  if (cause instanceof ModelHubExecutionError) {
+    return new ModelCenterError(cause.code, cause.message, cause.retryable);
+  }
   if (
     cause instanceof AppError ||
     cause instanceof ModelCenterError ||
@@ -2742,29 +3834,6 @@ export async function createConfiguredModelCandidate(
       ),
     );
   }
-  let profiles;
-  try {
-    profiles = await runtime.modelCenter.listProfiles();
-  } catch (cause: unknown) {
-    return err(
-      cause instanceof ModelCenterError
-        ? cause
-        : new ModelCenterError(
-            "MODEL_PROFILE_STORE_UNAVAILABLE",
-            "Unable to read model profiles.",
-            true,
-          ),
-    );
-  }
-  const profile = profiles.find((candidate) => candidate.selectedModel !== null);
-  if (!profile?.selectedModel) {
-    return err(
-      new ModelCenterError(
-        "MODEL_PROFILE_NOT_READY",
-        "Save a model profile with a selected model before generating.",
-      ),
-    );
-  }
   const chapterResult = await runtime.repositories.chapters.findById(chapterId);
   if (!chapterResult.ok) {
     return chapterResult;
@@ -2778,17 +3847,14 @@ export async function createConfiguredModelCandidate(
     );
   }
   const chapter = chapterResult.value;
-  const messages: readonly NativeModelMessage[] = [
-    {
-      role: "system",
-      content:
-        "你是长篇小说续写助手。只输出可直接追加到章节末尾的新正文，不要解释、标题、Markdown 代码围栏或元评论。保持既有人称、时态、语气和事实连续性；不要把建议直接当成正式设定。",
-    },
-    {
-      role: "user",
-      content: `章节标题：${chapter.title}\n\n当前正文：\n${chapter.content}\n\n请续写下一段情节。`,
-    },
-  ];
+  let messages: readonly NativeModelMessage[];
+  let preparedContext: ContextualContinuationMessages;
+  try {
+    preparedContext = await buildContextualContinuationMessages(runtime, chapter);
+    messages = preparedContext.messages;
+  } catch (cause: unknown) {
+    return err(normalizeStoryContextFailure(cause));
+  }
   const inputBytes = new TextEncoder().encode(
     messages.map(({ content }) => content).join(""),
   ).length;
@@ -2800,30 +3866,91 @@ export async function createConfiguredModelCandidate(
       ),
     );
   }
-
-  let generatedText: string;
+  let generatedText: string | null = null;
   try {
-    const generated = await runtime.modelGateway.generate({
-      generationId: runtime.ids.next(),
-      config: {
-        providerId: profile.providerId,
-        provider: profile.provider,
-        baseUrl: profile.baseUrl,
-        authentication: profile.authentication,
-      },
-      model: profile.selectedModel,
+    const generated = await executeModelHubTextTask(runtime, {
+      task: "continuation",
       messages,
-      maxOutputTokens: 2_048,
+      maximumOutputTokens: 2_048,
       temperature: 0.8,
+      onBeforeDispatch: () =>
+        saveDirectContinuationContextTrace(runtime, chapter, preparedContext.contextCompilation),
       ...(onDelta === undefined ? {} : { onDelta }),
     });
     generatedText = generated.text;
   } catch (cause: unknown) {
-    return err(
-      cause instanceof ModelCenterError
-        ? cause
-        : new ModelCenterError("MODEL_GENERATION_FAILED", "Native model generation failed.", true),
-    );
+    if (
+      !(cause instanceof ModelHubExecutionError) ||
+      cause.code !== "MODEL_HUB_ROUTE_NOT_CONFIGURED"
+    ) {
+      return err(
+        new ModelCenterError(
+          cause instanceof ModelHubExecutionError ? cause.code : "MODEL_GENERATION_FAILED",
+          cause instanceof Error
+            ? cause.message
+            : "模型调用失败。原文和已有 AI 建议版本都没有改变。",
+          cause instanceof ModelHubExecutionError ? cause.retryable : true,
+        ),
+      );
+    }
+  }
+
+  if (generatedText === null) {
+    let profiles;
+    try {
+      profiles = await runtime.modelCenter.listProfiles();
+    } catch (cause: unknown) {
+      return err(
+        cause instanceof ModelCenterError
+          ? cause
+          : new ModelCenterError(
+              "MODEL_PROFILE_STORE_UNAVAILABLE",
+              "Unable to read model profiles.",
+              true,
+            ),
+      );
+    }
+    const profile = profiles.find((candidate) => candidate.selectedModel !== null);
+    if (!profile?.selectedModel) {
+      return err(
+        new ModelCenterError(
+          "MODEL_PROFILE_NOT_READY",
+          "请先在设置中连接供应商并为“续写”选择模型。",
+        ),
+      );
+    }
+    try {
+      await saveDirectContinuationContextTrace(
+        runtime,
+        chapter,
+        preparedContext.contextCompilation,
+      );
+      const generated = await runtime.modelGateway.generate({
+        generationId: runtime.ids.next(),
+        config: {
+          providerId: profile.providerId,
+          provider: profile.provider,
+          baseUrl: profile.baseUrl,
+          authentication: profile.authentication,
+        },
+        model: profile.selectedModel,
+        messages,
+        maxOutputTokens: 2_048,
+        temperature: 0.8,
+        ...(onDelta === undefined ? {} : { onDelta }),
+      });
+      generatedText = generated.text;
+    } catch (cause: unknown) {
+      return err(
+        cause instanceof ModelCenterError
+          ? cause
+          : new ModelCenterError(
+              "MODEL_GENERATION_FAILED",
+              "模型调用失败。原文和已有 AI 建议版本都没有改变。",
+              true,
+            ),
+      );
+    }
   }
 
   const created = AiCandidate.createStreaming({

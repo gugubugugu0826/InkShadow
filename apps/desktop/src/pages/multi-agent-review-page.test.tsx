@@ -28,7 +28,7 @@ describe("MultiAgentReviewPage", () => {
     );
 
     expect(await screen.findByText("Existing local review remains readable")).toBeVisible();
-    expect(screen.getByText("多 Agent 创建功能当前关闭")).toBeVisible();
+    expect(screen.getByText("多智能体创建功能当前关闭")).toBeVisible();
     expect(screen.queryByRole("button", { name: "开始本地审查" })).toBeNull();
     expect(screen.queryByRole("button", { name: "停止审查" })).toBeNull();
     expect(runtime.startReview).not.toHaveBeenCalled();

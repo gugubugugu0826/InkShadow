@@ -134,27 +134,27 @@ export function StudioUsagePage() {
 
   if (service === null) {
     return (
-      <main className="studio-usage-page">
+      <div className="studio-usage-page">
         <PageIntro teamId={teamId} projectId={projectId} />
         <EmptyState
           kind="feature_limited"
           title="AI 用量云服务未配置"
           description="当前运行环境没有原生云会话与真实用量接口。预算操作保持关闭；本地正文、草稿与离线编辑不受影响。"
         />
-      </main>
+      </div>
     );
   }
 
   if (!online) {
     return (
-      <main className="studio-usage-page">
+      <div className="studio-usage-page">
         <PageIntro teamId={teamId} projectId={projectId} />
         <EmptyState
           kind="offline"
           title="离线时无法读取云端用量"
           description="重新联网后可刷新团队预算与账本。本地正文和现有草稿仍可继续编辑，不会因为云端额度而被锁定。"
         />
-      </main>
+      </div>
     );
   }
 
@@ -218,7 +218,7 @@ export function StudioUsagePage() {
   }
 
   return (
-    <main className="studio-usage-page">
+    <div className="studio-usage-page">
       <PageIntro teamId={teamId} projectId={projectId} />
       {operationError !== null && (
         <InlineAlert
@@ -310,7 +310,7 @@ export function StudioUsagePage() {
           <UsageEvents events={state.events} currency={state.summary.currency} />
         </>
       )}
-    </main>
+    </div>
   );
 }
 
@@ -465,7 +465,7 @@ function TeamBudgetForm(props: {
       </CardHeader>
       <CardContent>
         <form className="studio-usage-page__form" onSubmit={props.onSubmit}>
-          <FormField label="币种">
+          <FormField label="币种" required>
             {(field) => (
               <Input
                 {...field}
@@ -476,7 +476,7 @@ function TeamBudgetForm(props: {
               />
             )}
           </FormField>
-          <FormField label="月度额度（币种单位）">
+          <FormField label="月度额度（币种单位）" required>
             {(field) => (
               <Input
                 {...field}
@@ -487,7 +487,7 @@ function TeamBudgetForm(props: {
               />
             )}
           </FormField>
-          <FormField label="最大并发运行">
+          <FormField label="最大并发运行" required>
             {(field) => (
               <Input
                 {...field}
@@ -500,7 +500,7 @@ function TeamBudgetForm(props: {
               />
             )}
           </FormField>
-          <FormField label="价格版本">
+          <FormField label="价格版本" required>
             {(field) => (
               <Input
                 {...field}
@@ -510,7 +510,7 @@ function TeamBudgetForm(props: {
               />
             )}
           </FormField>
-          <FormField label="每百万输入 token 价格">
+          <FormField label="每百万输入 token 价格" required>
             {(field) => (
               <Input
                 {...field}
@@ -521,7 +521,7 @@ function TeamBudgetForm(props: {
               />
             )}
           </FormField>
-          <FormField label="每百万输出 token 价格">
+          <FormField label="每百万输出 token 价格" required>
             {(field) => (
               <Input
                 {...field}

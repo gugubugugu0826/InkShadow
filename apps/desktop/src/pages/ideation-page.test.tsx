@@ -140,7 +140,7 @@ describe("IdeationPage", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "恢复草稿" }));
 
-    expect(screen.getByText("还有 9 个 pending 步骤，创建保持禁用。")).toBeInTheDocument();
+    expect(screen.getByText("还有 9 个待处理步骤，创建保持禁用。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "创建项目并打开" })).toBeDisabled();
   });
 

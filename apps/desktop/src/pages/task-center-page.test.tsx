@@ -26,6 +26,9 @@ describe("TaskCenterPage", () => {
     expect(screen.getByText("等待执行")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "取消任务" }));
+    expect(await screen.findByRole("dialog", { name: "确认取消任务" })).toBeVisible();
+    expect(screen.getByText("取消不会删除已有项目内容")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "确认取消" }));
     expect(await screen.findByText("已取消")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "通知 1" }));

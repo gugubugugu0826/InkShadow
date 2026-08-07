@@ -1,4 +1,5 @@
 import {
+  createElement,
   createContext,
   useCallback,
   useContext,
@@ -15,6 +16,7 @@ import {
 
 import { cn } from "../lib/cn";
 import { Button } from "./button";
+import type { HeadingLevel } from "./surfaces";
 
 export type ToastTone = "success" | "info" | "warning" | "error";
 
@@ -148,7 +150,7 @@ export function ToastProvider({ children, maxVisible = 3 }: ToastProviderProps):
       counterRef.current += 1;
       const id = `${idPrefix}-${String(counterRef.current)}`;
       const record: ToastRecord = { ...options, id };
-      setToasts((current) => [...current, record].slice(-Math.max(1, maxVisible)));
+      setToasts((current) => limitVisibleToasts([...current, record], maxVisible));
       return id;
     },
     [idPrefix, maxVisible],
@@ -166,6 +168,33 @@ export function ToastProvider({ children, maxVisible = 3 }: ToastProviderProps):
       </div>
     </ToastContext.Provider>
   );
+}
+
+function limitVisibleToasts(toasts: ToastRecord[], maxVisible: number): ToastRecord[] {
+  const limit = Math.max(1, maxVisible);
+  if (toasts.length <= limit) {
+    return toasts;
+  }
+
+  const protectedIds = new Set(
+    toasts
+      .filter((toast) => toast.tone === "error" || toast.duration === null)
+      .map((toast) => toast.id),
+  );
+  const ordinarySlots = Math.max(0, limit - protectedIds.size);
+  const retainedOrdinaryIds = new Set(
+    ordinarySlots === 0
+      ? []
+      : toasts
+          .filter((toast) => !protectedIds.has(toast.id))
+          .slice(-ordinarySlots)
+          .map((toast) => toast.id),
+  );
+
+  // `maxVisible` is deliberately a soft limit for critical notices. Errors and
+  // persistent notices must remain visible until their own timer or the user
+  // dismisses them, even when several arrive together.
+  return toasts.filter((toast) => protectedIds.has(toast.id) || retainedOrdinaryIds.has(toast.id));
 }
 
 export function useToast(): ToastApi {
@@ -216,6 +245,7 @@ export type EmptyStateKind = "no_data" | "no_results" | "offline" | "forbidden" 
 export type EmptyStateProps = Omit<HTMLAttributes<HTMLDivElement>, "title"> & {
   title: ReactNode;
   description: ReactNode;
+  headingLevel?: HeadingLevel;
   kind?: EmptyStateKind;
   icon?: ReactNode;
   primaryAction?: StateAction;
@@ -225,6 +255,7 @@ export type EmptyStateProps = Omit<HTMLAttributes<HTMLDivElement>, "title"> & {
 export function EmptyState({
   className,
   description,
+  headingLevel = 2,
   icon,
   kind = "no_data",
   primaryAction,
@@ -232,6 +263,8 @@ export function EmptyState({
   title,
   ...props
 }: EmptyStateProps): ReactNode {
+  const Heading = `h${String(headingLevel)}`;
+
   return (
     <div {...props} className={cn("ink-empty-state", className)} data-kind={kind}>
       {icon !== undefined && (
@@ -239,7 +272,7 @@ export function EmptyState({
           {icon}
         </div>
       )}
-      <h2 className="ink-empty-state__title">{title}</h2>
+      {createElement(Heading, { className: "ink-empty-state__title" }, title)}
       <div className="ink-empty-state__description">{description}</div>
       {(primaryAction !== undefined || secondaryAction !== undefined) && (
         <div className="ink-empty-state__actions">
@@ -260,6 +293,7 @@ export function EmptyState({
 export type ErrorStateProps = Omit<HTMLAttributes<HTMLDivElement>, "title"> & {
   title: ReactNode;
   description: ReactNode;
+  headingLevel?: HeadingLevel;
   errorCode?: string;
   requestId?: string;
   savedState?: ReactNode;
@@ -271,6 +305,7 @@ export function ErrorState({
   className,
   description,
   errorCode,
+  headingLevel = 2,
   primaryAction,
   requestId,
   savedState,
@@ -278,9 +313,11 @@ export function ErrorState({
   title,
   ...props
 }: ErrorStateProps): ReactNode {
+  const Heading = `h${String(headingLevel)}`;
+
   return (
     <div {...props} role="alert" className={cn("ink-error-state", className)}>
-      <h2 className="ink-error-state__title">{title}</h2>
+      {createElement(Heading, { className: "ink-error-state__title" }, title)}
       <div className="ink-error-state__description">{description}</div>
       {(errorCode !== undefined || requestId !== undefined || savedState !== undefined) && (
         <dl className="ink-error-state__details">
@@ -397,10 +434,12 @@ export type SaveStatusProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   state: SaveState;
   labels?: Partial<Record<SaveState, string>>;
   onActivate?: () => void;
+  interactiveTitle?: string;
 };
 
 export function SaveStatus({
   className,
+  interactiveTitle = "查看保存详情",
   labels,
   onActivate,
   state,
@@ -430,7 +469,13 @@ export function SaveStatus({
   }
 
   return (
-    <button {...common} type="button" onClick={onActivate}>
+    <button
+      {...common}
+      type="button"
+      data-interactive
+      title={props.title ?? interactiveTitle}
+      onClick={onActivate}
+    >
       <span className="ink-save-status__indicator" aria-hidden="true" />
       {label}
     </button>

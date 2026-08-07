@@ -4,12 +4,17 @@ import {
   type CipherEnvelopeV1,
   type EncryptedGuestProjectRecordV1,
 } from "../contracts/encrypted-guest-project";
+import {
+  parseEncryptedGuestDraftRecord,
+  type EncryptedGuestDraftRecordV1,
+} from "../contracts/encrypted-guest-draft";
 import { GuestWorkspaceError, toGuestWorkspaceError } from "../domain/guest-workspace-error";
 import type { EncryptedProjectStore } from "../ports/encrypted-project-store";
 
 export const WEB_GUEST_DATABASE_NAME = "inkshadow-web-guest-v1";
 export const WEB_GUEST_OBJECT_STORE_NAME = "encrypted-projects";
-const DATABASE_VERSION = 1;
+export const WEB_GUEST_DRAFT_OBJECT_STORE_NAME = "encrypted-temporary-drafts";
+export const WEB_GUEST_DATABASE_VERSION = 2;
 
 export class IndexedDbEncryptedProjectStore implements EncryptedProjectStore {
   private databasePromise: Promise<IDBDatabase> | null = null;
@@ -84,6 +89,46 @@ export class IndexedDbEncryptedProjectStore implements EncryptedProjectStore {
     }
   }
 
+  public async getTemporaryDraft(projectId: string): Promise<EncryptedGuestDraftRecordV1 | null> {
+    const database = await this.openDatabase();
+    const transaction = database.transaction(WEB_GUEST_DRAFT_OBJECT_STORE_NAME, "readonly");
+    const request = transaction.objectStore(WEB_GUEST_DRAFT_OBJECT_STORE_NAME).get(projectId);
+    const value = await requestResult<unknown>(request);
+    await transactionComplete(transaction);
+    return value === undefined ? null : parseEncryptedGuestDraftRecord(value);
+  }
+
+  public async putTemporaryDraft(record: EncryptedGuestDraftRecordV1): Promise<void> {
+    const validated = parseEncryptedGuestDraftRecord(record);
+    const database = await this.openDatabase();
+    let transaction: IDBTransaction | null = null;
+    try {
+      transaction = database.transaction(WEB_GUEST_DRAFT_OBJECT_STORE_NAME, "readwrite");
+      transaction.objectStore(WEB_GUEST_DRAFT_OBJECT_STORE_NAME).put(validated);
+      await transactionComplete(transaction);
+    } catch (error) {
+      if (transaction !== null) {
+        abortTransaction(transaction);
+      }
+      throw toIndexedDbWriteError(error, "浏览器未能保存临时恢复密文；正式密文版本保持不变。");
+    }
+  }
+
+  public async deleteTemporaryDraft(projectId: string): Promise<void> {
+    const database = await this.openDatabase();
+    let transaction: IDBTransaction | null = null;
+    try {
+      transaction = database.transaction(WEB_GUEST_DRAFT_OBJECT_STORE_NAME, "readwrite");
+      transaction.objectStore(WEB_GUEST_DRAFT_OBJECT_STORE_NAME).delete(projectId);
+      await transactionComplete(transaction);
+    } catch (error) {
+      if (transaction !== null) {
+        abortTransaction(transaction);
+      }
+      throw toIndexedDbWriteError(error, "浏览器未能清理过期的临时恢复密文。");
+    }
+  }
+
   private openDatabase(): Promise<IDBDatabase> {
     if (this.databasePromise !== null) {
       return this.databasePromise;
@@ -93,17 +138,22 @@ export class IndexedDbEncryptedProjectStore implements EncryptedProjectStore {
     if (factory === null) {
       throw new GuestWorkspaceError(
         "WEB_STORAGE_UNAVAILABLE",
-        "当前浏览器未提供 IndexedDB，无法建立加密 Guest 工作区。",
+        "当前浏览器不支持所需的本地加密存储，无法建立访客工作区。",
       );
     }
 
     this.databasePromise = new Promise<IDBDatabase>((resolve, reject) => {
       let settled = false;
-      const request = factory.open(WEB_GUEST_DATABASE_NAME, DATABASE_VERSION);
+      const request = factory.open(WEB_GUEST_DATABASE_NAME, WEB_GUEST_DATABASE_VERSION);
       request.onupgradeneeded = () => {
         const database = request.result;
         if (!database.objectStoreNames.contains(WEB_GUEST_OBJECT_STORE_NAME)) {
           database.createObjectStore(WEB_GUEST_OBJECT_STORE_NAME, {
+            keyPath: "projectId",
+          });
+        }
+        if (!database.objectStoreNames.contains(WEB_GUEST_DRAFT_OBJECT_STORE_NAME)) {
+          database.createObjectStore(WEB_GUEST_DRAFT_OBJECT_STORE_NAME, {
             keyPath: "projectId",
           });
         }

@@ -141,7 +141,7 @@ export function AuthoritativeExtractionPage({
     : availabilityCopy(runtime.availability.reason);
   if (unavailable !== null) {
     return (
-      <main className="desktop-page authoritative-extraction-page">
+      <div className="desktop-page authoritative-extraction-page">
         <header className="page-heading">
           <div>
             <h1>权威事实抽取</h1>
@@ -154,7 +154,7 @@ export function AuthoritativeExtractionPage({
           title={unavailable.title}
           description={unavailable.description}
         />
-      </main>
+      </div>
     );
   }
 
@@ -165,7 +165,7 @@ export function AuthoritativeExtractionPage({
     dashboard?.graphFreshness === "stale" || dashboard?.graphFreshness === "unavailable";
 
   return (
-    <main className="desktop-page authoritative-extraction-page">
+    <div className="desktop-page authoritative-extraction-page">
       <header className="page-heading">
         <div>
           <h1>权威事实抽取</h1>
@@ -208,8 +208,8 @@ export function AuthoritativeExtractionPage({
 
       <InlineAlert
         tone="ai-clarification"
-        title="AI 始终只是 Candidate"
-        description="接受、修改、拒绝、暂缓都必须由人明确操作。来源章节、版本、校验和、范围、证据及 prompt/model/eval 版本会随候选保留。"
+        title="AI 输出始终只是待审核候选"
+        description="接受、修改、拒绝、暂缓都必须由人明确操作。来源章节、版本、校验和、范围、证据，以及提示词、模型和评测版本都会随候选保留。"
       />
 
       {!online && (
@@ -347,7 +347,7 @@ export function AuthoritativeExtractionPage({
             description={
               dashboard.evaluationPassed
                 ? "当前章节尚未产出候选。"
-                : "先让当前 prompt、model 与 eval 版本通过黄金样本门禁。"
+                : "先让当前提示词、模型与评测版本通过黄金样本门禁。"
             }
           />
         ) : (
@@ -380,7 +380,7 @@ export function AuthoritativeExtractionPage({
           </div>
         )}
       </section>
-    </main>
+    </div>
   );
 }
 
@@ -459,12 +459,13 @@ function CandidateCard(props: CandidateCardProps) {
           <div>
             <CardTitle>{candidate.key}</CardTitle>
             <CardDescription>
-              {candidate.category} · 置信度 {(candidate.confidence * 100).toFixed(0)}%
+              类别 {candidateCategoryLabel(candidate.category)} · 置信度{" "}
+              {(candidate.confidence * 100).toFixed(0)}%
             </CardDescription>
           </div>
           <div className="authoritative-extraction-badges">
             <Badge tone={candidate.severity === "error" ? "danger" : "info"}>
-              {candidate.severity}
+              {candidateSeverityLabel(candidate.severity)}
             </Badge>
             <Badge tone={reviewStatusTone(review?.status)}>
               {wasUndone ? "已撤销" : reviewStatusLabel(review?.status)}
@@ -491,7 +492,7 @@ function CandidateCard(props: CandidateCardProps) {
             </dd>
           </div>
           <div>
-            <dt>Prompt</dt>
+            <dt>提示词版本</dt>
             <dd>
               {extraction.provenance.prompt.registryId} v{extraction.provenance.prompt.version} ·{" "}
               <span title={extraction.provenance.prompt.checksumSha256}>
@@ -500,14 +501,14 @@ function CandidateCard(props: CandidateCardProps) {
             </dd>
           </div>
           <div>
-            <dt>Model</dt>
+            <dt>模型版本</dt>
             <dd>
               {extraction.provenance.model.provider}/{extraction.provenance.model.id}@
               {extraction.provenance.model.revision}
             </dd>
           </div>
           <div>
-            <dt>Eval</dt>
+            <dt>评测版本</dt>
             <dd>{extraction.provenance.evaluationVersion}</dd>
           </div>
         </dl>
@@ -532,7 +533,7 @@ function CandidateCard(props: CandidateCardProps) {
 
         {props.editing && (
           <div className="authoritative-extraction-modify">
-            <label htmlFor={`modify-${identity}`}>修改后写入的正式 JSON</label>
+            <label htmlFor={`modify-${identity}`}>修改后写入的正式结构化值（JSON）</label>
             <Textarea
               id={`modify-${identity}`}
               value={props.modifiedJson}
@@ -753,7 +754,7 @@ function availabilityCopy(
       return {
         title: "需要桌面原生持久化",
         description:
-          "浏览器开发模式不会伪装生产级队列与评测存储。请在已连接原生 SQLite 的桌面运行时中使用。",
+          "浏览器开发模式不会伪装生产级队列与评测存储。请在已连接桌面本地数据库的运行环境中使用。",
       };
     case "provider_not_configured":
       return {
@@ -811,6 +812,28 @@ function reviewStatusLabel(value: ReviewItemStatus | undefined): string {
     default:
       return "待物化";
   }
+}
+
+function candidateCategoryLabel(value: string): string {
+  const labels: Record<string, string> = {
+    character: "角色",
+    character_state: "角色状态",
+    foreshadow: "伏笔",
+    location: "地点",
+    timeline: "时间线",
+    timeline_event: "时间线事件",
+    world_rule: "世界规则",
+  };
+  return labels[value] ?? "自定义";
+}
+
+function candidateSeverityLabel(value: string): string {
+  const labels: Record<string, string> = {
+    error: "高风险",
+    info: "提示",
+    warning: "需注意",
+  };
+  return labels[value] ?? "提示";
 }
 
 function reviewStatusTone(value: ReviewItemStatus | undefined) {

@@ -5,6 +5,8 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DesktopRoutes } from "../app";
+import { APPEARANCE_PREFERENCE_STORAGE_KEY } from "../appearance-preference";
+import { NOVEL_AI_TASKS } from "../infrastructure/model-hub-provider-registry";
 import {
   createDevelopmentRuntime,
   type DesktopRuntime,
@@ -15,6 +17,644 @@ import { RuntimeProvider } from "../runtime-context";
 describe("SettingsPage model routing", () => {
   beforeEach(() => {
     window.localStorage.clear();
+  });
+
+  it("uses a page heading and level-two headings for primary setting sections", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    renderRoute(runtime);
+
+    expect(await screen.findByRole("heading", { name: "设置", level: 1 })).toBeVisible();
+    for (const name of [
+      "外观",
+      "数据与隐私",
+      "InkShadow Model Hub",
+      "AI 分工",
+      "同步安全",
+      "本地数据维护",
+      "安全更新",
+      "脱敏诊断包",
+    ]) {
+      expect(await screen.findByRole("heading", { name, level: 2 })).toBeVisible();
+    }
+  });
+
+  it("lets the user choose and persist an appearance without exposing technical settings", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    const appearance = await screen.findByRole("combobox", { name: /^外观模式/u });
+    expect(appearance).toHaveValue("system");
+    expect(document.documentElement).not.toHaveAttribute("data-surface");
+    expect(screen.getByText(/正在跟随系统，当前为(?:浅色|深色)/u)).toBeVisible();
+
+    await user.selectOptions(appearance, "light");
+    expect(document.documentElement).toHaveAttribute("data-surface", "light");
+    expect(window.localStorage.getItem(APPEARANCE_PREFERENCE_STORAGE_KEY)).toBe("light");
+    expect(screen.getByText("当前固定为浅色。")).toBeVisible();
+
+    await user.selectOptions(appearance, "dark");
+    expect(document.documentElement).toHaveAttribute("data-surface", "dark");
+    expect(window.localStorage.getItem(APPEARANCE_PREFERENCE_STORAGE_KEY)).toBe("dark");
+    expect(screen.getByText("当前固定为深色。")).toBeVisible();
+
+    await user.selectOptions(appearance, "system");
+    expect(document.documentElement).not.toHaveAttribute("data-surface");
+    expect(window.localStorage.getItem(APPEARANCE_PREFERENCE_STORAGE_KEY)).toBe("system");
+  });
+
+  it("keeps technical connection fields hidden until expert settings are opened", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    expect(await screen.findByRole("heading", { name: "InkShadow Model Hub" })).toBeVisible();
+    expect(screen.queryByLabelText("基础地址")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("认证方式")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("上下文窗口（token）")).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Google Gemini" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Anthropic Claude" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+
+    expect(screen.getByLabelText("基础地址")).toBeVisible();
+    expect(screen.getByLabelText("认证方式")).toBeVisible();
+    expect(screen.getByLabelText("上下文窗口（token）")).toBeInTheDocument();
+    expect(screen.getByText("重试不会重复计费请求")).toBeVisible();
+    expect(screen.getByText("专家兼容设置：旧 7 角色路由")).toBeVisible();
+    expect(
+      screen.getByText(new RegExp(`逐项覆盖 ${String(NOVEL_AI_TASKS.length)} 类小说任务`, "u")),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        new RegExp(`${String(NOVEL_AI_TASKS.length)} 类小说任务由 Model Hub 负责`, "u"),
+      ),
+    ).toBeVisible();
+  });
+
+  it("saves, tests and reopens a custom single-Header connection with exact expert options", async () => {
+    let credentialConfigured = false;
+    const observedConfigs: unknown[] = [];
+    const createRuntime = (): DesktopRuntime => {
+      const development = createDevelopmentRuntime(window.localStorage);
+      const modelGateway: NativeModelGatewayClient = {
+        available: true,
+        checkConnection: (config) => {
+          observedConfigs.push(config);
+          return Promise.resolve({
+            provider: "open_ai_compatible",
+            endpointOrigin: "https://custom-models.example",
+            modelCount: 1,
+            latencyMs: 12,
+          });
+        },
+        listModels: (config) => {
+          observedConfigs.push(config);
+          return Promise.resolve({
+            provider: "open_ai_compatible",
+            models: [{ id: "writer-model", displayName: "Writer model" }],
+          });
+        },
+        generate: (input) => {
+          observedConfigs.push(input.config);
+          return Promise.resolve({
+            text: "OK",
+            usage: { inputTokens: 2, outputTokens: 1, cachedInputTokens: null },
+          });
+        },
+        embed: () => Promise.reject(new Error("not used")),
+        cancelGeneration: () => Promise.resolve(false),
+      };
+      return {
+        ...development,
+        mode: "tauri",
+        credentials: {
+          getSummary: () =>
+            Promise.resolve({
+              configured: credentialConfigured,
+              lastFour: credentialConfigured ? "alue" : null,
+            }),
+          save: (_providerId, secret) => {
+            expect(secret).toBe("super-secret-header-value");
+            credentialConfigured = true;
+            return Promise.resolve({ configured: true, lastFour: "alue" });
+          },
+          delete: () => {
+            credentialConfigured = false;
+            return Promise.resolve({ configured: false, lastFour: null });
+          },
+        },
+        modelGateway,
+      };
+    };
+    const user = userEvent.setup();
+    const runtime = createRuntime();
+    const view = renderRoute(runtime);
+
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    const providerSelect = screen.getByRole("combobox", { name: "供应商" });
+    await waitFor(() => expect(providerSelect).toBeEnabled());
+    await user.selectOptions(providerSelect, "custom_openai_compatible");
+    await user.clear(screen.getByLabelText("Base URL"));
+    await user.type(screen.getByLabelText("Base URL"), "https://custom-models.example/v1");
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    expect(providerSelect).toHaveValue("custom_openai_compatible");
+    expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
+    expect(screen.getByLabelText(/^模型目录路径/u)).toBeVisible();
+    await user.clear(screen.getByLabelText("配置标识"));
+    await user.type(screen.getByLabelText("配置标识"), "custom-safe");
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "认证方式" }),
+      "custom_header_keyring",
+    );
+    expect(providerSelect).toHaveValue("custom_openai_compatible");
+    expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
+    await user.type(await screen.findByLabelText(/^模型目录路径/u), "/catalog/models");
+    await user.type(screen.getByLabelText(/^文本生成路径/u), "/text/chat");
+    await user.type(screen.getByLabelText(/^Embedding 路径/u), "/vectors/embed");
+    await user.type(screen.getByLabelText("认证 Header 名称"), "X-API-Key");
+    await user.clear(screen.getByLabelText("请求超时（毫秒）"));
+    await user.type(screen.getByLabelText("请求超时（毫秒）"), "47000");
+    await user.clear(screen.getByLabelText("安全重试次数"));
+    await user.type(screen.getByLabelText("安全重试次数"), "2");
+    await user.type(screen.getByLabelText("认证 Header 值"), "super-secret-header-value");
+    await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
+
+    const check = screen.getByRole("button", { name: "测试连接并发现模型" });
+    await waitFor(() => expect(check).toBeEnabled());
+    await user.click(check);
+    await screen.findByRole("option", { name: "Writer model" });
+    await user.click(screen.getByRole("button", { name: "验证写作能力" }));
+    expect(await screen.findByText("写作能力已验证")).toBeVisible();
+
+    const expectedConfig = {
+      providerId: "custom-safe",
+      provider: "open_ai_compatible",
+      baseUrl: "https://custom-models.example/v1",
+      authentication: "custom_header_keyring",
+      credentialHeaderName: "x-api-key",
+      modelDiscoveryPath: "/catalog/models",
+      textGenerationPath: "/text/chat",
+      embeddingPath: "/vectors/embed",
+      requestTimeoutMs: 47_000,
+      retryLimit: 2,
+    };
+    expect(observedConfigs).toEqual(expect.arrayContaining([expectedConfig]));
+    expect(JSON.stringify(window.localStorage)).not.toContain("super-secret-header-value");
+
+    view.unmount();
+    renderRoute(createRuntime());
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("配置标识")).toHaveValue("custom-safe");
+      expect(screen.getByRole("combobox", { name: "认证方式" })).toHaveValue(
+        "custom_header_keyring",
+      );
+      expect(screen.getByLabelText("认证 Header 名称")).toHaveValue("x-api-key");
+      expect(screen.getByLabelText(/^模型目录路径/u)).toHaveValue("/catalog/models");
+      expect(screen.getByLabelText(/^文本生成路径/u)).toHaveValue("/text/chat");
+      expect(screen.getByLabelText(/^Embedding 路径/u)).toHaveValue("/vectors/embed");
+      expect(screen.getByLabelText("请求超时（毫秒）")).toHaveValue(47_000);
+      expect(screen.getByLabelText("安全重试次数")).toHaveValue(2);
+    });
+  }, 15_000);
+
+  it("validates custom paths and Header names before writing the operating-system credential", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    const saveCredential = vi.fn(() => Promise.resolve({ configured: true, lastFour: "alue" }));
+    const runtime: DesktopRuntime = {
+      ...development,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: false, lastFour: null }),
+        save: saveCredential,
+        delete: () => Promise.resolve({ configured: false, lastFour: null }),
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    const providerSelect = screen.getByRole("combobox", { name: "供应商" });
+    await waitFor(() => expect(providerSelect).toBeEnabled());
+    await user.selectOptions(providerSelect, "custom_openai_compatible");
+    await user.type(screen.getByLabelText("Base URL"), "https://custom-models.example/v1");
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    expect(providerSelect).toHaveValue("custom_openai_compatible");
+    expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
+    expect(screen.getByLabelText(/^模型目录路径/u)).toBeVisible();
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "认证方式" }),
+      "custom_header_keyring",
+    );
+    expect(providerSelect).toHaveValue("custom_openai_compatible");
+    expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
+    await user.type(screen.getByLabelText("认证 Header 名称"), "Host");
+    await user.type(screen.getByLabelText("认证 Header 值"), "super-secret-header-value");
+    await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
+    await waitFor(() => expect(saveCredential).not.toHaveBeenCalled());
+
+    await user.clear(screen.getByLabelText("认证 Header 名称"));
+    await user.type(screen.getByLabelText("认证 Header 名称"), "x-api-key");
+    await user.type(await screen.findByLabelText(/^模型目录路径/u), "//attacker.example/models");
+    await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
+    await waitFor(() => expect(saveCredential).not.toHaveBeenCalled());
+  }, 15_000);
+
+  it("rejects a cross-provider connection id before writing a credential", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    await development.modelHub.saveConnection({
+      id: "shared-provider-id",
+      providerKind: "openai",
+      displayName: "Existing OpenAI",
+      credentialState: "missing",
+      authenticationMode: "bearer_keyring",
+      enabled: false,
+      expectedRevision: null,
+    });
+    const saveCredential = vi.fn(() => Promise.resolve({ configured: true, lastFour: "alue" }));
+    const runtime: DesktopRuntime = {
+      ...development,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: false, lastFour: null }),
+        save: saveCredential,
+        delete: () => Promise.resolve({ configured: false, lastFour: null }),
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    const providerSelect = screen.getByRole("combobox", { name: "供应商" });
+    await waitFor(() => expect(providerSelect).toBeEnabled());
+    await user.selectOptions(providerSelect, "custom_openai_compatible");
+    await user.type(screen.getByLabelText("Base URL"), "https://custom-models.example/v1");
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    const providerId = screen.getByLabelText("配置标识");
+    await user.clear(providerId);
+    await user.type(providerId, "shared-provider-id");
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "认证方式" }),
+      "custom_header_keyring",
+    );
+    await user.type(await screen.findByLabelText("认证 Header 名称"), "x-api-key");
+    await user.type(screen.getByLabelText("认证 Header 值"), "never-written-secret");
+    await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
+
+    expect(
+      await screen.findByText(/MODEL_HUB_PROVIDER_KIND_IMMUTABLE/u, undefined, {
+        timeout: 5_000,
+      }),
+    ).toBeVisible();
+    expect(saveCredential).not.toHaveBeenCalled();
+    await expect(runtime.modelHub.findConnection("shared-provider-id")).resolves.toMatchObject({
+      providerKind: "openai",
+    });
+  }, 15_000);
+
+  it("invalidates the delete action when a loaded connection id is changed across providers", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    await development.modelHub.saveConnection({
+      id: "custom-delete-owner",
+      providerKind: "custom_openai_compatible",
+      displayName: "Custom delete owner",
+      baseUrlOverride: "https://custom-delete.example/v1",
+      credentialRef: "keyring:model-hub:custom-delete-owner",
+      credentialState: "present",
+      authenticationMode: "custom_header_keyring",
+      credentialHeaderName: "x-api-key",
+      expectedRevision: null,
+    });
+    await development.modelHub.saveConnection({
+      id: "shared-delete-provider",
+      providerKind: "openai",
+      displayName: "Protected OpenAI",
+      credentialRef: "keyring:model-hub:shared-delete-provider",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      expectedRevision: null,
+    });
+    const deleteCredential = vi.fn(() => Promise.resolve({ configured: false, lastFour: null }));
+    const runtime: DesktopRuntime = {
+      ...development,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: true, lastFour: "alue" }),
+        save: () => Promise.resolve({ configured: true, lastFour: "alue" }),
+        delete: deleteCredential,
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    const providerSelect = screen.getByRole("combobox", { name: "供应商" });
+    await waitFor(() => expect(providerSelect).toBeEnabled());
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: /^已连接的供应商/u }),
+      "custom-delete-owner",
+    );
+    await waitFor(() => expect(providerSelect).toHaveValue("custom_openai_compatible"));
+    expect(await screen.findByRole("button", { name: "删除密钥" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    const providerId = screen.getByLabelText("配置标识");
+    expect(providerId).toHaveValue("custom-delete-owner");
+    await user.clear(providerId);
+    await user.type(providerId, "shared-delete-provider");
+
+    expect(screen.queryByRole("button", { name: "删除密钥" })).not.toBeInTheDocument();
+    expect(deleteCredential).not.toHaveBeenCalled();
+    await expect(runtime.modelHub.findConnection("shared-delete-provider")).resolves.toMatchObject({
+      providerKind: "openai",
+      credentialState: "present",
+    });
+    await expect(runtime.modelHub.findConnection("custom-delete-owner")).resolves.toMatchObject({
+      providerKind: "custom_openai_compatible",
+      credentialState: "present",
+    });
+  }, 10_000);
+
+  it("rejects writing a credential through another loaded connection of the same provider", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    await development.modelHub.saveConnection({
+      id: "same-provider-owner",
+      providerKind: "custom_openai_compatible",
+      displayName: "Same provider owner",
+      baseUrlOverride: "https://same-provider-owner.example/v1",
+      credentialRef: "keyring:model-hub:same-provider-owner",
+      credentialState: "present",
+      authenticationMode: "custom_header_keyring",
+      credentialHeaderName: "x-api-key",
+      expectedRevision: null,
+    });
+    await development.modelHub.saveConnection({
+      id: "same-provider-target",
+      providerKind: "custom_openai_compatible",
+      displayName: "Same provider target",
+      baseUrlOverride: "https://same-provider-target.example/v1",
+      credentialRef: "keyring:model-hub:same-provider-target",
+      credentialState: "present",
+      authenticationMode: "custom_header_keyring",
+      credentialHeaderName: "x-target-key",
+      expectedRevision: null,
+    });
+    const saveCredential = vi.fn(() => Promise.resolve({ configured: true, lastFour: "alue" }));
+    const runtime: DesktopRuntime = {
+      ...development,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: true, lastFour: "alue" }),
+        save: saveCredential,
+        delete: () => Promise.resolve({ configured: false, lastFour: null }),
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    const storedConnections = screen.getByRole("combobox", {
+      name: /^已连接的供应商/u,
+    });
+    await waitFor(() => expect(storedConnections).toBeEnabled());
+    await user.selectOptions(storedConnections, "same-provider-owner");
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "供应商" })).toHaveValue(
+        "custom_openai_compatible",
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    const providerId = screen.getByLabelText("配置标识");
+    await user.clear(providerId);
+    await user.type(providerId, "same-provider-target");
+    await user.type(screen.getByLabelText("认证 Header 值"), "never-overwrite-target");
+    await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
+
+    expect(await screen.findByText(/MODEL_HUB_CONNECTION_ID_CONFLICT/u)).toBeVisible();
+    expect(saveCredential).not.toHaveBeenCalled();
+    await expect(runtime.modelHub.findConnection("same-provider-owner")).resolves.toMatchObject({
+      baseUrl: "https://same-provider-owner.example/v1",
+      credentialHeaderName: "x-api-key",
+    });
+    await expect(runtime.modelHub.findConnection("same-provider-target")).resolves.toMatchObject({
+      baseUrl: "https://same-provider-target.example/v1",
+      credentialHeaderName: "x-target-key",
+    });
+  }, 10_000);
+
+  it("rejects saving connection metadata through another loaded connection of the same provider", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    await development.modelHub.saveConnection({
+      id: "same-metadata-owner",
+      providerKind: "custom_openai_compatible",
+      displayName: "Same metadata owner",
+      baseUrlOverride: "https://same-metadata-owner.example/v1",
+      credentialState: "missing",
+      authenticationMode: "none",
+      expectedRevision: null,
+    });
+    await development.modelHub.saveConnection({
+      id: "same-metadata-target",
+      providerKind: "custom_openai_compatible",
+      displayName: "Same metadata target",
+      baseUrlOverride: "https://same-metadata-target.example/v1",
+      credentialState: "missing",
+      authenticationMode: "none",
+      expectedRevision: null,
+    });
+    await development.modelHub.syncCatalog({
+      syncId: "same-metadata-target-sync",
+      connectionId: "same-metadata-target",
+      source: "manual",
+      status: "succeeded",
+      models: [
+        {
+          id: "same-metadata-target-model",
+          providerModelId: "target-model",
+        },
+      ],
+    });
+    await development.modelHub.saveTaskRoute({
+      task: "rewrite",
+      primaryCatalogEntryId: "same-metadata-target-model",
+      privacyPolicy: "cloud_allowed",
+      failurePolicy: "stop",
+      routeOrigin: "user",
+      expectedRevision: null,
+    });
+    const runtime: DesktopRuntime = {
+      ...development,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: false, lastFour: null }),
+        save: () => Promise.resolve({ configured: true, lastFour: "alue" }),
+        delete: () => Promise.resolve({ configured: false, lastFour: null }),
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    const storedConnections = screen.getByRole("combobox", {
+      name: /^已连接的供应商/u,
+    });
+    await waitFor(() => expect(storedConnections).toBeEnabled());
+    await user.selectOptions(storedConnections, "same-metadata-owner");
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    const providerId = screen.getByLabelText("配置标识");
+    await user.clear(providerId);
+    await user.type(providerId, "same-metadata-target");
+    await user.click(screen.getByRole("button", { name: "保存供应商与模型" }));
+
+    expect(await screen.findByText(/MODEL_HUB_CONNECTION_ID_CONFLICT/u)).toBeVisible();
+    await expect(runtime.modelHub.findConnection("same-metadata-owner")).resolves.toMatchObject({
+      baseUrl: "https://same-metadata-owner.example/v1",
+    });
+    await expect(runtime.modelHub.findConnection("same-metadata-target")).resolves.toMatchObject({
+      baseUrl: "https://same-metadata-target.example/v1",
+    });
+    await expect(runtime.modelHub.listCatalog("same-metadata-target")).resolves.toMatchObject([
+      { id: "same-metadata-target-model", providerModelId: "target-model" },
+    ]);
+    await expect(runtime.modelHub.findTaskRoute("rewrite")).resolves.toMatchObject({
+      primaryCatalogEntryId: "same-metadata-target-model",
+    });
+  }, 10_000);
+
+  it("invalidates deletion when the id is changed to another connection of the same provider", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    for (const [id, baseUrlOverride] of [
+      ["same-delete-owner", "https://same-delete-owner.example/v1"],
+      ["same-delete-target", "https://same-delete-target.example/v1"],
+    ] as const) {
+      await development.modelHub.saveConnection({
+        id,
+        providerKind: "custom_openai_compatible",
+        displayName: id,
+        baseUrlOverride,
+        credentialRef: `keyring:model-hub:${id}`,
+        credentialState: "present",
+        authenticationMode: "custom_header_keyring",
+        credentialHeaderName: "x-api-key",
+        expectedRevision: null,
+      });
+    }
+    const deleteCredential = vi.fn(() => Promise.resolve({ configured: false, lastFour: null }));
+    const runtime: DesktopRuntime = {
+      ...development,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: true, lastFour: "alue" }),
+        save: () => Promise.resolve({ configured: true, lastFour: "alue" }),
+        delete: deleteCredential,
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    const storedConnections = screen.getByRole("combobox", {
+      name: /^已连接的供应商/u,
+    });
+    await waitFor(() => expect(storedConnections).toBeEnabled());
+    await user.selectOptions(storedConnections, "same-delete-owner");
+    expect(await screen.findByRole("button", { name: "删除密钥" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    const providerId = screen.getByLabelText("配置标识");
+    await user.clear(providerId);
+    await user.type(providerId, "same-delete-target");
+
+    expect(screen.queryByRole("button", { name: "删除密钥" })).not.toBeInTheDocument();
+    expect(deleteCredential).not.toHaveBeenCalled();
+    await expect(runtime.modelHub.findConnection("same-delete-owner")).resolves.toMatchObject({
+      credentialState: "present",
+    });
+    await expect(runtime.modelHub.findConnection("same-delete-target")).resolves.toMatchObject({
+      credentialState: "present",
+    });
+  }, 10_000);
+
+  it("does not expose deletion after a loaded connection id is changed to a new id", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    await development.modelHub.saveConnection({
+      id: "new-id-delete-owner",
+      providerKind: "custom_openai_compatible",
+      displayName: "New id delete owner",
+      baseUrlOverride: "https://new-id-delete-owner.example/v1",
+      credentialRef: "keyring:model-hub:new-id-delete-owner",
+      credentialState: "present",
+      authenticationMode: "custom_header_keyring",
+      credentialHeaderName: "x-api-key",
+      expectedRevision: null,
+    });
+    const deleteCredential = vi.fn(() => Promise.resolve({ configured: false, lastFour: null }));
+    const runtime: DesktopRuntime = {
+      ...development,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: true, lastFour: "alue" }),
+        save: () => Promise.resolve({ configured: true, lastFour: "alue" }),
+        delete: deleteCredential,
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: /^已连接的供应商/u })).toBeEnabled(),
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: /^已连接的供应商/u }),
+      "new-id-delete-owner",
+    );
+    expect(await screen.findByRole("button", { name: "删除密钥" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    const providerId = screen.getByLabelText("配置标识");
+    await user.clear(providerId);
+    await user.type(providerId, "brand-new-provider-id");
+
+    expect(screen.queryByRole("button", { name: "删除密钥" })).not.toBeInTheDocument();
+    expect(deleteCredential).not.toHaveBeenCalled();
+    await expect(runtime.modelHub.findConnection("brand-new-provider-id")).resolves.toBeNull();
+    await expect(runtime.modelHub.findConnection("new-id-delete-owner")).resolves.toMatchObject({
+      credentialState: "present",
+    });
+  }, 10_000);
+
+  it("keeps focus on the requested settings section during hash navigation", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    const originalDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      renderRoute(runtime);
+      const pageHeading = await screen.findByRole("heading", { name: "设置", level: 1 });
+      await user.click(screen.getByRole("link", { name: "导入与导出" }));
+
+      const target = document.getElementById("data-transfer");
+      expect(target).not.toBeNull();
+      await waitFor(() => {
+        expect(scrollIntoView).toHaveBeenCalledWith({
+          behavior: "smooth",
+          block: "start",
+        });
+        expect(target).toHaveFocus();
+        expect(pageHeading).not.toHaveFocus();
+      });
+    } finally {
+      if (originalDescriptor === undefined) {
+        Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+      } else {
+        Object.defineProperty(Element.prototype, "scrollIntoView", originalDescriptor);
+      }
+    }
   });
 
   it("persists an exact primary and fallback model snapshot for a role", async () => {
@@ -40,21 +680,16 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    const heading = await screen.findByRole("heading", { name: "模型角色路由" });
+    const heading = await screen.findByRole("heading", { name: "AI 分工" });
     const routingCard = heading.closest<HTMLElement>(".ink-card");
     if (routingCard === null) {
       throw new Error("Expected the model routing card.");
     }
-    const routeControls = await within(routingCard).findAllByRole("combobox");
-    const [roleControl, primaryControl, fallbackControl] = routeControls;
-    if (
-      roleControl === undefined ||
-      primaryControl === undefined ||
-      fallbackControl === undefined ||
-      routeControls.length !== 3
-    ) {
-      throw new Error("Expected role, primary, and fallback model controls.");
-    }
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    const primaryControl = within(routingCard).getByRole("combobox", { name: "兼容主模型" });
+    const fallbackControl = within(routingCard).getByRole("combobox", {
+      name: /^兼容备用模型/u,
+    });
     await user.selectOptions(primaryControl, "remote-writer");
     await user.selectOptions(fallbackControl, "local-writer");
     await user.click(within(routingCard).getByRole("button", { name: "保存角色路由" }));
@@ -146,14 +781,184 @@ describe("SettingsPage model routing", () => {
     renderRoute(runtime);
 
     const checkButton = await screen.findByRole("button", {
-      name: "检查连接并读取模型",
+      name: "测试连接并发现模型",
     });
-    expect(checkButton).toBeEnabled();
+    await waitFor(() => expect(checkButton).toBeEnabled());
     await user.click(checkButton);
 
     expect(await screen.findByText("本地模型容量初步体检")).toBeInTheDocument();
     expect(screen.getByText(/内存余量初步通过/u)).toHaveTextContent("GPU/显存未测量");
     expect(checkConnection).toHaveBeenCalledOnce();
+
+    await user.click(screen.getByRole("button", { name: "保存供应商与模型" }));
+    await waitFor(async () => {
+      await expect(runtime.modelCenter.findByProviderId("ollama-local")).resolves.toMatchObject({
+        selectedModel: "qwen2.5:7b-instruct",
+      });
+    });
+    const localCatalog = await runtime.modelHub.listCatalog("ollama-local");
+    await expect(
+      runtime.modelHub.findCostPrivacyProfile(localCatalog[0]?.id ?? "missing"),
+    ).resolves.toMatchObject({
+      dataDestination: "local",
+      retentionPolicy: "none",
+      trainingPolicy: "not_used",
+    });
+  });
+
+  it("records a remote Ollama endpoint as remote instead of local privacy", async () => {
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(true);
+    const developmentRuntime = createDevelopmentRuntime(window.localStorage);
+    await developmentRuntime.modelCenter.save({
+      providerId: "ollama-remote",
+      provider: "ollama",
+      baseUrl: "https://remote-ollama.example",
+      authentication: "none",
+      selectedModel: null,
+      pricing: null,
+      expectedRevision: null,
+    });
+    const modelGateway: NativeModelGatewayClient = {
+      available: true,
+      checkConnection: () =>
+        Promise.resolve({
+          provider: "ollama",
+          endpointOrigin: "https://remote-ollama.example",
+          modelCount: 1,
+          latencyMs: 12,
+        }),
+      listModels: () =>
+        Promise.resolve({
+          provider: "ollama",
+          models: [{ id: "remote-model", displayName: "remote-model", sizeBytes: null }],
+        }),
+      inspectCapacity: () =>
+        Promise.resolve({
+          logicalCpuCount: 1,
+          physicalMemory: {
+            status: "unavailable",
+            totalBytes: null,
+            availableBytes: null,
+            reason: "not_local",
+          },
+          applicationDataDisk: {
+            status: "unavailable",
+            totalBytes: null,
+            availableBytes: null,
+            reason: "not_local",
+          },
+          gpuMemory: {
+            status: "unavailable",
+            totalBytes: null,
+            availableBytes: null,
+            reason: "not_local",
+          },
+        }),
+      embed: () => Promise.reject(new Error("not used")),
+      generate: () => Promise.reject(new Error("not used")),
+      cancelGeneration: () => Promise.resolve(false),
+    };
+    const runtime: DesktopRuntime = { ...developmentRuntime, modelGateway };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    await user.click(await screen.findByRole("button", { name: "测试连接并发现模型" }));
+    await screen.findByRole("option", { name: "remote-model" });
+    await user.click(screen.getByRole("button", { name: "保存供应商与模型" }));
+
+    await waitFor(async () => {
+      const catalog = await runtime.modelHub.listCatalog("ollama-remote");
+      await expect(
+        runtime.modelHub.findCostPrivacyProfile(catalog[0]?.id ?? "missing"),
+      ).resolves.toMatchObject({
+        dataDestination: "remote",
+        retentionPolicy: "provider_default",
+        trainingPolicy: "unknown",
+      });
+    });
+  });
+
+  it("verifies a manual Qwen model with a tiny generation probe without calling /models", async () => {
+    const developmentRuntime = createDevelopmentRuntime(window.localStorage);
+    await developmentRuntime.modelHub.saveConnection({
+      id: "qwen-writing",
+      providerKind: "alibaba_qwen",
+      displayName: "阿里云百炼 / Qwen",
+      region: "singapore",
+      baseUrlOverride: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      credentialRef: "keyring:legacy-model-profile:qwen-writing",
+      credentialState: "present",
+      expectedRevision: null,
+    });
+    const listModels = vi.fn<NativeModelGatewayClient["listModels"]>(() =>
+      Promise.reject(new Error("manual provider must not call /models")),
+    );
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>((input) => {
+      input.onDelta?.("OK");
+      return Promise.resolve({
+        text: "OK",
+        usage: { inputTokens: 4, outputTokens: 1, cachedInputTokens: null },
+      });
+    });
+    const runtime: DesktopRuntime = {
+      ...developmentRuntime,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        save: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        delete: () => Promise.resolve({ configured: false, lastFour: null }),
+      },
+      modelGateway: {
+        available: true,
+        checkConnection: () => Promise.reject(new Error("manual provider uses the probe")),
+        listModels,
+        generate,
+        embed: () => Promise.reject(new Error("not used")),
+        cancelGeneration: () => Promise.resolve(false),
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    const modelInput = await screen.findByRole("textbox", { name: "模型标识" });
+    await user.type(modelInput, "qwen-writing-model");
+    const verifyButton = screen.getByRole("button", { name: "验证连接与写作能力" });
+    await waitFor(() => expect(verifyButton).toBeEnabled());
+    await user.click(verifyButton);
+
+    expect(await screen.findByText("写作能力已验证")).toBeVisible();
+    expect(listModels).not.toHaveBeenCalled();
+    const generatedInput = generate.mock.calls[0]?.[0];
+    expect(generatedInput).toMatchObject({
+      config: {
+        providerId: "qwen-writing",
+        provider: "open_ai_compatible",
+      },
+      model: "qwen-writing-model",
+      maxOutputTokens: 8,
+    });
+    expect(generatedInput).not.toHaveProperty("temperature");
+    const catalog = await runtime.modelHub.listCatalog("qwen-writing");
+    const selected = catalog.find(
+      ({ providerModelId }) => providerModelId === "qwen-writing-model",
+    );
+    expect(selected).toBeDefined();
+    await expect(
+      runtime.modelHub.listCapabilityEvidence(selected?.id ?? "missing"),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "lightweight_probe",
+        }),
+        expect.objectContaining({
+          capability: "streaming",
+          verdict: "supported",
+          evidenceSource: "lightweight_probe",
+        }),
+      ]),
+    );
   });
 });
 

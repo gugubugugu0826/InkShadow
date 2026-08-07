@@ -20,6 +20,7 @@ describe("CloudSyncControlPanel", () => {
 
     render(<CloudSyncControlPanel projectId={PROJECT_ID} service={service} />);
 
+    expect(await screen.findByRole("heading", { name: "加密同步", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("加密同步已完成")).toBeVisible();
     expect(screen.getByText("本机工作始终可用")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "暂停同步" }));

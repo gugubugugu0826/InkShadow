@@ -80,7 +80,7 @@ export function StudioTeamTemplatesRoutePage() {
         if (project === null) {
           throw routeError(
             "TEAM_TEMPLATE_LOCAL_PROJECT_MISSING",
-            "The assigned cloud project is not present in the local workspace.",
+            "当前本地工作区中没有这个已分配的云项目。",
           );
         }
         const projectSnapshot = project.toSnapshot();
@@ -139,8 +139,9 @@ export function StudioTeamTemplatesRoutePage() {
   const projectId = params.projectId;
   if (teamId === undefined || projectId === undefined || !parseUuidV7(projectId).ok) {
     return (
-      <main className="desktop-page">
+      <div className="desktop-page">
         <ErrorState
+          headingLevel={1}
           title="无法打开团队模板"
           description="模板入口缺少有效的团队或项目范围，请从团队工作区重新打开。"
           errorCode="TEAM_TEMPLATE_ROUTE_SCOPE_INVALID"
@@ -149,13 +150,14 @@ export function StudioTeamTemplatesRoutePage() {
             onClick: () => void navigate("/teams"),
           }}
         />
-      </main>
+      </div>
     );
   }
   if (templateRuntime === null) {
     return (
-      <main className="desktop-page">
+      <div className="desktop-page">
         <EmptyState
+          headingLevel={1}
           kind="feature_limited"
           title="加密团队模板不可用"
           description="当前环境没有完整的原生云会话、项目密钥与本地事务能力；浏览器开发模式不会伪造远端成功。"
@@ -164,13 +166,14 @@ export function StudioTeamTemplatesRoutePage() {
             onClick: () => void navigate("/teams"),
           }}
         />
-      </main>
+      </div>
     );
   }
   if (!online) {
     return (
-      <main className="desktop-page">
+      <div className="desktop-page">
         <EmptyState
+          headingLevel={1}
           kind="offline"
           title="团队模板需要联网"
           description="离线时不会伪造模板列表或写入成功；恢复网络后会重新验证权限并续传待确认回执。"
@@ -179,7 +182,7 @@ export function StudioTeamTemplatesRoutePage() {
             onClick: () => void navigate("/teams"),
           }}
         />
-      </main>
+      </div>
     );
   }
 
@@ -189,17 +192,18 @@ export function StudioTeamTemplatesRoutePage() {
       : ({ status: "loading" } as const);
   if (visibleRoute.status === "loading") {
     return (
-      <main className="desktop-page">
+      <div className="desktop-page">
         <PageStateBoundary state="loading" loadingLabel="正在验证团队模板权限与本地项目版本">
           <span />
         </PageStateBoundary>
-      </main>
+      </div>
     );
   }
   if (visibleRoute.status === "error") {
     return (
-      <main className="desktop-page">
+      <div className="desktop-page">
         <ErrorState
+          headingLevel={1}
           title="无法打开团队模板"
           description={visibleRoute.description}
           errorCode={visibleRoute.code}
@@ -208,12 +212,12 @@ export function StudioTeamTemplatesRoutePage() {
             onClick: () => void navigate("/teams"),
           }}
         />
-      </main>
+      </div>
     );
   }
 
   return (
-    <main className="desktop-page">
+    <div className="desktop-page">
       {!visibleRoute.projectWritable && (
         <InlineAlert
           tone="warning"
@@ -231,8 +235,8 @@ export function StudioTeamTemplatesRoutePage() {
       {visibleRoute.recoveryFailure !== null && (
         <InlineAlert
           tone="warning"
-          title={visibleRoute.recoveryFailure.code}
-          description="待确认模板回执暂未恢复；本地项目提交保持有效，下次进入时会安全重试。"
+          title="待确认回执暂未恢复"
+          description={`本地项目提交保持有效，下次进入时会安全重试。（${visibleRoute.recoveryFailure.code}）`}
         />
       )}
       <StudioTeamTemplatesPage
@@ -255,7 +259,7 @@ export function StudioTeamTemplatesRoutePage() {
           )
         }
       />
-    </main>
+    </div>
   );
 }
 

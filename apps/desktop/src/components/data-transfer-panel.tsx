@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "react";
-import type { Project } from "@inkshadow/domain";
+import type { Chapter, Project } from "@inkshadow/domain";
 import {
   IMPORT_LIMITS,
   ImportExportError,
@@ -38,7 +38,7 @@ import {
 } from "../infrastructure/project-report-export";
 import { collectProjectExportSnapshot } from "../infrastructure/project-export-snapshot";
 import { downloadBrowserExportArtifact } from "../infrastructure/export-artifact-download";
-import { normalizeUiError } from "../infrastructure/ui-error";
+import { normalizeUiError, UiActionError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
 const issueLabels: Record<ImportExportErrorCode, string> = {
@@ -53,15 +53,19 @@ const issueLabels: Record<ImportExportErrorCode, string> = {
   IMPORT_BINARY_FORMAT_FORBIDDEN: "文本导入器拒绝二进制、压缩包或办公文档。",
   IMPORT_MAGIC_MISMATCH: "文件扩展名与真实文件签名不一致。",
   IMPORT_ENCODING_UNCERTAIN: "无法无损确认文本编码，请另存为 UTF-8 后重试。",
-  IMPORT_ARCHIVE_INVALID: "DOCX 压缩包结构损坏或不受支持。",
-  IMPORT_ARCHIVE_LIMIT_EXCEEDED: "DOCX 解压大小、条目数或压缩比超过安全限制。",
-  IMPORT_ARCHIVE_ENCRYPTED: "不支持加密的 DOCX 压缩条目。",
+  IMPORT_ARCHIVE_INVALID: "DOCX 或 EPUB 压缩包结构损坏、校验失败或不受支持。",
+  IMPORT_ARCHIVE_LIMIT_EXCEEDED: "DOCX 或 EPUB 的解压大小、条目数或压缩比超过安全限制。",
+  IMPORT_ARCHIVE_ENCRYPTED: "不支持包含加密压缩条目的 DOCX 或 EPUB。",
   IMPORT_ARCHIVE_ACTIVE_CONTENT: "DOCX 包含宏、嵌入对象或其他活动内容。",
   IMPORT_PATH_TRAVERSAL: "文件包含不安全的跨目录路径。",
   IMPORT_UNSAFE_PATH: "文件路径不符合安全规则。",
   IMPORT_UNSAFE_CONTENT: "文件包含不安全内容。",
   DOCX_PARSE_FAILED: "DOCX 无法在隔离解析器中安全读取。",
   DOCX_PARSER_WARNING: "DOCX 中不受支持的结构已被忽略。",
+  EPUB_PARSE_FAILED: "EPUB 无法安全解析，请确认文件结构完整。",
+  EPUB_DRM_UNSUPPORTED: "暂不支持带 DRM 或加密保护的 EPUB。",
+  EPUB_CONTENT_UNAVAILABLE: "EPUB 中没有找到可导入的章节文本。",
+  EPUB_ACTIVE_CONTENT_FORBIDDEN: "EPUB 包含脚本或其他活动内容，已停止导入。",
   PDF_PARSE_FAILED: "PDF 无法安全解析。",
   PDF_ENCRYPTED_UNSUPPORTED: "加密或密码保护 PDF 不受支持。",
   PDF_TEXT_UNAVAILABLE: "PDF 没有可提取文本；扫描件与 OCR 暂不支持。",
@@ -87,6 +91,7 @@ const issueLabels: Record<ImportExportErrorCode, string> = {
 const formatLabels: Record<ImportPreflightReport["format"], string> = {
   portable_bundle: "InkShadow Bundle",
   docx: "DOCX",
+  epub: "EPUB",
   html: "HTML",
   markdown: "Markdown",
   pdf: "PDF",
@@ -147,11 +152,16 @@ function errorDescription(error: unknown): string {
   return normalizeUiError(error).description;
 }
 
-interface CompletedImport {
-  readonly projectId: string;
-  readonly firstChapterId: string;
+export interface CompletedImport {
+  readonly projectId: Project["id"];
+  readonly firstChapterId: Chapter["id"];
   readonly projectName: string;
   readonly chapterCount: number;
+}
+
+export interface DataTransferPanelProps {
+  readonly mode?: "full" | "import-only";
+  readonly onImportComplete?: (completedImport: CompletedImport) => void;
 }
 
 interface ImportUiProgress {
@@ -168,7 +178,10 @@ interface ImportDocumentDraft {
   readonly content: string;
 }
 
-export function DataTransferPanel() {
+export function DataTransferPanel({
+  mode = "full",
+  onImportComplete,
+}: DataTransferPanelProps = {}) {
   const runtime = useRuntime();
   const [preflight, setPreflight] = useState<ImportPreflightReport | null>(null);
   const [importBusy, setImportBusy] = useState(false);
@@ -213,8 +226,12 @@ export function DataTransferPanel() {
   }, [runtime]);
 
   useEffect(() => {
-    void Promise.resolve().then(loadProjects);
-  }, [loadProjects]);
+    if (mode === "full") {
+      void Promise.resolve().then(loadProjects);
+    } else {
+      void Promise.resolve().then(() => setProjectsLoading(false));
+    }
+  }, [loadProjects, mode]);
 
   useEffect(
     () => () => {
@@ -335,16 +352,23 @@ export function DataTransferPanel() {
       }
       const firstChapter = result.value.chapters[0];
       if (firstChapter === undefined) {
-        throw new Error("导入完成后没有可打开的章节。");
+        throw new UiActionError(
+          "IMPORT_EMPTY_RESULT",
+          "导入结果中没有可打开的章节；原文件没有被修改，请检查文件内容后重新导入。",
+        );
       }
-      setCompletedImport({
+      const completed: CompletedImport = {
         projectId: result.value.project.id,
         firstChapterId: firstChapter.id,
         projectName: result.value.project.name,
         chapterCount: result.value.chapters.length,
-      });
+      };
+      setCompletedImport(completed);
       setSelectedProjectId(result.value.project.id);
-      await loadProjects();
+      onImportComplete?.(completed);
+      if (mode === "full") {
+        await loadProjects();
+      }
     } catch (error: unknown) {
       setTransferError(errorDescription(error));
     } finally {
@@ -389,10 +413,11 @@ export function DataTransferPanel() {
         })),
       };
       const exportedAt = runtime.clock.now();
+      const runtimeInformation = await runtime.getRuntimeInformation();
       const bundle = await createPortableBundle(input, {
         bundleId: runtime.ids.next(),
         exportedAt,
-        generatorVersion: "0.1.0",
+        generatorVersion: runtimeInformation.appVersion,
       });
 
       if (format === "text") {
@@ -526,7 +551,9 @@ export function DataTransferPanel() {
       <CardHeader>
         <div className="card-heading-row">
           <div>
-            <CardTitle>导入与导出</CardTitle>
+            <CardTitle headingLevel={2}>
+              {mode === "import-only" ? "安全导入原作" : "导入与导出"}
+            </CardTitle>
             <CardDescription>
               文件先经过安全预检与净化，再显示可编辑候选；确认前不会写入任何项目。
             </CardDescription>
@@ -540,7 +567,7 @@ export function DataTransferPanel() {
             <div>
               <h3 id="import-title">导入预检</h3>
               <p>
-                支持本地解析 TXT、Markdown、DOCX、静态 HTML 与可提取文本的 PDF；扫描
+                支持本地解析 TXT、Markdown、DOCX、EPUB、静态 HTML 与可提取文本的 PDF；扫描
                 PDF/OCR、宏、脚本和远程资源不会执行。
               </p>
             </div>
@@ -568,7 +595,7 @@ export function DataTransferPanel() {
                 <p>单文件与单次选择均不超过 50 MiB，最多 200 个文件。</p>
               </div>
               <div className="import-format-badges" aria-label="支持的作品格式">
-                {["MD", "DOCX", "HTML", "PDF", "TXT"].map((format) => (
+                {["MD", "DOCX", "EPUB", "HTML", "PDF", "TXT"].map((format) => (
                   <Badge key={format}>{format}</Badge>
                 ))}
               </div>
@@ -597,7 +624,7 @@ export function DataTransferPanel() {
                 ref={importFileInputRef}
                 className="import-file-input"
                 type="file"
-                accept=".txt,.md,.markdown,.docx,.htm,.html,.pdf,.json,.inkshadow.json"
+                accept=".txt,.md,.markdown,.docx,.epub,.htm,.html,.pdf,.json,.inkshadow.json"
                 multiple
                 tabIndex={-1}
                 disabled={importBusy}
@@ -683,151 +710,157 @@ export function DataTransferPanel() {
                       {completedImport.projectName} 已写入 {String(completedImport.chapterCount)}{" "}
                       个章节；导入报告已确认无半成品。
                     </span>
-                    <Link
-                      className="button-link"
-                      to={`/projects/${completedImport.projectId}/chapters/${completedImport.firstChapterId}`}
-                    >
-                      打开第一章
-                    </Link>
+                    {mode === "full" ? (
+                      <Link
+                        className="button-link"
+                        to={`/projects/${completedImport.projectId}/chapters/${completedImport.firstChapterId}`}
+                      >
+                        打开第一章
+                      </Link>
+                    ) : (
+                      <span>下方会自动读取作品结构并继续本次流程。</span>
+                    )}
                   </div>
                 }
               />
             )}
           </section>
 
-          <section className="data-transfer-section" aria-labelledby="export-title">
-            <div>
-              <h3 id="export-title">导出项目</h3>
-              <p>
-                DOCX 适合继续排版；PDF 会在本机固定中文外观并生成不可选字的图像型文档；Markdown
-                适合阅读与分享；Bundle
-                保留项目及章节结构并带校验清单；领域报告只包含所选项目的结构化数据。
-              </p>
-            </div>
-            {projects.length === 0 && !projectsLoading ? (
-              <InlineAlert
-                tone="info"
-                title="暂无可导出的项目"
-                description="新建项目后即可在此导出；回收站项目不会出现在列表中。"
-              />
-            ) : (
-              <>
-                <FormField label="选择项目">
-                  {(fieldProps) => (
-                    <Select
-                      {...fieldProps}
-                      value={selectedProjectId}
-                      loading={projectsLoading}
-                      options={projects.map((project) => ({
-                        value: project.id,
-                        label:
-                          project.status === "archived"
-                            ? `${project.name}（已归档）`
-                            : project.name,
-                      }))}
-                      onChange={(event) => setSelectedProjectId(event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-                <div className="settings-actions">
-                  <Button
-                    variant="secondary"
-                    loading={exportBusy === "text"}
-                    disabled={exportBusy !== null || selectedProjectId.length === 0}
-                    onClick={() => void exportProject("text")}
-                  >
-                    下载 TXT
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    loading={exportBusy === "markdown"}
-                    disabled={exportBusy !== null || selectedProjectId.length === 0}
-                    onClick={() => void exportProject("markdown")}
-                  >
-                    下载 Markdown
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    loading={exportBusy === "docx"}
-                    disabled={exportBusy !== null || selectedProjectId.length === 0}
-                    onClick={() => void exportProject("docx")}
-                  >
-                    下载 DOCX
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    loading={exportBusy === "pdf"}
-                    disabled={exportBusy !== null || selectedProjectId.length === 0}
-                    onClick={() => void exportProject("pdf")}
-                  >
-                    下载 PDF
-                  </Button>
-                  <Button
-                    loading={exportBusy === "bundle"}
-                    disabled={exportBusy !== null || selectedProjectId.length === 0}
-                    onClick={() => void exportProject("bundle")}
-                  >
-                    下载 Bundle
-                  </Button>
-                  {(exportBusy === "docx" || exportBusy === "pdf") && (
+          {mode === "full" && (
+            <section className="data-transfer-section" aria-labelledby="export-title">
+              <div>
+                <h3 id="export-title">导出项目</h3>
+                <p>
+                  DOCX 适合继续排版；PDF 会在本机固定中文外观并生成不可选字的图像型文档；Markdown
+                  适合阅读与分享；Bundle
+                  保留项目及章节结构并带校验清单；领域报告只包含所选项目的结构化数据。
+                </p>
+              </div>
+              {projects.length === 0 && !projectsLoading ? (
+                <InlineAlert
+                  tone="info"
+                  title="暂无可导出的项目"
+                  description="新建项目后即可在此导出；回收站项目不会出现在列表中。"
+                />
+              ) : (
+                <>
+                  <FormField label="选择项目">
+                    {(fieldProps) => (
+                      <Select
+                        {...fieldProps}
+                        value={selectedProjectId}
+                        loading={projectsLoading}
+                        options={projects.map((project) => ({
+                          value: project.id,
+                          label:
+                            project.status === "archived"
+                              ? `${project.name}（已归档）`
+                              : project.name,
+                        }))}
+                        onChange={(event) => setSelectedProjectId(event.currentTarget.value)}
+                      />
+                    )}
+                  </FormField>
+                  <div className="settings-actions">
                     <Button
-                      variant="ghost"
-                      onClick={() =>
-                        exportAbortRef.current?.abort(
-                          new DOMException("Export cancelled by user.", "AbortError"),
-                        )
-                      }
+                      variant="secondary"
+                      loading={exportBusy === "text"}
+                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      onClick={() => void exportProject("text")}
                     >
-                      取消 {exportBusy === "pdf" ? "PDF" : "DOCX"} 导出
+                      下载 TXT
                     </Button>
-                  )}
-                </div>
-                {docxProgress !== null && (
-                  <InlineAlert
-                    tone="info"
-                    title="正在生成 DOCX"
-                    description={formatDocxProgress(docxProgress)}
-                  />
-                )}
-                {pdfProgress !== null && (
-                  <InlineAlert
-                    tone="info"
-                    title="正在生成 PDF"
-                    description={formatPdfProgress(pdfProgress)}
-                  />
-                )}
-                <FormField label="领域报告">
-                  {(fieldProps) => (
-                    <Select
-                      {...fieldProps}
-                      value={projectReportKind}
-                      options={projectReportOptions}
-                      onChange={(event) =>
-                        setProjectReportKind(event.currentTarget.value as ProjectReportKind)
-                      }
+                    <Button
+                      variant="secondary"
+                      loading={exportBusy === "markdown"}
+                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      onClick={() => void exportProject("markdown")}
+                    >
+                      下载 Markdown
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      loading={exportBusy === "docx"}
+                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      onClick={() => void exportProject("docx")}
+                    >
+                      下载 DOCX
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      loading={exportBusy === "pdf"}
+                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      onClick={() => void exportProject("pdf")}
+                    >
+                      下载 PDF
+                    </Button>
+                    <Button
+                      loading={exportBusy === "bundle"}
+                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      onClick={() => void exportProject("bundle")}
+                    >
+                      下载 Bundle
+                    </Button>
+                    {(exportBusy === "docx" || exportBusy === "pdf") && (
+                      <Button
+                        variant="ghost"
+                        onClick={() =>
+                          exportAbortRef.current?.abort(
+                            new DOMException("Export cancelled by user.", "AbortError"),
+                          )
+                        }
+                      >
+                        取消 {exportBusy === "pdf" ? "PDF" : "DOCX"} 导出
+                      </Button>
+                    )}
+                  </div>
+                  {docxProgress !== null && (
+                    <InlineAlert
+                      tone="info"
+                      title="正在生成 DOCX"
+                      description={formatDocxProgress(docxProgress)}
                     />
                   )}
-                </FormField>
-                <div className="settings-actions">
-                  <Button
-                    variant="secondary"
-                    loading={exportBusy === "report"}
-                    disabled={exportBusy !== null || selectedProjectId.length === 0}
-                    onClick={() => void exportProjectReport()}
-                  >
-                    下载领域报告
-                  </Button>
-                </div>
-              </>
-            )}
-            {exportNotice !== null && (
-              <InlineAlert
-                tone={exportNotice.tone}
-                title={exportNotice.title}
-                description={exportNotice.description}
-              />
-            )}
-          </section>
+                  {pdfProgress !== null && (
+                    <InlineAlert
+                      tone="info"
+                      title="正在生成 PDF"
+                      description={formatPdfProgress(pdfProgress)}
+                    />
+                  )}
+                  <FormField label="领域报告">
+                    {(fieldProps) => (
+                      <Select
+                        {...fieldProps}
+                        value={projectReportKind}
+                        options={projectReportOptions}
+                        onChange={(event) =>
+                          setProjectReportKind(event.currentTarget.value as ProjectReportKind)
+                        }
+                      />
+                    )}
+                  </FormField>
+                  <div className="settings-actions">
+                    <Button
+                      variant="secondary"
+                      loading={exportBusy === "report"}
+                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      onClick={() => void exportProjectReport()}
+                    >
+                      下载领域报告
+                    </Button>
+                  </div>
+                </>
+              )}
+              {exportNotice !== null && (
+                <InlineAlert
+                  tone={exportNotice.tone}
+                  title={exportNotice.title}
+                  description={exportNotice.description}
+                />
+              )}
+            </section>
+          )}
         </div>
 
         {transferError !== null && (

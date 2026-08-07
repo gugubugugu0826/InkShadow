@@ -54,10 +54,10 @@ describe("multi-Agent review route boundary", () => {
 
     renderRoute(runtime, `/projects/${created.value.id}/multi-agent-review`);
 
-    expect(await screen.findByRole("heading", { name: "多 Agent 审查", level: 1 })).toBeVisible();
-    expect(screen.getByText("多 Agent 创建功能当前关闭")).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "多智能体审查", level: 1 })).toBeVisible();
+    expect(screen.getByText("多智能体创建功能当前关闭")).toBeVisible();
     expect(screen.queryByRole("button", { name: "开始本地审查" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "多 Agent 审查" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "多智能体审查" })).toBeNull();
     await waitFor(() => expect(listHistory).toHaveBeenCalledWith(created.value.id, 50));
     expect(startReview).not.toHaveBeenCalled();
     expect(runReview).not.toHaveBeenCalled();

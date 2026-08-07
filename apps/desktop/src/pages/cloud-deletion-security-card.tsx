@@ -290,7 +290,7 @@ export function CloudDeletionSecurityCard({
             <InlineAlert
               tone="warning"
               title="先进入 30 日宽限期，再跨越不可逆提交点"
-              description="宽限期内可以取消。服务端开始 commit 后，密文、密钥封装和访问记录会分阶段清除，不能恢复；项目云端删除不会删除本机项目。"
+              description="宽限期内可以取消。服务端开始最终清理后，密文、密钥封装和访问记录会分阶段清除，不能恢复；项目云端删除不会删除本机项目。"
             />
             {loading && (
               <InlineAlert
@@ -455,14 +455,15 @@ export function CloudDeletionSecurityCard({
 
       <Dialog
         open={dialog === "project_request"}
+        dismissible={!busy}
         onOpenChange={(open) => {
-          if (!open) {
+          if (!open && !busy) {
             closeDialog();
           }
         }}
         initialFocusRef={projectConfirmationRef}
         title="永久删除此项目的云端数据？"
-        description="先进入 30 日宽限期；宽限期结束且服务端开始 commit 后无法撤销。关闭云同步或删除本地项目都不会代替此操作。"
+        description="先进入 30 日宽限期；宽限期结束且服务端开始最终清理后无法撤销。关闭云同步或删除本地项目都不会代替此操作。"
         footer={
           <>
             <Button variant="secondary" disabled={busy} onClick={closeDialog}>
@@ -507,13 +508,14 @@ export function CloudDeletionSecurityCard({
 
       <Dialog
         open={dialog === "project_cancel"}
+        dismissible={!busy}
         onOpenChange={(open) => {
-          if (!open) {
+          if (!open && !busy) {
             closeDialog();
           }
         }}
         title="取消项目云端删除？"
-        description="只有服务端尚未开始不可逆 commit 时才会成功。"
+        description="只有服务端尚未开始不可逆清理时才会成功。"
         footer={
           <>
             <Button variant="secondary" disabled={busy} onClick={closeDialog}>
@@ -539,8 +541,9 @@ export function CloudDeletionSecurityCard({
 
       <Dialog
         open={dialog === "account_request"}
+        dismissible={!busy}
         onOpenChange={(open) => {
-          if (!open) {
+          if (!open && !busy) {
             closeDialog();
           }
         }}
@@ -567,7 +570,7 @@ export function CloudDeletionSecurityCard({
           <InlineAlert
             tone="warning"
             title="影响个人云项目、设备和会话"
-            description="团队项目不会被删除；团队访问会在最终清理时撤销。若仍是团队唯一 Owner，或个人云项目仍分配给其他团队成员，必须先完成转移或解除分配。宽限期后将跨越不可逆 commit 点，请先完成需要的本地导出。"
+            description="团队项目不会被删除；团队访问会在最终清理时撤销。若仍是团队唯一所有者，或个人云项目仍分配给其他团队成员，必须先完成转移或解除分配。宽限期后将跨越不可逆清理点，请先完成需要的本地导出。"
           />
           <FormField label="云账户邮箱" required>
             {(fieldProps) => (
@@ -603,8 +606,9 @@ export function CloudDeletionSecurityCard({
 
       <Dialog
         open={dialog === "account_lookup" || dialog === "account_cancel"}
+        dismissible={!busy}
         onOpenChange={(open) => {
-          if (!open) {
+          if (!open && !busy) {
             closeDialog();
           }
         }}
@@ -717,7 +721,7 @@ function DeletionReceiptFacts({ journal }: { readonly journal: CloudDeletionJour
           <dd>{formatDate(receipt.cancellableUntil)}</dd>
         </div>
         <div>
-          <dt>不可逆 commit</dt>
+          <dt>不可逆清理</dt>
           <dd>
             {receipt.commitStartedAt === null ? "尚未开始" : formatDate(receipt.commitStartedAt)}
           </dd>

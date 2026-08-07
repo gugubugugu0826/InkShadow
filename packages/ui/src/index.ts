@@ -30,7 +30,9 @@ export {
   CardTitle,
   type BadgeProps,
   type BadgeTone,
+  type CardTitleProps,
   type CardProps,
+  type HeadingLevel,
 } from "./components/surfaces";
 export {
   Table,

@@ -1,6 +1,7 @@
 import {
   forwardRef,
   useId,
+  useState,
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
@@ -13,6 +14,9 @@ export type InputProps = InputHTMLAttributes<HTMLInputElement> & {
   invalid?: boolean;
   leadingAdornment?: ReactNode;
   trailingAdornment?: ReactNode;
+  revealable?: boolean;
+  revealLabel?: string;
+  concealLabel?: string;
 };
 
 export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
@@ -23,12 +27,19 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
     invalid = false,
     leadingAdornment,
     readOnly,
+    revealable,
+    revealLabel = "显示内容",
+    concealLabel = "隐藏内容",
     trailingAdornment,
+    type,
     ...props
   },
   ref,
 ) {
+  const [revealed, setRevealed] = useState(false);
   const resolvedInvalid = invalid ? true : ariaInvalid;
+  const canReveal = type === "password" && revealable !== false;
+  const resolvedType = canReveal && revealed ? "text" : type;
 
   return (
     <span
@@ -48,12 +59,27 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
         className="ink-input"
         disabled={disabled}
         readOnly={readOnly}
+        type={resolvedType}
         aria-invalid={resolvedInvalid}
       />
       {trailingAdornment && (
         <span className="ink-field-control__adornment" aria-hidden="true">
           {trailingAdornment}
         </span>
+      )}
+      {canReveal && (
+        <button
+          type="button"
+          className="ink-field-control__reveal"
+          aria-label={revealed ? concealLabel : revealLabel}
+          aria-pressed={revealed}
+          disabled={disabled}
+          onClick={() => {
+            setRevealed((current) => !current);
+          }}
+        >
+          {revealed ? "隐藏" : "显示"}
+        </button>
       )}
     </span>
   );

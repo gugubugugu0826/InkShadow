@@ -92,8 +92,9 @@ export function StudioReviewRoutePage() {
 
   if (reviewRuntime === null) {
     return (
-      <main className="studio-review-page">
+      <div className="studio-review-page">
         <ErrorState
+          headingLevel={1}
           title="团队加密审阅不可用"
           description="当前运行环境没有完整的原生云会话、已落盘密文投影和项目密钥能力。浏览器开发模式不会模拟远端成功。"
           errorCode="REVIEW_RUNTIME_UNAVAILABLE"
@@ -102,14 +103,15 @@ export function StudioReviewRoutePage() {
             onClick: () => void navigate("/teams"),
           }}
         />
-      </main>
+      </div>
     );
   }
 
   if (!online) {
     return (
-      <main className="studio-review-page">
+      <div className="studio-review-page">
         <ErrorState
+          headingLevel={1}
           title="团队审阅需要联网"
           description="离线时不会伪造审阅列表或提交成功。恢复网络后，本页会重新验证团队与项目权限。"
           errorCode="REVIEW_OFFLINE"
@@ -118,7 +120,7 @@ export function StudioReviewRoutePage() {
             onClick: () => void navigate("/teams"),
           }}
         />
-      </main>
+      </div>
     );
   }
 
@@ -126,8 +128,9 @@ export function StudioReviewRoutePage() {
   const projectId = params.projectId;
   if (teamId === undefined || projectId === undefined) {
     return (
-      <main className="studio-review-page">
+      <div className="studio-review-page">
         <ErrorState
+          headingLevel={1}
           title="无法打开团队审阅"
           description="审阅入口缺少团队或项目范围，请从团队工作区重新打开。"
           errorCode="REVIEW_ROUTE_SCOPE_INVALID"
@@ -136,7 +139,7 @@ export function StudioReviewRoutePage() {
             onClick: () => void navigate("/teams"),
           }}
         />
-      </main>
+      </div>
     );
   }
   const visibleAuthority =
@@ -147,18 +150,19 @@ export function StudioReviewRoutePage() {
 
   if (visibleAuthority.status === "loading") {
     return (
-      <main className="studio-review-page">
+      <div className="studio-review-page">
         <PageStateBoundary state="loading" loadingLabel="正在验证团队审阅权限">
           <span />
         </PageStateBoundary>
-      </main>
+      </div>
     );
   }
 
   if (visibleAuthority.status === "error") {
     return (
-      <main className="studio-review-page">
+      <div className="studio-review-page">
         <ErrorState
+          headingLevel={1}
           title="无法打开团队审阅"
           description={visibleAuthority.description}
           errorCode={visibleAuthority.code}
@@ -167,7 +171,7 @@ export function StudioReviewRoutePage() {
             onClick: () => void navigate("/teams"),
           }}
         />
-      </main>
+      </div>
     );
   }
 

@@ -103,68 +103,9 @@ export function WorkspacePage() {
             返回项目
           </Link>
           <h1>{project?.name ?? "项目工作区"}</h1>
-          <p>章节正文、恢复草稿和版本均保存在本地持久层。</p>
+          <p>选择一章继续写，草稿与版本会自动保存在当前设备。</p>
         </div>
         <div className="settings-actions">
-          {projectId !== null && (
-            <>
-              <Link
-                className="button-link button-link--secondary"
-                to={`/projects/${projectId}/search`}
-              >
-                搜索项目
-              </Link>
-              <Link className="button-link" to={`/projects/${projectId}/outline`}>
-                故事大纲
-              </Link>
-              <Link
-                className="button-link button-link--secondary"
-                to={`/projects/${projectId}/story`}
-              >
-                故事治理
-              </Link>
-              {runtime.featureFlags.graphRag && runtime.storyGraph !== null && (
-                <Link
-                  className="button-link button-link--secondary"
-                  to={`/projects/${projectId}/graph`}
-                >
-                  故事关系图
-                </Link>
-              )}
-              {runtime.featureFlags.authoritativeExtraction &&
-                runtime.authoritativeExtraction !== null && (
-                  <Link
-                    className="button-link button-link--secondary"
-                    to={`/projects/${projectId}/extraction`}
-                  >
-                    权威事实抽取
-                  </Link>
-                )}
-              <Link
-                className="button-link button-link--secondary"
-                to={`/projects/${projectId}/materials`}
-              >
-                素材治理
-              </Link>
-              {runtime.featureFlags.multiAgent && runtime.multiAgentReview !== null && (
-                <Link
-                  className="button-link button-link--secondary"
-                  to={`/projects/${projectId}/multi-agent-review`}
-                >
-                  多 Agent 审查
-                </Link>
-              )}
-              {runtime.featureFlags.fineTuning &&
-                runtime.fineTuningGovernance?.availability.available === true && (
-                  <Link
-                    className="button-link button-link--secondary"
-                    to={`/projects/${projectId}/fine-tuning`}
-                  >
-                    微调治理
-                  </Link>
-                )}
-            </>
-          )}
           <Button disabled={readonly} onClick={() => setCreateOpen(true)}>
             新建章节
           </Button>
@@ -265,7 +206,11 @@ export function WorkspacePage() {
             <Button variant="secondary" onClick={() => setCreateOpen(false)}>
               取消
             </Button>
-            <Button loading={submitting} onClick={() => void createChapter()}>
+            <Button
+              loading={submitting}
+              disabled={title.trim().length === 0}
+              onClick={() => void createChapter()}
+            >
               创建章节
             </Button>
           </>
@@ -279,7 +224,12 @@ export function WorkspacePage() {
               maxLength={200}
               onChange={(event) => setTitle(event.currentTarget.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && !submitting) {
+                if (
+                  event.key === "Enter" &&
+                  !event.nativeEvent.isComposing &&
+                  !submitting &&
+                  title.trim().length > 0
+                ) {
                   event.preventDefault();
                   void createChapter();
                 }

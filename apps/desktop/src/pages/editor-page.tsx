@@ -15,6 +15,11 @@ import {
   type CandidateApplicationStrategy,
   type CandidateTextDiff,
 } from "@inkshadow/application";
+import type {
+  CandidateQualityGateResult,
+  ContextEvidenceSourceType,
+  ContextLayer,
+} from "@inkshadow/ai-core";
 import { DEFAULT_USER_SETTINGS } from "@inkshadow/config";
 import type {
   AiCandidate,
@@ -49,14 +54,23 @@ import {
   prepareGenerationPlan,
   saveDeferredGenerationPlan,
   type PreparedGenerationPlan,
+  type RuntimeStory,
 } from "../infrastructure/runtime";
-import { normalizeUiError } from "../infrastructure/ui-error";
+import { normalizeUiError, UiActionError } from "../infrastructure/ui-error";
 import type {
   DeferredGenerationRequest,
   GenerationAttemptUsage,
   GenerationBudgetPolicy,
   GenerationRun,
 } from "../infrastructure/generation-governance-store";
+import {
+  shouldRunContinuousStoryStateExtraction,
+  type ContinuousStoryStateExtractionReceipt,
+} from "../infrastructure/continuous-story-state-extraction";
+import {
+  shouldRunChapterSummaryAfterSave,
+  type ChapterSummaryGenerationReceipt,
+} from "../infrastructure/chapter-summary-service";
 import { useOnlineStatus } from "../hooks/use-online-status";
 import {
   EDITOR_FIND_QUERY_LIMIT,
@@ -92,17 +106,18 @@ import {
   type PersistenceFlushOutcome,
 } from "../infrastructure/persistence-lifecycle";
 import { useRuntime } from "../runtime-context";
-import {
-  CandidateDiffViewer,
-  type CandidateDiffDecision,
-} from "../components/candidate-diff-viewer";
 import { CrashRecoveryDialog } from "../components/crash-recovery-dialog";
+import { CandidateFeedbackControls } from "../components/candidate-feedback-controls";
+import {
+  EditorAiSuggestionDiffViewer,
+  type AiSuggestionDiffDecision,
+} from "./editor-ai-suggestion-diff-viewer";
 
 const versionReasonLabels: Record<ReturnType<ChapterVersion["toSnapshot"]>["reason"], string> = {
   created: "创建",
   autosave: "自动保存",
   manual: "手动保存",
-  candidate_accept: "接受候选",
+  candidate_accept: "接受 AI 建议",
   recovery: "恢复版本",
   import: "导入",
 };
@@ -121,10 +136,49 @@ const RECOVERY_DRAFT_DEBOUNCE_MS = 350;
 const AUTOSAVE_DEBOUNCE_MS = DEFAULT_USER_SETTINGS.autosaveDebounceMs;
 const BACKGROUND_FLUSH_TIMEOUT_MS = 3_000;
 
+const chapterListPanelStyle: CSSProperties = {
+  flex: "0 0 12rem",
+  maxHeight: "calc(100vh - 12rem)",
+};
+
+const collapsedPanelStyle: CSSProperties = {
+  flex: "0 0 auto",
+  alignSelf: "flex-start",
+  padding: "var(--space-2)",
+};
+
+const writingCanvasFlexStyle: CSSProperties = {
+  flex: "1 1 28rem",
+};
+
+const assistantPanelStyle: CSSProperties = {
+  flex: "0 1 18rem",
+  maxHeight: "calc(100vh - 12rem)",
+};
+
 interface CandidateRouteSelection {
   readonly candidate: AiCandidate | null;
   readonly notice: string | null;
 }
+
+type StoryStateUpdateNotice =
+  | Readonly<{ state: "idle" | "running" }>
+  | Readonly<{
+      state: "ready";
+      detectedCount: number;
+      needsConfirmationCount: number;
+      reversibleCount: number;
+      skippedTaskCount: number;
+    }>
+  | Readonly<{ state: "failed"; message: string }>;
+
+type ChapterSummaryNotice =
+  | Readonly<{ state: "idle" | "running" }>
+  | Readonly<{
+      state: "finished";
+      status: ChapterSummaryGenerationReceipt["status"];
+      message: string;
+    }>;
 
 function selectEditorCandidate(
   candidates: readonly AiCandidate[],
@@ -143,7 +197,7 @@ function selectEditorCandidate(
   if (!parsedCandidateId.ok) {
     return Object.freeze({
       candidate: null,
-      notice: "候选链接无效；未自动打开其他候选。请从多 Agent 审查页重新选择。",
+      notice: "AI 建议链接无效；未自动打开其他建议。请从深度审稿页重新选择。",
     });
   }
 
@@ -159,7 +213,7 @@ function selectEditorCandidate(
     candidate,
     notice:
       candidate === null
-        ? "链接指定的候选不存在、已处理，或不属于当前项目与章节；未自动打开其他候选。"
+        ? "链接指定的 AI 建议不存在、已处理，或不属于当前项目与章节；未自动打开其他建议。"
         : null,
   });
 }
@@ -176,6 +230,7 @@ export function EditorPage() {
   const chapterId = parsedChapterId.ok ? parsedChapterId.value : null;
   const [project, setProject] = useState<Project | null>(null);
   const [chapter, setChapter] = useState<Chapter | null>(null);
+  const [chapters, setChapters] = useState<readonly Chapter[]>([]);
   const [content, setContent] = useState("");
   const [pageState, setPageState] = useState<"loading" | "ready" | "fatal_error" | "conflict">(
     "loading",
@@ -202,7 +257,7 @@ export function EditorPage() {
   const [candidateReviewOpen, setCandidateReviewOpen] = useState(false);
   const [candidateDiff, setCandidateDiff] = useState<CandidateTextDiff | null>(null);
   const [candidateDiffDecisions, setCandidateDiffDecisions] = useState<
-    Readonly<Record<string, CandidateDiffDecision | undefined>>
+    Readonly<Record<string, AiSuggestionDiffDecision | undefined>>
   >({});
   const [candidateReviewError, setCandidateReviewError] = useState<string | null>(null);
   const [candidateReviewConflict, setCandidateReviewConflict] = useState<{
@@ -217,6 +272,8 @@ export function EditorPage() {
   const [preflightOpen, setPreflightOpen] = useState(false);
   const [generationPlan, setGenerationPlan] = useState<PreparedGenerationPlan | null>(null);
   const [generationReceipt, setGenerationReceipt] = useState<GenerationRun | null>(null);
+  const [candidateQualityGate, setCandidateQualityGate] =
+    useState<CandidateQualityGateResult | null>(null);
   const [generationAttemptUsage, setGenerationAttemptUsage] = useState<
     readonly GenerationAttemptUsage[]
   >([]);
@@ -243,6 +300,15 @@ export function EditorPage() {
   const [editorNotice, setEditorNotice] = useState<string | null>(null);
   const [typography, setTypography] = useState<EditorTypography>(DEFAULT_EDITOR_TYPOGRAPHY);
   const [selectionRequestId, setSelectionRequestId] = useState(0);
+  const [selectionLength, setSelectionLength] = useState(0);
+  const [chapterListOpen, setChapterListOpen] = useState(true);
+  const [assistantOpen, setAssistantOpen] = useState(true);
+  const [storyStateUpdate, setStoryStateUpdate] = useState<StoryStateUpdateNotice>({
+    state: "idle",
+  });
+  const [chapterSummaryUpdate, setChapterSummaryUpdate] = useState<ChapterSummaryNotice>({
+    state: "idle",
+  });
   const chapterRef = useRef<Chapter | null>(null);
   const contentRef = useRef("");
   const cursorRef = useRef(0);
@@ -292,6 +358,16 @@ export function EditorPage() {
     }
   }, [chapterId, runtime]);
 
+  const loadChapters = useCallback(async () => {
+    if (projectId === null) {
+      return;
+    }
+    const result = await runtime.repositories.chapters.listByProjectId(projectId);
+    if (result.ok) {
+      setChapters(result.value);
+    }
+  }, [projectId, runtime]);
+
   const syncHistoryAvailability = useCallback((history: EditorHistory): void => {
     setHistoryAvailability({
       canUndo: history.past.length > 0,
@@ -309,6 +385,7 @@ export function EditorPage() {
     (selection: EditorSelection, focus: boolean, scrollTop: number | null = null): void => {
       selectionRef.current = selection;
       cursorRef.current = selection.start;
+      setSelectionLength(Math.max(0, selection.end - selection.start));
       pendingSelectionRef.current = Object.freeze({ selection, focus, scrollTop });
       setSelectionRequestId((current) => current + 1);
     },
@@ -363,14 +440,22 @@ export function EditorPage() {
     setCandidateReviewConflict(null);
     setCandidateCopySaved(false);
     setEditorNotice(null);
-    const [projectResult, chapterResult, draftResult, versionsResult, candidatesResult] =
-      await Promise.all([
-        runtime.repositories.projects.findById(projectId),
-        runtime.repositories.chapters.findById(chapterId),
-        runtime.repositories.recoveryDrafts.findByChapterId(chapterId),
-        runtime.useCases.listChapterVersions.execute(chapterId),
-        runtime.repositories.aiCandidates.listByChapterId(chapterId),
-      ]);
+    setStoryStateUpdate({ state: "idle" });
+    const [
+      projectResult,
+      chapterResult,
+      chaptersResult,
+      draftResult,
+      versionsResult,
+      candidatesResult,
+    ] = await Promise.all([
+      runtime.repositories.projects.findById(projectId),
+      runtime.repositories.chapters.findById(chapterId),
+      runtime.repositories.chapters.listByProjectId(projectId),
+      runtime.repositories.recoveryDrafts.findByChapterId(chapterId),
+      runtime.useCases.listChapterVersions.execute(chapterId),
+      runtime.repositories.aiCandidates.listByChapterId(chapterId),
+    ]);
 
     if (!projectResult.ok) {
       setError(projectResult.error);
@@ -379,6 +464,11 @@ export function EditorPage() {
     }
     if (!chapterResult.ok) {
       setError(chapterResult.error);
+      setPageState("fatal_error");
+      return;
+    }
+    if (!chaptersResult.ok) {
+      setError(chaptersResult.error);
       setPageState("fatal_error");
       return;
     }
@@ -407,6 +497,7 @@ export function EditorPage() {
     const draft = draftResult.value;
     setProject(projectResult.value);
     setChapter(loadedChapter);
+    setChapters(chaptersResult.value);
     chapterRef.current = loadedChapter;
     setVersions(versionsResult.value);
     const candidateSelection = selectEditorCandidate(
@@ -452,6 +543,26 @@ export function EditorPage() {
     setFindStatus(null);
     setError(null);
     setPageState("ready");
+    const continuousState = (runtime.story as Partial<RuntimeStory>).continuousState;
+    if (continuousState !== undefined) {
+      void continuousState
+        .inspectProject(projectId)
+        .then((dashboard) => {
+          if (dashboard.detectedCount > 0) {
+            setStoryStateUpdate({
+              state: "ready",
+              detectedCount: dashboard.detectedCount,
+              needsConfirmationCount: dashboard.needsConfirmationCount,
+              reversibleCount: dashboard.reversibleCount,
+              skippedTaskCount: 0,
+            });
+          }
+        })
+        .catch(() => {
+          // Story-state review is additive and must never block opening正文.
+          globalThis.console.error("[CONTINUOUS_STORY_STATE_DASHBOARD_FAILED]");
+        });
+    }
   }, [chapterId, projectId, requestedCandidateId, resetEditorHistory, runtime, scheduleSelection]);
 
   useEffect(() => {
@@ -570,6 +681,81 @@ export function EditorPage() {
       setError(null);
       setSaveState(contentRef.current === snapshot ? saved.value.saveState : "dirty");
       await loadVersions();
+      const continuousState = (runtime.story as Partial<RuntimeStory>).continuousState;
+      if (
+        shouldRunContinuousStoryStateExtraction(
+          reason,
+          continuousState?.isAutomaticOnManualSaveEnabled(saved.value.chapter.projectId) ?? false,
+        ) &&
+        saved.value.version !== null &&
+        continuousState !== undefined
+      ) {
+        const savedVersion = saved.value.version.toSnapshot();
+        setStoryStateUpdate({ state: "running" });
+        void continuousState
+          .extractAfterSave({
+            projectId: savedVersion.projectId,
+            chapterId: savedVersion.chapterId,
+            versionId: savedVersion.id,
+            reason,
+          })
+          .then((receipt: ContinuousStoryStateExtractionReceipt | null) => {
+            if (receipt === null) {
+              setStoryStateUpdate({ state: "idle" });
+              return;
+            }
+            setStoryStateUpdate({
+              state: "ready",
+              detectedCount: receipt.detectedCount,
+              needsConfirmationCount: receipt.needsConfirmationCount,
+              reversibleCount: receipt.reversibleCount,
+              skippedTaskCount: receipt.skippedTasks.length,
+            });
+          })
+          .catch((cause: unknown) => {
+            setStoryStateUpdate({
+              state: "failed",
+              message:
+                cause instanceof Error
+                  ? cause.message
+                  : "故事状态识别暂时失败；正文和已有设定均未改变。",
+            });
+          });
+      }
+      const chapterSummaries = (runtime.story as Partial<RuntimeStory>).chapterSummaries;
+      if (
+        saved.value.version !== null &&
+        chapterSummaries !== undefined &&
+        shouldRunChapterSummaryAfterSave(
+          reason,
+          chapterSummaries.isAutomaticOnManualSaveEnabled(saved.value.chapter.projectId),
+        )
+      ) {
+        const savedVersion = saved.value.version.toSnapshot();
+        setChapterSummaryUpdate({ state: "running" });
+        void chapterSummaries
+          .summarizeSavedVersion({
+            projectId: savedVersion.projectId,
+            chapterId: savedVersion.chapterId,
+            versionId: savedVersion.id,
+            trigger: "manual_save",
+          })
+          .then((receipt: ChapterSummaryGenerationReceipt) => {
+            setChapterSummaryUpdate({
+              state: "finished",
+              status: receipt.status,
+              message: receipt.message,
+            });
+          })
+          .catch((cause: unknown) => {
+            setChapterSummaryUpdate({
+              state: "finished",
+              status: "failed",
+              message:
+                cause instanceof Error ? cause.message : "章节摘要暂未更新；正文保存不受影响。",
+            });
+          });
+      }
     },
     [loadVersions, runtime],
   );
@@ -862,6 +1048,7 @@ export function EditorPage() {
       setError(created.error);
       return;
     }
+    await loadChapters();
     setRecoveryCopySaved(true);
     const removed = await runtime.repositories.recoveryDrafts.delete(stableChapter.id, draft.id);
     setRecoveryDecisionBusy(false);
@@ -878,7 +1065,7 @@ export function EditorPage() {
     setSaveState("saved_local");
     setError(null);
     setEditorNotice(`恢复草稿已另存为新章节“${copyTitle}”，当前稳定正文未改变。`);
-  }, [project?.status, projectId, recoveryCopySaved, recoveryDraft, runtime]);
+  }, [loadChapters, project?.status, projectId, recoveryCopySaved, recoveryDraft, runtime]);
 
   function recordEdit(edit: EditorEdit | null): void {
     if (edit === null) {
@@ -893,6 +1080,7 @@ export function EditorPage() {
     contentRef.current = nextContent;
     selectionRef.current = selection;
     cursorRef.current = selection.start;
+    setSelectionLength(Math.max(0, selection.end - selection.start));
     setContent(nextContent);
     setRecovered(false);
     setSaveState("dirty");
@@ -1108,6 +1296,7 @@ export function EditorPage() {
     contentRef.current = finalContent;
     selectionRef.current = selectionAfter;
     cursorRef.current = selectionAfter.start;
+    setSelectionLength(Math.max(0, selectionAfter.end - selectionAfter.start));
     setContent(finalContent);
     setRecovered(false);
     setSaveState("dirty");
@@ -1328,8 +1517,22 @@ export function EditorPage() {
         setError(result.error);
         return;
       }
+      const previousCandidate = candidate;
       if (result.value.candidate !== null) {
         setCandidate(result.value.candidate);
+      }
+      setCandidateQualityGate(result.value.qualityGate);
+      if (
+        projectId !== null &&
+        chapterId !== null &&
+        result.value.candidate !== null &&
+        previousCandidate !== null &&
+        (previousCandidate.status === "accepted" || previousCandidate.status === "rejected")
+      ) {
+        await recordWritingFeedbackSafely({
+          action: "regenerated",
+          candidateId: previousCandidate.id,
+        });
       }
       const [receipt, usage] = await Promise.all([
         runtime.generationGovernance.findRunById(result.value.runId),
@@ -1397,7 +1600,7 @@ export function EditorPage() {
     setCandidateDiff(null);
     if (baseVersion === undefined) {
       setCandidateReviewError(
-        "候选所依据的稳定版本已经不可用；为避免覆盖正文，当前不能接受这份候选。",
+        "AI 建议所依据的稳定版本已经不可用；为避免覆盖正文，当前不能接受这份建议。",
       );
       setCandidateReviewOpen(true);
       return;
@@ -1467,10 +1670,28 @@ export function EditorPage() {
     setCandidateReviewConflict(null);
     setCandidateCopySaved(false);
     setError(null);
+    const acceptedChangeCount =
+      strategy.kind === "apply_changes"
+        ? strategy.decisions.filter(({ decision }) => decision === "accept").length
+        : null;
+    const rejectedChangeCount =
+      strategy.kind === "apply_changes"
+        ? strategy.decisions.filter(({ decision }) => decision === "reject").length
+        : null;
+    await recordWritingFeedbackSafely({
+      action:
+        strategy.kind === "apply_changes" && (rejectedChangeCount ?? 0) > 0
+          ? "partially_accepted"
+          : "accepted",
+      candidateId: result.value.candidate.id,
+      applicationStrategy: strategy.kind,
+      acceptedChangeCount,
+      rejectedChangeCount,
+    });
     setEditorNotice(
       strategy.kind === "apply_changes"
         ? "已按逐项决定创建新的稳定版本；可在本次会话撤销，原稳定版本仍保留在版本历史。"
-        : "候选已按所选方式写入新的稳定版本；原稳定版本仍保留在版本历史。",
+        : "AI 建议已按所选方式写入新的稳定版本；原稳定版本仍保留在版本历史。",
     );
     await loadVersions();
   }
@@ -1486,7 +1707,7 @@ export function EditorPage() {
       return;
     }
     setCandidateBusy(true);
-    const copyTitle = `${chapter.title.slice(0, 190)}（候选副本）`;
+    const copyTitle = `${chapter.title.slice(0, 190)}（AI 建议副本）`;
     const created = await runtime.useCases.createChapter.execute({
       projectId,
       title: copyTitle,
@@ -1497,9 +1718,10 @@ export function EditorPage() {
       setError(created.error);
       return;
     }
+    await loadChapters();
     setCandidateCopySaved(true);
     setError(null);
-    setEditorNotice(`候选已另存为新章节“${copyTitle}”，当前稳定正文和候选记录均未改变。`);
+    setEditorNotice(`AI 建议已另存为新章节“${copyTitle}”，当前稳定正文和建议记录均未改变。`);
   }
 
   async function restoreSelectedVersion(): Promise<void> {
@@ -1553,6 +1775,7 @@ export function EditorPage() {
       setEditorNotice(
         `已从版本 ${String(selected.toSnapshot().sequence)} 创建新的恢复版本；所有历史版本仍保留。`,
       );
+      await recordWritingFeedbackSafely({ action: "restored_original", candidateId: null });
       await loadVersions();
     } catch (cause: unknown) {
       setError(cause);
@@ -1577,6 +1800,42 @@ export function EditorPage() {
     setCandidate(result.value);
     setCandidateCopySaved(false);
     setError(null);
+    await recordWritingFeedbackSafely({
+      action: "rejected",
+      candidateId: result.value.id,
+    });
+  }
+
+  async function recordWritingFeedbackSafely(input: {
+    readonly action:
+      "accepted" | "rejected" | "regenerated" | "partially_accepted" | "restored_original";
+    readonly candidateId: string | null;
+    readonly applicationStrategy?:
+      | "accept_all"
+      | "apply_changes"
+      | "insert_at_cursor"
+      | "replace_selection"
+      | "overwrite_document"
+      | null;
+    readonly acceptedChangeCount?: number | null;
+    readonly rejectedChangeCount?: number | null;
+  }): Promise<void> {
+    if (projectId === null || chapterId === null) return;
+    try {
+      await runtime.story.writingFeedback.recordAction({
+        projectId,
+        chapterId,
+        candidateId: input.candidateId,
+        action: input.action,
+        applicationStrategy: input.applicationStrategy ?? null,
+        acceptedChangeCount: input.acceptedChangeCount ?? null,
+        rejectedChangeCount: input.rejectedChangeCount ?? null,
+      });
+    } catch {
+      // Feedback learning is additive. A ledger failure must never undo an
+      // already completed, user-authorized正文 operation.
+      globalThis.console.error("[WRITING_FEEDBACK_RECORD_FAILED]");
+    }
   }
 
   const normalizedError = error === null ? null : normalizeUiError(error);
@@ -1602,6 +1861,40 @@ export function EditorPage() {
     "--editor-font-size": `${String(typography.fontSize)}px`,
     "--editor-line-height": String(typography.lineHeight),
   } as CSSProperties;
+  const primaryAction = (() => {
+    if (readonly) {
+      return {
+        label: "查看版本历史",
+        disabled: false,
+        run: () => setVersionsOpen(true),
+      };
+    }
+    if (!editorClean) {
+      return {
+        label: saveState === "saving" ? "正在保存" : "保存正文",
+        disabled: saveState === "saving",
+        run: () => void manualSave(),
+      };
+    }
+    if (candidateReady) {
+      return {
+        label: selectionLength > 0 ? "用 AI 建议修改选中内容" : "查看 AI 建议版本",
+        disabled: candidateBusy,
+        run: () => {
+          setAssistantOpen(true);
+          openCandidateReview();
+        },
+      };
+    }
+    return {
+      label: content.trim().length === 0 ? "生成开头" : "继续创作",
+      disabled: candidateBusy || !canGenerateCandidate,
+      run: () => {
+        setAssistantOpen(true);
+        void generateCandidate();
+      },
+    };
+  })();
 
   return (
     <PageStateBoundary
@@ -1638,23 +1931,6 @@ export function EditorPage() {
             <h1>{chapter?.title ?? "写作编辑器"}</h1>
           </div>
           <div className="editor-toolbar__actions">
-            <Button
-              variant="secondary"
-              disabled={readonly || !historyAvailability.canUndo}
-              onClick={() => applyHistory("undo")}
-            >
-              撤销
-            </Button>
-            <Button
-              variant="secondary"
-              disabled={readonly || !historyAvailability.canRedo}
-              onClick={() => applyHistory("redo")}
-            >
-              重做
-            </Button>
-            <Button variant="secondary" onClick={openFind}>
-              查找替换
-            </Button>
             <SaveStatus
               state={readonly ? "readonly" : saveState}
               {...(readonly || saveState === "saving"
@@ -1664,23 +1940,13 @@ export function EditorPage() {
             <Button variant="secondary" onClick={() => setVersionsOpen(true)}>
               版本历史
             </Button>
-            {runtime.featureFlags.multiAgent &&
-              runtime.multiAgentReview !== null &&
-              projectId !== null &&
-              chapterId !== null && (
-                <Link
-                  className="ink-button ink-button--secondary"
-                  to={`/projects/${projectId}/chapters/${chapterId}/multi-agent-review`}
-                >
-                  多 Agent 审查
-                </Link>
-              )}
             <Button
-              disabled={readonly || saveState === "saving"}
-              loading={saveState === "saving"}
-              onClick={() => void manualSave()}
+              variant={candidateReady ? "ai-primary" : "primary"}
+              disabled={primaryAction.disabled}
+              loading={candidateBusy || saveState === "saving"}
+              onClick={primaryAction.run}
             >
-              手动保存
+              {primaryAction.label}
             </Button>
           </div>
         </header>
@@ -1691,16 +1957,16 @@ export function EditorPage() {
             title="当前离线"
             description={
               usesNativeModel
-                ? "正文、恢复草稿和版本仍会保存到当前设备；远程模型可能不可用，本机 Ollama 仍可尝试。"
-                : "正文、恢复草稿和版本仍会保存到当前设备；本地演示候选不需要联网。"
+                ? "正文、恢复草稿和版本仍会保存到当前设备；联网 AI 服务可能不可用，本机 AI 服务仍可尝试。"
+                : "正文、恢复草稿和版本仍会保存到当前设备；本机示例建议不需要联网。"
             }
           />
         )}
         {deferredGeneration !== null && deferredGeneration.status === "waiting_network" && (
           <InlineAlert
             tone={online ? "info" : "warning"}
-            title="云模型任务已保存待执行"
-            description={`仅保存章节/版本、模型角色和费用上界，不保存正文或 Prompt。${
+            title="联网 AI 任务已保存待执行"
+            description={`仅保存章节、版本、AI 分工和费用上界，不保存正文或创作指令。${
               online
                 ? "网络已恢复；再次打开生成前检查并确认后才会执行。"
                 : "可继续本地编辑，任务会留在任务中心。"
@@ -1737,72 +2003,101 @@ export function EditorPage() {
           />
         )}
 
-        <section className="editor-format-toolbar" aria-label="阅读排版">
-          <Select
-            aria-label="正文字体"
-            value={typography.fontFamily}
-            options={[
-              { value: "serif", label: "衬线字体" },
-              { value: "sans", label: "无衬线字体" },
-              { value: "mono", label: "等宽字体" },
-            ]}
-            onChange={(event) =>
-              updateTypography({
-                ...typography,
-                fontFamily: event.currentTarget.value as EditorFontFamily,
-              })
-            }
-          />
-          <Select
-            aria-label="正文字号"
-            value={String(typography.fontSize)}
-            options={[
-              { value: "16", label: "16 px" },
-              { value: "17", label: "17 px" },
-              { value: "18", label: "18 px" },
-              { value: "20", label: "20 px" },
-              { value: "22", label: "22 px" },
-            ]}
-            onChange={(event) =>
-              updateTypography({
-                ...typography,
-                fontSize: Number(event.currentTarget.value),
-              })
-            }
-          />
-          <Select
-            aria-label="正文行距"
-            value={String(typography.lineHeight)}
-            options={[
-              { value: "1.6", label: "紧凑行距" },
-              { value: "1.8", label: "标准行距" },
-              { value: "1.95", label: "舒展行距" },
-              { value: "2.2", label: "宽松行距" },
-            ]}
-            onChange={(event) =>
-              updateTypography({
-                ...typography,
-                lineHeight: Number(event.currentTarget.value),
-              })
-            }
-          />
-          <Select
-            aria-label="正文版心"
-            value={typography.measure}
-            options={[
-              { value: "narrow", label: "窄版心" },
-              { value: "comfortable", label: "标准版心" },
-              { value: "wide", label: "宽版心" },
-            ]}
-            onChange={(event) =>
-              updateTypography({
-                ...typography,
-                measure: event.currentTarget.value as EditorMeasure,
-              })
-            }
-          />
-          <span>视图偏好仅保存在本机，不包含正文。</span>
-        </section>
+        <details>
+          <summary>写作工具与排版</summary>
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "var(--space-2)",
+              margin: "var(--space-2) 0",
+            }}
+          >
+            <Button
+              variant="secondary"
+              disabled={readonly || !historyAvailability.canUndo}
+              onClick={() => applyHistory("undo")}
+            >
+              撤销
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={readonly || !historyAvailability.canRedo}
+              onClick={() => applyHistory("redo")}
+            >
+              重做
+            </Button>
+            <Button variant="secondary" onClick={openFind}>
+              查找替换
+            </Button>
+          </div>
+          <section className="editor-format-toolbar" aria-label="阅读排版">
+            <Select
+              aria-label="正文字体"
+              value={typography.fontFamily}
+              options={[
+                { value: "serif", label: "衬线字体" },
+                { value: "sans", label: "无衬线字体" },
+                { value: "mono", label: "等宽字体" },
+              ]}
+              onChange={(event) =>
+                updateTypography({
+                  ...typography,
+                  fontFamily: event.currentTarget.value as EditorFontFamily,
+                })
+              }
+            />
+            <Select
+              aria-label="正文字号"
+              value={String(typography.fontSize)}
+              options={[
+                { value: "16", label: "16 px" },
+                { value: "17", label: "17 px" },
+                { value: "18", label: "18 px" },
+                { value: "20", label: "20 px" },
+                { value: "22", label: "22 px" },
+              ]}
+              onChange={(event) =>
+                updateTypography({
+                  ...typography,
+                  fontSize: Number(event.currentTarget.value),
+                })
+              }
+            />
+            <Select
+              aria-label="正文行距"
+              value={String(typography.lineHeight)}
+              options={[
+                { value: "1.6", label: "紧凑行距" },
+                { value: "1.8", label: "标准行距" },
+                { value: "1.95", label: "舒展行距" },
+                { value: "2.2", label: "宽松行距" },
+              ]}
+              onChange={(event) =>
+                updateTypography({
+                  ...typography,
+                  lineHeight: Number(event.currentTarget.value),
+                })
+              }
+            />
+            <Select
+              aria-label="正文版心"
+              value={typography.measure}
+              options={[
+                { value: "narrow", label: "窄版心" },
+                { value: "comfortable", label: "标准版心" },
+                { value: "wide", label: "宽版心" },
+              ]}
+              onChange={(event) =>
+                updateTypography({
+                  ...typography,
+                  measure: event.currentTarget.value as EditorMeasure,
+                })
+              }
+            />
+            <span>视图偏好仅保存在本机，不包含正文。</span>
+          </section>
+        </details>
 
         {findOpen && (
           <section className="editor-find-bar" aria-label="查找和替换">
@@ -1866,12 +2161,72 @@ export function EditorPage() {
           </section>
         )}
 
-        <div className="editor-workspace">
+        <div
+          className="editor-workspace"
+          style={{ display: "flex", flexWrap: "wrap", alignItems: "stretch" }}
+        >
+          {chapterListOpen ? (
+            <aside
+              className="candidate-panel"
+              style={chapterListPanelStyle}
+              aria-labelledby="chapter-list-title"
+            >
+              <div className="candidate-panel__header">
+                <div>
+                  <p className="page-heading__eyebrow">正文</p>
+                  <h2 id="chapter-list-title">章节</h2>
+                </div>
+                <Button
+                  variant="ghost"
+                  aria-label="收起章节列表"
+                  aria-expanded={chapterListOpen}
+                  onClick={() => setChapterListOpen(false)}
+                >
+                  收起
+                </Button>
+              </div>
+              <nav aria-label="章节列表">
+                <ol
+                  style={{
+                    display: "grid",
+                    gap: "var(--space-2)",
+                    margin: 0,
+                    padding: 0,
+                    listStyle: "none",
+                  }}
+                >
+                  {chapters.map((item, index) => (
+                    <li key={item.id}>
+                      <Link
+                        className="back-link"
+                        aria-current={item.id === chapterId ? "page" : undefined}
+                        to={`/projects/${projectId ?? ""}/chapters/${item.id}`}
+                      >
+                        {String(index + 1).padStart(2, "0")} · {item.title}
+                      </Link>
+                    </li>
+                  ))}
+                </ol>
+              </nav>
+            </aside>
+          ) : (
+            <aside className="candidate-panel" style={collapsedPanelStyle} aria-label="章节列表">
+              <Button
+                variant="secondary"
+                aria-label="展开章节列表"
+                aria-expanded={chapterListOpen}
+                onClick={() => setChapterListOpen(true)}
+              >
+                章节
+              </Button>
+            </aside>
+          )}
+
           <section
             className={`writing-canvas writing-canvas--${typography.measure}`}
             data-surface="light"
             data-font-family={typography.fontFamily}
-            style={writingCanvasStyle}
+            style={{ ...writingCanvasStyle, ...writingCanvasFlexStyle }}
             aria-label="章节正文"
           >
             <Textarea
@@ -1880,7 +2235,6 @@ export function EditorPage() {
               aria-label="章节正文"
               value={content}
               readOnly={readonly}
-              currentLength={content.length}
               maxLength={5_000_000}
               onBeforeInput={handleEditorBeforeInput}
               onKeyDown={handleEditorKeyDown}
@@ -1897,6 +2251,7 @@ export function EditorPage() {
                 );
                 selectionRef.current = selection;
                 cursorRef.current = selection.start;
+                setSelectionLength(Math.max(0, selection.end - selection.start));
                 scheduleEditorViewPersistence(selection);
               }}
               onScroll={(event) => {
@@ -1907,161 +2262,299 @@ export function EditorPage() {
             />
           </section>
 
-          <aside className="candidate-panel" aria-labelledby="candidate-title">
-            <div className="candidate-panel__header">
-              <div>
-                <p className="page-heading__eyebrow">AI Candidate</p>
-                <h2 id="candidate-title">候选内容</h2>
-              </div>
-              <Badge tone="ai">{usesNativeModel ? "原生模型网关" : "本地演示生成器"}</Badge>
-            </div>
-            <InlineAlert
-              tone="ai-clarification"
-              title={usesNativeModel ? "模型输出仍是候选" : "仅用于本地交互演示"}
-              description={
-                usesNativeModel
-                  ? "保存后的章节内容会发送到模型中心最近配置且已选择模型的端点；流式输出只形成候选，点击“接受候选”前正式正文绝不改变。"
-                  : "不会调用模型或消耗密钥；点击“接受候选”前，正式正文绝不改变。"
-              }
-            />
-
-            {candidateBusy && usesNativeModel ? (
-              <div className="candidate-content" aria-live="polite">
-                <div className="candidate-content__meta">
-                  <Badge tone="ai">生成中</Badge>
-                  <span>{generationPreview.length} 字符</span>
+          {assistantOpen ? (
+            <aside
+              className="candidate-panel"
+              style={assistantPanelStyle}
+              aria-labelledby="candidate-title"
+            >
+              <div className="candidate-panel__header">
+                <div>
+                  <p className="page-heading__eyebrow">陪伴创作</p>
+                  <h2 id="candidate-title">AI 创作助手</h2>
                 </div>
-                <pre>{generationPreview || "正在等待模型返回首段内容……"}</pre>
-                <p className="candidate-panel__hint">
-                  当前内容尚未写入正式正文，也不会在生成完成前保存为候选。
-                </p>
-                <Button
-                  variant="secondary"
-                  loading={cancelBusy}
-                  onClick={() => void cancelActiveGeneration()}
-                >
-                  取消生成
-                </Button>
-              </div>
-            ) : candidate === null || candidate.status === "rejected" ? (
-              <EmptyState
-                title={candidate?.status === "rejected" ? "候选已拒绝" : "还没有候选"}
-                description={
-                  usesNativeModel
-                    ? "先保存正文，并在模型中心保存端点配置且选择模型，然后生成候选。"
-                    : "先保存正文，再创建一个明确标注的本地演示候选。"
-                }
-              />
-            ) : (
-              <div className="candidate-content">
-                <div className="candidate-content__meta">
-                  <Badge
-                    tone={
-                      candidate.status === "accepted"
-                        ? "success"
-                        : candidate.status === "ready"
-                          ? "ai"
-                          : "neutral"
-                    }
-                  >
-                    {candidate.status === "accepted"
-                      ? "已接受"
-                      : candidate.status === "ready"
-                        ? "等待决定"
-                        : candidate.status}
-                  </Badge>
-                  <span>{candidate.content.length} 字符</span>
-                </div>
-                {candidate.toSnapshot().incomplete && (
-                  <InlineAlert
-                    tone="warning"
-                    title="未完成候选"
-                    description="生成在取消后停止；已收到的部分内容被保留为未完成候选，必须由你明确接受才会进入正文。"
-                  />
-                )}
-                {generationReceipt !== null && (
-                  <div className="generation-receipt" aria-label="生成费用记录">
-                    <div>
-                      <span>尝试上界累计估算</span>
-                      <strong>
-                        {formatCostEstimate(
-                          BigInt(generationReceipt.incurredCostMicros),
-                          generationReceipt.currency,
-                        )}
-                      </strong>
-                    </div>
-                    <p>
-                      共 {generationReceipt.attempt} 次尝试 · {generationReceipt.pricingVersion}
-                      。这是预算安全账本，不是供应商实扣金额。
-                    </p>
-                    {generationAttemptUsage.length > 0 && (
-                      <ul>
-                        {generationAttemptUsage.map((usage) => (
-                          <li key={usage.attempt}>{formatAttemptUsage(usage)}</li>
-                        ))}
-                      </ul>
-                    )}
-                    <p>
-                      供应商回执只证明 token 用量；按回执重算的金额仍为估算，最终以供应商账单为准。
-                    </p>
-                  </div>
-                )}
-                <pre>{boundedEditorPreview(candidate.content)}</pre>
-                {candidate.content.length > 4_000 && (
-                  <p className="candidate-panel__hint">
-                    面板仅显示前 4,000 个字符；完整候选仍保留，可在比较界面逐项处理或另存。
-                  </p>
-                )}
-                {candidateReady && (
-                  <div className="candidate-actions">
-                    <Button
-                      variant="ai-primary"
-                      loading={candidateBusy}
-                      disabled={!editorClean}
-                      onClick={openCandidateReview}
-                    >
-                      比较并决定
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      disabled={candidateBusy}
-                      onClick={() => void rejectCandidate()}
-                    >
-                      拒绝
-                    </Button>
-                  </div>
-                )}
-              </div>
-            )}
-            {!editorClean && (
-              <p className="candidate-panel__hint" role="status">
-                请先保存当前正文，再决定候选。
-              </p>
-            )}
-            {canGenerateCandidate && (
-              <>
-                {usesNativeModel && (
-                  <Link className="back-link" to="/settings#model-center">
-                    打开模型中心
-                  </Link>
-                )}
                 <Button
                   variant="ghost"
-                  loading={candidateBusy}
-                  disabled={!editorClean}
-                  onClick={() => void generateCandidate()}
+                  aria-label="收起 AI 创作助手"
+                  aria-expanded={assistantOpen}
+                  onClick={() => setAssistantOpen(false)}
                 >
-                  {candidate?.status === "accepted"
-                    ? "继续生成候选"
-                    : candidate?.status === "rejected"
-                      ? "创建新候选"
-                      : usesNativeModel
-                        ? "生成候选"
-                        : "创建演示候选"}
+                  收起
                 </Button>
-              </>
-            )}
-          </aside>
+              </div>
+              <InlineAlert
+                tone="ai-clarification"
+                title="正文始终由你决定"
+                description={
+                  usesNativeModel
+                    ? "生成内容会先成为 AI 建议版本；只有你比较并接受后，才会创建新的正文版本。"
+                    : "当前使用本机示例帮助检查流程，不会联网；只有你接受后，内容才会进入正文。"
+                }
+              />
+
+              {storyStateUpdate.state === "running" && (
+                <InlineAlert
+                  tone="info"
+                  title="正在整理本章变化"
+                  description="正文已安全保存。墨影正在后台查找人物、世界、伏笔和剧情线变化；不会自动写成正式设定。"
+                />
+              )}
+              {storyStateUpdate.state === "ready" && (
+                <InlineAlert
+                  tone={storyStateUpdate.needsConfirmationCount > 0 ? "warning" : "info"}
+                  title={`识别到 ${String(storyStateUpdate.detectedCount)} 项变化，其中 ${String(storyStateUpdate.needsConfirmationCount)} 项需要确认`}
+                  description={
+                    storyStateUpdate.skippedTaskCount > 0
+                      ? "部分识别因没有可用的 AI 分工而跳过，没有使用假数据。可先继续写作，或连接模型后再次保存新版本。"
+                      : `另有 ${String(storyStateUpdate.reversibleCount)} 项属于可撤销的普通更新。所有变化都保留原文章节、版本和精确引文。`
+                  }
+                />
+              )}
+              {storyStateUpdate.state === "ready" && storyStateUpdate.detectedCount > 0 && (
+                <Link className="back-link" to={`/projects/${projectId ?? ""}/story`}>
+                  查看并处理本章变化
+                </Link>
+              )}
+              {storyStateUpdate.state === "failed" && (
+                <InlineAlert
+                  tone="warning"
+                  title="本章变化暂未整理"
+                  description={`${storyStateUpdate.message} 你可以继续写作，正文保存不受影响。`}
+                />
+              )}
+              {chapterSummaryUpdate.state === "running" && (
+                <InlineAlert
+                  tone="info"
+                  title="正在更新章节摘要"
+                  description="正文已经安全保存。本次仅因你启用了“手动保存后更新摘要”而调用一次长程记忆压缩；自动保存不会调用模型。"
+                />
+              )}
+              {chapterSummaryUpdate.state === "finished" && (
+                <InlineAlert
+                  tone={
+                    chapterSummaryUpdate.status === "generated" ||
+                    chapterSummaryUpdate.status === "already_current"
+                      ? "info"
+                      : "warning"
+                  }
+                  title={
+                    chapterSummaryUpdate.status === "generated"
+                      ? "章节摘要已更新"
+                      : chapterSummaryUpdate.status === "already_current"
+                        ? "章节摘要已是最新"
+                        : chapterSummaryUpdate.status === "skipped"
+                          ? "本次未生成章节摘要"
+                          : "章节摘要更新失败"
+                  }
+                  description={`${chapterSummaryUpdate.message} 正文和正式设定均未被修改。`}
+                />
+              )}
+
+              {candidateBusy && usesNativeModel ? (
+                <div className="candidate-content" aria-live="polite">
+                  <div className="candidate-content__meta">
+                    <Badge tone="ai">生成中</Badge>
+                    <span>{generationPreview.length} 字符</span>
+                  </div>
+                  <pre>{generationPreview || "正在准备第一段建议……"}</pre>
+                  <p className="candidate-panel__hint">
+                    当前内容尚未写入正式正文，也不会在完成前保存为 AI 建议版本。
+                  </p>
+                  <Button
+                    variant="secondary"
+                    loading={cancelBusy}
+                    onClick={() => void cancelActiveGeneration()}
+                  >
+                    取消生成
+                  </Button>
+                </div>
+              ) : candidate === null || candidate.status === "rejected" ? (
+                <div className="candidate-content">
+                  <EmptyState
+                    title={
+                      candidate?.status === "rejected" ? "这份建议已拒绝" : "还没有 AI 建议版本"
+                    }
+                    description={
+                      usesNativeModel
+                        ? "保存正文后即可继续创作。若无法生成，请前往设置连接 AI 服务并完成连接测试。"
+                        : "保存正文后可生成一份明确标注的本机示例建议，用于体验安全比较流程。"
+                    }
+                  />
+                  {candidate?.status === "rejected" && projectId !== null && chapterId !== null && (
+                    <CandidateFeedbackControls
+                      busy={candidateBusy}
+                      onSubmit={async ({ feedbackCode, customFeedback }) => {
+                        const outcome = await runtime.story.writingFeedback.recordExplicitFeedback({
+                          projectId,
+                          chapterId,
+                          candidateId: candidate.id,
+                          feedbackCode,
+                          customFeedback,
+                        });
+                        if (outcome.learnedPreference !== null) {
+                          setEditorNotice(
+                            "同类意见已形成一条可见的写作偏好；可在“设定 → 写作偏好”中修改或删除。",
+                          );
+                        }
+                      }}
+                    />
+                  )}
+                </div>
+              ) : (
+                <div className="candidate-content">
+                  <div className="candidate-content__meta">
+                    <Badge
+                      tone={
+                        candidate.status === "accepted"
+                          ? "success"
+                          : candidate.status === "ready"
+                            ? "ai"
+                            : "neutral"
+                      }
+                    >
+                      {candidate.status === "accepted"
+                        ? "已接受"
+                        : candidate.status === "ready"
+                          ? "等待决定"
+                          : candidate.status}
+                    </Badge>
+                    <span>{candidate.content.length} 字符</span>
+                  </div>
+                  {candidate.toSnapshot().incomplete && (
+                    <InlineAlert
+                      tone="warning"
+                      title="建议内容尚未完成"
+                      description="生成在取消后停止；已收到的内容仍需由你明确接受，才会进入正文。"
+                    />
+                  )}
+                  {candidateQualityGate?.candidateId === candidate.id &&
+                    candidateQualityGate.outcome !== "pass" && (
+                      <InlineAlert
+                        tone="warning"
+                        title={
+                          candidateQualityGate.outcome === "block"
+                            ? "这份建议存在明显重复"
+                            : "建议在接受前仔细比较"
+                        }
+                        description={
+                          candidateQualityGate.outcome === "block"
+                            ? "本机规则发现句段重复超过安全阈值。建议重新生成；当前内容仍只是一份隔离的 AI 建议，不会自动进入正文。"
+                            : "本机质量关卡发现需要留意的重复迹象。请在比较界面逐项决定。"
+                        }
+                      />
+                    )}
+                  {generationReceipt !== null && (
+                    <details>
+                      <summary>费用与调用记录（高级）</summary>
+                      <div className="generation-receipt" aria-label="生成费用记录">
+                        <div>
+                          <span>尝试上界累计估算</span>
+                          <strong>
+                            {formatCostEstimate(
+                              BigInt(generationReceipt.incurredCostMicros),
+                              generationReceipt.currency,
+                            )}
+                          </strong>
+                        </div>
+                        <p>
+                          共 {generationReceipt.attempt} 次尝试 · {generationReceipt.pricingVersion}
+                          。这是预算安全账本，不是供应商实扣金额。
+                        </p>
+                        {generationAttemptUsage.length > 0 && (
+                          <ul>
+                            {generationAttemptUsage.map((usage) => (
+                              <li key={usage.attempt}>{formatAttemptUsage(usage)}</li>
+                            ))}
+                          </ul>
+                        )}
+                        <p>服务回执只证明用量；按回执重算的金额仍为估算，最终以服务账单为准。</p>
+                      </div>
+                    </details>
+                  )}
+                  <pre>{boundedEditorPreview(candidate.content)}</pre>
+                  {candidate.content.length > 4_000 && (
+                    <p className="candidate-panel__hint">
+                      面板仅显示前 4,000 个字符；完整建议仍保留，可在比较界面逐项处理或另存。
+                    </p>
+                  )}
+                  {candidateReady && (
+                    <div className="candidate-actions">
+                      <Button
+                        variant="ai-primary"
+                        loading={candidateBusy}
+                        disabled={!editorClean}
+                        onClick={openCandidateReview}
+                      >
+                        比较 AI 建议
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        disabled={candidateBusy}
+                        onClick={() => void rejectCandidate()}
+                      >
+                        拒绝
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
+              {!editorClean && (
+                <p className="candidate-panel__hint" role="status">
+                  请先保存当前正文，再处理 AI 建议版本。
+                </p>
+              )}
+              {canGenerateCandidate && (
+                <>
+                  {usesNativeModel && (
+                    <Link className="back-link" to="/settings#model-center">
+                      设置 AI 服务
+                    </Link>
+                  )}
+                  <Button
+                    variant="ghost"
+                    loading={candidateBusy}
+                    disabled={!editorClean}
+                    onClick={() => void generateCandidate()}
+                  >
+                    {candidate?.status === "accepted"
+                      ? "继续创作"
+                      : candidate?.status === "rejected"
+                        ? "重新生成"
+                        : usesNativeModel
+                          ? content.trim().length === 0
+                            ? "生成开头"
+                            : "继续创作"
+                          : "生成示例建议"}
+                  </Button>
+                </>
+              )}
+              {runtime.featureFlags.multiAgent &&
+                runtime.multiAgentReview !== null &&
+                projectId !== null &&
+                chapterId !== null && (
+                  <details>
+                    <summary>高级工具</summary>
+                    <Link
+                      className="back-link"
+                      to={`/projects/${projectId}/chapters/${chapterId}/multi-agent-review`}
+                    >
+                      深度审稿
+                    </Link>
+                  </details>
+                )}
+            </aside>
+          ) : (
+            <aside className="candidate-panel" style={collapsedPanelStyle} aria-label="AI 创作助手">
+              <Button
+                variant="secondary"
+                aria-label="展开 AI 创作助手"
+                aria-expanded={assistantOpen}
+                onClick={() => setAssistantOpen(true)}
+              >
+                AI 助手
+              </Button>
+            </aside>
+          )}
         </div>
       </div>
 
@@ -2190,8 +2683,8 @@ export function EditorPage() {
             setCandidateReviewOpen(open);
           }
         }}
-        title="比较候选与稳定正文"
-        description="候选不会直接覆盖正文。可以逐处接受或保留原文，也可以把完整候选插入光标、替换选区，或明确覆盖全文。"
+        title="比较 AI 建议与正文"
+        description="AI 建议不会直接覆盖正文。你可以逐处接受或保留原文，也可以插入光标、替换选区，或明确覆盖全文。"
         footer={
           <>
             <Button
@@ -2222,12 +2715,12 @@ export function EditorPage() {
             <>
               <InlineAlert
                 tone="error"
-                title="稳定正文已在候选生成后变化"
-                description="已阻止接受。下面同时保留基线、当前正文和候选；请先另存或处理冲突，InkShadow 不会静默覆盖。"
+                title="正文已在建议生成后变化"
+                description="已阻止接受。下面同时保留生成时正文、当前正文和 AI 建议；请先另存或处理冲突，InkShadow 不会静默覆盖。"
               />
               <div className="candidate-review-dialog__three-way">
                 <section>
-                  <h3>候选基线</h3>
+                  <h3>生成时正文</h3>
                   <pre>{boundedEditorPreview(candidateReviewConflict.baselineContent)}</pre>
                 </section>
                 <section>
@@ -2235,13 +2728,13 @@ export function EditorPage() {
                   <pre>{boundedEditorPreview(candidateReviewConflict.currentContent)}</pre>
                 </section>
                 <section>
-                  <h3>候选内容</h3>
+                  <h3>AI 建议</h3>
                   <pre>{boundedEditorPreview(candidate.content)}</pre>
                 </section>
               </div>
               <div className="candidate-review-dialog__conflict-actions">
                 <p>
-                  可先把完整候选保存成独立章节，从而同时保留当前正文与候选，再决定是否拒绝原候选。
+                  可先把完整 AI 建议保存成独立章节，从而同时保留当前正文与建议，再决定是否拒绝。
                 </p>
                 <Button
                   variant="secondary"
@@ -2249,7 +2742,7 @@ export function EditorPage() {
                   disabled={project?.status !== "active" || candidateCopySaved}
                   onClick={() => void saveCandidateAsChapterCopy()}
                 >
-                  {candidateCopySaved ? "候选副本已保存" : "将候选另存为新章节"}
+                  {candidateCopySaved ? "建议副本已保存" : "将建议另存为新章节"}
                 </Button>
               </div>
             </>
@@ -2257,12 +2750,12 @@ export function EditorPage() {
           {candidateReviewError !== null && (
             <InlineAlert
               tone={candidateReviewConflict === null ? "warning" : "error"}
-              title="候选比较提示"
+              title="AI 建议比较提示"
               description={candidateReviewError}
             />
           )}
           {candidateDiff !== null && (
-            <CandidateDiffViewer
+            <EditorAiSuggestionDiffViewer
               decisions={candidateDiffDecisions}
               diff={candidateDiff}
               disabled={candidateBusy || candidateReviewConflict !== null}
@@ -2278,8 +2771,8 @@ export function EditorPage() {
               <div>
                 <h3>整段应用方式</h3>
                 <p>
-                  当前选区：{candidateReviewSelection.start}–{candidateReviewSelection.end}
-                  （UTF-16）
+                  当前选区：第 {candidateReviewSelection.start} 到 {candidateReviewSelection.end}{" "}
+                  个字符
                 </p>
               </div>
               <div>
@@ -2331,7 +2824,7 @@ export function EditorPage() {
           }
         }}
         title="生成前检查"
-        description="检查结果由当前章节、写入权限、模型配置、上下文、价格版本和预算实时计算；阻断项未解决前不会启动模型或产生任务费用。"
+        description="开始前会检查正文是否已保存、AI 服务是否可用以及预算是否允许；有问题时会告诉你如何解决。"
         footer={
           <>
             <Button
@@ -2374,34 +2867,90 @@ export function EditorPage() {
               }
               description={
                 generationPlan.preflight.canStart
-                  ? "确认后才会创建并执行可审计任务。重复提交同一检查计划会复用原任务，不会重复调用模型。"
+                  ? "确认后才会开始生成。重复确认同一份检查结果会复用原任务，不会重复调用 AI 服务。"
                   : canDeferGenerationPlan(generationPlan)
-                    ? "当前只因网络离线而阻断；可保存不含正文和 Prompt 的待执行记录，联网后重新检查并确认。"
-                    : "请按下列操作修复后重新检查；当前不会调用模型。"
+                    ? "当前只因网络离线而阻断；可保存不含正文和创作指令的待执行记录，联网后重新检查并确认。"
+                    : "请按下列操作修复后重新检查；当前不会调用 AI 服务。"
               }
             />
 
-            <InlineAlert
-              tone={generationPlan.routeReason === "role_fallback" ? "warning" : "info"}
-              title={
-                generationPlan.routeReason === "role_fallback"
-                  ? "将使用已配置的备用模型"
-                  : "本次模型路由"
-              }
-              description={`${generationRouteRoleLabel(generationPlan.modelRole)} · ${
-                generationPlan.providerId
-              } / ${generationPlan.modelId} · ${
-                generationPlan.profile?.provider === "ollama"
-                  ? "数据仅发送到本机模型端点"
-                  : generationPlan.routeReason === "local_demo"
-                    ? "内置演示，不外发"
-                    : "所列上下文将发送到外部模型供应商"
-              }${
-                generationPlan.routeFallback === null
-                  ? ""
-                  : `；配置备用 ${generationPlan.routeFallback.providerId} / ${generationPlan.routeFallback.modelId}`
-              }。`}
-            />
+            <details>
+              <summary>AI 分工与隐私详情（高级）</summary>
+              <InlineAlert
+                tone={generationPlan.routeReason === "role_fallback" ? "warning" : "info"}
+                title={
+                  generationPlan.routeReason === "role_fallback"
+                    ? "将使用已配置的备用服务"
+                    : "本次 AI 分工"
+                }
+                description={`${generationRouteRoleLabel(generationPlan.modelRole)} · ${
+                  generationPlan.providerId
+                } / ${generationPlan.modelId} · ${
+                  generationPlan.profile?.provider === "ollama"
+                    ? "数据仅发送到本机 AI 服务"
+                    : generationPlan.routeReason === "local_demo"
+                      ? "内置演示，不外发"
+                      : "本次所需内容将发送到外部 AI 服务"
+                }${
+                  generationPlan.routeFallback === null
+                    ? ""
+                    : `；备用服务 ${generationPlan.routeFallback.providerId} / ${generationPlan.routeFallback.modelId}`
+                }。`}
+              />
+            </details>
+
+            {generationPlan.contextCompilation !== null && (
+              <details>
+                <summary>本次会参考哪些故事内容</summary>
+                <div className="generation-receipt" aria-label="本次故事资料来源">
+                  <div>
+                    <span>已选资料</span>
+                    <strong>
+                      {
+                        generationPlan.contextCompilation.compiled.entries.filter(
+                          ({ included }) => included,
+                        ).length
+                      }{" "}
+                      项
+                    </strong>
+                  </div>
+                  <p>
+                    预计使用{" "}
+                    {generationPlan.contextCompilation.compiled.trace.usedTokens.toLocaleString(
+                      "zh-CN",
+                    )}
+                    /
+                    {generationPlan.contextCompilation.compiled.trace.maximumContextTokens.toLocaleString(
+                      "zh-CN",
+                    )}{" "}
+                    个上下文用量单位；未选资料不会发送给模型。
+                  </p>
+                  <ul>
+                    {generationPlan.contextCompilation.compiled.entries.map((entry) => (
+                      <li key={entry.id}>
+                        <Badge tone={entry.included ? "info" : "neutral"}>
+                          {entry.included ? "已参考" : "因篇幅未使用"}
+                        </Badge>{" "}
+                        <strong>{contextLayerLabel(entry.layer)}</strong>
+                        <span> · 约 {entry.estimatedTokens.toLocaleString("zh-CN")} 单位</span>
+                        <p>{contextSelectionReasonLabel(entry.selectionReason)}</p>
+                        {entry.evidence.length > 0 && (
+                          <small>
+                            来源：
+                            {entry.evidence
+                              .map(
+                                (source) =>
+                                  `${contextSourceTypeLabel(source.sourceType)} · ${source.sourceId}`,
+                              )
+                              .join("；")}
+                          </small>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </details>
+            )}
 
             <ul className="generation-preflight__checks">
               {generationPlan.preflight.checks.map((check) => (
@@ -2426,11 +2975,20 @@ export function EditorPage() {
                     </Button>
                   ) : check.action === "OPEN_MODEL_CENTER" ||
                     check.action === "UPDATE_PRICING" ||
-                    check.action === "RETRY_CONNECTION" ||
-                    check.action === "REDUCE_CONTEXT" ? (
+                    check.action === "RETRY_CONNECTION" ? (
                     <Link className="back-link" to="/settings#model-center">
-                      打开模型中心
+                      设置 AI 服务
                     </Link>
+                  ) : check.action === "REDUCE_CONTEXT" ? (
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        setPreflightOpen(false);
+                        editorRef.current?.focus({ preventScroll: true });
+                      }}
+                    >
+                      返回正文精简内容
+                    </Button>
                   ) : null}
                 </li>
               ))}
@@ -2444,30 +3002,34 @@ export function EditorPage() {
                     {formatCostEstimate(generationEstimate.micros, generationEstimate.currency)}
                   </strong>
                 </div>
-                <dl>
-                  <div>
-                    <dt>输入 / 输出</dt>
-                    <dd>
-                      {generationPlan.preflight.inputTokens.toLocaleString("zh-CN")} /{" "}
-                      {generationPlan.preflight.maximumOutputTokens.toLocaleString("zh-CN")} token
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>估算依据</dt>
-                    <dd>
-                      {generationPlan.tokenEstimateSource === "local_demo"
-                        ? "内置演示，不计费"
-                        : "UTF-8 字节保守估算"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>价格来源</dt>
-                    <dd>
-                      {generationEstimate.pricingVersion} ·{" "}
-                      {generationEstimate.priceUpdatedAt.slice(0, 10)}
-                    </dd>
-                  </div>
-                </dl>
+                <details>
+                  <summary>用量与计价依据（高级）</summary>
+                  <dl>
+                    <div>
+                      <dt>输入 / 输出上限</dt>
+                      <dd>
+                        {generationPlan.preflight.inputTokens.toLocaleString("zh-CN")} /{" "}
+                        {generationPlan.preflight.maximumOutputTokens.toLocaleString("zh-CN")}{" "}
+                        用量单位
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>估算依据</dt>
+                      <dd>
+                        {generationPlan.tokenEstimateSource === "local_demo"
+                          ? "内置演示，不计费"
+                          : "按文本体积保守估算"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>价格来源</dt>
+                      <dd>
+                        {generationEstimate.pricingVersion} ·{" "}
+                        {generationEstimate.priceUpdatedAt.slice(0, 10)}
+                      </dd>
+                    </div>
+                  </dl>
+                </details>
                 {generationPlan.preflight.budget?.alerts.map((alert) => (
                   <InlineAlert
                     key={alert.scope}
@@ -2585,29 +3147,102 @@ function preflightSeverityLabel(severity: "blocking" | "fix_recommended" | "noti
   return severity === "fix_recommended" ? "建议修复" : "提示";
 }
 
+function contextLayerLabel(layer: ContextLayer): string {
+  const labels: Record<ContextLayer, string> = {
+    locked_hard_rules: "已锁定规则",
+    current_task: "本次写作任务",
+    scene_goal: "当前场景目标",
+    pov_known_information: "视角人物已知信息",
+    character_current_state: "人物当前状态",
+    recent_events: "近期正文与事件",
+    related_causal_chain: "相关前因后果",
+    unresolved_foreshadowing: "尚未回收的伏笔",
+    world_setting: "相关世界设定",
+    character_voice_samples: "人物历史说话样例",
+    semantic_retrieval: "语义相关资料",
+    rerank_supplement: "再次核对后补充的资料",
+  };
+  return labels[layer];
+}
+
+function contextSourceTypeLabel(sourceType: ContextEvidenceSourceType): string {
+  const labels: Record<ContextEvidenceSourceType, string> = {
+    user_input: "用户输入",
+    generation_task: "当前任务",
+    scene_plan: "场景计划",
+    chapter: "章节版本",
+    outline: "故事规划",
+    character: "人物设定",
+    relationship: "人物关系",
+    world: "世界设定",
+    timeline_event: "时间线事件",
+    causal_event: "因果事件",
+    foreshadow: "伏笔",
+    story_rule: "故事规则",
+    memory: "AI 记住的内容",
+    search_document: "本地检索资料",
+    rerank_result: "检索复核结果",
+    import: "导入原文",
+    other: "其他创作资料",
+  };
+  return labels[sourceType];
+}
+
+function contextSelectionReasonLabel(reason: string): string {
+  const normalized = reason.toLowerCase();
+  if (normalized.includes("explicitly requested")) {
+    return "这是你本次明确提出的写作任务。";
+  }
+  if (normalized.includes("locked") || normalized.includes("hard constraint")) {
+    return "这是你已确认并锁定的规则，必须优先遵守。";
+  }
+  if (normalized.includes("current saved chapter")) {
+    return "这是与下一段内容直接相连的当前稳定正文。";
+  }
+  if (normalized.includes("local hybrid index")) {
+    return "本地检索发现它与当前情节相关。";
+  }
+  if (normalized.includes("alibaba qwen") || normalized.includes("qwen remote reranker")) {
+    return "你已在 AI 分工中明确允许远程重排；阿里云百炼 Qwen 将这项资料排到了更相关的位置。";
+  }
+  if (normalized.includes("deterministic evidence reranker")) {
+    return "本地证据复核后，它比原始排序中的其他资料更相关。";
+  }
+  if (normalized.includes("branch-scoped")) {
+    return "这是你为当前试演剧情明确填写的分支资料，不会混入主线。";
+  }
+  if (normalized.includes("non-authoritative aid")) {
+    return "这是系统从正文更新的可撤销临时状态，只作参考，不会覆盖正式设定。";
+  }
+  if (normalized.includes("formal") || normalized.includes("user-confirmed")) {
+    return "这是经过你确认的正式故事事实。";
+  }
+  return "系统根据当前任务、证据可靠性和资料优先级选择。";
+}
+
 function preflightCheckLabel(code: string): string {
   const labels: Record<string, string> = {
     MIGRATION_REQUIRED: "本地数据升级尚未完成",
     CHAPTER_NOT_FOUND: "找不到当前章节",
     CHAPTER_UNSAVED: "当前正文尚未稳定保存",
     PROJECT_READONLY: "项目当前为只读",
-    MODEL_GATEWAY_UNAVAILABLE: "原生模型网关不可用",
-    NETWORK_OFFLINE: "远程模型需要网络连接",
-    MODEL_ROUTE_UNRESOLVED: "角色路由没有可核验的精确模型",
-    MODEL_PROFILE_MISSING: "尚未保存模型配置",
-    MODEL_NOT_SELECTED: "尚未选择模型",
-    MODEL_CREDENTIAL_MISSING: "所选模型需要系统凭据库密钥",
-    MODEL_CONNECTION_FAILED: "模型目录连接检查未通过",
-    SELECTED_MODEL_UNAVAILABLE: "所选模型不在当前端点目录中",
-    MODEL_PRICING_MISSING: "缺少模型价格和上下文配置",
+    MODEL_GATEWAY_UNAVAILABLE: "AI 服务暂时不可用",
+    NETWORK_OFFLINE: "联网 AI 服务需要网络连接",
+    MODEL_ROUTE_UNRESOLVED: "没有找到可用的 AI 服务",
+    MODEL_PROFILE_MISSING: "尚未连接 AI 服务",
+    MODEL_NOT_SELECTED: "AI 服务尚未准备好",
+    MODEL_CREDENTIAL_MISSING: "需要补充 AI 服务密钥",
+    MODEL_CONNECTION_FAILED: "AI 服务连接测试未通过",
+    SELECTED_MODEL_UNAVAILABLE: "此前选择的 AI 服务当前不可用",
+    MODEL_PRICING_MISSING: "缺少费用与可处理长度信息",
     MODEL_PRICING_STALE: "价格信息超过 30 天",
-    INPUT_TOO_LARGE: "章节上下文超过原生请求安全上限",
-    CONTEXT_WINDOW_UNKNOWN: "模型上下文上限未知",
-    CONTEXT_WINDOW_EXCEEDED: "预计上下文超过模型上限",
-    CONTEXT_WINDOW_NEAR_LIMIT: "预计上下文接近模型上限",
+    INPUT_TOO_LARGE: "本章内容超过单次生成安全上限",
+    CONTEXT_WINDOW_UNKNOWN: "无法确认本次可处理的内容长度",
+    CONTEXT_WINDOW_EXCEEDED: "本次所需内容超过可处理长度",
+    CONTEXT_WINDOW_NEAR_LIMIT: "本次所需内容接近可处理长度上限",
     BUDGET_WARNING: "预计费用接近或超过预算提醒阈值",
     BUDGET_EXCEEDED: "预计费用超过硬预算",
-    READY: "模型、章节、费用与预算均已检查",
+    READY: "AI 服务、章节、费用与预算均已检查",
   };
   return labels[code] ?? code;
 }
@@ -2628,7 +3263,7 @@ function generationRouteRoleLabel(role: PreparedGenerationPlan["modelRole"]): st
     fast: "快速",
     high_quality: "高质量",
     long_context: "长上下文",
-    embedding: "Embedding",
+    embedding: "语义记忆",
     validation: "检查",
     translation: "翻译",
     local_private: "本地隐私",
@@ -2638,7 +3273,7 @@ function generationRouteRoleLabel(role: PreparedGenerationPlan["modelRole"]): st
 
 function formatAttemptUsage(usage: GenerationAttemptUsage): string {
   if (usage.source === "local_demo") {
-    return `第 ${String(usage.attempt)} 次：内置演示，不产生供应商 token 或费用。`;
+    return `第 ${String(usage.attempt)} 次：内置演示，不产生外部服务用量或费用。`;
   }
   if (
     usage.source === "provider_reported" &&
@@ -2654,12 +3289,12 @@ function formatAttemptUsage(usage: GenerationAttemptUsage): string {
       "zh-CN",
     )}${cached}，输出 ${usage.outputTokens.toLocaleString(
       "zh-CN",
-    )} token；按价格版本重算 ${formatCostEstimate(
+    )} 用量单位；按价格版本重算 ${formatCostEstimate(
       BigInt(usage.usagePricedEstimateMicros),
       usage.currency,
     )}（估算）。`;
   }
-  return `第 ${String(usage.attempt)} 次：供应商未返回可验证 token 回执，保留生成前上界估算。`;
+  return `第 ${String(usage.attempt)} 次：外部服务未返回可验证用量回执，保留生成前上界估算。`;
 }
 
 function formatCostEstimate(micros: bigint, currency: string): string {
@@ -2676,7 +3311,10 @@ function formatMicrosAmount(value: string): string {
 function parseAmountToMicros(value: string): string {
   const normalized = value.trim();
   if (!/^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/u.test(normalized)) {
-    throw new Error("预算金额必须是非负数字，最多保留六位小数。");
+    throw new UiActionError(
+      "GENERATION_BUDGET_INVALID",
+      "预算金额必须是非负数字，最多保留六位小数。请修改金额后重新保存。",
+    );
   }
   const [whole = "0", fraction = ""] = normalized.split(".");
   return (BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, "0"))).toString();

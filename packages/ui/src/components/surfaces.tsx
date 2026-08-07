@@ -1,4 +1,4 @@
-import { forwardRef, type HTMLAttributes, type ReactNode } from "react";
+import { createElement, forwardRef, type HTMLAttributes, type ReactNode } from "react";
 
 import { cn } from "../lib/cn";
 
@@ -26,11 +26,17 @@ export function CardHeader({ className, ...props }: HTMLAttributes<HTMLDivElemen
   return <div {...props} className={cn("ink-card__header", className)} />;
 }
 
-export function CardTitle({ children, className, ...props }: HTMLAttributes<HTMLHeadingElement>) {
-  return (
-    <h3 {...props} className={cn("ink-card__title", className)}>
-      {children}
-    </h3>
+export type HeadingLevel = 1 | 2 | 3 | 4 | 5 | 6;
+
+export type CardTitleProps = HTMLAttributes<HTMLHeadingElement> & {
+  headingLevel?: HeadingLevel;
+};
+
+export function CardTitle({ children, className, headingLevel = 3, ...props }: CardTitleProps) {
+  return createElement(
+    `h${String(headingLevel)}`,
+    { ...props, className: cn("ink-card__title", className) },
+    children,
   );
 }
 

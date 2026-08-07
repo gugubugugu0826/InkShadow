@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { CloudMarketplaceArtifactSummary } from "@inkshadow/contracts/marketplace";
+import { Button, Dialog, InlineAlert } from "@inkshadow/ui";
 
 import {
   type MarketplaceRuntime,
@@ -32,6 +33,11 @@ export function MarketplacePage({
   const [kind, setKind] = useState<"all" | CloudMarketplaceArtifactSummary["kind"]>("all");
   const [busyArtifactId, setBusyArtifactId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [pendingUninstall, setPendingUninstall] = useState<{
+    readonly artifactId: string;
+    readonly title: string;
+  } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -84,9 +90,12 @@ export function MarketplacePage({
   async function uninstall(artifactId: string): Promise<void> {
     setBusyArtifactId(artifactId);
     setActionError(null);
+    setActionNotice(null);
     try {
       await runtime.uninstall(artifactId);
       setSnapshot(await runtime.snapshot());
+      setPendingUninstall(null);
+      setActionNotice("本地模板副本已卸载。");
     } catch (error: unknown) {
       setActionError(readableError(error));
     } finally {
@@ -95,7 +104,7 @@ export function MarketplacePage({
   }
 
   return (
-    <main className="marketplace-page" aria-labelledby="marketplace-title">
+    <div className="marketplace-page" aria-labelledby="marketplace-title">
       <header className="marketplace-page__header">
         <div>
           <p className="marketplace-page__eyebrow">社区资源</p>
@@ -103,7 +112,12 @@ export function MarketplacePage({
           <p>只安装经过签名和结构校验的模板。已安装副本始终由你在本机管理。</p>
         </div>
         {onPublishRequested === undefined ? null : (
-          <button type="button" className="marketplace-page__primary" onClick={onPublishRequested}>
+          <button
+            type="button"
+            className="marketplace-page__primary"
+            disabled={snapshot.remoteState !== "ready"}
+            onClick={onPublishRequested}
+          >
             发布模板
           </button>
         )}
@@ -137,7 +151,11 @@ export function MarketplacePage({
                   type="button"
                   disabled={busyArtifactId === installed.artifact.artifactId}
                   onClick={() => {
-                    void uninstall(installed.artifact.artifactId);
+                    setActionError(null);
+                    setPendingUninstall({
+                      artifactId: installed.artifact.artifactId,
+                      title: installed.artifact.title,
+                    });
                   }}
                 >
                   卸载本地副本
@@ -161,6 +179,7 @@ export function MarketplacePage({
             <span>搜索</span>
             <input
               type="search"
+              disabled={snapshot.remoteState !== "ready"}
               value={query}
               placeholder="标题、作者或标签"
               onChange={(event) => {
@@ -171,6 +190,7 @@ export function MarketplacePage({
           <label>
             <span>类别</span>
             <select
+              disabled={snapshot.remoteState !== "ready"}
               value={kind}
               onChange={(event) => {
                 setKind(
@@ -190,6 +210,15 @@ export function MarketplacePage({
           <p className="marketplace-page__action-error" role="alert">
             {actionError}
           </p>
+        )}
+        {actionNotice === null ? null : (
+          <InlineAlert
+            tone="info"
+            title="本地副本已更新"
+            description={actionNotice}
+            onDismiss={() => setActionNotice(null)}
+            dismissLabel="关闭通知"
+          />
         )}
 
         {snapshot.remoteState === "loading" || snapshot.remoteState === "idle" ? (
@@ -256,7 +285,50 @@ export function MarketplacePage({
           </ul>
         )}
       </section>
-    </main>
+      <Dialog
+        open={pendingUninstall !== null}
+        dismissible={busyArtifactId === null}
+        onOpenChange={(open) => {
+          if (!open && busyArtifactId === null) {
+            setPendingUninstall(null);
+          }
+        }}
+        title="确认卸载本地模板"
+        description={
+          pendingUninstall === null
+            ? undefined
+            : `即将卸载“${pendingUninstall.title}”的本地副本。如果源模板已下架或市场不可用，之后可能无法重新安装。`
+        }
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              disabled={busyArtifactId !== null}
+              onClick={() => setPendingUninstall(null)}
+            >
+              保留副本
+            </Button>
+            <Button
+              variant="danger"
+              loading={busyArtifactId !== null}
+              onClick={() => {
+                if (pendingUninstall !== null) {
+                  void uninstall(pendingUninstall.artifactId);
+                }
+              }}
+            >
+              确认卸载
+            </Button>
+          </>
+        }
+      >
+        <InlineAlert
+          tone="warning"
+          title="卸载前请确认可恢复性"
+          description="卸载只删除当前设备上的副本，不会影响已从模板创建的项目内容；但源模板下架后可能无法再次获取。"
+        />
+      </Dialog>
+    </div>
   );
 }
 

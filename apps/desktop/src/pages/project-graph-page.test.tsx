@@ -38,7 +38,7 @@ describe("ProjectGraphPage feature boundary", () => {
     window.localStorage.clear();
   });
 
-  it("keeps the graph route unreachable when the feature flag is disabled", async () => {
+  it("keeps confirmed story links available when the legacy projection is disabled", async () => {
     const base = createDevelopmentRuntime(window.localStorage);
     const project = await base.useCases.createProject.execute({ name: "雾港档案" });
     if (!project.ok) {
@@ -53,12 +53,13 @@ describe("ProjectGraphPage feature boundary", () => {
 
     renderRoute(runtime, `/projects/${project.value.id}/graph`);
 
-    expect(await screen.findByRole("heading", { name: "雾港档案", level: 1 })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "故事关联", level: 1 })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "故事关系图" })).not.toBeInTheDocument();
+    expect(await screen.findByText("还没有可用的故事关联")).toBeInTheDocument();
     expect(graph.inspectProject).not.toHaveBeenCalled();
   });
 
-  it("exposes the guarded route and rebuild action only with a live graph runtime", async () => {
+  it("preserves the old projection behind an explicit expert query", async () => {
     const base = createDevelopmentRuntime(window.localStorage);
     const project = await base.useCases.createProject.execute({ name: "星河纪事" });
     if (!project.ok) {
@@ -72,7 +73,7 @@ describe("ProjectGraphPage feature boundary", () => {
     };
     const user = userEvent.setup();
 
-    renderRoute(runtime, `/projects/${project.value.id}/graph`);
+    renderRoute(runtime, `/projects/${project.value.id}/graph?legacy=1`);
 
     expect(
       await screen.findByRole("heading", { name: "故事关系图", level: 1 }),
@@ -86,7 +87,7 @@ describe("ProjectGraphPage feature boundary", () => {
     expect(graph.inspectProject).toHaveBeenCalledTimes(2);
   });
 
-  it("shows the workspace entry only when flag and runtime agree", async () => {
+  it("offers the old projection only when flag and runtime agree", async () => {
     const base = createDevelopmentRuntime(window.localStorage);
     const project = await base.useCases.createProject.execute({ name: "潮汐城" });
     if (!project.ok) {
@@ -98,11 +99,12 @@ describe("ProjectGraphPage feature boundary", () => {
       featureFlags: { ...base.featureFlags, graphRag: true },
     };
 
-    renderRoute(runtime, `/projects/${project.value.id}`);
+    renderRoute(runtime, `/projects/${project.value.id}/graph`);
 
-    expect(await screen.findByRole("link", { name: "故事关系图" })).toHaveAttribute(
+    expect(await screen.findByRole("heading", { name: "故事关联", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "打开旧版投影视图" })).toHaveAttribute(
       "href",
-      `/projects/${project.value.id}/graph`,
+      `/projects/${project.value.id}/graph?legacy=1`,
     );
   });
 });

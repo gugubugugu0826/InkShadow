@@ -28,6 +28,7 @@ export interface ModelRoutingStore {
   listRoutes(): Promise<readonly ModelRoleRoute[]>;
   findRoute(role: ModelRouteRole): Promise<ModelRoleRoute | null>;
   saveRoute(input: SaveModelRoleRouteInput): Promise<ModelRoleRoute>;
+  deleteRoute(role: ModelRouteRole, expectedRevision: number): Promise<void>;
 }
 
 interface ModelRoleRouteRow {
@@ -145,6 +146,18 @@ export class TauriModelRoutingStore implements ModelRoutingStore {
       return route;
     });
   }
+
+  public async deleteRoute(roleValue: ModelRouteRole, expectedRevision: number): Promise<void> {
+    const role = validateRole(roleValue);
+    validateRequiredRevision(expectedRevision);
+    const result = await this.executor.execute(
+      "DELETE FROM model_role_routes WHERE role = ? AND revision = ?",
+      [role, expectedRevision],
+    );
+    if (result.rowsAffected !== 1) {
+      throw routingConflict();
+    }
+  }
 }
 
 interface BrowserModelRoutingDatabase {
@@ -208,6 +221,20 @@ export class BrowserDevelopmentModelRoutingStore implements ModelRoutingStore {
     database.routes[route.role] = route;
     this.storage.setItem(DEVELOPMENT_MODEL_ROUTING_KEY, JSON.stringify(database));
     return route;
+  }
+
+  public deleteRoute(roleValue: ModelRouteRole, expectedRevision: number): Promise<void> {
+    return Promise.resolve().then(() => {
+      const role = validateRole(roleValue);
+      validateRequiredRevision(expectedRevision);
+      const database = this.read();
+      const existing = database.routes[role];
+      if (existing?.revision !== expectedRevision) {
+        throw routingConflict();
+      }
+      Reflect.deleteProperty(database.routes, role);
+      this.storage.setItem(DEVELOPMENT_MODEL_ROUTING_KEY, JSON.stringify(database));
+    });
   }
 
   private read(): BrowserModelRoutingDatabase {
@@ -367,6 +394,12 @@ function validateProviderId(value: string): string {
     throw routingError("MODEL_ROUTING_INVALID", "Model route provider identifier is invalid.");
   }
   return value;
+}
+
+function validateRequiredRevision(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw routingError("MODEL_ROUTING_INVALID", "Expected revision is invalid.");
+  }
 }
 
 function validateModelId(value: string): string {

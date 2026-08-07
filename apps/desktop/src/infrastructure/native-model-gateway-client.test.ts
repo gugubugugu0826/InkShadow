@@ -79,6 +79,53 @@ describe("Tauri native model gateway client", () => {
     });
   });
 
+  it("passes Gemini model resource names through to native embedding", async () => {
+    tauriMocks.invoke.mockResolvedValue({
+      provider: "gemini",
+      endpointOrigin: "https://generativelanguage.googleapis.com",
+      model: "models/text-embedding-004",
+      dimension: 3,
+      vectorCount: 1,
+      embeddings: [[0.1, 0.2, 0.3]],
+    });
+    const request = {
+      config: {
+        providerId: "gemini-primary",
+        provider: "gemini" as const,
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+        authentication: "bearer_keyring" as const,
+      },
+      model: "models/text-embedding-004",
+      inputs: ["A safe test input."],
+    };
+
+    await expect(new TauriNativeModelGatewayClient().embed(request)).resolves.toMatchObject({
+      provider: "gemini",
+      model: "models/text-embedding-004",
+      dimension: 3,
+    });
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("embed_native_model", { request });
+  });
+
+  it("rejects Anthropic embedding before invoking the native gateway", async () => {
+    const error = await new TauriNativeModelGatewayClient()
+      .embed({
+        config: {
+          providerId: "claude-primary",
+          provider: "anthropic",
+          baseUrl: "https://api.anthropic.com/v1",
+          authentication: "bearer_keyring",
+        },
+        model: "claude-sonnet",
+        inputs: ["Do not send this input."],
+      })
+      .catch((cause: unknown) => cause);
+
+    expect(error).toMatchObject({ code: "MODEL_OPERATION_UNSUPPORTED" });
+    expect(error).toHaveProperty("message", expect.stringContaining("embedding API"));
+    expect(tauriMocks.invoke).not.toHaveBeenCalled();
+  });
+
   it("rejects malformed native embedding results without echoing input text", async () => {
     tauriMocks.invoke.mockResolvedValue({
       provider: "ollama",
@@ -104,6 +151,214 @@ describe("Tauri native model gateway client", () => {
 
     expect(error).toMatchObject({ code: "MODEL_RESPONSE_INVALID" });
     expect(JSON.stringify(error)).not.toContain("private query must not escape");
+  });
+
+  it("invokes only the explicit Qwen rerank contract and returns index-score metadata", async () => {
+    tauriMocks.invoke.mockResolvedValue({
+      provider: "open_ai_compatible",
+      protocol: "qwen_open_ai_compatible",
+      endpointOrigin: "https://workspace.cn-beijing.maas.aliyuncs.com",
+      model: "qwen3-rerank",
+      rankings: [{ index: 1, relevanceScore: 0.92 }],
+      inputTokens: 28,
+    });
+    const request = {
+      config: {
+        providerId: "qwen-beijing",
+        provider: "open_ai_compatible" as const,
+        baseUrl: "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-api/v1",
+        authentication: "bearer_keyring" as const,
+      },
+      protocol: "qwen_open_ai_compatible" as const,
+      model: "qwen3-rerank",
+      query: "private query",
+      documents: ["private first", "private second"],
+      topN: 2,
+    };
+
+    await expect(new TauriNativeModelGatewayClient().rerank(request)).resolves.toEqual(
+      expect.objectContaining({
+        rankings: [{ index: 1, relevanceScore: 0.92 }],
+        inputTokens: 28,
+      }),
+    );
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("rerank_native_model", { request });
+  });
+
+  it("rejects malformed or unsupported native rerank responses without echoing content", async () => {
+    const client = new TauriNativeModelGatewayClient();
+    const unsupported = await client
+      .rerank({
+        config: {
+          providerId: "gemini",
+          provider: "gemini",
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          authentication: "bearer_keyring",
+        },
+        protocol: "qwen_open_ai_compatible",
+        model: "ranker",
+        query: "must remain private",
+        documents: ["private document"],
+        topN: 1,
+      })
+      .catch((cause: unknown) => cause);
+    expect(unsupported).toMatchObject({ code: "MODEL_OPERATION_UNSUPPORTED" });
+    expect(tauriMocks.invoke).not.toHaveBeenCalled();
+
+    tauriMocks.invoke.mockResolvedValue({
+      provider: "open_ai_compatible",
+      protocol: "qwen_open_ai_compatible",
+      endpointOrigin: "https://workspace.cn-beijing.maas.aliyuncs.com",
+      model: "qwen3-rerank",
+      rankings: [
+        { index: 0, relevanceScore: 0.8 },
+        { index: 0, relevanceScore: 0.7 },
+      ],
+      inputTokens: 10,
+    });
+    const malformed = await client
+      .rerank({
+        config: {
+          providerId: "qwen",
+          provider: "open_ai_compatible",
+          baseUrl: "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-api/v1",
+          authentication: "bearer_keyring",
+        },
+        protocol: "qwen_open_ai_compatible",
+        model: "qwen3-rerank",
+        query: "must remain private",
+        documents: ["private document", "private second"],
+        topN: 2,
+      })
+      .catch((cause: unknown) => cause);
+    expect(malformed).toMatchObject({ code: "MODEL_RESPONSE_INVALID" });
+    expect(JSON.stringify(malformed)).not.toContain("must remain private");
+    expect(JSON.stringify(malformed)).not.toContain("private document");
+  });
+
+  it("preserves Gemini models/... identifiers returned by native discovery", async () => {
+    const config = {
+      providerId: "gemini-primary",
+      provider: "gemini" as const,
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      authentication: "bearer_keyring" as const,
+    };
+    tauriMocks.invoke.mockResolvedValue({
+      provider: "gemini",
+      models: [
+        {
+          id: "models/gemini-2.5-pro",
+          displayName: "Gemini 2.5 Pro",
+          sizeBytes: null,
+        },
+      ],
+    });
+
+    await expect(new TauriNativeModelGatewayClient().listModels(config)).resolves.toEqual({
+      provider: "gemini",
+      models: [
+        {
+          id: "models/gemini-2.5-pro",
+          displayName: "Gemini 2.5 Pro",
+          sizeBytes: null,
+        },
+      ],
+    });
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("list_native_models", {
+      request: { config },
+    });
+  });
+
+  it("validates an Anthropic native connection result", async () => {
+    const config = {
+      providerId: "claude-primary",
+      provider: "anthropic" as const,
+      baseUrl: "https://api.anthropic.com/v1",
+      authentication: "bearer_keyring" as const,
+    };
+    tauriMocks.invoke.mockResolvedValue({
+      provider: "anthropic",
+      endpointOrigin: "https://api.anthropic.com",
+      modelCount: 4,
+      latencyMs: 125,
+    });
+
+    await expect(new TauriNativeModelGatewayClient().checkConnection(config)).resolves.toEqual({
+      provider: "anthropic",
+      endpointOrigin: "https://api.anthropic.com",
+      modelCount: 4,
+      latencyMs: 125,
+    });
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("check_native_model_connection", {
+      request: { config },
+    });
+  });
+
+  it("omits Anthropic temperature 1.0 from the native generation request", async () => {
+    let deliver: ((event: TestGenerationEvent) => void) | null = null;
+    tauriMocks.listen.mockImplementation(
+      (
+        _eventName: string,
+        handler: (event: Readonly<{ payload: TestGenerationEvent }>) => void,
+      ) => {
+        deliver = (event) => handler({ payload: event });
+        return Promise.resolve(vi.fn());
+      },
+    );
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command !== "start_native_generation") {
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      }
+      queueMicrotask(() => {
+        deliver?.(event(0, "", { phase: "started" }));
+        deliver?.(event(1, "Claude output", { phase: "delta" }));
+        deliver?.(event(2, "", { phase: "completed", usage: null }));
+      });
+      return Promise.resolve({ generationId: "generation-1", accepted: true });
+    });
+    const request: NativeModelGenerationInput = {
+      ...input(),
+      config: {
+        providerId: "claude-primary",
+        provider: "anthropic",
+        baseUrl: "https://api.anthropic.com/v1",
+        authentication: "bearer_keyring",
+      },
+      model: "claude-sonnet",
+      temperature: 1,
+    };
+
+    await expect(new TauriNativeModelGatewayClient().generate(request)).resolves.toEqual({
+      text: "Claude output",
+      usage: null,
+    });
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("start_native_generation", {
+      request: {
+        generationId: "generation-1",
+        config: request.config,
+        model: "claude-sonnet",
+        messages: request.messages,
+        maxOutputTokens: 128,
+      },
+    });
+  });
+
+  it("rejects a non-default Anthropic temperature before starting a stream", async () => {
+    await expect(
+      new TauriNativeModelGatewayClient().generate({
+        ...input(),
+        config: {
+          providerId: "claude-primary",
+          provider: "anthropic",
+          baseUrl: "https://api.anthropic.com/v1",
+          authentication: "bearer_keyring",
+        },
+        model: "claude-sonnet",
+        temperature: 0.7,
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_OPERATION_UNSUPPORTED" });
+    expect(tauriMocks.listen).not.toHaveBeenCalled();
+    expect(tauriMocks.invoke).not.toHaveBeenCalled();
   });
 
   it("accepts the native zero-based event sequence and accumulates streamed text", async () => {

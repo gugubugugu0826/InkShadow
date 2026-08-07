@@ -11,6 +11,7 @@ export {
 } from "./constants.js";
 export {
   importDocxDocuments,
+  importEpubDocuments,
   importPdfDocuments,
   type BinaryImportOptions,
   type BinaryImportProgress,

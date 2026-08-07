@@ -5,7 +5,12 @@ import {
   type AllowedBundleExtension,
   type AllowedTextExtension,
 } from "./constants.js";
-import { importDocxDocuments, importPdfDocuments, type BinaryImportProgress } from "./binary.js";
+import {
+  importDocxDocuments,
+  importEpubDocuments,
+  importPdfDocuments,
+  type BinaryImportProgress,
+} from "./binary.js";
 import { ImportExportError, type ImportIssue } from "./errors.js";
 import { assertSafeInputFilename, getAllowedImportExtension } from "./filename.js";
 import { parsePortableBundle } from "./portable-bundle.js";
@@ -32,7 +37,7 @@ export type InMemoryImportFile =
     };
 
 export type ImportPreflightFormat =
-  "portable_bundle" | "docx" | "html" | "markdown" | "pdf" | "text" | "mixed" | "unknown";
+  "portable_bundle" | "docx" | "epub" | "html" | "markdown" | "pdf" | "text" | "mixed" | "unknown";
 
 export interface ImportPreflightOptions {
   readonly signal?: AbortSignal;
@@ -113,10 +118,12 @@ function determineFormat(files: readonly CheckedFile[]): ImportPreflightFormat {
   const hasText = files.some(({ extension }) => extension === ".txt");
   const hasHtml = files.some(({ extension }) => extension === ".htm" || extension === ".html");
   const hasDocx = files.some(({ extension }) => extension === ".docx");
+  const hasEpub = files.some(({ extension }) => extension === ".epub");
   const hasPdf = files.some(({ extension }) => extension === ".pdf");
   const kindCount =
     Number(hasBundle) +
     Number(hasDocx) +
+    Number(hasEpub) +
     Number(hasHtml) +
     Number(hasMarkdown) +
     Number(hasPdf) +
@@ -130,6 +137,9 @@ function determineFormat(files: readonly CheckedFile[]): ImportPreflightFormat {
   }
   if (hasDocx) {
     return "docx";
+  }
+  if (hasEpub) {
+    return "epub";
   }
   if (hasHtml) {
     return "html";
@@ -358,6 +368,9 @@ async function parseCheckedDocument(
 ): Promise<readonly ImportedTextDocument[]> {
   if (checkedFile.extension === ".docx") {
     return importDocxDocuments(checkedFile.file.name, importFileBytes(checkedFile.file), options);
+  }
+  if (checkedFile.extension === ".epub") {
+    return importEpubDocuments(checkedFile.file.name, importFileBytes(checkedFile.file), options);
   }
   if (checkedFile.extension === ".pdf") {
     return importPdfDocuments(checkedFile.file.name, importFileBytes(checkedFile.file), options);

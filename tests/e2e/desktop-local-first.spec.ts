@@ -27,7 +27,7 @@ test("manages a project through rename, archive, trash, and restore", async ({ p
   await renameDialog.getByRole("button", { name: "保存名称" }).click();
   await expect(
     page.getByRole("heading", {
-      level: 3,
+      level: 2,
       name: "生命周期验收长篇·修订",
     }),
   ).toBeVisible();
@@ -36,7 +36,7 @@ test("manages a project through rename, archive, trash, and restore", async ({ p
   await page.getByRole("tab", { name: "已归档" }).click();
   await expect(
     page.getByRole("heading", {
-      level: 3,
+      level: 2,
       name: "生命周期验收长篇·修订",
     }),
   ).toBeVisible();
@@ -47,7 +47,7 @@ test("manages a project through rename, archive, trash, and restore", async ({ p
   await page.getByRole("tab", { name: "回收站" }).click();
   await expect(
     page.getByRole("heading", {
-      level: 3,
+      level: 2,
       name: "生命周期验收长篇·修订",
     }),
   ).toBeVisible();
@@ -58,7 +58,7 @@ test("manages a project through rename, archive, trash, and restore", async ({ p
   await page.getByRole("tab", { name: "进行中" }).click();
   await expect(
     page.getByRole("heading", {
-      level: 3,
+      level: 2,
       name: "生命周期验收长篇·修订",
     }),
   ).toBeVisible();
@@ -77,24 +77,26 @@ test("autosaves, recovers a crash draft, and isolates AI candidates", async ({ b
   await page.reload();
   await expect(page.getByRole("textbox", { name: "章节正文" })).toHaveValue(stableBody);
 
-  await page.getByRole("button", { name: "创建演示候选" }).click();
+  await page.getByRole("button", { name: "生成示例建议" }).click();
   const preflightDialog = page.getByRole("dialog", { name: "生成前检查" });
   await expect(preflightDialog.getByText("检查通过", { exact: true })).toBeVisible();
   await expect(preflightDialog.getByText("USD 0", { exact: true })).toBeVisible();
   await preflightDialog.getByRole("button", { name: "确认并开始" }).click();
   await expect(page.getByRole("textbox", { name: "章节正文" })).toHaveValue(stableBody);
   await expect(page.getByText("等待决定", { exact: true })).toBeVisible();
+  await page.getByText("费用与调用记录（高级）", { exact: true }).click();
   await expect(page.getByText("尝试上界累计估算", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "比较并决定" }).click();
-  const candidateReview = page.getByRole("dialog", { name: "比较候选与稳定正文" });
+  await page.getByRole("button", { name: "比较 AI 建议" }).click();
+  const candidateReview = page.getByRole("dialog", { name: "比较 AI 建议与正文" });
   await candidateReview.getByRole("button", { name: "覆盖全文并创建版本" }).click();
   await expect(page.getByRole("textbox", { name: "章节正文" })).toHaveValue(/【本地演示候选】/);
-  await expect(page.getByRole("button", { name: "继续生成候选" })).toBeVisible();
+  const assistant = page.getByRole("complementary", { name: "AI 创作助手" });
+  await expect(assistant.getByRole("button", { name: "继续创作" })).toBeVisible();
 
   await page.getByRole("button", { name: "版本历史" }).click();
   const versionDialog = page.getByRole("dialog", { name: "版本历史" });
   await expect(versionDialog.getByText("版本 3", { exact: true })).toBeVisible();
-  await expect(versionDialog.getByText("接受候选", { exact: true })).toBeVisible();
+  await expect(versionDialog.getByText("接受 AI 建议", { exact: true })).toBeVisible();
   await versionDialog.getByRole("button", { name: "关闭", exact: true }).last().click();
 
   const recoveryBody = `${await page
@@ -153,7 +155,7 @@ test("autosaves, recovers a crash draft, and isolates AI candidates", async ({ b
     await expect(recoveredPage.getByRole("textbox", { name: "章节正文" })).toHaveValue(
       recoveryBody,
     );
-    await recoveredPage.getByRole("button", { name: "手动保存" }).click();
+    await recoveredPage.getByRole("button", { name: "保存正文" }).click();
     await expect(recoveredPage.getByRole("button", { name: "已保存到本地" })).toBeVisible();
   } finally {
     await restartedContext.close();
@@ -166,8 +168,21 @@ test("imports into the first chapter and exports validated artifacts and diagnos
   await createProject(page, "导入导出验收长篇");
   await page.getByRole("link", { name: "打开" }).click();
   await createChapter(page, "第一章");
-  await page.getByRole("textbox", { name: "章节正文" }).fill("这是用于导出校验的正文。");
-  await page.getByRole("button", { name: "手动保存" }).click();
+  const exportBody = "这是用于导出校验的正文。";
+  await page.getByRole("textbox", { name: "章节正文" }).fill(exportBody);
+  await expect
+    .poll(
+      async () =>
+        inspectRecoveryPersistence(
+          await page.evaluate(
+            (storageKey) => window.localStorage.getItem(storageKey),
+            DEVELOPMENT_DATABASE_KEY,
+          ),
+          exportBody,
+        ).stableCommitted,
+      { message: "export body should be committed before opening settings" },
+    )
+    .toBe(true);
   await page.getByRole("link", { name: "设置", exact: true }).click();
 
   const markdownDownloadPromise = page.waitForEvent("download");
@@ -254,16 +269,16 @@ test("imports into the first chapter and exports validated artifacts and diagnos
   await expect(page.getByRole("heading", { level: 1, name: "安全导入" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "章节正文" })).toHaveValue(/可预览正文/u);
 
-  await page.getByRole("link", { name: "项目", exact: true }).click();
+  await page.getByRole("link", { name: "作品库", exact: true }).click();
   await expect(
     page.getByRole("heading", {
-      level: 3,
+      level: 2,
       name: "导入导出验收长篇",
     }),
   ).toHaveCount(1);
   await expect(
     page.getByRole("heading", {
-      level: 3,
+      level: 2,
       name: "安全导入验收长篇",
     }),
   ).toHaveCount(1);
@@ -286,7 +301,7 @@ async function createProject(page: Page, name: string): Promise<void> {
   const dialog = page.getByRole("dialog", { name: "新建项目" });
   await dialog.getByRole("textbox", { name: "项目名称" }).fill(name);
   await dialog.getByRole("button", { name: "创建项目" }).click();
-  await expect(page.getByRole("heading", { level: 3, name })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 2, name })).toBeVisible();
 }
 
 async function createChapter(page: Page, title: string): Promise<void> {

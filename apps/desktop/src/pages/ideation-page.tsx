@@ -633,7 +633,7 @@ export function IdeationPage({
   }
 
   return (
-    <main className="desktop-page ideation-page">
+    <div className="desktop-page ideation-page">
       <IdeationHeading />
 
       {!online && (
@@ -713,7 +713,7 @@ export function IdeationPage({
           onReturn={returnToDraftList}
         />
       )}
-    </main>
+    </div>
   );
 }
 
@@ -743,6 +743,16 @@ function IdeationLanding(props: {
   readonly setGuidedName: (value: string) => void;
   readonly setQuickForm: (value: QuickForm) => void;
 }) {
+  const targetWords = Number(props.quickForm.targetWords);
+  const quickFormInvalid =
+    props.quickForm.projectName.trim().length === 0 ||
+    props.quickForm.genre.trim().length === 0 ||
+    props.quickForm.protagonistType.trim().length === 0 ||
+    props.quickForm.idea.trim().length === 0 ||
+    !Number.isSafeInteger(targetWords) ||
+    targetWords < 1_000 ||
+    targetWords > 20_000_000;
+
   return (
     <div className="ideation-page__landing">
       <section className="ideation-page__drafts" aria-labelledby="active-ideation-drafts">
@@ -831,7 +841,7 @@ function IdeationLanding(props: {
       <div className="ideation-page__creation-grid">
         <Card>
           <CardHeader>
-            <CardTitle>引导开书</CardTitle>
+            <CardTitle headingLevel={2}>引导开书</CardTitle>
             <CardDescription>创建一份全空白九步草稿，由你逐项决定或明确跳过。</CardDescription>
           </CardHeader>
           <CardContent>
@@ -841,6 +851,7 @@ function IdeationLanding(props: {
                   <Input
                     {...fieldProps}
                     value={props.guidedName}
+                    required
                     maxLength={120}
                     disabled={props.busy !== null}
                     onChange={(event) => props.setGuidedName(event.currentTarget.value)}
@@ -860,9 +871,9 @@ function IdeationLanding(props: {
 
         <Card>
           <CardHeader>
-            <CardTitle>快速开书</CardTitle>
+            <CardTitle headingLevel={2}>快速开书</CardTitle>
             <CardDescription>
-              只映射你明确填写的内容；其余步骤仍保持 pending，必须后续完成或跳过。
+              只映射你明确填写的内容；其余步骤仍保持待处理，必须后续完成或跳过。
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -872,6 +883,7 @@ function IdeationLanding(props: {
                   label="项目名称"
                   value={props.quickForm.projectName}
                   required
+                  disabled={props.busy !== null}
                   onChange={(projectName) =>
                     props.setQuickForm({ ...props.quickForm, projectName })
                   }
@@ -880,12 +892,14 @@ function IdeationLanding(props: {
                   label="类型"
                   value={props.quickForm.genre}
                   required
+                  disabled={props.busy !== null}
                   onChange={(genre) => props.setQuickForm({ ...props.quickForm, genre })}
                 />
                 <QuickField
                   label="主角类型"
                   value={props.quickForm.protagonistType}
                   required
+                  disabled={props.busy !== null}
                   onChange={(protagonistType) =>
                     props.setQuickForm({ ...props.quickForm, protagonistType })
                   }
@@ -899,6 +913,7 @@ function IdeationLanding(props: {
                       max={20_000_000}
                       step={1_000}
                       value={props.quickForm.targetWords}
+                      required
                       disabled={props.busy !== null}
                       onChange={(event) =>
                         props.setQuickForm({
@@ -915,6 +930,7 @@ function IdeationLanding(props: {
                       <Textarea
                         {...fieldProps}
                         value={props.quickForm.idea}
+                        required
                         maxLength={4_000}
                         currentLength={props.quickForm.idea.length}
                         disabled={props.busy !== null}
@@ -932,6 +948,7 @@ function IdeationLanding(props: {
                   <QuickField
                     label="风格"
                     value={props.quickForm.style}
+                    disabled={props.busy !== null}
                     onChange={(style) => props.setQuickForm({ ...props.quickForm, style })}
                   />
                 </div>
@@ -939,7 +956,7 @@ function IdeationLanding(props: {
               <Button
                 type="submit"
                 loading={props.busy === "create-quick"}
-                disabled={props.busy !== null}
+                disabled={props.busy !== null || quickFormInvalid}
               >
                 创建快速草稿
               </Button>
@@ -955,6 +972,7 @@ function QuickField(props: {
   readonly label: string;
   readonly value: string;
   readonly required?: boolean;
+  readonly disabled?: boolean;
   readonly onChange: (value: string) => void;
 }) {
   return (
@@ -963,6 +981,8 @@ function QuickField(props: {
         <Input
           {...fieldProps}
           value={props.value}
+          required={props.required === true}
+          disabled={props.disabled === true}
           maxLength={4_000}
           onChange={(event) => props.onChange(event.currentTarget.value)}
         />
@@ -1042,7 +1062,7 @@ function IdeationWorkspace(props: {
                 <p className="ideation-step-card__number">
                   第 {currentIndex + 1} / {IDEATION_STEP_KEYS.length} 步
                 </p>
-                <CardTitle>{details.label}</CardTitle>
+                <CardTitle headingLevel={2}>{details.label}</CardTitle>
                 <CardDescription>{details.prompt}</CardDescription>
               </div>
               <div className="ideation-step-card__badges">
@@ -1128,7 +1148,7 @@ function IdeationWorkspace(props: {
         <Card className="ideation-suggestion-card">
           <CardHeader>
             <div className="card-heading-row">
-              <CardTitle>本地结构建议</CardTitle>
+              <CardTitle headingLevel={2}>本地结构建议</CardTitle>
               <Badge tone="neutral">未调用模型</Badge>
             </div>
             <CardDescription>
@@ -1213,7 +1233,7 @@ function IdeationWorkspace(props: {
             <span>
               {props.pendingCount === 0
                 ? "九步均已完成或明确跳过，可以创建。"
-                : `还有 ${String(props.pendingCount)} 个 pending 步骤，创建保持禁用。`}
+                : `还有 ${String(props.pendingCount)} 个待处理步骤，创建保持禁用。`}
             </span>
           </div>
           <Button

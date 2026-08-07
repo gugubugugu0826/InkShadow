@@ -170,7 +170,7 @@ export function getAllowedImportExtension(
 
   throw new ImportExportError(
     "IMPORT_EXTENSION_FORBIDDEN",
-    "Only InkShadow JSON bundles, DOCX, text-based PDF, inert HTML, Markdown, and plain text are accepted here.",
+    "Only InkShadow JSON bundles, DOCX, EPUB, text-based PDF, inert HTML, Markdown, and plain text are accepted here.",
     { fileName },
   );
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Project, ProjectStatus } from "@inkshadow/domain";
 import {
   Badge,
@@ -19,6 +19,7 @@ import {
   TabsContent,
   TabsList,
   TabsTrigger,
+  useToast,
 } from "@inkshadow/ui";
 import { Link } from "react-router-dom";
 
@@ -45,6 +46,8 @@ function formatDate(value: string): string {
 export function ProjectsPage() {
   const runtime = useRuntime();
   const online = useOnlineStatus();
+  const { toast } = useToast();
+  const loadRequestRef = useRef(0);
   const [status, setStatus] = useState<ProjectStatus>("active");
   const [search, setSearch] = useState("");
   const [projects, setProjects] = useState<readonly Project[]>([]);
@@ -63,11 +66,16 @@ export function ProjectsPage() {
   const [pendingProjectId, setPendingProjectId] = useState<string | null>(null);
 
   const loadProjects = useCallback(async () => {
+    const requestId = loadRequestRef.current + 1;
+    loadRequestRef.current = requestId;
     setPageState("loading");
     const result = await runtime.useCases.listProjects.execute({
       statuses: [status],
       search,
     });
+    if (requestId !== loadRequestRef.current) {
+      return;
+    }
     if (!result.ok) {
       setLoadError(result.error);
       setPageState("fatal_error");
@@ -121,6 +129,29 @@ export function ProjectsPage() {
       setPageState("fatal_error");
       return;
     }
+    const actionMessages = {
+      archive: { title: "项目已归档", description: "项目保持可读，可随时恢复编辑。" },
+      unarchive: { title: "项目已恢复编辑", description: "项目已回到进行中列表。" },
+      trash: { title: "项目已移到回收站", description: "项目将在回收站保留 30 天。" },
+      restore: { title: "项目已恢复", description: "项目已回到进行中列表。" },
+    } as const;
+    const message = actionMessages[action];
+    toast({
+      title: message.title,
+      description: message.description,
+      tone: "success",
+      ...(action === "trash"
+        ? {
+            action: {
+              label: "撤销",
+              onClick: () => {
+                setStatus("active");
+                void runLifecycleAction(project, "restore");
+              },
+            },
+          }
+        : {}),
+    });
     await loadProjects();
   }
 
@@ -206,8 +237,11 @@ export function ProjectsPage() {
               preserveContent={false}
               fallbacks={{
                 empty:
-                  status === "active" && search.length === 0 ? (
-                    <FirstLaunchState onCreate={() => setCreateOpen(true)} />
+                  tabStatus === "active" && status === "active" && search.length === 0 ? (
+                    <FirstLaunchState
+                      titleId={`first-launch-title-${tabStatus}`}
+                      onCreate={() => setCreateOpen(true)}
+                    />
                   ) : (
                     <EmptyState
                       kind={search.length > 0 ? "no_results" : "no_data"}
@@ -215,7 +249,22 @@ export function ProjectsPage() {
                       description={
                         search.length > 0
                           ? "尝试缩短搜索词，或切换项目状态。"
-                          : "这里暂时没有项目。"
+                          : tabStatus === "archived"
+                            ? "还没有归档项目。可返回进行中的项目继续写作。"
+                            : "回收站为空。可返回进行中的项目，或新建一本书。"
+                      }
+                      primaryAction={
+                        search.length > 0
+                          ? { label: "清除搜索", onClick: () => setSearch("") }
+                          : tabStatus === "archived"
+                            ? { label: "查看进行中", onClick: () => setStatus("active") }
+                            : {
+                                label: "新建项目",
+                                onClick: () => {
+                                  setStatus("active");
+                                  setCreateOpen(true);
+                                },
+                              }
                       }
                     />
                   ),
@@ -238,7 +287,7 @@ export function ProjectsPage() {
                     <Card key={project.id}>
                       <CardHeader>
                         <div className="card-heading-row">
-                          <CardTitle>{project.name}</CardTitle>
+                          <CardTitle headingLevel={2}>{project.name}</CardTitle>
                           <Badge
                             tone={
                               project.status === "active"
@@ -342,7 +391,11 @@ export function ProjectsPage() {
             <Button variant="secondary" onClick={() => setCreateOpen(false)}>
               取消
             </Button>
-            <Button loading={submitting} onClick={() => void createProject()}>
+            <Button
+              loading={submitting}
+              disabled={projectName.trim().length === 0}
+              onClick={() => void createProject()}
+            >
               创建项目
             </Button>
           </>
@@ -356,7 +409,12 @@ export function ProjectsPage() {
               maxLength={120}
               onChange={(event) => setProjectName(event.currentTarget.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && !submitting) {
+                if (
+                  event.key === "Enter" &&
+                  !event.nativeEvent.isComposing &&
+                  !submitting &&
+                  projectName.trim().length > 0
+                ) {
                   event.preventDefault();
                   void createProject();
                 }
@@ -415,12 +473,18 @@ export function ProjectsPage() {
   );
 }
 
-function FirstLaunchState({ onCreate }: { readonly onCreate: () => void }) {
+function FirstLaunchState({
+  onCreate,
+  titleId,
+}: {
+  readonly onCreate: () => void;
+  readonly titleId: string;
+}) {
   return (
-    <section className="first-launch" aria-labelledby="first-launch-title">
+    <section className="first-launch" aria-labelledby={titleId}>
       <div className="first-launch__heading">
         <Badge tone="success">无需注册</Badge>
-        <h2 id="first-launch-title">从本地开始创作</h2>
+        <h2 id={titleId}>从本地开始创作</h2>
         <p>项目与正文默认仅保存在此设备；断网也能创建、编辑、恢复和导出。</p>
       </div>
       <div className="first-launch__actions">
@@ -466,7 +530,7 @@ function FirstLaunchState({ onCreate }: { readonly onCreate: () => void }) {
             <CardTitle>恢复备份</CardTitle>
           </CardHeader>
           <CardContent>
-            <p>桌面版会先创建当前数据的回滚副本，再原子恢复 SQLite 备份。</p>
+            <p>桌面版会先创建当前数据的回滚副本，再原子恢复本地数据库（SQLite）备份。</p>
           </CardContent>
           <CardFooter>
             <Link className="button-link" to="/settings#local-maintenance">

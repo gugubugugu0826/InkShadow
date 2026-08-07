@@ -108,6 +108,7 @@ textarea {
 .web-capabilities,
 .web-form-stack,
 .web-project-cards,
+.web-locked-actions,
 .web-recovery-stack,
 .web-editor-content {
   display: grid;
@@ -152,11 +153,13 @@ textarea {
 }
 
 .web-create-card,
+.web-import-card,
 .web-editor-card {
   color: var(--text-primary);
 }
 
-.web-create-card form {
+.web-create-card form,
+.web-import-card form {
   display: contents;
 }
 
@@ -201,6 +204,12 @@ textarea {
 .web-encrypted-project__summary span {
   color: var(--text-secondary);
   font-size: var(--font-caption-size);
+}
+
+.web-project-id {
+  color: var(--text-tertiary);
+  font-size: var(--font-micro-size);
+  overflow-wrap: anywhere;
 }
 
 .web-unlock-form {
@@ -301,6 +310,45 @@ textarea {
   padding-left: var(--space-6);
   color: var(--text-secondary);
   line-height: 1.6;
+}
+
+.web-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.web-dialog-copy {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.web-recovery-project {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-3);
+  border: 0.0625rem solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+}
+
+.web-recovery-project > div {
+  display: grid;
+  grid-template-columns: minmax(6rem, auto) minmax(0, 1fr);
+  gap: var(--space-3);
+}
+
+.web-recovery-project dt {
+  color: var(--text-secondary);
+  font-size: var(--font-caption-size);
+}
+
+.web-recovery-project dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .web-recovery-material {
@@ -404,6 +452,16 @@ textarea {
   }
 
   .web-footer {
+    gap: var(--space-1);
+  }
+
+  .web-dialog-actions,
+  .web-dialog-actions .ink-button {
+    width: 100%;
+  }
+
+  .web-recovery-project > div {
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-1);
   }
 }

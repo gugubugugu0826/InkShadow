@@ -16,8 +16,9 @@ use cloud_session::{
     send_cloud_deletion_credential_request, verify_cloud_identity_email, CloudSessionVaultState,
 };
 use model_gateway::{
-    cancel_native_generation, check_native_model_connection, embed_native_model,
-    list_native_models, start_native_generation, CommandError, ModelGatewayState,
+    cancel_native_generation, check_native_model_connection, choose_native_image_destination,
+    embed_native_model, generate_native_image_to_file, list_native_models, rerank_native_model,
+    start_native_generation, CommandError, ModelGatewayState, NativeImageDestinationState,
 };
 use native_sqlite::{
     native_choose_backup_destination, native_choose_pre_restore_backup_destination,
@@ -103,14 +104,7 @@ fn get_runtime_info() -> RuntimeInfo {
 #[tauri::command]
 fn save_model_secret(provider_id: String, secret: String) -> Result<SecretSummary, CommandError> {
     let secret = Zeroizing::new(secret);
-    if secret.trim().len() < 8 || secret.trim().len() != secret.len() || secret.len() > 16_384 {
-        return Err(CommandError::new(
-            "MODEL_SECRET_INVALID",
-            "The API key format is invalid.",
-            false,
-            vec!["EDIT_API_KEY"],
-        ));
-    }
+    validate_model_secret(secret.as_str())?;
 
     let entry = credential_entry(&provider_id)?;
     entry
@@ -121,6 +115,22 @@ fn save_model_secret(provider_id: String, secret: String) -> Result<SecretSummar
         configured: true,
         last_four: Some(last_four(secret.as_str())),
     })
+}
+
+fn validate_model_secret(secret: &str) -> Result<(), CommandError> {
+    if secret.trim().len() < 8
+        || secret.trim().len() != secret.len()
+        || secret.len() > 16_384
+        || !secret.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+    {
+        return Err(CommandError::new(
+            "MODEL_SECRET_INVALID",
+            "The API key format is invalid.",
+            false,
+            vec!["EDIT_API_KEY"],
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -161,6 +171,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(model_gateway)
+        .manage(NativeImageDestinationState::default())
         .manage(CloudSessionVaultState::default())
         .manage(NativeSqliteState::default())
         .manage(PathTicketState::default())
@@ -198,6 +209,9 @@ pub fn run() {
             check_for_signed_update,
             stage_signed_update,
             embed_native_model,
+            rerank_native_model,
+            choose_native_image_destination,
+            generate_native_image_to_file,
             start_native_generation,
             cancel_native_generation,
             create_device_identity,
@@ -224,4 +238,27 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run InkShadow");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_model_secret;
+
+    #[test]
+    fn model_secret_validation_rejects_control_characters_without_echoing_values() {
+        assert!(validate_model_secret("printable-secret-value").is_ok());
+        for secret in [
+            "secret\nvalue",
+            "secret\rvalue",
+            "secret\0value",
+            "secret\tvalue",
+            " leading-secret",
+            "trailing-secret ",
+        ] {
+            let error = validate_model_secret(secret).expect_err("unsafe secret must fail");
+            let serialized = serde_json::to_string(&error).expect("serialize safe error");
+            assert_eq!(error.code(), "MODEL_SECRET_INVALID");
+            assert!(!serialized.contains(secret));
+        }
+    }
 }

@@ -592,7 +592,7 @@ export function SyncSecurityPage() {
                     <InlineAlert
                       tone="info"
                       title="这个项目尚未建立密钥"
-                      description="下一步会生成独立的 256 位项目密钥、当前设备 envelope 和一次性恢复码。恢复码确认前，密钥保持待确认状态。"
+                      description="下一步会生成独立的 256 位项目密钥、当前设备加密授权和一次性恢复码。恢复码确认前，密钥保持待确认状态。"
                     />
                     <div className="settings-actions">
                       <Button
@@ -974,7 +974,7 @@ export function SyncSecurityPage() {
           }
         }}
         title="重置未确认的密钥草案？"
-        description="这只会删除尚未激活的本地 key envelope 和恢复校验材料；项目正文不受影响，也不会删除任何云端数据。"
+        description="这只会删除尚未激活的本地密钥授权记录和恢复校验材料；项目正文不受影响，也不会删除任何云端数据。"
         footer={
           <>
             <Button
@@ -1169,7 +1169,7 @@ function CloudAccountSecurityCard({
                   <div className="sync-account-section-heading">
                     <div>
                       <h3>可信设备</h3>
-                      <p>{String(trustedDevices.length)} 台仍可访问云项目密钥 envelope</p>
+                      <p>{String(trustedDevices.length)} 台仍有云项目密钥授权</p>
                     </div>
                     <Button variant="secondary" disabled={busy} onClick={() => void load()}>
                       刷新
@@ -1267,7 +1267,7 @@ function CloudAccountSecurityCard({
         title={target?.kind === "device" ? "撤销这台设备？" : "结束这个云会话？"}
         description={
           target?.kind === "device"
-            ? "该设备的活动会话和项目密钥 envelope 会同时失效；重新授权前不能继续同步。"
+            ? "该设备的活动会话和项目密钥授权会同时失效；重新授权前不能继续同步。"
             : "该会话会立即失效，但不会删除本地项目或云端密文。"
         }
         footer={

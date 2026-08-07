@@ -63,6 +63,10 @@ blob-report/
 
 # Local delivery archives
 archive/
+installer/
+
+# External reference repositories and optional experiments
+/distill-novels/
 
 # Repository publication scope
 # Only the root README is published; product/design/execution documents stay local.

@@ -78,6 +78,31 @@ describe("MarketplacePage", () => {
     expect(await screen.findByText(/当前离线。在线目录和新安装暂不可用/)).toBeInTheDocument();
     expect(screen.getByText("The Vanished City")).toBeInTheDocument();
   });
+
+  it("requires confirmation before uninstalling a local copy and reports success", async () => {
+    const installed = installedFixture();
+    const initial: MarketplaceRuntimeSnapshot = {
+      catalog: [],
+      installed: [installed],
+      remoteState: "disabled",
+      remoteError: null,
+    };
+    const fake = fakeRuntime(initial);
+    fake.snapshot.mockResolvedValue({ ...initial, installed: [] });
+    render(<MarketplacePage runtime={fake.runtime} />);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "卸载本地副本" }));
+
+    expect(fake.uninstall).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "确认卸载本地模板" })).toBeVisible();
+    expect(screen.getByText(/源模板已下架或市场不可用/u)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "确认卸载" }));
+
+    expect(fake.uninstall).toHaveBeenCalledWith(ARTIFACT_ID);
+    expect(await screen.findByText("本地模板副本已卸载。")).toBeVisible();
+  });
 });
 
 function fakeRuntime(initialSnapshot: MarketplaceRuntimeSnapshot) {

@@ -13,12 +13,20 @@ import type {
   SearchDocument,
 } from "@inkshadow/search-core";
 
-import type { ModelCenterStore, ModelProfile, NativeProviderKind } from "./model-center-store";
+import type { ModelCenterStore, ModelProfile } from "./model-center-store";
+import {
+  executeModelHubEmbeddingTask,
+  inspectModelHubEmbeddingTask,
+  type ModelHubEmbeddingExecutionDependencies,
+  type ModelHubEmbeddingTaskInspection,
+} from "./model-hub-embedding-service";
+import { ModelHubExecutionError } from "./model-hub-execution-service";
 import type { ModelRoleRoute, ModelRoutingStore } from "./model-routing-store";
 import type {
   NativeEmbeddingGatewayClient,
   NativeEmbeddingResult,
 } from "./native-embedding-gateway";
+import type { NativeGatewayProviderKind } from "./native-model-gateway-contract";
 
 const MAX_DOCUMENTS = 25_000;
 const MAX_BATCH_ITEMS = 32;
@@ -46,7 +54,7 @@ export interface ProjectEmbeddingDiagnostics {
   readonly status: SearchCapabilityStatus;
   readonly reason: ProjectEmbeddingReason;
   readonly providerId: string | null;
-  readonly provider: NativeProviderKind | null;
+  readonly provider: NativeGatewayProviderKind | null;
   readonly model: string | null;
   readonly dimension: number | null;
   readonly embeddingCount: number;
@@ -90,15 +98,29 @@ export interface ProjectSearchVectorService {
   diagnostics(): ProjectEmbeddingDiagnostics;
 }
 
-interface ResolvedEmbeddingProfile {
-  readonly route: ModelRoleRoute;
-  readonly profile: ModelProfile;
+interface ResolvedEmbeddingProfileBase {
+  readonly source: "model_hub" | "legacy";
+  readonly providerId: string;
+  readonly provider: NativeGatewayProviderKind;
   readonly model: string;
   readonly configurationKey: string;
-  readonly endpointOrigin: string;
-  readonly endpointUrl: string;
+  readonly endpointOrigin: string | null;
+  readonly endpointUrl: string | null;
   readonly destination: EmbeddingDestinationKind;
 }
+
+interface ResolvedLegacyEmbeddingProfile extends ResolvedEmbeddingProfileBase {
+  readonly source: "legacy";
+  readonly route: ModelRoleRoute;
+  readonly profile: ModelProfile;
+}
+
+interface ResolvedModelHubEmbeddingProfile extends ResolvedEmbeddingProfileBase {
+  readonly source: "model_hub";
+  readonly inspection: ModelHubEmbeddingTaskInspection;
+}
+
+type ResolvedEmbeddingProfile = ResolvedLegacyEmbeddingProfile | ResolvedModelHubEmbeddingProfile;
 
 interface EmbeddingProfileResolution {
   readonly resolved: ResolvedEmbeddingProfile | null;
@@ -126,6 +148,7 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
     private readonly gateway: NativeEmbeddingGatewayClient,
     private readonly hasher: ContentHasher,
     private readonly clock: Clock,
+    private readonly modelHub: ModelHubEmbeddingExecutionDependencies | null = null,
   ) {}
 
   public diagnostics(): ProjectEmbeddingDiagnostics {
@@ -428,6 +451,21 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
       };
     }
 
+    if (this.modelHub !== null) {
+      try {
+        const inspection = await inspectModelHubEmbeddingTask(this.modelHub, {
+          inputs: [CAPABILITY_PROBE],
+        });
+        return await this.resolveModelHubProfile(inspection);
+      } catch (cause: unknown) {
+        if (
+          safeErrorCode(cause, "MODEL_HUB_PREFLIGHT_FAILED") !== "MODEL_HUB_ROUTE_NOT_CONFIGURED"
+        ) {
+          throw modelHubFailure(cause);
+        }
+      }
+    }
+
     const route = await this.routes.findRoute("embedding");
     if (route === null) {
       return {
@@ -481,9 +519,12 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
       );
     }
     const configurationKey = `embedding-profile:${fingerprint.value}`;
-    const resolved: ResolvedEmbeddingProfile = Object.freeze({
+    const resolved: ResolvedLegacyEmbeddingProfile = Object.freeze({
+      source: "legacy",
       route,
       profile,
+      providerId: profile.providerId,
+      provider: profile.provider,
       model: route.primaryModelId,
       configurationKey,
       endpointOrigin,
@@ -502,20 +543,95 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
     };
   }
 
+  private async resolveModelHubProfile(
+    inspection: ModelHubEmbeddingTaskInspection,
+  ): Promise<EmbeddingProfileResolution> {
+    const configurationKey = await this.modelHubConfigurationKey(inspection);
+    const resolved: ResolvedModelHubEmbeddingProfile = Object.freeze({
+      source: "model_hub",
+      inspection,
+      providerId: inspection.connectionId,
+      provider: inspection.gatewayProvider,
+      model: inspection.modelId,
+      configurationKey,
+      endpointOrigin: null,
+      endpointUrl: null,
+      destination: inspection.dataDestination === "local" ? "local_ollama" : "remote",
+    });
+    return {
+      resolved,
+      diagnostics: diagnosticsFor(resolved, {
+        status: "rebuild_required",
+        reason: "vector_index_not_built",
+      }),
+    };
+  }
+
+  private async modelHubConfigurationKey(
+    inspection: ModelHubEmbeddingTaskInspection,
+  ): Promise<string> {
+    const fingerprint = await this.hasher.sha256(JSON.stringify(inspection.fingerprintMaterial));
+    if (!fingerprint.ok) {
+      throw new ProjectEmbeddingServiceError(
+        "EMBEDDING_CONFIGURATION_FINGERPRINT_FAILED",
+        "The Model Hub embedding configuration could not be fingerprinted.",
+        fingerprint.error.retryable,
+      );
+    }
+    return `embedding-model-hub:${fingerprint.value}`;
+  }
+
   private async callGateway(
     resolved: ResolvedEmbeddingProfile,
     inputs: readonly string[],
   ): Promise<NativeEmbeddingResult> {
     try {
-      return await this.gateway.embed({
-        config: {
-          providerId: resolved.profile.providerId,
-          provider: resolved.profile.provider,
-          baseUrl: resolved.profile.baseUrl,
-          authentication: resolved.profile.authentication,
-        },
-        model: resolved.model,
+      if (resolved.source === "legacy") {
+        await this.assertLegacyFallbackStillAllowed(inputs);
+        return await this.gateway.embed({
+          config: {
+            providerId: resolved.profile.providerId,
+            provider: resolved.profile.provider,
+            baseUrl: resolved.profile.baseUrl,
+            authentication: resolved.profile.authentication,
+          },
+          model: resolved.model,
+          inputs,
+        });
+      }
+      if (this.modelHub === null) {
+        throw new ModelHubExecutionError(
+          "MODEL_HUB_EXECUTION_DEPENDENCIES_MISSING",
+          "Model Hub embedding execution is unavailable in this runtime.",
+        );
+      }
+      const inspected = await inspectModelHubEmbeddingTask(this.modelHub, { inputs });
+      const inspectedConfigurationKey = await this.modelHubConfigurationKey(inspected);
+      if (inspectedConfigurationKey !== resolved.configurationKey) {
+        throw new ModelHubExecutionError(
+          "MODEL_HUB_EMBEDDING_CONFIGURATION_DRIFT",
+          "Embedding configuration changed before provider dispatch.",
+          true,
+        );
+      }
+      return await executeModelHubEmbeddingTask(this.modelHub, {
         inputs,
+        onBeforeDispatch: (selection) => {
+          if (
+            selection.connectionId !== inspected.connectionId ||
+            selection.catalogEntryId !== inspected.catalogEntryId ||
+            selection.modelId !== inspected.modelId ||
+            selection.usedFallback !== inspected.usedFallback ||
+            JSON.stringify(selection.fingerprintMaterial) !==
+              JSON.stringify(inspected.fingerprintMaterial)
+          ) {
+            throw new ModelHubExecutionError(
+              "MODEL_HUB_EMBEDDING_SELECTION_DRIFT",
+              "Embedding route changed before provider dispatch.",
+              true,
+            );
+          }
+        },
       });
     } catch (cause: unknown) {
       throw new ProjectEmbeddingServiceError(
@@ -523,6 +639,25 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
         "The configured embedding provider request failed.",
         safeRetryable(cause),
       );
+    }
+  }
+
+  private async assertLegacyFallbackStillAllowed(inputs: readonly string[]): Promise<void> {
+    if (this.modelHub === null) {
+      return;
+    }
+    try {
+      await inspectModelHubEmbeddingTask(this.modelHub, { inputs });
+      throw new ModelHubExecutionError(
+        "MODEL_HUB_EMBEDDING_CONFIGURATION_DRIFT",
+        "A Model Hub embedding route became available before legacy provider dispatch.",
+        true,
+      );
+    } catch (cause: unknown) {
+      if (safeErrorCode(cause, "MODEL_HUB_PREFLIGHT_FAILED") === "MODEL_HUB_ROUTE_NOT_CONFIGURED") {
+        return;
+      }
+      throw cause;
     }
   }
 
@@ -578,8 +713,8 @@ function validateGatewayResult(
   expectedDimension: number | null,
 ): number {
   if (
-    result.provider !== resolved.profile.provider ||
-    result.endpointOrigin !== resolved.endpointOrigin ||
+    result.provider !== resolved.provider ||
+    (resolved.endpointOrigin !== null && result.endpointOrigin !== resolved.endpointOrigin) ||
     result.model !== resolved.model ||
     result.vectorCount !== expectedCount ||
     result.embeddings.length !== expectedCount ||
@@ -633,8 +768,8 @@ function diagnosticsFor(
   return Object.freeze({
     status: input.status,
     reason: input.reason,
-    providerId: resolved.profile.providerId,
-    provider: resolved.profile.provider,
+    providerId: resolved.providerId,
+    provider: resolved.provider,
     model: resolved.model,
     dimension: input.state?.configuration.dimension ?? null,
     embeddingCount: input.state?.embeddingCount ?? 0,
@@ -702,6 +837,14 @@ function embeddingUnavailable(reason: ProjectEmbeddingReason): ProjectEmbeddingS
   return new ProjectEmbeddingServiceError(
     code,
     "A usable primary embedding route is not configured.",
+  );
+}
+
+function modelHubFailure(cause: unknown): ProjectEmbeddingServiceError {
+  return new ProjectEmbeddingServiceError(
+    safeErrorCode(cause, "MODEL_HUB_PREFLIGHT_FAILED"),
+    "The configured Model Hub embedding route could not be used safely.",
+    safeRetryable(cause),
   );
 }
 

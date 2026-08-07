@@ -1,9 +1,21 @@
 import { AppError } from "@inkshadow/domain";
 import { describe, expect, it } from "vitest";
 
-import { isUiErrorRetryable, normalizeUiError } from "./ui-error";
+import { isUiErrorRetryable, normalizeUiError, UiActionError } from "./ui-error";
 
 describe("normalizeUiError SQLite persistence failures", () => {
+  it("shows only explicitly source-authored recovery messages verbatim", () => {
+    expect(
+      normalizeUiError(
+        new UiActionError("SAFE_RECOVERY", "请返回作品库确认后重试。", "可以安全恢复"),
+      ),
+    ).toEqual({
+      title: "可以安全恢复",
+      description: "请返回作品库确认后重试。",
+      code: "SAFE_RECOVERY",
+    });
+  });
+
   it("gives database-busy failures an actionable stable message", () => {
     expect(
       normalizeUiError(
@@ -78,5 +90,18 @@ describe("normalizeUiError SQLite persistence failures", () => {
         retryable: true,
       }),
     ).toBe(true);
+  });
+
+  it("redacts arbitrary native messages and always gives an actionable next step", () => {
+    const privateDetail = "C:\\Users\\writer\\secret.txt Authorization: Bearer hidden";
+    const normalized = normalizeUiError({
+      code: "UNEXPECTED_NATIVE_FAILURE",
+      message: privateDetail,
+      retryable: false,
+    });
+
+    expect(normalized.description).toContain("请先重试");
+    expect(normalized.description).toContain("脱敏诊断包");
+    expect(JSON.stringify(normalized)).not.toContain(privateDetail);
   });
 });

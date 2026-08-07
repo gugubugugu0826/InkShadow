@@ -17,6 +17,12 @@ import {
   type EncryptedGuestProjectRecordV1,
   type EnvelopeBinding,
 } from "../contracts/encrypted-guest-project";
+import {
+  WEB_GUEST_DRAFT_FORMAT,
+  WEB_GUEST_DRAFT_SCHEMA_VERSION,
+  parseEncryptedGuestDraftRecord,
+  type EncryptedGuestDraftRecordV1,
+} from "../contracts/encrypted-guest-draft";
 import { GuestWorkspaceError } from "../domain/guest-workspace-error";
 import { SessionProjectKeyring } from "../infrastructure/session-project-keyring";
 import { WebCryptoEnvelopeService } from "../infrastructure/web-crypto-envelope-service";
@@ -31,6 +37,12 @@ export interface GuestEncryptedProjectDescriptor {
 export interface GuestProjectSession {
   readonly project: Project;
   readonly chapter: Chapter;
+  readonly recoveredDraft?: RecoveredGuestDraft;
+}
+
+export interface RecoveredGuestDraft {
+  readonly baseRevision: number;
+  readonly content: string;
 }
 
 export interface CreateEncryptedGuestProjectInput {
@@ -55,6 +67,8 @@ export interface SaveEncryptedGuestChapterInput {
   readonly expectedRevision: number;
   readonly content: string;
 }
+
+export const MAX_ENCRYPTED_PROJECT_IMPORT_BYTES = 32 * 1024 * 1024;
 
 export class GuestWorkspaceService {
   readonly #pendingCreations = new Map<UuidV7, PendingEncryptedGuestProject>();
@@ -212,9 +226,10 @@ export class GuestWorkspaceService {
         recoveryMaterial,
       );
       const session = await this.decryptSession(record, projectKey);
+      const recoveredDraft = await this.tryRecoverTemporaryDraft(record, session, projectKey);
       this.assertOperationEpoch(operationEpoch);
       this.keyring.set(projectId, projectKey);
-      return session;
+      return recoveredDraft === null ? session : { ...session, recoveredDraft };
     } catch {
       this.keyring.delete(projectId);
       throw new GuestWorkspaceError(
@@ -259,6 +274,8 @@ export class GuestWorkspaceService {
     );
     await this.store.appendChapter(input.projectId, input.expectedRevision, envelope);
     this.assertOperationEpoch(operationEpoch);
+    await this.deleteTemporaryDraftBestEffort(input.projectId);
+    this.assertOperationEpoch(operationEpoch);
 
     return {
       project: session.project,
@@ -266,9 +283,93 @@ export class GuestWorkspaceService {
     };
   }
 
+  public async preserveTemporaryDraft(input: SaveEncryptedGuestChapterInput): Promise<void> {
+    const operationEpoch = this.#sessionEpoch;
+    const projectKey = this.keyring.get(input.projectId);
+    const record = await this.requireRecord(input.projectId);
+    const session = await this.decryptSession(record, projectKey);
+    if (session.chapter.revision !== input.expectedRevision) {
+      throw new GuestWorkspaceError(
+        "WEB_REVISION_CONFLICT",
+        "章节已出现新版本，无法建立对应当前版本的临时恢复密文。",
+        true,
+      );
+    }
+
+    const recovered = session.chapter.saveContent({
+      content: input.content,
+      expectedRevision: input.expectedRevision,
+      newVersionId: this.ids.next(),
+      now: this.clock.now(),
+    });
+    if (!recovered.ok) {
+      if (recovered.error.code === "NO_CHANGES") {
+        await this.deleteTemporaryDraftBestEffort(input.projectId);
+        return;
+      }
+      throw new GuestWorkspaceError(
+        "WEB_VALIDATION_FAILED",
+        "正文过长或包含无效内容，无法建立临时恢复密文。",
+      );
+    }
+
+    const chapterEnvelope = await this.envelopes.encryptJson(
+      projectKey,
+      chapterBinding(
+        input.projectId,
+        recovered.value.id,
+        record.keyVersion,
+        recovered.value.revision,
+      ),
+      recovered.value.toSnapshot(),
+    );
+    const draft = parseEncryptedGuestDraftRecord({
+      format: WEB_GUEST_DRAFT_FORMAT,
+      schemaVersion: WEB_GUEST_DRAFT_SCHEMA_VERSION,
+      projectId: input.projectId,
+      keyVersion: record.keyVersion,
+      baseContentVersion: input.expectedRevision,
+      chapterEnvelope,
+    });
+    await this.store.putTemporaryDraft(draft);
+    this.assertOperationEpoch(operationEpoch);
+  }
+
   public async exportEncryptedProject(projectId: UuidV7): Promise<string> {
     const record = await this.requireRecord(projectId);
     return JSON.stringify(record, null, 2);
+  }
+
+  public async importEncryptedProject(
+    payload: string,
+    recoveryMaterial: string,
+  ): Promise<GuestProjectSession> {
+    const operationEpoch = this.#sessionEpoch;
+    const record = parseImportedRecord(payload);
+    let projectKey: CryptoKey;
+    let session: GuestProjectSession;
+
+    try {
+      projectKey = await this.envelopes.unlockProjectKey(
+        record.projectId,
+        record.keyVersion,
+        record.recovery,
+        recoveryMaterial,
+      );
+      session = await this.decryptSession(record, projectKey);
+    } catch {
+      this.keyring.delete(record.projectId);
+      throw new GuestWorkspaceError(
+        "WEB_UNLOCK_FAILED",
+        "恢复材料与加密副本不匹配，或加密副本已损坏。没有导入任何项目。",
+      );
+    }
+
+    this.assertOperationEpoch(operationEpoch);
+    await this.store.create(record);
+    this.assertOperationEpoch(operationEpoch);
+    this.keyring.set(record.projectId, projectKey);
+    return session;
   }
 
   public lock(projectId: UuidV7): void {
@@ -318,6 +419,67 @@ export class GuestWorkspaceService {
       latestChapter.contentVersion,
     );
     return { project, chapter };
+  }
+
+  private async tryRecoverTemporaryDraft(
+    record: EncryptedGuestProjectRecordV1,
+    session: GuestProjectSession,
+    projectKey: CryptoKey,
+  ): Promise<RecoveredGuestDraft | null> {
+    let draft: EncryptedGuestDraftRecordV1 | null;
+    try {
+      draft = await this.store.getTemporaryDraft(record.projectId);
+    } catch {
+      return null;
+    }
+    if (draft === null) {
+      return null;
+    }
+
+    const envelope = draft.chapterEnvelope;
+    const matchesCurrentVersion =
+      draft.projectId === record.projectId &&
+      draft.keyVersion === record.keyVersion &&
+      draft.baseContentVersion === session.chapter.revision &&
+      envelope.objectId === session.chapter.id;
+    if (!matchesCurrentVersion || recordContainsNonce(record, envelope.nonce)) {
+      await this.deleteTemporaryDraftBestEffort(record.projectId);
+      return null;
+    }
+
+    try {
+      const value = await this.envelopes.decryptJson(
+        projectKey,
+        envelope,
+        chapterBinding(
+          record.projectId,
+          session.chapter.id,
+          record.keyVersion,
+          session.chapter.revision + 1,
+        ),
+      );
+      const recoveredChapter = rehydrateChapter(
+        value,
+        record.projectId,
+        session.chapter.id,
+        session.chapter.revision + 1,
+      );
+      return {
+        baseRevision: session.chapter.revision,
+        content: recoveredChapter.content,
+      };
+    } catch {
+      await this.deleteTemporaryDraftBestEffort(record.projectId);
+      return null;
+    }
+  }
+
+  private async deleteTemporaryDraftBestEffort(projectId: UuidV7): Promise<void> {
+    try {
+      await this.store.deleteTemporaryDraft(projectId);
+    } catch {
+      // A stale encrypted draft cannot override a newer committed revision.
+    }
   }
 
   private async requireRecord(projectId: UuidV7): Promise<EncryptedGuestProjectRecordV1> {
@@ -464,4 +626,34 @@ function invalidDecryptedPayload(): GuestWorkspaceError {
     "WEB_ENVELOPE_INVALID",
     "解密内容未通过项目领域校验，未载入任何正文。",
   );
+}
+
+function recordContainsNonce(record: EncryptedGuestProjectRecordV1, nonce: string): boolean {
+  return [record.recovery.keyEnvelope, record.projectEnvelope, ...record.chapterEnvelopes].some(
+    (envelope) => envelope.nonce === nonce,
+  );
+}
+
+function parseImportedRecord(payload: string): EncryptedGuestProjectRecordV1 {
+  if (
+    payload.length === 0 ||
+    payload.length > MAX_ENCRYPTED_PROJECT_IMPORT_BYTES ||
+    new TextEncoder().encode(payload).byteLength > MAX_ENCRYPTED_PROJECT_IMPORT_BYTES
+  ) {
+    throw new GuestWorkspaceError(
+      "WEB_VALIDATION_FAILED",
+      "加密副本为空或超过 32 MB，未导入任何内容。",
+    );
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(payload) as unknown;
+  } catch {
+    throw new GuestWorkspaceError(
+      "WEB_ENVELOPE_INVALID",
+      "所选文件不是有效的墨影加密副本，未导入任何内容。",
+    );
+  }
+  return parseEncryptedGuestProjectRecord(value);
 }

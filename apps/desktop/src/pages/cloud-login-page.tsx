@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
-import { Card, CardContent } from "@inkshadow/ui";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Card, CardContent, InlineAlert } from "@inkshadow/ui";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 
 import { useRuntime } from "../runtime-context";
+import { normalizeUiError } from "../infrastructure/ui-error";
 import { CloudIdentityAuthFlow } from "./cloud-identity-auth-flow";
 
 export function CloudLoginPage() {
@@ -10,46 +11,63 @@ export function CloudLoginPage() {
   const navigate = useNavigate();
   const [submitting, setSubmitting] = useState(false);
   const [checkingSession, setCheckingSession] = useState(true);
+  const [sessionError, setSessionError] = useState<unknown>(null);
+  const sessionRequestRef = useRef(0);
   const cloudIdentity =
     runtime.featureFlags.cloudIdentity && runtime.cloudIdentity?.available === true
       ? runtime.cloudIdentity
       : null;
 
-  useEffect(() => {
+  const checkSession = useCallback(async (): Promise<void> => {
     if (cloudIdentity === null) {
       return;
     }
-    let active = true;
-    void cloudIdentity
-      .getStatus()
-      .then((status) => {
-        if (!active) {
-          return;
-        }
-        if (status.configured) {
-          void navigate("/projects", { replace: true });
-          return;
-        }
+    const requestId = sessionRequestRef.current + 1;
+    sessionRequestRef.current = requestId;
+    setCheckingSession(true);
+    setSessionError(null);
+    try {
+      const status = await cloudIdentity.getStatus();
+      if (requestId !== sessionRequestRef.current) {
+        return;
+      }
+      if (status.configured) {
+        void navigate("/projects", { replace: true });
+        return;
+      }
+    } catch (reason: unknown) {
+      if (requestId === sessionRequestRef.current) {
+        setSessionError(reason);
+      }
+    } finally {
+      if (requestId === sessionRequestRef.current) {
         setCheckingSession(false);
-      })
-      .catch(() => {
-        if (active) {
-          void navigate("/start", { replace: true });
-        }
-      });
+      }
+    }
+  }, [cloudIdentity, navigate]);
+
+  useEffect(() => {
+    let active = true;
+    queueMicrotask(() => {
+      if (active) {
+        void checkSession();
+      }
+    });
     return () => {
       active = false;
+      sessionRequestRef.current += 1;
     };
-  }, [cloudIdentity, navigate]);
+  }, [checkSession]);
 
   if (cloudIdentity === null) {
     return <Navigate to="/start" replace />;
   }
   const activeCloudIdentity = cloudIdentity;
+  const normalizedSessionError = sessionError === null ? null : normalizeUiError(sessionError);
 
   if (checkingSession) {
     return (
-      <main className="cloud-login-page" data-surface="dark">
+      <main className="cloud-login-page">
         <p className="desktop-route-loading" role="status">
           正在检查本机云会话
         </p>
@@ -58,7 +76,7 @@ export function CloudLoginPage() {
   }
 
   return (
-    <main className="cloud-login-page" data-surface="dark">
+    <main className="cloud-login-page">
       <section className="cloud-login-page__intro" aria-labelledby="cloud-login-heading">
         <Link
           className="back-link"
@@ -85,6 +103,14 @@ export function CloudLoginPage() {
 
       <Card className="cloud-login-page__card">
         <CardContent>
+          {normalizedSessionError !== null && (
+            <InlineAlert
+              tone="error"
+              title="无法检查云会话"
+              description={`${normalizedSessionError.description} 本地项目仍可正常使用。`}
+              action={{ label: "重新检查", onClick: () => void checkSession() }}
+            />
+          )}
           <CloudIdentityAuthFlow
             service={activeCloudIdentity}
             onAuthenticated={() => void navigate("/projects", { replace: true })}

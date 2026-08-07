@@ -8,6 +8,7 @@ coverage/
 target/
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
+apps/desktop/public/favicon.svg
 playwright-report/
 test-results/
 .tmp-*/

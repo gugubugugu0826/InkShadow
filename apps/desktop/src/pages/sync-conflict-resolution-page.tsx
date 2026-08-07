@@ -231,13 +231,18 @@ export function SyncConflictResolutionPage({
         </Card>
       ) : (
         <div className="sync-conflict-page__workspace">
-          <nav className="sync-conflict-page__list" aria-label="待处理同步冲突">
+          <nav
+            className="sync-conflict-page__list"
+            aria-label="待处理同步冲突"
+            aria-busy={resolving}
+          >
             {conflicts.map((item, index) => (
               <button
                 key={item.conflictId}
                 type="button"
                 className="sync-conflict-page__list-item"
                 aria-current={selectedConflictId === item.conflictId ? "true" : undefined}
+                disabled={resolving}
                 onClick={() => {
                   setSelectedConflictId(item.conflictId);
                 }}
@@ -251,7 +256,7 @@ export function SyncConflictResolutionPage({
             ))}
           </nav>
 
-          <main className="sync-conflict-page__review">
+          <section className="sync-conflict-page__review" aria-label="冲突版本对比与处理">
             {reviewLoading ? (
               <p role="status">正在解密并核对版本…</p>
             ) : review === null ? (
@@ -387,7 +392,7 @@ export function SyncConflictResolutionPage({
                 )}
               </>
             )}
-          </main>
+          </section>
         </div>
       )}
     </section>

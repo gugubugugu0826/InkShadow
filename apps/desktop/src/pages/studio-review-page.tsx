@@ -517,7 +517,7 @@ export function StudioReviewPage({
     return (
       <ReviewState
         title="审阅密文损坏"
-        description="审阅正文未通过哈希、AAD 或 AES-GCM 认证，已停止显示该记录。"
+        description="审阅正文未通过完整性或加密认证，已停止显示该记录。"
         code={failure?.code}
         action={{ label: "重新加载", onClick: () => void load() }}
       />

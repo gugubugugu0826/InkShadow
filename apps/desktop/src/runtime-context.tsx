@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { ErrorState, PageStateBoundary } from "@inkshadow/ui";
 
+import { AppearancePreferenceProvider } from "./appearance-preference";
 import type { DesktopRuntime } from "./infrastructure/runtime";
 import { isUiErrorRetryable, normalizeUiError } from "./infrastructure/ui-error";
 
@@ -17,7 +18,20 @@ export interface RuntimeProviderProps {
   readonly factory?: () => Promise<DesktopRuntime>;
 }
 
-export function RuntimeProvider({
+export function RuntimeProvider({ children, factory, runtime }: RuntimeProviderProps) {
+  return (
+    <AppearancePreferenceProvider>
+      <RuntimeProviderContent
+        {...(factory === undefined ? {} : { factory })}
+        {...(runtime === undefined ? {} : { runtime })}
+      >
+        {children}
+      </RuntimeProviderContent>
+    </AppearancePreferenceProvider>
+  );
+}
+
+function RuntimeProviderContent({
   children,
   factory = createDefaultDesktopRuntime,
   runtime: providedRuntime,
@@ -68,7 +82,7 @@ export function RuntimeProvider({
         }
       : {};
     return (
-      <main className="desktop-bootstrap" data-surface="dark">
+      <main className="desktop-bootstrap">
         <ErrorState
           title="无法启动墨影"
           description={normalized.description}
@@ -81,7 +95,7 @@ export function RuntimeProvider({
 
   if (runtime === null) {
     return (
-      <main className="desktop-bootstrap" data-surface="dark">
+      <main className="desktop-bootstrap">
         <PageStateBoundary state="loading" loadingLabel="正在打开本地工作区">
           <span />
         </PageStateBoundary>

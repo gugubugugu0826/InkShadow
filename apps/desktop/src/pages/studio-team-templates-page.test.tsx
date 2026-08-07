@@ -32,9 +32,9 @@ describe("encrypted team-template injected page", () => {
       />,
     );
 
-    expect(screen.getByText("Loading encrypted team templates…")).toBeVisible();
+    expect(screen.getByText("正在读取加密团队模板…")).toBeVisible();
     release?.(listView([]));
-    expect(await screen.findByText("No team templates yet")).toBeVisible();
+    expect(await screen.findByText("还没有团队模板")).toBeVisible();
 
     view.rerender(
       <StudioTeamTemplatesPage
@@ -45,8 +45,10 @@ describe("encrypted team-template injected page", () => {
         expectedProjectRevision={1}
       />,
     );
-    expect(await screen.findByText("Team templates are offline")).toBeVisible();
-    expect(screen.getByText(/No remote success is simulated/u)).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: "团队模板当前离线", level: 1 }),
+    ).toBeVisible();
+    expect(screen.getByText(/离线时不会伪造远端成功/u)).toBeVisible();
   });
 
   it("does not issue a cloud read when the role has no template capability", async () => {
@@ -63,7 +65,9 @@ describe("encrypted team-template injected page", () => {
       />,
     );
 
-    expect(await screen.findByText("No team-template access")).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: "无权访问团队模板", level: 1 }),
+    ).toBeVisible();
     expect(coordinator.listTemplates).not.toHaveBeenCalled();
   });
 
@@ -83,10 +87,10 @@ describe("encrypted team-template injected page", () => {
     );
 
     expect(await screen.findByText("Assigned private title")).toBeVisible();
-    expect(screen.getByText("Read-only template history")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Apply once to project" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Clone as draft" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Export version history" })).toBeVisible();
+    expect(screen.getByText("模板历史为只读")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "应用一次到项目" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "克隆为草稿" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "导出版本历史" })).toBeVisible();
   });
 
   it("renders per-item decryption errors without inventing or leaking a title", async () => {
@@ -104,10 +108,10 @@ describe("encrypted team-template injected page", () => {
       />,
     );
 
-    expect(await screen.findByText("Unable to decrypt this template")).toBeVisible();
+    expect(await screen.findByText("无法解密此模板")).toBeVisible();
     expect(screen.getByText("TEAM_TEMPLATE_CIPHERTEXT_CORRUPT")).toBeVisible();
     expect(screen.queryByText("Fallback template title")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Apply once to project" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "应用一次到项目" })).toBeDisabled();
   });
 
   it("keeps history readable while a rollout flag removes every mutation control", async () => {
@@ -126,11 +130,9 @@ describe("encrypted team-template injected page", () => {
     );
 
     expect(await screen.findByText("Historical title")).toBeVisible();
-    expect(screen.getByText("Template changes are disabled")).toBeVisible();
-    expect(
-      screen.queryByRole("button", { name: "Encrypt and create draft" }),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Apply once to project" })).not.toBeInTheDocument();
+    expect(screen.getByText("团队模板变更尚未启用")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "加密并创建草稿" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "应用一次到项目" })).not.toBeInTheDocument();
   });
 
   it("retries only the cloud receipt after a durable local application", async () => {
@@ -171,9 +173,9 @@ describe("encrypted team-template injected page", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Apply once to project" }));
-    expect(await screen.findByText(/The template is committed locally/u)).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Retry cloud receipt only" }));
+    await user.click(await screen.findByRole("button", { name: "应用一次到项目" }));
+    expect(await screen.findByText(/模板已安全提交到本地/u)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "仅重试云端回执" }));
 
     await waitFor(() => expect(coordinator.retryApplicationRecord).toHaveBeenCalledTimes(1));
     expect(coordinator.applyPublished).toHaveBeenCalledTimes(1);
@@ -200,7 +202,7 @@ describe("encrypted team-template injected page", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Export version history" }));
+    await user.click(await screen.findByRole("button", { name: "导出版本历史" }));
 
     expect(coordinator.exportTemplateHistory).toHaveBeenCalledWith(
       AUTHOR,

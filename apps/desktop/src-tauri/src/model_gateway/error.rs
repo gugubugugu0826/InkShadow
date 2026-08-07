@@ -88,6 +88,15 @@ impl CommandError {
         )
     }
 
+    pub(crate) fn operation_unsupported() -> Self {
+        Self::new(
+            "MODEL_OPERATION_UNSUPPORTED",
+            "This provider protocol does not support the requested model operation.",
+            false,
+            vec!["SWITCH_MODEL", "EDIT_MODEL_CONFIG"],
+        )
+    }
+
     pub(crate) fn input_limit_exceeded() -> Self {
         Self::new(
             "MODEL_INPUT_LIMIT_EXCEEDED",

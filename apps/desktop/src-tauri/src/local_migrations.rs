@@ -230,6 +230,62 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0029_community_marketplace_installs.sql"
                 ),
             ),
+            migration(
+                33,
+                "create resumable creative journeys and ordered turns",
+                include_str!(
+                    "../../../../packages/data/migrations/0030_creative_journeys.sql"
+                ),
+            ),
+            migration(
+                34,
+                "create Model Hub connections, routing evidence, and invocation facts",
+                include_str!(
+                    "../../../../packages/data/migrations/0031_model_hub.sql"
+                ),
+            ),
+            migration(
+                35,
+                "create unified evidence-backed story facts and legacy links",
+                include_str!(
+                    "../../../../packages/data/migrations/0032_unified_story_facts.sql"
+                ),
+            ),
+            migration(
+                36,
+                "create evidence-backed causal event graph projections",
+                include_str!(
+                    "../../../../packages/data/migrations/0033_causal_event_graph.sql"
+                ),
+            ),
+            migration(
+                37,
+                "create content-free context compilation audit traces",
+                include_str!(
+                    "../../../../packages/data/migrations/0034_context_compilation_trace.sql"
+                ),
+            ),
+            migration(
+                38,
+                "create visible user-controlled writing feedback learning",
+                include_str!(
+                    "../../../../packages/data/migrations/0035_writing_feedback_learning.sql"
+                ),
+            ),
+            migration(
+                39,
+                "create review-only automatic story planning candidates",
+                include_str!(
+                    "../../../../packages/data/migrations/0036_story_planning_candidates.sql"
+                ),
+            ),
+            migration(
+                40,
+                "add safe Model Hub expert connection options",
+                include_str!(
+                    "../../../../packages/data/migrations/0037_model_hub_expert_options.sql"
+                ),
+            ),
         ]),
         ignore_missing: false,
         locking: true,

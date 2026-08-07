@@ -23,7 +23,8 @@ describe("DataTransferPanel import journey", () => {
       </MemoryRouter>,
     );
 
-    for (const format of ["MD", "DOCX", "HTML", "PDF", "TXT"]) {
+    expect(screen.getByRole("heading", { name: "导入与导出", level: 2 })).toBeInTheDocument();
+    for (const format of ["MD", "DOCX", "EPUB", "HTML", "PDF", "TXT"]) {
       expect(screen.getByText(format)).toBeInTheDocument();
     }
     expect(screen.getByText(/单文件与单次选择均不超过 50 MiB/)).toBeInTheDocument();
@@ -169,6 +170,61 @@ describe("DataTransferPanel import journey", () => {
 
       await screen.findByText(/可导出项目-AI用量报告\.json（0 条记录）/);
       expect(createObjectUrl).toHaveBeenCalledWith(expect.any(Blob));
+      expect(click).toHaveBeenCalledOnce();
+    } finally {
+      restoreProperty(URL, "createObjectURL", originalCreate);
+      restoreProperty(URL, "revokeObjectURL", originalRevoke);
+    }
+  });
+
+  it("writes the running desktop version into exported Bundle metadata", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const created = await runtime.useCases.createProject.execute({ name: "版本一致性" });
+    if (!created.ok) {
+      throw created.error;
+    }
+    const createObjectUrl = vi.fn((artifact: Blob | MediaSource) => {
+      void artifact;
+      return "blob:inkshadow-bundle";
+    });
+    const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectUrl,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+
+    try {
+      const user = userEvent.setup();
+      render(
+        <MemoryRouter>
+          <RuntimeProvider runtime={runtime}>
+            <DataTransferPanel />
+          </RuntimeProvider>
+        </MemoryRouter>,
+      );
+
+      await screen.findByRole("option", { name: "版本一致性" });
+      await user.click(screen.getByRole("button", { name: "下载 Bundle" }));
+      await screen.findByText(/已下载 版本一致性\.inkshadow\.json/u);
+
+      const downloaded = createObjectUrl.mock.calls[0]?.[0];
+      expect(downloaded).toBeInstanceOf(Blob);
+      if (downloaded instanceof Blob) {
+        const bytes = new Uint8Array(await downloaded.arrayBuffer());
+        const bundle = JSON.parse(new TextDecoder().decode(bytes)) as {
+          readonly manifest: { readonly generator: { readonly version: string } };
+        };
+        const information = await runtime.getRuntimeInformation();
+        expect(bundle.manifest.generator.version).toBe(information.appVersion);
+      }
       expect(click).toHaveBeenCalledOnce();
     } finally {
       restoreProperty(URL, "createObjectURL", originalCreate);

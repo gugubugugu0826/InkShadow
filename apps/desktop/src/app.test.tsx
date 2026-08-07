@@ -71,8 +71,11 @@ describe("desktop vertical slice", () => {
       "/teams/019f9f4a-b3c7-7350-9226-000000000202/projects/019f9f4a-b3c7-7350-9226-000000000210/reviews",
     );
 
-    expect(await screen.findByText("团队协作尚未启用")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "团队协作尚未启用", level: 1 }),
+    ).toBeInTheDocument();
     expect(screen.getByText(/本地个人项目与离线编辑不受影响/u)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "返回项目" })).toHaveAttribute("href", "/projects");
     expect(screen.queryByRole("link", { name: "团队与权限" })).not.toBeInTheDocument();
     expect(listTeams).not.toHaveBeenCalled();
   });
@@ -90,6 +93,17 @@ describe("desktop vertical slice", () => {
     expect(screen.getByText(/本地个人项目与离线编辑不受影响/u)).toBeInTheDocument();
     expect(getSummary).not.toHaveBeenCalled();
     expect(listEvents).not.toHaveBeenCalled();
+  });
+
+  it("shows a clear not-found page instead of silently redirecting invalid routes", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    renderRoute(runtime, "/this-route-does-not-exist");
+
+    expect(
+      await screen.findByRole("heading", { name: "找不到这个页面", level: 1 }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/链接可能已经过期/u)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "返回项目" })).toHaveAttribute("href", "/projects");
   });
 
   it("registers the AI usage route only when team collaboration is explicitly enabled", async () => {
@@ -112,7 +126,7 @@ describe("desktop vertical slice", () => {
       expect(getSummary).toHaveBeenCalledWith(teamId, null, expect.any(AbortSignal));
       expect(listEvents).toHaveBeenCalled();
     });
-    expect(screen.getByRole("link", { name: "团队与权限" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "团队与权限" })).not.toBeInTheDocument();
   });
 
   it("creates, searches, archives, and lists a project through real use cases", async () => {
@@ -139,6 +153,40 @@ describe("desktop vertical slice", () => {
     await user.click(screen.getByRole("button", { name: "恢复编辑" }));
     await user.click(screen.getByRole("tab", { name: "进行中" }));
     expect(await screen.findByRole("heading", { name: "星河手记" })).toBeInTheDocument();
+  });
+
+  it("does not create a project while Enter is confirming an IME candidate", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    renderRoute(runtime, "/projects");
+
+    await user.click(await screen.findByRole("button", { name: "新建项目" }));
+    const input = screen.getByRole("textbox", { name: "项目名称" });
+    fireEvent.change(input, { target: { value: "中文项目" } });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", isComposing: true });
+
+    expect(screen.getByRole("dialog", { name: "新建项目" })).toBeInTheDocument();
+    const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
+    expect(projects.ok && projects.value).toHaveLength(0);
+  });
+
+  it("does not create a chapter while Enter is confirming an IME candidate", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "中文项目" });
+    if (!project.ok) {
+      throw project.error;
+    }
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}`);
+
+    await user.click(await screen.findByRole("button", { name: "新建章节" }));
+    const input = screen.getByRole("textbox", { name: "章节标题" });
+    fireEvent.change(input, { target: { value: "中文章节" } });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", isComposing: true });
+
+    expect(screen.getByRole("dialog", { name: "新建章节" })).toBeInTheDocument();
+    const chapters = await runtime.repositories.chapters.listByProjectId(project.value.id);
+    expect(chapters.ok && chapters.value).toHaveLength(0);
   });
 
   it("renames projects, reports visible name conflicts, and persists the result", async () => {
@@ -201,7 +249,7 @@ describe("desktop vertical slice", () => {
       { timeout: 3_000 },
     );
 
-    await user.click(screen.getByRole("button", { name: "创建演示候选" }));
+    await user.click(screen.getByRole("button", { name: "生成示例建议" }));
     expect(await screen.findByRole("heading", { name: "生成前检查" })).toBeInTheDocument();
     expect(screen.getByText("本次费用上界估算")).toBeInTheDocument();
     expect(screen.getByText(/local-demo-zero-cost/u)).toBeInTheDocument();
@@ -215,15 +263,16 @@ describe("desktop vertical slice", () => {
       stableBeforeAcceptance.ok && stableBeforeAcceptance.value?.content === "修改后的正文。",
     ).toBe(true);
 
-    await user.click(screen.getByRole("button", { name: "比较并决定" }));
+    await user.click(screen.getByRole("button", { name: "比较 AI 建议" }));
     const candidateReview = await screen.findByRole("dialog", {
-      name: "比较候选与稳定正文",
+      name: "比较 AI 建议与正文",
     });
     await user.click(within(candidateReview).getByRole("button", { name: "覆盖全文并创建版本" }));
     await waitFor(() => {
       expect((editor as HTMLTextAreaElement).value).toContain("暮色沿着窗棂");
     });
-    expect(screen.getByRole("button", { name: "继续生成候选" })).toBeEnabled();
+    const assistant = screen.getByRole("complementary", { name: "AI 创作助手" });
+    expect(within(assistant).getByRole("button", { name: "继续创作" })).toBeEnabled();
   });
 
   it("blocks stale candidate acceptance and can preserve the candidate as a new chapter", async () => {
@@ -235,7 +284,7 @@ describe("desktop vertical slice", () => {
     const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
       name: "章节正文",
     });
-    await user.click(screen.getByRole("button", { name: "创建演示候选" }));
+    await user.click(screen.getByRole("button", { name: "生成示例建议" }));
     await user.click(await screen.findByRole("button", { name: "确认并开始" }));
     expect(await screen.findByText(/本地演示候选/u)).toBeInTheDocument();
 
@@ -256,18 +305,18 @@ describe("desktop vertical slice", () => {
       { timeout: 3_000 },
     );
 
-    await user.click(screen.getByRole("button", { name: "比较并决定" }));
+    await user.click(screen.getByRole("button", { name: "比较 AI 建议" }));
     const candidateReview = await screen.findByRole("dialog", {
-      name: "比较候选与稳定正文",
+      name: "比较 AI 建议与正文",
     });
-    expect(within(candidateReview).getByText("稳定正文已在候选生成后变化")).toBeVisible();
+    expect(within(candidateReview).getByText("正文已在建议生成后变化")).toBeVisible();
     expect(
       within(candidateReview).getByRole("button", { name: "覆盖全文并创建版本" }),
     ).toBeDisabled();
 
-    await user.click(within(candidateReview).getByRole("button", { name: "将候选另存为新章节" }));
+    await user.click(within(candidateReview).getByRole("button", { name: "将建议另存为新章节" }));
     expect(
-      await within(candidateReview).findByRole("button", { name: "候选副本已保存" }),
+      await within(candidateReview).findByRole("button", { name: "建议副本已保存" }),
     ).toBeDisabled();
 
     const chapters = await runtime.repositories.chapters.listByProjectId(project.id);
@@ -560,6 +609,7 @@ describe("desktop vertical slice", () => {
     const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
       name: "章节正文",
     });
+    await user.click(screen.getByText("写作工具与排版"));
     fireEvent.change(editor, {
       target: { value: "甲.*乙 甲.*乙！", selectionStart: 10, selectionEnd: 10 },
     });
@@ -609,6 +659,7 @@ describe("desktop vertical slice", () => {
     const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
       name: "章节正文",
     });
+    await user.click(screen.getByText("写作工具与排版"));
     editor.setSelectionRange(2, 5);
     fireEvent.select(editor);
     editor.scrollTop = 180;
@@ -643,6 +694,7 @@ describe("desktop vertical slice", () => {
     renderRoute(runtime, `/projects/${project.id}/chapters/${chapter.id}`);
 
     const editor = await screen.findByRole("textbox", { name: "章节正文" });
+    await user.click(screen.getByText("写作工具与排版"));
     expect(editor).toHaveAttribute("readonly");
     expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "查找替换" }));
@@ -699,16 +751,16 @@ describe("desktop vertical slice", () => {
     renderRoute(runtime, "/settings");
 
     expect(await screen.findByText("浏览器开发模式不接受模型密钥")).toBeInTheDocument();
-    expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("接口访问密钥")).not.toBeInTheDocument();
     expect(
       screen.getByText(
-        "SQLite 一致性检查与文件备份仅在 Tauri 桌面应用中可用。浏览器开发数据保存在 localStorage。",
+        "本地数据库一致性检查与文件备份仅在桌面应用中可用。浏览器开发数据保存在调试存储中。",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "创建一致性备份" })).not.toBeInTheDocument();
     expect(window.localStorage.getItem("model-secret")).toBeNull();
-    expect(screen.getByRole("button", { name: "检查连接并读取模型" })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "保存非敏感配置" }));
+    expect(screen.getByRole("button", { name: "测试连接并发现模型" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "保存供应商与模型" }));
     expect(await screen.findByText("配置修订 1")).toBeInTheDocument();
     await expect(runtime.modelCenter.listProfiles()).resolves.toMatchObject([
       {
@@ -717,6 +769,7 @@ describe("desktop vertical slice", () => {
         selectedModel: null,
       },
     ]);
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
     await user.type(screen.getByRole("textbox", { name: /^模型标识/u }), "gpt-test");
     await user.type(screen.getByRole("spinbutton", { name: "上下文窗口（token）" }), "32000");
     await user.type(screen.getByRole("spinbutton", { name: "输入价 / 百万 token" }), "1");
@@ -725,7 +778,7 @@ describe("desktop vertical slice", () => {
     fireEvent.change(screen.getByLabelText("价格更新时间"), {
       target: { value: "2026-07-27" },
     });
-    await user.click(screen.getByRole("button", { name: "保存非敏感配置" }));
+    await user.click(screen.getByRole("button", { name: "保存供应商与模型" }));
     await expect(runtime.modelCenter.listProfiles()).resolves.toMatchObject([
       {
         selectedModel: "gpt-test",

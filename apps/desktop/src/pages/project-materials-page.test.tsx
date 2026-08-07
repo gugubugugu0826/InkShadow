@@ -55,7 +55,9 @@ describe("ProjectMaterialsPage", () => {
     });
     await user.click(screen.getByRole("button", { name: "保存素材" }));
     expect(
-      await screen.findByText("An active material with the same content already exists."),
+      await screen.findByText(
+        "已存在正文内容相同的有效素材。请取消本次录入并使用已有素材，或修改正文后再保存。",
+      ),
     ).toBeInTheDocument();
     const storedAfterDuplicate = await runtime.story.materials.listByProjectId(
       parseStoryId(seeded.projectId),

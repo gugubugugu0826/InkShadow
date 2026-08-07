@@ -27,6 +27,7 @@ describe("CrashRecoveryDialog", () => {
     expect(screen.getByText("草稿正文")).toBeVisible();
     expect(screen.getByText(/预览已截断/u)).toBeVisible();
     expect(screen.getByRole("button", { name: "恢复草稿继续编辑" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "关闭" })).not.toBeInTheDocument();
     expect(screen.queryByText(stable)).not.toBeInTheDocument();
   });
 

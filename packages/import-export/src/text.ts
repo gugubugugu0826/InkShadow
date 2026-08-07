@@ -20,7 +20,7 @@ export interface ImportedTextDocument {
   readonly originalBytes: number;
   readonly sanitizedBytes: number;
   readonly issues: readonly ImportIssue[];
-  readonly sourceFormat?: "docx" | "html" | "markdown" | "pdf" | "text";
+  readonly sourceFormat?: "docx" | "epub" | "html" | "markdown" | "pdf" | "text";
   readonly sourceSha256?: string;
   readonly chapterDetectionConfidence?: number;
   readonly requiresBoundaryReview?: boolean;
@@ -220,7 +220,7 @@ export function sanitizePlainText(input: string, fileName?: string): MarkdownSan
 
 function titleFromFileName(fileName: string): string {
   return fileName
-    .replace(/\.(?:docx|html?|markdown|md|pdf|txt)$/i, "")
+    .replace(/\.(?:docx|epub|html?|markdown|md|pdf|txt)$/i, "")
     .normalize("NFKC")
     .trim()
     .slice(0, IMPORT_LIMITS.maximumTitleCharacters);

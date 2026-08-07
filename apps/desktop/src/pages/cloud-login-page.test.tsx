@@ -15,7 +15,7 @@ describe("cloud login route", () => {
     renderRoute(runtime);
 
     expect(
-      await screen.findByRole("heading", { name: "从你的设备开始创作", level: 1 }),
+      await screen.findByRole("heading", { name: "一句想法，也能开始一部长篇", level: 1 }),
     ).toBeVisible();
     expect(screen.queryByRole("heading", { name: "登录云账户" })).not.toBeInTheDocument();
     expect(screen.queryByRole("form", { name: "云账户登录" })).not.toBeInTheDocument();
@@ -96,7 +96,9 @@ describe("cloud login route", () => {
     await user.click(back);
     await user.click(continueLocally);
     expect(screen.getByRole("heading", { name: "登录云账户" })).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "从你的设备开始创作" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "一句想法，也能开始一部长篇" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "项目" })).not.toBeInTheDocument();
 
     pending.reject({ code: "AUTH_INVALID_CREDENTIALS" });
@@ -118,6 +120,28 @@ describe("cloud login route", () => {
     expect(await screen.findByRole("heading", { name: "项目", level: 1 })).toBeVisible();
     expect(screen.queryByRole("form", { name: "云账户登录" })).not.toBeInTheDocument();
     expect(login).not.toHaveBeenCalled();
+  });
+
+  it("shows a retryable session-check error without leaving the login page", async () => {
+    const getStatus = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error("temporary failure"), { code: "NETWORK" }))
+      .mockResolvedValueOnce(emptyStatus());
+    const runtime = createEnabledCloudRuntime({
+      getStatus,
+      login: vi.fn(),
+    });
+    const user = userEvent.setup();
+
+    renderRoute(runtime);
+
+    expect(await screen.findByText("无法检查云会话")).toBeVisible();
+    expect(screen.getByText(/本地项目仍可正常使用/u)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "重新检查" }));
+
+    await waitFor(() => expect(getStatus).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("heading", { name: "登录云账户", level: 1 })).toBeVisible();
+    expect(screen.queryByText("无法检查云会话")).not.toBeInTheDocument();
   });
 
   it("registers, clears the password, verifies the email, and establishes the device session", async () => {

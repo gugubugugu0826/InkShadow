@@ -1,7 +1,9 @@
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use reqwest::header::{HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, RequestBuilder, Response, Url};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -12,15 +14,18 @@ use zeroize::Zeroizing;
 use super::endpoint::ValidatedEndpoint;
 use super::error::CommandError;
 use super::protocol::{
+    parse_anthropic_models_page, parse_gemini_embeddings, parse_gemini_models_page,
     parse_ollama_embeddings, parse_ollama_models, parse_openai_embeddings, parse_openai_models,
-    OllamaNdjsonParser, OpenAiSseParser, StreamItem,
+    parse_qwen_rerank, AnthropicSseParser, GeminiSseParser, OllamaNdjsonParser, OpenAiSseParser,
+    PaginatedModels, StreamItem, MAX_MODELS,
 };
 use super::registry::{validate_generation_id, GenerationRegistry};
 use super::types::{
     AuthenticationMode, CancelGenerationRequest, CancelGenerationResponse, ConnectionCheckRequest,
     ConnectionCheckResponse, EmbeddingRequest, EmbeddingResponse, GenerationAccepted,
     GenerationEvent, GenerationEventStatus, GenerationUsage, ListModelsRequest, ModelDescriptor,
-    ModelEndpointConfig, ModelListResponse, ModelMessage, ProviderKind, StartGenerationRequest,
+    ModelEndpointConfig, ModelListResponse, ModelMessage, ProviderKind, RerankProtocol,
+    RerankRequest, RerankResponse, StartGenerationRequest,
 };
 use crate::network_egress::RestrictedDnsResolver;
 
@@ -28,6 +33,9 @@ pub(crate) const NATIVE_GENERATION_EVENT: &str = "model-generation-event";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MIN_REQUEST_TIMEOUT_MS: u64 = 1_000;
+const MAX_REQUEST_TIMEOUT_MS: u64 = 600_000;
+const MAX_RETRY_LIMIT: u8 = 3;
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_MODEL_LIST_BYTES: usize = 2 * 1024 * 1024;
@@ -44,9 +52,17 @@ const MAX_EMBEDDING_ITEM_BYTES: usize = 64 * 1024;
 const MAX_EMBEDDING_INPUT_BYTES: usize = 512 * 1024;
 const MAX_EMBEDDING_REQUEST_BYTES: usize = MAX_EMBEDDING_INPUT_BYTES + 64 * 1024;
 const MAX_EMBEDDING_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_RERANK_DOCUMENTS: usize = 64;
+const MAX_RERANK_QUERY_BYTES: usize = 16 * 1024;
+const MAX_RERANK_DOCUMENT_BYTES: usize = 32 * 1024;
+const MAX_RERANK_INPUT_BYTES: usize = 256 * 1024;
+const MAX_RERANK_REQUEST_BYTES: usize = MAX_RERANK_INPUT_BYTES + 64 * 1024;
+const MAX_RERANK_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_MODEL_LIST_PAGES: usize = 64;
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 pub(crate) struct ModelGatewayState {
-    client: Client,
+    pub(crate) client: Client,
     registry: Arc<GenerationRegistry>,
 }
 
@@ -100,6 +116,65 @@ struct OllamaGenerationBody<'a> {
 }
 
 #[derive(Serialize)]
+struct AnthropicGenerationBody<'a> {
+    model: &'a str,
+    messages: Vec<AnthropicMessage<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    stream: bool,
+    max_tokens: u32,
+}
+
+#[derive(Serialize)]
+struct AnthropicMessage<'a> {
+    role: AnthropicMessageRole,
+    content: &'a str,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AnthropicMessageRole {
+    User,
+    Assistant,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiGenerationBody<'a> {
+    contents: Vec<GeminiContent<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_instruction: Option<GeminiContent<'a>>,
+    generation_config: GeminiGenerationConfig,
+}
+
+#[derive(Serialize)]
+struct GeminiContent<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<GeminiMessageRole>,
+    parts: [GeminiTextPart<'a>; 1],
+}
+
+#[derive(Serialize)]
+struct GeminiTextPart<'a> {
+    text: Cow<'a, str>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GeminiMessageRole {
+    User,
+    Model,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiGenerationConfig {
+    max_output_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+}
+
+#[derive(Serialize)]
 struct OpenAiEmbeddingBody<'a> {
     model: &'a str,
     input: &'a [String],
@@ -111,21 +186,58 @@ struct OllamaEmbeddingBody<'a> {
     input: &'a [String],
 }
 
+#[derive(Serialize)]
+struct GeminiEmbeddingBody<'a> {
+    requests: Vec<GeminiEmbeddingItem<'a>>,
+}
+
+#[derive(Serialize)]
+struct GeminiEmbeddingItem<'a> {
+    model: String,
+    content: GeminiEmbeddingContent<'a>,
+}
+
+#[derive(Serialize)]
+struct GeminiEmbeddingContent<'a> {
+    parts: [GeminiTextPart<'a>; 1],
+}
+
+#[derive(Serialize)]
+struct QwenRerankBody<'a> {
+    model: &'a str,
+    query: &'a str,
+    documents: &'a [String],
+    top_n: usize,
+}
+
 struct PreparedGeneration {
     provider: ProviderKind,
     url: Url,
-    authorization: Option<HeaderValue>,
+    credential: Option<CredentialHeader>,
     body: Vec<u8>,
+    request_timeout: Duration,
 }
 
 struct PreparedEmbedding {
     provider: ProviderKind,
     endpoint_origin: String,
     url: Url,
-    authorization: Option<HeaderValue>,
+    credential: Option<CredentialHeader>,
     body: Vec<u8>,
     model: String,
     input_count: usize,
+}
+
+struct PreparedRerank {
+    provider: ProviderKind,
+    protocol: RerankProtocol,
+    endpoint_origin: String,
+    url: Url,
+    credential: Option<CredentialHeader>,
+    body: Vec<u8>,
+    model: String,
+    document_count: usize,
+    top_n: usize,
 }
 
 enum RunOutcome {
@@ -136,6 +248,8 @@ enum RunOutcome {
 enum ProviderStreamParser {
     OpenAi(OpenAiSseParser),
     Ollama(OllamaNdjsonParser),
+    Anthropic(AnthropicSseParser),
+    Gemini(GeminiSseParser),
 }
 
 impl ProviderStreamParser {
@@ -143,6 +257,8 @@ impl ProviderStreamParser {
         match self {
             Self::OpenAi(parser) => parser.push(chunk),
             Self::Ollama(parser) => parser.push(chunk),
+            Self::Anthropic(parser) => parser.push(chunk),
+            Self::Gemini(parser) => parser.push(chunk),
         }
     }
 
@@ -150,8 +266,16 @@ impl ProviderStreamParser {
         match self {
             Self::OpenAi(parser) => parser.finish(),
             Self::Ollama(parser) => parser.finish(),
+            Self::Anthropic(parser) => parser.finish(),
+            Self::Gemini(parser) => parser.finish(),
         }
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct CredentialHeader {
+    pub(crate) name: HeaderName,
+    pub(crate) value: HeaderValue,
 }
 
 struct GenerationEmitter {
@@ -236,7 +360,17 @@ pub(crate) async fn embed_native_model(
     state: State<'_, ModelGatewayState>,
     request: EmbeddingRequest,
 ) -> Result<EmbeddingResponse, CommandError> {
-    embed_with_timeout(&state.client, &request, REQUEST_TIMEOUT).await
+    let request_timeout = configured_request_timeout(&request.config)?;
+    embed_with_timeout(&state.client, &request, request_timeout).await
+}
+
+#[tauri::command]
+pub(crate) async fn rerank_native_model(
+    state: State<'_, ModelGatewayState>,
+    request: RerankRequest,
+) -> Result<RerankResponse, CommandError> {
+    let request_timeout = configured_request_timeout(&request.config)?;
+    rerank_with_timeout(&state.client, &request, request_timeout).await
 }
 
 #[tauri::command]
@@ -300,39 +434,276 @@ async fn fetch_models_with_endpoint(
     config: &ModelEndpointConfig,
     endpoint: &ValidatedEndpoint,
 ) -> Result<Vec<ModelDescriptor>, CommandError> {
-    let authorization = load_authorization(config).await?;
-    let suffix = match config.provider {
-        ProviderKind::OpenAiCompatible => "/models",
-        ProviderKind::Ollama => "/api/tags",
-    };
-    let url = endpoint.api_url(suffix)?;
-    let request = apply_authorization(
-        client.get(url).header(ACCEPT, "application/json"),
-        authorization,
-    );
-    let body = match timeout(REQUEST_TIMEOUT, fetch_limited_body(request)).await {
-        Ok(result) => result?,
-        Err(_) => return Err(CommandError::timeout()),
-    };
+    let credential = load_credential(config).await?;
+    let request_timeout = configured_request_timeout(config)?;
+    let retry_limit = configured_retry_limit(config)?;
     match config.provider {
-        ProviderKind::OpenAiCompatible => parse_openai_models(&body),
-        ProviderKind::Ollama => parse_ollama_models(&body),
+        ProviderKind::OpenAiCompatible => {
+            let body = fetch_model_page(
+                client,
+                endpoint.api_url(config.model_discovery_path.as_deref().unwrap_or("/models"))?,
+                config.provider,
+                credential,
+                request_timeout,
+                retry_limit,
+            )
+            .await?;
+            parse_openai_models(&body)
+        }
+        ProviderKind::Ollama => {
+            let body = fetch_model_page(
+                client,
+                endpoint.api_url("/api/tags")?,
+                config.provider,
+                credential,
+                request_timeout,
+                retry_limit,
+            )
+            .await?;
+            parse_ollama_models(&body)
+        }
+        ProviderKind::Anthropic => {
+            fetch_paginated_models(
+                client,
+                config.provider,
+                credential,
+                request_timeout,
+                retry_limit,
+                |cursor| {
+                    let mut url = endpoint.api_url("/models")?;
+                    {
+                        let mut query = url.query_pairs_mut();
+                        query.append_pair("limit", "1000");
+                        if let Some(cursor) = cursor {
+                            query.append_pair("after_id", cursor);
+                        }
+                    }
+                    Ok(url)
+                },
+                parse_anthropic_models_page,
+            )
+            .await
+        }
+        ProviderKind::Gemini => {
+            fetch_paginated_models(
+                client,
+                config.provider,
+                credential,
+                request_timeout,
+                retry_limit,
+                |cursor| {
+                    let mut url = endpoint.api_url("/models")?;
+                    {
+                        let mut query = url.query_pairs_mut();
+                        query.append_pair("pageSize", "1000");
+                        if let Some(cursor) = cursor {
+                            query.append_pair("pageToken", cursor);
+                        }
+                    }
+                    Ok(url)
+                },
+                parse_gemini_models_page,
+            )
+            .await
+        }
     }
 }
 
-fn validate_config(config: &ModelEndpointConfig) -> Result<ValidatedEndpoint, CommandError> {
-    crate::credential_account(&config.provider_id)?;
-    ValidatedEndpoint::parse(config)
+async fn fetch_model_page(
+    client: &Client,
+    url: Url,
+    provider: ProviderKind,
+    credential: Option<CredentialHeader>,
+    request_timeout: Duration,
+    retry_limit: u8,
+) -> Result<Vec<u8>, CommandError> {
+    for attempt in 0..=retry_limit {
+        let request = apply_provider_headers(
+            client.get(url.clone()).header(ACCEPT, "application/json"),
+            provider,
+            credential.clone(),
+        );
+        let result = match timeout(request_timeout, fetch_limited_body(request)).await {
+            Ok(result) => result,
+            Err(_) => Err(CommandError::timeout()),
+        };
+        match result {
+            Ok(body) => return Ok(body),
+            Err(error) if attempt < retry_limit && error.retryable() => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(CommandError::runtime_failed())
 }
 
-async fn load_authorization(
+async fn fetch_paginated_models(
+    client: &Client,
+    provider: ProviderKind,
+    credential: Option<CredentialHeader>,
+    request_timeout: Duration,
+    retry_limit: u8,
+    make_url: impl Fn(Option<&str>) -> Result<Url, CommandError>,
+    parse_page: fn(&[u8]) -> Result<PaginatedModels, CommandError>,
+) -> Result<Vec<ModelDescriptor>, CommandError> {
+    let mut models = Vec::new();
+    let mut seen_models = HashSet::new();
+    let mut seen_cursors = HashSet::new();
+    let mut cursor: Option<String> = None;
+
+    for _ in 0..MAX_MODEL_LIST_PAGES {
+        let body = fetch_model_page(
+            client,
+            make_url(cursor.as_deref())?,
+            provider,
+            credential.clone(),
+            request_timeout,
+            retry_limit,
+        )
+        .await?;
+        let page = parse_page(&body)?;
+        for model in page.models {
+            if seen_models.insert(model.id.clone()) {
+                models.push(model);
+                if models.len() > MAX_MODELS {
+                    return Err(CommandError::response_limit_exceeded());
+                }
+            }
+        }
+        let Some(next_cursor) = page.next_cursor else {
+            return Ok(models);
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err(CommandError::response_invalid());
+        }
+        cursor = Some(next_cursor);
+    }
+    Err(CommandError::response_limit_exceeded())
+}
+
+pub(crate) fn validate_config(
     config: &ModelEndpointConfig,
-) -> Result<Option<HeaderValue>, CommandError> {
+) -> Result<ValidatedEndpoint, CommandError> {
+    crate::credential_account(&config.provider_id)?;
+    let endpoint = ValidatedEndpoint::parse(config)?;
+    configured_request_timeout(config)?;
+    configured_retry_limit(config)?;
+
+    let has_custom_path = config.model_discovery_path.is_some()
+        || config.text_generation_path.is_some()
+        || config.embedding_path.is_some();
+    if config.provider != ProviderKind::OpenAiCompatible
+        && (has_custom_path
+            || config.credential_header_name.is_some()
+            || config.authentication == AuthenticationMode::CustomHeaderKeyring)
+    {
+        return Err(CommandError::endpoint_invalid());
+    }
+    for path in [
+        config.model_discovery_path.as_deref(),
+        config.text_generation_path.as_deref(),
+        config.embedding_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        endpoint.api_url(path)?;
+    }
+    match config.authentication {
+        AuthenticationMode::CustomHeaderKeyring => {
+            let name = config
+                .credential_header_name
+                .as_deref()
+                .ok_or_else(CommandError::endpoint_invalid)?;
+            validate_credential_header_name(name)?;
+        }
+        AuthenticationMode::None | AuthenticationMode::BearerKeyring => {
+            if config.credential_header_name.is_some() {
+                return Err(CommandError::endpoint_invalid());
+            }
+        }
+    }
+    Ok(endpoint)
+}
+
+pub(crate) fn configured_request_timeout(
+    config: &ModelEndpointConfig,
+) -> Result<Duration, CommandError> {
+    let milliseconds = config
+        .request_timeout_ms
+        .unwrap_or(REQUEST_TIMEOUT.as_millis() as u64);
+    if !(MIN_REQUEST_TIMEOUT_MS..=MAX_REQUEST_TIMEOUT_MS).contains(&milliseconds) {
+        return Err(CommandError::request_invalid());
+    }
+    Ok(Duration::from_millis(milliseconds))
+}
+
+fn configured_retry_limit(config: &ModelEndpointConfig) -> Result<u8, CommandError> {
+    let retry_limit = config.retry_limit.unwrap_or(0);
+    if retry_limit > MAX_RETRY_LIMIT {
+        return Err(CommandError::request_invalid());
+    }
+    Ok(retry_limit)
+}
+
+fn validate_credential_header_name(value: &str) -> Result<HeaderName, CommandError> {
+    if value.is_empty() || value.len() > 128 || value.trim() != value {
+        return Err(CommandError::endpoint_invalid());
+    }
+    let name =
+        HeaderName::from_bytes(value.as_bytes()).map_err(|_| CommandError::endpoint_invalid())?;
+    let normalized = name.as_str();
+    if matches!(
+        normalized,
+        "accept"
+            | "accept-encoding"
+            | "connection"
+            | "content-encoding"
+            | "content-length"
+            | "content-type"
+            | "cookie"
+            | "expect"
+            | "forwarded"
+            | "host"
+            | "keep-alive"
+            | "origin"
+            | "proxy-authorization"
+            | "proxy-connection"
+            | "referer"
+            | "set-cookie"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "user-agent"
+            | "via"
+    ) || normalized.starts_with("proxy-")
+        || normalized.starts_with("sec-")
+        || normalized.starts_with("x-forwarded-")
+    {
+        return Err(CommandError::endpoint_invalid());
+    }
+    Ok(name)
+}
+
+pub(crate) async fn load_credential(
+    config: &ModelEndpointConfig,
+) -> Result<Option<CredentialHeader>, CommandError> {
     if config.authentication == AuthenticationMode::None {
         return Ok(None);
     }
 
     let provider_id = config.provider_id.clone();
+    let provider = config.provider;
+    let authentication = config.authentication;
+    let custom_header_name = match authentication {
+        AuthenticationMode::CustomHeaderKeyring => Some(validate_credential_header_name(
+            config
+                .credential_header_name
+                .as_deref()
+                .ok_or_else(CommandError::endpoint_invalid)?,
+        )?),
+        AuthenticationMode::None | AuthenticationMode::BearerKeyring => None,
+    };
     let load = tokio::task::spawn_blocking(move || {
         let entry = crate::credential_entry(&provider_id)?;
         let password = match entry.get_password() {
@@ -340,7 +711,10 @@ async fn load_authorization(
             Err(keyring::Error::NoEntry) => return Err(CommandError::credential_missing()),
             Err(_) => return Err(CommandError::credential_store_unavailable()),
         };
-        if password.len() < 8 || password.len() > 16_384 || password.trim().len() != password.len()
+        if password.len() < 8
+            || password.len() > 16_384
+            || password.trim().len() != password.len()
+            || !password.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
         {
             return Err(CommandError::new(
                 "MODEL_CREDENTIAL_INVALID",
@@ -350,8 +724,30 @@ async fn load_authorization(
             ));
         }
 
-        let bearer = Zeroizing::new(format!("Bearer {}", password.as_str()));
-        let mut value = HeaderValue::from_bytes(bearer.as_bytes()).map_err(|_| {
+        let header_name = match authentication {
+            AuthenticationMode::CustomHeaderKeyring => {
+                custom_header_name.ok_or_else(CommandError::endpoint_invalid)?
+            }
+            AuthenticationMode::BearerKeyring => match provider {
+                ProviderKind::OpenAiCompatible | ProviderKind::Ollama => AUTHORIZATION,
+                ProviderKind::Anthropic => HeaderName::from_static("x-api-key"),
+                ProviderKind::Gemini => HeaderName::from_static("x-goog-api-key"),
+            },
+            AuthenticationMode::None => return Ok(None),
+        };
+        let wire_value = match authentication {
+            AuthenticationMode::CustomHeaderKeyring => Zeroizing::new(password.as_str().to_owned()),
+            AuthenticationMode::BearerKeyring => match provider {
+                ProviderKind::OpenAiCompatible | ProviderKind::Ollama => {
+                    Zeroizing::new(format!("Bearer {}", password.as_str()))
+                }
+                ProviderKind::Anthropic | ProviderKind::Gemini => {
+                    Zeroizing::new(password.as_str().to_owned())
+                }
+            },
+            AuthenticationMode::None => return Ok(None),
+        };
+        let mut value = HeaderValue::from_bytes(wire_value.as_bytes()).map_err(|_| {
             CommandError::new(
                 "MODEL_CREDENTIAL_INVALID",
                 "The stored model credential is invalid.",
@@ -360,7 +756,10 @@ async fn load_authorization(
             )
         })?;
         value.set_sensitive(true);
-        Ok(Some(value))
+        Ok(Some(CredentialHeader {
+            name: header_name,
+            value,
+        }))
     });
     match timeout(REQUEST_TIMEOUT, load).await {
         Ok(Ok(result)) => result,
@@ -374,9 +773,10 @@ async fn prepare_generation(
 ) -> Result<PreparedGeneration, CommandError> {
     let endpoint = validate_config(&request.config)?;
     validate_generation_request(request)?;
-    let authorization = load_authorization(&request.config).await?;
+    let credential = load_credential(&request.config).await?;
+    let request_timeout = configured_request_timeout(&request.config)?;
 
-    let (suffix, body) = match request.config.provider {
+    let (url, body) = match request.config.provider {
         ProviderKind::OpenAiCompatible => {
             let body = OpenAiGenerationBody {
                 model: &request.model,
@@ -388,7 +788,16 @@ async fn prepare_generation(
                 },
                 temperature: request.temperature,
             };
-            ("/chat/completions", serialize_request_body(&body)?)
+            (
+                endpoint.api_url(
+                    request
+                        .config
+                        .text_generation_path
+                        .as_deref()
+                        .unwrap_or("/chat/completions"),
+                )?,
+                serialize_request_body(&body)?,
+            )
         }
         ProviderKind::Ollama => {
             let body = OllamaGenerationBody {
@@ -400,44 +809,208 @@ async fn prepare_generation(
                     temperature: request.temperature,
                 },
             };
-            ("/api/chat", serialize_request_body(&body)?)
+            (
+                endpoint.api_url("/api/chat")?,
+                serialize_request_body(&body)?,
+            )
+        }
+        ProviderKind::Anthropic => {
+            if request
+                .temperature
+                .is_some_and(|temperature| temperature != 1.0)
+            {
+                return Err(CommandError::operation_unsupported());
+            }
+            let body = build_anthropic_generation_body(request)?;
+            (
+                endpoint.api_url("/messages")?,
+                serialize_request_body(&body)?,
+            )
+        }
+        ProviderKind::Gemini => {
+            let body = build_gemini_generation_body(request)?;
+            let model = normalized_gemini_model_name(&request.model)?;
+            let mut url = endpoint.api_url(&format!("/models/{model}:streamGenerateContent"))?;
+            url.query_pairs_mut().append_pair("alt", "sse");
+            (url, serialize_request_body(&body)?)
         }
     };
 
     Ok(PreparedGeneration {
         provider: request.config.provider,
-        url: endpoint.api_url(suffix)?,
-        authorization,
+        url,
+        credential,
         body,
+        request_timeout,
     })
+}
+
+fn build_anthropic_generation_body(
+    request: &StartGenerationRequest,
+) -> Result<AnthropicGenerationBody<'_>, CommandError> {
+    let mut messages = Vec::new();
+    let mut system_parts = Vec::new();
+    let mut saw_conversation_message = false;
+    for message in &request.messages {
+        match message.role {
+            super::types::ModelMessageRole::System => {
+                if saw_conversation_message {
+                    return Err(CommandError::request_invalid());
+                }
+                system_parts.push(message.content.as_str());
+            }
+            super::types::ModelMessageRole::User => {
+                saw_conversation_message = true;
+                messages.push(AnthropicMessage {
+                    role: AnthropicMessageRole::User,
+                    content: &message.content,
+                });
+            }
+            super::types::ModelMessageRole::Assistant => {
+                saw_conversation_message = true;
+                messages.push(AnthropicMessage {
+                    role: AnthropicMessageRole::Assistant,
+                    content: &message.content,
+                });
+            }
+        }
+    }
+    if messages.is_empty() {
+        return Err(CommandError::request_invalid());
+    }
+    Ok(AnthropicGenerationBody {
+        model: &request.model,
+        messages,
+        system: (!system_parts.is_empty()).then(|| system_parts.join("\n\n")),
+        stream: true,
+        max_tokens: request.max_output_tokens,
+    })
+}
+
+fn build_gemini_generation_body(
+    request: &StartGenerationRequest,
+) -> Result<GeminiGenerationBody<'_>, CommandError> {
+    let mut contents = Vec::new();
+    let mut system_parts = Vec::new();
+    let mut saw_conversation_message = false;
+    for message in &request.messages {
+        match message.role {
+            super::types::ModelMessageRole::System => {
+                if saw_conversation_message {
+                    return Err(CommandError::request_invalid());
+                }
+                system_parts.push(message.content.as_str());
+            }
+            super::types::ModelMessageRole::User => {
+                saw_conversation_message = true;
+                contents.push(GeminiContent {
+                    role: Some(GeminiMessageRole::User),
+                    parts: [GeminiTextPart {
+                        text: Cow::Borrowed(&message.content),
+                    }],
+                });
+            }
+            super::types::ModelMessageRole::Assistant => {
+                saw_conversation_message = true;
+                contents.push(GeminiContent {
+                    role: Some(GeminiMessageRole::Model),
+                    parts: [GeminiTextPart {
+                        text: Cow::Borrowed(&message.content),
+                    }],
+                });
+            }
+        }
+    }
+    if contents.is_empty() {
+        return Err(CommandError::request_invalid());
+    }
+    let system_instruction = (!system_parts.is_empty()).then(|| GeminiContent {
+        role: None,
+        parts: [GeminiTextPart {
+            text: Cow::Owned(system_parts.join("\n\n")),
+        }],
+    });
+    Ok(GeminiGenerationBody {
+        contents,
+        system_instruction,
+        generation_config: GeminiGenerationConfig {
+            max_output_tokens: request.max_output_tokens,
+            temperature: request.temperature,
+        },
+    })
+}
+
+fn normalized_gemini_model_name(model: &str) -> Result<&str, CommandError> {
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    if model.is_empty()
+        || model.len() > MAX_MODEL_ID_BYTES
+        || !model
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(CommandError::request_invalid());
+    }
+    Ok(model)
 }
 
 async fn prepare_embedding(request: &EmbeddingRequest) -> Result<PreparedEmbedding, CommandError> {
     let endpoint = validate_config(&request.config)?;
     validate_embedding_request(request)?;
-    let authorization = load_authorization(&request.config).await?;
-    let (suffix, body) = match request.config.provider {
+    if request.config.provider == ProviderKind::Anthropic {
+        return Err(CommandError::operation_unsupported());
+    }
+    let credential = load_credential(&request.config).await?;
+    let (url, body) = match request.config.provider {
         ProviderKind::OpenAiCompatible => (
-            "/embeddings",
+            endpoint.api_url(
+                request
+                    .config
+                    .embedding_path
+                    .as_deref()
+                    .unwrap_or("/embeddings"),
+            )?,
             serialize_embedding_request_body(&OpenAiEmbeddingBody {
                 model: &request.model,
                 input: &request.inputs,
             })?,
         ),
         ProviderKind::Ollama => (
-            "/api/embed",
+            endpoint.api_url("/api/embed")?,
             serialize_embedding_request_body(&OllamaEmbeddingBody {
                 model: &request.model,
                 input: &request.inputs,
             })?,
         ),
+        ProviderKind::Gemini => {
+            let model_name = normalized_gemini_model_name(&request.model)?;
+            let model_resource = format!("models/{model_name}");
+            let body = GeminiEmbeddingBody {
+                requests: request
+                    .inputs
+                    .iter()
+                    .map(|input| GeminiEmbeddingItem {
+                        model: model_resource.clone(),
+                        content: GeminiEmbeddingContent {
+                            parts: [GeminiTextPart {
+                                text: Cow::Borrowed(input),
+                            }],
+                        },
+                    })
+                    .collect(),
+            };
+            (
+                endpoint.api_url(&format!("/models/{model_name}:batchEmbedContents"))?,
+                serialize_embedding_request_body(&body)?,
+            )
+        }
+        ProviderKind::Anthropic => unreachable!("handled before credential loading"),
     };
 
     Ok(PreparedEmbedding {
         provider: request.config.provider,
         endpoint_origin: endpoint.origin(),
-        url: endpoint.api_url(suffix)?,
-        authorization,
+        url,
+        credential,
         body,
         model: request.model.clone(),
         input_count: request.inputs.len(),
@@ -499,13 +1072,14 @@ async fn execute_embedding(
     client: &Client,
     prepared: PreparedEmbedding,
 ) -> Result<EmbeddingResponse, CommandError> {
-    let request = apply_authorization(
+    let request = apply_provider_headers(
         client
             .post(prepared.url)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json")
             .body(prepared.body),
-        prepared.authorization,
+        prepared.provider,
+        prepared.credential,
     );
     let response = request
         .send()
@@ -520,6 +1094,8 @@ async fn execute_embedding(
         ProviderKind::Ollama => {
             parse_ollama_embeddings(&body, &prepared.model, prepared.input_count)?
         }
+        ProviderKind::Gemini => parse_gemini_embeddings(&body, prepared.input_count)?,
+        ProviderKind::Anthropic => return Err(CommandError::operation_unsupported()),
     };
     let dimension = embeddings
         .first()
@@ -532,6 +1108,129 @@ async fn execute_embedding(
         dimension,
         vector_count: embeddings.len(),
         embeddings,
+    })
+}
+
+async fn prepare_rerank(request: &RerankRequest) -> Result<PreparedRerank, CommandError> {
+    let endpoint = validate_config(&request.config)?;
+    validate_rerank_request(request)?;
+    if request.config.provider != ProviderKind::OpenAiCompatible
+        || request.protocol != RerankProtocol::QwenOpenAiCompatible
+    {
+        return Err(CommandError::operation_unsupported());
+    }
+    if request.config.authentication != AuthenticationMode::BearerKeyring {
+        return Err(CommandError::credential_missing());
+    }
+    let credential = load_credential(&request.config).await?;
+    let body = serde_json::to_vec(&QwenRerankBody {
+        model: &request.model,
+        query: &request.query,
+        documents: &request.documents,
+        top_n: request.top_n,
+    })
+    .map_err(|_| CommandError::request_invalid())?;
+    if body.len() > MAX_RERANK_REQUEST_BYTES {
+        return Err(CommandError::input_limit_exceeded());
+    }
+
+    Ok(PreparedRerank {
+        provider: request.config.provider,
+        protocol: request.protocol,
+        endpoint_origin: endpoint.origin(),
+        url: endpoint.api_url("/reranks")?,
+        credential,
+        body,
+        model: request.model.clone(),
+        document_count: request.documents.len(),
+        top_n: request.top_n,
+    })
+}
+
+fn validate_rerank_request(request: &RerankRequest) -> Result<(), CommandError> {
+    if request.model.is_empty()
+        || request.model.len() > MAX_MODEL_ID_BYTES
+        || request.model.trim() != request.model
+        || request.model.chars().any(char::is_control)
+        || request.query.is_empty()
+        || request.query.len() > MAX_RERANK_QUERY_BYTES
+        || contains_unsupported_control_character(&request.query)
+        || request.documents.is_empty()
+        || request.documents.len() > MAX_RERANK_DOCUMENTS
+        || request.top_n == 0
+        || request.top_n > request.documents.len()
+    {
+        return Err(CommandError::request_invalid());
+    }
+
+    let mut total_bytes = request.query.len();
+    for document in &request.documents {
+        if document.is_empty()
+            || document.len() > MAX_RERANK_DOCUMENT_BYTES
+            || contains_unsupported_control_character(document)
+        {
+            return Err(CommandError::request_invalid());
+        }
+        total_bytes = total_bytes
+            .checked_add(document.len())
+            .ok_or_else(CommandError::input_limit_exceeded)?;
+        if total_bytes > MAX_RERANK_INPUT_BYTES {
+            return Err(CommandError::input_limit_exceeded());
+        }
+    }
+    Ok(())
+}
+
+fn contains_unsupported_control_character(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+}
+
+async fn rerank_with_timeout(
+    client: &Client,
+    request: &RerankRequest,
+    request_timeout: Duration,
+) -> Result<RerankResponse, CommandError> {
+    let prepared = prepare_rerank(request).await?;
+    match timeout(request_timeout, execute_rerank(client, prepared)).await {
+        Ok(result) => result,
+        Err(_) => Err(CommandError::timeout()),
+    }
+}
+
+async fn execute_rerank(
+    client: &Client,
+    prepared: PreparedRerank,
+) -> Result<RerankResponse, CommandError> {
+    let request = apply_provider_headers(
+        client
+            .post(prepared.url)
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json")
+            .body(prepared.body),
+        prepared.provider,
+        prepared.credential,
+    );
+    let response = request
+        .send()
+        .await
+        .map_err(|error| CommandError::from_reqwest(&error))?;
+    assert_success_status(&response)?;
+    let body = collect_limited_body(response, MAX_RERANK_RESPONSE_BYTES).await?;
+    let (rankings, input_tokens) = parse_qwen_rerank(
+        &body,
+        &prepared.model,
+        prepared.document_count,
+        prepared.top_n,
+    )?;
+    Ok(RerankResponse {
+        provider: prepared.provider,
+        protocol: prepared.protocol,
+        endpoint_origin: prepared.endpoint_origin,
+        model: prepared.model,
+        rankings,
+        input_tokens,
     })
 }
 
@@ -618,7 +1317,7 @@ async fn stream_generation(
         return Ok(RunOutcome::Cancelled);
     }
 
-    let request = apply_authorization(
+    let request = apply_provider_headers(
         client
             .post(prepared.url)
             .header(CONTENT_TYPE, "application/json")
@@ -627,13 +1326,15 @@ async fn stream_generation(
                 match prepared.provider {
                     ProviderKind::OpenAiCompatible => "text/event-stream",
                     ProviderKind::Ollama => "application/x-ndjson",
+                    ProviderKind::Anthropic | ProviderKind::Gemini => "text/event-stream",
                 },
             )
             .body(prepared.body),
-        prepared.authorization,
+        prepared.provider,
+        prepared.credential,
     );
 
-    let send = timeout(REQUEST_TIMEOUT, request.send());
+    let send = timeout(prepared.request_timeout, request.send());
     let mut response = tokio::select! {
         _ = cancellation.cancelled() => return Ok(RunOutcome::Cancelled),
         result = send => {
@@ -655,6 +1356,8 @@ async fn stream_generation(
     let mut parser = match prepared.provider {
         ProviderKind::OpenAiCompatible => ProviderStreamParser::OpenAi(OpenAiSseParser::default()),
         ProviderKind::Ollama => ProviderStreamParser::Ollama(OllamaNdjsonParser::default()),
+        ProviderKind::Anthropic => ProviderStreamParser::Anthropic(AnthropicSseParser::default()),
+        ProviderKind::Gemini => ProviderStreamParser::Gemini(GeminiSseParser::default()),
     };
     let mut response_bytes = 0usize;
     let mut output_bytes = 0usize;
@@ -723,13 +1426,19 @@ fn process_stream_items(
     Ok(false)
 }
 
-fn apply_authorization(
+fn apply_provider_headers(
     request: RequestBuilder,
-    authorization: Option<HeaderValue>,
+    provider: ProviderKind,
+    credential: Option<CredentialHeader>,
 ) -> RequestBuilder {
-    match authorization {
-        Some(value) => request.header(AUTHORIZATION, value),
+    let request = match credential {
+        Some(credential) => request.header(credential.name, credential.value),
         None => request,
+    };
+    if provider == ProviderKind::Anthropic {
+        request.header("anthropic-version", ANTHROPIC_VERSION)
+    } else {
+        request
     }
 }
 
@@ -782,8 +1491,8 @@ async fn collect_limited_body(
 mod tests {
     use super::*;
     use crate::model_gateway::types::{
-        AuthenticationMode, EmbeddingRequest, ModelMessageRole, ProviderKind,
-        StartGenerationRequest,
+        AuthenticationMode, EmbeddingRequest, ModelMessageRole, ProviderKind, RerankProtocol,
+        RerankRequest, StartGenerationRequest,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -826,6 +1535,39 @@ mod tests {
             );
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.write_all(&body);
+        });
+        FakeServer {
+            base_url: format!("http://{address}"),
+            request: request_rx,
+            handle,
+        }
+    }
+
+    fn spawn_sequence_server(responses: &[(&str, &[u8])]) -> FakeServer {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("fake model server should bind loopback");
+        let address = listener
+            .local_addr()
+            .expect("fake model server should have an address");
+        let (request_tx, request_rx) = mpsc::sync_channel(responses.len());
+        let responses = responses
+            .iter()
+            .map(|(status, body)| ((*status).to_owned(), (*body).to_vec()))
+            .collect::<Vec<_>>();
+        let handle = thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().expect("fake server should accept");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("read timeout should apply");
+                let _ = request_tx.send(read_http_request(&mut stream));
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(&body);
+            }
         });
         FakeServer {
             base_url: format!("http://{address}"),
@@ -884,6 +1626,12 @@ mod tests {
                 provider,
                 base_url,
                 authentication: AuthenticationMode::None,
+                credential_header_name: None,
+                model_discovery_path: None,
+                text_generation_path: None,
+                embedding_path: None,
+                request_timeout_ms: None,
+                retry_limit: None,
             },
             model: model.to_owned(),
             inputs: inputs.iter().map(|input| (*input).to_owned()).collect(),
@@ -898,6 +1646,12 @@ mod tests {
                 provider: ProviderKind::OpenAiCompatible,
                 base_url: "https://models.example/v1".to_owned(),
                 authentication: AuthenticationMode::None,
+                credential_header_name: None,
+                model_discovery_path: None,
+                text_generation_path: None,
+                embedding_path: None,
+                request_timeout_ms: None,
+                retry_limit: None,
             },
             model: "model-1".to_owned(),
             messages: vec![ModelMessage {
@@ -906,6 +1660,28 @@ mod tests {
             }],
             max_output_tokens: 1_024,
             temperature: Some(0.7),
+        }
+    }
+
+    fn rerank_request(base_url: String) -> RerankRequest {
+        RerankRequest {
+            config: ModelEndpointConfig {
+                provider_id: "qwen-rerank-test".to_owned(),
+                provider: ProviderKind::OpenAiCompatible,
+                base_url,
+                authentication: AuthenticationMode::BearerKeyring,
+                credential_header_name: None,
+                model_discovery_path: None,
+                text_generation_path: None,
+                embedding_path: None,
+                request_timeout_ms: None,
+                retry_limit: None,
+            },
+            protocol: RerankProtocol::QwenOpenAiCompatible,
+            model: "qwen3-rerank".to_owned(),
+            query: "Which source continues the scene?".to_owned(),
+            documents: vec!["first source".to_owned(), "second source".to_owned()],
+            top_n: 2,
         }
     }
 
@@ -924,6 +1700,103 @@ mod tests {
         let mut invalid_temperature = generation_request();
         invalid_temperature.temperature = Some(f32::NAN);
         assert!(validate_generation_request(&invalid_temperature).is_err());
+    }
+
+    #[test]
+    fn validates_custom_header_timeout_and_provider_override_boundaries() {
+        let mut custom = generation_request().config;
+        custom.authentication = AuthenticationMode::CustomHeaderKeyring;
+        custom.credential_header_name = Some("Authorization".to_owned());
+        custom.model_discovery_path = Some("/custom/models".to_owned());
+        custom.text_generation_path = Some("/custom/chat".to_owned());
+        custom.embedding_path = Some("/custom/embed".to_owned());
+        custom.request_timeout_ms = Some(47_000);
+        custom.retry_limit = Some(3);
+        assert!(validate_config(&custom).is_ok());
+        assert_eq!(
+            configured_request_timeout(&custom).expect("valid timeout"),
+            Duration::from_secs(47)
+        );
+        assert_eq!(configured_retry_limit(&custom).expect("valid retries"), 3);
+
+        for name in [
+            "Host",
+            "Cookie",
+            "Content-Length",
+            "Connection",
+            "Transfer-Encoding",
+            "Proxy-Authorization",
+            "Sec-Fetch-Site",
+            "X-Forwarded-Host",
+            "bad header",
+        ] {
+            custom.credential_header_name = Some(name.to_owned());
+            assert!(validate_config(&custom).is_err(), "{name} must be rejected");
+        }
+
+        custom.credential_header_name = Some("x-api-key".to_owned());
+        custom.provider = ProviderKind::Anthropic;
+        assert!(validate_config(&custom).is_err());
+        custom.provider = ProviderKind::OpenAiCompatible;
+        custom.request_timeout_ms = Some(999);
+        assert!(validate_config(&custom).is_err());
+        custom.request_timeout_ms = Some(47_000);
+        custom.retry_limit = Some(4);
+        assert!(validate_config(&custom).is_err());
+    }
+
+    #[tokio::test]
+    async fn uses_custom_text_path_without_applying_generation_retries() {
+        let mut request = generation_request();
+        request.config.text_generation_path = Some("/custom/text/generate".to_owned());
+        request.config.request_timeout_ms = Some(12_000);
+        request.config.retry_limit = Some(3);
+        let prepared = prepare_generation(&request)
+            .await
+            .expect("custom text request should prepare");
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://models.example/v1/custom/text/generate"
+        );
+        assert_eq!(prepared.request_timeout, Duration::from_secs(12));
+        // retry_limit is intentionally absent from PreparedGeneration: POST
+        // dispatch can be billable and must never be repeated ambiguously.
+    }
+
+    #[tokio::test]
+    async fn retries_only_idempotent_custom_model_discovery_gets() {
+        let server = spawn_sequence_server(&[
+            ("500 Internal Server Error", br#"{"error":"temporary"}"#),
+            ("200 OK", br#"{"data":[{"id":"writer-model"}]}"#),
+        ]);
+        let mut config = generation_request().config;
+        config.base_url = format!("{}/v1", server.base_url);
+        config.model_discovery_path = Some("/custom/catalog".to_owned());
+        config.request_timeout_ms = Some(2_000);
+        config.retry_limit = Some(1);
+
+        let models = fetch_models(&test_client(), &config)
+            .await
+            .expect("one safe retry should recover model discovery");
+        let first = String::from_utf8(
+            server
+                .request
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first request"),
+        )
+        .expect("request should be UTF-8");
+        let second = String::from_utf8(
+            server
+                .request
+                .recv_timeout(Duration::from_secs(1))
+                .expect("retried request"),
+        )
+        .expect("request should be UTF-8");
+        server.handle.join().expect("fake server should stop");
+
+        assert_eq!(models[0].id, "writer-model");
+        assert!(first.starts_with("GET /v1/custom/catalog HTTP/1.1\r\n"));
+        assert!(second.starts_with("GET /v1/custom/catalog HTTP/1.1\r\n"));
     }
 
     #[test]
@@ -948,6 +1821,215 @@ mod tests {
         assert_eq!(value["max_tokens"], 1_024);
         assert_eq!(value["messages"][0]["role"], "user");
         assert_eq!(value["messages"][0]["content"], "Write a safe candidate.");
+
+        let mut provider_request = generation_request();
+        provider_request.temperature = None;
+        provider_request.messages = vec![
+            ModelMessage {
+                role: ModelMessageRole::System,
+                content: "Keep the prose concise.".to_owned(),
+            },
+            ModelMessage {
+                role: ModelMessageRole::User,
+                content: "Continue the scene.".to_owned(),
+            },
+            ModelMessage {
+                role: ModelMessageRole::Assistant,
+                content: "The door opened.".to_owned(),
+            },
+        ];
+
+        let anthropic = build_anthropic_generation_body(&provider_request)
+            .expect("Anthropic request should be expressible");
+        let value = serde_json::to_value(anthropic).expect("Anthropic body should serialize");
+        assert_eq!(value["system"], "Keep the prose concise.");
+        assert_eq!(value["messages"][0]["role"], "user");
+        assert_eq!(value["messages"][1]["role"], "assistant");
+        assert_eq!(value["stream"], true);
+        assert_eq!(value["max_tokens"], 1_024);
+        assert!(value.get("temperature").is_none());
+
+        let gemini = build_gemini_generation_body(&provider_request)
+            .expect("Gemini request should be expressible");
+        let value = serde_json::to_value(gemini).expect("Gemini body should serialize");
+        assert_eq!(
+            value["systemInstruction"]["parts"][0]["text"],
+            "Keep the prose concise."
+        );
+        assert_eq!(value["contents"][0]["role"], "user");
+        assert_eq!(value["contents"][1]["role"], "model");
+        assert_eq!(value["generationConfig"]["maxOutputTokens"], 1_024);
+
+        provider_request.messages.swap(0, 1);
+        assert!(build_anthropic_generation_body(&provider_request).is_err());
+        assert!(build_gemini_generation_body(&provider_request).is_err());
+    }
+
+    #[tokio::test]
+    async fn prepares_real_anthropic_and_gemini_stream_endpoints() {
+        let mut anthropic = generation_request();
+        anthropic.config.provider = ProviderKind::Anthropic;
+        anthropic.config.base_url = "https://api.anthropic.com/v1".to_owned();
+        anthropic.model = "claude-example".to_owned();
+        anthropic.temperature = None;
+        let prepared = prepare_generation(&anthropic)
+            .await
+            .expect("Anthropic generation should prepare");
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert!(matches!(prepared.provider, ProviderKind::Anthropic));
+
+        anthropic.temperature = Some(0.7);
+        assert_eq!(
+            prepare_generation(&anthropic)
+                .await
+                .err()
+                .expect("deprecated Claude sampling parameters must not be sent silently")
+                .code(),
+            "MODEL_OPERATION_UNSUPPORTED"
+        );
+
+        let mut gemini = generation_request();
+        gemini.config.provider = ProviderKind::Gemini;
+        gemini.config.base_url = "https://generativelanguage.googleapis.com/v1beta".to_owned();
+        gemini.model = "models/gemini-example".to_owned();
+        let prepared = prepare_generation(&gemini)
+            .await
+            .expect("Gemini generation should prepare");
+        assert_eq!(
+            prepared.url.as_str(),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-example:streamGenerateContent?alt=sse"
+        );
+        assert!(matches!(prepared.provider, ProviderKind::Gemini));
+
+        gemini.model = "models/../unsafe".to_owned();
+        assert_eq!(
+            prepare_generation(&gemini)
+                .await
+                .err()
+                .expect("path-like model identifiers must be rejected")
+                .code(),
+            "MODEL_REQUEST_INVALID"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovers_anthropic_and_gemini_models_using_official_routes() {
+        let anthropic_server = spawn_fake_server(
+            "200 OK",
+            br#"{"data":[{"id":"claude-example","display_name":"Claude Example"}],"has_more":false}"#,
+            Duration::ZERO,
+            None,
+        );
+        let anthropic_config = ModelEndpointConfig {
+            provider_id: "anthropic-test".to_owned(),
+            provider: ProviderKind::Anthropic,
+            base_url: format!("{}/v1", anthropic_server.base_url),
+            authentication: AuthenticationMode::None,
+            credential_header_name: None,
+            model_discovery_path: None,
+            text_generation_path: None,
+            embedding_path: None,
+            request_timeout_ms: None,
+            retry_limit: None,
+        };
+        let models = fetch_models(&test_client(), &anthropic_config)
+            .await
+            .expect("Anthropic model discovery should succeed");
+        assert_eq!(models[0].display_name, "Claude Example");
+        let wire_request = String::from_utf8(
+            anthropic_server
+                .request
+                .recv_timeout(Duration::from_secs(1))
+                .expect("capture Anthropic request"),
+        )
+        .expect("request should be UTF-8");
+        anthropic_server
+            .handle
+            .join()
+            .expect("Anthropic server should stop");
+        assert!(wire_request.starts_with("GET /v1/models?limit=1000 HTTP/1.1\r\n"));
+        assert!(wire_request
+            .to_ascii_lowercase()
+            .contains("anthropic-version: 2023-06-01\r\n"));
+
+        let gemini_server = spawn_fake_server(
+            "200 OK",
+            br#"{"models":[{"name":"models/gemini-example","displayName":"Gemini Example"}]}"#,
+            Duration::ZERO,
+            None,
+        );
+        let gemini_config = ModelEndpointConfig {
+            provider_id: "gemini-test".to_owned(),
+            provider: ProviderKind::Gemini,
+            base_url: format!("{}/v1beta", gemini_server.base_url),
+            authentication: AuthenticationMode::None,
+            credential_header_name: None,
+            model_discovery_path: None,
+            text_generation_path: None,
+            embedding_path: None,
+            request_timeout_ms: None,
+            retry_limit: None,
+        };
+        let models = fetch_models(&test_client(), &gemini_config)
+            .await
+            .expect("Gemini model discovery should succeed");
+        assert_eq!(models[0].display_name, "Gemini Example");
+        let wire_request = String::from_utf8(
+            gemini_server
+                .request
+                .recv_timeout(Duration::from_secs(1))
+                .expect("capture Gemini request"),
+        )
+        .expect("request should be UTF-8");
+        gemini_server
+            .handle
+            .join()
+            .expect("Gemini server should stop");
+        assert!(wire_request.starts_with("GET /v1beta/models?pageSize=1000 HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn applies_sensitive_provider_specific_credentials() {
+        for (provider, header_name) in [
+            (ProviderKind::Anthropic, "x-api-key"),
+            (ProviderKind::Gemini, "x-goog-api-key"),
+        ] {
+            let mut value = HeaderValue::from_static("test-secret-value");
+            value.set_sensitive(true);
+            let request = apply_provider_headers(
+                test_client().get("https://models.example/v1/models"),
+                provider,
+                Some(CredentialHeader {
+                    name: HeaderName::from_static(header_name),
+                    value,
+                }),
+            )
+            .build()
+            .expect("request should build");
+            assert_eq!(request.headers()[header_name], "test-secret-value");
+            assert!(!format!("{request:?}").contains("test-secret-value"));
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_unsupported_provider_embeddings_without_network_access() {
+        let request = embedding_request(
+            "http://localhost:11434".to_owned(),
+            ProviderKind::Anthropic,
+            "embedding-model",
+            &["private text"],
+        );
+        assert_eq!(
+            prepare_embedding(&request)
+                .await
+                .err()
+                .expect("unsupported embeddings must fail before network access")
+                .code(),
+            "MODEL_OPERATION_UNSUPPORTED"
+        );
     }
 
     #[tokio::test]
@@ -964,12 +2046,15 @@ mod tests {
             Duration::ZERO,
             None,
         );
-        let request = embedding_request(
+        let mut request = embedding_request(
             format!("{}/v1", server.base_url),
             ProviderKind::OpenAiCompatible,
             "embed-1",
             &["first private text", "second private text"],
         );
+        request.config.embedding_path = Some("/custom/vectors".to_owned());
+        request.config.request_timeout_ms = Some(2_000);
+        request.config.retry_limit = Some(3);
         let response = embed_with_timeout(&test_client(), &request, Duration::from_secs(2))
             .await
             .expect("embedding call should succeed");
@@ -980,7 +2065,7 @@ mod tests {
         server.handle.join().expect("fake server should stop");
         let wire_request = String::from_utf8(wire_request).expect("request should be UTF-8");
 
-        assert!(wire_request.starts_with("POST /v1/embeddings HTTP/1.1\r\n"));
+        assert!(wire_request.starts_with("POST /v1/custom/vectors HTTP/1.1\r\n"));
         let body = wire_request
             .split_once("\r\n\r\n")
             .expect("request should have a body")
@@ -1024,6 +2109,54 @@ mod tests {
         assert!(wire_request.starts_with("POST /api/embed HTTP/1.1\r\n"));
         assert_eq!(response.provider, ProviderKind::Ollama);
         assert_eq!(response.dimension, 3);
+    }
+
+    #[tokio::test]
+    async fn calls_gemini_batch_embedding_endpoint_in_input_order() {
+        let server = spawn_fake_server(
+            "200 OK",
+            br#"{"embeddings":[{"values":[0.1,0.2]},{"values":[0.3,0.4]}]}"#,
+            Duration::ZERO,
+            None,
+        );
+        let request = embedding_request(
+            format!("{}/v1beta", server.base_url),
+            ProviderKind::Gemini,
+            "models/gemini-embedding-example",
+            &["first private text", "second private text"],
+        );
+        let response = embed_with_timeout(&test_client(), &request, Duration::from_secs(2))
+            .await
+            .expect("Gemini batch embedding should succeed");
+        let wire_request = String::from_utf8(
+            server
+                .request
+                .recv_timeout(Duration::from_secs(1))
+                .expect("fake server should capture request"),
+        )
+        .expect("request should be UTF-8");
+        server.handle.join().expect("fake server should stop");
+
+        assert!(wire_request.starts_with(
+            "POST /v1beta/models/gemini-embedding-example:batchEmbedContents HTTP/1.1\r\n"
+        ));
+        let body = wire_request
+            .split_once("\r\n\r\n")
+            .expect("request should have a body")
+            .1;
+        let body: serde_json::Value =
+            serde_json::from_str(body).expect("Gemini embedding request should be JSON");
+        assert_eq!(
+            body["requests"][0]["model"],
+            "models/gemini-embedding-example"
+        );
+        assert_eq!(
+            body["requests"][1]["content"]["parts"][0]["text"],
+            "second private text"
+        );
+        assert_eq!(response.provider, ProviderKind::Gemini);
+        assert_eq!(response.dimension, 2);
+        assert_eq!(response.embeddings[1], vec![0.3, 0.4]);
     }
 
     #[tokio::test]
@@ -1131,6 +2264,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn calls_only_the_explicit_qwen_rerank_protocol_with_bounded_output() {
+        let server = spawn_fake_server(
+            "200 OK",
+            br#"{"object":"list","results":[{"index":1,"relevance_score":0.91}],"model":"qwen3-rerank","id":"request-id","usage":{"total_tokens":41}}"#,
+            Duration::ZERO,
+            None,
+        );
+        let request = rerank_request(format!("{}/compatible-api/v1", server.base_url));
+        let prepared = PreparedRerank {
+            provider: ProviderKind::OpenAiCompatible,
+            protocol: RerankProtocol::QwenOpenAiCompatible,
+            endpoint_origin: server.base_url.clone(),
+            url: Url::parse(&format!("{}/compatible-api/v1/reranks", server.base_url))
+                .expect("test URL should parse"),
+            credential: None,
+            body: serde_json::to_vec(&QwenRerankBody {
+                model: &request.model,
+                query: &request.query,
+                documents: &request.documents,
+                top_n: request.top_n,
+            })
+            .expect("test request should serialize"),
+            model: request.model.clone(),
+            document_count: request.documents.len(),
+            top_n: request.top_n,
+        };
+        let response = timeout(
+            Duration::from_secs(2),
+            execute_rerank(&test_client(), prepared),
+        )
+        .await
+        .expect("test server should respond before timeout")
+        .expect("Qwen rerank request should succeed");
+        let wire_request = String::from_utf8(
+            server
+                .request
+                .recv_timeout(Duration::from_secs(1))
+                .expect("fake server should capture request"),
+        )
+        .expect("request should be UTF-8");
+        server.handle.join().expect("fake server should stop");
+
+        assert!(wire_request.starts_with("POST /compatible-api/v1/reranks HTTP/1.1\r\n"));
+        let body: serde_json::Value = serde_json::from_str(
+            wire_request
+                .split_once("\r\n\r\n")
+                .expect("request should contain a body")
+                .1,
+        )
+        .expect("rerank body should be JSON");
+        assert_eq!(body["model"], "qwen3-rerank");
+        assert_eq!(body["query"], "Which source continues the scene?");
+        assert_eq!(body["documents"].as_array().map(Vec::len), Some(2));
+        assert_eq!(body["top_n"], 2);
+        assert_eq!(response.rankings[0].index, 1);
+        assert_eq!(response.input_tokens, Some(41));
+        let safe_response = serde_json::to_string(&response).expect("response should serialize");
+        assert!(!safe_response.contains("first source"));
+        assert!(!safe_response.contains("Which source"));
+    }
+
+    #[tokio::test]
+    async fn enforces_rerank_protocol_and_input_limits_before_network_access() {
+        let valid = rerank_request(
+            "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-api/v1".to_owned(),
+        );
+        assert!(validate_rerank_request(&valid).is_ok());
+
+        let mut unsupported = valid.clone();
+        unsupported.config.provider = ProviderKind::Gemini;
+        assert_eq!(
+            prepare_rerank(&unsupported)
+                .await
+                .err()
+                .expect("Gemini must not be treated as supporting rerank")
+                .code(),
+            "MODEL_OPERATION_UNSUPPORTED"
+        );
+
+        let mut no_keyring = valid.clone();
+        no_keyring.config.authentication = AuthenticationMode::None;
+        assert_eq!(
+            prepare_rerank(&no_keyring)
+                .await
+                .err()
+                .expect("remote rerank must use the OS credential store")
+                .code(),
+            "MODEL_CREDENTIAL_MISSING"
+        );
+
+        let mut duplicate_safe_limit = valid.clone();
+        duplicate_safe_limit.documents = vec!["x".to_owned(); MAX_RERANK_DOCUMENTS + 1];
+        assert!(validate_rerank_request(&duplicate_safe_limit).is_err());
+
+        let mut oversized_query = valid.clone();
+        oversized_query.query = "x".repeat(MAX_RERANK_QUERY_BYTES + 1);
+        assert!(validate_rerank_request(&oversized_query).is_err());
+
+        let mut invalid_top_n = valid;
+        invalid_top_n.top_n = invalid_top_n.documents.len() + 1;
+        assert!(validate_rerank_request(&invalid_top_n).is_err());
+    }
+
+    #[tokio::test]
     #[ignore = "requires an explicitly configured local Ollama installation and models"]
     async fn exercises_real_local_ollama_discovery_embedding_and_generation() {
         let base_url = std::env::var("INKSHADOW_TEST_OLLAMA_URL")
@@ -1145,6 +2382,12 @@ mod tests {
             provider: ProviderKind::Ollama,
             base_url,
             authentication: AuthenticationMode::None,
+            credential_header_name: None,
+            model_discovery_path: None,
+            text_generation_path: None,
+            embedding_path: None,
+            request_timeout_ms: None,
+            retry_limit: None,
         };
 
         let models = fetch_models(&state.client, &config)
@@ -1206,14 +2449,15 @@ mod tests {
         .await
         .expect("prepare the real local generation request");
         assert!(matches!(prepared.provider, ProviderKind::Ollama));
-        let response = apply_authorization(
+        let response = apply_provider_headers(
             state
                 .client
                 .post(prepared.url)
                 .header(CONTENT_TYPE, "application/json")
                 .header(ACCEPT, "application/x-ndjson")
                 .body(prepared.body),
-            prepared.authorization,
+            prepared.provider,
+            prepared.credential,
         )
         .send()
         .await

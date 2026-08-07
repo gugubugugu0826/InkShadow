@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { HybridSearchHit, HybridSearchResponse, SearchHealth } from "@inkshadow/search-core";
 import type { Project } from "@inkshadow/domain";
 import { parseUuidV7 } from "@inkshadow/domain";
@@ -30,6 +30,8 @@ export function ProjectSearchPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [query, setQuery] = useState("");
   const [response, setResponse] = useState<HybridSearchResponse | null>(null);
+  const [responseQuery, setResponseQuery] = useState<string | null>(null);
+  const searchRequestRef = useRef(0);
   const [health, setHealth] = useState<SearchHealth>(() => runtime.search.health());
   const [embedding, setEmbedding] = useState<ProjectEmbeddingDiagnostics>(() =>
     runtime.search.embeddingDiagnostics(),
@@ -77,18 +79,27 @@ export function ProjectSearchPage() {
   }, [load]);
 
   async function runSearch(): Promise<void> {
-    if (projectId === null || query.trim().length === 0) {
+    const submittedQuery = query.trim();
+    if (projectId === null || submittedQuery.length === 0) {
       return;
     }
+    const requestId = searchRequestRef.current + 1;
+    searchRequestRef.current = requestId;
     setBusy("search");
     setError(null);
-    const result = await runtime.search.search(projectId, query, 30);
+    setResponse(null);
+    setResponseQuery(null);
+    const result = await runtime.search.search(projectId, submittedQuery, 30);
+    if (requestId !== searchRequestRef.current) {
+      return;
+    }
     setBusy(null);
     if (!result.ok) {
       setError(result.error);
       return;
     }
     setResponse(result.value);
+    setResponseQuery(submittedQuery);
     setHealth(result.value.health);
     setEmbedding(runtime.search.embeddingDiagnostics());
   }
@@ -279,6 +290,13 @@ export function ProjectSearchPage() {
               搜索
             </Button>
           </form>
+          <p role="status" aria-live="polite">
+            {busy === "search"
+              ? `正在搜索“${query.trim()}”…`
+              : responseQuery === null
+                ? "尚未执行搜索。"
+                : `已完成“${responseQuery}”的搜索。`}
+          </p>
         </section>
 
         {pageState === "ready" && normalizedError !== null && (
@@ -301,9 +319,19 @@ export function ProjectSearchPage() {
         <section aria-labelledby="search-results-title">
           <div className="section-heading">
             <h2 id="search-results-title">结果</h2>
-            <Badge>{response === null ? "尚未搜索" : `${String(response.hits.length)} 条`}</Badge>
+            <Badge>
+              {busy === "search"
+                ? "搜索中"
+                : response === null
+                  ? "尚未搜索"
+                  : `${String(response.hits.length)} 条`}
+            </Badge>
           </div>
-          {response === null ? (
+          {busy === "search" ? (
+            <p className="desktop-route-loading" role="status">
+              正在读取最新结果…
+            </p>
+          ) : response === null ? (
             <EmptyState
               title="输入线索开始检索"
               description="索引会从当前稳定章节和故事大纲重建，不读取恢复草稿或未接受候选。"

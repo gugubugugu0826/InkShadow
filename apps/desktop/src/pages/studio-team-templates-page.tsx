@@ -179,7 +179,7 @@ export function StudioTeamTemplatesPage({
     if (normalizedTitle.length === 0) {
       setFailure({
         code: "TEAM_TEMPLATE_TITLE_REQUIRED",
-        message: "Enter a private template title before creating the draft.",
+        message: "创建草稿前请输入私密模板标题。",
       });
       return;
     }
@@ -249,8 +249,7 @@ export function StudioTeamTemplatesPage({
       setState("error");
       setFailure({
         code: outcome.failureCode,
-        message:
-          "The template is committed locally. Only the cloud metadata receipt remains; retry will not apply it again.",
+        message: "模板已安全提交到本地，只剩云端元数据回执待确认；重试不会重复应用模板。",
       });
       onProjectRevisionAdvanced?.(outcome.receipt.projectRevisionAfter);
       return;
@@ -274,7 +273,7 @@ export function StudioTeamTemplatesPage({
       if (listed.nextCursor !== null && seenCursors.current.has(listed.nextCursor)) {
         throw new StudioTeamTemplateCoordinatorError(
           "TEAM_TEMPLATE_PAGINATION_INVALID",
-          "Team-template pagination repeated an opaque cursor.",
+          "团队模板分页返回了重复游标。",
         );
       }
       if (listed.nextCursor !== null) {
@@ -307,8 +306,9 @@ export function StudioTeamTemplatesPage({
     return (
       <EmptyState
         kind="offline"
-        title="Team templates are offline"
-        description="No remote success is simulated. Reconnect to read or change encrypted team templates."
+        headingLevel={1}
+        title="团队模板当前离线"
+        description="离线时不会伪造远端成功。重新联网后才能读取或修改加密团队模板。"
       />
     );
   }
@@ -316,15 +316,16 @@ export function StudioTeamTemplatesPage({
     return (
       <EmptyState
         kind="forbidden"
-        title="No team-template access"
-        description="The active role or exact project assignment does not permit this project-bound read."
+        headingLevel={1}
+        title="无权访问团队模板"
+        description="当前角色或项目权限不允许读取这个项目的团队模板。"
       />
     );
   }
   if (state === "loading") {
     return (
-      <section role="status" aria-label="Loading encrypted team templates">
-        Loading encrypted team templates…
+      <section role="status" aria-label="正在读取加密团队模板">
+        正在读取加密团队模板…
       </section>
     );
   }
@@ -334,8 +335,9 @@ export function StudioTeamTemplatesPage({
         <PageHeader />
         {!mutationFeatureEnabled && <RolloutNotice />}
         <EmptyState
-          title="No team templates yet"
-          description="There are no encrypted templates in this assigned project."
+          headingLevel={2}
+          title="还没有团队模板"
+          description="这个项目中还没有加密团队模板。"
         />
         {capabilities.create && (
           <CreateDraftForm
@@ -351,25 +353,25 @@ export function StudioTeamTemplatesPage({
 
   const visibleState = state === "conflict" ? "conflict" : readOnly ? "readonly" : state;
   return (
-    <section data-page-state={visibleState} aria-label="Encrypted team templates">
+    <section data-page-state={visibleState} aria-label="加密团队模板">
       <PageHeader />
       {!mutationFeatureEnabled && <RolloutNotice />}
       {readOnly && (
         <InlineAlert
-          title="Read-only template history"
-          description="This role can decrypt assigned-project history but cannot create, clone, apply, publish or archive."
+          title="模板历史为只读"
+          description="当前角色可以解密并查看这个项目的模板历史，但不能创建、克隆、应用、发布或归档。"
         />
       )}
       {failure !== null && (
         <InlineAlert
           tone="error"
-          title={failure.code}
-          description={failure.message}
+          title="团队模板操作未完成"
+          description={`${failure.message}（${failure.code}）`}
           {...(partial === null
             ? {}
             : {
                 action: {
-                  label: "Retry cloud receipt only",
+                  label: "仅重试云端回执",
                   onClick: () => void retryCloudRecord(),
                 },
               })}
@@ -421,7 +423,7 @@ export function StudioTeamTemplatesPage({
           disabled={busy !== null}
           onClick={() => void loadMore()}
         >
-          Load more templates
+          加载更多模板
         </Button>
       )}
     </section>
@@ -431,11 +433,8 @@ export function StudioTeamTemplatesPage({
 function PageHeader() {
   return (
     <header>
-      <h1>Encrypted team templates</h1>
-      <p>
-        Titles, settings, prompt rules and checklists are decrypted only on this device with the
-        project key.
-      </p>
+      <h1>加密团队模板</h1>
+      <p>标题、项目设置、提示词规则和审阅清单只会使用项目密钥在当前设备上解密。</p>
     </header>
   );
 }
@@ -444,8 +443,8 @@ function RolloutNotice() {
   return (
     <InlineAlert
       tone="warning"
-      title="Template changes are disabled"
-      description="Historical encrypted records remain readable; mutation controls are unavailable until rollout is enabled."
+      title="团队模板变更尚未启用"
+      description="加密历史记录仍可读取；功能正式开放前，创建和修改操作保持关闭。"
     />
   );
 }
@@ -459,12 +458,12 @@ function CreateDraftForm(props: {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Create encrypted draft</CardTitle>
-        <CardDescription>The private title is encrypted before any cloud request.</CardDescription>
+        <CardTitle headingLevel={2}>创建加密草稿</CardTitle>
+        <CardDescription>私密标题会在任何云请求发出前完成加密。</CardDescription>
       </CardHeader>
       <CardContent>
         <form onSubmit={props.submit}>
-          <FormField label="Private template title" required>
+          <FormField label="私密模板标题" required>
             {({ id }) => (
               <Input
                 id={id}
@@ -475,8 +474,12 @@ function CreateDraftForm(props: {
               />
             )}
           </FormField>
-          <Button type="submit" loading={props.busy === "create"} disabled={props.busy !== null}>
-            Encrypt and create draft
+          <Button
+            type="submit"
+            loading={props.busy === "create"}
+            disabled={props.busy !== null || props.title.trim().length === 0}
+          >
+            加密并创建草稿
           </Button>
         </form>
       </CardContent>
@@ -503,14 +506,16 @@ function TemplateCard(props: {
     <Card data-template-id={item.template.templateId}>
       <CardHeader>
         <div>
-          <Badge tone={stateTone(item.template.state)}>{item.template.state}</Badge>
+          <Badge tone={stateTone(item.template.state)}>
+            {templateStateLabel(item.template.state)}
+          </Badge>
           <Badge tone="neutral">v{item.displayVersion.versionNumber}</Badge>
         </div>
         {item.state === "ready" ? (
-          <CardTitle>{item.payload.title}</CardTitle>
+          <CardTitle headingLevel={2}>{item.payload.title}</CardTitle>
         ) : (
           <>
-            <CardTitle>Unable to decrypt this template</CardTitle>
+            <CardTitle headingLevel={2}>无法解密此模板</CardTitle>
             <CardDescription>
               <code>{item.errorCode}</code>
             </CardDescription>
@@ -520,8 +525,8 @@ function TemplateCard(props: {
       <CardContent>
         {item.state === "ready" && (
           <p>
-            {item.payload.projectSettings.length} settings · {item.payload.promptRules.length}{" "}
-            prompt rules · {item.payload.reviewChecklist.length} checklist items
+            {item.payload.projectSettings.length} 项设置 · {item.payload.promptRules.length}{" "}
+            条提示词规则 · {item.payload.reviewChecklist.length} 个审阅项
           </p>
         )}
         <div>
@@ -532,7 +537,7 @@ function TemplateCard(props: {
               loading={props.busy === `publish:${item.template.templateId}`}
               onClick={props.publish}
             >
-              Publish latest version
+              发布最新版本
             </Button>
           )}
           {item.template.state === "published" && props.canApply && (
@@ -542,7 +547,7 @@ function TemplateCard(props: {
               loading={props.busy === `apply:${item.template.templateId}`}
               onClick={props.apply}
             >
-              Apply once to project
+              应用一次到项目
             </Button>
           )}
           {item.template.state === "published" && props.canClone && (
@@ -553,7 +558,7 @@ function TemplateCard(props: {
               loading={props.busy === `clone:${item.template.templateId}`}
               onClick={props.clone}
             >
-              Clone as draft
+              克隆为草稿
             </Button>
           )}
           {item.template.state !== "archived" && props.canArchive && (
@@ -564,7 +569,7 @@ function TemplateCard(props: {
               loading={props.busy === `archive:${item.template.templateId}`}
               onClick={props.archive}
             >
-              Archive
+              归档
             </Button>
           )}
           <Button
@@ -574,7 +579,7 @@ function TemplateCard(props: {
             loading={props.busy === `export:${item.template.templateId}`}
             onClick={props.exportHistory}
           >
-            Export version history
+            导出版本历史
           </Button>
         </div>
       </CardContent>
@@ -605,7 +610,7 @@ function applyFailure(
     setState("conflict");
     setFailure({
       code,
-      message: "The template or project revision changed. Reload before trying again.",
+      message: "模板或项目版本已经变化，请重新加载后再试。",
     });
     return;
   }
@@ -617,14 +622,25 @@ function applyFailure(
 }
 
 function visibleFailureMessage(error: unknown): string {
+  const code = errorCode(error);
+  const knownMessages: Record<string, string> = {
+    ACCESS_FORBIDDEN: "当前账户无权执行此团队模板操作。",
+    TEAM_TEMPLATE_OFFLINE: "当前处于离线状态，请联网后重试。",
+    TEAM_TEMPLATE_PERMISSION_DENIED: "当前团队角色或项目权限不允许执行此操作。",
+    TEAM_TEMPLATE_REVISION_CONFLICT: "模板或项目版本已经变化，请重新加载后再试。",
+  };
+  const known = knownMessages[code];
+  if (known !== undefined) {
+    return known;
+  }
   if (
     error instanceof StudioTeamTemplateCryptoError ||
     error instanceof StudioTeamTemplateCoordinatorError ||
     error instanceof StudioTeamTemplateServiceError
   ) {
-    return error.message;
+    return "团队模板未能通过安全校验，请重新加载后再试。";
   }
-  return "The encrypted team-template operation failed without exposing private details.";
+  return "加密团队模板操作未完成，未暴露任何私密内容。";
 }
 
 function errorCode(error: unknown): string {
@@ -652,6 +668,17 @@ function stateTone(state: DecryptedStudioTeamTemplateListItem["template"]["state
     case "archived":
       return "neutral" as const;
   }
+}
+
+function templateStateLabel(
+  state: DecryptedStudioTeamTemplateListItem["template"]["state"],
+): string {
+  const labels: Record<DecryptedStudioTeamTemplateListItem["template"]["state"], string> = {
+    archived: "已归档",
+    draft: "草稿",
+    published: "已发布",
+  };
+  return labels[state];
 }
 
 function downloadHistory(history: StudioTeamTemplateHistoryExport): void {

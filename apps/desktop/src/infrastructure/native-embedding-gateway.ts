@@ -1,11 +1,9 @@
-import type { NativeAuthenticationMode, NativeProviderKind } from "./model-center-store";
+import type {
+  NativeGatewayEndpointConfig,
+  NativeGatewayProviderKind,
+} from "./native-model-gateway-contract";
 
-export interface NativeEmbeddingEndpointConfig {
-  readonly providerId: string;
-  readonly provider: NativeProviderKind;
-  readonly baseUrl: string;
-  readonly authentication: NativeAuthenticationMode;
-}
+export type NativeEmbeddingEndpointConfig = NativeGatewayEndpointConfig;
 
 export interface NativeEmbeddingInput {
   readonly config: NativeEmbeddingEndpointConfig;
@@ -14,7 +12,7 @@ export interface NativeEmbeddingInput {
 }
 
 export interface NativeEmbeddingResult {
-  readonly provider: NativeProviderKind;
+  readonly provider: NativeGatewayProviderKind;
   readonly endpointOrigin: string;
   readonly model: string;
   readonly dimension: number;
