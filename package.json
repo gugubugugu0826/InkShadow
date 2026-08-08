@@ -29,7 +29,7 @@
     "test:e2e": "pnpm --filter @inkshadow/desktop build:web && node scripts/run-e2e.mjs",
     "test:e2e:release": "pnpm --filter @inkshadow/desktop build:web:release && node scripts/check-desktop-release.mjs --dist apps/desktop/dist-release && node scripts/run-e2e.mjs --dist apps/desktop/dist-release",
     "test:all": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e",
-    "release:check": "pnpm format:check && pnpm check:secrets && pnpm check:licenses && pnpm check:boundaries && pnpm check:desktop-release && pnpm typecheck && pnpm lint && pnpm test",
+    "release:check": "pnpm build && pnpm format:check && pnpm check:secrets && pnpm check:licenses && pnpm check:boundaries && pnpm check:desktop-release && pnpm typecheck && pnpm lint && pnpm test",
     "release:assert-clean": "node scripts/assert-clean-release-head.mjs",
     "release:verify:unsigned": "node scripts/check-desktop-release.mjs --dist apps/desktop/dist-release",
     "release:candidate:unsigned": "node scripts/run-unsigned-release-candidate.mjs",

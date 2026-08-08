@@ -91,6 +91,9 @@ const requiredFiles = [
   "apps/desktop/src-tauri/gen/schemas/acl-manifests.json",
   "apps/desktop/src-tauri/icons/icon.png",
   "apps/desktop/src-tauri/src/lib.rs",
+  "packages/access-core/package.json",
+  "packages/access-core/tsconfig.json",
+  "packages/access-core/src/index.ts",
   "packages/application/package.json",
   "packages/application/tsconfig.json",
   "packages/application/tsconfig.test.json",
@@ -127,6 +130,8 @@ test("desktop release source fingerprint covers build configuration and migratio
     assert(relativeFiles.has("packages/data/tsconfig.build.json"));
     assert(relativeFiles.has("packages/story-core/tsconfig.build.json"));
     assert(relativeFiles.has("packages/application/tsconfig.test.json"));
+    assert(relativeFiles.has("packages/access-core/package.json"));
+    assert(relativeFiles.has("packages/access-core/src/index.ts"));
     assert(relativeFiles.has("apps/desktop/src-tauri/tauri.dev.conf.json"));
     assert(relativeFiles.has("apps/desktop/src-tauri/.cargo/config.toml"));
     assert(relativeFiles.has("apps/desktop/public/favicon.svg"));
@@ -608,6 +613,38 @@ test("artifact fingerprint excludes only the root release manifest", async () =>
   }
 });
 
+test("release configuration requires exact clean-checkout build commands", async () => {
+  const releaseWorkspace = await createReleaseCheckerRepository();
+  const ciPath = path.join(releaseWorkspace.root, ".github", "workflows", "ci.yml");
+  try {
+    const original = await readFile(ciPath, "utf8");
+    const verified = runConfigChecker(releaseWorkspace.root);
+    assert.equal(verified.status, 0, `${verified.stdout}\n${verified.stderr}`);
+
+    const qualityMutation = original.replace(
+      "- name: Build workspace\n        run: pnpm build",
+      "- name: Build workspace\n        run: pnpm build:noop",
+    );
+    assert.notEqual(qualityMutation, original);
+    await writeFile(ciPath, qualityMutation, "utf8");
+    const rejectedQuality = runConfigChecker(releaseWorkspace.root);
+    assert.equal(rejectedQuality.status, 1);
+    assert.match(rejectedQuality.stderr, /CI quality checks must build workspace package entries/u);
+
+    const nativeMutation = original.replace(
+      "- name: Build workspace for native checks\n        run: pnpm build",
+      "- name: Build workspace for native checks\n        run: pnpm build:noop",
+    );
+    assert.notEqual(nativeMutation, original);
+    await writeFile(ciPath, nativeMutation, "utf8");
+    const rejectedNative = runConfigChecker(releaseWorkspace.root);
+    assert.equal(rejectedNative.status, 1);
+    assert.match(rejectedNative.stderr, /CI must build workspace package entries/u);
+  } finally {
+    await rm(releaseWorkspace.root, { recursive: true, force: true });
+  }
+});
+
 test("post-package provenance verification rejects a persistent dist-release mutation", async () => {
   const releaseWorkspace = await createReleaseCheckerRepository();
   const distributionRoot = path.join(
@@ -866,6 +903,17 @@ function runReleaseChecker(distributionRoot, releaseWorkspaceRoot) {
           ([name, value]) => !/^GIT_/iu.test(name) && value !== undefined,
         ),
       ),
+    },
+  );
+}
+
+function runConfigChecker(releaseWorkspaceRoot) {
+  return spawnSync(
+    process.execPath,
+    [path.join(releaseWorkspaceRoot, "scripts", "check-desktop-release.mjs"), "--config-only"],
+    {
+      cwd: releaseWorkspaceRoot,
+      encoding: "utf8",
     },
   );
 }

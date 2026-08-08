@@ -41,6 +41,9 @@ jobs:
       - name: Enforce runtime license policy
         run: pnpm check:licenses
 
+      - name: Build workspace
+        run: pnpm build
+
       - name: Check types
         run: pnpm typecheck
 
@@ -49,9 +52,6 @@ jobs:
 
       - name: Test
         run: pnpm test
-
-      - name: Build workspace
-        run: pnpm build
 
       - name: Install Playwright browser
         run: pnpm exec playwright install chromium
@@ -105,6 +105,9 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts=false
 
+      - name: Build cloud workspace dependencies
+        run: pnpm --filter "@inkshadow/cloud-api..." --filter "!@inkshadow/cloud-api" --if-present build
+
       - name: Run every cloud API suite against PostgreSQL
         run: pnpm --filter @inkshadow/cloud-api test
 
@@ -130,6 +133,9 @@ jobs:
 
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Build workspace for native checks
+        run: pnpm build
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check

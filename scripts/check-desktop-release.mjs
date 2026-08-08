@@ -126,17 +126,27 @@ function parseArguments(arguments_) {
 }
 
 async function checkConfiguration() {
-  const [base, development, release, desktopManifest, rootManifest, capability, viteSource, ci] =
-    await Promise.all([
-      readJson(path.join(tauriRoot, "tauri.conf.json")),
-      readJson(path.join(tauriRoot, "tauri.dev.conf.json")),
-      readJson(path.join(tauriRoot, "tauri.release-gate.conf.json")),
-      readJson(path.join(desktopRoot, "package.json")),
-      readJson(path.join(workspaceRoot, "package.json")),
-      readJson(path.join(tauriRoot, "capabilities", "default.json")),
-      readUtf8(path.join(desktopRoot, "vite.config.ts")),
-      readUtf8(path.join(workspaceRoot, ".github", "workflows", "ci.yml")),
-    ]);
+  const [
+    base,
+    development,
+    release,
+    desktopManifest,
+    rootManifest,
+    accessCoreManifest,
+    capability,
+    viteSource,
+    ci,
+  ] = await Promise.all([
+    readJson(path.join(tauriRoot, "tauri.conf.json")),
+    readJson(path.join(tauriRoot, "tauri.dev.conf.json")),
+    readJson(path.join(tauriRoot, "tauri.release-gate.conf.json")),
+    readJson(path.join(desktopRoot, "package.json")),
+    readJson(path.join(workspaceRoot, "package.json")),
+    readJson(path.join(workspaceRoot, "packages", "access-core", "package.json")),
+    readJson(path.join(tauriRoot, "capabilities", "default.json")),
+    readUtf8(path.join(desktopRoot, "vite.config.ts")),
+    readUtf8(path.join(workspaceRoot, ".github", "workflows", "ci.yml")),
+  ]);
 
   const production = deepMerge(base, release);
   const dev = deepMerge(base, development);
@@ -174,6 +184,18 @@ async function checkConfiguration() {
   expectEqual(base?.identifier, "com.inkshadow.desktop", "desktop identifier");
   expectEqual(base?.version, desktopManifest?.version, "Tauri/package version");
   expectEqual(base?.version, rootManifest?.version, "Tauri/workspace version");
+  expectEqual(accessCoreManifest?.main, "./dist/index.js", "access-core workspace main");
+  expectEqual(accessCoreManifest?.types, "./dist/index.d.ts", "access-core workspace types");
+  expectEqual(
+    accessCoreManifest?.exports?.["."]?.types,
+    "./dist/index.d.ts",
+    "access-core workspace export types",
+  );
+  expectEqual(
+    accessCoreManifest?.exports?.["."]?.import,
+    "./dist/index.js",
+    "access-core workspace import export",
+  );
   if (typeof base?.productName !== "string" || base.productName.trim().length === 0) {
     fail("productName must be a non-empty string.");
   }
@@ -258,11 +280,63 @@ async function checkConfiguration() {
     "node scripts/check-desktop-release.mjs --dist apps/desktop/dist-release",
     "post-package release provenance gate",
   );
+  expectEqual(
+    rootManifest?.scripts?.["release:check"],
+    "pnpm build && pnpm format:check && pnpm check:secrets && pnpm check:licenses && pnpm check:boundaries && pnpm check:desktop-release && pnpm typecheck && pnpm lint && pnpm test",
+    "clean-checkout release gate",
+  );
   if (!/run:\s+pnpm test:e2e:release/u.test(ci)) {
     fail("CI native packaging must exercise the exact release frontend before packaging.");
   }
   if (!/run:\s+pnpm --filter @inkshadow\/desktop tauri:package:unsigned:prebuilt/u.test(ci)) {
     fail("CI native packaging must package the already exercised release frontend.");
+  }
+  const qualityJobOffset = ci.indexOf("\n  quality:");
+  const qualityBuildOffset = ci.indexOf("- name: Build workspace", qualityJobOffset);
+  const qualityBuildCommandOffset = ci.indexOf("\n        run: pnpm build\n", qualityBuildOffset);
+  const qualityTypecheckOffset = ci.indexOf("- name: Check types", qualityJobOffset);
+  if (
+    qualityJobOffset < 0 ||
+    qualityBuildOffset < qualityJobOffset ||
+    qualityBuildCommandOffset < qualityBuildOffset ||
+    qualityTypecheckOffset < qualityBuildCommandOffset
+  ) {
+    fail("CI quality checks must build workspace package entries before type checking.");
+  }
+
+  const cloudJobOffset = ci.indexOf("\n  cloud-postgres:");
+  const cloudBuildOffset = ci.indexOf("- name: Build cloud workspace dependencies", cloudJobOffset);
+  const cloudBuildCommandOffset = ci.indexOf(
+    'run: pnpm --filter "@inkshadow/cloud-api..." --filter "!@inkshadow/cloud-api" --if-present build',
+    cloudBuildOffset,
+  );
+  const cloudTestOffset = ci.indexOf(
+    "- name: Run every cloud API suite against PostgreSQL",
+    cloudJobOffset,
+  );
+  if (
+    cloudJobOffset < 0 ||
+    cloudBuildOffset < cloudJobOffset ||
+    cloudBuildCommandOffset < cloudBuildOffset ||
+    cloudTestOffset < cloudBuildCommandOffset
+  ) {
+    fail("CI must build cloud workspace package entries before PostgreSQL tests.");
+  }
+
+  const nativeJobOffset = ci.indexOf("\n  native:");
+  const nativeBuildOffset = ci.indexOf(
+    "- name: Build workspace for native checks",
+    nativeJobOffset,
+  );
+  const nativeBuildCommandOffset = ci.indexOf("\n        run: pnpm build\n", nativeBuildOffset);
+  const nativeClippyOffset = ci.indexOf("- name: Lint Rust", nativeJobOffset);
+  if (
+    nativeJobOffset < 0 ||
+    nativeBuildOffset < nativeJobOffset ||
+    nativeBuildCommandOffset < nativeBuildOffset ||
+    nativeClippyOffset < nativeBuildCommandOffset
+  ) {
+    fail("CI must build workspace package entries and the desktop frontend before Clippy.");
   }
 }
 
