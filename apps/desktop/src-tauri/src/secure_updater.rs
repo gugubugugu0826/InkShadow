@@ -200,6 +200,10 @@ struct StagingOperationLock {
     path: PathBuf,
 }
 
+struct SecureStagingRoot {
+    identity: Handle,
+}
+
 impl Drop for StagingOperationLock {
     fn drop(&mut self) {
         drop(self.file.take());
@@ -228,8 +232,8 @@ struct LocalSecurityDescriptor(windows_sys::Win32::Security::PSECURITY_DESCRIPTO
 impl Drop for LocalSecurityDescriptor {
     fn drop(&mut self) {
         if !self.0.is_null() {
-            // SAFETY: GetNamedSecurityInfoW allocates this descriptor with
-            // LocalAlloc and transfers ownership to the caller.
+            // SAFETY: GetSecurityInfo allocates this descriptor with LocalAlloc
+            // and transfers ownership to the caller.
             let _ = unsafe { windows_sys::Win32::Foundation::LocalFree(self.0) };
         }
     }
@@ -735,7 +739,7 @@ async fn stage_verified_artifact(
     plan: &VerifiedUpdatePlan,
     staging_root: &Path,
 ) -> Result<PathBuf, CommandError> {
-    let staging_identity = prepare_secure_staging_root(staging_root).await?;
+    let secure_staging_root = prepare_secure_staging_root(staging_root).await?;
     let _cross_process_lock = acquire_staging_operation_lock(staging_root)?;
     enforce_staging_capacity(staging_root, plan.artifact_size_bytes).await?;
     let destination = staging_root.join(format!(
@@ -761,7 +765,8 @@ async fn stage_verified_artifact(
         let _ = fs::remove_file(&temporary).await;
         return Err(update_manifest_expired());
     }
-    if Handle::from_path(staging_root).map_err(|_| update_stage_failed())? != staging_identity
+    if Handle::from_path(staging_root).map_err(|_| update_stage_failed())?
+        != secure_staging_root.identity
         || fs::try_exists(&destination)
             .await
             .map_err(|_| update_stage_failed())?
@@ -785,7 +790,9 @@ async fn stage_verified_artifact(
     Ok(destination)
 }
 
-async fn prepare_secure_staging_root(staging_root: &Path) -> Result<Handle, CommandError> {
+async fn prepare_secure_staging_root(
+    staging_root: &Path,
+) -> Result<SecureStagingRoot, CommandError> {
     #[cfg(not(windows))]
     {
         let _ = staging_root;
@@ -796,26 +803,94 @@ async fn prepare_secure_staging_root(staging_root: &Path) -> Result<Handle, Comm
         fs::create_dir_all(staging_root)
             .await
             .map_err(|_| update_stage_failed())?;
-        let metadata = fs::symlink_metadata(staging_root)
-            .await
-            .map_err(|_| update_stage_failed())?;
+        let directory_handle = open_secure_staging_directory(staging_root)?;
+        let metadata = directory_handle
+            .metadata()
+            .map_err(|_| update_stage_security_unavailable())?;
         if !metadata_is_safe_directory(&metadata) {
             return Err(update_stage_security_unavailable());
         }
-        harden_and_verify_staging_acl(staging_root)?;
-        Handle::from_path(staging_root).map_err(|_| update_stage_security_unavailable())
+        harden_and_verify_staging_acl(&directory_handle)?;
+        // Handle::from_file takes ownership of the exact CreateFileW handle.
+        // Because that handle was opened without FILE_SHARE_DELETE, retaining
+        // it in this guard prevents the root from being renamed, deleted, or
+        // path-swapped for the complete staging operation.
+        let identity =
+            Handle::from_file(directory_handle).map_err(|_| update_stage_security_unavailable())?;
+        if Handle::from_path(staging_root).map_err(|_| update_stage_security_unavailable())?
+            != identity
+        {
+            return Err(update_stage_security_unavailable());
+        }
+        Ok(SecureStagingRoot { identity })
     }
 }
 
 #[cfg(windows)]
-fn harden_and_verify_staging_acl(staging_root: &Path) -> Result<(), CommandError> {
-    use std::mem::size_of;
+fn open_secure_staging_directory(staging_root: &Path) -> Result<std::fs::File, CommandError> {
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use std::ptr::{null, null_mut};
+
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
+    };
+
+    let path = staging_root
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: path is NUL-terminated. The returned handle is converted exactly
+    // once into an owning File. Omitting FILE_SHARE_DELETE prevents the path
+    // from being renamed or replaced while the staging operation is active.
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            // FILE_LIST_DIRECTORY activates ordinary share accounting without
+            // granting this guard delete rights. Omitting FILE_SHARE_DELETE
+            // then keeps the path stable until the guard is dropped.
+            READ_CONTROL | WRITE_DAC | FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(update_stage_security_unavailable());
+    }
+    // SAFETY: CreateFileW returned a unique, valid, owned handle above.
+    Ok(unsafe { std::fs::File::from_raw_handle(handle as RawHandle) })
+}
+
+#[cfg(windows)]
+fn harden_and_verify_staging_acl(staging_directory: &std::fs::File) -> Result<(), CommandError> {
+    harden_and_verify_staging_acl_with_owner_policy(staging_directory, |owner, trusted_sids| {
+        trusted_sids
+            .iter()
+            .any(|trusted| unsafe { windows_sys::Win32::Security::EqualSid(*trusted, owner) } != 0)
+    })
+}
+
+#[cfg(windows)]
+fn harden_and_verify_staging_acl_with_owner_policy<F>(
+    staging_directory: &std::fs::File,
+    owner_is_trusted: F,
+) -> Result<(), CommandError>
+where
+    F: Fn(windows_sys::Win32::Security::PSID, &[windows_sys::Win32::Security::PSID; 3]) -> bool,
+{
+    use std::mem::size_of;
+    use std::os::windows::io::AsRawHandle;
     use std::ptr::{null, null_mut};
 
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::Security::Authorization::{
-        GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
+        GetSecurityInfo, SetSecurityInfo, SE_FILE_OBJECT,
     };
     use windows_sys::Win32::Security::{
         AclSizeInformation, AddAccessAllowedAceEx, GetAce, GetAclInformation, GetLengthSid,
@@ -827,6 +902,8 @@ fn harden_and_verify_staging_acl(staging_root: &Path) -> Result<(), CommandError
     };
     use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let directory_handle = staging_directory.as_raw_handle();
 
     fn aligned_buffer(byte_len: usize) -> Vec<usize> {
         vec![0; byte_len.div_ceil(size_of::<usize>())]
@@ -937,16 +1014,39 @@ fn harden_and_verify_staging_acl(staging_root: &Path) -> Result<(), CommandError
         }
     }
 
-    let path = staging_root
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    // SAFETY: path is NUL-terminated and acl remains valid for the call. A
-    // protected DACL prevents later parent ACL changes from adding writers.
+    let mut initial_owner = null_mut();
+    let mut initial_descriptor = null_mut();
+    // SAFETY: directory_handle remains owned by staging_directory and all
+    // output pointers are writable.
     let status = unsafe {
-        SetNamedSecurityInfoW(
-            path.as_ptr(),
+        GetSecurityInfo(
+            directory_handle,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut initial_owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut initial_descriptor,
+        )
+    };
+    let initial_descriptor = LocalSecurityDescriptor(initial_descriptor);
+    if status != ERROR_SUCCESS || initial_descriptor.0.is_null() {
+        return Err(update_stage_security_unavailable());
+    }
+    if initial_owner.is_null()
+        || unsafe { IsValidSid(initial_owner) } == 0
+        || !owner_is_trusted(initial_owner, &trusted_sids)
+    {
+        return Err(update_stage_security_unavailable());
+    }
+    drop(initial_descriptor);
+
+    // SAFETY: directory_handle and acl remain valid for the call. A protected
+    // DACL prevents later parent ACL changes from adding writers.
+    let status = unsafe {
+        SetSecurityInfo(
+            directory_handle,
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
             null_mut(),
@@ -962,10 +1062,11 @@ fn harden_and_verify_staging_acl(staging_root: &Path) -> Result<(), CommandError
     let mut owner = null_mut();
     let mut persisted_acl = null_mut();
     let mut descriptor = null_mut();
-    // SAFETY: all output pointers are writable and path is NUL-terminated.
+    // SAFETY: directory_handle remains owned by staging_directory and all
+    // output pointers are writable.
     let status = unsafe {
-        GetNamedSecurityInfoW(
-            path.as_ptr(),
+        GetSecurityInfo(
+            directory_handle,
             SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             &mut owner,
@@ -975,14 +1076,14 @@ fn harden_and_verify_staging_acl(staging_root: &Path) -> Result<(), CommandError
             &mut descriptor,
         )
     };
-    if status != ERROR_SUCCESS || descriptor.is_null() {
+    let descriptor = LocalSecurityDescriptor(descriptor);
+    if status != ERROR_SUCCESS || descriptor.0.is_null() {
         return Err(update_stage_security_unavailable());
     }
-    let descriptor = LocalSecurityDescriptor(descriptor);
     if owner.is_null()
         || persisted_acl.is_null()
         || unsafe { IsValidSid(owner) } == 0
-        || unsafe { windows_sys::Win32::Security::EqualSid(owner, current_user_sid) } == 0
+        || !owner_is_trusted(owner, &trusted_sids)
         || unsafe { IsValidAcl(persisted_acl) } == 0
     {
         return Err(update_stage_security_unavailable());
@@ -1640,7 +1741,7 @@ fn update_stage_conflict() -> CommandError {
 fn update_stage_security_unavailable() -> CommandError {
     CommandError::new(
         "UPDATE_STAGE_SECURITY_UNAVAILABLE",
-        "The staging directory does not satisfy the Windows reparse-point safety policy.",
+        "The staging directory does not satisfy the Windows ACL or reparse-point safety policy.",
         false,
         vec!["USE_MANUAL_DOWNLOAD", "CONTACT_SUPPORT"],
     )
@@ -1730,6 +1831,133 @@ mod tests {
             "signature": URL_SAFE_NO_PAD.encode(signature.as_ref()),
         })
         .to_string()
+    }
+
+    #[cfg(windows)]
+    #[derive(Debug, PartialEq, Eq)]
+    struct StagingDaclSnapshot {
+        protected: bool,
+        bytes: Vec<u8>,
+    }
+
+    #[cfg(windows)]
+    fn staging_dacl_snapshot(staging_directory: &std::fs::File) -> StagingDaclSnapshot {
+        use std::mem::size_of;
+        use std::os::windows::io::AsRawHandle;
+        use std::ptr::null_mut;
+
+        use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+        use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+        use windows_sys::Win32::Security::{
+            AclSizeInformation, GetAclInformation, GetSecurityDescriptorControl, IsValidAcl,
+            ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+        };
+
+        let mut acl = null_mut();
+        let mut descriptor = null_mut();
+        // SAFETY: the file owns a live directory handle and every output
+        // pointer refers to writable local storage.
+        let status = unsafe {
+            GetSecurityInfo(
+                staging_directory.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                &mut acl,
+                null_mut(),
+                &mut descriptor,
+            )
+        };
+        let descriptor = LocalSecurityDescriptor(descriptor);
+        assert_eq!(status, ERROR_SUCCESS, "read staging DACL");
+        assert!(!descriptor.0.is_null(), "security descriptor");
+        assert!(!acl.is_null(), "staging DACL");
+        // SAFETY: GetSecurityInfo returned a valid descriptor and DACL above.
+        assert_ne!(unsafe { IsValidAcl(acl) }, 0, "valid staging DACL");
+
+        let mut control = 0_u16;
+        let mut revision = 0_u32;
+        // SAFETY: descriptor remains owned by the local RAII wrapper.
+        assert_ne!(
+            unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) },
+            0,
+            "read descriptor control"
+        );
+        let mut information = ACL_SIZE_INFORMATION::default();
+        // SAFETY: acl is valid and information is writable.
+        assert_ne!(
+            unsafe {
+                GetAclInformation(
+                    acl,
+                    (&mut information as *mut ACL_SIZE_INFORMATION).cast(),
+                    size_of::<ACL_SIZE_INFORMATION>() as u32,
+                    AclSizeInformation,
+                )
+            },
+            0,
+            "read DACL size"
+        );
+        // SAFETY: AclBytesInUse is the OS-reported initialized extent of the
+        // valid ACL and the descriptor remains alive while it is copied.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(acl.cast::<u8>(), information.AclBytesInUse as usize)
+        }
+        .to_vec();
+        StagingDaclSnapshot {
+            protected: control & SE_DACL_PROTECTED != 0,
+            bytes,
+        }
+    }
+
+    #[cfg(windows)]
+    fn make_staging_dacl_unprotected(staging_directory: &std::fs::File) {
+        use std::os::windows::io::AsRawHandle;
+        use std::ptr::{null, null_mut};
+
+        use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+        use windows_sys::Win32::Security::Authorization::{
+            GetSecurityInfo, SetSecurityInfo, SE_FILE_OBJECT,
+        };
+        use windows_sys::Win32::Security::{
+            DACL_SECURITY_INFORMATION, UNPROTECTED_DACL_SECURITY_INFORMATION,
+        };
+
+        let mut acl = null_mut();
+        let mut descriptor = null_mut();
+        // SAFETY: the file owns a live directory handle and every output
+        // pointer refers to writable local storage.
+        let status = unsafe {
+            GetSecurityInfo(
+                staging_directory.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                &mut acl,
+                null_mut(),
+                &mut descriptor,
+            )
+        };
+        let descriptor = LocalSecurityDescriptor(descriptor);
+        assert_eq!(status, ERROR_SUCCESS, "read DACL for test setup");
+        assert!(!descriptor.0.is_null(), "security descriptor");
+        assert!(!acl.is_null(), "staging DACL");
+        // SAFETY: the handle and descriptor-owned ACL remain valid for this
+        // call. The test changes only its unique temporary directory.
+        let status = unsafe {
+            SetSecurityInfo(
+                staging_directory.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                acl,
+                null(),
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS, "make test DACL unprotected");
+        drop(descriptor);
     }
 
     #[test]
@@ -1905,13 +2133,21 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn hardens_staging_acl_and_releases_the_cross_process_lock() {
+    #[tokio::test]
+    async fn hardens_staging_acl_and_holds_the_directory_identity_guard() {
         let staging_root =
             std::env::temp_dir().join(format!("inkshadow-updater-test-{}", Uuid::now_v7()));
+        let displaced_root = staging_root.with_extension("displaced");
+        let replacement_root = staging_root.with_extension("replacement");
         std::fs::create_dir(&staging_root).expect("create staging root");
-        harden_and_verify_staging_acl(&staging_root).expect("secure ACL");
-        harden_and_verify_staging_acl(&staging_root).expect("idempotent secure ACL");
+        std::fs::create_dir(&replacement_root).expect("create replacement root");
+        let staging_directory = open_secure_staging_directory(&staging_root).expect("open root");
+        harden_and_verify_staging_acl(&staging_directory).expect("secure ACL");
+        harden_and_verify_staging_acl(&staging_directory).expect("idempotent secure ACL");
+        drop(staging_directory);
+        let secure_staging_root = prepare_secure_staging_root(&staging_root)
+            .await
+            .expect("secure root");
 
         {
             let _lock = acquire_staging_operation_lock(&staging_root).expect("first lock");
@@ -1925,6 +2161,41 @@ mod tests {
             );
         }
         assert!(!staging_root.join(UPDATE_OPERATION_LOCK).exists());
+        assert!(std::fs::rename(&staging_root, &displaced_root).is_err());
+        assert!(std::fs::remove_dir(&staging_root).is_err());
+        assert!(staging_root.is_dir());
+
+        drop(secure_staging_root);
+        std::fs::rename(&staging_root, &displaced_root).expect("rename after guard release");
+        std::fs::rename(&replacement_root, &staging_root).expect("swap after guard release");
+        std::fs::remove_dir(&displaced_root).expect("remove displaced root");
+        std::fs::remove_dir(&staging_root).expect("remove replacement root");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_an_untrusted_owner_before_mutating_the_dacl() {
+        let staging_root =
+            std::env::temp_dir().join(format!("inkshadow-owner-test-{}", Uuid::now_v7()));
+        std::fs::create_dir(&staging_root).expect("create staging root");
+        let staging_directory = open_secure_staging_directory(&staging_root).expect("open root");
+        make_staging_dacl_unprotected(&staging_directory);
+        let before = staging_dacl_snapshot(&staging_directory);
+        assert!(!before.protected, "test starts with an unprotected DACL");
+
+        let error = harden_and_verify_staging_acl_with_owner_policy(
+            &staging_directory,
+            |_owner, _trusted_sids| false,
+        )
+        .expect_err("untrusted owner must fail closed");
+        assert_eq!(error.code(), "UPDATE_STAGE_SECURITY_UNAVAILABLE");
+        assert_eq!(
+            staging_dacl_snapshot(&staging_directory),
+            before,
+            "owner rejection must happen before any DACL write"
+        );
+
+        drop(staging_directory);
         std::fs::remove_dir(&staging_root).expect("remove staging root");
     }
 

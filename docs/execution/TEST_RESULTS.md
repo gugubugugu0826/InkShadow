@@ -12,7 +12,7 @@
 | GitHub 干净检出修复模拟         | 同时移开 `access-core/dist` 与 Desktop `dist` 后，拓扑构建、20 工作区类型、Cloud 87/64、Node 入口和 Clippy 全通过      | PASS    |
 | Workspace 自动化                | `2,569 passed / 65 skipped`；跳过项为 64 项真实 PostgreSQL 条件和 1 项真实 Ollama 条件                                 | PASS    |
 | Desktop 自动化                  | 206 files；`1,420 passed / 1 skipped`                                                                                  | PASS    |
-| Rust 原生层                     | format、严格 clippy；`146 passed / 1 ignored`                                                                          | PASS    |
+| Rust 原生层                     | format、严格 clippy；`147 passed / 1 ignored`                                                                          | PASS    |
 | 全工作区生产构建                | 20 个可构建工作区全部完成；Desktop 与 Web 均通过                                                                       | PASS    |
 | Desktop 默认公开前端            | 2,562 modules；82 files；6,325,162 bytes / 6,422,528 bytes；PDF Worker 1,190,087 bytes                                 | PASS    |
 | Desktop 团队功能双开构建        | 87 files；6,412,787 bytes / 6,422,528 bytes；4 个 Studio 页面均重新进入产物                                            | PASS    |
@@ -32,6 +32,8 @@
 - 下一轮 E2E 为 `8/9`，唯一失败是对 `:focus-visible` 动态样式的一次性同步取样；失败截图仍显示正确焦点环。改用 Playwright 可重试样式断言后，DPR2 场景 `10/10`、完整 E2E `9/9` 通过。
 - 第一次从唯一提交启动正式候选链时，在进入任何构建步骤前被发布脚本拒绝。根因是 pnpm 11 在该 Windows 运行方式下不再提供脚本原先依赖的 `npm_execpath`，同时旧校验也没有覆盖当前的 `.mjs` CLI；本次尝试没有生成候选包，不能计为通过。发布脚本改为在确认 pnpm 调用身份后安全解析实际 CLI，并补充回归测试；修复将进入新的唯一提交，随后整条候选链从头重跑。
 - pnpm 11 修复后的本地候选链在提交 `cad81533cd41ebdafd4fe8b5cc0f32bf102716e7` 上完整通过并生成安装包，但首次 GitHub Actions 干净检出暴露了两项旧环境缺陷，因此该候选不再作为最终发布候选：`access-core` 只指向未提交的 `dist`，使 Cloud 七个测试文件在收集阶段失败、Windows 质量作业出现六项 TS2307；原生作业又在前端 `dist` 尚未生成时运行 Clippy，使 Tauri 上下文宏失败。这七个 Cloud 文件没有进入数据库或业务断言，不能据此判定相关断言通过或失败；其余 30 个文件的 114 项测试通过。最终修复保留可直接运行的 `dist` 包入口，并让本地发布、质量 CI、Cloud CI 和原生 CI 都先按工作区依赖拓扑生成所需入口和前端目录；新提交必须重新执行本地候选链和全部远端 CI。
+- 干净检出修复后的本地候选链在提交 `9c142c254babd9dcb9bee1f53b691d112b90a826` 上以 686.8 秒完整通过并生成安装包；GitHub Actions run `31279672549` 证明 Cloud PostgreSQL 与 forced RLS 全部通过，质量和原生作业也已越过先构建、类型与 Clippy 修复点，但暴露两个新的 Windows Runner 环境假设，因此该候选继续作废。质量作业只有两个真实 PDF 集成测试在四工作区并发下超过默认 5 秒；日志与调用顺序指向 PDF.js 冷加载，唯一报告失败类型为超时、未报告断言不匹配，同包其余 65 项通过。修复只为这两项设置 30 秒逐测试上限。原生作业为 `145 passed / 1 failed / 1 ignored`：Windows 管理员 token 创建目录时可默认由 `BUILTIN\Administrators` 持有，旧安全更新代码只写保护 DACL 却随后要求 owner 必须是当前用户。修复在写 ACL 前后都要求 owner 严格属于当前用户、SYSTEM 或 `BUILTIN\Administrators`，并继续要求保护 DACL 恰好只有这三条精确 ACE；陌生 owner 在任何改写前即失败关闭，不跳过测试、不接管目录。新提交仍必须重新执行本地候选链和全部远端 CI。
+- 对上述 owner 修复的独立复核又发现旧实现仍按路径分别读取、改写和复核 ACL，存在检查期间替换暂存目录的竞态。最终实现只打开一次非 reparse 的真实目录句柄，ACL 前检、写入、后检与身份记录全部绑定该句柄，并在完整下载、重命名、摘要和过期复核期间持续持有；句柄用最小的 `FILE_LIST_DIRECTORY` 激活 Windows 共享核对且不共享删除权限。Windows 对抗测试已证明 guard 存活时同一目录不能重命名或删除、释放后同一操作成功；另一测试用拒绝 owner 策略并逐字节快照 DACL，证明陌生 owner 在任何 DACL 写入前失败。该定向套件 `8/8`、本地完整 Rust `147 passed / 1 ignored`；仍需由新干净提交的正式候选链与远端 Windows Runner 重新确认。
 
 下面的 2026-08-08 结果保留为可追溯历史，不再称为当前工作树的最终结果。
 

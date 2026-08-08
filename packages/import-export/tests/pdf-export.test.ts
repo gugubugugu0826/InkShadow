@@ -215,7 +215,7 @@ describe("image-based PDF export", () => {
     await expect(importPdfDocuments("安全结构检查.pdf", bytes)).rejects.toMatchObject({
       code: "PDF_TEXT_UNAVAILABLE",
     });
-  });
+  }, 30_000);
 
   it("fails closed for invalid timestamps, empty output, and renderer failures", async () => {
     await expect(

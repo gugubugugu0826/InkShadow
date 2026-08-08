@@ -64,7 +64,7 @@ describe("PDF import boundary", () => {
     expect(documents[0]?.markdown).toContain("Local text only");
     expect(documents[0]?.sourceFormat).toBe("pdf");
     expect(documents[0]?.sourceSha256).toMatch(/^[a-f0-9]{64}$/);
-  });
+  }, 30_000);
 
   it("rejects scanned/no-text, encrypted, active, and disguised PDFs", async () => {
     await expect(importPdfDocuments("scan.pdf", createPdf({ text: [] }))).rejects.toMatchObject({
