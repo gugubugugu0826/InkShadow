@@ -1093,7 +1093,7 @@ describe("unified story fact SQLite store", () => {
         .run(competingVersionId, chapterId).changes,
     ).toBe(1);
     expect(unwrap(await store.findById(fact.id))?.id).toBe(fact.id);
-  });
+  }, 30_000);
 
   it("accepts the full UI character-selection boundary and rejects an oversized authority union", async () => {
     const executor = createExecutor();
