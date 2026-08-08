@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { isModelRouteRole } from "@inkshadow/ai-core";
+import { parseUuidV7 } from "@inkshadow/domain";
 import type {
   NotificationSeverity,
   NotificationSnapshot,
@@ -27,6 +28,12 @@ import {
 } from "@inkshadow/ui";
 import { Link } from "react-router-dom";
 
+import {
+  pipelineRetryProgressStep,
+  runAcceptedChapterPipeline,
+  type AcceptedChapterPipelineInput,
+} from "../infrastructure/accepted-chapter-pipeline";
+import { retryInput as persistedAcceptedChapterPipelineInput } from "../infrastructure/accepted-chapter-pipeline-worker";
 import { normalizeUiError } from "../infrastructure/ui-error";
 import type { TaskCenterSnapshot } from "../infrastructure/task-center-store";
 import { useRuntime } from "../runtime-context";
@@ -176,6 +183,50 @@ export function TaskCenterPage() {
     }
   }
 
+  async function retryAcceptedVersionTask(task: TaskSnapshot): Promise<void> {
+    const input = acceptedVersionRetryInput(task);
+    if (input === null || task.failure === null) {
+      toast({
+        title: "这条任务无法安全重试",
+        description: "任务来源信息不完整。正文没有受影响，可导出诊断后再处理。",
+        tone: "warning",
+      });
+      return;
+    }
+
+    setBusyId(task.id);
+    try {
+      const queued = await runtime.taskCenter.retryTaskNow(task.id, {
+        expectedSequence: task.sequence,
+        expectedAttempt: task.attempt,
+        expectedFailureCauseCode: task.failure.causeCode,
+        recoveryProgressStep: pipelineRetryProgressStep(task.attempt, task.failure.causeCode),
+      });
+      const queuedInput = persistedAcceptedChapterPipelineInput(queued);
+      if (queuedInput === null) {
+        throw new Error("The accepted-version retry marker could not be verified after enqueue.");
+      }
+      const receipt = await runAcceptedChapterPipeline(runtime, queuedInput);
+      await load(true);
+      toast({
+        title:
+          receipt.status === "partially_completed"
+            ? "重试后仍有后台更新未完成"
+            : "故事资料已重新整理",
+        description:
+          receipt.status === "partially_completed"
+            ? "正文始终安全保留；可查看任务详情，并在服务恢复后再次重试。"
+            : "搜索、章节摘要、故事设定与故事关联已按当前可用能力处理。",
+        tone: receipt.status === "partially_completed" ? "warning" : "success",
+      });
+    } catch (reason: unknown) {
+      setError(reason);
+      await load(true).catch(() => undefined);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   async function markNotificationRead(notification: NotificationSnapshot): Promise<void> {
     setBusyId(notification.id);
     try {
@@ -264,7 +315,12 @@ export function TaskCenterPage() {
           </TabsList>
 
           <TabsContent value="tasks">
-            <TaskList tasks={snapshot.tasks} busyId={busyId} onCancel={setCancelTarget} />
+            <TaskList
+              tasks={snapshot.tasks}
+              busyId={busyId}
+              onCancel={setCancelTarget}
+              onRetry={(task) => void retryAcceptedVersionTask(task)}
+            />
           </TabsContent>
 
           <TabsContent value="notifications">
@@ -344,9 +400,10 @@ interface TaskListProps {
   readonly tasks: readonly TaskSnapshot[];
   readonly busyId: string | null;
   readonly onCancel: (task: TaskSnapshot) => void;
+  readonly onRetry: (task: TaskSnapshot) => void;
 }
 
-function TaskList({ busyId, onCancel, tasks }: TaskListProps) {
+function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
   if (tasks.length === 0) {
     return (
       <EmptyState
@@ -361,6 +418,7 @@ function TaskList({ busyId, onCancel, tasks }: TaskListProps) {
       {tasks.map((task) => {
         const progress = progressPercent(task);
         const editorRoute = taskEditorRoute(task);
+        const canRetryAcceptedVersion = acceptedVersionRetryInput(task) !== null;
         return (
           <Card key={task.id} className="task-card">
             <CardHeader>
@@ -429,11 +487,23 @@ function TaskList({ busyId, onCancel, tasks }: TaskListProps) {
                       }`}
                     />
                     <div className="task-failure-actions">
-                      {task.failure.actions.includes("RETRY") && editorRoute !== null && (
-                        <Link className="button-link" to={editorRoute}>
-                          返回章节重试
-                        </Link>
+                      {canRetryAcceptedVersion && (
+                        <Button
+                          size="sm"
+                          loading={busyId === task.id}
+                          disabled={busyId !== null}
+                          onClick={() => onRetry(task)}
+                        >
+                          立即重试后台整理
+                        </Button>
                       )}
+                      {task.failure.actions.includes("RETRY") &&
+                        !canRetryAcceptedVersion &&
+                        editorRoute !== null && (
+                          <Link className="button-link" to={editorRoute}>
+                            返回章节重试
+                          </Link>
+                        )}
                       {(task.failure.actions.includes("SWITCH_MODEL") ||
                         task.failure.actions.includes("REDUCE_CONTEXT")) && (
                         <Link className="button-link" to="/settings#model-center">
@@ -496,7 +566,7 @@ function NotificationList({ busyId, notifications, onMarkRead }: NotificationLis
           <CardHeader>
             <div className="card-heading-row">
               <div>
-                <CardTitle>{notificationMessage(notification.messageKey)}</CardTitle>
+                <CardTitle>{notificationMessage(notification)}</CardTitle>
                 <CardDescription>{formatTimestamp(notification.updatedAt)}</CardDescription>
               </div>
               <Badge tone={NOTIFICATION_SEVERITY_TONES[notification.severity]}>
@@ -521,6 +591,7 @@ function NotificationList({ busyId, notifications, onMarkRead }: NotificationLis
                   description="事件仍保存在本地通知中心，没有丢失。"
                 />
               )}
+              <NotificationAction notification={notification} />
               <div className="notification-card__footer">
                 <code title={notification.id}>{shortId(notification.id)}</code>
                 {canMarkRead(notification) && (
@@ -542,6 +613,18 @@ function NotificationList({ busyId, notifications, onMarkRead }: NotificationLis
   );
 }
 
+function NotificationAction({ notification }: { readonly notification: NotificationSnapshot }) {
+  const route = notificationStoryRoute(notification);
+  if (route === null) {
+    return null;
+  }
+  return (
+    <Link className="button-link" to={route}>
+      {notification.metadata.needsConfirmationCount === 0 ? "查看故事设定" : "查看待确认设定"}
+    </Link>
+  );
+}
+
 function NotificationMetadata({
   metadata,
 }: {
@@ -558,7 +641,7 @@ function NotificationMetadata({
       {entries.map(([key, value]) => (
         <div key={key}>
           <dt>{metadataLabel(key)}</dt>
-          <dd>{String(value)}</dd>
+          <dd>{metadataValue(key, value)}</dd>
         </div>
       ))}
     </dl>
@@ -603,6 +686,7 @@ function taskTypeLabel(type: string): string {
     "export.bundle": "导出项目包",
     "backup.create": "创建备份",
     "index.rebuild": "重建搜索索引",
+    "story.accepted-version.process": "整理已接受的正文",
     "sync.project": "同步项目",
   };
   return labels[type] ?? type;
@@ -622,6 +706,10 @@ function progressStepLabel(step: string): string {
     "import.commit": "写入项目",
     "index.keyword": "构建关键词索引",
     "index.embedding": "构建向量索引",
+    "search.rebuilt": "更新本地搜索",
+    "summary.updated": "更新章节摘要",
+    "story-state.updated": "更新故事设定",
+    "causal.projected": "更新故事关联",
   };
   return labels[step] ?? step;
 }
@@ -638,6 +726,7 @@ function taskFailureLabel(code: string): string {
     MODEL_GENERATION_FAILED: "模型生成未完成",
     MODEL_GENERATION_CANCELLED: "模型生成已取消",
     MODEL_OUTPUT_EMPTY: "模型没有返回可用内容",
+    ACCEPTED_VERSION_PIPELINE_PARTIAL: "正文已安全保留，但部分故事资料尚未更新",
   };
   return labels[code] ?? "后台任务未能完成";
 }
@@ -650,8 +739,60 @@ function taskEditorRoute(task: TaskSnapshot): string | null {
     : null;
 }
 
-function notificationMessage(messageKey: string): string {
-  return NOTIFICATION_MESSAGES[messageKey] ?? messageKey;
+function acceptedVersionRetryInput(task: TaskSnapshot): AcceptedChapterPipelineInput | null {
+  if (
+    task.type !== "story.accepted-version.process" ||
+    task.status !== "waiting_retry" ||
+    task.failure === null ||
+    !task.failure.retryable ||
+    !task.failure.actions.includes("RETRY")
+  ) {
+    return null;
+  }
+  const input = persistedAcceptedChapterPipelineInput(task);
+  if (input === null) {
+    return null;
+  }
+  return {
+    ...input,
+    ...(task.failure.causeCode === null ? {} : { retryFailureCauseCode: task.failure.causeCode }),
+  };
+}
+
+function notificationMessage(notification: NotificationSnapshot): string {
+  const detectedCount = notification.metadata.detectedCount;
+  const needsConfirmationCount = notification.metadata.needsConfirmationCount;
+  if (
+    (notification.messageKey === "story.accepted-version.completed" ||
+      notification.messageKey === "story.accepted-version.completed_with_skips") &&
+    typeof detectedCount === "number" &&
+    typeof needsConfirmationCount === "number"
+  ) {
+    return `识别到 ${String(detectedCount)} 项变化，其中 ${String(needsConfirmationCount)} 项需要确认`;
+  }
+  const acceptedVersionMessages: Record<string, string> = {
+    "story.accepted-version.completed": "正文整理已完成",
+    "story.accepted-version.completed_with_skips": "正文已整理，部分可选步骤已跳过",
+    "story.accepted-version.partially_completed": "正文已安全保存，部分故事资料需要重试",
+    "story.accepted-version.already_scheduled": "正文整理任务已在队列中",
+  };
+  return (
+    acceptedVersionMessages[notification.messageKey] ??
+    NOTIFICATION_MESSAGES[notification.messageKey] ??
+    "有一条新的后台通知"
+  );
+}
+
+function notificationStoryRoute(notification: NotificationSnapshot): string | null {
+  if (!notification.messageKey.startsWith("story.accepted-version.")) {
+    return null;
+  }
+  const projectId = notification.metadata.projectId;
+  if (typeof projectId !== "string") {
+    return null;
+  }
+  const parsed = parseUuidV7(projectId);
+  return parsed.ok ? `/projects/${parsed.value}/story` : null;
 }
 
 function metadataLabel(key: string): string {
@@ -660,8 +801,33 @@ function metadataLabel(key: string): string {
     attempt: "尝试次数",
     entityLabel: "对象",
     reasonCode: "原因码",
+    projectId: "作品编号",
+    chapterId: "章节编号",
+    versionId: "版本编号",
+    pipelineStatus: "整理状态",
+    detectedCount: "识别变化",
+    needsConfirmationCount: "需要确认",
   };
   return labels[key] ?? key;
+}
+
+function metadataValue(key: string, value: unknown): string {
+  if (key === "taskType" && typeof value === "string") {
+    return taskTypeLabel(value);
+  }
+  if (key === "reasonCode" && typeof value === "string") {
+    return taskFailureLabel(value);
+  }
+  if (key === "pipelineStatus" && typeof value === "string") {
+    const labels: Record<string, string> = {
+      completed: "已完成",
+      completed_with_skips: "已完成，部分步骤跳过",
+      partially_completed: "部分完成",
+      already_scheduled: "已在队列中",
+    };
+    return labels[value] ?? "状态待确认";
+  }
+  return String(value);
 }
 
 function formatTimestamp(value: string): string {

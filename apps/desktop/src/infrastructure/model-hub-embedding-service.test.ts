@@ -20,6 +20,19 @@ import type {
   NativeEmbeddingResult,
 } from "./native-embedding-gateway";
 
+const TEST_DISPATCH_SCOPE = {
+  kind: "project_context",
+  receipt: {
+    schemaVersion: 1,
+    projectId: "019f9f4a-b3c7-7350-9226-000000000001",
+    fingerprint: "a".repeat(64),
+    activeChapterCount: 0,
+    retainedChapterCount: 0,
+    requiresVerifiedLocal: false,
+    chapters: [],
+  },
+} as const;
+
 const NOW = "2026-08-01T00:00:00.000Z";
 const parsedNow = parseIsoUtcTimestamp(NOW);
 if (!parsedNow.ok) {
@@ -213,6 +226,7 @@ describe("Model Hub embedding execution service", () => {
     });
     expect(harness.embed).not.toHaveBeenCalled();
     const result = await executeModelHubEmbeddingTask(harness.dependencies, {
+      dispatchScope: TEST_DISPATCH_SCOPE,
       inputs: [PRIVATE_INPUT],
     });
 
@@ -236,6 +250,27 @@ describe("Model Hub embedding execution service", () => {
     });
   });
 
+  it("does not embed when the credential slot rotates in onBeforeDispatch", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "rotated-before-embedding",
+      catalogEntryId: "rotated-before-embedding-catalog",
+      modelId: "embedding-model",
+    });
+    await saveRoute(harness.modelHub, { primaryCatalogEntryId: target.id });
+
+    await expect(
+      executeModelHubEmbeddingTask(harness.dependencies, {
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        inputs: [PRIVATE_INPUT],
+        onBeforeDispatch: async ({ connectionId }) => {
+          await rotateConnectionCredential(harness.modelHub, connectionId);
+        },
+      }),
+    ).rejects.toMatchObject({ dispatched: false });
+    expect(harness.embed).not.toHaveBeenCalled();
+  });
+
   it("returns the same fail-closed preflight error for inspection and execution", async () => {
     const harness = createHarness();
     const target = await seedTarget(harness.modelHub, {
@@ -256,6 +291,7 @@ describe("Model Hub embedding execution service", () => {
       inputs: [PRIVATE_INPUT],
     }).catch((cause: unknown) => cause);
     const executedError = await executeModelHubEmbeddingTask(harness.dependencies, {
+      dispatchScope: TEST_DISPATCH_SCOPE,
       inputs: [PRIVATE_INPUT],
     }).catch((cause: unknown) => cause);
 
@@ -299,6 +335,7 @@ describe("Model Hub embedding execution service", () => {
     const beforeDispatch = vi.fn();
 
     const result = await executeModelHubEmbeddingTask(harness.dependencies, {
+      dispatchScope: TEST_DISPATCH_SCOPE,
       inputs: [PRIVATE_INPUT],
       onBeforeDispatch: beforeDispatch,
     });
@@ -318,7 +355,7 @@ describe("Model Hub embedding execution service", () => {
       estimatedInputTokens: expectedInputTokens,
       estimatedCostMicros: String(expectedInputTokens),
     });
-    expect(harness.credentials.getSummary).toHaveBeenCalledOnce();
+    expect(harness.credentials.getSummary).toHaveBeenCalledTimes(2);
     expect(harness.credentials.getSummary).toHaveBeenCalledWith("gemini-embedding-connection");
     expect(harness.embed).toHaveBeenCalledOnce();
     expect(harness.embed).toHaveBeenCalledWith({
@@ -332,6 +369,7 @@ describe("Model Hub embedding execution service", () => {
       },
       model: "models/text-embedding-exact",
       inputs: [PRIVATE_INPUT],
+      dispatchScope: TEST_DISPATCH_SCOPE,
     });
     expect(beforeDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -384,7 +422,10 @@ describe("Model Hub embedding execution service", () => {
     const startInvocation = vi.spyOn(harness.modelHub, "startInvocation");
 
     await expect(
-      executeModelHubEmbeddingTask(harness.dependencies, { inputs: [PRIVATE_INPUT] }),
+      executeModelHubEmbeddingTask(harness.dependencies, {
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        inputs: [PRIVATE_INPUT],
+      }),
     ).rejects.toMatchObject({
       code: "MODEL_HUB_ROUTE_NOT_CONFIGURED",
       dispatched: false,
@@ -405,7 +446,10 @@ describe("Model Hub embedding execution service", () => {
     const startInvocation = vi.spyOn(harness.modelHub, "startInvocation");
 
     await expect(
-      executeModelHubEmbeddingTask(harness.dependencies, { inputs: [PRIVATE_INPUT] }),
+      executeModelHubEmbeddingTask(harness.dependencies, {
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        inputs: [PRIVATE_INPUT],
+      }),
     ).rejects.toMatchObject({
       code: "MODEL_HUB_CAPABILITY_NOT_VERIFIED",
       dispatched: false,
@@ -426,7 +470,10 @@ describe("Model Hub embedding execution service", () => {
     harness.credentials.getSummary.mockResolvedValue({ configured: false });
 
     await expect(
-      executeModelHubEmbeddingTask(harness.dependencies, { inputs: [PRIVATE_INPUT] }),
+      executeModelHubEmbeddingTask(harness.dependencies, {
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        inputs: [PRIVATE_INPUT],
+      }),
     ).rejects.toMatchObject({
       code: "MODEL_HUB_CREDENTIAL_MISSING",
       dispatched: false,
@@ -459,7 +506,10 @@ describe("Model Hub embedding execution service", () => {
     });
 
     await expect(
-      executeModelHubEmbeddingTask(harness.dependencies, { inputs: [PRIVATE_INPUT] }),
+      executeModelHubEmbeddingTask(harness.dependencies, {
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        inputs: [PRIVATE_INPUT],
+      }),
     ).rejects.toMatchObject({
       code: "MODEL_HUB_PRIVACY_BLOCKED",
       dispatched: false,
@@ -487,7 +537,10 @@ describe("Model Hub embedding execution service", () => {
     });
 
     await expect(
-      executeModelHubEmbeddingTask(harness.dependencies, { inputs: [PRIVATE_INPUT] }),
+      executeModelHubEmbeddingTask(harness.dependencies, {
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        inputs: [PRIVATE_INPUT],
+      }),
     ).rejects.toMatchObject({ code: "MODEL_HUB_PRIVACY_BLOCKED", dispatched: false });
     expect(harness.embed).not.toHaveBeenCalled();
   });
@@ -509,7 +562,10 @@ describe("Model Hub embedding execution service", () => {
     const startInvocation = vi.spyOn(harness.modelHub, "startInvocation");
 
     await expect(
-      executeModelHubEmbeddingTask(harness.dependencies, { inputs: ["x"] }),
+      executeModelHubEmbeddingTask(harness.dependencies, {
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        inputs: ["x"],
+      }),
     ).rejects.toMatchObject({
       code: "MODEL_HUB_COST_CEILING_EXCEEDED",
       dispatched: false,
@@ -536,7 +592,10 @@ describe("Model Hub embedding execution service", () => {
     });
 
     await expect(
-      executeModelHubEmbeddingTask(harness.dependencies, { inputs: [PRIVATE_INPUT] }),
+      executeModelHubEmbeddingTask(harness.dependencies, {
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        inputs: [PRIVATE_INPUT],
+      }),
     ).rejects.toMatchObject({
       code: "MODEL_HUB_COST_CEILING_UNVERIFIABLE",
       dispatched: false,
@@ -568,6 +627,7 @@ describe("Model Hub embedding execution service", () => {
     const startInvocation = vi.spyOn(harness.modelHub, "startInvocation");
 
     const result = await executeModelHubEmbeddingTask(harness.dependencies, {
+      dispatchScope: TEST_DISPATCH_SCOPE,
       inputs: [PRIVATE_INPUT],
     });
 
@@ -617,7 +677,10 @@ describe("Model Hub embedding execution service", () => {
 
     let error: unknown;
     try {
-      await executeModelHubEmbeddingTask(harness.dependencies, { inputs: [PRIVATE_INPUT] });
+      await executeModelHubEmbeddingTask(harness.dependencies, {
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        inputs: [PRIVATE_INPUT],
+      });
     } catch (cause: unknown) {
       error = cause;
     }
@@ -643,7 +706,10 @@ describe("Model Hub embedding execution service", () => {
     const invalidHarness = createHarness();
     const findTaskRoute = vi.spyOn(invalidHarness.modelHub, "findTaskRoute");
     await expect(
-      executeModelHubEmbeddingTask(invalidHarness.dependencies, { inputs: [] }),
+      executeModelHubEmbeddingTask(invalidHarness.dependencies, {
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        inputs: [],
+      }),
     ).rejects.toMatchObject({ code: "MODEL_HUB_REQUEST_INVALID", dispatched: false });
     expect(findTaskRoute).not.toHaveBeenCalled();
 
@@ -657,6 +723,7 @@ describe("Model Hub embedding execution service", () => {
     await saveRoute(anthropicHarness.modelHub, { primaryCatalogEntryId: target.id });
     await expect(
       executeModelHubEmbeddingTask(anthropicHarness.dependencies, {
+        dispatchScope: TEST_DISPATCH_SCOPE,
         inputs: [PRIVATE_INPUT],
       }),
     ).rejects.toMatchObject({
@@ -741,7 +808,7 @@ async function seedTarget(
       : providerKind === "custom_openai_compatible"
         ? { baseUrlOverride: `https://${input.connectionId}.example.test/v1` }
         : {}),
-    credentialRef: local ? null : `keyring:test:${input.connectionId}`,
+    credentialRef: local ? null : `keyring:model-hub:${input.connectionId}`,
     credentialState: local ? "missing" : "present",
     expectedRevision: null,
   });
@@ -839,6 +906,31 @@ async function saveRoute(
         : "use_fallback"),
     routeOrigin: "user",
     expectedRevision: null,
+  });
+}
+
+async function rotateConnectionCredential(
+  modelHub: ModelHubStore,
+  connectionId: string,
+): Promise<void> {
+  const connection = await modelHub.findConnection(connectionId);
+  if (connection === null) throw new Error("test connection missing");
+  await modelHub.saveConnection({
+    id: connection.id,
+    providerKind: connection.providerKind,
+    displayName: connection.displayName,
+    baseUrlOverride: connection.baseUrl,
+    credentialRef: `keyring:model-hub:${connection.id}-rotated`,
+    credentialState: "present",
+    authenticationMode: connection.authenticationMode,
+    credentialHeaderName: connection.credentialHeaderName,
+    modelDiscoveryPath: connection.modelDiscoveryPath,
+    textGenerationPath: connection.textGenerationPath,
+    embeddingPath: connection.embeddingPath,
+    requestTimeoutMs: connection.requestTimeoutMs,
+    retryLimit: connection.retryLimit,
+    enabled: true,
+    expectedRevision: connection.revision,
   });
 }
 

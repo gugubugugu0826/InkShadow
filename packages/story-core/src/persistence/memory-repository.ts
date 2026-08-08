@@ -6,8 +6,11 @@ import {
   type MemoryRecordSnapshot,
 } from "../memory.js";
 import type {
+  CommitMemoryGovernanceInput,
   CreateMemoryPolicyResult,
   CreateMemoryRecordPersistenceInput,
+  MemoryGovernanceReceipt,
+  MemoryGovernanceUnitOfWork,
   MemoryPolicyRepository,
   MemoryRecordCreationUnitOfWork,
   MemoryRecordListReader,
@@ -45,6 +48,16 @@ interface MemoryRecordRow {
   source_version_id: string | null;
   automatic_learning_policy_revision: number | null;
   snapshot_json: string;
+}
+
+interface MemoryGovernanceEventRow {
+  id: string;
+  project_id: string;
+  operation: "forget_project" | "merge";
+  target_record_id: string | null;
+  affected_record_count: number;
+  resulting_policy_revision: number | null;
+  request_json: string;
 }
 
 export class SqliteMemoryPolicyRepository implements MemoryPolicyRepository {
@@ -214,6 +227,80 @@ export class SqliteMemoryRecordCreationUnitOfWork implements MemoryRecordCreatio
   }
 }
 
+export class SqliteMemoryGovernanceUnitOfWork implements MemoryGovernanceUnitOfWork {
+  public constructor(private readonly executor: StorySqlExecutor) {}
+
+  public commit(
+    input: CommitMemoryGovernanceInput,
+  ): Promise<Result<MemoryGovernanceReceipt, StoryCoreError>> {
+    return runPersistence(() =>
+      this.executor.transaction(async (transaction) => {
+        assertMemoryGovernanceInput(input);
+        const replay = await selectGovernanceEvent(transaction, input.operationId);
+        if (replay !== null) {
+          if (
+            replay.project_id !== input.projectId ||
+            replay.operation !== input.operation ||
+            replay.target_record_id !== input.targetRecordId ||
+            replay.request_json !== input.requestJson
+          ) {
+            abortMemoryIdempotencyConflict(input.operationId);
+          }
+          return governanceReceipt(replay, true);
+        }
+
+        await assertCurrentMemoryGovernanceState(transaction, input);
+        await persistMemoryGovernancePolicy(transaction, input);
+        for (const transition of input.records) {
+          await persistMemoryGovernanceRecord(transaction, transition.previous, transition.next);
+        }
+
+        const beforeSnapshot = serializeSnapshot({
+          policy: input.previousPolicy?.toSnapshot() ?? null,
+          records: input.records.map(({ role, previous }) => ({
+            role,
+            snapshot: previous.toSnapshot(),
+          })),
+        });
+        const afterSnapshot = serializeSnapshot({
+          policy: input.nextPolicy?.toSnapshot() ?? null,
+          records: input.records.map(({ role, next }) => ({
+            role,
+            snapshot: next.toSnapshot(),
+          })),
+        });
+        await transaction.execute(
+          `INSERT INTO story_memory_governance_events (
+             id, project_id, operation, target_record_id, affected_record_count,
+             resulting_policy_revision, request_json, before_snapshot_json,
+             after_snapshot_json, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            input.operationId,
+            input.projectId,
+            input.operation,
+            input.targetRecordId,
+            input.records.length,
+            input.nextPolicy?.revision ?? null,
+            input.requestJson,
+            beforeSnapshot,
+            afterSnapshot,
+            input.now,
+          ],
+        );
+        return {
+          operationId: input.operationId,
+          projectId: input.projectId,
+          operation: input.operation,
+          affectedRecordCount: input.records.length,
+          resultingPolicyRevision: input.nextPolicy?.revision ?? null,
+          idempotentReplay: false,
+        };
+      }),
+    );
+  }
+}
+
 async function selectPolicy(
   executor: StorySqlTransaction,
   projectId: string,
@@ -291,6 +378,247 @@ async function insertMemoryRecord(
       snapshot.updatedAt,
       serializeSnapshot(snapshot),
     ],
+  );
+}
+
+async function selectGovernanceEvent(
+  transaction: StorySqlTransaction,
+  operationId: string,
+): Promise<MemoryGovernanceEventRow | null> {
+  const rows = await transaction.select<MemoryGovernanceEventRow>(
+    `SELECT id, project_id, operation, target_record_id, affected_record_count,
+            resulting_policy_revision, request_json
+     FROM story_memory_governance_events
+     WHERE id = ?`,
+    [operationId],
+  );
+  return rows[0] ?? null;
+}
+
+async function assertCurrentMemoryGovernanceState(
+  transaction: StorySqlTransaction,
+  input: CommitMemoryGovernanceInput,
+): Promise<void> {
+  if (input.operation === "forget_project") {
+    const previousPolicy = input.previousPolicy;
+    if (previousPolicy === null) {
+      abortCorruptSnapshot("MEMORY_FORGET_POLICY_MISSING");
+    }
+    const currentPolicy = await selectPolicy(transaction, input.projectId);
+    if (currentPolicy?.revision !== previousPolicy.revision) {
+      await abortRevisionConflict(transaction, {
+        table: "story_memory_policies",
+        idColumn: "project_id",
+        id: input.projectId,
+        entity: "Memory policy",
+        expectedRevision: previousPolicy.revision,
+      });
+    }
+    const rows = await transaction.select<MemoryRecordRow>(
+      `${MEMORY_RECORD_SELECT}
+       WHERE project_id = ?
+       ORDER BY id ASC`,
+      [input.projectId],
+    );
+    const current = rows.map(hydrateMemoryRecord);
+    const expected = [...input.records]
+      .map(({ previous }) => previous)
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const currentFingerprint = current
+      .map(({ id, revision }) => `${id}:${String(revision)}`)
+      .join("|");
+    const expectedFingerprint = expected
+      .map(({ id, revision }) => `${id}:${String(revision)}`)
+      .join("|");
+    if (current.length !== expected.length || currentFingerprint !== expectedFingerprint) {
+      abortPersistence(
+        new StoryCoreError({
+          code: "STORY_REVISION_CONFLICT",
+          message: "Project memory scope changed before it could be forgotten.",
+          retryable: true,
+          actions: ["RECOMPARE", "RETRY"],
+          details: {
+            expectedRevision: expected.length,
+            actualRevision: current.length,
+          },
+        }),
+      );
+    }
+    return;
+  }
+
+  for (const { previous } of input.records) {
+    const rows = await transaction.select<MemoryRecordRow>(
+      `${MEMORY_RECORD_SELECT}
+       WHERE id = ?`,
+      [previous.id],
+    );
+    const current = rows[0] === undefined ? null : hydrateMemoryRecord(rows[0]);
+    const currentMatches =
+      current?.projectId === input.projectId && current.revision === previous.revision;
+    if (!currentMatches) {
+      await abortRevisionConflict(transaction, {
+        table: "story_memory_records",
+        idColumn: "id",
+        id: previous.id,
+        entity: "Memory record",
+        expectedRevision: previous.revision,
+      });
+    }
+  }
+}
+
+async function persistMemoryGovernancePolicy(
+  transaction: StorySqlTransaction,
+  input: CommitMemoryGovernanceInput,
+): Promise<void> {
+  const previous = input.previousPolicy;
+  const next = input.nextPolicy;
+  if (previous === null || next === null || next.revision === previous.revision) {
+    return;
+  }
+  assertNextRevision("Memory policy", next.revision, previous.revision);
+  const snapshot = next.toSnapshot();
+  const updated = await transaction.execute(
+    `UPDATE story_memory_policies
+     SET automatic_learning_enabled = ?, revision = ?, updated_at = ?, snapshot_json = ?
+     WHERE project_id = ? AND revision = ?`,
+    [
+      snapshot.automaticLearningEnabled ? 1 : 0,
+      snapshot.revision,
+      snapshot.updatedAt,
+      serializeSnapshot(snapshot),
+      snapshot.projectId,
+      previous.revision,
+    ],
+  );
+  if (updated.rowsAffected !== 1) {
+    await abortRevisionConflict(transaction, {
+      table: "story_memory_policies",
+      idColumn: "project_id",
+      id: snapshot.projectId,
+      entity: "Memory policy",
+      expectedRevision: previous.revision,
+    });
+  }
+}
+
+async function persistMemoryGovernanceRecord(
+  transaction: StorySqlTransaction,
+  previous: MemoryRecord,
+  next: MemoryRecord,
+): Promise<void> {
+  if (next.revision === previous.revision) {
+    return;
+  }
+  assertNextRevision("Memory record", next.revision, previous.revision);
+  const snapshot = next.toSnapshot();
+  const updated = await transaction.execute(
+    `UPDATE story_memory_records
+     SET level = ?, status = ?, revision = ?, updated_at = ?, snapshot_json = ?
+     WHERE id = ? AND project_id = ? AND revision = ?`,
+    [
+      snapshot.level,
+      snapshot.status,
+      snapshot.revision,
+      snapshot.updatedAt,
+      serializeSnapshot(snapshot),
+      snapshot.id,
+      snapshot.projectId,
+      previous.revision,
+    ],
+  );
+  if (updated.rowsAffected !== 1) {
+    await abortRevisionConflict(transaction, {
+      table: "story_memory_records",
+      idColumn: "id",
+      id: snapshot.id,
+      entity: "Memory record",
+      expectedRevision: previous.revision,
+    });
+  }
+}
+
+function assertMemoryGovernanceInput(input: CommitMemoryGovernanceInput): void {
+  const seen = new Set<string>();
+  let mergeTargetCount = 0;
+  let mergeSourceCount = 0;
+  for (const transition of input.records) {
+    const previous = transition.previous.toSnapshot();
+    const next = transition.next.toSnapshot();
+    if (
+      seen.has(previous.id) ||
+      previous.id !== next.id ||
+      previous.projectId !== input.projectId ||
+      next.projectId !== input.projectId ||
+      next.revision !== previous.revision + 1
+    ) {
+      abortCorruptSnapshot("MEMORY_GOVERNANCE_TRANSITION_INVALID");
+    }
+    seen.add(previous.id);
+    mergeTargetCount += transition.role === "merge_target" ? 1 : 0;
+    mergeSourceCount += transition.role === "merge_source" ? 1 : 0;
+  }
+  let request: unknown;
+  try {
+    request = JSON.parse(input.requestJson) as unknown;
+  } catch {
+    abortCorruptSnapshot("MEMORY_GOVERNANCE_REQUEST_JSON_INVALID");
+  }
+  if (typeof request !== "object" || request === null || Array.isArray(request)) {
+    abortCorruptSnapshot("MEMORY_GOVERNANCE_REQUEST_JSON_INVALID");
+  }
+  const forgetValid =
+    input.operation === "forget_project" &&
+    input.targetRecordId === null &&
+    input.previousPolicy !== null &&
+    input.nextPolicy !== null &&
+    input.previousPolicy.projectId === input.projectId &&
+    input.nextPolicy.projectId === input.projectId &&
+    input.nextPolicy.revision === input.previousPolicy.revision + 1 &&
+    !input.nextPolicy.automaticLearningEnabled &&
+    input.records.every(({ role, next }) => role === "forgotten" && next.toSnapshot().excluded);
+  const mergeValid =
+    input.operation === "merge" &&
+    input.targetRecordId !== null &&
+    input.previousPolicy === null &&
+    input.nextPolicy === null &&
+    input.records.length === 2 &&
+    mergeTargetCount === 1 &&
+    mergeSourceCount === 1 &&
+    input.records.some(
+      ({ role, previous }) => role === "merge_target" && previous.id === input.targetRecordId,
+    ) &&
+    input.records.every(({ role, next }) =>
+      role === "merge_source" ? next.toSnapshot().excluded : !next.toSnapshot().excluded,
+    );
+  if (!forgetValid && !mergeValid) {
+    abortCorruptSnapshot("MEMORY_GOVERNANCE_OPERATION_INVALID");
+  }
+}
+
+function governanceReceipt(
+  row: MemoryGovernanceEventRow,
+  idempotentReplay: boolean,
+): MemoryGovernanceReceipt {
+  return {
+    operationId: row.id as MemoryGovernanceReceipt["operationId"],
+    projectId: row.project_id as MemoryGovernanceReceipt["projectId"],
+    operation: row.operation,
+    affectedRecordCount: row.affected_record_count,
+    resultingPolicyRevision: row.resulting_policy_revision,
+    idempotentReplay,
+  };
+}
+
+function abortMemoryIdempotencyConflict(operationId: string): never {
+  abortPersistence(
+    new StoryCoreError({
+      code: "MEMORY_IDEMPOTENCY_CONFLICT",
+      message: "The memory operation id was already used for a different confirmed request.",
+      actions: ["RECOMPARE"],
+      details: { operationId },
+    }),
   );
 }
 

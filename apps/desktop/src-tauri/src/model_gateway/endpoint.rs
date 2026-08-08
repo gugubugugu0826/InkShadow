@@ -102,6 +102,10 @@ impl ValidatedEndpoint {
     pub(crate) fn origin(&self) -> String {
         self.base.origin().ascii_serialization()
     }
+
+    pub(crate) fn is_loopback(&self) -> bool {
+        self.base.host_str().is_some_and(host_is_explicit_loopback)
+    }
 }
 
 #[cfg(test)]

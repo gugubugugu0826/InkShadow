@@ -40,6 +40,19 @@ type TestGenerationEvent = Readonly<{
     | Readonly<{ phase: "failed"; code: string; retryable: boolean }>;
 }>;
 
+const TEST_DISPATCH_SCOPE = {
+  kind: "project_context",
+  receipt: {
+    schemaVersion: 1,
+    projectId: "019f9f4a-b3c7-7350-9226-000000000001",
+    fingerprint: "a".repeat(64),
+    activeChapterCount: 0,
+    retainedChapterCount: 0,
+    requiresVerifiedLocal: false,
+    chapters: [],
+  },
+} as const;
+
 describe("Tauri native model gateway client", () => {
   beforeEach(() => {
     tauriMocks.invoke.mockReset();
@@ -59,6 +72,7 @@ describe("Tauri native model gateway client", () => {
       ],
     });
     const request = {
+      dispatchScope: TEST_DISPATCH_SCOPE,
       config: {
         providerId: "provider-1",
         provider: "open_ai_compatible" as const,
@@ -89,6 +103,7 @@ describe("Tauri native model gateway client", () => {
       embeddings: [[0.1, 0.2, 0.3]],
     });
     const request = {
+      dispatchScope: TEST_DISPATCH_SCOPE,
       config: {
         providerId: "gemini-primary",
         provider: "gemini" as const,
@@ -110,6 +125,7 @@ describe("Tauri native model gateway client", () => {
   it("rejects Anthropic embedding before invoking the native gateway", async () => {
     const error = await new TauriNativeModelGatewayClient()
       .embed({
+        dispatchScope: TEST_DISPATCH_SCOPE,
         config: {
           providerId: "claude-primary",
           provider: "anthropic",
@@ -138,6 +154,7 @@ describe("Tauri native model gateway client", () => {
 
     const error = await new TauriNativeModelGatewayClient()
       .embed({
+        dispatchScope: TEST_DISPATCH_SCOPE,
         config: {
           providerId: "local",
           provider: "ollama",
@@ -163,6 +180,7 @@ describe("Tauri native model gateway client", () => {
       inputTokens: 28,
     });
     const request = {
+      dispatchScope: TEST_DISPATCH_SCOPE,
       config: {
         providerId: "qwen-beijing",
         provider: "open_ai_compatible" as const,
@@ -189,6 +207,7 @@ describe("Tauri native model gateway client", () => {
     const client = new TauriNativeModelGatewayClient();
     const unsupported = await client
       .rerank({
+        dispatchScope: TEST_DISPATCH_SCOPE,
         config: {
           providerId: "gemini",
           provider: "gemini",
@@ -218,6 +237,7 @@ describe("Tauri native model gateway client", () => {
     });
     const malformed = await client
       .rerank({
+        dispatchScope: TEST_DISPATCH_SCOPE,
         config: {
           providerId: "qwen",
           provider: "open_ai_compatible",
@@ -334,6 +354,7 @@ describe("Tauri native model gateway client", () => {
     });
     expect(tauriMocks.invoke).toHaveBeenCalledWith("start_native_generation", {
       request: {
+        dispatchScope: request.dispatchScope,
         generationId: "generation-1",
         config: request.config,
         model: "claude-sonnet",
@@ -407,6 +428,35 @@ describe("Tauri native model gateway client", () => {
 
     expect(onDelta).toHaveBeenNthCalledWith(1, "墨");
     expect(onDelta).toHaveBeenNthCalledWith(2, "墨影");
+    expect(unlisten).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a completed native stream that contains no visible candidate text", async () => {
+    let deliver: ((event: TestGenerationEvent) => void) | null = null;
+    const unlisten = vi.fn();
+    tauriMocks.listen.mockImplementation(
+      (
+        _eventName: string,
+        handler: (event: Readonly<{ payload: TestGenerationEvent }>) => void,
+      ) => {
+        deliver = (event) => handler({ payload: event });
+        return Promise.resolve(unlisten);
+      },
+    );
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command !== "start_native_generation") {
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      }
+      queueMicrotask(() => {
+        deliver?.(event(0, "", { phase: "started" }));
+        deliver?.(event(1, "", { phase: "completed", usage: null }));
+      });
+      return Promise.resolve({ generationId: "generation-1", accepted: true });
+    });
+
+    await expect(new TauriNativeModelGatewayClient().generate(input())).rejects.toMatchObject({
+      code: "MODEL_OUTPUT_EMPTY",
+    });
     expect(unlisten).toHaveBeenCalledOnce();
   });
 
@@ -509,7 +559,16 @@ describe("Tauri native model gateway client", () => {
       throw result.error;
     }
     expect(result.value.status).toBe("ready");
-    expect(result.value.content).toBe("稳定正文。\n\n候选续写。");
+    expect(result.value).toMatchObject({
+      content: "\n\n候选续写。",
+      applicationIntent: {
+        task: "continuation",
+        application: "insert_at_cursor",
+        payload: "fragment",
+        startUtf16: chapter.value.chapter.content.length,
+        endUtf16: chapter.value.chapter.content.length,
+      },
+    });
     expect(onDelta).toHaveBeenLastCalledWith("候选续写。");
     expect(generate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -535,6 +594,7 @@ describe("Tauri native model gateway client", () => {
 
 function input(onDelta?: (accumulatedText: string) => void): NativeModelGenerationInput {
   return {
+    dispatchScope: TEST_DISPATCH_SCOPE,
     generationId: "generation-1",
     config: {
       providerId: "provider-1",

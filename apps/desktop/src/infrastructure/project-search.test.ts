@@ -187,6 +187,7 @@ describe("local project search", () => {
         }
         diagnostics = readyEmbeddingDiagnostics(documents.length);
         return Promise.resolve({
+          projectId: _projectId,
           diagnostics,
           configuration: {
             modelId: diagnostics.confirmationId ?? "embedding-profile:test",

@@ -35,25 +35,31 @@ export async function loadModelHubRoutingCandidates(
 ): Promise<readonly ModelHubRoutingCandidate[]> {
   const connections = await modelHub.listConnections();
   const candidates = await Promise.all(
-    connections.map(async (connection) => {
-      const catalog = await modelHub.listCatalog(connection.id);
-      return Promise.all(
-        catalog.map(async (catalogEntry) => {
-          const [capabilities, costPrivacy, evaluations] = await Promise.all([
-            modelHub.listCapabilityEvidence(catalogEntry.id),
-            modelHub.findCostPrivacyProfile(catalogEntry.id),
-            modelHub.listEvaluationResults(catalogEntry.id),
-          ]);
-          return Object.freeze({
-            connection,
-            catalogEntry,
-            capabilities,
-            costPrivacy,
-            evaluations,
-          });
-        }),
-      );
-    }),
+    connections
+      .filter(
+        (connection) =>
+          connection.enabled &&
+          (connection.connectionStatus === "ready" || connection.connectionStatus === "degraded"),
+      )
+      .map(async (connection) => {
+        const catalog = await modelHub.listCatalog(connection.id);
+        return Promise.all(
+          catalog.map(async (catalogEntry) => {
+            const [capabilities, costPrivacy, evaluations] = await Promise.all([
+              modelHub.listCapabilityEvidence(catalogEntry.id),
+              modelHub.findCostPrivacyProfile(catalogEntry.id),
+              modelHub.listEvaluationResults(catalogEntry.id),
+            ]);
+            return Object.freeze({
+              connection,
+              catalogEntry,
+              capabilities,
+              costPrivacy,
+              evaluations,
+            });
+          }),
+        );
+      }),
   );
   return Object.freeze(candidates.flat());
 }

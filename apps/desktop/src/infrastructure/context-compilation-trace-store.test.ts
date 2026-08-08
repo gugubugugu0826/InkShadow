@@ -20,10 +20,16 @@ import {
 
 const coreMigration = readMigration("0001_core.sql");
 const traceMigration = readMigration("0034_context_compilation_trace.sql");
+const exactProvenanceMigration = readMigration("0047_context_compilation_exact_provenance.sql");
 const NOW = "2026-08-01T00:00:00.000Z";
 const PROJECT_ID = uuid(1);
 const TRACE_ID = uuid(2);
 const SECOND_TRACE_ID = uuid(3);
+const GENERATION_ID = uuid(4);
+const MODEL_INVOCATION_ID = uuid(5);
+const OUTPUT_CANDIDATE_ID = uuid(6);
+const GENERATION_RUN_ID = uuid(7);
+const RETRY_GENERATION_ID = uuid(8);
 const CANDIDATE_CONTENT_MARKER = "PRIVATE-CANDIDATE-CONTENT-DO-NOT-PERSIST";
 const EVIDENCE_EXCERPT_MARKER = "PRIVATE-EVIDENCE-EXCERPT-DO-NOT-PERSIST";
 const EXACT_ESTIMATOR: ContextTokenEstimator = {
@@ -58,7 +64,7 @@ describe("context compilation trace stores", () => {
     });
     expect(trace.entries.map(({ included }) => included)).toEqual([true, true, false, true]);
     expect(trace.entries[2]).toMatchObject({
-      candidateId: "scene-large",
+      contextCandidateId: "scene-large",
       included: false,
       discardedReason: "token_budget_exhausted",
       estimatedTokens: 10,
@@ -101,6 +107,8 @@ describe("context compilation trace stores", () => {
         includedCount: 3,
         discardedCount: 1,
         createdAt: NOW,
+        execution: null,
+        outputCandidateId: null,
       },
     ]);
     const entryRows = await executor.select<Record<string, unknown>>(
@@ -136,13 +144,141 @@ describe("context compilation trace stores", () => {
     window.localStorage.setItem(
       DEVELOPMENT_CONTEXT_COMPILATION_TRACE_KEY,
       (serialized ?? "").replace(
-        '"candidateId"',
-        `"content":"${CANDIDATE_CONTENT_MARKER}","candidateId"`,
+        '"contextCandidateId"',
+        `"content":"${CANDIDATE_CONTENT_MARKER}","contextCandidateId"`,
       ),
     );
     await expect(store.findById(TRACE_ID)).rejects.toMatchObject({
       code: "CONTEXT_TRACE_CORRUPT",
     });
+  });
+
+  it("links one exact generation, Model Hub invocation, and isolated AI Candidate", async () => {
+    const executor = await sqliteExecutor();
+    const store = new SqliteContextCompilationTraceStore(executor);
+    const trace = makeTrace(TRACE_ID, NOW, {
+      generationId: GENERATION_ID,
+      generationRunId: null,
+      modelInvocationId: null,
+    });
+    await store.save(trace);
+    await executor.execute("INSERT INTO model_invocation_facts (id) VALUES (?)", [
+      MODEL_INVOCATION_ID,
+    ]);
+    await executor.execute(
+      `INSERT INTO ai_candidates (
+         id, project_id, chapter_id, source, base_version_id, content,
+         content_checksum, status, incomplete, created_at, updated_at, decided_at
+       ) VALUES (?, ?, NULL, 'extract', NULL, 'isolated result', ?, 'ready', 0, ?, ?, NULL)`,
+      [OUTPUT_CANDIDATE_ID, PROJECT_ID, "a".repeat(64), NOW, NOW],
+    );
+
+    await store.linkModelInvocation({
+      traceId: TRACE_ID,
+      modelInvocationId: MODEL_INVOCATION_ID,
+      linkedAt: NOW,
+    });
+    await store.linkOutputCandidate({
+      traceId: TRACE_ID,
+      outputCandidateId: OUTPUT_CANDIDATE_ID,
+      linkedAt: NOW,
+    });
+
+    const linked = await store.findByOutputCandidateId(OUTPUT_CANDIDATE_ID);
+    expect(linked).toMatchObject({
+      id: TRACE_ID,
+      execution: {
+        generationId: GENERATION_ID,
+        generationRunId: null,
+        modelInvocationId: MODEL_INVOCATION_ID,
+      },
+      outputCandidateId: OUTPUT_CANDIDATE_ID,
+    });
+    await expect(
+      store.linkOutputCandidate({
+        traceId: TRACE_ID,
+        outputCandidateId: OUTPUT_CANDIDATE_ID,
+        linkedAt: NOW,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("never accepts a context compiler input id as an AI Candidate id", async () => {
+    const executor = await sqliteExecutor();
+    const store = new SqliteContextCompilationTraceStore(executor);
+    await store.save(
+      makeTrace(TRACE_ID, NOW, {
+        generationId: GENERATION_ID,
+        generationRunId: null,
+        modelInvocationId: null,
+      }),
+    );
+
+    await expect(
+      store.linkOutputCandidate({
+        traceId: TRACE_ID,
+        outputCandidateId: "scene-large",
+        linkedAt: NOW,
+      }),
+    ).rejects.toMatchObject({ code: "CONTEXT_TRACE_INVALID" });
+    await expect(store.findByOutputCandidateId(OUTPUT_CANDIDATE_ID)).resolves.toBeNull();
+  });
+
+  it("keeps retry attempts distinct while grouping them under one generation run", async () => {
+    const executor = await sqliteExecutor();
+    const store = new SqliteContextCompilationTraceStore(executor);
+    await executor.execute(
+      `INSERT INTO ai_generation_runs (id, project_id, chapter_id, candidate_id)
+       VALUES (?, ?, NULL, NULL)`,
+      [GENERATION_RUN_ID, PROJECT_ID],
+    );
+
+    await store.save(
+      makeTrace(TRACE_ID, NOW, {
+        generationId: GENERATION_ID,
+        generationRunId: GENERATION_RUN_ID,
+        modelInvocationId: null,
+      }),
+    );
+    await store.save(
+      makeTrace(SECOND_TRACE_ID, "2026-08-01T00:01:00.000Z", {
+        generationId: RETRY_GENERATION_ID,
+        generationRunId: GENERATION_RUN_ID,
+        modelInvocationId: null,
+      }),
+    );
+
+    const summaries = await store.listByProjectId(PROJECT_ID);
+    expect(summaries.map(({ execution }) => execution?.generationId)).toEqual([
+      RETRY_GENERATION_ID,
+      GENERATION_ID,
+    ]);
+    expect(
+      summaries.every(({ execution }) => execution?.generationRunId === GENERATION_RUN_ID),
+    ).toBe(true);
+  });
+
+  it("upgrades legacy browser traces without treating compiler input ids as AI Candidates", async () => {
+    const current = makeTrace(TRACE_ID);
+    const legacy = {
+      ...current,
+      entries: current.entries.map(({ contextCandidateId, ...entry }) => ({
+        ...entry,
+        candidateId: contextCandidateId,
+      })),
+    } as Record<string, unknown>;
+    delete legacy.execution;
+    delete legacy.outputCandidateId;
+    window.localStorage.setItem(
+      DEVELOPMENT_CONTEXT_COMPILATION_TRACE_KEY,
+      JSON.stringify({ schemaVersion: 1, runs: { [TRACE_ID]: legacy } }),
+    );
+
+    const store = new BrowserDevelopmentContextCompilationTraceStore(window.localStorage);
+    const upgraded = await store.findById(TRACE_ID);
+    expect(upgraded?.entries[0]).toHaveProperty("contextCandidateId", "locked-rule");
+    expect(upgraded?.entries[0]).not.toHaveProperty("candidateId");
+    expect(upgraded).toMatchObject({ execution: null, outputCandidateId: null });
   });
 
   it("rejects extra prompt, content, or excerpt fields before either store can persist them", async () => {
@@ -214,7 +350,11 @@ describe("context compilation trace stores", () => {
   });
 });
 
-function makeTrace(id: string, createdAt = NOW): ContextCompilationTrace {
+function makeTrace(
+  id: string,
+  createdAt = NOW,
+  execution?: ContextCompilationTrace["execution"],
+): ContextCompilationTrace {
   const candidates: readonly ContextCandidate[] = [
     candidate("locked_hard_rules", "locked-rule", 2, true),
     candidate("current_task", "current-task", 2, true),
@@ -231,6 +371,7 @@ function makeTrace(id: string, createdAt = NOW): ContextCompilationTrace {
       tokenEstimator: EXACT_ESTIMATOR,
     }),
     createdAt,
+    ...(execution === undefined ? {} : { execution }),
   });
 }
 
@@ -261,7 +402,17 @@ function candidate(
 }
 
 async function sqliteExecutor(): Promise<NodeSqliteExecutor> {
-  const executor = new NodeSqliteExecutor(`${coreMigration}\n${traceMigration}`);
+  const executor = new NodeSqliteExecutor(
+    `${coreMigration}\n${traceMigration}\n
+     CREATE TABLE ai_generation_runs (
+       id TEXT PRIMARY KEY,
+       project_id TEXT NOT NULL,
+       chapter_id TEXT,
+       candidate_id TEXT
+     );
+     CREATE TABLE model_invocation_facts (id TEXT PRIMARY KEY);
+     ${exactProvenanceMigration}`,
+  );
   executors.push(executor);
   await executor.execute(
     `INSERT INTO projects (

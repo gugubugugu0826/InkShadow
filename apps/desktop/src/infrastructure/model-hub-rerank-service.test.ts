@@ -23,6 +23,18 @@ if (!parsedNow.ok) {
 const clock = { now: () => parsedNow.value };
 const PRIVATE_QUERY = "PRIVATE_QUERY_不得写入账本";
 const PRIVATE_DOCUMENTS = ["PRIVATE_DOCUMENT_A", "PRIVATE_DOCUMENT_B"] as const;
+const TEST_DISPATCH_SCOPE = {
+  kind: "project_context",
+  receipt: {
+    schemaVersion: 1,
+    projectId: "019f9f4a-b3c7-7350-9226-000000000001",
+    fingerprint: "a".repeat(64),
+    activeChapterCount: 0,
+    retainedChapterCount: 0,
+    requiresVerifiedLocal: false,
+    chapters: [],
+  },
+} as const;
 
 describe("ModelHubRerankService", () => {
   it("persists explicit remote-content consent as task policy across runtime reopen", async () => {
@@ -71,6 +83,7 @@ describe("ModelHubRerankService", () => {
     const startInvocation = vi.spyOn(harness.modelHub, "startInvocation");
 
     const attempt = await harness.service.tryRerank({
+      dispatchScope: TEST_DISPATCH_SCOPE,
       query: PRIVATE_QUERY,
       documents: PRIVATE_DOCUMENTS,
       topN: 2,
@@ -107,6 +120,7 @@ describe("ModelHubRerankService", () => {
     const finishInvocation = vi.spyOn(harness.modelHub, "finishInvocation");
 
     const result = await harness.service.rerank({
+      dispatchScope: TEST_DISPATCH_SCOPE,
       query: PRIVATE_QUERY,
       documents: PRIVATE_DOCUMENTS,
       topN: 2,
@@ -154,12 +168,39 @@ describe("ModelHubRerankService", () => {
     });
 
     await expect(
-      harness.service.inspect({ query: PRIVATE_QUERY, documents: PRIVATE_DOCUMENTS, topN: 2 }),
+      harness.service.inspect({
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        query: PRIVATE_QUERY,
+        documents: PRIVATE_DOCUMENTS,
+        topN: 2,
+      }),
     ).resolves.toMatchObject({
       connectionId: "qwen-fallback",
       catalogEntryId: "qwen-fallback-catalog",
       usedFallback: true,
     });
+  });
+
+  it("does not send documents when the credential rotates in onBeforeDispatch", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "qwen-rotate-before-dispatch",
+      catalogEntryId: "qwen-rotate-before-dispatch-catalog",
+    });
+    await saveRoute(harness.modelHub, target.id, { remoteContentConsent: true });
+
+    await expect(
+      harness.service.rerank({
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        query: PRIVATE_QUERY,
+        documents: PRIVATE_DOCUMENTS,
+        topN: 2,
+        onBeforeDispatch: async ({ connectionId }) => {
+          await rotateConnectionCredential(harness.modelHub, connectionId);
+        },
+      }),
+    ).rejects.toMatchObject({ dispatched: false });
+    expect(harness.rerank).not.toHaveBeenCalled();
   });
 
   it("rejects unverified regions and discards results if routing evidence changes after dispatch", async () => {
@@ -172,6 +213,7 @@ describe("ModelHubRerankService", () => {
     await saveRoute(regionHarness.modelHub, regionTarget.id, { remoteContentConsent: true });
     await expect(
       regionHarness.service.inspect({
+        dispatchScope: TEST_DISPATCH_SCOPE,
         query: PRIVATE_QUERY,
         documents: PRIVATE_DOCUMENTS,
         topN: 2,
@@ -218,6 +260,7 @@ describe("ModelHubRerankService", () => {
 
     await expect(
       changedHarness.service.rerank({
+        dispatchScope: TEST_DISPATCH_SCOPE,
         query: PRIVATE_QUERY,
         documents: PRIVATE_DOCUMENTS,
         topN: 2,
@@ -274,7 +317,7 @@ async function seedTarget(
           workspaceId: input.workspaceId ?? "workspace-safe",
         }
       : {}),
-    credentialRef: `keyring:test:${input.connectionId}`,
+    credentialRef: `keyring:model-hub:${input.connectionId}`,
     credentialState: "present",
     expectedRevision: null,
   });
@@ -353,6 +396,29 @@ async function saveRoute(
     failurePolicy: input.fallbackCatalogEntryId === undefined ? "stop" : "use_fallback",
     routeOrigin: "user",
     expectedRevision: null,
+  });
+}
+
+async function rotateConnectionCredential(
+  modelHub: ModelHubStore,
+  connectionId: string,
+): Promise<void> {
+  const connection = await modelHub.findConnection(connectionId);
+  if (connection === null) throw new Error("test connection missing");
+  await modelHub.saveConnection({
+    id: connection.id,
+    providerKind: connection.providerKind,
+    displayName: connection.displayName,
+    region: connection.region,
+    workspaceId: connection.workspaceId,
+    endpointId: connection.endpointId,
+    credentialRef: `keyring:model-hub:${connection.id}-rotated`,
+    credentialState: "present",
+    authenticationMode: connection.authenticationMode,
+    requestTimeoutMs: connection.requestTimeoutMs,
+    retryLimit: connection.retryLimit,
+    enabled: true,
+    expectedRevision: connection.revision,
   });
 }
 

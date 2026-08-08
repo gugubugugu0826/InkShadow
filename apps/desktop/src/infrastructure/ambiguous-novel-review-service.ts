@@ -26,6 +26,13 @@ import {
   type ModelHubTextTaskInspection,
 } from "./model-hub-execution-service";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
+import {
+  ProjectContextPrivacyError,
+  projectContextRequiredDataDestination,
+  projectContextDispatchScope,
+  type ProjectContextPrivacyAuthority,
+  type ProjectContextPrivacyReceipt,
+} from "./project-context-privacy-authority";
 
 export const AMBIGUOUS_NOVEL_REVIEW_TASKS = [
   "contradiction_check",
@@ -125,6 +132,10 @@ export interface AmbiguousNovelReviewDependencies {
   readonly hasher: ContentHasher;
   readonly characterEvidence: Pick<CharacterVoicePovEvidenceAdapter, "prepare">;
   readonly modelHub: ModelHubTextExecutionDependencies;
+  readonly projectContextPrivacy: Pick<
+    ProjectContextPrivacyAuthority,
+    "inspect" | "assertChapterMatches" | "assertCurrentBeforeDispatch" | "assertRouteEligible"
+  >;
 }
 
 interface FactEvidenceRecord {
@@ -263,12 +274,25 @@ export class AmbiguousNovelReviewService {
   ): Promise<AmbiguousNovelReviewTaskResult> {
     let inspection: ModelHubTextTaskInspection;
     let routeFingerprint: string;
+    let requiredDataDestination: "local" | undefined;
+    let projectPrivacy: ProjectContextPrivacyReceipt;
     try {
+      const chapter = await this.dependencies.chapters.findById(request.chapterId);
+      if (!chapter.ok) {
+        throw chapter.error;
+      }
+      if (chapter.value === null) {
+        throw new Error("The review chapter no longer exists.");
+      }
+      projectPrivacy = await this.dependencies.projectContextPrivacy.inspect(request.projectId);
+      this.dependencies.projectContextPrivacy.assertChapterMatches(projectPrivacy, chapter.value);
+      requiredDataDestination = projectContextRequiredDataDestination(projectPrivacy);
       inspection = await inspectModelHubTextTask(this.dependencies.modelHub, {
         task: plan.task,
         messages: plan.messages,
         maximumOutputTokens: 6_000,
         temperature: 0.1,
+        ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
       });
       await assertReviewCapabilities(
         this.dependencies.modelHub,
@@ -283,10 +307,12 @@ export class AmbiguousNovelReviewService {
     let generated: ModelHubTextTaskExecutionResult;
     try {
       generated = await executeModelHubTextTask(this.dependencies.modelHub, {
+        dispatchScope: projectContextDispatchScope(projectPrivacy),
         task: plan.task,
         messages: plan.messages,
         maximumOutputTokens: 6_000,
         temperature: 0.1,
+        ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
         onBeforeDispatch: async (selection) => {
           if (
             selection.connectionId !== inspection.connectionId ||
@@ -305,6 +331,7 @@ export class AmbiguousNovelReviewService {
             messages: plan.messages,
             maximumOutputTokens: 6_000,
             temperature: 0.1,
+            ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
           });
           if (
             (await reviewRouteFingerprint(this.dependencies.modelHub, dispatchInspection)) !==
@@ -329,6 +356,11 @@ export class AmbiguousNovelReviewService {
               true,
             );
           }
+          await assertProjectPrivacyBeforeDispatch(
+            this.dependencies.projectContextPrivacy,
+            projectPrivacy,
+            selection.localOnlyEligible === true,
+          );
         },
       });
     } catch (cause: unknown) {
@@ -337,11 +369,13 @@ export class AmbiguousNovelReviewService {
 
     const invocation = invocationSummary(generated);
     try {
+      await this.dependencies.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
       const postflightInspection = await inspectModelHubTextTask(this.dependencies.modelHub, {
         task: plan.task,
         messages: plan.messages,
         maximumOutputTokens: 6_000,
         temperature: 0.1,
+        ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
       });
       if (
         (await reviewRouteFingerprint(this.dependencies.modelHub, postflightInspection)) !==
@@ -1445,6 +1479,22 @@ function requireResponseText(value: unknown, maximum: number, label: string): st
 
 function invalidResponse(message: string): AmbiguousNovelReviewResponseError {
   return new AmbiguousNovelReviewResponseError(message);
+}
+
+async function assertProjectPrivacyBeforeDispatch(
+  authority: AmbiguousNovelReviewDependencies["projectContextPrivacy"],
+  receipt: ProjectContextPrivacyReceipt,
+  localOnlyEligible: boolean,
+): Promise<void> {
+  try {
+    await authority.assertCurrentBeforeDispatch(receipt);
+    authority.assertRouteEligible(receipt, localOnlyEligible);
+  } catch (cause: unknown) {
+    if (cause instanceof ProjectContextPrivacyError) {
+      throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
+    }
+    throw cause;
+  }
 }
 
 function safeFailureMessage(cause: unknown, fallback: string): string {

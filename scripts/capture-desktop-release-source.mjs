@@ -7,21 +7,26 @@ import {
   createDesktopReleaseEnvironmentFingerprint,
   createDesktopReleaseSourceBaseline,
   createDesktopReleaseSourceFingerprint,
+  inspectCleanReleaseHead,
+  verifyReleaseHeadUnchanged,
 } from "./desktop-release-manifest.mjs";
 
 const workspaceRoot = fileURLToPath(new URL("../", import.meta.url));
 const outputPath = parseOutput(process.argv.slice(2));
 await ensureSafeParent(path.dirname(outputPath));
 await ensureSafeOutput(outputPath);
+const initialHead = await inspectCleanReleaseHead(workspaceRoot);
 const baseline = createDesktopReleaseSourceBaseline(
   await createDesktopReleaseSourceFingerprint(workspaceRoot),
   createDesktopReleaseEnvironmentFingerprint(),
+  initialHead.gitCommitSha,
 );
+verifyReleaseHeadUnchanged(initialHead, await inspectCleanReleaseHead(workspaceRoot));
 await writeFile(outputPath, `${JSON.stringify(baseline, null, 2)}\n`, "utf8");
 process.stdout.write(
   `Captured desktop release source baseline for ${String(
     baseline.sourceFingerprint.fileCount,
-  )} files.\n`,
+  )} files at Git commit ${baseline.gitCommitSha}.\n`,
 );
 
 function parseOutput(arguments_) {

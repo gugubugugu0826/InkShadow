@@ -8,9 +8,10 @@ import type {
 } from "../src/index.js";
 
 export class NodeStorySqliteExecutor implements StorySqlExecutor {
-  public readonly database = new DatabaseSync(":memory:");
+  public readonly database: DatabaseSync;
 
-  public constructor(migration: string) {
+  public constructor(migration: string, path = ":memory:") {
+    this.database = new DatabaseSync(path);
     this.database.exec(migration);
   }
 

@@ -1,10 +1,14 @@
 import { ToastProvider } from "@inkshadow/ui";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
+import { createDevelopmentRuntime } from "../infrastructure/runtime";
+import {
+  DEFAULT_EDITOR_TYPOGRAPHY,
+  saveEditorView,
+} from "../infrastructure/editor-view-state-store";
 import { RuntimeProvider } from "../runtime-context";
 import { StartPage } from "./start-page";
 
@@ -35,7 +39,7 @@ describe("local-first start page", () => {
     renderStartPage();
 
     expect(
-      screen.getByRole("heading", { name: "一句想法，也能开始一部长篇", level: 1 }),
+      screen.getByRole("heading", { name: "把你的第一个想法，写成一个故事", level: 1 }),
     ).toBeVisible();
     expect(screen.getByRole("link", { name: /从一个想法开始/ })).toHaveAttribute(
       "href",
@@ -52,18 +56,54 @@ describe("local-first start page", () => {
     expect(screen.getByText("推荐首次使用")).toBeVisible();
   });
 
+  it("keeps an empty library focused on the three creation entries", async () => {
+    renderStartPage();
+
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "回到刚才停下的地方" })).not.toBeInTheDocument();
+    });
+    expect(document.querySelectorAll(".start-page__entry")).toHaveLength(3);
+  });
+
+  it("continues the real most recently edited chapter and reports its saved cursor", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "海边电台" });
+    if (!project.ok) throw project.error;
+    const chapter = await runtime.useCases.createChapter.execute({
+      projectId: project.value.id,
+      title: "第三章 潮声",
+      content: "潮水退去以后，她在礁石间找到那台仍在播放的收音机。",
+    });
+    if (!chapter.ok) throw chapter.error;
+    saveEditorView(window.localStorage, {
+      projectId: project.value.id,
+      chapterId: chapter.value.chapter.id,
+      selection: { start: 8, end: 8 },
+      scrollTop: 240,
+      typography: DEFAULT_EDITOR_TYPOGRAPHY,
+      updatedAt: 2_000_000_000_000,
+    });
+
+    renderStartPage(runtime);
+
+    expect(await screen.findByRole("heading", { name: "回到刚才停下的地方" })).toBeVisible();
+    expect(screen.getByText("海边电台")).toBeVisible();
+    expect(screen.getByText("第三章 潮声")).toBeVisible();
+    expect(screen.getByText("第 8 个字符后")).toBeVisible();
+    expect(screen.getByRole("link", { name: "继续写" })).toHaveAttribute(
+      "href",
+      `/projects/${project.value.id}/chapters/${chapter.value.chapter.id}`,
+    );
+  });
+
   it("keeps the library and backup recovery available as secondary actions", () => {
     renderStartPage();
 
-    expect(screen.getByRole("link", { name: "打开最近创作与作品库" })).toHaveAttribute(
-      "href",
-      "/projects",
-    );
-    expect(screen.getByRole("link", { name: "从备份恢复" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "浏览作品库" })).toHaveAttribute("href", "/projects");
+    expect(screen.getByRole("link", { name: "恢复备份" })).toHaveAttribute(
       "href",
       "/settings#data-transfer",
     );
-    expect(screen.getByRole("heading", { name: "作品留在你的设备", level: 2 })).toBeVisible();
   });
 
   it("creates a real local example project and opens its stable chapter", async () => {
@@ -89,51 +129,9 @@ describe("local-first start page", () => {
     expect(chapters.ok && chapters.value[0]?.content).toContain("不要在今晚十点以后");
   });
 
-  it("does not expose a dead login link when cloud identity is disabled", () => {
+  it("keeps cloud account concepts out of the default local-first home", () => {
     renderStartPage();
 
-    expect(screen.getByText("云账户可稍后连接，本地创作功能保持完整。")).toBeVisible();
     expect(screen.queryByRole("link", { name: "登录已有云账户" })).not.toBeInTheDocument();
-  });
-
-  it("does not expose a dead login link after cloud identity fails closed", () => {
-    const baseRuntime = createDevelopmentRuntime(window.localStorage);
-    const runtime = {
-      ...baseRuntime,
-      mode: "tauri",
-      featureFlags: {
-        ...baseRuntime.featureFlags,
-        cloudIdentity: true,
-      },
-      cloudIdentity: {
-        available: false,
-      },
-    } as unknown as DesktopRuntime;
-
-    renderStartPage(runtime);
-
-    expect(screen.getByText("云账户可稍后连接，本地创作功能保持完整。")).toBeVisible();
-    expect(screen.queryByRole("link", { name: "登录已有云账户" })).not.toBeInTheDocument();
-  });
-
-  it("only offers cloud login when the runtime confirms that it is available", () => {
-    const baseRuntime = createDevelopmentRuntime(window.localStorage);
-    const runtime = {
-      ...baseRuntime,
-      featureFlags: {
-        ...baseRuntime.featureFlags,
-        cloudIdentity: true,
-      },
-      cloudIdentity: {
-        available: true,
-      },
-    } as unknown as DesktopRuntime;
-
-    renderStartPage(runtime);
-
-    expect(screen.getByRole("link", { name: "登录已有云账户" })).toHaveAttribute(
-      "href",
-      "/auth/login",
-    );
   });
 });

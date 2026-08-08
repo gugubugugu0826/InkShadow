@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::native_sqlite::NativeModelDispatchScope;
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProviderKind {
@@ -56,6 +58,7 @@ pub(crate) struct EmbeddingRequest {
     pub(crate) config: ModelEndpointConfig,
     pub(crate) model: String,
     pub(crate) inputs: Vec<String>,
+    pub(crate) dispatch_scope: NativeModelDispatchScope,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -73,6 +76,7 @@ pub(crate) struct RerankRequest {
     pub(crate) query: String,
     pub(crate) documents: Vec<String>,
     pub(crate) top_n: usize,
+    pub(crate) dispatch_scope: NativeModelDispatchScope,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -99,6 +103,7 @@ pub(crate) struct StartGenerationRequest {
     pub(crate) messages: Vec<ModelMessage>,
     pub(crate) max_output_tokens: u32,
     pub(crate) temperature: Option<f32>,
+    pub(crate) dispatch_scope: NativeModelDispatchScope,
 }
 
 #[derive(Clone, Debug, Deserialize)]

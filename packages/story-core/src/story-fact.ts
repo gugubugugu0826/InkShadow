@@ -143,8 +143,86 @@ export interface StoryFactRevision {
   readonly recordedAt: IsoUtcTimestamp;
 }
 
+export type StoryFactEntityAliasResolution =
+  | Readonly<{ kind: "existing_entity"; targetEntityKey: string }>
+  | Readonly<{ kind: "separate_entity" }>;
+
+export interface AmbiguousStoryFactEntityAlias {
+  readonly distinctEntityKey: string;
+  readonly matchedEntityKeys: readonly string[];
+}
+
+export const CONTINUOUS_STORY_STATE_ROUTE_TASKS = [
+  "character_extraction",
+  "world_extraction",
+] as const;
+export type ContinuousStoryStateRouteTask = (typeof CONTINUOUS_STORY_STATE_ROUTE_TASKS)[number];
+
+export interface ContinuousStoryStateRouteIdentity {
+  readonly projectId: string;
+  readonly chapterId: string;
+  readonly versionId: string;
+  readonly task: ContinuousStoryStateRouteTask;
+}
+
+/** Durable proof that one provider route completed for one immutable source version. */
+export interface ContinuousStoryStateRouteReceipt extends ContinuousStoryStateRouteIdentity {
+  readonly sourceContentHash: string;
+  readonly providerKind: string;
+  readonly modelId: string;
+  readonly invocationId: string;
+  readonly candidateCount: number;
+  readonly createdFactCount: number;
+  readonly retiredFactCount: number;
+  readonly completedAt: string;
+}
+
+export interface ContinuousStoryStateFactCommitCandidate {
+  readonly fact: StoryFact;
+  /**
+   * Stable entity/type/attribute key for disposable system projections. Null
+   * keeps a review-required AI fact isolated without retiring prior truth.
+   */
+  readonly replacementKey: string | null;
+}
+
+export interface ContinuousStoryStateRouteCommit extends ContinuousStoryStateRouteIdentity {
+  readonly sourceContentHash: string;
+  readonly providerKind: string;
+  readonly modelId: string;
+  readonly invocationId: string;
+  readonly candidateCount: number;
+  readonly completedAt: string;
+  readonly facts: readonly ContinuousStoryStateFactCommitCandidate[];
+}
+
+export interface ContinuousStoryStateRouteCommitReceipt {
+  readonly receipt: ContinuousStoryStateRouteReceipt;
+  readonly facts: readonly StoryFact[];
+  readonly retiredFactIds: readonly UuidV7[];
+  readonly alreadyCommitted: boolean;
+}
+
 export interface StoryFactStore {
   create(fact: StoryFact): Promise<Result<void, StoryCoreError>>;
+  /**
+   * Atomically verifies the mutable chapter/causal authority and inserts a
+   * formal fact, or returns an identical existing submission. Implementations
+   * must run every check and the insert in one persistence transaction.
+   */
+  createWithAuthorityFence?(
+    fact: StoryFact,
+    fence: StoryFactAuthorityFence,
+  ): Promise<Result<StoryFactConditionalCreateReceipt, StoryCoreError>>;
+  /**
+   * Atomically verifies the current chapter version and the immutable
+   * supplemental-finding identity before deprecating its disposition. A retry
+   * of the same successful command must return the already-deprecated fact.
+   */
+  deprecateSupplementalResolutionWithAuthorityFence?(
+    factId: UuidV7,
+    fence: StoryFactSupplementalResolutionUndoFence,
+  ): Promise<Result<StoryFactConditionalDeprecateReceipt, StoryCoreError>>;
   findById(id: UuidV7): Promise<Result<StoryFact | null, StoryCoreError>>;
   listByProjectId(
     projectId: UuidV7,
@@ -152,6 +230,47 @@ export interface StoryFactStore {
   ): Promise<Result<readonly StoryFact[], StoryCoreError>>;
   save(fact: StoryFact, expectedRevision: number): Promise<Result<void, StoryCoreError>>;
   listRevisions(factId: UuidV7): Promise<Result<readonly StoryFactRevision[], StoryCoreError>>;
+  /** Implemented by production stores that persist continuous extraction. */
+  findContinuousStoryStateRouteReceipt?(
+    identity: ContinuousStoryStateRouteIdentity,
+  ): Promise<Result<ContinuousStoryStateRouteReceipt | null, StoryCoreError>>;
+  /**
+   * Rechecks source authority, retires replaced projections, inserts new facts
+   * and revisions, and records the route receipt in one persistence commit.
+   */
+  commitContinuousStoryStateRoute?(
+    command: ContinuousStoryStateRouteCommit,
+  ): Promise<Result<ContinuousStoryStateRouteCommitReceipt, StoryCoreError>>;
+}
+
+export interface StoryFactAuthorityFence {
+  readonly chapterId: string;
+  readonly expectedCurrentVersionId: string;
+  readonly requiredCausalEventIds?: readonly string[];
+  readonly requiredCharacterIds?: readonly string[];
+}
+
+/** Maximum unique entity references that one atomic fact-authority fence may bind. */
+export const MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES = 512;
+
+export interface StoryFactConditionalCreateReceipt {
+  readonly fact: StoryFact;
+  readonly created: boolean;
+}
+
+export interface StoryFactSupplementalResolutionUndoFence {
+  readonly expectedProjectId: string;
+  readonly chapterId: string;
+  readonly expectedCurrentVersionId: string;
+  readonly findingId: string;
+  readonly evidenceSignature: string;
+  readonly expectedRevision: number;
+  readonly now: string;
+}
+
+export interface StoryFactConditionalDeprecateReceipt {
+  readonly fact: StoryFact;
+  readonly deprecated: boolean;
 }
 
 export class StoryFact {
@@ -280,6 +399,11 @@ export class StoryFact {
     if (this.snapshot.status !== "temporary" && this.snapshot.status !== "unconfirmed") {
       return invalidTransition("Only a temporary or unconfirmed fact can be confirmed.");
     }
+    if (storyFactNeedsEntityAliasResolution(this.snapshot)) {
+      return invalidTransition(
+        "An ambiguous entity alias must be resolved by the user before the story fact can be confirmed.",
+      );
+    }
     const actorId = parseUuidV7(input.actorId);
     if (!actorId.ok) {
       return actorId;
@@ -296,6 +420,79 @@ export class StoryFact {
       needsReview: false,
       confirmedByActorId: actorId.value,
       confirmedAt: now.value,
+      revision: this.snapshot.revision + 1,
+      updatedAt: now.value,
+    });
+  }
+
+  public resolveEntityAlias(input: {
+    readonly resolution: StoryFactEntityAliasResolution;
+    readonly humanConfirmed: unknown;
+    readonly expectedRevision: number;
+    readonly now: string;
+  }): Result<StoryFact, StoryCoreError> {
+    if (input.humanConfirmed !== true) {
+      return humanDecisionError();
+    }
+    if (
+      (this.snapshot.status !== "temporary" && this.snapshot.status !== "unconfirmed") ||
+      this.snapshot.locked ||
+      this.snapshot.deprecated
+    ) {
+      return invalidTransition(
+        "Only an active, unlocked temporary or unconfirmed fact can resolve an entity alias.",
+      );
+    }
+    const ambiguous = readAmbiguousStoryFactEntityAlias(this.snapshot);
+    if (ambiguous === null) {
+      return invalidTransition(
+        "This story fact does not have an ambiguous entity alias to resolve.",
+      );
+    }
+    const now = validateMutation(input.expectedRevision, input.now, this.snapshot);
+    if (!now.ok) {
+      return now;
+    }
+    const structuredValue = this.snapshot.structuredValue;
+    if (!isStoryValueRecord(structuredValue)) {
+      return factValidationError("The ambiguous entity alias payload is invalid.");
+    }
+    const subjectValue = structuredValue.subject;
+    if (!isStoryValueRecord(subjectValue)) {
+      return factValidationError("The ambiguous entity alias subject is invalid.");
+    }
+
+    let subject: Readonly<Record<string, StoryValue>>;
+    if (input.resolution.kind === "existing_entity") {
+      const targetEntityKey = validateBoundedText(
+        input.resolution.targetEntityKey,
+        200,
+        "Resolved entity key",
+      );
+      if (!targetEntityKey.ok) {
+        return targetEntityKey;
+      }
+      if (!ambiguous.matchedEntityKeys.includes(targetEntityKey.value)) {
+        return factValidationError(
+          "The selected entity must be one of the confirmed alias matches recorded on the fact.",
+        );
+      }
+      subject = Object.freeze({
+        ...subjectValue,
+        entityKey: targetEntityKey.value,
+        mergeStatus: "human_resolved_existing_entity",
+        matchedEntityKeys: Object.freeze([targetEntityKey.value]),
+      });
+    } else {
+      subject = Object.freeze({
+        ...subjectValue,
+        mergeStatus: "human_resolved_separate_entity",
+      });
+    }
+
+    return StoryFact.rehydrate({
+      ...this.snapshot,
+      structuredValue: Object.freeze({ ...structuredValue, subject }),
       revision: this.snapshot.revision + 1,
       updatedAt: now.value,
     });
@@ -383,6 +580,31 @@ export class StoryFact {
         "Only an active, unreviewed system-derived rebuildable fact can be retired automatically.",
       );
     }
+    return this.deprecateAutomaticSystemProjection(input);
+  }
+
+  /**
+   * Retires an active disposable system projection. Temporary status is the
+   * authority boundary: review-required AI facts and all formal/user facts are
+   * deliberately excluded.
+   */
+  public deprecateAutomaticSystemProjection(input: {
+    readonly expectedRevision: number;
+    readonly now: string;
+  }): Result<StoryFact, StoryCoreError> {
+    if (
+      this.snapshot.status !== "temporary" ||
+      this.snapshot.origin !== "system" ||
+      this.snapshot.userConfirmed ||
+      this.snapshot.locked ||
+      this.snapshot.deprecated ||
+      this.snapshot.needsReview ||
+      this.snapshot.branchId !== null
+    ) {
+      return invalidTransition(
+        "Only an active, unreviewed disposable system projection can be retired automatically.",
+      );
+    }
     const now = validateMutation(input.expectedRevision, input.now, this.snapshot);
     if (!now.ok) {
       return now;
@@ -396,6 +618,66 @@ export class StoryFact {
       updatedAt: now.value,
     });
   }
+}
+
+export function readAmbiguousStoryFactEntityAlias(
+  snapshot: StoryFactSnapshot,
+): AmbiguousStoryFactEntityAlias | null {
+  const structuredValue = snapshot.structuredValue;
+  if (!isStoryValueRecord(structuredValue)) {
+    return null;
+  }
+  const subject = structuredValue.subject;
+  if (!isStoryValueRecord(subject)) {
+    return null;
+  }
+  if (subject.mergeStatus !== "ambiguous_confirmed_alias") {
+    return null;
+  }
+  const entityKey = subject.entityKey;
+  const matchedEntityKeys = subject.matchedEntityKeys;
+  if (
+    typeof entityKey !== "string" ||
+    entityKey.length < 1 ||
+    entityKey.length > 200 ||
+    !isBoundedUniqueStringArray(matchedEntityKeys)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    distinctEntityKey: entityKey,
+    matchedEntityKeys: Object.freeze([...matchedEntityKeys]),
+  });
+}
+
+export function storyFactNeedsEntityAliasResolution(snapshot: StoryFactSnapshot): boolean {
+  const structuredValue = snapshot.structuredValue;
+  if (!isStoryValueRecord(structuredValue)) {
+    return false;
+  }
+  const subject = structuredValue.subject;
+  return isStoryValueRecord(subject) && subject.mergeStatus === "ambiguous_confirmed_alias";
+}
+
+function isStoryValueRecord(
+  value: StoryValue | null | undefined,
+): value is Readonly<Record<string, StoryValue>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isBoundedUniqueStringArray(value: unknown): value is readonly string[] {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+  const values: readonly unknown[] = value;
+  return (
+    values.length > 0 &&
+    values.length <= 64 &&
+    values.every(
+      (item): item is string => typeof item === "string" && item.length > 0 && item.length <= 200,
+    ) &&
+    new Set(values).size === values.length
+  );
 }
 
 function validateStoryFactSnapshot(

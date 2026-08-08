@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -9,6 +10,7 @@ use futures_util::TryStreamExt;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use sha2::{Digest, Sha256};
 use sqlx::{
     sqlite::{
         SqliteConnectOptions, SqliteJournalMode, SqliteQueryResult, SqliteRow, SqliteSynchronous,
@@ -19,7 +21,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex;
 
-use crate::local_migrations::local_migrator;
+use crate::local_migrations::run_local_migrations;
 use crate::path_tickets::{
     PathTicketError, PathTicketPurpose, PathTicketReceipt, PathTicketState, TicketedPathOperation,
 };
@@ -45,6 +47,8 @@ pub(crate) struct NativeSqliteState {
     inner: Arc<Mutex<NativeSqliteBridge>>,
     transaction_idle_timeout: Duration,
     transaction_max_lifetime: Duration,
+    runtime_id: Arc<str>,
+    startup_reconciled: Arc<AtomicBool>,
 }
 
 impl Default for NativeSqliteState {
@@ -53,8 +57,383 @@ impl Default for NativeSqliteState {
             inner: Arc::new(Mutex::new(NativeSqliteBridge::default())),
             transaction_idle_timeout: TRANSACTION_IDLE_TIMEOUT,
             transaction_max_lifetime: TRANSACTION_MAX_LIFETIME,
+            runtime_id: Arc::from(random_token()),
+            startup_reconciled: Arc::new(AtomicBool::new(false)),
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NativeProjectContextChapterAuthority {
+    pub(crate) chapter_id: String,
+    pub(crate) current_version_id: String,
+    pub(crate) revision: i64,
+    pub(crate) privacy_revision: i64,
+    pub(crate) privacy_mode: String,
+    pub(crate) status: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NativeProjectContextPrivacyReceipt {
+    pub(crate) schema_version: u8,
+    pub(crate) project_id: String,
+    pub(crate) fingerprint: String,
+    pub(crate) active_chapter_count: usize,
+    pub(crate) retained_chapter_count: usize,
+    pub(crate) requires_verified_local: bool,
+    pub(crate) chapters: Vec<NativeProjectContextChapterAuthority>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum NativeModelDispatchScope {
+    NonProject {
+        reason: NativeNonProjectDispatchReason,
+    },
+    ProjectContext {
+        receipt: NativeProjectContextPrivacyReceipt,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NativeNonProjectDispatchReason {
+    CreativeOpening,
+    ConnectionProbe,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectRemoteDispatchLease {
+    pub(crate) lease_id: String,
+    pub(crate) operation_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProjectRemoteDispatchLeaseError {
+    AuthorityChanged,
+    PrivateChapterLocalOnly,
+    DatabaseBusy,
+    DatabaseUnavailable,
+}
+
+impl NativeSqliteState {
+    #[cfg(test)]
+    pub(crate) async fn test_open_migrated_database(
+        &self,
+        path: &Path,
+    ) -> Result<(), NativeSqliteError> {
+        self.inner.lock().await.open_file(path).await.map(|_| ())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_execute_internal_sql(
+        &self,
+        query: &str,
+    ) -> Result<(), NativeSqliteError> {
+        sqlx::query(query)
+            .execute(self.inner.lock().await.connection_mut()?)
+            .await
+            .map(|_| ())
+            .map_err(NativeSqliteError::from_sqlx)
+    }
+
+    pub(crate) async fn active_maintenance_session(&self) -> Result<String, NativeSqliteError> {
+        let bridge = self.inner.lock().await;
+        bridge.require_no_transaction()?;
+        bridge
+            .session_token
+            .clone()
+            .ok_or_else(NativeSqliteError::unavailable)
+    }
+
+    pub(crate) async fn acquire_project_remote_dispatch_lease(
+        &self,
+        receipt: &NativeProjectContextPrivacyReceipt,
+        operation_kind: &str,
+        operation_id: &str,
+    ) -> Result<ProjectRemoteDispatchLease, ProjectRemoteDispatchLeaseError> {
+        if !valid_project_dispatch_receipt(receipt)
+            || !matches!(operation_kind, "generation" | "embedding" | "rerank")
+            || operation_id.is_empty()
+            || operation_id.len() > 200
+        {
+            return Err(ProjectRemoteDispatchLeaseError::AuthorityChanged);
+        }
+
+        let mut bridge = self.inner.lock().await;
+        bridge
+            .require_no_transaction()
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseBusy)?;
+        let connection = bridge
+            .connection_mut()
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+        sqlx::query("PRAGMA query_only = OFF")
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseBusy)?;
+
+        let result = acquire_project_remote_dispatch_lease_in_transaction(
+            connection,
+            receipt,
+            operation_kind,
+            operation_id,
+            &self.runtime_id,
+        )
+        .await;
+        match result {
+            Ok(lease) => {
+                if sqlx::query("COMMIT")
+                    .execute(&mut *connection)
+                    .await
+                    .is_err()
+                {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                    return Err(ProjectRemoteDispatchLeaseError::DatabaseUnavailable);
+                }
+                Ok(lease)
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) async fn release_project_remote_dispatch_lease(
+        &self,
+        lease: &ProjectRemoteDispatchLease,
+    ) -> Result<(), ProjectRemoteDispatchLeaseError> {
+        let mut bridge = self.inner.lock().await;
+        bridge
+            .require_no_transaction()
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseBusy)?;
+        let result = sqlx::query(
+            "DELETE FROM project_remote_dispatch_leases WHERE lease_id = ? AND operation_id = ? AND owner_runtime_id = ?",
+        )
+        .bind(&lease.lease_id)
+        .bind(&lease.operation_id)
+        .bind(self.runtime_id.as_ref())
+        .execute(
+            bridge
+                .connection_mut()
+                .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?,
+        )
+        .await
+        .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(ProjectRemoteDispatchLeaseError::DatabaseUnavailable)
+        }
+    }
+
+    pub(crate) async fn reconcile_project_remote_dispatch_leases(
+        &self,
+        active_operation_ids: &HashSet<String>,
+    ) -> Result<u64, ProjectRemoteDispatchLeaseError> {
+        let mut bridge = self.inner.lock().await;
+        bridge
+            .require_no_transaction()
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseBusy)?;
+        let connection = bridge
+            .connection_mut()
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+        let rows = sqlx::query(
+            "SELECT lease_id, operation_id FROM project_remote_dispatch_leases
+             WHERE owner_runtime_id = ?",
+        )
+        .bind(self.runtime_id.as_ref())
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+        let mut removed = 0u64;
+        for row in rows {
+            let lease_id = row
+                .try_get::<String, _>("lease_id")
+                .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+            let operation_id = row
+                .try_get::<String, _>("operation_id")
+                .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+            if active_operation_ids.contains(&operation_id) {
+                continue;
+            }
+            removed += sqlx::query(
+                "DELETE FROM project_remote_dispatch_leases
+                 WHERE lease_id = ? AND operation_id = ? AND owner_runtime_id = ?",
+            )
+            .bind(lease_id)
+            .bind(operation_id)
+            .bind(self.runtime_id.as_ref())
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?
+            .rows_affected();
+        }
+        Ok(removed)
+    }
+
+    async fn reconcile_startup_project_remote_dispatch_leases(
+        &self,
+        connection: &mut SqliteConnection,
+    ) -> Result<(), NativeSqliteError> {
+        if self.startup_reconciled.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        // The runtime identifier is born with this process. Remove only rows
+        // owned by a previous runtime; never use age/deadline as permission to
+        // erase a lease that the current native registry may still own.
+        sqlx::query("DELETE FROM project_remote_dispatch_leases WHERE owner_runtime_id <> ?")
+            .bind(self.runtime_id.as_ref())
+            .execute(&mut *connection)
+            .await
+            .map_err(NativeSqliteError::from_sqlx)?;
+        self.startup_reconciled.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+async fn acquire_project_remote_dispatch_lease_in_transaction(
+    connection: &mut SqliteConnection,
+    receipt: &NativeProjectContextPrivacyReceipt,
+    operation_kind: &str,
+    operation_id: &str,
+    runtime_id: &str,
+) -> Result<ProjectRemoteDispatchLease, ProjectRemoteDispatchLeaseError> {
+    let project_exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE id = ?")
+        .bind(&receipt.project_id)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+    if project_exists != 1 {
+        return Err(ProjectRemoteDispatchLeaseError::AuthorityChanged);
+    }
+    let rows = sqlx::query(
+        "SELECT id, current_version_id, revision, privacy_revision, privacy_mode, status
+         FROM chapters WHERE project_id = ? ORDER BY id",
+    )
+    .bind(&receipt.project_id)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+    if rows.len() != receipt.retained_chapter_count || rows.len() != receipt.chapters.len() {
+        return Err(ProjectRemoteDispatchLeaseError::AuthorityChanged);
+    }
+    let mut active_count = 0usize;
+    let mut requires_verified_local = false;
+    for (row, expected) in rows.iter().zip(&receipt.chapters) {
+        let chapter_id = row
+            .try_get::<String, _>("id")
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+        let current_version_id = row
+            .try_get::<String, _>("current_version_id")
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+        let revision = row
+            .try_get::<i64, _>("revision")
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+        let privacy_revision = row
+            .try_get::<i64, _>("privacy_revision")
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+        let privacy_mode = row
+            .try_get::<String, _>("privacy_mode")
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+        let status = row
+            .try_get::<String, _>("status")
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+        if chapter_id != expected.chapter_id
+            || current_version_id != expected.current_version_id
+            || revision != expected.revision
+            || privacy_revision != expected.privacy_revision
+            || privacy_mode != expected.privacy_mode
+            || status != expected.status
+        {
+            return Err(ProjectRemoteDispatchLeaseError::AuthorityChanged);
+        }
+        active_count += usize::from(status == "active");
+        requires_verified_local |= privacy_mode == "local_only";
+    }
+    if active_count != receipt.active_chapter_count
+        || requires_verified_local != receipt.requires_verified_local
+        || canonical_project_context_fingerprint(receipt).as_deref()
+            != Some(receipt.fingerprint.as_str())
+    {
+        return Err(ProjectRemoteDispatchLeaseError::AuthorityChanged);
+    }
+    if requires_verified_local {
+        return Err(ProjectRemoteDispatchLeaseError::PrivateChapterLocalOnly);
+    }
+
+    let lease = ProjectRemoteDispatchLease {
+        lease_id: uuid::Uuid::now_v7().to_string(),
+        operation_id: operation_id.to_owned(),
+    };
+    sqlx::query(
+        "INSERT INTO project_remote_dispatch_leases (
+           lease_id, project_id, operation_kind, operation_id, owner_runtime_id,
+           authority_fingerprint, acquired_at, network_deadline_at
+         ) VALUES (?, ?, ?, ?, ?, ?,
+           strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+           strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+12 minutes'))",
+    )
+    .bind(&lease.lease_id)
+    .bind(&receipt.project_id)
+    .bind(operation_kind)
+    .bind(operation_id)
+    .bind(runtime_id)
+    .bind(&receipt.fingerprint)
+    .execute(&mut *connection)
+    .await
+    .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+    Ok(lease)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CanonicalProjectContext<'a> {
+    schema_version: u8,
+    project_id: &'a str,
+    chapters: &'a [NativeProjectContextChapterAuthority],
+}
+
+pub(crate) fn canonical_project_context_fingerprint(
+    receipt: &NativeProjectContextPrivacyReceipt,
+) -> Option<String> {
+    let canonical = serde_json::to_vec(&CanonicalProjectContext {
+        schema_version: 1,
+        project_id: &receipt.project_id,
+        chapters: &receipt.chapters,
+    })
+    .ok()?;
+    let digest = Sha256::digest(canonical);
+    Some(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn valid_project_dispatch_receipt(receipt: &NativeProjectContextPrivacyReceipt) -> bool {
+    receipt.schema_version == 1
+        && receipt.project_id.len() == 36
+        && receipt.fingerprint.len() == 64
+        && receipt
+            .fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        && receipt.retained_chapter_count == receipt.chapters.len()
+        && receipt
+            .chapters
+            .windows(2)
+            .all(|pair| pair[0].chapter_id < pair[1].chapter_id)
+        && receipt.chapters.iter().all(|chapter| {
+            chapter.chapter_id.len() == 36
+                && chapter.current_version_id.len() == 36
+                && chapter.revision >= 1
+                && chapter.privacy_revision >= 1
+                && matches!(chapter.privacy_mode.as_str(), "standard" | "local_only")
+                && matches!(chapter.status.as_str(), "active" | "trashed")
+        })
 }
 
 #[derive(Default)]
@@ -174,6 +553,14 @@ impl NativeSqliteError {
         )
     }
 
+    fn remote_dispatch_active() -> Self {
+        Self::new(
+            "PROJECT_REMOTE_DISPATCH_ACTIVE",
+            "This project is still sending context to the selected AI. Cancel that task or wait for it to finish before enabling local-only privacy or restoring a backup.",
+            true,
+        )
+    }
+
     fn migration_integrity_failed() -> Self {
         Self::new(
             "SQLITE_MIGRATION_INTEGRITY_FAILED",
@@ -191,6 +578,13 @@ impl NativeSqliteError {
     }
 
     fn from_sqlx(error: sqlx::Error) -> Self {
+        if matches!(
+            &error,
+            sqlx::Error::Database(database_error)
+                if database_error.message().contains("INKSHADOW_REMOTE_DISPATCH_ACTIVE")
+        ) {
+            return Self::remote_dispatch_active();
+        }
         let extended_code = match &error {
             sqlx::Error::Database(database_error) => database_error
                 .code()
@@ -305,7 +699,21 @@ pub(crate) async fn native_sqlite_open(
     let path = directory.join(DATABASE_FILE_NAME);
 
     let mut bridge = state.inner.lock().await;
+    if bridge.connection.is_some() {
+        return Err(NativeSqliteError::new(
+            "SQLITE_ALREADY_OPEN",
+            "The local database is already open in this runtime.",
+            false,
+        ));
+    }
     let receipt = bridge.open_file(&path).await?;
+    // A previous process cannot still own a native request: the desktop app is
+    // single-instance and this runs before the WebView receives its database
+    // session. Remove crash-orphaned leases before any privacy mutation is
+    // accepted in the new runtime.
+    state
+        .reconcile_startup_project_remote_dispatch_leases(bridge.connection_mut()?)
+        .await?;
     path_tickets.inner.lock().await.clear();
     Ok(receipt)
 }
@@ -347,6 +755,9 @@ pub(crate) async fn native_sqlite_execute(
     bridge.require_session(&session_token)?;
 
     let maintenance = MaintenanceStatement::classify(&query);
+    if maintenance == MaintenanceStatement::AttachRestoreSource {
+        bridge.ensure_no_project_remote_dispatch_leases().await?;
+    }
     let ticket_operation = match maintenance {
         MaintenanceStatement::VacuumInto => Some(TicketedPathOperation::VacuumInto),
         MaintenanceStatement::AttachRestoreSource => {
@@ -511,6 +922,7 @@ pub(crate) async fn native_sqlite_close(
 ) -> Result<(), NativeSqliteError> {
     let mut bridge = state.inner.lock().await;
     bridge.require_session(&session_token)?;
+    bridge.ensure_no_project_remote_dispatch_leases().await?;
     let result = bridge.close().await;
     path_tickets
         .inner
@@ -691,7 +1103,7 @@ impl NativeSqliteBridge {
             let _ = connection.close().await;
             return Err(mapped);
         }
-        if let Err(error) = local_migrator().run_direct(&mut connection).await {
+        if let Err(error) = run_local_migrations(&mut connection).await {
             let mapped = NativeSqliteError::from_migrate(error);
             let _ = connection.close().await;
             return Err(mapped);
@@ -932,6 +1344,19 @@ impl NativeSqliteBridge {
         match same_file::is_same_file(&source, expected) {
             Ok(true) => Ok(()),
             Ok(false) | Err(_) => Err(NativeSqliteError::invalid_request()),
+        }
+    }
+
+    async fn ensure_no_project_remote_dispatch_leases(&mut self) -> Result<(), NativeSqliteError> {
+        let active =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM project_remote_dispatch_leases")
+                .fetch_one(self.connection_mut()?)
+                .await
+                .map_err(NativeSqliteError::from_sqlx)?;
+        if active > 0 {
+            Err(NativeSqliteError::remote_dispatch_active())
+        } else {
+            Ok(())
         }
     }
 
@@ -1379,6 +1804,12 @@ fn validate_sql(query: &str, read: bool) -> Result<(), NativeSqliteError> {
         return Err(NativeSqliteError::invalid_request());
     }
     ensure_single_statement(query)?;
+    if contains_protected_sql_identifier_prefix(query, "project_remote_dispatch_") {
+        // This table is a native network-lifetime capability, not application
+        // data. The renderer may neither observe nor mutate it through the SQL
+        // bridge; native gateway methods use the pinned connection directly.
+        return Err(NativeSqliteError::invalid_request());
+    }
 
     let normalized = strip_leading_space_and_comments(query);
     let lower = normalized.to_ascii_lowercase();
@@ -1418,6 +1849,101 @@ fn validate_sql(query: &str, read: bool) -> Result<(), NativeSqliteError> {
             _ => Ok(()),
         }
     }
+}
+
+fn contains_protected_sql_identifier_prefix(sql: &str, protected_prefix: &str) -> bool {
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum Mode {
+        Plain,
+        LineComment,
+        BlockComment,
+    }
+
+    let bytes = sql.as_bytes();
+    let mut index = 0usize;
+    let mut mode = Mode::Plain;
+    while index < bytes.len() {
+        match mode {
+            Mode::LineComment => {
+                if bytes[index] == b'\n' {
+                    mode = Mode::Plain;
+                }
+                index += 1;
+            }
+            Mode::BlockComment => {
+                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    mode = Mode::Plain;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            Mode::Plain => {
+                if bytes[index] == b'-' && bytes.get(index + 1) == Some(&b'-') {
+                    mode = Mode::LineComment;
+                    index += 2;
+                    continue;
+                }
+                if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                    mode = Mode::BlockComment;
+                    index += 2;
+                    continue;
+                }
+                let (end, token) = match bytes[index] {
+                    b'"' | b'`' | b'\'' => {
+                        let quote = bytes[index];
+                        let mut cursor = index + 1;
+                        let mut token = Vec::new();
+                        while cursor < bytes.len() {
+                            if bytes[cursor] == quote {
+                                if bytes.get(cursor + 1) == Some(&quote) {
+                                    token.push(quote);
+                                    cursor += 2;
+                                    continue;
+                                }
+                                cursor += 1;
+                                break;
+                            }
+                            token.push(bytes[cursor]);
+                            cursor += 1;
+                        }
+                        (cursor, token)
+                    }
+                    b'[' => {
+                        let mut cursor = index + 1;
+                        let mut token = Vec::new();
+                        while cursor < bytes.len() && bytes[cursor] != b']' {
+                            token.push(bytes[cursor]);
+                            cursor += 1;
+                        }
+                        (cursor.saturating_add(1).min(bytes.len()), token)
+                    }
+                    byte if byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' => {
+                        let mut cursor = index + 1;
+                        while cursor < bytes.len()
+                            && (bytes[cursor].is_ascii_alphanumeric()
+                                || matches!(bytes[cursor], b'_' | b'$'))
+                        {
+                            cursor += 1;
+                        }
+                        (cursor, bytes[index..cursor].to_vec())
+                    }
+                    _ => {
+                        index += 1;
+                        continue;
+                    }
+                };
+                if token.len() >= protected_prefix.len()
+                    && token[..protected_prefix.len()]
+                        .eq_ignore_ascii_case(protected_prefix.as_bytes())
+                {
+                    return true;
+                }
+                index = end;
+            }
+        }
+    }
+    false
 }
 
 fn is_exact_database_list_pragma(query: &str) -> bool {
@@ -1955,6 +2481,133 @@ mod tests {
         NativeSqlValue::Integer { value }
     }
 
+    async fn open_migrated_state(directory: &TestDirectory) -> (NativeSqliteState, String) {
+        let state = NativeSqliteState::default();
+        let receipt = state
+            .inner
+            .lock()
+            .await
+            .open_file(&directory.path().join("dispatch-lease.db"))
+            .await
+            .expect("open fully migrated dispatch database");
+        (state, receipt.session_token)
+    }
+
+    fn dispatch_receipt(
+        project_id: &str,
+        chapters: Vec<NativeProjectContextChapterAuthority>,
+    ) -> NativeProjectContextPrivacyReceipt {
+        let mut receipt = NativeProjectContextPrivacyReceipt {
+            schema_version: 1,
+            project_id: project_id.to_owned(),
+            fingerprint: String::new(),
+            active_chapter_count: chapters
+                .iter()
+                .filter(|chapter| chapter.status == "active")
+                .count(),
+            retained_chapter_count: chapters.len(),
+            requires_verified_local: chapters
+                .iter()
+                .any(|chapter| chapter.privacy_mode == "local_only"),
+            chapters,
+        };
+        receipt.fingerprint =
+            canonical_project_context_fingerprint(&receipt).expect("canonical fingerprint");
+        receipt
+    }
+
+    #[test]
+    fn canonical_project_context_fingerprint_matches_cross_language_golden() {
+        let receipt = NativeProjectContextPrivacyReceipt {
+            schema_version: 1,
+            project_id: "019f9f4a-b3c7-7350-9226-000000000001".to_owned(),
+            fingerprint: String::new(),
+            active_chapter_count: 1,
+            retained_chapter_count: 2,
+            requires_verified_local: true,
+            chapters: vec![
+                NativeProjectContextChapterAuthority {
+                    chapter_id: "019f9f4a-b3c7-7350-9226-000000000002".to_owned(),
+                    current_version_id: "019f9f4a-b3c7-7350-9226-000000000004".to_owned(),
+                    revision: 2,
+                    privacy_revision: 3,
+                    privacy_mode: "standard".to_owned(),
+                    status: "active".to_owned(),
+                },
+                NativeProjectContextChapterAuthority {
+                    chapter_id: "019f9f4a-b3c7-7350-9226-000000000003".to_owned(),
+                    current_version_id: "019f9f4a-b3c7-7350-9226-000000000005".to_owned(),
+                    revision: 7,
+                    privacy_revision: 8,
+                    privacy_mode: "local_only".to_owned(),
+                    status: "trashed".to_owned(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            canonical_project_context_fingerprint(&receipt).as_deref(),
+            Some("753e6be487ad58ca9953b20d3e27a8cbc4c27fcba281cffa557e074040520ee3")
+        );
+    }
+
+    async fn seed_dispatch_project(
+        state: &NativeSqliteState,
+        project_id: &str,
+        chapter_id: Option<&str>,
+        version_id: Option<&str>,
+        privacy_mode: &str,
+    ) {
+        let mut bridge = state.inner.lock().await;
+        let connection = bridge.connection_mut().expect("migrated connection");
+        sqlx::query("BEGIN")
+            .execute(&mut *connection)
+            .await
+            .expect("begin seed");
+        sqlx::query(
+            "INSERT INTO projects (id, name, created_at, updated_at)
+             VALUES (?, ?, '2026-08-08T00:00:00.000Z', '2026-08-08T00:00:00.000Z')",
+        )
+        .bind(project_id)
+        .bind(project_id)
+        .execute(&mut *connection)
+        .await
+        .expect("seed project");
+        if let (Some(chapter_id), Some(version_id)) = (chapter_id, version_id) {
+            sqlx::query(
+                "INSERT INTO chapters (
+                   id, project_id, title, content, current_version_id,
+                   created_at, updated_at, privacy_mode, privacy_revision
+                 ) VALUES (?, ?, 'Chapter', '', ?,
+                   '2026-08-08T00:00:00.000Z', '2026-08-08T00:00:00.000Z', ?, 1)",
+            )
+            .bind(chapter_id)
+            .bind(project_id)
+            .bind(version_id)
+            .bind(privacy_mode)
+            .execute(&mut *connection)
+            .await
+            .expect("seed chapter");
+            sqlx::query(
+                "INSERT INTO chapter_versions (
+                   id, project_id, chapter_id, sequence, reason, content,
+                   content_checksum, created_at
+                 ) VALUES (?, ?, ?, 1, 'created', '', ?, '2026-08-08T00:00:00.000Z')",
+            )
+            .bind(version_id)
+            .bind(project_id)
+            .bind(chapter_id)
+            .bind("a".repeat(64))
+            .execute(&mut *connection)
+            .await
+            .expect("seed version");
+        }
+        sqlx::query("COMMIT")
+            .execute(&mut *connection)
+            .await
+            .expect("commit seed");
+    }
+
     #[test]
     fn maps_busy_and_disk_full_extended_codes_without_exposing_engine_text() {
         let busy = NativeSqliteError::from_sqlite_extended_code(Some(5));
@@ -2043,6 +2696,299 @@ mod tests {
                 "retryable": false
             })
         );
+    }
+
+    #[tokio::test]
+    async fn remote_dispatch_lease_binds_exact_authority_and_blocks_privacy_taint() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000001";
+        const CHAPTER_ID: &str = "019f9f4a-b3c7-7350-9226-000000000002";
+        const VERSION_ID: &str = "019f9f4a-b3c7-7350-9226-000000000003";
+        let directory = TestDirectory::create();
+        let (state, _) = open_migrated_state(&directory).await;
+        seed_dispatch_project(
+            &state,
+            PROJECT_ID,
+            Some(CHAPTER_ID),
+            Some(VERSION_ID),
+            "standard",
+        )
+        .await;
+        let receipt = dispatch_receipt(
+            PROJECT_ID,
+            vec![NativeProjectContextChapterAuthority {
+                chapter_id: CHAPTER_ID.to_owned(),
+                current_version_id: VERSION_ID.to_owned(),
+                revision: 1,
+                privacy_revision: 1,
+                privacy_mode: "standard".to_owned(),
+                status: "active".to_owned(),
+            }],
+        );
+
+        let lease = state
+            .acquire_project_remote_dispatch_lease(&receipt, "generation", "generation-1")
+            .await
+            .expect("exact authority acquires a lease");
+        let mut bridge = state.inner.lock().await;
+        sqlx::query(
+            "UPDATE chapters SET content = 'autosave', revision = revision + 1 WHERE id = ?",
+        )
+        .bind(CHAPTER_ID)
+        .execute(bridge.connection_mut().expect("connection"))
+        .await
+        .expect("ordinary content writes remain available");
+        let error = sqlx::query("UPDATE chapters SET privacy_mode = 'local_only' WHERE id = ?")
+            .bind(CHAPTER_ID)
+            .execute(bridge.connection_mut().expect("connection"))
+            .await
+            .expect_err("privacy taint must wait for the network future");
+        assert_eq!(
+            NativeSqliteError::from_sqlx(error).code,
+            "PROJECT_REMOTE_DISPATCH_ACTIVE"
+        );
+        let maintenance_error = bridge
+            .ensure_no_project_remote_dispatch_leases()
+            .await
+            .expect_err("restore and close must wait for the full network future");
+        assert_eq!(maintenance_error.code, "PROJECT_REMOTE_DISPATCH_ACTIVE");
+        drop(bridge);
+
+        state
+            .release_project_remote_dispatch_lease(&lease)
+            .await
+            .expect("release exact lease");
+    }
+
+    #[tokio::test]
+    async fn two_connections_close_both_w_before_l_and_l_before_w_races() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000031";
+        const CHAPTER_ID: &str = "019f9f4a-b3c7-7350-9226-000000000032";
+        const VERSION_ID: &str = "019f9f4a-b3c7-7350-9226-000000000033";
+        let directory = TestDirectory::create();
+        let database_path = directory.path().join("dispatch-lease.db");
+        let (state, _) = open_migrated_state(&directory).await;
+        seed_dispatch_project(
+            &state,
+            PROJECT_ID,
+            Some(CHAPTER_ID),
+            Some(VERSION_ID),
+            "standard",
+        )
+        .await;
+        let receipt = dispatch_receipt(
+            PROJECT_ID,
+            vec![NativeProjectContextChapterAuthority {
+                chapter_id: CHAPTER_ID.to_owned(),
+                current_version_id: VERSION_ID.to_owned(),
+                revision: 1,
+                privacy_revision: 1,
+                privacy_mode: "standard".to_owned(),
+                status: "active".to_owned(),
+            }],
+        );
+        let mut writer = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&database_path)
+                .create_if_missing(false)
+                .foreign_keys(true)
+                .journal_mode(SqliteJournalMode::Wal)
+                .busy_timeout(Duration::from_secs(1)),
+        )
+        .await
+        .expect("open independent writer connection");
+
+        // W before L: acquisition recomputes authority after the committed
+        // privacy write and therefore cannot dispatch the stale receipt.
+        sqlx::query("UPDATE chapters SET privacy_mode = 'local_only' WHERE id = ?")
+            .bind(CHAPTER_ID)
+            .execute(&mut writer)
+            .await
+            .expect("privacy write wins before lease");
+        assert_eq!(
+            state
+                .acquire_project_remote_dispatch_lease(&receipt, "generation", "w-before-l")
+                .await
+                .expect_err("stale standard authority must not acquire"),
+            ProjectRemoteDispatchLeaseError::AuthorityChanged
+        );
+        sqlx::query("UPDATE chapters SET privacy_mode = 'standard' WHERE id = ?")
+            .bind(CHAPTER_ID)
+            .execute(&mut writer)
+            .await
+            .expect("restore standard fixture");
+
+        // L before W: BEGIN IMMEDIATE commits the durable barrier before the
+        // network future starts, so the independent writer hits the trigger.
+        let lease = state
+            .acquire_project_remote_dispatch_lease(&receipt, "generation", "l-before-w")
+            .await
+            .expect("lease wins before privacy write");
+        let blocked = sqlx::query("UPDATE chapters SET privacy_mode = 'local_only' WHERE id = ?")
+            .bind(CHAPTER_ID)
+            .execute(&mut writer)
+            .await
+            .expect_err("active lease must reject the losing privacy write");
+        assert!(blocked
+            .as_database_error()
+            .is_some_and(|error| error.message().contains("INKSHADOW_REMOTE_DISPATCH_ACTIVE")));
+        sqlx::query("UPDATE chapters SET content = 'still editable' WHERE id = ?")
+            .bind(CHAPTER_ID)
+            .execute(&mut writer)
+            .await
+            .expect("ordinary正文 write remains available during dispatch");
+        state
+            .release_project_remote_dispatch_lease(&lease)
+            .await
+            .expect("release winning lease");
+        sqlx::query("UPDATE chapters SET privacy_mode = 'local_only' WHERE id = ?")
+            .bind(CHAPTER_ID)
+            .execute(&mut writer)
+            .await
+            .expect("delayed privacy change succeeds after release");
+    }
+
+    #[tokio::test]
+    async fn remote_dispatch_authority_fails_closed_but_allows_an_existing_empty_project() {
+        const EMPTY_PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000011";
+        const MISSING_PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000012";
+        let directory = TestDirectory::create();
+        let (state, _) = open_migrated_state(&directory).await;
+        seed_dispatch_project(&state, EMPTY_PROJECT_ID, None, None, "standard").await;
+
+        let empty = dispatch_receipt(EMPTY_PROJECT_ID, vec![]);
+        let lease = state
+            .acquire_project_remote_dispatch_lease(&empty, "embedding", "embedding-1")
+            .await
+            .expect("an existing empty project is a legal project context");
+        state
+            .release_project_remote_dispatch_lease(&lease)
+            .await
+            .expect("release empty project lease");
+
+        let missing = dispatch_receipt(MISSING_PROJECT_ID, vec![]);
+        assert_eq!(
+            state
+                .acquire_project_remote_dispatch_lease(&missing, "rerank", "rerank-1")
+                .await
+                .expect_err("a nonexistent project must fail closed"),
+            ProjectRemoteDispatchLeaseError::AuthorityChanged
+        );
+        let mut changed = empty.clone();
+        changed.fingerprint = "0".repeat(64);
+        assert_eq!(
+            state
+                .acquire_project_remote_dispatch_lease(&changed, "generation", "generation-2")
+                .await
+                .expect_err("a forged fingerprint must fail closed"),
+            ProjectRemoteDispatchLeaseError::AuthorityChanged
+        );
+    }
+
+    #[tokio::test]
+    async fn reconciliation_removes_only_operations_proven_inactive_by_native_registry() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000021";
+        let directory = TestDirectory::create();
+        let (state, _) = open_migrated_state(&directory).await;
+        seed_dispatch_project(&state, PROJECT_ID, None, None, "standard").await;
+        let receipt = dispatch_receipt(PROJECT_ID, vec![]);
+        state
+            .acquire_project_remote_dispatch_lease(&receipt, "generation", "generation-live")
+            .await
+            .expect("acquire live lease");
+        state
+            .acquire_project_remote_dispatch_lease(&receipt, "embedding", "embedding-ended")
+            .await
+            .expect("acquire ended lease");
+
+        let active = HashSet::from(["generation-live".to_owned()]);
+        assert_eq!(
+            state
+                .reconcile_project_remote_dispatch_leases(&active)
+                .await
+                .expect("reconcile leases"),
+            1
+        );
+        let mut bridge = state.inner.lock().await;
+        let remaining = sqlx::query_scalar::<_, String>(
+            "SELECT operation_id FROM project_remote_dispatch_leases",
+        )
+        .fetch_all(bridge.connection_mut().expect("connection"))
+        .await
+        .expect("list remaining leases");
+        assert_eq!(remaining, vec!["generation-live"]);
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_removes_old_owners_once_without_touching_current_owner() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000041";
+        let directory = TestDirectory::create();
+        let (state, _) = open_migrated_state(&directory).await;
+        seed_dispatch_project(&state, PROJECT_ID, None, None, "standard").await;
+        let mut bridge = state.inner.lock().await;
+        let connection = bridge.connection_mut().expect("connection");
+        for (lease_id, operation_id, owner) in [
+            (
+                "019f9f4a-b3c7-7350-9226-000000000042",
+                "old-operation",
+                "previous-runtime-owner",
+            ),
+            (
+                "019f9f4a-b3c7-7350-9226-000000000043",
+                "current-operation",
+                state.runtime_id.as_ref(),
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO project_remote_dispatch_leases (
+                   lease_id, project_id, operation_kind, operation_id, owner_runtime_id,
+                   authority_fingerprint, acquired_at, network_deadline_at
+                 ) VALUES (?, ?, 'generation', ?, ?, ?,
+                   '2026-08-08T00:00:00.000Z', '2026-08-08T00:12:00.000Z')",
+            )
+            .bind(lease_id)
+            .bind(PROJECT_ID)
+            .bind(operation_id)
+            .bind(owner)
+            .bind("a".repeat(64))
+            .execute(&mut *connection)
+            .await
+            .expect("seed startup lease");
+        }
+        state
+            .reconcile_startup_project_remote_dispatch_leases(connection)
+            .await
+            .expect("first startup reconciliation");
+        let remaining = sqlx::query_scalar::<_, String>(
+            "SELECT operation_id FROM project_remote_dispatch_leases ORDER BY operation_id",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .expect("remaining startup leases");
+        assert_eq!(remaining, vec!["current-operation"]);
+
+        sqlx::query(
+            "INSERT INTO project_remote_dispatch_leases (
+               lease_id, project_id, operation_kind, operation_id, owner_runtime_id,
+               authority_fingerprint, acquired_at, network_deadline_at
+             ) VALUES (?, ?, 'generation', 'late-old-operation', 'previous-runtime-owner', ?,
+               '2026-08-08T00:00:00.000Z', '2026-08-08T00:12:00.000Z')",
+        )
+        .bind("019f9f4a-b3c7-7350-9226-000000000044")
+        .bind(PROJECT_ID)
+        .bind("a".repeat(64))
+        .execute(&mut *connection)
+        .await
+        .expect("seed row after first open");
+        state
+            .reconcile_startup_project_remote_dispatch_leases(connection)
+            .await
+            .expect("repeated open reconciliation is a no-op");
+        let count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM project_remote_dispatch_leases")
+                .fetch_one(&mut *connection)
+                .await
+                .expect("count repeated-open leases");
+        assert_eq!(count, 2);
     }
 
     #[tokio::test]
@@ -2688,6 +3634,69 @@ mod tests {
             unknown.get("file"),
             Some(&JsonValue::from("native://redacted"))
         );
+    }
+
+    #[tokio::test]
+    async fn renderer_sql_cannot_observe_or_mutate_native_dispatch_leases() {
+        let (mut bridge, session) = open_memory().await;
+        for query in [
+            "SELECT * FROM project_remote_dispatch_leases",
+            "select * from main.\"PROJECT_REMOTE_DISPATCH_LEASES\"",
+            "EXPLAIN SELECT * FROM [project_remote_dispatch_leases]",
+            "DELETE FROM /* guarded */ `project_remote_dispatch_leases`",
+            "WITH target AS (SELECT lease_id FROM project_remote_dispatch_leases) SELECT * FROM target",
+            "WITH target AS (SELECT 1) DELETE FROM project_remote_dispatch_leases",
+            "DROP TABLE project_remote_dispatch_leases",
+            "DrOp TrIgGeR \"PROJECT_REMOTE_DISPATCH_PRIVATE_CHAPTER_UPDATE_GUARD\"",
+            "DROP INDEX [project_remote_dispatch_leases_project_idx]",
+        ] {
+            let error = if query
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("select")
+                || query.trim_start().to_ascii_lowercase().starts_with("explain")
+                || (query.trim_start().to_ascii_lowercase().starts_with("with")
+                    && query.to_ascii_lowercase().contains(" select * from target"))
+            {
+                bridge
+                    .select(&session, query, vec![])
+                    .await
+                    .expect_err("protected lease read must be rejected")
+            } else {
+                bridge
+                    .execute(&session, query, vec![])
+                    .await
+                    .expect_err("protected lease mutation must be rejected")
+            };
+            assert_eq!(error.code, "SQLITE_REQUEST_INVALID", "query: {query}");
+        }
+        bridge
+            .select(
+                &session,
+                "SELECT 1 AS value /* project_remote_dispatch_leases */",
+                vec![],
+            )
+            .await
+            .expect("comments do not create an identifier");
+
+        let transaction = bridge
+            .begin(&session, false)
+            .await
+            .expect("begin transaction");
+        let error = bridge
+            .transaction_execute(
+                &session,
+                &transaction,
+                "DeLeTe FROM 'project_remote_dispatch_leases'",
+                vec![],
+            )
+            .await
+            .expect_err("transaction path must enforce the same protected table boundary");
+        assert_eq!(error.code, "SQLITE_REQUEST_INVALID");
+        bridge
+            .finish_transaction(&session, &transaction, false)
+            .await
+            .expect("rollback test transaction");
     }
 
     #[test]

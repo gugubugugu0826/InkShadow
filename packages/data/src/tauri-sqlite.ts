@@ -155,14 +155,23 @@ export class TauriSqliteExecutor implements SqlExecutor {
         return;
       }
       try {
+        // Reconciliation can remove only this process's durable leases whose
+        // operation is absent from the native-only live-future registry.
+        await invoke("reconcile_native_model_dispatch_leases");
         await invoke("native_sqlite_close", {
           sessionToken: this.sessionToken,
         });
-      } finally {
-        // Native close is itself fail-closed: even an error can mean the
-        // connection was invalidated after rollback/close recovery failed.
         this.closed = true;
         executorLifecycle = "closed";
+      } catch (error: unknown) {
+        if (!isRemoteDispatchActiveError(error)) {
+          // Preserve the established fail-closed behavior for uncertain native
+          // close failures. An active dispatch is different: native explicitly
+          // proves the connection is still valid and must remain open.
+          this.closed = true;
+          executorLifecycle = "closed";
+        }
+        throw error;
       }
     });
   }
@@ -381,6 +390,15 @@ export class TauriSqliteExecutor implements SqlExecutor {
       throw new Error("The InkShadow local database is closed.");
     }
   }
+}
+
+function isRemoteDispatchActiveError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "PROJECT_REMOTE_DISPATCH_ACTIVE"
+  );
 }
 
 function encodeBindValues(values: readonly SqlPrimitive[]): NativeSqlValue[] {

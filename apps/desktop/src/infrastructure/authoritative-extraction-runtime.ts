@@ -152,6 +152,7 @@ export interface CreateAuthoritativeExtractionDesktopRuntimeOptions {
   readonly goldenSuite?: AuthoritativeExtractionGoldenSuite;
   readonly executionMode: AuthoritativeExtractionExecutionMode;
   readonly workerId?: string;
+  readonly captureProjectContextAuthority?: (projectId: string) => Promise<() => Promise<void>>;
 }
 
 export function createAuthoritativeExtractionDesktopRuntime(
@@ -200,6 +201,9 @@ export function createAuthoritativeExtractionDesktopRuntime(
     clock: options.clock,
     ids: options.ids,
     workerId: options.workerId ?? "authoritative.extraction.desktop",
+    ...(options.captureProjectContextAuthority === undefined
+      ? {}
+      : { captureProjectContextAuthority: options.captureProjectContextAuthority }),
   });
   const decisions = new AuthoritativeExtractionReviewCoordinator({
     extraction: repository,

@@ -24,7 +24,6 @@ describe("Model Hub image generation service", () => {
     const harness = createHarness();
     const entry = await seedTarget(harness.modelHub, {});
     await saveRoute(harness.modelHub, entry.id);
-
     const inspection = await harness.service.inspect();
 
     expect(inspection).toMatchObject({
@@ -45,6 +44,7 @@ describe("Model Hub image generation service", () => {
     const harness = createHarness();
     const entry = await seedTarget(harness.modelHub, {});
     await saveRoute(harness.modelHub, entry.id);
+    const inspection = await harness.service.inspect();
     const start = vi.spyOn(harness.modelHub, "startInvocation");
     const finish = vi.spyOn(harness.modelHub, "finishInvocation");
     harness.gateway.generateToFile.mockResolvedValue({
@@ -61,6 +61,7 @@ describe("Model Hub image generation service", () => {
       prompt: PRIVATE_PROMPT,
       destination: { ticket: "c".repeat(64), fileName: "cover.png" },
       acknowledgedCostAndPrivacy: true,
+      expectedConfirmationFingerprint: inspection.confirmationFingerprint,
     });
 
     expect(harness.gateway.generateToFile).toHaveBeenCalledWith({
@@ -108,6 +109,29 @@ describe("Model Hub image generation service", () => {
     expect(ledger).not.toContain("https://images.example/v1");
   });
 
+  it("does not send the prompt when the connection is disabled during invocation setup", async () => {
+    const harness = createHarness();
+    const entry = await seedTarget(harness.modelHub, {});
+    await saveRoute(harness.modelHub, entry.id);
+    const inspection = await harness.service.inspect();
+    const startInvocation = harness.modelHub.startInvocation.bind(harness.modelHub);
+    vi.spyOn(harness.modelHub, "startInvocation").mockImplementationOnce(async (input) => {
+      const invocation = await startInvocation(input);
+      await disableConnection(harness.modelHub, "image-connection");
+      return invocation;
+    });
+
+    await expect(
+      harness.service.generate({
+        prompt: PRIVATE_PROMPT,
+        destination: { ticket: "f".repeat(64), fileName: "image.png" },
+        acknowledgedCostAndPrivacy: true,
+        expectedConfirmationFingerprint: inspection.confirmationFingerprint,
+      }),
+    ).rejects.toMatchObject({ dispatched: false });
+    expect(harness.gateway.generateToFile).not.toHaveBeenCalled();
+  });
+
   it("blocks unknown capability, unsupported protocols and absent consent before dispatch", async () => {
     const missingEvidence = createHarness();
     const unknown = await seedTarget(missingEvidence.modelHub, { capability: false });
@@ -137,6 +161,7 @@ describe("Model Hub image generation service", () => {
         prompt: PRIVATE_PROMPT,
         destination: { ticket: "d".repeat(64), fileName: "image.png" },
         acknowledgedCostAndPrivacy: false,
+        expectedConfirmationFingerprint: "0".repeat(64),
       }),
     ).rejects.toMatchObject({ code: "MODEL_HUB_IMAGE_CONSENT_REQUIRED", dispatched: false });
     expect(noConsent.gateway.generateToFile).not.toHaveBeenCalled();
@@ -175,6 +200,42 @@ describe("Model Hub image generation service", () => {
     expect(harness.gateway.generateToFile).not.toHaveBeenCalled();
   });
 
+  it("requires a fresh confirmation when the inspected route changes and makes zero gateway calls", async () => {
+    const harness = createHarness();
+    const entry = await seedTarget(harness.modelHub, {});
+    const route = await saveRoute(harness.modelHub, entry.id);
+    const inspection = await harness.service.inspect();
+    const start = vi.spyOn(harness.modelHub, "startInvocation");
+    await harness.modelHub.saveTaskRoute({
+      task: route.task,
+      primaryCatalogEntryId: route.primaryCatalogEntryId,
+      fallbackCatalogEntryId: route.fallbackCatalogEntryId,
+      presetId: route.presetId,
+      parameterPolicy: { imageStyle: "natural" },
+      maximumCostMicros: route.maximumCostMicros,
+      currency: route.currency,
+      privacyPolicy: route.privacyPolicy,
+      failurePolicy: route.failurePolicy,
+      routeOrigin: route.routeOrigin,
+      enabled: route.enabled,
+      expectedRevision: route.revision,
+    });
+
+    await expect(
+      harness.service.generate({
+        prompt: PRIVATE_PROMPT,
+        destination: { ticket: "a".repeat(64), fileName: "image.png" },
+        acknowledgedCostAndPrivacy: true,
+        expectedConfirmationFingerprint: inspection.confirmationFingerprint,
+      }),
+    ).rejects.toMatchObject({
+      code: "MODEL_HUB_IMAGE_CONFIRMATION_STALE",
+      dispatched: false,
+    });
+    expect(harness.gateway.generateToFile).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it("does not retry a fallback after dispatch and records a content-free failure", async () => {
     const harness = createHarness();
     const primary = await seedTarget(harness.modelHub, {});
@@ -184,6 +245,7 @@ describe("Model Hub image generation service", () => {
       modelId: "fallback-image-model",
     });
     await saveRoute(harness.modelHub, primary.id, fallback.id);
+    const inspection = await harness.service.inspect();
     harness.gateway.generateToFile.mockRejectedValue({
       code: "MODEL_HTTP_RATE_LIMITED",
       retryable: true,
@@ -196,6 +258,7 @@ describe("Model Hub image generation service", () => {
         prompt: PRIVATE_PROMPT,
         destination: { ticket: "e".repeat(64), fileName: "image.png" },
         acknowledgedCostAndPrivacy: true,
+        expectedConfirmationFingerprint: inspection.confirmationFingerprint,
       }),
     ).rejects.toMatchObject({ code: "MODEL_HTTP_RATE_LIMITED", dispatched: true });
     expect(harness.gateway.generateToFile).toHaveBeenCalledOnce();
@@ -252,7 +315,7 @@ async function seedTarget(
     ...(providerKind === "custom_openai_compatible"
       ? { baseUrlOverride: "https://images.example/v1" }
       : {}),
-    credentialRef: `keyring:${connectionId}`,
+    credentialRef: `keyring:model-hub:${connectionId}`,
     credentialState: "present",
     expectedRevision: null,
   });
@@ -306,6 +369,28 @@ async function seedTarget(
     expectedRevision: null,
   });
   return entry;
+}
+
+async function disableConnection(modelHub: ModelHubStore, connectionId: string): Promise<void> {
+  const connection = await modelHub.findConnection(connectionId);
+  if (connection === null) throw new Error("test connection missing");
+  await modelHub.saveConnection({
+    id: connection.id,
+    providerKind: connection.providerKind,
+    displayName: connection.displayName,
+    baseUrlOverride: connection.baseUrl,
+    credentialRef: connection.credentialRef,
+    credentialState: connection.credentialState,
+    authenticationMode: connection.authenticationMode,
+    credentialHeaderName: connection.credentialHeaderName,
+    modelDiscoveryPath: connection.modelDiscoveryPath,
+    textGenerationPath: connection.textGenerationPath,
+    embeddingPath: connection.embeddingPath,
+    requestTimeoutMs: connection.requestTimeoutMs,
+    retryLimit: connection.retryLimit,
+    enabled: false,
+    expectedRevision: connection.revision,
+  });
 }
 
 function saveRoute(

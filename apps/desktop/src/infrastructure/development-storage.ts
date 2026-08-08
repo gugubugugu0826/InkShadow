@@ -1,6 +1,7 @@
 import type {
   AcceptCandidateCommit,
   AiCandidateRepository,
+  ChapterPrivacyRepository,
   ChapterRepository,
   ChapterVersionRepository,
   ContentCommitRepository,
@@ -82,6 +83,7 @@ export interface DevelopmentAiCandidateRepository extends AiCandidateRepository 
 export interface DevelopmentRepositories {
   readonly projects: ProjectRepository;
   readonly chapters: ChapterRepository;
+  readonly chapterPrivacy: ChapterPrivacyRepository;
   readonly chapterVersions: ChapterVersionRepository;
   readonly recoveryDrafts: RecoveryDraftRepository;
   readonly aiCandidates: DevelopmentAiCandidateRepository;
@@ -266,6 +268,58 @@ class DevelopmentChapterRepository implements ChapterRepository {
         .map((snapshot) => requireEntity(Chapter.rehydrate(snapshot))),
     );
   }
+
+  listPrivacyAuthorityByProjectId(
+    projectId: UuidV7,
+  ): ReturnType<NonNullable<ChapterRepository["listPrivacyAuthorityByProjectId"]>> {
+    return attempt("读取章节隐私元数据", () =>
+      this.database
+        .read()
+        .chapters.filter((chapter) => chapter.projectId === projectId)
+        .sort((left, right) => left.id.localeCompare(right.id))
+        .map((chapter) =>
+          Object.freeze({
+            chapterId: chapter.id,
+            currentVersionId: chapter.currentVersionId,
+            chapterRevision: chapter.revision,
+            privacyRevision: chapter.privacyRevision,
+            privacyMode: chapter.privacyMode,
+            status: chapter.status,
+          }),
+        ),
+    );
+  }
+}
+
+class DevelopmentChapterPrivacyRepository implements ChapterPrivacyRepository {
+  public constructor(private readonly database: DevelopmentDatabase) {}
+
+  public updatePrivacy(
+    chapter: Chapter,
+    expectedPrivacyRevision: number,
+  ): ReturnType<ChapterPrivacyRepository["updatePrivacy"]> {
+    return attempt("update chapter privacy", () => {
+      const snapshot = chapter.toSnapshot();
+      this.database.update((database) => {
+        const index = database.chapters.findIndex(({ id }) => id === snapshot.id);
+        const currentSnapshot = database.chapters[index];
+        if (currentSnapshot === undefined) {
+          throw appError("CHAPTER_NOT_FOUND", "Chapter not found.");
+        }
+        const current = requireEntity(Chapter.rehydrate(currentSnapshot));
+        if (current.privacyRevision !== expectedPrivacyRevision) {
+          throw concurrencyError("chapter privacy", snapshot.id);
+        }
+        database.chapters[index] = snapshot;
+      });
+      return {
+        chapter,
+        blockedProjectionCount: 0,
+        removedOutboxOperationCount: 0,
+        acknowledgedCloudEvidenceCount: 0,
+      };
+    });
+  }
 }
 
 class DevelopmentVersionRepository implements ChapterVersionRepository {
@@ -352,14 +406,21 @@ class DevelopmentCandidateRepository implements DevelopmentAiCandidateRepository
     );
   }
 
-  save(candidate: AiCandidate, expectedStatus: AiCandidateStatus): Promise<Result<void, AppError>> {
+  save(
+    candidate: AiCandidate,
+    expected: Readonly<{ status: AiCandidateStatus; revision: number }>,
+  ): Promise<Result<void, AppError>> {
     return attempt("保存候选", () => {
       const snapshot = candidate.toSnapshot();
       this.database.update((database) => {
         const index = database.candidates.findIndex((item) => item.id === snapshot.id);
         const current = database.candidates[index];
-        if (current?.status !== expectedStatus) {
+        if (current?.status !== expected.status) {
           throw appError("CANDIDATE_ALREADY_DECIDED", "候选状态已发生变化。");
+        }
+        const currentRevision = current.revision ?? 1;
+        if (currentRevision !== expected.revision) {
+          throw candidateRevisionConflict(snapshot.id, expected.revision, currentRevision);
         }
         database.candidates[index] = snapshot;
       });
@@ -425,6 +486,14 @@ class DevelopmentContentCommitRepository implements ContentCommitRepository {
         }
         if (currentCandidate?.status !== commit.expectedCandidateStatus) {
           throw appError("CANDIDATE_ALREADY_DECIDED", "候选状态已发生变化。");
+        }
+        const currentCandidateRevision = currentCandidate.revision ?? 1;
+        if (currentCandidateRevision !== commit.expectedCandidateRevision) {
+          throw candidateRevisionConflict(
+            candidate.id,
+            commit.expectedCandidateRevision,
+            currentCandidateRevision,
+          );
         }
         database.versions.push(version);
         database.chapters[chapterIndex] = chapter;
@@ -512,6 +581,7 @@ export function createDevelopmentRepositories(storage: Storage): DevelopmentRepo
   return {
     projects: new DevelopmentProjectRepository(database),
     chapters: new DevelopmentChapterRepository(database),
+    chapterPrivacy: new DevelopmentChapterPrivacyRepository(database),
     chapterVersions: new DevelopmentVersionRepository(database),
     recoveryDrafts: new DevelopmentDraftRepository(database),
     aiCandidates: new DevelopmentCandidateRepository(database),
@@ -564,5 +634,23 @@ function concurrencyError(entity: string, id: UuidV7): AppError {
     message: `${entity}已在其他操作中更新。`,
     actions: ["RESOLVE_CONFLICT", "EXPORT_DRAFT"],
     details: { id },
+  });
+}
+
+function candidateRevisionConflict(
+  candidateId: UuidV7,
+  expectedRevision: number,
+  actualRevision: number,
+): AppError {
+  return new AppError({
+    code: "VERSION_CONFLICT",
+    message: "The AI candidate was revised in another window.",
+    actions: ["RESOLVE_CONFLICT", "EXPORT_DRAFT"],
+    details: {
+      entityType: "candidate",
+      candidateId,
+      expectedRevision,
+      actualRevision,
+    },
   });
 }

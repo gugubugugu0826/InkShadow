@@ -155,6 +155,52 @@ export interface MemoryRecordCreationUnitOfWork {
   create(input: CreateMemoryRecordPersistenceInput): Promise<Result<void, StoryCoreError>>;
 }
 
+export type MemoryGovernanceOperation = "forget_project" | "merge";
+
+export type MemoryGovernanceRecordRole = "forgotten" | "merge_target" | "merge_source";
+
+export interface MemoryGovernanceRecordTransition {
+  readonly role: MemoryGovernanceRecordRole;
+  readonly previous: MemoryRecord;
+  readonly next: MemoryRecord;
+}
+
+export interface CommitMemoryGovernanceInput {
+  readonly operationId: UuidV7;
+  readonly projectId: UuidV7;
+  readonly operation: MemoryGovernanceOperation;
+  readonly targetRecordId: UuidV7 | null;
+  readonly previousPolicy: MemoryPolicy | null;
+  readonly nextPolicy: MemoryPolicy | null;
+  readonly records: readonly MemoryGovernanceRecordTransition[];
+  /**
+   * Canonical request payload used to make a repeated operation id safe. It
+   * intentionally excludes the event timestamp so a lost response can be
+   * retried with the same operation id.
+   */
+  readonly requestJson: string;
+  readonly now: IsoUtcTimestamp;
+}
+
+export interface MemoryGovernanceReceipt {
+  readonly operationId: UuidV7;
+  readonly projectId: UuidV7;
+  readonly operation: MemoryGovernanceOperation;
+  readonly affectedRecordCount: number;
+  readonly resultingPolicyRevision: number | null;
+  readonly idempotentReplay: boolean;
+}
+
+/**
+ * Commits project-wide forgetting or a two-record manual merge with its audit
+ * event. Implementations must use one atomic commit boundary and exact CAS.
+ */
+export interface MemoryGovernanceUnitOfWork {
+  commit(
+    input: CommitMemoryGovernanceInput,
+  ): Promise<Result<MemoryGovernanceReceipt, StoryCoreError>>;
+}
+
 export interface WhatIfRepository {
   create(branch: WhatIfBranch): Promise<Result<void, StoryCoreError>>;
 

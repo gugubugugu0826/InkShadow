@@ -8,6 +8,7 @@ import {
   parseContentChecksum,
   parseIsoUtcTimestamp,
   parseUuidV7,
+  type AiCandidateApplicationIntent,
   type ContentChecksum,
   type IsoUtcTimestamp,
   type UuidV7,
@@ -81,6 +82,44 @@ function readyCandidate(): AiCandidate {
 }
 
 describe("content entities", () => {
+  it("keeps chapter privacy on an independent optimistic revision", () => {
+    const original = chapter();
+
+    const changed = original.changePrivacy({
+      privacyMode: "local_only",
+      expectedPrivacyRevision: 1,
+      now: timestamp("2026-07-27T00:01:00.000Z"),
+    });
+
+    expect(changed.ok).toBe(true);
+    if (!changed.ok) {
+      return;
+    }
+    expect(changed.value.toSnapshot()).toMatchObject({
+      privacyMode: "local_only",
+      privacyRevision: 2,
+      revision: 1,
+      currentVersionId: VERSION_ID,
+    });
+    expect(original.toSnapshot()).toMatchObject({
+      privacyMode: "standard",
+      privacyRevision: 1,
+    });
+  });
+
+  it("rejects a stale privacy write without changing正文 version state", () => {
+    const changed = chapter().changePrivacy({
+      privacyMode: "local_only",
+      expectedPrivacyRevision: 2,
+      now: NOW,
+    });
+
+    expect(changed.ok).toBe(false);
+    if (!changed.ok) {
+      expect(changed.error.code).toBe("VERSION_CONFLICT");
+    }
+  });
+
   it("rejects a stale chapter write instead of overwriting", () => {
     const saved = chapter().saveContent({
       content: "New text",
@@ -133,10 +172,144 @@ describe("content entities", () => {
       return;
     }
 
+    expect(accepted.value.revision).toBe(2);
     const acceptedAgain = accepted.value.accept(NOW);
     expect(acceptedAgain.ok).toBe(false);
     if (!acceptedAgain.ok) {
       expect(acceptedAgain.error.code).toBe("CANDIDATE_ALREADY_DECIDED");
+    }
+  });
+
+  it("revises only a ready candidate without deciding or mutating the original", () => {
+    const original = readyCandidate();
+    const revised = original.reviseReadyContent(
+      "作者修改后的建议。",
+      checksum(),
+      timestamp("2026-07-27T00:02:00.000Z"),
+    );
+
+    expect(revised.ok).toBe(true);
+    if (!revised.ok) return;
+    expect(revised.value.toSnapshot()).toMatchObject({
+      content: "作者修改后的建议。",
+      status: "ready",
+      revision: 2,
+      decidedAt: null,
+      updatedAt: "2026-07-27T00:02:00.000Z",
+    });
+    expect(original.content).not.toBe(revised.value.content);
+
+    const accepted = revised.value.accept(NOW);
+    expect(accepted.ok).toBe(true);
+    if (accepted.ok) {
+      expect(accepted.value.revision).toBe(3);
+      expect(accepted.value.reviseReadyContent("不能再改", checksum(), NOW).ok).toBe(false);
+    }
+  });
+
+  it("normalizes legacy Candidate snapshots to explicit full-document application semantics", () => {
+    const legacySnapshot = { ...readyCandidate().toSnapshot() };
+    Reflect.deleteProperty(legacySnapshot, "applicationIntent");
+    Reflect.deleteProperty(legacySnapshot, "revision");
+
+    const rehydrated = AiCandidate.rehydrate(legacySnapshot);
+
+    expect(rehydrated.ok).toBe(true);
+    if (!rehydrated.ok) return;
+    expect(rehydrated.value.revision).toBe(1);
+    expect(rehydrated.value.applicationIntent).toEqual({
+      task: "legacy_full_document",
+      application: "replace_document",
+      payload: "full_document",
+      startUtf16: null,
+      endUtf16: null,
+    });
+  });
+
+  it("rejects an invalid Candidate revision during rehydration", () => {
+    const invalid = AiCandidate.rehydrate({ ...readyCandidate().toSnapshot(), revision: 0 });
+
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) {
+      expect(invalid.error.code).toBe("VALIDATION_FAILED");
+      expect(invalid.error.details.field).toBe("revision");
+    }
+  });
+
+  it("fails closed instead of overflowing exhausted Candidate revision authority", () => {
+    const exhausted = AiCandidate.rehydrate({
+      ...readyCandidate().toSnapshot(),
+      revision: Number.MAX_SAFE_INTEGER,
+    });
+
+    expect(exhausted.ok).toBe(true);
+    if (!exhausted.ok) return;
+    const revised = exhausted.value.reviseReadyContent("不能越界", checksum(), NOW);
+    const rejected = exhausted.value.reject(NOW);
+    expect(revised.ok).toBe(false);
+    expect(rejected.ok).toBe(false);
+    if (!revised.ok) {
+      expect(revised.error.details.reason).toBe("CANDIDATE_REVISION_EXHAUSTED");
+    }
+    if (!rejected.ok) {
+      expect(rejected.error.details.reason).toBe("CANDIDATE_REVISION_EXHAUSTED");
+    }
+  });
+
+  it("retains a fragment task anchor while the ready Candidate is revised", () => {
+    const intent = {
+      task: "selection_rewrite",
+      application: "replace_selection",
+      payload: "fragment",
+      startUtf16: 2,
+      endUtf16: 7,
+    } as const;
+    const streaming = AiCandidate.createStreaming({
+      id: CANDIDATE_ID,
+      projectId: PROJECT_ID,
+      chapterId: CHAPTER_ID,
+      source: "polish",
+      baseVersionId: VERSION_ID,
+      now: NOW,
+      applicationIntent: intent,
+    });
+    expect(streaming.ok).toBe(true);
+    if (!streaming.ok) return;
+    const ready = streaming.value.markReady("改写片段", checksum(), NOW);
+    expect(ready.ok).toBe(true);
+    if (!ready.ok) return;
+
+    const revised = ready.value.reviseReadyContent("作者调整后的片段", checksum(), NOW);
+
+    expect(revised.ok).toBe(true);
+    if (revised.ok) {
+      expect(revised.value.applicationIntent).toEqual(intent);
+    }
+  });
+
+  it("rejects malformed task anchors before a Candidate can be created", () => {
+    const malformedIntent = {
+      task: "continuation",
+      application: "insert_at_cursor",
+      payload: "fragment",
+      startUtf16: 4,
+      endUtf16: 5,
+    } as unknown as AiCandidateApplicationIntent;
+
+    const streaming = AiCandidate.createStreaming({
+      id: CANDIDATE_ID,
+      projectId: PROJECT_ID,
+      chapterId: CHAPTER_ID,
+      source: "generate",
+      baseVersionId: VERSION_ID,
+      now: NOW,
+      applicationIntent: malformedIntent,
+    });
+
+    expect(streaming.ok).toBe(false);
+    if (!streaming.ok) {
+      expect(streaming.error.code).toBe("VALIDATION_FAILED");
+      expect(streaming.error.details.field).toBe("applicationIntent");
     }
   });
 });

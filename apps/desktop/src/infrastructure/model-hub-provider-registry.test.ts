@@ -15,11 +15,11 @@ import {
 } from "./model-hub-provider-registry";
 
 describe("Model Hub provider registry", () => {
-  it("registers the eight launch providers without hard-coding a model catalog", () => {
+  it("registers the launch providers without hard-coding a model catalog", () => {
     const presets = listModelProviderPresets();
 
     expect(presets.map(({ id }) => id)).toEqual(MODEL_PROVIDER_KINDS);
-    expect(new Set(presets.map(({ id }) => id)).size).toBe(8);
+    expect(new Set(presets.map(({ id }) => id)).size).toBe(9);
     expect(JSON.stringify(presets)).not.toMatch(/gpt-\d|claude-\d|gemini-\d|qwen\d|doubao-.*-\d/iu);
     expect(presets.every(({ officialDocsUrl }) => officialDocsUrl.startsWith("https://"))).toBe(
       true,
@@ -52,6 +52,12 @@ describe("Model Hub provider registry", () => {
   });
 
   it("resolves region-aware Qwen endpoints and validates custom endpoints", () => {
+    expect(resolveProviderBaseUrl("zhipu_glm")).toBe("https://open.bigmodel.cn/api/paas/v4");
+    expect(getModelProviderPreset("zhipu_glm").modelDiscovery).toMatchObject({
+      strategy: "preset_and_manual",
+      automatic: false,
+      path: null,
+    });
     expect(resolveProviderBaseUrl("alibaba_qwen", { region: "china_beijing" })).toBe(
       "https://dashscope.aliyuncs.com/compatible-mode/v1",
     );

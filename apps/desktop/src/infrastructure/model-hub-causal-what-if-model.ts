@@ -5,6 +5,13 @@ import {
   type ModelHubTextExecutionDependencies,
 } from "./model-hub-execution-service";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
+import {
+  ProjectContextPrivacyError,
+  projectContextRequiredDataDestination,
+  projectContextDispatchScope,
+  type ProjectContextPrivacyAuthority,
+  type ProjectContextPrivacyReceipt,
+} from "./project-context-privacy-authority";
 import type {
   CausalWhatIfEventContext,
   CausalWhatIfModelEffect,
@@ -58,10 +65,24 @@ export class CausalWhatIfModelHubError extends Error {
  * story data out of that ledger and validates the provider response locally.
  */
 export class ModelHubCausalWhatIfModelPort implements CausalWhatIfModelPort {
-  public constructor(private readonly dependencies: ModelHubTextExecutionDependencies) {}
+  public constructor(
+    private readonly dependencies: ModelHubTextExecutionDependencies &
+      Readonly<{
+        projectContextPrivacy: Pick<
+          ProjectContextPrivacyAuthority,
+          "inspect" | "assertCurrentBeforeDispatch" | "assertRouteEligible"
+        >;
+      }>,
+  ) {}
 
   public async simulate(input: CausalWhatIfModelInput): Promise<CausalWhatIfModelOutput> {
     const boundedInput = validateModelInput(input);
+    const projectPrivacy = await this.dependencies.projectContextPrivacy
+      .inspect(boundedInput.projectId)
+      .catch((cause: unknown) => {
+        throw normalizeModelHubFailure(cause);
+      });
+    const requiredDataDestination = projectContextRequiredDataDestination(projectPrivacy);
     const allowedEventIds = new Set([
       boundedInput.sourceEvent.id,
       ...boundedInput.impactedEvents.map(({ id }) => id),
@@ -75,6 +96,7 @@ export class ModelHubCausalWhatIfModelPort implements CausalWhatIfModelPort {
         messages,
         maximumOutputTokens: 8_000,
         temperature: 0.2,
+        ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
       });
     } catch (cause: unknown) {
       throw normalizeModelHubFailure(cause);
@@ -84,10 +106,12 @@ export class ModelHubCausalWhatIfModelPort implements CausalWhatIfModelPort {
     let generated;
     try {
       generated = await executeModelHubTextTask(this.dependencies, {
+        dispatchScope: projectContextDispatchScope(projectPrivacy),
         task: "what_if_simulation",
         messages,
         maximumOutputTokens: 8_000,
         temperature: 0.2,
+        ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
         onBeforeDispatch: async (selection) => {
           if (
             selection.connectionId !== inspection.connectionId ||
@@ -102,11 +126,22 @@ export class ModelHubCausalWhatIfModelPort implements CausalWhatIfModelPort {
             );
           }
           await assertStructuredOutputSupported(this.dependencies, selection.catalogEntryId, true);
+          await assertProjectPrivacyBeforeDispatch(
+            this.dependencies.projectContextPrivacy,
+            projectPrivacy,
+            selection.localOnlyEligible === true,
+          );
         },
       });
     } catch (cause: unknown) {
       throw normalizeModelHubFailure(cause);
     }
+
+    await this.dependencies.projectContextPrivacy
+      .assertCurrentBeforeDispatch(projectPrivacy)
+      .catch((cause: unknown) => {
+        throw normalizeModelHubFailure(cause);
+      });
 
     return parseCausalWhatIfModelResponse(generated.text, allowedEventIds);
   }
@@ -383,6 +418,15 @@ async function assertStructuredOutputSupported(
 
 function normalizeModelHubFailure(cause: unknown): CausalWhatIfModelHubError {
   if (cause instanceof CausalWhatIfModelHubError) return cause;
+  if (cause instanceof ProjectContextPrivacyError) {
+    return new CausalWhatIfModelHubError(
+      "CAUSAL_WHAT_IF_MODEL_REQUEST_FAILED",
+      cause.message,
+      cause.retryable,
+      cause.code,
+      false,
+    );
+  }
   if (!(cause instanceof ModelHubExecutionError)) {
     return new CausalWhatIfModelHubError(
       "CAUSAL_WHAT_IF_MODEL_REQUEST_FAILED",
@@ -428,6 +472,25 @@ function normalizeModelHubFailure(cause: unknown): CausalWhatIfModelHubError {
     cause.code,
     cause.dispatched,
   );
+}
+
+async function assertProjectPrivacyBeforeDispatch(
+  authority: Pick<
+    ProjectContextPrivacyAuthority,
+    "assertCurrentBeforeDispatch" | "assertRouteEligible"
+  >,
+  receipt: ProjectContextPrivacyReceipt,
+  localOnlyEligible: boolean,
+): Promise<void> {
+  try {
+    await authority.assertCurrentBeforeDispatch(receipt);
+    authority.assertRouteEligible(receipt, localOnlyEligible);
+  } catch (cause: unknown) {
+    if (cause instanceof ProjectContextPrivacyError) {
+      throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
+    }
+    throw cause;
+  }
 }
 
 function requireRecord(value: unknown, message: string): Record<string, unknown> {

@@ -18,6 +18,7 @@ export function ProjectGraphRoutePage() {
         chapters: runtime.repositories.chapters,
         chapterVersions: runtime.repositories.chapterVersions,
         facts: runtime.story.factService,
+        factStore: runtime.story.facts,
         projector: runtime.story.causalProjector,
       }),
     [runtime],

@@ -10,6 +10,12 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
+import {
+  findSupplementalFindingResolution,
+  supplementalEvidenceSignature,
+  type SupplementalFindingDescriptor,
+} from "../infrastructure/chapter-supplemental-finding-verifier";
+import type { ChapterSupplementalFindingResolutionSummary } from "../infrastructure/novel-validation-runtime";
 import { RuntimeProvider } from "../runtime-context";
 import { ProjectChecksPage } from "./project-checks-page";
 
@@ -17,9 +23,79 @@ const CONTENT = "林遥仍然活着。林遥已经死去。";
 const REFERENCE_EXCERPT = "林遥仍然活着";
 const CURRENT_EXCERPT = "林遥已经死去";
 
+function supplementalResolutionSummary(
+  overrides: Pick<
+    ChapterSupplementalFindingResolutionSummary,
+    "factId" | "chapterVersionId" | "evidenceSignature"
+  >,
+): ChapterSupplementalFindingResolutionSummary {
+  return {
+    findingId: "voice:stable-id",
+    category: "character_voice",
+    action: "ignore",
+    factRevision: 1,
+    chapterId: "chapter-one",
+    decidedAt: "2026-08-09T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 describe("ProjectChecksPage", () => {
   beforeEach(() => {
     window.localStorage.clear();
+  });
+
+  it("does not display a supplemental disposition from another immutable version", () => {
+    const previousVersionId = "019f9f4a-b3c7-7350-9226-000000000001";
+    const currentVersionId = "019f9f4a-b3c7-7350-9226-000000000002";
+    const sharedEvidence = {
+      contentHash: "a".repeat(64),
+      startOffset: 4,
+      endOffset: 12,
+    } as const;
+
+    expect(
+      supplementalEvidenceSignature([{ ...sharedEvidence, sourceVersionId: previousVersionId }]),
+    ).not.toBe(
+      supplementalEvidenceSignature([{ ...sharedEvidence, sourceVersionId: currentVersionId }]),
+    );
+
+    const finding = {
+      id: "voice:stable-id",
+      category: "character_voice",
+      evidence: [
+        {
+          sourceKind: "chapter",
+          sourceId: "chapter-one",
+          sourceVersionId: currentVersionId,
+          contentHash: sharedEvidence.contentHash,
+          locator: "chapter:current:utf16:4-12",
+          excerpt: "12345678",
+          startOffset: sharedEvidence.startOffset,
+          endOffset: sharedEvidence.endOffset,
+          sourceLength: 12,
+        },
+      ],
+    } as const satisfies SupplementalFindingDescriptor;
+    const evidenceSignature = supplementalEvidenceSignature(finding.evidence);
+    const historical = supplementalResolutionSummary({
+      factId: "historical-resolution",
+      chapterVersionId: previousVersionId,
+      evidenceSignature,
+    });
+    const current = supplementalResolutionSummary({
+      factId: "current-resolution",
+      chapterVersionId: currentVersionId,
+      evidenceSignature,
+    });
+
+    expect(
+      findSupplementalFindingResolution([historical], finding, currentVersionId),
+    ).toBeUndefined();
+    expect(
+      findSupplementalFindingResolution([historical, current], finding, currentVersionId),
+    ).toEqual(current);
+    expect(findSupplementalFindingResolution([current], finding, null)).toBeUndefined();
   });
 
   it("lets the user select a chapter and honestly explains a skipped check", async () => {
@@ -47,6 +123,8 @@ describe("ProjectChecksPage", () => {
     expect(screen.getByText("尚无足够证据")).toBeInTheDocument();
     expect(screen.queryByText(/已发现\s*\d+\s*个问题/u)).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "确定性检查" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "本次实际检查范围" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "因证据不足未检查（10）" })).toBeInTheDocument();
     const aiHeading = await screen.findByRole("heading", { name: "AI 模糊复核" });
     const aiSection = aiHeading.closest("section");
     if (!(aiSection instanceof HTMLElement)) {
@@ -70,6 +148,11 @@ describe("ProjectChecksPage", () => {
     renderPage(fixture.runtime, fixture.projectId);
 
     await user.click(await screen.findByRole("button", { name: "检查本章" }));
+    expect(
+      await screen.findByText("1 类实际运行 · 1 项待处理", {}, { timeout: 3_000 }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "已检查（1）" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "因证据不足未检查（9）" })).toBeInTheDocument();
     const heading = await screen.findByRole("heading", { name: "人物生死冲突" });
     const issueCard = heading.closest(".ink-card");
     if (!(issueCard instanceof HTMLElement)) {
@@ -87,10 +170,59 @@ describe("ProjectChecksPage", () => {
     expect(screen.getByText(/只作用于这条问题和当前章节版本/u)).toBeInTheDocument();
     expect(screen.getByText("本版本处理记录（1）")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "撤销忽略" }));
-    expect(await screen.findByText(/这条问题重新进入待处理状态/u)).toBeInTheDocument();
+    const undoButton = screen.getByRole("button", { name: "撤销忽略" });
+    await waitFor(() => expect(undoButton).toBeEnabled());
+    await user.click(undoButton);
+    expect(
+      await screen.findByText(/这条问题重新进入待处理状态/u, {}, { timeout: 3_000 }),
+    ).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("button", { name: "忽略" })).toBeEnabled());
     expect(screen.getByText("已撤销")).toBeInTheDocument();
+  });
+
+  it("reopens the latest version-bound snapshot and records an explicit rerun", async () => {
+    const user = userEvent.setup();
+    const fixture = await seededRuntime(true);
+    const firstRender = renderPage(fixture.runtime, fixture.projectId);
+
+    await user.click(await screen.findByRole("button", { name: "检查本章" }));
+    expect(await screen.findByText(/第 1 次检查/u)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "重新检查" })).toBeEnabled();
+    firstRender.unmount();
+
+    const reopenedRuntime = createDevelopmentRuntime(window.localStorage);
+    renderPage(reopenedRuntime, fixture.projectId);
+    expect(await screen.findByRole("heading", { name: "人物生死冲突" })).toBeInTheDocument();
+    expect(screen.getByText(/第 1 次检查/u)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "重新检查" }));
+    expect(await screen.findByText(/第 2 次检查/u)).toBeInTheDocument();
+  });
+
+  it("creates an isolated correction Candidate from exact evidence without changing正文", async () => {
+    const user = userEvent.setup();
+    const fixture = await seededRuntime(true);
+    const before = unwrap(
+      await fixture.runtime.repositories.chapters.findById(fixture.chapterId),
+    )?.content;
+    renderPage(fixture.runtime, fixture.projectId);
+
+    await user.click(await screen.findByRole("button", { name: "检查本章" }));
+    await user.click(await screen.findByRole("button", { name: "按设定生成修改建议" }));
+
+    expect(await screen.findByRole("heading", { name: "AI 建议目的地" })).toBeInTheDocument();
+    const stable = unwrap(await fixture.runtime.repositories.chapters.findById(fixture.chapterId));
+    expect(stable?.content).toBe(before);
+    const candidates = unwrap(
+      await fixture.runtime.repositories.aiCandidates.listByChapterId(fixture.chapterId),
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.toSnapshot()).toMatchObject({
+      status: "ready",
+      source: "polish",
+      baseVersionId: stable?.currentVersionId,
+    });
+    expect(candidates[0]?.content).toContain("林遥在这一时间段仍然存活");
   });
 
   it("makes the allow action create a locked, traceable formal rule", async () => {
@@ -140,7 +272,9 @@ describe("ProjectChecksPage", () => {
     expect(
       await screen.findByText("已创建用户确认的正式事实，并停用被替换设定；原正文没有改变。"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "没有发现有证据支持的冲突" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "没有发现有证据支持的冲突" }),
+    ).toBeInTheDocument();
     const after = unwrap(
       await fixture.runtime.repositories.chapters.findById(fixture.chapterId),
     )?.toSnapshot();
@@ -197,8 +331,19 @@ describe("ProjectChecksPage", () => {
     expect(screen.getByRole("heading", { name: "节奏与章节质量" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "找到失踪的钥匙" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "foreshadow-key" })).toBeInTheDocument();
-    expect(screen.getByText(/既未推进剧情，也未改变人物状态/u)).toBeInTheDocument();
-    expect(screen.queryByText(/质量总分|综合评分/u)).not.toBeInTheDocument();
+    const findingText = screen.getByText(/既未推进剧情，也未改变人物状态/u);
+    const finding = findingText.closest(".chapter-check-issue");
+    if (!(finding instanceof HTMLElement)) throw new Error("Expected a narrative finding card.");
+    expect(within(finding).getByText("建议复核")).toBeInTheDocument();
+    expect(within(finding).getByText(`“${CONTENT}”`)).toBeInTheDocument();
+    expect(within(finding).getByText("修改建议")).toBeInTheDocument();
+    await user.click(within(finding).getByRole("button", { name: "忽略" }));
+    expect(await within(finding).findByText("已忽略")).toBeInTheDocument();
+    await user.click(within(finding).getByRole("button", { name: "恢复为待处理" }));
+    await waitFor(() =>
+      expect(within(finding).getByRole("button", { name: "忽略" })).toBeEnabled(),
+    );
+    expect(screen.queryByText(/(?:质量总分|综合评分)[:：]\s*\d/u)).not.toBeInTheDocument();
   });
 });
 
@@ -403,6 +548,7 @@ function renderPage(runtime: DesktopRuntime, projectId: string) {
         <Routes>
           <Route path="/projects/:projectId/checks" element={<ProjectChecksPage />} />
           <Route path="/projects/:projectId" element={<h1>正文目的地</h1>} />
+          <Route path="/projects/:projectId/chapters/:chapterId" element={<h1>AI 建议目的地</h1>} />
         </Routes>
       </MemoryRouter>
     </RuntimeProvider>,

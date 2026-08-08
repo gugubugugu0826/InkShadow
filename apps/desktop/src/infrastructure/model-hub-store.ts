@@ -26,6 +26,10 @@ export type ModelHubConnectionStatus =
 export type ModelHubCatalogSyncStatus = "never" | "syncing" | "succeeded" | "partial" | "failed";
 export type ModelHubPrivacyPolicy = "cloud_allowed" | "local_preferred" | "local_only";
 
+const RETIRED_CONNECTION_ERROR_CODE = "MODEL_HUB_CONNECTION_RETIRED";
+const RETIRED_CONNECTION_SUMMARY =
+  "The connection was retired. Its credential reference was cleared while immutable invocation history was retained.";
+
 export interface ModelProviderConnection {
   readonly id: string;
   readonly providerKind: ModelProviderKind;
@@ -57,6 +61,16 @@ export interface ModelProviderConnection {
   readonly updatedAt: string;
 }
 
+export function isRetiredModelProviderConnection(connection: ModelProviderConnection): boolean {
+  return (
+    !connection.enabled &&
+    connection.connectionStatus === "disabled" &&
+    connection.credentialRef === null &&
+    connection.credentialState === "missing" &&
+    connection.lastErrorCode === RETIRED_CONNECTION_ERROR_CODE
+  );
+}
+
 export interface SaveModelProviderConnectionInput {
   readonly id: string;
   readonly providerKind: ModelProviderKind;
@@ -84,6 +98,11 @@ export interface RecordConnectionTestInput {
   readonly status: "ready" | "degraded" | "error";
   readonly errorCode?: string | null;
   readonly errorSummary?: string | null;
+  readonly expectedRevision: number;
+}
+
+export interface RetireModelProviderConnectionInput {
+  readonly connectionId: string;
   readonly expectedRevision: number;
 }
 
@@ -126,6 +145,48 @@ export interface SyncModelCatalogInput {
   readonly errorCode?: string | null;
   readonly errorSummary?: string | null;
   readonly startedAt?: string | null;
+}
+
+export interface ModelHubConnectionCommit {
+  readonly id: string;
+  readonly connectionId: string;
+  readonly phase: "prepared" | "cleanup_pending";
+  readonly credentialProviderId: string | null;
+  readonly cleanupCredentialProviderId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface PrepareModelHubConnectionCommitInput {
+  readonly id: string;
+  readonly connectionId: string;
+  readonly credentialProviderId?: string | null;
+}
+
+export interface PublishModelHubConnectionCommitInput {
+  readonly id: string;
+  readonly connection: SaveModelProviderConnectionInput;
+  readonly catalog: SyncModelCatalogInput;
+  readonly credentialProviderId?: string | null;
+  readonly cleanupCredentialProviderId?: string | null;
+}
+
+export interface PublishModelHubConnectionCommitResult {
+  readonly connection: ModelProviderConnection;
+  readonly catalog: readonly ModelCatalogEntry[];
+  readonly commit: ModelHubConnectionCommit | null;
+}
+
+export interface PublishModelHubCredentialCommitInput {
+  readonly id: string;
+  readonly connection: SaveModelProviderConnectionInput;
+  readonly credentialProviderId?: string | null;
+  readonly cleanupCredentialProviderId?: string | null;
+}
+
+export interface PublishModelHubCredentialCommitResult {
+  readonly connection: ModelProviderConnection;
+  readonly commit: ModelHubConnectionCommit | null;
 }
 
 export interface ModelCatalogSync {
@@ -174,6 +235,24 @@ export interface RecordCapabilityScanInput {
   readonly errorCode?: string | null;
   readonly errorSummary?: string | null;
   readonly requestedAt?: string | null;
+}
+
+export interface CommitCapabilityProbeResultInput {
+  readonly connectionId: string;
+  readonly expectedConnectionRevision: number;
+  readonly catalogEntryId: string;
+  readonly expectedCatalogRevision: number;
+  readonly expectedProviderModelId: string;
+  readonly scan: RecordCapabilityScanInput;
+  readonly connectionTest?: Omit<
+    RecordConnectionTestInput,
+    "connectionId" | "expectedRevision"
+  > | null;
+}
+
+export interface CapabilityProbeCommitResult {
+  readonly connection: ModelProviderConnection;
+  readonly evidence: readonly ModelCapabilityEvidence[];
 }
 
 export interface ModelHubPreset {
@@ -364,14 +443,30 @@ export interface ModelHubStore {
   listConnections(): Promise<readonly ModelProviderConnection[]>;
   findConnection(id: string): Promise<ModelProviderConnection | null>;
   saveConnection(input: SaveModelProviderConnectionInput): Promise<ModelProviderConnection>;
+  retireConnection(input: RetireModelProviderConnectionInput): Promise<ModelProviderConnection>;
   recordConnectionTest(input: RecordConnectionTestInput): Promise<ModelProviderConnection>;
   listCatalog(connectionId: string): Promise<readonly ModelCatalogEntry[]>;
   listCatalogSyncs(connectionId: string): Promise<readonly ModelCatalogSync[]>;
   syncCatalog(input: SyncModelCatalogInput): Promise<readonly ModelCatalogEntry[]>;
+  listConnectionCommits(): Promise<readonly ModelHubConnectionCommit[]>;
+  findConnectionCommit(connectionId: string): Promise<ModelHubConnectionCommit | null>;
+  prepareConnectionCommit(
+    input: PrepareModelHubConnectionCommitInput,
+  ): Promise<ModelHubConnectionCommit>;
+  publishConnectionCommit(
+    input: PublishModelHubConnectionCommitInput,
+  ): Promise<PublishModelHubConnectionCommitResult>;
+  publishCredentialCommit(
+    input: PublishModelHubCredentialCommitInput,
+  ): Promise<PublishModelHubCredentialCommitResult>;
+  finishConnectionCommit(connectionId: string, id: string): Promise<void>;
   listCapabilityEvidence(catalogEntryId: string): Promise<readonly ModelCapabilityEvidence[]>;
   recordCapabilityScan(
     input: RecordCapabilityScanInput,
   ): Promise<readonly ModelCapabilityEvidence[]>;
+  commitCapabilityProbeResult(
+    input: CommitCapabilityProbeResultInput,
+  ): Promise<CapabilityProbeCommitResult>;
   findCostPrivacyProfile(catalogEntryId: string): Promise<ModelCostPrivacyProfile | null>;
   saveCostPrivacyProfile(input: SaveModelCostPrivacyProfileInput): Promise<ModelCostPrivacyProfile>;
   listEvaluationResults(
@@ -385,6 +480,7 @@ export interface ModelHubStore {
   findTaskRoute(task: NovelAiTask): Promise<NovelTaskRoute | null>;
   saveTaskRoute(input: SaveNovelTaskRouteInput): Promise<NovelTaskRoute>;
   deleteTaskRoute(task: NovelAiTask, expectedRevision: number): Promise<void>;
+  findInvocation(id: string): Promise<ModelInvocationFact | null>;
   startInvocation(input: StartModelInvocationInput): Promise<ModelInvocationFact>;
   finishInvocation(input: FinishModelInvocationInput): Promise<ModelInvocationFact>;
 }
@@ -416,6 +512,16 @@ interface ConnectionRow {
   legacy_provider_id: string | null;
   enabled: number;
   revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ConnectionCommitRow {
+  id: string;
+  connection_id: string;
+  phase: string;
+  credential_provider_id: string | null;
+  cleanup_credential_provider_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -580,111 +686,65 @@ export class TauriModelHubStore implements ModelHubStore {
     input: SaveModelProviderConnectionInput,
   ): Promise<ModelProviderConnection> {
     const validated = validateConnectionInput(input);
+    return this.executor.transaction((transaction) =>
+      persistSqliteConnection(transaction, validated, this.clock.now()),
+    );
+  }
+
+  public async retireConnection(
+    input: RetireModelProviderConnectionInput,
+  ): Promise<ModelProviderConnection> {
+    const connectionId = boundedText(input.connectionId, "connection id", 128);
+    const expectedRevision = validateRequiredRevision(input.expectedRevision);
     return this.executor.transaction(async (transaction) => {
-      const existing = await findConnectionRow(transaction, validated.id);
-      if (existing === null && validated.expectedRevision !== null) {
-        throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
-      }
-      if (
-        existing !== null &&
-        (validated.expectedRevision === null || validated.expectedRevision !== existing.revision)
-      ) {
-        throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
-      }
-      if (existing !== null && existing.provider_kind !== validated.providerKind) {
-        throw modelHubError(
-          "MODEL_HUB_PROVIDER_KIND_IMMUTABLE",
-          "A connection id cannot be reassigned to a different provider kind.",
-        );
-      }
-      const endpointIdentityChanged =
-        existing !== null &&
-        connectionEndpointIdentityChanged(hydrateConnection(existing), validated);
-      const now = this.clock.now();
-      const revision = existing === null ? 1 : existing.revision + 1;
+      const existing = await findConnectionRow(transaction, connectionId);
       if (existing === null) {
-        await transaction.execute(
-          `INSERT INTO model_provider_connections (
-             id, provider_kind, display_name, protocol, region, workspace_id,
-             endpoint_id, base_url, credential_ref, credential_state,
-             authentication_mode, credential_header_name, model_discovery_path,
-             text_generation_path, embedding_path, request_timeout_ms, retry_limit,
-             legacy_provider_id, enabled, revision, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-          [
-            validated.id,
-            validated.providerKind,
-            validated.displayName,
-            validated.protocol,
-            validated.region,
-            validated.workspaceId,
-            validated.endpointId,
-            validated.baseUrl,
-            validated.credentialRef,
-            validated.credentialState,
-            validated.authenticationMode,
-            validated.credentialHeaderName,
-            validated.modelDiscoveryPath,
-            validated.textGenerationPath,
-            validated.embeddingPath,
-            validated.requestTimeoutMs,
-            validated.retryLimit,
-            validated.legacyProviderId,
-            validated.enabled ? 1 : 0,
-            now,
-            now,
-          ],
+        throw modelHubError(
+          "MODEL_HUB_CONNECTION_NOT_FOUND",
+          "The provider connection does not exist.",
         );
-      } else {
-        const result = await transaction.execute(
-          `UPDATE model_provider_connections
-           SET provider_kind = ?, display_name = ?, protocol = ?, region = ?,
-               workspace_id = ?, endpoint_id = ?, base_url = ?, credential_ref = ?,
-               credential_state = ?, authentication_mode = ?, credential_header_name = ?,
-               model_discovery_path = ?, text_generation_path = ?, embedding_path = ?,
-               request_timeout_ms = ?, retry_limit = ?, legacy_provider_id = ?, enabled = ?,
-               revision = ?, updated_at = ?
-           WHERE id = ? AND revision = ?`,
-          [
-            validated.providerKind,
-            validated.displayName,
-            validated.protocol,
-            validated.region,
-            validated.workspaceId,
-            validated.endpointId,
-            validated.baseUrl,
-            validated.credentialRef,
-            validated.credentialState,
-            validated.authenticationMode,
-            validated.credentialHeaderName,
-            validated.modelDiscoveryPath,
-            validated.textGenerationPath,
-            validated.embeddingPath,
-            validated.requestTimeoutMs,
-            validated.retryLimit,
-            validated.legacyProviderId,
-            validated.enabled ? 1 : 0,
-            revision,
-            now,
-            validated.id,
-            existing.revision,
-          ],
-        );
-        if (result.rowsAffected !== 1) {
-          throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
-        }
-        if (endpointIdentityChanged) {
-          await invalidateSqliteConnectionDerivedState(transaction, validated.id, now);
-        }
       }
-      const saved = await findConnectionRow(transaction, validated.id);
-      if (saved === null) {
+      if (isRetiredConnectionRow(existing)) {
+        return hydrateConnection(existing);
+      }
+      if (existing.revision !== expectedRevision) {
+        throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
+      }
+      const now = this.clock.now();
+      const result = await transaction.execute(
+        `UPDATE model_provider_connections
+         SET credential_ref = NULL, credential_state = 'missing',
+             authentication_mode = CASE
+               WHEN provider_kind = 'custom_openai_compatible' THEN 'none'
+               ELSE authentication_mode
+             END,
+             credential_header_name = CASE
+               WHEN provider_kind = 'custom_openai_compatible' THEN NULL
+               ELSE credential_header_name
+             END,
+             enabled = 0, connection_status = 'disabled',
+             last_error_code = ?, last_error_summary = ?,
+             revision = revision + 1, updated_at = ?
+         WHERE id = ? AND revision = ?`,
+        [
+          RETIRED_CONNECTION_ERROR_CODE,
+          RETIRED_CONNECTION_SUMMARY,
+          now,
+          connectionId,
+          expectedRevision,
+        ],
+      );
+      if (result.rowsAffected !== 1) {
+        throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
+      }
+      const retired = await findConnectionRow(transaction, connectionId);
+      if (retired === null) {
         throw modelHubError(
           "MODEL_HUB_CONNECTION_WRITE_FAILED",
-          "The connection was not persisted.",
+          "The retired connection was not persisted.",
         );
       }
-      return hydrateConnection(saved);
+      return hydrateConnection(retired);
     });
   }
 
@@ -745,115 +805,214 @@ export class TauriModelHubStore implements ModelHubStore {
 
   public async syncCatalog(input: SyncModelCatalogInput): Promise<readonly ModelCatalogEntry[]> {
     const validated = validateCatalogInput(input);
-    await this.executor.transaction(async (transaction) => {
-      const connection = await findConnectionRow(transaction, validated.connectionId);
-      if (connection === null) {
-        throw modelHubError(
-          "MODEL_HUB_CONNECTION_NOT_FOUND",
-          "The provider connection does not exist.",
-        );
+    await this.executor.transaction((transaction) =>
+      persistSqliteCatalogSync(transaction, validated, this.clock.now()),
+    );
+    return this.listCatalog(validated.connectionId);
+  }
+
+  public async findConnectionCommit(
+    connectionIdValue: string,
+  ): Promise<ModelHubConnectionCommit | null> {
+    const connectionId = boundedText(connectionIdValue, "connection commit connection id", 128);
+    const rows = await this.executor.select<ConnectionCommitRow>(
+      `SELECT id, connection_id, phase, credential_provider_id,
+              cleanup_credential_provider_id, created_at, updated_at
+       FROM model_hub_connection_commits
+       WHERE connection_id = ?`,
+      [connectionId],
+    );
+    return rows[0] === undefined ? null : hydrateConnectionCommit(rows[0]);
+  }
+
+  public async listConnectionCommits(): Promise<readonly ModelHubConnectionCommit[]> {
+    const rows = await this.executor.select<ConnectionCommitRow>(
+      `SELECT id, connection_id, phase, credential_provider_id,
+              cleanup_credential_provider_id, created_at, updated_at
+       FROM model_hub_connection_commits
+       ORDER BY updated_at ASC, id ASC`,
+    );
+    return Object.freeze(rows.map(hydrateConnectionCommit));
+  }
+
+  public async prepareConnectionCommit(
+    input: PrepareModelHubConnectionCommitInput,
+  ): Promise<ModelHubConnectionCommit> {
+    const validated = validatePrepareConnectionCommitInput(input);
+    const now = this.clock.now();
+    await this.executor.execute(
+      `INSERT INTO model_hub_connection_commits (
+         id, connection_id, phase, credential_provider_id,
+         cleanup_credential_provider_id, created_at, updated_at
+       ) VALUES (?, ?, 'prepared', ?, NULL, ?, ?)`,
+      [validated.id, validated.connectionId, validated.credentialProviderId, now, now],
+    );
+    const saved = await this.findConnectionCommit(validated.connectionId);
+    if (saved?.id !== validated.id) {
+      throw modelHubError(
+        "MODEL_HUB_CONNECTION_COMMIT_WRITE_FAILED",
+        "The connection commit journal was not persisted.",
+      );
+    }
+    return saved;
+  }
+
+  public async publishConnectionCommit(
+    input: PublishModelHubConnectionCommitInput,
+  ): Promise<PublishModelHubConnectionCommitResult> {
+    const validated = validatePublishConnectionCommitInput(input);
+    return this.executor.transaction(async (transaction) => {
+      const journal = await findConnectionCommitRow(transaction, validated.connection.id);
+      if (
+        journal?.id !== validated.id ||
+        journal.phase !== "prepared" ||
+        journal.credential_provider_id !== validated.credentialProviderId
+      ) {
+        throw conflict("MODEL_HUB_CONNECTION_COMMIT_CONFLICT");
       }
       const now = this.clock.now();
-      await transaction.execute(
-        `INSERT INTO model_catalog_syncs (
-           id, connection_id, source, status, discovered_model_count,
-           next_page_token_present, error_code, error_summary, started_at, completed_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          validated.syncId,
-          validated.connectionId,
-          validated.source,
-          validated.status,
-          validated.models.length,
-          validated.nextPageTokenPresent ? 1 : 0,
-          validated.errorCode,
-          validated.errorSummary,
-          validated.startedAt ?? now,
-          now,
-        ],
-      );
-
-      for (const model of validated.models) {
-        const existingRows = await transaction.select<CatalogRow>(
-          `${CATALOG_SELECT} WHERE connection_id = ? AND provider_model_id = ?`,
-          [validated.connectionId, model.providerModelId],
-        );
-        const existing = existingRows[0];
-        if (existing === undefined) {
-          await transaction.execute(
-            `INSERT INTO model_catalog_entries (
-               id, connection_id, provider_model_id, display_name, owned_by,
-               catalog_source, availability, lifecycle, input_token_limit,
-               output_token_limit, first_discovered_at, last_seen_at, stale_after,
-               last_sync_id, revision
-             ) VALUES (?, ?, ?, ?, ?, ?, 'available', ?, ?, ?, ?, ?, ?, ?, 1)`,
-            [
-              model.id,
-              validated.connectionId,
-              model.providerModelId,
-              model.displayName,
-              model.ownedBy,
-              validated.source,
-              model.lifecycle,
-              model.inputTokenLimit,
-              model.outputTokenLimit,
-              now,
-              now,
-              model.staleAfter,
-              validated.syncId,
-            ],
-          );
-        } else {
-          await transaction.execute(
-            `UPDATE model_catalog_entries
-             SET display_name = ?, owned_by = ?, catalog_source = ?, availability = 'available',
-                 lifecycle = ?, input_token_limit = ?, output_token_limit = ?,
-                 last_seen_at = ?, stale_after = ?, last_sync_id = ?, revision = revision + 1
-             WHERE id = ?`,
-            [
-              model.displayName,
-              model.ownedBy,
-              validated.source,
-              model.lifecycle,
-              model.inputTokenLimit,
-              model.outputTokenLimit,
-              now,
-              model.staleAfter,
-              validated.syncId,
-              existing.id,
-            ],
-          );
-        }
-      }
-
-      if (validated.status === "succeeded" && validated.source === "provider_api") {
-        await transaction.execute(
-          `UPDATE model_catalog_entries
-           SET availability = 'unavailable', revision = revision + 1
-           WHERE connection_id = ?
-             AND catalog_source = 'provider_api'
-             AND (last_sync_id IS NULL OR last_sync_id <> ?)
-             AND availability <> 'unavailable'`,
-          [validated.connectionId, validated.syncId],
-        );
-      }
-      await transaction.execute(
+      const saved = await persistSqliteConnection(transaction, validated.connection, now);
+      const testedResult = await transaction.execute(
         `UPDATE model_provider_connections
-         SET catalog_sync_status = ?, last_catalog_synced_at = ?,
-             last_error_code = ?, last_error_summary = ?, revision = revision + 1,
-             updated_at = ?
-         WHERE id = ?`,
-        [
-          validated.status,
-          now,
-          validated.errorCode,
-          validated.errorSummary,
-          now,
-          validated.connectionId,
-        ],
+         SET connection_status = 'ready', last_tested_at = ?,
+             last_error_code = NULL, last_error_summary = NULL,
+             revision = revision + 1, updated_at = ?
+         WHERE id = ? AND revision = ?`,
+        [now, now, saved.id, saved.revision],
       );
+      if (testedResult.rowsAffected !== 1) {
+        throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
+      }
+      await persistSqliteCatalogSync(transaction, validated.catalog, now);
+      const currentRow = await findConnectionRow(transaction, saved.id);
+      if (currentRow === null) {
+        throw modelHubError(
+          "MODEL_HUB_CONNECTION_WRITE_FAILED",
+          "The verified connection was not persisted.",
+        );
+      }
+      const catalogRows = await transaction.select<CatalogRow>(
+        `${CATALOG_SELECT}
+         WHERE connection_id = ?
+         ORDER BY availability = 'available' DESC, display_name COLLATE NOCASE,
+                  provider_model_id`,
+        [saved.id],
+      );
+      const currentCatalog = Object.freeze(catalogRows.map(hydrateCatalog));
+      if (
+        !currentCatalog.some(
+          ({ availability, lastSyncId }) =>
+            availability === "available" && lastSyncId === validated.catalog.syncId,
+        )
+      ) {
+        throw modelHubError(
+          "MODEL_HUB_CONNECTION_COMMIT_CATALOG_EMPTY",
+          "A verified connection cannot be published without an available catalog entry.",
+        );
+      }
+      let commit: ModelHubConnectionCommit | null = null;
+      if (validated.cleanupCredentialProviderId === null) {
+        await transaction.execute(
+          "DELETE FROM model_hub_connection_commits WHERE id = ? AND connection_id = ?",
+          [validated.id, saved.id],
+        );
+      } else {
+        await transaction.execute(
+          `UPDATE model_hub_connection_commits
+           SET phase = 'cleanup_pending', cleanup_credential_provider_id = ?, updated_at = ?
+           WHERE id = ? AND connection_id = ? AND phase = 'prepared'`,
+          [validated.cleanupCredentialProviderId, now, validated.id, saved.id],
+        );
+        commit = Object.freeze({
+          id: validated.id,
+          connectionId: saved.id,
+          phase: "cleanup_pending",
+          credentialProviderId: validated.credentialProviderId,
+          cleanupCredentialProviderId: validated.cleanupCredentialProviderId,
+          createdAt: journal.created_at,
+          updatedAt: now,
+        });
+      }
+      return Object.freeze({
+        connection: hydrateConnection(currentRow),
+        catalog: currentCatalog,
+        commit,
+      });
     });
-    return this.listCatalog(validated.connectionId);
+  }
+
+  public async publishCredentialCommit(
+    input: PublishModelHubCredentialCommitInput,
+  ): Promise<PublishModelHubCredentialCommitResult> {
+    const validated = validatePublishCredentialCommitInput(input);
+    return this.executor.transaction(async (transaction) => {
+      const journal = await findConnectionCommitRow(transaction, validated.connection.id);
+      if (
+        journal?.id !== validated.id ||
+        journal.phase !== "prepared" ||
+        journal.credential_provider_id !== validated.credentialProviderId
+      ) {
+        throw conflict("MODEL_HUB_CONNECTION_COMMIT_CONFLICT");
+      }
+      const now = this.clock.now();
+      const saved = await persistSqliteConnection(transaction, validated.connection, now);
+      const status = saved.enabled ? "not_tested" : "disabled";
+      const statusResult = await transaction.execute(
+        `UPDATE model_provider_connections
+         SET connection_status = ?, last_tested_at = NULL,
+             last_error_code = NULL, last_error_summary = NULL,
+             revision = revision + 1, updated_at = ?
+         WHERE id = ? AND revision = ?`,
+        [status, now, saved.id, saved.revision],
+      );
+      if (statusResult.rowsAffected !== 1) {
+        throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
+      }
+      const currentRow = await findConnectionRow(transaction, saved.id);
+      if (currentRow === null) {
+        throw modelHubError(
+          "MODEL_HUB_CONNECTION_WRITE_FAILED",
+          "The credential connection update was not persisted.",
+        );
+      }
+      let commit: ModelHubConnectionCommit | null = null;
+      if (validated.cleanupCredentialProviderId === null) {
+        await transaction.execute(
+          "DELETE FROM model_hub_connection_commits WHERE id = ? AND connection_id = ?",
+          [validated.id, saved.id],
+        );
+      } else {
+        await transaction.execute(
+          `UPDATE model_hub_connection_commits
+           SET phase = 'cleanup_pending', cleanup_credential_provider_id = ?, updated_at = ?
+           WHERE id = ? AND connection_id = ? AND phase = 'prepared'`,
+          [validated.cleanupCredentialProviderId, now, validated.id, saved.id],
+        );
+        commit = Object.freeze({
+          id: validated.id,
+          connectionId: saved.id,
+          phase: "cleanup_pending",
+          credentialProviderId: validated.credentialProviderId,
+          cleanupCredentialProviderId: validated.cleanupCredentialProviderId,
+          createdAt: journal.created_at,
+          updatedAt: now,
+        });
+      }
+      return Object.freeze({ connection: hydrateConnection(currentRow), commit });
+    });
+  }
+
+  public async finishConnectionCommit(connectionIdValue: string, idValue: string): Promise<void> {
+    const connectionId = boundedText(connectionIdValue, "connection commit connection id", 128);
+    const id = boundedText(idValue, "connection commit id", 128);
+    const result = await this.executor.execute(
+      "DELETE FROM model_hub_connection_commits WHERE connection_id = ? AND id = ?",
+      [connectionId, id],
+    );
+    if (result.rowsAffected === 0) {
+      const current = await this.findConnectionCommit(connectionId);
+      if (current !== null) throw conflict("MODEL_HUB_CONNECTION_COMMIT_CONFLICT");
+    }
   }
 
   public async listCapabilityEvidence(
@@ -875,52 +1034,81 @@ export class TauriModelHubStore implements ModelHubStore {
     const validated = validateCapabilityScanInput(input);
     await this.executor.transaction(async (transaction) => {
       await ensureCatalogEntryExists(transaction, validated.catalogEntryId);
-      const now = this.clock.now();
-      await transaction.execute(
-        `INSERT INTO model_capability_scans (
-           id, catalog_entry_id, scan_kind, status, evidence_version,
-           supported_count, unsupported_count, unknown_count,
-           error_code, error_summary, requested_at, started_at, completed_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          validated.scanId,
-          validated.catalogEntryId,
-          validated.scanKind,
-          validated.status,
-          validated.evidenceVersion,
-          validated.supportedCount,
-          validated.unsupportedCount,
-          validated.unknownCount,
-          validated.errorCode,
-          validated.errorSummary,
-          validated.requestedAt ?? now,
-          now,
-          now,
-        ],
-      );
-      for (const evidence of validated.evidence) {
-        await transaction.execute(
-          `INSERT INTO model_capability_evidence (
-             id, catalog_entry_id, scan_id, capability, verdict,
-             evidence_source, evidence_version, evidence_summary,
-             observed_at, expires_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            evidence.id,
-            validated.catalogEntryId,
-            validated.scanId,
-            evidence.capability,
-            evidence.verdict,
-            evidence.evidenceSource,
-            validated.evidenceVersion,
-            evidence.evidenceSummary,
-            now,
-            evidence.expiresAt,
-          ],
-        );
-      }
+      await persistSqliteCapabilityScan(transaction, validated, this.clock.now());
     });
     return this.listCapabilityEvidence(validated.catalogEntryId);
+  }
+
+  public async commitCapabilityProbeResult(
+    input: CommitCapabilityProbeResultInput,
+  ): Promise<CapabilityProbeCommitResult> {
+    const validated = validateCapabilityProbeCommitInput(input);
+    return this.executor.transaction(async (transaction) => {
+      const connectionGuard = await transaction.execute(
+        `UPDATE model_provider_connections
+         SET revision = revision
+         WHERE id = ? AND revision = ? AND enabled = 1
+           AND (
+             authentication_mode = 'none'
+             OR (credential_state = 'present' AND credential_ref IS NOT NULL)
+           )`,
+        [validated.connectionId, validated.expectedConnectionRevision],
+      );
+      if (connectionGuard.rowsAffected !== 1) {
+        throw conflict("MODEL_HUB_PROBE_TARGET_CONFLICT");
+      }
+      const catalogGuard = await transaction.execute(
+        `UPDATE model_catalog_entries
+         SET revision = revision
+         WHERE id = ? AND connection_id = ? AND revision = ?
+           AND provider_model_id = ? AND availability = 'available'`,
+        [
+          validated.catalogEntryId,
+          validated.connectionId,
+          validated.expectedCatalogRevision,
+          validated.expectedProviderModelId,
+        ],
+      );
+      if (catalogGuard.rowsAffected !== 1) {
+        throw conflict("MODEL_HUB_PROBE_TARGET_CONFLICT");
+      }
+      const now = this.clock.now();
+      if (validated.connectionTest !== null) {
+        const tested = await transaction.execute(
+          `UPDATE model_provider_connections
+           SET connection_status = ?, last_tested_at = ?, last_error_code = ?,
+               last_error_summary = ?, revision = revision + 1, updated_at = ?
+           WHERE id = ? AND revision = ?`,
+          [
+            validated.connectionTest.status,
+            now,
+            validated.connectionTest.errorCode,
+            validated.connectionTest.errorSummary,
+            now,
+            validated.connectionId,
+            validated.expectedConnectionRevision,
+          ],
+        );
+        if (tested.rowsAffected !== 1) {
+          throw conflict("MODEL_HUB_PROBE_TARGET_CONFLICT");
+        }
+      }
+      await persistSqliteCapabilityScan(transaction, validated.scan, now);
+      const connection = await findConnectionRow(transaction, validated.connectionId);
+      if (connection === null) {
+        throw conflict("MODEL_HUB_PROBE_TARGET_CONFLICT");
+      }
+      const evidenceRows = await transaction.select<CapabilityEvidenceRow>(
+        `${CAPABILITY_EVIDENCE_SELECT}
+         WHERE catalog_entry_id = ?
+         ORDER BY capability, observed_at DESC, id ASC`,
+        [validated.catalogEntryId],
+      );
+      return Object.freeze({
+        connection: hydrateConnection(connection),
+        evidence: Object.freeze(evidenceRows.map(hydrateCapabilityEvidence)),
+      });
+    });
   }
 
   public async findCostPrivacyProfile(
@@ -1310,13 +1498,16 @@ export class TauriModelHubStore implements ModelHubStore {
   public async startInvocation(input: StartModelInvocationInput): Promise<ModelInvocationFact> {
     const validated = validateInvocationStart(input);
     const now = this.clock.now();
-    await this.executor.execute(
+    const result = await this.executor.execute(
       `INSERT INTO model_invocation_facts (
          id, task, route_task, connection_id, catalog_entry_id,
          provider_kind_snapshot, model_id_snapshot, route_reason, status, attempt,
          fallback_from_invocation_id, privacy_policy, data_destination,
          maximum_cost_micros, currency, started_at, created_at, revision
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+       )
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, 1
+       FROM model_provider_connections AS connection
+       WHERE connection.id = ? AND connection.enabled = 1`,
       [
         validated.id,
         validated.task,
@@ -1334,9 +1525,27 @@ export class TauriModelHubStore implements ModelHubStore {
         validated.currency,
         now,
         now,
+        validated.connectionId,
       ],
     );
+    if (result.rowsAffected !== 1) {
+      const connection = await this.findConnection(validated.connectionId);
+      throw connection === null
+        ? modelHubError("MODEL_HUB_CONNECTION_NOT_FOUND", "The provider connection does not exist.")
+        : modelHubError(
+            "MODEL_HUB_CONNECTION_DISABLED",
+            "The provider connection is disabled and cannot start a model invocation.",
+          );
+    }
     return this.requireInvocation(validated.id);
+  }
+
+  public async findInvocation(idValue: string): Promise<ModelInvocationFact | null> {
+    const id = boundedText(idValue, "invocation id", 128);
+    const rows = await this.executor.select<InvocationRow>(`${INVOCATION_SELECT} WHERE id = ?`, [
+      id,
+    ]);
+    return rows[0] === undefined ? null : hydrateInvocation(rows[0]);
   }
 
   public async finishInvocation(input: FinishModelInvocationInput): Promise<ModelInvocationFact> {
@@ -1368,17 +1577,16 @@ export class TauriModelHubStore implements ModelHubStore {
   }
 
   private async requireInvocation(id: string): Promise<ModelInvocationFact> {
-    const rows = await this.executor.select<InvocationRow>(`${INVOCATION_SELECT} WHERE id = ?`, [
-      id,
-    ]);
-    if (rows[0] === undefined) {
+    const invocation = await this.findInvocation(id);
+    if (invocation === null) {
       throw modelHubError("MODEL_HUB_INVOCATION_NOT_FOUND", "The invocation fact does not exist.");
     }
-    return hydrateInvocation(rows[0]);
+    return invocation;
   }
 }
 
 interface MemoryModelHubState {
+  readonly connectionCommits: Record<string, ModelHubConnectionCommit>;
   readonly connections: Record<string, ModelProviderConnection>;
   readonly catalog: Record<string, ModelCatalogEntry>;
   readonly catalogSyncs: Record<string, ModelCatalogSync>;
@@ -1392,7 +1600,7 @@ interface MemoryModelHubState {
 }
 
 export class InMemoryModelHubStore implements ModelHubStore {
-  private readonly state: MemoryModelHubState;
+  private state: MemoryModelHubState;
 
   public constructor(
     private readonly clock: Clock,
@@ -1489,6 +1697,50 @@ export class InMemoryModelHubStore implements ModelHubStore {
       this.state.connections[saved.id] = saved;
       this.commit();
       return saved;
+    });
+  }
+
+  public retireConnection(
+    input: RetireModelProviderConnectionInput,
+  ): Promise<ModelProviderConnection> {
+    return Promise.resolve().then(() => {
+      const connectionId = boundedText(input.connectionId, "connection id", 128);
+      const expectedRevision = validateRequiredRevision(input.expectedRevision);
+      const existing = this.state.connections[connectionId];
+      if (existing === undefined) {
+        throw modelHubError(
+          "MODEL_HUB_CONNECTION_NOT_FOUND",
+          "The provider connection does not exist.",
+        );
+      }
+      if (isRetiredModelProviderConnection(existing)) {
+        return Object.freeze(structuredClone(existing));
+      }
+      if (existing.revision !== expectedRevision) {
+        throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
+      }
+      const retired: ModelProviderConnection = Object.freeze({
+        ...existing,
+        credentialRef: null,
+        credentialState: "missing",
+        authenticationMode:
+          existing.providerKind === "custom_openai_compatible"
+            ? "none"
+            : existing.authenticationMode,
+        credentialHeaderName:
+          existing.providerKind === "custom_openai_compatible"
+            ? null
+            : existing.credentialHeaderName,
+        enabled: false,
+        connectionStatus: "disabled",
+        lastErrorCode: RETIRED_CONNECTION_ERROR_CODE,
+        lastErrorSummary: RETIRED_CONNECTION_SUMMARY,
+        revision: existing.revision + 1,
+        updatedAt: this.clock.now(),
+      });
+      this.state.connections[connectionId] = retired;
+      this.commit();
+      return retired;
     });
   }
 
@@ -1629,6 +1881,189 @@ export class InMemoryModelHubStore implements ModelHubStore {
     });
   }
 
+  public findConnectionCommit(connectionIdValue: string): Promise<ModelHubConnectionCommit | null> {
+    const connectionId = boundedText(connectionIdValue, "connection commit connection id", 128);
+    const commit = this.state.connectionCommits[connectionId];
+    return Promise.resolve(commit === undefined ? null : Object.freeze(structuredClone(commit)));
+  }
+
+  public listConnectionCommits(): Promise<readonly ModelHubConnectionCommit[]> {
+    return Promise.resolve(
+      Object.freeze(
+        Object.values(this.state.connectionCommits)
+          .sort(
+            (left, right) =>
+              left.updatedAt.localeCompare(right.updatedAt) || left.id.localeCompare(right.id),
+          )
+          .map((commit) => Object.freeze(structuredClone(commit))),
+      ),
+    );
+  }
+
+  public prepareConnectionCommit(
+    input: PrepareModelHubConnectionCommitInput,
+  ): Promise<ModelHubConnectionCommit> {
+    return Promise.resolve().then(() => {
+      const validated = validatePrepareConnectionCommitInput(input);
+      if (
+        this.state.connectionCommits[validated.connectionId] !== undefined ||
+        Object.values(this.state.connectionCommits).some(({ id }) => id === validated.id)
+      ) {
+        throw conflict("MODEL_HUB_CONNECTION_COMMIT_CONFLICT");
+      }
+      const now = this.clock.now();
+      const saved: ModelHubConnectionCommit = Object.freeze({
+        id: validated.id,
+        connectionId: validated.connectionId,
+        phase: "prepared",
+        credentialProviderId: validated.credentialProviderId,
+        cleanupCredentialProviderId: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      this.state.connectionCommits[saved.connectionId] = saved;
+      this.commit();
+      return saved;
+    });
+  }
+
+  public publishConnectionCommit(
+    input: PublishModelHubConnectionCommitInput,
+  ): Promise<PublishModelHubConnectionCommitResult> {
+    return Promise.resolve().then(() => {
+      const validated = validatePublishConnectionCommitInput(input);
+      const journal = this.state.connectionCommits[validated.connection.id];
+      if (
+        journal?.id !== validated.id ||
+        journal.phase !== "prepared" ||
+        journal.credentialProviderId !== validated.credentialProviderId
+      ) {
+        throw conflict("MODEL_HUB_CONNECTION_COMMIT_CONFLICT");
+      }
+      const working = structuredClone(this.state);
+      const now = this.clock.now();
+      const saved = persistMemoryConnection(working, validated.connection, now);
+      working.connections[saved.id] = Object.freeze({
+        ...saved,
+        connectionStatus: "ready",
+        lastTestedAt: now,
+        lastErrorCode: null,
+        lastErrorSummary: null,
+        revision: saved.revision + 1,
+        updatedAt: now,
+      });
+      persistMemoryCatalogSync(working, validated.catalog, now);
+      const current = working.connections[saved.id];
+      if (current === undefined) {
+        throw modelHubError(
+          "MODEL_HUB_CONNECTION_WRITE_FAILED",
+          "The verified connection was not persisted.",
+        );
+      }
+      const currentCatalog = Object.freeze(
+        Object.values(working.catalog)
+          .filter(({ connectionId }) => connectionId === saved.id)
+          .sort(
+            (left, right) =>
+              Number(right.availability === "available") -
+                Number(left.availability === "available") ||
+              left.displayName.localeCompare(right.displayName) ||
+              left.providerModelId.localeCompare(right.providerModelId),
+          )
+          .map((entry) => Object.freeze(structuredClone(entry))),
+      );
+      if (
+        !currentCatalog.some(
+          ({ availability, lastSyncId }) =>
+            availability === "available" && lastSyncId === validated.catalog.syncId,
+        )
+      ) {
+        throw modelHubError(
+          "MODEL_HUB_CONNECTION_COMMIT_CATALOG_EMPTY",
+          "A verified connection cannot be published without an available catalog entry.",
+        );
+      }
+      let commit: ModelHubConnectionCommit | null = null;
+      if (validated.cleanupCredentialProviderId === null) {
+        Reflect.deleteProperty(working.connectionCommits, saved.id);
+      } else {
+        commit = Object.freeze({
+          ...journal,
+          phase: "cleanup_pending",
+          cleanupCredentialProviderId: validated.cleanupCredentialProviderId,
+          updatedAt: now,
+        });
+        working.connectionCommits[saved.id] = commit;
+      }
+      this.state = working;
+      this.commit();
+      return Object.freeze({
+        connection: Object.freeze(structuredClone(current)),
+        catalog: currentCatalog,
+        commit,
+      });
+    });
+  }
+
+  public publishCredentialCommit(
+    input: PublishModelHubCredentialCommitInput,
+  ): Promise<PublishModelHubCredentialCommitResult> {
+    return Promise.resolve().then(() => {
+      const validated = validatePublishCredentialCommitInput(input);
+      const journal = this.state.connectionCommits[validated.connection.id];
+      if (
+        journal?.id !== validated.id ||
+        journal.phase !== "prepared" ||
+        journal.credentialProviderId !== validated.credentialProviderId
+      ) {
+        throw conflict("MODEL_HUB_CONNECTION_COMMIT_CONFLICT");
+      }
+      const working = structuredClone(this.state);
+      const now = this.clock.now();
+      const saved = persistMemoryConnection(working, validated.connection, now);
+      const current: ModelProviderConnection = Object.freeze({
+        ...saved,
+        connectionStatus: saved.enabled ? "not_tested" : "disabled",
+        lastTestedAt: null,
+        lastErrorCode: null,
+        lastErrorSummary: null,
+        revision: saved.revision + 1,
+        updatedAt: now,
+      });
+      working.connections[saved.id] = current;
+      let commit: ModelHubConnectionCommit | null = null;
+      if (validated.cleanupCredentialProviderId === null) {
+        Reflect.deleteProperty(working.connectionCommits, saved.id);
+      } else {
+        commit = Object.freeze({
+          ...journal,
+          phase: "cleanup_pending",
+          cleanupCredentialProviderId: validated.cleanupCredentialProviderId,
+          updatedAt: now,
+        });
+        working.connectionCommits[saved.id] = commit;
+      }
+      this.state = working;
+      this.commit();
+      return Object.freeze({
+        connection: Object.freeze(structuredClone(current)),
+        commit,
+      });
+    });
+  }
+
+  public finishConnectionCommit(connectionIdValue: string, idValue: string): Promise<void> {
+    return Promise.resolve().then(() => {
+      const connectionId = boundedText(connectionIdValue, "connection commit connection id", 128);
+      const id = boundedText(idValue, "connection commit id", 128);
+      const current = this.state.connectionCommits[connectionId];
+      if (current === undefined) return;
+      if (current.id !== id) throw conflict("MODEL_HUB_CONNECTION_COMMIT_CONFLICT");
+      Reflect.deleteProperty(this.state.connectionCommits, connectionId);
+      this.commit();
+    });
+  }
+
   public listCapabilityEvidence(
     catalogEntryIdValue: string,
   ): Promise<readonly ModelCapabilityEvidence[]> {
@@ -1692,6 +2127,91 @@ export class InMemoryModelHubStore implements ModelHubStore {
       }
       this.commit();
       return this.listCapabilityEvidence(validated.catalogEntryId);
+    });
+  }
+
+  public commitCapabilityProbeResult(
+    input: CommitCapabilityProbeResultInput,
+  ): Promise<CapabilityProbeCommitResult> {
+    return Promise.resolve().then(() => {
+      const validated = validateCapabilityProbeCommitInput(input);
+      const nextState = structuredClone(this.state);
+      const connection = nextState.connections[validated.connectionId];
+      const catalogEntry = nextState.catalog[validated.catalogEntryId];
+      if (
+        connection?.revision !== validated.expectedConnectionRevision ||
+        !connection.enabled ||
+        (connection.authenticationMode !== "none" &&
+          (connection.credentialState !== "present" || connection.credentialRef === null)) ||
+        catalogEntry?.connectionId !== validated.connectionId ||
+        catalogEntry.revision !== validated.expectedCatalogRevision ||
+        catalogEntry.providerModelId !== validated.expectedProviderModelId ||
+        catalogEntry.availability !== "available"
+      ) {
+        throw conflict("MODEL_HUB_PROBE_TARGET_CONFLICT");
+      }
+      if (nextState.capabilityScanIds[validated.scan.scanId] === true) {
+        throw conflict("MODEL_HUB_CAPABILITY_SCAN_CONFLICT");
+      }
+      for (const evidence of validated.scan.evidence) {
+        if (nextState.capabilityEvidence[evidence.id] !== undefined) {
+          throw conflict("MODEL_HUB_CAPABILITY_EVIDENCE_CONFLICT");
+        }
+        const duplicate = Object.values(nextState.capabilityEvidence).some(
+          (stored) =>
+            stored.catalogEntryId === validated.catalogEntryId &&
+            stored.capability === evidence.capability &&
+            stored.evidenceSource === evidence.evidenceSource &&
+            stored.evidenceVersion === validated.scan.evidenceVersion,
+        );
+        if (duplicate) {
+          throw conflict("MODEL_HUB_CAPABILITY_EVIDENCE_CONFLICT");
+        }
+      }
+      const now = this.clock.now();
+      let committedConnection = connection;
+      if (validated.connectionTest !== null) {
+        committedConnection = Object.freeze({
+          ...connection,
+          connectionStatus: validated.connectionTest.status,
+          lastTestedAt: now,
+          lastErrorCode: validated.connectionTest.errorCode,
+          lastErrorSummary: validated.connectionTest.errorSummary,
+          revision: connection.revision + 1,
+          updatedAt: now,
+        });
+        nextState.connections[validated.connectionId] = committedConnection;
+      }
+      nextState.capabilityScanIds[validated.scan.scanId] = true;
+      for (const evidence of validated.scan.evidence) {
+        nextState.capabilityEvidence[evidence.id] = Object.freeze({
+          id: evidence.id,
+          catalogEntryId: validated.catalogEntryId,
+          scanId: validated.scan.scanId,
+          capability: evidence.capability,
+          verdict: evidence.verdict,
+          evidenceSource: evidence.evidenceSource,
+          evidenceVersion: validated.scan.evidenceVersion,
+          evidenceSummary: evidence.evidenceSummary,
+          observedAt: now,
+          expiresAt: evidence.expiresAt,
+        });
+      }
+      this.state = nextState;
+      this.commit();
+      const committedEvidence = Object.values(nextState.capabilityEvidence)
+        .filter((evidence) => evidence.catalogEntryId === validated.catalogEntryId)
+        .map((evidence) => Object.freeze(structuredClone(evidence)))
+        .sort(
+          (left, right) =>
+            left.capability.localeCompare(right.capability) ||
+            right.observedAt.localeCompare(left.observedAt) ||
+            left.id.localeCompare(right.id),
+        );
+      return Object.freeze({
+        connection: Object.freeze(structuredClone(committedConnection)),
+        evidence: Object.freeze(committedEvidence),
+      });
     });
   }
 
@@ -1971,10 +2491,17 @@ export class InMemoryModelHubStore implements ModelHubStore {
       if (this.state.invocations[validated.id] !== undefined) {
         throw conflict("MODEL_HUB_INVOCATION_CONFLICT");
       }
-      if (this.state.connections[validated.connectionId] === undefined) {
+      const connection = this.state.connections[validated.connectionId];
+      if (connection === undefined) {
         throw modelHubError(
           "MODEL_HUB_CONNECTION_NOT_FOUND",
           "The provider connection does not exist.",
+        );
+      }
+      if (!connection.enabled) {
+        throw modelHubError(
+          "MODEL_HUB_CONNECTION_DISABLED",
+          "The provider connection is disabled and cannot start a model invocation.",
         );
       }
       const now = this.clock.now();
@@ -2011,6 +2538,14 @@ export class InMemoryModelHubStore implements ModelHubStore {
     });
   }
 
+  public findInvocation(idValue: string): Promise<ModelInvocationFact | null> {
+    const id = boundedText(idValue, "invocation id", 128);
+    const invocation = this.state.invocations[id];
+    return Promise.resolve(
+      invocation === undefined ? null : Object.freeze(structuredClone(invocation)),
+    );
+  }
+
   public finishInvocation(input: FinishModelInvocationInput): Promise<ModelInvocationFact> {
     return Promise.resolve().then(() => {
       const validated = validateInvocationFinish(input);
@@ -2045,14 +2580,14 @@ export class InMemoryModelHubStore implements ModelHubStore {
 export const DEVELOPMENT_MODEL_HUB_KEY = "inkshadow.development.model-hub.v1";
 
 interface BrowserModelHubDatabase {
-  readonly schemaVersion: 4;
+  readonly schemaVersion: 5;
   readonly state: MemoryModelHubState;
 }
 
 export class BrowserDevelopmentModelHubStore extends InMemoryModelHubStore {
   public constructor(storage: Storage, clock: Clock) {
     super(clock, readBrowserState(storage), (state) => {
-      const database: BrowserModelHubDatabase = { schemaVersion: 4, state };
+      const database: BrowserModelHubDatabase = { schemaVersion: 5, state };
       storage.setItem(DEVELOPMENT_MODEL_HUB_KEY, JSON.stringify(database));
     });
   }
@@ -2060,6 +2595,7 @@ export class BrowserDevelopmentModelHubStore extends InMemoryModelHubStore {
 
 function createEmptyMemoryState(): MemoryModelHubState {
   return {
+    connectionCommits: {},
     connections: {},
     catalog: {},
     catalogSyncs: {},
@@ -2083,16 +2619,26 @@ function readBrowserState(storage: Storage): MemoryModelHubState {
     if (!isRecord(parsed)) {
       throw modelHubError("MODEL_HUB_STORE_CORRUPT", "The browser Model Hub store is corrupt.");
     }
-    if (parsed.schemaVersion === 4 && isMemoryState(parsed.state)) {
+    if (parsed.schemaVersion === 5 && isMemoryState(parsed.state)) {
       return normalizeBrowserExpertOptions(parsed.state, false);
     }
-    if (parsed.schemaVersion === 3 && isMemoryState(parsed.state)) {
-      return normalizeBrowserExpertOptions(parsed.state, true);
+    if (parsed.schemaVersion === 4 && isVersionFourMemoryState(parsed.state)) {
+      return normalizeBrowserExpertOptions(
+        {
+          ...parsed.state,
+          connectionCommits: {},
+        },
+        false,
+      );
+    }
+    if (parsed.schemaVersion === 3 && isVersionFourMemoryState(parsed.state)) {
+      return normalizeBrowserExpertOptions({ ...parsed.state, connectionCommits: {} }, true);
     }
     if (parsed.schemaVersion === 2 && isVersionTwoMemoryState(parsed.state)) {
       return normalizeBrowserExpertOptions(
         {
           ...parsed.state,
+          connectionCommits: {},
           evaluationResults: {},
         },
         true,
@@ -2102,6 +2648,7 @@ function readBrowserState(storage: Storage): MemoryModelHubState {
       return normalizeBrowserExpertOptions(
         {
           ...parsed.state,
+          connectionCommits: {},
           costPrivacyProfiles: {},
           evaluationResults: {},
         },
@@ -2120,6 +2667,26 @@ function normalizeBrowserExpertOptions(
   state: MemoryModelHubState,
   migratingLegacySchema: boolean,
 ): MemoryModelHubState {
+  const connectionCommits = Object.fromEntries(
+    Object.entries(state.connectionCommits).map(([key, value]) => {
+      if (!isRecord(value) || value.connectionId !== key) {
+        throw modelHubError(
+          "MODEL_HUB_STORE_CORRUPT",
+          "A browser Model Hub connection commit is invalid.",
+        );
+      }
+      const normalized = hydrateConnectionCommit({
+        id: value.id,
+        connection_id: value.connectionId,
+        phase: value.phase,
+        credential_provider_id: value.credentialProviderId ?? null,
+        cleanup_credential_provider_id: value.cleanupCredentialProviderId ?? null,
+        created_at: value.createdAt,
+        updated_at: value.updatedAt,
+      });
+      return [key, normalized];
+    }),
+  );
   const connections = Object.fromEntries(
     Object.entries(state.connections).map(([key, value]) => {
       if (!isRecord(value) || value.id !== key || !isModelProviderKind(value.providerKind)) {
@@ -2215,10 +2782,19 @@ function normalizeBrowserExpertOptions(
       return [key, normalized];
     }),
   );
-  return { ...state, connections };
+  return { ...state, connectionCommits, connections };
 }
 
 function isMemoryState(value: unknown): value is MemoryModelHubState {
+  return (
+    isVersionFourMemoryState(value) &&
+    isRecord((value as Record<string, unknown>).connectionCommits)
+  );
+}
+
+function isVersionFourMemoryState(
+  value: unknown,
+): value is Omit<MemoryModelHubState, "connectionCommits"> {
   return (
     isVersionTwoMemoryState(value) && isRecord((value as Record<string, unknown>).evaluationResults)
   );
@@ -2226,7 +2802,7 @@ function isMemoryState(value: unknown): value is MemoryModelHubState {
 
 function isVersionTwoMemoryState(
   value: unknown,
-): value is Omit<MemoryModelHubState, "evaluationResults"> {
+): value is Omit<MemoryModelHubState, "connectionCommits" | "evaluationResults"> {
   return (
     isLegacyMemoryState(value) && isRecord((value as Record<string, unknown>).costPrivacyProfiles)
   );
@@ -2234,7 +2810,10 @@ function isVersionTwoMemoryState(
 
 function isLegacyMemoryState(
   value: unknown,
-): value is Omit<MemoryModelHubState, "costPrivacyProfiles" | "evaluationResults"> {
+): value is Omit<
+  MemoryModelHubState,
+  "connectionCommits" | "costPrivacyProfiles" | "evaluationResults"
+> {
   if (!isRecord(value)) {
     return false;
   }
@@ -2452,6 +3031,106 @@ function validateCatalogInput(input: SyncModelCatalogInput) {
   });
 }
 
+function validatePrepareConnectionCommitInput(input: PrepareModelHubConnectionCommitInput) {
+  return Object.freeze({
+    id: boundedText(input.id, "connection commit id", 128),
+    connectionId: boundedText(input.connectionId, "connection commit connection id", 128),
+    credentialProviderId: optionalCredentialProviderId(input.credentialProviderId),
+  });
+}
+
+function validatePublishConnectionCommitInput(input: PublishModelHubConnectionCommitInput) {
+  const id = boundedText(input.id, "connection commit id", 128);
+  const connection = validateConnectionInput(input.connection);
+  const catalog = validateCatalogInput(input.catalog);
+  const credentialProviderId = optionalCredentialProviderId(input.credentialProviderId);
+  const cleanupCredentialProviderId = optionalCredentialProviderId(
+    input.cleanupCredentialProviderId,
+  );
+  if (!connection.enabled || catalog.connectionId !== connection.id) {
+    throw modelHubError(
+      "MODEL_HUB_CONNECTION_COMMIT_INVALID",
+      "A connection commit must publish one enabled connection and its own catalog.",
+    );
+  }
+  if (catalog.status !== "succeeded" || catalog.models.length === 0) {
+    throw modelHubError(
+      "MODEL_HUB_CONNECTION_COMMIT_CATALOG_EMPTY",
+      "A verified connection commit requires a successful non-empty catalog.",
+    );
+  }
+  if (
+    credentialProviderId !== null &&
+    connection.credentialRef !== `keyring:model-hub:${credentialProviderId}`
+  ) {
+    throw modelHubError(
+      "MODEL_HUB_CONNECTION_COMMIT_CREDENTIAL_MISMATCH",
+      "The prepared credential slot does not match the connection credential reference.",
+    );
+  }
+  if (
+    cleanupCredentialProviderId !== null &&
+    cleanupCredentialProviderId === credentialProviderId
+  ) {
+    throw modelHubError(
+      "MODEL_HUB_CONNECTION_COMMIT_CREDENTIAL_MISMATCH",
+      "The active credential slot cannot also be scheduled for cleanup.",
+    );
+  }
+  return Object.freeze({
+    id,
+    connection,
+    catalog,
+    credentialProviderId,
+    cleanupCredentialProviderId,
+  });
+}
+
+function validatePublishCredentialCommitInput(input: PublishModelHubCredentialCommitInput) {
+  const id = boundedText(input.id, "connection commit id", 128);
+  const connection = validateConnectionInput(input.connection);
+  const credentialProviderId = optionalCredentialProviderId(input.credentialProviderId);
+  const cleanupCredentialProviderId = optionalCredentialProviderId(
+    input.cleanupCredentialProviderId,
+  );
+  if (
+    credentialProviderId !== null &&
+    connection.credentialRef !== `keyring:model-hub:${credentialProviderId}`
+  ) {
+    throw modelHubError(
+      "MODEL_HUB_CONNECTION_COMMIT_CREDENTIAL_MISMATCH",
+      "The prepared credential slot does not match the connection credential reference.",
+    );
+  }
+  if (
+    cleanupCredentialProviderId !== null &&
+    cleanupCredentialProviderId === credentialProviderId
+  ) {
+    throw modelHubError(
+      "MODEL_HUB_CONNECTION_COMMIT_CREDENTIAL_MISMATCH",
+      "The active credential slot cannot also be scheduled for cleanup.",
+    );
+  }
+  return Object.freeze({
+    id,
+    connection,
+    credentialProviderId,
+    cleanupCredentialProviderId,
+  });
+}
+
+function optionalCredentialProviderId(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9._-]{1,128}$/u.test(normalized)) {
+    throw modelHubError(
+      "MODEL_HUB_CREDENTIAL_PROVIDER_ID_INVALID",
+      "The credential provider identifier is invalid.",
+    );
+  }
+  return normalized;
+}
+
 function validateCapabilityScanInput(input: RecordCapabilityScanInput) {
   const evidence = (input.evidence ?? []).map((item) => {
     if (!isModelHubCapability(item.capability)) {
@@ -2501,6 +3180,35 @@ function validateCapabilityScanInput(input: RecordCapabilityScanInput) {
     errorCode,
     errorSummary: safeDiagnosticText(input.errorSummary, "capability scan error summary", 1000),
     requestedAt: optionalText(input.requestedAt, "capability scan request timestamp", 64),
+  });
+}
+
+function validateCapabilityProbeCommitInput(input: CommitCapabilityProbeResultInput) {
+  const connectionId = boundedText(input.connectionId, "connection id", 128);
+  const catalogEntryId = boundedText(input.catalogEntryId, "catalog entry id", 128);
+  const scan = validateCapabilityScanInput(input.scan);
+  if (scan.catalogEntryId !== catalogEntryId) {
+    throw modelHubError(
+      "MODEL_HUB_PROBE_TARGET_INVALID",
+      "The capability scan does not belong to the guarded catalog entry.",
+    );
+  }
+  const connectionTest =
+    input.connectionTest === null || input.connectionTest === undefined
+      ? null
+      : validateConnectionTestInput({
+          ...input.connectionTest,
+          connectionId,
+          expectedRevision: input.expectedConnectionRevision,
+        });
+  return Object.freeze({
+    connectionId,
+    expectedConnectionRevision: validateRequiredRevision(input.expectedConnectionRevision),
+    catalogEntryId,
+    expectedCatalogRevision: validateRequiredRevision(input.expectedCatalogRevision),
+    expectedProviderModelId: boundedText(input.expectedProviderModelId, "provider model id", 512),
+    scan,
+    connectionTest,
   });
 }
 
@@ -2770,6 +3478,381 @@ async function findConnectionRow(
   return rows[0] ?? null;
 }
 
+async function findConnectionCommitRow(
+  executor: TransactionExecutor,
+  connectionId: string,
+): Promise<ConnectionCommitRow | null> {
+  const rows = await executor.select<ConnectionCommitRow>(
+    `SELECT id, connection_id, phase, credential_provider_id,
+            cleanup_credential_provider_id, created_at, updated_at
+     FROM model_hub_connection_commits
+     WHERE connection_id = ?`,
+    [connectionId],
+  );
+  return rows[0] ?? null;
+}
+
+async function persistSqliteConnection(
+  transaction: TransactionExecutor,
+  validated: ReturnType<typeof validateConnectionInput>,
+  now: string,
+): Promise<ModelProviderConnection> {
+  const existing = await findConnectionRow(transaction, validated.id);
+  if (existing === null && validated.expectedRevision !== null) {
+    throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
+  }
+  if (
+    existing !== null &&
+    (validated.expectedRevision === null || validated.expectedRevision !== existing.revision)
+  ) {
+    throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
+  }
+  if (existing !== null && existing.provider_kind !== validated.providerKind) {
+    throw modelHubError(
+      "MODEL_HUB_PROVIDER_KIND_IMMUTABLE",
+      "A connection id cannot be reassigned to a different provider kind.",
+    );
+  }
+  const endpointIdentityChanged =
+    existing !== null && connectionEndpointIdentityChanged(hydrateConnection(existing), validated);
+  const revision = existing === null ? 1 : existing.revision + 1;
+  if (existing === null) {
+    await transaction.execute(
+      `INSERT INTO model_provider_connections (
+         id, provider_kind, display_name, protocol, region, workspace_id,
+         endpoint_id, base_url, credential_ref, credential_state,
+         authentication_mode, credential_header_name, model_discovery_path,
+         text_generation_path, embedding_path, request_timeout_ms, retry_limit,
+         legacy_provider_id, enabled, revision, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+      [
+        validated.id,
+        validated.providerKind,
+        validated.displayName,
+        validated.protocol,
+        validated.region,
+        validated.workspaceId,
+        validated.endpointId,
+        validated.baseUrl,
+        validated.credentialRef,
+        validated.credentialState,
+        validated.authenticationMode,
+        validated.credentialHeaderName,
+        validated.modelDiscoveryPath,
+        validated.textGenerationPath,
+        validated.embeddingPath,
+        validated.requestTimeoutMs,
+        validated.retryLimit,
+        validated.legacyProviderId,
+        validated.enabled ? 1 : 0,
+        now,
+        now,
+      ],
+    );
+  } else {
+    const result = await transaction.execute(
+      `UPDATE model_provider_connections
+       SET provider_kind = ?, display_name = ?, protocol = ?, region = ?,
+           workspace_id = ?, endpoint_id = ?, base_url = ?, credential_ref = ?,
+           credential_state = ?, authentication_mode = ?, credential_header_name = ?,
+           model_discovery_path = ?, text_generation_path = ?, embedding_path = ?,
+           request_timeout_ms = ?, retry_limit = ?, legacy_provider_id = ?, enabled = ?,
+           revision = ?, updated_at = ?
+       WHERE id = ? AND revision = ?`,
+      [
+        validated.providerKind,
+        validated.displayName,
+        validated.protocol,
+        validated.region,
+        validated.workspaceId,
+        validated.endpointId,
+        validated.baseUrl,
+        validated.credentialRef,
+        validated.credentialState,
+        validated.authenticationMode,
+        validated.credentialHeaderName,
+        validated.modelDiscoveryPath,
+        validated.textGenerationPath,
+        validated.embeddingPath,
+        validated.requestTimeoutMs,
+        validated.retryLimit,
+        validated.legacyProviderId,
+        validated.enabled ? 1 : 0,
+        revision,
+        now,
+        validated.id,
+        existing.revision,
+      ],
+    );
+    if (result.rowsAffected !== 1) throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
+    if (endpointIdentityChanged) {
+      await invalidateSqliteConnectionDerivedState(transaction, validated.id, now);
+    }
+  }
+  const saved = await findConnectionRow(transaction, validated.id);
+  if (saved === null) {
+    throw modelHubError("MODEL_HUB_CONNECTION_WRITE_FAILED", "The connection was not persisted.");
+  }
+  return hydrateConnection(saved);
+}
+
+async function persistSqliteCatalogSync(
+  transaction: TransactionExecutor,
+  validated: ReturnType<typeof validateCatalogInput>,
+  now: string,
+): Promise<void> {
+  const connection = await findConnectionRow(transaction, validated.connectionId);
+  if (connection === null) {
+    throw modelHubError(
+      "MODEL_HUB_CONNECTION_NOT_FOUND",
+      "The provider connection does not exist.",
+    );
+  }
+  await transaction.execute(
+    `INSERT INTO model_catalog_syncs (
+       id, connection_id, source, status, discovered_model_count,
+       next_page_token_present, error_code, error_summary, started_at, completed_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      validated.syncId,
+      validated.connectionId,
+      validated.source,
+      validated.status,
+      validated.models.length,
+      validated.nextPageTokenPresent ? 1 : 0,
+      validated.errorCode,
+      validated.errorSummary,
+      validated.startedAt ?? now,
+      now,
+    ],
+  );
+  for (const model of validated.models) {
+    const existingRows = await transaction.select<CatalogRow>(
+      `${CATALOG_SELECT} WHERE connection_id = ? AND provider_model_id = ?`,
+      [validated.connectionId, model.providerModelId],
+    );
+    const existing = existingRows[0];
+    if (existing === undefined) {
+      await transaction.execute(
+        `INSERT INTO model_catalog_entries (
+           id, connection_id, provider_model_id, display_name, owned_by,
+           catalog_source, availability, lifecycle, input_token_limit,
+           output_token_limit, first_discovered_at, last_seen_at, stale_after,
+           last_sync_id, revision
+         ) VALUES (?, ?, ?, ?, ?, ?, 'available', ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [
+          model.id,
+          validated.connectionId,
+          model.providerModelId,
+          model.displayName,
+          model.ownedBy,
+          validated.source,
+          model.lifecycle,
+          model.inputTokenLimit,
+          model.outputTokenLimit,
+          now,
+          now,
+          model.staleAfter,
+          validated.syncId,
+        ],
+      );
+    } else {
+      await transaction.execute(
+        `UPDATE model_catalog_entries
+         SET display_name = ?, owned_by = ?, catalog_source = ?, availability = 'available',
+             lifecycle = ?, input_token_limit = ?, output_token_limit = ?,
+             last_seen_at = ?, stale_after = ?, last_sync_id = ?, revision = revision + 1
+         WHERE id = ?`,
+        [
+          model.displayName,
+          model.ownedBy,
+          validated.source,
+          model.lifecycle,
+          model.inputTokenLimit,
+          model.outputTokenLimit,
+          now,
+          model.staleAfter,
+          validated.syncId,
+          existing.id,
+        ],
+      );
+    }
+  }
+  if (validated.status === "succeeded" && validated.source === "provider_api") {
+    await transaction.execute(
+      `UPDATE model_catalog_entries
+       SET availability = 'unavailable', revision = revision + 1
+       WHERE connection_id = ?
+         AND catalog_source = 'provider_api'
+         AND (last_sync_id IS NULL OR last_sync_id <> ?)
+         AND availability <> 'unavailable'`,
+      [validated.connectionId, validated.syncId],
+    );
+  }
+  const result = await transaction.execute(
+    `UPDATE model_provider_connections
+     SET catalog_sync_status = ?, last_catalog_synced_at = ?,
+         last_error_code = ?, last_error_summary = ?, revision = revision + 1,
+         updated_at = ?
+     WHERE id = ?`,
+    [
+      validated.status,
+      now,
+      validated.errorCode,
+      validated.errorSummary,
+      now,
+      validated.connectionId,
+    ],
+  );
+  if (result.rowsAffected !== 1) {
+    throw modelHubError(
+      "MODEL_HUB_CONNECTION_WRITE_FAILED",
+      "The catalog sync did not update its connection.",
+    );
+  }
+}
+
+function persistMemoryConnection(
+  state: MemoryModelHubState,
+  validated: ReturnType<typeof validateConnectionInput>,
+  now: string,
+): ModelProviderConnection {
+  const existing = state.connections[validated.id];
+  if (existing === undefined && validated.expectedRevision !== null) {
+    throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
+  }
+  if (
+    existing !== undefined &&
+    (validated.expectedRevision === null || existing.revision !== validated.expectedRevision)
+  ) {
+    throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
+  }
+  if (existing !== undefined && existing.providerKind !== validated.providerKind) {
+    throw modelHubError(
+      "MODEL_HUB_PROVIDER_KIND_IMMUTABLE",
+      "A connection id cannot be reassigned to a different provider kind.",
+    );
+  }
+  const endpointIdentityChanged =
+    existing !== undefined && connectionEndpointIdentityChanged(existing, validated);
+  if (endpointIdentityChanged) {
+    invalidateMemoryConnectionDerivedState(state, validated.id, now);
+  }
+  const saved: ModelProviderConnection = Object.freeze({
+    id: validated.id,
+    providerKind: validated.providerKind,
+    displayName: validated.displayName,
+    protocol: validated.protocol,
+    region: validated.region,
+    workspaceId: validated.workspaceId,
+    endpointId: validated.endpointId,
+    baseUrl: validated.baseUrl,
+    credentialRef: validated.credentialRef,
+    credentialState: validated.credentialState,
+    authenticationMode: validated.authenticationMode,
+    credentialHeaderName: validated.credentialHeaderName,
+    modelDiscoveryPath: validated.modelDiscoveryPath,
+    textGenerationPath: validated.textGenerationPath,
+    embeddingPath: validated.embeddingPath,
+    requestTimeoutMs: validated.requestTimeoutMs,
+    retryLimit: validated.retryLimit,
+    connectionStatus: endpointIdentityChanged
+      ? "not_tested"
+      : (existing?.connectionStatus ?? "not_tested"),
+    catalogSyncStatus: endpointIdentityChanged ? "never" : (existing?.catalogSyncStatus ?? "never"),
+    lastTestedAt: endpointIdentityChanged ? null : (existing?.lastTestedAt ?? null),
+    lastCatalogSyncedAt: endpointIdentityChanged ? null : (existing?.lastCatalogSyncedAt ?? null),
+    lastErrorCode: endpointIdentityChanged ? null : (existing?.lastErrorCode ?? null),
+    lastErrorSummary: endpointIdentityChanged ? null : (existing?.lastErrorSummary ?? null),
+    legacyProviderId: validated.legacyProviderId,
+    enabled: validated.enabled,
+    revision: existing === undefined ? 1 : existing.revision + 1,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  });
+  state.connections[saved.id] = saved;
+  return saved;
+}
+
+function persistMemoryCatalogSync(
+  state: MemoryModelHubState,
+  validated: ReturnType<typeof validateCatalogInput>,
+  now: string,
+): void {
+  const connection = state.connections[validated.connectionId];
+  if (connection === undefined) {
+    throw modelHubError(
+      "MODEL_HUB_CONNECTION_NOT_FOUND",
+      "The provider connection does not exist.",
+    );
+  }
+  if (state.catalogSyncs[validated.syncId] !== undefined) {
+    throw conflict("MODEL_HUB_CATALOG_SYNC_CONFLICT");
+  }
+  state.catalogSyncs[validated.syncId] = Object.freeze({
+    id: validated.syncId,
+    connectionId: validated.connectionId,
+    source: validated.source,
+    status: validated.status,
+    discoveredModelCount: validated.models.length,
+    nextPageTokenPresent: validated.nextPageTokenPresent,
+    errorCode: validated.errorCode,
+    errorSummary: validated.errorSummary,
+    startedAt: validated.startedAt ?? now,
+    completedAt: now,
+  });
+  for (const model of validated.models) {
+    const existing = Object.values(state.catalog).find(
+      (entry) =>
+        entry.connectionId === validated.connectionId &&
+        entry.providerModelId === model.providerModelId,
+    );
+    const id = existing?.id ?? model.id;
+    state.catalog[id] = Object.freeze({
+      id,
+      connectionId: validated.connectionId,
+      providerModelId: model.providerModelId,
+      displayName: model.displayName,
+      ownedBy: model.ownedBy,
+      catalogSource: validated.source,
+      availability: "available",
+      lifecycle: model.lifecycle,
+      inputTokenLimit: model.inputTokenLimit,
+      outputTokenLimit: model.outputTokenLimit,
+      firstDiscoveredAt: existing?.firstDiscoveredAt ?? now,
+      lastSeenAt: now,
+      staleAfter: model.staleAfter,
+      lastSyncId: validated.syncId,
+      revision: existing === undefined ? 1 : existing.revision + 1,
+    });
+  }
+  if (validated.status === "succeeded" && validated.source === "provider_api") {
+    for (const [id, entry] of Object.entries(state.catalog)) {
+      if (
+        entry.connectionId === validated.connectionId &&
+        entry.catalogSource === "provider_api" &&
+        entry.lastSyncId !== validated.syncId &&
+        entry.availability !== "unavailable"
+      ) {
+        state.catalog[id] = Object.freeze({
+          ...entry,
+          availability: "unavailable",
+          revision: entry.revision + 1,
+        });
+      }
+    }
+  }
+  state.connections[connection.id] = Object.freeze({
+    ...connection,
+    catalogSyncStatus: validated.status,
+    lastCatalogSyncedAt: now,
+    lastErrorCode: validated.errorCode,
+    lastErrorSummary: validated.errorSummary,
+    revision: connection.revision + 1,
+    updatedAt: now,
+  });
+}
+
 type ConnectionEndpointIdentity = Pick<
   ModelProviderConnection,
   | "baseUrl"
@@ -2900,6 +3983,56 @@ async function ensureCatalogEntryExists(executor: TransactionExecutor, id: strin
   }
 }
 
+async function persistSqliteCapabilityScan(
+  transaction: TransactionExecutor,
+  validated: ReturnType<typeof validateCapabilityScanInput>,
+  now: string,
+): Promise<void> {
+  await transaction.execute(
+    `INSERT INTO model_capability_scans (
+       id, catalog_entry_id, scan_kind, status, evidence_version,
+       supported_count, unsupported_count, unknown_count,
+       error_code, error_summary, requested_at, started_at, completed_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      validated.scanId,
+      validated.catalogEntryId,
+      validated.scanKind,
+      validated.status,
+      validated.evidenceVersion,
+      validated.supportedCount,
+      validated.unsupportedCount,
+      validated.unknownCount,
+      validated.errorCode,
+      validated.errorSummary,
+      validated.requestedAt ?? now,
+      now,
+      now,
+    ],
+  );
+  for (const evidence of validated.evidence) {
+    await transaction.execute(
+      `INSERT INTO model_capability_evidence (
+         id, catalog_entry_id, scan_id, capability, verdict,
+         evidence_source, evidence_version, evidence_summary,
+         observed_at, expires_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        evidence.id,
+        validated.catalogEntryId,
+        validated.scanId,
+        evidence.capability,
+        evidence.verdict,
+        evidence.evidenceSource,
+        validated.evidenceVersion,
+        evidence.evidenceSummary,
+        now,
+        evidence.expiresAt,
+      ],
+    );
+  }
+}
+
 async function ensureLocalCatalogEntry(executor: TransactionExecutor, id: string): Promise<void> {
   const rows = await executor.select<{ catalog_entry_id: string; base_url: string }>(
     `SELECT privacy.catalog_entry_id, connection.base_url
@@ -2985,6 +4118,41 @@ function hydrateConnection(row: ConnectionRow): ModelProviderConnection {
     legacyProviderId: row.legacy_provider_id,
     enabled: row.enabled === 1,
     revision: row.revision,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
+function isRetiredConnectionRow(row: ConnectionRow): boolean {
+  return (
+    row.enabled === 0 &&
+    row.connection_status === "disabled" &&
+    row.credential_ref === null &&
+    row.credential_state === "missing" &&
+    row.last_error_code === RETIRED_CONNECTION_ERROR_CODE
+  );
+}
+
+function hydrateConnectionCommit(row: ConnectionCommitRow): ModelHubConnectionCommit {
+  if (row.phase !== "prepared" && row.phase !== "cleanup_pending") {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", "A stored connection commit phase is invalid.");
+  }
+  const credentialProviderId = optionalCredentialProviderId(row.credential_provider_id);
+  const cleanupCredentialProviderId = optionalCredentialProviderId(
+    row.cleanup_credential_provider_id,
+  );
+  if (row.phase === "prepared" && cleanupCredentialProviderId !== null) {
+    throw modelHubError(
+      "MODEL_HUB_STORE_CORRUPT",
+      "A prepared connection commit cannot contain cleanup work.",
+    );
+  }
+  return Object.freeze({
+    id: boundedText(row.id, "stored connection commit id", 128),
+    connectionId: boundedText(row.connection_id, "stored connection commit connection id", 128),
+    phase: row.phase,
+    credentialProviderId,
+    cleanupCredentialProviderId,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });

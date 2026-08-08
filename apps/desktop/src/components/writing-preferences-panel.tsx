@@ -216,7 +216,9 @@ export function WritingPreferencesPanel({
               <CardHeader>
                 <div className="card-heading-row">
                   <CardTitle>
-                    {preference.source === "manual" ? "手动偏好" : "从反馈中学到"}
+                    {preference.source === "manual" && preference.sourceFeedbackHash === null
+                      ? "手动偏好"
+                      : "从反馈中学到"}
                   </CardTitle>
                   <Badge tone={preference.enabled ? "success" : "neutral"}>
                     {preference.enabled ? "使用中" : "已停用"}
@@ -230,6 +232,11 @@ export function WritingPreferencesPanel({
                     来源：你选择过“
                     {WRITING_FEEDBACK_CODE_LABELS[preference.sourceFeedbackCode]}”共
                     {preference.evidenceCount}次
+                  </p>
+                )}
+                {preference.sourceFeedbackHash !== null && (
+                  <p className="candidate-panel__hint">
+                    来源：你重复提交过同一条自定义意见，共{preference.evidenceCount}次
                   </p>
                 )}
               </CardContent>

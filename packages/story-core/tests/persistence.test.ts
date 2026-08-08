@@ -9,10 +9,12 @@ import {
   Outline,
   STORY_CORE_SQLITE_MIGRATION_0001,
   STORY_CORE_SQLITE_MIGRATION_0002,
+  STORY_CORE_SQLITE_MIGRATION_0004,
   SqliteChapterVersionReader,
   SqliteDeferredReviewReader,
   SqliteFormalStoryRecordRepository,
   SqliteMemoryPolicyRepository,
+  SqliteMemoryGovernanceUnitOfWork,
   SqliteMemoryRecordCreationUnitOfWork,
   SqliteMemoryRecordRepository,
   SqliteOutlineDraftReader,
@@ -23,6 +25,7 @@ import {
   SqliteWhatIfRepository,
   WhatIfBranch,
   parseIsoUtcTimestamp,
+  parseUuidV7,
 } from "../src/index.js";
 import { unwrap, uuid } from "./helpers.js";
 import { NodeStorySqliteExecutor } from "./node-sqlite-executor.js";
@@ -50,6 +53,11 @@ describe("story SQLite migration", () => {
       "utf8",
     ).trim();
     expect(normalizeSql(nativeMaterialSql)).toBe(normalizeSql(STORY_CORE_SQLITE_MIGRATION_0002));
+    const memoryGovernanceSql = readFileSync(
+      new URL("../../data/migrations/0049_memory_governance_audit.sql", import.meta.url),
+      "utf8",
+    ).trim();
+    expect(normalizeSql(memoryGovernanceSql)).toBe(normalizeSql(STORY_CORE_SQLITE_MIGRATION_0004));
 
     const executor = createExecutor();
     const tables = executor.database
@@ -66,6 +74,7 @@ describe("story SQLite migration", () => {
       "story_formal_records",
       "story_material_references",
       "story_materials",
+      "story_memory_governance_events",
       "story_memory_policies",
       "story_memory_records",
       "story_outline_drafts",
@@ -379,6 +388,171 @@ describe("memory and What-if persistence invariants", () => {
     ]);
   });
 
+  it("atomically forgets one project, preserves audit evidence, and replays idempotently", async () => {
+    const executor = createExecutor();
+    const policies = new SqliteMemoryPolicyRepository(executor);
+    const records = new SqliteMemoryRecordRepository(executor);
+    const creation = new SqliteMemoryRecordCreationUnitOfWork(executor);
+    const governance = new SqliteMemoryGovernanceUnitOfWork(executor);
+    const projectId = unwrap(parseUuidV7(uuid(114)));
+    const defaultPolicy = unwrap(MemoryPolicy.create(projectId, T0));
+    expect(unwrap(await policies.createIfAbsent(defaultPolicy)).created).toBe(true);
+    const enabled = unwrap(
+      defaultPolicy.setAutomaticLearning({
+        enabled: true,
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: T1,
+      }),
+    );
+    expect((await policies.save(enabled, 1)).ok).toBe(true);
+    const record = makeUserMemory(115, projectId, "需要保留来源的记忆");
+    expect(
+      (
+        await creation.create({
+          record,
+          expectedAutomaticLearningPolicyRevision: null,
+        })
+      ).ok,
+    ).toBe(true);
+    const disabled = unwrap(
+      enabled.setAutomaticLearning({
+        enabled: false,
+        humanConfirmed: true,
+        expectedRevision: enabled.revision,
+        now: T2,
+      }),
+    );
+    const excluded = unwrap(
+      record.exclude({
+        humanConfirmed: true,
+        expectedRevision: record.revision,
+        now: T2,
+      }),
+    );
+    const input = {
+      operationId: unwrap(parseUuidV7(uuid(119))),
+      projectId,
+      operation: "forget_project" as const,
+      targetRecordId: null,
+      previousPolicy: enabled,
+      nextPolicy: disabled,
+      records: [{ role: "forgotten" as const, previous: record, next: excluded }],
+      requestJson: JSON.stringify({
+        operation: "forget_project",
+        projectId,
+        expectedPolicyRevision: enabled.revision,
+        records: [{ id: record.id, revision: record.revision }],
+      }),
+      now: unwrap(parseIsoUtcTimestamp(T2)),
+    };
+
+    executor.database.exec(`
+      CREATE TEMP TRIGGER fail_memory_governance_audit
+      BEFORE INSERT ON story_memory_governance_events
+      BEGIN
+        SELECT RAISE(ABORT, 'injected audit failure');
+      END;
+    `);
+    const failed = await governance.commit(input);
+    expect(failed.ok).toBe(false);
+    expect(unwrap(await policies.findByProjectId(projectId))?.revision).toBe(enabled.revision);
+    expect(unwrap(await records.findById(record.id))?.revision).toBe(record.revision);
+    executor.database.exec("DROP TRIGGER fail_memory_governance_audit");
+
+    const committed = unwrap(await governance.commit(input));
+    expect(committed).toMatchObject({
+      affectedRecordCount: 1,
+      resultingPolicyRevision: disabled.revision,
+      idempotentReplay: false,
+    });
+    expect(unwrap(await policies.findByProjectId(projectId))?.automaticLearningEnabled).toBe(false);
+    expect(unwrap(await records.findById(record.id))?.toSnapshot().excluded).toBe(true);
+    const replayed = unwrap(await governance.commit(input));
+    expect(replayed.idempotentReplay).toBe(true);
+    expect(unwrap(await records.findById(record.id))?.revision).toBe(excluded.revision);
+    const conflictingReplay = await governance.commit({
+      ...input,
+      requestJson: JSON.stringify({ operation: "forget_project", changedScope: true }),
+    });
+    expect(conflictingReplay).toMatchObject({
+      ok: false,
+      error: { code: "MEMORY_IDEMPOTENCY_CONFLICT" },
+    });
+
+    const audit = executor.database
+      .prepare(
+        `SELECT before_snapshot_json AS beforeJson, after_snapshot_json AS afterJson
+         FROM story_memory_governance_events WHERE id = ?`,
+      )
+      .get(input.operationId) as { beforeJson: string; afterJson: string };
+    expect(audit.beforeJson).toContain(record.toSnapshot().source.sourceId);
+    expect(audit.afterJson).toContain('"excluded":true');
+  });
+
+  it("manually merges exactly two memories without deleting either source row", async () => {
+    const executor = createExecutor();
+    const records = new SqliteMemoryRecordRepository(executor);
+    const creation = new SqliteMemoryRecordCreationUnitOfWork(executor);
+    const governance = new SqliteMemoryGovernanceUnitOfWork(executor);
+    const projectId = unwrap(parseUuidV7(uuid(150)));
+    const target = makeUserMemory(151, projectId, "原目标记忆");
+    const source = makeUserMemory(154, projectId, "来源记忆");
+    for (const record of [target, source]) {
+      expect(
+        (
+          await creation.create({
+            record,
+            expectedAutomaticLearningPolicyRevision: null,
+          })
+        ).ok,
+      ).toBe(true);
+    }
+    const nextTarget = unwrap(
+      target.edit({
+        content: "编辑后的合并内容",
+        humanConfirmed: true,
+        expectedRevision: target.revision,
+        now: T1,
+      }),
+    );
+    const nextSource = unwrap(
+      source.exclude({
+        humanConfirmed: true,
+        expectedRevision: source.revision,
+        now: T1,
+      }),
+    );
+    const result = await governance.commit({
+      operationId: unwrap(parseUuidV7(uuid(158))),
+      projectId,
+      operation: "merge",
+      targetRecordId: target.id,
+      previousPolicy: null,
+      nextPolicy: null,
+      records: [
+        { role: "merge_target", previous: target, next: nextTarget },
+        { role: "merge_source", previous: source, next: nextSource },
+      ],
+      requestJson: JSON.stringify({
+        operation: "merge",
+        projectId,
+        targetRecordId: target.id,
+        targetRevision: target.revision,
+        sourceRecordId: source.id,
+        sourceRevision: source.revision,
+        content: nextTarget.toSnapshot().content,
+      }),
+      now: unwrap(parseIsoUtcTimestamp(T1)),
+    });
+    expect(result.ok).toBe(true);
+    expect(unwrap(await records.findById(target.id))?.toSnapshot().content).toBe(
+      "编辑后的合并内容",
+    );
+    expect(unwrap(await records.findById(source.id))?.toSnapshot().excluded).toBe(true);
+    expect(unwrap(await records.listByProjectId(projectId))).toHaveLength(2);
+  });
+
   it("atomically promotes a What-if branch only into an outline draft", async () => {
     const executor = createExecutor();
     const branches = new SqliteWhatIfRepository(executor);
@@ -473,10 +647,24 @@ describe("memory and What-if persistence invariants", () => {
 
 function createExecutor(): NodeStorySqliteExecutor {
   const executor = new NodeStorySqliteExecutor(
-    `${STORY_CORE_SQLITE_MIGRATION_0001}\n${STORY_CORE_SQLITE_MIGRATION_0002}`,
+    `${STORY_CORE_SQLITE_MIGRATION_0001}\n${STORY_CORE_SQLITE_MIGRATION_0002}\n${STORY_CORE_SQLITE_MIGRATION_0004}`,
   );
   executors.push(executor);
   return executor;
+}
+
+function makeUserMemory(base: number, projectId: string, content: string): MemoryRecord {
+  return unwrap(
+    MemoryRecord.create({
+      id: uuid(base),
+      projectId,
+      level: "L2",
+      content,
+      source: { kind: "user_rule", sourceId: uuid(base + 1), sourceVersionId: null },
+      origin: "user",
+      now: T0,
+    }),
+  );
 }
 
 function normalizeSql(sql: string): string {

@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 
 import { BrowserDevelopmentModelCenterStore } from "./model-center-store";
 import { MODEL_HUB_CAPABILITIES, NOVEL_AI_TASKS } from "./model-hub-provider-registry";
-import { applyAutomaticModelHubRouting } from "./model-hub-routing-service";
+import {
+  applyAutomaticModelHubRouting,
+  loadModelHubRoutingCandidates,
+} from "./model-hub-routing-service";
 import { BrowserDevelopmentModelHubStore, type ModelHubStore } from "./model-hub-store";
 import { BrowserDevelopmentModelRoutingStore } from "./model-routing-store";
 
@@ -15,6 +18,25 @@ if (!parsedNow.ok) {
 const clock = { now: () => parsedNow.value };
 
 describe("automatic Model Hub routing application", () => {
+  it("never offers a retired connection to automatic routing", async () => {
+    const storage = new MemoryStorage();
+    const modelHub = new BrowserDevelopmentModelHubStore(storage, clock);
+    await seedCandidate(modelHub, {
+      connectionId: "retired-route-provider",
+      catalogEntryId: "retired-route-model",
+      modelId: "writer-model",
+      destination: "local",
+    });
+    const current = await modelHub.findConnection("retired-route-provider");
+    if (current === null) throw new Error("expected seeded connection");
+    await modelHub.retireConnection({
+      connectionId: current.id,
+      expectedRevision: current.revision,
+    });
+
+    await expect(loadModelHubRoutingCandidates(modelHub)).resolves.toEqual([]);
+  });
+
   it("clears a legacy role when its selected-model snapshot differs from the catalog model", async () => {
     const storage = new MemoryStorage();
     const modelCenter = new BrowserDevelopmentModelCenterStore(storage, clock);

@@ -87,6 +87,7 @@ export class ModelHubLocalEvaluationService {
       let result: ModelHubTextTaskExecutionResult;
       try {
         result = await this.executeText(this.dependencies, {
+          dispatchScope: { kind: "non_project", reason: "connection_probe" },
           task,
           messages: probe.messages,
           maximumOutputTokens: 64,

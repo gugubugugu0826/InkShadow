@@ -9,14 +9,23 @@ import {
   type GovernedExtensionGatewayResult,
 } from "./governed-creative-extensions-runtime";
 import type { CredentialStore, NativeModelGatewayClient, NativeModelMessage } from "./runtime";
-import type { ModelCenterStore, ModelProfile } from "./model-center-store";
+import type { ModelCenterStore } from "./model-center-store";
+import { resolveModelProfileGatewayConfig } from "./model-profile-gateway-config";
+import type { ModelHubStore } from "./model-hub-store";
+import type { NativeGatewayEndpointConfig } from "./native-model-gateway-contract";
 import type { ModelRoleRoute, ModelRoutingStore } from "./model-routing-store";
 
 type ConfiguredRouteDependencies = Readonly<{
   modelCenter: Pick<ModelCenterStore, "findByProviderId">;
+  modelHub: Pick<ModelHubStore, "findConnection">;
   modelRouting: Pick<ModelRoutingStore, "findRoute">;
   credentials: Pick<CredentialStore, "getSummary">;
 }>;
+
+type GatewayProfileDependencies = Pick<
+  ConfiguredRouteDependencies,
+  "modelCenter" | "modelHub" | "credentials"
+>;
 
 const TRANSLATION_MAXIMUM_OUTPUT_TOKENS = 4_096;
 const SHORT_DRAMA_MAXIMUM_OUTPUT_TOKENS = 8_192;
@@ -34,14 +43,12 @@ export async function resolveConfiguredGovernedCreativeExtensionRoute(
 
   for (const target of routeTargets(route)) {
     const profile = await dependencies.modelCenter.findByProviderId(target.providerId);
-    if (
-      profile?.selectedModel !== target.modelId ||
-      profile.pricing === null ||
-      !(await credentialIsReady(profile, dependencies.credentials))
-    ) {
+    if (profile?.selectedModel !== target.modelId || profile.pricing === null) {
       continue;
     }
-    const provider = inspectProfileDestination(profile);
+    const endpoint = await resolveModelProfileGatewayConfig(dependencies, profile);
+    if (endpoint === null) continue;
+    const provider = inspectProfileDestination(endpoint.config);
     if (provider === null) {
       continue;
     }
@@ -88,6 +95,7 @@ export class NativeGovernedCreativeExtensionGateway implements GovernedCreativeE
       "available" | "generate" | "cancelGeneration"
     >,
     private readonly ids: UuidV7Generator,
+    private readonly profileDependencies?: GatewayProfileDependencies,
   ) {}
 
   public async generate(
@@ -113,16 +121,11 @@ export class NativeGovernedCreativeExtensionGateway implements GovernedCreativeE
     };
     options.signal.addEventListener("abort", cancel, { once: true });
     try {
+      const config = await this.resolveCurrentGatewayConfig(request);
       const generated = await this.gateway.generate({
+        dispatchScope: request.dispatchScope,
         generationId,
-        config: {
-          providerId: request.snapshot.provider.providerId,
-          provider:
-            request.snapshot.provider.location === "loopback" ? "ollama" : "open_ai_compatible",
-          baseUrl: request.snapshot.provider.baseUrl,
-          authentication:
-            request.snapshot.provider.location === "loopback" ? "none" : "bearer_keyring",
-        },
+        config,
         model: request.snapshot.provider.modelId,
         messages: buildGovernedMessages(request),
         maxOutputTokens: request.snapshot.limits.maximumOutputTokens,
@@ -158,6 +161,44 @@ export class NativeGovernedCreativeExtensionGateway implements GovernedCreativeE
       options.signal.removeEventListener("abort", cancel);
     }
   }
+
+  private async resolveCurrentGatewayConfig(
+    request: GovernedExtensionGatewayRequest,
+  ): Promise<NativeGatewayEndpointConfig> {
+    const fallback = Object.freeze({
+      providerId: request.snapshot.provider.providerId,
+      provider:
+        request.snapshot.provider.location === "loopback"
+          ? ("ollama" as const)
+          : ("open_ai_compatible" as const),
+      baseUrl: request.snapshot.provider.baseUrl,
+      authentication:
+        request.snapshot.provider.location === "loopback"
+          ? ("none" as const)
+          : ("bearer_keyring" as const),
+    });
+    if (this.profileDependencies === undefined) return fallback;
+    const profile = await this.profileDependencies.modelCenter.findByProviderId(
+      request.snapshot.provider.providerId,
+    );
+    if (profile?.selectedModel !== request.snapshot.provider.modelId) {
+      throw new GovernedCreativeExtensionGatewayError(
+        "The governed provider configuration changed before dispatch.",
+        true,
+      );
+    }
+    const resolved = await resolveModelProfileGatewayConfig(this.profileDependencies, profile);
+    if (
+      resolved?.config.baseUrl !== request.snapshot.provider.baseUrl ||
+      inspectProfileDestination(resolved.config)?.location !== request.snapshot.provider.location
+    ) {
+      throw new GovernedCreativeExtensionGatewayError(
+        "The governed provider credential or endpoint changed before dispatch.",
+        true,
+      );
+    }
+    return resolved.config;
+  }
 }
 
 function signalIsAborted(signal: AbortSignal): boolean {
@@ -183,38 +224,31 @@ function routeTargets(
   ]);
 }
 
-async function credentialIsReady(
-  profile: ModelProfile,
-  credentials: Pick<CredentialStore, "getSummary">,
-): Promise<boolean> {
-  if (profile.authentication === "none") {
-    return true;
-  }
-  try {
-    return (await credentials.getSummary(profile.providerId)).configured;
-  } catch {
-    return false;
-  }
-}
-
-function inspectProfileDestination(profile: ModelProfile): {
+function inspectProfileDestination(
+  config: Readonly<{
+    provider: string;
+    baseUrl: string;
+    authentication: string;
+  }>,
+): {
   readonly location: GovernedCreativeExtensionRoute["location"];
   readonly canonicalUrl: string;
 } | null {
   let canonicalUrl: string;
   try {
-    canonicalUrl = new URL(profile.baseUrl).toString();
+    canonicalUrl = new URL(config.baseUrl).toString();
   } catch {
     return null;
   }
   const loopback = inspectGovernedExtensionProviderUrl(canonicalUrl, "loopback");
-  if (loopback.ok && profile.provider === "ollama" && profile.authentication === "none") {
+  if (loopback.ok && config.provider === "ollama" && config.authentication === "none") {
     return Object.freeze({ location: "loopback", canonicalUrl: loopback.canonicalUrl });
   }
   const remote = inspectGovernedExtensionProviderUrl(canonicalUrl, "remote");
   return remote.ok &&
-    profile.provider === "open_ai_compatible" &&
-    profile.authentication === "bearer_keyring"
+    config.provider === "open_ai_compatible" &&
+    (config.authentication === "bearer_keyring" ||
+      config.authentication === "custom_header_keyring")
     ? Object.freeze({ location: "remote", canonicalUrl: remote.canonicalUrl })
     : null;
 }

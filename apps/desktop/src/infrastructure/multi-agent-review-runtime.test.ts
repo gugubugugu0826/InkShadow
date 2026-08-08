@@ -15,10 +15,12 @@ import {
 import {
   MultiAgentReviewRuntime,
   SqliteMultiAgentReviewContextReader,
+  type MultiAgentReviewContext,
   type MultiAgentReviewContextReader,
 } from "./multi-agent-review-runtime";
-import type { ModelCenterStore } from "./model-center-store";
+import type { ModelCenterStore, ModelProfile } from "./model-center-store";
 import type { ModelRoutingStore } from "./model-routing-store";
+import type { ProjectContextPrivacyAuthority } from "./project-context-privacy-authority";
 import type { NativeModelGatewayClient, NativeModelGenerationResult } from "./runtime";
 import { NodeSqliteExecutor } from "../../../../packages/data/tests/node-sqlite-executor.js";
 
@@ -100,6 +102,85 @@ describe("local multi-agent review runtime", () => {
       initial.revision,
       "AGENT_PREFLIGHT_RESOURCE_EXHAUSTED",
       NOW,
+    );
+  });
+
+  it("blocks a local-only chapter before a remote review participant is claimed", async () => {
+    const initial = reviewSession({
+      targetKind: "chapter",
+      chapterId: "chapter-1",
+      baseVersionId: "version-1",
+      baseOutlineRevision: null,
+    });
+    const store = fakeStore({
+      findSessionById: vi.fn(() => Promise.resolve(initial)),
+    });
+    const gateway = fakeGateway();
+    const runtime = createRuntime(store, gateway, {
+      authorityJson: JSON.stringify({ content: "private chapter text" }),
+      citationReceiptsJson: "[]",
+      localOnly: true,
+    });
+
+    await expect(runtime.runReview(initial.id)).rejects.toMatchObject({
+      code: "PRIVATE_CHAPTER_LOCAL_ONLY",
+    });
+    expect(store.claimTurn).not.toHaveBeenCalled();
+    expect(gateway.generate).not.toHaveBeenCalled();
+  });
+
+  it("does not dispatch when the participant profile changes during the final privacy check", async () => {
+    const initial = reviewSession();
+    const working = withWorkingTurn(initial);
+    const failed = reviewSession({
+      ...working,
+      status: "failed",
+      revision: 3,
+      failureCode: "MULTI_AGENT_MODEL_PROFILE_INVALID",
+      completedAt: NOW,
+      participants: working.participants.map((participant) => ({
+        ...participant,
+        status: "error",
+        errorCode: "MULTI_AGENT_MODEL_PROFILE_INVALID",
+      })),
+      turns: working.turns.map((turn) => ({
+        ...turn,
+        status: "failed",
+        usageSource: "provider_unavailable",
+        errorCode: "MULTI_AGENT_MODEL_PROFILE_INVALID",
+        completedAt: NOW,
+        updatedAt: NOW,
+      })),
+    });
+    const store = fakeStore({
+      findSessionById: vi.fn(() => Promise.resolve(initial)),
+      claimTurn: vi.fn(() => Promise.resolve(working)),
+      failTurn: vi.fn(() => Promise.resolve(failed)),
+    });
+    const gateway = fakeGateway();
+    let profileRevision = 1;
+    const privacy = standardPrivacyAuthority();
+    const runtime = createRuntime(store, gateway, undefined, {
+      modelCenter: fakeModelCenter(() => profileRevision),
+      projectContextPrivacy: {
+        ...privacy,
+        assertCurrentBeforeDispatch: () => {
+          profileRevision = 2;
+          return Promise.resolve();
+        },
+      },
+    });
+
+    await expect(runtime.runReview(initial.id)).resolves.toMatchObject({
+      status: "failed",
+      failureCode: "MULTI_AGENT_MODEL_PROFILE_INVALID",
+    });
+    expect(gateway.generate).not.toHaveBeenCalled();
+    expect(store.failTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "failed",
+        errorCode: "MULTI_AGENT_MODEL_PROFILE_INVALID",
+      }),
     );
   });
 
@@ -772,10 +853,17 @@ function fakeGateway(override: Partial<NativeModelGatewayClient> = {}) {
 function createRuntime(
   store: ReturnType<typeof fakeStore>,
   gateway: ReturnType<typeof fakeGateway>,
-  context = {
+  context: MultiAgentReviewContext = {
     authorityJson: JSON.stringify({ nodes: [] }),
     citationReceiptsJson: "[]",
   },
+  overrides: Readonly<{
+    modelCenter?: ModelCenterStore;
+    projectContextPrivacy?: Pick<
+      ProjectContextPrivacyAuthority,
+      "inspect" | "assertCurrentBeforeDispatch" | "assertRouteEligible"
+    >;
+  }> = {},
 ): MultiAgentReviewRuntime {
   let id = 0;
   return new MultiAgentReviewRuntime({
@@ -784,15 +872,40 @@ function createRuntime(
       resolveTargetAuthority: vi.fn(),
       load: vi.fn(() => Promise.resolve(context)),
     } satisfies MultiAgentReviewContextReader,
-    modelCenter: fakeModelCenter(),
+    modelCenter: overrides.modelCenter ?? fakeModelCenter(),
+    modelHub: { findConnection: vi.fn().mockResolvedValue(null) },
     modelRouting: fakeModelRouting(),
+    credentials: { getSummary: vi.fn().mockResolvedValue({ configured: true }) },
     modelGateway: gateway.runtimeGateway,
+    projectContextPrivacy: overrides.projectContextPrivacy ?? standardPrivacyAuthority(),
     ids: {
       next: () => requireUuid(`00000000-0000-7000-8000-${String((id += 1)).padStart(12, "0")}`),
     } satisfies UuidV7Generator,
     clock: TEST_CLOCK,
     enabled: true,
   });
+}
+
+function standardPrivacyAuthority(): Pick<
+  ProjectContextPrivacyAuthority,
+  "inspect" | "assertCurrentBeforeDispatch" | "assertRouteEligible"
+> {
+  return {
+    inspect: (projectId) =>
+      Promise.resolve(
+        Object.freeze({
+          schemaVersion: 1 as const,
+          projectId,
+          fingerprint: `standard:${projectId}`,
+          activeChapterCount: 0,
+          retainedChapterCount: 0,
+          requiresVerifiedLocal: false,
+          chapters: Object.freeze([]),
+        }),
+      ),
+    assertCurrentBeforeDispatch: () => Promise.resolve(),
+    assertRouteEligible: () => undefined,
+  };
 }
 
 class RejectingSqlExecutor implements SqlExecutor {
@@ -838,10 +951,35 @@ function requireCandidate(
   return session.candidate;
 }
 
-function fakeModelCenter(): ModelCenterStore {
+function fakeModelCenter(readRevision: () => number = () => 1): ModelCenterStore {
+  const baseProfile: ModelProfile = {
+    providerId: "provider-1",
+    provider: "open_ai_compatible",
+    baseUrl: "https://models.example/v1",
+    authentication: "bearer_keyring",
+    selectedModel: "review-model",
+    pricing: {
+      contextWindowTokens: 8_192,
+      currency: "USD",
+      inputMicrosPerMillionTokens: 1_000,
+      outputMicrosPerMillionTokens: 1_000,
+      cachedInputMicrosPerMillionTokens: 0,
+      pricingVersion: "price-1",
+      priceUpdatedAt: NOW,
+    },
+    revision: 1,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+  const currentProfile = (): ModelProfile =>
+    Object.freeze({ ...baseProfile, revision: readRevision() });
   return {
-    listProfiles: vi.fn<ModelCenterStore["listProfiles"]>(),
-    findByProviderId: vi.fn<ModelCenterStore["findByProviderId"]>(),
+    listProfiles: vi.fn<ModelCenterStore["listProfiles"]>(() =>
+      Promise.resolve([currentProfile()]),
+    ),
+    findByProviderId: vi.fn<ModelCenterStore["findByProviderId"]>((providerId) =>
+      Promise.resolve(providerId === baseProfile.providerId ? currentProfile() : null),
+    ),
     save: vi.fn<ModelCenterStore["save"]>(),
   };
 }

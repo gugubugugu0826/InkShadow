@@ -29,6 +29,18 @@ export {
   type DocxExportStage,
 } from "./docx-export.js";
 export {
+  EPUB_MEDIA_TYPE,
+  EPUB_OUTPUT_LIMIT_BYTES,
+  EpubExportError,
+  exportProjectToEpub,
+  exportPublicationToEpub,
+  type EpubExportArtifact,
+  type EpubExportErrorCode,
+  type EpubExportOptions,
+  type EpubExportProgress,
+  type EpubExportStage,
+} from "./epub-export.js";
+export {
   canonicalJson,
   checksumEquals,
   sha256Hex,

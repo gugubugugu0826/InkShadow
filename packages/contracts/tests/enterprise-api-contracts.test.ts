@@ -6,8 +6,8 @@ import {
   CloudEnterprisePolicyUpdateRequestSchema,
   CloudEnterpriseSsoAuthorizationRequestSchema,
   CONTRACT_SCHEMA_VERSION,
-  INKSHADOW_CLOUD_OPENAPI,
 } from "../src/index.js";
+import { INKSHADOW_CLOUD_OPENAPI } from "@inkshadow/contracts/openapi";
 
 const TEAM_ID = "018f0d7a-3b2c-7abc-8def-000000000001";
 const DEVICE_ID = "018f0d7a-3b2c-7abc-8def-000000000002";

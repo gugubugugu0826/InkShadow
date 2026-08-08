@@ -2,7 +2,13 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import type { Clock, IsoUtcTimestamp } from "@inkshadow/domain";
+import {
+  deriveIdeaProjectSeed,
+  parseIsoUtcTimestamp,
+  parseUuidV7,
+  type Clock,
+  type IsoUtcTimestamp,
+} from "@inkshadow/domain";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -12,6 +18,7 @@ import {
   type GovernedExtensionRequestSnapshot,
 } from "../src/governed-creative-extension-sqlite-store.js";
 import { DatabaseMaintenanceService } from "../src/maintenance.js";
+import { createSqliteRepositories } from "../src/sqlite-repositories.js";
 import { TeamTemplateApplicationSqliteStore } from "../src/team-template-application-sqlite-store.js";
 import type { SqlPrimitive } from "../src/executor.js";
 import { NodeSqliteExecutor } from "./node-sqlite-executor.js";
@@ -68,6 +75,7 @@ const inkShadowMigration = [
     new URL("../migrations/0018_sync_incremental_terminal_observations.sql", import.meta.url),
     "utf8",
   ),
+  readFileSync(new URL("../migrations/0019_cloud_deletion_journal.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../migrations/0020_graph_rag_projection.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../migrations/0021_search_vector_index.sql", import.meta.url), "utf8"),
   readFileSync(
@@ -93,6 +101,7 @@ const inkShadowMigration = [
     new URL("../migrations/0029_community_marketplace_installs.sql", import.meta.url),
     "utf8",
   ),
+  readFileSync(new URL("../migrations/0030_creative_journeys.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../migrations/0031_model_hub.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../migrations/0032_unified_story_facts.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../migrations/0033_causal_event_graph.sql", import.meta.url), "utf8"),
@@ -109,6 +118,69 @@ const inkShadowMigration = [
     "utf8",
   ),
   readFileSync(new URL("../migrations/0037_model_hub_expert_options.sql", import.meta.url), "utf8"),
+  readFileSync(new URL("../migrations/0038_private_chapters.sql", import.meta.url), "utf8"),
+  readFileSync(new URL("../migrations/0039_project_seeds.sql", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../migrations/0040_chapter_validation_snapshots.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0041_story_planning_selective_acceptance.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0042_chapter_validation_snapshot_delete_cascade.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0043_story_fact_entity_alias_resolution.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0044_story_planning_selective_acceptance_intent.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0045_project_remote_dispatch_leases.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(new URL("../migrations/0046_model_hub_zhipu_glm.sql", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../migrations/0047_context_compilation_exact_provenance.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0048_candidate_application_intents.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(new URL("../migrations/0049_memory_governance_audit.sql", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../migrations/0050_candidate_revision_authority.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0051_model_hub_connection_commits.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0052_continuous_story_state_route_receipts.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0053_writing_feedback_learning_policy_context.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0054_writing_feedback_explicit_idempotency.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL(
+      "../migrations/0055_continuous_story_state_historical_route_receipts.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
 ].join("\n");
 const BACKUP_PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const BACKUP_ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
@@ -120,6 +192,21 @@ const BACKUP_FINE_TUNING_ARTIFACT_ID = "maintenance-fine-tuning-artifact";
 const BACKUP_MARKETPLACE_ARTIFACT_ID = "maintenance-marketplace-artifact";
 const BACKUP_CHAPTER_ID = "019f9f4a-b3c7-7350-9226-000000000201";
 const BACKUP_CHAPTER_VERSION_ID = "019f9f4a-b3c7-7350-9226-000000000202";
+const BACKUP_CURRENT_CHAPTER_VERSION_ID = "019f9f4a-b3c7-7350-9226-000000000203";
+const BACKUP_VALIDATION_SNAPSHOT_IDS = [
+  "019f9f4a-b3c7-7350-9226-000000000211",
+  "019f9f4a-b3c7-7350-9226-000000000212",
+  "019f9f4a-b3c7-7350-9226-000000000213",
+] as const;
+const BACKUP_JOURNEY_ID = "019f9f4a-b3c7-7350-9226-000000000301";
+const BACKUP_JOURNEY_TURN_ID = "019f9f4a-b3c7-7350-9226-000000000302";
+const BACKUP_PLANNING_CANDIDATE_ID = "019f9f4a-b3c7-7350-9226-000000000303";
+const BACKUP_MEMORY_ID = "019f9f4a-b3c7-7350-9226-000000000311";
+const BACKUP_MEMORY_GOVERNANCE_EVENT_ID = "019f9f4a-b3c7-7350-9226-000000000312";
+const BACKUP_DELETION_JOURNAL_ID = "019f9f4a-b3c7-7350-9226-000000000401";
+const BACKUP_DELETION_MUTATION_ID = "019f9f4a-b3c7-7350-9226-000000000402";
+const BACKUP_DELETION_REQUEST_ID = "019f9f4a-b3c7-7350-9226-000000000403";
+const BACKUP_DELETION_CONFIRMATION_ID = "019f9f4a-b3c7-7350-9226-000000000404";
 
 afterEach(() => {
   rmSync(backupPath, { force: true });
@@ -205,12 +292,52 @@ describe("DatabaseMaintenanceService", () => {
     await executor.close();
   });
 
+  it("restores a historical story-state receipt after its chapter advances", async () => {
+    const executor = new NodeSqliteExecutor(inkShadowMigration);
+    const service = new DatabaseMaintenanceService(executor);
+    await insertProject(executor, BACKUP_PROJECT_ID, "历史回执恢复项目");
+    await insertHistoricalContinuousStoryStateReceiptScenario(executor);
+    expect(await service.createConsistentBackup(backupPath)).toMatchObject({ ok: true });
+    await executor.execute("DELETE FROM continuous_story_state_route_receipts");
+
+    expect(await service.restoreConsistentBackup(backupPath)).toMatchObject({ ok: true });
+    await expect(
+      executor.select<{ receiptVersionId: string; currentVersionId: string }>(
+        `SELECT receipt.version_id AS receiptVersionId,
+                chapter.current_version_id AS currentVersionId
+         FROM continuous_story_state_route_receipts AS receipt
+         INNER JOIN chapters AS chapter
+           ON chapter.id = receipt.chapter_id
+          AND chapter.project_id = receipt.project_id
+         WHERE receipt.project_id = ? AND receipt.chapter_id = ?`,
+        [BACKUP_PROJECT_ID, BACKUP_CHAPTER_ID],
+      ),
+    ).resolves.toEqual([
+      {
+        receiptVersionId: BACKUP_CHAPTER_VERSION_ID,
+        currentVersionId: BACKUP_CURRENT_CHAPTER_VERSION_ID,
+      },
+    ]);
+    await executor.close();
+  });
+
   it("restores every supported table from a healthy backup in one transaction", async () => {
     const executor = new NodeSqliteExecutor(inkShadowMigration);
     const service = new DatabaseMaintenanceService(executor);
     await insertProject(executor, BACKUP_PROJECT_ID, "备份中的项目");
+    await insertMemoryGovernanceAudit(executor);
+    await insertApplyingStoryPlanningCandidate(executor);
+    await insertCloudDeletionJournal(executor);
     await insertTeamTemplateApplication(executor);
     await insertGovernedExtensionMetadata(executor);
+    await insertContinuousStoryStateRouteReceipt(executor);
+    await insertChapterValidationSnapshots(executor);
+    await executor.execute(
+      "UPDATE chapters SET privacy_mode = 'local_only', privacy_revision = 2 WHERE id = ?",
+      [BACKUP_CHAPTER_ID],
+    );
+    await insertCreativeJourney(executor);
+    await insertProjectSeed(executor);
     await insertCausalEventGraph(executor);
     await insertContextCompilationTrace(executor);
     await insertSyncAndAccessMetadata(executor);
@@ -220,12 +347,75 @@ describe("DatabaseMaintenanceService", () => {
     await insertSearchSnapshot(executor, "备份中的派生索引");
     await insertVectorProjection(executor);
     await insertGraphProjectionState(executor);
+    await setAuthoritativeStoryGraphCheckpoint(executor);
     await insertFineTuningGovernance(executor);
     await insertMarketplaceInstall(executor);
     await insertUnifiedStoryFact(executor);
     await insertWritingFeedbackLearning(executor);
+    await executor.execute(
+      `INSERT INTO project_remote_dispatch_leases (
+         lease_id, project_id, operation_kind, operation_id, owner_runtime_id,
+         authority_fingerprint, acquired_at, network_deadline_at
+       ) VALUES (?, ?, 'generation', 'crashed-operation', 'previous-runtime-owner', ?, ?, ?)`,
+      [
+        "019f9f4a-b3c7-7350-9226-000000000901",
+        "019f9f4a-b3c7-7350-9226-000000000902",
+        "a".repeat(64),
+        "2026-07-27T00:00:00.000Z",
+        "2026-07-27T00:12:00.000Z",
+      ],
+    );
     const backup = await service.createConsistentBackup(backupPath);
     expect(backup.ok).toBe(true);
+    const backupInspection = new NodeSqliteExecutor("", backupPath);
+    await expect(
+      backupInspection.select<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM project_remote_dispatch_leases",
+      ),
+    ).resolves.toEqual([{ count: 1 }]);
+    await backupInspection.close();
+    await executor.execute("DELETE FROM project_remote_dispatch_leases");
+    await executor.execute("DELETE FROM continuous_story_state_route_receipts");
+    await executor.execute("DELETE FROM story_memory_governance_events");
+    await executor.execute(
+      "UPDATE chapters SET privacy_mode = 'standard', privacy_revision = 3 WHERE id = ?",
+      [BACKUP_CHAPTER_ID],
+    );
+    await executor.execute(
+      `UPDATE story_planning_candidates
+       SET selective_acceptance_intent_json = NULL, revision = 3,
+           updated_at = '2026-07-27T00:01:00.000Z'
+       WHERE id = ?`,
+      [BACKUP_PLANNING_CANDIDATE_ID],
+    );
+    await executor.execute("DELETE FROM chapter_validation_snapshots");
+    await executor.execute(
+      "UPDATE creative_journeys SET snapshot_json = ?, revision = 2 WHERE id = ?",
+      [JSON.stringify({ idea: "changed-after-backup" }), BACKUP_JOURNEY_ID],
+    );
+    const changedProjectSeed = createMaintenanceProjectSeed(
+      "changed-after-backup",
+      "2026-07-27T00:01:00.000Z",
+    );
+    await executor.execute(
+      `UPDATE project_seeds
+       SET payload_json = ?, revision = 2, updated_at = ?
+       WHERE project_id = ?`,
+      [JSON.stringify(changedProjectSeed), changedProjectSeed.updatedAt, BACKUP_PROJECT_ID],
+    );
+    await executor.execute("DELETE FROM creative_journey_turns WHERE journey_id = ?", [
+      BACKUP_JOURNEY_ID,
+    ]);
+    await executor.execute(
+      "UPDATE cloud_deletion_journals SET recovery_action = 'none' WHERE journal_id = ?",
+      [BACKUP_DELETION_JOURNAL_ID],
+    );
+    await executor.execute(
+      `UPDATE authoritative_story_graph_state
+       SET authority_epoch = 8
+       WHERE project_id = ?`,
+      [BACKUP_PROJECT_ID],
+    );
     await executor.execute(
       "DELETE FROM context_compilation_runs WHERE id = 'maintenance-context-run'",
     );
@@ -250,7 +440,10 @@ describe("DatabaseMaintenanceService", () => {
            model_discovery_path = '/changed/models',
            text_generation_path = '/changed/chat', embedding_path = '/changed/embed',
            request_timeout_ms = 120000, retry_limit = 0
-       WHERE id = 'maintenance-custom-model'`,
+      WHERE id = 'maintenance-custom-model'`,
+    );
+    await executor.execute(
+      "DELETE FROM model_hub_connection_commits WHERE connection_id = 'maintenance-custom-model'",
     );
     await executor.execute(
       `UPDATE device_public_key_records
@@ -317,9 +510,82 @@ describe("DatabaseMaintenanceService", () => {
       value: {
         sourceKind: "user_selected_file",
         integrityVerified: true,
-        restoredTableCount: 128,
+        restoredTableCount: 141,
       },
     });
+    await expect(
+      executor.select<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM project_remote_dispatch_leases",
+      ),
+    ).resolves.toEqual([{ count: 0 }]);
+    await expect(
+      executor.select<{ operation: string; requestJson: string; afterJson: string }>(
+        `SELECT operation, request_json AS requestJson, after_snapshot_json AS afterJson
+         FROM story_memory_governance_events WHERE id = ?`,
+        [BACKUP_MEMORY_GOVERNANCE_EVENT_ID],
+      ),
+    ).resolves.toEqual([
+      {
+        operation: "forget_project",
+        requestJson: JSON.stringify({ operation: "forget_project", projectId: BACKUP_PROJECT_ID }),
+        afterJson: JSON.stringify({ records: [{ id: BACKUP_MEMORY_ID, excluded: true }] }),
+      },
+    ]);
+    await expect(
+      executor.select<{ phase: string; cleanupCredentialProviderId: string }>(
+        `SELECT phase,
+                cleanup_credential_provider_id AS cleanupCredentialProviderId
+         FROM model_hub_connection_commits
+         WHERE connection_id = 'maintenance-custom-model'`,
+      ),
+    ).resolves.toEqual([
+      { phase: "cleanup_pending", cleanupCredentialProviderId: "maintenance-old-slot" },
+    ]);
+    await expect(
+      executor.select<{ privacyMode: string; privacyRevision: number }>(
+        `SELECT privacy_mode AS privacyMode, privacy_revision AS privacyRevision
+         FROM chapters WHERE id = ?`,
+        [BACKUP_CHAPTER_ID],
+      ),
+    ).resolves.toEqual([{ privacyMode: "local_only", privacyRevision: 2 }]);
+    await expect(
+      executor.select<{ revision: number; intentJson: string | null }>(
+        `SELECT revision, selective_acceptance_intent_json AS intentJson
+         FROM story_planning_candidates WHERE id = ?`,
+        [BACKUP_PLANNING_CANDIDATE_ID],
+      ),
+    ).resolves.toEqual([
+      {
+        revision: 2,
+        intentJson: maintenancePlanningAcceptanceIntentJson(),
+      },
+    ]);
+    await expect(
+      executor.select<{
+        readonly id: string;
+        readonly runSequence: number;
+        readonly supersedesSnapshotId: string | null;
+        readonly checksum: string;
+        readonly resultJson: string;
+      }>(
+        `SELECT id,
+                run_sequence AS runSequence,
+                supersedes_snapshot_id AS supersedesSnapshotId,
+                result_checksum_sha256 AS checksum,
+                result_json AS resultJson
+         FROM chapter_validation_snapshots
+         ORDER BY run_sequence`,
+      ),
+    ).resolves.toEqual(
+      BACKUP_VALIDATION_SNAPSHOT_IDS.map((id, index) => ({
+        id,
+        runSequence: index + 1,
+        supersedesSnapshotId:
+          index === 0 ? null : (BACKUP_VALIDATION_SNAPSHOT_IDS[index - 1] ?? null),
+        checksum: String(index + 1).repeat(64),
+        resultJson: maintenanceValidationResultJson(),
+      })),
+    );
     await expect(
       executor.select<{ text: string; revision: number }>(
         `SELECT preference_text AS text, revision
@@ -343,6 +609,73 @@ describe("DatabaseMaintenanceService", () => {
     ).resolves.toEqual([{ code: "less_environment_description" }]);
     await expect(executor.select<{ name: string }>("SELECT name FROM projects")).resolves.toEqual([
       { name: "备份中的项目" },
+    ]);
+    await expect(
+      executor.select<{ snapshotJson: string; revision: number; turnCount: number }>(
+        `SELECT journey.snapshot_json AS snapshotJson, journey.revision,
+                COUNT(turn.id) AS turnCount
+         FROM creative_journeys AS journey
+         LEFT JOIN creative_journey_turns AS turn ON turn.journey_id = journey.id
+         WHERE journey.id = ?
+         GROUP BY journey.id`,
+        [BACKUP_JOURNEY_ID],
+      ),
+    ).resolves.toEqual([
+      {
+        snapshotJson: JSON.stringify({ idea: "backed-up-idea", step: "opening" }),
+        revision: 1,
+        turnCount: 1,
+      },
+    ]);
+    const restoredProjectSeeds = await executor.select<{
+      readonly payloadJson: string;
+      readonly revision: number;
+    }>(
+      `SELECT payload_json AS payloadJson, revision
+       FROM project_seeds WHERE project_id = ?`,
+      [BACKUP_PROJECT_ID],
+    );
+    expect(restoredProjectSeeds).toHaveLength(1);
+    expect(restoredProjectSeeds[0]?.revision).toBe(1);
+    expect(JSON.parse(restoredProjectSeeds[0]?.payloadJson ?? "null")).toEqual(
+      createMaintenanceProjectSeed("backed-up-project-seed", "2026-07-27T00:00:00.000Z"),
+    );
+    await expect(
+      executor.select<{ recoveryAction: string; mutationState: string }>(
+        `SELECT journal.recovery_action AS recoveryAction,
+                mutation.state AS mutationState
+         FROM cloud_deletion_journals AS journal
+         INNER JOIN cloud_deletion_mutations AS mutation
+           ON mutation.journal_id = journal.journal_id
+         WHERE journal.journal_id = ?`,
+        [BACKUP_DELETION_JOURNAL_ID],
+      ),
+    ).resolves.toEqual([{ recoveryAction: "lookup", mutationState: "accepted" }]);
+    await expect(
+      executor.select<{
+        authorityEpoch: number;
+        projectedEpoch: number | null;
+        projectedGraphRevision: number | null;
+        projectionComplete: number | null;
+        diagnosticsJson: string | null;
+      }>(
+        `SELECT authority_epoch AS authorityEpoch,
+                projected_epoch AS projectedEpoch,
+                projected_graph_revision AS projectedGraphRevision,
+                projection_complete AS projectionComplete,
+                diagnostics_json AS diagnosticsJson
+         FROM authoritative_story_graph_state
+         WHERE project_id = ?`,
+        [BACKUP_PROJECT_ID],
+      ),
+    ).resolves.toEqual([
+      {
+        authorityEpoch: 7,
+        projectedEpoch: null,
+        projectedGraphRevision: null,
+        projectionComplete: null,
+        diagnosticsJson: null,
+      },
     ]);
     await expect(
       executor.select<{ acknowledged: string }>(
@@ -569,6 +902,14 @@ describe("DatabaseMaintenanceService", () => {
       ),
     ).resolves.toEqual([{ revisionCount: 2, linkCount: 1 }]);
     await expect(
+      executor.select<{ task: string; sourceContentHash: string }>(
+        `SELECT task, source_content_hash AS sourceContentHash
+         FROM continuous_story_state_route_receipts
+         WHERE project_id = ? AND chapter_id = ? AND version_id = ?`,
+        [BACKUP_PROJECT_ID, BACKUP_CHAPTER_ID, BACKUP_CHAPTER_VERSION_ID],
+      ),
+    ).resolves.toEqual([{ task: "character_extraction", sourceContentHash: "1".repeat(64) }]);
+    await expect(
       executor.select<{ tableName: string; count: number }>(
         `SELECT 'causal_evidence_sources' AS tableName, COUNT(*) AS count
            FROM causal_evidence_sources
@@ -640,6 +981,7 @@ describe("DatabaseMaintenanceService", () => {
         sourceType: string;
         sourceId: string;
         locator: string | null;
+        generationId: string;
       }>(
         `SELECT
            run.task_type AS taskType,
@@ -647,13 +989,16 @@ describe("DatabaseMaintenanceService", () => {
            entry.included,
            source.source_type AS sourceType,
            source.source_id AS sourceId,
-           source.locator
+           source.locator,
+           execution.generation_id AS generationId
          FROM context_compilation_runs AS run
          INNER JOIN context_compilation_entries AS entry
            ON entry.run_id = run.id
          INNER JOIN context_compilation_entry_sources AS source
            ON source.run_id = entry.run_id
           AND source.candidate_id = entry.candidate_id
+         INNER JOIN context_compilation_execution_links AS execution
+           ON execution.trace_id = run.id
          WHERE run.id = 'maintenance-context-run'
          ORDER BY entry.evaluation_order`,
       ),
@@ -665,6 +1010,7 @@ describe("DatabaseMaintenanceService", () => {
         sourceType: "causal_event",
         sourceId: "maintenance-causal-event-b",
         locator: "causal-event:maintenance-causal-event-b",
+        generationId: "019f9f4a-b3c7-7350-9226-000000000701",
       },
       {
         taskType: "next_scene",
@@ -673,6 +1019,7 @@ describe("DatabaseMaintenanceService", () => {
         sourceType: "search_document",
         sourceId: "maintenance-search-document",
         locator: "search-document:maintenance-search-document",
+        generationId: "019f9f4a-b3c7-7350-9226-000000000701",
       },
     ]);
     await expect(
@@ -684,7 +1031,10 @@ describe("DatabaseMaintenanceService", () => {
            AND m.name IN (
              'context_compilation_runs',
              'context_compilation_entries',
-             'context_compilation_entry_sources'
+             'context_compilation_entry_sources',
+             'context_compilation_execution_links',
+             'context_compilation_model_invocation_links',
+             'context_compilation_output_candidate_links'
            )
            AND lower(p.name) IN (
              'prompt', 'prompt_text', 'content', 'content_text', 'excerpt',
@@ -719,6 +1069,199 @@ describe("DatabaseMaintenanceService", () => {
     await expect(executor.select<{ name: string }>("SELECT name FROM projects")).resolves.toEqual([
       { name: "保留当前项目" },
     ]);
+    await executor.close();
+  });
+
+  it("reports positive cloud acknowledgement evidence without claiming that zero proves absence", async () => {
+    const executor = new NodeSqliteExecutor(inkShadowMigration);
+    const now = "2026-07-27T00:00:00.000Z";
+    await insertProject(executor, BACKUP_PROJECT_ID, "Private disclosure evidence");
+    await insertGovernedExtensionMetadata(executor);
+    await executor.execute(
+      `INSERT INTO sync_outbox_operations (
+         operation_id, project_id, device_id, device_sequence, object_id,
+         object_generation, kind, vector_json, status, attempt, next_attempt_at,
+         lease_owner_id, lease_token, lease_expires_at, failure_code,
+         acknowledged_at, created_at, updated_at, object_type
+       ) VALUES ('019f9f4a-b3c7-7350-9226-000000000500', ?, ?, 1, ?, 1,
+                 'upsert', ?, 'acknowledged', 1, NULL, NULL, NULL, NULL, NULL,
+                 ?, ?, ?, 'chapter_version')`,
+      [
+        BACKUP_PROJECT_ID,
+        BACKUP_DEVICE_ID,
+        BACKUP_CHAPTER_ID,
+        JSON.stringify({ [BACKUP_DEVICE_ID]: 1 }),
+        now,
+        now,
+        now,
+      ],
+    );
+    const chapterId = parseUuidV7(BACKUP_CHAPTER_ID);
+    const changedAt = parseIsoUtcTimestamp(now);
+    if (!chapterId.ok || !changedAt.ok) {
+      throw new Error("Private disclosure evidence fixture identity is invalid.");
+    }
+    const repositories = createSqliteRepositories(executor);
+    const current = await repositories.chapters.findById(chapterId.value);
+    if (!current.ok || current.value === null) {
+      throw new Error("Private disclosure evidence fixture chapter is missing.");
+    }
+    const changed = current.value.changePrivacy({
+      privacyMode: "local_only",
+      expectedPrivacyRevision: current.value.privacyRevision,
+      now: changedAt.value,
+    });
+    if (!changed.ok) {
+      throw changed.error;
+    }
+
+    const receipt = await repositories.chapterPrivacy.updatePrivacy(
+      changed.value,
+      current.value.privacyRevision,
+    );
+
+    expect(receipt).toMatchObject({
+      ok: true,
+      value: {
+        acknowledgedCloudEvidenceCount: 1,
+        blockedProjectionCount: 0,
+        removedOutboxOperationCount: 0,
+      },
+    });
+    await executor.close();
+  });
+
+  it("revokes pending chapter transport and rejects every new local-only upload path", async () => {
+    const executor = new NodeSqliteExecutor(inkShadowMigration);
+    const now = "2026-07-27T00:00:00.000Z";
+    const projectionId = "019f9f4a-b3c7-7350-9226-000000000501";
+    const outboxId = "019f9f4a-b3c7-7350-9226-000000000502";
+    await insertProject(executor, BACKUP_PROJECT_ID, "Private transport test");
+    await insertGovernedExtensionMetadata(executor);
+    await executor.execute(
+      `INSERT INTO sync_projection_jobs (
+         job_id, project_id, account_id, object_type, object_id, object_generation,
+         projection_kind, version_id, source_revision, key_version, consent_revision,
+         device_id, status, attempt, revision, next_attempt_at, lease_owner_id,
+         lease_token, lease_expires_at, operation_id, failure_code, superseded_by_job_id,
+         created_at, updated_at, terminal_at
+       ) VALUES (?, ?, ?, 'chapter_version', ?, 1, 'upsert', ?, 1, 1, 1, ?,
+                 'queued', 0, 1, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, NULL)`,
+      [
+        projectionId,
+        BACKUP_PROJECT_ID,
+        BACKUP_ACCOUNT_ID,
+        BACKUP_CHAPTER_ID,
+        BACKUP_CHAPTER_VERSION_ID,
+        BACKUP_DEVICE_ID,
+        now,
+        now,
+        now,
+      ],
+    );
+    await executor.execute(
+      `INSERT INTO sync_outbox_operations (
+         operation_id, project_id, device_id, device_sequence, object_id,
+         object_generation, kind, vector_json, status, attempt, next_attempt_at,
+         lease_owner_id, lease_token, lease_expires_at, failure_code,
+         acknowledged_at, created_at, updated_at, object_type
+       ) VALUES (?, ?, ?, 1, ?, 1, 'upsert', ?, 'queued', 0, ?,
+                 NULL, NULL, NULL, NULL, NULL, ?, ?, 'chapter_version')`,
+      [
+        outboxId,
+        BACKUP_PROJECT_ID,
+        BACKUP_DEVICE_ID,
+        BACKUP_CHAPTER_ID,
+        JSON.stringify({ [BACKUP_DEVICE_ID]: 1 }),
+        now,
+        now,
+        now,
+      ],
+    );
+
+    await executor.execute(
+      `UPDATE chapters
+       SET privacy_mode = 'local_only', privacy_revision = 2, updated_at = ?
+       WHERE id = ?`,
+      [now, BACKUP_CHAPTER_ID],
+    );
+
+    await expect(
+      executor.select<{ status: string; failureCode: string }>(
+        `SELECT status, failure_code AS failureCode
+         FROM sync_projection_jobs WHERE job_id = ?`,
+        [projectionId],
+      ),
+    ).resolves.toEqual([{ status: "failed", failureCode: "PRIVATE_CHAPTER_LOCAL_ONLY" }]);
+    await expect(
+      executor.select<{ count: number }>(
+        "SELECT count(*) AS count FROM sync_outbox_operations WHERE operation_id = ?",
+        [outboxId],
+      ),
+    ).resolves.toEqual([{ count: 0 }]);
+
+    await expect(
+      executor.execute(
+        `INSERT INTO sync_projection_jobs (
+           job_id, project_id, account_id, object_type, object_id, object_generation,
+           projection_kind, version_id, source_revision, key_version, consent_revision,
+           device_id, status, attempt, revision, next_attempt_at, lease_owner_id,
+           lease_token, lease_expires_at, operation_id, failure_code, superseded_by_job_id,
+           created_at, updated_at, terminal_at
+         ) VALUES ('019f9f4a-b3c7-7350-9226-000000000503', ?, ?, 'chapter_version', ?, 1,
+                   'upsert', ?, 1, 1, 1, ?, 'queued', 0, 1, ?, NULL, NULL, NULL,
+                   NULL, NULL, NULL, ?, ?, NULL)`,
+        [
+          BACKUP_PROJECT_ID,
+          BACKUP_ACCOUNT_ID,
+          BACKUP_CHAPTER_ID,
+          BACKUP_CHAPTER_VERSION_ID,
+          BACKUP_DEVICE_ID,
+          now,
+          now,
+          now,
+        ],
+      ),
+    ).rejects.toThrow(/local-only chapter cannot enter cloud projection/u);
+    await expect(
+      executor.execute(
+        `INSERT INTO sync_outbox_operations (
+           operation_id, project_id, device_id, device_sequence, object_id,
+           object_generation, kind, vector_json, status, attempt, next_attempt_at,
+           lease_owner_id, lease_token, lease_expires_at, failure_code,
+           acknowledged_at, created_at, updated_at, object_type
+         ) VALUES ('019f9f4a-b3c7-7350-9226-000000000504', ?, ?, 2, ?, 1,
+                   'upsert', ?, 'queued', 0, ?, NULL, NULL, NULL, NULL, NULL,
+                   ?, ?, 'chapter_version')`,
+        [
+          BACKUP_PROJECT_ID,
+          BACKUP_DEVICE_ID,
+          BACKUP_CHAPTER_ID,
+          JSON.stringify({ [BACKUP_DEVICE_ID]: 2 }),
+          now,
+          now,
+          now,
+        ],
+      ),
+    ).rejects.toThrow(/local-only chapter cannot enter cloud outbox/u);
+    await expect(
+      executor.execute(
+        `INSERT INTO sync_ciphertext_chunks (
+           chunk_id, project_id, object_type, object_id, version_id, chunk_index,
+           key_version, algorithm, nonce, ciphertext, ciphertext_sha256,
+           plaintext_bytes, created_at
+         ) VALUES ('private-chunk', ?, 'chapter_version', ?, ?, 0, 1,
+                   'AES-256-GCM', 'AAAAAAAAAAAAAAAA', ?, ?, 1, ?)`,
+        [
+          BACKUP_PROJECT_ID,
+          BACKUP_CHAPTER_ID,
+          BACKUP_CHAPTER_VERSION_ID,
+          "A".repeat(22),
+          "a".repeat(64),
+          now,
+        ],
+      ),
+    ).rejects.toThrow(/local-only chapter cannot be encrypted/u);
     await executor.close();
   });
 });
@@ -759,6 +1302,233 @@ async function insertProject(
       status_before_trash
     ) VALUES (?, ?, 'active', 1, 0, ?, ?, NULL, NULL, NULL, NULL)`,
     [id, name, now, now],
+  );
+}
+
+async function insertMemoryGovernanceAudit(executor: NodeSqliteExecutor): Promise<void> {
+  const createdAt = "2026-07-27T00:00:00.000Z";
+  const updatedAt = "2026-07-27T00:01:00.000Z";
+  const policy = {
+    projectId: BACKUP_PROJECT_ID,
+    automaticLearningEnabled: false,
+    revision: 1,
+    createdAt,
+    updatedAt: createdAt,
+  };
+  const memory = {
+    id: BACKUP_MEMORY_ID,
+    projectId: BACKUP_PROJECT_ID,
+    level: "L2",
+    content: "备份必须保留这条已忘掉记忆的来源。",
+    source: {
+      kind: "user_rule",
+      sourceId: BACKUP_MEMORY_ID,
+      sourceVersionId: null,
+    },
+    origin: "user",
+    automaticLearningPolicyRevision: null,
+    status: "enabled",
+    pinned: false,
+    excluded: true,
+    weight: 0,
+    useCount: 0,
+    lastUsedAt: null,
+    revision: 2,
+    createdAt,
+    updatedAt,
+  };
+  await executor.execute(
+    `INSERT INTO story_memory_policies (
+       project_id, automatic_learning_enabled, revision, created_at, updated_at, snapshot_json
+     ) VALUES (?, 0, 1, ?, ?, ?)`,
+    [BACKUP_PROJECT_ID, createdAt, createdAt, JSON.stringify(policy)],
+  );
+  await executor.execute(
+    `INSERT INTO story_memory_records (
+       id, project_id, level, origin, status, revision, source_kind, source_id,
+       source_version_id, automatic_learning_policy_revision, created_at, updated_at,
+       snapshot_json
+     ) VALUES (?, ?, 'L2', 'user', 'enabled', 2, 'user_rule', ?, NULL, NULL, ?, ?, ?)`,
+    [
+      BACKUP_MEMORY_ID,
+      BACKUP_PROJECT_ID,
+      BACKUP_MEMORY_ID,
+      createdAt,
+      updatedAt,
+      JSON.stringify(memory),
+    ],
+  );
+  await executor.execute(
+    `INSERT INTO story_memory_governance_events (
+       id, project_id, operation, target_record_id, affected_record_count,
+       resulting_policy_revision, request_json, before_snapshot_json,
+       after_snapshot_json, created_at
+     ) VALUES (?, ?, 'forget_project', NULL, 1, 1, ?, ?, ?, ?)`,
+    [
+      BACKUP_MEMORY_GOVERNANCE_EVENT_ID,
+      BACKUP_PROJECT_ID,
+      JSON.stringify({ operation: "forget_project", projectId: BACKUP_PROJECT_ID }),
+      JSON.stringify({ records: [{ id: BACKUP_MEMORY_ID, excluded: false }] }),
+      JSON.stringify({ records: [{ id: BACKUP_MEMORY_ID, excluded: true }] }),
+      updatedAt,
+    ],
+  );
+}
+
+async function insertApplyingStoryPlanningCandidate(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  await executor.execute(
+    `INSERT INTO story_planning_candidates (
+       id, project_id, task, target_node_id, target_node_title,
+       baseline_outline_revision, baseline_target_synopsis, status,
+       payload_json, editable_synopsis, context_json, invocation_id,
+       connection_id, catalog_entry_id, provider_kind, model_id,
+       used_fallback, selective_acceptance_intent_json,
+       revision, created_at, updated_at
+     ) VALUES (?, ?, 'outline_planning', ?, '备份规划节点', 1, '备份基线简介', 'review',
+               ?, '待审阅规划内容', ?, 'maintenance-planning-invocation',
+               'maintenance-planning-connection', 'maintenance-planning-catalog',
+               'openai', 'maintenance-planning-model', 0, ?, 2, ?, ?)`,
+    [
+      BACKUP_PLANNING_CANDIDATE_ID,
+      BACKUP_PROJECT_ID,
+      "019f9f4a-b3c7-7350-9226-000000000304",
+      JSON.stringify({
+        schemaVersion: 1,
+        task: "outline_planning",
+        title: "备份规划",
+        direction: "保持备份恢复语义",
+        beats: [{ title: "恢复", purpose: "验证意图", outcome: "继续同一采纳" }],
+        constraintsApplied: [],
+        openQuestions: [],
+      }),
+      JSON.stringify({
+        formalFactIds: [],
+        lockedFactIds: [],
+        causalEventIds: [],
+        causalGraphStatus: "empty",
+      }),
+      maintenancePlanningAcceptanceIntentJson(),
+      now,
+      now,
+    ],
+  );
+}
+
+function maintenancePlanningAcceptanceIntentJson(): string {
+  return JSON.stringify({
+    schemaVersion: 1,
+    selectedItemIds: ["beat:0"],
+    selectionSha256: "a".repeat(64),
+    baselineOutlineRevision: 1,
+    baselineSynopsisSha256: "b".repeat(64),
+    proposedSynopsisSha256: "c".repeat(64),
+    startedAt: "2026-07-27T00:00:00.000Z",
+  });
+}
+
+async function insertCreativeJourney(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  await executor.execute(
+    `INSERT INTO creative_journeys (
+       id, kind, status, current_state, project_id, chapter_id, candidate_id,
+       revision, snapshot_json, created_at, updated_at, completed_at
+     ) VALUES (?, 'idea', 'active', 'opening', ?, ?, NULL, 1, ?, ?, ?, NULL)`,
+    [
+      BACKUP_JOURNEY_ID,
+      BACKUP_PROJECT_ID,
+      BACKUP_CHAPTER_ID,
+      JSON.stringify({ idea: "backed-up-idea", step: "opening" }),
+      now,
+      now,
+    ],
+  );
+  await executor.execute(
+    `INSERT INTO creative_journey_turns (
+       id, journey_id, sequence, turn_kind, question_key, generation_source,
+       provider_id, model_id, task_key, request_id, snapshot_json, created_at
+     ) VALUES (?, ?, 1, 'idea', NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)`,
+    [BACKUP_JOURNEY_TURN_ID, BACKUP_JOURNEY_ID, JSON.stringify({ text: "backed-up-idea" }), now],
+  );
+}
+
+async function insertProjectSeed(executor: NodeSqliteExecutor): Promise<void> {
+  const seed = createMaintenanceProjectSeed("backed-up-project-seed", "2026-07-27T00:00:00.000Z");
+  await executor.execute(
+    `INSERT INTO project_seeds (
+       project_id, seed_id, journey_kind, schema_version, payload_json,
+       revision, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+    [
+      BACKUP_PROJECT_ID,
+      seed.seedId,
+      seed.journeyKind,
+      seed.version,
+      JSON.stringify(seed),
+      seed.createdAt,
+      seed.updatedAt,
+    ],
+  );
+}
+
+function createMaintenanceProjectSeed(direction: string, now: string) {
+  return deriveIdeaProjectSeed({
+    seedId: "idea:maintenance-project-seed",
+    idea: direction,
+    answers: { tone: "克制" },
+    skippedQuestionKeys: [],
+    now,
+  });
+}
+
+async function insertCloudDeletionJournal(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  await executor.execute(
+    `INSERT INTO cloud_deletion_journals (
+       journal_id, target_kind, target_id, account_email, active_mutation_id,
+       deletion_request_id, latest_request_id, latest_revision,
+       latest_receipt_json, recovery_action, last_error_code, created_at, updated_at
+     ) VALUES (?, 'project', ?, NULL, ?, ?, ?, 1, ?, 'lookup', NULL, ?, ?)`,
+    [
+      BACKUP_DELETION_JOURNAL_ID,
+      BACKUP_PROJECT_ID,
+      BACKUP_DELETION_MUTATION_ID,
+      BACKUP_DELETION_REQUEST_ID,
+      BACKUP_DELETION_REQUEST_ID,
+      JSON.stringify({ requestId: BACKUP_DELETION_REQUEST_ID, revision: 1 }),
+      now,
+      now,
+    ],
+  );
+  await executor.execute(
+    `INSERT INTO cloud_deletion_mutations (
+       mutation_id, journal_id, request_type, confirmation_id, idempotency_key,
+       expected_revision, request_body_sha256, state, response_request_id,
+       response_revision, last_error_code, created_at, updated_at
+     ) VALUES (?, ?, 'submission', ?, 'maintenance.delete.project.0001', 1, ?,
+               'accepted', ?, 1, NULL, ?, ?)`,
+    [
+      BACKUP_DELETION_MUTATION_ID,
+      BACKUP_DELETION_JOURNAL_ID,
+      BACKUP_DELETION_CONFIRMATION_ID,
+      "d".repeat(64),
+      BACKUP_DELETION_REQUEST_ID,
+      now,
+      now,
+    ],
+  );
+}
+
+async function setAuthoritativeStoryGraphCheckpoint(executor: NodeSqliteExecutor): Promise<void> {
+  await executor.execute(
+    `UPDATE authoritative_story_graph_state
+     SET authority_epoch = 7,
+         projected_epoch = 7,
+         projected_graph_revision = 1,
+         projection_complete = 1,
+         diagnostics_json = ?
+     WHERE project_id = ?`,
+    [JSON.stringify({ source: "backed-up-projection" }), BACKUP_PROJECT_ID],
   );
 }
 
@@ -1213,6 +1983,17 @@ async function insertContextCompilationTrace(executor: NodeSqliteExecutor): Prom
           'search-document:maintenance-search-document', ?)`,
       ["1".repeat(64), "2".repeat(64)],
     );
+    await transaction.execute(
+      `INSERT INTO context_compilation_execution_links (
+         trace_id, generation_id, generation_run_id, created_at
+       ) VALUES (
+         'maintenance-context-run',
+         '019f9f4a-b3c7-7350-9226-000000000701',
+         NULL,
+         ?
+       )`,
+      [now],
+    );
   });
 }
 
@@ -1392,6 +2173,109 @@ async function insertGovernedExtensionMetadata(executor: NodeSqliteExecutor): Pr
   });
 }
 
+async function insertContinuousStoryStateRouteReceipt(executor: NodeSqliteExecutor): Promise<void> {
+  await executor.execute(
+    `INSERT INTO continuous_story_state_route_receipts (
+       project_id, chapter_id, version_id, task, source_content_hash,
+       provider_kind, model_id, invocation_id, candidate_count,
+       created_fact_count, retired_fact_count, completed_at
+     ) VALUES (?, ?, ?, 'character_extraction', ?, 'ollama', 'test-model',
+               'maintenance-route-invocation', 0, 0, 0, '2026-07-27T00:00:00.000Z')`,
+    [BACKUP_PROJECT_ID, BACKUP_CHAPTER_ID, BACKUP_CHAPTER_VERSION_ID, "1".repeat(64)],
+  );
+}
+
+async function insertHistoricalContinuousStoryStateReceiptScenario(
+  executor: NodeSqliteExecutor,
+): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  await executor.transaction(async (transaction) => {
+    await transaction.execute(
+      `INSERT INTO chapters (
+         id, project_id, title, content, status, revision, current_version_id,
+         created_at, updated_at, trashed_at
+       ) VALUES (?, ?, '历史回执章节', '旧正文', 'active', 1, ?, ?, ?, NULL)`,
+      [BACKUP_CHAPTER_ID, BACKUP_PROJECT_ID, BACKUP_CHAPTER_VERSION_ID, now, now],
+    );
+    await transaction.execute(
+      `INSERT INTO chapter_versions (
+         id, project_id, chapter_id, parent_version_id, sequence, content,
+         content_checksum, reason, source_candidate_id, created_at
+       ) VALUES (?, ?, ?, NULL, 1, '旧正文', ?, 'created', NULL, ?)`,
+      [BACKUP_CHAPTER_VERSION_ID, BACKUP_PROJECT_ID, BACKUP_CHAPTER_ID, "1".repeat(64), now],
+    );
+  });
+  await insertContinuousStoryStateRouteReceipt(executor);
+  await advanceChapterAfterContinuousStoryStateReceipt(executor);
+}
+
+async function advanceChapterAfterContinuousStoryStateReceipt(
+  executor: NodeSqliteExecutor,
+): Promise<void> {
+  await executor.transaction(async (transaction) => {
+    await transaction.execute(
+      `INSERT INTO chapter_versions (
+         id, project_id, chapter_id, parent_version_id, sequence, content,
+         content_checksum, reason, source_candidate_id, created_at
+       ) VALUES (?, ?, ?, ?, 2, '备份中的新正文', ?, 'manual', NULL,
+                 '2026-07-27T00:01:00.000Z')`,
+      [
+        BACKUP_CURRENT_CHAPTER_VERSION_ID,
+        BACKUP_PROJECT_ID,
+        BACKUP_CHAPTER_ID,
+        BACKUP_CHAPTER_VERSION_ID,
+        "2".repeat(64),
+      ],
+    );
+    await transaction.execute(
+      `UPDATE chapters
+       SET content = '备份中的新正文', current_version_id = ?, revision = 2,
+           updated_at = '2026-07-27T00:01:00.000Z'
+       WHERE project_id = ? AND id = ?`,
+      [BACKUP_CURRENT_CHAPTER_VERSION_ID, BACKUP_PROJECT_ID, BACKUP_CHAPTER_ID],
+    );
+  });
+}
+
+async function insertChapterValidationSnapshots(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  for (const [index, id] of BACKUP_VALIDATION_SNAPSHOT_IDS.entries()) {
+    const runSequence = index + 1;
+    await executor.execute(
+      `INSERT INTO chapter_validation_snapshots (
+         id, project_id, chapter_id, chapter_version_id, chapter_revision,
+         schema_version, rule_set_version, run_sequence, run_kind,
+         supersedes_snapshot_id, result_status, issue_count,
+         result_checksum_sha256, result_json, generated_at
+       ) VALUES (?, ?, ?, ?, 1, 1, 'deterministic-novel-validator.v1', ?, ?, ?,
+                 'checked', 1, ?, ?, ?)`,
+      [
+        id,
+        BACKUP_PROJECT_ID,
+        BACKUP_CHAPTER_ID,
+        BACKUP_CHAPTER_VERSION_ID,
+        runSequence,
+        index === 0 ? "initial" : "rerun",
+        index === 0 ? null : (BACKUP_VALIDATION_SNAPSHOT_IDS[index - 1] ?? null),
+        String(runSequence).repeat(64),
+        maintenanceValidationResultJson(),
+        now,
+      ],
+    );
+  }
+}
+
+function maintenanceValidationResultJson(): string {
+  return JSON.stringify({
+    status: "checked",
+    projectId: BACKUP_PROJECT_ID,
+    chapterId: BACKUP_CHAPTER_ID,
+    chapterVersionId: BACKUP_CHAPTER_VERSION_ID,
+    chapterRevision: 1,
+    issues: [{ severity: "warning", currentEvidence: [], conflictingEvidence: [] }],
+  });
+}
+
 async function sha256Text(value: string): Promise<string> {
   const digest = new Uint8Array(
     await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)),
@@ -1482,6 +2366,16 @@ async function insertModelHubExpertConnection(executor: NodeSqliteExecutor): Pro
        'keyring:model-hub:maintenance-custom-model', 'present', 'custom_header_keyring',
        'x-api-key', '/catalog/models', '/text/chat', '/vectors/embed',
        47000, 2, 1, 1, ?, ?
+     )`,
+    [now, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_hub_connection_commits (
+       id, connection_id, phase, credential_provider_id,
+       cleanup_credential_provider_id, created_at, updated_at
+     ) VALUES (
+       'maintenance-model-commit', 'maintenance-custom-model', 'cleanup_pending',
+       'maintenance-current-slot', 'maintenance-old-slot', ?, ?
      )`,
     [now, now],
   );

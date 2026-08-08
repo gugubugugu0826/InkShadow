@@ -62,6 +62,7 @@ describe("desktop cloud gates", () => {
     expect(runtime.cloudSync).toBeNull();
     expect(runtime.cloudSyncEnrollment).toBeNull();
     expect(runtime.cloudSyncSupervisor).toBeNull();
+    expect(runtime.usageCenter).toBeNull();
 
     await runtime.close();
   });

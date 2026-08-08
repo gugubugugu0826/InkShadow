@@ -1,7 +1,13 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { AiCandidate, type Chapter, type Project } from "@inkshadow/domain";
+import {
+  AiCandidate,
+  type AiCandidateApplicationIntent,
+  type AiCandidateSource,
+  type Chapter,
+  type Project,
+} from "@inkshadow/domain";
 import { ToastProvider } from "@inkshadow/ui";
 import { describe, expect, it } from "vitest";
 
@@ -112,6 +118,56 @@ describe("editor candidate route selection", () => {
         ),
     ).toBeVisible();
   });
+
+  it("uses the persisted selection-rewrite anchor instead of the current editor selection", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime);
+    const candidate = await createReadyCandidate(runtime, project, chapter, "新稿", {
+      source: "polish",
+      applicationIntent: {
+        task: "selection_rewrite",
+        application: "replace_selection",
+        payload: "fragment",
+        startUtf16: 2,
+        endUtf16: 4,
+      },
+    });
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
+
+    await user.click(await screen.findByRole("button", { name: "比较 AI 建议" }));
+    const review = await screen.findByRole("dialog", { name: "比较 AI 建议与正文" });
+    expect(within(review).getByText(/第 2 到第 4 个字符/u)).toBeVisible();
+    await user.click(within(review).getByRole("button", { name: "替换选区并创建版本" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "章节正文" })).toHaveValue("稳定新稿"),
+    );
+  });
+
+  it("offers the four explicit whole-chapter rewrite outcomes", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime);
+    const candidate = await createReadyCandidate(runtime, project, chapter, "整章改写正文", {
+      source: "polish",
+      applicationIntent: {
+        task: "whole_chapter_rewrite",
+        application: "replace_document",
+        payload: "full_document",
+        startUtf16: null,
+        endUtf16: null,
+      },
+    });
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
+
+    await user.click(await screen.findByRole("button", { name: "比较 AI 建议" }));
+    const review = await screen.findByRole("dialog", { name: "比较 AI 建议与正文" });
+    expect(within(review).getByRole("button", { name: "取消" })).toBeEnabled();
+    expect(within(review).getByRole("button", { name: "替换整章并创建版本" })).toBeEnabled();
+    expect(within(review).getByRole("button", { name: "追加到章末并创建版本" })).toBeEnabled();
+    expect(within(review).getByRole("button", { name: "保存为新草稿" })).toBeEnabled();
+  });
 });
 
 function renderEditor(
@@ -155,14 +211,21 @@ async function createReadyCandidate(
   project: Project,
   chapter: Chapter,
   content: string,
+  options: Readonly<{
+    source?: AiCandidateSource;
+    applicationIntent?: AiCandidateApplicationIntent;
+  }> = {},
 ): Promise<AiCandidate> {
   const streaming = AiCandidate.createStreaming({
     id: runtime.ids.next(),
     projectId: project.id,
     chapterId: chapter.id,
-    source: "agent",
+    source: options.source ?? "agent",
     baseVersionId: chapter.currentVersionId,
     now: runtime.clock.now(),
+    ...(options.applicationIntent === undefined
+      ? {}
+      : { applicationIntent: options.applicationIntent }),
   });
   if (!streaming.ok) {
     throw streaming.error;

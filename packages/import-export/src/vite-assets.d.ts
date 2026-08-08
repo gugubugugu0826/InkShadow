@@ -1,4 +1,4 @@
-declare module "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url" {
+declare module "pdfjs-dist/build/pdf.worker.min.mjs?worker&url" {
   const workerUrl: string;
   export default workerUrl;
 }

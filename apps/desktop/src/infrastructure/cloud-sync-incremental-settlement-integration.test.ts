@@ -28,6 +28,7 @@ const migration = [
   readMigration("0014_sync_protocol_v2_object_types.sql"),
   readMigration("0015_sync_materialization_authority.sql"),
   readMigration("0017_sync_projection_account_authority.sql"),
+  readMigration("0038_private_chapters.sql"),
 ].join("\n");
 
 const PROJECT_ID = id(1);

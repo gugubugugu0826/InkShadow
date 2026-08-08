@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button, FormField, InlineAlert, Textarea } from "@inkshadow/ui";
 
 import {
+  MAXIMUM_LEARNABLE_CUSTOM_FEEDBACK_CHARACTERS,
   WRITING_FEEDBACK_CODE_LABELS,
   type WritingFeedbackCode,
 } from "../infrastructure/writing-feedback-store";
@@ -88,7 +89,7 @@ export function CandidateFeedbackControls({
           <Textarea
             {...fieldProps}
             rows={2}
-            maxLength={1_000}
+            maxLength={MAXIMUM_LEARNABLE_CUSTOM_FEEDBACK_CHARACTERS}
             currentLength={custom.length}
             value={custom}
             disabled={disabled}

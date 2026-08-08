@@ -29,6 +29,11 @@ import {
   PersistentProjectEmbeddingService,
   ProjectEmbeddingServiceError,
 } from "./project-search-vector-service";
+import {
+  ProjectContextPrivacyError,
+  type ProjectContextPrivacyAuthority,
+  type ProjectContextPrivacyReceipt,
+} from "./project-context-privacy-authority";
 
 const PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const NOW = "2026-07-28T00:00:00.000Z";
@@ -87,6 +92,238 @@ describe("persistent project embedding service", () => {
     });
     expect(gateway.inputs[0]?.config.providerId).not.toBe("fallback-provider");
     expect(hasher.inputs[0]).toContain("https://models.example/tenant/v1/embeddings");
+  });
+
+  it("treats probe-shaped user text as project context and fails closed without authority", async () => {
+    const store = new InMemoryVectorStore();
+    const gateway = new FakeEmbeddingGateway();
+    const documents = [document(0, "authoritative text")];
+    const trusted = createService({
+      store,
+      gateway,
+      hasher: fingerprintHasher(),
+      route: route(),
+      profile: profile("https://models.example/v1"),
+    });
+    const initial = await trusted.synchronizeProject(PROJECT_ID, documents, false);
+    const ready = await trusted.rebuildProject(
+      PROJECT_ID,
+      documents,
+      initial.diagnostics.confirmationId,
+    );
+    expect(ready.projectId).toBe(PROJECT_ID);
+    const probeShapedUserQuery = "InkShadow embedding capability probe";
+    const authorized = await trusted.embedQuery(ready, probeShapedUserQuery);
+    expect(authorized.embedding).not.toBeNull();
+    expect(gateway.inputs.at(-1)?.dispatchScope).toMatchObject({
+      kind: "project_context",
+      receipt: { projectId: PROJECT_ID },
+    });
+    const callsAfterAuthorizedQuery = gateway.inputs.length;
+
+    const authorityUnavailable = createService({
+      store,
+      gateway,
+      hasher: fingerprintHasher(),
+      route: route(),
+      profile: profile("https://models.example/v1"),
+      projectContextPrivacy: null,
+    });
+    const query = await authorityUnavailable.embedQuery(ready, probeShapedUserQuery);
+
+    expect(query.embedding).toBeNull();
+    expect(query.diagnostics).toMatchObject({
+      status: "degraded",
+      reason: "query_embedding_failed",
+      queryFailureCode: "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE",
+    });
+    expect(gateway.inputs).toHaveLength(callsAfterAuthorizedQuery);
+  });
+
+  it("keeps an empty-project capability payload inside project authority", async () => {
+    const trustedStore = new InMemoryVectorStore();
+    const trustedGateway = new FakeEmbeddingGateway();
+    const trusted = createService({
+      store: trustedStore,
+      gateway: trustedGateway,
+      hasher: fingerprintHasher(),
+      route: route(),
+      profile: profile("https://models.example/v1"),
+    });
+    const initial = await trusted.synchronizeProject(PROJECT_ID, [], false);
+    await trusted.rebuildProject(PROJECT_ID, [], initial.diagnostics.confirmationId);
+    expect(trustedGateway.inputs).toHaveLength(1);
+    expect(trustedGateway.inputs[0]).toMatchObject({
+      inputs: ["InkShadow embedding capability probe"],
+      dispatchScope: {
+        kind: "project_context",
+        receipt: { projectId: PROJECT_ID },
+      },
+    });
+
+    const unavailableStore = new InMemoryVectorStore();
+    const unavailableGateway = new FakeEmbeddingGateway();
+    const unavailable = createService({
+      store: unavailableStore,
+      gateway: unavailableGateway,
+      hasher: fingerprintHasher(),
+      route: route(),
+      profile: profile("https://models.example/v1"),
+      projectContextPrivacy: null,
+    });
+    const unavailableInitial = await unavailable.synchronizeProject(PROJECT_ID, [], false);
+    await expect(
+      unavailable.rebuildProject(PROJECT_ID, [], unavailableInitial.diagnostics.confirmationId),
+    ).rejects.toMatchObject({ code: "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE" });
+    expect(unavailableGateway.inputs).toHaveLength(0);
+  });
+
+  it("does not relabel real project queries as connection probes on local routes", async () => {
+    const store = new InMemoryVectorStore();
+    const gateway = new FakeEmbeddingGateway();
+    const documents = [document(0, "local authoritative text")];
+    const trusted = createService({
+      store,
+      gateway,
+      hasher: fingerprintHasher(),
+      route: route(),
+      profile: profile("http://127.0.0.1:11434", "ollama"),
+    });
+    const ready = await trusted.rebuildProject(PROJECT_ID, documents, null);
+    const callsAfterRebuild = gateway.inputs.length;
+    const authorityUnavailable = createService({
+      store,
+      gateway,
+      hasher: fingerprintHasher(),
+      route: route(),
+      profile: profile("http://127.0.0.1:11434", "ollama"),
+      projectContextPrivacy: null,
+    });
+
+    const query = await authorityUnavailable.embedQuery(ready, "local private query");
+
+    expect(query.embedding).toBeNull();
+    expect(query.diagnostics.queryFailureCode).toBe("PROJECT_CONTEXT_PRIVACY_UNAVAILABLE");
+    expect(gateway.inputs).toHaveLength(callsAfterRebuild);
+  });
+
+  it("rechecks project privacy in the final query-vector dispatch hook", async () => {
+    const store = new InMemoryVectorStore();
+    const gateway = new FakeEmbeddingGateway();
+    const documents = [document(0, "authoritative text")];
+    const trusted = createService({
+      store,
+      gateway,
+      hasher: fingerprintHasher(),
+      route: route(),
+      profile: profile("https://models.example/v1"),
+    });
+    const initial = await trusted.synchronizeProject(PROJECT_ID, documents, false);
+    const ready = await trusted.rebuildProject(
+      PROJECT_ID,
+      documents,
+      initial.diagnostics.confirmationId,
+    );
+    const callsAfterRebuild = gateway.inputs.length;
+    const receipt = standardPrivacyReceipt(PROJECT_ID);
+    const changedAuthority: Pick<
+      ProjectContextPrivacyAuthority,
+      "inspect" | "assertCurrentBeforeDispatch" | "assertRouteEligible"
+    > = {
+      inspect: vi.fn(() => Promise.resolve(receipt)),
+      assertCurrentBeforeDispatch: vi.fn(() =>
+        Promise.reject(
+          new ProjectContextPrivacyError(
+            "PROJECT_CONTEXT_PRIVACY_CHANGED",
+            "privacy changed",
+            true,
+          ),
+        ),
+      ),
+      assertRouteEligible: vi.fn(),
+    };
+    const racingQuery = createService({
+      store,
+      gateway,
+      hasher: fingerprintHasher(),
+      route: route(),
+      profile: profile("https://models.example/v1"),
+      projectContextPrivacy: changedAuthority,
+    });
+
+    const query = await racingQuery.embedQuery(ready, "query after privacy race");
+
+    expect(query.embedding).toBeNull();
+    expect(query.diagnostics.queryFailureCode).toBe("PROJECT_CONTEXT_PRIVACY_CHANGED");
+    expect(changedAuthority.assertCurrentBeforeDispatch).toHaveBeenCalledWith(receipt);
+    expect(gateway.inputs).toHaveLength(callsAfterRebuild);
+  });
+
+  it("excludes local-only chapter text from every remote embedding batch", async () => {
+    const store = new InMemoryVectorStore();
+    const gateway = new FakeEmbeddingGateway();
+    const privateDocument = document(0, "PRIVATE_CHAPTER_TEXT_MUST_STAY_LOCAL");
+    const standardDocument = document(1, "standard chapter text");
+    const filterRemoteEligibleDocuments = vi.fn(
+      (_projectId: string, documents: readonly SearchDocument[]) =>
+        Promise.resolve(documents.filter(({ id }) => id === standardDocument.id)),
+    );
+    const service = createService({
+      store,
+      gateway,
+      hasher: fingerprintHasher(),
+      route: route(),
+      profile: profile("https://models.example/v1"),
+      filterRemoteEligibleDocuments,
+    });
+    const documents = [privateDocument, standardDocument];
+    const initial = await service.synchronizeProject(PROJECT_ID, documents, false);
+
+    const rebuilt = await service.rebuildProject(
+      PROJECT_ID,
+      documents,
+      initial.diagnostics.confirmationId,
+    );
+
+    expect(filterRemoteEligibleDocuments).toHaveBeenCalled();
+    expect(gateway.inputs).toHaveLength(1);
+    expect(gateway.inputs[0]?.inputs).toEqual([
+      `${standardDocument.title}\n${standardDocument.text}`,
+    ]);
+    expect(JSON.stringify(gateway.inputs)).not.toContain(privateDocument.text);
+    expect(rebuilt.embeddings).toHaveLength(1);
+    expect(rebuilt.embeddings[0]?.documentId).toBe(standardDocument.id);
+  });
+
+  it("rechecks chapter privacy immediately before each remote embedding dispatch", async () => {
+    const store = new InMemoryVectorStore();
+    const gateway = new FakeEmbeddingGateway();
+    const chapter = document(0, "CHAPTER_BECOMES_PRIVATE_BEFORE_DISPATCH");
+    let privacyChecks = 0;
+    const service = createService({
+      store,
+      gateway,
+      hasher: fingerprintHasher(),
+      route: route(),
+      profile: profile("https://models.example/v1"),
+      filterRemoteEligibleDocuments: (_projectId, documents) => {
+        privacyChecks += 1;
+        return Promise.resolve(privacyChecks >= 3 ? [] : documents);
+      },
+    });
+    const initial = await service.synchronizeProject(PROJECT_ID, [chapter], false);
+
+    const rebuilt = await service.rebuildProject(
+      PROJECT_ID,
+      [chapter],
+      initial.diagnostics.confirmationId,
+    );
+
+    expect(privacyChecks).toBeGreaterThanOrEqual(3);
+    expect(gateway.inputs).toHaveLength(1);
+    expect(gateway.inputs[0]?.inputs).toEqual(["InkShadow embedding capability probe"]);
+    expect(JSON.stringify(gateway.inputs)).not.toContain(chapter.text);
+    expect(rebuilt.embeddings).toEqual([]);
   });
 
   it("batches bounded documents, reloads the exact ready generation, and detects config drift", async () => {
@@ -378,11 +615,152 @@ describe("persistent project embedding service", () => {
       initial.diagnostics.confirmationId,
     );
     expect(rebuilt.diagnostics.status).toBe("ready");
+    expect(gateway.inputs).toHaveLength(1);
     expect(gateway.inputs[0]).toMatchObject({
       config: { providerId: "primary-provider" },
       model: "embed-primary",
     });
     expect(await modelHub.store.findTaskRoute("embedding")).toBeNull();
+  });
+
+  it("does not embed when a Model Hub route becomes available during the final privacy check", async () => {
+    const store = new InMemoryVectorStore();
+    const gateway = new FakeEmbeddingGateway();
+    const modelHub = await createModelHubHarness(gateway, null);
+    let routePublished = false;
+    const service = createService({
+      store,
+      gateway,
+      hasher: fingerprintHasher(),
+      route: route(),
+      profile: profile("https://legacy-superseded.example/v1"),
+      modelHub: modelHub.dependencies,
+      projectContextPrivacy: {
+        inspect: (projectId) => Promise.resolve(standardPrivacyReceipt(projectId)),
+        assertRouteEligible: () => undefined,
+        assertCurrentBeforeDispatch: async () => {
+          if (routePublished) return;
+          routePublished = true;
+          const catalogEntryId = await seedAdditionalModelHubTarget(modelHub.store, {
+            connectionId: "new-authoritative-embedding",
+            catalogEntryId: "new-authoritative-embedding-catalog",
+            modelId: "new-authoritative-embedding-model",
+          });
+          await modelHub.store.saveTaskRoute({
+            task: "embedding",
+            primaryCatalogEntryId: catalogEntryId,
+            fallbackCatalogEntryId: null,
+            parameterPolicy: {},
+            maximumCostMicros: null,
+            currency: null,
+            privacyPolicy: "cloud_allowed",
+            failurePolicy: "stop",
+            routeOrigin: "user",
+            expectedRevision: null,
+          });
+        },
+      },
+    });
+    const documents = [document(0, "LEGACY_SUPERSEDED_PRIVATE_TEXT")];
+    const initial = await service.synchronizeProject(PROJECT_ID, documents, false);
+
+    await expect(
+      service.rebuildProject(PROJECT_ID, documents, initial.diagnostics.confirmationId),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_EMBEDDING_CONFIGURATION_DRIFT" });
+    expect(routePublished).toBe(true);
+    expect(gateway.inputs).toHaveLength(0);
+    expect(store.project).toBeNull();
+  });
+
+  it("does not embed when the legacy route changes during the final privacy check", async () => {
+    const store = new InMemoryVectorStore();
+    const gateway = new FakeEmbeddingGateway();
+    let currentRoute = route();
+    const service = createService({
+      store,
+      gateway,
+      hasher: fingerprintHasher(),
+      route: currentRoute,
+      profile: profile("https://legacy-route-change.example/v1"),
+      findRoute: () => Promise.resolve(currentRoute),
+      projectContextPrivacy: {
+        inspect: (projectId) => Promise.resolve(standardPrivacyReceipt(projectId)),
+        assertRouteEligible: () => undefined,
+        assertCurrentBeforeDispatch: () => {
+          currentRoute = {
+            ...currentRoute,
+            primaryModelId: "embed-reconfigured",
+            revision: currentRoute.revision + 1,
+            updatedAt: LATER,
+          };
+          return Promise.resolve();
+        },
+      },
+    });
+    const documents = [document(0, "LEGACY_ROUTE_CHANGED_PRIVATE_TEXT")];
+    const initial = await service.synchronizeProject(PROJECT_ID, documents, false);
+
+    await expect(
+      service.rebuildProject(PROJECT_ID, documents, initial.diagnostics.confirmationId),
+    ).rejects.toMatchObject({ code: "EMBEDDING_CONFIGURATION_CHANGED" });
+    expect(gateway.inputs).toHaveLength(0);
+    expect(store.project).toBeNull();
+  });
+
+  it("does not embed when the legacy credential slot rotates before native dispatch", async () => {
+    const store = new InMemoryVectorStore();
+    const gateway = new FakeEmbeddingGateway();
+    const modelHub = await createModelHubHarness(gateway, null);
+    const connection = await modelHub.store.saveConnection({
+      id: "primary-provider",
+      providerKind: "custom_openai_compatible",
+      displayName: "Legacy versioned connection",
+      baseUrlOverride: "https://legacy-versioned.example/v1",
+      credentialRef: "keyring:model-hub:legacy-slot-v1",
+      credentialState: "present",
+      expectedRevision: null,
+    });
+    await modelHub.store.recordConnectionTest({
+      connectionId: connection.id,
+      status: "ready",
+      expectedRevision: connection.revision,
+    });
+    let rotated = false;
+    const service = createService({
+      store,
+      gateway,
+      hasher: fingerprintHasher(),
+      route: route(),
+      profile: profile("https://legacy-versioned.example/v1"),
+      modelHub: modelHub.dependencies,
+      projectContextPrivacy: {
+        inspect: (projectId) => Promise.resolve(standardPrivacyReceipt(projectId)),
+        assertRouteEligible: () => undefined,
+        assertCurrentBeforeDispatch: async () => {
+          if (rotated) return;
+          rotated = true;
+          const current = await modelHub.store.findConnection("primary-provider");
+          if (current === null) throw new Error("expected legacy Model Hub connection");
+          await modelHub.store.saveConnection({
+            id: current.id,
+            providerKind: current.providerKind,
+            displayName: current.displayName,
+            baseUrlOverride: current.baseUrl,
+            credentialRef: "keyring:model-hub:legacy-slot-v2",
+            credentialState: "present",
+            expectedRevision: current.revision,
+          });
+        },
+      },
+    });
+    const documents = [document(0, "LEGACY_CREDENTIAL_ROTATED_PRIVATE_TEXT")];
+    const initial = await service.synchronizeProject(PROJECT_ID, documents, false);
+
+    await expect(
+      service.rebuildProject(PROJECT_ID, documents, initial.diagnostics.confirmationId),
+    ).rejects.toMatchObject({ code: "EMBEDDING_CONFIGURATION_CHANGED" });
+    expect(gateway.inputs).toHaveLength(0);
+    expect(store.project).toBeNull();
   });
 
   it("never bypasses a Model Hub capability policy failure through a valid legacy profile", async () => {
@@ -602,7 +980,7 @@ async function createModelHubHarness(
       ...(providerKind === "custom_openai_compatible"
         ? { baseUrlOverride: `https://${target.connectionId}.example.test/v1` }
         : {}),
-      credentialRef: local ? null : `keyring:test:${target.connectionId}`,
+      credentialRef: local ? null : `keyring:model-hub:${target.connectionId}`,
       credentialState: local ? "missing" : "present",
       expectedRevision: null,
     });
@@ -697,7 +1075,7 @@ async function seedAdditionalModelHubTarget(
     providerKind: "custom_openai_compatible",
     displayName: target.connectionId,
     baseUrlOverride: `https://${target.connectionId}.example.test/v1`,
-    credentialRef: `keyring:test:${target.connectionId}`,
+    credentialRef: `keyring:model-hub:${target.connectionId}`,
     credentialState: "present",
     expectedRevision: null,
   });
@@ -760,16 +1138,26 @@ function createService(input: {
   readonly route: ModelRoleRoute | null;
   readonly profile: ModelProfile | null;
   readonly modelHub?: ModelHubEmbeddingExecutionDependencies | null;
+  readonly filterRemoteEligibleDocuments?: (
+    projectId: string,
+    documents: readonly SearchDocument[],
+  ) => Promise<readonly SearchDocument[]>;
+  readonly projectContextPrivacy?: Pick<
+    ProjectContextPrivacyAuthority,
+    "inspect" | "assertCurrentBeforeDispatch" | "assertRouteEligible"
+  > | null;
+  readonly findRoute?: () => Promise<ModelRoleRoute | null>;
+  readonly findProfile?: (providerId: string) => Promise<ModelProfile | null>;
 }): PersistentProjectEmbeddingService {
   const routes: ModelRoutingStore = {
     listRoutes: () => Promise.resolve(input.route === null ? [] : [input.route]),
-    findRoute: () => Promise.resolve(input.route),
+    findRoute: input.findRoute ?? (() => Promise.resolve(input.route)),
     saveRoute: () => Promise.reject(new Error("not used")),
     deleteRoute: () => Promise.reject(new Error("not used")),
   };
   const profiles: ModelCenterStore = {
     listProfiles: () => Promise.resolve(input.profile === null ? [] : [input.profile]),
-    findByProviderId: () => Promise.resolve(input.profile),
+    findByProviderId: input.findProfile ?? (() => Promise.resolve(input.profile)),
     save: () => Promise.reject(new Error("not used")),
   };
   const clock: Clock = {
@@ -783,7 +1171,34 @@ function createService(input: {
     input.hasher,
     clock,
     input.modelHub ?? null,
+    input.filterRemoteEligibleDocuments ?? ((_projectId, documents) => Promise.resolve(documents)),
+    input.projectContextPrivacy === undefined
+      ? standardProjectPrivacyAuthority()
+      : input.projectContextPrivacy,
   );
+}
+
+function standardPrivacyReceipt(projectId: string): ProjectContextPrivacyReceipt {
+  return Object.freeze({
+    schemaVersion: 1,
+    projectId,
+    fingerprint: `privacy:${projectId}`,
+    activeChapterCount: 0,
+    retainedChapterCount: 0,
+    requiresVerifiedLocal: false,
+    chapters: Object.freeze([]),
+  });
+}
+
+function standardProjectPrivacyAuthority(): Pick<
+  ProjectContextPrivacyAuthority,
+  "inspect" | "assertCurrentBeforeDispatch" | "assertRouteEligible"
+> {
+  return {
+    inspect: (projectId) => Promise.resolve(standardPrivacyReceipt(projectId)),
+    assertCurrentBeforeDispatch: () => Promise.resolve(),
+    assertRouteEligible: () => undefined,
+  };
 }
 
 function fingerprintHasher(): ContentHasher & { readonly inputs: string[] } {

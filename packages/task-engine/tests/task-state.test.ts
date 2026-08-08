@@ -197,6 +197,63 @@ describe("Task state machine", () => {
     expect(expectOk(running.pause(timestamp(4), uuid(2))).status).toBe("paused");
   });
 
+  it("lets the author run a scheduled retry now without consuming another attempt", () => {
+    const running = expectOk(
+      makeTask().claim({
+        ownerId: "worker:primary",
+        leaseToken: uuid(2),
+        now: timestamp(1),
+        leaseExpiresAt: timestamp(10),
+      }),
+    );
+    const waiting = expectOk(
+      running.recordFailure({
+        leaseToken: uuid(2),
+        failure: retryableFailure(),
+        now: timestamp(2),
+        retryAt: timestamp(30),
+      }),
+    );
+
+    const queued = expectOk(waiting.retryNow(timestamp(3)));
+    expect(queued.toSnapshot()).toMatchObject({
+      status: "queued",
+      attempt: 2,
+      runAfter: timestamp(3),
+      failure: null,
+      sequence: 4,
+    });
+    const recoveryQueued = expectOk(
+      waiting.retryNow(timestamp(3), {
+        expectedSequence: waiting.sequence,
+        expectedAttempt: waiting.attempt,
+        expectedFailureCauseCode: waiting.failure?.causeCode ?? null,
+        recoveryProgressStep: "pipeline.retry.v2.a2.full",
+      }),
+    );
+    expect(recoveryQueued.toSnapshot()).toMatchObject({
+      status: "queued",
+      attempt: 2,
+      sequence: 4,
+      failure: null,
+      progress: {
+        step: "pipeline.retry.v2.a2.full",
+        completedUnits: 0,
+        totalUnits: null,
+      },
+    });
+    expectErrorCode(
+      waiting.retryNow(timestamp(3), {
+        expectedSequence: waiting.sequence + 1,
+        expectedAttempt: waiting.attempt,
+        expectedFailureCauseCode: waiting.failure?.causeCode ?? null,
+        recoveryProgressStep: "pipeline.retry.v2.a2.full",
+      }),
+      "TASK_SEQUENCE_CONFLICT",
+    );
+    expectErrorCode(makeTask().retryNow(timestamp(3)), "TASK_INVALID_TRANSITION");
+  });
+
   it("uses injected jitter deterministically and caps exponential delay", () => {
     const values = [0, 0.5, 1, 0.5];
     const policy = new ExponentialBackoffPolicy({

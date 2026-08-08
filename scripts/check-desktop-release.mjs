@@ -9,6 +9,8 @@ import {
   createDesktopReleaseEnvironmentFingerprint,
   createDesktopReleaseManifest,
   createDesktopReleaseSourceFingerprint,
+  inspectCleanReleaseHead,
+  verifyReleaseHeadUnchanged,
 } from "./desktop-release-manifest.mjs";
 
 const workspaceRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -21,7 +23,8 @@ const budgets = Object.freeze({
   cssAsset: 128 * 1024,
   workerAsset: 1_536 * 1024,
   generalAsset: 2 * 1024 * 1024,
-  totalFrontend: 6 * 1024 * 1024,
+  releaseManifest: 32 * 1024,
+  totalFrontend: (6 * 1024 + 128) * 1024,
   maximumFiles: 200,
 });
 
@@ -235,9 +238,26 @@ async function checkConfiguration() {
   if (rootManifest?.scripts?.["build:desktop:unsigned"] === undefined) {
     fail("The workspace must expose an explicit unsigned desktop build script.");
   }
-  if (rootManifest?.scripts?.["release:candidate:unsigned"] === undefined) {
-    fail("The workspace must expose a complete unsigned release-candidate gate.");
-  }
+  expectEqual(
+    rootManifest?.scripts?.["release:assert-clean"],
+    "node scripts/assert-clean-release-head.mjs",
+    "release clean-HEAD gate",
+  );
+  expectEqual(
+    rootManifest?.scripts?.["check:rust"],
+    "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check && cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
+    "Rust release gate",
+  );
+  expectEqual(
+    rootManifest?.scripts?.["release:candidate:unsigned"],
+    "node scripts/run-unsigned-release-candidate.mjs",
+    "complete unsigned release-candidate gate",
+  );
+  expectEqual(
+    rootManifest?.scripts?.["release:verify:unsigned"],
+    "node scripts/check-desktop-release.mjs --dist apps/desktop/dist-release",
+    "post-package release provenance gate",
+  );
   if (!/run:\s+pnpm test:e2e:release/u.test(ci)) {
     fail("CI native packaging must exercise the exact release frontend before packaging.");
   }
@@ -310,13 +330,18 @@ async function checkArtifact(distDirectory) {
     );
   }
 
-  let totalBytes = 0;
+  let frontendBytes = 0;
   let safeToFingerprint = files.length <= budgets.maximumFiles;
   const fileSet = new Set();
   for (const file of files) {
     const relativeFile = normalizeSlash(path.relative(normalizedDist, file.path));
     fileSet.add(relativeFile);
-    totalBytes += file.bytes;
+    const isReleaseManifest = relativeFile === DESKTOP_RELEASE_MANIFEST_NAME;
+    // The Vite policy applies the 6 MiB + 128 KiB budget before this attestation file is
+    // generated. Mirror that payload boundary here and cap the manifest
+    // separately so adding integrity metadata cannot silently grow without a
+    // limit or consume the application-code budget.
+    if (!isReleaseManifest) frontendBytes += file.bytes;
     const extension = path.extname(file.path).toLowerCase();
     if (!allowedArtifactExtensions.has(extension)) {
       fail(`${relative(file.path)} has a non-runtime release extension.`);
@@ -327,8 +352,9 @@ async function checkArtifact(distDirectory) {
     if (relativeFile.startsWith("assets/") && !/-[A-Za-z0-9_-]{8,}\.[^.]+$/u.test(relativeFile)) {
       fail(`${relative(file.path)} is not content-hashed.`);
     }
-    const maximum =
-      extension === ".css"
+    const maximum = isReleaseManifest
+      ? budgets.releaseManifest
+      : extension === ".css"
         ? budgets.cssAsset
         : relativeFile.includes(".worker.")
           ? budgets.workerAsset
@@ -340,9 +366,9 @@ async function checkArtifact(distDirectory) {
       safeToFingerprint = false;
     }
   }
-  if (totalBytes > budgets.totalFrontend) {
+  if (frontendBytes > budgets.totalFrontend) {
     fail(
-      `${relative(normalizedDist)} totals ${String(totalBytes)} bytes; maximum is ${String(budgets.totalFrontend)}.`,
+      `${relative(normalizedDist)} frontend payload totals ${String(frontendBytes)} bytes; maximum is ${String(budgets.totalFrontend)}.`,
     );
     safeToFingerprint = false;
   }
@@ -421,16 +447,20 @@ async function checkReleaseManifest(distDirectory) {
     return;
   }
   try {
+    const initialHead = await inspectCleanReleaseHead(workspaceRoot);
     const [sourceFingerprint, artifactFingerprint] = await Promise.all([
       createDesktopReleaseSourceFingerprint(workspaceRoot),
       createDesktopReleaseArtifactFingerprint(distDirectory),
     ]);
+    const finalHead = await inspectCleanReleaseHead(workspaceRoot);
+    verifyReleaseHeadUnchanged(initialHead, finalHead);
     expectJsonEqual(
       manifest,
       createDesktopReleaseManifest(
         sourceFingerprint,
         createDesktopReleaseEnvironmentFingerprint(),
         artifactFingerprint,
+        finalHead.gitCommitSha,
       ),
       "release source/artifact manifest",
     );

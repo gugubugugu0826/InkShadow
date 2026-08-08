@@ -10,7 +10,8 @@ import {
   marketplaceSubmissionSignaturePayload,
 } from "../src/marketplace-api-schemas.js";
 import { CONTRACT_SCHEMA_VERSION } from "../src/schemas.js";
-import { CLOUD_API_OPERATIONS, INKSHADOW_CLOUD_OPENAPI } from "../src/cloud-openapi.js";
+import { CLOUD_API_OPERATIONS } from "../src/cloud-openapi.js";
+import { INKSHADOW_CLOUD_OPENAPI } from "@inkshadow/contracts/openapi";
 
 const ARTIFACT_ID = "0198b111-0000-7000-8000-000000000001";
 const VERSION_ID = "0198b111-0000-7000-8000-000000000002";

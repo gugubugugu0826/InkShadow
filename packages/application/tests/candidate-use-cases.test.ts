@@ -8,6 +8,7 @@ import {
   ok,
   parseContentChecksum,
   type ContentChecksum,
+  type AiCandidateApplicationIntent,
   type Result,
   type UuidV7,
 } from "@inkshadow/domain";
@@ -16,6 +17,8 @@ import {
   AcceptAiCandidate,
   CreateChapter,
   EditChapter,
+  RejectAiCandidate,
+  ReviseAiCandidate,
   SaveChapter,
   diffCandidateContent,
   type CandidateApplicationStrategy,
@@ -61,7 +64,11 @@ function activeProject(): Project {
   return project.value;
 }
 
-function readyCandidate(content: string, baseVersionId: UuidV7 = VERSION_ID): AiCandidate {
+function readyCandidate(
+  content: string,
+  baseVersionId: UuidV7 = VERSION_ID,
+  applicationIntent?: AiCandidateApplicationIntent,
+): AiCandidate {
   const streaming = AiCandidate.createStreaming({
     id: CANDIDATE_ID,
     projectId: PROJECT_ID,
@@ -69,6 +76,7 @@ function readyCandidate(content: string, baseVersionId: UuidV7 = VERSION_ID): Ai
     source: "generate",
     baseVersionId,
     now: NOW,
+    applicationIntent,
   });
   if (!streaming.ok) {
     throw streaming.error;
@@ -189,6 +197,307 @@ async function expectStableState(
 }
 
 describe("candidate application persistence", () => {
+  it("persists author edits as an isolated ready Candidate across repository reloads", async () => {
+    const baseline = "原始正文。";
+    const { candidates, store } = await stableContentStore(baseline);
+    candidates.seed(
+      readyCandidate("最初续写。", VERSION_ID, {
+        task: "continuation",
+        application: "insert_at_cursor",
+        payload: "fragment",
+        startUtf16: baseline.length,
+        endUtf16: baseline.length,
+      }),
+    );
+
+    const revised = await new ReviseAiCandidate(
+      candidates,
+      new FixedClock(),
+      new FixedHasher(),
+    ).execute({
+      candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
+      content: "作者保存的续写。",
+    });
+
+    expect(revised.ok).toBe(true);
+    const reloaded = await candidates.findById(CANDIDATE_ID);
+    expect(reloaded.ok && reloaded.value?.toSnapshot()).toMatchObject({
+      content: "作者保存的续写。",
+      status: "ready",
+      applicationIntent: {
+        task: "continuation",
+        startUtf16: baseline.length,
+        endUtf16: baseline.length,
+      },
+    });
+    await expectStableState(store, candidates, baseline);
+  });
+
+  it("rejects stale UI revise, accept, and reject commands while preserving the winning revision", async () => {
+    const baseline = "原始正文。";
+    const { candidates, store } = await stableContentStore(baseline);
+    candidates.seed(readyCandidate("双方最初看到的建议。"));
+
+    const winner = await new ReviseAiCandidate(
+      candidates,
+      new FixedClock(),
+      new FixedHasher(),
+    ).execute({
+      candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
+      content: "窗口 A 保存的赢家。",
+    });
+    expect(winner.ok && winner.value.revision).toBe(2);
+
+    const staleRevise = await new ReviseAiCandidate(
+      candidates,
+      new FixedClock(),
+      new FixedHasher(),
+    ).execute({
+      candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
+      content: "窗口 B 的旧修改。",
+    });
+    const staleAccept = await acceptCandidate(candidates, store).execute({
+      candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
+      strategy: { kind: "overwrite_document" },
+    });
+    const staleReject = await new RejectAiCandidate(candidates, new FixedClock()).execute({
+      candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
+    });
+
+    for (const result of [staleRevise, staleAccept, staleReject]) {
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe("VERSION_CONFLICT");
+        expect(result.error.details.actualRevision).toBe(2);
+      }
+    }
+    const persisted = await candidates.findById(CANDIDATE_ID);
+    expect(persisted.ok && persisted.value?.toSnapshot()).toMatchObject({
+      content: "窗口 A 保存的赢家。",
+      status: "ready",
+      revision: 2,
+    });
+    await expectStableState(store, candidates, baseline);
+  });
+
+  it.each([
+    {
+      name: "continuation",
+      baseline: "前文。",
+      candidateContent: "续写。",
+      intent: {
+        task: "continuation",
+        application: "insert_at_cursor",
+        payload: "fragment",
+        startUtf16: 3,
+        endUtf16: 3,
+      } as const,
+      expected: "前文。续写。",
+    },
+    {
+      name: "selection rewrite",
+      baseline: "保留旧段结尾",
+      candidateContent: "新段",
+      intent: {
+        task: "selection_rewrite",
+        application: "replace_selection",
+        payload: "fragment",
+        startUtf16: 2,
+        endUtf16: 4,
+      } as const,
+      expected: "保留新段结尾",
+    },
+  ])("applies a $name fragment only at its persisted task anchor", async (testCase) => {
+    const { candidates, store } = await stableContentStore(testCase.baseline);
+    candidates.seed(readyCandidate(testCase.candidateContent, VERSION_ID, testCase.intent));
+
+    const outcome = await acceptCandidate(candidates, store).execute({
+      candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
+    });
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.chapter.content).toBe(testCase.expected);
+    expect(outcome.value.version.toSnapshot()).toMatchObject({
+      content: testCase.expected,
+      parentVersionId: VERSION_ID,
+      sourceCandidateId: CANDIDATE_ID,
+    });
+  });
+
+  it("fails closed when a fragment is applied outside its recorded task anchor", async () => {
+    const baseline = "正文内容";
+    const { candidates, store } = await stableContentStore(baseline);
+    candidates.seed(
+      readyCandidate("续写", VERSION_ID, {
+        task: "continuation",
+        application: "insert_at_cursor",
+        payload: "fragment",
+        startUtf16: baseline.length,
+        endUtf16: baseline.length,
+      }),
+    );
+
+    const outcome = await acceptCandidate(candidates, store).execute({
+      candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
+      strategy: { kind: "overwrite_document" },
+    });
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error.code).toBe("VALIDATION_FAILED");
+      expect(outcome.error.details.candidatePlanningCode).toBe(
+        "CANDIDATE_APPLICATION_INTENT_MISMATCH",
+      );
+    }
+    await expectStableState(store, candidates, baseline);
+  });
+
+  it.each([
+    {
+      name: "replace",
+      strategy: { kind: "overwrite_document" } as const,
+      expected: "整章重写建议。",
+    },
+    {
+      name: "append at the exact chapter end",
+      strategy: { kind: "insert_at_cursor", cursorUtf16: "原章。".length } as const,
+      expected: "原章。整章重写建议。",
+    },
+  ])("allows a whole-chapter rewrite to $name only", async ({ strategy, expected }) => {
+    const baseline = "原章。";
+    const { candidates, store } = await stableContentStore(baseline);
+    candidates.seed(
+      readyCandidate("整章重写建议。", VERSION_ID, {
+        task: "whole_chapter_rewrite",
+        application: "replace_document",
+        payload: "full_document",
+        startUtf16: null,
+        endUtf16: null,
+      }),
+    );
+
+    const outcome = await acceptCandidate(candidates, store).execute({
+      candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
+      strategy,
+    });
+
+    expect(outcome.ok && outcome.value.chapter.content).toBe(expected);
+  });
+
+  it.each([
+    { name: "legacy accept-all", strategy: { kind: "accept_all" } as const },
+    {
+      name: "middle insertion",
+      strategy: { kind: "insert_at_cursor", cursorUtf16: 1 } as const,
+    },
+    {
+      name: "selection replacement",
+      strategy: {
+        kind: "replace_selection",
+        selection: { start: 0, end: 1 },
+      } as const,
+    },
+    {
+      name: "per-change selection",
+      strategy: { kind: "apply_changes", decisions: [] } as const,
+    },
+  ])("fails closed for whole-chapter $name", async ({ strategy }) => {
+    const baseline = "原章。";
+    const { candidates, store } = await stableContentStore(baseline);
+    candidates.seed(
+      readyCandidate("整章重写建议。", VERSION_ID, {
+        task: "whole_chapter_rewrite",
+        application: "replace_document",
+        payload: "full_document",
+        startUtf16: null,
+        endUtf16: null,
+      }),
+    );
+
+    const outcome = await acceptCandidate(candidates, store).execute({
+      candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
+      strategy,
+    });
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error.code).toBe("VALIDATION_FAILED");
+      expect(outcome.error.details.candidatePlanningCode).toBe(
+        "CANDIDATE_APPLICATION_INTENT_MISMATCH",
+      );
+    }
+    await expectStableState(store, candidates, baseline);
+  });
+
+  it("rejects a Candidate without changing正文 or deleting its audit payload", async () => {
+    const baseline = "正式正文";
+    const { candidates, store } = await stableContentStore(baseline);
+    const original = readyCandidate("被拒绝的建议");
+    candidates.seed(original);
+
+    const rejected = await new RejectAiCandidate(candidates, new FixedClock()).execute({
+      candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
+    });
+
+    expect(rejected.ok).toBe(true);
+    const persisted = await candidates.findById(CANDIDATE_ID);
+    expect(persisted.ok && persisted.value?.toSnapshot()).toMatchObject({
+      status: "rejected",
+      content: "被拒绝的建议",
+      contentChecksum: original.toSnapshot().contentChecksum,
+    });
+    const chapter = await store.findById(CHAPTER_ID);
+    expect(chapter.ok && chapter.value?.content).toBe(baseline);
+    const versions = await store.listByChapterId(CHAPTER_ID);
+    expect(versions.ok && versions.value).toHaveLength(1);
+  });
+
+  it("atomically accepts an author-edited suggestion without changing正文 beforehand", async () => {
+    const baseline = "原始正文。";
+    const { candidates, store } = await stableContentStore(baseline);
+    candidates.seed(readyCandidate("AI 最初建议。"));
+
+    const before = await store.findById(CHAPTER_ID);
+    expect(before.ok && before.value?.content).toBe(baseline);
+
+    const outcome = await acceptCandidate(
+      candidates,
+      store,
+      new SequenceHasher([checksum(), checksum(), checksum(), checksum("b"), checksum("b")]),
+    ).execute({
+      candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
+      editedContent: "作者改到满意的建议。",
+      strategy: { kind: "overwrite_document" },
+    });
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.chapter.content).toBe("作者改到满意的建议。");
+    expect(outcome.value.candidate.toSnapshot()).toMatchObject({
+      content: "作者改到满意的建议。",
+      contentChecksum: checksum("b"),
+      status: "accepted",
+      revision: 3,
+    });
+    expect(outcome.value.version.toSnapshot()).toMatchObject({
+      content: "作者改到满意的建议。",
+      reason: "candidate_accept",
+      sourceCandidateId: CANDIDATE_ID,
+    });
+  });
+
   it("persists a mixed per-change decision and returns the exact committed plan", async () => {
     const baseline = "one cat two.";
     const candidateContent = "one dog two!";
@@ -202,6 +511,7 @@ describe("candidate application persistence", () => {
 
     const outcome = await acceptCandidate(candidates, store).execute({
       candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
       strategy: {
         kind: "apply_changes",
         decisions: diff.diff.changes.map((change) => ({
@@ -250,6 +560,7 @@ describe("candidate application persistence", () => {
       candidates.seed(readyCandidate("X"));
       const outcome = await acceptCandidate(candidates, store).execute({
         candidateId: CANDIDATE_ID,
+        expectedCandidateRevision: 1,
         strategy: testCase.strategy,
       });
 
@@ -275,6 +586,7 @@ describe("candidate application persistence", () => {
 
     const outcome = await acceptCandidate(candidates, store).execute({
       candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
       strategy: {
         kind: "apply_changes",
         decisions: [
@@ -307,7 +619,7 @@ describe("candidate application persistence", () => {
       store,
       new FixedHasher(),
       missingVersions,
-    ).execute({ candidateId: CANDIDATE_ID });
+    ).execute({ candidateId: CANDIDATE_ID, expectedCandidateRevision: 1 });
 
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
@@ -352,7 +664,7 @@ describe("candidate application persistence", () => {
       new FixedHasher(),
       store,
       MERGE_VERSION_ID,
-    ).execute({ candidateId: CANDIDATE_ID });
+    ).execute({ candidateId: CANDIDATE_ID, expectedCandidateRevision: 1 });
 
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
@@ -369,8 +681,8 @@ describe("candidate application persistence", () => {
     const outcome = await acceptCandidate(
       candidates,
       store,
-      new SequenceHasher([checksum(), checksum("b")]),
-    ).execute({ candidateId: CANDIDATE_ID });
+      new SequenceHasher([checksum(), checksum("b"), checksum()]),
+    ).execute({ candidateId: CANDIDATE_ID, expectedCandidateRevision: 1 });
 
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
@@ -389,7 +701,7 @@ describe("candidate application persistence", () => {
       candidates,
       store,
       new ConstantHasher(checksum("b")),
-    ).execute({ candidateId: CANDIDATE_ID });
+    ).execute({ candidateId: CANDIDATE_ID, expectedCandidateRevision: 1 });
 
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
@@ -399,7 +711,25 @@ describe("candidate application persistence", () => {
     await expectStableState(store, candidates, "base");
   });
 
-  it.each([1, 2, 3])(
+  it("fails closed when the stored Candidate content does not match its checksum", async () => {
+    const { candidates, store } = await stableContentStore("base");
+    candidates.seed(readyCandidate("candidate"));
+
+    const outcome = await acceptCandidate(
+      candidates,
+      store,
+      new SequenceHasher([checksum(), checksum(), checksum("b")]),
+    ).execute({ candidateId: CANDIDATE_ID, expectedCandidateRevision: 1 });
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error.code).toBe("REPOSITORY_ERROR");
+      expect(outcome.error.details.reason).toBe("CANDIDATE_CONTENT_CHECKSUM_MISMATCH");
+    }
+    await expectStableState(store, candidates, "base");
+  });
+
+  it.each([1, 2, 3, 4])(
     "keeps all formal state unchanged when checksum call %i fails",
     async (failureCall) => {
       const { candidates, store } = await stableContentStore("base");
@@ -409,7 +739,7 @@ describe("candidate application persistence", () => {
         candidates,
         store,
         new FailingOnCallHasher(failureCall),
-      ).execute({ candidateId: CANDIDATE_ID });
+      ).execute({ candidateId: CANDIDATE_ID, expectedCandidateRevision: 1 });
 
       expect(outcome.ok).toBe(false);
       if (!outcome.ok) {
@@ -426,6 +756,7 @@ describe("candidate application persistence", () => {
 
     const outcome = await acceptCandidate(candidates, store).execute({
       candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
     });
 
     expect(outcome.ok).toBe(false);

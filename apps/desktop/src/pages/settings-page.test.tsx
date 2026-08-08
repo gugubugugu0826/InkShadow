@@ -1,11 +1,20 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { parseUuidV7, type UuidV7 } from "@inkshadow/story-core";
 import { ToastProvider } from "@inkshadow/ui";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DesktopRoutes } from "../app";
 import { APPEARANCE_PREFERENCE_STORAGE_KEY } from "../appearance-preference";
+import {
+  EDITOR_PREFERENCES_CHANGED_EVENT,
+  EDITOR_PREFERENCES_STORAGE_KEY,
+} from "../infrastructure/editor-preferences-store";
+import {
+  EDITOR_TYPOGRAPHY_CHANGED_EVENT,
+  EDITOR_VIEW_STATE_STORAGE_KEY,
+} from "../infrastructure/editor-view-state-store";
 import { NOVEL_AI_TASKS } from "../infrastructure/model-hub-provider-registry";
 import {
   createDevelopmentRuntime,
@@ -14,6 +23,12 @@ import {
 } from "../infrastructure/runtime";
 import { RuntimeProvider } from "../runtime-context";
 
+function parseStoryProjectId(value: string): UuidV7 {
+  const parsed = parseUuidV7(value);
+  if (!parsed.ok) throw parsed.error;
+  return parsed.value;
+}
+
 describe("SettingsPage model routing", () => {
   beforeEach(() => {
     window.localStorage.clear();
@@ -21,14 +36,14 @@ describe("SettingsPage model routing", () => {
 
   it("uses a page heading and level-two headings for primary setting sections", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
-    renderRoute(runtime);
+    renderRoute(runtime, "/settings");
 
-    expect(await screen.findByRole("heading", { name: "设置", level: 1 })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "全局设置", level: 1 })).toBeVisible();
     for (const name of [
       "外观",
+      "正文阅读与自动保存",
       "数据与隐私",
-      "InkShadow Model Hub",
-      "AI 分工",
+      "项目 AI 记忆",
       "同步安全",
       "本地数据维护",
       "安全更新",
@@ -36,12 +51,20 @@ describe("SettingsPage model routing", () => {
     ]) {
       expect(await screen.findByRole("heading", { name, level: 2 })).toBeVisible();
     }
+    expect(screen.queryByRole("heading", { name: "InkShadow Model Hub" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "AI 分工" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "模型基础评测" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "生成小说配图" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "打开 Model Hub" })).toHaveAttribute(
+      "href",
+      "/settings#model-center",
+    );
   });
 
   it("lets the user choose and persist an appearance without exposing technical settings", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const user = userEvent.setup();
-    renderRoute(runtime);
+    renderRoute(runtime, "/settings");
 
     const appearance = await screen.findByRole("combobox", { name: /^外观模式/u });
     expect(appearance).toHaveValue("system");
@@ -62,6 +85,152 @@ describe("SettingsPage model routing", () => {
     expect(document.documentElement).not.toHaveAttribute("data-surface");
     expect(window.localStorage.getItem(APPEARANCE_PREFERENCE_STORAGE_KEY)).toBe("system");
   });
+
+  it("persists writing typography and autosave preferences with live editor events", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    const typographyChanged = vi.fn();
+    const preferencesChanged = vi.fn();
+    window.addEventListener(EDITOR_TYPOGRAPHY_CHANGED_EVENT, typographyChanged);
+    window.addEventListener(EDITOR_PREFERENCES_CHANGED_EVENT, preferencesChanged);
+    renderRoute(runtime, "/settings");
+
+    const fontSize = await screen.findByRole("combobox", { name: /^字号/u });
+    const lineHeight = screen.getByRole("combobox", { name: /^行距/u });
+    const measure = screen.getByRole("combobox", { name: /^正文宽度/u });
+    const autosave = screen.getByRole("checkbox", { name: /自动保存正式版本/u });
+    const delay = screen.getByRole("combobox", { name: /^自动保存等待时间/u });
+
+    expect(fontSize).toHaveValue("16");
+    expect(lineHeight).toHaveValue("1.75");
+    expect(measure).toHaveValue("comfortable");
+    expect(autosave).toBeChecked();
+    expect(delay).toHaveValue("1000");
+
+    await user.selectOptions(fontSize, "20");
+    await user.selectOptions(measure, "wide");
+    await user.click(autosave);
+
+    expect(delay).toBeDisabled();
+    expect(typographyChanged).toHaveBeenCalledTimes(2);
+    expect(preferencesChanged).toHaveBeenCalledTimes(1);
+    expect(
+      JSON.parse(window.localStorage.getItem(EDITOR_VIEW_STATE_STORAGE_KEY) ?? "{}"),
+    ).toMatchObject({
+      typography: { fontSize: 20, lineHeight: 1.75, measure: "wide" },
+    });
+    expect(
+      JSON.parse(window.localStorage.getItem(EDITOR_PREFERENCES_STORAGE_KEY) ?? "{}"),
+    ).toMatchObject({
+      autosaveEnabled: false,
+      autosaveDebounceMs: 1000,
+    });
+
+    window.removeEventListener(EDITOR_TYPOGRAPHY_CHANGED_EVENT, typographyChanged);
+    window.removeEventListener(EDITOR_PREFERENCES_CHANGED_EVENT, preferencesChanged);
+  });
+
+  it("clears exactly one selected project's AI memory and preserves other projects", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const firstProject = await runtime.useCases.createProject.execute({ name: "要清空的项目" });
+    const otherProject = await runtime.useCases.createProject.execute({ name: "保留的项目" });
+    if (!firstProject.ok || !otherProject.ok) throw new Error("无法准备项目。 ");
+    const policy = await runtime.story.memoryService.ensureDefaultPolicy(firstProject.value.id);
+    if (!policy.ok) throw policy.error;
+    const enabled = await runtime.story.memoryService.setAutomaticLearning({
+      projectId: firstProject.value.id,
+      enabled: true,
+      humanConfirmed: true,
+      expectedRevision: policy.value.revision,
+    });
+    if (!enabled.ok) throw enabled.error;
+    for (const [projectId, content] of [
+      [firstProject.value.id, "第一条待忘记记忆"],
+      [firstProject.value.id, "第二条待忘记记忆"],
+      [otherProject.value.id, "不能被跨项目清空的记忆"],
+    ] as const) {
+      const created = await runtime.story.memoryService.createRecord({
+        projectId,
+        level: "L2",
+        content,
+        source: { kind: "user_rule", sourceId: runtime.story.actorId, sourceVersionId: null },
+        origin: "user",
+        humanConfirmed: true,
+      });
+      if (!created.ok) throw created.error;
+    }
+
+    const user = userEvent.setup();
+    renderRoute(runtime, "/settings");
+    const memoryHeading = await screen.findByRole("heading", { name: "项目 AI 记忆", level: 2 });
+    const memoryCard = memoryHeading.closest(".ink-card");
+    if (!(memoryCard instanceof HTMLElement)) throw new Error("找不到项目 AI 记忆设置。 ");
+    const projectSelect = await within(memoryCard).findByRole("combobox", {
+      name: /^选择项目/u,
+    });
+    await user.selectOptions(projectSelect, firstProject.value.id);
+    expect(await screen.findByText("当前有 2 条可用记忆")).toBeVisible();
+    await user.click(within(memoryCard).getByRole("button", { name: "清空该项目全部 AI 记忆" }));
+    const dialog = screen.getByRole("dialog", { name: "清空该项目的全部 AI 记忆？" });
+    expect(within(dialog).getByText(/不会被删除/u)).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "确认清空该项目记忆" }));
+    expect(await screen.findByText("项目 AI 记忆已清空")).toBeVisible();
+
+    const selectedId = parseStoryProjectId(firstProject.value.id);
+    const otherId = parseStoryProjectId(otherProject.value.id);
+    const selectedRecords = await runtime.story.memoryRecords.listByProjectId(selectedId);
+    const otherRecords = await runtime.story.memoryRecords.listByProjectId(otherId);
+    const storedPolicy = await runtime.story.memoryPolicies.findByProjectId(selectedId);
+    if (!selectedRecords.ok || !otherRecords.ok || !storedPolicy.ok) {
+      throw new Error("无法读取清空后的项目记忆。 ");
+    }
+    expect(selectedRecords.value).toHaveLength(2);
+    expect(selectedRecords.value.every((record) => record.toSnapshot().excluded)).toBe(true);
+    expect(storedPolicy.value?.automaticLearningEnabled).toBe(false);
+    expect(otherRecords.value).toHaveLength(1);
+    expect(otherRecords.value[0]?.toSnapshot().excluded).toBe(false);
+    const stored = JSON.parse(
+      window.localStorage.getItem("inkshadow.development.story.v1") ?? "{}",
+    ) as { memoryGovernanceEvents?: Record<string, { projectId: string }> };
+    expect(Object.values(stored.memoryGovernanceEvents ?? {})).toMatchObject([
+      { projectId: firstProject.value.id },
+    ]);
+  }, 15_000);
+
+  it.each([
+    ["model-center", "Model Hub · 连接与模型", "连接与模型"],
+    ["model-routing", "Model Hub · AI 分工", "AI 分工"],
+    ["model-evaluation", "Model Hub · 模型评测", "模型评测"],
+    ["image-generation", "Model Hub · 图片生成", "图片生成"],
+  ] as const)(
+    "separates the %s Model Hub view from global settings",
+    async (sectionId, pageTitle, navigationLabel) => {
+      const runtime = createDevelopmentRuntime(window.localStorage);
+      renderRoute(runtime, `/settings#${sectionId}`);
+
+      expect(await screen.findByRole("heading", { name: pageTitle, level: 1 })).toBeVisible();
+      expect(screen.getByRole("navigation", { name: "Model Hub 分区" })).toBeVisible();
+      expect(screen.getByRole("link", { name: navigationLabel })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+      for (const sectionHeading of [
+        "InkShadow Model Hub",
+        "AI 分工",
+        "模型基础评测",
+        "生成小说配图",
+      ]) {
+        expect(await screen.findByRole("heading", { name: sectionHeading })).toBeVisible();
+      }
+      expect(screen.queryByRole("heading", { name: "外观" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "数据与隐私" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "同步安全" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "本地数据维护" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "安全更新" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "脱敏诊断包" })).not.toBeInTheDocument();
+      expect(screen.queryByText("导入与导出")).not.toBeInTheDocument();
+    },
+  );
 
   it("keeps technical connection fields hidden until expert settings are opened", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
@@ -90,6 +259,34 @@ describe("SettingsPage model routing", () => {
         new RegExp(`${String(NOVEL_AI_TASKS.length)} 类小说任务由 Model Hub 负责`, "u"),
       ),
     ).toBeVisible();
+  });
+
+  it("shows one current AI readiness state and explains all seven user-facing states", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    renderRoute(runtime, "/settings#model-center");
+
+    const currentStateHeading = await screen.findByRole("heading", {
+      name: "未连接",
+      level: 3,
+    });
+    expect(currentStateHeading).toBeVisible();
+    const readiness = currentStateHeading.closest("section");
+    if (!(readiness instanceof HTMLElement)) throw new Error("找不到 AI 状态区域");
+    expect(within(readiness).getAllByText(/先连接并测试一个模型/u)[0]).toBeVisible();
+    await user.click(screen.getByText("了解全部 7 种 AI 状态"));
+    const legend = screen.getByRole("list", { name: "AI 状态说明" });
+    for (const label of [
+      "未连接",
+      "正在验证",
+      "基础写作可用",
+      "完整可用",
+      "部分能力不可用",
+      "连接失败",
+      "额度不足",
+    ]) {
+      expect(within(legend).getByText(label)).toBeInTheDocument();
+    }
   });
 
   it("saves, tests and reopens a custom single-Header connection with exact expert options", async () => {
@@ -188,7 +385,7 @@ describe("SettingsPage model routing", () => {
     expect(await screen.findByText("写作能力已验证")).toBeVisible();
 
     const expectedConfig = {
-      providerId: "custom-safe",
+      providerId: expect.stringMatching(/^model-key-/u) as unknown,
       provider: "open_ai_compatible",
       baseUrl: "https://custom-models.example/v1",
       authentication: "custom_header_keyring",
@@ -219,6 +416,67 @@ describe("SettingsPage model routing", () => {
       expect(screen.getByLabelText("安全重试次数")).toHaveValue(2);
     });
   }, 15_000);
+
+  it("confirms safe connection removal, deletes the credential, and keeps an auditable retired row", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    const connection = await development.modelHub.saveConnection({
+      id: "ui-retired-provider",
+      providerKind: "custom_openai_compatible",
+      displayName: "可移除写作连接",
+      baseUrlOverride: "https://retire-ui.example/v1",
+      credentialRef: "keyring:model-hub:ui-retired-provider",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      expectedRevision: null,
+    });
+    await development.modelCenter.save({
+      providerId: connection.id,
+      provider: "open_ai_compatible",
+      baseUrl: connection.baseUrl,
+      authentication: "bearer_keyring",
+      selectedModel: "writer-model",
+      expectedRevision: null,
+    });
+    const deleteCredential = vi.fn(() => Promise.resolve({ configured: false, lastFour: null }));
+    const runtime: DesktopRuntime = {
+      ...development,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        save: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        delete: deleteCredential,
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    const remove = await screen.findByRole("button", { name: "移除连接" });
+    await user.click(remove);
+    const dialog = screen.getByRole("dialog", { name: "移除“可移除写作连接”连接？" });
+    expect(
+      within(dialog).getByText(/立即停止参与 AI 分工，并删除系统凭据库中的密钥/u),
+    ).toBeVisible();
+    expect(within(dialog).getByText("不会删除创作与审计历史")).toBeVisible();
+    expect(
+      within(dialog).getByText(/正文、AI 建议版本、模型调用记录和费用凭据都不会被删除/u),
+    ).toBeVisible();
+
+    await user.click(within(dialog).getByRole("button", { name: "停用并移除凭据" }));
+    expect(await screen.findByText("连接已安全移除")).toBeVisible();
+    expect(deleteCredential).toHaveBeenCalledWith(connection.id);
+    await expect(runtime.modelHub.findConnection(connection.id)).resolves.toMatchObject({
+      enabled: false,
+      connectionStatus: "disabled",
+      credentialRef: null,
+      credentialState: "missing",
+      lastErrorCode: "MODEL_HUB_CONNECTION_RETIRED",
+    });
+    await expect(runtime.modelCenter.findByProviderId(connection.id)).resolves.toMatchObject({
+      selectedModel: null,
+    });
+    expect(screen.queryByRole("button", { name: "移除连接" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /已移除/u })).toBeInTheDocument();
+  }, 10_000);
 
   it("validates custom paths and Header names before writing the operating-system credential", async () => {
     const development = createDevelopmentRuntime(window.localStorage);
@@ -634,8 +892,8 @@ describe("SettingsPage model routing", () => {
     });
 
     try {
-      renderRoute(runtime);
-      const pageHeading = await screen.findByRole("heading", { name: "设置", level: 1 });
+      renderRoute(runtime, "/settings");
+      const pageHeading = await screen.findByRole("heading", { name: "全局设置", level: 1 });
       await user.click(screen.getByRole("link", { name: "导入与导出" }));
 
       const target = document.getElementById("data-transfer");
@@ -928,6 +1186,7 @@ describe("SettingsPage model routing", () => {
 
     expect(await screen.findByText("写作能力已验证")).toBeVisible();
     expect(listModels).not.toHaveBeenCalled();
+    expect(generate).toHaveBeenCalledTimes(1);
     const generatedInput = generate.mock.calls[0]?.[0];
     expect(generatedInput).toMatchObject({
       config: {
@@ -960,11 +1219,270 @@ describe("SettingsPage model routing", () => {
       ]),
     );
   });
+
+  it.each(["connection", "catalog"] as const)(
+    "stops a manual model probe before dispatch when the authoritative %s changes",
+    async (mutationKind) => {
+      const developmentRuntime = createDevelopmentRuntime(window.localStorage);
+      await developmentRuntime.modelHub.saveConnection({
+        id: "qwen-guarded",
+        providerKind: "alibaba_qwen",
+        displayName: "阿里云百炼 / Qwen",
+        region: "singapore",
+        baseUrlOverride: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        credentialRef: "keyring:legacy-model-profile:qwen-guarded",
+        credentialState: "present",
+        expectedRevision: null,
+      });
+      const originalFindConnection = developmentRuntime.modelHub.findConnection.bind(
+        developmentRuntime.modelHub,
+      );
+      const originalListCatalog = developmentRuntime.modelHub.listCatalog.bind(
+        developmentRuntime.modelHub,
+      );
+      let mutationArmed = false;
+      let mutationApplied = false;
+      vi.spyOn(developmentRuntime.modelHub, "findConnection").mockImplementation(
+        async (connectionId) => {
+          const connection = await originalFindConnection(connectionId);
+          const catalog = await originalListCatalog(connectionId);
+          if (
+            mutationArmed &&
+            !mutationApplied &&
+            connection !== null &&
+            catalog.some(({ providerModelId }) => providerModelId === "qwen-guarded-model")
+          ) {
+            mutationApplied = true;
+            if (mutationKind === "connection") {
+              await developmentRuntime.modelHub.saveConnection({
+                id: connection.id,
+                providerKind: connection.providerKind,
+                displayName: connection.displayName,
+                region: "us_virginia",
+                workspaceId: null,
+                endpointId: "rotated-endpoint",
+                baseUrlOverride: "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
+                credentialRef: "keyring:model-hub:qwen-guarded-rotated",
+                credentialState: "present",
+                authenticationMode: connection.authenticationMode,
+                requestTimeoutMs: connection.requestTimeoutMs,
+                retryLimit: connection.retryLimit,
+                enabled: true,
+                expectedRevision: connection.revision,
+              });
+            } else {
+              await developmentRuntime.modelHub.syncCatalog({
+                syncId: "concurrent-probe-catalog-sync",
+                connectionId: connection.id,
+                source: "manual",
+                status: "succeeded",
+                models: [
+                  {
+                    id: "unused-concurrent-catalog-id",
+                    providerModelId: "qwen-guarded-model",
+                    displayName: "concurrently-updated-model",
+                  },
+                ],
+              });
+            }
+          }
+          return connection;
+        },
+      );
+      const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+        Promise.resolve({
+          text: "OK",
+          usage: { inputTokens: 4, outputTokens: 1, cachedInputTokens: null },
+        }),
+      );
+      const runtime: DesktopRuntime = {
+        ...developmentRuntime,
+        mode: "tauri",
+        credentials: {
+          getSummary: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+          save: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+          delete: () => Promise.resolve({ configured: false, lastFour: null }),
+        },
+        modelGateway: {
+          available: true,
+          checkConnection: () => Promise.reject(new Error("manual provider uses the probe")),
+          listModels: () => Promise.reject(new Error("manual provider must not call /models")),
+          generate,
+          embed: () => Promise.reject(new Error("not used")),
+          cancelGeneration: () => Promise.resolve(false),
+        },
+      };
+      const user = userEvent.setup();
+      renderRoute(runtime);
+
+      const modelInput = await screen.findByRole("textbox", { name: "模型标识" });
+      await user.type(modelInput, "qwen-guarded-model");
+      const verifyButton = screen.getByRole("button", { name: "验证连接与写作能力" });
+      await waitFor(() => expect(verifyButton).toBeEnabled());
+      mutationArmed = true;
+      await user.click(verifyButton);
+
+      expect(
+        await screen.findByText(/MODEL_HUB_CONFIGURATION_CHANGED_BEFORE_DISPATCH/u),
+      ).toBeVisible();
+      expect(mutationApplied).toBe(true);
+      expect(generate).not.toHaveBeenCalled();
+      const currentConnection = await originalFindConnection("qwen-guarded");
+      expect(currentConnection?.connectionStatus).not.toBe("error");
+      if (mutationKind === "connection") {
+        expect(currentConnection).toMatchObject({
+          enabled: true,
+          region: "us_virginia",
+          endpointId: "rotated-endpoint",
+          baseUrl: "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
+          credentialRef: "keyring:model-hub:qwen-guarded-rotated",
+          credentialState: "present",
+        });
+      } else {
+        const catalog = await originalListCatalog("qwen-guarded");
+        expect(
+          catalog.find(({ providerModelId }) => providerModelId === "qwen-guarded-model"),
+        ).toMatchObject({ revision: 2, displayName: "concurrently-updated-model" });
+      }
+    },
+  );
+
+  it.each(["retired", "catalog-ready"] as const)(
+    "does not let a completed probe overwrite a %s target during its final atomic write",
+    async (mutationKind) => {
+      const developmentRuntime = createDevelopmentRuntime(window.localStorage);
+      await developmentRuntime.modelHub.saveConnection({
+        id: "qwen-final-write-guard",
+        providerKind: "alibaba_qwen",
+        displayName: "Qwen final write guard",
+        region: "singapore",
+        baseUrlOverride: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        credentialRef: "keyring:model-hub:qwen-final-write-guard",
+        credentialState: "present",
+        expectedRevision: null,
+      });
+      const originalCommit = developmentRuntime.modelHub.commitCapabilityProbeResult.bind(
+        developmentRuntime.modelHub,
+      );
+      let mutationApplied = false;
+      vi.spyOn(developmentRuntime.modelHub, "commitCapabilityProbeResult").mockImplementation(
+        async (input) => {
+          if (!mutationApplied) {
+            mutationApplied = true;
+            const current = await developmentRuntime.modelHub.findConnection(input.connectionId);
+            if (current === null) throw new Error("Expected the current probe connection.");
+            if (mutationKind === "retired") {
+              await developmentRuntime.modelHub.retireConnection({
+                connectionId: current.id,
+                expectedRevision: current.revision,
+              });
+            } else {
+              await developmentRuntime.modelHub.syncCatalog({
+                syncId: "final-write-concurrent-sync",
+                connectionId: current.id,
+                source: "manual",
+                status: "succeeded",
+                models: [
+                  {
+                    id: "unused-final-write-catalog-id",
+                    providerModelId: input.expectedProviderModelId,
+                    displayName: "Concurrently refreshed model",
+                  },
+                ],
+              });
+              const refreshed = await developmentRuntime.modelHub.findConnection(current.id);
+              if (refreshed === null) throw new Error("Expected the refreshed connection.");
+              await developmentRuntime.modelHub.recordConnectionTest({
+                connectionId: refreshed.id,
+                status: "ready",
+                expectedRevision: refreshed.revision,
+              });
+            }
+          }
+          return originalCommit(input);
+        },
+      );
+      const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+        Promise.resolve({
+          text: "OK",
+          usage: { inputTokens: 4, outputTokens: 1, cachedInputTokens: null },
+        }),
+      );
+      const runtime: DesktopRuntime = {
+        ...developmentRuntime,
+        mode: "tauri",
+        credentials: {
+          getSummary: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+          save: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+          delete: () => Promise.resolve({ configured: false, lastFour: null }),
+        },
+        modelGateway: {
+          available: true,
+          checkConnection: () => Promise.reject(new Error("manual provider uses the probe")),
+          listModels: () => Promise.reject(new Error("manual provider must not call /models")),
+          generate,
+          embed: () => Promise.reject(new Error("not used")),
+          cancelGeneration: () => Promise.resolve(false),
+        },
+      };
+      const user = userEvent.setup();
+      renderRoute(runtime);
+
+      await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+      const modelSection = document.querySelector("#model-selection");
+      if (!(modelSection instanceof HTMLElement)) {
+        throw new Error("Expected the model selection section.");
+      }
+      const modelInput = modelSection.querySelector("input");
+      if (!(modelInput instanceof HTMLInputElement)) {
+        throw new Error("Expected the manual model input.");
+      }
+      await user.type(modelInput, "qwen-final-write-model");
+      let actions = modelSection.nextElementSibling;
+      while (actions !== null && !actions.classList.contains("settings-actions")) {
+        actions = actions.nextElementSibling;
+      }
+      const verifyButton = actions?.querySelectorAll("button")[1];
+      if (!(verifyButton instanceof HTMLButtonElement)) {
+        throw new Error("Expected the manual verification button.");
+      }
+      await waitFor(() => expect(verifyButton).toBeEnabled());
+      await user.click(verifyButton);
+
+      expect(
+        await screen.findByText(/MODEL_HUB_CONFIGURATION_CHANGED_BEFORE_DISPATCH/u),
+      ).toBeVisible();
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(mutationApplied).toBe(true);
+      const catalog = await developmentRuntime.modelHub.listCatalog("qwen-final-write-guard");
+      const selected = catalog.find(
+        ({ providerModelId }) => providerModelId === "qwen-final-write-model",
+      );
+      expect(selected).toBeDefined();
+      await expect(
+        developmentRuntime.modelHub.listCapabilityEvidence(selected?.id ?? "missing"),
+      ).resolves.toEqual([]);
+      const current = await developmentRuntime.modelHub.findConnection("qwen-final-write-guard");
+      expect(current).toMatchObject(
+        mutationKind === "retired"
+          ? {
+              enabled: false,
+              connectionStatus: "disabled",
+              lastErrorCode: "MODEL_HUB_CONNECTION_RETIRED",
+            }
+          : {
+              enabled: true,
+              connectionStatus: "ready",
+              lastErrorCode: null,
+            },
+      );
+    },
+  );
 });
 
-function renderRoute(runtime: DesktopRuntime) {
+function renderRoute(runtime: DesktopRuntime, initialEntry = "/settings#model-center") {
   return render(
-    <MemoryRouter initialEntries={["/settings"]}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <RuntimeProvider runtime={runtime}>
         <ToastProvider>
           <DesktopRoutes />

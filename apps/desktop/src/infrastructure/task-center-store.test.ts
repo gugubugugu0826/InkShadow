@@ -112,6 +112,55 @@ describe("BrowserDevelopmentTaskCenterStore", () => {
     });
   });
 
+  it("persists an immediate retry without incrementing the scheduled attempt twice", async () => {
+    let now = ACTION_TIME;
+    const store = new BrowserDevelopmentTaskCenterStore(window.localStorage, {
+      now: () => now,
+    });
+    await store.enqueueTask({
+      id: uuid(22),
+      type: "story.accepted-version.process",
+      idempotencyKey: `story.accepted-version:${uuid(105)}`,
+      metadata: {
+        projectId: uuid(100),
+        chapterId: uuid(101),
+        versionId: uuid(105),
+        source: "candidate_accept",
+        acceptedCharacterCount: 120,
+      },
+      priority: 75,
+      maxAttempts: 3,
+      now,
+    });
+    await store.startTask(uuid(22), "desktop.test", uuid(23), "2026-07-27T00:16:00.000Z");
+    now = "2026-07-27T00:02:00.000Z";
+    await store.failTask(
+      uuid(22),
+      uuid(23),
+      {
+        code: "ACCEPTED_VERSION_PIPELINE_PARTIAL",
+        retryable: true,
+        actions: ["RETRY"],
+        requestId: "req-task-center-retry",
+      },
+      "2026-07-27T00:10:00.000Z",
+    );
+    now = "2026-07-27T00:03:00.000Z";
+
+    await expect(store.retryTaskNow(uuid(22))).resolves.toMatchObject({
+      status: "queued",
+      attempt: 2,
+      runAfter: now,
+      failure: null,
+    });
+    const reopened = new BrowserDevelopmentTaskCenterStore(window.localStorage, {
+      now: () => now,
+    });
+    await expect(reopened.load()).resolves.toMatchObject({
+      tasks: [{ id: uuid(22), status: "queued", attempt: 2, runAfter: now }],
+    });
+  });
+
   it("publishes a deduplicated visible inbox notification", async () => {
     const store = new BrowserDevelopmentTaskCenterStore(window.localStorage, {
       now: () => ACTION_TIME,

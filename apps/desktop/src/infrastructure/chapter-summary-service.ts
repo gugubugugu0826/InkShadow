@@ -3,6 +3,7 @@ import type {
   ChapterVersionRepository,
   ContentHasher,
 } from "@inkshadow/application";
+import type { ChapterPrivacyMode } from "@inkshadow/domain";
 import { parseUuidV7 as parseDomainUuid } from "@inkshadow/domain";
 import {
   REBUILDABLE_SYSTEM_FACT_SCHEMA_VERSION,
@@ -11,6 +12,12 @@ import {
   type StoryFactApplicationService,
   type StoryFactStore,
 } from "@inkshadow/story-core";
+
+import {
+  ProjectContextPrivacyError,
+  type ProjectContextPrivacyAuthority,
+  type ProjectContextPrivacyReceipt,
+} from "./project-context-privacy-authority";
 
 export const CHAPTER_SUMMARY_PAYLOAD_SCHEMA_VERSION = "inkshadow.chapter-summary.v1" as const;
 export const CHAPTER_SUMMARY_TASK = "long_memory_compression" as const;
@@ -38,7 +45,15 @@ export interface ChapterSummaryModelInput {
   readonly sourceContentHash: string;
   readonly sourceLength: number;
   readonly segments: readonly ChapterSummarySourceSegment[];
+  /** Exact project privacy authority bound to the native network dispatch. */
+  readonly projectPrivacy: ProjectContextPrivacyReceipt;
+  /** Present for production calls; optional only for older custom model adapters. */
+  readonly privacyMode?: ChapterPrivacyMode;
+  /** Project-wide authority captured before any chapter正文 is assembled. */
+  readonly requiresVerifiedLocal?: boolean;
   readonly assertSourceCurrent: () => Promise<void>;
+  /** A boolean argument means the selected route is about to dispatch. */
+  readonly assertProjectPrivacyCurrent?: (verifiedLocalEligible?: boolean) => Promise<void>;
 }
 
 export interface ChapterSummaryModelOutput {
@@ -156,6 +171,10 @@ interface ChapterSummaryServiceDependencies {
   readonly hasher: ContentHasher;
   readonly model: ChapterSummaryModelPort;
   readonly preferences: ChapterSummaryPreferenceStore;
+  readonly projectContextPrivacy: Pick<
+    ProjectContextPrivacyAuthority,
+    "inspect" | "assertCurrentBeforeDispatch" | "assertRouteEligible"
+  >;
 }
 
 interface VerifiedChapterSummarySource {
@@ -165,6 +184,9 @@ interface VerifiedChapterSummarySource {
   readonly chapterTitle: string;
   readonly content: string;
   readonly contentHash: string;
+  readonly privacyMode: ChapterPrivacyMode;
+  readonly privacyRevision: number;
+  readonly revision: number;
 }
 
 export interface StoredChapterSummaryPayload {
@@ -234,7 +256,7 @@ export class ChapterSummaryService {
     readonly projectId: string;
     readonly chapterId: string;
     readonly versionId: string;
-    readonly trigger: "manual_save" | "user_rebuild";
+    readonly trigger: "manual_save" | "user_rebuild" | "historical_backfill";
   }): Promise<ChapterSummaryGenerationReceipt> {
     if (
       input.trigger === "manual_save" &&
@@ -360,10 +382,12 @@ export class ChapterSummaryService {
     readonly projectId: string;
     readonly chapterId: string;
     readonly versionId: string;
-    readonly trigger: "manual_save" | "user_rebuild";
+    readonly trigger: "manual_save" | "user_rebuild" | "historical_backfill";
   }): Promise<ChapterSummaryGenerationReceipt> {
     try {
+      const projectPrivacy = await this.dependencies.projectContextPrivacy.inspect(input.projectId);
       const source = await this.readVerifiedSource(input);
+      assertSummarySourceMatchesProjectReceipt(projectPrivacy, source);
       if (source.content.length === 0) {
         return receipt(input, "skipped", "CHAPTER_SUMMARY_EMPTY_CHAPTER", "空章节无需生成摘要。");
       }
@@ -375,7 +399,7 @@ export class ChapterSummaryService {
           "本章超过单次摘要的安全上限，请拆分章节后重试。",
         );
       }
-      if (input.trigger === "manual_save" && (await this.hasCurrentSummary(source))) {
+      if (input.trigger !== "user_rebuild" && (await this.hasCurrentSummary(source))) {
         return receipt(
           input,
           "already_current",
@@ -391,11 +415,24 @@ export class ChapterSummaryService {
         sourceContentHash: source.contentHash,
         sourceLength: source.content.length,
         segments,
+        projectPrivacy,
+        privacyMode: source.privacyMode,
+        requiresVerifiedLocal: projectPrivacy.requiresVerifiedLocal,
         assertSourceCurrent: async () => {
           await this.readVerifiedSource(source);
         },
+        assertProjectPrivacyCurrent: async (verifiedLocalEligible) => {
+          await this.dependencies.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
+          if (verifiedLocalEligible !== undefined) {
+            this.dependencies.projectContextPrivacy.assertRouteEligible(
+              projectPrivacy,
+              verifiedLocalEligible,
+            );
+          }
+        },
       });
       await this.readVerifiedSource(source);
+      await this.dependencies.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
       const citedSegments = resolveCitedSegments(output, segments);
       const primary = citedSegments.at(0);
       if (primary === undefined) {
@@ -531,6 +568,8 @@ export class ChapterSummaryService {
     readonly chapterId: string;
     readonly versionId: string;
     readonly contentHash?: string;
+    readonly privacyMode?: ChapterPrivacyMode;
+    readonly privacyRevision?: number;
   }): Promise<VerifiedChapterSummarySource> {
     const projectId = parseDomainUuid(input.projectId);
     const chapterId = parseDomainUuid(input.chapterId);
@@ -592,6 +631,16 @@ export class ChapterSummaryService {
         "保存版本正文或校验值不一致，未生成摘要。",
       );
     }
+    if (
+      (input.privacyMode !== undefined && chapter.value.privacyMode !== input.privacyMode) ||
+      (input.privacyRevision !== undefined &&
+        chapter.value.privacyRevision !== input.privacyRevision)
+    ) {
+      throw new ChapterSummarySourceError(
+        "CHAPTER_SUMMARY_PRIVACY_CHANGED",
+        "章节隐私设置已变化，本次摘要在发送正文前停止，请重新运行。",
+      );
+    }
     return Object.freeze({
       projectId: input.projectId,
       chapterId: input.chapterId,
@@ -599,7 +648,31 @@ export class ChapterSummaryService {
       chapterTitle: chapter.value.title,
       content: snapshot.content,
       contentHash: hashed.value,
+      privacyMode: chapter.value.privacyMode,
+      privacyRevision: chapter.value.privacyRevision,
+      revision: chapter.value.revision,
     });
+  }
+}
+
+function assertSummarySourceMatchesProjectReceipt(
+  receipt: ProjectContextPrivacyReceipt,
+  source: VerifiedChapterSummarySource,
+): void {
+  const binding = receipt.chapters.find(({ chapterId }) => chapterId === source.chapterId);
+  if (
+    receipt.projectId !== source.projectId ||
+    binding?.status !== "active" ||
+    binding.currentVersionId !== source.versionId ||
+    binding.revision !== source.revision ||
+    binding.privacyMode !== source.privacyMode ||
+    binding.privacyRevision !== source.privacyRevision
+  ) {
+    throw new ProjectContextPrivacyError(
+      "PROJECT_CONTEXT_PRIVACY_CHANGED",
+      "章节版本或作品隐私范围在摘要准备期间发生了变化；本次请求在发送 0 字后停止。",
+      true,
+    );
   }
 }
 

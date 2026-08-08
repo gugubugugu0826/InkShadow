@@ -41,6 +41,12 @@ export default defineConfig({
         ),
       },
       {
+        find: "@inkshadow/import-export/epub-export",
+        replacement: fileURLToPath(
+          new URL("../../packages/import-export/src/epub-export.ts", import.meta.url),
+        ),
+      },
+      {
         find: "@inkshadow/import-export/pdf-export",
         replacement: fileURLToPath(
           new URL("../../packages/import-export/src/pdf-export.ts", import.meta.url),
@@ -80,6 +86,11 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
+    // Several browser-level suites intentionally render the complete desktop
+    // shell and exercise SQLite/ZIP boundaries. Letting Vitest match a
+    // high-core workstation one-for-one starves lazy routes and file parsing,
+    // producing load-dependent UI failures that disappear in isolation.
+    maxWorkers: 2,
     clearMocks: true,
     restoreMocks: true,
   },

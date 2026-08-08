@@ -12,6 +12,7 @@ import {
 } from "react";
 import {
   diffCandidateContent,
+  planCandidateApplication,
   type CandidateApplicationStrategy,
   type CandidateTextDiff,
 } from "@inkshadow/application";
@@ -20,10 +21,10 @@ import type {
   ContextEvidenceSourceType,
   ContextLayer,
 } from "@inkshadow/ai-core";
-import { DEFAULT_USER_SETTINGS } from "@inkshadow/config";
 import type {
   AiCandidate,
   Chapter,
+  ChapterPrivacyMode,
   ChapterVersion,
   Project,
   RecoveryDraft,
@@ -56,6 +57,11 @@ import {
   type PreparedGenerationPlan,
   type RuntimeStory,
 } from "../infrastructure/runtime";
+import {
+  createSelectionRewriteCandidate,
+  MAXIMUM_SELECTION_REWRITE_CHARACTERS,
+} from "../infrastructure/selection-rewrite-service";
+import type { StoryContextCompilationReceipt } from "../infrastructure/story-context-runtime";
 import { normalizeUiError, UiActionError } from "../infrastructure/ui-error";
 import type {
   DeferredGenerationRequest,
@@ -63,14 +69,13 @@ import type {
   GenerationBudgetPolicy,
   GenerationRun,
 } from "../infrastructure/generation-governance-store";
+import type { ChapterSummaryGenerationReceipt } from "../infrastructure/chapter-summary-service";
 import {
-  shouldRunContinuousStoryStateExtraction,
-  type ContinuousStoryStateExtractionReceipt,
-} from "../infrastructure/continuous-story-state-extraction";
-import {
-  shouldRunChapterSummaryAfterSave,
-  type ChapterSummaryGenerationReceipt,
-} from "../infrastructure/chapter-summary-service";
+  ensureAcceptedChapterPipelineTask,
+  runAcceptedChapterPipeline,
+  type AcceptedChapterPipelineInput,
+} from "../infrastructure/accepted-chapter-pipeline";
+import { useAppearancePreference } from "../appearance-preference";
 import { useOnlineStatus } from "../hooks/use-online-status";
 import {
   EDITOR_FIND_QUERY_LIMIT,
@@ -92,6 +97,8 @@ import {
 } from "../infrastructure/editor-text-operations";
 import {
   DEFAULT_EDITOR_TYPOGRAPHY,
+  EDITOR_TYPOGRAPHY_CHANGED_EVENT,
+  loadEditorTypography,
   loadEditorView,
   saveEditorTypography,
   saveEditorView,
@@ -99,6 +106,11 @@ import {
   type EditorMeasure,
   type EditorTypography,
 } from "../infrastructure/editor-view-state-store";
+import {
+  EDITOR_PREFERENCES_CHANGED_EVENT,
+  EDITOR_PREFERENCES_STORAGE_KEY,
+  loadEditorPreferences,
+} from "../infrastructure/editor-preferences-store";
 import {
   desktopPersistenceLifecycle,
   SerializedPersistenceQueue,
@@ -133,8 +145,28 @@ const selectionDerivedInputTypes = new Set([
 ]);
 
 const RECOVERY_DRAFT_DEBOUNCE_MS = 350;
-const AUTOSAVE_DEBOUNCE_MS = DEFAULT_USER_SETTINGS.autosaveDebounceMs;
 const BACKGROUND_FLUSH_TIMEOUT_MS = 3_000;
+const COMPACT_EDITOR_MEDIA_QUERY = "(max-width: 63.9375rem)";
+const COMPACT_ASSISTANT_FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+function compactAssistantFocusableElements(panel: HTMLElement): HTMLElement[] {
+  return Array.from(
+    panel.querySelectorAll<HTMLElement>(COMPACT_ASSISTANT_FOCUSABLE_SELECTOR),
+  ).filter(
+    (element) =>
+      element.tabIndex >= 0 &&
+      !element.hidden &&
+      !element.inert &&
+      element.getAttribute("aria-hidden") !== "true",
+  );
+}
 
 const chapterListPanelStyle: CSSProperties = {
   flex: "0 0 12rem",
@@ -159,6 +191,77 @@ const assistantPanelStyle: CSSProperties = {
 interface CandidateRouteSelection {
   readonly candidate: AiCandidate | null;
   readonly notice: string | null;
+}
+
+function candidateDefaultStrategy(candidate: AiCandidate): CandidateApplicationStrategy {
+  const intent = candidate.applicationIntent;
+  if (intent.task === "legacy_full_document") {
+    return { kind: "accept_all" };
+  }
+  switch (intent.application) {
+    case "insert_at_cursor":
+      return { kind: "insert_at_cursor", cursorUtf16: intent.startUtf16 };
+    case "replace_selection":
+      return {
+        kind: "replace_selection",
+        selection: { start: intent.startUtf16, end: intent.endUtf16 },
+      };
+    case "replace_document":
+      return { kind: "overwrite_document" };
+  }
+}
+
+function materializeCandidateDraft(
+  candidate: AiCandidate,
+  baseline: ReturnType<ChapterVersion["toSnapshot"]>,
+  draft: string,
+): string | null {
+  const planned = planCandidateApplication({
+    baseline: {
+      revision: baseline.sequence,
+      contentDigest: baseline.contentChecksum,
+      content: baseline.content,
+    },
+    current: {
+      revision: baseline.sequence,
+      contentDigest: baseline.contentChecksum,
+      content: baseline.content,
+    },
+    candidateContent: draft,
+    strategy: candidateDefaultStrategy(candidate),
+  });
+  return planned.status === "ready" ? planned.plan.resultContent : null;
+}
+
+interface CompactEditorLayout {
+  readonly compact: boolean;
+  readonly revision: number;
+}
+
+function useCompactEditorLayout(): CompactEditorLayout {
+  const [layout, setLayout] = useState<CompactEditorLayout>(() => ({
+    compact:
+      typeof window.matchMedia === "function"
+        ? window.matchMedia(COMPACT_EDITOR_MEDIA_QUERY).matches
+        : false,
+    revision: 0,
+  }));
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return undefined;
+    const query = window.matchMedia(COMPACT_EDITOR_MEDIA_QUERY);
+    const update = (): void => {
+      setLayout((current) =>
+        current.compact === query.matches
+          ? current
+          : Object.freeze({ compact: query.matches, revision: current.revision + 1 }),
+      );
+    };
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  return layout;
 }
 
 type StoryStateUpdateNotice =
@@ -220,7 +323,9 @@ function selectEditorCandidate(
 
 export function EditorPage() {
   const runtime = useRuntime();
+  const { resolvedSurface } = useAppearancePreference();
   const online = useOnlineStatus();
+  const { compact: compactEditorLayout, revision: editorLayoutRevision } = useCompactEditorLayout();
   const params = useParams<{ projectId: string; chapterId: string }>();
   const [searchParams] = useSearchParams();
   const requestedCandidateId = searchParams.get("candidate");
@@ -250,16 +355,20 @@ export function EditorPage() {
   const [recoveryCopySaved, setRecoveryCopySaved] = useState(false);
   const [versions, setVersions] = useState<readonly ChapterVersion[]>([]);
   const [versionsOpen, setVersionsOpen] = useState(false);
+  const [contextSourcesOpen, setContextSourcesOpen] = useState(false);
   const [versionToRestore, setVersionToRestore] = useState<ChapterVersion | null>(null);
   const [versionRestoreBusy, setVersionRestoreBusy] = useState(false);
   const [candidate, setCandidate] = useState<AiCandidate | null>(null);
   const [candidateBusy, setCandidateBusy] = useState(false);
   const [candidateReviewOpen, setCandidateReviewOpen] = useState(false);
   const [candidateDiff, setCandidateDiff] = useState<CandidateTextDiff | null>(null);
+  const [candidateReviewDraft, setCandidateReviewDraft] = useState("");
+  const [candidateReviewComparedContent, setCandidateReviewComparedContent] = useState("");
   const [candidateDiffDecisions, setCandidateDiffDecisions] = useState<
     Readonly<Record<string, AiSuggestionDiffDecision | undefined>>
   >({});
   const [candidateReviewError, setCandidateReviewError] = useState<string | null>(null);
+  const [candidateRevisionSaved, setCandidateRevisionSaved] = useState(false);
   const [candidateReviewConflict, setCandidateReviewConflict] = useState<{
     readonly baselineContent: string;
     readonly currentContent: string;
@@ -271,6 +380,7 @@ export function EditorPage() {
   });
   const [preflightOpen, setPreflightOpen] = useState(false);
   const [generationPlan, setGenerationPlan] = useState<PreparedGenerationPlan | null>(null);
+  const [generationError, setGenerationError] = useState<unknown>(null);
   const [generationReceipt, setGenerationReceipt] = useState<GenerationRun | null>(null);
   const [candidateQualityGate, setCandidateQualityGate] =
     useState<CandidateQualityGateResult | null>(null);
@@ -288,6 +398,14 @@ export function EditorPage() {
   const [budgetSaving, setBudgetSaving] = useState(false);
   const [cancelBusy, setCancelBusy] = useState(false);
   const [generationPreview, setGenerationPreview] = useState("");
+  const [selectionRewriteInstruction, setSelectionRewriteInstruction] =
+    useState("保持原意，让表达更自然。");
+  const [selectionRewriteBusy, setSelectionRewriteBusy] = useState(false);
+  const [selectionRewriteContext, setSelectionRewriteContext] =
+    useState<StoryContextCompilationReceipt | null>(null);
+  const [lastGenerationAction, setLastGenerationAction] = useState<
+    "continuation" | "selection_rewrite"
+  >("continuation");
   const [isComposing, setIsComposing] = useState(false);
   const [historyAvailability, setHistoryAvailability] = useState({
     canUndo: false,
@@ -299,21 +417,49 @@ export function EditorPage() {
   const [findStatus, setFindStatus] = useState<string | null>(null);
   const [editorNotice, setEditorNotice] = useState<string | null>(null);
   const [typography, setTypography] = useState<EditorTypography>(DEFAULT_EDITOR_TYPOGRAPHY);
+  const [editorPreferences, setEditorPreferences] = useState(() =>
+    loadEditorPreferences(window.localStorage),
+  );
   const [selectionRequestId, setSelectionRequestId] = useState(0);
   const [selectionLength, setSelectionLength] = useState(0);
   const [chapterListOpen, setChapterListOpen] = useState(true);
-  const [assistantOpen, setAssistantOpen] = useState(true);
+  const [chapterDrawerState, setChapterDrawerState] = useState(() => ({
+    open: false,
+    layoutRevision: editorLayoutRevision,
+  }));
+  const [assistantState, setAssistantState] = useState(() => ({
+    open: !compactEditorLayout,
+    layoutRevision: editorLayoutRevision,
+  }));
+  const chapterDrawerOpen =
+    chapterDrawerState.open && chapterDrawerState.layoutRevision === editorLayoutRevision;
+  const assistantOpen =
+    assistantState.open && assistantState.layoutRevision === editorLayoutRevision;
+  const setChapterDrawerOpen = useCallback(
+    (open: boolean): void =>
+      setChapterDrawerState(Object.freeze({ open, layoutRevision: editorLayoutRevision })),
+    [editorLayoutRevision],
+  );
+  const setAssistantOpen = useCallback(
+    (open: boolean): void =>
+      setAssistantState(Object.freeze({ open, layoutRevision: editorLayoutRevision })),
+    [editorLayoutRevision],
+  );
   const [storyStateUpdate, setStoryStateUpdate] = useState<StoryStateUpdateNotice>({
     state: "idle",
   });
   const [chapterSummaryUpdate, setChapterSummaryUpdate] = useState<ChapterSummaryNotice>({
     state: "idle",
   });
+  const [privacyChangeTarget, setPrivacyChangeTarget] = useState<ChapterPrivacyMode | null>(null);
+  const [privacyChangeBusy, setPrivacyChangeBusy] = useState(false);
   const chapterRef = useRef<Chapter | null>(null);
   const contentRef = useRef("");
   const cursorRef = useRef(0);
   const selectionRef = useRef<EditorSelection>({ start: 0, end: 0 });
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const assistantPanelRef = useRef<HTMLElement | null>(null);
+  const selectionRewriteInstructionRef = useRef<HTMLTextAreaElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const historyRef = useRef<EditorHistory>(createEmptyEditorHistory());
   const compositionBaseRef = useRef<{
@@ -437,8 +583,11 @@ export function EditorPage() {
     setCandidateDiff(null);
     setCandidateDiffDecisions({});
     setCandidateReviewError(null);
+    setCandidateRevisionSaved(false);
     setCandidateReviewConflict(null);
     setCandidateCopySaved(false);
+    setSelectionRewriteBusy(false);
+    setSelectionRewriteContext(null);
     setEditorNotice(null);
     setStoryStateUpdate({ state: "idle" });
     const [
@@ -681,81 +830,86 @@ export function EditorPage() {
       setError(null);
       setSaveState(contentRef.current === snapshot ? saved.value.saveState : "dirty");
       await loadVersions();
+
+      if (reason !== "manual" || saved.value.version === null) {
+        return;
+      }
+
       const continuousState = (runtime.story as Partial<RuntimeStory>).continuousState;
-      if (
-        shouldRunContinuousStoryStateExtraction(
-          reason,
-          continuousState?.isAutomaticOnManualSaveEnabled(saved.value.chapter.projectId) ?? false,
-        ) &&
-        saved.value.version !== null &&
-        continuousState !== undefined
-      ) {
-        const savedVersion = saved.value.version.toSnapshot();
-        setStoryStateUpdate({ state: "running" });
-        void continuousState
-          .extractAfterSave({
-            projectId: savedVersion.projectId,
-            chapterId: savedVersion.chapterId,
-            versionId: savedVersion.id,
-            reason,
-          })
-          .then((receipt: ContinuousStoryStateExtractionReceipt | null) => {
-            if (receipt === null) {
-              setStoryStateUpdate({ state: "idle" });
-              return;
-            }
-            setStoryStateUpdate({
-              state: "ready",
-              detectedCount: receipt.detectedCount,
-              needsConfirmationCount: receipt.needsConfirmationCount,
-              reversibleCount: receipt.reversibleCount,
-              skippedTaskCount: receipt.skippedTasks.length,
-            });
-          })
-          .catch((cause: unknown) => {
-            setStoryStateUpdate({
-              state: "failed",
-              message:
-                cause instanceof Error
-                  ? cause.message
-                  : "故事状态识别暂时失败；正文和已有设定均未改变。",
-            });
-          });
-      }
       const chapterSummaries = (runtime.story as Partial<RuntimeStory>).chapterSummaries;
-      if (
-        saved.value.version !== null &&
-        chapterSummaries !== undefined &&
-        shouldRunChapterSummaryAfterSave(
-          reason,
-          chapterSummaries.isAutomaticOnManualSaveEnabled(saved.value.chapter.projectId),
-        )
-      ) {
-        const savedVersion = saved.value.version.toSnapshot();
-        setChapterSummaryUpdate({ state: "running" });
-        void chapterSummaries
-          .summarizeSavedVersion({
-            projectId: savedVersion.projectId,
-            chapterId: savedVersion.chapterId,
-            versionId: savedVersion.id,
-            trigger: "manual_save",
-          })
-          .then((receipt: ChapterSummaryGenerationReceipt) => {
-            setChapterSummaryUpdate({
-              state: "finished",
-              status: receipt.status,
-              message: receipt.message,
-            });
-          })
-          .catch((cause: unknown) => {
-            setChapterSummaryUpdate({
-              state: "finished",
-              status: "failed",
-              message:
-                cause instanceof Error ? cause.message : "章节摘要暂未更新；正文保存不受影响。",
-            });
-          });
+      const runStoryState =
+        continuousState?.isAutomaticOnManualSaveEnabled(saved.value.chapter.projectId) ?? false;
+      const runChapterSummary =
+        chapterSummaries?.isAutomaticOnManualSaveEnabled(saved.value.chapter.projectId) ?? false;
+      const savedVersion = saved.value.version.toSnapshot();
+      const pipelineInput: AcceptedChapterPipelineInput = {
+        projectId: savedVersion.projectId,
+        chapterId: savedVersion.chapterId,
+        versionId: savedVersion.id,
+        source: "manual_save",
+        acceptedCharacterCount: snapshot.length,
+        runChapterSummary,
+        runStoryState,
+      };
+
+      setStoryStateUpdate(runStoryState ? { state: "running" } : { state: "idle" });
+      setChapterSummaryUpdate(runChapterSummary ? { state: "running" } : { state: "idle" });
+
+      try {
+        // Persist the idempotent recovery task before returning from the save.
+        // The accepted text version is already immutable. Any later failure can only
+        // affect rebuildable story data, never the author's saved text.
+        await ensureAcceptedChapterPipelineTask(runtime, pipelineInput);
+      } catch (cause: unknown) {
+        const message =
+          cause instanceof Error ? cause.message : "后台整理任务暂时无法加入本地队列。";
+        setEditorNotice(`正文已安全保存；${message}`);
+        if (runStoryState) {
+          setStoryStateUpdate({ state: "failed", message });
+        }
+        if (runChapterSummary) {
+          setChapterSummaryUpdate({ state: "finished", status: "failed", message });
+        }
+        return;
       }
+
+      void runAcceptedChapterPipeline(runtime, pipelineInput)
+        .then((receipt) => {
+          if (runStoryState) {
+            if (receipt.storyState.status === "failed") {
+              setStoryStateUpdate({ state: "failed", message: receipt.storyState.message });
+            } else {
+              setStoryStateUpdate({
+                state: "ready",
+                detectedCount: receipt.storyStateMetrics?.detectedCount ?? 0,
+                needsConfirmationCount: receipt.storyStateMetrics?.needsConfirmationCount ?? 0,
+                reversibleCount: receipt.storyStateMetrics?.reversibleCount ?? 0,
+                skippedTaskCount:
+                  receipt.storyStateMetrics?.skippedTaskCount ??
+                  (receipt.storyState.status === "skipped" ? 1 : 0),
+              });
+            }
+          }
+          if (runChapterSummary) {
+            setChapterSummaryUpdate({
+              state: "finished",
+              status:
+                receipt.chapterSummaryStatus ??
+                (receipt.chapterSummary.status === "failed" ? "failed" : "skipped"),
+              message: receipt.chapterSummary.message,
+            });
+          }
+        })
+        .catch((cause: unknown) => {
+          const message =
+            cause instanceof Error ? cause.message : "后台故事资料整理暂时失败，可稍后重试。";
+          if (runStoryState) {
+            setStoryStateUpdate({ state: "failed", message });
+          }
+          if (runChapterSummary) {
+            setChapterSummaryUpdate({ state: "finished", status: "failed", message });
+          }
+        });
     },
     [loadVersions, runtime],
   );
@@ -866,6 +1020,110 @@ export function EditorPage() {
   ]);
 
   useEffect(() => {
+    const reloadPreferences = (): void => {
+      setEditorPreferences(loadEditorPreferences(window.localStorage));
+    };
+    const reloadTypography = (): void => {
+      const next = loadEditorTypography(window.localStorage);
+      typographyRef.current = next;
+      setTypography(next);
+    };
+    const handleStorage = (event: StorageEvent): void => {
+      if (event.key === EDITOR_PREFERENCES_STORAGE_KEY) reloadPreferences();
+    };
+    window.addEventListener(EDITOR_PREFERENCES_CHANGED_EVENT, reloadPreferences);
+    window.addEventListener(EDITOR_TYPOGRAPHY_CHANGED_EVENT, reloadTypography);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener(EDITOR_PREFERENCES_CHANGED_EVENT, reloadPreferences);
+      window.removeEventListener(EDITOR_TYPOGRAPHY_CHANGED_EVENT, reloadTypography);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!compactEditorLayout || !assistantOpen) return undefined;
+    const panel = assistantPanelRef.current;
+    if (panel === null) return undefined;
+
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousBodyOverflow = document.body.style.overflow;
+    const backgroundState: {
+      readonly element: HTMLElement;
+      readonly inert: boolean;
+      readonly ariaHidden: string | null;
+    }[] = [];
+    let current: HTMLElement = panel;
+    while (current.parentElement !== null && current !== document.body) {
+      const parent = current.parentElement;
+      Array.from(parent.children).forEach((sibling) => {
+        if (
+          sibling instanceof HTMLElement &&
+          sibling !== current &&
+          !sibling.classList.contains("editor-assistant-backdrop")
+        ) {
+          backgroundState.push({
+            element: sibling,
+            inert: sibling.inert,
+            ariaHidden: sibling.getAttribute("aria-hidden"),
+          });
+          sibling.inert = true;
+          sibling.setAttribute("aria-hidden", "true");
+        }
+      });
+      current = parent;
+    }
+    document.body.style.overflow = "hidden";
+    (compactAssistantFocusableElements(panel)[0] ?? panel).focus({ preventScroll: true });
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      const nestedDialog = document.querySelector<HTMLElement>('.ink-overlay [role="dialog"]');
+      if (nestedDialog !== null) return;
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setAssistantOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const focusable = compactAssistantFocusableElements(panel);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        panel.focus({ preventScroll: true });
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || active === panel)) {
+        event.preventDefault();
+        last?.focus({ preventScroll: true });
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first?.focus({ preventScroll: true });
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousBodyOverflow;
+      backgroundState.forEach(({ ariaHidden, element, inert }) => {
+        element.inert = inert;
+        if (ariaHidden === null) {
+          element.removeAttribute("aria-hidden");
+        } else {
+          element.setAttribute("aria-hidden", ariaHidden);
+        }
+      });
+      if (previouslyFocused?.isConnected) {
+        previouslyFocused.focus({ preventScroll: true });
+      }
+    };
+  }, [assistantOpen, compactEditorLayout, setAssistantOpen]);
+
+  useEffect(() => {
     const stableChapter = chapterRef.current;
     if (
       stableChapter === null ||
@@ -891,10 +1149,14 @@ export function EditorPage() {
       draftTimerRef.current = null;
       void enqueue(() => persistDraft(snapshot, cursorOffset)).catch(() => undefined);
     }, RECOVERY_DRAFT_DEBOUNCE_MS);
-    autosaveTimerRef.current = window.setTimeout(() => {
-      autosaveTimerRef.current = null;
-      void enqueue(() => commitSnapshot(snapshot, cursorOffset, "autosave")).catch(() => undefined);
-    }, AUTOSAVE_DEBOUNCE_MS);
+    if (editorPreferences.autosaveEnabled) {
+      autosaveTimerRef.current = window.setTimeout(() => {
+        autosaveTimerRef.current = null;
+        void enqueue(() => commitSnapshot(snapshot, cursorOffset, "autosave")).catch(
+          () => undefined,
+        );
+      }, editorPreferences.autosaveDebounceMs);
+    }
 
     return () => {
       clearScheduledPersistence();
@@ -903,6 +1165,7 @@ export function EditorPage() {
     clearScheduledPersistence,
     commitSnapshot,
     content,
+    editorPreferences,
     enqueue,
     isComposing,
     pageState,
@@ -1042,6 +1305,7 @@ export function EditorPage() {
       projectId,
       title: copyTitle,
       content: draft.content,
+      privacyMode: stableChapter.privacyMode,
     });
     if (!created.ok) {
       setRecoveryDecisionBusy(false);
@@ -1391,23 +1655,108 @@ export function EditorPage() {
     if (chapterId === null || saveState === "dirty" || saveState === "saving") {
       return;
     }
+    setLastGenerationAction("continuation");
+    setSelectionRewriteContext(null);
     setCandidateBusy(true);
     setError(null);
+    setGenerationError(null);
     setGenerationReceipt(null);
     setGenerationAttemptUsage([]);
     try {
       const plan = await prepareGenerationPlan(runtime, chapterId, {
         chapterSaved: editorClean,
         networkAvailable: online,
+        cursorUtf16: normalizeEditorSelection(selectionRef.current, contentRef.current.length)
+          .start,
       });
       setGenerationPlan(plan);
       setDeferredGeneration(plan.deferredRequest);
       await loadBudgetForm(plan);
-      setPreflightOpen(true);
+      if (plan.preflight.canStart && !plan.preflight.requiresConfirmation) {
+        await executePreparedGeneration(plan);
+      } else {
+        setPreflightOpen(true);
+      }
     } catch (cause: unknown) {
-      setError(cause);
+      setGenerationError(cause);
     } finally {
       setCandidateBusy(false);
+    }
+  }
+
+  async function rewriteSelectedText(): Promise<void> {
+    const stableChapter = chapterRef.current;
+    if (
+      stableChapter === null ||
+      runtime.mode !== "tauri" ||
+      !editorClean ||
+      candidateBusy ||
+      !canGenerateCandidate ||
+      contentRef.current !== stableChapter.content
+    ) {
+      return;
+    }
+    const selection = normalizeEditorSelection(selectionRef.current, stableChapter.content.length);
+    if (selection.start === selection.end) {
+      setGenerationError(
+        new UiActionError(
+          "SELECTION_REWRITE_RANGE_INVALID",
+          "请先在正文中选择要修改的文字，再从 AI 创作助手开始改写。",
+          "尚未选择正文",
+        ),
+      );
+      return;
+    }
+
+    setLastGenerationAction("selection_rewrite");
+    setSelectionRewriteBusy(true);
+    setCandidateBusy(true);
+    setGenerationPlan(null);
+    setSelectionRewriteContext(null);
+    setGenerationPreview("");
+    setGenerationReceipt(null);
+    setGenerationAttemptUsage([]);
+    setCandidateQualityGate(null);
+    setError(null);
+    setGenerationError(null);
+    try {
+      const selectedText = stableChapter.content.slice(selection.start, selection.end);
+      const selectedHash = await runtime.hasher.sha256(selectedText);
+      if (!selectedHash.ok) {
+        throw selectedHash.error;
+      }
+      const result = await createSelectionRewriteCandidate(runtime, {
+        chapterId: stableChapter.id,
+        baseVersionId: stableChapter.currentVersionId,
+        selection: {
+          startUtf16: selection.start,
+          endUtf16: selection.end,
+          selectedTextSha256: selectedHash.value,
+        },
+        instruction: selectionRewriteInstruction,
+        onDelta: setGenerationPreview,
+      });
+      const previousCandidate = candidate;
+      setCandidate(result.candidate);
+      setSelectionRewriteContext(result.contextCompilation);
+      setEditorNotice(
+        `已生成 ${String(result.rewrittenSelection.length)} 个字符的选区改写建议。正文尚未改变，请先比较再决定是否创建新版本。`,
+      );
+      if (
+        previousCandidate !== null &&
+        (previousCandidate.status === "accepted" || previousCandidate.status === "rejected")
+      ) {
+        await recordWritingFeedbackSafely({
+          action: "regenerated",
+          candidateId: previousCandidate.id,
+        });
+      }
+    } catch (cause: unknown) {
+      setGenerationError(selectionRewriteUiError(cause));
+    } finally {
+      setSelectionRewriteBusy(false);
+      setCandidateBusy(false);
+      setGenerationPreview("");
     }
   }
 
@@ -1484,6 +1833,7 @@ export function EditorPage() {
       const refreshed = await prepareGenerationPlan(runtime, chapterId, {
         chapterSaved: editorClean,
         networkAvailable: online,
+        cursorUtf16: generationPlan.applicationCursorUtf16,
       });
       setGenerationPlan(refreshed);
       await loadBudgetForm(refreshed);
@@ -1494,27 +1844,28 @@ export function EditorPage() {
     }
   }
 
-  async function confirmGeneration(): Promise<void> {
-    if (!generationPlan?.preflight.canStart) {
+  async function executePreparedGeneration(plan: PreparedGenerationPlan): Promise<void> {
+    if (!plan.preflight.canStart) {
       return;
     }
     setPreflightOpen(false);
     setCandidateBusy(true);
     setGenerationPreview("");
     setError(null);
-    activeGenerationPlanRef.current = generationPlan;
+    setGenerationError(null);
+    activeGenerationPlanRef.current = plan;
     try {
-      const result = await executeGenerationPlan(runtime, generationPlan, setGenerationPreview);
-      if (generationPlan.deferredRequest !== null) {
+      const result = await executeGenerationPlan(runtime, plan, setGenerationPreview);
+      if (plan.deferredRequest !== null) {
         setDeferredGeneration(
           await runtime.generationGovernance.findWaitingDeferredRequest(
-            generationPlan.chapterId,
-            generationPlan.modelRole,
+            plan.chapterId,
+            plan.modelRole,
           ),
         );
       }
       if (!result.ok) {
-        setError(result.error);
+        setGenerationError(result.error);
         return;
       }
       const previousCandidate = candidate;
@@ -1541,14 +1892,22 @@ export function EditorPage() {
       setGenerationReceipt(receipt);
       setGenerationAttemptUsage(usage);
       setError(null);
+      setGenerationError(null);
     } catch (cause: unknown) {
-      setError(cause);
+      setGenerationError(cause);
     } finally {
       activeGenerationPlanRef.current = null;
       setCandidateBusy(false);
       setCancelBusy(false);
       setGenerationPreview("");
     }
+  }
+
+  async function confirmGeneration(): Promise<void> {
+    if (generationPlan === null) {
+      return;
+    }
+    await executePreparedGeneration(generationPlan);
   }
 
   async function deferGenerationUntilOnline(): Promise<void> {
@@ -1578,7 +1937,7 @@ export function EditorPage() {
     try {
       await cancelGenerationPlan(runtime, activePlan);
     } catch (cause: unknown) {
-      setError(cause);
+      setGenerationError(cause);
       setCancelBusy(false);
     }
   }
@@ -1595,9 +1954,12 @@ export function EditorPage() {
     );
     setCandidateDiffDecisions({});
     setCandidateReviewError(null);
+    setCandidateRevisionSaved(false);
     setCandidateReviewConflict(null);
     setCandidateCopySaved(false);
     setCandidateDiff(null);
+    setCandidateReviewDraft(candidate.content);
+    setCandidateReviewComparedContent(candidate.content);
     if (baseVersion === undefined) {
       setCandidateReviewError(
         "AI 建议所依据的稳定版本已经不可用；为避免覆盖正文，当前不能接受这份建议。",
@@ -1606,10 +1968,16 @@ export function EditorPage() {
       return;
     }
     const baseline = baseVersion.toSnapshot();
-    const diff = diffCandidateContent(baseline.content, candidate.content);
+    const materialized = materializeCandidateDraft(candidate, baseline, candidate.content);
+    if (materialized === null) {
+      setCandidateReviewError("AI 建议的应用位置已失效；为避免改错位置，当前不能接受这份建议。");
+      setCandidateReviewOpen(true);
+      return;
+    }
+    const diff = diffCandidateContent(baseline.content, materialized);
     if (diff.status === "error") {
       setCandidateReviewError(
-        `逐项比较超出安全边界（${diff.error.code}）；仍可选择插入、替换选区或覆盖全文。`,
+        `逐项比较超出安全边界（${diff.error.code}）；仍可按这份建议原本记录的应用位置创建版本。`,
       );
     } else {
       setCandidateDiff(diff.diff);
@@ -1627,6 +1995,65 @@ export function EditorPage() {
     setCandidateReviewOpen(true);
   }
 
+  function compareEditedCandidate(): void {
+    if (candidate?.status !== "ready" || chapter === null) return;
+    const baseVersion =
+      candidate.baseVersionId === null
+        ? undefined
+        : versions.find((version) => version.id === candidate.baseVersionId);
+    if (baseVersion === undefined) {
+      setCandidateDiff(null);
+      setCandidateReviewError(
+        "AI 建议所依据的稳定版本已经不可用；为避免覆盖正文，当前不能接受这份建议。",
+      );
+      return;
+    }
+    const baseline = baseVersion.toSnapshot();
+    const materialized = materializeCandidateDraft(candidate, baseline, candidateReviewDraft);
+    if (materialized === null) {
+      setCandidateDiff(null);
+      setCandidateReviewError("AI 建议的应用位置已失效；为避免改错位置，当前不能接受这份建议。");
+      return;
+    }
+    const diff = diffCandidateContent(baseline.content, materialized);
+    setCandidateDiffDecisions({});
+    setCandidateReviewComparedContent(candidateReviewDraft);
+    if (diff.status === "error") {
+      setCandidateDiff(null);
+      setCandidateReviewError(
+        `逐项比较超出安全边界（${diff.error.code}）；仍可按这份建议原本记录的应用位置创建版本。`,
+      );
+      return;
+    }
+    setCandidateReviewError(null);
+    setCandidateDiff(diff.diff);
+  }
+
+  async function saveCandidateRevision(): Promise<void> {
+    if (
+      candidate?.status !== "ready" ||
+      !candidateReviewDraftValid ||
+      candidateReviewDraft === candidate.content
+    ) {
+      return;
+    }
+    setCandidateBusy(true);
+    setError(null);
+    const result = await runtime.useCases.reviseCandidate.execute({
+      candidateId: candidate.id,
+      expectedCandidateRevision: candidate.revision,
+      content: candidateReviewDraft,
+    });
+    setCandidateBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setCandidate(result.value);
+    setCandidateRevisionSaved(true);
+    setEditorNotice("建议修改已保存在本机，仍是隔离的 AI 建议；稳定正文没有改变。");
+  }
+
   async function acceptCandidate(strategy: CandidateApplicationStrategy): Promise<void> {
     if (candidate?.status !== "ready" || saveState === "dirty" || saveState === "saving") {
       return;
@@ -1634,17 +2061,40 @@ export function EditorPage() {
     setCandidateBusy(true);
     const result = await runtime.useCases.acceptCandidate.execute({
       candidateId: candidate.id,
+      expectedCandidateRevision: candidate.revision,
       strategy,
+      ...(candidateReviewDraft === candidate.content
+        ? {}
+        : { editedContent: candidateReviewDraft }),
     });
-    setCandidateBusy(false);
     if (!result.ok) {
+      setCandidateBusy(false);
       setError(result.error);
       return;
     }
+    const acceptedVersion = result.value.version.toSnapshot();
+    const nextContent = result.value.chapter.content;
+    const pipelineInput: AcceptedChapterPipelineInput = {
+      projectId: acceptedVersion.projectId,
+      chapterId: acceptedVersion.chapterId,
+      versionId: acceptedVersion.id,
+      source: "candidate_accept",
+      acceptedCharacterCount: nextContent.length,
+    };
+    let pipelineRegistrationError: string | null = null;
+    try {
+      // In Tauri this confirms the task created atomically with Candidate
+      // acceptance; browser development registers the same idempotent request
+      // before the accept action can return to the author.
+      await ensureAcceptedChapterPipelineTask(runtime, pipelineInput);
+    } catch (cause: unknown) {
+      pipelineRegistrationError =
+        cause instanceof Error ? cause.message : "后台整理任务暂时无法加入本地队列。";
+    }
+    setCandidateBusy(false);
     setCandidate(result.value.candidate);
     setChapter(result.value.chapter);
     chapterRef.current = result.value.chapter;
-    const nextContent = result.value.chapter.content;
     const selectionBefore = normalizeEditorSelection(
       selectionRef.current,
       contentRef.current.length,
@@ -1665,8 +2115,11 @@ export function EditorPage() {
     setSaveState(result.value.saveState);
     setCandidateReviewOpen(false);
     setCandidateDiff(null);
+    setCandidateReviewDraft("");
+    setCandidateReviewComparedContent("");
     setCandidateDiffDecisions({});
     setCandidateReviewError(null);
+    setCandidateRevisionSaved(false);
     setCandidateReviewConflict(null);
     setCandidateCopySaved(false);
     setError(null);
@@ -1688,6 +2141,45 @@ export function EditorPage() {
       acceptedChangeCount,
       rejectedChangeCount,
     });
+    if (pipelineRegistrationError !== null) {
+      setStoryStateUpdate({ state: "failed", message: pipelineRegistrationError });
+      setChapterSummaryUpdate({
+        state: "finished",
+        status: "failed",
+        message: pipelineRegistrationError,
+      });
+      setEditorNotice(
+        `AI 建议已安全写入正文和不可变版本；后台整理任务登记失败：${pipelineRegistrationError}`,
+      );
+      await loadVersions();
+      return;
+    }
+    setStoryStateUpdate({ state: "running" });
+    setChapterSummaryUpdate({ state: "running" });
+    void runAcceptedChapterPipeline(runtime, pipelineInput)
+      .then((receipt) => {
+        if (receipt.storyState.status === "failed" || receipt.storyStateMetrics === null) {
+          setStoryStateUpdate({ state: "failed", message: receipt.storyState.message });
+        } else {
+          setStoryStateUpdate({ state: "ready", ...receipt.storyStateMetrics });
+        }
+        setChapterSummaryUpdate({
+          state: "finished",
+          status: receipt.chapterSummaryStatus ?? "failed",
+          message: receipt.chapterSummary.message,
+        });
+        if (receipt.status === "partially_completed") {
+          setEditorNotice(
+            "AI 建议已安全写入新版本；部分故事记忆或索引暂未更新，可在任务中心重试。",
+          );
+        }
+      })
+      .catch((cause: unknown) => {
+        const message =
+          cause instanceof Error ? cause.message : "后台故事记忆更新暂时失败，可稍后重试。";
+        setStoryStateUpdate({ state: "failed", message });
+        setChapterSummaryUpdate({ state: "finished", status: "failed", message });
+      });
     setEditorNotice(
       strategy.kind === "apply_changes"
         ? "已按逐项决定创建新的稳定版本；可在本次会话撤销，原稳定版本仍保留在版本历史。"
@@ -1708,10 +2200,28 @@ export function EditorPage() {
     }
     setCandidateBusy(true);
     const copyTitle = `${chapter.title.slice(0, 190)}（AI 建议副本）`;
+    const baseVersion =
+      candidate.baseVersionId === null
+        ? undefined
+        : versions.find((version) => version.id === candidate.baseVersionId);
+    const copyContent =
+      baseVersion === undefined
+        ? null
+        : materializeCandidateDraft(
+            candidate,
+            baseVersion.toSnapshot(),
+            candidateReviewDraft || candidate.content,
+          );
+    if (copyContent === null) {
+      setCandidateBusy(false);
+      setError(new Error("AI 建议的原始应用位置已失效，无法安全另存完整草稿。"));
+      return;
+    }
     const created = await runtime.useCases.createChapter.execute({
       projectId,
       title: copyTitle,
-      content: candidate.content,
+      content: copyContent,
+      privacyMode: chapter.privacyMode,
     });
     setCandidateBusy(false);
     if (!created.ok) {
@@ -1775,6 +2285,15 @@ export function EditorPage() {
       setEditorNotice(
         `已从版本 ${String(selected.toSnapshot().sequence)} 创建新的恢复版本；所有历史版本仍保留。`,
       );
+      void runAcceptedChapterPipeline(runtime, {
+        projectId: result.value.chapter.projectId,
+        chapterId: result.value.chapter.id,
+        versionId: result.value.version.id,
+        source: "version_restore",
+        acceptedCharacterCount: result.value.chapter.content.length,
+      }).catch(() => {
+        setEditorNotice("恢复版本与正文已安全保存；故事资料整理暂未完成，可在任务与通知中重试。");
+      });
       await recordWritingFeedbackSafely({ action: "restored_original", candidateId: null });
       await loadVersions();
     } catch (cause: unknown) {
@@ -1791,6 +2310,7 @@ export function EditorPage() {
     setCandidateBusy(true);
     const result = await runtime.useCases.rejectCandidate.execute({
       candidateId: candidate.id,
+      expectedCandidateRevision: candidate.revision,
     });
     setCandidateBusy(false);
     if (!result.ok) {
@@ -1804,6 +2324,57 @@ export function EditorPage() {
       action: "rejected",
       candidateId: result.value.id,
     });
+  }
+
+  async function confirmChapterPrivacyChange(): Promise<void> {
+    const stableChapter = chapterRef.current;
+    if (
+      stableChapter === null ||
+      privacyChangeTarget === null ||
+      stableChapter.privacyMode === privacyChangeTarget ||
+      project?.status !== "active"
+    ) {
+      return;
+    }
+
+    setPrivacyChangeBusy(true);
+    setError(null);
+    try {
+      const result = await runtime.useCases.setChapterPrivacy.execute({
+        chapterId: stableChapter.id,
+        privacyMode: privacyChangeTarget,
+        expectedPrivacyRevision: stableChapter.privacyRevision,
+      });
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+
+      setChapter(result.value.chapter);
+      chapterRef.current = result.value.chapter;
+      setChapters((current) =>
+        current.map((item) => (item.id === result.value.chapter.id ? result.value.chapter : item)),
+      );
+      setPrivacyChangeTarget(null);
+      setGenerationError(null);
+      if (result.value.chapter.isLocalOnly) {
+        const historicalCloudMessage =
+          result.value.acknowledgedCloudEvidenceCount > 0
+            ? `本地仍保留 ${String(result.value.acknowledgedCloudEvidenceCount)} 条已完成云端传输证据；它不能换算成云端副本数量，这些历史传输也不会被本次切换撤回。`
+            : "当前本地记录没有找到已确认的云端副本证据，但这不代表本章从未上传。";
+        setEditorNotice(
+          `本章现已设为私密章节；阻止了 ${String(result.value.blockedProjectionCount)} 条待处理投影，并移除了 ${String(result.value.removedOutboxOperationCount)} 条尚未发出的同步任务。今后的 AI 处理只允许使用已验证的本地模型。${historicalCloudMessage}`,
+        );
+      } else {
+        setEditorNotice(
+          "本章已恢复为普通章节；今后的联网 AI、同步与导出可按你的设置使用必要内容。已有正文和版本没有变化。",
+        );
+      }
+    } catch (cause: unknown) {
+      setError(cause);
+    } finally {
+      setPrivacyChangeBusy(false);
+    }
   }
 
   async function recordWritingFeedbackSafely(input: {
@@ -1839,6 +2410,9 @@ export function EditorPage() {
   }
 
   const normalizedError = error === null ? null : normalizeUiError(error);
+  const normalizedGenerationError =
+    generationError === null ? null : normalizeUiError(generationError);
+  const privateGenerationBlocked = normalizedGenerationError?.code === "PRIVATE_CHAPTER_LOCAL_ONLY";
   const readonly = project?.status !== "active";
   const candidateReady = candidate?.status === "ready";
   const canGenerateCandidate =
@@ -1850,13 +2424,35 @@ export function EditorPage() {
       const decision = candidateDiffDecisions[change.id];
       return decision === undefined ? [] : [{ changeId: change.id, decision }];
     }) ?? [];
+  const candidateReviewDiffCurrent = candidateReviewDraft === candidateReviewComparedContent;
+  const candidateReviewDraftValid = candidateReviewDraft.length > 0;
+  const candidateIntent = candidate?.applicationIntent ?? null;
+  const candidateIsContinuation = candidateIntent?.task === "continuation";
+  const candidateIsSelectionRewrite = candidateIntent?.task === "selection_rewrite";
+  const candidateIsWholeChapterRewrite = candidateIntent?.task === "whole_chapter_rewrite";
+  const candidateAllowsPartialDecisions = candidateIntent?.task === "legacy_full_document";
+  const candidateBaseVersion =
+    candidate?.baseVersionId === null || candidate?.baseVersionId === undefined
+      ? undefined
+      : versions.find((version) => version.id === candidate.baseVersionId);
+  const candidateApplicationBlocked =
+    candidate !== null &&
+    (candidateBaseVersion === undefined ||
+      materializeCandidateDraft(
+        candidate,
+        candidateBaseVersion.toSnapshot(),
+        candidateReviewDraft,
+      ) === null);
   const candidatePartialDecisionComplete =
+    candidateReviewDiffCurrent &&
     candidateDiff !== null &&
     candidateDiff.changes.length > 0 &&
     candidateSelectedDecisions.length === candidateDiff.changes.length &&
     candidateSelectedDecisions.some(({ decision }) => decision === "accept");
   const editorClean =
     saveState === "saved_local" || saveState === "clean" || saveState === "pending_sync";
+  const displayedContextCompilation =
+    selectionRewriteContext ?? generationPlan?.contextCompilation ?? null;
   const writingCanvasStyle = {
     "--editor-font-size": `${String(typography.fontSize)}px`,
     "--editor-line-height": String(typography.lineHeight),
@@ -1878,11 +2474,23 @@ export function EditorPage() {
     }
     if (candidateReady) {
       return {
-        label: selectionLength > 0 ? "用 AI 建议修改选中内容" : "查看 AI 建议版本",
+        label: "查看 AI 建议版本",
         disabled: candidateBusy,
         run: () => {
           setAssistantOpen(true);
           openCandidateReview();
+        },
+      };
+    }
+    if (usesNativeModel && selectionLength > 0 && canGenerateCandidate) {
+      return {
+        label: "修改选中内容",
+        disabled: candidateBusy,
+        run: () => {
+          setAssistantOpen(true);
+          window.requestAnimationFrame(() => {
+            selectionRewriteInstructionRef.current?.focus({ preventScroll: true });
+          });
         },
       };
     }
@@ -1929,8 +2537,50 @@ export function EditorPage() {
               返回章节
             </Link>
             <h1>{chapter?.title ?? "写作编辑器"}</h1>
+            {chapter !== null && (
+              <div className="editor-toolbar__privacy">
+                <Badge tone={chapter.isLocalOnly ? "success" : "neutral"}>
+                  {chapter.isLocalOnly ? "本地私密" : "普通章节"}
+                </Badge>
+                {!readonly && (
+                  <Button
+                    variant="ghost"
+                    disabled={privacyChangeBusy}
+                    onClick={() =>
+                      setPrivacyChangeTarget(chapter.isLocalOnly ? "standard" : "local_only")
+                    }
+                  >
+                    {chapter.isLocalOnly ? "管理隐私" : "设为私密"}
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
           <div className="editor-toolbar__actions">
+            {compactEditorLayout && (
+              <>
+                <Button
+                  variant="secondary"
+                  aria-expanded={chapterDrawerOpen}
+                  onClick={() => {
+                    setAssistantOpen(false);
+                    setChapterDrawerOpen(true);
+                  }}
+                >
+                  章节
+                </Button>
+                <Button
+                  variant="secondary"
+                  aria-expanded={assistantOpen}
+                  onClick={() => {
+                    setChapterDrawerOpen(false);
+                    setAssistantOpen(true);
+                  }}
+                >
+                  AI 助手
+                </Button>
+              </>
+            )}
             <SaveStatus
               state={readonly ? "readonly" : saveState}
               {...(readonly || saveState === "saving"
@@ -2069,7 +2719,7 @@ export function EditorPage() {
               value={String(typography.lineHeight)}
               options={[
                 { value: "1.6", label: "紧凑行距" },
-                { value: "1.8", label: "标准行距" },
+                { value: "1.75", label: "舒适行距" },
                 { value: "1.95", label: "舒展行距" },
                 { value: "2.2", label: "宽松行距" },
               ]}
@@ -2165,66 +2815,70 @@ export function EditorPage() {
           className="editor-workspace"
           style={{ display: "flex", flexWrap: "wrap", alignItems: "stretch" }}
         >
-          {chapterListOpen ? (
-            <aside
-              className="candidate-panel"
-              style={chapterListPanelStyle}
-              aria-labelledby="chapter-list-title"
-            >
-              <div className="candidate-panel__header">
-                <div>
-                  <p className="page-heading__eyebrow">正文</p>
-                  <h2 id="chapter-list-title">章节</h2>
-                </div>
-                <Button
-                  variant="ghost"
-                  aria-label="收起章节列表"
-                  aria-expanded={chapterListOpen}
-                  onClick={() => setChapterListOpen(false)}
-                >
-                  收起
-                </Button>
-              </div>
-              <nav aria-label="章节列表">
-                <ol
-                  style={{
-                    display: "grid",
-                    gap: "var(--space-2)",
-                    margin: 0,
-                    padding: 0,
-                    listStyle: "none",
-                  }}
-                >
-                  {chapters.map((item, index) => (
-                    <li key={item.id}>
-                      <Link
-                        className="back-link"
-                        aria-current={item.id === chapterId ? "page" : undefined}
-                        to={`/projects/${projectId ?? ""}/chapters/${item.id}`}
-                      >
-                        {String(index + 1).padStart(2, "0")} · {item.title}
-                      </Link>
-                    </li>
-                  ))}
-                </ol>
-              </nav>
-            </aside>
-          ) : (
-            <aside className="candidate-panel" style={collapsedPanelStyle} aria-label="章节列表">
-              <Button
-                variant="secondary"
-                aria-label="展开章节列表"
-                aria-expanded={chapterListOpen}
-                onClick={() => setChapterListOpen(true)}
+          {!compactEditorLayout &&
+            (chapterListOpen ? (
+              <aside
+                className="candidate-panel"
+                style={chapterListPanelStyle}
+                aria-labelledby="chapter-list-title"
               >
-                章节
-              </Button>
-            </aside>
-          )}
+                <div className="candidate-panel__header">
+                  <div>
+                    <p className="page-heading__eyebrow">正文</p>
+                    <h2 id="chapter-list-title">章节</h2>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    aria-label="收起章节列表"
+                    aria-expanded={chapterListOpen}
+                    onClick={() => setChapterListOpen(false)}
+                  >
+                    收起
+                  </Button>
+                </div>
+                <nav aria-label="章节列表">
+                  <ol
+                    style={{
+                      display: "grid",
+                      gap: "var(--space-2)",
+                      margin: 0,
+                      padding: 0,
+                      listStyle: "none",
+                    }}
+                  >
+                    {chapters.map((item, index) => (
+                      <li key={item.id}>
+                        <Link
+                          className="back-link editor-chapter-link"
+                          aria-current={item.id === chapterId ? "page" : undefined}
+                          to={`/projects/${projectId ?? ""}/chapters/${item.id}`}
+                        >
+                          <span>
+                            {String(index + 1).padStart(2, "0")} · {item.title}
+                          </span>
+                          {item.isLocalOnly && <Badge tone="success">私密</Badge>}
+                        </Link>
+                      </li>
+                    ))}
+                  </ol>
+                </nav>
+              </aside>
+            ) : (
+              <aside className="candidate-panel" style={collapsedPanelStyle} aria-label="章节列表">
+                <Button
+                  variant="secondary"
+                  aria-label="展开章节列表"
+                  aria-expanded={chapterListOpen}
+                  onClick={() => setChapterListOpen(true)}
+                >
+                  章节
+                </Button>
+              </aside>
+            ))}
 
           <section
             className={`writing-canvas writing-canvas--${typography.measure}`}
-            data-surface="light"
+            data-surface={resolvedSurface}
             data-font-family={typography.fontFamily}
             style={{ ...writingCanvasStyle, ...writingCanvasFlexStyle }}
             aria-label="章节正文"
@@ -2234,6 +2888,7 @@ export function EditorPage() {
               className="writing-textarea"
               aria-label="章节正文"
               value={content}
+              currentLength={content.length}
               readOnly={readonly}
               maxLength={5_000_000}
               onBeforeInput={handleEditorBeforeInput}
@@ -2262,11 +2917,25 @@ export function EditorPage() {
             />
           </section>
 
+          {compactEditorLayout && assistantOpen && (
+            <button
+              type="button"
+              className="editor-assistant-backdrop"
+              aria-hidden="true"
+              tabIndex={-1}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => setAssistantOpen(false)}
+            />
+          )}
           {assistantOpen ? (
             <aside
-              className="candidate-panel"
-              style={assistantPanelStyle}
+              ref={assistantPanelRef}
+              className={`candidate-panel${compactEditorLayout ? " candidate-panel--assistant-overlay" : ""}`}
+              style={compactEditorLayout ? undefined : assistantPanelStyle}
               aria-labelledby="candidate-title"
+              role={compactEditorLayout ? "dialog" : undefined}
+              aria-modal={compactEditorLayout ? true : undefined}
+              tabIndex={compactEditorLayout ? -1 : undefined}
             >
               <div className="candidate-panel__header">
                 <div>
@@ -2275,11 +2944,11 @@ export function EditorPage() {
                 </div>
                 <Button
                   variant="ghost"
-                  aria-label="收起 AI 创作助手"
+                  aria-label={compactEditorLayout ? "关闭 AI 创作助手" : "收起 AI 创作助手"}
                   aria-expanded={assistantOpen}
                   onClick={() => setAssistantOpen(false)}
                 >
-                  收起
+                  {compactEditorLayout ? "关闭" : "收起"}
                 </Button>
               </div>
               <InlineAlert
@@ -2291,6 +2960,84 @@ export function EditorPage() {
                     : "当前使用本机示例帮助检查流程，不会联网；只有你接受后，内容才会进入正文。"
                 }
               />
+              {displayedContextCompilation !== null && (
+                <button
+                  type="button"
+                  className="context-sources-trigger"
+                  onClick={() => setContextSourcesOpen(true)}
+                >
+                  <span>
+                    <strong>本次参考</strong>
+                    <small>查看 AI 为什么选用这些故事资料</small>
+                  </span>
+                  <Badge tone="info">
+                    {
+                      displayedContextCompilation.compiled.entries.filter(
+                        ({ included }) => included,
+                      ).length
+                    }{" "}
+                    项
+                  </Badge>
+                </button>
+              )}
+              {projectId !== null && (
+                <Link className="back-link" to={`/projects/${projectId}/context`}>
+                  查看 AI 参考记录
+                </Link>
+              )}
+              {normalizedGenerationError !== null && (
+                <section className="generation-error-card" role="alert" aria-live="assertive">
+                  <div>
+                    <Badge tone="danger">生成未完成</Badge>
+                    <strong>{normalizedGenerationError.title}</strong>
+                  </div>
+                  <p>
+                    {privateGenerationBlocked
+                      ? "本章处于私密模式，但目前没有可用且已验证的本地模型。本次请求在发送 0 字后停止。"
+                      : normalizedGenerationError.description}
+                  </p>
+                  <p className="generation-error-card__saved-state">
+                    正文和已保存版本没有变化，你可以继续写作。
+                  </p>
+                  <code>{normalizedGenerationError.code}</code>
+                  <div className="generation-error-card__actions">
+                    <Button
+                      variant="ai-primary"
+                      loading={candidateBusy}
+                      disabled={!editorClean}
+                      onClick={() =>
+                        void (lastGenerationAction === "selection_rewrite"
+                          ? rewriteSelectedText()
+                          : generateCandidate())
+                      }
+                    >
+                      {lastGenerationAction === "selection_rewrite" ? "重试选区改写" : "重试生成"}
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        setGenerationError(null);
+                        editorRef.current?.focus({ preventScroll: true });
+                      }}
+                    >
+                      继续写作
+                    </Button>
+                    {privateGenerationBlocked && (
+                      <Button
+                        variant="secondary"
+                        onClick={() => setPrivacyChangeTarget("standard")}
+                      >
+                        改用普通模式
+                      </Button>
+                    )}
+                    {usesNativeModel && (
+                      <Link className="back-link" to="/settings#model-center">
+                        {privateGenerationBlocked ? "配置本地 AI" : "检查 AI 服务"}
+                      </Link>
+                    )}
+                  </div>
+                </section>
+              )}
 
               {storyStateUpdate.state === "running" && (
                 <InlineAlert
@@ -2353,20 +3100,25 @@ export function EditorPage() {
               {candidateBusy && usesNativeModel ? (
                 <div className="candidate-content" aria-live="polite">
                   <div className="candidate-content__meta">
-                    <Badge tone="ai">生成中</Badge>
+                    <Badge tone="ai">{selectionRewriteBusy ? "改写中" : "生成中"}</Badge>
                     <span>{generationPreview.length} 字符</span>
                   </div>
-                  <pre>{generationPreview || "正在准备第一段建议……"}</pre>
+                  <pre>
+                    {generationPreview ||
+                      (selectionRewriteBusy ? "正在准备选区改写建议……" : "正在准备第一段建议……")}
+                  </pre>
                   <p className="candidate-panel__hint">
                     当前内容尚未写入正式正文，也不会在完成前保存为 AI 建议版本。
                   </p>
-                  <Button
-                    variant="secondary"
-                    loading={cancelBusy}
-                    onClick={() => void cancelActiveGeneration()}
-                  >
-                    取消生成
-                  </Button>
+                  {!selectionRewriteBusy && (
+                    <Button
+                      variant="secondary"
+                      loading={cancelBusy}
+                      onClick={() => void cancelActiveGeneration()}
+                    >
+                      取消生成
+                    </Button>
+                  )}
                 </div>
               ) : candidate === null || candidate.status === "rejected" ? (
                 <div className="candidate-content">
@@ -2385,6 +3137,7 @@ export function EditorPage() {
                       busy={candidateBusy}
                       onSubmit={async ({ feedbackCode, customFeedback }) => {
                         const outcome = await runtime.story.writingFeedback.recordExplicitFeedback({
+                          idempotencyKey: `editor-candidate:${candidate.id}:${feedbackCode ?? "none"}:${customFeedback?.normalize("NFKC").trim().replace(/\s+/gu, " ") ?? "none"}`,
                           projectId,
                           chapterId,
                           candidateId: candidate.id,
@@ -2505,6 +3258,48 @@ export function EditorPage() {
               )}
               {canGenerateCandidate && (
                 <>
+                  {usesNativeModel && selectionLength > 0 && (
+                    <section className="candidate-content" aria-label="修改选中内容">
+                      <FormField
+                        label={`改写选中的 ${selectionLength.toLocaleString("zh-CN")} 个字符`}
+                        hint={
+                          selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS
+                            ? `选区最多支持 ${MAXIMUM_SELECTION_REWRITE_CHARACTERS.toLocaleString("zh-CN")} 个字符，请缩小选区。`
+                            : "只改写当前选区；前后正文会原样保留。结果先进入 AI 建议版本。"
+                        }
+                        required
+                      >
+                        {(fieldProps) => (
+                          <Textarea
+                            {...fieldProps}
+                            ref={selectionRewriteInstructionRef}
+                            value={selectionRewriteInstruction}
+                            rows={3}
+                            maxLength={2_000}
+                            currentLength={selectionRewriteInstruction.length}
+                            disabled={candidateBusy}
+                            placeholder="例如：保留原意，让对话更自然"
+                            onChange={(event) =>
+                              setSelectionRewriteInstruction(event.currentTarget.value)
+                            }
+                          />
+                        )}
+                      </FormField>
+                      <Button
+                        variant="ai-primary"
+                        loading={selectionRewriteBusy}
+                        disabled={
+                          !editorClean ||
+                          candidateBusy ||
+                          selectionRewriteInstruction.trim().length === 0 ||
+                          selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS
+                        }
+                        onClick={() => void rewriteSelectedText()}
+                      >
+                        生成选区改写建议
+                      </Button>
+                    </section>
+                  )}
                   {usesNativeModel && (
                     <Link className="back-link" to="/settings#model-center">
                       设置 AI 服务
@@ -2543,7 +3338,7 @@ export function EditorPage() {
                   </details>
                 )}
             </aside>
-          ) : (
+          ) : !compactEditorLayout ? (
             <aside className="candidate-panel" style={collapsedPanelStyle} aria-label="AI 创作助手">
               <Button
                 variant="secondary"
@@ -2554,9 +3349,42 @@ export function EditorPage() {
                 AI 助手
               </Button>
             </aside>
-          )}
+          ) : null}
         </div>
       </div>
+
+      <Drawer
+        side="left"
+        open={compactEditorLayout && chapterDrawerOpen}
+        onOpenChange={setChapterDrawerOpen}
+        title="章节"
+        description="选择章节后会回到正文；未保存的修改会先完成安全保存。"
+        footer={
+          <Button variant="secondary" onClick={() => setChapterDrawerOpen(false)}>
+            关闭
+          </Button>
+        }
+      >
+        <nav aria-label="章节抽屉">
+          <ol className="compact-chapter-list">
+            {chapters.map((item, index) => (
+              <li key={item.id}>
+                <Link
+                  className="back-link editor-chapter-link"
+                  aria-current={item.id === chapterId ? "page" : undefined}
+                  to={`/projects/${projectId ?? ""}/chapters/${item.id}`}
+                  onClick={() => setChapterDrawerOpen(false)}
+                >
+                  <span>
+                    {String(index + 1).padStart(2, "0")} · {item.title}
+                  </span>
+                  {item.isLocalOnly && <Badge tone="success">私密</Badge>}
+                </Link>
+              </li>
+            ))}
+          </ol>
+        </nav>
+      </Drawer>
 
       <Drawer
         open={versionsOpen}
@@ -2613,6 +3441,74 @@ export function EditorPage() {
         )}
       </Drawer>
 
+      <Drawer
+        open={contextSourcesOpen}
+        onOpenChange={setContextSourcesOpen}
+        title="本次参考"
+        description="这里只展示本次生成实际选择或因篇幅舍弃的资料。未选中的内容不会发送给 AI。"
+        footer={
+          <Button variant="secondary" onClick={() => setContextSourcesOpen(false)}>
+            关闭
+          </Button>
+        }
+      >
+        {displayedContextCompilation === null ? (
+          <EmptyState
+            title="暂无参考记录"
+            description="开始一次创作后，这里会显示使用了哪些设定、事件与章节资料，以及选择原因。"
+          />
+        ) : (
+          <div className="context-sources" aria-label="本次故事资料来源">
+            <div className="context-sources__summary">
+              <div>
+                <span>实际参考</span>
+                <strong>
+                  {
+                    displayedContextCompilation.compiled.entries.filter(({ included }) => included)
+                      .length
+                  }{" "}
+                  项
+                </strong>
+              </div>
+              <p>
+                使用约{" "}
+                {displayedContextCompilation.compiled.trace.usedTokens.toLocaleString("zh-CN")}/
+                {displayedContextCompilation.compiled.trace.maximumContextTokens.toLocaleString(
+                  "zh-CN",
+                )}{" "}
+                个上下文用量单位。
+              </p>
+            </div>
+            <ol className="context-sources__list">
+              {displayedContextCompilation.compiled.entries.map((entry) => (
+                <li key={entry.id} data-included={entry.included ? "true" : "false"}>
+                  <div className="context-sources__item-heading">
+                    <Badge tone={entry.included ? "info" : "neutral"}>
+                      {entry.included ? "已参考" : "因篇幅未使用"}
+                    </Badge>
+                    <strong>{contextLayerLabel(entry.layer)}</strong>
+                    <span>约 {entry.estimatedTokens.toLocaleString("zh-CN")} 单位</span>
+                  </div>
+                  <p>{contextSelectionReasonLabel(entry.selectionReason)}</p>
+                  {entry.evidence.length > 0 ? (
+                    <ul className="context-sources__evidence">
+                      {entry.evidence.map((source) => (
+                        <li key={`${source.sourceType}:${source.sourceId}`}>
+                          <span>{contextSourceTypeLabel(source.sourceType)}</span>
+                          <code>{source.sourceId}</code>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <small>由当前写作任务直接提供，没有额外资料来源。</small>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+      </Drawer>
+
       {versionToRestore !== null && chapter !== null && (
         <Dialog
           open
@@ -2662,6 +3558,57 @@ export function EditorPage() {
         </Dialog>
       )}
 
+      {privacyChangeTarget !== null && chapter !== null && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open && !privacyChangeBusy) {
+              setPrivacyChangeTarget(null);
+            }
+          }}
+          title={
+            privacyChangeTarget === "local_only" ? "将本章设为私密章节？" : "允许本章使用联网 AI？"
+          }
+          description={
+            privacyChangeTarget === "local_only"
+              ? "确认后，本章正文、摘要、检索、审稿和续写只允许使用已验证的本地模型；没有可用本地模型时会安全停止。"
+              : "确认后，未来的联网 AI、同步与普通导出可以按你的设置使用本章所需内容。"
+          }
+          footer={
+            <>
+              <Button
+                variant="secondary"
+                disabled={privacyChangeBusy}
+                onClick={() => setPrivacyChangeTarget(null)}
+              >
+                取消
+              </Button>
+              <Button
+                loading={privacyChangeBusy}
+                disabled={project?.status !== "active"}
+                onClick={() => void confirmChapterPrivacyChange()}
+              >
+                {privacyChangeTarget === "local_only" ? "确认仅限本地" : "确认改为普通章节"}
+              </Button>
+            </>
+          }
+        >
+          {privacyChangeTarget === "local_only" ? (
+            <InlineAlert
+              tone="warning"
+              title="无法撤回已经完成的外部传输"
+              description="墨影会从现在起阻止新的云端发送，并清理尚未发出的同步任务；如果本章过去已经传到供应商或确认写入远端，当前版本无法替你从对方系统中删除。"
+            />
+          ) : (
+            <InlineAlert
+              tone="warning"
+              title="以后可能离开本机"
+              description="改为普通章节不会立刻发送正文，但后续使用联网 AI、同步或勾选包含私密内容导出时，完成任务所需的内容可能离开本机。"
+            />
+          )}
+        </Dialog>
+      )}
+
       {recoveryDraftSnapshot !== null && chapter !== null && (
         <CrashRecoveryDialog
           busy={recoveryDecisionBusy}
@@ -2684,7 +3631,7 @@ export function EditorPage() {
           }
         }}
         title="比较 AI 建议与正文"
-        description="AI 建议不会直接覆盖正文。你可以逐处接受或保留原文，也可以插入光标、替换选区，或明确覆盖全文。"
+        description="先把建议改到满意，再逐处决定或选择应用位置；点击创建版本前不会写入正文。"
         footer={
           <>
             <Button
@@ -2692,25 +3639,98 @@ export function EditorPage() {
               disabled={candidateBusy}
               onClick={() => setCandidateReviewOpen(false)}
             >
-              暂不处理
+              取消
             </Button>
-            <Button
-              variant="ai-primary"
-              loading={candidateBusy}
-              disabled={candidateReviewConflict !== null || !candidatePartialDecisionComplete}
-              onClick={() =>
-                void acceptCandidate({
-                  kind: "apply_changes",
-                  decisions: candidateSelectedDecisions,
-                })
-              }
-            >
-              按逐项决定创建版本
-            </Button>
+            {candidateAllowsPartialDecisions && (
+              <Button
+                variant="ai-primary"
+                loading={candidateBusy}
+                disabled={
+                  candidateReviewConflict !== null ||
+                  candidateApplicationBlocked ||
+                  !candidateReviewDraftValid ||
+                  !candidatePartialDecisionComplete
+                }
+                onClick={() =>
+                  void acceptCandidate({
+                    kind: "apply_changes",
+                    decisions: candidateSelectedDecisions,
+                  })
+                }
+              >
+                按逐项决定创建版本
+              </Button>
+            )}
           </>
         }
       >
         <div className="candidate-review-dialog">
+          {candidate !== null && candidateReviewConflict === null && (
+            <section className="candidate-review-dialog__editor">
+              <div className="candidate-review-dialog__editor-heading">
+                <div>
+                  <h3>可编辑的 AI 建议</h3>
+                  <p>这里是临时建议草稿；采用前不会写进正文或创建正式版本。</p>
+                </div>
+                <Badge
+                  tone={
+                    candidateRevisionSaved || candidateReviewDraft !== candidate.content
+                      ? "ai"
+                      : "neutral"
+                  }
+                >
+                  {candidateRevisionSaved
+                    ? "修改已保存为建议"
+                    : candidateReviewDraft === candidate.content
+                      ? "原始建议"
+                      : "已由你修改"}
+                </Badge>
+              </div>
+              <Textarea
+                aria-label="可编辑的 AI 建议"
+                value={candidateReviewDraft}
+                maxLength={5_000_000}
+                rows={10}
+                disabled={candidateBusy}
+                onChange={(event) => {
+                  setCandidateReviewDraft(event.currentTarget.value);
+                  setCandidateDiffDecisions({});
+                  setCandidateRevisionSaved(false);
+                }}
+              />
+              <div className="candidate-review-dialog__editor-actions">
+                <span>{candidateReviewDraft.length.toLocaleString("zh-CN")} 字符</span>
+                <Button
+                  variant="secondary"
+                  loading={candidateBusy}
+                  disabled={
+                    candidateBusy ||
+                    !candidateReviewDraftValid ||
+                    candidateReviewDraft === candidate.content
+                  }
+                  onClick={() => void saveCandidateRevision()}
+                >
+                  保存建议修改
+                </Button>
+                <Button
+                  variant="secondary"
+                  disabled={
+                    candidateBusy || !candidateReviewDraftValid || candidateReviewDiffCurrent
+                  }
+                  onClick={compareEditedCandidate}
+                >
+                  重新比较差异
+                </Button>
+              </div>
+              {!candidateReviewDiffCurrent && (
+                <InlineAlert
+                  tone="info"
+                  title="建议已经修改"
+                  description="整段应用可以直接继续；若要逐处接受，请先重新比较差异。"
+                />
+              )}
+            </section>
+          )}
           {candidateReviewConflict !== null && candidate !== null && (
             <>
               <InlineAlert
@@ -2754,7 +3774,7 @@ export function EditorPage() {
               description={candidateReviewError}
             />
           )}
-          {candidateDiff !== null && (
+          {candidateDiff !== null && candidateReviewDiffCurrent && (
             <EditorAiSuggestionDiffViewer
               decisions={candidateDiffDecisions}
               diff={candidateDiff}
@@ -2769,47 +3789,156 @@ export function EditorPage() {
           {candidate !== null && (
             <section className="candidate-review-dialog__placement">
               <div>
-                <h3>整段应用方式</h3>
-                <p>
-                  当前选区：第 {candidateReviewSelection.start} 到 {candidateReviewSelection.end}{" "}
-                  个字符
-                </p>
+                <h3>{candidateIsWholeChapterRewrite ? "整章改写处理方式" : "应用建议"}</h3>
+                {candidateIsContinuation && (
+                  <p>
+                    这份建议只包含续写片段，将插入生成时记录的第 {candidateIntent.startUtf16}
+                    个字符处；不会重复插入原正文。
+                  </p>
+                )}
+                {candidateIsSelectionRewrite && (
+                  <p>
+                    这份建议只会替换生成时记录的第 {candidateIntent.startUtf16} 到第{" "}
+                    {candidateIntent.endUtf16} 个字符；选区之外的正文保持不变。
+                  </p>
+                )}
+                {candidateIsWholeChapterRewrite && (
+                  <p>可替换整章、追加到章末或另存为新草稿；取消不会改变正文。</p>
+                )}
+                {!candidateIsContinuation &&
+                  !candidateIsSelectionRewrite &&
+                  !candidateIsWholeChapterRewrite && (
+                    <p>
+                      当前选区：第 {candidateReviewSelection.start} 到{" "}
+                      {candidateReviewSelection.end} 个字符
+                    </p>
+                  )}
               </div>
               <div>
-                <Button
-                  variant="secondary"
-                  disabled={candidateBusy || candidateReviewConflict !== null}
-                  onClick={() =>
-                    void acceptCandidate({
-                      kind: "insert_at_cursor",
-                      cursorUtf16: candidateReviewSelection.start,
-                    })
-                  }
-                >
-                  插入到光标
-                </Button>
-                <Button
-                  variant="secondary"
-                  disabled={
-                    candidateBusy ||
-                    candidateReviewConflict !== null ||
-                    candidateReviewSelection.start === candidateReviewSelection.end
-                  }
-                  onClick={() =>
-                    void acceptCandidate({
-                      kind: "replace_selection",
-                      selection: candidateReviewSelection,
-                    })
-                  }
-                >
-                  替换当前选区
-                </Button>
-                <Button
-                  disabled={candidateBusy || candidateReviewConflict !== null}
-                  onClick={() => void acceptCandidate({ kind: "overwrite_document" })}
-                >
-                  覆盖全文并创建版本
-                </Button>
+                {candidateIsContinuation && (
+                  <Button
+                    loading={candidateBusy}
+                    disabled={
+                      candidateBusy ||
+                      candidateReviewConflict !== null ||
+                      candidateApplicationBlocked ||
+                      !candidateReviewDraftValid
+                    }
+                    onClick={() => void acceptCandidate(candidateDefaultStrategy(candidate))}
+                  >
+                    {candidateReviewDraft === candidate.content
+                      ? "插入光标并创建版本"
+                      : "编辑后插入光标并创建版本"}
+                  </Button>
+                )}
+                {candidateIsSelectionRewrite && (
+                  <Button
+                    loading={candidateBusy}
+                    disabled={
+                      candidateBusy ||
+                      candidateReviewConflict !== null ||
+                      candidateApplicationBlocked ||
+                      !candidateReviewDraftValid
+                    }
+                    onClick={() => void acceptCandidate(candidateDefaultStrategy(candidate))}
+                  >
+                    {candidateReviewDraft === candidate.content
+                      ? "替换选区并创建版本"
+                      : "编辑后替换选区并创建版本"}
+                  </Button>
+                )}
+                {candidateIsWholeChapterRewrite && (
+                  <>
+                    <Button
+                      variant="secondary"
+                      disabled={
+                        candidateBusy ||
+                        candidateReviewConflict !== null ||
+                        candidateApplicationBlocked ||
+                        !candidateReviewDraftValid
+                      }
+                      onClick={() =>
+                        void acceptCandidate({
+                          kind: "insert_at_cursor",
+                          cursorUtf16: chapter?.content.length ?? 0,
+                        })
+                      }
+                    >
+                      追加到章末并创建版本
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      loading={candidateBusy}
+                      disabled={project?.status !== "active" || candidateCopySaved}
+                      onClick={() => void saveCandidateAsChapterCopy()}
+                    >
+                      {candidateCopySaved ? "新草稿已保存" : "保存为新草稿"}
+                    </Button>
+                    <Button
+                      disabled={
+                        candidateBusy ||
+                        candidateReviewConflict !== null ||
+                        candidateApplicationBlocked ||
+                        !candidateReviewDraftValid
+                      }
+                      onClick={() => void acceptCandidate({ kind: "overwrite_document" })}
+                    >
+                      替换整章并创建版本
+                    </Button>
+                  </>
+                )}
+                {!candidateIsContinuation &&
+                  !candidateIsSelectionRewrite &&
+                  !candidateIsWholeChapterRewrite && (
+                    <>
+                      <Button
+                        variant="secondary"
+                        disabled={
+                          candidateBusy ||
+                          candidateReviewConflict !== null ||
+                          candidateApplicationBlocked ||
+                          !candidateReviewDraftValid
+                        }
+                        onClick={() =>
+                          void acceptCandidate({
+                            kind: "insert_at_cursor",
+                            cursorUtf16: candidateReviewSelection.start,
+                          })
+                        }
+                      >
+                        插入到光标
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        disabled={
+                          candidateBusy ||
+                          candidateReviewConflict !== null ||
+                          candidateApplicationBlocked ||
+                          !candidateReviewDraftValid ||
+                          candidateReviewSelection.start === candidateReviewSelection.end
+                        }
+                        onClick={() =>
+                          void acceptCandidate({
+                            kind: "replace_selection",
+                            selection: candidateReviewSelection,
+                          })
+                        }
+                      >
+                        替换当前选区
+                      </Button>
+                      <Button
+                        disabled={
+                          candidateBusy ||
+                          candidateReviewConflict !== null ||
+                          candidateApplicationBlocked ||
+                          !candidateReviewDraftValid
+                        }
+                        onClick={() => void acceptCandidate({ kind: "overwrite_document" })}
+                      >
+                        覆盖全文并创建版本
+                      </Button>
+                    </>
+                  )}
               </div>
             </section>
           )}
@@ -3131,6 +4260,23 @@ export function EditorPage() {
       </Dialog>
     </PageStateBoundary>
   );
+}
+
+function selectionRewriteUiError(cause: unknown): unknown {
+  if (cause instanceof UiActionError) {
+    return cause;
+  }
+  if (
+    cause instanceof Error &&
+    "code" in cause &&
+    typeof cause.code === "string" &&
+    /^(?:SELECTION_REWRITE|PRIVATE_CHAPTER|STORY_CONTEXT|CONTEXT_TRACE|MODEL_)[A-Z0-9_]*$/u.test(
+      cause.code,
+    )
+  ) {
+    return new UiActionError(cause.code, cause.message, "选区改写未完成");
+  }
+  return cause;
 }
 
 function boundedEditorPreview(content: string): string {

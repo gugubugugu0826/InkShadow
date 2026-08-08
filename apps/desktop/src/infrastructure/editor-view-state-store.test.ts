@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_EDITOR_TYPOGRAPHY,
+  EDITOR_TYPOGRAPHY_CHANGED_EVENT,
   EDITOR_VIEW_STATE_ENTRY_LIMIT,
   EDITOR_VIEW_STATE_STORAGE_KEY,
+  loadEditorTypography,
   loadEditorView,
   saveEditorTypography,
   saveEditorView,
@@ -82,18 +84,37 @@ describe("editor view-state store", () => {
     };
     expect(parsed.entries).toHaveLength(EDITOR_VIEW_STATE_ENTRY_LIMIT);
 
-    saveEditorTypography(window.localStorage, {
-      fontFamily: "mono",
-      fontSize: 200,
-      lineHeight: 10,
-      measure: "narrow",
-    });
+    let notified = false;
+    window.addEventListener(
+      EDITOR_TYPOGRAPHY_CHANGED_EVENT,
+      () => {
+        notified = true;
+      },
+      { once: true },
+    );
+    saveEditorTypography(
+      window.localStorage,
+      {
+        fontFamily: "mono",
+        fontSize: 200,
+        lineHeight: 10,
+        measure: "narrow",
+      },
+      window,
+    );
     expect(loadEditorView(window.localStorage, PROJECT_ID, CHAPTER_ID, 0).typography).toEqual({
       fontFamily: "mono",
       fontSize: 24,
       lineHeight: 2.4,
       measure: "narrow",
     });
+    expect(loadEditorTypography(window.localStorage)).toEqual({
+      fontFamily: "mono",
+      fontSize: 24,
+      lineHeight: 2.4,
+      measure: "narrow",
+    });
+    expect(notified).toBe(true);
   });
 
   it("strips unexpected stored body fields during canonical cleanup", () => {

@@ -14,6 +14,7 @@ import {
   validateBoundedText,
   type CreateMemoryPolicyResult,
   type CreateMemoryRecordPersistenceInput,
+  type CommitMemoryGovernanceInput,
   type ChapterVersionReader,
   type CommitReviewDecisionInput,
   type FormalStoryRecordListReader,
@@ -25,6 +26,8 @@ import {
   type IdeationDraftSnapshot,
   type MemoryPolicyRepository,
   type MemoryPolicySnapshot,
+  type MemoryGovernanceReceipt,
+  type MemoryGovernanceUnitOfWork,
   type MemoryRecordCreationUnitOfWork,
   type MemoryRecordListReader,
   type MemoryRecordRepository,
@@ -91,7 +94,7 @@ interface StoredStoryDatabaseV4 {
   readonly reviewItems: Record<string, StructuredReviewItemSnapshot>;
 }
 
-export interface DevelopmentStoredStoryDatabase {
+interface StoredStoryDatabaseV5 {
   readonly schemaVersion: 5;
   readonly outlines: Record<string, OutlineSnapshot>;
   readonly formalRecords: Record<string, FormalStoryRecordSnapshot>;
@@ -102,6 +105,33 @@ export interface DevelopmentStoredStoryDatabase {
   readonly outlineDrafts: Record<string, OutlineDraftCandidate>;
   readonly reviewItems: Record<string, StructuredReviewItemSnapshot>;
   readonly ideationDrafts: Record<string, IdeationDraftSnapshot>;
+}
+
+interface StoredMemoryGovernanceEvent {
+  readonly id: string;
+  readonly projectId: string;
+  readonly operation: "forget_project" | "merge";
+  readonly targetRecordId: string | null;
+  readonly affectedRecordCount: number;
+  readonly resultingPolicyRevision: number | null;
+  readonly requestJson: string;
+  readonly beforeSnapshotJson: string;
+  readonly afterSnapshotJson: string;
+  readonly createdAt: string;
+}
+
+export interface DevelopmentStoredStoryDatabase {
+  readonly schemaVersion: 6;
+  readonly outlines: Record<string, OutlineSnapshot>;
+  readonly formalRecords: Record<string, FormalStoryRecordSnapshot>;
+  readonly timelineRevisions: Record<string, number>;
+  readonly memoryPolicies: Record<string, MemoryPolicySnapshot>;
+  readonly memoryRecords: Record<string, MemoryRecordSnapshot>;
+  readonly whatIfBranches: Record<string, WhatIfBranchSnapshot>;
+  readonly outlineDrafts: Record<string, OutlineDraftCandidate>;
+  readonly reviewItems: Record<string, StructuredReviewItemSnapshot>;
+  readonly ideationDrafts: Record<string, IdeationDraftSnapshot>;
+  readonly memoryGovernanceEvents: Record<string, StoredMemoryGovernanceEvent>;
 }
 
 type StoredStoryDatabase = DevelopmentStoredStoryDatabase;
@@ -423,6 +453,116 @@ export class BrowserDevelopmentMemoryRecordCreationUnitOfWork implements MemoryR
   }
 }
 
+export class BrowserDevelopmentMemoryGovernanceUnitOfWork implements MemoryGovernanceUnitOfWork {
+  public constructor(private readonly storage: Storage) {}
+
+  public commit(
+    input: CommitMemoryGovernanceInput,
+  ): Promise<Result<MemoryGovernanceReceipt, StoryCoreError>> {
+    return mutateStoryDatabase(this.storage, (database) => {
+      const inputError = validateBrowserMemoryGovernanceInput(input);
+      if (inputError !== null) {
+        return inputError;
+      }
+      const existing = database.memoryGovernanceEvents[input.operationId];
+      if (existing !== undefined) {
+        if (
+          existing.projectId !== input.projectId ||
+          existing.operation !== input.operation ||
+          existing.targetRecordId !== input.targetRecordId ||
+          existing.requestJson !== input.requestJson
+        ) {
+          return memoryIdempotencyConflict();
+        }
+        return ok(memoryGovernanceReceipt(existing, true));
+      }
+
+      if (input.operation === "forget_project") {
+        const previousPolicy = input.previousPolicy;
+        if (previousPolicy === null) {
+          return repositoryFailure("Project memory forgetting requires a policy snapshot.");
+        }
+        const policySnapshot = database.memoryPolicies[input.projectId];
+        if (policySnapshot === undefined) {
+          return repositoryFailure("Memory policy was not found.");
+        }
+        const currentPolicy = requireMemoryPolicy(policySnapshot);
+        if (currentPolicy.revision !== previousPolicy.revision) {
+          return revisionConflict("Memory policy", previousPolicy.revision, currentPolicy.revision);
+        }
+        const current = Object.values(database.memoryRecords)
+          .filter(({ projectId }) => projectId === input.projectId)
+          .sort((left, right) => left.id.localeCompare(right.id));
+        const expected = [...input.records]
+          .map(({ previous }) => previous.toSnapshot())
+          .sort((left, right) => left.id.localeCompare(right.id));
+        const currentFingerprint = current
+          .map(({ id, revision }) => `${id}:${String(revision)}`)
+          .join("|");
+        const expectedFingerprint = expected
+          .map(({ id, revision }) => `${id}:${String(revision)}`)
+          .join("|");
+        const scopeMatches =
+          current.length === expected.length && currentFingerprint === expectedFingerprint;
+        if (!scopeMatches) {
+          return revisionConflict("Project memory scope", expected.length, current.length);
+        }
+      } else {
+        for (const { previous } of input.records) {
+          const currentSnapshot = database.memoryRecords[previous.id];
+          if (currentSnapshot === undefined) {
+            return repositoryFailure("Memory record was not found.", "MEMORY_RECORD_NOT_FOUND");
+          }
+          const current = requireMemoryRecord(currentSnapshot);
+          if (current.projectId !== input.projectId || current.revision !== previous.revision) {
+            return revisionConflict("Memory record", previous.revision, current.revision);
+          }
+        }
+      }
+
+      if (
+        input.previousPolicy !== null &&
+        input.nextPolicy !== null &&
+        input.nextPolicy.revision !== input.previousPolicy.revision
+      ) {
+        database.memoryPolicies[input.projectId] = input.nextPolicy.toSnapshot();
+      }
+      for (const { previous, next } of input.records) {
+        if (next.revision !== previous.revision) {
+          database.memoryRecords[next.id] = next.toSnapshot();
+        }
+      }
+
+      const event: StoredMemoryGovernanceEvent = {
+        id: input.operationId,
+        projectId: input.projectId,
+        operation: input.operation,
+        targetRecordId: input.targetRecordId,
+        affectedRecordCount: input.records.length,
+        resultingPolicyRevision: input.nextPolicy?.revision ?? null,
+        requestJson: input.requestJson,
+        beforeSnapshotJson: JSON.stringify({
+          policy: input.previousPolicy?.toSnapshot() ?? null,
+          records: input.records.map(({ role, previous }) => ({
+            role,
+            snapshot: previous.toSnapshot(),
+          })),
+        }),
+        afterSnapshotJson: JSON.stringify({
+          policy: input.nextPolicy?.toSnapshot() ?? null,
+          records: input.records.map(({ role, next }) => ({
+            role,
+            snapshot: next.toSnapshot(),
+          })),
+        }),
+        createdAt: input.now,
+      };
+      database.memoryGovernanceEvents[input.operationId] = event;
+      return ok(memoryGovernanceReceipt(event, false));
+    });
+  }
+}
+
 export class BrowserDevelopmentWhatIfRepository
   implements WhatIfRepository, WhatIfBranchListReader
 {
@@ -732,7 +872,9 @@ export function readDevelopmentStoryDatabase(storage: Storage): DevelopmentStore
           ? migrateStoryDatabaseV3(parsed)
           : isStoredStoryDatabaseV4(parsed)
             ? migrateStoryDatabaseV4(parsed)
-            : requireStoredStoryDatabase(parsed);
+            : isStoredStoryDatabaseV5(parsed)
+              ? migrateStoryDatabaseV5(parsed)
+              : requireStoredStoryDatabase(parsed);
     validateStoryDatabase(database);
     return structuredClone(database);
   } catch (cause: unknown) {
@@ -742,7 +884,7 @@ export function readDevelopmentStoryDatabase(storage: Storage): DevelopmentStore
 
 function emptyStoryDatabase(): StoredStoryDatabase {
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     outlines: {},
     formalRecords: {},
     timelineRevisions: {},
@@ -752,6 +894,7 @@ function emptyStoryDatabase(): StoredStoryDatabase {
     outlineDrafts: {},
     reviewItems: {},
     ideationDrafts: {},
+    memoryGovernanceEvents: {},
   };
 }
 
@@ -765,35 +908,46 @@ function migrateStoryDatabaseV1(database: StoredStoryDatabaseV1): StoredStoryDat
 function migrateStoryDatabaseV2(database: StoredStoryDatabaseV2): StoredStoryDatabase {
   return {
     ...structuredClone(database),
-    schemaVersion: 5,
+    schemaVersion: 6,
     whatIfBranches: {},
     outlineDrafts: {},
     reviewItems: {},
     ideationDrafts: {},
+    memoryGovernanceEvents: {},
   };
 }
 
 function migrateStoryDatabaseV3(database: StoredStoryDatabaseV3): StoredStoryDatabase {
   return {
     ...structuredClone(database),
-    schemaVersion: 5,
+    schemaVersion: 6,
     reviewItems: {},
     ideationDrafts: {},
+    memoryGovernanceEvents: {},
   };
 }
 
 function migrateStoryDatabaseV4(database: StoredStoryDatabaseV4): StoredStoryDatabase {
   return {
     ...structuredClone(database),
-    schemaVersion: 5,
+    schemaVersion: 6,
     ideationDrafts: {},
+    memoryGovernanceEvents: {},
+  };
+}
+
+function migrateStoryDatabaseV5(database: StoredStoryDatabaseV5): StoredStoryDatabase {
+  return {
+    ...structuredClone(database),
+    schemaVersion: 6,
+    memoryGovernanceEvents: {},
   };
 }
 
 function requireStoredStoryDatabase(value: unknown): StoredStoryDatabase {
   if (
     !isObject(value) ||
-    value.schemaVersion !== 5 ||
+    value.schemaVersion !== 6 ||
     !isRecordMap(value.outlines) ||
     !isRecordMap(value.formalRecords) ||
     !isRecordMap(value.timelineRevisions) ||
@@ -802,7 +956,8 @@ function requireStoredStoryDatabase(value: unknown): StoredStoryDatabase {
     !isRecordMap(value.whatIfBranches) ||
     !isRecordMap(value.outlineDrafts) ||
     !isRecordMap(value.reviewItems) ||
-    !isRecordMap(value.ideationDrafts)
+    !isRecordMap(value.ideationDrafts) ||
+    !isRecordMap(value.memoryGovernanceEvents)
   ) {
     throw corruptStoryStore();
   }
@@ -851,6 +1006,22 @@ function isStoredStoryDatabaseV4(value: unknown): value is StoredStoryDatabaseV4
     isRecordMap(value.whatIfBranches) &&
     isRecordMap(value.outlineDrafts) &&
     isRecordMap(value.reviewItems)
+  );
+}
+
+function isStoredStoryDatabaseV5(value: unknown): value is StoredStoryDatabaseV5 {
+  return (
+    isObject(value) &&
+    value.schemaVersion === 5 &&
+    isRecordMap(value.outlines) &&
+    isRecordMap(value.formalRecords) &&
+    isRecordMap(value.timelineRevisions) &&
+    isRecordMap(value.memoryPolicies) &&
+    isRecordMap(value.memoryRecords) &&
+    isRecordMap(value.whatIfBranches) &&
+    isRecordMap(value.outlineDrafts) &&
+    isRecordMap(value.reviewItems) &&
+    isRecordMap(value.ideationDrafts)
   );
 }
 
@@ -905,6 +1076,11 @@ function validateStoryDatabase(database: StoredStoryDatabase): void {
   for (const [id, snapshot] of Object.entries(database.ideationDrafts)) {
     const draft = IdeationDraft.rehydrate(snapshot);
     if (!draft.ok || draft.value.id !== id) {
+      throw corruptStoryStore();
+    }
+  }
+  for (const [id, event] of Object.entries(database.memoryGovernanceEvents)) {
+    if (!isStoredMemoryGovernanceEvent(event) || event.id !== id) {
       throw corruptStoryStore();
     }
   }
@@ -1028,6 +1204,136 @@ function compareMemorySnapshots(left: MemoryRecordSnapshot, right: MemoryRecordS
     left.level.localeCompare(right.level) ||
     right.updatedAt.localeCompare(left.updatedAt) ||
     left.id.localeCompare(right.id)
+  );
+}
+
+function validateBrowserMemoryGovernanceInput(
+  input: CommitMemoryGovernanceInput,
+): Result<never, StoryCoreError> | null {
+  const seen = new Set<string>();
+  let mergeTargetCount = 0;
+  let mergeSourceCount = 0;
+  for (const transition of input.records) {
+    const previous = transition.previous.toSnapshot();
+    const next = transition.next.toSnapshot();
+    if (
+      seen.has(previous.id) ||
+      previous.id !== next.id ||
+      previous.projectId !== input.projectId ||
+      next.projectId !== input.projectId ||
+      next.revision !== previous.revision + 1
+    ) {
+      return repositoryFailure("Memory governance transition is invalid.");
+    }
+    seen.add(previous.id);
+    mergeTargetCount += transition.role === "merge_target" ? 1 : 0;
+    mergeSourceCount += transition.role === "merge_source" ? 1 : 0;
+  }
+  if (!isJsonObject(input.requestJson)) {
+    return repositoryFailure("Memory governance request is invalid.");
+  }
+  const forgetValid =
+    input.operation === "forget_project" &&
+    input.targetRecordId === null &&
+    input.previousPolicy !== null &&
+    input.nextPolicy !== null &&
+    input.previousPolicy.projectId === input.projectId &&
+    input.nextPolicy.projectId === input.projectId &&
+    input.nextPolicy.revision === input.previousPolicy.revision + 1 &&
+    !input.nextPolicy.automaticLearningEnabled &&
+    input.records.every(({ role, next }) => role === "forgotten" && next.toSnapshot().excluded);
+  const mergeValid =
+    input.operation === "merge" &&
+    input.targetRecordId !== null &&
+    input.previousPolicy === null &&
+    input.nextPolicy === null &&
+    input.records.length === 2 &&
+    mergeTargetCount === 1 &&
+    mergeSourceCount === 1 &&
+    input.records.some(
+      ({ role, previous }) => role === "merge_target" && previous.id === input.targetRecordId,
+    ) &&
+    input.records.every(({ role, next }) =>
+      role === "merge_source" ? next.toSnapshot().excluded : !next.toSnapshot().excluded,
+    );
+  return forgetValid || mergeValid
+    ? null
+    : repositoryFailure("Memory governance operation is invalid.");
+}
+
+function memoryGovernanceReceipt(
+  event: StoredMemoryGovernanceEvent,
+  idempotentReplay: boolean,
+): MemoryGovernanceReceipt {
+  const operationId = parseUuidV7(event.id);
+  const projectId = parseUuidV7(event.projectId);
+  if (!operationId.ok || !projectId.ok) {
+    throw corruptStoryStore();
+  }
+  return {
+    operationId: operationId.value,
+    projectId: projectId.value,
+    operation: event.operation,
+    affectedRecordCount: event.affectedRecordCount,
+    resultingPolicyRevision: event.resultingPolicyRevision,
+    idempotentReplay,
+  };
+}
+
+function isStoredMemoryGovernanceEvent(value: unknown): value is StoredMemoryGovernanceEvent {
+  if (!isObject(value)) {
+    return false;
+  }
+  const operationId = typeof value.id === "string" ? parseUuidV7(value.id) : null;
+  const projectId = typeof value.projectId === "string" ? parseUuidV7(value.projectId) : null;
+  const targetId =
+    value.targetRecordId === null
+      ? null
+      : typeof value.targetRecordId === "string"
+        ? parseUuidV7(value.targetRecordId)
+        : undefined;
+  const createdAt =
+    typeof value.createdAt === "string" ? parseIsoUtcTimestamp(value.createdAt) : null;
+  const commonValid =
+    operationId?.ok === true &&
+    projectId?.ok === true &&
+    createdAt?.ok === true &&
+    (value.operation === "forget_project" || value.operation === "merge") &&
+    Number.isSafeInteger(value.affectedRecordCount) &&
+    Number(value.affectedRecordCount) >= 0 &&
+    (value.resultingPolicyRevision === null ||
+      (Number.isSafeInteger(value.resultingPolicyRevision) &&
+        Number(value.resultingPolicyRevision) >= 1)) &&
+    typeof value.requestJson === "string" &&
+    isJsonObject(value.requestJson) &&
+    typeof value.beforeSnapshotJson === "string" &&
+    isJsonObject(value.beforeSnapshotJson) &&
+    typeof value.afterSnapshotJson === "string" &&
+    isJsonObject(value.afterSnapshotJson);
+  if (!commonValid) {
+    return false;
+  }
+  return value.operation === "forget_project"
+    ? value.targetRecordId === null
+    : targetId !== undefined && targetId !== null && targetId.ok && value.affectedRecordCount === 2;
+}
+
+function isJsonObject(serialized: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(serialized);
+    return isObject(parsed);
+  } catch {
+    return false;
+  }
+}
+
+function memoryIdempotencyConflict(): Result<never, StoryCoreError> {
+  return err(
+    new StoryCoreError({
+      code: "MEMORY_IDEMPOTENCY_CONFLICT",
+      message: "The memory operation id was already used for a different confirmed request.",
+      actions: ["RECOMPARE"],
+    }),
   );
 }
 

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
+import type { AcceptCandidateCommit } from "@inkshadow/application";
 import {
   AiCandidate,
   Chapter,
@@ -16,12 +17,34 @@ import {
   type Result,
   type UuidV7,
 } from "@inkshadow/domain";
+import {
+  Task,
+  createTaskFailure,
+  parseUuidV7 as parseTaskUuidV7,
+  type CreateTaskInput,
+} from "@inkshadow/task-engine";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createSqliteRepositories, type SqliteRepositories } from "../src/sqlite-repositories.js";
+import { SqliteTaskRepository } from "../src/task-sqlite-repositories.js";
 import { NodeSqliteExecutor } from "./node-sqlite-executor.js";
 
-const migration = readFileSync(new URL("../migrations/0001_core.sql", import.meta.url), "utf8");
+const migration = [
+  readFileSync(new URL("../migrations/0001_core.sql", import.meta.url), "utf8"),
+  readFileSync(new URL("../migrations/0002_tasks_notifications.sql", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../migrations/0048_candidate_application_intents.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0050_candidate_revision_authority.sql", import.meta.url),
+    "utf8",
+  ),
+  `ALTER TABLE chapters ADD COLUMN privacy_mode TEXT NOT NULL DEFAULT 'standard'
+     CHECK (privacy_mode IN ('standard', 'local_only'));
+   ALTER TABLE chapters ADD COLUMN privacy_revision INTEGER NOT NULL DEFAULT 1
+     CHECK (privacy_revision >= 1);`,
+].join("\n");
 
 describe("SQLite repositories with node:sqlite", () => {
   let executor: NodeSqliteExecutor;
@@ -117,10 +140,42 @@ describe("SQLite repositories with node:sqlite", () => {
     );
 
     expect(chapter.toSnapshot()).toEqual(fixture.chapter.toSnapshot());
+    expect(chapter.toSnapshot()).toMatchObject({
+      privacyMode: "standard",
+      privacyRevision: 1,
+    });
     expect(versions.map((version) => version.toSnapshot())).toEqual([
       fixture.initialVersion.toSnapshot(),
     ]);
     expect(executor.database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  it("loads project privacy authority without selecting chapter正文", async () => {
+    const fixture = await createChapterFixture();
+    executor.database
+      .prepare(
+        `UPDATE chapters
+         SET privacy_mode = 'local_only', privacy_revision = 2
+         WHERE id = ?`,
+      )
+      .run(fixture.chapter.id);
+
+    const snapshots = expectOk(
+      await repositories.chapters.listPrivacyAuthorityByProjectId(fixture.project.id),
+    );
+
+    expect(snapshots).toEqual([
+      {
+        chapterId: fixture.chapter.id,
+        currentVersionId: fixture.initialVersion.id,
+        chapterRevision: 1,
+        privacyRevision: 2,
+        privacyMode: "local_only",
+        status: "active",
+      },
+    ]);
+    expect(Object.hasOwn(snapshots[0] ?? {}, "content")).toBe(false);
+    expect(JSON.stringify(snapshots)).not.toContain(fixture.chapter.content);
   });
 
   it("rolls back chapter creation when the initial version cannot commit", async () => {
@@ -516,6 +571,7 @@ describe("SQLite repositories with node:sqlite", () => {
         candidate: acceptedCandidate,
         expectedChapterRevision: 1,
         expectedCandidateStatus: "ready",
+        expectedCandidateRevision: candidate.revision,
       }),
     );
 
@@ -543,13 +599,239 @@ describe("SQLite repositories with node:sqlite", () => {
     });
   });
 
+  it("reloads revised fragment content and its exact task anchor without changing正文", async () => {
+    const fixture = await createChapterFixture();
+    const streaming = expectOk(
+      AiCandidate.createStreaming({
+        id: uuid(31),
+        projectId: fixture.project.id,
+        chapterId: fixture.chapter.id,
+        source: "generate",
+        baseVersionId: fixture.initialVersion.id,
+        now: atMinute(2),
+        applicationIntent: {
+          task: "continuation",
+          application: "insert_at_cursor",
+          payload: "fragment",
+          startUtf16: fixture.chapter.content.length,
+          endUtf16: fixture.chapter.content.length,
+        },
+      }),
+    );
+    const ready = expectOk(streaming.markReady("最初片段", checksum("最初片段"), atMinute(3)));
+    expectOk(await repositories.aiCandidates.create(ready));
+    const revised = expectOk(
+      ready.reviseReadyContent("作者保存的片段", checksum("作者保存的片段"), atMinute(4)),
+    );
+    expectOk(
+      await repositories.aiCandidates.save(revised, {
+        status: "ready",
+        revision: ready.revision,
+      }),
+    );
+
+    const reopenedRepositories = createSqliteRepositories(executor);
+    const reloaded = expectPresent(
+      expectOk(await reopenedRepositories.aiCandidates.findById(revised.id)),
+    );
+    expect(reloaded.toSnapshot()).toMatchObject({
+      content: "作者保存的片段",
+      status: "ready",
+      applicationIntent: {
+        task: "continuation",
+        application: "insert_at_cursor",
+        payload: "fragment",
+        startUtf16: fixture.chapter.content.length,
+        endUtf16: fixture.chapter.content.length,
+      },
+    });
+    expect(
+      expectPresent(expectOk(await reopenedRepositories.chapters.findById(fixture.chapter.id)))
+        .content,
+    ).toBe(fixture.chapter.content);
+    expect(
+      expectOk(await reopenedRepositories.chapterVersions.listByChapterId(fixture.chapter.id)),
+    ).toHaveLength(1);
+  });
+
+  it("commits the accepted version and its recovery task atomically before returning", async () => {
+    const taskId = uuid(90);
+    repositories = createSqliteRepositories(executor, {
+      acceptedCandidateTaskFactory: (commit) => acceptedPipelineTask(taskId, commit),
+    });
+    const fixture = await createChapterFixture();
+    const candidate = makeReadyCandidate(fixture, 91, "accepted text with durable recovery");
+    expectOk(await repositories.aiCandidates.create(candidate));
+    const commit = acceptedCandidateCommit(fixture, candidate, 92, atMinute(4));
+
+    expectOk(await repositories.contentCommits.acceptCandidate(commit));
+
+    // This is the state a new process observes if the renderer exits as soon as
+    // acceptCandidate returns: both the immutable text and the queued task exist.
+    const persistedVersion = expectPresent(
+      expectOk(await repositories.chapterVersions.findVersionById(commit.version.id)),
+    );
+    expect(persistedVersion.toSnapshot()).toMatchObject({
+      reason: "candidate_accept",
+      sourceCandidateId: candidate.id,
+    });
+    const taskRepository = new SqliteTaskRepository(executor);
+    const parsedTaskId = parseTaskUuidV7(taskId);
+    if (!parsedTaskId.ok) {
+      throw parsedTaskId.error;
+    }
+    const loadedTask = await taskRepository.findById(parsedTaskId.value);
+    if (!loadedTask.ok) {
+      throw loadedTask.error;
+    }
+    const taskEntity = expectPresent(loadedTask.value);
+    expect(taskEntity.toSnapshot()).toMatchObject({
+      id: taskId,
+      idempotencyKey: `story.accepted-version:${commit.version.id}`,
+      type: "story.accepted-version.process",
+      status: "queued",
+      metadata: {
+        projectId: fixture.project.id,
+        chapterId: fixture.chapter.id,
+        versionId: commit.version.id,
+        source: "candidate_accept",
+        acceptedCharacterCount: commit.version.toSnapshot().content.length,
+        operation: "rebuild-derived-story-state",
+      },
+    });
+
+    const duplicateTask = Task.create(acceptedPipelineTask(uuid(93), commit));
+    if (!duplicateTask.ok) {
+      throw duplicateTask.error;
+    }
+    const duplicate = await taskRepository.createIfAbsent(duplicateTask.value);
+    if (!duplicate.ok) {
+      throw duplicate.error;
+    }
+    expect(duplicate.value.created).toBe(false);
+    expect(String(duplicate.value.task.id)).toBe(taskId);
+
+    const conflictingVersion = commit.version.toSnapshot();
+    const conflictingTask = Task.create({
+      ...acceptedPipelineTask(uuid(94), commit),
+      metadata: {
+        projectId: conflictingVersion.projectId,
+        chapterId: conflictingVersion.chapterId,
+        versionId: conflictingVersion.id,
+        source: "candidate_accept",
+        acceptedCharacterCount: conflictingVersion.content.length + 1,
+        operation: "rebuild-derived-story-state",
+      },
+    });
+    if (!conflictingTask.ok) {
+      throw conflictingTask.error;
+    }
+    const conflict = await taskRepository.createIfAbsent(conflictingTask.value);
+    expect(conflict.ok).toBe(false);
+    if (conflict.ok) {
+      throw new Error("Expected strict task idempotency to reject different metadata.");
+    }
+    expect(conflict.error.code).toBe("TASK_IDEMPOTENCY_CONFLICT");
+
+    const claimed = taskEntity.claim({
+      ownerId: "test.accepted-version",
+      leaseToken: uuid(98),
+      now: atMinute(5),
+      leaseExpiresAt: atMinute(6),
+    });
+    if (!claimed.ok) {
+      throw claimed.error;
+    }
+    const savedClaim = await taskRepository.save(claimed.value, taskEntity.sequence);
+    if (!savedClaim.ok) {
+      throw savedClaim.error;
+    }
+    const failure = createTaskFailure({
+      code: "DERIVED_STORY_REBUILD_FAILED",
+      causeCode: "SEARCH_INDEX_FAILED",
+      retryable: false,
+      actions: ["CONTACT_SUPPORT"],
+      requestId: "request:accepted-version-failure",
+    });
+    if (!failure.ok) {
+      throw failure.error;
+    }
+    const failed = claimed.value.recordFailure({
+      leaseToken: uuid(98),
+      failure: failure.value,
+      now: atMinute(5),
+      retryAt: null,
+    });
+    if (!failed.ok) {
+      throw failed.error;
+    }
+    const savedFailure = await taskRepository.save(failed.value, claimed.value.sequence);
+    if (!savedFailure.ok) {
+      throw savedFailure.error;
+    }
+    const chapterAfterTaskFailure = expectPresent(
+      expectOk(await repositories.chapters.findById(fixture.chapter.id)),
+    );
+    expect(chapterAfterTaskFailure.toSnapshot()).toEqual(commit.chapter.toSnapshot());
+    expect(
+      expectPresent(expectOk(await repositories.aiCandidates.findById(candidate.id))).status,
+    ).toBe("accepted");
+  });
+
+  it("rolls back Candidate acceptance when its durable task cannot be registered", async () => {
+    const collidingTaskId = uuid(95);
+    repositories = createSqliteRepositories(executor, {
+      acceptedCandidateTaskFactory: (commit) => acceptedPipelineTask(collidingTaskId, commit),
+    });
+    const fixture = await createChapterFixture();
+    const candidate = makeReadyCandidate(fixture, 96, "candidate remains retryable");
+    expectOk(await repositories.aiCandidates.create(candidate));
+    const commit = acceptedCandidateCommit(fixture, candidate, 97, atMinute(4));
+    const unrelated = Task.create({
+      id: collidingTaskId,
+      type: "test.unrelated",
+      idempotencyKey: "test.unrelated:durable-task-id-collision",
+      metadata: { operation: "unrelated" },
+      priority: 1,
+      maxAttempts: 1,
+      now: atMinute(3),
+    });
+    if (!unrelated.ok) {
+      throw unrelated.error;
+    }
+    const taskRepository = new SqliteTaskRepository(executor);
+    const seeded = await taskRepository.createIfAbsent(unrelated.value);
+    if (!seeded.ok) {
+      throw seeded.error;
+    }
+
+    expectErrorCode(await repositories.contentCommits.acceptCandidate(commit), "REPOSITORY_ERROR");
+
+    const persistedChapter = expectPresent(
+      expectOk(await repositories.chapters.findById(fixture.chapter.id)),
+    );
+    const persistedCandidate = expectPresent(
+      expectOk(await repositories.aiCandidates.findById(candidate.id)),
+    );
+    expect(persistedChapter.toSnapshot()).toEqual(fixture.chapter.toSnapshot());
+    expect(persistedCandidate.status).toBe("ready");
+    expect(
+      expectOk(await repositories.chapterVersions.findVersionById(commit.version.id)),
+    ).toBeNull();
+  });
+
   it("rolls back candidate acceptance when the candidate decision races", async () => {
     const fixture = await createChapterFixture();
     const candidate = makeReadyCandidate(fixture, 30, "发生竞争的正文");
     expectOk(await repositories.aiCandidates.create(candidate));
 
     const rejectedCandidate = expectOk(candidate.reject(atMinute(4)));
-    expectOk(await repositories.aiCandidates.save(rejectedCandidate, "ready"));
+    expectOk(
+      await repositories.aiCandidates.save(rejectedCandidate, {
+        status: "ready",
+        revision: candidate.revision,
+      }),
+    );
 
     const acceptedCandidate = expectOk(candidate.accept(atMinute(5)));
     const versionId = uuid(12);
@@ -580,6 +862,7 @@ describe("SQLite repositories with node:sqlite", () => {
         candidate: acceptedCandidate,
         expectedChapterRevision: 1,
         expectedCandidateStatus: "ready",
+        expectedCandidateRevision: candidate.revision,
       }),
       "CANDIDATE_ALREADY_DECIDED",
     );
@@ -682,6 +965,69 @@ describe("SQLite repositories with node:sqlite", () => {
     return { project, chapter, initialVersion };
   }
 });
+
+interface ChapterFixtureSnapshot {
+  readonly project: Project;
+  readonly chapter: Chapter;
+  readonly initialVersion: ChapterVersion;
+}
+
+function acceptedCandidateCommit(
+  fixture: ChapterFixtureSnapshot,
+  candidate: AiCandidate,
+  versionSequence: number,
+  now: IsoUtcTimestamp,
+): AcceptCandidateCommit {
+  const acceptedCandidate = expectOk(candidate.accept(now));
+  const versionId = uuid(versionSequence);
+  const chapter = expectOk(
+    fixture.chapter.saveContent({
+      content: candidate.content,
+      expectedRevision: fixture.chapter.revision,
+      newVersionId: versionId,
+      now,
+    }),
+  );
+  const version = makeVersion({
+    id: versionId,
+    projectId: fixture.project.id,
+    chapterId: fixture.chapter.id,
+    parentVersionId: fixture.initialVersion.id,
+    sequence: chapter.revision,
+    content: candidate.content,
+    reason: "candidate_accept",
+    sourceCandidateId: candidate.id,
+    createdAt: now,
+  });
+  return {
+    chapter,
+    version,
+    candidate: acceptedCandidate,
+    expectedChapterRevision: fixture.chapter.revision,
+    expectedCandidateStatus: "ready",
+    expectedCandidateRevision: candidate.revision,
+  };
+}
+
+function acceptedPipelineTask(taskId: UuidV7, commit: AcceptCandidateCommit): CreateTaskInput {
+  const version = commit.version.toSnapshot();
+  return {
+    id: taskId,
+    type: "story.accepted-version.process",
+    idempotencyKey: `story.accepted-version:${version.id}`,
+    metadata: {
+      projectId: version.projectId,
+      chapterId: version.chapterId,
+      versionId: version.id,
+      source: "candidate_accept",
+      acceptedCharacterCount: version.content.length,
+      operation: "rebuild-derived-story-state",
+    },
+    priority: 75,
+    maxAttempts: 3,
+    now: version.createdAt,
+  };
+}
 
 function makeProject(idSequence: number, name: string, minute: number): Project {
   return expectOk(

@@ -5,12 +5,18 @@ import {
   BrowserDevelopmentStoryFactStore,
   DEVELOPMENT_STORY_FACT_STORE_KEY,
 } from "./story-fact-store";
+import { DEVELOPMENT_DATABASE_KEY } from "./development-storage";
 
 const PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
+const OTHER_PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000099";
 const FACT_ID = "019f9f4a-b3c7-7350-9226-000000000002";
 const ACTOR_ID = "019f9f4a-b3c7-7350-9226-000000000003";
 const T0 = "2026-08-01T00:00:00.000Z";
 const T1 = "2026-08-01T00:01:00.000Z";
+const T2 = "2026-08-01T00:02:00.000Z";
+const CHAPTER_ID = "019f9f4a-b3c7-7350-9226-000000000004";
+const VERSION_ID = "019f9f4a-b3c7-7350-9226-000000000005";
+const CHAPTER_CONTENT = "门被打开。随后门被锁上。";
 
 beforeEach(() => {
   localStorage.clear();
@@ -66,6 +72,306 @@ describe("BrowserDevelopmentStoryFactStore", () => {
       expect(result.error.code).toBe("STORY_REPOSITORY_ERROR");
     }
   });
+
+  it("binds the browser authority fence to the exact source and recovers an identical retry", async () => {
+    seedDevelopmentChapter();
+    const store = new BrowserDevelopmentStoryFactStore(localStorage);
+    const original = createCausalFact(6, "门被打开。", {
+      schemaVersion: "inkshadow.causal-event-fact.v2",
+      eventText: "门被打开",
+      resultText: "通道开放",
+      narrativeTime: { order: 10, label: "先前" },
+      location: { locationId: "door", label: "门口" },
+      participantCharacterIds: [],
+      informedCharacterIds: [],
+      knowledgeGains: [],
+      prerequisites: [],
+      characterStateChanges: [],
+      relationshipChanges: [],
+      itemChanges: [],
+      foreshadowProgress: [],
+    });
+    const exactFence = { chapterId: CHAPTER_ID, expectedCurrentVersionId: VERSION_ID } as const;
+    expect(unwrap(await store.createWithAuthorityFence(original, exactFence)).created).toBe(true);
+    const retry = createCausalFact(7, "门被打开。", original.toSnapshot().structuredValue);
+    const recovered = unwrap(await store.createWithAuthorityFence(retry, exactFence));
+    expect(recovered).toMatchObject({ created: false });
+    expect(recovered.fact.id).toBe(original.id);
+
+    const unrelatedFence = await store.createWithAuthorityFence(
+      createCausalFact(8, "随后门被锁上。", {
+        ...(original.toSnapshot().structuredValue as Readonly<Record<string, unknown>>),
+        eventText: "门被锁上",
+        narrativeTime: { order: 20, label: "随后" },
+      }),
+      {
+        chapterId: "019f9f4a-b3c7-7350-9226-000000000099",
+        expectedCurrentVersionId: VERSION_ID,
+      },
+    );
+    expect(unrelatedFence.ok).toBe(false);
+    if (!unrelatedFence.ok) {
+      expect(unrelatedFence.error.code).toBe("STORY_FACT_SOURCE_FENCE_FAILED");
+    }
+
+    const disguisedEvent = await store.createWithAuthorityFence(
+      createCausalFact(
+        12,
+        "随后门被锁上。",
+        original.toSnapshot().structuredValue,
+        "world_property",
+      ),
+      exactFence,
+    );
+    expect(disguisedEvent.ok).toBe(false);
+    if (!disguisedEvent.ok) expect(disguisedEvent.error.code).toBe("STORY_VALIDATION_FAILED");
+
+    const serialized = localStorage.getItem(DEVELOPMENT_DATABASE_KEY);
+    if (serialized === null) throw new Error("expected development chapter database");
+    const database = JSON.parse(serialized) as { versions: { id: string; content: string }[] };
+    const version = database.versions.find(({ id }) => id === VERSION_ID);
+    if (version === undefined) throw new Error("expected development chapter version");
+    version.content = "被篡改的版本正文";
+    localStorage.setItem(DEVELOPMENT_DATABASE_KEY, JSON.stringify(database));
+    const changedEvidence = await store.createWithAuthorityFence(
+      createCausalFact(9, "随后门被锁上。", {
+        ...(original.toSnapshot().structuredValue as Readonly<Record<string, unknown>>),
+        eventText: "门被锁上",
+        narrativeTime: { order: 20, label: "随后" },
+      }),
+      exactFence,
+    );
+    expect(changedEvidence.ok).toBe(false);
+    if (!changedEvidence.ok) expect(changedEvidence.error.code).toBe("REVIEW_SOURCE_CHANGED");
+  });
+
+  it("rejects causal endpoint and character fences that do not exactly match the fact", async () => {
+    seedDevelopmentChapter();
+    const store = new BrowserDevelopmentStoryFactStore(localStorage);
+    const event = createCausalFact(10, "门被打开。", {
+      schemaVersion: "inkshadow.causal-event-fact.v2",
+      eventText: "门被打开",
+      resultText: "通道开放",
+      narrativeTime: { order: 10, label: "先前" },
+      location: { locationId: "door", label: "门口" },
+      participantCharacterIds: ["character-linxia"],
+      informedCharacterIds: [],
+      knowledgeGains: [],
+      prerequisites: [],
+      characterStateChanges: [],
+      relationshipChanges: [],
+      itemChanges: [],
+      foreshadowProgress: [],
+    });
+    const omittedCharacter = await store.createWithAuthorityFence(event, {
+      chapterId: CHAPTER_ID,
+      expectedCurrentVersionId: VERSION_ID,
+    });
+    expect(omittedCharacter.ok).toBe(false);
+    if (!omittedCharacter.ok) {
+      expect(omittedCharacter.error.code).toBe("STORY_FACT_CHARACTER_AUTHORITY_INVALID");
+    }
+
+    const relation = createCausalFact(
+      11,
+      CHAPTER_CONTENT,
+      {
+        schemaVersion: "inkshadow.causal-relation-fact.v1",
+        fromEventId: "event-a",
+        toEventId: "event-missing",
+        kind: "causes",
+      },
+      "causal_relation",
+    );
+    const mismatchedEndpoints = await store.createWithAuthorityFence(relation, {
+      chapterId: CHAPTER_ID,
+      expectedCurrentVersionId: VERSION_ID,
+      requiredCausalEventIds: ["event-a", "event-b"],
+    });
+    expect(mismatchedEndpoints.ok).toBe(false);
+    if (!mismatchedEndpoints.ok) {
+      expect(mismatchedEndpoints.error.code).toBe("STORY_FACT_RELATION_ENDPOINT_INVALID");
+    }
+
+    expect((await store.create(createCharacterFact(20, "character-linxia"))).ok).toBe(true);
+    expect((await store.create(createCharacterFact(21, "character-linxia"))).ok).toBe(true);
+    const duplicatedCharacter = await store.createWithAuthorityFence(event, {
+      chapterId: CHAPTER_ID,
+      expectedCurrentVersionId: VERSION_ID,
+      requiredCharacterIds: ["character-linxia"],
+    });
+    expect(duplicatedCharacter.ok).toBe(false);
+    if (!duplicatedCharacter.ok) {
+      expect(duplicatedCharacter.error.code).toBe("STORY_FACT_CHARACTER_AUTHORITY_INVALID");
+    }
+  });
+
+  it("atomically undoes a supplemental disposition and recovers the same retry", async () => {
+    seedDevelopmentChapter();
+    const store = new BrowserDevelopmentStoryFactStore(localStorage);
+    const resolution = createSupplementalResolutionFact(30);
+    expect(
+      unwrap(
+        await store.createWithAuthorityFence(resolution, {
+          chapterId: CHAPTER_ID,
+          expectedCurrentVersionId: VERSION_ID,
+        }),
+      ).created,
+    ).toBe(true);
+    const fence = {
+      expectedProjectId: PROJECT_ID,
+      chapterId: CHAPTER_ID,
+      expectedCurrentVersionId: VERSION_ID,
+      findingId: "voice:browser-test",
+      evidenceSignature: `v2:${VERSION_ID}:${"a".repeat(64)}:0-5`,
+      expectedRevision: 1,
+      now: T2,
+    } as const;
+
+    const first = unwrap(
+      await store.deprecateSupplementalResolutionWithAuthorityFence(resolution.id, fence),
+    );
+    expect(first).toMatchObject({ deprecated: true, fact: { revision: 2 } });
+    const retry = unwrap(
+      await store.deprecateSupplementalResolutionWithAuthorityFence(resolution.id, fence),
+    );
+    expect(retry).toMatchObject({ deprecated: false, fact: { revision: 2 } });
+    expect(unwrap(await store.listRevisions(resolution.id))).toHaveLength(2);
+  });
+
+  it("fails supplemental undo closed on identity mismatch or a switched chapter version", async () => {
+    seedDevelopmentChapter();
+    const store = new BrowserDevelopmentStoryFactStore(localStorage);
+    const resolution = createSupplementalResolutionFact(31);
+    unwrap(
+      await store.createWithAuthorityFence(resolution, {
+        chapterId: CHAPTER_ID,
+        expectedCurrentVersionId: VERSION_ID,
+      }),
+    );
+    const baseFence = {
+      expectedProjectId: PROJECT_ID,
+      chapterId: CHAPTER_ID,
+      expectedCurrentVersionId: VERSION_ID,
+      findingId: "voice:browser-test",
+      evidenceSignature: `v2:${VERSION_ID}:${"a".repeat(64)}:0-5`,
+      expectedRevision: 1,
+      now: T2,
+    } as const;
+    const mismatched = await store.deprecateSupplementalResolutionWithAuthorityFence(
+      resolution.id,
+      { ...baseFence, findingId: "voice:forged" },
+    );
+    expect(mismatched.ok).toBe(false);
+    if (!mismatched.ok) expect(mismatched.error.code).toBe("STORY_VALIDATION_FAILED");
+
+    const crossProject = await store.deprecateSupplementalResolutionWithAuthorityFence(
+      resolution.id,
+      { ...baseFence, expectedProjectId: OTHER_PROJECT_ID },
+    );
+    expect(crossProject.ok).toBe(false);
+    if (!crossProject.ok) expect(crossProject.error.code).toBe("STORY_VALIDATION_FAILED");
+    expect(unwrap(await store.findById(resolution.id))?.toSnapshot()).toMatchObject({
+      status: "formal",
+      deprecated: false,
+      revision: 1,
+    });
+    expect(unwrap(await store.listRevisions(resolution.id))).toHaveLength(1);
+
+    const serialized = localStorage.getItem(DEVELOPMENT_DATABASE_KEY);
+    if (serialized === null) throw new Error("expected development chapter database");
+    const database = JSON.parse(serialized) as {
+      chapters: { id: string; currentVersionId: string }[];
+    };
+    const chapter = database.chapters.find(({ id }) => id === CHAPTER_ID);
+    if (chapter === undefined) throw new Error("expected development chapter");
+    chapter.currentVersionId = "019f9f4a-b3c7-7350-9226-000000000099";
+    localStorage.setItem(DEVELOPMENT_DATABASE_KEY, JSON.stringify(database));
+    const switched = await store.deprecateSupplementalResolutionWithAuthorityFence(
+      resolution.id,
+      baseFence,
+    );
+    expect(switched.ok).toBe(false);
+    if (!switched.ok) expect(switched.error.code).toBe("STORY_FACT_SOURCE_FENCE_FAILED");
+    expect(unwrap(await store.findById(resolution.id))?.toSnapshot()).toMatchObject({
+      status: "formal",
+      deprecated: false,
+      revision: 1,
+    });
+  });
+
+  it("persists a bounded unique entity-alias resolution with revision history", async () => {
+    const store = new BrowserDevelopmentStoryFactStore(localStorage);
+    const original = createAmbiguousAliasFact();
+    expect((await store.create(original)).ok).toBe(true);
+
+    const resolved = unwrap(
+      original.resolveEntityAlias({
+        resolution: { kind: "existing_entity", targetEntityKey: "character.linzhou.b" },
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: T1,
+      }),
+    );
+    expect((await store.save(resolved, 1)).ok).toBe(true);
+    expect(unwrap(await store.findById(original.id))?.toSnapshot()).toMatchObject({
+      revision: 2,
+      structuredValue: {
+        subject: {
+          entityKey: "character.linzhou.b",
+          mergeStatus: "human_resolved_existing_entity",
+          matchedEntityKeys: ["character.linzhou.b"],
+        },
+      },
+    });
+    expect(
+      unwrap(await store.listRevisions(original.id)).map(({ changeKind }) => changeKind),
+    ).toEqual(["created", "governance_updated"]);
+  });
+
+  it.each([
+    ["empty matches", []],
+    ["too many matches", Array.from({ length: 65 }, (_, index) => `character.${String(index)}`)],
+    ["duplicate matches", ["character.same", "character.same"]],
+    ["overlong match", ["x".repeat(201)]],
+  ])("fails closed when persisted alias data has %s", async (_label, matchedEntityKeys) => {
+    const store = new BrowserDevelopmentStoryFactStore(localStorage);
+    const original = createAmbiguousAliasFact();
+    expect((await store.create(original)).ok).toBe(true);
+    corruptPersistedAlias((subject) => {
+      subject.matchedEntityKeys = matchedEntityKeys;
+    });
+
+    const result = await store.findById(original.id);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatchObject({
+        code: "STORY_REPOSITORY_ERROR",
+        message: "Stored unified story facts failed integrity validation.",
+      });
+    }
+  });
+
+  it("fails closed when persisted alias data contains a prohibited structure key", async () => {
+    const store = new BrowserDevelopmentStoryFactStore(localStorage);
+    const original = createAmbiguousAliasFact();
+    expect((await store.create(original)).ok).toBe(true);
+    corruptPersistedAlias((subject) => {
+      Object.defineProperty(subject, "constructor", {
+        value: { polluted: true },
+        configurable: true,
+        enumerable: true,
+        writable: true,
+      });
+    });
+
+    const result = await store.findById(original.id);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("STORY_REPOSITORY_ERROR");
+    }
+    expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
+  });
 });
 
 function createFact(): StoryFact {
@@ -87,6 +393,176 @@ function createFact(): StoryFact {
       now: T0,
     }),
   );
+}
+
+function createAmbiguousAliasFact(): StoryFact {
+  return unwrap(
+    StoryFact.create({
+      id: FACT_ID,
+      projectId: PROJECT_ID,
+      factType: "character_state",
+      contentText: "林舟回到了旧宅。",
+      structuredValue: {
+        subject: {
+          entityKey: "character.linzhou.distinct",
+          displayName: "林舟",
+          mergeStatus: "ambiguous_confirmed_alias",
+          matchedEntityKeys: ["character.linzhou.a", "character.linzhou.b"],
+        },
+        attributeKey: "location",
+        valueText: "旧宅",
+      },
+      source: {
+        kind: "system_derivation",
+        reference: "extraction-job:browser-alias-test",
+      },
+      confidence: 0.8,
+      status: "unconfirmed",
+      origin: "ai_extraction",
+      needsReview: true,
+      humanConfirmed: false,
+      now: T0,
+    }),
+  );
+}
+
+function createCharacterFact(suffix: number, entityKey: string): StoryFact {
+  return unwrap(
+    StoryFact.create({
+      id: `019f9f4a-b3c7-7350-9226-${String(suffix).padStart(12, "0")}`,
+      projectId: PROJECT_ID,
+      factType: "character_identity",
+      contentText: "已确认人物",
+      structuredValue: {
+        subject: { kind: "character", entityKey, canonicalName: "林夏" },
+      },
+      source: { kind: "user_statement", reference: `character:${String(suffix)}` },
+      confidence: 1,
+      status: "formal",
+      origin: "user",
+      needsReview: false,
+      humanConfirmed: true,
+      confirmationActorId: ACTOR_ID,
+      now: T0,
+    }),
+  );
+}
+
+function createSupplementalResolutionFact(suffix: number): StoryFact {
+  return unwrap(
+    StoryFact.create({
+      id: `019f9f4a-b3c7-7350-9226-${String(suffix).padStart(12, "0")}`,
+      projectId: PROJECT_ID,
+      factType: "validation_resolution",
+      contentText: "用户忽略检查提醒",
+      structuredValue: {
+        resolutionSchema: "inkshadow.chapter-supplemental-finding-resolution.v1",
+        resolutionAction: "ignore",
+        resolvedFindingId: "voice:browser-test",
+        resolvedFindingCategory: "character_voice",
+        resolvedChapterId: CHAPTER_ID,
+        resolvedChapterVersionId: VERSION_ID,
+        evidenceSignature: `v2:${VERSION_ID}:${"a".repeat(64)}:0-5`,
+      },
+      source: {
+        kind: "review_decision",
+        reference: `chapter-supplemental-finding:${CHAPTER_ID}:${VERSION_ID}:voice:browser-test`,
+      },
+      confidence: 1,
+      status: "formal",
+      origin: "user",
+      needsReview: false,
+      humanConfirmed: true,
+      confirmationActorId: ACTOR_ID,
+      now: T0,
+    }),
+  );
+}
+
+function seedDevelopmentChapter(): void {
+  localStorage.setItem(
+    DEVELOPMENT_DATABASE_KEY,
+    JSON.stringify({
+      schemaVersion: 2,
+      projects: [],
+      chapters: [
+        {
+          id: CHAPTER_ID,
+          projectId: PROJECT_ID,
+          status: "active",
+          currentVersionId: VERSION_ID,
+        },
+      ],
+      versions: [
+        {
+          id: VERSION_ID,
+          projectId: PROJECT_ID,
+          chapterId: CHAPTER_ID,
+          content: CHAPTER_CONTENT,
+        },
+      ],
+      drafts: [],
+      candidates: [],
+      auditEvents: [],
+    }),
+  );
+}
+
+function createCausalFact(
+  suffix: number,
+  excerpt: string,
+  structuredValue: unknown,
+  factType = "causal_event",
+): StoryFact {
+  const startOffset = CHAPTER_CONTENT.indexOf(excerpt);
+  return unwrap(
+    StoryFact.create({
+      id: `019f9f4a-b3c7-7350-9226-${String(suffix).padStart(12, "0")}`,
+      projectId: PROJECT_ID,
+      factType,
+      contentText: "causal fact",
+      structuredValue,
+      source: {
+        kind: "chapter_span",
+        reference: `chapter:${CHAPTER_ID}:version:${VERSION_ID}:utf16:${String(startOffset)}-${String(startOffset + excerpt.length)}`,
+        chapterId: CHAPTER_ID,
+        versionId: VERSION_ID,
+        startOffset,
+        endOffset: startOffset + excerpt.length,
+        sourceLength: CHAPTER_CONTENT.length,
+        excerpt,
+      },
+      confidence: 1,
+      status: "formal",
+      origin: "user",
+      needsReview: false,
+      humanConfirmed: true,
+      confirmationActorId: ACTOR_ID,
+      now: T0,
+    }),
+  );
+}
+
+function corruptPersistedAlias(mutate: (subject: Record<string, unknown>) => void): void {
+  const serialized = localStorage.getItem(DEVELOPMENT_STORY_FACT_STORE_KEY);
+  if (serialized === null) {
+    throw new Error("expected persisted story fact database");
+  }
+  const database = JSON.parse(serialized) as {
+    facts: Record<string, { structuredValue: { subject: Record<string, unknown> } }>;
+    revisions: Record<
+      string,
+      { snapshot: { structuredValue: { subject: Record<string, unknown> } } }[]
+    >;
+  };
+  const fact = database.facts[FACT_ID];
+  const revision = database.revisions[FACT_ID]?.[0];
+  if (fact === undefined || revision === undefined) {
+    throw new Error("expected persisted alias fact and revision");
+  }
+  mutate(fact.structuredValue.subject);
+  revision.snapshot = structuredClone(fact);
+  localStorage.setItem(DEVELOPMENT_STORY_FACT_STORE_KEY, JSON.stringify(database));
 }
 
 function unwrap<Value>(result: { ok: true; value: Value } | { ok: false; error: unknown }): Value {

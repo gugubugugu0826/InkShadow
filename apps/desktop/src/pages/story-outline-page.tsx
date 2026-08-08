@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { Project } from "@inkshadow/domain";
+import type { Chapter, Project } from "@inkshadow/domain";
 import { parseUuidV7 as parseDomainUuid } from "@inkshadow/domain";
 import {
   type Outline,
@@ -22,9 +22,10 @@ import {
   Input,
   PageStateBoundary,
 } from "@inkshadow/ui";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { StoryPlanningPanel } from "../components/story-planning-panel";
+import type { ChapterSummaryDashboardEntry } from "../infrastructure/chapter-summary-service";
 import { normalizeUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
@@ -33,8 +34,35 @@ interface AddTarget {
   readonly parentId: string;
 }
 
+function summaryStateLabel(state: ChapterSummaryDashboardEntry["state"] | undefined): string {
+  switch (state) {
+    case "current":
+      return "摘要已更新";
+    case "stale":
+      return "摘要待更新";
+    case "invalid":
+      return "摘要不可用";
+    case "missing":
+    case undefined:
+      return "尚无摘要";
+  }
+}
+
+function summaryStateTone(
+  state: ChapterSummaryDashboardEntry["state"] | undefined,
+): "success" | "warning" | "danger" | "neutral" {
+  return state === "current"
+    ? "success"
+    : state === "stale"
+      ? "warning"
+      : state === "invalid"
+        ? "danger"
+        : "neutral";
+}
+
 export function StoryOutlinePage() {
   const runtime = useRuntime();
+  const navigate = useNavigate();
   const params = useParams<{ projectId: string }>();
   const projectIdParameter = params.projectId ?? "";
   const domainProjectId = useMemo(() => parseDomainUuid(projectIdParameter), [projectIdParameter]);
@@ -45,6 +73,10 @@ export function StoryOutlinePage() {
       ? storyProjectId.error
       : null;
   const [project, setProject] = useState<Project | null>(null);
+  const [writtenChapters, setWrittenChapters] = useState<readonly Chapter[]>([]);
+  const [chapterSummaries, setChapterSummaries] = useState<readonly ChapterSummaryDashboardEntry[]>(
+    [],
+  );
   const [outline, setOutline] = useState<Outline | null>(null);
   const [pageState, setPageState] = useState<"loading" | "ready" | "empty" | "fatal_error">(
     "loading",
@@ -61,9 +93,11 @@ export function StoryOutlinePage() {
       return;
     }
     setPageState("loading");
-    const [projectResult, outlineResult] = await Promise.all([
+    const [projectResult, outlineResult, chapterResult, summaryDashboard] = await Promise.all([
       runtime.repositories.projects.findById(domainProjectId.value),
       runtime.story.outlines.findByProjectId(storyProjectId.value),
+      runtime.repositories.chapters.listByProjectId(domainProjectId.value),
+      runtime.story.chapterSummaries.inspectProject(projectIdParameter).catch(() => null),
     ]);
     if (!projectResult.ok) {
       setError(projectResult.error);
@@ -80,11 +114,18 @@ export function StoryOutlinePage() {
       setPageState("fatal_error");
       return;
     }
+    if (!chapterResult.ok) {
+      setError(chapterResult.error);
+      setPageState("fatal_error");
+      return;
+    }
     setProject(projectResult.value);
+    setWrittenChapters(chapterResult.value.filter(({ status }) => status === "active"));
+    setChapterSummaries(summaryDashboard?.entries ?? []);
     setOutline(outlineResult.value);
     setError(null);
     setPageState(outlineResult.value === null ? "empty" : "ready");
-  }, [domainProjectId, runtime, storyProjectId]);
+  }, [domainProjectId, projectIdParameter, runtime, storyProjectId]);
 
   useEffect(() => {
     void Promise.resolve().then(load);
@@ -235,6 +276,58 @@ export function StoryOutlinePage() {
         />
       )}
 
+      {project !== null && (
+        <section className="written-chapter-plan" aria-labelledby="written-chapter-plan-title">
+          <div className="section-heading">
+            <div>
+              <h2 id="written-chapter-plan-title">已经写下的章节</h2>
+              <p>这里来自真实正文；大纲节点只是规划，不会删除或覆盖已经写好的章节。</p>
+            </div>
+            <Badge>{writtenChapters.length.toLocaleString("zh-CN")} 章</Badge>
+          </div>
+          {writtenChapters.length === 0 ? (
+            <EmptyState
+              title="还没有正文章节"
+              description="大纲是可选的。你可以先回到正文创建第一章，也可以继续在这里规划。"
+              secondaryAction={{
+                label: "去写正文",
+                onClick: () => {
+                  void navigate(`/projects/${projectIdParameter}`);
+                },
+              }}
+            />
+          ) : (
+            <ol className="written-chapter-plan__list">
+              {writtenChapters.map((chapter, index) => {
+                const summary = chapterSummaries.find((entry) => entry.chapterId === chapter.id);
+                return (
+                  <li key={chapter.id}>
+                    <span className="chapter-number">{String(index + 1).padStart(2, "0")}</span>
+                    <div>
+                      <Link
+                        className="back-link"
+                        to={`/projects/${projectIdParameter}/chapters/${chapter.id}`}
+                      >
+                        {chapter.title}
+                      </Link>
+                      <p>
+                        {summary?.summary ??
+                          (chapter.content.trim().length === 0
+                            ? "正文还是空白，可以直接开始写。"
+                            : "还没有可用的一句话摘要；不会用猜测内容代替。")}
+                      </p>
+                    </div>
+                    <Badge tone={summaryStateTone(summary?.state)}>
+                      {summaryStateLabel(summary?.state)}
+                    </Badge>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </section>
+      )}
+
       <PageStateBoundary
         state={pageState}
         preserveContent={false}
@@ -242,13 +335,19 @@ export function StoryOutlinePage() {
           empty: (
             <EmptyState
               title="还没有故事大纲"
-              description="创建后可完全手工添加卷和章节，AI 不是前置条件。"
+              description="可以先列一个简单结构，也可以暂时跳过，直接去写第一章。大纲不是开始创作的前置条件。"
               {...(readonly
                 ? {}
                 : {
                     primaryAction: {
-                      label: busy ? "正在创建…" : "创建三层大纲",
+                      label: busy ? "正在创建…" : "先列简单大纲",
                       onClick: () => void createOutline(),
+                    },
+                    secondaryAction: {
+                      label: "暂时跳过，去写正文",
+                      onClick: () => {
+                        void navigate(`/projects/${projectIdParameter}`);
+                      },
                     },
                   })}
             />
@@ -287,13 +386,19 @@ export function StoryOutlinePage() {
               {volumes.length === 0 ? (
                 <EmptyState
                   title="还没有卷"
-                  description="先添加第一卷，再在卷下安排章节。"
+                  description="可以先添加第一卷安排章节，也可以继续写正文，稍后再回来规划。"
                   {...(readonly || book.locked
                     ? {}
                     : {
                         primaryAction: {
                           label: "新增卷",
                           onClick: () => openAdd({ kind: "volume", parentId: book.id }),
+                        },
+                        secondaryAction: {
+                          label: "去写正文",
+                          onClick: () => {
+                            void navigate(`/projects/${projectIdParameter}`);
+                          },
                         },
                       })}
                 />

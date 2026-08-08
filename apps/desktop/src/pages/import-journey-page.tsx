@@ -18,6 +18,10 @@ import { Link } from "react-router-dom";
 
 import { DataTransferPanel, type CompletedImport } from "../components/data-transfer-panel";
 import {
+  ensureAcceptedChapterPipelineTask,
+  runAcceptedChapterPipeline,
+} from "../infrastructure/accepted-chapter-pipeline";
+import {
   createImportRewriteCandidate,
   restoreCandidateBaseVersion,
   type ImportRewriteCandidateResult,
@@ -34,7 +38,15 @@ import {
   UiActionError,
   type NormalizedUiError,
 } from "../infrastructure/ui-error";
-import type { WritingFeedbackCode } from "../infrastructure/writing-feedback-store";
+import {
+  deriveImportProjectSeed,
+  parseProjectSeed,
+  type ProjectSeed,
+} from "../infrastructure/project-seed";
+import {
+  MAXIMUM_LEARNABLE_CUSTOM_FEEDBACK_CHARACTERS,
+  type WritingFeedbackCode,
+} from "../infrastructure/writing-feedback-store";
 import { useRuntime } from "../runtime-context";
 
 export const IMPORT_JOURNEY_STORAGE_KEY = "inkshadow.import-rewrite-journey.v2";
@@ -80,6 +92,8 @@ interface RewriteRuleDraft {
 
 interface TrialPointer {
   readonly candidateId: UuidV7;
+  /** Exact Candidate revision generated and shown for this trial. */
+  readonly candidateRevision: number | null;
   readonly chapterId: UuidV7;
   readonly excerptStart: number;
   readonly excerptEnd: number;
@@ -93,6 +107,8 @@ interface BatchItemDraft {
   readonly chapterId: UuidV7;
   readonly chapterTitle: string;
   readonly candidateId: UuidV7 | null;
+  /** Exact revision generated and shown for this batch item. */
+  readonly candidateRevision: number | null;
   readonly status: BatchStatus;
   readonly providerId: string | null;
   readonly modelId: string | null;
@@ -117,6 +133,14 @@ class ImportJourneyError extends Error {
   ) {
     super(message);
   }
+}
+
+class JourneyDraftPersistenceError extends ImportJourneyError {
+  override name = "JourneyDraftPersistenceError";
+}
+
+class PendingRequestPersistenceError extends JourneyDraftPersistenceError {
+  override name = "PendingRequestPersistenceError";
 }
 
 type WorkAnalysisJobStatus = "pending" | "running" | "ready" | "error" | "skipped";
@@ -147,6 +171,7 @@ interface WorkAnalysisDraft {
 
 interface ImportJourneyDraft {
   readonly version: 2;
+  readonly projectSeed: ProjectSeed | null;
   readonly goal: string;
   readonly selectedPresetIds: readonly RewritePresetId[];
   readonly importedWork: CompletedImport | null;
@@ -185,6 +210,7 @@ type TrialViewState =
 
 const EMPTY_DRAFT: ImportJourneyDraft = Object.freeze({
   version: 2,
+  projectSeed: null,
   goal: "",
   selectedPresetIds: [],
   importedWork: null,
@@ -201,17 +227,24 @@ const EMPTY_DRAFT: ImportJourneyDraft = Object.freeze({
 export function ImportJourneyPage() {
   const runtime = useRuntime();
   const [draft, setDraft] = useState<ImportJourneyDraft>(() => readJourneyDraft());
+  const draftRef = useRef(draft);
   const [analysis, setAnalysis] = useState<AnalysisState>({ status: "idle" });
   const [trialView, setTrialView] = useState<TrialViewState>({ status: "idle" });
   const [operation, setOperation] = useState<
     "idle" | "analysis" | "trial" | "trial-decision" | "batch" | "batch-decision"
   >("idle");
   const [operationError, setOperationError] = useState<NormalizedUiError | null>(null);
+  const [pendingCleanupError, setPendingCleanupError] = useState<NormalizedUiError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pendingRequest, setPendingRequest] = useState<PendingRewriteRequest | null>(() =>
     readPendingRequest(),
   );
   const recordedExplicitFeedback = useRef(new Set<string>());
+  const derivedStoryRefreshQueue = useRef<Promise<void>>(Promise.resolve());
+
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
 
   useEffect(() => {
     writeJourneyDraft(draft);
@@ -317,8 +350,24 @@ export function ImportJourneyPage() {
     analysis.value.chapters.some(({ content }) => content.trim().length > 0) &&
     operation === "idle";
 
+  useEffect(() => {
+    if (draft.importedWork === null || draft.projectSeed === null) return;
+    let active = true;
+    void runtime.projectSeeds
+      .saveForProject(draft.importedWork.projectId, draft.projectSeed)
+      .catch((cause: unknown) => {
+        if (active) setOperationError(normalizeUiError(cause));
+      });
+    return () => {
+      active = false;
+    };
+  }, [draft.importedWork, draft.projectSeed, runtime.projectSeeds]);
+
   function patchDraft(patch: Partial<ImportJourneyDraft>): void {
-    setDraft((current) => ({ ...current, ...patch, updatedAt: new Date().toISOString() }));
+    setDraft((current) => {
+      const now = new Date().toISOString();
+      return synchronizeImportProjectSeed({ ...current, ...patch, updatedAt: now }, now);
+    });
   }
 
   function updateGoal(goal: string): void {
@@ -326,14 +375,20 @@ export function ImportJourneyPage() {
   }
 
   function togglePreset(id: RewritePresetId): void {
-    setDraft((current) => ({
-      ...current,
-      selectedPresetIds: current.selectedPresetIds.includes(id)
-        ? current.selectedPresetIds.filter((currentId) => currentId !== id)
-        : [...current.selectedPresetIds, id],
-      rulesSavedAt: null,
-      updatedAt: new Date().toISOString(),
-    }));
+    setDraft((current) => {
+      const now = new Date().toISOString();
+      return synchronizeImportProjectSeed(
+        {
+          ...current,
+          selectedPresetIds: current.selectedPresetIds.includes(id)
+            ? current.selectedPresetIds.filter((currentId) => currentId !== id)
+            : [...current.selectedPresetIds, id],
+          rulesSavedAt: null,
+          updatedAt: now,
+        },
+        now,
+      );
+    });
   }
 
   function toggleFeedback(id: FeedbackPresetId): void {
@@ -360,7 +415,7 @@ export function ImportJourneyPage() {
         chapterId: input.chapterId,
         candidateId: input.candidateId,
         action: input.action,
-        applicationStrategy: input.action === "accepted" ? "accept_all" : null,
+        applicationStrategy: input.action === "accepted" ? "overwrite_document" : null,
       });
     } catch {
       globalThis.console.error("[IMPORT_WRITING_FEEDBACK_RECORD_FAILED]");
@@ -373,41 +428,41 @@ export function ImportJourneyPage() {
     for (const presetId of draft.feedbackPresetIds) {
       const key = `${trialView.candidate.id}:preset:${presetId}`;
       if (recordedExplicitFeedback.current.has(key)) continue;
-      try {
-        await runtime.story.writingFeedback.recordExplicitFeedback({
-          projectId: importedWork.projectId,
-          chapterId: trialView.candidate.chapterId,
-          candidateId: trialView.candidate.id,
-          feedbackCode: FEEDBACK_CODE_BY_PRESET[presetId],
-        });
-        recordedExplicitFeedback.current.add(key);
-      } catch {
-        globalThis.console.error("[IMPORT_EXPLICIT_FEEDBACK_RECORD_FAILED]");
-      }
+      await runtime.story.writingFeedback.recordExplicitFeedback({
+        idempotencyKey: `import-trial:${key}`,
+        projectId: importedWork.projectId,
+        chapterId: trialView.candidate.chapterId,
+        candidateId: trialView.candidate.id,
+        feedbackCode: FEEDBACK_CODE_BY_PRESET[presetId],
+      });
+      recordedExplicitFeedback.current.add(key);
     }
     const customFeedback = draft.feedbackText.trim();
     const customKey = `${trialView.candidate.id}:custom:${customFeedback}`;
     if (customFeedback.length > 0 && !recordedExplicitFeedback.current.has(customKey)) {
-      try {
-        await runtime.story.writingFeedback.recordExplicitFeedback({
-          projectId: importedWork.projectId,
-          chapterId: trialView.candidate.chapterId,
-          candidateId: trialView.candidate.id,
-          customFeedback,
-        });
-        recordedExplicitFeedback.current.add(customKey);
-      } catch {
-        globalThis.console.error("[IMPORT_EXPLICIT_FEEDBACK_RECORD_FAILED]");
-      }
+      await runtime.story.writingFeedback.recordExplicitFeedback({
+        idempotencyKey: `import-trial:${customKey}`,
+        projectId: importedWork.projectId,
+        chapterId: trialView.candidate.chapterId,
+        candidateId: trialView.candidate.id,
+        customFeedback,
+      });
+      recordedExplicitFeedback.current.add(customKey);
     }
   }
 
   function rememberImport(completedImport: CompletedImport): void {
-    setDraft({
-      ...EMPTY_DRAFT,
-      importedWork: completedImport,
-      updatedAt: new Date().toISOString(),
-    });
+    const now = new Date().toISOString();
+    setDraft(
+      synchronizeImportProjectSeed(
+        {
+          ...EMPTY_DRAFT,
+          importedWork: completedImport,
+          updatedAt: now,
+        },
+        now,
+      ),
+    );
     setOperationError(null);
     setNotice("原作已安全导入。接下来先确认目标，再对代表段落进行一次真实试改。");
   }
@@ -423,13 +478,104 @@ export function ImportJourneyPage() {
       kind,
       startedAt: new Date().toISOString(),
     };
-    writePendingRequest(pending);
+    try {
+      // This write is the durable pre-dispatch receipt. It deliberately runs
+      // synchronously: throwing here prevents the provider call below it.
+      writePendingRequest(pending);
+    } catch {
+      throw new PendingRequestPersistenceError(
+        "IMPORT_PENDING_REQUEST_PERSIST_FAILED",
+        "无法在模型调用前保存本机请求凭据，本次调用已在发送 0 字时停止。请检查本机存储空间或权限后重试。",
+      );
+    }
     setPendingRequest(pending);
   }
 
   function clearPendingRequest(): void {
-    writePendingRequest(null);
-    setPendingRequest(null);
+    try {
+      writePendingRequest(null);
+      setPendingRequest(null);
+      setPendingCleanupError(null);
+    } catch {
+      // A stale receipt is safer than hiding an ambiguous request. Keep it
+      // visible so reopening the page still stops automatic redispatch.
+      setPendingRequest((current) => current ?? readPendingRequest());
+      setPendingCleanupError(
+        normalizeUiError(
+          new PendingRequestPersistenceError(
+            "IMPORT_PENDING_REQUEST_CLEAR_FAILED",
+            "模型结果已经处理，但本机未能清除请求恢复标记。墨影不会自动重复调用；请释放存储空间后重新打开页面。",
+          ),
+        ),
+      );
+    }
+  }
+
+  function commitTrialPointerDurably(pointer: TrialPointer): void {
+    commitJourneyDraftDurably(
+      (current) => ({
+        ...current,
+        trial: pointer,
+        rulesSavedAt: null,
+        batchItems: [],
+        updatedAt: new Date().toISOString(),
+      }),
+      "无法把试改建议的精确修订号写入本机存储。已停止后续操作；当前页面和请求恢复标记仍保留这次结果，请先处理后再关闭。",
+    );
+  }
+
+  function updateTrialPointerDurably(
+    candidate: AiCandidate,
+    patch: Readonly<{ restoredAt?: string | null }> = {},
+  ): void {
+    commitJourneyDraftDurably(
+      (current) => ({
+        ...current,
+        trial:
+          current.trial?.candidateId === candidate.id
+            ? {
+                ...current.trial,
+                candidateRevision: candidate.revision,
+                ...(patch.restoredAt === undefined ? {} : { restoredAt: patch.restoredAt }),
+              }
+            : current.trial,
+        updatedAt: new Date().toISOString(),
+      }),
+      "建议状态已经安全更新，但精确修订号暂时无法写入本机流程记录。请先保持当前页面打开并释放存储空间。",
+    );
+  }
+
+  async function restoreTrialReplacementAfterFailure(
+    input: Readonly<{
+      previousDraft: ImportJourneyDraft;
+      previousPointer: TrialPointer;
+      failureCode: string;
+    }>,
+  ): Promise<void> {
+    const latest = await runtime.repositories.aiCandidates.findById(
+      input.previousPointer.candidateId,
+    );
+    if (!latest.ok) {
+      throw latest.error;
+    }
+    const candidate = latest.value;
+    const restoredPointer: TrialPointer =
+      candidate === null
+        ? input.previousPointer
+        : { ...input.previousPointer, candidateRevision: candidate.revision };
+    commitJourneyDraftDurably(
+      () => ({
+        ...input.previousDraft,
+        trial: restoredPointer,
+        updatedAt: new Date().toISOString(),
+      }),
+      "旧试改建议发生并发变化，且恢复指针无法写入本机存储。已保留当前页面和请求恢复标记，请不要再次调用模型。",
+    );
+    const restoredView = await loadTrialView(runtime, restoredPointer);
+    setTrialView(restoredView);
+    setNotice(
+      `旧试改建议在替换时发生变化（${input.failureCode}）；已恢复其最新可定位状态，新建议正在安全清理。`,
+    );
   }
 
   async function runWorkAnalysis(includeSkipped = false): Promise<void> {
@@ -610,9 +756,12 @@ export function ImportJourneyPage() {
     }
     const chapter = analysis.value.representativeChapter;
     const previous = trialView.status === "ready" ? trialView.candidate : null;
+    const previousDraft = draftRef.current;
+    const previousPointer = previousDraft.trial;
     setOperation("trial");
     setOperationError(null);
     setNotice(null);
+    let preservePendingRequest = false;
     try {
       const generated = await createImportRewriteCandidate(runtime, {
         chapterId: chapter.id,
@@ -620,12 +769,41 @@ export function ImportJourneyPage() {
         mode: "trial",
         onBeforeDispatch: (request) => rememberPendingRequest("trial", chapter.id, request),
       });
-      if (previous?.status === "ready") {
+      const pointer = trialPointerFromResult(generated);
+      const generatedView: TrialViewState = {
+        status: "ready",
+        candidate: generated.candidate,
+        originalExcerpt: generated.originalExcerpt,
+        rewrittenExcerpt: generated.rewrittenExcerpt,
+      };
+      // Keep the newly generated Candidate visible even if the synchronous
+      // journey write fails. The old Candidate is not mutated until this exact
+      // id + revision pointer is durable.
+      setTrialView(generatedView);
+      commitTrialPointerDurably(pointer);
+
+      if (
+        previous?.status === "ready" &&
+        previousPointer?.candidateId === previous.id &&
+        previousPointer.candidateRevision === previous.revision
+      ) {
         const rejected = await runtime.useCases.rejectCandidate.execute({
           candidateId: previous.id,
+          expectedCandidateRevision: previous.revision,
         });
         if (!rejected.ok) {
-          await runtime.useCases.rejectCandidate.execute({ candidateId: generated.candidate.id });
+          await restoreTrialReplacementAfterFailure({
+            previousDraft,
+            previousPointer,
+            failureCode: rejected.error.code,
+          });
+          const cleanedUp = await runtime.useCases.rejectCandidate.execute({
+            candidateId: generated.candidate.id,
+            expectedCandidateRevision: generated.candidate.revision,
+          });
+          if (!cleanedUp.ok) {
+            throw candidateCleanupError(cleanedUp.error.code);
+          }
           throw rejected.error;
         }
         await recordImportAction({
@@ -634,25 +812,14 @@ export function ImportJourneyPage() {
           action: "regenerated",
         });
       }
-      const pointer = trialPointerFromResult(generated);
-      setDraft((current) => ({
-        ...current,
-        trial: pointer,
-        rulesSavedAt: null,
-        batchItems: [],
-        updatedAt: new Date().toISOString(),
-      }));
-      setTrialView({
-        status: "ready",
-        candidate: generated.candidate,
-        originalExcerpt: generated.originalExcerpt,
-        rewrittenExcerpt: generated.rewrittenExcerpt,
-      });
       setNotice("代表段落试改已保存为独立 AI 建议版本，原文尚未改变。");
     } catch (cause: unknown) {
+      preservePendingRequest = shouldPreservePendingRequest(cause);
       setOperationError(normalizeUiError(cause));
     } finally {
-      clearPendingRequest();
+      if (!preservePendingRequest) {
+        clearPendingRequest();
+      }
       setOperation("idle");
     }
   }
@@ -667,7 +834,8 @@ export function ImportJourneyPage() {
       if (decision === "accept") {
         const result = await runtime.useCases.acceptCandidate.execute({
           candidateId: trialView.candidate.id,
-          strategy: { kind: "accept_all" },
+          expectedCandidateRevision: trialView.candidate.revision,
+          strategy: { kind: "overwrite_document" },
         });
         if (!result.ok) {
           throw result.error;
@@ -675,15 +843,24 @@ export function ImportJourneyPage() {
         setTrialView((current) =>
           current.status === "ready" ? { ...current, candidate: result.value.candidate } : current,
         );
+        updateTrialPointerDurably(result.value.candidate);
         await recordImportAction({
           chapterId: trialView.candidate.chapterId,
           candidateId: result.value.candidate.id,
           action: "accepted",
         });
+        scheduleDerivedStoryRefresh({
+          projectId: result.value.chapter.projectId,
+          chapterId: result.value.chapter.id,
+          versionId: result.value.version.id,
+          source: "chapter_import",
+          acceptedCharacterCount: result.value.chapter.content.length,
+        });
         setNotice("试改已作为新的稳定版本写入；接受前的原文仍保留在版本历史中，可随时恢复。");
       } else if (decision === "reject") {
         const result = await runtime.useCases.rejectCandidate.execute({
           candidateId: trialView.candidate.id,
+          expectedCandidateRevision: trialView.candidate.revision,
         });
         if (!result.ok) {
           throw result.error;
@@ -691,6 +868,7 @@ export function ImportJourneyPage() {
         setTrialView((current) =>
           current.status === "ready" ? { ...current, candidate: result.value } : current,
         );
+        updateTrialPointerDurably(result.value);
         await recordImportAction({
           chapterId: trialView.candidate.chapterId,
           candidateId: result.value.id,
@@ -702,9 +880,15 @@ export function ImportJourneyPage() {
         if (!restored.ok) {
           throw restored.error;
         }
-        patchDraft({
-          trial:
-            draft.trial === null ? null : { ...draft.trial, restoredAt: new Date().toISOString() },
+        scheduleDerivedStoryRefresh({
+          projectId: restored.value.projectId,
+          chapterId: restored.value.chapterId,
+          versionId: restored.value.versionId,
+          source: "version_restore",
+          acceptedCharacterCount: restored.value.chapterContent.length,
+        });
+        updateTrialPointerDurably(trialView.candidate, {
+          restoredAt: new Date().toISOString(),
         });
         await recordImportAction({
           chapterId: trialView.candidate.chapterId,
@@ -720,11 +904,22 @@ export function ImportJourneyPage() {
     }
   }
 
-  function formRules(): void {
+  async function formRules(): Promise<void> {
     const rules = compileEditableRules(draft);
     patchDraft({ rules, rulesSavedAt: null, batchItems: [] });
-    void recordTrialFeedbackSelections();
-    setNotice("已把目标和试改反馈整理为可编辑规则。请检查后再保留规则。");
+    setOperationError(null);
+    try {
+      await recordTrialFeedbackSelections();
+      setNotice("已形成可编辑规则，试改反馈也已安全保存。请检查后再保留规则。");
+    } catch (cause: unknown) {
+      const failure = normalizeUiError(cause);
+      setNotice("规则已经形成并可继续编辑，但试改反馈尚未全部保存。");
+      setOperationError({
+        title: "规则已形成，但反馈偏好尚未保存",
+        description: `${failure.description} 请再次点击“按当前目标和反馈形成规则”重试；已经形成的规则不会丢失。`,
+        code: failure.code,
+      });
+    }
   }
 
   function updateRule(id: string, text: string): void {
@@ -779,81 +974,238 @@ export function ImportJourneyPage() {
     if (!canStartBatch) {
       return;
     }
-    const chapters = analysis.value.chapters.filter(({ content }) => content.trim().length > 0);
-    const previousCandidateByChapter = new Map(
-      draft.batchItems.flatMap(({ chapterId, candidateId, status }) =>
-        candidateId !== null && status === "ready" ? [[chapterId, candidateId] as const] : [],
-      ),
+    const unverifiableReadyCandidate = draft.batchItems.find(
+      ({ candidateId, candidateRevision }) => candidateId !== null && candidateRevision === null,
     );
-    const initial = chapters.map<BatchItemDraft>((chapter) => ({
-      chapterId: chapter.id,
-      chapterTitle: chapter.title,
-      candidateId: null,
-      status: "queued",
-      providerId: null,
-      modelId: null,
-      errorCode: null,
-    }));
-    patchDraft({ batchItems: initial });
+    if (unverifiableReadyCandidate !== undefined) {
+      setOperationError(
+        normalizeUiError(
+          new ImportJourneyError(
+            "CANDIDATE_REVISION_MISSING",
+            `“${unverifiableReadyCandidate.chapterTitle}”的旧建议没有可验证的修订号，请先在差异页处理或移除它。`,
+          ),
+        ),
+      );
+      return;
+    }
+    const chapters = analysis.value.chapters.filter(({ content }) => content.trim().length > 0);
+    const previousItemByChapter = new Map(
+      draft.batchItems.map((item) => [item.chapterId, item] as const),
+    );
+    const initial = chapters.map<BatchItemDraft>((chapter) => {
+      const previous = previousItemByChapter.get(chapter.id);
+      return previous === undefined
+        ? {
+            chapterId: chapter.id,
+            chapterTitle: chapter.title,
+            candidateId: null,
+            candidateRevision: null,
+            status: "queued",
+            providerId: null,
+            modelId: null,
+            errorCode: null,
+          }
+        : {
+            ...previous,
+            chapterTitle: chapter.title,
+            errorCode: null,
+          };
+    });
+    try {
+      replaceBatchItemsDurably(initial);
+    } catch (cause: unknown) {
+      setOperationError(normalizeUiError(cause));
+      return;
+    }
     setOperation("batch");
     setOperationError(null);
     setNotice(null);
+    let persistenceFailed = false;
     for (const chapter of chapters) {
-      updateBatchItem(chapter.id, { status: "generating", errorCode: null });
+      const previousItem = previousItemByChapter.get(chapter.id) ?? null;
+      let previousPointerRestored = false;
       try {
+        updateBatchItemDurably(chapter.id, { status: "generating", errorCode: null });
         const generated = await createImportRewriteCandidate(runtime, {
           chapterId: chapter.id,
           instructions: activeRules,
           mode: "chapter",
           onBeforeDispatch: (request) => rememberPendingRequest("chapter", chapter.id, request),
         });
-        const previousCandidateId = previousCandidateByChapter.get(chapter.id);
-        if (previousCandidateId !== undefined && previousCandidateId !== generated.candidate.id) {
-          const rejected = await runtime.useCases.rejectCandidate.execute({
-            candidateId: previousCandidateId,
-          });
-          if (!rejected.ok) {
-            await runtime.useCases.rejectCandidate.execute({
-              candidateId: generated.candidate.id,
-            });
-            throw rejected.error;
-          }
-          await recordImportAction({
-            chapterId: chapter.id,
-            candidateId: previousCandidateId,
-            action: "regenerated",
-          });
-        }
-        updateBatchItem(chapter.id, {
+        // The new exact pointer is durable before the old Candidate is ever
+        // mutated. If this write fails, the persisted journey still points at
+        // the untouched previous Candidate and the current page shows the new one.
+        updateBatchItemDurably(chapter.id, {
           candidateId: generated.candidate.id,
+          candidateRevision: generated.candidate.revision,
           status: "ready",
           providerId: generated.providerId,
           modelId: generated.modelId,
           errorCode: null,
         });
+        const previousCandidate =
+          previousItem?.candidateId !== null &&
+          previousItem?.candidateRevision !== null &&
+          previousItem?.status === "ready"
+            ? {
+                candidateId: previousItem.candidateId,
+                candidateRevision: previousItem.candidateRevision,
+              }
+            : null;
+        if (
+          previousItem !== null &&
+          previousCandidate !== null &&
+          previousCandidate.candidateId !== generated.candidate.id
+        ) {
+          const rejected = await runtime.useCases.rejectCandidate.execute({
+            candidateId: previousCandidate.candidateId,
+            expectedCandidateRevision: previousCandidate.candidateRevision,
+          });
+          if (!rejected.ok) {
+            await restoreBatchReplacementAfterFailure({
+              previousItem,
+              failureCode: rejected.error.code,
+            });
+            previousPointerRestored = true;
+            const cleanedUp = await runtime.useCases.rejectCandidate.execute({
+              candidateId: generated.candidate.id,
+              expectedCandidateRevision: generated.candidate.revision,
+            });
+            if (!cleanedUp.ok) {
+              throw candidateCleanupError(cleanedUp.error.code);
+            }
+            throw rejected.error;
+          }
+          await recordImportAction({
+            chapterId: chapter.id,
+            candidateId: previousCandidate.candidateId,
+            action: "regenerated",
+          });
+        }
       } catch (cause: unknown) {
         const error = normalizeUiError(cause);
-        updateBatchItem(chapter.id, { status: "error", errorCode: error.code });
+        if (shouldPreservePendingRequest(cause)) {
+          persistenceFailed = true;
+          setOperationError(error);
+          break;
+        }
+        try {
+          if (!previousPointerRestored && previousItem !== null) {
+            restoreBatchItemDurably(previousItem, error.code);
+          } else {
+            updateBatchItemDurably(chapter.id, { status: "error", errorCode: error.code });
+          }
+        } catch (persistenceCause: unknown) {
+          persistenceFailed = true;
+          setOperationError(normalizeUiError(persistenceCause));
+          break;
+        }
+        if (shouldStopBatchAfterFailure(cause)) {
+          setOperationError(error);
+          break;
+        }
       }
     }
-    clearPendingRequest();
+    if (!persistenceFailed) {
+      clearPendingRequest();
+    }
     setOperation("idle");
     setNotice(
-      "逐章处理已结束。成功的章节都有各自的 AI 建议版本；失败章节的原文没有改变，可单独重试。",
+      persistenceFailed
+        ? "批次状态无法写入本机存储，已停止继续调用模型；当前页面仍保留已生成建议，请先处理后再关闭。"
+        : "逐章处理已结束。成功的章节都有各自的 AI 建议版本；失败章节的原文没有改变，可单独重试。",
     );
   }
 
-  function updateBatchItem(
+  function replaceBatchItemsDurably(batchItems: readonly BatchItemDraft[]): void {
+    commitBatchDraftDurably((current) => ({
+      ...current,
+      batchItems,
+      updatedAt: new Date().toISOString(),
+    }));
+  }
+
+  function updateBatchItemDurably(
     chapterId: UuidV7,
     patch: Partial<Omit<BatchItemDraft, "chapterId" | "chapterTitle">>,
   ): void {
-    setDraft((current) => ({
+    commitBatchDraftDurably((current) => ({
       ...current,
       batchItems: current.batchItems.map((item) =>
         item.chapterId === chapterId ? { ...item, ...patch } : item,
       ),
       updatedAt: new Date().toISOString(),
     }));
+  }
+
+  function restoreBatchItemDurably(item: BatchItemDraft, errorCode: string): void {
+    updateBatchItemDurably(item.chapterId, {
+      candidateId: item.candidateId,
+      candidateRevision: item.candidateRevision,
+      status: "error",
+      providerId: item.providerId,
+      modelId: item.modelId,
+      errorCode,
+    });
+  }
+
+  async function restoreBatchReplacementAfterFailure(
+    input: Readonly<{
+      previousItem: BatchItemDraft;
+      failureCode: string;
+    }>,
+  ): Promise<void> {
+    if (input.previousItem.candidateId === null) {
+      throw new ImportJourneyError(
+        "CANDIDATE_RECOVERY_POINTER_MISSING",
+        "旧建议缺少可恢复指针；已保留新建议并停止后续处理。",
+      );
+    }
+    const latest = await runtime.repositories.aiCandidates.findById(input.previousItem.candidateId);
+    if (!latest.ok) {
+      throw latest.error;
+    }
+    const latestCandidate = latest.value;
+    const recovered =
+      latestCandidate === null
+        ? input.previousItem
+        : {
+            ...input.previousItem,
+            candidateId: latestCandidate.id,
+            candidateRevision: latestCandidate.revision,
+          };
+    restoreBatchItemDurably(recovered, input.failureCode);
+  }
+
+  function commitBatchDraftDurably(
+    update: (current: ImportJourneyDraft) => ImportJourneyDraft,
+  ): void {
+    commitJourneyDraftDurably(
+      update,
+      "无法把逐章建议的修订号写入本机存储。已停止继续调用模型，请先处理当前建议后再关闭页面。",
+    );
+  }
+
+  function commitJourneyDraftDurably(
+    update: (current: ImportJourneyDraft) => ImportJourneyDraft,
+    failureMessage: string,
+  ): void {
+    const next = update(draftRef.current);
+    const synchronized = synchronizeImportProjectSeed(
+      next,
+      isIsoTimestamp(next.updatedAt) ? next.updatedAt : new Date().toISOString(),
+    );
+    try {
+      const persisted = persistJourneyDraft(synchronized);
+      draftRef.current = persisted;
+      setDraft(persisted);
+    } catch {
+      // Keep the exact Candidate pointer visible in this session, while the
+      // still-durable pending receipt prevents an ambiguous redispatch.
+      draftRef.current = synchronized;
+      setDraft(synchronized);
+      throw new JourneyDraftPersistenceError("IMPORT_JOURNEY_PERSIST_FAILED", failureMessage);
+    }
   }
 
   async function decideBatchItem(
@@ -865,14 +1217,34 @@ export function ImportJourneyPage() {
     }
     setOperation("batch-decision");
     setOperationError(null);
+    let preservePendingRequest = false;
     try {
       if (decision === "regenerate") {
-        const previous =
+        const previousAuthority =
           item.candidateId === null
             ? null
-            : await runtime.repositories.aiCandidates.findById(item.candidateId);
+            : {
+                candidateId: item.candidateId,
+                revision: requireBatchCandidateRevision(item),
+              };
+        const previous =
+          previousAuthority === null
+            ? null
+            : await runtime.repositories.aiCandidates.findById(previousAuthority.candidateId);
         if (previous !== null && !previous.ok) {
           throw previous.error;
+        }
+        if (
+          previousAuthority !== null &&
+          previous?.value !== null &&
+          previous?.value !== undefined &&
+          (previous.value.id !== previousAuthority.candidateId ||
+            previous.value.revision !== previousAuthority.revision)
+        ) {
+          throw new ImportJourneyError(
+            "CANDIDATE_VERSION_CONFLICT",
+            "这份章节建议已在其他窗口发生变化；本次重新生成在发送 0 字时停止，请先查看最新差异。",
+          );
         }
         const generated = await createImportRewriteCandidate(runtime, {
           chapterId: item.chapterId,
@@ -880,14 +1252,31 @@ export function ImportJourneyPage() {
           mode: "chapter",
           onBeforeDispatch: (request) => rememberPendingRequest("chapter", item.chapterId, request),
         });
-        if (previous?.value?.status === "ready") {
+        updateBatchItemDurably(item.chapterId, {
+          candidateId: generated.candidate.id,
+          candidateRevision: generated.candidate.revision,
+          status: "ready",
+          providerId: generated.providerId,
+          modelId: generated.modelId,
+          errorCode: null,
+        });
+        if (previousAuthority !== null && previous?.value?.status === "ready") {
           const rejected = await runtime.useCases.rejectCandidate.execute({
             candidateId: previous.value.id,
+            expectedCandidateRevision: previousAuthority.revision,
           });
           if (!rejected.ok) {
-            await runtime.useCases.rejectCandidate.execute({
-              candidateId: generated.candidate.id,
+            await restoreBatchReplacementAfterFailure({
+              previousItem: item,
+              failureCode: rejected.error.code,
             });
+            const cleanedUp = await runtime.useCases.rejectCandidate.execute({
+              candidateId: generated.candidate.id,
+              expectedCandidateRevision: generated.candidate.revision,
+            });
+            if (!cleanedUp.ok) {
+              throw candidateCleanupError(cleanedUp.error.code);
+            }
             throw rejected.error;
           }
           await recordImportAction({
@@ -896,13 +1285,6 @@ export function ImportJourneyPage() {
             action: "regenerated",
           });
         }
-        updateBatchItem(item.chapterId, {
-          candidateId: generated.candidate.id,
-          status: "ready",
-          providerId: generated.providerId,
-          modelId: generated.modelId,
-          errorCode: null,
-        });
         return;
       }
       if (item.candidateId === null) {
@@ -915,28 +1297,51 @@ export function ImportJourneyPage() {
       if (found.value === null) {
         throw new ImportJourneyError("CANDIDATE_NOT_FOUND", "找不到这个章节的建议版本。");
       }
+      if (item.candidateRevision === null) {
+        throw new ImportJourneyError(
+          "CANDIDATE_REVISION_MISSING",
+          "这份建议来自旧版流程，无法验证你看到的内容；请重新生成后再处理。",
+        );
+      }
       if (decision === "accept") {
         const accepted = await runtime.useCases.acceptCandidate.execute({
           candidateId: found.value.id,
-          strategy: { kind: "accept_all" },
+          expectedCandidateRevision: item.candidateRevision,
+          strategy: { kind: "overwrite_document" },
         });
         if (!accepted.ok) {
           throw accepted.error;
         }
-        updateBatchItem(item.chapterId, { status: "accepted", errorCode: null });
+        updateBatchItemDurably(item.chapterId, {
+          candidateRevision: accepted.value.candidate.revision,
+          status: "accepted",
+          errorCode: null,
+        });
         await recordImportAction({
           chapterId: item.chapterId,
           candidateId: accepted.value.candidate.id,
           action: "accepted",
         });
+        scheduleDerivedStoryRefresh({
+          projectId: accepted.value.chapter.projectId,
+          chapterId: accepted.value.chapter.id,
+          versionId: accepted.value.version.id,
+          source: "chapter_import",
+          acceptedCharacterCount: accepted.value.chapter.content.length,
+        });
       } else if (decision === "reject") {
         const rejected = await runtime.useCases.rejectCandidate.execute({
           candidateId: found.value.id,
+          expectedCandidateRevision: item.candidateRevision,
         });
         if (!rejected.ok) {
           throw rejected.error;
         }
-        updateBatchItem(item.chapterId, { status: "rejected", errorCode: null });
+        updateBatchItemDurably(item.chapterId, {
+          candidateRevision: rejected.value.revision,
+          status: "rejected",
+          errorCode: null,
+        });
         await recordImportAction({
           chapterId: item.chapterId,
           candidateId: rejected.value.id,
@@ -947,7 +1352,14 @@ export function ImportJourneyPage() {
         if (!restored.ok) {
           throw restored.error;
         }
-        updateBatchItem(item.chapterId, { status: "restored", errorCode: null });
+        scheduleDerivedStoryRefresh({
+          projectId: restored.value.projectId,
+          chapterId: restored.value.chapterId,
+          versionId: restored.value.versionId,
+          source: "version_restore",
+          acceptedCharacterCount: restored.value.chapterContent.length,
+        });
+        updateBatchItemDurably(item.chapterId, { status: "restored", errorCode: null });
         await recordImportAction({
           chapterId: item.chapterId,
           candidateId: found.value.id,
@@ -956,10 +1368,22 @@ export function ImportJourneyPage() {
       }
     } catch (cause: unknown) {
       const error = normalizeUiError(cause);
-      updateBatchItem(item.chapterId, { status: "error", errorCode: error.code });
+      if (!shouldPreservePendingRequest(cause)) {
+        try {
+          updateBatchItemDurably(item.chapterId, { status: "error", errorCode: error.code });
+        } catch (persistenceCause: unknown) {
+          preservePendingRequest = true;
+          setOperationError(normalizeUiError(persistenceCause));
+          return;
+        }
+      } else {
+        preservePendingRequest = true;
+      }
       setOperationError(error);
     } finally {
-      clearPendingRequest();
+      if (!preservePendingRequest) {
+        clearPendingRequest();
+      }
       setOperation("idle");
     }
   }
@@ -968,33 +1392,133 @@ export function ImportJourneyPage() {
     if (operation !== "idle") {
       return;
     }
-    const readyItems = draft.batchItems.filter(
-      ({ status, candidateId }) => status === "ready" && candidateId !== null,
-    );
+    const readyItems = draft.batchItems.filter(({ status }) => status === "ready");
     setOperation("batch-decision");
     setOperationError(null);
-    for (const item of readyItems) {
-      if (item.candidateId === null) {
-        continue;
-      }
-      const accepted = await runtime.useCases.acceptCandidate.execute({
-        candidateId: item.candidateId,
-        strategy: { kind: "accept_all" },
-      });
-      updateBatchItem(item.chapterId, {
-        status: accepted.ok ? "accepted" : "error",
-        errorCode: accepted.ok ? null : accepted.error.code,
-      });
-      if (accepted.ok) {
+    let acceptedCount = 0;
+    let stoppedAt: Readonly<{ item: BatchItemDraft; position: number }> | null = null;
+    try {
+      for (const [index, item] of readyItems.entries()) {
+        if (item.candidateId === null) {
+          const error = new ImportJourneyError(
+            "CANDIDATE_NOT_FOUND",
+            `“${item.chapterTitle}”缺少可定位的建议版本，批量接受已在此停止。`,
+          );
+          try {
+            updateBatchItemDurably(item.chapterId, {
+              status: "error",
+              errorCode: error.code,
+            });
+            setOperationError(normalizeUiError(error));
+          } catch (cause: unknown) {
+            setOperationError(normalizeUiError(cause));
+          }
+          stoppedAt = { item, position: index + 1 };
+          break;
+        }
+        if (item.candidateRevision === null) {
+          const error = new ImportJourneyError(
+            "CANDIDATE_REVISION_MISSING",
+            `“${item.chapterTitle}”缺少可验证的建议修订号，批量接受已在此停止。`,
+          );
+          try {
+            updateBatchItemDurably(item.chapterId, {
+              status: "error",
+              errorCode: error.code,
+            });
+            setOperationError(normalizeUiError(error));
+          } catch (cause: unknown) {
+            setOperationError(normalizeUiError(cause));
+          }
+          stoppedAt = { item, position: index + 1 };
+          break;
+        }
+        let accepted: Awaited<ReturnType<typeof runtime.useCases.acceptCandidate.execute>>;
+        try {
+          accepted = await runtime.useCases.acceptCandidate.execute({
+            candidateId: item.candidateId,
+            expectedCandidateRevision: item.candidateRevision,
+            strategy: { kind: "overwrite_document" },
+          });
+        } catch (cause: unknown) {
+          const error = normalizeUiError(cause);
+          try {
+            updateBatchItemDurably(item.chapterId, {
+              status: "error",
+              errorCode: error.code,
+            });
+            setOperationError(error);
+          } catch (persistenceCause: unknown) {
+            setOperationError(normalizeUiError(persistenceCause));
+          }
+          stoppedAt = { item, position: index + 1 };
+          break;
+        }
+        try {
+          updateBatchItemDurably(item.chapterId, {
+            candidateRevision: accepted.ok
+              ? accepted.value.candidate.revision
+              : item.candidateRevision,
+            status: accepted.ok ? "accepted" : "error",
+            errorCode: accepted.ok ? null : accepted.error.code,
+          });
+        } catch (cause: unknown) {
+          // Keep the exact accepted Candidate visible in this session. The
+          // last durable pointer still identifies that same Candidate for
+          // crash recovery; no later chapter may be accepted first.
+          setOperationError(normalizeUiError(cause));
+          if (accepted.ok) {
+            acceptedCount += 1;
+          }
+          stoppedAt = { item, position: index + 1 };
+          break;
+        }
+        if (!accepted.ok) {
+          setOperationError(normalizeUiError(accepted.error));
+          stoppedAt = { item, position: index + 1 };
+          break;
+        }
+        acceptedCount += 1;
         await recordImportAction({
           chapterId: item.chapterId,
           candidateId: accepted.value.candidate.id,
           action: "accepted",
         });
+        scheduleDerivedStoryRefresh({
+          projectId: accepted.value.chapter.projectId,
+          chapterId: accepted.value.chapter.id,
+          versionId: accepted.value.version.id,
+          source: "chapter_import",
+          acceptedCharacterCount: accepted.value.chapter.content.length,
+        });
       }
+    } finally {
+      setOperation("idle");
     }
-    setOperation("idle");
-    setNotice("全部就绪建议已逐章处理；每次接受都创建独立稳定版本，失败章节保持原文。");
+    setNotice(
+      stoppedAt === null
+        ? `全部就绪建议已逐章处理，共接受 ${String(acceptedCount)} 项；每次接受都创建独立稳定版本。`
+        : `已接受 ${String(acceptedCount)} 项，停在第 ${String(stoppedAt.position)} 项“${stoppedAt.item.chapterTitle}”。失败项和后续项仍保留，可单独处理。`,
+    );
+  }
+
+  function scheduleDerivedStoryRefresh(
+    input: Parameters<typeof runAcceptedChapterPipeline>[1],
+  ): void {
+    void ensureAcceptedChapterPipelineTask(runtime, input)
+      .then(() => {
+        const execution = derivedStoryRefreshQueue.current
+          .catch(() => undefined)
+          .then(() => runAcceptedChapterPipeline(runtime, input))
+          .then(() => undefined);
+        derivedStoryRefreshQueue.current = execution.catch(() => undefined);
+        void execution.catch(() => {
+          setNotice("正文和版本已安全保存；故事资料整理暂未完成，可在任务与通知中重试。");
+        });
+      })
+      .catch(() => {
+        setNotice("正文和版本已安全保存；后台任务登记失败，可稍后重新打开本章手动整理。");
+      });
   }
 
   return (
@@ -1092,6 +1616,13 @@ export function ImportJourneyPage() {
               )}
             </span>
           }
+        />
+      )}
+      {pendingCleanupError !== null && (
+        <InlineAlert
+          tone="error"
+          title={pendingCleanupError.title}
+          description={`${pendingCleanupError.description}（${pendingCleanupError.code}）`}
         />
       )}
       {pendingRequest !== null && operation === "idle" && (
@@ -1464,18 +1995,18 @@ export function ImportJourneyPage() {
                   <Textarea
                     {...fieldProps}
                     value={draft.feedbackText}
-                    maxLength={2_000}
+                    maxLength={MAXIMUM_LEARNABLE_CUSTOM_FEEDBACK_CHARACTERS}
                     currentLength={draft.feedbackText.length}
                     onChange={(event) =>
                       patchDraft({
-                        feedbackText: event.currentTarget.value.slice(0, 2_000),
+                        feedbackText: event.currentTarget.value,
                         rulesSavedAt: null,
                       })
                     }
                   />
                 )}
               </FormField>
-              <Button variant="secondary" onClick={formRules}>
+              <Button variant="secondary" onClick={() => void formRules()}>
                 按当前目标和反馈形成规则
               </Button>
             </section>
@@ -1684,6 +2215,7 @@ function trialPointerFromResult(result: ImportRewriteCandidateResult): TrialPoin
   }
   return Object.freeze({
     candidateId: result.candidate.id,
+    candidateRevision: result.candidate.revision,
     chapterId,
     excerptStart: result.excerptStart,
     excerptEnd: result.excerptEnd,
@@ -1699,11 +2231,23 @@ async function loadTrialView(
   pointer: TrialPointer,
 ): Promise<TrialViewState> {
   try {
+    if (pointer.candidateRevision === null) {
+      throw new ImportJourneyError(
+        "CANDIDATE_REVISION_MISSING",
+        "这份旧试改建议没有可验证的修订号。墨影已停止自动应用，请从建议差异页确认后再继续。",
+      );
+    }
     const candidateResult = await runtime.repositories.aiCandidates.findById(pointer.candidateId);
     if (!candidateResult.ok) throw candidateResult.error;
     const candidate = candidateResult.value;
     if (candidate?.chapterId !== pointer.chapterId || candidate.baseVersionId === null)
       throw new ImportJourneyError("CANDIDATE_NOT_FOUND", "找不到已保存的试改建议。");
+    if (candidate.revision !== pointer.candidateRevision) {
+      throw new ImportJourneyError(
+        "CANDIDATE_VERSION_CONFLICT",
+        "试改建议已在其他窗口发生变化。已保留原指针并停止自动处理，请重新打开差异页确认最新版本。",
+      );
+    }
     const baseResult = await runtime.repositories.chapterVersions.findVersionById(
       candidate.baseVersionId,
     );
@@ -1784,21 +2328,25 @@ function readJourneyDraft(): ImportJourneyDraft {
     const candidate = parsed as Partial<ImportJourneyDraft>;
     const knownPresetIds = new Set<RewritePresetId>(REWRITE_PRESETS.map(({ id }) => id));
     const knownFeedbackIds = new Set<FeedbackPresetId>(FEEDBACK_PRESETS.map(({ id }) => id));
-    return {
+    const recovered = {
       version: 2,
+      projectSeed: parseProjectSeed(candidate.projectSeed),
       goal: typeof candidate.goal === "string" ? candidate.goal.slice(0, 4_000) : "",
       selectedPresetIds: filterKnownIds(candidate.selectedPresetIds, knownPresetIds),
       importedWork: isCompletedImport(candidate.importedWork) ? candidate.importedWork : null,
       feedbackPresetIds: filterKnownIds(candidate.feedbackPresetIds, knownFeedbackIds),
       feedbackText:
-        typeof candidate.feedbackText === "string" ? candidate.feedbackText.slice(0, 2_000) : "",
+        typeof candidate.feedbackText === "string" && candidate.feedbackText.length <= 2_000
+          ? candidate.feedbackText
+          : "",
       trial: parseTrialPointer(candidate.trial),
       rules: parseRules(candidate.rules),
       rulesSavedAt: isIsoTimestamp(candidate.rulesSavedAt) ? candidate.rulesSavedAt : null,
       batchItems: parseBatchItems(candidate.batchItems),
       workAnalysis: parseWorkAnalysisDraft(candidate.workAnalysis),
-      updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : "",
-    };
+      updatedAt: isIsoTimestamp(candidate.updatedAt) ? candidate.updatedAt : "",
+    } satisfies ImportJourneyDraft;
+    return synchronizeImportProjectSeed(recovered, recovered.updatedAt || new Date().toISOString());
   } catch {
     return EMPTY_DRAFT;
   }
@@ -1806,10 +2354,80 @@ function readJourneyDraft(): ImportJourneyDraft {
 
 function writeJourneyDraft(draft: ImportJourneyDraft): void {
   try {
-    window.localStorage.setItem(IMPORT_JOURNEY_STORAGE_KEY, JSON.stringify(draft));
+    persistJourneyDraft(draft);
   } catch {
     /* The form remains usable when local storage is unavailable. */
   }
+}
+
+function persistJourneyDraft(draft: ImportJourneyDraft): ImportJourneyDraft {
+  const now = isIsoTimestamp(draft.updatedAt) ? draft.updatedAt : new Date().toISOString();
+  const synchronized = synchronizeImportProjectSeed(draft, now);
+  window.localStorage.setItem(IMPORT_JOURNEY_STORAGE_KEY, JSON.stringify(synchronized));
+  return synchronized;
+}
+
+function candidateCleanupError(cleanupCode: string): ImportJourneyError {
+  return new ImportJourneyError(
+    "CANDIDATE_CLEANUP_FAILED",
+    `新建议生成后未能安全清理，已停止后续操作（${cleanupCode}）。请在建议差异页处理后再继续。`,
+  );
+}
+
+function shouldPreservePendingRequest(cause: unknown): boolean {
+  if (cause instanceof JourneyDraftPersistenceError) return true;
+  const code = errorCodeFromUnknown(cause);
+  return (
+    typeof code === "string" &&
+    (code === "IMPORT_JOURNEY_PERSIST_FAILED" || code === "CANDIDATE_CLEANUP_FAILED")
+  );
+}
+
+function shouldStopBatchAfterFailure(cause: unknown): boolean {
+  const code = errorCodeFromUnknown(cause);
+  return (
+    code === "IMPORT_PENDING_REQUEST_PERSIST_FAILED" ||
+    code === "CANDIDATE_VERSION_CONFLICT" ||
+    code === "VERSION_CONFLICT" ||
+    code === "CANDIDATE_CLEANUP_FAILED"
+  );
+}
+
+function errorCodeFromUnknown(cause: unknown): string | null {
+  if (typeof cause !== "object" || cause === null || !("code" in cause)) return null;
+  return typeof cause.code === "string" ? cause.code : null;
+}
+
+function requireBatchCandidateRevision(item: BatchItemDraft): number {
+  if (item.candidateRevision === null) {
+    throw new ImportJourneyError(
+      "CANDIDATE_REVISION_MISSING",
+      "这份旧建议没有可验证的修订号，请先在差异页处理或移除它；墨影不会先调用模型。",
+    );
+  }
+  return item.candidateRevision;
+}
+
+function synchronizeImportProjectSeed(draft: ImportJourneyDraft, now: string): ImportJourneyDraft {
+  if (draft.importedWork === null) {
+    return draft.projectSeed === null ? draft : { ...draft, projectSeed: null };
+  }
+  const presetLabels = REWRITE_PRESETS.filter(({ id }) => draft.selectedPresetIds.includes(id)).map(
+    ({ label }) => label,
+  );
+  const rewriteRules = draft.rules.filter(({ enabled }) => enabled).map(({ text }) => text);
+  return {
+    ...draft,
+    projectSeed: deriveImportProjectSeed({
+      seedId: `import:${draft.importedWork.projectId}`,
+      projectName: draft.importedWork.projectName,
+      goal: draft.goal,
+      presetLabels,
+      rewriteRules,
+      now,
+      existing: draft.projectSeed,
+    }),
+  };
 }
 
 function readPendingRequest(): PendingRewriteRequest | null {
@@ -1848,14 +2466,10 @@ function readPendingRequest(): PendingRewriteRequest | null {
 }
 
 function writePendingRequest(pending: PendingRewriteRequest | null): void {
-  try {
-    if (pending === null) {
-      window.localStorage.removeItem(IMPORT_REWRITE_PENDING_STORAGE_KEY);
-    } else {
-      window.localStorage.setItem(IMPORT_REWRITE_PENDING_STORAGE_KEY, JSON.stringify(pending));
-    }
-  } catch {
-    // A blocked storage write never changes the stable chapter or triggers an automatic retry.
+  if (pending === null) {
+    window.localStorage.removeItem(IMPORT_REWRITE_PENDING_STORAGE_KEY);
+  } else {
+    window.localStorage.setItem(IMPORT_REWRITE_PENDING_STORAGE_KEY, JSON.stringify(pending));
   }
 }
 
@@ -1899,6 +2513,12 @@ function parseTrialPointer(value: unknown): TrialPointer | null {
     return null;
   return {
     candidateId: candidateId.value,
+    candidateRevision:
+      typeof item.candidateRevision === "number" &&
+      Number.isSafeInteger(item.candidateRevision) &&
+      item.candidateRevision >= 1
+        ? item.candidateRevision
+        : null,
     chapterId: chapterId.value,
     excerptStart: item.excerptStart,
     excerptEnd: item.excerptEnd,
@@ -1967,6 +2587,12 @@ function parseBatchItems(value: unknown): readonly BatchItemDraft[] {
           chapterId: chapterId.value,
           chapterTitle: item.chapterTitle.slice(0, 200),
           candidateId: candidateId?.ok === true ? candidateId.value : null,
+          candidateRevision:
+            typeof item.candidateRevision === "number" &&
+            Number.isSafeInteger(item.candidateRevision) &&
+            item.candidateRevision >= 1
+              ? item.candidateRevision
+              : null,
           status,
           providerId: typeof item.providerId === "string" ? item.providerId : null,
           modelId: typeof item.modelId === "string" ? item.modelId : null,

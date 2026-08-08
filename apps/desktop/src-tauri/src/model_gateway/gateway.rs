@@ -1,12 +1,15 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use reqwest::header::{HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, RequestBuilder, Response, Url};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -16,16 +19,20 @@ use super::error::CommandError;
 use super::protocol::{
     parse_anthropic_models_page, parse_gemini_embeddings, parse_gemini_models_page,
     parse_ollama_embeddings, parse_ollama_models, parse_openai_embeddings, parse_openai_models,
-    parse_qwen_rerank, AnthropicSseParser, GeminiSseParser, OllamaNdjsonParser, OpenAiSseParser,
-    PaginatedModels, StreamItem, MAX_MODELS,
+    parse_qwen_rerank, AnthropicSseParser, GeminiSseParser, OllamaNdjsonParser,
+    OpenAiResponseParser, PaginatedModels, StreamItem, MAX_MODELS,
 };
-use super::registry::{validate_generation_id, GenerationRegistry};
+use super::registry::{validate_generation_id, ActiveDispatchRegistry, GenerationRegistry};
 use super::types::{
     AuthenticationMode, CancelGenerationRequest, CancelGenerationResponse, ConnectionCheckRequest,
     ConnectionCheckResponse, EmbeddingRequest, EmbeddingResponse, GenerationAccepted,
     GenerationEvent, GenerationEventStatus, GenerationUsage, ListModelsRequest, ModelDescriptor,
     ModelEndpointConfig, ModelListResponse, ModelMessage, ProviderKind, RerankProtocol,
     RerankRequest, RerankResponse, StartGenerationRequest,
+};
+use crate::native_sqlite::{
+    NativeModelDispatchScope, NativeSqliteState, ProjectRemoteDispatchLease,
+    ProjectRemoteDispatchLeaseError,
 };
 use crate::network_egress::RestrictedDnsResolver;
 
@@ -61,9 +68,12 @@ const MAX_RERANK_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_MODEL_LIST_PAGES: usize = 64;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+#[derive(Clone)]
 pub(crate) struct ModelGatewayState {
     pub(crate) client: Client,
     registry: Arc<GenerationRegistry>,
+    dispatch_registry: Arc<ActiveDispatchRegistry>,
+    dispatch_lifecycle: Arc<AsyncMutex<()>>,
 }
 
 impl ModelGatewayState {
@@ -80,6 +90,8 @@ impl ModelGatewayState {
         Ok(Self {
             client,
             registry: Arc::new(GenerationRegistry::default()),
+            dispatch_registry: Arc::new(ActiveDispatchRegistry::default()),
+            dispatch_lifecycle: Arc::new(AsyncMutex::new(())),
         })
     }
 }
@@ -216,6 +228,7 @@ struct PreparedGeneration {
     credential: Option<CredentialHeader>,
     body: Vec<u8>,
     request_timeout: Duration,
+    endpoint_is_loopback: bool,
 }
 
 struct PreparedEmbedding {
@@ -226,6 +239,7 @@ struct PreparedEmbedding {
     body: Vec<u8>,
     model: String,
     input_count: usize,
+    endpoint_is_loopback: bool,
 }
 
 struct PreparedRerank {
@@ -238,6 +252,7 @@ struct PreparedRerank {
     model: String,
     document_count: usize,
     top_n: usize,
+    endpoint_is_loopback: bool,
 }
 
 enum RunOutcome {
@@ -246,7 +261,7 @@ enum RunOutcome {
 }
 
 enum ProviderStreamParser {
-    OpenAi(OpenAiSseParser),
+    OpenAi(OpenAiResponseParser),
     Ollama(OllamaNdjsonParser),
     Anthropic(AnthropicSseParser),
     Gemini(GeminiSseParser),
@@ -327,6 +342,44 @@ impl GenerationEmitter {
     }
 }
 
+trait GenerationDeltaSink {
+    fn emit_delta(&mut self, delta: &str) -> Result<(), CommandError>;
+}
+
+trait GenerationEventSink: GenerationDeltaSink + Send {
+    fn emit_status(
+        &mut self,
+        status: GenerationEventStatus,
+        delta: String,
+    ) -> Result<(), CommandError>;
+}
+
+struct NativeGenerationLifecycle<Emitter> {
+    state: ModelGatewayState,
+    sqlite: NativeSqliteState,
+    prepared: PreparedGeneration,
+    cancellation: CancellationToken,
+    generation_id: String,
+    emitter: Emitter,
+    lease: Option<ProjectRemoteDispatchLease>,
+}
+
+impl GenerationDeltaSink for GenerationEmitter {
+    fn emit_delta(&mut self, delta: &str) -> Result<(), CommandError> {
+        GenerationEmitter::emit_delta(self, delta)
+    }
+}
+
+impl GenerationEventSink for GenerationEmitter {
+    fn emit_status(
+        &mut self,
+        status: GenerationEventStatus,
+        delta: String,
+    ) -> Result<(), CommandError> {
+        self.emit(status, delta)
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn list_native_models(
     state: State<'_, ModelGatewayState>,
@@ -358,55 +411,379 @@ pub(crate) async fn check_native_model_connection(
 #[tauri::command]
 pub(crate) async fn embed_native_model(
     state: State<'_, ModelGatewayState>,
+    sqlite: State<'_, NativeSqliteState>,
     request: EmbeddingRequest,
 ) -> Result<EmbeddingResponse, CommandError> {
     let request_timeout = configured_request_timeout(&request.config)?;
-    embed_with_timeout(&state.client, &request, request_timeout).await
+    let prepared = prepare_embedding(&request).await?;
+    let operation_id = uuid::Uuid::now_v7().to_string();
+    run_prepared_embedding_with_dispatch(
+        &state,
+        &sqlite,
+        &request.dispatch_scope,
+        request_timeout,
+        prepared,
+        operation_id,
+    )
+    .await
+}
+
+async fn run_prepared_embedding_with_dispatch(
+    state: &ModelGatewayState,
+    sqlite: &NativeSqliteState,
+    dispatch_scope: &NativeModelDispatchScope,
+    request_timeout: Duration,
+    prepared: PreparedEmbedding,
+    operation_id: String,
+) -> Result<EmbeddingResponse, CommandError> {
+    let state = state.clone();
+    let sqlite = sqlite.clone();
+    let dispatch_scope = dispatch_scope.clone();
+    // The native worker owns begin -> network -> finish. Dropping the WebView
+    // invoke future detaches this join handle even while BEGIN IMMEDIATE is
+    // waiting, so registry/lease acquisition cannot be cancelled halfway.
+    let worker = tokio::spawn(async move {
+        let lease = begin_remote_dispatch(
+            &state,
+            &sqlite,
+            &dispatch_scope,
+            prepared.endpoint_is_loopback,
+            "embedding",
+            &operation_id,
+        )
+        .await?;
+        let client = state.client.clone();
+        let network_result = AssertUnwindSafe(async move {
+            match timeout(request_timeout, execute_embedding(&client, prepared)).await {
+                Ok(result) => result,
+                Err(_) => Err(CommandError::timeout()),
+            }
+        })
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err(CommandError::runtime_failed()));
+        finish_remote_dispatch(
+            &state.dispatch_lifecycle,
+            &state.dispatch_registry,
+            &sqlite,
+            lease,
+            &operation_id,
+        )
+        .await?;
+        network_result
+    });
+    worker.await.map_err(|_| CommandError::runtime_failed())?
 }
 
 #[tauri::command]
 pub(crate) async fn rerank_native_model(
     state: State<'_, ModelGatewayState>,
+    sqlite: State<'_, NativeSqliteState>,
     request: RerankRequest,
 ) -> Result<RerankResponse, CommandError> {
     let request_timeout = configured_request_timeout(&request.config)?;
-    rerank_with_timeout(&state.client, &request, request_timeout).await
+    let prepared = prepare_rerank(&request).await?;
+    let operation_id = uuid::Uuid::now_v7().to_string();
+    run_prepared_rerank_with_dispatch(
+        &state,
+        &sqlite,
+        &request.dispatch_scope,
+        request_timeout,
+        prepared,
+        operation_id,
+    )
+    .await
+}
+
+async fn run_prepared_rerank_with_dispatch(
+    state: &ModelGatewayState,
+    sqlite: &NativeSqliteState,
+    dispatch_scope: &NativeModelDispatchScope,
+    request_timeout: Duration,
+    prepared: PreparedRerank,
+    operation_id: String,
+) -> Result<RerankResponse, CommandError> {
+    let state = state.clone();
+    let sqlite = sqlite.clone();
+    let dispatch_scope = dispatch_scope.clone();
+    let worker = tokio::spawn(async move {
+        let lease = begin_remote_dispatch(
+            &state,
+            &sqlite,
+            &dispatch_scope,
+            prepared.endpoint_is_loopback,
+            "rerank",
+            &operation_id,
+        )
+        .await?;
+        let client = state.client.clone();
+        let network_result = AssertUnwindSafe(async move {
+            match timeout(request_timeout, execute_rerank(&client, prepared)).await {
+                Ok(result) => result,
+                Err(_) => Err(CommandError::timeout()),
+            }
+        })
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err(CommandError::runtime_failed()));
+        finish_remote_dispatch(
+            &state.dispatch_lifecycle,
+            &state.dispatch_registry,
+            &sqlite,
+            lease,
+            &operation_id,
+        )
+        .await?;
+        network_result
+    });
+    worker.await.map_err(|_| CommandError::runtime_failed())?
 }
 
 #[tauri::command]
 pub(crate) async fn start_native_generation(
     app: AppHandle,
     state: State<'_, ModelGatewayState>,
+    sqlite: State<'_, NativeSqliteState>,
     request: StartGenerationRequest,
 ) -> Result<GenerationAccepted, CommandError> {
     validate_generation_id(&request.generation_id)?;
     let prepared = prepare_generation(&request).await?;
     let generation_id = request.generation_id.clone();
-    let cancellation = state.registry.register(&generation_id)?;
-    let registry = Arc::clone(&state.registry);
-    let client = state.client.clone();
-    let mut emitter = GenerationEmitter::new(app, generation_id.clone());
-    if let Err(error) = emitter.emit(GenerationEventStatus::Started, String::new()) {
-        let _ = registry.remove(&generation_id);
-        return Err(error);
-    }
-
-    tauri::async_runtime::spawn(async move {
-        drive_generation(
-            client,
-            prepared,
-            cancellation,
-            registry,
-            generation_id,
-            emitter,
-        )
-        .await;
-    });
+    let emitter = GenerationEmitter::new(app, generation_id.clone());
+    start_prepared_generation_with_dispatch(
+        &state,
+        &sqlite,
+        &request.dispatch_scope,
+        prepared,
+        generation_id,
+        emitter,
+    )
+    .await?;
 
     Ok(GenerationAccepted {
         generation_id: request.generation_id,
         accepted: true,
     })
+}
+
+async fn start_prepared_generation_with_dispatch<Emitter>(
+    state: &ModelGatewayState,
+    sqlite: &NativeSqliteState,
+    dispatch_scope: &NativeModelDispatchScope,
+    prepared: PreparedGeneration,
+    generation_id: String,
+    mut emitter: Emitter,
+) -> Result<(), CommandError>
+where
+    Emitter: GenerationEventSink + 'static,
+{
+    let state = state.clone();
+    let sqlite = sqlite.clone();
+    let dispatch_scope = dispatch_scope.clone();
+    let (startup_tx, startup_rx) = tokio::sync::oneshot::channel();
+    // Spawn before registration or BEGIN IMMEDIATE. The native task therefore
+    // owns every stateful step even if the invoke future waiting on startup is
+    // dropped by its caller.
+    tokio::spawn(async move {
+        let cancellation = match state.registry.register(&generation_id) {
+            Ok(cancellation) => cancellation,
+            Err(error) => {
+                let _ = startup_tx.send(Err(error));
+                return;
+            }
+        };
+        let lease = match begin_remote_dispatch(
+            &state,
+            &sqlite,
+            &dispatch_scope,
+            prepared.endpoint_is_loopback,
+            "generation",
+            &generation_id,
+        )
+        .await
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                let _ = state.registry.remove(&generation_id);
+                let _ = startup_tx.send(Err(error));
+                return;
+            }
+        };
+        let started = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            emitter.emit_status(GenerationEventStatus::Started, String::new())
+        }))
+        .unwrap_or_else(|_| Err(CommandError::runtime_failed()));
+        if let Err(emit_error) = started {
+            let cleanup = finish_remote_dispatch(
+                &state.dispatch_lifecycle,
+                &state.dispatch_registry,
+                &sqlite,
+                lease,
+                &generation_id,
+            )
+            .await;
+            let _ = state.registry.remove(&generation_id);
+            let _ = startup_tx.send(Err(cleanup.err().unwrap_or(emit_error)));
+            return;
+        }
+
+        // Failure to deliver the handshake only means the invoke waiter was
+        // dropped. It must not cancel a generation whose native lifecycle is
+        // already fenced and active.
+        let _ = startup_tx.send(Ok(()));
+        drive_generation(NativeGenerationLifecycle {
+            state,
+            sqlite,
+            prepared,
+            cancellation,
+            generation_id,
+            emitter,
+            lease,
+        })
+        .await;
+    });
+
+    startup_rx
+        .await
+        .map_err(|_| CommandError::runtime_failed())?
+}
+
+#[tauri::command]
+pub(crate) async fn reconcile_native_model_dispatch_leases(
+    state: State<'_, ModelGatewayState>,
+    sqlite: State<'_, NativeSqliteState>,
+) -> Result<u64, CommandError> {
+    reconcile_remote_dispatch_leases(&state, &sqlite).await
+}
+
+async fn reconcile_remote_dispatch_leases(
+    state: &ModelGatewayState,
+    sqlite: &NativeSqliteState,
+) -> Result<u64, CommandError> {
+    reconcile_remote_dispatch_leases_with_snapshot_pause(state, sqlite, std::future::ready(()))
+        .await
+}
+
+async fn reconcile_remote_dispatch_leases_with_snapshot_pause<Pause>(
+    state: &ModelGatewayState,
+    sqlite: &NativeSqliteState,
+    snapshot_pause: Pause,
+) -> Result<u64, CommandError>
+where
+    Pause: std::future::Future<Output = ()>,
+{
+    let _lifecycle = state.dispatch_lifecycle.lock().await;
+    let active = state.dispatch_registry.snapshot()?;
+    // Production passes a ready future. Tests use this seam to hold the exact
+    // historical snapshot-to-SQL race window open and prove that acquisition
+    // cannot enter it while the lifecycle lock is held.
+    snapshot_pause.await;
+    sqlite
+        .reconcile_project_remote_dispatch_leases(&active)
+        .await
+        .map_err(map_dispatch_lease_error)
+}
+
+async fn begin_remote_dispatch(
+    state: &ModelGatewayState,
+    sqlite: &NativeSqliteState,
+    scope: &NativeModelDispatchScope,
+    endpoint_is_loopback: bool,
+    operation_kind: &str,
+    operation_id: &str,
+) -> Result<Option<ProjectRemoteDispatchLease>, CommandError> {
+    let _lifecycle = state.dispatch_lifecycle.lock().await;
+    state.dispatch_registry.register(operation_id)?;
+    match acquire_remote_dispatch_lease(
+        sqlite,
+        scope,
+        endpoint_is_loopback,
+        operation_kind,
+        operation_id,
+    )
+    .await
+    {
+        Ok(lease) => Ok(lease),
+        Err(error) => {
+            let _ = state.dispatch_registry.remove(operation_id);
+            Err(error)
+        }
+    }
+}
+
+async fn finish_remote_dispatch(
+    lifecycle: &AsyncMutex<()>,
+    registry: &ActiveDispatchRegistry,
+    sqlite: &NativeSqliteState,
+    lease: Option<ProjectRemoteDispatchLease>,
+    operation_id: &str,
+) -> Result<(), CommandError> {
+    let _lifecycle = lifecycle.lock().await;
+    // Keep the lifecycle ordering identical to begin/reconcile:
+    // lifecycle -> native registry -> SQLite. Reconciliation also takes the
+    // lifecycle lock, so it cannot observe the short registry/lease mismatch.
+    // If registry removal fails, retaining the durable lease is the safe side
+    // of the privacy boundary and a later in-process reconciliation can clear
+    // it once the registry is available again.
+    if !registry.remove(operation_id)? {
+        return Err(CommandError::registry_unavailable());
+    }
+    release_remote_dispatch_lease(sqlite, lease).await
+}
+
+async fn acquire_remote_dispatch_lease(
+    sqlite: &NativeSqliteState,
+    scope: &NativeModelDispatchScope,
+    endpoint_is_loopback: bool,
+    operation_kind: &str,
+    operation_id: &str,
+) -> Result<Option<ProjectRemoteDispatchLease>, CommandError> {
+    if endpoint_is_loopback {
+        return Ok(None);
+    }
+    let receipt = match scope {
+        NativeModelDispatchScope::NonProject { reason } => {
+            match reason {
+                crate::native_sqlite::NativeNonProjectDispatchReason::CreativeOpening
+                | crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe => {}
+            }
+            return Ok(None);
+        }
+        NativeModelDispatchScope::ProjectContext { receipt } => receipt,
+    };
+    sqlite
+        .acquire_project_remote_dispatch_lease(receipt, operation_kind, operation_id)
+        .await
+        .map(Some)
+        .map_err(map_dispatch_lease_error)
+}
+
+async fn release_remote_dispatch_lease(
+    sqlite: &NativeSqliteState,
+    lease: Option<ProjectRemoteDispatchLease>,
+) -> Result<(), CommandError> {
+    let Some(lease) = lease else {
+        return Ok(());
+    };
+    sqlite
+        .release_project_remote_dispatch_lease(&lease)
+        .await
+        .map_err(map_dispatch_lease_error)
+}
+
+fn map_dispatch_lease_error(error: ProjectRemoteDispatchLeaseError) -> CommandError {
+    match error {
+        ProjectRemoteDispatchLeaseError::AuthorityChanged => {
+            CommandError::project_context_privacy_changed()
+        }
+        ProjectRemoteDispatchLeaseError::PrivateChapterLocalOnly => {
+            CommandError::private_chapter_local_only()
+        }
+        ProjectRemoteDispatchLeaseError::DatabaseBusy
+        | ProjectRemoteDispatchLeaseError::DatabaseUnavailable => {
+            CommandError::project_context_privacy_unavailable()
+        }
+    }
 }
 
 #[tauri::command]
@@ -842,6 +1219,7 @@ async fn prepare_generation(
         credential,
         body,
         request_timeout,
+        endpoint_is_loopback: endpoint.is_loopback(),
     })
 }
 
@@ -1014,6 +1392,7 @@ async fn prepare_embedding(request: &EmbeddingRequest) -> Result<PreparedEmbeddi
         body,
         model: request.model.clone(),
         input_count: request.inputs.len(),
+        endpoint_is_loopback: endpoint.is_loopback(),
     })
 }
 
@@ -1054,18 +1433,6 @@ fn serialize_embedding_request_body(value: &impl Serialize) -> Result<Vec<u8>, C
         return Err(CommandError::input_limit_exceeded());
     }
     Ok(body)
-}
-
-async fn embed_with_timeout(
-    client: &Client,
-    request: &EmbeddingRequest,
-    request_timeout: Duration,
-) -> Result<EmbeddingResponse, CommandError> {
-    let prepared = prepare_embedding(request).await?;
-    match timeout(request_timeout, execute_embedding(client, prepared)).await {
-        Ok(result) => result,
-        Err(_) => Err(CommandError::timeout()),
-    }
 }
 
 async fn execute_embedding(
@@ -1111,6 +1478,19 @@ async fn execute_embedding(
     })
 }
 
+#[cfg(test)]
+async fn embed_with_timeout(
+    client: &Client,
+    request: &EmbeddingRequest,
+    request_timeout: Duration,
+) -> Result<EmbeddingResponse, CommandError> {
+    let prepared = prepare_embedding(request).await?;
+    match timeout(request_timeout, execute_embedding(client, prepared)).await {
+        Ok(result) => result,
+        Err(_) => Err(CommandError::timeout()),
+    }
+}
+
 async fn prepare_rerank(request: &RerankRequest) -> Result<PreparedRerank, CommandError> {
     let endpoint = validate_config(&request.config)?;
     validate_rerank_request(request)?;
@@ -1144,6 +1524,7 @@ async fn prepare_rerank(request: &RerankRequest) -> Result<PreparedRerank, Comma
         model: request.model.clone(),
         document_count: request.documents.len(),
         top_n: request.top_n,
+        endpoint_is_loopback: endpoint.is_loopback(),
     })
 }
 
@@ -1185,18 +1566,6 @@ fn contains_unsupported_control_character(value: &str) -> bool {
     value
         .chars()
         .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
-}
-
-async fn rerank_with_timeout(
-    client: &Client,
-    request: &RerankRequest,
-    request_timeout: Duration,
-) -> Result<RerankResponse, CommandError> {
-    let prepared = prepare_rerank(request).await?;
-    match timeout(request_timeout, execute_rerank(client, prepared)).await {
-        Ok(result) => result,
-        Err(_) => Err(CommandError::timeout()),
-    }
 }
 
 async fn execute_rerank(
@@ -1277,41 +1646,85 @@ fn serialize_request_body(value: &impl Serialize) -> Result<Vec<u8>, CommandErro
     Ok(body)
 }
 
-async fn drive_generation(
-    client: Client,
-    prepared: PreparedGeneration,
-    cancellation: CancellationToken,
-    registry: Arc<GenerationRegistry>,
-    generation_id: String,
-    mut emitter: GenerationEmitter,
-) {
-    let result = timeout(
+async fn drive_generation<Emitter>(lifecycle: NativeGenerationLifecycle<Emitter>)
+where
+    Emitter: GenerationEventSink,
+{
+    let NativeGenerationLifecycle {
+        state,
+        sqlite,
+        prepared,
+        cancellation,
+        generation_id,
+        mut emitter,
+        lease,
+    } = lifecycle;
+    let result = AssertUnwindSafe(timeout(
         GENERATION_TIMEOUT,
-        stream_generation(&client, prepared, &cancellation, &mut emitter),
+        stream_generation(&state.client, prepared, &cancellation, &mut emitter),
+    ))
+    .catch_unwind()
+    .await
+    .unwrap_or_else(|_| Ok(Err(CommandError::runtime_failed())));
+
+    let status = finalize_generation_dispatch(
+        &sqlite,
+        lease,
+        &state.dispatch_registry,
+        &state.dispatch_lifecycle,
+        &generation_id,
+        result,
     )
     .await;
-
-    let status = match result {
-        Ok(Ok(RunOutcome::Completed(usage))) => GenerationEventStatus::Completed { usage },
-        Ok(Ok(RunOutcome::Cancelled)) => GenerationEventStatus::Cancelled,
-        Ok(Err(error)) => GenerationEventStatus::Failed {
-            code: error.code(),
-            retryable: error.retryable(),
-        },
-        Err(_) => GenerationEventStatus::Failed {
-            code: "MODEL_TIMEOUT",
-            retryable: true,
-        },
-    };
-    let _ = emitter.emit(status, String::new());
-    let _ = registry.remove(&generation_id);
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        emitter.emit_status(status, String::new())
+    }));
+    let _ = state.registry.remove(&generation_id);
 }
 
-async fn stream_generation(
+async fn finalize_generation_dispatch(
+    sqlite: &NativeSqliteState,
+    lease: Option<ProjectRemoteDispatchLease>,
+    dispatch_registry: &ActiveDispatchRegistry,
+    dispatch_lifecycle: &AsyncMutex<()>,
+    generation_id: &str,
+    result: Result<Result<RunOutcome, CommandError>, tokio::time::error::Elapsed>,
+) -> GenerationEventStatus {
+    let status = if let Err(error) = finish_remote_dispatch(
+        dispatch_lifecycle,
+        dispatch_registry,
+        sqlite,
+        lease,
+        generation_id,
+    )
+    .await
+    {
+        GenerationEventStatus::Failed {
+            code: error.code(),
+            retryable: error.retryable(),
+        }
+    } else {
+        match result {
+            Ok(Ok(RunOutcome::Completed(usage))) => GenerationEventStatus::Completed { usage },
+            Ok(Ok(RunOutcome::Cancelled)) => GenerationEventStatus::Cancelled,
+            Ok(Err(error)) => GenerationEventStatus::Failed {
+                code: error.code(),
+                retryable: error.retryable(),
+            },
+            Err(_) => GenerationEventStatus::Failed {
+                code: "MODEL_TIMEOUT",
+                retryable: true,
+            },
+        }
+    };
+    status
+}
+
+async fn stream_generation<Emitter: GenerationDeltaSink>(
     client: &Client,
     prepared: PreparedGeneration,
     cancellation: &CancellationToken,
-    emitter: &mut GenerationEmitter,
+    emitter: &mut Emitter,
 ) -> Result<RunOutcome, CommandError> {
     if cancellation.is_cancelled() {
         return Ok(RunOutcome::Cancelled);
@@ -1354,7 +1767,9 @@ async fn stream_generation(
     }
 
     let mut parser = match prepared.provider {
-        ProviderKind::OpenAiCompatible => ProviderStreamParser::OpenAi(OpenAiSseParser::default()),
+        ProviderKind::OpenAiCompatible => {
+            ProviderStreamParser::OpenAi(OpenAiResponseParser::default())
+        }
         ProviderKind::Ollama => ProviderStreamParser::Ollama(OllamaNdjsonParser::default()),
         ProviderKind::Anthropic => ProviderStreamParser::Anthropic(AnthropicSseParser::default()),
         ProviderKind::Gemini => ProviderStreamParser::Gemini(GeminiSseParser::default()),
@@ -1397,11 +1812,11 @@ async fn stream_generation(
     }
 }
 
-fn process_stream_items(
+fn process_stream_items<Emitter: GenerationDeltaSink>(
     items: Vec<StreamItem>,
     output_bytes: &mut usize,
     usage: &mut Option<GenerationUsage>,
-    emitter: &mut GenerationEmitter,
+    emitter: &mut Emitter,
 ) -> Result<bool, CommandError> {
     for item in items {
         match item {
@@ -1494,6 +1909,13 @@ mod tests {
         AuthenticationMode, EmbeddingRequest, ModelMessageRole, ProviderKind, RerankProtocol,
         RerankRequest, StartGenerationRequest,
     };
+    use crate::native_sqlite::{
+        canonical_project_context_fingerprint, NativeProjectContextPrivacyReceipt,
+    };
+    use sqlx::{
+        sqlite::{SqliteConnectOptions, SqliteJournalMode},
+        Connection, SqliteConnection,
+    };
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc::{self, Receiver};
@@ -1502,6 +1924,12 @@ mod tests {
     struct FakeServer {
         base_url: String,
         request: Receiver<Vec<u8>>,
+        handle: JoinHandle<()>,
+    }
+
+    struct GatedFakeServer {
+        base_url: String,
+        release: std::sync::mpsc::SyncSender<()>,
         handle: JoinHandle<()>,
     }
 
@@ -1539,6 +1967,38 @@ mod tests {
         FakeServer {
             base_url: format!("http://{address}"),
             request: request_rx,
+            handle,
+        }
+    }
+
+    fn spawn_gated_fake_server(status: &str, body: &[u8]) -> GatedFakeServer {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("gated model server should bind loopback");
+        let address = listener
+            .local_addr()
+            .expect("gated model server should have an address");
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let status = status.to_owned();
+        let body = body.to_vec();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("gated server should accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout should apply");
+            let _ = read_http_request(&mut stream);
+            release_rx
+                .recv()
+                .expect("test should release the gated response");
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&body);
+        });
+        GatedFakeServer {
+            base_url: format!("http://{address}"),
+            release: release_tx,
             handle,
         }
     }
@@ -1614,6 +2074,124 @@ mod tests {
             .expect("test client should build")
     }
 
+    fn test_dispatch_scope() -> NativeModelDispatchScope {
+        NativeModelDispatchScope::NonProject {
+            reason: crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe,
+        }
+    }
+
+    async fn seeded_empty_remote_project(
+        label: &str,
+        project_id: &str,
+    ) -> (
+        std::path::PathBuf,
+        Arc<NativeSqliteState>,
+        NativeModelDispatchScope,
+    ) {
+        let directory = std::env::temp_dir().join(format!(
+            "inkshadow-{label}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir(&directory).expect("create dispatch fixture directory");
+        let database_path = directory.join("inkshadow.db");
+        let sqlite = Arc::new(NativeSqliteState::default());
+        sqlite
+            .test_open_migrated_database(&database_path)
+            .await
+            .expect("open migrated dispatch fixture");
+        sqlite
+            .test_execute_internal_sql(&format!(
+                "INSERT INTO projects (id, name, created_at, updated_at) VALUES \
+                 ('{project_id}', 'Dispatch fixture', '2026-08-08T00:00:00.000Z', \
+                 '2026-08-08T00:00:00.000Z')"
+            ))
+            .await
+            .expect("seed empty dispatch project");
+        let mut receipt = NativeProjectContextPrivacyReceipt {
+            schema_version: 1,
+            project_id: project_id.to_owned(),
+            fingerprint: String::new(),
+            active_chapter_count: 0,
+            retained_chapter_count: 0,
+            requires_verified_local: false,
+            chapters: vec![],
+        };
+        receipt.fingerprint = canonical_project_context_fingerprint(&receipt)
+            .expect("canonical empty-project fingerprint");
+        (
+            directory,
+            sqlite,
+            NativeModelDispatchScope::ProjectContext { receipt },
+        )
+    }
+
+    async fn open_dispatch_inspector(database_path: &std::path::Path) -> SqliteConnection {
+        SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(database_path)
+                .create_if_missing(false)
+                .foreign_keys(true)
+                .journal_mode(SqliteJournalMode::Wal)
+                .busy_timeout(Duration::from_secs(1)),
+        )
+        .await
+        .expect("open independent dispatch inspector")
+    }
+
+    async fn dispatch_lease_count(connection: &mut SqliteConnection) -> i64 {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM project_remote_dispatch_leases")
+            .fetch_one(connection)
+            .await
+            .expect("count remote dispatch leases")
+    }
+
+    async fn wait_for_dispatch_lease_count(connection: &mut SqliteConnection, expected: i64) {
+        for _ in 0..1_000 {
+            if dispatch_lease_count(connection).await == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(dispatch_lease_count(connection).await, expected);
+    }
+
+    async fn wait_for_dispatch_registry_entry(state: &ModelGatewayState, operation_id: &str) {
+        for _ in 0..1_000 {
+            if state
+                .dispatch_registry
+                .snapshot()
+                .expect("snapshot dispatch registry")
+                .contains(operation_id)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(state
+            .dispatch_registry
+            .snapshot()
+            .expect("final dispatch registry snapshot")
+            .contains(operation_id));
+    }
+
+    async fn wait_for_generation_registry_absence(state: &ModelGatewayState, generation_id: &str) {
+        for _ in 0..1_000 {
+            if !state
+                .registry
+                .contains(generation_id)
+                .expect("inspect generation registry")
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(!state
+            .registry
+            .contains(generation_id)
+            .expect("final generation registry inspection"));
+    }
+
     fn embedding_request(
         base_url: String,
         provider: ProviderKind,
@@ -1621,6 +2199,7 @@ mod tests {
         inputs: &[&str],
     ) -> EmbeddingRequest {
         EmbeddingRequest {
+            dispatch_scope: test_dispatch_scope(),
             config: ModelEndpointConfig {
                 provider_id: "embedding-test".to_owned(),
                 provider,
@@ -1640,6 +2219,7 @@ mod tests {
 
     fn generation_request() -> StartGenerationRequest {
         StartGenerationRequest {
+            dispatch_scope: test_dispatch_scope(),
             generation_id: "generation-1".to_owned(),
             config: ModelEndpointConfig {
                 provider_id: "provider-1".to_owned(),
@@ -1665,6 +2245,7 @@ mod tests {
 
     fn rerank_request(base_url: String) -> RerankRequest {
         RerankRequest {
+            dispatch_scope: test_dispatch_scope(),
             config: ModelEndpointConfig {
                 provider_id: "qwen-rerank-test".to_owned(),
                 provider: ProviderKind::OpenAiCompatible,
@@ -2081,6 +2662,719 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delayed_remote_embedding_holds_the_barrier_until_the_network_future_ends() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000071";
+        let directory = std::env::temp_dir().join(format!(
+            "inkshadow-gateway-dispatch-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir(&directory).expect("create test directory");
+        let database_path = directory.join("inkshadow.db");
+        let sqlite = Arc::new(NativeSqliteState::default());
+        sqlite
+            .test_open_migrated_database(&database_path)
+            .await
+            .expect("open migrated native database");
+        sqlite
+            .test_execute_internal_sql(&format!(
+                "INSERT INTO projects (id, name, created_at, updated_at) VALUES \
+                 ('{PROJECT_ID}', 'Delayed request', '2026-08-08T00:00:00.000Z', \
+                 '2026-08-08T00:00:00.000Z')"
+            ))
+            .await
+            .expect("seed empty project");
+        let mut receipt = NativeProjectContextPrivacyReceipt {
+            schema_version: 1,
+            project_id: PROJECT_ID.to_owned(),
+            fingerprint: String::new(),
+            active_chapter_count: 0,
+            retained_chapter_count: 0,
+            requires_verified_local: false,
+            chapters: vec![],
+        };
+        receipt.fingerprint = canonical_project_context_fingerprint(&receipt)
+            .expect("canonical empty-project fingerprint");
+        let scope = NativeModelDispatchScope::ProjectContext { receipt };
+        let server = spawn_gated_fake_server(
+            "200 OK",
+            br#"{"data":[{"index":0,"embedding":[0.25,0.75]}],"model":"embed-1"}"#,
+        );
+        let request = embedding_request(
+            format!("{}/v1", server.base_url),
+            ProviderKind::OpenAiCompatible,
+            "embed-1",
+            &["project context"],
+        );
+        let mut prepared = prepare_embedding(&request)
+            .await
+            .expect("prepare embedding");
+        // The fake HTTP endpoint is loopback, but the lifecycle under test is
+        // the remote branch whose complete future must be fenced by SQLite.
+        prepared.endpoint_is_loopback = false;
+        let gateway = Arc::new(ModelGatewayState::new().expect("gateway state"));
+        let worker_gateway = Arc::clone(&gateway);
+        let worker_sqlite = Arc::clone(&sqlite);
+        let worker = tokio::spawn(async move {
+            run_prepared_embedding_with_dispatch(
+                &worker_gateway,
+                &worker_sqlite,
+                &scope,
+                Duration::from_secs(5),
+                prepared,
+                "delayed-embedding".to_owned(),
+            )
+            .await
+        });
+
+        let mut writer = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&database_path)
+                .create_if_missing(false)
+                .foreign_keys(true)
+                .journal_mode(SqliteJournalMode::Wal)
+                .busy_timeout(Duration::from_secs(1)),
+        )
+        .await
+        .expect("open independent writer");
+        for _ in 0..50 {
+            let count =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM project_remote_dispatch_leases")
+                    .fetch_one(&mut writer)
+                    .await
+                    .expect("observe lease count");
+            if count == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM project_remote_dispatch_leases",)
+                .fetch_one(&mut writer)
+                .await
+                .expect("lease committed before request"),
+            1
+        );
+        let blocked = sqlx::query(
+            "INSERT INTO chapters (
+               id, project_id, title, content, current_version_id, created_at, updated_at,
+               privacy_mode, privacy_revision
+             ) VALUES (
+               '019f9f4a-b3c7-7350-9226-000000000072', ?, 'Private', '',
+               '019f9f4a-b3c7-7350-9226-000000000073',
+               '2026-08-08T00:00:00.000Z', '2026-08-08T00:00:00.000Z', 'local_only', 1
+             )",
+        )
+        .bind(PROJECT_ID)
+        .execute(&mut writer)
+        .await
+        .expect_err("privacy-tainting write must wait for delayed response");
+        assert!(blocked
+            .as_database_error()
+            .is_some_and(|error| error.message().contains("INKSHADOW_REMOTE_DISPATCH_ACTIVE")));
+
+        server
+            .release
+            .send(())
+            .expect("release delayed embedding response");
+        let response = worker
+            .await
+            .expect("gateway worker joins")
+            .expect("delayed response succeeds");
+        assert_eq!(response.vector_count, 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM project_remote_dispatch_leases",)
+                .fetch_one(&mut writer)
+                .await
+                .expect("lease released after response future"),
+            0
+        );
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("dispatch registry snapshot")
+            .is_empty());
+        server.handle.join().expect("fake server stops");
+        drop(writer);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_snapshot_and_new_acquisition_are_one_atomic_lifecycle() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000091";
+        let (directory, sqlite, scope) =
+            seeded_empty_remote_project("reconcile-barrier", PROJECT_ID).await;
+        let receipt = match &scope {
+            NativeModelDispatchScope::ProjectContext { receipt } => receipt.clone(),
+            NativeModelDispatchScope::NonProject { .. } => unreachable!("project fixture"),
+        };
+        sqlite
+            .acquire_project_remote_dispatch_lease(&receipt, "embedding", "ended-before-reconcile")
+            .await
+            .expect("seed a lease absent from the native live registry");
+
+        let gateway = Arc::new(ModelGatewayState::new().expect("gateway state"));
+        let (snapshot_ready_tx, snapshot_ready_rx) = tokio::sync::oneshot::channel();
+        let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
+        let reconcile_gateway = Arc::clone(&gateway);
+        let reconcile_sqlite = Arc::clone(&sqlite);
+        let reconcile = tokio::spawn(async move {
+            reconcile_remote_dispatch_leases_with_snapshot_pause(
+                &reconcile_gateway,
+                &reconcile_sqlite,
+                async move {
+                    snapshot_ready_tx
+                        .send(())
+                        .expect("signal captured registry snapshot");
+                    continue_rx.await.expect("release snapshot barrier");
+                },
+            )
+            .await
+        });
+        snapshot_ready_rx
+            .await
+            .expect("reconciliation reaches old-snapshot window");
+
+        let acquire_gateway = Arc::clone(&gateway);
+        let acquire_sqlite = Arc::clone(&sqlite);
+        let acquire = tokio::spawn(async move {
+            begin_remote_dispatch(
+                &acquire_gateway,
+                &acquire_sqlite,
+                &scope,
+                false,
+                "rerank",
+                "starts-during-reconcile",
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            !acquire.is_finished(),
+            "new acquisition must wait outside the captured-snapshot window"
+        );
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("snapshot native registry while reconciliation is paused")
+            .is_empty());
+
+        continue_tx
+            .send(())
+            .expect("let reconciliation commit cleanup");
+        assert_eq!(
+            reconcile
+                .await
+                .expect("reconciliation worker joins")
+                .expect("reconciliation succeeds"),
+            1
+        );
+        let lease = acquire
+            .await
+            .expect("acquisition worker joins")
+            .expect("new acquisition succeeds after reconciliation");
+        let mut inspector = open_dispatch_inspector(&directory.join("inkshadow.db")).await;
+        assert_eq!(dispatch_lease_count(&mut inspector).await, 1);
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("snapshot registry after acquisition")
+            .contains("starts-during-reconcile"));
+
+        finish_remote_dispatch(
+            &gateway.dispatch_lifecycle,
+            &gateway.dispatch_registry,
+            &sqlite,
+            lease,
+            "starts-during-reconcile",
+        )
+        .await
+        .expect("finish new dispatch");
+        assert_eq!(dispatch_lease_count(&mut inspector).await, 0);
+        drop(inspector);
+        drop(gateway);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn dropping_embedding_command_future_does_not_release_a_live_network_lease() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000101";
+        let (directory, sqlite, scope) =
+            seeded_empty_remote_project("embedding-drop", PROJECT_ID).await;
+        let server = spawn_gated_fake_server(
+            "200 OK",
+            br#"{"data":[{"index":0,"embedding":[0.25,0.75]}],"model":"embed-1"}"#,
+        );
+        let request = embedding_request(
+            format!("{}/v1", server.base_url),
+            ProviderKind::OpenAiCompatible,
+            "embed-1",
+            &["project context"],
+        );
+        let mut prepared = prepare_embedding(&request)
+            .await
+            .expect("prepare embedding");
+        prepared.endpoint_is_loopback = false;
+        let gateway = Arc::new(ModelGatewayState::new().expect("gateway state"));
+        let outer_gateway = Arc::clone(&gateway);
+        let outer_sqlite = Arc::clone(&sqlite);
+        let outer = tokio::spawn(async move {
+            run_prepared_embedding_with_dispatch(
+                &outer_gateway,
+                &outer_sqlite,
+                &scope,
+                Duration::from_secs(5),
+                prepared,
+                "dropped-embedding-command".to_owned(),
+            )
+            .await
+        });
+        let mut inspector = open_dispatch_inspector(&directory.join("inkshadow.db")).await;
+        wait_for_dispatch_lease_count(&mut inspector, 1).await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        outer.abort();
+        assert!(outer
+            .await
+            .expect_err("outer invoke future is cancelled")
+            .is_cancelled());
+        assert_eq!(dispatch_lease_count(&mut inspector).await, 1);
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("registry remains live after outer cancellation")
+            .contains("dropped-embedding-command"));
+
+        server
+            .release
+            .send(())
+            .expect("release detached embedding response");
+        wait_for_dispatch_lease_count(&mut inspector, 0).await;
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("registry after detached worker finishes")
+            .is_empty());
+        server.handle.join().expect("fake server stops");
+        drop(inspector);
+        drop(gateway);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn dropping_embedding_command_while_begin_is_blocked_keeps_native_lifecycle_alive() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000131";
+        const OPERATION_ID: &str = "embedding-cancelled-during-begin";
+        let (directory, sqlite, scope) =
+            seeded_empty_remote_project("embedding-begin-drop", PROJECT_ID).await;
+        let server = spawn_gated_fake_server(
+            "200 OK",
+            br#"{"data":[{"index":0,"embedding":[0.25,0.75]}],"model":"embed-1"}"#,
+        );
+        let request = embedding_request(
+            format!("{}/v1", server.base_url),
+            ProviderKind::OpenAiCompatible,
+            "embed-1",
+            &["project context"],
+        );
+        let mut prepared = prepare_embedding(&request)
+            .await
+            .expect("prepare embedding");
+        prepared.endpoint_is_loopback = false;
+        let gateway = Arc::new(ModelGatewayState::new().expect("gateway state"));
+        let mut writer = open_dispatch_inspector(&directory.join("inkshadow.db")).await;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut writer)
+            .await
+            .expect("hold the acquisition writer barrier");
+
+        let outer_gateway = Arc::clone(&gateway);
+        let outer_sqlite = Arc::clone(&sqlite);
+        let outer = tokio::spawn(async move {
+            run_prepared_embedding_with_dispatch(
+                &outer_gateway,
+                &outer_sqlite,
+                &scope,
+                Duration::from_secs(5),
+                prepared,
+                OPERATION_ID.to_owned(),
+            )
+            .await
+        });
+        wait_for_dispatch_registry_entry(&gateway, OPERATION_ID).await;
+        assert_eq!(dispatch_lease_count(&mut writer).await, 0);
+
+        outer.abort();
+        assert!(outer
+            .await
+            .expect_err("outer invoke future is cancelled during begin")
+            .is_cancelled());
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("native worker remains registered during begin")
+            .contains(OPERATION_ID));
+
+        sqlx::query("COMMIT")
+            .execute(&mut writer)
+            .await
+            .expect("release the acquisition writer barrier");
+        wait_for_dispatch_lease_count(&mut writer, 1).await;
+        server
+            .release
+            .send(())
+            .expect("release embedding response after begin completes");
+        wait_for_dispatch_lease_count(&mut writer, 0).await;
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("registry after begin-cancelled embedding finishes")
+            .is_empty());
+        server.handle.join().expect("fake server stops");
+        drop(writer);
+        drop(gateway);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn generation_cancellation_releases_the_lease_before_terminal_status() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000081";
+        let directory = std::env::temp_dir().join(format!(
+            "inkshadow-generation-cancel-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir(&directory).expect("create test directory");
+        let database_path = directory.join("inkshadow.db");
+        let sqlite = NativeSqliteState::default();
+        sqlite
+            .test_open_migrated_database(&database_path)
+            .await
+            .expect("open migrated database");
+        sqlite
+            .test_execute_internal_sql(&format!(
+                "INSERT INTO projects (id, name, created_at, updated_at) VALUES \
+                 ('{PROJECT_ID}', 'Cancellation', '2026-08-08T00:00:00.000Z', \
+                 '2026-08-08T00:00:00.000Z')"
+            ))
+            .await
+            .expect("seed project");
+        let mut receipt = NativeProjectContextPrivacyReceipt {
+            schema_version: 1,
+            project_id: PROJECT_ID.to_owned(),
+            fingerprint: String::new(),
+            active_chapter_count: 0,
+            retained_chapter_count: 0,
+            requires_verified_local: false,
+            chapters: vec![],
+        };
+        receipt.fingerprint =
+            canonical_project_context_fingerprint(&receipt).expect("canonical privacy fingerprint");
+        let scope = NativeModelDispatchScope::ProjectContext { receipt };
+        let server = spawn_fake_server(
+            "200 OK",
+            b"data: [DONE]\n\n",
+            Duration::from_millis(300),
+            None,
+        );
+        let mut request = generation_request();
+        request.config.base_url = format!("{}/v1", server.base_url);
+        request.config.request_timeout_ms = Some(2_000);
+        let mut prepared = prepare_generation(&request)
+            .await
+            .expect("prepare generation");
+        prepared.endpoint_is_loopback = false;
+        let gateway = ModelGatewayState::new().expect("gateway state");
+        let operation_id = "cancelled-generation";
+        let lease =
+            begin_remote_dispatch(&gateway, &sqlite, &scope, false, "generation", operation_id)
+                .await
+                .expect("acquire remote generation lease");
+        let cancellation = CancellationToken::new();
+        let cancel = cancellation.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            cancel.cancel();
+        });
+        #[derive(Default)]
+        struct TestSink;
+        impl GenerationDeltaSink for TestSink {
+            fn emit_delta(&mut self, _delta: &str) -> Result<(), CommandError> {
+                Ok(())
+            }
+        }
+        let mut sink = TestSink;
+        let result = timeout(
+            Duration::from_secs(2),
+            stream_generation(&gateway.client, prepared, &cancellation, &mut sink),
+        )
+        .await;
+        let terminal = finalize_generation_dispatch(
+            &sqlite,
+            lease,
+            &gateway.dispatch_registry,
+            &gateway.dispatch_lifecycle,
+            operation_id,
+            result,
+        )
+        .await;
+        assert!(matches!(terminal, GenerationEventStatus::Cancelled));
+        let mut writer = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&database_path)
+                .create_if_missing(false)
+                .foreign_keys(true)
+                .journal_mode(SqliteJournalMode::Wal),
+        )
+        .await
+        .expect("open post-cancel inspection");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM project_remote_dispatch_leases",)
+                .fetch_one(&mut writer)
+                .await
+                .expect("terminal status observes released lease"),
+            0
+        );
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("registry snapshot")
+            .is_empty());
+        server.handle.join().expect("fake server stops");
+        drop(writer);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn generation_timeout_releases_the_lease_before_terminal_status() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000111";
+        let (directory, sqlite, scope) =
+            seeded_empty_remote_project("generation-timeout", PROJECT_ID).await;
+        let gateway = ModelGatewayState::new().expect("gateway state");
+        let operation_id = "timed-out-generation";
+        let lease =
+            begin_remote_dispatch(&gateway, &sqlite, &scope, false, "generation", operation_id)
+                .await
+                .expect("acquire generation timeout lease");
+        let result = timeout(
+            Duration::from_millis(5),
+            std::future::pending::<Result<RunOutcome, CommandError>>(),
+        )
+        .await;
+        let terminal = finalize_generation_dispatch(
+            &sqlite,
+            lease,
+            &gateway.dispatch_registry,
+            &gateway.dispatch_lifecycle,
+            operation_id,
+            result,
+        )
+        .await;
+        assert!(matches!(
+            terminal,
+            GenerationEventStatus::Failed {
+                code: "MODEL_TIMEOUT",
+                retryable: true
+            }
+        ));
+        let mut inspector = open_dispatch_inspector(&directory.join("inkshadow.db")).await;
+        assert_eq!(dispatch_lease_count(&mut inspector).await, 0);
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("registry after generation timeout")
+            .is_empty());
+        drop(inspector);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn dropping_generation_command_while_begin_is_blocked_keeps_native_lifecycle_alive() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000151";
+        const GENERATION_ID: &str = "generation-cancelled-during-begin";
+        let (directory, sqlite, scope) =
+            seeded_empty_remote_project("generation-begin-drop", PROJECT_ID).await;
+        let server = spawn_gated_fake_server("200 OK", b"data: [DONE]\n\n");
+        let mut request = generation_request();
+        request.config.base_url = format!("{}/v1", server.base_url);
+        request.config.request_timeout_ms = Some(5_000);
+        let mut prepared = prepare_generation(&request)
+            .await
+            .expect("prepare generation");
+        prepared.endpoint_is_loopback = false;
+
+        #[derive(Default)]
+        struct TestEventSink;
+        impl GenerationDeltaSink for TestEventSink {
+            fn emit_delta(&mut self, _delta: &str) -> Result<(), CommandError> {
+                Ok(())
+            }
+        }
+        impl GenerationEventSink for TestEventSink {
+            fn emit_status(
+                &mut self,
+                _status: GenerationEventStatus,
+                _delta: String,
+            ) -> Result<(), CommandError> {
+                Ok(())
+            }
+        }
+
+        let gateway = Arc::new(ModelGatewayState::new().expect("gateway state"));
+        let mut writer = open_dispatch_inspector(&directory.join("inkshadow.db")).await;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut writer)
+            .await
+            .expect("hold the generation acquisition writer barrier");
+        let outer_gateway = Arc::clone(&gateway);
+        let outer_sqlite = Arc::clone(&sqlite);
+        let outer = tokio::spawn(async move {
+            start_prepared_generation_with_dispatch(
+                &outer_gateway,
+                &outer_sqlite,
+                &scope,
+                prepared,
+                GENERATION_ID.to_owned(),
+                TestEventSink,
+            )
+            .await
+        });
+        wait_for_dispatch_registry_entry(&gateway, GENERATION_ID).await;
+        assert_eq!(dispatch_lease_count(&mut writer).await, 0);
+
+        outer.abort();
+        assert!(outer
+            .await
+            .expect_err("outer generation invoke is cancelled during begin")
+            .is_cancelled());
+        assert!(gateway
+            .registry
+            .contains(GENERATION_ID)
+            .expect("generation registry remains native-owned"));
+        sqlx::query("COMMIT")
+            .execute(&mut writer)
+            .await
+            .expect("release the generation acquisition writer barrier");
+        wait_for_dispatch_lease_count(&mut writer, 1).await;
+        server
+            .release
+            .send(())
+            .expect("release generation response after begin completes");
+        wait_for_dispatch_lease_count(&mut writer, 0).await;
+        wait_for_generation_registry_absence(&gateway, GENERATION_ID).await;
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("registry after begin-cancelled generation finishes")
+            .is_empty());
+        server.handle.join().expect("fake server stops");
+        drop(writer);
+        drop(gateway);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn generation_stream_panic_still_releases_lease_and_both_registries() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000161";
+        const GENERATION_ID: &str = "generation-panics-after-network";
+        let (directory, sqlite, scope) =
+            seeded_empty_remote_project("generation-panic", PROJECT_ID).await;
+        let server = spawn_fake_server(
+            "200 OK",
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"panic delta\"}}]}\n\ndata: [DONE]\n\n",
+            Duration::ZERO,
+            None,
+        );
+        let mut request = generation_request();
+        request.config.base_url = format!("{}/v1", server.base_url);
+        let mut prepared = prepare_generation(&request)
+            .await
+            .expect("prepare generation");
+        prepared.endpoint_is_loopback = false;
+        let gateway = ModelGatewayState::new().expect("gateway state");
+        let cancellation = gateway
+            .registry
+            .register(GENERATION_ID)
+            .expect("register generation");
+        let lease = begin_remote_dispatch(
+            &gateway,
+            &sqlite,
+            &scope,
+            false,
+            "generation",
+            GENERATION_ID,
+        )
+        .await
+        .expect("acquire generation lease");
+
+        #[derive(Clone)]
+        struct PanicSink {
+            terminal: Arc<std::sync::Mutex<Vec<GenerationEventStatus>>>,
+        }
+        impl GenerationDeltaSink for PanicSink {
+            fn emit_delta(&mut self, _delta: &str) -> Result<(), CommandError> {
+                panic!("deterministic emitter panic");
+            }
+        }
+        impl GenerationEventSink for PanicSink {
+            fn emit_status(
+                &mut self,
+                status: GenerationEventStatus,
+                _delta: String,
+            ) -> Result<(), CommandError> {
+                self.terminal
+                    .lock()
+                    .expect("record terminal status")
+                    .push(status);
+                Ok(())
+            }
+        }
+        let terminal = Arc::new(std::sync::Mutex::new(Vec::new()));
+        drive_generation(NativeGenerationLifecycle {
+            state: gateway.clone(),
+            sqlite: (*sqlite).clone(),
+            prepared,
+            cancellation,
+            generation_id: GENERATION_ID.to_owned(),
+            emitter: PanicSink {
+                terminal: Arc::clone(&terminal),
+            },
+            lease,
+        })
+        .await;
+
+        let mut inspector = open_dispatch_inspector(&directory.join("inkshadow.db")).await;
+        assert_eq!(dispatch_lease_count(&mut inspector).await, 0);
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("dispatch registry after panic")
+            .is_empty());
+        assert!(!gateway
+            .registry
+            .contains(GENERATION_ID)
+            .expect("generation registry after panic"));
+        assert!(matches!(
+            terminal.lock().expect("read terminal status").as_slice(),
+            [GenerationEventStatus::Failed {
+                code: "MODEL_RUNTIME_FAILED",
+                retryable: true
+            }]
+        ));
+        server.handle.join().expect("fake server stops");
+        drop(inspector);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
     async fn calls_ollama_embed_endpoint_without_provider_guessing() {
         let server = spawn_fake_server(
             "200 OK",
@@ -2289,6 +3583,7 @@ mod tests {
             model: request.model.clone(),
             document_count: request.documents.len(),
             top_n: request.top_n,
+            endpoint_is_loopback: true,
         };
         let response = timeout(
             Duration::from_secs(2),
@@ -2323,6 +3618,162 @@ mod tests {
         let safe_response = serde_json::to_string(&response).expect("response should serialize");
         assert!(!safe_response.contains("first source"));
         assert!(!safe_response.contains("Which source"));
+    }
+
+    #[tokio::test]
+    async fn dropping_rerank_command_future_does_not_release_a_live_network_lease() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000121";
+        let (directory, sqlite, scope) =
+            seeded_empty_remote_project("rerank-drop", PROJECT_ID).await;
+        let server = spawn_gated_fake_server(
+            "200 OK",
+            br#"{"object":"list","results":[{"index":1,"relevance_score":0.91}],"model":"qwen3-rerank","usage":{"total_tokens":41}}"#,
+        );
+        let request = rerank_request(format!("{}/compatible-api/v1", server.base_url));
+        let prepared = PreparedRerank {
+            provider: ProviderKind::OpenAiCompatible,
+            protocol: RerankProtocol::QwenOpenAiCompatible,
+            endpoint_origin: server.base_url.clone(),
+            url: Url::parse(&format!("{}/compatible-api/v1/reranks", server.base_url))
+                .expect("test URL parses"),
+            credential: None,
+            body: serde_json::to_vec(&QwenRerankBody {
+                model: &request.model,
+                query: &request.query,
+                documents: &request.documents,
+                top_n: request.top_n,
+            })
+            .expect("rerank body serializes"),
+            model: request.model,
+            document_count: request.documents.len(),
+            top_n: request.top_n,
+            endpoint_is_loopback: false,
+        };
+        let gateway = Arc::new(ModelGatewayState::new().expect("gateway state"));
+        let outer_gateway = Arc::clone(&gateway);
+        let outer_sqlite = Arc::clone(&sqlite);
+        let outer = tokio::spawn(async move {
+            run_prepared_rerank_with_dispatch(
+                &outer_gateway,
+                &outer_sqlite,
+                &scope,
+                Duration::from_secs(5),
+                prepared,
+                "dropped-rerank-command".to_owned(),
+            )
+            .await
+        });
+        let mut inspector = open_dispatch_inspector(&directory.join("inkshadow.db")).await;
+        wait_for_dispatch_lease_count(&mut inspector, 1).await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        outer.abort();
+        assert!(outer
+            .await
+            .expect_err("outer invoke future is cancelled")
+            .is_cancelled());
+        assert_eq!(dispatch_lease_count(&mut inspector).await, 1);
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("registry remains live after outer rerank cancellation")
+            .contains("dropped-rerank-command"));
+
+        server
+            .release
+            .send(())
+            .expect("release detached rerank response");
+        wait_for_dispatch_lease_count(&mut inspector, 0).await;
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("registry after detached rerank worker finishes")
+            .is_empty());
+        server.handle.join().expect("fake server stops");
+        drop(inspector);
+        drop(gateway);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn dropping_rerank_command_while_begin_is_blocked_keeps_native_lifecycle_alive() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000141";
+        const OPERATION_ID: &str = "rerank-cancelled-during-begin";
+        let (directory, sqlite, scope) =
+            seeded_empty_remote_project("rerank-begin-drop", PROJECT_ID).await;
+        let server = spawn_gated_fake_server(
+            "200 OK",
+            br#"{"object":"list","results":[{"index":1,"relevance_score":0.91}],"model":"qwen3-rerank","usage":{"total_tokens":41}}"#,
+        );
+        let request = rerank_request(format!("{}/compatible-api/v1", server.base_url));
+        let prepared = PreparedRerank {
+            provider: ProviderKind::OpenAiCompatible,
+            protocol: RerankProtocol::QwenOpenAiCompatible,
+            endpoint_origin: server.base_url.clone(),
+            url: Url::parse(&format!("{}/compatible-api/v1/reranks", server.base_url))
+                .expect("test URL parses"),
+            credential: None,
+            body: serde_json::to_vec(&QwenRerankBody {
+                model: &request.model,
+                query: &request.query,
+                documents: &request.documents,
+                top_n: request.top_n,
+            })
+            .expect("rerank body serializes"),
+            model: request.model,
+            document_count: request.documents.len(),
+            top_n: request.top_n,
+            endpoint_is_loopback: false,
+        };
+        let gateway = Arc::new(ModelGatewayState::new().expect("gateway state"));
+        let mut writer = open_dispatch_inspector(&directory.join("inkshadow.db")).await;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut writer)
+            .await
+            .expect("hold the rerank acquisition writer barrier");
+
+        let outer_gateway = Arc::clone(&gateway);
+        let outer_sqlite = Arc::clone(&sqlite);
+        let outer = tokio::spawn(async move {
+            run_prepared_rerank_with_dispatch(
+                &outer_gateway,
+                &outer_sqlite,
+                &scope,
+                Duration::from_secs(5),
+                prepared,
+                OPERATION_ID.to_owned(),
+            )
+            .await
+        });
+        wait_for_dispatch_registry_entry(&gateway, OPERATION_ID).await;
+        assert_eq!(dispatch_lease_count(&mut writer).await, 0);
+
+        outer.abort();
+        assert!(outer
+            .await
+            .expect_err("outer rerank invoke is cancelled during begin")
+            .is_cancelled());
+        sqlx::query("COMMIT")
+            .execute(&mut writer)
+            .await
+            .expect("release the rerank acquisition writer barrier");
+        wait_for_dispatch_lease_count(&mut writer, 1).await;
+        server
+            .release
+            .send(())
+            .expect("release rerank response after begin completes");
+        wait_for_dispatch_lease_count(&mut writer, 0).await;
+        assert!(gateway
+            .dispatch_registry
+            .snapshot()
+            .expect("registry after begin-cancelled rerank finishes")
+            .is_empty());
+        server.handle.join().expect("fake server stops");
+        drop(writer);
+        drop(gateway);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[tokio::test]
@@ -2407,6 +3858,7 @@ mod tests {
         let embedding = embed_with_timeout(
             &state.client,
             &EmbeddingRequest {
+                dispatch_scope: test_dispatch_scope(),
                 config: config.clone(),
                 model: embedding_model.clone(),
                 inputs: vec![
@@ -2429,6 +3881,7 @@ mod tests {
             .all(|value| value.is_finite()));
 
         let prepared = prepare_generation(&StartGenerationRequest {
+            dispatch_scope: test_dispatch_scope(),
             generation_id: "real-local-ollama-generation".to_owned(),
             config,
             model: generation_model,

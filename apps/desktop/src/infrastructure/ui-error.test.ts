@@ -104,4 +104,31 @@ describe("normalizeUiError SQLite persistence failures", () => {
     expect(normalized.description).toContain("脱敏诊断包");
     expect(JSON.stringify(normalized)).not.toContain(privateDetail);
   });
+
+  it("explains how to recover from browser storage quota exhaustion", () => {
+    const normalized = normalizeUiError({
+      code: "CREATIVE_JOURNEY_STORAGE_QUOTA_EXCEEDED",
+      message: "private browser detail",
+      retryable: true,
+    });
+
+    expect(normalized.code).toBe("CREATIVE_JOURNEY_STORAGE_QUOTA_EXCEEDED");
+    expect(normalized.description).toContain("释放设备或浏览器存储空间");
+    expect(normalized.description).toContain("再次点击原来的创建或保存操作");
+    expect(normalized.description).toContain("当前输入仍保留在页面中");
+    expect(normalized.description).not.toContain("private browser detail");
+  });
+
+  it("explains how to recover when browser storage permission is denied", () => {
+    const normalized = normalizeUiError({
+      code: "CREATIVE_JOURNEY_STORAGE_ACCESS_DENIED",
+      message: "private browser detail",
+      retryable: true,
+    });
+
+    expect(normalized.code).toBe("CREATIVE_JOURNEY_STORAGE_ACCESS_DENIED");
+    expect(normalized.description).toContain("允许 InkShadow 使用本地存储");
+    expect(normalized.description).toContain("再次点击原来的创建或保存操作");
+    expect(normalized.description).not.toContain("private browser detail");
+  });
 });

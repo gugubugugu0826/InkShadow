@@ -63,6 +63,40 @@ describe("BrowserCreativeJourneyStore", () => {
     ).rejects.toBeInstanceOf(CreativeJourneyStoreError);
     expect(window.localStorage.getItem(DEVELOPMENT_CREATIVE_JOURNEY_KEY)).toBeNull();
   });
+
+  it("maps quota failures to a stable retryable error without partially committing", async () => {
+    const storage = new FaultInjectingStorage(window.localStorage);
+    const store = new BrowserCreativeJourneyStore(storage);
+    const record = journey();
+    await store.create(record, turn());
+    const updated = {
+      ...record,
+      revision: 2,
+      currentState: "asking_one_question",
+      updatedAt: LATER,
+    } satisfies CreativeJourneyRecord;
+
+    storage.failNextWrite(new DOMException("quota reached", "QuotaExceededError"));
+    await expect(store.update(updated, 1)).rejects.toMatchObject({
+      code: "CREATIVE_JOURNEY_STORAGE_QUOTA_EXCEEDED",
+      retryable: true,
+    });
+    expect((await store.findById(JOURNEY_ID))?.revision).toBe(1);
+
+    await store.update(updated, 1);
+    expect((await store.findById(JOURNEY_ID))?.revision).toBe(2);
+  });
+
+  it("maps denied browser storage access to a stable retryable error", async () => {
+    const storage = new FaultInjectingStorage(window.localStorage);
+    const store = new BrowserCreativeJourneyStore(storage);
+    storage.failNextRead(new DOMException("storage disabled", "SecurityError"));
+
+    await expect(store.listActive("idea")).rejects.toMatchObject({
+      code: "CREATIVE_JOURNEY_STORAGE_ACCESS_DENIED",
+      retryable: true,
+    });
+  });
 });
 
 describe("SqliteCreativeJourneyStore", () => {
@@ -118,6 +152,55 @@ function turn(overrides: Partial<CreativeJourneyTurnRecord> = {}): CreativeJourn
     createdAt: NOW,
     ...overrides,
   };
+}
+
+class FaultInjectingStorage implements Storage {
+  private nextReadError: Error | null = null;
+  private nextWriteError: Error | null = null;
+
+  public constructor(private readonly delegate: Storage) {}
+
+  public get length(): number {
+    return this.delegate.length;
+  }
+
+  public clear(): void {
+    this.delegate.clear();
+  }
+
+  public failNextRead(error: Error): void {
+    this.nextReadError = error;
+  }
+
+  public failNextWrite(error: Error): void {
+    this.nextWriteError = error;
+  }
+
+  public getItem(key: string): string | null {
+    if (this.nextReadError !== null) {
+      const error = this.nextReadError;
+      this.nextReadError = null;
+      throw error;
+    }
+    return this.delegate.getItem(key);
+  }
+
+  public key(index: number): string | null {
+    return this.delegate.key(index);
+  }
+
+  public removeItem(key: string): void {
+    this.delegate.removeItem(key);
+  }
+
+  public setItem(key: string, value: string): void {
+    if (this.nextWriteError !== null) {
+      const error = this.nextWriteError;
+      this.nextWriteError = null;
+      throw error;
+    }
+    this.delegate.setItem(key, value);
+  }
 }
 
 const CORE_MIGRATION = readMigration("0001_core.sql");

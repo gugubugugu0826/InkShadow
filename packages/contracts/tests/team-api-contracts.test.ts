@@ -15,9 +15,9 @@ import {
   CloudTeamMembershipSchema,
   CloudTeamSchema,
   CONTRACT_SCHEMA_VERSION,
-  INKSHADOW_CLOUD_OPENAPI,
   getCloudApiOperation,
 } from "../src/index.js";
+import { INKSHADOW_CLOUD_OPENAPI } from "@inkshadow/contracts/openapi";
 
 const REQUEST_ID = "018f0d7a-3b2c-7abc-8def-000000000001";
 const TENANT_ID = "018f0d7a-3b2c-7abc-8def-000000000002";

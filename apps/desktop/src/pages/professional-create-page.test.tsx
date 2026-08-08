@@ -6,6 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
 import { createDevelopmentRuntime } from "../infrastructure/runtime";
+import { parseProjectSeed } from "../infrastructure/project-seed";
 import { RuntimeProvider } from "../runtime-context";
 import {
   PROFESSIONAL_CREATE_RECOVERY_KEY,
@@ -42,6 +43,34 @@ describe("professional project creation", () => {
       expect(screen.getByText(label).closest("details")).not.toHaveAttribute("open");
     }
     expect(screen.getByRole("textbox", { name: /^故事方向/ })).not.toBeVisible();
+  });
+
+  it("recovers professional inputs through the shared ProjectSeed contract", async () => {
+    const first = renderPage();
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("textbox", { name: "项目名称" }), "雾港来信");
+    await user.click(screen.getByText("故事方向与大纲"));
+    await user.type(screen.getByRole("textbox", { name: /^故事方向/ }), "追查失踪的邮差");
+    await user.click(screen.getByText("人物与世界"));
+    await user.type(screen.getByRole("textbox", { name: /^世界背景/ }), "终年有雾的港城");
+
+    await waitFor(() => {
+      const saved = JSON.parse(
+        window.localStorage.getItem(PROFESSIONAL_CREATE_RECOVERY_KEY) ?? "{}",
+      ) as { projectSeed?: unknown };
+      const seed = parseProjectSeed(saved.projectSeed);
+      expect(seed?.journeyKind).toBe("professional");
+      expect(seed?.currentDirection.values).toEqual(["追查失踪的邮差"]);
+      expect(seed?.currentDirection.source).toBe("professional_setup");
+      expect(seed?.currentDirection.confirmation).toBe("confirmed");
+      expect(seed?.world.values).toEqual(["终年有雾的港城"]);
+    });
+
+    first.unmount();
+    renderPage(createDevelopmentRuntime(window.localStorage));
+    expect(screen.getByRole("textbox", { name: "项目名称" })).toHaveValue("雾港来信");
+    await user.click(screen.getByText("人物与世界"));
+    expect(screen.getByRole("textbox", { name: /^世界背景/ })).toHaveValue("终年有雾的港城");
   });
 
   it("persists a blank first chapter, outline, and human-confirmed setup records", async () => {

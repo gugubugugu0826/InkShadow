@@ -2,6 +2,11 @@ import type { Clock, UuidV7Generator } from "@inkshadow/domain";
 
 import { getModelProviderPreset, isLoopbackModelBaseUrl } from "./model-hub-provider-registry";
 import { ModelHubExecutionError } from "./model-hub-execution-service";
+import {
+  assertModelHubFinalDispatchUnchanged,
+  ModelHubFinalDispatchError,
+  modelHubFinalDispatchIdentity,
+} from "./model-hub-final-dispatch-guard";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
 import type {
   ModelCapabilityEvidence,
@@ -17,7 +22,10 @@ import type {
   NativeImageFileReceipt,
   NativeImageGenerationGateway,
 } from "./native-image-generation-gateway";
-import { modelHubNativeEndpointConfig } from "./model-hub-native-config";
+import {
+  modelHubCredentialProviderId,
+  modelHubNativeEndpointConfig,
+} from "./model-hub-native-config";
 
 const IMAGE_TASK = "image_generation" as const;
 const MAXIMUM_PROMPT_CHARACTERS = 1_000;
@@ -27,7 +35,9 @@ export interface ModelHubImageGenerationDependencies {
   readonly modelHub: ModelHubStore;
   readonly imageGateway: NativeImageGenerationGateway;
   readonly credentials: Readonly<{
-    getSummary(providerId: string): Promise<Readonly<{ configured: boolean }>>;
+    getSummary(
+      providerId: string,
+    ): Promise<Readonly<{ configured: boolean; lastFour?: string | null }>>;
   }>;
   readonly ids: Pick<UuidV7Generator, "next">;
   readonly clock: Clock;
@@ -55,12 +65,18 @@ export interface ModelHubImageGenerationInspection {
   readonly maximumPromptCharacters: number;
   readonly outputFormat: "png";
   readonly usedFallback: boolean;
+  /**
+   * Immutable confirmation identity for the exact route, model, credential
+   * slot, privacy policy, data destination and cost policy shown to the user.
+   */
+  readonly confirmationFingerprint: string;
 }
 
 export interface GenerateModelHubImageInput {
   readonly prompt: string;
   readonly destination: NativeImageDestinationReceipt;
   readonly acknowledgedCostAndPrivacy: boolean;
+  readonly expectedConfirmationFingerprint: string;
 }
 
 export interface ModelHubImageGenerationReceipt {
@@ -78,6 +94,11 @@ interface ResolvedImageTarget {
   readonly catalogEntry: ModelCatalogEntry;
   readonly privacy: ModelCostPrivacyProfile;
   readonly evidence: readonly ModelCapabilityEvidence[];
+  readonly credentialIdentity: Readonly<{
+    providerId: string;
+    configured: boolean;
+    lastFour: string | null;
+  }>;
 }
 
 interface ResolvedImagePlan {
@@ -91,7 +112,7 @@ export class ModelHubImageGenerationService {
 
   public async inspect(): Promise<ModelHubImageGenerationInspection> {
     const plan = await resolvePlan(this.dependencies);
-    return inspectionFromPlan(plan, this.dependencies.clock.now());
+    return createInspectionFromPlan(plan, this.dependencies.clock.now());
   }
 
   public chooseDestination(): Promise<NativeImageDestinationReceipt | null> {
@@ -112,7 +133,21 @@ export class ModelHubImageGenerationService {
       );
     }
     validateDestinationReceipt(input.destination);
+    const expectedConfirmationFingerprint = validateConfirmationFingerprint(
+      input.expectedConfirmationFingerprint,
+    );
     const { route, target, usedFallback } = await resolvePlan(this.dependencies);
+    await assertImageConfirmationMatches(expectedConfirmationFingerprint, {
+      route,
+      target,
+      usedFallback,
+    });
+    const expectedDispatchIdentity = modelHubFinalDispatchIdentity({
+      route,
+      connection: target.connection,
+      catalogEntry: target.catalogEntry,
+      costPrivacy: target.privacy,
+    });
 
     let invocation = await this.dependencies.modelHub.startInvocation({
       id: this.dependencies.ids.next(),
@@ -131,15 +166,28 @@ export class ModelHubImageGenerationService {
     });
 
     let generated: NativeImageFileReceipt;
+    let dispatched = false;
     try {
+      const current = await resolvePlan(this.dependencies);
+      assertModelHubFinalDispatchUnchanged(
+        expectedDispatchIdentity,
+        modelHubFinalDispatchIdentity({
+          route: current.route,
+          connection: current.target.connection,
+          catalogEntry: current.target.catalogEntry,
+          costPrivacy: current.target.privacy,
+        }),
+      );
+      await assertImageConfirmationMatches(expectedConfirmationFingerprint, current);
+      dispatched = true;
       generated = await this.dependencies.imageGateway.generateToFile({
         destinationTicket: input.destination.ticket,
-        config: modelHubNativeEndpointConfig(target.connection),
-        model: target.catalogEntry.providerModelId,
+        config: modelHubNativeEndpointConfig(current.target.connection),
+        model: current.target.catalogEntry.providerModelId,
         prompt,
       });
     } catch (cause: unknown) {
-      const error = normalizeDispatchedError(cause);
+      const error = dispatched ? normalizeDispatchedError(cause) : normalizePreDispatchError(cause);
       await this.dependencies.modelHub
         .finishInvocation({
           id: invocation.id,
@@ -299,17 +347,19 @@ async function resolveTarget(
     );
   }
   const preset = getModelProviderPreset(connection.providerKind);
-  if (preset.credentialRequired || connection.credentialState === "present") {
-    const summary = await dependencies.credentials
-      .getSummary(connection.id)
-      .catch(() => ({ configured: false }));
-    if (!summary.configured) {
-      throw executionError(
-        "MODEL_HUB_CREDENTIAL_MISSING",
-        "图片模型缺少可用凭据。请在设置中重新保存 API Key。",
-        true,
-      );
-    }
+  const credentialProviderId = modelHubCredentialProviderId(connection);
+  const credentialSummary = await dependencies.credentials
+    .getSummary(credentialProviderId)
+    .catch(() => ({ configured: false, lastFour: null }));
+  if (
+    (preset.credentialRequired || connection.credentialState === "present") &&
+    !credentialSummary.configured
+  ) {
+    throw executionError(
+      "MODEL_HUB_CREDENTIAL_MISSING",
+      "图片模型缺少可用凭据。请在设置中重新保存 API Key。",
+      true,
+    );
   }
   const privacy = await dependencies.modelHub.findCostPrivacyProfile(catalogEntry.id);
   if (
@@ -336,13 +386,18 @@ async function resolveTarget(
     catalogEntry,
     privacy,
     evidence: Object.freeze([...evidence]),
+    credentialIdentity: Object.freeze({
+      providerId: credentialProviderId,
+      configured: credentialSummary.configured,
+      lastFour: typeof credentialSummary.lastFour === "string" ? credentialSummary.lastFour : null,
+    }),
   });
 }
 
-function inspectionFromPlan(
+async function createInspectionFromPlan(
   plan: ResolvedImagePlan,
   now: string,
-): ModelHubImageGenerationInspection {
+): Promise<ModelHubImageGenerationInspection> {
   const { target } = plan;
   return Object.freeze({
     task: IMAGE_TASK,
@@ -377,7 +432,76 @@ function inspectionFromPlan(
     maximumPromptCharacters: MAXIMUM_PROMPT_CHARACTERS,
     outputFormat: "png",
     usedFallback: plan.usedFallback,
+    confirmationFingerprint: await imageConfirmationFingerprint(plan),
   });
+}
+
+async function assertImageConfirmationMatches(
+  expected: string,
+  current: ResolvedImagePlan,
+): Promise<void> {
+  if ((await imageConfirmationFingerprint(current)) !== expected) {
+    throw executionError(
+      "MODEL_HUB_IMAGE_CONFIRMATION_STALE",
+      "图片模型、连接、凭据、数据去向、隐私或费用规则已发生变化。请重新检查并再次确认后生成。",
+      true,
+    );
+  }
+}
+
+async function imageConfirmationFingerprint(plan: ResolvedImagePlan): Promise<string> {
+  const { route, target } = plan;
+  const canonical = JSON.stringify({
+    version: 1,
+    task: IMAGE_TASK,
+    dispatchIdentity: modelHubFinalDispatchIdentity({
+      route,
+      connection: target.connection,
+      catalogEntry: target.catalogEntry,
+      costPrivacy: target.privacy,
+    }),
+    usedFallback: plan.usedFallback,
+    maximumCostMicros: route.maximumCostMicros,
+    currency: route.currency,
+    routeOrigin: route.routeOrigin,
+    presetId: route.presetId,
+    parameterPolicy: route.parameterPolicy,
+    dataDestination: target.privacy.dataDestination,
+    retentionPolicy: target.privacy.retentionPolicy,
+    trainingPolicy: target.privacy.trainingPolicy,
+    privacyEvidenceSource: target.privacy.evidenceSource,
+    privacyEvidenceVersion: target.privacy.evidenceVersion,
+    privacyRevision: target.privacy.revision,
+    credentialIdentity: target.credentialIdentity,
+    capabilityEvidence: [...target.evidence]
+      .filter(({ capability, verdict }) => capability === IMAGE_TASK && verdict === "supported")
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map(({ id, evidenceSource, evidenceVersion, observedAt, expiresAt }) => ({
+        id,
+        evidenceSource,
+        evidenceVersion,
+        observedAt,
+        expiresAt,
+      })),
+    outputFormat: "png",
+    pricingNotice: "per_image_price_not_modeled",
+  });
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(canonical),
+  );
+  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+function validateConfirmationFingerprint(value: string): string {
+  if (!/^[a-f0-9]{64}$/u.test(value)) {
+    throw executionError(
+      "MODEL_HUB_IMAGE_CONFIRMATION_STALE",
+      "生成确认已失效。请重新检查图片模型、费用与数据去向后再次确认。",
+      true,
+    );
+  }
+  return value;
 }
 
 function validatePrompt(value: string): string {
@@ -414,11 +538,13 @@ function validateDestinationReceipt(value: NativeImageDestinationReceipt): void 
 function normalizePreDispatchError(cause: unknown): ModelHubExecutionError {
   return cause instanceof ModelHubExecutionError
     ? cause
-    : executionError(
-        "MODEL_HUB_PREFLIGHT_FAILED",
-        "图片生成前检查没有通过。请检查 AI 分工、能力、连接和隐私信息。",
-        true,
-      );
+    : cause instanceof ModelHubFinalDispatchError
+      ? executionError(cause.code, cause.message, cause.retryable)
+      : executionError(
+          "MODEL_HUB_PREFLIGHT_FAILED",
+          "图片生成前检查没有通过。请检查 AI 分工、能力、连接和隐私信息。",
+          true,
+        );
 }
 
 function normalizeDispatchedError(cause: unknown): ModelHubExecutionError {

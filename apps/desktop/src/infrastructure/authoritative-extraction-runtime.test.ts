@@ -7,7 +7,7 @@ import {
   parseContentChecksum,
   parseIsoUtcTimestamp as parseDomainTimestamp,
 } from "@inkshadow/domain";
-import type { SqlExecutor } from "@inkshadow/data";
+import { SqliteChapterRepository, type SqlExecutor } from "@inkshadow/data";
 import {
   FormalStoryRecord,
   SqliteFormalStoryRecordRepository,
@@ -24,6 +24,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { NodeSqliteExecutor } from "../../../../packages/data/tests/node-sqlite-executor.js";
 import { createAuthoritativeExtractionDesktopRuntime } from "./authoritative-extraction-runtime";
+import { ProjectContextPrivacyAuthority } from "./project-context-privacy-authority";
 import { createSqliteStoryGraphRuntime, type StoryGraphRuntimePort } from "./story-graph-runtime";
 
 const migration = [
@@ -32,6 +33,15 @@ const migration = [
   readWorkspaceFile("packages", "data", "migrations", "0020_graph_rag_projection.sql"),
   readWorkspaceFile("packages", "data", "migrations", "0023_authoritative_story_graph_epoch.sql"),
   readWorkspaceFile("packages", "data", "migrations", "0027_authoritative_extraction.sql"),
+  // Keep the minimal extraction fixture aligned with the current chapters row.
+  // The full 0038 migration also installs sync guards, whose tables are outside
+  // this focused runtime test.
+  `ALTER TABLE chapters
+     ADD COLUMN privacy_mode TEXT NOT NULL DEFAULT 'standard'
+       CHECK (privacy_mode IN ('standard', 'local_only'));
+   ALTER TABLE chapters
+     ADD COLUMN privacy_revision INTEGER NOT NULL DEFAULT 1
+       CHECK (privacy_revision BETWEEN 1 AND 9007199254740991);`,
 ].join("\n");
 
 const PROJECT_ID = uuid(1);
@@ -39,6 +49,8 @@ const CHAPTER_ID = uuid(2);
 const VERSION_ID = uuid(3);
 const RECORD_ID = uuid(4);
 const ACTOR_ID = uuid(5);
+const PRIVATE_CHAPTER_ID = uuid(6);
+const PRIVATE_VERSION_ID = uuid(7);
 const NOW = "2026-07-28T03:00:00.000Z";
 const CONTENT = "Lin Zhou left South City and reached North Tower before sunrise.";
 const EXCERPT = "reached North Tower";
@@ -249,12 +261,61 @@ describe("authoritative extraction desktop runtime", () => {
       ),
     ).toBe(false);
   });
+
+  it("blocks a standard remote target when another retained chapter is local-only", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    executors.push(executor);
+    await seedAuthority(executor);
+    await seedRetainedPrivateChapter(executor);
+    const contentHasher = new CryptoContentHasher();
+    const clock = fixedClock();
+    const provider = new FixtureProvider();
+    const authority = new ProjectContextPrivacyAuthority(
+      new SqliteChapterRepository(executor),
+      contentHasher,
+    );
+    const runtime = createAuthoritativeExtractionDesktopRuntime({
+      featureEnabled: true,
+      persistence: "native_sqlite",
+      executor,
+      provider,
+      graph: createSqliteStoryGraphRuntime({ executor, hasher: contentHasher, clock }),
+      contentHasher,
+      clock,
+      ids: new SequenceIds(200),
+      provenance: provenance(),
+      evaluationSuiteId: "authoritative.v1",
+      executionMode: "remote",
+      captureProjectContextAuthority: async (projectId) => {
+        const receipt = await authority.inspect(projectId);
+        authority.assertRouteEligible(receipt, false);
+        return async () => {
+          await authority.assertCurrentBeforeDispatch(receipt);
+          authority.assertRouteEligible(receipt, false);
+        };
+      },
+    });
+    unwrap(await runtime.runEvaluation(goldenSuite()));
+    provider.calls = 0;
+
+    unwrap(await runtime.runCycle(PROJECT_ID, { online: true, maximumJobs: 1 }));
+
+    expect(provider.calls).toBe(0);
+    const dashboard = unwrap(await runtime.inspect(PROJECT_ID));
+    expect(dashboard.jobs.find(({ source }) => source.chapterId === CHAPTER_ID)).toMatchObject({
+      state: "failed_retryable",
+      failure: { code: "project_context_privacy_unavailable", retryable: true },
+    });
+  });
 });
 
 class FixtureProvider implements AuthoritativeExtractionProvider {
+  public calls = 0;
+
   public generate(
     request: AuthoritativeExtractionProviderRequest,
   ): Promise<Result<string, { code: string; retryable: boolean; offline: boolean }>> {
+    this.calls += 1;
     return Promise.resolve(ok(validProviderOutput(request)));
   }
 }
@@ -309,6 +370,26 @@ async function seedAuthority(executor: SqlExecutor): Promise<void> {
     }),
   );
   unwrap(await new SqliteFormalStoryRecordRepository(executor).create(record));
+}
+
+async function seedRetainedPrivateChapter(executor: SqlExecutor): Promise<void> {
+  const content = "This retained sibling chapter must stay on this device.";
+  await executor.transaction(async (transaction) => {
+    await transaction.execute(
+      `INSERT INTO chapters (
+         id, project_id, title, content, status, revision, current_version_id,
+         privacy_mode, privacy_revision, created_at, updated_at
+       ) VALUES (?, ?, 'Private sibling', ?, 'active', 1, ?, 'local_only', 1, ?, ?)`,
+      [PRIVATE_CHAPTER_ID, PROJECT_ID, content, PRIVATE_VERSION_ID, NOW, NOW],
+    );
+    await transaction.execute(
+      `INSERT INTO chapter_versions (
+         id, project_id, chapter_id, parent_version_id, sequence, content,
+         content_checksum, reason, source_candidate_id, created_at
+       ) VALUES (?, ?, ?, NULL, 1, ?, ?, 'created', NULL, ?)`,
+      [PRIVATE_VERSION_ID, PROJECT_ID, PRIVATE_CHAPTER_ID, content, sha256(content), NOW],
+    );
+  });
 }
 
 function validProviderOutput(request: AuthoritativeExtractionProviderRequest): string {

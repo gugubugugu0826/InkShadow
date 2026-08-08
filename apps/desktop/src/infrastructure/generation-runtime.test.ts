@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createProjectSeed, updateProjectSeedField } from "@inkshadow/domain";
 
 import { ModelCenterError } from "./model-center-store";
 import {
@@ -13,6 +14,53 @@ import {
 } from "./runtime";
 
 describe("governed generation runtime", () => {
+  it("includes confirmed ProjectSeed guidance in the real continuation context", async () => {
+    const { runtime, chapterId } = await createNativeRuntime();
+    const chapter = await runtime.repositories.chapters.findById(chapterId);
+    if (!chapter.ok || chapter.value === null) {
+      throw new Error("Expected the generated test chapter.");
+    }
+    const now = runtime.clock.now();
+    let seed = createProjectSeed({
+      seedId: runtime.ids.next(),
+      journeyKind: "idea",
+      premise: "在永夜港寻找失踪的姐姐。",
+      now,
+    });
+    seed = updateProjectSeedField(seed, "boundaries", {
+      values: ["禁止死者复生。"],
+      source: "user_input",
+      confirmation: "confirmed",
+      origin: "author-boundaries",
+      updatedAt: now,
+    });
+    seed = updateProjectSeedField(seed, "world", {
+      values: ["潮雾会吞没无人看守的灯塔。"],
+      source: "ai_inference",
+      confirmation: "unconfirmed",
+      origin: "ai-opening",
+      updatedAt: now,
+    });
+    await runtime.projectSeeds.saveForProject(chapter.value.projectId, seed);
+
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const boundaryEntry = plan.contextCompilation?.compiled.entries.find(({ id }) =>
+      id.includes(":boundaries:"),
+    );
+    expect(boundaryEntry).toMatchObject({
+      layer: "locked_hard_rules",
+      included: true,
+      required: true,
+    });
+    const prompt = plan.messages.map(({ content }) => content).join("\n");
+    expect(prompt).toContain("禁止死者复生。");
+    expect(prompt).not.toContain("潮雾会吞没无人看守的灯塔");
+  });
+
   it("blocks missing price metadata and exposes a source-backed estimate after configuration", async () => {
     const { runtime, chapterId } = await createNativeRuntime();
     await runtime.modelCenter.save({

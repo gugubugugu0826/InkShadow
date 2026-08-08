@@ -6,9 +6,10 @@ import {
   MEMORY_LEVELS,
   StoryCoreError,
   parseUuidV7 as parseStoryUuid,
+  readAmbiguousStoryFactEntityAlias,
+  storyFactNeedsEntityAliasResolution,
   type FormalRecordKind,
   type FormalStoryRecord,
-  type FormalTimelineSnapshot,
   type DecideReviewItemCommand,
   type MemoryLevel,
   type MemoryPolicy,
@@ -35,6 +36,7 @@ import {
   CardHeader,
   CardTitle,
   Dialog,
+  Drawer,
   EmptyState,
   ErrorState,
   FormField,
@@ -48,7 +50,7 @@ import {
   TabsTrigger,
   Textarea,
 } from "@inkshadow/ui";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { normalizeUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
@@ -66,6 +68,9 @@ const MEMORY_LEVEL_OPTIONS = MEMORY_LEVELS.map((level) => ({
   value: level,
   label: memoryLevelLabel(level),
 }));
+
+const PRIMARY_GOVERNANCE_TABS = ["characters", "world", "memory", "preferences"] as const;
+const WORLD_SECTION_ORDER = ["location", "rule", "organization", "other"] as const;
 
 const FACT_TYPE_OPTIONS = [
   { value: "character_identity", label: "人物身份" },
@@ -85,15 +90,22 @@ const FACT_TYPE_OPTIONS = [
 type FormalDialog =
   Readonly<{ mode: "create" }> | Readonly<{ mode: "edit"; record: FormalStoryRecord }>;
 
-type WhatIfDialog =
-  | Readonly<{ mode: "create" }>
-  | Readonly<{ mode: "simulate"; branch: WhatIfBranch }>
-  | Readonly<{ mode: "promote"; branch: WhatIfBranch }>;
-
 type ReviewItem = StructuredReviewItem<"extraction"> | StructuredReviewItem<"consistency">;
+
+type WorldSectionKind = "location" | "rule" | "organization" | "other";
+
+interface StoryEntityGroup {
+  readonly key: string;
+  readonly name: string;
+  readonly aliases: readonly string[];
+  readonly facts: readonly StoryFact[];
+  readonly records: readonly FormalStoryRecord[];
+  readonly worldSection: WorldSectionKind | null;
+}
 
 export function StoryGovernancePage() {
   const runtime = useRuntime();
+  const navigate = useNavigate();
   const params = useParams<{ projectId: string }>();
   const projectIdParameter = params.projectId ?? "";
   const domainProjectId = useMemo(() => parseDomainUuid(projectIdParameter), [projectIdParameter]);
@@ -108,7 +120,6 @@ export function StoryGovernancePage() {
   const [facts, setFacts] = useState<readonly StoryFact[]>([]);
   const [policy, setPolicy] = useState<MemoryPolicy | null>(null);
   const [memories, setMemories] = useState<readonly MemoryRecord[]>([]);
-  const [timeline, setTimeline] = useState<FormalTimelineSnapshot | null>(null);
   const [whatIfBranches, setWhatIfBranches] = useState<readonly WhatIfBranch[]>([]);
   const [outlineDrafts, setOutlineDrafts] = useState<readonly OutlineDraftCandidate[]>([]);
   const [chapters, setChapters] = useState<readonly Chapter[]>([]);
@@ -119,7 +130,7 @@ export function StoryGovernancePage() {
     readonly StructuredReviewItem<"consistency">[]
   >([]);
   const [comparison, setComparison] = useState<WhatIfComparison | null>(null);
-  const [activeTab, setActiveTab] = useState("facts");
+  const [activeTab, setActiveTab] = useState("characters");
   const [pageState, setPageState] = useState<"loading" | "ready" | "fatal_error">("loading");
   const [error, setError] = useState<unknown>(identifierError);
   const [busy, setBusy] = useState(false);
@@ -131,13 +142,6 @@ export function StoryGovernancePage() {
   const [memoryLevel, setMemoryLevel] = useState<MemoryLevel>("L2");
   const [memoryContent, setMemoryContent] = useState("");
   const [policyDialogOpen, setPolicyDialogOpen] = useState(false);
-  const [whatIfDialog, setWhatIfDialog] = useState<WhatIfDialog | null>(null);
-  const [sourceEventId, setSourceEventId] = useState("");
-  const [hypothesis, setHypothesis] = useState("");
-  const [effectSummary, setEffectSummary] = useState("");
-  const [impactedRecordId, setImpactedRecordId] = useState("");
-  const [draftTitle, setDraftTitle] = useState("");
-  const [draftSynopsis, setDraftSynopsis] = useState("");
   const [reviewDialogOpen, setReviewDialogOpen] = useState(false);
   const [reviewItemType, setReviewItemType] = useState<ReviewItemType>("extraction");
   const [reviewTargetId, setReviewTargetId] = useState("");
@@ -156,6 +160,16 @@ export function StoryGovernancePage() {
   }> | null>(null);
   const [continuousStateDashboard, setContinuousStateDashboard] =
     useState<ContinuousStoryStateDashboard | null>(null);
+  const [selectedCharacterKey, setSelectedCharacterKey] = useState<string | null>(null);
+  const [selectedWorldKey, setSelectedWorldKey] = useState<string | null>(null);
+  const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
+  const [mergeMemoryIds, setMergeMemoryIds] = useState<readonly string[]>([]);
+  const [mergeDialogOpen, setMergeDialogOpen] = useState(false);
+  const [mergeTargetId, setMergeTargetId] = useState("");
+  const [mergedMemoryContent, setMergedMemoryContent] = useState("");
+  const [mergeOperationId, setMergeOperationId] = useState<string | null>(null);
+  const [aliasResolutionFactId, setAliasResolutionFactId] = useState<string | null>(null);
+  const [aliasResolutionChoice, setAliasResolutionChoice] = useState("");
 
   const load = useCallback(async () => {
     if (!domainProjectId.ok || !storyProjectId.ok) {
@@ -169,7 +183,6 @@ export function StoryGovernancePage() {
       recordResult,
       policyResult,
       memoryResult,
-      timelineResult,
       branchResult,
       draftResult,
       chapterResult,
@@ -181,7 +194,6 @@ export function StoryGovernancePage() {
       runtime.story.formalRecords.listByProjectId(storyProjectId.value),
       runtime.story.memoryService.ensureDefaultPolicy(storyProjectId.value),
       runtime.story.memoryRecords.listByProjectId(storyProjectId.value),
-      runtime.story.formalRecords.load(storyProjectId.value),
       runtime.story.whatIfBranches.listByProjectId(storyProjectId.value),
       runtime.story.outlineDrafts.listByProjectId(storyProjectId.value),
       runtime.repositories.chapters.listByProjectId(domainProjectId.value),
@@ -194,7 +206,6 @@ export function StoryGovernancePage() {
       recordResult,
       policyResult,
       memoryResult,
-      timelineResult,
       branchResult,
       draftResult,
       chapterResult,
@@ -216,7 +227,6 @@ export function StoryGovernancePage() {
       !factResult.ok ||
       !policyResult.ok ||
       !memoryResult.ok ||
-      !timelineResult.ok ||
       !branchResult.ok ||
       !draftResult.ok ||
       !chapterResult.ok ||
@@ -230,7 +240,6 @@ export function StoryGovernancePage() {
     setRecords(recordResult.value);
     setPolicy(policyResult.value);
     setMemories(memoryResult.value);
-    setTimeline(timelineResult.value);
     setWhatIfBranches(branchResult.value);
     setOutlineDrafts(draftResult.value);
     setChapters(chapterResult.value);
@@ -282,12 +291,124 @@ export function StoryGovernancePage() {
       ),
     [continuousStateDashboard],
   );
+  const characterGroups = useMemo(
+    () => buildCharacterGroups(activeFacts, records),
+    [activeFacts, records],
+  );
+  const worldGroups = useMemo(() => buildWorldGroups(activeFacts, records), [activeFacts, records]);
+  const selectedCharacter = characterGroups.find(({ key }) => key === selectedCharacterKey) ?? null;
+  const selectedWorld = worldGroups.find(({ key }) => key === selectedWorldKey) ?? null;
+  const selectedMemory = memories.find(({ id }) => id === selectedMemoryId) ?? null;
+  const mergeMemories = mergeMemoryIds
+    .map((id) => memories.find((memory) => memory.id === id) ?? null)
+    .filter((memory): memory is MemoryRecord => memory !== null);
+  const aliasResolutionFact = facts.find(({ id }) => String(id) === aliasResolutionFactId) ?? null;
+  const ambiguousAlias =
+    aliasResolutionFact === null
+      ? null
+      : readAmbiguousStoryFactEntityAlias(aliasResolutionFact.toSnapshot());
+  const aliasResolutionOptions = useMemo(
+    () =>
+      ambiguousAlias === null
+        ? []
+        : [
+            ...ambiguousAlias.matchedEntityKeys.map((entityKey) => {
+              const group = [...characterGroups, ...worldGroups].find(
+                ({ key }) => key === `entity:${entityKey}`,
+              );
+              return {
+                value: `existing:${entityKey}`,
+                label: group === undefined ? `已有对象：${entityKey}` : `已有对象：${group.name}`,
+              };
+            }),
+            { value: "separate", label: "不是以上对象，保留为新的独立对象" },
+          ],
+    [ambiguousAlias, characterGroups, worldGroups],
+  );
 
   function openCreateFact(): void {
     setFactType("character_identity");
     setFactContent("");
     setFactLocked(false);
     setFactDialogOpen(true);
+  }
+
+  function keepMemoryAsSetting(memory: MemoryRecord): void {
+    const snapshot = memory.toSnapshot();
+    setFactType(snapshot.level === "L4" ? "writing_rule" : "world_setting");
+    setFactContent(snapshot.content);
+    setFactLocked(snapshot.level === "L4");
+    setSelectedMemoryId(null);
+    setFactDialogOpen(true);
+  }
+
+  async function forgetMemory(memory: MemoryRecord): Promise<void> {
+    setSelectedMemoryId(null);
+    await governMemory(memory, { kind: "exclude" });
+  }
+
+  function toggleMergeMemory(memoryId: string): void {
+    setMergeMemoryIds((current) =>
+      current.includes(memoryId)
+        ? current.filter((id) => id !== memoryId)
+        : current.length < 2
+          ? [...current, memoryId]
+          : current,
+    );
+  }
+
+  function openMergeMemories(): void {
+    if (mergeMemories.length !== 2) {
+      return;
+    }
+    const [first, second] = mergeMemories;
+    if (first === undefined || second === undefined) {
+      return;
+    }
+    setMergeTargetId(first.id);
+    setMergedMemoryContent(`${first.toSnapshot().content}\n${second.toSnapshot().content}`.trim());
+    setMergeOperationId(runtime.ids.next());
+    setMergeDialogOpen(true);
+  }
+
+  async function submitMemoryMerge(): Promise<void> {
+    if (
+      !storyProjectId.ok ||
+      busy ||
+      mergeOperationId === null ||
+      mergeMemories.length !== 2 ||
+      mergedMemoryContent.trim().length === 0
+    ) {
+      return;
+    }
+    const target = mergeMemories.find(({ id }) => id === mergeTargetId);
+    const source = mergeMemories.find(({ id }) => id !== mergeTargetId);
+    if (target === undefined || source === undefined) {
+      return;
+    }
+    setBusy(true);
+    const result = await runtime.story.memoryService.mergeRecords({
+      operationId: mergeOperationId,
+      projectId: storyProjectId.value,
+      targetRecordId: target.id,
+      sourceRecordId: source.id,
+      expectedTargetRevision: target.revision,
+      expectedSourceRevision: source.revision,
+      content: mergedMemoryContent,
+      humanConfirmed: true,
+    });
+    setBusy(false);
+    setMergeDialogOpen(false);
+    setMergeOperationId(null);
+    if (!result.ok) {
+      setError(result.error);
+      setMergeMemoryIds([]);
+      await load();
+      return;
+    }
+    setMergeMemoryIds([]);
+    setError(null);
+    await load();
   }
 
   async function submitFact(): Promise<void> {
@@ -340,6 +461,44 @@ export function StoryGovernancePage() {
       return;
     }
     await refreshCausalStoryLinks(fact);
+    setError(null);
+    await load();
+  }
+
+  function openAliasResolution(fact: StoryFact): void {
+    setAliasResolutionFactId(fact.id);
+    setAliasResolutionChoice("");
+  }
+
+  async function resolveFactAlias(): Promise<void> {
+    if (
+      aliasResolutionFact === null ||
+      ambiguousAlias === null ||
+      aliasResolutionChoice.length === 0 ||
+      busy
+    ) {
+      return;
+    }
+    setBusy(true);
+    const result = await runtime.story.factService.resolveEntityAlias({
+      factId: aliasResolutionFact.id,
+      resolution:
+        aliasResolutionChoice === "separate"
+          ? { kind: "separate_entity" }
+          : {
+              kind: "existing_entity",
+              targetEntityKey: aliasResolutionChoice.slice("existing:".length),
+            },
+      humanConfirmed: true,
+      expectedRevision: aliasResolutionFact.revision,
+    });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setAliasResolutionFactId(null);
+    setAliasResolutionChoice("");
     setError(null);
     await load();
   }
@@ -639,64 +798,6 @@ export function StoryGovernancePage() {
     setError(null);
   }
 
-  function openCreateWhatIf(): void {
-    const firstEvent = timeline?.events[0];
-    if (firstEvent === undefined) {
-      setActiveTab("formal");
-      return;
-    }
-    setSourceEventId(firstEvent.id);
-    setHypothesis("");
-    setWhatIfDialog({ mode: "create" });
-  }
-
-  function openSimulation(branch: WhatIfBranch): void {
-    setEffectSummary("");
-    setImpactedRecordId(branch.toSnapshot().sourceEventId);
-    setWhatIfDialog({ mode: "simulate", branch });
-  }
-
-  async function submitWhatIf(): Promise<void> {
-    if (!storyProjectId.ok || whatIfDialog === null || timeline === null || busy) {
-      return;
-    }
-    setBusy(true);
-    const result =
-      whatIfDialog.mode === "create"
-        ? await runtime.story.whatIfService.create({
-            projectId: storyProjectId.value,
-            sourceEventId,
-            baseTimelineRevision: timeline.revision,
-            hypothesis,
-          })
-        : whatIfDialog.mode === "simulate"
-          ? await runtime.story.whatIfService.recordSimulation({
-              branchId: whatIfDialog.branch.id,
-              effects: [
-                {
-                  effectType: "story.consequence",
-                  summary: effectSummary,
-                  impactedRecordIds: [impactedRecordId],
-                  confidence: 0.8,
-                },
-              ],
-              expectedRevision: whatIfDialog.branch.revision,
-            })
-          : null;
-    setBusy(false);
-    if (result === null) {
-      return;
-    }
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    setWhatIfDialog(null);
-    setComparison(null);
-    setError(null);
-    await load();
-  }
-
   async function compareWhatIf(branch: WhatIfBranch): Promise<WhatIfComparison | null> {
     if (busy) {
       return null;
@@ -711,64 +812,6 @@ export function StoryGovernancePage() {
     setComparison(result.value);
     setError(null);
     return result.value;
-  }
-
-  async function preparePromotion(branch: WhatIfBranch): Promise<void> {
-    const compared = await compareWhatIf(branch);
-    if (compared === null) {
-      return;
-    }
-    setDraftTitle(branch.toSnapshot().hypothesis.slice(0, 200));
-    setDraftSynopsis(
-      branch
-        .toSnapshot()
-        .effects.map(({ summary }) => summary)
-        .join("\n"),
-    );
-    setWhatIfDialog({ mode: "promote", branch });
-  }
-
-  async function promoteWhatIf(): Promise<void> {
-    if (whatIfDialog?.mode !== "promote" || busy) {
-      return;
-    }
-    setBusy(true);
-    const result = await runtime.story.whatIfService.promoteToOutlineDraft({
-      branchId: whatIfDialog.branch.id,
-      title: draftTitle,
-      synopsis: draftSynopsis,
-      actorId: runtime.story.actorId,
-      humanConfirmed: true,
-      expectedRevision: whatIfDialog.branch.revision,
-    });
-    setBusy(false);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    setWhatIfDialog(null);
-    setComparison(null);
-    setError(null);
-    await load();
-  }
-
-  async function discardWhatIf(branch: WhatIfBranch): Promise<void> {
-    if (busy) {
-      return;
-    }
-    setBusy(true);
-    const result = await runtime.story.whatIfService.discard({
-      branchId: branch.id,
-      expectedRevision: branch.revision,
-    });
-    setBusy(false);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    setComparison(null);
-    setError(null);
-    await load();
   }
 
   function openCreateReview(): void {
@@ -929,6 +972,157 @@ export function StoryGovernancePage() {
     await load();
   }
 
+  function renderEntityGroupDetails(group: StoryEntityGroup) {
+    return (
+      <div className="story-entity-detail">
+        <dl className="story-entity-detail__summary">
+          <div>
+            <dt>已记录字段</dt>
+            <dd>{String(group.facts.length + group.records.length)}</dd>
+          </div>
+          <div>
+            <dt>出场或来源章节</dt>
+            <dd>{String(entityChapterIds(group).length)}</dd>
+          </div>
+          <div>
+            <dt>别名</dt>
+            <dd>{group.aliases.length > 0 ? group.aliases.join("、") : "暂无可靠别名"}</dd>
+          </div>
+        </dl>
+
+        {group.facts.map((fact) => {
+          const snapshot = fact.toSnapshot();
+          const chapter = chapters.find(
+            ({ id }) => String(id) === String(snapshot.source.chapterId),
+          );
+          const mergeNotice = storyFactMergeNotice(snapshot);
+          const ambiguousAlias = readAmbiguousStoryFactEntityAlias(snapshot);
+          const needsAliasResolution = storyFactNeedsEntityAliasResolution(snapshot);
+          return (
+            <section className="story-entity-detail__item" key={fact.id}>
+              <div className="card-heading-row">
+                <div>
+                  <h3>{factTypeLabel(snapshot.factType)}</h3>
+                  <p>{factSourceLabel(snapshot)}</p>
+                </div>
+                <Badge tone={factStatusTone(snapshot)}>{factStatusLabel(snapshot)}</Badge>
+              </div>
+              <p className="story-governance-copy">{storyFactContent(snapshot)}</p>
+              <dl className="story-entity-detail__metadata">
+                <div>
+                  <dt>来源章节</dt>
+                  <dd>{chapter?.title ?? snapshot.source.chapterId ?? "非章节来源"}</dd>
+                </div>
+                <div>
+                  <dt>来源引用</dt>
+                  <dd>{snapshot.source.reference}</dd>
+                </div>
+                <div>
+                  <dt>状态</dt>
+                  <dd>{factStatusLabel(snapshot)}</dd>
+                </div>
+                <div>
+                  <dt>可信度</dt>
+                  <dd>{Math.round(snapshot.confidence * 100)}%</dd>
+                </div>
+              </dl>
+              <blockquote className="story-source-quote">
+                {snapshot.source.excerpt ?? "这条记录没有保存可显示的精确原文片段。"}
+              </blockquote>
+              {mergeNotice !== null && (
+                <InlineAlert
+                  tone="warning"
+                  title="没有自动合并人物或设定"
+                  description={mergeNotice}
+                />
+              )}
+              <div className="story-governance-actions">
+                {ambiguousAlias !== null && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={readonly || busy}
+                    onClick={() => openAliasResolution(fact)}
+                  >
+                    先辨认这个对象
+                  </Button>
+                )}
+                {(snapshot.status === "unconfirmed" || snapshot.status === "temporary") && (
+                  <Button
+                    size="sm"
+                    disabled={readonly || busy || needsAliasResolution}
+                    onClick={() => void confirmFact(fact)}
+                  >
+                    确认并保留
+                  </Button>
+                )}
+                {snapshot.status === "formal" && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={readonly || busy}
+                    onClick={() => void toggleFactLock(fact)}
+                  >
+                    {snapshot.locked ? "取消锁定" : "锁定为硬规则"}
+                  </Button>
+                )}
+                {snapshot.status !== "branch" && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={readonly || busy}
+                    onClick={() => void deprecateFact(fact)}
+                  >
+                    {snapshot.status === "temporary" ? "撤销这项更新" : "标记为不再生效"}
+                  </Button>
+                )}
+              </div>
+            </section>
+          );
+        })}
+
+        {group.records.map((record) => {
+          const snapshot = record.toSnapshot();
+          const fields = readFormalFields(record);
+          return (
+            <section className="story-entity-detail__item" key={record.id}>
+              <div className="card-heading-row">
+                <div>
+                  <h3>{fields.title}</h3>
+                  <p>{snapshot.recordKey}</p>
+                </div>
+                <Badge tone={formalKindTone(record.kind)}>{formalKindLabel(record.kind)}</Badge>
+              </div>
+              <p className="story-governance-copy">{fields.description}</p>
+              <div className="story-governance-meta">
+                <span>正式版本 {String(snapshot.currentVersion)}</span>
+                <span>修订 {String(snapshot.revision)}</span>
+              </div>
+              <div className="story-governance-actions">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={readonly || busy}
+                  onClick={() => openEditFormalRecord(record)}
+                >
+                  编辑正式记录
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={readonly || busy || snapshot.currentVersion < 2}
+                  onClick={() => void undoFormalRecord(record)}
+                >
+                  撤回至上一版
+                </Button>
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    );
+  }
+
   return (
     <div className="desktop-page story-governance-page">
       <header className="page-heading">
@@ -998,16 +1192,216 @@ export function StoryGovernancePage() {
             ),
         }}
       >
-        <Tabs defaultValue="facts" value={activeTab} onValueChange={setActiveTab}>
+        <Tabs defaultValue="characters" value={activeTab} onValueChange={setActiveTab}>
           <TabsList label="故事设定分类">
-            <TabsTrigger value="facts">故事设定</TabsTrigger>
+            <TabsTrigger value="characters">人物</TabsTrigger>
+            <TabsTrigger value="world">世界与规则</TabsTrigger>
             <TabsTrigger value="memory">AI 记住的内容</TabsTrigger>
-            <TabsTrigger value="review">待确认变化</TabsTrigger>
             <TabsTrigger value="preferences">写作偏好</TabsTrigger>
-            <TabsTrigger value="context-history">AI 参考记录</TabsTrigger>
-            <TabsTrigger value="what-if">试演另一条剧情</TabsTrigger>
-            <TabsTrigger value="formal">旧版设定（高级）</TabsTrigger>
           </TabsList>
+
+          {!(PRIMARY_GOVERNANCE_TABS as readonly string[]).includes(activeTab) && (
+            <div className="story-governance-advanced-return">
+              <TabsList label="当前高级治理工具">
+                <TabsTrigger value={activeTab}>{advancedGovernanceTabLabel(activeTab)}</TabsTrigger>
+              </TabsList>
+              <Button size="sm" variant="secondary" onClick={() => setActiveTab("world")}>
+                返回世界与规则
+              </Button>
+            </div>
+          )}
+
+          <TabsContent value="characters">
+            <section aria-labelledby="character-library-title">
+              <div className="section-heading">
+                <div>
+                  <h2 id="character-library-title">人物</h2>
+                  <p>只按已有实体标识聚合；名称相同但没有可靠关联的人物不会被自动合并。</p>
+                </div>
+                <div className="story-governance-actions">
+                  <Button
+                    variant="secondary"
+                    disabled={readonly || busy}
+                    onClick={() => void runLatestChapterRecognition()}
+                  >
+                    重新识别最近一章
+                  </Button>
+                  <Button disabled={readonly || busy} onClick={openCreateFact}>
+                    添加人物设定
+                  </Button>
+                </div>
+              </div>
+
+              {needsConfirmationCount > 0 && (
+                <InlineAlert
+                  tone="warning"
+                  title={`${String(needsConfirmationCount)} 项重大变化需要确认`}
+                  description="人物身份、生死、核心关系和重大能力变化不会因为 AI 识别而自动成为正式事实。"
+                />
+              )}
+
+              {characterGroups.length === 0 ? (
+                <EmptyState
+                  title="还没有人物设定"
+                  description="可以直接开始写作，或先添加一个人物；从正文识别出的内容会保留原文证据并等待你确认。"
+                  {...(readonly
+                    ? {}
+                    : { primaryAction: { label: "添加第一个人物", onClick: openCreateFact } })}
+                />
+              ) : (
+                <div className="story-entity-grid">
+                  {characterGroups.map((group) => (
+                    <Card key={group.key}>
+                      <CardHeader>
+                        <div className="card-heading-row">
+                          <div>
+                            <CardTitle>{group.name}</CardTitle>
+                            <CardDescription>
+                              {group.aliases.length > 0
+                                ? `别名：${group.aliases.join("、")}`
+                                : "暂无已确认别名"}
+                            </CardDescription>
+                          </div>
+                          <Badge tone={entityGroupStatusTone(group)}>
+                            {entityGroupStatusLabel(group)}
+                          </Badge>
+                        </div>
+                      </CardHeader>
+                      <CardContent>
+                        <p className="story-governance-copy">{entityGroupSummary(group)}</p>
+                        <div className="story-governance-meta">
+                          <span>{String(group.facts.length)} 项事实</span>
+                          <span>{String(group.records.length)} 条正式记录</span>
+                          <span>{String(entityChapterIds(group).length)} 个来源章节</span>
+                        </div>
+                      </CardContent>
+                      <CardFooter>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => setSelectedCharacterKey(group.key)}
+                        >
+                          查看人物详情
+                        </Button>
+                      </CardFooter>
+                    </Card>
+                  ))}
+                </div>
+              )}
+            </section>
+          </TabsContent>
+
+          <TabsContent value="world">
+            <section aria-labelledby="world-library-title">
+              <div className="section-heading">
+                <div>
+                  <h2 id="world-library-title">世界与规则</h2>
+                  <p>
+                    地点、规则和组织按真实类型或实体标识分组；无法可靠分类的内容保留在“其他设定”。
+                  </p>
+                </div>
+                <Button disabled={readonly || busy} onClick={openCreateFact}>
+                  添加世界设定
+                </Button>
+              </div>
+
+              {worldGroups.length === 0 ? (
+                <EmptyState
+                  title="还没有世界设定"
+                  description="世界设定不是开始写作的必填项。需要时可添加地点、硬规则或组织，也可以从已保存正文重新识别。"
+                  {...(readonly
+                    ? {}
+                    : { primaryAction: { label: "添加第一条设定", onClick: openCreateFact } })}
+                />
+              ) : (
+                <div className="story-world-sections">
+                  {WORLD_SECTION_ORDER.map((sectionKind) => {
+                    const groups = worldGroups.filter(
+                      ({ worldSection }) => worldSection === sectionKind,
+                    );
+                    if (groups.length === 0) return null;
+                    return (
+                      <section key={sectionKind} aria-labelledby={`world-${sectionKind}-title`}>
+                        <div className="section-heading section-heading--compact">
+                          <h3 id={`world-${sectionKind}-title`}>
+                            {worldSectionLabel(sectionKind)}
+                          </h3>
+                          <Badge>{String(groups.length)} 项</Badge>
+                        </div>
+                        <div className="story-entity-grid">
+                          {groups.map((group) => (
+                            <Card key={group.key}>
+                              <CardHeader>
+                                <div className="card-heading-row">
+                                  <div>
+                                    <CardTitle>{group.name}</CardTitle>
+                                    <CardDescription>
+                                      {worldSectionLabel(sectionKind)}
+                                    </CardDescription>
+                                  </div>
+                                  <Badge tone={entityGroupStatusTone(group)}>
+                                    {entityGroupStatusLabel(group)}
+                                  </Badge>
+                                </div>
+                              </CardHeader>
+                              <CardContent>
+                                <p className="story-governance-copy">{entityGroupSummary(group)}</p>
+                                <div className="story-governance-meta">
+                                  <span>{String(group.facts.length)} 项事实</span>
+                                  <span>{String(entityChapterIds(group).length)} 个引用章节</span>
+                                </div>
+                              </CardContent>
+                              <CardFooter>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  onClick={() => setSelectedWorldKey(group.key)}
+                                >
+                                  查看设定详情
+                                </Button>
+                              </CardFooter>
+                            </Card>
+                          ))}
+                        </div>
+                      </section>
+                    );
+                  })}
+                </div>
+              )}
+
+              <Card className="story-governance-advanced-tools">
+                <CardHeader>
+                  <CardTitle>更多治理工具</CardTitle>
+                  <CardDescription>
+                    待确认变化、版本化正式记录和剧情试演保留原有安全边界，但不作为普通用户一级导航。
+                  </CardDescription>
+                </CardHeader>
+                <CardFooter className="story-governance-actions">
+                  <Button size="sm" variant="secondary" onClick={() => setActiveTab("facts")}>
+                    查看全部故事事实
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => setActiveTab("review")}>
+                    待确认变化
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => setActiveTab("formal")}>
+                    版本化正式记录
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => navigate(`/projects/${projectIdParameter}/graph`)}
+                  >
+                    因果剧情试演
+                  </Button>
+                  {whatIfBranches.length > 0 && (
+                    <Button size="sm" variant="ghost" onClick={() => setActiveTab("what-if")}>
+                      查看旧版试演记录
+                    </Button>
+                  )}
+                </CardFooter>
+              </Card>
+            </section>
+          </TabsContent>
 
           <TabsContent value="facts">
             <section aria-labelledby="unified-story-facts-title">
@@ -1057,6 +1451,8 @@ export function StoryGovernancePage() {
                     const snapshot = fact.toSnapshot();
                     const continuousEvidence = continuousEvidenceByFactId.get(fact.id);
                     const mergeNotice = storyFactMergeNotice(snapshot);
+                    const ambiguousAlias = readAmbiguousStoryFactEntityAlias(snapshot);
+                    const needsAliasResolution = storyFactNeedsEntityAliasResolution(snapshot);
                     return (
                       <Card key={fact.id}>
                         <CardHeader>
@@ -1100,11 +1496,21 @@ export function StoryGovernancePage() {
                           )}
                         </CardContent>
                         <CardFooter>
+                          {ambiguousAlias !== null && (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              disabled={readonly || busy}
+                              onClick={() => openAliasResolution(fact)}
+                            >
+                              先辨认这个对象
+                            </Button>
+                          )}
                           {(snapshot.status === "unconfirmed" ||
                             snapshot.status === "temporary") && (
                             <Button
                               size="sm"
-                              disabled={readonly || busy}
+                              disabled={readonly || busy || needsAliasResolution}
                               onClick={() => void confirmFact(fact)}
                             >
                               确认并保留
@@ -1144,6 +1550,7 @@ export function StoryGovernancePage() {
               projectId={projectIdParameter}
               service={runtime.story.chapterSummaries}
               continuousState={runtime.story.continuousState}
+              historicalBackfill={runtime.story.historicalBackfill}
               readOnly={readonly}
             />
             <ContextHistoryPanel projectId={projectIdParameter} store={runtime.contextTraces} />
@@ -1258,9 +1665,21 @@ export function StoryGovernancePage() {
                   <h2>可治理记忆</h2>
                   <p>固定、降权、排除、停用和编辑都会经过版本校验并保留来源。</p>
                 </div>
-                <Button disabled={readonly || busy} onClick={openCreateMemory}>
-                  添加用户记忆
-                </Button>
+                <div className="story-governance-actions">
+                  <Button
+                    variant="secondary"
+                    disabled={readonly || busy || mergeMemories.length !== 2}
+                    onClick={openMergeMemories}
+                  >
+                    合并所选 2 条
+                  </Button>
+                  <Button variant="secondary" onClick={() => setActiveTab("context-history")}>
+                    查看 AI 参考记录
+                  </Button>
+                  <Button disabled={readonly || busy} onClick={openCreateMemory}>
+                    添加用户记忆
+                  </Button>
+                </div>
               </div>
 
               {memories.length === 0 ? (
@@ -1311,6 +1730,27 @@ export function StoryGovernancePage() {
                           </div>
                         </CardContent>
                         <CardFooter className="story-governance-actions">
+                          <Button
+                            size="sm"
+                            variant={mergeMemoryIds.includes(memory.id) ? "primary" : "secondary"}
+                            disabled={
+                              readonly ||
+                              busy ||
+                              snapshot.excluded ||
+                              (mergeMemoryIds.length >= 2 && !mergeMemoryIds.includes(memory.id))
+                            }
+                            aria-pressed={mergeMemoryIds.includes(memory.id)}
+                            onClick={() => toggleMergeMemory(memory.id)}
+                          >
+                            {mergeMemoryIds.includes(memory.id) ? "已选择合并" : "选择用于合并"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => setSelectedMemoryId(memory.id)}
+                          >
+                            查看记忆详情
+                          </Button>
                           <Button
                             size="sm"
                             variant="secondary"
@@ -1549,51 +1989,24 @@ export function StoryGovernancePage() {
           <TabsContent value="what-if">
             <section aria-labelledby="what-if-title">
               <InlineAlert
-                tone="info"
-                title="沙盒边界"
-                description="试演剧情只能比较正式时间线；即使采用，也只生成大纲草稿，不能直接提交正式时间线。"
+                tone="warning"
+                title="旧版试演已停止新建"
+                description="这些记录仅供查看和迁移参考。新的剧情试演统一使用因果事件图确定影响范围，并保留锁定规则编译与模型调用证据。"
               />
               <div className="section-heading">
                 <div>
-                  <h2 id="what-if-title">试演另一条剧情</h2>
-                  <p>
-                    当前正式时间线修订 {String(timeline?.revision ?? 1)}，包含{" "}
-                    {String(timeline?.events.length ?? 0)} 个事件。
-                  </p>
+                  <h2 id="what-if-title">旧版试演记录</h2>
+                  <p>历史沙盒与已生成的大纲草稿保持原样，不会自动转成正式事实。</p>
                 </div>
-                <Button
-                  disabled={readonly || busy || (timeline?.events.length ?? 0) === 0}
-                  onClick={openCreateWhatIf}
-                >
-                  新建剧情试演
+                <Button onClick={() => navigate(`/projects/${projectIdParameter}/graph`)}>
+                  前往因果剧情试演
                 </Button>
               </div>
 
-              {(timeline?.events.length ?? 0) === 0 ? (
+              {whatIfBranches.length === 0 ? (
                 <EmptyState
-                  title="还没有正式时间线事件"
-                  description="先在“正式设定”中新增一条时间线事件，才能以它为基线创建沙盒分支。"
-                  {...(readonly
-                    ? {}
-                    : {
-                        primaryAction: {
-                          label: "前往正式设定",
-                          onClick: () => setActiveTab("formal"),
-                        },
-                      })}
-                />
-              ) : whatIfBranches.length === 0 ? (
-                <EmptyState
-                  title="还没有剧情试演"
-                  description="选择一个正式时间线事件，记录假设与人工审阅的影响。"
-                  {...(readonly
-                    ? {}
-                    : {
-                        primaryAction: {
-                          label: "新建剧情试演",
-                          onClick: openCreateWhatIf,
-                        },
-                      })}
+                  title="没有旧版试演记录"
+                  description="这里不会再创建自由输入的非因果模拟；请使用统一的因果剧情试演。"
                 />
               ) : (
                 <div className="story-what-if-list">
@@ -1646,45 +2059,17 @@ export function StoryGovernancePage() {
                           )}
                         </CardContent>
                         <CardFooter className="story-governance-actions">
-                          {snapshot.status === "draft" && (
+                          {snapshot.status === "simulated" && (
                             <Button
                               size="sm"
                               variant="secondary"
-                              disabled={readonly || busy}
-                              onClick={() => openSimulation(branch)}
+                              disabled={busy}
+                              onClick={() => void compareWhatIf(branch)}
                             >
-                              记录模拟结果
+                              只读比较
                             </Button>
                           )}
-                          {snapshot.status === "simulated" && (
-                            <>
-                              <Button
-                                size="sm"
-                                variant="secondary"
-                                disabled={busy}
-                                onClick={() => void compareWhatIf(branch)}
-                              >
-                                与正式时间线比较
-                              </Button>
-                              <Button
-                                size="sm"
-                                disabled={readonly || busy}
-                                onClick={() => void preparePromotion(branch)}
-                              >
-                                转为大纲草稿
-                              </Button>
-                            </>
-                          )}
-                          {(snapshot.status === "draft" || snapshot.status === "simulated") && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              disabled={readonly || busy}
-                              onClick={() => void discardWhatIf(branch)}
-                            >
-                              丢弃分支
-                            </Button>
-                          )}
+                          <Badge tone="neutral">只读历史</Badge>
                         </CardFooter>
                       </Card>
                     );
@@ -1697,7 +2082,7 @@ export function StoryGovernancePage() {
                   <div className="section-heading">
                     <div>
                       <h2>待采用的大纲草稿</h2>
-                      <p>这里只是建议内容；不会自动合并现有大纲或正式时间线。</p>
+                      <p>旧版试演生成的历史建议，仅供迁移参考，不会自动合并。</p>
                     </div>
                     <Badge>{String(outlineDrafts.length)} 条</Badge>
                   </div>
@@ -1723,6 +2108,179 @@ export function StoryGovernancePage() {
           </TabsContent>
         </Tabs>
       </PageStateBoundary>
+
+      <Drawer
+        open={selectedCharacter !== null}
+        onOpenChange={(open) => {
+          if (!open) setSelectedCharacterKey(null);
+        }}
+        title={selectedCharacter?.name ?? "人物详情"}
+        description="字段、状态、来源原文和章节引用均来自当前本地记录；没有可靠关联时不会按姓名猜测合并。"
+        footer={
+          <Button variant="secondary" onClick={() => setSelectedCharacterKey(null)}>
+            关闭
+          </Button>
+        }
+      >
+        {selectedCharacter !== null && renderEntityGroupDetails(selectedCharacter)}
+      </Drawer>
+
+      <Drawer
+        open={selectedWorld !== null}
+        onOpenChange={(open) => {
+          if (!open) setSelectedWorldKey(null);
+        }}
+        title={selectedWorld?.name ?? "设定详情"}
+        description="只显示已经保存的设定、状态与引用；缺少精确原文时会明确说明。"
+        footer={
+          <Button variant="secondary" onClick={() => setSelectedWorldKey(null)}>
+            关闭
+          </Button>
+        }
+      >
+        {selectedWorld !== null && renderEntityGroupDetails(selectedWorld)}
+      </Drawer>
+
+      <Drawer
+        open={selectedMemory !== null}
+        onOpenChange={(open) => {
+          if (!open) setSelectedMemoryId(null);
+        }}
+        title="AI 记住的内容"
+        description="这里展示本地记忆的来源、状态和治理方式；忘掉会排除后续使用，但保留可审计记录。"
+        footer={
+          <Button variant="secondary" onClick={() => setSelectedMemoryId(null)}>
+            关闭
+          </Button>
+        }
+      >
+        {selectedMemory !== null &&
+          (() => {
+            const snapshot = selectedMemory.toSnapshot();
+            const sourceChapter = chapters.find(
+              ({ id }) => String(id) === snapshot.source.sourceId,
+            );
+            return (
+              <div className="story-entity-detail">
+                <p className="story-governance-copy">{snapshot.content}</p>
+                <dl className="story-entity-detail__metadata">
+                  <div>
+                    <dt>记忆层级</dt>
+                    <dd>{memoryLevelLabel(snapshot.level)}</dd>
+                  </div>
+                  <div>
+                    <dt>状态</dt>
+                    <dd>
+                      {snapshot.excluded
+                        ? "已忘掉"
+                        : snapshot.status === "enabled"
+                          ? "启用"
+                          : "停用"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>来源</dt>
+                    <dd>{memorySourceLabel(snapshot.source.kind)}</dd>
+                  </div>
+                  <div>
+                    <dt>来源章节或对象</dt>
+                    <dd>{sourceChapter?.title ?? snapshot.source.sourceId}</dd>
+                  </div>
+                  <div>
+                    <dt>来源版本</dt>
+                    <dd>{snapshot.source.sourceVersionId ?? "没有版本引用"}</dd>
+                  </div>
+                  <div>
+                    <dt>已使用</dt>
+                    <dd>{String(snapshot.useCount)} 次</dd>
+                  </div>
+                </dl>
+                <blockquote className="story-source-quote">
+                  {snapshot.source.kind === "chapter" && sourceChapter !== undefined
+                    ? `证据指向章节《${sourceChapter.title}》及上方来源版本；当前记忆底层没有保存精确原文范围，无法在此还原原文片段。`
+                    : "这条记忆只保存了来源对象和版本，没有可显示的精确原文证据。"}
+                </blockquote>
+                <InlineAlert
+                  tone="info"
+                  title="记忆只会由你手动合并"
+                  description="墨影不会仅凭文字相似自动合并。请回到列表选择两条记忆，核对各自来源、指定保留项并编辑合并内容；来源项只会被排除，不会删除。"
+                />
+                <div className="story-governance-actions">
+                  <Button
+                    disabled={readonly || busy}
+                    onClick={() => keepMemoryAsSetting(selectedMemory)}
+                  >
+                    保留为设定
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={readonly || busy || snapshot.excluded}
+                    onClick={() => void forgetMemory(selectedMemory)}
+                  >
+                    忘掉
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    disabled={readonly || busy}
+                    onClick={() => openEditMemory(selectedMemory)}
+                  >
+                    编辑记忆
+                  </Button>
+                </div>
+              </div>
+            );
+          })()}
+      </Drawer>
+
+      <Dialog
+        open={aliasResolutionFact !== null}
+        onOpenChange={(open) => {
+          if (!open && !busy) {
+            setAliasResolutionFactId(null);
+            setAliasResolutionChoice("");
+          }
+        }}
+        title="这段原文说的是哪个对象？"
+        description="同一个名称对应多个已确认对象。请选择原文实际指向的对象；如果都不是，可以明确保留为新的独立对象。这个选择不会同时确认事实内容。"
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              disabled={busy}
+              onClick={() => {
+                setAliasResolutionFactId(null);
+                setAliasResolutionChoice("");
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              loading={busy}
+              disabled={aliasResolutionChoice.length === 0}
+              onClick={() => void resolveFactAlias()}
+            >
+              保存对象选择
+            </Button>
+          </>
+        }
+      >
+        <div className="story-governance-form">
+          <FormField
+            label="原文中的对象"
+            hint="这里只解决对象归属；保存后仍需单独点击“确认并保留”。"
+            required
+          >
+            {(fieldProps) => (
+              <Select
+                {...fieldProps}
+                value={aliasResolutionChoice}
+                options={[{ value: "", label: "请选择一个对象" }, ...aliasResolutionOptions]}
+                onChange={(event) => setAliasResolutionChoice(event.currentTarget.value)}
+              />
+            )}
+          </FormField>
+        </div>
+      </Dialog>
 
       <Dialog
         open={factDialogOpen}
@@ -1849,6 +2407,107 @@ export function StoryGovernancePage() {
               />
             )}
           </FormField>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={mergeDialogOpen}
+        onOpenChange={(open) => {
+          if (!open && !busy) {
+            setMergeDialogOpen(false);
+            setMergeOperationId(null);
+          }
+        }}
+        title="手动合并两条记忆"
+        description="先核对两条记忆的来源，再指定保留哪一条记录。保存后会更新保留项并排除另一项，二者的原始来源和操作前后快照都保留在审计记录中。"
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              disabled={busy}
+              onClick={() => {
+                setMergeDialogOpen(false);
+                setMergeOperationId(null);
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              loading={busy}
+              disabled={mergeMemories.length !== 2 || mergedMemoryContent.trim().length === 0}
+              onClick={() => void submitMemoryMerge()}
+            >
+              确认合并
+            </Button>
+          </>
+        }
+      >
+        <div className="story-governance-form">
+          <FormField
+            label="保留的记忆记录"
+            hint="被保留的记录会承载下方合并内容；另一条只标记为已忘掉，不会删除。"
+            required
+          >
+            {(fieldProps) => (
+              <Select
+                {...fieldProps}
+                value={mergeTargetId}
+                options={mergeMemories.map((memory, index) => ({
+                  value: memory.id,
+                  label: `记忆 ${String(index + 1)} · ${memoryLevelLabel(memory.toSnapshot().level)}`,
+                }))}
+                onChange={(event) => setMergeTargetId(event.currentTarget.value)}
+              />
+            )}
+          </FormField>
+
+          {mergeMemories.map((memory, index) => {
+            const snapshot = memory.toSnapshot();
+            return (
+              <Card key={memory.id}>
+                <CardHeader>
+                  <div className="card-heading-row">
+                    <div>
+                      <CardTitle headingLevel={3}>记忆 {String(index + 1)}</CardTitle>
+                      <CardDescription>
+                        {memorySourceLabel(snapshot.source.kind)} · 修订 {String(snapshot.revision)}
+                      </CardDescription>
+                    </div>
+                    {memory.id === mergeTargetId && <Badge tone="accent">保留项</Badge>}
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <p className="story-governance-copy">{snapshot.content}</p>
+                  <div className="story-governance-meta">
+                    <span>来源对象：{snapshot.source.sourceId}</span>
+                    <span>来源版本：{snapshot.source.sourceVersionId ?? "无"}</span>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+
+          <FormField
+            label="合并后的内容"
+            hint="请自行校对并编辑；墨影不会根据相似度自动生成或覆盖内容。"
+            required
+          >
+            {(fieldProps) => (
+              <Textarea
+                {...fieldProps}
+                value={mergedMemoryContent}
+                maxLength={1000}
+                currentLength={mergedMemoryContent.length}
+                rows={7}
+                onChange={(event) => setMergedMemoryContent(event.currentTarget.value)}
+              />
+            )}
+          </FormField>
+          <InlineAlert
+            tone="warning"
+            title="合并不会删除来源"
+            description="两条记录会在一个事务中完成更新；任何版本冲突或审计写入失败都会整体回滚。"
+          />
         </div>
       </Dialog>
 
@@ -2038,160 +2697,268 @@ export function StoryGovernancePage() {
           </FormField>
         </div>
       </Dialog>
-
-      <Dialog
-        open={whatIfDialog?.mode === "create" || whatIfDialog?.mode === "simulate"}
-        onOpenChange={(open) => {
-          if (!open) {
-            setWhatIfDialog(null);
-          }
-        }}
-        title={whatIfDialog?.mode === "simulate" ? "记录试演结果" : "新建剧情试演"}
-        description={
-          whatIfDialog?.mode === "simulate"
-            ? "记录可审阅的影响，不改动任何正式设定。"
-            : "分支会绑定当前正式时间线修订，避免在过期基线上悄悄运行。"
-        }
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setWhatIfDialog(null)}>
-              取消
-            </Button>
-            <Button
-              loading={busy}
-              disabled={
-                whatIfDialog?.mode === "simulate"
-                  ? effectSummary.trim().length === 0 || impactedRecordId.length === 0
-                  : hypothesis.trim().length === 0 || sourceEventId.length === 0
-              }
-              onClick={() => void submitWhatIf()}
-            >
-              {whatIfDialog?.mode === "simulate" ? "保存沙盒结果" : "创建沙盒分支"}
-            </Button>
-          </>
-        }
-      >
-        <div className="story-governance-form">
-          {whatIfDialog?.mode === "simulate" ? (
-            <>
-              <FormField label="影响摘要" required>
-                {(fieldProps) => (
-                  <Textarea
-                    {...fieldProps}
-                    value={effectSummary}
-                    maxLength={1000}
-                    currentLength={effectSummary.length}
-                    rows={6}
-                    onChange={(event) => setEffectSummary(event.currentTarget.value)}
-                  />
-                )}
-              </FormField>
-              <FormField label="主要受影响设定" required>
-                {(fieldProps) => (
-                  <Select
-                    {...fieldProps}
-                    value={impactedRecordId}
-                    options={records.map((record) => ({
-                      value: record.id,
-                      label: `${formalKindLabel(record.kind)} · ${readFormalFields(record).title}`,
-                    }))}
-                    onChange={(event) => setImpactedRecordId(event.currentTarget.value)}
-                  />
-                )}
-              </FormField>
-              <InlineAlert
-                tone="info"
-                title="人工记录"
-                description="当前结果由你输入并确认，置信度按 80% 记录；尚未调用模型生成。"
-              />
-            </>
-          ) : (
-            <>
-              <FormField label="基线时间线事件" required>
-                {(fieldProps) => (
-                  <Select
-                    {...fieldProps}
-                    value={sourceEventId}
-                    options={(timeline?.events ?? []).map((event) => ({
-                      value: event.id,
-                      label: readFormalFields(event).title,
-                    }))}
-                    onChange={(event) => setSourceEventId(event.currentTarget.value)}
-                  />
-                )}
-              </FormField>
-              <FormField label="假设" required>
-                {(fieldProps) => (
-                  <Textarea
-                    {...fieldProps}
-                    value={hypothesis}
-                    maxLength={1000}
-                    currentLength={hypothesis.length}
-                    rows={6}
-                    onChange={(event) => setHypothesis(event.currentTarget.value)}
-                  />
-                )}
-              </FormField>
-            </>
-          )}
-        </div>
-      </Dialog>
-
-      <Dialog
-        open={whatIfDialog?.mode === "promote"}
-        onOpenChange={(open) => {
-          if (!open) {
-            setWhatIfDialog(null);
-          }
-        }}
-        title="转为大纲草稿"
-        description="这一步只创建独立建议，不合并大纲，更不会写入正式时间线。"
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setWhatIfDialog(null)}>
-              取消
-            </Button>
-            <Button
-              loading={busy}
-              disabled={draftTitle.trim().length === 0 || draftSynopsis.trim().length === 0}
-              onClick={() => void promoteWhatIf()}
-            >
-              明确确认生成草稿
-            </Button>
-          </>
-        }
-      >
-        <div className="story-governance-form">
-          <FormField label="草稿标题" required>
-            {(fieldProps) => (
-              <Input
-                {...fieldProps}
-                value={draftTitle}
-                maxLength={200}
-                onChange={(event) => setDraftTitle(event.currentTarget.value)}
-              />
-            )}
-          </FormField>
-          <FormField label="草稿摘要" required>
-            {(fieldProps) => (
-              <Textarea
-                {...fieldProps}
-                value={draftSynopsis}
-                maxLength={1000}
-                currentLength={draftSynopsis.length}
-                rows={6}
-                onChange={(event) => setDraftSynopsis(event.currentTarget.value)}
-              />
-            )}
-          </FormField>
-          <InlineAlert
-            tone="warning"
-            title="不可直接提交正式时间线"
-            description="这份建议需要在后续大纲流程中再次人工审阅；本操作没有正式时间线写入能力。"
-          />
-        </div>
-      </Dialog>
     </div>
+  );
+}
+
+function buildCharacterGroups(
+  facts: readonly StoryFact[],
+  records: readonly FormalStoryRecord[],
+): readonly StoryEntityGroup[] {
+  const groups = new Map<
+    string,
+    {
+      name: string;
+      aliases: string[];
+      facts: StoryFact[];
+      records: FormalStoryRecord[];
+    }
+  >();
+  for (const record of records.filter(({ kind }) => kind === "character")) {
+    const fields = readFormalFields(record);
+    groups.set(`entity:${record.toSnapshot().recordKey}`, {
+      name: fields.title,
+      aliases: [],
+      facts: [],
+      records: [record],
+    });
+  }
+  for (const fact of facts) {
+    const snapshot = fact.toSnapshot();
+    const subject = readFactSubject(snapshot);
+    if (!isCharacterFact(snapshot.factType, subject?.kind ?? null)) continue;
+    const key =
+      subject?.entityKey === null || subject?.entityKey === undefined
+        ? `fact:${fact.id}`
+        : `entity:${subject.entityKey}`;
+    const existing = groups.get(key) ?? {
+      name: subject?.canonicalName ?? factTypeLabel(snapshot.factType),
+      aliases: [],
+      facts: [],
+      records: [],
+    };
+    existing.facts.push(fact);
+    existing.aliases.push(...(subject?.aliases ?? []));
+    groups.set(key, existing);
+  }
+  return freezeEntityGroups(groups, null);
+}
+
+function buildWorldGroups(
+  facts: readonly StoryFact[],
+  records: readonly FormalStoryRecord[],
+): readonly StoryEntityGroup[] {
+  const groups = new Map<
+    string,
+    {
+      name: string;
+      aliases: string[];
+      facts: StoryFact[];
+      records: FormalStoryRecord[];
+      worldSection: WorldSectionKind;
+    }
+  >();
+  for (const record of records.filter(({ kind }) => kind !== "character")) {
+    const fields = readFormalFields(record);
+    const worldSection = worldSectionForFormalKind(record.kind);
+    groups.set(`entity:${record.toSnapshot().recordKey}`, {
+      name: fields.title,
+      aliases: [],
+      facts: [],
+      records: [record],
+      worldSection,
+    });
+  }
+  for (const fact of facts) {
+    const snapshot = fact.toSnapshot();
+    const subject = readFactSubject(snapshot);
+    if (!isWorldFact(snapshot.factType, subject?.kind ?? null)) continue;
+    const worldSection = worldSectionForFactType(snapshot.factType);
+    const key =
+      subject?.entityKey === null || subject?.entityKey === undefined
+        ? `fact:${fact.id}`
+        : `entity:${subject.entityKey}`;
+    const existing = groups.get(key) ?? {
+      name: subject?.canonicalName ?? factTypeLabel(snapshot.factType),
+      aliases: [],
+      facts: [],
+      records: [],
+      worldSection,
+    };
+    existing.facts.push(fact);
+    existing.aliases.push(...(subject?.aliases ?? []));
+    groups.set(key, existing);
+  }
+  return Object.freeze(
+    [...groups.entries()]
+      .map(([key, group]) =>
+        Object.freeze({
+          key,
+          name: group.name,
+          aliases: Object.freeze([...new Set(group.aliases)]),
+          facts: Object.freeze([...group.facts]),
+          records: Object.freeze([...group.records]),
+          worldSection: group.worldSection,
+        }),
+      )
+      .sort((left, right) => left.name.localeCompare(right.name, "zh-CN")),
+  );
+}
+
+function freezeEntityGroups(
+  groups: ReadonlyMap<
+    string,
+    {
+      name: string;
+      aliases: string[];
+      facts: StoryFact[];
+      records: FormalStoryRecord[];
+    }
+  >,
+  worldSection: WorldSectionKind | null,
+): readonly StoryEntityGroup[] {
+  return Object.freeze(
+    [...groups.entries()]
+      .map(([key, group]) =>
+        Object.freeze({
+          key,
+          name: group.name,
+          aliases: Object.freeze([...new Set(group.aliases)]),
+          facts: Object.freeze([...group.facts]),
+          records: Object.freeze([...group.records]),
+          worldSection,
+        }),
+      )
+      .sort((left, right) => left.name.localeCompare(right.name, "zh-CN")),
+  );
+}
+
+function readFactSubject(snapshot: StoryFactSnapshot): Readonly<{
+  kind: string | null;
+  entityKey: string | null;
+  canonicalName: string | null;
+  aliases: readonly string[];
+}> | null {
+  if (!isStoryObject(snapshot.structuredValue)) return null;
+  const subject = snapshot.structuredValue.subject;
+  if (!isStoryObject(subject)) return null;
+  return Object.freeze({
+    kind: typeof subject.kind === "string" ? subject.kind : null,
+    entityKey: typeof subject.entityKey === "string" ? subject.entityKey : null,
+    canonicalName: typeof subject.canonicalName === "string" ? subject.canonicalName : null,
+    aliases: Object.freeze(
+      Array.isArray(subject.aliases)
+        ? subject.aliases.filter((value): value is string => typeof value === "string")
+        : [],
+    ),
+  });
+}
+
+function isCharacterFact(factType: string, subjectKind: string | null): boolean {
+  return (
+    subjectKind === "character" ||
+    factType.includes("character") ||
+    factType.includes("relationship") ||
+    factType === "pov_knowledge" ||
+    factType === "core_relationship"
+  );
+}
+
+function isWorldFact(factType: string, subjectKind: string | null): boolean {
+  if (subjectKind === "world") return true;
+  return [
+    "world",
+    "location",
+    "place",
+    "geography",
+    "organization",
+    "faction",
+    "rule",
+    "timeline",
+    "causal",
+    "foreshadow",
+    "plotline",
+    "key_item",
+    "setting",
+  ].some((token) => factType.includes(token));
+}
+
+function worldSectionForFactType(factType: string): WorldSectionKind {
+  if (["location", "place", "geography"].some((token) => factType.includes(token))) {
+    return "location";
+  }
+  if (["rule", "constraint", "boundary"].some((token) => factType.includes(token))) {
+    return "rule";
+  }
+  if (["organization", "faction", "group"].some((token) => factType.includes(token))) {
+    return "organization";
+  }
+  return "other";
+}
+
+function worldSectionForFormalKind(kind: FormalRecordKind): WorldSectionKind {
+  return kind === "world_rule" ? "rule" : "other";
+}
+
+function worldSectionLabel(kind: WorldSectionKind): string {
+  const labels: Record<WorldSectionKind, string> = {
+    location: "地点",
+    rule: "规则",
+    organization: "组织",
+    other: "其他设定",
+  };
+  return labels[kind];
+}
+
+function advancedGovernanceTabLabel(value: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    facts: "全部故事事实",
+    review: "待确认变化",
+    formal: "版本化正式记录",
+    "what-if": "旧版试演记录",
+    "context-history": "AI 参考记录",
+  };
+  return labels[value] ?? "高级治理工具";
+}
+
+function groupNeedsConfirmation(group: StoryEntityGroup): boolean {
+  return group.facts.some((fact) => {
+    const snapshot = fact.toSnapshot();
+    return snapshot.needsReview || snapshot.status === "unconfirmed";
+  });
+}
+
+function groupHasReversibleUpdate(group: StoryEntityGroup): boolean {
+  return group.facts.some(({ status }) => status === "temporary");
+}
+
+function entityGroupStatusLabel(group: StoryEntityGroup): string {
+  if (groupNeedsConfirmation(group)) return "需要确认";
+  if (groupHasReversibleUpdate(group)) return "可撤销更新";
+  return "已记录";
+}
+
+function entityGroupStatusTone(group: StoryEntityGroup): "info" | "warning" | "success" {
+  if (groupNeedsConfirmation(group)) return "warning";
+  return groupHasReversibleUpdate(group) ? "info" : "success";
+}
+
+function entityGroupSummary(group: StoryEntityGroup): string {
+  const firstFact = group.facts[0];
+  if (firstFact !== undefined) return storyFactContent(firstFact.toSnapshot());
+  const firstRecord = group.records[0];
+  return firstRecord === undefined ? "暂无可显示内容" : readFormalFields(firstRecord).description;
+}
+
+function entityChapterIds(group: StoryEntityGroup): readonly string[] {
+  return Object.freeze(
+    [
+      ...new Set(
+        group.facts
+          .map((fact) => fact.toSnapshot().source.chapterId)
+          .filter((chapterId): chapterId is NonNullable<typeof chapterId> => chapterId !== null),
+      ),
+    ].map(String),
   );
 }
 
@@ -2278,8 +3045,11 @@ function storyFactMergeNotice(snapshot: StoryFactSnapshot): string | null {
     return null;
   }
   if (subject.mergeStatus === "ambiguous_confirmed_alias") {
+    if (readAmbiguousStoryFactEntityAlias(snapshot) === null) {
+      return "这个候选的对象匹配结构已损坏，因此不能确认或辨认。请将它标记为不再生效，再重新识别正文或手动添加正确事实。";
+    }
     const count = Array.isArray(subject.matchedEntityKeys) ? subject.matchedEntityKeys.length : 0;
-    return `原文中的名称同时对应 ${String(count)} 个已确认对象。墨影没有按姓名猜测或自动合并；请核对证据后决定保留或废弃。`;
+    return `原文中的名称同时对应 ${String(count)} 个已确认对象。墨影没有按姓名猜测或自动合并；请先明确它指向哪个对象，或保留为新的独立对象。`;
   }
   if (subject.mergeStatus === "untrusted_key_ignored") {
     return "模型给出的对象编号没有已确认依据，已被忽略并隔离为新候选；请核对后决定。";

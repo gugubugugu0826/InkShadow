@@ -13,6 +13,7 @@ import {
   type CreateNotificationInput,
   type CreateTaskInput,
   type NotificationSnapshot,
+  type RetryTaskNowInput,
   type TaskFailureInput,
   type TaskSnapshot,
 } from "@inkshadow/task-engine";
@@ -21,6 +22,7 @@ export const DEVELOPMENT_TASK_CENTER_KEY = "inkshadow.development.task-center.v1
 
 const TASK_LIST_LIMIT = 200;
 const NOTIFICATION_LIST_LIMIT = 200;
+const MAX_DUE_TASK_QUERY_LIMIT = 500;
 const ACTIVE_NOTIFICATION_STATUSES = [
   "created",
   "queued",
@@ -39,8 +41,31 @@ export interface CreateTaskSnapshotResult {
   readonly created: boolean;
 }
 
+export interface DueTaskQuery {
+  readonly taskType: string;
+  readonly metadataOperation: string;
+  readonly now: string;
+  readonly queuedUpdatedAtOrBefore: string;
+  readonly after: DueTaskCursor | null;
+  readonly limit: number;
+}
+
+export interface DueTaskCursor {
+  readonly runAfter: string;
+  readonly createdAt: string;
+  readonly id: string;
+}
+
 export interface TaskCenterStore {
   load(): Promise<TaskCenterSnapshot>;
+  /** Read-only lookup used by idempotent planning before any task is registered. */
+  findTaskByIdempotencyKey(idempotencyKey: string): Promise<TaskSnapshot | null>;
+  /**
+   * Loads one oldest-first bounded batch for a specific worker. This is kept
+   * separate from load(), whose newest-first limit is intentionally a UI
+   * concern and must never decide whether durable work can be recovered.
+   */
+  listDueTasks(input: DueTaskQuery): Promise<readonly TaskSnapshot[]>;
   enqueueTask(input: CreateTaskInput): Promise<CreateTaskSnapshotResult>;
   startTask(
     taskId: string,
@@ -62,6 +87,7 @@ export interface TaskCenterStore {
     failure: TaskFailureInput,
     retryAt: string | null,
   ): Promise<TaskSnapshot>;
+  retryTaskNow(taskId: string, recovery?: RetryTaskNowInput): Promise<TaskSnapshot>;
   cancelTask(taskId: string): Promise<TaskSnapshot>;
   acknowledgeTaskCancellation(taskId: string, leaseToken: string): Promise<TaskSnapshot>;
   recoverExpiredTasks(): Promise<number>;
@@ -125,6 +151,66 @@ export class TauriTaskCenterStore implements TaskCenterStore {
       tasks: tasks.map((task) => task.toSnapshot()),
       notifications: notifications.map((notification) => notification.toSnapshot()),
     };
+  }
+
+  public async listDueTasks(input: DueTaskQuery): Promise<readonly TaskSnapshot[]> {
+    assertDueTaskQuery(input);
+    await this.recoverExpiredTasks();
+    const rows = await this.executor.select<IdRow>(
+      `SELECT id
+       FROM background_tasks
+       WHERE task_type = ?
+         AND json_extract(metadata_json, '$.operation') = ?
+         AND run_after <= ?
+         AND (
+           ? IS NULL
+           OR run_after > ?
+           OR (run_after = ? AND created_at > ?)
+           OR (run_after = ? AND created_at = ? AND id > ?)
+         )
+         AND (
+           (status = 'queued' AND updated_at <= ?)
+           OR (
+             status = 'waiting_retry'
+             AND failure_retryable = 1
+             AND EXISTS (
+               SELECT 1
+               FROM json_each(background_tasks.failure_actions_json)
+               WHERE json_each.value = 'RETRY'
+             )
+           )
+         )
+       ORDER BY run_after ASC, created_at ASC, id ASC
+       LIMIT ?`,
+      [
+        input.taskType,
+        input.metadataOperation,
+        input.now,
+        input.after?.runAfter ?? null,
+        input.after?.runAfter ?? null,
+        input.after?.runAfter ?? null,
+        input.after?.createdAt ?? null,
+        input.after?.runAfter ?? null,
+        input.after?.createdAt ?? null,
+        input.after?.id ?? null,
+        input.queuedUpdatedAtOrBefore,
+        input.limit,
+      ],
+    );
+    const tasks = await Promise.all(rows.map(({ id }) => this.loadTask(id)));
+    return tasks.map((task) => task.toSnapshot());
+  }
+
+  public async findTaskByIdempotencyKey(idempotencyKey: string): Promise<TaskSnapshot | null> {
+    const rows = await this.executor.select<IdRow>(
+      `SELECT id
+       FROM background_tasks
+       WHERE idempotency_key = ?
+       LIMIT 1`,
+      [idempotencyKey],
+    );
+    const row = rows[0];
+    return row === undefined ? null : (await this.loadTask(row.id)).toSnapshot();
   }
 
   public async enqueueTask(input: CreateTaskInput): Promise<CreateTaskSnapshotResult> {
@@ -201,6 +287,10 @@ export class TauriTaskCenterStore implements TaskCenterStore {
       unwrap(await this.tasks.save(next, current.sequence));
     }
     return next.toSnapshot();
+  }
+
+  public async retryTaskNow(taskId: string, recovery?: RetryTaskNowInput): Promise<TaskSnapshot> {
+    return this.mutateTask(taskId, (current) => current.retryNow(this.clock.now(), recovery));
   }
 
   public async acknowledgeTaskCancellation(
@@ -371,6 +461,27 @@ export class BrowserDevelopmentTaskCenterStore implements TaskCenterStore {
     });
   }
 
+  public async listDueTasks(input: DueTaskQuery): Promise<readonly TaskSnapshot[]> {
+    assertDueTaskQuery(input);
+    await this.recoverExpiredTasks();
+    return Promise.resolve().then(() =>
+      this.read()
+        .tasks.map(rehydrateTask)
+        .map((task) => task.toSnapshot())
+        .filter((task) => matchesDueTaskQuery(task, input))
+        .filter((task) => input.after === null || compareTaskToCursor(task, input.after) > 0)
+        .sort(compareDueTasks)
+        .slice(0, input.limit),
+    );
+  }
+
+  public findTaskByIdempotencyKey(idempotencyKey: string): Promise<TaskSnapshot | null> {
+    return Promise.resolve().then(() => {
+      const snapshot = this.read().tasks.find((task) => task.idempotencyKey === idempotencyKey);
+      return snapshot === undefined ? null : rehydrateTask(snapshot).toSnapshot();
+    });
+  }
+
   public enqueueTask(input: CreateTaskInput): Promise<CreateTaskSnapshotResult> {
     return this.mutate((database) => {
       const task = unwrap(Task.create(input));
@@ -449,6 +560,10 @@ export class BrowserDevelopmentTaskCenterStore implements TaskCenterStore {
 
   public cancelTask(taskId: string): Promise<TaskSnapshot> {
     return this.transitionTask(taskId, (current) => current.requestCancellation(this.clock.now()));
+  }
+
+  public retryTaskNow(taskId: string, recovery?: RetryTaskNowInput): Promise<TaskSnapshot> {
+    return this.transitionTask(taskId, (current) => current.retryNow(this.clock.now(), recovery));
   }
 
   public acknowledgeTaskCancellation(taskId: string, leaseToken: string): Promise<TaskSnapshot> {
@@ -674,6 +789,64 @@ function invalidNotificationTransition(status: string): TaskEngineError {
     code: "NOTIFICATION_INVALID_TRANSITION",
     message: `Notification in ${status} state cannot be marked as read.`,
   });
+}
+
+function assertDueTaskQuery(input: DueTaskQuery): void {
+  if (
+    input.taskType.length === 0 ||
+    input.metadataOperation.length === 0 ||
+    !Number.isFinite(Date.parse(input.now)) ||
+    !Number.isFinite(Date.parse(input.queuedUpdatedAtOrBefore)) ||
+    (input.after !== null &&
+      (!Number.isFinite(Date.parse(input.after.runAfter)) ||
+        !Number.isFinite(Date.parse(input.after.createdAt)) ||
+        input.after.id.length === 0)) ||
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > MAX_DUE_TASK_QUERY_LIMIT
+  ) {
+    throw new TaskEngineError({
+      code: "TASK_REPOSITORY_ERROR",
+      message: "The due task query is invalid.",
+    });
+  }
+}
+
+function matchesDueTaskQuery(task: TaskSnapshot, input: DueTaskQuery): boolean {
+  if (
+    task.type !== input.taskType ||
+    task.metadata.operation !== input.metadataOperation ||
+    task.runAfter === null ||
+    task.runAfter > input.now
+  ) {
+    return false;
+  }
+  if (task.status === "queued") {
+    return task.updatedAt <= input.queuedUpdatedAtOrBefore;
+  }
+  return (
+    task.status === "waiting_retry" &&
+    task.failure?.retryable === true &&
+    task.failure.actions.includes("RETRY")
+  );
+}
+
+function compareDueTasks(left: TaskSnapshot, right: TaskSnapshot): number {
+  const runAfter = (left.runAfter ?? "").localeCompare(right.runAfter ?? "");
+  if (runAfter !== 0) {
+    return runAfter;
+  }
+  const createdAt = left.createdAt.localeCompare(right.createdAt);
+  return createdAt !== 0 ? createdAt : left.id.localeCompare(right.id);
+}
+
+function compareTaskToCursor(task: TaskSnapshot, cursor: DueTaskCursor): number {
+  const runAfter = (task.runAfter ?? "").localeCompare(cursor.runAfter);
+  if (runAfter !== 0) {
+    return runAfter;
+  }
+  const createdAt = task.createdAt.localeCompare(cursor.createdAt);
+  return createdAt !== 0 ? createdAt : task.id.localeCompare(cursor.id);
 }
 
 function taskCenterRepositoryError(error: unknown): TaskEngineError {

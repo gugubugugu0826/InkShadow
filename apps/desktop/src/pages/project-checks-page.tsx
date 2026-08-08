@@ -18,16 +18,21 @@ import {
   InlineAlert,
   Select,
 } from "@inkshadow/ui";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import {
   type ChapterNovelValidationResult,
+  type ChapterValidationCoverageCategory,
+  type ChapterValidationCoverageItem,
   type ChapterValidationResolutionSummary,
+  type ChapterSupplementalFindingAction,
+  type ChapterSupplementalFindingResolutionSummary,
   type ChapterValidationUiAction,
   type ChapterValidationUiEvidence,
   type ChapterValidationUiIssue,
 } from "../infrastructure/novel-validation-runtime";
+import type { ChapterValidationSnapshot } from "../infrastructure/chapter-validation-snapshot-store";
 import type { ChapterNarrativeAnalysisResult } from "../infrastructure/narrative-analysis-runtime";
 import type {
   ChapterCharacterVoicePovIssue,
@@ -39,7 +44,16 @@ import type {
   AmbiguousNovelReviewResult,
   AmbiguousNovelReviewTask,
 } from "../infrastructure/ambiguous-novel-review-service";
-import { normalizeUiError } from "../infrastructure/ui-error";
+import {
+  characterVoicePovSupplementalFinding,
+  findSupplementalFindingResolution,
+  narrativeQualityFindingId,
+  supplementalEvidenceSignature,
+  type SupplementalFindingDescriptor,
+  type SupplementalFindingEvidenceIdentity,
+} from "../infrastructure/chapter-supplemental-finding-verifier";
+import { createEvidenceCorrectionCandidate } from "../infrastructure/evidence-correction-candidate";
+import { normalizeUiError, UiActionError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
 const checkCategories = [
@@ -80,7 +94,37 @@ const missingRequirementLabels: Readonly<Record<string, string>> = {
     "本章还没有带原文位置的明确事实，系统不会从语气或暗示中猜测。",
   confirmed_reference_fact_or_locked_hard_rule_with_exact_evidence:
     "项目还没有可与本章比较的已确认设定或锁定规则。",
+  comparable_current_claim_and_confirmed_source:
+    "本章明确事实与已确认设定之间还没有可比较的同一对象、属性和生效区间。",
 };
+
+const coverageCategoryLabels: Readonly<Record<ChapterValidationCoverageCategory, string>> = {
+  character_life_status: "人物生死",
+  character_age: "人物年龄",
+  character_identity: "人物身份",
+  relationship: "人物关系",
+  event_time: "事件时间",
+  entity_location: "人物与物品地点",
+  item_ownership: "物品归属",
+  ability_state: "人物能力",
+  world_property: "世界设定与硬规则",
+  character_knowledge: "人物知情范围与 POV",
+};
+
+interface SupplementalFindingActionProps {
+  readonly actionsDisabled: boolean;
+  readonly busyIssue: string | null;
+  readonly expectedChapterVersionId: string | null;
+  readonly resolutions: readonly ChapterSupplementalFindingResolutionSummary[];
+  readonly onResolve: (
+    finding: SupplementalFindingDescriptor,
+    action: ChapterSupplementalFindingAction,
+  ) => void;
+  readonly onUndo: (
+    finding: SupplementalFindingDescriptor,
+    resolution: ChapterSupplementalFindingResolutionSummary,
+  ) => void;
+}
 
 export function ProjectChecksPage() {
   const runtime = useRuntime();
@@ -93,12 +137,17 @@ export function ProjectChecksPage() {
   const [selectedChapterId, setSelectedChapterId] = useState("");
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const snapshotLoadSequence = useRef(0);
   const [busyIssue, setBusyIssue] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<unknown>(
     parsedProjectId.ok ? null : parsedProjectId.error,
   );
   const [operationError, setOperationError] = useState<unknown>(null);
   const [result, setResult] = useState<ChapterNovelValidationResult | null>(null);
+  const [validationSnapshot, setValidationSnapshot] = useState<ChapterValidationSnapshot | null>(
+    null,
+  );
   const [narrativeResult, setNarrativeResult] = useState<ChapterNarrativeAnalysisResult | null>(
     null,
   );
@@ -106,6 +155,9 @@ export function ProjectChecksPage() {
     useState<ChapterCharacterVoicePovRuntimeResult | null>(null);
   const [ambiguousReviewResult, setAmbiguousReviewResult] =
     useState<AmbiguousNovelReviewResult | null>(null);
+  const [supplementalResolutions, setSupplementalResolutions] = useState<
+    readonly ChapterSupplementalFindingResolutionSummary[]
+  >([]);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
 
   const loadChapters = useCallback(async (): Promise<void> => {
@@ -133,6 +185,49 @@ export function ProjectChecksPage() {
     void Promise.resolve().then(loadChapters);
   }, [loadChapters]);
 
+  useEffect(() => {
+    const requestSequence = snapshotLoadSequence.current + 1;
+    snapshotLoadSequence.current = requestSequence;
+    void Promise.resolve().then(async () => {
+      if (snapshotLoadSequence.current !== requestSequence) return;
+      setValidationSnapshot(null);
+      setResult(null);
+      setNarrativeResult(null);
+      setVoicePovResult(null);
+      setAmbiguousReviewResult(null);
+      setSupplementalResolutions([]);
+      if (projectId === null || selectedChapterId.length === 0) {
+        setSnapshotLoading(false);
+        return;
+      }
+      const chapterId = parseUuidV7(selectedChapterId);
+      if (!chapterId.ok) {
+        setOperationError(chapterId.error);
+        setSnapshotLoading(false);
+        return;
+      }
+      setSnapshotLoading(true);
+      try {
+        const snapshot = await runtime.story.chapterValidationSnapshots.findLatest(
+          projectId,
+          chapterId.value,
+        );
+        if (snapshotLoadSequence.current !== requestSequence) return;
+        setValidationSnapshot(snapshot);
+        setResult(snapshot?.result ?? null);
+      } catch (cause: unknown) {
+        if (snapshotLoadSequence.current === requestSequence) setOperationError(cause);
+      } finally {
+        if (snapshotLoadSequence.current === requestSequence) setSnapshotLoading(false);
+      }
+    });
+    return () => {
+      if (snapshotLoadSequence.current === requestSequence) {
+        snapshotLoadSequence.current += 1;
+      }
+    };
+  }, [projectId, runtime, selectedChapterId]);
+
   const runCheck = useCallback(
     async (chapterIdValue: string): Promise<ChapterNovelValidationResult | null> => {
       if (projectId === null) {
@@ -146,11 +241,14 @@ export function ProjectChecksPage() {
       setChecking(true);
       setOperationError(null);
       try {
-        const [checked, narrative, voicePov] = await Promise.all([
-          runtime.story.chapterValidation.checkChapter({
-            projectId,
-            chapterId: chapterId.value,
-          }),
+        const [snapshot, narrative, voicePov] = await Promise.all([
+          runtime.story.chapterValidationSnapshots.run(
+            {
+              projectId,
+              chapterId: chapterId.value,
+            },
+            { mode: "rerun" },
+          ),
           runtime.story.narrativeAnalysis.analyzeChapter({
             projectId,
             chapterId: chapterId.value,
@@ -160,6 +258,8 @@ export function ProjectChecksPage() {
             chapterId: chapterId.value,
           }),
         ]);
+        const checked = snapshot.result;
+        setValidationSnapshot(snapshot);
         setResult(checked);
         setNarrativeResult(narrative);
         setVoicePovResult(voicePov);
@@ -169,6 +269,17 @@ export function ProjectChecksPage() {
           expectedChapterVersionId: checked.chapterVersionId,
         });
         setAmbiguousReviewResult(ambiguous);
+        if (checked.chapterVersionId !== null) {
+          setSupplementalResolutions(
+            await runtime.story.chapterValidation.listSupplementalFindingResolutions({
+              projectId,
+              chapterId: chapterId.value,
+              expectedChapterVersionId: checked.chapterVersionId,
+            }),
+          );
+        } else {
+          setSupplementalResolutions([]);
+        }
         return checked;
       } catch (cause) {
         setOperationError(cause);
@@ -244,11 +355,143 @@ export function ProjectChecksPage() {
     }
   }
 
+  async function createCorrectionCandidate(issue: ChapterValidationUiIssue): Promise<void> {
+    const chapterVersionId = result?.chapterVersionId ?? null;
+    if (projectId === null || chapterVersionId === null) return;
+    const chapterId = parseUuidV7(selectedChapterId);
+    if (!chapterId.ok) {
+      setOperationError(chapterId.error);
+      return;
+    }
+    const evidence = issue.currentEvidence.find(
+      (item) =>
+        item.sourceKind === "chapter" &&
+        item.sourceId === chapterId.value &&
+        item.sourceVersionId === chapterVersionId,
+    );
+    if (evidence === undefined) {
+      setOperationError(
+        new UiActionError(
+          "EVIDENCE_NOT_FOUND",
+          "这条问题缺少能够精确定位到当前正文的原文证据。请重新检查本章后再试。",
+          "无法创建修改建议",
+        ),
+      );
+      return;
+    }
+
+    setBusyIssue(`${issue.id}:create_candidate`);
+    setOperationError(null);
+    setActionNotice(null);
+    try {
+      const candidate = await createEvidenceCorrectionCandidate(runtime, {
+        projectId,
+        chapterId: chapterId.value,
+        expectedChapterVersionId: chapterVersionId,
+        evidence,
+        replacement: issue.conflictingFact.statement,
+      });
+      await navigate(
+        `${projectRoot}/chapters/${String(chapterId.value)}?candidate=${String(candidate.id)}`,
+      );
+    } catch (cause) {
+      setOperationError(cause);
+    } finally {
+      setBusyIssue(null);
+    }
+  }
+
+  async function resolveSupplementalFinding(
+    finding: SupplementalFindingDescriptor,
+    action: ChapterSupplementalFindingAction,
+  ): Promise<void> {
+    const chapterVersionId = result?.chapterVersionId ?? null;
+    if (projectId === null || chapterVersionId === null || finding.evidence.length === 0) return;
+    const chapterId = parseUuidV7(selectedChapterId);
+    if (!chapterId.ok) {
+      setOperationError(chapterId.error);
+      return;
+    }
+    const evidenceSignature = supplementalEvidenceSignature(finding.evidence);
+    setBusyIssue(`${finding.id}:supplemental:${action}`);
+    setOperationError(null);
+    try {
+      const saved = await runtime.story.chapterValidation.resolveSupplementalFinding({
+        projectId,
+        chapterId: chapterId.value,
+        expectedChapterVersionId: chapterVersionId,
+        findingId: finding.id,
+        category: finding.category,
+        evidenceSignature,
+        action,
+        humanConfirmed: true,
+      });
+      setSupplementalResolutions((current) => [
+        ...current.filter(
+          (item) =>
+            item.chapterVersionId !== saved.chapterVersionId ||
+            item.findingId !== saved.findingId ||
+            item.evidenceSignature !== saved.evidenceSignature,
+        ),
+        saved,
+      ]);
+      setActionNotice(
+        action === "ignore" ? "提醒已忽略，可随时恢复。" : "当前写法已明确标记为允许，可随时恢复。",
+      );
+    } catch (cause) {
+      setOperationError(cause);
+    } finally {
+      setBusyIssue(null);
+    }
+  }
+
+  async function undoSupplementalFinding(
+    finding: SupplementalFindingDescriptor,
+    resolution: ChapterSupplementalFindingResolutionSummary,
+  ): Promise<void> {
+    const chapterVersionId = result?.chapterVersionId ?? null;
+    if (projectId === null || chapterVersionId === null) return;
+    const chapterId = parseUuidV7(selectedChapterId);
+    if (!chapterId.ok) {
+      setOperationError(chapterId.error);
+      return;
+    }
+    setBusyIssue(`${finding.id}:supplemental:undo`);
+    setOperationError(null);
+    try {
+      await runtime.story.chapterValidation.undoSupplementalFinding({
+        projectId,
+        chapterId: chapterId.value,
+        expectedChapterVersionId: chapterVersionId,
+        findingId: finding.id,
+        evidenceSignature: resolution.evidenceSignature,
+        resolutionFactId: resolution.factId,
+        expectedResolutionFactRevision: resolution.factRevision,
+        humanConfirmed: true,
+      });
+      setSupplementalResolutions((current) =>
+        current.filter(({ factId }) => factId !== resolution.factId),
+      );
+      setActionNotice("提醒已恢复为待处理状态。正文和正式设定没有改变。");
+    } catch (cause) {
+      setOperationError(cause);
+    } finally {
+      setBusyIssue(null);
+    }
+  }
+
   const normalizedLoadError = loadError === null ? null : normalizeUiError(loadError);
   const normalizedOperationError =
     operationError === null ? null : normalizeUiError(operationError);
   const unresolvedCount =
     result?.issues.filter(({ resolution }) => resolution.status === "unresolved").length ?? 0;
+  const selectedChapter = chapters.find(({ id }) => id === selectedChapterId) ?? null;
+  const checkedCoverageCount =
+    result?.coverage?.filter(({ status }) => status === "checked").length ?? 0;
+  const snapshotIsCurrent =
+    validationSnapshot !== null &&
+    selectedChapter !== null &&
+    validationSnapshot.chapterVersionId === selectedChapter.currentVersionId;
   const advancedTools = advancedProjectTools(runtime, projectRoot);
 
   return (
@@ -307,6 +550,7 @@ export function ProjectChecksPage() {
                     }))}
                     onChange={(event) => {
                       setSelectedChapterId(event.currentTarget.value);
+                      setValidationSnapshot(null);
                       setResult(null);
                       setNarrativeResult(null);
                       setVoicePovResult(null);
@@ -320,10 +564,10 @@ export function ProjectChecksPage() {
               <Button
                 loading={checking}
                 loadingLabel="正在检查"
-                disabled={selectedChapterId.length === 0 || busyIssue !== null}
+                disabled={selectedChapterId.length === 0 || busyIssue !== null || snapshotLoading}
                 onClick={() => void runCheck(selectedChapterId)}
               >
-                检查本章
+                {validationSnapshot === null ? "检查本章" : "重新检查"}
               </Button>
             </div>
           </CardContent>
@@ -338,6 +582,16 @@ export function ProjectChecksPage() {
         />
       )}
       {actionNotice !== null && <InlineAlert title="处理结果已保存" description={actionNotice} />}
+      {snapshotLoading && <div role="status">正在读取最近一次检查快照…</div>}
+      {validationSnapshot !== null && (
+        <InlineAlert
+          tone={snapshotIsCurrent ? "info" : "warning"}
+          title={snapshotIsCurrent ? "已读取当前版本的检查快照" : "这是较早版本的检查快照"}
+          description={`第 ${String(validationSnapshot.runSequence)} 次检查 · 规则 ${validationSnapshot.ruleSetVersion} · ${formatTimestamp(validationSnapshot.generatedAt)}${
+            snapshotIsCurrent ? "" : "。正文版本已经变化，请重新检查后再处理问题。"
+          }`}
+        />
+      )}
 
       <section aria-labelledby="check-results-heading">
         <div className="section-heading">
@@ -347,10 +601,11 @@ export function ProjectChecksPage() {
           </div>
           {result !== null && (
             <Badge tone={unresolvedCount === 0 ? "success" : "warning"}>
-              {unresolvedCount} 项待处理
+              {checkedCoverageCount} 类实际运行 · {unresolvedCount} 项待处理
             </Badge>
           )}
         </div>
+        {result !== null && <DeterministicCoverageSummary coverage={result.coverage} />}
         {result === null ? (
           <EmptyState
             title="还没有检查结果"
@@ -361,7 +616,7 @@ export function ProjectChecksPage() {
         ) : result.issues.length === 0 ? (
           <EmptyState
             title="没有发现有证据支持的冲突"
-            description="本次确定性检查已经完成。它不会把缺少证据的猜测显示成问题；章节正文没有改变。"
+            description="在上方列出的实际运行类别中没有发现冲突；未检查类别仍然未知，不代表通过。章节正文没有改变。"
           />
         ) : (
           <div className="chapter-check-results">
@@ -370,6 +625,8 @@ export function ProjectChecksPage() {
                 key={issue.id}
                 issue={issue}
                 busyIssue={busyIssue}
+                actionsDisabled={!snapshotIsCurrent}
+                onCreateCandidate={() => void createCorrectionCandidate(issue)}
                 onResolve={(action) => void resolveIssue(issue, action)}
                 onUndoIgnore={() => void undoIgnore(issue)}
               />
@@ -378,9 +635,32 @@ export function ProjectChecksPage() {
         )}
       </section>
 
-      {narrativeResult !== null && <NarrativeAnalysisSections result={narrativeResult} />}
+      {narrativeResult !== null && (
+        <NarrativeAnalysisSections
+          result={narrativeResult}
+          projectRoot={projectRoot}
+          expectedChapterVersionId={result?.chapterVersionId ?? null}
+          actionsDisabled={!snapshotIsCurrent}
+          busyIssue={busyIssue}
+          resolutions={supplementalResolutions}
+          onResolve={(finding, action) => void resolveSupplementalFinding(finding, action)}
+          onUndo={(finding, resolution) => void undoSupplementalFinding(finding, resolution)}
+        />
+      )}
 
-      {voicePovResult !== null && <CharacterVoicePovSection result={voicePovResult} />}
+      {voicePovResult !== null && (
+        <CharacterVoicePovSection
+          result={voicePovResult}
+          deterministicIssues={result?.issues ?? []}
+          expectedChapterVersionId={result?.chapterVersionId ?? null}
+          actionsDisabled={!snapshotIsCurrent}
+          busyIssue={busyIssue}
+          resolutions={supplementalResolutions}
+          onResolve={(finding, action) => void resolveSupplementalFinding(finding, action)}
+          onUndo={(finding, resolution) => void undoSupplementalFinding(finding, resolution)}
+          onUpdateSetting={(issue) => void resolveIssue(issue, "update_setting")}
+        />
+      )}
 
       {ambiguousReviewResult !== null && (
         <>
@@ -661,7 +941,23 @@ function ambiguousEvidenceRoleLabel(role: AmbiguousNovelReviewEvidence["role"]):
   return labels[role];
 }
 
-function CharacterVoicePovSection({ result }: { result: ChapterCharacterVoicePovRuntimeResult }) {
+function CharacterVoicePovSection({
+  actionsDisabled,
+  busyIssue,
+  deterministicIssues,
+  expectedChapterVersionId,
+  onResolve,
+  onUndo,
+  onUpdateSetting,
+  resolutions,
+  result,
+}: Readonly<
+  SupplementalFindingActionProps & {
+    readonly result: ChapterCharacterVoicePovRuntimeResult;
+    readonly deterministicIssues: readonly ChapterValidationUiIssue[];
+    readonly onUpdateSetting: (issue: ChapterValidationUiIssue) => void;
+  }
+>) {
   return (
     <section aria-labelledby="voice-pov-check-heading">
       <div className="section-heading">
@@ -706,9 +1002,25 @@ function CharacterVoicePovSection({ result }: { result: ChapterCharacterVoicePov
         />
       ) : (
         <div className="chapter-check-results">
-          {result.issues.map((issue) => (
-            <CharacterVoicePovIssueCard key={issue.id} issue={issue} />
-          ))}
+          {result.issues.map((issue) => {
+            const linkedDeterministicIssue = issue.id.startsWith("pov:")
+              ? (deterministicIssues.find(({ id }) => id === issue.id.slice(4)) ?? null)
+              : null;
+            return (
+              <CharacterVoicePovIssueCard
+                key={issue.id}
+                issue={issue}
+                linkedDeterministicIssue={linkedDeterministicIssue}
+                expectedChapterVersionId={expectedChapterVersionId}
+                actionsDisabled={actionsDisabled}
+                busyIssue={busyIssue}
+                resolutions={resolutions}
+                onResolve={onResolve}
+                onUndo={onUndo}
+                onUpdateSetting={onUpdateSetting}
+              />
+            );
+          })}
         </div>
       )}
 
@@ -731,7 +1043,24 @@ function CharacterVoicePovSection({ result }: { result: ChapterCharacterVoicePov
   );
 }
 
-function CharacterVoicePovIssueCard({ issue }: { issue: ChapterCharacterVoicePovIssue }) {
+function CharacterVoicePovIssueCard({
+  actionsDisabled,
+  busyIssue,
+  expectedChapterVersionId,
+  issue,
+  linkedDeterministicIssue,
+  onResolve,
+  onUndo,
+  onUpdateSetting,
+  resolutions,
+}: Readonly<
+  SupplementalFindingActionProps & {
+    readonly issue: ChapterCharacterVoicePovIssue;
+    readonly linkedDeterministicIssue: ChapterValidationUiIssue | null;
+    readonly onUpdateSetting: (issue: ChapterValidationUiIssue) => void;
+  }
+>) {
+  const finding = characterVoicePovSupplementalFinding(issue);
   return (
     <Card>
       <CardHeader>
@@ -756,6 +1085,39 @@ function CharacterVoicePovIssueCard({ issue }: { issue: ChapterCharacterVoicePov
           title="修改建议"
           description={`${issue.suggestion.summary} ${issue.suggestion.actions.join("；")}`}
         />
+        <SupplementalFindingActions
+          finding={finding}
+          expectedChapterVersionId={expectedChapterVersionId}
+          actionsDisabled={actionsDisabled}
+          busyIssue={busyIssue}
+          resolutions={resolutions}
+          onResolve={onResolve}
+          onUndo={onUndo}
+        />
+        {issue.kind === "character_voice_deviation" ? (
+          <p>
+            <strong>更新正式设定：</strong>
+            不适用于单章声纹偏离。声纹需要综合多段历史台词，请在人物设定中人工调整，避免一条异常台词覆盖既有样本。
+          </p>
+        ) : linkedDeterministicIssue !== null ? (
+          <div className="settings-actions">
+            <Button
+              size="sm"
+              loading={busyIssue === `${linkedDeterministicIssue.id}:update_setting`}
+              disabled={
+                actionsDisabled || busyIssue?.startsWith(`${linkedDeterministicIssue.id}:`) === true
+              }
+              onClick={() => onUpdateSetting(linkedDeterministicIssue)}
+            >
+              用当前正文更新正式知情设定
+            </Button>
+          </div>
+        ) : (
+          <p>
+            <strong>更新正式设定：</strong>
+            当前提醒没有可安全绑定的正式知识事实，因此不提供一键更新；请先补充带来源的信息取得事件后重新检查。
+          </p>
+        )}
       </CardContent>
     </Card>
   );
@@ -790,7 +1152,21 @@ function CharacterEvidenceList({
   );
 }
 
-function NarrativeAnalysisSections({ result }: { result: ChapterNarrativeAnalysisResult }) {
+function NarrativeAnalysisSections({
+  actionsDisabled,
+  busyIssue,
+  expectedChapterVersionId,
+  onResolve,
+  onUndo,
+  projectRoot,
+  resolutions,
+  result,
+}: Readonly<
+  SupplementalFindingActionProps & {
+    readonly result: ChapterNarrativeAnalysisResult;
+    readonly projectRoot: string;
+  }
+>) {
   if (result.status === "skipped" || result.analysis === null) {
     return (
       <section aria-labelledby="narrative-analysis-heading">
@@ -835,9 +1211,34 @@ function NarrativeAnalysisSections({ result }: { result: ChapterNarrativeAnalysi
         {result.sourceSummary.causalRelations} 条因果关系。
       </p>
 
-      <NarrativePlotlineSection result={result} />
-      <NarrativeForeshadowSection result={result} />
-      <NarrativePacingSection result={result} />
+      <NarrativePlotlineSection
+        result={result}
+        projectRoot={projectRoot}
+        expectedChapterVersionId={expectedChapterVersionId}
+        actionsDisabled={actionsDisabled}
+        busyIssue={busyIssue}
+        resolutions={resolutions}
+        onResolve={onResolve}
+        onUndo={onUndo}
+      />
+      <NarrativeForeshadowSection
+        result={result}
+        expectedChapterVersionId={expectedChapterVersionId}
+        actionsDisabled={actionsDisabled}
+        busyIssue={busyIssue}
+        resolutions={resolutions}
+        onResolve={onResolve}
+        onUndo={onUndo}
+      />
+      <NarrativePacingSection
+        result={result}
+        expectedChapterVersionId={expectedChapterVersionId}
+        actionsDisabled={actionsDisabled}
+        busyIssue={busyIssue}
+        resolutions={resolutions}
+        onResolve={onResolve}
+        onUndo={onUndo}
+      />
 
       {result.skippedSources.length > 0 && (
         <details>
@@ -855,7 +1256,21 @@ function NarrativeAnalysisSections({ result }: { result: ChapterNarrativeAnalysi
   );
 }
 
-function NarrativePlotlineSection({ result }: { result: ChapterNarrativeAnalysisResult }) {
+function NarrativePlotlineSection({
+  actionsDisabled,
+  busyIssue,
+  expectedChapterVersionId,
+  onResolve,
+  onUndo,
+  projectRoot,
+  resolutions,
+  result,
+}: Readonly<
+  SupplementalFindingActionProps & {
+    readonly result: ChapterNarrativeAnalysisResult;
+    readonly projectRoot: string;
+  }
+>) {
   const analysis = result.analysis;
   if (analysis === null) {
     return null;
@@ -949,6 +1364,26 @@ function NarrativePlotlineSection({ result }: { result: ChapterNarrativeAnalysis
                     </li>
                   </ul>
                   <NarrativeEvidenceList evidence={evidence} />
+                  {stagnation?.state === "stagnant" && (
+                    <NarrativeFindingDisposition
+                      title="剧情线长期未推进"
+                      severity="warning"
+                      explanation={`“${goal ?? plotline.plotlineId}”已超过 ${String(stagnation.threshold)} 章未推进。`}
+                      suggestion="在接下来的场景推进该剧情线、明确安排交汇点，或在确认有意搁置时标记为允许。"
+                      finding={{
+                        id: `narrative:plotline:${plotline.plotlineId}:stagnant`,
+                        category: "plotline",
+                        evidence,
+                      }}
+                      settingAction="not_applicable"
+                      expectedChapterVersionId={expectedChapterVersionId}
+                      actionsDisabled={actionsDisabled}
+                      busyIssue={busyIssue}
+                      resolutions={resolutions}
+                      onResolve={onResolve}
+                      onUndo={onUndo}
+                    />
+                  )}
                 </CardContent>
               </Card>
             );
@@ -967,16 +1402,31 @@ function NarrativePlotlineSection({ result }: { result: ChapterNarrativeAnalysis
           ) : conflicts.value.length === 0 ? (
             <p>在已声明完整的资料范围内没有发现时空冲突。</p>
           ) : (
-            <ul className="privacy-list">
+            <div className="chapter-check-results">
               {conflicts.value.map((conflict) => (
-                <li key={conflict.id}>
-                  <strong>{conflict.characterId}</strong> 在故事时间{" "}
-                  {conflict.overlappingStoryTime.start}–{conflict.overlappingStoryTime.end}{" "}
-                  同时出现在 {conflict.locationIds.join(" 和 ")}。
-                  <NarrativeEvidenceList evidence={conflict.evidence} />
-                </li>
+                <NarrativeFindingDisposition
+                  key={conflict.id}
+                  title="人物时空冲突"
+                  severity="error"
+                  explanation={`${conflict.characterId} 在故事时间 ${String(conflict.overlappingStoryTime.start)}–${String(conflict.overlappingStoryTime.end)} 同时出现在 ${conflict.locationIds.join(" 和 ")}。`}
+                  suggestion="核对两条事件的时间、地点和参与人物，保留有原文依据的一条；若这是有意设定，可标记为允许。"
+                  finding={{
+                    id: `narrative:time-location:${conflict.id}`,
+                    category: "time_location",
+                    evidence: conflict.evidence,
+                  }}
+                  evidence={conflict.evidence}
+                  settingAction="choose_source"
+                  projectRoot={projectRoot}
+                  expectedChapterVersionId={expectedChapterVersionId}
+                  actionsDisabled={actionsDisabled}
+                  busyIssue={busyIssue}
+                  resolutions={resolutions}
+                  onResolve={onResolve}
+                  onUndo={onUndo}
+                />
               ))}
-            </ul>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -984,7 +1434,15 @@ function NarrativePlotlineSection({ result }: { result: ChapterNarrativeAnalysis
   );
 }
 
-function NarrativeForeshadowSection({ result }: { result: ChapterNarrativeAnalysisResult }) {
+function NarrativeForeshadowSection({
+  actionsDisabled,
+  busyIssue,
+  expectedChapterVersionId,
+  onResolve,
+  onUndo,
+  resolutions,
+  result,
+}: Readonly<SupplementalFindingActionProps & { readonly result: ChapterNarrativeAnalysisResult }>) {
   const analysis = result.analysis;
   if (analysis === null) {
     return null;
@@ -1033,13 +1491,49 @@ function NarrativeForeshadowSection({ result }: { result: ChapterNarrativeAnalys
                       : `；距今 ${String(progress.chaptersSinceProgress)} 章`}
                   </p>
                   {progress.sequenceIssues.length > 0 && (
-                    <ul className="privacy-list">
+                    <div className="chapter-check-results">
                       {progress.sequenceIssues.map((issue) => (
-                        <li key={`${issue.kind}:${issue.progressId}`}>
-                          {foreshadowIssueLabel(issue.kind)}
-                        </li>
+                        <NarrativeFindingDisposition
+                          key={`${issue.kind}:${issue.progressId}`}
+                          title="伏笔顺序冲突"
+                          severity={issue.kind === "duplicate_plant" ? "warning" : "error"}
+                          explanation={foreshadowIssueLabel(issue.kind)}
+                          suggestion={foreshadowIssueSuggestion(issue.kind)}
+                          finding={{
+                            id: `narrative:foreshadow:${foreshadow.foreshadowId}:${issue.kind}:${issue.progressId}`,
+                            category: "foreshadow",
+                            evidence: issue.evidence,
+                          }}
+                          settingAction="not_applicable"
+                          expectedChapterVersionId={expectedChapterVersionId}
+                          actionsDisabled={actionsDisabled}
+                          busyIssue={busyIssue}
+                          resolutions={resolutions}
+                          onResolve={onResolve}
+                          onUndo={onUndo}
+                        />
                       ))}
-                    </ul>
+                    </div>
+                  )}
+                  {progress.stagnant && (
+                    <NarrativeFindingDisposition
+                      title="伏笔长期未推进"
+                      severity="warning"
+                      explanation={`“${foreshadow.foreshadowId}”距最近一次推进已经 ${String(progress.chaptersSinceProgress ?? progress.threshold)} 章。`}
+                      suggestion="在后续场景安排推进或回收；若有意延后，可以标记为允许并保留审计记录。"
+                      finding={{
+                        id: `narrative:foreshadow:${foreshadow.foreshadowId}:stagnant:${progress.latestProgress?.id ?? "none"}`,
+                        category: "foreshadow",
+                        evidence: foreshadow.progress.evidence,
+                      }}
+                      settingAction="not_applicable"
+                      expectedChapterVersionId={expectedChapterVersionId}
+                      actionsDisabled={actionsDisabled}
+                      busyIssue={busyIssue}
+                      resolutions={resolutions}
+                      onResolve={onResolve}
+                      onUndo={onUndo}
+                    />
                   )}
                   <NarrativeEvidenceList evidence={foreshadow.progress.evidence} />
                 </CardContent>
@@ -1052,7 +1546,15 @@ function NarrativeForeshadowSection({ result }: { result: ChapterNarrativeAnalys
   );
 }
 
-function NarrativePacingSection({ result }: { result: ChapterNarrativeAnalysisResult }) {
+function NarrativePacingSection({
+  actionsDisabled,
+  busyIssue,
+  expectedChapterVersionId,
+  onResolve,
+  onUndo,
+  resolutions,
+  result,
+}: Readonly<SupplementalFindingActionProps & { readonly result: ChapterNarrativeAnalysisResult }>) {
   const analysis = result.analysis;
   if (analysis === null) {
     return null;
@@ -1129,14 +1631,29 @@ function NarrativePacingSection({ result }: { result: ChapterNarrativeAnalysisRe
               <p>尚无足够证据</p>
             )
           ) : (
-            <ul className="privacy-list">
-              {analysis.qualityFindings.map((finding, index) => (
-                <li key={`${finding.kind}:${String(index)}`}>
-                  {qualityFindingLabel(finding)}
-                  <NarrativeEvidenceList evidence={finding.evidence} />
-                </li>
+            <div className="chapter-check-results">
+              {analysis.qualityFindings.map((finding) => (
+                <NarrativeFindingDisposition
+                  key={narrativeQualityFindingId(finding)}
+                  title="节奏与章节功能提醒"
+                  severity="warning"
+                  explanation={qualityFindingLabel(finding)}
+                  suggestion={qualityFindingSuggestion(finding)}
+                  finding={{
+                    id: narrativeQualityFindingId(finding),
+                    category: "pacing_quality",
+                    evidence: finding.evidence,
+                  }}
+                  settingAction="not_applicable"
+                  expectedChapterVersionId={expectedChapterVersionId}
+                  actionsDisabled={actionsDisabled}
+                  busyIssue={busyIssue}
+                  resolutions={resolutions}
+                  onResolve={onResolve}
+                  onUndo={onUndo}
+                />
               ))}
-            </ul>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -1170,6 +1687,184 @@ function NarrativePacingSection({ result }: { result: ChapterNarrativeAnalysisRe
   );
 }
 
+function NarrativeFindingDisposition({
+  actionsDisabled,
+  busyIssue,
+  evidence,
+  expectedChapterVersionId,
+  explanation,
+  finding,
+  onResolve,
+  onUndo,
+  projectRoot,
+  resolutions,
+  settingAction,
+  severity,
+  suggestion,
+  title,
+}: Readonly<
+  SupplementalFindingActionProps & {
+    readonly title: string;
+    readonly severity: "warning" | "error";
+    readonly explanation: string;
+    readonly suggestion: string;
+    readonly finding: SupplementalFindingDescriptor;
+    readonly evidence?: readonly NarrativeEvidenceReference[];
+    readonly settingAction: "not_applicable" | "choose_source";
+    readonly projectRoot?: string;
+  }
+>) {
+  const displayedEvidence = evidence ?? finding.evidence;
+  return (
+    <div className="chapter-check-issue">
+      <div className="card-heading-row">
+        <strong>{title}</strong>
+        <Badge tone={severity === "error" ? "danger" : "warning"}>
+          {severity === "error" ? "需要处理" : "建议复核"}
+        </Badge>
+      </div>
+      <p>{explanation}</p>
+      <SupplementalEvidenceList evidence={displayedEvidence} />
+      <InlineAlert tone="info" title="修改建议" description={suggestion} />
+      <SupplementalFindingActions
+        finding={finding}
+        expectedChapterVersionId={expectedChapterVersionId}
+        actionsDisabled={actionsDisabled}
+        busyIssue={busyIssue}
+        resolutions={resolutions}
+        onResolve={onResolve}
+        onUndo={onUndo}
+      />
+      {settingAction === "choose_source" && projectRoot !== undefined ? (
+        <p>
+          <strong>更新正式设定：</strong>
+          这类事实冲突需要先选择哪条事件为准，不能一键覆盖。请到
+          <Link to={`${projectRoot}/graph`}>故事关联</Link>
+          核对事件后再保存。
+        </p>
+      ) : (
+        <p>
+          <strong>更新正式设定：</strong>
+          不适用于结构或质量提醒；忽略和允许只保存处置记录，不会改写正文或正式设定。
+        </p>
+      )}
+    </div>
+  );
+}
+
+function SupplementalFindingActions({
+  actionsDisabled,
+  busyIssue,
+  expectedChapterVersionId,
+  finding,
+  onResolve,
+  onUndo,
+  resolutions,
+}: SupplementalFindingActionProps & { readonly finding: SupplementalFindingDescriptor }) {
+  const evidenceSignature = supplementalEvidenceSignature(finding.evidence);
+  const resolution = findSupplementalFindingResolution(
+    resolutions,
+    finding,
+    expectedChapterVersionId,
+  );
+  const busy = actionsDisabled || busyIssue?.startsWith(`${finding.id}:supplemental:`) === true;
+  if (finding.evidence.length === 0) {
+    return (
+      <InlineAlert
+        tone="warning"
+        title="缺少精确证据，不能保存处置"
+        description="请补充带不可变版本、原文位置和内容校验值的证据后重新检查。"
+      />
+    );
+  }
+  if (evidenceSignature.length > 5_000) {
+    return (
+      <InlineAlert
+        tone="warning"
+        title="证据范围过大，不能保存处置"
+        description="请缩小本次检查范围或拆分提醒后重新检查；正文和正式设定没有改变。"
+      />
+    );
+  }
+  return (
+    <div className="settings-actions" aria-label={`${finding.id}处理操作`}>
+      {resolution === undefined ? (
+        <>
+          <Button
+            size="sm"
+            variant="ghost"
+            loading={busyIssue === `${finding.id}:supplemental:ignore`}
+            disabled={busy}
+            onClick={() => onResolve(finding, "ignore")}
+          >
+            忽略
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            loading={busyIssue === `${finding.id}:supplemental:allow`}
+            disabled={busy}
+            onClick={() => onResolve(finding, "allow")}
+          >
+            标记为允许
+          </Button>
+        </>
+      ) : (
+        <>
+          <span>{resolution.action === "ignore" ? "已忽略" : "已标记为允许"}</span>
+          <Button
+            size="sm"
+            variant="secondary"
+            loading={busyIssue === `${finding.id}:supplemental:undo`}
+            disabled={busy}
+            onClick={() => onUndo(finding, resolution)}
+          >
+            恢复为待处理
+          </Button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SupplementalEvidenceList({
+  evidence,
+}: {
+  readonly evidence: readonly SupplementalFindingEvidenceIdentity[];
+}) {
+  const uniqueEvidence = uniqueSupplementalEvidence(evidence);
+  return (
+    <div>
+      <h4>原文证据</h4>
+      <ul className="privacy-list">
+        {uniqueEvidence.map((source) => (
+          <li
+            key={`${source.sourceVersionId}:${source.contentHash}:${String(source.startOffset)}:${String(source.endOffset)}`}
+          >
+            “{source.excerpt}”
+            <br />
+            <small>
+              {source.locator} · 版本 {source.sourceVersionId} · UTF-16 {source.startOffset}–
+              {source.endOffset}
+            </small>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function uniqueSupplementalEvidence(
+  evidence: readonly SupplementalFindingEvidenceIdentity[],
+): readonly SupplementalFindingEvidenceIdentity[] {
+  const unique = new Map<string, SupplementalFindingEvidenceIdentity>();
+  evidence.forEach((source) => {
+    const identity = `${source.sourceVersionId}:${source.contentHash}:${String(source.startOffset)}:${String(source.endOffset)}`;
+    if (!unique.has(identity)) unique.set(identity, source);
+  });
+  return Object.freeze([...unique.values()]);
+}
+
 function NarrativeEvidenceMissing() {
   return (
     <InlineAlert
@@ -1192,11 +1887,12 @@ function NarrativeEvidenceList({ evidence }: { evidence: readonly NarrativeEvide
           <li
             key={`${source.sourceKind}:${source.sourceId}:${source.sourceVersionId}:${String(source.startOffset)}`}
           >
-            <span>{source.locator}</span>
-            <code>{source.sourceVersionId}</code>
-            <span>
-              位置 {source.startOffset}–{source.endOffset}
-            </span>
+            <span>“{source.excerpt}”</span>
+            <br />
+            <small>
+              {source.locator} · 版本 {source.sourceVersionId} · UTF-16 {source.startOffset}–
+              {source.endOffset}
+            </small>
           </li>
         ))}
       </ul>
@@ -1249,6 +1945,19 @@ function qualityFindingLabel(finding: NarrativeQualityFinding): string {
   }
 }
 
+function qualityFindingSuggestion(finding: NarrativeQualityFinding): string {
+  switch (finding.kind) {
+    case "scene_changes_neither_plot_nor_character":
+      return "为该场景补充明确的剧情推进或人物状态变化；如果它有意承担停顿、氛围或对照功能，可以标记为允许。";
+    case "repeated_scene_function":
+      return "合并重复功能的场景，或让后一个场景承担新的冲突、信息或人物变化。";
+    case "climax_missing_required_setup":
+      return "在高潮前补齐列出的铺垫节点，或重新确认高潮场景声明的必需铺垫。";
+    case "consecutive_chapters_have_similar_pacing":
+      return "调整相邻章节的冲突强度、张力走势或内容比例，形成可感知的节奏变化。";
+  }
+}
+
 function plotlineStateLabel(state: "active" | "stagnant" | "not_started"): string {
   return state === "stagnant" ? "长期未推进" : state === "active" ? "正在推进" : "尚未开始";
 }
@@ -1277,6 +1986,16 @@ function foreshadowIssueLabel(
       : "伏笔已经回收后仍出现新的推进记录。";
 }
 
+function foreshadowIssueSuggestion(
+  kind: "missing_plant" | "duplicate_plant" | "progress_after_resolution",
+): string {
+  return kind === "missing_plant"
+    ? "补充有原文依据的埋设记录，或把当前记录改成独立线索。"
+    : kind === "duplicate_plant"
+      ? "合并重复的埋设记录；若是有意二次强化，可以标记为允许。"
+      : "移除回收后的推进记录，或明确建立新的伏笔分支。";
+}
+
 function tensionTrendLabel(trend: "rising" | "falling" | "flat"): string {
   return trend === "rising" ? "上升" : trend === "falling" ? "下降" : "平稳";
 }
@@ -1291,6 +2010,82 @@ function formatDecimal(value: number): string {
 
 function formatPercent(value: number): string {
   return `${String(Math.round(value * 100))}%`;
+}
+
+function DeterministicCoverageSummary({
+  coverage,
+}: {
+  readonly coverage: readonly ChapterValidationCoverageItem[] | undefined;
+}) {
+  if (coverage === undefined) {
+    return (
+      <InlineAlert
+        tone="warning"
+        title="旧检查快照没有记录覆盖范围"
+        description="不能判断哪些类别实际运行。请重新检查本章；旧结果不会被当作完整通过。"
+      />
+    );
+  }
+  const checked = coverage.filter(({ status }) => status === "checked");
+  const missing = coverage.filter(({ status }) => status === "not_checked");
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle headingLevel={3}>本次实际检查范围</CardTitle>
+        <CardDescription>
+          “已检查”只表示至少一条明确原文事实与同对象、同属性、同生效区间的确认资料完成比较，不代表整类内容已被完整提取。
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="settings-grid">
+          <div>
+            <h4>已检查（{checked.length}）</h4>
+            {checked.length === 0 ? (
+              <p>没有类别具备完整比较条件。</p>
+            ) : (
+              <ul className="privacy-list">
+                {checked.map((item) => (
+                  <li key={item.category}>
+                    <strong>{coverageCategoryLabels[item.category]}</strong>：比较{" "}
+                    {item.currentClaimCount} 条当前主张、{item.comparableReferenceCount}{" "}
+                    条确认事实和 {item.applicableHardRuleCount} 条锁定规则。
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div>
+            <h4>因证据不足未检查（{missing.length}）</h4>
+            {missing.length === 0 ? (
+              <p>所有已声明类别都有可比较资料。</p>
+            ) : (
+              <ul className="privacy-list">
+                {missing.map((item) => (
+                  <li key={item.category}>
+                    <strong>{coverageCategoryLabels[item.category]}</strong>：
+                    {coverageReasonLabel(item)}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function coverageReasonLabel(item: ChapterValidationCoverageItem): string {
+  switch (item.reason) {
+    case "current_claim_missing":
+      return "本章没有带精确原文位置的明确主张。";
+    case "confirmed_reference_or_rule_missing":
+      return "没有已确认设定或锁定规则可供比较。";
+    case "no_comparable_source":
+      return "现有资料的对象、属性、分支或生效区间不重合。";
+    case "explicit_claim_compared":
+      return "已完成比较。";
+  }
 }
 
 function SkippedCheckResult({ result }: { result: ChapterNovelValidationResult }) {
@@ -1318,17 +2113,21 @@ function SkippedCheckResult({ result }: { result: ChapterNovelValidationResult }
 }
 
 function IssueCard({
+  actionsDisabled,
   busyIssue,
   issue,
+  onCreateCandidate,
   onResolve,
   onUndoIgnore,
 }: {
+  readonly actionsDisabled: boolean;
   readonly busyIssue: string | null;
   readonly issue: ChapterValidationUiIssue;
+  readonly onCreateCandidate: () => void;
   readonly onResolve: (action: ChapterValidationUiAction) => void;
   readonly onUndoIgnore: () => void;
 }) {
-  const busy = busyIssue?.startsWith(`${issue.id}:`) === true;
+  const busy = actionsDisabled || busyIssue?.startsWith(`${issue.id}:`) === true;
   return (
     <Card className="chapter-check-issue">
       <CardHeader>
@@ -1367,6 +2166,15 @@ function IssueCard({
         <div className="settings-actions" aria-label={`${issueLabels[issue.type]}处理操作`}>
           {issue.resolution.status === "unresolved" ? (
             <>
+              <Button
+                size="sm"
+                variant="ai-primary"
+                loading={busyIssue === `${issue.id}:create_candidate`}
+                disabled={busy || issue.currentEvidence.length === 0}
+                onClick={onCreateCandidate}
+              >
+                按设定生成修改建议
+              </Button>
               <Button
                 size="sm"
                 variant="ghost"

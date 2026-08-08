@@ -2,6 +2,17 @@ import { AiCandidate, AppError, err, ok, type Result, type UuidV7 } from "@inksh
 
 import { ModelCenterError, type ModelProfile } from "./model-center-store";
 import { executeModelHubTextTask, ModelHubExecutionError } from "./model-hub-execution-service";
+import { isLoopbackModelBaseUrl } from "./model-hub-provider-registry";
+import {
+  resolveFinalModelProfileGatewayConfig,
+  resolveModelProfileGatewayConfig,
+  type ModelProfileGatewayConfigResolution,
+} from "./model-profile-gateway-config";
+import {
+  ProjectContextPrivacyError,
+  projectContextRequiredDataDestination,
+  projectContextDispatchScope,
+} from "./project-context-privacy-authority";
 import type { DesktopRuntime, NativeModelGenerationResult, NativeModelMessage } from "./runtime";
 
 export type ImportRewriteMode = "trial" | "chapter";
@@ -61,6 +72,9 @@ export async function createImportRewriteCandidate(
     );
   }
   const instructions = normalizeInstructions(input.instructions);
+  const projectPrivacy = await runtime.projectContextPrivacy.inspect(chapter.projectId);
+  runtime.projectContextPrivacy.assertChapterMatches(projectPrivacy, chapter);
+  const requiredDataDestination = projectContextRequiredDataDestination(projectPrivacy);
 
   const excerpt = selectRepresentativeExcerpt(chapter.content, input.mode);
   const requestId = runtime.ids.next();
@@ -88,21 +102,33 @@ export async function createImportRewriteCandidate(
   if (!modelHubRouteMissing) {
     try {
       const modelHubResult = await executeModelHubTextTask(runtime, {
+        dispatchScope: projectContextDispatchScope(projectPrivacy),
         task: "rewrite",
         messages,
         maximumOutputTokens: input.mode === "trial" ? 1_500 : 8_000,
         temperature: 0.65,
         generationId: requestId,
-        ...(input.onBeforeDispatch === undefined
-          ? {}
-          : {
-              onBeforeDispatch: ({ connectionId, modelId }) =>
-                input.onBeforeDispatch?.({
-                  requestId,
-                  providerId: connectionId,
-                  modelId,
-                }),
-            }),
+        ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
+        onBeforeDispatch: async ({ connectionId, modelId, localOnlyEligible }) => {
+          await input.onBeforeDispatch?.({
+            requestId,
+            providerId: connectionId,
+            modelId,
+          });
+          await assertLatestRewriteSource(runtime, chapter);
+          try {
+            await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
+            runtime.projectContextPrivacy.assertRouteEligible(
+              projectPrivacy,
+              localOnlyEligible === true,
+            );
+          } catch (cause: unknown) {
+            if (cause instanceof ProjectContextPrivacyError) {
+              throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
+            }
+            throw cause;
+          }
+        },
         ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
       });
       generated = Object.freeze({ text: modelHubResult.text, usage: modelHubResult.usage });
@@ -119,24 +145,39 @@ export async function createImportRewriteCandidate(
 
   if (modelHubRouteMissing) {
     const profile = await resolveRewriteProfile(runtime);
-    await assertProfileReady(runtime, profile);
+    const resolvedEndpoint = await assertProfileReady(runtime, profile);
     selectedProviderId = profile.providerId;
     selectedModelId = requireSelectedModel(profile);
     try {
+      runtime.projectContextPrivacy.assertRouteEligible(
+        projectPrivacy,
+        isVerifiedLocalEndpoint(resolvedEndpoint),
+      );
       await input.onBeforeDispatch?.({
         requestId,
         providerId: selectedProviderId,
         modelId: selectedModelId,
       });
-      generated = await runtime.modelGateway.generate({
-        generationId: requestId,
-        config: {
-          providerId: profile.providerId,
-          provider: profile.provider,
-          baseUrl: profile.baseUrl,
-          authentication: profile.authentication,
+      await assertLatestRewriteSource(runtime, chapter);
+      await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
+      runtime.projectContextPrivacy.assertRouteEligible(
+        projectPrivacy,
+        isVerifiedLocalEndpoint(resolvedEndpoint),
+      );
+      const current = await resolveFinalModelProfileGatewayConfig(
+        {
+          modelCenter: runtime.modelCenter,
+          modelHub: runtime.modelHub,
+          credentials: runtime.credentials,
         },
-        model: selectedModelId,
+        profile,
+        resolvedEndpoint,
+      );
+      generated = await runtime.modelGateway.generate({
+        dispatchScope: projectContextDispatchScope(projectPrivacy),
+        generationId: requestId,
+        config: current.resolution.config,
+        model: current.profile.selectedModel ?? selectedModelId,
         messages,
         maxOutputTokens: input.mode === "trial" ? 1_500 : 8_000,
         temperature: 0.65,
@@ -189,6 +230,43 @@ export async function createImportRewriteCandidate(
   });
 }
 
+async function assertLatestRewriteSource(
+  runtime: DesktopRuntime,
+  expected: Readonly<{
+    id: UuidV7;
+    currentVersionId: UuidV7;
+    revision: number;
+    privacyRevision: number;
+  }>,
+): Promise<void> {
+  const latest = await runtime.repositories.chapters.findById(expected.id);
+  if (!latest.ok) {
+    throw latest.error;
+  }
+  if (latest.value === null) {
+    throw new AppError({
+      code: "CHAPTER_NOT_FOUND",
+      message: "The chapter selected for rewriting no longer exists.",
+    });
+  }
+  if (
+    latest.value.status !== "active" ||
+    latest.value.currentVersionId !== expected.currentVersionId ||
+    latest.value.revision !== expected.revision ||
+    latest.value.privacyRevision !== expected.privacyRevision
+  ) {
+    throw new ModelCenterError(
+      "IMPORT_REWRITE_SOURCE_CHANGED",
+      "章节版本或隐私设置在 AI 发送前发生了变化；本次改写在发送 0 字后停止。请重新运行。",
+      true,
+    );
+  }
+}
+
+function isVerifiedLocalEndpoint(resolved: ModelProfileGatewayConfigResolution): boolean {
+  return resolved.config.provider === "ollama" && isLoopbackModelBaseUrl(resolved.config.baseUrl);
+}
+
 async function persistCandidate(
   runtime: DesktopRuntime,
   input: Readonly<{
@@ -205,6 +283,13 @@ async function persistCandidate(
     source: "polish",
     baseVersionId: input.baseVersionId,
     now: runtime.clock.now(),
+    applicationIntent: {
+      task: "whole_chapter_rewrite",
+      application: "replace_document",
+      payload: "full_document",
+      startUtf16: null,
+      endUtf16: null,
+    },
   });
   if (!streaming.ok) {
     throw streaming.error;
@@ -268,25 +353,24 @@ async function resolveRewriteProfile(runtime: DesktopRuntime): Promise<ModelProf
   return selected;
 }
 
-async function assertProfileReady(runtime: DesktopRuntime, profile: ModelProfile): Promise<void> {
+async function assertProfileReady(
+  runtime: DesktopRuntime,
+  profile: ModelProfile,
+): Promise<ModelProfileGatewayConfigResolution> {
   const model = requireSelectedModel(profile);
-  if (profile.authentication === "bearer_keyring") {
-    const summary = await runtime.credentials.getSummary(profile.providerId);
-    if (!summary.configured) {
-      throw new ModelCenterError(
-        "MODEL_CREDENTIAL_MISSING",
-        "供应商连接尚未保存 API Key。请在设置中补充凭据并测试连接。",
-      );
-    }
+  const resolvedEndpoint = await resolveModelProfileGatewayConfig(
+    { modelHub: runtime.modelHub, credentials: runtime.credentials },
+    profile,
+  );
+  if (resolvedEndpoint === null) {
+    throw new ModelCenterError(
+      "MODEL_CREDENTIAL_MISSING",
+      "供应商连接尚未保存可用 API Key。请在设置中补充凭据并测试连接。",
+    );
   }
   let listed;
   try {
-    listed = await runtime.modelGateway.listModels({
-      providerId: profile.providerId,
-      provider: profile.provider,
-      baseUrl: profile.baseUrl,
-      authentication: profile.authentication,
-    });
+    listed = await runtime.modelGateway.listModels(resolvedEndpoint.config);
   } catch (cause: unknown) {
     throw normalizeProviderError(cause);
   }
@@ -297,6 +381,7 @@ async function assertProfileReady(runtime: DesktopRuntime, profile: ModelProfile
       true,
     );
   }
+  return resolvedEndpoint;
 }
 
 function buildRewriteMessages(
@@ -411,14 +496,34 @@ function normalizeProviderError(cause: unknown): ModelCenterError {
 export function restoreCandidateBaseVersion(
   runtime: DesktopRuntime,
   candidate: AiCandidate,
-): Promise<Result<Readonly<{ chapterContent: string }>, AppError | ModelCenterError>> {
+): Promise<
+  Result<
+    Readonly<{
+      chapterContent: string;
+      projectId: UuidV7;
+      chapterId: UuidV7;
+      versionId: UuidV7;
+    }>,
+    AppError | ModelCenterError
+  >
+> {
   return restoreCandidateBaseVersionInternal(runtime, candidate);
 }
 
 async function restoreCandidateBaseVersionInternal(
   runtime: DesktopRuntime,
   candidate: AiCandidate,
-): Promise<Result<Readonly<{ chapterContent: string }>, AppError | ModelCenterError>> {
+): Promise<
+  Result<
+    Readonly<{
+      chapterContent: string;
+      projectId: UuidV7;
+      chapterId: UuidV7;
+      versionId: UuidV7;
+    }>,
+    AppError | ModelCenterError
+  >
+> {
   if (candidate.chapterId === null || candidate.baseVersionId === null) {
     return err(
       new ModelCenterError(
@@ -458,5 +563,12 @@ async function restoreCandidateBaseVersionInternal(
     versionId: candidate.baseVersionId,
     expectedRevision: chapterResult.value.revision,
   });
-  return restored.ok ? ok({ chapterContent: restored.value.chapter.content }) : restored;
+  return restored.ok
+    ? ok({
+        chapterContent: restored.value.chapter.content,
+        projectId: restored.value.chapter.projectId,
+        chapterId: restored.value.chapter.id,
+        versionId: restored.value.version.id,
+      })
+    : restored;
 }

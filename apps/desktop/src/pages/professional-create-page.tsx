@@ -10,6 +10,11 @@ import { Badge, Button, FormField, InlineAlert, Input, Textarea } from "@inkshad
 import { useEffect, useState, type SyntheticEvent } from "react";
 import { Link } from "react-router-dom";
 
+import {
+  deriveProfessionalProjectSeed,
+  parseProjectSeed,
+  type ProjectSeed,
+} from "../infrastructure/project-seed";
 import { normalizeUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
@@ -34,6 +39,7 @@ interface ProfessionalCreateRecovery {
   readonly projectId: string | null;
   readonly projectCreatedAt: string | null;
   readonly draft: ProfessionalSetupDraft;
+  readonly projectSeed: ProjectSeed;
 }
 
 interface CreatedProjectSummary {
@@ -65,6 +71,15 @@ export function ProfessionalCreatePage() {
   const runtime = useRuntime();
   const [initialRecovery] = useState(readRecovery);
   const [draft, setDraft] = useState<ProfessionalSetupDraft>(initialRecovery?.draft ?? EMPTY_DRAFT);
+  const [projectSeed, setProjectSeed] = useState<ProjectSeed>(
+    () =>
+      initialRecovery?.projectSeed ??
+      deriveProfessionalProjectSeed({
+        seedId: "professional:recovery",
+        ...EMPTY_DRAFT,
+        now: runtime.clock.now(),
+      }),
+  );
   const [pendingProjectId, setPendingProjectId] = useState<string | null>(
     initialRecovery?.projectId ?? null,
   );
@@ -86,11 +101,22 @@ export function ProfessionalCreatePage() {
       projectId: pendingProjectId,
       projectCreatedAt: pendingProjectCreatedAt,
       draft,
+      projectSeed,
     });
-  }, [createdProject, draft, pendingProjectCreatedAt, pendingProjectId]);
+  }, [createdProject, draft, pendingProjectCreatedAt, pendingProjectId, projectSeed]);
 
   function updateField(field: ProfessionalSetupField, value: string): void {
-    setDraft((current) => ({ ...current, [field]: value }));
+    const nextDraft = { ...draft, [field]: value };
+    const now = runtime.clock.now();
+    setDraft(nextDraft);
+    setProjectSeed((current) =>
+      deriveProfessionalProjectSeed({
+        seedId: current.seedId,
+        ...nextDraft,
+        now,
+        existing: current,
+      }),
+    );
     setNameError(null);
     setProvisioningError(null);
   }
@@ -107,6 +133,7 @@ export function ProfessionalCreatePage() {
     let projectId = pendingProjectId;
     let projectCreatedAt = pendingProjectCreatedAt;
     let projectName = draft.projectName.trim();
+    let seedForProject = projectSeed;
 
     try {
       if (projectId === null) {
@@ -122,18 +149,29 @@ export function ProfessionalCreatePage() {
         projectCreatedAt = created.value.toSnapshot().createdAt;
         setPendingProjectId(projectId);
         setPendingProjectCreatedAt(projectCreatedAt);
-        setDraft((current) => ({ ...current, projectName }));
+        const normalizedDraft = { ...draft, projectName };
+        const normalizedSeed = deriveProfessionalProjectSeed({
+          seedId: projectSeed.seedId,
+          ...normalizedDraft,
+          now: runtime.clock.now(),
+          existing: projectSeed,
+        });
+        seedForProject = normalizedSeed;
+        setDraft(normalizedDraft);
+        setProjectSeed(normalizedSeed);
         writeRecovery({
           version: 1,
           projectId,
           projectCreatedAt,
-          draft: { ...draft, projectName },
+          draft: normalizedDraft,
+          projectSeed: normalizedSeed,
         });
       }
 
       if (projectCreatedAt === null) {
         throw new Error("未完成创建的项目缺少安全校验信息，请从作品库打开项目确认现状。");
       }
+      await runtime.projectSeeds.saveForProject(projectId, seedForProject);
       await provisionProfessionalWorkspace(runtime, projectId, projectCreatedAt, {
         ...draft,
         projectName,
@@ -734,15 +772,23 @@ function readRecovery(): ProfessionalCreateRecovery | null {
     if (fields.some((field) => typeof draft[field] !== "string")) {
       return null;
     }
+    const recoveredDraft = Object.freeze(
+      Object.fromEntries(
+        fields.map((field) => [field, draft[field]]),
+      ) as unknown as ProfessionalSetupDraft,
+    );
     return {
       version: 1,
       projectId,
       projectCreatedAt,
-      draft: Object.freeze(
-        Object.fromEntries(
-          fields.map((field) => [field, draft[field]]),
-        ) as unknown as ProfessionalSetupDraft,
-      ),
+      draft: recoveredDraft,
+      projectSeed:
+        parseProjectSeed(value.projectSeed) ??
+        deriveProfessionalProjectSeed({
+          seedId: `professional:${projectId ?? "recovery"}`,
+          ...recoveredDraft,
+          now: new Date().toISOString(),
+        }),
     };
   } catch {
     return null;

@@ -127,6 +127,11 @@ export function ContextHistoryPanel({ projectId, store }: ContextHistoryPanelPro
                   {formatTimestamp(summary.createdAt)} ·{" "}
                   {tokenSourceLabel(summary.tokenEstimateSource)}
                 </p>
+                {summary.outputCandidateId !== null && (
+                  <p>
+                    <Badge tone="ai">已精确关联 AI 建议版本</Badge>
+                  </p>
+                )}
                 <Button
                   size="sm"
                   variant="secondary"
@@ -156,9 +161,16 @@ export function ContextHistoryPanel({ projectId, store }: ContextHistoryPanelPro
             </div>
           </CardHeader>
           <CardContent>
+            {selected.outputCandidateId !== null && (
+              <InlineAlert
+                tone="info"
+                title="这条记录与 AI 建议版本精确关联"
+                description={`建议版本标识：${selected.outputCandidateId}`}
+              />
+            )}
             <div className="story-governance-grid">
               {selected.entries.map((entry) => (
-                <article className="context-history-entry" key={entry.candidateId}>
+                <article className="context-history-entry" key={entry.contextCandidateId}>
                   <div className="card-heading-row">
                     <strong>{layerLabel(entry.layer)}</strong>
                     <Badge tone={entry.included ? "success" : "neutral"}>
@@ -177,7 +189,7 @@ export function ContextHistoryPanel({ projectId, store }: ContextHistoryPanelPro
                     <summary>查看来源标识（{entry.sources.length}）</summary>
                     <ul>
                       {entry.sources.map((source, index) => (
-                        <li key={`${entry.candidateId}-${String(index)}`}>
+                        <li key={`${entry.contextCandidateId}-${String(index)}`}>
                           {sourceTypeLabel(source.sourceType)} · {source.sourceId}
                           {source.sourceVersionId === null
                             ? ""

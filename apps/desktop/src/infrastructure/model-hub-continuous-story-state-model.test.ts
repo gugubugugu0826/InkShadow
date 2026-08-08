@@ -43,6 +43,10 @@ describe("parseContinuousStoryStateResponse", () => {
                 knowledgeStatus: "known",
                 effectiveRange: { startOrder: 1, endOrder: null },
                 mode: "third_person_limited",
+                acquiredAt: 1,
+                sourceEventId: "event-clock-seen",
+                sourceFactId: "fact-clock-seen",
+                informationId: "reversing-clock-information",
               },
               voice: null,
               narrative: null,
@@ -71,6 +75,55 @@ describe("parseContinuousStoryStateResponse", () => {
       value: "known",
     });
     expect(parsed[0]?.projection?.pov).toMatchObject({ mode: "third_person_limited" });
+  });
+
+  it("rejects a partially declared POV acquisition source", () => {
+    expect(() =>
+      parseContinuousStoryStateResponse(
+        JSON.stringify({
+          schemaVersion: 2,
+          candidates: [
+            {
+              factType: "pov_knowledge",
+              contentText: "林夏知道门后的钟会倒着走。",
+              confidence: 0.94,
+              subject: {
+                kind: "character",
+                entityKey: null,
+                canonicalName: "林夏",
+                aliases: [],
+              },
+              state: {
+                knowledgeStatus: "known",
+                information: "门后的钟会倒着走",
+                acquiredAt: "第一章雨夜",
+                informationSource: "亲眼看见",
+              },
+              evidence: { start: 0, end: content.length, excerpt: content },
+              effectiveAt: "第一章雨夜",
+              invalidatedAt: null,
+              projection: {
+                validation: null,
+                pov: {
+                  characterId: null,
+                  attributeKey: "reversing-clock",
+                  knowledgeStatus: "known",
+                  effectiveRange: { startOrder: 1, endOrder: null },
+                  mode: "third_person_limited",
+                  acquiredAt: 1,
+                  sourceEventId: null,
+                  sourceFactId: "fact-clock-seen",
+                  informationId: "reversing-clock-information",
+                },
+                voice: null,
+                narrative: null,
+              },
+            },
+          ],
+        }),
+        { task: "character_extraction", content },
+      ),
+    ).toThrow(/all null or all present/u);
   });
 
   it("rejects unknown fields instead of silently accepting protocol drift", () => {

@@ -12,11 +12,11 @@ import {
   CloudSyncPushRequestSchema,
   CloudTombstoneAcknowledgementRequestSchema,
   CONTRACT_SCHEMA_VERSION,
-  INKSHADOW_CLOUD_OPENAPI,
   SYNC_PROTOCOL_SCHEMA_VERSION,
   hashCloudProjectKeyPublication,
   type CloudProjectKeyPublishRequest,
 } from "../src/index.js";
+import { INKSHADOW_CLOUD_OPENAPI } from "@inkshadow/contracts/openapi";
 
 const ACCOUNT_ID = "018f0d7a-3b2c-7abc-8def-000000000001";
 const DEVICE_ID = "018f0d7a-3b2c-7abc-8def-000000000002";
@@ -39,6 +39,13 @@ const LATER = "2026-07-27T01:00:00.000Z";
 const RETAIN_UNTIL = "2027-07-27T00:00:00.000Z";
 
 describe("cloud API contract", () => {
+  it("keeps document generation behind the explicit OpenAPI subpath", async () => {
+    const runtimeContracts = await import("../src/index.js");
+
+    expect(runtimeContracts).not.toHaveProperty("INKSHADOW_CLOUD_OPENAPI");
+    expect(INKSHADOW_CLOUD_OPENAPI).toHaveProperty("openapi", "3.1.1");
+  });
+
   it("exports one OpenAPI operation for every unique client operation", () => {
     const operationIds = CLOUD_API_OPERATIONS.map((operation) => operation.operationId);
     expect(new Set(operationIds).size).toBe(operationIds.length);
@@ -52,6 +59,7 @@ describe("cloud API contract", () => {
       };
     };
     expect(document.openapi).toBe("3.1.1");
+    expect(Object.keys(document.components.schemas)).toHaveLength(105);
     for (const operation of CLOUD_API_OPERATIONS) {
       expect(document.paths[operation.path]?.[operation.method]).toMatchObject({
         operationId: operation.operationId,

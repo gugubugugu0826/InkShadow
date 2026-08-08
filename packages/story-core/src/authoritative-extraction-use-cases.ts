@@ -73,6 +73,8 @@ export interface AuthoritativeExtractionProviderRequest {
   readonly chapterContent: string;
   readonly targets: readonly AuthoritativeExtractionTargetBaseline[];
   readonly provenance: AuthoritativeExtractionProvenance;
+  /** In-memory dispatch guard; never serialized into the provider prompt. */
+  readonly assertProjectContextCurrent?: () => Promise<void>;
 }
 
 export interface AuthoritativeExtractionProvider {
@@ -111,6 +113,8 @@ export interface AuthoritativeExtractionCoordinatorOptions {
   readonly workerId: string;
   readonly leaseDurationMs?: number;
   readonly maximumAttempts?: number;
+  /** Captured before any project正文 or formal record is assembled. */
+  readonly captureProjectContextAuthority?: (projectId: UuidV7) => Promise<() => Promise<void>>;
 }
 
 export interface AuthoritativeExtractionCycleReceipt {
@@ -467,6 +471,22 @@ export class AuthoritativeExtractionCoordinator {
     if (!evaluationPassed) {
       return this.failClaim(job, "blocked_evaluation", "evaluation_gate_not_passed", false);
     }
+    if (
+      job.executionMode === "remote" &&
+      this.options.captureProjectContextAuthority === undefined
+    ) {
+      return this.failClaim(job, "failed_retryable", "project_context_privacy_unavailable", true);
+    }
+    let assertProjectContextCurrent: (() => Promise<void>) | undefined;
+    if (this.options.captureProjectContextAuthority !== undefined) {
+      try {
+        assertProjectContextCurrent = await this.options.captureProjectContextAuthority(
+          job.source.projectId,
+        );
+      } catch {
+        return this.failClaim(job, "failed_retryable", "project_context_privacy_unavailable", true);
+      }
+    }
     const document = await this.options.sources.loadCurrentByChapter(job.source.chapterId);
     if (!document.ok) {
       return document;
@@ -503,7 +523,11 @@ export class AuthoritativeExtractionCoordinator {
     this.active.set(job.id, controller);
     let generated: Result<string, AuthoritativeExtractionProviderFailure>;
     try {
-      generated = await this.options.provider.generate(providerRequest(context), controller.signal);
+      await assertProjectContextCurrent?.();
+      generated = await this.options.provider.generate(
+        providerRequest(context, assertProjectContextCurrent),
+        controller.signal,
+      );
     } catch {
       generated = err({
         code: "provider_exception",
@@ -813,6 +837,7 @@ export class AuthoritativeExtractionCoordinator {
 
 function providerRequest(
   context: AuthoritativeExtractionValidationContext,
+  assertProjectContextCurrent?: () => Promise<void>,
 ): AuthoritativeExtractionProviderRequest {
   return Object.freeze({
     publicationBoundary: "candidate_only",
@@ -822,6 +847,7 @@ function providerRequest(
     chapterContent: context.chapterContent,
     targets: context.targets,
     provenance: context.provenance,
+    ...(assertProjectContextCurrent === undefined ? {} : { assertProjectContextCurrent }),
   });
 }
 

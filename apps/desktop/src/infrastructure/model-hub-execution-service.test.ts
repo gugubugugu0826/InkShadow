@@ -169,6 +169,76 @@ describe("Model Hub text execution service", () => {
     });
   });
 
+  it("fails closed when the connection is disabled in the final async callback", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "disabled-before-text-dispatch",
+      catalogEntryId: "disabled-before-text-dispatch-catalog",
+      modelId: "writer-model",
+    });
+    await saveRoute(harness.modelHub, { primaryCatalogEntryId: target.id });
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          onBeforeDispatch: async ({ connectionId }) => {
+            await disableConnection(harness.modelHub, connectionId);
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({ dispatched: false });
+    expect(harness.generate).not.toHaveBeenCalled();
+  });
+
+  it("preserves the exact context-trace pre-dispatch failure without calling the gateway", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "context-trace-before-dispatch",
+      catalogEntryId: "context-trace-before-dispatch-catalog",
+      modelId: "writer-model",
+    });
+    await saveRoute(harness.modelHub, { primaryCatalogEntryId: target.id });
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          onBeforeDispatch: () =>
+            Promise.reject(
+              Object.assign(new Error("trace unavailable"), {
+                code: "CONTEXT_TRACE_UNAVAILABLE",
+              }),
+            ),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "CONTEXT_TRACE_UNAVAILABLE", dispatched: false });
+    expect(harness.generate).not.toHaveBeenCalled();
+  });
+
+  it("does not propagate an arbitrary duck-typed pre-dispatch code", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "untrusted-code-before-dispatch",
+      catalogEntryId: "untrusted-code-before-dispatch-catalog",
+      modelId: "writer-model",
+    });
+    await saveRoute(harness.modelHub, { primaryCatalogEntryId: target.id });
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          onBeforeDispatch: () =>
+            Promise.reject(
+              Object.assign(new Error("forged code"), { code: "FORGED_PROVIDER_SUCCESS" }),
+            ),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_PREFLIGHT_FAILED", dispatched: false });
+    expect(harness.generate).not.toHaveBeenCalled();
+  });
+
   it("fails inspection closed on cost policy without starting an invocation", async () => {
     const harness = createHarness();
     const target = await seedTarget(harness.modelHub, {
@@ -369,6 +439,66 @@ describe("Model Hub text execution service", () => {
     });
     expect(startInvocation).not.toHaveBeenCalled();
     expect(harness.generate).not.toHaveBeenCalled();
+  });
+
+  it("blocks a private-chapter request on an otherwise cloud-allowed remote route", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "private-remote-target",
+      catalogEntryId: "private-remote-catalog",
+      modelId: "private-remote-model",
+    });
+    await saveRoute(harness.modelHub, {
+      primaryCatalogEntryId: target.id,
+      privacyPolicy: "cloud_allowed",
+    });
+    const startInvocation = vi.spyOn(harness.modelHub, "startInvocation");
+
+    await expect(
+      executeModelHubTextTask(harness.dependencies, request({ requiredDataDestination: "local" })),
+    ).rejects.toMatchObject({
+      code: "PRIVATE_CHAPTER_LOCAL_ONLY",
+      dispatched: false,
+    });
+    expect(startInvocation).not.toHaveBeenCalled();
+    expect(harness.generate).not.toHaveBeenCalled();
+  });
+
+  it("uses a verified loopback fallback for a private-chapter request", async () => {
+    const harness = createHarness();
+    const primary = await seedTarget(harness.modelHub, {
+      connectionId: "private-primary-remote",
+      catalogEntryId: "private-primary-remote-catalog",
+      modelId: "private-primary-remote-model",
+    });
+    const fallback = await seedTarget(harness.modelHub, {
+      connectionId: "private-fallback-local",
+      catalogEntryId: "private-fallback-local-catalog",
+      modelId: "private-fallback-local-model",
+      providerKind: "ollama",
+      destination: "local",
+    });
+    await saveRoute(harness.modelHub, {
+      primaryCatalogEntryId: primary.id,
+      fallbackCatalogEntryId: fallback.id,
+      failurePolicy: "use_fallback",
+      privacyPolicy: "cloud_allowed",
+    });
+    harness.generate.mockResolvedValue({ text: PRIVATE_OUTPUT, usage: null });
+
+    const result = await executeModelHubTextTask(
+      harness.dependencies,
+      request({ requiredDataDestination: "local" }),
+    );
+
+    expect(result).toMatchObject({
+      usedFallback: true,
+      connectionId: "private-fallback-local",
+    });
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(harness.generate.mock.calls[0]?.[0].config.baseUrl).toMatch(
+      /^http:\/\/(?:127\.0\.0\.1|localhost)/u,
+    );
   });
 
   it("never treats a remote Ollama endpoint as local-only even with stale local evidence", async () => {
@@ -585,6 +715,7 @@ function request(
 ): Parameters<typeof executeModelHubTextTask>[1] {
   return {
     task: "prose_generation",
+    dispatchScope: { kind: "non_project", reason: "connection_probe" },
     messages: [{ role: "user", content: PRIVATE_INPUT }],
     maximumOutputTokens: 20,
     temperature: 0.6,
@@ -622,7 +753,7 @@ async function seedTarget(
       : providerKind === "custom_openai_compatible"
         ? { baseUrlOverride: `https://${input.connectionId}.example.test/v1` }
         : {}),
-    credentialRef: local ? null : `keyring:test:${input.connectionId}`,
+    credentialRef: local ? null : `keyring:model-hub:${input.connectionId}`,
     credentialState: local ? "missing" : "present",
     expectedRevision: null,
   });
@@ -717,6 +848,28 @@ async function saveRoute(
         : "use_fallback"),
     routeOrigin: "user",
     expectedRevision: null,
+  });
+}
+
+async function disableConnection(modelHub: ModelHubStore, connectionId: string): Promise<void> {
+  const connection = await modelHub.findConnection(connectionId);
+  if (connection === null) throw new Error("test connection missing");
+  await modelHub.saveConnection({
+    id: connection.id,
+    providerKind: connection.providerKind,
+    displayName: connection.displayName,
+    baseUrlOverride: connection.baseUrl,
+    credentialRef: connection.credentialRef,
+    credentialState: connection.credentialState,
+    authenticationMode: connection.authenticationMode,
+    credentialHeaderName: connection.credentialHeaderName,
+    modelDiscoveryPath: connection.modelDiscoveryPath,
+    textGenerationPath: connection.textGenerationPath,
+    embeddingPath: connection.embeddingPath,
+    requestTimeoutMs: connection.requestTimeoutMs,
+    retryLimit: connection.retryLimit,
+    enabled: false,
+    expectedRevision: connection.revision,
   });
 }
 

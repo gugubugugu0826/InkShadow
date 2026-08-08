@@ -8,7 +8,9 @@ import { NodeSqliteExecutor } from "../../../../packages/data/tests/node-sqlite-
 import {
   BrowserDevelopmentModelHubStore,
   DEVELOPMENT_MODEL_HUB_KEY,
+  isRetiredModelProviderConnection,
   TauriModelHubStore,
+  type ModelHubStore,
 } from "./model-hub-store";
 
 const NOW = "2026-08-01T00:00:00.000Z";
@@ -21,9 +23,165 @@ const migration = [
   readMigration("0004_model_profiles.sql"),
   readMigration("0031_model_hub.sql"),
   readMigration("0037_model_hub_expert_options.sql"),
+  readMigration("0046_model_hub_zhipu_glm.sql"),
+  readMigration("0051_model_hub_connection_commits.sql"),
 ].join("\n");
 
 describe("TauriModelHubStore", () => {
+  it("publishes a verified connection and catalog atomically while preserving the old route on failure", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    const store = new TauriModelHubStore(executor, clock);
+    let existing = await store.saveConnection({
+      id: "atomic-openai",
+      providerKind: "openai",
+      displayName: "Atomic OpenAI",
+      credentialRef: "keyring:model-hub:atomic-openai",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      expectedRevision: null,
+    });
+    existing = await store.recordConnectionTest({
+      connectionId: existing.id,
+      status: "ready",
+      expectedRevision: existing.revision,
+    });
+    await store.syncCatalog({
+      syncId: "atomic-old-sync",
+      connectionId: existing.id,
+      source: "provider_api",
+      status: "succeeded",
+      models: [{ id: "atomic-old-entry", providerModelId: "writer-model" }],
+    });
+    const current = await store.findConnection(existing.id);
+    if (current === null) throw new Error("Expected the seeded connection.");
+    const route = await store.saveTaskRoute({
+      task: "book_start_guidance",
+      primaryCatalogEntryId: "atomic-old-entry",
+      privacyPolicy: "cloud_allowed",
+      failurePolicy: "ask_user",
+      routeOrigin: "user",
+      expectedRevision: null,
+    });
+    await store.saveConnection({
+      id: "atomic-other",
+      providerKind: "ollama",
+      displayName: "Other",
+      credentialState: "missing",
+      authenticationMode: "none",
+      expectedRevision: null,
+    });
+    await store.syncCatalog({
+      syncId: "atomic-other-sync",
+      connectionId: "atomic-other",
+      source: "manual",
+      status: "succeeded",
+      models: [{ id: "atomic-collision", providerModelId: "other-model" }],
+    });
+    await store.prepareConnectionCommit({
+      id: "atomic-commit",
+      connectionId: current.id,
+      credentialProviderId: "atomic-new-slot",
+    });
+
+    await expect(
+      store.publishConnectionCommit({
+        id: "atomic-commit",
+        credentialProviderId: "atomic-new-slot",
+        cleanupCredentialProviderId: "atomic-openai",
+        connection: {
+          id: current.id,
+          providerKind: current.providerKind,
+          displayName: current.displayName,
+          baseUrlOverride: current.baseUrl,
+          credentialRef: "keyring:model-hub:atomic-new-slot",
+          credentialState: "present",
+          authenticationMode: "bearer_keyring",
+          enabled: true,
+          expectedRevision: current.revision,
+        },
+        catalog: {
+          syncId: "atomic-failed-sync",
+          connectionId: current.id,
+          source: "provider_api",
+          status: "succeeded",
+          models: [{ id: "atomic-collision", providerModelId: "new-writer-model" }],
+        },
+      }),
+    ).rejects.toBeDefined();
+
+    await expect(store.findConnection(current.id)).resolves.toEqual(current);
+    await expect(store.listCatalog(current.id)).resolves.toEqual([
+      expect.objectContaining({ id: "atomic-old-entry", availability: "available" }),
+    ]);
+    await expect(store.findTaskRoute("book_start_guidance")).resolves.toEqual(route);
+    await expect(store.findConnectionCommit(current.id)).resolves.toMatchObject({
+      id: "atomic-commit",
+      phase: "prepared",
+    });
+
+    const published = await store.publishConnectionCommit({
+      id: "atomic-commit",
+      credentialProviderId: "atomic-new-slot",
+      cleanupCredentialProviderId: "atomic-openai",
+      connection: {
+        id: current.id,
+        providerKind: current.providerKind,
+        displayName: current.displayName,
+        baseUrlOverride: current.baseUrl,
+        credentialRef: "keyring:model-hub:atomic-new-slot",
+        credentialState: "present",
+        authenticationMode: "bearer_keyring",
+        enabled: true,
+        expectedRevision: current.revision,
+      },
+      catalog: {
+        syncId: "atomic-success-sync",
+        connectionId: current.id,
+        source: "provider_api",
+        status: "succeeded",
+        models: [{ id: "unused-new-id", providerModelId: "writer-model" }],
+      },
+    });
+    expect(published.connection).toMatchObject({
+      connectionStatus: "ready",
+      credentialRef: "keyring:model-hub:atomic-new-slot",
+    });
+    expect(published.catalog).toContainEqual(
+      expect.objectContaining({ id: "atomic-old-entry", availability: "available" }),
+    );
+    expect(published.commit).toMatchObject({
+      phase: "cleanup_pending",
+      cleanupCredentialProviderId: "atomic-openai",
+    });
+    await expect(store.findTaskRoute("book_start_guidance")).resolves.toEqual(route);
+    await executor.close();
+  });
+
+  it("persists the registered Zhipu GLM provider in real SQLite", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    const store = new TauriModelHubStore(executor, clock);
+    const saved = await store.saveConnection({
+      id: "zhipu-glm-primary",
+      providerKind: "zhipu_glm",
+      displayName: "智谱 GLM",
+      credentialRef: "keyring:model-hub:zhipu-glm-primary",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      expectedRevision: null,
+    });
+
+    expect(saved).toMatchObject({
+      providerKind: "zhipu_glm",
+      baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+      authenticationMode: "bearer_keyring",
+      credentialState: "present",
+      revision: 1,
+    });
+    const reopened = new TauriModelHubStore(executor, clock);
+    await expect(reopened.findConnection(saved.id)).resolves.toMatchObject(saved);
+    await executor.close();
+  });
+
   it("persists bounded custom endpoint metadata without storing a credential Header value", async () => {
     const executor = new NodeSqliteExecutor(migration);
     const store = new TauriModelHubStore(executor, clock);
@@ -178,6 +336,29 @@ describe("TauriModelHubStore", () => {
     await assertProviderKindCannotBeOverwritten(browser, "browser-provider-id");
   });
 
+  it("retires connections without deleting immutable invocation history in SQLite or browser storage", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    const sqlite = new TauriModelHubStore(executor, clock);
+    await assertConnectionRetirement(
+      sqlite,
+      () => new TauriModelHubStore(executor, clock),
+      "sqlite-retired-provider",
+    );
+    const sqliteForeignKeys = await executor.select<{ violations: number }>(
+      "SELECT COUNT(*) AS violations FROM pragma_foreign_key_check",
+    );
+    expect(sqliteForeignKeys[0]?.violations).toBe(0);
+    await executor.close();
+
+    window.localStorage.clear();
+    const browser = new BrowserDevelopmentModelHubStore(window.localStorage, clock);
+    await assertConnectionRetirement(
+      browser,
+      () => new BrowserDevelopmentModelHubStore(window.localStorage, clock),
+      "browser-retired-provider",
+    );
+  });
+
   it("invalidates local evidence and routes when an Ollama endpoint becomes remote", async () => {
     const executor = new NodeSqliteExecutor(migration);
     const sqlite = new TauriModelHubStore(executor, clock);
@@ -187,6 +368,17 @@ describe("TauriModelHubStore", () => {
     window.localStorage.clear();
     const browser = new BrowserDevelopmentModelHubStore(window.localStorage, clock);
     await assertLocalToRemoteTransitionFailsClosed(browser, "browser-ollama");
+  });
+
+  it("atomically commits capability probes only for the exact connection and catalog revisions", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    const sqlite = new TauriModelHubStore(executor, clock);
+    await assertCapabilityProbeCommitIsAtomic(sqlite, "sqlite-guarded-probe");
+    await executor.close();
+
+    window.localStorage.clear();
+    const browser = new BrowserDevelopmentModelHubStore(window.localStorage, clock);
+    await assertCapabilityProbeCommitIsAtomic(browser, "browser-guarded-probe");
   });
 
   it("persists non-secret connections, dynamic catalogs, and CAS task routes", async () => {
@@ -539,6 +731,121 @@ describe("TauriModelHubStore", () => {
   });
 });
 
+async function assertCapabilityProbeCommitIsAtomic(
+  store: ModelHubStore,
+  id: string,
+): Promise<void> {
+  await store.saveConnection({
+    id,
+    providerKind: "openai",
+    displayName: "Guarded probe connection",
+    credentialRef: `keyring:model-hub:${id}`,
+    credentialState: "present",
+    authenticationMode: "bearer_keyring",
+    expectedRevision: null,
+  });
+  await store.syncCatalog({
+    syncId: `${id}-initial-sync`,
+    connectionId: id,
+    source: "manual",
+    status: "succeeded",
+    models: [{ id: `${id}-model`, providerModelId: "writer-model" }],
+  });
+  const initialConnection = await store.findConnection(id);
+  const initialCatalog = await store.listCatalog(id);
+  const initialEntry = initialCatalog[0];
+  if (initialConnection === null || initialEntry === undefined) {
+    throw new Error("Expected the guarded probe target.");
+  }
+
+  const stable = await store.commitCapabilityProbeResult({
+    connectionId: id,
+    expectedConnectionRevision: initialConnection.revision,
+    catalogEntryId: initialEntry.id,
+    expectedCatalogRevision: initialEntry.revision,
+    expectedProviderModelId: initialEntry.providerModelId,
+    scan: {
+      scanId: `${id}-stable-scan`,
+      catalogEntryId: initialEntry.id,
+      scanKind: "lightweight_probe",
+      status: "succeeded",
+      evidenceVersion: `${id}-stable-v1`,
+      evidence: [
+        {
+          id: `${id}-stable-evidence`,
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "lightweight_probe",
+        },
+      ],
+    },
+    connectionTest: { status: "ready" },
+  });
+  expect(stable.connection).toMatchObject({
+    connectionStatus: "ready",
+    revision: initialConnection.revision + 1,
+  });
+  expect(stable.evidence).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        id: `${id}-stable-evidence`,
+        capability: "text_generation",
+        verdict: "supported",
+      }),
+    ]),
+  );
+
+  const staleConnection = stable.connection;
+  const staleEntry = (await store.listCatalog(id))[0];
+  if (staleEntry === undefined) throw new Error("Expected the stable catalog entry.");
+  await store.syncCatalog({
+    syncId: `${id}-concurrent-sync`,
+    connectionId: id,
+    source: "manual",
+    status: "succeeded",
+    models: [
+      {
+        id: `${id}-unused-model-id`,
+        providerModelId: staleEntry.providerModelId,
+        displayName: "Concurrently updated model",
+      },
+    ],
+  });
+  const concurrentlyReady = await store.findConnection(id);
+  if (concurrentlyReady === null) throw new Error("Expected the concurrently updated connection.");
+  const readyRevision = await store.recordConnectionTest({
+    connectionId: id,
+    status: "ready",
+    expectedRevision: concurrentlyReady.revision,
+  });
+
+  await expect(
+    store.commitCapabilityProbeResult({
+      connectionId: id,
+      expectedConnectionRevision: staleConnection.revision,
+      catalogEntryId: staleEntry.id,
+      expectedCatalogRevision: staleEntry.revision,
+      expectedProviderModelId: staleEntry.providerModelId,
+      scan: {
+        scanId: `${id}-stale-scan`,
+        catalogEntryId: staleEntry.id,
+        scanKind: "lightweight_probe",
+        status: "failed",
+        evidenceVersion: `${id}-stale-v1`,
+        errorCode: "PROBE_FAILED",
+      },
+      connectionTest: {
+        status: "error",
+        errorCode: "PROBE_FAILED",
+      },
+    }),
+  ).rejects.toMatchObject({ code: "MODEL_HUB_PROBE_TARGET_CONFLICT" });
+  await expect(store.findConnection(id)).resolves.toEqual(readyRevision);
+  await expect(store.listCapabilityEvidence(staleEntry.id)).resolves.not.toEqual(
+    expect.arrayContaining([expect.objectContaining({ evidenceVersion: `${id}-stale-v1` })]),
+  );
+}
+
 async function assertProviderKindCannotBeOverwritten(
   store: TauriModelHubStore | BrowserDevelopmentModelHubStore,
   id: string,
@@ -565,6 +872,93 @@ async function assertProviderKindCannotBeOverwritten(
     }),
   ).rejects.toMatchObject({ code: "MODEL_HUB_PROVIDER_KIND_IMMUTABLE" });
   await expect(store.findConnection(id)).resolves.toMatchObject({ providerKind: "openai" });
+}
+
+async function assertConnectionRetirement(
+  store: ModelHubStore,
+  reopen: () => ModelHubStore,
+  id: string,
+): Promise<void> {
+  await store.saveConnection({
+    id,
+    providerKind: "openai",
+    displayName: "Retirable OpenAI connection",
+    credentialRef: `keyring:model-hub:${id}`,
+    credentialState: "present",
+    authenticationMode: "bearer_keyring",
+    expectedRevision: null,
+  });
+  await store.syncCatalog({
+    syncId: `${id}-sync`,
+    connectionId: id,
+    source: "manual",
+    status: "succeeded",
+    models: [{ id: `${id}-model`, providerModelId: "writer-model" }],
+  });
+  const invocation = await store.startInvocation({
+    id: `${id}-invocation`,
+    task: "prose_generation",
+    connectionId: id,
+    catalogEntryId: `${id}-model`,
+    providerKindSnapshot: "openai",
+    modelIdSnapshot: "writer-model",
+    routeReason: "user_override",
+    attempt: 1,
+    privacyPolicy: "cloud_allowed",
+    dataDestination: "remote",
+  });
+  await store.finishInvocation({
+    id: invocation.id,
+    status: "succeeded",
+    inputTokens: 20,
+    outputTokens: 10,
+    expectedRevision: invocation.revision,
+  });
+  const current = await store.findConnection(id);
+  if (current === null) {
+    throw new Error("Expected the connection before retirement.");
+  }
+
+  const retired = await store.retireConnection({
+    connectionId: id,
+    expectedRevision: current.revision,
+  });
+  expect(isRetiredModelProviderConnection(retired)).toBe(true);
+  expect(retired).toMatchObject({
+    enabled: false,
+    connectionStatus: "disabled",
+    credentialRef: null,
+    credentialState: "missing",
+    lastErrorCode: "MODEL_HUB_CONNECTION_RETIRED",
+    revision: current.revision + 1,
+  });
+
+  const reopened = reopen();
+  await expect(reopened.findConnection(id)).resolves.toEqual(retired);
+  await expect(reopened.findInvocation(invocation.id)).resolves.toMatchObject({
+    id: invocation.id,
+    connectionId: id,
+    status: "succeeded",
+    providerKindSnapshot: "openai",
+    modelIdSnapshot: "writer-model",
+  });
+  await expect(
+    reopened.retireConnection({ connectionId: id, expectedRevision: current.revision }),
+  ).resolves.toEqual(retired);
+  await expect(
+    reopened.startInvocation({
+      id: `${id}-blocked-invocation`,
+      task: "prose_generation",
+      connectionId: id,
+      catalogEntryId: `${id}-model`,
+      providerKindSnapshot: "openai",
+      modelIdSnapshot: "writer-model",
+      routeReason: "user_override",
+      attempt: 1,
+      privacyPolicy: "cloud_allowed",
+      dataDestination: "remote",
+    }),
+  ).rejects.toMatchObject({ code: "MODEL_HUB_CONNECTION_DISABLED" });
 }
 
 async function assertLocalToRemoteTransitionFailsClosed(

@@ -11,6 +11,7 @@
       "@inkshadow/platform": ["../../packages/platform/src/index.ts"],
       "@inkshadow/import-export": ["../../packages/import-export/src/index.ts"],
       "@inkshadow/import-export/docx-export": ["../../packages/import-export/src/docx-export.ts"],
+      "@inkshadow/import-export/epub-export": ["../../packages/import-export/src/epub-export.ts"],
       "@inkshadow/import-export/pdf-export": ["../../packages/import-export/src/pdf-export.ts"],
       "@inkshadow/observability": ["../../packages/observability/src/index.ts"],
       "@inkshadow/search-core": ["../../packages/search-core/src/index.ts"],

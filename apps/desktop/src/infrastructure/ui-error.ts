@@ -86,6 +86,18 @@ function chineseErrorDescription(code: AppError["code"]): string {
 }
 
 function recordErrorDescription(code: string): string {
+  if (code === "CREATIVE_JOURNEY_STORAGE_QUOTA_EXCEEDED") {
+    return "本地存储空间不足，本次更改没有保存。请保持当前页面打开，释放设备或浏览器存储空间后，再次点击原来的创建或保存操作；当前输入仍保留在页面中。";
+  }
+  if (code === "CREATIVE_JOURNEY_STORAGE_ACCESS_DENIED") {
+    return "浏览器阻止了本地存储，本次更改没有保存。请允许 InkShadow 使用本地存储，或退出隐私/受限模式后，再次点击原来的创建或保存操作；当前输入仍保留在页面中。";
+  }
+  if (
+    code === "CREATIVE_JOURNEY_STORAGE_READ_FAILED" ||
+    code === "CREATIVE_JOURNEY_STORAGE_WRITE_FAILED"
+  ) {
+    return "本地创作进度暂时无法读取或保存，本次更改没有被报告为成功。请保持当前页面打开，确认浏览器允许本地存储且设备仍有可用空间，然后重试原操作。";
+  }
   if (code === "MATERIAL_DUPLICATE_FOUND") {
     return "已存在正文内容相同的有效素材。请取消本次录入并使用已有素材，或修改正文后再保存。";
   }

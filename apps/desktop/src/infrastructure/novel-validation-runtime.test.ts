@@ -29,9 +29,13 @@ import {
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { BrowserDevelopmentStoryFactStore } from "./story-fact-store";
+import { DEVELOPMENT_DATABASE_KEY } from "./development-storage";
 import {
   CHAPTER_VALIDATION_UI_ACTIONS,
   ChapterNovelValidationRuntime,
+  type ChapterSupplementalFindingCategory,
+  type ChapterSupplementalFindingVerificationPort,
+  type ChapterSupplementalFindingVerificationRequest,
 } from "./novel-validation-runtime";
 
 const PROJECT_ID = uuid(1);
@@ -48,6 +52,7 @@ const PREVIOUS_CONTENT = "林遥仍然活着。";
 const CURRENT_CONTENT = "林遥已经死去。";
 const PREVIOUS_EXCERPT = "林遥仍然活着";
 const CURRENT_EXCERPT = "林遥已经死去";
+const SUPPLEMENTAL_EVIDENCE_SIGNATURE = `v2:${CURRENT_VERSION_ID}:${sha256(CURRENT_CONTENT)}:0-${String(CURRENT_EXCERPT.length)}`;
 
 describe("ChapterNovelValidationRuntime", () => {
   beforeEach(() => {
@@ -124,6 +129,15 @@ describe("ChapterNovelValidationRuntime", () => {
       availableActions: CHAPTER_VALIDATION_UI_ACTIONS,
     });
     expect(result.issues[0]?.modificationSuggestion.length).toBeGreaterThan(0);
+    expect(result.coverage?.filter(({ status }) => status === "checked")).toEqual([
+      expect.objectContaining({
+        category: "character_life_status",
+        reason: "explicit_claim_compared",
+        currentClaimCount: 1,
+        comparableReferenceCount: 1,
+      }),
+    ]);
+    expect(result.coverage).toHaveLength(10);
     expect(fixture.chapter.toSnapshot()).toEqual(before);
     expect(facts.listCalls).toEqual([PROJECT_ID]);
     expect(Object.isFrozen(result.issues)).toBe(true);
@@ -210,6 +224,7 @@ describe("ChapterNovelValidationRuntime", () => {
       issues: [],
       missingRequirements: [
         "current_claim_with_explicit_structured_fields_and_current_version_evidence",
+        "comparable_current_claim_and_confirmed_source",
       ],
       checked: { currentClaims: 0, referenceFacts: 1, hardRules: 0 },
     });
@@ -219,6 +234,47 @@ describe("ChapterNovelValidationRuntime", () => {
       "other_branch",
     ]);
     expect(result.explanation).toContain("current_claim_with_explicit_structured_fields");
+  });
+
+  it("does not claim a category ran when current and confirmed facts belong to different types", async () => {
+    const fixture = chapterFixture();
+    const currentClaim = storyFact(44, {
+      factType: "character_life_status",
+      structuredValue: currentClaimValue("dead"),
+      source: chapterSource(CURRENT_VERSION_ID, CURRENT_CONTENT, CURRENT_EXCERPT),
+      status: "unconfirmed",
+      origin: "ai_extraction",
+      needsReview: true,
+    });
+    const unrelatedAgeReference = storyFact(45, {
+      factType: "character_age",
+      structuredValue: referenceFactValue(18, "character.lin-yao", "age"),
+      source: chapterSource(PREVIOUS_VERSION_ID, PREVIOUS_CONTENT, PREVIOUS_EXCERPT),
+    });
+
+    const result = await runtimeFor(
+      fixture,
+      new ReadOnlyFactStore([currentClaim, unrelatedAgeReference]),
+    ).checkChapter(request());
+
+    expect(result).toMatchObject({
+      status: "skipped",
+      issues: [],
+      missingRequirements: ["comparable_current_claim_and_confirmed_source"],
+    });
+    expect(result.coverage?.some(({ status }) => status === "checked")).toBe(false);
+    expect(
+      result.coverage?.find(({ category }) => category === "character_life_status"),
+    ).toMatchObject({
+      status: "not_checked",
+      reason: "confirmed_reference_or_rule_missing",
+      currentClaimCount: 1,
+    });
+    expect(result.coverage?.find(({ category }) => category === "character_age")).toMatchObject({
+      status: "not_checked",
+      reason: "current_claim_missing",
+      currentClaimCount: 0,
+    });
   });
 
   it("rejects a structured claim when its exact versioned excerpt does not match", async () => {
@@ -476,6 +532,302 @@ describe("ChapterNovelValidationRuntime", () => {
     });
   });
 
+  it("persists and restores supplemental finding dispositions against exact evidence", async () => {
+    const fixture = chapterFixture();
+    seedDevelopmentChapterAuthority(fixture);
+    const persistence = new BrowserDevelopmentStoryFactStore(window.localStorage);
+    const runtime = mutableRuntime(fixture, persistence, 850);
+    const command = {
+      ...request(),
+      expectedChapterVersionId: asDomainUuid(CURRENT_VERSION_ID),
+      findingId: "voice:character-linxia:sentence-length",
+      category: "character_voice" as const,
+      evidenceSignature: SUPPLEMENTAL_EVIDENCE_SIGNATURE,
+      action: "ignore" as const,
+      humanConfirmed: true,
+    };
+
+    const ignored = await runtime.resolveSupplementalFinding(command);
+    expect(ignored).toMatchObject({
+      findingId: command.findingId,
+      category: "character_voice",
+      action: "ignore",
+      chapterVersionId: CURRENT_VERSION_ID,
+    });
+    const stored = unwrap(await persistence.findById(ignored.factId as StoryUuidV7));
+    expect(stored?.toSnapshot()).toMatchObject({
+      factType: "validation_resolution",
+      status: "formal",
+      deprecated: false,
+      structuredValue: {
+        resolutionSchema: "inkshadow.chapter-supplemental-finding-resolution.v1",
+        resolvedFindingId: command.findingId,
+        evidenceSignature: command.evidenceSignature,
+      },
+    });
+    await expect(runtime.resolveSupplementalFinding(command)).resolves.toEqual(ignored);
+    await expect(
+      runtime.resolveSupplementalFinding({ ...command, action: "allow" }),
+    ).rejects.toMatchObject({ code: "NOVEL_VALIDATION_ALREADY_RESOLVED" });
+
+    const recreated = mutableRuntime(fixture, persistence, 860);
+    await expect(
+      recreated.listSupplementalFindingResolutions({
+        ...request(),
+        expectedChapterVersionId: asDomainUuid(CURRENT_VERSION_ID),
+      }),
+    ).resolves.toEqual([ignored]);
+    const undone = await recreated.undoSupplementalFinding({
+      ...request(),
+      expectedChapterVersionId: asDomainUuid(CURRENT_VERSION_ID),
+      findingId: command.findingId,
+      evidenceSignature: command.evidenceSignature,
+      resolutionFactId: ignored.factId,
+      expectedResolutionFactRevision: ignored.factRevision,
+      humanConfirmed: true,
+    });
+    expect(undone).toMatchObject({ idempotent: false, resolutionFactRevision: 2 });
+    await expect(
+      recreated.undoSupplementalFinding({
+        ...request(),
+        expectedChapterVersionId: asDomainUuid(CURRENT_VERSION_ID),
+        findingId: command.findingId,
+        evidenceSignature: command.evidenceSignature,
+        resolutionFactId: ignored.factId,
+        expectedResolutionFactRevision: ignored.factRevision,
+        humanConfirmed: true,
+      }),
+    ).resolves.toMatchObject({ idempotent: true, resolutionFactRevision: 2 });
+    await expect(
+      recreated.listSupplementalFindingResolutions({
+        ...request(),
+        expectedChapterVersionId: asDomainUuid(CURRENT_VERSION_ID),
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it("keeps same-identity supplemental dispositions independent across chapter versions", async () => {
+    const fixture = chapterFixture();
+    seedDevelopmentChapterAuthority(fixture);
+    const persistence = new BrowserDevelopmentStoryFactStore(window.localStorage);
+    const findingId = "voice:stable-cross-version-finding";
+    const sharedSignature = `v2:shared:${"a".repeat(64)}:0-${String(CURRENT_EXCERPT.length)}`;
+    const historical = supplementalResolutionFact(
+      840,
+      PREVIOUS_VERSION_ID,
+      findingId,
+      sharedSignature,
+      "ignore",
+    );
+    unwrap(await persistence.create(historical));
+    const verifier = new StaticSupplementalFindingVerifier([
+      { findingId, category: "character_voice", evidenceSignature: sharedSignature },
+    ]);
+    const runtime = mutableRuntime(fixture, persistence, 850, verifier);
+    const currentRequest = {
+      ...request(),
+      expectedChapterVersionId: asDomainUuid(CURRENT_VERSION_ID),
+    };
+
+    await expect(runtime.listSupplementalFindingResolutions(currentRequest)).resolves.toEqual([]);
+    const current = await runtime.resolveSupplementalFinding({
+      ...currentRequest,
+      findingId,
+      category: "character_voice",
+      evidenceSignature: sharedSignature,
+      action: "allow",
+      humanConfirmed: true,
+    });
+    expect(current).toMatchObject({
+      action: "allow",
+      chapterVersionId: CURRENT_VERSION_ID,
+      evidenceSignature: sharedSignature,
+    });
+    expect(current.factId).not.toBe(historical.id);
+
+    const reopened = mutableRuntime(fixture, persistence, 860, verifier);
+    await expect(reopened.listSupplementalFindingResolutions(currentRequest)).resolves.toEqual([
+      current,
+    ]);
+    await expect(
+      reopened.undoSupplementalFinding({
+        ...currentRequest,
+        findingId,
+        evidenceSignature: sharedSignature,
+        resolutionFactId: historical.id,
+        expectedResolutionFactRevision: 1,
+        humanConfirmed: true,
+      }),
+    ).rejects.toMatchObject({ code: "NOVEL_VALIDATION_ISSUE_NOT_FOUND" });
+    expect(unwrap(await persistence.findById(historical.id))?.toSnapshot()).toMatchObject({
+      status: "formal",
+      deprecated: false,
+      revision: 1,
+    });
+
+    await expect(
+      reopened.undoSupplementalFinding({
+        ...currentRequest,
+        projectId: asDomainUuid(OTHER_PROJECT_ID),
+        findingId,
+        evidenceSignature: sharedSignature,
+        resolutionFactId: current.factId,
+        expectedResolutionFactRevision: current.factRevision,
+        humanConfirmed: true,
+      }),
+    ).rejects.toMatchObject({ code: "NOVEL_VALIDATION_ISSUE_NOT_FOUND" });
+    expect(
+      unwrap(await persistence.findById(current.factId as StoryUuidV7))?.toSnapshot(),
+    ).toMatchObject({ status: "formal", deprecated: false, revision: 1 });
+    expect(unwrap(await persistence.listRevisions(current.factId as StoryUuidV7))).toHaveLength(1);
+
+    await expect(
+      reopened.undoSupplementalFinding({
+        ...currentRequest,
+        findingId,
+        evidenceSignature: sharedSignature,
+        resolutionFactId: current.factId,
+        expectedResolutionFactRevision: current.factRevision,
+        humanConfirmed: true,
+      }),
+    ).resolves.toMatchObject({ idempotent: false, resolutionFactRevision: 2 });
+    await expect(reopened.listSupplementalFindingResolutions(currentRequest)).resolves.toEqual([]);
+    expect(unwrap(await persistence.findById(historical.id))?.toSnapshot()).toMatchObject({
+      status: "formal",
+      deprecated: false,
+      revision: 1,
+    });
+  });
+
+  it("rejects forged or no-longer-produced supplemental findings with zero writes", async () => {
+    const fixture = chapterFixture();
+    seedDevelopmentChapterAuthority(fixture);
+    const persistence = new BrowserDevelopmentStoryFactStore(window.localStorage);
+    const verifier = new StaticSupplementalFindingVerifier([
+      {
+        findingId: "voice:character-linxia:sentence-length",
+        category: "character_voice",
+        evidenceSignature: SUPPLEMENTAL_EVIDENCE_SIGNATURE,
+      },
+    ]);
+    const runtime = mutableRuntime(fixture, persistence, 865, verifier);
+    const base = {
+      ...request(),
+      expectedChapterVersionId: asDomainUuid(CURRENT_VERSION_ID),
+      category: "character_voice" as const,
+      evidenceSignature: SUPPLEMENTAL_EVIDENCE_SIGNATURE,
+      action: "allow" as const,
+      humanConfirmed: true,
+    };
+
+    await expect(
+      runtime.resolveSupplementalFinding({ ...base, findingId: "voice:forged-finding" }),
+    ).rejects.toMatchObject({ code: "NOVEL_VALIDATION_ISSUE_NOT_FOUND" });
+    await expect(
+      runtime.resolveSupplementalFinding({
+        ...base,
+        findingId: "voice:character-linxia:sentence-length",
+        evidenceSignature: `v2:${CURRENT_VERSION_ID}:${"f".repeat(64)}:0-${String(CURRENT_EXCERPT.length)}`,
+      }),
+    ).rejects.toMatchObject({ code: "NOVEL_VALIDATION_ISSUE_NOT_FOUND" });
+    verifier.invalidateSources();
+    await expect(
+      runtime.resolveSupplementalFinding({
+        ...base,
+        findingId: "voice:character-linxia:sentence-length",
+      }),
+    ).rejects.toMatchObject({ code: "NOVEL_VALIDATION_ISSUE_NOT_FOUND" });
+
+    expect(
+      unwrap(await persistence.listByProjectId(PROJECT_ID as StoryUuidV7)).filter(
+        (fact) => fact.toSnapshot().factType === "validation_resolution",
+      ),
+    ).toEqual([]);
+  });
+
+  it("fails closed with zero supplemental writes when the chapter version changes at commit", async () => {
+    const fixture = chapterFixture();
+    seedDevelopmentChapterAuthority(fixture);
+    const persistence = new BrowserDevelopmentStoryFactStore(window.localStorage);
+    const runtime = mutableRuntime(fixture, persistence, 866);
+    const serialized = window.localStorage.getItem(DEVELOPMENT_DATABASE_KEY);
+    if (serialized === null) throw new Error("Expected development chapter authority.");
+    const database = JSON.parse(serialized) as {
+      chapters: { id: string; currentVersionId: string }[];
+    };
+    const chapter = database.chapters.find(({ id }) => id === CHAPTER_ID);
+    if (chapter === undefined) throw new Error("Expected the seeded chapter.");
+    chapter.currentVersionId = uuid(867);
+    window.localStorage.setItem(DEVELOPMENT_DATABASE_KEY, JSON.stringify(database));
+
+    await expect(
+      runtime.resolveSupplementalFinding({
+        ...request(),
+        expectedChapterVersionId: asDomainUuid(CURRENT_VERSION_ID),
+        findingId: "voice:character-linxia:sentence-length",
+        category: "character_voice",
+        evidenceSignature: SUPPLEMENTAL_EVIDENCE_SIGNATURE,
+        action: "ignore",
+        humanConfirmed: true,
+      }),
+    ).rejects.toMatchObject({ code: "NOVEL_VALIDATION_STALE_RESULT" });
+    expect(
+      unwrap(await persistence.listByProjectId(PROJECT_ID as StoryUuidV7)).filter(
+        (fact) => fact.toSnapshot().factType === "validation_resolution",
+      ),
+    ).toEqual([]);
+  });
+
+  it("atomically deduplicates same-action retries and rejects opposite concurrent dispositions", async () => {
+    const fixture = chapterFixture();
+    seedDevelopmentChapterAuthority(fixture);
+    const sameActionStore = new BrowserDevelopmentStoryFactStore(window.localStorage);
+    const sameLeft = mutableRuntime(fixture, sameActionStore, 870);
+    const sameRight = mutableRuntime(fixture, sameActionStore, 880);
+    const base = {
+      ...request(),
+      expectedChapterVersionId: asDomainUuid(CURRENT_VERSION_ID),
+      findingId: "pacing:chapter-run",
+      category: "pacing_quality" as const,
+      evidenceSignature: SUPPLEMENTAL_EVIDENCE_SIGNATURE,
+      humanConfirmed: true,
+    };
+
+    const sameResults = await Promise.all([
+      sameLeft.resolveSupplementalFinding({ ...base, action: "ignore" }),
+      sameRight.resolveSupplementalFinding({ ...base, action: "ignore" }),
+    ]);
+    expect(sameResults[0].factId).toBe(sameResults[1].factId);
+    await expect(
+      sameLeft.listSupplementalFindingResolutions({
+        ...request(),
+        expectedChapterVersionId: asDomainUuid(CURRENT_VERSION_ID),
+      }),
+    ).resolves.toHaveLength(1);
+
+    window.localStorage.clear();
+    seedDevelopmentChapterAuthority(fixture);
+    const oppositeStore = new BrowserDevelopmentStoryFactStore(window.localStorage);
+    const oppositeLeft = mutableRuntime(fixture, oppositeStore, 890);
+    const oppositeRight = mutableRuntime(fixture, oppositeStore, 900);
+    const oppositeResults = await Promise.allSettled([
+      oppositeLeft.resolveSupplementalFinding({ ...base, action: "ignore" }),
+      oppositeRight.resolveSupplementalFinding({ ...base, action: "allow" }),
+    ]);
+    expect(oppositeResults.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    const rejected = oppositeResults.find(({ status }) => status === "rejected");
+    expect(rejected).toMatchObject({
+      status: "rejected",
+      reason: { code: "NOVEL_VALIDATION_ALREADY_RESOLVED" },
+    });
+    await expect(
+      oppositeLeft.listSupplementalFindingResolutions({
+        ...request(),
+        expectedChapterVersionId: asDomainUuid(CURRENT_VERSION_ID),
+      }),
+    ).resolves.toHaveLength(1);
+  });
+
   it("updates a setting with a confirmed fact and deprecates the superseded fact with revisions", async () => {
     const fixture = chapterFixture();
     const { currentClaim, reference } = conflictFacts(80);
@@ -590,6 +942,43 @@ function chapterFixture(): ChapterFixture {
   return { chapter, previousVersion, currentVersion };
 }
 
+function seedDevelopmentChapterAuthority(fixture: ChapterFixture): void {
+  window.localStorage.setItem(
+    DEVELOPMENT_DATABASE_KEY,
+    JSON.stringify({
+      chapters: [fixture.chapter.toSnapshot()],
+      versions: [fixture.currentVersion.toSnapshot()],
+    }),
+  );
+}
+
+function supplementalResolutionFact(
+  sequence: number,
+  chapterVersionId: string,
+  findingId: string,
+  evidenceSignature: string,
+  action: "ignore" | "allow",
+): StoryFact {
+  return storyFact(sequence, {
+    factType: "validation_resolution",
+    contentText: "用户处理了检查提醒。",
+    structuredValue: {
+      resolutionSchema: "inkshadow.chapter-supplemental-finding-resolution.v1",
+      resolutionAction: action,
+      resolvedFindingId: findingId,
+      resolvedFindingCategory: "character_voice",
+      resolvedChapterId: CHAPTER_ID,
+      resolvedChapterVersionId: chapterVersionId,
+      evidenceSignature,
+    },
+    source: {
+      kind: "review_decision",
+      reference: `chapter-supplemental-finding:${CHAPTER_ID}:${chapterVersionId}:${findingId}`,
+    },
+    locked: action === "allow",
+  });
+}
+
 function conflictFacts(sequence: number): Readonly<{
   currentClaim: StoryFact;
   reference: StoryFact;
@@ -616,6 +1005,20 @@ function mutableRuntime(
   fixture: ChapterFixture,
   storyFacts: StoryFactStore,
   nextId: number,
+  supplementalFindingVerifier: ChapterSupplementalFindingVerificationPort = new StaticSupplementalFindingVerifier(
+    [
+      {
+        findingId: "voice:character-linxia:sentence-length",
+        category: "character_voice",
+        evidenceSignature: SUPPLEMENTAL_EVIDENCE_SIGNATURE,
+      },
+      {
+        findingId: "pacing:chapter-run",
+        category: "pacing_quality",
+        evidenceSignature: SUPPLEMENTAL_EVIDENCE_SIGNATURE,
+      },
+    ],
+  ),
 ): ChapterNovelValidationRuntime {
   const factService = new StoryFactApplicationService({
     facts: storyFacts,
@@ -627,8 +1030,40 @@ function mutableRuntime(
     chapterVersions: new VersionReader([fixture.previousVersion, fixture.currentVersion]),
     storyFacts,
     hasher: new CryptoHasher(),
+    supplementalFindingVerifier,
     mutations: { factService, actorId: ACTOR_ID },
   });
+}
+
+interface StaticSupplementalFinding {
+  readonly findingId: string;
+  readonly category: ChapterSupplementalFindingCategory;
+  readonly evidenceSignature: string;
+}
+
+class StaticSupplementalFindingVerifier implements ChapterSupplementalFindingVerificationPort {
+  private active = true;
+
+  public constructor(private readonly findings: readonly StaticSupplementalFinding[]) {}
+
+  public invalidateSources(): void {
+    this.active = false;
+  }
+
+  public isCurrentFinding(
+    request: ChapterSupplementalFindingVerificationRequest,
+  ): Promise<boolean> {
+    return Promise.resolve(
+      this.active &&
+        request.expectedChapterVersionId === CURRENT_VERSION_ID &&
+        this.findings.some(
+          (finding) =>
+            finding.findingId === request.findingId &&
+            finding.category === request.category &&
+            finding.evidenceSignature === request.evidenceSignature,
+        ),
+    );
+  }
 }
 
 function makeVersion(input: {
@@ -730,7 +1165,7 @@ function currentClaimValue(
 }
 
 function referenceFactValue(
-  value: string | boolean,
+  value: string | number | boolean,
   subjectId = "character.lin-yao",
   attributeKey = "life_status",
 ) {

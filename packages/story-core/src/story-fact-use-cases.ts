@@ -3,6 +3,10 @@ import {
   isRebuildableStoryFactType,
   StoryFact,
   type CreateStoryFactInput,
+  type StoryFactEntityAliasResolution,
+  type StoryFactAuthorityFence,
+  type StoryFactConditionalCreateReceipt,
+  type StoryFactConditionalDeprecateReceipt,
   type StoryFactOrigin,
   type StoryFactStore,
 } from "./story-fact.js";
@@ -114,6 +118,75 @@ export class StoryFactApplicationService {
   public async createFormalUserFact(
     command: CreateFormalUserFactCommand,
   ): Promise<Result<StoryFact, StoryCoreError>> {
+    const created = this.buildFormalUserFact(command);
+    if (!created.ok) return created;
+    const saved = await this.options.facts.create(created.value);
+    return saved.ok ? ok(created.value) : saved;
+  }
+
+  public async createFormalUserFactWithAuthorityFence(
+    command: CreateFormalUserFactCommand,
+    fence: StoryFactAuthorityFence,
+  ): Promise<Result<StoryFactConditionalCreateReceipt, StoryCoreError>> {
+    const created = this.buildFormalUserFact(command);
+    if (!created.ok) return created;
+    if (this.options.facts.createWithAuthorityFence === undefined) {
+      return err(
+        new StoryCoreError({
+          code: "STORY_REPOSITORY_ERROR",
+          message: "The story fact store does not support an atomic authority fence.",
+        }),
+      );
+    }
+    return this.options.facts.createWithAuthorityFence(created.value, fence);
+  }
+
+  public deprecateSupplementalResolutionWithAuthorityFence(command: {
+    readonly factId: string;
+    readonly expectedProjectId: string;
+    readonly chapterId: string;
+    readonly expectedCurrentVersionId: string;
+    readonly findingId: string;
+    readonly evidenceSignature: string;
+    readonly expectedRevision: number;
+    readonly humanConfirmed: boolean;
+  }): Promise<Result<StoryFactConditionalDeprecateReceipt, StoryCoreError>> {
+    if (!command.humanConfirmed) {
+      return Promise.resolve(
+        err(
+          new StoryCoreError({
+            code: "HUMAN_DECISION_REQUIRED",
+            message: "A supplemental finding disposition requires an explicit user decision.",
+          }),
+        ),
+      );
+    }
+    const factId = parseUuidV7(command.factId);
+    if (!factId.ok) return Promise.resolve(factId);
+    if (this.options.facts.deprecateSupplementalResolutionWithAuthorityFence === undefined) {
+      return Promise.resolve(
+        err(
+          new StoryCoreError({
+            code: "STORY_REPOSITORY_ERROR",
+            message: "The story fact store does not support an atomic supplemental undo fence.",
+          }),
+        ),
+      );
+    }
+    return this.options.facts.deprecateSupplementalResolutionWithAuthorityFence(factId.value, {
+      expectedProjectId: command.expectedProjectId,
+      chapterId: command.chapterId,
+      expectedCurrentVersionId: command.expectedCurrentVersionId,
+      findingId: command.findingId,
+      evidenceSignature: command.evidenceSignature,
+      expectedRevision: command.expectedRevision,
+      now: this.options.clock.now(),
+    });
+  }
+
+  private buildFormalUserFact(
+    command: CreateFormalUserFactCommand,
+  ): Result<StoryFact, StoryCoreError> {
     if (!command.humanConfirmed) {
       return err(
         new StoryCoreError({
@@ -149,8 +222,7 @@ export class StoryFactApplicationService {
     if (!created.ok) {
       return created;
     }
-    const saved = await this.options.facts.create(created.value);
-    return saved.ok ? ok(created.value) : saved;
+    return created;
   }
 
   public async stageAutomaticFact(
@@ -195,6 +267,22 @@ export class StoryFactApplicationService {
       fact.confirm({
         actorId: command.actorId,
         ...(command.lock === undefined ? {} : { lock: command.lock }),
+        humanConfirmed: command.humanConfirmed,
+        expectedRevision: command.expectedRevision,
+        now: this.options.clock.now(),
+      }),
+    );
+  }
+
+  public resolveEntityAlias(command: {
+    readonly factId: string;
+    readonly resolution: StoryFactEntityAliasResolution;
+    readonly humanConfirmed: boolean;
+    readonly expectedRevision: number;
+  }): Promise<Result<StoryFact, StoryCoreError>> {
+    return this.mutate(command.factId, (fact) =>
+      fact.resolveEntityAlias({
+        resolution: command.resolution,
         humanConfirmed: command.humanConfirmed,
         expectedRevision: command.expectedRevision,
         now: this.options.clock.now(),

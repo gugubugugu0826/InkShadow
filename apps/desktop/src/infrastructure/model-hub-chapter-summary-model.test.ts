@@ -16,6 +16,7 @@ import type {
   ModelHubTextTaskInspection,
 } from "./model-hub-execution-service";
 import type { ModelHubStore } from "./model-hub-store";
+import { ProjectContextPrivacyError } from "./project-context-privacy-authority";
 
 const PROJECT_ID = uuid(1);
 const CHAPTER_ID = uuid(2);
@@ -28,6 +29,7 @@ describe("ModelHubChapterSummaryModel", () => {
     const inspection = modelInspection();
     const inspectText = vi.fn().mockResolvedValue(inspection);
     const sourceCheck = vi.fn().mockResolvedValue(undefined);
+    const projectCheck = vi.fn().mockResolvedValue(undefined);
     const executeText = vi.fn(
       async (
         _dependencies: ModelHubTextExecutionDependencies,
@@ -57,7 +59,7 @@ describe("ModelHubChapterSummaryModel", () => {
       executeText,
     });
 
-    const output = await model.summarize(input(sourceCheck));
+    const output = await model.summarize(input(sourceCheck, projectCheck));
 
     expect(output).toMatchObject({
       summary: "A concise summary.",
@@ -70,11 +72,70 @@ describe("ModelHubChapterSummaryModel", () => {
     expect(executeText).toHaveBeenCalledTimes(1);
     expect(listCapabilityEvidence).toHaveBeenCalledTimes(3);
     expect(sourceCheck.mock.calls.length).toBeGreaterThanOrEqual(5);
+    expect(projectCheck.mock.calls.length).toBeGreaterThanOrEqual(4);
     expect(executeText.mock.calls[0]?.[1]).toMatchObject({
       task: "long_memory_compression",
       maximumOutputTokens: 3500,
       temperature: 0.1,
     });
+  });
+
+  it("rechecks project privacy in the final dispatch hook before provider code runs", async () => {
+    const inspection = modelInspection();
+    const providerDispatch = vi.fn();
+    const projectCheck = vi.fn((verifiedLocalEligible?: boolean) =>
+      verifiedLocalEligible === false
+        ? Promise.reject(
+            new ProjectContextPrivacyError(
+              "PROJECT_CONTEXT_PRIVACY_CHANGED",
+              "project privacy changed",
+              true,
+            ),
+          )
+        : Promise.resolve(),
+    );
+    const executeText = vi.fn(
+      async (
+        _dependencies: ModelHubTextExecutionDependencies,
+        request: ExecuteModelHubTextTaskInput,
+      ) => {
+        await request.onBeforeDispatch?.({
+          generationId: uuid(20),
+          invocationId: uuid(21),
+          connectionId: inspection.connectionId,
+          catalogEntryId: inspection.catalogEntryId,
+          modelId: inspection.modelId,
+          usedFallback: inspection.usedFallback,
+          localOnlyEligible: false,
+        });
+        providerDispatch();
+        return modelExecution();
+      },
+    );
+    const model = new ModelHubChapterSummaryModel({
+      modelHub: {
+        listCapabilityEvidence: vi
+          .fn()
+          .mockResolvedValue([
+            capability("text_generation", 30),
+            capability("structured_output", 31),
+          ]),
+      } as unknown as ModelHubStore,
+      modelGateway: { available: true, generate: vi.fn() },
+      credentials: { getSummary: vi.fn().mockResolvedValue({ configured: true }) },
+      clock: { now: () => timestamp("2026-08-01T00:00:00.000Z") },
+      ids: { next: () => uuid(40) as never },
+      inspectText: vi.fn().mockResolvedValue(inspection) as never,
+      executeText,
+    });
+
+    await expect(
+      model.summarize(input(vi.fn().mockResolvedValue(undefined), projectCheck, true)),
+    ).rejects.toMatchObject({ code: "PROJECT_CONTEXT_PRIVACY_CHANGED" });
+
+    expect(executeText).toHaveBeenCalledTimes(1);
+    expect(executeText.mock.calls[0]?.[1]).toMatchObject({ requiredDataDestination: "local" });
+    expect(providerDispatch).not.toHaveBeenCalled();
   });
 
   it("skips before dispatch when structured output is not verified", async () => {
@@ -117,7 +178,12 @@ describe("ModelHubChapterSummaryModel", () => {
   });
 });
 
-function input(assertSourceCurrent: () => Promise<void>): ChapterSummaryModelInput {
+function input(
+  assertSourceCurrent: () => Promise<void>,
+  assertProjectPrivacyCurrent: (verifiedLocalEligible?: boolean) => Promise<void> = () =>
+    Promise.resolve(),
+  requiresVerifiedLocal = false,
+): ChapterSummaryModelInput {
   return Object.freeze({
     projectId: PROJECT_ID,
     chapterId: CHAPTER_ID,
@@ -127,7 +193,27 @@ function input(assertSourceCurrent: () => Promise<void>): ChapterSummaryModelInp
     segments: Object.freeze([
       Object.freeze({ evidenceId: EVIDENCE_ID, startOffset: 0, endOffset: 4, text: "ABCD" }),
     ]),
+    projectPrivacy: Object.freeze({
+      schemaVersion: 1 as const,
+      projectId: PROJECT_ID,
+      fingerprint: "a".repeat(64),
+      activeChapterCount: 1,
+      retainedChapterCount: 1,
+      requiresVerifiedLocal,
+      chapters: Object.freeze([
+        Object.freeze({
+          chapterId: CHAPTER_ID,
+          currentVersionId: VERSION_ID,
+          revision: 1,
+          privacyRevision: 1,
+          privacyMode: requiresVerifiedLocal ? ("local_only" as const) : ("standard" as const),
+          status: "active" as const,
+        }),
+      ]),
+    }),
+    requiresVerifiedLocal,
     assertSourceCurrent,
+    assertProjectPrivacyCurrent,
   });
 }
 

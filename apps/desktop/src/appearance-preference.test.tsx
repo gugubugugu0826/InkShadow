@@ -52,7 +52,7 @@ describe("appearance preference", () => {
 
     expect(document.documentElement).toHaveAttribute("data-surface", "dark");
     expect(window.localStorage.getItem(APPEARANCE_PREFERENCE_STORAGE_KEY)).toBe("dark");
-    expect(screen.getByTestId("editor-paper")).toHaveAttribute("data-surface", "light");
+    expect(screen.getByTestId("editor-paper")).toHaveAttribute("data-surface", "dark");
 
     document.documentElement.removeAttribute("data-surface");
     expect(initializeAppearancePreference()).toBe("dark");
@@ -98,7 +98,7 @@ function AppearanceHarness() {
       <output data-testid="appearance-state">
         {preference}:{resolvedSurface}
       </output>
-      <div data-testid="editor-paper" data-surface="light" />
+      <div data-testid="editor-paper" data-surface={resolvedSurface} />
       <button type="button" onClick={() => setPreference("light")}>
         使用浅色
       </button>

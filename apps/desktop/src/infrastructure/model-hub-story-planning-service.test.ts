@@ -114,6 +114,397 @@ describe("Model Hub story planning service", () => {
     ).toContain("章节目标：让两人在暴雨中暂时合作");
   });
 
+  it("appends only selected immutable rows while preserving the exact baseline synopsis", async () => {
+    const harness = createHarness(outlineResponse());
+    const outcome = await harness.service.generate({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    if (outcome.status !== "completed") {
+      throw new Error("expected planning candidate");
+    }
+
+    const receipt = await harness.service.acceptCandidateItems({
+      candidateId: outcome.candidate.id,
+      expectedRevision: outcome.candidate.revision,
+      selectedItemIds: ["question:0", "beat:0"],
+    });
+
+    const synopsis = harness.repository.current
+      ?.toSnapshot()
+      .nodes.find(({ id }) => id === BOOK_ID)?.synopsis;
+    expect(synopsis).toBe(
+      "原始故事方向\n\n已采纳的 AI 规划条目：\n1. 暂时同行\n目标：建立合作\n结果：发现共同目标\n\n待作者决定：幕后人是谁",
+    );
+    expect(synopsis).not.toContain("误会揭开");
+    expect(synopsis).not.toContain("两人从误会走向共同选择");
+    expect(receipt.acceptedItemIds).toEqual(["beat:0", "question:0"]);
+    expect(receipt.candidate.acceptedItemIds).toEqual(["beat:0", "question:0"]);
+    expect(receipt.outlineRevision).toBe(outcome.candidate.baselineOutlineRevision + 1);
+  });
+
+  it("rejects an empty selection without changing the outline or candidate", async () => {
+    const harness = createHarness(outlineResponse());
+    const outcome = await harness.service.generate({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    if (outcome.status !== "completed") {
+      throw new Error("expected planning candidate");
+    }
+    const before = harness.repository.current?.toSnapshot();
+
+    await expect(
+      harness.service.acceptCandidateItems({
+        candidateId: outcome.candidate.id,
+        expectedRevision: 1,
+        selectedItemIds: [],
+      }),
+    ).rejects.toMatchObject({ code: "STORY_PLANNING_SELECTION_EMPTY" });
+    expect(harness.repository.current?.toSnapshot()).toEqual(before);
+    expect(await harness.candidates.findById(outcome.candidate.id)).toMatchObject({
+      status: "review",
+      revision: 1,
+    });
+  });
+
+  it("makes a repeated identical selective acceptance idempotent", async () => {
+    const harness = createHarness(outlineResponse());
+    const outcome = await harness.service.generate({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    if (outcome.status !== "completed") {
+      throw new Error("expected planning candidate");
+    }
+    const input = {
+      candidateId: outcome.candidate.id,
+      expectedRevision: outcome.candidate.revision,
+      selectedItemIds: ["beat:0"],
+    } as const;
+    const first = await harness.service.acceptCandidateItems(input);
+    const afterFirst = harness.repository.current?.toSnapshot();
+    const second = await harness.service.acceptCandidateItems(input);
+
+    expect(first.idempotent).toBe(false);
+    expect(second.idempotent).toBe(true);
+    expect(second.outlineRevision).toBe(first.outlineRevision);
+    expect(harness.repository.current?.toSnapshot()).toEqual(afterFirst);
+    expect(
+      harness.repository.current?.toSnapshot().nodes.find(({ id }) => id === BOOK_ID)?.synopsis,
+    ).toMatch(/已采纳的 AI 规划条目：/gu);
+  });
+
+  it("reserves selective acceptance before concurrent reject or edit can win", async () => {
+    const harness = createHarness(outlineResponse());
+    const outcome = await harness.service.generate({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    if (outcome.status !== "completed") {
+      throw new Error("expected planning candidate");
+    }
+    const intentStored = deferred<undefined>();
+    const continueAcceptance = deferred<undefined>();
+    const originalBegin = harness.candidates.beginSelectiveAcceptance.bind(harness.candidates);
+    vi.spyOn(harness.candidates, "beginSelectiveAcceptance").mockImplementationOnce(
+      async (input) => {
+        const applying = await originalBegin(input);
+        intentStored.resolve(undefined);
+        await continueAcceptance.promise;
+        return applying;
+      },
+    );
+
+    const accepting = harness.service.acceptCandidateItems({
+      candidateId: outcome.candidate.id,
+      expectedRevision: 1,
+      selectedItemIds: ["beat:0"],
+    });
+    await intentStored.promise;
+    await expect(
+      harness.service.rejectCandidate({
+        candidateId: outcome.candidate.id,
+        expectedRevision: 2,
+      }),
+    ).rejects.toMatchObject({ code: "STORY_PLANNING_CANDIDATE_CONFLICT" });
+    await expect(
+      harness.service.updateCandidate({
+        candidateId: outcome.candidate.id,
+        expectedRevision: 2,
+        editableSynopsis: "不应覆盖正在采纳的建议",
+      }),
+    ).rejects.toMatchObject({ code: "STORY_PLANNING_CANDIDATE_CONFLICT" });
+    continueAcceptance.resolve(undefined);
+
+    await expect(accepting).resolves.toMatchObject({
+      idempotent: false,
+      candidate: { status: "accepted", acceptedItemIds: ["beat:0"] },
+    });
+  });
+
+  it("makes two concurrent identical selective accepts converge on one outline write", async () => {
+    const harness = createHarness(outlineResponse());
+    const outcome = await harness.service.generate({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    if (outcome.status !== "completed") {
+      throw new Error("expected planning candidate");
+    }
+    const input = {
+      candidateId: outcome.candidate.id,
+      expectedRevision: 1,
+      selectedItemIds: ["beat:0"],
+    } as const;
+
+    const receipts = await Promise.all([
+      harness.service.acceptCandidateItems(input),
+      harness.service.acceptCandidateItems(input),
+    ]);
+
+    expect(receipts.filter(({ idempotent }) => !idempotent)).toHaveLength(1);
+    expect(receipts.filter(({ idempotent }) => idempotent)).toHaveLength(1);
+    expect(harness.repository.current?.revision).toBe(
+      outcome.candidate.baselineOutlineRevision + 1,
+    );
+  });
+
+  it("does not touch the outline when persisting the applying intent fails", async () => {
+    const harness = createHarness(outlineResponse());
+    const outcome = await harness.service.generate({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    if (outcome.status !== "completed") {
+      throw new Error("expected planning candidate");
+    }
+    const before = harness.repository.current?.toSnapshot();
+    vi.spyOn(harness.candidates, "beginSelectiveAcceptance").mockRejectedValueOnce(
+      new Error("intent write interrupted"),
+    );
+
+    await expect(
+      harness.service.acceptCandidateItems({
+        candidateId: outcome.candidate.id,
+        expectedRevision: 1,
+        selectedItemIds: ["beat:0"],
+      }),
+    ).rejects.toMatchObject({ code: "STORY_PLANNING_TARGET_CHANGED" });
+    expect(harness.repository.current?.toSnapshot()).toEqual(before);
+    expect(await harness.candidates.findById(outcome.candidate.id)).toMatchObject({
+      status: "review",
+      revision: 1,
+      selectiveAcceptanceIntent: null,
+    });
+  });
+
+  it("keeps an applying intent after a definite pre-commit outline failure and can retry", async () => {
+    const harness = createHarness(outlineResponse());
+    const outcome = await harness.service.generate({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    if (outcome.status !== "completed") {
+      throw new Error("expected planning candidate");
+    }
+    vi.spyOn(harness.outlineService, "apply").mockResolvedValueOnce(
+      err(new StoryCoreError({ code: "STORY_REPOSITORY_ERROR", message: "write failed" })),
+    );
+
+    await expect(
+      harness.service.acceptCandidateItems({
+        candidateId: outcome.candidate.id,
+        expectedRevision: 1,
+        selectedItemIds: ["beat:0"],
+      }),
+    ).rejects.toMatchObject({ code: "STORY_REPOSITORY_ERROR" });
+    expect(await harness.candidates.findById(outcome.candidate.id)).toMatchObject({
+      status: "review",
+      revision: 2,
+      selectiveAcceptanceIntent: { selectedItemIds: ["beat:0"] },
+    });
+
+    await expect(
+      harness.service.acceptCandidateItems({
+        candidateId: outcome.candidate.id,
+        expectedRevision: 1,
+        selectedItemIds: ["beat:0"],
+      }),
+    ).resolves.toMatchObject({ candidate: { status: "accepted" } });
+  });
+
+  it("keeps reject and edit locked between one failed apply and an identical concurrent commit", async () => {
+    const harness = createHarness(outlineResponse());
+    const outcome = await harness.service.generate({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    if (outcome.status !== "completed") {
+      throw new Error("expected planning candidate");
+    }
+    const firstApplyEntered = deferred<undefined>();
+    const releaseFirstFailure = deferred<undefined>();
+    const secondApplyEntered = deferred<undefined>();
+    const releaseSecondCommit = deferred<undefined>();
+    const originalApply = harness.outlineService.apply.bind(harness.outlineService);
+    let applyAttempt = 0;
+    vi.spyOn(harness.outlineService, "apply").mockImplementation(async (input) => {
+      applyAttempt += 1;
+      if (applyAttempt === 1) {
+        firstApplyEntered.resolve(undefined);
+        await releaseFirstFailure.promise;
+        return err(
+          new StoryCoreError({ code: "STORY_REPOSITORY_ERROR", message: "first write failed" }),
+        );
+      }
+      secondApplyEntered.resolve(undefined);
+      await releaseSecondCommit.promise;
+      return originalApply(input);
+    });
+    const acceptanceInput = {
+      candidateId: outcome.candidate.id,
+      expectedRevision: 1,
+      selectedItemIds: ["beat:0"],
+    } as const;
+
+    const firstAcceptance = harness.service.acceptCandidateItems(acceptanceInput);
+    await firstApplyEntered.promise;
+    const secondAcceptance = harness.service.acceptCandidateItems(acceptanceInput);
+    await secondApplyEntered.promise;
+    releaseFirstFailure.resolve(undefined);
+    await expect(firstAcceptance).rejects.toMatchObject({ code: "STORY_REPOSITORY_ERROR" });
+
+    await expect(
+      harness.service.rejectCandidate({
+        candidateId: outcome.candidate.id,
+        expectedRevision: 2,
+      }),
+    ).rejects.toMatchObject({ code: "STORY_PLANNING_CANDIDATE_CONFLICT" });
+    await expect(
+      harness.service.updateCandidate({
+        candidateId: outcome.candidate.id,
+        expectedRevision: 2,
+        editableSynopsis: "不能插入并发采纳之间",
+      }),
+    ).rejects.toMatchObject({ code: "STORY_PLANNING_CANDIDATE_CONFLICT" });
+    expect(await harness.candidates.findById(outcome.candidate.id)).toMatchObject({
+      status: "review",
+      revision: 2,
+      selectiveAcceptanceIntent: { selectedItemIds: ["beat:0"] },
+    });
+
+    releaseSecondCommit.resolve(undefined);
+    await expect(secondAcceptance).resolves.toMatchObject({
+      candidate: { status: "accepted", acceptedItemIds: ["beat:0"] },
+    });
+    expect(harness.repository.current?.revision).toBe(
+      outcome.candidate.baselineOutlineRevision + 1,
+    );
+  });
+
+  it("recovers when the outline commit succeeds but its result is reported as failed", async () => {
+    const harness = createHarness(outlineResponse());
+    const outcome = await harness.service.generate({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    if (outcome.status !== "completed") {
+      throw new Error("expected planning candidate");
+    }
+    const originalApply = harness.outlineService.apply.bind(harness.outlineService);
+    vi.spyOn(harness.outlineService, "apply").mockImplementationOnce(async (input) => {
+      const committed = await originalApply(input);
+      if (!committed.ok) {
+        return committed;
+      }
+      return err(new StoryCoreError({ code: "STORY_REPOSITORY_ERROR", message: "lost receipt" }));
+    });
+
+    await expect(
+      harness.service.acceptCandidateItems({
+        candidateId: outcome.candidate.id,
+        expectedRevision: 1,
+        selectedItemIds: ["beat:0"],
+      }),
+    ).resolves.toMatchObject({
+      recoveredAfterInterruptedRecording: true,
+      candidate: { status: "accepted" },
+    });
+  });
+
+  it("keeps the applying intent after finalize interruption and completes it on retry", async () => {
+    const harness = createHarness(outlineResponse());
+    const outcome = await harness.service.generate({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    if (outcome.status !== "completed") {
+      throw new Error("expected planning candidate");
+    }
+    vi.spyOn(harness.candidates, "finalizeSelectiveAcceptance").mockRejectedValueOnce(
+      new Error("final receipt interrupted"),
+    );
+
+    await expect(
+      harness.service.acceptCandidateItems({
+        candidateId: outcome.candidate.id,
+        expectedRevision: 1,
+        selectedItemIds: ["beat:0"],
+      }),
+    ).rejects.toMatchObject({
+      code: "STORY_PLANNING_ACCEPTANCE_RECORD_FAILED",
+      outlineAlreadyUpdated: true,
+    });
+    expect(await harness.candidates.findById(outcome.candidate.id)).toMatchObject({
+      status: "review",
+      revision: 2,
+      selectiveAcceptanceIntent: { selectedItemIds: ["beat:0"] },
+    });
+
+    await expect(
+      harness.service.acceptCandidateItems({
+        candidateId: outcome.candidate.id,
+        expectedRevision: 1,
+        selectedItemIds: ["beat:0"],
+      }),
+    ).resolves.toMatchObject({
+      recoveredAfterInterruptedRecording: true,
+      candidate: { status: "accepted" },
+    });
+  });
+
+  it("recognizes a finalize that committed before its caller observed an error", async () => {
+    const harness = createHarness(outlineResponse());
+    const outcome = await harness.service.generate({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    if (outcome.status !== "completed") {
+      throw new Error("expected planning candidate");
+    }
+    const originalFinalize = harness.candidates.finalizeSelectiveAcceptance.bind(
+      harness.candidates,
+    );
+    vi.spyOn(harness.candidates, "finalizeSelectiveAcceptance").mockImplementationOnce(
+      async (input) => {
+        await originalFinalize(input);
+        throw new Error("lost final receipt");
+      },
+    );
+
+    await expect(
+      harness.service.acceptCandidateItems({
+        candidateId: outcome.candidate.id,
+        expectedRevision: 1,
+        selectedItemIds: ["beat:0"],
+      }),
+    ).resolves.toMatchObject({
+      idempotent: true,
+      candidate: { status: "accepted", acceptedItemIds: ["beat:0"] },
+    });
+  });
+
   it("reports a skipped result before dispatch when structured output is not verified", async () => {
     const harness = createHarness(outlineResponse(), { structuredOutput: false });
     const outcome = await harness.service.generate({
@@ -162,6 +553,36 @@ describe("Model Hub story planning service", () => {
       harness.service.acceptCandidate({
         candidateId: outcome.candidate.id,
         expectedRevision: outcome.candidate.revision,
+      }),
+    ).rejects.toMatchObject({ code: "STORY_PLANNING_TARGET_CHANGED" });
+    expect(
+      harness.repository.current?.toSnapshot().nodes.find(({ id }) => id === BOOK_ID)?.synopsis,
+    ).toBe("原始故事方向");
+  });
+
+  it("blocks selective acceptance after an unrelated outline revision", async () => {
+    const harness = createHarness(outlineResponse());
+    const outcome = await harness.service.generate({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    if (outcome.status !== "completed") {
+      throw new Error("expected planning candidate");
+    }
+    const changed = await harness.outlineService.apply({
+      projectId: PROJECT_ID,
+      expectedRevision: outcome.candidate.baselineOutlineRevision,
+      change: { kind: "rename", nodeId: VOLUME_ID, title: "作者的新卷名" },
+    });
+    if (!changed.ok) {
+      throw changed.error;
+    }
+
+    await expect(
+      harness.service.acceptCandidateItems({
+        candidateId: outcome.candidate.id,
+        expectedRevision: outcome.candidate.revision,
+        selectedItemIds: ["beat:0"],
       }),
     ).rejects.toMatchObject({ code: "STORY_PLANNING_TARGET_CHANGED" });
     expect(
@@ -218,8 +639,27 @@ function createHarness(
     candidates,
     inspectText: vi.fn(() => Promise.resolve(inspection())),
     executeText,
+    projectContextPrivacy: standardProjectPrivacyAuthority(),
   });
   return { service, repository, outlineService, candidates, executeText };
+}
+
+function standardProjectPrivacyAuthority() {
+  return {
+    inspect: vi.fn((projectId: string) =>
+      Promise.resolve({
+        schemaVersion: 1 as const,
+        projectId,
+        fingerprint: `privacy:${projectId}`,
+        activeChapterCount: 0,
+        retainedChapterCount: 0,
+        requiresVerifiedLocal: false,
+        chapters: [] as const,
+      }),
+    ),
+    assertCurrentBeforeDispatch: vi.fn(() => Promise.resolve()),
+    assertRouteEligible: vi.fn(),
+  };
 }
 
 function createOutline(): Outline {
@@ -529,4 +969,14 @@ class MemoryStorage implements Storage {
   public setItem(key: string, value: string): void {
     this.values.set(key, value);
   }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }

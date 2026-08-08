@@ -5,6 +5,7 @@ import {
 } from "./editor-text-operations";
 
 export const EDITOR_VIEW_STATE_STORAGE_KEY = "inkshadow.editor.view-state.v1";
+export const EDITOR_TYPOGRAPHY_CHANGED_EVENT = "inkshadow:editor-typography-changed";
 export const EDITOR_VIEW_STATE_ENTRY_LIMIT = 100;
 export const EDITOR_VIEW_STATE_SERIALIZED_LIMIT = 262_144;
 
@@ -42,8 +43,8 @@ interface EditorViewStateDatabase {
 
 export const DEFAULT_EDITOR_TYPOGRAPHY: EditorTypography = Object.freeze({
   fontFamily: "serif",
-  fontSize: 17,
-  lineHeight: 1.95,
+  fontSize: 16,
+  lineHeight: 1.75,
   measure: "comfortable",
 });
 
@@ -69,6 +70,10 @@ export function loadEditorView(
     }),
     typography: database.typography,
   });
+}
+
+export function loadEditorTypography(storage: Storage): EditorTypography {
+  return readAndCleanDatabase(storage).typography;
 }
 
 export function saveEditorView(
@@ -109,12 +114,17 @@ export function saveEditorView(
   });
 }
 
-export function saveEditorTypography(storage: Storage, typography: EditorTypography): void {
+export function saveEditorTypography(
+  storage: Storage,
+  typography: EditorTypography,
+  eventTarget?: EventTarget,
+): void {
   const database = readAndCleanDatabase(storage);
   writeDatabase(storage, {
     ...database,
     typography: normalizeTypography(typography),
   });
+  eventTarget?.dispatchEvent(new Event(EDITOR_TYPOGRAPHY_CHANGED_EVENT));
 }
 
 function readAndCleanDatabase(storage: Storage): EditorViewStateDatabase {

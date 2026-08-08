@@ -8,7 +8,9 @@ import {
   err,
   ok,
   type MemoryPolicyRepository,
+  type MemoryGovernanceUnitOfWork,
   type MemoryRecordCreationUnitOfWork,
+  type MemoryRecordListReader,
   type MemoryRecordRepository,
 } from "../src/index.js";
 import { ManualClock, SequenceUuidV7Generator, unwrap, uuid } from "./helpers.js";
@@ -217,7 +219,7 @@ describe("L1-L4 memory records", () => {
         return Promise.resolve(ok(undefined));
       },
     };
-    const records: MemoryRecordRepository = {
+    const records: MemoryRecordRepository & MemoryRecordListReader = {
       findById: (id) => Promise.resolve(ok(persistedRecords.get(id) ?? null)),
       save: (record, expectedRevision) => {
         const current = persistedRecords.get(record.id);
@@ -234,6 +236,14 @@ describe("L1-L4 memory records", () => {
         persistedRecords.set(record.id, record);
         return Promise.resolve(ok(undefined));
       },
+      listByProjectId: (requestedProjectId) =>
+        Promise.resolve(
+          ok(
+            [...persistedRecords.values()].filter(
+              (record) => record.projectId === requestedProjectId,
+            ),
+          ),
+        ),
     };
     const creation: MemoryRecordCreationUnitOfWork = {
       create: (input) => {
@@ -264,10 +274,24 @@ describe("L1-L4 memory records", () => {
         return Promise.resolve(ok(undefined));
       },
     };
+    const governance: MemoryGovernanceUnitOfWork = {
+      commit: (input) =>
+        Promise.resolve(
+          ok({
+            operationId: input.operationId,
+            projectId: input.projectId,
+            operation: input.operation,
+            affectedRecordCount: input.records.length,
+            resultingPolicyRevision: input.nextPolicy?.revision ?? null,
+            idempotentReplay: false,
+          }),
+        ),
+    };
     const service = new MemoryApplicationService({
       policies,
       records,
       creation,
+      governance,
       clock: new ManualClock("2026-07-27T00:03:00.000Z"),
       ids: new SequenceUuidV7Generator(2_000),
     });

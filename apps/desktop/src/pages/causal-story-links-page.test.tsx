@@ -22,14 +22,113 @@ const graph = CausalEventGraph.create({
       participantCharacterIds: ["林夏"],
       narrativeTime: { order: 1, label: "第一幕" },
       location: { locationId: "school", label: "旧校舍" },
-      prerequisites: [],
+      prerequisites: [
+        {
+          id: "prerequisite-one",
+          kind: "state",
+          referenceId: "state-has-key",
+          referenceLabel: "持有旧门钥匙",
+          description: "林夏先取得钥匙",
+          evidence: {
+            id: "evidence-prerequisite",
+            chapterId: "chapter-one",
+            chapterVersionId: "version-one",
+            contentHash: "a".repeat(64),
+            locator: "utf16:0-4/4",
+            excerpt: "打开旧门",
+            startOffset: 0,
+            endOffset: 4,
+            sourceLength: 4,
+          },
+        },
+      ],
       eventText: "林夏打开旧门",
       resultText: "钟声响起",
-      characterStateChanges: [],
-      relationshipChanges: [],
-      itemChanges: [],
+      characterStateChanges: [
+        {
+          id: "state-change-one",
+          characterId: "character-linxia",
+          attributeKey: "state-courage",
+          attributeLabel: "勇气",
+          beforeValue: "犹豫",
+          afterValue: "坚定",
+          evidence: {
+            id: "evidence-state",
+            chapterId: "chapter-one",
+            chapterVersionId: "version-one",
+            contentHash: "a".repeat(64),
+            locator: "utf16:0-4/4",
+            excerpt: "打开旧门",
+            startOffset: 0,
+            endOffset: 4,
+            sourceLength: 4,
+          },
+        },
+      ],
+      relationshipChanges: [
+        {
+          id: "relationship-change-one",
+          fromCharacterId: "character-linxia",
+          toCharacterId: "character-zhouming",
+          relationshipKey: "relationship-trust",
+          relationshipLabel: "信任程度",
+          beforeValue: "怀疑",
+          afterValue: "信任",
+          evidence: {
+            id: "evidence-relationship",
+            chapterId: "chapter-one",
+            chapterVersionId: "version-one",
+            contentHash: "a".repeat(64),
+            locator: "utf16:0-4/4",
+            excerpt: "打开旧门",
+            startOffset: 0,
+            endOffset: 4,
+            sourceLength: 4,
+          },
+        },
+      ],
+      itemChanges: [
+        {
+          id: "item-change-one",
+          itemId: "item-key",
+          itemLabel: "旧门钥匙",
+          kind: "transferred",
+          fromCharacterId: "character-linxia",
+          toCharacterId: "character-zhouming",
+          evidence: {
+            id: "evidence-item",
+            chapterId: "chapter-one",
+            chapterVersionId: "version-one",
+            contentHash: "a".repeat(64),
+            locator: "utf16:0-4/4",
+            excerpt: "打开旧门",
+            startOffset: 0,
+            endOffset: 4,
+            sourceLength: 4,
+          },
+        },
+      ],
       informedCharacterIds: ["林夏"],
-      foreshadowProgress: [],
+      foreshadowProgress: [
+        {
+          id: "foreshadow-one",
+          foreshadowId: "foreshadow-bell",
+          foreshadowLabel: "午夜钟声",
+          kind: "planted",
+          description: "第一次听见异常钟声",
+          evidence: {
+            id: "evidence-foreshadow",
+            chapterId: "chapter-one",
+            chapterVersionId: "version-one",
+            contentHash: "a".repeat(64),
+            locator: "utf16:0-4/4",
+            excerpt: "打开旧门",
+            startOffset: 0,
+            endOffset: 4,
+            sourceLength: 4,
+          },
+        },
+      ],
       downstreamEventIds: [],
       evidence: {
         id: "evidence-one",
@@ -75,7 +174,11 @@ describe("causal story links page", () => {
           }}
           projector={{ rebuildProject: vi.fn() } as never}
           whatIf={{ simulate: vi.fn(), list: vi.fn().mockResolvedValue([]) }}
-          authoring={{ createEvent: vi.fn(), createRelation: vi.fn() }}
+          authoring={{
+            createEvent: vi.fn(),
+            createRelation: vi.fn(),
+            listConfirmedCharacters: vi.fn().mockResolvedValue([]),
+          }}
           chapters={{ listByProjectId: vi.fn().mockResolvedValue({ ok: true, value: [] }) }}
           actorId="019f9f4a-b3c7-7350-9226-000000000005"
           legacyProjectionAvailable={false}
@@ -85,6 +188,11 @@ describe("causal story links page", () => {
 
     expect(await screen.findByRole("heading", { name: "林夏打开旧门" })).toBeInTheDocument();
     expect(screen.getByText("“打开旧门”")).toBeInTheDocument();
+    expect(screen.getByText(/持有旧门钥匙.*林夏先取得钥匙/u)).toBeInTheDocument();
+    expect(screen.getByText(/勇气.*犹豫.*坚定/u)).toBeInTheDocument();
+    expect(screen.getByText(/信任程度.*怀疑.*信任/u)).toBeInTheDocument();
+    expect(screen.getByText(/旧门钥匙.*转移/u)).toBeInTheDocument();
+    expect(screen.getByText(/午夜钟声.*埋设.*第一次听见异常钟声/u)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "试演改变它会影响哪里" }));
     await waitFor(() => expect(traceImpacts).toHaveBeenCalled());
     expect(screen.getByText("当前没有找到会被这个改变波及的已确认后续事件。")).toBeInTheDocument();
@@ -147,7 +255,11 @@ describe("causal story links page", () => {
           }}
           projector={{ rebuildProject: vi.fn() } as never}
           whatIf={{ simulate, list: vi.fn().mockResolvedValue([]) }}
-          authoring={{ createEvent: vi.fn(), createRelation: vi.fn() }}
+          authoring={{
+            createEvent: vi.fn(),
+            createRelation: vi.fn(),
+            listConfirmedCharacters: vi.fn().mockResolvedValue([]),
+          }}
           chapters={{ listByProjectId: vi.fn().mockResolvedValue({ ok: true, value: [] }) }}
           actorId="019f9f4a-b3c7-7350-9226-000000000005"
           legacyProjectionAvailable={false}

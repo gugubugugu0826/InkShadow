@@ -16,6 +16,7 @@ import {
   type ModelHubTextTaskInspection,
 } from "./model-hub-execution-service";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
+import { projectContextDispatchScope } from "./project-context-privacy-authority";
 
 const MAXIMUM_RESPONSE_CHARACTERS = 32_000;
 const MAXIMUM_SUMMARY_CHARACTERS = 1_200;
@@ -45,14 +46,24 @@ export class ModelHubChapterSummaryModel implements ChapterSummaryModelPort {
 
   public async summarize(input: ChapterSummaryModelInput): Promise<ChapterSummaryModelOutput> {
     validateInput(input);
+    if (input.assertProjectPrivacyCurrent === undefined) {
+      throw new ChapterSummaryModelUnavailableError(
+        "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE",
+        "无法核对作品级隐私范围，因此没有发送章节正文。",
+      );
+    }
     const request: InspectModelHubTextTaskInput = Object.freeze({
       task: CHAPTER_SUMMARY_TASK,
       messages: buildMessages(input),
       maximumOutputTokens: MAXIMUM_OUTPUT_TOKENS,
       temperature: 0.1,
+      ...(input.requiresVerifiedLocal === true
+        ? { requiredDataDestination: "local" as const }
+        : {}),
     });
     let inspection: ModelHubTextTaskInspection;
     try {
+      await input.assertProjectPrivacyCurrent();
       await input.assertSourceCurrent();
       inspection = await this.inspectText(this.dependencies, request);
       await assertRequiredCapabilities(this.dependencies, inspection.catalogEntryId, false);
@@ -65,10 +76,12 @@ export class ModelHubChapterSummaryModel implements ChapterSummaryModelPort {
     try {
       executed = await this.executeText(this.dependencies, {
         ...request,
+        dispatchScope: projectContextDispatchScope(input.projectPrivacy),
         onBeforeDispatch: async (selection) => {
           assertSelectionMatches(inspection, selection);
           await assertRequiredCapabilities(this.dependencies, selection.catalogEntryId, true);
           await input.assertSourceCurrent();
+          await input.assertProjectPrivacyCurrent?.(selection.localOnlyEligible === true);
         },
       });
     } catch (cause: unknown) {
@@ -83,11 +96,13 @@ export class ModelHubChapterSummaryModel implements ChapterSummaryModelPort {
     assertExecutionLedger(executed);
     await assertRequiredCapabilities(this.dependencies, executed.catalogEntryId, true);
     await input.assertSourceCurrent();
+    await input.assertProjectPrivacyCurrent();
     const parsed = parseChapterSummaryResponse(
       executed.text,
       new Set(input.segments.map(({ evidenceId }) => evidenceId)),
     );
     await input.assertSourceCurrent();
+    await input.assertProjectPrivacyCurrent();
     return Object.freeze({
       ...parsed,
       providerKind: executed.providerKind,

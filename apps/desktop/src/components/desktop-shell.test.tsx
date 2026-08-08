@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 
-import { createDevelopmentRuntime } from "../infrastructure/runtime";
+import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
 import { RuntimeProvider } from "../runtime-context";
 import { DesktopShell } from "./desktop-shell";
 
@@ -13,11 +13,18 @@ function RouteHeading() {
   const location = useLocation();
   const title = location.pathname.endsWith("/outline") ? "规划页面标题" : "项目页面标题";
 
-  return <h1>{title}</h1>;
+  return (
+    <>
+      <h1>{title}</h1>
+      <output data-testid="current-route">{location.pathname}</output>
+    </>
+  );
 }
 
-function renderShell(route: string) {
-  const runtime = createDevelopmentRuntime(window.localStorage);
+function renderShell(
+  route: string,
+  runtime: DesktopRuntime = createDevelopmentRuntime(window.localStorage),
+) {
   return render(
     <MemoryRouter initialEntries={[route]}>
       <RuntimeProvider runtime={runtime}>
@@ -56,8 +63,8 @@ describe("DesktopShell", () => {
     expect(screen.queryByRole("link", { name: "多智能体审查" })).not.toBeInTheDocument();
 
     const globalNavigation = screen.getByLabelText("全局导航");
-    expect(within(globalNavigation).getAllByRole("link")).toHaveLength(3);
-    expect(within(globalNavigation).getByRole("link", { name: "开始" })).toHaveAttribute(
+    expect(within(globalNavigation).getAllByRole("link")).toHaveLength(2);
+    expect(within(globalNavigation).getByRole("link", { name: "创作首页" })).toHaveAttribute(
       "href",
       "/start",
     );
@@ -65,12 +72,25 @@ describe("DesktopShell", () => {
       "href",
       "/projects",
     );
-    expect(within(globalNavigation).getByRole("link", { name: "设置" })).toHaveAttribute(
+    const toolNavigation = screen.getByLabelText("工具导航");
+    expect(within(toolNavigation).getAllByRole("link")).toHaveLength(4);
+    expect(within(toolNavigation).getByRole("link", { name: "任务与通知" })).toHaveAttribute(
+      "href",
+      "/tasks",
+    );
+    expect(within(toolNavigation).getByRole("link", { name: "调用与费用" })).toHaveAttribute(
+      "href",
+      "/usage",
+    );
+    expect(within(toolNavigation).getByRole("link", { name: "Model Hub" })).toHaveAttribute(
+      "href",
+      "/settings#model-center",
+    );
+    expect(within(toolNavigation).getByRole("link", { name: "设置" })).toHaveAttribute(
       "href",
       "/settings",
     );
     expect(screen.queryByRole("link", { name: "社区模板" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "任务与通知" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "团队与权限" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "导航" })).toHaveAttribute(
       "aria-controls",
@@ -89,6 +109,14 @@ describe("DesktopShell", () => {
       expect(document.title).toBe("规划 · InkShadow 墨影");
       expect(screen.getByRole("heading", { name: "规划页面标题" })).toHaveFocus();
     });
+  });
+
+  it("distinguishes Model Hub from general settings when the hash route is active", () => {
+    renderShell("/settings#model-center");
+
+    expect(document.title).toBe("Model Hub · InkShadow 墨影");
+    expect(screen.getByRole("link", { name: "Model Hub" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "设置" })).not.toHaveAttribute("aria-current");
   });
 
   it("keeps direct legacy tools under the check area without exposing extra navigation", () => {
@@ -127,5 +155,91 @@ describe("DesktopShell", () => {
     expect(networkStatus).toHaveAttribute("role", "status");
     expect(networkStatus).toHaveAttribute("aria-live", "polite");
     expect(networkStatus).toHaveAttribute("aria-atomic", "true");
+  });
+
+  it("opens Ctrl+K, filters commands, navigates and returns focus on Escape", async () => {
+    const user = userEvent.setup();
+    renderShell(`/projects/${projectId}`);
+    const trigger = screen.getByRole("button", { name: "搜索页面与命令" });
+
+    trigger.focus();
+    await user.keyboard("{Control>}k{/Control}");
+    const search = screen.getByRole("searchbox", { name: "搜索命令" });
+    await waitFor(() => {
+      expect(search).toHaveFocus();
+    });
+    await user.keyboard("任务");
+    expect(search).toHaveAttribute("aria-activedescendant", "command-tasks");
+    expect(screen.getByRole("button", { name: /任务与通知/u })).toBeInTheDocument();
+    await user.keyboard("{Enter}");
+    await waitFor(() => {
+      expect(screen.getByTestId("current-route")).toHaveTextContent("/tasks");
+    });
+    expect(screen.queryByRole("dialog", { name: "快速前往" })).not.toBeInTheDocument();
+
+    trigger.focus();
+    await user.click(trigger);
+    await waitFor(() => {
+      expect(screen.getByRole("searchbox", { name: "搜索命令" })).toHaveFocus();
+    });
+    expect(screen.getByRole("searchbox", { name: "搜索命令" })).toHaveValue("");
+    await user.keyboard("{Escape}");
+    expect(trigger).toHaveFocus();
+  });
+
+  it("searches real chapters and people alongside writing, AI and export commands", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const projectResult = await runtime.useCases.createProject.execute({ name: "命令搜索作品" });
+    if (!projectResult.ok) throw projectResult.error;
+    const project = projectResult.value;
+    const chapterResult = await runtime.useCases.createChapter.execute({
+      projectId: project.id,
+      title: "唯一灯塔章节",
+      content: "林遥走进灯塔。",
+    });
+    if (!chapterResult.ok) throw chapterResult.error;
+    const chapter = chapterResult.value.chapter;
+    const factResult = await runtime.story.factService.createFormalUserFact({
+      projectId: project.id,
+      factType: "character_identity",
+      contentText: "林遥",
+      structuredValue: { name: "林遥", subjectKind: "character" },
+      actorId: runtime.story.actorId,
+      humanConfirmed: true,
+    });
+    if (!factResult.ok) throw factResult.error;
+
+    const user = userEvent.setup();
+    renderShell(`/projects/${project.id}`, runtime);
+    const trigger = screen.getByRole("button", { name: "搜索页面与命令" });
+
+    await user.click(trigger);
+    let search = screen.getByRole("searchbox", { name: "搜索命令" });
+    await user.type(search, "唯一灯塔");
+    const chapterCommand = await screen.findByRole("button", { name: /章节：唯一灯塔章节/u });
+    expect(chapterCommand).toHaveTextContent("写作");
+    await user.click(chapterCommand);
+    await waitFor(() => {
+      expect(screen.getByTestId("current-route")).toHaveTextContent(
+        `/projects/${project.id}/chapters/${chapter.id}`,
+      );
+    });
+
+    await user.click(trigger);
+    search = screen.getByRole("searchbox", { name: "搜索命令" });
+    await user.type(search, "林遥");
+    const characterCommand = await screen.findByRole("button", { name: /人物：林遥/u });
+    await user.click(characterCommand);
+    await waitFor(() => {
+      expect(screen.getByTestId("current-route")).toHaveTextContent(
+        `/projects/${project.id}/story`,
+      );
+    });
+
+    await user.click(trigger);
+    search = screen.getByRole("searchbox", { name: "搜索命令" });
+    expect(screen.getByRole("button", { name: /生成小说配图/u })).toBeInTheDocument();
+    await user.type(search, "PDF");
+    expect(screen.getByRole("button", { name: /导出作品/u })).toHaveTextContent("导出");
   });
 });

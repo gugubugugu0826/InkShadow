@@ -232,6 +232,82 @@ describe("DataTransferPanel import journey", () => {
     }
   });
 
+  it("excludes private chapters by default and includes them only after explicit opt-in", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const created = await runtime.useCases.createProject.execute({ name: "隐私导出" });
+    if (!created.ok) throw created.error;
+    const publicChapter = await runtime.useCases.createChapter.execute({
+      projectId: created.value.id,
+      title: "公开章",
+      content: "可以进入普通导出的正文。",
+    });
+    const privateChapter = await runtime.useCases.createChapter.execute({
+      projectId: created.value.id,
+      title: "私密章",
+      content: "PRIVATE_CHAPTER_MUST_REQUIRE_OPT_IN",
+    });
+    if (!publicChapter.ok || !privateChapter.ok) throw new Error("测试章节创建失败");
+    const privacy = await runtime.useCases.setChapterPrivacy.execute({
+      chapterId: privateChapter.value.chapter.id,
+      privacyMode: "local_only",
+      expectedPrivacyRevision: privateChapter.value.chapter.privacyRevision,
+    });
+    if (!privacy.ok) throw privacy.error;
+
+    const blobs: Blob[] = [];
+    const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: vi.fn((artifact: Blob) => {
+        blobs.push(artifact);
+        return `blob:inkshadow-private-${String(blobs.length)}`;
+      }),
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+
+    try {
+      const user = userEvent.setup();
+      render(
+        <MemoryRouter>
+          <RuntimeProvider runtime={runtime}>
+            <DataTransferPanel />
+          </RuntimeProvider>
+        </MemoryRouter>,
+      );
+
+      await screen.findByRole("option", { name: "隐私导出" });
+      const includePrivate = screen.getByRole("checkbox", { name: /包含私密章节/u });
+      expect(includePrivate).not.toBeChecked();
+      await user.click(screen.getByRole("button", { name: "下载 Bundle" }));
+      expect(await screen.findByText(/排除 1 个私密章节/u)).toBeVisible();
+
+      const safeBundle = await readPortableBundle(blobs[0]);
+      expect(safeBundle.content.chapters.map(({ title }) => title)).toEqual(["公开章"]);
+      expect(JSON.stringify(safeBundle)).not.toContain("PRIVATE_CHAPTER_MUST_REQUIRE_OPT_IN");
+
+      await user.click(includePrivate);
+      await user.click(screen.getByRole("button", { name: "下载 Bundle" }));
+      await waitFor(() => expect(blobs).toHaveLength(2));
+      const explicitBundle = await readPortableBundle(blobs[1]);
+      expect(explicitBundle.content.chapters.map(({ title }) => title)).toEqual([
+        "公开章",
+        "私密章",
+      ]);
+      expect(JSON.stringify(explicitBundle)).toContain("PRIVATE_CHAPTER_MUST_REQUIRE_OPT_IN");
+      expect(click).toHaveBeenCalledTimes(2);
+    } finally {
+      restoreProperty(URL, "createObjectURL", originalCreate);
+      restoreProperty(URL, "revokeObjectURL", originalRevoke);
+    }
+  });
+
   it("generates and downloads a project as a real DOCX package", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const created = await runtime.useCases.createProject.execute({ name: "雾港交付稿" });
@@ -279,6 +355,64 @@ describe("DataTransferPanel import journey", () => {
           "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         );
         expect(downloaded.size).toBeGreaterThan(0);
+      }
+    } finally {
+      restoreProperty(URL, "createObjectURL", originalCreate);
+      restoreProperty(URL, "revokeObjectURL", originalRevoke);
+    }
+  });
+
+  it("generates and downloads a project as a real EPUB package", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const created = await runtime.useCases.createProject.execute({ name: "雾港电子书" });
+    if (!created.ok) {
+      throw created.error;
+    }
+    const createObjectUrl = vi.fn((artifact: Blob | MediaSource) => {
+      void artifact;
+      return "blob:inkshadow-epub";
+    });
+    const revokeObjectUrl = vi.fn();
+    const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectUrl,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: revokeObjectUrl,
+    });
+    let suggestedFilename = "";
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      suggestedFilename = this.download;
+    });
+
+    try {
+      const user = userEvent.setup();
+      render(
+        <MemoryRouter>
+          <RuntimeProvider runtime={runtime}>
+            <DataTransferPanel />
+          </RuntimeProvider>
+        </MemoryRouter>,
+      );
+
+      await screen.findByRole("option", { name: "雾港电子书" });
+      await user.click(screen.getByRole("button", { name: "下载 EPUB" }));
+
+      await screen.findByText(/已下载 雾港电子书\.epub/);
+      expect(click).toHaveBeenCalledOnce();
+      expect(suggestedFilename).toBe("雾港电子书.epub");
+      const downloaded = createObjectUrl.mock.calls[0]?.[0];
+      expect(downloaded).toBeInstanceOf(Blob);
+      if (downloaded instanceof Blob) {
+        expect(downloaded.type).toBe("application/epub+zip");
+        const bytes = new Uint8Array(await downloaded.arrayBuffer());
+        expect([...bytes.subarray(0, 4)]).toEqual([0x50, 0x4b, 0x03, 0x04]);
+        expect(new TextDecoder().decode(bytes.subarray(30, 38))).toBe("mimetype");
       }
     } finally {
       restoreProperty(URL, "createObjectURL", originalCreate);
@@ -367,6 +501,20 @@ describe("DataTransferPanel import journey", () => {
     }
   });
 });
+
+async function readPortableBundle(blob: Blob | undefined): Promise<{
+  readonly content: {
+    readonly chapters: readonly Readonly<{ readonly title: string; readonly markdown: string }>[];
+  };
+}> {
+  if (blob === undefined) throw new Error("没有捕获到导出的 Bundle。");
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  return JSON.parse(new TextDecoder().decode(bytes)) as {
+    readonly content: {
+      readonly chapters: readonly Readonly<{ readonly title: string; readonly markdown: string }>[];
+    };
+  };
+}
 
 function restoreProperty(
   target: typeof URL,

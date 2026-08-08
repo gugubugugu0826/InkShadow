@@ -10,6 +10,30 @@ import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure
 import { RuntimeProvider } from "../runtime-context";
 
 describe("StoryOutlinePage", () => {
+  it("shows real written chapters separately from optional planning nodes", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "已写正文" });
+    if (!project.ok) throw project.error;
+    const created = await runtime.useCases.createChapter.execute({
+      projectId: project.value.id,
+      title: "第一章 雨夜",
+      content: "雨夜里，主角收到一封没有署名的信。",
+    });
+    if (!created.ok) throw created.error;
+    renderRoute(runtime, `/projects/${project.value.id}/outline`);
+
+    expect(
+      await screen.findByRole("heading", { name: "已经写下的章节", level: 2 }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "第一章 雨夜" })).toHaveAttribute(
+      "href",
+      `/projects/${project.value.id}/chapters/${created.value.chapter.id}`,
+    );
+    expect(screen.getByText("还没有可用的一句话摘要；不会用猜测内容代替。")).toBeVisible();
+    expect(screen.getByText(/大纲节点只是规划，不会删除或覆盖已经写好的章节/u)).toBeVisible();
+    expect(screen.getByRole("button", { name: "暂时跳过，去写正文" })).toBeVisible();
+  });
+
   it("creates and persists a manual book, volume, and chapter workflow", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const project = await runtime.useCases.createProject.execute({ name: "雾港纪事" });
@@ -20,7 +44,8 @@ describe("StoryOutlinePage", () => {
     renderRoute(runtime, `/projects/${project.value.id}/outline`);
 
     expect(await screen.findByRole("heading", { name: "雾港纪事", level: 1 })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "创建三层大纲" }));
+    expect(screen.getByRole("button", { name: "暂时跳过，去写正文" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "先列简单大纲" }));
 
     expect(await screen.findByRole("heading", { name: "雾港纪事", level: 2 })).toBeInTheDocument();
     const addVolumeButton = screen.getAllByRole("button", { name: "新增卷" })[0];

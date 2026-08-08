@@ -1,5 +1,6 @@
 import type {
   NativeGatewayEndpointConfig,
+  NativeModelDispatchScope,
   NativeGatewayProviderKind,
 } from "./native-model-gateway-contract";
 
@@ -9,6 +10,7 @@ export interface NativeEmbeddingInput {
   readonly config: NativeEmbeddingEndpointConfig;
   readonly model: string;
   readonly inputs: readonly string[];
+  readonly dispatchScope: NativeModelDispatchScope;
 }
 
 export interface NativeEmbeddingResult {

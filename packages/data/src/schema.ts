@@ -42,6 +42,28 @@ export const projects = sqliteTable(
   ],
 );
 
+export const projectSeeds = sqliteTable(
+  "project_seeds",
+  {
+    projectId: text("project_id")
+      .primaryKey()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    seedId: text("seed_id").notNull(),
+    journeyKind: text("journey_kind", { enum: ["idea", "import", "professional"] }).notNull(),
+    schemaVersion: integer("schema_version").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    revision: integer("revision").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    check("project_seeds_seed_id_length", sql`length(${table.seedId}) BETWEEN 1 AND 256`),
+    check("project_seeds_schema_version", sql`${table.schemaVersion} = 1`),
+    check("project_seeds_revision_bounds", sql`${table.revision} BETWEEN 1 AND 9007199254740991`),
+    index("project_seeds_updated_idx").on(table.updatedAt, table.projectId),
+  ],
+);
+
 export const chapters = sqliteTable(
   "chapters",
   {
@@ -55,6 +77,10 @@ export const chapters = sqliteTable(
       .notNull()
       .default("active"),
     revision: integer("revision").notNull().default(1),
+    privacyMode: text("privacy_mode", { enum: ["standard", "local_only"] })
+      .notNull()
+      .default("standard"),
+    privacyRevision: integer("privacy_revision").notNull().default(1),
     // The SQL migration owns the deferred FK to chapter_versions. Keeping this
     // field unreferenced here avoids a circular schema initializer in Drizzle.
     currentVersionId: text("current_version_id").notNull(),
@@ -66,7 +92,15 @@ export const chapters = sqliteTable(
     check("chapters_title_length", sql`length(trim(${table.title})) BETWEEN 1 AND 200`),
     check("chapters_content_length", sql`length(${table.content}) <= 5000000`),
     check("chapters_revision", sql`${table.revision} >= 1`),
+    check("chapters_privacy_revision", sql`${table.privacyRevision} >= 1`),
     index("chapters_project_updated_idx").on(table.projectId, table.status, table.updatedAt),
+    index("chapters_project_privacy_idx").on(
+      table.projectId,
+      table.privacyMode,
+      table.status,
+      table.createdAt,
+      table.id,
+    ),
   ],
 );
 
@@ -95,6 +129,60 @@ export const chapterVersions = sqliteTable(
     check("chapter_versions_checksum", sql`length(${table.contentChecksum}) = 64`),
     uniqueIndex("chapter_versions_chapter_sequence_unique").on(table.chapterId, table.sequence),
     index("chapter_versions_chapter_idx").on(table.chapterId, table.sequence),
+  ],
+);
+
+export const chapterValidationSnapshots = sqliteTable(
+  "chapter_validation_snapshots",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    chapterId: text("chapter_id")
+      .notNull()
+      .references(() => chapters.id, { onDelete: "cascade" }),
+    chapterVersionId: text("chapter_version_id").references(() => chapterVersions.id, {
+      onDelete: "cascade",
+    }),
+    chapterRevision: integer("chapter_revision"),
+    schemaVersion: integer("schema_version").notNull(),
+    ruleSetVersion: text("rule_set_version").notNull(),
+    runSequence: integer("run_sequence").notNull(),
+    runKind: text("run_kind", { enum: ["initial", "rerun"] }).notNull(),
+    // The SQL migration owns this self-reference. Leaving it unreferenced here
+    // avoids a circular Drizzle initializer while preserving the database FK.
+    supersedesSnapshotId: text("supersedes_snapshot_id"),
+    resultStatus: text("result_status", { enum: ["checked", "skipped"] }).notNull(),
+    issueCount: integer("issue_count").notNull(),
+    resultChecksumSha256: text("result_checksum_sha256").notNull(),
+    resultJson: text("result_json").notNull(),
+    generatedAt: text("generated_at").notNull(),
+  },
+  (table) => [
+    check("chapter_validation_snapshots_schema", sql`${table.schemaVersion} = 1`),
+    check(
+      "chapter_validation_snapshots_rule_set",
+      sql`length(${table.ruleSetVersion}) BETWEEN 1 AND 128`,
+    ),
+    check("chapter_validation_snapshots_sequence", sql`${table.runSequence} >= 1`),
+    check("chapter_validation_snapshots_issue_count", sql`${table.issueCount} >= 0`),
+    check("chapter_validation_snapshots_checksum", sql`length(${table.resultChecksumSha256}) = 64`),
+    uniqueIndex("chapter_validation_snapshots_sequence_unique").on(
+      table.chapterId,
+      table.runSequence,
+    ),
+    index("chapter_validation_snapshots_latest_idx").on(
+      table.projectId,
+      table.chapterId,
+      table.runSequence,
+    ),
+    index("chapter_validation_snapshots_version_idx").on(
+      table.chapterId,
+      table.chapterVersionId,
+      table.ruleSetVersion,
+      table.generatedAt,
+    ),
   ],
 );
 
@@ -140,16 +228,33 @@ export const aiCandidates = sqliteTable(
     status: text("status", {
       enum: ["streaming", "ready", "accepted", "rejected", "expired"],
     }).notNull(),
+    revision: integer("revision").notNull().default(1),
     incomplete: integer("incomplete", { mode: "boolean" }).notNull().default(false),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     decidedAt: text("decided_at"),
+    taskIntent: text("task_intent", {
+      enum: ["legacy_full_document", "continuation", "selection_rewrite", "whole_chapter_rewrite"],
+    })
+      .notNull()
+      .default("legacy_full_document"),
+    applicationMode: text("application_mode", {
+      enum: ["replace_document", "insert_at_cursor", "replace_selection"],
+    })
+      .notNull()
+      .default("replace_document"),
+    payloadKind: text("payload_kind", { enum: ["full_document", "fragment"] })
+      .notNull()
+      .default("full_document"),
+    anchorStartUtf16: integer("anchor_start_utf16"),
+    anchorEndUtf16: integer("anchor_end_utf16"),
   },
   (table) => [
     check(
       "ai_candidates_checksum",
       sql`${table.contentChecksum} IS NULL OR length(${table.contentChecksum}) = 64`,
     ),
+    check("ai_candidates_revision", sql`${table.revision} BETWEEN 1 AND 9007199254740991`),
     index("ai_candidates_chapter_status_idx").on(table.chapterId, table.status, table.createdAt),
   ],
 );
@@ -1500,10 +1605,14 @@ export const shortDramaScripts = sqliteTable(
 
 export type ProjectRow = typeof projects.$inferSelect;
 export type NewProjectRow = typeof projects.$inferInsert;
+export type ProjectSeedRow = typeof projectSeeds.$inferSelect;
+export type NewProjectSeedRow = typeof projectSeeds.$inferInsert;
 export type ChapterRow = typeof chapters.$inferSelect;
 export type NewChapterRow = typeof chapters.$inferInsert;
 export type ChapterVersionRow = typeof chapterVersions.$inferSelect;
 export type NewChapterVersionRow = typeof chapterVersions.$inferInsert;
+export type ChapterValidationSnapshotRow = typeof chapterValidationSnapshots.$inferSelect;
+export type NewChapterValidationSnapshotRow = typeof chapterValidationSnapshots.$inferInsert;
 export type RecoveryDraftRow = typeof recoveryDrafts.$inferSelect;
 export type AiCandidateRow = typeof aiCandidates.$inferSelect;
 export type ModelProfileRow = typeof modelProfiles.$inferSelect;

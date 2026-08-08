@@ -1,4 +1,6 @@
 * text=auto eol=lf
+# Two trailing spaces are valid CommonMark hard-break syntax in public documentation.
+*.md whitespace=-trailing-space
 *.ps1 text eol=crlf
 *.png binary
 *.jpg binary

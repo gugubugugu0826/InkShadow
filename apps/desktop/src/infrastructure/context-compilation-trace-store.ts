@@ -20,7 +20,8 @@ export interface ContextCompilationTraceSource {
 }
 
 export interface ContextCompilationTraceEntry {
-  readonly candidateId: string;
+  /** Identifier of the compiler input item, not an `ai_candidates.id`. */
+  readonly contextCandidateId: string;
   readonly layer: ContextLayer;
   readonly selectionReason: string;
   readonly included: boolean;
@@ -36,6 +37,15 @@ export interface ContextCompilationTraceEntry {
   readonly sources: readonly ContextCompilationTraceSource[];
 }
 
+export interface ContextCompilationTraceExecution {
+  /** The exact identifier sent to the native model gateway. */
+  readonly generationId: string;
+  /** Present for the governed continuation pipeline. */
+  readonly generationRunId: string | null;
+  /** Present when Model Hub selected and recorded a provider invocation. */
+  readonly modelInvocationId: string | null;
+}
+
 export interface ContextCompilationTrace {
   readonly id: string;
   readonly projectId: string;
@@ -49,6 +59,9 @@ export interface ContextCompilationTrace {
   readonly discardedTokens: number;
   readonly tokenEstimateSource: ContextTokenEstimator["source"];
   readonly createdAt: string;
+  readonly execution: ContextCompilationTraceExecution | null;
+  /** The isolated AI result that consumed this context, never a compiler input id. */
+  readonly outputCandidateId: string | null;
   readonly entries: readonly ContextCompilationTraceEntry[];
 }
 
@@ -67,11 +80,28 @@ export interface ContextCompilationTraceSummary {
   readonly includedCount: number;
   readonly discardedCount: number;
   readonly createdAt: string;
+  readonly execution: ContextCompilationTraceExecution | null;
+  readonly outputCandidateId: string | null;
+}
+
+export interface LinkContextCompilationModelInvocationInput {
+  readonly traceId: string;
+  readonly modelInvocationId: string;
+  readonly linkedAt: string;
+}
+
+export interface LinkContextCompilationOutputCandidateInput {
+  readonly traceId: string;
+  readonly outputCandidateId: string;
+  readonly linkedAt: string;
 }
 
 export interface ContextCompilationTraceStore {
   save(trace: ContextCompilationTrace): Promise<void>;
+  linkModelInvocation(input: LinkContextCompilationModelInvocationInput): Promise<void>;
+  linkOutputCandidate(input: LinkContextCompilationOutputCandidateInput): Promise<void>;
   findById(id: string): Promise<ContextCompilationTrace | null>;
+  findByOutputCandidateId(outputCandidateId: string): Promise<ContextCompilationTrace | null>;
   listByProjectId(
     projectId: string,
     limit?: number,
@@ -102,9 +132,14 @@ export interface CreateContextCompilationTraceInput {
   readonly taskType: string;
   readonly compiled: CompiledContext;
   readonly createdAt: string;
+  readonly execution?: Readonly<{
+    readonly generationId: string;
+    readonly generationRunId?: string | null;
+    readonly modelInvocationId?: string | null;
+  }> | null;
 }
 
-const TRACE_SCHEMA_VERSION = 1;
+const TRACE_SCHEMA_VERSION = 2;
 const MAXIMUM_TRACE_ENTRIES = 4_096;
 const MAXIMUM_SOURCES_PER_ENTRY = 32;
 const MAXIMUM_CONTEXT_TOKENS = 10_000_000;
@@ -125,7 +160,7 @@ const TOKEN_ESTIMATE_SOURCES: readonly ContextTokenEstimator["source"][] = [
 ];
 
 interface BrowserTraceDatabase {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly runs: Readonly<Record<string, ContextCompilationTrace>>;
 }
 
@@ -144,10 +179,14 @@ interface RunRow {
   readonly includedCount: number;
   readonly discardedCount: number;
   readonly createdAt: string;
+  readonly generationId: string | null;
+  readonly generationRunId: string | null;
+  readonly modelInvocationId: string | null;
+  readonly explicitOutputCandidateId: string | null;
 }
 
 interface EntryRow {
-  readonly candidateId: string;
+  readonly contextCandidateId: string;
   readonly layer: string;
   readonly selectionReason: string;
   readonly included: number;
@@ -163,7 +202,7 @@ interface EntryRow {
 }
 
 interface SourceRow {
-  readonly candidateId: string;
+  readonly contextCandidateId: string;
   readonly sourceOrder: number;
   readonly sourceType: string;
   readonly sourceId: string;
@@ -187,8 +226,17 @@ export function createContextCompilationTrace(
     discardedTokens: input.compiled.trace.discardedTokens,
     tokenEstimateSource: input.compiled.trace.tokenEstimateSource,
     createdAt: input.createdAt,
+    execution:
+      input.execution === undefined || input.execution === null
+        ? null
+        : {
+            generationId: input.execution.generationId,
+            generationRunId: input.execution.generationRunId ?? null,
+            modelInvocationId: input.execution.modelInvocationId ?? null,
+          },
+    outputCandidateId: null,
     entries: input.compiled.entries.map((entry) => ({
-      candidateId: entry.id,
+      contextCandidateId: entry.id,
       layer: entry.layer,
       selectionReason: entry.selectionReason,
       included: entry.included,
@@ -231,9 +279,77 @@ export class SqliteContextCompilationTraceStore implements ContextCompilationTra
         for (const entry of trace.entries) {
           await insertEntry(transaction, trace.id, entry);
         }
+        if (trace.execution !== null) {
+          await insertExecutionLink(transaction, trace.id, trace.execution, trace.createdAt);
+        }
       });
     } catch (cause: unknown) {
       throw normalizeStoreFailure(cause, "Unable to save the context compilation trace.");
+    }
+  }
+
+  public async linkModelInvocation(
+    inputValue: LinkContextCompilationModelInvocationInput,
+  ): Promise<void> {
+    const input = normalizeModelInvocationLink(inputValue);
+    try {
+      await this.executor.transaction(async (transaction) => {
+        const existing = await transaction.select<{ readonly modelInvocationId: string }>(
+          `SELECT model_invocation_id AS modelInvocationId
+           FROM context_compilation_model_invocation_links
+           WHERE trace_id = ?
+           LIMIT 1`,
+          [input.traceId],
+        );
+        if (existing[0]?.modelInvocationId === input.modelInvocationId) {
+          return;
+        }
+        if (existing.length > 0) {
+          throw traceConflict();
+        }
+        await transaction.execute(
+          `INSERT INTO context_compilation_model_invocation_links (
+             trace_id, model_invocation_id, linked_at
+           ) VALUES (?, ?, ?)`,
+          [input.traceId, input.modelInvocationId, input.linkedAt],
+        );
+      });
+    } catch (cause: unknown) {
+      throw normalizeStoreFailure(
+        cause,
+        "Unable to link the model invocation to its context trace.",
+      );
+    }
+  }
+
+  public async linkOutputCandidate(
+    inputValue: LinkContextCompilationOutputCandidateInput,
+  ): Promise<void> {
+    const input = normalizeOutputCandidateLink(inputValue);
+    try {
+      await this.executor.transaction(async (transaction) => {
+        const existing = await transaction.select<{ readonly outputCandidateId: string }>(
+          `SELECT ai_candidate_id AS outputCandidateId
+           FROM context_compilation_output_candidate_links
+           WHERE trace_id = ?
+           LIMIT 1`,
+          [input.traceId],
+        );
+        if (existing[0]?.outputCandidateId === input.outputCandidateId) {
+          return;
+        }
+        if (existing.length > 0) {
+          throw traceConflict();
+        }
+        await transaction.execute(
+          `INSERT INTO context_compilation_output_candidate_links (
+             trace_id, ai_candidate_id, linked_at
+           ) VALUES (?, ?, ?)`,
+          [input.traceId, input.outputCandidateId, input.linkedAt],
+        );
+      });
+    } catch (cause: unknown) {
+      throw normalizeStoreFailure(cause, "Unable to link the AI candidate to its context trace.");
     }
   }
 
@@ -246,6 +362,27 @@ export class SqliteContextCompilationTraceStore implements ContextCompilationTra
     }
   }
 
+  public async findByOutputCandidateId(
+    outputCandidateIdValue: string,
+  ): Promise<ContextCompilationTrace | null> {
+    const outputCandidateId = validateUuid(outputCandidateIdValue, "output AI candidate id");
+    try {
+      const rows = await this.executor.select<{ readonly id: string }>(
+        `SELECT trace_id AS id
+         FROM context_compilation_output_candidate_links
+         WHERE ai_candidate_id = ?
+         LIMIT 2`,
+        [outputCandidateId],
+      );
+      if (rows.length > 1) {
+        throw corruptTrace();
+      }
+      return rows[0] === undefined ? null : await readSqlTrace(this.executor, rows[0].id);
+    } catch (cause: unknown) {
+      throw normalizeStoreFailure(cause, "Unable to find the context trace for this AI candidate.");
+    }
+  }
+
   public async listByProjectId(
     projectIdValue: string,
     limitValue = DEFAULT_LIST_LIMIT,
@@ -255,8 +392,8 @@ export class SqliteContextCompilationTraceStore implements ContextCompilationTra
     try {
       const rows = await this.executor.select<RunRow>(
         `${RUN_SELECT}
-        WHERE project_id = ?
-        ORDER BY created_at DESC, id DESC
+        WHERE trace.project_id = ?
+        ORDER BY trace.created_at DESC, trace.id DESC
         LIMIT ?`,
         [projectId, limit],
       );
@@ -284,10 +421,87 @@ export class BrowserDevelopmentContextCompilationTraceStore implements ContextCo
     });
   }
 
+  public linkModelInvocation(
+    inputValue: LinkContextCompilationModelInvocationInput,
+  ): Promise<void> {
+    return Promise.resolve().then(() => {
+      const input = normalizeModelInvocationLink(inputValue);
+      const database = this.readDatabase();
+      const trace = database.runs[input.traceId];
+      if (trace?.execution === null || trace === undefined) {
+        throw traceConflict();
+      }
+      if (trace.execution.modelInvocationId === input.modelInvocationId) {
+        return;
+      }
+      if (trace.execution.modelInvocationId !== null) {
+        throw traceConflict();
+      }
+      const duplicate = Object.values(database.runs).some(
+        (candidate) => candidate.execution?.modelInvocationId === input.modelInvocationId,
+      );
+      if (duplicate) {
+        throw traceConflict();
+      }
+      const linked = normalizeTrace({
+        ...trace,
+        execution: { ...trace.execution, modelInvocationId: input.modelInvocationId },
+      });
+      this.writeDatabase({
+        schemaVersion: TRACE_SCHEMA_VERSION,
+        runs: { ...database.runs, [trace.id]: linked },
+      });
+    });
+  }
+
+  public linkOutputCandidate(
+    inputValue: LinkContextCompilationOutputCandidateInput,
+  ): Promise<void> {
+    return Promise.resolve().then(() => {
+      const input = normalizeOutputCandidateLink(inputValue);
+      const database = this.readDatabase();
+      const trace = database.runs[input.traceId];
+      if (trace?.execution === undefined || trace.execution === null) {
+        throw traceConflict();
+      }
+      if (trace.outputCandidateId === input.outputCandidateId) {
+        return;
+      }
+      if (
+        trace.outputCandidateId !== null ||
+        Object.values(database.runs).some(
+          (candidate) => candidate.outputCandidateId === input.outputCandidateId,
+        )
+      ) {
+        throw traceConflict();
+      }
+      const linked = normalizeTrace({ ...trace, outputCandidateId: input.outputCandidateId });
+      this.writeDatabase({
+        schemaVersion: TRACE_SCHEMA_VERSION,
+        runs: { ...database.runs, [trace.id]: linked },
+      });
+    });
+  }
+
   public findById(idValue: string): Promise<ContextCompilationTrace | null> {
     return Promise.resolve().then(() => {
       const id = validateUuid(idValue, "trace id");
       return this.readDatabase().runs[id] ?? null;
+    });
+  }
+
+  public findByOutputCandidateId(
+    outputCandidateIdValue: string,
+  ): Promise<ContextCompilationTrace | null> {
+    return Promise.resolve().then(() => {
+      const outputCandidateId = validateUuid(outputCandidateIdValue, "output AI candidate id");
+      const matches = Object.values(this.readDatabase().runs).filter(
+        (trace) => trace.outputCandidateId === outputCandidateId,
+      );
+      if (matches.length > 1) {
+        throw corruptTrace();
+      }
+      return matches[0] ?? null;
     });
   }
 
@@ -321,14 +535,17 @@ export class BrowserDevelopmentContextCompilationTraceStore implements ContextCo
       if (
         !isRecord(parsed) ||
         !hasExactKeys(parsed, ["schemaVersion", "runs"]) ||
-        parsed.schemaVersion !== TRACE_SCHEMA_VERSION ||
+        (parsed.schemaVersion !== 1 && parsed.schemaVersion !== TRACE_SCHEMA_VERSION) ||
         !isRecord(parsed.runs)
       ) {
         throw corruptTrace();
       }
       const runs: Record<string, ContextCompilationTrace> = {};
       for (const [id, value] of Object.entries(parsed.runs)) {
-        const trace = normalizeTrace(value, true);
+        const trace = normalizeTrace(
+          parsed.schemaVersion === 1 ? upgradeLegacyBrowserTrace(value) : value,
+          true,
+        );
         if (trace.id !== id) {
           throw corruptTrace();
         }
@@ -404,7 +621,7 @@ async function insertEntry(
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       runId,
-      entry.candidateId,
+      entry.contextCandidateId,
       entry.layer,
       entry.selectionReason,
       entry.included ? 1 : 0,
@@ -427,7 +644,7 @@ async function insertEntry(
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         runId,
-        entry.candidateId,
+        entry.contextCandidateId,
         sourceIndex + 1,
         source.sourceType,
         source.sourceId,
@@ -439,18 +656,40 @@ async function insertEntry(
   }
 }
 
+async function insertExecutionLink(
+  transaction: TransactionExecutor,
+  traceId: string,
+  execution: ContextCompilationTraceExecution,
+  createdAt: string,
+): Promise<void> {
+  await transaction.execute(
+    `INSERT INTO context_compilation_execution_links (
+       trace_id, generation_id, generation_run_id, created_at
+     ) VALUES (?, ?, ?, ?)`,
+    [traceId, execution.generationId, execution.generationRunId, createdAt],
+  );
+  if (execution.modelInvocationId !== null) {
+    await transaction.execute(
+      `INSERT INTO context_compilation_model_invocation_links (
+         trace_id, model_invocation_id, linked_at
+       ) VALUES (?, ?, ?)`,
+      [traceId, execution.modelInvocationId, createdAt],
+    );
+  }
+}
+
 async function readSqlTrace(
   executor: Pick<SqlExecutor, "select">,
   id: string,
 ): Promise<ContextCompilationTrace | null> {
-  const runRows = await executor.select<RunRow>(`${RUN_SELECT} WHERE id = ? LIMIT 1`, [id]);
+  const runRows = await executor.select<RunRow>(`${RUN_SELECT} WHERE trace.id = ? LIMIT 1`, [id]);
   const run = runRows[0];
   if (run === undefined) {
     return null;
   }
   const entries = await executor.select<EntryRow>(
     `SELECT
-       candidate_id AS candidateId,
+       candidate_id AS contextCandidateId,
        layer,
        selection_reason AS selectionReason,
        included,
@@ -470,7 +709,7 @@ async function readSqlTrace(
   );
   const sourceRows = await executor.select<SourceRow>(
     `SELECT
-       candidate_id AS candidateId,
+       candidate_id AS contextCandidateId,
        source_order AS sourceOrder,
        source_type AS sourceType,
        source_id AS sourceId,
@@ -484,12 +723,12 @@ async function readSqlTrace(
   );
   const sourcesByCandidate = new Map<string, SourceRow[]>();
   for (const source of sourceRows) {
-    const sources = sourcesByCandidate.get(source.candidateId) ?? [];
+    const sources = sourcesByCandidate.get(source.contextCandidateId) ?? [];
     if (source.sourceOrder !== sources.length + 1) {
       throw corruptTrace();
     }
     sources.push(source);
-    sourcesByCandidate.set(source.candidateId, sources);
+    sourcesByCandidate.set(source.contextCandidateId, sources);
   }
   const trace = normalizeTrace(
     {
@@ -504,8 +743,10 @@ async function readSqlTrace(
       discardedTokens: run.discardedTokens,
       tokenEstimateSource: run.tokenEstimateSource,
       createdAt: run.createdAt,
+      execution: executionFromRow(run),
+      outputCandidateId: outputCandidateIdFromRow(run),
       entries: entries.map((entry) => ({
-        candidateId: entry.candidateId,
+        contextCandidateId: entry.contextCandidateId,
         layer: entry.layer,
         selectionReason: entry.selectionReason,
         included: entry.included === 1,
@@ -518,7 +759,7 @@ async function readSqlTrace(
         required: entry.required === 1,
         budgetRemainingBefore: entry.budgetRemainingBefore,
         budgetRemainingAfter: entry.budgetRemainingAfter,
-        sources: (sourcesByCandidate.get(entry.candidateId) ?? []).map((source) => ({
+        sources: (sourcesByCandidate.get(entry.contextCandidateId) ?? []).map((source) => ({
           sourceType: source.sourceType,
           sourceId: source.sourceId,
           sourceVersionId: source.sourceVersionId,
@@ -541,21 +782,31 @@ async function readSqlTrace(
 }
 
 const RUN_SELECT = `SELECT
-  id,
-  project_id AS projectId,
-  chapter_id AS chapterId,
-  task_type AS taskType,
-  maximum_context_tokens AS maximumContextTokens,
-  required_tokens AS requiredTokens,
-  used_tokens AS usedTokens,
-  remaining_tokens AS remainingTokens,
-  discarded_tokens AS discardedTokens,
-  token_estimate_source AS tokenEstimateSource,
-  candidate_count AS candidateCount,
-  included_count AS includedCount,
-  discarded_count AS discardedCount,
-  created_at AS createdAt
-FROM context_compilation_runs`;
+  trace.id,
+  trace.project_id AS projectId,
+  trace.chapter_id AS chapterId,
+  trace.task_type AS taskType,
+  trace.maximum_context_tokens AS maximumContextTokens,
+  trace.required_tokens AS requiredTokens,
+  trace.used_tokens AS usedTokens,
+  trace.remaining_tokens AS remainingTokens,
+  trace.discarded_tokens AS discardedTokens,
+  trace.token_estimate_source AS tokenEstimateSource,
+  trace.candidate_count AS candidateCount,
+  trace.included_count AS includedCount,
+  trace.discarded_count AS discardedCount,
+  trace.created_at AS createdAt,
+  execution.generation_id AS generationId,
+  execution.generation_run_id AS generationRunId,
+  invocation.model_invocation_id AS modelInvocationId,
+  output_link.ai_candidate_id AS explicitOutputCandidateId
+FROM context_compilation_runs AS trace
+LEFT JOIN context_compilation_execution_links AS execution
+  ON execution.trace_id = trace.id
+LEFT JOIN context_compilation_model_invocation_links AS invocation
+  ON invocation.trace_id = trace.id
+LEFT JOIN context_compilation_output_candidate_links AS output_link
+  ON output_link.trace_id = trace.id`;
 
 function normalizeTrace(value: unknown, stored = false): ContextCompilationTrace {
   if (
@@ -572,6 +823,8 @@ function normalizeTrace(value: unknown, stored = false): ContextCompilationTrace
       "discardedTokens",
       "tokenEstimateSource",
       "createdAt",
+      "execution",
+      "outputCandidateId",
       "entries",
     ]) ||
     !Array.isArray(value.entries) ||
@@ -612,6 +865,11 @@ function normalizeTrace(value: unknown, stored = false): ContextCompilationTrace
   ) {
     throw stored ? corruptTrace() : invalidTrace();
   }
+  const execution = normalizeExecution(value.execution, stored);
+  const outputCandidateId =
+    value.outputCandidateId === null
+      ? null
+      : validateUuid(value.outputCandidateId, "output AI candidate id", stored);
 
   const candidateIds = new Set<string>();
   const entries = value.entries.map((entry, index) =>
@@ -654,7 +912,35 @@ function normalizeTrace(value: unknown, stored = false): ContextCompilationTrace
     discardedTokens,
     tokenEstimateSource: value.tokenEstimateSource as ContextTokenEstimator["source"],
     createdAt: value.createdAt,
+    execution,
+    outputCandidateId,
     entries: Object.freeze(entries),
+  });
+}
+
+function normalizeExecution(
+  value: unknown,
+  stored: boolean,
+): ContextCompilationTraceExecution | null {
+  if (value === null) {
+    return null;
+  }
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["generationId", "generationRunId", "modelInvocationId"])
+  ) {
+    throw stored ? corruptTrace() : invalidTrace();
+  }
+  return Object.freeze({
+    generationId: validateUuid(value.generationId, "generation id", stored),
+    generationRunId:
+      value.generationRunId === null
+        ? null
+        : validateUuid(value.generationRunId, "generation run id", stored),
+    modelInvocationId:
+      value.modelInvocationId === null
+        ? null
+        : validateUuid(value.modelInvocationId, "model invocation id", stored),
   });
 }
 
@@ -668,7 +954,7 @@ function normalizeEntry(
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
-      "candidateId",
+      "contextCandidateId",
       "layer",
       "selectionReason",
       "included",
@@ -683,8 +969,8 @@ function normalizeEntry(
       "budgetRemainingAfter",
       "sources",
     ]) ||
-    !isSafeReference(value.candidateId) ||
-    candidateIds.has(value.candidateId) ||
+    !isSafeReference(value.contextCandidateId) ||
+    candidateIds.has(value.contextCandidateId) ||
     typeof value.layer !== "string" ||
     !CONTEXT_LAYER_ORDER.includes(value.layer as ContextLayer) ||
     typeof value.selectionReason !== "string" ||
@@ -727,10 +1013,10 @@ function normalizeEntry(
   ) {
     throw stored ? corruptTrace() : invalidTrace();
   }
-  candidateIds.add(value.candidateId);
+  candidateIds.add(value.contextCandidateId);
   const sources = value.sources.map((source) => normalizeSource(source, stored));
   return Object.freeze({
-    candidateId: value.candidateId,
+    contextCandidateId: value.contextCandidateId,
     layer: value.layer as ContextLayer,
     selectionReason: value.selectionReason,
     included: value.included,
@@ -787,6 +1073,8 @@ function summaryFromRow(row: RunRow): ContextCompilationTraceSummary {
     includedCount: row.includedCount,
     discardedCount: row.discardedCount,
     createdAt: row.createdAt,
+    execution: executionFromRow(row),
+    outputCandidateId: outputCandidateIdFromRow(row),
   });
 }
 
@@ -807,6 +1095,8 @@ function summaryFromTrace(trace: ContextCompilationTrace): ContextCompilationTra
     includedCount,
     discardedCount: trace.entries.length - includedCount,
     createdAt: trace.createdAt,
+    execution: trace.execution,
+    outputCandidateId: trace.outputCandidateId,
   });
 }
 
@@ -828,6 +1118,8 @@ function normalizeSummary(value: unknown): ContextCompilationTraceSummary {
       "includedCount",
       "discardedCount",
       "createdAt",
+      "execution",
+      "outputCandidateId",
     ])
   ) {
     throw corruptTrace();
@@ -854,6 +1146,11 @@ function normalizeSummary(value: unknown): ContextCompilationTraceSummary {
   const candidateCount = validateInteger(value.candidateCount, 1, MAXIMUM_TRACE_ENTRIES, true);
   const includedCount = validateInteger(value.includedCount, 1, candidateCount, true);
   const discardedCount = validateInteger(value.discardedCount, 0, candidateCount, true);
+  const execution = normalizeExecution(value.execution, true);
+  const outputCandidateId =
+    value.outputCandidateId === null
+      ? null
+      : validateUuid(value.outputCandidateId, "output AI candidate id", true);
   if (
     typeof value.taskType !== "string" ||
     !SAFE_TASK_PATTERN.test(value.taskType) ||
@@ -884,7 +1181,33 @@ function normalizeSummary(value: unknown): ContextCompilationTraceSummary {
     includedCount,
     discardedCount,
     createdAt: value.createdAt,
+    execution,
+    outputCandidateId,
   });
+}
+
+function executionFromRow(row: RunRow): ContextCompilationTraceExecution | null {
+  if (row.generationId === null) {
+    if (row.generationRunId !== null || row.modelInvocationId !== null) {
+      throw corruptTrace();
+    }
+    return null;
+  }
+  return normalizeExecution(
+    {
+      generationId: row.generationId,
+      generationRunId: row.generationRunId,
+      modelInvocationId: row.modelInvocationId,
+    },
+    true,
+  );
+}
+
+function outputCandidateIdFromRow(row: RunRow): string | null {
+  const outputCandidateId = row.explicitOutputCandidateId;
+  return outputCandidateId === null
+    ? null
+    : validateUuid(outputCandidateId, "output AI candidate id", true);
 }
 
 function validateUuid(value: unknown, field: string, stored = false): string {
@@ -898,6 +1221,116 @@ function validateUuid(value: unknown, field: string, stored = false): string {
     );
   }
   return value;
+}
+
+function normalizeModelInvocationLink(value: unknown): LinkContextCompilationModelInvocationInput {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["traceId", "modelInvocationId", "linkedAt"]) ||
+    typeof value.linkedAt !== "string" ||
+    !isCanonicalTimestamp(value.linkedAt)
+  ) {
+    throw invalidTrace();
+  }
+  return Object.freeze({
+    traceId: validateUuid(value.traceId, "trace id"),
+    modelInvocationId: validateUuid(value.modelInvocationId, "model invocation id"),
+    linkedAt: value.linkedAt,
+  });
+}
+
+function normalizeOutputCandidateLink(value: unknown): LinkContextCompilationOutputCandidateInput {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["traceId", "outputCandidateId", "linkedAt"]) ||
+    typeof value.linkedAt !== "string" ||
+    !isCanonicalTimestamp(value.linkedAt)
+  ) {
+    throw invalidTrace();
+  }
+  return Object.freeze({
+    traceId: validateUuid(value.traceId, "trace id"),
+    outputCandidateId: validateUuid(value.outputCandidateId, "output AI candidate id"),
+    linkedAt: value.linkedAt,
+  });
+}
+
+function upgradeLegacyBrowserTrace(value: unknown): unknown {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "id",
+      "projectId",
+      "chapterId",
+      "taskType",
+      "maximumContextTokens",
+      "requiredTokens",
+      "usedTokens",
+      "remainingTokens",
+      "discardedTokens",
+      "tokenEstimateSource",
+      "createdAt",
+      "entries",
+    ]) ||
+    !Array.isArray(value.entries)
+  ) {
+    throw corruptTrace();
+  }
+  const entries = value.entries.map((entry) => {
+    if (
+      !isRecord(entry) ||
+      !hasExactKeys(entry, [
+        "candidateId",
+        "layer",
+        "selectionReason",
+        "included",
+        "discardedReason",
+        "estimatedTokens",
+        "evaluationOrder",
+        "layerOrder",
+        "priority",
+        "relevanceScore",
+        "required",
+        "budgetRemainingBefore",
+        "budgetRemainingAfter",
+        "sources",
+      ])
+    ) {
+      throw corruptTrace();
+    }
+    return {
+      contextCandidateId: entry.candidateId,
+      layer: entry.layer,
+      selectionReason: entry.selectionReason,
+      included: entry.included,
+      discardedReason: entry.discardedReason,
+      estimatedTokens: entry.estimatedTokens,
+      evaluationOrder: entry.evaluationOrder,
+      layerOrder: entry.layerOrder,
+      priority: entry.priority,
+      relevanceScore: entry.relevanceScore,
+      required: entry.required,
+      budgetRemainingBefore: entry.budgetRemainingBefore,
+      budgetRemainingAfter: entry.budgetRemainingAfter,
+      sources: entry.sources,
+    };
+  });
+  return {
+    id: value.id,
+    projectId: value.projectId,
+    chapterId: value.chapterId,
+    taskType: value.taskType,
+    maximumContextTokens: value.maximumContextTokens,
+    requiredTokens: value.requiredTokens,
+    usedTokens: value.usedTokens,
+    remainingTokens: value.remainingTokens,
+    discardedTokens: value.discardedTokens,
+    tokenEstimateSource: value.tokenEstimateSource,
+    createdAt: value.createdAt,
+    execution: null,
+    outputCandidateId: null,
+    entries,
+  };
 }
 
 function validateInteger(

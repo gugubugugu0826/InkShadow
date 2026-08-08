@@ -1,3 +1,152 @@
+:root {
+  /* DESIGN v0.3.1b canonical colour tokens. */
+  --shell-bg: #0e1116;
+  --shell-bg-raised: #161b22;
+  --shell-bg-sunken: #0a0c10;
+  --shell-border: #232a33;
+  --shell-text: #e7eaf0;
+  --shell-text-2: #9aa3b2;
+
+  --paper-bg: #f7f4ee;
+  --paper-card: #fcfaf6;
+  --paper-border: #efeae2;
+  --ink-1: #24211c;
+  --ink-2: #6b6457;
+
+  --accent: #5b6bd9;
+  --accent-strong: #4554c4;
+  --accent-soft: rgb(91 107 217 / 14%);
+  --ai: #2bc6e0;
+  --ai-text-light: #087588;
+  --success: #2f9e68;
+  --warning: #d9781a;
+  --danger: #b84040;
+  --info: #4fa3f0;
+
+  /* Status fills stay paired with copy; colour alone never communicates state. */
+  --success-soft: rgb(47 158 104 / 14%);
+  --warning-soft: rgb(217 120 26 / 14%);
+  --danger-soft: rgb(184 64 64 / 14%);
+  --info-soft: rgb(79 163 240 / 14%);
+
+  /* Graph colours are expert-view auxiliaries, not brand decoration. */
+  --graph-character: #5b6bd9;
+  --graph-location: #2bc6e0;
+  --graph-event: #d9781a;
+  --graph-faction: #2f9e68;
+  --graph-item: #4fa3f0;
+  --graph-edge: #2a323c;
+  --graph-edge-ai: #2bc6e0;
+
+  --font-ui: Inter, "PingFang SC", "Noto Sans SC", sans-serif;
+  --font-body: "Noto Serif SC", serif;
+  --font-mono: "JetBrains Mono", monospace;
+  --font-sans: var(--font-ui);
+  --font-serif: var(--font-body);
+
+  --text-xs: 0.75rem;
+  --line-xs: 1rem;
+  --text-sm: 0.8125rem;
+  --line-sm: 1.125rem;
+  --text-base: 0.875rem;
+  --line-base: 1.25rem;
+  --text-md: 1rem;
+  --line-md: 1.5rem;
+  --text-lg: 1.125rem;
+  --line-lg: 1.625rem;
+  --text-xl: 1.375rem;
+  --line-xl: 1.875rem;
+  --text-display: 1.75rem;
+  --line-display: 2.25rem;
+
+  /* Compatibility aliases used by the existing primitives. */
+  --font-display-size: var(--text-display);
+  --font-h1-size: var(--text-display);
+  --font-h2-size: var(--text-xl);
+  --font-h3-size: var(--text-md);
+  --font-body-size: var(--text-md);
+  --font-ui-size: var(--text-base);
+  --font-caption-size: var(--text-sm);
+  --font-micro-size: var(--text-xs);
+  --font-size-sm: var(--text-sm);
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-7: 1.75rem;
+  --space-8: 2rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+
+  --radius-s: 0.375rem;
+  --radius-m: 0.625rem;
+  --radius-l: 0.875rem;
+  --radius-xs: var(--radius-s);
+  --radius-sm: var(--radius-m);
+  --radius-md: var(--radius-m);
+  --radius-lg: var(--radius-l);
+  --radius-xl: 1.375rem;
+  --radius-full: 9999px;
+
+  /* The three DESIGN button heights: inline, secondary, primary. */
+  --btn-h-inline: 1.9375rem;
+  --btn-h-secondary: 2.5rem;
+  --btn-h-primary: 2.75rem;
+  --control-sm: var(--btn-h-inline);
+  --control-md: var(--btn-h-secondary);
+  --control-lg: var(--btn-h-primary);
+  --touch-target: 2.75rem;
+  --target-min: var(--touch-target);
+
+  --topbar-h: 3rem;
+  --sidebar-w: 16.25rem;
+  --sidebar-w-collapsed: 3.25rem;
+  --inspector-w: 20rem;
+  --statusbar-h: 1.75rem;
+  --content-max: 45rem;
+  --topbar-height: var(--topbar-h);
+  --navigation-width: var(--sidebar-w);
+  --navigation-collapsed-width: var(--sidebar-w-collapsed);
+  --inspector-width: var(--inspector-w);
+  --statusbar-height: var(--statusbar-h);
+  --dialog-width: 32rem;
+  --drawer-width: 22rem;
+  --toast-width: 24rem;
+
+  /* SVG uses the unitless value; --icon-stroke mirrors the DESIGN CSS asset. */
+  --icon-stroke: 1.75px;
+  --icon-stroke-width: 1.75;
+
+  --shadow-card: 0 2px 8px rgb(20 18 12 / 6%);
+  --shadow-drawer: -8px 0 32px rgb(0 0 0 / 45%);
+  --shadow-floating: 0 0.5rem 1.5rem rgb(0 0 0 / 45%);
+  --shadow-overlay: 0 0.75rem 2.5rem rgb(0 0 0 / 55%);
+  --shadow-raised: 0 1rem 2.5rem rgb(0 0 0 / 24%);
+
+  --editor-font-size: 1rem;
+  --editor-line-height: 1.75;
+  --editor-paragraph-gap: 1rem;
+  --editor-content-max: var(--content-max);
+
+  --duration-instant: 75ms;
+  --duration-hover: 150ms;
+  --duration-panel: 300ms;
+  --duration-overlay: 300ms;
+  --ease-fast: 150ms ease;
+  --ease-drawer: 300ms ease;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  --z-dropdown: 40;
+  --z-drawer: 60;
+  --z-dialog: 80;
+  --z-toast: 100;
+}
+
 [data-surface="dark"] {
   color-scheme: dark;
 
@@ -18,7 +167,7 @@
   --text-disabled: #697384;
 
   --accent-fill: #5b6bd9;
-  --accent-soft: rgb(91 107 217 / 14%);
+  --accent-surface: rgb(91 107 217 / 14%);
   --accent-text: #7180e6;
   --accent-on-fill: #ffffff;
 
@@ -27,6 +176,7 @@
   --ai-text: #2bc6e0;
   --ai-on-fill: #06222a;
 
+  /* High-contrast text auxiliaries preserve readable status copy on the shell. */
   --success-text: #48dfa9;
   --warning-text: #ffc35b;
   --danger-text: #ff7379;
@@ -49,7 +199,7 @@
   --bg-active: #e7e1d7;
   --overlay-scrim: rgb(36 33 28 / 48%);
 
-  --border-subtle: #e5dfd4;
+  --border-subtle: #efeae2;
   --border-strong: #cfc6b8;
 
   --text-primary: #24211c;
@@ -57,24 +207,25 @@
   --text-tertiary: #6e6659;
   --text-disabled: #81796c;
 
-  --accent-fill: #4655c4;
-  --accent-soft: rgb(70 85 196 / 14%);
-  --accent-text: #4655c4;
+  --accent-fill: #4554c4;
+  --accent-surface: rgb(91 107 217 / 14%);
+  --accent-text: #4554c4;
   --accent-on-fill: #ffffff;
 
   --ai-fill: #0e9cb3;
-  --ai-soft: rgb(14 156 179 / 14%);
+  --ai-soft: rgb(43 198 224 / 14%);
   --ai-text: #087588;
   --ai-on-fill: #06222a;
 
+  /* High-contrast text auxiliaries preserve WCAG contrast on the paper canvas. */
   --success-text: #087a53;
   --warning-text: #8a5600;
   --danger-text: #b4232c;
   --info-text: #1769aa;
 
-  --focus-ring: #4655c4;
-  --selection: rgb(70 85 196 / 18%);
-  --caret: #4655c4;
+  --focus-ring: #4554c4;
+  --selection: rgb(91 107 217 / 18%);
+  --caret: #4554c4;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -98,7 +249,7 @@
     --text-disabled: #697384;
 
     --accent-fill: #5b6bd9;
-    --accent-soft: rgb(91 107 217 / 14%);
+    --accent-surface: rgb(91 107 217 / 14%);
     --accent-text: #7180e6;
     --accent-on-fill: #ffffff;
 
@@ -124,102 +275,13 @@
   /* Re-declare aliases on local surfaces so nested paper themes resolve locally. */
   --bg-canvas: var(--bg-app);
   --bg-elevated: var(--bg-overlay);
+  --bg-raised: var(--bg-surface);
   --bg-muted: var(--bg-sunken);
   --bg-subtle: var(--bg-hover);
   --border-default: var(--border-subtle);
   --accent-border: color-mix(in srgb, var(--accent-fill) 38%, transparent);
   --accent-solid: var(--accent-fill);
   --text-accent: var(--accent-text);
-}
-
-:root {
-  --success: #34d399;
-  --warning: #f5a524;
-  --danger: #f2545b;
-  --info: #4fa3f0;
-
-  --success-soft: rgb(52 211 153 / 14%);
-  --warning-soft: rgb(245 165 36 / 14%);
-  --danger-soft: rgb(242 84 91 / 14%);
-  --info-soft: rgb(79 163 240 / 14%);
-
-  --graph-character: #5b6bd9;
-  --graph-location: #2bc6e0;
-  --graph-event: #f5a524;
-  --graph-faction: #34d399;
-  --graph-item: #4fa3f0;
-  --graph-edge: #2a323c;
-  --graph-edge-ai: #2bc6e0;
-
-  --font-ui:
-    Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
-    "Microsoft YaHei", "Noto Sans SC", sans-serif;
-  --font-sans: var(--font-ui);
-  --font-mono: "JetBrains Mono", "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
-  --font-serif: "Noto Serif SC", "Songti SC", "Source Han Serif SC", Georgia, serif;
-
-  --font-display-size: 2.5rem;
-  --font-h1-size: 1.875rem;
-  --font-h2-size: 1.375rem;
-  --font-h3-size: 1.125rem;
-  --font-body-size: 1rem;
-  --font-ui-size: 0.875rem;
-  --font-caption-size: 0.8125rem;
-  --font-micro-size: 0.75rem;
-  --font-size-sm: var(--font-ui-size);
-  --text-xl: 1.25rem;
-  --text-xs: var(--font-micro-size);
-
-  --space-1: 0.25rem;
-  --space-2: 0.5rem;
-  --space-3: 0.75rem;
-  --space-4: 1rem;
-  --space-5: 1.25rem;
-  --space-6: 1.5rem;
-  --space-7: 1.75rem;
-  --space-8: 2rem;
-  --space-12: 3rem;
-
-  --radius-xs: 0.375rem;
-  --radius-sm: 0.5rem;
-  --radius-md: 0.75rem;
-  --radius-lg: 1rem;
-  --radius-xl: 1.375rem;
-  --radius-full: 9999px;
-
-  --control-sm: 2rem;
-  --control-md: 2.25rem;
-  --control-lg: 2.75rem;
-  --target-min: 2.75rem;
-  --topbar-height: 3rem;
-  --navigation-width: 16.25rem;
-  --navigation-collapsed-width: 3.5rem;
-  --inspector-width: 20rem;
-  --statusbar-height: 1.75rem;
-  --dialog-width: 32rem;
-  --drawer-width: 22rem;
-  --toast-width: 24rem;
-
-  --shadow-floating: 0 0.5rem 1.5rem rgb(0 0 0 / 45%);
-  --shadow-overlay: 0 0.75rem 2.5rem rgb(0 0 0 / 55%);
-  --shadow-card: 0 0.5rem 1.5rem rgb(0 0 0 / 14%);
-  --shadow-raised: 0 1rem 2.5rem rgb(0 0 0 / 24%);
-
-  --editor-font-size: 1.0625rem;
-  --editor-line-height: 1.95;
-
-  --duration-instant: 75ms;
-  --duration-hover: 150ms;
-  --duration-panel: 220ms;
-  --duration-overlay: 260ms;
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-
-  --z-dropdown: 40;
-  --z-drawer: 60;
-  --z-dialog: 80;
-  --z-toast: 100;
 }
 
 ::selection {

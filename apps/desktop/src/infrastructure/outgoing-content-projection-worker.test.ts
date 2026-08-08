@@ -57,6 +57,7 @@ const migration = [
   readMigration("0014_sync_protocol_v2_object_types.sql"),
   readMigration("0015_sync_materialization_authority.sql"),
   readMigration("0017_sync_projection_account_authority.sql"),
+  readMigration("0038_private_chapters.sql"),
 ].join("\n");
 
 const PROJECT_ID = id(1);
@@ -353,6 +354,28 @@ describe("OutgoingContentProjectionWorker", () => {
         "SELECT device_sequence FROM sync_outbox_operations ORDER BY device_sequence",
       ),
     ).toEqual([{ device_sequence: 1 }, { device_sequence: 2 }]);
+  });
+
+  it("fails a stale queued private-chapter projection before key opening or encryption", async () => {
+    await insertChapterHistory();
+    await insertPresentManifestMarker();
+    await enqueueChapterJob(VERSION_ONE_JOB_ID, VERSION_ONE_ID, 1, CREATED_AT);
+    // Simulate a queue created by an older client so the worker's own final
+    // defense is exercised independently from the migration cleanup trigger.
+    await executor.execute("DROP TRIGGER private_chapter_transport_cleanup");
+    await executor.execute(
+      "UPDATE chapters SET privacy_mode = 'local_only', privacy_revision = 2 WHERE id = ?",
+      [CHAPTER_ID],
+    );
+
+    await expect(worker.runOnce(PROJECT_ID)).resolves.toMatchObject({
+      status: "failed",
+      jobId: VERSION_ONE_JOB_ID,
+      failureCode: "PRIVATE_CHAPTER_LOCAL_ONLY",
+    });
+    expect(openExactKey).not.toHaveBeenCalled();
+    expect(await countRows("sync_ciphertext_chunks")).toBe(0);
+    expect(await countRows("sync_outbox_operations")).toBe(0);
   });
 
   it("makes a human conflict-resolution projection causally dominate both branches", async () => {

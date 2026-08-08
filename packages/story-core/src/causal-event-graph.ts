@@ -59,6 +59,7 @@ export interface CausalEventPrerequisite {
   readonly id: string;
   readonly kind: CausalPrerequisiteKind;
   readonly referenceId: string;
+  readonly referenceLabel?: string;
   readonly description: string;
   readonly evidence: CausalTextEvidence;
 }
@@ -67,6 +68,7 @@ export interface CausalCharacterStateChange {
   readonly id: string;
   readonly characterId: string;
   readonly attributeKey: string;
+  readonly attributeLabel?: string;
   readonly beforeValue: CausalStateValue;
   readonly afterValue: CausalStateValue;
   readonly evidence: CausalTextEvidence;
@@ -77,6 +79,7 @@ export interface CausalRelationshipChange {
   readonly fromCharacterId: string;
   readonly toCharacterId: string;
   readonly relationshipKey: string;
+  readonly relationshipLabel?: string;
   readonly beforeValue: CausalStateValue;
   readonly afterValue: CausalStateValue;
   readonly evidence: CausalTextEvidence;
@@ -87,6 +90,7 @@ export type CausalItemChangeKind = "acquired" | "lost" | "transferred" | "create
 export interface CausalItemChange {
   readonly id: string;
   readonly itemId: string;
+  readonly itemLabel?: string;
   readonly kind: CausalItemChangeKind;
   readonly fromCharacterId: string | null;
   readonly toCharacterId: string | null;
@@ -99,6 +103,7 @@ export type CausalForeshadowChangeKind =
 export interface CausalForeshadowProgress {
   readonly id: string;
   readonly foreshadowId: string;
+  readonly foreshadowLabel?: string;
   readonly kind: CausalForeshadowChangeKind;
   readonly description: string;
   readonly evidence: CausalTextEvidence;
@@ -549,6 +554,7 @@ function validatePrerequisite(
     !registerUniqueReference(value.id, componentIds) ||
     !PREREQUISITE_KINDS.includes(value.kind as CausalPrerequisiteKind) ||
     !isSafeReference(value.referenceId) ||
+    !isOptionalBoundedText(value.referenceLabel, MAXIMUM_DESCRIPTION_CHARACTERS) ||
     !isBoundedText(value.description, MAXIMUM_DESCRIPTION_CHARACTERS)
   ) {
     throw invalidInput("A causal event prerequisite is invalid.");
@@ -557,6 +563,7 @@ function validatePrerequisite(
     id: value.id,
     kind: value.kind as CausalPrerequisiteKind,
     referenceId: value.referenceId,
+    ...(value.referenceLabel === undefined ? {} : { referenceLabel: value.referenceLabel }),
     description: value.description,
     evidence: validateEvidence(value.evidence, evidenceById),
   });
@@ -572,6 +579,7 @@ function validateCharacterChange(
     !registerUniqueReference(value.id, componentIds) ||
     !isSafeReference(value.characterId) ||
     !isSafeReference(value.attributeKey) ||
+    !isOptionalBoundedText(value.attributeLabel, MAXIMUM_DESCRIPTION_CHARACTERS) ||
     !isStateValue(value.beforeValue) ||
     !isStateValue(value.afterValue) ||
     stateValuesEqual(value.beforeValue, value.afterValue)
@@ -582,6 +590,7 @@ function validateCharacterChange(
     id: value.id,
     characterId: value.characterId,
     attributeKey: value.attributeKey,
+    ...(value.attributeLabel === undefined ? {} : { attributeLabel: value.attributeLabel }),
     beforeValue: normalizeStateValue(value.beforeValue),
     afterValue: normalizeStateValue(value.afterValue),
     evidence: validateEvidence(value.evidence, evidenceById),
@@ -600,6 +609,7 @@ function validateRelationshipChange(
     !isSafeReference(value.toCharacterId) ||
     value.fromCharacterId === value.toCharacterId ||
     !isSafeReference(value.relationshipKey) ||
+    !isOptionalBoundedText(value.relationshipLabel, MAXIMUM_DESCRIPTION_CHARACTERS) ||
     !isStateValue(value.beforeValue) ||
     !isStateValue(value.afterValue) ||
     stateValuesEqual(value.beforeValue, value.afterValue)
@@ -611,6 +621,9 @@ function validateRelationshipChange(
     fromCharacterId: value.fromCharacterId,
     toCharacterId: value.toCharacterId,
     relationshipKey: value.relationshipKey,
+    ...(value.relationshipLabel === undefined
+      ? {}
+      : { relationshipLabel: value.relationshipLabel }),
     beforeValue: normalizeStateValue(value.beforeValue),
     afterValue: normalizeStateValue(value.afterValue),
     evidence: validateEvidence(value.evidence, evidenceById),
@@ -626,6 +639,7 @@ function validateItemChange(
     !isRecord(value) ||
     !registerUniqueReference(value.id, componentIds) ||
     !isSafeReference(value.itemId) ||
+    !isOptionalBoundedText(value.itemLabel, MAXIMUM_DESCRIPTION_CHARACTERS) ||
     !ITEM_CHANGE_KINDS.includes(value.kind as CausalItemChangeKind) ||
     !isNullableSafeReference(value.fromCharacterId) ||
     !isNullableSafeReference(value.toCharacterId) ||
@@ -640,6 +654,7 @@ function validateItemChange(
   return Object.freeze({
     id: value.id,
     itemId: value.itemId,
+    ...(value.itemLabel === undefined ? {} : { itemLabel: value.itemLabel }),
     kind: value.kind as CausalItemChangeKind,
     fromCharacterId: value.fromCharacterId,
     toCharacterId: value.toCharacterId,
@@ -656,6 +671,7 @@ function validateForeshadowProgress(
     !isRecord(value) ||
     !registerUniqueReference(value.id, componentIds) ||
     !isSafeReference(value.foreshadowId) ||
+    !isOptionalBoundedText(value.foreshadowLabel, MAXIMUM_DESCRIPTION_CHARACTERS) ||
     !FORESHADOW_CHANGE_KINDS.includes(value.kind as CausalForeshadowChangeKind) ||
     !isBoundedText(value.description, MAXIMUM_DESCRIPTION_CHARACTERS)
   ) {
@@ -664,6 +680,7 @@ function validateForeshadowProgress(
   return Object.freeze({
     id: value.id,
     foreshadowId: value.foreshadowId,
+    ...(value.foreshadowLabel === undefined ? {} : { foreshadowLabel: value.foreshadowLabel }),
     kind: value.kind as CausalForeshadowChangeKind,
     description: value.description,
     evidence: validateEvidence(value.evidence, evidenceById),
@@ -1007,6 +1024,10 @@ function isBoundedText(value: unknown, maximumLength: number): value is string {
     value.length <= maximumLength &&
     !CONTROL_CHARACTER_PATTERN.test(value)
   );
+}
+
+function isOptionalBoundedText(value: unknown, maximumLength: number): value is string | undefined {
+  return value === undefined || isBoundedText(value, maximumLength);
 }
 
 function isSafeReference(value: unknown): value is string {

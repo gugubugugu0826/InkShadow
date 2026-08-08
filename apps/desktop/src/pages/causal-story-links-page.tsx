@@ -20,7 +20,10 @@ import { Link, useNavigate } from "react-router-dom";
 
 import type { CausalEventGraphStore } from "../infrastructure/causal-event-graph-store";
 import { CausalFactAuthoringPanel } from "../components/causal-fact-authoring-panel";
-import type { CausalFactAuthoringService } from "../infrastructure/causal-fact-authoring-service";
+import type {
+  CausalFactAuthoringService,
+  ConfirmedCausalCharacter,
+} from "../infrastructure/causal-fact-authoring-service";
 import type {
   CausalStoryFactProjectionReceipt,
   CausalStoryFactProjector,
@@ -36,7 +39,10 @@ interface CausalStoryLinksPageProps {
   readonly graph: CausalEventGraphStore;
   readonly projector: CausalStoryFactProjector;
   readonly whatIf: Pick<CausalWhatIfSimulationService, "simulate" | "list">;
-  readonly authoring: Pick<CausalFactAuthoringService, "createEvent" | "createRelation">;
+  readonly authoring: Pick<
+    CausalFactAuthoringService,
+    "createEvent" | "createRelation" | "listConfirmedCharacters"
+  >;
   readonly chapters: Pick<ChapterRepository, "listByProjectId">;
   readonly actorId: string;
   readonly legacyProjectionAvailable: boolean;
@@ -54,18 +60,23 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
   const [hypothesis, setHypothesis] = useState("");
   const [simulation, setSimulation] = useState<CausalWhatIfSimulationValue | null>(null);
   const [simulationHistory, setSimulationHistory] = useState<readonly StoryFact[]>([]);
+  const [confirmedCharacters, setConfirmedCharacters] = useState<
+    readonly ConfirmedCausalCharacter[]
+  >([]);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     setPageState("loading");
     try {
-      const [loaded, history] = await Promise.all([
+      const [loaded, history, characters] = await Promise.all([
         props.graph.loadProjectBranch(props.projectId, "main"),
         props.whatIf.list(props.projectId).catch(() => Object.freeze([])),
+        props.authoring.listConfirmedCharacters(props.projectId).catch(() => Object.freeze([])),
       ]);
       setGraph(loaded);
       setSimulationHistory(history);
+      setConfirmedCharacters(characters);
       setSelectedEventId((current) =>
         current !== null && loaded.events.some(({ id }) => id === current)
           ? current
@@ -77,7 +88,7 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
       setError(cause);
       setPageState("fatal_error");
     }
-  }, [props.graph, props.projectId, props.whatIf]);
+  }, [props.authoring, props.graph, props.projectId, props.whatIf]);
 
   useEffect(() => {
     void Promise.resolve().then(load);
@@ -96,6 +107,10 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
               fromEventId === selectedEvent.id || toEventId === selectedEvent.id,
           ) ?? []),
     [graph, selectedEvent],
+  );
+  const characterNames = useMemo(
+    () => new Map(confirmedCharacters.map(({ id, name }) => [id, name] as const)),
+    [confirmedCharacters],
   );
 
   async function rebuild(): Promise<void> {
@@ -231,6 +246,10 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
             chapters={props.chapters}
             service={props.authoring}
             onCreated={(receipt) => {
+              if (receipt.projection === null) {
+                setProjection(null);
+                return;
+              }
               setProjection(receipt.projection);
               setGraph(receipt.projection.graph);
               setSelectedEventId(receipt.projection.graph.events.at(-1)?.id ?? null);
@@ -301,11 +320,118 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
                       </div>
                       <div>
                         <dt>参与人物</dt>
-                        <dd>{selectedEvent.participantCharacterIds.join("、") || "未标注"}</dd>
+                        <dd>
+                          {selectedEvent.participantCharacterIds
+                            .map((id) => characterNames.get(id) ?? id)
+                            .join("、") || "未标注"}
+                        </dd>
                       </div>
                       <div>
                         <dt>谁已经知道</dt>
-                        <dd>{selectedEvent.informedCharacterIds.join("、") || "未标注"}</dd>
+                        <dd>
+                          {selectedEvent.informedCharacterIds
+                            .map((id) => characterNames.get(id) ?? id)
+                            .join("、") || "未标注"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>前置条件</dt>
+                        <dd>
+                          {selectedEvent.prerequisites.length === 0 ? (
+                            "未标注"
+                          ) : (
+                            <ul className="privacy-list">
+                              {selectedEvent.prerequisites.map((prerequisite) => (
+                                <li key={prerequisite.id}>
+                                  {prerequisiteKindLabel(prerequisite.kind)} ·{" "}
+                                  {prerequisite.referenceLabel ?? prerequisite.referenceId}：
+                                  {prerequisite.description}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>人物状态变化</dt>
+                        <dd>
+                          {selectedEvent.characterStateChanges.length === 0 ? (
+                            "未标注"
+                          ) : (
+                            <ul className="privacy-list">
+                              {selectedEvent.characterStateChanges.map((change) => (
+                                <li key={change.id}>
+                                  {characterNames.get(change.characterId) ?? change.characterId} ·{" "}
+                                  {change.attributeLabel ?? change.attributeKey}：
+                                  {formatCausalState(change.beforeValue)} →{" "}
+                                  {formatCausalState(change.afterValue)}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>人物关系变化</dt>
+                        <dd>
+                          {selectedEvent.relationshipChanges.length === 0 ? (
+                            "未标注"
+                          ) : (
+                            <ul className="privacy-list">
+                              {selectedEvent.relationshipChanges.map((change) => (
+                                <li key={change.id}>
+                                  {characterNames.get(change.fromCharacterId) ??
+                                    change.fromCharacterId}{" "}
+                                  与{" "}
+                                  {characterNames.get(change.toCharacterId) ?? change.toCharacterId}{" "}
+                                  · {change.relationshipLabel ?? change.relationshipKey}：
+                                  {formatCausalState(change.beforeValue)} →{" "}
+                                  {formatCausalState(change.afterValue)}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>物品变化</dt>
+                        <dd>
+                          {selectedEvent.itemChanges.length === 0 ? (
+                            "未标注"
+                          ) : (
+                            <ul className="privacy-list">
+                              {selectedEvent.itemChanges.map((change) => (
+                                <li key={change.id}>
+                                  {change.itemLabel ?? change.itemId} ·{" "}
+                                  {itemChangeKindLabel(change.kind)}
+                                  {change.fromCharacterId === null
+                                    ? ""
+                                    : ` · 原持有人：${characterNames.get(change.fromCharacterId) ?? change.fromCharacterId}`}
+                                  {change.toCharacterId === null
+                                    ? ""
+                                    : ` · 新持有人：${characterNames.get(change.toCharacterId) ?? change.toCharacterId}`}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>伏笔推进</dt>
+                        <dd>
+                          {selectedEvent.foreshadowProgress.length === 0 ? (
+                            "未标注"
+                          ) : (
+                            <ul className="privacy-list">
+                              {selectedEvent.foreshadowProgress.map((progress) => (
+                                <li key={progress.id}>
+                                  {progress.foreshadowLabel ?? progress.foreshadowId} ·{" "}
+                                  {foreshadowChangeKindLabel(progress.kind)}：{progress.description}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </dd>
                       </div>
                       <div>
                         <dt>原文证据</dt>
@@ -456,4 +582,36 @@ function relationKindLabel(kind: string): string {
     loses_item: "失去物品",
   };
   return labels[kind] ?? kind;
+}
+
+function prerequisiteKindLabel(kind: string): string {
+  return kind === "event" ? "前置事件" : kind === "state" ? "所需状态" : "所需规则";
+}
+
+function itemChangeKindLabel(kind: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    acquired: "取得",
+    lost: "失去",
+    transferred: "转移",
+    created: "新出现",
+    destroyed: "被毁或消失",
+  };
+  return labels[kind] ?? kind;
+}
+
+function foreshadowChangeKindLabel(kind: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    planted: "埋设",
+    advanced: "推进",
+    revealed: "揭示",
+    resolved: "回收",
+    misdirected: "误导",
+  };
+  return labels[kind] ?? kind;
+}
+
+function formatCausalState(value: string | number | boolean | null): string {
+  if (value === null) return "无";
+  if (typeof value === "boolean") return value ? "是" : "否";
+  return String(value);
 }

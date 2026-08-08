@@ -15,6 +15,7 @@ import {
   type PortableProjectInput,
 } from "@inkshadow/import-export";
 import type { DocxExportErrorCode, DocxExportProgress } from "@inkshadow/import-export/docx-export";
+import type { EpubExportErrorCode, EpubExportProgress } from "@inkshadow/import-export/epub-export";
 import type { PdfExportErrorCode, PdfExportProgress } from "@inkshadow/import-export/pdf-export";
 import {
   Badge,
@@ -130,6 +131,15 @@ function errorDescription(error: unknown): string {
   if (error instanceof ImportExportError) {
     return `${issueLabels[error.code]}（${error.code}）`;
   }
+  const epubCode = getEpubExportErrorCode(error);
+  if (epubCode !== null) {
+    const labels: Record<EpubExportErrorCode, string> = {
+      EPUB_RENDER_FAILED: "EPUB 生成失败，项目内容没有写入不完整文件。",
+      EXPORT_CANCELLED: "EPUB 导出已取消。",
+      EXPORT_OUTPUT_TOO_LARGE: "EPUB 超过 64 MiB 安全上限，未生成截断文件。",
+    };
+    return `${labels[epubCode]}（${epubCode}）`;
+  }
   const pdfCode = getPdfExportErrorCode(error);
   if (pdfCode !== null) {
     const labels: Record<PdfExportErrorCode, string> = {
@@ -197,11 +207,13 @@ export function DataTransferPanel({
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [exportBusy, setExportBusy] = useState<
-    "text" | "markdown" | "bundle" | "docx" | "pdf" | "report" | null
+    "text" | "markdown" | "bundle" | "epub" | "docx" | "pdf" | "report" | null
   >(null);
+  const [epubProgress, setEpubProgress] = useState<EpubExportProgress | null>(null);
   const [docxProgress, setDocxProgress] = useState<DocxExportProgress | null>(null);
   const [pdfProgress, setPdfProgress] = useState<PdfExportProgress | null>(null);
   const [projectReportKind, setProjectReportKind] = useState<ProjectReportKind>("characters");
+  const [includeLocalOnlyChapters, setIncludeLocalOnlyChapters] = useState(false);
   const [transferError, setTransferError] = useState<string | null>(null);
   const [exportNotice, setExportNotice] = useState<ExportNotice | null>(null);
   const importAbortRef = useRef<AbortController | null>(null);
@@ -377,15 +389,17 @@ export function DataTransferPanel({
   }
 
   async function exportProject(
-    format: "text" | "markdown" | "bundle" | "docx" | "pdf",
+    format: "text" | "markdown" | "bundle" | "epub" | "docx" | "pdf",
   ): Promise<void> {
     const project = projects.find(({ id }) => id === selectedProjectId);
     if (project === undefined) {
       return;
     }
-    const controller = format === "docx" || format === "pdf" ? new AbortController() : null;
+    const controller =
+      format === "epub" || format === "docx" || format === "pdf" ? new AbortController() : null;
     exportAbortRef.current = controller;
     setExportBusy(format);
+    setEpubProgress(null);
     setDocxProgress(null);
     setPdfProgress(null);
     setTransferError(null);
@@ -396,7 +410,20 @@ export function DataTransferPanel({
         throw chaptersResult.error;
       }
       const projectSnapshot = project.toSnapshot();
-      const chapters = chaptersResult.value.filter(({ status }) => status === "active");
+      const activeChapters = chaptersResult.value.filter(({ status }) => status === "active");
+      const omittedLocalOnlyChapterCount = includeLocalOnlyChapters
+        ? 0
+        : activeChapters.filter(({ privacyMode }) => privacyMode === "local_only").length;
+      const chapters = activeChapters.filter(
+        ({ privacyMode }) => includeLocalOnlyChapters || privacyMode !== "local_only",
+      );
+      if (chapters.length === 0 && omittedLocalOnlyChapterCount > 0) {
+        throw new UiActionError(
+          "PRIVATE_CHAPTER_EXPORT_CONFIRMATION_REQUIRED",
+          "这个项目当前只有私密章节。若确实要让这些内容离开墨影的本地保护，请先勾选“包含私密章节”后重新导出。",
+          "私密章节尚未导出",
+        );
+      }
       const input: PortableProjectInput = {
         project: {
           id: project.id,
@@ -423,16 +450,42 @@ export function DataTransferPanel({
       if (format === "text") {
         const artifact = exportProjectToPlainText(bundle.content);
         downloadBrowserExportArtifact(artifact);
-        setExportNotice(completeExportNotice(`已下载 ${artifact.fileName}`));
+        setExportNotice(
+          completeExportNotice(`已下载 ${artifact.fileName}`, omittedLocalOnlyChapterCount),
+        );
       } else if (format === "markdown") {
         const artifact = exportProjectToMarkdown(bundle.content);
         downloadBrowserExportArtifact(artifact);
-        setExportNotice(completeExportNotice(`已下载 ${artifact.fileName}`));
+        setExportNotice(
+          completeExportNotice(`已下载 ${artifact.fileName}`, omittedLocalOnlyChapterCount),
+        );
       } else if (format === "bundle") {
         const content = await serializePortableBundle(bundle);
         const fileName = sanitizeFilename(project.name, ".inkshadow.json");
         downloadBrowserExportArtifact({ fileName, content, mediaType: "application/json" });
-        setExportNotice(completeExportNotice(`已下载 ${fileName}`));
+        setExportNotice(completeExportNotice(`已下载 ${fileName}`, omittedLocalOnlyChapterCount));
+      } else if (format === "epub") {
+        const { exportProjectToEpub } = await import("@inkshadow/import-export/epub-export");
+        const artifact = await exportProjectToEpub(bundle.content, {
+          generatedAt: exportedAt,
+          ...(controller === null ? {} : { signal: controller.signal }),
+          onProgress: setEpubProgress,
+        });
+        downloadBrowserExportArtifact({
+          fileName: artifact.fileName,
+          mediaType: artifact.mediaType,
+          content: artifact.bytes,
+        });
+        const issueSummary =
+          artifact.issues.length === 0
+            ? ""
+            : `，含 ${String(artifact.issues.length)} 条可审阅的格式提示`;
+        setExportNotice(
+          completeExportNotice(
+            `已下载 ${artifact.fileName}（${formatBytes(artifact.byteLength)}${issueSummary}）`,
+            omittedLocalOnlyChapterCount,
+          ),
+        );
       } else if (format === "docx") {
         const { exportProjectToDocx } = await import("@inkshadow/import-export/docx-export");
         const artifact = await exportProjectToDocx(bundle.content, {
@@ -452,6 +505,7 @@ export function DataTransferPanel({
         setExportNotice(
           completeExportNotice(
             `已下载 ${artifact.fileName}（${formatBytes(artifact.byteLength)}${issueSummary}）`,
+            omittedLocalOnlyChapterCount,
           ),
         );
       } else {
@@ -479,18 +533,20 @@ export function DataTransferPanel({
             `已下载 ${artifact.fileName}（${String(artifact.pageCount)} 页图像型 PDF，${formatBytes(
               artifact.byteLength,
             )}${issueSummary}；中文外观已固定，文本不可选择）`,
+            omittedLocalOnlyChapterCount,
           ),
         );
       }
     } catch (error: unknown) {
       if (
+        getEpubExportErrorCode(error) === "EXPORT_CANCELLED" ||
         getDocxExportErrorCode(error) === "EXPORT_CANCELLED" ||
         getPdfExportErrorCode(error) === "EXPORT_CANCELLED"
       ) {
         setExportNotice({
           tone: "warning",
           title: "已取消导出",
-          description: `${format === "pdf" ? "PDF" : "DOCX"} 生成已停止，没有下载半成品。`,
+          description: `${format === "pdf" ? "PDF" : format === "epub" ? "EPUB" : "DOCX"} 生成已停止，没有下载半成品。`,
         });
       } else {
         setTransferError(errorDescription(error));
@@ -499,6 +555,7 @@ export function DataTransferPanel({
       if (exportAbortRef.current === controller) {
         exportAbortRef.current = null;
       }
+      setEpubProgress(null);
       setDocxProgress(null);
       setPdfProgress(null);
       setExportBusy(null);
@@ -514,6 +571,15 @@ export function DataTransferPanel({
     setTransferError(null);
     setExportNotice(null);
     try {
+      const chaptersResult = await runtime.repositories.chapters.listByProjectId(project.id);
+      if (!chaptersResult.ok) {
+        throw chaptersResult.error;
+      }
+      const omittedLocalOnlyChapterCount = includeLocalOnlyChapters
+        ? 0
+        : chaptersResult.value.filter(
+            ({ status, privacyMode }) => status === "active" && privacyMode === "local_only",
+          ).length;
       const snapshot = await collectProjectExportSnapshot(
         {
           projects: runtime.repositories.projects,
@@ -528,6 +594,7 @@ export function DataTransferPanel({
           clock: runtime.clock,
         },
         project.id,
+        { includeLocalOnlyChapters },
       );
       if (!snapshot.ok) {
         throw snapshot.error;
@@ -537,6 +604,7 @@ export function DataTransferPanel({
       setExportNotice(
         completeExportNotice(
           `已下载 ${artifact.fileName}（${String(artifact.recordCount)} 条记录）`,
+          omittedLocalOnlyChapterCount,
         ),
       );
     } catch (error: unknown) {
@@ -757,10 +825,28 @@ export function DataTransferPanel({
                               ? `${project.name}（已归档）`
                               : project.name,
                         }))}
-                        onChange={(event) => setSelectedProjectId(event.currentTarget.value)}
+                        onChange={(event) => {
+                          setSelectedProjectId(event.currentTarget.value);
+                          setIncludeLocalOnlyChapters(false);
+                        }}
                       />
                     )}
                   </FormField>
+                  <label className="private-export-option">
+                    <input
+                      type="checkbox"
+                      aria-label="包含私密章节"
+                      checked={includeLocalOnlyChapters}
+                      disabled={exportBusy !== null}
+                      onChange={(event) => setIncludeLocalOnlyChapters(event.currentTarget.checked)}
+                    />
+                    <span>
+                      <strong>包含私密章节</strong>
+                      <small>
+                        默认不包含。勾选后，私密正文及其直接分析记录会写入导出文件并离开墨影的本地保护。
+                      </small>
+                    </span>
+                  </label>
                   <div className="settings-actions">
                     <Button
                       variant="secondary"
@@ -777,6 +863,14 @@ export function DataTransferPanel({
                       onClick={() => void exportProject("markdown")}
                     >
                       下载 Markdown
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      loading={exportBusy === "epub"}
+                      disabled={exportBusy !== null || selectedProjectId.length === 0}
+                      onClick={() => void exportProject("epub")}
+                    >
+                      下载 EPUB
                     </Button>
                     <Button
                       variant="secondary"
@@ -801,7 +895,7 @@ export function DataTransferPanel({
                     >
                       下载 Bundle
                     </Button>
-                    {(exportBusy === "docx" || exportBusy === "pdf") && (
+                    {(exportBusy === "epub" || exportBusy === "docx" || exportBusy === "pdf") && (
                       <Button
                         variant="ghost"
                         onClick={() =>
@@ -810,10 +904,19 @@ export function DataTransferPanel({
                           )
                         }
                       >
-                        取消 {exportBusy === "pdf" ? "PDF" : "DOCX"} 导出
+                        取消{" "}
+                        {exportBusy === "pdf" ? "PDF" : exportBusy === "epub" ? "EPUB" : "DOCX"}{" "}
+                        导出
                       </Button>
                     )}
                   </div>
+                  {epubProgress !== null && (
+                    <InlineAlert
+                      tone="info"
+                      title="正在生成 EPUB"
+                      description={formatEpubProgress(epubProgress)}
+                    />
+                  )}
                   {docxProgress !== null && (
                     <InlineAlert
                       tone="info"
@@ -871,12 +974,34 @@ export function DataTransferPanel({
   );
 }
 
-function completeExportNotice(message: string): ExportNotice {
+function completeExportNotice(message: string, omittedLocalOnlyChapterCount = 0): ExportNotice {
   return {
     tone: "info",
     title: "导出完成",
-    description: `${message}。文件内容已在下载前通过格式校验。`,
+    description: `${message}。文件内容已在下载前通过格式校验。${
+      omittedLocalOnlyChapterCount > 0
+        ? ` 已按默认保护排除 ${String(omittedLocalOnlyChapterCount)} 个私密章节及其可定位的直接分析记录。`
+        : ""
+    }`,
   };
+}
+
+function getEpubExportErrorCode(error: unknown): EpubExportErrorCode | null {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("code" in error) ||
+    !("name" in error) ||
+    error.name !== "EpubExportError"
+  ) {
+    return null;
+  }
+  const code = error.code;
+  return code === "EPUB_RENDER_FAILED" ||
+    code === "EXPORT_CANCELLED" ||
+    code === "EXPORT_OUTPUT_TOO_LARGE"
+    ? code
+    : null;
 }
 
 function getDocxExportErrorCode(error: unknown): DocxExportErrorCode | null {
@@ -914,6 +1039,17 @@ function getPdfExportErrorCode(error: unknown): PdfExportErrorCode | null {
     code === "EXPORT_OUTPUT_TOO_LARGE"
     ? code
     : null;
+}
+
+function formatEpubProgress(progress: EpubExportProgress): string {
+  const stageLabels: Record<EpubExportProgress["stage"], string> = {
+    normalizing: "正在整理章节结构",
+    rendering: "正在生成电子书页面",
+    packaging: "正在封装 EPUB",
+  };
+  const maximum = Math.max(progress.totalUnits, 1);
+  const percentage = Math.min(100, Math.round((progress.completedUnits / maximum) * 100));
+  return `${stageLabels[progress.stage]} · ${String(percentage)}%`;
 }
 
 function formatDocxProgress(progress: DocxExportProgress): string {

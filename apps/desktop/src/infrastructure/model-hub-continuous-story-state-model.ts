@@ -8,6 +8,12 @@ import {
 } from "./model-hub-execution-service";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
 import {
+  PROJECT_CONTEXT_LOCAL_ONLY_MESSAGE,
+  ProjectContextPrivacyError,
+  projectContextRequiredDataDestination,
+  projectContextDispatchScope,
+} from "./project-context-privacy-authority";
+import {
   CONTINUOUS_VALIDATION_FACT_TYPES,
   CONTINUOUS_STORY_FACT_TYPES,
   KNOWLEDGE_STATES,
@@ -38,15 +44,28 @@ export class ModelHubContinuousStoryStateModel implements ContinuousStoryStateMo
   ): Promise<ContinuousStoryStateModelOutput> {
     validateInput(input);
     const messages = buildMessages(input);
+    if (input.projectPrivacy === undefined) {
+      throw new ContinuousStoryStateModelUnavailableError(
+        "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE",
+        "无法建立作品隐私边界，因此没有调用 AI。",
+        true,
+      );
+    }
+    const requiredDataDestination = projectContextRequiredDataDestination(input.projectPrivacy);
     let inspection;
     try {
+      await input.assertSourceCurrent?.();
+      await input.assertProjectPrivacyCurrent?.();
       inspection = await inspectModelHubTextTask(this.dependencies, {
         task: input.task,
         messages,
         maximumOutputTokens: 12_000,
         temperature: 0.1,
+        ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
       });
       await assertStructuredOutput(this.dependencies, inspection.catalogEntryId, false);
+      await input.assertSourceCurrent?.();
+      await input.assertProjectPrivacyCurrent?.();
     } catch (cause: unknown) {
       throw normalizeAvailabilityFailure(cause);
     }
@@ -54,10 +73,12 @@ export class ModelHubContinuousStoryStateModel implements ContinuousStoryStateMo
     let generated;
     try {
       generated = await executeModelHubTextTask(this.dependencies, {
+        dispatchScope: projectContextDispatchScope(input.projectPrivacy),
         task: input.task,
         messages,
         maximumOutputTokens: 12_000,
         temperature: 0.1,
+        ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
         onBeforeDispatch: async (selection) => {
           if (
             selection.connectionId !== inspection.connectionId ||
@@ -71,7 +92,18 @@ export class ModelHubContinuousStoryStateModel implements ContinuousStoryStateMo
               true,
             );
           }
+          await input.assertSourceCurrent?.();
           await assertStructuredOutput(this.dependencies, selection.catalogEntryId, true);
+          await input.assertProjectPrivacyCurrent?.();
+          if (
+            input.projectPrivacy?.requiresVerifiedLocal === true &&
+            !selection.localOnlyEligible
+          ) {
+            throw new ModelHubExecutionError(
+              "PRIVATE_CHAPTER_LOCAL_ONLY",
+              PROJECT_CONTEXT_LOCAL_ONLY_MESSAGE,
+            );
+          }
         },
       });
     } catch (cause: unknown) {
@@ -80,6 +112,9 @@ export class ModelHubContinuousStoryStateModel implements ContinuousStoryStateMo
       }
       throw cause;
     }
+
+    await input.assertSourceCurrent?.();
+    await input.assertProjectPrivacyCurrent?.();
 
     const candidates = parseContinuousStoryStateResponse(generated.text, input);
     return Object.freeze({
@@ -439,19 +474,54 @@ function parsePovProjection(
   const record = requireRecord(value, label);
   requireExactKeys(
     record,
-    ["characterId", "attributeKey", "knowledgeStatus", "effectiveRange", "mode"],
+    [
+      "characterId",
+      "attributeKey",
+      "knowledgeStatus",
+      "effectiveRange",
+      "mode",
+      "acquiredAt",
+      "sourceEventId",
+      "sourceFactId",
+      "informationId",
+    ],
     label,
   );
+  const effectiveRange = parseEffectiveRange(record.effectiveRange, `${label} effectiveRange`);
+  const acquiredAt =
+    record.acquiredAt === null
+      ? null
+      : requireSafeInteger(record.acquiredAt, 0, 1_000_000_000_000, `${label} acquiredAt`);
+  const sourceEventId = requireOptionalReference(record.sourceEventId, `${label} sourceEventId`);
+  const sourceFactId = requireOptionalReference(record.sourceFactId, `${label} sourceFactId`);
+  const informationId = requireOptionalReference(record.informationId, `${label} informationId`);
+  const sourceFieldCount = [acquiredAt, sourceEventId, sourceFactId, informationId].filter(
+    (item) => item !== null,
+  ).length;
+  if (sourceFieldCount !== 0 && sourceFieldCount !== 4) {
+    throw responseError(`${label} acquisition source fields must be all null or all present.`);
+  }
+  if (
+    acquiredAt !== null &&
+    (acquiredAt < effectiveRange.startOrder ||
+      (effectiveRange.endOrder !== null && acquiredAt > effectiveRange.endOrder))
+  ) {
+    throw responseError(`${label} acquiredAt must be inside its effective range.`);
+  }
   return Object.freeze({
     characterId: requireOptionalReference(record.characterId, `${label} characterId`),
     attributeKey: requireReference(record.attributeKey, `${label} attributeKey`),
     knowledgeStatus: requireEnum(record.knowledgeStatus, KNOWLEDGE_STATES, `${label} status`),
-    effectiveRange: parseEffectiveRange(record.effectiveRange, `${label} effectiveRange`),
+    effectiveRange,
     mode: requireEnum(
       record.mode,
       ["first_person", "third_person_limited"] as const,
       `${label} mode`,
     ),
+    acquiredAt,
+    sourceEventId,
+    sourceFactId,
+    informationId,
   });
 }
 
@@ -840,6 +910,7 @@ function buildMessages(input: ContinuousStoryStateModelInput) {
     contentChecksum: input.contentChecksum,
     sourceLengthUtf16: input.content.length,
     knownConfirmedEntities: input.knownEntities,
+    knownConfirmedKnowledgeSources: input.knownKnowledgeSources,
     chapterContent: input.content,
   });
   return Object.freeze([
@@ -852,6 +923,7 @@ function buildMessages(input: ContinuousStoryStateModelInput) {
         "每项必须引用保存版本中的精确 UTF-16 start/end/excerpt；JavaScript content.slice(start,end) 必须逐字等于 excerpt。",
         "entityKey 只能引用 knownConfirmedEntities 中已有且别名能被证据直接支持的键；新实体或不确定时必须为 null。禁止仅凭同名人物合并。",
         "人物知识必须明确给出 knowledgeStatus（known/unknown/suspected/false_belief）、information、acquiredAt 和 informationSource。",
+        "POV 知识来源只能逐字引用 knownConfirmedKnowledgeSources 中同一 knowledgeGains 项的 sourceFactId、sourceEventId、acquiredAt、characterId、attributeKey 和 informationId；不得仅凭人物出现在事件中推断其取得任意知识；四个来源字段无法核验时必须全部为 null。",
         "人物声纹只引用直接台词证据；伏笔、剧情线和节奏只描述本证据片段实际表现，不得声称全书结论。",
         "projection 只填写原文直接支持且字段完整的规范化投影；不能确定稳定键、属性键、叙事顺序、POV 或精确台词位置时，对应项必须为 null，禁止猜测。",
         "validation.subjectId、pov.characterId、voice.characterId、narrative.plotline.plotlineId 对新实体可为 null，系统只会将它绑定到本候选已经通过证据校验的 subject；其他实体引用必须来自 knownConfirmedEntities。",
@@ -872,7 +944,7 @@ function responseCandidateSchema(task: ContinuousStoryStateModelInput["task"]): 
   const validation =
     'validation 非空时严格为 {"factType":"character_life_status|character_age|character_identity|relationship|event_time|entity_location|item_ownership|ability_state|world_property|character_knowledge","subjectId":null或"稳定主体键","attributeKey":"稳定属性键","value":"字符串或数字或布尔值","effectiveRange":{"startOrder":0,"endOrder":null或整数}}。';
   const pov =
-    'pov 非空时严格为 {"characterId":null或"稳定人物键","attributeKey":"该信息的稳定键","knowledgeStatus":"known|unknown|suspected|false_belief","effectiveRange":{"startOrder":0,"endOrder":null或整数},"mode":"first_person|third_person_limited"}。';
+    'pov 非空时严格为 {"characterId":null或"稳定人物键","attributeKey":"该信息的稳定键","knowledgeStatus":"known|unknown|suspected|false_belief","effectiveRange":{"startOrder":0,"endOrder":null或整数},"mode":"first_person|third_person_limited","acquiredAt":null或整数,"sourceEventId":null或"已确认因果事件键","sourceFactId":null或"已确认因果事实键","informationId":null或"来源事件明确授予的稳定信息键"}；四个来源字段必须全部为空或全部填写，且人物、attributeKey、informationId 必须精确命中 knownConfirmedKnowledgeSources.knowledgeGains。';
   const voice =
     'voice 非空时严格为 {"characterId":null或"稳定人物键","featureCatalog":{"commonTermCandidates":[],"emotionMarkers":[],"politeMarkers":[],"casualMarkers":[],"directMarkers":[],"indirectMarkers":[],"metaphorMarkers":[],"dialectMarkers":[],"addressTerms":[{"addresseeCharacterId":"已确认人物键","terms":[]}]},"dialogues":[{"start":0,"end":1,"excerpt":"精确台词原文","addresseeCharacterId":null或"已确认人物键","typical":true}]}；每段台词必须位于候选 evidence 范围内。';
   const narrative =
@@ -931,6 +1003,9 @@ function normalizeAvailabilityFailure(cause: unknown): ContinuousStoryStateModel
     return cause;
   }
   if (cause instanceof ModelHubExecutionError) {
+    return new ContinuousStoryStateModelUnavailableError(cause.code, cause.message);
+  }
+  if (cause instanceof ProjectContextPrivacyError) {
     return new ContinuousStoryStateModelUnavailableError(cause.code, cause.message);
   }
   return new ContinuousStoryStateModelUnavailableError(

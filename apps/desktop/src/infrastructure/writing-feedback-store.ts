@@ -36,6 +36,8 @@ export const CANDIDATE_APPLICATION_STRATEGIES = [
 export type RecordedCandidateApplicationStrategy =
   (typeof CANDIDATE_APPLICATION_STRATEGIES)[number];
 
+export const MAXIMUM_LEARNABLE_CUSTOM_FEEDBACK_CHARACTERS = 500;
+
 export const WRITING_FEEDBACK_CODE_LABELS: Readonly<Record<WritingFeedbackCode, string>> = {
   shorter_sentences: "句子更短一些",
   more_dialogue: "增加人物对话",
@@ -80,11 +82,17 @@ export interface WritingFeedbackEvent {
   readonly action: WritingFeedbackAction;
   readonly feedbackCode: WritingFeedbackCode | null;
   readonly customFeedback: string | null;
+  readonly customFeedbackNormalizedHash: string | null;
+  /** Project-scoped SHA-256 identity for retry-safe explicit feedback. */
+  readonly idempotencyKey: string | null;
+  readonly learningEnabledAtEvent: boolean;
   readonly applicationStrategy: RecordedCandidateApplicationStrategy | null;
   readonly acceptedChangeCount: number | null;
   readonly rejectedChangeCount: number | null;
   readonly createdAt: string;
 }
+
+export type NewWritingFeedbackEvent = Omit<WritingFeedbackEvent, "learningEnabledAtEvent">;
 
 export interface WritingPreference {
   readonly id: string;
@@ -92,6 +100,7 @@ export interface WritingPreference {
   readonly preferenceText: string;
   readonly source: "manual" | "feedback_pattern";
   readonly sourceFeedbackCode: WritingFeedbackCode | null;
+  readonly sourceFeedbackHash: string | null;
   readonly evidenceCount: number;
   readonly enabled: boolean;
   readonly revision: number;
@@ -106,6 +115,7 @@ export interface SaveWritingPreferenceInput {
   readonly preferenceText: string;
   readonly source: WritingPreference["source"];
   readonly sourceFeedbackCode?: WritingFeedbackCode | null;
+  readonly sourceFeedbackHash?: string | null;
   readonly evidenceCount?: number;
   readonly enabled?: boolean;
   readonly now: string;
@@ -121,6 +131,28 @@ export interface UpdateWritingPreferenceInput {
   readonly now: string;
 }
 
+export interface SynchronizeLearnedWritingPreferenceInput {
+  readonly id: string;
+  readonly projectId: string;
+  readonly feedbackCode?: WritingFeedbackCode | null;
+  readonly customFeedbackNormalizedHash?: string | null;
+  readonly preferenceText: string;
+  readonly evidenceThreshold: number;
+  readonly now: string;
+}
+
+export interface RecordExplicitFeedbackAndSynchronizeInput {
+  readonly event: NewWritingFeedbackEvent;
+  readonly feedbackCodePreferenceId?: string | null;
+  readonly customFeedbackPreferenceId?: string | null;
+  readonly evidenceThreshold: number;
+}
+
+export interface RecordExplicitFeedbackAndSynchronizeResult {
+  readonly event: WritingFeedbackEvent;
+  readonly learnedPreference: WritingPreference | null;
+}
+
 export interface WritingFeedbackStore {
   getPolicy(projectId: string): Promise<WritingFeedbackPolicy>;
   setLearningEnabled(
@@ -129,13 +161,19 @@ export interface WritingFeedbackStore {
     expectedRevision: number,
     now: string,
   ): Promise<WritingFeedbackPolicy>;
-  recordEvent(event: WritingFeedbackEvent): Promise<void>;
+  recordEvent(event: NewWritingFeedbackEvent): Promise<WritingFeedbackEvent>;
+  recordExplicitFeedbackAndSynchronize(
+    input: RecordExplicitFeedbackAndSynchronizeInput,
+  ): Promise<RecordExplicitFeedbackAndSynchronizeResult>;
   listEvents(projectId: string, limit?: number): Promise<readonly WritingFeedbackEvent[]>;
   listPreferences(
     projectId: string,
     includeDeleted?: boolean,
   ): Promise<readonly WritingPreference[]>;
   createPreference(input: SaveWritingPreferenceInput): Promise<WritingPreference>;
+  synchronizeLearnedPreference(
+    input: SynchronizeLearnedWritingPreferenceInput,
+  ): Promise<WritingPreference | null>;
   updatePreference(input: UpdateWritingPreferenceInput): Promise<WritingPreference>;
   clearPreferences(projectId: string, now: string): Promise<number>;
 }
@@ -178,6 +216,9 @@ interface EventRow {
   readonly action: string;
   readonly feedbackCode: string | null;
   readonly customFeedback: string | null;
+  readonly customFeedbackNormalizedHash: string | null;
+  readonly idempotencyKey: string | null;
+  readonly learningEnabledAtEvent: number;
   readonly applicationStrategy: string | null;
   readonly acceptedChangeCount: number | null;
   readonly rejectedChangeCount: number | null;
@@ -190,6 +231,7 @@ interface PreferenceRow {
   readonly preferenceText: string;
   readonly source: string;
   readonly sourceFeedbackCode: string | null;
+  readonly sourceFeedbackHash: string | null;
   readonly evidenceCount: number;
   readonly enabled: number;
   readonly revision: number;
@@ -199,7 +241,7 @@ interface PreferenceRow {
 }
 
 interface BrowserWritingFeedbackDatabase {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 3;
   policies: Record<string, WritingFeedbackPolicy>;
   events: Record<string, WritingFeedbackEvent>;
   preferences: Record<string, WritingPreference>;
@@ -274,31 +316,102 @@ export class SqliteWritingFeedbackStore implements WritingFeedbackStore {
     }
   }
 
-  public async recordEvent(eventValue: WritingFeedbackEvent): Promise<void> {
-    const event = normalizeEvent(eventValue);
+  public async recordEvent(eventValue: NewWritingFeedbackEvent): Promise<WritingFeedbackEvent> {
+    const normalizedInput = normalizeNewEvent(eventValue);
     try {
-      await this.executor.execute(
-        `INSERT INTO writing_feedback_events (
-           id, project_id, chapter_id, candidate_id, action, feedback_code,
-           custom_feedback, application_strategy, accepted_change_count,
-           rejected_change_count, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          event.id,
-          event.projectId,
-          event.chapterId,
-          event.candidateId,
-          event.action,
-          event.feedbackCode,
-          event.customFeedback,
-          event.applicationStrategy,
-          event.acceptedChangeCount,
-          event.rejectedChangeCount,
-          event.createdAt,
-        ],
-      );
+      return await this.executor.transaction(async (transaction) => {
+        const policies = await transaction.select<Pick<PolicyRow, "learningEnabled">>(
+          `SELECT learning_enabled AS learningEnabled
+           FROM writing_feedback_policies WHERE project_id = ? LIMIT 1`,
+          [normalizedInput.projectId],
+        );
+        const event = normalizeEvent({
+          ...normalizedInput,
+          learningEnabledAtEvent: policies[0]?.learningEnabled !== 0,
+        });
+        await transaction.execute(
+          `INSERT INTO writing_feedback_events (
+             id, project_id, chapter_id, candidate_id, action, feedback_code,
+             custom_feedback, custom_feedback_normalized_hash,
+             idempotency_key, learning_enabled_at_event, application_strategy,
+             accepted_change_count, rejected_change_count, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            event.id,
+            event.projectId,
+            event.chapterId,
+            event.candidateId,
+            event.action,
+            event.feedbackCode,
+            event.customFeedback,
+            event.customFeedbackNormalizedHash,
+            event.idempotencyKey,
+            event.learningEnabledAtEvent ? 1 : 0,
+            event.applicationStrategy,
+            event.acceptedChangeCount,
+            event.rejectedChangeCount,
+            event.createdAt,
+          ],
+        );
+        return event;
+      });
     } catch (cause: unknown) {
       throw normalizeFailure(cause, "无法记录这次写作反馈。");
+    }
+  }
+
+  public async recordExplicitFeedbackAndSynchronize(
+    inputValue: RecordExplicitFeedbackAndSynchronizeInput,
+  ): Promise<RecordExplicitFeedbackAndSynchronizeResult> {
+    const input = normalizeExplicitFeedbackSyncInput(inputValue);
+    try {
+      return await this.executor.transaction(async (transaction) => {
+        const existing = await findSqlEventByIdempotencyKey(
+          transaction,
+          input.event.projectId,
+          requireExplicitIdempotencyKey(input.event),
+        );
+        if (existing !== null) {
+          assertSameExplicitFeedback(existing, input.event);
+          return Object.freeze({
+            event: existing,
+            learnedPreference: existing.learningEnabledAtEvent
+              ? await findPreferredSqlLearnedPreference(transaction, input)
+              : null,
+          });
+        }
+
+        const policies = await transaction.select<Pick<PolicyRow, "learningEnabled">>(
+          `SELECT learning_enabled AS learningEnabled
+           FROM writing_feedback_policies WHERE project_id = ? LIMIT 1`,
+          [input.event.projectId],
+        );
+        const event = normalizeEvent({
+          ...input.event,
+          learningEnabledAtEvent: policies[0]?.learningEnabled !== 0,
+        });
+        await insertSqlFeedbackEvent(transaction, event);
+
+        let learnedPreference: WritingPreference | null = null;
+        if (event.learningEnabledAtEvent) {
+          if (input.feedbackCodePreference !== null) {
+            learnedPreference = await synchronizeSqlLearnedPreference(
+              transaction,
+              input.feedbackCodePreference,
+            );
+          }
+          if (input.customFeedbackPreference !== null) {
+            learnedPreference =
+              (await synchronizeSqlLearnedPreference(
+                transaction,
+                input.customFeedbackPreference,
+              )) ?? learnedPreference;
+          }
+        }
+        return Object.freeze({ event, learnedPreference });
+      });
+    } catch (cause: unknown) {
+      throw normalizeFailure(cause, "无法原子保存明确反馈和从中学习到的写作偏好。请重试。");
     }
   }
 
@@ -312,7 +425,11 @@ export class SqliteWritingFeedbackStore implements WritingFeedbackStore {
       const rows = await this.executor.select<EventRow>(
         `SELECT id, project_id AS projectId, chapter_id AS chapterId,
                 candidate_id AS candidateId, action, feedback_code AS feedbackCode,
-                custom_feedback AS customFeedback, application_strategy AS applicationStrategy,
+                custom_feedback AS customFeedback,
+                custom_feedback_normalized_hash AS customFeedbackNormalizedHash,
+                idempotency_key AS idempotencyKey,
+                learning_enabled_at_event AS learningEnabledAtEvent,
+                application_strategy AS applicationStrategy,
                 accepted_change_count AS acceptedChangeCount,
                 rejected_change_count AS rejectedChangeCount, created_at AS createdAt
          FROM writing_feedback_events
@@ -335,6 +452,7 @@ export class SqliteWritingFeedbackStore implements WritingFeedbackStore {
       const rows = await this.executor.select<PreferenceRow>(
         `SELECT id, project_id AS projectId, preference_text AS preferenceText,
                 source, source_feedback_code AS sourceFeedbackCode,
+                source_feedback_hash AS sourceFeedbackHash,
                 evidence_count AS evidenceCount, enabled, revision,
                 created_at AS createdAt, updated_at AS updatedAt, deleted_at AS deletedAt
          FROM writing_preferences
@@ -355,6 +473,7 @@ export class SqliteWritingFeedbackStore implements WritingFeedbackStore {
       preferenceText: input.preferenceText,
       source: input.source,
       sourceFeedbackCode: input.sourceFeedbackCode ?? null,
+      sourceFeedbackHash: input.sourceFeedbackHash ?? null,
       evidenceCount: input.evidenceCount ?? 0,
       enabled: input.enabled ?? true,
       revision: 1,
@@ -365,15 +484,16 @@ export class SqliteWritingFeedbackStore implements WritingFeedbackStore {
     try {
       await this.executor.execute(
         `INSERT INTO writing_preferences (
-           id, project_id, preference_text, source, source_feedback_code,
+           id, project_id, preference_text, source, source_feedback_code, source_feedback_hash,
            evidence_count, enabled, revision, created_at, updated_at, deleted_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
         [
           preference.id,
           preference.projectId,
           preference.preferenceText,
           preference.source,
           preference.sourceFeedbackCode,
+          preference.sourceFeedbackHash,
           preference.evidenceCount,
           preference.enabled ? 1 : 0,
           preference.createdAt,
@@ -383,6 +503,68 @@ export class SqliteWritingFeedbackStore implements WritingFeedbackStore {
       return preference;
     } catch (cause: unknown) {
       throw normalizeFailure(cause, "无法创建写作偏好。");
+    }
+  }
+
+  public async synchronizeLearnedPreference(
+    inputValue: SynchronizeLearnedWritingPreferenceInput,
+  ): Promise<WritingPreference | null> {
+    const input = normalizeLearnedPreferenceSyncInput(inputValue);
+    try {
+      return await this.executor.transaction(async (transaction) => {
+        const evidenceCount = await countSqlLearningEvidence(transaction, input);
+        if (evidenceCount < input.evidenceThreshold) return null;
+
+        const current = await findSqlPreferenceByFeedbackSource(transaction, input);
+        if (current !== null) {
+          if (current.evidenceCount >= evidenceCount) return current;
+          const next = normalizePreference({
+            ...current,
+            evidenceCount,
+            revision: current.revision + 1,
+            updatedAt: input.now,
+          });
+          const updated = await transaction.execute(
+            `UPDATE writing_preferences
+             SET evidence_count = ?, revision = ?, updated_at = ?
+             WHERE id = ? AND revision = ? AND deleted_at IS NULL`,
+            [evidenceCount, next.revision, next.updatedAt, next.id, current.revision],
+          );
+          if (updated.rowsAffected !== 1) {
+            throw conflict("写作偏好证据已在其他位置更新，请刷新后重试。");
+          }
+          await insertPreferenceRevision(transaction, next, "evidence_updated");
+          return next;
+        }
+
+        const created = learnedPreferenceFromSyncInput(input, evidenceCount);
+        await transaction.execute(
+          `INSERT INTO writing_preferences (
+             id, project_id, preference_text, source, source_feedback_code,
+             source_feedback_hash, evidence_count, enabled, revision,
+             created_at, updated_at, deleted_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, NULL)
+           ON CONFLICT DO NOTHING`,
+          [
+            created.id,
+            created.projectId,
+            created.preferenceText,
+            created.source,
+            created.sourceFeedbackCode,
+            created.sourceFeedbackHash,
+            created.evidenceCount,
+            created.createdAt,
+            created.updatedAt,
+          ],
+        );
+        const persisted = await findSqlPreferenceByFeedbackSource(transaction, input);
+        if (persisted === null) {
+          throw conflict("写作偏好同步与另一窗口冲突，请重试。");
+        }
+        return persisted;
+      });
+    } catch (cause: unknown) {
+      throw normalizeFailure(cause, "无法同步从反馈中学到的写作偏好。");
     }
   }
 
@@ -504,15 +686,71 @@ export class BrowserDevelopmentWritingFeedbackStore implements WritingFeedbackSt
     });
   }
 
-  public recordEvent(eventValue: WritingFeedbackEvent): Promise<void> {
+  public recordEvent(eventValue: NewWritingFeedbackEvent): Promise<WritingFeedbackEvent> {
     return Promise.resolve().then(() => {
-      const event = normalizeEvent(eventValue);
+      const normalizedInput = normalizeNewEvent(eventValue);
       const database = this.read();
+      const event = normalizeEvent({
+        ...normalizedInput,
+        learningEnabledAtEvent:
+          database.policies[normalizedInput.projectId]?.learningEnabled ?? true,
+      });
       if (database.events[event.id] !== undefined) {
         throw conflict("这次写作反馈已经记录。");
       }
       database.events[event.id] = event;
       this.write(database);
+      return event;
+    });
+  }
+
+  public recordExplicitFeedbackAndSynchronize(
+    inputValue: RecordExplicitFeedbackAndSynchronizeInput,
+  ): Promise<RecordExplicitFeedbackAndSynchronizeResult> {
+    return Promise.resolve().then(() => {
+      const input = normalizeExplicitFeedbackSyncInput(inputValue);
+      const database = this.read();
+      const idempotencyKey = requireExplicitIdempotencyKey(input.event);
+      const existing =
+        Object.values(database.events).find(
+          (event) =>
+            event.projectId === input.event.projectId && event.idempotencyKey === idempotencyKey,
+        ) ?? null;
+      if (existing !== null) {
+        assertSameExplicitFeedback(existing, input.event);
+        return Object.freeze({
+          event: existing,
+          learnedPreference: existing.learningEnabledAtEvent
+            ? findPreferredBrowserLearnedPreference(database, input)
+            : null,
+        });
+      }
+
+      const event = normalizeEvent({
+        ...input.event,
+        learningEnabledAtEvent: database.policies[input.event.projectId]?.learningEnabled ?? true,
+      });
+      if (database.events[event.id] !== undefined) {
+        throw conflict("这次明确反馈的事件编号已经存在，请重试。");
+      }
+      database.events[event.id] = event;
+      let learnedPreference: WritingPreference | null = null;
+      if (event.learningEnabledAtEvent) {
+        if (input.feedbackCodePreference !== null) {
+          learnedPreference = synchronizeBrowserLearnedPreference(
+            database,
+            input.feedbackCodePreference,
+          );
+        }
+        if (input.customFeedbackPreference !== null) {
+          learnedPreference =
+            synchronizeBrowserLearnedPreference(database, input.customFeedbackPreference) ??
+            learnedPreference;
+        }
+      }
+      // One storage mutation is the browser development adapter's atomic boundary.
+      this.write(database);
+      return Object.freeze({ event, learnedPreference });
     });
   }
 
@@ -564,6 +802,7 @@ export class BrowserDevelopmentWritingFeedbackStore implements WritingFeedbackSt
         preferenceText: input.preferenceText,
         source: input.source,
         sourceFeedbackCode: input.sourceFeedbackCode ?? null,
+        sourceFeedbackHash: input.sourceFeedbackHash ?? null,
         evidenceCount: input.evidenceCount ?? 0,
         enabled: input.enabled ?? true,
         revision: 1,
@@ -580,6 +819,13 @@ export class BrowserDevelopmentWritingFeedbackStore implements WritingFeedbackSt
             existing.deletedAt === null &&
             preference.sourceFeedbackCode !== null &&
             existing.sourceFeedbackCode === preference.sourceFeedbackCode,
+        ) ||
+        Object.values(database.preferences).some(
+          (existing) =>
+            existing.projectId === preference.projectId &&
+            existing.deletedAt === null &&
+            preference.sourceFeedbackHash !== null &&
+            existing.sourceFeedbackHash === preference.sourceFeedbackHash,
         )
       ) {
         throw conflict("这条写作偏好已经存在。");
@@ -587,6 +833,34 @@ export class BrowserDevelopmentWritingFeedbackStore implements WritingFeedbackSt
       database.preferences[preference.id] = preference;
       this.write(database);
       return preference;
+    });
+  }
+
+  public synchronizeLearnedPreference(
+    inputValue: SynchronizeLearnedWritingPreferenceInput,
+  ): Promise<WritingPreference | null> {
+    return Promise.resolve().then(() => {
+      const input = normalizeLearnedPreferenceSyncInput(inputValue);
+      const database = this.read();
+      const evidenceCount = countBrowserLearningEvidence(database, input);
+      if (evidenceCount < input.evidenceThreshold) return null;
+      const current = findBrowserPreferenceByFeedbackSource(database, input);
+      if (current !== null) {
+        if (current.evidenceCount >= evidenceCount) return current;
+        const next = normalizePreference({
+          ...current,
+          evidenceCount,
+          revision: current.revision + 1,
+          updatedAt: input.now,
+        });
+        database.preferences[next.id] = next;
+        this.write(database);
+        return next;
+      }
+      const created = learnedPreferenceFromSyncInput(input, evidenceCount);
+      database.preferences[created.id] = created;
+      this.write(database);
+      return created;
     });
   }
 
@@ -642,11 +916,14 @@ export class BrowserDevelopmentWritingFeedbackStore implements WritingFeedbackSt
   private read(): BrowserWritingFeedbackDatabase {
     const serialized = this.storage.getItem(DEVELOPMENT_KEY);
     if (serialized === null) {
-      return { schemaVersion: 1, policies: {}, events: {}, preferences: {} };
+      return { schemaVersion: 3, policies: {}, events: {}, preferences: {} };
     }
     try {
       const parsed: unknown = JSON.parse(serialized);
-      if (!isRecord(parsed) || parsed.schemaVersion !== 1) {
+      if (
+        !isRecord(parsed) ||
+        (parsed.schemaVersion !== 1 && parsed.schemaVersion !== 2 && parsed.schemaVersion !== 3)
+      ) {
         throw corrupt();
       }
       const rawPolicies = requireRecord(parsed.policies);
@@ -661,16 +938,37 @@ export class BrowserDevelopmentWritingFeedbackStore implements WritingFeedbackSt
         policies[id] = policy;
       }
       for (const [id, value] of Object.entries(rawEvents)) {
-        const event = normalizeEvent(value as WritingFeedbackEvent);
+        const legacy = parsed.schemaVersion === 1;
+        const event = normalizeEvent({
+          ...(value as WritingFeedbackEvent),
+          customFeedbackNormalizedHash: legacy
+            ? null
+            : ((value as WritingFeedbackEvent).customFeedbackNormalizedHash ?? null),
+          idempotencyKey:
+            parsed.schemaVersion === 3
+              ? ((value as WritingFeedbackEvent).idempotencyKey ?? null)
+              : null,
+          learningEnabledAtEvent: legacy
+            ? false
+            : isRecord(value) && typeof value.learningEnabledAtEvent === "boolean"
+              ? value.learningEnabledAtEvent
+              : false,
+        });
         if (event.id !== id) throw corrupt();
         events[id] = event;
       }
       for (const [id, value] of Object.entries(rawPreferences)) {
-        const preference = normalizePreference(value as WritingPreference);
+        const preference = normalizePreference({
+          ...(value as WritingPreference),
+          sourceFeedbackHash:
+            parsed.schemaVersion === 1
+              ? null
+              : ((value as WritingPreference).sourceFeedbackHash ?? null),
+        });
         if (preference.id !== id) throw corrupt();
         preferences[id] = preference;
       }
-      return { schemaVersion: 1, policies, events, preferences };
+      return { schemaVersion: 3, policies, events, preferences };
     } catch (cause: unknown) {
       if (cause instanceof WritingFeedbackStoreError) throw cause;
       throw corrupt();
@@ -690,6 +988,362 @@ export class BrowserDevelopmentWritingFeedbackStore implements WritingFeedbackSt
   }
 }
 
+interface NormalizedExplicitFeedbackSyncInput {
+  readonly event: NewWritingFeedbackEvent;
+  readonly feedbackCodePreference: NormalizedLearnedPreferenceSyncInput | null;
+  readonly customFeedbackPreference: NormalizedLearnedPreferenceSyncInput | null;
+}
+
+interface NormalizedLearnedPreferenceSyncInput {
+  readonly id: string;
+  readonly projectId: string;
+  readonly feedbackCode: WritingFeedbackCode | null;
+  readonly customFeedbackNormalizedHash: string | null;
+  readonly preferenceText: string;
+  readonly evidenceThreshold: number;
+  readonly now: string;
+}
+
+function normalizeExplicitFeedbackSyncInput(
+  value: RecordExplicitFeedbackAndSynchronizeInput,
+): NormalizedExplicitFeedbackSyncInput {
+  const event = normalizeNewEvent(value.event);
+  if (event.action !== "explicit_feedback") {
+    throw invalid("原子反馈操作只接受明确反馈事件。");
+  }
+  requireExplicitIdempotencyKey(event);
+  const feedbackCodePreferenceId = value.feedbackCodePreferenceId ?? null;
+  const customFeedbackPreferenceId = value.customFeedbackPreferenceId ?? null;
+  if ((event.feedbackCode === null) !== (feedbackCodePreferenceId === null)) {
+    throw invalid("明确反馈选项与偏好身份不一致。");
+  }
+  if ((event.customFeedbackNormalizedHash === null) !== (customFeedbackPreferenceId === null)) {
+    throw invalid("自定义明确反馈与偏好身份不一致。");
+  }
+  return Object.freeze({
+    event,
+    feedbackCodePreference:
+      event.feedbackCode === null || feedbackCodePreferenceId === null
+        ? null
+        : normalizeLearnedPreferenceSyncInput({
+            id: feedbackCodePreferenceId,
+            projectId: event.projectId,
+            feedbackCode: event.feedbackCode,
+            preferenceText: WRITING_FEEDBACK_PREFERENCE_TEXT[event.feedbackCode],
+            evidenceThreshold: value.evidenceThreshold,
+            now: event.createdAt,
+          }),
+    customFeedbackPreference:
+      event.customFeedbackNormalizedHash === null ||
+      event.customFeedback === null ||
+      customFeedbackPreferenceId === null
+        ? null
+        : normalizeLearnedPreferenceSyncInput({
+            id: customFeedbackPreferenceId,
+            projectId: event.projectId,
+            customFeedbackNormalizedHash: event.customFeedbackNormalizedHash,
+            preferenceText: event.customFeedback,
+            evidenceThreshold: value.evidenceThreshold,
+            now: event.createdAt,
+          }),
+  });
+}
+
+function normalizeLearnedPreferenceSyncInput(
+  value: SynchronizeLearnedWritingPreferenceInput,
+): NormalizedLearnedPreferenceSyncInput {
+  const feedbackCode = value.feedbackCode ?? null;
+  if (feedbackCode !== null && !WRITING_FEEDBACK_CODES.includes(feedbackCode)) {
+    throw invalid("写作反馈选项无效。");
+  }
+  const customFeedbackNormalizedHash = normalizeOptionalSha256(
+    value.customFeedbackNormalizedHash ?? null,
+    "自定义反馈聚类标识无效。",
+  );
+  if ((feedbackCode === null) === (customFeedbackNormalizedHash === null)) {
+    throw invalid("必须且只能指定一种反馈学习来源。");
+  }
+  if (
+    !Number.isInteger(value.evidenceThreshold) ||
+    value.evidenceThreshold < 1 ||
+    value.evidenceThreshold > 10_000
+  ) {
+    throw invalid("反馈学习证据阈值无效。");
+  }
+  return Object.freeze({
+    id: validateUuid(value.id, "preference id"),
+    projectId: validateUuid(value.projectId, "project id"),
+    feedbackCode,
+    customFeedbackNormalizedHash,
+    preferenceText: normalizeRequiredText(value.preferenceText, 500),
+    evidenceThreshold: value.evidenceThreshold,
+    now: validateTimestamp(value.now),
+  });
+}
+
+async function countSqlLearningEvidence(
+  executor: Pick<TransactionExecutor, "select">,
+  input: NormalizedLearnedPreferenceSyncInput,
+): Promise<number> {
+  const rows =
+    input.feedbackCode !== null
+      ? await executor.select<{ readonly evidenceCount: number }>(
+          `SELECT COUNT(*) AS evidenceCount
+           FROM writing_feedback_events
+           WHERE project_id = ? AND action = 'explicit_feedback'
+             AND learning_enabled_at_event = 1 AND feedback_code = ?`,
+          [input.projectId, input.feedbackCode],
+        )
+      : await executor.select<{ readonly evidenceCount: number }>(
+          `SELECT COUNT(*) AS evidenceCount
+           FROM writing_feedback_events
+           WHERE project_id = ? AND action = 'explicit_feedback'
+             AND learning_enabled_at_event = 1
+             AND custom_feedback_normalized_hash = ?`,
+          [input.projectId, input.customFeedbackNormalizedHash],
+        );
+  const evidenceCount = rows[0]?.evidenceCount;
+  if (!Number.isInteger(evidenceCount) || evidenceCount === undefined || evidenceCount < 0) {
+    throw corrupt();
+  }
+  return evidenceCount;
+}
+
+async function findSqlEventByIdempotencyKey(
+  executor: Pick<TransactionExecutor, "select">,
+  projectId: string,
+  idempotencyKey: string,
+): Promise<WritingFeedbackEvent | null> {
+  const rows = await executor.select<EventRow>(
+    `SELECT id, project_id AS projectId, chapter_id AS chapterId,
+            candidate_id AS candidateId, action, feedback_code AS feedbackCode,
+            custom_feedback AS customFeedback,
+            custom_feedback_normalized_hash AS customFeedbackNormalizedHash,
+            idempotency_key AS idempotencyKey,
+            learning_enabled_at_event AS learningEnabledAtEvent,
+            application_strategy AS applicationStrategy,
+            accepted_change_count AS acceptedChangeCount,
+            rejected_change_count AS rejectedChangeCount, created_at AS createdAt
+     FROM writing_feedback_events
+     WHERE project_id = ? AND action = 'explicit_feedback' AND idempotency_key = ?
+     LIMIT 1`,
+    [projectId, idempotencyKey],
+  );
+  return rows[0] === undefined ? null : normalizeEvent(rows[0]);
+}
+
+async function insertSqlFeedbackEvent(
+  transaction: Pick<TransactionExecutor, "execute">,
+  event: WritingFeedbackEvent,
+): Promise<void> {
+  await transaction.execute(
+    `INSERT INTO writing_feedback_events (
+       id, project_id, chapter_id, candidate_id, action, feedback_code,
+       custom_feedback, custom_feedback_normalized_hash, idempotency_key,
+       learning_enabled_at_event, application_strategy,
+       accepted_change_count, rejected_change_count, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      event.id,
+      event.projectId,
+      event.chapterId,
+      event.candidateId,
+      event.action,
+      event.feedbackCode,
+      event.customFeedback,
+      event.customFeedbackNormalizedHash,
+      event.idempotencyKey,
+      event.learningEnabledAtEvent ? 1 : 0,
+      event.applicationStrategy,
+      event.acceptedChangeCount,
+      event.rejectedChangeCount,
+      event.createdAt,
+    ],
+  );
+}
+
+async function synchronizeSqlLearnedPreference(
+  transaction: TransactionExecutor,
+  input: NormalizedLearnedPreferenceSyncInput,
+): Promise<WritingPreference | null> {
+  const evidenceCount = await countSqlLearningEvidence(transaction, input);
+  if (evidenceCount < input.evidenceThreshold) return null;
+
+  const current = await findSqlPreferenceByFeedbackSource(transaction, input);
+  if (current !== null) {
+    if (current.evidenceCount >= evidenceCount) return current;
+    const next = normalizePreference({
+      ...current,
+      evidenceCount,
+      revision: current.revision + 1,
+      updatedAt: input.now,
+    });
+    const updated = await transaction.execute(
+      `UPDATE writing_preferences
+       SET evidence_count = ?, revision = ?, updated_at = ?
+       WHERE id = ? AND revision = ? AND deleted_at IS NULL`,
+      [evidenceCount, next.revision, next.updatedAt, next.id, current.revision],
+    );
+    if (updated.rowsAffected !== 1) {
+      throw conflict("写作偏好证据已在另一个位置更新，请刷新后重试。");
+    }
+    await insertPreferenceRevision(transaction, next, "evidence_updated");
+    return next;
+  }
+
+  const created = learnedPreferenceFromSyncInput(input, evidenceCount);
+  await transaction.execute(
+    `INSERT INTO writing_preferences (
+       id, project_id, preference_text, source, source_feedback_code,
+       source_feedback_hash, evidence_count, enabled, revision,
+       created_at, updated_at, deleted_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, NULL)
+     ON CONFLICT DO NOTHING`,
+    [
+      created.id,
+      created.projectId,
+      created.preferenceText,
+      created.source,
+      created.sourceFeedbackCode,
+      created.sourceFeedbackHash,
+      created.evidenceCount,
+      created.createdAt,
+      created.updatedAt,
+    ],
+  );
+  const persisted = await findSqlPreferenceByFeedbackSource(transaction, input);
+  if (persisted === null) {
+    throw conflict("写作偏好同步与另一个窗口冲突，请重试。");
+  }
+  return persisted;
+}
+
+async function findPreferredSqlLearnedPreference(
+  transaction: Pick<TransactionExecutor, "select">,
+  input: NormalizedExplicitFeedbackSyncInput,
+): Promise<WritingPreference | null> {
+  const feedbackPreference =
+    input.feedbackCodePreference === null
+      ? null
+      : await findSqlPreferenceByFeedbackSource(transaction, input.feedbackCodePreference);
+  return input.customFeedbackPreference === null
+    ? feedbackPreference
+    : ((await findSqlPreferenceByFeedbackSource(transaction, input.customFeedbackPreference)) ??
+        feedbackPreference);
+}
+
+async function findSqlPreferenceByFeedbackSource(
+  executor: Pick<TransactionExecutor, "select">,
+  input: NormalizedLearnedPreferenceSyncInput,
+): Promise<WritingPreference | null> {
+  const sourcePredicate =
+    input.feedbackCode !== null
+      ? "source = 'feedback_pattern' AND source_feedback_code = ?"
+      : "source_feedback_hash = ?";
+  const sourceValue = input.feedbackCode ?? input.customFeedbackNormalizedHash;
+  const rows = await executor.select<PreferenceRow>(
+    `SELECT id, project_id AS projectId, preference_text AS preferenceText,
+            source, source_feedback_code AS sourceFeedbackCode,
+            source_feedback_hash AS sourceFeedbackHash,
+            evidence_count AS evidenceCount, enabled, revision,
+            created_at AS createdAt, updated_at AS updatedAt, deleted_at AS deletedAt
+     FROM writing_preferences
+     WHERE project_id = ? AND deleted_at IS NULL AND ${sourcePredicate}
+     LIMIT 1`,
+    [input.projectId, sourceValue],
+  );
+  return rows[0] === undefined ? null : preferenceFromRow(rows[0]);
+}
+
+function countBrowserLearningEvidence(
+  database: BrowserWritingFeedbackDatabase,
+  input: NormalizedLearnedPreferenceSyncInput,
+): number {
+  return Object.values(database.events).filter(
+    (event) =>
+      event.projectId === input.projectId &&
+      event.action === "explicit_feedback" &&
+      event.learningEnabledAtEvent &&
+      (input.feedbackCode !== null
+        ? event.feedbackCode === input.feedbackCode
+        : event.customFeedbackNormalizedHash === input.customFeedbackNormalizedHash),
+  ).length;
+}
+
+function synchronizeBrowserLearnedPreference(
+  database: BrowserWritingFeedbackDatabase,
+  input: NormalizedLearnedPreferenceSyncInput,
+): WritingPreference | null {
+  const evidenceCount = countBrowserLearningEvidence(database, input);
+  if (evidenceCount < input.evidenceThreshold) return null;
+  const current = findBrowserPreferenceByFeedbackSource(database, input);
+  if (current !== null) {
+    if (current.evidenceCount >= evidenceCount) return current;
+    const next = normalizePreference({
+      ...current,
+      evidenceCount,
+      revision: current.revision + 1,
+      updatedAt: input.now,
+    });
+    database.preferences[next.id] = next;
+    return next;
+  }
+  const created = learnedPreferenceFromSyncInput(input, evidenceCount);
+  database.preferences[created.id] = created;
+  return created;
+}
+
+function findPreferredBrowserLearnedPreference(
+  database: BrowserWritingFeedbackDatabase,
+  input: NormalizedExplicitFeedbackSyncInput,
+): WritingPreference | null {
+  const feedbackPreference =
+    input.feedbackCodePreference === null
+      ? null
+      : findBrowserPreferenceByFeedbackSource(database, input.feedbackCodePreference);
+  return input.customFeedbackPreference === null
+    ? feedbackPreference
+    : (findBrowserPreferenceByFeedbackSource(database, input.customFeedbackPreference) ??
+        feedbackPreference);
+}
+
+function findBrowserPreferenceByFeedbackSource(
+  database: BrowserWritingFeedbackDatabase,
+  input: NormalizedLearnedPreferenceSyncInput,
+): WritingPreference | null {
+  return (
+    Object.values(database.preferences).find(
+      (preference) =>
+        preference.projectId === input.projectId &&
+        preference.deletedAt === null &&
+        (input.feedbackCode !== null
+          ? preference.source === "feedback_pattern" &&
+            preference.sourceFeedbackCode === input.feedbackCode
+          : preference.sourceFeedbackHash === input.customFeedbackNormalizedHash),
+    ) ?? null
+  );
+}
+
+function learnedPreferenceFromSyncInput(
+  input: NormalizedLearnedPreferenceSyncInput,
+  evidenceCount: number,
+): WritingPreference {
+  return normalizePreference({
+    id: input.id,
+    projectId: input.projectId,
+    preferenceText: input.preferenceText,
+    source: input.feedbackCode === null ? "manual" : "feedback_pattern",
+    sourceFeedbackCode: input.feedbackCode,
+    sourceFeedbackHash: input.customFeedbackNormalizedHash,
+    evidenceCount,
+    enabled: true,
+    revision: 1,
+    createdAt: input.now,
+    updatedAt: input.now,
+    deletedAt: null,
+  });
+}
+
 async function findSqlPreference(
   executor: Pick<TransactionExecutor, "select">,
   preferenceId: string,
@@ -697,6 +1351,7 @@ async function findSqlPreference(
   const rows = await executor.select<PreferenceRow>(
     `SELECT id, project_id AS projectId, preference_text AS preferenceText,
             source, source_feedback_code AS sourceFeedbackCode,
+            source_feedback_hash AS sourceFeedbackHash,
             evidence_count AS evidenceCount, enabled, revision,
             created_at AS createdAt, updated_at AS updatedAt, deleted_at AS deletedAt
      FROM writing_preferences WHERE id = ? LIMIT 1`,
@@ -712,6 +1367,7 @@ async function listSqlPreferences(
   const rows = await executor.select<PreferenceRow>(
     `SELECT id, project_id AS projectId, preference_text AS preferenceText,
             source, source_feedback_code AS sourceFeedbackCode,
+            source_feedback_hash AS sourceFeedbackHash,
             evidence_count AS evidenceCount, enabled, revision,
             created_at AS createdAt, updated_at AS updatedAt, deleted_at AS deletedAt
      FROM writing_preferences WHERE project_id = ? AND deleted_at IS NULL
@@ -760,6 +1416,7 @@ function preferenceFromRow(row: PreferenceRow): WritingPreference {
     enabled: row.enabled === 1,
     source: row.source as WritingPreference["source"],
     sourceFeedbackCode: row.sourceFeedbackCode as WritingFeedbackCode | null,
+    sourceFeedbackHash: row.sourceFeedbackHash,
   });
 }
 
@@ -810,7 +1467,15 @@ function normalizeEvent(value: WritingFeedbackEvent | EventRow): WritingFeedback
         : (() => {
             throw invalid("写作反馈选项无效。");
           })();
-  const customFeedback = normalizeOptionalText(value.customFeedback, 1_000);
+  const customFeedback = normalizeOptionalText(
+    value.customFeedback,
+    MAXIMUM_LEARNABLE_CUSTOM_FEEDBACK_CHARACTERS,
+  );
+  const customFeedbackNormalizedHash = normalizeOptionalSha256(
+    value.customFeedbackNormalizedHash,
+    "自定义反馈聚类标识无效。",
+  );
+  const idempotencyKey = normalizeOptionalSha256(value.idempotencyKey, "明确反馈的幂等身份无效。");
   const applicationStrategy =
     value.applicationStrategy === null
       ? null
@@ -826,6 +1491,19 @@ function normalizeEvent(value: WritingFeedbackEvent | EventRow): WritingFeedback
   if (action === "explicit_feedback" && feedbackCode === null && customFeedback === null) {
     throw invalid("明确反馈必须包含一个选项或自定义意见。");
   }
+  if (customFeedback === null && customFeedbackNormalizedHash !== null) {
+    throw invalid("自定义反馈聚类缺少对应的明确意见。");
+  }
+  if (action !== "explicit_feedback" && idempotencyKey !== null) {
+    throw invalid("只有明确反馈可以携带幂等身份。");
+  }
+  if (
+    typeof value.learningEnabledAtEvent !== "boolean" &&
+    value.learningEnabledAtEvent !== 0 &&
+    value.learningEnabledAtEvent !== 1
+  ) {
+    throw invalid("反馈发生时的学习设置无效。");
+  }
   return Object.freeze({
     id,
     projectId,
@@ -834,11 +1512,61 @@ function normalizeEvent(value: WritingFeedbackEvent | EventRow): WritingFeedback
     action,
     feedbackCode,
     customFeedback,
+    customFeedbackNormalizedHash,
+    idempotencyKey,
+    learningEnabledAtEvent:
+      typeof value.learningEnabledAtEvent === "boolean"
+        ? value.learningEnabledAtEvent
+        : value.learningEnabledAtEvent === 1,
     applicationStrategy,
     acceptedChangeCount,
     rejectedChangeCount,
     createdAt: validateTimestamp(value.createdAt),
   });
+}
+
+function normalizeNewEvent(value: NewWritingFeedbackEvent): NewWritingFeedbackEvent {
+  const normalized = normalizeEvent({ ...value, learningEnabledAtEvent: false });
+  return Object.freeze({
+    id: normalized.id,
+    projectId: normalized.projectId,
+    chapterId: normalized.chapterId,
+    candidateId: normalized.candidateId,
+    action: normalized.action,
+    feedbackCode: normalized.feedbackCode,
+    customFeedback: normalized.customFeedback,
+    customFeedbackNormalizedHash: normalized.customFeedbackNormalizedHash,
+    idempotencyKey: normalized.idempotencyKey,
+    applicationStrategy: normalized.applicationStrategy,
+    acceptedChangeCount: normalized.acceptedChangeCount,
+    rejectedChangeCount: normalized.rejectedChangeCount,
+    createdAt: normalized.createdAt,
+  });
+}
+
+function requireExplicitIdempotencyKey(event: NewWritingFeedbackEvent): string {
+  if (event.action !== "explicit_feedback" || event.idempotencyKey === null) {
+    throw invalid("明确反馈必须携带稳定的幂等身份。");
+  }
+  return event.idempotencyKey;
+}
+
+function assertSameExplicitFeedback(
+  persisted: WritingFeedbackEvent,
+  requested: NewWritingFeedbackEvent,
+): void {
+  if (
+    persisted.projectId !== requested.projectId ||
+    persisted.chapterId !== requested.chapterId ||
+    persisted.candidateId !== requested.candidateId ||
+    persisted.action !== requested.action ||
+    persisted.feedbackCode !== requested.feedbackCode ||
+    persisted.customFeedback !== requested.customFeedback ||
+    persisted.customFeedbackNormalizedHash !== requested.customFeedbackNormalizedHash ||
+    persisted.idempotencyKey !== requested.idempotencyKey
+  ) {
+    throw conflict("这个明确反馈身份已用于不同内容，请刷新后重试。");
+  }
 }
 
 function normalizePreference(value: WritingPreference): WritingPreference {
@@ -854,9 +1582,15 @@ function normalizePreference(value: WritingPreference): WritingPreference {
         : (() => {
             throw invalid("写作偏好来源选项无效。");
           })();
+  const sourceFeedbackHash = normalizeOptionalSha256(
+    value.sourceFeedbackHash,
+    "写作偏好的自定义反馈来源无效。",
+  );
   if (
     (source === "manual" && sourceFeedbackCode !== null) ||
-    (source === "feedback_pattern" && sourceFeedbackCode === null)
+    (source === "feedback_pattern" && sourceFeedbackCode === null) ||
+    (source === "feedback_pattern" && sourceFeedbackHash !== null) ||
+    (sourceFeedbackCode !== null && sourceFeedbackHash !== null)
   ) {
     throw invalid("写作偏好来源与反馈选项不一致。");
   }
@@ -882,6 +1616,7 @@ function normalizePreference(value: WritingPreference): WritingPreference {
     preferenceText,
     source,
     sourceFeedbackCode,
+    sourceFeedbackHash,
     createdAt,
     updatedAt,
     deletedAt,
@@ -924,6 +1659,12 @@ function normalizeRequiredText(value: string, maximum: number): string {
 function normalizeOptionalText(value: string | null, maximum: number): string | null {
   if (value === null) return null;
   return normalizeRequiredText(value, maximum);
+}
+
+function normalizeOptionalSha256(value: string | null, message: string): string | null {
+  if (value === null) return null;
+  if (!/^[a-f0-9]{64}$/u.test(value)) throw invalid(message);
+  return value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

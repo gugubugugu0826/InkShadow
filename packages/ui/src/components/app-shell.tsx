@@ -21,7 +21,7 @@ export type AppShellProps = HTMLAttributes<HTMLDivElement> & {
   mainRef?: (element: HTMLElement | null) => void;
 };
 
-const narrowNavigationQuery = "(max-width: 59.9375rem)";
+const narrowNavigationQuery = "(max-width: 39.9375rem)";
 const focusableSelector = [
   "a[href]",
   "button:not([disabled])",

@@ -170,7 +170,7 @@ async function seedRoute(modelHub: ModelHubStore, includeStructuredOutput: boole
     id: "what-if-connection",
     providerKind: "google_gemini",
     displayName: "What-if connection",
-    credentialRef: "keyring:test:what-if",
+    credentialRef: "keyring:model-hub:what-if",
     credentialState: "present",
     expectedRevision: null,
   });

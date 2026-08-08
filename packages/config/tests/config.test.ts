@@ -51,7 +51,7 @@ describe("user settings", () => {
     expect(settings.telemetryEnabled).toBe(false);
     expect(settings.automaticMemoryLearning).toBe(false);
     expect(settings.diagnosticsRedaction).toBe(true);
-    expect(settings.autosaveDebounceMs).toBe(800);
+    expect(settings.autosaveDebounceMs).toBe(1_000);
   });
 
   it("keeps autosave debounce inside the supported safety range", () => {

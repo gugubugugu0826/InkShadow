@@ -21,6 +21,11 @@ import { parseUuidV7 } from "@inkshadow/domain";
 import { useOnlineStatus } from "../hooks/use-online-status";
 import { normalizeUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
+import {
+  calculateWorkspaceInsights,
+  type WorkspaceInsights,
+  type WorkspaceVersionMetric,
+} from "./workspace-insights";
 
 export function WorkspacePage() {
   const runtime = useRuntime();
@@ -38,8 +43,63 @@ export function WorkspacePage() {
   );
   const [createOpen, setCreateOpen] = useState(false);
   const [title, setTitle] = useState("");
+  const [createLocalOnly, setCreateLocalOnly] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [insights, setInsights] = useState<WorkspaceInsights | null>(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsError, setInsightsError] = useState<unknown>(null);
+
+  const loadInsights = useCallback(
+    async (chapterList: readonly Chapter[]): Promise<void> => {
+      setInsightsLoading(true);
+      setInsightsError(null);
+      const rows = await Promise.all(
+        chapterList.map(async (chapter) => {
+          const [versions, candidates] = await Promise.all([
+            runtime.repositories.chapterVersions.listByChapterId(chapter.id),
+            runtime.repositories.aiCandidates.listByChapterId(chapter.id),
+          ]);
+          return { chapter, versions, candidates } as const;
+        }),
+      );
+      const failedRow = rows.find(({ versions, candidates }) => !versions.ok || !candidates.ok);
+      if (failedRow !== undefined) {
+        setInsightsError(
+          !failedRow.versions.ok
+            ? failedRow.versions.error
+            : !failedRow.candidates.ok
+              ? failedRow.candidates.error
+              : new Error("工作区统计读取失败"),
+        );
+        setInsights(null);
+        setInsightsLoading(false);
+        return;
+      }
+
+      const versionMetrics: WorkspaceVersionMetric[] = [];
+      let readyCandidateCount = 0;
+      for (const row of rows) {
+        if (!row.versions.ok || !row.candidates.ok) continue;
+        versionMetrics.push(
+          ...row.versions.value.map((version) => {
+            const snapshot = version.toSnapshot();
+            return {
+              chapterId: snapshot.chapterId,
+              contentLength: snapshot.content.length,
+              createdAt: snapshot.createdAt,
+            };
+          }),
+        );
+        readyCandidateCount += row.candidates.value.filter(
+          (candidate) => candidate.status === "ready",
+        ).length;
+      }
+      setInsights(calculateWorkspaceInsights(versionMetrics, readyCandidateCount));
+      setInsightsLoading(false);
+    },
+    [runtime],
+  );
 
   const load = useCallback(async () => {
     if (projectId === null) {
@@ -66,7 +126,8 @@ export function WorkspacePage() {
     setChapters(chapterResult.value);
     setLoadError(null);
     setPageState(chapterResult.value.length === 0 ? "empty" : "ready");
-  }, [projectId, runtime]);
+    void loadInsights(chapterResult.value);
+  }, [loadInsights, projectId, runtime]);
 
   useEffect(() => {
     void Promise.resolve().then(load);
@@ -81,6 +142,7 @@ export function WorkspacePage() {
     const result = await runtime.useCases.createChapter.execute({
       projectId,
       title,
+      privacyMode: createLocalOnly ? "local_only" : "standard",
     });
     setSubmitting(false);
     if (!result.ok) {
@@ -88,12 +150,26 @@ export function WorkspacePage() {
       return;
     }
     setTitle("");
+    setCreateLocalOnly(false);
     setCreateOpen(false);
     await load();
   }
 
   const normalizedError = loadError === null ? null : normalizeUiError(loadError);
+  const normalizedInsightsError = insightsError === null ? null : normalizeUiError(insightsError);
   const readonly = project?.status !== "active";
+  const activeChapters = chapters.filter((chapter) => chapter.status === "active");
+  const latestChapter = activeChapters.reduce<Chapter | null>((latest, current) => {
+    if (latest === null) return current;
+    return new Date(current.toSnapshot().updatedAt).getTime() >
+      new Date(latest.toSnapshot().updatedAt).getTime()
+      ? current
+      : latest;
+  }, null);
+  const totalCharacters = activeChapters.reduce(
+    (total, chapter) => total + chapter.content.length,
+    0,
+  );
 
   return (
     <div className="desktop-page">
@@ -128,6 +204,19 @@ export function WorkspacePage() {
         />
       )}
 
+      {normalizedInsightsError !== null && (
+        <InlineAlert
+          tone="warning"
+          title="写作统计暂时不可用"
+          description={`${normalizedInsightsError.description} 章节和正文仍可正常打开。`}
+          action={{
+            label: "重试统计",
+            onClick: () => void loadInsights(chapters),
+          }}
+          onDismiss={() => setInsightsError(null)}
+        />
+      )}
+
       <PageStateBoundary
         state={pageState}
         preserveContent={false}
@@ -157,6 +246,59 @@ export function WorkspacePage() {
             ),
         }}
       >
+        {latestChapter !== null && (
+          <section className="workspace-resume" aria-labelledby="workspace-resume-title">
+            <div>
+              <p className="page-heading__eyebrow">上次写到</p>
+              <h2 id="workspace-resume-title">{latestChapter.title}</h2>
+              <p>
+                {latestChapter.content.trim().length === 0
+                  ? "这一章还是空白的，可以从第一句话开始。"
+                  : `${latestChapter.content.trim().slice(0, 120)}${
+                      latestChapter.content.trim().length > 120 ? "…" : ""
+                    }`}
+              </p>
+            </div>
+            <Link
+              className="button-link workspace-resume__action"
+              to={`/projects/${latestChapter.projectId}/chapters/${latestChapter.id}`}
+            >
+              {readonly ? "继续阅读" : "继续写作"}
+            </Link>
+          </section>
+        )}
+
+        <section className="workspace-insights" aria-label="作品进度">
+          <article>
+            <span>正文总字数</span>
+            <strong>{totalCharacters.toLocaleString("zh-CN")}</strong>
+          </article>
+          <article>
+            <span>今日净变化</span>
+            <strong>
+              {insightsLoading || insights === null
+                ? "—"
+                : formatSignedCharacters(insights.todayNetCharacters)}
+            </strong>
+          </article>
+          <article>
+            <span>当前连续写作</span>
+            <strong>
+              {insightsLoading || insights === null
+                ? "—"
+                : `${String(insights.currentStreakDays)} 天`}
+            </strong>
+          </article>
+          <article>
+            <span>待处理 AI 建议</span>
+            <strong>
+              {insightsLoading || insights === null
+                ? "—"
+                : `${String(insights.readyCandidateCount)} 份`}
+            </strong>
+          </article>
+        </section>
+
         <section aria-labelledby="chapters-title">
           <div className="section-heading">
             <h2 id="chapters-title">章节</h2>
@@ -169,6 +311,7 @@ export function WorkspacePage() {
                   <div className="card-heading-row">
                     <span className="chapter-number">{String(index + 1).padStart(2, "0")}</span>
                     <CardTitle>{chapter.title}</CardTitle>
+                    {chapter.isLocalOnly && <Badge tone="success">本地私密</Badge>}
                   </div>
                 </CardHeader>
                 <CardContent>
@@ -198,12 +341,23 @@ export function WorkspacePage() {
 
       <Dialog
         open={createOpen}
-        onOpenChange={setCreateOpen}
+        onOpenChange={(open) => {
+          setCreateOpen(open);
+          if (!open && !submitting) {
+            setCreateLocalOnly(false);
+          }
+        }}
         title="新建章节"
-        description="创建时会同时生成首个稳定版本。"
+        description="创建时会同时生成首个稳定版本；私密章节会从第一笔事务起阻止云端投影。"
         footer={
           <>
-            <Button variant="secondary" onClick={() => setCreateOpen(false)}>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setCreateOpen(false);
+                setCreateLocalOnly(false);
+              }}
+            >
               取消
             </Button>
             <Button
@@ -237,7 +391,27 @@ export function WorkspacePage() {
             />
           )}
         </FormField>
+        <label className="private-export-option" htmlFor="workspace-create-private-chapter">
+          <input
+            id="workspace-create-private-chapter"
+            type="checkbox"
+            checked={createLocalOnly}
+            disabled={submitting}
+            onChange={(event) => setCreateLocalOnly(event.currentTarget.checked)}
+          />
+          <span>
+            创建为私密章节
+            <small>
+              正文、摘要、检索、审稿和续写只允许使用已验证的本地模型；未配置本地模型时会安全停止。
+            </small>
+          </span>
+        </label>
       </Dialog>
     </div>
   );
+}
+
+function formatSignedCharacters(value: number): string {
+  if (value === 0) return "0";
+  return `${value > 0 ? "+" : ""}${value.toLocaleString("zh-CN")}`;
 }

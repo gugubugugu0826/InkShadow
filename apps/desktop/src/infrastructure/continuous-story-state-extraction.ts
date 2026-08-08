@@ -3,19 +3,27 @@ import type {
   ChapterVersionRepository,
   ContentHasher,
 } from "@inkshadow/application";
-import { parseUuidV7 as parseDomainUuid } from "@inkshadow/domain";
+import { parseUuidV7 as parseDomainUuid, type ChapterPrivacyMode } from "@inkshadow/domain";
 import {
+  REBUILDABLE_SYSTEM_FACT_SCHEMA_VERSION,
+  StoryFact,
   StoryCoreError,
   err,
   parseUuidV7 as parseStoryUuid,
   storyFactUpdatePolicy,
   type Result,
-  type StoryFact,
   type StoryFactApplicationService,
   type StoryFactStore,
   type StoryValue,
+  type Clock,
+  type ContinuousStoryStateFactCommitCandidate,
   type UuidV7Generator,
 } from "@inkshadow/story-core";
+
+import type {
+  ProjectContextPrivacyAuthority,
+  ProjectContextPrivacyReceipt,
+} from "./project-context-privacy-authority";
 
 export const CONTINUOUS_STORY_STATE_TASKS = ["character_extraction", "world_extraction"] as const;
 export type ContinuousStoryStateTask = (typeof CONTINUOUS_STORY_STATE_TASKS)[number];
@@ -75,6 +83,14 @@ export interface ContinuousPovProjection {
   readonly knowledgeStatus: KnowledgeState;
   readonly effectiveRange: ContinuousEffectiveRange;
   readonly mode: "first_person" | "third_person_limited";
+  /** Narrative order at which the character obtained this information. */
+  readonly acquiredAt?: number | null;
+  /** Confirmed causal event that granted the information. */
+  readonly sourceEventId?: string | null;
+  /** Confirmed story fact backing sourceEventId and its exact chapter evidence. */
+  readonly sourceFactId?: string | null;
+  /** Stable information identifier declared by the confirmed source event. */
+  readonly informationId?: string | null;
 }
 
 export interface ContinuousVoiceFeatureCatalog {
@@ -194,6 +210,24 @@ export interface ContinuousStoryStateModelInput {
   readonly contentChecksum: string;
   readonly content: string;
   readonly knownEntities: readonly ContinuousStoryStateKnownEntity[];
+  readonly knownKnowledgeSources: readonly ContinuousPovKnowledgeSource[];
+  /** Production extraction always supplies both fields; optional for legacy adapters. */
+  readonly privacyMode?: ChapterPrivacyMode;
+  readonly assertSourceCurrent?: () => Promise<void>;
+  readonly projectPrivacy?: ProjectContextPrivacyReceipt;
+  readonly assertProjectPrivacyCurrent?: () => Promise<void>;
+}
+
+export interface ContinuousPovKnowledgeSource {
+  readonly sourceFactId: string;
+  readonly sourceEventId: string;
+  readonly acquiredAt: number;
+  readonly informedCharacterIds: readonly string[];
+  readonly knowledgeGains: readonly Readonly<{
+    readonly characterId: string;
+    readonly attributeKey: string;
+    readonly informationId: string;
+  }>[];
 }
 
 export interface ContinuousStoryStateKnownEntity {
@@ -220,6 +254,7 @@ export class ContinuousStoryStateModelUnavailableError extends Error {
   public constructor(
     public readonly code: string,
     message: string,
+    public readonly retryable = false,
   ) {
     super(message);
   }
@@ -263,14 +298,16 @@ interface ContinuousStoryStateExtractionDependencies {
   readonly chapters: Pick<ChapterRepository, "findById">;
   readonly chapterVersions: Pick<ChapterVersionRepository, "findVersionById">;
   readonly facts: StoryFactStore;
-  readonly factService: Pick<
-    StoryFactApplicationService,
-    "stageAutomaticFact" | "replaceRebuildableSystemFact" | "confirm"
-  >;
+  readonly factService: Pick<StoryFactApplicationService, "confirm">;
   readonly model: ContinuousStoryStateModelPort;
   readonly hasher: ContentHasher;
   readonly ids: Pick<UuidV7Generator, "next">;
+  readonly clock: Pick<Clock, "now">;
   readonly preferences: ContinuousStoryStatePreferenceStore;
+  readonly projectContextPrivacy: Pick<
+    ProjectContextPrivacyAuthority,
+    "inspect" | "assertChapterMatches" | "assertCurrentBeforeDispatch"
+  >;
 }
 
 const REFERENCE_PREFIX = "continuous-story-state";
@@ -290,7 +327,6 @@ export function shouldRunContinuousStoryStateExtraction(
  * result into a formal fact.
  */
 export class ContinuousStoryStateExtractionService {
-  private readonly processedRouteKeys = new Set<string>();
   private readonly inFlight = new Map<string, Promise<ContinuousStoryStateExtractionReceipt>>();
 
   public constructor(private readonly dependencies: ContinuousStoryStateExtractionDependencies) {}
@@ -423,9 +459,32 @@ export class ContinuousStoryStateExtractionService {
     readonly force?: boolean;
   }): Promise<ContinuousStoryStateExtractionReceipt> {
     const projectId = requireStoryUuid(input.projectId, "Project identity is invalid.");
-    requireDomainUuid(input.chapterId, "Chapter identity is invalid.");
+    const chapterId = requireDomainUuid(input.chapterId, "Chapter identity is invalid.");
     const versionId = requireDomainUuid(input.versionId, "Chapter version identity is invalid.");
-    const versionResult = await this.dependencies.chapterVersions.findVersionById(versionId);
+    const [chapterResult, versionResult] = await Promise.all([
+      this.dependencies.chapters.findById(chapterId),
+      this.dependencies.chapterVersions.findVersionById(versionId),
+    ]);
+    if (!chapterResult.ok) {
+      throw extractionError("STORY_STATE_CHAPTER_READ_FAILED", chapterResult.error.message);
+    }
+    const chapter = chapterResult.value;
+    if (chapter === null) {
+      throw extractionError(
+        "STORY_STATE_SOURCE_NOT_CURRENT",
+        "The chapter changed before story-state extraction could start.",
+      );
+    }
+    if (
+      chapter.projectId !== input.projectId ||
+      chapter.status !== "active" ||
+      chapter.currentVersionId !== input.versionId
+    ) {
+      throw extractionError(
+        "STORY_STATE_SOURCE_NOT_CURRENT",
+        "The chapter changed before story-state extraction could start.",
+      );
+    }
     if (!versionResult.ok) {
       throw extractionError("STORY_STATE_VERSION_READ_FAILED", versionResult.error.message);
     }
@@ -464,11 +523,15 @@ export class ContinuousStoryStateExtractionService {
       );
     }
 
+    const projectPrivacy = await this.dependencies.projectContextPrivacy.inspect(input.projectId);
+    this.dependencies.projectContextPrivacy.assertChapterMatches(projectPrivacy, chapter);
+
     const listed = await this.dependencies.facts.listByProjectId(projectId);
     if (!listed.ok) {
       throw listed.error;
     }
     const knownEntities = buildKnownEntityRegistry(listed.value);
+    const knownKnowledgeSources = buildKnownKnowledgeSourceRegistry(listed.value);
     const stagedFacts: StoryFact[] = [];
     const skippedTasks: { task: ContinuousStoryStateTask; code: string }[] = [];
     const providerInvocations: {
@@ -479,18 +542,41 @@ export class ContinuousStoryStateExtractionService {
     }[] = [];
     let completedTaskCount = 0;
     let alreadyProcessedCount = 0;
+    const findRouteReceipt = this.dependencies.facts.findContinuousStoryStateRouteReceipt?.bind(
+      this.dependencies.facts,
+    );
+    const commitRoute = this.dependencies.facts.commitContinuousStoryStateRoute?.bind(
+      this.dependencies.facts,
+    );
+    if (findRouteReceipt === undefined || commitRoute === undefined) {
+      throw extractionError(
+        "STORY_STATE_ATOMIC_COMMIT_UNAVAILABLE",
+        "The story-state store cannot commit provider output and its receipt atomically.",
+      );
+    }
 
     for (const task of CONTINUOUS_STORY_STATE_TASKS) {
-      const taskKey = `${task}:${snapshot.id}`;
+      const existingRoute = await findRouteReceipt({
+        projectId: input.projectId,
+        chapterId: input.chapterId,
+        versionId: input.versionId,
+        task,
+      });
+      if (!existingRoute.ok) {
+        throw existingRoute.error;
+      }
+      // A successful provider route is immutable for one saved version. A
+      // caller that wants a fresh run must first create a new immutable version;
+      // `force` never repeats a route that may already have incurred cost.
+      if (existingRoute.value !== null) {
+        alreadyProcessedCount += 1;
+        continue;
+      }
       const existingFingerprints = new Set(
         listed.value
           .filter((fact) => isFactFromTaskAndVersion(fact, task, snapshot.id))
           .map(factFingerprint),
       );
-      if (input.force !== true && this.processedRouteKeys.has(taskKey)) {
-        alreadyProcessedCount += 1;
-        continue;
-      }
       let output: ContinuousStoryStateModelOutput;
       try {
         output = await this.dependencies.model.extract({
@@ -501,6 +587,32 @@ export class ContinuousStoryStateExtractionService {
           contentChecksum: checksum.value,
           content: snapshot.content,
           knownEntities,
+          knownKnowledgeSources,
+          privacyMode: chapter.privacyMode,
+          projectPrivacy,
+          assertProjectPrivacyCurrent: () =>
+            this.dependencies.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy),
+          assertSourceCurrent: async () => {
+            const latest = await this.dependencies.chapters.findById(chapterId);
+            if (!latest.ok) {
+              throw latest.error;
+            }
+            if (latest.value === null) {
+              throw extractionError(
+                "STORY_STATE_SOURCE_CHANGED",
+                "The chapter version or privacy setting changed before model dispatch.",
+              );
+            }
+            if (
+              latest.value.currentVersionId !== versionId ||
+              latest.value.privacyRevision !== chapter.privacyRevision
+            ) {
+              throw extractionError(
+                "STORY_STATE_SOURCE_CHANGED",
+                "The chapter version or privacy setting changed before model dispatch.",
+              );
+            }
+          },
         });
       } catch (cause: unknown) {
         if (cause instanceof ContinuousStoryStateModelUnavailableError) {
@@ -515,7 +627,6 @@ export class ContinuousStoryStateExtractionService {
           "The model returned too many story-state candidates for one saved version.",
         );
       }
-      completedTaskCount += 1;
       providerInvocations.push({
         task,
         providerKind: output.providerKind,
@@ -523,21 +634,42 @@ export class ContinuousStoryStateExtractionService {
         invocationId: output.invocationId,
       });
       const seen = new Set<string>();
+      const routeFacts: ContinuousStoryStateFactCommitCandidate[] = [];
+      const completedAt = this.dependencies.clock.now();
       for (const candidate of output.candidates) {
         assertTaskAllowsFactType(task, candidate.factType);
         assertExactEvidence(snapshot.content, candidate.evidence);
         const merged = mergeCandidateEntity(candidate, knownEntities, snapshot.id);
-        const fingerprint = modelCandidateFingerprint(candidate, merged.entityKey);
+        const normalizedState = normalizeCandidateState(candidate, knownEntities);
+        const normalizedCandidate = Object.freeze({ ...candidate, state: normalizedState });
+        const reference = evidenceReference(task, snapshot.id, checksum.value);
+        const boundProjection = bindProjection(
+          normalizedCandidate.projection ?? null,
+          merged,
+          knownEntities,
+          knownKnowledgeSources,
+        );
+        const policy = storyFactUpdatePolicy(normalizedCandidate.factType);
+        const replacementKey = replacementKeyForCandidate(
+          policy,
+          input.chapterId,
+          normalizedCandidate,
+          typeof merged.entityKey === "string" ? merged.entityKey : null,
+        );
+        const fingerprint = modelCandidateFingerprint(
+          normalizedCandidate,
+          merged.entityKey,
+          replacementKey,
+        );
         if (seen.has(fingerprint) || existingFingerprints.has(fingerprint)) {
           continue;
         }
         seen.add(fingerprint);
-        const reference = evidenceReference(task, snapshot.id, checksum.value);
-        const boundProjection = bindProjection(candidate.projection ?? null, merged, knownEntities);
-        const structuredValue = {
+        const continuousValue = {
           schemaVersion: CONTINUOUS_STORY_STATE_SCHEMA,
+          ...(policy === "automatic_reversible" ? { replacementKey } : {}),
           subject: merged,
-          payload: candidate.state,
+          payload: normalizedState,
           // The story-value boundary intentionally caps object nesting at five
           // levels. Keep the validated optional projection as inert JSON and
           // parse it again in the strict read-only projection adapter.
@@ -551,6 +683,14 @@ export class ContinuousStoryStateExtractionService {
             invocationId: output.invocationId,
           },
         };
+        const structuredValue =
+          policy === "rebuildable_automatic"
+            ? {
+                schemaVersion: REBUILDABLE_SYSTEM_FACT_SCHEMA_VERSION,
+                replacementKey,
+                payload: continuousValue,
+              }
+            : continuousValue;
         const source = {
           kind: "chapter_span" as const,
           reference,
@@ -561,39 +701,54 @@ export class ContinuousStoryStateExtractionService {
           sourceLength: snapshot.content.length,
           excerpt: candidate.evidence.excerpt,
         };
-        const policy = storyFactUpdatePolicy(candidate.factType);
-        const staged =
-          policy === "rebuildable_automatic"
-            ? await this.dependencies.factService.replaceRebuildableSystemFact({
-                projectId: input.projectId,
-                factType: candidate.factType,
-                replacementKey: rebuildableReplacementKey(input.chapterId, candidate),
-                contentText: candidate.contentText,
-                payload: structuredValue,
-                source,
-                effectiveAt: candidate.effectiveAt,
-                invalidatedAt: candidate.invalidatedAt,
-                confidence: candidate.confidence,
-              })
-            : await this.dependencies.factService.stageAutomaticFact({
-                projectId: input.projectId,
-                factType: candidate.factType,
-                contentText: candidate.contentText,
-                structuredValue,
-                source,
-                effectiveAt: candidate.effectiveAt,
-                invalidatedAt: candidate.invalidatedAt,
-                confidence: candidate.confidence,
-                // Reversible facts are transparent system projections of exact AI
-                // extraction evidence. Critical facts remain AI-origin review items.
-                origin: policy === "automatic_reversible" ? "system" : "ai_extraction",
-              });
-        if (!staged.ok) {
-          throw staged.error;
+        const created = StoryFact.create({
+          id: this.dependencies.ids.next(),
+          projectId: input.projectId,
+          factType: candidate.factType,
+          contentText: candidate.contentText,
+          structuredValue,
+          source,
+          effectiveAt: candidate.effectiveAt,
+          invalidatedAt: candidate.invalidatedAt,
+          confidence: candidate.confidence,
+          status: policy === "human_confirmation_required" ? "unconfirmed" : "temporary",
+          origin: policy === "human_confirmation_required" ? "ai_extraction" : "system",
+          needsReview: policy === "human_confirmation_required",
+          humanConfirmed: false,
+          now: completedAt,
+        });
+        if (!created.ok) {
+          throw created.error;
         }
-        stagedFacts.push(staged.value.fact);
+        routeFacts.push(
+          Object.freeze({
+            fact: created.value,
+            replacementKey,
+          }),
+        );
       }
-      this.processedRouteKeys.add(taskKey);
+      const committed = await commitRoute({
+        projectId: input.projectId,
+        chapterId: input.chapterId,
+        versionId: input.versionId,
+        task,
+        sourceContentHash: checksum.value,
+        providerKind: output.providerKind,
+        modelId: output.modelId,
+        invocationId: output.invocationId,
+        candidateCount: output.candidates.length,
+        completedAt,
+        facts: compactContinuousRouteFacts(routeFacts),
+      });
+      if (!committed.ok) {
+        throw committed.error;
+      }
+      if (committed.value.alreadyCommitted) {
+        alreadyProcessedCount += 1;
+      } else {
+        completedTaskCount += 1;
+        stagedFacts.push(...committed.value.facts);
+      }
     }
 
     const status =
@@ -799,6 +954,56 @@ function buildKnownEntityRegistry(
   );
 }
 
+function buildKnownKnowledgeSourceRegistry(
+  facts: readonly StoryFact[],
+): readonly ContinuousPovKnowledgeSource[] {
+  const sources: ContinuousPovKnowledgeSource[] = [];
+  for (const fact of facts) {
+    const snapshot = fact.toSnapshot();
+    if (
+      snapshot.status !== "formal" ||
+      !snapshot.userConfirmed ||
+      snapshot.needsReview ||
+      snapshot.deprecated ||
+      snapshot.invalidatedAt !== null ||
+      snapshot.branchId !== null ||
+      snapshot.source.kind !== "chapter_span"
+    ) {
+      continue;
+    }
+    const structured = asStoryRecord(snapshot.structuredValue);
+    const narrativeTime = asStoryRecord(structured?.narrativeTime);
+    const sourceEventId = readBoundedString(structured?.eventId, 512) ?? snapshot.id;
+    const acquiredAt = narrativeTime?.order;
+    const informedCharacterIds = readBoundedStringArray(structured?.informedCharacterIds, 128, 512);
+    const knowledgeGains = readKnowledgeGains(structured?.knowledgeGains);
+    if (
+      structured?.schemaVersion !== "inkshadow.causal-event-fact.v2" ||
+      typeof acquiredAt !== "number" ||
+      !Number.isSafeInteger(acquiredAt) ||
+      Math.abs(acquiredAt) > 1_000_000_000_000 ||
+      informedCharacterIds === null ||
+      knowledgeGains === null ||
+      knowledgeGains.length === 0 ||
+      knowledgeGains.some(({ characterId }) => !informedCharacterIds.includes(characterId))
+    ) {
+      continue;
+    }
+    sources.push(
+      Object.freeze({
+        sourceFactId: snapshot.id,
+        sourceEventId,
+        acquiredAt,
+        informedCharacterIds: Object.freeze([...informedCharacterIds]),
+        knowledgeGains,
+      }),
+    );
+  }
+  return Object.freeze(
+    sources.sort((left, right) => left.sourceFactId.localeCompare(right.sourceFactId)),
+  );
+}
+
 function mergeCandidateEntity(
   candidate: ContinuousStoryStateModelCandidate,
   knownEntities: readonly ContinuousStoryStateKnownEntity[],
@@ -903,6 +1108,7 @@ function bindProjection(
   projection: ContinuousStoryStateProjection | null,
   subject: Readonly<Record<string, StoryValue>>,
   knownEntities: readonly ContinuousStoryStateKnownEntity[],
+  knownKnowledgeSources: readonly ContinuousPovKnowledgeSource[],
 ): Readonly<{
   readonly projection: ContinuousStoryStateProjection | null;
   readonly issues: readonly string[];
@@ -934,13 +1140,14 @@ function bindProjection(
     issues,
     "validation_subject_mismatch",
   );
-  const pov = bindCharacterProjection(
+  const povBase = bindCharacterProjection(
     projection.pov,
     subjectId,
     subjectKind,
     issues,
     "pov_character_mismatch",
   );
+  const pov = bindPovKnowledgeSource(povBase, knownKnowledgeSources, issues);
   const voiceBase = bindCharacterProjection(
     projection.voice,
     subjectId,
@@ -990,6 +1197,53 @@ function bindProjection(
   });
 }
 
+function bindPovKnowledgeSource(
+  projection:
+    (Omit<ContinuousPovProjection, "characterId"> & { readonly characterId: string }) | null,
+  knownSources: readonly ContinuousPovKnowledgeSource[],
+  issues: string[],
+): (Omit<ContinuousPovProjection, "characterId"> & { readonly characterId: string }) | null {
+  if (projection === null) {
+    return null;
+  }
+  // Missing keys identify an early v2 record. It remains readable, but the
+  // projection adapter will never promote it to a formal reference edge.
+  if (
+    projection.acquiredAt === undefined ||
+    projection.sourceEventId === undefined ||
+    projection.sourceFactId === undefined ||
+    projection.informationId === undefined
+  ) {
+    return projection;
+  }
+  if (
+    projection.acquiredAt === null &&
+    projection.sourceEventId === null &&
+    projection.sourceFactId === null &&
+    projection.informationId === null
+  ) {
+    return projection;
+  }
+  const matched = knownSources.find(
+    (source) =>
+      source.sourceFactId === projection.sourceFactId &&
+      source.sourceEventId === projection.sourceEventId &&
+      source.acquiredAt === projection.acquiredAt &&
+      source.informedCharacterIds.includes(projection.characterId) &&
+      source.knowledgeGains.some(
+        (gain) =>
+          gain.characterId === projection.characterId &&
+          gain.attributeKey === projection.attributeKey &&
+          gain.informationId === projection.informationId,
+      ),
+  );
+  if (matched === undefined) {
+    issues.push("pov_knowledge_source_or_exact_gain_not_confirmed");
+    return null;
+  }
+  return projection;
+}
+
 function bindSubjectProjection(
   projection: ContinuousValidationProjection | null,
   subjectId: string | null,
@@ -1027,17 +1281,39 @@ function bindCharacterProjection<Value extends { readonly characterId: string | 
   return Object.freeze({ ...projection, characterId: subjectId });
 }
 
-function rebuildableReplacementKey(
+function replacementKeyForCandidate(
+  policy: ReturnType<typeof storyFactUpdatePolicy>,
   chapterId: string,
   candidate: ContinuousStoryStateModelCandidate,
-): string {
-  const sceneId = candidate.projection?.narrative?.scene?.sceneId;
-  return [
+  entityKey: string | null,
+): string | null {
+  if (policy === "human_confirmation_required") {
+    return null;
+  }
+  const stateDiscriminator = Object.keys(candidate.state).sort().join(",") || "state";
+  const relationshipDiscriminator =
+    candidate.factType === "relationship_change"
+      ? relationshipReplacementDiscriminator(candidate)
+      : null;
+  const discriminator =
+    relationshipDiscriminator ??
+    (policy === "rebuildable_automatic"
+      ? (candidate.projection?.narrative?.scene?.sceneId ??
+        `${String(candidate.evidence.start)}-${String(candidate.evidence.end)}`)
+      : (candidate.projection?.validation?.attributeKey ?? stateDiscriminator));
+  const key = [
     "continuous-story-state",
-    chapterId,
+    policy === "rebuildable_automatic" ? chapterId : (entityKey ?? chapterId),
     candidate.factType,
-    sceneId ?? `${String(candidate.evidence.start)}-${String(candidate.evidence.end)}`,
+    discriminator,
   ].join(":");
+  if (key.length > 500 || key !== key.trim() || /[\u0000-\u001f\u007f]/u.test(key)) {
+    throw extractionError(
+      "STORY_STATE_REPLACEMENT_KEY_INVALID",
+      "The model result could not be bound to a safe current-state replacement key.",
+    );
+  }
+  return key;
 }
 
 function factFingerprint(fact: StoryFact): string {
@@ -1049,6 +1325,7 @@ function factFingerprint(fact: StoryFact): string {
   return [
     snapshot.factType,
     entityKey,
+    readContinuousReplacementKeyFromStructured(structured),
     String(snapshot.source.startOffset ?? -1),
     String(snapshot.source.endOffset ?? -1),
     snapshot.contentText ?? "",
@@ -1058,14 +1335,207 @@ function factFingerprint(fact: StoryFact): string {
 function modelCandidateFingerprint(
   candidate: ContinuousStoryStateModelCandidate,
   entityKeyValue: StoryValue | undefined,
+  replacementKey: string | null,
 ): string {
   return [
     candidate.factType,
     typeof entityKeyValue === "string" ? entityKeyValue : "",
+    replacementKey ?? "",
     String(candidate.evidence.start),
     String(candidate.evidence.end),
     candidate.contentText,
   ].join("\u001f");
+}
+
+function normalizeCandidateState(
+  candidate: ContinuousStoryStateModelCandidate,
+  knownEntities: readonly ContinuousStoryStateKnownEntity[],
+): Readonly<Record<string, StoryValue>> {
+  if (candidate.factType !== "relationship_change") {
+    return candidate.state;
+  }
+  const requestedOtherEntityKey = readBoundedString(candidate.state.otherEntityKey, 200);
+  const otherEntityName = readBoundedString(candidate.state.otherEntityName, 200);
+  const relationship = readBoundedString(candidate.state.relationship, 1_000);
+  const change = readBoundedString(candidate.state.change, 2_000);
+  if (
+    requestedOtherEntityKey === null ||
+    otherEntityName === null ||
+    relationship === null ||
+    change === null
+  ) {
+    throw extractionError(
+      "STORY_STATE_RELATIONSHIP_TARGET_UNTRUSTED",
+      "A relationship change must cite a confirmed relationship target and bounded relationship attributes.",
+    );
+  }
+  const target = knownEntities.find(({ entityKey }) => entityKey === requestedOtherEntityKey);
+  const normalizedName = normalizeReplacementIdentityText(otherEntityName);
+  const normalizedEvidence = normalizeReplacementIdentityText(candidate.evidence.excerpt);
+  const trustedNames =
+    target === undefined
+      ? []
+      : [...new Set([target.canonicalName, ...target.aliases])].map((name) => ({
+          source: name,
+          normalized: normalizeReplacementIdentityText(name),
+        }));
+  const nameMatchesTarget = trustedNames.some(({ normalized }) => normalized === normalizedName);
+  const evidenceNamesTarget = trustedNames.some(({ normalized }) =>
+    normalizedEvidence.includes(normalized),
+  );
+  if (target === undefined || !nameMatchesTarget || !evidenceNamesTarget) {
+    throw extractionError(
+      "STORY_STATE_RELATIONSHIP_TARGET_UNTRUSTED",
+      "A relationship change target was not resolved to one exact user-confirmed entity in its evidence.",
+    );
+  }
+  return Object.freeze({
+    otherEntityName: target.canonicalName,
+    otherEntityKey: target.entityKey,
+    relationship,
+    change,
+  });
+}
+
+function relationshipReplacementDiscriminator(
+  candidate: ContinuousStoryStateModelCandidate,
+): string {
+  const otherEntityKey = readBoundedString(candidate.state.otherEntityKey, 200);
+  const relationship = readBoundedString(candidate.state.relationship, 1_000);
+  const validationAttribute =
+    candidate.projection?.validation?.factType === "relationship"
+      ? readBoundedString(candidate.projection.validation.attributeKey, 500)
+      : "relationship";
+  if (otherEntityKey === null || relationship === null || validationAttribute === null) {
+    throw extractionError(
+      "STORY_STATE_REPLACEMENT_KEY_INVALID",
+      "A relationship change could not be bound to a trusted replacement identity.",
+    );
+  }
+  return [
+    "other",
+    encodeReplacementIdentitySegment(otherEntityKey),
+    "attribute",
+    encodeReplacementIdentitySegment(validationAttribute),
+    "relationship",
+    encodeReplacementIdentitySegment(relationship),
+  ].join(":");
+}
+
+function encodeReplacementIdentitySegment(value: string): string {
+  try {
+    return encodeURIComponent(normalizeReplacementIdentityText(value));
+  } catch {
+    throw extractionError(
+      "STORY_STATE_REPLACEMENT_KEY_INVALID",
+      "A relationship replacement identity contains invalid Unicode.",
+    );
+  }
+}
+
+function normalizeReplacementIdentityText(value: string): string {
+  return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase();
+}
+
+function readContinuousReplacementKeyFromStructured(
+  structured: Readonly<Record<string, StoryValue>> | null,
+): string {
+  if (structured === null) {
+    return "";
+  }
+  const direct = readBoundedString(structured.replacementKey, 500);
+  if (direct !== null) {
+    return direct;
+  }
+  const payload = asStoryRecord(structured.payload);
+  return readBoundedString(payload?.replacementKey, 500) ?? "";
+}
+
+/**
+ * A provider can report several changes for one current-state identity inside
+ * the same chapter. Persist only the state backed by the latest exact UTF-16
+ * evidence span; otherwise the store must reject the duplicate identity and a
+ * retry could pay for the same already-completed provider route again.
+ */
+function compactContinuousRouteFacts(
+  candidates: readonly ContinuousStoryStateFactCommitCandidate[],
+): readonly ContinuousStoryStateFactCommitCandidate[] {
+  const selectedByIdentity = new Map<string, ContinuousStoryStateFactCommitCandidate>();
+  const withoutReplacementIdentity: ContinuousStoryStateFactCommitCandidate[] = [];
+  for (const candidate of candidates) {
+    if (candidate.replacementKey === null) {
+      withoutReplacementIdentity.push(candidate);
+      continue;
+    }
+    const snapshot = candidate.fact.toSnapshot();
+    const identity = `${snapshot.factType}\u0000${candidate.replacementKey}`;
+    const selected = selectedByIdentity.get(identity);
+    if (selected === undefined || compareContinuousRouteFinality(candidate, selected) > 0) {
+      selectedByIdentity.set(identity, candidate);
+    }
+  }
+  return Object.freeze([
+    ...withoutReplacementIdentity,
+    ...[...selectedByIdentity.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([, candidate]) => candidate),
+  ]);
+}
+
+function compareContinuousRouteFinality(
+  left: ContinuousStoryStateFactCommitCandidate,
+  right: ContinuousStoryStateFactCommitCandidate,
+): number {
+  const leftSnapshot = left.fact.toSnapshot();
+  const rightSnapshot = right.fact.toSnapshot();
+  const startDifference =
+    (leftSnapshot.source.startOffset ?? -1) - (rightSnapshot.source.startOffset ?? -1);
+  if (startDifference !== 0) {
+    return startDifference;
+  }
+  const endDifference =
+    (leftSnapshot.source.endOffset ?? -1) - (rightSnapshot.source.endOffset ?? -1);
+  if (endDifference !== 0) {
+    return endDifference;
+  }
+  // Equal spans have no later textual position. Canonical semantic content is
+  // the deterministic tie-break; exact duplicates retain the first item.
+  return continuousRouteTieBreak(leftSnapshot).localeCompare(
+    continuousRouteTieBreak(rightSnapshot),
+  );
+}
+
+function continuousRouteTieBreak(snapshot: ReturnType<StoryFact["toSnapshot"]>): string {
+  return [
+    snapshot.factType,
+    snapshot.contentText ?? "",
+    stableStoryValue(snapshot.structuredValue),
+    snapshot.effectiveAt ?? "",
+    snapshot.invalidatedAt ?? "",
+    String(snapshot.confidence),
+    snapshot.source.reference,
+    snapshot.source.excerpt ?? "",
+  ].join("\u001f");
+}
+
+function stableStoryValue(value: StoryValue | null): string {
+  if (value === null) {
+    return "null";
+  }
+  if (typeof value === "string" || typeof value === "boolean" || typeof value === "number") {
+    return JSON.stringify(value);
+  }
+  if (isStoryValueList(value)) {
+    return `[${value.map((item) => stableStoryValue(item)).join(",")}]`;
+  }
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStoryValue(value[key] ?? null)}`)
+    .join(",")}}`;
+}
+
+function isStoryValueList(value: StoryValue): value is readonly StoryValue[] {
+  return Array.isArray(value);
 }
 
 function isFactFromTaskAndVersion(
@@ -1125,6 +1595,48 @@ function readBoundedStringArray(
     readBoundedString(item, maximumLength),
   );
   return strings.some((item) => item === null) ? null : Object.freeze(strings as readonly string[]);
+}
+
+function readKnowledgeGains(value: StoryValue | undefined):
+  | readonly Readonly<{
+      readonly characterId: string;
+      readonly attributeKey: string;
+      readonly informationId: string;
+    }>[]
+  | null {
+  if (!Array.isArray(value) || value.length > 128) return null;
+  const gains = (value as readonly StoryValue[]).map((item) => {
+    const record = asStoryRecord(item);
+    if (
+      record === null ||
+      Object.keys(record).sort().join("\u0000") !==
+        ["attributeKey", "characterId", "informationId"].sort().join("\u0000")
+    ) {
+      return null;
+    }
+    const characterId = readSafeReference(record.characterId);
+    const attributeKey = readSafeReference(record.attributeKey);
+    const informationId = readSafeReference(record.informationId);
+    return characterId === null || attributeKey === null || informationId === null
+      ? null
+      : Object.freeze({ characterId, attributeKey, informationId });
+  });
+  if (gains.some((gain) => gain === null)) return null;
+  const complete = gains as readonly Readonly<{
+    readonly characterId: string;
+    readonly attributeKey: string;
+    readonly informationId: string;
+  }>[];
+  const signatures = complete.map(
+    ({ characterId, attributeKey, informationId }) =>
+      `${characterId}\u0000${attributeKey}\u0000${informationId}`,
+  );
+  return new Set(signatures).size === signatures.length ? Object.freeze([...complete]) : null;
+}
+
+function readSafeReference(value: StoryValue | undefined): string | null {
+  const reference = readBoundedString(value, 512);
+  return reference !== null && /^[a-z0-9][a-z0-9:._-]{0,511}$/iu.test(reference) ? reference : null;
 }
 
 function requireDomainUuid(value: string, message: string) {

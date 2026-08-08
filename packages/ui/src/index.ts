@@ -8,6 +8,7 @@ export {
   type ButtonVariant,
   type IconButtonProps,
 } from "./components/button";
+export { InkIcon, inkIconNames, type InkIconName, type InkIconProps } from "./components/icon";
 export {
   FormField,
   Input,

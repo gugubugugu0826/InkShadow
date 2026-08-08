@@ -9,8 +9,8 @@ import {
   CloudDeletionRequestSchema,
   CloudDeletionSubmissionRequestSchema,
   CONTRACT_SCHEMA_VERSION,
-  INKSHADOW_CLOUD_OPENAPI,
 } from "../src/index.js";
+import { INKSHADOW_CLOUD_OPENAPI } from "@inkshadow/contracts/openapi";
 
 const DELETION_REQUEST_ID = "019f9f4a-b3c7-7350-9226-000000000201";
 const TARGET_ID = "019f9f4a-b3c7-7350-9226-000000000202";

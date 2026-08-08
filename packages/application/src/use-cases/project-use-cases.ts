@@ -20,6 +20,12 @@ const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1_000;
 
 export interface CreateProjectCommand {
   readonly name: string;
+  /**
+   * A caller-owned idempotency key for crash-safe provisioning. When supplied,
+   * retrying the same command recovers the exact project instead of allocating
+   * another project with a guessed name.
+   */
+  readonly plannedId?: UuidV7;
 }
 
 export interface ListProjectsQuery {
@@ -48,6 +54,16 @@ export class CreateProject {
       return normalized;
     }
 
+    if (command.plannedId !== undefined) {
+      const recovered = await this.projects.findById(command.plannedId);
+      if (!recovered.ok) {
+        return recovered;
+      }
+      if (recovered.value !== null) {
+        return validateRecoveredProject(recovered.value, normalized.value);
+      }
+    }
+
     const duplicate = await this.projects.nameExists(normalized.value, null);
     if (!duplicate.ok) {
       return duplicate;
@@ -57,7 +73,7 @@ export class CreateProject {
     }
 
     const project = Project.create({
-      id: this.ids.next(),
+      id: command.plannedId ?? this.ids.next(),
       name: normalized.value,
       now: this.clock.now(),
     });
@@ -66,7 +82,20 @@ export class CreateProject {
     }
 
     const persisted = await this.projects.create(project.value);
-    return persisted.ok ? ok(project.value) : persisted;
+    if (persisted.ok) {
+      return ok(project.value);
+    }
+    if (command.plannedId === undefined) {
+      return persisted;
+    }
+
+    // A concurrent/restarted attempt may have committed immediately before the
+    // create returned. Recover only an exact match; never adopt a same-name row.
+    const recovered = await this.projects.findById(command.plannedId);
+    if (!recovered.ok || recovered.value === null) {
+      return persisted;
+    }
+    return validateRecoveredProject(recovered.value, normalized.value);
   }
 }
 
@@ -238,4 +267,26 @@ function projectNameConflict(name: string): AppError {
     actions: ["RENAME"],
     details: { name },
   });
+}
+
+function validateRecoveredProject(
+  project: Project,
+  expectedName: string,
+): Result<Project, AppError> {
+  if (project.name === expectedName && project.status === "active") {
+    return ok(project);
+  }
+  return err(
+    new AppError({
+      code: "REPOSITORY_ERROR",
+      message: "The planned project id already belongs to different project state.",
+      details: {
+        reason: "PLANNED_PROJECT_SCOPE_MISMATCH",
+        projectId: project.id,
+        expectedName,
+        actualName: project.name,
+        actualStatus: project.status,
+      },
+    }),
+  );
 }

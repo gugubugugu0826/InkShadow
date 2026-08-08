@@ -34,6 +34,7 @@ const migration = [
     new URL("../migrations/0017_sync_projection_account_authority.sql", import.meta.url),
     "utf8",
   ),
+  readFileSync(new URL("../migrations/0038_private_chapters.sql", import.meta.url), "utf8"),
 ].join("\n");
 
 const PROJECT_ID = "019fa002-2000-7000-8000-000000000001";
@@ -62,6 +63,23 @@ describe("SyncMaterializationSqliteStore", () => {
       "INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, 'Materialize', ?, ?)",
       [PROJECT_ID, NOW, NOW],
     );
+    await executor.transaction(async (transaction) => {
+      await transaction.execute(
+        `INSERT INTO chapters (
+           id, project_id, title, content, status, revision, privacy_mode,
+           privacy_revision, current_version_id, created_at, updated_at, trashed_at
+         ) VALUES (?, ?, 'Materialized chapter', '正文', 'active', 1, 'standard',
+                   1, ?, ?, ?, NULL)`,
+        [OBJECT_ID, PROJECT_ID, VERSION_ID, NOW, NOW],
+      );
+      await transaction.execute(
+        `INSERT INTO chapter_versions (
+           id, project_id, chapter_id, parent_version_id, sequence, content,
+           content_checksum, reason, source_candidate_id, created_at
+         ) VALUES (?, ?, ?, NULL, 1, '正文', ?, 'created', NULL, ?)`,
+        [VERSION_ID, PROJECT_ID, OBJECT_ID, "a".repeat(64), NOW],
+      );
+    });
   });
 
   afterEach(async () => {
@@ -978,6 +996,23 @@ describe("SyncMaterializationSqliteStore", () => {
         acknowledged_at: "2026-07-28T01:02:30.000Z",
       },
     ]);
+  });
+
+  it("rechecks chapter privacy at the final network fence", async () => {
+    await prepareFencedPush(store, executor);
+    const push = vi.fn();
+    // Exercise the final fence independently from the cleanup trigger, as if a
+    // legacy client left an operation behind during a concurrent privacy flip.
+    await executor.execute("DROP TRIGGER private_chapter_transport_cleanup");
+    await executor.execute(
+      "UPDATE chapters SET privacy_mode = 'local_only', privacy_revision = 2 WHERE id = ?",
+      [OBJECT_ID],
+    );
+
+    await expect(
+      store.pushProjectionOperationFenced(fencedPushInput(), push),
+    ).resolves.toMatchObject({ status: "blocked", reason: "chapter_local_only" });
+    expect(push).not.toHaveBeenCalled();
   });
 
   it("does not invoke the network callback when the base or settled checkpoint drifts", async () => {

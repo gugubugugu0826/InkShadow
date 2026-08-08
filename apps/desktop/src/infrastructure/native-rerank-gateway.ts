@@ -1,5 +1,6 @@
 import type {
   NativeGatewayAuthenticationMode,
+  NativeModelDispatchScope,
   NativeGatewayProviderKind,
 } from "./native-model-gateway-contract";
 
@@ -19,6 +20,7 @@ export interface NativeRerankInput {
   readonly query: string;
   readonly documents: readonly string[];
   readonly topN: number;
+  readonly dispatchScope: NativeModelDispatchScope;
 }
 
 export interface NativeRerankScore {

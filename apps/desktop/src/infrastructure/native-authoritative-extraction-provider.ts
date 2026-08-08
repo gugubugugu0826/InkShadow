@@ -1,6 +1,6 @@
-import type { ContentHasher } from "@inkshadow/application";
+import type { ChapterRepository, ContentHasher } from "@inkshadow/application";
 import { inspectGovernedExtensionProviderUrl } from "@inkshadow/data";
-import type { UuidV7Generator } from "@inkshadow/domain";
+import { parseUuidV7 as parseDomainUuid, type UuidV7Generator } from "@inkshadow/domain";
 import {
   err,
   ok,
@@ -21,7 +21,13 @@ import {
 
 import type { CredentialStore, NativeModelGatewayClient, NativeModelMessage } from "./runtime";
 import type { ModelCenterStore, ModelProfile } from "./model-center-store";
+import { resolveModelProfileGatewayConfig } from "./model-profile-gateway-config";
+import type { ModelHubStore } from "./model-hub-store";
 import type { ModelRoleRoute, ModelRoutingStore } from "./model-routing-store";
+import {
+  projectContextDispatchScope,
+  type ProjectContextPrivacyAuthority,
+} from "./project-context-privacy-authority";
 
 const PROMPT_REGISTRY_ID = "authoritative.extraction";
 const PROMPT_VERSION = 1;
@@ -51,11 +57,17 @@ export const AUTHORITATIVE_EXTRACTION_PROMPT_REGISTRY_BODY = [
 
 interface ConfiguredRouteDependencies {
   readonly modelCenter: Pick<ModelCenterStore, "findByProviderId">;
+  readonly modelHub: Pick<ModelHubStore, "findConnection">;
   readonly modelRouting: Pick<ModelRoutingStore, "findRoute">;
   readonly credentials: Pick<CredentialStore, "getSummary">;
   readonly gateway: Pick<NativeModelGatewayClient, "available" | "generate" | "cancelGeneration">;
   readonly hasher: ContentHasher;
   readonly ids: UuidV7Generator;
+  readonly chapters?: Pick<ChapterRepository, "findById">;
+  readonly projectContextPrivacy?: Pick<
+    ProjectContextPrivacyAuthority,
+    "inspect" | "assertChapterMatches" | "assertRouteEligible"
+  >;
 }
 
 interface ResolvedProviderRoute {
@@ -123,6 +135,13 @@ export async function resolveConfiguredAuthoritativeExtractionProvider(
       dependencies.ids,
       resolved,
       provenance.value,
+      {
+        modelCenter: dependencies.modelCenter,
+        modelHub: dependencies.modelHub,
+        credentials: dependencies.credentials,
+      },
+      dependencies.chapters,
+      dependencies.projectContextPrivacy,
     ),
     provenance: provenance.value,
     goldenSuite,
@@ -139,6 +158,15 @@ export class NativeAuthoritativeExtractionProvider implements AuthoritativeExtra
     private readonly ids: UuidV7Generator,
     private readonly route: ResolvedProviderRoute,
     private readonly provenance: AuthoritativeExtractionProvenance,
+    private readonly profileDependencies: Pick<
+      ConfiguredRouteDependencies,
+      "modelCenter" | "modelHub" | "credentials"
+    >,
+    private readonly chapters?: Pick<ChapterRepository, "findById">,
+    private readonly projectContextPrivacy?: Pick<
+      ProjectContextPrivacyAuthority,
+      "inspect" | "assertChapterMatches" | "assertRouteEligible"
+    >,
   ) {}
 
   public async generate(request: AuthoritativeExtractionProviderRequest, signal: AbortSignal) {
@@ -154,6 +182,34 @@ export class NativeAuthoritativeExtractionProvider implements AuthoritativeExtra
     }
     if (signal.aborted) {
       return err(providerFailure("provider_cancelled", false, false));
+    }
+    if (this.projectContextPrivacy === undefined) {
+      return err(providerFailure("private_chapter_check_unavailable", false, false));
+    }
+    let projectPrivacy;
+    try {
+      projectPrivacy = await this.projectContextPrivacy.inspect(String(request.source.projectId));
+    } catch {
+      return err(providerFailure("private_chapter_check_unavailable", false, false));
+    }
+    if (this.route.location === "remote") {
+      const chapterId = parseDomainUuid(String(request.source.chapterId));
+      if (!chapterId.ok || this.chapters === undefined) {
+        return err(providerFailure("private_chapter_check_unavailable", false, false));
+      }
+      const chapter = await this.chapters.findById(chapterId.value);
+      if (!chapter.ok || chapter.value === null) {
+        return err(providerFailure("private_chapter_check_unavailable", false, false));
+      }
+      if (chapter.value.isLocalOnly) {
+        return err(providerFailure("private_chapter_local_only", false, false));
+      }
+      try {
+        this.projectContextPrivacy.assertChapterMatches(projectPrivacy, chapter.value);
+        this.projectContextPrivacy.assertRouteEligible(projectPrivacy, false);
+      } catch {
+        return err(providerFailure("private_chapter_local_only", false, false));
+      }
     }
 
     const messages = buildMessages(request);
@@ -174,14 +230,30 @@ export class NativeAuthoritativeExtractionProvider implements AuthoritativeExtra
     };
     signal.addEventListener("abort", cancel, { once: true });
     try {
+      await request.assertProjectContextCurrent?.();
+      if (isAborted(signal)) {
+        return err(providerFailure("provider_cancelled", false, false));
+      }
+      const profile = await this.profileDependencies.modelCenter.findByProviderId(
+        this.route.profile.providerId,
+      );
+      const resolvedEndpoint =
+        profile?.selectedModel === this.route.modelId
+          ? await resolveModelProfileGatewayConfig(this.profileDependencies, profile)
+          : null;
+      const destination =
+        resolvedEndpoint === null ? null : inspectProfileDestination(resolvedEndpoint.config);
+      if (
+        resolvedEndpoint === null ||
+        destination?.location !== this.route.location ||
+        destination.canonicalBaseUrl !== this.route.canonicalBaseUrl
+      ) {
+        return err(providerFailure("provider_configuration_changed", true, false));
+      }
       const generated = await this.gateway.generate({
+        dispatchScope: projectContextDispatchScope(projectPrivacy),
         generationId,
-        config: {
-          providerId: this.route.profile.providerId,
-          provider: this.route.profile.provider,
-          baseUrl: this.route.canonicalBaseUrl,
-          authentication: this.route.profile.authentication,
-        },
+        config: resolvedEndpoint.config,
         model: this.route.modelId,
         messages,
         maxOutputTokens: this.route.maximumOutputTokens,
@@ -211,14 +283,12 @@ async function resolveProviderRoute(
 ): Promise<ResolvedProviderRoute | null> {
   for (const target of routeTargets(route)) {
     const profile = await dependencies.modelCenter.findByProviderId(target.providerId);
-    if (
-      profile?.selectedModel !== target.modelId ||
-      profile.pricing === null ||
-      !(await credentialIsReady(profile, dependencies.credentials))
-    ) {
+    if (profile?.selectedModel !== target.modelId || profile.pricing === null) {
       continue;
     }
-    const destination = inspectProfileDestination(profile);
+    const resolvedEndpoint = await resolveModelProfileGatewayConfig(dependencies, profile);
+    if (resolvedEndpoint === null) continue;
+    const destination = inspectProfileDestination(resolvedEndpoint.config);
     if (destination === null) {
       continue;
     }
@@ -351,32 +421,24 @@ function routeTargets(
   ]);
 }
 
-async function credentialIsReady(
-  profile: ModelProfile,
-  credentials: Pick<CredentialStore, "getSummary">,
-): Promise<boolean> {
-  if (profile.authentication === "none") {
-    return true;
-  }
-  try {
-    return (await credentials.getSummary(profile.providerId)).configured;
-  } catch {
-    return false;
-  }
-}
-
-function inspectProfileDestination(profile: ModelProfile): Readonly<{
+function inspectProfileDestination(
+  config: Readonly<{
+    provider: string;
+    baseUrl: string;
+    authentication: string;
+  }>,
+): Readonly<{
   location: "loopback" | "remote";
   canonicalBaseUrl: string;
 }> | null {
   let canonicalBaseUrl: string;
   try {
-    canonicalBaseUrl = new URL(profile.baseUrl).toString();
+    canonicalBaseUrl = new URL(config.baseUrl).toString();
   } catch {
     return null;
   }
   const loopback = inspectGovernedExtensionProviderUrl(canonicalBaseUrl, "loopback");
-  if (loopback.ok && profile.provider === "ollama" && profile.authentication === "none") {
+  if (loopback.ok && config.provider === "ollama" && config.authentication === "none") {
     return Object.freeze({
       location: "loopback",
       canonicalBaseUrl: loopback.canonicalUrl,
@@ -384,8 +446,9 @@ function inspectProfileDestination(profile: ModelProfile): Readonly<{
   }
   const remote = inspectGovernedExtensionProviderUrl(canonicalBaseUrl, "remote");
   return remote.ok &&
-    profile.provider === "open_ai_compatible" &&
-    profile.authentication === "bearer_keyring"
+    config.provider === "open_ai_compatible" &&
+    (config.authentication === "bearer_keyring" ||
+      config.authentication === "custom_header_keyring")
     ? Object.freeze({
         location: "remote" as const,
         canonicalBaseUrl: remote.canonicalUrl,

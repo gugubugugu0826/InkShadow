@@ -23,6 +23,7 @@ import type {
   AcceptCandidateCommit,
   AiCandidateRepository,
   ChapterRepository,
+  ChapterPrivacyRepository,
   ChapterVersionRepository,
   ContentCommitRepository,
   CreateChapterCommit,
@@ -185,13 +186,16 @@ export class InMemoryCandidateRepository implements AiCandidateRepository {
     return Promise.resolve(ok(this.candidates.get(id) ?? null));
   }
 
-  save(candidate: AiCandidate, expectedStatus: AiCandidateStatus): Promise<Result<void, AppError>> {
-    return Promise.resolve(this.commitExpected(candidate, expectedStatus));
+  save(
+    candidate: AiCandidate,
+    expected: Readonly<{ status: AiCandidateStatus; revision: number }>,
+  ): Promise<Result<void, AppError>> {
+    return Promise.resolve(this.commitExpected(candidate, expected));
   }
 
   commitExpected(
     candidate: AiCandidate,
-    expectedStatus: AiCandidateStatus,
+    expected: Readonly<{ status: AiCandidateStatus; revision: number }>,
   ): Result<void, AppError> {
     const existing = this.candidates.get(candidate.id);
     if (existing === undefined) {
@@ -202,11 +206,25 @@ export class InMemoryCandidateRepository implements AiCandidateRepository {
         }),
       );
     }
-    if (existing.status !== expectedStatus) {
+    if (existing.status !== expected.status) {
       return err(
         new AppError({
           code: "CANDIDATE_ALREADY_DECIDED",
           message: "Candidate status changed.",
+        }),
+      );
+    }
+    if (existing.revision !== expected.revision) {
+      return err(
+        new AppError({
+          code: "VERSION_CONFLICT",
+          message: "Candidate revision changed.",
+          details: {
+            entityType: "candidate",
+            candidateId: candidate.id,
+            expectedRevision: expected.revision,
+            actualRevision: existing.revision,
+          },
         }),
       );
     }
@@ -218,6 +236,7 @@ export class InMemoryCandidateRepository implements AiCandidateRepository {
 export class InMemoryContentStore
   implements
     ChapterRepository,
+    ChapterPrivacyRepository,
     ChapterVersionRepository,
     RecoveryDraftRepository,
     ContentCommitRepository
@@ -243,6 +262,32 @@ export class InMemoryContentStore
 
   listByChapterId(chapterId: UuidV7): Promise<Result<readonly ChapterVersion[], AppError>> {
     return Promise.resolve(ok(this.versions.get(chapterId) ?? []));
+  }
+
+  updatePrivacy(
+    chapter: Chapter,
+    expectedPrivacyRevision: number,
+  ): ReturnType<ChapterPrivacyRepository["updatePrivacy"]> {
+    const existing = this.chapters.get(chapter.id);
+    if (existing === undefined || existing.privacyRevision !== expectedPrivacyRevision) {
+      return Promise.resolve(
+        err(
+          new AppError({
+            code: "VERSION_CONFLICT",
+            message: "Chapter privacy revision changed.",
+          }),
+        ),
+      );
+    }
+    this.chapters.set(chapter.id, chapter);
+    return Promise.resolve(
+      ok({
+        chapter,
+        blockedProjectionCount: 0,
+        removedOutboxOperationCount: 0,
+        acknowledgedCloudEvidenceCount: 0,
+      }),
+    );
   }
 
   findVersionById(id: UuidV7): Promise<Result<ChapterVersion | null, AppError>> {
@@ -341,10 +386,10 @@ export class InMemoryContentStore
       );
     }
 
-    const candidateResult = this.candidates.commitExpected(
-      commit.candidate,
-      commit.expectedCandidateStatus,
-    );
+    const candidateResult = this.candidates.commitExpected(commit.candidate, {
+      status: commit.expectedCandidateStatus,
+      revision: commit.expectedCandidateRevision,
+    });
     if (!candidateResult.ok) {
       return Promise.resolve(candidateResult);
     }

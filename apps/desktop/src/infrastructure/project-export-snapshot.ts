@@ -93,9 +93,18 @@ export interface ProjectExportSnapshotDependencies {
   readonly clock: Clock;
 }
 
+export interface ProjectExportPrivacyOptions {
+  /**
+   * Local-only chapters are excluded unless the user explicitly opts in at
+   * the local export boundary. Callers must never infer this from file type.
+   */
+  readonly includeLocalOnlyChapters?: boolean;
+}
+
 export async function collectProjectExportSnapshot(
   dependencies: ProjectExportSnapshotDependencies,
   projectId: UuidV7,
+  options: ProjectExportPrivacyOptions = {},
 ): Promise<Result<ProjectExportSnapshot, AppError>> {
   try {
     const projectResult = await dependencies.projects.findById(projectId);
@@ -162,6 +171,16 @@ export async function collectProjectExportSnapshot(
       return storySourceError("consistency_review", consistencyResult.error);
     }
 
+    const localOnlyChapterIds = new Set<string>(
+      chaptersResult.value
+        .filter(({ privacyMode }) => privacyMode === "local_only")
+        .map(({ id }) => id),
+    );
+    const includeLocalOnly = options.includeLocalOnlyChapters === true;
+    const exportableGenerationRuns = includeLocalOnly
+      ? generationRuns
+      : generationRuns.filter(({ chapterId }) => !localOnlyChapterIds.has(chapterId));
+
     const limitFailure =
       enforceLimit("chapters", chaptersResult.value.length, PROJECT_EXPORT_LIMITS.chapters) ??
       enforceLimit(
@@ -179,21 +198,28 @@ export async function collectProjectExportSnapshot(
         consistencyResult.value.length,
         PROJECT_EXPORT_LIMITS.reviewItemsPerKind,
       ) ??
-      enforceLimit("generation_runs", generationRuns.length, PROJECT_EXPORT_LIMITS.generationRuns);
+      enforceLimit(
+        "generation_runs",
+        exportableGenerationRuns.length,
+        PROJECT_EXPORT_LIMITS.generationRuns,
+      );
     if (limitFailure !== null) {
       return err(limitFailure);
     }
 
     const aiUsage = await collectSafeGenerationRuns(
       dependencies.generationGovernance,
-      generationRuns,
+      exportableGenerationRuns,
     );
     if (!aiUsage.ok) {
       return aiUsage;
     }
 
     const chapters = chaptersResult.value
-      .filter((chapter) => chapter.status === "active")
+      .filter(
+        (chapter) =>
+          chapter.status === "active" && (includeLocalOnly || chapter.privacyMode !== "local_only"),
+      )
       .map((chapter) => chapter.toSnapshot())
       .sort(compareCreatedSnapshot);
     const formalRecords = formalRecordsResult.value
@@ -206,9 +232,15 @@ export async function collectProjectExportSnapshot(
       );
     const extraction = extractionResult.value
       .map((item) => item.toSnapshot())
+      .filter(
+        ({ sourceChapterId }) => includeLocalOnly || !localOnlyChapterIds.has(sourceChapterId),
+      )
       .sort(compareCreatedSnapshot);
     const consistency = consistencyResult.value
       .map((item) => item.toSnapshot())
+      .filter(
+        ({ sourceChapterId }) => includeLocalOnly || !localOnlyChapterIds.has(sourceChapterId),
+      )
       .sort(compareCreatedSnapshot);
 
     return ok({

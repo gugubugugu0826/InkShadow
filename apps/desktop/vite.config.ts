@@ -7,7 +7,60 @@ const ASYNC_CHUNK_BUDGET_BYTES = 500 * 1024;
 const CSS_ASSET_BUDGET_BYTES = 128 * 1024;
 const WORKER_ASSET_BUDGET_BYTES = 1_536 * 1024;
 const GENERAL_ASSET_BUDGET_BYTES = 2 * 1024 * 1024;
-const TOTAL_FRONTEND_BUDGET_BYTES = 6 * 1024 * 1024;
+const PDFJS_WORKER_LICENSE_BANNER = `/*!
+ * @licstart The following is the entire license notice for the
+ * JavaScript code in this page
+ *
+ * Copyright 2024 Mozilla Foundation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * @licend The above is the entire license notice for the
+ * JavaScript code in this page
+ */
+/**
+ * pdfjsVersion = 6.1.200
+ * pdfjsBuild = 6353acefe
+ */`;
+// DESIGN v0.3.1b adds the complete three-entry creation and governed-memory
+// flows. Keep every per-chunk ceiling unchanged while allowing only 128 KiB
+// of explicit aggregate growth beyond the previous 6 MiB cap.
+const TOTAL_FRONTEND_BUDGET_BYTES = (6 * 1024 + 128) * 1024;
+
+function isPdfJsWorkerModule(facadeModuleId: string | null): boolean {
+  return (
+    facadeModuleId?.replaceAll("\\", "/").includes("/pdfjs-dist/build/pdf.worker.min.mjs") === true
+  );
+}
+
+function preservePdfJsWorkerLicense(): Plugin {
+  return {
+    name: "inkshadow-pdfjs-worker-license",
+    apply: "build",
+    renderChunk: {
+      order: "post",
+      handler(code, chunk) {
+        if (!isPdfJsWorkerModule(chunk.facadeModuleId) || code.includes("@licstart")) {
+          return null;
+        }
+        return {
+          code: `${PDFJS_WORKER_LICENSE_BANNER}\n${code}`,
+          map: null,
+        };
+      },
+    },
+  };
+}
 
 function enforceDesktopBundlePolicy(): Plugin {
   return {
@@ -15,6 +68,7 @@ function enforceDesktopBundlePolicy(): Plugin {
     apply: "build",
     generateBundle(_options, bundle) {
       let totalBytes = 0;
+      const outputSizes: { readonly fileName: string; readonly bytes: number }[] = [];
       for (const output of Object.values(bundle)) {
         if (output.fileName.endsWith(".map")) {
           throw new Error(`Source map ${output.fileName} must not ship in a desktop release.`);
@@ -22,6 +76,7 @@ function enforceDesktopBundlePolicy(): Plugin {
         if (output.type === "chunk") {
           const bytes = Buffer.byteLength(output.code, "utf8");
           totalBytes += bytes;
+          outputSizes.push({ fileName: output.fileName, bytes });
           const maximum = output.isEntry ? ENTRY_CHUNK_BUDGET_BYTES : ASYNC_CHUNK_BUDGET_BYTES;
           const nearBudget = bytes > maximum * 0.9;
           const largestModules = nearBudget
@@ -55,6 +110,7 @@ function enforceDesktopBundlePolicy(): Plugin {
             ? Buffer.byteLength(output.source, "utf8")
             : output.source.byteLength;
         totalBytes += bytes;
+        outputSizes.push({ fileName: output.fileName, bytes });
         const maximum = output.fileName.endsWith(".css")
           ? CSS_ASSET_BUDGET_BYTES
           : output.fileName.includes(".worker.")
@@ -67,8 +123,13 @@ function enforceDesktopBundlePolicy(): Plugin {
         }
       }
       if (totalBytes > TOTAL_FRONTEND_BUDGET_BYTES) {
+        const largestOutputs = outputSizes
+          .sort((left, right) => right.bytes - left.bytes)
+          .slice(0, 12)
+          .map(({ fileName, bytes }) => `${fileName} (${String(bytes)} bytes)`)
+          .join(", ");
         throw new Error(
-          `The desktop frontend is ${String(totalBytes)} bytes and exceeds its ${String(TOTAL_FRONTEND_BUDGET_BYTES)} byte total release budget.`,
+          `The desktop frontend is ${String(totalBytes)} bytes and exceeds its ${String(TOTAL_FRONTEND_BUDGET_BYTES)} byte total release budget. Largest outputs: ${largestOutputs}`,
         );
       }
     },
@@ -109,6 +170,12 @@ export default defineConfig({
         find: "@inkshadow/import-export/docx-export",
         replacement: fileURLToPath(
           new URL("../../packages/import-export/src/docx-export.ts", import.meta.url),
+        ),
+      },
+      {
+        find: "@inkshadow/import-export/epub-export",
+        replacement: fileURLToPath(
+          new URL("../../packages/import-export/src/epub-export.ts", import.meta.url),
         ),
       },
       {
@@ -167,6 +234,15 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 1420,
     strictPort: true,
+  },
+  worker: {
+    plugins: () => [preservePdfJsWorkerLicense()],
+    rollupOptions: {
+      output: {
+        banner: ({ facadeModuleId }) =>
+          isPdfJsWorkerModule(facadeModuleId) ? PDFJS_WORKER_LICENSE_BANNER : "",
+      },
+    },
   },
   build: {
     target: "es2022",

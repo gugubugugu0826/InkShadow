@@ -24,12 +24,15 @@ import {
   type ChapterSummaryModelOutput,
   type ChapterSummaryModelPort,
 } from "./chapter-summary-service";
+import { ProjectContextPrivacyAuthority } from "./project-context-privacy-authority";
 
 const ids = {
   project: uuid(1),
   chapter: uuid(2),
   version1: uuid(3),
   version2: uuid(4),
+  privateChapter: uuid(5),
+  privateVersion: uuid(6),
 };
 
 describe("ChapterSummaryService", () => {
@@ -140,6 +143,29 @@ describe("ChapterSummaryService", () => {
     expect(afterClear.value.every((fact) => fact.toSnapshot().status === "deprecated")).toBe(true);
   });
 
+  it("does not repeat an already-current summary during historical recovery", async () => {
+    const harness = await createHarness("Stable historical chapter text.");
+    await harness.service.summarizeSavedVersion({
+      projectId: ids.project,
+      chapterId: ids.chapter,
+      versionId: ids.version1,
+      trigger: "user_rebuild",
+    });
+
+    await expect(
+      harness.service.summarizeSavedVersion({
+        projectId: ids.project,
+        chapterId: ids.chapter,
+        versionId: ids.version1,
+        trigger: "historical_backfill",
+      }),
+    ).resolves.toMatchObject({
+      status: "already_current",
+      code: "CHAPTER_SUMMARY_ALREADY_CURRENT",
+    });
+    expect(harness.model.providerCalls).toBe(1);
+  });
+
   it("does not persist a result when the saved version changes during the model call", async () => {
     const harness = await createHarness("Version one.");
     harness.model.beforeReturn = async () => {
@@ -164,6 +190,29 @@ describe("ChapterSummaryService", () => {
     const facts = await harness.store.listByProjectId(storyUuid(ids.project));
     if (!facts.ok) throw facts.error;
     expect(facts.value).toHaveLength(0);
+  });
+
+  it("blocks a standard target when another retained chapter is local-only", async () => {
+    const harness = await createHarness("Standard target chapter.");
+    harness.chapters.set(
+      ids.privateChapter,
+      makeSiblingPrivateChapter(ids.privateChapter, ids.privateVersion),
+    );
+    harness.model.verifiedLocalEligible = false;
+
+    const receipt = await harness.service.summarizeSavedVersion({
+      projectId: ids.project,
+      chapterId: ids.chapter,
+      versionId: ids.version1,
+      trigger: "user_rebuild",
+    });
+
+    expect(receipt).toMatchObject({
+      status: "failed",
+      code: "PRIVATE_CHAPTER_LOCAL_ONLY",
+    });
+    expect(harness.model.lastInput).toMatchObject({ requiresVerifiedLocal: true });
+    expect(harness.model.providerCalls).toBe(0);
   });
 
   it("skips clearly when no model is configured and bounds source size before dispatch", async () => {
@@ -221,21 +270,26 @@ async function createHarness(content: string) {
     ids: storyIds,
   });
   const model = new SummaryModel();
+  const chapterRepository = new ChapterMapRepository(chapters);
+  const hasher = new CryptoContentHasher();
   const service = new ChapterSummaryService({
-    chapters: new ChapterMapRepository(chapters),
+    chapters: chapterRepository,
     chapterVersions: new VersionMapRepository(versions),
     facts: store,
     factService,
-    hasher: new CryptoContentHasher(),
+    hasher,
     model,
     preferences: new BrowserChapterSummaryPreferenceStore(new MemoryStorage()),
+    projectContextPrivacy: new ProjectContextPrivacyAuthority(chapterRepository, hasher),
   });
   return { service, store, model, chapters, versions };
 }
 
 class SummaryModel implements ChapterSummaryModelPort {
   public callCount = 0;
+  public providerCalls = 0;
   public unavailable = false;
+  public verifiedLocalEligible = true;
   public beforeReturn: (() => Promise<void>) | null = null;
   public lastInput: ChapterSummaryModelInput | null = null;
 
@@ -248,7 +302,10 @@ class SummaryModel implements ChapterSummaryModelPort {
         "请先为长程记忆压缩配置模型。",
       );
     }
+    await input.assertProjectPrivacyCurrent?.();
     await input.assertSourceCurrent();
+    await input.assertProjectPrivacyCurrent?.(this.verifiedLocalEligible);
+    this.providerCalls += 1;
     await this.beforeReturn?.();
     const evidenceId = input.segments[0]?.evidenceId;
     if (evidenceId === undefined) throw new Error("missing segment");
@@ -326,6 +383,20 @@ function makeChapter(versionId: string, content: string, revision = 1): Chapter 
     createdAt: timestamp("2026-08-01T00:00:00.000Z"),
     updatedAt: timestamp(revision === 1 ? "2026-08-01T00:00:00.000Z" : "2026-08-01T00:01:00.000Z"),
     trashedAt: null,
+  });
+  if (!created.ok) throw created.error;
+  return created.value;
+}
+
+function makeSiblingPrivateChapter(chapterId: string, versionId: string): Chapter {
+  const created = Chapter.create({
+    id: domainUuid(chapterId),
+    projectId: domainUuid(ids.project),
+    title: "Private sibling",
+    content: "This retained sibling must stay local.",
+    initialVersionId: domainUuid(versionId),
+    privacyMode: "local_only",
+    now: timestamp("2026-08-01T00:00:00.000Z"),
   });
   if (!created.ok) throw created.error;
   return created.value;

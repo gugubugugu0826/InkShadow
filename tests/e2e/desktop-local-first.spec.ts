@@ -14,7 +14,11 @@ test.beforeEach(async ({ page }) => {
   });
   await page.reload();
   await expect(page.getByRole("heading", { level: 1, name: "项目" })).toBeVisible();
-  await expect(page.getByText("浏览器开发模式", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("仅开发环境：当前数据只保存在此浏览器中，不代表桌面正式版的持久化能力。", {
+      exact: true,
+    }),
+  ).toBeVisible();
   await expect(page.getByRole("main")).not.toContainText("登录");
 });
 
@@ -44,6 +48,10 @@ test("manages a project through rename, archive, trash, and restore", async ({ p
 
   await page.getByRole("tab", { name: "进行中" }).click();
   await page.getByRole("button", { name: "移到回收站" }).click();
+  await page
+    .getByRole("dialog", { name: /移到回收站/u })
+    .getByRole("button", { name: "移到回收站", exact: true })
+    .click();
   await page.getByRole("tab", { name: "回收站" }).click();
   await expect(
     page.getByRole("heading", {
@@ -66,7 +74,7 @@ test("manages a project through rename, archive, trash, and restore", async ({ p
 
 test("autosaves, recovers a crash draft, and isolates AI candidates", async ({ browser, page }) => {
   await createProject(page, "编辑器验收长篇");
-  await page.getByRole("link", { name: "打开" }).click();
+  await page.getByRole("link", { name: "打开", exact: true }).click();
   await createChapter(page, "第一章 风起");
 
   const editor = page.getByRole("textbox", { name: "章节正文" });
@@ -78,18 +86,19 @@ test("autosaves, recovers a crash draft, and isolates AI candidates", async ({ b
   await expect(page.getByRole("textbox", { name: "章节正文" })).toHaveValue(stableBody);
 
   await page.getByRole("button", { name: "生成示例建议" }).click();
-  const preflightDialog = page.getByRole("dialog", { name: "生成前检查" });
-  await expect(preflightDialog.getByText("检查通过", { exact: true })).toBeVisible();
-  await expect(preflightDialog.getByText("USD 0", { exact: true })).toBeVisible();
-  await preflightDialog.getByRole("button", { name: "确认并开始" }).click();
   await expect(page.getByRole("textbox", { name: "章节正文" })).toHaveValue(stableBody);
+  await expect(
+    page.getByText(/当前使用本机示例帮助检查流程，不会联网；只有你接受后/u),
+  ).toBeVisible();
   await expect(page.getByText("等待决定", { exact: true })).toBeVisible();
   await page.getByText("费用与调用记录（高级）", { exact: true }).click();
   await expect(page.getByText("尝试上界累计估算", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "比较 AI 建议" }).click();
   const candidateReview = page.getByRole("dialog", { name: "比较 AI 建议与正文" });
-  await candidateReview.getByRole("button", { name: "覆盖全文并创建版本" }).click();
-  await expect(page.getByRole("textbox", { name: "章节正文" })).toHaveValue(/【本地演示候选】/);
+  await candidateReview.getByRole("button", { name: "插入光标并创建版本", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "章节正文" })).toHaveValue(
+    `${stableBody}\n\n【本地演示候选】暮色沿着窗棂缓慢下沉，人物在未说出口的决定前停了一瞬。`,
+  );
   const assistant = page.getByRole("complementary", { name: "AI 创作助手" });
   await expect(assistant.getByRole("button", { name: "继续创作" })).toBeVisible();
 
@@ -166,7 +175,7 @@ test("imports into the first chapter and exports validated artifacts and diagnos
   page,
 }) => {
   await createProject(page, "导入导出验收长篇");
-  await page.getByRole("link", { name: "打开" }).click();
+  await page.getByRole("link", { name: "打开", exact: true }).click();
   await createChapter(page, "第一章");
   const exportBody = "这是用于导出校验的正文。";
   await page.getByRole("textbox", { name: "章节正文" }).fill(exportBody);
@@ -225,6 +234,21 @@ test("imports into the first chapter and exports validated artifacts and diagnos
   if (process.env.INKSHADOW_PDF_QA_OUTPUT !== undefined) {
     await pdfDownload.saveAs(process.env.INKSHADOW_PDF_QA_OUTPUT);
   }
+
+  // Exercise the production PDF.js Web Worker asset as well as the Node-side
+  // structural reader above. The exported document is intentionally image-only,
+  // so a safe import must finish parsing and report that OCR is required.
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "图像型安全检查.pdf",
+    mimeType: "application/pdf",
+    buffer: pdf,
+  });
+  const pdfIssue = page
+    .getByRole("list", { name: "预检提示" })
+    .getByRole("listitem")
+    .filter({ hasText: "图像型安全检查.pdf" });
+  await expect(pdfIssue).toContainText("PDF 没有可提取文本；扫描件与 OCR 暂不支持。");
+  await expect(pdfIssue).toContainText("PDF_TEXT_UNAVAILABLE");
 
   const bundleDownloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "下载 Bundle" }).click();
@@ -309,7 +333,7 @@ async function createChapter(page: Page, title: string): Promise<void> {
   const dialog = page.getByRole("dialog", { name: "新建章节" });
   await dialog.getByRole("textbox", { name: "章节标题" }).fill(title);
   await dialog.getByRole("button", { name: "创建章节" }).click();
-  await page.getByRole("link", { name: "继续写作" }).click();
+  await page.getByLabel(title).getByRole("link", { name: "继续写作", exact: true }).click();
   await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
 }
 

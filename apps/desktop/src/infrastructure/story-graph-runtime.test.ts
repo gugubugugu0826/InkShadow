@@ -29,6 +29,15 @@ const migration = [
   readWorkspaceFile("packages", "story-core", "migrations", "0001_story_core.sql"),
   readWorkspaceFile("packages", "data", "migrations", "0020_graph_rag_projection.sql"),
   readWorkspaceFile("packages", "data", "migrations", "0023_authoritative_story_graph_epoch.sql"),
+  // This deliberately small graph fixture does not install the sync tables that
+  // 0038's transport guards depend on, but it must still reflect the current
+  // authoritative chapters shape consumed by SqliteChapterRepository.
+  `ALTER TABLE chapters
+     ADD COLUMN privacy_mode TEXT NOT NULL DEFAULT 'standard'
+       CHECK (privacy_mode IN ('standard', 'local_only'));
+   ALTER TABLE chapters
+     ADD COLUMN privacy_revision INTEGER NOT NULL DEFAULT 1
+       CHECK (privacy_revision BETWEEN 1 AND 9007199254740991);`,
 ].join("\n");
 
 const PROJECT_ID = "018f0d7a-3b2c-7abc-8def-000000000001";

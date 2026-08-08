@@ -608,6 +608,7 @@ export class RepositoryStudioReviewCandidateVersions implements StudioReviewCand
     await this.requireStableBase(application, signal);
     const accepted = await this.options.acceptCandidate.execute({
       candidateId,
+      expectedCandidateRevision: candidate.revision,
       strategy: { kind: "accept_all" },
     });
     if (!accepted.ok) {

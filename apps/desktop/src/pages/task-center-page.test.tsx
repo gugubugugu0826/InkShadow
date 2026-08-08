@@ -1,9 +1,15 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Notification, Task, type Result, type TaskEngineError } from "@inkshadow/task-engine";
+import {
+  Notification,
+  Task,
+  createTaskFailure,
+  type Result,
+  type TaskEngineError,
+} from "@inkshadow/task-engine";
 import { ToastProvider } from "@inkshadow/ui";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { DesktopRoutes } from "../app";
 import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
@@ -45,6 +51,57 @@ describe("TaskCenterPage", () => {
     const persisted = await reopened.taskCenter.load();
     expect(persisted.tasks[0]?.status).toBe("cancelled");
     expect(persisted.notifications[0]?.status).toBe("read");
+  });
+
+  it("retries the accepted正文 pipeline from its persisted metadata", async () => {
+    seedRetryingAcceptedVersionTask();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const startTask = vi.spyOn(runtime.taskCenter, "startTask");
+    const summary = vi.spyOn(runtime.story.chapterSummaries, "summarizeSavedVersion");
+    const storyState = vi.spyOn(runtime.story.continuousState, "extractSavedVersion");
+    const causal = vi.spyOn(runtime.story.causalProjector, "rebuildProject");
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    expect(await screen.findByText("等待重试")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "立即重试后台整理" }));
+
+    await waitFor(() => {
+      expect(startTask).toHaveBeenCalledTimes(1);
+    });
+    expect(startTask).toHaveBeenCalledWith(
+      uuid(10),
+      "desktop.accepted-version",
+      expect.any(String),
+      expect.any(String),
+    );
+    await waitFor(async () => {
+      const persisted = await runtime.taskCenter.load();
+      expect(persisted.tasks[0]?.status).not.toBe("queued");
+    });
+    expect(summary).not.toHaveBeenCalled();
+    expect(storyState).not.toHaveBeenCalled();
+    expect(causal).not.toHaveBeenCalled();
+  });
+
+  it("explains accepted正文 changes in user language and links to confirmation", async () => {
+    seedAcceptedVersionNotification();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    await user.click(await screen.findByRole("tab", { name: "通知 1" }));
+    expect(
+      await screen.findByRole("heading", {
+        name: "识别到 8 项变化，其中 1 项需要确认",
+      }),
+    ).toBeVisible();
+    expect(screen.getByRole("link", { name: "查看待确认设定" })).toHaveAttribute(
+      "href",
+      `/projects/${uuid(21)}/story`,
+    );
+    expect(screen.queryByText("story.accepted-version.completed")).not.toBeInTheDocument();
+    expect(screen.getByText("整理已接受的正文")).toBeVisible();
   });
 });
 
@@ -94,6 +151,96 @@ function seedTaskCenter(): void {
     JSON.stringify({
       schemaVersion: 1,
       tasks: [task.toSnapshot()],
+      notifications: [visible.toSnapshot()],
+    }),
+  );
+}
+
+function seedRetryingAcceptedVersionTask(): void {
+  const queued = expectOk(
+    Task.create({
+      id: uuid(10),
+      type: "story.accepted-version.process",
+      idempotencyKey: `story.accepted-version:${uuid(13)}`,
+      metadata: {
+        projectId: uuid(11),
+        chapterId: uuid(12),
+        versionId: uuid(13),
+        source: "candidate_accept",
+        acceptedCharacterCount: 128,
+        operation: "rebuild-derived-story-state",
+      },
+      priority: 75,
+      maxAttempts: 3,
+      now: INITIAL_TIME,
+    }),
+  );
+  const running = expectOk(
+    queued.claim({
+      ownerId: "desktop.test",
+      leaseToken: uuid(14),
+      now: "2026-07-26T00:00:01.000Z",
+      leaseExpiresAt: "2026-07-26T00:15:00.000Z",
+    }),
+  );
+  const failure = expectOk(
+    createTaskFailure({
+      code: "ACCEPTED_VERSION_PIPELINE_PARTIAL",
+      causeCode: "PIPELINE_STAGES_SEARCH",
+      retryable: true,
+      actions: ["RETRY", "OPEN_SETTINGS", "EXPORT_DIAGNOSTICS"],
+      requestId: "req-task-center-page-retry",
+    }),
+  );
+  const waiting = expectOk(
+    running.recordFailure({
+      leaseToken: uuid(14),
+      failure,
+      now: "2026-07-26T00:00:02.000Z",
+      retryAt: "2026-12-01T00:00:00.000Z",
+    }),
+  );
+  window.localStorage.setItem(
+    DEVELOPMENT_TASK_CENTER_KEY,
+    JSON.stringify({
+      schemaVersion: 1,
+      tasks: [waiting.toSnapshot()],
+      notifications: [],
+    }),
+  );
+}
+
+function seedAcceptedVersionNotification(): void {
+  const created = expectOk(
+    Notification.create({
+      id: uuid(20),
+      dedupeKey: "notification:accepted-version:test",
+      messageKey: "story.accepted-version.completed",
+      level: "inbox",
+      severity: "success",
+      route: { entityType: "task", entityId: uuid(24) },
+      metadata: {
+        taskType: "story.accepted-version.process",
+        projectId: uuid(21),
+        chapterId: uuid(22),
+        versionId: uuid(23),
+        pipelineStatus: "completed",
+        detectedCount: 8,
+        needsConfirmationCount: 1,
+      },
+      requiresResolution: false,
+      expiresAt: null,
+      now: INITIAL_TIME,
+    }),
+  );
+  const visible = expectOk(
+    expectOk(created.queue("2026-07-26T00:00:00.500Z")).markVisible("2026-07-26T00:00:01.000Z"),
+  );
+  window.localStorage.setItem(
+    DEVELOPMENT_TASK_CENTER_KEY,
+    JSON.stringify({
+      schemaVersion: 1,
+      tasks: [],
       notifications: [visible.toSnapshot()],
     }),
   );

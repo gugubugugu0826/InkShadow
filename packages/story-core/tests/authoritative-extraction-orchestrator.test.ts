@@ -213,7 +213,37 @@ describe("authoritative extraction durable coordinator", () => {
     expect(provider.calls).toBe(0);
   });
 
-  function createCoordinator(enabled: boolean): AuthoritativeExtractionCoordinator {
+  it("captures project privacy before loading正文 and blocks a private remote project", async () => {
+    provider.handler = (request) => Promise.resolve(ok(validProviderOutput(request)));
+    const evaluationCoordinator = createCoordinator(true);
+    unwrap(await evaluationCoordinator.runGoldenSuite(goldenSuite()));
+    provider.calls = 0;
+    sourceReader.loadCalls = 0;
+    let captureCalls = 0;
+    const coordinator = createCoordinator(true, async () => {
+      captureCalls += 1;
+      throw Object.assign(new Error("private project requires local execution"), {
+        code: "PRIVATE_CHAPTER_LOCAL_ONLY",
+      });
+    });
+
+    unwrap(await coordinator.runCycle(PROJECT_ID, { online: true, maximumJobs: 1 }));
+
+    expect(captureCalls).toBe(1);
+    expect(sourceReader.loadCalls).toBe(0);
+    expect(provider.calls).toBe(0);
+    expect(unwrap(await repository.listJobsByProject(asUuid(PROJECT_ID)))).toMatchObject([
+      {
+        state: "failed_retryable",
+        failure: { code: "project_context_privacy_unavailable", retryable: true },
+      },
+    ]);
+  });
+
+  function createCoordinator(
+    enabled: boolean,
+    captureProjectContextAuthority?: (projectId: UuidV7) => Promise<() => Promise<void>>,
+  ): AuthoritativeExtractionCoordinator {
     return new AuthoritativeExtractionCoordinator({
       enabled,
       executionMode: "remote",
@@ -230,12 +260,15 @@ describe("authoritative extraction durable coordinator", () => {
       workerId: "authoritative.worker",
       leaseDurationMs: 60_000,
       maximumAttempts: 2,
+      captureProjectContextAuthority:
+        captureProjectContextAuthority ?? (() => Promise.resolve(() => Promise.resolve())),
     });
   }
 });
 
 class MutableSourceReader implements AuthoritativeExtractionSourceReader {
   public listCalls = 0;
+  public loadCalls = 0;
 
   public constructor(public documents: AuthoritativeExtractionChapterDocument[]) {}
 
@@ -251,6 +284,7 @@ class MutableSourceReader implements AuthoritativeExtractionSourceReader {
   public loadCurrentByChapter(
     chapterId: UuidV7,
   ): Promise<Result<AuthoritativeExtractionChapterDocument | null, StoryCoreError>> {
+    this.loadCalls += 1;
     return Promise.resolve(
       ok(this.documents.find((documentValue) => documentValue.chapterId === chapterId) ?? null),
     );

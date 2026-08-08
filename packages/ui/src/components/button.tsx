@@ -22,7 +22,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     leadingIcon,
     loading = false,
     loadingLabel = "正在处理",
-    size = "md",
+    size,
     trailingIcon,
     type = "button",
     variant = "primary",
@@ -31,13 +31,19 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   ref,
 ) {
   const unavailable = disabled || loading;
+  const resolvedSize = size ?? (variant === "primary" ? "lg" : "md");
 
   return (
     <button
       {...props}
       ref={ref}
       type={type}
-      className={cn("ink-button", `ink-button--${variant}`, `ink-button--${size}`, className)}
+      className={cn(
+        "ink-button",
+        `ink-button--${variant}`,
+        `ink-button--${resolvedSize}`,
+        className,
+      )}
       disabled={unavailable}
       aria-busy={loading || undefined}
       data-loading={loading || undefined}
@@ -82,13 +88,14 @@ export type IconButtonProps = Omit<ButtonProps, "children" | "leadingIcon" | "tr
 };
 
 export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
-  { className, icon, label, title, variant = "ghost", ...props },
+  { className, icon, label, size = "lg", title, variant = "ghost", ...props },
   ref,
 ) {
   return (
     <Button
       {...props}
       ref={ref}
+      size={size}
       variant={variant}
       className={cn("ink-icon-button", className)}
       aria-label={label}

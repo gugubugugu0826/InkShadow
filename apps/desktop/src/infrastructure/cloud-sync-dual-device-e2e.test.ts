@@ -101,6 +101,7 @@ const migration = [
   "0016_sync_snapshot_materialization_receipts.sql",
   "0017_sync_projection_account_authority.sql",
   "0018_sync_incremental_terminal_observations.sql",
+  "0038_private_chapters.sql",
 ]
   .map(readMigration)
   .join("\n");

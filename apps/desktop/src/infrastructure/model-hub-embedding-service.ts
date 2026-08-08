@@ -6,7 +6,15 @@ import {
   type ModelHubAuthenticationMode,
 } from "./model-hub-provider-registry";
 import { ModelHubExecutionError } from "./model-hub-execution-service";
-import { modelHubNativeEndpointConfig } from "./model-hub-native-config";
+import {
+  assertModelHubFinalDispatchUnchanged,
+  ModelHubFinalDispatchError,
+  modelHubFinalDispatchIdentity,
+} from "./model-hub-final-dispatch-guard";
+import {
+  modelHubCredentialProviderId,
+  modelHubNativeEndpointConfig,
+} from "./model-hub-native-config";
 import {
   requiredCapabilitiesForNovelTask,
   resolveModelCapabilityVerdict,
@@ -25,12 +33,14 @@ import type {
   NativeEmbeddingResult,
 } from "./native-embedding-gateway";
 import type { NativeGatewayProviderKind } from "./native-model-gateway-contract";
+import type { NativeModelDispatchScope } from "./native-model-gateway-contract";
 
 export interface InspectModelHubEmbeddingTaskInput {
   readonly inputs: readonly string[];
 }
 
 export interface ExecuteModelHubEmbeddingTaskInput extends InspectModelHubEmbeddingTaskInput {
+  readonly dispatchScope: NativeModelDispatchScope;
   readonly onBeforeDispatch?: (
     selection: Readonly<{
       invocationId: string;
@@ -40,6 +50,7 @@ export interface ExecuteModelHubEmbeddingTaskInput extends InspectModelHubEmbedd
       inputCount: number;
       estimatedInputTokens: number;
       usedFallback: boolean;
+      localOnlyEligible: boolean;
       fingerprintMaterial: ModelHubEmbeddingTaskInspection["fingerprintMaterial"];
     }>,
   ) => void | Promise<void>;
@@ -216,6 +227,12 @@ export async function executeModelHubEmbeddingTask(
     dependencies,
     input,
   );
+  const expectedDispatchIdentity = modelHubFinalDispatchIdentity({
+    route,
+    connection: target.connection,
+    catalogEntry: target.catalogEntry,
+    costPrivacy: target.costPrivacy,
+  });
 
   let invocation = await dependencies.modelHub.startInvocation({
     id: dependencies.ids.next(),
@@ -244,13 +261,28 @@ export async function executeModelHubEmbeddingTask(
       inputCount: input.inputs.length,
       estimatedInputTokens: target.estimatedInputTokens,
       usedFallback,
+      localOnlyEligible:
+        target.dataDestination === "local" &&
+        target.costPrivacy.evidenceSource !== "unknown" &&
+        isLoopbackModelBaseUrl(target.connection.baseUrl),
       fingerprintMaterial: inspection.fingerprintMaterial,
     });
+    const current = await resolveEmbeddingPlan(dependencies, input);
+    assertModelHubFinalDispatchUnchanged(
+      expectedDispatchIdentity,
+      modelHubFinalDispatchIdentity({
+        route: current.route,
+        connection: current.target.connection,
+        catalogEntry: current.target.catalogEntry,
+        costPrivacy: current.target.costPrivacy,
+      }),
+    );
     dispatched = true;
     embedded = await dependencies.modelGateway.embed({
-      config: modelHubNativeEndpointConfig(target.connection),
-      model: target.catalogEntry.providerModelId,
+      config: modelHubNativeEndpointConfig(current.target.connection),
+      model: current.target.catalogEntry.providerModelId,
       inputs: input.inputs,
+      dispatchScope: input.dispatchScope,
     });
   } catch (cause: unknown) {
     const normalized = dispatched
@@ -519,9 +551,11 @@ async function resolveEmbeddingTarget(
 
   const preset = getModelProviderPreset(connection.providerKind);
   if (preset.credentialRequired || connection.credentialState === "present") {
-    const summary = await dependencies.credentials.getSummary(connection.id).catch(() => ({
-      configured: false,
-    }));
+    const summary = await dependencies.credentials
+      .getSummary(modelHubCredentialProviderId(connection))
+      .catch(() => ({
+        configured: false,
+      }));
     if (!summary.configured) {
       throw executionError(
         "MODEL_HUB_CREDENTIAL_MISSING",
@@ -703,11 +737,13 @@ function gatewayProviderKind(connection: ModelProviderConnection): NativeGateway
 function normalizePreDispatchError(cause: unknown): ModelHubExecutionError {
   return cause instanceof ModelHubExecutionError
     ? cause
-    : executionError(
-        "MODEL_HUB_PREFLIGHT_FAILED",
-        "Embedding 调用前检查没有通过。请检查 AI 分工、模型能力、隐私和费用设置。",
-        true,
-      );
+    : cause instanceof ModelHubFinalDispatchError
+      ? executionError(cause.code, cause.message, cause.retryable)
+      : executionError(
+          "MODEL_HUB_PREFLIGHT_FAILED",
+          "Embedding 调用前检查没有通过。请检查 AI 分工、模型能力、隐私和费用设置。",
+          true,
+        );
 }
 
 function normalizeDispatchedError(cause: unknown): ModelHubExecutionError {

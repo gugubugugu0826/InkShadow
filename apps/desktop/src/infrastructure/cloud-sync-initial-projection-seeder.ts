@@ -29,6 +29,7 @@ interface ProjectSeedRow {
 interface ChapterSeedRow {
   readonly id: string;
   readonly created_at: string;
+  readonly privacy_mode: string;
 }
 
 interface ChapterVersionSeedRow {
@@ -221,9 +222,9 @@ async function buildSeedCandidates(
     },
   ];
   const chapters = await transaction.select<ChapterSeedRow>(
-    `SELECT id, created_at
+    `SELECT id, created_at, privacy_mode
      FROM chapters
-     WHERE project_id = ? AND status = 'active'
+     WHERE project_id = ? AND status = 'active' AND privacy_mode <> 'local_only'
      ORDER BY created_at, id`,
     [project.id],
   );

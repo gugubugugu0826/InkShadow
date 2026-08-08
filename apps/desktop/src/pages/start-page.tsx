@@ -1,8 +1,10 @@
-import { Badge, Button, InlineAlert } from "@inkshadow/ui";
-import { parseUuidV7, type UuidV7 } from "@inkshadow/domain";
-import { useState } from "react";
+import { Button, InkIcon, InlineAlert } from "@inkshadow/ui";
+import { parseUuidV7, type Chapter, type Project, type UuidV7 } from "@inkshadow/domain";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
+import { loadEditorView, type EditorViewState } from "../infrastructure/editor-view-state-store";
+import type { DesktopRuntime } from "../infrastructure/runtime";
 import { normalizeUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
@@ -11,9 +13,9 @@ const creationEntries = [
     to: "/create/idea",
     eyebrow: "推荐首次使用",
     title: "从一个想法开始",
-    description: "写下一句话，AI 会先给你一段可修改的试写，再一次只和你确认一个问题。",
+    description: "写下一句话，AI 会先给你三种彼此隔离的开头方案，再一次只和你确认一个问题。",
     action: "说出我的想法",
-    mark: "想",
+    icon: "sparkles",
     primary: true,
   },
   {
@@ -22,7 +24,7 @@ const creationEntries = [
     title: "导入小说，继续写或改写",
     description: "先分析作品和试改一小段，确认方向后再逐章处理，原文始终保留。",
     action: "选择作品",
-    mark: "入",
+    icon: "upload",
     primary: false,
   },
   {
@@ -31,18 +33,45 @@ const creationEntries = [
     title: "专业创建",
     description: "从人物、世界、剧情规划和写作规则开始，按自己的方式深入控制。",
     action: "开始专业创建",
-    mark: "专",
+    icon: "alert-triangle",
     primary: false,
   },
 ] as const;
+
+interface RecentWritingTarget {
+  readonly project: Project;
+  readonly chapter: Chapter;
+  readonly activityAt: number;
+  readonly editorView: EditorViewState | null;
+}
 
 export function StartPage() {
   const runtime = useRuntime();
   const navigate = useNavigate();
   const [exampleBusy, setExampleBusy] = useState(false);
   const [exampleError, setExampleError] = useState<string | null>(null);
-  const cloudIdentityAvailable =
-    runtime.featureFlags.cloudIdentity && runtime.cloudIdentity?.available === true;
+  const [recentWriting, setRecentWriting] = useState<RecentWritingTarget | null>(null);
+  const [recentWritingError, setRecentWritingError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void findRecentWriting(runtime)
+      .then((target) => {
+        if (active) {
+          setRecentWriting(target);
+          setRecentWritingError(null);
+        }
+      })
+      .catch((cause: unknown) => {
+        if (active) {
+          setRecentWriting(null);
+          setRecentWritingError(normalizeUiError(cause).description);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [runtime]);
 
   async function openExampleProject(): Promise<void> {
     if (exampleBusy) {
@@ -99,19 +128,10 @@ export function StartPage() {
   }
 
   return (
-    <main className="start-page">
+    <div className="start-page">
       <header className="start-page__header" aria-labelledby="start-heading">
-        <div className="start-page__brand" aria-label="InkShadow 墨影">
-          <span className="start-page__mark" aria-hidden="true">
-            墨
-          </span>
-          <span>InkShadow 墨影</span>
-        </div>
-        <Badge tone="success">本地优先 · 无需登录</Badge>
-        <h1 id="start-heading">一句想法，也能开始一部长篇</h1>
-        <p>
-          先告诉墨影你想做什么。人物、世界和写作规则可以在创作过程中逐步形成，不必一次准备齐全。
-        </p>
+        <h1 id="start-heading">把你的第一个想法，写成一个故事</h1>
+        <p>无需注册，本地保存。连接你自己的 AI 模型后，续写、改写与检查都由你掌控。</p>
       </header>
 
       <section className="start-page__entries" aria-label="选择创作方式">
@@ -122,7 +142,7 @@ export function StartPage() {
             to={entry.to}
           >
             <span className="start-page__entry-mark" aria-hidden="true">
-              {entry.mark}
+              <InkIcon name={entry.icon} decorative size={24} />
             </span>
             <span className="start-page__entry-copy">
               <span className="start-page__entry-eyebrow">{entry.eyebrow}</span>
@@ -137,10 +157,60 @@ export function StartPage() {
         ))}
       </section>
 
+      {recentWriting !== null && (
+        <section className="start-page__recent" aria-labelledby="recent-writing-title">
+          <div className="start-page__recent-copy">
+            <p className="start-page__recent-eyebrow">继续上次创作</p>
+            <h2 id="recent-writing-title">回到刚才停下的地方</h2>
+            <dl className="start-page__recent-details">
+              <div>
+                <dt>最近作品</dt>
+                <dd>{recentWriting.project.name}</dd>
+              </div>
+              <div>
+                <dt>最近章节</dt>
+                <dd>{recentWriting.chapter.title}</dd>
+              </div>
+              <div>
+                <dt>保存时间</dt>
+                <dd>{new Date(recentWriting.activityAt).toLocaleString("zh-CN")}</dd>
+              </div>
+              {recentWriting.editorView !== null && (
+                <div>
+                  <dt>上次编辑位置</dt>
+                  <dd>
+                    {describeEditorPosition(
+                      recentWriting.editorView,
+                      recentWriting.chapter.content.length,
+                    )}
+                  </dd>
+                </div>
+              )}
+            </dl>
+          </div>
+          <Link
+            className="start-page__continue-link"
+            to={`/projects/${recentWriting.project.id}/chapters/${recentWriting.chapter.id}`}
+          >
+            继续写
+            <span aria-hidden="true">→</span>
+          </Link>
+        </section>
+      )}
+
+      {recentWritingError !== null && (
+        <div className="start-page__recent-error">
+          <InlineAlert
+            tone="warning"
+            title="最近作品暂时无法读取"
+            description={`${recentWritingError} 你仍可以从作品库打开已有内容。`}
+          />
+        </div>
+      )}
+
       <nav className="start-page__secondary" aria-label="已有内容与数据工具">
-        <span>已经在创作？</span>
-        <Link to="/projects">打开最近创作与作品库</Link>
-        <span aria-hidden="true">·</span>
+        <Link to="/settings#data-transfer">恢复备份</Link>
+        <Link to="/projects">浏览作品库</Link>
         <Button
           variant="ghost"
           size="sm"
@@ -149,8 +219,6 @@ export function StartPage() {
         >
           体验示例作品
         </Button>
-        <span aria-hidden="true">·</span>
-        <Link to="/settings#data-transfer">从备份恢复</Link>
       </nav>
 
       {exampleError !== null && (
@@ -160,28 +228,7 @@ export function StartPage() {
           description={`${exampleError} 请重试；已有本地作品不会受到影响。`}
         />
       )}
-
-      <section className="start-page__assurance" aria-labelledby="local-control-heading">
-        <div>
-          <h2 id="local-control-heading">作品留在你的设备</h2>
-          <p>正文、版本和备份默认保存在本地；云能力暂时不可用，也不会阻断写作与导出。</p>
-        </div>
-        <ul>
-          <li>AI 修改先成为建议版本，不会静默覆盖原文</li>
-          <li>登录或订阅状态不会锁住本地正文</li>
-        </ul>
-      </section>
-
-      <div className="start-page__cloud-status">
-        {cloudIdentityAvailable ? (
-          <Link className="start-page__cloud-link" to="/auth/login">
-            登录已有云账户
-          </Link>
-        ) : (
-          <span className="start-page__cloud-note">云账户可稍后连接，本地创作功能保持完整。</span>
-        )}
-      </div>
-    </main>
+    </div>
   );
 }
 
@@ -233,4 +280,63 @@ function rememberExamplePointer(projectId: string, chapterId: string): void {
   } catch {
     // The example remains usable even if the WebView cannot remember its shortcut.
   }
+}
+
+async function findRecentWriting(runtime: DesktopRuntime): Promise<RecentWritingTarget | null> {
+  const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
+  if (!projects.ok) {
+    throw projects.error;
+  }
+  const targets = await Promise.all(
+    projects.value.map(async (project) => {
+      const chapters = await runtime.repositories.chapters.listByProjectId(project.id);
+      if (!chapters.ok) {
+        throw chapters.error;
+      }
+      return chapters.value
+        .filter(({ status }) => status === "active")
+        .map((chapter): RecentWritingTarget => {
+          const chapterUpdatedAt = Date.parse(chapter.toSnapshot().updatedAt);
+          const editorView = readEditorView(project.id, chapter);
+          return Object.freeze({
+            project,
+            chapter,
+            activityAt: Math.max(
+              Number.isFinite(chapterUpdatedAt) ? chapterUpdatedAt : 0,
+              editorView?.updatedAt ?? 0,
+            ),
+            editorView,
+          });
+        });
+    }),
+  );
+  return (
+    targets
+      .flat()
+      .sort(
+        (left, right) =>
+          right.activityAt - left.activityAt ||
+          right.chapter.toSnapshot().updatedAt.localeCompare(left.chapter.toSnapshot().updatedAt) ||
+          left.chapter.id.localeCompare(right.chapter.id),
+      )[0] ?? null
+  );
+}
+
+function readEditorView(projectId: string, chapter: Chapter): EditorViewState | null {
+  try {
+    return loadEditorView(window.localStorage, projectId, chapter.id, chapter.content.length).view;
+  } catch {
+    return null;
+  }
+}
+
+function describeEditorPosition(view: EditorViewState, contentLength: number): string {
+  const { start, end } = view.selection;
+  if (start !== end) {
+    return `第 ${String(start + 1)} 至 ${String(end)} 个字符`;
+  }
+  if (contentLength === 0 || end === 0) {
+    return "正文开头";
+  }
+  return `第 ${String(Math.min(end, contentLength))} 个字符后`;
 }

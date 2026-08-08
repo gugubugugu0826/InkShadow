@@ -173,7 +173,40 @@
 .ink-icon-button__icon > svg {
   width: 1rem;
   height: 1rem;
-  stroke-width: 1.75;
+  stroke-width: var(--icon-stroke-width);
+}
+
+.ink-icon {
+  display: inline-block;
+  flex: 0 0 auto;
+  color: inherit;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: var(--icon-stroke-width);
+  vertical-align: middle;
+}
+
+.ink-icon[aria-hidden="true"] {
+  pointer-events: none;
+}
+
+.ink-prose {
+  width: 100%;
+  max-width: var(--editor-content-max);
+  margin-inline: auto;
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: var(--editor-font-size);
+  line-height: var(--editor-line-height);
+  overflow-wrap: anywhere;
+}
+
+.ink-prose p {
+  margin-block: 0;
+}
+
+.ink-prose p + p {
+  margin-top: var(--editor-paragraph-gap);
 }
 
 .ink-icon-button {
@@ -270,8 +303,10 @@
 }
 
 .ink-field-control[data-disabled] {
+  border-color: var(--border-subtle);
+  background: var(--bg-active);
   cursor: not-allowed;
-  opacity: 0.7;
+  opacity: 1;
 }
 
 .ink-field-control__adornment {
@@ -988,13 +1023,7 @@
   width: 100%;
   height: 1em;
   border-radius: var(--radius-xs);
-  background: linear-gradient(
-    90deg,
-    var(--bg-hover) 25%,
-    var(--bg-active) 50%,
-    var(--bg-hover) 75%
-  );
-  background-size: 200% 100%;
+  background: var(--bg-active);
   animation: ink-skeleton-shimmer 1.4s var(--ease-standard) infinite;
 }
 
@@ -1010,8 +1039,8 @@
 }
 
 @keyframes ink-skeleton-shimmer {
-  to {
-    background-position: -200% 0;
+  50% {
+    opacity: 0.55;
   }
 }
 
@@ -1359,14 +1388,17 @@ button.ink-save-status:hover {
 
 @media (max-width: 79.9375rem) {
   .ink-app-shell,
-  .ink-app-shell[data-navigation-collapsed],
-  .ink-app-shell[data-inspector-present],
-  .ink-app-shell[data-inspector-present][data-navigation-collapsed] {
+  .ink-app-shell[data-inspector-present] {
     grid-template:
       "topbar topbar" var(--topbar-height)
       "navigation main" minmax(0, 1fr)
       "status status" var(--statusbar-height)
-      / var(--navigation-collapsed-width) minmax(0, 1fr);
+      / var(--navigation-width) minmax(0, 1fr);
+  }
+
+  .ink-app-shell[data-navigation-collapsed],
+  .ink-app-shell[data-inspector-present][data-navigation-collapsed] {
+    grid-template-columns: var(--navigation-collapsed-width) minmax(0, 1fr);
   }
 
   .ink-app-shell__inspector {
@@ -1376,7 +1408,7 @@ button.ink-save-status:hover {
     right: 0;
     bottom: var(--statusbar-height);
     display: none;
-    width: min(var(--inspector-width), calc(100vw - var(--space-8)));
+    width: min(28rem, calc(100vw - var(--navigation-collapsed-width)));
     box-shadow: var(--shadow-overlay);
   }
 
@@ -1385,7 +1417,20 @@ button.ink-save-status:hover {
   }
 }
 
-@media (max-width: 59.9375rem) {
+@media (max-width: 64rem) {
+  .ink-app-shell,
+  .ink-app-shell[data-navigation-collapsed],
+  .ink-app-shell[data-inspector-present],
+  .ink-app-shell[data-inspector-present][data-navigation-collapsed] {
+    grid-template:
+      "topbar topbar" var(--topbar-height)
+      "navigation main" minmax(0, 1fr)
+      "status status" var(--statusbar-height)
+      / var(--navigation-collapsed-width) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 39.9375rem) {
   .ink-app-shell,
   .ink-app-shell[data-navigation-collapsed],
   .ink-app-shell[data-inspector-present],

@@ -18,6 +18,8 @@ describe("context history panel", () => {
     const findById = vi.fn(() => Promise.resolve(trace));
     const store: ContextCompilationTraceStore = {
       save: vi.fn(() => Promise.resolve()),
+      linkModelInvocation: vi.fn(() => Promise.resolve()),
+      linkOutputCandidate: vi.fn(() => Promise.resolve()),
       listByProjectId: vi.fn(() =>
         Promise.resolve([
           {
@@ -35,10 +37,13 @@ describe("context history panel", () => {
             includedCount: 1,
             discardedCount: 1,
             createdAt: trace.createdAt,
+            execution: trace.execution,
+            outputCandidateId: trace.outputCandidateId,
           },
         ]),
       ),
       findById,
+      findByOutputCandidateId: vi.fn(() => Promise.resolve(trace)),
     };
 
     render(<ContextHistoryPanel projectId={PROJECT_ID} store={store} />);
@@ -55,13 +60,18 @@ describe("context history panel", () => {
     expect(screen.getByText("未采用")).toBeInTheDocument();
     expect(screen.getByText(/预算不足/u)).toBeInTheDocument();
     expect(findById).toHaveBeenCalledWith(TRACE_ID);
+    expect(screen.getByText("已精确关联 AI 建议版本")).toBeInTheDocument();
+    expect(screen.getByText("这条记录与 AI 建议版本精确关联")).toBeInTheDocument();
   });
 
   it("gives a useful empty state before the first AI creation", async () => {
     const store: ContextCompilationTraceStore = {
       save: vi.fn(() => Promise.resolve()),
+      linkModelInvocation: vi.fn(() => Promise.resolve()),
+      linkOutputCandidate: vi.fn(() => Promise.resolve()),
       listByProjectId: vi.fn(() => Promise.resolve([])),
       findById: vi.fn(() => Promise.resolve(null)),
+      findByOutputCandidateId: vi.fn(() => Promise.resolve(null)),
     };
     render(<ContextHistoryPanel projectId={PROJECT_ID} store={store} />);
 
@@ -83,9 +93,15 @@ function makeTrace(): ContextCompilationTrace {
     discardedTokens: 90,
     tokenEstimateSource: "utf8_conservative",
     createdAt: "2026-08-01T01:02:03.000Z",
+    execution: {
+      generationId: "019a1f9f-4ab3-7000-8000-000000000004",
+      generationRunId: null,
+      modelInvocationId: "019a1f9f-4ab3-7000-8000-000000000005",
+    },
+    outputCandidateId: "019a1f9f-4ab3-7000-8000-000000000006",
     entries: [
       {
-        candidateId: "locked-rule.1",
+        contextCandidateId: "locked-rule.1",
         layer: "locked_hard_rules",
         selectionReason: "用户已锁定，必须参与本次创作。",
         included: true,
@@ -109,7 +125,7 @@ function makeTrace(): ContextCompilationTrace {
         ],
       },
       {
-        candidateId: "scene.1",
+        contextCandidateId: "scene.1",
         layer: "scene_goal",
         selectionReason: "当前场景候选。",
         included: false,

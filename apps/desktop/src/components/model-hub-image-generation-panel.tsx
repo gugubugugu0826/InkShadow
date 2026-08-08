@@ -42,7 +42,9 @@ export function ModelHubImageGenerationPanel({
     setChecking(true);
     setError(null);
     try {
-      setInspection(await service.inspect());
+      const nextInspection = await service.inspect();
+      setInspection(nextInspection);
+      setAcknowledged(false);
     } catch (cause: unknown) {
       setInspection(null);
       setError(messageFrom(cause, "还没有找到可安全使用的图片模型。"));
@@ -81,13 +83,19 @@ export function ModelHubImageGenerationPanel({
         prompt,
         destination,
         acknowledgedCostAndPrivacy: true,
+        expectedConfirmationFingerprint: inspection.confirmationFingerprint,
       });
       setReceipt(generated);
       setNotice(
         `图片已保存为 ${generated.file.fileName}。它不会自动插入正文，也不会覆盖已有图片。`,
       );
     } catch (cause: unknown) {
-      setError(messageFrom(cause, "图片生成未完成，未改变正文和已有图片。"));
+      const message = messageFrom(cause, "图片生成未完成，未改变正文和已有图片。");
+      setAcknowledged(false);
+      if (errorCodeFrom(cause) === "MODEL_HUB_IMAGE_CONFIRMATION_STALE") {
+        await inspect();
+      }
+      setError(message);
     } finally {
       setBusy(false);
     }
@@ -213,4 +221,13 @@ function formatBytes(value: number): string {
 
 function messageFrom(cause: unknown, fallback: string): string {
   return cause instanceof Error && cause.message.trim() !== "" ? cause.message : fallback;
+}
+
+function errorCodeFrom(cause: unknown): string | null {
+  return typeof cause === "object" &&
+    cause !== null &&
+    "code" in cause &&
+    typeof cause.code === "string"
+    ? cause.code
+    : null;
 }

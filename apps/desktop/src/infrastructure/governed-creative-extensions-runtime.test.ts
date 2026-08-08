@@ -121,6 +121,27 @@ describe("GovernedCreativeExtensionsRuntime", () => {
     ).toEqual({ content: SOURCE_TEXT });
   });
 
+  it("blocks remote translation of a local-only chapter before consent or dispatch", async () => {
+    const gateway = new DeterministicGateway(validTranslationResult);
+    const harness = await createHarness({
+      gateway,
+      flags: { translation: true, shortDrama: false },
+      route: remoteRoute(),
+      localOnly: true,
+    });
+
+    const preflight = await harness.runtime.preflight(translationDraft());
+
+    expect(preflight.ready).toBe(false);
+    expect(preflight.checks).toContainEqual(
+      expect.objectContaining({ code: "PRIVATE_CHAPTER_LOCAL_ONLY", level: "blocking" }),
+    );
+    await expect(harness.runtime.run(preflight)).rejects.toMatchObject({
+      code: "PRIVATE_CHAPTER_LOCAL_ONLY",
+    });
+    expect(gateway.calls).toBe(0);
+  });
+
   it("fails closed when token usage is missing and prepares a new billed retry", async () => {
     const gateway = new DeterministicGateway(async (request) => {
       const valid = await validTranslationResult(request);
@@ -340,6 +361,7 @@ async function createHarness(options: {
   readonly gateway: GovernedCreativeExtensionGateway;
   readonly flags?: GovernedCreativeExtensionFlags;
   readonly route?: GovernedCreativeExtensionRoute;
+  readonly localOnly?: boolean;
 }) {
   const executor = new NodeSqliteExecutor(migration);
   seedAuthorities(executor);
@@ -355,15 +377,43 @@ async function createHarness(options: {
   const route = options.route ?? localRoute();
   const flags = options.flags;
   const runtime = new GovernedCreativeExtensionsRuntime({
+    isSourceLocalOnly: () => Promise.resolve(options.localOnly ?? false),
     store,
     gateway: options.gateway,
     ids: new SequentialIds(),
     clock,
     resolveRoute: () => route,
     readEnvironment: () => ({ online: true, readOnly: false }),
+    projectContextPrivacy: stableProjectPrivacyAuthority(options.localOnly ?? false),
     ...(flags === undefined ? {} : { readFeatureFlags: () => flags }),
   });
   return { executor, runtime, store };
+}
+
+function stableProjectPrivacyAuthority(localOnly: boolean) {
+  const receipt = Object.freeze({
+    schemaVersion: 1 as const,
+    projectId: PROJECT_ID,
+    fingerprint: `privacy:${localOnly ? "local" : "standard"}`,
+    activeChapterCount: 1,
+    retainedChapterCount: 1,
+    requiresVerifiedLocal: localOnly,
+    chapters: Object.freeze([
+      Object.freeze({
+        chapterId: CHAPTER_ID,
+        currentVersionId: VERSION_ID,
+        revision: 1,
+        privacyRevision: 1,
+        privacyMode: localOnly ? ("local_only" as const) : ("standard" as const),
+        status: "active" as const,
+      }),
+    ]),
+  });
+  return {
+    inspect: vi.fn(() => Promise.resolve(receipt)),
+    assertCurrentBeforeDispatch: vi.fn(() => Promise.resolve()),
+    assertRouteEligible: vi.fn(),
+  };
 }
 
 function translationDraft() {
@@ -544,6 +594,18 @@ function gatewayRequestFrom(
   preflight: Awaited<ReturnType<GovernedCreativeExtensionsRuntime["preflight"]>>,
 ): GovernedExtensionGatewayRequest {
   return {
+    dispatchScope: {
+      kind: "project_context",
+      receipt: {
+        schemaVersion: 1,
+        projectId: preflight.snapshot.projectId,
+        fingerprint: "a".repeat(64),
+        activeChapterCount: 0,
+        retainedChapterCount: 0,
+        requiresVerifiedLocal: false,
+        chapters: [],
+      },
+    },
     snapshot: preflight.snapshot,
     requestFingerprint: preflight.requestFingerprint,
     paragraphAuthorities: preflight.paragraphAuthorities,

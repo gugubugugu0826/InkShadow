@@ -104,6 +104,13 @@ export interface RecordTaskFailureInput {
   readonly retryAt: string | null;
 }
 
+export interface RetryTaskNowInput {
+  readonly expectedSequence: number;
+  readonly expectedAttempt: number;
+  readonly expectedFailureCauseCode: string | null;
+  readonly recoveryProgressStep: string;
+}
+
 const PROGRESS_STEP_PATTERN = /^[a-z][a-z0-9_.-]{0,63}$/u;
 
 export class Task {
@@ -541,6 +548,68 @@ export class Task {
       status: "queued",
       runAfter: now.value,
       failure: null,
+      updatedAt: now.value,
+      sequence: this.snapshot.sequence + 1,
+    });
+  }
+
+  /**
+   * Makes an already scheduled retry runnable immediately without consuming an
+   * additional attempt. The attempt was advanced when the retryable failure was
+   * recorded; claiming the queued task remains the only way to start that
+   * attempt.
+   */
+  public retryNow(nowValue: string, recovery?: RetryTaskNowInput): Result<Task, TaskEngineError> {
+    if (
+      this.snapshot.status !== "waiting_retry" ||
+      this.snapshot.failure === null ||
+      !this.snapshot.failure.retryable ||
+      this.snapshot.attempt > this.snapshot.maxAttempts
+    ) {
+      return transitionError("Only a retryable waiting task can be retried immediately.");
+    }
+    const now = parseIsoUtcTimestamp(nowValue);
+    if (!now.ok) {
+      return now;
+    }
+    if (
+      recovery !== undefined &&
+      (!Number.isSafeInteger(recovery.expectedSequence) ||
+        recovery.expectedSequence < 1 ||
+        !Number.isSafeInteger(recovery.expectedAttempt) ||
+        recovery.expectedAttempt < 1 ||
+        !PROGRESS_STEP_PATTERN.test(recovery.recoveryProgressStep))
+    ) {
+      return validationError("Task retry recovery authority is invalid.");
+    }
+    if (
+      recovery !== undefined &&
+      (this.snapshot.sequence !== recovery.expectedSequence ||
+        this.snapshot.attempt !== recovery.expectedAttempt ||
+        this.snapshot.failure.causeCode !== recovery.expectedFailureCauseCode)
+    ) {
+      return err(
+        new TaskEngineError({
+          code: "TASK_SEQUENCE_CONFLICT",
+          message: "Task retry authority changed before it could be scheduled.",
+          retryable: true,
+          actions: ["RETRY"],
+        }),
+      );
+    }
+    return this.evolve({
+      status: "queued",
+      runAfter: now.value,
+      failure: null,
+      progress:
+        recovery === undefined
+          ? null
+          : Object.freeze({
+              step: recovery.recoveryProgressStep,
+              completedUnits: 0,
+              totalUnits: null,
+              updatedAt: now.value,
+            }),
       updatedAt: now.value,
       sequence: this.snapshot.sequence + 1,
     });

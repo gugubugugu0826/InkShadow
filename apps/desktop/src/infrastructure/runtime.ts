@@ -8,14 +8,17 @@ import {
   ListChapterVersions,
   ListProjects,
   RejectAiCandidate,
+  ReviseAiCandidate,
   RenameProject,
   RestoreChapterVersion,
   RestoreProject,
   SaveChapter,
+  SetChapterPrivacy,
   TrashProject,
   UnarchiveProject,
   type AiCandidateRepository,
   type ChapterRepository,
+  type ChapterPrivacyRepository,
   type ChapterVersionRepository,
   type ContentCommitRepository,
   type ContentHasher,
@@ -46,6 +49,7 @@ import {
   type Clock,
   type Chapter,
   type Result,
+  type ProjectSeedStore,
   type UuidV7,
   type UuidV7Generator,
 } from "@inkshadow/domain";
@@ -54,6 +58,7 @@ import {
   DatabaseMaintenanceService,
   GovernedCreativeExtensionSqliteStore,
   MultiAgentReviewSqliteStore,
+  ProjectSeedSqliteStore,
   SearchVectorSqliteStore,
   TauriSqliteExecutor,
   createSqliteRepositories,
@@ -84,6 +89,7 @@ import {
   SqliteMaterialReferenceRepository,
   SqliteMaterialRepository,
   SqliteMemoryPolicyRepository,
+  SqliteMemoryGovernanceUnitOfWork,
   SqliteMemoryRecordCreationUnitOfWork,
   SqliteMemoryRecordRepository,
   SqliteOutlineDraftReader,
@@ -113,6 +119,7 @@ import {
   type MaterialReferenceRepository,
   type MaterialRepository,
   type MemoryPolicyRepository,
+  type MemoryGovernanceUnitOfWork,
   type MemoryRecordCreationUnitOfWork,
   type MemoryRecordListReader,
   type MemoryRecordRepository,
@@ -137,13 +144,33 @@ import {
   SqliteCreativeJourneyStore,
   type CreativeJourneyStore,
 } from "./creative-journey-store";
+import { BrowserProjectSeedStore, backfillLegacyProjectSeeds } from "./project-seed-local-store";
+import { selectProjectSeedContextCandidates } from "./project-seed-context-adapter";
 import {
   BrowserDevelopmentContextCompilationTraceStore,
   SqliteContextCompilationTraceStore,
   createContextCompilationTrace,
   type ContextCompilationTraceStore,
 } from "./context-compilation-trace-store";
+import {
+  BrowserDevelopmentContextTraceOutputCommitUnitOfWork,
+  SqliteContextTraceOutputCommitUnitOfWork,
+  type ContextTraceOutputCommitUnitOfWork,
+} from "./context-trace-output-commit";
+import {
+  BrowserDevelopmentChapterValidationSnapshotStore,
+  ChapterValidationSnapshotService,
+  SqliteChapterValidationSnapshotStore,
+  type ChapterValidationSnapshotStore,
+} from "./chapter-validation-snapshot-store";
 import { createIdempotentAsyncCloser } from "./desktop-close-coordinator";
+import {
+  createTauriAutomaticBackupRuntime,
+  type AutomaticBackupRuntime,
+} from "./automatic-backup-runtime";
+import { AcceptedChapterPipelineWorker } from "./accepted-chapter-pipeline-worker";
+import { createAcceptedChapterPipelineTaskInput } from "./accepted-chapter-pipeline";
+import { HistoricalChapterBackfillService } from "./historical-chapter-backfill-service";
 import { CloudAiUsageService, type CloudAiUsageRuntimePort } from "./cloud-ai-usage-service";
 import { CloudAccountManagementService } from "./cloud-account-management-service";
 import { CloudDeletionLifecycleService } from "./cloud-deletion-lifecycle-service";
@@ -198,6 +225,7 @@ import {
 import {
   isNativeGatewayProviderKind,
   type NativeGatewayEndpointConfig,
+  type NativeModelDispatchScope,
   type NativeGatewayProviderKind,
 } from "./native-model-gateway-contract";
 import {
@@ -211,12 +239,19 @@ import {
   type ModelHubStore,
 } from "./model-hub-store";
 import { bridgeLegacyModelProfilesToModelHub } from "./model-hub-legacy-bridge";
+import { recoverModelHubCredentialCommits } from "./model-hub-credential-commit-recovery";
 import {
   executeModelHubTextTask,
   inspectModelHubTextTask,
   ModelHubExecutionError,
   type ModelHubTextTaskInspection,
 } from "./model-hub-execution-service";
+import { isLoopbackModelBaseUrl } from "./model-hub-provider-registry";
+import {
+  resolveFinalModelProfileGatewayConfig,
+  resolveModelProfileGatewayConfig,
+  type ModelProfileGatewayConfigResolution,
+} from "./model-profile-gateway-config";
 import {
   compileStoryContextForGeneration,
   formatStoryContextPrompt,
@@ -244,6 +279,13 @@ import type {
 } from "./native-rerank-gateway";
 import { LocalProjectSearchService, type ProjectSearchService } from "./project-search";
 import {
+  ProjectContextPrivacyAuthority,
+  ProjectContextPrivacyError,
+  projectContextDispatchScope,
+  projectContextRequiredDataDestination,
+  type ProjectContextPrivacyReceipt,
+} from "./project-context-privacy-authority";
+import {
   BrowserDevelopmentProjectSearchSnapshotStore,
   TauriProjectSearchSnapshotStore,
   type ProjectSearchSnapshotStore,
@@ -256,10 +298,12 @@ import {
 } from "./project-key-vault";
 import { ProjectKeyLifecycleService } from "./project-key-lifecycle";
 import { TauriCloudTransport } from "./tauri-cloud-transport";
+import { SqliteUsageCenterService, type UsageCenterReader } from "./usage-center-service";
 import {
   BrowserDevelopmentIdeationDraftRepository,
   BrowserDevelopmentFormalStoryRecordRepository,
   BrowserDevelopmentMemoryPolicyRepository,
+  BrowserDevelopmentMemoryGovernanceUnitOfWork,
   BrowserDevelopmentMemoryRecordCreationUnitOfWork,
   BrowserDevelopmentMemoryRecordRepository,
   BrowserDevelopmentOutlineDraftReader,
@@ -307,6 +351,7 @@ import {
 import { evaluateGeneratedCandidateQuality } from "./candidate-quality-evaluator";
 import { ChapterNarrativeAnalysisRuntime } from "./narrative-analysis-runtime";
 import { ChapterNovelValidationRuntime } from "./novel-validation-runtime";
+import { RecomputedChapterSupplementalFindingVerifier } from "./chapter-supplemental-finding-verifier";
 import { CharacterVoicePovEvidenceAdapter } from "./character-voice-pov-evidence-adapter";
 import { ChapterCharacterVoicePovRuntime } from "./chapter-character-voice-pov-runtime";
 import { AmbiguousNovelReviewService } from "./ambiguous-novel-review-service";
@@ -360,6 +405,7 @@ export interface CandidateStore extends AiCandidateRepository {
 export interface RuntimeRepositories {
   readonly projects: ProjectRepository;
   readonly chapters: ChapterRepository;
+  readonly chapterPrivacy: ChapterPrivacyRepository;
   readonly chapterVersions: ChapterVersionRepository;
   readonly recoveryDrafts: RecoveryDraftRepository;
   readonly aiCandidates: CandidateStore;
@@ -379,9 +425,11 @@ export interface RuntimeUseCases {
   readonly importProject: ImportProject;
   readonly editChapter: EditChapter;
   readonly saveChapter: SaveChapter;
+  readonly setChapterPrivacy: SetChapterPrivacy;
   readonly listChapterVersions: ListChapterVersions;
   readonly restoreChapterVersion: RestoreChapterVersion;
   readonly acceptCandidate: AcceptAiCandidate;
+  readonly reviseCandidate: ReviseAiCandidate;
   readonly rejectCandidate: RejectAiCandidate;
 }
 
@@ -468,6 +516,7 @@ export interface NativeModelGenerationInput {
   readonly messages: readonly NativeModelMessage[];
   readonly maxOutputTokens: number;
   readonly temperature?: number;
+  readonly dispatchScope: NativeModelDispatchScope;
   readonly onDelta?: (accumulatedText: string) => void;
 }
 
@@ -496,10 +545,13 @@ export interface RuntimeStory {
   readonly facts: StoryFactStore;
   readonly factService: StoryFactApplicationService;
   readonly chapterValidation: ChapterNovelValidationRuntime;
+  readonly chapterValidationSnapshots: ChapterValidationSnapshotService;
   readonly characterVoicePov: ChapterCharacterVoicePovRuntime;
   readonly ambiguousReview: AmbiguousNovelReviewService;
   readonly continuousState: ContinuousStoryStateExtractionService;
+  readonly continuousProjection: ContinuousStoryStateProjectionAdapter;
   readonly chapterSummaries: ChapterSummaryService;
+  readonly historicalBackfill: HistoricalChapterBackfillService;
   readonly narrativeAnalysis: ChapterNarrativeAnalysisRuntime;
   readonly causalGraph: CausalEventGraphStore;
   readonly causalProjector: CausalStoryFactProjector;
@@ -545,6 +597,7 @@ export interface DesktopRuntime {
   readonly useCases: RuntimeUseCases;
   readonly taskCenter: TaskCenterStore;
   readonly generationGovernance: GenerationGovernanceStore;
+  readonly usageCenter: UsageCenterReader | null;
   readonly modelCenter: ModelCenterStore;
   readonly modelRouting: ModelRoutingStore;
   readonly modelHub: ModelHubStore;
@@ -552,7 +605,10 @@ export interface DesktopRuntime {
   readonly imageGeneration: ModelHubImageGenerationService;
   readonly rerank: ModelHubRerankService;
   readonly creativeJourneys: CreativeJourneyStore;
+  readonly projectSeeds: ProjectSeedStore;
   readonly contextTraces: ContextCompilationTraceStore;
+  readonly contextTraceOutputs: ContextTraceOutputCommitUnitOfWork;
+  readonly projectContextPrivacy: ProjectContextPrivacyAuthority;
   readonly multiAgentReview: MultiAgentReviewRuntime | null;
   readonly governedCreativeExtensions: GovernedCreativeExtensionsRuntime | null;
   readonly projectKeyVault: ProjectKeyVault;
@@ -580,6 +636,7 @@ export interface DesktopRuntime {
   readonly featureFlags: Readonly<FeatureFlags>;
   readonly credentials: CredentialStore;
   readonly maintenance: RuntimeMaintenance | null;
+  readonly automaticBackup: AutomaticBackupRuntime | null;
   readonly secureUpdater?: SecureUpdaterPort;
   readonly fineTuningGovernance?: FineTuningDesktopPort | null;
   readonly marketplace: MarketplaceRuntime;
@@ -683,6 +740,7 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
           config: input.config,
           model: input.model,
           inputs: input.inputs,
+          dispatchScope: input.dispatchScope,
         },
       });
       return validateNativeEmbeddingResult(result, input);
@@ -707,6 +765,7 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
           query: input.query,
           documents: input.documents,
           topN: input.topN,
+          dispatchScope: input.dispatchScope,
         },
       });
       return validateNativeRerankResult(result, input);
@@ -852,6 +911,7 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
             messages: input.messages,
             maxOutputTokens: input.maxOutputTokens,
             ...(includeTemperature ? { temperature: input.temperature } : {}),
+            dispatchScope: input.dispatchScope,
           },
         });
         if (accepted.generationId !== input.generationId || !accepted.accepted) {
@@ -1012,6 +1072,7 @@ function buildRuntime(
   mode: RuntimeMode,
   repositories: RuntimeRepositories,
   creativeJourneys: CreativeJourneyStore,
+  projectSeeds: ProjectSeedStore,
   close: () => Promise<void>,
   maintenance: RuntimeMaintenance | null,
   createTaskCenter: (clock: Clock) => TaskCenterStore,
@@ -1020,6 +1081,7 @@ function buildRuntime(
   createModelRouting: (clock: Clock, modelCenter: ModelCenterStore) => ModelRoutingStore,
   createModelHub: (clock: Clock) => ModelHubStore,
   createContextTraces: (clock: Clock) => ContextCompilationTraceStore,
+  createChapterValidationSnapshots: () => ChapterValidationSnapshotStore,
   createWritingFeedback: () => WritingFeedbackStore,
   createStoryPersistence: (
     ids: UuidV7Generator,
@@ -1033,10 +1095,22 @@ function buildRuntime(
   const clock = new SystemClock();
   const ids = new CryptoUuidV7Generator();
   const hasher = new CryptoContentHasher();
+  const projectContextPrivacy = new ProjectContextPrivacyAuthority(repositories.chapters, hasher);
+  const taskCenter = createTaskCenter(clock);
   const modelCenter = createModelCenter(clock);
   const modelRouting = createModelRouting(clock, modelCenter);
   const modelHub = createModelHub(clock);
+  const usageCenter =
+    mode === "tauri" && cloudExecutor !== null ? new SqliteUsageCenterService(cloudExecutor) : null;
   const contextTraces = createContextTraces(clock);
+  const contextTraceOutputs =
+    mode === "tauri"
+      ? createRequiredSqliteContextTraceOutputs(cloudExecutor)
+      : new BrowserDevelopmentContextTraceOutputCommitUnitOfWork(
+          repositories.aiCandidates,
+          contextTraces,
+        );
+  const chapterValidationSnapshotStore = createChapterValidationSnapshots();
   const writingFeedback = new WritingFeedbackLearningService(createWritingFeedback(), ids, clock);
   const modelGateway: NativeModelGatewayClient =
     mode === "tauri"
@@ -1094,12 +1168,17 @@ function buildRuntime(
     mode === "tauri" && cloudExecutor !== null
       ? new GovernedCreativeExtensionsRuntime({
           store: new GovernedCreativeExtensionSqliteStore(cloudExecutor, clock),
-          gateway: new NativeGovernedCreativeExtensionGateway(modelGateway, ids),
+          gateway: new NativeGovernedCreativeExtensionGateway(modelGateway, ids, {
+            modelCenter,
+            modelHub,
+            credentials,
+          }),
           ids,
           clock,
           resolveRoute: (kind) =>
             resolveConfiguredGovernedCreativeExtensionRoute(kind, {
               modelCenter,
+              modelHub,
               modelRouting,
               credentials,
             }),
@@ -1109,6 +1188,9 @@ function buildRuntime(
           }),
           isSourceReadOnly: (projectId, chapterId) =>
             isGovernedSourceReadOnly(repositories, projectId, chapterId),
+          isSourceLocalOnly: (projectId, chapterId) =>
+            isGovernedSourceLocalOnly(repositories, projectId, chapterId),
+          projectContextPrivacy,
           readFeatureFlags: () => ({
             translation: featureFlags.translation,
             shortDrama: featureFlags.shortDrama,
@@ -1121,8 +1203,11 @@ function buildRuntime(
           store: new MultiAgentReviewSqliteStore(cloudExecutor, clock),
           contextReader: new SqliteMultiAgentReviewContextReader(cloudExecutor),
           modelCenter,
+          modelHub,
           modelRouting,
           modelGateway,
+          credentials,
+          projectContextPrivacy,
           ids,
           clock,
           enabled: featureFlags.multiAgent,
@@ -1298,15 +1383,8 @@ function buildRuntime(
     chapters: repositories.chapters,
     chapterVersions: repositories.chapterVersions,
     storyFacts: storyPersistence.facts,
+    causalGraph: storyPersistence.causalGraph,
     hasher,
-  });
-  const chapterValidation = new ChapterNovelValidationRuntime({
-    chapters: repositories.chapters,
-    chapterVersions: repositories.chapterVersions,
-    storyFacts: storyPersistence.facts,
-    hasher,
-    continuousProjection,
-    mutations: { factService, actorId },
   });
   const characterEvidence = new CharacterVoicePovEvidenceAdapter({
     chapters: repositories.chapters,
@@ -1316,6 +1394,32 @@ function buildRuntime(
     continuousProjection,
   });
   const characterVoicePov = new ChapterCharacterVoicePovRuntime(characterEvidence);
+  const narrativeAnalysis = new ChapterNarrativeAnalysisRuntime({
+    storyFacts: storyPersistence.facts,
+    chapterVersions: repositories.chapterVersions,
+    causalGraph: storyPersistence.causalGraph,
+    hasher,
+    continuousProjection,
+  });
+  const chapterValidation = new ChapterNovelValidationRuntime({
+    chapters: repositories.chapters,
+    chapterVersions: repositories.chapterVersions,
+    storyFacts: storyPersistence.facts,
+    hasher,
+    continuousProjection,
+    supplementalFindingVerifier: new RecomputedChapterSupplementalFindingVerifier({
+      characterVoicePov,
+      narrativeAnalysis,
+    }),
+    mutations: { factService, actorId },
+  });
+  const chapterValidationSnapshots = new ChapterValidationSnapshotService({
+    validator: chapterValidation,
+    store: chapterValidationSnapshotStore,
+    ids,
+    clock,
+    hasher,
+  });
   const ambiguousReview = new AmbiguousNovelReviewService({
     chapters: repositories.chapters,
     chapterVersions: repositories.chapterVersions,
@@ -1323,6 +1427,7 @@ function buildRuntime(
     hasher,
     characterEvidence,
     modelHub: { modelHub, modelGateway, credentials, clock, ids },
+    projectContextPrivacy,
   });
   const storyProcessingPreferences = new BrowserChapterSummaryPreferenceStore(
     typeof globalThis.localStorage === "undefined" ? null : globalThis.localStorage,
@@ -1341,7 +1446,9 @@ function buildRuntime(
     }),
     hasher,
     ids,
+    clock,
     preferences: storyProcessingPreferences,
+    projectContextPrivacy,
   });
   const chapterSummaries = new ChapterSummaryService({
     chapters: repositories.chapters,
@@ -1357,18 +1464,28 @@ function buildRuntime(
       ids,
     }),
     preferences: storyProcessingPreferences,
+    projectContextPrivacy,
   });
-  const narrativeAnalysis = new ChapterNarrativeAnalysisRuntime({
-    storyFacts: storyPersistence.facts,
+  const historicalBackfill = new HistoricalChapterBackfillService({
+    chapters: repositories.chapters,
     chapterVersions: repositories.chapterVersions,
-    causalGraph: storyPersistence.causalGraph,
+    taskCenter,
+    preferences: storyProcessingPreferences,
     hasher,
-    continuousProjection,
+    ids,
+    clock,
   });
   const causalWhatIf = new CausalWhatIfSimulationService(
     storyPersistence.causalGraph,
     storyPersistence.facts,
-    new ModelHubCausalWhatIfModelPort({ modelHub, modelGateway, credentials, clock, ids }),
+    new ModelHubCausalWhatIfModelPort({
+      modelHub,
+      modelGateway,
+      credentials,
+      clock,
+      ids,
+      projectContextPrivacy,
+    }),
     ids,
     clock,
   );
@@ -1388,6 +1505,7 @@ function buildRuntime(
     outlines: storyPersistence.outlines,
     outlineService,
     candidates: storyPersistence.planningCandidates,
+    projectContextPrivacy,
   });
   const searchVectors = new PersistentProjectEmbeddingService(
     cloudExecutor === null ? null : new SearchVectorSqliteStore(cloudExecutor),
@@ -1403,6 +1521,26 @@ function buildRuntime(
       clock,
       ids,
     },
+    async (projectId, documents) => {
+      const parsedProjectId = parseDomainUuid(projectId);
+      if (!parsedProjectId.ok) {
+        return documents.filter(({ sourceType }) => sourceType !== "chapter");
+      }
+      const chapters = await repositories.chapters.listByProjectId(parsedProjectId.value);
+      if (!chapters.ok) {
+        throw chapters.error;
+      }
+      const remoteEligibleChapterIds = new Set(
+        chapters.value
+          .filter((chapter) => !chapter.isLocalOnly)
+          .map((chapter) => chapter.id as string),
+      );
+      return documents.filter(
+        (document) =>
+          document.sourceType !== "chapter" || remoteEligibleChapterIds.has(document.sourceId),
+      );
+    },
+    projectContextPrivacy,
   );
   const search = new LocalProjectSearchService({
     projects: repositories.projects,
@@ -1478,9 +1616,13 @@ function buildRuntime(
     mode,
     repositories,
     creativeJourneys,
+    projectSeeds,
     contextTraces,
-    taskCenter: createTaskCenter(clock),
+    contextTraceOutputs,
+    projectContextPrivacy,
+    taskCenter,
     generationGovernance: createGenerationGovernance(clock),
+    usageCenter,
     modelCenter,
     modelRouting,
     modelHub,
@@ -1496,10 +1638,13 @@ function buildRuntime(
       facts: storyPersistence.facts,
       factService,
       chapterValidation,
+      chapterValidationSnapshots,
       characterVoicePov,
       ambiguousReview,
       continuousState,
+      continuousProjection,
       chapterSummaries,
+      historicalBackfill,
       narrativeAnalysis,
       causalGraph: storyPersistence.causalGraph,
       causalProjector: new CausalStoryFactProjector({
@@ -1531,6 +1676,7 @@ function buildRuntime(
         policies: storyPersistence.memoryPolicies,
         records: storyPersistence.memoryRecords,
         creation: storyPersistence.memoryCreation,
+        governance: storyPersistence.memoryGovernance,
         clock,
         ids,
       }),
@@ -1614,6 +1760,7 @@ function buildRuntime(
     fineTuningGovernance,
     marketplace,
     maintenance,
+    automaticBackup: null,
     useCases: {
       createProject: new CreateProject(repositories.projects, ids, clock),
       listProjects: new ListProjects(repositories.projects),
@@ -1628,6 +1775,8 @@ function buildRuntime(
         ids,
         clock,
         hasher,
+        repositories.chapters,
+        repositories.chapterVersions,
       ),
       importProject: new ImportProject(
         repositories.projects,
@@ -1645,6 +1794,11 @@ function buildRuntime(
         clock,
         hasher,
       ),
+      setChapterPrivacy: new SetChapterPrivacy(
+        repositories.chapters,
+        repositories.chapterPrivacy,
+        clock,
+      ),
       listChapterVersions: new ListChapterVersions(repositories.chapterVersions),
       restoreChapterVersion: new RestoreChapterVersion(
         repositories.chapters,
@@ -1655,10 +1809,34 @@ function buildRuntime(
         hasher,
       ),
       acceptCandidate,
+      reviseCandidate: new ReviseAiCandidate(repositories.aiCandidates, clock, hasher),
       rejectCandidate: new RejectAiCandidate(repositories.aiCandidates, clock),
     },
     close: closeRuntime,
   };
+}
+
+function createRequiredSqliteContextTraceOutputs(
+  executor: SqlExecutor | null,
+): ContextTraceOutputCommitUnitOfWork {
+  if (executor === null) {
+    throw new Error(
+      "The production desktop runtime requires an atomic SQLite context-output commit boundary.",
+    );
+  }
+  const unitOfWork = new SqliteContextTraceOutputCommitUnitOfWork(executor);
+  assertAtomicContextTraceOutputCapability(unitOfWork);
+  return unitOfWork;
+}
+
+function assertAtomicContextTraceOutputCapability(
+  unitOfWork: ContextTraceOutputCommitUnitOfWork,
+): void {
+  if (unitOfWork.capability !== "sqlite_atomic") {
+    throw new Error(
+      "The production desktop runtime refused a non-atomic context-output commit boundary.",
+    );
+  }
 }
 
 interface StoryPersistence {
@@ -1674,6 +1852,7 @@ interface StoryPersistence {
   readonly memoryPolicies: MemoryPolicyRepository;
   readonly memoryRecords: MemoryRecordRepository & MemoryRecordListReader;
   readonly memoryCreation: MemoryRecordCreationUnitOfWork;
+  readonly memoryGovernance: MemoryGovernanceUnitOfWork;
   readonly whatIfBranches: WhatIfRepository & WhatIfBranchListReader;
   readonly whatIfPromotions: WhatIfPromotionUnitOfWork;
   readonly outlineDrafts: OutlineDraftReader;
@@ -1713,6 +1892,24 @@ async function isGovernedSourceReadOnly(
     project.status !== "active" ||
     chapter.status !== "active" ||
     chapter.projectId !== project.id
+  );
+}
+
+async function isGovernedSourceLocalOnly(
+  repositories: Pick<RuntimeRepositories, "chapters">,
+  projectIdValue: string,
+  chapterIdValue: string,
+): Promise<boolean> {
+  const projectId = parseDomainUuid(projectIdValue);
+  const chapterId = parseDomainUuid(chapterIdValue);
+  if (!projectId.ok || !chapterId.ok) {
+    return true;
+  }
+  const chapterResult = await repositories.chapters.findById(chapterId.value);
+  return (
+    !chapterResult.ok ||
+    chapterResult.value?.projectId !== projectId.value ||
+    chapterResult.value.isLocalOnly
   );
 }
 
@@ -1820,11 +2017,14 @@ async function createConfiguredAuthoritativeExtractionRuntime(options: {
   try {
     configured = await resolveConfiguredAuthoritativeExtractionProvider({
       modelCenter: options.runtime.modelCenter,
+      modelHub: options.runtime.modelHub,
       modelRouting: options.runtime.modelRouting,
       credentials: options.runtime.credentials,
       gateway: options.runtime.modelGateway,
       hasher: options.runtime.hasher,
       ids: options.runtime.ids,
+      chapters: options.runtime.repositories.chapters,
+      projectContextPrivacy: options.runtime.projectContextPrivacy,
     });
   } catch {
     configured = null;
@@ -1842,6 +2042,25 @@ async function createConfiguredAuthoritativeExtractionRuntime(options: {
     evaluationSuiteId: "authoritative.extraction.golden.v1",
     ...(configured === null ? {} : { goldenSuite: configured.goldenSuite }),
     executionMode: configured?.executionMode ?? "local",
+    ...(configured === null
+      ? {}
+      : {
+          captureProjectContextAuthority: async (projectId: string) => {
+            const receipt = await options.runtime.projectContextPrivacy.inspect(projectId);
+            const verifiedLocalEligible = configured.executionMode === "local";
+            options.runtime.projectContextPrivacy.assertRouteEligible(
+              receipt,
+              verifiedLocalEligible,
+            );
+            return async () => {
+              await options.runtime.projectContextPrivacy.assertCurrentBeforeDispatch(receipt);
+              options.runtime.projectContextPrivacy.assertRouteEligible(
+                receipt,
+                verifiedLocalEligible,
+              );
+            };
+          },
+        }),
   });
 }
 
@@ -1873,8 +2092,23 @@ function unavailableExtractionProvenance(): AuthoritativeExtractionProvenance {
 export async function createDesktopRuntime(): Promise<DesktopRuntime> {
   if (isTauri()) {
     const executor = await TauriSqliteExecutor.open();
+    const acceptedCandidateTaskIds = new CryptoUuidV7Generator();
     const repositories = createSqliteRepositories(executor, {
       syncProjectionIds: new CryptoUuidV7Generator(),
+      acceptedCandidateTaskFactory: (commit) => {
+        const version = commit.version.toSnapshot();
+        return createAcceptedChapterPipelineTaskInput(
+          acceptedCandidateTaskIds.next(),
+          version.createdAt,
+          {
+            projectId: version.projectId,
+            chapterId: version.chapterId,
+            versionId: version.id,
+            source: "candidate_accept",
+            acceptedCharacterCount: version.content.length,
+          },
+        );
+      },
     });
     const [{ AccessSqliteStore }, { ProjectKeySqliteStore }, { SyncSqliteStore }] =
       await Promise.all([
@@ -1886,6 +2120,7 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
       "tauri",
       repositories,
       new SqliteCreativeJourneyStore(executor),
+      new ProjectSeedSqliteStore(executor),
       () => executor.close(),
       createTauriRuntimeMaintenance(executor),
       (clock) => new TauriTaskCenterStore(executor, clock),
@@ -1894,6 +2129,7 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
       (clock) => new TauriModelRoutingStore(executor, clock),
       (clock) => new TauriModelHubStore(executor, clock),
       () => new SqliteContextCompilationTraceStore(executor),
+      () => new SqliteChapterValidationSnapshotStore(executor),
       () => new SqliteWritingFeedbackStore(executor),
       (ids, clock, hasher) => {
         const extractionItems = new SqliteReviewItemRepository(executor, "extraction");
@@ -1909,6 +2145,7 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
           memoryPolicies: new SqliteMemoryPolicyRepository(executor),
           memoryRecords: new SqliteMemoryRecordRepository(executor),
           memoryCreation: new SqliteMemoryRecordCreationUnitOfWork(executor),
+          memoryGovernance: new SqliteMemoryGovernanceUnitOfWork(executor),
           whatIfBranches: new SqliteWhatIfRepository(executor),
           whatIfPromotions: new SqliteWhatIfPromotionUnitOfWork(executor),
           outlineDrafts: new SqliteOutlineDraftReader(executor),
@@ -1930,13 +2167,35 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
       },
       executor,
     );
-    const runtime: DesktopRuntime = Object.freeze({
+    const configuredRuntime: DesktopRuntime = Object.freeze({
       ...baseRuntime,
       authoritativeExtraction: await createConfiguredAuthoritativeExtractionRuntime({
         enabled: baseRuntime.featureFlags.authoritativeExtraction,
         executor,
         runtime: baseRuntime,
       }),
+    });
+    const automaticBackup = createTauriAutomaticBackupRuntime({
+      executor,
+      ids: configuredRuntime.ids,
+      clock: configuredRuntime.clock,
+    });
+    const backupRuntime = attachAutomaticBackupRuntime(configuredRuntime, automaticBackup);
+    const acceptedChapterPipelineWorker = new AcceptedChapterPipelineWorker(backupRuntime, {
+      reportError: () => {
+        globalThis.console.error(
+          "[ACCEPTED_VERSION_PIPELINE_WORKER_FAILED] Accepted正文 remains safe; derived story data can be retried from the task center.",
+        );
+      },
+    });
+    const runtime = attachAcceptedChapterPipelineWorker(
+      backupRuntime,
+      acceptedChapterPipelineWorker,
+    );
+    await recoverModelHubCredentialCommits(runtime).catch(() => {
+      globalThis.console.error(
+        "[MODEL_HUB_CREDENTIAL_COMMIT_RECOVERY_FAILED] Published connections remain unchanged; pending credential cleanup will retry later.",
+      );
     });
     await bridgeLegacyModelProfilesToModelHub({
       modelCenter: runtime.modelCenter,
@@ -1950,6 +2209,13 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
         "[MODEL_HUB_LEGACY_BRIDGE_FAILED] Legacy model configuration remains available through the compatibility runtime.",
       );
     });
+    if (typeof window.localStorage !== "undefined") {
+      await backfillLegacyProjectSeeds(runtime.projectSeeds, window.localStorage).catch(() => {
+        globalThis.console.error(
+          "[PROJECT_SEED_LEGACY_BACKFILL_FAILED] Legacy creation recovery data remains unchanged.",
+        );
+      });
+    }
     if (runtime.cloudIdentity !== null) {
       try {
         await runtime.cloudIdentity.reconcileLocalState();
@@ -1965,10 +2231,40 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
       runtime.governedCreativeExtensions,
       runtime.clock.now(),
     );
+    automaticBackup.start();
+    acceptedChapterPipelineWorker.start();
     return runtime;
   }
 
   return createDevelopmentRuntime(window.localStorage);
+}
+
+export function attachAutomaticBackupRuntime(
+  runtime: DesktopRuntime,
+  automaticBackup: AutomaticBackupRuntime,
+): DesktopRuntime {
+  const close = createIdempotentAsyncCloser(async () => {
+    try {
+      await automaticBackup.stop();
+    } finally {
+      await runtime.close();
+    }
+  });
+  return Object.freeze({ ...runtime, automaticBackup, close });
+}
+
+export function attachAcceptedChapterPipelineWorker(
+  runtime: DesktopRuntime,
+  worker: Pick<AcceptedChapterPipelineWorker, "stop">,
+): DesktopRuntime {
+  const close = createIdempotentAsyncCloser(async () => {
+    try {
+      await worker.stop();
+    } finally {
+      await runtime.close();
+    }
+  });
+  return Object.freeze({ ...runtime, close });
 }
 
 export interface MultiAgentReviewStartupRecoveryResult {
@@ -2048,6 +2344,7 @@ export function createDevelopmentRuntime(storage: Storage): DesktopRuntime {
     "browser-development",
     repositories,
     new BrowserCreativeJourneyStore(storage),
+    new BrowserProjectSeedStore(storage),
     () => Promise.resolve(),
     null,
     (clock) => new BrowserDevelopmentTaskCenterStore(storage, clock),
@@ -2056,6 +2353,7 @@ export function createDevelopmentRuntime(storage: Storage): DesktopRuntime {
     (clock, modelCenter) => new BrowserDevelopmentModelRoutingStore(storage, clock, modelCenter),
     (clock) => new BrowserDevelopmentModelHubStore(storage, clock),
     () => new BrowserDevelopmentContextCompilationTraceStore(storage),
+    () => new BrowserDevelopmentChapterValidationSnapshotStore(storage),
     () => new BrowserDevelopmentWritingFeedbackStore(storage),
     (ids, clock, hasher) => {
       const sourceVersions = new RepositoryChapterVersionReader(repositories.chapters);
@@ -2080,6 +2378,7 @@ export function createDevelopmentRuntime(storage: Storage): DesktopRuntime {
         memoryPolicies: new BrowserDevelopmentMemoryPolicyRepository(storage),
         memoryRecords: new BrowserDevelopmentMemoryRecordRepository(storage),
         memoryCreation: new BrowserDevelopmentMemoryRecordCreationUnitOfWork(storage),
+        memoryGovernance: new BrowserDevelopmentMemoryGovernanceUnitOfWork(storage),
         whatIfBranches: new BrowserDevelopmentWhatIfRepository(storage),
         whatIfPromotions: new BrowserDevelopmentWhatIfPromotionUnitOfWork(storage),
         outlineDrafts: new BrowserDevelopmentOutlineDraftReader(storage),
@@ -2107,16 +2406,23 @@ export function createDevelopmentRuntime(storage: Storage): DesktopRuntime {
   );
 }
 
+export interface ChapterStoryContextCompilationReceipt extends StoryContextCompilationReceipt {
+  readonly projectPrivacy: ProjectContextPrivacyReceipt;
+}
+
 export interface PreparedGenerationPlan {
   readonly requestId: string;
   readonly taskId: string;
   readonly runId: string;
   readonly generationId: string;
+  readonly contextTraceId: string | null;
   readonly leaseToken: string;
   readonly idempotencyKey: string;
   readonly projectId: string | null;
   readonly chapterId: UuidV7;
   readonly baseVersionId: string | null;
+  /** Exact saved-text UTF-16 anchor captured when the author requested continuation. */
+  readonly applicationCursorUtf16: number;
   readonly providerId: string;
   readonly modelId: string;
   readonly modelRole: ModelRouteRole;
@@ -2137,9 +2443,13 @@ export interface PreparedGenerationPlan {
   readonly tokenEstimateSource: "utf8_conservative" | "local_demo";
   readonly preflight: GenerationPreflightSnapshot;
   readonly profile: ModelProfile | null;
+  /** In-memory resolved endpoint; providerId is the current versioned vault slot. */
+  readonly legacyGatewayConfig: NativeModelEndpointConfig | null;
+  /** In-memory authoritative identity used by the final pre-dispatch guard. */
+  readonly legacyGatewayResolution: ModelProfileGatewayConfigResolution | null;
   /** In-memory only. Deferred/task persistence deliberately excludes prompt content. */
   readonly messages: readonly NativeModelMessage[];
-  readonly contextCompilation: StoryContextCompilationReceipt | null;
+  readonly contextCompilation: ChapterStoryContextCompilationReceipt | null;
   readonly executionMode: "local_demo" | "model_hub" | "legacy_profile";
   readonly modelHubInspection: ModelHubTextTaskInspection | null;
   readonly approvedPricing: ModelPricing | null;
@@ -2164,6 +2474,7 @@ export async function prepareGenerationPlan(
   input: {
     readonly chapterSaved: boolean;
     readonly networkAvailable: boolean;
+    readonly cursorUtf16?: number;
   },
 ): Promise<PreparedGenerationPlan> {
   await runtime.taskCenter.recoverExpiredTasks();
@@ -2185,6 +2496,10 @@ export async function prepareGenerationPlan(
     throw projectResult.error;
   }
   const project = projectResult?.value ?? null;
+  const applicationCursorUtf16 = resolveContinuationCursor(
+    chapter?.content ?? "",
+    input.cursorUtf16,
+  );
   const demo = runtime.mode === "browser-development";
   let profile: ModelProfile | null = null;
   let routeResolved = true;
@@ -2202,6 +2517,8 @@ export async function prepareGenerationPlan(
   let credentialConfigured = demo;
   let connectionStatus: "verified" | "failed" | "not_checked" = demo ? "verified" : "not_checked";
   let selectedModelAvailable = demo;
+  let legacyGatewayConfig: NativeModelEndpointConfig | null = null;
+  let legacyGatewayResolution: ModelProfileGatewayConfigResolution | null = null;
 
   if (!demo && roleRoute !== null) {
     const routeProfiles = profiles.filter(
@@ -2247,6 +2564,8 @@ export async function prepareGenerationPlan(
       credentialConfigured = selectedInspection.credentialConfigured;
       connectionStatus = selectedInspection.connectionStatus;
       selectedModelAvailable = selectedInspection.selectedModelAvailable;
+      legacyGatewayConfig = selectedInspection.gatewayConfig;
+      legacyGatewayResolution = selectedInspection.gatewayResolution;
     }
     if (resolution.status === "resolved") {
       routeReason = resolution.reason === "fallback_verified" ? "role_fallback" : "role_primary";
@@ -2261,6 +2580,8 @@ export async function prepareGenerationPlan(
       credentialConfigured = inspected.credentialConfigured;
       connectionStatus = inspected.connectionStatus;
       selectedModelAvailable = inspected.selectedModelAvailable;
+      legacyGatewayConfig = inspected.gatewayConfig;
+      legacyGatewayResolution = inspected.gatewayResolution;
     }
   }
 
@@ -2268,7 +2589,7 @@ export async function prepareGenerationPlan(
   let modelId = demo ? "built-in-demo" : (profile?.selectedModel ?? "unselected");
   let maximumOutputTokens = 2_048;
   let messages: readonly NativeModelMessage[] = [];
-  let contextCompilation: StoryContextCompilationReceipt | null = null;
+  let contextCompilation: ChapterStoryContextCompilationReceipt | null = null;
   if (chapter !== null) {
     if (demo) {
       messages = buildContinuationMessages(chapter);
@@ -2287,12 +2608,17 @@ export async function prepareGenerationPlan(
     ? "local_demo"
     : "legacy_profile";
   if (!demo && chapter !== null) {
+    const requiredDataDestination =
+      contextCompilation === null
+        ? undefined
+        : projectContextRequiredDataDestination(contextCompilation.projectPrivacy);
     try {
       modelHubInspection = await inspectModelHubTextTask(runtime, {
         task: "continuation",
         messages,
         maximumOutputTokens,
         temperature: 0.8,
+        ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
       });
     } catch (cause: unknown) {
       if (
@@ -2319,7 +2645,17 @@ export async function prepareGenerationPlan(
       connectionStatus = "verified";
       selectedModelAvailable = true;
       profile = null;
+      legacyGatewayConfig = null;
+      legacyGatewayResolution = null;
     }
+  }
+  if (
+    !demo &&
+    contextCompilation?.projectPrivacy.requiresVerifiedLocal === true &&
+    modelHubInspection === null &&
+    !isVerifiedLocalGatewayConfig(legacyGatewayConfig)
+  ) {
+    throw privateChapterModelBlocked();
   }
   const inputBytes = demo ? 0 : measureMessageBytes(messages);
   const inputTokens = demo
@@ -2349,7 +2685,8 @@ export async function prepareGenerationPlan(
     networkAvailable: input.networkAvailable,
     providerLocation: demo
       ? "demo"
-      : modelHubInspection?.dataDestination === "local" || profile?.provider === "ollama"
+      : modelHubInspection?.dataDestination === "local" ||
+          isVerifiedLocalGatewayConfig(legacyGatewayConfig)
         ? "local"
         : "remote",
     routeResolved,
@@ -2407,16 +2744,21 @@ export async function prepareGenerationPlan(
     (baseVersionId === null
       ? `ai.generate:blocked:${requestId}`
       : `ai.generate:${chapterId}:${baseVersionId}:${requestId}`);
+  const generationId = runtime.ids.next();
+  const contextTraceId =
+    contextCompilation === null || chapter === null ? null : runtime.ids.next();
   return Object.freeze({
     requestId,
     taskId: retryableRun?.taskId ?? deferredResumeRun?.taskId ?? runtime.ids.next(),
     runId: retryableRun?.id ?? deferredResumeRun?.id ?? runtime.ids.next(),
-    generationId: runtime.ids.next(),
+    generationId,
+    contextTraceId,
     leaseToken: runtime.ids.next(),
     idempotencyKey,
     projectId: chapter?.projectId ?? null,
     chapterId,
     baseVersionId,
+    applicationCursorUtf16,
     providerId,
     modelId,
     modelRole,
@@ -2428,12 +2770,33 @@ export async function prepareGenerationPlan(
     tokenEstimateSource: demo ? "local_demo" : "utf8_conservative",
     preflight,
     profile,
+    legacyGatewayConfig,
+    legacyGatewayResolution,
     messages,
     contextCompilation,
     executionMode,
     modelHubInspection,
     approvedPricing: pricing,
   });
+}
+
+function resolveContinuationCursor(content: string, requested: number | undefined): number {
+  const cursor = requested ?? content.length;
+  const splitsSurrogate =
+    cursor > 0 &&
+    cursor < content.length &&
+    content.charCodeAt(cursor - 1) >= 0xd800 &&
+    content.charCodeAt(cursor - 1) <= 0xdbff &&
+    content.charCodeAt(cursor) >= 0xdc00 &&
+    content.charCodeAt(cursor) <= 0xdfff;
+  if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > content.length || splitsSurrogate) {
+    throw new AppError({
+      code: "VALIDATION_FAILED",
+      message: "The continuation cursor is no longer a valid saved-text position.",
+      details: { field: "cursorUtf16" },
+    });
+  }
+  return cursor;
 }
 
 function resolvePreparedGenerationPricing(
@@ -2600,6 +2963,20 @@ export async function executeGenerationPlan(
       }),
     );
   }
+  if (plan.contextCompilation !== null) {
+    try {
+      runtime.projectContextPrivacy.assertChapterMatches(
+        plan.contextCompilation.projectPrivacy,
+        chapter,
+      );
+      runtime.projectContextPrivacy.assertRouteEligible(
+        plan.contextCompilation.projectPrivacy,
+        isPreparedGenerationTargetLocal(plan),
+      );
+    } catch (cause: unknown) {
+      return err(normalizeProjectContextPrivacyFailure(cause));
+    }
+  }
 
   try {
     const enqueued = await runtime.taskCenter.enqueueTask({
@@ -2759,7 +3136,11 @@ export async function executeGenerationPlan(
     };
     try {
       if (runtime.mode === "browser-development") {
-        const demo = await createLocalDemoCandidate(runtime, plan.chapterId);
+        const demo = await createLocalDemoCandidate(
+          runtime,
+          plan.chapterId,
+          plan.applicationCursorUtf16,
+        );
         if (!demo.ok) {
           throw demo.error;
         }
@@ -2772,15 +3153,31 @@ export async function executeGenerationPlan(
           usagePricedEstimateMicros: "0",
         };
       } else {
+        const privacyReceipt = plan.contextCompilation?.projectPrivacy ?? null;
+        if (privacyReceipt === null) {
+          throw new ModelCenterError(
+            "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE",
+            "无法建立作品隐私边界，因此没有调用 AI。",
+            true,
+          );
+        }
+        const requiredDataDestination = projectContextRequiredDataDestination(privacyReceipt);
         const generated =
           plan.executionMode === "model_hub"
             ? await executeModelHubTextTask(runtime, {
+                dispatchScope: projectContextDispatchScope(privacyReceipt),
                 task: "continuation",
                 messages: plan.messages,
                 maximumOutputTokens: plan.maximumOutputTokens,
                 temperature: 0.8,
+                ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
                 generationId: plan.generationId,
-                onBeforeDispatch: ({ connectionId, modelId }) => {
+                onBeforeDispatch: async ({
+                  invocationId,
+                  connectionId,
+                  modelId,
+                  localOnlyEligible,
+                }) => {
                   if (connectionId !== plan.providerId || modelId !== plan.modelId) {
                     throw new ModelHubExecutionError(
                       "MODEL_HUB_PLAN_CHANGED",
@@ -2788,6 +3185,12 @@ export async function executeGenerationPlan(
                       true,
                     );
                   }
+                  await linkPreparedContextModelInvocation(runtime, plan, invocationId);
+                  await assertProjectContextBeforeModelHubDispatch(
+                    runtime,
+                    privacyReceipt,
+                    localOnlyEligible === true,
+                  );
                 },
                 onDelta: (next) => {
                   accumulated = next;
@@ -2800,20 +3203,36 @@ export async function executeGenerationPlan(
               });
         attemptUsage = priceProviderReportedUsage(plan, generated.usage);
         accumulated = generated.text;
-        const persisted = await persistGeneratedCandidate(runtime, chapter, generated.text, false);
-        if (!persisted.ok) {
-          throw persisted.error;
+        const built = await buildGeneratedCandidate(
+          runtime,
+          chapter,
+          generated.text,
+          false,
+          plan.applicationCursorUtf16,
+        );
+        if (!built.ok) {
+          throw built.error;
         }
-        candidate = persisted.value;
+        candidate = built.value;
       }
+      await commitPreparedContextOutputCandidate(runtime, plan, candidate);
     } catch (cause: unknown) {
       const normalized = normalizeGovernedGenerationError(cause);
       if (normalized.code === "MODEL_GENERATION_CANCELLED") {
         let partialCandidate: AiCandidate | null = null;
         if (accumulated.trim().length > 0) {
-          const persisted = await persistGeneratedCandidate(runtime, chapter, accumulated, true);
-          if (persisted.ok) {
-            partialCandidate = persisted.value;
+          const built = await buildGeneratedCandidate(
+            runtime,
+            chapter,
+            accumulated,
+            true,
+            plan.applicationCursorUtf16,
+          );
+          if (built.ok) {
+            try {
+              await commitPreparedContextOutputCandidate(runtime, plan, built.value);
+              partialCandidate = built.value;
+            } catch {}
           }
         }
         run = await runtime.generationGovernance.transitionRun({
@@ -2980,32 +3399,109 @@ async function persistPreparedContextTrace(
   if (plan.contextCompilation === null || plan.projectId === null) {
     return;
   }
+  if (plan.contextTraceId === null) {
+    throw new ModelCenterError(
+      "CONTEXT_TRACE_UNAVAILABLE",
+      "无法建立本次生成与上下文来源的精确关联，因此没有调用模型。正文和已有 AI 建议版本均未改变。",
+      true,
+    );
+  }
   await runtime.contextTraces.save(
     createContextCompilationTrace({
-      id: runtime.ids.next(),
+      id: plan.contextTraceId,
       projectId: plan.projectId,
       chapterId: plan.chapterId,
       taskType: "continuation",
       compiled: plan.contextCompilation.compiled,
       createdAt: runtime.clock.now(),
+      execution: {
+        generationId: plan.generationId,
+        generationRunId: plan.runId,
+      },
     }),
   );
+}
+
+async function linkPreparedContextModelInvocation(
+  runtime: DesktopRuntime,
+  plan: PreparedGenerationPlan,
+  modelInvocationId: string,
+): Promise<void> {
+  if (plan.contextTraceId === null) {
+    throw new ModelCenterError(
+      "CONTEXT_TRACE_UNAVAILABLE",
+      "无法建立本次模型调用与上下文来源的精确关联，因此没有发送正文。",
+      true,
+    );
+  }
+  try {
+    await runtime.contextTraces.linkModelInvocation({
+      traceId: plan.contextTraceId,
+      modelInvocationId,
+      linkedAt: runtime.clock.now(),
+    });
+  } catch {
+    throw new ModelCenterError(
+      "CONTEXT_TRACE_UNAVAILABLE",
+      "无法建立本次模型调用与上下文来源的精确关联，因此没有发送正文。",
+      true,
+    );
+  }
+}
+
+async function commitPreparedContextOutputCandidate(
+  runtime: DesktopRuntime,
+  plan: PreparedGenerationPlan,
+  candidate: AiCandidate,
+): Promise<void> {
+  if (plan.contextTraceId === null) {
+    if (runtime.mode === "tauri") {
+      throw new ModelCenterError(
+        "CONTEXT_TRACE_UNAVAILABLE",
+        "无法建立本次 AI 建议版本与上下文来源的精确关联，因此没有保存该版本。正文和已有 AI 建议版本均未改变。",
+        true,
+      );
+    }
+    return;
+  }
+  try {
+    await runtime.contextTraceOutputs.commit({
+      traceId: plan.contextTraceId,
+      candidate,
+      linkedAt: runtime.clock.now(),
+    });
+  } catch {
+    throw new ModelCenterError(
+      "CONTEXT_TRACE_UNAVAILABLE",
+      "无法同时保存 AI 建议版本及其上下文来源记录，因此本次建议版本未保存。正文和已有 AI 建议版本均未改变。",
+      true,
+    );
+  }
 }
 
 async function saveDirectContinuationContextTrace(
   runtime: DesktopRuntime,
   chapter: Chapter,
   receipt: StoryContextCompilationReceipt,
+  execution: Readonly<{
+    traceId: string;
+    generationId: string;
+    modelInvocationId: string | null;
+  }>,
 ): Promise<void> {
   try {
     await runtime.contextTraces.save(
       createContextCompilationTrace({
-        id: runtime.ids.next(),
+        id: execution.traceId,
         projectId: chapter.projectId,
         chapterId: chapter.id,
         taskType: "continuation",
         compiled: receipt.compiled,
         createdAt: runtime.clock.now(),
+        execution: {
+          generationId: execution.generationId,
+          modelInvocationId: execution.modelInvocationId,
+        },
       }),
     );
   } catch {
@@ -3023,6 +3519,8 @@ interface InspectedModelRouteProfile {
   readonly credentialConfigured: boolean;
   readonly connectionStatus: "verified" | "failed" | "not_checked";
   readonly selectedModelAvailable: boolean;
+  readonly gatewayConfig: NativeModelEndpointConfig | null;
+  readonly gatewayResolution: ModelProfileGatewayConfigResolution | null;
 }
 
 const TEXT_GENERATION_MODEL_ROLES = [
@@ -3296,31 +3794,108 @@ function priceProviderReportedUsage(
   });
 }
 
-function generateLegacyContinuation(
+async function generateLegacyContinuation(
   runtime: DesktopRuntime,
   plan: PreparedGenerationPlan,
   onDelta: (next: string) => void,
 ): Promise<NativeModelGenerationResult> {
-  if (plan.profile?.selectedModel === null || plan.profile === null) {
+  if (
+    plan.profile?.selectedModel === null ||
+    plan.profile === null ||
+    plan.legacyGatewayResolution === null
+  ) {
     throw new ModelCenterError(
       "MODEL_PROFILE_NOT_READY",
       "The preflight model profile is no longer ready.",
     );
   }
-  return runtime.modelGateway.generate({
-    generationId: plan.generationId,
-    config: {
-      providerId: plan.profile.providerId,
-      provider: plan.profile.provider,
-      baseUrl: plan.profile.baseUrl,
-      authentication: plan.profile.authentication,
+  if (plan.contextCompilation !== null) {
+    await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(
+      plan.contextCompilation.projectPrivacy,
+    );
+    runtime.projectContextPrivacy.assertRouteEligible(
+      plan.contextCompilation.projectPrivacy,
+      isVerifiedLocalGatewayConfig(plan.legacyGatewayResolution.config),
+    );
+  }
+  if (plan.contextCompilation === null) {
+    throw new ModelCenterError(
+      "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE",
+      "无法建立作品隐私边界，因此没有调用 AI。",
+      true,
+    );
+  }
+  const current = await resolveFinalModelProfileGatewayConfig(
+    {
+      modelCenter: runtime.modelCenter,
+      modelHub: runtime.modelHub,
+      credentials: runtime.credentials,
     },
-    model: plan.profile.selectedModel,
+    plan.profile,
+    plan.legacyGatewayResolution,
+  ).catch(() => {
+    throw new ModelCenterError(
+      "MODEL_PROFILE_NOT_READY",
+      "The preflight model connection or credential changed before dispatch.",
+      true,
+    );
+  });
+  return runtime.modelGateway.generate({
+    dispatchScope: projectContextDispatchScope(plan.contextCompilation.projectPrivacy),
+    generationId: plan.generationId,
+    config: current.resolution.config,
+    model: current.profile.selectedModel ?? plan.profile.selectedModel,
     messages: plan.messages,
     maxOutputTokens: plan.maximumOutputTokens,
     temperature: 0.8,
     onDelta,
   });
+}
+
+function isVerifiedLocalGatewayConfig(config: NativeModelEndpointConfig | null): boolean {
+  return config?.provider === "ollama" && isLoopbackModelBaseUrl(config.baseUrl);
+}
+
+function isPreparedGenerationTargetLocal(plan: PreparedGenerationPlan): boolean {
+  return (
+    plan.executionMode === "local_demo" ||
+    plan.modelHubInspection?.dataDestination === "local" ||
+    (plan.executionMode === "legacy_profile" &&
+      isVerifiedLocalGatewayConfig(plan.legacyGatewayConfig))
+  );
+}
+
+function privateChapterModelBlocked(): ModelCenterError {
+  return new ModelCenterError(
+    "PRIVATE_CHAPTER_LOCAL_ONLY",
+    "私密章节只能由已验证的本地模型处理；本次请求在发送 0 字后停止。",
+  );
+}
+
+async function assertProjectContextBeforeModelHubDispatch(
+  runtime: Pick<DesktopRuntime, "projectContextPrivacy">,
+  receipt: ProjectContextPrivacyReceipt,
+  localOnlyEligible: boolean,
+): Promise<void> {
+  try {
+    await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(receipt);
+    runtime.projectContextPrivacy.assertRouteEligible(receipt, localOnlyEligible);
+  } catch (cause: unknown) {
+    if (cause instanceof ProjectContextPrivacyError) {
+      throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
+    }
+    throw cause;
+  }
+}
+
+function normalizeProjectContextPrivacyFailure(cause: unknown): ModelCenterError {
+  return cause instanceof ProjectContextPrivacyError
+    ? new ModelCenterError(cause.code, cause.message, cause.retryable)
+    : new ModelCenterError(
+        "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE",
+        "无法核对这个作品的本地隐私范围，因此没有调用 AI。请重试；若问题持续，请先检查本地数据库。",
+        true,
+      );
 }
 
 async function inspectModelRouteProfile(
@@ -3335,30 +3910,22 @@ async function inspectModelRouteProfile(
       "A route target profile no longer has a selected model.",
     );
   }
-  let credentialConfigured = profile.authentication === "none";
-  if (profile.authentication === "bearer_keyring") {
-    try {
-      credentialConfigured = (await runtime.credentials.getSummary(profile.providerId)).configured;
-    } catch {
-      credentialConfigured = false;
-    }
-  }
+  const resolvedEndpoint = await resolveModelProfileGatewayConfig(
+    { modelHub: runtime.modelHub, credentials: runtime.credentials },
+    profile,
+  ).catch(() => null);
+  const credentialConfigured = resolvedEndpoint !== null;
 
   const canProbe =
     runtime.modelGateway.available &&
     credentialConfigured &&
-    (profile.provider === "ollama" || networkAvailable);
+    (resolvedEndpoint.config.provider === "ollama" || networkAvailable);
   let verification: ModelRouteCandidate["verification"] = "not_checked";
   let connectionStatus: InspectedModelRouteProfile["connectionStatus"] = "not_checked";
   let selectedModelAvailable = true;
   if (canProbe) {
     try {
-      const listed = await runtime.modelGateway.listModels({
-        providerId: profile.providerId,
-        provider: profile.provider,
-        baseUrl: profile.baseUrl,
-        authentication: profile.authentication,
-      });
+      const listed = await runtime.modelGateway.listModels(resolvedEndpoint.config);
       connectionStatus = "verified";
       selectedModelAvailable = listed.models.some(({ id }) => id === modelId);
       verification = selectedModelAvailable ? "verified" : "unavailable";
@@ -3369,22 +3936,25 @@ async function inspectModelRouteProfile(
     }
   }
 
-  const capabilities: readonly ModelRouteRole[] =
-    profile.provider === "ollama"
-      ? [...TEXT_GENERATION_MODEL_ROLES, "local_private"]
-      : TEXT_GENERATION_MODEL_ROLES;
+  const capabilities: readonly ModelRouteRole[] = isVerifiedLocalGatewayConfig(
+    resolvedEndpoint?.config ?? null,
+  )
+    ? [...TEXT_GENERATION_MODEL_ROLES, "local_private"]
+    : TEXT_GENERATION_MODEL_ROLES;
   return Object.freeze({
     profile,
     candidate: Object.freeze({
       providerId: profile.providerId,
       modelId,
-      location: profile.provider === "ollama" ? "local" : "remote",
+      location: isVerifiedLocalGatewayConfig(resolvedEndpoint?.config ?? null) ? "local" : "remote",
       verification,
       capabilities: Object.freeze([...capabilities]),
     }),
     credentialConfigured,
     connectionStatus,
     selectedModelAvailable,
+    gatewayConfig: resolvedEndpoint?.config ?? null,
+    gatewayResolution: resolvedEndpoint,
   });
 }
 
@@ -3404,25 +3974,107 @@ function buildContinuationMessages(chapter: Chapter): readonly NativeModelMessag
 
 interface ContextualContinuationMessages {
   readonly messages: readonly NativeModelMessage[];
-  readonly contextCompilation: StoryContextCompilationReceipt;
+  readonly contextCompilation: ChapterStoryContextCompilationReceipt;
+}
+
+export interface ChapterStoryContextCompilationInput {
+  readonly currentTask: ContextCandidateDraft;
+  readonly retrievalQuery?: string;
+  readonly maximumContextTokens?: number;
+  /** Supply only from author-confirmed scene/chapter metadata; the pair is fail-closed. */
+  readonly currentPovCharacterId?: string | null;
+  readonly currentNarrativeOrder?: number | null;
+  /**
+   * Remote reranking is optional enrichment, never a prerequisite. Callers
+   * handling bounded source text can keep preparation entirely local.
+   */
+  readonly allowRemoteRerank?: boolean;
+}
+
+/**
+ * Compiles the governed, traceable story context shared by chapter-level AI
+ * actions. The caller still owns the task-specific prompt and persistence
+ * policy; this helper only selects verified story sources.
+ */
+export async function compileChapterStoryContext(
+  runtime: DesktopRuntime,
+  chapter: Chapter,
+  input: ChapterStoryContextCompilationInput,
+): Promise<ChapterStoryContextCompilationReceipt> {
+  const projectPrivacy = await runtime.projectContextPrivacy.inspect(chapter.projectId);
+  runtime.projectContextPrivacy.assertChapterMatches(projectPrivacy, chapter);
+  const [
+    retrieval,
+    causalCandidates,
+    preferenceCandidates,
+    currentChapterVersions,
+    creationSeedCandidates,
+    verifiedPovKnowledgeFacts,
+  ] = await Promise.all([
+    retrieveSemanticContinuationCandidates(
+      runtime,
+      chapter,
+      projectPrivacy,
+      input.retrievalQuery,
+      (input.allowRemoteRerank ?? true) && !projectPrivacy.requiresVerifiedLocal,
+    ),
+    retrieveCausalContinuationCandidates(runtime, chapter, input.retrievalQuery),
+    runtime.story.writingFeedback
+      .loadDashboard(chapter.projectId)
+      .then(({ preferences }) => selectWritingPreferenceContextCandidates(preferences))
+      .catch(() => Object.freeze([])),
+    buildVerifiedCurrentChapterVersionRegistry(runtime, chapter.projectId),
+    runtime.projectSeeds
+      .findByProjectId(chapter.projectId)
+      .then(selectProjectSeedContextCandidates)
+      .catch(() => Object.freeze([])),
+    runtime.story.continuousProjection
+      .projectVoicePovFacts({
+        projectId: chapter.projectId,
+        chapterId: chapter.id,
+        currentVersionId: chapter.currentVersionId,
+      })
+      .then(({ facts }) =>
+        Object.freeze(facts.filter((fact) => fact.toSnapshot().factType === "character_knowledge")),
+      )
+      .catch(() => Object.freeze([])),
+  ]);
+  const currentVersionAuthority = currentChapterVersions[chapter.id];
+  if (currentVersionAuthority?.versionId !== chapter.currentVersionId) {
+    throw new StoryContextRuntimeError(
+      "STORY_CONTEXT_COMPILATION_FAILED",
+      "The current chapter version and checksum could not be verified for context compilation.",
+    );
+  }
+  const compiled = await compileStoryContextForGeneration(runtime.story.facts, {
+    projectId: chapter.projectId,
+    currentTask: input.currentTask,
+    currentTaskSupplements: preferenceCandidates,
+    creationSeedCandidates,
+    currentChapter: {
+      chapterId: chapter.id,
+      versionId: chapter.currentVersionId,
+      contentHash: currentVersionAuthority.contentHash,
+      title: chapter.title,
+      content: chapter.content,
+    },
+    currentChapterVersions,
+    causalCandidates,
+    semanticCandidates: retrieval.semanticCandidates,
+    rerankCandidates: retrieval.rerankCandidates,
+    verifiedDerivedFacts: verifiedPovKnowledgeFacts,
+    currentPovCharacterId: input.currentPovCharacterId ?? null,
+    currentNarrativeOrder: input.currentNarrativeOrder ?? null,
+    maximumContextTokens: input.maximumContextTokens ?? 7_000,
+  });
+  return Object.freeze({ ...compiled, projectPrivacy });
 }
 
 async function buildContextualContinuationMessages(
   runtime: DesktopRuntime,
   chapter: Chapter,
 ): Promise<ContextualContinuationMessages> {
-  const [retrieval, causalCandidates, preferenceCandidates, currentChapterVersions] =
-    await Promise.all([
-      retrieveSemanticContinuationCandidates(runtime, chapter),
-      retrieveCausalContinuationCandidates(runtime, chapter),
-      runtime.story.writingFeedback
-        .loadDashboard(chapter.projectId)
-        .then(({ preferences }) => selectWritingPreferenceContextCandidates(preferences))
-        .catch(() => Object.freeze([])),
-      buildVerifiedCurrentChapterVersionRegistry(runtime, chapter.projectId),
-    ]);
-  const contextCompilation = await compileStoryContextForGeneration(runtime.story.facts, {
-    projectId: chapter.projectId,
+  const contextCompilation = await compileChapterStoryContext(runtime, chapter, {
     currentTask: {
       id: `continuation-task:${chapter.id}:${chapter.currentVersionId}`,
       content: `续写《${chapter.title}》的下一场景，保持已保存正文、正式设定与锁定规则连续。`,
@@ -3439,17 +4091,6 @@ async function buildContextualContinuationMessages(
       ],
       priority: 1_000,
     },
-    currentTaskSupplements: preferenceCandidates,
-    currentChapter: {
-      chapterId: chapter.id,
-      versionId: chapter.currentVersionId,
-      title: chapter.title,
-      content: chapter.content,
-    },
-    currentChapterVersions,
-    causalCandidates,
-    semanticCandidates: retrieval.semanticCandidates,
-    rerankCandidates: retrieval.rerankCandidates,
     maximumContextTokens: 7_000,
   });
   return Object.freeze({
@@ -3520,11 +4161,19 @@ async function buildVerifiedCurrentChapterVersionRegistry(
 async function retrieveCausalContinuationCandidates(
   runtime: DesktopRuntime,
   chapter: Chapter,
+  retrievalQuery?: string,
 ): Promise<readonly ContextCandidateDraft[]> {
   try {
     const graph = await runtime.story.causalGraph.loadProjectBranch(chapter.projectId, "main");
     const source = chapter.content.trim();
-    const query = (source.length === 0 ? chapter.title : source.slice(-480)).trim();
+    const requestedQuery = retrievalQuery?.trim() ?? "";
+    const query = (
+      requestedQuery.length > 0
+        ? requestedQuery.slice(0, 480)
+        : source.length === 0
+          ? chapter.title
+          : source.slice(-480)
+    ).trim();
     return selectCausalContextCandidates({
       graph,
       query: query.length === 0 ? "继续创作" : query,
@@ -3551,6 +4200,9 @@ const EMPTY_SEMANTIC_CONTINUATION_CANDIDATES: SemanticContinuationCandidates = O
 async function retrieveSemanticContinuationCandidates(
   runtime: DesktopRuntime,
   chapter: Chapter,
+  projectPrivacy: ProjectContextPrivacyReceipt,
+  retrievalQuery?: string,
+  allowRemoteRerank = !projectPrivacy.requiresVerifiedLocal,
 ): Promise<SemanticContinuationCandidates> {
   // Context preparation must not create an unreviewed remote data transfer.
   // Remote embedding is enabled only through the explicit Model Hub rebuild flow.
@@ -3558,7 +4210,14 @@ async function retrieveSemanticContinuationCandidates(
     return EMPTY_SEMANTIC_CONTINUATION_CANDIDATES;
   }
   const querySource = chapter.content.trim();
-  const query = (querySource.length === 0 ? chapter.title : querySource.slice(-480)).trim();
+  const requestedQuery = retrievalQuery?.trim() ?? "";
+  const query = (
+    requestedQuery.length > 0
+      ? requestedQuery.slice(0, 480)
+      : querySource.length === 0
+        ? chapter.title
+        : querySource.slice(-480)
+  ).trim();
   if (query.length === 0) {
     return EMPTY_SEMANTIC_CONTINUATION_CANDIDATES;
   }
@@ -3599,11 +4258,25 @@ async function retrieveSemanticContinuationCandidates(
     candidates: rerankInputs,
     limit: Math.min(8, Math.max(1, eligibleHits.length)),
   });
-  const remoteAttempt = await runtime.rerank.tryRerank({
-    query,
-    documents: rerankInputs.map(({ text }) => text),
-    topN: Math.min(12, rerankInputs.length),
-  });
+  if (allowRemoteRerank) {
+    await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
+  }
+  const remoteAttempt = allowRemoteRerank
+    ? await runtime.rerank.tryRerank({
+        dispatchScope: projectContextDispatchScope(projectPrivacy),
+        query,
+        documents: rerankInputs.map(({ text }) => text),
+        topN: Math.min(12, rerankInputs.length),
+        onBeforeDispatch: () =>
+          runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy),
+      })
+    : Object.freeze({
+        status: "skipped" as const,
+        source: "local_deterministic_fallback" as const,
+        code: "REMOTE_RERANK_NOT_ALLOWED",
+        message:
+          "Remote reranking was disabled for this chapter task; local evidence order was used.",
+      });
   const indexById = new Map(rerankInputs.map(({ id }, index) => [id, index] as const));
   const localReasonByIndex = new Map<number, string>();
   const localRankings = localReranked.ranked.flatMap((ranked) => {
@@ -3699,6 +4372,9 @@ function searchContextSourceType(
 }
 
 function normalizeStoryContextFailure(cause: unknown): ModelCenterError {
+  if (cause instanceof ProjectContextPrivacyError) {
+    return normalizeProjectContextPrivacyFailure(cause);
+  }
   if (cause instanceof StoryContextRuntimeError) {
     return new ModelCenterError(cause.code, cause.message, cause.retryable);
   }
@@ -3713,11 +4389,12 @@ function measureMessageBytes(messages: readonly NativeModelMessage[]): number {
   return new TextEncoder().encode(messages.map(({ content }) => content).join("\n")).length;
 }
 
-async function persistGeneratedCandidate(
+async function buildGeneratedCandidate(
   runtime: DesktopRuntime,
   chapter: Chapter,
   generatedText: string,
   incomplete: boolean,
+  cursorUtf16: number,
 ): Promise<Result<AiCandidate, AppError>> {
   const created = AiCandidate.createStreaming({
     id: runtime.ids.next(),
@@ -3726,15 +4403,22 @@ async function persistGeneratedCandidate(
     source: "generate",
     baseVersionId: chapter.currentVersionId,
     now: runtime.clock.now(),
+    applicationIntent: {
+      task: "continuation",
+      application: "insert_at_cursor",
+      payload: "fragment",
+      startUtf16: cursorUtf16,
+      endUtf16: cursorUtf16,
+    },
   });
   if (!created.ok) {
     return created;
   }
   const generated = generatedText.trim();
   const content =
-    chapter.content.trim().length === 0
-      ? generated
-      : `${chapter.content.trimEnd()}\n\n${generated}`;
+    chapter.content.length > 0 && cursorUtf16 === chapter.content.length
+      ? `\n\n${generated}`
+      : generated;
   const checksum = await runtime.hasher.sha256(content);
   if (!checksum.ok) {
     return checksum;
@@ -3743,8 +4427,7 @@ async function persistGeneratedCandidate(
   if (!ready.ok) {
     return ready;
   }
-  const persisted = await runtime.repositories.aiCandidates.create(ready.value);
-  return persisted.ok ? ok(ready.value) : persisted;
+  return ok(ready.value);
 }
 
 async function evaluateCandidateAgainstLocalGate(
@@ -3770,6 +4453,9 @@ async function evaluateCandidateAgainstLocalGate(
 }
 
 function normalizeGovernedGenerationError(cause: unknown): GovernedGenerationError {
+  if (cause instanceof ProjectContextPrivacyError) {
+    return normalizeProjectContextPrivacyFailure(cause);
+  }
   if (cause instanceof ModelHubExecutionError) {
     return new ModelCenterError(cause.code, cause.message, cause.retryable);
   }
@@ -3867,14 +4553,40 @@ export async function createConfiguredModelCandidate(
     );
   }
   let generatedText: string | null = null;
+  const privacyReceipt = preparedContext.contextCompilation.projectPrivacy;
+  const requiredDataDestination = projectContextRequiredDataDestination(privacyReceipt);
+  const contextTraceId = runtime.ids.next();
+  const generationId = runtime.ids.next();
   try {
     const generated = await executeModelHubTextTask(runtime, {
+      dispatchScope: projectContextDispatchScope(privacyReceipt),
       task: "continuation",
       messages,
       maximumOutputTokens: 2_048,
       temperature: 0.8,
-      onBeforeDispatch: () =>
-        saveDirectContinuationContextTrace(runtime, chapter, preparedContext.contextCompilation),
+      generationId,
+      ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
+      onBeforeDispatch: async ({
+        generationId: selectedGenerationId,
+        invocationId,
+        localOnlyEligible,
+      }) => {
+        await saveDirectContinuationContextTrace(
+          runtime,
+          chapter,
+          preparedContext.contextCompilation,
+          {
+            traceId: contextTraceId,
+            generationId: selectedGenerationId,
+            modelInvocationId: invocationId,
+          },
+        );
+        await assertProjectContextBeforeModelHubDispatch(
+          runtime,
+          privacyReceipt,
+          localOnlyEligible === true,
+        );
+      },
       ...(onDelta === undefined ? {} : { onDelta }),
     });
     generatedText = generated.text;
@@ -3919,21 +4631,45 @@ export async function createConfiguredModelCandidate(
         ),
       );
     }
+    const resolvedEndpoint = await resolveModelProfileGatewayConfig(
+      { modelHub: runtime.modelHub, credentials: runtime.credentials },
+      profile,
+    ).catch(() => null);
+    if (resolvedEndpoint === null) {
+      return err(
+        new ModelCenterError(
+          "MODEL_CREDENTIAL_MISSING",
+          "供应商连接没有可用凭据。请在设置中重新保存并测试连接。",
+          true,
+        ),
+      );
+    }
     try {
       await saveDirectContinuationContextTrace(
         runtime,
         chapter,
         preparedContext.contextCompilation,
+        { traceId: contextTraceId, generationId, modelInvocationId: null },
+      );
+      await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(privacyReceipt);
+      runtime.projectContextPrivacy.assertRouteEligible(
+        privacyReceipt,
+        isVerifiedLocalGatewayConfig(resolvedEndpoint.config),
+      );
+      const current = await resolveFinalModelProfileGatewayConfig(
+        {
+          modelCenter: runtime.modelCenter,
+          modelHub: runtime.modelHub,
+          credentials: runtime.credentials,
+        },
+        profile,
+        resolvedEndpoint,
       );
       const generated = await runtime.modelGateway.generate({
-        generationId: runtime.ids.next(),
-        config: {
-          providerId: profile.providerId,
-          provider: profile.provider,
-          baseUrl: profile.baseUrl,
-          authentication: profile.authentication,
-        },
-        model: profile.selectedModel,
+        dispatchScope: projectContextDispatchScope(privacyReceipt),
+        generationId,
+        config: current.resolution.config,
+        model: current.profile.selectedModel ?? profile.selectedModel,
         messages,
         maxOutputTokens: 2_048,
         temperature: 0.8,
@@ -3944,11 +4680,13 @@ export async function createConfiguredModelCandidate(
       return err(
         cause instanceof ModelCenterError
           ? cause
-          : new ModelCenterError(
-              "MODEL_GENERATION_FAILED",
-              "模型调用失败。原文和已有 AI 建议版本都没有改变。",
-              true,
-            ),
+          : cause instanceof ProjectContextPrivacyError
+            ? normalizeProjectContextPrivacyFailure(cause)
+            : new ModelCenterError(
+                "MODEL_GENERATION_FAILED",
+                "模型调用失败。原文和已有 AI 建议版本都没有改变。",
+                true,
+              ),
       );
     }
   }
@@ -3960,15 +4698,19 @@ export async function createConfiguredModelCandidate(
     source: "generate",
     baseVersionId: chapter.currentVersionId,
     now: runtime.clock.now(),
+    applicationIntent: {
+      task: "continuation",
+      application: "insert_at_cursor",
+      payload: "fragment",
+      startUtf16: chapter.content.length,
+      endUtf16: chapter.content.length,
+    },
   });
   if (!created.ok) {
     return created;
   }
   const generated = generatedText.trim();
-  const content =
-    chapter.content.trim().length === 0
-      ? generated
-      : `${chapter.content.trimEnd()}\n\n${generated}`;
+  const content = chapter.content.length === 0 ? generated : `\n\n${generated}`;
   const checksum = await runtime.hasher.sha256(content);
   if (!checksum.ok) {
     return checksum;
@@ -3977,13 +4719,28 @@ export async function createConfiguredModelCandidate(
   if (!ready.ok) {
     return ready;
   }
-  const persisted = await runtime.repositories.aiCandidates.create(ready.value);
-  return persisted.ok ? ok(ready.value) : persisted;
+  try {
+    await runtime.contextTraceOutputs.commit({
+      traceId: contextTraceId,
+      candidate: ready.value,
+      linkedAt: runtime.clock.now(),
+    });
+  } catch {
+    return err(
+      new ModelCenterError(
+        "CONTEXT_TRACE_UNAVAILABLE",
+        "无法同时保存 AI 建议版本及其上下文来源记录，因此本次建议版本未保存。正文和已有 AI 建议版本均未改变。",
+        true,
+      ),
+    );
+  }
+  return ok(ready.value);
 }
 
 export async function createLocalDemoCandidate(
   runtime: DesktopRuntime,
   chapterId: UuidV7,
+  requestedCursorUtf16?: number,
 ): Promise<Result<AiCandidate, AppError>> {
   const chapterResult = await runtime.repositories.chapters.findById(chapterId);
   if (!chapterResult.ok) {
@@ -3999,6 +4756,7 @@ export async function createLocalDemoCandidate(
   }
 
   const chapter = chapterResult.value;
+  const cursorUtf16 = resolveContinuationCursor(chapter.content, requestedCursorUtf16);
   const created = AiCandidate.createStreaming({
     id: runtime.ids.next(),
     projectId: chapter.projectId,
@@ -4006,6 +4764,13 @@ export async function createLocalDemoCandidate(
     source: "generate",
     baseVersionId: chapter.currentVersionId,
     now: runtime.clock.now(),
+    applicationIntent: {
+      task: "continuation",
+      application: "insert_at_cursor",
+      payload: "fragment",
+      startUtf16: cursorUtf16,
+      endUtf16: cursorUtf16,
+    },
   });
   if (!created.ok) {
     return created;
@@ -4013,9 +4778,9 @@ export async function createLocalDemoCandidate(
 
   const demoParagraph = "【本地演示候选】暮色沿着窗棂缓慢下沉，人物在未说出口的决定前停了一瞬。";
   const content =
-    chapter.content.trim().length === 0
-      ? demoParagraph
-      : `${chapter.content.trimEnd()}\n\n${demoParagraph}`;
+    chapter.content.length > 0 && cursorUtf16 === chapter.content.length
+      ? `\n\n${demoParagraph}`
+      : demoParagraph;
   const checksum = await runtime.hasher.sha256(content);
   if (!checksum.ok) {
     return checksum;

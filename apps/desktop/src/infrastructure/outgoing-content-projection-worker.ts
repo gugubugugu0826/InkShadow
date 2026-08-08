@@ -132,6 +132,8 @@ interface ProjectDbRow {
   readonly name: string;
   readonly status: string;
   readonly revision: number;
+  readonly privacy_mode: string;
+  readonly privacy_revision: number;
   readonly deletion_generation: number;
   readonly created_at: string;
   readonly updated_at: string;
@@ -148,6 +150,8 @@ interface ChapterDbRow {
   readonly content: string;
   readonly status: string;
   readonly revision: number;
+  readonly privacy_mode: "standard" | "local_only";
+  readonly privacy_revision: number;
   readonly current_version_id: string;
   readonly created_at: string;
   readonly updated_at: string;
@@ -742,7 +746,8 @@ async function loadProjectionSource(
     const versionId = requireVersionId(job);
     const [chapterRows, versionRows] = await Promise.all([
       executor.select<ChapterDbRow>(
-        `SELECT id, project_id, title, content, status, revision, current_version_id,
+        `SELECT id, project_id, title, content, status, revision, privacy_mode, privacy_revision,
+                current_version_id,
                 created_at, updated_at, trashed_at
          FROM chapters WHERE id = ?`,
         [job.objectId],
@@ -764,6 +769,12 @@ async function loadProjectionSource(
       "SYNC_PROJECTION_SOURCE_MISSING",
       "The immutable chapter version is missing or duplicated.",
     );
+    if (chapter.privacy_mode === "local_only") {
+      throw permanentFailure(
+        "PRIVATE_CHAPTER_LOCAL_ONLY",
+        "A local-only chapter cannot be projected, encrypted, or uploaded.",
+      );
+    }
     if (
       chapter.id !== job.objectId ||
       chapter.project_id !== job.projectId ||
@@ -894,7 +905,8 @@ async function loadProjectionDeleteSource(
   }
   if (job.objectType === "chapter_version") {
     const rows = await executor.select<ChapterDbRow>(
-      `SELECT id, project_id, title, content, status, revision, current_version_id,
+      `SELECT id, project_id, title, content, status, revision, privacy_mode, privacy_revision,
+              current_version_id,
               created_at, updated_at, trashed_at
        FROM chapters WHERE id = ?`,
       [job.objectId],

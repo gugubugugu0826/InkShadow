@@ -1422,9 +1422,13 @@ export class MultiAgentReviewSqliteStore {
         await transaction.execute(
           `INSERT INTO ai_candidates (
              id, project_id, chapter_id, source, base_version_id, content,
-             content_checksum, status, incomplete, created_at, updated_at,
-             decided_at
-           ) VALUES (?, ?, ?, 'agent', ?, ?, ?, 'ready', 0, ?, ?, NULL)`,
+             content_checksum, status, revision, incomplete, created_at, updated_at,
+             decided_at, task_intent, application_mode, payload_kind,
+             anchor_start_utf16, anchor_end_utf16
+           ) VALUES (
+             ?, ?, ?, 'agent', ?, ?, ?, 'ready', 1, 0, ?, ?, NULL,
+             'whole_chapter_rewrite', 'replace_document', 'full_document', NULL, NULL
+           )`,
           [
             input.chapterCandidateId,
             session.project_id,
@@ -1758,9 +1762,15 @@ export class MultiAgentReviewSqliteStore {
       if (candidate.target_kind === "chapter") {
         const changed = await transaction.execute(
           `UPDATE ai_candidates
-           SET status = ?, updated_at = ?, decided_at = ?
-           WHERE id = ? AND status = 'ready'`,
-          [decision, decidedAt, decidedAt, candidate.chapter_candidate_id],
+           SET status = ?, revision = revision + 1, updated_at = ?, decided_at = ?
+           WHERE id = ? AND status = 'ready' AND revision = ?`,
+          [
+            decision,
+            decidedAt,
+            decidedAt,
+            candidate.chapter_candidate_id,
+            expectedCandidateRevision,
+          ],
         );
         if (changed.rowsAffected !== 1) {
           throw storeError(

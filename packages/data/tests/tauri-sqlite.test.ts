@@ -262,19 +262,57 @@ describe("TauriSqliteExecutor native bridge", () => {
   it("becomes fail-closed and reopenable when native close reports an error", async () => {
     executor = await TauriSqliteExecutor.open();
     const closeFailure = new Error("native close failed");
-    mocks.invoke.mockImplementationOnce(async (command: string) => {
+    mocks.invoke.mockImplementation(async (command: string) => {
       events.push(command);
       if (command === "native_sqlite_close") {
         throw closeFailure;
       }
-      return undefined;
+      if (command === "native_sqlite_select") {
+        return [];
+      }
+      return command === "native_sqlite_open" ? { sessionToken: nativeSessionToken } : undefined;
     });
 
     await expect(executor.close()).rejects.toBe(closeFailure);
     await expect(executor.select("SELECT 1 AS value")).rejects.toThrow("database is closed");
 
+    mocks.invoke.mockImplementation(async (command: string) => {
+      events.push(command);
+      if (command === "native_sqlite_open") {
+        return { sessionToken: nativeSessionToken };
+      }
+      if (command === "native_sqlite_select") {
+        return [];
+      }
+      return undefined;
+    });
     executor = await TauriSqliteExecutor.open();
     await expect(executor.select("SELECT 1 AS value")).resolves.toEqual([]);
+  });
+
+  it("keeps the valid database session open while a native model request is active", async () => {
+    executor = await TauriSqliteExecutor.open();
+    const active = {
+      code: "PROJECT_REMOTE_DISPATCH_ACTIVE",
+      message: "A remote project request is still active.",
+      retryable: true,
+    };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      events.push(command);
+      if (command === "native_sqlite_close") {
+        throw active;
+      }
+      if (command === "native_sqlite_select") {
+        return [];
+      }
+      return undefined;
+    });
+
+    await expect(executor.close()).rejects.toBe(active);
+    await expect(executor.select("SELECT 1 AS value")).resolves.toEqual([]);
+    mocks.invoke.mockResolvedValue(undefined);
+    await executor.close();
+    executor = undefined;
   });
 
   it("becomes immediately reopenable when the native connection is invalidated", async () => {

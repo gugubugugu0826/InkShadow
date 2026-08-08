@@ -27,8 +27,19 @@ import type {
 
 import { SqliteCausalEventGraphStore } from "./causal-event-graph-store";
 import type { ModelCenterStore, ModelProfile } from "./model-center-store";
+import {
+  nativeGatewayEndpointIdentity,
+  resolveModelProfileGatewayConfig,
+} from "./model-profile-gateway-config";
+import type { ModelHubStore } from "./model-hub-store";
 import type { ModelRoutingStore } from "./model-routing-store";
-import type { NativeModelGatewayClient } from "./runtime";
+import type { CredentialStore, NativeModelGatewayClient } from "./runtime";
+import { isLoopbackModelBaseUrl } from "./model-hub-provider-registry";
+import {
+  ProjectContextPrivacyError,
+  projectContextDispatchScope,
+  type ProjectContextPrivacyAuthority,
+} from "./project-context-privacy-authority";
 
 export const MULTI_AGENT_LOCAL_ROLES = [
   "planner",
@@ -63,6 +74,7 @@ export interface MultiAgentReviewContext {
    * reader always supplies this explicit evidence-status envelope.
    */
   readonly unifiedStoryContextJson?: string;
+  readonly localOnly?: boolean;
 }
 
 export interface MultiAgentReviewContextReader {
@@ -80,7 +92,10 @@ export type MultiAgentReviewRuntimeErrorCode =
   | "MULTI_AGENT_MODEL_PROFILE_INVALID"
   | "MULTI_AGENT_TARGET_STALE"
   | "MULTI_AGENT_RESOURCE_EXHAUSTED"
-  | "MULTI_AGENT_ALREADY_RUNNING";
+  | "MULTI_AGENT_ALREADY_RUNNING"
+  | "PRIVATE_CHAPTER_LOCAL_ONLY"
+  | "PROJECT_CONTEXT_PRIVACY_CHANGED"
+  | "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE";
 
 export class MultiAgentReviewRuntimeError extends Error {
   public constructor(
@@ -96,8 +111,14 @@ interface RuntimeDependencies {
   readonly store: MultiAgentReviewSqliteStore;
   readonly contextReader: MultiAgentReviewContextReader;
   readonly modelCenter: ModelCenterStore;
+  readonly modelHub: Pick<ModelHubStore, "findConnection">;
   readonly modelRouting: ModelRoutingStore;
+  readonly credentials: Pick<CredentialStore, "getSummary">;
   readonly modelGateway: NativeModelGatewayClient;
+  readonly projectContextPrivacy: Pick<
+    ProjectContextPrivacyAuthority,
+    "inspect" | "assertCurrentBeforeDispatch" | "assertRouteEligible"
+  >;
   readonly ids: UuidV7Generator;
   readonly clock: Clock;
   readonly enabled: boolean;
@@ -458,7 +479,29 @@ export class MultiAgentReviewRuntime {
     options: RunMultiAgentReviewOptions,
   ): Promise<MultiAgentReviewSession> {
     const participant = selectNextParticipant(initialSession);
+    const gatewayConfig = await this.resolveParticipantGatewayConfig(participant);
+    const verifiedLocalParticipant =
+      gatewayConfig.provider === "ollama" && isLoopbackModelBaseUrl(gatewayConfig.baseUrl);
+    const projectPrivacy = await this.dependencies.projectContextPrivacy
+      .inspect(initialSession.projectId)
+      .catch((cause: unknown) => {
+        throw normalizeProjectContextPrivacyError(cause);
+      });
+    try {
+      this.dependencies.projectContextPrivacy.assertRouteEligible(
+        projectPrivacy,
+        verifiedLocalParticipant,
+      );
+    } catch (cause: unknown) {
+      throw normalizeProjectContextPrivacyError(cause);
+    }
     const context = await this.dependencies.contextReader.load(initialSession);
+    if (context.localOnly === true && !verifiedLocalParticipant) {
+      throw runtimeError(
+        "PRIVATE_CHAPTER_LOCAL_ONLY",
+        "私密章节只能由已验证的本地模型审查；本次请求在发送 0 字后停止。",
+      );
+    }
     const isFinalTurn = initialSession.turns.length + 1 >= initialSession.limits.maximumTurns;
     const messages = buildMessages(initialSession, participant.role, context, isFinalTurn);
     const reservation = planLocalMultiAgentReservation(initialSession, participant, messages);
@@ -499,14 +542,25 @@ export class MultiAgentReviewRuntime {
         }
       | undefined;
     try {
+      await this.dependencies.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
+      this.dependencies.projectContextPrivacy.assertRouteEligible(
+        projectPrivacy,
+        verifiedLocalParticipant,
+      );
+      const currentGatewayConfig = await this.resolveParticipantGatewayConfig(participant);
+      if (
+        nativeGatewayEndpointIdentity(currentGatewayConfig) !==
+        nativeGatewayEndpointIdentity(gatewayConfig)
+      ) {
+        throw runtimeError(
+          "MULTI_AGENT_MODEL_PROFILE_INVALID",
+          "The participant credential or endpoint changed before dispatch.",
+        );
+      }
       const generated = await this.dependencies.modelGateway.generate({
+        dispatchScope: projectContextDispatchScope(projectPrivacy),
         generationId,
-        config: {
-          providerId: participant.providerId,
-          provider: participant.providerKind,
-          baseUrl: participant.endpointUrl,
-          authentication: participant.authentication,
-        },
+        config: currentGatewayConfig,
         model: participant.modelId,
         messages,
         maxOutputTokens: reservation.maximumOutputTokens,
@@ -777,15 +831,46 @@ export class MultiAgentReviewRuntime {
       );
     }
     const pricing = requirePresent(selected.profile.pricing, "pricing");
+    const resolvedEndpoint = await resolveModelProfileGatewayConfig(
+      {
+        modelHub: this.dependencies.modelHub,
+        credentials: this.dependencies.credentials,
+      },
+      selected.profile,
+    );
+    if (resolvedEndpoint === null) {
+      throw runtimeError(
+        "MULTI_AGENT_MODEL_PROFILE_INVALID",
+        `The ${routeRole} route does not have a usable current credential.`,
+      );
+    }
+    if (
+      resolvedEndpoint.config.provider !== "open_ai_compatible" &&
+      resolvedEndpoint.config.provider !== "ollama"
+    ) {
+      throw runtimeError(
+        "MULTI_AGENT_MODEL_PROFILE_INVALID",
+        `The ${routeRole} route uses a protocol that legacy review participants cannot dispatch.`,
+      );
+    }
+    if (
+      resolvedEndpoint.config.authentication !== "none" &&
+      resolvedEndpoint.config.authentication !== "bearer_keyring"
+    ) {
+      throw runtimeError(
+        "MULTI_AGENT_MODEL_PROFILE_INVALID",
+        `The ${routeRole} route uses an authentication mode that legacy review participants cannot persist.`,
+      );
+    }
     return Object.freeze({
       participantId: this.dependencies.ids.next(),
       ordinal,
       role,
       enabled: true,
       providerId: selected.profile.providerId,
-      providerKind: selected.profile.provider,
-      endpointUrl: selected.profile.baseUrl,
-      authentication: selected.profile.authentication,
+      providerKind: resolvedEndpoint.config.provider,
+      endpointUrl: resolvedEndpoint.config.baseUrl,
+      authentication: resolvedEndpoint.config.authentication,
       providerProfileRevision: selected.profile.revision,
       modelId: selected.modelId,
       modelRevision: `${String(selected.profile.revision)}.${String(route.revision)}`,
@@ -798,6 +883,32 @@ export class MultiAgentReviewRuntime {
       priceUpdatedAt: pricing.priceUpdatedAt,
       currency: pricing.currency,
     });
+  }
+
+  private async resolveParticipantGatewayConfig(participant: MultiAgentReviewParticipantSnapshot) {
+    const profile = await this.dependencies.modelCenter.findByProviderId(participant.providerId);
+    const resolved =
+      profile?.selectedModel === participant.modelId &&
+      profile.revision === participant.providerProfileRevision
+        ? await resolveModelProfileGatewayConfig(
+            {
+              modelHub: this.dependencies.modelHub,
+              credentials: this.dependencies.credentials,
+            },
+            profile,
+          )
+        : null;
+    if (
+      resolved?.config.provider !== participant.providerKind ||
+      resolved.config.baseUrl !== participant.endpointUrl ||
+      resolved.config.authentication !== participant.authentication
+    ) {
+      throw runtimeError(
+        "MULTI_AGENT_MODEL_PROFILE_INVALID",
+        "The participant credential or endpoint changed before dispatch.",
+      );
+    }
+    return resolved.config;
   }
 
   private async requireSession(sessionId: string): Promise<MultiAgentReviewSession> {
@@ -899,10 +1010,12 @@ export class SqliteMultiAgentReviewContextReader implements MultiAgentReviewCont
       current_version_id: string;
       sequence: number;
       content_checksum: string;
+      privacy_mode: "standard" | "local_only";
     }>(
       `SELECT
          chapter.id AS chapter_id, chapter.title, chapter.content,
-         chapter.current_version_id, version.sequence, version.content_checksum
+         chapter.current_version_id, chapter.privacy_mode,
+         version.sequence, version.content_checksum
        FROM chapters AS chapter
        JOIN chapter_versions AS version
          ON version.id = chapter.current_version_id
@@ -944,6 +1057,7 @@ export class SqliteMultiAgentReviewContextReader implements MultiAgentReviewCont
         mergeCitationReceipts([receipt], unified.citationReceipts),
       ),
       unifiedStoryContextJson: JSON.stringify(unified.authority),
+      localOnly: row.privacy_mode === "local_only",
     });
   }
 
@@ -1861,6 +1975,15 @@ function requirePresent<Value>(value: Value | null | undefined, field: string): 
     throw runtimeError("MULTI_AGENT_TARGET_STALE", `The ${field} authority is missing.`);
   }
   return value;
+}
+
+function normalizeProjectContextPrivacyError(cause: unknown): MultiAgentReviewRuntimeError {
+  return cause instanceof ProjectContextPrivacyError
+    ? runtimeError(cause.code, cause.message)
+    : runtimeError(
+        "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE",
+        "无法核对这个作品的本地隐私范围，因此没有调用 AI。请重试；若问题持续，请先检查本地数据库。",
+      );
 }
 
 function runtimeError(

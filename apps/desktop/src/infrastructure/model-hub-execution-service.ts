@@ -5,7 +5,15 @@ import {
   isLoopbackModelBaseUrl,
   type NovelAiTask,
 } from "./model-hub-provider-registry";
-import { modelHubNativeEndpointConfig } from "./model-hub-native-config";
+import {
+  modelHubCredentialProviderId,
+  modelHubNativeEndpointConfig,
+} from "./model-hub-native-config";
+import {
+  assertModelHubFinalDispatchUnchanged,
+  ModelHubFinalDispatchError,
+  modelHubFinalDispatchIdentity,
+} from "./model-hub-final-dispatch-guard";
 import {
   requiredCapabilitiesForNovelTask,
   resolveModelCapabilityVerdict,
@@ -23,15 +31,20 @@ import type {
   NativeModelGenerationResult,
   NativeModelMessage,
 } from "./runtime";
+import type { NativeModelDispatchScope } from "./native-model-gateway-contract";
+import { UiActionError } from "./ui-error";
 
 export interface InspectModelHubTextTaskInput {
   readonly task: NovelAiTask;
   readonly messages: readonly NativeModelMessage[];
   readonly maximumOutputTokens: number;
   readonly temperature?: number;
+  /** Fail closed before dispatch when chapter content must stay on this device. */
+  readonly requiredDataDestination?: "local";
 }
 
 export interface ExecuteModelHubTextTaskInput extends InspectModelHubTextTaskInput {
+  readonly dispatchScope: NativeModelDispatchScope;
   readonly generationId?: string;
   readonly onBeforeDispatch?: (
     selection: Readonly<{
@@ -41,6 +54,8 @@ export interface ExecuteModelHubTextTaskInput extends InspectModelHubTextTaskInp
       catalogEntryId: string;
       modelId: string;
       usedFallback: boolean;
+      /** True only for an evidence-backed local model on a loopback endpoint. */
+      localOnlyEligible?: boolean;
     }>,
   ) => void | Promise<void>;
   readonly onDelta?: (accumulatedText: string) => void;
@@ -193,6 +208,12 @@ export async function executeModelHubTextTask(
   input: ExecuteModelHubTextTaskInput,
 ): Promise<ModelHubTextTaskExecutionResult> {
   const { route, target, usedFallback } = await resolveTextPlan(dependencies, input);
+  const expectedDispatchIdentity = modelHubFinalDispatchIdentity({
+    route,
+    connection: target.connection,
+    catalogEntry: target.catalogEntry,
+    costPrivacy: target.costPrivacy,
+  });
 
   const generationId = input.generationId ?? dependencies.ids.next();
   const invocationId = dependencies.ids.next();
@@ -212,6 +233,7 @@ export async function executeModelHubTextTask(
     currency: route.currency,
   });
 
+  let dispatched = false;
   try {
     await input.onBeforeDispatch?.({
       generationId,
@@ -220,12 +242,28 @@ export async function executeModelHubTextTask(
       catalogEntryId: target.catalogEntry.id,
       modelId: target.catalogEntry.providerModelId,
       usedFallback,
+      localOnlyEligible:
+        target.dataDestination === "local" &&
+        target.costPrivacy.evidenceSource !== "unknown" &&
+        isLoopbackModelBaseUrl(target.connection.baseUrl),
     });
+    const current = await resolveTextPlan(dependencies, input);
+    assertModelHubFinalDispatchUnchanged(
+      expectedDispatchIdentity,
+      modelHubFinalDispatchIdentity({
+        route: current.route,
+        connection: current.target.connection,
+        catalogEntry: current.target.catalogEntry,
+        costPrivacy: current.target.costPrivacy,
+      }),
+    );
+    dispatched = true;
     const generated = await dependencies.modelGateway.generate({
       generationId,
-      config: modelHubNativeEndpointConfig(target.connection),
-      model: target.catalogEntry.providerModelId,
+      config: modelHubNativeEndpointConfig(current.target.connection),
+      model: current.target.catalogEntry.providerModelId,
       messages: input.messages,
+      dispatchScope: input.dispatchScope,
       maxOutputTokens: target.maximumOutputTokens,
       ...(target.temperature === undefined ? {} : { temperature: target.temperature }),
       ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
@@ -257,7 +295,9 @@ export async function executeModelHubTextTask(
       costCeilingExceededAfterDispatch,
     });
   } catch (cause: unknown) {
-    const normalized = normalizeDispatchedError(cause);
+    const normalized = dispatched
+      ? normalizeDispatchedError(cause)
+      : normalizePreDispatchError(cause);
     const status = normalized.code === "MODEL_GENERATION_CANCELLED" ? "cancelled" : "failed";
     invocation = await dependencies.modelHub.finishInvocation({
       id: invocation.id,
@@ -430,9 +470,11 @@ async function resolveTextTarget(
 
   const preset = getModelProviderPreset(connection.providerKind);
   if (preset.credentialRequired || connection.credentialState === "present") {
-    const summary = await dependencies.credentials.getSummary(connection.id).catch(() => ({
-      configured: false,
-    }));
+    const summary = await dependencies.credentials
+      .getSummary(modelHubCredentialProviderId(connection))
+      .catch(() => ({
+        configured: false,
+      }));
     if (!summary.configured) {
       throw executionError(
         "MODEL_HUB_CREDENTIAL_MISSING",
@@ -450,6 +492,17 @@ async function resolveTextTarget(
     );
   }
   const dataDestination = costPrivacy.dataDestination;
+  if (
+    input.requiredDataDestination === "local" &&
+    (dataDestination !== "local" ||
+      costPrivacy.evidenceSource === "unknown" ||
+      !isLoopbackModelBaseUrl(connection.baseUrl))
+  ) {
+    throw executionError(
+      "PRIVATE_CHAPTER_LOCAL_ONLY",
+      "私密章节只能由已验证的本地模型处理；本次请求在发送 0 字后停止。",
+    );
+  }
   if (
     route.privacyPolicy === "local_only" &&
     (dataDestination !== "local" ||
@@ -667,13 +720,43 @@ function calculateCostMicros(
 }
 
 function normalizePreDispatchError(cause: unknown): ModelHubExecutionError {
-  return cause instanceof ModelHubExecutionError
-    ? cause
-    : executionError(
-        "MODEL_HUB_PREFLIGHT_FAILED",
-        "模型调用前检查没有通过。请检查 AI 分工、模型能力、隐私和费用设置。",
-        true,
-      );
+  if (cause instanceof ModelHubExecutionError) return cause;
+  if (cause instanceof ModelHubFinalDispatchError) {
+    return executionError(cause.code, cause.message, cause.retryable);
+  }
+  if (cause instanceof UiActionError) {
+    return executionError(cause.code, cause.message, true);
+  }
+  const code = safePreDispatchCode(cause);
+  if (code === "CONTEXT_TRACE_UNAVAILABLE") {
+    return executionError(
+      "CONTEXT_TRACE_UNAVAILABLE",
+      "无法保存本次上下文来源记录，因此没有调用模型。请检查本机存储空间或数据库状态后重试。",
+      true,
+    );
+  }
+  if (code === "IMPORT_PENDING_REQUEST_PERSIST_FAILED") {
+    return executionError(
+      "IMPORT_PENDING_REQUEST_PERSIST_FAILED",
+      "模型调用前的本地请求凭据没有保存成功，本次调用已在发送 0 字时停止。",
+      true,
+    );
+  }
+  return executionError(
+    "MODEL_HUB_PREFLIGHT_FAILED",
+    "模型调用前检查没有通过。请检查 AI 分工、模型能力、隐私和费用设置。",
+    true,
+  );
+}
+
+function safePreDispatchCode(cause: unknown): string | null {
+  return typeof cause === "object" &&
+    cause !== null &&
+    "code" in cause &&
+    typeof cause.code === "string" &&
+    /^[A-Z][A-Z0-9_]{2,80}$/u.test(cause.code)
+    ? cause.code
+    : null;
 }
 
 function normalizeDispatchedError(cause: unknown): ModelHubExecutionError {

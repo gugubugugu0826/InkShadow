@@ -12,7 +12,11 @@ const expertMigration = readFileSync(
   new URL("../migrations/0037_model_hub_expert_options.sql", import.meta.url),
   "utf8",
 );
-const migration = `${baseMigration}\n${expertMigration}`;
+const zhipuGlmMigration = readFileSync(
+  new URL("../migrations/0046_model_hub_zhipu_glm.sql", import.meta.url),
+  "utf8",
+);
+const migration = `${baseMigration}\n${expertMigration}\n${zhipuGlmMigration}`;
 
 const NOW = "2026-08-01T00:00:00.000Z";
 
@@ -126,6 +130,85 @@ describe("Model Hub migration", () => {
         retryLimit: 0,
       },
     ]);
+    await executor.close();
+  });
+
+  it("adds zhipu_glm without losing published connections or dependent catalog rows", async () => {
+    const executor = new NodeSqliteExecutor(`${baseMigration}\n${expertMigration}`);
+    await insertConnection(
+      executor,
+      "published-cloud",
+      "openai",
+      "Published cloud",
+      "https://api.openai.com/v1",
+    );
+    await executor.execute(
+      `INSERT INTO model_catalog_syncs (
+         id, connection_id, source, status, discovered_model_count,
+         next_page_token_present, started_at, completed_at
+       ) VALUES ('published-sync', 'published-cloud', 'provider_api',
+                 'succeeded', 1, 0, ?, ?)`,
+      [NOW, NOW],
+    );
+    await insertCatalogEntry(
+      executor,
+      "published-model",
+      "published-cloud",
+      "published-model-id",
+      "published-sync",
+    );
+
+    await expect(
+      insertConnection(
+        executor,
+        "glm-before-migration",
+        "zhipu_glm",
+        "GLM before migration",
+        "https://open.bigmodel.cn/api/paas/v4",
+      ),
+    ).rejects.toThrow();
+
+    executor.database.exec(zhipuGlmMigration);
+    await insertConnection(
+      executor,
+      "glm-after-migration",
+      "zhipu_glm",
+      "Zhipu GLM",
+      "https://open.bigmodel.cn/api/paas/v4",
+    );
+
+    await expect(
+      executor.select<{ id: string; providerKind: string }>(
+        `SELECT id, provider_kind AS providerKind
+         FROM model_provider_connections
+         ORDER BY id`,
+      ),
+    ).resolves.toEqual([
+      { id: "glm-after-migration", providerKind: "zhipu_glm" },
+      { id: "published-cloud", providerKind: "openai" },
+    ]);
+    await expect(
+      executor.select<{ id: string; connectionId: string }>(
+        `SELECT id, connection_id AS connectionId
+         FROM model_catalog_entries`,
+      ),
+    ).resolves.toEqual([{ id: "published-model", connectionId: "published-cloud" }]);
+    await expect(executor.select<{ table: string }>("PRAGMA foreign_key_check")).resolves.toEqual(
+      [],
+    );
+    await expect(
+      executor.select<{ integrity_check: string }>("PRAGMA integrity_check"),
+    ).resolves.toEqual([{ integrity_check: "ok" }]);
+    await expect(
+      insertConnection(
+        executor,
+        "unknown-after-migration",
+        "unknown_provider",
+        "Unknown",
+        "https://example.test/v1",
+      ),
+    ).rejects.toThrow();
+
     await executor.close();
   });
 

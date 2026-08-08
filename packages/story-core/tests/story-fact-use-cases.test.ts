@@ -136,6 +136,50 @@ describe("StoryFactApplicationService", () => {
     });
   });
 
+  it("persists alias resolution through the application service before confirmation", async () => {
+    const { service, store } = harness();
+    const staged = unwrap(
+      await service.stageAutomaticFact({
+        projectId: PROJECT_ID,
+        factType: "character_identity",
+        contentText: "林舟继承了银印。",
+        structuredValue: {
+          subject: {
+            kind: "character",
+            entityKey: "character:isolated:1",
+            canonicalName: "林舟",
+            aliases: [],
+            mergeStatus: "ambiguous_confirmed_alias",
+            matchedEntityKeys: ["character.linzhou.a", "character.linzhou.b"],
+          },
+          state: { inherited: "silver-seal" },
+        },
+        source: chapterEvidence("林舟继承了银印。"),
+        confidence: 0.9,
+        origin: "ai_extraction",
+      }),
+    );
+
+    const resolved = unwrap(
+      await service.resolveEntityAlias({
+        factId: staged.fact.id,
+        resolution: { kind: "separate_entity" },
+        humanConfirmed: true,
+        expectedRevision: staged.fact.revision,
+      }),
+    );
+    expect(resolved.toSnapshot()).toMatchObject({
+      revision: 2,
+      structuredValue: {
+        subject: {
+          entityKey: "character:isolated:1",
+          mergeStatus: "human_resolved_separate_entity",
+        },
+      },
+    });
+    expect(unwrap(await store.findById(parse(staged.fact.id)))?.revision).toBe(2);
+  });
+
   it("replaces and clears only its own rebuildable system projection", async () => {
     const { service, store } = harness();
     const first = unwrap(

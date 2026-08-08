@@ -12,6 +12,7 @@ function preference(
     preferenceText: overrides.preferenceText,
     source: overrides.source ?? "manual",
     sourceFeedbackCode: overrides.sourceFeedbackCode ?? null,
+    sourceFeedbackHash: overrides.sourceFeedbackHash ?? null,
     evidenceCount: overrides.evidenceCount ?? 0,
     enabled: overrides.enabled ?? true,
     revision: overrides.revision ?? 1,

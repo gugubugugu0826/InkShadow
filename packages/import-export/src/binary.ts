@@ -1,3 +1,4 @@
+import type * as PdfJs from "pdfjs-dist";
 import type JSZip from "jszip";
 
 import { sha256Hex, utf8ByteLength } from "./checksum.js";
@@ -354,6 +355,20 @@ export async function importEpubDocuments(
   }
 }
 
+type PdfJsModule = typeof PdfJs;
+
+async function loadPdfJsModule(): Promise<PdfJsModule> {
+  if (typeof DOMMatrix !== "undefined") {
+    return import("pdfjs-dist");
+  }
+
+  // The modern browser build deliberately relies on DOMMatrix. Node-based tooling and
+  // verification keep the package's supported non-browser path without shipping the legacy
+  // parser in the WebView bundle.
+  const legacyModuleSpecifier = ["pdfjs-dist", "legacy", "build", "pdf.mjs"].join("/");
+  return import(/* @vite-ignore */ legacyModuleSpecifier) as Promise<PdfJsModule>;
+}
+
 export async function importPdfDocuments(
   fileName: string,
   bytes: Uint8Array,
@@ -378,9 +393,9 @@ export async function importPdfDocuments(
   throwIfAborted(options.signal);
   options.onProgress?.({ stage: "scanning", fileName, completedUnits: 1, totalUnits: 1 });
 
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const pdfjs = await loadPdfJsModule();
   if (typeof Worker !== "undefined" && pdfjs.GlobalWorkerOptions.workerSrc.length === 0) {
-    const workerAsset = await import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url");
+    const workerAsset = await import("pdfjs-dist/build/pdf.worker.min.mjs?worker&url");
     pdfjs.GlobalWorkerOptions.workerSrc = workerAsset.default;
   }
   const loadingTask = pdfjs.getDocument({

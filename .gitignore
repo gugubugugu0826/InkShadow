@@ -69,11 +69,44 @@ installer/
 /distill-novels/
 
 # Repository publication scope
-# Only the root README is published; product/design/execution documents stay local.
+# Publish only the curated user/developer documentation requested for this project.
+# Raw DESIGN deliveries, legal drafts, security runbooks and local review material stay local.
 /docs/
 /DESIGN/
 *.md
 !/README.md
+!/docs/
+!/docs/README.md
+!/docs/GITHUB_PUBLISH_RELEASE_GUIDE.md
+!/docs/front-end/
+!/docs/front-end/README.md
+!/docs/front-end/PAGE_CATALOG.md
+!/docs/front-end/INTERFACE_REFERENCE.md
+!/docs/front-end/CREATION_JOURNEYS_AND_PROJECT_SEED.md
+!/docs/back-end/
+!/docs/back-end/README.md
+!/docs/back-end/DESKTOP_NATIVE.md
+!/docs/back-end/SHARED_PACKAGES.md
+!/docs/back-end/CLOUD_BACKEND.md
+!/docs/back-end/ANDROID_OPERATIONS_TOOLING.md
+!/docs/product-rebuild/
+!/docs/product-rebuild/README.md
+!/docs/product-rebuild/00-PHASE-0-REALITY-AUDIT.md
+!/docs/product-rebuild/01-INFORMATION-ARCHITECTURE-AND-FLOWS.md
+!/docs/product-rebuild/02-DATA-REUSE-AND-MIGRATION.md
+!/docs/product-rebuild/03-DELIVERY-PLAN-ACCEPTANCE-ROLLBACK.md
+!/docs/product-rebuild/04-PHASE-3-CONTEXT-COMPILER.md
+!/docs/product-rebuild/04-PHASE-3-UNIFIED-STORY-STATE.md
+!/docs/product-rebuild/05-PHASE-1-IMPORT-WORK-ANALYSIS.md
+!/docs/product-rebuild/06-PHASE-3-TO-5-CAPABILITY-LEDGER.md
+!/docs/product-rebuild/07-PHASE-5-IMAGE-GENERATION.md
+!/docs/product-rebuild/08-DESIGN-V031B-REALITY-MATRIX.md
+!/docs/product-rebuild/09-PROJECT-SEED-AND-CREATION-JOURNEYS.md
+!/docs/product-rebuild/10-ACCEPTED-VERSION-PIPELINE-AND-RECOVERY.md
+!/docs/execution/
+!/docs/execution/CURRENT_STATUS.md
+!/docs/execution/TEST_RESULTS.md
+!/docs/execution/RELEASE_CHECKLIST.md
 *.mdx
 *.doc
 *.docx

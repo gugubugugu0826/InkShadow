@@ -1,6 +1,11 @@
 import type { Clock, UuidV7Generator } from "@inkshadow/domain";
 
 import { ModelHubExecutionError } from "./model-hub-execution-service";
+import {
+  assertModelHubFinalDispatchUnchanged,
+  modelHubFinalDispatchIdentity,
+} from "./model-hub-final-dispatch-guard";
+import { modelHubCredentialProviderId } from "./model-hub-native-config";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
 import type {
   ModelCapabilityEvidence,
@@ -16,11 +21,13 @@ import type {
   NativeRerankResult,
   NativeRerankScore,
 } from "./native-rerank-gateway";
+import type { NativeModelDispatchScope } from "./native-model-gateway-contract";
 
 export interface ModelHubRerankInput {
   readonly query: string;
   readonly documents: readonly string[];
   readonly topN: number;
+  readonly dispatchScope: NativeModelDispatchScope;
   readonly onBeforeDispatch?: (inspection: ModelHubRerankInspection) => void | Promise<void>;
 }
 
@@ -181,6 +188,12 @@ export class ModelHubRerankService {
 
   public async rerank(input: ModelHubRerankInput): Promise<ModelHubRerankExecutionResult> {
     const initial = await resolveRerankTarget(this.dependencies, input);
+    const expectedDispatchIdentity = modelHubFinalDispatchIdentity({
+      route: initial.route,
+      connection: initial.connection,
+      catalogEntry: initial.catalogEntry,
+      costPrivacy: initial.costPrivacy,
+    });
     let invocation = await this.dependencies.modelHub.startInvocation({
       id: this.dependencies.ids.next(),
       task: "rerank",
@@ -200,22 +213,34 @@ export class ModelHubRerankService {
     let dispatched = false;
     let nativeResult: NativeRerankResult;
     try {
-      await input.onBeforeDispatch?.(initial.inspection);
       const immediatelyBefore = await resolveRerankTarget(this.dependencies, input);
       requireSameFingerprint(initial.inspection, immediatelyBefore.inspection);
+      await input.onBeforeDispatch?.(immediatelyBefore.inspection);
+      const current = await resolveRerankTarget(this.dependencies, input);
+      requireSameFingerprint(initial.inspection, current.inspection);
+      assertModelHubFinalDispatchUnchanged(
+        expectedDispatchIdentity,
+        modelHubFinalDispatchIdentity({
+          route: current.route,
+          connection: current.connection,
+          catalogEntry: current.catalogEntry,
+          costPrivacy: current.costPrivacy,
+        }),
+      );
       dispatched = true;
       nativeResult = await this.dependencies.gateway.rerank({
         config: {
-          providerId: initial.connection.id,
+          providerId: modelHubCredentialProviderId(current.connection),
           provider: "open_ai_compatible",
-          baseUrl: initial.baseUrl,
+          baseUrl: current.baseUrl,
           authentication: "bearer_keyring",
         },
         protocol: QWEN_RERANK_PROTOCOL,
-        model: initial.catalogEntry.providerModelId,
+        model: current.catalogEntry.providerModelId,
         query: input.query,
         documents: input.documents,
         topN: input.topN,
+        dispatchScope: input.dispatchScope,
       });
       const immediatelyAfter = await resolveRerankTarget(this.dependencies, input);
       requireSameFingerprint(initial.inspection, immediatelyAfter.inspection);
@@ -413,9 +438,9 @@ async function resolveCatalogTarget(
       "该模型没有可用证据证明支持检索重排。",
     );
   }
-  const credential = await dependencies.credentials.getSummary(connection.id).catch(() => ({
-    configured: false,
-  }));
+  const credential = await dependencies.credentials
+    .getSummary(modelHubCredentialProviderId(connection))
+    .catch(() => ({ configured: false }));
   if (!credential.configured) {
     throw executionError(
       "MODEL_HUB_RERANK_CREDENTIAL_MISSING",

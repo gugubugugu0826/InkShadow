@@ -8,7 +8,7 @@ import {
   type ContextLayer,
   type PromptSection,
 } from "@inkshadow/ai-core";
-import { parseUuidV7, type StoryFactStore } from "@inkshadow/story-core";
+import { parseUuidV7, type StoryFact, type StoryFactStore } from "@inkshadow/story-core";
 
 import {
   assembleStoryContextCandidates,
@@ -34,6 +34,7 @@ export class StoryContextRuntimeError extends Error {
 export interface CurrentChapterContextSource {
   readonly chapterId: string;
   readonly versionId: string;
+  readonly contentHash: string;
   readonly title: string;
   readonly content: string;
 }
@@ -48,6 +49,8 @@ export interface StoryContextCompilationRequest {
    * context trace can explain exactly why each instruction was included.
    */
   readonly currentTaskSupplements?: readonly ContextCandidateDraft[];
+  /** Author-confirmed creation inputs, already assigned to reviewed layers. */
+  readonly creationSeedCandidates?: readonly ContextCandidate[];
   readonly sceneGoal?: ContextCandidateDraft | null;
   readonly currentChapter?: CurrentChapterContextSource | null;
   readonly currentChapterVersions?: Readonly<
@@ -56,6 +59,11 @@ export interface StoryContextCompilationRequest {
   readonly causalCandidates?: readonly ContextCandidateDraft[];
   readonly semanticCandidates?: readonly ContextCandidateDraft[];
   readonly rerankCandidates?: readonly ContextCandidateDraft[];
+  /** Read-only, source-verified projections such as post-acquisition POV knowledge edges. */
+  readonly verifiedDerivedFacts?: readonly StoryFact[];
+  /** Derived POV facts stay excluded unless both confirmed locators are supplied. */
+  readonly currentPovCharacterId?: string | null;
+  readonly currentNarrativeOrder?: number | null;
   readonly maximumContextTokens: number;
 }
 
@@ -94,17 +102,22 @@ export async function compileStoryContextForGeneration(
   }
 
   try {
+    const governedFacts = mergeFactsById(loaded.value, request.verifiedDerivedFacts ?? []);
     const assembled = assembleStoryContextCandidates({
       projectId: request.projectId,
       currentBranchId: request.currentBranchId ?? null,
       currentTask: request.currentTask,
       ...(request.sceneGoal === undefined ? {} : { sceneGoal: request.sceneGoal }),
-      facts: loaded.value,
+      facts: governedFacts,
+      knowledgeSourceFacts: loaded.value,
+      currentPovCharacterId: request.currentPovCharacterId ?? null,
+      currentNarrativeOrder: request.currentNarrativeOrder ?? null,
       ...(request.currentChapterVersions === undefined
         ? {}
         : { currentChapterVersions: request.currentChapterVersions }),
     });
     const candidates: ContextCandidate[] = [...assembled.candidates];
+    candidates.push(...cloneLayeredCandidates(request.creationSeedCandidates ?? []));
     candidates.push(...layerCandidates("current_task", request.currentTaskSupplements ?? []));
     if (request.currentChapter !== undefined && request.currentChapter !== null) {
       const chapter = currentChapterCandidate(request.currentChapter);
@@ -140,6 +153,16 @@ export async function compileStoryContextForGeneration(
   }
 }
 
+function mergeFactsById(
+  persisted: readonly StoryFact[],
+  derived: readonly StoryFact[],
+): readonly StoryFact[] {
+  const merged = new Map<string, StoryFact>();
+  persisted.forEach((fact) => merged.set(fact.id, fact));
+  derived.forEach((fact) => merged.set(fact.id, fact));
+  return Object.freeze([...merged.values()]);
+}
+
 /** Formats only selected entries. Full selection/discard metadata stays in the receipt. */
 export function formatStoryContextPrompt(receipt: StoryContextCompilationReceipt): string {
   const sections = receipt.compiled.entries
@@ -155,18 +178,22 @@ export function formatStoryContextPrompt(receipt: StoryContextCompilationReceipt
 }
 
 function currentChapterCandidate(source: CurrentChapterContextSource): ContextCandidate | null {
-  const normalized = source.content.trim();
-  if (normalized.length === 0) {
+  const leadingWhitespace = /^\s*/u.exec(source.content)?.[0].length ?? 0;
+  const trailingWhitespace = /\s*$/u.exec(source.content)?.[0].length ?? 0;
+  const contentEnd = Math.max(leadingWhitespace, source.content.length - trailingWhitespace);
+  if (leadingWhitespace >= contentEnd) {
     return null;
   }
-  const startOffset = safeTailStart(normalized, CURRENT_CHAPTER_CONTEXT_CHARACTER_LIMIT);
-  const tail = normalized.slice(startOffset);
+  const normalized = source.content.slice(leadingWhitespace, contentEnd);
+  const relativeStart = safeTailStart(normalized, CURRENT_CHAPTER_CONTEXT_CHARACTER_LIMIT);
+  const startOffset = leadingWhitespace + relativeStart;
+  const tail = source.content.slice(startOffset, contentEnd);
   const evidence: ContextEvidenceReference = Object.freeze({
     sourceType: "chapter",
     sourceId: source.chapterId,
     sourceVersionId: source.versionId,
-    locator: `utf16:${String(startOffset)}-${String(normalized.length)}:${String(normalized.length)}`,
-    contentHash: null,
+    locator: `utf16:${String(startOffset)}-${String(contentEnd)}/${String(source.content.length)}`,
+    contentHash: source.contentHash,
     excerpt: null,
   });
   return Object.freeze({
@@ -174,7 +201,7 @@ function currentChapterCandidate(source: CurrentChapterContextSource): ContextCa
     layer: "recent_events",
     content: `[当前章节：${source.title}]\n${tail}`,
     selectionReason:
-      startOffset === 0
+      startOffset === leadingWhitespace
         ? "The current saved chapter is the immediate continuity source."
         : "The most recent saved chapter tail is the immediate continuity source; older text was trimmed before compilation.",
     evidence: Object.freeze([evidence]),
@@ -192,6 +219,19 @@ function layerCandidates(
       ...draft,
       layer,
       evidence: Object.freeze(draft.evidence.map((reference) => Object.freeze({ ...reference }))),
+    }),
+  );
+}
+
+function cloneLayeredCandidates(
+  candidates: readonly ContextCandidate[],
+): readonly ContextCandidate[] {
+  return candidates.map((candidate) =>
+    Object.freeze({
+      ...candidate,
+      evidence: Object.freeze(
+        candidate.evidence.map((reference) => Object.freeze({ ...reference })),
+      ),
     }),
   );
 }

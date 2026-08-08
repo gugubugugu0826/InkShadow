@@ -9,6 +9,7 @@ import {
   ListChapterVersions,
   RejectAiCandidate,
   SaveChapter,
+  SetChapterPrivacy,
 } from "../src/index.js";
 import {
   CANDIDATE_ID,
@@ -85,6 +86,119 @@ function readyCandidate(baseVersionId = VERSION_ID): AiCandidate {
 }
 
 describe("chapter and candidate use cases", () => {
+  it("recovers an exact planned chapter and initial version without duplicating either", async () => {
+    const projects = new InMemoryProjectRepository();
+    projects.seed(activeProject());
+    const contentStore = new InMemoryContentStore(new InMemoryCandidateRepository());
+    const create = () =>
+      new CreateChapter(
+        projects,
+        contentStore,
+        new SequenceIds([]),
+        new FixedClock(),
+        new FixedHasher(),
+        contentStore,
+        contentStore,
+      ).execute({
+        projectId: PROJECT_ID,
+        title: "Planned Chapter",
+        content: "Stable initial content",
+        plannedChapterId: CHAPTER_ID,
+        plannedInitialVersionId: VERSION_ID,
+      });
+
+    expect((await create()).ok).toBe(true);
+    const recovered = await create();
+    expect(recovered.ok && recovered.value.chapter.id).toBe(CHAPTER_ID);
+    const chapters = await contentStore.listByProjectId(PROJECT_ID);
+    const versions = await contentStore.listByChapterId(CHAPTER_ID);
+    expect(chapters.ok && chapters.value).toHaveLength(1);
+    expect(versions.ok && versions.value).toHaveLength(1);
+  });
+
+  it("fails closed when planned chapter ids point at different initial content", async () => {
+    const projects = new InMemoryProjectRepository();
+    projects.seed(activeProject());
+    const contentStore = new InMemoryContentStore(new InMemoryCandidateRepository());
+    const create = (content: string) =>
+      new CreateChapter(
+        projects,
+        contentStore,
+        new SequenceIds([]),
+        new FixedClock(),
+        new FixedHasher(),
+        contentStore,
+        contentStore,
+      ).execute({
+        projectId: PROJECT_ID,
+        title: "Planned Chapter",
+        content,
+        plannedChapterId: CHAPTER_ID,
+        plannedInitialVersionId: VERSION_ID,
+      });
+    expect((await create("First content")).ok).toBe(true);
+
+    const mismatched = await create("Different content");
+    expect(mismatched.ok).toBe(false);
+    if (!mismatched.ok) {
+      expect(mismatched.error.details.reason).toBe("PLANNED_CHAPTER_SCOPE_MISMATCH");
+    }
+  });
+
+  it("creates a local-only chapter atomically before any sync commit is considered", async () => {
+    const projects = new InMemoryProjectRepository();
+    projects.seed(activeProject());
+    const contentStore = new InMemoryContentStore(new InMemoryCandidateRepository());
+    const created = await new CreateChapter(
+      projects,
+      contentStore,
+      new SequenceIds([CHAPTER_ID, VERSION_ID]),
+      new FixedClock(),
+      new FixedHasher(),
+    ).execute({
+      projectId: PROJECT_ID,
+      title: "Private from creation",
+      content: "Never cloud eligible",
+      privacyMode: "local_only",
+    });
+
+    expect(created.ok && created.value.chapter.toSnapshot()).toMatchObject({
+      privacyMode: "local_only",
+      privacyRevision: 1,
+    });
+  });
+
+  it("marks a chapter local-only without creating a正文 version", async () => {
+    const projects = new InMemoryProjectRepository();
+    projects.seed(activeProject());
+    const contentStore = new InMemoryContentStore(new InMemoryCandidateRepository());
+    await createStableChapter(projects, contentStore);
+
+    const result = await new SetChapterPrivacy(
+      contentStore,
+      contentStore,
+      new FixedClock(),
+    ).execute({
+      chapterId: CHAPTER_ID,
+      privacyMode: "local_only",
+      expectedPrivacyRevision: 1,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.value.chapter.toSnapshot()).toMatchObject({
+      privacyMode: "local_only",
+      privacyRevision: 2,
+      revision: 1,
+      currentVersionId: VERSION_ID,
+    });
+    expect(result.value.acknowledgedCloudEvidenceCount).toBe(0);
+    const versions = await contentStore.listByChapterId(CHAPTER_ID);
+    expect(versions.ok && versions.value).toHaveLength(1);
+  });
+
   it("reports a newly created chapter as pending only when the commit queued sync", async () => {
     const projects = new InMemoryProjectRepository();
     projects.seed(activeProject());
@@ -173,7 +287,7 @@ describe("chapter and candidate use cases", () => {
       new SequenceIds([NEXT_VERSION_ID]),
       new FixedClock(),
       new FixedHasher(),
-    ).execute({ candidateId: CANDIDATE_ID });
+    ).execute({ candidateId: CANDIDATE_ID, expectedCandidateRevision: 1 });
     expect(accepted.ok).toBe(true);
     if (!accepted.ok) {
       return;
@@ -202,7 +316,7 @@ describe("chapter and candidate use cases", () => {
       new SequenceIds([NEXT_VERSION_ID]),
       new FixedClock(),
       new FixedHasher(),
-    ).execute({ candidateId: CANDIDATE_ID });
+    ).execute({ candidateId: CANDIDATE_ID, expectedCandidateRevision: 1 });
     expect(accepted.ok).toBe(false);
 
     const candidate = await candidates.findById(CANDIDATE_ID);
@@ -226,7 +340,7 @@ describe("chapter and candidate use cases", () => {
       new SequenceIds([NEXT_VERSION_ID]),
       new FixedClock(),
       new FixedHasher(),
-    ).execute({ candidateId: CANDIDATE_ID });
+    ).execute({ candidateId: CANDIDATE_ID, expectedCandidateRevision: 1 });
     expect(accepted.ok).toBe(false);
     if (!accepted.ok) {
       expect(accepted.error.code).toBe("BASE_VERSION_CHANGED");
@@ -246,6 +360,7 @@ describe("chapter and candidate use cases", () => {
 
     const rejected = await new RejectAiCandidate(candidates, new FixedClock()).execute({
       candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
     });
     expect(rejected.ok && rejected.value.status).toBe("rejected");
 

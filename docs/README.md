@@ -1,0 +1,83 @@
+# 墨影 InkShadow 文档入口
+
+> 应用版本（App Version）：`0.2.0`  
+> 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
+> 最近治理复核：2026-08-09  
+> 注意：设计版本用于界面与交互验收，不会自动改变应用版本。
+
+本目录同时保存当前规则、实现说明、执行证据和历史基线。为避免把旧页面说明或一次历史测试
+误当成当前产品事实，阅读时必须先看文档状态，再看日期和适用范围。
+
+## 文档状态
+
+| 状态                    | 含义                                   | 使用方式                                        |
+| ----------------------- | -------------------------------------- | ----------------------------------------------- |
+| `AUTHORITATIVE_CURRENT` | 当前产品、数据或交付规则               | 发生冲突时优先；仍须由代码与当前运行证据支撑    |
+| `SUPPORTING_CURRENT`    | 当前实现的详细说明                     | 补充权威文档，不得扩大“已实现”或“已验证”范围    |
+| `EVIDENCE_CURRENT`      | 当前工作树的命令、结果、失败和制品证据 | 只证明记录所绑定的提交或工作树，不替代产品规则  |
+| `TARGET_BASELINE`       | 目标设计或计划基线                     | 表示要达到什么，不表示当前已经实现              |
+| `HISTORICAL`            | 历史审计、旧方案或旧测试快照           | 只用于追溯；不得作为当前 UI、迁移上限或发布状态 |
+
+任意页面、接口、迁移、测试替身或截图单独存在，都不能把能力升级为 `VERIFIED`。P01–P44 只有在
+真实动作、目标宽度、浅色/深色、键盘、加载/空/错状态和相关持久化全部完成当次复核后，才能逐项
+标记为已验证。当前不得宣称 44/44 已验证，也不得把模拟协议测试写成真实供应商验收。
+
+## 当前权威入口
+
+| 状态                    | 文档                                                                                                                   | 负责回答的问题                                     |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `AUTHORITATIVE_CURRENT` | [`product-rebuild/README.md`](product-rebuild/README.md)                                                               | 下一阶段产品重构的当前阅读顺序、冲突规则和阶段边界 |
+| `AUTHORITATIVE_CURRENT` | [`product-rebuild/01-INFORMATION-ARCHITECTURE-AND-FLOWS.md`](product-rebuild/01-INFORMATION-ARCHITECTURE-AND-FLOWS.md) | 三个创建入口、四区工作台和核心用户流程             |
+| `AUTHORITATIVE_CURRENT` | [`product-rebuild/02-DATA-REUSE-AND-MIGRATION.md`](product-rebuild/02-DATA-REUSE-AND-MIGRATION.md)                     | 数据复用、前向迁移、兼容与回滚                     |
+| `AUTHORITATIVE_CURRENT` | [`product-rebuild/03-DELIVERY-PLAN-ACCEPTANCE-ROLLBACK.md`](product-rebuild/03-DELIVERY-PLAN-ACCEPTANCE-ROLLBACK.md)   | Phase 0–5 顺序、验收、风险和回滚                   |
+| `SUPPORTING_CURRENT`    | [`front-end/README.md`](front-end/README.md)                                                                           | 当前前端页面、路由、普通/专家体验和接口索引        |
+| `SUPPORTING_CURRENT`    | [`back-end/README.md`](back-end/README.md)                                                                             | Cloud、Desktop 原生层、共享包与工程工具索引        |
+| `EVIDENCE_CURRENT`      | [`execution/CURRENT_STATUS.md`](execution/CURRENT_STATUS.md)                                                           | 当前执行状态；必须同时核对其中绑定的提交与运行日期 |
+| `EVIDENCE_CURRENT`      | [`execution/TEST_RESULTS.md`](execution/TEST_RESULTS.md)                                                               | 当前和历史测试证据；失败不得省略                   |
+| `EVIDENCE_CURRENT`      | [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md)                                                     | 当前候选是否达到构建、打包或发布门禁               |
+
+## 支撑文档
+
+- [`front-end/PAGE_CATALOG.md`](front-end/PAGE_CATALOG.md)：Desktop 路由、对应文件、页面内容、
+  真实动作与条件。
+- [`front-end/INTERFACE_REFERENCE.md`](front-end/INTERFACE_REFERENCE.md)：DesktopRuntime、Tauri
+  IPC、Model Hub、SQLite、Cloud API 与 Web Guest 数据边界。
+- [`front-end/CREATION_JOURNEYS_AND_PROJECT_SEED.md`](front-end/CREATION_JOURNEYS_AND_PROJECT_SEED.md)：
+  三条创建旅程共享的 ProjectSeed 合同。
+- [`back-end/CLOUD_BACKEND.md`](back-end/CLOUD_BACKEND.md)：Cloud API 代码边界；不代表生产云已部署。
+- [`back-end/DESKTOP_NATIVE.md`](back-end/DESKTOP_NATIVE.md)：Tauri/Rust 可信边界、SQLite、凭据、
+  模型网络和备份恢复。
+- [`back-end/SHARED_PACKAGES.md`](back-end/SHARED_PACKAGES.md)：领域、应用、数据和共享包职责。
+- [`back-end/ANDROID_OPERATIONS_TOOLING.md`](back-end/ANDROID_OPERATIONS_TOOLING.md)：Android POC、
+  部署和工程工具；不属于当前 Phase 1 默认产品范围。
+- [`GITHUB_PUBLISH_RELEASE_GUIDE.md`](GITHUB_PUBLISH_RELEASE_GUIDE.md)：公开仓库上传与 Release
+  注意事项。实际公开范围以根 `.gitignore` 和当次提交清单为准。
+
+## 目标与历史文档
+
+- `DESIGN/`：`TARGET_BASELINE`。DESIGN v0.3.1b 规定视觉与交互目标；应用仍是 0.2.0。
+- [`product-rebuild/00-PHASE-0-REALITY-AUDIT.md`](product-rebuild/00-PHASE-0-REALITY-AUDIT.md)：
+  `HISTORICAL` Phase 0 起始审计；当前差异须再读增量现实矩阵。
+- `docs/prototypes/`、`docs/state-matrices/`：目标原型或状态设计；除非文件明确标为当前，否则不是
+  当前页面权威。
+- `docs/execution/` 中带日期或提交号的旧报告：历史证据；不得证明更新后的工作树或安装包。
+- `PROJECT.md`、`PLAN.md`、`PRD.md`、`SPEC.md`：仍可提供系统约束，但普通用户信息架构与本轮
+  实施顺序以 `product-rebuild/` 当前权威文档为准。
+
+## 当前产品不变量
+
+- 默认入口是“从一个想法开始、导入小说、专业创建”；项目一级区域只有正文、规划、设定、检查。
+- AI 结果先进入隔离的“AI 建议版本”（内部 Candidate）；明确接受前不得覆盖正文。
+- 每次接受都创建不可变版本；派生摘要、索引、事实和因果投影失败不得回滚已接受正文。
+- 密钥保存在操作系统凭据库；正文、Prompt、密钥和完整模型响应不得写入调用账本或普通日志。
+- 项目含仅本机章节时，所有读取项目内容的远程模型派发失败关闭。
+- 缺少凭据、路由、能力或真实输出时显示失败或跳过，不生成看似来自供应商的替代数据。
+
+## 维护规则
+
+1. 产品事实变化时，先更新 `product-rebuild/`，再同步 `front-end/`、`back-end/` 和执行证据。
+2. 新 SQLite 结构只能新增前向迁移，并同步备份恢复白名单、顺序和测试。
+3. 任何精确测试数量、制品哈希或发布结论只能写入与当次提交绑定的执行证据；概览文档不复制
+   尚未重跑的数字。
+4. 历史文件不倒改成当前事实；在索引中降级为 `HISTORICAL`，或在文件顶部明确适用快照。
+5. 公开 GitHub 时只提交根 `.gitignore` 允许的文档，不使用强制添加绕过公开范围。

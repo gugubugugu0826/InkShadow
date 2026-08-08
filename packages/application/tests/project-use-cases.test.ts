@@ -91,4 +91,40 @@ describe("project use cases", () => {
       expect(second.error.code).toBe("PROJECT_NAME_CONFLICT");
     }
   });
+
+  it("recovers an exact planned project id without allocating or guessing another project", async () => {
+    const repository = new InMemoryProjectRepository();
+    const clock = new FixedClock();
+    const first = await new CreateProject(repository, new SequenceIds([]), clock).execute({
+      name: "Crash-safe Novel",
+      plannedId: PROJECT_ID,
+    });
+    expect(first.ok).toBe(true);
+
+    const retried = await new CreateProject(repository, new SequenceIds([]), clock).execute({
+      name: "Crash-safe Novel",
+      plannedId: PROJECT_ID,
+    });
+    expect(retried.ok && retried.value.id).toBe(PROJECT_ID);
+    const listed = await repository.list({ statuses: ["active"], search: null });
+    expect(listed.ok && listed.value).toHaveLength(1);
+  });
+
+  it("fails closed when a planned project id belongs to different content", async () => {
+    const repository = new InMemoryProjectRepository();
+    const clock = new FixedClock();
+    await new CreateProject(repository, new SequenceIds([]), clock).execute({
+      name: "Original",
+      plannedId: PROJECT_ID,
+    });
+
+    const mismatched = await new CreateProject(repository, new SequenceIds([]), clock).execute({
+      name: "Different",
+      plannedId: PROJECT_ID,
+    });
+    expect(mismatched.ok).toBe(false);
+    if (!mismatched.ok) {
+      expect(mismatched.error.details.reason).toBe("PLANNED_PROJECT_SCOPE_MISMATCH");
+    }
+  });
 });

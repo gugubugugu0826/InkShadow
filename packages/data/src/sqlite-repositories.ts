@@ -1,7 +1,9 @@
 import type {
   AcceptCandidateCommit,
   AiCandidateRepository,
+  ChapterPrivacyAuthoritySnapshot,
   ChapterRepository,
+  ChapterPrivacyRepository,
   ChapterVersionRepository,
   ContentCommitReceipt,
   ContentCommitRepository,
@@ -15,6 +17,8 @@ import type {
 import {
   AiCandidate,
   AppError,
+  CHAPTER_PRIVACY_MODES,
+  CHAPTER_STATUSES,
   Chapter,
   ChapterVersion,
   Project,
@@ -24,9 +28,11 @@ import {
   parseContentChecksum,
   parseIsoUtcTimestamp,
   parseUuidV7,
+  type AiCandidateApplicationIntent,
   type AiCandidateSource,
   type AiCandidateStatus,
   type ChapterStatus,
+  type ChapterPrivacyMode,
   type ChapterVersionReason,
   type IsoUtcTimestamp,
   type ProjectStatus,
@@ -35,8 +41,10 @@ import {
   type UuidV7,
   type UuidV7Generator,
 } from "@inkshadow/domain";
+import { Task, type CreateTaskInput } from "@inkshadow/task-engine";
 
 import type { SqlExecutor, SqlPrimitive, TransactionExecutor } from "./executor.js";
+import { createTaskIfAbsentInTransaction } from "./task-sqlite-repositories.js";
 import {
   enqueueSyncProjectionJobInTransaction,
   findCurrentSyncMaterializedObjectInTransaction,
@@ -65,10 +73,21 @@ interface ChapterDbRow {
   content: string;
   status: string;
   revision: number;
+  privacy_mode: string;
+  privacy_revision: number;
   current_version_id: string;
   created_at: string;
   updated_at: string;
   trashed_at: string | null;
+}
+
+interface ChapterPrivacyAuthorityDbRow {
+  readonly chapter_id: string;
+  readonly current_version_id: string;
+  readonly chapter_revision: number;
+  readonly privacy_revision: number;
+  readonly privacy_mode: string;
+  readonly status: string;
 }
 
 interface ChapterVersionDbRow {
@@ -104,10 +123,25 @@ interface AiCandidateDbRow {
   content: string;
   content_checksum: string | null;
   status: string;
+  revision: number;
   incomplete: number;
   created_at: string;
   updated_at: string;
   decided_at: string | null;
+  task_intent: string;
+  application_mode: string;
+  payload_kind: string;
+  anchor_start_utf16: number | null;
+  anchor_end_utf16: number | null;
+}
+
+interface CountDbRow {
+  count: number;
+}
+
+interface CandidateAuthorityDbRow {
+  readonly status: string;
+  readonly revision: number;
 }
 
 const PROJECT_COLUMNS = `
@@ -131,6 +165,8 @@ const CHAPTER_COLUMNS = `
   content,
   status,
   revision,
+  privacy_mode,
+  privacy_revision,
   current_version_id,
   created_at,
   updated_at,
@@ -170,10 +206,16 @@ const CANDIDATE_COLUMNS = `
   content,
   content_checksum,
   status,
+  revision,
   incomplete,
   created_at,
   updated_at,
-  decided_at
+  decided_at,
+  task_intent,
+  application_mode,
+  payload_kind,
+  anchor_start_utf16,
+  anchor_end_utf16
 `;
 
 export class SqliteProjectRepository implements ProjectRepository {
@@ -346,6 +388,115 @@ export class SqliteChapterRepository implements ChapterRepository {
       return rows.map(rehydrateChapter);
     });
   }
+
+  public async listPrivacyAuthorityByProjectId(
+    projectId: UuidV7,
+  ): Promise<Result<readonly ChapterPrivacyAuthoritySnapshot[], AppError>> {
+    return attempt("list chapter privacy authority", async () => {
+      const rows = await this.executor.select<ChapterPrivacyAuthorityDbRow>(
+        `SELECT
+           id AS chapter_id,
+           current_version_id,
+           revision AS chapter_revision,
+           privacy_revision,
+           privacy_mode,
+           status
+         FROM chapters
+         WHERE project_id = ?
+         ORDER BY id ASC`,
+        [projectId],
+      );
+      return Object.freeze(rows.map(rehydrateChapterPrivacyAuthority));
+    });
+  }
+}
+
+export class SqliteChapterPrivacyRepository implements ChapterPrivacyRepository {
+  public constructor(private readonly executor: SqlExecutor) {}
+
+  public async updatePrivacy(
+    chapter: Chapter,
+    expectedPrivacyRevision: number,
+  ): ReturnType<ChapterPrivacyRepository["updatePrivacy"]> {
+    return attempt("update chapter privacy", async () => {
+      return this.executor.transaction(async (transaction) => {
+        const snapshot = chapter.toSnapshot();
+        const [projectionRows, outboxRows, acknowledgedRows] =
+          snapshot.privacyMode === "local_only"
+            ? await Promise.all([
+                transaction.select<CountDbRow>(
+                  `SELECT count(*) AS count
+                   FROM sync_projection_jobs
+                   WHERE project_id = ?
+                     AND object_type = 'chapter_version'
+                     AND object_id = ?
+                     AND projection_kind = 'upsert'
+                     AND status IN ('queued', 'leased', 'retry_wait')`,
+                  [snapshot.projectId, snapshot.id],
+                ),
+                transaction.select<CountDbRow>(
+                  `SELECT count(*) AS count
+                   FROM sync_outbox_operations
+                   WHERE project_id = ?
+                     AND object_type = 'chapter_version'
+                     AND object_id = ?
+                     AND kind = 'upsert'
+                     AND status <> 'acknowledged'`,
+                  [snapshot.projectId, snapshot.id],
+                ),
+                transaction.select<CountDbRow>(
+                  `SELECT (
+                     SELECT count(*)
+                     FROM sync_outbox_operations
+                     WHERE project_id = ?
+                       AND object_type = 'chapter_version'
+                       AND object_id = ?
+                       AND kind = 'upsert'
+                       AND status = 'acknowledged'
+                       AND acknowledged_at IS NOT NULL
+                   ) + (
+                     SELECT count(*)
+                     FROM sync_transfers AS transfer
+                     WHERE transfer.project_id = ?
+                       AND transfer.object_id = ?
+                       AND transfer.status = 'completed'
+                       AND EXISTS (
+                         SELECT 1
+                         FROM sync_transfer_chunks AS chunk
+                         WHERE chunk.transfer_id = transfer.transfer_id
+                           AND chunk.remote_etag IS NOT NULL
+                           AND chunk.acknowledged_at IS NOT NULL
+                       )
+                   ) AS count`,
+                  [snapshot.projectId, snapshot.id, snapshot.projectId, snapshot.id],
+                ),
+              ])
+            : [[{ count: 0 }], [{ count: 0 }], [{ count: 0 }]];
+        const updated = await transaction.execute(
+          `UPDATE chapters
+           SET privacy_mode = ?, privacy_revision = ?, updated_at = ?
+           WHERE id = ? AND project_id = ? AND privacy_revision = ?`,
+          [
+            snapshot.privacyMode,
+            snapshot.privacyRevision,
+            snapshot.updatedAt,
+            snapshot.id,
+            snapshot.projectId,
+            expectedPrivacyRevision,
+          ],
+        );
+        if (updated.rowsAffected !== 1) {
+          throw concurrencyError("chapter", snapshot.id, expectedPrivacyRevision);
+        }
+        return {
+          chapter,
+          blockedProjectionCount: projectionRows[0]?.count ?? 0,
+          removedOutboxOperationCount: outboxRows[0]?.count ?? 0,
+          acknowledgedCloudEvidenceCount: acknowledgedRows[0]?.count ?? 0,
+        };
+      });
+    });
+  }
 }
 
 export class SqliteChapterVersionRepository implements ChapterVersionRepository {
@@ -481,7 +632,7 @@ export class SqliteAiCandidateRepository implements AiCandidateRepository {
 
   public async save(
     candidate: AiCandidate,
-    expectedStatus: AiCandidateStatus,
+    expected: Readonly<{ status: AiCandidateStatus; revision: number }>,
   ): Promise<Result<void, AppError>> {
     const snapshot = candidate.toSnapshot();
     return attempt("save AI candidate", async () => {
@@ -491,27 +642,26 @@ export class SqliteAiCandidateRepository implements AiCandidateRepository {
            content = ?,
            content_checksum = ?,
            status = ?,
+           revision = ?,
            incomplete = ?,
            updated_at = ?,
            decided_at = ?
-         WHERE id = ? AND status = ?`,
+         WHERE id = ? AND status = ? AND revision = ?`,
         [
           snapshot.content,
           snapshot.contentChecksum,
           snapshot.status,
+          candidate.revision,
           snapshot.incomplete ? 1 : 0,
           snapshot.updatedAt,
           snapshot.decidedAt,
           snapshot.id,
-          expectedStatus,
+          expected.status,
+          expected.revision,
         ],
       );
       if (result.rowsAffected !== 1) {
-        throw new AppError({
-          code: "CANDIDATE_ALREADY_DECIDED",
-          message: "The AI candidate changed before it could be saved.",
-          details: { candidateId: snapshot.id, expectedStatus },
-        });
+        throw await candidateAuthorityError(this.executor, snapshot.id, expected);
       }
     });
   }
@@ -521,6 +671,7 @@ export class SqliteContentCommitRepository implements ContentCommitRepository {
   public constructor(
     private readonly executor: SqlExecutor,
     private readonly syncProjectionIds?: UuidV7Generator,
+    private readonly acceptedCandidateTaskFactory?: AcceptedCandidateTaskFactory,
   ) {}
 
   public async createChapter(
@@ -584,26 +735,43 @@ export class SqliteContentCommitRepository implements ContentCommitRepository {
              content = ?,
              content_checksum = ?,
              status = ?,
+             revision = ?,
              incomplete = ?,
              updated_at = ?,
              decided_at = ?
-           WHERE id = ? AND status = ?`,
+           WHERE id = ? AND status = ? AND revision = ?`,
           [
             snapshot.content,
             snapshot.contentChecksum,
             snapshot.status,
+            commit.candidate.revision,
             snapshot.incomplete ? 1 : 0,
             snapshot.updatedAt,
             snapshot.decidedAt,
             snapshot.id,
             commit.expectedCandidateStatus,
+            commit.expectedCandidateRevision,
           ],
         );
         if (updated.rowsAffected !== 1) {
-          throw new AppError({
-            code: "CANDIDATE_ALREADY_DECIDED",
-            message: "The AI candidate changed before acceptance could be committed.",
+          throw await candidateAuthorityError(transaction, snapshot.id, {
+            status: commit.expectedCandidateStatus,
+            revision: commit.expectedCandidateRevision,
           });
+        }
+        if (this.acceptedCandidateTaskFactory !== undefined) {
+          const taskInput = this.acceptedCandidateTaskFactory(commit);
+          const task = Task.create(taskInput);
+          if (!task.ok) {
+            throw new AppError({
+              code: "SAVE_FAILED",
+              message: "The accepted-version recovery task is invalid.",
+              retryable: true,
+              actions: ["RETRY", "CONTACT_SUPPORT"],
+              details: { taskErrorCode: task.error.code },
+            });
+          }
+          await createTaskIfAbsentInTransaction(transaction, task.value);
         }
         const syncQueued = await enqueueChapterProjectionIfEnabled(
           transaction,
@@ -669,6 +837,7 @@ export class SqliteProjectImportCommitRepository implements ProjectImportCommitR
 export interface SqliteRepositories {
   readonly projects: SqliteProjectRepository;
   readonly chapters: SqliteChapterRepository;
+  readonly chapterPrivacy: SqliteChapterPrivacyRepository;
   readonly chapterVersions: SqliteChapterVersionRepository;
   readonly recoveryDrafts: SqliteRecoveryDraftRepository;
   readonly aiCandidates: SqliteAiCandidateRepository;
@@ -678,7 +847,14 @@ export interface SqliteRepositories {
 
 export interface CreateSqliteRepositoriesOptions {
   readonly syncProjectionIds?: UuidV7Generator;
+  /**
+   * Production may provide the accepted-version task request here so Candidate
+   * acceptance and its recovery work become durable in the same transaction.
+   */
+  readonly acceptedCandidateTaskFactory?: AcceptedCandidateTaskFactory;
 }
+
+export type AcceptedCandidateTaskFactory = (commit: AcceptCandidateCommit) => CreateTaskInput;
 
 export function createSqliteRepositories(
   executor: SqlExecutor,
@@ -687,10 +863,15 @@ export function createSqliteRepositories(
   return {
     projects: new SqliteProjectRepository(executor, options.syncProjectionIds),
     chapters: new SqliteChapterRepository(executor),
+    chapterPrivacy: new SqliteChapterPrivacyRepository(executor),
     chapterVersions: new SqliteChapterVersionRepository(executor),
     recoveryDrafts: new SqliteRecoveryDraftRepository(executor),
     aiCandidates: new SqliteAiCandidateRepository(executor),
-    contentCommits: new SqliteContentCommitRepository(executor, options.syncProjectionIds),
+    contentCommits: new SqliteContentCommitRepository(
+      executor,
+      options.syncProjectionIds,
+      options.acceptedCandidateTaskFactory,
+    ),
     projectImports: new SqliteProjectImportCommitRepository(executor),
   };
 }
@@ -705,6 +886,9 @@ async function enqueueChapterProjectionIfEnabled(
     return false;
   }
   const chapterSnapshot = chapter.toSnapshot();
+  if (chapterSnapshot.privacyMode === "local_only") {
+    return false;
+  }
   const versionSnapshot = version.toSnapshot();
   const registration = await loadEnabledSyncRegistration(transaction, chapterSnapshot.projectId);
   if (registration === null) {
@@ -838,11 +1022,13 @@ async function insertChapter(executor: TransactionExecutor, chapter: Chapter): P
       content,
       status,
       revision,
+      privacy_mode,
+      privacy_revision,
       current_version_id,
       created_at,
       updated_at,
       trashed_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       snapshot.id,
       snapshot.projectId,
@@ -850,6 +1036,8 @@ async function insertChapter(executor: TransactionExecutor, chapter: Chapter): P
       snapshot.content,
       snapshot.status,
       snapshot.revision,
+      snapshot.privacyMode,
+      snapshot.privacyRevision,
       snapshot.currentVersionId,
       snapshot.createdAt,
       snapshot.updatedAt,
@@ -874,7 +1062,7 @@ async function updateChapter(
        current_version_id = ?,
        updated_at = ?,
        trashed_at = ?
-     WHERE id = ? AND revision = ?`,
+     WHERE id = ? AND revision = ? AND privacy_revision = ?`,
     [
       snapshot.title,
       snapshot.content,
@@ -885,6 +1073,7 @@ async function updateChapter(
       snapshot.trashedAt,
       snapshot.id,
       expectedRevision,
+      snapshot.privacyRevision,
     ],
   );
   if (result.rowsAffected !== 1) {
@@ -940,11 +1129,17 @@ async function insertCandidate(
       content,
       content_checksum,
       status,
+      revision,
       incomplete,
       created_at,
       updated_at,
-      decided_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      decided_at,
+      task_intent,
+      application_mode,
+      payload_kind,
+      anchor_start_utf16,
+      anchor_end_utf16
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       snapshot.id,
       snapshot.projectId,
@@ -954,10 +1149,16 @@ async function insertCandidate(
       snapshot.content,
       snapshot.contentChecksum,
       snapshot.status,
+      candidate.revision,
       snapshot.incomplete ? 1 : 0,
       snapshot.createdAt,
       snapshot.updatedAt,
       snapshot.decidedAt,
+      snapshot.applicationIntent?.task ?? "legacy_full_document",
+      snapshot.applicationIntent?.application ?? "replace_document",
+      snapshot.applicationIntent?.payload ?? "full_document",
+      snapshot.applicationIntent?.startUtf16 ?? null,
+      snapshot.applicationIntent?.endUtf16 ?? null,
     ],
   );
 }
@@ -987,12 +1188,40 @@ function rehydrateChapter(row: ChapterDbRow): Chapter {
     content: row.content,
     status: row.status as ChapterStatus,
     revision: row.revision,
+    privacyMode: row.privacy_mode as ChapterPrivacyMode,
+    privacyRevision: row.privacy_revision,
     currentVersionId: requiredUuid(row.current_version_id, "chapter.currentVersionId"),
     createdAt: requiredTimestamp(row.created_at, "chapter.createdAt"),
     updatedAt: requiredTimestamp(row.updated_at, "chapter.updatedAt"),
     trashedAt: optionalTimestamp(row.trashed_at, "chapter.trashedAt"),
   });
   return requireEntity(restored, "chapter", row.id);
+}
+
+function rehydrateChapterPrivacyAuthority(
+  row: ChapterPrivacyAuthorityDbRow,
+): ChapterPrivacyAuthoritySnapshot {
+  if (
+    !Number.isSafeInteger(row.chapter_revision) ||
+    row.chapter_revision < 1 ||
+    !Number.isSafeInteger(row.privacy_revision) ||
+    row.privacy_revision < 1 ||
+    !CHAPTER_PRIVACY_MODES.includes(row.privacy_mode as ChapterPrivacyMode) ||
+    !CHAPTER_STATUSES.includes(row.status as ChapterStatus)
+  ) {
+    throw corruptData(`chapter-privacy-authority:${row.chapter_id}`, "INVALID_METADATA");
+  }
+  return Object.freeze({
+    chapterId: requiredUuid(row.chapter_id, "chapterPrivacyAuthority.chapterId"),
+    currentVersionId: requiredUuid(
+      row.current_version_id,
+      "chapterPrivacyAuthority.currentVersionId",
+    ),
+    chapterRevision: row.chapter_revision,
+    privacyRevision: row.privacy_revision,
+    privacyMode: row.privacy_mode as ChapterPrivacyMode,
+    status: row.status as ChapterStatus,
+  });
 }
 
 function rehydrateChapterVersion(row: ChapterVersionDbRow): ChapterVersion {
@@ -1038,12 +1267,24 @@ function rehydrateAiCandidate(row: AiCandidateDbRow): AiCandidate {
         ? null
         : requiredChecksum(row.content_checksum, "aiCandidate.contentChecksum"),
     status: row.status as AiCandidateStatus,
+    revision: row.revision,
     incomplete: row.incomplete === 1,
     createdAt: requiredTimestamp(row.created_at, "aiCandidate.createdAt"),
     updatedAt: requiredTimestamp(row.updated_at, "aiCandidate.updatedAt"),
     decidedAt: optionalTimestamp(row.decided_at, "aiCandidate.decidedAt"),
+    applicationIntent: rehydrateCandidateApplicationIntent(row),
   });
   return requireEntity(restored, "AI candidate", row.id);
+}
+
+function rehydrateCandidateApplicationIntent(row: AiCandidateDbRow): AiCandidateApplicationIntent {
+  return {
+    task: row.task_intent,
+    application: row.application_mode,
+    payload: row.payload_kind,
+    startUtf16: row.anchor_start_utf16,
+    endUtf16: row.anchor_end_utf16,
+  } as AiCandidateApplicationIntent;
 }
 
 async function attempt<Value>(
@@ -1077,6 +1318,16 @@ function normalizeDatabaseError(operation: string, error: unknown): AppError {
   }
 
   const nativeCode = readNativeSqliteCode(error);
+  if (nativeCode === "PROJECT_REMOTE_DISPATCH_ACTIVE") {
+    return new AppError({
+      code: "SAVE_FAILED",
+      message:
+        "This project is still sending context to AI. Cancel that task or wait for it to finish before enabling local-only privacy.",
+      retryable: true,
+      actions: ["RETRY"],
+      details: { databaseCode: nativeCode, operation },
+    });
+  }
   if (nativeCode === "SQLITE_BUSY") {
     return new AppError({
       code: "SAVE_FAILED",
@@ -1125,6 +1376,56 @@ function concurrencyError(
     message: `The ${entityType} changed before this operation completed.`,
     actions: ["RESOLVE_CONFLICT", "EXPORT_DRAFT"],
     details: { entityType, entityId, expectedRevision },
+  });
+}
+
+async function candidateAuthorityError(
+  executor: TransactionExecutor,
+  candidateId: UuidV7,
+  expected: Readonly<{ status: AiCandidateStatus; revision: number }>,
+): Promise<AppError> {
+  const rows = await executor.select<CandidateAuthorityDbRow>(
+    "SELECT status, revision FROM ai_candidates WHERE id = ? LIMIT 1",
+    [candidateId],
+  );
+  const current = rows[0];
+  if (current === undefined) {
+    return new AppError({
+      code: "CANDIDATE_NOT_FOUND",
+      message: "The AI candidate no longer exists.",
+      details: { candidateId },
+    });
+  }
+  if (current.status !== expected.status) {
+    return new AppError({
+      code: "CANDIDATE_ALREADY_DECIDED",
+      message: "The AI candidate status changed before this operation completed.",
+      details: {
+        candidateId,
+        expectedStatus: expected.status,
+        actualStatus: current.status,
+      },
+    });
+  }
+  if (current.revision !== expected.revision) {
+    return new AppError({
+      code: "VERSION_CONFLICT",
+      message: "The AI candidate was revised in another window.",
+      actions: ["RESOLVE_CONFLICT", "EXPORT_DRAFT"],
+      details: {
+        entityType: "candidate",
+        candidateId,
+        expectedRevision: expected.revision,
+        actualRevision: current.revision,
+      },
+    });
+  }
+  return new AppError({
+    code: "REPOSITORY_ERROR",
+    message: "The AI candidate write did not complete.",
+    retryable: true,
+    actions: ["RETRY", "EXPORT_DRAFT"],
+    details: { candidateId },
   });
 }
 

@@ -54,6 +54,41 @@ describe("collectProjectExportSnapshot", () => {
     expect(serialized).toContain('"providerId":"openai"');
   });
 
+  it("excludes local-only chapters and their AI usage unless inclusion is explicit", async () => {
+    const dependencies = createDependencies();
+    const publicChapter = createChapter(FIRST_CHAPTER_ID, uuid(4));
+    const privateChapter = createChapter(SECOND_CHAPTER_ID, uuid(5), "local_only");
+    dependencies.chapters.listByProjectId = vi
+      .fn()
+      .mockResolvedValue(ok([publicChapter, privateChapter]));
+    dependencies.generationGovernance.listRunsByProjectId = vi
+      .fn()
+      .mockResolvedValue([
+        createGenerationRun(8, FIRST_CHAPTER_ID),
+        createGenerationRun(9, SECOND_CHAPTER_ID),
+      ]);
+
+    const safeDefault = await collectProjectExportSnapshot(dependencies, domainUuid(PROJECT_ID));
+    expect(safeDefault.ok && safeDefault.value.chapters.map(({ id }) => id)).toEqual([
+      FIRST_CHAPTER_ID,
+    ]);
+    expect(safeDefault.ok && safeDefault.value.aiUsage.map(({ chapterId }) => chapterId)).toEqual([
+      FIRST_CHAPTER_ID,
+    ]);
+
+    const explicit = await collectProjectExportSnapshot(dependencies, domainUuid(PROJECT_ID), {
+      includeLocalOnlyChapters: true,
+    });
+    expect(explicit.ok && explicit.value.chapters.map(({ id }) => id)).toEqual([
+      FIRST_CHAPTER_ID,
+      SECOND_CHAPTER_ID,
+    ]);
+    expect(explicit.ok && explicit.value.aiUsage.map(({ chapterId }) => chapterId)).toEqual([
+      FIRST_CHAPTER_ID,
+      SECOND_CHAPTER_ID,
+    ]);
+  });
+
   it("fails closed when a story partition cannot be read", async () => {
     const dependencies = createDependencies();
     dependencies.story.outlines.findByProjectId = vi.fn().mockResolvedValue(
@@ -167,26 +202,34 @@ function createDependencies(): ProjectExportSnapshotDependencies {
   };
 }
 
-function createChapter(id: string, versionId: string): Chapter {
+function createChapter(
+  id: string,
+  versionId: string,
+  privacyMode: "standard" | "local_only" = "standard",
+): Chapter {
   return expectValue(
     Chapter.create({
       id: domainUuid(id),
       projectId: domainUuid(PROJECT_ID),
       title: `章节 ${id.slice(-1)}`,
       content: `正文 ${id.slice(-1)}`,
+      privacyMode,
       initialVersionId: domainUuid(versionId),
       now: timestamp(NOW),
     }),
   );
 }
 
-function createGenerationRun(sequence: number): GenerationRun {
+function createGenerationRun(
+  sequence: number,
+  chapterId: string = FIRST_CHAPTER_ID,
+): GenerationRun {
   return {
     id: uuid(sequence),
     taskId: uuid(sequence + 20),
     idempotencyKey: `private-secret-idempotency-marker-${String(sequence)}`,
     projectId: PROJECT_ID,
-    chapterId: FIRST_CHAPTER_ID,
+    chapterId,
     baseVersionId: uuid(4),
     providerId: "openai",
     modelId: "gpt-test",

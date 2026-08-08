@@ -4,15 +4,30 @@ import { MemoryRecord, type MemoryRecordSnapshot } from "../memory.js";
 import type { Result } from "../result.js";
 import {
   StoryFact,
+  CONTINUOUS_STORY_STATE_ROUTE_TASKS,
+  MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES,
+  type ContinuousStoryStateRouteCommit,
+  type ContinuousStoryStateRouteCommitReceipt,
+  type ContinuousStoryStateRouteIdentity,
+  type ContinuousStoryStateRouteReceipt,
   STORY_FACT_REVISION_CHANGE_KINDS,
   type StoryFactListFilter,
+  type StoryFactAuthorityFence,
+  type StoryFactConditionalCreateReceipt,
+  type StoryFactConditionalDeprecateReceipt,
+  type StoryFactSupplementalResolutionUndoFence,
   type StoryFactRevision,
   type StoryFactRevisionChangeKind,
   type StoryFactSnapshot,
   type StoryFactStatus,
   type StoryFactStore,
 } from "../story-fact.js";
-import { parseSafeIdentifier, parseUuidV7, type UuidV7 } from "../value-objects.js";
+import {
+  parseIsoUtcTimestamp,
+  parseSafeIdentifier,
+  parseUuidV7,
+  type UuidV7,
+} from "../value-objects.js";
 import {
   abortCorruptSnapshot,
   abortPersistence,
@@ -26,6 +41,8 @@ import type { StorySqlPrimitive, StorySqlExecutor, StorySqlTransaction } from ".
 
 export const LEGACY_STORY_FACT_KINDS = ["formal_record", "memory_record"] as const;
 export type LegacyStoryFactKind = (typeof LEGACY_STORY_FACT_KINDS)[number];
+const CHAPTER_SUPPLEMENTAL_FINDING_RESOLUTION_SCHEMA =
+  "inkshadow.chapter-supplemental-finding-resolution.v1";
 
 export interface StageLegacyStoryFactInput {
   readonly factId: string;
@@ -123,10 +140,129 @@ interface ChapterVersionRow {
   readonly content: string;
 }
 
+interface ContinuousStoryStateRouteReceiptRow {
+  readonly project_id: string;
+  readonly chapter_id: string;
+  readonly version_id: string;
+  readonly task: string;
+  readonly source_content_hash: string;
+  readonly provider_kind: string;
+  readonly model_id: string;
+  readonly invocation_id: string;
+  readonly candidate_count: number;
+  readonly created_fact_count: number;
+  readonly retired_fact_count: number;
+  readonly completed_at: string;
+}
+
+function storyRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : null;
+}
+
+function sameSubmission(left: StoryFactSnapshot, right: StoryFactSnapshot): boolean {
+  return (
+    left.projectId === right.projectId &&
+    left.factType === right.factType &&
+    left.contentText === right.contentText &&
+    JSON.stringify(left.structuredValue) === JSON.stringify(right.structuredValue) &&
+    JSON.stringify(left.source) === JSON.stringify(right.source) &&
+    left.effectiveAt === right.effectiveAt &&
+    left.invalidatedAt === right.invalidatedAt &&
+    left.branchId === right.branchId &&
+    left.status === right.status &&
+    left.origin === right.origin &&
+    left.userConfirmed === right.userConfirmed
+  );
+}
+
+function supplementalResolutionIdentity(snapshot: StoryFactSnapshot): Readonly<{
+  readonly key: string;
+  readonly action: "ignore" | "allow";
+  readonly chapterId: string;
+  readonly chapterVersionId: string;
+  readonly findingId: string;
+  readonly evidenceSignature: string;
+}> | null {
+  if (
+    snapshot.factType !== "validation_resolution" ||
+    snapshot.status !== "formal" ||
+    !snapshot.userConfirmed ||
+    snapshot.needsReview ||
+    snapshot.deprecated ||
+    snapshot.invalidatedAt !== null ||
+    snapshot.branchId !== null
+  ) {
+    return null;
+  }
+  return supplementalResolutionMetadata(snapshot);
+}
+
+function supplementalResolutionMetadata(snapshot: StoryFactSnapshot): Readonly<{
+  readonly key: string;
+  readonly action: "ignore" | "allow";
+  readonly chapterId: string;
+  readonly chapterVersionId: string;
+  readonly findingId: string;
+  readonly evidenceSignature: string;
+}> | null {
+  if (
+    snapshot.factType !== "validation_resolution" ||
+    !snapshot.userConfirmed ||
+    snapshot.needsReview ||
+    snapshot.invalidatedAt !== null ||
+    snapshot.branchId !== null
+  ) {
+    return null;
+  }
+  const value = storyRecord(snapshot.structuredValue);
+  const action = value?.resolutionAction;
+  const findingId = boundedResolutionIdentityPart(value?.resolvedFindingId, 1_000);
+  const chapterId = safeAuthorityReference(value?.resolvedChapterId);
+  const chapterVersionId = safeAuthorityReference(value?.resolvedChapterVersionId);
+  const evidenceSignature = boundedResolutionIdentityPart(value?.evidenceSignature, 5_000);
+  if (
+    value?.resolutionSchema !== CHAPTER_SUPPLEMENTAL_FINDING_RESOLUTION_SCHEMA ||
+    (action !== "ignore" && action !== "allow") ||
+    findingId === null ||
+    chapterId === null ||
+    chapterVersionId === null ||
+    evidenceSignature === null
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    key: JSON.stringify([
+      snapshot.projectId,
+      chapterId,
+      chapterVersionId,
+      findingId,
+      evidenceSignature,
+    ]),
+    action,
+    chapterId,
+    chapterVersionId,
+    findingId,
+    evidenceSignature,
+  });
+}
+
+function boundedResolutionIdentityPart(value: unknown, maximumLength: number): string | null {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maximumLength &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+    ? value
+    : null;
+}
+
 /**
  * Unified story-state authority backed by the shared SQLite executor contract.
  * `TauriSqliteExecutor` satisfies this interface structurally; tests use the
- * in-memory Node adapter. Fact identity/content/evidence never mutate in place.
+ * in-memory Node adapter. Fact identity/content/evidence never mutate in place;
+ * a forward migration permits only the domain-validated ambiguous-alias
+ * resolution inside structuredValue and captures it as the next revision.
  */
 export class SqliteStoryFactStore implements StoryFactStore {
   public constructor(private readonly executor: StorySqlExecutor) {}
@@ -145,6 +281,278 @@ export class SqliteStoryFactStore implements StoryFactStore {
         await insertInitialRevision(transaction, snapshot, "created");
       });
     });
+  }
+
+  public createWithAuthorityFence(
+    fact: StoryFact,
+    fence: StoryFactAuthorityFence,
+  ): Promise<Result<StoryFactConditionalCreateReceipt, StoryCoreError>> {
+    return runPersistence(() =>
+      this.executor.transaction(async (transaction) => {
+        const snapshot = fact.toSnapshot();
+        if (snapshot.revision !== 1 || snapshot.status !== "formal" || snapshot.origin !== "user") {
+          abortPersistence(
+            validationFailure("An authority-fenced story fact must be new and formal."),
+          );
+        }
+        assertAuthorityFenceMatchesFact(snapshot, fence);
+        const chapters = await transaction.select<{
+          readonly project_id: string;
+          readonly current_version_id: string;
+        }>(
+          `SELECT project_id, current_version_id
+           FROM chapters
+           WHERE id = ? AND project_id = ? AND status = 'active'
+           LIMIT 2`,
+          [fence.chapterId, snapshot.projectId],
+        );
+        if (
+          chapters.length !== 1 ||
+          chapters[0]?.current_version_id !== fence.expectedCurrentVersionId
+        ) {
+          abortPersistence(
+            new StoryCoreError({
+              code: "STORY_FACT_SOURCE_FENCE_FAILED",
+              message: "The chapter current version changed before the story fact was committed.",
+            }),
+          );
+        }
+        if ((fence.requiredCausalEventIds?.length ?? 0) > 0) {
+          const eventRows = await transaction.select<StoryFactRow>(
+            `${STORY_FACT_SELECT}
+             WHERE fact.project_id = ?
+               AND fact.fact_type = 'causal_event'
+               AND fact.status = 'formal'
+               AND fact.user_confirmed = 1
+               AND fact.needs_review = 0
+               AND fact.deprecated = 0
+               AND fact.invalidated_at IS NULL
+               AND fact.branch_id IS NULL`,
+            [snapshot.projectId],
+          );
+          const eventIdCounts = new Map<string, number>();
+          for (const row of eventRows) {
+            const eventSnapshot = hydrateFact(row).toSnapshot();
+            const structured = storyRecord(eventSnapshot.structuredValue);
+            if (
+              structured?.schemaVersion !== "inkshadow.causal-event-fact.v1" &&
+              structured?.schemaVersion !== "inkshadow.causal-event-fact.v2"
+            ) {
+              continue;
+            }
+            const eventId =
+              typeof structured.eventId === "string" ? structured.eventId : eventSnapshot.id;
+            eventIdCounts.set(eventId, (eventIdCounts.get(eventId) ?? 0) + 1);
+          }
+          if (fence.requiredCausalEventIds?.some((eventId) => eventIdCounts.get(eventId) !== 1)) {
+            abortPersistence(
+              new StoryCoreError({
+                code: "STORY_FACT_RELATION_ENDPOINT_INVALID",
+                message: "A causal relation endpoint is missing, duplicated, or no longer active.",
+              }),
+            );
+          }
+        }
+        if ((fence.requiredCharacterIds?.length ?? 0) > 0) {
+          const characterRows = await transaction.select<StoryFactRow>(
+            `${STORY_FACT_SELECT}
+             WHERE fact.project_id = ?
+               AND fact.fact_type = 'character_identity'
+               AND fact.status = 'formal'
+               AND fact.user_confirmed = 1
+               AND fact.needs_review = 0
+               AND fact.deprecated = 0
+               AND fact.invalidated_at IS NULL
+               AND fact.branch_id IS NULL`,
+            [snapshot.projectId],
+          );
+          const characterIdCounts = new Map<string, number>();
+          for (const row of characterRows) {
+            const structured = storyRecord(hydrateFact(row).toSnapshot().structuredValue);
+            const subject = storyRecord(structured?.subject);
+            if (subject?.kind === "character" && typeof subject.entityKey === "string") {
+              characterIdCounts.set(
+                subject.entityKey,
+                (characterIdCounts.get(subject.entityKey) ?? 0) + 1,
+              );
+            }
+          }
+          if (
+            fence.requiredCharacterIds?.some(
+              (characterId) => characterIdCounts.get(characterId) !== 1,
+            )
+          ) {
+            abortPersistence(
+              new StoryCoreError({
+                code: "STORY_FACT_CHARACTER_AUTHORITY_INVALID",
+                message:
+                  "A referenced character is missing, duplicated, or no longer an active confirmed formal fact.",
+              }),
+            );
+          }
+        }
+        await assertChapterEvidence(transaction, snapshot);
+        const matchingRows = await transaction.select<StoryFactRow>(
+          `${STORY_FACT_SELECT}
+           WHERE fact.project_id = ?
+             AND fact.fact_type = ?
+             AND fact.status = 'formal'
+             AND fact.user_confirmed = 1
+             AND fact.needs_review = 0
+             AND fact.deprecated = 0
+             AND fact.invalidated_at IS NULL
+             AND fact.branch_id IS NULL`,
+          [snapshot.projectId, snapshot.factType],
+        );
+        const supplementalIdentity = supplementalResolutionIdentity(snapshot);
+        if (supplementalIdentity !== null) {
+          const existingResolution = matchingRows.map(hydrateFact).find((candidate) => {
+            const identity = supplementalResolutionIdentity(candidate.toSnapshot());
+            return identity !== null && identity.key === supplementalIdentity.key;
+          });
+          if (existingResolution !== undefined) {
+            const existingIdentity = supplementalResolutionIdentity(
+              existingResolution.toSnapshot(),
+            );
+            if (existingIdentity?.action === supplementalIdentity.action) {
+              return Object.freeze({ fact: existingResolution, created: false });
+            }
+            abortPersistence(
+              new StoryCoreError({
+                code: "STORY_FACT_IDEMPOTENCY_CONFLICT",
+                message: "A supplemental finding already has a different active disposition.",
+              }),
+            );
+          }
+        }
+        const existing = matchingRows
+          .map(hydrateFact)
+          .find((candidate) => sameSubmission(candidate.toSnapshot(), snapshot));
+        if (existing !== undefined) {
+          return Object.freeze({ fact: existing, created: false });
+        }
+        await insertFact(transaction, snapshot);
+        await insertInitialRevision(transaction, snapshot, "created");
+        return Object.freeze({ fact, created: true });
+      }),
+    );
+  }
+
+  public deprecateSupplementalResolutionWithAuthorityFence(
+    factId: UuidV7,
+    fence: StoryFactSupplementalResolutionUndoFence,
+  ): Promise<Result<StoryFactConditionalDeprecateReceipt, StoryCoreError>> {
+    return runPersistence(() =>
+      this.executor.transaction(async (transaction) => {
+        const rows = await transaction.select<StoryFactRow>(
+          `${STORY_FACT_SELECT} WHERE fact.id = ? LIMIT 2`,
+          [factId],
+        );
+        if (rows.length > 1) abortCorruptSnapshot("STORY_FACT_ID_NOT_UNIQUE");
+        const current = rows[0] === undefined ? null : hydrateFact(rows[0]);
+        if (current === null) {
+          abortPersistence(
+            new StoryCoreError({
+              code: "STORY_FACT_NOT_FOUND",
+              message: "The supplemental finding disposition was not found.",
+            }),
+          );
+        }
+        const snapshot = current.toSnapshot();
+        const identity = supplementalResolutionMetadata(snapshot);
+        if (
+          snapshot.projectId !== fence.expectedProjectId ||
+          identity?.chapterId !== fence.chapterId ||
+          identity.chapterVersionId !== fence.expectedCurrentVersionId ||
+          identity.findingId !== fence.findingId ||
+          identity.evidenceSignature !== fence.evidenceSignature
+        ) {
+          abortPersistence(
+            validationFailure("The supplemental finding undo identity does not match the fact."),
+          );
+        }
+        const chapters = await transaction.select<{
+          readonly project_id: string;
+          readonly current_version_id: string;
+        }>(
+          `SELECT project_id, current_version_id
+           FROM chapters
+           WHERE id = ? AND project_id = ? AND status = 'active'
+           LIMIT 2`,
+          [fence.chapterId, fence.expectedProjectId],
+        );
+        if (
+          chapters.length !== 1 ||
+          chapters[0]?.current_version_id !== fence.expectedCurrentVersionId
+        ) {
+          abortPersistence(
+            new StoryCoreError({
+              code: "STORY_FACT_SOURCE_FENCE_FAILED",
+              message: "The chapter current version changed before the disposition was undone.",
+              retryable: true,
+            }),
+          );
+        }
+        if (
+          snapshot.status === "deprecated" &&
+          snapshot.deprecated &&
+          snapshot.revision === fence.expectedRevision + 1
+        ) {
+          return Object.freeze({ fact: current, deprecated: false });
+        }
+        if (
+          snapshot.status !== "formal" ||
+          snapshot.deprecated ||
+          snapshot.revision !== fence.expectedRevision
+        ) {
+          abortPersistence(
+            new StoryCoreError({
+              code: "STORY_REVISION_CONFLICT",
+              message: "The supplemental finding disposition changed before it was undone.",
+              retryable: true,
+            }),
+          );
+        }
+        const deprecated = current.deprecate({
+          humanConfirmed: true,
+          expectedRevision: fence.expectedRevision,
+          now: fence.now,
+        });
+        if (!deprecated.ok) abortPersistence(deprecated.error);
+        const next = deprecated.value.toSnapshot();
+        const updated = await transaction.execute(
+          `UPDATE story_facts
+           SET status = ?, user_confirmed = ?, locked = ?, deprecated = ?,
+               needs_review = ?, confirmed_by_actor_id = ?, confirmed_at = ?,
+               revision = ?, updated_at = ?
+           WHERE id = ? AND project_id = ? AND revision = ?`,
+          [
+            next.status,
+            next.userConfirmed ? 1 : 0,
+            next.locked ? 1 : 0,
+            next.deprecated ? 1 : 0,
+            next.needsReview ? 1 : 0,
+            next.confirmedByActorId,
+            next.confirmedAt,
+            next.revision,
+            next.updatedAt,
+            next.id,
+            next.projectId,
+            fence.expectedRevision,
+          ],
+        );
+        if (updated.rowsAffected !== 1) {
+          abortPersistence(
+            new StoryCoreError({
+              code: "STORY_REVISION_CONFLICT",
+              message: "The supplemental finding disposition changed before it was undone.",
+              retryable: true,
+            }),
+          );
+        }
+        return Object.freeze({ fact: deprecated.value, deprecated: true });
+      }),
+    );
   }
 
   public findById(id: UuidV7): Promise<Result<StoryFact | null, StoryCoreError>> {
@@ -215,11 +623,12 @@ export class SqliteStoryFactStore implements StoryFactStore {
       const snapshot = fact.toSnapshot();
       const updated = await this.executor.execute(
         `UPDATE story_facts
-         SET status = ?, user_confirmed = ?, locked = ?, deprecated = ?,
-             needs_review = ?, confirmed_by_actor_id = ?, confirmed_at = ?,
-             revision = ?, updated_at = ?
+         SET value_json = ?, status = ?, user_confirmed = ?, locked = ?, deprecated = ?,
+              needs_review = ?, confirmed_by_actor_id = ?, confirmed_at = ?,
+              revision = ?, updated_at = ?
          WHERE id = ? AND project_id = ? AND revision = ?`,
         [
+          snapshot.structuredValue === null ? null : JSON.stringify(snapshot.structuredValue),
           snapshot.status,
           snapshot.userConfirmed ? 1 : 0,
           snapshot.locked ? 1 : 0,
@@ -259,6 +668,181 @@ export class SqliteStoryFactStore implements StoryFactStore {
       );
       return Object.freeze(rows.map(hydrateRevision));
     });
+  }
+
+  public findContinuousStoryStateRouteReceipt(
+    identity: ContinuousStoryStateRouteIdentity,
+  ): Promise<Result<ContinuousStoryStateRouteReceipt | null, StoryCoreError>> {
+    return runPersistence(async () => {
+      validateContinuousRouteIdentity(identity);
+      const rows = await selectContinuousRouteReceipts(this.executor, identity);
+      if (rows.length > 1) {
+        abortCorruptSnapshot("CONTINUOUS_STORY_STATE_ROUTE_RECEIPT_NOT_UNIQUE");
+      }
+      return rows[0] === undefined ? null : hydrateContinuousRouteReceipt(rows[0]);
+    });
+  }
+
+  public commitContinuousStoryStateRoute(
+    command: ContinuousStoryStateRouteCommit,
+  ): Promise<Result<ContinuousStoryStateRouteCommitReceipt, StoryCoreError>> {
+    return runPersistence(() =>
+      this.executor.transaction(async (transaction) => {
+        validateContinuousRouteCommit(command);
+        const existingRows = await selectContinuousRouteReceipts(transaction, command);
+        if (existingRows.length > 1) {
+          abortCorruptSnapshot("CONTINUOUS_STORY_STATE_ROUTE_RECEIPT_NOT_UNIQUE");
+        }
+        if (existingRows[0] !== undefined) {
+          return Object.freeze({
+            receipt: hydrateContinuousRouteReceipt(existingRows[0]),
+            facts: Object.freeze([]),
+            retiredFactIds: Object.freeze([]),
+            alreadyCommitted: true,
+          });
+        }
+
+        const authorityRows = await transaction.select<{
+          readonly current_version_id: string;
+          readonly status: string;
+          readonly content_checksum: string;
+        }>(
+          `SELECT chapter.current_version_id, chapter.status, version.content_checksum
+           FROM chapters AS chapter
+           INNER JOIN chapter_versions AS version
+             ON version.id = ?
+            AND version.chapter_id = chapter.id
+            AND version.project_id = chapter.project_id
+           WHERE chapter.id = ? AND chapter.project_id = ?
+           LIMIT 2`,
+          [command.versionId, command.chapterId, command.projectId],
+        );
+        if (
+          authorityRows.length !== 1 ||
+          authorityRows[0]?.status !== "active" ||
+          authorityRows[0].current_version_id !== command.versionId ||
+          authorityRows[0].content_checksum !== command.sourceContentHash
+        ) {
+          abortPersistence(continuousRouteSourceChanged());
+        }
+
+        for (const { fact } of command.facts) {
+          await assertChapterEvidence(transaction, fact.toSnapshot());
+        }
+
+        const replacementKeys = new Set(
+          command.facts
+            .filter(
+              (candidate): candidate is typeof candidate & { readonly replacementKey: string } =>
+                candidate.replacementKey !== null,
+            )
+            .map(({ fact, replacementKey }) =>
+              continuousReplacementIdentity(fact.toSnapshot().factType, replacementKey),
+            ),
+        );
+        const retiredFactIds: UuidV7[] = [];
+        if (replacementKeys.size > 0) {
+          const rows = await transaction.select<StoryFactRow>(
+            `${STORY_FACT_SELECT}
+             WHERE fact.project_id = ?
+               AND fact.status = 'temporary'
+               AND fact.origin = 'system'
+               AND fact.user_confirmed = 0
+               AND fact.locked = 0
+               AND fact.deprecated = 0
+               AND fact.needs_review = 0
+               AND fact.branch_id IS NULL`,
+            [command.projectId],
+          );
+          for (const row of rows) {
+            const current = hydrateFact(row);
+            const snapshot = current.toSnapshot();
+            const replacementKey = readContinuousReplacementKey(snapshot);
+            if (
+              replacementKey === null ||
+              !replacementKeys.has(continuousReplacementIdentity(snapshot.factType, replacementKey))
+            ) {
+              continue;
+            }
+            const retired = current.deprecateAutomaticSystemProjection({
+              expectedRevision: snapshot.revision,
+              now: command.completedAt,
+            });
+            if (!retired.ok) {
+              abortPersistence(retired.error);
+            }
+            const retiredSnapshot = retired.value.toSnapshot();
+            const updated = await transaction.execute(
+              `UPDATE story_facts
+               SET status = ?, user_confirmed = ?, locked = ?, deprecated = ?,
+                   needs_review = ?, confirmed_by_actor_id = ?, confirmed_at = ?,
+                   revision = ?, updated_at = ?
+               WHERE id = ? AND project_id = ? AND revision = ?`,
+              [
+                retiredSnapshot.status,
+                retiredSnapshot.userConfirmed ? 1 : 0,
+                retiredSnapshot.locked ? 1 : 0,
+                retiredSnapshot.deprecated ? 1 : 0,
+                retiredSnapshot.needsReview ? 1 : 0,
+                retiredSnapshot.confirmedByActorId,
+                retiredSnapshot.confirmedAt,
+                retiredSnapshot.revision,
+                retiredSnapshot.updatedAt,
+                retiredSnapshot.id,
+                retiredSnapshot.projectId,
+                snapshot.revision,
+              ],
+            );
+            if (updated.rowsAffected !== 1) {
+              abortPersistence(
+                new StoryCoreError({
+                  code: "STORY_REVISION_CONFLICT",
+                  message: "A replaced story projection changed before the route was committed.",
+                  retryable: true,
+                }),
+              );
+            }
+            retiredFactIds.push(retiredSnapshot.id);
+          }
+        }
+
+        const committedFacts: StoryFact[] = [];
+        for (const { fact } of command.facts) {
+          const snapshot = fact.toSnapshot();
+          await insertFact(transaction, snapshot);
+          await insertInitialRevision(transaction, snapshot, "created");
+          committedFacts.push(fact);
+        }
+        const receipt: ContinuousStoryStateRouteReceipt = Object.freeze({
+          projectId: command.projectId,
+          chapterId: command.chapterId,
+          versionId: command.versionId,
+          task: command.task,
+          sourceContentHash: command.sourceContentHash,
+          providerKind: command.providerKind,
+          modelId: command.modelId,
+          invocationId: command.invocationId,
+          candidateCount: command.candidateCount,
+          createdFactCount: committedFacts.length,
+          retiredFactCount: retiredFactIds.length,
+          completedAt: command.completedAt,
+        });
+        await transaction.execute(
+          `INSERT INTO continuous_story_state_route_receipts (
+             project_id, chapter_id, version_id, task, source_content_hash,
+             provider_kind, model_id, invocation_id, candidate_count,
+             created_fact_count, retired_fact_count, completed_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          continuousRouteReceiptValues(receipt),
+        );
+        return Object.freeze({
+          receipt,
+          facts: Object.freeze(committedFacts),
+          retiredFactIds: Object.freeze(retiredFactIds),
+          alreadyCommitted: false,
+        });
+      }),
+    );
   }
 
   /**
@@ -423,6 +1007,226 @@ function factValues(snapshot: StoryFactSnapshot): readonly StorySqlPrimitive[] {
     snapshot.createdAt,
     snapshot.updatedAt,
   ];
+}
+
+const CAUSAL_EVENT_FACT_SCHEMAS = new Set([
+  "inkshadow.causal-event-fact.v1",
+  "inkshadow.causal-event-fact.v2",
+]);
+const CAUSAL_RELATION_FACT_SCHEMA = "inkshadow.causal-relation-fact.v1";
+
+/**
+ * A caller-provided fence is useful only when it describes the references in
+ * the fact being inserted. Keep this check inside the write transaction so a
+ * future adapter cannot validate one chapter/entity set while committing a
+ * fact that cites another.
+ */
+function assertAuthorityFenceMatchesFact(
+  snapshot: StoryFactSnapshot,
+  fence: StoryFactAuthorityFence,
+): void {
+  const source = snapshot.source;
+  const structured = storyRecord(snapshot.structuredValue);
+  const supplementalIdentity = supplementalResolutionIdentity(snapshot);
+  if (supplementalIdentity !== null) {
+    if (
+      source.kind !== "review_decision" ||
+      supplementalIdentity.chapterId !== fence.chapterId ||
+      supplementalIdentity.chapterVersionId !== fence.expectedCurrentVersionId ||
+      !sameAuthorityReferences(fence.requiredCausalEventIds, []) ||
+      !sameAuthorityReferences(fence.requiredCharacterIds, [])
+    ) {
+      abortPersistence(validationFailure("The supplemental finding authority fence is invalid."));
+    }
+    return;
+  }
+  if (
+    source.kind !== "chapter_span" ||
+    source.chapterId !== fence.chapterId ||
+    source.versionId !== fence.expectedCurrentVersionId
+  ) {
+    abortPersistence(
+      new StoryCoreError({
+        code: "STORY_FACT_SOURCE_FENCE_FAILED",
+        message: "The authority fence does not match the fact's exact chapter version.",
+      }),
+    );
+  }
+
+  const schemaVersion = structured?.schemaVersion;
+  const hasCausalEventSchema =
+    typeof schemaVersion === "string" && CAUSAL_EVENT_FACT_SCHEMAS.has(schemaVersion);
+  if (snapshot.factType === "causal_relation" || schemaVersion === CAUSAL_RELATION_FACT_SCHEMA) {
+    const fromEventId = safeAuthorityReference(structured?.fromEventId);
+    const toEventId = safeAuthorityReference(structured?.toEventId);
+    if (
+      snapshot.factType !== "causal_relation" ||
+      schemaVersion !== CAUSAL_RELATION_FACT_SCHEMA ||
+      fromEventId === null ||
+      toEventId === null ||
+      fromEventId === toEventId ||
+      !sameAuthorityReferences(fence.requiredCausalEventIds, [fromEventId, toEventId]) ||
+      !sameAuthorityReferences(fence.requiredCharacterIds, [])
+    ) {
+      abortPersistence(
+        new StoryCoreError({
+          code: "STORY_FACT_RELATION_ENDPOINT_INVALID",
+          message: "The causal relation fence does not match the relation endpoints.",
+        }),
+      );
+    }
+    return;
+  }
+
+  if (snapshot.factType === "causal_event" || hasCausalEventSchema) {
+    if (
+      snapshot.factType !== "causal_event" ||
+      typeof schemaVersion !== "string" ||
+      !CAUSAL_EVENT_FACT_SCHEMAS.has(schemaVersion)
+    ) {
+      abortPersistence(validationFailure("The causal event authority fence is invalid."));
+    }
+    const prerequisiteEventIds = causalEventPrerequisiteEventReferences(structured);
+    const characterIds = causalEventCharacterReferences(structured);
+    if (
+      prerequisiteEventIds === null ||
+      !sameAuthorityReferences(fence.requiredCausalEventIds, prerequisiteEventIds)
+    ) {
+      abortPersistence(
+        new StoryCoreError({
+          code: "STORY_FACT_RELATION_ENDPOINT_INVALID",
+          message: "The causal event prerequisite fence does not match its event references.",
+        }),
+      );
+    }
+    if (
+      characterIds === null ||
+      !sameAuthorityReferences(fence.requiredCharacterIds, characterIds)
+    ) {
+      abortPersistence(
+        new StoryCoreError({
+          code: "STORY_FACT_CHARACTER_AUTHORITY_INVALID",
+          message: "The character authority fence does not match the causal event references.",
+        }),
+      );
+    }
+    return;
+  }
+
+  if (
+    !sameAuthorityReferences(fence.requiredCausalEventIds, []) ||
+    !sameAuthorityReferences(fence.requiredCharacterIds, [])
+  ) {
+    abortPersistence(
+      validationFailure("This story fact cannot carry causal authority references."),
+    );
+  }
+}
+
+function causalEventPrerequisiteEventReferences(
+  structured: Readonly<Record<string, unknown>> | null,
+): readonly string[] | null {
+  if (structured === null || !Array.isArray(structured.prerequisites)) return null;
+  if (structured.prerequisites.length > MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES) return null;
+  const references: string[] = [];
+  for (const value of structured.prerequisites as readonly unknown[]) {
+    const prerequisite = storyRecord(value);
+    if (prerequisite === null) return null;
+    if (prerequisite.kind !== "event") continue;
+    const referenceId = safeAuthorityReference(prerequisite.referenceId);
+    if (referenceId === null) return null;
+    references.push(referenceId);
+  }
+  return Object.freeze(references);
+}
+
+function causalEventCharacterReferences(
+  structured: Readonly<Record<string, unknown>> | null,
+): readonly string[] | null {
+  if (structured === null) return null;
+  const references: string[] = [];
+  if (
+    !appendAuthorityReferenceArray(references, structured.participantCharacterIds) ||
+    !appendAuthorityReferenceArray(references, structured.informedCharacterIds) ||
+    !appendAuthorityRecordReferences(references, structured.knowledgeGains, ["characterId"]) ||
+    !appendAuthorityRecordReferences(references, structured.characterStateChanges, [
+      "characterId",
+    ]) ||
+    !appendAuthorityRecordReferences(references, structured.relationshipChanges, [
+      "fromCharacterId",
+      "toCharacterId",
+    ]) ||
+    !appendAuthorityRecordReferences(
+      references,
+      structured.itemChanges,
+      ["fromCharacterId", "toCharacterId"],
+      true,
+    )
+  ) {
+    return null;
+  }
+  return Object.freeze([...new Set(references)]);
+}
+
+function appendAuthorityReferenceArray(target: string[], value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES) {
+    return false;
+  }
+  for (const item of value as readonly unknown[]) {
+    const reference = safeAuthorityReference(item);
+    if (reference === null) return false;
+    target.push(reference);
+  }
+  return true;
+}
+
+function appendAuthorityRecordReferences(
+  target: string[],
+  value: unknown,
+  keys: readonly string[],
+  nullable = false,
+): boolean {
+  if (!Array.isArray(value) || value.length > MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES) {
+    return false;
+  }
+  for (const item of value as readonly unknown[]) {
+    const record = storyRecord(item);
+    if (record === null) return false;
+    for (const key of keys) {
+      if (nullable && (record[key] === null || record[key] === undefined)) continue;
+      const reference = safeAuthorityReference(record[key]);
+      if (reference === null) return false;
+      target.push(reference);
+    }
+  }
+  return true;
+}
+
+function sameAuthorityReferences(
+  actualValue: readonly string[] | undefined,
+  expectedValue: readonly string[],
+): boolean {
+  const actual = actualValue ?? [];
+  if (
+    actual.length > MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES ||
+    new Set(actual).size !== actual.length ||
+    new Set(expectedValue).size !== expectedValue.length ||
+    actual.some((value) => safeAuthorityReference(value) === null)
+  ) {
+    return false;
+  }
+  const expected = new Set(expectedValue);
+  return actual.length === expected.size && actual.every((value) => expected.has(value));
+}
+
+function safeAuthorityReference(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 512 &&
+    value === value.trim() &&
+    !/[\u0000-\u0020\u007f]/u.test(value)
+    ? value
+    : null;
 }
 
 async function assertChapterEvidence(
@@ -761,6 +1565,212 @@ function validateLegacyInput(
       legacyId: legacyId.value,
     }),
   };
+}
+
+function validateContinuousRouteIdentity(identity: ContinuousStoryStateRouteIdentity): void {
+  const projectId = parseUuidV7(identity.projectId);
+  const chapterId = parseUuidV7(identity.chapterId);
+  const versionId = parseUuidV7(identity.versionId);
+  if (!projectId.ok || !chapterId.ok || !versionId.ok) {
+    abortPersistence(validationFailure("Continuous story-state route scope is invalid."));
+  }
+  if (!CONTINUOUS_STORY_STATE_ROUTE_TASKS.includes(identity.task)) {
+    abortPersistence(validationFailure("Continuous story-state route task is invalid."));
+  }
+}
+
+function validateContinuousRouteCommit(command: ContinuousStoryStateRouteCommit): void {
+  validateContinuousRouteIdentity(command);
+  if (!/^[a-f0-9]{64}$/u.test(command.sourceContentHash)) {
+    abortPersistence(validationFailure("Continuous story-state source hash is invalid."));
+  }
+  validateContinuousRouteText(command.providerKind, 100, "provider");
+  validateContinuousRouteText(command.modelId, 500, "model");
+  validateContinuousRouteText(command.invocationId, 500, "invocation");
+  const completedAt = parseIsoUtcTimestamp(command.completedAt);
+  if (!completedAt.ok) {
+    abortPersistence(completedAt.error);
+  }
+  if (
+    !Number.isSafeInteger(command.candidateCount) ||
+    command.candidateCount < 0 ||
+    command.candidateCount > 128 ||
+    command.facts.length > command.candidateCount
+  ) {
+    abortPersistence(validationFailure("Continuous story-state candidate count is invalid."));
+  }
+  const expectedReference = `continuous-story-state:${command.task}:${command.versionId}:sha256:${command.sourceContentHash}`;
+  const factIds = new Set<string>();
+  const replacementKeys = new Set<string>();
+  for (const candidate of command.facts) {
+    const snapshot = candidate.fact.toSnapshot();
+    if (
+      factIds.has(snapshot.id) ||
+      snapshot.revision !== 1 ||
+      snapshot.projectId !== command.projectId ||
+      snapshot.source.kind !== "chapter_span" ||
+      snapshot.source.chapterId !== command.chapterId ||
+      snapshot.source.versionId !== command.versionId ||
+      snapshot.source.reference !== expectedReference
+    ) {
+      abortPersistence(
+        validationFailure("A continuous story-state fact does not match its route authority."),
+      );
+    }
+    factIds.add(snapshot.id);
+    if (candidate.replacementKey === null) {
+      if (
+        snapshot.status !== "unconfirmed" ||
+        snapshot.origin !== "ai_extraction" ||
+        !snapshot.needsReview ||
+        snapshot.userConfirmed ||
+        snapshot.locked ||
+        snapshot.deprecated ||
+        snapshot.branchId !== null ||
+        readContinuousReplacementKey(snapshot) !== null
+      ) {
+        abortPersistence(
+          validationFailure("A review-required story-state fact has invalid governance."),
+        );
+      }
+      continue;
+    }
+    validateContinuousRouteText(candidate.replacementKey, 500, "replacement key");
+    const identity = continuousReplacementIdentity(snapshot.factType, candidate.replacementKey);
+    if (
+      replacementKeys.has(identity) ||
+      snapshot.status !== "temporary" ||
+      snapshot.origin !== "system" ||
+      snapshot.needsReview ||
+      snapshot.userConfirmed ||
+      snapshot.locked ||
+      snapshot.deprecated ||
+      snapshot.branchId !== null ||
+      readContinuousReplacementKey(snapshot) !== candidate.replacementKey
+    ) {
+      abortPersistence(
+        validationFailure("A disposable story-state projection has invalid replacement authority."),
+      );
+    }
+    replacementKeys.add(identity);
+  }
+}
+
+function validateContinuousRouteText(value: string, maximum: number, label: string): void {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > maximum ||
+    value !== value.trim() ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    abortPersistence(validationFailure(`Continuous story-state ${label} is invalid.`));
+  }
+}
+
+function readContinuousReplacementKey(snapshot: StoryFactSnapshot): string | null {
+  const root = storyRecord(snapshot.structuredValue);
+  if (
+    root === null ||
+    (root.schemaVersion !== "inkshadow.rebuildable-system-fact.v1" &&
+      root.schemaVersion !== "inkshadow.continuous-story-state.v2")
+  ) {
+    return null;
+  }
+  return typeof root.replacementKey === "string" ? root.replacementKey : null;
+}
+
+function continuousReplacementIdentity(factType: string, replacementKey: string): string {
+  return `${factType}\u0000${replacementKey}`;
+}
+
+async function selectContinuousRouteReceipts(
+  executor: Pick<StorySqlExecutor, "select">,
+  identity: ContinuousStoryStateRouteIdentity,
+): Promise<readonly ContinuousStoryStateRouteReceiptRow[]> {
+  return executor.select<ContinuousStoryStateRouteReceiptRow>(
+    `SELECT project_id, chapter_id, version_id, task, source_content_hash,
+            provider_kind, model_id, invocation_id, candidate_count,
+            created_fact_count, retired_fact_count, completed_at
+     FROM continuous_story_state_route_receipts
+     WHERE project_id = ? AND chapter_id = ? AND version_id = ? AND task = ?
+     LIMIT 2`,
+    [identity.projectId, identity.chapterId, identity.versionId, identity.task],
+  );
+}
+
+function hydrateContinuousRouteReceipt(
+  row: ContinuousStoryStateRouteReceiptRow,
+): ContinuousStoryStateRouteReceipt {
+  const projectId = parseUuidV7(row.project_id);
+  const chapterId = parseUuidV7(row.chapter_id);
+  const versionId = parseUuidV7(row.version_id);
+  const completedAt = parseIsoUtcTimestamp(row.completed_at);
+  if (
+    !projectId.ok ||
+    !chapterId.ok ||
+    !versionId.ok ||
+    !completedAt.ok ||
+    !CONTINUOUS_STORY_STATE_ROUTE_TASKS.includes(
+      row.task as (typeof CONTINUOUS_STORY_STATE_ROUTE_TASKS)[number],
+    ) ||
+    !/^[a-f0-9]{64}$/u.test(row.source_content_hash) ||
+    !Number.isSafeInteger(row.candidate_count) ||
+    !Number.isSafeInteger(row.created_fact_count) ||
+    !Number.isSafeInteger(row.retired_fact_count) ||
+    row.candidate_count < 0 ||
+    row.candidate_count > 128 ||
+    row.created_fact_count < 0 ||
+    row.created_fact_count > row.candidate_count ||
+    row.retired_fact_count < 0
+  ) {
+    abortCorruptSnapshot("CONTINUOUS_STORY_STATE_ROUTE_RECEIPT_INVALID");
+  }
+  validateContinuousRouteText(row.provider_kind, 100, "provider");
+  validateContinuousRouteText(row.model_id, 500, "model");
+  validateContinuousRouteText(row.invocation_id, 500, "invocation");
+  return Object.freeze({
+    projectId: projectId.value,
+    chapterId: chapterId.value,
+    versionId: versionId.value,
+    task: row.task as ContinuousStoryStateRouteReceipt["task"],
+    sourceContentHash: row.source_content_hash,
+    providerKind: row.provider_kind,
+    modelId: row.model_id,
+    invocationId: row.invocation_id,
+    candidateCount: row.candidate_count,
+    createdFactCount: row.created_fact_count,
+    retiredFactCount: row.retired_fact_count,
+    completedAt: completedAt.value,
+  });
+}
+
+function continuousRouteReceiptValues(
+  receipt: ContinuousStoryStateRouteReceipt,
+): readonly StorySqlPrimitive[] {
+  return [
+    receipt.projectId,
+    receipt.chapterId,
+    receipt.versionId,
+    receipt.task,
+    receipt.sourceContentHash,
+    receipt.providerKind,
+    receipt.modelId,
+    receipt.invocationId,
+    receipt.candidateCount,
+    receipt.createdFactCount,
+    receipt.retiredFactCount,
+    receipt.completedAt,
+  ];
+}
+
+function continuousRouteSourceChanged(): StoryCoreError {
+  return new StoryCoreError({
+    code: "CONTINUOUS_STORY_STATE_ROUTE_SOURCE_CHANGED",
+    message: "The chapter version changed before the story-state route was committed.",
+    retryable: true,
+    actions: ["RETRY", "OPEN_SOURCE"],
+  });
 }
 
 function requireStatus(status: StoryFactStatus): void {

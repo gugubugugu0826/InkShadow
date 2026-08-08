@@ -8,6 +8,11 @@ import {
   type ModelHubTextTask,
 } from "./model-hub-execution-service";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
+import {
+  ProjectContextPrivacyError,
+  projectContextRequiredDataDestination,
+  projectContextDispatchScope,
+} from "./project-context-privacy-authority";
 import type { DesktopRuntime, NativeModelMessage } from "./runtime";
 
 export const IMPORT_WORK_ANALYSIS_STAGES = ["character", "story"] as const;
@@ -208,6 +213,10 @@ export async function analyzeImportedChapter(
   const factTypeCounts: Partial<Record<ImportWorkAnalysisFactType, number>> = {};
   let criticalFactCount = 0;
 
+  const projectPrivacy = await runtime.projectContextPrivacy.inspect(input.projectId);
+  runtime.projectContextPrivacy.assertChapterMatches(projectPrivacy, input.chapter);
+  const requiredDataDestination = projectContextRequiredDataDestination(projectPrivacy);
+
   const storyProjectId = parseStoryUuidV7(input.projectId);
   if (!storyProjectId.ok) {
     throw storyProjectId.error;
@@ -233,6 +242,7 @@ export async function analyzeImportedChapter(
       messages,
       maximumOutputTokens: 8_000,
       temperature: 0,
+      ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
     }).catch((cause: unknown) => {
       throw normalizeAnalysisFailure(cause);
     });
@@ -240,11 +250,13 @@ export async function analyzeImportedChapter(
 
     const requestId = runtime.ids.next();
     const generated = await executeModelHubTextTask(runtime, {
+      dispatchScope: projectContextDispatchScope(projectPrivacy),
       task: ANALYSIS_TASKS[input.stage],
       messages,
       maximumOutputTokens: 8_000,
       temperature: 0,
       generationId: requestId,
+      ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
       onBeforeDispatch: async (selection) => {
         if (
           selection.connectionId !== inspection.connectionId ||
@@ -267,6 +279,18 @@ export async function analyzeImportedChapter(
           chunkIndex: chunk.index,
           chunkCount: chunks.length,
         });
+        try {
+          await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
+          runtime.projectContextPrivacy.assertRouteEligible(
+            projectPrivacy,
+            selection.localOnlyEligible === true,
+          );
+        } catch (cause: unknown) {
+          if (cause instanceof ProjectContextPrivacyError) {
+            throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
+          }
+          throw cause;
+        }
       },
     }).catch((cause: unknown) => {
       throw normalizeAnalysisFailure(cause);

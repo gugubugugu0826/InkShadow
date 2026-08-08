@@ -1,6 +1,7 @@
 import type { ChapterVersionRepository } from "@inkshadow/application";
 import { parseUuidV7 as parseDomainUuid } from "@inkshadow/domain";
 import {
+  CAUSAL_IMPACT_RELATION_KINDS,
   CAUSAL_EVENT_RELATION_KINDS,
   type CausalEventGraph,
   parseUuidV7 as parseStoryUuid,
@@ -20,7 +21,8 @@ import {
 
 import type { CausalEventGraphStore } from "./causal-event-graph-store";
 
-export const CAUSAL_EVENT_FACT_SCHEMA = "inkshadow.causal-event-fact.v1" as const;
+export const CAUSAL_EVENT_FACT_SCHEMA = "inkshadow.causal-event-fact.v2" as const;
+const LEGACY_CAUSAL_EVENT_FACT_SCHEMA = "inkshadow.causal-event-fact.v1" as const;
 export const CAUSAL_RELATION_FACT_SCHEMA = "inkshadow.causal-relation-fact.v1" as const;
 
 export type CausalProjectionSkipReason =
@@ -147,7 +149,10 @@ export class CausalStoryFactProjector {
         continue;
       }
 
-      if (structured.schemaVersion === CAUSAL_EVENT_FACT_SCHEMA) {
+      if (
+        structured.schemaVersion === CAUSAL_EVENT_FACT_SCHEMA ||
+        structured.schemaVersion === LEGACY_CAUSAL_EVENT_FACT_SCHEMA
+      ) {
         const event = parseEventFact(fact, structured, projectId.value, branchId, evidence.value);
         if (event === null) {
           skipped.push(skip(fact, "structured_value_invalid", "事件字段不完整或格式无效。"));
@@ -195,6 +200,34 @@ export class CausalStoryFactProjector {
       );
       return false;
     });
+    for (const { event, fact } of events) {
+      for (const prerequisite of event.prerequisites) {
+        if (
+          prerequisite.kind !== "event" ||
+          !eventIds.has(prerequisite.referenceId) ||
+          validRelations.some(
+            ({ relation }) =>
+              relation.fromEventId === prerequisite.referenceId &&
+              relation.toEventId === event.id &&
+              CAUSAL_IMPACT_RELATION_KINDS.some((kind) => kind === relation.kind),
+          )
+        ) {
+          continue;
+        }
+        validRelations.push({
+          fact,
+          relation: Object.freeze({
+            id: `prerequisite:${prerequisite.id}`,
+            projectId: event.projectId,
+            branchId: event.branchId,
+            fromEventId: prerequisite.referenceId,
+            toEventId: event.id,
+            kind: "depends_on" as const,
+            evidence: prerequisite.evidence,
+          }),
+        });
+      }
+    }
     const outgoing = new Map<string, string[]>();
     for (const { relation } of validRelations) {
       if (relation.kind === "before") {
@@ -229,7 +262,7 @@ export class CausalStoryFactProjector {
         branchId,
         eventCount: graph.events.length,
         relationCount: graph.relations.length,
-        includedFactIds: Object.freeze(includedFactIds),
+        includedFactIds: Object.freeze([...new Set(includedFactIds)]),
         skipped: Object.freeze(skipped),
         graph,
       });
@@ -326,6 +359,7 @@ function isCausalFact(factType: string, value: StoryValue | null): boolean {
   const record = asRecord(value);
   return (
     record?.schemaVersion === CAUSAL_EVENT_FACT_SCHEMA ||
+    record?.schemaVersion === LEGACY_CAUSAL_EVENT_FACT_SCHEMA ||
     record?.schemaVersion === CAUSAL_RELATION_FACT_SCHEMA
   );
 }
@@ -358,7 +392,13 @@ function parseEventFact(
   }
   const participantCharacterIds = stringArray(value.participantCharacterIds);
   const informedCharacterIds = stringArray(value.informedCharacterIds);
-  if (participantCharacterIds === null || informedCharacterIds === null) {
+  const knowledgeGains = parseKnowledgeGains(value.knowledgeGains);
+  if (
+    participantCharacterIds === null ||
+    informedCharacterIds === null ||
+    knowledgeGains === null ||
+    knowledgeGains.some(({ characterId }) => !informedCharacterIds.includes(characterId))
+  ) {
     return null;
   }
   const prerequisites = parsePrerequisites(value.prerequisites, evidence);
@@ -393,6 +433,29 @@ function parseEventFact(
     foreshadowProgress: Object.freeze(foreshadowProgress),
     evidence,
   });
+}
+
+function parseKnowledgeGains(value: StoryValue | undefined):
+  | readonly Readonly<{
+      readonly characterId: string;
+      readonly attributeKey: string;
+      readonly informationId: string;
+    }>[]
+  | null {
+  const parsed = parseObjectArray(value, (record) => {
+    const characterId = stringValue(record.characterId);
+    const attributeKey = stringValue(record.attributeKey);
+    const informationId = stringValue(record.informationId);
+    return characterId === null || attributeKey === null || informationId === null
+      ? null
+      : Object.freeze({ characterId, attributeKey, informationId });
+  });
+  if (parsed === null) return null;
+  const signatures = parsed.map(
+    ({ characterId, attributeKey, informationId }) =>
+      `${characterId}\u0000${attributeKey}\u0000${informationId}`,
+  );
+  return new Set(signatures).size === signatures.length ? Object.freeze(parsed) : null;
 }
 
 function parseRelationFact(
@@ -432,6 +495,7 @@ function parsePrerequisites(
   return parseObjectArray(value, (record, index) => {
     const kind = stringValue(record.kind);
     const referenceId = stringValue(record.referenceId);
+    const referenceLabel = stringValue(record.referenceLabel);
     const description = stringValue(record.description);
     if (
       referenceId === null ||
@@ -444,6 +508,7 @@ function parsePrerequisites(
       id: stringValue(record.id) ?? `${evidence.id}:prerequisite:${String(index)}`,
       kind,
       referenceId,
+      ...(referenceLabel === null ? {} : { referenceLabel }),
       description,
       evidence,
     };
@@ -457,6 +522,7 @@ function parseCharacterChanges(
   return parseObjectArray(value, (record, index) => {
     const characterId = stringValue(record.characterId);
     const attributeKey = stringValue(record.attributeKey);
+    const attributeLabel = stringValue(record.attributeLabel);
     const beforeValue = stateValue(record.beforeValue);
     const afterValue = stateValue(record.afterValue);
     if (characterId === null || attributeKey === null || !beforeValue.ok || !afterValue.ok) {
@@ -466,6 +532,7 @@ function parseCharacterChanges(
       id: stringValue(record.id) ?? `${evidence.id}:character:${String(index)}`,
       characterId,
       attributeKey,
+      ...(attributeLabel === null ? {} : { attributeLabel }),
       beforeValue: beforeValue.value,
       afterValue: afterValue.value,
       evidence,
@@ -481,6 +548,7 @@ function parseRelationshipChanges(
     const fromCharacterId = stringValue(record.fromCharacterId);
     const toCharacterId = stringValue(record.toCharacterId);
     const relationshipKey = stringValue(record.relationshipKey);
+    const relationshipLabel = stringValue(record.relationshipLabel);
     const beforeValue = stateValue(record.beforeValue);
     const afterValue = stateValue(record.afterValue);
     if (
@@ -497,6 +565,7 @@ function parseRelationshipChanges(
       fromCharacterId,
       toCharacterId,
       relationshipKey,
+      ...(relationshipLabel === null ? {} : { relationshipLabel }),
       beforeValue: beforeValue.value,
       afterValue: afterValue.value,
       evidence,
@@ -510,6 +579,7 @@ function parseItemChanges(
 ): CausalItemChange[] | null {
   return parseObjectArray(value, (record, index) => {
     const itemId = stringValue(record.itemId);
+    const itemLabel = stringValue(record.itemLabel);
     const kind = stringValue(record.kind);
     const fromCharacterId = nullableStringValue(record.fromCharacterId);
     const toCharacterId = nullableStringValue(record.toCharacterId);
@@ -524,6 +594,7 @@ function parseItemChanges(
     return {
       id: stringValue(record.id) ?? `${evidence.id}:item:${String(index)}`,
       itemId,
+      ...(itemLabel === null ? {} : { itemLabel }),
       kind: kind as CausalItemChange["kind"],
       fromCharacterId: fromCharacterId.value,
       toCharacterId: toCharacterId.value,
@@ -538,6 +609,7 @@ function parseForeshadowProgress(
 ): CausalForeshadowProgress[] | null {
   return parseObjectArray(value, (record, index) => {
     const foreshadowId = stringValue(record.foreshadowId);
+    const foreshadowLabel = stringValue(record.foreshadowLabel);
     const kind = stringValue(record.kind);
     const description = stringValue(record.description);
     if (
@@ -550,6 +622,7 @@ function parseForeshadowProgress(
     return {
       id: stringValue(record.id) ?? `${evidence.id}:foreshadow:${String(index)}`,
       foreshadowId,
+      ...(foreshadowLabel === null ? {} : { foreshadowLabel }),
       kind: kind as CausalForeshadowProgress["kind"],
       description,
       evidence,

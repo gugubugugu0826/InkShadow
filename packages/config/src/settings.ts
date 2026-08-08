@@ -5,7 +5,7 @@ export const userSettingsSchema = z
     theme: z.enum(["system", "light", "dark"]).default("system"),
     locale: z.enum(["zh-CN", "en"]).default("zh-CN"),
     reducedMotion: z.boolean().default(false),
-    autosaveDebounceMs: z.number().int().min(250).max(5_000).default(800),
+    autosaveDebounceMs: z.number().int().min(250).max(5_000).default(1_000),
     backupEnabled: z.boolean().default(true),
     backupIntervalMinutes: z.number().int().min(5).max(1_440).default(30),
     backupRetentionDays: z.number().int().min(1).max(3_650).default(30),

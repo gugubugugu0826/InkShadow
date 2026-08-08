@@ -117,7 +117,9 @@ export function createTaskFailure(input: TaskFailureInput): Result<TaskFailure, 
 export function retryExhaustedFailure(failure: TaskFailure): TaskFailure {
   return Object.freeze({
     code: "TASK_RETRY_EXHAUSTED",
-    causeCode: failure.code,
+    // Preserve the most specific safe cause (for example a stage mask) so a
+    // later supplemental recovery can avoid repeating work that succeeded.
+    causeCode: failure.causeCode ?? failure.code,
     retryable: false,
     actions: Object.freeze(failure.actions.filter((action) => action !== "RETRY")),
     requestId: failure.requestId,

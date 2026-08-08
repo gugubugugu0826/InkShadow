@@ -15,7 +15,7 @@ describe("cloud login route", () => {
     renderRoute(runtime);
 
     expect(
-      await screen.findByRole("heading", { name: "一句想法，也能开始一部长篇", level: 1 }),
+      await screen.findByRole("heading", { name: "把你的第一个想法，写成一个故事", level: 1 }),
     ).toBeVisible();
     expect(screen.queryByRole("heading", { name: "登录云账户" })).not.toBeInTheDocument();
     expect(screen.queryByRole("form", { name: "云账户登录" })).not.toBeInTheDocument();
@@ -97,7 +97,7 @@ describe("cloud login route", () => {
     await user.click(continueLocally);
     expect(screen.getByRole("heading", { name: "登录云账户" })).toBeVisible();
     expect(
-      screen.queryByRole("heading", { name: "一句想法，也能开始一部长篇" }),
+      screen.queryByRole("heading", { name: "把你的第一个想法，写成一个故事" }),
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "项目" })).not.toBeInTheDocument();
 

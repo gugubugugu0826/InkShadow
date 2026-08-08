@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { GovernedExtensionGatewayRequest } from "./governed-creative-extensions-runtime";
 import type { ModelProfile } from "./model-center-store";
+import type { ModelProviderConnection } from "./model-hub-store";
+import type { NativeModelGatewayClient } from "./runtime";
 import {
   NativeGovernedCreativeExtensionGateway,
   resolveConfiguredGovernedCreativeExtensionRoute,
@@ -28,6 +30,7 @@ describe("native governed creative-extension adapter", () => {
         }),
       },
       modelCenter: { findByProviderId: vi.fn().mockResolvedValue(profile) },
+      modelHub: { findConnection: vi.fn().mockResolvedValue(null) },
       credentials: {
         getSummary: vi.fn().mockResolvedValue({ configured: true, lastFour: "abcd" }),
       },
@@ -60,6 +63,7 @@ describe("native governed creative-extension adapter", () => {
           }),
         },
         modelCenter: { findByProviderId: vi.fn().mockResolvedValue(profile) },
+        modelHub: { findConnection: vi.fn().mockResolvedValue(null) },
         credentials: {
           getSummary: vi.fn().mockResolvedValue({ configured: false, lastFour: null }),
         },
@@ -68,7 +72,7 @@ describe("native governed creative-extension adapter", () => {
   });
 
   it("sends source authority through the native gateway and maps provider usage", async () => {
-    const generate = vi.fn().mockResolvedValue({
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>().mockResolvedValue({
       text: '{"schemaVersion":1}',
       usage: { inputTokens: 120, outputTokens: 80, cachedInputTokens: 10 },
     });
@@ -99,6 +103,47 @@ describe("native governed creative-extension adapter", () => {
     expect(input.messages[0]?.content).toContain("exactly one JSON object");
     expect(input.messages[1]?.content).toContain('"sourceVersionId":"version-1"');
     expect(input.messages[1]?.content).toContain('"checksum":"paragraph-checksum"');
+  });
+
+  it("dispatches governed generation through the current versioned credential slot", async () => {
+    const profile = modelProfile();
+    const generate = vi.fn().mockResolvedValue({
+      text: '{"schemaVersion":1}',
+      usage: null,
+    });
+    const getSummary = vi
+      .fn()
+      .mockImplementation((providerId: string) =>
+        Promise.resolve({ configured: providerId === "model-key-governed-v4" }),
+      );
+    const gateway = new NativeGovernedCreativeExtensionGateway(
+      {
+        available: true,
+        generate,
+        cancelGeneration: vi.fn().mockResolvedValue(true),
+      },
+      { next: () => UUID } satisfies UuidV7Generator,
+      {
+        modelCenter: { findByProviderId: vi.fn().mockResolvedValue(profile) },
+        modelHub: {
+          findConnection: vi.fn().mockResolvedValue(modelHubConnection("model-key-governed-v4")),
+        },
+        credentials: { getSummary },
+      },
+    );
+
+    await expect(
+      gateway.generate(request(), { signal: new AbortController().signal }),
+    ).resolves.toMatchObject({ serializedCandidate: '{"schemaVersion":1}' });
+
+    expect(getSummary).toHaveBeenCalledWith("model-key-governed-v4");
+    expect(getSummary).not.toHaveBeenCalledWith("remote-provider");
+    const generatedInput = generate.mock.calls[0]?.[0] as
+      Parameters<NativeModelGatewayClient["generate"]>[0] | undefined;
+    expect(generatedInput?.config).toMatchObject({
+      providerId: "model-key-governed-v4",
+      baseUrl: "https://models.example/v1",
+    });
   });
 
   it("does not invoke a provider for an already-aborted attempt", async () => {
@@ -143,8 +188,53 @@ function modelProfile(): ModelProfile {
   };
 }
 
+function modelHubConnection(credentialProviderId: string): ModelProviderConnection {
+  return {
+    id: "remote-provider",
+    providerKind: "custom_openai_compatible",
+    displayName: "Remote provider",
+    protocol: "openai_compatible",
+    region: null,
+    workspaceId: null,
+    endpointId: null,
+    baseUrl: "https://models.example/v1",
+    credentialRef: `keyring:model-hub:${credentialProviderId}`,
+    credentialState: "present",
+    authenticationMode: "bearer_keyring",
+    credentialHeaderName: null,
+    modelDiscoveryPath: null,
+    textGenerationPath: null,
+    embeddingPath: null,
+    requestTimeoutMs: 60_000,
+    retryLimit: 1,
+    connectionStatus: "ready",
+    catalogSyncStatus: "succeeded",
+    lastTestedAt: NOW,
+    lastCatalogSyncedAt: NOW,
+    lastErrorCode: null,
+    lastErrorSummary: null,
+    legacyProviderId: null,
+    enabled: true,
+    revision: 2,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+}
+
 function request(): GovernedExtensionGatewayRequest {
   return {
+    dispatchScope: {
+      kind: "project_context",
+      receipt: {
+        schemaVersion: 1,
+        projectId: "019f9f4a-b3c7-7350-9226-000000000001",
+        fingerprint: "a".repeat(64),
+        activeChapterCount: 0,
+        retainedChapterCount: 0,
+        requiresVerifiedLocal: false,
+        chapters: [],
+      },
+    },
     requestFingerprint: "f".repeat(64),
     rangeChecksumAlgorithm: "sha256-utf8-double-newline-v1",
     paragraphAuthorities: [{ index: 0, text: "source paragraph", checksum: "paragraph-checksum" }],

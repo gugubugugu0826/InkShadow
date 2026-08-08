@@ -220,4 +220,180 @@ describe("unified story facts", () => {
       error: { code: "STORY_FACT_INVALID_TRANSITION" },
     });
   });
+
+  it("requires an explicit bounded alias resolution before confirmation", () => {
+    const original = ambiguousAliasFact();
+
+    expect(
+      original.confirm({
+        actorId: uuid(44),
+        humanConfirmed: true,
+        expectedRevision: original.revision,
+        now: T1,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "STORY_FACT_INVALID_TRANSITION" } });
+    expect(
+      original.resolveEntityAlias({
+        resolution: { kind: "existing_entity", targetEntityKey: "character.unknown" },
+        humanConfirmed: true,
+        expectedRevision: original.revision,
+        now: T1,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "STORY_VALIDATION_FAILED" } });
+    expect(
+      original.resolveEntityAlias({
+        resolution: { kind: "existing_entity", targetEntityKey: "character.linzhou.older" },
+        humanConfirmed: true,
+        expectedRevision: 99,
+        now: T1,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "STORY_REVISION_CONFLICT" } });
+
+    const resolved = unwrap(
+      original.resolveEntityAlias({
+        resolution: { kind: "existing_entity", targetEntityKey: "character.linzhou.younger" },
+        humanConfirmed: true,
+        expectedRevision: original.revision,
+        now: T1,
+      }),
+    );
+    expect(resolved.toSnapshot()).toMatchObject({
+      status: "unconfirmed",
+      revision: 2,
+      contentText: "林舟接过了银印。",
+      structuredValue: {
+        subject: {
+          kind: "character",
+          entityKey: "character.linzhou.younger",
+          canonicalName: "林舟",
+          aliases: ["小舟"],
+          mergeStatus: "human_resolved_existing_entity",
+          matchedEntityKeys: ["character.linzhou.younger"],
+        },
+        state: { owns: "silver-seal" },
+      },
+    });
+    expect(resolved.toSnapshot().source).toEqual(original.toSnapshot().source);
+
+    const confirmed = unwrap(
+      resolved.confirm({
+        actorId: uuid(44),
+        humanConfirmed: true,
+        expectedRevision: resolved.revision,
+        now: T2,
+      }),
+    );
+    expect(confirmed.toSnapshot()).toMatchObject({ status: "formal", revision: 3 });
+  });
+
+  it("keeps the isolated entity key when the user resolves an alias as a separate entity", () => {
+    const original = ambiguousAliasFact();
+    const resolved = unwrap(
+      original.resolveEntityAlias({
+        resolution: { kind: "separate_entity" },
+        humanConfirmed: true,
+        expectedRevision: original.revision,
+        now: T1,
+      }),
+    );
+
+    expect(resolved.toSnapshot().structuredValue).toMatchObject({
+      subject: {
+        entityKey: "character:chapter-version:42",
+        mergeStatus: "human_resolved_separate_entity",
+        matchedEntityKeys: ["character.linzhou.older", "character.linzhou.younger"],
+      },
+    });
+    expect(
+      original.resolveEntityAlias({
+        resolution: { kind: "separate_entity" },
+        humanConfirmed: false,
+        expectedRevision: original.revision,
+        now: T1,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "HUMAN_DECISION_REQUIRED" } });
+  });
+
+  it("fails closed when an unresolved ambiguous alias payload is malformed", () => {
+    const malformed = unwrap(
+      StoryFact.create({
+        id: uuid(45),
+        projectId: uuid(41),
+        factType: "character_state",
+        contentText: "林舟接过了银印。",
+        structuredValue: {
+          subject: {
+            kind: "character",
+            entityKey: "character:isolated:malformed",
+            mergeStatus: "ambiguous_confirmed_alias",
+            matchedEntityKeys: "not-an-array",
+          },
+        },
+        source: { kind: "system_derivation", reference: "malformed-alias-fixture" },
+        confidence: 0.8,
+        status: "unconfirmed",
+        origin: "ai_extraction",
+        needsReview: true,
+        humanConfirmed: false,
+        now: T0,
+      }),
+    );
+
+    expect(
+      malformed.confirm({
+        actorId: uuid(44),
+        humanConfirmed: true,
+        expectedRevision: malformed.revision,
+        now: T1,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "STORY_FACT_INVALID_TRANSITION" } });
+    expect(
+      malformed.resolveEntityAlias({
+        resolution: { kind: "separate_entity" },
+        humanConfirmed: true,
+        expectedRevision: malformed.revision,
+        now: T1,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "STORY_FACT_INVALID_TRANSITION" } });
+  });
 });
+
+function ambiguousAliasFact(): StoryFact {
+  return unwrap(
+    StoryFact.create({
+      id: uuid(40),
+      projectId: uuid(41),
+      factType: "character_state",
+      contentText: "林舟接过了银印。",
+      structuredValue: {
+        schemaVersion: "inkshadow.continuous-story-state.v1",
+        subject: {
+          kind: "character",
+          entityKey: "character:chapter-version:42",
+          canonicalName: "林舟",
+          aliases: ["小舟"],
+          mergeStatus: "ambiguous_confirmed_alias",
+          matchedEntityKeys: ["character.linzhou.older", "character.linzhou.younger"],
+        },
+        state: { owns: "silver-seal" },
+        projection: { validation: null },
+      },
+      source: {
+        kind: "chapter_span",
+        reference: `chapter-version:${uuid(43)}#0:4`,
+        chapterId: uuid(42),
+        versionId: uuid(43),
+        startOffset: 0,
+        endOffset: 4,
+        sourceLength: 10,
+        excerpt: "林舟接过",
+      },
+      confidence: 0.8,
+      status: "unconfirmed",
+      origin: "ai_extraction",
+      needsReview: true,
+      humanConfirmed: false,
+      now: T0,
+    }),
+  );
+}

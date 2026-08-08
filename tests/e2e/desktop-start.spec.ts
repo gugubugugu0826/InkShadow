@@ -20,9 +20,13 @@ test("starts locally through the three creation paths without requiring cloud lo
   await page.reload();
 
   await expect(
-    page.getByRole("heading", { level: 1, name: "一句想法，也能开始一部长篇" }),
+    page.getByRole("heading", { level: 1, name: "把你的第一个想法，写成一个故事" }),
   ).toBeVisible();
-  await expect(page.getByText("本地优先 · 无需登录")).toBeVisible();
+  await expect(
+    page.getByText("仅开发环境：当前数据只保存在此浏览器中，不代表桌面正式版的持久化能力。", {
+      exact: true,
+    }),
+  ).toBeVisible();
 
   const creationEntries = page.getByRole("region", { name: "选择创作方式" });
   const ideaEntry = creationEntries.getByRole("link", { name: /从一个想法开始/u });
@@ -36,16 +40,16 @@ test("starts locally through the three creation paths without requiring cloud lo
     "#/create/professional",
   );
 
-  await expect(page.getByRole("link", { name: "打开最近创作与作品库" })).toHaveAttribute(
+  await expect(page.getByRole("link", { name: "浏览作品库" })).toHaveAttribute(
     "href",
     "#/projects",
   );
-  await expect(page.getByRole("link", { name: "从备份恢复" })).toHaveAttribute(
+  await expect(page.getByRole("link", { name: "恢复备份" })).toHaveAttribute(
     "href",
     "#/settings#data-transfer",
   );
 
-  await expect(page.getByText("云账户可稍后连接，本地创作功能保持完整。")).toBeVisible();
+  await expect(page.getByText(/无需注册，本地保存。连接你自己的 AI 模型后/u)).toBeVisible();
   await expect(page.getByRole("link", { name: "登录已有云账户" })).toHaveCount(0);
 
   await ideaEntry.click();

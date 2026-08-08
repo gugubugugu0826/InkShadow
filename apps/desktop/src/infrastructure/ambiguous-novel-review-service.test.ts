@@ -601,6 +601,7 @@ function createHarness(
       storyFacts: runtime.story.facts,
       hasher: runtime.hasher,
       characterEvidence,
+      projectContextPrivacy: runtime.projectContextPrivacy,
       modelHub: {
         modelHub: runtime.modelHub,
         modelGateway,
@@ -621,7 +622,7 @@ async function seedRoutes(
     id: "ambiguous-review-connection",
     providerKind: "google_gemini",
     displayName: "Ambiguous review connection",
-    credentialRef: "keyring:test:ambiguous-review",
+    credentialRef: "keyring:model-hub:ambiguous-review",
     credentialState: "present",
     expectedRevision: null,
   });

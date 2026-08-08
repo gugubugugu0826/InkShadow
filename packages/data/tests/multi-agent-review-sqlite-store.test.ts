@@ -15,12 +15,25 @@ import {
 } from "../src/index.js";
 import { NodeSqliteExecutor } from "./node-sqlite-executor.js";
 
+const multiAgentReviewMigration = readFileSync(
+  new URL("../migrations/0024_multi_agent_review.sql", import.meta.url),
+  "utf8",
+);
+
 const migration = [
   readFileSync(new URL("../migrations/0001_core.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../../story-core/migrations/0001_story_core.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../../story-core/migrations/0002_materials.sql", import.meta.url), "utf8"),
-  readFileSync(new URL("../migrations/0024_multi_agent_review.sql", import.meta.url), "utf8"),
+  multiAgentReviewMigration,
   readFileSync(new URL("../migrations/0032_unified_story_facts.sql", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../migrations/0048_candidate_application_intents.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0050_candidate_revision_authority.sql", import.meta.url),
+    "utf8",
+  ),
 ].join("\n");
 
 const ids = {
@@ -54,7 +67,9 @@ describe("0024 bounded multi-agent review SQLite vertical", () => {
     const executor = new NodeSqliteExecutor(migration);
     seedAuthorities(executor);
 
-    expect(() => executor.database.exec(migration)).not.toThrow();
+    // The released 0024 migration remains idempotent. Later ALTER migrations
+    // are deliberately forward-only and must not be replayed against one DB.
+    expect(() => executor.database.exec(multiAgentReviewMigration)).not.toThrow();
     expect(() =>
       executor.database
         .prepare(
@@ -603,7 +618,9 @@ describe("0024 bounded multi-agent review SQLite vertical", () => {
     expect(
       executor.database
         .prepare(
-          `SELECT source, status, base_version_id, content
+          `SELECT source, status, revision, base_version_id, content,
+                  task_intent, application_mode, payload_kind,
+                  anchor_start_utf16, anchor_end_utf16
            FROM ai_candidates
            WHERE id = ?`,
         )
@@ -611,8 +628,14 @@ describe("0024 bounded multi-agent review SQLite vertical", () => {
     ).toEqual({
       source: "agent",
       status: "ready",
+      revision: 1,
       base_version_id: ids.version,
       content: "评审后的候选正文。",
+      task_intent: "whole_chapter_rewrite",
+      application_mode: "replace_document",
+      payload_kind: "full_document",
+      anchor_start_utf16: null,
+      anchor_end_utf16: null,
     });
     expect(() =>
       executor.database.prepare("DELETE FROM ai_candidates WHERE id = ?").run(ids.chapterCandidate),
@@ -630,10 +653,11 @@ describe("0024 bounded multi-agent review SQLite vertical", () => {
     ).resolves.toMatchObject({ status: "rejected", revision: 2 });
     expect(
       executor.database
-        .prepare("SELECT status, decided_at FROM ai_candidates WHERE id = ?")
+        .prepare("SELECT status, revision, decided_at FROM ai_candidates WHERE id = ?")
         .get(ids.chapterCandidate),
     ).toEqual({
       status: "rejected",
+      revision: 2,
       decided_at: "2026-07-28T08:03:00.000Z",
     });
     expect(() =>
@@ -649,6 +673,51 @@ describe("0024 bounded multi-agent review SQLite vertical", () => {
         )
         .get(ids.project, ids.project),
     ).toEqual({ ai_count: 0, review_count: 0 });
+  });
+
+  it("does not reject a chapter Candidate after another client revised its ready text", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    seedAuthorities(executor);
+    const store = createStore(executor);
+    await store.createSession(await chapterCreateInput());
+    await store.claimTurn(claim());
+    const response = chapterResponse();
+    await store.completeTurn(await completion(response));
+    const payloadJson = JSON.stringify(response.candidate);
+    await store.publishCandidate({
+      sessionId: ids.session,
+      expectedSessionRevision: 3,
+      candidateId: ids.candidate,
+      chapterCandidateId: ids.chapterCandidate,
+      payloadJson,
+      payloadChecksum: await sha256(payloadJson),
+      chapterContentChecksum: await sha256(response.candidate.content),
+      auditEventId: ids.audit,
+      publishedAt: "2026-07-28T08:02:00.000Z",
+    });
+    const winnerContent = "作者在另一窗口保存的审稿建议。";
+    executor.database
+      .prepare(
+        `UPDATE ai_candidates
+         SET content = ?, content_checksum = ?, revision = 2,
+             updated_at = '2026-07-28T08:02:30.000Z'
+         WHERE id = ? AND status = 'ready' AND revision = 1`,
+      )
+      .run(winnerContent, await sha256(winnerContent), ids.chapterCandidate);
+
+    await expect(
+      store.rejectCandidate(ids.candidate, 1, ids.rejectAudit, "2026-07-28T08:03:00.000Z"),
+    ).rejects.toMatchObject({ code: "MULTI_AGENT_REVISION_CONFLICT" });
+    expect(
+      executor.database
+        .prepare("SELECT content, status, revision FROM ai_candidates WHERE id = ?")
+        .get(ids.chapterCandidate),
+    ).toEqual({ content: winnerContent, status: "ready", revision: 2 });
+    expect(
+      executor.database
+        .prepare("SELECT status, revision FROM multi_agent_review_candidates WHERE id = ?")
+        .get(ids.candidate),
+    ).toEqual({ status: "ready", revision: 1 });
   });
 
   it("fails closed when callers bypass the protocol parser", async () => {

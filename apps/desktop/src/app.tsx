@@ -14,6 +14,7 @@ import {
   DesktopPersistenceBoundary,
   PersistenceRouteBoundary,
 } from "./components/desktop-persistence-boundary";
+import { AppErrorBoundary } from "./components/app-error-boundary";
 import { DesktopShell } from "./components/desktop-shell";
 import { RuntimeProvider, useRuntime, type RuntimeProviderProps } from "./runtime-context";
 
@@ -35,6 +36,11 @@ const ProjectMaterialsPage = lazy(() =>
 );
 const ProjectChecksPage = lazy(() =>
   import("./pages/project-checks-page").then(({ ProjectChecksPage: Page }) => ({
+    default: Page,
+  })),
+);
+const ContextSourcesPage = lazy(() =>
+  import("./pages/context-sources-page").then(({ ContextSourcesPage: Page }) => ({
     default: Page,
   })),
 );
@@ -88,6 +94,9 @@ const StoryGovernancePage = lazy(() =>
 const TaskCenterPage = lazy(() =>
   import("./pages/task-center-page").then(({ TaskCenterPage: Page }) => ({ default: Page })),
 );
+const UsageCenterPage = lazy(() =>
+  import("./pages/usage-center-page").then(({ UsageCenterPage: Page }) => ({ default: Page })),
+);
 const WorkspacePage = lazy(() =>
   import("./pages/workspace-page").then(({ WorkspacePage: Page }) => ({ default: Page })),
 );
@@ -108,24 +117,36 @@ const ProfessionalCreatePage = lazy(() =>
 const CloudLoginPage = lazy(() =>
   import("./pages/cloud-login-page").then(({ CloudLoginPage: Page }) => ({ default: Page })),
 );
-const StudioTeamPage = lazy(() =>
-  import("./pages/studio-team-page").then(({ StudioTeamPage: Page }) => ({ default: Page })),
-);
-const StudioUsagePage = lazy(() =>
-  import("./pages/studio-usage-page").then(({ StudioUsagePage: Page }) => ({ default: Page })),
-);
-const StudioReviewRoutePage = lazy(() =>
-  import("./pages/studio-review-route-page").then(({ StudioReviewRoutePage: Page }) => ({
-    default: Page,
-  })),
-);
-const StudioTeamTemplatesRoutePage = lazy(() =>
-  import("./pages/studio-team-templates-route-page").then(
-    ({ StudioTeamTemplatesRoutePage: Page }) => ({
-      default: Page,
-    }),
-  ),
-);
+const TEAM_COLLABORATION_ROUTES_BUNDLED =
+  import.meta.env.MODE === "test" ||
+  (import.meta.env.VITE_INKSHADOW_CLOUD_IDENTITY_ENABLED === "true" &&
+    import.meta.env.VITE_INKSHADOW_TEAM_COLLABORATION_ENABLED === "true");
+const StudioTeamPage = TEAM_COLLABORATION_ROUTES_BUNDLED
+  ? lazy(() =>
+      import("./pages/studio-team-page").then(({ StudioTeamPage: Page }) => ({ default: Page })),
+    )
+  : null;
+const StudioUsagePage = TEAM_COLLABORATION_ROUTES_BUNDLED
+  ? lazy(() =>
+      import("./pages/studio-usage-page").then(({ StudioUsagePage: Page }) => ({ default: Page })),
+    )
+  : null;
+const StudioReviewRoutePage = TEAM_COLLABORATION_ROUTES_BUNDLED
+  ? lazy(() =>
+      import("./pages/studio-review-route-page").then(({ StudioReviewRoutePage: Page }) => ({
+        default: Page,
+      })),
+    )
+  : null;
+const StudioTeamTemplatesRoutePage = TEAM_COLLABORATION_ROUTES_BUNDLED
+  ? lazy(() =>
+      import("./pages/studio-team-templates-route-page").then(
+        ({ StudioTeamTemplatesRoutePage: Page }) => ({
+          default: Page,
+        }),
+      ),
+    )
+  : null;
 const IdeationPage = lazy(() =>
   import("./pages/ideation-page").then(({ IdeationPage: Page }) => ({ default: Page })),
 );
@@ -207,17 +228,47 @@ function NotFoundState() {
 
 function StudioTeamRoute() {
   const runtime = useRuntime();
-  return runtime.featureFlags.teamCollaboration ? <StudioTeamPage /> : <TeamFeatureLimitedState />;
+  return runtime.featureFlags.teamCollaboration && StudioTeamPage !== null ? (
+    <StudioTeamPage />
+  ) : (
+    <TeamFeatureLimitedState />
+  );
 }
 
 function StudioUsageRoute() {
   const runtime = useRuntime();
-  return runtime.featureFlags.teamCollaboration ? <StudioUsagePage /> : <TeamFeatureLimitedState />;
+  return runtime.featureFlags.teamCollaboration && StudioUsagePage !== null ? (
+    <StudioUsagePage />
+  ) : (
+    <TeamFeatureLimitedState />
+  );
+}
+
+function PersonalUsageRoute() {
+  const runtime = useRuntime();
+  if (runtime.usageCenter === null) {
+    return (
+      <div className="desktop-page">
+        <EmptyState
+          kind="feature_limited"
+          title="调用账本只在桌面版读取"
+          description="浏览器开发模式不会伪造调用、token 或费用数据。请在 InkShadow 桌面版中打开此页面；正文与本地创作不受影响。"
+          primaryAction={{
+            label: "返回创作首页",
+            onClick: () => {
+              window.location.hash = "#/start";
+            },
+          }}
+        />
+      </div>
+    );
+  }
+  return <UsageCenterPage reader={runtime.usageCenter} />;
 }
 
 function StudioReviewFeatureRoute() {
   const runtime = useRuntime();
-  return runtime.featureFlags.teamCollaboration ? (
+  return runtime.featureFlags.teamCollaboration && StudioReviewRoutePage !== null ? (
     <StudioReviewRoutePage />
   ) : (
     <TeamFeatureLimitedState />
@@ -226,7 +277,7 @@ function StudioReviewFeatureRoute() {
 
 function StudioTeamTemplatesFeatureRoute() {
   const runtime = useRuntime();
-  return runtime.featureFlags.teamCollaboration ? (
+  return runtime.featureFlags.teamCollaboration && StudioTeamTemplatesRoutePage !== null ? (
     <StudioTeamTemplatesRoutePage />
   ) : (
     <TeamFeatureLimitedState />
@@ -244,8 +295,7 @@ export function DesktopRoutes() {
     >
       {WebViewStressController !== null && <WebViewStressController />}
       <Routes>
-        <Route path="/" element={<StartPage />} />
-        <Route path="/start" element={<StartPage />} />
+        <Route path="/" element={<Navigate to="/start" replace />} />
         <Route path="/create/idea" element={<IdeaJourneyPage />} />
         <Route path="/create/import" element={<ImportJourneyPage />} />
         <Route path="/create/professional" element={<ProfessionalCreatePage />} />
@@ -257,6 +307,7 @@ export function DesktopRoutes() {
             </DesktopShell>
           }
         >
+          <Route path="/start" element={<StartPage />} />
           <Route path="/projects" element={<ProjectsPage />} />
           <Route path="/ideation" element={<IdeationPage />} />
           <Route path="/marketplace" element={<MarketplaceRoutePage />} />
@@ -271,6 +322,7 @@ export function DesktopRoutes() {
           <Route path="/projects/:projectId/outline" element={<StoryOutlinePage />} />
           <Route path="/projects/:projectId/story" element={<StoryGovernancePage />} />
           <Route path="/projects/:projectId/checks" element={<ProjectChecksPage />} />
+          <Route path="/projects/:projectId/context" element={<ContextSourcesPage />} />
           <Route path="/projects/:projectId/sync" element={<ProjectSyncRoutePage />} />
           <Route
             path="/projects/:projectId/sync/conflicts"
@@ -306,6 +358,7 @@ export function DesktopRoutes() {
             element={<StudioTeamTemplatesFeatureRoute />}
           />
           <Route path="/tasks" element={<TaskCenterPage />} />
+          <Route path="/usage" element={<PersonalUsageRoute />} />
           <Route path="*" element={<NotFoundState />} />
         </Route>
       </Routes>
@@ -338,9 +391,11 @@ export function App({ factory, router = "hash", runtime }: AppProps) {
       {...(runtime === undefined ? {} : { runtime })}
     >
       <ToastProvider>
-        <DesktopPersistenceBoundary>
-          {router === "hash" ? <HashRoutedDesktop /> : <DesktopRoutes />}
-        </DesktopPersistenceBoundary>
+        <AppErrorBoundary>
+          <DesktopPersistenceBoundary>
+            {router === "hash" ? <HashRoutedDesktop /> : <DesktopRoutes />}
+          </DesktopPersistenceBoundary>
+        </AppErrorBoundary>
       </ToastProvider>
     </RuntimeProvider>
   );

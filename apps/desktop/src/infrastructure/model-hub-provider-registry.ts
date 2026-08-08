@@ -1,6 +1,7 @@
 export const MODEL_PROVIDER_KINDS = [
   "openai",
   "deepseek",
+  "zhipu_glm",
   "alibaba_qwen",
   "volcengine_doubao",
   "google_gemini",
@@ -265,6 +266,25 @@ const PROVIDER_PRESETS: readonly ModelProviderPreset[] = Object.freeze([
       capabilityMetadata: false,
     },
     officialDocsUrl: "https://api-docs.deepseek.com/api/list-models/",
+  }),
+  freezePreset({
+    id: "zhipu_glm",
+    displayName: "智谱 GLM",
+    shortDescription:
+      "使用智谱开放平台的 OpenAI 兼容接口；模型由用户从账户当前可用目录中选择，不在客户端写死。",
+    protocol: "openai_compatible",
+    credentialRequired: true,
+    defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    basicFields: [API_KEY_FIELD],
+    expertFields: STANDARD_EXPERT_FIELDS,
+    modelDiscovery: {
+      strategy: "preset_and_manual",
+      method: "GET",
+      path: null,
+      automatic: false,
+      capabilityMetadata: false,
+    },
+    officialDocsUrl: "https://docs.bigmodel.cn/cn/guide/develop/openai/introduction",
   }),
   freezePreset({
     id: "alibaba_qwen",

@@ -18,13 +18,19 @@ import type {
   StoryPlanningCandidate,
   StoryPlanningTask,
 } from "../infrastructure/story-planning-candidate-store";
+import { listStoryPlanningSelectableItems } from "../infrastructure/story-planning-selective-acceptance";
 
 export interface StoryPlanningPanelProps {
   readonly projectId: string;
   readonly outline: Outline;
   readonly service: Pick<
     ModelHubStoryPlanningService,
-    "listCandidates" | "generate" | "updateCandidate" | "acceptCandidate" | "rejectCandidate"
+    | "listCandidates"
+    | "generate"
+    | "updateCandidate"
+    | "acceptCandidate"
+    | "acceptCandidateItems"
+    | "rejectCandidate"
   >;
   readonly disabled?: boolean;
   readonly onOutlineChanged: () => void | Promise<void>;
@@ -37,15 +43,17 @@ export function StoryPlanningPanel({
   projectId,
   service,
 }: StoryPlanningPanelProps) {
+  const outlineSnapshot = useMemo(() => outline.toSnapshot(), [outline]);
   const chapters = useMemo(
-    () => outline.toSnapshot().nodes.filter(({ kind }) => kind === "chapter"),
-    [outline],
+    () => outlineSnapshot.nodes.filter(({ kind }) => kind === "chapter"),
+    [outlineSnapshot],
   );
   const [task, setTask] = useState<StoryPlanningTask>("outline_planning");
   const [targetNodeId, setTargetNodeId] = useState(chapters[0]?.id ?? "");
   const [direction, setDirection] = useState("");
   const [candidates, setCandidates] = useState<readonly StoryPlanningCandidate[]>([]);
   const [editable, setEditable] = useState<Record<string, string>>({});
+  const [selectedItems, setSelectedItems] = useState<Record<string, readonly string[]>>({});
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Readonly<{ title: string; message: string }> | null>(null);
@@ -61,6 +69,16 @@ export function StoryPlanningPanel({
         const next = { ...current };
         for (const candidate of loaded) {
           next[candidate.id] ??= candidate.editableSynopsis;
+        }
+        return next;
+      });
+      setSelectedItems((current) => {
+        const next = { ...current };
+        for (const candidate of loaded) {
+          const intent = candidate.selectiveAcceptanceIntent;
+          if (intent !== null && intent !== undefined) {
+            next[candidate.id] = intent.selectedItemIds;
+          }
         }
         return next;
       });
@@ -148,6 +166,35 @@ export function StoryPlanningPanel({
       });
     } catch (cause: unknown) {
       setError(errorMessage(cause, "无法安全采纳这份建议。"));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function acceptSelected(candidate: StoryPlanningCandidate): Promise<void> {
+    const selectedItemIds = selectedItems[candidate.id] ?? [];
+    if (selectedItemIds.length === 0) {
+      setError("请至少勾选一项要采纳的规划内容。");
+      return;
+    }
+    setBusyAction(`partial:${candidate.id}`);
+    setError(null);
+    try {
+      const receipt = await service.acceptCandidateItems({
+        candidateId: candidate.id,
+        expectedRevision: candidate.revision,
+        selectedItemIds,
+      });
+      replaceCandidate(receipt.candidate);
+      await onOutlineChanged();
+      setNotice({
+        title: receipt.idempotent ? "已确认此前的逐项采纳" : "已采纳所选规划条目",
+        message: receipt.recoveredAfterInterruptedRecording
+          ? "已恢复上次中断的采纳记录，没有重复追加内容。"
+          : `已保留原有简介，并追加 ${String(receipt.acceptedItemIds.length)} 项结构化规划内容；未选内容、正文和故事设定均未修改。`,
+      });
+    } catch (cause: unknown) {
+      setError(errorMessage(cause, "无法安全采纳所选规划条目。"));
     } finally {
       setBusyAction(null);
     }
@@ -279,6 +326,18 @@ export function StoryPlanningPanel({
             const text = editable[candidate.id] ?? candidate.editableSynopsis;
             const dirty = text !== candidate.editableSynopsis;
             const candidateBusy = busyAction?.endsWith(candidate.id) === true;
+            const selectableItems = listStoryPlanningSelectableItems(candidate.payload);
+            const selected = selectedItems[candidate.id] ?? [];
+            const currentTarget = outlineSnapshot.nodes.find(
+              ({ id }) => id === candidate.targetNodeId,
+            );
+            const hasBaseline =
+              candidate.baselineTargetSynopsis !== null &&
+              candidate.baselineTargetSynopsis !== undefined;
+            const selectiveAcceptanceApplying =
+              candidate.status === "review" &&
+              candidate.selectiveAcceptanceIntent !== null &&
+              candidate.selectiveAcceptanceIntent !== undefined;
             return (
               <Card key={candidate.id}>
                 <CardHeader>
@@ -295,11 +354,20 @@ export function StoryPlanningPanel({
                       </p>
                     </div>
                     <Badge tone={candidateStatusTone(candidate.status)}>
-                      {candidateStatusLabel(candidate.status)}
+                      {selectiveAcceptanceApplying
+                        ? "正在恢复逐项采纳"
+                        : candidateStatusLabel(candidate.status)}
                     </Badge>
                   </div>
                 </CardHeader>
                 <CardContent>
+                  {selectiveAcceptanceApplying && (
+                    <InlineAlert
+                      tone="info"
+                      title="上次逐项采纳尚未完成"
+                      description="系统已锁定同一组规划条目。只能继续恢复这次采纳；在完成前不能编辑、整篇采纳或拒绝，避免正式大纲与候选状态互相冲突。"
+                    />
+                  )}
                   <p>
                     本次参考 {String(candidate.context.formalFactIds.length)} 条已确认设定（其中
                     {String(candidate.context.lockedFactIds.length)} 条已锁定）、
@@ -308,9 +376,79 @@ export function StoryPlanningPanel({
                       ? "故事关联资料当前不可用，生成时已明确省略。"
                       : ""}
                   </p>
+                  <div className="story-planning-diff" aria-label="当前大纲与候选差异">
+                    <div>
+                      <strong>当前正式简介</strong>
+                      <p className="story-planning-diff-text">
+                        {currentTarget === undefined || currentTarget.synopsis.length === 0
+                          ? "（当前简介为空）"
+                          : currentTarget.synopsis}
+                      </p>
+                    </div>
+                    <div>
+                      <strong>候选中的结构化变更</strong>
+                      <p>
+                        逐项采纳只会把你勾选的固定条目追加到生成时的简介；不会让 AI
+                        重新解析旧文本，未选内容保持原样。
+                      </p>
+                      {hasBaseline ? (
+                        <div className="story-planning-selectable-items">
+                          {selectableItems.map((item) => {
+                            const accepted = candidate.acceptedItemIds?.includes(item.id) === true;
+                            const checked =
+                              candidate.status === "accepted"
+                                ? accepted
+                                : selected.includes(item.id);
+                            return (
+                              <label
+                                key={item.id}
+                                className="checkbox-row"
+                                htmlFor={`${candidate.id}-${item.id}`}
+                                aria-label={`选择${item.label}`}
+                              >
+                                <input
+                                  id={`${candidate.id}-${item.id}`}
+                                  type="checkbox"
+                                  checked={checked}
+                                  disabled={
+                                    disabled ||
+                                    candidateBusy ||
+                                    candidate.status !== "review" ||
+                                    selectiveAcceptanceApplying
+                                  }
+                                  onChange={(event) => {
+                                    const isChecked = event.currentTarget.checked;
+                                    setSelectedItems((current) => {
+                                      const before = current[candidate.id] ?? [];
+                                      return {
+                                        ...current,
+                                        [candidate.id]: isChecked
+                                          ? Object.freeze([...before, item.id])
+                                          : Object.freeze(before.filter((id) => id !== item.id)),
+                                      };
+                                    });
+                                  }}
+                                />
+                                <span>
+                                  <strong>{item.label}</strong>
+                                  <small>{item.detail}</small>
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <InlineAlert
+                          tone="warning"
+                          title="旧版建议不能逐项采纳"
+                          description="这份建议没有保存可核验的目标简介基线。请重新生成后使用逐项采纳；仍可在下方编辑、整体采纳或拒绝。"
+                        />
+                      )}
+                    </div>
+                  </div>
                   <FormField
-                    label={`准备采纳到“${candidate.targetNodeTitle}”简介的内容`}
-                    hint="你可以修改并保存。采纳前不会触碰正式大纲。"
+                    label={`整体替换“${candidate.targetNodeTitle}”简介的候选内容`}
+                    hint="这里的手动编辑只用于整体采纳，不会改变上方可勾选的固定条目。采纳前不会触碰正式大纲。"
                   >
                     {(fieldProps) => (
                       <Textarea
@@ -319,7 +457,7 @@ export function StoryPlanningPanel({
                         rows={12}
                         maxLength={20_000}
                         currentLength={text.length}
-                        readOnly={candidate.status !== "review"}
+                        readOnly={candidate.status !== "review" || selectiveAcceptanceApplying}
                         disabled={candidateBusy}
                         onChange={(event) => {
                           const nextValue = event.currentTarget.value;
@@ -338,7 +476,11 @@ export function StoryPlanningPanel({
                         variant="secondary"
                         loading={busyAction === `save:${candidate.id}`}
                         disabled={
-                          disabled || busyAction !== null || !dirty || text.trim().length === 0
+                          disabled ||
+                          busyAction !== null ||
+                          selectiveAcceptanceApplying ||
+                          !dirty ||
+                          text.trim().length === 0
                         }
                         onClick={() => void save(candidate)}
                       >
@@ -346,8 +488,23 @@ export function StoryPlanningPanel({
                       </Button>
                       <Button
                         size="sm"
+                        variant="secondary"
+                        loading={busyAction === `partial:${candidate.id}`}
+                        disabled={
+                          disabled || busyAction !== null || !hasBaseline || selected.length === 0
+                        }
+                        onClick={() => void acceptSelected(candidate)}
+                      >
+                        {selectiveAcceptanceApplying
+                          ? "恢复上次逐项采纳"
+                          : `采纳已选 ${String(selected.length)} 项并保留当前简介`}
+                      </Button>
+                      <Button
+                        size="sm"
                         loading={busyAction === `accept:${candidate.id}`}
-                        disabled={disabled || busyAction !== null || dirty}
+                        disabled={
+                          disabled || busyAction !== null || dirty || selectiveAcceptanceApplying
+                        }
                         onClick={() => void accept(candidate)}
                       >
                         采纳并替换“{candidate.targetNodeTitle}”的简介
@@ -356,7 +513,7 @@ export function StoryPlanningPanel({
                         size="sm"
                         variant="ghost"
                         loading={busyAction === `reject:${candidate.id}`}
-                        disabled={disabled || busyAction !== null}
+                        disabled={disabled || busyAction !== null || selectiveAcceptanceApplying}
                         onClick={() => void reject(candidate)}
                       >
                         拒绝这份建议

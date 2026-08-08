@@ -67,6 +67,7 @@ interface FineTuningDeploymentRestoreRow {
 
 const RESTORABLE_TABLES = [
   "projects",
+  "project_seeds",
   "team_template_application_receipts",
   "project_team_template_settings",
   "project_team_template_prompt_refs",
@@ -74,6 +75,8 @@ const RESTORABLE_TABLES = [
   "project_team_template_checklist_items",
   "chapters",
   "chapter_versions",
+  "continuous_story_state_route_receipts",
+  "chapter_validation_snapshots",
   "causal_evidence_sources",
   "causal_events",
   "causal_event_participants",
@@ -87,6 +90,9 @@ const RESTORABLE_TABLES = [
   "context_compilation_runs",
   "context_compilation_entries",
   "context_compilation_entry_sources",
+  "context_compilation_execution_links",
+  "context_compilation_model_invocation_links",
+  "context_compilation_output_candidate_links",
   "writing_feedback_policies",
   "writing_preferences",
   "writing_preference_revisions",
@@ -94,6 +100,8 @@ const RESTORABLE_TABLES = [
   "ai_candidates",
   "writing_feedback_events",
   "story_planning_candidates",
+  "creative_journeys",
+  "creative_journey_turns",
   "multi_agent_review_sessions",
   "multi_agent_review_participants",
   "multi_agent_review_turns",
@@ -117,11 +125,13 @@ const RESTORABLE_TABLES = [
   "story_facts",
   "story_fact_revisions",
   "story_fact_legacy_links",
+  "authoritative_story_graph_state",
   "authoritative_extraction_jobs",
   "authoritative_extraction_candidates",
   "authoritative_extraction_evaluations",
   "authoritative_extraction_decision_claims",
   "story_memory_policies",
+  "story_memory_governance_events",
   "story_memory_records",
   "story_what_if_branches",
   "story_outline_drafts",
@@ -138,6 +148,8 @@ const RESTORABLE_TABLES = [
   "sync_device_sequences",
   "sync_incoming_batches",
   "sync_incremental_terminal_observations",
+  "cloud_deletion_journals",
+  "cloud_deletion_mutations",
   "sync_inbox_operations",
   "sync_inbox_operation_chunks",
   "sync_snapshot_staging_sessions",
@@ -168,6 +180,7 @@ const RESTORABLE_TABLES = [
   "model_profiles",
   "model_pricing_profiles",
   "model_role_routes",
+  "model_hub_connection_commits",
   "model_provider_connections",
   "model_catalog_syncs",
   "model_catalog_entries",
@@ -207,6 +220,11 @@ const DERIVED_TABLES_TO_CLEAR = [
 ] as const;
 
 const RESTORE_DELETE_ORDER = [
+  "context_compilation_output_candidate_links",
+  "context_compilation_model_invocation_links",
+  "context_compilation_execution_links",
+  "creative_journey_turns",
+  "creative_journeys",
   "story_planning_candidates",
   "writing_preference_revisions",
   "writing_preferences",
@@ -268,6 +286,8 @@ const RESTORE_DELETE_ORDER = [
   "sync_inbox_operation_chunks",
   "sync_inbox_operations",
   "sync_incremental_terminal_observations",
+  "cloud_deletion_mutations",
+  "cloud_deletion_journals",
   "sync_incoming_batches",
   "sync_remote_checkpoints",
   "sync_device_sequences",
@@ -285,6 +305,7 @@ const RESTORE_DELETE_ORDER = [
   "model_cost_privacy_profiles",
   "model_catalog_entries",
   "model_catalog_syncs",
+  "model_hub_connection_commits",
   "model_provider_connections",
   "model_role_routes",
   "model_pricing_profiles",
@@ -321,6 +342,7 @@ const RESTORE_DELETE_ORDER = [
   "story_ideation_drafts",
   "story_outline_drafts",
   "story_what_if_branches",
+  "story_memory_governance_events",
   "story_memory_records",
   "story_memory_policies",
   "story_review_items",
@@ -332,13 +354,20 @@ const RESTORE_DELETE_ORDER = [
   "recovery_drafts",
   "ai_candidates",
   "local_audit_events",
+  "continuous_story_state_route_receipts",
+  "chapter_validation_snapshots",
   "chapter_versions",
   "chapters",
+  "authoritative_story_graph_state",
+  "project_seeds",
   "projects",
 ] as const;
 
 const RESTORE_INSERT_ORDER = [
   "projects",
+  "project_seeds",
+  "cloud_deletion_journals",
+  "cloud_deletion_mutations",
   "writing_feedback_policies",
   "writing_preferences",
   "writing_preference_revisions",
@@ -354,6 +383,8 @@ const RESTORE_INSERT_ORDER = [
   "cloud_project_key_checkpoints",
   "chapters",
   "chapter_versions",
+  "continuous_story_state_route_receipts",
+  "chapter_validation_snapshots",
   "causal_evidence_sources",
   "causal_events",
   "causal_event_participants",
@@ -369,6 +400,8 @@ const RESTORE_INSERT_ORDER = [
   "context_compilation_entry_sources",
   "recovery_drafts",
   "ai_candidates",
+  "creative_journeys",
+  "creative_journey_turns",
   "writing_feedback_events",
   "local_audit_events",
   "background_tasks",
@@ -397,6 +430,7 @@ const RESTORE_INSERT_ORDER = [
   "authoritative_extraction_decision_claims",
   "story_memory_policies",
   "story_memory_records",
+  "story_memory_governance_events",
   "story_facts",
   "story_fact_revisions",
   "story_fact_legacy_links",
@@ -440,6 +474,7 @@ const RESTORE_INSERT_ORDER = [
   "model_profiles",
   "model_pricing_profiles",
   "model_role_routes",
+  "model_hub_connection_commits",
   "model_provider_connections",
   "model_catalog_syncs",
   "model_catalog_entries",
@@ -455,6 +490,9 @@ const RESTORE_INSERT_ORDER = [
   "ai_generation_route_selections",
   "ai_generation_attempt_usage",
   "ai_deferred_generation_requests",
+  "context_compilation_execution_links",
+  "context_compilation_model_invocation_links",
+  "context_compilation_output_candidate_links",
   "fine_tuning_datasets",
   "fine_tuning_samples",
   "fine_tuning_approvals",
@@ -466,6 +504,7 @@ const RESTORE_INSERT_ORDER = [
   "fine_tuning_operation_claims",
   "fine_tuning_audit_events",
   "community_marketplace_installs",
+  "authoritative_story_graph_state",
 ] as const;
 
 const FINE_TUNING_JOB_PLACEHOLDER_INSERT = `
@@ -864,7 +903,25 @@ export class DatabaseMaintenanceService {
           await transaction.execute(`DELETE FROM main.${table}`);
         }
         for (const table of RESTORE_INSERT_ORDER) {
-          if (table === "fine_tuning_jobs") {
+          if (table === "authoritative_story_graph_state") {
+            // The authority epoch belongs to the restored source history, but
+            // the published graph receipt does not: GraphRAG tables are
+            // deliberately cleared above and must be rebuilt. Authoritative
+            // chapter/story insert triggers create transient rows during the
+            // restore, so replace those rows only after every authority table
+            // has been copied.
+            await transaction.execute("DELETE FROM main.authoritative_story_graph_state");
+            await transaction.execute(
+              `INSERT INTO main.authoritative_story_graph_state (
+                 project_id, schema_version, authority_epoch,
+                 projected_epoch, projected_graph_revision,
+                 projection_complete, diagnostics_json
+               )
+               SELECT project_id, schema_version, authority_epoch,
+                      NULL, NULL, NULL, NULL
+               FROM restore_source.authoritative_story_graph_state`,
+            );
+          } else if (table === "fine_tuning_jobs") {
             // A completed source job points at its artifact, while the artifact
             // insertion authority requires that job to be running. Restore a
             // content-free transient state, insert the artifact, then put the
@@ -916,6 +973,14 @@ export class DatabaseMaintenanceService {
               await transaction.execute(FINE_TUNING_DEPLOYMENT_INSERT, [deployment.id]);
             }
             await transaction.execute(FINE_TUNING_ARTIFACT_FINALIZE);
+          } else if (table === "chapter_validation_snapshots") {
+            // Rerun snapshots are immutable and must be restored only after the
+            // immediately preceding snapshot in their evidence chain.
+            await transaction.execute(
+              `INSERT INTO main.chapter_validation_snapshots
+               SELECT * FROM restore_source.chapter_validation_snapshots
+               ORDER BY project_id, chapter_id, run_sequence`,
+            );
           } else {
             await transaction.execute(
               `INSERT INTO main.${table} SELECT * FROM restore_source.${table}`,

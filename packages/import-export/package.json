@@ -15,6 +15,10 @@
       "types": "./dist/docx-export.d.ts",
       "import": "./dist/docx-export.js"
     },
+    "./epub-export": {
+      "types": "./dist/epub-export.d.ts",
+      "import": "./dist/epub-export.js"
+    },
     "./pdf-export": {
       "types": "./dist/pdf-export.d.ts",
       "import": "./dist/pdf-export.js"

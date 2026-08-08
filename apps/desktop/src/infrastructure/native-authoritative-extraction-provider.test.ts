@@ -87,6 +87,7 @@ describe("native authoritative extraction provider", () => {
       modelCenter: {
         findByProviderId: vi.fn().mockResolvedValue(localProfile()),
       },
+      modelHub: noModelHubConnection(),
       modelRouting: {
         findRoute: vi.fn().mockResolvedValue(validationRoute()),
       },
@@ -98,6 +99,7 @@ describe("native authoritative extraction provider", () => {
         generate,
         cancelGeneration: vi.fn().mockResolvedValue(true),
       },
+      projectContextPrivacy: projectContextPrivacyAuthority(),
       hasher: new CryptoContentHasher(),
       ids: { next: () => GENERATION_ID },
     });
@@ -123,6 +125,10 @@ describe("native authoritative extraction provider", () => {
     expect(call?.config.authentication).toBe("none");
     expect(call?.model).toBe("qwen2.5:7b-instruct");
     expect(call?.temperature).toBe(0);
+    expect(call?.dispatchScope).toEqual({
+      kind: "project_context",
+      receipt: projectContextPrivacyReceipt(false),
+    });
     expect(call?.messages[0]?.content).toContain(AUTHORITATIVE_EXTRACTION_PROMPT_REGISTRY_BODY);
     expect(call?.messages[0]?.content).not.toContain("Ignore the system");
     expect(call?.messages[1]?.content).toContain("Ignore the system");
@@ -133,6 +139,7 @@ describe("native authoritative extraction provider", () => {
       modelCenter: {
         findByProviderId: vi.fn().mockResolvedValue(remoteProfile()),
       },
+      modelHub: noModelHubConnection(),
       modelRouting: {
         findRoute: vi.fn().mockResolvedValue(validationRoute("remote-provider", "remote-model")),
       },
@@ -151,6 +158,102 @@ describe("native authoritative extraction provider", () => {
     expect(configured).toBeNull();
   });
 
+  it("fails before remote extraction when the source chapter is local-only", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>();
+    const configured = await resolveConfiguredAuthoritativeExtractionProvider({
+      modelCenter: {
+        findByProviderId: vi.fn().mockResolvedValue(remoteProfile()),
+      },
+      modelHub: noModelHubConnection(),
+      modelRouting: {
+        findRoute: vi.fn().mockResolvedValue(validationRoute("remote-provider", "remote-model")),
+      },
+      credentials: {
+        getSummary: vi.fn().mockResolvedValue({ configured: true, lastFour: "test" }),
+      },
+      gateway: {
+        available: true,
+        generate,
+        cancelGeneration: vi.fn().mockResolvedValue(true),
+      },
+      chapters: {
+        findById: vi.fn().mockResolvedValue({
+          ok: true,
+          value: { isLocalOnly: true },
+        }) as never,
+      },
+      projectContextPrivacy: projectContextPrivacyAuthority(true),
+      hasher: new CryptoContentHasher(),
+      ids: { next: () => GENERATION_ID },
+    });
+    if (configured === null) {
+      throw new Error("Expected configured remote extraction provider.");
+    }
+    const request = providerRequest(
+      configured.provenance,
+      firstFixture(configured.goldenSuite.fixtures),
+      "safe",
+    );
+
+    await expect(
+      configured.provider.generate(request, new AbortController().signal),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: "private_chapter_local_only", retryable: false },
+    });
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it("runs the project authority callback immediately before the native gateway", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>();
+    const assertProjectContextCurrent = vi.fn(() =>
+      Promise.reject(
+        Object.assign(new Error("project privacy changed"), {
+          code: "PROJECT_CONTEXT_PRIVACY_CHANGED",
+          retryable: true,
+        }),
+      ),
+    );
+    const configured = await resolveConfiguredAuthoritativeExtractionProvider({
+      modelCenter: {
+        findByProviderId: vi.fn().mockResolvedValue(localProfile()),
+      },
+      modelHub: noModelHubConnection(),
+      modelRouting: {
+        findRoute: vi.fn().mockResolvedValue(validationRoute()),
+      },
+      credentials: {
+        getSummary: vi.fn(),
+      },
+      gateway: {
+        available: true,
+        generate,
+        cancelGeneration: vi.fn().mockResolvedValue(true),
+      },
+      projectContextPrivacy: projectContextPrivacyAuthority(),
+      hasher: new CryptoContentHasher(),
+      ids: { next: () => GENERATION_ID },
+    });
+    if (configured === null) {
+      throw new Error("Expected configured extraction provider.");
+    }
+    const request = providerRequest(
+      configured.provenance,
+      firstFixture(configured.goldenSuite.fixtures),
+      "safe",
+      assertProjectContextCurrent,
+    );
+
+    await expect(
+      configured.provider.generate(request, new AbortController().signal),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: "PROJECT_CONTEXT_PRIVACY_CHANGED", retryable: true },
+    });
+    expect(assertProjectContextCurrent).toHaveBeenCalledOnce();
+    expect(generate).not.toHaveBeenCalled();
+  });
+
   it("cancels the native generation and never publishes a late result", async () => {
     let release:
       ((value: Awaited<ReturnType<NativeModelGatewayClient["generate"]>>) => void) | undefined;
@@ -165,6 +268,7 @@ describe("native authoritative extraction provider", () => {
       modelCenter: {
         findByProviderId: vi.fn().mockResolvedValue(localProfile()),
       },
+      modelHub: noModelHubConnection(),
       modelRouting: {
         findRoute: vi.fn().mockResolvedValue(validationRoute()),
       },
@@ -176,6 +280,7 @@ describe("native authoritative extraction provider", () => {
         generate,
         cancelGeneration,
       },
+      projectContextPrivacy: projectContextPrivacyAuthority(),
       hasher: new CryptoContentHasher(),
       ids: { next: () => GENERATION_ID },
     });
@@ -187,6 +292,7 @@ describe("native authoritative extraction provider", () => {
       providerRequest(configured.provenance, firstFixture(configured.goldenSuite.fixtures), "safe"),
       controller.signal,
     );
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledOnce());
     controller.abort();
     release?.({ text: '{"candidates":[]}', usage: null });
 
@@ -211,6 +317,7 @@ describe("native authoritative extraction provider", () => {
         modelCenter: {
           findByProviderId: vi.fn().mockResolvedValue(profile),
         },
+        modelHub: noModelHubConnection(),
         modelRouting: {
           findRoute: vi.fn().mockResolvedValue(validationRoute(profile.providerId, model)),
         },
@@ -255,6 +362,7 @@ describe("native authoritative extraction provider", () => {
           },
           cancelGeneration: () => Promise.resolve(true),
         },
+        projectContextPrivacy: projectContextPrivacyAuthority(),
         hasher: new CryptoContentHasher(),
         ids: { next: () => GENERATION_ID },
       });
@@ -305,6 +413,7 @@ function providerRequest(
   provenance: AuthoritativeExtractionProvenance,
   fixture: AuthoritativeExtractionGoldenFixture,
   chapterContent: string,
+  assertProjectContextCurrent?: () => Promise<void>,
 ): AuthoritativeExtractionProviderRequest {
   const source: AuthoritativeExtractionSource = {
     projectId: uuid(fixture.source.projectId),
@@ -325,6 +434,7 @@ function providerRequest(
     chapterContent,
     targets: fixture.targets,
     provenance,
+    ...(assertProjectContextCurrent === undefined ? {} : { assertProjectContextCurrent }),
   };
 }
 
@@ -437,4 +547,43 @@ function validationRoute(
     createdAt: "2026-07-28T00:00:00.000Z",
     updatedAt: "2026-07-28T00:00:00.000Z",
   });
+}
+
+function noModelHubConnection() {
+  return { findConnection: vi.fn().mockResolvedValue(null) };
+}
+
+function projectContextPrivacyReceipt(localOnly: boolean) {
+  return Object.freeze({
+    schemaVersion: 1 as const,
+    projectId: "019fa028-0000-7000-8000-000000000101",
+    fingerprint: localOnly ? "b".repeat(64) : "a".repeat(64),
+    activeChapterCount: 1,
+    retainedChapterCount: 1,
+    requiresVerifiedLocal: localOnly,
+    chapters: Object.freeze([
+      Object.freeze({
+        chapterId: "019fa028-0000-7000-8000-000000000102",
+        currentVersionId: "019fa028-0000-7000-8000-000000000103",
+        revision: 1,
+        privacyRevision: 1,
+        privacyMode: localOnly ? ("local_only" as const) : ("standard" as const),
+        status: "active" as const,
+      }),
+    ]),
+  });
+}
+
+function projectContextPrivacyAuthority(localOnly = false) {
+  const receipt = projectContextPrivacyReceipt(localOnly);
+  return {
+    inspect: vi.fn((projectId: string) => {
+      if (projectId !== receipt.projectId) {
+        return Promise.reject(new Error("unexpected project authority request"));
+      }
+      return Promise.resolve(receipt);
+    }),
+    assertChapterMatches: vi.fn(),
+    assertRouteEligible: vi.fn(),
+  };
 }

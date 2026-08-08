@@ -1,11 +1,15 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AiCandidate, type Chapter, type Project } from "@inkshadow/domain";
 import { ToastProvider } from "@inkshadow/ui";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 
-import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
+import {
+  createDevelopmentRuntime,
+  type DesktopRuntime,
+  type NativeModelGatewayClient,
+} from "../infrastructure/runtime";
 import { RuntimeProvider } from "../runtime-context";
 import { EditorPage } from "./editor-page";
 
@@ -35,6 +39,7 @@ describe("simplified editor workspace", () => {
       `/projects/${project.id}/chapters/${second.value.chapter.id}`,
     );
     expect(screen.getByRole("textbox", { name: "章节正文" })).toHaveValue("第一章正文");
+    expect(screen.getByText("5 / 5000000 字符")).toBeVisible();
     expect(screen.getByRole("complementary", { name: "AI 创作助手" })).toBeVisible();
 
     const toolbar = document.querySelector(".editor-toolbar");
@@ -57,7 +62,7 @@ describe("simplified editor workspace", () => {
     expect(await screen.findByRole("heading", { name: "AI 创作助手" })).toBeVisible();
   });
 
-  it("changes the single top action when an AI suggestion can be applied to a selection", async () => {
+  it("keeps an existing AI suggestion action unambiguous when正文 is selected", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const { chapter, project } = await seedProject(runtime);
     await createReadySuggestion(runtime, project, chapter, "建议改写内容");
@@ -76,11 +81,87 @@ describe("simplified editor workspace", () => {
     editor.setSelectionRange(0, 3);
     fireEvent.select(editor);
 
-    expect(within(toolbar).getByRole("button", { name: "用 AI 建议修改选中内容" })).toBeVisible();
+    expect(within(toolbar).getByRole("button", { name: "查看 AI 建议版本" })).toBeVisible();
+    expect(within(toolbar).queryByRole("button", { name: "修改选中内容" })).not.toBeInTheDocument();
     expect(screen.queryByText("原生模型网关")).not.toBeInTheDocument();
     expect(screen.queryByText("AI 候选")).not.toBeInTheDocument();
   });
+
+  it("offers a focused rewrite instruction for an exact selection in the desktop app", async () => {
+    const runtime = createNativeEditorRuntime();
+    const { chapter, project } = await seedProject(runtime);
+    const user = userEvent.setup();
+
+    renderEditor(runtime, project, chapter);
+
+    const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "章节正文",
+    });
+    editor.setSelectionRange(0, 3);
+    fireEvent.select(editor);
+
+    const toolbar = document.querySelector(".editor-toolbar");
+    if (!(toolbar instanceof HTMLElement)) {
+      throw new Error("找不到编辑器顶部操作区");
+    }
+    const rewriteAction = within(toolbar).getByRole("button", { name: "修改选中内容" });
+    expect(rewriteAction).toBeVisible();
+    const instruction = screen.getByRole<HTMLTextAreaElement>("textbox", {
+      name: "改写选中的 3 个字符",
+    });
+    expect(instruction).toHaveValue("保持原意，让表达更自然。");
+    expect(screen.getByRole("button", { name: "生成选区改写建议" })).toBeEnabled();
+
+    await user.click(rewriteAction);
+    await waitFor(() => expect(instruction).toHaveFocus());
+  });
+
+  it("records a durable derived-story task after an explicit manual save", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedProject(runtime);
+    const user = userEvent.setup();
+
+    renderEditor(runtime, project, chapter);
+
+    const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "章节正文",
+    });
+    fireEvent.change(editor, {
+      target: { value: "第一章正文，手动保存后的新内容。", selectionStart: 16 },
+    });
+    await user.click(await screen.findByRole("button", { name: "保存正文" }));
+
+    await waitFor(async () => {
+      const snapshot = await runtime.taskCenter.load();
+      const task = snapshot.tasks.find(({ type }) => type === "story.accepted-version.process");
+      expect(task?.status).toBe("succeeded");
+      expect(task?.metadata).toMatchObject({
+        projectId: project.id,
+        chapterId: chapter.id,
+        source: "manual_save",
+        acceptedCharacterCount: 16,
+      });
+    });
+
+    const versions = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    expect(
+      versions.ok && versions.value.some((version) => version.toSnapshot().reason === "manual"),
+    ).toBe(true);
+  });
 });
+
+function createNativeEditorRuntime(): DesktopRuntime {
+  const runtime = createDevelopmentRuntime(window.localStorage);
+  const modelGateway: NativeModelGatewayClient = {
+    available: true,
+    generate: () => Promise.reject(new Error("not used")),
+    listModels: () => Promise.reject(new Error("not used")),
+    checkConnection: () => Promise.reject(new Error("not used")),
+    embed: () => Promise.reject(new Error("not used")),
+    cancelGeneration: () => Promise.resolve(false),
+  };
+  return Object.freeze({ ...runtime, mode: "tauri", modelGateway });
+}
 
 function renderEditor(runtime: DesktopRuntime, project: Project, chapter: Chapter) {
   return render(

@@ -1412,6 +1412,8 @@ function pushGateFailureCode(reason: ProjectionOperationPushGate["reason"]): str
       return "SYNC_DEVICE_AUTHORITY_CHANGED";
     case "operation_unbound":
       return "SYNC_PROJECTION_AUTHORITY_MISSING";
+    case "chapter_local_only":
+      return "PRIVATE_CHAPTER_LOCAL_ONLY";
     case "authority_mismatch":
       return "SYNC_PROJECTION_AUTHORITY_CHANGED";
   }

@@ -1,3 +1,4 @@
+mod automatic_backup;
 mod cloud_session;
 mod local_migrations;
 mod model_gateway;
@@ -8,6 +9,13 @@ mod project_keys;
 mod secure_updater;
 mod system_capacity;
 
+use automatic_backup::{
+    native_automatic_backup_acquire_lease, native_automatic_backup_cleanup_failed_creation,
+    native_automatic_backup_delete_file, native_automatic_backup_inspect_file,
+    native_automatic_backup_inspect_root, native_automatic_backup_prepare_destination,
+    native_automatic_backup_read_manifest, native_automatic_backup_release_lease,
+    native_automatic_backup_write_manifest,
+};
 use cloud_session::{
     accept_current_device_team_project_key_envelope_from_cloud, clear_cloud_session,
     get_cloud_session_status, inspect_stored_team_project_key_receipt, login_cloud_identity,
@@ -17,8 +25,9 @@ use cloud_session::{
 };
 use model_gateway::{
     cancel_native_generation, check_native_model_connection, choose_native_image_destination,
-    embed_native_model, generate_native_image_to_file, list_native_models, rerank_native_model,
-    start_native_generation, CommandError, ModelGatewayState, NativeImageDestinationState,
+    embed_native_model, generate_native_image_to_file, list_native_models,
+    reconcile_native_model_dispatch_leases, rerank_native_model, start_native_generation,
+    CommandError, ModelGatewayState, NativeImageDestinationState,
 };
 use native_sqlite::{
     native_choose_backup_destination, native_choose_pre_restore_backup_destination,
@@ -186,6 +195,15 @@ pub fn run() {
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            native_automatic_backup_inspect_root,
+            native_automatic_backup_acquire_lease,
+            native_automatic_backup_release_lease,
+            native_automatic_backup_read_manifest,
+            native_automatic_backup_write_manifest,
+            native_automatic_backup_prepare_destination,
+            native_automatic_backup_inspect_file,
+            native_automatic_backup_delete_file,
+            native_automatic_backup_cleanup_failed_creation,
             get_runtime_info,
             native_choose_backup_destination,
             native_choose_restore_source,
@@ -214,6 +232,7 @@ pub fn run() {
             generate_native_image_to_file,
             start_native_generation,
             cancel_native_generation,
+            reconcile_native_model_dispatch_leases,
             create_device_identity,
             get_device_identity_status,
             generate_project_data_key,

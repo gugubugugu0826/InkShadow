@@ -33,6 +33,21 @@ const statusLabels: Record<ProjectStatus, string> = {
   trashed: "回收站",
 };
 
+const ALL_PROJECT_STATUSES = ["active", "archived", "trashed"] as const;
+const IMPORT_JOURNEY_STORAGE_KEY = "inkshadow.import-rewrite-journey.v2";
+
+interface ImportJourneyLibraryProjection {
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly chapterCount: number;
+  readonly analysisCompleted: boolean;
+  readonly analysisFinishedJobs: number;
+  readonly analysisTotalJobs: number;
+  readonly hasRewriteTarget: boolean;
+  readonly hasTrial: boolean;
+  readonly hasSavedRules: boolean;
+}
+
 function formatDate(value: string): string {
   return new Intl.DateTimeFormat("zh-CN", {
     year: "numeric",
@@ -51,6 +66,10 @@ export function ProjectsPage() {
   const [status, setStatus] = useState<ProjectStatus>("active");
   const [search, setSearch] = useState("");
   const [projects, setProjects] = useState<readonly Project[]>([]);
+  const [allProjects, setAllProjects] = useState<readonly Project[]>([]);
+  const [importJourney, setImportJourney] = useState<ImportJourneyLibraryProjection | null>(() =>
+    readImportJourneyProjection(),
+  );
   const [pageState, setPageState] = useState<"loading" | "ready" | "empty" | "fatal_error">(
     "loading",
   );
@@ -63,16 +82,20 @@ export function ProjectsPage() {
   const [renameName, setRenameName] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
   const [renameSubmitting, setRenameSubmitting] = useState(false);
+  const [trashTarget, setTrashTarget] = useState<Project | null>(null);
   const [pendingProjectId, setPendingProjectId] = useState<string | null>(null);
 
   const loadProjects = useCallback(async () => {
     const requestId = loadRequestRef.current + 1;
     loadRequestRef.current = requestId;
     setPageState("loading");
-    const result = await runtime.useCases.listProjects.execute({
-      statuses: [status],
-      search,
-    });
+    const [result, libraryResult] = await Promise.all([
+      runtime.useCases.listProjects.execute({
+        statuses: [status],
+        search,
+      }),
+      runtime.useCases.listProjects.execute({ statuses: ALL_PROJECT_STATUSES }),
+    ]);
     if (requestId !== loadRequestRef.current) {
       return;
     }
@@ -81,7 +104,14 @@ export function ProjectsPage() {
       setPageState("fatal_error");
       return;
     }
+    if (!libraryResult.ok) {
+      setLoadError(libraryResult.error);
+      setPageState("fatal_error");
+      return;
+    }
     setProjects(result.value);
+    setAllProjects(libraryResult.value);
+    setImportJourney(readImportJourneyProjection());
     setLoadError(null);
     setPageState(result.value.length === 0 ? "empty" : "ready");
   }, [runtime, search, status]);
@@ -113,7 +143,7 @@ export function ProjectsPage() {
   async function runLifecycleAction(
     project: Project,
     action: "archive" | "unarchive" | "trash" | "restore",
-  ): Promise<void> {
+  ): Promise<boolean> {
     setPendingProjectId(project.id);
     const result =
       action === "archive"
@@ -127,7 +157,7 @@ export function ProjectsPage() {
     if (!result.ok) {
       setLoadError(result.error);
       setPageState("fatal_error");
-      return;
+      return false;
     }
     const actionMessages = {
       archive: { title: "项目已归档", description: "项目保持可读，可随时恢复编辑。" },
@@ -153,6 +183,27 @@ export function ProjectsPage() {
         : {}),
     });
     await loadProjects();
+    return true;
+  }
+
+  async function confirmTrash(): Promise<void> {
+    if (trashTarget === null) {
+      return;
+    }
+    const moved = await runLifecycleAction(trashTarget, "trash");
+    if (moved) {
+      setTrashTarget(null);
+    }
+  }
+
+  async function archiveInsteadOfTrash(): Promise<void> {
+    if (trashTarget?.status !== "active") {
+      return;
+    }
+    const archived = await runLifecycleAction(trashTarget, "archive");
+    if (archived) {
+      setTrashTarget(null);
+    }
   }
 
   function openRenameDialog(project: Project): void {
@@ -181,9 +232,22 @@ export function ProjectsPage() {
   }
 
   const normalizedLoadError = loadError === null ? null : normalizeUiError(loadError);
+  const normalizedSearch = search.trim();
+  const hasSearch = normalizedSearch.length > 0;
+  const completelyEmpty = allProjects.length === 0;
+  const hasArchivedProjects = allProjects.some((project) => project.status === "archived");
+  const hasTrashedProjects = allProjects.some((project) => project.status === "trashed");
+  const resumableImport =
+    importJourney === null
+      ? null
+      : allProjects.some(
+            (project) => project.id === importJourney.projectId && project.status === "active",
+          )
+        ? importJourney
+        : null;
 
   return (
-    <div className="desktop-page">
+    <div className="desktop-page project-library-page">
       <header className="page-heading">
         <div>
           <p className="page-heading__eyebrow">本地创作空间</p>
@@ -232,151 +296,182 @@ export function ProjectsPage() {
         </TabsList>
         {(["active", "archived", "trashed"] as const).map((tabStatus) => (
           <TabsContent key={tabStatus} value={tabStatus}>
-            <PageStateBoundary
-              state={pageState}
-              preserveContent={false}
-              fallbacks={{
-                empty:
-                  tabStatus === "active" && status === "active" && search.length === 0 ? (
-                    <FirstLaunchState
-                      titleId={`first-launch-title-${tabStatus}`}
-                      onCreate={() => setCreateOpen(true)}
-                    />
-                  ) : (
-                    <EmptyState
-                      kind={search.length > 0 ? "no_results" : "no_data"}
-                      title={search.length > 0 ? "没有匹配的项目" : `${statusLabels[status]}为空`}
-                      description={
-                        search.length > 0
-                          ? "尝试缩短搜索词，或切换项目状态。"
-                          : tabStatus === "archived"
-                            ? "还没有归档项目。可返回进行中的项目继续写作。"
-                            : "回收站为空。可返回进行中的项目，或新建一本书。"
-                      }
-                      primaryAction={
-                        search.length > 0
-                          ? { label: "清除搜索", onClick: () => setSearch("") }
-                          : tabStatus === "archived"
-                            ? { label: "查看进行中", onClick: () => setStatus("active") }
-                            : {
-                                label: "新建项目",
-                                onClick: () => {
-                                  setStatus("active");
-                                  setCreateOpen(true);
-                                },
+            {tabStatus === status && (
+              <>
+                {tabStatus === "active" && !hasSearch && resumableImport !== null && (
+                  <ImportJourneyState projection={resumableImport} />
+                )}
+                <PageStateBoundary
+                  state={pageState}
+                  preserveContent={false}
+                  fallbacks={{
+                    empty:
+                      tabStatus === "active" &&
+                      status === "active" &&
+                      !hasSearch &&
+                      completelyEmpty ? (
+                        <FirstLaunchState titleId={`first-launch-title-${tabStatus}`} />
+                      ) : (
+                        <EmptyState
+                          kind={hasSearch ? "no_results" : "no_data"}
+                          title={
+                            hasSearch
+                              ? `没有与“${normalizedSearch}”匹配的作品`
+                              : status === "active"
+                                ? "没有进行中的作品"
+                                : `${statusLabels[status]}为空`
+                          }
+                          description={
+                            hasSearch
+                              ? "检查是否有错别字，或换个名称试试。归档作品不会出现在当前列表中。"
+                              : tabStatus === "active"
+                                ? hasArchivedProjects
+                                  ? "作品已保存在归档中，可以随时恢复编辑。"
+                                  : hasTrashedProjects
+                                    ? "作品仍在回收站保留 30 天，可以恢复后继续写作。"
+                                    : "从一个想法开始，或导入已有小说。"
+                                : tabStatus === "archived"
+                                  ? "还没有归档项目。可返回进行中的项目继续写作。"
+                                  : "回收站为空。可返回进行中的项目，或新建一本书。"
+                          }
+                          primaryAction={
+                            hasSearch
+                              ? { label: "清除搜索", onClick: () => setSearch("") }
+                              : tabStatus === "active" && hasArchivedProjects
+                                ? { label: "查看归档", onClick: () => setStatus("archived") }
+                                : tabStatus === "active" && hasTrashedProjects
+                                  ? { label: "查看回收站", onClick: () => setStatus("trashed") }
+                                  : tabStatus === "archived"
+                                    ? { label: "查看进行中", onClick: () => setStatus("active") }
+                                    : {
+                                        label: "新建项目",
+                                        onClick: () => {
+                                          setStatus("active");
+                                          setCreateOpen(true);
+                                        },
+                                      }
+                          }
+                          {...(hasSearch
+                            ? {
+                                secondaryAction:
+                                  status === "archived"
+                                    ? { label: "查看进行中", onClick: () => setStatus("active") }
+                                    : { label: "查看归档", onClick: () => setStatus("archived") },
                               }
-                      }
-                    />
-                  ),
-                fatal_error:
-                  normalizedLoadError === null ? undefined : (
-                    <ErrorState
-                      title={normalizedLoadError.title}
-                      description={normalizedLoadError.description}
-                      errorCode={normalizedLoadError.code}
-                      primaryAction={{ label: "重试", onClick: () => void loadProjects() }}
-                    />
-                  ),
-              }}
-            >
-              <div className="project-grid">
-                {projects.map((project) => {
-                  const snapshot = project.toSnapshot();
-                  const pending = pendingProjectId === project.id;
-                  return (
-                    <Card key={project.id}>
-                      <CardHeader>
-                        <div className="card-heading-row">
-                          <CardTitle headingLevel={2}>{project.name}</CardTitle>
-                          <Badge
-                            tone={
-                              project.status === "active"
-                                ? "success"
-                                : project.status === "trashed"
-                                  ? "danger"
-                                  : "neutral"
-                            }
-                          >
-                            {statusLabels[project.status]}
-                          </Badge>
-                        </div>
-                      </CardHeader>
-                      <CardContent>
-                        <p className="project-meta">
-                          更新于{" "}
-                          <time dateTime={snapshot.updatedAt}>
-                            {formatDate(snapshot.updatedAt)}
-                          </time>
-                        </p>
-                        {project.retentionUntil !== null && (
-                          <p className="project-retention">
-                            可恢复至{" "}
-                            <time dateTime={project.retentionUntil}>
-                              {formatDate(project.retentionUntil)}
-                            </time>
-                          </p>
-                        )}
-                      </CardContent>
-                      <CardFooter>
-                        {project.status !== "trashed" && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            disabled={pending}
-                            onClick={() => openRenameDialog(project)}
-                          >
-                            重命名
-                          </Button>
-                        )}
-                        {project.status !== "trashed" && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            loading={pending}
-                            onClick={() => void runLifecycleAction(project, "trash")}
-                          >
-                            移到回收站
-                          </Button>
-                        )}
-                        {project.status === "active" && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            loading={pending}
-                            onClick={() => void runLifecycleAction(project, "archive")}
-                          >
-                            归档
-                          </Button>
-                        )}
-                        {project.status === "archived" && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            loading={pending}
-                            onClick={() => void runLifecycleAction(project, "unarchive")}
-                          >
-                            恢复编辑
-                          </Button>
-                        )}
-                        {project.status === "trashed" ? (
-                          <Button
-                            size="sm"
-                            loading={pending}
-                            onClick={() => void runLifecycleAction(project, "restore")}
-                          >
-                            恢复
-                          </Button>
-                        ) : (
-                          <Link className="button-link" to={`/projects/${project.id}`}>
-                            打开
-                          </Link>
-                        )}
-                      </CardFooter>
-                    </Card>
-                  );
-                })}
-              </div>
-            </PageStateBoundary>
+                            : {})}
+                        />
+                      ),
+                    fatal_error:
+                      normalizedLoadError === null ? undefined : (
+                        <ErrorState
+                          title={normalizedLoadError.title}
+                          description={normalizedLoadError.description}
+                          errorCode={normalizedLoadError.code}
+                          primaryAction={{ label: "重试", onClick: () => void loadProjects() }}
+                        />
+                      ),
+                  }}
+                >
+                  <div className="project-grid">
+                    {projects.map((project) => {
+                      const snapshot = project.toSnapshot();
+                      const pending = pendingProjectId === project.id;
+                      return (
+                        <Card key={project.id}>
+                          <CardHeader>
+                            <div className="card-heading-row">
+                              <CardTitle headingLevel={2}>{project.name}</CardTitle>
+                              <Badge
+                                tone={
+                                  project.status === "active"
+                                    ? "success"
+                                    : project.status === "trashed"
+                                      ? "danger"
+                                      : "neutral"
+                                }
+                              >
+                                {statusLabels[project.status]}
+                              </Badge>
+                            </div>
+                          </CardHeader>
+                          <CardContent>
+                            <p className="project-meta">
+                              更新于{" "}
+                              <time dateTime={snapshot.updatedAt}>
+                                {formatDate(snapshot.updatedAt)}
+                              </time>
+                            </p>
+                            {project.retentionUntil !== null && (
+                              <p className="project-retention">
+                                可恢复至{" "}
+                                <time dateTime={project.retentionUntil}>
+                                  {formatDate(project.retentionUntil)}
+                                </time>
+                              </p>
+                            )}
+                          </CardContent>
+                          <CardFooter>
+                            {project.status !== "trashed" && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={pending}
+                                onClick={() => openRenameDialog(project)}
+                              >
+                                重命名
+                              </Button>
+                            )}
+                            {project.status !== "trashed" && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                loading={pending}
+                                onClick={() => setTrashTarget(project)}
+                              >
+                                移到回收站
+                              </Button>
+                            )}
+                            {project.status === "active" && (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                loading={pending}
+                                onClick={() => void runLifecycleAction(project, "archive")}
+                              >
+                                归档
+                              </Button>
+                            )}
+                            {project.status === "archived" && (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                loading={pending}
+                                onClick={() => void runLifecycleAction(project, "unarchive")}
+                              >
+                                恢复编辑
+                              </Button>
+                            )}
+                            {project.status === "trashed" ? (
+                              <Button
+                                size="sm"
+                                loading={pending}
+                                onClick={() => void runLifecycleAction(project, "restore")}
+                              >
+                                恢复
+                              </Button>
+                            ) : (
+                              <Link className="button-link" to={`/projects/${project.id}`}>
+                                打开
+                              </Link>
+                            )}
+                          </CardFooter>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                </PageStateBoundary>
+              </>
+            )}
           </TabsContent>
         ))}
       </Tabs>
@@ -422,6 +517,48 @@ export function ProjectsPage() {
             />
           )}
         </FormField>
+      </Dialog>
+
+      <Dialog
+        open={trashTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && pendingProjectId === null) {
+            setTrashTarget(null);
+          }
+        }}
+        title={trashTarget === null ? "移到回收站？" : `将《${trashTarget.name}》移到回收站？`}
+        description="30 天内可以从回收站恢复。你也可以先归档，保留作品并让进行中列表更清爽。"
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              disabled={pendingProjectId !== null}
+              onClick={() => setTrashTarget(null)}
+            >
+              取消
+            </Button>
+            {trashTarget?.status === "active" && (
+              <Button
+                variant="secondary"
+                loading={pendingProjectId === trashTarget.id}
+                onClick={() => void archiveInsteadOfTrash()}
+              >
+                改为归档
+              </Button>
+            )}
+            <Button
+              variant="danger"
+              loading={trashTarget !== null && pendingProjectId === trashTarget.id}
+              onClick={() => void confirmTrash()}
+            >
+              移到回收站
+            </Button>
+          </>
+        }
+      >
+        <p className="project-library-page__trash-note">
+          这不是永久删除：正文、版本和 AI 建议会一起保留到恢复期限。取消不会改变任何内容。
+        </p>
       </Dialog>
 
       <Dialog
@@ -473,43 +610,26 @@ export function ProjectsPage() {
   );
 }
 
-function FirstLaunchState({
-  onCreate,
-  titleId,
-}: {
-  readonly onCreate: () => void;
-  readonly titleId: string;
-}) {
+function FirstLaunchState({ titleId }: { readonly titleId: string }) {
   return (
     <section className="first-launch" aria-labelledby={titleId}>
       <div className="first-launch__heading">
         <Badge tone="success">无需注册</Badge>
-        <h2 id={titleId}>从本地开始创作</h2>
-        <p>项目与正文默认仅保存在此设备；断网也能创建、编辑、恢复和导出。</p>
+        <h2 id={titleId}>还没有作品</h2>
+        <p>从一个想法开始，或导入已有小说。所有数据只存在这台电脑。</p>
       </div>
       <div className="first-launch__actions">
         <Card>
           <CardHeader>
-            <CardTitle>从构思开始</CardTitle>
+            <CardTitle>从一个想法开始</CardTitle>
           </CardHeader>
           <CardContent>
-            <p>通过固定九步完成或明确跳过关键决定，再原子创建项目与开篇骨架。</p>
+            <p>只写一句灵感，AI 会先给出一段可以继续修改的开头。</p>
           </CardContent>
           <CardFooter>
-            <Link className="button-link" to="/ideation">
-              开书构思
+            <Link className="button-link" to="/create/idea">
+              从想法开始
             </Link>
-          </CardFooter>
-        </Card>
-        <Card>
-          <CardHeader>
-            <CardTitle>创建本地项目</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p>从空白长篇开始，随后可手工建立大纲和第一章。</p>
-          </CardContent>
-          <CardFooter>
-            <Button onClick={onCreate}>创建空白项目</Button>
           </CardFooter>
         </Card>
         <Card>
@@ -517,28 +637,118 @@ function FirstLaunchState({
             <CardTitle>导入已有作品</CardTitle>
           </CardHeader>
           <CardContent>
-            <p>先安全预检 TXT、Markdown 或 InkShadow Bundle，再一次性写入全部章节。</p>
+            <p>先安全保留原作，再分析、试改和逐章确认；不会静默覆盖原文。</p>
           </CardContent>
           <CardFooter>
-            <Link className="button-link" to="/settings#data-transfer">
-              选择文件
-            </Link>
-          </CardFooter>
-        </Card>
-        <Card>
-          <CardHeader>
-            <CardTitle>恢复备份</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p>桌面版会先创建当前数据的回滚副本，再原子恢复本地数据库（SQLite）备份。</p>
-          </CardContent>
-          <CardFooter>
-            <Link className="button-link" to="/settings#local-maintenance">
-              打开恢复工具
+            <Link className="button-link" to="/create/import">
+              导入已有小说
             </Link>
           </CardFooter>
         </Card>
       </div>
     </section>
   );
+}
+
+function ImportJourneyState({
+  projection,
+}: {
+  readonly projection: ImportJourneyLibraryProjection;
+}) {
+  const analysisLabel = projection.analysisCompleted
+    ? "已完成"
+    : projection.analysisTotalJobs > 0
+      ? `已保存 ${String(projection.analysisFinishedJobs)}/${String(projection.analysisTotalJobs)} 项，待继续`
+      : "待开始";
+  const finalStepLabel = projection.hasSavedRules
+    ? "规则已保存，可继续逐章"
+    : projection.hasTrial
+      ? "试改已保存，待确认规则"
+      : projection.hasRewriteTarget
+        ? "目标已保存，待试改"
+        : "待填写改写目标";
+
+  return (
+    <section
+      className="project-library-page__import-state"
+      aria-labelledby="project-library-import-title"
+    >
+      <div className="project-library-page__import-heading">
+        <div>
+          <p className="project-library-page__section-label">可继续的导入流程</p>
+          <h2 id="project-library-import-title">《{projection.projectName}》</h2>
+          <p>已安全导入 {String(projection.chapterCount)} 个章节，原文保持不变。</p>
+        </div>
+        <Link className="button-link" to="/create/import">
+          继续导入改写
+        </Link>
+      </div>
+      <ol className="project-library-page__import-steps" aria-label="已保存的导入步骤">
+        <li data-state="complete">
+          <span>1　安全导入原作</span>
+          <strong>已完成</strong>
+        </li>
+        <li data-state={projection.analysisCompleted ? "complete" : "current"}>
+          <span>2　分析作品</span>
+          <strong>{analysisLabel}</strong>
+        </li>
+        <li data-state={projection.hasSavedRules ? "complete" : "pending"}>
+          <span>3　试改、确认规则并逐章处理</span>
+          <strong>{finalStepLabel}</strong>
+        </li>
+      </ol>
+      <p className="project-library-page__import-limit">
+        这里仅显示已经保存在本机的步骤。文件读取和安全解析的实时进度只在导入页显示；离开后不会猜测百分比。
+      </p>
+    </section>
+  );
+}
+
+function readImportJourneyProjection(): ImportJourneyLibraryProjection | null {
+  try {
+    const serialized = window.localStorage.getItem(IMPORT_JOURNEY_STORAGE_KEY);
+    if (serialized === null) return null;
+    const parsed: unknown = JSON.parse(serialized);
+    if (!isRecord(parsed) || !isRecord(parsed.importedWork)) return null;
+    const importedWork = parsed.importedWork;
+    if (
+      typeof importedWork.projectId !== "string" ||
+      typeof importedWork.projectName !== "string" ||
+      importedWork.projectName.trim().length === 0 ||
+      typeof importedWork.chapterCount !== "number" ||
+      !Number.isSafeInteger(importedWork.chapterCount) ||
+      importedWork.chapterCount < 1
+    ) {
+      return null;
+    }
+
+    const workAnalysis = isRecord(parsed.workAnalysis) ? parsed.workAnalysis : null;
+    const jobs = workAnalysis !== null && Array.isArray(workAnalysis.jobs) ? workAnalysis.jobs : [];
+    const finishedJobs = jobs.filter(
+      (job) => isRecord(job) && (job.status === "ready" || job.status === "skipped"),
+    ).length;
+
+    return {
+      projectId: importedWork.projectId,
+      projectName: importedWork.projectName.trim().slice(0, 120),
+      chapterCount: importedWork.chapterCount,
+      analysisCompleted:
+        workAnalysis !== null &&
+        typeof workAnalysis.completedAt === "string" &&
+        workAnalysis.completedAt.length > 0,
+      analysisFinishedJobs: finishedJobs,
+      analysisTotalJobs: jobs.length,
+      hasRewriteTarget:
+        (typeof parsed.goal === "string" && parsed.goal.trim().length > 0) ||
+        (Array.isArray(parsed.selectedPresetIds) && parsed.selectedPresetIds.length > 0),
+      hasTrial: isRecord(parsed.trial),
+      hasSavedRules: typeof parsed.rulesSavedAt === "string" && parsed.rulesSavedAt.length > 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

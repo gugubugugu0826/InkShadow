@@ -36,6 +36,18 @@ const migration = [
     new URL("../migrations/0017_sync_projection_account_authority.sql", import.meta.url),
     "utf8",
   ),
+  `ALTER TABLE chapters ADD COLUMN privacy_mode TEXT NOT NULL DEFAULT 'standard'
+     CHECK (privacy_mode IN ('standard', 'local_only'));
+   ALTER TABLE chapters ADD COLUMN privacy_revision INTEGER NOT NULL DEFAULT 1
+     CHECK (privacy_revision >= 1);`,
+  readFileSync(
+    new URL("../migrations/0048_candidate_application_intents.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0050_candidate_revision_authority.sql", import.meta.url),
+    "utf8",
+  ),
 ].join("\n");
 
 const ACCOUNT_ID = uuid(900);
@@ -67,6 +79,24 @@ describe("SQLite business commits project durable sync jobs atomically", () => {
     await seedRegistration(project.id, "disabled");
 
     const fixture = makeChapter(project, 10, 11, "Local plaintext");
+    const receipt = expectOk(
+      await repositories.contentCommits.createChapter({
+        chapter: fixture.chapter,
+        initialVersion: fixture.initialVersion,
+      }),
+    );
+
+    expect(receipt).toEqual({ syncQueued: false });
+    expect(ids.calls).toBe(0);
+    expect(projectionRows()).toEqual([]);
+  });
+
+  it("never allocates a projection job for a local-only chapter", async () => {
+    const project = makeProject(1, "Private chapter", 0);
+    expectOk(await repositories.projects.create(project));
+    await seedRegistration(project.id, "enabled");
+    const fixture = makeChapter(project, 10, 11, "Local plaintext", "local_only");
+
     const receipt = expectOk(
       await repositories.contentCommits.createChapter({
         chapter: fixture.chapter,
@@ -332,6 +362,7 @@ describe("SQLite business commits project durable sync jobs atomically", () => {
         candidate: acceptedCandidate,
         expectedChapterRevision: 1,
         expectedCandidateStatus: "ready",
+        expectedCandidateRevision: readyCandidate.revision,
       }),
     );
     const acceptedJob = projectionRows().find(
@@ -565,6 +596,7 @@ function makeChapter(
   chapterIdSequence: number,
   versionIdSequence: number,
   content: string,
+  privacyMode: "standard" | "local_only" = "standard",
 ): { readonly chapter: Chapter; readonly initialVersion: ChapterVersion } {
   const chapterId = uuid(chapterIdSequence);
   const versionId = uuid(versionIdSequence);
@@ -574,6 +606,7 @@ function makeChapter(
       projectId: project.id,
       title: "Chapter title",
       content,
+      privacyMode,
       initialVersionId: versionId,
       now: atMinute(1),
     }),

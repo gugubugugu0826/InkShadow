@@ -2,6 +2,7 @@ export * from "./entities/ai-candidate.js";
 export * from "./entities/chapter-version.js";
 export * from "./entities/chapter.js";
 export * from "./entities/project.js";
+export * from "./entities/project-seed.js";
 export * from "./entities/recovery-draft.js";
 export type * from "./ports/clock.js";
 export type * from "./ports/uuid-v7-generator.js";

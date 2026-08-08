@@ -41,6 +41,10 @@ const textEncoderRealm = vi.hoisted(() => {
 const migration = [
   readMigration("0001_core.sql"),
   readMigration("0015_sync_materialization_authority.sql"),
+  `ALTER TABLE chapters ADD COLUMN privacy_mode TEXT NOT NULL DEFAULT 'standard'
+     CHECK (privacy_mode IN ('standard', 'local_only'));
+   ALTER TABLE chapters ADD COLUMN privacy_revision INTEGER NOT NULL DEFAULT 1
+     CHECK (privacy_revision >= 1);`,
 ].join("\n");
 
 const PROJECT_ID = id(1);
@@ -139,6 +143,52 @@ describe("ContentSyncMaterializer", () => {
     ).toEqual([
       { id: VERSION_ONE_ID, sequence: 1 },
       { id: VERSION_TWO_ID, sequence: 2 },
+    ]);
+  });
+
+  it("does not overwrite a local-only chapter with an incoming cloud version", async () => {
+    const project = await buildUpsertWork(projectPayload(), DEVICE_ID, 1);
+    const versionOne = await buildUpsertWork(
+      await chapterPayload({
+        versionId: VERSION_ONE_ID,
+        sequence: 1,
+        parentVersionId: null,
+        content: "private local text",
+        updatedAt: CREATED_AT,
+      }),
+      DEVICE_ID,
+      1,
+    );
+    const versionTwo = await buildUpsertWork(
+      await chapterPayload({
+        versionId: VERSION_TWO_ID,
+        sequence: 2,
+        parentVersionId: VERSION_ONE_ID,
+        content: "remote replacement",
+        updatedAt: VERSION_TWO_AT,
+      }),
+      OTHER_DEVICE_ID,
+      1,
+    );
+    expect((await apply(project)).status).toBe("applied");
+    expect((await apply(versionOne)).status).toBe("applied");
+    await executor.execute(
+      "UPDATE chapters SET privacy_mode = 'local_only', privacy_revision = 2 WHERE id = ?",
+      [CHAPTER_ID],
+    );
+
+    await expect(apply(versionTwo)).resolves.toMatchObject({
+      status: "skipped",
+      reason: "local_only",
+    });
+    await expect(
+      executor.select<{ content: string; versionId: string; privacyMode: string }>(
+        `SELECT content, current_version_id AS versionId, privacy_mode AS privacyMode
+         FROM chapters WHERE id = ?`,
+        [CHAPTER_ID],
+      ),
+    ).resolves.toEqual([
+      { content: "private local text", versionId: VERSION_ONE_ID, privacyMode: "local_only" },
     ]);
   });
 

@@ -106,7 +106,8 @@ export type ProjectionOperationPushGateReason =
   | "account_mismatch"
   | "device_mismatch"
   | "operation_unbound"
-  | "authority_mismatch";
+  | "authority_mismatch"
+  | "chapter_local_only";
 
 export interface ProjectionOperationPushGateInput {
   readonly projectId: string;
@@ -550,6 +551,10 @@ interface PushFencePendingCountsDbRow {
 
 interface UnacknowledgedOutboxCountDbRow {
   readonly count: number;
+}
+
+interface ChapterPrivacyDbRow {
+  readonly privacy_mode: string;
 }
 
 export class SyncMaterializationSqliteStore {
@@ -1496,6 +1501,28 @@ async function evaluateProjectionOperationPushGate(
     };
   }
   const job = rehydrateProjectionJob(rows[0]);
+  if (job.objectType === "chapter_version" && job.projectionKind === "upsert") {
+    const privacyRows = await executor.select<ChapterPrivacyDbRow>(
+      `SELECT privacy_mode
+       FROM chapters
+       WHERE id = ? AND project_id = ?`,
+      [job.objectId, job.projectId],
+    );
+    if (privacyRows.length !== 1) {
+      return {
+        allowed: false,
+        reason: "operation_unbound",
+        registrationRevision: registration.revision,
+      };
+    }
+    if (privacyRows[0]?.privacy_mode === "local_only") {
+      return {
+        allowed: false,
+        reason: "chapter_local_only",
+        registrationRevision: registration.revision,
+      };
+    }
+  }
   if (
     job.accountId !== registration.accountId ||
     job.deviceId !== registration.deviceId ||

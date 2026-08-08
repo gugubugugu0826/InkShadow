@@ -190,7 +190,7 @@ describe("AppShell", () => {
     const originalMatchMedia = window.matchMedia;
     window.matchMedia = vi.fn().mockReturnValue({
       matches: true,
-      media: "(max-width: 59.9375rem)",
+      media: "(max-width: 39.9375rem)",
       onchange: null,
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),

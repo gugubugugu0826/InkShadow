@@ -26,6 +26,7 @@ describe("ModelHubImageGenerationPanel", () => {
       prompt: "月色下的旧书店",
       destination: { ticket: "a".repeat(64), fileName: "illustration.png" },
       acknowledgedCostAndPrivacy: true,
+      expectedConfirmationFingerprint: "f".repeat(64),
     });
     expect(await screen.findByText(/不会自动插入正文/u)).toBeInTheDocument();
     expect(screen.getByText(/实际调用：openai/u)).toBeInTheDocument();
@@ -110,5 +111,6 @@ function inspection(): ModelHubImageGenerationInspection {
     maximumPromptCharacters: 1_000,
     outputFormat: "png",
     usedFallback: false,
+    confirmationFingerprint: "f".repeat(64),
   };
 }

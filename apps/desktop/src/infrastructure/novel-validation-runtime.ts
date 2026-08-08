@@ -34,6 +34,21 @@ export const CHAPTER_VALIDATION_UI_ACTIONS = ["ignore", "allow", "update_setting
 export type ChapterValidationUiAction = (typeof CHAPTER_VALIDATION_UI_ACTIONS)[number];
 
 export const CHAPTER_VALIDATION_RESOLUTION_SCHEMA = "inkshadow.chapter-validation-resolution.v1";
+export const CHAPTER_SUPPLEMENTAL_FINDING_RESOLUTION_SCHEMA =
+  "inkshadow.chapter-supplemental-finding-resolution.v1";
+export const CHAPTER_SUPPLEMENTAL_FINDING_ACTIONS = ["ignore", "allow"] as const;
+export type ChapterSupplementalFindingAction =
+  (typeof CHAPTER_SUPPLEMENTAL_FINDING_ACTIONS)[number];
+export const CHAPTER_SUPPLEMENTAL_FINDING_CATEGORIES = [
+  "character_voice",
+  "pov_knowledge",
+  "plotline",
+  "time_location",
+  "foreshadow",
+  "pacing_quality",
+] as const;
+export type ChapterSupplementalFindingCategory =
+  (typeof CHAPTER_SUPPLEMENTAL_FINDING_CATEGORIES)[number];
 
 export const CHAPTER_VALIDATION_ADAPTER_SKIP_REASONS = [
   "chapter_not_found",
@@ -57,6 +72,9 @@ export const CHAPTER_VALIDATION_ADAPTER_SKIP_REASONS = [
   "evidence_span_mismatch",
   "evidence_hash_mismatch",
   "validator_input_rejected",
+  "pov_knowledge_source_incomplete",
+  "pov_knowledge_source_unverified",
+  "pov_knowledge_source_inactive",
 ] as const;
 
 export type ChapterValidationAdapterSkipReason =
@@ -67,6 +85,30 @@ export interface ChapterValidationSkippedFact {
   readonly role: ValidationFactRole | null;
   readonly reason: ChapterValidationAdapterSkipReason;
   readonly missingRequirements: readonly string[];
+}
+
+export const CHAPTER_VALIDATION_COVERAGE_CATEGORIES = DETERMINISTIC_NOVEL_FACT_TYPES;
+export type ChapterValidationCoverageCategory = DeterministicNovelFactType;
+export type ChapterValidationCoverageStatus = "checked" | "not_checked";
+export type ChapterValidationCoverageReason =
+  | "explicit_claim_compared"
+  | "current_claim_missing"
+  | "confirmed_reference_or_rule_missing"
+  | "no_comparable_source";
+
+/**
+ * Category-level truth about what the deterministic run actually compared.
+ * `checked` never means every possible fact of that category was exhaustively
+ * extracted; it only means at least one explicit current claim had an
+ * overlapping confirmed reference or locked rule.
+ */
+export interface ChapterValidationCoverageItem {
+  readonly category: ChapterValidationCoverageCategory;
+  readonly status: ChapterValidationCoverageStatus;
+  readonly reason: ChapterValidationCoverageReason;
+  readonly currentClaimCount: number;
+  readonly comparableReferenceCount: number;
+  readonly applicableHardRuleCount: number;
 }
 
 export interface ChapterValidationUiEvidence {
@@ -154,6 +196,8 @@ export interface ChapterNovelValidationResult {
     readonly referenceFacts: number;
     readonly hardRules: number;
   }>;
+  /** Missing only on legacy v1 snapshots created before coverage was recorded. */
+  readonly coverage?: readonly ChapterValidationCoverageItem[];
   readonly capabilities: Readonly<{
     readonly deterministicValidation: "ready";
     readonly naturalLanguageInference: "disabled";
@@ -178,8 +222,15 @@ export interface ChapterNovelValidationRuntimeDependencies {
     ContinuousStoryStateProjectionAdapter,
     "projectValidationFacts"
   >;
+  readonly supplementalFindingVerifier?: ChapterSupplementalFindingVerificationPort;
   readonly mutations?: Readonly<{
-    readonly factService: Pick<StoryFactApplicationService, "createFormalUserFact" | "deprecate">;
+    readonly factService: Pick<
+      StoryFactApplicationService,
+      | "createFormalUserFact"
+      | "createFormalUserFactWithAuthorityFence"
+      | "deprecate"
+      | "deprecateSupplementalResolutionWithAuthorityFence"
+    >;
     readonly actorId: string;
   }>;
 }
@@ -210,6 +261,51 @@ export interface ChapterValidationResolutionReceipt {
     readonly sourceKind: "chapter_span" | "review_decision";
     readonly humanConfirmed: true;
   }>;
+}
+
+export interface ChapterSupplementalFindingResolutionSummary {
+  readonly findingId: string;
+  readonly category: ChapterSupplementalFindingCategory;
+  readonly action: ChapterSupplementalFindingAction;
+  readonly evidenceSignature: string;
+  readonly factId: string;
+  readonly factRevision: number;
+  readonly chapterId: string;
+  readonly chapterVersionId: string;
+  readonly decidedAt: string;
+}
+
+export interface ResolveChapterSupplementalFindingCommand extends ChapterNovelValidationRequest {
+  readonly expectedChapterVersionId: UuidV7;
+  readonly findingId: string;
+  readonly category: ChapterSupplementalFindingCategory;
+  readonly evidenceSignature: string;
+  readonly action: ChapterSupplementalFindingAction;
+  readonly humanConfirmed: boolean;
+}
+
+export type ChapterSupplementalFindingVerificationRequest = Omit<
+  ResolveChapterSupplementalFindingCommand,
+  "action" | "humanConfirmed"
+>;
+
+export interface ChapterSupplementalFindingVerificationPort {
+  isCurrentFinding(request: ChapterSupplementalFindingVerificationRequest): Promise<boolean>;
+}
+
+export interface UndoChapterSupplementalFindingCommand extends ChapterNovelValidationRequest {
+  readonly expectedChapterVersionId: UuidV7;
+  readonly findingId: string;
+  readonly evidenceSignature: string;
+  readonly resolutionFactId: string;
+  readonly expectedResolutionFactRevision: number;
+  readonly humanConfirmed: boolean;
+}
+
+export interface ChapterSupplementalFindingUndoReceipt {
+  readonly resolutionFactId: string;
+  readonly resolutionFactRevision: number;
+  readonly idempotent: boolean;
 }
 
 export type ChapterNovelValidationRuntimeErrorCode =
@@ -269,6 +365,21 @@ interface ResolutionFactRecord {
   readonly fact: StoryFact;
   readonly snapshot: StoryFactSnapshot;
   readonly metadata: ValidationResolutionMetadata;
+}
+
+interface SupplementalFindingResolutionMetadata {
+  readonly action: ChapterSupplementalFindingAction;
+  readonly findingId: string;
+  readonly category: ChapterSupplementalFindingCategory;
+  readonly chapterId: string;
+  readonly chapterVersionId: string;
+  readonly evidenceSignature: string;
+}
+
+interface SupplementalFindingResolutionRecord {
+  readonly fact: StoryFact;
+  readonly snapshot: StoryFactSnapshot;
+  readonly metadata: SupplementalFindingResolutionMetadata;
 }
 
 export class ChapterNovelValidationRuntime {
@@ -379,6 +490,7 @@ export class ChapterNovelValidationRuntime {
       adapted.validatedResolutionFactIds,
     );
     const activeResolutions = activeResolutionByIssue(resolutions);
+    const coverage = deterministicCoverage(adapted);
 
     const missingRequirements: string[] = [];
     if (adapted.currentClaims.length === 0) {
@@ -388,6 +500,9 @@ export class ChapterNovelValidationRuntime {
     }
     if (adapted.referenceFacts.length === 0 && adapted.hardRules.length === 0) {
       missingRequirements.push("confirmed_reference_fact_or_locked_hard_rule_with_exact_evidence");
+    }
+    if (!coverage.some(({ status }) => status === "checked")) {
+      missingRequirements.push("comparable_current_claim_and_confirmed_source");
     }
     if (missingRequirements.length > 0) {
       return freezeResult({
@@ -402,6 +517,7 @@ export class ChapterNovelValidationRuntime {
         missingRequirements,
         explanation: `Deterministic chapter validation skipped: ${missingRequirements.join(", ")}.`,
         checked: counts(adapted),
+        coverage,
       });
     }
 
@@ -424,9 +540,10 @@ export class ChapterNovelValidationRuntime {
       missingRequirements: [],
       explanation:
         validation.issues.length === 0
-          ? "Deterministic checks found no evidence-backed conflicts."
+          ? "Deterministic checks found no evidence-backed conflicts in the categories that actually ran."
           : `Deterministic checks found ${String(validation.issues.length)} evidence-backed conflict(s).`,
       checked: counts(adapted),
+      coverage,
     });
   }
 
@@ -579,6 +696,223 @@ export class ChapterNovelValidationRuntime {
       );
     }
     return resolutionReceipt(command, deprecated.value.toSnapshot(), "ignore_undone", false);
+  }
+
+  public async listSupplementalFindingResolutions(
+    request: ChapterNovelValidationRequest &
+      Readonly<{ readonly expectedChapterVersionId: UuidV7 }>,
+  ): Promise<readonly ChapterSupplementalFindingResolutionSummary[]> {
+    await this.assertCurrentChapterVersion(request, request.expectedChapterVersionId);
+    const records = await this.findSupplementalFindingResolutionRecords(
+      request,
+      request.expectedChapterVersionId,
+    );
+    return Object.freeze(
+      records
+        .filter(({ snapshot }) => snapshot.status === "formal" && !snapshot.deprecated)
+        .map(supplementalResolutionSummary)
+        .sort(
+          (left, right) =>
+            left.decidedAt.localeCompare(right.decidedAt) ||
+            left.factId.localeCompare(right.factId),
+        ),
+    );
+  }
+
+  public async resolveSupplementalFinding(
+    command: ResolveChapterSupplementalFindingCommand,
+  ): Promise<ChapterSupplementalFindingResolutionSummary> {
+    const mutations = this.requireMutations(command.humanConfirmed, command.branchId);
+    validateSupplementalFindingIdentity(command.findingId, command.evidenceSignature);
+    await this.assertCurrentChapterVersion(command, command.expectedChapterVersionId);
+    await this.assertTrustedSupplementalFinding(command);
+    const records = await this.findSupplementalFindingResolutionRecords(
+      command,
+      command.expectedChapterVersionId,
+    );
+    const active = records.find(
+      ({ metadata, snapshot }) =>
+        metadata.findingId === command.findingId &&
+        metadata.evidenceSignature === command.evidenceSignature &&
+        snapshot.status === "formal" &&
+        !snapshot.deprecated,
+    );
+    if (active !== undefined) {
+      if (active.metadata.action !== command.action) {
+        throw actionFailure(
+          "NOVEL_VALIDATION_ALREADY_RESOLVED",
+          "这条提醒已经用另一种方式处理。请先恢复为待处理状态。",
+          false,
+        );
+      }
+      return supplementalResolutionSummary(active);
+    }
+    const created = await mutations.factService.createFormalUserFactWithAuthorityFence(
+      {
+        projectId: command.projectId,
+        factType: "validation_resolution",
+        contentText:
+          command.action === "ignore"
+            ? `用户忽略了检查提醒：${command.findingId}`
+            : `用户明确允许了检查提醒：${command.findingId}`,
+        structuredValue: Object.freeze({
+          resolutionSchema: CHAPTER_SUPPLEMENTAL_FINDING_RESOLUTION_SCHEMA,
+          resolutionAction: command.action,
+          resolvedFindingId: command.findingId,
+          resolvedFindingCategory: command.category,
+          resolvedChapterId: command.chapterId,
+          resolvedChapterVersionId: command.expectedChapterVersionId,
+          evidenceSignature: command.evidenceSignature,
+        }),
+        source: Object.freeze({
+          kind: "review_decision" as const,
+          reference: `chapter-supplemental-finding:${command.chapterId}:${command.expectedChapterVersionId}:${command.findingId}`,
+        }),
+        actorId: mutations.actorId,
+        lock: command.action === "allow",
+        humanConfirmed: true,
+      },
+      {
+        chapterId: command.chapterId,
+        expectedCurrentVersionId: command.expectedChapterVersionId,
+        requiredCausalEventIds: Object.freeze([]),
+        requiredCharacterIds: Object.freeze([]),
+      },
+    );
+    if (!created.ok) {
+      if (created.error.code === "STORY_FACT_IDEMPOTENCY_CONFLICT") {
+        throw actionFailure(
+          "NOVEL_VALIDATION_ALREADY_RESOLVED",
+          "这条提醒已经在另一窗口用不同方式处理。请重新检查后再继续。",
+          true,
+        );
+      }
+      if (created.error.code === "STORY_FACT_SOURCE_FENCE_FAILED") {
+        throw actionFailure(
+          "NOVEL_VALIDATION_STALE_RESULT",
+          "章节已经保存了新版本。请重新检查后再处理提醒。",
+          true,
+        );
+      }
+      throw actionFailure(
+        "NOVEL_VALIDATION_RESOLUTION_WRITE_FAILED",
+        "提醒的处理结果没有保存成功。正文和正式设定没有改变，请重试。",
+        created.error.retryable,
+      );
+    }
+    const record = toSupplementalFindingResolutionRecord(created.value.fact);
+    if (record === null) {
+      throw actionFailure(
+        "NOVEL_VALIDATION_RESOLUTION_WRITE_FAILED",
+        "提醒的处理记录未通过完整性校验。正文和正式设定没有改变。",
+        false,
+      );
+    }
+    return supplementalResolutionSummary(record);
+  }
+
+  public async undoSupplementalFinding(
+    command: UndoChapterSupplementalFindingCommand,
+  ): Promise<ChapterSupplementalFindingUndoReceipt> {
+    const mutations = this.requireMutations(command.humanConfirmed, command.branchId);
+    validateSupplementalFindingIdentity(command.findingId, command.evidenceSignature);
+    const deprecated =
+      await mutations.factService.deprecateSupplementalResolutionWithAuthorityFence({
+        factId: command.resolutionFactId,
+        expectedProjectId: command.projectId,
+        chapterId: command.chapterId,
+        expectedCurrentVersionId: command.expectedChapterVersionId,
+        findingId: command.findingId,
+        evidenceSignature: command.evidenceSignature,
+        expectedRevision: command.expectedResolutionFactRevision,
+        humanConfirmed: true,
+      });
+    if (!deprecated.ok) {
+      if (deprecated.error.code === "STORY_FACT_SOURCE_FENCE_FAILED") {
+        throw actionFailure(
+          "NOVEL_VALIDATION_STALE_RESULT",
+          "章节已经保存了新版本。请重新检查后再恢复提醒。",
+          true,
+        );
+      }
+      if (
+        deprecated.error.code === "STORY_FACT_NOT_FOUND" ||
+        deprecated.error.code === "STORY_VALIDATION_FAILED" ||
+        deprecated.error.code === "STORY_REVISION_CONFLICT" ||
+        deprecated.error.code === "STORY_FACT_INVALID_TRANSITION"
+      ) {
+        throw actionFailure(
+          "NOVEL_VALIDATION_ISSUE_NOT_FOUND",
+          "这条提醒的处理记录已变化。请重新检查本章。",
+          deprecated.error.retryable,
+        );
+      }
+      throw actionFailure(
+        "NOVEL_VALIDATION_RESOLUTION_WRITE_FAILED",
+        "没有恢复为待处理状态。正文和正式设定没有改变，请重试。",
+        deprecated.error.retryable,
+      );
+    }
+    return Object.freeze({
+      resolutionFactId: deprecated.value.fact.id,
+      resolutionFactRevision: deprecated.value.fact.revision,
+      idempotent: !deprecated.value.deprecated,
+    });
+  }
+
+  private async assertTrustedSupplementalFinding(
+    request: ChapterSupplementalFindingVerificationRequest,
+  ): Promise<void> {
+    const verifier = this.dependencies.supplementalFindingVerifier;
+    if (verifier === undefined || !(await verifier.isCurrentFinding(request))) {
+      throw actionFailure(
+        "NOVEL_VALIDATION_ISSUE_NOT_FOUND",
+        "这条提醒已不存在、证据已变化或来源已经失效。请重新检查本章。",
+        true,
+      );
+    }
+  }
+
+  private async assertCurrentChapterVersion(
+    request: ChapterNovelValidationRequest,
+    expectedChapterVersionId: UuidV7,
+  ): Promise<void> {
+    const checked = await this.checkChapter(request);
+    if (checked.chapterVersionId !== expectedChapterVersionId) {
+      throw actionFailure(
+        "NOVEL_VALIDATION_STALE_RESULT",
+        "章节已经保存了新版本。请重新检查后再处理提醒。",
+        true,
+      );
+    }
+  }
+
+  private async findSupplementalFindingResolutionRecords(
+    request: ChapterNovelValidationRequest,
+    expectedChapterVersionId: UuidV7,
+  ): Promise<readonly SupplementalFindingResolutionRecord[]> {
+    const loaded = await this.dependencies.storyFacts.listByProjectId(
+      request.projectId as unknown as StoryUuidV7,
+    );
+    if (!loaded.ok) {
+      throw storageFailure("Unable to read supplemental finding resolutions.");
+    }
+    return Object.freeze(
+      loaded.value
+        .map(toSupplementalFindingResolutionRecord)
+        .filter((record): record is SupplementalFindingResolutionRecord => record !== null)
+        .filter(
+          ({ metadata }) =>
+            metadata.chapterId === request.chapterId &&
+            metadata.chapterVersionId === expectedChapterVersionId &&
+            (request.branchId === undefined || request.branchId === null),
+        )
+        .sort(
+          (left, right) =>
+            right.snapshot.updatedAt.localeCompare(left.snapshot.updatedAt) ||
+            right.snapshot.id.localeCompare(left.snapshot.id),
+        ),
+    );
   }
 
   private requireMutations(
@@ -1195,6 +1529,76 @@ function toResolutionFactRecord(fact: StoryFact): ResolutionFactRecord | null {
   return metadata === null ? null : Object.freeze({ fact, snapshot, metadata });
 }
 
+function parseSupplementalFindingResolutionMetadata(
+  value: StoryValue | null,
+): SupplementalFindingResolutionMetadata | null {
+  if (
+    !isRecord(value) ||
+    value.resolutionSchema !== CHAPTER_SUPPLEMENTAL_FINDING_RESOLUTION_SCHEMA ||
+    !CHAPTER_SUPPLEMENTAL_FINDING_ACTIONS.includes(
+      value.resolutionAction as ChapterSupplementalFindingAction,
+    ) ||
+    !CHAPTER_SUPPLEMENTAL_FINDING_CATEGORIES.includes(
+      value.resolvedFindingCategory as ChapterSupplementalFindingCategory,
+    ) ||
+    !isBoundedReference(value.resolvedFindingId, 1_000) ||
+    !isUuidV7(value.resolvedChapterId) ||
+    !isUuidV7(value.resolvedChapterVersionId) ||
+    !isBoundedReference(value.evidenceSignature, 5_000)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    action: value.resolutionAction as ChapterSupplementalFindingAction,
+    findingId: value.resolvedFindingId,
+    category: value.resolvedFindingCategory as ChapterSupplementalFindingCategory,
+    chapterId: value.resolvedChapterId,
+    chapterVersionId: value.resolvedChapterVersionId,
+    evidenceSignature: value.evidenceSignature,
+  });
+}
+
+function toSupplementalFindingResolutionRecord(
+  fact: StoryFact,
+): SupplementalFindingResolutionRecord | null {
+  const snapshot = fact.toSnapshot();
+  if (
+    snapshot.factType !== "validation_resolution" ||
+    snapshot.status !== "formal" ||
+    !snapshot.userConfirmed
+  ) {
+    return null;
+  }
+  const metadata = parseSupplementalFindingResolutionMetadata(snapshot.structuredValue);
+  return metadata === null ? null : Object.freeze({ fact, snapshot, metadata });
+}
+
+function supplementalResolutionSummary(
+  record: SupplementalFindingResolutionRecord,
+): ChapterSupplementalFindingResolutionSummary {
+  return Object.freeze({
+    findingId: record.metadata.findingId,
+    category: record.metadata.category,
+    action: record.metadata.action,
+    evidenceSignature: record.metadata.evidenceSignature,
+    factId: record.snapshot.id,
+    factRevision: record.snapshot.revision,
+    chapterId: record.metadata.chapterId,
+    chapterVersionId: record.metadata.chapterVersionId,
+    decidedAt: record.snapshot.updatedAt,
+  });
+}
+
+function validateSupplementalFindingIdentity(findingId: string, evidenceSignature: string): void {
+  if (!isBoundedReference(findingId, 1_000) || !isBoundedReference(evidenceSignature, 5_000)) {
+    throw actionFailure(
+      "NOVEL_VALIDATION_RESOLUTION_WRITE_FAILED",
+      "提醒缺少稳定标识或证据签名，不能保存处理结果。",
+      false,
+    );
+  }
+}
+
 function compareResolutionRecords(left: ResolutionFactRecord, right: ResolutionFactRecord): number {
   return (
     right.snapshot.updatedAt.localeCompare(left.snapshot.updatedAt) ||
@@ -1348,11 +1752,17 @@ function continuousProjectionValidationSkip(
       ? "other_branch"
       : value.reason === "human_confirmation_required"
         ? "reference_fact_not_confirmed"
-        : value.reason === "current_version_required"
-          ? "current_claim_not_current_version"
-          : value.reason === "evidence_invalid"
-            ? "evidence_span_mismatch"
-            : "structured_fields_missing";
+        : value.reason === "knowledge_source_incomplete"
+          ? "pov_knowledge_source_incomplete"
+          : value.reason === "knowledge_source_unverified"
+            ? "pov_knowledge_source_unverified"
+            : value.reason === "knowledge_source_inactive"
+              ? "pov_knowledge_source_inactive"
+              : value.reason === "current_version_required"
+                ? "current_claim_not_current_version"
+                : value.reason === "evidence_invalid"
+                  ? "evidence_span_mismatch"
+                  : "structured_fields_missing";
   return Object.freeze({
     factId: value.sourceFactId,
     role: null,
@@ -1440,7 +1850,93 @@ function skippedRun(
     missingRequirements,
     explanation: `Deterministic chapter validation skipped: ${missingRequirements.join(", ")}.`,
     checked: { currentClaims: 0, referenceFacts: 0, hardRules: 0 },
+    coverage: emptyDeterministicCoverage(),
   });
+}
+
+function deterministicCoverage(
+  adapted: Pick<AdaptedFactCollections, "currentClaims" | "referenceFacts" | "hardRules">,
+): readonly ChapterValidationCoverageItem[] {
+  return Object.freeze(
+    CHAPTER_VALIDATION_COVERAGE_CATEGORIES.map((category) => {
+      const claims = adapted.currentClaims.filter(({ factType }) => factType === category);
+      const references = adapted.referenceFacts.filter(({ factType }) => factType === category);
+      const rules = adapted.hardRules.filter(({ targetFactType }) => targetFactType === category);
+      let comparableReferenceCount = 0;
+      let applicableHardRuleCount = 0;
+      for (const claim of claims) {
+        comparableReferenceCount += references.filter((fact) =>
+          assertionsCanBeCompared(claim, fact),
+        ).length;
+        applicableHardRuleCount += rules.filter((rule) => ruleCanBeCompared(claim, rule)).length;
+      }
+      const status =
+        comparableReferenceCount > 0 || applicableHardRuleCount > 0 ? "checked" : "not_checked";
+      const reason: ChapterValidationCoverageReason =
+        status === "checked"
+          ? "explicit_claim_compared"
+          : claims.length === 0
+            ? "current_claim_missing"
+            : references.length === 0 && rules.length === 0
+              ? "confirmed_reference_or_rule_missing"
+              : "no_comparable_source";
+      return Object.freeze({
+        category,
+        status,
+        reason,
+        currentClaimCount: claims.length,
+        comparableReferenceCount,
+        applicableHardRuleCount,
+      });
+    }),
+  );
+}
+
+function emptyDeterministicCoverage(): readonly ChapterValidationCoverageItem[] {
+  return Object.freeze(
+    CHAPTER_VALIDATION_COVERAGE_CATEGORIES.map((category) =>
+      Object.freeze({
+        category,
+        status: "not_checked" as const,
+        reason: "current_claim_missing" as const,
+        currentClaimCount: 0,
+        comparableReferenceCount: 0,
+        applicableHardRuleCount: 0,
+      }),
+    ),
+  );
+}
+
+function assertionsCanBeCompared(claim: NovelCurrentClaim, fact: NovelReferenceFact): boolean {
+  return (
+    claim.subjectId === fact.subjectId &&
+    claim.attributeKey === fact.attributeKey &&
+    branchesCanOverlap(claim.branchId, fact.branchId) &&
+    rangesCanOverlap(claim.effectiveRange, fact.effectiveRange)
+  );
+}
+
+function ruleCanBeCompared(claim: NovelCurrentClaim, rule: NovelHardRule): boolean {
+  return (
+    claim.subjectId === rule.subjectId &&
+    claim.attributeKey === rule.attributeKey &&
+    branchesCanOverlap(claim.branchId, rule.branchId) &&
+    rangesCanOverlap(claim.effectiveRange, rule.effectiveRange)
+  );
+}
+
+function branchesCanOverlap(left: string | null, right: string | null): boolean {
+  return left === null || right === null || left === right;
+}
+
+function rangesCanOverlap(
+  left: Readonly<{ readonly startOrder: number; readonly endOrder: number | null }>,
+  right: Readonly<{ readonly startOrder: number; readonly endOrder: number | null }>,
+): boolean {
+  return (
+    Math.max(left.startOrder, right.startOrder) <=
+    Math.min(left.endOrder ?? Number.POSITIVE_INFINITY, right.endOrder ?? Number.POSITIVE_INFINITY)
+  );
 }
 
 function counts(adapted: AdaptedFactCollections): ChapterNovelValidationResult["checked"] {
@@ -1461,6 +1957,9 @@ function freezeResult(
     skippedFacts: Object.freeze([...input.skippedFacts]),
     missingRequirements: Object.freeze([...input.missingRequirements]),
     checked: Object.freeze({ ...input.checked }),
+    ...(input.coverage === undefined
+      ? {}
+      : { coverage: Object.freeze(input.coverage.map((item) => Object.freeze({ ...item }))) }),
     capabilities: Object.freeze({
       deterministicValidation: "ready",
       naturalLanguageInference: "disabled",

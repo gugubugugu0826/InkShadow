@@ -1,4 +1,5 @@
 import {
+  MAX_OUTLINE_TEXT_LENGTH,
   parseUuidV7,
   type OutlineApplicationService,
   type OutlineRepository,
@@ -23,6 +24,20 @@ import {
   type StoryPlanningPayload,
   type StoryPlanningTask,
 } from "./story-planning-candidate-store";
+import {
+  buildSelectiveStoryPlanningSynopsisForIntentVersion,
+  canonicalizeStoryPlanningSelection,
+  createStoryPlanningSelectiveAcceptanceIntent,
+  STORY_PLANNING_SELECTIVE_ACCEPTANCE_RENDERER_VERSION,
+  storyPlanningSelectiveAcceptanceIntentMatches,
+} from "./story-planning-selective-acceptance";
+import {
+  ProjectContextPrivacyError,
+  projectContextDispatchScope,
+  projectContextRequiredDataDestination,
+  type ProjectContextPrivacyAuthority,
+  type ProjectContextPrivacyReceipt,
+} from "./project-context-privacy-authority";
 
 export interface GenerateStoryPlanningInput {
   readonly projectId: string;
@@ -48,11 +63,18 @@ export interface StoryPlanningAcceptanceReceipt {
   readonly recoveredAfterInterruptedRecording: boolean;
 }
 
+export interface StoryPlanningSelectiveAcceptanceReceipt extends StoryPlanningAcceptanceReceipt {
+  readonly acceptedItemIds: readonly string[];
+  readonly idempotent: boolean;
+}
+
 export type StoryPlanningServiceErrorCode =
   | "STORY_PLANNING_INVALID"
   | "STORY_PLANNING_OUTLINE_NOT_FOUND"
   | "STORY_PLANNING_TARGET_NOT_FOUND"
   | "STORY_PLANNING_TARGET_CHANGED"
+  | "STORY_PLANNING_SELECTION_EMPTY"
+  | "STORY_PLANNING_SELECTION_INVALID"
   | "STORY_PLANNING_RESPONSE_INVALID"
   | "STORY_PLANNING_CONTEXT_UNAVAILABLE"
   | "STORY_PLANNING_ACCEPTANCE_RECORD_FAILED";
@@ -87,6 +109,10 @@ export interface ModelHubStoryPlanningDependencies extends ModelHubTextExecution
   readonly candidates: StoryPlanningCandidateStore;
   readonly inspectText?: InspectText;
   readonly executeText?: ExecuteText;
+  readonly projectContextPrivacy: Pick<
+    ProjectContextPrivacyAuthority,
+    "inspect" | "assertCurrentBeforeDispatch" | "assertRouteEligible"
+  >;
 }
 
 interface PlanningContext {
@@ -100,6 +126,7 @@ interface PlanningContext {
   }>;
   readonly modelInput: Readonly<Record<string, unknown>>;
   readonly receipt: StoryPlanningCandidate["context"];
+  readonly projectPrivacy: ProjectContextPrivacyReceipt;
 }
 
 const MAXIMUM_USER_DIRECTION_CHARACTERS = 2_000;
@@ -131,11 +158,13 @@ export class ModelHubStoryPlanningService {
   ): Promise<StoryPlanningGenerationOutcome> {
     const direction = normalizeOptionalDirection(input.userDirection);
     const context = await this.buildContext(input);
+    const requiredDataDestination = projectContextRequiredDataDestination(context.projectPrivacy);
     const request: InspectModelHubTextTaskInput = {
       task: input.task,
       messages: buildPlanningMessages(input.task, context, direction),
       maximumOutputTokens: input.task === "outline_planning" ? 3_000 : 2_400,
       temperature: 0.65,
+      ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
     };
 
     try {
@@ -159,7 +188,48 @@ export class ModelHubStoryPlanningService {
         });
       }
 
-      const executed = await this.executeText(this.dependencies, request);
+      const executed = await this.executeText(this.dependencies, {
+        ...request,
+        dispatchScope: projectContextDispatchScope(context.projectPrivacy),
+        onBeforeDispatch: async (selection) => {
+          if (
+            selection.connectionId !== inspection.connectionId ||
+            selection.catalogEntryId !== inspection.catalogEntryId ||
+            selection.modelId !== inspection.modelId ||
+            selection.usedFallback !== inspection.usedFallback
+          ) {
+            throw new ModelHubExecutionError(
+              "MODEL_HUB_PLAN_CHANGED",
+              "规划建议发送前 AI 分工发生了变化，请重新运行。",
+              true,
+            );
+          }
+          const dispatchEvidence = await this.dependencies.modelHub.listCapabilityEvidence(
+            selection.catalogEntryId,
+          );
+          if (
+            resolveModelCapabilityVerdict({
+              catalogEntryId: selection.catalogEntryId,
+              capability: "structured_output",
+              evidence: dispatchEvidence,
+              now: this.dependencies.clock.now(),
+            }) !== "supported"
+          ) {
+            throw new ModelHubExecutionError(
+              "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED",
+              "发送规划建议前无法确认结构化输出能力，本次请求在发送 0 字后停止。",
+            );
+          }
+          await assertPlanningPrivacyBeforeDispatch(
+            this.dependencies.projectContextPrivacy,
+            context.projectPrivacy,
+            selection.localOnlyEligible === true,
+          );
+        },
+      });
+      await this.dependencies.projectContextPrivacy.assertCurrentBeforeDispatch(
+        context.projectPrivacy,
+      );
       const actualEvidence =
         executed.catalogEntryId === inspection.catalogEntryId
           ? evidence
@@ -190,6 +260,7 @@ export class ModelHubStoryPlanningService {
         targetNodeId: context.targetNode.id,
         targetNodeTitle: context.targetNode.title,
         baselineOutlineRevision: context.outlineRevision,
+        baselineTargetSynopsis: context.targetNode.synopsis,
         status: "review",
         payload,
         editableSynopsis: renderEditableSynopsis(payload),
@@ -201,6 +272,7 @@ export class ModelHubStoryPlanningService {
         modelId: executed.modelId,
         usedFallback: executed.usedFallback,
         acceptedOutlineRevision: null,
+        acceptedItemIds: null,
         revision: 1,
         createdAt: now,
         updatedAt: now,
@@ -209,6 +281,9 @@ export class ModelHubStoryPlanningService {
       await this.dependencies.candidates.create(candidate);
       return Object.freeze({ status: "completed", candidate });
     } catch (cause: unknown) {
+      if (cause instanceof ProjectContextPrivacyError) {
+        return Object.freeze({ status: "skipped", code: cause.code, message: cause.message });
+      }
       if (cause instanceof ModelHubExecutionError && !cause.dispatched) {
         return Object.freeze({ status: "skipped", code: cause.code, message: cause.message });
       }
@@ -239,6 +314,7 @@ export class ModelHubStoryPlanningService {
       ...input,
       decision: "rejected",
       acceptedOutlineRevision: null,
+      acceptedItemIds: null,
       now: this.dependencies.clock.now(),
     });
   }
@@ -315,6 +391,7 @@ export class ModelHubStoryPlanningService {
         expectedRevision: candidate.revision,
         decision: "accepted",
         acceptedOutlineRevision: outline.revision,
+        acceptedItemIds: null,
         now: this.dependencies.clock.now(),
       });
       return Object.freeze({
@@ -332,8 +409,275 @@ export class ModelHubStoryPlanningService {
     }
   }
 
+  /**
+   * Appends only explicitly selected immutable payload rows to the captured target
+   * synopsis. Existing outline text is never parsed or regenerated, and the whole
+   * selection is committed through one outline CAS update.
+   */
+  public async acceptCandidateItems(
+    input: Readonly<{
+      candidateId: string;
+      expectedRevision: number;
+      selectedItemIds: readonly string[];
+    }>,
+  ): Promise<StoryPlanningSelectiveAcceptanceReceipt> {
+    if (input.selectedItemIds.length === 0) {
+      throw new StoryPlanningServiceError(
+        "STORY_PLANNING_SELECTION_EMPTY",
+        "请至少选择一项要采纳的规划内容；本次没有修改正式大纲。",
+      );
+    }
+    let candidate = await this.dependencies.candidates.findById(input.candidateId);
+    if (candidate === null) {
+      throw new StoryPlanningServiceError(
+        "STORY_PLANNING_TARGET_NOT_FOUND",
+        "规划建议版本不存在。",
+      );
+    }
+    const selectedItemIds = canonicalizeStoryPlanningSelection(
+      candidate.payload,
+      input.selectedItemIds,
+    );
+    if (selectedItemIds === null) {
+      throw new StoryPlanningServiceError(
+        "STORY_PLANNING_SELECTION_INVALID",
+        "所选规划条目已失效、重复或不属于这份建议；本次没有修改正式大纲。",
+      );
+    }
+    if (
+      candidate.baselineTargetSynopsis === null ||
+      candidate.baselineTargetSynopsis === undefined
+    ) {
+      throw new StoryPlanningServiceError(
+        "STORY_PLANNING_SELECTION_INVALID",
+        "这是一份旧版规划建议，没有可核验的目标简介基线。请重新生成后再逐项采纳；仍可整体采纳、编辑或拒绝旧建议。",
+      );
+    }
+
+    const proposedSynopsis = buildSelectiveStoryPlanningSynopsisForIntentVersion(
+      candidate.selectiveAcceptanceIntent?.schemaVersion ??
+        STORY_PLANNING_SELECTIVE_ACCEPTANCE_RENDERER_VERSION,
+      candidate.baselineTargetSynopsis,
+      candidate.payload,
+      selectedItemIds,
+    );
+    if (proposedSynopsis.length > MAX_OUTLINE_TEXT_LENGTH) {
+      throw new StoryPlanningServiceError(
+        "STORY_PLANNING_SELECTION_INVALID",
+        "所选条目加入后会超过大纲简介长度上限。请减少选择，或先精简当前简介；本次没有修改正式大纲。",
+      );
+    }
+
+    const requestedIntent = await createStoryPlanningSelectiveAcceptanceIntent({
+      selectedItemIds,
+      baselineOutlineRevision: candidate.baselineOutlineRevision,
+      baselineSynopsis: candidate.baselineTargetSynopsis,
+      proposedSynopsis,
+      startedAt: this.dependencies.clock.now(),
+    });
+    if (candidate.status === "review" && candidate.selectiveAcceptanceIntent === null) {
+      if (candidate.revision !== input.expectedRevision) {
+        throw changedSelectionTarget();
+      }
+      try {
+        candidate = await this.dependencies.candidates.beginSelectiveAcceptance({
+          candidateId: candidate.id,
+          expectedRevision: candidate.revision,
+          intent: requestedIntent,
+          now: this.dependencies.clock.now(),
+        });
+      } catch {
+        const concurrent = await this.dependencies.candidates.findById(candidate.id);
+        if (concurrent === null) {
+          throw changedSelectionTarget();
+        }
+        candidate = concurrent;
+      }
+    }
+
+    const projectId = parseProjectId(candidate.projectId);
+    const loaded = await this.dependencies.outlines.findByProjectId(projectId);
+    if (!loaded.ok) {
+      throw loaded.error;
+    }
+    if (loaded.value === null) {
+      throw new StoryPlanningServiceError(
+        "STORY_PLANNING_OUTLINE_NOT_FOUND",
+        "项目大纲不存在，无法采纳这份建议。",
+      );
+    }
+
+    let outline = loaded.value;
+    let target = outline.toSnapshot().nodes.find(({ id }) => id === candidate.targetNodeId);
+    if (
+      target === undefined ||
+      !targetKindMatchesTask(target.kind, candidate.task) ||
+      target.title !== candidate.targetNodeTitle
+    ) {
+      throw changedSelectionTarget();
+    }
+
+    if (candidate.status === "accepted") {
+      if (
+        (candidate.revision === input.expectedRevision ||
+          candidate.revision === input.expectedRevision + 1 ||
+          candidate.revision === input.expectedRevision + 2) &&
+        arraysEqual(candidate.acceptedItemIds ?? [], selectedItemIds) &&
+        candidate.acceptedOutlineRevision === outline.revision &&
+        target.synopsis === proposedSynopsis
+      ) {
+        return Object.freeze({
+          candidate,
+          outlineRevision: outline.revision,
+          recoveredAfterInterruptedRecording: false,
+          acceptedItemIds: selectedItemIds,
+          idempotent: true,
+        });
+      }
+      throw new StoryPlanningServiceError(
+        "STORY_PLANNING_TARGET_CHANGED",
+        "这份建议已经以另一种方式处理，或正式大纲后来又发生了变化。为避免重复写入，本次没有继续。",
+      );
+    }
+    if (
+      candidate.status !== "review" ||
+      candidate.selectiveAcceptanceIntent === null ||
+      candidate.selectiveAcceptanceIntent === undefined ||
+      !storyPlanningSelectiveAcceptanceIntentMatches(
+        candidate.selectiveAcceptanceIntent,
+        requestedIntent,
+      ) ||
+      (candidate.revision !== input.expectedRevision &&
+        candidate.revision !== input.expectedRevision + 1)
+    ) {
+      throw new StoryPlanningServiceError(
+        "STORY_PLANNING_TARGET_CHANGED",
+        "规划建议已在其他位置修改或处理，请刷新后重试。",
+      );
+    }
+
+    let recoveredAfterInterruptedRecording = false;
+    if (outline.revision === candidate.baselineOutlineRevision) {
+      if (target.synopsis !== candidate.baselineTargetSynopsis) {
+        throw changedSelectionTarget();
+      }
+      const applied = await this.dependencies.outlineService.apply({
+        projectId: candidate.projectId,
+        expectedRevision: candidate.baselineOutlineRevision,
+        change: {
+          kind: "update_synopsis",
+          nodeId: candidate.targetNodeId,
+          synopsis: proposedSynopsis,
+        },
+      });
+      if (!applied.ok) {
+        const reloaded = await this.dependencies.outlines.findByProjectId(projectId);
+        if (!reloaded.ok || reloaded.value === null) {
+          throw applied.error;
+        }
+        const reloadedTarget = reloaded.value
+          .toSnapshot()
+          .nodes.find(({ id }) => id === candidate.targetNodeId);
+        if (
+          reloaded.value.revision === candidate.baselineOutlineRevision + 1 &&
+          reloadedTarget !== undefined &&
+          targetKindMatchesTask(reloadedTarget.kind, candidate.task) &&
+          reloadedTarget.title === candidate.targetNodeTitle &&
+          reloadedTarget.synopsis === proposedSynopsis
+        ) {
+          outline = reloaded.value;
+          target = reloadedTarget;
+          recoveredAfterInterruptedRecording = true;
+        } else if (
+          reloaded.value.revision === candidate.baselineOutlineRevision &&
+          reloadedTarget !== undefined &&
+          targetKindMatchesTask(reloadedTarget.kind, candidate.task) &&
+          reloadedTarget.title === candidate.targetNodeTitle &&
+          reloadedTarget.synopsis === candidate.baselineTargetSynopsis
+        ) {
+          // Keep the durable intent locked. Another identical in-flight retry may
+          // still commit after this read; reject/edit must never enter that gap.
+          throw applied.error;
+        } else {
+          throw changedSelectionTarget();
+        }
+      } else {
+        outline = applied.value;
+        target = outline.toSnapshot().nodes.find(({ id }) => id === candidate.targetNodeId);
+      }
+      if (
+        outline.revision !== candidate.baselineOutlineRevision + 1 ||
+        target === undefined ||
+        !targetKindMatchesTask(target.kind, candidate.task) ||
+        target.title !== candidate.targetNodeTitle ||
+        target.synopsis !== proposedSynopsis
+      ) {
+        throw new StoryPlanningServiceError(
+          "STORY_PLANNING_TARGET_CHANGED",
+          "正式大纲写入后未能通过目标节点复核。为保护现有内容，请刷新并检查大纲后再继续。",
+          false,
+          true,
+        );
+      }
+    } else if (
+      outline.revision === candidate.baselineOutlineRevision + 1 &&
+      target.synopsis === proposedSynopsis
+    ) {
+      // The single outline CAS write succeeded but recording the candidate
+      // decision was interrupted. Exact baseline + selection reconstruction
+      // makes recovery deterministic and prevents duplicate append.
+      recoveredAfterInterruptedRecording = true;
+    } else {
+      throw changedSelectionTarget();
+    }
+
+    try {
+      const decided = await this.dependencies.candidates.finalizeSelectiveAcceptance({
+        candidateId: candidate.id,
+        expectedRevision: candidate.revision,
+        intent: candidate.selectiveAcceptanceIntent,
+        acceptedOutlineRevision: outline.revision,
+        now: this.dependencies.clock.now(),
+      });
+      return Object.freeze({
+        candidate: decided,
+        outlineRevision: outline.revision,
+        recoveredAfterInterruptedRecording,
+        acceptedItemIds: selectedItemIds,
+        idempotent: false,
+      });
+    } catch {
+      try {
+        const recorded = await this.dependencies.candidates.findById(candidate.id);
+        if (
+          recorded !== null &&
+          recorded.status === "accepted" &&
+          recorded.acceptedOutlineRevision === outline.revision &&
+          arraysEqual(recorded.acceptedItemIds ?? [], selectedItemIds)
+        ) {
+          return Object.freeze({
+            candidate: recorded,
+            outlineRevision: outline.revision,
+            recoveredAfterInterruptedRecording,
+            acceptedItemIds: selectedItemIds,
+            idempotent: true,
+          });
+        }
+      } catch {
+        // Preserve the explicit interrupted-recording receipt below.
+      }
+      throw new StoryPlanningServiceError(
+        "STORY_PLANNING_ACCEPTANCE_RECORD_FAILED",
+        "正式大纲简介已经安全更新，但建议版本的采纳记录未能完成。请不要重复编辑大纲；刷新后以同样选择再次采纳即可恢复记录。",
+        true,
+        true,
+      );
+    }
+  }
+
   private async buildContext(input: GenerateStoryPlanningInput): Promise<PlanningContext> {
     const projectId = parseProjectId(input.projectId);
+    const projectPrivacy = await this.dependencies.projectContextPrivacy.inspect(input.projectId);
     const [outlineResult, factsResult] = await Promise.all([
       this.dependencies.outlines.findByProjectId(projectId),
       this.dependencies.facts.listByProjectId(projectId, {
@@ -433,6 +777,7 @@ export class ModelHubStoryPlanningService {
         causalEventIds,
         causalGraphStatus: graphStatus,
       }),
+      projectPrivacy,
       modelInput: Object.freeze({
         currentOutline: Object.freeze({
           revision: snapshot.revision,
@@ -617,6 +962,17 @@ function targetKindMatchesTask(
   return task === "outline_planning" ? kind === "book" : kind === "chapter";
 }
 
+function changedSelectionTarget(): StoryPlanningServiceError {
+  return new StoryPlanningServiceError(
+    "STORY_PLANNING_TARGET_CHANGED",
+    "正式大纲或目标节点已在建议生成后发生变化。为避免覆盖新内容，本次没有采纳；请保留当前内容并重新生成建议。",
+  );
+}
+
+function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
 function parseProjectId(value: string) {
   const parsed = parseUuidV7(value);
   if (!parsed.ok) {
@@ -655,6 +1011,22 @@ function stableJson(value: unknown): string | null {
 
 function clip(value: string, maximum: number): string {
   return value.length <= maximum ? value : `${value.slice(0, maximum - 1)}…`;
+}
+
+async function assertPlanningPrivacyBeforeDispatch(
+  authority: ModelHubStoryPlanningDependencies["projectContextPrivacy"],
+  receipt: ProjectContextPrivacyReceipt,
+  localOnlyEligible: boolean,
+): Promise<void> {
+  try {
+    await authority.assertCurrentBeforeDispatch(receipt);
+    authority.assertRouteEligible(receipt, localOnlyEligible);
+  } catch (cause: unknown) {
+    if (cause instanceof ProjectContextPrivacyError) {
+      throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
+    }
+    throw cause;
+  }
 }
 
 function invalidResponse(): StoryPlanningServiceError {

@@ -9,6 +9,35 @@ export type NativeGatewayProviderKind = "open_ai_compatible" | "ollama" | "anthr
 
 export type NativeGatewayAuthenticationMode = "none" | "bearer_keyring" | "custom_header_keyring";
 
+export interface NativeProjectContextChapterAuthority {
+  readonly chapterId: string;
+  readonly currentVersionId: string;
+  readonly revision: number;
+  readonly privacyRevision: number;
+  readonly privacyMode: "standard" | "local_only";
+  readonly status: "active" | "trashed";
+}
+
+export interface NativeProjectContextPrivacyReceipt {
+  readonly schemaVersion: 1;
+  readonly projectId: string;
+  readonly fingerprint: string;
+  readonly activeChapterCount: number;
+  readonly retainedChapterCount: number;
+  readonly requiresVerifiedLocal: boolean;
+  readonly chapters: readonly NativeProjectContextChapterAuthority[];
+}
+
+export type NativeModelDispatchScope =
+  | Readonly<{
+      kind: "non_project";
+      reason: "creative_opening" | "connection_probe";
+    }>
+  | Readonly<{
+      kind: "project_context";
+      receipt: NativeProjectContextPrivacyReceipt;
+    }>;
+
 export interface NativeGatewayEndpointConfig {
   readonly providerId: string;
   readonly provider: NativeGatewayProviderKind;

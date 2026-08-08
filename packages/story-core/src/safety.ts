@@ -24,7 +24,7 @@ export interface Evidence {
 
 const MAX_STORY_VALUE_BYTES = 16_384;
 const MAX_STORY_VALUE_DEPTH = 5;
-const MAX_COLLECTION_ITEMS = 64;
+const MAX_COLLECTION_ITEMS = 128;
 const SAFE_OBJECT_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u;
 const SECRET_PATTERNS = [
   /\bBearer\s+\S+/iu,

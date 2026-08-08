@@ -17,6 +17,7 @@ const TOKEN_HEX_BYTES: usize = 64;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PathTicketPurpose {
     BackupDestination,
+    AutomaticBackupDestination,
     RestoreSource,
     PreRestoreRollbackDestination,
 }
@@ -25,7 +26,9 @@ impl PathTicketPurpose {
     fn is_backup_destination(self) -> bool {
         matches!(
             self,
-            Self::BackupDestination | Self::PreRestoreRollbackDestination
+            Self::BackupDestination
+                | Self::AutomaticBackupDestination
+                | Self::PreRestoreRollbackDestination
         )
     }
 }

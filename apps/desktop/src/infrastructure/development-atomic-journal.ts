@@ -367,7 +367,7 @@ function rollbackDevelopmentDatabase(
 function rollbackStoryDatabase(serialized: string, artifacts: IdeationJournalArtifacts): string {
   const database = parseJsonObject(serialized, "StoryDatabase");
   if (
-    database.schemaVersion !== 5 ||
+    (database.schemaVersion !== 5 && database.schemaVersion !== 6) ||
     !isRecord(database.outlines) ||
     !isRecord(database.formalRecords) ||
     !isRecord(database.ideationDrafts)

@@ -67,6 +67,7 @@ export {
   type CreateTaskInput,
   type RecordTaskFailureInput,
   type ReportTaskProgressInput,
+  type RetryTaskNowInput,
   type TaskLease,
   type TaskProgress,
   type TaskSnapshot,

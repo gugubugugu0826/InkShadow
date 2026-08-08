@@ -2,9 +2,31 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { Button, FormField, Input, Select, Textarea } from "../src";
+import { Button, FormField, IconButton, InkIcon, Input, Select, Textarea } from "../src";
 
 describe("Button", () => {
+  it("uses the DESIGN primary and secondary default height classes", () => {
+    render(
+      <>
+        <Button>主操作</Button>
+        <Button variant="secondary">次操作</Button>
+        <Button size="sm" variant="ghost">
+          行内操作
+        </Button>
+      </>,
+    );
+
+    expect(screen.getByRole("button", { name: "主操作" })).toHaveClass("ink-button--lg");
+    expect(screen.getByRole("button", { name: "次操作" })).toHaveClass("ink-button--md");
+    expect(screen.getByRole("button", { name: "行内操作" })).toHaveClass("ink-button--sm");
+  });
+
+  it("keeps standalone icon controls on the 44px touch-target class", () => {
+    render(<IconButton label="搜索" icon={<InkIcon name="search" decorative />} />);
+
+    expect(screen.getByRole("button", { name: "搜索" })).toHaveClass("ink-button--lg");
+  });
+
   it("exposes its loading state and blocks duplicate activation", async () => {
     const onClick = vi.fn();
     const user = userEvent.setup();
@@ -77,6 +99,32 @@ describe("form controls", () => {
     expect(screen.getByRole("option", { name: "English" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "简介" })).toHaveAttribute("maxlength", "20");
     expect(screen.getByText("3 / 20 字符")).toBeInTheDocument();
+  });
+
+  it("keeps textarea counters in sync without requiring duplicate length props", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <>
+        <Textarea aria-label="受控简介" value="墨影" maxLength={20} readOnly />
+        <Textarea aria-label="自由简介" defaultValue="开篇" maxLength={20} />
+      </>,
+    );
+
+    expect(screen.getAllByText("2 / 20 字符")).toHaveLength(2);
+
+    await user.type(screen.getByRole("textbox", { name: "自由简介" }), "继续");
+    expect(screen.getByText("4 / 20 字符")).toBeInTheDocument();
+
+    rerender(
+      <Textarea
+        aria-label="显式计数"
+        value="这段值更长"
+        currentLength={1}
+        maxLength={20}
+        readOnly
+      />,
+    );
+    expect(screen.getByText("1 / 20 字符")).toBeInTheDocument();
   });
 
   it("lets users reveal and verify password-style values", async () => {

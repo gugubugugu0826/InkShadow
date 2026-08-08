@@ -1,5 +1,6 @@
 import {
   type AiCandidate,
+  type AiCandidateApplicationIntent,
   AppError,
   ChapterVersion,
   err,
@@ -30,10 +31,17 @@ import {
 
 export interface CandidateCommand {
   readonly candidateId: UuidV7;
+  /** Revision of the exact Candidate text shown when the author chose this action. */
+  readonly expectedCandidateRevision: number;
 }
 
 export interface AcceptCandidateCommand extends CandidateCommand {
   readonly strategy?: CandidateApplicationStrategy;
+  /**
+   * Author-edited suggestion text. It remains isolated until this command
+   * atomically accepts the candidate and creates the next stable version.
+   */
+  readonly editedContent?: string;
 }
 
 export interface AcceptCandidateOutcome {
@@ -42,6 +50,50 @@ export interface AcceptCandidateOutcome {
   readonly candidate: AiCandidate;
   readonly plan: CandidateApplicationPlan;
   readonly saveState: SaveState;
+}
+
+export interface ReviseCandidateCommand extends CandidateCommand {
+  readonly content: string;
+}
+
+/** Persists author edits while the text remains an isolated, ready Candidate. */
+export class ReviseAiCandidate {
+  constructor(
+    private readonly candidates: AiCandidateRepository,
+    private readonly clock: Clock,
+    private readonly hasher: ContentHasher,
+  ) {}
+
+  async execute(command: ReviseCandidateCommand): Promise<Result<AiCandidate, AppError>> {
+    const candidate = await findCandidate(this.candidates, command.candidateId);
+    if (!candidate.ok) {
+      return candidate;
+    }
+    const authorityError = validateDisplayedCandidateRevision(
+      candidate.value,
+      command.expectedCandidateRevision,
+    );
+    if (authorityError !== null) {
+      return err(authorityError);
+    }
+    const checksum = await this.hasher.sha256(command.content);
+    if (!checksum.ok) {
+      return checksum;
+    }
+    const revised = candidate.value.reviseReadyContent(
+      command.content,
+      checksum.value,
+      this.clock.now(),
+    );
+    if (!revised.ok) {
+      return revised;
+    }
+    const persisted = await this.candidates.save(revised.value, {
+      status: "ready",
+      revision: command.expectedCandidateRevision,
+    });
+    return persisted.ok ? revised : persisted;
+  }
 }
 
 export class AcceptAiCandidate {
@@ -66,6 +118,13 @@ export class AcceptAiCandidate {
     const candidate = await findCandidate(this.candidates, command.candidateId);
     if (!candidate.ok) {
       return candidate;
+    }
+    const authorityError = validateDisplayedCandidateRevision(
+      candidate.value,
+      command.expectedCandidateRevision,
+    );
+    if (authorityError !== null) {
+      return err(authorityError);
     }
     if (candidate.value.status !== "ready") {
       return err(
@@ -128,6 +187,55 @@ export class AcceptAiCandidate {
       contentDigest: currentChecksum.value,
       content: chapter.content,
     };
+    const storedCandidateChecksum = await this.hasher.sha256(candidate.value.content);
+    if (!storedCandidateChecksum.ok) {
+      return storedCandidateChecksum;
+    }
+    if (
+      candidate.value.contentChecksum === null ||
+      storedCandidateChecksum.value !== candidate.value.contentChecksum
+    ) {
+      return err(
+        new AppError({
+          code: "REPOSITORY_ERROR",
+          message: "The AI candidate failed its content checksum and was not accepted.",
+          details: {
+            candidateId: candidate.value.id,
+            reason: "CANDIDATE_CONTENT_CHECKSUM_MISMATCH",
+          },
+        }),
+      );
+    }
+    const now = this.clock.now();
+    let candidateForAcceptance = candidate.value;
+    if (
+      command.editedContent !== undefined &&
+      command.editedContent !== candidateForAcceptance.content
+    ) {
+      const editedChecksum = await this.hasher.sha256(command.editedContent);
+      if (!editedChecksum.ok) {
+        return editedChecksum;
+      }
+      const revised = candidateForAcceptance.reviseReadyContent(
+        command.editedContent,
+        editedChecksum.value,
+        now,
+      );
+      if (!revised.ok) {
+        return revised;
+      }
+      candidateForAcceptance = revised.value;
+    }
+    const strategy = command.strategy ?? defaultApplicationStrategy(candidateForAcceptance);
+    const intentError = validateStrategyAgainstIntent(
+      candidateForAcceptance.applicationIntent,
+      strategy,
+      chapter.content.length,
+      baseline.content.length,
+    );
+    if (intentError !== null) {
+      return err(intentError);
+    }
     const planned = planCandidateApplication({
       baseline,
       current: {
@@ -135,8 +243,8 @@ export class AcceptAiCandidate {
         contentDigest: currentChecksum.value,
         content: chapter.content,
       },
-      candidateContent: candidate.value.content,
-      strategy: command.strategy ?? { kind: "accept_all" },
+      candidateContent: candidateForAcceptance.content,
+      strategy,
     });
     if (planned.status === "conflict") {
       return err(
@@ -166,7 +274,6 @@ export class AcceptAiCandidate {
       return checksum;
     }
 
-    const now = this.clock.now();
     const versionId = this.ids.next();
     const savedChapter = chapter.saveContent({
       content: planned.plan.resultContent,
@@ -194,7 +301,7 @@ export class AcceptAiCandidate {
       return version;
     }
 
-    const acceptedCandidate = candidate.value.accept(now);
+    const acceptedCandidate = candidateForAcceptance.accept(now);
     if (!acceptedCandidate.ok) {
       return acceptedCandidate;
     }
@@ -205,6 +312,7 @@ export class AcceptAiCandidate {
       candidate: acceptedCandidate.value,
       expectedChapterRevision: chapter.revision,
       expectedCandidateStatus: "ready",
+      expectedCandidateRevision: command.expectedCandidateRevision,
     });
     return committed.ok
       ? ok({
@@ -280,6 +388,74 @@ export class AcceptAiCandidate {
   }
 }
 
+function defaultApplicationStrategy(candidate: AiCandidate): CandidateApplicationStrategy {
+  const intent = candidate.applicationIntent;
+  if (intent.task === "legacy_full_document") {
+    return { kind: "accept_all" };
+  }
+  switch (intent.application) {
+    case "insert_at_cursor":
+      return { kind: "insert_at_cursor", cursorUtf16: intent.startUtf16 };
+    case "replace_selection":
+      return {
+        kind: "replace_selection",
+        selection: { start: intent.startUtf16, end: intent.endUtf16 },
+      };
+    case "replace_document":
+      return { kind: "overwrite_document" };
+  }
+}
+
+function validateStrategyAgainstIntent(
+  intent: AiCandidateApplicationIntent,
+  strategy: CandidateApplicationStrategy,
+  currentDocumentLength: number,
+  baselineDocumentLength: number,
+): AppError | null {
+  if (intent.task === "legacy_full_document") {
+    return null;
+  }
+  if (intent.task === "whole_chapter_rewrite") {
+    const matchesWholeChapterStrategy =
+      strategy.kind === "overwrite_document" ||
+      (strategy.kind === "insert_at_cursor" &&
+        strategy.cursorUtf16 === currentDocumentLength &&
+        strategy.cursorUtf16 === baselineDocumentLength);
+    return matchesWholeChapterStrategy
+      ? null
+      : new AppError({
+          code: "VALIDATION_FAILED",
+          message:
+            "A whole-chapter rewrite can only replace the chapter or append after its current end.",
+          details: {
+            candidatePlanningCode: "CANDIDATE_APPLICATION_INTENT_MISMATCH",
+            expectedApplication: "replace_document_or_append_document_end",
+            actualStrategy: strategy.kind,
+          },
+        });
+  }
+  const matchesContinuation =
+    intent.application === "insert_at_cursor" &&
+    strategy.kind === "insert_at_cursor" &&
+    strategy.cursorUtf16 === intent.startUtf16;
+  const matchesSelection =
+    intent.application === "replace_selection" &&
+    strategy.kind === "replace_selection" &&
+    strategy.selection.start === intent.startUtf16 &&
+    strategy.selection.end === intent.endUtf16;
+  return matchesContinuation || matchesSelection
+    ? null
+    : new AppError({
+        code: "VALIDATION_FAILED",
+        message: "The Candidate fragment can only be applied to its original task anchor.",
+        details: {
+          candidatePlanningCode: "CANDIDATE_APPLICATION_INTENT_MISMATCH",
+          expectedApplication: intent.application,
+          actualStrategy: strategy.kind,
+        },
+      });
+}
+
 export class RejectAiCandidate {
   constructor(
     private readonly candidates: AiCandidateRepository,
@@ -292,14 +468,44 @@ export class RejectAiCandidate {
       return candidate;
     }
 
+    const authorityError = validateDisplayedCandidateRevision(
+      candidate.value,
+      command.expectedCandidateRevision,
+    );
+    if (authorityError !== null) {
+      return err(authorityError);
+    }
+
     const rejected = candidate.value.reject(this.clock.now());
     if (!rejected.ok) {
       return rejected;
     }
 
-    const persisted = await this.candidates.save(rejected.value, "ready");
+    const persisted = await this.candidates.save(rejected.value, {
+      status: "ready",
+      revision: command.expectedCandidateRevision,
+    });
     return persisted.ok ? rejected : persisted;
   }
+}
+
+function validateDisplayedCandidateRevision(
+  candidate: AiCandidate,
+  expectedRevision: number,
+): AppError | null {
+  return candidate.revision === expectedRevision
+    ? null
+    : new AppError({
+        code: "VERSION_CONFLICT",
+        message: "The AI candidate was revised after it was shown. Review the latest text first.",
+        actions: ["RESOLVE_CONFLICT", "EXPORT_DRAFT"],
+        details: {
+          entityType: "candidate",
+          candidateId: candidate.id,
+          expectedRevision,
+          actualRevision: candidate.revision,
+        },
+      });
 }
 
 async function findCandidate(

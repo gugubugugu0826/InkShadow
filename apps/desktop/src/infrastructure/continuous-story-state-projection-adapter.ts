@@ -5,6 +5,8 @@ import type {
 } from "@inkshadow/application";
 import { parseUuidV7 as parseDomainUuid } from "@inkshadow/domain";
 import {
+  type CausalEventGraph,
+  type CausalEventNode,
   StoryFact,
   createStoryValue,
   type StoryFactSnapshot,
@@ -19,10 +21,13 @@ import {
   type ContinuousStoryFactType,
   type ContinuousValidationFactType,
 } from "./continuous-story-state-extraction";
+import type { CausalEventGraphStore } from "./causal-event-graph-store";
 
 const REBUILDABLE_SYSTEM_FACT_SCHEMA = "inkshadow.rebuildable-system-fact.v1";
 const CHARACTER_VOICE_EVIDENCE_SCHEMA = "inkshadow.character-voice-evidence.v1";
 const NARRATIVE_ANALYSIS_FACT_SCHEMA = "inkshadow.narrative-analysis-fact.v1";
+const CAUSAL_EVENT_FACT_SCHEMA = "inkshadow.causal-event-fact.v2";
+const POV_KNOWLEDGE_SOURCE_SCHEMA = "inkshadow.pov-knowledge-source.v2";
 const CONTINUOUS_REFERENCE_PATTERN =
   /^continuous-story-state:(?:character_extraction|world_extraction):([0-9a-f-]+):sha256:([a-f0-9]{64})$/u;
 const SAFE_REFERENCE_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,511}$/iu;
@@ -40,6 +45,9 @@ export type ContinuousProjectionDiagnosticReason =
   | "current_version_required"
   | "human_confirmation_required"
   | "rebuildable_authority_required"
+  | "knowledge_source_incomplete"
+  | "knowledge_source_unverified"
+  | "knowledge_source_inactive"
   | "duplicate_projection";
 
 export interface ContinuousProjectionDiagnostic {
@@ -66,6 +74,7 @@ export interface ContinuousStoryStateProjectionDependencies {
   readonly chapters: Pick<ChapterRepository, "findById">;
   readonly chapterVersions: Pick<ChapterVersionRepository, "findVersionById">;
   readonly storyFacts: Pick<StoryFactStore, "listByProjectId">;
+  readonly causalGraph: Pick<CausalEventGraphStore, "loadProjectBranch">;
   readonly hasher: ContentHasher;
 }
 
@@ -118,7 +127,26 @@ interface PovProjection {
     readonly endOrder: number | null;
   }>;
   readonly mode: "first_person" | "third_person_limited";
+  readonly acquiredAt: number | null;
+  readonly sourceEventId: string | null;
+  readonly sourceFactId: string | null;
+  readonly informationId: string | null;
+  readonly sourceCompleteness: "declared" | "legacy_incomplete";
 }
+
+interface VerifiedPovKnowledgeSource {
+  readonly sourceSnapshot: StoryFactSnapshot;
+  readonly event: CausalEventNode;
+  readonly evidence: VerifiedEvidence;
+  readonly acquiredAt: number;
+}
+
+type PovKnowledgeSourceResolution =
+  | Readonly<{ readonly ok: true; readonly value: VerifiedPovKnowledgeSource }>
+  | Readonly<{
+      readonly ok: false;
+      readonly reason: "knowledge_source_unverified" | "knowledge_source_inactive";
+    }>;
 
 interface VoiceProjection {
   readonly characterId: string;
@@ -158,6 +186,7 @@ export class ContinuousStoryStateProjectionAdapter {
     const diagnostics: ContinuousProjectionDiagnostic[] = [...loaded.diagnostics];
     const facts: StoryFact[] = [];
     const versionCache = new Map<string, Promise<VerifiedEvidence | null>>();
+    const graphCache = new Map<string, Promise<CausalEventGraph | null>>();
     for (const source of loaded.facts) {
       if (source.snapshot.deprecated) continue;
       if (!branchMatches(source.snapshot, request.branchId)) {
@@ -166,9 +195,32 @@ export class ContinuousStoryStateProjectionAdapter {
         );
         continue;
       }
+      if (source.snapshot.factType === "pov_knowledge") {
+        const pov = parsePovProjection(source);
+        if (pov === null) {
+          diagnostics.push(
+            diagnostic(source, "validation", "projection_missing", [
+              "explicit_pov_character_mode_knowledge_and_effective_range",
+            ]),
+          );
+          continue;
+        }
+        const projected = await this.projectPovKnowledge({
+          source,
+          projection: pov,
+          request,
+          allFactsById: loaded.allFactsById,
+          versionCache,
+          graphCache,
+          area: "validation",
+          requireConfirmedCurrent: false,
+        });
+        facts.push(...projected.facts);
+        diagnostics.push(...projected.diagnostics);
+        continue;
+      }
       const validation = parseValidationProjection(source);
-      const pov = parsePovProjection(source);
-      const normalized = validation ?? (pov === null ? null : validationFromPov(pov));
+      const normalized = validation;
       if (normalized === null) {
         if (expectsValidationProjection(source.snapshot.factType)) {
           diagnostics.push(
@@ -232,11 +284,6 @@ export class ContinuousStoryStateProjectionAdapter {
               ...(role === "current_claim"
                 ? {
                     basis: "explicit_text",
-                    ...(pov === null
-                      ? {}
-                      : {
-                          povContext: { mode: pov.mode, characterId: pov.characterId },
-                        }),
                   }
                 : {}),
             };
@@ -264,6 +311,7 @@ export class ContinuousStoryStateProjectionAdapter {
     const diagnostics: ContinuousProjectionDiagnostic[] = [...loaded.diagnostics];
     const facts: StoryFact[] = [];
     const versionCache = new Map<string, Promise<VerifiedEvidence | null>>();
+    const graphCache = new Map<string, Promise<CausalEventGraph | null>>();
     const voices: { source: StoredContinuousFact; projection: VoiceProjection }[] = [];
     for (const source of loaded.facts) {
       if (source.snapshot.deprecated) continue;
@@ -272,6 +320,30 @@ export class ContinuousStoryStateProjectionAdapter {
         source.snapshot.factType !== "pov_knowledge" &&
         source.snapshot.factType !== "character_voice"
       ) {
+        continue;
+      }
+      if (source.snapshot.factType === "pov_knowledge") {
+        const pov = parsePovProjection(source);
+        if (pov === null) {
+          diagnostics.push(
+            diagnostic(source, "voice_pov", "projection_missing", [
+              "explicit_pov_character_mode_knowledge_and_effective_range",
+            ]),
+          );
+          continue;
+        }
+        const projected = await this.projectPovKnowledge({
+          source,
+          projection: pov,
+          request,
+          allFactsById: loaded.allFactsById,
+          versionCache,
+          graphCache,
+          area: "voice_pov",
+          requireConfirmedCurrent: true,
+        });
+        facts.push(...projected.facts);
+        diagnostics.push(...projected.diagnostics);
         continue;
       }
       if (!isConfirmedFormal(source.snapshot)) {
@@ -289,41 +361,6 @@ export class ContinuousStoryStateProjectionAdapter {
             "exact_immutable_chapter_span_and_checksum",
           ]),
         );
-        continue;
-      }
-      if (source.snapshot.factType === "pov_knowledge") {
-        const pov = parsePovProjection(source);
-        if (pov === null) {
-          diagnostics.push(
-            diagnostic(source, "voice_pov", "projection_missing", [
-              "explicit_pov_character_mode_knowledge_and_effective_range",
-            ]),
-          );
-          continue;
-        }
-        const role = isCurrentTargetSource(source.snapshot, request)
-          ? "current_claim"
-          : "reference_fact";
-        const projected = rehydrateProjectedFact(
-          source.snapshot,
-          source.snapshot.id,
-          "character_knowledge",
-          {
-            validationRole: role,
-            subjectId: pov.characterId,
-            characterId: pov.characterId,
-            attributeKey: pov.attributeKey,
-            effectiveRange: pov.effectiveRange,
-            value: pov.knowledgeStatus,
-            ...(role === "current_claim"
-              ? {
-                  basis: "explicit_text",
-                  povContext: { mode: pov.mode, characterId: pov.characterId },
-                }
-              : {}),
-          },
-        );
-        if (projected !== null) facts.push(projected);
         continue;
       }
       const voice = parseVoiceProjection(source, verified.content);
@@ -422,6 +459,273 @@ export class ContinuousStoryStateProjectionAdapter {
       }
     }
     return freezeBatch(facts, diagnostics);
+  }
+
+  private async projectPovKnowledge(
+    input: Readonly<{
+      source: StoredContinuousFact;
+      projection: PovProjection;
+      request: ContinuousStoryStateProjectionRequest;
+      allFactsById: ReadonlyMap<string, StoryFactSnapshot>;
+      versionCache: Map<string, Promise<VerifiedEvidence | null>>;
+      graphCache: Map<string, Promise<CausalEventGraph | null>>;
+      area: "validation" | "voice_pov";
+      requireConfirmedCurrent: boolean;
+    }>,
+  ): Promise<ContinuousProjectedFactBatch> {
+    const { source, projection, request } = input;
+    const diagnostics: ContinuousProjectionDiagnostic[] = [];
+    const current = isCurrentTargetSource(source.snapshot, request);
+    if (source.snapshot.invalidatedAt !== null) {
+      diagnostics.push(
+        diagnostic(source, input.area, "knowledge_source_inactive", ["active_pov_knowledge_claim"]),
+      );
+      return freezeBatch([], diagnostics);
+    }
+    if ((await this.verifyEvidence(source.snapshot, input.versionCache)) === null) {
+      diagnostics.push(
+        diagnostic(source, input.area, "evidence_invalid", [
+          "exact_immutable_chapter_span_and_checksum",
+        ]),
+      );
+      return freezeBatch([], diagnostics);
+    }
+
+    if (current) {
+      if (input.requireConfirmedCurrent && !isConfirmedFormal(source.snapshot)) {
+        diagnostics.push(
+          diagnostic(source, input.area, "human_confirmation_required", [
+            "user_confirmed_formal_current_pov_claim",
+          ]),
+        );
+        return freezeBatch([], diagnostics);
+      }
+      const projected = rehydrateProjectedFact(
+        source.snapshot,
+        source.snapshot.id,
+        "character_knowledge",
+        {
+          validationRole: "current_claim",
+          subjectId: projection.characterId,
+          characterId: projection.characterId,
+          attributeKey: projection.attributeKey,
+          effectiveRange: projection.effectiveRange,
+          value: projection.knowledgeStatus,
+          basis: "explicit_text",
+          povContext: { mode: projection.mode, characterId: projection.characterId },
+          knowledgeSourceSchema: POV_KNOWLEDGE_SOURCE_SCHEMA,
+          knowledgeSourceCompleteness:
+            projection.sourceCompleteness === "legacy_incomplete"
+              ? "legacy_incomplete"
+              : "current_claim",
+        },
+      );
+      if (projected === null) {
+        diagnostics.push(
+          diagnostic(source, input.area, "projection_invalid", ["validator_story_fact_schema"]),
+        );
+        return freezeBatch([], diagnostics);
+      }
+      return freezeBatch([projected], diagnostics);
+    }
+
+    if (!isConfirmedFormal(source.snapshot)) {
+      diagnostics.push(
+        diagnostic(source, input.area, "human_confirmation_required", [
+          "historical_knowledge_must_be_human_confirmed_formal",
+        ]),
+      );
+      return freezeBatch([], diagnostics);
+    }
+    if (
+      projection.sourceCompleteness === "legacy_incomplete" ||
+      projection.knowledgeStatus !== "known" ||
+      projection.acquiredAt === null ||
+      projection.sourceEventId === null ||
+      projection.sourceFactId === null ||
+      projection.informationId === null
+    ) {
+      diagnostics.push(
+        diagnostic(source, input.area, "knowledge_source_incomplete", [
+          "confirmed_source_fact_event_acquisition_order_and_exact_knowledge_gain",
+        ]),
+      );
+      return freezeBatch([], diagnostics);
+    }
+
+    const resolved = await this.resolvePovKnowledgeSource({
+      source,
+      projection,
+      request,
+      allFactsById: input.allFactsById,
+      versionCache: input.versionCache,
+      graphCache: input.graphCache,
+    });
+    if (!resolved.ok) {
+      diagnostics.push(
+        diagnostic(source, input.area, resolved.reason, [
+          resolved.reason === "knowledge_source_inactive"
+            ? "active_confirmed_source_fact"
+            : "matching_character_attribute_information_causal_event_and_exact_source_evidence",
+        ]),
+      );
+      return freezeBatch([], diagnostics);
+    }
+
+    const acquiredAt = resolved.value.acquiredAt;
+    const sourceEvidence = resolved.value.sourceSnapshot.source;
+    const projectedSource: StoryFactSnapshot = {
+      ...source.snapshot,
+      source: sourceEvidence,
+    };
+    const evidenceReceipt = Object.freeze({
+      chapterId: sourceEvidence.chapterId,
+      versionId: sourceEvidence.versionId,
+      contentHash: resolved.value.evidence.contentHash,
+      reference: sourceEvidence.reference,
+      startOffset: sourceEvidence.startOffset,
+      endOffset: sourceEvidence.endOffset,
+      sourceLength: sourceEvidence.sourceLength,
+      excerpt: sourceEvidence.excerpt,
+    });
+    const knowledgeSource = {
+      knowledgeSourceSchema: POV_KNOWLEDGE_SOURCE_SCHEMA,
+      knowledgeSourceCompleteness: "verified",
+      acquiredAt,
+      sourceEventId: projection.sourceEventId,
+      sourceFactId: projection.sourceFactId,
+      informationId: projection.informationId,
+      sourceEvidence: evidenceReceipt,
+    } as const;
+    const facts: StoryFact[] = [];
+    if (projection.effectiveRange.startOrder < acquiredAt) {
+      const beforeId = await this.derivedUuid(source.snapshot.id, "pov-before-acquisition");
+      const before = rehydrateProjectedFact(projectedSource, beforeId, "character_knowledge", {
+        validationRole: "reference_fact",
+        subjectId: projection.characterId,
+        characterId: projection.characterId,
+        attributeKey: projection.attributeKey,
+        effectiveRange: {
+          startOrder: projection.effectiveRange.startOrder,
+          endOrder: acquiredAt - 1,
+        },
+        value: "unknown",
+        ...knowledgeSource,
+      });
+      if (before !== null) facts.push(before);
+    }
+    const afterId = await this.derivedUuid(source.snapshot.id, "pov-after-acquisition");
+    const after = rehydrateProjectedFact(projectedSource, afterId, "character_knowledge", {
+      validationRole: "reference_fact",
+      subjectId: projection.characterId,
+      characterId: projection.characterId,
+      attributeKey: projection.attributeKey,
+      effectiveRange: {
+        startOrder: acquiredAt,
+        endOrder: projection.effectiveRange.endOrder,
+      },
+      value: "known",
+      ...knowledgeSource,
+    });
+    if (after !== null) facts.push(after);
+    if (facts.length === 0) {
+      diagnostics.push(
+        diagnostic(source, input.area, "projection_invalid", ["validator_story_fact_schema"]),
+      );
+    }
+    return freezeBatch(facts, diagnostics);
+  }
+
+  private async resolvePovKnowledgeSource(
+    input: Readonly<{
+      source: StoredContinuousFact;
+      projection: PovProjection;
+      request: ContinuousStoryStateProjectionRequest;
+      allFactsById: ReadonlyMap<string, StoryFactSnapshot>;
+      versionCache: Map<string, Promise<VerifiedEvidence | null>>;
+      graphCache: Map<string, Promise<CausalEventGraph | null>>;
+    }>,
+  ): Promise<PovKnowledgeSourceResolution> {
+    const { projection, request } = input;
+    if (
+      projection.acquiredAt === null ||
+      projection.sourceEventId === null ||
+      projection.sourceFactId === null ||
+      projection.informationId === null
+    ) {
+      return Object.freeze({ ok: false, reason: "knowledge_source_unverified" });
+    }
+    const sourceSnapshot = input.allFactsById.get(projection.sourceFactId);
+    if (sourceSnapshot === undefined) {
+      return Object.freeze({ ok: false, reason: "knowledge_source_unverified" });
+    }
+    if (
+      sourceSnapshot.status !== "formal" ||
+      !sourceSnapshot.userConfirmed ||
+      sourceSnapshot.needsReview ||
+      sourceSnapshot.deprecated ||
+      sourceSnapshot.invalidatedAt !== null
+    ) {
+      return Object.freeze({ ok: false, reason: "knowledge_source_inactive" });
+    }
+    const branchId = request.branchId ?? null;
+    if (
+      sourceSnapshot.projectId !== request.projectId ||
+      sourceSnapshot.branchId !== branchId ||
+      sourceSnapshot.source.kind !== "chapter_span"
+    ) {
+      return Object.freeze({ ok: false, reason: "knowledge_source_unverified" });
+    }
+    const structured = asRecord(sourceSnapshot.structuredValue);
+    const narrativeTime = asRecord(structured?.narrativeTime);
+    const eventId = safeReference(structured?.eventId) ?? sourceSnapshot.id;
+    const informedCharacterIds = readReferenceArray(structured?.informedCharacterIds, 512);
+    const knowledgeGains = readKnowledgeGains(structured?.knowledgeGains);
+    if (
+      structured?.schemaVersion !== CAUSAL_EVENT_FACT_SCHEMA ||
+      eventId !== projection.sourceEventId ||
+      narrativeTime?.order !== projection.acquiredAt ||
+      !informedCharacterIds?.includes(projection.characterId) ||
+      !knowledgeGains?.some(
+        (gain) =>
+          gain.characterId === projection.characterId &&
+          gain.attributeKey === projection.attributeKey &&
+          gain.informationId === projection.informationId,
+      )
+    ) {
+      return Object.freeze({ ok: false, reason: "knowledge_source_unverified" });
+    }
+    const evidence = await this.verifyChapterEvidence(sourceSnapshot, input.versionCache);
+    if (evidence === null) {
+      return Object.freeze({ ok: false, reason: "knowledge_source_unverified" });
+    }
+    const graphBranchId = branchId ?? "main";
+    const graphKey = `${request.projectId}\u0000${graphBranchId}`;
+    let pending = input.graphCache.get(graphKey);
+    if (pending === undefined) {
+      pending = this.dependencies.causalGraph
+        .loadProjectBranch(request.projectId, graphBranchId)
+        .catch(() => null);
+      input.graphCache.set(graphKey, pending);
+    }
+    const graph = await pending;
+    const event = graph?.events.find(({ id }) => id === projection.sourceEventId);
+    if (event === undefined) {
+      return Object.freeze({ ok: false, reason: "knowledge_source_unverified" });
+    }
+    if (
+      event.projectId !== request.projectId ||
+      event.branchId !== graphBranchId ||
+      event.narrativeTime.order !== projection.acquiredAt ||
+      !event.informedCharacterIds.includes(projection.characterId) ||
+      !causalEvidenceMatchesStoryFact(event, sourceSnapshot, evidence)
+    ) {
+      return Object.freeze({ ok: false, reason: "knowledge_source_unverified" });
+    }
+    return Object.freeze({
+      ok: true,
+      value: Object.freeze({ sourceSnapshot, event, evidence, acquiredAt: projection.acquiredAt }),
+    });
   }
 
   public async projectNarrativeFacts(
@@ -656,6 +960,7 @@ export class ContinuousStoryStateProjectionAdapter {
   private async loadContinuousFacts(projectIdValue: string): Promise<
     Readonly<{
       facts: readonly StoredContinuousFact[];
+      allFactsById: ReadonlyMap<string, StoryFactSnapshot>;
       diagnostics: readonly ContinuousProjectionDiagnostic[];
     }>
   > {
@@ -678,9 +983,11 @@ export class ContinuousStoryStateProjectionAdapter {
       );
     }
     const facts: StoredContinuousFact[] = [];
+    const allFactsById = new Map<string, StoryFactSnapshot>();
     const diagnostics: ContinuousProjectionDiagnostic[] = [];
     for (const fact of loaded.value) {
       const snapshot = fact.toSnapshot();
+      allFactsById.set(snapshot.id, snapshot);
       if (!CONTINUOUS_STORY_FACT_TYPES.includes(snapshot.factType as ContinuousStoryFactType)) {
         continue;
       }
@@ -703,10 +1010,31 @@ export class ContinuousStoryStateProjectionAdapter {
         }
       }
     }
-    return Object.freeze({ facts: Object.freeze(facts), diagnostics: Object.freeze(diagnostics) });
+    return Object.freeze({
+      facts: Object.freeze(facts),
+      allFactsById,
+      diagnostics: Object.freeze(diagnostics),
+    });
   }
 
   private async verifyEvidence(
+    snapshot: StoryFactSnapshot,
+    cache: Map<string, Promise<VerifiedEvidence | null>>,
+  ): Promise<VerifiedEvidence | null> {
+    const source = snapshot.source;
+    const reference = CONTINUOUS_REFERENCE_PATTERN.exec(source.reference);
+    if (
+      source.versionId === null ||
+      reference?.[1] !== source.versionId ||
+      reference[2] === undefined
+    ) {
+      return null;
+    }
+    const verified = await this.verifyChapterEvidence(snapshot, cache);
+    return verified !== null && reference[2] === verified.contentHash ? verified : null;
+  }
+
+  private async verifyChapterEvidence(
     snapshot: StoryFactSnapshot,
     cache: Map<string, Promise<VerifiedEvidence | null>>,
   ): Promise<VerifiedEvidence | null> {
@@ -722,8 +1050,6 @@ export class ContinuousStoryStateProjectionAdapter {
     ) {
       return null;
     }
-    const reference = CONTINUOUS_REFERENCE_PATTERN.exec(source.reference);
-    if (reference?.[1] !== source.versionId || reference[2] === undefined) return null;
     let pending = cache.get(source.versionId);
     if (pending === undefined) {
       pending = this.loadVersionEvidence(source.versionId);
@@ -734,7 +1060,6 @@ export class ContinuousStoryStateProjectionAdapter {
       verified?.projectId !== snapshot.projectId ||
       verified.chapterId !== source.chapterId ||
       verified.versionId !== source.versionId ||
-      reference[2] !== verified.contentHash ||
       source.sourceLength !== verified.content.length ||
       source.startOffset < 0 ||
       source.endOffset <= source.startOffset ||
@@ -878,16 +1203,18 @@ function parseValidationProjection(source: StoredContinuousFact): ValidationProj
 function parsePovProjection(source: StoredContinuousFact): PovProjection | null {
   if (source.snapshot.factType !== "pov_knowledge") return null;
   const value = asRecord(source.projection.pov);
-  if (
-    value === null ||
-    !hasExactKeys(value, [
-      "characterId",
-      "attributeKey",
-      "knowledgeStatus",
-      "effectiveRange",
-      "mode",
-    ])
-  ) {
+  const legacyKeys = [
+    "characterId",
+    "attributeKey",
+    "knowledgeStatus",
+    "effectiveRange",
+    "mode",
+  ] as const;
+  const previousKeys = [...legacyKeys, "acquiredAt", "sourceEventId", "sourceFactId"] as const;
+  const currentKeys = [...previousKeys, "informationId"] as const;
+  const legacy =
+    value !== null && (hasExactKeys(value, legacyKeys) || hasExactKeys(value, previousKeys));
+  if (value === null || (!legacy && !hasExactKeys(value, currentKeys))) {
     return null;
   }
   const characterId = safeReference(value.characterId);
@@ -904,12 +1231,44 @@ function parsePovProjection(source: StoredContinuousFact): PovProjection | null 
   ) {
     return null;
   }
+  if (
+    !legacy &&
+    ((value.acquiredAt !== null && !safeInteger(value.acquiredAt, 0, 1_000_000_000_000)) ||
+      (value.sourceEventId !== null && safeReference(value.sourceEventId) === null) ||
+      (value.sourceFactId !== null && safeReference(value.sourceFactId) === null) ||
+      (value.informationId !== null && safeReference(value.informationId) === null))
+  ) {
+    return null;
+  }
+  const acquiredAt = legacy ? null : safeNullableInteger(value.acquiredAt, 0, 1_000_000_000_000);
+  const sourceEventId =
+    legacy || value.sourceEventId === null ? null : safeReference(value.sourceEventId);
+  const sourceFactId =
+    legacy || value.sourceFactId === null ? null : safeReference(value.sourceFactId);
+  const informationId =
+    legacy || value.informationId === null ? null : safeReference(value.informationId);
+  const populatedSourceFields = [acquiredAt, sourceEventId, sourceFactId, informationId].filter(
+    (item) => item !== null,
+  ).length;
+  if (
+    (!legacy && populatedSourceFields !== 0 && populatedSourceFields !== 4) ||
+    (acquiredAt !== null &&
+      (acquiredAt < effectiveRange.startOrder ||
+        (effectiveRange.endOrder !== null && acquiredAt > effectiveRange.endOrder)))
+  ) {
+    return null;
+  }
   return Object.freeze({
     characterId,
     attributeKey,
     knowledgeStatus: value.knowledgeStatus as PovProjection["knowledgeStatus"],
     effectiveRange,
     mode: value.mode,
+    acquiredAt,
+    sourceEventId,
+    sourceFactId,
+    informationId,
+    sourceCompleteness: legacy ? "legacy_incomplete" : "declared",
   });
 }
 
@@ -1151,14 +1510,35 @@ function rehydrateProjectedFact(
   return rehydrated.ok ? rehydrated.value : null;
 }
 
-function validationFromPov(pov: PovProjection): ValidationProjection {
-  return Object.freeze({
-    factType: "character_knowledge",
-    subjectId: pov.characterId,
-    attributeKey: pov.attributeKey,
-    value: pov.knowledgeStatus,
-    effectiveRange: pov.effectiveRange,
-  });
+function causalEvidenceMatchesStoryFact(
+  event: CausalEventNode,
+  snapshot: StoryFactSnapshot,
+  verified: VerifiedEvidence,
+): boolean {
+  const source = snapshot.source;
+  if (
+    source.kind !== "chapter_span" ||
+    source.chapterId === null ||
+    source.versionId === null ||
+    source.startOffset === null ||
+    source.endOffset === null ||
+    source.sourceLength === null ||
+    source.excerpt === null
+  ) {
+    return false;
+  }
+  const expectedLocator = `${source.reference}#utf16:${String(source.startOffset)}-${String(source.endOffset)}/${String(source.sourceLength)}`;
+  const evidence = event.evidence;
+  return (
+    evidence.chapterId === source.chapterId &&
+    evidence.chapterVersionId === source.versionId &&
+    evidence.contentHash === verified.contentHash &&
+    evidence.locator === expectedLocator &&
+    evidence.excerpt === source.excerpt &&
+    evidence.startOffset === source.startOffset &&
+    evidence.endOffset === source.endOffset &&
+    evidence.sourceLength === source.sourceLength
+  );
 }
 
 function isConfirmedFormal(snapshot: StoryFactSnapshot): boolean {
@@ -1298,6 +1678,10 @@ function safeInteger(value: unknown, minimum: number, maximum: number): value is
   );
 }
 
+function safeNullableInteger(value: unknown, minimum: number, maximum: number): number | null {
+  return value === null ? null : safeInteger(value, minimum, maximum) ? value : null;
+}
+
 function ratio(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
@@ -1318,6 +1702,42 @@ function readReferenceArray(value: unknown, maximumItems = 64): readonly string[
   return parsed.some((item) => item === null) || new Set(parsed).size !== parsed.length
     ? null
     : (parsed as readonly string[]);
+}
+
+function readKnowledgeGains(value: unknown):
+  | readonly Readonly<{
+      readonly characterId: string;
+      readonly attributeKey: string;
+      readonly informationId: string;
+    }>[]
+  | null {
+  if (!Array.isArray(value) || value.length > 128) return null;
+  const parsed = value.map((item) => {
+    const record = asRecord(item);
+    if (
+      record === null ||
+      !hasExactKeys(record, ["characterId", "attributeKey", "informationId"])
+    ) {
+      return null;
+    }
+    const characterId = safeReference(record.characterId);
+    const attributeKey = safeReference(record.attributeKey);
+    const informationId = safeReference(record.informationId);
+    return characterId === null || attributeKey === null || informationId === null
+      ? null
+      : Object.freeze({ characterId, attributeKey, informationId });
+  });
+  if (parsed.some((item) => item === null)) return null;
+  const complete = parsed as readonly Readonly<{
+    readonly characterId: string;
+    readonly attributeKey: string;
+    readonly informationId: string;
+  }>[];
+  const signatures = complete.map(
+    ({ characterId, attributeKey, informationId }) =>
+      `${characterId}\u0000${attributeKey}\u0000${informationId}`,
+  );
+  return new Set(signatures).size === signatures.length ? Object.freeze([...complete]) : null;
 }
 
 function readProjectionIssues(value: unknown): readonly string[] {

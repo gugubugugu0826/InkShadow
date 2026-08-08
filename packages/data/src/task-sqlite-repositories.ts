@@ -129,19 +129,7 @@ export class SqliteTaskRepository implements TaskRepository {
   public async createIfAbsent(task: Task): Promise<Result<CreateTaskResult, TaskEngineError>> {
     return attempt("create task", "task", async () =>
       this.executor.transaction(async (transaction) => {
-        const existing = await findTaskByIdempotencyKey(transaction, task.idempotencyKey);
-        if (existing !== null) {
-          if (!existing.isSameRequestAs(task)) {
-            throw new TaskEngineError({
-              code: "TASK_IDEMPOTENCY_CONFLICT",
-              message: "The task idempotency key is already bound to a different request.",
-            });
-          }
-          return { task: existing, created: false };
-        }
-
-        await insertTask(transaction, task);
-        return { task, created: true };
+        return createTaskIfAbsentInTransaction(transaction, task);
       }),
     );
   }
@@ -220,6 +208,32 @@ export class SqliteTaskRepository implements TaskRepository {
       return rows.map(rehydrateTask);
     });
   }
+}
+
+/**
+ * Registers a task inside an existing SQLite transaction.
+ *
+ * Content commits use this boundary to make the immutable accepted version and
+ * its recovery task durable together. Keeping the same request comparison as
+ * the public repository preserves strict idempotency if a caller retries.
+ */
+export async function createTaskIfAbsentInTransaction(
+  executor: TransactionExecutor,
+  task: Task,
+): Promise<CreateTaskResult> {
+  const existing = await findTaskByIdempotencyKey(executor, task.idempotencyKey);
+  if (existing !== null) {
+    if (!existing.isSameRequestAs(task)) {
+      throw new TaskEngineError({
+        code: "TASK_IDEMPOTENCY_CONFLICT",
+        message: "The task idempotency key is already bound to a different request.",
+      });
+    }
+    return { task: existing, created: false };
+  }
+
+  await insertTask(executor, task);
+  return { task, created: true };
 }
 
 export class SqliteNotificationRepository implements NotificationRepository {

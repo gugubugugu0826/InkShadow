@@ -23,9 +23,10 @@ const BRANCH_ID = uuid(3);
 
 describe("unified story fact context adapter", () => {
   it("assembles an explicit task, optional scene goal, and reviewed facts into fixed layers", () => {
+    const knowledgeSource = causalKnowledgeSourceFact(110, "character-linyao");
     const facts = [
       fact(10, "world_rule", { locked: true, contentText: "魔法不能复活死者。" }),
-      fact(11, "pov.knowledge", { contentText: "林遥只知道钥匙被人拿走。" }),
+      verifiedPovKnowledgeFact(11, knowledgeSource, "character-linyao"),
       fact(12, "character.state", { contentText: "林遥的左臂受伤。" }),
       fact(13, "timeline_event", { contentText: "列车刚刚离站。" }),
       fact(14, "causal_event", { contentText: "停电导致监控失效。" }),
@@ -41,6 +42,9 @@ describe("unified story fact context adapter", () => {
       currentTask: explicit("continue-chapter", "续写本章下一场景。", "generation_task"),
       sceneGoal: explicit("escape-platform", "让主角在不暴露身份的情况下离开站台。", "scene_plan"),
       facts,
+      knowledgeSourceFacts: [knowledgeSource],
+      currentPovCharacterId: "character-linyao",
+      currentNarrativeOrder: 4,
     });
 
     expect(assembled.candidates.map(({ layer }) => layer)).toEqual([
@@ -67,6 +71,150 @@ describe("unified story fact context adapter", () => {
     expect(compiled.entries[0]).toMatchObject({
       layer: "locked_hard_rules",
       required: true,
+    });
+  });
+
+  it("admits only verified post-acquisition POV knowledge and invalidates the edge with its source", () => {
+    const source = causalKnowledgeSourceFact(120, "character-aria");
+    const verified = verifiedPovKnowledgeFact(121, source, "character-aria");
+    const legacy = fact(122, "pov_knowledge", {
+      contentText: "Legacy knowledge without a source.",
+      structuredValue: { value: "known" },
+      locked: true,
+    });
+
+    expect(
+      adaptStoryFactContextSource(legacy, {
+        projectId: PROJECT_ID,
+        currentBranchId: null,
+        knowledgeSourceFacts: [source],
+        currentPovCharacterId: "character-aria",
+        currentNarrativeOrder: 4,
+      }),
+    ).toMatchObject({
+      included: false,
+      discard: { reason: "pov_knowledge_source_incomplete" },
+    });
+    expect(
+      adaptStoryFactContextSource(verified, {
+        projectId: PROJECT_ID,
+        currentBranchId: null,
+        knowledgeSourceFacts: [source],
+        currentPovCharacterId: "character-aria",
+        currentNarrativeOrder: 4,
+      }),
+    ).toMatchObject({ included: true, candidate: { layer: "pov_known_information" } });
+    expect(
+      adaptStoryFactContextSource(verified, {
+        projectId: PROJECT_ID,
+        currentBranchId: null,
+        knowledgeSourceFacts: [source],
+      }),
+    ).toMatchObject({ included: false, discard: { reason: "pov_context_unavailable" } });
+    expect(
+      adaptStoryFactContextSource(verified, {
+        projectId: PROJECT_ID,
+        currentBranchId: null,
+        knowledgeSourceFacts: [source],
+        currentPovCharacterId: "character-other",
+        currentNarrativeOrder: 4,
+      }),
+    ).toMatchObject({ included: false, discard: { reason: "pov_character_mismatch" } });
+    expect(
+      adaptStoryFactContextSource(verified, {
+        projectId: PROJECT_ID,
+        currentBranchId: null,
+        knowledgeSourceFacts: [source],
+        currentPovCharacterId: "character-aria",
+        currentNarrativeOrder: 3,
+      }),
+    ).toMatchObject({
+      included: false,
+      discard: { reason: "pov_narrative_order_outside_range" },
+    });
+
+    const invalidated = causalKnowledgeSourceFact(120, "character-aria", "第二卷/来源失效");
+    expect(
+      adaptStoryFactContextSource(verified, {
+        projectId: PROJECT_ID,
+        currentBranchId: null,
+        knowledgeSourceFacts: [invalidated],
+        currentPovCharacterId: "character-aria",
+        currentNarrativeOrder: 4,
+      }),
+    ).toMatchObject({
+      included: false,
+      discard: { reason: "pov_knowledge_source_unverified" },
+    });
+  });
+
+  it("binds an acquisition to the exact character, knowledge key, information, branch, and order", () => {
+    const characterId = "character-aria";
+    const source = causalKnowledgeSourceFact(130, characterId, undefined, {
+      knowledgeGains: [
+        { characterId, attributeKey: "sealed-name", informationId: "sealed-name-secret" },
+        { characterId, attributeKey: "vault-code", informationId: "vault-code-7319" },
+      ],
+    });
+    const scope = {
+      projectId: PROJECT_ID,
+      currentBranchId: null,
+      knowledgeSourceFacts: [source],
+      currentPovCharacterId: characterId,
+      currentNarrativeOrder: 4,
+    } as const;
+
+    expect(
+      adaptStoryFactContextSource(verifiedPovKnowledgeFact(131, source, characterId), scope),
+    ).toMatchObject({ included: true });
+    expect(
+      adaptStoryFactContextSource(
+        verifiedPovKnowledgeFact(132, source, characterId, {
+          attributeKey: "vault-code",
+          informationId: "vault-code-7319",
+        }),
+        scope,
+      ),
+    ).toMatchObject({ included: true });
+
+    const unrelatedKnowledge = verifiedPovKnowledgeFact(133, source, characterId, {
+      attributeKey: "traitor-identity",
+      informationId: "traitor-is-mira",
+    });
+    expect(adaptStoryFactContextSource(unrelatedKnowledge, scope)).toMatchObject({
+      included: false,
+      discard: { reason: "pov_knowledge_source_unverified" },
+    });
+
+    const wrongInformation = verifiedPovKnowledgeFact(134, source, characterId, {
+      attributeKey: "sealed-name",
+      informationId: "different-secret",
+    });
+    expect(adaptStoryFactContextSource(wrongInformation, scope)).toMatchObject({
+      included: false,
+      discard: { reason: "pov_knowledge_source_unverified" },
+    });
+
+    const wrongOrder = verifiedPovKnowledgeFact(135, source, characterId, { acquiredAt: 5 });
+    expect(adaptStoryFactContextSource(wrongOrder, scope)).toMatchObject({
+      included: false,
+      discard: { reason: "pov_narrative_order_outside_range" },
+    });
+
+    const branchSource = causalKnowledgeSourceFact(136, characterId, undefined, {
+      branchId: BRANCH_ID,
+    });
+    expect(
+      adaptStoryFactContextSource(verifiedPovKnowledgeFact(137, branchSource, characterId), {
+        projectId: PROJECT_ID,
+        currentBranchId: null,
+        knowledgeSourceFacts: [branchSource],
+        currentPovCharacterId: characterId,
+        currentNarrativeOrder: 4,
+      }),
+    ).toMatchObject({
+      included: false,
+      discard: { reason: "pov_knowledge_source_unverified" },
     });
   });
 
@@ -203,6 +351,10 @@ describe("unified story fact context adapter", () => {
       origin: "system",
       needsReview: false,
       contentText: "林遥的左臂仍然受伤。",
+      structuredValue: {
+        schemaVersion: "inkshadow.continuous-story-state.v2",
+        replacementKey: "continuous-story-state:character-linyao:character_state:life-status",
+      },
       source: {
         kind: "system_derivation",
         reference: "chapter-state:45",
@@ -238,6 +390,58 @@ describe("unified story fact context adapter", () => {
     expect(rejected).toMatchObject({ included: false, discard: { reason: "temporary" } });
   });
 
+  it("requires current versioned evidence and selects one reversible projection per key", () => {
+    const chapterId = uuid(47);
+    const versionId = uuid(48);
+    const contentHash = "a".repeat(64);
+    const replacementKey = "continuous-story-state:character-linyao:character_state:life-status";
+    const automatic = (sequence: number, hash: string) =>
+      fact(sequence, "character_state", {
+        status: "temporary",
+        origin: "system",
+        needsReview: false,
+        structuredValue: {
+          schemaVersion: "inkshadow.continuous-story-state.v2",
+          replacementKey,
+        },
+        source: {
+          kind: "chapter_span",
+          reference: `continuous-story-state:character_extraction:${versionId}:sha256:${hash}`,
+          chapterId,
+          versionId,
+          startOffset: 0,
+          endOffset: 4,
+          sourceLength: 10,
+          excerpt: "ABCD",
+        },
+      });
+    const older = automatic(47, contentHash);
+    const newer = automatic(48, contentHash);
+    const stale = automatic(49, "b".repeat(64));
+    const scope = {
+      projectId: PROJECT_ID,
+      currentBranchId: null,
+      currentChapterVersions: { [chapterId]: { versionId, contentHash } },
+    } as const;
+
+    expect(adaptStoryFactContextSource(stale, scope)).toMatchObject({
+      included: false,
+      discard: { reason: "automatic_reversible_source_not_current" },
+    });
+    const assembled = assembleStoryContextCandidates({
+      ...scope,
+      currentTask: explicit("continue", "Continue.", "generation_task"),
+      facts: [older, newer, stale],
+    });
+    expect(assembled.includedFactIds).toEqual([newer.id]);
+    expect(assembled.discardedFacts).toContainEqual(
+      expect.objectContaining({
+        factId: older.id,
+        reason: "superseded_automatic_reversible_fact",
+      }),
+    );
+  });
+
   it("preserves chapter, version, UTF-16 locator, excerpt, and narrative locators", () => {
     const chapterId = uuid(51);
     const versionId = uuid(52);
@@ -245,7 +449,6 @@ describe("unified story fact context adapter", () => {
       contentText: "林遥与苏晚成为盟友。",
       structuredValue: { from: "林遥", relation: "盟友", to: "苏晚" },
       effectiveAt: "第一卷/第三章/雨夜之后",
-      invalidatedAt: "第一卷/第十章/决裂",
       source: {
         kind: "chapter_span",
         reference: `chapter-version:${versionId}`,
@@ -280,12 +483,21 @@ describe("unified story fact context adapter", () => {
         },
       ],
     });
-    expect(decision.candidate.content).toMatch(
-      /生效位置：第一卷\/第三章\/雨夜之后[\s\S]*失效位置：第一卷\/第十章\/决裂/u,
-    );
+    expect(decision.candidate.content).toContain("生效位置：第一卷/第三章/雨夜之后");
+    expect(decision.candidate.content).not.toContain("失效位置：");
     expect(decision.candidate.content).toContain(
       '结构化值：{"from":"林遥","relation":"盟友","to":"苏晚"}',
     );
+
+    const invalidated = fact(53, "relationship", {
+      invalidatedAt: "第一卷/第十章/决裂",
+    });
+    expect(
+      adaptStoryFactContextSource(invalidated, {
+        projectId: PROJECT_ID,
+        currentBranchId: null,
+      }),
+    ).toMatchObject({ included: false, discard: { reason: "invalidated" } });
   });
 
   it("treats every explicitly locked formal fact as a required constraint", () => {
@@ -476,6 +688,104 @@ function fact(sequence: number, factType: string, options: FactOptions = {}): St
       now: NOW,
     }),
   );
+}
+
+function causalKnowledgeSourceFact(
+  sequence: number,
+  characterId: string,
+  invalidatedAt?: string,
+  options: Readonly<{
+    readonly order?: number;
+    readonly branchId?: string;
+    readonly knowledgeGains?: readonly Readonly<{
+      readonly characterId: string;
+      readonly attributeKey: string;
+      readonly informationId: string;
+    }>[];
+  }> = {},
+): StoryFact {
+  const excerpt = "Aria learns.";
+  const chapterId = uuid(sequence + 1_000);
+  const versionId = uuid(sequence + 2_000);
+  return fact(sequence, "causal_event", {
+    contentText: excerpt,
+    structuredValue: {
+      schemaVersion: "inkshadow.causal-event-fact.v2",
+      eventId: uuid(sequence),
+      narrativeTime: { order: options.order ?? 4, label: "第四幕" },
+      informedCharacterIds: [characterId],
+      knowledgeGains: options.knowledgeGains ?? [
+        { characterId, attributeKey: "sealed-name", informationId: "sealed-name-secret" },
+      ],
+    },
+    ...(invalidatedAt === undefined ? {} : { invalidatedAt }),
+    ...(options.branchId === undefined
+      ? {}
+      : { status: "branch" as const, branchId: options.branchId }),
+    source: {
+      kind: "chapter_span",
+      reference: `chapter-version:${versionId}`,
+      chapterId,
+      versionId,
+      startOffset: 0,
+      endOffset: excerpt.length,
+      sourceLength: excerpt.length,
+      excerpt,
+    },
+  });
+}
+
+function verifiedPovKnowledgeFact(
+  sequence: number,
+  sourceFact: StoryFact,
+  characterId: string,
+  options: Readonly<{
+    readonly attributeKey?: string;
+    readonly informationId?: string;
+    readonly acquiredAt?: number;
+  }> = {},
+): StoryFact {
+  const sourceSnapshot = sourceFact.toSnapshot();
+  const source = sourceSnapshot.source;
+  if (
+    source.kind !== "chapter_span" ||
+    source.chapterId === null ||
+    source.versionId === null ||
+    source.startOffset === null ||
+    source.endOffset === null ||
+    source.sourceLength === null ||
+    source.excerpt === null
+  ) {
+    throw new Error("POV test source must be an exact chapter span.");
+  }
+  return fact(sequence, "character_knowledge", {
+    contentText: "Aria knows the secret after learning it.",
+    structuredValue: {
+      validationRole: "reference_fact",
+      subjectId: characterId,
+      characterId,
+      attributeKey: options.attributeKey ?? "sealed-name",
+      effectiveRange: { startOrder: options.acquiredAt ?? 4, endOrder: null },
+      value: "known",
+      knowledgeSourceSchema: "inkshadow.pov-knowledge-source.v2",
+      knowledgeSourceCompleteness: "verified",
+      acquiredAt: options.acquiredAt ?? 4,
+      sourceEventId: sourceFact.id,
+      sourceFactId: sourceFact.id,
+      informationId: options.informationId ?? "sealed-name-secret",
+      sourceEvidence: {
+        chapterId: source.chapterId,
+        versionId: source.versionId,
+        contentHash: "d".repeat(64),
+        reference: source.reference,
+        startOffset: source.startOffset,
+        endOffset: source.endOffset,
+        sourceLength: source.sourceLength,
+        excerpt: source.excerpt,
+      },
+    },
+    source,
+  });
 }
 
 function chapterSummaryFact(

@@ -11,6 +11,7 @@ const MAX_MODEL_ID_BYTES: usize = 512;
 const MAX_MODEL_DISPLAY_NAME_BYTES: usize = 1_024;
 const MAX_CURSOR_BYTES: usize = 8_192;
 const MAX_STREAM_LINE_BYTES: usize = 1024 * 1024;
+const MAX_OPENAI_JSON_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_USAGE_TOKENS: u64 = 100_000_000;
 pub(crate) const MAX_EMBEDDING_DIMENSION: usize = 4_096;
 pub(crate) const MAX_EMBEDDING_VALUES: usize = 524_288;
@@ -165,6 +166,119 @@ pub(crate) struct OpenAiSseParser {
     data_lines: Vec<Vec<u8>>,
     saw_finish_reason: bool,
     saw_done: bool,
+}
+
+pub(crate) struct OpenAiResponseParser {
+    mode: OpenAiResponseMode,
+}
+
+enum OpenAiResponseMode {
+    Detecting(Vec<u8>),
+    Sse(OpenAiSseParser),
+    Json(OpenAiJsonParser),
+}
+
+#[derive(Default)]
+struct OpenAiJsonParser {
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+enum OpenAiResponseFormat {
+    Sse,
+    Json,
+}
+
+impl Default for OpenAiResponseParser {
+    fn default() -> Self {
+        Self {
+            mode: OpenAiResponseMode::Detecting(Vec::new()),
+        }
+    }
+}
+
+impl OpenAiResponseParser {
+    pub(crate) fn push(&mut self, chunk: &[u8]) -> Result<Vec<StreamItem>, CommandError> {
+        if let OpenAiResponseMode::Detecting(bytes) = &mut self.mode {
+            if bytes.len().saturating_add(chunk.len()) > MAX_OPENAI_JSON_BODY_BYTES {
+                return Err(CommandError::response_limit_exceeded());
+            }
+            bytes.extend_from_slice(chunk);
+            let Some(format) = detect_openai_response_format(bytes)? else {
+                return Ok(Vec::new());
+            };
+            let buffered = std::mem::take(bytes);
+            self.mode = match format {
+                OpenAiResponseFormat::Sse => OpenAiResponseMode::Sse(OpenAiSseParser::default()),
+                OpenAiResponseFormat::Json => OpenAiResponseMode::Json(OpenAiJsonParser::default()),
+            };
+            return self.push(&buffered);
+        }
+
+        match &mut self.mode {
+            OpenAiResponseMode::Sse(parser) => parser.push(chunk),
+            OpenAiResponseMode::Json(parser) => parser.push(chunk),
+            OpenAiResponseMode::Detecting(_) => unreachable!("detecting mode handled above"),
+        }
+    }
+
+    pub(crate) fn finish(&mut self) -> Result<Vec<StreamItem>, CommandError> {
+        let mut items = Vec::new();
+        if let OpenAiResponseMode::Detecting(bytes) = &mut self.mode {
+            let format =
+                detect_openai_response_format(bytes)?.ok_or_else(CommandError::response_invalid)?;
+            let buffered = std::mem::take(bytes);
+            self.mode = match format {
+                OpenAiResponseFormat::Sse => OpenAiResponseMode::Sse(OpenAiSseParser::default()),
+                OpenAiResponseFormat::Json => OpenAiResponseMode::Json(OpenAiJsonParser::default()),
+            };
+            items.extend(self.push(&buffered)?);
+        }
+
+        items.extend(match &mut self.mode {
+            OpenAiResponseMode::Sse(parser) => parser.finish(),
+            OpenAiResponseMode::Json(parser) => parser.finish(),
+            OpenAiResponseMode::Detecting(_) => unreachable!("detecting mode handled above"),
+        }?);
+        Ok(items)
+    }
+}
+
+impl OpenAiJsonParser {
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<StreamItem>, CommandError> {
+        if self.bytes.len().saturating_add(chunk.len()) > MAX_OPENAI_JSON_BODY_BYTES {
+            return Err(CommandError::response_limit_exceeded());
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(Vec::new())
+    }
+
+    fn finish(&mut self) -> Result<Vec<StreamItem>, CommandError> {
+        let bytes = std::mem::take(&mut self.bytes);
+        parse_openai_json_response(&bytes)
+    }
+}
+
+fn detect_openai_response_format(
+    bytes: &[u8],
+) -> Result<Option<OpenAiResponseFormat>, CommandError> {
+    let Some(start) = bytes.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return Ok(None);
+    };
+    let payload = &bytes[start..];
+    if payload.first() == Some(&b'{') {
+        return Ok(Some(OpenAiResponseFormat::Json));
+    }
+
+    for prefix in [b"data:".as_slice(), b"event:".as_slice(), b":".as_slice()] {
+        if payload.starts_with(prefix) {
+            return Ok(Some(OpenAiResponseFormat::Sse));
+        }
+        if prefix.starts_with(payload) {
+            return Ok(None);
+        }
+    }
+    Err(CommandError::response_invalid())
 }
 
 impl OpenAiSseParser {
@@ -851,6 +965,25 @@ struct OpenAiStreamEnvelope {
 }
 
 #[derive(Deserialize)]
+struct OpenAiJsonEnvelope {
+    #[serde(default)]
+    choices: Vec<OpenAiJsonChoice>,
+    error: Option<Value>,
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiJsonChoice {
+    message: Option<OpenAiJsonMessage>,
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiJsonMessage {
+    content: Option<Value>,
+}
+
+#[derive(Deserialize)]
 struct OpenAiChoice {
     delta: Option<OpenAiDelta>,
     finish_reason: Option<String>,
@@ -952,6 +1085,7 @@ fn parse_openai_stream_data(
 
     let mut saw_finish_reason = false;
     if let Some(choice) = envelope.choices.first() {
+        saw_finish_reason = openai_finish_reason(choice.finish_reason.as_deref(), false)?;
         if let Some(content) = choice
             .delta
             .as_ref()
@@ -963,27 +1097,84 @@ fn parse_openai_stream_data(
                 items.push(StreamItem::Delta(text));
             }
         }
-        if choice.finish_reason.is_some() {
-            saw_finish_reason = true;
-        }
     }
     if let Some(usage) = envelope.usage {
-        let input_tokens = validate_usage_tokens(usage.prompt_tokens)?;
-        let cached_input_tokens = usage
-            .prompt_tokens_details
-            .and_then(|details| details.cached_tokens)
-            .map(validate_usage_tokens)
-            .transpose()?;
-        if cached_input_tokens.is_some_and(|cached| cached > input_tokens) {
-            return Err(CommandError::response_invalid());
-        }
-        items.push(StreamItem::Usage(GenerationUsage {
-            input_tokens,
-            output_tokens: validate_usage_tokens(usage.completion_tokens)?,
-            cached_input_tokens,
-        }));
+        items.push(StreamItem::Usage(openai_usage(usage)?));
     }
     Ok(saw_finish_reason)
+}
+
+fn parse_openai_json_response(body: &[u8]) -> Result<Vec<StreamItem>, CommandError> {
+    let envelope: OpenAiJsonEnvelope =
+        serde_json::from_slice(body).map_err(|_| CommandError::response_invalid())?;
+    if envelope.error.is_some_and(|error| !error.is_null()) {
+        return Err(CommandError::provider_error());
+    }
+    if envelope.choices.len() != 1 {
+        return Err(CommandError::response_invalid());
+    }
+
+    let choice = envelope
+        .choices
+        .first()
+        .ok_or_else(CommandError::response_invalid)?;
+    openai_finish_reason(choice.finish_reason.as_deref(), true)?;
+    let message = choice
+        .message
+        .as_ref()
+        .ok_or_else(CommandError::response_invalid)?;
+    let text = match message.content.as_ref() {
+        Some(content) => openai_content_text(content)?,
+        None => String::new(),
+    };
+
+    let mut items = Vec::new();
+    if !text.is_empty() {
+        validate_delta(&text)?;
+        items.push(StreamItem::Delta(text));
+    }
+    if let Some(usage) = envelope.usage {
+        items.push(StreamItem::Usage(openai_usage(usage)?));
+    }
+    items.push(StreamItem::Done);
+    Ok(items)
+}
+
+fn openai_finish_reason(finish_reason: Option<&str>, required: bool) -> Result<bool, CommandError> {
+    let Some(finish_reason) = finish_reason else {
+        return if required {
+            Err(CommandError::stream_truncated())
+        } else {
+            Ok(false)
+        };
+    };
+    if finish_reason.is_empty() {
+        return Err(CommandError::response_invalid());
+    }
+    if matches!(
+        finish_reason.to_ascii_lowercase().as_str(),
+        "length" | "max_tokens" | "max_output_tokens"
+    ) {
+        return Err(CommandError::output_truncated());
+    }
+    Ok(true)
+}
+
+fn openai_usage(usage: OpenAiUsage) -> Result<GenerationUsage, CommandError> {
+    let input_tokens = validate_usage_tokens(usage.prompt_tokens)?;
+    let cached_input_tokens = usage
+        .prompt_tokens_details
+        .and_then(|details| details.cached_tokens)
+        .map(validate_usage_tokens)
+        .transpose()?;
+    if cached_input_tokens.is_some_and(|cached| cached > input_tokens) {
+        return Err(CommandError::response_invalid());
+    }
+    Ok(GenerationUsage {
+        input_tokens,
+        output_tokens: validate_usage_tokens(usage.completion_tokens)?,
+        cached_input_tokens,
+    })
 }
 
 fn openai_content_text(content: &Value) -> Result<String, CommandError> {
@@ -993,18 +1184,67 @@ fn openai_content_text(content: &Value) -> Result<String, CommandError> {
     if let Some(text) = content.as_str() {
         return Ok(text.to_owned());
     }
-    let Some(parts) = content.as_array() else {
+    let mut text = String::new();
+    if let Some(parts) = content.as_array() {
+        for part in parts {
+            append_openai_content_part(part, &mut text)?;
+        }
+        return Ok(text);
+    }
+    append_openai_content_part(content, &mut text)?;
+    Ok(text)
+}
+
+fn append_openai_content_part(part: &Value, output: &mut String) -> Result<(), CommandError> {
+    if let Some(text) = part.as_str() {
+        output.push_str(text);
+        return Ok(());
+    }
+    let Some(object) = part.as_object() else {
         return Err(CommandError::response_invalid());
     };
-
-    let mut text = String::new();
-    for part in parts {
-        let Some(part_text) = part.get("text").and_then(Value::as_str) else {
-            return Err(CommandError::response_invalid());
-        };
-        text.push_str(part_text);
+    let kind = object.get("type").and_then(Value::as_str);
+    if kind.is_some_and(is_openai_reasoning_part) {
+        return Ok(());
     }
-    Ok(text)
+    if kind.is_some_and(is_openai_non_text_part) {
+        return Ok(());
+    }
+    if kind.is_some_and(|kind| !is_openai_text_part(kind)) {
+        return Err(CommandError::response_invalid());
+    }
+
+    let text = object
+        .get("text")
+        .and_then(|value| {
+            value
+                .as_str()
+                .or_else(|| value.get("value").and_then(Value::as_str))
+        })
+        .ok_or_else(CommandError::response_invalid)?;
+    output.push_str(text);
+    Ok(())
+}
+
+fn is_openai_text_part(kind: &str) -> bool {
+    matches!(
+        kind.to_ascii_lowercase().as_str(),
+        "text" | "output_text" | "text_delta"
+    )
+}
+
+fn is_openai_reasoning_part(kind: &str) -> bool {
+    matches!(
+        kind.to_ascii_lowercase().as_str(),
+        "reasoning" | "reasoning_text" | "analysis" | "thinking" | "redacted_thinking"
+    )
+}
+
+fn is_openai_non_text_part(kind: &str) -> bool {
+    matches!(
+        kind.to_ascii_lowercase().as_str(),
+        "image" | "image_url" | "input_image" | "tool_call" | "function_call" | "refusal"
+    )
 }
 
 #[derive(Deserialize)]
@@ -1190,6 +1430,114 @@ mod tests {
                 StreamItem::Done,
             ]
         );
+    }
+
+    #[test]
+    fn auto_detects_openai_json_and_reads_non_streaming_message_content() {
+        let mut parser = OpenAiResponseParser::default();
+        assert!(parser
+            .push(
+                br#"{
+                    "choices":[{
+                        "message":{
+                            "role":"assistant",
+                            "reasoning_content":"private chain of thought",
+                            "content":"Visible answer"
+                        },
+                        "finish_reason":"stop"
+                    }],
+                    "usage":{
+                        "prompt_tokens":18,
+                        "completion_tokens":4,
+                        "prompt_tokens_details":{"cached_tokens":3}
+                    }
+                }"#,
+            )
+            .expect("JSON response should buffer")
+            .is_empty());
+
+        assert_eq!(
+            parser.finish().expect("JSON response should parse"),
+            vec![
+                StreamItem::Delta("Visible answer".to_owned()),
+                StreamItem::Usage(GenerationUsage {
+                    input_tokens: 18,
+                    output_tokens: 4,
+                    cached_input_tokens: Some(3),
+                }),
+                StreamItem::Done,
+            ]
+        );
+    }
+
+    #[test]
+    fn accepts_openai_content_parts_without_mixing_reasoning_into_prose() {
+        let mut parser = OpenAiResponseParser::default();
+        parser
+            .push(
+                br#"{
+                    "choices":[{
+                        "message":{
+                            "reasoning_content":"hidden sibling reasoning",
+                            "content":[
+                                {"type":"reasoning","text":"hidden reasoning part"},
+                                {"type":"text","text":"Visible"},
+                                {"type":"output_text","text":{"value":" answer"}},
+                                {"type":"image_url","image_url":{"url":"https://example.invalid/image"}}
+                            ]
+                        },
+                        "finish_reason":"stop"
+                    }]
+                }"#,
+            )
+            .expect("content-parts response should buffer");
+
+        assert_eq!(
+            parser.finish().expect("content parts should parse"),
+            vec![
+                StreamItem::Delta("Visible answer".to_owned()),
+                StreamItem::Done,
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_streamed_reasoning_content_separate_from_visible_content_parts() {
+        let mut parser = OpenAiResponseParser::default();
+        let items = parser
+            .push(
+                b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hidden\"},\"finish_reason\":null}]}\n\n\
+                  data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"reasoning\",\"text\":\"also hidden\"},{\"type\":\"text\",\"text\":\"Visible\"}]},\"finish_reason\":\"stop\"}]}\n\n\
+                  data: [DONE]\n\n",
+            )
+            .expect("OpenAI-compatible SSE should parse");
+
+        assert_eq!(
+            items,
+            vec![StreamItem::Delta("Visible".to_owned()), StreamItem::Done]
+        );
+        assert!(parser.finish().expect("stream should finish").is_empty());
+    }
+
+    #[test]
+    fn reports_token_limit_finish_reasons_as_truncated_output() {
+        let mut stream = OpenAiResponseParser::default();
+        let stream_error = stream
+            .push(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}]}\n\n",
+            )
+            .expect_err("length-limited SSE must not complete successfully");
+        assert_eq!(stream_error.code(), "MODEL_OUTPUT_TRUNCATED");
+
+        let mut json = OpenAiResponseParser::default();
+        json.push(
+            br#"{"choices":[{"message":{"content":"partial"},"finish_reason":"max_tokens"}]}"#,
+        )
+        .expect("JSON response should buffer");
+        let json_error = json
+            .finish()
+            .expect_err("length-limited JSON must not complete successfully");
+        assert_eq!(json_error.code(), "MODEL_OUTPUT_TRUNCATED");
     }
 
     #[test]

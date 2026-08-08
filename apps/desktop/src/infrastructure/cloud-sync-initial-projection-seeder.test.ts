@@ -20,6 +20,7 @@ const migration = [
   readMigration("0014_sync_protocol_v2_object_types.sql"),
   readMigration("0015_sync_materialization_authority.sql"),
   readMigration("0017_sync_projection_account_authority.sql"),
+  readMigration("0038_private_chapters.sql"),
 ].join("\n");
 
 const PROJECT_ID = id(1);
@@ -98,6 +99,21 @@ describe("CloudSyncInitialProjectionSeeder", () => {
     expect(rows.every((row) => row.next_attempt_at === SEEDED_AT)).toBe(true);
     expect(rows.every((row) => row.account_id === ACCOUNT_ID)).toBe(true);
     expect(rows.every((row) => row.key_version === 7 && row.consent_revision === 3)).toBe(true);
+  });
+
+  it("seeds only the project manifest when the active chapter is local-only", async () => {
+    await insertChapterHistory();
+    await executor.execute(
+      "UPDATE chapters SET privacy_mode = 'local_only', privacy_revision = 2 WHERE id = ?",
+      [EARLY_CHAPTER_ID],
+    );
+
+    const result = await enableAndSeed();
+
+    expect(result.enqueuedJobIds).toEqual([id(9_000)]);
+    expect((await projectionRows()).map(({ object_type }) => object_type)).toEqual([
+      "project_manifest",
+    ]);
   });
 
   it("starts a locally retained chapter after a remote tombstone at the next generation", async () => {

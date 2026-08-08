@@ -314,7 +314,7 @@ async function seedAnalysisRoute(
     id: `${prefix}-connection`,
     providerKind: "google_gemini",
     displayName: `${prefix} connection`,
-    credentialRef: `keyring:test:${prefix}`,
+    credentialRef: `keyring:model-hub:${prefix}`,
     credentialState: "present",
     expectedRevision: null,
   });

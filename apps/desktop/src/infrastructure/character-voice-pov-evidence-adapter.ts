@@ -69,6 +69,9 @@ export const CHARACTER_VOICE_POV_EVIDENCE_SKIP_REASONS = [
   "detector_input_rejected",
   "pov_current_claim_missing",
   "pov_confirmed_knowledge_missing",
+  "pov_knowledge_source_incomplete",
+  "pov_knowledge_source_unverified",
+  "pov_knowledge_source_inactive",
 ] as const;
 
 export type CharacterVoicePovEvidenceSkipReason =
@@ -1042,11 +1045,17 @@ function continuousProjectionDiagnostic(
   const reason: CharacterVoicePovEvidenceSkipReason =
     value.reason === "human_confirmation_required"
       ? "not_user_confirmed_formal"
-      : value.reason === "current_version_required"
-        ? "current_evidence_not_current_version"
-        : value.reason === "evidence_invalid"
-          ? "evidence_span_mismatch"
-          : "structured_fields_missing";
+      : value.reason === "knowledge_source_incomplete"
+        ? "pov_knowledge_source_incomplete"
+        : value.reason === "knowledge_source_unverified"
+          ? "pov_knowledge_source_unverified"
+          : value.reason === "knowledge_source_inactive"
+            ? "pov_knowledge_source_inactive"
+            : value.reason === "current_version_required"
+              ? "current_evidence_not_current_version"
+              : value.reason === "evidence_invalid"
+                ? "evidence_span_mismatch"
+                : "structured_fields_missing";
   return diagnostic(
     "story_fact",
     value.sourceFactId,

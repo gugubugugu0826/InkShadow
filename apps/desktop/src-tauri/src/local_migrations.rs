@@ -1,6 +1,11 @@
 use std::borrow::Cow;
 
-use sqlx::migrate::{Migration, MigrationType, Migrator};
+use sqlx::{
+    migrate::{MigrateError, Migration, MigrationType, Migrator},
+    SqliteConnection,
+};
+
+const ZHIPU_GLM_MIGRATION_VERSION: i64 = 49;
 
 fn migration(version: i64, description: &'static str, sql: &'static str) -> Migration {
     // tauri-plugin-sql represented every prior `MigrationKind::Up` as a
@@ -286,8 +291,183 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0037_model_hub_expert_options.sql"
                 ),
             ),
+            migration(
+                41,
+                "add fail-closed local-only private chapters",
+                include_str!(
+                    "../../../../packages/data/migrations/0038_private_chapters.sql"
+                ),
+            ),
+            migration(
+                42,
+                "create project-owned creation seeds and backfill legacy journeys",
+                include_str!(
+                    "../../../../packages/data/migrations/0039_project_seeds.sql"
+                ),
+            ),
+            migration(
+                43,
+                "create immutable deterministic chapter validation snapshots",
+                include_str!(
+                    "../../../../packages/data/migrations/0040_chapter_validation_snapshots.sql"
+                ),
+            ),
+            migration(
+                44,
+                "add safe selective story planning candidate acceptance",
+                include_str!(
+                    "../../../../packages/data/migrations/0041_story_planning_selective_acceptance.sql"
+                ),
+            ),
+            migration(
+                45,
+                "repair immutable chapter validation snapshot deletion cascades",
+                include_str!(
+                    "../../../../packages/data/migrations/0042_chapter_validation_snapshot_delete_cascade.sql"
+                ),
+            ),
+            migration(
+                46,
+                "permit only audited story fact entity alias resolutions",
+                include_str!(
+                    "../../../../packages/data/migrations/0043_story_fact_entity_alias_resolution.sql"
+                ),
+            ),
+            migration(
+                47,
+                "reserve selective story planning acceptance before outline mutation",
+                include_str!(
+                    "../../../../packages/data/migrations/0044_story_planning_selective_acceptance_intent.sql"
+                ),
+            ),
+            migration(
+                48,
+                "guard project privacy during remote model dispatch",
+                include_str!(
+                    "../../../../packages/data/migrations/0045_project_remote_dispatch_leases.sql"
+                ),
+            ),
+            migration(
+                49,
+                "allow the registered Zhipu GLM Model Hub provider",
+                include_str!(
+                    "../../../../packages/data/migrations/0046_model_hub_zhipu_glm.sql"
+                ),
+            ),
+            migration(
+                50,
+                "link context compilations to exact generations and AI candidates",
+                include_str!(
+                    "../../../../packages/data/migrations/0047_context_compilation_exact_provenance.sql"
+                ),
+            ),
+            migration(
+                51,
+                "persist task-semantic AI Candidate application intents",
+                include_str!(
+                    "../../../../packages/data/migrations/0048_candidate_application_intents.sql"
+                ),
+            ),
+            migration(
+                52,
+                "audit atomic project memory forgetting and manual merges",
+                include_str!(
+                    "../../../../packages/data/migrations/0049_memory_governance_audit.sql"
+                ),
+            ),
+            migration(
+                53,
+                "authorize AI Candidate writes with monotonic revisions",
+                include_str!(
+                    "../../../../packages/data/migrations/0050_candidate_revision_authority.sql"
+                ),
+            ),
+            migration(
+                54,
+                "journal recoverable Model Hub connection commits",
+                include_str!(
+                    "../../../../packages/data/migrations/0051_model_hub_connection_commits.sql"
+                ),
+            ),
+            migration(
+                55,
+                "commit continuous story-state routes exactly once",
+                include_str!(
+                    "../../../../packages/data/migrations/0052_continuous_story_state_route_receipts.sql"
+                ),
+            ),
+            migration(
+                56,
+                "bind writing feedback learning to event-time policy and custom clusters",
+                include_str!(
+                    "../../../../packages/data/migrations/0053_writing_feedback_learning_policy_context.sql"
+                ),
+            ),
+            migration(
+                57,
+                "commit explicit writing feedback and learned preferences idempotently",
+                include_str!(
+                    "../../../../packages/data/migrations/0054_writing_feedback_explicit_idempotency.sql"
+                ),
+            ),
+            migration(
+                58,
+                "restore historical continuous story-state route receipts safely",
+                include_str!(
+                    "../../../../packages/data/migrations/0055_continuous_story_state_historical_route_receipts.sql"
+                ),
+            ),
         ]),
         ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    }
+}
+
+pub(crate) async fn run_local_migrations(
+    connection: &mut SqliteConnection,
+) -> Result<(), MigrateError> {
+    let full = local_migrator();
+    let before_zhipu = migration_subset(&full, |migration| {
+        migration.version < ZHIPU_GLM_MIGRATION_VERSION
+    });
+    before_zhipu.run_direct(&mut *connection).await?;
+
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await?;
+    let zhipu_only = migration_subset(&full, |migration| {
+        migration.version == ZHIPU_GLM_MIGRATION_VERSION
+    });
+    let zhipu_result = zhipu_only.run_direct(&mut *connection).await;
+    let restore_foreign_keys = sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await;
+    zhipu_result?;
+    restore_foreign_keys?;
+
+    let violation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+        .fetch_one(&mut *connection)
+        .await?;
+    if violation_count != 0 {
+        return Err(MigrateError::Execute(sqlx::Error::Protocol(
+            "foreign-key violations remained after Model Hub provider migration".into(),
+        )));
+    }
+
+    full.run_direct(connection).await
+}
+
+fn migration_subset(migrator: &Migrator, include: impl Fn(&Migration) -> bool) -> Migrator {
+    Migrator {
+        migrations: Cow::Owned(
+            migrator
+                .iter()
+                .filter(|migration| include(migration))
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: true,
         locking: true,
         no_tx: false,
     }
@@ -302,7 +482,7 @@ mod tests {
         Connection, Row, SqliteConnection,
     };
 
-    use super::local_migrator;
+    use super::{local_migrator, run_local_migrations};
 
     fn test_migrator(migrations: Vec<Migration>) -> Migrator {
         Migrator {
@@ -349,12 +529,10 @@ mod tests {
             .expect("open sqlite");
         let migrator = local_migrator();
 
-        migrator
-            .run_direct(&mut connection)
+        run_local_migrations(&mut connection)
             .await
             .expect("fresh migration");
-        migrator
-            .run_direct(&mut connection)
+        run_local_migrations(&mut connection)
             .await
             .expect("existing migration history");
 
@@ -372,6 +550,136 @@ mod tests {
         .await
         .expect("core schema");
         assert_eq!(projects, 1);
+        let dispatch_leases: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table' AND name = 'project_remote_dispatch_leases'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("native dispatch lease schema");
+        assert_eq!(dispatch_leases, 1);
+
+        sqlx::query(
+            "INSERT INTO model_provider_connections (
+               id, provider_kind, display_name, protocol, base_url, created_at, updated_at
+             ) VALUES ('native-zhipu', 'zhipu_glm', 'Zhipu GLM', 'openai_compatible',
+                       'https://open.bigmodel.cn/api/paas/v4',
+                       '2026-08-08T00:00:00.000Z', '2026-08-08T00:00:00.000Z')",
+        )
+        .execute(&mut connection)
+        .await
+        .expect("persist registered Zhipu provider");
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&mut connection)
+            .await
+            .expect("foreign-key enforcement restored");
+        assert_eq!(foreign_keys, 1);
+    }
+
+    #[tokio::test]
+    async fn upgrades_an_existing_validation_snapshot_chain_and_cascades_project_delete() {
+        let mut connection = SqliteConnection::connect("sqlite::memory:")
+            .await
+            .expect("open sqlite");
+        let full = local_migrator();
+        let before_repair = test_migrator(
+            full.iter()
+                .filter(|migration| migration.version <= 44)
+                .cloned()
+                .collect(),
+        );
+        before_repair
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate through the published snapshot schema");
+
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut connection)
+            .await
+            .expect("begin fixture transaction");
+        sqlx::query(
+            "INSERT INTO projects (
+               id, name, status, revision, deletion_generation, created_at, updated_at
+             ) VALUES ('snapshot-project', 'Snapshot migration', 'active', 1, 0,
+                       '2026-08-08T00:00:00.000Z', '2026-08-08T00:00:00.000Z')",
+        )
+        .execute(&mut connection)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO chapters (
+               id, project_id, title, content, status, revision, current_version_id,
+               created_at, updated_at, trashed_at
+             ) VALUES ('snapshot-chapter', 'snapshot-project', 'Chapter', 'Body', 'active', 1,
+                       'snapshot-version', '2026-08-08T00:00:00.000Z',
+                       '2026-08-08T00:00:00.000Z', NULL)",
+        )
+        .execute(&mut connection)
+        .await
+        .expect("insert chapter");
+        sqlx::query(
+            "INSERT INTO chapter_versions (
+               id, project_id, chapter_id, parent_version_id, sequence, content,
+               content_checksum, reason, source_candidate_id, created_at
+             ) VALUES ('snapshot-version', 'snapshot-project', 'snapshot-chapter', NULL, 1,
+                       'Body', ?, 'created', NULL, '2026-08-08T00:00:00.000Z')",
+        )
+        .bind("a".repeat(64))
+        .execute(&mut connection)
+        .await
+        .expect("insert chapter version");
+        for sequence in 1..=3_i64 {
+            let id = format!("snapshot-{sequence}");
+            let supersedes = (sequence > 1).then(|| format!("snapshot-{}", sequence - 1));
+            let run_kind = if sequence == 1 { "initial" } else { "rerun" };
+            let result_json = String::from(
+                "{\"status\":\"checked\",\"projectId\":\"snapshot-project\",\"chapterId\":\"snapshot-chapter\",\"chapterVersionId\":\"snapshot-version\",\"chapterRevision\":1,\"issues\":[]}",
+            );
+            sqlx::query(
+                "INSERT INTO chapter_validation_snapshots (
+                   id, project_id, chapter_id, chapter_version_id, chapter_revision,
+                   schema_version, rule_set_version, run_sequence, run_kind,
+                   supersedes_snapshot_id, result_status, issue_count,
+                   result_checksum_sha256, result_json, generated_at
+                 ) VALUES (?, 'snapshot-project', 'snapshot-chapter', 'snapshot-version', 1,
+                           1, 'deterministic-novel-validator.v1', ?, ?, ?, 'checked', 0, ?, ?,
+                           '2026-08-08T00:00:00.000Z')",
+            )
+            .bind(id)
+            .bind(sequence)
+            .bind(run_kind)
+            .bind(supersedes)
+            .bind(sequence.to_string().repeat(64))
+            .bind(result_json)
+            .execute(&mut connection)
+            .await
+            .expect("insert validation snapshot");
+        }
+        sqlx::query("COMMIT")
+            .execute(&mut connection)
+            .await
+            .expect("commit fixture transaction");
+
+        run_local_migrations(&mut connection)
+            .await
+            .expect("apply the forward-only cascade repair");
+        let snapshot_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM chapter_validation_snapshots")
+                .fetch_one(&mut connection)
+                .await
+                .expect("count migrated snapshots");
+        assert_eq!(snapshot_count, 3);
+
+        sqlx::query("DELETE FROM projects WHERE id = 'snapshot-project'")
+            .execute(&mut connection)
+            .await
+            .expect("cascade project deletion");
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM chapter_validation_snapshots")
+                .fetch_one(&mut connection)
+                .await
+                .expect("count remaining snapshots");
+        assert_eq!(remaining, 0);
     }
 
     #[tokio::test]

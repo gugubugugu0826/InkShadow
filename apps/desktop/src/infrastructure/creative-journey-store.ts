@@ -277,7 +277,12 @@ export class BrowserCreativeJourneyStore implements CreativeJourneyStore {
   }
 
   private read(): BrowserCreativeJourneyDatabase {
-    const serialized = this.storage.getItem(DEVELOPMENT_CREATIVE_JOURNEY_KEY);
+    let serialized: string | null;
+    try {
+      serialized = this.storage.getItem(DEVELOPMENT_CREATIVE_JOURNEY_KEY);
+    } catch (cause: unknown) {
+      throw browserStorageError(cause, "read");
+    }
     if (serialized === null) {
       return { schemaVersion: 1, journeys: {}, turns: {} };
     }
@@ -301,7 +306,11 @@ export class BrowserCreativeJourneyStore implements CreativeJourneyStore {
   }
 
   private write(database: BrowserCreativeJourneyDatabase): void {
-    this.storage.setItem(DEVELOPMENT_CREATIVE_JOURNEY_KEY, JSON.stringify(database));
+    try {
+      this.storage.setItem(DEVELOPMENT_CREATIVE_JOURNEY_KEY, JSON.stringify(database));
+    } catch (cause: unknown) {
+      throw browserStorageError(cause, "write");
+    }
   }
 }
 
@@ -518,6 +527,57 @@ function containsProhibitedKey(value: unknown): boolean {
 
 function storeError(code: string, message: string, retryable = false): CreativeJourneyStoreError {
   return new CreativeJourneyStoreError(code, message, retryable);
+}
+
+function browserStorageError(
+  cause: unknown,
+  operation: "read" | "write",
+): CreativeJourneyStoreError {
+  const name = errorProperty(cause, "name");
+  const legacyCode = errorNumberProperty(cause, "code");
+  if (
+    operation === "write" &&
+    (name === "QuotaExceededError" ||
+      name === "NS_ERROR_DOM_QUOTA_REACHED" ||
+      legacyCode === 22 ||
+      legacyCode === 1014)
+  ) {
+    return storeError(
+      "CREATIVE_JOURNEY_STORAGE_QUOTA_EXCEEDED",
+      "Browser storage does not have enough space for the creative journey checkpoint.",
+      true,
+    );
+  }
+  if (name === "SecurityError" || name === "NotAllowedError") {
+    return storeError(
+      "CREATIVE_JOURNEY_STORAGE_ACCESS_DENIED",
+      "Browser storage access is not allowed for the creative journey checkpoint.",
+      true,
+    );
+  }
+  return storeError(
+    operation === "read"
+      ? "CREATIVE_JOURNEY_STORAGE_READ_FAILED"
+      : "CREATIVE_JOURNEY_STORAGE_WRITE_FAILED",
+    `Browser storage ${operation} failed for the creative journey checkpoint.`,
+    true,
+  );
+}
+
+function errorProperty(value: unknown, key: string): string | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const property = (value as Readonly<Record<string, unknown>>)[key];
+  return typeof property === "string" ? property : null;
+}
+
+function errorNumberProperty(value: unknown, key: string): number | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const property = (value as Readonly<Record<string, unknown>>)[key];
+  return typeof property === "number" ? property : null;
 }
 
 function fail(message: string): never {

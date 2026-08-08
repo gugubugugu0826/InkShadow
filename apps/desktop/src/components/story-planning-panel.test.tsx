@@ -74,7 +74,7 @@ describe("StoryPlanningPanel", () => {
     expect(screen.getByText(/正式大纲和正文都没有改变/u)).toBeInTheDocument();
 
     const editor = screen.getByRole("textbox", {
-      name: new RegExp(`^准备采纳到“${generated.targetNodeTitle}”简介的内容(?:可选)?$`, "u"),
+      name: new RegExp(`^整体替换“${generated.targetNodeTitle}”简介的候选内容(?:可选)?$`, "u"),
     });
     await user.clear(editor);
     await user.type(editor, "作者修改后的方向");
@@ -103,6 +103,111 @@ describe("StoryPlanningPanel", () => {
     expect(onOutlineChanged).toHaveBeenCalledOnce();
     expect(await screen.findByText("建议已采纳")).toBeInTheDocument();
     expect(screen.getByText(/正文、人物设定和世界规则都没有被修改/u)).toBeInTheDocument();
+  });
+
+  it("shows the current synopsis and accepts only checked immutable planning rows", async () => {
+    const user = userEvent.setup();
+    const review = candidate();
+    const accepted = {
+      ...review,
+      status: "accepted" as const,
+      acceptedOutlineRevision: 2,
+      acceptedItemIds: ["beat:0"],
+      revision: 2,
+      updatedAt: LATER,
+      decidedAt: LATER,
+    };
+    const acceptCandidateItems = vi.fn(() =>
+      Promise.resolve({
+        candidate: accepted,
+        outlineRevision: 2,
+        recoveredAfterInterruptedRecording: false,
+        acceptedItemIds: ["beat:0"],
+        idempotent: false,
+      }),
+    );
+    const onOutlineChanged = vi.fn();
+    const service = planningService({
+      listCandidates: vi.fn(() => Promise.resolve([review])),
+      acceptCandidateItems,
+    });
+    renderPanel(service, onOutlineChanged);
+
+    expect(await screen.findByText("原始故事方向")).toBeInTheDocument();
+    const selectedBeat = screen.getByRole("checkbox", { name: /剧情节点 1：同行/u });
+    await user.click(selectedBeat);
+    expect(screen.getByRole("checkbox", { name: /故事方向/u })).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "采纳已选 1 项并保留当前简介" }));
+
+    await waitFor(() =>
+      expect(acceptCandidateItems).toHaveBeenCalledWith({
+        candidateId: CANDIDATE_ID,
+        expectedRevision: 1,
+        selectedItemIds: ["beat:0"],
+      }),
+    );
+    expect(onOutlineChanged).toHaveBeenCalledOnce();
+    expect(await screen.findByText("已采纳所选规划条目")).toBeInTheDocument();
+    expect(screen.getByText(/未选内容、正文和故事设定均未修改/u)).toBeInTheDocument();
+  });
+
+  it("restores the persisted applying selection and disables conflicting review actions", async () => {
+    const user = userEvent.setup();
+    const review = candidate();
+    const applying = {
+      ...review,
+      revision: 2,
+      selectiveAcceptanceIntent: {
+        schemaVersion: 1 as const,
+        selectedItemIds: ["beat:0"],
+        selectionSha256: "a".repeat(64),
+        baselineOutlineRevision: 1,
+        baselineSynopsisSha256: "b".repeat(64),
+        proposedSynopsisSha256: "c".repeat(64),
+        startedAt: LATER,
+      },
+    };
+    const accepted = {
+      ...applying,
+      status: "accepted" as const,
+      acceptedOutlineRevision: 2,
+      acceptedItemIds: ["beat:0"],
+      selectiveAcceptanceIntent: null,
+      revision: 3,
+      decidedAt: LATER,
+    };
+    const acceptCandidateItems = vi.fn(() =>
+      Promise.resolve({
+        candidate: accepted,
+        outlineRevision: 2,
+        recoveredAfterInterruptedRecording: true,
+        acceptedItemIds: ["beat:0"],
+        idempotent: false,
+      }),
+    );
+    const service = planningService({
+      listCandidates: vi.fn(() => Promise.resolve([applying])),
+      acceptCandidateItems,
+    });
+    renderPanel(service);
+
+    expect(await screen.findByText("上次逐项采纳尚未完成")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /剧情节点 1：同行/u })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /剧情节点 1：同行/u })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存对建议的修改" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: `采纳并替换“${review.targetNodeTitle}”的简介` }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "拒绝这份建议" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "恢复上次逐项采纳" }));
+    await waitFor(() =>
+      expect(acceptCandidateItems).toHaveBeenCalledWith({
+        candidateId: CANDIDATE_ID,
+        expectedRevision: 2,
+        selectedItemIds: ["beat:0"],
+      }),
+    );
   });
 
   it("rejects one candidate without calling the outline refresh path", async () => {
@@ -172,6 +277,7 @@ function planningService(
     ),
     updateCandidate: vi.fn(() => Promise.reject(new Error("unexpected update"))),
     acceptCandidate: vi.fn(() => Promise.reject(new Error("unexpected acceptance"))),
+    acceptCandidateItems: vi.fn(() => Promise.reject(new Error("unexpected selective acceptance"))),
     rejectCandidate: vi.fn(() => Promise.reject(new Error("unexpected rejection"))),
     ...overrides,
   };
@@ -199,6 +305,7 @@ function candidate(): StoryPlanningCandidate {
     targetNodeId: BOOK_ID,
     targetNodeTitle: "雨夜车站",
     baselineOutlineRevision: 1,
+    baselineTargetSynopsis: "原始故事方向",
     status: "review",
     payload: {
       schemaVersion: 1,
@@ -223,6 +330,8 @@ function candidate(): StoryPlanningCandidate {
     modelId: "planning-model",
     usedFallback: false,
     acceptedOutlineRevision: null,
+    acceptedItemIds: null,
+    selectiveAcceptanceIntent: null,
     revision: 1,
     createdAt: NOW,
     updatedAt: NOW,

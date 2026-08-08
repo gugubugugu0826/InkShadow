@@ -58,6 +58,7 @@ describe("story context runtime", () => {
       currentChapter: {
         chapterId: CHAPTER_ID,
         versionId: VERSION_ID,
+        contentHash: "a".repeat(64),
         title: "雨夜站台",
         content: "列车已经离站，林遥仍站在雨里。",
       },
@@ -83,6 +84,7 @@ describe("story context runtime", () => {
     expect(chapterEvidence).toMatchObject({
       sourceId: CHAPTER_ID,
       sourceVersionId: VERSION_ID,
+      contentHash: "a".repeat(64),
     });
     expect(chapterEvidence?.locator).toMatch(/^utf16:/u);
     const prompt = formatStoryContextPrompt(receipt);
@@ -101,6 +103,7 @@ describe("story context runtime", () => {
       currentChapter: {
         chapterId: CHAPTER_ID,
         versionId: VERSION_ID,
+        contentHash: "b".repeat(64),
         title: "长章",
         content: chapterContent,
       },
@@ -112,6 +115,31 @@ describe("story context runtime", () => {
     expect(chapter?.content).not.toContain("旧".repeat(100));
     expect(chapter?.content).not.toContain("�");
     expect(chapter?.evidence[0]?.excerpt).toBeNull();
+    expect(chapter?.evidence[0]?.contentHash).toBe("b".repeat(64));
+  });
+
+  it("keeps current-chapter locators absolute to the original UTF-16 content", async () => {
+    const facts = new BrowserDevelopmentStoryFactStore(new MemoryStorage());
+    const content = " \n🙂abcdef \t";
+    const receipt = await compileStoryContextForGeneration(facts, {
+      projectId: PROJECT_ID,
+      currentTask: draft("continue", "Continue.", "generation_task"),
+      currentChapter: {
+        chapterId: CHAPTER_ID,
+        versionId: VERSION_ID,
+        contentHash: "c".repeat(64),
+        title: "Offsets",
+        content,
+      },
+      maximumContextTokens: 20_000,
+    });
+
+    const chapter = receipt.compiled.entries.find(({ id }) => id.startsWith("current-chapter:"));
+    expect(chapter?.evidence[0]).toMatchObject({
+      locator: "utf16:2-10/12",
+      contentHash: "c".repeat(64),
+    });
+    expect(chapter?.content).toContain("🙂abcdef");
   });
 
   it("keeps user-visible task supplements independently traceable", async () => {

@@ -96,17 +96,25 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function 
     "aria-invalid": ariaInvalid,
     className,
     currentLength,
+    defaultValue,
     disabled,
     invalid = false,
     maxLength,
     maxLengthLabel = "字符",
+    onChange,
     readOnly,
+    value,
     ...props
   },
   ref,
 ) {
   const showCounter = currentLength !== undefined || maxLength !== undefined;
   const resolvedInvalid = invalid ? true : ariaInvalid;
+  const [uncontrolledLength, setUncontrolledLength] = useState(
+    getTextareaValueLength(defaultValue) ?? 0,
+  );
+  const resolvedCurrentLength =
+    currentLength ?? getTextareaValueLength(value) ?? uncontrolledLength;
 
   return (
     <span className={cn("ink-textarea-wrap", className)}>
@@ -114,21 +122,47 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function 
         {...props}
         ref={ref}
         className="ink-textarea"
+        defaultValue={defaultValue}
         disabled={disabled}
         readOnly={readOnly}
         maxLength={maxLength}
+        value={value}
         aria-invalid={resolvedInvalid}
         data-invalid={resolvedInvalid}
+        onChange={(event) => {
+          if (value === undefined) {
+            setUncontrolledLength(event.currentTarget.value.length);
+          }
+          onChange?.(event);
+        }}
       />
       {showCounter && (
         <span className="ink-textarea__counter" aria-live="off">
-          {currentLength ?? 0}
+          {resolvedCurrentLength}
           {maxLength === undefined ? "" : ` / ${String(maxLength)}`} {maxLengthLabel}
         </span>
       )}
     </span>
   );
 });
+
+function getTextareaValueLength(
+  value: TextareaHTMLAttributes<HTMLTextAreaElement>["value"],
+): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value === "string") {
+    return value.length;
+  }
+
+  if (typeof value === "number") {
+    return String(value).length;
+  }
+
+  return value.join("").length;
+}
 
 export interface SelectOption {
   value: string;

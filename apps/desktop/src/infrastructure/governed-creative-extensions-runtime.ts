@@ -21,6 +21,14 @@ import {
 } from "@inkshadow/data";
 import type { Clock, UuidV7Generator } from "@inkshadow/domain";
 
+import {
+  ProjectContextPrivacyError,
+  projectContextDispatchScope,
+  type ProjectContextPrivacyAuthority,
+  type ProjectContextPrivacyReceipt,
+} from "./project-context-privacy-authority";
+import type { NativeModelDispatchScope } from "./native-model-gateway-contract";
+
 export interface GovernedCreativeExtensionFlags {
   readonly translation: boolean;
   readonly shortDrama: boolean;
@@ -124,6 +132,7 @@ export interface GovernedCreativeExtensionPreflight {
 }
 
 export interface GovernedExtensionGatewayRequest {
+  readonly dispatchScope: NativeModelDispatchScope;
   readonly snapshot: GovernedExtensionRequestSnapshot;
   readonly requestFingerprint: string;
   readonly paragraphAuthorities: readonly GovernedExtensionParagraphAuthority[];
@@ -174,7 +183,10 @@ export type GovernedCreativeExtensionRuntimeErrorCode =
   | "EXTENSION_USAGE_UNAVAILABLE"
   | "EXTENSION_RESPONSE_AUTHORITY_MISMATCH"
   | "EXTENSION_RETRY_NOT_ALLOWED"
-  | "EXTENSION_NOT_FOUND";
+  | "EXTENSION_NOT_FOUND"
+  | "PRIVATE_CHAPTER_LOCAL_ONLY"
+  | "PROJECT_CONTEXT_PRIVACY_CHANGED"
+  | "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE";
 
 export class GovernedCreativeExtensionRuntimeError extends Error {
   public constructor(
@@ -225,6 +237,11 @@ interface RuntimeDependencies {
   ) => GovernedCreativeExtensionRoute | null | Promise<GovernedCreativeExtensionRoute | null>;
   readonly readEnvironment: () => GovernedCreativeExtensionEnvironment;
   readonly isSourceReadOnly?: (projectId: string, chapterId: string) => Promise<boolean>;
+  readonly isSourceLocalOnly?: (projectId: string, chapterId: string) => Promise<boolean>;
+  readonly projectContextPrivacy: Pick<
+    ProjectContextPrivacyAuthority,
+    "inspect" | "assertCurrentBeforeDispatch" | "assertRouteEligible"
+  >;
   readonly readFeatureFlags?: () => GovernedCreativeExtensionFlags;
 }
 
@@ -306,6 +323,7 @@ export class GovernedCreativeExtensionsRuntime {
       );
     }
     await this.assertFingerprint(preflight);
+    const projectPrivacy = await this.captureProjectPrivacy(preflight);
 
     const requestId = this.dependencies.ids.next();
     const correlationId = this.dependencies.ids.next();
@@ -347,9 +365,11 @@ export class GovernedCreativeExtensionsRuntime {
         const cancelled = await this.cancel(start.request.id);
         return await this.hydrateRunResult(cancelled, false);
       }
+      await this.assertProjectPrivacyBeforeDispatch(preflight, projectPrivacy);
       gatewayResult = await invokeWithTimeout(
         this.dependencies.gateway,
         {
+          dispatchScope: projectContextDispatchScope(projectPrivacy),
           snapshot: preflight.snapshot,
           requestFingerprint: preflight.requestFingerprint,
           paragraphAuthorities: preflight.paragraphAuthorities,
@@ -446,11 +466,14 @@ export class GovernedCreativeExtensionsRuntime {
       if (
         error instanceof GovernedCreativeExtensionRuntimeError &&
         (error.code === "EXTENSION_USAGE_UNAVAILABLE" ||
-          error.code === "EXTENSION_RESPONSE_AUTHORITY_MISMATCH")
+          error.code === "EXTENSION_RESPONSE_AUTHORITY_MISMATCH" ||
+          error.code === "PRIVATE_CHAPTER_LOCAL_ONLY" ||
+          error.code === "PROJECT_CONTEXT_PRIVACY_CHANGED" ||
+          error.code === "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE")
       ) {
-        if (error.code === "EXTENSION_RESPONSE_AUTHORITY_MISMATCH") {
+        if (error.code !== "EXTENSION_USAGE_UNAVAILABLE") {
           await this.failIfRunning(start.request.id, {
-            outcome: "failed_retryable",
+            outcome: error.retryable ? "failed_retryable" : "failed_final",
             errorCode: error.code,
             correlationId,
             ...(gatewayResult?.usage === undefined
@@ -689,6 +712,19 @@ export class GovernedCreativeExtensionsRuntime {
     }
 
     const effectiveRoute = route ?? PLACEHOLDER_ROUTE;
+    const sourceLocalOnly = await this.readSourceLocalOnlyState(
+      draft.source.projectId,
+      draft.source.chapterId,
+    );
+    if (sourceLocalOnly && effectiveRoute.location === "remote") {
+      checks.push(
+        blocking(
+          "PRIVATE_CHAPTER_LOCAL_ONLY",
+          "私密章节仅限本地处理",
+          "请选择已验证的本地模型；正文不会发送到远程供应商。",
+        ),
+      );
+    }
     if (effectiveRoute.location === "remote" && !environment.online) {
       checks.push(
         blocking(
@@ -846,6 +882,18 @@ export class GovernedCreativeExtensionsRuntime {
         true,
       );
     }
+    if (
+      preflight.snapshot.provider.location === "remote" &&
+      (await this.readSourceLocalOnlyState(
+        preflight.snapshot.projectId,
+        preflight.snapshot.chapterId,
+      ))
+    ) {
+      throw runtimeError(
+        "PRIVATE_CHAPTER_LOCAL_ONLY",
+        "Private chapter content cannot be dispatched to a remote creative-extension provider.",
+      );
+    }
   }
 
   private async assertFingerprint(preflight: GovernedCreativeExtensionPreflight): Promise<void> {
@@ -855,6 +903,51 @@ export class GovernedCreativeExtensionsRuntime {
         "EXTENSION_PREFLIGHT_BLOCKED",
         "The prepared request changed after preflight.",
       );
+    }
+  }
+
+  private async captureProjectPrivacy(
+    preflight: GovernedCreativeExtensionPreflight,
+  ): Promise<ProjectContextPrivacyReceipt> {
+    try {
+      const receipt = await this.dependencies.projectContextPrivacy.inspect(
+        preflight.snapshot.projectId,
+      );
+      const target = receipt.chapters.find(
+        ({ chapterId }) => chapterId === preflight.snapshot.chapterId,
+      );
+      if (
+        target?.status !== "active" ||
+        target.currentVersionId !== preflight.snapshot.sourceVersionId
+      ) {
+        throw new ProjectContextPrivacyError(
+          "PROJECT_CONTEXT_PRIVACY_CHANGED",
+          "章节版本或隐私设置在 AI 发送前发生了变化；本次请求在发送 0 字后停止。请重新运行。",
+          true,
+        );
+      }
+      this.dependencies.projectContextPrivacy.assertRouteEligible(
+        receipt,
+        preflight.snapshot.provider.location === "loopback",
+      );
+      return receipt;
+    } catch (cause: unknown) {
+      throw extensionProjectPrivacyError(cause);
+    }
+  }
+
+  private async assertProjectPrivacyBeforeDispatch(
+    preflight: GovernedCreativeExtensionPreflight,
+    receipt: ProjectContextPrivacyReceipt,
+  ): Promise<void> {
+    try {
+      await this.dependencies.projectContextPrivacy.assertCurrentBeforeDispatch(receipt);
+      this.dependencies.projectContextPrivacy.assertRouteEligible(
+        receipt,
+        preflight.snapshot.provider.location === "loopback",
+      );
+    } catch (cause: unknown) {
+      throw extensionProjectPrivacyError(cause);
     }
   }
 
@@ -884,6 +977,15 @@ export class GovernedCreativeExtensionsRuntime {
       return (await this.dependencies.isSourceReadOnly?.(projectId, chapterId)) ?? false;
     } catch {
       // Authority lookup failures fail closed for all provider and decision mutations.
+      return true;
+    }
+  }
+
+  private async readSourceLocalOnlyState(projectId: string, chapterId: string): Promise<boolean> {
+    try {
+      return (await this.dependencies.isSourceLocalOnly?.(projectId, chapterId)) ?? true;
+    } catch {
+      // Missing privacy authority must never degrade into a remote dispatch.
       return true;
     }
   }
@@ -1268,6 +1370,16 @@ function blocking(code: string, title: string, detail: string): GovernedExtensio
 
 function authorityMismatch(message: string): GovernedCreativeExtensionRuntimeError {
   return runtimeError("EXTENSION_RESPONSE_AUTHORITY_MISMATCH", message, true);
+}
+
+function extensionProjectPrivacyError(cause: unknown): GovernedCreativeExtensionRuntimeError {
+  return cause instanceof ProjectContextPrivacyError
+    ? runtimeError(cause.code, cause.message, cause.retryable)
+    : runtimeError(
+        "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE",
+        "无法核对这个作品的本地隐私范围，因此没有调用 AI。请重试；若问题持续，请先检查本地数据库。",
+        true,
+      );
 }
 
 function runtimeError(

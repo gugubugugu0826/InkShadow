@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { modelHubNativeEndpointConfig } from "./model-hub-native-config";
+import {
+  modelHubCredentialProviderId,
+  modelHubNativeEndpointConfig,
+} from "./model-hub-native-config";
 import type { ModelProviderConnection } from "./model-hub-store";
 
 const NOW = "2026-08-02T00:00:00.000Z";
@@ -56,6 +59,25 @@ describe("Model Hub native endpoint config", () => {
       requestTimeoutMs: 30_000,
       retryLimit: 0,
     });
+  });
+
+  it("uses only an InkShadow-owned credential slot and rejects arbitrary references", () => {
+    const slotted = connection({
+      credentialRef: "keyring:model-hub:quick-key-019f-slot",
+    });
+    expect(modelHubCredentialProviderId(slotted)).toBe("quick-key-019f-slot");
+    expect(modelHubNativeEndpointConfig(slotted).providerId).toBe("quick-key-019f-slot");
+
+    for (const credentialRef of [
+      "vault:model-hub:quick-key-019f-slot",
+      "keyring:model-hub:../other",
+      "keyring:unknown:quick-key-019f-slot",
+      "",
+    ]) {
+      expect(() => modelHubNativeEndpointConfig(connection({ credentialRef }))).toThrow(
+        expect.objectContaining({ code: "MODEL_HUB_CREDENTIAL_REFERENCE_INVALID" }),
+      );
+    }
   });
 });
 

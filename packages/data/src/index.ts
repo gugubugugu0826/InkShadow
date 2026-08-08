@@ -7,6 +7,7 @@ export * from "./governed-creative-extension-sqlite-store.js";
 export * from "./maintenance.js";
 export * from "./multi-agent-review-sqlite-store.js";
 export * from "./project-key-sqlite-store.js";
+export * from "./project-seed-sqlite-store.js";
 export * from "./search-vector-sqlite-store.js";
 export * from "./schema.js";
 export * from "./sqlite-repositories.js";

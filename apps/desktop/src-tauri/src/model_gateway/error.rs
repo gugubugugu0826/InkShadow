@@ -142,6 +142,15 @@ impl CommandError {
         )
     }
 
+    pub(crate) fn output_truncated() -> Self {
+        Self::new(
+            "MODEL_OUTPUT_TRUNCATED",
+            "The provider stopped because the configured output token limit was reached.",
+            false,
+            vec!["INCREASE_OUTPUT_LIMIT", "REDUCE_CONTEXT"],
+        )
+    }
+
     pub(crate) fn provider_error() -> Self {
         Self::new(
             "MODEL_PROVIDER_ERROR",
@@ -200,6 +209,33 @@ impl CommandError {
         Self::new(
             "MODEL_RUNTIME_FAILED",
             "The native model task could not be started.",
+            true,
+            vec!["RETRY", "OPEN_DIAGNOSTICS"],
+        )
+    }
+
+    pub(crate) fn project_context_privacy_changed() -> Self {
+        Self::new(
+            "PROJECT_CONTEXT_PRIVACY_CHANGED",
+            "The project chapters, accepted versions, or privacy settings changed before native dispatch. No project text was sent.",
+            true,
+            vec!["RETRY"],
+        )
+    }
+
+    pub(crate) fn private_chapter_local_only() -> Self {
+        Self::new(
+            "PRIVATE_CHAPTER_LOCAL_ONLY",
+            "This project contains a local-only chapter and cannot be sent to a remote model.",
+            false,
+            vec!["SWITCH_MODEL", "EDIT_MODEL_CONFIG"],
+        )
+    }
+
+    pub(crate) fn project_context_privacy_unavailable() -> Self {
+        Self::new(
+            "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE",
+            "The native gateway could not establish the project privacy barrier. No project text was sent.",
             true,
             vec!["RETRY", "OPEN_DIAGNOSTICS"],
         )
@@ -300,5 +336,8 @@ mod tests {
             CommandError::from_http_status(StatusCode::BAD_GATEWAY).code(),
             "MODEL_HTTP_PROVIDER_UNAVAILABLE"
         );
+        let truncated = CommandError::output_truncated();
+        assert_eq!(truncated.code(), "MODEL_OUTPUT_TRUNCATED");
+        assert!(!truncated.retryable());
     }
 }

@@ -16,6 +16,7 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { BrowserDevelopmentStoryFactStore } from "./story-fact-store";
+import { DEVELOPMENT_DATABASE_KEY } from "./development-atomic-journal";
 import {
   ContinuousStoryStateExtractionService,
   ContinuousStoryStateModelUnavailableError,
@@ -25,6 +26,7 @@ import {
   type ContinuousStoryStateModelOutput,
   type ContinuousStoryStateModelPort,
 } from "./continuous-story-state-extraction";
+import { ProjectContextPrivacyAuthority } from "./project-context-privacy-authority";
 
 const ids = {
   project: uuid(1),
@@ -36,6 +38,7 @@ const ids = {
   actor: uuid(7),
   entity1: uuid(8),
   entity2: uuid(9),
+  entity3: uuid(10),
 };
 
 describe("ContinuousStoryStateExtractionService", () => {
@@ -166,6 +169,7 @@ describe("ContinuousStoryStateExtractionService", () => {
     const secondVersion = await makeVersion(ids.chapter2, ids.version2, secondContent);
     harness.versions.set(ids.version2, secondVersion);
     harness.chapters.set(ids.chapter2, makeChapter(ids.chapter2, ids.version2, secondContent));
+    harness.syncAuthority();
     harness.model.candidates = [
       modelCandidate({
         factType: "character_state",
@@ -201,6 +205,7 @@ describe("ContinuousStoryStateExtractionService", () => {
       await makeVersion(ids.chapter1, ids.version1, ambiguousContent),
     );
     harness.chapters.set(ids.chapter1, makeChapter(ids.chapter1, ids.version1, ambiguousContent));
+    harness.syncAuthority();
     for (const entityKey of [ids.entity1, ids.entity2]) {
       const created = await harness.factService.createFormalUserFact({
         projectId: ids.project,
@@ -308,7 +313,212 @@ describe("ContinuousStoryStateExtractionService", () => {
     expect(listed.ok && listed.value).toEqual([]);
   });
 
-  it("is idempotent by default but reruns an explicit force request without duplicate facts", async () => {
+  it("keeps separate relationship targets and retires only the matching target on a new version", async () => {
+    const firstContent = "林夏把阿棠当作朋友，也仍把顾川视为朋友。";
+    const harness = await createHarness([]);
+    harness.versions.set(ids.version1, await makeVersion(ids.chapter1, ids.version1, firstContent));
+    harness.chapters.set(ids.chapter1, makeChapter(ids.chapter1, ids.version1, firstContent));
+    await addConfirmedCharacter(harness.factService, ids.entity1, "林夏");
+    await addConfirmedCharacter(harness.factService, ids.entity2, "阿棠");
+    await addConfirmedCharacter(harness.factService, ids.entity3, "顾川");
+    harness.syncAuthority();
+    harness.model.candidates = [
+      relationshipCandidate({
+        content: firstContent,
+        subjectKey: ids.entity1,
+        otherEntityKey: ids.entity2,
+        otherEntityName: "阿棠",
+        change: "关系稳定",
+      }),
+      relationshipCandidate({
+        content: firstContent,
+        subjectKey: ids.entity1,
+        otherEntityKey: ids.entity3,
+        otherEntityName: "顾川",
+        change: "关系稳定",
+      }),
+    ];
+
+    await harness.service.extractSavedVersion({
+      projectId: ids.project,
+      chapterId: ids.chapter1,
+      versionId: ids.version1,
+    });
+    const firstFacts = await harness.store.listByProjectId(storyUuid(ids.project));
+    if (!firstFacts.ok) throw firstFacts.error;
+    const firstRelationships = firstFacts.value.filter(
+      (fact) => fact.toSnapshot().factType === "relationship_change",
+    );
+    expect(firstRelationships).toHaveLength(2);
+    expect(
+      new Set(
+        firstRelationships.map((fact) => {
+          const replacementKey = storyRecord(fact.toSnapshot().structuredValue)?.replacementKey;
+          return typeof replacementKey === "string" ? replacementKey : "";
+        }),
+      ).size,
+    ).toBe(2);
+    expect(
+      firstRelationships.map((fact) => relationshipTargetKey(fact.toSnapshot().structuredValue)),
+    ).toEqual(expect.arrayContaining([ids.entity2, ids.entity3]));
+
+    const nextContent = "林夏和阿棠的朋友关系变得更加牢固。";
+    harness.versions.set(ids.version3, await makeVersion(ids.chapter1, ids.version3, nextContent));
+    harness.chapters.set(ids.chapter1, makeChapter(ids.chapter1, ids.version3, nextContent, 2));
+    harness.syncAuthority();
+    harness.model.candidates = [
+      relationshipCandidate({
+        content: nextContent,
+        subjectKey: ids.entity1,
+        otherEntityKey: ids.entity2,
+        otherEntityName: "阿棠",
+        change: "关系更加牢固",
+      }),
+    ];
+
+    await harness.service.extractSavedVersion({
+      projectId: ids.project,
+      chapterId: ids.chapter1,
+      versionId: ids.version3,
+    });
+    const after = await harness.store.listByProjectId(storyUuid(ids.project));
+    if (!after.ok) throw after.error;
+    const relationships = after.value.filter(
+      (fact) => fact.toSnapshot().factType === "relationship_change",
+    );
+    const oldTargetA = relationships.find(
+      (fact) =>
+        fact.toSnapshot().source.versionId === ids.version1 &&
+        relationshipTargetKey(fact.toSnapshot().structuredValue) === ids.entity2,
+    );
+    const oldTargetB = relationships.find(
+      (fact) =>
+        fact.toSnapshot().source.versionId === ids.version1 &&
+        relationshipTargetKey(fact.toSnapshot().structuredValue) === ids.entity3,
+    );
+    const currentTargetA = relationships.find(
+      (fact) =>
+        fact.toSnapshot().source.versionId === ids.version3 &&
+        relationshipTargetKey(fact.toSnapshot().structuredValue) === ids.entity2,
+    );
+    expect(oldTargetA?.toSnapshot().deprecated).toBe(true);
+    expect(oldTargetB?.toSnapshot().deprecated).toBe(false);
+    expect(currentTargetA?.toSnapshot().deprecated).toBe(false);
+  });
+
+  it("compacts repeated relationship changes to the latest evidence and persists the raw route count", async () => {
+    const content = "林夏先和阿棠成为朋友。后来林夏与阿棠发生争执。林夏仍把顾川视为朋友。";
+    const harness = await createHarness([]);
+    harness.versions.set(ids.version1, await makeVersion(ids.chapter1, ids.version1, content));
+    harness.chapters.set(ids.chapter1, makeChapter(ids.chapter1, ids.version1, content));
+    await addConfirmedCharacter(harness.factService, ids.entity1, "林夏");
+    await addConfirmedCharacter(harness.factService, ids.entity2, "阿棠");
+    await addConfirmedCharacter(harness.factService, ids.entity3, "顾川");
+    harness.syncAuthority();
+    const earlierExcerpt = "林夏先和阿棠成为朋友。";
+    const laterExcerpt = "后来林夏与阿棠发生争执。";
+    const otherTargetExcerpt = "林夏仍把顾川视为朋友。";
+    // Deliberately return the later state first. Compaction must use exact text
+    // position rather than provider array order.
+    harness.model.candidates = [
+      relationshipCandidate({
+        content,
+        subjectKey: ids.entity1,
+        otherEntityKey: ids.entity2,
+        otherEntityName: "阿棠",
+        change: "发生争执",
+        evidence: evidenceFor(content, laterExcerpt),
+      }),
+      relationshipCandidate({
+        content,
+        subjectKey: ids.entity1,
+        otherEntityKey: ids.entity2,
+        otherEntityName: "阿棠",
+        change: "成为朋友",
+        evidence: evidenceFor(content, earlierExcerpt),
+      }),
+      relationshipCandidate({
+        content,
+        subjectKey: ids.entity1,
+        otherEntityKey: ids.entity3,
+        otherEntityName: "顾川",
+        change: "关系稳定",
+        evidence: evidenceFor(content, otherTargetExcerpt),
+      }),
+    ];
+    const input = {
+      projectId: ids.project,
+      chapterId: ids.chapter1,
+      versionId: ids.version1,
+    } as const;
+
+    expect(await harness.service.extractSavedVersion(input)).toMatchObject({
+      status: "completed",
+      detectedCount: 2,
+      reversibleCount: 2,
+    });
+    const routeReceipt = await harness.store.findContinuousStoryStateRouteReceipt({
+      ...input,
+      task: "character_extraction",
+    });
+    expect(routeReceipt.ok && routeReceipt.value).toMatchObject({
+      candidateCount: 3,
+      createdFactCount: 2,
+    });
+    const listed = await harness.store.listByProjectId(storyUuid(ids.project));
+    if (!listed.ok) throw listed.error;
+    const relationships = listed.value.filter(
+      (fact) => fact.toSnapshot().factType === "relationship_change",
+    );
+    expect(relationships).toHaveLength(2);
+    const targetA = relationships.find(
+      (fact) => relationshipTargetKey(fact.toSnapshot().structuredValue) === ids.entity2,
+    );
+    const targetB = relationships.find(
+      (fact) => relationshipTargetKey(fact.toSnapshot().structuredValue) === ids.entity3,
+    );
+    expect(relationshipChange(targetA?.toSnapshot().structuredValue)).toBe("发生争执");
+    expect(targetA?.toSnapshot().source.startOffset).toBe(content.indexOf(laterExcerpt));
+    expect(targetB).toBeDefined();
+
+    expect((await harness.service.extractSavedVersion(input)).status).toBe("already_processed");
+    expect((await harness.service.extractSavedVersion({ ...input, force: true })).status).toBe(
+      "already_processed",
+    );
+    expect((await harness.restart().extractSavedVersion(input)).status).toBe("already_processed");
+    expect(harness.model.callCount).toBe(2);
+  });
+
+  it("fails closed when a relationship target key is missing or untrusted", async () => {
+    const content = "林夏把陌生人当作朋友。";
+    const harness = await createHarness([]);
+    harness.versions.set(ids.version1, await makeVersion(ids.chapter1, ids.version1, content));
+    harness.chapters.set(ids.chapter1, makeChapter(ids.chapter1, ids.version1, content));
+    await addConfirmedCharacter(harness.factService, ids.entity1, "林夏");
+    harness.syncAuthority();
+    harness.model.candidates = [
+      relationshipCandidate({
+        content,
+        subjectKey: ids.entity1,
+        otherEntityKey: ids.entity2,
+        otherEntityName: "陌生人",
+        change: "关系建立",
+      }),
+    ];
+
+    await expect(
+      harness.service.extractSavedVersion({
+        projectId: ids.project,
+        chapterId: ids.chapter1,
+        versionId: ids.version1,
+      }),
+    ).rejects.toMatchObject({
+      code: "STORY_VALIDATION_FAILED",
+      details: { reasonCode: "STORY_STATE_RELATIONSHIP_TARGET_UNTRUSTED" },
+    });
+  });
+
+  it("persists route idempotency across replay, force, and service restart", async () => {
     const harness = await createHarness([
       modelCandidate({
         factType: "character_state",
@@ -328,9 +538,12 @@ describe("ContinuousStoryStateExtractionService", () => {
     expect(harness.model.callCount).toBe(2);
 
     const forced = await harness.service.extractSavedVersion({ ...input, force: true });
-    expect(forced.status).toBe("completed");
+    expect(forced.status).toBe("already_processed");
     expect(forced.detectedCount).toBe(0);
-    expect(harness.model.callCount).toBe(4);
+    expect(harness.model.callCount).toBe(2);
+    const afterRestart = await harness.restart().extractSavedVersion(input);
+    expect(afterRestart.status).toBe("already_processed");
+    expect(harness.model.callCount).toBe(2);
     const listed = await harness.store.listByProjectId(storyUuid(ids.project));
     if (!listed.ok) throw listed.error;
     expect(listed.value).toHaveLength(1);
@@ -343,26 +556,64 @@ async function createHarness(candidates: ContinuousStoryStateModelCandidate[]) {
   const chapters = new Map<string, Chapter>();
   versions.set(ids.version1, await makeVersion(ids.chapter1, ids.version1, content));
   chapters.set(ids.chapter1, makeChapter(ids.chapter1, ids.version1, content));
-  const store = new BrowserDevelopmentStoryFactStore(new MemoryStorage());
+  const storage = new MemoryStorage();
+  const syncAuthority = () =>
+    storage.setItem(
+      DEVELOPMENT_DATABASE_KEY,
+      JSON.stringify({
+        chapters: [...chapters.values()].map((chapter) => chapter.toSnapshot()),
+        versions: [...versions.values()].map((version) => version.toSnapshot()),
+      }),
+    );
+  syncAuthority();
+  const store = new BrowserDevelopmentStoryFactStore(storage);
   const storyIds = new CryptoUuidV7Generator();
+  const clock = new SystemClock();
   const factService = new StoryFactApplicationService({
     facts: store,
-    clock: new SystemClock(),
+    clock,
     ids: storyIds,
   });
   const model = new MutableModel(candidates);
   const preferences = new MemoryContinuousStoryStatePreferences();
+  const chapterRepository = new ChapterMapRepository(chapters);
+  const hasher = new CryptoContentHasher();
   const service = new ContinuousStoryStateExtractionService({
-    chapters: new ChapterMapRepository(chapters),
+    chapters: chapterRepository,
     chapterVersions: new VersionMapRepository(versions),
     facts: store,
     factService,
     model,
-    hasher: new CryptoContentHasher(),
+    hasher,
     ids: storyIds,
+    clock,
     preferences,
+    projectContextPrivacy: new ProjectContextPrivacyAuthority(chapterRepository, hasher),
   });
-  return { service, store, factService, model, chapters, versions, content };
+  const restart = () =>
+    new ContinuousStoryStateExtractionService({
+      chapters: chapterRepository,
+      chapterVersions: new VersionMapRepository(versions),
+      facts: store,
+      factService,
+      model,
+      hasher,
+      ids: storyIds,
+      clock,
+      preferences,
+      projectContextPrivacy: new ProjectContextPrivacyAuthority(chapterRepository, hasher),
+    });
+  return {
+    service,
+    restart,
+    syncAuthority,
+    store,
+    factService,
+    model,
+    chapters,
+    versions,
+    content,
+  };
 }
 
 class MemoryContinuousStoryStatePreferences {
@@ -421,11 +672,17 @@ class MutableModel implements ContinuousStoryStateModelPort {
   }
 }
 
-class ChapterMapRepository implements Pick<ChapterRepository, "findById"> {
+class ChapterMapRepository implements Pick<ChapterRepository, "findById" | "listByProjectId"> {
   public constructor(private readonly chapters: ReadonlyMap<string, Chapter>) {}
 
   public findById(id: DomainUuidV7) {
     return Promise.resolve(domainOk(this.chapters.get(id) ?? null));
+  }
+
+  public listByProjectId(projectId: DomainUuidV7) {
+    return Promise.resolve(
+      domainOk([...this.chapters.values()].filter((chapter) => chapter.projectId === projectId)),
+    );
   }
 }
 
@@ -497,6 +754,81 @@ function modelCandidate(
     effectiveAt: overrides.effectiveAt ?? null,
     invalidatedAt: overrides.invalidatedAt ?? null,
   });
+}
+
+function relationshipCandidate(
+  input: Readonly<{
+    content: string;
+    subjectKey: string;
+    otherEntityKey: string;
+    otherEntityName: string;
+    change: string;
+    evidence?: Readonly<{ start: number; end: number; excerpt: string }>;
+  }>,
+): ContinuousStoryStateModelCandidate {
+  return modelCandidate({
+    factType: "relationship_change",
+    contentText: `${input.otherEntityName}：${input.change}`,
+    subject: {
+      kind: "character",
+      entityKey: input.subjectKey,
+      canonicalName: "林夏",
+      aliases: [],
+    },
+    state: {
+      otherEntityName: input.otherEntityName,
+      otherEntityKey: input.otherEntityKey,
+      relationship: "朋友",
+      change: input.change,
+    },
+    ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
+    excerpt: input.content,
+  });
+}
+
+async function addConfirmedCharacter(
+  factService: StoryFactApplicationService,
+  entityKey: string,
+  canonicalName: string,
+): Promise<void> {
+  const created = await factService.createFormalUserFact({
+    projectId: ids.project,
+    factType: "character_identity",
+    contentText: `${canonicalName}是已确认人物。`,
+    structuredValue: {
+      schemaVersion: "inkshadow.continuous-story-state.v2",
+      subject: {
+        kind: "character",
+        entityKey,
+        canonicalName,
+        aliases: [canonicalName],
+        mergeStatus: "user_created",
+        matchedEntityKeys: [],
+        needsReview: false,
+      },
+      payload: { identity: "已确认人物", attributes: {} },
+    },
+    actorId: ids.actor,
+    humanConfirmed: true,
+  });
+  if (!created.ok) throw created.error;
+}
+
+function relationshipTargetKey(value: StoryValue | undefined): StoryValue | undefined {
+  return storyRecord(storyRecord(value)?.payload)?.otherEntityKey;
+}
+
+function relationshipChange(value: StoryValue | undefined): StoryValue | undefined {
+  return storyRecord(storyRecord(value)?.payload)?.change;
+}
+
+function evidenceFor(
+  content: string,
+  excerpt: string,
+): Readonly<{ start: number; end: number; excerpt: string }> {
+  const start = content.indexOf(excerpt);
+  if (start < 0) throw new Error("expected relationship evidence in test content");
+  return Object.freeze({ start, end: start + excerpt.length, excerpt });
 }
 
 class MemoryStorage implements Storage {

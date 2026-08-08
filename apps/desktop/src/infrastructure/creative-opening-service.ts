@@ -2,6 +2,10 @@ import { AiCandidate, AppError, err, ok, type Result, type UuidV7 } from "@inksh
 
 import { ModelCenterError, type ModelProfile } from "./model-center-store";
 import { executeModelHubTextTask, ModelHubExecutionError } from "./model-hub-execution-service";
+import {
+  resolveFinalModelProfileGatewayConfig,
+  resolveModelProfileGatewayConfig,
+} from "./model-profile-gateway-config";
 import type { DesktopRuntime, NativeModelMessage } from "./runtime";
 
 export interface CreativeOpeningResult {
@@ -12,6 +16,8 @@ export interface CreativeOpeningResult {
   readonly modelId: string | null;
   readonly noticeCode: string | null;
 }
+
+export type CreativeOpeningAngle = "immediate_action" | "relationship_dialogue" | "mystery_clue";
 
 export type CreativeOpeningDestination =
   Readonly<{ kind: "local" }> | Readonly<{ kind: "provider"; providerId: string; modelId: string }>;
@@ -28,6 +34,12 @@ export async function inspectCreativeOpeningDestination(
           continue;
         }
         for (const connection of connections) {
+          if (
+            !connection.enabled ||
+            (connection.connectionStatus !== "ready" && connection.connectionStatus !== "degraded")
+          ) {
+            continue;
+          }
           const catalog = await runtime.modelHub.listCatalog(connection.id).catch(() => []);
           const entry = catalog.find(({ id }) => id === catalogEntryId);
           if (entry !== undefined) {
@@ -54,6 +66,7 @@ export async function generateCreativeOpening(
     idea: string;
     direction?: string;
     answers?: Readonly<Record<string, string>>;
+    openingAngle?: CreativeOpeningAngle;
     requestId?: string;
     onDelta?: (text: string) => void;
   }>,
@@ -64,11 +77,17 @@ export async function generateCreativeOpening(
       ? null
       : validateCreativeText(input.direction, 1_000, "direction");
   const requestId = input.requestId ?? runtime.ids.next();
-  const messages = buildOpeningMessages(idea, direction, input.answers ?? {});
+  const messages = buildOpeningMessages(
+    idea,
+    direction,
+    input.answers ?? {},
+    input.openingAngle ?? null,
+  );
 
   if (runtime.mode === "tauri" && runtime.modelGateway.available) {
     try {
       const generated = await executeModelHubTextTask(runtime, {
+        dispatchScope: { kind: "non_project", reason: "creative_opening" },
         task: "book_start_guidance",
         messages,
         maximumOutputTokens: 1_200,
@@ -106,37 +125,39 @@ export async function generateCreativeOpening(
     return localOpening(requestId, idea, direction, "MODEL_NOT_CONNECTED");
   }
 
+  const resolvedEndpoint = await resolveModelProfileGatewayConfig(
+    { modelHub: runtime.modelHub, credentials: runtime.credentials },
+    profile,
+  ).catch(() => null);
+  if (resolvedEndpoint === null) {
+    return localOpening(requestId, idea, direction, "MODEL_CREDENTIAL_MISSING");
+  }
+
   try {
-    if (profile.authentication === "bearer_keyring") {
-      const summary = await runtime.credentials.getSummary(profile.providerId);
-      if (!summary.configured) {
-        return localOpening(requestId, idea, direction, "MODEL_CREDENTIAL_MISSING");
-      }
-    }
     const inputBytes = new TextEncoder().encode(
       messages.map(({ content }) => content).join("\n"),
     ).length;
     if (inputBytes > 64_000) {
       return localOpening(requestId, idea, direction, "MODEL_INPUT_TOO_LARGE");
     }
-    const listed = await runtime.modelGateway.listModels({
-      providerId: profile.providerId,
-      provider: profile.provider,
-      baseUrl: profile.baseUrl,
-      authentication: profile.authentication,
-    });
+    const listed = await runtime.modelGateway.listModels(resolvedEndpoint.config);
     if (!listed.models.some(({ id }) => id === profile.selectedModel)) {
       return localOpening(requestId, idea, direction, "SELECTED_MODEL_UNAVAILABLE");
     }
-    const generated = await runtime.modelGateway.generate({
-      generationId: requestId,
-      config: {
-        providerId: profile.providerId,
-        provider: profile.provider,
-        baseUrl: profile.baseUrl,
-        authentication: profile.authentication,
+    const current = await resolveFinalModelProfileGatewayConfig(
+      {
+        modelCenter: runtime.modelCenter,
+        modelHub: runtime.modelHub,
+        credentials: runtime.credentials,
       },
-      model: profile.selectedModel,
+      profile,
+      resolvedEndpoint,
+    );
+    const generated = await runtime.modelGateway.generate({
+      dispatchScope: { kind: "non_project", reason: "creative_opening" },
+      generationId: requestId,
+      config: current.resolution.config,
+      model: current.profile.selectedModel ?? profile.selectedModel,
       messages,
       maxOutputTokens: 1_200,
       temperature: 0.85,
@@ -157,6 +178,19 @@ export async function generateCreativeOpening(
   } catch (cause: unknown) {
     return localOpening(requestId, idea, direction, safeModelFailureCode(cause));
   }
+}
+
+/** Returns the deterministic, clearly labelled local example without contacting a provider. */
+export function generateLocalCreativeOpening(
+  runtime: Pick<DesktopRuntime, "ids">,
+  input: Readonly<{ idea: string; direction?: string; requestId?: string }>,
+): CreativeOpeningResult {
+  const idea = validateCreativeText(input.idea, 4_000, "idea");
+  const direction =
+    input.direction === undefined || input.direction.trim().length === 0
+      ? null
+      : validateCreativeText(input.direction, 1_000, "direction");
+  return localOpening(input.requestId ?? runtime.ids.next(), idea, direction, "LOCAL_SAMPLE");
 }
 
 export async function persistCreativeOpeningCandidate(
@@ -234,6 +268,7 @@ function buildOpeningMessages(
   idea: string,
   direction: string | null,
   answers: Readonly<Record<string, string>>,
+  openingAngle: CreativeOpeningAngle | null,
 ): readonly NativeModelMessage[] {
   const known = Object.entries(answers)
     .filter(([, value]) => value.trim().length > 0)
@@ -251,12 +286,24 @@ function buildOpeningMessages(
       content: [
         `作者的一句话灵感：${idea}`,
         direction === null ? "" : `本轮修改方向：${direction}`,
+        openingAngle === null ? "" : `本次开头方案侧重：${openingAngleInstruction(openingAngle)}`,
         known.length === 0 ? "" : `作者已经表达的偏好：\n${known}`,
       ]
         .filter((value) => value.length > 0)
         .join("\n\n"),
     },
   ]);
+}
+
+function openingAngleInstruction(angle: CreativeOpeningAngle): string {
+  switch (angle) {
+    case "immediate_action":
+      return "从一个正在发生的选择或行动切入，尽快建立场景目标";
+    case "relationship_dialogue":
+      return "从人物关系与具体对话切入，让关系张力推动读者继续阅读";
+    case "mystery_clue":
+      return "从一个异常细节或未解线索切入，但不要提前解释真相";
+  }
 }
 
 function localOpening(

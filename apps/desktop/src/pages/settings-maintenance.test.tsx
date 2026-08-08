@@ -6,6 +6,7 @@ import { ToastProvider } from "@inkshadow/ui";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { AutomaticBackupRuntime } from "../infrastructure/automatic-backup-runtime";
 import { createDevelopmentRuntime, type RuntimeMaintenance } from "../infrastructure/runtime";
 import { RuntimeProvider } from "../runtime-context";
 import { SettingsPage } from "./settings-page";
@@ -127,6 +128,52 @@ describe("SettingsPage native maintenance tickets", () => {
     ).toBeVisible();
     expect(document.body.textContent).not.toContain(rawPath);
   });
+
+  it("shows the real automatic-backup policy and latest desktop check result", async () => {
+    const user = userEvent.setup();
+    const checkNow = vi.fn<AutomaticBackupRuntime["checkNow"]>().mockResolvedValue({
+      state: "ready",
+      run: {
+        status: "completed",
+        dueSlot: "2026-08-08",
+        nextDueAt: "2026-08-09T17:00:00.000Z",
+        createdBackup: {
+          backupId: "019f9f4a-b3c7-7350-9226-000000000001",
+          createdBy: "inkshadow_automatic_backup_service",
+          scheduleSlot: "2026-08-08",
+          fileName:
+            "inkshadow-auto-v1-20260808T170000000Z-019f9f4a-b3c7-7350-9226-000000000001.sqlite3",
+          absolutePath: "D:\\managed\\automatic-backup.sqlite3",
+          createdAt: "2026-08-08T17:00:00.000Z",
+          retentionUntil: "2026-09-07T17:00:00.000Z",
+          status: "ready",
+          byteLength: 4_096,
+          sha256: "a".repeat(64),
+        },
+        recoveredPendingCount: 0,
+        prunedCount: 1,
+        missedSlotCount: 1,
+      },
+      errorCode: null,
+    });
+    const automaticBackup: AutomaticBackupRuntime = {
+      available: true,
+      start: vi.fn(),
+      checkNow,
+      stop: vi.fn().mockResolvedValue(undefined),
+    };
+
+    renderSettings(healthyMaintenance(), automaticBackup);
+
+    expect(await screen.findByRole("heading", { name: "自动备份" })).toBeVisible();
+    expect(screen.getByText(/每天本地时间 03:00/u)).toBeVisible();
+    expect(await screen.findByText("今天的自动备份已完成")).toBeVisible();
+    expect(screen.getByText(/4\.0 KiB/u)).toBeVisible();
+    expect(screen.getByText(/清理了 1 份过期备份/u)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "立即检查自动备份" }));
+    await waitFor(() => expect(checkNow).toHaveBeenCalledTimes(2));
+  });
 });
 
 function healthyMaintenance(): RuntimeMaintenance {
@@ -147,9 +194,12 @@ function healthyMaintenance(): RuntimeMaintenance {
   };
 }
 
-function renderSettings(maintenance: RuntimeMaintenance): void {
+function renderSettings(
+  maintenance: RuntimeMaintenance,
+  automaticBackup: AutomaticBackupRuntime | null = null,
+): void {
   const runtime = createDevelopmentRuntime(window.localStorage);
-  Object.assign(runtime, { maintenance });
+  Object.assign(runtime, { automaticBackup, maintenance });
   render(
     <MemoryRouter initialEntries={["/settings"]}>
       <RuntimeProvider runtime={runtime}>

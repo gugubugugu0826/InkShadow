@@ -9,15 +9,19 @@ import {
   type ContinuousStoryStateModelPort,
   type ContinuousStoryStateProjection,
 } from "./continuous-story-state-extraction";
+import { CausalFactAuthoringService } from "./causal-fact-authoring-service";
 import { createDevelopmentRuntime, type DesktopRuntime } from "./runtime";
 
 const CHARACTER_NAME = "Aria";
 const IDENTITY_TEXT = "Aria was a careful courier.";
 const HISTORY_LIFE_TEXT = "Aria was alive before the observatory fire.";
 const CURRENT_LIFE_TEXT = "Aria is dead after the observatory fire.";
-const HISTORY_KNOWLEDGE_TEXT = "Aria had never learned where the observatory key was hidden.";
+const HISTORY_KNOWLEDGE_TEXT =
+  "At the observatory, Aria learned the key was hidden under the northern stair.";
 const CURRENT_KNOWLEDGE_TEXT =
   "Aria now knew the observatory key was hidden under the northern stair.";
+const AFTER_KNOWLEDGE_TEXT =
+  "Later, Aria used her knowledge that the observatory key was under the northern stair.";
 const HISTORY_DIALOGUES = [
   "Aria says, Captain, please wait. Perhaps we should take the quiet road before dawn.",
   "Aria says, Captain, please listen. Perhaps the northern road will be safer for everyone.",
@@ -58,7 +62,7 @@ describe("continuous story-state detector projections", () => {
     const project = unwrap(
       await runtime.useCases.createProject.execute({ name: "Continuous projection integration" }),
     );
-    const history = unwrap(
+    let history = unwrap(
       await runtime.useCases.createChapter.execute({
         projectId: project.id,
         title: "History",
@@ -82,7 +86,9 @@ describe("continuous story-state detector projections", () => {
       model,
       hasher: runtime.hasher,
       ids: runtime.ids,
+      clock: runtime.clock,
       preferences: new DisabledPreferences(),
+      projectContextPrivacy: runtime.projectContextPrivacy,
     });
 
     model.set(history.id, [identityCandidate()]);
@@ -101,13 +107,79 @@ describe("continuous story-state detector projections", () => {
       new Set(["character_identity"]),
     );
 
-    model.set(history.id, historyCandidates());
+    const characterId = await confirmedCharacterId(runtime, project.id);
+    const causalAuthoring = new CausalFactAuthoringService({
+      chapters: runtime.repositories.chapters,
+      chapterVersions: runtime.repositories.chapterVersions,
+      facts: runtime.story.factService,
+      factStore: runtime.story.facts,
+      projector: runtime.story.causalProjector,
+    });
+    const acquisition = await causalAuthoring.createEvent({
+      projectId: project.id,
+      chapterId: history.id,
+      evidenceExcerpt: HISTORY_KNOWLEDGE_TEXT,
+      eventText: "Aria learns where the observatory key is hidden",
+      resultText: "Aria knows the observatory key location",
+      narrativeOrder: 2,
+      narrativeLabel: "After the observatory discovery",
+      locationLabel: "Observatory",
+      participantCharacterIds: [characterId],
+      informedCharacterIds: [characterId],
+      knowledgeGains: [
+        {
+          characterId,
+          attributeKey: "observatory-key-location",
+          informationId: "observatory-key-under-northern-stair",
+        },
+      ],
+      actorId: runtime.story.actorId,
+    });
+    const acquisitionFactId = acquisition.fact.id;
+
     expect(
       await extraction.extractSavedVersion({
         projectId: project.id,
         chapterId: history.id,
         versionId: history.currentVersionId,
         force: true,
+      }),
+    ).toMatchObject({ status: "already_processed", detectedCount: 0 });
+
+    unwrap(
+      await runtime.useCases.editChapter.execute({
+        chapterId: history.id,
+        expectedRevision: history.revision,
+        content: `${HISTORY_CONTENT}\n`,
+        cursorOffset: HISTORY_CONTENT.length,
+      }),
+    );
+    const savedHistory = unwrap(
+      await runtime.useCases.saveChapter.execute({
+        chapterId: history.id,
+        expectedRevision: history.revision,
+        reason: "manual",
+      }),
+    );
+    if (savedHistory.version === null) {
+      throw new Error("Expected the edited history to create a new immutable version.");
+    }
+    history = savedHistory.chapter.toSnapshot();
+
+    model.set(
+      history.id,
+      historyCandidates({
+        acquiredAt: 2,
+        sourceEventId: acquisitionFactId,
+        sourceFactId: acquisitionFactId,
+        informationId: "observatory-key-under-northern-stair",
+      }),
+    );
+    expect(
+      await extraction.extractSavedVersion({
+        projectId: project.id,
+        chapterId: history.id,
+        versionId: history.currentVersionId,
       }),
     ).toMatchObject({ status: "completed", detectedCount: 4 });
     await confirmChapterFacts(
@@ -154,6 +226,26 @@ describe("continuous story-state detector projections", () => {
       ]),
     );
 
+    const projectedPov = await runtime.story.continuousProjection.projectVoicePovFacts({
+      projectId: project.id,
+      chapterId: current.id,
+      currentVersionId: current.currentVersionId,
+    });
+    expect(
+      projectedPov.facts
+        .filter((fact) => fact.toSnapshot().factType === "character_knowledge")
+        .map((fact) => fact.toSnapshot().structuredValue),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          validationRole: "reference_fact",
+          value: "unknown",
+          knowledgeSourceCompleteness: "verified",
+        }),
+        expect.objectContaining({ validationRole: "current_claim", value: "known" }),
+      ]),
+    );
+
     const character = await runtime.story.characterVoicePov.check({
       projectId: project.id,
       chapterId: current.id,
@@ -162,6 +254,60 @@ describe("continuous story-state detector projections", () => {
     expect(character.summary).toMatchObject({ detectorRunCount: 2, checkedCharacterCount: 1 });
     expect(character.issues).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: "pov_boundary_violation" })]),
+    );
+    const povIssue = character.issues.find(({ kind }) => kind === "pov_boundary_violation");
+    expect(povIssue?.currentEvidence).toEqual([
+      expect.objectContaining({ excerpt: CURRENT_KNOWLEDGE_TEXT }),
+    ]);
+    expect(povIssue?.referenceEvidence).toEqual([
+      expect.objectContaining({ excerpt: HISTORY_KNOWLEDGE_TEXT }),
+    ]);
+
+    const after = unwrap(
+      await runtime.useCases.createChapter.execute({
+        projectId: project.id,
+        title: "After acquisition",
+        content: AFTER_KNOWLEDGE_TEXT,
+      }),
+    ).chapter.toSnapshot();
+    model.set(after.id, [povCandidate(AFTER_KNOWLEDGE_TEXT, AFTER_KNOWLEDGE_TEXT, "known", 3)]);
+    await extraction.extractSavedVersion({
+      projectId: project.id,
+      chapterId: after.id,
+      versionId: after.currentVersionId,
+    });
+    await confirmChapterFacts(
+      runtime,
+      extraction,
+      project.id,
+      after.id,
+      new Set(["pov_knowledge"]),
+    );
+    const afterCheck = await runtime.story.characterVoicePov.check({
+      projectId: project.id,
+      chapterId: after.id,
+    });
+    expect(afterCheck.issues.some(({ kind }) => kind === "pov_boundary_violation")).toBe(false);
+
+    const sourceSnapshot = acquisition.fact.toSnapshot();
+    unwrap(
+      await runtime.story.factService.deprecate({
+        factId: sourceSnapshot.id,
+        expectedRevision: sourceSnapshot.revision,
+        humanConfirmed: true,
+      }),
+    );
+    const inactiveSourceCheck = await runtime.story.characterVoicePov.check({
+      projectId: project.id,
+      chapterId: current.id,
+    });
+    expect(inactiveSourceCheck.issues.some(({ kind }) => kind === "pov_boundary_violation")).toBe(
+      false,
+    );
+    expect(inactiveSourceCheck.skippedChecks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ reason: "pov_knowledge_source_inactive" }),
+      ]),
     );
 
     const narrative = await runtime.story.narrativeAnalysis.analyzeChapter({
@@ -208,6 +354,88 @@ describe("continuous story-state detector projections", () => {
         payload: { schemaVersion: "inkshadow.continuous-story-state.v2" },
       },
     });
+  });
+
+  it("keeps legacy v2 POV data readable but refuses to promote an incomplete source", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = unwrap(await runtime.useCases.createProject.execute({ name: "Legacy POV" }));
+    const source = unwrap(
+      await runtime.useCases.createChapter.execute({
+        projectId: project.id,
+        title: "Legacy source",
+        content: "Aria knows the sealed name.",
+      }),
+    ).chapter.toSnapshot();
+    const target = unwrap(
+      await runtime.useCases.createChapter.execute({
+        projectId: project.id,
+        title: "Target",
+        content: "The sealed name is spoken.",
+      }),
+    ).chapter.toSnapshot();
+    const checksum = unwrap(await runtime.hasher.sha256(source.content));
+    const created = unwrap(
+      await runtime.story.factService.createFormalUserFact({
+        projectId: project.id,
+        factType: "pov_knowledge",
+        contentText: source.content,
+        structuredValue: {
+          schemaVersion: "inkshadow.continuous-story-state.v2",
+          subject: {
+            kind: "character",
+            entityKey: "character-legacy",
+            canonicalName: "Aria",
+            aliases: [],
+          },
+          state: {
+            knowledgeStatus: "known",
+            information: "sealed name",
+            acquiredAt: null,
+            informationSource: "legacy import",
+          },
+          projectionJson: JSON.stringify({
+            validation: null,
+            pov: {
+              characterId: "character-legacy",
+              attributeKey: "sealed-name",
+              knowledgeStatus: "known",
+              effectiveRange: { startOrder: 0, endOrder: null },
+              mode: "third_person_limited",
+            },
+            voice: null,
+            narrative: null,
+          }),
+        },
+        source: {
+          kind: "chapter_span",
+          reference: `continuous-story-state:character_extraction:${source.currentVersionId}:sha256:${checksum}`,
+          chapterId: source.id,
+          versionId: source.currentVersionId,
+          startOffset: 0,
+          endOffset: source.content.length,
+          sourceLength: source.content.length,
+          excerpt: source.content,
+        },
+        actorId: runtime.story.actorId,
+        humanConfirmed: true,
+      }),
+    );
+
+    const projected = await runtime.story.continuousProjection.projectVoicePovFacts({
+      projectId: project.id,
+      chapterId: target.id,
+      currentVersionId: target.currentVersionId,
+    });
+
+    expect(projected.facts).toEqual([]);
+    expect(projected.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceFactId: created.id,
+          reason: "knowledge_source_incomplete",
+        }),
+      ]),
+    );
   });
 });
 
@@ -281,10 +509,17 @@ function identityCandidate(): ContinuousStoryStateModelCandidate {
   });
 }
 
-function historyCandidates(): readonly ContinuousStoryStateModelCandidate[] {
+function historyCandidates(
+  source: Readonly<{
+    acquiredAt: number;
+    sourceEventId: string;
+    sourceFactId: string;
+    informationId: string;
+  }>,
+): readonly ContinuousStoryStateModelCandidate[] {
   return Object.freeze([
     characterStateCandidate(HISTORY_CONTENT, HISTORY_LIFE_TEXT, "alive", 1),
-    povCandidate(HISTORY_CONTENT, HISTORY_KNOWLEDGE_TEXT, "unknown", 1),
+    povCandidate(HISTORY_CONTENT, HISTORY_KNOWLEDGE_TEXT, "known", 0, source),
     voiceCandidate(HISTORY_CONTENT, HISTORY_DIALOGUES, HISTORY_DIALOGUES.join("\n")),
     candidate({
       factType: "world_rule",
@@ -309,7 +544,7 @@ function historyCandidates(): readonly ContinuousStoryStateModelCandidate[] {
 function currentCandidates(): readonly ContinuousStoryStateModelCandidate[] {
   return Object.freeze([
     characterStateCandidate(CURRENT_CONTENT, CURRENT_LIFE_TEXT, "dead", 2),
-    povCandidate(CURRENT_CONTENT, CURRENT_KNOWLEDGE_TEXT, "known", 2),
+    povCandidate(CURRENT_CONTENT, CURRENT_KNOWLEDGE_TEXT, "known", 1),
     voiceCandidate(CURRENT_CONTENT, [CURRENT_DIALOGUE], CURRENT_DIALOGUE),
     candidate({
       factType: "world_setting",
@@ -404,6 +639,12 @@ function povCandidate(
   evidenceText: string,
   knowledgeStatus: "known" | "unknown",
   order: number,
+  source: Readonly<{
+    acquiredAt: number;
+    sourceEventId: string;
+    sourceFactId: string;
+    informationId: string;
+  }> | null = null,
 ): ContinuousStoryStateModelCandidate {
   return candidate({
     factType: "pov_knowledge",
@@ -430,6 +671,10 @@ function povCandidate(
         knowledgeStatus,
         effectiveRange: { startOrder: order, endOrder: null },
         mode: "third_person_limited",
+        acquiredAt: source?.acquiredAt ?? null,
+        sourceEventId: source?.sourceEventId ?? null,
+        sourceFactId: source?.sourceFactId ?? null,
+        informationId: source?.informationId ?? null,
       },
     }),
   });
@@ -561,6 +806,26 @@ async function confirmChapterFacts(
       }),
     );
   }
+}
+
+async function confirmedCharacterId(runtime: DesktopRuntime, projectId: string): Promise<string> {
+  const facts = unwrap(await runtime.story.facts.listByProjectId(projectId as never));
+  const identity = facts
+    .find((fact) => fact.toSnapshot().factType === "character_identity")
+    ?.toSnapshot();
+  const structured = identity?.structuredValue;
+  if (structured === null || typeof structured !== "object" || Array.isArray(structured)) {
+    throw new Error("Missing confirmed character identity.");
+  }
+  const subject = (structured as Readonly<Record<string, StoryValue>>).subject;
+  if (subject === null || typeof subject !== "object" || Array.isArray(subject)) {
+    throw new Error("Missing confirmed character subject.");
+  }
+  const entityKey = (subject as Readonly<Record<string, StoryValue>>).entityKey;
+  if (typeof entityKey !== "string") {
+    throw new Error("Missing confirmed character key.");
+  }
+  return entityKey;
 }
 
 function unwrap<Value>(

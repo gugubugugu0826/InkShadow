@@ -31,7 +31,8 @@ export type ContentSyncMaterializationSkipReason =
   | "causally_older"
   | "bootstrap_business_match"
   | "historical_business_match"
-  | "already_deleted";
+  | "already_deleted"
+  | "local_only";
 
 interface ContentSyncMaterializationOutcomeBase {
   readonly projectId: string;
@@ -92,6 +93,8 @@ interface ChapterDbRow {
   readonly content: string;
   readonly status: string;
   readonly revision: number;
+  readonly privacy_mode: string;
+  readonly privacy_revision: number;
   readonly current_version_id: string;
   readonly created_at: string;
   readonly updated_at: string;
@@ -154,6 +157,12 @@ export class ContentSyncMaterializer {
         prepared.objectId,
       ),
     );
+    if (
+      prepared.objectType === "chapter_version" &&
+      (await isLocalOnlyChapter(transaction, prepared.projectId, prepared.objectId))
+    ) {
+      return skippedOutcome(prepared, "local_only", current);
+    }
     const remoteMarker = markerForPrepared(prepared, now);
     const decision = decideMaterialization(current, exact, remoteMarker);
 
@@ -625,6 +634,23 @@ async function findChapter(
     await transaction.select<ChapterDbRow>("SELECT * FROM chapters WHERE id = ?", [chapterId]),
     "A chapter identifier resolved to duplicate rows.",
   );
+}
+
+async function isLocalOnlyChapter(
+  transaction: TransactionExecutor,
+  projectId: string,
+  chapterId: string,
+): Promise<boolean> {
+  const rows = await transaction.select<Pick<ChapterDbRow, "privacy_mode">>(
+    `SELECT privacy_mode
+     FROM chapters
+     WHERE id = ? AND project_id = ?`,
+    [chapterId, projectId],
+  );
+  if (rows.length > 1) {
+    throw materializationCorruption("A chapter identifier resolved to duplicate privacy rows.");
+  }
+  return rows[0]?.privacy_mode === "local_only";
 }
 
 async function findChapterVersion(

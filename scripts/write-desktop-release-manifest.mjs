@@ -9,8 +9,10 @@ import {
   createDesktopReleaseEnvironmentFingerprint,
   createDesktopReleaseManifest,
   createDesktopReleaseSourceFingerprint,
+  inspectCleanReleaseHead,
   requireSafeReleasePath,
   verifyDesktopReleaseSourceBaseline,
+  verifyReleaseHeadUnchanged,
 } from "./desktop-release-manifest.mjs";
 
 const workspaceRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -28,19 +30,31 @@ await requireSafeReleasePath(
   "Release source baseline",
 );
 const baseline = await readBaseline(options.sourceBaseline);
+const initialHead = await inspectCleanReleaseHead(workspaceRoot);
 const sourceFingerprint = await createDesktopReleaseSourceFingerprint(workspaceRoot);
 const environmentFingerprint = createDesktopReleaseEnvironmentFingerprint();
-verifyDesktopReleaseSourceBaseline(baseline, sourceFingerprint, environmentFingerprint);
-const artifactFingerprint = await createDesktopReleaseArtifactFingerprint(options.distributionRoot);
 verifyDesktopReleaseSourceBaseline(
   baseline,
-  await createDesktopReleaseSourceFingerprint(workspaceRoot),
-  createDesktopReleaseEnvironmentFingerprint(),
+  sourceFingerprint,
+  environmentFingerprint,
+  initialHead.gitCommitSha,
+);
+const artifactFingerprint = await createDesktopReleaseArtifactFingerprint(options.distributionRoot);
+const finalSourceFingerprint = await createDesktopReleaseSourceFingerprint(workspaceRoot);
+const finalEnvironmentFingerprint = createDesktopReleaseEnvironmentFingerprint();
+const finalHead = await inspectCleanReleaseHead(workspaceRoot);
+verifyReleaseHeadUnchanged(initialHead, finalHead);
+verifyDesktopReleaseSourceBaseline(
+  baseline,
+  finalSourceFingerprint,
+  finalEnvironmentFingerprint,
+  finalHead.gitCommitSha,
 );
 const manifest = createDesktopReleaseManifest(
   baseline.sourceFingerprint,
   baseline.environmentFingerprint,
   artifactFingerprint,
+  baseline.gitCommitSha,
 );
 await writeFile(
   path.join(options.distributionRoot, DESKTOP_RELEASE_MANIFEST_NAME),
@@ -48,7 +62,9 @@ await writeFile(
   "utf8",
 );
 process.stdout.write(
-  `Wrote ${DESKTOP_RELEASE_MANIFEST_NAME} for ${String(artifactFingerprint.fileCount)} release files.\n`,
+  `Wrote ${DESKTOP_RELEASE_MANIFEST_NAME} for ${String(
+    artifactFingerprint.fileCount,
+  )} release files at Git commit ${baseline.gitCommitSha}.\n`,
 );
 
 async function readBaseline(filePath) {

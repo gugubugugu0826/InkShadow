@@ -6,6 +6,7 @@ import {
   RecoveryDraft,
   err,
   ok,
+  type ChapterPrivacyMode,
   type ChapterVersionReason,
   type Clock,
   type Result,
@@ -14,6 +15,7 @@ import {
 } from "@inkshadow/domain";
 
 import type {
+  ChapterPrivacyRepository,
   ChapterRepository,
   ChapterVersionRepository,
   ContentCommitRepository,
@@ -27,6 +29,10 @@ export interface CreateChapterCommand {
   readonly projectId: UuidV7;
   readonly title: string;
   readonly content?: string;
+  readonly privacyMode?: ChapterPrivacyMode;
+  /** Stable ids persisted by a journey before provisioning starts. */
+  readonly plannedChapterId?: UuidV7;
+  readonly plannedInitialVersionId?: UuidV7;
 }
 
 export interface EditChapterCommand {
@@ -67,6 +73,60 @@ export interface CreateChapterOutcome {
   readonly saveState: SaveState;
 }
 
+export interface SetChapterPrivacyCommand {
+  readonly chapterId: UuidV7;
+  readonly privacyMode: ChapterPrivacyMode;
+  readonly expectedPrivacyRevision: number;
+}
+
+export interface SetChapterPrivacyOutcome {
+  readonly chapter: Chapter;
+  readonly blockedProjectionCount: number;
+  readonly removedOutboxOperationCount: number;
+  readonly acknowledgedCloudEvidenceCount: number;
+}
+
+/**
+ * Changes chapter privacy without manufacturing a正文 version. Its separate
+ * privacy revision keeps this metadata CAS independent from content sequence.
+ */
+export class SetChapterPrivacy {
+  public constructor(
+    private readonly chapters: ChapterRepository,
+    private readonly privacy: ChapterPrivacyRepository,
+    private readonly clock: Clock,
+  ) {}
+
+  public async execute(
+    command: SetChapterPrivacyCommand,
+  ): Promise<Result<SetChapterPrivacyOutcome, AppError>> {
+    const chapterResult = await findChapter(this.chapters, command.chapterId);
+    if (!chapterResult.ok) {
+      return chapterResult;
+    }
+    const changed = chapterResult.value.changePrivacy({
+      privacyMode: command.privacyMode,
+      expectedPrivacyRevision: command.expectedPrivacyRevision,
+      now: this.clock.now(),
+    });
+    if (!changed.ok) {
+      return changed;
+    }
+    const committed = await this.privacy.updatePrivacy(
+      changed.value,
+      command.expectedPrivacyRevision,
+    );
+    return committed.ok
+      ? ok({
+          chapter: committed.value.chapter,
+          blockedProjectionCount: committed.value.blockedProjectionCount,
+          removedOutboxOperationCount: committed.value.removedOutboxOperationCount,
+          acknowledgedCloudEvidenceCount: committed.value.acknowledgedCloudEvidenceCount,
+        })
+      : committed;
+  }
+}
+
 export class CreateChapter {
   constructor(
     private readonly projects: ProjectRepository,
@@ -74,9 +134,32 @@ export class CreateChapter {
     private readonly ids: UuidV7Generator,
     private readonly clock: Clock,
     private readonly hasher: ContentHasher,
+    private readonly chapters?: ChapterRepository,
+    private readonly versions?: ChapterVersionRepository,
   ) {}
 
   async execute(command: CreateChapterCommand): Promise<Result<CreateChapterOutcome, AppError>> {
+    const hasPlannedChapterId = command.plannedChapterId !== undefined;
+    const hasPlannedVersionId = command.plannedInitialVersionId !== undefined;
+    if (hasPlannedChapterId !== hasPlannedVersionId) {
+      return err(
+        new AppError({
+          code: "VALIDATION_FAILED",
+          message: "Crash-safe chapter provisioning requires both planned ids.",
+          details: { reason: "PLANNED_CHAPTER_IDS_INCOMPLETE" },
+        }),
+      );
+    }
+    if (hasPlannedChapterId && (this.chapters === undefined || this.versions === undefined)) {
+      return err(
+        new AppError({
+          code: "REPOSITORY_ERROR",
+          message: "Crash-safe chapter recovery repositories are unavailable.",
+          details: { reason: "PLANNED_CHAPTER_RECOVERY_UNAVAILABLE" },
+        }),
+      );
+    }
+
     const project = await findProject(this.projects, command.projectId);
     if (!project.ok) {
       return project;
@@ -88,8 +171,8 @@ export class CreateChapter {
     }
 
     const now = this.clock.now();
-    const chapterId = this.ids.next();
-    const versionId = this.ids.next();
+    const chapterId = command.plannedChapterId ?? this.ids.next();
+    const versionId = command.plannedInitialVersionId ?? this.ids.next();
     const content = command.content ?? "";
     const checksum = await this.hasher.sha256(content);
     if (!checksum.ok) {
@@ -101,6 +184,7 @@ export class CreateChapter {
       projectId: command.projectId,
       title: command.title,
       content,
+      ...(command.privacyMode === undefined ? {} : { privacyMode: command.privacyMode }),
       initialVersionId: versionId,
       now,
     });
@@ -124,18 +208,113 @@ export class CreateChapter {
       return version;
     }
 
+    if (command.plannedChapterId !== undefined) {
+      const recovered = await this.recoverPlannedChapter(chapter.value, version.value);
+      if (!recovered.ok) {
+        return recovered;
+      }
+      if (recovered.value !== null) {
+        return ok(recovered.value);
+      }
+    }
+
     const committed = await this.commits.createChapter({
       chapter: chapter.value,
       initialVersion: version.value,
     });
-    return committed.ok
-      ? ok({
-          chapter: chapter.value,
-          version: version.value,
-          saveState: committed.value.syncQueued ? "pending_sync" : "saved_local",
-        })
-      : committed;
+    if (committed.ok) {
+      return ok({
+        chapter: chapter.value,
+        version: version.value,
+        saveState: committed.value.syncQueued ? "pending_sync" : "saved_local",
+      });
+    }
+    if (command.plannedChapterId === undefined) {
+      return committed;
+    }
+    const recovered = await this.recoverPlannedChapter(chapter.value, version.value);
+    if (!recovered.ok) {
+      return recovered;
+    }
+    return recovered.value === null ? committed : ok(recovered.value);
   }
+
+  private async recoverPlannedChapter(
+    expectedChapter: Chapter,
+    expectedVersion: ChapterVersion,
+  ): Promise<Result<CreateChapterOutcome | null, AppError>> {
+    if (this.chapters === undefined || this.versions === undefined) {
+      return ok(null);
+    }
+    const [chapterResult, versionResult] = await Promise.all([
+      this.chapters.findById(expectedChapter.id),
+      this.versions.findVersionById(expectedVersion.id),
+    ]);
+    if (!chapterResult.ok) {
+      return chapterResult;
+    }
+    if (!versionResult.ok) {
+      return versionResult;
+    }
+    if (chapterResult.value === null && versionResult.value === null) {
+      return ok(null);
+    }
+    if (
+      chapterResult.value === null ||
+      versionResult.value === null ||
+      !sameInitialChapter(chapterResult.value, expectedChapter) ||
+      !sameInitialVersion(versionResult.value, expectedVersion)
+    ) {
+      return err(
+        new AppError({
+          code: "REPOSITORY_ERROR",
+          message: "The planned chapter ids already belong to different content or scope.",
+          details: {
+            reason: "PLANNED_CHAPTER_SCOPE_MISMATCH",
+            chapterId: expectedChapter.id,
+            versionId: expectedVersion.id,
+          },
+        }),
+      );
+    }
+    return ok({
+      chapter: chapterResult.value,
+      version: versionResult.value,
+      saveState: "saved_local",
+    });
+  }
+}
+
+function sameInitialChapter(actual: Chapter, expected: Chapter): boolean {
+  const current = actual.toSnapshot();
+  const planned = expected.toSnapshot();
+  return (
+    current.id === planned.id &&
+    current.projectId === planned.projectId &&
+    current.title === planned.title &&
+    current.content === planned.content &&
+    current.status === "active" &&
+    current.revision === 1 &&
+    current.privacyMode === planned.privacyMode &&
+    current.privacyRevision === 1 &&
+    current.currentVersionId === planned.currentVersionId
+  );
+}
+
+function sameInitialVersion(actual: ChapterVersion, expected: ChapterVersion): boolean {
+  const current = actual.toSnapshot();
+  const planned = expected.toSnapshot();
+  return (
+    current.id === planned.id &&
+    current.projectId === planned.projectId &&
+    current.chapterId === planned.chapterId &&
+    current.parentVersionId === null &&
+    current.sequence === 1 &&
+    current.content === planned.content &&
+    current.contentChecksum === planned.contentChecksum &&
+    current.reason === "created" &&
+    current.sourceCandidateId === null
+  );
 }
 
 export class EditChapter {

@@ -15,6 +15,10 @@ import type {
 
 import type { ModelCenterStore, ModelProfile } from "./model-center-store";
 import {
+  nativeGatewayEndpointIdentity,
+  resolveModelProfileGatewayConfig,
+} from "./model-profile-gateway-config";
+import {
   executeModelHubEmbeddingTask,
   inspectModelHubEmbeddingTask,
   type ModelHubEmbeddingExecutionDependencies,
@@ -26,7 +30,16 @@ import type {
   NativeEmbeddingGatewayClient,
   NativeEmbeddingResult,
 } from "./native-embedding-gateway";
-import type { NativeGatewayProviderKind } from "./native-model-gateway-contract";
+import type {
+  NativeGatewayEndpointConfig,
+  NativeGatewayProviderKind,
+} from "./native-model-gateway-contract";
+import {
+  ProjectContextPrivacyError,
+  projectContextDispatchScope,
+  type ProjectContextPrivacyAuthority,
+  type ProjectContextPrivacyReceipt,
+} from "./project-context-privacy-authority";
 
 const MAX_DOCUMENTS = 25_000;
 const MAX_BATCH_ITEMS = 32;
@@ -34,6 +47,12 @@ const MAX_BATCH_BYTES = 384 * 1024;
 const MAX_ITEM_BYTES = 64 * 1024;
 const MAX_DIMENSION = 4_096;
 const CAPABILITY_PROBE = "InkShadow embedding capability probe";
+
+type ProjectEmbeddingGatewayDispatch = Readonly<{
+  kind: "project_context";
+  inputs: readonly string[];
+  receipt: ProjectContextPrivacyReceipt;
+}>;
 
 export type EmbeddingDestinationKind = "local_ollama" | "remote";
 
@@ -68,6 +87,8 @@ export interface ProjectEmbeddingDiagnostics {
 }
 
 export interface ProjectVectorLoad {
+  /** Project authority bound to this load; required before any query-vector egress. */
+  readonly projectId: string;
   readonly diagnostics: ProjectEmbeddingDiagnostics;
   readonly configuration: EmbeddingConfiguration | null;
   readonly embeddings: readonly DocumentEmbedding[];
@@ -98,6 +119,11 @@ export interface ProjectSearchVectorService {
   diagnostics(): ProjectEmbeddingDiagnostics;
 }
 
+export type RemoteEmbeddingDocumentFilter = (
+  projectId: string,
+  documents: readonly SearchDocument[],
+) => Promise<readonly SearchDocument[]>;
+
 interface ResolvedEmbeddingProfileBase {
   readonly source: "model_hub" | "legacy";
   readonly providerId: string;
@@ -113,6 +139,8 @@ interface ResolvedLegacyEmbeddingProfile extends ResolvedEmbeddingProfileBase {
   readonly source: "legacy";
   readonly route: ModelRoleRoute;
   readonly profile: ModelProfile;
+  /** Exact non-secret endpoint and credential-slot identity inspected initially. */
+  readonly endpointConfig: NativeGatewayEndpointConfig;
 }
 
 interface ResolvedModelHubEmbeddingProfile extends ResolvedEmbeddingProfileBase {
@@ -149,6 +177,11 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
     private readonly hasher: ContentHasher,
     private readonly clock: Clock,
     private readonly modelHub: ModelHubEmbeddingExecutionDependencies | null = null,
+    private readonly filterRemoteEligibleDocuments?: RemoteEmbeddingDocumentFilter,
+    private readonly projectContextPrivacy: Pick<
+      ProjectContextPrivacyAuthority,
+      "inspect" | "assertCurrentBeforeDispatch" | "assertRouteEligible"
+    > | null = null,
   ) {}
 
   public diagnostics(): ProjectEmbeddingDiagnostics {
@@ -162,16 +195,22 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
   ): Promise<ProjectVectorLoad> {
     const resolution = await this.resolveProfile();
     if (resolution.resolved === null || this.store === null) {
-      return this.remember(emptyLoad(resolution.diagnostics));
+      return this.remember(emptyLoad(projectId, resolution.diagnostics));
     }
 
     const resolved = resolution.resolved;
+    const eligibleDocuments = await this.documentsEligibleForDestination(
+      resolved,
+      projectId,
+      documents,
+    );
     let stored: StoredSearchVectorProject | null;
     try {
       stored = await this.store.loadProject(projectId);
     } catch (cause: unknown) {
       return this.remember(
         emptyLoad(
+          projectId,
           diagnosticsFor(resolved, {
             status: "degraded",
             reason: isVectorCorruption(cause) ? "vector_index_corrupt" : "vector_store_unavailable",
@@ -183,6 +222,7 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
     if (stored === null) {
       return this.remember(
         emptyLoad(
+          projectId,
           diagnosticsFor(resolved, {
             status: "rebuild_required",
             reason: "vector_index_not_built",
@@ -194,6 +234,7 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
     if (stored.state.configuration.modelId !== resolved.configurationKey) {
       return this.remember(
         emptyLoad(
+          projectId,
           diagnosticsFor(resolved, {
             status: "rebuild_required",
             reason: "embedding_configuration_changed",
@@ -205,7 +246,7 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
 
     if (
       stored.state.status === "ready" &&
-      (authoritativeSourcesChanged || !matchesDocuments(stored.embeddings, documents))
+      (authoritativeSourcesChanged || !matchesDocuments(stored.embeddings, eligibleDocuments))
     ) {
       try {
         const marked = await this.store.markProjectRebuildRequired({
@@ -219,6 +260,7 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
       } catch {
         return this.remember(
           emptyLoad(
+            projectId,
             diagnosticsFor(resolved, {
               status: "degraded",
               reason: "vector_store_unavailable",
@@ -232,10 +274,11 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
     if (stored.state.status !== "ready") {
       return this.remember(
         emptyLoad(
+          projectId,
           diagnosticsFor(resolved, {
             status: stored.state.status,
             reason:
-              authoritativeSourcesChanged || !matchesDocuments(stored.embeddings, documents)
+              authoritativeSourcesChanged || !matchesDocuments(stored.embeddings, eligibleDocuments)
                 ? "authoritative_source_changed"
                 : "vector_index_not_built",
             state: stored.state,
@@ -244,9 +287,10 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
       );
     }
 
-    if (!matchesDocuments(stored.embeddings, documents)) {
+    if (!matchesDocuments(stored.embeddings, eligibleDocuments)) {
       return this.remember(
         emptyLoad(
+          projectId,
           diagnosticsFor(resolved, {
             status: "rebuild_required",
             reason: "authoritative_source_changed",
@@ -257,6 +301,7 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
     }
 
     return this.remember({
+      projectId,
       diagnostics: diagnosticsFor(resolved, {
         status: "ready",
         reason: null,
@@ -303,6 +348,14 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
       );
     }
 
+    const projectPrivacy = await this.inspectProjectPrivacy(projectId);
+    if (projectPrivacy === null) {
+      throw projectPrivacyUnavailable();
+    }
+    if (resolved.destination === "remote") {
+      this.assertProjectPrivacyRoute(projectPrivacy, false);
+    }
+
     let current: StoredSearchVectorProject | null;
     try {
       current = await this.store.loadProject(projectId);
@@ -310,21 +363,41 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
       throw safeStoreFailure(cause);
     }
 
-    const batches = createBatches(documents);
+    const eligibleDocuments = await this.documentsEligibleForDestination(
+      resolved,
+      projectId,
+      documents,
+    );
+    const batches = createBatches(eligibleDocuments);
     const embeddings: DocumentEmbedding[] = [];
     let dimension: number | null = null;
 
     if (batches.length === 0) {
-      const result = await this.callGateway(resolved, [CAPABILITY_PROBE]);
+      const result = await this.callGateway(resolved, {
+        kind: "project_context",
+        inputs: [CAPABILITY_PROBE],
+        receipt: projectPrivacy,
+      });
       dimension = validateGatewayResult(result, resolved, 1, null);
     } else {
       for (const batch of batches) {
-        const result = await this.callGateway(
+        const liveEligibleDocuments = await this.documentsEligibleForDestination(
           resolved,
-          batch.map(({ text }) => text),
+          projectId,
+          batch.map(({ document }) => document),
         );
-        dimension = validateGatewayResult(result, resolved, batch.length, dimension);
-        for (const [index, source] of batch.entries()) {
+        const liveEligibleIds = new Set(liveEligibleDocuments.map(({ id }) => id));
+        const dispatchBatch = batch.filter(({ document }) => liveEligibleIds.has(document.id));
+        if (dispatchBatch.length === 0) {
+          continue;
+        }
+        const result = await this.callGateway(resolved, {
+          kind: "project_context",
+          inputs: dispatchBatch.map(({ text }) => text),
+          receipt: projectPrivacy,
+        });
+        dimension = validateGatewayResult(result, resolved, dispatchBatch.length, dimension);
+        for (const [index, source] of dispatchBatch.entries()) {
           const values = result.embeddings[index];
           if (values === undefined) {
             throw invalidGatewayResponse();
@@ -344,7 +417,12 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
     }
 
     if (dimension === null) {
-      throw invalidGatewayResponse();
+      const result = await this.callGateway(resolved, {
+        kind: "project_context",
+        inputs: [CAPABILITY_PROBE],
+        receipt: projectPrivacy,
+      });
+      dimension = validateGatewayResult(result, resolved, 1, null);
     }
     const configuration = Object.freeze({
       modelId: resolved.configurationKey,
@@ -388,7 +466,15 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
     }
 
     try {
-      const result = await this.callGateway(resolved, [query]);
+      const projectPrivacy = await this.inspectProjectPrivacy(load.projectId);
+      if (projectPrivacy === null) {
+        throw projectPrivacyUnavailable();
+      }
+      const result = await this.callGateway(resolved, {
+        kind: "project_context",
+        inputs: [query],
+        receipt: projectPrivacy,
+      });
       validateGatewayResult(result, resolved, 1, load.configuration.dimension);
       const values = result.embeddings[0];
       if (values === undefined) {
@@ -429,6 +515,25 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
       await this.store.resetProject(projectId);
     }
     this.lastDiagnostics = EMPTY_DIAGNOSTICS;
+  }
+
+  private async documentsEligibleForDestination(
+    resolved: ResolvedEmbeddingProfile,
+    projectId: string,
+    documents: readonly SearchDocument[],
+  ): Promise<readonly SearchDocument[]> {
+    if (resolved.destination !== "remote") {
+      return documents;
+    }
+    if (this.filterRemoteEligibleDocuments === undefined) {
+      // A remote embedding route must never guess that chapter text is
+      // cloud-eligible. Non-chapter sources remain usable while chapter text
+      // fails closed until the runtime supplies live privacy authority.
+      return documents.filter(({ sourceType }) => sourceType !== "chapter");
+    }
+    const eligible = await this.filterRemoteEligibleDocuments(projectId, documents);
+    const eligibleIds = new Set(eligible.map(({ id }) => id));
+    return documents.filter((document) => eligibleIds.has(document.id));
   }
 
   private async resolveProfile(): Promise<EmbeddingProfileResolution> {
@@ -498,16 +603,34 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
       };
     }
 
-    const endpointOrigin = new URL(profile.baseUrl).origin;
-    const endpointUrl = `${profile.baseUrl.replace(/\/$/u, "")}${
-      profile.provider === "ollama" ? "/api/embed" : "/embeddings"
+    const resolvedEndpoint: Readonly<{ config: NativeGatewayEndpointConfig }> | null =
+      this.modelHub === null
+        ? Object.freeze({
+            config: Object.freeze({
+              providerId: profile.providerId,
+              provider: profile.provider,
+              baseUrl: profile.baseUrl,
+              authentication: profile.authentication,
+            }),
+          })
+        : await resolveModelProfileGatewayConfig(this.modelHub, profile);
+    if (resolvedEndpoint === null) {
+      return {
+        resolved: null,
+        diagnostics: unavailableProfileDiagnostics(route, "embedding_profile_missing", profile),
+      };
+    }
+    const endpointOrigin = new URL(resolvedEndpoint.config.baseUrl).origin;
+    const endpointUrl = `${resolvedEndpoint.config.baseUrl.replace(/\/$/u, "")}${
+      resolvedEndpoint.config.embeddingPath ??
+      (resolvedEndpoint.config.provider === "ollama" ? "/api/embed" : "/embeddings")
     }`;
     const fingerprint = await this.hasher.sha256(
       JSON.stringify([
         profile.providerId,
-        profile.provider,
+        resolvedEndpoint.config.provider,
         endpointUrl,
-        profile.authentication,
+        resolvedEndpoint.config.authentication,
         route.primaryModelId,
       ]),
     );
@@ -523,14 +646,16 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
       source: "legacy",
       route,
       profile,
+      endpointConfig: resolvedEndpoint.config,
       providerId: profile.providerId,
-      provider: profile.provider,
+      provider: resolvedEndpoint.config.provider,
       model: route.primaryModelId,
       configurationKey,
       endpointOrigin,
       endpointUrl,
       destination:
-        profile.provider === "ollama" && isLoopbackHost(new URL(profile.baseUrl).hostname)
+        resolvedEndpoint.config.provider === "ollama" &&
+        isLoopbackHost(new URL(resolvedEndpoint.config.baseUrl).hostname)
           ? "local_ollama"
           : "remote",
     });
@@ -583,19 +708,24 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
 
   private async callGateway(
     resolved: ResolvedEmbeddingProfile,
-    inputs: readonly string[],
+    dispatch: ProjectEmbeddingGatewayDispatch,
   ): Promise<NativeEmbeddingResult> {
     try {
+      const { inputs, receipt: projectPrivacy } = dispatch;
+      const dispatchScope = projectContextDispatchScope(projectPrivacy);
       if (resolved.source === "legacy") {
         await this.assertLegacyFallbackStillAllowed(inputs);
+        await this.assertProjectPrivacyBeforeDispatch(
+          projectPrivacy,
+          resolved.destination === "local_ollama",
+        );
+        await this.assertLegacyFallbackStillAllowed(inputs);
+        const current = await this.resolveCurrentLegacyEmbeddingDispatch(resolved);
+        await this.assertLegacyFallbackStillAllowed(inputs);
         return await this.gateway.embed({
-          config: {
-            providerId: resolved.profile.providerId,
-            provider: resolved.profile.provider,
-            baseUrl: resolved.profile.baseUrl,
-            authentication: resolved.profile.authentication,
-          },
-          model: resolved.model,
+          dispatchScope,
+          config: current.config,
+          model: current.model,
           inputs,
         });
       }
@@ -615,8 +745,9 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
         );
       }
       return await executeModelHubEmbeddingTask(this.modelHub, {
+        dispatchScope,
         inputs,
-        onBeforeDispatch: (selection) => {
+        onBeforeDispatch: async (selection) => {
           if (
             selection.connectionId !== inspected.connectionId ||
             selection.catalogEntryId !== inspected.catalogEntryId ||
@@ -631,6 +762,10 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
               true,
             );
           }
+          await this.assertProjectPrivacyBeforeDispatch(
+            projectPrivacy,
+            selection.localOnlyEligible,
+          );
         },
       });
     } catch (cause: unknown) {
@@ -658,6 +793,86 @@ export class PersistentProjectEmbeddingService implements ProjectSearchVectorSer
         return;
       }
       throw cause;
+    }
+  }
+
+  private async resolveCurrentLegacyEmbeddingDispatch(
+    expected: ResolvedLegacyEmbeddingProfile,
+  ): Promise<Readonly<{ config: NativeGatewayEndpointConfig; model: string }>> {
+    const route = await this.routes.findRoute("embedding");
+    const profile =
+      route === null ? null : await this.profiles.findByProviderId(route.primaryProviderId);
+    if (route === null || profile?.selectedModel !== route.primaryModelId) {
+      throw legacyEmbeddingConfigurationChanged();
+    }
+    const resolution: Readonly<{ config: NativeGatewayEndpointConfig }> | null =
+      this.modelHub === null
+        ? Object.freeze({
+            config: Object.freeze({
+              providerId: profile.providerId,
+              provider: profile.provider,
+              baseUrl: profile.baseUrl,
+              authentication: profile.authentication,
+            }),
+          })
+        : await resolveModelProfileGatewayConfig(this.modelHub, profile);
+    if (
+      resolution === null ||
+      legacyEmbeddingDispatchIdentity(route, profile, resolution.config) !==
+        legacyEmbeddingDispatchIdentity(expected.route, expected.profile, expected.endpointConfig)
+    ) {
+      throw legacyEmbeddingConfigurationChanged();
+    }
+    return Object.freeze({ config: resolution.config, model: route.primaryModelId });
+  }
+
+  private async inspectProjectPrivacy(
+    projectId: string,
+  ): Promise<ProjectContextPrivacyReceipt | null> {
+    if (this.projectContextPrivacy === null) {
+      return null;
+    }
+    try {
+      return await this.projectContextPrivacy.inspect(projectId);
+    } catch (cause: unknown) {
+      throw projectPrivacyEmbeddingError(cause);
+    }
+  }
+
+  private assertProjectPrivacyRoute(
+    receipt: ProjectContextPrivacyReceipt,
+    verifiedLocalEligible: boolean,
+  ): void {
+    if (this.projectContextPrivacy === null) {
+      throw new ProjectEmbeddingServiceError(
+        "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE",
+        "无法核对作品隐私范围，因此没有发送语义记忆内容。",
+        true,
+      );
+    }
+    try {
+      this.projectContextPrivacy.assertRouteEligible(receipt, verifiedLocalEligible);
+    } catch (cause: unknown) {
+      throw projectPrivacyEmbeddingError(cause);
+    }
+  }
+
+  private async assertProjectPrivacyBeforeDispatch(
+    receipt: ProjectContextPrivacyReceipt,
+    verifiedLocalEligible: boolean,
+  ): Promise<void> {
+    if (this.projectContextPrivacy === null) {
+      throw new ProjectEmbeddingServiceError(
+        "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE",
+        "无法核对作品隐私范围，因此没有发送语义记忆内容。",
+        true,
+      );
+    }
+    try {
+      await this.projectContextPrivacy.assertCurrentBeforeDispatch(receipt);
+      this.projectContextPrivacy.assertRouteEligible(receipt, verifiedLocalEligible);
+    } catch (cause: unknown) {
+      throw projectPrivacyEmbeddingError(cause);
     }
   }
 
@@ -812,8 +1027,9 @@ function diagnosticsFromLoad(
   return Object.freeze({ ...load.diagnostics, ...changes });
 }
 
-function emptyLoad(diagnostics: ProjectEmbeddingDiagnostics): ProjectVectorLoad {
+function emptyLoad(projectId: string, diagnostics: ProjectEmbeddingDiagnostics): ProjectVectorLoad {
   return Object.freeze({
+    projectId,
     diagnostics,
     configuration: null,
     embeddings: Object.freeze([]),
@@ -840,12 +1056,56 @@ function embeddingUnavailable(reason: ProjectEmbeddingReason): ProjectEmbeddingS
   );
 }
 
+function legacyEmbeddingDispatchIdentity(
+  route: ModelRoleRoute,
+  profile: ModelProfile,
+  config: NativeGatewayEndpointConfig,
+): string {
+  return JSON.stringify([
+    route.role,
+    route.revision,
+    route.primaryProviderId,
+    route.primaryModelId,
+    route.fallbackProviderId,
+    route.fallbackModelId,
+    profile.providerId,
+    profile.revision,
+    profile.provider,
+    profile.baseUrl,
+    profile.authentication,
+    profile.selectedModel,
+    nativeGatewayEndpointIdentity(config),
+  ]);
+}
+
+function legacyEmbeddingConfigurationChanged(): ProjectEmbeddingServiceError {
+  return new ProjectEmbeddingServiceError(
+    "EMBEDDING_CONFIGURATION_CHANGED",
+    "The legacy embedding route, profile, model, credential, or endpoint changed before dispatch.",
+    true,
+  );
+}
+
 function modelHubFailure(cause: unknown): ProjectEmbeddingServiceError {
   return new ProjectEmbeddingServiceError(
     safeErrorCode(cause, "MODEL_HUB_PREFLIGHT_FAILED"),
     "The configured Model Hub embedding route could not be used safely.",
     safeRetryable(cause),
   );
+}
+
+function projectPrivacyUnavailable(): ProjectEmbeddingServiceError {
+  return new ProjectEmbeddingServiceError(
+    "PROJECT_CONTEXT_PRIVACY_UNAVAILABLE",
+    "无法核对作品隐私范围，因此没有发送语义记忆内容。",
+    true,
+  );
+}
+
+function projectPrivacyEmbeddingError(cause: unknown): ProjectEmbeddingServiceError {
+  return cause instanceof ProjectContextPrivacyError
+    ? new ProjectEmbeddingServiceError(cause.code, cause.message, cause.retryable)
+    : projectPrivacyUnavailable();
 }
 
 function safeStoreFailure(cause: unknown): ProjectEmbeddingServiceError {
