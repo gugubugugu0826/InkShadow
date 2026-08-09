@@ -1,28 +1,31 @@
 # InkShadow 测试与构建结果
 
 > 更新日期：2026-08-09  
-> 证据范围：本次源码预检、Rust、全工作区构建和 production Chromium E2E 已通过；尚未从最终干净提交执行完整候选链与 Windows x64 未签名打包。下方明确标记为历史的结果不能替代本次证据
+> 证据范围：最终发布提交 `435454b952bead1014dd7d44f0f4806d70fce7e5` 已完成本地完整候选链、Windows x64 未签名打包、远端 GitHub Actions 三作业和公开 Pre-release 附件回读校验。下方明确标记为历史的结果不能替代本次证据
 
 ## 2026-08-09 当前验证状态
 
-| 范围                            | 结果                                                                                                                   | 状态    |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------- |
-| 全仓发布预检                    | `pnpm release:check`，439.4 秒；格式、秘密、151 licenses、20 boundaries、14 release tests、20 TS 工作区、ESLint 全通过 | PASS    |
-| pnpm 11 发布脚本回归            | 17/17；包含真实 CLI 解析、失败关闭、候选步骤、干净检出命令和发布来源/制品校验                                          | PASS    |
-| GitHub 干净检出修复模拟         | 同时移开 `access-core/dist` 与 Desktop `dist` 后，拓扑构建、20 工作区类型、Cloud 87/64、Node 入口和 Clippy 全通过      | PASS    |
-| Workspace 自动化                | `2,569 passed / 65 skipped`；跳过项为 64 项真实 PostgreSQL 条件和 1 项真实 Ollama 条件                                 | PASS    |
-| Desktop 自动化                  | 206 files；`1,420 passed / 1 skipped`                                                                                  | PASS    |
-| Rust 原生层                     | format、严格 clippy；`147 passed / 1 ignored`                                                                          | PASS    |
-| 全工作区生产构建                | 20 个可构建工作区全部完成；Desktop 与 Web 均通过                                                                       | PASS    |
-| Desktop 默认公开前端            | 2,562 modules；82 files；6,325,162 bytes / 6,422,528 bytes；PDF Worker 1,190,087 bytes                                 | PASS    |
-| Desktop 团队功能双开构建        | 87 files；6,412,787 bytes / 6,422,528 bytes；4 个 Studio 页面均重新进入产物                                            | PASS    |
-| Desktop production Chromium E2E | `9/9`；生产 PDF Worker 请求与扫描件失败关闭路径已覆盖；DPR2 焦点场景另串行重复 `10/10`                                 | PASS    |
-| 干净提交候选链                  | 等待创建唯一发布提交后连续重跑                                                                                         | NOT_RUN |
-| Windows x64 未签名安装包        | 尚未由本次发布提交生成                                                                                                 | NOT_RUN |
+| 范围                            | 结果                                                                                                                   | 状态 |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ---- |
+| 全仓发布预检                    | `pnpm release:check`，439.4 秒；格式、秘密、151 licenses、20 boundaries、17 release tests、20 TS 工作区、ESLint 全通过 | PASS |
+| pnpm 11 发布脚本回归            | 17/17；包含真实 CLI 解析、失败关闭、候选步骤、干净检出命令和发布来源/制品校验                                          | PASS |
+| GitHub 干净检出修复模拟         | 同时移开 `access-core/dist` 与 Desktop `dist` 后，拓扑构建、20 工作区类型、Cloud 87/64、Node 入口和 Clippy 全通过      | PASS |
+| Workspace 自动化                | `2,569 passed / 65 skipped`；跳过项为 64 项真实 PostgreSQL 条件和 1 项真实 Ollama 条件                                 | PASS |
+| Desktop 自动化                  | 206 files；`1,420 passed / 1 skipped`                                                                                  | PASS |
+| Rust 原生层                     | format、严格 clippy；`147 passed / 1 ignored`                                                                          | PASS |
+| 全工作区生产构建                | 20 个可构建工作区全部完成；Desktop 与 Web 均通过                                                                       | PASS |
+| Desktop 默认公开前端            | 2,562 modules；82 files；6,325,162 bytes / 6,422,528 bytes；PDF Worker 1,190,087 bytes                                 | PASS |
+| Desktop 团队功能双开构建        | 87 files；6,412,787 bytes / 6,422,528 bytes；4 个 Studio 页面均重新进入产物                                            | PASS |
+| Desktop production Chromium E2E | `9/9`；生产 PDF Worker 请求与扫描件失败关闭路径已覆盖；DPR2 焦点场景另串行重复 `10/10`                                 | PASS |
+| 干净提交候选链                  | 提交 `435454b`；703.9 秒；源码指纹 1,049 文件 / 16,109,230 bytes；全链从头通过                                         | PASS |
+| Windows x64 未签名安装包        | 7,429,121 bytes；SHA-256 `6E824533BE5FBBBC2693C8F3891BA2CDD5850B39BA17674C8D1A4EF3E1D2FC20`                            | PASS |
+| GitHub Actions                  | run `31289865897`；Cloud PostgreSQL/forced RLS、质量与浏览器、Windows 原生与 NSIS 三作业全部成功                       | PASS |
+| GitHub Pre-release              | `v0.2.0`；公开、非 Draft、未签名工程预览；三个附件均从 Release 重新下载并逐项核对                                      | PASS |
 
 公开前端中的 PDF.js Worker 仅出现一份完整 Apache 许可证、`pdfjsVersion = 6.1.200`、
-`pdfjsBuild = 6353acefe` 与 `WorkerMessageHandler`；默认构建无 `studio-*` 页面。安装包的精确提交、
-制品大小和 SHA-256 将由候选内嵌发布清单与 GitHub Release 共同记录，避免在源码文档中制造自引用哈希。
+`pdfjsBuild = 6353acefe` 与 `WorkerMessageHandler`；默认构建无 `studio-*` 页面。候选内嵌发布清单为
+15,823 bytes，SHA-256 `9CA873E72676DF094AC3B78C2B233CA46AE8ABD32BA339C1868E83FADAF69FAC`；
+公开 Release 为 <https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.0>。
 
 ### 2026-08-09 发布收口失败记录（不计为通过）
 
@@ -37,6 +40,7 @@
 - 本地候选链随后在提交 `36441bbd5a566506aa6913d3f5f7a5224cccd505` 上以 704.7 秒完整通过，但 GitHub Actions run `31283869052` 的质量作业又暴露一项独立的 Windows Runner 时序假设，因此该候选同样作废。Cloud PostgreSQL/forced RLS 与 Windows 原生作业全部通过；质量作业的构建、类型和 lint 通过，唯一失败是一个真实临时文件 SQLite 双连接 `BEGIN IMMEDIATE` 锁测试用时 5.063 秒，超过 Vitest 默认 5 秒，未报告断言不匹配；同文件其余 11 项、同包其余 132 项通过。由于测试阶段失败，浏览器旅程未执行，不能把该远端 run 记为全绿。修复只为这一项真实 SQLite 集成测试设置 30 秒逐测试上限，不修改全局超时或生产事务逻辑；新提交必须再次从头执行本地候选链和全部远端 CI。
 - SQLite 单项时限修复后的本地候选链在提交 `02c81e1bc22f360441d6d216565c34d4b6aec6a7` 上以 700.7 秒完整通过；GitHub Actions run `31285740826` 的 Cloud PostgreSQL/forced RLS 与 Windows 原生作业也全部通过，原生作业包含 Rust format、严格 Clippy、`147 passed / 1 ignored`、发布前端演练和未签名 NSIS 打包。质量作业的构建、类型和 lint 通过，Story Core 的 SQLite 测试亦已通过；唯一失败是 Desktop 的旧版 What-if 只读历史页面跳转测试，1.544 秒总耗时与路由结构表明首次懒加载“故事关联”页面未能在 Testing Library 默认约 1 秒查询等待内完成，日志只报告找不到目标标题，Desktop 同轮其余 `1,419 passed / 1 skipped`。由于测试阶段失败，浏览器旅程仍未执行，不能把该 run 记为全绿。修复只为这条真实跨路由测试设置 10 秒元素等待和 15 秒逐测试上限，不修改全局超时、页面导航或生产逻辑；新提交仍须重新执行完整本地候选链和全部远端 CI。
 - 跨路由等待修复后的本地候选链在提交 `7675ffde81e45fe250354e4f1d9a4c3f1ed81768` 上以 702.5 秒完整通过并生成安装包；GitHub Actions run `31287548847` 的 Cloud PostgreSQL/forced RLS 与 Windows 原生作业全部通过，原生作业再次完成 Rust format、严格 Clippy、`147 passed / 1 ignored`、发布前端演练和未签名 NSIS 打包。质量作业的构建、类型和 lint 通过，但 Data 包有两个互不相关的真实磁盘 SQLite 用例同时触发 Vitest 默认 5 秒上限：双连接 Candidate revision 权威测试与向量索引落盘关闭重开测试；日志未报告断言不匹配，同包其余 `354` 项通过。两文件在上一成功 run 分别为 919 毫秒和 726 毫秒，本轮文件总耗时均约 8 秒，符合 Windows Runner 与四工作区并发下同步临时文件 I/O 尖峰。由于测试阶段失败，浏览器旅程仍未执行，不能把该 run 记为全绿。审计新增的 15 秒辅助测试入口严格限定到 Data 包 9 项真实磁盘 SQLite/备份/关闭重开用例，以及 Desktop 复用同一文件执行器的 1 项因果图重开测试；内存 SQLite、普通单元测试、Data 包及全仓全局超时仍保持 5 秒，Story Core 已有的文件锁测试继续使用其独立 30 秒上限。修复后的 Data 包 `62/62 files / 356/356 tests` 与类型、格式、lint 均通过；新提交仍须从头执行完整本地候选链和全部远端 CI。
+- 最终提交 `435454b952bead1014dd7d44f0f4806d70fce7e5` 仅把上述 15 秒辅助入口应用到经两次独立审查确认的 10 项真实文件 SQLite/备份/关闭重开用例；普通内存测试和全局 5 秒上限未放宽。本地候选链以 703.9 秒完整通过；GitHub Actions run `31289865897` 的 Cloud、质量/浏览器和 Windows 原生三作业全部成功，随后同一提交生成的安装包、发布清单与两行校验表已发布并从公开 Release 重新下载核对。
 
 下面的 2026-08-08 结果保留为可追溯历史，不再称为当前工作树的最终结果。
 
@@ -432,9 +436,10 @@ pnpm release:candidate:unsigned
 
 ## 当前结论
 
-v0.2.0 的本次完整自动化、production E2E、NSIS 打包、提交绑定、版本和二进制摘要复核
-仍为 `NOT_RUN`。全部完成并如实补录前不得发布新候选；通过后也只能发布为明确标注未签名
-与边界的 GitHub Pre-release 工程预览，不可标记为 Beta、GA 或商业正式版。
+v0.2.0 的本次完整自动化、production E2E、NSIS 打包、提交绑定、版本、二进制摘要、远端 CI
+和公开附件回读复核均已完成。它已发布为明确标注未签名与边界的 GitHub Pre-release 工程预览；
+隔离 Windows 安装矩阵、真实供应商、商业签名、法律审批和独立安全审计未完成，因此不可标记为
+Beta、GA 或商业正式版。
 
 ## 2026-08-08 P39 自动备份历史增量证据
 

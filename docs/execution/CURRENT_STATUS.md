@@ -2,28 +2,28 @@
 
 > 更新日期：2026-08-09  
 > 源码与候选版本：`0.2.0`  
-> 工程状态：Phase 0 审计与 Phase 1–5 内部纵向链路已完成本轮实现和独立审查；源码预检、Rust、全工作区构建与 production Chromium E2E 已通过，正在创建干净、唯一发布提交  
-> 发布结论：**本次源码预检已通过；只有干净提交的完整候选链、未签名 NSIS、哈希复核和 GitHub 工作流继续通过，才发布为 GitHub Pre-release 工程预览。它不是 Beta、GA 或商业正式版**  
+> 工程状态：Phase 0 审计与 Phase 1–5 内部纵向链路已完成本轮实现和独立审查；提交 `435454b` 的本地完整候选链、远端 CI、未签名 NSIS 与公开附件回读均已通过  
+> 发布结论：**`v0.2.0` 已发布为公开 GitHub Pre-release 工程预览。它不是 Beta、GA 或商业正式版**  
 > 原因：商业签名、真实供应商全矩阵、百万字真实作品全链路/WebView 压力、隔离 Windows 安装/升级/卸载矩阵、法律与独立安全审计仍未完成
 
 ## 2026-08-09 当前源码状态
 
 | 项目                   | 当前事实                                                                                                                                       |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| 源码提交               | `IN_PROGRESS`；文档收口后创建唯一发布提交，标签只允许指向该提交                                                                                |
-| 全仓发布预检           | `PASS`；151 项依赖许可证、20 包边界、14 项发布脚本、20 个 TypeScript 工作区、全仓 ESLint、`2,569 passed / 65 skipped`                          |
-| Rust 原生层            | `PASS`；format、严格 clippy、`146 passed / 1 ignored`；忽略项只是真实 Ollama 条件测试                                                          |
+| 源码提交               | `PASS`；发布标签 `v0.2.0` peeled 后精确指向 `435454b952bead1014dd7d44f0f4806d70fce7e5`                                                         |
+| 全仓发布预检           | `PASS`；151 项依赖许可证、20 包边界、17 项发布脚本、20 个 TypeScript 工作区、全仓 ESLint、`2,569 passed / 65 skipped`                          |
+| Rust 原生层            | `PASS`；format、严格 clippy、`147 passed / 1 ignored`；忽略项只是真实 Ollama 条件测试                                                          |
 | 全工作区生产构建       | `PASS`；公开桌面前端 82 文件 / 6,325,162 bytes；团队功能双开构建 87 文件 / 6,412,787 bytes，均低于 6,422,528 bytes 预算                        |
 | Desktop production E2E | `PASS`；`9/9`，覆盖三入口、项目生命周期、自动保存/恢复、Candidate 隔离、生产 PDF Worker、响应式布局与本地凭据边界；DPR2 焦点场景另重复 `10/10` |
-| 干净提交完整候选链     | `NOT_RUN`；提交后连续执行 release check、Rust、release E2E、Tauri/NSIS 打包和打包后来源复核                                                    |
-| Windows x64 未签名候选 | `NOT_RUN`；必须由上述干净提交生成，精确提交、大小与 SHA-256 由内嵌发布清单和 GitHub Release 记录                                               |
-| GitHub                 | `NOT_RUN`；候选、哈希和 GitHub Actions 通过前不创建 `v0.2.0` Pre-release                                                                       |
+| 干净提交完整候选链     | `PASS`；703.9 秒，包含 release check、Rust、release E2E、Tauri/NSIS 和打包后来源复核                                                           |
+| Windows x64 未签名候选 | `PASS`；7,429,121 bytes；SHA-256 `6E824533BE5FBBBC2693C8F3891BA2CDD5850B39BA17674C8D1A4EF3E1D2FC20`                                            |
+| GitHub                 | `PASS`；Actions run `31289865897` 三作业成功；公开 Pre-release：<https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.0>              |
 
 本轮公开前端保留 PDF.js 6.1.200 Worker 的 Apache 许可证、版本和 build 标识；默认公开构建不包含
 四个不可达的 Studio 团队页面，团队能力双开时四个页面会重新进入产物。OpenAPI 文档生成器只从
 `@inkshadow/contracts/openapi` 显式入口加载，不进入桌面运行时主入口。
 
-本页后续带有 2026-08-08 或更早时间标签的测试和制品均为历史记录。最终只有本次将要创建并标记的
+本页后续带有 2026-08-08 或更早时间标签的测试和制品均为历史记录。最终只有上方 `435454b`
 唯一提交、其完整候选链、制品哈希和 GitHub 发布地址可代表本次交付。
 
 ## 2026-08-08 DESIGN v0.3.1b 历史实现快照
@@ -258,7 +258,6 @@ workspace 门禁并非同一个进程或同一环境，不把分层证据合并�
 
 ## 下一步
 
-先完成当前源码的全量门禁、干净提交候选链、制品复核与 GitHub Pre-release；随后在目标
-Tauri WebView 和隔离 Windows 用户中复核设置滚动、窄窗抽屉、安装、首次启动、覆盖升级、
-卸载、重装与数据保留。任何一项外部审批或凭据未完成，都不得把工程预览升级为 Beta、GA
-或商业正式版。
+下一步是在目标 Tauri WebView 和隔离 Windows 用户中复核设置滚动、窄窗抽屉、安装、首次
+启动、覆盖升级、卸载、重装与数据保留，并使用经授权的真实供应商环境完成互操作矩阵。
+任何一项外部审批或凭据未完成，都不得把工程预览升级为 Beta、GA 或商业正式版。
