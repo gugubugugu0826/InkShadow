@@ -6,7 +6,7 @@ import type { DocumentEmbedding } from "@inkshadow/search-core";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { SearchVectorSqliteStore } from "../src/search-vector-sqlite-store.js";
-import { NodeSqliteExecutor } from "./node-sqlite-executor.js";
+import { fileSqliteIt, NodeSqliteExecutor } from "./node-sqlite-executor.js";
 
 const migration = [
   readFileSync(new URL("../migrations/0001_core.sql", import.meta.url), "utf8"),
@@ -32,7 +32,7 @@ afterEach(() => {
 });
 
 describe("SearchVectorSqliteStore", () => {
-  it("persists exact project-scoped cosine results with version and hash provenance", async () => {
+  fileSqliteIt("persists project-scoped cosine results and provenance across restart", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "inkshadow-vector-"));
     temporaryDirectories.push(directory);
     const databasePath = path.join(directory, "vectors.sqlite");

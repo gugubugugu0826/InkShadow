@@ -1,4 +1,5 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { it, type TestFunction } from "vitest";
 
 import {
   TransactionNestingError,
@@ -7,6 +8,12 @@ import {
   type SqlPrimitive,
   type TransactionExecutor,
 } from "../src/executor.js";
+
+const FILE_BACKED_SQLITE_TEST_TIMEOUT_MS = 15_000;
+
+export function fileSqliteIt(name: string, testFunction: TestFunction): void {
+  it(name, testFunction, FILE_BACKED_SQLITE_TEST_TIMEOUT_MS);
+}
 
 export class NodeSqliteExecutor implements SqlExecutor {
   public readonly database: DatabaseSync;

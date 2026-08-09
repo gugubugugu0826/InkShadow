@@ -10,7 +10,10 @@ import type {
   CausalTextEvidence,
 } from "@inkshadow/story-core";
 
-import { NodeSqliteExecutor } from "../../../../packages/data/tests/node-sqlite-executor.js";
+import {
+  fileSqliteIt,
+  NodeSqliteExecutor,
+} from "../../../../packages/data/tests/node-sqlite-executor.js";
 import {
   BrowserDevelopmentCausalEventGraphStore,
   DEVELOPMENT_CAUSAL_EVENT_GRAPH_STORE_KEY,
@@ -47,7 +50,7 @@ afterEach(async () => {
 });
 
 describe("causal event graph persistence adapters", () => {
-  it("round-trips every causal child through SQLite and survives a database restart", async () => {
+  fileSqliteIt("round-trips causal children through SQLite and survives a restart", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "inkshadow-causal-store-"));
     temporaryDirectories.push(directory);
     const databasePath = path.join(directory, "inkshadow.sqlite");

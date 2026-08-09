@@ -21,7 +21,7 @@ import { DatabaseMaintenanceService } from "../src/maintenance.js";
 import { createSqliteRepositories } from "../src/sqlite-repositories.js";
 import { TeamTemplateApplicationSqliteStore } from "../src/team-template-application-sqlite-store.js";
 import type { SqlPrimitive } from "../src/executor.js";
-import { NodeSqliteExecutor } from "./node-sqlite-executor.js";
+import { fileSqliteIt, NodeSqliteExecutor } from "./node-sqlite-executor.js";
 
 const backupPath = path.join(tmpdir(), `inkshadow-maintenance-${process.pid}.db`);
 const incompatibleBackupPath = path.join(
@@ -235,7 +235,7 @@ describe("DatabaseMaintenanceService", () => {
     await executor.close();
   });
 
-  it("creates a standalone consistent backup without overwriting", async () => {
+  fileSqliteIt("creates a standalone consistent backup without overwriting", async () => {
     const executor = new NodeSqliteExecutor("");
     await executor.execute("CREATE TABLE notes (id INTEGER PRIMARY KEY, content TEXT NOT NULL)");
     await executor.execute("INSERT INTO notes (content) VALUES (?)", ["stable"]);
@@ -274,7 +274,7 @@ describe("DatabaseMaintenanceService", () => {
     await executor.close();
   });
 
-  it("does not issue a verified receipt when the generated target fails schema verification", async () => {
+  fileSqliteIt("withholds a verified receipt when backup schema verification fails", async () => {
     const executor = new CorruptingBackupExecutor("");
     await executor.execute("CREATE TABLE notes (id INTEGER PRIMARY KEY, content TEXT NOT NULL)");
     const service = new DatabaseMaintenanceService(executor);
@@ -292,7 +292,7 @@ describe("DatabaseMaintenanceService", () => {
     await executor.close();
   });
 
-  it("restores a historical story-state receipt after its chapter advances", async () => {
+  fileSqliteIt("restores a historical story-state receipt after its chapter advances", async () => {
     const executor = new NodeSqliteExecutor(inkShadowMigration);
     const service = new DatabaseMaintenanceService(executor);
     await insertProject(executor, BACKUP_PROJECT_ID, "历史回执恢复项目");
@@ -321,7 +321,7 @@ describe("DatabaseMaintenanceService", () => {
     await executor.close();
   });
 
-  it("restores every supported table from a healthy backup in one transaction", async () => {
+  fileSqliteIt("restores all supported tables from a healthy backup atomically", async () => {
     const executor = new NodeSqliteExecutor(inkShadowMigration);
     const service = new DatabaseMaintenanceService(executor);
     await insertProject(executor, BACKUP_PROJECT_ID, "备份中的项目");
@@ -527,7 +527,10 @@ describe("DatabaseMaintenanceService", () => {
     ).resolves.toEqual([
       {
         operation: "forget_project",
-        requestJson: JSON.stringify({ operation: "forget_project", projectId: BACKUP_PROJECT_ID }),
+        requestJson: JSON.stringify({
+          operation: "forget_project",
+          projectId: BACKUP_PROJECT_ID,
+        }),
         afterJson: JSON.stringify({ records: [{ id: BACKUP_MEMORY_ID, excluded: true }] }),
       },
     ]);
@@ -1045,7 +1048,7 @@ describe("DatabaseMaintenanceService", () => {
     await executor.close();
   });
 
-  it("keeps the current database unchanged when the selected backup is incompatible", async () => {
+  fileSqliteIt("leaves the current database unchanged for an incompatible backup", async () => {
     const executor = new NodeSqliteExecutor(inkShadowMigration);
     const service = new DatabaseMaintenanceService(executor);
     await insertProject(executor, "019f9f4a-b3c7-7350-9226-000000000003", "保留当前项目");

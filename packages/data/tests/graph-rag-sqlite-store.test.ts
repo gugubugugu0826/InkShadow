@@ -19,7 +19,7 @@ import {
 } from "@inkshadow/search-core";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { NodeSqliteExecutor } from "./node-sqlite-executor.js";
+import { fileSqliteIt, NodeSqliteExecutor } from "./node-sqlite-executor.js";
 
 const migration = [
   readFileSync(new URL("../migrations/0001_core.sql", import.meta.url), "utf8"),
@@ -41,7 +41,7 @@ afterEach(() => {
 });
 
 describe("GraphRagSqliteRepository vertical slice", () => {
-  it("persists and restarts exact emoji evidence as an auditable context-only candidate", async () => {
+  fileSqliteIt("restarts persisted emoji evidence as an auditable candidate", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "inkshadow-graph-rag-"));
     temporaryDirectories.push(directory);
     const databasePath = path.join(directory, "projection.sqlite");

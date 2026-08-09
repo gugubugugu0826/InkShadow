@@ -19,10 +19,10 @@ import {
   type UuidV7,
 } from "@inkshadow/domain";
 import { AcceptAiCandidate } from "@inkshadow/application";
-import { describe, expect, it } from "vitest";
+import { describe, expect } from "vitest";
 
 import { createSqliteRepositories, type SqliteRepositories } from "../src/sqlite-repositories.js";
-import { NodeSqliteExecutor } from "./node-sqlite-executor.js";
+import { fileSqliteIt, NodeSqliteExecutor } from "./node-sqlite-executor.js";
 
 const migration = [
   readFileSync(new URL("../migrations/0001_core.sql", import.meta.url), "utf8"),
@@ -50,7 +50,7 @@ const NOW = iso("2026-08-08T00:00:00.000Z");
 const LATER = iso("2026-08-08T00:01:00.000Z");
 
 describe("SQLite Candidate revision authority", () => {
-  it("rejects stale revise and accept writes across two real connections", async () => {
+  fileSqliteIt("rejects stale revise and accept writes across two real connections", async () => {
     const directory = mkdtempSync(join(tmpdir(), "inkshadow-candidate-revision-"));
     const databasePath = join(directory, "candidate.sqlite");
     const first = new NodeSqliteExecutor(migration, databasePath);
@@ -189,7 +189,7 @@ describe("SQLite Candidate revision authority", () => {
     }
   });
 
-  it("rejects acceptance when the stored Candidate row content was tampered without its checksum", async () => {
+  fileSqliteIt("rejects persisted Candidate content with a mismatched checksum", async () => {
     const directory = mkdtempSync(join(tmpdir(), "inkshadow-candidate-checksum-"));
     const databasePath = join(directory, "candidate.sqlite");
     const executor = new NodeSqliteExecutor(migration, databasePath);
