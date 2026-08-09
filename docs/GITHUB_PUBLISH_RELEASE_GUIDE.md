@@ -4,11 +4,12 @@
 > 仓库可见性：Public  
 > 默认分支：`main`  
 > 适用环境：Windows PowerShell  
-> 更新日期：2026-08-09  
-> 当前待发布版本线：`0.2.x`（首个候选标签按实际版本使用 `v0.2.0`）
+> 更新日期：2026-08-10  
+> 当前待发布补丁版本：`0.2.1`（标签 `v0.2.1`；不得覆盖已公开的 `v0.2.0`）
 
 本文是每次向 GitHub 上传源码或发布安装包时必须执行的检查清单。它只描述操作流程，
 不替代 [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md) 中的产品发布门禁。
+`v0.2.1` 的 Pre-release 发布说明草稿也复用该门禁文档维护，候选生成前不填写提交、大小或哈希。
 
 ## 1. 永久规则
 
@@ -107,7 +108,7 @@ rg --no-ignore -n '"version"\s*:\s*"|^version\s*=' `
 ```
 
 `apps/web`、`apps/cloud-api` 和内部 workspace 包有独立的 `0.1.x` 版本线，不是本次 Windows
-Desktop `v0.2.0` Release 资产，也不要求随桌面标签同步。文档提到“当前应用版本”时必须明确
+Desktop `v0.2.1` Release 资产，也不要求随桌面标签同步。文档提到“当前应用版本”时必须明确
 指 Desktop，不能把这些内部包误写成同一可下载产品版本。
 
 ## 5. 源码上传前门禁

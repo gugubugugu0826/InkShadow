@@ -22,6 +22,7 @@ import {
   generateCreativeOpening,
   generateLocalCreativeOpening,
   inspectCreativeOpeningDestination,
+  MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS,
   persistCreativeOpeningCandidate,
   type CreativeOpeningAngle,
   type CreativeOpeningDestination,
@@ -65,10 +66,20 @@ interface IdeaJourneySnapshotV1 extends Readonly<Record<string, unknown>> {
   readonly answers: Readonly<Record<string, string>>;
   readonly skippedQuestionKeys: readonly string[];
   readonly questionHistory: readonly string[];
+  /** Persisted and append-only, with unique keys and a repository-wide hard cap. */
+  readonly questionPlan: readonly string[];
+  readonly expectedQuestionTotal: number;
+  /** Zero-based cursor; questionPlan.length is the explicit completed state. */
+  readonly questionIndex: number;
+  /** Unresolved focus pool; every answer or skip must strictly reduce this set. */
+  readonly remainingQuestionFocus: readonly string[];
+  readonly questionPlanExpansionNotice: string | null;
   readonly currentQuestionKey: string;
   readonly projectName: string;
   readonly storySummary: string;
   readonly summaryCustomized: boolean;
+  /** At most one author-requested rewrite is allowed after the finite question plan. */
+  readonly guidanceRewriteUsed: boolean;
   readonly projectSeed: ProjectSeed;
 }
 
@@ -77,7 +88,7 @@ interface IdeaOpeningSuggestionV1 extends Readonly<Record<string, unknown>> {
   readonly batchId: string;
   readonly text: string;
   readonly source: "provider" | "local_fallback";
-  readonly status: "pending" | "ready" | "failed";
+  readonly status: "pending" | "ready" | "partial" | "failed";
   readonly openingAngle: CreativeOpeningAngle | null;
   readonly providerId: string | null;
   readonly modelId: string | null;
@@ -89,7 +100,7 @@ interface PersistedIdeaOpeningSuggestionV1 extends Readonly<Record<string, unkno
   readonly batchId: string;
   readonly text: string;
   readonly source: "provider" | "local_fallback";
-  readonly status: "pending" | "ready" | "failed";
+  readonly status: "pending" | "ready" | "partial" | "failed";
   readonly openingAngle?: CreativeOpeningAngle | null;
   readonly providerId: string | null;
   readonly modelId: string | null;
@@ -109,6 +120,7 @@ interface ProviderOpeningBatchPlan {
   readonly requests: readonly Readonly<{
     requestId: string;
     openingAngle: CreativeOpeningAngle;
+    replacesOpeningId?: string;
   }>[];
 }
 
@@ -135,7 +147,6 @@ interface JourneyQuestion {
   readonly helper: string;
   readonly options: readonly string[];
   readonly placeholder: string;
-  readonly regeneratePreview: boolean;
 }
 
 const QUESTIONS: readonly JourneyQuestion[] = Object.freeze([
@@ -151,7 +162,6 @@ const QUESTIONS: readonly JourneyQuestion[] = Object.freeze([
       "更接近日系轻小说",
     ]),
     placeholder: "也可以直接说：保留情节，但让对话更自然……",
-    regeneratePreview: true,
   }),
   Object.freeze({
     key: "tone",
@@ -159,7 +169,6 @@ const QUESTIONS: readonly JourneyQuestion[] = Object.freeze([
     helper: "这会影响叙述节奏和词语选择，不会锁死后续剧情。",
     options: Object.freeze(["温暖心动", "轻松好笑", "紧张悬疑", "克制伤感"]),
     placeholder: "例如：表面轻松，但隐约让人不安。",
-    regeneratePreview: true,
   }),
   Object.freeze({
     key: "protagonist",
@@ -167,7 +176,6 @@ const QUESTIONS: readonly JourneyQuestion[] = Object.freeze([
     helper: "只说当前最重要的一点就够了。",
     options: Object.freeze(["普通但很敏锐", "嘴硬心软", "目标感很强", "隐藏着秘密"]),
     placeholder: "例如：刚转学、很会观察别人，却不擅长表达自己。",
-    regeneratePreview: true,
   }),
   Object.freeze({
     key: "relationship",
@@ -175,7 +183,6 @@ const QUESTIONS: readonly JourneyQuestion[] = Object.freeze([
     helper: "关系会先作为可修改方案，不会自动写成永久设定。",
     options: Object.freeze(["刚刚认识", "青梅竹马", "互相看不顺眼", "一方认识另一方"]),
     placeholder: "例如：小时候见过，但只有女主还记得。",
-    regeneratePreview: true,
   }),
   Object.freeze({
     key: "conflict",
@@ -183,7 +190,6 @@ const QUESTIONS: readonly JourneyQuestion[] = Object.freeze([
     helper: "先确定能推动下一场景的小冲突，不必现在想完整大纲。",
     options: Object.freeze(["误会正在扩大", "秘密可能暴露", "必须共同完成一件事", "有人突然失踪"]),
     placeholder: "例如：两人被迫在放学前找到丢失的社团钥匙。",
-    regeneratePreview: true,
   }),
   Object.freeze({
     key: "pov",
@@ -191,7 +197,6 @@ const QUESTIONS: readonly JourneyQuestion[] = Object.freeze([
     helper: "不确定可以跳过，系统会先保持当前写法。",
     options: Object.freeze(["第一人称主角", "第三人称跟随主角", "双主角轮换", "暂时保持当前"]),
     placeholder: "例如：第三人称限知，只写男主能察觉到的事。",
-    regeneratePreview: true,
   }),
   Object.freeze({
     key: "style",
@@ -199,7 +204,6 @@ const QUESTIONS: readonly JourneyQuestion[] = Object.freeze([
     helper: "可以描述喜欢的节奏，不需要懂提示词。",
     options: Object.freeze(["短句和更多对话", "细腻但不过度", "节奏快、少解释", "画面感更强"]),
     placeholder: "例如：减少总结句，让情绪从动作和对话里出来。",
-    regeneratePreview: true,
   }),
   Object.freeze({
     key: "boundaries",
@@ -207,7 +211,6 @@ const QUESTIONS: readonly JourneyQuestion[] = Object.freeze([
     helper: "这类限制会作为需要优先遵守的写作边界。",
     options: Object.freeze(["不要突然加入超自然设定", "不要强行误会", "不要角色降智", "暂时没有"]),
     placeholder: "例如：不写校园霸凌，不让主角靠巧合解决问题。",
-    regeneratePreview: true,
   }),
   Object.freeze({
     key: "direction",
@@ -220,7 +223,6 @@ const QUESTIONS: readonly JourneyQuestion[] = Object.freeze([
       "先展示日常关系",
     ]),
     placeholder: "用一句话描述你最想看到的下一步。",
-    regeneratePreview: true,
   }),
   Object.freeze({
     key: "genre",
@@ -228,7 +230,6 @@ const QUESTIONS: readonly JourneyQuestion[] = Object.freeze([
     helper: "只选当前最接近的方向即可，后面仍然可以混合其他类型。",
     options: Object.freeze(["青春恋爱", "悬疑", "科幻", "奇幻", "都市日常"]),
     placeholder: "例如：带一点悬疑的青春恋爱轻小说。",
-    regeneratePreview: false,
   }),
   Object.freeze({
     key: "world",
@@ -236,7 +237,6 @@ const QUESTIONS: readonly JourneyQuestion[] = Object.freeze([
     helper: "一句最影响人物行动的背景就够了，不需要先写完整世界书。",
     options: Object.freeze(["当代校园", "近未来城市", "架空小镇", "异世界", "先保持现实背景"]),
     placeholder: "例如：一座每到午夜就会停电十分钟的沿海小城。",
-    regeneratePreview: true,
   }),
   Object.freeze({
     key: "outline",
@@ -249,7 +249,6 @@ const QUESTIONS: readonly JourneyQuestion[] = Object.freeze([
       "先写日常再引出冲突",
     ]),
     placeholder: "例如：两人先找到失踪物品，再发现它与十年前的旧案有关。",
-    regeneratePreview: false,
   }),
 ]);
 
@@ -262,6 +261,15 @@ const PROVIDER_OPENING_ANGLES: readonly CreativeOpeningAngle[] = Object.freeze([
 ]);
 const GENERATION_ABANDONED_BY_AUTHOR = "GENERATION_ABANDONED_BY_AUTHOR";
 const OPENING_RESULT_RECONCILE_ATTEMPTS = 8;
+const DEFAULT_GUIDANCE_QUESTION_PLAN: readonly string[] = Object.freeze([
+  "opening_direction",
+  "protagonist",
+  "conflict",
+  "tone",
+  "boundaries",
+]);
+const ALL_GUIDANCE_FOCUS_KEYS: readonly string[] = Object.freeze(QUESTIONS.map(({ key }) => key));
+const MAX_GUIDANCE_PLAN_LENGTH = QUESTIONS.length;
 
 function firstQuestion(questions: readonly JourneyQuestion[]): JourneyQuestion {
   const [question] = questions;
@@ -284,9 +292,12 @@ export function IdeaJourneyPage() {
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const [storySummaryDraft, setStorySummaryDraft] = useState("");
   const [busy, setBusy] = useState<"create" | "answer" | "regenerate" | "keep" | null>(null);
-  const [streamingPreview, setStreamingPreview] = useState("");
+  const [streamingPreviews, setStreamingPreviews] = useState<Readonly<Record<string, string>>>({});
+  const [requestTimings, setRequestTimings] = useState<
+    Readonly<Record<string, Readonly<{ startedAt: number; elapsedMs: number | null }>>>
+  >({});
   const [batchProgress, setBatchProgress] = useState<Readonly<{
-    current: number;
+    completed: number;
     total: number;
   }> | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -304,6 +315,61 @@ export function IdeaJourneyPage() {
   const resumeLock = useRef<JourneyOperation | null>(null);
   const blankWorkspaceLock = useRef<JourneyOperation | null>(null);
   const listRequestSequence = useRef(0);
+
+  function startRequestTimings(requestIds: readonly string[]): void {
+    const startedAt = Date.parse(runtime.clock.now());
+    setRequestTimings((current) =>
+      Object.freeze({
+        ...current,
+        ...Object.fromEntries(
+          requestIds.map((requestId) => [requestId, Object.freeze({ startedAt, elapsedMs: null })]),
+        ),
+      }),
+    );
+  }
+
+  function updateStreamingPreview(requestId: string, text: string): void {
+    setStreamingPreviews((current) => Object.freeze({ ...current, [requestId]: text }));
+    setRequestTimings((current) => {
+      const timing = current[requestId];
+      return timing === undefined
+        ? current
+        : Object.freeze({
+            ...current,
+            [requestId]: Object.freeze({
+              ...timing,
+              elapsedMs: Math.max(0, Date.parse(runtime.clock.now()) - timing.startedAt),
+            }),
+          });
+    });
+  }
+
+  function finishRequestTiming(requestId: string): void {
+    setRequestTimings((current) => {
+      const timing = current[requestId];
+      return timing === undefined
+        ? current
+        : Object.freeze({
+            ...current,
+            [requestId]: Object.freeze({
+              ...timing,
+              elapsedMs: Math.max(0, Date.parse(runtime.clock.now()) - timing.startedAt),
+            }),
+          });
+    });
+  }
+
+  function clearStreamingPreviews(requestIds?: readonly string[]): void {
+    if (requestIds === undefined) {
+      setStreamingPreviews({});
+      return;
+    }
+    setStreamingPreviews((current) =>
+      Object.freeze(
+        Object.fromEntries(Object.entries(current).filter(([id]) => !requestIds.includes(id))),
+      ),
+    );
+  }
 
   function startOperation(journeyId: string | null): JourneyOperation {
     const operation = Object.freeze({ token: operationSequence.current + 1, journeyId });
@@ -523,7 +589,7 @@ export function IdeaJourneyPage() {
         input.batchPlan === null && latestSnapshot.pendingRequestId === generated.requestId;
       let nextSnapshot: IdeaJourneySnapshotV1;
       let nextState = latest.currentState;
-      let resultStatus: "ready" | "failed";
+      let resultStatus: "ready" | "partial" | "failed";
       let historicalResult = false;
 
       if (activeBatchRequest && input.openingAngle !== null) {
@@ -535,13 +601,13 @@ export function IdeaJourneyPage() {
         );
         nextState =
           countPendingSuggestions(nextSnapshot, input.batchId) === 0
-            ? "asking_one_question"
+            ? guidanceStateForSnapshot(nextSnapshot)
             : "generation_pending";
-        resultStatus = generated.source === "provider" ? "ready" : "failed";
+        resultStatus = settledOpeningStatus(suggestion);
       } else if (activeSingleRequest) {
         nextSnapshot = applySingleOpeningResult(latestSnapshot, generated, input.generationMode);
-        nextState = "asking_one_question";
-        resultStatus = suggestion.status === "ready" ? "ready" : "failed";
+        nextState = guidanceStateForSnapshot(nextSnapshot);
+        resultStatus = settledOpeningStatus(suggestion);
       } else {
         historicalResult = true;
         const historicalIndex = latestSnapshot.openingResultHistory.findIndex(
@@ -554,13 +620,17 @@ export function IdeaJourneyPage() {
         ) {
           return latest;
         }
-        if (
-          existingHistorical !== undefined &&
-          !(
-            existingHistorical.status === "failed" &&
-            existingHistorical.noticeCode === GENERATION_ABANDONED_BY_AUTHOR
-          )
-        ) {
+        const replacesAbandonment =
+          existingHistorical?.status === "failed" &&
+          existingHistorical.noticeCode === GENERATION_ABANDONED_BY_AUTHOR &&
+          isUsableOpeningSuggestion(suggestion);
+        if (existingHistorical !== undefined && !replacesAbandonment) {
+          if (
+            existingHistorical.noticeCode === GENERATION_ABANDONED_BY_AUTHOR &&
+            suggestion.status === "failed"
+          ) {
+            return latest;
+          }
           throw new UiActionError(
             "IDEA_OPENING_REQUEST_RESULT_MISMATCH",
             "同一个 AI 请求已经有一份不同的历史结果，墨影没有覆盖它。",
@@ -576,7 +646,7 @@ export function IdeaJourneyPage() {
           ...latestSnapshot,
           openingResultHistory: Object.freeze(history),
         });
-        resultStatus = suggestion.status === "ready" ? "ready" : "failed";
+        resultStatus = settledOpeningStatus(suggestion);
       }
 
       const updated = Object.freeze({
@@ -623,85 +693,72 @@ export function IdeaJourneyPage() {
   async function runProviderOpeningBatch(
     operation: JourneyOperation,
     current: CreativeJourneyRecord,
-    currentSnapshot: IdeaJourneySnapshotV1,
     plan: ProviderOpeningBatchPlan,
     input: Readonly<{
       idea: string;
       direction?: string;
       answers?: Readonly<Record<string, string>>;
     }>,
-    firstSequence: number,
     questionKey = "opening_direction",
   ): Promise<CreativeJourneyRecord> {
-    let saved = current;
-    let savedSnapshot = currentSnapshot;
-    for (const [index, request] of plan.requests.entries()) {
-      if (!isCurrentOperation(operation)) {
-        break;
-      }
-      setBatchProgress({ current: index + 1, total: plan.requests.length });
-      setStreamingPreview("");
-      const generated = await generateCreativeOpening(runtime, {
-        ...input,
-        requestId: request.requestId,
-        openingAngle: request.openingAngle,
-        onDelta: (text) => {
-          if (isCurrentOperation(operation)) {
-            setStreamingPreview(text);
-          }
-        },
-      });
-      const nextSnapshot = applyProviderOpeningResult(
-        savedSnapshot,
-        plan,
-        request.openingAngle,
-        generated,
-      );
-      const pendingCount = countPendingSuggestions(nextSnapshot, plan.batchId);
-      const updated = Object.freeze({
-        ...saved,
-        currentState: pendingCount === 0 ? "asking_one_question" : "generation_pending",
-        revision: saved.revision + 1,
-        snapshot: nextSnapshot,
-        updatedAt: runtime.clock.now(),
-      });
-      try {
-        await runtime.creativeJourneys.update(
-          updated,
-          saved.revision,
-          createTurn(runtime, updated, firstSequence + index, "regenerate", questionKey, {
-            generationSource: generated.source,
-            providerId: generated.providerId,
-            modelId: generated.modelId,
-            requestId: generated.requestId,
-            snapshot: {
-              batchId: plan.batchId,
-              openingAngle: request.openingAngle,
-              status: generated.source === "provider" ? "ready" : "failed",
+    setBatchProgress({ completed: 0, total: plan.requests.length });
+    startRequestTimings(plan.requests.map(({ requestId }) => requestId));
+    const settled = await Promise.allSettled(
+      plan.requests.map(async (request) => {
+        try {
+          const generated = await generateCreativeOpening(runtime, {
+            ...input,
+            requestId: request.requestId,
+            openingAngle: request.openingAngle,
+            onDelta: (text) => {
+              if (isCurrentOperation(operation)) {
+                updateStreamingPreview(request.requestId, text);
+              }
             },
-          }),
-        );
-        saved = updated;
-        savedSnapshot = nextSnapshot;
-      } catch (cause: unknown) {
-        if (!isCreativeJourneyRevisionConflict(cause)) {
-          throw cause;
+          });
+          const saved = await reconcileOpeningResult(current.id, generated, {
+            batchId: plan.batchId,
+            openingAngle: request.openingAngle,
+            questionKey,
+            generationMode: "provider",
+            batchPlan: plan,
+          });
+          if (isCurrentOperation(operation)) {
+            setJourney((active) =>
+              active?.id !== saved.id || active.revision < saved.revision ? saved : active,
+            );
+          }
+          return saved;
+        } finally {
+          finishRequestTiming(request.requestId);
+          clearStreamingPreviews([request.requestId]);
+          if (isCurrentOperation(operation)) {
+            setBatchProgress((progress) =>
+              progress === null
+                ? null
+                : Object.freeze({
+                    completed: Math.min(progress.total, progress.completed + 1),
+                    total: progress.total,
+                  }),
+            );
+          }
         }
-        saved = await reconcileOpeningResult(saved.id, generated, {
-          batchId: plan.batchId,
-          openingAngle: request.openingAngle,
-          questionKey,
-          generationMode: "provider",
-          batchPlan: plan,
-        });
-        savedSnapshot = readIdeaSnapshot(saved.snapshot, saved.id);
-      }
-      if (isCurrentOperation(operation)) {
-        setJourney(saved);
-        setTurnCount(firstSequence + index);
-      }
+      }),
+    );
+    const rejected = settled.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (rejected !== undefined) {
+      throw rejected.reason;
     }
-    return saved;
+    const latest = await runtime.creativeJourneys.findById(current.id);
+    if (latest === null) {
+      throw new UiActionError(
+        "IDEA_JOURNEY_NOT_FOUND",
+        "这次构思已经不在当前设备上，AI 返回结果无法安全归档。",
+      );
+    }
+    return latest;
   }
 
   const snapshot = useMemo(
@@ -761,10 +818,16 @@ export function IdeaJourneyPage() {
       answers: Object.freeze({}),
       skippedQuestionKeys: Object.freeze([]),
       questionHistory: Object.freeze([]),
-      currentQuestionKey: "opening_direction",
+      questionPlan: DEFAULT_GUIDANCE_QUESTION_PLAN,
+      expectedQuestionTotal: DEFAULT_GUIDANCE_QUESTION_PLAN.length,
+      questionIndex: 0,
+      remainingQuestionFocus: ALL_GUIDANCE_FOCUS_KEYS,
+      questionPlanExpansionNotice: null,
+      currentQuestionKey: DEFAULT_GUIDANCE_QUESTION_PLAN[0] ?? "opening_direction",
       projectName: deriveProjectName(normalizedIdea),
       storySummary: normalizedIdea,
       summaryCustomized: false,
+      guidanceRewriteUsed: false,
       projectSeed: deriveIdeaProjectSeed({
         seedId: `idea:${id}`,
         idea: normalizedIdea,
@@ -810,6 +873,9 @@ export function IdeaJourneyPage() {
         setJourney(record);
         setTurnCount(1);
       }
+      if (providerBatchPlan === null) {
+        startRequestTimings([requestId]);
+      }
       const updated =
         providerBatchPlan === null
           ? await persistGeneratedPreview(
@@ -820,7 +886,7 @@ export function IdeaJourneyPage() {
                 requestId,
                 onDelta: (text) => {
                   if (isCurrentOperation(boundOperation)) {
-                    setStreamingPreview(text);
+                    updateStreamingPreview(requestId, text);
                   }
                 },
               }),
@@ -828,27 +894,29 @@ export function IdeaJourneyPage() {
               "opening_direction",
               generationMode,
             )
-          : await runProviderOpeningBatch(
-              boundOperation,
-              record,
-              initialSnapshot,
-              providerBatchPlan,
-              { idea: normalizedIdea },
-              2,
-            );
+          : await runProviderOpeningBatch(boundOperation, record, providerBatchPlan, {
+              idea: normalizedIdea,
+            });
       if (isCurrentOperation(boundOperation)) {
         setJourney(updated);
         setTurnCount(providerBatchPlan === null ? 2 : 1 + providerBatchPlan.requests.length);
-        setStreamingPreview("");
+        clearStreamingPreviews();
         setBatchProgress(null);
         setIdea("");
         await loadActive();
+      }
+      if (providerBatchPlan === null) {
+        finishRequestTiming(requestId);
       }
     } catch (cause: unknown) {
       if (isCurrentOperation(boundOperation)) {
         setError(cause);
       }
     } finally {
+      if (providerBatchPlan === null) {
+        finishRequestTiming(requestId);
+        clearStreamingPreviews([requestId]);
+      }
       if (isCurrentOperation(boundOperation)) {
         setBatchProgress(null);
         setBusy(null);
@@ -880,10 +948,16 @@ export function IdeaJourneyPage() {
       answers: Object.freeze({}),
       skippedQuestionKeys: Object.freeze([]),
       questionHistory: Object.freeze([]),
-      currentQuestionKey: "opening_direction",
+      questionPlan: DEFAULT_GUIDANCE_QUESTION_PLAN,
+      expectedQuestionTotal: DEFAULT_GUIDANCE_QUESTION_PLAN.length,
+      questionIndex: 0,
+      remainingQuestionFocus: ALL_GUIDANCE_FOCUS_KEYS,
+      questionPlanExpansionNotice: null,
+      currentQuestionKey: DEFAULT_GUIDANCE_QUESTION_PLAN[0] ?? "opening_direction",
       projectName: deriveProjectName(normalizedIdea),
       storySummary: normalizedIdea,
       summaryCustomized: false,
+      guidanceRewriteUsed: false,
       projectSeed: deriveIdeaProjectSeed({
         seedId: `idea-self:${id}`,
         idea: normalizedIdea,
@@ -1144,12 +1218,13 @@ export function IdeaJourneyPage() {
     sequence: number,
     questionKey = "opening_direction",
     generationMode: "provider" | "local" = currentSnapshot.openingGenerationMode,
+    nextState = guidanceStateForSnapshot(currentSnapshot),
   ): Promise<CreativeJourneyRecord> {
     const nextSnapshot = applySingleOpeningResult(currentSnapshot, generated, generationMode);
     const now = runtime.clock.now();
     const updated = Object.freeze({
       ...current,
-      currentState: "asking_one_question",
+      currentState: nextState,
       revision: current.revision + 1,
       snapshot: nextSnapshot,
       updatedAt: now,
@@ -1165,8 +1240,12 @@ export function IdeaJourneyPage() {
           requestId: generated.requestId,
           snapshot: {
             direction: currentSnapshot.answers[questionKey] ?? null,
-            status:
-              generationMode === "provider" && generated.source !== "provider" ? "failed" : "ready",
+            status: openingSuggestionFromResult(
+              generated,
+              generated.requestId,
+              generationMode,
+              null,
+            ).status,
           },
         }),
       );
@@ -1189,7 +1268,7 @@ export function IdeaJourneyPage() {
     if (
       journey === null ||
       snapshot === null ||
-      busy !== null ||
+      (busy !== null && busy !== "create" && busy !== "regenerate") ||
       !hasPersistedGenerationPending(snapshot)
     ) {
       return;
@@ -1221,7 +1300,7 @@ export function IdeaJourneyPage() {
         }
         const updated = Object.freeze({
           ...latest,
-          currentState: "asking_one_question",
+          currentState: guidanceStateForSnapshot(abandonment.snapshot),
           revision: latest.revision + 1,
           snapshot: abandonment.snapshot,
           updatedAt: runtime.clock.now(),
@@ -1243,8 +1322,16 @@ export function IdeaJourneyPage() {
           if (isCurrentOperation(operation)) {
             setJourney(updated);
             setTurnCount(turns.length + 1);
-            setStreamingPreview("");
+            clearStreamingPreviews(abandonment.requestIds);
             setBatchProgress(null);
+            await Promise.allSettled(
+              abandonment.requestIds.map((requestId) =>
+                runtime.modelGateway.cancelGeneration(requestId),
+              ),
+            );
+            for (const requestId of abandonment.requestIds) {
+              finishRequestTiming(requestId);
+            }
             await loadActive();
           }
           return;
@@ -1314,29 +1401,45 @@ export function IdeaJourneyPage() {
         ...snapshot.questionHistory.filter((key) => key !== currentQuestion.key),
         currentQuestion.key,
       ]);
-      const nextQuestionKey = selectNextQuestionKey(answers, skippedQuestionKeys, questionHistory);
-      const requestId = !skip && currentQuestion.regeneratePreview ? runtime.ids.next() : null;
-      const generationMode =
-        requestId === null
-          ? snapshot.openingGenerationMode
-          : await resolveOpeningGenerationMode(snapshot);
+      const provedProgress = snapshot.remainingQuestionFocus.includes(currentQuestion.key);
+      let remainingQuestionFocus = Object.freeze(
+        snapshot.remainingQuestionFocus.filter((key) => key !== currentQuestion.key),
+      );
+      const extension =
+        !skip && provedProgress
+          ? suggestGuidancePlanExtension(snapshot, currentQuestion.key, normalized)
+          : null;
+      const questionPlan =
+        extension === null
+          ? snapshot.questionPlan
+          : Object.freeze([...snapshot.questionPlan, extension.key]);
+      const nextQuestionIndex = provedProgress
+        ? Math.min(questionPlan.length, snapshot.questionIndex + 1)
+        : questionPlan.length;
+      if (!provedProgress || (nextQuestionIndex >= questionPlan.length && extension === null)) {
+        remainingQuestionFocus = Object.freeze([]);
+      }
+      const nextQuestionKey =
+        questionPlan[Math.min(nextQuestionIndex, questionPlan.length - 1)] ?? currentQuestion.key;
       const now = runtime.clock.now();
       const nextSnapshot: IdeaJourneySnapshotV1 = Object.freeze({
         ...snapshot,
         answers,
         skippedQuestionKeys,
         questionHistory,
+        questionPlan,
+        expectedQuestionTotal: questionPlan.length,
+        questionIndex: nextQuestionIndex,
+        remainingQuestionFocus,
+        questionPlanExpansionNotice:
+          extension === null
+            ? snapshot.questionPlanExpansionNotice
+            : `因为你的回答涉及“${extension.focusLabel}”，问题计划从 ${String(snapshot.expectedQuestionTotal)} 问增加为 ${String(questionPlan.length)} 问。${extension.reason}`,
         currentQuestionKey: nextQuestionKey,
-        pendingRequestId: requestId,
-        openingGenerationMode: generationMode,
-        storySummary: snapshot.summaryCustomized
-          ? snapshot.storySummary
-          : deriveStorySummary(snapshot.idea, answers),
+        pendingRequestId: null,
         projectSeed: deriveIdeaProjectSeed({
           seedId: snapshot.projectSeed.seedId,
-          idea: snapshot.summaryCustomized
-            ? snapshot.storySummary
-            : deriveStorySummary(snapshot.idea, answers),
+          idea: snapshot.storySummary,
           answers,
           skippedQuestionKeys,
           now,
@@ -1345,7 +1448,7 @@ export function IdeaJourneyPage() {
       });
       const pending = Object.freeze({
         ...journey,
-        currentState: requestId === null ? "asking_one_question" : "generation_pending",
+        currentState: guidanceStateForSnapshot(nextSnapshot),
         revision: journey.revision + 1,
         snapshot: nextSnapshot,
         updatedAt: now,
@@ -1354,8 +1457,8 @@ export function IdeaJourneyPage() {
         pending,
         journey.revision,
         createTurn(runtime, pending, turnCount + 1, skip ? "skip" : "answer", currentQuestion.key, {
-          requestId,
-          taskKey: requestId === null ? null : "opening_guidance",
+          requestId: null,
+          taskKey: null,
           snapshot: skip ? { skipped: true } : { userText: normalized },
         }),
       );
@@ -1364,36 +1467,7 @@ export function IdeaJourneyPage() {
         setTurnCount(turnCount + 1);
         setCustomAnswer(answers[nextQuestionKey] ?? "");
       }
-      if (requestId !== null) {
-        if (isCurrentOperation(operation)) {
-          setBusy("regenerate");
-        }
-        const generated = await generateOpening({
-          idea: snapshot.idea,
-          direction: normalized,
-          answers,
-          requestId,
-          onDelta: (text) => {
-            if (isCurrentOperation(operation)) {
-              setStreamingPreview(text);
-            }
-          },
-        });
-        const updated = await persistGeneratedPreview(
-          pending,
-          nextSnapshot,
-          generated,
-          turnCount + 2,
-          currentQuestion.key,
-          generationMode,
-        );
-        if (isCurrentOperation(operation)) {
-          setJourney(updated);
-          setTurnCount(turnCount + 2);
-        }
-      }
       if (isCurrentOperation(operation)) {
-        setStreamingPreview("");
         await loadActive();
       }
     } catch (cause: unknown) {
@@ -1425,16 +1499,21 @@ export function IdeaJourneyPage() {
     ) {
       return;
     }
+    const consumesGuidanceRewrite = journey.currentState === "guidance_complete";
+    if (consumesGuidanceRewrite && snapshot.guidanceRewriteUsed) {
+      return;
+    }
     const operation = startOperation(journey.id);
     setBusy("regenerate");
     setError(null);
+    let individuallyTrackedRequestId: string | null = null;
     try {
       const direction = snapshot.answers.opening_direction;
       const generationMode = await resolveOpeningGenerationMode(snapshot);
       const providerBatchPlan =
         generationMode === "provider" ? createProviderOpeningBatchPlan() : null;
       const requestId = providerBatchPlan?.requests[0]?.requestId ?? runtime.ids.next();
-      const pendingSnapshot: IdeaJourneySnapshotV1 =
+      const plannedSnapshot: IdeaJourneySnapshotV1 =
         providerBatchPlan === null
           ? Object.freeze({
               ...snapshot,
@@ -1443,6 +1522,10 @@ export function IdeaJourneyPage() {
               openingBatchId: requestId,
             })
           : planProviderOpeningBatch(snapshot, providerBatchPlan);
+      const pendingSnapshot: IdeaJourneySnapshotV1 = Object.freeze({
+        ...plannedSnapshot,
+        guidanceRewriteUsed: snapshot.guidanceRewriteUsed || consumesGuidanceRewrite,
+      });
       const pending = Object.freeze({
         ...journey,
         currentState: "generation_pending",
@@ -1473,6 +1556,10 @@ export function IdeaJourneyPage() {
         setJourney(pending);
         setTurnCount(turnCount + 1);
       }
+      if (providerBatchPlan === null) {
+        individuallyTrackedRequestId = requestId;
+        startRequestTimings([requestId]);
+      }
       const updated =
         providerBatchPlan === null
           ? await persistGeneratedPreview(
@@ -1485,7 +1572,7 @@ export function IdeaJourneyPage() {
                 requestId,
                 onDelta: (text) => {
                   if (isCurrentOperation(operation)) {
-                    setStreamingPreview(text);
+                    updateStreamingPreview(requestId, text);
                   }
                 },
               }),
@@ -1493,18 +1580,11 @@ export function IdeaJourneyPage() {
               "opening_direction",
               generationMode,
             )
-          : await runProviderOpeningBatch(
-              operation,
-              pending,
-              pendingSnapshot,
-              providerBatchPlan,
-              {
-                idea: snapshot.idea,
-                ...(direction === undefined ? {} : { direction }),
-                answers: snapshot.answers,
-              },
-              turnCount + 2,
-            );
+          : await runProviderOpeningBatch(operation, pending, providerBatchPlan, {
+              idea: snapshot.idea,
+              ...(direction === undefined ? {} : { direction }),
+              answers: snapshot.answers,
+            });
       if (isCurrentOperation(operation)) {
         setJourney(updated);
         setTurnCount(
@@ -1512,7 +1592,7 @@ export function IdeaJourneyPage() {
             ? turnCount + 2
             : turnCount + 1 + providerBatchPlan.requests.length,
         );
-        setStreamingPreview("");
+        clearStreamingPreviews();
         setBatchProgress(null);
         await loadActive();
       }
@@ -1529,8 +1609,139 @@ export function IdeaJourneyPage() {
         }
       }
     } finally {
+      if (individuallyTrackedRequestId !== null) {
+        finishRequestTiming(individuallyTrackedRequestId);
+        clearStreamingPreviews([individuallyTrackedRequestId]);
+      }
       if (isCurrentOperation(operation)) {
         setBatchProgress(null);
+        setBusy(null);
+      }
+      finishOperation(operation);
+    }
+  }
+
+  async function retryOpeningSuggestion(
+    suggestionId: string,
+    mode: "continue" | "regenerate",
+  ): Promise<void> {
+    if (
+      journey === null ||
+      snapshot?.openingGenerationMode !== "provider" ||
+      busy !== null ||
+      hasPersistedGenerationPending(snapshot)
+    ) {
+      return;
+    }
+    const targetIndex = snapshot.openingSuggestions.findIndex(({ id }) => id === suggestionId);
+    const target = snapshot.openingSuggestions[targetIndex];
+    if (
+      target === undefined ||
+      (mode === "continue" ? target.status !== "partial" : target.status === "pending") ||
+      target.openingAngle === null
+    ) {
+      return;
+    }
+    const operation = startOperation(journey.id);
+    setBusy("regenerate");
+    setError(null);
+    const requestId = runtime.ids.next();
+    const plan: ProviderOpeningBatchPlan = Object.freeze({
+      batchId: runtime.ids.next(),
+      requests: Object.freeze([
+        Object.freeze({
+          requestId,
+          openingAngle: target.openingAngle,
+          replacesOpeningId: target.id,
+        }),
+      ]),
+    });
+    try {
+      const suggestions = [...snapshot.openingSuggestions];
+      const [pendingSuggestion] = pendingOpeningSuggestions(plan);
+      if (pendingSuggestion === undefined) {
+        throw new UiActionError(
+          "IDEA_OPENING_REQUEST_NOT_PLANNED",
+          "这个开头方案没有生成安全的重试计划，当前内容未改变。",
+        );
+      }
+      suggestions[targetIndex] = pendingSuggestion;
+      const pendingSnapshot: IdeaJourneySnapshotV1 = Object.freeze({
+        ...snapshot,
+        pendingRequestId: requestId,
+        openingSuggestions: Object.freeze(suggestions),
+        openingResultHistory: mergeOpeningHistory(snapshot.openingResultHistory, [target]),
+        openingBatchId: plan.batchId,
+      });
+      const pending = Object.freeze({
+        ...journey,
+        currentState: "generation_pending",
+        revision: journey.revision + 1,
+        snapshot: pendingSnapshot,
+        updatedAt: runtime.clock.now(),
+      });
+      await runtime.creativeJourneys.update(
+        pending,
+        journey.revision,
+        createTurn(runtime, pending, turnCount + 1, "regenerate", "opening_choice", {
+          requestId,
+          taskKey: "opening_guidance",
+          snapshot: {
+            started: true,
+            retryMode: mode,
+            replacesOpeningId: target.id,
+            batchId: plan.batchId,
+            openingAngle: target.openingAngle,
+          },
+        }),
+      );
+      if (isCurrentOperation(operation)) {
+        setJourney(pending);
+        setTurnCount(turnCount + 1);
+      }
+      startRequestTimings([requestId]);
+      const generated = await generateCreativeOpening(runtime, {
+        idea: snapshot.idea,
+        ...(snapshot.answers.opening_direction === undefined
+          ? {}
+          : { direction: snapshot.answers.opening_direction }),
+        answers: snapshot.answers,
+        openingAngle: target.openingAngle,
+        ...(mode === "continue" ? { partialOpening: target.text } : {}),
+        requestId,
+        onDelta: (text) => {
+          if (isCurrentOperation(operation)) {
+            updateStreamingPreview(requestId, text);
+          }
+        },
+      });
+      const updated = await reconcileOpeningResult(journey.id, generated, {
+        batchId: plan.batchId,
+        openingAngle: target.openingAngle,
+        questionKey: "opening_choice",
+        generationMode: "provider",
+        batchPlan: plan,
+      });
+      if (isCurrentOperation(operation)) {
+        const turns = await runtime.creativeJourneys.listTurns(journey.id);
+        if (isCurrentOperation(operation)) {
+          setJourney(updated);
+          setTurnCount(turns.length);
+          await loadActive();
+        }
+      }
+    } catch (cause: unknown) {
+      if (isCurrentOperation(operation)) {
+        setError(cause);
+        const latest = await runtime.creativeJourneys.findById(journey.id).catch(() => null);
+        if (latest !== null && isCurrentOperation(operation)) {
+          setJourney(latest);
+        }
+      }
+    } finally {
+      finishRequestTiming(requestId);
+      clearStreamingPreviews([requestId]);
+      if (isCurrentOperation(operation)) {
         setBusy(null);
       }
       finishOperation(operation);
@@ -1547,7 +1758,7 @@ export function IdeaJourneyPage() {
       return;
     }
     const suggestion = snapshot.openingSuggestions.find(
-      ({ id, status }) => id === suggestionId && status === "ready",
+      (candidate) => candidate.id === suggestionId && isUsableOpeningSuggestion(candidate),
     );
     if (suggestion === undefined || snapshot.selectedOpeningId === suggestion.id) {
       return;
@@ -1584,20 +1795,25 @@ export function IdeaJourneyPage() {
     if (
       journey === null ||
       snapshot === null ||
-      snapshot.questionHistory.length === 0 ||
+      snapshot.questionIndex === 0 ||
       busy !== null ||
       hasPersistedGenerationPending(snapshot)
     ) {
       return;
     }
-    const history = [...snapshot.questionHistory];
-    const previous = history.pop();
+    const previousIndex = Math.max(0, snapshot.questionIndex - 1);
+    const previous = snapshot.questionPlan[previousIndex];
     if (previous === undefined) {
       return;
     }
+    const history = snapshot.questionHistory.filter((key) => key !== previous);
     const nextSnapshot = Object.freeze({
       ...snapshot,
       questionHistory: Object.freeze(history),
+      questionIndex: previousIndex,
+      remainingQuestionFocus: Object.freeze([
+        ...new Set([...snapshot.remainingQuestionFocus, previous]),
+      ]),
       currentQuestionKey: previous,
       pendingRequestId: null,
     });
@@ -1662,7 +1878,11 @@ export function IdeaJourneyPage() {
     setBusy("answer");
     setError(null);
     try {
-      const committed = await persistSummaryDraft(journey, snapshot, "asking_one_question");
+      const committed = await persistSummaryDraft(
+        journey,
+        snapshot,
+        guidanceStateForSnapshot(snapshot),
+      );
       setJourney(committed.record);
       setProjectNameDraft(committed.snapshot.projectName);
       setStorySummaryDraft(committed.snapshot.storySummary);
@@ -1727,6 +1947,21 @@ export function IdeaJourneyPage() {
       const committed = await persistSummaryDraft(journey, snapshot, "creating_project");
       let current = committed.record;
       const projectSnapshot = committed.snapshot;
+      const selectedOpening = [
+        ...projectSnapshot.openingSuggestions,
+        ...projectSnapshot.openingResultHistory,
+      ].find(
+        (suggestion) =>
+          suggestion.id === projectSnapshot.selectedOpeningId &&
+          isUsableOpeningSuggestion(suggestion),
+      );
+      if (selectedOpening?.text !== projectSnapshot.preview) {
+        throw new UiActionError(
+          "IDEA_OPENING_SELECTION_INVALID",
+          "当前开头没有可核对的选择记录，墨影已停止创建以保护正文。请重新选择一个开头。",
+        );
+      }
+      const incompleteCandidate = selectedOpening.status === "partial";
       if (isCurrentOperation(operation)) {
         setJourney(current);
       }
@@ -1753,6 +1988,7 @@ export function IdeaJourneyPage() {
           chapterId.value,
           projectSnapshot.preview,
           candidateId.value,
+          incompleteCandidate,
         );
         if (!persisted.ok) {
           throw persisted.error;
@@ -1762,7 +1998,8 @@ export function IdeaJourneyPage() {
       } else if (
         candidate.chapterId !== chapterId.value ||
         candidate.content !== projectSnapshot.preview ||
-        candidate.status !== "ready"
+        candidate.status !== "ready" ||
+        candidate.toSnapshot().incomplete !== incompleteCandidate
       ) {
         throw new UiActionError(
           "IDEA_CANDIDATE_SCOPE_MISMATCH",
@@ -1985,7 +2222,8 @@ export function IdeaJourneyPage() {
     setCustomAnswer("");
     setProjectNameDraft("");
     setStorySummaryDraft("");
-    setStreamingPreview("");
+    clearStreamingPreviews();
+    setRequestTimings({});
     setBatchProgress(null);
     setBusy(null);
     setError(null);
@@ -2139,10 +2377,23 @@ export function IdeaJourneyPage() {
     const readySuggestionCount = snapshot.openingSuggestions.filter(
       ({ status }) => status === "ready",
     ).length;
+    const partialSuggestionCount = snapshot.openingSuggestions.filter(
+      ({ status }) => status === "partial",
+    ).length;
+    const usableSuggestionCount = readySuggestionCount + partialSuggestionCount;
     const pendingSuggestionCount = snapshot.openingSuggestions.filter(
       ({ status }) => status === "pending",
     ).length;
     const persistedGenerationPending = hasPersistedGenerationPending(snapshot);
+    const guidanceComplete = snapshot.questionIndex >= snapshot.expectedQuestionTotal;
+    const questionNumber = Math.min(snapshot.expectedQuestionTotal, snapshot.questionIndex + 1);
+    const completedQuestionCount = Math.min(snapshot.questionIndex, snapshot.expectedQuestionTotal);
+    const completedQuestionPercentage = Math.round(
+      (completedQuestionCount / Math.max(snapshot.expectedQuestionTotal, 1)) * 100,
+    );
+    const remainingFocusLabels = snapshot.remainingQuestionFocus.map(
+      (key) => QUESTION_BY_KEY.get(key)?.prompt ?? key,
+    );
     return (
       <div className="desktop-page idea-journey">
         {quickAiDrawer}
@@ -2158,13 +2409,16 @@ export function IdeaJourneyPage() {
             </button>
             <p className="page-heading__eyebrow">AI 陪伴开书</p>
             <h1>先把一个想法写成可以继续的开头</h1>
-            <p>一次只解决一个问题。你可以选择、自己回答、跳过、返回或随时保留。</p>
+            <p>
+              这次问题计划预计 {String(snapshot.expectedQuestionTotal)}
+              问，一次只解决一件事；可跳过、返回或随时创建。
+            </p>
           </div>
           <Badge tone={readySuggestionCount > 0 ? "success" : "info"}>
             {batchProgress !== null
-              ? `正在生成 ${String(batchProgress.current)}/${String(batchProgress.total)}`
+              ? `已返回 ${String(batchProgress.completed)}/${String(batchProgress.total)}`
               : providerOpeningMode
-                ? `${String(readySuggestionCount)} 个 AI 建议可选`
+                ? `${String(usableSuggestionCount)} 个 AI 建议可用`
                 : snapshot.preview.length > 0
                   ? "本地草案"
                   : "等待重新生成"}
@@ -2208,7 +2462,7 @@ export function IdeaJourneyPage() {
           />
         )}
 
-        {persistedGenerationPending && busy === null && (
+        {persistedGenerationPending && (
           <div className="idea-journey__pending-recovery">
             <InlineAlert
               tone="warning"
@@ -2217,7 +2471,7 @@ export function IdeaJourneyPage() {
                   ? `生成仍在进行，${String(pendingSuggestionCount)} 个方案尚未返回`
                   : "这次 AI 修改仍在等待结果"
               }
-              description="已返回的 AI 正文会立即保存在本机。为避免覆盖已计费结果或重复计费，当前构思暂不允许回答、换一批或确认采用；墨影也不会在恢复时自动重试。如果原请求已无法返回，可以手动结束等待，再继续创作。"
+              description="各方案会独立返回并立即保存在本机。可以结束等待并取消仍在运行的请求；取消后的晚到内容只会进入历史记录，不会覆盖当前选择。"
               action={{
                 label: "结束未完成请求",
                 onClick: () => void endPendingGeneration(),
@@ -2238,7 +2492,7 @@ export function IdeaJourneyPage() {
                 </CardTitle>
                 <span>
                   {providerOpeningMode
-                    ? `${String(readySuggestionCount)}/3 可用`
+                    ? `${String(usableSuggestionCount)}/3 可用${partialSuggestionCount > 0 ? `（${String(partialSuggestionCount)} 个未完整）` : ""}`
                     : `${snapshot.preview.length.toLocaleString("zh-CN")} 字符`}
                 </span>
               </div>
@@ -2248,10 +2502,7 @@ export function IdeaJourneyPage() {
                 <p className="idea-journey__generation-status" role="status">
                   {batchProgress === null
                     ? "正在准备第一段内容……"
-                    : `正在依次生成第 ${String(batchProgress.current)} 个方案，共 ${String(batchProgress.total)} 个。`}
-                  {streamingPreview.length > 0
-                    ? ` 当前方案已收到 ${String(streamingPreview.length)} 个字符。`
-                    : ""}
+                    : `三个方案正在并行生成，已返回 ${String(batchProgress.completed)}/${String(batchProgress.total)}。`}
                 </p>
               )}
               {snapshot.openingSuggestions.length === 0 ? (
@@ -2262,9 +2513,12 @@ export function IdeaJourneyPage() {
                 <div className="idea-journey__suggestions" aria-label="开头建议列表" role="list">
                   {snapshot.openingSuggestions.map((suggestion, index) => {
                     const selected = snapshot.selectedOpeningId === suggestion.id;
+                    const streamingText = streamingPreviews[suggestion.id] ?? "";
+                    const timing = requestTimings[suggestion.id];
+                    const elapsedMs = timing === undefined ? null : timing.elapsedMs;
                     return (
                       <article
-                        className={`idea-journey__suggestion${selected ? " idea-journey__suggestion--selected" : ""}${suggestion.status === "failed" ? " idea-journey__suggestion--failed" : ""}${suggestion.status === "pending" ? " idea-journey__suggestion--pending" : ""}`}
+                        className={`idea-journey__suggestion${selected ? " idea-journey__suggestion--selected" : ""}${suggestion.status === "failed" ? " idea-journey__suggestion--failed" : ""}${suggestion.status === "partial" ? " idea-journey__suggestion--partial" : ""}${suggestion.status === "pending" ? " idea-journey__suggestion--pending" : ""}`}
                         key={suggestion.id}
                         role="listitem"
                       >
@@ -2276,31 +2530,91 @@ export function IdeaJourneyPage() {
                                 ? "warning"
                                 : suggestion.status === "pending"
                                   ? "info"
-                                  : suggestion.source === "provider"
-                                    ? "success"
-                                    : "info"
+                                  : suggestion.status === "partial"
+                                    ? "warning"
+                                    : suggestion.source === "provider"
+                                      ? "success"
+                                      : "info"
                             }
                           >
                             {suggestion.status === "failed"
                               ? "生成失败"
                               : suggestion.status === "pending"
                                 ? "等待生成"
-                                : suggestion.source === "provider"
-                                  ? "AI 已生成"
-                                  : "本地生成"}
+                                : suggestion.status === "partial"
+                                  ? "AI 未完整"
+                                  : suggestion.source === "provider"
+                                    ? "AI 已生成"
+                                    : "本地生成"}
                           </Badge>
                         </header>
-                        {suggestion.status === "ready" ? (
+                        {suggestion.status !== "pending" && (
+                          <p className="idea-journey__suggestion-metrics">
+                            {isUsableOpeningSuggestion(suggestion)
+                              ? `${String(suggestion.text.length)} 个可见字符`
+                              : "0 个可见字符"}
+                            {elapsedMs === null ? "" : ` · 用时 ${formatOpeningElapsed(elapsedMs)}`}
+                          </p>
+                        )}
+                        {suggestion.status === "ready" || suggestion.status === "partial" ? (
                           <div className="idea-journey__manuscript">{suggestion.text}</div>
                         ) : suggestion.status === "pending" ? (
                           <div className="idea-journey__suggestion-failure">
-                            <p>这个请求已经安全登记；恢复时不会自动重复调用或重复计费。</p>
+                            <p>
+                              已收到 {String(streamingText.length)} 个可见字符
+                              {elapsedMs === null
+                                ? ""
+                                : ` · 已用 ${formatOpeningElapsed(elapsedMs)}`}
+                              。这个请求已安全登记，恢复时不会自动重复调用。
+                            </p>
                           </div>
                         ) : (
                           <div className="idea-journey__suggestion-failure">
                             <p>这个位置没有可用正文，其他成功方案不受影响。</p>
                             <code>{suggestion.noticeCode ?? "MODEL_GENERATION_FAILED"}</code>
                           </div>
+                        )}
+                        {suggestion.status === "partial" && (
+                          <div className="idea-journey__partial-actions">
+                            <InlineAlert
+                              tone="warning"
+                              title="结尾可能不完整"
+                              description="供应商在输出上限处中断。正文足以作为草稿，但不会被标为完整，也不会自动进入正式正文。"
+                            />
+                            <Button
+                              variant="secondary"
+                              disabled={busy !== null || persistedGenerationPending}
+                              onClick={() => void retryOpeningSuggestion(suggestion.id, "continue")}
+                            >
+                              继续补全
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              disabled={busy !== null || persistedGenerationPending}
+                              onClick={() =>
+                                void retryOpeningSuggestion(suggestion.id, "regenerate")
+                              }
+                            >
+                              重新生成
+                            </Button>
+                            <Button
+                              variant={selected ? "ghost" : "secondary"}
+                              aria-pressed={selected}
+                              disabled={busy !== null || persistedGenerationPending || selected}
+                              onClick={() => void chooseOpeningSuggestion(suggestion.id)}
+                            >
+                              {selected ? "已保留为草稿" : "保留为草稿"}
+                            </Button>
+                          </div>
+                        )}
+                        {suggestion.status === "failed" && providerOpeningMode && (
+                          <Button
+                            variant="secondary"
+                            disabled={busy !== null || persistedGenerationPending}
+                            onClick={() => void retryOpeningSuggestion(suggestion.id, "regenerate")}
+                          >
+                            重新生成此方案
+                          </Button>
                         )}
                         {suggestion.status === "ready" && providerOpeningMode && (
                           <Button
@@ -2333,12 +2647,14 @@ export function IdeaJourneyPage() {
                           <Badge tone={suggestion.status === "ready" ? "info" : "warning"}>
                             {suggestion.status === "ready"
                               ? "已安全归档"
-                              : suggestion.noticeCode === GENERATION_ABANDONED_BY_AUTHOR
-                                ? "已结束等待"
-                                : "未生成正文"}
+                              : suggestion.status === "partial"
+                                ? "未完整草稿已归档"
+                                : suggestion.noticeCode === GENERATION_ABANDONED_BY_AUTHOR
+                                  ? "已结束等待"
+                                  : "未生成正文"}
                           </Badge>
                         </header>
-                        {suggestion.status === "ready" ? (
+                        {isUsableOpeningSuggestion(suggestion) ? (
                           <div className="idea-journey__manuscript">{suggestion.text}</div>
                         ) : (
                           <div className="idea-journey__suggestion-failure">
@@ -2359,10 +2675,20 @@ export function IdeaJourneyPage() {
                 <Button
                   variant="secondary"
                   loading={busy === "regenerate"}
-                  disabled={busy !== null || persistedGenerationPending}
+                  disabled={
+                    busy !== null ||
+                    persistedGenerationPending ||
+                    (guidanceComplete && snapshot.guidanceRewriteUsed)
+                  }
                   onClick={() => void regenerate()}
                 >
-                  {providerOpeningMode ? "换一批" : "重新生成开头"}
+                  {guidanceComplete
+                    ? snapshot.guidanceRewriteUsed
+                      ? "已完成一次明确重写"
+                      : "根据全部回答重写一次"
+                    : providerOpeningMode
+                      ? "换一批"
+                      : "重新生成开头"}
                 </Button>
                 <Button
                   loading={busy === "keep"}
@@ -2373,7 +2699,12 @@ export function IdeaJourneyPage() {
                   }
                   onClick={() => void openSummary()}
                 >
-                  保留开头，确认创建
+                  {snapshot.selectedOpeningId !== null &&
+                  [...snapshot.openingSuggestions, ...snapshot.openingResultHistory].some(
+                    ({ id, status }) => id === snapshot.selectedOpeningId && status === "partial",
+                  )
+                    ? "使用未完整草稿，确认创建"
+                    : "保留开头，确认创建"}
                 </Button>
               </div>
               <p className="idea-journey__safety-note">
@@ -2384,67 +2715,149 @@ export function IdeaJourneyPage() {
           </Card>
 
           <Card className="idea-journey__question">
-            <CardHeader>
-              <p className="page-heading__eyebrow">现在只决定这一件事</p>
-              <CardTitle headingLevel={2}>{currentQuestion.prompt}</CardTitle>
-              <p>{currentQuestion.helper}</p>
-            </CardHeader>
-            <CardContent>
-              <div className="idea-journey__options" aria-label="推荐选项">
-                {currentQuestion.options.map((option) => (
-                  <Button
-                    key={option}
-                    variant="secondary"
-                    disabled={busy !== null || persistedGenerationPending}
-                    onClick={() => void answerCurrent(option)}
-                  >
-                    {option}
-                  </Button>
-                ))}
-              </div>
-              <FormField label="自己回答" hint="自然语言即可，不需要写提示词。">
-                {(fieldProps) => (
-                  <Textarea
-                    {...fieldProps}
-                    value={customAnswer}
-                    rows={4}
-                    maxLength={1_000}
-                    placeholder={currentQuestion.placeholder}
-                    disabled={busy !== null || persistedGenerationPending}
-                    onChange={(event) => setCustomAnswer(event.currentTarget.value)}
-                  />
-                )}
-              </FormField>
-              <div className="idea-journey__question-actions">
-                <Button
-                  variant="ghost"
-                  disabled={
-                    busy !== null ||
-                    persistedGenerationPending ||
-                    snapshot.questionHistory.length === 0
-                  }
-                  onClick={() => void goBack()}
-                >
-                  返回上一问
-                </Button>
-                <Button
-                  variant="ghost"
-                  disabled={busy !== null || persistedGenerationPending}
-                  onClick={() => void answerCurrent("", true)}
-                >
-                  跳过
-                </Button>
-                <Button
-                  loading={busy === "answer"}
-                  disabled={
-                    busy !== null || persistedGenerationPending || customAnswer.trim().length === 0
-                  }
-                  onClick={() => void answerCurrent(customAnswer)}
-                >
-                  采用我的回答
-                </Button>
-              </div>
-            </CardContent>
+            {guidanceComplete ? (
+              <>
+                <CardHeader>
+                  <p className="page-heading__eyebrow">问题计划已完成</p>
+                  <CardTitle headingLevel={2}>已经收集完这次开书需要的核心信息</CardTitle>
+                  <p>
+                    已走完 {String(snapshot.expectedQuestionTotal)}/
+                    {String(snapshot.expectedQuestionTotal)} 问（100%）；剩余重点：无。回答已更新到
+                    ProjectSeed；没有自动重写开头，也没有写入正式正文。
+                  </p>
+                </CardHeader>
+                <CardContent>
+                  <div className="idea-journey__question-actions">
+                    <Button
+                      variant="ghost"
+                      disabled={busy !== null || persistedGenerationPending}
+                      onClick={() => void goBack()}
+                    >
+                      返回上一问
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      loading={busy === "regenerate"}
+                      disabled={
+                        busy !== null || persistedGenerationPending || snapshot.guidanceRewriteUsed
+                      }
+                      onClick={() => void regenerate()}
+                    >
+                      {snapshot.guidanceRewriteUsed ? "已明确重写一次" : "根据回答重写一次"}
+                    </Button>
+                    <Button
+                      loading={busy === "keep"}
+                      disabled={
+                        busy !== null ||
+                        persistedGenerationPending ||
+                        snapshot.preview.trim().length === 0
+                      }
+                      onClick={() => void openSummary()}
+                    >
+                      直接确认创建
+                    </Button>
+                  </div>
+                </CardContent>
+              </>
+            ) : (
+              <>
+                <CardHeader>
+                  <p className="page-heading__eyebrow">
+                    第 {String(questionNumber)}/{String(snapshot.expectedQuestionTotal)} 问
+                  </p>
+                  <CardTitle headingLevel={2}>{currentQuestion.prompt}</CardTitle>
+                  <p>
+                    <strong>本问目的：</strong>
+                    {currentQuestion.helper}
+                  </p>
+                  <div className="idea-journey__question-progress" role="status">
+                    <progress max={snapshot.expectedQuestionTotal} value={completedQuestionCount} />
+                    <span>
+                      已完成 {String(completedQuestionCount)}/
+                      {String(snapshot.expectedQuestionTotal)}（
+                      {String(completedQuestionPercentage)}%）；剩余重点（含可选扩展，共
+                      {String(remainingFocusLabels.length)} 项）：
+                      {remainingFocusLabels.slice(0, 3).join("、") || "无"}
+                      {remainingFocusLabels.length > 3 ? "……" : ""}
+                    </span>
+                  </div>
+                  {snapshot.questionPlanExpansionNotice !== null && (
+                    <InlineAlert
+                      tone="info"
+                      title="问题计划已按你的新信息扩展"
+                      description={snapshot.questionPlanExpansionNotice}
+                    />
+                  )}
+                </CardHeader>
+                <CardContent>
+                  <div className="idea-journey__options" aria-label="推荐选项">
+                    {currentQuestion.options.map((option) => (
+                      <Button
+                        key={option}
+                        variant="secondary"
+                        disabled={busy !== null || persistedGenerationPending}
+                        onClick={() => void answerCurrent(option)}
+                      >
+                        {option}
+                      </Button>
+                    ))}
+                  </div>
+                  <FormField label="自己回答" hint="自然语言即可，不需要写提示词。">
+                    {(fieldProps) => (
+                      <Textarea
+                        {...fieldProps}
+                        value={customAnswer}
+                        rows={4}
+                        maxLength={1_000}
+                        placeholder={currentQuestion.placeholder}
+                        disabled={busy !== null || persistedGenerationPending}
+                        onChange={(event) => setCustomAnswer(event.currentTarget.value)}
+                      />
+                    )}
+                  </FormField>
+                  <div className="idea-journey__question-actions">
+                    <Button
+                      variant="ghost"
+                      disabled={
+                        busy !== null || persistedGenerationPending || snapshot.questionIndex === 0
+                      }
+                      onClick={() => void goBack()}
+                    >
+                      返回上一问
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={busy !== null || persistedGenerationPending}
+                      onClick={() => void answerCurrent("", true)}
+                    >
+                      跳过
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={
+                        busy !== null ||
+                        persistedGenerationPending ||
+                        snapshot.preview.trim().length === 0
+                      }
+                      onClick={() => void openSummary()}
+                    >
+                      结束引导并创建
+                    </Button>
+                    <Button
+                      loading={busy === "answer"}
+                      disabled={
+                        busy !== null ||
+                        persistedGenerationPending ||
+                        customAnswer.trim().length === 0
+                      }
+                      onClick={() => void answerCurrent(customAnswer)}
+                    >
+                      采用我的回答
+                    </Button>
+                  </div>
+                </CardContent>
+              </>
+            )}
           </Card>
         </div>
       </div>
@@ -2661,11 +3074,24 @@ function readIdeaSnapshot(
     !isStringRecord(value.answers) ||
     !isStringArray(value.skippedQuestionKeys) ||
     !isStringArray(value.questionHistory) ||
+    (value.questionPlan !== undefined && !isGuidanceQuestionPlan(value.questionPlan)) ||
+    (value.expectedQuestionTotal !== undefined &&
+      (!Number.isSafeInteger(value.expectedQuestionTotal) ||
+        Number(value.expectedQuestionTotal) < 1 ||
+        Number(value.expectedQuestionTotal) > MAX_GUIDANCE_PLAN_LENGTH)) ||
+    (value.questionIndex !== undefined &&
+      (!Number.isSafeInteger(value.questionIndex) || Number(value.questionIndex) < 0)) ||
+    (value.remainingQuestionFocus !== undefined &&
+      !isGuidanceFocusList(value.remainingQuestionFocus)) ||
+    (value.questionPlanExpansionNotice !== undefined &&
+      value.questionPlanExpansionNotice !== null &&
+      typeof value.questionPlanExpansionNotice !== "string") ||
     typeof value.currentQuestionKey !== "string" ||
     !QUESTION_BY_KEY.has(value.currentQuestionKey) ||
     (value.projectName !== undefined && typeof value.projectName !== "string") ||
     (value.storySummary !== undefined && typeof value.storySummary !== "string") ||
     (value.summaryCustomized !== undefined && typeof value.summaryCustomized !== "boolean") ||
+    (value.guidanceRewriteUsed !== undefined && typeof value.guidanceRewriteUsed !== "boolean") ||
     (value.openingMode !== undefined &&
       value.openingMode !== "guided" &&
       value.openingMode !== "self" &&
@@ -2679,12 +3105,40 @@ function readIdeaSnapshot(
   const openingMode =
     value.openingMode === "self" || value.openingMode === "sample" ? value.openingMode : "guided";
   const openingSuggestions = normalizeOpeningSuggestions(value, journeyId);
+  const openingResultHistory =
+    value.openingResultHistory === undefined
+      ? Object.freeze([])
+      : normalizePersistedOpeningSuggestions(value.openingResultHistory);
   const selectedOpening =
-    openingSuggestions.find(
-      ({ id, status }) => id === value.selectedOpeningId && status === "ready",
+    [...openingSuggestions, ...openingResultHistory].find(
+      (suggestion) =>
+        suggestion.id === value.selectedOpeningId && isUsableOpeningSuggestion(suggestion),
     ) ??
     openingSuggestions.find(({ status }) => status === "ready") ??
     null;
+  const questionPlan =
+    value.questionPlan === undefined
+      ? DEFAULT_GUIDANCE_QUESTION_PLAN
+      : Object.freeze([...value.questionPlan]);
+  if (
+    value.expectedQuestionTotal !== undefined &&
+    value.expectedQuestionTotal !== questionPlan.length
+  ) {
+    throw new UiActionError(
+      "IDEA_GUIDANCE_PLAN_INVALID",
+      "保存的问题计划总数与实际问题不一致，墨影已停止继续提问以避免循环。",
+    );
+  }
+  const inferredQuestionIndex = Math.min(
+    questionPlan.length,
+    new Set(value.questionHistory.filter((key) => questionPlan.includes(key))).size,
+  );
+  const questionIndex =
+    typeof value.questionIndex === "number"
+      ? Math.min(questionPlan.length, value.questionIndex)
+      : inferredQuestionIndex;
+  const currentQuestionKey =
+    questionPlan[Math.min(questionIndex, questionPlan.length - 1)] ?? "opening_direction";
   const openingGenerationMode =
     value.openingGenerationMode === "provider" || value.openingGenerationMode === "local"
       ? value.openingGenerationMode
@@ -2698,10 +3152,7 @@ function readIdeaSnapshot(
     pendingRequestId: typeof value.pendingRequestId === "string" ? value.pendingRequestId : null,
     openingGenerationMode,
     openingSuggestions,
-    openingResultHistory:
-      value.openingResultHistory === undefined
-        ? Object.freeze([])
-        : normalizePersistedOpeningSuggestions(value.openingResultHistory),
+    openingResultHistory,
     selectedOpeningId: selectedOpening?.id ?? null,
     openingBatchId:
       typeof value.openingBatchId === "string"
@@ -2733,6 +3184,23 @@ function readIdeaSnapshot(
           : normalizeSummaryField(value.storySummary, 4_000, "故事摘要")
         : deriveStorySummary(value.idea, value.answers),
     summaryCustomized: value.summaryCustomized === true,
+    questionPlan,
+    expectedQuestionTotal: questionPlan.length,
+    questionIndex,
+    remainingQuestionFocus:
+      value.remainingQuestionFocus === undefined
+        ? Object.freeze(
+            ALL_GUIDANCE_FOCUS_KEYS.filter(
+              (key) => !(value.questionHistory as readonly string[]).includes(key),
+            ),
+          )
+        : Object.freeze([...value.remainingQuestionFocus]),
+    questionPlanExpansionNotice:
+      typeof value.questionPlanExpansionNotice === "string"
+        ? value.questionPlanExpansionNotice
+        : null,
+    currentQuestionKey,
+    guidanceRewriteUsed: value.guidanceRewriteUsed === true,
     projectSeed:
       parseProjectSeed(value.projectSeed) ??
       deriveIdeaProjectSeed({
@@ -2767,6 +3235,7 @@ function isOpeningSuggestionArray(
       (suggestion.source !== "provider" && suggestion.source !== "local_fallback") ||
       (suggestion.status !== "pending" &&
         suggestion.status !== "ready" &&
+        suggestion.status !== "partial" &&
         suggestion.status !== "failed") ||
       (suggestion.openingAngle !== undefined &&
         suggestion.openingAngle !== null &&
@@ -2774,8 +3243,14 @@ function isOpeningSuggestionArray(
       (suggestion.providerId !== null && typeof suggestion.providerId !== "string") ||
       (suggestion.modelId !== null && typeof suggestion.modelId !== "string") ||
       (suggestion.noticeCode !== null && typeof suggestion.noticeCode !== "string") ||
-      (suggestion.status === "ready" && suggestion.text.trim().length === 0) ||
-      (suggestion.status !== "ready" && suggestion.text.length > 0) ||
+      ((suggestion.status === "ready" || suggestion.status === "partial") &&
+        suggestion.text.trim().length === 0) ||
+      ((suggestion.status === "pending" || suggestion.status === "failed") &&
+        suggestion.text.length > 0) ||
+      (suggestion.status === "partial" &&
+        (suggestion.source !== "provider" ||
+          suggestion.noticeCode !== "MODEL_OUTPUT_TRUNCATED" ||
+          suggestion.text.trim().length < MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS)) ||
       (suggestion.status === "pending" &&
         (suggestion.source !== "provider" ||
           suggestion.providerId !== null ||
@@ -2785,6 +3260,24 @@ function isOpeningSuggestionArray(
       return false;
     }
     ids.add(suggestion.id);
+  }
+  return true;
+}
+
+function isGuidanceQuestionPlan(value: unknown): value is readonly string[] {
+  return isGuidanceFocusList(value) && value.length > 0;
+}
+
+function isGuidanceFocusList(value: unknown): value is readonly string[] {
+  if (!Array.isArray(value) || value.length > MAX_GUIDANCE_PLAN_LENGTH) {
+    return false;
+  }
+  const unique = new Set<string>();
+  for (const key of value) {
+    if (typeof key !== "string" || !QUESTION_BY_KEY.has(key) || unique.has(key)) {
+      return false;
+    }
+    unique.add(key);
   }
   return true;
 }
@@ -2861,7 +3354,7 @@ function abandonPersistedOpeningGeneration(
     });
     const existingIndex = history.findIndex(({ id }) => id === requestId);
     const existing = history[existingIndex];
-    if (existing?.status === "ready") {
+    if (existing !== undefined && isUsableOpeningSuggestion(existing)) {
       continue;
     }
     if (existingIndex < 0) {
@@ -2873,8 +3366,12 @@ function abandonPersistedOpeningGeneration(
   const suggestions = Object.freeze(
     snapshot.openingSuggestions.filter(({ status }) => status !== "pending"),
   );
+  const available = [...suggestions, ...history];
   const selected =
-    suggestions.find(({ id, status }) => id === snapshot.selectedOpeningId && status === "ready") ??
+    available.find(
+      (suggestion) =>
+        suggestion.id === snapshot.selectedOpeningId && isUsableOpeningSuggestion(suggestion),
+    ) ??
     suggestions.find(({ status }) => status === "ready") ??
     null;
   const firstFailure = suggestions.find(({ status }) => status === "failed");
@@ -2978,8 +3475,15 @@ function applySingleOpeningResult(
       pendingRequestId: null,
       openingGenerationMode: generationMode,
       openingSuggestions: suggestions,
+      openingResultHistory:
+        existing.length > 0
+          ? mergeOpeningHistory(snapshot.openingResultHistory, [suggestion])
+          : snapshot.openingResultHistory,
       openingBatchId: generated.requestId,
-      openingBatchFailureCount: 1,
+      openingBatchFailureCount:
+        existing.length > 0
+          ? suggestions.filter(({ status }) => status === "failed").length + 1
+          : 1,
       noticeCode: generated.noticeCode,
     });
   }
@@ -3003,6 +3507,7 @@ function applySingleOpeningResult(
     ({ id }) => id === snapshot.selectedOpeningId,
   );
   const suggestions = [...snapshot.openingSuggestions];
+  const replaced = selectedIndex >= 0 ? suggestions[selectedIndex] : suggestions[0];
   if (selectedIndex >= 0) {
     suggestions[selectedIndex] = suggestion;
   } else if (suggestions.length < PROVIDER_OPENING_ANGLES.length) {
@@ -3010,19 +3515,29 @@ function applySingleOpeningResult(
   } else {
     suggestions[0] = suggestion;
   }
+  const history =
+    replaced === undefined
+      ? snapshot.openingResultHistory
+      : mergeOpeningHistory(snapshot.openingResultHistory, [replaced]);
+  const previousSelected = [...snapshot.openingSuggestions, ...history].find(
+    (candidate) =>
+      candidate.id === snapshot.selectedOpeningId && isUsableOpeningSuggestion(candidate),
+  );
+  const selected = suggestion.status === "ready" ? suggestion : (previousSelected ?? null);
   return Object.freeze({
     ...snapshot,
-    preview: suggestion.text,
-    previewSource: suggestion.source,
-    providerId: suggestion.providerId,
-    modelId: suggestion.modelId,
-    noticeCode: suggestion.noticeCode,
+    preview: selected?.text ?? "",
+    previewSource: selected?.source ?? null,
+    providerId: selected?.providerId ?? null,
+    modelId: selected?.modelId ?? null,
+    noticeCode: suggestion.noticeCode ?? selected?.noticeCode ?? null,
     pendingRequestId: null,
     openingGenerationMode: "provider",
     openingSuggestions: Object.freeze(suggestions),
-    selectedOpeningId: suggestion.id,
+    openingResultHistory: history,
+    selectedOpeningId: selected?.id ?? null,
     openingBatchId: suggestion.batchId,
-    openingBatchFailureCount: 0,
+    openingBatchFailureCount: suggestions.filter(({ status }) => status === "failed").length,
   });
 }
 
@@ -3050,12 +3565,16 @@ function planProviderOpeningBatch(
   snapshot: IdeaJourneySnapshotV1,
   plan: ProviderOpeningBatchPlan,
 ): IdeaJourneySnapshotV1 {
-  const previousReady = snapshot.openingSuggestions.filter(({ status }) => status === "ready");
+  const history = mergeOpeningHistory(
+    snapshot.openingResultHistory,
+    snapshot.openingSuggestions.filter(({ status }) => status !== "pending"),
+  );
   return Object.freeze({
     ...snapshot,
     pendingRequestId: plan.requests[0]?.requestId ?? null,
     openingGenerationMode: "provider",
-    openingSuggestions: Object.freeze([...pendingOpeningSuggestions(plan), ...previousReady]),
+    openingSuggestions: pendingOpeningSuggestions(plan),
+    openingResultHistory: history,
     openingBatchId: plan.batchId,
     openingBatchFailureCount: 0,
   });
@@ -3103,29 +3622,17 @@ function applyProviderOpeningResult(
 
   const updated = [...snapshot.openingSuggestions];
   updated[index] = suggestion;
-  const currentBatch = updated.filter(({ batchId }) => batchId === plan.batchId);
-  const pending = currentBatch.filter(({ status }) => status === "pending");
-  const ready = currentBatch.filter(({ status }) => status === "ready");
-  const failed = currentBatch.filter(({ status }) => status === "failed");
-  const previousReady = updated.filter(
-    ({ batchId, status }) => batchId !== plan.batchId && status === "ready",
-  );
-  const selectedPrevious = previousReady.find(({ id }) => id === snapshot.selectedOpeningId);
-  const orderedPrevious = [
-    ...(selectedPrevious === undefined ? [] : [selectedPrevious]),
-    ...previousReady.filter(({ id }) => id !== selectedPrevious?.id),
-  ];
-  const suggestions =
-    pending.length === 0
-      ? failed.length === 0
-        ? Object.freeze(currentBatch)
-        : Object.freeze(
-            [...ready, ...orderedPrevious, ...failed].slice(0, PROVIDER_OPENING_ANGLES.length),
-          )
-      : Object.freeze(updated);
+  const suggestions = Object.freeze(updated);
+  const pending = suggestions.filter(({ status }) => status === "pending");
+  const failed = suggestions.filter(({ status }) => status === "failed");
+  const allAvailable = [...suggestions, ...snapshot.openingResultHistory];
+  const replacesSelected = planned.replacesOpeningId === snapshot.selectedOpeningId;
   const selected =
-    suggestions.find(({ id, status }) => id === snapshot.selectedOpeningId && status === "ready") ??
-    suggestions.find(({ batchId, status }) => batchId === plan.batchId && status === "ready") ??
+    (replacesSelected && suggestion.status === "ready" ? suggestion : undefined) ??
+    allAvailable.find(
+      (candidate) =>
+        candidate.id === snapshot.selectedOpeningId && isUsableOpeningSuggestion(candidate),
+    ) ??
     suggestions.find(({ status }) => status === "ready") ??
     null;
   return Object.freeze({
@@ -3144,11 +3651,51 @@ function applyProviderOpeningResult(
   });
 }
 
+function mergeOpeningHistory(
+  existing: readonly IdeaOpeningSuggestionV1[],
+  additions: readonly IdeaOpeningSuggestionV1[],
+): readonly IdeaOpeningSuggestionV1[] {
+  const merged = [...existing];
+  for (const addition of additions) {
+    const index = merged.findIndex(({ id }) => id === addition.id);
+    if (index < 0) {
+      merged.push(addition);
+    } else {
+      const current = merged[index];
+      if (current !== undefined && sameOpeningSuggestion(current, addition)) {
+        continue;
+      }
+    }
+  }
+  return Object.freeze(merged);
+}
+
 function countPendingSuggestions(snapshot: IdeaJourneySnapshotV1, batchId: string): number {
   return snapshot.openingSuggestions.filter(
     ({ batchId: suggestionBatchId, status }) =>
       suggestionBatchId === batchId && status === "pending",
   ).length;
+}
+
+function isUsableOpeningSuggestion(suggestion: IdeaOpeningSuggestionV1): boolean {
+  return suggestion.status === "ready" || suggestion.status === "partial";
+}
+
+function settledOpeningStatus(suggestion: IdeaOpeningSuggestionV1): "ready" | "partial" | "failed" {
+  return suggestion.status === "pending" ? "failed" : suggestion.status;
+}
+
+function guidanceStateForSnapshot(snapshot: IdeaJourneySnapshotV1): string {
+  return snapshot.questionIndex >= snapshot.questionPlan.length
+    ? "guidance_complete"
+    : "asking_one_question";
+}
+
+function formatOpeningElapsed(milliseconds: number): string {
+  if (milliseconds < 1_000) {
+    return "不足 1 秒";
+  }
+  return `${(milliseconds / 1_000).toFixed(1)} 秒`;
 }
 
 function sameOpeningSuggestion(
@@ -3174,12 +3721,16 @@ function openingSuggestionFromResult(
   generationMode: "provider" | "local",
   openingAngle: CreativeOpeningAngle | null,
 ): IdeaOpeningSuggestionV1 {
-  const status =
-    generationMode === "provider" && generated.source !== "provider" ? "failed" : "ready";
+  const status: IdeaOpeningSuggestionV1["status"] =
+    generationMode === "provider" && generated.source !== "provider"
+      ? "failed"
+      : generated.completion === "partial"
+        ? "partial"
+        : "ready";
   return Object.freeze({
     id: generated.requestId,
     batchId,
-    text: status === "ready" ? generated.text : "",
+    text: status === "ready" || status === "partial" ? generated.text : "",
     source: generated.source,
     status,
     openingAngle,
@@ -3204,30 +3755,53 @@ function selectOpeningSuggestion(
   });
 }
 
-function selectNextQuestionKey(
-  answers: Readonly<Record<string, string>>,
-  skipped: readonly string[],
-  history: readonly string[],
-): string {
-  const resolved = new Set([...Object.keys(answers), ...skipped]);
-  const openingDirection = answers.opening_direction ?? "";
-  const preferred = [
-    ...(openingDirection.includes("关系") ? ["relationship"] : []),
-    ...(openingDirection.includes("悬念") ? ["conflict"] : []),
-    "tone",
-    "genre",
-    "protagonist",
-    "relationship",
-    "world",
-    "conflict",
-    "pov",
-    "style",
-    "boundaries",
-    "direction",
-    "outline",
-    "opening_direction",
+function suggestGuidancePlanExtension(
+  snapshot: IdeaJourneySnapshotV1,
+  currentQuestionKey: string,
+  answer: string,
+): Readonly<{ key: string; focusLabel: string; reason: string }> | null {
+  if (snapshot.questionPlan.length >= MAX_GUIDANCE_PLAN_LENGTH || answer.length === 0) {
+    return null;
+  }
+  const normalized = answer.normalize("NFC");
+  const candidates: readonly Readonly<{ key: string; reason: string }>[] = [
+    ...(/视角|第一人称|第三人称/u.test(normalized)
+      ? [{ key: "pov", reason: "需要确认叙事距离，避免后续视角漂移。" }]
+      : []),
+    ...(/关系|感情|恋爱|搭档/u.test(normalized)
+      ? [{ key: "relationship", reason: "需要确认人物之间的当前张力。" }]
+      : []),
+    ...(/世界|时代|城市|校园|科幻|奇幻/u.test(normalized)
+      ? [{ key: "world", reason: "需要补充会直接影响人物行动的背景。" }]
+      : []),
+    ...(currentQuestionKey === "opening_direction"
+      ? [{ key: "genre", reason: "开头方向已明确，再确认类型能减少风格误判。" }]
+      : []),
+    ...(currentQuestionKey === "protagonist"
+      ? [{ key: "relationship", reason: "主角轮廓已明确，再确认关键关系能约束互动。" }]
+      : []),
+    ...(currentQuestionKey === "conflict"
+      ? [{ key: "direction", reason: "眼前冲突已明确，再确认下一步推进方向。" }]
+      : []),
+    ...(currentQuestionKey === "tone"
+      ? [{ key: "style", reason: "目标感受已明确，再确认长期写法。" }]
+      : []),
+    ...(currentQuestionKey === "boundaries"
+      ? [{ key: "outline", reason: "内容边界已明确，可以安全确认第一段走向。" }]
+      : []),
   ];
-  return preferred.find((key) => !resolved.has(key)) ?? history.at(-1) ?? "direction";
+  const selected = candidates.find(
+    ({ key }) =>
+      snapshot.remainingQuestionFocus.includes(key) && !snapshot.questionPlan.includes(key),
+  );
+  if (selected === undefined) {
+    return null;
+  }
+  return Object.freeze({
+    key: selected.key,
+    focusLabel: QUESTION_BY_KEY.get(selected.key)?.prompt ?? selected.key,
+    reason: selected.reason,
+  });
 }
 
 function createTurn(
@@ -3395,16 +3969,12 @@ async function persistGuidedStorySetup(
   if (!storyProjectId.ok) {
     throw storyProjectId.error;
   }
-  const [outline, records, facts] = await Promise.all([
+  const [outline, facts] = await Promise.all([
     runtime.story.outlines.findByProjectId(storyProjectId.value),
-    runtime.story.formalRecords.listByProjectId(storyProjectId.value),
     runtime.story.facts.listByProjectId(storyProjectId.value),
   ]);
   if (!outline.ok) {
     throw outline.error;
-  }
-  if (!records.ok) {
-    throw records.error;
   }
   if (!facts.ok) {
     throw facts.error;
@@ -3428,46 +3998,10 @@ async function persistGuidedStorySetup(
       throw created.error;
     }
   }
-  const existingKeys = new Set<string>(
-    records.value.map((record) => String(record.toSnapshot().recordKey)),
-  );
-  const characterValues = compactAnswers(snapshot.answers, ["protagonist", "relationship"]);
-  if (Object.keys(characterValues).length > 0 && !existingKeys.has("guided_opening.characters")) {
-    const created = await runtime.story.formalRecordService.create({
-      projectId,
-      kind: "character",
-      recordKey: "guided_opening.characters",
-      value: { ...characterValues, origin: "guided_opening", userConfirmed: true },
-      actorId: runtime.story.actorId,
-      humanConfirmed: true,
-    });
-    if (!created.ok) {
-      throw created.error;
-    }
-  }
-  const writingRules = compactAnswers(snapshot.answers, ["tone", "pov", "style", "boundaries"]);
-  if (Object.keys(writingRules).length > 0 && !existingKeys.has("guided_opening.rules")) {
-    const created = await runtime.story.formalRecordService.create({
-      projectId,
-      kind: "world_rule",
-      recordKey: "guided_opening.rules",
-      value: { ...writingRules, origin: "guided_opening", userConfirmed: true },
-      actorId: runtime.story.actorId,
-      humanConfirmed: true,
-    });
-    if (!created.ok) {
-      throw created.error;
-    }
-  }
   await createGuidedStoryFactIfMissing(runtime, facts.value, {
     projectId,
     factType: "character_identity",
     contentText: labeledAnswer("主角", snapshot.answers.protagonist) ?? "",
-  });
-  await createGuidedStoryFactIfMissing(runtime, facts.value, {
-    projectId,
-    factType: "relationship",
-    contentText: labeledAnswer("人物关系", snapshot.answers.relationship) ?? "",
   });
   await createGuidedStoryFactIfMissing(runtime, facts.value, {
     projectId,
@@ -3524,20 +4058,6 @@ async function createGuidedStoryFactIfMissing(
   if (!created.ok) {
     throw created.error;
   }
-}
-
-function compactAnswers(
-  answers: Readonly<Record<string, string>>,
-  keys: readonly string[],
-): Readonly<Record<string, string>> {
-  return Object.freeze(
-    Object.fromEntries(
-      keys.flatMap((key) => {
-        const value = answers[key]?.trim();
-        return value === undefined || value.length === 0 ? [] : [[key, value]];
-      }),
-    ),
-  );
 }
 
 function labeledAnswer(label: string, value: string | undefined): string | null {

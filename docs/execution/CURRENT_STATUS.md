@@ -1,12 +1,30 @@
 # InkShadow 当前执行状态
 
-> 更新日期：2026-08-09  
-> 源码与候选版本：`0.2.0`  
-> 工程状态：当前工作树已完成 DeepSeek 文本能力探针 P0 修复及本地全仓/Rust 门禁；证据不包含真实 DeepSeek 凭据在线调用  
-> 发布结论：**截至本段工程门禁记录，安装包候选尚未生成且本轮 P0 修复尚未发布；既有公开 `v0.2.0` Pre-release 只作为历史基线，不包含当前工作树改动**  
-> 原因：仍需真实 DeepSeek API Key 的目录发现、能力探针、任务分工和基础评测端到端验收；商业签名、供应商全矩阵和隔离 Windows 安装矩阵也未完成
+> 更新日期：2026-08-10  
+> 当前源码与待发布版本：`0.2.1`  
+> 工程状态：当前工作树的完整 `release:check`、Rust 严格门禁和 production Chromium 响应式 E2E 已通过；干净唯一提交、Tauri WebView 候选链与公开发布仍待完成  
+> 发布结论：**`v0.2.1` 尚未生成干净安装包候选，也尚未发布；既有公开 `v0.2.0` Pre-release 只是不可覆盖的历史基线**  
+> 外部边界：没有读取或使用真实 DeepSeek API Key；商业签名、供应商真实互操作和隔离 Windows 安装矩阵仍未完成
 
-## 2026-08-09 DeepSeek P0 当前工作树
+## 2026-08-10 v0.2.1 当前工作树
+
+| 项目                       | 当前事实                                                                                                                                                                                                      |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 开书引导                   | 已实现初始 5 个重点、最多 12 个唯一重点的有限动态计划；页面显示第 N/M 问、完成百分比、剩余重点和扩展原因。回答或跳过减少剩余项，作者可随时返回或结束；不是“三问上限”，也不会无限追问                          |
+| DOCX 导入聚焦回归          | `PASS`；`pnpm.cmd --filter @inkshadow/import-export test`，81/81 通过                                                                                                                                         |
+| Model Hub 设置页聚焦回归   | `PASS`；`pnpm.cmd --filter @inkshadow/desktop test src/pages/settings-page.test.tsx`，34/34 通过                                                                                                              |
+| Desktop TypeScript         | `PASS`；`pnpm.cmd --filter @inkshadow/desktop typecheck`，0 error                                                                                                                                             |
+| 设置页聚焦 ESLint          | `PASS`；设置页实现与测试文件的零警告 ESLint 检查通过                                                                                                                                                          |
+| 全仓门禁与生产构建         | `PASS`；`pnpm.cmd release:check` 退出码 0、520.9 秒；20/21 workspace scopes，2,688 passed / 65 skipped / 0 failed；Desktop 2,204 modules，49 files / 6,065,923 bytes，低于 6,422,528 bytes 预算 356,605 bytes |
+| Rust 原生层                | `PASS`；`pnpm.cmd check:rust` 退出码 0、116.7 秒；format、严格 Clippy 通过，152 passed / 1 ignored / 0 failed                                                                                                 |
+| 响应式 production E2E      | `PASS`；指定正式 `dist` 的四组 Chromium 规格 11/11，通过 1440、1280、1024、800 与 200% zoom 主路径；测试 23.1 秒、工具总计 29.4 秒；不外推为 Tauri WebView 验收                                               |
+| 真实 DeepSeek 凭据端到端   | `NOT_RUN`；当前只有本地与模拟协议证据，不能标记真实供应商 `VERIFIED`                                                                                                                                          |
+| 干净候选、提交、哈希与发布 | `NOT_RUN`；来源提交、源码指纹、安装包大小与 SHA-256 均须在干净唯一提交生成候选后填写，当前不得使用占位值冒充证据                                                                                              |
+
+精确命令、最终数字和前一次失败记录见 [`TEST_RESULTS.md`](TEST_RESULTS.md)。上述 `PASS` 绑定
+当前工作树，不继承下方历史运行；干净候选仍必须从唯一提交重新执行完整候选链并记录来源与哈希。
+
+## 2026-08-09 DeepSeek P0 历史验证快照
 
 | 项目                   | 当前事实                                                                                                                                                                      |
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -18,7 +36,7 @@
 | P0 定向证据            | `PASS`；Desktop 9 files / 104 tests；Data migration + maintenance 2 files / 14 tests；`model_gateway` 63 passed / 1 ignored；Tauri `local_migrations` 5 passed                |
 | Provider 与迁移口径    | Provider Registry 当前为 9 类；Data migration `0056` / Tauri `59`；发布脚本门禁为 17 项                                                                                       |
 | 真实 DeepSeek 线上验收 | `NOT_RUN`；没有读取或使用用户 API Key，不能将本地/模拟协议测试标为供应商 `VERIFIED`                                                                                           |
-| 本轮发布与安装包       | 截至本段工程门禁记录为 `NOT_RUN`；`release:check` 不等于打包，若随后从干净提交生成候选，须以候选清单记录来源提交、SHA-256 和大小；GitHub Release 尚未发布                     |
+| 当时发布与安装包       | 截至该次记录为 `NOT_RUN`；`release:check` 不等于打包，若随后从干净提交生成候选，须以候选清单记录来源提交、SHA-256 和大小；该轮 GitHub Release 当时尚未发布                    |
 
 精确命令与分包结果见 [`TEST_RESULTS.md`](TEST_RESULTS.md) 和
 [`2026-08-09-DEEPSEEK-TEXT-PROBE-P0.md`](2026-08-09-DEEPSEEK-TEXT-PROBE-P0.md)。
@@ -194,7 +212,7 @@ E2E 证据继续只证明当时的历史快照。
 该历史候选文件时间为 2026-07-30 00:58:47 +10:00，晚于当轮构建开始。其 PE Subsystem 已复核为
 `Windows GUI (2)`，正式构建不会再创建用户可见的控制台窗口。尚未运行该
 历史安装包，也未在隔离 Windows 用户中执行安装、覆盖升级、卸载、重装和数据保留验证。
-页面整改源码当时由 2026-07-31 候选覆盖；当前发布基线已由本页顶部的 v0.2.0 候选取代，
+页面整改源码当时由 2026-07-31 候选覆盖；该历史基线后来由 v0.2.0 候选取代，
 本节旧候选继续作为不可改写的历史证据保留。
 
 ## 已完成的工程能力

@@ -42,10 +42,11 @@ export interface PersistedGenerationPreflight {
   readonly canStart: boolean;
   readonly requiresConfirmation: boolean;
   readonly codes: readonly string[];
-  readonly estimateMicros: string;
-  readonly currency: string;
-  readonly pricingVersion: string;
-  readonly priceUpdatedAt: string;
+  readonly costStatus: GenerationCostStatus;
+  readonly estimateMicros: string | null;
+  readonly currency: string | null;
+  readonly pricingVersion: string | null;
+  readonly priceUpdatedAt: string | null;
   readonly inputBytes: number;
   readonly inputTokens: number;
   readonly maximumOutputTokens: number;
@@ -78,6 +79,7 @@ export interface GenerationRun {
   readonly maximumOutputTokens: number;
   readonly estimatedCostMicros: string;
   readonly incurredCostMicros: string;
+  readonly costStatus: GenerationCostStatus;
   readonly currency: string;
   readonly pricingVersion: string;
   readonly priceUpdatedAt: string;
@@ -120,7 +122,10 @@ export interface TransitionGenerationRunInput {
   readonly attemptUsage?: GenerationAttemptUsageInput;
 }
 
-export type GenerationUsageSource = "provider_reported" | "provider_unavailable" | "local_demo";
+export type GenerationCostStatus = "estimated" | "pricing_unavailable";
+
+export type GenerationUsageSource =
+  "provider_reported" | "provider_reported_unpriced" | "provider_unavailable" | "local_demo";
 
 export interface GenerationAttemptUsageInput {
   readonly source: GenerationUsageSource;
@@ -133,6 +138,7 @@ export interface GenerationAttemptUsageInput {
 export interface GenerationAttemptUsage extends GenerationAttemptUsageInput {
   readonly runId: string;
   readonly attempt: number;
+  readonly costStatus: GenerationCostStatus;
   readonly currency: string;
   readonly pricingVersion: string;
   readonly priceUpdatedAt: string;
@@ -255,6 +261,7 @@ interface GenerationRunRow {
   maximum_output_tokens: number;
   estimated_cost_micros: string;
   incurred_cost_micros: string;
+  cost_status: string;
   currency: string;
   pricing_version: string;
   price_updated_at: string;
@@ -279,6 +286,7 @@ interface GenerationAttemptUsageRow {
   output_tokens: number | null;
   cached_input_tokens: number | null;
   usage_priced_estimate_micros: string | null;
+  cost_status: string;
   currency: string;
   pricing_version: string;
   price_updated_at: string;
@@ -440,9 +448,9 @@ export class TauriGenerationGovernanceStore implements GenerationGovernanceStore
            id, task_id, idempotency_key, project_id, chapter_id, base_version_id,
            provider_id, model_id, state, revision, attempt, input_tokens,
            maximum_output_tokens, estimated_cost_micros, incurred_cost_micros,
-           currency, pricing_version, price_updated_at, preflight_json,
+           cost_status, currency, pricing_version, price_updated_at, preflight_json,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 1, 1, ?, ?, ?, '0', ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 1, 1, ?, ?, ?, '0', ?, ?, ?, ?, ?, ?, ?)`,
         [
           prepared.id,
           prepared.taskId,
@@ -455,6 +463,7 @@ export class TauriGenerationGovernanceStore implements GenerationGovernanceStore
           prepared.inputTokens,
           prepared.maximumOutputTokens,
           prepared.estimatedCostMicros,
+          prepared.costStatus,
           prepared.currency,
           prepared.pricingVersion,
           prepared.priceUpdatedAt,
@@ -559,9 +568,9 @@ export class TauriGenerationGovernanceStore implements GenerationGovernanceStore
         await transaction.execute(
           `INSERT INTO ai_generation_attempt_usage (
              run_id, attempt, usage_source, input_tokens, output_tokens,
-             cached_input_tokens, usage_priced_estimate_micros, currency,
+             cached_input_tokens, usage_priced_estimate_micros, cost_status, currency,
              pricing_version, price_updated_at, reported_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             attemptUsage.runId,
             attemptUsage.attempt,
@@ -570,6 +579,7 @@ export class TauriGenerationGovernanceStore implements GenerationGovernanceStore
             attemptUsage.outputTokens,
             attemptUsage.cachedInputTokens,
             attemptUsage.usagePricedEstimateMicros,
+            attemptUsage.costStatus,
             attemptUsage.currency,
             attemptUsage.pricingVersion,
             attemptUsage.priceUpdatedAt,
@@ -1059,13 +1069,14 @@ export class GenerationGovernanceError extends Error {
 }
 
 function prepareGenerationRun(input: CreateGenerationRunInput, now: string): GenerationRun {
-  if (!input.preflight.canStart || input.preflight.estimate === null) {
+  if (!input.preflight.canStart) {
     throw governanceError(
       "AI_GENERATION_PREFLIGHT_BLOCKED",
-      "A blocked or unpriced preflight cannot create a generation run.",
+      "A blocked preflight cannot create a generation run.",
     );
   }
   const estimate = input.preflight.estimate;
+  const costStatus: GenerationCostStatus = estimate === null ? "pricing_unavailable" : "estimated";
   const run: GenerationRun = {
     id: validateUuid(input.id, "id"),
     taskId: validateUuid(input.taskId, "taskId"),
@@ -1080,11 +1091,16 @@ function prepareGenerationRun(input: CreateGenerationRunInput, now: string): Gen
     attempt: 1,
     inputTokens: input.preflight.inputTokens,
     maximumOutputTokens: input.preflight.maximumOutputTokens,
-    estimatedCostMicros: estimate.micros.toString(),
+    estimatedCostMicros: estimate?.micros.toString() ?? "0",
     incurredCostMicros: "0",
-    currency: validateCurrency(estimate.currency),
-    pricingVersion: validateSafeIdentifier(estimate.pricingVersion, 128, "pricingVersion"),
-    priceUpdatedAt: validateTimestamp(estimate.priceUpdatedAt),
+    costStatus,
+    currency: validateCurrency(estimate?.currency ?? "XXX"),
+    pricingVersion: validateSafeIdentifier(
+      estimate?.pricingVersion ?? "pricing_unavailable",
+      128,
+      "pricingVersion",
+    ),
+    priceUpdatedAt: validateTimestamp(estimate?.priceUpdatedAt ?? now),
     preflight: serializePreflight(input.preflight),
     route: validateRouteSelection(
       input.route ?? {
@@ -1131,7 +1147,10 @@ function evolveGenerationRun(
       "A ready or completed generation run must retain its candidate.",
     );
   }
-  const addCost = input.addIncurredCost === true ? BigInt(current.estimatedCostMicros) : 0n;
+  const addCost =
+    input.addIncurredCost === true && current.costStatus === "estimated"
+      ? BigInt(current.estimatedCostMicros)
+      : 0n;
   return validateGenerationRun({
     ...current,
     state: input.state,
@@ -1153,18 +1172,19 @@ function evolveGenerationRun(
 
 function serializePreflight(preflight: GenerationPreflightSnapshot): PersistedGenerationPreflight {
   const estimate = preflight.estimate;
-  if (estimate === null) {
-    throw governanceError("AI_GENERATION_PREFLIGHT_BLOCKED", "Preflight has no cost estimate.");
-  }
   return Object.freeze({
     checkedAt: validateTimestamp(preflight.checkedAt),
     canStart: preflight.canStart,
     requiresConfirmation: preflight.requiresConfirmation,
     codes: Object.freeze(preflight.checks.map(({ code }) => code)),
-    estimateMicros: estimate.micros.toString(),
-    currency: validateCurrency(estimate.currency),
-    pricingVersion: validateSafeIdentifier(estimate.pricingVersion, 128, "pricingVersion"),
-    priceUpdatedAt: validateTimestamp(estimate.priceUpdatedAt),
+    costStatus: estimate === null ? "pricing_unavailable" : "estimated",
+    estimateMicros: estimate?.micros.toString() ?? null,
+    currency: estimate === null ? null : validateCurrency(estimate.currency),
+    pricingVersion:
+      estimate === null
+        ? null
+        : validateSafeIdentifier(estimate.pricingVersion, 128, "pricingVersion"),
+    priceUpdatedAt: estimate === null ? null : validateTimestamp(estimate.priceUpdatedAt),
     inputBytes: preflight.inputBytes,
     inputTokens: preflight.inputTokens,
     maximumOutputTokens: preflight.maximumOutputTokens,
@@ -1205,10 +1225,11 @@ function buildBudgetLimits(
 function costCommittedOrReserved(run: GenerationRun): bigint {
   const incurred = BigInt(run.incurredCostMicros);
   if (
-    run.state === "queued" ||
-    run.state === "retrieving" ||
-    run.state === "generating" ||
-    run.state === "validating"
+    run.costStatus === "estimated" &&
+    (run.state === "queued" ||
+      run.state === "retrieving" ||
+      run.state === "generating" ||
+      run.state === "validating")
   ) {
     const estimate = BigInt(run.estimatedCostMicros);
     return incurred + estimate;
@@ -1324,6 +1345,7 @@ function hydrateGenerationRun(row: GenerationRunRow): GenerationRun {
     maximumOutputTokens: row.maximum_output_tokens,
     estimatedCostMicros: row.estimated_cost_micros,
     incurredCostMicros: row.incurred_cost_micros,
+    costStatus: row.cost_status as GenerationCostStatus,
     currency: row.currency,
     pricingVersion: row.pricing_version,
     priceUpdatedAt: row.price_updated_at,
@@ -1352,6 +1374,7 @@ function hydrateGenerationRun(row: GenerationRunRow): GenerationRun {
 }
 
 function validateGenerationRun(run: GenerationRun): GenerationRun {
+  const costStatus = (run as Partial<GenerationRun>).costStatus ?? "estimated";
   if (
     !Number.isSafeInteger(run.revision) ||
     run.revision < 1 ||
@@ -1377,6 +1400,15 @@ function validateGenerationRun(run: GenerationRun): GenerationRun {
   validateSafeIdentifier(run.modelId, 512, "modelId");
   validateMicros(run.estimatedCostMicros, "estimatedCostMicros");
   validateMicros(run.incurredCostMicros, "incurredCostMicros");
+  if (
+    !(["estimated", "pricing_unavailable"] as readonly string[]).includes(costStatus) ||
+    (costStatus === "pricing_unavailable" &&
+      (run.estimatedCostMicros !== "0" ||
+        run.currency !== "XXX" ||
+        run.pricingVersion !== "pricing_unavailable"))
+  ) {
+    throw governanceError("AI_GENERATION_STORE_CORRUPT", "Stored cost status is invalid.");
+  }
   validateCurrency(run.currency);
   validateSafeIdentifier(run.pricingVersion, 128, "pricingVersion");
   validateTimestamp(run.priceUpdatedAt);
@@ -1398,6 +1430,7 @@ function validateGenerationRun(run: GenerationRun): GenerationRun {
   validateTimestamp(run.updatedAt);
   return Object.freeze({
     ...run,
+    costStatus,
     route,
     preflight: Object.freeze({ ...run.preflight }),
   });
@@ -1406,8 +1439,11 @@ function validateGenerationRun(run: GenerationRun): GenerationRun {
 function validatePersistedPreflight(
   preflight: PersistedGenerationPreflight,
 ): PersistedGenerationPreflight {
+  if (!isObject(preflight)) {
+    throw governanceError("AI_GENERATION_STORE_CORRUPT", "Stored generation preflight is invalid.");
+  }
+  const costStatus = (preflight as Partial<PersistedGenerationPreflight>).costStatus ?? "estimated";
   if (
-    !isObject(preflight) ||
     typeof preflight.canStart !== "boolean" ||
     typeof preflight.requiresConfirmation !== "boolean" ||
     !Array.isArray(preflight.codes) ||
@@ -1427,11 +1463,23 @@ function validatePersistedPreflight(
     throw governanceError("AI_GENERATION_STORE_CORRUPT", "Stored generation preflight is invalid.");
   }
   validateTimestamp(preflight.checkedAt);
-  validateMicros(preflight.estimateMicros, "estimateMicros");
-  validateCurrency(preflight.currency);
-  validateSafeIdentifier(preflight.pricingVersion, 128, "pricingVersion");
-  validateTimestamp(preflight.priceUpdatedAt);
-  return preflight;
+  if (!(["estimated", "pricing_unavailable"] as readonly string[]).includes(costStatus)) {
+    throw governanceError("AI_GENERATION_STORE_CORRUPT", "Stored preflight cost is invalid.");
+  }
+  if (costStatus === "estimated") {
+    validateMicros(preflight.estimateMicros ?? "", "estimateMicros");
+    validateCurrency(preflight.currency ?? "");
+    validateSafeIdentifier(preflight.pricingVersion ?? "", 128, "pricingVersion");
+    validateTimestamp(preflight.priceUpdatedAt ?? "");
+  } else if (
+    preflight.estimateMicros !== null ||
+    preflight.currency !== null ||
+    preflight.pricingVersion !== null ||
+    preflight.priceUpdatedAt !== null
+  ) {
+    throw governanceError("AI_GENERATION_STORE_CORRUPT", "Stored preflight cost is invalid.");
+  }
+  return Object.freeze({ ...preflight, costStatus });
 }
 
 function sameGenerationRequest(left: GenerationRun, right: GenerationRun): boolean {
@@ -1448,6 +1496,7 @@ function sameGenerationRequest(left: GenerationRun, right: GenerationRun): boole
     left.route.fallbackModelId === right.route.fallbackModelId &&
     left.inputTokens === right.inputTokens &&
     left.maximumOutputTokens === right.maximumOutputTokens &&
+    left.costStatus === right.costStatus &&
     left.pricingVersion === right.pricingVersion &&
     left.estimatedCostMicros === right.estimatedCostMicros
   );
@@ -1483,6 +1532,7 @@ function prepareAttemptUsage(
     ...input,
     runId: run.id,
     attempt: run.attempt,
+    costStatus: run.costStatus,
     currency: run.currency,
     pricingVersion: run.pricingVersion,
     priceUpdatedAt: run.priceUpdatedAt,
@@ -1499,6 +1549,7 @@ function hydrateAttemptUsage(row: GenerationAttemptUsageRow): GenerationAttemptU
     outputTokens: row.output_tokens,
     cachedInputTokens: row.cached_input_tokens,
     usagePricedEstimateMicros: row.usage_priced_estimate_micros,
+    costStatus: row.cost_status as GenerationCostStatus,
     currency: row.currency,
     pricingVersion: row.pricing_version,
     priceUpdatedAt: row.price_updated_at,
@@ -1507,6 +1558,9 @@ function hydrateAttemptUsage(row: GenerationAttemptUsageRow): GenerationAttemptU
 }
 
 function validateAttemptUsage(usage: GenerationAttemptUsage): GenerationAttemptUsage {
+  const costStatus =
+    (usage as Partial<GenerationAttemptUsage>).costStatus ??
+    (usage.source === "provider_reported_unpriced" ? "pricing_unavailable" : "estimated");
   const validToken = (value: number | null): boolean =>
     value === null || (Number.isSafeInteger(value) && value >= 0 && value <= 100_000_000);
   if (
@@ -1521,10 +1575,18 @@ function validateAttemptUsage(usage: GenerationAttemptUsage): GenerationAttemptU
   }
   const providerReported =
     usage.source === "provider_reported" &&
+    costStatus === "estimated" &&
     usage.inputTokens !== null &&
     usage.outputTokens !== null &&
     (usage.cachedInputTokens === null || usage.cachedInputTokens <= usage.inputTokens) &&
     usage.usagePricedEstimateMicros !== null;
+  const providerReportedUnpriced =
+    usage.source === "provider_reported_unpriced" &&
+    costStatus === "pricing_unavailable" &&
+    usage.inputTokens !== null &&
+    usage.outputTokens !== null &&
+    (usage.cachedInputTokens === null || usage.cachedInputTokens <= usage.inputTokens) &&
+    usage.usagePricedEstimateMicros === null;
   const providerUnavailable =
     usage.source === "provider_unavailable" &&
     usage.inputTokens === null &&
@@ -1537,7 +1599,7 @@ function validateAttemptUsage(usage: GenerationAttemptUsage): GenerationAttemptU
     usage.outputTokens === 0 &&
     usage.cachedInputTokens === 0 &&
     usage.usagePricedEstimateMicros === "0";
-  if (!providerReported && !providerUnavailable && !localDemo) {
+  if (!providerReported && !providerReportedUnpriced && !providerUnavailable && !localDemo) {
     throw governanceError(
       "AI_GENERATION_USAGE_INVALID",
       "Usage source and token values are inconsistent.",
@@ -1551,7 +1613,7 @@ function validateAttemptUsage(usage: GenerationAttemptUsage): GenerationAttemptU
   validateSafeIdentifier(usage.pricingVersion, 128, "pricingVersion");
   validateTimestamp(usage.priceUpdatedAt);
   validateTimestamp(usage.reportedAt);
-  return Object.freeze({ ...usage });
+  return Object.freeze({ ...usage, costStatus });
 }
 
 function prepareDeferredRequest(
@@ -1889,7 +1951,7 @@ const GENERATION_RUN_SELECT = `SELECT
   run.chapter_id, run.base_version_id, run.provider_id, run.model_id,
   run.state, run.revision, run.attempt, run.input_tokens,
   run.maximum_output_tokens, run.estimated_cost_micros,
-  run.incurred_cost_micros, run.currency, run.pricing_version,
+  run.incurred_cost_micros, run.cost_status, run.currency, run.pricing_version,
   run.price_updated_at, run.preflight_json, run.candidate_id,
   run.failure_code, run.cancelled_at, run.completed_at,
   run.created_at, run.updated_at,
@@ -1903,7 +1965,7 @@ LEFT JOIN ai_generation_route_selections AS route
 
 const ATTEMPT_USAGE_SELECT = `SELECT
   run_id, attempt, usage_source, input_tokens, output_tokens,
-  cached_input_tokens, usage_priced_estimate_micros, currency,
+  cached_input_tokens, usage_priced_estimate_micros, cost_status, currency,
   pricing_version, price_updated_at, reported_at
 FROM ai_generation_attempt_usage`;
 

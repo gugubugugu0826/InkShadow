@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { parseUuidV7, type UuidV7 } from "@inkshadow/story-core";
 import { ToastProvider } from "@inkshadow/ui";
@@ -16,6 +16,8 @@ import {
   EDITOR_VIEW_STATE_STORAGE_KEY,
 } from "../infrastructure/editor-view-state-store";
 import { NOVEL_AI_TASKS } from "../infrastructure/model-hub-provider-registry";
+import { applyAutomaticModelHubRouting } from "../infrastructure/model-hub-routing-service";
+import { ModelHubStoreError } from "../infrastructure/model-hub-store";
 import {
   createDevelopmentRuntime,
   type DesktopRuntime,
@@ -240,7 +242,7 @@ describe("SettingsPage model routing", () => {
     expect(await screen.findByRole("heading", { name: "InkShadow Model Hub" })).toBeVisible();
     expect(screen.queryByLabelText("基础地址")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("认证方式")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("上下文窗口（token）")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^上下文窗口（token）/u)).not.toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Google Gemini" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Anthropic Claude" })).toBeInTheDocument();
 
@@ -248,7 +250,7 @@ describe("SettingsPage model routing", () => {
 
     expect(screen.getByLabelText("基础地址")).toBeVisible();
     expect(screen.getByLabelText("认证方式")).toBeVisible();
-    expect(screen.getByLabelText("上下文窗口（token）")).toBeInTheDocument();
+    expect(screen.getByLabelText(/^上下文窗口（token）/u)).toBeInTheDocument();
     expect(screen.getByText("重试不会重复计费请求")).toBeVisible();
     expect(screen.getByText("专家兼容设置：旧 7 角色路由")).toBeVisible();
     expect(
@@ -352,29 +354,39 @@ describe("SettingsPage model routing", () => {
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
     await user.selectOptions(providerSelect, "custom_openai_compatible");
-    await user.clear(screen.getByLabelText("Base URL"));
-    await user.type(screen.getByLabelText("Base URL"), "https://custom-models.example/v1");
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://custom-models.example/v1" },
+    });
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     expect(providerSelect).toHaveValue("custom_openai_compatible");
     expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
     expect(screen.getByLabelText(/^模型目录路径/u)).toBeVisible();
-    await user.clear(screen.getByLabelText("配置标识"));
-    await user.type(screen.getByLabelText("配置标识"), "custom-safe");
+    fireEvent.change(screen.getByLabelText("配置标识"), { target: { value: "custom-safe" } });
     await user.selectOptions(
       screen.getByRole("combobox", { name: "认证方式" }),
       "custom_header_keyring",
     );
     expect(providerSelect).toHaveValue("custom_openai_compatible");
     expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
-    await user.type(await screen.findByLabelText(/^模型目录路径/u), "/catalog/models");
-    await user.type(screen.getByLabelText(/^文本生成路径/u), "/text/chat");
-    await user.type(screen.getByLabelText(/^Embedding 路径/u), "/vectors/embed");
-    await user.type(screen.getByLabelText("认证 Header 名称"), "X-API-Key");
-    await user.clear(screen.getByLabelText("请求超时（毫秒）"));
-    await user.type(screen.getByLabelText("请求超时（毫秒）"), "47000");
-    await user.clear(screen.getByLabelText("安全重试次数"));
-    await user.type(screen.getByLabelText("安全重试次数"), "2");
-    await user.type(screen.getByLabelText("认证 Header 值"), "super-secret-header-value");
+    fireEvent.change(await screen.findByLabelText(/^模型目录路径/u), {
+      target: { value: "/catalog/models" },
+    });
+    fireEvent.change(screen.getByLabelText(/^文本生成路径/u), {
+      target: { value: "/text/chat" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Embedding 路径/u), {
+      target: { value: "/vectors/embed" },
+    });
+    fireEvent.change(screen.getByLabelText("认证 Header 名称"), {
+      target: { value: "X-API-Key" },
+    });
+    fireEvent.change(screen.getByLabelText("请求超时（毫秒）"), {
+      target: { value: "47000" },
+    });
+    fireEvent.change(screen.getByLabelText("安全重试次数"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("认证 Header 值"), {
+      target: { value: "super-secret-header-value" },
+    });
     await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
 
     const check = screen.getByRole("button", { name: "测试连接并发现模型" });
@@ -497,7 +509,9 @@ describe("SettingsPage model routing", () => {
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
     await user.selectOptions(providerSelect, "custom_openai_compatible");
-    await user.type(screen.getByLabelText("Base URL"), "https://custom-models.example/v1");
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://custom-models.example/v1" },
+    });
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     expect(providerSelect).toHaveValue("custom_openai_compatible");
     expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
@@ -508,16 +522,25 @@ describe("SettingsPage model routing", () => {
     );
     expect(providerSelect).toHaveValue("custom_openai_compatible");
     expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
-    await user.type(screen.getByLabelText("认证 Header 名称"), "Host");
-    await user.type(screen.getByLabelText("认证 Header 值"), "super-secret-header-value");
+    fireEvent.change(screen.getByLabelText("认证 Header 名称"), {
+      target: { value: "Host" },
+    });
+    fireEvent.change(screen.getByLabelText("认证 Header 值"), {
+      target: { value: "super-secret-header-value" },
+    });
     await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
-    await waitFor(() => expect(saveCredential).not.toHaveBeenCalled());
+    expect(await screen.findByText(/MODEL_PROVIDER_CREDENTIAL_HEADER_FORBIDDEN/u)).toBeVisible();
+    expect(saveCredential).not.toHaveBeenCalled();
 
-    await user.clear(screen.getByLabelText("认证 Header 名称"));
-    await user.type(screen.getByLabelText("认证 Header 名称"), "x-api-key");
-    await user.type(await screen.findByLabelText(/^模型目录路径/u), "//attacker.example/models");
+    fireEvent.change(screen.getByLabelText("认证 Header 名称"), {
+      target: { value: "x-api-key" },
+    });
+    fireEvent.change(await screen.findByLabelText(/^模型目录路径/u), {
+      target: { value: "//attacker.example/models" },
+    });
     await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
-    await waitFor(() => expect(saveCredential).not.toHaveBeenCalled());
+    expect(await screen.findByText(/MODEL_PROVIDER_API_PATH_INVALID/u)).toBeVisible();
+    expect(saveCredential).not.toHaveBeenCalled();
   }, 15_000);
 
   it("rejects a cross-provider connection id before writing a credential", async () => {
@@ -548,17 +571,22 @@ describe("SettingsPage model routing", () => {
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
     await user.selectOptions(providerSelect, "custom_openai_compatible");
-    await user.type(screen.getByLabelText("Base URL"), "https://custom-models.example/v1");
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://custom-models.example/v1" },
+    });
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     const providerId = screen.getByLabelText("配置标识");
-    await user.clear(providerId);
-    await user.type(providerId, "shared-provider-id");
+    fireEvent.change(providerId, { target: { value: "shared-provider-id" } });
     await user.selectOptions(
       screen.getByRole("combobox", { name: "认证方式" }),
       "custom_header_keyring",
     );
-    await user.type(await screen.findByLabelText("认证 Header 名称"), "x-api-key");
-    await user.type(screen.getByLabelText("认证 Header 值"), "never-written-secret");
+    fireEvent.change(await screen.findByLabelText("认证 Header 名称"), {
+      target: { value: "x-api-key" },
+    });
+    fireEvent.change(screen.getByLabelText("认证 Header 值"), {
+      target: { value: "never-written-secret" },
+    });
     await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
 
     expect(
@@ -1316,6 +1344,198 @@ describe("SettingsPage model routing", () => {
     await expect(runtime.modelHub.findTaskRoute("image_generation")).resolves.toBeNull();
   });
 
+  it("repairs the exact legacy 15-route automatic smart prefix without revising matching routes", async () => {
+    const prepared = await createReadyDeepSeekProbeRuntime("deepseek-routing-recovery");
+    await prepared.runtime.modelHub.recordCapabilityScan({
+      scanId: "deepseek-routing-recovery-seed-scan",
+      catalogEntryId: prepared.catalogEntryId,
+      scanKind: "user_review",
+      status: "succeeded",
+      evidenceVersion: "routing-recovery-v1",
+      evidence: [
+        {
+          id: "deepseek-routing-recovery-text",
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "user_confirmed",
+        },
+      ],
+    });
+    const seeded = await applyAutomaticModelHubRouting({
+      modelHub: prepared.runtime.modelHub,
+      legacyRouting: prepared.runtime.modelRouting,
+      legacyReadyModels: [],
+      scheme: "smart",
+      now: "2026-08-09T20:00:00.000Z",
+    });
+    expect(seeded.savedNovelTaskCount).toBe(16);
+    const missingRoute = await prepared.runtime.modelHub.findTaskRoute("content_quality_check");
+    const unchangedRoute = await prepared.runtime.modelHub.findTaskRoute("idea_discussion");
+    if (missingRoute === null || unchangedRoute === null) {
+      throw new Error("Expected the seeded text routes.");
+    }
+    await prepared.runtime.modelHub.deleteTaskRoute(missingRoute.task, missingRoute.revision);
+    const interruptedRoutes = (
+      await Promise.all(NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)))
+    ).filter((route) => route !== null);
+    expect(interruptedRoutes).toHaveLength(15);
+
+    const user = userEvent.setup();
+    renderRoute(prepared.runtime);
+    const verifyButton = await screen.findByRole("button", { name: "验证写作能力" });
+    await waitFor(() => expect(verifyButton).toBeEnabled());
+    await user.click(verifyButton);
+
+    expect(await screen.findByText("写作能力已验证")).toBeVisible();
+    expect(await screen.findByText("16 / 22 类已配置 · 6 类缺能力")).toBeVisible();
+    const recovered = (
+      await Promise.all(NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)))
+    ).flatMap((route) => (route?.enabled === true ? [route] : []));
+    expect(recovered).toHaveLength(16);
+    await expect(
+      prepared.runtime.modelHub.findTaskRoute("content_quality_check"),
+    ).resolves.toMatchObject({
+      routeOrigin: "automatic",
+      presetId: "automatic-smart",
+      enabled: true,
+    });
+    await expect(prepared.runtime.modelHub.findTaskRoute("idea_discussion")).resolves.toEqual(
+      unchangedRoute,
+    );
+  });
+
+  it("keeps a successful writing probe visible when the initial routing transaction fails", async () => {
+    const prepared = await createReadyDeepSeekProbeRuntime("deepseek-routing-write-failure");
+    vi.spyOn(prepared.runtime.modelHub, "applyAutomaticRoutingPlan").mockRejectedValue(
+      new ModelHubStoreError(
+        "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED",
+        "injected routing transaction failure",
+        true,
+      ),
+    );
+    const user = userEvent.setup();
+    renderRoute(prepared.runtime);
+
+    const verifyButton = await screen.findByRole("button", { name: "验证写作能力" });
+    await waitFor(() => expect(verifyButton).toBeEnabled());
+    await user.click(verifyButton);
+
+    expect(await screen.findByText("写作能力已验证")).toBeVisible();
+    expect(screen.getByText(/写作能力证据已保留；自动分工未完成/u)).toBeVisible();
+    expect(screen.getByText("配置写入失败")).toBeVisible();
+    expect(screen.getAllByText("AI 分工没有保存").length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/Model Hub 的 22 项分工没有被修改，本次任务路由事务已回滚/u),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "重试保存" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "导出脱敏诊断" })).toBeVisible();
+    expect(screen.queryByText(/INSERT INTO|UPDATE novel_task_routes/u)).not.toBeInTheDocument();
+    expect(screen.getByText(/MODEL_HUB_ROUTING_PLAN_WRITE_FAILED/u)).toBeVisible();
+    await expect(
+      prepared.runtime.modelHub.listCapabilityEvidence(prepared.catalogEntryId),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "lightweight_probe",
+        }),
+      ]),
+    );
+    const routes = await Promise.all(
+      NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)),
+    );
+    expect(routes.every((route) => route === null)).toBe(true);
+  });
+
+  it("reports the fail-closed legacy projection truthfully when local privacy routing fails", async () => {
+    const prepared = await createReadyDeepSeekProbeRuntime("deepseek-local-privacy-failure");
+    await prepared.runtime.modelCenter.save({
+      providerId: "deepseek-local-privacy-failure",
+      provider: "open_ai_compatible",
+      baseUrl: "https://api.deepseek.com",
+      authentication: "bearer_keyring",
+      selectedModel: "deepseek-v4-flash",
+      pricing: null,
+      expectedRevision: null,
+    });
+    await prepared.runtime.modelRouting.saveRoute({
+      role: "high_quality",
+      primaryProviderId: "deepseek-local-privacy-failure",
+      fallbackProviderId: null,
+      expectedRevision: null,
+    });
+    vi.spyOn(prepared.runtime.modelHub, "applyAutomaticRoutingPlan").mockRejectedValue(
+      new ModelHubStoreError(
+        "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED",
+        "injected local privacy routing failure",
+        true,
+      ),
+    );
+    const user = userEvent.setup();
+    renderRoute(prepared.runtime);
+
+    const scheme = await screen.findByRole("combobox", { name: "使用方案" });
+    await user.selectOptions(scheme, "local_privacy");
+    await user.click(screen.getByRole("button", { name: "应用 AI 分工" }));
+
+    expect(
+      await screen.findByText(/Model Hub 的 22 项分工未修改.*旧版兼容分工可能已被安全停用/u),
+    ).toBeVisible();
+    expect(screen.queryByText(/之前的 AI 分工没有被修改，事务已回滚/u)).not.toBeInTheDocument();
+    await expect(prepared.runtime.modelRouting.listRoutes()).resolves.toEqual([]);
+    const routes = await Promise.all(
+      NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)),
+    );
+    expect(routes.every((route) => route === null)).toBe(true);
+  });
+
+  it("shows a partial capability status while preserving a committed plan when legacy sync fails", async () => {
+    const prepared = await createReadyDeepSeekProbeRuntime("deepseek-manual-routing");
+    await prepared.runtime.modelHub.recordCapabilityScan({
+      scanId: "deepseek-manual-routing-scan",
+      catalogEntryId: prepared.catalogEntryId,
+      scanKind: "user_review",
+      status: "succeeded",
+      evidenceVersion: "manual-routing-v1",
+      evidence: [
+        {
+          id: "deepseek-manual-routing-text",
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "user_confirmed",
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    renderRoute(prepared.runtime);
+    await screen.findByRole("heading", { name: "AI 分工" });
+    vi.spyOn(prepared.runtime.modelRouting, "listRoutes").mockRejectedValue(
+      new Error("injected legacy projection failure"),
+    );
+
+    await user.click(screen.getByRole("button", { name: "应用 AI 分工" }));
+
+    expect(await screen.findByText("16 / 22 类已配置 · 6 类缺能力")).toBeVisible();
+    expect(screen.getByText("AI 基础写作已可用")).toBeVisible();
+    expect(screen.getByText(/6 项高级能力尚未配置，但不会阻止基础写作/u)).toBeVisible();
+    expect(screen.getByRole("heading", { name: "当前模型能做什么" })).toBeVisible();
+    expect(screen.getByText(/由用户确认，尚未实测 · 用户确认/u)).toBeVisible();
+    await user.click(screen.getByText("查看已配置的 16 项"));
+    expect(screen.getAllByText("正文生成").length).toBeGreaterThan(0);
+    await user.click(screen.getByText("查看尚未配置的 6 项"));
+    expect(screen.getAllByText("语义记忆").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("基础写作仍可用").length).toBeGreaterThan(0);
+    expect(screen.getByRole("heading", { name: "完善全部功能还需要" })).toBeVisible();
+    expect(await screen.findByText(/旧版兼容分工暂未同步/u)).toBeVisible();
+    expect(screen.getByText("AI 分工部分可用")).toBeVisible();
+    expect(screen.queryByText(/MODEL_HUB_LEGACY_SYNC_FAILED/u)).not.toBeInTheDocument();
+    const routes = (
+      await Promise.all(NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)))
+    ).flatMap((route) => (route?.enabled === true ? [route] : []));
+    expect(routes).toHaveLength(16);
+  });
+
   it("never replaces an existing disabled custom route after a successful probe", async () => {
     const developmentRuntime = createDevelopmentRuntime(window.localStorage);
     let connection = await developmentRuntime.modelHub.saveConnection({
@@ -1685,4 +1905,66 @@ function pricing(pricingVersion: string) {
     pricingVersion,
     priceUpdatedAt: "2026-07-27T00:00:00.000Z",
   } as const;
+}
+
+async function createReadyDeepSeekProbeRuntime(connectionId: string): Promise<
+  Readonly<{
+    runtime: DesktopRuntime;
+    catalogEntryId: string;
+  }>
+> {
+  const developmentRuntime = createDevelopmentRuntime(window.localStorage);
+  let connection = await developmentRuntime.modelHub.saveConnection({
+    id: connectionId,
+    providerKind: "deepseek",
+    displayName: "DeepSeek",
+    credentialRef: `keyring:model-hub:${connectionId}`,
+    credentialState: "present",
+    authenticationMode: "bearer_keyring",
+    enabled: true,
+    expectedRevision: null,
+  });
+  connection = await developmentRuntime.modelHub.recordConnectionTest({
+    connectionId: connection.id,
+    status: "ready",
+    expectedRevision: connection.revision,
+  });
+  const catalog = await developmentRuntime.modelHub.syncCatalog({
+    syncId: `${connectionId}-sync`,
+    connectionId: connection.id,
+    source: "provider_api",
+    status: "succeeded",
+    models: [
+      {
+        id: `${connectionId}-catalog`,
+        providerModelId: "deepseek-v4-flash",
+        displayName: "deepseek-v4-flash",
+      },
+    ],
+  });
+  const catalogEntry = catalog[0];
+  if (catalogEntry === undefined) throw new Error("Expected the DeepSeek catalog entry.");
+  const runtime: DesktopRuntime = {
+    ...developmentRuntime,
+    mode: "tauri",
+    credentials: {
+      getSummary: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+      save: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+      delete: () => Promise.resolve({ configured: false, lastFour: null }),
+    },
+    modelGateway: {
+      available: true,
+      checkConnection: () => Promise.reject(new Error("not used")),
+      listModels: () => Promise.reject(new Error("not used")),
+      generate: () =>
+        Promise.resolve({
+          text: "OK",
+          usage: { inputTokens: 4, outputTokens: 1, cachedInputTokens: null },
+          streamed: false,
+        }),
+      embed: () => Promise.reject(new Error("not used")),
+      cancelGeneration: () => Promise.resolve(false),
+    },
+  };
+  return Object.freeze({ runtime, catalogEntryId: catalogEntry.id });
 }

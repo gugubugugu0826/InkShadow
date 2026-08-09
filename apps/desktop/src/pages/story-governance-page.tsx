@@ -57,6 +57,7 @@ import { useRuntime } from "../runtime-context";
 import { WritingPreferencesPanel } from "../components/writing-preferences-panel";
 import { ContextHistoryPanel } from "../components/context-history-panel";
 import { ChapterSummaryPanel } from "../components/chapter-summary-panel";
+import { StorySettingsTools } from "../components/story-settings-tools";
 import type { ContinuousStoryStateDashboard } from "../infrastructure/continuous-story-state-extraction";
 
 const FORMAL_KIND_OPTIONS = FORMAL_RECORD_KINDS.map((kind) => ({
@@ -1192,921 +1193,958 @@ export function StoryGovernancePage() {
             ),
         }}
       >
-        <Tabs defaultValue="characters" value={activeTab} onValueChange={setActiveTab}>
-          <TabsList label="故事设定分类">
-            <TabsTrigger value="characters">人物</TabsTrigger>
-            <TabsTrigger value="world">世界与规则</TabsTrigger>
-            <TabsTrigger value="memory">AI 记住的内容</TabsTrigger>
-            <TabsTrigger value="preferences">写作偏好</TabsTrigger>
-          </TabsList>
+        <>
+          <StorySettingsTools
+            runtime={runtime}
+            projectId={projectIdParameter}
+            projectName={project?.name ?? "InkShadow"}
+            records={records}
+            facts={facts}
+            memories={memories}
+            activeSection={
+              activeTab === "characters" ||
+              activeTab === "world" ||
+              activeTab === "memory" ||
+              activeTab === "preferences"
+                ? activeTab
+                : "other"
+            }
+            readonly={readonly}
+            onChanged={load}
+            onOpenManualForm={openCreateFact}
+          />
+          <Tabs defaultValue="characters" value={activeTab} onValueChange={setActiveTab}>
+            <TabsList label="故事设定分类">
+              <TabsTrigger value="characters">人物</TabsTrigger>
+              <TabsTrigger value="world">世界与规则</TabsTrigger>
+              <TabsTrigger value="memory">AI 记住的内容</TabsTrigger>
+              <TabsTrigger value="preferences">写作偏好</TabsTrigger>
+            </TabsList>
 
-          {!(PRIMARY_GOVERNANCE_TABS as readonly string[]).includes(activeTab) && (
-            <div className="story-governance-advanced-return">
-              <TabsList label="当前高级治理工具">
-                <TabsTrigger value={activeTab}>{advancedGovernanceTabLabel(activeTab)}</TabsTrigger>
-              </TabsList>
-              <Button size="sm" variant="secondary" onClick={() => setActiveTab("world")}>
-                返回世界与规则
-              </Button>
-            </div>
-          )}
-
-          <TabsContent value="characters">
-            <section aria-labelledby="character-library-title">
-              <div className="section-heading">
-                <div>
-                  <h2 id="character-library-title">人物</h2>
-                  <p>只按已有实体标识聚合；名称相同但没有可靠关联的人物不会被自动合并。</p>
-                </div>
-                <div className="story-governance-actions">
-                  <Button
-                    variant="secondary"
-                    disabled={readonly || busy}
-                    onClick={() => void runLatestChapterRecognition()}
-                  >
-                    重新识别最近一章
-                  </Button>
-                  <Button disabled={readonly || busy} onClick={openCreateFact}>
-                    添加人物设定
-                  </Button>
-                </div>
-              </div>
-
-              {needsConfirmationCount > 0 && (
-                <InlineAlert
-                  tone="warning"
-                  title={`${String(needsConfirmationCount)} 项重大变化需要确认`}
-                  description="人物身份、生死、核心关系和重大能力变化不会因为 AI 识别而自动成为正式事实。"
-                />
-              )}
-
-              {characterGroups.length === 0 ? (
-                <EmptyState
-                  title="还没有人物设定"
-                  description="可以直接开始写作，或先添加一个人物；从正文识别出的内容会保留原文证据并等待你确认。"
-                  {...(readonly
-                    ? {}
-                    : { primaryAction: { label: "添加第一个人物", onClick: openCreateFact } })}
-                />
-              ) : (
-                <div className="story-entity-grid">
-                  {characterGroups.map((group) => (
-                    <Card key={group.key}>
-                      <CardHeader>
-                        <div className="card-heading-row">
-                          <div>
-                            <CardTitle>{group.name}</CardTitle>
-                            <CardDescription>
-                              {group.aliases.length > 0
-                                ? `别名：${group.aliases.join("、")}`
-                                : "暂无已确认别名"}
-                            </CardDescription>
-                          </div>
-                          <Badge tone={entityGroupStatusTone(group)}>
-                            {entityGroupStatusLabel(group)}
-                          </Badge>
-                        </div>
-                      </CardHeader>
-                      <CardContent>
-                        <p className="story-governance-copy">{entityGroupSummary(group)}</p>
-                        <div className="story-governance-meta">
-                          <span>{String(group.facts.length)} 项事实</span>
-                          <span>{String(group.records.length)} 条正式记录</span>
-                          <span>{String(entityChapterIds(group).length)} 个来源章节</span>
-                        </div>
-                      </CardContent>
-                      <CardFooter>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => setSelectedCharacterKey(group.key)}
-                        >
-                          查看人物详情
-                        </Button>
-                      </CardFooter>
-                    </Card>
-                  ))}
-                </div>
-              )}
-            </section>
-          </TabsContent>
-
-          <TabsContent value="world">
-            <section aria-labelledby="world-library-title">
-              <div className="section-heading">
-                <div>
-                  <h2 id="world-library-title">世界与规则</h2>
-                  <p>
-                    地点、规则和组织按真实类型或实体标识分组；无法可靠分类的内容保留在“其他设定”。
-                  </p>
-                </div>
-                <Button disabled={readonly || busy} onClick={openCreateFact}>
-                  添加世界设定
+            {!(PRIMARY_GOVERNANCE_TABS as readonly string[]).includes(activeTab) && (
+              <div className="story-governance-advanced-return">
+                <TabsList label="当前高级治理工具">
+                  <TabsTrigger value={activeTab}>
+                    {advancedGovernanceTabLabel(activeTab)}
+                  </TabsTrigger>
+                </TabsList>
+                <Button size="sm" variant="secondary" onClick={() => setActiveTab("world")}>
+                  返回世界与规则
                 </Button>
               </div>
-
-              {worldGroups.length === 0 ? (
-                <EmptyState
-                  title="还没有世界设定"
-                  description="世界设定不是开始写作的必填项。需要时可添加地点、硬规则或组织，也可以从已保存正文重新识别。"
-                  {...(readonly
-                    ? {}
-                    : { primaryAction: { label: "添加第一条设定", onClick: openCreateFact } })}
-                />
-              ) : (
-                <div className="story-world-sections">
-                  {WORLD_SECTION_ORDER.map((sectionKind) => {
-                    const groups = worldGroups.filter(
-                      ({ worldSection }) => worldSection === sectionKind,
-                    );
-                    if (groups.length === 0) return null;
-                    return (
-                      <section key={sectionKind} aria-labelledby={`world-${sectionKind}-title`}>
-                        <div className="section-heading section-heading--compact">
-                          <h3 id={`world-${sectionKind}-title`}>
-                            {worldSectionLabel(sectionKind)}
-                          </h3>
-                          <Badge>{String(groups.length)} 项</Badge>
-                        </div>
-                        <div className="story-entity-grid">
-                          {groups.map((group) => (
-                            <Card key={group.key}>
-                              <CardHeader>
-                                <div className="card-heading-row">
-                                  <div>
-                                    <CardTitle>{group.name}</CardTitle>
-                                    <CardDescription>
-                                      {worldSectionLabel(sectionKind)}
-                                    </CardDescription>
-                                  </div>
-                                  <Badge tone={entityGroupStatusTone(group)}>
-                                    {entityGroupStatusLabel(group)}
-                                  </Badge>
-                                </div>
-                              </CardHeader>
-                              <CardContent>
-                                <p className="story-governance-copy">{entityGroupSummary(group)}</p>
-                                <div className="story-governance-meta">
-                                  <span>{String(group.facts.length)} 项事实</span>
-                                  <span>{String(entityChapterIds(group).length)} 个引用章节</span>
-                                </div>
-                              </CardContent>
-                              <CardFooter>
-                                <Button
-                                  size="sm"
-                                  variant="secondary"
-                                  onClick={() => setSelectedWorldKey(group.key)}
-                                >
-                                  查看设定详情
-                                </Button>
-                              </CardFooter>
-                            </Card>
-                          ))}
-                        </div>
-                      </section>
-                    );
-                  })}
-                </div>
-              )}
-
-              <Card className="story-governance-advanced-tools">
-                <CardHeader>
-                  <CardTitle>更多治理工具</CardTitle>
-                  <CardDescription>
-                    待确认变化、版本化正式记录和剧情试演保留原有安全边界，但不作为普通用户一级导航。
-                  </CardDescription>
-                </CardHeader>
-                <CardFooter className="story-governance-actions">
-                  <Button size="sm" variant="secondary" onClick={() => setActiveTab("facts")}>
-                    查看全部故事事实
-                  </Button>
-                  <Button size="sm" variant="secondary" onClick={() => setActiveTab("review")}>
-                    待确认变化
-                  </Button>
-                  <Button size="sm" variant="secondary" onClick={() => setActiveTab("formal")}>
-                    版本化正式记录
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => navigate(`/projects/${projectIdParameter}/graph`)}
-                  >
-                    因果剧情试演
-                  </Button>
-                  {whatIfBranches.length > 0 && (
-                    <Button size="sm" variant="ghost" onClick={() => setActiveTab("what-if")}>
-                      查看旧版试演记录
-                    </Button>
-                  )}
-                </CardFooter>
-              </Card>
-            </section>
-          </TabsContent>
-
-          <TabsContent value="facts">
-            <section aria-labelledby="unified-story-facts-title">
-              <InlineAlert
-                tone="info"
-                title={`识别到 ${String(pendingFactCount)} 项变化，其中 ${String(needsConfirmationCount)} 项需要确认`}
-                description="普通状态可作为可撤销参考；人物死亡、身份、核心关系、世界规则等重大变化只有在你确认后才会影响后续创作。"
-              />
-              <div className="section-heading">
-                <div>
-                  <h2 id="unified-story-facts-title">当前故事设定</h2>
-                  <p>
-                    每项内容都保留来源、状态和修订记录；“重新识别”会调用已连接的
-                    AI，可能产生供应商费用。
-                  </p>
-                </div>
-                <div className="story-governance-actions">
-                  <Button
-                    variant="secondary"
-                    disabled={readonly || busy}
-                    onClick={() => void runLatestChapterRecognition()}
-                  >
-                    重新识别最近一章
-                  </Button>
-                  <Button disabled={readonly || busy} onClick={openCreateFact}>
-                    添加设定
-                  </Button>
-                </div>
-              </div>
-
-              {activeFacts.length === 0 ? (
-                <EmptyState
-                  title="还没有整理故事设定"
-                  description="可以直接开始写，也可以先添加一个人物、世界规则或时间线事件；这些都不是开写前的必填项。"
-                  {...(readonly
-                    ? {}
-                    : {
-                        primaryAction: {
-                          label: "添加第一条设定",
-                          onClick: openCreateFact,
-                        },
-                      })}
-                />
-              ) : (
-                <div className="story-governance-grid">
-                  {activeFacts.map((fact) => {
-                    const snapshot = fact.toSnapshot();
-                    const continuousEvidence = continuousEvidenceByFactId.get(fact.id);
-                    const mergeNotice = storyFactMergeNotice(snapshot);
-                    const ambiguousAlias = readAmbiguousStoryFactEntityAlias(snapshot);
-                    const needsAliasResolution = storyFactNeedsEntityAliasResolution(snapshot);
-                    return (
-                      <Card key={fact.id}>
-                        <CardHeader>
-                          <div className="card-heading-row">
-                            <div>
-                              <CardTitle>{factTypeLabel(snapshot.factType)}</CardTitle>
-                              <CardDescription>{factSourceLabel(snapshot)}</CardDescription>
-                            </div>
-                            <Badge tone={factStatusTone(snapshot)}>
-                              {factStatusLabel(snapshot)}
-                            </Badge>
-                          </div>
-                        </CardHeader>
-                        <CardContent>
-                          <p className="story-governance-copy">{storyFactContent(snapshot)}</p>
-                          <div className="story-governance-meta">
-                            <span>可信度 {Math.round(snapshot.confidence * 100)}%</span>
-                            <span>修订 {String(snapshot.revision)}</span>
-                          </div>
-                          {continuousEvidence !== undefined && (
-                            <InlineAlert
-                              tone={
-                                continuousEvidence.evidenceState === "current" ? "info" : "warning"
-                              }
-                              title={
-                                continuousEvidence.evidenceState === "current"
-                                  ? "证据与当前正文一致"
-                                  : continuousEvidence.evidenceState === "historical"
-                                    ? "来自较早的正文版本"
-                                    : "证据无法验证"
-                              }
-                              description={continuousEvidence.evidenceMessage}
-                            />
-                          )}
-                          {mergeNotice !== null && (
-                            <InlineAlert
-                              tone="warning"
-                              title="人物或剧情对象需要你辨认"
-                              description={mergeNotice}
-                            />
-                          )}
-                        </CardContent>
-                        <CardFooter>
-                          {ambiguousAlias !== null && (
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              disabled={readonly || busy}
-                              onClick={() => openAliasResolution(fact)}
-                            >
-                              先辨认这个对象
-                            </Button>
-                          )}
-                          {(snapshot.status === "unconfirmed" ||
-                            snapshot.status === "temporary") && (
-                            <Button
-                              size="sm"
-                              disabled={readonly || busy || needsAliasResolution}
-                              onClick={() => void confirmFact(fact)}
-                            >
-                              确认并保留
-                            </Button>
-                          )}
-                          {snapshot.status === "formal" && (
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              disabled={readonly || busy}
-                              onClick={() => void toggleFactLock(fact)}
-                            >
-                              {snapshot.locked ? "取消锁定" : "锁定为硬规则"}
-                            </Button>
-                          )}
-                          {snapshot.status !== "branch" && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              disabled={readonly || busy}
-                              onClick={() => void deprecateFact(fact)}
-                            >
-                              {snapshot.status === "temporary" ? "撤销这项更新" : "标记为不再生效"}
-                            </Button>
-                          )}
-                        </CardFooter>
-                      </Card>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          </TabsContent>
-
-          <TabsContent value="context-history">
-            <ChapterSummaryPanel
-              projectId={projectIdParameter}
-              service={runtime.story.chapterSummaries}
-              continuousState={runtime.story.continuousState}
-              historicalBackfill={runtime.story.historicalBackfill}
-              readOnly={readonly}
-            />
-            <ContextHistoryPanel projectId={projectIdParameter} store={runtime.contextTraces} />
-          </TabsContent>
-
-          <TabsContent value="formal">
-            <section aria-labelledby="formal-records-title">
-              <div className="section-heading">
-                <div>
-                  <h2 id="formal-records-title">正式设定</h2>
-                  <p>角色、世界规则、伏笔和时间线事件都以不可静默覆盖的版本保存。</p>
-                </div>
-                <Button disabled={readonly || busy} onClick={openCreateFormalRecord}>
-                  新建正式设定
-                </Button>
-              </div>
-
-              {records.length === 0 ? (
-                <EmptyState
-                  title="还没有正式设定"
-                  description="手工录入第一条角色、世界规则、伏笔或时间线事件。"
-                  {...(readonly
-                    ? {}
-                    : {
-                        primaryAction: {
-                          label: "新建正式设定",
-                          onClick: openCreateFormalRecord,
-                        },
-                      })}
-                />
-              ) : (
-                <div className="story-governance-grid">
-                  {records.map((record) => {
-                    const snapshot = record.toSnapshot();
-                    const fields = readFormalFields(record);
-                    return (
-                      <Card key={record.id}>
-                        <CardHeader>
-                          <div className="card-heading-row">
-                            <div>
-                              <CardTitle>{fields.title}</CardTitle>
-                              <CardDescription>{snapshot.recordKey}</CardDescription>
-                            </div>
-                            <Badge tone={formalKindTone(record.kind)}>
-                              {formalKindLabel(record.kind)}
-                            </Badge>
-                          </div>
-                        </CardHeader>
-                        <CardContent>
-                          <p className="story-governance-copy">{fields.description}</p>
-                          <div className="story-governance-meta">
-                            <span>版本 {String(snapshot.currentVersion)}</span>
-                            <span>修订 {String(snapshot.revision)}</span>
-                          </div>
-                        </CardContent>
-                        <CardFooter>
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            disabled={readonly || busy}
-                            onClick={() => openEditFormalRecord(record)}
-                          >
-                            编辑
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            disabled={readonly || busy || snapshot.currentVersion < 2}
-                            onClick={() => void undoFormalRecord(record)}
-                          >
-                            撤回至上一版
-                          </Button>
-                        </CardFooter>
-                      </Card>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          </TabsContent>
-
-          <TabsContent value="memory">
-            <section aria-labelledby="memory-policy-title">
-              <Card className="story-memory-policy">
-                <CardHeader>
-                  <div className="card-heading-row">
-                    <div>
-                      <CardTitle id="memory-policy-title">自动学习授权</CardTitle>
-                      <CardDescription>
-                        开启只授权后续经过校验的自动记忆写入，不会立即生成或修改任何记忆。
-                      </CardDescription>
-                    </div>
-                    <Badge tone={policy?.automaticLearningEnabled === true ? "success" : "neutral"}>
-                      {policy?.automaticLearningEnabled === true ? "已授权" : "未授权"}
-                    </Badge>
-                  </div>
-                </CardHeader>
-                <CardFooter>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={readonly || busy || policy === null}
-                    onClick={() => setPolicyDialogOpen(true)}
-                  >
-                    {policy?.automaticLearningEnabled === true ? "关闭自动学习" : "开启自动学习"}
-                  </Button>
-                </CardFooter>
-              </Card>
-
-              <div className="section-heading">
-                <div>
-                  <h2>可治理记忆</h2>
-                  <p>固定、降权、排除、停用和编辑都会经过版本校验并保留来源。</p>
-                </div>
-                <div className="story-governance-actions">
-                  <Button
-                    variant="secondary"
-                    disabled={readonly || busy || mergeMemories.length !== 2}
-                    onClick={openMergeMemories}
-                  >
-                    合并所选 2 条
-                  </Button>
-                  <Button variant="secondary" onClick={() => setActiveTab("context-history")}>
-                    查看 AI 参考记录
-                  </Button>
-                  <Button disabled={readonly || busy} onClick={openCreateMemory}>
-                    添加用户记忆
-                  </Button>
-                </div>
-              </div>
-
-              {memories.length === 0 ? (
-                <EmptyState
-                  title="还没有记忆"
-                  description="添加一条由你确认的记忆规则；默认不会自动学习正文。"
-                  {...(readonly
-                    ? {}
-                    : {
-                        primaryAction: {
-                          label: "添加用户记忆",
-                          onClick: openCreateMemory,
-                        },
-                      })}
-                />
-              ) : (
-                <div className="story-memory-list">
-                  {memories.map((memory) => {
-                    const snapshot = memory.toSnapshot();
-                    return (
-                      <Card key={memory.id}>
-                        <CardHeader>
-                          <div className="card-heading-row">
-                            <div>
-                              <CardTitle>{memoryLevelLabel(snapshot.level)}</CardTitle>
-                              <CardDescription>
-                                {snapshot.origin === "user" ? "用户确认" : "自动学习"} · 修订{" "}
-                                {String(snapshot.revision)}
-                              </CardDescription>
-                            </div>
-                            <div className="story-memory-badges">
-                              <Badge tone={snapshot.status === "enabled" ? "success" : "neutral"}>
-                                {snapshot.status === "enabled" ? "启用" : "停用"}
-                              </Badge>
-                              {snapshot.pinned && <Badge tone="accent">固定</Badge>}
-                              {snapshot.excluded && <Badge tone="danger">排除</Badge>}
-                              {!snapshot.pinned && !snapshot.excluded && snapshot.weight < 1 && (
-                                <Badge tone="warning">权重 {snapshot.weight.toFixed(1)}</Badge>
-                              )}
-                            </div>
-                          </div>
-                        </CardHeader>
-                        <CardContent>
-                          <p className="story-governance-copy">{snapshot.content}</p>
-                          <div className="story-governance-meta">
-                            <span>来源：{memorySourceLabel(snapshot.source.kind)}</span>
-                            <span>使用 {String(snapshot.useCount)} 次</span>
-                          </div>
-                        </CardContent>
-                        <CardFooter className="story-governance-actions">
-                          <Button
-                            size="sm"
-                            variant={mergeMemoryIds.includes(memory.id) ? "primary" : "secondary"}
-                            disabled={
-                              readonly ||
-                              busy ||
-                              snapshot.excluded ||
-                              (mergeMemoryIds.length >= 2 && !mergeMemoryIds.includes(memory.id))
-                            }
-                            aria-pressed={mergeMemoryIds.includes(memory.id)}
-                            onClick={() => toggleMergeMemory(memory.id)}
-                          >
-                            {mergeMemoryIds.includes(memory.id) ? "已选择合并" : "选择用于合并"}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            onClick={() => setSelectedMemoryId(memory.id)}
-                          >
-                            查看记忆详情
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            disabled={readonly || busy}
-                            onClick={() => openEditMemory(memory)}
-                          >
-                            编辑
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            disabled={readonly || busy}
-                            onClick={() =>
-                              void governMemory(memory, {
-                                kind: "set_enabled",
-                                enabled: snapshot.status !== "enabled",
-                              })
-                            }
-                          >
-                            {snapshot.status === "enabled" ? "停用" : "启用"}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            disabled={readonly || busy || snapshot.pinned}
-                            onClick={() => void governMemory(memory, { kind: "pin" })}
-                          >
-                            固定
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            disabled={readonly || busy || snapshot.excluded}
-                            onClick={() => void governMemory(memory, { kind: "exclude" })}
-                          >
-                            排除
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            disabled={
-                              readonly ||
-                              busy ||
-                              snapshot.excluded ||
-                              (!snapshot.pinned && snapshot.weight < 1)
-                            }
-                            onClick={() =>
-                              void governMemory(memory, { kind: "downweight", weight: 0.5 })
-                            }
-                          >
-                            降低权重
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            disabled={
-                              readonly ||
-                              busy ||
-                              (!snapshot.pinned && !snapshot.excluded && snapshot.weight === 1)
-                            }
-                            onClick={() => void governMemory(memory, { kind: "reset_priority" })}
-                          >
-                            恢复默认
-                          </Button>
-                        </CardFooter>
-                      </Card>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          </TabsContent>
-
-          <TabsContent value="review">
-            <section aria-labelledby="review-items-title">
-              <InlineAlert
-                tone="info"
-                title="证据与版本绑定"
-                description="每项变化都保留章节版本和精确证据范围；确认时会再次校验章节仍是该版本，并与正式设定更新同事务提交。"
-              />
-              <div className="section-heading">
-                <div>
-                  <h2 id="review-items-title">待确认的设定变化</h2>
-                  <p>当前支持人工准备变化建议；AI 识别出的变化以后也必须进入同一审阅与确认流程。</p>
-                </div>
-                <Button
-                  disabled={
-                    readonly ||
-                    busy ||
-                    records.length === 0 ||
-                    !chapters.some((chapter) => chapter.content.length > 1)
-                  }
-                  onClick={openCreateReview}
-                >
-                  准备一项变化
-                </Button>
-              </div>
-
-              {records.length === 0 ? (
-                <EmptyState
-                  title="还没有可审阅的正式设定"
-                  description="先创建至少一条正式设定，再准备一项有明确目标的变化。"
-                  {...(readonly
-                    ? {}
-                    : {
-                        primaryAction: {
-                          label: "前往正式设定",
-                          onClick: () => setActiveTab("formal"),
-                        },
-                      })}
-                />
-              ) : !chapters.some((chapter) => chapter.content.length > 1) ? (
-                <EmptyState
-                  title="还没有可引用的章节正文"
-                  description="变化必须引用一个非空章节的精确证据片段。"
-                />
-              ) : reviewItems.length === 0 ? (
-                <EmptyState
-                  title="还没有待确认变化"
-                  description="准备一项人工变化，验证证据、版本和正式设定的安全提交链路。"
-                  {...(readonly
-                    ? {}
-                    : {
-                        primaryAction: {
-                          label: "准备一项变化",
-                          onClick: openCreateReview,
-                        },
-                      })}
-                />
-              ) : (
-                <div className="story-review-list">
-                  {reviewItems.map((item) => {
-                    const snapshot = item.toSnapshot();
-                    const target = records.find((record) => record.id === snapshot.targetRecordId);
-                    const chapter = chapters.find(
-                      (candidate) => String(candidate.id) === snapshot.sourceChapterId,
-                    );
-                    const suggestion = readStoryValueFields(snapshot.suggestedValue, "建议值");
-                    return (
-                      <Card key={item.id}>
-                        <CardHeader>
-                          <div className="card-heading-row">
-                            <div>
-                              <CardTitle>
-                                {reviewTypeLabel(item.itemType)} ·{" "}
-                                {target === undefined
-                                  ? snapshot.targetRecordId
-                                  : readFormalFields(target).title}
-                              </CardTitle>
-                              <CardDescription>
-                                {chapter?.title ?? snapshot.sourceChapterId} · 版本{" "}
-                                {snapshot.sourceVersionId.slice(-8)}
-                              </CardDescription>
-                            </div>
-                            <div className="story-memory-badges">
-                              <Badge tone={reviewStatusTone(snapshot.status)}>
-                                {reviewStatusLabel(snapshot.status)}
-                              </Badge>
-                              <Badge tone={reviewSeverityTone(snapshot.severity)}>
-                                {reviewSeverityLabel(snapshot.severity)}
-                              </Badge>
-                            </div>
-                          </div>
-                        </CardHeader>
-                        <CardContent className="story-review-content">
-                          <blockquote>{snapshot.evidence.excerpt}</blockquote>
-                          <div className="story-review-suggestion">
-                            <span>建议正式值</span>
-                            <strong>{suggestion.title}</strong>
-                            <p>{suggestion.description}</p>
-                          </div>
-                          <div className="story-governance-meta">
-                            <span>置信度 {Math.round(snapshot.confidence * 100).toString()}%</span>
-                            <span>修订 {String(snapshot.revision)}</span>
-                          </div>
-                        </CardContent>
-                        <CardFooter className="story-governance-actions">
-                          {(snapshot.status === "pending" || snapshot.status === "deferred") && (
-                            <>
-                              <Button
-                                size="sm"
-                                disabled={readonly || busy || target === undefined}
-                                onClick={() => void decideReview(item, "accept")}
-                              >
-                                接受并写入正式设定
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="secondary"
-                                disabled={readonly || busy}
-                                onClick={() => void decideReview(item, "reject")}
-                              >
-                                拒绝
-                              </Button>
-                            </>
-                          )}
-                          {snapshot.status === "pending" && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              disabled={readonly || busy}
-                              onClick={() => void decideReview(item, "defer")}
-                            >
-                              延后一天
-                            </Button>
-                          )}
-                          {snapshot.status === "deferred" && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              disabled={readonly || busy}
-                              onClick={() => void decideReview(item, "resume")}
-                            >
-                              恢复待审
-                            </Button>
-                          )}
-                        </CardFooter>
-                      </Card>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          </TabsContent>
-
-          <TabsContent value="preferences">
-            {storyProjectId.ok && (
-              <WritingPreferencesPanel
-                projectId={storyProjectId.value}
-                service={runtime.story.writingFeedback}
-                readonly={readonly}
-              />
             )}
-          </TabsContent>
 
-          <TabsContent value="what-if">
-            <section aria-labelledby="what-if-title">
-              <InlineAlert
-                tone="warning"
-                title="旧版试演已停止新建"
-                description="这些记录仅供查看和迁移参考。新的剧情试演统一使用因果事件图确定影响范围，并保留锁定规则编译与模型调用证据。"
-              />
-              <div className="section-heading">
-                <div>
-                  <h2 id="what-if-title">旧版试演记录</h2>
-                  <p>历史沙盒与已生成的大纲草稿保持原样，不会自动转成正式事实。</p>
+            <TabsContent value="characters">
+              <section aria-labelledby="character-library-title">
+                <div className="section-heading">
+                  <div>
+                    <h2 id="character-library-title">人物</h2>
+                    <p>只按已有实体标识聚合；名称相同但没有可靠关联的人物不会被自动合并。</p>
+                  </div>
+                  <div className="story-governance-actions">
+                    <Button
+                      variant="secondary"
+                      disabled={readonly || busy}
+                      onClick={() => void runLatestChapterRecognition()}
+                    >
+                      重新识别最近一章
+                    </Button>
+                    <Button disabled={readonly || busy} onClick={openCreateFact}>
+                      添加人物设定
+                    </Button>
+                  </div>
                 </div>
-                <Button onClick={() => navigate(`/projects/${projectIdParameter}/graph`)}>
-                  前往因果剧情试演
-                </Button>
-              </div>
 
-              {whatIfBranches.length === 0 ? (
-                <EmptyState
-                  title="没有旧版试演记录"
-                  description="这里不会再创建自由输入的非因果模拟；请使用统一的因果剧情试演。"
-                />
-              ) : (
-                <div className="story-what-if-list">
-                  {whatIfBranches.map((branch) => {
-                    const snapshot = branch.toSnapshot();
-                    const sourceRecord = records.find(
-                      (record) => record.id === snapshot.sourceEventId,
-                    );
-                    return (
-                      <Card key={branch.id}>
+                {needsConfirmationCount > 0 && (
+                  <InlineAlert
+                    tone="warning"
+                    title={`${String(needsConfirmationCount)} 项重大变化需要确认`}
+                    description="人物身份、生死、核心关系和重大能力变化不会因为 AI 识别而自动成为正式事实。"
+                  />
+                )}
+
+                {characterGroups.length === 0 ? (
+                  <EmptyState
+                    title="还没有人物设定"
+                    description="可以直接开始写作，或先添加一个人物；从正文识别出的内容会保留原文证据并等待你确认。"
+                    {...(readonly
+                      ? {}
+                      : { primaryAction: { label: "添加第一个人物", onClick: openCreateFact } })}
+                  />
+                ) : (
+                  <div className="story-entity-grid">
+                    {characterGroups.map((group) => (
+                      <Card key={group.key}>
                         <CardHeader>
                           <div className="card-heading-row">
                             <div>
-                              <CardTitle>{snapshot.hypothesis}</CardTitle>
+                              <CardTitle>{group.name}</CardTitle>
                               <CardDescription>
-                                基于{" "}
-                                {sourceRecord === undefined
-                                  ? snapshot.sourceEventId
-                                  : readFormalFields(sourceRecord).title}{" "}
-                                · 时间线修订 {String(snapshot.baseTimelineRevision)}
+                                {group.aliases.length > 0
+                                  ? `别名：${group.aliases.join("、")}`
+                                  : "暂无已确认别名"}
                               </CardDescription>
                             </div>
-                            <Badge tone={whatIfStatusTone(snapshot.status)}>
-                              {whatIfStatusLabel(snapshot.status)}
+                            <Badge tone={entityGroupStatusTone(group)}>
+                              {entityGroupStatusLabel(group)}
                             </Badge>
                           </div>
                         </CardHeader>
                         <CardContent>
-                          {snapshot.effects.length === 0 ? (
-                            <p className="story-governance-copy">尚未记录模拟影响。</p>
-                          ) : (
-                            <ul className="story-what-if-effects">
-                              {snapshot.effects.map((effect) => (
-                                <li key={effect.id}>
-                                  <strong>{effect.summary}</strong>
-                                  <span>
-                                    置信度 {Math.round(effect.confidence * 100).toString()}% · 影响{" "}
-                                    {String(effect.impactedRecordIds.length)} 条设定
-                                  </span>
-                                </li>
-                              ))}
-                            </ul>
-                          )}
-                          {comparison?.branchId === branch.id && (
-                            <InlineAlert
-                              tone="info"
-                              title="已与当前正式时间线比较"
-                              description={`基线修订 ${String(comparison.baseTimelineRevision)}；当前修订 ${String(comparison.formalTimelineRevision)}。沙盒不可提交正式时间线。`}
-                            />
-                          )}
-                        </CardContent>
-                        <CardFooter className="story-governance-actions">
-                          {snapshot.status === "simulated" && (
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              disabled={busy}
-                              onClick={() => void compareWhatIf(branch)}
-                            >
-                              只读比较
-                            </Button>
-                          )}
-                          <Badge tone="neutral">只读历史</Badge>
-                        </CardFooter>
-                      </Card>
-                    );
-                  })}
-                </div>
-              )}
-
-              {outlineDrafts.length > 0 && (
-                <div className="story-outline-drafts">
-                  <div className="section-heading">
-                    <div>
-                      <h2>待采用的大纲草稿</h2>
-                      <p>旧版试演生成的历史建议，仅供迁移参考，不会自动合并。</p>
-                    </div>
-                    <Badge>{String(outlineDrafts.length)} 条</Badge>
-                  </div>
-                  <div className="story-governance-grid">
-                    {outlineDrafts.map((draft) => (
-                      <Card key={draft.id}>
-                        <CardHeader>
-                          <CardTitle>{draft.title}</CardTitle>
-                          <CardDescription>来源分支 {draft.sourceBranchId}</CardDescription>
-                        </CardHeader>
-                        <CardContent>
-                          <p className="story-governance-copy">{draft.synopsis}</p>
+                          <p className="story-governance-copy">{entityGroupSummary(group)}</p>
+                          <div className="story-governance-meta">
+                            <span>{String(group.facts.length)} 项事实</span>
+                            <span>{String(group.records.length)} 条正式记录</span>
+                            <span>{String(entityChapterIds(group).length)} 个来源章节</span>
+                          </div>
                         </CardContent>
                         <CardFooter>
-                          <Badge tone="warning">尚未合并</Badge>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => setSelectedCharacterKey(group.key)}
+                          >
+                            查看人物详情
+                          </Button>
                         </CardFooter>
                       </Card>
                     ))}
                   </div>
+                )}
+              </section>
+            </TabsContent>
+
+            <TabsContent value="world">
+              <section aria-labelledby="world-library-title">
+                <div className="section-heading">
+                  <div>
+                    <h2 id="world-library-title">世界与规则</h2>
+                    <p>
+                      地点、规则和组织按真实类型或实体标识分组；无法可靠分类的内容保留在“其他设定”。
+                    </p>
+                  </div>
+                  <Button disabled={readonly || busy} onClick={openCreateFact}>
+                    添加世界设定
+                  </Button>
                 </div>
+
+                {worldGroups.length === 0 ? (
+                  <EmptyState
+                    title="还没有世界设定"
+                    description="世界设定不是开始写作的必填项。需要时可添加地点、硬规则或组织，也可以从已保存正文重新识别。"
+                    {...(readonly
+                      ? {}
+                      : { primaryAction: { label: "添加第一条设定", onClick: openCreateFact } })}
+                  />
+                ) : (
+                  <div className="story-world-sections">
+                    {WORLD_SECTION_ORDER.map((sectionKind) => {
+                      const groups = worldGroups.filter(
+                        ({ worldSection }) => worldSection === sectionKind,
+                      );
+                      if (groups.length === 0) return null;
+                      return (
+                        <section key={sectionKind} aria-labelledby={`world-${sectionKind}-title`}>
+                          <div className="section-heading section-heading--compact">
+                            <h3 id={`world-${sectionKind}-title`}>
+                              {worldSectionLabel(sectionKind)}
+                            </h3>
+                            <Badge>{String(groups.length)} 项</Badge>
+                          </div>
+                          <div className="story-entity-grid">
+                            {groups.map((group) => (
+                              <Card key={group.key}>
+                                <CardHeader>
+                                  <div className="card-heading-row">
+                                    <div>
+                                      <CardTitle>{group.name}</CardTitle>
+                                      <CardDescription>
+                                        {worldSectionLabel(sectionKind)}
+                                      </CardDescription>
+                                    </div>
+                                    <Badge tone={entityGroupStatusTone(group)}>
+                                      {entityGroupStatusLabel(group)}
+                                    </Badge>
+                                  </div>
+                                </CardHeader>
+                                <CardContent>
+                                  <p className="story-governance-copy">
+                                    {entityGroupSummary(group)}
+                                  </p>
+                                  <div className="story-governance-meta">
+                                    <span>{String(group.facts.length)} 项事实</span>
+                                    <span>{String(entityChapterIds(group).length)} 个引用章节</span>
+                                  </div>
+                                </CardContent>
+                                <CardFooter>
+                                  <Button
+                                    size="sm"
+                                    variant="secondary"
+                                    onClick={() => setSelectedWorldKey(group.key)}
+                                  >
+                                    查看设定详情
+                                  </Button>
+                                </CardFooter>
+                              </Card>
+                            ))}
+                          </div>
+                        </section>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <Card className="story-governance-advanced-tools">
+                  <CardHeader>
+                    <CardTitle>更多治理工具</CardTitle>
+                    <CardDescription>
+                      待确认变化、版本化正式记录和剧情试演保留原有安全边界，但不作为普通用户一级导航。
+                    </CardDescription>
+                  </CardHeader>
+                  <CardFooter className="story-governance-actions">
+                    <Button size="sm" variant="secondary" onClick={() => setActiveTab("facts")}>
+                      查看全部故事事实
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => setActiveTab("review")}>
+                      待确认变化
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => setActiveTab("formal")}>
+                      版本化正式记录
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => navigate(`/projects/${projectIdParameter}/graph`)}
+                    >
+                      因果剧情试演
+                    </Button>
+                    {whatIfBranches.length > 0 && (
+                      <Button size="sm" variant="ghost" onClick={() => setActiveTab("what-if")}>
+                        查看旧版试演记录
+                      </Button>
+                    )}
+                  </CardFooter>
+                </Card>
+              </section>
+            </TabsContent>
+
+            <TabsContent value="facts">
+              <section aria-labelledby="unified-story-facts-title">
+                <InlineAlert
+                  tone="info"
+                  title={`识别到 ${String(pendingFactCount)} 项变化，其中 ${String(needsConfirmationCount)} 项需要确认`}
+                  description="普通状态可作为可撤销参考；人物死亡、身份、核心关系、世界规则等重大变化只有在你确认后才会影响后续创作。"
+                />
+                <div className="section-heading">
+                  <div>
+                    <h2 id="unified-story-facts-title">当前故事设定</h2>
+                    <p>
+                      每项内容都保留来源、状态和修订记录；“重新识别”会调用已连接的
+                      AI，可能产生供应商费用。
+                    </p>
+                  </div>
+                  <div className="story-governance-actions">
+                    <Button
+                      variant="secondary"
+                      disabled={readonly || busy}
+                      onClick={() => void runLatestChapterRecognition()}
+                    >
+                      重新识别最近一章
+                    </Button>
+                    <Button disabled={readonly || busy} onClick={openCreateFact}>
+                      添加设定
+                    </Button>
+                  </div>
+                </div>
+
+                {activeFacts.length === 0 ? (
+                  <EmptyState
+                    title="还没有整理故事设定"
+                    description="可以直接开始写，也可以先添加一个人物、世界规则或时间线事件；这些都不是开写前的必填项。"
+                    {...(readonly
+                      ? {}
+                      : {
+                          primaryAction: {
+                            label: "添加第一条设定",
+                            onClick: openCreateFact,
+                          },
+                        })}
+                  />
+                ) : (
+                  <div className="story-governance-grid">
+                    {activeFacts.map((fact) => {
+                      const snapshot = fact.toSnapshot();
+                      const continuousEvidence = continuousEvidenceByFactId.get(fact.id);
+                      const mergeNotice = storyFactMergeNotice(snapshot);
+                      const ambiguousAlias = readAmbiguousStoryFactEntityAlias(snapshot);
+                      const needsAliasResolution = storyFactNeedsEntityAliasResolution(snapshot);
+                      return (
+                        <Card key={fact.id}>
+                          <CardHeader>
+                            <div className="card-heading-row">
+                              <div>
+                                <CardTitle>{factTypeLabel(snapshot.factType)}</CardTitle>
+                                <CardDescription>{factSourceLabel(snapshot)}</CardDescription>
+                              </div>
+                              <Badge tone={factStatusTone(snapshot)}>
+                                {factStatusLabel(snapshot)}
+                              </Badge>
+                            </div>
+                          </CardHeader>
+                          <CardContent>
+                            <p className="story-governance-copy">{storyFactContent(snapshot)}</p>
+                            <div className="story-governance-meta">
+                              <span>可信度 {Math.round(snapshot.confidence * 100)}%</span>
+                              <span>修订 {String(snapshot.revision)}</span>
+                            </div>
+                            {continuousEvidence !== undefined && (
+                              <InlineAlert
+                                tone={
+                                  continuousEvidence.evidenceState === "current"
+                                    ? "info"
+                                    : "warning"
+                                }
+                                title={
+                                  continuousEvidence.evidenceState === "current"
+                                    ? "证据与当前正文一致"
+                                    : continuousEvidence.evidenceState === "historical"
+                                      ? "来自较早的正文版本"
+                                      : "证据无法验证"
+                                }
+                                description={continuousEvidence.evidenceMessage}
+                              />
+                            )}
+                            {mergeNotice !== null && (
+                              <InlineAlert
+                                tone="warning"
+                                title="人物或剧情对象需要你辨认"
+                                description={mergeNotice}
+                              />
+                            )}
+                          </CardContent>
+                          <CardFooter>
+                            {ambiguousAlias !== null && (
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                disabled={readonly || busy}
+                                onClick={() => openAliasResolution(fact)}
+                              >
+                                先辨认这个对象
+                              </Button>
+                            )}
+                            {(snapshot.status === "unconfirmed" ||
+                              snapshot.status === "temporary") && (
+                              <Button
+                                size="sm"
+                                disabled={readonly || busy || needsAliasResolution}
+                                onClick={() => void confirmFact(fact)}
+                              >
+                                确认并保留
+                              </Button>
+                            )}
+                            {snapshot.status === "formal" && (
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                disabled={readonly || busy}
+                                onClick={() => void toggleFactLock(fact)}
+                              >
+                                {snapshot.locked ? "取消锁定" : "锁定为硬规则"}
+                              </Button>
+                            )}
+                            {snapshot.status !== "branch" && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={readonly || busy}
+                                onClick={() => void deprecateFact(fact)}
+                              >
+                                {snapshot.status === "temporary"
+                                  ? "撤销这项更新"
+                                  : "标记为不再生效"}
+                              </Button>
+                            )}
+                          </CardFooter>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            </TabsContent>
+
+            <TabsContent value="context-history">
+              <ChapterSummaryPanel
+                projectId={projectIdParameter}
+                service={runtime.story.chapterSummaries}
+                continuousState={runtime.story.continuousState}
+                historicalBackfill={runtime.story.historicalBackfill}
+                readOnly={readonly}
+              />
+              <ContextHistoryPanel projectId={projectIdParameter} store={runtime.contextTraces} />
+            </TabsContent>
+
+            <TabsContent value="formal">
+              <section aria-labelledby="formal-records-title">
+                <div className="section-heading">
+                  <div>
+                    <h2 id="formal-records-title">正式设定</h2>
+                    <p>角色、世界规则、伏笔和时间线事件都以不可静默覆盖的版本保存。</p>
+                  </div>
+                  <Button disabled={readonly || busy} onClick={openCreateFormalRecord}>
+                    新建正式设定
+                  </Button>
+                </div>
+
+                {records.length === 0 ? (
+                  <EmptyState
+                    title="还没有正式设定"
+                    description="手工录入第一条角色、世界规则、伏笔或时间线事件。"
+                    {...(readonly
+                      ? {}
+                      : {
+                          primaryAction: {
+                            label: "新建正式设定",
+                            onClick: openCreateFormalRecord,
+                          },
+                        })}
+                  />
+                ) : (
+                  <div className="story-governance-grid">
+                    {records.map((record) => {
+                      const snapshot = record.toSnapshot();
+                      const fields = readFormalFields(record);
+                      return (
+                        <Card key={record.id}>
+                          <CardHeader>
+                            <div className="card-heading-row">
+                              <div>
+                                <CardTitle>{fields.title}</CardTitle>
+                                <CardDescription>{snapshot.recordKey}</CardDescription>
+                              </div>
+                              <Badge tone={formalKindTone(record.kind)}>
+                                {formalKindLabel(record.kind)}
+                              </Badge>
+                            </div>
+                          </CardHeader>
+                          <CardContent>
+                            <p className="story-governance-copy">{fields.description}</p>
+                            <div className="story-governance-meta">
+                              <span>版本 {String(snapshot.currentVersion)}</span>
+                              <span>修订 {String(snapshot.revision)}</span>
+                            </div>
+                          </CardContent>
+                          <CardFooter>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              disabled={readonly || busy}
+                              onClick={() => openEditFormalRecord(record)}
+                            >
+                              编辑
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={readonly || busy || snapshot.currentVersion < 2}
+                              onClick={() => void undoFormalRecord(record)}
+                            >
+                              撤回至上一版
+                            </Button>
+                          </CardFooter>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            </TabsContent>
+
+            <TabsContent value="memory">
+              <section aria-labelledby="memory-policy-title">
+                <Card className="story-memory-policy">
+                  <CardHeader>
+                    <div className="card-heading-row">
+                      <div>
+                        <CardTitle id="memory-policy-title">自动学习授权</CardTitle>
+                        <CardDescription>
+                          开启只授权后续经过校验的自动记忆写入，不会立即生成或修改任何记忆。
+                        </CardDescription>
+                      </div>
+                      <Badge
+                        tone={policy?.automaticLearningEnabled === true ? "success" : "neutral"}
+                      >
+                        {policy?.automaticLearningEnabled === true ? "已授权" : "未授权"}
+                      </Badge>
+                    </div>
+                  </CardHeader>
+                  <CardFooter>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={readonly || busy || policy === null}
+                      onClick={() => setPolicyDialogOpen(true)}
+                    >
+                      {policy?.automaticLearningEnabled === true ? "关闭自动学习" : "开启自动学习"}
+                    </Button>
+                  </CardFooter>
+                </Card>
+
+                <div className="section-heading">
+                  <div>
+                    <h2>可治理记忆</h2>
+                    <p>固定、降权、排除、停用和编辑都会经过版本校验并保留来源。</p>
+                  </div>
+                  <div className="story-governance-actions">
+                    <Button
+                      variant="secondary"
+                      disabled={readonly || busy || mergeMemories.length !== 2}
+                      onClick={openMergeMemories}
+                    >
+                      合并所选 2 条
+                    </Button>
+                    <Button variant="secondary" onClick={() => setActiveTab("context-history")}>
+                      查看 AI 参考记录
+                    </Button>
+                    <Button disabled={readonly || busy} onClick={openCreateMemory}>
+                      添加用户记忆
+                    </Button>
+                  </div>
+                </div>
+
+                {memories.length === 0 ? (
+                  <EmptyState
+                    title="还没有记忆"
+                    description="添加一条由你确认的记忆规则；默认不会自动学习正文。"
+                    {...(readonly
+                      ? {}
+                      : {
+                          primaryAction: {
+                            label: "添加用户记忆",
+                            onClick: openCreateMemory,
+                          },
+                        })}
+                  />
+                ) : (
+                  <div className="story-memory-list">
+                    {memories.map((memory) => {
+                      const snapshot = memory.toSnapshot();
+                      return (
+                        <Card key={memory.id}>
+                          <CardHeader>
+                            <div className="card-heading-row">
+                              <div>
+                                <CardTitle>{memoryLevelLabel(snapshot.level)}</CardTitle>
+                                <CardDescription>
+                                  {snapshot.origin === "user" ? "用户确认" : "自动学习"} · 修订{" "}
+                                  {String(snapshot.revision)}
+                                </CardDescription>
+                              </div>
+                              <div className="story-memory-badges">
+                                <Badge tone={snapshot.status === "enabled" ? "success" : "neutral"}>
+                                  {snapshot.status === "enabled" ? "启用" : "停用"}
+                                </Badge>
+                                {snapshot.pinned && <Badge tone="accent">固定</Badge>}
+                                {snapshot.excluded && <Badge tone="danger">排除</Badge>}
+                                {!snapshot.pinned && !snapshot.excluded && snapshot.weight < 1 && (
+                                  <Badge tone="warning">权重 {snapshot.weight.toFixed(1)}</Badge>
+                                )}
+                              </div>
+                            </div>
+                          </CardHeader>
+                          <CardContent>
+                            <p className="story-governance-copy">{snapshot.content}</p>
+                            <div className="story-governance-meta">
+                              <span>来源：{memorySourceLabel(snapshot.source.kind)}</span>
+                              <span>使用 {String(snapshot.useCount)} 次</span>
+                            </div>
+                          </CardContent>
+                          <CardFooter className="story-governance-actions">
+                            <Button
+                              size="sm"
+                              variant={mergeMemoryIds.includes(memory.id) ? "primary" : "secondary"}
+                              disabled={
+                                readonly ||
+                                busy ||
+                                snapshot.excluded ||
+                                (mergeMemoryIds.length >= 2 && !mergeMemoryIds.includes(memory.id))
+                              }
+                              aria-pressed={mergeMemoryIds.includes(memory.id)}
+                              onClick={() => toggleMergeMemory(memory.id)}
+                            >
+                              {mergeMemoryIds.includes(memory.id) ? "已选择合并" : "选择用于合并"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => setSelectedMemoryId(memory.id)}
+                            >
+                              查看记忆详情
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              disabled={readonly || busy}
+                              onClick={() => openEditMemory(memory)}
+                            >
+                              编辑
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={readonly || busy}
+                              onClick={() =>
+                                void governMemory(memory, {
+                                  kind: "set_enabled",
+                                  enabled: snapshot.status !== "enabled",
+                                })
+                              }
+                            >
+                              {snapshot.status === "enabled" ? "停用" : "启用"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={readonly || busy || snapshot.pinned}
+                              onClick={() => void governMemory(memory, { kind: "pin" })}
+                            >
+                              固定
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={readonly || busy || snapshot.excluded}
+                              onClick={() => void governMemory(memory, { kind: "exclude" })}
+                            >
+                              排除
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={
+                                readonly ||
+                                busy ||
+                                snapshot.excluded ||
+                                (!snapshot.pinned && snapshot.weight < 1)
+                              }
+                              onClick={() =>
+                                void governMemory(memory, { kind: "downweight", weight: 0.5 })
+                              }
+                            >
+                              降低权重
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={
+                                readonly ||
+                                busy ||
+                                (!snapshot.pinned && !snapshot.excluded && snapshot.weight === 1)
+                              }
+                              onClick={() => void governMemory(memory, { kind: "reset_priority" })}
+                            >
+                              恢复默认
+                            </Button>
+                          </CardFooter>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            </TabsContent>
+
+            <TabsContent value="review">
+              <section aria-labelledby="review-items-title">
+                <InlineAlert
+                  tone="info"
+                  title="证据与版本绑定"
+                  description="每项变化都保留章节版本和精确证据范围；确认时会再次校验章节仍是该版本，并与正式设定更新同事务提交。"
+                />
+                <div className="section-heading">
+                  <div>
+                    <h2 id="review-items-title">待确认的设定变化</h2>
+                    <p>
+                      当前支持人工准备变化建议；AI 识别出的变化以后也必须进入同一审阅与确认流程。
+                    </p>
+                  </div>
+                  <Button
+                    disabled={
+                      readonly ||
+                      busy ||
+                      records.length === 0 ||
+                      !chapters.some((chapter) => chapter.content.length > 1)
+                    }
+                    onClick={openCreateReview}
+                  >
+                    准备一项变化
+                  </Button>
+                </div>
+
+                {records.length === 0 ? (
+                  <EmptyState
+                    title="还没有可审阅的正式设定"
+                    description="先创建至少一条正式设定，再准备一项有明确目标的变化。"
+                    {...(readonly
+                      ? {}
+                      : {
+                          primaryAction: {
+                            label: "前往正式设定",
+                            onClick: () => setActiveTab("formal"),
+                          },
+                        })}
+                  />
+                ) : !chapters.some((chapter) => chapter.content.length > 1) ? (
+                  <EmptyState
+                    title="还没有可引用的章节正文"
+                    description="变化必须引用一个非空章节的精确证据片段。"
+                  />
+                ) : reviewItems.length === 0 ? (
+                  <EmptyState
+                    title="还没有待确认变化"
+                    description="准备一项人工变化，验证证据、版本和正式设定的安全提交链路。"
+                    {...(readonly
+                      ? {}
+                      : {
+                          primaryAction: {
+                            label: "准备一项变化",
+                            onClick: openCreateReview,
+                          },
+                        })}
+                  />
+                ) : (
+                  <div className="story-review-list">
+                    {reviewItems.map((item) => {
+                      const snapshot = item.toSnapshot();
+                      const target = records.find(
+                        (record) => record.id === snapshot.targetRecordId,
+                      );
+                      const chapter = chapters.find(
+                        (candidate) => String(candidate.id) === snapshot.sourceChapterId,
+                      );
+                      const suggestion = readStoryValueFields(snapshot.suggestedValue, "建议值");
+                      return (
+                        <Card key={item.id}>
+                          <CardHeader>
+                            <div className="card-heading-row">
+                              <div>
+                                <CardTitle>
+                                  {reviewTypeLabel(item.itemType)} ·{" "}
+                                  {target === undefined
+                                    ? snapshot.targetRecordId
+                                    : readFormalFields(target).title}
+                                </CardTitle>
+                                <CardDescription>
+                                  {chapter?.title ?? snapshot.sourceChapterId} · 版本{" "}
+                                  {snapshot.sourceVersionId.slice(-8)}
+                                </CardDescription>
+                              </div>
+                              <div className="story-memory-badges">
+                                <Badge tone={reviewStatusTone(snapshot.status)}>
+                                  {reviewStatusLabel(snapshot.status)}
+                                </Badge>
+                                <Badge tone={reviewSeverityTone(snapshot.severity)}>
+                                  {reviewSeverityLabel(snapshot.severity)}
+                                </Badge>
+                              </div>
+                            </div>
+                          </CardHeader>
+                          <CardContent className="story-review-content">
+                            <blockquote>{snapshot.evidence.excerpt}</blockquote>
+                            <div className="story-review-suggestion">
+                              <span>建议正式值</span>
+                              <strong>{suggestion.title}</strong>
+                              <p>{suggestion.description}</p>
+                            </div>
+                            <div className="story-governance-meta">
+                              <span>
+                                置信度 {Math.round(snapshot.confidence * 100).toString()}%
+                              </span>
+                              <span>修订 {String(snapshot.revision)}</span>
+                            </div>
+                          </CardContent>
+                          <CardFooter className="story-governance-actions">
+                            {(snapshot.status === "pending" || snapshot.status === "deferred") && (
+                              <>
+                                <Button
+                                  size="sm"
+                                  disabled={readonly || busy || target === undefined}
+                                  onClick={() => void decideReview(item, "accept")}
+                                >
+                                  接受并写入正式设定
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  disabled={readonly || busy}
+                                  onClick={() => void decideReview(item, "reject")}
+                                >
+                                  拒绝
+                                </Button>
+                              </>
+                            )}
+                            {snapshot.status === "pending" && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={readonly || busy}
+                                onClick={() => void decideReview(item, "defer")}
+                              >
+                                延后一天
+                              </Button>
+                            )}
+                            {snapshot.status === "deferred" && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={readonly || busy}
+                                onClick={() => void decideReview(item, "resume")}
+                              >
+                                恢复待审
+                              </Button>
+                            )}
+                          </CardFooter>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            </TabsContent>
+
+            <TabsContent value="preferences">
+              {storyProjectId.ok && (
+                <WritingPreferencesPanel
+                  projectId={storyProjectId.value}
+                  service={runtime.story.writingFeedback}
+                  readonly={readonly}
+                />
               )}
-            </section>
-          </TabsContent>
-        </Tabs>
+            </TabsContent>
+
+            <TabsContent value="what-if">
+              <section aria-labelledby="what-if-title">
+                <InlineAlert
+                  tone="warning"
+                  title="旧版试演已停止新建"
+                  description="这些记录仅供查看和迁移参考。新的剧情试演统一使用因果事件图确定影响范围，并保留锁定规则编译与模型调用证据。"
+                />
+                <div className="section-heading">
+                  <div>
+                    <h2 id="what-if-title">旧版试演记录</h2>
+                    <p>历史沙盒与已生成的大纲草稿保持原样，不会自动转成正式事实。</p>
+                  </div>
+                  <Button onClick={() => navigate(`/projects/${projectIdParameter}/graph`)}>
+                    前往因果剧情试演
+                  </Button>
+                </div>
+
+                {whatIfBranches.length === 0 ? (
+                  <EmptyState
+                    title="没有旧版试演记录"
+                    description="这里不会再创建自由输入的非因果模拟；请使用统一的因果剧情试演。"
+                  />
+                ) : (
+                  <div className="story-what-if-list">
+                    {whatIfBranches.map((branch) => {
+                      const snapshot = branch.toSnapshot();
+                      const sourceRecord = records.find(
+                        (record) => record.id === snapshot.sourceEventId,
+                      );
+                      return (
+                        <Card key={branch.id}>
+                          <CardHeader>
+                            <div className="card-heading-row">
+                              <div>
+                                <CardTitle>{snapshot.hypothesis}</CardTitle>
+                                <CardDescription>
+                                  基于{" "}
+                                  {sourceRecord === undefined
+                                    ? snapshot.sourceEventId
+                                    : readFormalFields(sourceRecord).title}{" "}
+                                  · 时间线修订 {String(snapshot.baseTimelineRevision)}
+                                </CardDescription>
+                              </div>
+                              <Badge tone={whatIfStatusTone(snapshot.status)}>
+                                {whatIfStatusLabel(snapshot.status)}
+                              </Badge>
+                            </div>
+                          </CardHeader>
+                          <CardContent>
+                            {snapshot.effects.length === 0 ? (
+                              <p className="story-governance-copy">尚未记录模拟影响。</p>
+                            ) : (
+                              <ul className="story-what-if-effects">
+                                {snapshot.effects.map((effect) => (
+                                  <li key={effect.id}>
+                                    <strong>{effect.summary}</strong>
+                                    <span>
+                                      置信度 {Math.round(effect.confidence * 100).toString()}% ·
+                                      影响 {String(effect.impactedRecordIds.length)} 条设定
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                            {comparison?.branchId === branch.id && (
+                              <InlineAlert
+                                tone="info"
+                                title="已与当前正式时间线比较"
+                                description={`基线修订 ${String(comparison.baseTimelineRevision)}；当前修订 ${String(comparison.formalTimelineRevision)}。沙盒不可提交正式时间线。`}
+                              />
+                            )}
+                          </CardContent>
+                          <CardFooter className="story-governance-actions">
+                            {snapshot.status === "simulated" && (
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                disabled={busy}
+                                onClick={() => void compareWhatIf(branch)}
+                              >
+                                只读比较
+                              </Button>
+                            )}
+                            <Badge tone="neutral">只读历史</Badge>
+                          </CardFooter>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {outlineDrafts.length > 0 && (
+                  <div className="story-outline-drafts">
+                    <div className="section-heading">
+                      <div>
+                        <h2>待采用的大纲草稿</h2>
+                        <p>旧版试演生成的历史建议，仅供迁移参考，不会自动合并。</p>
+                      </div>
+                      <Badge>{String(outlineDrafts.length)} 条</Badge>
+                    </div>
+                    <div className="story-governance-grid">
+                      {outlineDrafts.map((draft) => (
+                        <Card key={draft.id}>
+                          <CardHeader>
+                            <CardTitle>{draft.title}</CardTitle>
+                            <CardDescription>来源分支 {draft.sourceBranchId}</CardDescription>
+                          </CardHeader>
+                          <CardContent>
+                            <p className="story-governance-copy">{draft.synopsis}</p>
+                          </CardContent>
+                          <CardFooter>
+                            <Badge tone="warning">尚未合并</Badge>
+                          </CardFooter>
+                        </Card>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+            </TabsContent>
+          </Tabs>
+        </>
       </PageStateBoundary>
 
       <Drawer

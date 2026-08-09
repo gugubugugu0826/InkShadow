@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
+import { NOVEL_AI_TASKS } from "../../../apps/desktop/src/infrastructure/model-hub-provider-registry.js";
 import { NodeSqliteExecutor } from "./node-sqlite-executor.js";
 
 const baseMigration = [
@@ -20,14 +21,18 @@ const failureDiagnosticMigration = readFileSync(
   new URL("../migrations/0056_model_hub_failure_diagnostics.sql", import.meta.url),
   "utf8",
 );
-const migration = `${baseMigration}\n${expertMigration}\n${zhipuGlmMigration}\n${failureDiagnosticMigration}`;
+const contentQualityTaskMigration = readFileSync(
+  new URL("../migrations/0057_model_hub_content_quality_task.sql", import.meta.url),
+  "utf8",
+);
+const migration = `${baseMigration}\n${expertMigration}\n${zhipuGlmMigration}\n${failureDiagnosticMigration}\n${contentQualityTaskMigration}`;
 
 const NOW = "2026-08-01T00:00:00.000Z";
 
 describe("Model Hub migration", () => {
   it("is idempotent and creates the complete non-secret foundation", async () => {
     const executor = new NodeSqliteExecutor(
-      `${baseMigration}\n${baseMigration}\n${expertMigration}\n${zhipuGlmMigration}\n${failureDiagnosticMigration}`,
+      `${baseMigration}\n${baseMigration}\n${expertMigration}\n${zhipuGlmMigration}\n${failureDiagnosticMigration}\n${contentQualityTaskMigration}`,
     );
     const tables = await executor.select<{ name: string }>(
       `SELECT name
@@ -335,6 +340,251 @@ describe("Model Hub migration", () => {
     await executor.close();
   });
 
+  it("keeps all three task constraints synchronized with the published task registry", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    await insertConnection(
+      executor,
+      "task-contract-cloud",
+      "openai",
+      "Task contract",
+      "https://api.example.test/v1",
+    );
+    await insertCatalogEntry(
+      executor,
+      "task-contract-model",
+      "task-contract-cloud",
+      "task-contract-model",
+      null,
+    );
+
+    for (const [index, task] of NOVEL_AI_TASKS.entries()) {
+      await executor.execute(
+        `INSERT INTO model_evaluation_results (
+           id, catalog_entry_id, task, score_basis_points, latency_p50_ms,
+           sample_count, evaluation_source, evaluation_version, observed_at
+         ) VALUES (?, 'task-contract-model', ?, 5000, 1, 1,
+                   'local_evaluation', 'task-contract-v1', ?)`,
+        [`task-contract-evaluation-${String(index)}`, task, NOW],
+      );
+      await executor.execute(
+        `INSERT INTO novel_task_routes (
+           task, primary_catalog_entry_id, parameter_policy_json,
+           privacy_policy, failure_policy, route_origin, created_at, updated_at
+         ) VALUES (?, 'task-contract-model', '{}', 'cloud_allowed',
+                   'ask_user', 'automatic', ?, ?)`,
+        [task, NOW, NOW],
+      );
+      await executor.execute(
+        `INSERT INTO model_invocation_facts (
+           id, task, route_task, connection_id, catalog_entry_id,
+           provider_kind_snapshot, model_id_snapshot, route_reason, status,
+           attempt, privacy_policy, data_destination, created_at
+         ) VALUES (?, ?, ?, 'task-contract-cloud', 'task-contract-model',
+                   'openai', 'task-contract-model', 'task_primary', 'queued',
+                   1, 'cloud_allowed', 'remote', ?)`,
+        [`task-contract-invocation-${String(index)}`, task, task, NOW],
+      );
+    }
+
+    await expect(
+      executor.select<{ count: number }>("SELECT COUNT(*) AS count FROM novel_task_routes"),
+    ).resolves.toEqual([{ count: NOVEL_AI_TASKS.length }]);
+    await expect(
+      executor.execute(
+        `INSERT INTO model_evaluation_results (
+           id, catalog_entry_id, task, score_basis_points, latency_p50_ms,
+           sample_count, evaluation_source, evaluation_version, observed_at
+         ) VALUES ('unknown-evaluation', 'task-contract-model', 'unknown_task',
+                   5000, 1, 1, 'local_evaluation', 'unknown-v1', ?)`,
+        [NOW],
+      ),
+    ).rejects.toThrow();
+    await expect(
+      executor.execute(
+        `INSERT INTO novel_task_routes (
+           task, primary_catalog_entry_id, parameter_policy_json,
+           privacy_policy, failure_policy, route_origin, created_at, updated_at
+         ) VALUES ('unknown_task', 'task-contract-model', '{}', 'cloud_allowed',
+                   'ask_user', 'automatic', ?, ?)`,
+        [NOW, NOW],
+      ),
+    ).rejects.toThrow();
+    await expect(
+      executor.execute(
+        `INSERT INTO model_invocation_facts (
+           id, task, connection_id, provider_kind_snapshot, model_id_snapshot,
+           route_reason, status, attempt, privacy_policy, data_destination, created_at
+         ) VALUES ('unknown-invocation', 'unknown_task', 'task-contract-cloud',
+                   'openai', 'task-contract-model', 'user_override', 'queued', 1,
+                   'cloud_allowed', 'remote', ?)`,
+        [NOW],
+      ),
+    ).rejects.toThrow();
+    await executor.close();
+  });
+
+  it("upgrades published Model Hub rows without losing diagnostics, links, indexes, or privacy guards", async () => {
+    const beforeContentQuality = `${baseMigration}\n${expertMigration}\n${zhipuGlmMigration}\n${failureDiagnosticMigration}`;
+    const executor = new NodeSqliteExecutor(beforeContentQuality);
+    await insertConnection(
+      executor,
+      "upgrade-cloud",
+      "openai",
+      "Upgrade cloud",
+      "https://api.example.test/v1",
+    );
+    await insertConnection(
+      executor,
+      "upgrade-local",
+      "ollama",
+      "Upgrade local",
+      "http://127.0.0.1:11434",
+    );
+    await insertCatalogEntry(executor, "upgrade-cloud-a", "upgrade-cloud", "writer-a", null);
+    await insertCatalogEntry(executor, "upgrade-cloud-b", "upgrade-cloud", "writer-b", null);
+    await insertCatalogEntry(
+      executor,
+      "upgrade-local-model",
+      "upgrade-local",
+      "local-writer",
+      null,
+    );
+    await executor.execute(
+      `INSERT INTO model_hub_presets (
+         id, scheme, display_name, status, privacy_policy, cost_priority,
+         route_generation_version, created_at, updated_at
+       ) VALUES ('upgrade-preset', 'smart', '智能推荐', 'active',
+                 'cloud_allowed', 'balanced', 'router-v1', ?, ?)`,
+      [NOW, NOW],
+    );
+    await executor.execute(
+      `INSERT INTO model_cost_privacy_profiles (
+         catalog_entry_id, data_destination, retention_policy, training_policy,
+         evidence_source, evidence_version, evidence_updated_at, created_at, updated_at
+       ) VALUES ('upgrade-local-model', 'local', 'none', 'not_used',
+                 'user_confirmed', 'upgrade-local-v1', ?, ?, ?)`,
+      [NOW, NOW, NOW],
+    );
+    await executor.execute(
+      `INSERT INTO novel_task_routes (
+         task, primary_catalog_entry_id, fallback_catalog_entry_id, preset_id,
+         parameter_policy_json, privacy_policy, failure_policy, route_origin,
+         revision, created_at, updated_at
+       ) VALUES ('prose_generation', 'upgrade-cloud-a', 'upgrade-cloud-b',
+                 'upgrade-preset', '{"temperature":0.6}', 'cloud_allowed',
+                 'use_fallback', 'automatic', 4, ?, ?)`,
+      [NOW, NOW],
+    );
+    await executor.execute(
+      `INSERT INTO novel_task_routes (
+         task, primary_catalog_entry_id, parameter_policy_json, privacy_policy,
+         failure_policy, route_origin, revision, created_at, updated_at
+       ) VALUES ('embedding', 'upgrade-local-model', '{}', 'local_only',
+                 'stop', 'user', 2, ?, ?)`,
+      [NOW, NOW],
+    );
+    await executor.execute(
+      `INSERT INTO model_evaluation_results (
+         id, catalog_entry_id, task, score_basis_points, latency_p50_ms,
+         sample_count, evaluation_source, evaluation_version, observed_at
+       ) VALUES ('upgrade-evaluation', 'upgrade-cloud-a', 'prose_generation',
+                 8700, 800, 12, 'local_evaluation', 'upgrade-v1', ?)`,
+      [NOW],
+    );
+    await executor.execute(
+      `INSERT INTO model_invocation_facts (
+         id, task, route_task, connection_id, catalog_entry_id,
+         provider_kind_snapshot, model_id_snapshot, route_reason, status,
+         attempt, privacy_policy, data_destination, input_tokens, output_tokens,
+         started_at, completed_at, created_at, revision
+       ) VALUES ('upgrade-parent-call', 'prose_generation', 'prose_generation',
+                 'upgrade-cloud', 'upgrade-cloud-a', 'openai', 'writer-a',
+                 'task_primary', 'succeeded', 1, 'cloud_allowed', 'remote',
+                 100, 200, ?, ?, ?, 3)`,
+      [NOW, NOW, NOW],
+    );
+    await executor.execute(
+      `INSERT INTO model_invocation_facts (
+         id, task, route_task, connection_id, catalog_entry_id,
+         provider_kind_snapshot, model_id_snapshot, route_reason, status,
+         attempt, fallback_from_invocation_id, privacy_policy, data_destination,
+         error_code, error_summary, started_at, completed_at, created_at, revision,
+         diagnostic_request_id, failure_stage, failure_retryable, http_status,
+         finish_reason, visible_content_length, reasoning_present, streamed,
+         requested_max_output_tokens
+       ) VALUES ('upgrade-fallback-call', 'prose_generation', 'prose_generation',
+                 'upgrade-cloud', 'upgrade-cloud-b', 'openai', 'writer-b',
+                 'task_fallback', 'failed', 2, 'upgrade-parent-call',
+                 'cloud_allowed', 'remote', 'UPSTREAM_TIMEOUT', 'safe summary',
+                 ?, ?, ?, 5, 'request-upgrade-0001', 'http_response', 1, 504,
+                 'length', 17, 1, 0, 64)`,
+      [NOW, NOW, NOW],
+    );
+    executor.database.exec(
+      `CREATE TABLE context_compilation_model_invocation_links (
+         trace_id TEXT PRIMARY KEY NOT NULL,
+         model_invocation_id TEXT NOT NULL
+           REFERENCES model_invocation_facts(id) ON DELETE CASCADE
+       );
+       INSERT INTO context_compilation_model_invocation_links
+         (trace_id, model_invocation_id)
+       VALUES ('upgrade-context-link', 'upgrade-fallback-call');`,
+    );
+
+    const before = await snapshotRebuiltModelHubRows(executor);
+    executor.database.exec(contentQualityTaskMigration);
+    const after = await snapshotRebuiltModelHubRows(executor);
+
+    expect(after).toEqual(before);
+    await expect(
+      executor.select<{ trace_id: string; model_invocation_id: string }>(
+        "SELECT * FROM context_compilation_model_invocation_links",
+      ),
+    ).resolves.toEqual([
+      {
+        trace_id: "upgrade-context-link",
+        model_invocation_id: "upgrade-fallback-call",
+      },
+    ]);
+    await expect(
+      executor.select<{ name: string }>(
+        `SELECT name FROM sqlite_schema
+         WHERE type = 'index' AND name IN (
+           'model_evaluation_results_routing_idx',
+           'model_evaluation_results_model_idx',
+           'novel_task_routes_models_idx',
+           'model_invocation_facts_task_idx',
+           'model_invocation_facts_connection_idx',
+           'model_invocation_facts_fallback_idx',
+           'model_invocation_facts_recent_failure_idx'
+         ) ORDER BY name`,
+      ),
+    ).resolves.toHaveLength(7);
+    await expect(
+      executor.select<{ name: string }>(
+        `SELECT name FROM sqlite_schema
+         WHERE type = 'trigger' AND name IN (
+           'novel_task_routes_local_only_insert_guard',
+           'novel_task_routes_local_only_update_guard',
+           'model_cost_privacy_local_route_update_guard',
+           'model_cost_privacy_local_route_delete_guard'
+         ) ORDER BY name`,
+      ),
+    ).resolves.toHaveLength(4);
+    await expect(
+      executor.execute(
+        `UPDATE model_cost_privacy_profiles
+         SET data_destination = 'remote'
+         WHERE catalog_entry_id = 'upgrade-local-model'`,
+      ),
+    ).rejects.toThrow(/cannot remove local evidence used by a local-only route/iu);
+    await expect(executor.select("PRAGMA foreign_key_check")).resolves.toEqual([]);
+    await expect(executor.select("PRAGMA integrity_check")).resolves.toEqual([
+      { integrity_check: "ok" },
+    ]);
+    await executor.close();
+  });
+
   it("persists dynamic catalogs, evidence, task routing, and content-free invocation facts", async () => {
     const executor = new NodeSqliteExecutor(migration);
     await insertConnection(executor, "cloud", "openai", "remote", "https://api.example.test/v1");
@@ -573,6 +823,14 @@ async function columnNames(
     `SELECT name FROM pragma_table_info('${table}') ORDER BY cid`,
   );
   return rows.map(({ name }) => name);
+}
+
+async function snapshotRebuiltModelHubRows(executor: NodeSqliteExecutor): Promise<unknown> {
+  return {
+    evaluations: await executor.select("SELECT * FROM model_evaluation_results ORDER BY id"),
+    routes: await executor.select("SELECT * FROM novel_task_routes ORDER BY task"),
+    invocations: await executor.select("SELECT * FROM model_invocation_facts ORDER BY id"),
+  };
 }
 
 async function insertConnection(

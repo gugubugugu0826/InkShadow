@@ -66,72 +66,75 @@ function enforceDesktopBundlePolicy(): Plugin {
   return {
     name: "inkshadow-desktop-bundle-policy",
     apply: "build",
-    generateBundle(_options, bundle) {
-      let totalBytes = 0;
-      const outputSizes: { readonly fileName: string; readonly bytes: number }[] = [];
-      for (const output of Object.values(bundle)) {
-        if (output.fileName.endsWith(".map")) {
-          throw new Error(`Source map ${output.fileName} must not ship in a desktop release.`);
-        }
-        if (output.type === "chunk") {
-          const bytes = Buffer.byteLength(output.code, "utf8");
+    generateBundle: {
+      order: "post",
+      handler(_options, bundle) {
+        let totalBytes = 0;
+        const outputSizes: { readonly fileName: string; readonly bytes: number }[] = [];
+        for (const output of Object.values(bundle)) {
+          if (output.fileName.endsWith(".map")) {
+            throw new Error(`Source map ${output.fileName} must not ship in a desktop release.`);
+          }
+          if (output.type === "chunk") {
+            const bytes = Buffer.byteLength(output.code, "utf8");
+            totalBytes += bytes;
+            outputSizes.push({ fileName: output.fileName, bytes });
+            const maximum = output.isEntry ? ENTRY_CHUNK_BUDGET_BYTES : ASYNC_CHUNK_BUDGET_BYTES;
+            const nearBudget = bytes > maximum * 0.9;
+            const largestModules = nearBudget
+              ? Object.entries(output.modules)
+                  .map(([moduleId, details]) => ({
+                    moduleId,
+                    bytes: details.renderedLength,
+                  }))
+                  .sort((left, right) => right.bytes - left.bytes)
+                  .slice(0, 8)
+                  .map(
+                    ({ moduleId, bytes: moduleBytes }) =>
+                      `${moduleId.replaceAll("\\", "/")} (${String(moduleBytes)} bytes)`,
+                  )
+                  .join(", ")
+              : "";
+            if (bytes > maximum) {
+              throw new Error(
+                `${output.fileName} is ${String(bytes)} bytes and exceeds its ${String(maximum)} byte desktop release budget. Largest modules: ${largestModules}`,
+              );
+            }
+            if (nearBudget) {
+              this.warn(
+                `${output.fileName} uses ${String(bytes)} of ${String(maximum)} allowed bytes. Largest modules: ${largestModules}`,
+              );
+            }
+            continue;
+          }
+          const bytes =
+            typeof output.source === "string"
+              ? Buffer.byteLength(output.source, "utf8")
+              : output.source.byteLength;
           totalBytes += bytes;
           outputSizes.push({ fileName: output.fileName, bytes });
-          const maximum = output.isEntry ? ENTRY_CHUNK_BUDGET_BYTES : ASYNC_CHUNK_BUDGET_BYTES;
-          const nearBudget = bytes > maximum * 0.9;
-          const largestModules = nearBudget
-            ? Object.entries(output.modules)
-                .map(([moduleId, details]) => ({
-                  moduleId,
-                  bytes: details.renderedLength,
-                }))
-                .sort((left, right) => right.bytes - left.bytes)
-                .slice(0, 8)
-                .map(
-                  ({ moduleId, bytes: moduleBytes }) =>
-                    `${moduleId.replaceAll("\\", "/")} (${String(moduleBytes)} bytes)`,
-                )
-                .join(", ")
-            : "";
+          const maximum = output.fileName.endsWith(".css")
+            ? CSS_ASSET_BUDGET_BYTES
+            : output.fileName.includes(".worker.")
+              ? WORKER_ASSET_BUDGET_BYTES
+              : GENERAL_ASSET_BUDGET_BYTES;
           if (bytes > maximum) {
             throw new Error(
-              `${output.fileName} is ${String(bytes)} bytes and exceeds its ${String(maximum)} byte desktop release budget. Largest modules: ${largestModules}`,
+              `${output.fileName} is ${String(bytes)} bytes and exceeds its ${String(maximum)} byte desktop asset budget.`,
             );
           }
-          if (nearBudget) {
-            this.warn(
-              `${output.fileName} uses ${String(bytes)} of ${String(maximum)} allowed bytes. Largest modules: ${largestModules}`,
-            );
-          }
-          continue;
         }
-        const bytes =
-          typeof output.source === "string"
-            ? Buffer.byteLength(output.source, "utf8")
-            : output.source.byteLength;
-        totalBytes += bytes;
-        outputSizes.push({ fileName: output.fileName, bytes });
-        const maximum = output.fileName.endsWith(".css")
-          ? CSS_ASSET_BUDGET_BYTES
-          : output.fileName.includes(".worker.")
-            ? WORKER_ASSET_BUDGET_BYTES
-            : GENERAL_ASSET_BUDGET_BYTES;
-        if (bytes > maximum) {
+        if (totalBytes > TOTAL_FRONTEND_BUDGET_BYTES) {
+          const largestOutputs = outputSizes
+            .sort((left, right) => right.bytes - left.bytes)
+            .slice(0, 12)
+            .map(({ fileName, bytes }) => `${fileName} (${String(bytes)} bytes)`)
+            .join(", ");
           throw new Error(
-            `${output.fileName} is ${String(bytes)} bytes and exceeds its ${String(maximum)} byte desktop asset budget.`,
+            `The desktop frontend is ${String(totalBytes)} bytes and exceeds its ${String(TOTAL_FRONTEND_BUDGET_BYTES)} byte total release budget. Largest outputs: ${largestOutputs}`,
           );
         }
-      }
-      if (totalBytes > TOTAL_FRONTEND_BUDGET_BYTES) {
-        const largestOutputs = outputSizes
-          .sort((left, right) => right.bytes - left.bytes)
-          .slice(0, 12)
-          .map(({ fileName, bytes }) => `${fileName} (${String(bytes)} bytes)`)
-          .join(", ");
-        throw new Error(
-          `The desktop frontend is ${String(totalBytes)} bytes and exceeds its ${String(TOTAL_FRONTEND_BUDGET_BYTES)} byte total release budget. Largest outputs: ${largestOutputs}`,
-        );
-      }
+      },
     },
   };
 }
@@ -248,8 +251,33 @@ export default defineConfig({
     target: "es2022",
     // Do not ship readable application source alongside commercial desktop bundles.
     sourcemap: false,
+    cssMinify: "lightningcss",
+    minify: "terser",
+    terserOptions: {
+      ecma: 2022,
+      // Rollup's production chunks are ECMAScript modules. Declaring that fact lets
+      // Terser safely optimize module-scoped bindings without property mangling.
+      module: true,
+      compress: {
+        // Additional passes are semantics-preserving and recover repeated helper
+        // patterns across the large desktop orchestration chunks.
+        ecma: 2022,
+        passes: 3,
+        toplevel: true,
+      },
+      format: {
+        ecma: 2022,
+      },
+      mangle: {
+        toplevel: true,
+      },
+    },
     rollupOptions: {
       output: {
+        // Merge very small route fragments so their import/export wrappers and
+        // duplicated bootstrap code do not dominate the installed application.
+        experimentalMinChunkSize: 240_000,
+        generatedCode: "es2015",
         manualChunks(moduleId) {
           const normalizedModuleId = moduleId.replaceAll("\\", "/");
           if (
@@ -349,9 +377,6 @@ export default defineConfig({
             normalizedModuleId.includes("/node_modules/xmlbuilder/")
           ) {
             return "docx-xml";
-          }
-          if (normalizedModuleId.includes("/node_modules/mammoth/")) {
-            return "docx-import";
           }
           return undefined;
         },

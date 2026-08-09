@@ -81,7 +81,15 @@ import {
   projectModelHubReadiness,
 } from "../infrastructure/model-hub-readiness";
 import { applyAutomaticModelHubRouting } from "../infrastructure/model-hub-routing-service";
+import {
+  MODEL_HUB_TASK_GROUPS,
+  buildModelHubRoutingVisibility,
+  capabilityLabel,
+  modelHubTaskGroupLabel,
+  type ModelHubCapabilityDisplayState,
+} from "../infrastructure/model-hub-routing-visibility";
 import { bridgeLegacyModelProfilesToModelHub } from "../infrastructure/model-hub-legacy-bridge";
+import { resolveModelHubFormReadiness } from "../infrastructure/model-hub-form-readiness";
 import { ModelHubLocalEvaluationService } from "../infrastructure/model-hub-local-evaluation-service";
 import {
   modelHubTextCapabilityProbeFailureMetadata,
@@ -96,11 +104,13 @@ import {
   isRetiredModelProviderConnection,
   ModelHubStoreError,
   type ModelCatalogEntry,
+  type ModelCapabilityEvidence,
   type ModelCostPrivacyProfile,
   type ModelHubPrivacyPolicy,
   type ModelHubStore,
   type ModelProviderConnection,
   type NovelTaskRoute,
+  type RecentAiFailure,
   type SaveModelProviderConnectionInput,
 } from "../infrastructure/model-hub-store";
 import type {
@@ -135,6 +145,10 @@ const DEFAULT_OPENAI_PROFILE = {
 const CONNECTABLE_PROVIDER_KINDS = MODEL_PROVIDER_KINDS;
 
 type ConnectableProviderKind = (typeof CONNECTABLE_PROVIDER_KINDS)[number];
+
+type SettingsPricingProfile = Omit<ModelPricingProfile, "contextWindowTokens"> & {
+  readonly contextWindowTokens: number | null;
+};
 
 const MODEL_HUB_SECTION_IDS = [
   "model-center",
@@ -209,6 +223,43 @@ function resolveModelHubSection(hash: string): ModelHubSectionId | null {
   return MODEL_HUB_SECTION_IDS.find((candidate) => candidate === sectionId) ?? null;
 }
 
+type ModelHubTargetSection =
+  | "model-center"
+  | "provider-connection"
+  | "model-selection"
+  | "model-pricing"
+  | "model-capabilities";
+
+function resolveModelHubTargetSection(search: string): ModelHubTargetSection {
+  const requested = new URLSearchParams(search).get("targetSection");
+  return (
+    [
+      "model-center",
+      "provider-connection",
+      "model-selection",
+      "model-pricing",
+      "model-capabilities",
+    ] as const
+  ).includes(requested as ModelHubTargetSection)
+    ? (requested as ModelHubTargetSection)
+    : "model-center";
+}
+
+function resolveSafeEditorReturnRoute(search: string): string | null {
+  const requested = new URLSearchParams(search).get("returnRoute");
+  if (requested === null || !requested.startsWith("/") || requested.startsWith("//")) {
+    return null;
+  }
+  const parsed = new URL(requested, "https://inkshadow.local");
+  if (
+    parsed.origin !== "https://inkshadow.local" ||
+    !/^\/projects\/[^/]+\/chapters\/[^/]+$/u.test(parsed.pathname)
+  ) {
+    return null;
+  }
+  return `${parsed.pathname}${parsed.search}`;
+}
+
 export function SettingsPage() {
   const runtime = useRuntime();
   const {
@@ -222,6 +273,8 @@ export function SettingsPage() {
   );
   const location = useLocation();
   const activeModelHubSection = resolveModelHubSection(location.hash);
+  const modelHubTargetSection = resolveModelHubTargetSection(location.search);
+  const editorReturnRoute = resolveSafeEditorReturnRoute(location.search);
   const isModelHubView = activeModelHubSection !== null;
   const modelHubPageMeta =
     activeModelHubSection === null ? null : MODEL_HUB_SECTION_META[activeModelHubSection];
@@ -243,9 +296,17 @@ export function SettingsPage() {
   const [hubConnection, setHubConnection] = useState<ModelProviderConnection | null>(null);
   const [hubCatalog, setHubCatalog] = useState<readonly ModelCatalogEntry[]>([]);
   const [routingCatalog, setRoutingCatalog] = useState<readonly ModelCatalogEntry[]>([]);
+  const [routingCapabilityEvidence, setRoutingCapabilityEvidence] = useState<
+    readonly ModelCapabilityEvidence[]
+  >([]);
+  const [routingCostPrivacyProfiles, setRoutingCostPrivacyProfiles] = useState<
+    readonly ModelCostPrivacyProfile[]
+  >([]);
+  const [routingRecentAiFailures, setRoutingRecentAiFailures] = useState<
+    readonly RecentAiFailure[]
+  >([]);
   const [localCatalogEntryIds, setLocalCatalogEntryIds] = useState<readonly string[]>([]);
   const [novelTaskRoutes, setNovelTaskRoutes] = useState<readonly NovelTaskRoute[]>([]);
-  const [novelTaskRouteCount, setNovelTaskRouteCount] = useState(0);
   const [roleRoutes, setRoleRoutes] = useState<readonly ModelRoleRoute[]>([]);
   const [providerPreset, setProviderPreset] = useState<ConnectableProviderKind>("openai");
   const [expertMode, setExpertMode] = useState(false);
@@ -258,6 +319,14 @@ export function SettingsPage() {
   const [routeFallbackProviderId, setRouteFallbackProviderId] = useState("");
   const [routeSaving, setRouteSaving] = useState(false);
   const [routeError, setRouteError] = useState<unknown>(null);
+  const [routeFailureRollbackConfirmed, setRouteFailureRollbackConfirmed] = useState<
+    boolean | null
+  >(null);
+  const [
+    routeFailureLegacyProjectionMayHaveChanged,
+    setRouteFailureLegacyProjectionMayHaveChanged,
+  ] = useState(false);
+  const [taskMatrixFilter, setTaskMatrixFilter] = useState<"all" | "missing" | "failed">("all");
   const [novelRouteTask, setNovelRouteTask] = useState<NovelAiTask>("prose_generation");
   const [novelRoutePrimaryCatalogId, setNovelRoutePrimaryCatalogId] = useState("");
   const [novelRouteFallbackCatalogId, setNovelRouteFallbackCatalogId] = useState("");
@@ -372,6 +441,26 @@ export function SettingsPage() {
     [],
   );
 
+  const refreshRoutingVisibilityEvidence = useCallback(
+    async (entries: readonly ModelCatalogEntry[]): Promise<void> => {
+      const [evidenceGroups, costProfiles, recentFailures, confirmedLocalIds] = await Promise.all([
+        Promise.all(entries.map((entry) => runtime.modelHub.listCapabilityEvidence(entry.id))),
+        Promise.all(entries.map((entry) => runtime.modelHub.findCostPrivacyProfile(entry.id))),
+        runtime.modelHub.listRecentAiFailures(25).catch(() => Object.freeze([])),
+        loadEvidenceConfirmedLocalCatalogIds(runtime.modelHub, entries),
+      ]);
+      setRoutingCapabilityEvidence(Object.freeze(evidenceGroups.flat()));
+      setRoutingCostPrivacyProfiles(
+        Object.freeze(
+          costProfiles.filter((profile): profile is ModelCostPrivacyProfile => profile !== null),
+        ),
+      );
+      setRoutingRecentAiFailures(recentFailures);
+      setLocalCatalogEntryIds(confirmedLocalIds);
+    },
+    [runtime],
+  );
+
   const loadModelCenter = useCallback(async () => {
     setLoading(true);
     try {
@@ -389,7 +478,13 @@ export function SettingsPage() {
           Promise.all(NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task))),
           runtime.modelHub.findActivePreset(),
         ]);
-      const selectedConnection = storedConnections[0] ?? null;
+      const requested = new URLSearchParams(location.search);
+      const requestedConnectionId = requested.get("connectionId");
+      const requestedModelId = requested.get("modelId");
+      const selectedConnection =
+        storedConnections.find(({ id }) => id === requestedConnectionId) ??
+        storedConnections[0] ??
+        null;
       const selectedProfile =
         storedProfiles.find(({ providerId: id }) => id === selectedConnection?.id) ?? null;
       const catalog =
@@ -410,6 +505,7 @@ export function SettingsPage() {
       );
       const proseRoute = storedNovelRoutes.find((route) => route?.task === "prose_generation");
       const selectedCatalogEntry =
+        catalog.find(({ providerModelId }) => providerModelId === requestedModelId) ??
         catalog.find(({ id }) => id === proseRoute?.primaryCatalogEntryId) ??
         catalog.find(({ availability }) => availability === "available") ??
         null;
@@ -420,6 +516,7 @@ export function SettingsPage() {
               runtime.modelHub.findCostPrivacyProfile(selectedCatalogEntry.id),
               runtime.modelHub.listCapabilityEvidence(selectedCatalogEntry.id),
             ]);
+      await refreshRoutingVisibilityEvidence(allCatalogEntries);
       setHubConnections(storedConnections);
       setHubConnection(selectedConnection);
       setHubCatalog(catalog);
@@ -428,7 +525,6 @@ export function SettingsPage() {
       setNovelTaskRoutes(persistedNovelRoutes);
       setProfiles(storedProfiles);
       setRoleRoutes(storedRoutes);
-      setNovelTaskRouteCount(persistedNovelRoutes.length);
       setNovelRoutePrimaryCatalogId(proseRoute?.primaryCatalogEntryId ?? "");
       setNovelRouteFallbackCatalogId(proseRoute?.fallbackCatalogEntryId ?? "");
       setNovelRouteMaximumCost(
@@ -502,7 +598,7 @@ export function SettingsPage() {
     } finally {
       setLoading(false);
     }
-  }, [applyHubModelToForm, runtime]);
+  }, [applyHubModelToForm, location.search, refreshRoutingVisibilityEvidence, runtime]);
 
   const inspectDatabase = useCallback(async () => {
     if (runtime.maintenance === null) {
@@ -608,12 +704,30 @@ export function SettingsPage() {
   }, [isModelHubView, loadMemoryProjects]);
 
   useEffect(() => {
+    if (
+      modelHubTargetSection !== "provider-connection" &&
+      modelHubTargetSection !== "model-pricing" &&
+      modelHubTargetSection !== "model-capabilities"
+    ) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => setExpertMode(true), 0);
+    return () => window.clearTimeout(timeout);
+  }, [modelHubTargetSection]);
+
+  useEffect(() => {
     const targetId = location.hash.startsWith("#") ? location.hash.slice(1) : "";
-    if (targetId.length === 0) {
+    const preciseTargetId =
+      modelHubTargetSection === "provider-connection"
+        ? "model-hub-expert-settings"
+        : modelHubTargetSection;
+    const resolvedTargetId = preciseTargetId === "model-center" ? targetId : preciseTargetId;
+    if (resolvedTargetId.length === 0) {
       return;
     }
     const timeout = window.setTimeout(() => {
-      const target = document.getElementById(targetId);
+      const target = document.getElementById(resolvedTargetId);
       if (target === null) {
         return;
       }
@@ -629,7 +743,7 @@ export function SettingsPage() {
       target.focus({ preventScroll: true });
     }, 0);
     return () => window.clearTimeout(timeout);
-  }, [location.hash]);
+  }, [expertMode, location.hash, modelHubTargetSection]);
 
   async function selectStoredProfile(providerIdValue: string): Promise<void> {
     const selected = hubConnections.find((candidate) => candidate.id === providerIdValue);
@@ -758,6 +872,25 @@ export function SettingsPage() {
     setCapabilityProbeMessage(null);
   }
 
+  function restoreProviderConnectionDefaults(): void {
+    if (providerPreset === "custom_openai_compatible") {
+      return;
+    }
+    setBaseUrl(resolveProviderBaseUrl(providerPreset, { region, workspaceId }));
+    setAuthentication(
+      getModelProviderPreset(providerPreset).credentialRequired ? "bearer_keyring" : "none",
+    );
+    setCredentialHeaderName("");
+    setModelDiscoveryPath("");
+    setTextGenerationPath("");
+    setEmbeddingPath("");
+    setRequestTimeoutMs(String(MODEL_HUB_DEFAULT_REQUEST_TIMEOUT_MS));
+    setRetryLimit("0");
+    setConnection(null);
+    setConnectionChecked(false);
+    setSchemeMessage("已恢复供应商默认连接参数；系统凭据、已保存连接和 AI 分工均未删除。");
+  }
+
   async function modelHubConnectionInput(
     credentialConfigured = summary.configured,
     authenticationOverride: NativeGatewayAuthenticationMode = authentication,
@@ -807,6 +940,37 @@ export function SettingsPage() {
     );
   }
 
+  async function persistConnectionWithAvailableCredential(): Promise<ModelProviderConnection> {
+    if (authentication === "none" || secret.trim().length === 0) {
+      return persistModelHubConnection(summary.configured, authentication);
+    }
+    validateExpertConnectionDraft({
+      provider: providerPreset,
+      baseUrl,
+      region,
+      workspaceId,
+      authentication,
+      credentialHeaderName,
+      modelDiscoveryPath,
+      textGenerationPath,
+      embeddingPath,
+      requestTimeoutMs,
+      retryLimit,
+    });
+    await assertCredentialMutationTarget("save");
+    const saved = await saveModelHubCredential(runtime, {
+      connection: await modelHubConnectionInput(true, authentication),
+      secret,
+    });
+    setHubConnection(saved.connection);
+    setSummary(saved.credential);
+    setSecret("");
+    if (saved.oldCredentialCleanupPending) {
+      setSchemeMessage("新密钥已安全保存；旧密钥槽将在下次启动或重试时继续清理。");
+    }
+    return saved.connection;
+  }
+
   function assertConnectionTargetIsOwned(existingConnection: ModelProviderConnection | null): void {
     if (existingConnection !== null && existingConnection.providerKind !== providerPreset) {
       throw new ModelHubStoreError(
@@ -850,8 +1014,12 @@ export function SettingsPage() {
   async function saveModelProfile(): Promise<void> {
     setSaving(true);
     try {
-      const savedConnection = await persistModelHubConnection();
+      const savedConnection = await persistConnectionWithAvailableCredential();
       const pricing = buildPricingProfile();
+      const legacyPricing: ModelPricingProfile | null =
+        pricing?.contextWindowTokens == null
+          ? null
+          : { ...pricing, contextWindowTokens: pricing.contextWindowTokens };
       let nextCatalog = await runtime.modelHub.listCatalog(savedConnection.id);
       let selectedCatalogEntry = nextCatalog.find(
         ({ providerModelId }) => providerModelId === selectedModel,
@@ -933,7 +1101,7 @@ export function SettingsPage() {
           authentication: legacyAuthentication,
           selectedModel:
             savedConnection.enabled && selectedModel.trim().length > 0 ? selectedModel : null,
-          pricing: savedConnection.enabled ? pricing : null,
+          pricing: savedConnection.enabled ? legacyPricing : null,
           expectedRevision: existingLegacyProfile?.revision ?? null,
         });
       }
@@ -967,12 +1135,16 @@ export function SettingsPage() {
     setRoutePrimaryProviderId(stored?.primaryProviderId ?? firstReadyProfile?.providerId ?? "");
     setRouteFallbackProviderId(stored?.fallbackProviderId ?? "");
     setRouteError(null);
+    setRouteFailureRollbackConfirmed(null);
+    setRouteFailureLegacyProjectionMayHaveChanged(false);
   }
 
   async function saveModelRoleRoute(): Promise<void> {
     const existing = roleRoutes.find(({ role }) => role === routeRole);
     setRouteSaving(true);
     setRouteError(null);
+    setRouteFailureRollbackConfirmed(null);
+    setRouteFailureLegacyProjectionMayHaveChanged(false);
     try {
       const saved = await runtime.modelRouting.saveRoute({
         role: routeRole,
@@ -1006,14 +1178,19 @@ export function SettingsPage() {
     setNovelRouteFailure(stored?.failurePolicy ?? "use_fallback");
     setNovelRouteRemoteContentConsent(stored?.parameterPolicy.remoteContentConsent === true);
     setRouteError(null);
+    setRouteFailureRollbackConfirmed(null);
+    setRouteFailureLegacyProjectionMayHaveChanged(false);
   }
 
   async function saveNovelTaskRoute(): Promise<void> {
     const existing = novelTaskRoutes.find(({ task }) => task === novelRouteTask);
+    const routesBeforeSave = novelTaskRoutes;
     const fallbackCatalogEntryId =
       novelRouteFallbackCatalogId.trim().length === 0 ? null : novelRouteFallbackCatalogId;
     setRouteSaving(true);
     setRouteError(null);
+    setRouteFailureRollbackConfirmed(null);
+    setRouteFailureLegacyProjectionMayHaveChanged(false);
     try {
       if (novelRoutePrimaryCatalogId === fallbackCatalogEntryId) {
         throw new Error("主模型和备用模型不能相同。");
@@ -1072,7 +1249,6 @@ export function SettingsPage() {
       );
       const persisted = nextRoutes.filter((route): route is NovelTaskRoute => route !== null);
       setNovelTaskRoutes(persisted);
-      setNovelTaskRouteCount(persisted.length);
       setModelHubScheme("custom");
       setNovelRoutePrimaryCatalogId(saved.primaryCatalogEntryId);
       setNovelRouteFallbackCatalogId(saved.fallbackCatalogEntryId ?? "");
@@ -1080,20 +1256,33 @@ export function SettingsPage() {
       setSchemeMessage(`已保存“${novelAiTaskLabel(saved.task)}”的自定义分工。`);
     } catch (cause: unknown) {
       setRouteError(cause);
+      await confirmNovelRoutingUnchanged(routesBeforeSave);
     } finally {
       setRouteSaving(false);
     }
   }
 
-  function buildPricingProfile(): ModelPricingProfile | null {
+  async function confirmNovelRoutingUnchanged(
+    routesBeforeSave: readonly NovelTaskRoute[],
+  ): Promise<void> {
+    try {
+      const currentRoutes = (
+        await Promise.all(NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task)))
+      ).filter((route): route is NovelTaskRoute => route !== null);
+      setNovelTaskRoutes(currentRoutes);
+      setRouteFailureRollbackConfirmed(routeSnapshotsMatch(routesBeforeSave, currentRoutes));
+    } catch {
+      setRouteFailureRollbackConfirmed(null);
+    }
+  }
+
+  function buildPricingProfile(): SettingsPricingProfile | null {
     if (selectedModel.trim().length === 0) {
       return null;
     }
     const pricingFields = [
-      contextWindowTokens,
       inputPricePerMillion,
       outputPricePerMillion,
-      cachedInputPricePerMillion,
       pricingVersion,
       priceUpdatedDate,
     ];
@@ -1102,15 +1291,19 @@ export function SettingsPage() {
     }
     const parsedContext = Number(contextWindowTokens);
     if (
-      !Number.isSafeInteger(parsedContext) ||
-      parsedContext < 1 ||
+      (contextWindowTokens.trim().length > 0 &&
+        (!Number.isSafeInteger(parsedContext) || parsedContext < 1)) ||
+      inputPricePerMillion.trim().length === 0 ||
+      outputPricePerMillion.trim().length === 0 ||
       pricingVersion.trim().length === 0 ||
       priceUpdatedDate.length === 0
     ) {
-      throw new Error("请填写有效的上下文窗口、价格版本和价格更新日期。");
+      throw new Error(
+        "如需费用估算，请同时填写输入价、输出价、价格版本和更新时间；上下文窗口可单独留空。",
+      );
     }
     return {
-      contextWindowTokens: parsedContext,
+      contextWindowTokens: contextWindowTokens.trim().length === 0 ? null : parsedContext,
       currency: pricingCurrency.trim().toUpperCase(),
       inputMicrosPerMillionTokens: parseCurrencyAsMicros(inputPricePerMillion),
       outputMicrosPerMillionTokens: parseCurrencyAsMicros(outputPricePerMillion),
@@ -1130,7 +1323,7 @@ export function SettingsPage() {
       await Promise.all(connections.map((candidate) => runtime.modelHub.listCatalog(candidate.id)))
     ).flat();
     setRoutingCatalog(entries);
-    setLocalCatalogEntryIds(await loadEvidenceConfirmedLocalCatalogIds(runtime.modelHub, entries));
+    await refreshRoutingVisibilityEvidence(entries);
     return entries;
   }
 
@@ -1370,8 +1563,24 @@ export function SettingsPage() {
     const currentRoutes = await Promise.all(
       NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task)),
     );
-    if (currentRoutes.some((route) => route !== null)) return null;
+    const persistedRoutes = currentRoutes.filter(
+      (route): route is NovelTaskRoute => route !== null,
+    );
+    if (persistedRoutes.length > 0) {
+      const activePreset = await runtime.modelHub.findActivePreset();
+      const canRecoverInterruptedSmartPlan =
+        persistedRoutes.length === 15 &&
+        activePreset?.id === "automatic-smart" &&
+        activePreset.scheme === "smart" &&
+        persistedRoutes.every(
+          ({ enabled, presetId, routeOrigin }) =>
+            enabled && presetId === "automatic-smart" && routeOrigin === "automatic",
+        );
+      if (!canRecoverInterruptedSmartPlan) return null;
+    }
     setRouteError(null);
+    setRouteFailureRollbackConfirmed(null);
+    setRouteFailureLegacyProjectionMayHaveChanged(false);
     const currentProfiles = await runtime.modelCenter.listProfiles();
     const applied = await applyAutomaticModelHubRouting({
       modelHub: runtime.modelHub,
@@ -1383,14 +1592,21 @@ export function SettingsPage() {
       scheme: "smart",
       now: new Date().toISOString(),
     });
-    const [nextRoleRoutes, nextNovelRoutes] = await Promise.all([
-      runtime.modelRouting.listRoutes(),
-      Promise.all(NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task))),
-    ]);
+    let legacyRefreshFailed = applied.legacySyncStatus === "failed";
+    if (!legacyRefreshFailed) {
+      try {
+        setRoleRoutes(await runtime.modelRouting.listRoutes());
+      } catch {
+        legacyRefreshFailed = true;
+      }
+    }
     setModelHubScheme("smart");
-    setRoleRoutes(nextRoleRoutes);
-    setNovelTaskRoutes(nextNovelRoutes.filter((route): route is NovelTaskRoute => route !== null));
-    setNovelTaskRouteCount(applied.savedNovelTaskCount);
+    setNovelTaskRoutes(applied.routes);
+    if (legacyRefreshFailed) {
+      setSchemeMessage(
+        "核心 AI 分工已保存；旧版兼容分工暂未同步，不影响当前 Model Hub 任务，可以稍后重试。",
+      );
+    }
     return applied.savedNovelTaskCount;
   }
 
@@ -1402,7 +1618,7 @@ export function SettingsPage() {
     setCapabilityProbeError(null);
     setCapabilityProbeMessage(null);
     try {
-      const savedConnection = await persistModelHubConnection();
+      const savedConnection = await persistConnectionWithAvailableCredential();
       const target = await ensureCatalogEntryForModel(savedConnection, selectedModel);
       const result = await performLightweightTextProbe(target.connection, target.entry, true);
       setHubCatalog(result.catalog);
@@ -1412,11 +1628,13 @@ export function SettingsPage() {
       await refreshRoutingCatalogState(nextConnections);
       let automaticallyConfigured: number | null = null;
       let automaticRoutingFailed = false;
+      const routesBeforeAutomaticConfiguration = novelTaskRoutes;
       try {
         automaticallyConfigured = await applyInitialSmartRoutingIfEmpty();
       } catch (cause: unknown) {
         automaticRoutingFailed = true;
         setRouteError(cause);
+        await confirmNovelRoutingUnchanged(routesBeforeAutomaticConfiguration);
       }
       setCapabilityProbeMessage(
         `${
@@ -1449,7 +1667,7 @@ export function SettingsPage() {
     let savedConnection: ModelProviderConnection | null = null;
     let lightweightProbeOwnsConnectionOutcome = false;
     try {
-      savedConnection = await persistModelHubConnection();
+      savedConnection = await persistConnectionWithAvailableCredential();
       const config = modelHubNativeEndpointConfig(savedConnection);
       const capacityInspection =
         providerPreset === "ollama" && runtime.modelGateway.inspectCapacity !== undefined
@@ -1605,6 +1823,8 @@ export function SettingsPage() {
 
   async function applyModelHubScheme(): Promise<void> {
     setSchemeMessage(null);
+    setRouteFailureRollbackConfirmed(null);
+    setRouteFailureLegacyProjectionMayHaveChanged(false);
     if (modelHubScheme === "custom") {
       setExpertMode(true);
       setSchemeMessage("已打开专家设置，可逐项调整模型能力和兼容路由。");
@@ -1612,6 +1832,7 @@ export function SettingsPage() {
     }
     setSchemeSaving(true);
     setRouteError(null);
+    const routesBeforeSave = novelTaskRoutes;
     try {
       const applied = await applyAutomaticModelHubRouting({
         modelHub: runtime.modelHub,
@@ -1623,19 +1844,30 @@ export function SettingsPage() {
         scheme: modelHubScheme,
         now: new Date().toISOString(),
       });
-      const nextRoleRoutes = await runtime.modelRouting.listRoutes();
-      setRoleRoutes(nextRoleRoutes);
-      setNovelTaskRouteCount(applied.savedNovelTaskCount);
-      const missing = applied.plan.unroutableTasks.length;
+      let legacyRefreshFailed = applied.legacySyncStatus === "failed";
+      if (!legacyRefreshFailed) {
+        try {
+          setRoleRoutes(await runtime.modelRouting.listRoutes());
+        } catch {
+          legacyRefreshFailed = true;
+        }
+      }
+      setNovelTaskRoutes(applied.routes);
+      const missing = NOVEL_AI_TASKS.length - applied.savedNovelTaskCount;
+      const legacyWarning = legacyRefreshFailed
+        ? "；旧版兼容分工暂未同步，不影响当前 Model Hub 任务，可以稍后重试"
+        : "";
       setSchemeMessage(
         modelHubScheme === "local_privacy"
           ? missing === 0
-            ? `本地隐私方案已覆盖 ${String(applied.savedNovelTaskCount)} 类任务；主模型和备用模型都只会使用本机连接。`
-            : `本地隐私方案已安全应用；${String(applied.savedNovelTaskCount)} 类任务可用，${String(missing)} 类缺少本机能力证据，且不会回退到云端。`
-          : `已按能力、评测、成本和隐私证据配置 ${String(applied.savedNovelTaskCount)} 类任务；${String(missing)} 类任务等待能力证据。`,
+            ? `本地隐私方案已覆盖 ${String(applied.savedNovelTaskCount)} 类任务；主模型和备用模型都只会使用本机连接${legacyWarning}。`
+            : `本地隐私方案已安全应用；${String(applied.savedNovelTaskCount)} 类任务可用，${String(missing)} 类缺少本机能力证据，且不会回退到云端${legacyWarning}。`
+          : `已按当前可用能力配置 ${String(applied.savedNovelTaskCount)} 类任务；${String(missing)} 类任务等待能力证据${legacyWarning}。`,
       );
     } catch (cause: unknown) {
       setRouteError(cause);
+      setRouteFailureLegacyProjectionMayHaveChanged(modelHubScheme === "local_privacy");
+      await confirmNovelRoutingUnchanged(routesBeforeSave);
     } finally {
       setSchemeSaving(false);
     }
@@ -1927,6 +2159,43 @@ export function SettingsPage() {
   const normalizedCapabilityProbeError =
     capabilityProbeError === null ? null : normalizeUiError(capabilityProbeError);
   const normalizedRouteError = routeError === null ? null : normalizeUiError(routeError);
+  const routingVisibility = useMemo(
+    () =>
+      buildModelHubRoutingVisibility({
+        connections: hubConnections,
+        catalog: routingCatalog,
+        routes: novelTaskRoutes,
+        capabilityEvidence: routingCapabilityEvidence,
+        recentAiFailures: routingRecentAiFailures,
+        now: runtime.clock.now(),
+        validating: loading || checkingModel || probingCapability,
+        loadFailed: credentialError !== null,
+        saveFailed: normalizedRouteError !== null,
+      }),
+    [
+      checkingModel,
+      credentialError,
+      hubConnections,
+      loading,
+      novelTaskRoutes,
+      normalizedRouteError,
+      probingCapability,
+      routingCapabilityEvidence,
+      routingCatalog,
+      routingRecentAiFailures,
+      runtime,
+    ],
+  );
+  const missingNovelTaskRouteCount = routingVisibility.missingRouteCount;
+  const modelHubRouteBadgeTone = modelHubOverallBadgeTone(routingVisibility.state);
+  const modelHubRouteBadgeLabel = modelHubOverallBadgeLabel(routingVisibility.state);
+  const visibleExpertTasks = routingVisibility.tasks.filter(({ status }) =>
+    taskMatrixFilter === "all" ? true : status === taskMatrixFilter,
+  );
+  const schemeMessageIsWarning =
+    schemeMessage?.includes("缺少") === true ||
+    schemeMessage?.includes("暂未同步") === true ||
+    schemeMessage?.includes("等待能力证据") === true;
   const normalizedMaintenanceError =
     maintenanceError === null ? null : normalizeUiError(maintenanceError);
   const normalizedDiagnosticError =
@@ -1948,6 +2217,31 @@ export function SettingsPage() {
       availability === "available" &&
       (novelRoutePrivacy !== "local_only" || localCatalogEntryIds.includes(id)),
   );
+  const modelHubFormReadiness = resolveModelHubFormReadiness({
+    busy: loading || saving || checkingModel || probingCapability,
+    nativeGatewayAvailable: runtime.modelGateway.available,
+    online,
+    endpointCanRunOffline: canCheckModelEndpointWhileOffline(provider, baseUrl),
+    providerId,
+    baseUrl,
+    connectionFieldsValid: expertConnectionInputsAreComplete(
+      authentication,
+      credentialHeaderName,
+      requestTimeoutMs,
+      retryLimit,
+    ),
+    authenticationRequired: authentication !== "none",
+    storedCredentialConfigured: summary.configured,
+    newlyEnteredCredentialValid: secret.trim().length >= 8,
+    automaticDiscovery: getModelProviderPreset(providerPreset).modelDiscovery.automatic,
+    selectedModelId: selectedModel,
+    endpointModelId: endpointId,
+    connectionReady:
+      connection !== null ||
+      (hubConnection?.id === providerId &&
+        (hubConnection.connectionStatus === "ready" ||
+          hubConnection.connectionStatus === "degraded")),
+  });
 
   return (
     <div
@@ -2367,6 +2661,20 @@ export function SettingsPage() {
                 </div>
               </CardHeader>
               <CardContent>
+                {editorReturnRoute !== null && (
+                  <>
+                    <InlineAlert
+                      tone="info"
+                      title="正在修复本章的 AI 设置"
+                      description="已定位到这次生成所需的连接或模型字段；返回时会恢复原章节、滚动位置和光标。"
+                    />
+                    <div className="settings-actions">
+                      <Link className="button-link button-link--secondary" to={editorReturnRoute}>
+                        返回原章节
+                      </Link>
+                    </div>
+                  </>
+                )}
                 <div className="model-center-settings">
                   <section className="model-hub-readiness" aria-labelledby="model-hub-status-title">
                     <div className="model-hub-readiness__heading">
@@ -2459,7 +2767,7 @@ export function SettingsPage() {
                     <InlineAlert
                       tone="warning"
                       title="浏览器开发模式不连接模型"
-                      description="可验证并保存非敏感配置，但不会接收密钥、访问端点或伪造模型目录。真实检查只在 Tauri 桌面应用中运行。"
+                      description="可查看和填写非敏感配置，但需要密钥的连接只能在 Tauri 桌面应用中保存、测试和验证；这里不会接收密钥、访问端点或伪造模型目录。"
                     />
                   )}
 
@@ -2472,6 +2780,15 @@ export function SettingsPage() {
                     >
                       {expertMode ? "收起专家设置" : "专家设置"}
                     </Button>
+                    {providerPreset !== "custom_openai_compatible" && (
+                      <Button
+                        variant="secondary"
+                        disabled={loading || saving || checkingModel}
+                        onClick={restoreProviderConnectionDefaults}
+                      >
+                        恢复供应商默认配置
+                      </Button>
+                    )}
                     {hubConnection !== null &&
                       hubConnection.id === providerId &&
                       hubConnection.providerKind === providerPreset &&
@@ -2913,10 +3230,13 @@ export function SettingsPage() {
                       <InlineAlert
                         tone="info"
                         title="费用预估依据"
-                        description="为已选模型填写上下文上限和每百万输入、输出 token 的价格。墨影会在生成前显示估算、价格版本与更新时间；Ollama 等本地免费模型可明确填写 0。"
+                        description="这些字段只用于整理上下文、费用估算和预算，不是开始写作的必填项。不确定时可以留空；价格单位为每百万 token，供应商仍可能正常计费。"
                       />
                       <div className="model-center-grid">
-                        <FormField label="上下文窗口（token）" required>
+                        <FormField
+                          label="上下文窗口（token）"
+                          hint="模型一次可读取的最大 token。目录没有提供时可留空，墨影会使用保守默认长度；这里不是小说字数。"
+                        >
                           {(fieldProps) => (
                             <Input
                               {...fieldProps}
@@ -2932,7 +3252,10 @@ export function SettingsPage() {
                             />
                           )}
                         </FormField>
-                        <FormField label="计价币种" hint="三位大写代码，例如 USD。" required>
+                        <FormField
+                          label="计价币种"
+                          hint="只在填写价格时使用；三位大写代码，例如 USD。"
+                        >
                           {(fieldProps) => (
                             <Input
                               {...fieldProps}
@@ -2944,7 +3267,10 @@ export function SettingsPage() {
                             />
                           )}
                         </FormField>
-                        <FormField label="输入价 / 百万 token" required>
+                        <FormField
+                          label="输入价 / 百万 token"
+                          hint="从供应商价格页获取；不确定可留空。"
+                        >
                           {(fieldProps) => (
                             <Input
                               {...fieldProps}
@@ -2959,7 +3285,10 @@ export function SettingsPage() {
                             />
                           )}
                         </FormField>
-                        <FormField label="输出价 / 百万 token" required>
+                        <FormField
+                          label="输出价 / 百万 token"
+                          hint="从供应商价格页获取；不确定可留空。"
+                        >
                           {(fieldProps) => (
                             <Input
                               {...fieldProps}
@@ -2989,7 +3318,10 @@ export function SettingsPage() {
                             />
                           )}
                         </FormField>
-                        <FormField label="价格版本" hint="例如 provider-2026-07。" required>
+                        <FormField
+                          label="价格版本"
+                          hint="仅在填写价格时使用，例如 provider-2026-07。"
+                        >
                           {(fieldProps) => (
                             <Input
                               {...fieldProps}
@@ -3000,7 +3332,7 @@ export function SettingsPage() {
                             />
                           )}
                         </FormField>
-                        <FormField label="价格更新时间" required>
+                        <FormField label="价格更新时间" hint="仅在填写价格时使用。">
                           {(fieldProps) => (
                             <Input
                               {...fieldProps}
@@ -3021,7 +3353,7 @@ export function SettingsPage() {
                       <InlineAlert
                         tone="info"
                         title="只确认实际验证过的能力"
-                        description="模型目录无法证明的能力会保持“未知”。这里的勾选会作为用户确认的路由证据；取消勾选不会自动写成“不支持”。"
+                        description="普通用户不需要勾选；能力由目录和真实探针验证。专家手动确认只影响路由选择，不代表墨影已经实际验证；语义向量、图片和工具调用都不是基础写作的前提。"
                       />
                       <div className="model-center-grid" role="group" aria-label="模型能力">
                         {MODEL_HUB_CAPABILITIES.map((capability) => (
@@ -3074,19 +3406,7 @@ export function SettingsPage() {
                   <div className="settings-actions">
                     <Button
                       loading={saving}
-                      disabled={
-                        loading ||
-                        checkingModel ||
-                        probingCapability ||
-                        providerId.trim().length === 0 ||
-                        baseUrl.trim().length === 0 ||
-                        !expertConnectionInputsAreComplete(
-                          authentication,
-                          credentialHeaderName,
-                          requestTimeoutMs,
-                          retryLimit,
-                        )
-                      }
+                      disabled={!modelHubFormReadiness.save.enabled}
                       onClick={() => void saveModelProfile()}
                     >
                       保存供应商与模型
@@ -3094,23 +3414,7 @@ export function SettingsPage() {
                     <Button
                       variant="secondary"
                       loading={checkingModel}
-                      disabled={
-                        !runtime.modelGateway.available ||
-                        (!online && !canCheckModelEndpointWhileOffline(provider, baseUrl)) ||
-                        loading ||
-                        saving ||
-                        probingCapability ||
-                        (!getModelProviderPreset(providerPreset).modelDiscovery.automatic &&
-                          selectedModel.trim().length === 0 &&
-                          endpointId.trim().length === 0) ||
-                        (authentication !== "none" && !summary.configured) ||
-                        !expertConnectionInputsAreComplete(
-                          authentication,
-                          credentialHeaderName,
-                          requestTimeoutMs,
-                          retryLimit,
-                        )
-                      }
+                      disabled={!modelHubFormReadiness.discover.enabled}
                       onClick={() => void checkModelConnection()}
                     >
                       {getModelProviderPreset(providerPreset).modelDiscovery.automatic
@@ -3121,26 +3425,32 @@ export function SettingsPage() {
                       <Button
                         variant="secondary"
                         loading={probingCapability}
-                        disabled={
-                          !runtime.modelGateway.available ||
-                          selectedModel.trim().length === 0 ||
-                          loading ||
-                          saving ||
-                          checkingModel ||
-                          (authentication !== "none" && !summary.configured) ||
-                          !expertConnectionInputsAreComplete(
-                            authentication,
-                            credentialHeaderName,
-                            requestTimeoutMs,
-                            retryLimit,
-                          )
-                        }
+                        disabled={!modelHubFormReadiness.verify.enabled}
                         onClick={() => void probeSelectedModelCapability()}
                       >
                         验证写作能力
                       </Button>
                     )}
                   </div>
+
+                  {(
+                    [
+                      ["保存供应商与模型", modelHubFormReadiness.save],
+                      ["测试连接并发现模型", modelHubFormReadiness.discover],
+                      ...(getModelProviderPreset(providerPreset).modelDiscovery.automatic
+                        ? ([["验证写作能力", modelHubFormReadiness.verify]] as const)
+                        : []),
+                    ] as const
+                  ).map(([label, state]) =>
+                    state.enabled ? null : (
+                      <InlineAlert
+                        key={label}
+                        tone="warning"
+                        title={`${label}暂不可用`}
+                        description={state.blockers.map(({ message }) => message).join(" ")}
+                      />
+                    ),
+                  )}
 
                   {connection !== null && (
                     <InlineAlert
@@ -3203,6 +3513,9 @@ export function SettingsPage() {
                               concealLabel="隐藏接口访问密钥"
                               autoComplete="off"
                               value={secret}
+                              placeholder={
+                                summary.configured ? "留空继续使用已保存凭据" : "输入新的 API Key"
+                              }
                               disabled={loading || saving || checkingModel}
                               onChange={(event) => setSecret(event.currentTarget.value)}
                             />
@@ -3243,22 +3556,281 @@ export function SettingsPage() {
                       选择一种使用方案，让写作、规划和检查使用合适的已连接模型。
                     </CardDescription>
                   </div>
-                  <Badge tone={novelTaskRouteCount > 0 ? "success" : "neutral"}>
-                    {novelTaskRouteCount > 0
-                      ? `${String(novelTaskRouteCount)} / ${String(NOVEL_AI_TASKS.length)} 类任务已配置`
-                      : "尚未配置"}
-                  </Badge>
+                  <Badge tone={modelHubRouteBadgeTone}>{modelHubRouteBadgeLabel}</Badge>
                 </div>
               </CardHeader>
               <CardContent>
                 <div className="model-center-settings">
                   {normalizedRouteError !== null && (
-                    <InlineAlert
-                      tone="error"
-                      title={normalizedRouteError.title}
-                      description={`${normalizedRouteError.description}（${normalizedRouteError.code}）`}
-                    />
+                    <div className="model-routing-save-failure">
+                      <InlineAlert
+                        tone="error"
+                        title="AI 分工没有保存"
+                        description={`系统在保存模型分配时遇到本地数据问题。${
+                          routeFailureRollbackConfirmed === true
+                            ? routeFailureLegacyProjectionMayHaveChanged
+                              ? "已重新读取并确认：Model Hub 的 22 项分工未修改；为防止云端回退，旧版兼容分工可能已被安全停用。请重试应用本地隐私方案。"
+                              : "已重新读取并确认：Model Hub 的 22 项分工没有被修改，本次任务路由事务已回滚。"
+                            : routeFailureRollbackConfirmed === false
+                              ? "重新读取后发现分工状态发生变化，请先查看下面的 22 项清单再重试。"
+                              : "暂时无法重新读取并确认旧分工状态；请先导出诊断包。"
+                        }（${normalizedRouteError.code}）`}
+                      />
+                      <div className="settings-actions">
+                        <Button
+                          variant="secondary"
+                          disabled={schemeSaving || routeSaving}
+                          onClick={() => void applyModelHubScheme()}
+                        >
+                          重试保存
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          loading={diagnosticBusy}
+                          onClick={() => void downloadDiagnostics()}
+                        >
+                          导出脱敏诊断
+                        </Button>
+                      </div>
+                      {expertMode && (
+                        <p className="model-routing-technical-detail">
+                          技术详情：{normalizedRouteError.code}；旧状态校验：
+                          {routeFailureRollbackConfirmed === null
+                            ? "未能确认"
+                            : routeFailureRollbackConfirmed
+                              ? routeFailureLegacyProjectionMayHaveChanged
+                                ? "Model Hub 快照未变化；旧兼容分工可能已安全停用"
+                                : "Model Hub 快照未变化"
+                              : "检测到变化"}
+                          。原始 SQL 不会在界面中显示。
+                        </p>
+                      )}
+                    </div>
                   )}
+
+                  <InlineAlert
+                    tone={modelHubOverallAlertTone(routingVisibility.state)}
+                    title={modelHubOverallTitle(routingVisibility.state)}
+                    description={modelHubOverallDescription(routingVisibility)}
+                  />
+                  <div className="model-routing-summary" aria-label="AI 分工总体状态">
+                    <strong>
+                      {`${String(routingVisibility.enabledRouteCount)} / ${String(
+                        NOVEL_AI_TASKS.length,
+                      )} 类已配置${
+                        missingNovelTaskRouteCount > 0
+                          ? ` · ${String(missingNovelTaskRouteCount)} 类缺能力`
+                          : ""
+                      }`}
+                    </strong>
+                    <span>
+                      手动 {String(routingVisibility.manuallyConfiguredCount)} 项 · 智能推荐{" "}
+                      {String(routingVisibility.automaticallyConfiguredCount)} 项
+                    </span>
+                  </div>
+
+                  {routingVisibility.models.length > 0 && (
+                    <section
+                      className="model-routing-capabilities"
+                      aria-labelledby="connected-model-capabilities-title"
+                    >
+                      <h3 id="connected-model-capabilities-title">当前模型能做什么</h3>
+                      <div className="model-routing-model-grid">
+                        {routingVisibility.models.map((model) => (
+                          <article className="model-routing-model" key={model.catalogEntry.id}>
+                            <header>
+                              <div>
+                                <strong>
+                                  {
+                                    getModelProviderPreset(model.connection.providerKind)
+                                      .displayName
+                                  }
+                                  {" / "}
+                                  {model.catalogEntry.displayName}
+                                </strong>
+                                <small>
+                                  协议：{model.connection.protocol} · 最后验证：
+                                  {formatVerificationTime(model.lastVerifiedAt)}
+                                </small>
+                              </div>
+                              <Badge
+                                tone={
+                                  !model.connectionUsable
+                                    ? "danger"
+                                    : model.latestProbeFailureCode === null
+                                      ? "success"
+                                      : "warning"
+                                }
+                              >
+                                {!model.connectionUsable
+                                  ? "连接异常"
+                                  : model.latestProbeFailureCode === null
+                                    ? "能力证据已读取"
+                                    : "最近实测失败"}
+                              </Badge>
+                            </header>
+                            <ul className="model-capability-list">
+                              {model.capabilities.map((capability) => (
+                                <li key={capability.capability} data-state={capability.state}>
+                                  <span>{capabilityLabel(capability.capability)}</span>
+                                  <small>
+                                    {capabilityDisplayStateLabel(capability.state)} ·{" "}
+                                    {capabilityEvidenceSourceLabel(capability.source)}
+                                    {capability.observedAt === null
+                                      ? ""
+                                      : ` · ${formatVerificationTime(capability.observedAt)}`}
+                                    {capability.failureCode === null
+                                      ? ""
+                                      : ` · ${capability.failureCode}`}
+                                  </small>
+                                </li>
+                              ))}
+                            </ul>
+                          </article>
+                        ))}
+                      </div>
+                    </section>
+                  )}
+
+                  <div className="model-routing-task-disclosure">
+                    <details>
+                      <summary>
+                        查看已配置的 {String(routingVisibility.enabledRouteCount)} 项
+                      </summary>
+                      <div className="model-routing-task-groups">
+                        {MODEL_HUB_TASK_GROUPS.map((group) => {
+                          const tasks = routingVisibility.tasks.filter(
+                            ({ definition, route }) => definition.group === group && route !== null,
+                          );
+                          if (tasks.length === 0) return null;
+                          return (
+                            <section key={group}>
+                              <h4>{modelHubTaskGroupLabel(group)}</h4>
+                              <ul className="model-routing-task-list">
+                                {tasks.map((task) => (
+                                  <li key={task.definition.task} data-state={task.status}>
+                                    <div>
+                                      <strong>{task.definition.displayName}</strong>
+                                      <small>{task.definition.description}</small>
+                                    </div>
+                                    <dl>
+                                      <div>
+                                        <dt>主模型</dt>
+                                        <dd>
+                                          {task.primaryModel === null
+                                            ? "模型已不可用"
+                                            : catalogEntryLabel(task.primaryModel, hubConnections)}
+                                        </dd>
+                                      </div>
+                                      <div>
+                                        <dt>备用模型</dt>
+                                        <dd>
+                                          {task.fallbackModel === null
+                                            ? "未配置"
+                                            : catalogEntryLabel(task.fallbackModel, hubConnections)}
+                                        </dd>
+                                      </div>
+                                      <div>
+                                        <dt>所需能力</dt>
+                                        <dd>
+                                          {task.definition.requiredCapabilities
+                                            .map(capabilityLabel)
+                                            .join("、")}
+                                        </dd>
+                                      </div>
+                                      <div>
+                                        <dt>来源</dt>
+                                        <dd>
+                                          {task.route === null
+                                            ? "未配置"
+                                            : routeOriginLabel(task.route.routeOrigin)}
+                                        </dd>
+                                      </div>
+                                    </dl>
+                                    {task.status === "failed" && (
+                                      <p className="model-routing-task-warning">{task.reason}</p>
+                                    )}
+                                  </li>
+                                ))}
+                              </ul>
+                            </section>
+                          );
+                        })}
+                      </div>
+                    </details>
+                    <details>
+                      <summary>
+                        查看尚未配置的 {String(routingVisibility.missingRouteCount)} 项
+                      </summary>
+                      <div className="model-routing-task-groups">
+                        {MODEL_HUB_TASK_GROUPS.map((group) => {
+                          const tasks = routingVisibility.tasks.filter(
+                            ({ definition, route }) => definition.group === group && route === null,
+                          );
+                          if (tasks.length === 0) return null;
+                          return (
+                            <section key={group}>
+                              <h4>{modelHubTaskGroupLabel(group)}</h4>
+                              <ul className="model-routing-task-list">
+                                {tasks.map((task) => (
+                                  <li key={task.definition.task} data-state="missing">
+                                    <div>
+                                      <strong>{task.definition.displayName}</strong>
+                                      <small>{task.reason}</small>
+                                    </div>
+                                    <p>
+                                      <strong>影响：</strong>
+                                      {task.definition.impactWhenMissing}
+                                    </p>
+                                    <p>
+                                      <strong>下一步：</strong>
+                                      {task.nextStep}
+                                    </p>
+                                    {task.definition.isCoreWritingTask ? (
+                                      <Badge tone="danger">会阻止这项基础写作</Badge>
+                                    ) : (
+                                      <Badge tone="neutral">不阻止基础写作</Badge>
+                                    )}
+                                  </li>
+                                ))}
+                              </ul>
+                            </section>
+                          );
+                        })}
+                      </div>
+                    </details>
+                  </div>
+
+                  <section
+                    className="model-routing-missing-capabilities"
+                    aria-labelledby="missing-capabilities-title"
+                  >
+                    <h3 id="missing-capabilities-title">完善全部功能还需要</h3>
+                    {routingVisibility.missingCapabilities.length === 0 ? (
+                      <p>当前 22 项任务所需能力均已满足。</p>
+                    ) : (
+                      <ul>
+                        {routingVisibility.missingCapabilities.map((missing) => (
+                          <li key={missing.capability}>
+                            <div>
+                              <strong>{capabilityLabel(missing.capability)}</strong>
+                              <span>
+                                {missing.core ? "核心写作能力" : "非核心扩展能力"} · 影响
+                                {String(missing.tasks.length)} 项任务
+                              </span>
+                            </div>
+                            <p>{missing.degradedBehavior}</p>
+                            <Badge tone={missing.blocksBasicWriting ? "danger" : "neutral"}>
+                              {missing.blocksBasicWriting ? "会阻止部分基础写作" : "基础写作仍可用"}
+                            </Badge>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <a className="button-link button-link--secondary" href="#model-center">
+                      新增或验证模型连接
+                    </a>
+                  </section>
 
                   <FormField label="使用方案" required>
                     {(fieldProps) => (
@@ -3297,8 +3869,8 @@ export function SettingsPage() {
                   </div>
                   {schemeMessage !== null && (
                     <InlineAlert
-                      tone={schemeMessage.startsWith("还没有") ? "warning" : "info"}
-                      title={schemeMessage.startsWith("还没有") ? "暂时无法应用" : "AI 分工已更新"}
+                      tone={schemeMessageIsWarning ? "warning" : "info"}
+                      title={schemeMessageIsWarning ? "AI 分工部分可用" : "AI 分工已更新"}
                       description={schemeMessage}
                     />
                   )}
@@ -3313,6 +3885,178 @@ export function SettingsPage() {
 
                   {expertMode && (
                     <>
+                      <section
+                        className="model-routing-expert-matrix"
+                        aria-labelledby="model-routing-expert-matrix-title"
+                      >
+                        <div className="model-routing-expert-matrix__heading">
+                          <div>
+                            <h3 id="model-routing-expert-matrix-title">22 项任务矩阵</h3>
+                            <p>
+                              这里复用下方单项编辑器，不会创建第二套路由入口。内部任务和能力代码只在专家模式显示。
+                            </p>
+                          </div>
+                          <FormField label="矩阵筛选">
+                            {(fieldProps) => (
+                              <Select
+                                {...fieldProps}
+                                value={taskMatrixFilter}
+                                options={[
+                                  { value: "all", label: "全部 22 项" },
+                                  { value: "missing", label: "只看未配置" },
+                                  { value: "failed", label: "只看失败" },
+                                ]}
+                                onChange={(event) =>
+                                  setTaskMatrixFilter(
+                                    event.currentTarget.value as "all" | "missing" | "failed",
+                                  )
+                                }
+                              />
+                            )}
+                          </FormField>
+                        </div>
+                        <div className="model-routing-expert-rows">
+                          {visibleExpertTasks.length === 0 ? (
+                            <p className="model-routing-expert-empty">当前筛选下没有任务。</p>
+                          ) : (
+                            visibleExpertTasks.map((task) => {
+                              const costProfile =
+                                task.primaryModel === null
+                                  ? null
+                                  : (routingCostPrivacyProfiles.find(
+                                      ({ catalogEntryId }) =>
+                                        catalogEntryId === task.primaryModel?.id,
+                                    ) ?? null);
+                              const primaryProjection =
+                                task.primaryModel === null
+                                  ? null
+                                  : (routingVisibility.models.find(
+                                      ({ catalogEntry }) =>
+                                        catalogEntry.id === task.primaryModel?.id,
+                                    ) ?? null);
+                              return (
+                                <article key={task.definition.task} data-state={task.status}>
+                                  <header>
+                                    <div>
+                                      <strong>{task.definition.displayName}</strong>
+                                      <code>{task.definition.task}</code>
+                                    </div>
+                                    <Badge
+                                      tone={
+                                        task.status === "configured"
+                                          ? "success"
+                                          : task.status === "failed"
+                                            ? "danger"
+                                            : "neutral"
+                                      }
+                                    >
+                                      {task.status === "configured"
+                                        ? "已配置"
+                                        : task.status === "failed"
+                                          ? "需要修复"
+                                          : "未配置"}
+                                    </Badge>
+                                  </header>
+                                  <dl>
+                                    <div>
+                                      <dt>任务组</dt>
+                                      <dd>{modelHubTaskGroupLabel(task.definition.group)}</dd>
+                                    </div>
+                                    <div>
+                                      <dt>所需能力</dt>
+                                      <dd>
+                                        {task.definition.requiredCapabilities.map((capability) => (
+                                          <code key={capability}>{capability}</code>
+                                        ))}
+                                      </dd>
+                                    </div>
+                                    <div>
+                                      <dt>主模型</dt>
+                                      <dd>
+                                        {task.primaryModel === null
+                                          ? "未配置"
+                                          : catalogEntryLabel(task.primaryModel, hubConnections)}
+                                      </dd>
+                                    </div>
+                                    <div>
+                                      <dt>备用模型</dt>
+                                      <dd>
+                                        {task.fallbackModel === null
+                                          ? "未配置"
+                                          : catalogEntryLabel(task.fallbackModel, hubConnections)}
+                                      </dd>
+                                    </div>
+                                    <div>
+                                      <dt>能力证据</dt>
+                                      <dd>
+                                        {primaryProjection === null
+                                          ? "没有可读证据"
+                                          : task.definition.requiredCapabilities
+                                              .map((capability) => {
+                                                const evidence =
+                                                  primaryProjection.capabilities.find(
+                                                    (item) => item.capability === capability,
+                                                  );
+                                                return evidence === undefined
+                                                  ? `${capability}: unknown`
+                                                  : `${capability}: ${evidence.state} / ${evidence.source ?? "none"}`;
+                                              })
+                                              .join("；")}
+                                      </dd>
+                                    </div>
+                                    <div>
+                                      <dt>费用</dt>
+                                      <dd>
+                                        {task.route?.maximumCostMicros === null ||
+                                        task.route?.maximumCostMicros === undefined
+                                          ? costProfile?.pricingVersion === null ||
+                                            costProfile?.pricingVersion === undefined
+                                            ? "未设置上限；价格证据未知"
+                                            : `未设置上限；价格版本 ${costProfile.pricingVersion}`
+                                          : `${task.route.maximumCostMicros} 微单位 / ${task.route.currency ?? "币种未知"}`}
+                                      </dd>
+                                    </div>
+                                    <div>
+                                      <dt>隐私</dt>
+                                      <dd>
+                                        {task.route?.privacyPolicy ?? "未配置"}；证据
+                                        {costProfile?.evidenceSource ?? "unknown"}
+                                      </dd>
+                                    </div>
+                                    <div>
+                                      <dt>来源</dt>
+                                      <dd>
+                                        {task.route === null
+                                          ? "未配置"
+                                          : routeOriginLabel(task.route.routeOrigin)}
+                                      </dd>
+                                    </div>
+                                    <div>
+                                      <dt>最后验证</dt>
+                                      <dd>{formatVerificationTime(task.lastVerifiedAt)}</dd>
+                                    </div>
+                                    <div>
+                                      <dt>状态说明</dt>
+                                      <dd>{task.reason}</dd>
+                                    </div>
+                                  </dl>
+                                  <Button
+                                    variant="secondary"
+                                    onClick={() => {
+                                      selectNovelTaskRoute(task.definition.task);
+                                      document
+                                        .getElementById("novel-task-route-editor")
+                                        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                                    }}
+                                  >
+                                    在单项编辑器中查看
+                                  </Button>
+                                </article>
+                              );
+                            })
+                          )}
+                        </div>
+                      </section>
                       <InlineAlert
                         tone="info"
                         title="小说任务路由"
@@ -3320,7 +4064,7 @@ export function SettingsPage() {
                       />
                       {routingCatalog.some(({ availability }) => availability === "available") && (
                         <>
-                          <div className="model-center-grid">
+                          <div id="novel-task-route-editor" className="model-center-grid">
                             <FormField label="小说任务" required>
                               {(fieldProps) => (
                                 <Select
@@ -4340,6 +5084,154 @@ function modelHubCapabilityLabel(capability: ModelHubCapability): string {
     long_context: "长上下文",
   };
   return labels[capability];
+}
+
+function modelHubOverallBadgeLabel(
+  state: ReturnType<typeof buildModelHubRoutingVisibility>["state"],
+): string {
+  const labels = {
+    unconnected: "AI 未连接",
+    validating: "正在验证",
+    writing_ready: "基础写作可用",
+    partial: "部分高级能力不可用",
+    complete: "全部功能可用",
+    anomaly: "连接或分工异常",
+    save_failed: "配置写入失败",
+  } as const;
+  return labels[state];
+}
+
+function modelHubOverallBadgeTone(
+  state: ReturnType<typeof buildModelHubRoutingVisibility>["state"],
+): "neutral" | "info" | "success" | "warning" | "danger" {
+  if (state === "complete" || state === "writing_ready") return "success";
+  if (state === "validating") return "info";
+  if (state === "partial") return "warning";
+  if (state === "anomaly" || state === "save_failed") return "danger";
+  return "neutral";
+}
+
+function modelHubOverallAlertTone(
+  state: ReturnType<typeof buildModelHubRoutingVisibility>["state"],
+): "info" | "warning" | "error" {
+  if (state === "anomaly" || state === "save_failed") return "error";
+  if (state === "partial") return "warning";
+  return "info";
+}
+
+function modelHubOverallTitle(
+  state: ReturnType<typeof buildModelHubRoutingVisibility>["state"],
+): string {
+  const titles = {
+    unconnected: "AI 尚未连接",
+    validating: "正在验证 AI 连接与能力",
+    writing_ready: "AI 基础写作已可用",
+    partial: "部分 AI 功能可用",
+    complete: "全部 AI 功能可用",
+    anomaly: "AI 连接或分工需要修复",
+    save_failed: "AI 分工没有保存",
+  } as const;
+  return titles[state];
+}
+
+function modelHubOverallDescription(
+  visibility: ReturnType<typeof buildModelHubRoutingVisibility>,
+): string {
+  if (visibility.state === "unconnected") {
+    return "连接并验证一个文本生成模型后即可开始 AI 写作；没有 AI 时仍可手动创作。";
+  }
+  if (visibility.state === "validating") {
+    return "正在读取连接、模型目录和能力证据；完成前不会把未知能力当作可用。";
+  }
+  if (visibility.state === "save_failed") {
+    return "新的分工没有确认保存。请查看上方回读结果后重试或导出脱敏诊断。";
+  }
+  if (visibility.state === "anomaly") {
+    return "连接、模型目录、能力证据或已保存分工存在失效项；手动写作和已有正文不会受影响。";
+  }
+  if (visibility.state === "complete") {
+    return "22 项小说任务均已配置；仍可在下方查看每项使用的模型与证据来源。";
+  }
+  if (visibility.coreWritingReady) {
+    return `开书、正文生成、续写、改写和润色已经可用；${String(
+      visibility.missingRouteCount,
+    )} 项高级能力尚未配置，但不会阻止基础写作。`;
+  }
+  return `${String(visibility.enabledRouteCount)} 项任务可用；基础写作链仍有缺口，请按下方建议验证所需能力。`;
+}
+
+function capabilityDisplayStateLabel(state: ModelHubCapabilityDisplayState): string {
+  const labels: Readonly<Record<ModelHubCapabilityDisplayState, string>> = Object.freeze({
+    verified: "已实测",
+    catalog_declared: "目录或官方资料声明",
+    user_confirmed: "由用户确认，尚未实测",
+    unknown: "未知",
+    failed: "验证失败",
+    unsupported: "明确不支持",
+  });
+  return labels[state];
+}
+
+function capabilityEvidenceSourceLabel(
+  source: ModelCapabilityEvidence["evidenceSource"] | null,
+): string {
+  if (source === null) return "没有证据";
+  const labels: Readonly<Record<ModelCapabilityEvidence["evidenceSource"], string>> = Object.freeze(
+    {
+      lightweight_probe: "轻量实测",
+      provider_metadata: "供应商目录",
+      official_preset: "官方预设",
+      user_confirmed: "用户确认",
+      legacy: "旧版迁移",
+    },
+  );
+  return labels[source];
+}
+
+function routeOriginLabel(origin: NovelTaskRoute["routeOrigin"]): string {
+  const labels: Readonly<Record<NovelTaskRoute["routeOrigin"], string>> = Object.freeze({
+    automatic: "智能推荐",
+    user: "手动设置",
+    legacy: "旧版兼容",
+  });
+  return labels[origin];
+}
+
+function formatVerificationTime(value: string | null): string {
+  if (value === null) return "尚未验证";
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "时间未知";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(timestamp));
+}
+
+function routeSnapshotsMatch(
+  left: readonly NovelTaskRoute[],
+  right: readonly NovelTaskRoute[],
+): boolean {
+  const snapshot = (routes: readonly NovelTaskRoute[]) =>
+    routes
+      .map((route) => ({
+        task: route.task,
+        primaryCatalogEntryId: route.primaryCatalogEntryId,
+        fallbackCatalogEntryId: route.fallbackCatalogEntryId,
+        presetId: route.presetId,
+        parameterPolicy: route.parameterPolicy,
+        maximumCostMicros: route.maximumCostMicros,
+        currency: route.currency,
+        privacyPolicy: route.privacyPolicy,
+        failurePolicy: route.failurePolicy,
+        routeOrigin: route.routeOrigin,
+        enabled: route.enabled,
+        revision: route.revision,
+      }))
+      .sort((first, second) => first.task.localeCompare(second.task));
+  return JSON.stringify(snapshot(left)) === JSON.stringify(snapshot(right));
 }
 
 function novelAiTaskLabel(task: NovelAiTask): string {

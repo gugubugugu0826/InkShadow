@@ -132,7 +132,7 @@ describe("layout style contracts", () => {
       /@media\s*\(max-width:\s*64rem\)\s*\{[^}]*\.settings-page > \.page-heading,[^}]*\.settings-page > \.settings-grid\s*\{[^}]*max-width:\s*42\.5rem;/su,
     );
     expect(desktopStyles).toMatch(
-      /@media\s*\(max-width:\s*64rem\)\s*\{[\s\S]*?\.settings-grid,[\s\S]*?\.model-center-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);/u,
+      /@media\s*\(max-width:\s*64rem\)\s*\{[\s\S]*?\.settings-grid,[\s\S]*?\.model-center-grid,[\s\S]*?\.model-routing-model-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);/u,
     );
   });
 

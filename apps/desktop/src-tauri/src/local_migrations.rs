@@ -6,6 +6,7 @@ use sqlx::{
 };
 
 const ZHIPU_GLM_MIGRATION_VERSION: i64 = 49;
+const MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION: i64 = 60;
 
 fn migration(version: i64, description: &'static str, sql: &'static str) -> Migration {
     // tauri-plugin-sql represented every prior `MigrationKind::Up` as a
@@ -424,6 +425,27 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0056_model_hub_failure_diagnostics.sql"
                 ),
             ),
+            migration(
+                60,
+                "allow the published Model Hub content quality task",
+                include_str!(
+                    "../../../../packages/data/migrations/0057_model_hub_content_quality_task.sql"
+                ),
+            ),
+            migration(
+                61,
+                "persist atomic story settings import receipts",
+                include_str!(
+                    "../../../../packages/data/migrations/0058_story_settings_import_receipts.sql"
+                ),
+            ),
+            migration(
+                62,
+                "record generation cost availability without blocking writing",
+                include_str!(
+                    "../../../../packages/data/migrations/0059_generation_preflight_cost_status.sql"
+                ),
+            ),
         ]),
         ignore_missing: false,
         locking: true,
@@ -440,17 +462,49 @@ pub(crate) async fn run_local_migrations(
     });
     before_zhipu.run_direct(&mut *connection).await?;
 
+    run_foreign_key_disabled_migration(
+        connection,
+        &full,
+        ZHIPU_GLM_MIGRATION_VERSION,
+        "foreign-key violations remained after Model Hub provider migration",
+    )
+    .await?;
+
+    let before_content_quality = migration_subset(&full, |migration| {
+        migration.version > ZHIPU_GLM_MIGRATION_VERSION
+            && migration.version < MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+    });
+    before_content_quality.run_direct(&mut *connection).await?;
+
+    run_foreign_key_disabled_migration(
+        connection,
+        &full,
+        MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION,
+        "foreign-key violations remained after Model Hub task migration",
+    )
+    .await?;
+
+    let future = migration_subset(&full, |migration| {
+        migration.version > MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+    });
+    future.run_direct(connection).await
+}
+
+async fn run_foreign_key_disabled_migration(
+    connection: &mut SqliteConnection,
+    full: &Migrator,
+    version: i64,
+    violation_message: &'static str,
+) -> Result<(), MigrateError> {
     sqlx::query("PRAGMA foreign_keys = OFF")
         .execute(&mut *connection)
         .await?;
-    let zhipu_only = migration_subset(&full, |migration| {
-        migration.version == ZHIPU_GLM_MIGRATION_VERSION
-    });
-    let zhipu_result = zhipu_only.run_direct(&mut *connection).await;
+    let selected = migration_subset(full, |migration| migration.version == version);
+    let migration_result = selected.run_direct(&mut *connection).await;
     let restore_foreign_keys = sqlx::query("PRAGMA foreign_keys = ON")
         .execute(&mut *connection)
         .await;
-    zhipu_result?;
+    migration_result?;
     restore_foreign_keys?;
 
     let violation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
@@ -458,11 +512,10 @@ pub(crate) async fn run_local_migrations(
         .await?;
     if violation_count != 0 {
         return Err(MigrateError::Execute(sqlx::Error::Protocol(
-            "foreign-key violations remained after Model Hub provider migration".into(),
+            violation_message.into(),
         )));
     }
-
-    full.run_direct(connection).await
+    Ok(())
 }
 
 fn migration_subset(migrator: &Migrator, include: impl Fn(&Migration) -> bool) -> Migrator {
@@ -565,6 +618,22 @@ mod tests {
         .await
         .expect("native dispatch lease schema");
         assert_eq!(dispatch_leases, 1);
+        let story_settings_receipts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table' AND name = 'story_settings_import_receipts'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("story settings import receipt schema");
+        assert_eq!(story_settings_receipts, 1);
+        let generation_cost_status: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('ai_generation_runs')
+             WHERE name = 'cost_status'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("generation cost status schema");
+        assert_eq!(generation_cost_status, 1);
 
         sqlx::query(
             "INSERT INTO model_provider_connections (
@@ -576,6 +645,52 @@ mod tests {
         .execute(&mut connection)
         .await
         .expect("persist registered Zhipu provider");
+        sqlx::query(
+            "INSERT INTO model_catalog_entries (
+               id, connection_id, provider_model_id, display_name, catalog_source,
+               availability, lifecycle, first_discovered_at, last_seen_at
+             ) VALUES ('native-zhipu-model', 'native-zhipu', 'glm-writer', 'GLM writer',
+                       'manual', 'available', 'unknown',
+                       '2026-08-08T00:00:00.000Z', '2026-08-08T00:00:00.000Z')",
+        )
+        .execute(&mut connection)
+        .await
+        .expect("persist native catalog entry");
+        sqlx::query(
+            "INSERT INTO model_evaluation_results (
+               id, catalog_entry_id, task, score_basis_points, latency_p50_ms,
+               sample_count, evaluation_source, evaluation_version, observed_at
+             ) VALUES ('native-quality-evaluation', 'native-zhipu-model',
+                       'content_quality_check', 5000, 1, 1, 'local_evaluation',
+                       'native-v1', '2026-08-08T00:00:00.000Z')",
+        )
+        .execute(&mut connection)
+        .await
+        .expect("persist content quality evaluation");
+        sqlx::query(
+            "INSERT INTO novel_task_routes (
+               task, primary_catalog_entry_id, parameter_policy_json, privacy_policy,
+               failure_policy, route_origin, created_at, updated_at
+             ) VALUES ('content_quality_check', 'native-zhipu-model', '{}',
+                       'cloud_allowed', 'ask_user', 'automatic',
+                       '2026-08-08T00:00:00.000Z', '2026-08-08T00:00:00.000Z')",
+        )
+        .execute(&mut connection)
+        .await
+        .expect("persist content quality route");
+        sqlx::query(
+            "INSERT INTO model_invocation_facts (
+               id, task, route_task, connection_id, catalog_entry_id,
+               provider_kind_snapshot, model_id_snapshot, route_reason, status,
+               attempt, privacy_policy, data_destination, created_at
+             ) VALUES ('native-quality-invocation', 'content_quality_check',
+                       'content_quality_check', 'native-zhipu', 'native-zhipu-model',
+                       'zhipu_glm', 'glm-writer', 'task_primary', 'queued', 1,
+                       'cloud_allowed', 'remote', '2026-08-08T00:00:00.000Z')",
+        )
+        .execute(&mut connection)
+        .await
+        .expect("persist content quality invocation");
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(&mut connection)
             .await

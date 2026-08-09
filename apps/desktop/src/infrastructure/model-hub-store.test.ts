@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
+import type { ExecuteResult, SqlPrimitive } from "@inkshadow/data";
 import { parseIsoUtcTimestamp } from "@inkshadow/domain";
 import { describe, expect, it } from "vitest";
 
@@ -26,9 +27,88 @@ const migration = [
   readMigration("0046_model_hub_zhipu_glm.sql"),
   readMigration("0051_model_hub_connection_commits.sql"),
   readMigration("0056_model_hub_failure_diagnostics.sql"),
+  readMigration("0057_model_hub_content_quality_task.sql"),
 ].join("\n");
 
 describe("TauriModelHubStore", () => {
+  it("atomically applies idempotent automatic plans while preserving manual routes in SQLite and browser storage", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    const sqlite = new TauriModelHubStore(executor, clock);
+    await assertAutomaticRoutingPlanIsIdempotent(
+      sqlite,
+      () => new TauriModelHubStore(executor, clock),
+      "sqlite-automatic-plan",
+    );
+    await executor.close();
+
+    window.localStorage.clear();
+    const browser = new BrowserDevelopmentModelHubStore(window.localStorage, clock);
+    await assertAutomaticRoutingPlanIsIdempotent(
+      browser,
+      () => new BrowserDevelopmentModelHubStore(window.localStorage, clock),
+      "browser-automatic-plan",
+    );
+  });
+
+  it("rolls back the complete SQLite plan when a later route write fails", async () => {
+    const executor = new FailingNodeSqliteExecutor(migration);
+    const store = new TauriModelHubStore(executor, clock);
+    const catalogIds = await seedAvailableCatalog(store, "rollback-plan");
+    await store.applyAutomaticRoutingPlan({
+      preset: automaticPreset("smart"),
+      routes: [automaticRoute("idea_discussion", catalogIds[0])],
+    });
+    const originalRoute = await store.findTaskRoute("idea_discussion");
+    const originalPreset = await store.findActivePreset();
+
+    executor.failNextMatching("INSERT INTO novel_task_routes");
+    await expect(
+      store.applyAutomaticRoutingPlan({
+        preset: automaticPreset("quality"),
+        routes: [
+          automaticRoute("idea_discussion", catalogIds[1]),
+          automaticRoute("book_start_guidance", catalogIds[1]),
+        ],
+      }),
+    ).rejects.toMatchObject({
+      code: "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED",
+      retryable: true,
+    });
+
+    const reopened = new TauriModelHubStore(executor, clock);
+    await expect(reopened.findActivePreset()).resolves.toEqual(originalPreset);
+    await expect(reopened.findTaskRoute("idea_discussion")).resolves.toEqual(originalRoute);
+    await expect(reopened.findTaskRoute("book_start_guidance")).resolves.toBeNull();
+    await expect(reopened.listPresets()).resolves.not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "automatic-quality" })]),
+    );
+    await executor.close();
+  });
+
+  it("keeps browser memory and persisted state unchanged when plan persistence fails", async () => {
+    const storage = new ToggleFailStorage();
+    const store = new BrowserDevelopmentModelHubStore(storage, clock);
+    const catalogIds = await seedAvailableCatalog(store, "browser-plan-failure");
+    storage.failWrites = true;
+
+    await expect(
+      store.applyAutomaticRoutingPlan({
+        preset: automaticPreset("smart"),
+        routes: [automaticRoute("content_quality_check", catalogIds[0])],
+      }),
+    ).rejects.toMatchObject({
+      code: "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED",
+      retryable: true,
+    });
+    await expect(store.findActivePreset()).resolves.toBeNull();
+    await expect(store.findTaskRoute("content_quality_check")).resolves.toBeNull();
+
+    storage.failWrites = false;
+    const reopened = new BrowserDevelopmentModelHubStore(storage, clock);
+    await expect(reopened.findActivePreset()).resolves.toBeNull();
+    await expect(reopened.findTaskRoute("content_quality_check")).resolves.toBeNull();
+  });
+
   it("publishes a verified connection and catalog atomically while preserving the old route on failure", async () => {
     const executor = new NodeSqliteExecutor(migration);
     const store = new TauriModelHubStore(executor, clock);
@@ -808,6 +888,168 @@ describe("TauriModelHubStore", () => {
     await executor.close();
   });
 });
+
+async function assertAutomaticRoutingPlanIsIdempotent(
+  store: ModelHubStore,
+  reopen: () => ModelHubStore,
+  id: string,
+): Promise<void> {
+  const catalogIds = await seedAvailableCatalog(store, id);
+  const manual = await store.saveTaskRoute({
+    task: "rewrite",
+    primaryCatalogEntryId: catalogIds[0],
+    privacyPolicy: "cloud_allowed",
+    failurePolicy: "stop",
+    routeOrigin: "user",
+    expectedRevision: null,
+  });
+  const input = {
+    preset: automaticPreset("smart"),
+    routes: [
+      automaticRoute("rewrite", catalogIds[1]),
+      automaticRoute("prose_generation", catalogIds[1]),
+      automaticRoute("content_quality_check", catalogIds[1]),
+    ],
+  } as const;
+
+  const first = await store.applyAutomaticRoutingPlan(input);
+  expect(first).toMatchObject({
+    changed: true,
+    preservedUserRouteCount: 1,
+  });
+  expect(first.routes).toHaveLength(3);
+  expect(first.routes.find(({ task }) => task === "rewrite")).toEqual(manual);
+  expect(first.routes).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ task: "content_quality_check", routeOrigin: "automatic" }),
+      expect.objectContaining({ task: "prose_generation", routeOrigin: "automatic" }),
+    ]),
+  );
+
+  const second = await store.applyAutomaticRoutingPlan(input);
+  expect(second.changed).toBe(false);
+  expect(second.preset).toEqual(first.preset);
+  expect(second.routes).toEqual(first.routes);
+
+  const reopened = reopen();
+  await expect(reopened.findTaskRoute("rewrite")).resolves.toEqual(manual);
+  await expect(reopened.findTaskRoute("content_quality_check")).resolves.toEqual(
+    first.routes.find(({ task }) => task === "content_quality_check"),
+  );
+  await expect(reopened.findActivePreset()).resolves.toEqual(first.preset);
+}
+
+async function seedAvailableCatalog(
+  store: ModelHubStore,
+  id: string,
+): Promise<readonly [string, string]> {
+  await store.saveConnection({
+    id,
+    providerKind: "custom_openai_compatible",
+    displayName: id,
+    baseUrlOverride: `https://${id}.example.test/v1`,
+    credentialState: "missing",
+    authenticationMode: "none",
+    expectedRevision: null,
+  });
+  const catalogIds = [`${id}-model-a`, `${id}-model-b`] as const;
+  await store.syncCatalog({
+    syncId: `${id}-sync`,
+    connectionId: id,
+    source: "manual",
+    status: "succeeded",
+    models: catalogIds.map((catalogId) => ({
+      id: catalogId,
+      providerModelId: catalogId,
+    })),
+  });
+  return catalogIds;
+}
+
+function automaticPreset(scheme: "smart" | "quality") {
+  return {
+    id: `automatic-${scheme}`,
+    scheme,
+    displayName: scheme === "smart" ? "智能推荐" : "高质量",
+    status: "active" as const,
+    privacyPolicy: "cloud_allowed" as const,
+    costPriority: scheme === "quality" ? ("quality_first" as const) : ("balanced" as const),
+    routeGenerationVersion: "model-hub-evidence-router-v1",
+  };
+}
+
+function automaticRoute(
+  task:
+    | "idea_discussion"
+    | "book_start_guidance"
+    | "prose_generation"
+    | "rewrite"
+    | "content_quality_check",
+  catalogEntryId: string,
+) {
+  return {
+    task,
+    primaryCatalogEntryId: catalogEntryId,
+    fallbackCatalogEntryId: null,
+    parameterPolicy: {},
+    maximumCostMicros: null,
+    currency: null,
+    privacyPolicy: "cloud_allowed" as const,
+    failurePolicy: "ask_user" as const,
+    enabled: true,
+  };
+}
+
+class FailingNodeSqliteExecutor extends NodeSqliteExecutor {
+  private queryFragment: string | null = null;
+
+  public failNextMatching(queryFragment: string): void {
+    this.queryFragment = queryFragment;
+  }
+
+  public override async execute(
+    query: string,
+    bindValues: readonly SqlPrimitive[] = [],
+  ): Promise<ExecuteResult> {
+    if (this.queryFragment !== null && query.includes(this.queryFragment)) {
+      this.queryFragment = null;
+      throw new Error("injected routing-plan write failure");
+    }
+    return super.execute(query, bindValues);
+  }
+}
+
+class ToggleFailStorage implements Storage {
+  private readonly values = new Map<string, string>();
+  public failWrites = false;
+
+  public get length(): number {
+    return this.values.size;
+  }
+
+  public clear(): void {
+    this.values.clear();
+  }
+
+  public getItem(key: string): string | null {
+    return this.values.get(key) ?? null;
+  }
+
+  public key(index: number): string | null {
+    return [...this.values.keys()][index] ?? null;
+  }
+
+  public removeItem(key: string): void {
+    this.values.delete(key);
+  }
+
+  public setItem(key: string, value: string): void {
+    if (this.failWrites) {
+      throw new DOMException("storage quota reached", "QuotaExceededError");
+    }
+    this.values.set(key, value);
+  }
+}
 
 async function assertCapabilityProbeCommitIsAtomic(
   store: ModelHubStore,

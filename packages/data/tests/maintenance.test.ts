@@ -185,6 +185,18 @@ const inkShadowMigration = [
     new URL("../migrations/0056_model_hub_failure_diagnostics.sql", import.meta.url),
     "utf8",
   ),
+  readFileSync(
+    new URL("../migrations/0057_model_hub_content_quality_task.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0058_story_settings_import_receipts.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0059_generation_preflight_cost_status.sql", import.meta.url),
+    "utf8",
+  ),
 ].join("\n");
 const BACKUP_PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const BACKUP_ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
@@ -203,6 +215,7 @@ const BACKUP_VALIDATION_SNAPSHOT_IDS = [
   "019f9f4a-b3c7-7350-9226-000000000213",
 ] as const;
 const BACKUP_JOURNEY_ID = "019f9f4a-b3c7-7350-9226-000000000301";
+const BACKUP_STORY_SETTINGS_IMPORT_RECEIPT_ID = "019f9f4a-b3c7-7350-9226-000000000304";
 const BACKUP_JOURNEY_TURN_ID = "019f9f4a-b3c7-7350-9226-000000000302";
 const BACKUP_PLANNING_CANDIDATE_ID = "019f9f4a-b3c7-7350-9226-000000000303";
 const BACKUP_MEMORY_ID = "019f9f4a-b3c7-7350-9226-000000000311";
@@ -342,6 +355,7 @@ describe("DatabaseMaintenanceService", () => {
     );
     await insertCreativeJourney(executor);
     await insertProjectSeed(executor);
+    await insertStorySettingsImportReceipt(executor);
     await insertCausalEventGraph(executor);
     await insertContextCompilationTrace(executor);
     await insertSyncAndAccessMetadata(executor);
@@ -380,6 +394,7 @@ describe("DatabaseMaintenanceService", () => {
     await backupInspection.close();
     await executor.execute("DELETE FROM project_remote_dispatch_leases");
     await executor.execute("DELETE FROM continuous_story_state_route_receipts");
+    await executor.execute("DELETE FROM story_settings_import_receipts");
     await executor.execute("DELETE FROM story_memory_governance_events");
     await executor.execute(
       "UPDATE chapters SET privacy_mode = 'standard', privacy_revision = 3 WHERE id = ?",
@@ -526,7 +541,7 @@ describe("DatabaseMaintenanceService", () => {
       value: {
         sourceKind: "user_selected_file",
         integrityVerified: true,
-        restoredTableCount: 141,
+        restoredTableCount: 142,
       },
     });
     await expect(
@@ -701,6 +716,19 @@ describe("DatabaseMaintenanceService", () => {
     expect(JSON.parse(restoredProjectSeeds[0]?.payloadJson ?? "null")).toEqual(
       createMaintenanceProjectSeed("backed-up-project-seed", "2026-07-27T00:00:00.000Z"),
     );
+    await expect(
+      executor.select<{ id: string; status: string; sourceSha256: string }>(
+        `SELECT id, status, source_sha256 AS sourceSha256
+         FROM story_settings_import_receipts WHERE id = ?`,
+        [BACKUP_STORY_SETTINGS_IMPORT_RECEIPT_ID],
+      ),
+    ).resolves.toEqual([
+      {
+        id: BACKUP_STORY_SETTINGS_IMPORT_RECEIPT_ID,
+        status: "committed",
+        sourceSha256: "8".repeat(64),
+      },
+    ]);
     await expect(
       executor.select<{ recoveryAction: string; mutationState: string }>(
         `SELECT journal.recovery_action AS recoveryAction,
@@ -1528,6 +1556,25 @@ async function insertProjectSeed(executor: NodeSqliteExecutor): Promise<void> {
       JSON.stringify(seed),
       seed.createdAt,
       seed.updatedAt,
+    ],
+  );
+}
+
+async function insertStorySettingsImportReceipt(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  await executor.execute(
+    `INSERT INTO story_settings_import_receipts (
+       id, project_id, source_sha256, request_sha256, status,
+       created_record_ids_json, updated_record_fences_json,
+       created_fact_ids_json, created_memory_ids_json,
+       imported_count, skipped_count, created_at, undone_at
+     ) VALUES (?, ?, ?, ?, 'committed', '[]', '[]', '[]', '[]', 0, 1, ?, NULL)`,
+    [
+      BACKUP_STORY_SETTINGS_IMPORT_RECEIPT_ID,
+      BACKUP_PROJECT_ID,
+      "8".repeat(64),
+      "9".repeat(64),
+      now,
     ],
   );
 }

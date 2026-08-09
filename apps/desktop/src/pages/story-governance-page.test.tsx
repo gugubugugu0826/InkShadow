@@ -1,12 +1,17 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { createStorySettingsTemplate, serializeStorySettings } from "@inkshadow/import-export";
 import { parseUuidV7 } from "@inkshadow/story-core";
 import { ToastProvider } from "@inkshadow/ui";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DesktopRoutes } from "../app";
 import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
+import type {
+  StorySettingsImportCommand,
+  StorySettingsImportReceipt,
+} from "../infrastructure/story-settings-import-service";
 import { RuntimeProvider } from "../runtime-context";
 
 describe("StoryGovernancePage", () => {
@@ -776,7 +781,600 @@ describe("StoryGovernancePage", () => {
       false,
     );
   });
+
+  it("turns ordinary language into a two-ended candidate without silently saving suggestions", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "白话设定测试" });
+    if (!project.ok) throw project.error;
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+
+    await screen.findByRole("heading", { name: "白话设定测试", level: 1 });
+    await user.click(screen.getByRole("button", { name: "用一句话添加设定" }));
+    const dialog = screen.getByRole("dialog", { name: "用一句话添加设定" });
+    await user.type(
+      within(dialog).getByRole("textbox", { name: /^描述人物、关系或规则/u }),
+      "顾顾和丹丹是情侣关系，在初中就认识了。",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "整理为待确认设定" }));
+
+    expect(within(dialog).getByRole("heading", { name: "待确认的结构化设定" })).toBeVisible();
+    expect(within(dialog).getByText("顾顾")).toBeVisible();
+    expect(within(dialog).getByText("丹丹")).toBeVisible();
+    expect(within(dialog).getByText("情侣")).toBeVisible();
+    expect(within(dialog).getByText("初中")).toBeVisible();
+    expect(within(dialog).getByText("AI 补充建议（不会自动写入）")).toBeVisible();
+    expect(
+      within(dialog).queryByText(/guided_opening|fromCharacterRef|toCharacterRef/u),
+    ).toBeNull();
+
+    await user.click(within(dialog).getByRole("button", { name: "确认并保存" }));
+    expect(await screen.findByText("当前预览环境不写入本地数据库")).toBeVisible();
+    const records = await runtime.story.formalRecords.listByProjectId(
+      parseStoryProjectId(project.value.id),
+    );
+    if (!records.ok) throw records.error;
+    expect(records.value).toHaveLength(0);
+  });
+
+  it("opens import teaching before file selection and blocks commit until dry-run is complete", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "设定导入测试" });
+    if (!project.ok) throw project.error;
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+
+    await screen.findByRole("heading", { name: "设定导入测试", level: 1 });
+    await user.click(screen.getByRole("button", { name: "导入或导出" }));
+    const dialog = screen.getByRole("dialog", { name: "导入与导出故事设定" });
+    expect(within(dialog).getByRole("heading", { name: "选择要处理的内容" })).toBeVisible();
+    expect(within(dialog).queryByRole("button", { name: "选择 Story Settings JSON" })).toBeNull();
+    expect(within(dialog).getByText(/文件先做 dry run.*正式写入使用单一事务/u)).toBeVisible();
+
+    await user.click(within(dialog).getByRole("button", { name: "4选择文件" }));
+    expect(within(dialog).getByRole("button", { name: "选择 Story Settings JSON" })).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "7确认导入" }));
+    expect(within(dialog).getByText("尚未预检")).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "确认并原子导入" })).toBeDisabled();
+    expect(within(dialog).getByText("当前预览环境无法提交")).toBeVisible();
+  });
+
+  it("requires an explicit resolution for an imported world rule with an existing title", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "规则冲突测试" });
+    if (!project.ok) throw project.error;
+    const existing = await runtime.story.formalRecordService.create({
+      projectId: project.value.id,
+      kind: "world_rule",
+      recordKey: "world-rule.memory-cost",
+      value: {
+        title: "魔法的记忆代价",
+        rule: "旧规则由作者确认。",
+      },
+      actorId: runtime.story.actorId,
+      humanConfirmed: true,
+    });
+    if (!existing.ok) throw existing.error;
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+
+    await screen.findByRole("heading", { name: "规则冲突测试", level: 1 });
+    await user.click(screen.getByRole("button", { name: "导入或导出" }));
+    const dialog = screen.getByRole("dialog", { name: "导入与导出故事设定" });
+    await user.click(within(dialog).getByRole("button", { name: "3模板与示例" }));
+    await user.click(within(dialog).getByRole("button", { name: "查看并预检示例" }));
+    expect(within(dialog).getByText("需确认 1 项")).toBeVisible();
+
+    await user.click(within(dialog).getByRole("button", { name: "6解决冲突" }));
+    const resolution = within(dialog).getByRole("combobox", {
+      name: /^世界规则“魔法的记忆代价”已存在/u,
+    });
+    expect(within(dialog).getByText("1 项冲突尚未决定")).toBeVisible();
+    await user.selectOptions(resolution, "merge");
+    expect(within(dialog).queryByText("1 项冲突尚未决定")).toBeNull();
+  });
+
+  it("invalidates a previous dry run before rejecting a new invalid or unreadable file", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "候选失效测试" });
+    if (!project.ok) throw project.error;
+    const user = userEvent.setup({ applyAccept: false });
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+
+    await screen.findByRole("heading", { name: "候选失效测试", level: 1 });
+    await user.click(screen.getByRole("button", { name: "导入或导出" }));
+    const dialog = screen.getByRole("dialog", { name: "导入与导出故事设定" });
+    await user.click(within(dialog).getByRole("button", { name: "4选择文件" }));
+    const fileInput = document.querySelector<HTMLInputElement>(
+      'input[type="file"][accept=".json"]',
+    );
+    if (fileInput === null) throw new Error("找不到故事设定导入文件输入。");
+
+    await user.upload(
+      fileInput,
+      readableFile("valid-settings.json", serializeStorySettings(createStorySettingsTemplate())),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "5校验与预览" }));
+    expect(await within(dialog).findByText("可导入 5 项")).toBeVisible();
+
+    await user.upload(fileInput, readableFile("not-settings.txt", "not settings"));
+    expect(await screen.findByText("只接受 Story Settings JSON")).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "7确认导入" }));
+    expect(within(dialog).getByText("尚未预检")).toBeVisible();
+    expect(within(dialog).queryByText("可导入 5 项")).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "确认并原子导入" })).toBeDisabled();
+
+    await user.upload(
+      fileInput,
+      readableFile(
+        "valid-settings-again.json",
+        serializeStorySettings(createStorySettingsTemplate()),
+      ),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "5校验与预览" }));
+    expect(await within(dialog).findByText("可导入 5 项")).toBeVisible();
+
+    const unreadable = new File(["{}"], "unreadable-settings.json", {
+      type: "application/json",
+    });
+    Object.defineProperty(unreadable, "text", {
+      configurable: true,
+      value: () => Promise.reject(new Error("read failed")),
+    });
+    await user.upload(fileInput, unreadable);
+    expect(await screen.findByText("无法读取设定文件")).toBeVisible();
+    expect(within(dialog).getByText("尚未预检")).toBeVisible();
+    expect(within(dialog).queryByText("可导入 5 项")).toBeNull();
+    await user.click(within(dialog).getByRole("button", { name: "7确认导入" }));
+    expect(within(dialog).getByRole("button", { name: "确认并原子导入" })).toBeDisabled();
+  });
+
+  it("clears the file input so a corrected file at the same path can be selected again", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "同路径重选测试" });
+    if (!project.ok) throw project.error;
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+
+    await screen.findByRole("heading", { name: "同路径重选测试", level: 1 });
+    await user.click(screen.getByRole("button", { name: "导入或导出" }));
+    const dialog = screen.getByRole("dialog", { name: "导入与导出故事设定" });
+    await user.click(within(dialog).getByRole("button", { name: "4选择文件" }));
+    const fileInput = document.querySelector<HTMLInputElement>(
+      'input[type="file"][accept=".json"]',
+    );
+    if (fileInput === null) throw new Error("找不到故事设定导入文件输入。");
+    const content = serializeStorySettings(createStorySettingsTemplate());
+    const file = readableFile("same-settings.json", content);
+    const read = vi.spyOn(file, "text");
+
+    await user.upload(fileInput, file);
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    expect(fileInput.value).toBe("");
+    await user.upload(fileInput, file);
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    expect(fileInput.value).toBe("");
+    await user.click(within(dialog).getByRole("button", { name: "5校验与预览" }));
+    expect(await within(dialog).findByText("可导入 5 项")).toBeVisible();
+  });
+
+  it("reuses one operation id when a confirmed import is retried after a transient failure", async () => {
+    const baseRuntime = createDevelopmentRuntime(window.localStorage);
+    const project = await baseRuntime.useCases.createProject.execute({ name: "导入幂等重试" });
+    if (!project.ok) throw project.error;
+    const committed = mockReceipt(project.value.id, "019f9f4a-b3c7-7350-9226-000000001901");
+    const importSpy = vi
+      .fn<(command: StorySettingsImportCommand) => Promise<StorySettingsImportReceipt>>()
+      .mockRejectedValueOnce(new Error("临时写入失败，请重试"))
+      .mockResolvedValueOnce(committed);
+    const runtime = {
+      ...baseRuntime,
+      storySettingsImport: {
+        import: importSpy,
+        undo: vi.fn(),
+        listRecentReceipts: vi.fn().mockResolvedValue([]),
+        findLegacyRepairRelationship: vi.fn().mockResolvedValue(null),
+      },
+    } as unknown as DesktopRuntime;
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+
+    await screen.findByRole("heading", { name: "导入幂等重试", level: 1 });
+    await user.click(screen.getByRole("button", { name: "导入或导出" }));
+    const dialog = screen.getByRole("dialog", { name: "导入与导出故事设定" });
+    await user.click(within(dialog).getByRole("button", { name: "4选择文件" }));
+    const fileInput = document.querySelector<HTMLInputElement>(
+      'input[type="file"][accept=".json"]',
+    );
+    if (fileInput === null) throw new Error("找不到故事设定导入文件输入。");
+    await user.upload(
+      fileInput,
+      readableFile("retry-settings.json", serializeStorySettings(createStorySettingsTemplate())),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "7确认导入" }));
+    const confirm = within(dialog).getByRole("button", { name: "确认并原子导入" });
+    await user.click(confirm);
+    expect(await screen.findByText("操作未完成")).toBeVisible();
+    await user.click(confirm);
+    expect(await screen.findByText("故事设定已导入")).toBeVisible();
+
+    expect(importSpy).toHaveBeenCalledTimes(2);
+    expect(importSpy.mock.calls[0]?.[0].operationId).toBe(importSpy.mock.calls[1]?.[0].operationId);
+  });
+
+  it("reloads the latest committed receipt after remount and can undo it safely", async () => {
+    const baseRuntime = createDevelopmentRuntime(window.localStorage);
+    const project = await baseRuntime.useCases.createProject.execute({ name: "收据恢复测试" });
+    if (!project.ok) throw project.error;
+    const committed = mockReceipt(project.value.id, "019f9f4a-b3c7-7350-9226-000000001902");
+    const undone = {
+      ...committed,
+      status: "undone" as const,
+      undoneAt: "2026-08-09T00:01:00.000Z",
+    };
+    const listRecentReceipts = vi.fn().mockResolvedValue([committed]);
+    const undo = vi.fn().mockResolvedValue(undone);
+    const runtime = {
+      ...baseRuntime,
+      storySettingsImport: {
+        import: vi.fn(),
+        undo,
+        listRecentReceipts,
+        findLegacyRepairRelationship: vi.fn().mockResolvedValue(null),
+      },
+    } as unknown as DesktopRuntime;
+    const user = userEvent.setup();
+    const first = renderRoute(runtime, `/projects/${project.value.id}/story`);
+    await screen.findByRole("heading", { name: "收据恢复测试", level: 1 });
+    await user.click(screen.getByRole("button", { name: "导入或导出" }));
+    await waitFor(() => expect(listRecentReceipts).toHaveBeenCalledTimes(1));
+    first.unmount();
+
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+    await screen.findByRole("heading", { name: "收据恢复测试", level: 1 });
+    await user.click(screen.getByRole("button", { name: "导入或导出" }));
+    const dialog = screen.getByRole("dialog", { name: "导入与导出故事设定" });
+    await waitFor(() => expect(listRecentReceipts).toHaveBeenCalledTimes(2));
+    await user.click(within(dialog).getByRole("button", { name: "7确认导入" }));
+    expect(await within(dialog).findByText("导入已完成")).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "撤销本次导入" }));
+    expect(await screen.findByText("本次导入已撤销")).toBeVisible();
+    expect(undo).toHaveBeenCalledWith(
+      expect.objectContaining({ receiptId: committed.id, projectId: project.value.id }),
+    );
+  });
+
+  it("shows an actionable error instead of leaking a rejected export", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "设定导出异常" });
+    if (!project.ok) throw project.error;
+    const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: () => {
+        throw new Error("无法创建下载地址");
+      },
+    });
+    try {
+      const user = userEvent.setup();
+      renderRoute(runtime, `/projects/${project.value.id}/story`);
+      await screen.findByRole("heading", { name: "设定导出异常", level: 1 });
+      await user.click(screen.getByRole("button", { name: "导入或导出" }));
+      const dialog = screen.getByRole("dialog", { name: "导入与导出故事设定" });
+      await user.click(within(dialog).getByRole("button", { name: "导出全部故事设定" }));
+      expect(await screen.findByText("故事设定没有导出")).toBeVisible();
+      expect(screen.getByText(/没有产生可下载的半成品.*检查设定后重试/u)).toBeVisible();
+    } finally {
+      restoreUrlProperty("createObjectURL", originalCreate);
+    }
+  });
+
+  it("keeps legacy tone and boundaries when normalizing an old guided-opening rule", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "旧规则整理测试" });
+    if (!project.ok) throw project.error;
+    const legacy = await runtime.story.formalRecordService.create({
+      projectId: project.value.id,
+      kind: "world_rule",
+      recordKey: "guided_opening.rules",
+      value: {
+        writingRules: "保持第三人称限知",
+        tone: "克制温柔",
+        boundaries: ["不写人物死亡", "不增加超自然设定"],
+      },
+      actorId: runtime.story.actorId,
+      humanConfirmed: true,
+    });
+    if (!legacy.ok) throw legacy.error;
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+
+    await screen.findByRole("heading", { name: "旧规则整理测试", level: 1 });
+    await user.click(screen.getByRole("button", { name: "整理 1 条旧记录" }));
+    const dialog = screen.getByRole("dialog", { name: "整理旧版开书设定" });
+    await user.click(within(dialog).getByRole("button", { name: "确认整理" }));
+    expect(await screen.findByText("旧记录已整理为可读设定")).toBeVisible();
+
+    const stored = await runtime.story.formalRecords.findById(legacy.value.id);
+    if (!stored.ok || stored.value === null) throw new Error("找不到整理后的旧规则。");
+    expect(stored.value.currentValue).toMatchObject({
+      schemaVersion: "inkshadow.world-rule-setting.v1",
+      tone: "克制温柔",
+      boundaries: ["不写人物死亡", "不增加超自然设定"],
+    });
+    expect(JSON.stringify(stored.value.currentValue)).toContain("保持第三人称限知");
+    expect(JSON.stringify(stored.value.currentValue)).toContain("克制温柔");
+  });
+
+  it("keeps an incomplete relationship visible after normalizing the mixed character card", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "旧关系独立整理测试" });
+    if (!project.ok) throw project.error;
+    const legacy = await runtime.story.formalRecordService.create({
+      projectId: project.value.id,
+      kind: "character",
+      recordKey: "guided_opening.characters",
+      value: { protagonist: "普通但敏锐", relationship: "青梅竹马" },
+      actorId: runtime.story.actorId,
+      humanConfirmed: true,
+    });
+    if (!legacy.ok) throw legacy.error;
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+
+    await screen.findByRole("heading", { name: "旧关系独立整理测试", level: 1 });
+    await user.click(screen.getByRole("button", { name: "整理 2 条旧记录" }));
+    const dialog = screen.getByRole("dialog", { name: "整理旧版开书设定" });
+    await user.click(within(dialog).getByRole("button", { name: "确认整理" }));
+    expect(await within(dialog).findByText(/旧记录只保存了关系类型“青梅竹马”/u)).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "补全后确认" })).toBeEnabled();
+  });
+
+  it("retries only legacy finalization after the new relationship was already saved", async () => {
+    const baseRuntime = createDevelopmentRuntime(window.localStorage);
+    const project = await baseRuntime.useCases.createProject.execute({ name: "旧关系收尾重试" });
+    if (!project.ok) throw project.error;
+    const legacy = await baseRuntime.story.formalRecordService.create({
+      projectId: project.value.id,
+      kind: "character",
+      recordKey: "guided_opening.characters",
+      value: {
+        schemaVersion: "inkshadow.character-setting.v1",
+        name: "林舟",
+        aliases: [],
+        traits: [],
+        knownInformation: [],
+        legacyRelationship: "青梅竹马",
+      },
+      actorId: baseRuntime.story.actorId,
+      humanConfirmed: true,
+    });
+    if (!legacy.ok) throw legacy.error;
+    const relationshipFactId = "019f9f4a-b3c7-7350-9226-000000000991";
+    const importSpy = vi.fn().mockResolvedValue({
+      id: "019f9f4a-b3c7-7350-9226-000000000992",
+      projectId: project.value.id,
+      sourceSha256: "a".repeat(64),
+      status: "committed",
+      importedCount: 3,
+      skippedCount: 0,
+      createdRecordIds: [],
+      updatedRecordFences: [],
+      createdFactIds: [relationshipFactId],
+      createdMemoryIds: [],
+      createdAt: "2026-08-09T00:00:00.000Z",
+      undoneAt: null,
+      idempotentReplay: false,
+    });
+    const findExisting = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({ relationshipFactId, expectedSourceRevision: legacy.value.revision });
+    const editSpy = vi
+      .spyOn(baseRuntime.story.formalRecordService, "edit")
+      .mockResolvedValueOnce({ ok: false, error: new Error("injected stale CAS") } as never);
+    const runtime = {
+      ...baseRuntime,
+      storySettingsImport: {
+        import: importSpy,
+        undo: vi.fn(),
+        listRecentReceipts: vi.fn().mockResolvedValue([]),
+        findLegacyRepairRelationship: findExisting,
+      },
+    } as unknown as DesktopRuntime;
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+
+    await screen.findByRole("heading", { name: "旧关系收尾重试", level: 1 });
+    await user.click(screen.getByRole("button", { name: "整理 1 条旧记录" }));
+    const repairDialog = screen.getByRole("dialog", { name: "整理旧版开书设定" });
+    await user.click(within(repairDialog).getByRole("button", { name: "补全后确认" }));
+    const editor = screen.getByRole("dialog", { name: "补全旧版人物关系" });
+    await user.type(
+      within(editor).getByRole("textbox", { name: /^描述人物、关系或规则/u }),
+      "林舟和顾顾是青梅竹马关系。",
+    );
+    await user.click(within(editor).getByRole("button", { name: "整理为待确认设定" }));
+    const save = within(editor).getByRole("button", { name: "保存新关系并完成迁移" });
+    await user.click(save);
+    expect(await screen.findByText("新关系已保存，旧提示仍保留")).toBeVisible();
+    expect(importSpy).toHaveBeenCalledTimes(1);
+
+    await user.click(save);
+    expect(await screen.findByText("旧关系迁移已完成")).toBeVisible();
+    expect(importSpy).toHaveBeenCalledTimes(1);
+    expect(findExisting).toHaveBeenCalledTimes(2);
+    expect(editSpy).toHaveBeenCalledTimes(2);
+    const stored = await baseRuntime.story.formalRecords.findById(legacy.value.id);
+    if (!stored.ok || stored.value === null) throw new Error("找不到收尾后的旧记录。");
+    expect(stored.value.currentValue).toMatchObject({
+      legacyRelationshipMigration: {
+        relationshipFactId,
+        supersedesSourceId: legacy.value.id,
+      },
+    });
+    expect(stored.value.currentValue).not.toHaveProperty("legacyRelationship");
+  });
+
+  it("requires a second confirmation before finalizing an existing relationship against a newer legacy revision", async () => {
+    const baseRuntime = createDevelopmentRuntime(window.localStorage);
+    const project = await baseRuntime.useCases.createProject.execute({ name: "旧关系跨重启收尾" });
+    if (!project.ok) throw project.error;
+    const legacy = await baseRuntime.story.formalRecordService.create({
+      projectId: project.value.id,
+      kind: "character",
+      recordKey: "guided_opening.characters",
+      value: {
+        schemaVersion: "inkshadow.character-setting.v1",
+        name: "林舟",
+        aliases: [],
+        traits: [],
+        knownInformation: [],
+        legacyRelationship: "青梅竹马",
+      },
+      actorId: baseRuntime.story.actorId,
+      humanConfirmed: true,
+    });
+    if (!legacy.ok) throw legacy.error;
+    const revised = await baseRuntime.story.formalRecordService.edit({
+      recordId: legacy.value.id,
+      value: {
+        schemaVersion: "inkshadow.character-setting.v1",
+        name: "林舟",
+        aliases: [],
+        traits: [],
+        knownInformation: [],
+        legacyRelationship: "青梅竹马",
+        shortDescription: "作者在迁移间隙补充的说明",
+      },
+      actorId: baseRuntime.story.actorId,
+      humanConfirmed: true,
+      expectedRevision: legacy.value.revision,
+    });
+    if (!revised.ok) throw revised.error;
+    const current = await baseRuntime.story.formalRecords.findById(legacy.value.id);
+    if (!current.ok || current.value === null) throw new Error("找不到修订后的旧关系来源。");
+
+    const relationshipFactId = "019f9f4a-b3c7-7350-9226-000000000993";
+    const importSpy = vi.fn();
+    const editSpy = vi.spyOn(baseRuntime.story.formalRecordService, "edit");
+    const runtime = {
+      ...baseRuntime,
+      storySettingsImport: {
+        import: importSpy,
+        undo: vi.fn(),
+        listRecentReceipts: vi.fn().mockResolvedValue([]),
+        findLegacyRepairRelationship: vi.fn().mockResolvedValue({
+          relationshipFactId,
+          expectedSourceRevision: legacy.value.revision,
+        }),
+      },
+    } as unknown as DesktopRuntime;
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+
+    await screen.findByRole("heading", { name: "旧关系跨重启收尾", level: 1 });
+    await user.click(screen.getByRole("button", { name: "整理 1 条旧记录" }));
+    const repairDialog = screen.getByRole("dialog", { name: "整理旧版开书设定" });
+    await user.click(within(repairDialog).getByRole("button", { name: "补全后确认" }));
+    const editor = screen.getByRole("dialog", { name: "补全旧版人物关系" });
+    await user.type(
+      within(editor).getByRole("textbox", { name: /^描述人物、关系或规则/u }),
+      "林舟和顾顾是青梅竹马关系。",
+    );
+    await user.click(within(editor).getByRole("button", { name: "整理为待确认设定" }));
+    await user.click(within(editor).getByRole("button", { name: "保存新关系并完成迁移" }));
+
+    expect(await screen.findByText("旧来源已变化，需要再次确认")).toBeVisible();
+    expect(importSpy).not.toHaveBeenCalled();
+    expect(editSpy).not.toHaveBeenCalled();
+
+    await user.click(within(editor).getByRole("button", { name: "确认按当前版本完成迁移" }));
+    expect(await screen.findByText("旧关系迁移已完成")).toBeVisible();
+    expect(importSpy).not.toHaveBeenCalled();
+    expect(editSpy).toHaveBeenCalledTimes(1);
+    expect(editSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recordId: legacy.value.id,
+        expectedRevision: current.value.revision,
+      }),
+    );
+  });
+
+  it("disables Story Settings commit in an archived project even when a service exists", async () => {
+    const baseRuntime = createDevelopmentRuntime(window.localStorage);
+    const project = await baseRuntime.useCases.createProject.execute({ name: "只读导入测试" });
+    if (!project.ok) throw project.error;
+    const archived = await baseRuntime.useCases.archiveProject.execute({
+      projectId: project.value.id,
+    });
+    if (!archived.ok) throw archived.error;
+    const importSpy = vi.fn();
+    const committed = mockReceipt(project.value.id, "019f9f4a-b3c7-7350-9226-000000001903");
+    const runtime = {
+      ...baseRuntime,
+      storySettingsImport: {
+        import: importSpy,
+        undo: vi.fn(),
+        listRecentReceipts: vi.fn().mockResolvedValue([committed]),
+        findLegacyRepairRelationship: vi.fn().mockResolvedValue(null),
+      },
+    } as unknown as DesktopRuntime;
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+
+    await screen.findByRole("heading", { name: "只读导入测试", level: 1 });
+    await user.click(screen.getByRole("button", { name: "导入或导出" }));
+    const dialog = screen.getByRole("dialog", { name: "导入与导出故事设定" });
+    await user.click(within(dialog).getByRole("button", { name: "7确认导入" }));
+    expect(await within(dialog).findByRole("button", { name: "撤销本次导入" })).toBeDisabled();
+    await user.click(within(dialog).getByRole("button", { name: "3模板与示例" }));
+    await user.click(within(dialog).getByRole("button", { name: "查看并预检示例" }));
+    await user.click(within(dialog).getByRole("button", { name: "7确认导入" }));
+    const confirm = within(dialog).getByRole("button", { name: "确认并原子导入" });
+    expect(confirm).toBeDisabled();
+    await user.click(confirm);
+    expect(importSpy).not.toHaveBeenCalled();
+  });
 });
+
+function readableFile(name: string, content: string): File {
+  const file = new File([content], name, { type: "application/json" });
+  Object.defineProperty(file, "text", {
+    configurable: true,
+    value: () => Promise.resolve(content),
+  });
+  return file;
+}
+
+function mockReceipt(projectId: string, id: string): StorySettingsImportReceipt {
+  return Object.freeze({
+    id,
+    projectId,
+    sourceSha256: "a".repeat(64),
+    status: "committed" as const,
+    importedCount: 5,
+    skippedCount: 0,
+    createdRecordIds: [],
+    updatedRecordFences: [],
+    createdFactIds: [],
+    createdMemoryIds: [],
+    createdAt: "2026-08-09T00:00:00.000Z",
+    undoneAt: null,
+    idempotentReplay: false,
+  });
+}
+
+function restoreUrlProperty(
+  property: "createObjectURL",
+  descriptor: PropertyDescriptor | undefined,
+): void {
+  if (descriptor === undefined) {
+    Reflect.deleteProperty(URL, property);
+    return;
+  }
+  Object.defineProperty(URL, property, descriptor);
+}
 
 function renderRoute(runtime: DesktopRuntime, route: string) {
   return render(

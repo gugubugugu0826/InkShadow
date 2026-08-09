@@ -956,6 +956,23 @@ async function insertFact(
   );
 }
 
+/**
+ * Persists one already-validated story fact and its initial immutable revision
+ * inside a caller-owned transaction. Mixed story-setting imports use this
+ * boundary so characters, relationships, rules and memories cannot be left
+ * half-written when any one insert fails.
+ */
+export async function insertNewStoryFact(
+  transaction: StorySqlTransaction,
+  fact: StoryFact,
+  changeKind: "created" | "legacy_backfill" = "created",
+): Promise<void> {
+  const snapshot = fact.toSnapshot();
+  await assertChapterEvidence(transaction, snapshot);
+  await insertFact(transaction, snapshot);
+  await insertInitialRevision(transaction, snapshot, changeKind);
+}
+
 async function insertInitialRevision(
   transaction: StorySqlTransaction,
   snapshot: StoryFactSnapshot,

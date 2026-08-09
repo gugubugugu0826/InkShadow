@@ -1,8 +1,8 @@
 # InkShadow 前端接口与数据边界
 
-> 基于源码快照：2026-08-09  
+> 基于源码快照：2026-08-10  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 应用版本：`0.2.0`；设计基线：`DESIGN v0.3.1b`  
+> 应用版本：`0.2.1`；设计基线：`DESIGN v0.3.1b`  
 > 本文记录当前代码接口；它不代表所有云能力已部署或已开放
 
 ## 1. 接口总览
@@ -69,6 +69,12 @@ WebView 不能直接向任意外部地址发送请求。
 
 页面应依赖这些端口，而不是直接拼接 SQL、读取系统凭据或绕过安全中继。
 
+正文工作区采用全视口三栏合同：宽度大于 `1024px` 时，左栏是章节列表，中栏是正文编辑区，
+右栏是 AI 创作助手；中栏优先获得可用宽度，左右栏均可收起。宽度不超过 `1024px` 时，正文保留为
+唯一主栏，章节列表改为左侧 Drawer，AI 助手改为右侧模态面板；到 `800px` 时继续沿用单栏结构，
+顶部状态与操作允许换行，不能依靠隐藏横向滚动条掩盖溢出。抽屉和模态面板仍须满足 Escape、焦点约束与
+关闭后的焦点返回。
+
 ## 3. Tauri IPC 通用约定
 
 大部分原生命令失败时返回：
@@ -134,9 +140,10 @@ interface NativeSqliteError {
 
 正式数据库固定在应用配置目录中的 `inkshadow.db`；WebView 不能指定任意数据库路径。
 
-当前前向迁移上限为 Data `0056_model_hub_failure_diagnostics.sql` / Tauri `59`。Tauri 原生版本把
-Data 迁移和 story-core 迁移合并成一个连续序列，所以两个编号不要求相同。已登记 migration
-只校验和验证、不可改写；新结构必须继续追加更高版本。
+当前前向迁移上限为 Data `0059_generation_preflight_cost_status.sql` / Tauri `62`。Tauri 原生版本把
+Data 迁移和 story-core 迁移合并成一个连续序列，所以两个编号不要求相同。`0057`/Tauri `60`
+补齐 Model Hub 内容质量任务合同，`0058`/Tauri `61` 保存故事设定导入收据，`0059`/Tauri `62`
+记录费用可估状态。已登记 migration 只校验和验证、不可改写；新结构必须继续追加更高版本。
 
 ### 5.1 连接与查询
 
@@ -243,7 +250,42 @@ interface ProjectSeedField {
 `ProjectSeed` 是创建输入，不是稳定正文、正式设定或已确认 StoryFact。页面不能仅凭字段存在就把
 它显示为已经由用户确认的故事事实。
 
-### 5.5 私密章节
+一句话开书的可恢复快照同时保存有限问题计划和三个开头槽位。问题计划初始包含 5 个重点，
+`questionPlan` 只允许唯一问题键，`expectedQuestionTotal` 始终等于计划长度，最多扩展到 12 个重点；
+`questionIndex`、`remainingQuestionFocus`、`questionHistory`、`skippedQuestionKeys` 和
+`questionPlanExpansionNotice` 共同支持页面显示 N/M、百分比、剩余重点和扩展原因。回答或跳过必须
+移除当前剩余重点；没有尚未问过的新重点时进入 `guidance_complete`。作者始终可以返回上一问、
+跳过或直接结束并创建。回答仅重算并保存 `ProjectSeed`，不会隐式重写开头；计划结束后只有作者
+明确点击，才允许一次基于全部回答的重写。
+
+开头批次固定由 `immediate_action`、`relationship_dialogue`、`mystery_clue` 三个请求组成并发执行，
+每槽保存独立 request/batch ID、状态、来源、供应商、模型和失败码。旅程 revision CAS 与当前批次
+检查阻止迟到或已取消结果覆盖当前方案，迟到结果只进入可追溯历史。只有开书服务在
+`MODEL_OUTPUT_TRUNCATED` 且已收到至少 160 个可见字符、供应商和模型均可确定时，才返回显式
+`partial`；作者可继续补全、重新生成或明确保留。这个例外不放宽普通正文、改写或 Candidate 的
+截断失败合同。
+
+### 5.5 Story Settings JSON 与导入事务
+
+便携格式由 `packages/import-export/src/story-settings.ts` 定义：`format` 固定为
+`inkshadow.story-settings`，`schemaVersion` 当前固定为 `1`，正文载荷分为 `characters`、
+`relationships`、`worldRules`、`writingPreferences` 和可选内容数组 `memories`。关系必须使用
+`fromCharacterRef` 与 `toCharacterRef` 引用本文件中两个不同人物；缺端点、自指、重复人物名、
+重复规则标题、未知字段、越界或无法解析的版本都会在 dry run 中给出精确 JSON 路径和修复动作。
+
+页面按七步披露导入：选择内容、格式规则、模板与示例、选择文件、校验与预览、解决冲突、确认
+导入。与现有同名人物或规则的冲突必须逐项选择合并、保留当前或新建副本；未解决冲突和阻断项
+不允许提交。`StorySettingsImportService` 在提交前再次严格预检，并把规范化文件哈希、冲突决定、
+现有记录 revision/version fence、正式记录、双端点关系 StoryFact、偏好、记忆和导入收据放在一个
+SQLite 事务边界内；同一 operation 的安全重试幂等，任一失败不留下半导入。
+
+收据记录新建 ID 与被更新记录的前后 revision/version。撤销会先检查这些 fence、后续正式事实、
+审阅、权威提取和记忆治理引用；只要导入后有人编辑或其他记录开始依赖本次结果，就失败关闭并
+保留现状。浏览器开发运行时不伪造这个 SQLite 原子导入服务。旧开书原始 JSON 人物卡和缺少双方
+人物的关系由 `inspectLegacyGuidedOpeningRecords` 进入逐条 legacy repair；原值留在版本历史，
+无法补出双端点时仍不创建正式关系。
+
+### 5.6 私密章节
 
 `0038_private_chapters.sql` 为章节增加 `privacy_mode = "standard" | "local_only"` 和独立的
 `privacy_revision`；旧章节缺省为 `standard`。`CreateChapterCommand.privacyMode` 可让章节从首个
@@ -402,8 +444,11 @@ Candidate 生成遇到截断仍严格失败；只有固定、无作品内容的�
 但保留目录、历史调用和审计；重复移除保持幂等。
 
 首次文本能力验证成功且当前完全没有任何任务路由记录时，智能推荐可建立 16 类只依赖
-`text_generation` 的核心小说任务分工；已有用户路由不会被覆盖。22 类总任务中的结构化输出、
-Embedding、Rerank、图片、视觉等仍必须等待各自证据。基础评测只执行已持久化路由，不能替代
+`text_generation` 的核心小说任务分工；旧版本留下的纯自动、同方案 15/22 中断计划可幂等补齐。
+整个 preset 与任务路由集合由一次原子提交替换，任一写入失败都保留完整旧方案；任一用户建立的
+启用、禁用或自定义路由都不会被覆盖。价格、上下文长度和本地基础评测属于可选排序证据，缺失时
+不阻止已有文本能力证据的核心分工。22 类总任务中的结构化输出、Embedding、Rerank、图片、视觉
+等仍必须等待各自证据。基础评测只执行已持久化路由，不能替代
 能力发现。诊断 artifact schema v2 从能力扫描和调用事实账本读取最近脱敏 AI 失败，包括 request
 ID、阶段、HTTP/终止原因、可见长度、推理/流式标记、尝试和 token 预算；不包含 Prompt、作品、
 模型回答、推理正文、供应商原始错误或凭据。旧 `modelCenter` 兼容指标明确命名为
@@ -417,6 +462,7 @@ ID、阶段、HTTP/终止原因、可见长度、推理/流式标记、尝试和
 | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ContinuousStoryStateExtractionService`                         | “设定 → 章节摘要与长程记忆”；项目级默认关闭，仅手动保存或显式重识别，人物/世界最多两次模型调用；结果为可撤销或待确认 StoryFact                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `ContinuousStoryStateProjectionAdapter`                         | 无独立按钮；只读地把显式合法投影交给验证、声纹/POV 和叙事分析；POV 取得链同时核验人物、知识键、信息标识、取得时间、已确认事件、来源事实和叙事顺序，任一证据、分支、当前性或权威门禁失败即跳过并返回诊断                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `parseNaturalLanguageSetting` / `StorySettingsImportService`    | “设定 → 快速维护故事设定”；自然语言只形成待确认候选，关系必须解析出两个不同人物端点。Story Settings JSON 先严格 dry run，再逐项解决冲突并用单事务提交正式记录、StoryFact、偏好、记忆和收据；撤销受 revision/version fence 与后续引用保护，旧开书坏记录另走逐条 repair                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `CausalFactAuthoringService` / `CausalFactAuthoringPanel`       | “设定 → 高级工具 → 故事关联”；事件可填写前置条件、人物状态、关系、物品和伏笔变化，并展开“明确获得的知识”。人物只从当前作品中主分支、正式、用户确认且仍有效且实体键唯一的人物身份中选择；两个有效人物共享同一实体键时失败关闭。正式事实插入会在同一事务精确复核有效来源章节、当前不可变版本、证据片段、事实类型与 schema、关系端点、前置事件和全部人物引用；保存瞬间任一权限失效都会失败关闭，相同重试返回原事实而不重复。正式事实已保存但派生图或页面刷新失败时会明确显示“已保存、等待刷新”，不会谎报未保存。空列表允许保存但不会授权 POV 取得，服务不会从事件正文或知情人物自动猜测；参与者和知情者各最多 128 个，明确知识最多 128 条，结构化事实超过 16 KiB 时会在保存前提示拆成两个事件。动态字段提供上限播报、新增焦点和删除后的焦点返回 |
 | `StoryFactApplicationService.resolveEntityAlias`                | “设定 → 待确认内容”；只能从候选允许列表选择已有对象，或明确保留独立对象；CAS 防并发覆盖，畸形候选结构失败关闭并要求废弃、重新识别或手动新建                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `ChapterSummaryService`                                         | 项目级默认关闭；手动保存后最多一次 `long_memory_compression`，也可逐章显式重建/清除；摘要绑定不可变版本并作为可重建临时事实                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -915,7 +961,7 @@ send_cloud_api_request({
 | `inkshadow.development.project-search.v1`                  |      1 | 项目搜索快照                                                                 | `project-search-store.ts`              |
 | `inkshadow.development.task-center.v1`                     |      1 | 任务与通知                                                                   | `task-center-store.ts`                 |
 | `inkshadow.marketplace.installs.v1`                        |      1 | 浏览器模式已安装市场资产                                                     | `marketplace-runtime.ts`               |
-| `inkshadow.development.creative-journeys.v1`               |      1 | 一句话开书旅程和逐轮恢复                                                     | `creative-journey-store.ts`            |
+| `inkshadow.development.creative-journeys.v1`               |      1 | 一句话开书三槽请求、有限动态问题计划、回答/跳过、扩展原因和逐轮恢复          | `creative-journey-store.ts`            |
 | `inkshadow.development.project-seeds.v1`                   |      1 | 项目创建后的 `ProjectSeed` 副本                                              | `project-seed-local-store.ts`          |
 | `inkshadow.development.model-hub.v1`                       |      6 | Model Hub 连接、目录、能力、路由、策略、调用及脱敏失败元数据；原位升级 v1–v5 | `model-hub-store.ts`                   |
 | `inkshadow.development.story-facts.v1`                     |      2 | 浏览器调试模式统一 StoryFact、修订与连续提取回执                             | `story-fact-store.ts`                  |

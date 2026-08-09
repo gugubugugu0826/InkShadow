@@ -353,7 +353,7 @@ async function assertAutomaticMemoryAuthorization(
   }
 }
 
-async function insertMemoryRecord(
+export async function insertMemoryRecord(
   executor: StorySqlTransaction,
   snapshot: MemoryRecordSnapshot,
 ): Promise<void> {

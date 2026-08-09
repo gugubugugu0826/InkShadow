@@ -1,9 +1,78 @@
 # InkShadow 测试与构建结果
 
-> 更新日期：2026-08-09  
-> 证据范围：当前工作树的 DeepSeek 文本能力探针 P0 修复及本地工程门禁。没有使用真实 DeepSeek API Key；截至本段记录安装包候选尚未生成且 GitHub Release 尚未发布，既有提交 `435454b` 与公开 Pre-release 只保留为历史基线
+> 更新日期：2026-08-10  
+> 证据范围：当前 `0.2.1` 工作树的完整本地工程门禁、Rust 严格检查和 production Chromium 响应式 E2E。没有使用真实 DeepSeek API Key；干净唯一提交、Tauri WebView 候选、NSIS 与 GitHub `v0.2.1` Release 尚未完成。提交 `435454b` 与公开 `v0.2.0` Pre-release 只保留为历史基线
 
-## 2026-08-09 DeepSeek P0 当前工作树验证
+## 2026-08-10 v0.2.1 当前工作树验证
+
+| 范围                   | 精确命令                                                                                                                       | 结果                   | 状态 |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------- | ---- |
+| Import/Export 全量测试 | `pnpm.cmd --filter @inkshadow/import-export test`                                                                              | 81/81 passed，0 failed | PASS |
+| Settings 页面定向测试  | `pnpm.cmd --filter @inkshadow/desktop test src/pages/settings-page.test.tsx`                                                   | 34/34 passed，0 failed | PASS |
+| Desktop TypeScript     | `pnpm.cmd --filter @inkshadow/desktop typecheck`                                                                               | 0 error                | PASS |
+| Settings 聚焦 ESLint   | `pnpm.cmd exec eslint apps/desktop/src/pages/settings-page.tsx apps/desktop/src/pages/settings-page.test.tsx --max-warnings 0` | 0 error / 0 warning    | PASS |
+
+这些聚焦结果证明 DOCX 导入回归、设置页交互、Desktop 类型和设置页静态规则在各自执行快照中
+通过；当前最终门禁另由下表和后续精确命令记录，安装包候选仍未生成。
+
+| 当前门禁                             | 状态    | 说明                                                                                               |
+| ------------------------------------ | ------- | -------------------------------------------------------------------------------------------------- |
+| 最终 `pnpm.cmd release:check`        | PASS    | 退出码 0，520.9 秒；构建、格式、秘密、许可证、边界、发布配置、类型、Lint 与 workspace tests 全通过 |
+| 最终 production build 与 bundle 预算 | PASS    | Desktop 2,204 modules；49 files / 6,065,923 bytes，预算 6,422,528 bytes，余量 356,605 bytes        |
+| `pnpm.cmd check:rust`                | PASS    | 退出码 0，116.7 秒；format、严格 Clippy、152 passed / 1 ignored / 0 failed                         |
+| 1440/1280/1024/800 与 200% zoom E2E  | PASS    | 指定 production `dist` 的 Chromium 规格 11/11；测试 23.1 秒、工具 29.4 秒；不等于 Tauri WebView    |
+| 真实 DeepSeek Key 端到端             | NOT_RUN | 未读取或使用用户 Key，本地/模拟协议证据不能标记供应商 `VERIFIED`                                   |
+| 干净 `v0.2.1` 候选与 SHA-256         | NOT_RUN | 候选未生成；来源提交、源指纹、文件大小和哈希均不得伪造                                             |
+
+### 最终完整工程门禁
+
+```powershell
+pnpm.cmd release:check
+```
+
+结果：退出码 0，wall time 520.9 秒。
+
+- 工作区执行报告为 20/21 workspace scopes；build、Prettier format check、秘密扫描、137 项运行时依赖许可证、20 项包边界、17 项 Desktop release source/config、全部 TypeScript、全仓零警告 ESLint 均通过；
+- workspace tests：400 个测试文件通过、16 个文件按外部条件跳过；2,688 passed、65 skipped、0 failed；Cloud API 占 64 项外部 PostgreSQL 跳过；
+- Desktop：212 个测试文件，1,520 passed、1 skipped、0 failed；唯一跳过继续是显式外部条件，不计为通过；
+- Desktop production build：2,204 modules；有效载荷 49 files / 6,065,923 bytes，预算 6,422,528 bytes，余量 356,605 bytes，比要求保留的 50 KiB 最低余量再多 305,405 bytes；
+- runtime chunk：474,119 / 512,000 bytes；PDF Worker：1,187,649 / 1,572,864 bytes；
+- `release:check` 不包含 Rust、production E2E、Tauri/NSIS 或干净提交来源证明；这些证据必须分开记录。
+
+### Rust 严格门禁
+
+```powershell
+pnpm.cmd check:rust
+```
+
+结果：退出码 0，wall time 116.7 秒；`cargo fmt --check`、全 target 严格 Clippy
+`-D warnings` 通过，Rust tests 为 152 passed、1 ignored、0 failed。ignored 项保持显式，
+不计为通过。
+
+### Production Chromium 响应式 E2E
+
+```powershell
+node scripts/run-e2e.mjs --dist apps/desktop/dist tests/e2e/desktop-production-reflow.spec.ts tests/e2e/desktop-responsive.spec.ts tests/e2e/desktop-start.spec.ts tests/e2e/desktop-local-first.spec.ts --reporter=line
+```
+
+结果：11/11 passed；Playwright 测试耗时 23.1 秒，工具总耗时 29.4 秒。该组使用最终当前工作树的
+production `dist`，覆盖 1440、1280、1024、800 和 200% zoom 的导航、抽屉、编辑器、Story
+Settings 与 Model Hub 主路径。它运行在 Chromium，不是打包后的 Tauri WebView，不能替代候选
+安装、启动或 WebView 验收。
+
+### 2026-08-10 前次完整门禁失败（保留，不计为通过）
+
+`pnpm.cmd release:check` 的前一次完整运行退出码为 1，wall time 701 秒。该次 build、format、
+secrets、137 项 licenses、20 项 boundaries、17 项 Desktop release source/config、全部 typecheck
+和 lint 已通过；Desktop 测试为 1,518 passed、1 skipped、2 timed out。两项超时均来自
+`settings-page.test.tsx`，当时日志定位在第 493 与 535 行。
+
+修复只优化测试交互成本：长字符串字段使用等价的 change 事件，并保留这两项跨异步 UI 集成测试
+既有的 15 秒聚焦时限；没有改变生产保存/校验合同，也没有提高 Vitest 全局或局部 timeout。Settings 定向复跑
+34/34 通过后，仍从头执行上述完整 `release:check`，最终 Desktop 1,520 passed / 1 skipped、
+workspace 2,688 passed / 65 skipped / 0 failed。该最终 PASS 不删除这次失败记录。
+
+## 2026-08-09 DeepSeek P0 历史工作树验证
 
 ### 全量门禁
 
@@ -487,7 +556,7 @@ pnpm release:candidate:unsigned
 | `pnpm-lock.yaml`   | SHA-256 `194CAD4508EF773409253536F66B0A196D1466B8D22DBB11FAF785E167F98B26`                     |
 
 该历史候选没有执行安装、首次启动、覆盖升级、卸载或重装。此前更旧候选的安装 smoke
-不能迁移为该产物的通过证据；该产物本身也不能迁移为 v0.2.0 当前源码的候选证据。
+不能迁移为该产物的通过证据；该产物本身也不能迁移为后来 v0.2.0 历史源码的候选证据。
 
 ## 尚未验证或受外部条件阻断
 
@@ -501,12 +570,12 @@ pnpm release:candidate:unsigned
 - Word/LibreOffice DOCX 逐页视觉 QA、真实 Tauri WebView 压力矩阵和 Android 真机门禁。
 - 完整 Web Cloud/项目/团队产品路径。
 
-## 当前结论
+## v0.2.0 历史发布结论
 
-v0.2.0 的本次完整自动化、production E2E、NSIS 打包、提交绑定、版本、二进制摘要、远端 CI
+v0.2.0 的该次完整自动化、production E2E、NSIS 打包、提交绑定、版本、二进制摘要、远端 CI
 和公开附件回读复核均已完成。它已发布为明确标注未签名与边界的 GitHub Pre-release 工程预览；
 隔离 Windows 安装矩阵、真实供应商、商业签名、法律审批和独立安全审计未完成，因此不可标记为
-Beta、GA 或商业正式版。
+Beta、GA 或商业正式版。这些历史结果不能替代本文首节所列 `v0.2.1` 当前门禁。
 
 ## 2026-08-08 P39 自动备份历史增量证据
 
@@ -527,3 +596,24 @@ manifest compare-and-swap、到期与校验和门禁，以及删除自动备份�
 覆盖启动立即检查、失败降级不阻断、重检不重叠、关闭清理 timer、浏览器能力为 `null`，以及
 受限 ticket 必须调用现有一致性备份服务。尚未把这些自动化结果提升为打包后 Windows 长时间
 运行、睡眠唤醒、磁盘满或真实 30 天保留演练的通过证据。
+
+## 2026-08-09 生成前检查与 Model Hub 表单增量证据
+
+本节只记录当前增量，不替代历史全仓、真实供应商或安装包验收。
+
+| 检查                      | 精确命令                                                                                                                                              | 当前结果               |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| AI Core 类型              | `pnpm.cmd --filter @inkshadow/ai-core typecheck`                                                                                                      | PASS                   |
+| AI Core 生成前检查回归    | `pnpm.cmd --filter @inkshadow/ai-core test`                                                                                                           | `12 files / 73 passed` |
+| Model Hub 表单最小条件    | `vitest run apps/desktop/src/infrastructure/model-hub-form-readiness.test.ts`                                                                         | `1 file / 4 passed`    |
+| 未知价格浏览器治理账本    | `vitest run --environment jsdom generation-governance-store.test.ts -t "keeps an unpriced generation runnable without fabricating a monetary amount"` | `1 passed / 7 skipped` |
+| 未知价格运行时预检        | `vitest run --environment jsdom generation-runtime.test.ts -t "warns without price metadata"`                                                         | `1 passed / 7 skipped` |
+| 脱敏生成前诊断            | `vitest run --environment jsdom diagnostics.test.ts -t "exports bounded runtime health"`                                                              | `1 passed`             |
+| SQLite 未知价格迁移与账本 | `vitest run generation-governance-sqlite.test.ts -t "persists pricing-unavailable runs and provider token usage without a fake amount"`               | `1 passed / 1 skipped` |
+| Desktop 类型              | `pnpm.cmd --filter @inkshadow/desktop typecheck`                                                                                                      | PASS                   |
+| Part B 定向 ESLint        | `eslint settings-page* preflight* model-hub-form-readiness* generation-preflight-diagnostics.ts --max-warnings 0`                                     | PASS                   |
+| Settings 组件定向复跑     | `pnpm.cmd --filter @inkshadow/desktop test src/pages/settings-page.test.tsx`                                                                          | `1 file / 33 passed`   |
+
+代码覆盖 `READY / READY_WITH_WARNINGS / BLOCKED`、单一保守上下文回退、未知价格的非零价冒充防护、
+安全诊断字段，以及保存/发现/验证按钮对已保存凭据和新 Key 的最小条件。真实供应商返回、实际账单、
+模型真实上下文窗口、原生迁移升级及打包后恢复仍需在干净依赖树和目标 Windows 环境继续验证。

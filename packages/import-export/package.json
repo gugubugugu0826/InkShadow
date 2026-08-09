@@ -34,11 +34,11 @@
   },
   "dependencies": {
     "jszip": "3.10.1",
-    "mammoth": "1.12.0",
     "pdfjs-dist": "6.1.200",
     "zod": "catalog:"
   },
   "devDependencies": {
+    "mammoth": "1.12.0",
     "typescript": "catalog:",
     "vitest": "^4.1.10"
   }

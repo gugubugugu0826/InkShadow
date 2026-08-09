@@ -47,19 +47,6 @@ interface EpubSpineItem {
   readonly path: string;
 }
 
-interface MammothRawTextResult {
-  readonly value: string;
-  readonly messages: readonly {
-    readonly type: "error" | "warning";
-  }[];
-}
-
-interface MammothRawTextParser {
-  extractRawText(
-    input: { readonly arrayBuffer: ArrayBuffer } | { readonly buffer: unknown },
-  ): Promise<MammothRawTextResult>;
-}
-
 interface ZipStreamHelper {
   on(event: "data", listener: (chunk: Uint8Array) => void): ZipStreamHelper;
   on(event: "end", listener: () => void): ZipStreamHelper;
@@ -107,38 +94,18 @@ export async function importDocxDocuments(
     rejectDocxActiveContent: true,
     requiredEntries: ["[content_types].xml", "_rels/.rels", "word/document.xml"],
   });
-  const parserIssues = await inspectDocxXml(fileName, bytes, archive);
+  const inspection = await inspectDocxXml(fileName, bytes, archive);
   options.onProgress?.({ stage: "scanning", fileName, completedUnits: 1, totalUnits: 1 });
   throwIfAborted(options.signal);
   options.onProgress?.({ stage: "parsing", fileName, completedUnits: 0, totalUnits: 1 });
 
   try {
-    const mammothModule = await import("mammoth");
     throwIfAborted(options.signal);
-    const mammoth = mammothModule.default as unknown as MammothRawTextParser;
-    const result = await mammoth.extractRawText(mammothInput(bytes));
-    const parserErrors = result.messages.filter(({ type }) => type === "error");
-    if (parserErrors.length > 0) {
-      throw new ImportExportError(
-        "DOCX_PARSE_FAILED",
-        "The DOCX parser reported an unsafe or invalid document structure.",
-        { fileName },
-      );
-    }
-    const warningIssues = result.messages
-      .filter(({ type }) => type === "warning")
-      .map((): ImportIssue => ({
-        severity: "warning",
-        code: "DOCX_PARSER_WARNING",
-        message: "The DOCX parser omitted unsupported document structure.",
-        fileName,
-      }));
-    throwIfAborted(options.signal);
-    const documents = importExtractedTextDocuments(fileName, result.value, {
+    const documents = importExtractedTextDocuments(fileName, inspection.rawText, {
       originalBytes: bytes.byteLength,
       sourceFormat: "docx",
       sourceSha256: await sha256Hex(bytes),
-      parserIssues: [...parserIssues, ...warningIssues],
+      parserIssues: inspection.parserIssues,
     });
     options.onProgress?.({ stage: "parsing", fileName, completedUnits: 1, totalUnits: 1 });
     return documents;
@@ -787,7 +754,9 @@ async function inspectDocxXml(
   fileName: string,
   bytes: Uint8Array,
   archive: ZipInspection,
-): Promise<readonly ImportIssue[]> {
+): Promise<
+  Readonly<{ parserIssues: readonly ImportIssue[]; documentXml: string; rawText: string }>
+> {
   try {
     const { default: JSZip } = await import("jszip");
     const zip = await JSZip.loadAsync(bytes, {
@@ -795,6 +764,7 @@ async function inspectDocxXml(
       createFolders: false,
     });
     const issues: ImportIssue[] = [];
+    let documentXml: string | null = null;
     const xmlEntries = archive.entries.filter(
       ({ name }) =>
         name.toLowerCase().endsWith(".rels") ||
@@ -817,8 +787,24 @@ async function inspectDocxXml(
       if (entry === null) {
         throw archiveInvalid(fileName);
       }
-      const xml = await entry.async("string");
-      if (utf8ByteLength(xml) > xmlLimit || /<!\s*(?:doctype|entity)\b/iu.test(xml)) {
+      const entryBytes = await readZipEntryBytesBounded(
+        entry as unknown as StreamableZipObject,
+        uncompressedBytes,
+        fileName,
+        name,
+        "DOCX",
+      );
+      const metadata = findArchiveEntry(archive, name);
+      if (
+        metadata === undefined ||
+        entryBytes.byteLength !== uncompressedBytes ||
+        entryBytes.byteLength > xmlLimit ||
+        crc32(entryBytes) !== metadata.crc32
+      ) {
+        throw archiveInvalid(fileName);
+      }
+      const xml = decodeDocxXmlEntry(entryBytes, fileName, name);
+      if (/<!\s*(?:doctype|entity)\b/iu.test(xml)) {
         throw new ImportExportError(
           "IMPORT_ARCHIVE_ACTIVE_CONTENT",
           "The DOCX contains oversized or unsafe XML declarations.",
@@ -835,7 +821,7 @@ async function inspectDocxXml(
           { fileName },
         );
       }
-      if (normalizedName === "word/document.xml" && /<w:altChunk\b/iu.test(xml)) {
+      if (normalizedName === "word/document.xml" && /<(?:[a-z_][\w.-]*:)?altChunk\b/iu.test(xml)) {
         throw new ImportExportError(
           "IMPORT_ARCHIVE_ACTIVE_CONTENT",
           "Alternative embedded DOCX content is not accepted.",
@@ -850,14 +836,680 @@ async function inspectDocxXml(
           fileName,
         });
       }
+      if (normalizedName === "word/document.xml") {
+        documentXml = xml;
+      }
     }
-    return issues;
+    if (documentXml === null) {
+      throw archiveInvalid(fileName);
+    }
+    return {
+      parserIssues: issues,
+      documentXml,
+      rawText: extractDocxOoxmlText(documentXml, fileName),
+    };
   } catch (error: unknown) {
     if (error instanceof ImportExportError) {
       throw error;
     }
     throw archiveInvalid(fileName);
   }
+}
+
+const WORDPROCESSINGML_NAMESPACE_URIS = new Set([
+  "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+  "http://purl.oclc.org/ooxml/wordprocessingml/main",
+]);
+const XML_NAMESPACE_URI = "http://www.w3.org/XML/1998/namespace";
+const DOCX_MAX_XML_DEPTH = 512;
+const DOCX_MAX_TAG_CHARACTERS = 256 * 1024;
+const DOCX_ACTIVE_ELEMENT_NAMES = new Set(["altchunk", "control", "object", "oleobject"]);
+const DOCX_OMITTED_SUBTREE_NAMES = new Set([
+  "del",
+  "deltext",
+  "externaldata",
+  "externallink",
+  "instrtext",
+  "movefrom",
+  "script",
+]);
+
+interface DocxXmlAttribute {
+  readonly name: string;
+  readonly value: string;
+}
+
+interface DocxNamespaceChange {
+  readonly prefix: string;
+  readonly previous: string | undefined;
+}
+
+interface DocxXmlFrame {
+  readonly qName: string;
+  readonly localName: string;
+  readonly namespaceUri: string;
+  readonly namespaceChanges: readonly DocxNamespaceChange[];
+  readonly excluded: boolean;
+  captureText: boolean;
+}
+
+interface DocxParagraphState {
+  readonly depth: number;
+  readonly parts: string[];
+}
+
+interface DocxTableState {
+  readonly depth: number;
+  readonly lines: string[];
+  row: string[] | null;
+  cell: string[] | null;
+}
+
+function decodeDocxXmlEntry(bytes: Uint8Array, fileName: string, path: string): string {
+  try {
+    const offset = hasPrefix(bytes, [0xef, 0xbb, 0xbf]) ? 3 : 0;
+    const xml = textDecoder.decode(bytes.subarray(offset));
+    const declarationStart = /^\s*<\?xml\b/iu.test(xml);
+    const declaration = /^\s*<\?xml\b[\s\S]{0,500}?\?>/iu.exec(xml)?.[0];
+    const declaredEncoding =
+      declaration === undefined
+        ? undefined
+        : /\bencoding\s*=\s*["']\s*([^"'\s]+)\s*["']/iu.exec(declaration)?.[1]?.toLowerCase();
+    if (
+      (declarationStart && declaration === undefined) ||
+      (declaration !== undefined &&
+        /\bencoding\s*=/iu.test(declaration) &&
+        declaredEncoding === undefined) ||
+      (declaredEncoding !== undefined && !["utf-8", "utf8"].includes(declaredEncoding))
+    ) {
+      throw docxParseFailed(fileName, "The DOCX XML encoding declaration is invalid.", path);
+    }
+    assertSafeDocxXmlCharacters(xml, fileName, path);
+    return xml;
+  } catch (error: unknown) {
+    if (error instanceof ImportExportError) {
+      throw error;
+    }
+    throw docxParseFailed(fileName, "The DOCX XML is not valid UTF-8 text.", path);
+  }
+}
+
+function extractDocxOoxmlText(documentXml: string, fileName: string): string {
+  const frames: DocxXmlFrame[] = [];
+  const namespaces = new Map<string, string>([["xml", XML_NAMESPACE_URI]]);
+  const blocks: string[] = [];
+  const tables: DocxTableState[] = [];
+  let paragraph: DocxParagraphState | null = null;
+  const structure = {
+    bodyDepth: null as number | null,
+    bodySeen: false,
+    bodyClosed: false,
+    rootSeen: false,
+    rootClosed: false,
+    declarationSeen: false,
+  };
+  let extractedBytes = 0;
+  let cursor = 0;
+
+  const appendParagraphPart = (value: string): void => {
+    if (paragraph === null || value.length === 0) {
+      return;
+    }
+    extractedBytes += utf8ByteLength(value);
+    if (extractedBytes > IMPORT_LIMITS.maximumTotalBytes) {
+      throw new ImportExportError(
+        "IMPORT_TOTAL_TOO_LARGE",
+        "The extracted DOCX text exceeds the import size limit.",
+        { fileName, path: "word/document.xml" },
+      );
+    }
+    paragraph.parts.push(value);
+  };
+
+  const appendBlock = (value: string): void => {
+    const table = tables.at(-1);
+    if (table?.cell !== null && table?.cell !== undefined) {
+      table.cell.push(value);
+      return;
+    }
+    blocks.push(value);
+  };
+
+  const openFrame = (frame: DocxXmlFrame): void => {
+    const depth = frames.length;
+    const wordElement = WORDPROCESSINGML_NAMESPACE_URIS.has(frame.namespaceUri);
+    const localName = frame.localName.toLowerCase();
+    if (depth === 1) {
+      if (structure.rootSeen || !wordElement || localName !== "document" || frame.excluded) {
+        throw docxParseFailed(fileName, "The DOCX main part has an invalid root element.");
+      }
+      structure.rootSeen = true;
+      return;
+    }
+    if (!structure.rootSeen || structure.rootClosed) {
+      throw docxParseFailed(fileName, "The DOCX main part contains multiple root elements.");
+    }
+    if (wordElement && DOCX_ACTIVE_ELEMENT_NAMES.has(localName)) {
+      throw new ImportExportError(
+        "IMPORT_ARCHIVE_ACTIVE_CONTENT",
+        "The DOCX main part references active or embedded content.",
+        { fileName, path: "word/document.xml" },
+      );
+    }
+    if (wordElement && localName === "body") {
+      const parent = frames.at(-2);
+      if (
+        structure.bodySeen ||
+        parent === undefined ||
+        !WORDPROCESSINGML_NAMESPACE_URIS.has(parent.namespaceUri) ||
+        parent.localName.toLowerCase() !== "document"
+      ) {
+        throw docxParseFailed(fileName, "The DOCX main part has an invalid body element.");
+      }
+      structure.bodySeen = true;
+      structure.bodyDepth = depth;
+      return;
+    }
+    if (structure.bodyDepth === null || frame.excluded || !wordElement) {
+      return;
+    }
+    if (localName === "p") {
+      if (paragraph !== null || (tables.at(-1) !== undefined && tables.at(-1)?.cell === null)) {
+        throw docxParseFailed(fileName, "The DOCX contains an invalid paragraph structure.");
+      }
+      paragraph = { depth, parts: [] };
+      return;
+    }
+    if (localName === "t") {
+      frame.captureText = paragraph !== null;
+      return;
+    }
+    if (localName === "tab") {
+      appendParagraphPart("\t");
+      return;
+    }
+    if (localName === "br" || localName === "cr") {
+      appendParagraphPart("\n");
+      return;
+    }
+    if (localName === "tbl") {
+      if (paragraph !== null) {
+        throw docxParseFailed(fileName, "The DOCX contains a table inside a text paragraph.");
+      }
+      tables.push({ depth, lines: [], row: null, cell: null });
+      return;
+    }
+    if (localName === "tr") {
+      const table = tables.at(-1);
+      if (table?.row !== null || table.cell !== null) {
+        throw docxParseFailed(fileName, "The DOCX contains an invalid table row.");
+      }
+      table.row = [];
+      return;
+    }
+    if (localName === "tc") {
+      const table = tables.at(-1);
+      if (table?.row === null || table?.cell !== null) {
+        throw docxParseFailed(fileName, "The DOCX contains an invalid table cell.");
+      }
+      table.cell = [];
+    }
+  };
+
+  const closeFrame = (frame: DocxXmlFrame): void => {
+    const depth = frames.length;
+    const wordElement = WORDPROCESSINGML_NAMESPACE_URIS.has(frame.namespaceUri);
+    const localName = frame.localName.toLowerCase();
+    if (!frame.excluded && wordElement && structure.bodyDepth !== null) {
+      if (localName === "p") {
+        if (paragraph?.depth !== depth) {
+          throw docxParseFailed(fileName, "The DOCX paragraph boundaries are invalid.");
+        }
+        appendBlock(paragraph.parts.join(""));
+        paragraph = null;
+      } else if (localName === "tc") {
+        const table = tables.at(-1);
+        if (!table?.cell || table.row === null) {
+          throw docxParseFailed(fileName, "The DOCX table cell boundaries are invalid.");
+        }
+        table.row.push(table.cell.join("\n"));
+        table.cell = null;
+      } else if (localName === "tr") {
+        const table = tables.at(-1);
+        if (!table?.row || table.cell !== null) {
+          throw docxParseFailed(fileName, "The DOCX table row boundaries are invalid.");
+        }
+        table.lines.push(table.row.join("\t"));
+        table.row = null;
+      } else if (localName === "tbl") {
+        const table = tables.at(-1);
+        if (table?.depth !== depth || table.row !== null || table.cell !== null) {
+          throw docxParseFailed(fileName, "The DOCX table boundaries are invalid.");
+        }
+        tables.pop();
+        appendBlock(table.lines.join("\n"));
+      }
+    }
+    if (wordElement && localName === "body") {
+      if (
+        structure.bodyDepth !== depth ||
+        paragraph !== null ||
+        tables.length > 0 ||
+        structure.bodyClosed
+      ) {
+        throw docxParseFailed(fileName, "The DOCX body boundaries are invalid.");
+      }
+      structure.bodyDepth = null;
+      structure.bodyClosed = true;
+    }
+    if (depth === 1) {
+      if (!structure.bodySeen || !structure.bodyClosed) {
+        throw docxParseFailed(fileName, "The DOCX main part has no complete text body.");
+      }
+      structure.rootClosed = true;
+    }
+  };
+
+  const closeTopFrame = (): void => {
+    const frame = frames.at(-1);
+    if (frame === undefined) {
+      throw docxParseFailed(fileName, "The DOCX XML closes an element that was not opened.");
+    }
+    closeFrame(frame);
+    frames.pop();
+    restoreDocxNamespaces(namespaces, frame.namespaceChanges);
+  };
+
+  const consumeText = (rawValue: string, alreadyDecoded = false): void => {
+    if (rawValue.length === 0) {
+      return;
+    }
+    if (!alreadyDecoded && rawValue.includes("]]>")) {
+      throw docxParseFailed(fileName, "The DOCX XML contains an invalid CDATA terminator.");
+    }
+    const value = alreadyDecoded
+      ? rawValue
+      : decodeDocxXmlEntities(rawValue, fileName, "word/document.xml");
+    assertSafeDocxXmlCharacters(value, fileName, "word/document.xml");
+    if (frames.length === 0) {
+      if (value.trim().length > 0) {
+        throw docxParseFailed(fileName, "The DOCX XML contains text outside its root element.");
+      }
+      return;
+    }
+    const frame = frames.at(-1);
+    if (frame?.captureText === true && !frame.excluded) {
+      appendParagraphPart(value);
+    }
+  };
+
+  while (cursor < documentXml.length) {
+    const open = documentXml.indexOf("<", cursor);
+    if (open < 0) {
+      consumeText(documentXml.slice(cursor));
+      cursor = documentXml.length;
+      break;
+    }
+    consumeText(documentXml.slice(cursor, open));
+    if (documentXml.startsWith("<!--", open)) {
+      const close = documentXml.indexOf("-->", open + 4);
+      if (close < 0 || documentXml.slice(open + 4, close).includes("--")) {
+        throw docxParseFailed(fileName, "The DOCX XML contains a malformed comment.");
+      }
+      cursor = close + 3;
+      continue;
+    }
+    if (documentXml.startsWith("<![CDATA[", open)) {
+      const close = documentXml.indexOf("]]>", open + 9);
+      if (close < 0 || frames.length === 0) {
+        throw docxParseFailed(fileName, "The DOCX XML contains malformed CDATA.");
+      }
+      consumeText(documentXml.slice(open + 9, close), true);
+      cursor = close + 3;
+      continue;
+    }
+    if (documentXml.startsWith("<?", open)) {
+      const close = documentXml.indexOf("?>", open + 2);
+      const instruction = close < 0 ? "" : documentXml.slice(open + 2, close).trim();
+      if (
+        close < 0 ||
+        structure.declarationSeen ||
+        structure.rootSeen ||
+        !/^xml(?:\s|$)/u.test(instruction)
+      ) {
+        throw docxParseFailed(fileName, "The DOCX XML contains an unsupported instruction.");
+      }
+      structure.declarationSeen = true;
+      cursor = close + 2;
+      continue;
+    }
+    if (documentXml.startsWith("<!", open)) {
+      throw new ImportExportError(
+        "IMPORT_ARCHIVE_ACTIVE_CONTENT",
+        "The DOCX XML contains an unsafe declaration.",
+        { fileName, path: "word/document.xml" },
+      );
+    }
+    const close = findDocxTagEnd(documentXml, open + 1);
+    if (close < 0 || close - open > DOCX_MAX_TAG_CHARACTERS) {
+      throw docxParseFailed(fileName, "The DOCX XML contains an unterminated or oversized tag.");
+    }
+    const markup = documentXml.slice(open + 1, close);
+    if (markup.startsWith("/")) {
+      const qName = parseDocxEndTag(markup.slice(1), fileName);
+      const frame = frames.at(-1);
+      if (frame?.qName !== qName) {
+        throw docxParseFailed(fileName, "The DOCX XML element boundaries do not match.");
+      }
+      closeTopFrame();
+    } else {
+      if (frames.at(-1)?.captureText === true || frames.length >= DOCX_MAX_XML_DEPTH) {
+        throw docxParseFailed(fileName, "The DOCX XML nesting is invalid or too deep.");
+      }
+      const parsed = parseDocxStartTag(markup, fileName);
+      const namespaceChanges = applyDocxNamespaces(parsed.attributes, namespaces, fileName);
+      const resolved = resolveDocxQName(parsed.qName, namespaces, fileName);
+      const localName = resolved.localName.toLowerCase();
+      const inheritedExclusion = frames.at(-1)?.excluded === true;
+      const excluded =
+        inheritedExclusion ||
+        DOCX_OMITTED_SUBTREE_NAMES.has(localName) ||
+        (!WORDPROCESSINGML_NAMESPACE_URIS.has(resolved.namespaceUri) && localName === "script");
+      const frame: DocxXmlFrame = {
+        qName: parsed.qName,
+        localName: resolved.localName,
+        namespaceUri: resolved.namespaceUri,
+        namespaceChanges,
+        excluded,
+        captureText: false,
+      };
+      frames.push(frame);
+      openFrame(frame);
+      if (parsed.selfClosing) {
+        closeTopFrame();
+      }
+    }
+    cursor = close + 1;
+  }
+
+  if (
+    frames.length > 0 ||
+    !structure.rootSeen ||
+    !structure.rootClosed ||
+    !structure.bodySeen ||
+    !structure.bodyClosed
+  ) {
+    throw docxParseFailed(
+      fileName,
+      "The DOCX XML ended before its document structure was complete.",
+    );
+  }
+  const rawText = blocks.join("\n\n").replaceAll("\r\n", "\n").replaceAll("\r", "\n").trim();
+  if (rawText.length === 0) {
+    throw docxParseFailed(fileName, "The DOCX document has no extractable paragraph text.");
+  }
+  if (utf8ByteLength(rawText) > IMPORT_LIMITS.maximumTotalBytes) {
+    throw new ImportExportError(
+      "IMPORT_TOTAL_TOO_LARGE",
+      "The extracted DOCX text exceeds the import size limit.",
+      { fileName, path: "word/document.xml" },
+    );
+  }
+  return rawText;
+}
+
+function parseDocxStartTag(
+  markup: string,
+  fileName: string,
+): Readonly<{
+  qName: string;
+  attributes: readonly DocxXmlAttribute[];
+  selfClosing: boolean;
+}> {
+  let cursor = 0;
+  const name = readDocxXmlName(markup, cursor);
+  if (name === null) {
+    throw docxParseFailed(fileName, "The DOCX XML contains an invalid element name.");
+  }
+  cursor = name.end;
+  const attributes: DocxXmlAttribute[] = [];
+  const attributeNames = new Set<string>();
+  while (cursor < markup.length) {
+    cursor = skipDocxXmlWhitespace(markup, cursor);
+    if (cursor >= markup.length) {
+      return { qName: name.value, attributes, selfClosing: false };
+    }
+    if (markup[cursor] === "/") {
+      if (skipDocxXmlWhitespace(markup, cursor + 1) !== markup.length) {
+        throw docxParseFailed(fileName, "The DOCX XML contains an invalid self-closing tag.");
+      }
+      return { qName: name.value, attributes, selfClosing: true };
+    }
+    const attributeName = readDocxXmlName(markup, cursor);
+    if (attributeName === null || attributeNames.has(attributeName.value)) {
+      throw docxParseFailed(fileName, "The DOCX XML contains an invalid attribute name.");
+    }
+    attributeNames.add(attributeName.value);
+    cursor = skipDocxXmlWhitespace(markup, attributeName.end);
+    if (markup[cursor] !== "=") {
+      throw docxParseFailed(fileName, "The DOCX XML contains an attribute without a value.");
+    }
+    cursor = skipDocxXmlWhitespace(markup, cursor + 1);
+    const quote = markup[cursor];
+    if (quote !== '"' && quote !== "'") {
+      throw docxParseFailed(fileName, "The DOCX XML attribute value is not quoted.");
+    }
+    const valueEnd = markup.indexOf(quote, cursor + 1);
+    if (valueEnd < 0) {
+      throw docxParseFailed(fileName, "The DOCX XML attribute value is unterminated.");
+    }
+    const rawValue = markup.slice(cursor + 1, valueEnd);
+    if (rawValue.includes("<")) {
+      throw docxParseFailed(fileName, "The DOCX XML attribute contains invalid markup.");
+    }
+    attributes.push({
+      name: attributeName.value,
+      value: decodeDocxXmlEntities(rawValue, fileName, "word/document.xml"),
+    });
+    cursor = valueEnd + 1;
+  }
+  return { qName: name.value, attributes, selfClosing: false };
+}
+
+function parseDocxEndTag(markup: string, fileName: string): string {
+  const cursor = skipDocxXmlWhitespace(markup, 0);
+  const name = readDocxXmlName(markup, cursor);
+  if (name === null || skipDocxXmlWhitespace(markup, name.end) !== markup.length) {
+    throw docxParseFailed(fileName, "The DOCX XML contains an invalid closing tag.");
+  }
+  return name.value;
+}
+
+function readDocxXmlName(
+  source: string,
+  start: number,
+): Readonly<{ value: string; end: number }> | null {
+  const match = /^[\p{L}_:][\p{L}\p{N}_.:-]*/u.exec(source.slice(start));
+  if (match === null) {
+    return null;
+  }
+  const value = match[0];
+  const parts = value.split(":");
+  if (parts.length > 2 || parts.some((part) => part.length === 0)) {
+    return null;
+  }
+  return { value, end: start + value.length };
+}
+
+function skipDocxXmlWhitespace(source: string, start: number): number {
+  let cursor = start;
+  while (cursor < source.length && /[\t\n\r ]/u.test(source[cursor] ?? "")) {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+function findDocxTagEnd(source: string, start: number): number {
+  let quote: '"' | "'" | null = null;
+  for (let cursor = start; cursor < source.length; cursor += 1) {
+    const character = source[cursor];
+    if (quote !== null) {
+      if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === "<") {
+      return -1;
+    } else if (character === ">") {
+      return cursor;
+    }
+  }
+  return -1;
+}
+
+function applyDocxNamespaces(
+  attributes: readonly DocxXmlAttribute[],
+  namespaces: Map<string, string>,
+  fileName: string,
+): readonly DocxNamespaceChange[] {
+  const changes: DocxNamespaceChange[] = [];
+  for (const attribute of attributes) {
+    const prefix =
+      attribute.name === "xmlns"
+        ? ""
+        : attribute.name.startsWith("xmlns:")
+          ? attribute.name.slice("xmlns:".length)
+          : null;
+    if (prefix === null) {
+      continue;
+    }
+    if (
+      prefix === "xmlns" ||
+      (prefix === "xml" && attribute.value !== XML_NAMESPACE_URI) ||
+      (prefix.length > 0 && attribute.value.length === 0)
+    ) {
+      throw docxParseFailed(fileName, "The DOCX XML contains an invalid namespace declaration.");
+    }
+    changes.push({ prefix, previous: namespaces.get(prefix) });
+    if (attribute.value.length === 0) {
+      namespaces.delete(prefix);
+    } else {
+      namespaces.set(prefix, attribute.value);
+    }
+  }
+  return changes;
+}
+
+function restoreDocxNamespaces(
+  namespaces: Map<string, string>,
+  changes: readonly DocxNamespaceChange[],
+): void {
+  for (const change of [...changes].reverse()) {
+    if (change.previous === undefined) {
+      namespaces.delete(change.prefix);
+    } else {
+      namespaces.set(change.prefix, change.previous);
+    }
+  }
+}
+
+function resolveDocxQName(
+  qName: string,
+  namespaces: ReadonlyMap<string, string>,
+  fileName: string,
+): Readonly<{ localName: string; namespaceUri: string }> {
+  const parts = qName.split(":");
+  const prefix = parts.length === 2 ? (parts[0] ?? "") : "";
+  const localName = parts.at(-1) ?? "";
+  const namespaceUri = namespaces.get(prefix);
+  if ((prefix.length > 0 && namespaceUri === undefined) || localName.length === 0) {
+    throw docxParseFailed(fileName, "The DOCX XML uses an undeclared namespace prefix.");
+  }
+  return { localName, namespaceUri: namespaceUri ?? "" };
+}
+
+function decodeDocxXmlEntities(input: string, fileName: string, path: string): string {
+  const named: Readonly<Record<string, string>> = {
+    amp: "&",
+    apos: "'",
+    gt: ">",
+    lt: "<",
+    quot: '"',
+  };
+  const result: string[] = [];
+  let cursor = 0;
+  while (cursor < input.length) {
+    const entityStart = input.indexOf("&", cursor);
+    if (entityStart < 0) {
+      result.push(input.slice(cursor));
+      break;
+    }
+    result.push(input.slice(cursor, entityStart));
+    const entityEnd = input.indexOf(";", entityStart + 1);
+    if (entityEnd < 0 || entityEnd - entityStart > 40) {
+      throw docxParseFailed(fileName, "The DOCX XML contains a malformed entity.", path);
+    }
+    const entity = input.slice(entityStart + 1, entityEnd);
+    if (entity.startsWith("#x") || entity.startsWith("#X")) {
+      if (!/^#x[0-9a-f]{1,6}$/iu.test(entity)) {
+        throw docxParseFailed(fileName, "The DOCX XML contains an invalid numeric entity.", path);
+      }
+      result.push(docxCodePoint(Number.parseInt(entity.slice(2), 16), fileName, path));
+    } else if (entity.startsWith("#")) {
+      if (!/^#[0-9]{1,7}$/u.test(entity)) {
+        throw docxParseFailed(fileName, "The DOCX XML contains an invalid numeric entity.", path);
+      }
+      result.push(docxCodePoint(Number.parseInt(entity.slice(1), 10), fileName, path));
+    } else {
+      const decoded = named[entity];
+      if (decoded === undefined) {
+        throw docxParseFailed(fileName, "The DOCX XML contains an undeclared named entity.", path);
+      }
+      result.push(decoded);
+    }
+    cursor = entityEnd + 1;
+  }
+  return result.join("");
+}
+
+function docxCodePoint(codePoint: number, fileName: string, path: string): string {
+  if (!isSafeDocxXmlCodePoint(codePoint)) {
+    throw docxParseFailed(fileName, "The DOCX XML contains an unsafe numeric entity.", path);
+  }
+  return String.fromCodePoint(codePoint);
+}
+
+function assertSafeDocxXmlCharacters(input: string, fileName: string, path: string): void {
+  for (const character of input) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint === undefined || !isSafeDocxXmlCodePoint(codePoint)) {
+      throw docxParseFailed(fileName, "The DOCX XML contains unsafe control characters.", path);
+    }
+  }
+}
+
+function isSafeDocxXmlCodePoint(codePoint: number): boolean {
+  return (
+    codePoint === 0x9 ||
+    codePoint === 0xa ||
+    codePoint === 0xd ||
+    (codePoint >= 0x20 &&
+      codePoint <= 0x10ffff &&
+      !(codePoint >= 0xd800 && codePoint <= 0xdfff) &&
+      codePoint !== 0xfffe &&
+      codePoint !== 0xffff)
+  );
+}
+
+function docxParseFailed(
+  fileName: string,
+  message: string,
+  path = "word/document.xml",
+): ImportExportError {
+  return new ImportExportError("DOCX_PARSE_FAILED", message, { fileName, path });
 }
 
 function findArchiveEntry(archive: ZipInspection, path: string): ZipEntryMetadata | undefined {
@@ -952,6 +1604,7 @@ function readZipEntryBytesBounded(
   maximumBytes: number,
   fileName: string,
   path: string,
+  documentLabel: "DOCX" | "EPUB" = "EPUB",
 ): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     const chunks: Uint8Array[] = [];
@@ -978,7 +1631,7 @@ function readZipEntryBytesBounded(
           fail(
             new ImportExportError(
               "IMPORT_ARCHIVE_INVALID",
-              "The EPUB archive expanded beyond its validated entry size.",
+              `The ${documentLabel} archive expanded beyond its validated entry size.`,
               { fileName, path },
             ),
           );
@@ -1439,27 +2092,6 @@ function hasPdfSignature(bytes: Uint8Array): boolean {
     bytes[3] === 0x46 &&
     bytes[4] === 0x2d
   );
-}
-
-function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  const clone = new Uint8Array(bytes.byteLength);
-  clone.set(bytes);
-  return clone.buffer;
-}
-
-function mammothInput(
-  bytes: Uint8Array,
-): { readonly arrayBuffer: ArrayBuffer } | { readonly buffer: unknown } {
-  const maybeBuffer = (
-    globalThis as unknown as {
-      readonly Buffer?: {
-        from(value: Uint8Array): unknown;
-      };
-    }
-  ).Buffer;
-  return maybeBuffer === undefined
-    ? { arrayBuffer: exactArrayBuffer(bytes) }
-    : { buffer: maybeBuffer.from(bytes) };
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

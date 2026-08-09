@@ -1,8 +1,8 @@
 # InkShadow 非前端工程文档
 
 > 文档状态：`SUPPORTING_CURRENT`  
-> 基于源码复核：2026-08-08  
-> 应用版本（App Version）：`0.2.0`  
+> 基于源码复核：2026-08-10  
+> Desktop 发布基线（App Version）：`0.2.1`  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
 > 文档性质：当前实现指引，不把计划代码描述成已部署能力
 
@@ -17,16 +17,16 @@ InkShadow 不是只有“前端”和“后端”两块。除用户界面外，�
 本目录以 `back-end` 作为便于查找的统一入口，但不会把共享领域包、Android 或工程脚本错误地
 称为云后端。
 
-DESIGN v0.3.1b 只约束目标界面与交互验收；它不会改变 Tauri、数据库或安装包的 0.2.0
-应用版本。
+DESIGN v0.3.1b 只约束目标界面与交互验收；它不会改变 Tauri、数据库或待发布安装包的
+0.2.1 Desktop 发布基线。
 
 ## 文档导航与状态
 
 | 状态                    | 文档                                                                                                     | 内容与边界                                                                           |
 | ----------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `SUPPORTING_CURRENT`    | [`CLOUD_BACKEND.md`](CLOUD_BACKEND.md)                                                                   | Cloud API、PostgreSQL、HTTP、服务和后台任务；代码存在不表示生产 Cloud 已部署         |
-| `SUPPORTING_CURRENT`    | [`DESKTOP_NATIVE.md`](DESKTOP_NATIVE.md)                                                                 | Tauri/Rust 可信边界、SQLite、凭据、模型网络、项目密钥和备份；当前迁移上限 Tauri `58` |
-| `SUPPORTING_CURRENT`    | [`SHARED_PACKAGES.md`](SHARED_PACKAGES.md)                                                               | workspace 领域、应用、数据、导入导出和共享 UI 包；当前 Data 迁移上限 `0055`          |
+| `SUPPORTING_CURRENT`    | [`DESKTOP_NATIVE.md`](DESKTOP_NATIVE.md)                                                                 | Tauri/Rust 可信边界、SQLite、凭据、模型网络、项目密钥和备份；当前迁移上限 Tauri `62` |
+| `SUPPORTING_CURRENT`    | [`SHARED_PACKAGES.md`](SHARED_PACKAGES.md)                                                               | workspace 领域、应用、数据、导入导出和共享 UI 包；当前 Data 迁移上限 `0059`          |
 | `SUPPORTING_CURRENT`    | [`ANDROID_OPERATIONS_TOOLING.md`](ANDROID_OPERATIONS_TOOLING.md)                                         | Android POC、部署模板、发布/安全脚本、CI 和 E2E；不属于当前默认创作主链路            |
 | `AUTHORITATIVE_CURRENT` | [`../product-rebuild/02-DATA-REUSE-AND-MIGRATION.md`](../product-rebuild/02-DATA-REUSE-AND-MIGRATION.md) | 数据复用、前向迁移与回滚规则                                                         |
 

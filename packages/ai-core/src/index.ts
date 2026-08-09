@@ -145,6 +145,7 @@ export {
   type ModelRouteVerification,
 } from "./routing.js";
 export {
+  CONSERVATIVE_GENERATION_CONTEXT_POLICY,
   GENERATION_PREFLIGHT_ACTIONS,
   GENERATION_PREFLIGHT_CODES,
   GenerationPreflightInputError,
@@ -152,10 +153,13 @@ export {
   type GenerationPreflightAction,
   type GenerationPreflightCheck,
   type GenerationPreflightCode,
+  type GenerationPreflightCostStatus,
   type GenerationPreflightInput,
+  type GenerationPreflightReadiness,
   type GenerationPreflightSeverity,
   type GenerationPreflightSnapshot,
   type GenerationProviderLocation,
+  type GenerationTokenizerStatus,
 } from "./preflight.js";
 export {
   PROMPT_TASKS,

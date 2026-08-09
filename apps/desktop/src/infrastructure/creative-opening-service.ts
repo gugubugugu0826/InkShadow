@@ -12,12 +12,16 @@ export interface CreativeOpeningResult {
   readonly requestId: string;
   readonly text: string;
   readonly source: "provider" | "local_fallback";
+  readonly completion: "complete" | "partial";
   readonly providerId: string | null;
   readonly modelId: string | null;
   readonly noticeCode: string | null;
 }
 
 export type CreativeOpeningAngle = "immediate_action" | "relationship_dialogue" | "mystery_clue";
+
+/** A truncated proposal below this boundary is not useful enough to offer to the author. */
+export const MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS = 160;
 
 export type CreativeOpeningDestination =
   Readonly<{ kind: "local" }> | Readonly<{ kind: "provider"; providerId: string; modelId: string }>;
@@ -67,6 +71,8 @@ export async function generateCreativeOpening(
     direction?: string;
     answers?: Readonly<Record<string, string>>;
     openingAngle?: CreativeOpeningAngle;
+    /** An explicitly selected incomplete proposal to continue without repeating its visible text. */
+    partialOpening?: string;
     requestId?: string;
     onDelta?: (text: string) => void;
   }>,
@@ -77,14 +83,28 @@ export async function generateCreativeOpening(
       ? null
       : validateCreativeText(input.direction, 1_000, "direction");
   const requestId = input.requestId ?? runtime.ids.next();
+  const partialOpening =
+    input.partialOpening === undefined
+      ? null
+      : validateCreativeProse(input.partialOpening, 64_000, "partial opening");
   const messages = buildOpeningMessages(
     idea,
     direction,
     input.answers ?? {},
     input.openingAngle ?? null,
+    partialOpening,
   );
+  let visibleText = partialOpening ?? "";
+  const receiveVisibleText = (text: string) => {
+    visibleText = combineOpeningText(partialOpening, text);
+    input.onDelta?.(visibleText);
+  };
 
   if (runtime.mode === "tauri" && runtime.modelGateway.available) {
+    const dispatchedTarget: { connectionId: string | null; modelId: string | null } = {
+      connectionId: null,
+      modelId: null,
+    };
     try {
       const generated = await executeModelHubTextTask(runtime, {
         dispatchScope: { kind: "non_project", reason: "creative_opening" },
@@ -93,9 +113,14 @@ export async function generateCreativeOpening(
         maximumOutputTokens: 1_200,
         temperature: 0.85,
         generationId: requestId,
-        ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
+        reasoningPolicy: "visible_prose",
+        onBeforeDispatch: ({ connectionId, modelId }) => {
+          dispatchedTarget.connectionId = connectionId;
+          dispatchedTarget.modelId = modelId;
+        },
+        onDelta: receiveVisibleText,
       });
-      const text = generated.text.trim();
+      const text = combineOpeningText(partialOpening, generated.text).trim();
       if (text.length === 0) {
         return localOpening(requestId, idea, direction, "MODEL_OUTPUT_EMPTY");
       }
@@ -103,6 +128,7 @@ export async function generateCreativeOpening(
         requestId,
         text,
         source: "provider",
+        completion: "complete",
         providerId: generated.connectionId,
         modelId: generated.modelId,
         noticeCode: generated.costCeilingExceededAfterDispatch
@@ -110,6 +136,16 @@ export async function generateCreativeOpening(
           : null,
       });
     } catch (cause: unknown) {
+      const partial = usableTruncatedOpening(
+        requestId,
+        visibleText,
+        cause,
+        dispatchedTarget.connectionId,
+        dispatchedTarget.modelId,
+      );
+      if (partial !== null) {
+        return partial;
+      }
       if (
         !(cause instanceof ModelHubExecutionError) ||
         cause.code !== "MODEL_HUB_ROUTE_NOT_CONFIGURED"
@@ -161,9 +197,9 @@ export async function generateCreativeOpening(
       messages,
       maxOutputTokens: 1_200,
       temperature: 0.85,
-      ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
+      onDelta: receiveVisibleText,
     });
-    const text = generated.text.trim();
+    const text = combineOpeningText(partialOpening, generated.text).trim();
     if (text.length === 0) {
       return localOpening(requestId, idea, direction, "MODEL_OUTPUT_EMPTY");
     }
@@ -171,11 +207,22 @@ export async function generateCreativeOpening(
       requestId,
       text,
       source: "provider",
+      completion: "complete",
       providerId: profile.providerId,
       modelId: profile.selectedModel,
       noticeCode: null,
     });
   } catch (cause: unknown) {
+    const partial = usableTruncatedOpening(
+      requestId,
+      visibleText,
+      cause,
+      profile.providerId,
+      profile.selectedModel,
+    );
+    if (partial !== null) {
+      return partial;
+    }
     return localOpening(requestId, idea, direction, safeModelFailureCode(cause));
   }
 }
@@ -198,6 +245,7 @@ export async function persistCreativeOpeningCandidate(
   chapterId: UuidV7,
   textValue: string,
   candidateId?: UuidV7,
+  incomplete = false,
 ): Promise<Result<AiCandidate, AppError | ModelCenterError>> {
   const chapterResult = await runtime.repositories.chapters.findById(chapterId);
   if (!chapterResult.ok) {
@@ -228,7 +276,7 @@ export async function persistCreativeOpeningCandidate(
   if (!checksum.ok) {
     return checksum;
   }
-  const ready = streaming.value.markReady(text, checksum.value, runtime.clock.now());
+  const ready = streaming.value.markReady(text, checksum.value, runtime.clock.now(), incomplete);
   if (!ready.ok) {
     return ready;
   }
@@ -269,6 +317,7 @@ function buildOpeningMessages(
   direction: string | null,
   answers: Readonly<Record<string, string>>,
   openingAngle: CreativeOpeningAngle | null,
+  partialOpening: string | null,
 ): readonly NativeModelMessage[] {
   const known = Object.entries(answers)
     .filter(([, value]) => value.trim().length > 0)
@@ -279,7 +328,9 @@ function buildOpeningMessages(
     {
       role: "system",
       content:
-        "你是长篇小说开篇助手。根据作者的一句话灵感写一段 500 至 900 字、可直接继续修改的小说开头。只输出正文，不要标题、分析、设定表、Markdown 围栏或元评论。不要把推测写成已经确认的长期设定；聚焦具体场景、人物行动和一个能推动下一段的问题。",
+        partialOpening === null
+          ? "你是长篇小说开篇助手。根据作者的一句话灵感写一段 500 至 900 字、可直接继续修改的小说开头。只输出正文，不要标题、分析、设定表、Markdown 围栏或元评论。不要把推测写成已经确认的长期设定；聚焦具体场景、人物行动和一个能推动下一段的问题。"
+          : "你是长篇小说开篇助手。续写作者明确选择的未完整开头，只输出从已有文字结尾之后开始的新正文。不要复述已有文字，不要标题、分析、设定表、Markdown 围栏或元评论；让补全后的开头形成一个可继续修改的完整场景。",
     },
     {
       role: "user",
@@ -288,6 +339,7 @@ function buildOpeningMessages(
         direction === null ? "" : `本轮修改方向：${direction}`,
         openingAngle === null ? "" : `本次开头方案侧重：${openingAngleInstruction(openingAngle)}`,
         known.length === 0 ? "" : `作者已经表达的偏好：\n${known}`,
+        partialOpening === null ? "" : `需要从结尾继续的已有开头：\n${partialOpening}`,
       ]
         .filter((value) => value.length > 0)
         .join("\n\n"),
@@ -324,10 +376,42 @@ function localOpening(
     requestId,
     text,
     source: "local_fallback",
+    completion: "complete",
     providerId: null,
     modelId: null,
     noticeCode,
   });
+}
+
+function usableTruncatedOpening(
+  requestId: string,
+  visibleText: string,
+  cause: unknown,
+  providerId: string | null,
+  modelId: string | null,
+): CreativeOpeningResult | null {
+  const text = visibleText.trim();
+  if (
+    safeModelFailureCode(cause) !== "MODEL_OUTPUT_TRUNCATED" ||
+    providerId === null ||
+    modelId === null ||
+    text.length < MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    requestId,
+    text,
+    source: "provider",
+    completion: "partial",
+    providerId,
+    modelId,
+    noticeCode: "MODEL_OUTPUT_TRUNCATED",
+  });
+}
+
+function combineOpeningText(partialOpening: string | null, continuation: string): string {
+  return partialOpening === null ? continuation : `${partialOpening}${continuation}`;
 }
 
 function localDirectionHint(direction: string): string {
@@ -346,6 +430,21 @@ function localDirectionHint(direction: string): string {
 
 function validateCreativeText(value: string, maximum: number, label: string): string {
   const normalized = value.normalize("NFKC").trim();
+  if (
+    normalized.length < 1 ||
+    normalized.length > maximum ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(normalized)
+  ) {
+    throw new ModelCenterError(
+      "CREATIVE_INPUT_INVALID",
+      `${label} does not satisfy the creative input policy.`,
+    );
+  }
+  return normalized;
+}
+
+function validateCreativeProse(value: string, maximum: number, label: string): string {
+  const normalized = value.normalize("NFC").trim();
   if (
     normalized.length < 1 ||
     normalized.length > maximum ||

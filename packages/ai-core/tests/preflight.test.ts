@@ -40,6 +40,7 @@ describe("runGenerationPreflight", () => {
     const snapshot = runGenerationPreflight(baseInput);
 
     expect(snapshot.canStart).toBe(true);
+    expect(snapshot.readiness).toBe("READY");
     expect(snapshot.requiresConfirmation).toBe(false);
     expect(snapshot.checks).toEqual([
       {
@@ -81,10 +82,11 @@ describe("runGenerationPreflight", () => {
       "MODEL_GATEWAY_UNAVAILABLE",
       "NETWORK_OFFLINE",
       "MODEL_PROFILE_MISSING",
-      "MODEL_PRICING_MISSING",
+      "PREFLIGHT_WARNING_PRICING_UNKNOWN",
       "INPUT_TOO_LARGE",
-      "CONTEXT_WINDOW_EXCEEDED",
+      "PREFLIGHT_BLOCKED_CONTEXT_OVERFLOW",
     ]);
+    expect(snapshot.readiness).toBe("BLOCKED");
   });
 
   it("warns at 80 percent and blocks only hard budget overruns", () => {
@@ -115,7 +117,7 @@ describe("runGenerationPreflight", () => {
       ],
     });
     expect(blocked.canStart).toBe(false);
-    expect(blocked.checks.map(({ code }) => code)).toContain("BUDGET_EXCEEDED");
+    expect(blocked.checks.map(({ code }) => code)).toContain("PREFLIGHT_BLOCKED_HARD_BUDGET");
   });
 
   it("requires confirmation for stale prices and near-full contexts", () => {
@@ -147,19 +149,19 @@ describe("runGenerationPreflight", () => {
         ...baseInput,
         credentialConfigured: false,
       }).checks.map(({ code }) => code),
-    ).toContain("MODEL_CREDENTIAL_MISSING");
+    ).toContain("PREFLIGHT_BLOCKED_CREDENTIAL");
     expect(
       runGenerationPreflight({
         ...baseInput,
         connectionStatus: "failed",
       }).checks.map(({ code }) => code),
-    ).toContain("MODEL_CONNECTION_FAILED");
+    ).toContain("PREFLIGHT_BLOCKED_MODEL_UNAVAILABLE");
     expect(
       runGenerationPreflight({
         ...baseInput,
         selectedModelAvailable: false,
       }).checks.map(({ code }) => code),
-    ).toContain("SELECTED_MODEL_UNAVAILABLE");
+    ).toContain("PREFLIGHT_BLOCKED_MODEL_UNAVAILABLE");
   });
 
   it("treats a local demo as explicitly zero cost without a provider profile", () => {
@@ -180,6 +182,48 @@ describe("runGenerationPreflight", () => {
       pricingVersion: "local-demo-zero-cost",
     });
     expect(snapshot.checks.map(({ code }) => code)).toEqual(["READY"]);
+  });
+
+  it("allows generation with explicit warnings when price, context, and tokenizer are unknown", () => {
+    const snapshot = runGenerationPreflight({
+      ...baseInput,
+      pricing: null,
+      contextWindowTokens: null,
+      tokenizerStatus: "approximate",
+    });
+
+    expect(snapshot.readiness).toBe("READY_WITH_WARNINGS");
+    expect(snapshot.canStart).toBe(true);
+    expect(snapshot.requiresConfirmation).toBe(true);
+    expect(snapshot.estimate).toBeNull();
+    expect(snapshot.costStatus).toBe("pricing_unavailable");
+    expect(snapshot.effectiveContextBudget).toBe(7_000);
+    expect(snapshot.checks.map(({ code }) => code)).toEqual([
+      "PREFLIGHT_WARNING_PRICING_UNKNOWN",
+      "PREFLIGHT_WARNING_CONTEXT_UNKNOWN",
+      "PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE",
+    ]);
+    expect(snapshot.defaultsApplied).toEqual([
+      "CONSERVATIVE_CONTEXT_WINDOW",
+      "CONSERVATIVE_TOKEN_ESTIMATE",
+      "PRICING_UNAVAILABLE",
+    ]);
+  });
+
+  it("blocks a known privacy denial even when optional model metadata is unknown", () => {
+    const snapshot = runGenerationPreflight({
+      ...baseInput,
+      pricing: null,
+      contextWindowTokens: null,
+      privacyStatus: "blocked",
+    });
+
+    expect(snapshot.readiness).toBe("BLOCKED");
+    expect(snapshot.blockers.map(({ code }) => code)).toEqual(["PREFLIGHT_BLOCKED_PRIVACY"]);
+    expect(snapshot.warnings.map(({ code }) => code)).toEqual([
+      "PREFLIGHT_WARNING_PRICING_UNKNOWN",
+      "PREFLIGHT_WARNING_CONTEXT_UNKNOWN",
+    ]);
   });
 
   it("rejects malformed numeric inputs before producing a snapshot", () => {

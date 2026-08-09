@@ -95,6 +95,12 @@ function recordErrorDescription(code: string): string {
   if (code === "MODEL_HUB_ROUTE_NOT_CONFIGURED") {
     return "这项写作任务还没有可用的 AI 分工。请先验证至少一个模型的写作能力，再在 Model Hub 中应用智能推荐；缺少 Embedding 不会阻止基础文本写作。";
   }
+  if (code === "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED") {
+    return "AI 分工没有完整写入，之前可用的分工仍保持不变。请直接重试“应用 AI 分工”；若问题持续，请下载脱敏诊断包后联系支持。";
+  }
+  if (code === "MODEL_HUB_MANUAL_ROUTE_PRIVACY_CONFLICT") {
+    return "已有手动设置的云端任务与“本地隐私”冲突。系统没有覆盖这条手动设置；请在专家设置中将它改为本机模型或先停用，再重新应用本地隐私方案。";
+  }
   if (code === "CREATIVE_JOURNEY_STORAGE_QUOTA_EXCEEDED") {
     return "本地存储空间不足，本次更改没有保存。请保持当前页面打开，释放设备或浏览器存储空间后，再次点击原来的创建或保存操作；当前输入仍保留在页面中。";
   }

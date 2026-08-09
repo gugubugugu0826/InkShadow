@@ -146,7 +146,7 @@ const selectionDerivedInputTypes = new Set([
 
 const RECOVERY_DRAFT_DEBOUNCE_MS = 350;
 const BACKGROUND_FLUSH_TIMEOUT_MS = 3_000;
-const COMPACT_EDITOR_MEDIA_QUERY = "(max-width: 63.9375rem)";
+const COMPACT_EDITOR_MEDIA_QUERY = "(max-width: 64rem)";
 const COMPACT_ASSISTANT_FOCUSABLE_SELECTOR = [
   "a[href]",
   "button:not([disabled])",
@@ -168,24 +168,9 @@ function compactAssistantFocusableElements(panel: HTMLElement): HTMLElement[] {
   );
 }
 
-const chapterListPanelStyle: CSSProperties = {
-  flex: "0 0 12rem",
-  maxHeight: "calc(100vh - 12rem)",
-};
-
 const collapsedPanelStyle: CSSProperties = {
-  flex: "0 0 auto",
   alignSelf: "flex-start",
   padding: "var(--space-2)",
-};
-
-const writingCanvasFlexStyle: CSSProperties = {
-  flex: "1 1 28rem",
-};
-
-const assistantPanelStyle: CSSProperties = {
-  flex: "0 1 18rem",
-  maxHeight: "calc(100vh - 12rem)",
 };
 
 interface CandidateRouteSelection {
@@ -482,6 +467,7 @@ export function EditorPage() {
   const flushInFlightRef = useRef<Promise<PersistenceFlushHandlerResult> | null>(null);
   const activeGenerationPlanRef = useRef<PreparedGenerationPlan | null>(null);
   const generationEstimate = generationPlan?.preflight.estimate ?? null;
+  const returnedFromAiSettings = searchParams.get("aiSettings") === "returned";
 
   const clearScheduledPersistence = useCallback((): void => {
     if (draftTimerRef.current !== null) {
@@ -739,6 +725,16 @@ export function EditorPage() {
     }
     pendingSelectionRef.current = null;
   }, [pageState, selectionRequestId]);
+
+  useEffect(() => {
+    if (!returnedFromAiSettings || pageState !== "ready") {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      scheduleSelection(selectionRef.current, true, scrollTopRef.current);
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [pageState, returnedFromAiSettings, scheduleSelection]);
 
   useEffect(() => {
     if (findOpen) {
@@ -1910,6 +1906,38 @@ export function EditorPage() {
     await executePreparedGeneration(generationPlan);
   }
 
+  function closePreflightAndFocusEditor(): void {
+    const selection = normalizeEditorSelection(selectionRef.current, contentRef.current.length);
+    persistEditorView(selection);
+    setPreflightOpen(false);
+    window.requestAnimationFrame(() => {
+      scheduleSelection(selection, true, scrollTopRef.current);
+    });
+  }
+
+  async function saveAndClosePreflight(): Promise<void> {
+    if (!editorClean) {
+      await manualSave();
+    }
+    closePreflightAndFocusEditor();
+  }
+
+  function preflightModelHubLink(
+    targetSection: "provider-connection" | "model-selection" | "model-pricing",
+  ): string {
+    if (projectId === null || chapterId === null) {
+      return "/settings#model-center";
+    }
+    const returnRoute = `/projects/${projectId}/chapters/${chapterId}?aiSettings=returned`;
+    const query = new URLSearchParams({
+      connectionId: generationPlan?.providerId ?? "",
+      modelId: generationPlan?.modelId ?? "",
+      targetSection,
+      returnRoute,
+    });
+    return `/settings?${query.toString()}#model-center`;
+  }
+
   async function deferGenerationUntilOnline(): Promise<void> {
     if (generationPlan === null || !canDeferGenerationPlan(generationPlan)) {
       return;
@@ -2506,6 +2534,7 @@ export function EditorPage() {
 
   return (
     <PageStateBoundary
+      className="editor-page-boundary"
       state={pageState}
       preserveContent={false}
       fallbacks={{
@@ -2642,6 +2671,13 @@ export function EditorPage() {
             tone="error"
             title={normalizedError.title}
             description={`${normalizedError.description}（${normalizedError.code}）`}
+          />
+        )}
+        {returnedFromAiSettings && (
+          <InlineAlert
+            tone="info"
+            title="已返回原章节"
+            description="正文、滚动位置和光标已从本地视图记录恢复；你可以继续手写，或再次打开生成前检查。"
           />
         )}
         {editorNotice !== null && (
@@ -2813,13 +2849,17 @@ export function EditorPage() {
 
         <div
           className="editor-workspace"
-          style={{ display: "flex", flexWrap: "wrap", alignItems: "stretch" }}
+          data-chapter-panel={
+            compactEditorLayout ? "drawer" : chapterListOpen ? "open" : "collapsed"
+          }
+          data-assistant-panel={
+            compactEditorLayout ? "drawer" : assistantOpen ? "open" : "collapsed"
+          }
         >
           {!compactEditorLayout &&
             (chapterListOpen ? (
               <aside
-                className="candidate-panel"
-                style={chapterListPanelStyle}
+                className="candidate-panel candidate-panel--chapters"
                 aria-labelledby="chapter-list-title"
               >
                 <div className="candidate-panel__header">
@@ -2864,7 +2904,11 @@ export function EditorPage() {
                 </nav>
               </aside>
             ) : (
-              <aside className="candidate-panel" style={collapsedPanelStyle} aria-label="章节列表">
+              <aside
+                className="candidate-panel candidate-panel--collapsed"
+                style={collapsedPanelStyle}
+                aria-label="章节列表"
+              >
                 <Button
                   variant="secondary"
                   aria-label="展开章节列表"
@@ -2880,7 +2924,7 @@ export function EditorPage() {
             className={`writing-canvas writing-canvas--${typography.measure}`}
             data-surface={resolvedSurface}
             data-font-family={typography.fontFamily}
-            style={{ ...writingCanvasStyle, ...writingCanvasFlexStyle }}
+            style={writingCanvasStyle}
             aria-label="章节正文"
           >
             <Textarea
@@ -2930,8 +2974,7 @@ export function EditorPage() {
           {assistantOpen ? (
             <aside
               ref={assistantPanelRef}
-              className={`candidate-panel${compactEditorLayout ? " candidate-panel--assistant-overlay" : ""}`}
-              style={compactEditorLayout ? undefined : assistantPanelStyle}
+              className={`candidate-panel candidate-panel--assistant${compactEditorLayout ? " candidate-panel--assistant-overlay" : ""}`}
               aria-labelledby="candidate-title"
               role={compactEditorLayout ? "dialog" : undefined}
               aria-modal={compactEditorLayout ? true : undefined}
@@ -3339,7 +3382,11 @@ export function EditorPage() {
                 )}
             </aside>
           ) : !compactEditorLayout ? (
-            <aside className="candidate-panel" style={collapsedPanelStyle} aria-label="AI 创作助手">
+            <aside
+              className="candidate-panel candidate-panel--collapsed"
+              style={collapsedPanelStyle}
+              aria-label="AI 创作助手"
+            >
               <Button
                 variant="secondary"
                 aria-label="展开 AI 创作助手"
@@ -3955,51 +4002,96 @@ export function EditorPage() {
         title="生成前检查"
         description="开始前会检查正文是否已保存、AI 服务是否可用以及预算是否允许；有问题时会告诉你如何解决。"
         footer={
-          <>
-            <Button
-              variant="secondary"
-              disabled={budgetSaving}
-              onClick={() => setPreflightOpen(false)}
-            >
-              暂不生成
-            </Button>
-            {generationPlan !== null && canDeferGenerationPlan(generationPlan) && (
+          generationPlan?.preflight.readiness === "BLOCKED" ? (
+            <>
               <Button
                 variant="secondary"
-                loading={candidateBusy}
                 disabled={budgetSaving}
-                onClick={() => void deferGenerationUntilOnline()}
+                onClick={closePreflightAndFocusEditor}
               >
-                保存待执行
+                先自己写
               </Button>
-            )}
-            <Button
-              variant="ai-primary"
-              disabled={!generationPlan?.preflight.canStart || budgetSaving}
-              onClick={() => void confirmGeneration()}
-            >
-              确认并开始
-            </Button>
-          </>
+              <Button
+                variant="secondary"
+                disabled={budgetSaving}
+                onClick={() => void saveAndClosePreflight()}
+              >
+                保存并关闭
+              </Button>
+              {canDeferGenerationPlan(generationPlan) && (
+                <Button
+                  variant="secondary"
+                  loading={candidateBusy}
+                  disabled={budgetSaving}
+                  onClick={() => void deferGenerationUntilOnline()}
+                >
+                  保存待执行
+                </Button>
+              )}
+              <Link
+                className="button-link"
+                to={preflightModelHubLink("provider-connection")}
+                onClick={() => persistEditorView(selectionRef.current)}
+              >
+                修复 AI 设置
+              </Link>
+            </>
+          ) : (
+            <>
+              <Button
+                variant="secondary"
+                disabled={budgetSaving}
+                onClick={closePreflightAndFocusEditor}
+              >
+                暂不生成
+              </Button>
+              {generationPlan?.preflight.readiness === "READY_WITH_WARNINGS" && (
+                <Link
+                  className="button-link button-link--secondary"
+                  to={preflightModelHubLink("model-pricing")}
+                  onClick={() => persistEditorView(selectionRef.current)}
+                >
+                  去完善模型信息
+                </Link>
+              )}
+              <Button
+                variant="ai-primary"
+                disabled={!generationPlan?.preflight.canStart || budgetSaving}
+                onClick={() => void confirmGeneration()}
+              >
+                {generationPlan?.preflight.readiness === "READY_WITH_WARNINGS"
+                  ? "使用安全默认值并开始"
+                  : "确认并开始"}
+              </Button>
+            </>
+          )
         }
       >
         {generationPlan !== null && (
           <div className="generation-preflight">
             <InlineAlert
-              tone={generationPlan.preflight.canStart ? "info" : "error"}
+              tone={
+                generationPlan.preflight.readiness === "BLOCKED"
+                  ? "error"
+                  : generationPlan.preflight.readiness === "READY_WITH_WARNINGS"
+                    ? "warning"
+                    : "info"
+              }
               title={
-                generationPlan.preflight.canStart
-                  ? generationPlan.preflight.requiresConfirmation
-                    ? "可以开始，但有建议项"
+                generationPlan.preflight.readiness === "BLOCKED"
+                  ? "当前无法调用 AI"
+                  : generationPlan.preflight.readiness === "READY_WITH_WARNINGS"
+                    ? `可以开始生成，但有 ${String(generationPlan.preflight.warnings.length)} 项提示`
                     : "检查通过"
-                  : "存在阻断项"
               }
               description={
-                generationPlan.preflight.canStart
-                  ? "确认后才会开始生成。重复确认同一份检查结果会复用原任务，不会重复调用 AI 服务。"
+                generationPlan.preflight.readiness !== "BLOCKED"
+                  ? generationPlan.preflight.readiness === "READY_WITH_WARNINGS"
+                    ? "这些提示不会阻止生成；墨影会使用已列出的安全默认值。供应商仍可能按实际调用计费。"
+                    : "确认后才会开始生成。重复确认同一份检查结果会复用原任务，不会重复调用 AI 服务。"
                   : canDeferGenerationPlan(generationPlan)
                     ? "当前只因网络离线而阻断；可保存不含正文和创作指令的待执行记录，联网后重新检查并确认。"
-                    : "请按下列操作修复后重新检查；当前不会调用 AI 服务。"
+                    : "请按下列操作修复后重新检查；当前不会调用 AI 服务，但正文仍可编辑和保存。"
               }
             />
 
@@ -4105,23 +4197,40 @@ export function EditorPage() {
                   ) : check.action === "OPEN_MODEL_CENTER" ||
                     check.action === "UPDATE_PRICING" ||
                     check.action === "RETRY_CONNECTION" ? (
-                    <Link className="back-link" to="/settings#model-center">
+                    <Link
+                      className="back-link"
+                      to={preflightModelHubLink(
+                        check.action === "UPDATE_PRICING"
+                          ? "model-pricing"
+                          : check.action === "RETRY_CONNECTION"
+                            ? "provider-connection"
+                            : "model-selection",
+                      )}
+                      onClick={() => persistEditorView(selectionRef.current)}
+                    >
                       设置 AI 服务
                     </Link>
                   ) : check.action === "REDUCE_CONTEXT" ? (
-                    <Button
-                      variant="secondary"
-                      onClick={() => {
-                        setPreflightOpen(false);
-                        editorRef.current?.focus({ preventScroll: true });
-                      }}
-                    >
+                    <Button variant="secondary" onClick={closePreflightAndFocusEditor}>
                       返回正文精简内容
                     </Button>
                   ) : null}
                 </li>
               ))}
             </ul>
+
+            {generationPlan.preflight.costStatus === "pricing_unavailable" && (
+              <section className="generation-preflight__cost" aria-label="费用估算">
+                <div>
+                  <span>预计费用</span>
+                  <strong>暂时无法计算</strong>
+                </div>
+                <p>
+                  当前模型价格未配置；这不会阻止本次生成，但供应商仍可能正常计费。生成后会保留供应商返回的用量，金额标记为
+                  pricing_unavailable，不伪造零费用。
+                </p>
+              </section>
+            )}
 
             {generationEstimate !== null && (
               <section className="generation-preflight__cost" aria-label="费用估算">
@@ -4290,7 +4399,7 @@ function preflightSeverityLabel(severity: "blocking" | "fix_recommended" | "noti
   if (severity === "blocking") {
     return "阻断";
   }
-  return severity === "fix_recommended" ? "建议修复" : "提示";
+  return severity === "fix_recommended" ? "提示" : "已检查";
 }
 
 function contextLayerLabel(layer: ContextLayer): string {
@@ -4388,6 +4497,15 @@ function preflightCheckLabel(code: string): string {
     CONTEXT_WINDOW_NEAR_LIMIT: "本次所需内容接近可处理长度上限",
     BUDGET_WARNING: "预计费用接近或超过预算提醒阈值",
     BUDGET_EXCEEDED: "预计费用超过硬预算",
+    PREFLIGHT_WARNING_PRICING_UNKNOWN: "该模型尚未填写价格，暂时无法估算费用",
+    PREFLIGHT_WARNING_CONTEXT_UNKNOWN: "未获取精确上下文上限，将使用保守长度整理参考内容",
+    PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE: "当前 Token 数为估算值，已预留安全余量",
+    PREFLIGHT_BLOCKED_NO_ROUTE: "没有可用的正文生成 AI 分工",
+    PREFLIGHT_BLOCKED_CREDENTIAL: "AI 服务凭据缺失或不可用",
+    PREFLIGHT_BLOCKED_MODEL_UNAVAILABLE: "连接或所选模型确定不可用",
+    PREFLIGHT_BLOCKED_PRIVACY: "当前隐私规则不允许使用这项 AI 服务",
+    PREFLIGHT_BLOCKED_CONTEXT_OVERFLOW: "精简后仍超过当前可处理的上下文长度",
+    PREFLIGHT_BLOCKED_HARD_BUDGET: "预计费用超过你主动设置的硬预算",
     READY: "AI 服务、章节、费用与预算均已检查",
   };
   return labels[code] ?? code;
@@ -4439,6 +4557,21 @@ function formatAttemptUsage(usage: GenerationAttemptUsage): string {
       BigInt(usage.usagePricedEstimateMicros),
       usage.currency,
     )}（估算）。`;
+  }
+  if (
+    usage.source === "provider_reported_unpriced" &&
+    usage.inputTokens !== null &&
+    usage.outputTokens !== null
+  ) {
+    const cached =
+      usage.cachedInputTokens === null
+        ? ""
+        : `，其中缓存输入 ${usage.cachedInputTokens.toLocaleString("zh-CN")}`;
+    return `第 ${String(usage.attempt)} 次供应商回执：输入 ${usage.inputTokens.toLocaleString(
+      "zh-CN",
+    )}${cached}，输出 ${usage.outputTokens.toLocaleString(
+      "zh-CN",
+    )} 个用量单位；价格未配置，因此金额标记为 pricing_unavailable。`;
   }
   return `第 ${String(usage.attempt)} 次：外部服务未返回可验证用量回执，保留生成前上界估算。`;
 }

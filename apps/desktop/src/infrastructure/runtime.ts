@@ -27,6 +27,7 @@ import {
   type RecoveryDraftRepository,
 } from "@inkshadow/application";
 import {
+  CONSERVATIVE_GENERATION_CONTEXT_POLICY,
   estimateGenerationCost,
   rerankWithLocalEvidence,
   resolveModelRoute,
@@ -171,6 +172,7 @@ import {
 import { AcceptedChapterPipelineWorker } from "./accepted-chapter-pipeline-worker";
 import { createAcceptedChapterPipelineTaskInput } from "./accepted-chapter-pipeline";
 import { HistoricalChapterBackfillService } from "./historical-chapter-backfill-service";
+import { StorySettingsImportService } from "./story-settings-import-service";
 import { CloudAiUsageService, type CloudAiUsageRuntimePort } from "./cloud-ai-usage-service";
 import { CloudAccountManagementService } from "./cloud-account-management-service";
 import { CloudDeletionLifecycleService } from "./cloud-deletion-lifecycle-service";
@@ -205,6 +207,7 @@ import {
   type GenerationAttemptUsageInput,
   type GenerationGovernanceStore,
 } from "./generation-governance-store";
+import { recordSafeGenerationPreflightDiagnostic } from "./generation-preflight-diagnostics";
 import {
   createAuthoritativeExtractionDesktopRuntime,
   type AuthoritativeExtractionDesktopPort,
@@ -610,6 +613,7 @@ export interface DesktopRuntime {
   readonly rerank: ModelHubRerankService;
   readonly creativeJourneys: CreativeJourneyStore;
   readonly projectSeeds: ProjectSeedStore;
+  readonly storySettingsImport: StorySettingsImportService | null;
   readonly contextTraces: ContextCompilationTraceStore;
   readonly contextTraceOutputs: ContextTraceOutputCommitUnitOfWork;
   readonly projectContextPrivacy: ProjectContextPrivacyAuthority;
@@ -1634,6 +1638,10 @@ function buildRuntime(
     repositories,
     creativeJourneys,
     projectSeeds,
+    storySettingsImport:
+      cloudExecutor === null
+        ? null
+        : new StorySettingsImportService({ executor: cloudExecutor, ids, clock, hasher }),
     contextTraces,
     contextTraceOutputs,
     projectContextPrivacy,
@@ -1947,7 +1955,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.2.0",
+    appVersion: "0.2.1",
     platform: "browser",
     architecture: "web",
     environment: "development",
@@ -2719,8 +2727,22 @@ export async function prepareGenerationPlan(
     contextWindowTokens: demo
       ? null
       : (modelHubInspection?.inputTokenLimit ?? profile?.pricing?.contextWindowTokens ?? null),
+    tokenizerStatus: demo ? "exact" : "approximate",
     pricing,
     budgets,
+  });
+  recordSafeGenerationPreflightDiagnostic(runtime, {
+    taskType: "continuation",
+    routeFound: routeResolved,
+    connectionUsable:
+      credentialConfigured && connectionStatus !== "failed" && selectedModelAvailable,
+    capabilityStatus:
+      !routeResolved || !selectedModelAvailable
+        ? "unavailable"
+        : modelHubInspection !== null || connectionStatus === "verified"
+          ? "supported"
+          : "unknown",
+    snapshot: preflight,
   });
   const baseVersionId = chapter?.currentVersionId ?? null;
   let deferredRequest = waitingDeferred;
@@ -2944,12 +2966,7 @@ export async function executeGenerationPlan(
   plan: PreparedGenerationPlan,
   onDelta?: (accumulatedText: string) => void,
 ): Promise<Result<GovernedGenerationOutcome, GovernedGenerationError>> {
-  if (
-    !plan.preflight.canStart ||
-    plan.projectId === null ||
-    plan.baseVersionId === null ||
-    plan.preflight.estimate === null
-  ) {
+  if (!plan.preflight.canStart || plan.projectId === null || plan.baseVersionId === null) {
     return err(
       new GenerationGovernanceError(
         "AI_GENERATION_PREFLIGHT_BLOCKED",
@@ -2979,6 +2996,11 @@ export async function executeGenerationPlan(
         actions: ["RETRY", "EXPORT_DRAFT"],
       }),
     );
+  }
+  try {
+    await assertGenerationProjectActive(runtime, plan.projectId);
+  } catch (cause: unknown) {
+    return err(normalizeGovernedGenerationError(cause));
   }
   if (plan.contextCompilation !== null) {
     try {
@@ -3153,6 +3175,7 @@ export async function executeGenerationPlan(
     };
     try {
       if (runtime.mode === "browser-development") {
+        await assertGenerationProjectActive(runtime, plan.projectId);
         const demo = await createLocalDemoCandidate(
           runtime,
           plan.chapterId,
@@ -3202,6 +3225,7 @@ export async function executeGenerationPlan(
                       true,
                     );
                   }
+                  await assertGenerationProjectActive(runtime, plan.projectId);
                   await linkPreparedContextModelInvocation(runtime, plan, invocationId);
                   await assertProjectContextBeforeModelHubDispatch(
                     runtime,
@@ -3787,10 +3811,13 @@ function priceProviderReportedUsage(
   }
   const pricing = plan.approvedPricing;
   if (pricing === null) {
-    throw new ModelCenterError(
-      "MODEL_PRICING_MISSING",
-      "Provider usage cannot be priced without the approved pricing snapshot.",
-    );
+    return Object.freeze({
+      source: "provider_reported_unpriced",
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cachedInputTokens: usage.cachedInputTokens,
+      usagePricedEstimateMicros: null,
+    });
   }
   const estimate = estimateGenerationCost(
     {
@@ -3857,6 +3884,7 @@ async function generateLegacyContinuation(
       true,
     );
   });
+  await assertGenerationProjectActive(runtime, plan.projectId);
   return runtime.modelGateway.generate({
     dispatchScope: projectContextDispatchScope(plan.contextCompilation.projectPrivacy),
     generationId: plan.generationId,
@@ -3867,6 +3895,47 @@ async function generateLegacyContinuation(
     temperature: 0.8,
     onDelta,
   });
+}
+
+async function assertGenerationProjectActive(
+  runtime: Pick<DesktopRuntime, "repositories">,
+  projectIdValue: string | null,
+): Promise<void> {
+  if (projectIdValue === null) {
+    throw new AppError({
+      code: "PROJECT_NOT_FOUND",
+      message: "The project no longer exists.",
+    });
+  }
+  const projectId = parseDomainUuid(projectIdValue);
+  if (!projectId.ok) {
+    throw projectId.error;
+  }
+  const projectResult = await runtime.repositories.projects.findById(projectId.value);
+  if (!projectResult.ok) {
+    throw projectResult.error;
+  }
+  const project = projectResult.value;
+  if (project === null) {
+    throw new AppError({
+      code: "PROJECT_NOT_FOUND",
+      message: "The project no longer exists.",
+    });
+  }
+  if (project.status === "archived") {
+    throw new AppError({
+      code: "PROJECT_ARCHIVED",
+      message: "Restore the project to active before generating a new AI candidate.",
+      actions: ["RESTORE"],
+    });
+  }
+  if (project.status === "trashed") {
+    throw new AppError({
+      code: "PROJECT_DELETED",
+      message: "Restore the project from the recycle bin before generating a new AI candidate.",
+      actions: ["RESTORE"],
+    });
+  }
 }
 
 function isVerifiedLocalGatewayConfig(config: NativeModelEndpointConfig | null): boolean {
@@ -4082,7 +4151,9 @@ export async function compileChapterStoryContext(
     verifiedDerivedFacts: verifiedPovKnowledgeFacts,
     currentPovCharacterId: input.currentPovCharacterId ?? null,
     currentNarrativeOrder: input.currentNarrativeOrder ?? null,
-    maximumContextTokens: input.maximumContextTokens ?? 7_000,
+    maximumContextTokens:
+      input.maximumContextTokens ??
+      CONSERVATIVE_GENERATION_CONTEXT_POLICY.maximumCompiledInputTokens,
   });
   return Object.freeze({ ...compiled, projectPrivacy });
 }
@@ -4108,7 +4179,7 @@ async function buildContextualContinuationMessages(
       ],
       priority: 1_000,
     },
-    maximumContextTokens: 7_000,
+    maximumContextTokens: CONSERVATIVE_GENERATION_CONTEXT_POLICY.maximumCompiledInputTokens,
   });
   return Object.freeze({
     contextCompilation,

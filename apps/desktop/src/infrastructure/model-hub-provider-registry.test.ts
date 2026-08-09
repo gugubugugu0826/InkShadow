@@ -5,6 +5,7 @@ import {
   MODEL_PROVIDER_KINDS,
   NOVEL_AI_TASKS,
   getModelProviderPreset,
+  modelProviderVisibleProsePolicy,
   modelProviderTextCapabilityProbePolicy,
   isLoopbackModelBaseUrl,
   listModelProviderPresets,
@@ -25,6 +26,15 @@ describe("Model Hub provider registry", () => {
       maxOutputTokens: 64,
       reasoningMode: null,
     });
+  });
+
+  it("disables reasoning for visible prose only on DeepSeek", () => {
+    expect(modelProviderVisibleProsePolicy("deepseek")).toEqual({
+      reasoningMode: "disabled",
+    });
+    for (const provider of MODEL_PROVIDER_KINDS.filter((provider) => provider !== "deepseek")) {
+      expect(modelProviderVisibleProsePolicy(provider)).toEqual({ reasoningMode: null });
+    }
   });
 
   it("registers the launch providers without hard-coding a model catalog", () => {
