@@ -2,6 +2,19 @@ use reqwest::StatusCode;
 use serde::Serialize;
 use uuid::Uuid;
 
+use super::types::GenerationUsage;
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerationFailureObservation {
+    http_status: Option<u16>,
+    finish_reason: Option<String>,
+    reasoning_present: Option<bool>,
+    reasoning_length: Option<u64>,
+    stream: Option<bool>,
+    usage: Option<GenerationUsage>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CommandError {
@@ -10,6 +23,8 @@ pub(crate) struct CommandError {
     retryable: bool,
     actions: Vec<&'static str>,
     request_id: String,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    generation: Option<Box<GenerationFailureObservation>>,
 }
 
 impl CommandError {
@@ -41,6 +56,7 @@ impl CommandError {
             retryable,
             actions,
             request_id,
+            generation: None,
         }
     }
 
@@ -50,6 +66,72 @@ impl CommandError {
 
     pub(crate) fn retryable(&self) -> bool {
         self.retryable
+    }
+
+    pub(crate) fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub(crate) fn http_status(&self) -> Option<u16> {
+        self.generation
+            .as_deref()
+            .and_then(|observation| observation.http_status)
+    }
+
+    pub(crate) fn finish_reason(&self) -> Option<&str> {
+        self.generation
+            .as_deref()
+            .and_then(|observation| observation.finish_reason.as_deref())
+    }
+
+    pub(crate) fn reasoning_present(&self) -> Option<bool> {
+        self.generation
+            .as_deref()
+            .and_then(|observation| observation.reasoning_present)
+    }
+
+    pub(crate) fn reasoning_length(&self) -> Option<u64> {
+        self.generation
+            .as_deref()
+            .and_then(|observation| observation.reasoning_length)
+    }
+
+    pub(crate) fn stream(&self) -> Option<bool> {
+        self.generation
+            .as_deref()
+            .and_then(|observation| observation.stream)
+    }
+
+    pub(crate) fn usage(&self) -> Option<&GenerationUsage> {
+        self.generation
+            .as_deref()
+            .and_then(|observation| observation.usage.as_ref())
+    }
+
+    pub(crate) fn with_http_status(mut self, status: u16) -> Self {
+        self.generation
+            .get_or_insert_with(|| Box::new(GenerationFailureObservation::default()))
+            .http_status = Some(status);
+        self
+    }
+
+    pub(crate) fn with_generation_observation(
+        mut self,
+        finish_reason: Option<String>,
+        reasoning_present: Option<bool>,
+        reasoning_length: Option<u64>,
+        stream: Option<bool>,
+        usage: Option<GenerationUsage>,
+    ) -> Self {
+        let observation = self
+            .generation
+            .get_or_insert_with(|| Box::new(GenerationFailureObservation::default()));
+        observation.finish_reason = finish_reason;
+        observation.reasoning_present = reasoning_present;
+        observation.reasoning_length = reasoning_length;
+        observation.stream = stream;
+        observation.usage = usage;
+        self
     }
 
     pub(crate) fn credential_store_unavailable() -> Self {
@@ -250,67 +332,68 @@ impl CommandError {
     }
 
     pub(crate) fn from_http_status(status: StatusCode) -> Self {
-        if status.is_redirection() {
-            return Self::new(
+        let error = if status.is_redirection() {
+            Self::new(
                 "MODEL_HTTP_REDIRECT_FORBIDDEN",
                 "Model endpoint redirects are forbidden.",
                 false,
                 vec!["EDIT_MODEL_CONFIG"],
-            );
-        }
-
-        match status.as_u16() {
-            400 | 422 => Self::new(
-                "MODEL_HTTP_BAD_REQUEST",
-                "The provider rejected the model request.",
-                false,
-                vec!["EDIT_MODEL_CONFIG", "EDIT_PROMPT"],
-            ),
-            401 => Self::new(
-                "MODEL_HTTP_UNAUTHORIZED",
-                "The provider rejected the stored credential.",
-                false,
-                vec!["EDIT_API_KEY"],
-            ),
-            403 => Self::new(
-                "MODEL_HTTP_FORBIDDEN",
-                "The provider denied access to this model operation.",
-                false,
-                vec!["EDIT_API_KEY", "EDIT_MODEL_CONFIG"],
-            ),
-            404 => Self::new(
-                "MODEL_HTTP_NOT_FOUND",
-                "The provider endpoint or model was not found.",
-                false,
-                vec!["EDIT_MODEL_CONFIG"],
-            ),
-            408 | 504 => Self::timeout(),
-            409 => Self::new(
-                "MODEL_HTTP_CONFLICT",
-                "The provider reported a request conflict.",
-                true,
-                vec!["RETRY"],
-            ),
-            413 => Self::input_limit_exceeded(),
-            429 => Self::new(
-                "MODEL_HTTP_RATE_LIMITED",
-                "The provider rate limit was reached.",
-                true,
-                vec!["RETRY", "SWITCH_MODEL"],
-            ),
-            500..=599 => Self::new(
-                "MODEL_HTTP_PROVIDER_UNAVAILABLE",
-                "The provider is temporarily unavailable.",
-                true,
-                vec!["RETRY", "SWITCH_MODEL"],
-            ),
-            _ => Self::new(
-                "MODEL_HTTP_ERROR",
-                "The provider returned an unsuccessful HTTP status.",
-                false,
-                vec!["EDIT_MODEL_CONFIG", "OPEN_DIAGNOSTICS"],
-            ),
-        }
+            )
+        } else {
+            match status.as_u16() {
+                400 | 422 => Self::new(
+                    "MODEL_HTTP_BAD_REQUEST",
+                    "The provider rejected the model request.",
+                    false,
+                    vec!["EDIT_MODEL_CONFIG", "EDIT_PROMPT"],
+                ),
+                401 => Self::new(
+                    "MODEL_HTTP_UNAUTHORIZED",
+                    "The provider rejected the stored credential.",
+                    false,
+                    vec!["EDIT_API_KEY"],
+                ),
+                403 => Self::new(
+                    "MODEL_HTTP_FORBIDDEN",
+                    "The provider denied access to this model operation.",
+                    false,
+                    vec!["EDIT_API_KEY", "EDIT_MODEL_CONFIG"],
+                ),
+                404 => Self::new(
+                    "MODEL_HTTP_NOT_FOUND",
+                    "The provider endpoint or model was not found.",
+                    false,
+                    vec!["EDIT_MODEL_CONFIG"],
+                ),
+                408 | 504 => Self::timeout(),
+                409 => Self::new(
+                    "MODEL_HTTP_CONFLICT",
+                    "The provider reported a request conflict.",
+                    true,
+                    vec!["RETRY"],
+                ),
+                413 => Self::input_limit_exceeded(),
+                429 => Self::new(
+                    "MODEL_HTTP_RATE_LIMITED",
+                    "The provider rate limit was reached.",
+                    true,
+                    vec!["RETRY", "SWITCH_MODEL"],
+                ),
+                500..=599 => Self::new(
+                    "MODEL_HTTP_PROVIDER_UNAVAILABLE",
+                    "The provider is temporarily unavailable.",
+                    true,
+                    vec!["RETRY", "SWITCH_MODEL"],
+                ),
+                _ => Self::new(
+                    "MODEL_HTTP_ERROR",
+                    "The provider returned an unsuccessful HTTP status.",
+                    false,
+                    vec!["EDIT_MODEL_CONFIG", "OPEN_DIAGNOSTICS"],
+                ),
+            }
+        };
+        error.with_http_status(status.as_u16())
     }
 }
 
@@ -336,8 +419,34 @@ mod tests {
             CommandError::from_http_status(StatusCode::BAD_GATEWAY).code(),
             "MODEL_HTTP_PROVIDER_UNAVAILABLE"
         );
+        assert_eq!(
+            CommandError::from_http_status(StatusCode::BAD_GATEWAY).http_status(),
+            Some(502)
+        );
         let truncated = CommandError::output_truncated();
         assert_eq!(truncated.code(), "MODEL_OUTPUT_TRUNCATED");
         assert!(!truncated.retryable());
+    }
+
+    #[test]
+    fn generation_observations_are_redacted_and_serialized_flat() {
+        let error = CommandError::output_truncated().with_generation_observation(
+            Some("length".to_owned()),
+            Some(true),
+            Some(42),
+            Some(true),
+            Some(GenerationUsage {
+                input_tokens: 4,
+                output_tokens: 8,
+                cached_input_tokens: None,
+            }),
+        );
+        let value = serde_json::to_value(error).expect("error should serialize");
+        assert_eq!(value["finishReason"], "length");
+        assert_eq!(value["reasoningPresent"], true);
+        assert_eq!(value["reasoningLength"], 42);
+        assert_eq!(value["stream"], true);
+        assert_eq!(value["usage"]["outputTokens"], 8);
+        assert!(!value.to_string().contains("reasoning_content"));
     }
 }

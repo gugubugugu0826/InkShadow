@@ -261,15 +261,38 @@ export class BrowserDevelopmentModelCenterStore implements ModelCenterStore {
   }
 }
 
+/**
+ * Redacted transport facts that are safe to persist in diagnostics.  This
+ * deliberately cannot carry request bodies, prompts, credentials or model
+ * output.
+ */
+export interface ModelCenterFailureDiagnostics {
+  readonly requestId: string | null;
+  readonly httpStatus: number | null;
+  readonly finishReason: string | null;
+  readonly visibleContentLength: number | null;
+  readonly reasoningPresent: boolean | null;
+  readonly stream: boolean | null;
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+}
+
 export class ModelCenterError extends Error {
   public readonly code: string;
   public readonly retryable: boolean;
+  public readonly diagnostics: ModelCenterFailureDiagnostics | null;
 
-  public constructor(code: string, message: string, retryable = false) {
+  public constructor(
+    code: string,
+    message: string,
+    retryable = false,
+    diagnostics: ModelCenterFailureDiagnostics | null = null,
+  ) {
     super(message);
     this.name = "ModelCenterError";
     this.code = code;
     this.retryable = retryable;
+    this.diagnostics = diagnostics === null ? null : Object.freeze({ ...diagnostics });
   }
 }
 

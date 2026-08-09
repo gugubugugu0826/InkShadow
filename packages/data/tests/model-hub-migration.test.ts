@@ -16,14 +16,18 @@ const zhipuGlmMigration = readFileSync(
   new URL("../migrations/0046_model_hub_zhipu_glm.sql", import.meta.url),
   "utf8",
 );
-const migration = `${baseMigration}\n${expertMigration}\n${zhipuGlmMigration}`;
+const failureDiagnosticMigration = readFileSync(
+  new URL("../migrations/0056_model_hub_failure_diagnostics.sql", import.meta.url),
+  "utf8",
+);
+const migration = `${baseMigration}\n${expertMigration}\n${zhipuGlmMigration}\n${failureDiagnosticMigration}`;
 
 const NOW = "2026-08-01T00:00:00.000Z";
 
 describe("Model Hub migration", () => {
   it("is idempotent and creates the complete non-secret foundation", async () => {
     const executor = new NodeSqliteExecutor(
-      `${baseMigration}\n${baseMigration}\n${expertMigration}`,
+      `${baseMigration}\n${baseMigration}\n${expertMigration}\n${zhipuGlmMigration}\n${failureDiagnosticMigration}`,
     );
     const tables = await executor.select<{ name: string }>(
       `SELECT name
@@ -70,6 +74,7 @@ describe("Model Hub migration", () => {
       ]),
     );
     const invocationColumns = await columnNames(executor, "model_invocation_facts");
+    const capabilityScanColumns = await columnNames(executor, "model_capability_scans");
     const costPrivacyColumns = await columnNames(executor, "model_cost_privacy_profiles");
     const evaluationColumns = await columnNames(executor, "model_evaluation_results");
     for (const columns of [
@@ -81,6 +86,23 @@ describe("Model Hub migration", () => {
       expect(columns.join(" ")).not.toMatch(/api_key|password|access_token|bearer|secret/iu);
     }
     expect(invocationColumns).not.toEqual(
+      expect.arrayContaining(["prompt", "messages", "chapter_text", "response", "content"]),
+    );
+    expect(capabilityScanColumns).toEqual(
+      expect.arrayContaining([
+        "diagnostic_request_id",
+        "failure_stage",
+        "failure_retryable",
+        "http_status",
+        "finish_reason",
+        "visible_content_length",
+        "reasoning_present",
+        "streamed",
+        "attempt",
+        "requested_max_output_tokens",
+      ]),
+    );
+    expect(capabilityScanColumns).not.toEqual(
       expect.arrayContaining(["prompt", "messages", "chapter_text", "response", "content"]),
     );
     expect(evaluationColumns).not.toEqual(
@@ -206,6 +228,107 @@ describe("Model Hub migration", () => {
         "unknown_provider",
         "Unknown",
         "https://example.test/v1",
+      ),
+    ).rejects.toThrow();
+
+    await executor.close();
+  });
+
+  it("upgrades existing failure ledgers with nullable bounded metadata", async () => {
+    const executor = new NodeSqliteExecutor(
+      `${baseMigration}\n${expertMigration}\n${zhipuGlmMigration}`,
+    );
+    await insertConnection(
+      executor,
+      "failure-cloud",
+      "openai",
+      "Failure cloud",
+      "https://api.example.test/v1",
+    );
+    await executor.execute(
+      `INSERT INTO model_catalog_syncs (
+         id, connection_id, source, status, discovered_model_count,
+         next_page_token_present, started_at, completed_at
+       ) VALUES ('failure-sync', 'failure-cloud', 'provider_api',
+                 'succeeded', 1, 0, ?, ?)`,
+      [NOW, NOW],
+    );
+    await insertCatalogEntry(
+      executor,
+      "failure-model",
+      "failure-cloud",
+      "writer-model",
+      "failure-sync",
+    );
+    await executor.execute(
+      `INSERT INTO model_capability_scans (
+         id, catalog_entry_id, scan_kind, status, evidence_version,
+         supported_count, unsupported_count, unknown_count, error_code,
+         requested_at, started_at, completed_at
+       ) VALUES (
+         'legacy-failed-scan', 'failure-model', 'lightweight_probe', 'failed',
+         'probe-v1', 0, 0, 0, 'MODEL_OUTPUT_TRUNCATED', ?, ?, ?
+       )`,
+      [NOW, NOW, NOW],
+    );
+    await executor.execute(
+      `INSERT INTO model_invocation_facts (
+         id, task, connection_id, catalog_entry_id, provider_kind_snapshot,
+         model_id_snapshot, route_reason, status, attempt, privacy_policy,
+         data_destination, error_code, started_at, completed_at, created_at
+       ) VALUES (
+         'legacy-failed-call', 'prose_generation', 'failure-cloud', 'failure-model',
+         'openai', 'writer-model', 'user_override', 'failed', 1,
+         'cloud_allowed', 'remote', 'AI_UPSTREAM_UNAVAILABLE', ?, ?, ?
+       )`,
+      [NOW, NOW, NOW],
+    );
+
+    executor.database.exec(failureDiagnosticMigration);
+
+    await expect(
+      executor.select<{
+        id: string;
+        requestId: string | null;
+        stage: string | null;
+        visibleContentLength: number | null;
+      }>(
+        `SELECT id, diagnostic_request_id AS requestId, failure_stage AS stage,
+                visible_content_length AS visibleContentLength
+         FROM model_capability_scans WHERE id = 'legacy-failed-scan'`,
+      ),
+    ).resolves.toEqual([
+      {
+        id: "legacy-failed-scan",
+        requestId: null,
+        stage: null,
+        visibleContentLength: null,
+      },
+    ]);
+    await expect(
+      executor.execute(
+        `UPDATE model_capability_scans
+         SET diagnostic_request_id = 'req-safe-probe-0001',
+             failure_stage = 'response_normalization', failure_retryable = 0,
+             http_status = 200, finish_reason = 'length',
+             visible_content_length = 0, reasoning_present = 1, streamed = 0,
+             attempt = 1, requested_max_output_tokens = 8
+         WHERE id = 'legacy-failed-scan'`,
+      ),
+    ).resolves.toMatchObject({ rowsAffected: 1 });
+    await expect(
+      executor.execute(
+        `UPDATE model_invocation_facts
+         SET diagnostic_request_id = 'Bearer sk-never-store',
+             failure_stage = 'http_response'
+         WHERE id = 'legacy-failed-call'`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      executor.execute(
+        `UPDATE model_invocation_facts
+         SET finish_reason = 'provider reply text'
+         WHERE id = 'legacy-failed-call'`,
       ),
     ).rejects.toThrow();
 

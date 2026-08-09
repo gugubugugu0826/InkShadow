@@ -7,10 +7,12 @@ import { TASK_STATUSES, type TaskStatus } from "@inkshadow/task-engine";
 import type { LocalAccessStoreHealth } from "@inkshadow/data/access-sqlite-store";
 import type { LocalSyncStoreHealth } from "@inkshadow/data/sync-sqlite-store";
 
+import { NOVEL_AI_TASKS } from "./model-hub-provider-registry";
+import type { RecentAiFailure } from "./model-hub-store";
 import type { DesktopRuntime } from "./runtime";
 
 export interface DesktopDiagnosticBundle {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly summary: DiagnosticSummary;
   readonly database: {
     readonly integrityMessageCount: number | null;
@@ -20,6 +22,7 @@ export interface DesktopDiagnosticBundle {
     readonly sync: LocalSyncStoreHealth;
     readonly access: LocalAccessStoreHealth;
   } | null;
+  readonly recentAiFailures: readonly RecentAiFailure[];
   readonly recentLogs: readonly [];
   readonly privacy: {
     readonly projectContentIncluded: false;
@@ -42,13 +45,19 @@ export async function collectDesktopDiagnosticArtifact(
 ): Promise<DesktopDiagnosticArtifact> {
   const information = await runtime.getRuntimeInformation();
   const errorCodes: string[] = [];
+  const requestIds: string[] = [];
   const taskStateCounts = emptyTaskStateCounts();
   let databaseHealth: HealthState = runtime.maintenance === null ? "unknown" : "unavailable";
   let integrityMessageCount: number | null = null;
   let foreignKeyViolationCount: number | null = null;
   let localCloudFoundation: DesktopDiagnosticBundle["localCloudFoundation"] = null;
-  let modelProfileCount: number | null = null;
-  let modelProfilesWithSelection: number | null = null;
+  let recentAiFailures: readonly RecentAiFailure[] = [];
+  let legacyModelProfileCount: number | null = null;
+  let legacyModelProfilesWithSelection: number | null = null;
+  let modelHubConnectionCount: number | null = null;
+  let modelHubUsableConnectionCount: number | null = null;
+  let modelHubCatalogEntryCount: number | null = null;
+  let modelHubEnabledTaskRouteCount: number | null = null;
 
   try {
     const taskCenter = await runtime.taskCenter.load();
@@ -56,6 +65,7 @@ export async function collectDesktopDiagnosticArtifact(
       taskStateCounts[task.status] += 1;
       if (task.failure !== null) {
         errorCodes.push(task.failure.code);
+        requestIds.push(task.failure.requestId);
       }
     }
   } catch (cause: unknown) {
@@ -95,12 +105,42 @@ export async function collectDesktopDiagnosticArtifact(
 
   try {
     const modelProfiles = await runtime.modelCenter.listProfiles();
-    modelProfileCount = modelProfiles.length;
-    modelProfilesWithSelection = modelProfiles.filter(
+    legacyModelProfileCount = modelProfiles.length;
+    legacyModelProfilesWithSelection = modelProfiles.filter(
       ({ selectedModel }) => selectedModel !== null,
     ).length;
   } catch (cause: unknown) {
     errorCodes.push(errorCode(cause, "MODEL_PROFILE_DIAGNOSTIC_UNAVAILABLE"));
+  }
+
+  try {
+    const connections = await runtime.modelHub.listConnections();
+    const [catalogs, routes] = await Promise.all([
+      Promise.all(connections.map((connection) => runtime.modelHub.listCatalog(connection.id))),
+      Promise.all(NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task))),
+    ]);
+    modelHubConnectionCount = connections.length;
+    modelHubUsableConnectionCount = connections.filter(
+      (connection) =>
+        connection.enabled &&
+        (connection.connectionStatus === "ready" || connection.connectionStatus === "degraded"),
+    ).length;
+    modelHubCatalogEntryCount = catalogs.reduce((count, catalog) => count + catalog.length, 0);
+    modelHubEnabledTaskRouteCount = routes.filter((route) => route?.enabled === true).length;
+  } catch (cause: unknown) {
+    errorCodes.push(errorCode(cause, "MODEL_HUB_DIAGNOSTIC_UNAVAILABLE"));
+  }
+
+  try {
+    recentAiFailures = await runtime.modelHub.listRecentAiFailures(25);
+    for (const failure of recentAiFailures) {
+      errorCodes.push(failure.normalizedErrorCode);
+      if (failure.requestId !== null) {
+        requestIds.push(failure.requestId);
+      }
+    }
+  } catch (cause: unknown) {
+    errorCodes.push(errorCode(cause, "AI_FAILURE_DIAGNOSTIC_UNAVAILABLE"));
   }
 
   const searchHealth = runtime.search.health();
@@ -123,8 +163,9 @@ export async function collectDesktopDiagnosticArtifact(
     syncState: "local_only",
     errorCodes,
     taskStateCounts,
+    requestIds,
     configuration: {
-      diagnosticSchemaVersion: 1,
+      diagnosticSchemaVersion: 2,
       runtimeMode: runtime.mode,
       storageBackend: runtime.mode === "tauri" ? "sqlite" : "development_local_storage",
       telemetryEnabled: false,
@@ -144,8 +185,12 @@ export async function collectDesktopDiagnosticArtifact(
       embeddingGeneration: embeddingDiagnostics.generation,
       embeddingLastRebuiltAt: embeddingDiagnostics.lastRebuiltAt,
       embeddingQueryFailureCode: embeddingDiagnostics.queryFailureCode,
-      modelProfileCount,
-      modelProfilesWithSelection,
+      legacyModelProfileCount,
+      legacyModelProfilesWithSelection,
+      modelHubConnectionCount,
+      modelHubUsableConnectionCount,
+      modelHubCatalogEntryCount,
+      modelHubEnabledTaskRouteCount,
       nativeModelGatewayAvailable: runtime.modelGateway.available,
       cloudIdentityEnabled: runtime.featureFlags.cloudIdentity,
       cloudSyncEnabled: runtime.featureFlags.cloudSync,
@@ -169,13 +214,14 @@ export async function collectDesktopDiagnosticArtifact(
         ]),
   ];
   const bundle: DesktopDiagnosticBundle = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     summary,
     database: {
       integrityMessageCount,
       foreignKeyViolationCount,
     },
     localCloudFoundation,
+    recentAiFailures,
     recentLogs: [],
     privacy: {
       projectContentIncluded: false,

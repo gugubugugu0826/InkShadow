@@ -26,6 +26,71 @@ export type ModelHubConnectionStatus =
 export type ModelHubCatalogSyncStatus = "never" | "syncing" | "succeeded" | "partial" | "failed";
 export type ModelHubPrivacyPolicy = "cloud_allowed" | "local_preferred" | "local_only";
 
+export const MODEL_FAILURE_STAGES = [
+  "request_preparation",
+  "dispatch",
+  "transport",
+  "http_response",
+  "stream_parse",
+  "response_normalization",
+  "capability_commit",
+  "invocation_commit",
+  "unknown",
+] as const;
+
+export type ModelFailureStage = (typeof MODEL_FAILURE_STAGES)[number];
+
+/**
+ * Bounded provider-failure metadata. This contract intentionally has no field
+ * capable of carrying prompts, messages, chapter text, credentials or model
+ * output. `visibleContentLength` is a count only.
+ */
+export interface SafeModelFailureMetadata {
+  readonly requestId: string | null;
+  readonly stage: ModelFailureStage | null;
+  readonly retryable: boolean | null;
+  readonly httpStatus: number | null;
+  readonly finishReason: string | null;
+  readonly visibleContentLength: number | null;
+  readonly reasoningPresent: boolean | null;
+  readonly stream: boolean | null;
+  readonly attempt: number | null;
+  readonly requestedMaxOutputTokens: number | null;
+}
+
+export interface SafeAiFailureMetadata {
+  readonly requestId?: string | null;
+  readonly stage?: ModelFailureStage | null;
+  readonly retryable?: boolean | null;
+  readonly httpStatus?: number | null;
+  readonly finishReason?: string | null;
+  readonly visibleContentLength?: number | null;
+  readonly reasoningPresent?: boolean | null;
+  readonly stream?: boolean | null;
+  readonly attempt?: number | null;
+  readonly requestedMaxOutputTokens?: number | null;
+}
+
+export interface RecentAiFailure {
+  readonly diagnosticId: string;
+  readonly timestamp: string;
+  readonly providerKind: ModelProviderKind;
+  readonly connectionId: string;
+  readonly modelId: string;
+  readonly taskType: NovelAiTask | "capability_probe";
+  readonly stage: ModelFailureStage | null;
+  readonly normalizedErrorCode: string;
+  readonly retryable: boolean | null;
+  readonly httpStatus: number | null;
+  readonly finishReason: string | null;
+  readonly visibleContentLength: number | null;
+  readonly reasoningPresent: boolean | null;
+  readonly stream: boolean | null;
+  readonly attempt: number;
+  readonly requestedMaxOutputTokens: number | null;
+  readonly requestId: string | null;
+}
+
 const RETIRED_CONNECTION_ERROR_CODE = "MODEL_HUB_CONNECTION_RETIRED";
 const RETIRED_CONNECTION_SUMMARY =
   "The connection was retired. Its credential reference was cleared while immutable invocation history was retained.";
@@ -235,6 +300,7 @@ export interface RecordCapabilityScanInput {
   readonly errorCode?: string | null;
   readonly errorSummary?: string | null;
   readonly requestedAt?: string | null;
+  readonly failure?: SafeAiFailureMetadata | null;
 }
 
 export interface CommitCapabilityProbeResultInput {
@@ -403,6 +469,7 @@ export interface ModelInvocationFact {
   readonly estimatedCostMicros: string | null;
   readonly errorCode: string | null;
   readonly errorSummary: string | null;
+  readonly failure?: SafeModelFailureMetadata | null;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
   readonly createdAt: string;
@@ -436,6 +503,7 @@ export interface FinishModelInvocationInput {
   readonly currency?: string | null;
   readonly errorCode?: string | null;
   readonly errorSummary?: string | null;
+  readonly failure?: SafeAiFailureMetadata | null;
   readonly expectedRevision: number;
 }
 
@@ -480,6 +548,7 @@ export interface ModelHubStore {
   findTaskRoute(task: NovelAiTask): Promise<NovelTaskRoute | null>;
   saveTaskRoute(input: SaveNovelTaskRouteInput): Promise<NovelTaskRoute>;
   deleteTaskRoute(task: NovelAiTask, expectedRevision: number): Promise<void>;
+  listRecentAiFailures(limit?: number): Promise<readonly RecentAiFailure[]>;
   findInvocation(id: string): Promise<ModelInvocationFact | null>;
   startInvocation(input: StartModelInvocationInput): Promise<ModelInvocationFact>;
   finishInvocation(input: FinishModelInvocationInput): Promise<ModelInvocationFact>;
@@ -570,6 +639,37 @@ interface CapabilityEvidenceRow {
   expires_at: string | null;
 }
 
+interface ModelCapabilityScanFact {
+  readonly id: string;
+  readonly catalogEntryId: string;
+  readonly scanKind: RecordCapabilityScanInput["scanKind"];
+  readonly status: RecordCapabilityScanInput["status"];
+  readonly errorCode: string | null;
+  readonly requestedAt: string;
+  readonly completedAt: string;
+  readonly failure: SafeModelFailureMetadata | null;
+}
+
+interface RecentAiFailureRow {
+  diagnostic_id: string;
+  timestamp: string;
+  provider_kind: string;
+  connection_id: string;
+  model_id: string;
+  task_type: string;
+  failure_stage: string | null;
+  normalized_error_code: string;
+  failure_retryable: number | null;
+  http_status: number | null;
+  finish_reason: string | null;
+  visible_content_length: number | null;
+  reasoning_present: number | null;
+  streamed: number | null;
+  attempt: number;
+  requested_max_output_tokens: number | null;
+  diagnostic_request_id: string | null;
+}
+
 interface CostPrivacyProfileRow {
   catalog_entry_id: string;
   currency: string | null;
@@ -655,6 +755,15 @@ interface InvocationRow {
   estimated_cost_micros: string | null;
   error_code: string | null;
   error_summary: string | null;
+  diagnostic_request_id: string | null;
+  failure_stage: string | null;
+  failure_retryable: number | null;
+  http_status: number | null;
+  finish_reason: string | null;
+  visible_content_length: number | null;
+  reasoning_present: number | null;
+  streamed: number | null;
+  requested_max_output_tokens: number | null;
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
@@ -1495,6 +1604,12 @@ export class TauriModelHubStore implements ModelHubStore {
     }
   }
 
+  public async listRecentAiFailures(limitValue = 25): Promise<readonly RecentAiFailure[]> {
+    const limit = validateRecentFailureLimit(limitValue);
+    const rows = await this.executor.select<RecentAiFailureRow>(RECENT_AI_FAILURE_SELECT, [limit]);
+    return Object.freeze(rows.map(hydrateRecentAiFailure));
+  }
+
   public async startInvocation(input: StartModelInvocationInput): Promise<ModelInvocationFact> {
     const validated = validateInvocationStart(input);
     const now = this.clock.now();
@@ -1554,7 +1669,10 @@ export class TauriModelHubStore implements ModelHubStore {
       `UPDATE model_invocation_facts
        SET status = ?, input_tokens = ?, output_tokens = ?, cached_input_tokens = ?,
            estimated_cost_micros = ?, currency = COALESCE(?, currency),
-           error_code = ?, error_summary = ?, completed_at = ?, revision = revision + 1
+           error_code = ?, error_summary = ?, diagnostic_request_id = ?,
+           failure_stage = ?, failure_retryable = ?, http_status = ?, finish_reason = ?,
+           visible_content_length = ?, reasoning_present = ?, streamed = ?,
+           requested_max_output_tokens = ?, completed_at = ?, revision = revision + 1
        WHERE id = ? AND status = 'running' AND revision = ?`,
       [
         validated.status,
@@ -1565,6 +1683,15 @@ export class TauriModelHubStore implements ModelHubStore {
         validated.currency,
         validated.errorCode,
         validated.errorSummary,
+        validated.failure?.requestId ?? null,
+        validated.failure?.stage ?? null,
+        nullableBooleanInteger(validated.failure?.retryable ?? null),
+        validated.failure?.httpStatus ?? null,
+        validated.failure?.finishReason ?? null,
+        validated.failure?.visibleContentLength ?? null,
+        nullableBooleanInteger(validated.failure?.reasoningPresent ?? null),
+        nullableBooleanInteger(validated.failure?.stream ?? null),
+        validated.failure?.requestedMaxOutputTokens ?? null,
         this.clock.now(),
         validated.id,
         validated.expectedRevision,
@@ -1591,7 +1718,7 @@ interface MemoryModelHubState {
   readonly catalog: Record<string, ModelCatalogEntry>;
   readonly catalogSyncs: Record<string, ModelCatalogSync>;
   readonly capabilityEvidence: Record<string, ModelCapabilityEvidence>;
-  readonly capabilityScanIds: Record<string, true>;
+  readonly capabilityScans: Record<string, ModelCapabilityScanFact | null>;
   readonly costPrivacyProfiles: Record<string, ModelCostPrivacyProfile>;
   readonly evaluationResults: Record<string, ModelEvaluationResult>;
   readonly presets: Record<string, ModelHubPreset>;
@@ -2091,7 +2218,7 @@ export class InMemoryModelHubStore implements ModelHubStore {
       if (this.state.catalog[validated.catalogEntryId] === undefined) {
         throw modelHubError("MODEL_HUB_MODEL_NOT_FOUND", "The selected model does not exist.");
       }
-      if (this.state.capabilityScanIds[validated.scanId] === true) {
+      if (Object.hasOwn(this.state.capabilityScans, validated.scanId)) {
         throw conflict("MODEL_HUB_CAPABILITY_SCAN_CONFLICT");
       }
       const now = this.clock.now();
@@ -2110,7 +2237,7 @@ export class InMemoryModelHubStore implements ModelHubStore {
           throw conflict("MODEL_HUB_CAPABILITY_EVIDENCE_CONFLICT");
         }
       }
-      this.state.capabilityScanIds[validated.scanId] = true;
+      this.state.capabilityScans[validated.scanId] = capabilityScanFact(validated, now);
       for (const evidence of validated.evidence) {
         this.state.capabilityEvidence[evidence.id] = Object.freeze({
           id: evidence.id,
@@ -2150,7 +2277,7 @@ export class InMemoryModelHubStore implements ModelHubStore {
       ) {
         throw conflict("MODEL_HUB_PROBE_TARGET_CONFLICT");
       }
-      if (nextState.capabilityScanIds[validated.scan.scanId] === true) {
+      if (Object.hasOwn(nextState.capabilityScans, validated.scan.scanId)) {
         throw conflict("MODEL_HUB_CAPABILITY_SCAN_CONFLICT");
       }
       for (const evidence of validated.scan.evidence) {
@@ -2182,7 +2309,7 @@ export class InMemoryModelHubStore implements ModelHubStore {
         });
         nextState.connections[validated.connectionId] = committedConnection;
       }
-      nextState.capabilityScanIds[validated.scan.scanId] = true;
+      nextState.capabilityScans[validated.scan.scanId] = capabilityScanFact(validated.scan, now);
       for (const evidence of validated.scan.evidence) {
         nextState.capabilityEvidence[evidence.id] = Object.freeze({
           id: evidence.id,
@@ -2485,6 +2612,47 @@ export class InMemoryModelHubStore implements ModelHubStore {
     });
   }
 
+  public listRecentAiFailures(limitValue = 25): Promise<readonly RecentAiFailure[]> {
+    return Promise.resolve().then(() => {
+      const limit = validateRecentFailureLimit(limitValue);
+      const failures: RecentAiFailure[] = [];
+      for (const scan of Object.values(this.state.capabilityScans)) {
+        if (
+          scan === null ||
+          (scan.status !== "partial" && scan.status !== "failed") ||
+          scan.errorCode === null
+        ) {
+          continue;
+        }
+        const catalogEntry = this.state.catalog[scan.catalogEntryId];
+        const connection =
+          catalogEntry === undefined
+            ? undefined
+            : this.state.connections[catalogEntry.connectionId];
+        if (catalogEntry === undefined || connection === undefined) continue;
+        failures.push(
+          recentAiFailureFromCapabilityScan(scan, connection, catalogEntry.providerModelId),
+        );
+      }
+      for (const invocation of Object.values(this.state.invocations)) {
+        if (
+          (invocation.status !== "failed" && invocation.status !== "timed_out") ||
+          invocation.errorCode === null ||
+          invocation.completedAt === null
+        ) {
+          continue;
+        }
+        failures.push(recentAiFailureFromInvocation(invocation));
+      }
+      failures.sort(
+        (left, right) =>
+          right.timestamp.localeCompare(left.timestamp) ||
+          left.diagnosticId.localeCompare(right.diagnosticId),
+      );
+      return Object.freeze(failures.slice(0, limit));
+    });
+  }
+
   public startInvocation(input: StartModelInvocationInput): Promise<ModelInvocationFact> {
     return Promise.resolve().then(() => {
       const validated = validateInvocationStart(input);
@@ -2527,6 +2695,7 @@ export class InMemoryModelHubStore implements ModelHubStore {
         estimatedCostMicros: null,
         errorCode: null,
         errorSummary: null,
+        failure: null,
         startedAt: now,
         completedAt: null,
         createdAt: now,
@@ -2563,6 +2732,7 @@ export class InMemoryModelHubStore implements ModelHubStore {
         currency: validated.currency ?? existing.currency,
         errorCode: validated.errorCode,
         errorSummary: validated.errorSummary,
+        failure: validated.failure,
         completedAt: this.clock.now(),
         revision: existing.revision + 1,
       });
@@ -2580,14 +2750,14 @@ export class InMemoryModelHubStore implements ModelHubStore {
 export const DEVELOPMENT_MODEL_HUB_KEY = "inkshadow.development.model-hub.v1";
 
 interface BrowserModelHubDatabase {
-  readonly schemaVersion: 5;
+  readonly schemaVersion: 6;
   readonly state: MemoryModelHubState;
 }
 
 export class BrowserDevelopmentModelHubStore extends InMemoryModelHubStore {
   public constructor(storage: Storage, clock: Clock) {
     super(clock, readBrowserState(storage), (state) => {
-      const database: BrowserModelHubDatabase = { schemaVersion: 5, state };
+      const database: BrowserModelHubDatabase = { schemaVersion: 6, state };
       storage.setItem(DEVELOPMENT_MODEL_HUB_KEY, JSON.stringify(database));
     });
   }
@@ -2600,7 +2770,7 @@ function createEmptyMemoryState(): MemoryModelHubState {
     catalog: {},
     catalogSyncs: {},
     capabilityEvidence: {},
-    capabilityScanIds: {},
+    capabilityScans: {},
     costPrivacyProfiles: {},
     evaluationResults: {},
     presets: {},
@@ -2619,39 +2789,45 @@ function readBrowserState(storage: Storage): MemoryModelHubState {
     if (!isRecord(parsed)) {
       throw modelHubError("MODEL_HUB_STORE_CORRUPT", "The browser Model Hub store is corrupt.");
     }
-    if (parsed.schemaVersion === 5 && isMemoryState(parsed.state)) {
+    if (parsed.schemaVersion === 6 && isMemoryState(parsed.state)) {
       return normalizeBrowserExpertOptions(parsed.state, false);
+    }
+    if (parsed.schemaVersion === 5 && isVersionFiveMemoryState(parsed.state)) {
+      return normalizeBrowserExpertOptions(migrateLegacyCapabilityScans(parsed.state), false);
     }
     if (parsed.schemaVersion === 4 && isVersionFourMemoryState(parsed.state)) {
       return normalizeBrowserExpertOptions(
-        {
+        migrateLegacyCapabilityScans({
           ...parsed.state,
           connectionCommits: {},
-        },
+        }),
         false,
       );
     }
     if (parsed.schemaVersion === 3 && isVersionFourMemoryState(parsed.state)) {
-      return normalizeBrowserExpertOptions({ ...parsed.state, connectionCommits: {} }, true);
+      return normalizeBrowserExpertOptions(
+        migrateLegacyCapabilityScans({ ...parsed.state, connectionCommits: {} }),
+        true,
+      );
     }
     if (parsed.schemaVersion === 2 && isVersionTwoMemoryState(parsed.state)) {
       return normalizeBrowserExpertOptions(
-        {
+        migrateLegacyCapabilityScans({
           ...parsed.state,
           connectionCommits: {},
           evaluationResults: {},
-        },
+        }),
         true,
       );
     }
     if (parsed.schemaVersion === 1 && isLegacyMemoryState(parsed.state)) {
       return normalizeBrowserExpertOptions(
-        {
+        migrateLegacyCapabilityScans({
           ...parsed.state,
           connectionCommits: {},
           costPrivacyProfiles: {},
           evaluationResults: {},
-        },
+        }),
         true,
       );
     }
@@ -2782,51 +2958,133 @@ function normalizeBrowserExpertOptions(
       return [key, normalized];
     }),
   );
-  return { ...state, connectionCommits, connections };
+  const capabilityScans = Object.fromEntries(
+    Object.entries(state.capabilityScans).map(([key, value]) => [
+      key,
+      value === null ? null : normalizeStoredCapabilityScanFact(key, value),
+    ]),
+  );
+  return { ...state, connectionCommits, connections, capabilityScans };
 }
 
+type VersionFiveMemoryState = Omit<MemoryModelHubState, "capabilityScans"> & {
+  readonly capabilityScanIds: Record<string, true>;
+};
+type VersionFourMemoryState = Omit<VersionFiveMemoryState, "connectionCommits">;
+type VersionTwoMemoryState = Omit<VersionFourMemoryState, "evaluationResults">;
+type LegacyMemoryState = Omit<VersionTwoMemoryState, "costPrivacyProfiles">;
+
 function isMemoryState(value: unknown): value is MemoryModelHubState {
+  if (!hasLegacyMemoryCollections(value)) return false;
+  return (
+    isRecord(value.connectionCommits) &&
+    isRecord(value.costPrivacyProfiles) &&
+    isRecord(value.evaluationResults) &&
+    isRecord(value.capabilityScans) &&
+    Object.values(value.capabilityScans).every(
+      (scan) => scan === null || isStoredCapabilityScanFact(scan),
+    )
+  );
+}
+
+function isVersionFiveMemoryState(value: unknown): value is VersionFiveMemoryState {
   return (
     isVersionFourMemoryState(value) &&
     isRecord((value as Record<string, unknown>).connectionCommits)
   );
 }
 
-function isVersionFourMemoryState(
-  value: unknown,
-): value is Omit<MemoryModelHubState, "connectionCommits"> {
+function isVersionFourMemoryState(value: unknown): value is VersionFourMemoryState {
   return (
     isVersionTwoMemoryState(value) && isRecord((value as Record<string, unknown>).evaluationResults)
   );
 }
 
-function isVersionTwoMemoryState(
-  value: unknown,
-): value is Omit<MemoryModelHubState, "connectionCommits" | "evaluationResults"> {
+function isVersionTwoMemoryState(value: unknown): value is VersionTwoMemoryState {
   return (
     isLegacyMemoryState(value) && isRecord((value as Record<string, unknown>).costPrivacyProfiles)
   );
 }
 
-function isLegacyMemoryState(
-  value: unknown,
-): value is Omit<
-  MemoryModelHubState,
-  "connectionCommits" | "costPrivacyProfiles" | "evaluationResults"
-> {
-  if (!isRecord(value)) {
-    return false;
-  }
+function isLegacyMemoryState(value: unknown): value is LegacyMemoryState {
+  return hasLegacyMemoryCollections(value) && isRecord(value.capabilityScanIds);
+}
+
+function hasLegacyMemoryCollections(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
   return [
     value.connections,
     value.catalog,
     value.catalogSyncs,
     value.capabilityEvidence,
-    value.capabilityScanIds,
     value.presets,
     value.routes,
     value.invocations,
   ].every(isRecord);
+}
+
+function migrateLegacyCapabilityScans(state: VersionFiveMemoryState): MemoryModelHubState {
+  const { capabilityScanIds, ...current } = state;
+  return {
+    ...current,
+    capabilityScans: Object.fromEntries(
+      Object.keys(capabilityScanIds).map((scanId) => [scanId, null]),
+    ),
+  };
+}
+
+function isStoredCapabilityScanFact(value: unknown): value is ModelCapabilityScanFact {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.catalogEntryId === "string" &&
+    typeof value.scanKind === "string" &&
+    typeof value.status === "string" &&
+    (value.errorCode === null || typeof value.errorCode === "string") &&
+    typeof value.requestedAt === "string" &&
+    typeof value.completedAt === "string" &&
+    (value.failure === undefined || value.failure === null || isRecord(value.failure))
+  );
+}
+
+function normalizeStoredCapabilityScanFact(
+  key: string,
+  value: Omit<ModelCapabilityScanFact, "failure"> & {
+    readonly failure?: SafeModelFailureMetadata | null;
+  },
+): ModelCapabilityScanFact {
+  if (
+    value.id !== key ||
+    !["provider_metadata", "official_preset", "lightweight_probe", "user_review"].includes(
+      value.scanKind,
+    ) ||
+    !["succeeded", "partial", "failed"].includes(value.status)
+  ) {
+    throw modelHubError(
+      "MODEL_HUB_STORE_CORRUPT",
+      "A browser Model Hub capability scan is invalid.",
+    );
+  }
+  const errorCode = validateNullableErrorCode(value.errorCode);
+  if ((value.status === "partial" || value.status === "failed") !== (errorCode !== null)) {
+    throw modelHubError(
+      "MODEL_HUB_STORE_CORRUPT",
+      "A browser Model Hub capability scan has inconsistent failure state.",
+    );
+  }
+  return Object.freeze({
+    id: boundedText(value.id, "capability scan id", 128),
+    catalogEntryId: boundedText(value.catalogEntryId, "catalog entry id", 128),
+    scanKind: value.scanKind,
+    status: value.status,
+    errorCode,
+    requestedAt: requireIsoTimestamp(value.requestedAt, "capability scan request timestamp"),
+    completedAt: requireIsoTimestamp(value.completedAt, "capability scan completion timestamp"),
+    failure:
+      value.failure === undefined || value.failure === null
+        ? null
+        : validateSafeAiFailureMetadata(value.failure),
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -3161,10 +3419,26 @@ function validateCapabilityScanInput(input: RecordCapabilityScanInput) {
       "A partial or failed capability scan requires an error code.",
     );
   }
+  if (input.status === "succeeded" && errorCode !== null) {
+    throw modelHubError(
+      "MODEL_HUB_CAPABILITY_SCAN_INVALID",
+      "A successful capability scan cannot contain an error code.",
+    );
+  }
   if (input.status === "failed" && evidence.length !== 0) {
     throw modelHubError(
       "MODEL_HUB_CAPABILITY_SCAN_INVALID",
       "A failed capability scan cannot publish evidence.",
+    );
+  }
+  const failure =
+    input.failure === undefined || input.failure === null
+      ? null
+      : validateSafeAiFailureMetadata(input.failure);
+  if (input.status === "succeeded" && failure !== null) {
+    throw modelHubError(
+      "MODEL_HUB_CAPABILITY_SCAN_INVALID",
+      "A successful capability scan cannot contain failure metadata.",
     );
   }
   return Object.freeze({
@@ -3180,6 +3454,7 @@ function validateCapabilityScanInput(input: RecordCapabilityScanInput) {
     errorCode,
     errorSummary: safeDiagnosticText(input.errorSummary, "capability scan error summary", 1000),
     requestedAt: optionalText(input.requestedAt, "capability scan request timestamp", 64),
+    failure,
   });
 }
 
@@ -3456,6 +3731,16 @@ function validateInvocationFinish(input: FinishModelInvocationInput) {
       "Successful or cancelled invocations cannot have an error code.",
     );
   }
+  const failure =
+    input.failure === undefined || input.failure === null
+      ? null
+      : validateSafeAiFailureMetadata(input.failure);
+  if (input.status !== "failed" && input.status !== "timed_out" && failure !== null) {
+    throw modelHubError(
+      "MODEL_HUB_INVOCATION_INVALID",
+      "Successful or cancelled invocations cannot contain failure metadata.",
+    );
+  }
   return Object.freeze({
     id: boundedText(input.id, "invocation id", 128),
     status: input.status,
@@ -3466,6 +3751,7 @@ function validateInvocationFinish(input: FinishModelInvocationInput) {
     currency: validateCurrency(input.currency ?? null),
     errorCode,
     errorSummary: safeDiagnosticText(input.errorSummary, "invocation error summary", 1000),
+    failure,
     expectedRevision: validateExpectedRevision(input.expectedRevision) ?? 0,
   });
 }
@@ -3992,8 +4278,11 @@ async function persistSqliteCapabilityScan(
     `INSERT INTO model_capability_scans (
        id, catalog_entry_id, scan_kind, status, evidence_version,
        supported_count, unsupported_count, unknown_count,
-       error_code, error_summary, requested_at, started_at, completed_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       error_code, error_summary, requested_at, started_at, completed_at,
+       diagnostic_request_id, failure_stage, failure_retryable, http_status,
+       finish_reason, visible_content_length, reasoning_present, streamed,
+       attempt, requested_max_output_tokens
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       validated.scanId,
       validated.catalogEntryId,
@@ -4008,6 +4297,16 @@ async function persistSqliteCapabilityScan(
       validated.requestedAt ?? now,
       now,
       now,
+      validated.failure?.requestId ?? null,
+      validated.failure?.stage ?? null,
+      nullableBooleanInteger(validated.failure?.retryable ?? null),
+      validated.failure?.httpStatus ?? null,
+      validated.failure?.finishReason ?? null,
+      validated.failure?.visibleContentLength ?? null,
+      nullableBooleanInteger(validated.failure?.reasoningPresent ?? null),
+      nullableBooleanInteger(validated.failure?.stream ?? null),
+      validated.failure?.attempt ?? null,
+      validated.failure?.requestedMaxOutputTokens ?? null,
     ],
   );
   for (const evidence of validated.evidence) {
@@ -4308,6 +4607,18 @@ function hydrateInvocation(row: InvocationRow): ModelInvocationFact {
     estimatedCostMicros: row.estimated_cost_micros,
     errorCode: row.error_code,
     errorSummary: row.error_summary,
+    failure: hydrateSafeFailureMetadata({
+      requestId: row.diagnostic_request_id,
+      stage: row.failure_stage,
+      retryable: row.failure_retryable,
+      httpStatus: row.http_status,
+      finishReason: row.finish_reason,
+      visibleContentLength: row.visible_content_length,
+      reasoningPresent: row.reasoning_present,
+      stream: row.streamed,
+      attempt: row.attempt,
+      requestedMaxOutputTokens: row.requested_max_output_tokens,
+    }),
     startedAt: row.started_at,
     completedAt: row.completed_at,
     createdAt: row.created_at,
@@ -4315,9 +4626,238 @@ function hydrateInvocation(row: InvocationRow): ModelInvocationFact {
   });
 }
 
+function hydrateRecentAiFailure(row: RecentAiFailureRow): RecentAiFailure {
+  if (!isModelProviderKind(row.provider_kind)) {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", "A recent AI failure provider is invalid.");
+  }
+  const taskType =
+    row.task_type === "capability_probe" ? "capability_probe" : validateTask(row.task_type);
+  return Object.freeze({
+    diagnosticId: boundedText(row.diagnostic_id, "AI failure diagnostic id", 256),
+    timestamp: requireIsoTimestamp(row.timestamp, "AI failure timestamp"),
+    providerKind: row.provider_kind,
+    connectionId: boundedText(row.connection_id, "AI failure connection id", 128),
+    modelId: boundedText(row.model_id, "AI failure model id", 512),
+    taskType,
+    stage: validateStoredFailureStage(row.failure_stage),
+    normalizedErrorCode: validateErrorCode(row.normalized_error_code),
+    retryable: storedNullableBoolean(row.failure_retryable, "AI failure retryable flag"),
+    httpStatus: validateNullableHttpStatus(row.http_status),
+    finishReason: validateNullableFinishReason(row.finish_reason),
+    visibleContentLength: validateNullableCount(
+      row.visible_content_length,
+      "AI failure visible content length",
+    ),
+    reasoningPresent: storedNullableBoolean(row.reasoning_present, "AI reasoning presence flag"),
+    stream: storedNullableBoolean(row.streamed, "AI stream flag"),
+    attempt: validateRecentFailureAttempt(row.attempt),
+    requestedMaxOutputTokens:
+      row.requested_max_output_tokens === null
+        ? null
+        : (optionalPositiveInteger(row.requested_max_output_tokens) ?? null),
+    requestId: validateNullableRequestId(row.diagnostic_request_id),
+  });
+}
+
+function capabilityScanFact(
+  validated: ReturnType<typeof validateCapabilityScanInput>,
+  now: string,
+): ModelCapabilityScanFact {
+  return Object.freeze({
+    id: validated.scanId,
+    catalogEntryId: validated.catalogEntryId,
+    scanKind: validated.scanKind,
+    status: validated.status,
+    errorCode: validated.errorCode,
+    requestedAt: validated.requestedAt ?? now,
+    completedAt: now,
+    failure: validated.failure,
+  });
+}
+
+function recentAiFailureFromCapabilityScan(
+  scan: ModelCapabilityScanFact,
+  connection: ModelProviderConnection,
+  modelId: string,
+): RecentAiFailure {
+  if (scan.errorCode === null) {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", "A failed capability scan has no error code.");
+  }
+  return Object.freeze({
+    diagnosticId: boundedText(`capability_scan:${scan.id}`, "AI failure diagnostic id", 256),
+    timestamp: requireIsoTimestamp(scan.completedAt, "AI failure timestamp"),
+    providerKind: connection.providerKind,
+    connectionId: boundedText(connection.id, "AI failure connection id", 128),
+    modelId: boundedText(modelId, "AI failure model id", 512),
+    taskType: "capability_probe",
+    stage: validateStoredFailureStage(scan.failure?.stage ?? null),
+    normalizedErrorCode: validateErrorCode(scan.errorCode),
+    retryable: validateNullableBooleanValue(
+      scan.failure?.retryable ?? null,
+      "AI failure retryable flag",
+    ),
+    httpStatus: validateNullableHttpStatus(scan.failure?.httpStatus ?? null),
+    finishReason: validateNullableFinishReason(scan.failure?.finishReason ?? null),
+    visibleContentLength: validateNullableCount(
+      scan.failure?.visibleContentLength ?? null,
+      "AI failure visible content length",
+    ),
+    reasoningPresent: validateNullableBooleanValue(
+      scan.failure?.reasoningPresent ?? null,
+      "AI reasoning presence flag",
+    ),
+    stream: validateNullableBooleanValue(scan.failure?.stream ?? null, "AI stream flag"),
+    attempt: validateRecentFailureAttempt(scan.failure?.attempt ?? 1),
+    requestedMaxOutputTokens:
+      scan.failure?.requestedMaxOutputTokens === undefined ||
+      scan.failure.requestedMaxOutputTokens === null
+        ? null
+        : optionalPositiveInteger(scan.failure.requestedMaxOutputTokens),
+    requestId: validateNullableRequestId(scan.failure?.requestId ?? null),
+  });
+}
+
+function recentAiFailureFromInvocation(invocation: ModelInvocationFact): RecentAiFailure {
+  if (invocation.errorCode === null || invocation.completedAt === null) {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", "A failed invocation is incomplete.");
+  }
+  return Object.freeze({
+    diagnosticId: boundedText(`model_invocation:${invocation.id}`, "AI failure diagnostic id", 256),
+    timestamp: requireIsoTimestamp(invocation.completedAt, "AI failure timestamp"),
+    providerKind: requireProviderKind(invocation.providerKindSnapshot),
+    connectionId: boundedText(invocation.connectionId, "AI failure connection id", 128),
+    modelId: boundedText(invocation.modelIdSnapshot, "AI failure model id", 512),
+    taskType: validateTask(invocation.task),
+    stage: validateStoredFailureStage(invocation.failure?.stage ?? null),
+    normalizedErrorCode: validateErrorCode(invocation.errorCode),
+    retryable: validateNullableBooleanValue(
+      invocation.failure?.retryable ?? null,
+      "AI failure retryable flag",
+    ),
+    httpStatus: validateNullableHttpStatus(invocation.failure?.httpStatus ?? null),
+    finishReason: validateNullableFinishReason(invocation.failure?.finishReason ?? null),
+    visibleContentLength: validateNullableCount(
+      invocation.failure?.visibleContentLength ?? null,
+      "AI failure visible content length",
+    ),
+    reasoningPresent: validateNullableBooleanValue(
+      invocation.failure?.reasoningPresent ?? null,
+      "AI reasoning presence flag",
+    ),
+    stream: validateNullableBooleanValue(invocation.failure?.stream ?? null, "AI stream flag"),
+    attempt: validateRecentFailureAttempt(invocation.attempt),
+    requestedMaxOutputTokens:
+      invocation.failure?.requestedMaxOutputTokens === undefined ||
+      invocation.failure.requestedMaxOutputTokens === null
+        ? null
+        : optionalPositiveInteger(invocation.failure.requestedMaxOutputTokens),
+    requestId: validateNullableRequestId(invocation.failure?.requestId ?? null),
+  });
+}
+
 function validateTask(value: unknown): NovelAiTask {
   if (!isNovelAiTask(value)) {
     throw modelHubError("MODEL_HUB_TASK_INVALID", "The novel AI task is invalid.");
+  }
+  return value;
+}
+
+function requireProviderKind(value: string): ModelProviderKind {
+  if (!isModelProviderKind(value)) {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", "A stored provider kind is invalid.");
+  }
+  return value;
+}
+
+function validateRecentFailureLimit(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 100) {
+    throw modelHubError(
+      "MODEL_HUB_FAILURE_LIMIT_INVALID",
+      "The recent AI failure limit must be between 1 and 100.",
+    );
+  }
+  return value;
+}
+
+function validateRecentFailureAttempt(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 100) {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", "A stored AI failure attempt is invalid.");
+  }
+  return value;
+}
+
+function validateNullableErrorCode(value: string | null): string | null {
+  return value === null ? null : validateErrorCode(value);
+}
+
+function validateErrorCode(value: string): string {
+  const normalized = value.trim();
+  if (!/^[A-Z][A-Z0-9_]{2,127}$/u.test(normalized)) {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", "A stored AI error code is invalid.");
+  }
+  return normalized;
+}
+
+function requireIsoTimestamp(value: string, label: string): string {
+  const normalized = optionalIsoTimestamp(value, label);
+  if (normalized === null) {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", `The ${label} is missing.`);
+  }
+  return normalized;
+}
+
+function validateStoredFailureStage(value: string | null): ModelFailureStage | null {
+  if (value === null) return null;
+  if (!(MODEL_FAILURE_STAGES as readonly string[]).includes(value)) {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", "A stored AI failure stage is invalid.");
+  }
+  return value as ModelFailureStage;
+}
+
+function storedNullableBoolean(value: number | null, label: string): boolean | null {
+  if (value === null) return null;
+  if (value !== 0 && value !== 1) {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", `The stored ${label} is invalid.`);
+  }
+  return value === 1;
+}
+
+function validateNullableBooleanValue(value: unknown, label: string): boolean | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "boolean") {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", `The stored ${label} is invalid.`);
+  }
+  return value;
+}
+
+function validateNullableHttpStatus(value: number | null): number | null {
+  if (value === null) return null;
+  if (!Number.isSafeInteger(value) || value < 100 || value > 599) {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", "A stored AI HTTP status is invalid.");
+  }
+  return value;
+}
+
+function validateNullableFinishReason(value: string | null): string | null {
+  if (value === null) return null;
+  if (!/^[a-z][a-z0-9_.-]{0,63}$/u.test(value)) {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", "A stored AI finish reason is invalid.");
+  }
+  return value;
+}
+
+function validateNullableCount(value: number | null, label: string): number | null {
+  if (value === null) return null;
+  if (!Number.isSafeInteger(value) || value < 0 || value > 1_000_000_000) {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", `The stored ${label} is invalid.`);
+  }
+  return value;
+}
+
+function validateNullableRequestId(value: string | null): string | null {
+  if (value === null) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$/u.test(value)) {
+    throw modelHubError("MODEL_HUB_STORE_CORRUPT", "A stored AI request id is invalid.");
   }
   return value;
 }
@@ -4365,6 +4905,134 @@ function optionalIsoTimestamp(value: string | null | undefined, label: string): 
     throw modelHubError("MODEL_HUB_VALUE_INVALID", `The ${label} is invalid.`);
   }
   return new Date(milliseconds).toISOString();
+}
+
+const SAFE_AI_FAILURE_KEYS = new Set([
+  "requestId",
+  "stage",
+  "retryable",
+  "httpStatus",
+  "finishReason",
+  "visibleContentLength",
+  "reasoningPresent",
+  "stream",
+  "attempt",
+  "requestedMaxOutputTokens",
+]);
+
+function validateSafeAiFailureMetadata(input: SafeAiFailureMetadata): SafeModelFailureMetadata {
+  const candidate: unknown = input;
+  if (
+    !isRecord(candidate) ||
+    containsProhibitedKey(candidate) ||
+    Object.keys(candidate).some((key) => !SAFE_AI_FAILURE_KEYS.has(key))
+  ) {
+    throw modelHubError(
+      "MODEL_HUB_FAILURE_METADATA_INVALID",
+      "AI failure metadata contains an unsupported or sensitive field.",
+    );
+  }
+  const metadata = candidate as unknown as SafeAiFailureMetadata;
+  const requestId = optionalText(metadata.requestId, "AI failure request id", 128);
+  if (requestId !== null && !/^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$/u.test(requestId)) {
+    throw modelHubError(
+      "MODEL_HUB_FAILURE_METADATA_INVALID",
+      "The AI failure request id is invalid.",
+    );
+  }
+  const stage = metadata.stage ?? null;
+  if (stage !== null && !(MODEL_FAILURE_STAGES as readonly string[]).includes(stage)) {
+    throw modelHubError("MODEL_HUB_FAILURE_METADATA_INVALID", "The AI failure stage is invalid.");
+  }
+  const httpStatus = metadata.httpStatus ?? null;
+  if (
+    httpStatus !== null &&
+    (!Number.isSafeInteger(httpStatus) || httpStatus < 100 || httpStatus > 599)
+  ) {
+    throw modelHubError(
+      "MODEL_HUB_FAILURE_METADATA_INVALID",
+      "The AI failure HTTP status is invalid.",
+    );
+  }
+  const finishReason = optionalText(metadata.finishReason, "AI failure finish reason", 64);
+  if (finishReason !== null && !/^[a-z][a-z0-9_.-]{0,63}$/u.test(finishReason)) {
+    throw modelHubError(
+      "MODEL_HUB_FAILURE_METADATA_INVALID",
+      "The AI failure finish reason is invalid.",
+    );
+  }
+  const attempt = metadata.attempt ?? null;
+  if (attempt !== null && (!Number.isSafeInteger(attempt) || attempt < 1 || attempt > 100)) {
+    throw modelHubError("MODEL_HUB_FAILURE_METADATA_INVALID", "The AI failure attempt is invalid.");
+  }
+  return Object.freeze({
+    requestId,
+    stage,
+    retryable: optionalBoolean(metadata.retryable, "AI failure retryable flag"),
+    httpStatus,
+    finishReason,
+    visibleContentLength: optionalNonNegativeInteger(metadata.visibleContentLength),
+    reasoningPresent: optionalBoolean(metadata.reasoningPresent, "AI reasoning presence flag"),
+    stream: optionalBoolean(metadata.stream, "AI stream flag"),
+    attempt,
+    requestedMaxOutputTokens: optionalPositiveInteger(metadata.requestedMaxOutputTokens),
+  });
+}
+
+function optionalBoolean(value: boolean | null | undefined, label: string): boolean | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "boolean") {
+    throw modelHubError("MODEL_HUB_FAILURE_METADATA_INVALID", `The ${label} is invalid.`);
+  }
+  return value;
+}
+
+function nullableBooleanInteger(value: boolean | null): number | null {
+  return value === null ? null : value ? 1 : 0;
+}
+
+function hydrateSafeFailureMetadata(input: {
+  readonly requestId: string | null;
+  readonly stage: string | null;
+  readonly retryable: number | null;
+  readonly httpStatus: number | null;
+  readonly finishReason: string | null;
+  readonly visibleContentLength: number | null;
+  readonly reasoningPresent: number | null;
+  readonly stream: number | null;
+  readonly attempt: number | null;
+  readonly requestedMaxOutputTokens: number | null;
+}): SafeModelFailureMetadata | null {
+  const hasFailureDetail = [
+    input.requestId,
+    input.stage,
+    input.retryable,
+    input.httpStatus,
+    input.finishReason,
+    input.visibleContentLength,
+    input.reasoningPresent,
+    input.stream,
+    input.requestedMaxOutputTokens,
+  ].some((value) => value !== null);
+  if (!hasFailureDetail) return null;
+  return Object.freeze({
+    requestId: validateNullableRequestId(input.requestId),
+    stage: validateStoredFailureStage(input.stage),
+    retryable: storedNullableBoolean(input.retryable, "AI failure retryable flag"),
+    httpStatus: validateNullableHttpStatus(input.httpStatus),
+    finishReason: validateNullableFinishReason(input.finishReason),
+    visibleContentLength: validateNullableCount(
+      input.visibleContentLength,
+      "AI failure visible content length",
+    ),
+    reasoningPresent: storedNullableBoolean(input.reasoningPresent, "AI reasoning presence flag"),
+    stream: storedNullableBoolean(input.stream, "AI stream flag"),
+    attempt: input.attempt === null ? null : validateRecentFailureAttempt(input.attempt),
+    requestedMaxOutputTokens:
+      input.requestedMaxOutputTokens === null
+        ? null
+        : (optionalPositiveInteger(input.requestedMaxOutputTokens) ?? null),
+  });
 }
 
 function safeDiagnosticText(
@@ -4511,10 +5179,67 @@ const ROUTE_SELECT = `SELECT
   failure_policy, route_origin, enabled, revision, created_at, updated_at
 FROM novel_task_routes`;
 
+const RECENT_AI_FAILURE_SELECT = `SELECT *
+FROM (
+  SELECT
+    'capability_scan:' || scan.id AS diagnostic_id,
+    scan.completed_at AS timestamp,
+    connection.provider_kind AS provider_kind,
+    connection.id AS connection_id,
+    catalog.provider_model_id AS model_id,
+    'capability_probe' AS task_type,
+    scan.failure_stage,
+    scan.error_code AS normalized_error_code,
+    scan.failure_retryable,
+    scan.http_status,
+    scan.finish_reason,
+    scan.visible_content_length,
+    scan.reasoning_present,
+    scan.streamed,
+    COALESCE(scan.attempt, 1) AS attempt,
+    scan.requested_max_output_tokens,
+    scan.diagnostic_request_id
+  FROM model_capability_scans AS scan
+  JOIN model_catalog_entries AS catalog ON catalog.id = scan.catalog_entry_id
+  JOIN model_provider_connections AS connection ON connection.id = catalog.connection_id
+  WHERE scan.status IN ('partial', 'failed')
+    AND scan.error_code IS NOT NULL
+    AND scan.completed_at IS NOT NULL
+
+  UNION ALL
+
+  SELECT
+    'model_invocation:' || invocation.id AS diagnostic_id,
+    invocation.completed_at AS timestamp,
+    invocation.provider_kind_snapshot AS provider_kind,
+    invocation.connection_id,
+    invocation.model_id_snapshot AS model_id,
+    invocation.task AS task_type,
+    invocation.failure_stage,
+    invocation.error_code AS normalized_error_code,
+    invocation.failure_retryable,
+    invocation.http_status,
+    invocation.finish_reason,
+    invocation.visible_content_length,
+    invocation.reasoning_present,
+    invocation.streamed,
+    invocation.attempt,
+    invocation.requested_max_output_tokens,
+    invocation.diagnostic_request_id
+  FROM model_invocation_facts AS invocation
+  WHERE invocation.status IN ('failed', 'timed_out')
+    AND invocation.error_code IS NOT NULL
+    AND invocation.completed_at IS NOT NULL
+)
+ORDER BY timestamp DESC, diagnostic_id ASC
+LIMIT ?`;
+
 const INVOCATION_SELECT = `SELECT
   id, task, route_task, connection_id, catalog_entry_id, provider_kind_snapshot,
   model_id_snapshot, route_reason, status, attempt, fallback_from_invocation_id,
   privacy_policy, data_destination, maximum_cost_micros, currency, input_tokens,
   output_tokens, cached_input_tokens, estimated_cost_micros, error_code,
-  error_summary, started_at, completed_at, created_at, revision
+  error_summary, diagnostic_request_id, failure_stage, failure_retryable,
+  http_status, finish_reason, visible_content_length, reasoning_present,
+  streamed, requested_max_output_tokens, started_at, completed_at, created_at, revision
 FROM model_invocation_facts`;

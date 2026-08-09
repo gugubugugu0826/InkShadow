@@ -5,6 +5,7 @@ import {
   MODEL_PROVIDER_KINDS,
   NOVEL_AI_TASKS,
   getModelProviderPreset,
+  modelProviderTextCapabilityProbePolicy,
   isLoopbackModelBaseUrl,
   listModelProviderPresets,
   normalizeCredentialHeaderName,
@@ -15,6 +16,17 @@ import {
 } from "./model-hub-provider-registry";
 
 describe("Model Hub provider registry", () => {
+  it("uses a provider-declared, model-name-independent DeepSeek text probe policy", () => {
+    expect(modelProviderTextCapabilityProbePolicy("deepseek")).toEqual({
+      maxOutputTokens: 64,
+      reasoningMode: "disabled",
+    });
+    expect(modelProviderTextCapabilityProbePolicy("openai")).toEqual({
+      maxOutputTokens: 64,
+      reasoningMode: null,
+    });
+  });
+
   it("registers the launch providers without hard-coding a model catalog", () => {
     const presets = listModelProviderPresets();
 

@@ -1,9 +1,76 @@
 # InkShadow 测试与构建结果
 
 > 更新日期：2026-08-09  
-> 证据范围：最终发布提交 `435454b952bead1014dd7d44f0f4806d70fce7e5` 已完成本地完整候选链、Windows x64 未签名打包、远端 GitHub Actions 三作业和公开 Pre-release 附件回读校验。下方明确标记为历史的结果不能替代本次证据
+> 证据范围：当前工作树的 DeepSeek 文本能力探针 P0 修复及本地工程门禁。没有使用真实 DeepSeek API Key；截至本段记录安装包候选尚未生成且 GitHub Release 尚未发布，既有提交 `435454b` 与公开 Pre-release 只保留为历史基线
 
-## 2026-08-09 当前验证状态
+## 2026-08-09 DeepSeek P0 当前工作树验证
+
+### 全量门禁
+
+- `pnpm.cmd release:check`：`PASS`，475.7 秒；生产构建、Prettier format check、秘密扫描、
+  151 项许可证、20 包边界、Desktop release gate `17/17`、全部工作区 TypeScript、全仓
+  ESLint 与 workspace tests 通过；
+- Desktop：207 files，1,440 passed，1 skipped，0 failed；
+- Data：62 files，357 passed，0 failed；
+- Cloud API：87 passed，64 skipped，0 failed；跳过项需要外部 PostgreSQL 条件，不能计为通过；
+- Web：33 passed，0 failed；
+- `pnpm.cmd check:rust`：`PASS`；`cargo fmt --check` 和
+  `cargo clippy --all-targets -- -D warnings` 通过；完整 Rust lib 152 passed，1 ignored，0 failed。
+
+### 定向门禁
+
+DeepSeek P0 Desktop 回归：
+
+```powershell
+.\node_modules\.bin\vitest.cmd run --config apps/desktop/vitest.config.ts --configLoader runner apps/desktop/src/infrastructure/model-hub-text-capability-probe.test.ts apps/desktop/src/infrastructure/quick-model-connection-service.test.ts apps/desktop/src/infrastructure/model-hub-local-evaluation-service.test.ts apps/desktop/src/infrastructure/model-hub-execution-service.test.ts apps/desktop/src/infrastructure/model-hub-router.test.ts apps/desktop/src/infrastructure/model-hub-routing-service.test.ts apps/desktop/src/infrastructure/native-model-dispatch-scope-contract.test.ts apps/desktop/src/infrastructure/ui-error.test.ts apps/desktop/src/pages/settings-page.test.tsx
+```
+
+结果：9 files，104 passed，0 failed。
+
+Desktop TypeScript：
+
+```powershell
+.\node_modules\.bin\tsc.cmd --noEmit -p apps/desktop/tsconfig.json --pretty false
+```
+
+结果：0 error，`PASS`。
+
+Data 迁移与维护：
+
+```powershell
+pnpm.cmd --filter @inkshadow/data exec vitest run tests/model-hub-migration.test.ts tests/maintenance.test.ts --config vitest.config.ts
+```
+
+结果：2 files，14 passed，0 failed。
+
+原生模型网关：
+
+```powershell
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml model_gateway --no-fail-fast
+```
+
+结果：63 passed，1 ignored，0 failed。
+
+Tauri 本地迁移链：
+
+```powershell
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml local_migrations --lib
+```
+
+结果：5 passed，0 failed。
+
+### 未运行边界
+
+- 真实 DeepSeek Key 在线端到端：`NOT_RUN`。未读取用户 API Key；模型目录、真实 SSE、账号额度、
+  16 类初始文本分工和两项基础评测未在线串联验收；
+- 截至本段工程门禁记录，安装包候选尚未生成；`release:check` 不等于打包。若随后从干净提交
+  生成候选，必须以候选清单另行记录来源提交、SHA-256 和大小；当前尚未发布新的 GitHub Release。
+
+当前 Provider Registry 为 9 类，发布脚本门禁为 17 项。本轮结果只能证明本地实现与受控协议路径，
+不能把 DeepSeek 供应商标记为 `VERIFIED`。根因、迁移、隐私和回滚边界见
+[`2026-08-09-DEEPSEEK-TEXT-PROBE-P0.md`](2026-08-09-DEEPSEEK-TEXT-PROBE-P0.md)。
+
+## 2026-08-09 既有 v0.2.0 发布基线（历史，不含本轮 P0）
 
 | 范围                            | 结果                                                                                                                   | 状态 |
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ---- |

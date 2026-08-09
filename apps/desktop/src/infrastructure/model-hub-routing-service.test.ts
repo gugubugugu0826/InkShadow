@@ -18,6 +18,59 @@ if (!parsedNow.ok) {
 const clock = { now: () => parsedNow.value };
 
 describe("automatic Model Hub routing application", () => {
+  it("persists the 16 compatible core routes for text-only evidence without evaluations", async () => {
+    const storage = new MemoryStorage();
+    const modelCenter = new BrowserDevelopmentModelCenterStore(storage, clock);
+    const legacyRouting = new BrowserDevelopmentModelRoutingStore(storage, clock, modelCenter);
+    const modelHub = new BrowserDevelopmentModelHubStore(storage, clock);
+    await seedCandidate(modelHub, {
+      connectionId: "text-only-provider",
+      catalogEntryId: "text-only-catalog",
+      modelId: "text-only-model",
+      destination: "remote",
+      textOnly: true,
+    });
+
+    const applied = await applyAutomaticModelHubRouting({
+      modelHub,
+      legacyRouting,
+      legacyReadyModels: [],
+      scheme: "smart",
+      now: NOW,
+    });
+    const savedRoutes = (
+      await Promise.all(NOVEL_AI_TASKS.map((task) => modelHub.findTaskRoute(task)))
+    ).filter((route) => route !== null);
+
+    expect(applied.savedNovelTaskCount).toBe(16);
+    expect(savedRoutes).toHaveLength(16);
+    expect(savedRoutes.map(({ task }) => task)).toEqual(
+      expect.arrayContaining([
+        "book_start_guidance",
+        "prose_generation",
+        "continuation",
+        "rewrite",
+        "content_quality_check",
+      ]),
+    );
+    await expect(modelHub.findTaskRoute("embedding")).resolves.toBeNull();
+    await expect(modelHub.findTaskRoute("image_generation")).resolves.toBeNull();
+
+    const reopened = new BrowserDevelopmentModelHubStore(storage, clock);
+    const reopenedRoutes = (
+      await Promise.all(NOVEL_AI_TASKS.map((task) => reopened.findTaskRoute(task)))
+    ).filter((route) => route !== null);
+    expect(reopenedRoutes).toHaveLength(16);
+    await expect(reopened.listCapabilityEvidence("text-only-catalog")).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          capability: "text_generation",
+          verdict: "supported",
+        }),
+      ]),
+    );
+  });
+
   it("never offers a retired connection to automatic routing", async () => {
     const storage = new MemoryStorage();
     const modelHub = new BrowserDevelopmentModelHubStore(storage, clock);
@@ -170,6 +223,7 @@ async function seedCandidate(
     catalogEntryId: string;
     modelId: string;
     destination: "local" | "remote";
+    textOnly?: boolean;
   }>,
 ): Promise<void> {
   const providerKind = input.destination === "local" ? "ollama" : "custom_openai_compatible";
@@ -206,12 +260,14 @@ async function seedCandidate(
     scanKind: "user_review",
     status: "succeeded",
     evidenceVersion: "test-v1",
-    evidence: MODEL_HUB_CAPABILITIES.map((capability) => ({
-      id: `${input.connectionId}-${capability}`,
-      capability,
-      verdict: "supported",
-      evidenceSource: "user_confirmed",
-    })),
+    evidence: (input.textOnly === true ? ["text_generation" as const] : MODEL_HUB_CAPABILITIES).map(
+      (capability) => ({
+        id: `${input.connectionId}-${capability}`,
+        capability,
+        verdict: "supported",
+        evidenceSource: "user_confirmed",
+      }),
+    ),
   });
   await modelHub.saveCostPrivacyProfile({
     catalogEntryId: entry.id,

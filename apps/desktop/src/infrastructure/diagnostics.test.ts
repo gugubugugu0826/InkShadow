@@ -27,6 +27,43 @@ describe("desktop diagnostics", () => {
       selectedModel: "proprietary-model-42",
       expectedRevision: null,
     });
+    await runtime.modelHub.saveConnection({
+      id: "diagnostic-provider",
+      providerKind: "custom_openai_compatible",
+      displayName: "Diagnostic provider",
+      baseUrlOverride: "https://diagnostic.example.test/v1",
+      credentialState: "missing",
+      authenticationMode: "none",
+      expectedRevision: null,
+    });
+    await runtime.modelHub.syncCatalog({
+      syncId: "diagnostic-sync",
+      connectionId: "diagnostic-provider",
+      source: "manual",
+      status: "succeeded",
+      models: [{ id: "diagnostic-model", providerModelId: "diagnostic-writer" }],
+    });
+    await runtime.modelHub.recordCapabilityScan({
+      scanId: "diagnostic-failed-probe",
+      catalogEntryId: "diagnostic-model",
+      scanKind: "lightweight_probe",
+      status: "failed",
+      evidenceVersion: "writing-probe-v1",
+      errorCode: "MODEL_OUTPUT_TRUNCATED",
+      errorSummary: "never-export-this-error-summary",
+      failure: {
+        requestId: "req-diagnostic-probe-0001",
+        stage: "response_normalization",
+        retryable: false,
+        httpStatus: 200,
+        finishReason: "length",
+        visibleContentLength: 0,
+        reasoningPresent: true,
+        stream: false,
+        attempt: 1,
+        requestedMaxOutputTokens: 8,
+      },
+    });
     const search = await runtime.search.search(project.value.id, "绝不能进入");
     if (!search.ok) {
       throw search.error;
@@ -36,12 +73,14 @@ describe("desktop diagnostics", () => {
 
     expect(artifact.fileName).toMatch(/^InkShadow-diagnostics-\d{4}-\d{2}-\d{2}-/u);
     expect(artifact.bundle).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       summary: {
         appVersion: "0.2.0",
         databaseHealth: "unknown",
         indexHealth: "healthy",
         syncState: "local_only",
+        errorCodes: ["MODEL_OUTPUT_TRUNCATED"],
+        requestIds: ["req-diagnostic-probe-0001"],
       },
       privacy: {
         projectContentIncluded: false,
@@ -50,25 +89,52 @@ describe("desktop diagnostics", () => {
         uploadedFilesIncluded: false,
       },
       localCloudFoundation: null,
+      recentAiFailures: [
+        {
+          diagnosticId: "capability_scan:diagnostic-failed-probe",
+          providerKind: "custom_openai_compatible",
+          connectionId: "diagnostic-provider",
+          modelId: "diagnostic-writer",
+          taskType: "capability_probe",
+          normalizedErrorCode: "MODEL_OUTPUT_TRUNCATED",
+          stage: "response_normalization",
+          requestId: "req-diagnostic-probe-0001",
+          retryable: false,
+          httpStatus: 200,
+          finishReason: "length",
+          visibleContentLength: 0,
+          reasoningPresent: true,
+          stream: false,
+          attempt: 1,
+          requestedMaxOutputTokens: 8,
+        },
+      ],
     });
+    expect(typeof artifact.bundle.recentAiFailures[0]?.timestamp).toBe("string");
     expect(artifact.content).not.toContain("绝不能进入诊断包的正文标记");
     expect(artifact.content).not.toContain("sk-never-include-this-value");
     expect(artifact.content).not.toContain("敏感章节");
     expect(artifact.content).not.toContain("private-provider");
     expect(artifact.content).not.toContain("private.example");
     expect(artifact.content).not.toContain("proprietary-model-42");
+    expect(artifact.content).not.toContain("never-export-this-error-summary");
     expect(artifact.bundle.summary.configuration).toMatchObject({
       indexIntegrated: true,
       indexPersistence: "runtime_rebuild",
       indexedDocumentCount: 1,
       vectorStatus: "disabled",
-      modelProfileCount: 1,
-      modelProfilesWithSelection: 1,
+      legacyModelProfileCount: 1,
+      legacyModelProfilesWithSelection: 1,
+      modelHubConnectionCount: 1,
+      modelHubUsableConnectionCount: 0,
+      modelHubCatalogEntryCount: 1,
+      modelHubEnabledTaskRouteCount: 0,
       nativeModelGatewayAvailable: false,
       cloudIdentityEnabled: false,
       cloudSyncEnabled: false,
       encryptedSyncStore: "unavailable",
       entitlementCacheTrust: "unverified_only",
+      diagnosticSchemaVersion: 2,
     });
   });
 });

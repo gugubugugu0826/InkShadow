@@ -84,6 +84,10 @@ import { applyAutomaticModelHubRouting } from "../infrastructure/model-hub-routi
 import { bridgeLegacyModelProfilesToModelHub } from "../infrastructure/model-hub-legacy-bridge";
 import { ModelHubLocalEvaluationService } from "../infrastructure/model-hub-local-evaluation-service";
 import {
+  modelHubTextCapabilityProbeFailureMetadata,
+  runModelHubTextCapabilityProbe,
+} from "../infrastructure/model-hub-text-capability-probe";
+import {
   assertModelHubFinalDispatchUnchanged,
   ModelHubFinalDispatchError,
   modelHubFinalDispatchIdentity,
@@ -1200,6 +1204,37 @@ export function SettingsPage() {
     return Object.freeze({ connection, catalog, entry });
   }
 
+  async function ensureProbeCostPrivacyProfile(
+    connection: ModelProviderConnection,
+    catalogEntry: ModelCatalogEntry,
+  ): Promise<void> {
+    if ((await runtime.modelHub.findCostPrivacyProfile(catalogEntry.id)) !== null) return;
+    const local = isLoopbackModelBaseUrl(connection.baseUrl);
+    try {
+      await runtime.modelHub.saveCostPrivacyProfile({
+        catalogEntryId: catalogEntry.id,
+        dataDestination: local ? "local" : "remote",
+        retentionPolicy: local ? "none" : "provider_default",
+        trainingPolicy: local ? "not_used" : "unknown",
+        evidenceSource: "provider_metadata",
+        evidenceVersion: "text-capability-probe-endpoint-v1",
+        evidenceSummary: local
+          ? "连接目标是本机回环地址；探针未发送作品内容。"
+          : "连接目标是供应商远程端点；留存与训练政策仍以供应商当前政策为准。",
+        expectedRevision: null,
+      });
+    } catch (cause: unknown) {
+      if (
+        cause instanceof ModelHubStoreError &&
+        cause.code === "MODEL_HUB_COST_PRIVACY_CONFLICT" &&
+        (await runtime.modelHub.findCostPrivacyProfile(catalogEntry.id)) !== null
+      ) {
+        return;
+      }
+      throw cause;
+    }
+  }
+
   async function performLightweightTextProbe(
     savedConnection: ModelProviderConnection,
     catalogEntry: ModelCatalogEntry,
@@ -1216,7 +1251,6 @@ export function SettingsPage() {
     const scanId = createModelHubId("probe-scan");
     const evidenceVersion = createModelHubId("lightweight-probe-v1");
     const startedAt = Date.now();
-    const probeObservation = { streamed: false };
     const expectedDispatchIdentity = settingsProbeDispatchIdentity(savedConnection, catalogEntry);
     try {
       const current = await readAuthoritativeProbeTarget(savedConnection.id, catalogEntry.id);
@@ -1224,27 +1258,19 @@ export function SettingsPage() {
         expectedDispatchIdentity,
         settingsProbeDispatchIdentity(current.connection, current.entry),
       );
-      const result = await runtime.modelGateway.generate({
-        dispatchScope: { kind: "non_project", reason: "connection_probe" },
+      const result = await runModelHubTextCapabilityProbe({
+        gateway: runtime.modelGateway,
+        providerKind: current.connection.providerKind,
         generationId: createModelHubId("capability-probe"),
         config: modelHubNativeEndpointConfig(current.connection),
         model: current.entry.providerModelId,
-        messages: [{ role: "user", content: "只回复：OK" }],
-        maxOutputTokens: 8,
-        onDelta: (text) => {
-          if (text.trim().length > 0) {
-            probeObservation.streamed = true;
-          }
-        },
       });
-      if (result.text.trim().length === 0) {
-        throw new Error("模型已连接，但没有返回可用文字。请检查模型或接入点是否支持文本生成。");
-      }
       const verified = await readAuthoritativeProbeTarget(savedConnection.id, catalogEntry.id);
       assertModelHubFinalDispatchUnchanged(
         expectedDispatchIdentity,
         settingsProbeDispatchIdentity(verified.connection, verified.entry),
       );
+      await ensureProbeCostPrivacyProfile(verified.connection, verified.entry);
       const committed = await runtime.modelHub.commitCapabilityProbeResult({
         connectionId: savedConnection.id,
         expectedConnectionRevision: savedConnection.revision,
@@ -1255,7 +1281,7 @@ export function SettingsPage() {
           scanId,
           catalogEntryId: verified.entry.id,
           scanKind: "lightweight_probe",
-          status: "succeeded",
+          status: result.acceptedTruncatedOutput ? "partial" : "succeeded",
           evidenceVersion,
           evidence: [
             {
@@ -1265,7 +1291,7 @@ export function SettingsPage() {
               evidenceSource: "lightweight_probe",
               evidenceSummary: "固定短文本探测成功；未保存探测输入或模型输出。",
             },
-            ...(probeObservation.streamed
+            ...(result.streamed
               ? [
                   {
                     id: createModelHubId("capability"),
@@ -1277,11 +1303,19 @@ export function SettingsPage() {
                 ]
               : []),
           ],
+          ...(result.partialFailure === null
+            ? {}
+            : {
+                errorCode: "MODEL_OUTPUT_TRUNCATED",
+                errorSummary:
+                  "固定能力探针已返回可见文字，但响应以输出上限结束；文本生成能力已确认，未保存探针输出。",
+                failure: result.partialFailure,
+              }),
         },
         ...(updateConnectionStatus ? { connectionTest: { status: "ready" as const } } : {}),
       });
       return Object.freeze({
-        streamed: probeObservation.streamed,
+        streamed: result.streamed,
         latencyMs: Math.max(0, Date.now() - startedAt),
         connection: committed.connection,
         catalog: verified.catalog,
@@ -1304,6 +1338,10 @@ export function SettingsPage() {
             evidenceVersion,
             errorCode: normalized.code,
             errorSummary: normalized.description,
+            failure: modelHubTextCapabilityProbeFailureMetadata(
+              cause,
+              savedConnection.providerKind,
+            ),
           },
           ...(updateConnectionStatus
             ? {
@@ -1328,6 +1366,34 @@ export function SettingsPage() {
     }
   }
 
+  async function applyInitialSmartRoutingIfEmpty(): Promise<number | null> {
+    const currentRoutes = await Promise.all(
+      NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task)),
+    );
+    if (currentRoutes.some((route) => route !== null)) return null;
+    setRouteError(null);
+    const currentProfiles = await runtime.modelCenter.listProfiles();
+    const applied = await applyAutomaticModelHubRouting({
+      modelHub: runtime.modelHub,
+      legacyRouting: runtime.modelRouting,
+      legacyReadyModels: currentProfiles.flatMap(
+        ({ providerId: connectionId, selectedModel: modelId }) =>
+          modelId === null ? [] : [{ connectionId, modelId }],
+      ),
+      scheme: "smart",
+      now: new Date().toISOString(),
+    });
+    const [nextRoleRoutes, nextNovelRoutes] = await Promise.all([
+      runtime.modelRouting.listRoutes(),
+      Promise.all(NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task))),
+    ]);
+    setModelHubScheme("smart");
+    setRoleRoutes(nextRoleRoutes);
+    setNovelTaskRoutes(nextNovelRoutes.filter((route): route is NovelTaskRoute => route !== null));
+    setNovelTaskRouteCount(applied.savedNovelTaskCount);
+    return applied.savedNovelTaskCount;
+  }
+
   async function probeSelectedModelCapability(): Promise<void> {
     if (!runtime.modelGateway.available || selectedModel.trim().length === 0) {
       return;
@@ -1338,16 +1404,30 @@ export function SettingsPage() {
     try {
       const savedConnection = await persistModelHubConnection();
       const target = await ensureCatalogEntryForModel(savedConnection, selectedModel);
-      const result = await performLightweightTextProbe(target.connection, target.entry);
+      const result = await performLightweightTextProbe(target.connection, target.entry, true);
       setHubCatalog(result.catalog);
       setModels(result.catalog.map(catalogEntryToDescriptor));
       const nextConnections = await runtime.modelHub.listConnections();
       setHubConnections(nextConnections);
       await refreshRoutingCatalogState(nextConnections);
+      let automaticallyConfigured: number | null = null;
+      let automaticRoutingFailed = false;
+      try {
+        automaticallyConfigured = await applyInitialSmartRoutingIfEmpty();
+      } catch (cause: unknown) {
+        automaticRoutingFailed = true;
+        setRouteError(cause);
+      }
       setCapabilityProbeMessage(
-        result.streamed
-          ? `已验证“${result.entry.displayName}”可生成文字并支持流式返回。`
-          : `已验证“${result.entry.displayName}”可生成文字；本次没有观察到流式增量。`,
+        `${
+          result.streamed
+            ? `已验证“${result.entry.displayName}”可生成文字并支持流式返回。`
+            : `已验证“${result.entry.displayName}”可生成文字；本次没有观察到流式增量。`
+        }${
+          automaticallyConfigured === null
+            ? ""
+            : ` 已自动配置 ${String(automaticallyConfigured)} 类可用 AI 任务。`
+        }${automaticRoutingFailed ? " 写作能力证据已保留；自动分工未完成，请重试应用 AI 分工。" : ""}`,
       );
     } catch (cause: unknown) {
       setCapabilityProbeError(cause);
@@ -2971,7 +3051,7 @@ export function SettingsPage() {
                     <InlineAlert
                       tone="warning"
                       title="能力验证会调用一次模型"
-                      description="点击“验证写作能力”会发送一条不含作品内容的固定短测试，最多请求 8 个输出 token，供应商可能收取极少费用。测试输入和输出不会写入能力记录。"
+                      description="点击“验证写作能力”会发送一条不含作品内容的固定短测试，最多请求 64 个输出 token；DeepSeek 探针会关闭推理，供应商可能收取极少费用。测试输入和输出不会写入能力记录。"
                     />
                   )}
 

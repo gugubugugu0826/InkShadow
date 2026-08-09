@@ -6,6 +6,7 @@ import {
   QUICK_MODEL_PROVIDERS,
   QuickModelConnectionError,
 } from "./quick-model-connection-service";
+import { ModelCenterError } from "./model-center-store";
 import { modelHubCredentialProviderId } from "./model-hub-native-config";
 import {
   createDevelopmentRuntime,
@@ -85,7 +86,89 @@ describe("quick Model Hub connection", () => {
     expect(harness.generate.mock.calls[0]?.[0].messages).toEqual([
       { role: "user", content: "只回复：OK" },
     ]);
+    expect(harness.generate.mock.calls[0]?.[0].maxOutputTokens).toBe(64);
+    expect(harness.generate.mock.calls[0]?.[0]).not.toHaveProperty("reasoningMode");
     expect(harness.generate.mock.calls[0]?.[0].config.providerId).toBe(credentialProviderId);
+    await expect(
+      harness.runtime.modelHub.listCapabilityEvidence(ready.catalogEntry.id),
+    ).resolves.not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          capability: "streaming",
+          verdict: "supported",
+          evidenceSource: "lightweight_probe",
+        }),
+      ]),
+    );
+  });
+
+  it("uses the provider-owned DeepSeek reasoning policy for the quick text probe", async () => {
+    const harness = createHarness();
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "deepseek",
+      secret: "test-deepseek-secret",
+    });
+
+    await configureQuickBookStartRoute(harness.runtime, {
+      connectionId: connected.connection.id,
+      catalogEntryId: connected.catalog[0]?.id ?? "missing",
+    });
+
+    expect(harness.generate.mock.calls[0]?.[0]).toMatchObject({
+      maxOutputTokens: 64,
+      reasoningMode: "disabled",
+      messages: [{ role: "user", content: "只回复：OK" }],
+    });
+  });
+
+  it("records a truthful partial scan when a truncated probe already emitted visible text", async () => {
+    const harness = createHarness();
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "deepseek",
+      secret: "test-deepseek-secret",
+    });
+    harness.generate.mockImplementationOnce((request) => {
+      request.onDelta?.("OK");
+      return Promise.reject(
+        new ModelCenterError("MODEL_OUTPUT_TRUNCATED", "truncated", false, {
+          requestId: "deepseek-request-1",
+          httpStatus: 200,
+          finishReason: "length",
+          visibleContentLength: 2,
+          reasoningPresent: true,
+          stream: true,
+          inputTokens: 4,
+          outputTokens: 64,
+        }),
+      );
+    });
+
+    const ready = await configureQuickBookStartRoute(harness.runtime, {
+      connectionId: connected.connection.id,
+      catalogEntryId: connected.catalog[0]?.id ?? "missing",
+    });
+
+    await expect(
+      harness.runtime.modelHub.listCapabilityEvidence(ready.catalogEntry.id),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "lightweight_probe",
+        }),
+      ]),
+    );
+    await expect(harness.runtime.modelHub.listRecentAiFailures()).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          normalizedErrorCode: "MODEL_OUTPUT_TRUNCATED",
+          finishReason: "length",
+          visibleContentLength: 2,
+          requestedMaxOutputTokens: 64,
+        }),
+      ]),
+    );
   });
 
   it("does not run the fixed probe when the connection is disabled during capability setup", async () => {
@@ -314,7 +397,9 @@ describe("quick Model Hub connection", () => {
       model: "qwen-account-model",
       messages: [{ role: "user", content: "只回复：OK" }],
       dispatchScope: { kind: "non_project", reason: "connection_probe" },
+      maxOutputTokens: 64,
     });
+    expect(harness.generate.mock.calls[0]?.[0]).not.toHaveProperty("reasoningMode");
     expect(connected.connection).toMatchObject({
       providerKind: "alibaba_qwen",
       region: "singapore",

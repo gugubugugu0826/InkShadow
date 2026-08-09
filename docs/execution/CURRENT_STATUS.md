@@ -2,11 +2,28 @@
 
 > 更新日期：2026-08-09  
 > 源码与候选版本：`0.2.0`  
-> 工程状态：Phase 0 审计与 Phase 1–5 内部纵向链路已完成本轮实现和独立审查；提交 `435454b` 的本地完整候选链、远端 CI、未签名 NSIS 与公开附件回读均已通过  
-> 发布结论：**`v0.2.0` 已发布为公开 GitHub Pre-release 工程预览。它不是 Beta、GA 或商业正式版**  
-> 原因：商业签名、真实供应商全矩阵、百万字真实作品全链路/WebView 压力、隔离 Windows 安装/升级/卸载矩阵、法律与独立安全审计仍未完成
+> 工程状态：当前工作树已完成 DeepSeek 文本能力探针 P0 修复及本地全仓/Rust 门禁；证据不包含真实 DeepSeek 凭据在线调用  
+> 发布结论：**截至本段工程门禁记录，安装包候选尚未生成且本轮 P0 修复尚未发布；既有公开 `v0.2.0` Pre-release 只作为历史基线，不包含当前工作树改动**  
+> 原因：仍需真实 DeepSeek API Key 的目录发现、能力探针、任务分工和基础评测端到端验收；商业签名、供应商全矩阵和隔离 Windows 安装矩阵也未完成
 
-## 2026-08-09 当前源码状态
+## 2026-08-09 DeepSeek P0 当前工作树
+
+| 项目                   | 当前事实                                                                                                                                                                      |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P0 根因与修复          | `PASS`；共享 64-token 无作品内容探针、DeepSeek Provider Registry 禁用探针思考、`reasoning_content`/可见正文分离、可见截断窄例外、能力证据/初始文本分工和诊断 schema v2 已接线 |
+| 全仓发布前工程门禁     | `PASS`；`pnpm.cmd release:check` 用时 475.7 秒，生产构建、格式、秘密扫描、151 项许可证、20 包边界、Desktop release gate `17/17`、全部工作区类型检查、ESLint 与测试通过        |
+| Desktop 测试           | `PASS`；207 files，1,440 passed，1 skipped，0 failed                                                                                                                          |
+| Data / Cloud API / Web | `PASS`；Data 62 files / 357 passed；Cloud API 87 passed / 64 条外部 PostgreSQL 条件跳过；Web 33 passed                                                                        |
+| Rust 原生层            | `PASS`；`pnpm.cmd check:rust` 完成 format、全 target 严格 Clippy `-D warnings` 和完整测试；152 passed，1 ignored，0 failed                                                    |
+| P0 定向证据            | `PASS`；Desktop 9 files / 104 tests；Data migration + maintenance 2 files / 14 tests；`model_gateway` 63 passed / 1 ignored；Tauri `local_migrations` 5 passed                |
+| Provider 与迁移口径    | Provider Registry 当前为 9 类；Data migration `0056` / Tauri `59`；发布脚本门禁为 17 项                                                                                       |
+| 真实 DeepSeek 线上验收 | `NOT_RUN`；没有读取或使用用户 API Key，不能将本地/模拟协议测试标为供应商 `VERIFIED`                                                                                           |
+| 本轮发布与安装包       | 截至本段工程门禁记录为 `NOT_RUN`；`release:check` 不等于打包，若随后从干净提交生成候选，须以候选清单记录来源提交、SHA-256 和大小；GitHub Release 尚未发布                     |
+
+精确命令与分包结果见 [`TEST_RESULTS.md`](TEST_RESULTS.md) 和
+[`2026-08-09-DEEPSEEK-TEXT-PROBE-P0.md`](2026-08-09-DEEPSEEK-TEXT-PROBE-P0.md)。
+
+## 2026-08-09 已发布 v0.2.0 历史基线（不含本轮 P0）
 
 | 项目                   | 当前事实                                                                                                                                       |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -23,8 +40,9 @@
 四个不可达的 Studio 团队页面，团队能力双开时四个页面会重新进入产物。OpenAPI 文档生成器只从
 `@inkshadow/contracts/openapi` 显式入口加载，不进入桌面运行时主入口。
 
-本页后续带有 2026-08-08 或更早时间标签的测试和制品均为历史记录。最终只有上方 `435454b`
-唯一提交、其完整候选链、制品哈希和 GitHub 发布地址可代表本次交付。
+本节记录提交 `435454b` 的既有公开工程预览，只代表该历史发布。它的候选链、制品哈希和 GitHub
+地址不能替代上方当前工作树验证，也不能证明本轮 DeepSeek P0 已经发布或通过真实供应商验收。
+本页后续带有 2026-08-08 或更早时间标签的测试和制品同样是历史记录。
 
 ## 2026-08-08 DESIGN v0.3.1b 历史实现快照
 

@@ -25,6 +25,7 @@ const migration = [
   readMigration("0037_model_hub_expert_options.sql"),
   readMigration("0046_model_hub_zhipu_glm.sql"),
   readMigration("0051_model_hub_connection_commits.sql"),
+  readMigration("0056_model_hub_failure_diagnostics.sql"),
 ].join("\n");
 
 describe("TauriModelHubStore", () => {
@@ -325,6 +326,64 @@ describe("TauriModelHubStore", () => {
     expect(() => new BrowserDevelopmentModelHubStore(window.localStorage, clock)).toThrow();
   });
 
+  it("upgrades legacy browser scan ids as honest no-detail placeholders", async () => {
+    window.localStorage.clear();
+    const store = new BrowserDevelopmentModelHubStore(window.localStorage, clock);
+    await store.saveConnection({
+      id: "legacy-browser-scan",
+      providerKind: "custom_openai_compatible",
+      displayName: "Legacy browser scan",
+      baseUrlOverride: "https://legacy-browser.example.test/v1",
+      credentialState: "missing",
+      authenticationMode: "none",
+      expectedRevision: null,
+    });
+    await store.syncCatalog({
+      syncId: "legacy-browser-sync",
+      connectionId: "legacy-browser-scan",
+      source: "manual",
+      status: "succeeded",
+      models: [{ id: "legacy-browser-model", providerModelId: "legacy-writer" }],
+    });
+    await store.recordCapabilityScan({
+      scanId: "legacy-browser-scan-id",
+      catalogEntryId: "legacy-browser-model",
+      scanKind: "provider_metadata",
+      status: "failed",
+      evidenceVersion: "legacy-v1",
+      errorCode: "MODEL_OUTPUT_TRUNCATED",
+    });
+
+    const database = JSON.parse(
+      window.localStorage.getItem(DEVELOPMENT_MODEL_HUB_KEY) ?? "null",
+    ) as {
+      schemaVersion: number;
+      state: {
+        capabilityScans?: Record<string, unknown>;
+        capabilityScanIds?: Record<string, true>;
+      };
+    };
+    database.schemaVersion = 5;
+    database.state.capabilityScanIds = Object.fromEntries(
+      Object.keys(database.state.capabilityScans ?? {}).map((id) => [id, true]),
+    );
+    delete database.state.capabilityScans;
+    window.localStorage.setItem(DEVELOPMENT_MODEL_HUB_KEY, JSON.stringify(database));
+
+    const reopened = new BrowserDevelopmentModelHubStore(window.localStorage, clock);
+    await expect(reopened.listRecentAiFailures()).resolves.toEqual([]);
+    await expect(
+      reopened.recordCapabilityScan({
+        scanId: "legacy-browser-scan-id",
+        catalogEntryId: "legacy-browser-model",
+        scanKind: "provider_metadata",
+        status: "failed",
+        evidenceVersion: "replacement-v1",
+        errorCode: "MODEL_OUTPUT_TRUNCATED",
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_CAPABILITY_SCAN_CONFLICT" });
+  });
+
   it("never reassigns an existing connection id to another provider kind", async () => {
     const executor = new NodeSqliteExecutor(migration);
     const sqlite = new TauriModelHubStore(executor, clock);
@@ -604,6 +663,25 @@ describe("TauriModelHubStore", () => {
       }),
     ).rejects.toMatchObject({ code: "MODEL_HUB_ROUTE_SECRET_REJECTED" });
     await executor.close();
+  });
+
+  it("persists and lists only bounded AI failure metadata in SQLite and browser storage", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    const sqlite = new TauriModelHubStore(executor, clock);
+    await assertRecentAiFailurePersistence(
+      sqlite,
+      () => new TauriModelHubStore(executor, clock),
+      "sqlite-failure",
+    );
+    await executor.close();
+
+    window.localStorage.clear();
+    const browser = new BrowserDevelopmentModelHubStore(window.localStorage, clock);
+    await assertRecentAiFailurePersistence(
+      browser,
+      () => new BrowserDevelopmentModelHubStore(window.localStorage, clock),
+      "browser-failure",
+    );
   });
 
   it("persists cost, privacy, and aggregate evaluation evidence without content", async () => {
@@ -1096,6 +1174,154 @@ async function assertLocalToRemoteTransitionFailsClosed(
       expectedRevision: null,
     }),
   ).rejects.toMatchObject({ code: "MODEL_HUB_PRIVACY_BLOCKED" });
+}
+
+async function assertRecentAiFailurePersistence(
+  store: TauriModelHubStore | BrowserDevelopmentModelHubStore,
+  reopen: () => TauriModelHubStore | BrowserDevelopmentModelHubStore,
+  id: string,
+): Promise<void> {
+  await store.saveConnection({
+    id,
+    providerKind: "custom_openai_compatible",
+    displayName: "Failure diagnostics provider",
+    baseUrlOverride: "https://failure-diagnostics.example.test/v1",
+    credentialState: "missing",
+    authenticationMode: "none",
+    expectedRevision: null,
+  });
+  await store.syncCatalog({
+    syncId: `${id}-sync`,
+    connectionId: id,
+    source: "manual",
+    status: "succeeded",
+    models: [{ id: `${id}-model`, providerModelId: "writer-model" }],
+  });
+
+  await store.recordCapabilityScan({
+    scanId: `${id}-scan`,
+    catalogEntryId: `${id}-model`,
+    scanKind: "lightweight_probe",
+    status: "failed",
+    evidenceVersion: "writing-probe-v1",
+    errorCode: "MODEL_OUTPUT_TRUNCATED",
+    errorSummary: "never-export-this-capability-summary",
+    failure: {
+      requestId: `req-${id}-probe-0001`,
+      stage: "response_normalization",
+      retryable: false,
+      httpStatus: 200,
+      finishReason: "length",
+      visibleContentLength: 0,
+      reasoningPresent: true,
+      stream: false,
+      attempt: 1,
+      requestedMaxOutputTokens: 8,
+    },
+  });
+
+  const invocation = await store.startInvocation({
+    id: `${id}-invocation`,
+    task: "prose_generation",
+    connectionId: id,
+    catalogEntryId: `${id}-model`,
+    providerKindSnapshot: "custom_openai_compatible",
+    modelIdSnapshot: "writer-model",
+    routeReason: "user_override",
+    attempt: 2,
+    privacyPolicy: "cloud_allowed",
+    dataDestination: "remote",
+  });
+  await store.finishInvocation({
+    id: invocation.id,
+    status: "failed",
+    errorCode: "AI_UPSTREAM_UNAVAILABLE",
+    errorSummary: "never-export-this-invocation-summary",
+    failure: {
+      requestId: `req-${id}-invoke-0001`,
+      stage: "http_response",
+      retryable: true,
+      httpStatus: 503,
+      visibleContentLength: 0,
+      reasoningPresent: false,
+      stream: true,
+      attempt: 2,
+      requestedMaxOutputTokens: 512,
+    },
+    expectedRevision: invocation.revision,
+  });
+
+  const failures = await reopen().listRecentAiFailures(25);
+  expect(failures).toHaveLength(2);
+  expect(failures).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        diagnosticId: `capability_scan:${id}-scan`,
+        providerKind: "custom_openai_compatible",
+        connectionId: id,
+        modelId: "writer-model",
+        taskType: "capability_probe",
+        normalizedErrorCode: "MODEL_OUTPUT_TRUNCATED",
+        stage: "response_normalization",
+        requestId: `req-${id}-probe-0001`,
+        httpStatus: 200,
+        finishReason: "length",
+        visibleContentLength: 0,
+        reasoningPresent: true,
+        stream: false,
+        attempt: 1,
+        requestedMaxOutputTokens: 8,
+      }),
+      expect.objectContaining({
+        diagnosticId: `model_invocation:${id}-invocation`,
+        taskType: "prose_generation",
+        normalizedErrorCode: "AI_UPSTREAM_UNAVAILABLE",
+        stage: "http_response",
+        requestId: `req-${id}-invoke-0001`,
+        retryable: true,
+        httpStatus: 503,
+        attempt: 2,
+        requestedMaxOutputTokens: 512,
+      }),
+    ]),
+  );
+  expect(await reopen().listRecentAiFailures(1)).toHaveLength(1);
+  expect(JSON.stringify(failures)).not.toContain("never-export-this");
+
+  await expect(
+    store.recordCapabilityScan({
+      scanId: `${id}-invalid-success`,
+      catalogEntryId: `${id}-model`,
+      scanKind: "lightweight_probe",
+      status: "succeeded",
+      evidenceVersion: "writing-probe-v1",
+      failure: { requestId: `req-${id}-invalid-0001` },
+    }),
+  ).rejects.toMatchObject({ code: "MODEL_HUB_CAPABILITY_SCAN_INVALID" });
+  await expect(
+    store.recordCapabilityScan({
+      scanId: `${id}-invalid-success-error`,
+      catalogEntryId: `${id}-model`,
+      scanKind: "lightweight_probe",
+      status: "succeeded",
+      evidenceVersion: "writing-probe-v1",
+      errorCode: "MODEL_OUTPUT_TRUNCATED",
+    }),
+  ).rejects.toMatchObject({ code: "MODEL_HUB_CAPABILITY_SCAN_INVALID" });
+  await expect(
+    store.recordCapabilityScan({
+      scanId: `${id}-sensitive-failure`,
+      catalogEntryId: `${id}-model`,
+      scanKind: "lightweight_probe",
+      status: "failed",
+      evidenceVersion: "writing-probe-v1",
+      errorCode: "MODEL_OUTPUT_TRUNCATED",
+      failure: {
+        requestId: `req-${id}-sensitive-0001`,
+        prompt: "must-never-be-accepted",
+      } as never,
+    }),
+  ).rejects.toMatchObject({ code: "MODEL_HUB_FAILURE_METADATA_INVALID" });
 }
 
 function readMigration(fileName: string): string {

@@ -86,6 +86,15 @@ function chineseErrorDescription(code: AppError["code"]): string {
 }
 
 function recordErrorDescription(code: string): string {
+  if (code === "MODEL_OUTPUT_TRUNCATED") {
+    return "模型在返回可见文字前或返回过程中达到输出上限。能力验证会使用更充足的固定预算并为 DeepSeek 关闭推理；若仍失败，请重新同步模型后重试，或改选另一个文本模型。";
+  }
+  if (code === "MODEL_OUTPUT_EMPTY") {
+    return "连接已建立，但模型没有返回可用于写作的可见文字。请确认所选模型支持文本生成；若它只返回推理内容，请改选普通文本模型后重试。";
+  }
+  if (code === "MODEL_HUB_ROUTE_NOT_CONFIGURED") {
+    return "这项写作任务还没有可用的 AI 分工。请先验证至少一个模型的写作能力，再在 Model Hub 中应用智能推荐；缺少 Embedding 不会阻止基础文本写作。";
+  }
   if (code === "CREATIVE_JOURNEY_STORAGE_QUOTA_EXCEEDED") {
     return "本地存储空间不足，本次更改没有保存。请保持当前页面打开，释放设备或浏览器存储空间后，再次点击原来的创建或保存操作；当前输入仍保留在页面中。";
   }

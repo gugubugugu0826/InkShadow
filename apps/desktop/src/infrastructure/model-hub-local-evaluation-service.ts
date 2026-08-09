@@ -7,6 +7,7 @@ import {
   type ModelHubTextTaskExecutionResult,
 } from "./model-hub-execution-service";
 import type { ModelEvaluationResult, ModelHubStore } from "./model-hub-store";
+import { MODEL_HUB_TEXT_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS } from "./model-hub-text-capability-probe";
 
 export interface ModelHubLocalEvaluationReceipt {
   readonly result: ModelEvaluationResult;
@@ -88,9 +89,10 @@ export class ModelHubLocalEvaluationService {
       try {
         result = await this.executeText(this.dependencies, {
           dispatchScope: { kind: "non_project", reason: "connection_probe" },
+          reasoningPolicy: "capability_probe",
           task,
           messages: probe.messages,
-          maximumOutputTokens: 64,
+          maximumOutputTokens: MODEL_HUB_TEXT_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
           temperature: 0,
           generationId: this.ids.next(),
         });

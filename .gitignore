@@ -107,6 +107,7 @@ installer/
 !/docs/execution/CURRENT_STATUS.md
 !/docs/execution/TEST_RESULTS.md
 !/docs/execution/RELEASE_CHECKLIST.md
+!/docs/execution/2026-08-09-DEEPSEEK-TEXT-PROBE-P0.md
 *.mdx
 *.doc
 *.docx

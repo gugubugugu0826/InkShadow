@@ -87,6 +87,12 @@ pub(crate) enum ModelMessageRole {
     Assistant,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReasoningMode {
+    Disabled,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ModelMessage {
@@ -103,6 +109,8 @@ pub(crate) struct StartGenerationRequest {
     pub(crate) messages: Vec<ModelMessage>,
     pub(crate) max_output_tokens: u32,
     pub(crate) temperature: Option<f32>,
+    #[serde(default)]
+    pub(crate) reasoning_mode: Option<ReasoningMode>,
     pub(crate) dispatch_scope: NativeModelDispatchScope,
 }
 
@@ -188,13 +196,30 @@ pub(crate) struct GenerationUsage {
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(tag = "phase", rename_all = "snake_case")]
+#[serde(
+    tag = "phase",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub(crate) enum GenerationEventStatus {
     Started,
     Delta,
-    Completed { usage: Option<GenerationUsage> },
+    Completed {
+        usage: Option<GenerationUsage>,
+        streamed: bool,
+    },
     Cancelled,
-    Failed { code: &'static str, retryable: bool },
+    Failed {
+        code: &'static str,
+        retryable: bool,
+        request_id: String,
+        http_status: Option<u16>,
+        finish_reason: Option<String>,
+        reasoning_present: Option<bool>,
+        reasoning_length: Option<u64>,
+        stream: Option<bool>,
+        usage: Option<GenerationUsage>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -240,6 +265,43 @@ mod tests {
             serde_json::to_string(&ProviderKind::Gemini).expect("serialize Gemini"),
             "\"gemini\""
         );
+    }
+
+    #[test]
+    fn generation_terminal_events_expose_only_flat_redacted_observations() {
+        let event = GenerationEvent {
+            generation_id: "generation-1".to_owned(),
+            sequence: 8,
+            delta: String::new(),
+            status: GenerationEventStatus::Failed {
+                code: "MODEL_OUTPUT_TRUNCATED",
+                retryable: false,
+                request_id: "request-1".to_owned(),
+                http_status: Some(200),
+                finish_reason: Some("length".to_owned()),
+                reasoning_present: Some(true),
+                reasoning_length: Some(24),
+                stream: Some(true),
+                usage: Some(GenerationUsage {
+                    input_tokens: 9,
+                    output_tokens: 8,
+                    cached_input_tokens: None,
+                }),
+            },
+        };
+        let value = serde_json::to_value(event).expect("event should serialize");
+        let status = value["status"].as_object().expect("status object");
+        assert_eq!(status["requestId"], "request-1");
+        assert_eq!(status["httpStatus"], 200);
+        assert_eq!(status["finishReason"], "length");
+        assert_eq!(status["reasoningPresent"], true);
+        assert_eq!(status["reasoningLength"], 24);
+        assert_eq!(status["stream"], true);
+        assert_eq!(status["usage"]["outputTokens"], 8);
+        let serialized = value.to_string();
+        assert!(!serialized.contains("private chain"));
+        assert!(!serialized.contains("prompt"));
+        assert!(!serialized.contains("secret"));
     }
 
     #[test]

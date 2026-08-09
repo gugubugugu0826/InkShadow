@@ -18,6 +18,10 @@ import {
   type ModelProviderKind,
 } from "./model-hub-provider-registry";
 import { MODEL_HUB_READINESS_CHANGED_EVENT } from "./model-hub-readiness";
+import {
+  modelHubTextCapabilityProbeFailureMetadata,
+  runModelHubTextCapabilityProbe,
+} from "./model-hub-text-capability-probe";
 import type {
   ModelCatalogEntry,
   ModelHubConnectionCommit,
@@ -149,7 +153,7 @@ export async function connectQuickModelProvider(
       await savePreparedCredential(runtime, credentialProviderId, submittedSecret);
       credentialConfigured = true;
     }
-    const listed = await inspectQuickEndpoint(runtime, endpoint, manualModelId);
+    const listed = await inspectQuickEndpoint(runtime, endpoint, input.provider, manualModelId);
     if (listed.models.length === 0) {
       throw quickError(
         "QUICK_MODEL_CATALOG_EMPTY",
@@ -367,23 +371,17 @@ async function cleanupPublishedCredential(
 async function inspectQuickEndpoint(
   runtime: DesktopRuntime,
   endpoint: NativeModelEndpointConfig,
+  providerKind: ModelProviderKind,
   manualModelId: string | null,
 ): Promise<NativeModelListResponse> {
   if (manualModelId !== null) {
-    const generated = await runtime.modelGateway.generate({
-      dispatchScope: { kind: "non_project", reason: "connection_probe" },
+    await runModelHubTextCapabilityProbe({
+      gateway: runtime.modelGateway,
+      providerKind,
       generationId: runtime.ids.next(),
       config: endpoint,
       model: manualModelId,
-      messages: [{ role: "user", content: "只回复：OK" }],
-      maxOutputTokens: 8,
     });
-    if (generated.text.trim().length === 0) {
-      throw quickError(
-        "QUICK_MODEL_TEXT_PROBE_EMPTY",
-        "连接已建立，但这个模型没有返回文字。请检查模型或 Endpoint ID 后重试。",
-      );
-    }
     return Object.freeze({
       provider: endpoint.provider,
       models: Object.freeze([Object.freeze({ id: manualModelId, displayName: manualModelId })]),
@@ -471,7 +469,6 @@ export async function configureQuickBookStartRoute(
   });
 
   const probeScanId = runtime.ids.next();
-  const probeObservation = { streamed: false };
   try {
     const currentConnection = await runtime.modelHub.findConnection(connection.id);
     const currentCatalogEntry =
@@ -493,28 +490,18 @@ export async function configureQuickBookStartRoute(
         catalogEntry: currentCatalogEntry,
       }),
     );
-    const generated = await runtime.modelGateway.generate({
-      dispatchScope: { kind: "non_project", reason: "connection_probe" },
+    const generated = await runModelHubTextCapabilityProbe({
+      gateway: runtime.modelGateway,
+      providerKind: currentConnection.providerKind,
       generationId: runtime.ids.next(),
       config: modelHubNativeEndpointConfig(currentConnection),
       model: currentCatalogEntry.providerModelId,
-      messages: [{ role: "user", content: "只回复：OK" }],
-      maxOutputTokens: 8,
-      onDelta: (text) => {
-        if (text.trim().length > 0) probeObservation.streamed = true;
-      },
     });
-    if (generated.text.trim().length === 0) {
-      throw quickError(
-        "QUICK_MODEL_TEXT_PROBE_EMPTY",
-        "模型可以连接，但没有返回文字。请选择支持文本生成的模型后重试。",
-      );
-    }
     await runtime.modelHub.recordCapabilityScan({
       scanId: probeScanId,
       catalogEntryId: catalogEntry.id,
       scanKind: "lightweight_probe",
-      status: "succeeded",
+      status: generated.acceptedTruncatedOutput ? "partial" : "succeeded",
       evidenceVersion: "quick-text-probe-v1",
       evidence: [
         {
@@ -524,7 +511,7 @@ export async function configureQuickBookStartRoute(
           evidenceSource: "lightweight_probe",
           evidenceSummary: "固定短文本探测成功；未保存探测输入或模型输出。",
         },
-        ...(probeObservation.streamed
+        ...(generated.streamed
           ? [
               {
                 id: runtime.ids.next(),
@@ -536,6 +523,14 @@ export async function configureQuickBookStartRoute(
             ]
           : []),
       ],
+      ...(generated.partialFailure === null
+        ? {}
+        : {
+            errorCode: "MODEL_OUTPUT_TRUNCATED",
+            errorSummary:
+              "固定能力探针已返回可见文字，但响应以输出上限结束；文本生成能力已确认，未保存探针输出。",
+            failure: generated.partialFailure,
+          }),
     });
   } catch (cause: unknown) {
     const normalized = normalizeQuickError(cause, connection.providerKind);
@@ -548,6 +543,7 @@ export async function configureQuickBookStartRoute(
         evidenceVersion: "quick-text-probe-v1",
         errorCode: normalized.code,
         errorSummary: normalized.message,
+        failure: modelHubTextCapabilityProbeFailureMetadata(cause, connection.providerKind),
       })
       .catch(() => undefined);
     throw normalized;

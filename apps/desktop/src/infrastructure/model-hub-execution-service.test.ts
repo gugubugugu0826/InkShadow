@@ -8,6 +8,7 @@ import {
   ModelHubExecutionError,
   type ModelHubTextExecutionDependencies,
 } from "./model-hub-execution-service";
+import { ModelCenterError } from "./model-center-store";
 import type { ModelProviderKind, NovelAiTask } from "./model-hub-provider-registry";
 import {
   BrowserDevelopmentModelHubStore,
@@ -611,7 +612,18 @@ describe("Model Hub text execution service", () => {
       fallbackCatalogEntryId: fallback.id,
       failurePolicy: "use_fallback",
     });
-    harness.generate.mockRejectedValue({ code: "UPSTREAM_TIMEOUT", retryable: true });
+    harness.generate.mockRejectedValue(
+      new ModelCenterError("UPSTREAM_TIMEOUT", "private provider failure", true, {
+        requestId: "upstream-request-1",
+        httpStatus: 504,
+        finishReason: "length",
+        visibleContentLength: 0,
+        reasoningPresent: true,
+        stream: true,
+        inputTokens: 12,
+        outputTokens: 20,
+      }),
+    );
     const startInvocation = vi.spyOn(harness.modelHub, "startInvocation");
     const finishInvocation = vi.spyOn(harness.modelHub, "finishInvocation");
 
@@ -636,9 +648,34 @@ describe("Model Hub text execution service", () => {
     expect(finishInvocation).toHaveBeenCalledOnce();
     expect(finishInvocation).toHaveBeenCalledWith(
       expect.objectContaining({
-        status: "failed",
+        status: "timed_out",
         errorCode: "UPSTREAM_TIMEOUT",
+        failure: {
+          requestId: "upstream-request-1",
+          stage: "http_response",
+          retryable: true,
+          httpStatus: 504,
+          finishReason: "length",
+          visibleContentLength: 0,
+          reasoningPresent: true,
+          stream: true,
+          attempt: 1,
+          requestedMaxOutputTokens: 20,
+        },
       }),
+    );
+    await expect(harness.modelHub.listRecentAiFailures()).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          providerKind: "custom_openai_compatible",
+          connectionId: "dispatched-primary",
+          modelId: "dispatched-primary-model",
+          normalizedErrorCode: "UPSTREAM_TIMEOUT",
+          stage: "http_response",
+          requestId: "upstream-request-1",
+          requestedMaxOutputTokens: 20,
+        }),
+      ]),
     );
   });
 

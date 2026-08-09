@@ -3,6 +3,7 @@ import type { Clock, UuidV7Generator } from "@inkshadow/domain";
 import {
   getModelProviderPreset,
   isLoopbackModelBaseUrl,
+  modelProviderTextCapabilityProbePolicy,
   type NovelAiTask,
 } from "./model-hub-provider-registry";
 import {
@@ -25,6 +26,8 @@ import type {
   ModelInvocationFact,
   ModelProviderConnection,
   NovelTaskRoute,
+  ModelFailureStage,
+  SafeAiFailureMetadata,
 } from "./model-hub-store";
 import type {
   NativeModelGatewayClient,
@@ -46,6 +49,8 @@ export interface InspectModelHubTextTaskInput {
 export interface ExecuteModelHubTextTaskInput extends InspectModelHubTextTaskInput {
   readonly dispatchScope: NativeModelDispatchScope;
   readonly generationId?: string;
+  /** Applies only the shared, provider-aware reasoning policy used by content-free probes. */
+  readonly reasoningPolicy?: "capability_probe";
   readonly onBeforeDispatch?: (
     selection: Readonly<{
       generationId: string;
@@ -258,6 +263,10 @@ export async function executeModelHubTextTask(
       }),
     );
     dispatched = true;
+    const probePolicy =
+      input.reasoningPolicy === "capability_probe"
+        ? modelProviderTextCapabilityProbePolicy(current.target.connection.providerKind)
+        : null;
     const generated = await dependencies.modelGateway.generate({
       generationId,
       config: modelHubNativeEndpointConfig(current.target.connection),
@@ -266,6 +275,9 @@ export async function executeModelHubTextTask(
       dispatchScope: input.dispatchScope,
       maxOutputTokens: target.maximumOutputTokens,
       ...(target.temperature === undefined ? {} : { temperature: target.temperature }),
+      ...(probePolicy?.reasoningMode === undefined || probePolicy.reasoningMode === null
+        ? {}
+        : { reasoningMode: probePolicy.reasoningMode }),
       ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
     });
     const cost = calculateActualCost(target.costPrivacy, generated.usage);
@@ -298,14 +310,30 @@ export async function executeModelHubTextTask(
     const normalized = dispatched
       ? normalizeDispatchedError(cause)
       : normalizePreDispatchError(cause);
-    const status = normalized.code === "MODEL_GENERATION_CANCELLED" ? "cancelled" : "failed";
+    const status =
+      normalized.code === "MODEL_GENERATION_CANCELLED"
+        ? "cancelled"
+        : normalized.code.includes("TIMEOUT")
+          ? "timed_out"
+          : "failed";
+    const failure =
+      status === "failed" || status === "timed_out"
+        ? safeExecutionFailureMetadata(
+            cause,
+            normalized,
+            usedFallback ? 2 : 1,
+            target.maximumOutputTokens,
+            dispatched,
+          )
+        : null;
     invocation = await dependencies.modelHub.finishInvocation({
       id: invocation.id,
       status,
-      ...(status === "failed"
+      ...(status === "failed" || status === "timed_out"
         ? {
             errorCode: normalized.code,
             errorSummary: "模型调用失败；作品正文和已有 AI 建议版本均未改变。",
+            failure,
           }
         : {}),
       expectedRevision: invocation.revision,
@@ -650,6 +678,10 @@ function isArrayValue(value: unknown): boolean {
   return Array.isArray(value);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function estimateMessageTokens(messages: readonly NativeModelMessage[]): number {
   const bytes = new TextEncoder().encode(messages.map(({ content }) => content).join("\n")).length;
   // Every input byte is counted as a possible token, then a deliberately large
@@ -783,6 +815,62 @@ function normalizeDispatchedError(cause: unknown): ModelHubExecutionError {
     true,
     true,
   );
+}
+
+function safeExecutionFailureMetadata(
+  cause: unknown,
+  normalized: ModelHubExecutionError,
+  attempt: number,
+  requestedMaxOutputTokens: number,
+  dispatched: boolean,
+): SafeAiFailureMetadata {
+  const diagnostics = isRecord(cause) && isRecord(cause.diagnostics) ? cause.diagnostics : null;
+  const httpStatus = safeFailureInteger(diagnostics?.httpStatus, 100, 599);
+  return Object.freeze({
+    requestId: safeFailureString(diagnostics?.requestId),
+    stage: executionFailureStage(normalized.code, dispatched, httpStatus),
+    retryable:
+      isRecord(cause) && typeof cause.retryable === "boolean"
+        ? cause.retryable
+        : normalized.retryable,
+    httpStatus,
+    finishReason: safeFailureString(diagnostics?.finishReason),
+    visibleContentLength: safeFailureInteger(diagnostics?.visibleContentLength, 0, 100_000_000),
+    reasoningPresent:
+      typeof diagnostics?.reasoningPresent === "boolean" ? diagnostics.reasoningPresent : null,
+    stream: typeof diagnostics?.stream === "boolean" ? diagnostics.stream : null,
+    attempt,
+    requestedMaxOutputTokens,
+  });
+}
+
+function executionFailureStage(
+  code: string,
+  dispatched: boolean,
+  httpStatus: number | null,
+): ModelFailureStage {
+  if (!dispatched) return "request_preparation";
+  if (httpStatus !== null) return "http_response";
+  if (/STREAM|SSE/u.test(code)) return "stream_parse";
+  if (/OUTPUT|RESPONSE|MALFORMED|JSON/u.test(code)) return "response_normalization";
+  if (code.includes("HTTP")) return "http_response";
+  if (/NETWORK|TIMEOUT|DNS|TLS|TRANSPORT/u.test(code)) return "transport";
+  return "dispatch";
+}
+
+function safeFailureString(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= 128 &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+    ? value
+    : null;
+}
+
+function safeFailureInteger(value: unknown, minimum: number, maximum: number): number | null {
+  return Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) <= maximum
+    ? (value as number)
+    : null;
 }
 
 function executionError(code: string, message: string, retryable = false): ModelHubExecutionError {

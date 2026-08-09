@@ -417,6 +417,13 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0055_continuous_story_state_historical_route_receipts.sql"
                 ),
             ),
+            migration(
+                59,
+                "persist redacted Model Hub failure diagnostics",
+                include_str!(
+                    "../../../../packages/data/migrations/0056_model_hub_failure_diagnostics.sql"
+                ),
+            ),
         ]),
         ignore_missing: false,
         locking: true,

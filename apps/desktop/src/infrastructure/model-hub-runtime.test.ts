@@ -169,6 +169,12 @@ describe("Model Hub runtime wiring", () => {
       state: Record<string, unknown>;
     };
     previousDatabase.schemaVersion = 2;
+    const currentScans = previousDatabase.state.capabilityScans as
+      Record<string, unknown> | undefined;
+    previousDatabase.state.capabilityScanIds = Object.fromEntries(
+      Object.keys(currentScans ?? {}).map((scanId) => [scanId, true]),
+    );
+    delete previousDatabase.state.capabilityScans;
     delete previousDatabase.state.evaluationResults;
     window.localStorage.setItem(DEVELOPMENT_MODEL_HUB_KEY, JSON.stringify(previousDatabase));
 
@@ -193,7 +199,7 @@ describe("Model Hub runtime wiring", () => {
     });
     expect(
       JSON.parse(window.localStorage.getItem(DEVELOPMENT_MODEL_HUB_KEY) ?? "{}"),
-    ).toMatchObject({ schemaVersion: 5 });
+    ).toMatchObject({ schemaVersion: 6 });
     await upgraded.close();
   });
 });

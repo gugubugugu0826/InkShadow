@@ -168,6 +168,56 @@ describe("Model Hub evidence router", () => {
     expect(plan.unroutableTasks).toEqual(["embedding"]);
   });
 
+  it("routes all 16 core text tasks with only text evidence and no evaluations or embeddings", () => {
+    const seeded = candidate("text-only", "remote", 9000, "1000000");
+    const textOnly: ModelHubRoutingCandidate = {
+      ...seeded,
+      capabilities: [
+        capability(
+          "text-only-probe",
+          "text_generation",
+          "supported",
+          "lightweight_probe",
+          seeded.catalogEntry.id,
+        ),
+      ],
+      evaluations: [],
+    };
+
+    const plan = buildModelHubRoutingPlan({
+      scheme: "smart",
+      candidates: [textOnly],
+      now: NOW,
+    });
+
+    expect(plan.routes.map(({ task }) => task)).toEqual([
+      "idea_discussion",
+      "book_start_guidance",
+      "prose_generation",
+      "continuation",
+      "rewrite",
+      "polish",
+      "outline_planning",
+      "scene_breakdown",
+      "chapter_summary",
+      "long_memory_compression",
+      "character_extraction",
+      "world_extraction",
+      "contradiction_check",
+      "pov_check",
+      "character_voice_check",
+      "content_quality_check",
+    ]);
+    expect(plan.unroutableTasks).toEqual([
+      "what_if_simulation",
+      "embedding",
+      "rerank",
+      "image_generation",
+      "vision_understanding",
+      "translation",
+    ]);
+  });
+
   it("never emits a legacy temperature for an Anthropic route", () => {
     const claude = candidate("claude-connection", "remote", 9000, "1000000", 400, [], {
       providerKind: "anthropic_claude",

@@ -220,6 +220,7 @@ import {
   ModelCenterError,
   TauriModelCenterStore,
   type ModelCenterStore,
+  type ModelCenterFailureDiagnostics,
   type ModelProfile,
 } from "./model-center-store";
 import {
@@ -516,6 +517,7 @@ export interface NativeModelGenerationInput {
   readonly messages: readonly NativeModelMessage[];
   readonly maxOutputTokens: number;
   readonly temperature?: number;
+  readonly reasoningMode?: "disabled";
   readonly dispatchScope: NativeModelDispatchScope;
   readonly onDelta?: (accumulatedText: string) => void;
 }
@@ -529,6 +531,8 @@ export interface NativeModelGenerationUsage {
 export interface NativeModelGenerationResult {
   readonly text: string;
   readonly usage: NativeModelGenerationUsage | null;
+  /** Authoritative native transport observation; absent only in legacy test doubles. */
+  readonly streamed?: boolean;
 }
 
 export interface NativeModelGatewayClient extends NativeEmbeddingGatewayClient {
@@ -681,12 +685,19 @@ type NativeGenerationStatus =
   | Readonly<{
       phase: "completed";
       usage: NativeModelGenerationUsage | null;
+      streamed?: boolean;
     }>
   | Readonly<{ phase: "cancelled" }>
   | Readonly<{
       phase: "failed";
       code: string;
       retryable: boolean;
+      requestId?: string;
+      httpStatus?: number | null;
+      finishReason?: string | null;
+      reasoningPresent?: boolean | null;
+      stream?: boolean | null;
+      usage?: NativeModelGenerationUsage | null;
     }>;
 
 interface NativeGenerationEvent {
@@ -810,7 +821,10 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
         cleanup();
         reject(normalizeNativeModelGatewayError(cause));
       };
-      const complete = (usage: NativeModelGenerationUsage | null) => {
+      const complete = (
+        usage: NativeModelGenerationUsage | null,
+        streamed: boolean | undefined,
+      ) => {
         if (settled) {
           return;
         }
@@ -841,6 +855,7 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
           Object.freeze({
             text: accumulated,
             usage: validatedUsage,
+            ...(streamed === undefined ? {} : { streamed }),
           }),
         );
       };
@@ -869,7 +884,7 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
               input.onDelta?.(accumulated);
               return;
             case "completed":
-              complete(payload.status.usage);
+              complete(payload.status.usage, payload.status.streamed);
               return;
             case "cancelled":
               fail(
@@ -886,6 +901,7 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
                   payload.status.code,
                   "Native model generation failed.",
                   payload.status.retryable,
+                  nativeFailureDiagnostics(payload.status, accumulated.length),
                 ),
               );
           }
@@ -911,6 +927,7 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
             messages: input.messages,
             maxOutputTokens: input.maxOutputTokens,
             ...(includeTemperature ? { temperature: input.temperature } : {}),
+            ...(input.reasoningMode === undefined ? {} : { reasoningMode: input.reasoningMode }),
             dispatchScope: input.dispatchScope,
           },
         });
@@ -4807,6 +4824,7 @@ function normalizeNativeModelGatewayError(cause: unknown): ModelCenterError {
       cause.code,
       "The native model gateway rejected the operation.",
       cause.retryable === true,
+      nativeFailureDiagnostics(cause, null),
     );
   }
   return new ModelCenterError(
@@ -4814,6 +4832,75 @@ function normalizeNativeModelGatewayError(cause: unknown): ModelCenterError {
     "Native model generation failed unexpectedly.",
     true,
   );
+}
+
+function nativeFailureDiagnostics(
+  value: unknown,
+  visibleContentLength: number | null,
+): ModelCenterFailureDiagnostics | null {
+  const record = isRecord(value) ? value : {};
+  const requestId = safeDiagnosticIdentifier(record.requestId);
+  const httpStatus = safeHttpStatus(record.httpStatus);
+  const finishReason = safeFinishReason(record.finishReason);
+  const reasoningPresent =
+    typeof record.reasoningPresent === "boolean" ? record.reasoningPresent : null;
+  const stream = typeof record.stream === "boolean" ? record.stream : null;
+  const usage = isRecord(record.usage) ? record.usage : null;
+  const inputTokens = safeDiagnosticTokenCount(usage?.inputTokens);
+  const outputTokens = safeDiagnosticTokenCount(usage?.outputTokens);
+  const safeVisibleLength =
+    visibleContentLength !== null &&
+    Number.isSafeInteger(visibleContentLength) &&
+    visibleContentLength >= 0
+      ? visibleContentLength
+      : null;
+  if (
+    requestId === null &&
+    httpStatus === null &&
+    finishReason === null &&
+    safeVisibleLength === null &&
+    reasoningPresent === null &&
+    stream === null &&
+    inputTokens === null &&
+    outputTokens === null
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    requestId,
+    httpStatus,
+    finishReason,
+    visibleContentLength: safeVisibleLength,
+    reasoningPresent,
+    stream,
+    inputTokens,
+    outputTokens,
+  });
+}
+
+function safeDiagnosticIdentifier(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= 128 &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+    ? value
+    : null;
+}
+
+function safeHttpStatus(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) >= 100 && (value as number) <= 599
+    ? (value as number)
+    : null;
+}
+
+function safeFinishReason(value: unknown): string | null {
+  return typeof value === "string" && /^[a-z0-9_-]{1,64}$/u.test(value) ? value : null;
+}
+
+function safeDiagnosticTokenCount(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= 100_000_000
+    ? (value as number)
+    : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -181,6 +181,10 @@ const inkShadowMigration = [
     ),
     "utf8",
   ),
+  readFileSync(
+    new URL("../migrations/0056_model_hub_failure_diagnostics.sql", import.meta.url),
+    "utf8",
+  ),
 ].join("\n");
 const BACKUP_PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const BACKUP_ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
@@ -446,6 +450,18 @@ describe("DatabaseMaintenanceService", () => {
       "DELETE FROM model_hub_connection_commits WHERE connection_id = 'maintenance-custom-model'",
     );
     await executor.execute(
+      `UPDATE model_capability_scans
+       SET finish_reason = 'changed', visible_content_length = 99,
+           requested_max_output_tokens = 128
+       WHERE id = 'maintenance-failed-probe'`,
+    );
+    await executor.execute(
+      `UPDATE model_invocation_facts
+       SET http_status = 502, failure_retryable = 1,
+           requested_max_output_tokens = 256
+       WHERE id = 'maintenance-failed-invocation'`,
+    );
+    await executor.execute(
       `UPDATE device_public_key_records
        SET state = 'credential_missing', display_name = '恢复前改名', updated_at = ?
        WHERE device_id = ?`,
@@ -543,6 +559,48 @@ describe("DatabaseMaintenanceService", () => {
       ),
     ).resolves.toEqual([
       { phase: "cleanup_pending", cleanupCredentialProviderId: "maintenance-old-slot" },
+    ]);
+    await expect(
+      executor.select<{
+        id: string;
+        finishReason: string;
+        visibleContentLength: number;
+        requestedMaxOutputTokens: number;
+      }>(
+        `SELECT id, finish_reason AS finishReason,
+                visible_content_length AS visibleContentLength,
+                requested_max_output_tokens AS requestedMaxOutputTokens
+         FROM model_capability_scans
+         WHERE id = 'maintenance-failed-probe'`,
+      ),
+    ).resolves.toEqual([
+      {
+        id: "maintenance-failed-probe",
+        finishReason: "length",
+        visibleContentLength: 0,
+        requestedMaxOutputTokens: 64,
+      },
+    ]);
+    await expect(
+      executor.select<{
+        id: string;
+        httpStatus: number;
+        retryable: number;
+        requestedMaxOutputTokens: number;
+      }>(
+        `SELECT id, http_status AS httpStatus,
+                failure_retryable AS retryable,
+                requested_max_output_tokens AS requestedMaxOutputTokens
+         FROM model_invocation_facts
+         WHERE id = 'maintenance-failed-invocation'`,
+      ),
+    ).resolves.toEqual([
+      {
+        id: "maintenance-failed-invocation",
+        httpStatus: 504,
+        retryable: 0,
+        requestedMaxOutputTokens: 512,
+      },
     ]);
     await expect(
       executor.select<{ privacyMode: string; privacyRevision: number }>(
@@ -2381,6 +2439,60 @@ async function insertModelHubExpertConnection(executor: NodeSqliteExecutor): Pro
        'maintenance-current-slot', 'maintenance-old-slot', ?, ?
      )`,
     [now, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_catalog_syncs (
+       id, connection_id, source, status, discovered_model_count,
+       next_page_token_present, started_at, completed_at
+     ) VALUES (
+       'maintenance-model-sync', 'maintenance-custom-model', 'manual', 'succeeded',
+       1, 0, ?, ?
+     )`,
+    [now, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_catalog_entries (
+       id, connection_id, provider_model_id, display_name, catalog_source,
+       availability, lifecycle, first_discovered_at, last_seen_at, last_sync_id
+     ) VALUES (
+       'maintenance-model-catalog', 'maintenance-custom-model', 'maintenance-writer',
+       'Maintenance writer', 'manual', 'available', 'stable', ?, ?,
+       'maintenance-model-sync'
+     )`,
+    [now, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_capability_scans (
+       id, catalog_entry_id, scan_kind, status, evidence_version,
+       error_code, requested_at, started_at, completed_at,
+       diagnostic_request_id, failure_stage, failure_retryable, http_status,
+       finish_reason, visible_content_length, reasoning_present, streamed,
+       attempt, requested_max_output_tokens
+     ) VALUES (
+       'maintenance-failed-probe', 'maintenance-model-catalog',
+       'lightweight_probe', 'failed', 'maintenance-probe-v1',
+       'MODEL_OUTPUT_TRUNCATED', ?, ?, ?, 'maintenance-probe-request-0001',
+       'response_normalization', 0, 200, 'length', 0, 1, 1, 1, 64
+     )`,
+    [now, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_invocation_facts (
+       id, task, connection_id, catalog_entry_id, provider_kind_snapshot,
+       model_id_snapshot, route_reason, status, attempt, privacy_policy,
+       data_destination, error_code, started_at, completed_at, created_at,
+       diagnostic_request_id, failure_stage, failure_retryable, http_status,
+       finish_reason, visible_content_length, reasoning_present, streamed,
+       requested_max_output_tokens
+     ) VALUES (
+       'maintenance-failed-invocation', 'prose_generation',
+       'maintenance-custom-model', 'maintenance-model-catalog',
+       'custom_openai_compatible', 'maintenance-writer', 'user_override',
+       'failed', 1, 'cloud_allowed', 'remote', 'MODEL_TIMEOUT', ?, ?, ?,
+       'maintenance-invocation-request-0001', 'http_response', 0, 504,
+       NULL, 0, 0, 1, 512
+     )`,
+    [now, now, now],
   );
 }
 

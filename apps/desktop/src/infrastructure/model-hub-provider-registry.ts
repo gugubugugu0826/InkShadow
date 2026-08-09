@@ -117,7 +117,16 @@ export interface ModelProviderPreset {
   readonly basicFields: readonly ProviderFieldDefinition[];
   readonly expertFields: readonly ProviderFieldDefinition[];
   readonly modelDiscovery: ProviderModelDiscovery;
+  /** Provider-supported controls used only by the fixed, content-free text probe. */
+  readonly textCapabilityProbe?: Readonly<{
+    readonly reasoningMode: "disabled";
+  }>;
   readonly officialDocsUrl: string;
+}
+
+export interface ModelProviderTextCapabilityProbePolicy {
+  readonly maxOutputTokens: 64;
+  readonly reasoningMode: "disabled" | null;
 }
 
 export interface ProviderEndpointMetadata {
@@ -265,6 +274,7 @@ const PROVIDER_PRESETS: readonly ModelProviderPreset[] = Object.freeze([
       automatic: true,
       capabilityMetadata: false,
     },
+    textCapabilityProbe: { reasoningMode: "disabled" },
     officialDocsUrl: "https://api-docs.deepseek.com/api/list-models/",
   }),
   freezePreset({
@@ -507,6 +517,15 @@ export function getModelProviderPreset(provider: ModelProviderKind): ModelProvid
   return preset;
 }
 
+export function modelProviderTextCapabilityProbePolicy(
+  provider: ModelProviderKind,
+): ModelProviderTextCapabilityProbePolicy {
+  return Object.freeze({
+    maxOutputTokens: 64,
+    reasoningMode: getModelProviderPreset(provider).textCapabilityProbe?.reasoningMode ?? null,
+  });
+}
+
 export function isModelProviderKind(value: unknown): value is ModelProviderKind {
   return typeof value === "string" && (MODEL_PROVIDER_KINDS as readonly string[]).includes(value);
 }
@@ -706,6 +725,9 @@ function freezePreset(preset: ModelProviderPreset): ModelProviderPreset {
     basicFields: Object.freeze(preset.basicFields.map((field) => Object.freeze({ ...field }))),
     expertFields: Object.freeze(preset.expertFields.map((field) => Object.freeze({ ...field }))),
     modelDiscovery: Object.freeze({ ...preset.modelDiscovery }),
+    ...(preset.textCapabilityProbe === undefined
+      ? {}
+      : { textCapabilityProbe: Object.freeze({ ...preset.textCapabilityProbe }) }),
   });
 }
 

@@ -1,6 +1,6 @@
 # InkShadow Desktop 原生层逐文件指引
 
-> 基于源码快照：2026-08-08  
+> 基于源码快照：2026-08-09  
 > 文档状态：`SUPPORTING_CURRENT`  
 > 应用版本：`0.2.0`；设计基线：`DESIGN v0.3.1b`  
 > 覆盖范围：`apps/desktop/src-tauri`、本地 SQLite 原生桥、自动备份、系统凭据库、原生网络、项目密钥、安全更新与系统容量
@@ -52,7 +52,7 @@ React 页面
 | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
 | `apps/desktop/src-tauri/src/main.rs`                   | Windows GUI subsystem 入口；Release 隐藏控制台。                                                   |
 | `apps/desktop/src-tauri/src/lib.rs`                    | 模块组合、Tauri 启动、共享状态、插件和 59 个 command 注册。                                        |
-| `apps/desktop/src-tauri/src/local_migrations.rs`       | 把 `packages/data` 与 `packages/story-core` 的 58 个 SQL migration 编译进二进制并交给 SQLx。       |
+| `apps/desktop/src-tauri/src/local_migrations.rs`       | 把 `packages/data` 与 `packages/story-core` 的 59 个 SQL migration 编译进二进制并交给 SQLx。       |
 | `apps/desktop/src-tauri/src/automatic_backup.rs`       | 应用专属自动备份根、所有权标记、租约、清单 CAS、一次性目标票据、完整性核验和受限清理。             |
 | `apps/desktop/src-tauri/src/native_sqlite.rs`          | 固定库打开、迁移、查询、写入、事务、备份/恢复受控语句、资源上限和失败关闭。                        |
 | `apps/desktop/src-tauri/src/path_tickets.rs`           | 文件选择后的 5 分钟、会话绑定、不可伪造路径票据及文件身份防替换。                                  |
@@ -87,7 +87,9 @@ React 页面
 | 项目密钥         |    9 | `create_device_identity`、`get_device_identity_status`、`generate_project_data_key`、`wrap_project_data_key_for_device`、`unwrap_project_data_key_for_device`、`rewrap_project_data_key_for_team_recipients`、`create_project_recovery_kit`、`verify_project_recovery_kit`、`recover_project_data_key`                                                                                                                   |
 | 云会话与团队密钥 |   12 | `login_cloud_identity`、`verify_cloud_identity_email`、`refresh_cloud_session`、`get_cloud_session_status`、`send_cloud_api_request`、`send_cloud_deletion_credential_request`、`accept_current_device_team_project_key_envelope_from_cloud`、`inspect_stored_team_project_key_receipt`、`open_stored_team_project_key_receipt`、`remove_stored_team_project_key_receipt`、`logout_cloud_session`、`clear_cloud_session` |
 
-唯一主动事件为 `model-generation-event`，状态为 `started`、`delta`、`completed`、`cancelled` 或 `failed`。事件不会包含 Prompt 或 API Key。
+唯一主动事件为 `model-generation-event`，状态为 `started`、`delta`、`completed`、`cancelled` 或 `failed`。事件不会包含 Prompt 或 API Key。完成事件可声明原生响应是否实际流式；失败事件只携带
+扁平、有界的 request ID、HTTP/终止原因、可见内容长度、推理是否出现/长度、流式标记和 usage，
+不携带可见回答、推理正文或供应商原始响应。
 
 ## 5. 原生 SQLite
 
@@ -97,6 +99,8 @@ React 页面
 - 打开时强制 `foreign_keys=ON`、WAL、`synchronous=NORMAL`、5 秒 busy timeout。
 - 配置和全部 migration 验证成功后才返回随机会话 token。
 - migration 校验和不一致会报 `SQLITE_MIGRATION_INTEGRITY_FAILED` 并停止，而不是覆盖用户数据。
+- 当前前向上限为 Data `0056_model_hub_failure_diagnostics.sql` / Tauri `59`；Data 与 story-core
+  合并为一个原生连续序列，所以两个编号不要求相同。
 
 ### 5.2 SQL 与结果边界
 
@@ -198,6 +202,7 @@ React 页面
 |       56 | `packages/data/migrations/0053_writing_feedback_learning_policy_context.sql`         | 反馈发生时学习策略与自定义意见哈希簇。                           |
 |       57 | `packages/data/migrations/0054_writing_feedback_explicit_idempotency.sql`            | 明确反馈幂等身份与反馈/偏好原子同步边界。                        |
 |       58 | `packages/data/migrations/0055_continuous_story_state_historical_route_receipts.sql` | 合法历史状态回执的备份恢复约束。                                 |
+|       59 | `packages/data/migrations/0056_model_hub_failure_diagnostics.sql`                    | 能力扫描与调用事实的可空、脱敏 AI 失败诊断字段和索引。           |
 
 规则：SQL 通过 `include_str!` 编译进二进制；缺失迁移不忽略、迁移加锁且逐条事务执行。已发布 migration 的内容、描述和顺序不能修改，只能新增。
 
@@ -212,6 +217,9 @@ Google Gemini、Anthropic Claude、智谱 GLM、Ollama 和自定义 OpenAI-compa
 支持的当前代码路径：
 
 - OpenAI-compatible：模型列表、流式文本生成、Embedding；自定义兼容连接可在专家模式覆盖受限相对路径和单一认证 Header 名，Header 值仍在 OS 凭据库。
+- DeepSeek 文本能力探针：Provider Registry 为固定无作品内容探针声明禁用思考，网关映射为
+  `thinking: {"type":"disabled"}`；共享探针预算为 64 token。该覆盖不应用于普通正文生成，也不
+  依赖具体模型名称。
 - Ollama：`/api/tags`、`/api/chat` NDJSON、`/api/embed`。
 - Anthropic：官方模型目录和 Messages SSE 文本生成。
 - Gemini：官方模型目录、流式文本生成和批量 Embedding。
@@ -228,6 +236,12 @@ Google Gemini、Anthropic Claude、智谱 GLM、Ollama 和自定义 OpenAI-compa
 - Embedding 最多 64 条，总输入 512 KiB，单条 64 KiB，响应 8 MiB。
 - Rerank 最多 64 条候选，限制查询/单条/总字节；模型返回索引、分数和协议必须严格匹配。
 - Provider 的原始错误正文不会直接暴露给页面。
+- OpenAI-compatible SSE 的 `reasoning_content` 不会作为可见 `delta` 发出；解析器只保留脱敏的
+  出现标记和有界长度。同一帧会先处理可见 `content` 与 usage，再把 `finish_reason = "length"`
+  归一化为 `MODEL_OUTPUT_TRUNCATED`，避免丢失已经实际收到的可见文本。
+- `MODEL_OUTPUT_TRUNCATED` 对普通正文、续写、改写和 Candidate 始终是失败。只有固定文本能力
+  探针可以在截断前已有非空可见文本时把扫描记为 `partial` 并证明可见文本能力；只有推理或空
+  文本不能提交支持证据。
 - 每个 generation、embedding、rerank 请求都必须显式声明 `dispatchScope`。`non_project` 只允许固定白名单中的无既有项目正文连接/能力探针与建项前创意开头；其余项目内容必须携带 `project_context` 权威回执。
 - 远程 `project_context` 在发出任何正文前以 `BEGIN IMMEDIATE` 原子重验项目存在性、章节集合、稳定版本/修订、隐私修订和规范指纹；不匹配即失败关闭。
 - 指纹复核成功后，原生网关为完整网络 Future 持有不含正文的派发租约，生成、Embedding 与 Rerank 的成功、失败、取消和 panic 路径都在网络生命周期结束后释放。租约期间仅阻止向该项目新增/转入 `local_only` 章节及删除项目，普通正文编辑、版本和自动保存继续可写。

@@ -19,7 +19,9 @@ pub(crate) const MAX_EMBEDDING_VALUES: usize = 524_288;
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum StreamItem {
     Delta(String),
+    Reasoning { length: u64 },
     Usage(GenerationUsage),
+    FinishReason(String),
     Done,
 }
 
@@ -198,6 +200,14 @@ impl Default for OpenAiResponseParser {
 }
 
 impl OpenAiResponseParser {
+    pub(crate) fn streamed(&self) -> Option<bool> {
+        match self.mode {
+            OpenAiResponseMode::Detecting(_) => None,
+            OpenAiResponseMode::Sse(_) => Some(true),
+            OpenAiResponseMode::Json(_) => Some(false),
+        }
+    }
+
     pub(crate) fn push(&mut self, chunk: &[u8]) -> Result<Vec<StreamItem>, CommandError> {
         if let OpenAiResponseMode::Detecting(bytes) = &mut self.mode {
             if bytes.len().saturating_add(chunk.len()) > MAX_OPENAI_JSON_BODY_BYTES {
@@ -981,6 +991,7 @@ struct OpenAiJsonChoice {
 #[derive(Deserialize)]
 struct OpenAiJsonMessage {
     content: Option<Value>,
+    reasoning_content: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -992,6 +1003,7 @@ struct OpenAiChoice {
 #[derive(Deserialize)]
 struct OpenAiDelta {
     content: Option<Value>,
+    reasoning_content: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -1085,20 +1097,28 @@ fn parse_openai_stream_data(
 
     let mut saw_finish_reason = false;
     if let Some(choice) = envelope.choices.first() {
-        saw_finish_reason = openai_finish_reason(choice.finish_reason.as_deref(), false)?;
-        if let Some(content) = choice
-            .delta
-            .as_ref()
-            .and_then(|delta| delta.content.as_ref())
-        {
-            let text = openai_content_text(content)?;
-            if !text.is_empty() {
-                validate_delta(&text)?;
-                items.push(StreamItem::Delta(text));
+        if let Some(delta) = choice.delta.as_ref() {
+            if let Some(content) = delta.content.as_ref() {
+                let text = openai_content_text(content)?;
+                if !text.is_empty() {
+                    validate_delta(&text)?;
+                    items.push(StreamItem::Delta(text));
+                }
+            }
+            if let Some(length) = openai_reasoning_length(delta.reasoning_content.as_ref())? {
+                items.push(StreamItem::Reasoning { length });
             }
         }
-    }
-    if let Some(usage) = envelope.usage {
+        if let Some(usage) = envelope.usage {
+            items.push(StreamItem::Usage(openai_usage(usage)?));
+        }
+        if let Some(finish_reason) =
+            normalized_openai_finish_reason(choice.finish_reason.as_deref(), false)?
+        {
+            saw_finish_reason = true;
+            items.push(StreamItem::FinishReason(finish_reason));
+        }
+    } else if let Some(usage) = envelope.usage {
         items.push(StreamItem::Usage(openai_usage(usage)?));
     }
     Ok(saw_finish_reason)
@@ -1118,7 +1138,8 @@ fn parse_openai_json_response(body: &[u8]) -> Result<Vec<StreamItem>, CommandErr
         .choices
         .first()
         .ok_or_else(CommandError::response_invalid)?;
-    openai_finish_reason(choice.finish_reason.as_deref(), true)?;
+    let finish_reason = normalized_openai_finish_reason(choice.finish_reason.as_deref(), true)?
+        .ok_or_else(CommandError::stream_truncated)?;
     let message = choice
         .message
         .as_ref()
@@ -1133,31 +1154,52 @@ fn parse_openai_json_response(body: &[u8]) -> Result<Vec<StreamItem>, CommandErr
         validate_delta(&text)?;
         items.push(StreamItem::Delta(text));
     }
+    if let Some(length) = openai_reasoning_length(message.reasoning_content.as_ref())? {
+        items.push(StreamItem::Reasoning { length });
+    }
     if let Some(usage) = envelope.usage {
         items.push(StreamItem::Usage(openai_usage(usage)?));
     }
+    items.push(StreamItem::FinishReason(finish_reason));
     items.push(StreamItem::Done);
     Ok(items)
 }
 
-fn openai_finish_reason(finish_reason: Option<&str>, required: bool) -> Result<bool, CommandError> {
+fn normalized_openai_finish_reason(
+    finish_reason: Option<&str>,
+    required: bool,
+) -> Result<Option<String>, CommandError> {
     let Some(finish_reason) = finish_reason else {
         return if required {
             Err(CommandError::stream_truncated())
         } else {
-            Ok(false)
+            Ok(None)
         };
     };
-    if finish_reason.is_empty() {
+    if finish_reason.is_empty()
+        || finish_reason.len() > 128
+        || finish_reason
+            .bytes()
+            .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'-' | b'.'))
+    {
         return Err(CommandError::response_invalid());
     }
-    if matches!(
-        finish_reason.to_ascii_lowercase().as_str(),
-        "length" | "max_tokens" | "max_output_tokens"
-    ) {
-        return Err(CommandError::output_truncated());
+    Ok(Some(finish_reason.to_ascii_lowercase()))
+}
+
+fn openai_reasoning_length(reasoning: Option<&Value>) -> Result<Option<u64>, CommandError> {
+    let Some(reasoning) = reasoning else {
+        return Ok(None);
+    };
+    if reasoning.is_null() {
+        return Ok(None);
     }
-    Ok(true)
+    let text = reasoning
+        .as_str()
+        .ok_or_else(CommandError::response_invalid)?;
+    u64::try_from(text.len())
+        .map(Some)
+        .map_err(|_| CommandError::response_limit_exceeded())
 }
 
 fn openai_usage(usage: OpenAiUsage) -> Result<GenerationUsage, CommandError> {
@@ -1422,6 +1464,7 @@ mod tests {
             vec![
                 StreamItem::Delta("hello".to_owned()),
                 StreamItem::Delta("!".to_owned()),
+                StreamItem::FinishReason("stop".to_owned()),
                 StreamItem::Usage(GenerationUsage {
                     input_tokens: 120,
                     output_tokens: 9,
@@ -1460,14 +1503,17 @@ mod tests {
             parser.finish().expect("JSON response should parse"),
             vec![
                 StreamItem::Delta("Visible answer".to_owned()),
+                StreamItem::Reasoning { length: 24 },
                 StreamItem::Usage(GenerationUsage {
                     input_tokens: 18,
                     output_tokens: 4,
                     cached_input_tokens: Some(3),
                 }),
+                StreamItem::FinishReason("stop".to_owned()),
                 StreamItem::Done,
             ]
         );
+        assert_eq!(parser.streamed(), Some(false));
     }
 
     #[test]
@@ -1496,6 +1542,8 @@ mod tests {
             parser.finish().expect("content parts should parse"),
             vec![
                 StreamItem::Delta("Visible answer".to_owned()),
+                StreamItem::Reasoning { length: 24 },
+                StreamItem::FinishReason("stop".to_owned()),
                 StreamItem::Done,
             ]
         );
@@ -1514,30 +1562,52 @@ mod tests {
 
         assert_eq!(
             items,
-            vec![StreamItem::Delta("Visible".to_owned()), StreamItem::Done]
+            vec![
+                StreamItem::Reasoning { length: 6 },
+                StreamItem::Delta("Visible".to_owned()),
+                StreamItem::FinishReason("stop".to_owned()),
+                StreamItem::Done,
+            ]
         );
+        assert_eq!(parser.streamed(), Some(true));
         assert!(parser.finish().expect("stream should finish").is_empty());
     }
 
     #[test]
-    fn reports_token_limit_finish_reasons_as_truncated_output() {
+    fn preserves_same_frame_content_before_reporting_token_limit_finish_reason() {
         let mut stream = OpenAiResponseParser::default();
-        let stream_error = stream
+        let stream_items = stream
             .push(
-                b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}]}\n\n",
+                b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hidden\",\"content\":\"partial\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":8}}\n\n",
             )
-            .expect_err("length-limited SSE must not complete successfully");
-        assert_eq!(stream_error.code(), "MODEL_OUTPUT_TRUNCATED");
+            .expect("protocol parser must preserve safe same-frame observations");
+        assert_eq!(
+            stream_items,
+            vec![
+                StreamItem::Delta("partial".to_owned()),
+                StreamItem::Reasoning { length: 6 },
+                StreamItem::Usage(GenerationUsage {
+                    input_tokens: 2,
+                    output_tokens: 8,
+                    cached_input_tokens: None,
+                }),
+                StreamItem::FinishReason("length".to_owned()),
+            ]
+        );
 
         let mut json = OpenAiResponseParser::default();
         json.push(
             br#"{"choices":[{"message":{"content":"partial"},"finish_reason":"max_tokens"}]}"#,
         )
         .expect("JSON response should buffer");
-        let json_error = json
-            .finish()
-            .expect_err("length-limited JSON must not complete successfully");
-        assert_eq!(json_error.code(), "MODEL_OUTPUT_TRUNCATED");
+        assert_eq!(
+            json.finish().expect("JSON observations should parse"),
+            vec![
+                StreamItem::Delta("partial".to_owned()),
+                StreamItem::FinishReason("max_tokens".to_owned()),
+                StreamItem::Done,
+            ]
+        );
     }
 
     #[test]
@@ -1642,7 +1712,13 @@ mod tests {
                   \"finish_reason\":\"stop\"}]}\n\n",
             )
             .expect("finish reason should parse");
-        assert_eq!(items, vec![StreamItem::Delta("text".to_owned())]);
+        assert_eq!(
+            items,
+            vec![
+                StreamItem::Delta("text".to_owned()),
+                StreamItem::FinishReason("stop".to_owned()),
+            ]
+        );
         assert_eq!(
             parser.finish().expect("stream end should complete"),
             vec![StreamItem::Done]

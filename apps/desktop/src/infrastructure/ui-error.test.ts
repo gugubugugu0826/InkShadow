@@ -105,6 +105,23 @@ describe("normalizeUiError SQLite persistence failures", () => {
     expect(JSON.stringify(normalized)).not.toContain(privateDetail);
   });
 
+  it.each([
+    ["MODEL_OUTPUT_TRUNCATED", ["更充足的固定预算", "DeepSeek 关闭推理", "重新同步模型"]],
+    ["MODEL_OUTPUT_EMPTY", ["可用于写作的可见文字", "支持文本生成", "普通文本模型"]],
+    [
+      "MODEL_HUB_ROUTE_NOT_CONFIGURED",
+      ["验证至少一个模型的写作能力", "应用智能推荐", "缺少 Embedding 不会阻止"],
+    ],
+  ])("gives an actionable, redacted recovery path for %s", (code, expectedFragments) => {
+    const privateDetail = "Authorization: Bearer hidden private provider response";
+    const normalized = normalizeUiError({ code, message: privateDetail, retryable: true });
+
+    for (const fragment of expectedFragments) {
+      expect(normalized.description).toContain(fragment);
+    }
+    expect(normalized.description).not.toContain(privateDetail);
+  });
+
   it("explains how to recover from browser storage quota exhaustion", () => {
     const normalized = normalizeUiError({
       code: "CREATIVE_JOURNEY_STORAGE_QUOTA_EXCEEDED",

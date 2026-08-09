@@ -1,6 +1,6 @@
 # InkShadow 前端接口与数据边界
 
-> 基于源码快照：2026-08-08  
+> 基于源码快照：2026-08-09  
 > 文档状态：`SUPPORTING_CURRENT`  
 > 应用版本：`0.2.0`；设计基线：`DESIGN v0.3.1b`  
 > 本文记录当前代码接口；它不代表所有云能力已部署或已开放
@@ -134,7 +134,7 @@ interface NativeSqliteError {
 
 正式数据库固定在应用配置目录中的 `inkshadow.db`；WebView 不能指定任意数据库路径。
 
-当前前向迁移上限为 Data `0055_continuous_story_state_historical_route_receipts.sql` / Tauri `58`。Tauri 原生版本把
+当前前向迁移上限为 Data `0056_model_hub_failure_diagnostics.sql` / Tauri `59`。Tauri 原生版本把
 Data 迁移和 story-core 迁移合并成一个连续序列，所以两个编号不要求相同。已登记 migration
 只校验和验证、不可改写；新结构必须继续追加更高版本。
 
@@ -311,17 +311,17 @@ interface NativeGatewayEndpointConfig {
 }
 ```
 
-| Command                           | 参数                                                                          | 返回                                                |
-| --------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------- |
-| `list_native_models`              | `{request:{config}}`                                                          | `{provider,models:[{id,displayName,sizeBytes?}]}`   |
-| `check_native_model_connection`   | `{request:{config}}`                                                          | `{provider,endpointOrigin,modelCount,latencyMs}`    |
-| `inspect_native_model_capacity`   | 无                                                                            | CPU、内存、应用盘和 GPU 容量                        |
-| `embed_native_model`              | `{request:{config,model,inputs}}`                                             | provider、origin、model、dimension、向量            |
-| `rerank_native_model`             | `{request:{config,protocol,model,query,documents,topN}}`                      | provider、protocol、origin、model、排名和输入 Token |
-| `choose_native_image_destination` | 无                                                                            | 五分钟单次文件票据或 `null`                         |
-| `generate_native_image_to_file`   | `{request:{destinationTicket,config,model,prompt}}`                           | 安全保存后的 PNG 元数据                             |
-| `start_native_generation`         | `{request:{generationId,config,model,messages,maxOutputTokens,temperature?}}` | `{generationId,accepted}`                           |
-| `cancel_native_generation`        | `{request:{generationId}}`                                                    | `{generationId,cancellationRequested}`              |
+| Command                           | 参数                                                                                         | 返回                                                |
+| --------------------------------- | -------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `list_native_models`              | `{request:{config}}`                                                                         | `{provider,models:[{id,displayName,sizeBytes?}]}`   |
+| `check_native_model_connection`   | `{request:{config}}`                                                                         | `{provider,endpointOrigin,modelCount,latencyMs}`    |
+| `inspect_native_model_capacity`   | 无                                                                                           | CPU、内存、应用盘和 GPU 容量                        |
+| `embed_native_model`              | `{request:{config,model,inputs}}`                                                            | provider、origin、model、dimension、向量            |
+| `rerank_native_model`             | `{request:{config,protocol,model,query,documents,topN}}`                                     | provider、protocol、origin、model、排名和输入 Token |
+| `choose_native_image_destination` | 无                                                                                           | 五分钟单次文件票据或 `null`                         |
+| `generate_native_image_to_file`   | `{request:{destinationTicket,config,model,prompt}}`                                          | 安全保存后的 PNG 元数据                             |
+| `start_native_generation`         | `{request:{generationId,config,model,messages,maxOutputTokens,temperature?,reasoningMode?}}` | `{generationId,accepted}`                           |
+| `cancel_native_generation`        | `{request:{generationId}}`                                                                   | `{generationId,cancellationRequested}`              |
 
 原生请求路径：
 
@@ -337,6 +337,12 @@ Google Gemini、Anthropic Claude、智谱 GLM、Ollama 和自定义 OpenAI-compa
 的底层参数；开书快捷连接显示其中 DeepSeek、OpenAI、百炼/Qwen、豆包、Ollama、GLM 和自定义兼容。
 百炼、豆包、GLM 或自定义连接无法可靠自动列出账号实际可用模型时，用户必须明确填写模型/Endpoint，
 再运行不含作品内容的真实文本探针；系统不得仅根据模型名标记能力。
+
+文本能力探针统一使用固定无作品内容消息和 `64` token 输出预算。Provider Registry 只为 DeepSeek
+探针声明 `reasoningMode = "disabled"`，原生 OpenAI-compatible 请求映射为
+`thinking: {"type":"disabled"}`；其他供应商不会收到该专有参数。设置页、快捷连接的手动/已配置
+连接检查和本地基础评测复用这项策略。它只证明模型能输出可见文本，不证明文笔、结构化输出或
+其他能力，也不按模型名称猜测支持项。
 
 供应商预设与能力资料会变化，Registry 应按官方接口/地域说明更新，而不是把某个模型写成永久
 最佳： [OpenAI models](https://platform.openai.com/docs/api-reference/models/object)、
@@ -379,9 +385,14 @@ API Key、有效 `rerank` 能力证据、已确认隐私/保留/训练政策和�
 主要错误包括：`MODEL_ENDPOINT_INVALID`、`MODEL_CREDENTIAL_MISSING`、
 `MODEL_REQUEST_INVALID`、`MODEL_INPUT_LIMIT_EXCEEDED`、`MODEL_OUTPUT_LIMIT_EXCEEDED`、
 `MODEL_RESPONSE_INVALID`、`MODEL_RESPONSE_LIMIT_EXCEEDED`、`MODEL_STREAM_TRUNCATED`、
-`MODEL_TIMEOUT`、`MODEL_CONNECTION_FAILED`、`MODEL_GENERATION_DUPLICATE`、
+`MODEL_OUTPUT_TRUNCATED`、`MODEL_TIMEOUT`、`MODEL_CONNECTION_FAILED`、`MODEL_GENERATION_DUPLICATE`、
 `MODEL_EVENT_EMIT_FAILED`、`MODEL_HTTP_UNAUTHORIZED`、`MODEL_HTTP_FORBIDDEN`、
 `MODEL_HTTP_NOT_FOUND`、`MODEL_HTTP_RATE_LIMITED` 和 `MODEL_HTTP_PROVIDER_UNAVAILABLE`。
+
+原生解析器不会把 `reasoning_content` 当成用户可见正文增量。它只为失败诊断保留是否出现和
+有界长度，并在同一帧先交付可见 `content`/usage，再处理 `finish_reason`。普通正文、改写和
+Candidate 生成遇到截断仍严格失败；只有固定、无作品内容的能力探针可以在已收到非空可见文本时
+把截断记录为 `partial` 并提交文本生成证据。只有推理或空响应仍失败。
 
 ### 6.1 Model Hub 与小说智能前端服务
 
@@ -389,6 +400,16 @@ API Key、有效 `rerank` 能力证据、已确认隐私/保留/训练政策和�
 五种方案。专家模式才显示受限 Base URL/路径/Header 元数据、超时/重试、能力证据、逐任务主备、
 费用与隐私策略。API Key 值不会回传页面。移除连接采用停用/墓碑语义：清除系统凭据并阻止新调用，
 但保留目录、历史调用和审计；重复移除保持幂等。
+
+首次文本能力验证成功且当前完全没有任何任务路由记录时，智能推荐可建立 16 类只依赖
+`text_generation` 的核心小说任务分工；已有用户路由不会被覆盖。22 类总任务中的结构化输出、
+Embedding、Rerank、图片、视觉等仍必须等待各自证据。基础评测只执行已持久化路由，不能替代
+能力发现。诊断 artifact schema v2 从能力扫描和调用事实账本读取最近脱敏 AI 失败，包括 request
+ID、阶段、HTTP/终止原因、可见长度、推理/流式标记、尝试和 token 预算；不包含 Prompt、作品、
+模型回答、推理正文、供应商原始错误或凭据。旧 `modelCenter` 兼容指标明确命名为
+`legacyModelProfileCount` / `legacyModelProfilesWithSelection`；Model Hub 另行报告
+`modelHubConnectionCount`、`modelHubUsableConnectionCount`、`modelHubCatalogEntryCount` 和
+`modelHubEnabledTaskRouteCount`。可用连接只表示已启用且状态为 ready/degraded，不替代能力证据。
 
 以下服务运行在 Desktop runtime 内，通过页面调用，不是 Cloud API：
 
@@ -882,27 +903,27 @@ send_cloud_api_request({
 
 下表键用于 `createDevelopmentRuntime(window.localStorage)`；正式 Tauri 业务数据使用 SQLite。
 
-| 键                                                         | Schema | 内容                                                      | 实现                                   |
-| ---------------------------------------------------------- | -----: | --------------------------------------------------------- | -------------------------------------- |
-| `inkshadow.development.database.v1`                        |      2 | 项目、章节、版本、恢复草稿、候选、审计                    | `development-storage.ts`               |
-| `inkshadow.development.story.v1`                           |      6 | 大纲、正式设定、时间线、记忆、What-if、审阅、构思         | `story-storage.ts`                     |
-| `inkshadow.development.ideation-project-commit.journal.v1` |      1 | 跨存储键预提交日志                                        | `development-atomic-journal.ts`        |
-| `inkshadow.development.materials.v1`                       |      1 | 素材与引用                                                | `material-storage.ts`                  |
-| `inkshadow.development.model-center.v1`                    |      2 | 模型配置和定价，不含 API Key                              | `model-center-store.ts`                |
-| `inkshadow.development.model-routing.v1`                   |      1 | 角色到模型路由                                            | `model-routing-store.ts`               |
-| `inkshadow.development.generation-governance.v1`           |      2 | 预算、运行、用量和延期请求                                | `generation-governance-store.ts`       |
-| `inkshadow.development.project-search.v1`                  |      1 | 项目搜索快照                                              | `project-search-store.ts`              |
-| `inkshadow.development.task-center.v1`                     |      1 | 任务与通知                                                | `task-center-store.ts`                 |
-| `inkshadow.marketplace.installs.v1`                        |      1 | 浏览器模式已安装市场资产                                  | `marketplace-runtime.ts`               |
-| `inkshadow.development.creative-journeys.v1`               |      1 | 一句话开书旅程和逐轮恢复                                  | `creative-journey-store.ts`            |
-| `inkshadow.development.project-seeds.v1`                   |      1 | 项目创建后的 `ProjectSeed` 副本                           | `project-seed-local-store.ts`          |
-| `inkshadow.development.model-hub.v1`                       |      5 | Model Hub 连接、目录、能力、路由、策略和调用元数据        | `model-hub-store.ts`                   |
-| `inkshadow.development.story-facts.v1`                     |      2 | 浏览器调试模式统一 StoryFact、修订与连续提取回执          | `story-fact-store.ts`                  |
-| `inkshadow.development.causal-event-graphs.v1`             |      1 | 浏览器调试模式可重建因果图                                | `causal-event-graph-store.ts`          |
-| `inkshadow.development.context-compilation-traces.v1`      |      2 | 内容最小化上下文历史及精确生成/调用/输出关联；原位读取 v1 | `context-compilation-trace-store.ts`   |
-| `inkshadow.development.writing-feedback.v1`                |      3 | 可见、可编辑且幂等的写作反馈学习                          | `writing-feedback-store.ts`            |
-| `inkshadow.development.story-planning-candidates.v1`       |      1 | 可审阅 AI 剧情规划候选                                    | `story-planning-candidate-store.ts`    |
-| `inkshadow.development.chapter-validation-snapshots.v1`    |      1 | 绑定当前不可变章节版本的确定性检查快照                    | `chapter-validation-snapshot-store.ts` |
+| 键                                                         | Schema | 内容                                                                         | 实现                                   |
+| ---------------------------------------------------------- | -----: | ---------------------------------------------------------------------------- | -------------------------------------- |
+| `inkshadow.development.database.v1`                        |      2 | 项目、章节、版本、恢复草稿、候选、审计                                       | `development-storage.ts`               |
+| `inkshadow.development.story.v1`                           |      6 | 大纲、正式设定、时间线、记忆、What-if、审阅、构思                            | `story-storage.ts`                     |
+| `inkshadow.development.ideation-project-commit.journal.v1` |      1 | 跨存储键预提交日志                                                           | `development-atomic-journal.ts`        |
+| `inkshadow.development.materials.v1`                       |      1 | 素材与引用                                                                   | `material-storage.ts`                  |
+| `inkshadow.development.model-center.v1`                    |      2 | 模型配置和定价，不含 API Key                                                 | `model-center-store.ts`                |
+| `inkshadow.development.model-routing.v1`                   |      1 | 角色到模型路由                                                               | `model-routing-store.ts`               |
+| `inkshadow.development.generation-governance.v1`           |      2 | 预算、运行、用量和延期请求                                                   | `generation-governance-store.ts`       |
+| `inkshadow.development.project-search.v1`                  |      1 | 项目搜索快照                                                                 | `project-search-store.ts`              |
+| `inkshadow.development.task-center.v1`                     |      1 | 任务与通知                                                                   | `task-center-store.ts`                 |
+| `inkshadow.marketplace.installs.v1`                        |      1 | 浏览器模式已安装市场资产                                                     | `marketplace-runtime.ts`               |
+| `inkshadow.development.creative-journeys.v1`               |      1 | 一句话开书旅程和逐轮恢复                                                     | `creative-journey-store.ts`            |
+| `inkshadow.development.project-seeds.v1`                   |      1 | 项目创建后的 `ProjectSeed` 副本                                              | `project-seed-local-store.ts`          |
+| `inkshadow.development.model-hub.v1`                       |      6 | Model Hub 连接、目录、能力、路由、策略、调用及脱敏失败元数据；原位升级 v1–v5 | `model-hub-store.ts`                   |
+| `inkshadow.development.story-facts.v1`                     |      2 | 浏览器调试模式统一 StoryFact、修订与连续提取回执                             | `story-fact-store.ts`                  |
+| `inkshadow.development.causal-event-graphs.v1`             |      1 | 浏览器调试模式可重建因果图                                                   | `causal-event-graph-store.ts`          |
+| `inkshadow.development.context-compilation-traces.v1`      |      2 | 内容最小化上下文历史及精确生成/调用/输出关联；原位读取 v1                    | `context-compilation-trace-store.ts`   |
+| `inkshadow.development.writing-feedback.v1`                |      3 | 可见、可编辑且幂等的写作反馈学习                                             | `writing-feedback-store.ts`            |
+| `inkshadow.development.story-planning-candidates.v1`       |      1 | 可审阅 AI 剧情规划候选                                                       | `story-planning-candidate-store.ts`    |
+| `inkshadow.development.chapter-validation-snapshots.v1`    |      1 | 绑定当前不可变章节版本的确定性检查快照                                       | `chapter-validation-snapshot-store.ts` |
 
 正式 Tauri Marketplace 安装记录使用 SQLite 表 `community_marketplace_installs`。
 

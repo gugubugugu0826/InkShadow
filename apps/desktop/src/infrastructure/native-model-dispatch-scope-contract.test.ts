@@ -21,13 +21,11 @@ const NON_PROJECT_ALLOWLIST = new Map<
     { reason: "connection_probe", occurrences: 1 },
   ],
   [
-    "infrastructure/quick-model-connection-service.ts",
-    // One probe validates manually entered model IDs before persistence; the
-    // second validates the selected catalog model before routing book start.
-    // Both send only the fixed content-free `只回复：OK` message.
-    { reason: "connection_probe", occurrences: 2 },
+    "infrastructure/model-hub-text-capability-probe.ts",
+    // Every fixed `只回复：OK` capability check must pass through the shared
+    // provider-aware budget, reasoning, truncation and redaction boundary.
+    { reason: "connection_probe", occurrences: 1 },
   ],
-  ["pages/settings-page.tsx", { reason: "connection_probe", occurrences: 1 }],
 ]);
 
 describe("native model dispatch scope production contract", () => {

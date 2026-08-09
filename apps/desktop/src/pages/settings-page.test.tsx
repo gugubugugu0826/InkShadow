@@ -1136,7 +1136,7 @@ describe("SettingsPage model routing", () => {
     });
   });
 
-  it("verifies a manual Qwen model with a tiny generation probe without calling /models", async () => {
+  it("verifies a manual Qwen model with the shared 64-token probe without calling /models", async () => {
     const developmentRuntime = createDevelopmentRuntime(window.localStorage);
     await developmentRuntime.modelHub.saveConnection({
       id: "qwen-writing",
@@ -1156,6 +1156,7 @@ describe("SettingsPage model routing", () => {
       return Promise.resolve({
         text: "OK",
         usage: { inputTokens: 4, outputTokens: 1, cachedInputTokens: null },
+        streamed: true,
       });
     });
     const runtime: DesktopRuntime = {
@@ -1194,7 +1195,7 @@ describe("SettingsPage model routing", () => {
         provider: "open_ai_compatible",
       },
       model: "qwen-writing-model",
-      maxOutputTokens: 8,
+      maxOutputTokens: 64,
     });
     expect(generatedInput).not.toHaveProperty("temperature");
     const catalog = await runtime.modelHub.listCatalog("qwen-writing");
@@ -1218,6 +1219,188 @@ describe("SettingsPage model routing", () => {
         }),
       ]),
     );
+    await expect(
+      runtime.modelHub.findCostPrivacyProfile(selected?.id ?? "missing"),
+    ).resolves.toMatchObject({
+      dataDestination: "remote",
+      retentionPolicy: "provider_default",
+      trainingPolicy: "unknown",
+      evidenceSource: "provider_metadata",
+    });
+  });
+
+  it("uses the DeepSeek probe policy and automatically configures only compatible text tasks", async () => {
+    const developmentRuntime = createDevelopmentRuntime(window.localStorage);
+    let connection = await developmentRuntime.modelHub.saveConnection({
+      id: "deepseek-writing",
+      providerKind: "deepseek",
+      displayName: "DeepSeek",
+      credentialRef: "keyring:model-hub:deepseek-writing",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    connection = await developmentRuntime.modelHub.recordConnectionTest({
+      connectionId: connection.id,
+      status: "ready",
+      expectedRevision: connection.revision,
+    });
+    await developmentRuntime.modelHub.syncCatalog({
+      syncId: "deepseek-writing-sync",
+      connectionId: connection.id,
+      source: "provider_api",
+      status: "succeeded",
+      models: [
+        {
+          id: "deepseek-v4-flash-catalog",
+          providerModelId: "deepseek-v4-flash",
+          displayName: "deepseek-v4-flash",
+        },
+      ],
+    });
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve({
+        text: "OK",
+        usage: { inputTokens: 4, outputTokens: 1, cachedInputTokens: null },
+        streamed: false,
+      }),
+    );
+    const runtime: DesktopRuntime = {
+      ...developmentRuntime,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        save: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        delete: () => Promise.resolve({ configured: false, lastFour: null }),
+      },
+      modelGateway: {
+        available: true,
+        checkConnection: () => Promise.reject(new Error("not used")),
+        listModels: () => Promise.reject(new Error("not used")),
+        generate,
+        embed: () => Promise.reject(new Error("not used")),
+        cancelGeneration: () => Promise.resolve(false),
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    const verifyButton = await screen.findByRole("button", { name: "验证写作能力" });
+    expect(screen.getByText(/最多请求 64 个输出 token/u)).toBeVisible();
+    expect(screen.queryByText(/最多请求 8 个输出 token/u)).not.toBeInTheDocument();
+    await waitFor(() => expect(verifyButton).toBeEnabled());
+    await user.click(verifyButton);
+
+    expect(await screen.findByText("写作能力已验证")).toBeVisible();
+    expect(generate.mock.calls[0]?.[0]).toMatchObject({
+      model: "deepseek-v4-flash",
+      maxOutputTokens: 64,
+      reasoningMode: "disabled",
+    });
+    const catalog = await runtime.modelHub.listCatalog("deepseek-writing");
+    await expect(
+      runtime.modelHub.findCostPrivacyProfile(catalog[0]?.id ?? "missing"),
+    ).resolves.toMatchObject({
+      dataDestination: "remote",
+      evidenceSource: "provider_metadata",
+    });
+    const enabledRoutes = (
+      await Promise.all(NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task)))
+    ).flatMap((route) => (route?.enabled === true ? [route] : []));
+    expect(enabledRoutes).toHaveLength(16);
+    expect(
+      enabledRoutes.every(({ primaryCatalogEntryId }) => primaryCatalogEntryId === catalog[0]?.id),
+    ).toBe(true);
+    await expect(runtime.modelHub.findTaskRoute("embedding")).resolves.toBeNull();
+    await expect(runtime.modelHub.findTaskRoute("image_generation")).resolves.toBeNull();
+  });
+
+  it("never replaces an existing disabled custom route after a successful probe", async () => {
+    const developmentRuntime = createDevelopmentRuntime(window.localStorage);
+    let connection = await developmentRuntime.modelHub.saveConnection({
+      id: "deepseek-existing-route",
+      providerKind: "deepseek",
+      displayName: "DeepSeek existing route",
+      credentialRef: "keyring:model-hub:deepseek-existing-route",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    connection = await developmentRuntime.modelHub.recordConnectionTest({
+      connectionId: connection.id,
+      status: "ready",
+      expectedRevision: connection.revision,
+    });
+    const catalog = await developmentRuntime.modelHub.syncCatalog({
+      syncId: "deepseek-existing-route-sync",
+      connectionId: connection.id,
+      source: "provider_api",
+      status: "succeeded",
+      models: [
+        {
+          id: "deepseek-existing-route-catalog",
+          providerModelId: "deepseek-v4-pro",
+          displayName: "deepseek-v4-pro",
+        },
+      ],
+    });
+    const existingPrivacy = await developmentRuntime.modelHub.saveCostPrivacyProfile({
+      catalogEntryId: catalog[0]?.id ?? "missing",
+      dataDestination: "remote",
+      retentionPolicy: "unknown",
+      trainingPolicy: "not_used",
+      evidenceSource: "user_confirmed",
+      evidenceVersion: "user-policy-v1",
+      evidenceSummary: "User-owned policy",
+      expectedRevision: null,
+    });
+    const existingRoute = await developmentRuntime.modelHub.saveTaskRoute({
+      task: "prose_generation",
+      primaryCatalogEntryId: catalog[0]?.id ?? "missing",
+      fallbackCatalogEntryId: null,
+      privacyPolicy: "cloud_allowed",
+      failurePolicy: "ask_user",
+      routeOrigin: "user",
+      enabled: false,
+      expectedRevision: null,
+    });
+    const runtime: DesktopRuntime = {
+      ...developmentRuntime,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        save: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        delete: () => Promise.resolve({ configured: false, lastFour: null }),
+      },
+      modelGateway: {
+        available: true,
+        checkConnection: () => Promise.reject(new Error("not used")),
+        listModels: () => Promise.reject(new Error("not used")),
+        generate: () => Promise.resolve({ text: "OK", usage: null, streamed: false }),
+        embed: () => Promise.reject(new Error("not used")),
+        cancelGeneration: () => Promise.resolve(false),
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    const verifyButton = await screen.findByRole("button", { name: "验证写作能力" });
+    await waitFor(() => expect(verifyButton).toBeEnabled());
+    await user.click(verifyButton);
+    expect(await screen.findByText("写作能力已验证")).toBeVisible();
+
+    await expect(runtime.modelHub.findTaskRoute("prose_generation")).resolves.toEqual(
+      existingRoute,
+    );
+    await expect(
+      runtime.modelHub.findCostPrivacyProfile(catalog[0]?.id ?? "missing"),
+    ).resolves.toEqual(existingPrivacy);
+    const savedRoutes = (
+      await Promise.all(NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task)))
+    ).filter((route) => route !== null);
+    expect(savedRoutes).toEqual([existingRoute]);
   });
 
   it.each(["connection", "catalog"] as const)(

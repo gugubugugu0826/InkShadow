@@ -31,13 +31,28 @@ type TestGenerationEvent = Readonly<{
     | Readonly<{ phase: "started" | "delta" | "cancelled" }>
     | Readonly<{
         phase: "completed";
+        streamed?: boolean;
         usage: {
           inputTokens: number;
           outputTokens: number;
           cachedInputTokens: number | null;
         } | null;
       }>
-    | Readonly<{ phase: "failed"; code: string; retryable: boolean }>;
+    | Readonly<{
+        phase: "failed";
+        code: string;
+        retryable: boolean;
+        requestId?: string;
+        httpStatus?: number | null;
+        finishReason?: string | null;
+        reasoningPresent?: boolean | null;
+        stream?: boolean | null;
+        usage?: {
+          inputTokens: number;
+          outputTokens: number;
+          cachedInputTokens: number | null;
+        } | null;
+      }>;
 }>;
 
 const TEST_DISPATCH_SCOPE = {
@@ -429,6 +444,89 @@ describe("Tauri native model gateway client", () => {
     expect(onDelta).toHaveBeenNthCalledWith(1, "墨");
     expect(onDelta).toHaveBeenNthCalledWith(2, "墨影");
     expect(unlisten).toHaveBeenCalledOnce();
+  });
+
+  it("forwards a probe-only reasoning control and trusts the native transport observation", async () => {
+    let deliver: ((event: TestGenerationEvent) => void) | null = null;
+    tauriMocks.listen.mockImplementation(
+      (
+        _eventName: string,
+        handler: (event: Readonly<{ payload: TestGenerationEvent }>) => void,
+      ) => {
+        deliver = (event) => handler({ payload: event });
+        return Promise.resolve(vi.fn());
+      },
+    );
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command !== "start_native_generation") {
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      }
+      queueMicrotask(() => {
+        deliver?.(event(0, "", { phase: "started" }));
+        deliver?.(event(1, "OK", { phase: "delta" }));
+        deliver?.(event(2, "", { phase: "completed", usage: null, streamed: false }));
+      });
+      return Promise.resolve({ generationId: "generation-1", accepted: true });
+    });
+    const request = { ...input(), reasoningMode: "disabled" as const };
+
+    await expect(new TauriNativeModelGatewayClient().generate(request)).resolves.toEqual({
+      text: "OK",
+      usage: null,
+      streamed: false,
+    });
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("start_native_generation", { request });
+  });
+
+  it("preserves only redacted native failure facts and the visible character count", async () => {
+    let deliver: ((event: TestGenerationEvent) => void) | null = null;
+    tauriMocks.listen.mockImplementation(
+      (
+        _eventName: string,
+        handler: (event: Readonly<{ payload: TestGenerationEvent }>) => void,
+      ) => {
+        deliver = (event) => handler({ payload: event });
+        return Promise.resolve(vi.fn());
+      },
+    );
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command !== "start_native_generation") {
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      }
+      queueMicrotask(() => {
+        deliver?.(event(0, "", { phase: "started" }));
+        deliver?.(event(1, "可见", { phase: "delta" }));
+        deliver?.(
+          event(2, "", {
+            phase: "failed",
+            code: "MODEL_OUTPUT_TRUNCATED",
+            retryable: false,
+            requestId: "019f9f4a-b3c7-7350-9226-000000000099",
+            httpStatus: 200,
+            finishReason: "length",
+            reasoningPresent: true,
+            stream: true,
+            usage: { inputTokens: 5, outputTokens: 8, cachedInputTokens: null },
+          }),
+        );
+      });
+      return Promise.resolve({ generationId: "generation-1", accepted: true });
+    });
+
+    await expect(new TauriNativeModelGatewayClient().generate(input())).rejects.toMatchObject({
+      code: "MODEL_OUTPUT_TRUNCATED",
+      retryable: false,
+      diagnostics: {
+        requestId: "019f9f4a-b3c7-7350-9226-000000000099",
+        httpStatus: 200,
+        finishReason: "length",
+        visibleContentLength: 2,
+        reasoningPresent: true,
+        stream: true,
+        inputTokens: 5,
+        outputTokens: 8,
+      },
+    });
   });
 
   it("rejects a completed native stream that contains no visible candidate text", async () => {

@@ -27,8 +27,8 @@ use super::types::{
     AuthenticationMode, CancelGenerationRequest, CancelGenerationResponse, ConnectionCheckRequest,
     ConnectionCheckResponse, EmbeddingRequest, EmbeddingResponse, GenerationAccepted,
     GenerationEvent, GenerationEventStatus, GenerationUsage, ListModelsRequest, ModelDescriptor,
-    ModelEndpointConfig, ModelListResponse, ModelMessage, ProviderKind, RerankProtocol,
-    RerankRequest, RerankResponse, StartGenerationRequest,
+    ModelEndpointConfig, ModelListResponse, ModelMessage, ProviderKind, ReasoningMode,
+    RerankProtocol, RerankRequest, RerankResponse, StartGenerationRequest,
 };
 use crate::native_sqlite::{
     NativeModelDispatchScope, NativeSqliteState, ProjectRemoteDispatchLease,
@@ -105,11 +105,19 @@ struct OpenAiGenerationBody<'a> {
     stream_options: OpenAiStreamOptions,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<OpenAiThinking>,
 }
 
 #[derive(Serialize)]
 struct OpenAiStreamOptions {
     include_usage: bool,
+}
+
+#[derive(Serialize)]
+struct OpenAiThinking {
+    #[serde(rename = "type")]
+    mode: ReasoningMode,
 }
 
 #[derive(Serialize)]
@@ -256,8 +264,38 @@ struct PreparedRerank {
 }
 
 enum RunOutcome {
-    Completed(Option<GenerationUsage>),
+    Completed {
+        usage: Option<GenerationUsage>,
+        streamed: bool,
+    },
     Cancelled,
+}
+
+#[derive(Default)]
+struct GenerationObservation {
+    http_status: Option<u16>,
+    finish_reason: Option<String>,
+    reasoning_present: Option<bool>,
+    reasoning_length: Option<u64>,
+    stream: Option<bool>,
+    usage: Option<GenerationUsage>,
+}
+
+impl GenerationObservation {
+    fn attach(&self, mut error: CommandError) -> CommandError {
+        if error.http_status().is_none() {
+            if let Some(status) = self.http_status {
+                error = error.with_http_status(status);
+            }
+        }
+        error.with_generation_observation(
+            self.finish_reason.clone(),
+            self.reasoning_present,
+            self.reasoning_length,
+            self.stream,
+            self.usage.clone(),
+        )
+    }
 }
 
 enum ProviderStreamParser {
@@ -283,6 +321,13 @@ impl ProviderStreamParser {
             Self::Ollama(parser) => parser.finish(),
             Self::Anthropic(parser) => parser.finish(),
             Self::Gemini(parser) => parser.finish(),
+        }
+    }
+
+    fn streamed(&self) -> Option<bool> {
+        match self {
+            Self::OpenAi(parser) => parser.streamed(),
+            Self::Ollama(_) | Self::Anthropic(_) | Self::Gemini(_) => Some(true),
         }
     }
 }
@@ -1164,6 +1209,7 @@ async fn prepare_generation(
                     include_usage: true,
                 },
                 temperature: request.temperature,
+                thinking: request.reasoning_mode.map(|mode| OpenAiThinking { mode }),
             };
             (
                 endpoint.api_url(
@@ -1617,6 +1663,10 @@ fn validate_generation_request(request: &StartGenerationRequest) -> Result<(), C
     {
         return Err(CommandError::request_invalid());
     }
+    if request.reasoning_mode.is_some() && request.config.provider != ProviderKind::OpenAiCompatible
+    {
+        return Err(CommandError::operation_unsupported());
+    }
 
     let mut input_bytes = 0usize;
     for message in &request.messages {
@@ -1699,25 +1749,32 @@ async fn finalize_generation_dispatch(
     )
     .await
     {
-        GenerationEventStatus::Failed {
-            code: error.code(),
-            retryable: error.retryable(),
-        }
+        failed_generation_status(error)
     } else {
         match result {
-            Ok(Ok(RunOutcome::Completed(usage))) => GenerationEventStatus::Completed { usage },
+            Ok(Ok(RunOutcome::Completed { usage, streamed })) => {
+                GenerationEventStatus::Completed { usage, streamed }
+            }
             Ok(Ok(RunOutcome::Cancelled)) => GenerationEventStatus::Cancelled,
-            Ok(Err(error)) => GenerationEventStatus::Failed {
-                code: error.code(),
-                retryable: error.retryable(),
-            },
-            Err(_) => GenerationEventStatus::Failed {
-                code: "MODEL_TIMEOUT",
-                retryable: true,
-            },
+            Ok(Err(error)) => failed_generation_status(error),
+            Err(_) => failed_generation_status(CommandError::timeout()),
         }
     };
     status
+}
+
+fn failed_generation_status(error: CommandError) -> GenerationEventStatus {
+    GenerationEventStatus::Failed {
+        code: error.code(),
+        retryable: error.retryable(),
+        request_id: error.request_id().to_owned(),
+        http_status: error.http_status(),
+        finish_reason: error.finish_reason().map(str::to_owned),
+        reasoning_present: error.reasoning_present(),
+        reasoning_length: error.reasoning_length(),
+        stream: error.stream(),
+        usage: error.usage().cloned(),
+    }
 }
 
 async fn stream_generation<Emitter: GenerationDeltaSink>(
@@ -1726,9 +1783,24 @@ async fn stream_generation<Emitter: GenerationDeltaSink>(
     cancellation: &CancellationToken,
     emitter: &mut Emitter,
 ) -> Result<RunOutcome, CommandError> {
+    let mut observation = GenerationObservation::default();
+    let result =
+        stream_generation_observed(client, prepared, cancellation, emitter, &mut observation).await;
+    result.map_err(|error| observation.attach(error))
+}
+
+async fn stream_generation_observed<Emitter: GenerationDeltaSink>(
+    client: &Client,
+    prepared: PreparedGeneration,
+    cancellation: &CancellationToken,
+    emitter: &mut Emitter,
+    observation: &mut GenerationObservation,
+) -> Result<RunOutcome, CommandError> {
     if cancellation.is_cancelled() {
         return Ok(RunOutcome::Cancelled);
     }
+
+    let provider = prepared.provider;
 
     let request = apply_provider_headers(
         client
@@ -1736,14 +1808,14 @@ async fn stream_generation<Emitter: GenerationDeltaSink>(
             .header(CONTENT_TYPE, "application/json")
             .header(
                 ACCEPT,
-                match prepared.provider {
+                match provider {
                     ProviderKind::OpenAiCompatible => "text/event-stream",
                     ProviderKind::Ollama => "application/x-ndjson",
                     ProviderKind::Anthropic | ProviderKind::Gemini => "text/event-stream",
                 },
             )
             .body(prepared.body),
-        prepared.provider,
+        provider,
         prepared.credential,
     );
 
@@ -1758,6 +1830,7 @@ async fn stream_generation<Emitter: GenerationDeltaSink>(
             }
         }
     };
+    observation.http_status = Some(response.status().as_u16());
     assert_success_status(&response)?;
     if response
         .content_length()
@@ -1766,7 +1839,7 @@ async fn stream_generation<Emitter: GenerationDeltaSink>(
         return Err(CommandError::response_limit_exceeded());
     }
 
-    let mut parser = match prepared.provider {
+    let mut parser = match provider {
         ProviderKind::OpenAiCompatible => {
             ProviderStreamParser::OpenAi(OpenAiResponseParser::default())
         }
@@ -1774,9 +1847,12 @@ async fn stream_generation<Emitter: GenerationDeltaSink>(
         ProviderKind::Anthropic => ProviderStreamParser::Anthropic(AnthropicSseParser::default()),
         ProviderKind::Gemini => ProviderStreamParser::Gemini(GeminiSseParser::default()),
     };
+    observation.stream = parser.streamed();
+    if provider == ProviderKind::OpenAiCompatible && observation.stream.is_some() {
+        observation.reasoning_present = Some(false);
+    }
     let mut response_bytes = 0usize;
     let mut output_bytes = 0usize;
-    let mut usage: Option<GenerationUsage> = None;
 
     loop {
         let next_chunk = timeout(STREAM_IDLE_TIMEOUT, response.chunk());
@@ -1792,9 +1868,17 @@ async fn stream_generation<Emitter: GenerationDeltaSink>(
         };
 
         let Some(chunk) = chunk else {
-            let items = parser.finish()?;
-            if process_stream_items(items, &mut output_bytes, &mut usage, emitter)? {
-                return Ok(RunOutcome::Completed(usage));
+            let parsed = parser.finish();
+            observe_parser_mode(provider, &parser, observation)?;
+            let items = parsed?;
+            if process_stream_items(items, &mut output_bytes, observation, emitter)? {
+                let streamed = observation
+                    .stream
+                    .ok_or_else(CommandError::response_invalid)?;
+                return Ok(RunOutcome::Completed {
+                    usage: observation.usage.clone(),
+                    streamed,
+                });
             }
             return Err(CommandError::stream_truncated());
         };
@@ -1805,17 +1889,46 @@ async fn stream_generation<Emitter: GenerationDeltaSink>(
         if response_bytes > MAX_RESPONSE_BYTES {
             return Err(CommandError::response_limit_exceeded());
         }
-        let items = parser.push(&chunk)?;
-        if process_stream_items(items, &mut output_bytes, &mut usage, emitter)? {
-            return Ok(RunOutcome::Completed(usage));
+        let parsed = parser.push(&chunk);
+        observe_parser_mode(provider, &parser, observation)?;
+        let items = parsed?;
+        if process_stream_items(items, &mut output_bytes, observation, emitter)? {
+            let streamed = observation
+                .stream
+                .ok_or_else(CommandError::response_invalid)?;
+            return Ok(RunOutcome::Completed {
+                usage: observation.usage.clone(),
+                streamed,
+            });
         }
     }
+}
+
+fn observe_parser_mode(
+    provider: ProviderKind,
+    parser: &ProviderStreamParser,
+    observation: &mut GenerationObservation,
+) -> Result<(), CommandError> {
+    let Some(streamed) = parser.streamed() else {
+        return Ok(());
+    };
+    if observation
+        .stream
+        .is_some_and(|current| current != streamed)
+    {
+        return Err(CommandError::response_invalid());
+    }
+    observation.stream = Some(streamed);
+    if provider == ProviderKind::OpenAiCompatible && observation.reasoning_present.is_none() {
+        observation.reasoning_present = Some(false);
+    }
+    Ok(())
 }
 
 fn process_stream_items<Emitter: GenerationDeltaSink>(
     items: Vec<StreamItem>,
     output_bytes: &mut usize,
-    usage: &mut Option<GenerationUsage>,
+    observation: &mut GenerationObservation,
     emitter: &mut Emitter,
 ) -> Result<bool, CommandError> {
     for item in items {
@@ -1829,11 +1942,42 @@ fn process_stream_items<Emitter: GenerationDeltaSink>(
                 }
                 emitter.emit_delta(&delta)?;
             }
+            StreamItem::Reasoning { length } => {
+                observation.reasoning_present = Some(true);
+                observation.reasoning_length = Some(
+                    observation
+                        .reasoning_length
+                        .unwrap_or_default()
+                        .checked_add(length)
+                        .ok_or_else(CommandError::response_limit_exceeded)?,
+                );
+            }
             StreamItem::Usage(next) => {
-                if usage.as_ref().is_some_and(|current| current != &next) {
+                if observation
+                    .usage
+                    .as_ref()
+                    .is_some_and(|current| current != &next)
+                {
                     return Err(CommandError::response_invalid());
                 }
-                *usage = Some(next);
+                observation.usage = Some(next);
+            }
+            StreamItem::FinishReason(reason) => {
+                if observation
+                    .finish_reason
+                    .as_ref()
+                    .is_some_and(|current| current != &reason)
+                {
+                    return Err(CommandError::response_invalid());
+                }
+                let truncated = matches!(
+                    reason.as_str(),
+                    "length" | "max_tokens" | "max_output_tokens"
+                );
+                observation.finish_reason = Some(reason);
+                if truncated {
+                    return Err(CommandError::output_truncated());
+                }
             }
             StreamItem::Done => return Ok(true),
         }
@@ -1906,8 +2050,8 @@ async fn collect_limited_body(
 mod tests {
     use super::*;
     use crate::model_gateway::types::{
-        AuthenticationMode, EmbeddingRequest, ModelMessageRole, ProviderKind, RerankProtocol,
-        RerankRequest, StartGenerationRequest,
+        AuthenticationMode, EmbeddingRequest, ModelMessageRole, ProviderKind, ReasoningMode,
+        RerankProtocol, RerankRequest, StartGenerationRequest,
     };
     use crate::native_sqlite::{
         canonical_project_context_fingerprint, NativeProjectContextPrivacyReceipt,
@@ -2240,6 +2384,7 @@ mod tests {
             }],
             max_output_tokens: 1_024,
             temperature: Some(0.7),
+            reasoning_mode: None,
         }
     }
 
@@ -2392,6 +2537,7 @@ mod tests {
                 include_usage: true,
             },
             temperature: request.temperature,
+            thinking: None,
         };
         let body = serialize_request_body(&openai).expect("request should serialize");
         let value: serde_json::Value =
@@ -2444,6 +2590,145 @@ mod tests {
         provider_request.messages.swap(0, 1);
         assert!(build_anthropic_generation_body(&provider_request).is_err());
         assert!(build_gemini_generation_body(&provider_request).is_err());
+    }
+
+    #[tokio::test]
+    async fn conditionally_disables_openai_compatible_reasoning_without_affecting_other_requests() {
+        let mut request = generation_request();
+        request.reasoning_mode = Some(ReasoningMode::Disabled);
+        let prepared = prepare_generation(&request)
+            .await
+            .expect("OpenAI-compatible reasoning control should prepare");
+        let value: serde_json::Value =
+            serde_json::from_slice(&prepared.body).expect("prepared body should be JSON");
+        assert_eq!(value["thinking"]["type"], "disabled");
+
+        request.reasoning_mode = None;
+        let prepared = prepare_generation(&request)
+            .await
+            .expect("default OpenAI-compatible request should prepare");
+        let value: serde_json::Value =
+            serde_json::from_slice(&prepared.body).expect("prepared body should be JSON");
+        assert!(value.get("thinking").is_none());
+
+        request.reasoning_mode = Some(ReasoningMode::Disabled);
+        request.config.provider = ProviderKind::Ollama;
+        request.config.base_url = "http://127.0.0.1:11434".to_owned();
+        assert_eq!(
+            prepare_generation(&request)
+                .await
+                .err()
+                .expect("unsupported protocols must not silently ignore reasoning mode")
+                .code(),
+            "MODEL_OPERATION_UNSUPPORTED"
+        );
+    }
+
+    #[tokio::test]
+    async fn distinguishes_json_completion_from_sse_and_keeps_usage() {
+        let server = spawn_fake_server(
+            "200 OK",
+            br#"{"choices":[{"message":{"content":"Visible"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#,
+            Duration::ZERO,
+            None,
+        );
+        let mut request = generation_request();
+        request.config.base_url = format!("{}/v1", server.base_url);
+        let prepared = prepare_generation(&request)
+            .await
+            .expect("prepare JSON request");
+
+        #[derive(Default)]
+        struct RecordingSink(String);
+        impl GenerationDeltaSink for RecordingSink {
+            fn emit_delta(&mut self, delta: &str) -> Result<(), CommandError> {
+                self.0.push_str(delta);
+                Ok(())
+            }
+        }
+        let mut sink = RecordingSink::default();
+        let outcome = stream_generation(
+            &test_client(),
+            prepared,
+            &CancellationToken::new(),
+            &mut sink,
+        )
+        .await
+        .expect("JSON completion should succeed");
+        assert_eq!(sink.0, "Visible");
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed {
+                streamed: false,
+                usage: Some(GenerationUsage {
+                    input_tokens: 3,
+                    output_tokens: 2,
+                    cached_input_tokens: None,
+                }),
+            }
+        ));
+        let _ = server
+            .request
+            .recv_timeout(Duration::from_secs(1))
+            .expect("generation request should arrive");
+        server.handle.join().expect("fake server should stop");
+    }
+
+    #[tokio::test]
+    async fn truncation_keeps_same_frame_visible_delta_usage_and_redacted_observations() {
+        let server = spawn_fake_server(
+            "200 OK",
+            b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"private\",\"content\":\"partial\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":8}}\n\n",
+            Duration::ZERO,
+            None,
+        );
+        let mut request = generation_request();
+        request.config.base_url = format!("{}/v1", server.base_url);
+        let prepared = prepare_generation(&request)
+            .await
+            .expect("prepare SSE request");
+
+        #[derive(Default)]
+        struct RecordingSink(String);
+        impl GenerationDeltaSink for RecordingSink {
+            fn emit_delta(&mut self, delta: &str) -> Result<(), CommandError> {
+                self.0.push_str(delta);
+                Ok(())
+            }
+        }
+        let mut sink = RecordingSink::default();
+        let error = stream_generation(
+            &test_client(),
+            prepared,
+            &CancellationToken::new(),
+            &mut sink,
+        )
+        .await
+        .err()
+        .expect("length finish reason must remain a strict failure");
+        assert_eq!(sink.0, "partial");
+        assert_eq!(error.code(), "MODEL_OUTPUT_TRUNCATED");
+        assert_eq!(error.http_status(), Some(200));
+        assert_eq!(error.finish_reason(), Some("length"));
+        assert_eq!(error.reasoning_present(), Some(true));
+        assert_eq!(error.reasoning_length(), Some(7));
+        assert_eq!(error.stream(), Some(true));
+        assert_eq!(
+            error.usage(),
+            Some(&GenerationUsage {
+                input_tokens: 3,
+                output_tokens: 8,
+                cached_input_tokens: None,
+            })
+        );
+        assert!(!serde_json::to_string(&error)
+            .expect("error should serialize")
+            .contains("private"));
+        let _ = server
+            .request
+            .recv_timeout(Duration::from_secs(1))
+            .expect("generation request should arrive");
+        server.handle.join().expect("fake server should stop");
     }
 
     #[tokio::test]
@@ -3179,7 +3464,8 @@ mod tests {
             terminal,
             GenerationEventStatus::Failed {
                 code: "MODEL_TIMEOUT",
-                retryable: true
+                retryable: true,
+                ..
             }
         ));
         let mut inspector = open_dispatch_inspector(&directory.join("inkshadow.db")).await;
@@ -3365,7 +3651,8 @@ mod tests {
             terminal.lock().expect("read terminal status").as_slice(),
             [GenerationEventStatus::Failed {
                 code: "MODEL_RUNTIME_FAILED",
-                retryable: true
+                retryable: true,
+                ..
             }]
         ));
         server.handle.join().expect("fake server stops");
@@ -3898,6 +4185,7 @@ mod tests {
             ],
             max_output_tokens: 32,
             temperature: Some(0.0),
+            reasoning_mode: None,
         })
         .await
         .expect("prepare the real local generation request");
@@ -3934,6 +4222,7 @@ mod tests {
             for item in parser.push(&chunk).expect("parse real Ollama NDJSON") {
                 match item {
                     StreamItem::Delta(delta) => output.push_str(&delta),
+                    StreamItem::Reasoning { .. } | StreamItem::FinishReason(_) => {}
                     StreamItem::Usage(next) => usage = Some(next),
                     StreamItem::Done => done = true,
                 }
@@ -3942,6 +4231,7 @@ mod tests {
         for item in parser.finish().expect("finish real Ollama NDJSON") {
             match item {
                 StreamItem::Delta(delta) => output.push_str(&delta),
+                StreamItem::Reasoning { .. } | StreamItem::FinishReason(_) => {}
                 StreamItem::Usage(next) => usage = Some(next),
                 StreamItem::Done => done = true,
             }

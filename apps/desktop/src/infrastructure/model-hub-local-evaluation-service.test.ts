@@ -86,6 +86,14 @@ describe("model hub local evaluation service", () => {
       sampleCount: 2,
       evaluationSource: "local_evaluation",
     });
+    expect(executeText).toHaveBeenCalledTimes(2);
+    for (const call of executeText.mock.calls) {
+      expect(call[1]).toMatchObject({
+        maximumOutputTokens: 64,
+        reasoningPolicy: "capability_probe",
+        dispatchScope: { kind: "non_project", reason: "connection_probe" },
+      });
+    }
   });
 
   it("refuses to combine probes that were routed to different models", async () => {
@@ -103,6 +111,33 @@ describe("model hub local evaluation service", () => {
 
     await expect(service.evaluate("continuation")).rejects.toMatchObject({
       code: "MODEL_EVALUATION_INCONSISTENT_ROUTE",
+    });
+  });
+
+  it("does not record a partial evaluation when a probe fails", async () => {
+    const recordEvaluationResult = vi.fn();
+    const executeText = vi.fn().mockRejectedValueOnce(
+      Object.assign(new Error("provider unavailable"), {
+        code: "MODEL_TIMEOUT",
+        retryable: true,
+      }),
+    );
+    const service = new ModelHubLocalEvaluationService(
+      {} as never,
+      { recordEvaluationResult },
+      new CryptoUuidV7Generator(),
+      new SystemClock(),
+      executeText,
+    );
+
+    await expect(service.evaluate("continuation")).rejects.toMatchObject({
+      code: "MODEL_EVALUATION_UNAVAILABLE",
+      retryable: true,
+    });
+    expect(recordEvaluationResult).not.toHaveBeenCalled();
+    expect(executeText.mock.calls[0]?.[1]).toMatchObject({
+      maximumOutputTokens: 64,
+      reasoningPolicy: "capability_probe",
     });
   });
 });
