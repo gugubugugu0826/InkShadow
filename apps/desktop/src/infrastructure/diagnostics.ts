@@ -8,7 +8,22 @@ import type { LocalAccessStoreHealth } from "@inkshadow/data/access-sqlite-store
 import type { LocalSyncStoreHealth } from "@inkshadow/data/sync-sqlite-store";
 
 import { NOVEL_AI_TASKS } from "./model-hub-provider-registry";
-import type { RecentAiFailure } from "./model-hub-store";
+import {
+  buildModelHubRoutingVisibility,
+  toAiRoutingDiagnosticSummary,
+  type AiRoutingDiagnosticSummary,
+} from "./model-hub-routing-visibility";
+import type {
+  ModelCapabilityEvidence,
+  ModelCatalogEntry,
+  ModelProviderConnection,
+  NovelTaskRoute,
+  RecentAiFailure,
+} from "./model-hub-store";
+import {
+  readSafeGenerationPreflightDiagnostic,
+  type SafeGenerationPreflightDiagnostic,
+} from "./generation-preflight-diagnostics";
 import type { DesktopRuntime } from "./runtime";
 
 export interface DesktopDiagnosticBundle {
@@ -22,7 +37,10 @@ export interface DesktopDiagnosticBundle {
     readonly sync: LocalSyncStoreHealth;
     readonly access: LocalAccessStoreHealth;
   } | null;
+  readonly aiRoutingSummary: AiRoutingDiagnosticSummary;
+  readonly recentAiRoutingFailures: readonly [];
   readonly recentAiFailures: readonly RecentAiFailure[];
+  readonly generationPreflight: SafeGenerationPreflightDiagnostic | null;
   readonly recentLogs: readonly [];
   readonly privacy: {
     readonly projectContentIncluded: false;
@@ -58,6 +76,10 @@ export async function collectDesktopDiagnosticArtifact(
   let modelHubUsableConnectionCount: number | null = null;
   let modelHubCatalogEntryCount: number | null = null;
   let modelHubEnabledTaskRouteCount: number | null = null;
+  let modelHubConnections: readonly ModelProviderConnection[] = [];
+  let modelHubCatalog: readonly ModelCatalogEntry[] = [];
+  let modelHubRoutes: readonly NovelTaskRoute[] = [];
+  let modelHubCapabilityEvidence: readonly ModelCapabilityEvidence[] = [];
 
   try {
     const taskCenter = await runtime.taskCenter.load();
@@ -119,13 +141,22 @@ export async function collectDesktopDiagnosticArtifact(
       Promise.all(connections.map((connection) => runtime.modelHub.listCatalog(connection.id))),
       Promise.all(NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task))),
     ]);
+    const catalog = catalogs.flat();
+    const persistedRoutes = routes.filter((route): route is NovelTaskRoute => route !== null);
+    const capabilityEvidence = (
+      await Promise.all(catalog.map((entry) => runtime.modelHub.listCapabilityEvidence(entry.id)))
+    ).flat();
+    modelHubConnections = connections;
+    modelHubCatalog = catalog;
+    modelHubRoutes = persistedRoutes;
+    modelHubCapabilityEvidence = capabilityEvidence;
     modelHubConnectionCount = connections.length;
     modelHubUsableConnectionCount = connections.filter(
       (connection) =>
         connection.enabled &&
         (connection.connectionStatus === "ready" || connection.connectionStatus === "degraded"),
     ).length;
-    modelHubCatalogEntryCount = catalogs.reduce((count, catalog) => count + catalog.length, 0);
+    modelHubCatalogEntryCount = catalog.length;
     modelHubEnabledTaskRouteCount = routes.filter((route) => route?.enabled === true).length;
   } catch (cause: unknown) {
     errorCodes.push(errorCode(cause, "MODEL_HUB_DIAGNOSTIC_UNAVAILABLE"));
@@ -142,6 +173,20 @@ export async function collectDesktopDiagnosticArtifact(
   } catch (cause: unknown) {
     errorCodes.push(errorCode(cause, "AI_FAILURE_DIAGNOSTIC_UNAVAILABLE"));
   }
+
+  const aiRoutingSummary = toAiRoutingDiagnosticSummary(
+    buildModelHubRoutingVisibility({
+      connections: modelHubConnections,
+      catalog: modelHubCatalog,
+      routes: modelHubRoutes,
+      capabilityEvidence: modelHubCapabilityEvidence,
+      recentAiFailures,
+      now: runtime.clock.now(),
+      validating: false,
+      loadFailed: modelHubConnectionCount === null,
+      saveFailed: false,
+    }),
+  );
 
   const searchHealth = runtime.search.health();
   const embeddingDiagnostics = runtime.search.embeddingDiagnostics();
@@ -205,6 +250,7 @@ export async function collectDesktopDiagnosticArtifact(
       ? ["Database integrity inspection is available only in the desktop runtime."]
       : []),
     "Persistent redacted log collection is not enabled; recentLogs is intentionally empty.",
+    "AI routing write failures are not persisted as a dedicated safe fact; recentAiRoutingFailures is intentionally empty and cannot locate historical routing write failures.",
     ...(runtime.mode === "tauri"
       ? [
           "Keyword and relation projections are rebuilt in memory; validated document vectors persist in local SQLite.",
@@ -221,7 +267,10 @@ export async function collectDesktopDiagnosticArtifact(
       foreignKeyViolationCount,
     },
     localCloudFoundation,
+    aiRoutingSummary,
+    recentAiRoutingFailures: [],
     recentAiFailures,
+    generationPreflight: readSafeGenerationPreflightDiagnostic(runtime),
     recentLogs: [],
     privacy: {
       projectContentIncluded: false,

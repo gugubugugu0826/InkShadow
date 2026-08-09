@@ -68,6 +68,7 @@ interface FineTuningDeploymentRestoreRow {
 const RESTORABLE_TABLES = [
   "projects",
   "project_seeds",
+  "story_settings_import_receipts",
   "team_template_application_receipts",
   "project_team_template_settings",
   "project_team_template_prompt_refs",
@@ -220,6 +221,7 @@ const DERIVED_TABLES_TO_CLEAR = [
 ] as const;
 
 const RESTORE_DELETE_ORDER = [
+  "story_settings_import_receipts",
   "context_compilation_output_candidate_links",
   "context_compilation_model_invocation_links",
   "context_compilation_execution_links",
@@ -366,6 +368,7 @@ const RESTORE_DELETE_ORDER = [
 const RESTORE_INSERT_ORDER = [
   "projects",
   "project_seeds",
+  "story_settings_import_receipts",
   "cloud_deletion_journals",
   "cloud_deletion_mutations",
   "writing_feedback_policies",

@@ -3,7 +3,7 @@
 > 基于源码快照：2026-07-30  
 > 覆盖范围：`apps/cloud-api/src` 的 84 个非测试源码文件、16 个 PostgreSQL 迁移及其共享契约  
 > 文档状态：`SUPPORTING_CURRENT`（代码边界）；不表示生产 Cloud 已部署  
-> 应用版本：`0.2.0`；设计基线 `DESIGN v0.3.1b` 不改变 Cloud API 版本  
+> Desktop 发布基线：`0.2.1`；设计基线 `DESIGN v0.3.1b` 不改变 Cloud API 版本  
 > 状态口径：代码已实现不等于已经部署或通过真实生产环境验证
 
 ## 1. 定位与规模

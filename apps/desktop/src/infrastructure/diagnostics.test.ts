@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { runGenerationPreflight } from "@inkshadow/ai-core";
 
 import { collectDesktopDiagnosticArtifact } from "./diagnostics";
+import { recordSafeGenerationPreflightDiagnostic } from "./generation-preflight-diagnostics";
 import { createDevelopmentRuntime } from "./runtime";
 
 describe("desktop diagnostics", () => {
@@ -68,6 +70,37 @@ describe("desktop diagnostics", () => {
     if (!search.ok) {
       throw search.error;
     }
+    const preflight = runGenerationPreflight({
+      now: runtime.clock.now(),
+      migrationReady: true,
+      chapterExists: true,
+      chapterSaved: true,
+      projectWritable: true,
+      gatewayAvailable: true,
+      networkAvailable: true,
+      providerLocation: "remote",
+      routeResolved: true,
+      profileConfigured: true,
+      modelSelected: true,
+      credentialConfigured: true,
+      connectionStatus: "verified",
+      selectedModelAvailable: true,
+      inputBytes: 4_000,
+      maximumInputBytes: 1_000_000,
+      inputTokens: 1_000,
+      maximumOutputTokens: 800,
+      contextWindowTokens: null,
+      tokenizerStatus: "approximate",
+      pricing: null,
+      budgets: [],
+    });
+    recordSafeGenerationPreflightDiagnostic(runtime, {
+      taskType: "continuation",
+      routeFound: true,
+      connectionUsable: true,
+      capabilityStatus: "supported",
+      snapshot: preflight,
+    });
 
     const artifact = await collectDesktopDiagnosticArtifact(runtime);
 
@@ -75,7 +108,7 @@ describe("desktop diagnostics", () => {
     expect(artifact.bundle).toMatchObject({
       schemaVersion: 2,
       summary: {
-        appVersion: "0.2.0",
+        appVersion: "0.2.1",
         databaseHealth: "unknown",
         indexHealth: "healthy",
         syncState: "local_only",
@@ -89,6 +122,24 @@ describe("desktop diagnostics", () => {
         uploadedFilesIncluded: false,
       },
       localCloudFoundation: null,
+      aiRoutingSummary: {
+        registryTaskCount: 22,
+        enabledRouteCount: 0,
+        missingRouteCount: 22,
+        manuallyConfiguredCount: 0,
+        automaticallyConfiguredCount: 0,
+        coreWritingReady: false,
+        missingCapabilities: [
+          "text_generation",
+          "structured_output",
+          "embedding",
+          "rerank",
+          "image_generation",
+          "vision",
+          "translation",
+        ],
+      },
+      recentAiRoutingFailures: [],
       recentAiFailures: [
         {
           diagnosticId: "capability_scan:diagnostic-failed-probe",
@@ -109,6 +160,29 @@ describe("desktop diagnostics", () => {
           requestedMaxOutputTokens: 8,
         },
       ],
+      generationPreflight: {
+        taskType: "continuation",
+        routeFound: true,
+        connectionUsable: true,
+        capabilityStatus: "supported",
+        pricingStatus: "unavailable",
+        contextWindowStatus: "conservative_fallback",
+        tokenizerStatus: "approximate",
+        estimatedInputTokens: 1_000,
+        effectiveContextBudget: 7_000,
+        readiness: "READY_WITH_WARNINGS",
+        blockerCodes: [],
+        warningCodes: [
+          "PREFLIGHT_WARNING_PRICING_UNKNOWN",
+          "PREFLIGHT_WARNING_CONTEXT_UNKNOWN",
+          "PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE",
+        ],
+        defaultsApplied: [
+          "CONSERVATIVE_CONTEXT_WINDOW",
+          "CONSERVATIVE_TOKEN_ESTIMATE",
+          "PRICING_UNAVAILABLE",
+        ],
+      },
     });
     expect(typeof artifact.bundle.recentAiFailures[0]?.timestamp).toBe("string");
     expect(artifact.content).not.toContain("绝不能进入诊断包的正文标记");
@@ -118,6 +192,13 @@ describe("desktop diagnostics", () => {
     expect(artifact.content).not.toContain("private.example");
     expect(artifact.content).not.toContain("proprietary-model-42");
     expect(artifact.content).not.toContain("never-export-this-error-summary");
+    expect(JSON.stringify(artifact.bundle.aiRoutingSummary)).not.toContain("diagnostic-provider");
+    expect(JSON.stringify(artifact.bundle.aiRoutingSummary)).not.toContain("diagnostic-writer");
+    expect(artifact.bundle.limitations).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("recentAiRoutingFailures is intentionally empty"),
+      ]),
+    );
     expect(artifact.bundle.summary.configuration).toMatchObject({
       indexIntegrated: true,
       indexPersistence: "runtime_rebuild",

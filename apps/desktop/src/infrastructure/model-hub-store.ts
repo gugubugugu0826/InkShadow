@@ -447,6 +447,30 @@ export interface SaveNovelTaskRouteInput {
   readonly expectedRevision: number | null;
 }
 
+export interface AutomaticNovelTaskRouteInput {
+  readonly task: NovelAiTask;
+  readonly primaryCatalogEntryId: string;
+  readonly fallbackCatalogEntryId?: string | null;
+  readonly parameterPolicy?: Readonly<Record<string, unknown>>;
+  readonly maximumCostMicros?: string | null;
+  readonly currency?: string | null;
+  readonly privacyPolicy: ModelHubPrivacyPolicy;
+  readonly failurePolicy: "use_fallback" | "ask_user" | "stop";
+  readonly enabled?: boolean;
+}
+
+export interface ApplyAutomaticModelHubRoutingPlanInput {
+  readonly preset: Omit<SaveModelHubPresetInput, "expectedRevision">;
+  readonly routes: readonly AutomaticNovelTaskRouteInput[];
+}
+
+export interface AppliedAutomaticModelHubRoutingPlan {
+  readonly preset: ModelHubPreset;
+  readonly routes: readonly NovelTaskRoute[];
+  readonly changed: boolean;
+  readonly preservedUserRouteCount: number;
+}
+
 export interface ModelInvocationFact {
   readonly id: string;
   readonly task: NovelAiTask;
@@ -548,6 +572,9 @@ export interface ModelHubStore {
   findTaskRoute(task: NovelAiTask): Promise<NovelTaskRoute | null>;
   saveTaskRoute(input: SaveNovelTaskRouteInput): Promise<NovelTaskRoute>;
   deleteTaskRoute(task: NovelAiTask, expectedRevision: number): Promise<void>;
+  applyAutomaticRoutingPlan(
+    input: ApplyAutomaticModelHubRoutingPlanInput,
+  ): Promise<AppliedAutomaticModelHubRoutingPlan>;
   listRecentAiFailures(limit?: number): Promise<readonly RecentAiFailure[]>;
   findInvocation(id: string): Promise<ModelInvocationFact | null>;
   startInvocation(input: StartModelInvocationInput): Promise<ModelInvocationFact>;
@@ -1604,6 +1631,208 @@ export class TauriModelHubStore implements ModelHubStore {
     }
   }
 
+  public async applyAutomaticRoutingPlan(
+    input: ApplyAutomaticModelHubRoutingPlanInput,
+  ): Promise<AppliedAutomaticModelHubRoutingPlan> {
+    const validated = validateAutomaticRoutingPlanInput(input);
+    try {
+      return await this.executor.transaction(async (transaction) => {
+        const presetRows = await transaction.select<PresetRow>(PRESET_SELECT);
+        const routeRows = await transaction.select<RouteRow>(ROUTE_SELECT);
+        const existingPreset = presetRows.find(({ id }) => id === validated.preset.id);
+        const preservedUserRoutes = routeRows.filter(({ route_origin }) => route_origin === "user");
+
+        if (
+          validated.preset.privacyPolicy === "local_only" &&
+          preservedUserRoutes.some(
+            ({ privacy_policy, enabled }) => enabled === 1 && privacy_policy !== "local_only",
+          )
+        ) {
+          throw modelHubError(
+            "MODEL_HUB_MANUAL_ROUTE_PRIVACY_CONFLICT",
+            "A manual cloud route must be changed or disabled before applying local-only routing.",
+          );
+        }
+
+        const userTasks = new Set(preservedUserRoutes.map(({ task }) => validateTask(task)));
+        for (const route of validated.routes) {
+          if (userTasks.has(route.task)) continue;
+          await ensureCatalogEntry(transaction, route.primaryCatalogEntryId);
+          if (route.fallbackCatalogEntryId !== null) {
+            await ensureCatalogEntry(transaction, route.fallbackCatalogEntryId);
+          }
+          if (route.privacyPolicy === "local_only") {
+            await ensureLocalCatalogEntry(transaction, route.primaryCatalogEntryId);
+            if (route.fallbackCatalogEntryId !== null) {
+              await ensureLocalCatalogEntry(transaction, route.fallbackCatalogEntryId);
+            }
+          }
+        }
+
+        const now = this.clock.now();
+        let changed = false;
+        if (validated.preset.status === "active") {
+          const superseded = await transaction.execute(
+            `UPDATE model_hub_presets
+             SET status = 'superseded', revision = revision + 1, updated_at = ?
+             WHERE status = 'active' AND id <> ?`,
+            [now, validated.preset.id],
+          );
+          changed = superseded.rowsAffected > 0;
+        }
+
+        if (existingPreset === undefined) {
+          await transaction.execute(
+            `INSERT INTO model_hub_presets (
+               id, scheme, display_name, status, privacy_policy, cost_priority,
+               route_generation_version, revision, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+            [
+              validated.preset.id,
+              validated.preset.scheme,
+              validated.preset.displayName,
+              validated.preset.status,
+              validated.preset.privacyPolicy,
+              validated.preset.costPriority,
+              validated.preset.routeGenerationVersion,
+              now,
+              now,
+            ],
+          );
+          changed = true;
+        } else if (!presetRowMatchesAutomaticPlan(existingPreset, validated.preset)) {
+          const updated = await transaction.execute(
+            `UPDATE model_hub_presets
+             SET scheme = ?, display_name = ?, status = ?, privacy_policy = ?,
+                 cost_priority = ?, route_generation_version = ?,
+                 revision = revision + 1, updated_at = ?
+             WHERE id = ? AND revision = ?`,
+            [
+              validated.preset.scheme,
+              validated.preset.displayName,
+              validated.preset.status,
+              validated.preset.privacyPolicy,
+              validated.preset.costPriority,
+              validated.preset.routeGenerationVersion,
+              now,
+              validated.preset.id,
+              existingPreset.revision,
+            ],
+          );
+          if (updated.rowsAffected !== 1) {
+            throw conflict("MODEL_HUB_PRESET_CONFLICT");
+          }
+          changed = true;
+        }
+
+        const desiredByTask = new Map(
+          validated.routes.map((route) => [route.task, route] as const),
+        );
+        for (const existing of routeRows) {
+          if (existing.route_origin === "user") {
+            desiredByTask.delete(validateTask(existing.task));
+            continue;
+          }
+          const desired = desiredByTask.get(validateTask(existing.task));
+          if (desired === undefined) {
+            const deleted = await transaction.execute(
+              "DELETE FROM novel_task_routes WHERE task = ? AND revision = ? AND route_origin <> 'user'",
+              [existing.task, existing.revision],
+            );
+            if (deleted.rowsAffected !== 1) {
+              throw conflict("MODEL_HUB_ROUTE_CONFLICT");
+            }
+            changed = true;
+            continue;
+          }
+          if (!routeRowMatchesAutomaticPlan(existing, desired, validated.preset.id)) {
+            const updated = await transaction.execute(
+              `UPDATE novel_task_routes
+               SET primary_catalog_entry_id = ?, fallback_catalog_entry_id = ?, preset_id = ?,
+                   parameter_policy_json = ?, maximum_cost_micros = ?, currency = ?,
+                   privacy_policy = ?, failure_policy = ?, route_origin = 'automatic', enabled = ?,
+                   revision = revision + 1, updated_at = ?
+               WHERE task = ? AND revision = ? AND route_origin <> 'user'`,
+              [
+                desired.primaryCatalogEntryId,
+                desired.fallbackCatalogEntryId,
+                validated.preset.id,
+                desired.parameterPolicyJson,
+                desired.maximumCostMicros,
+                desired.currency,
+                desired.privacyPolicy,
+                desired.failurePolicy,
+                desired.enabled ? 1 : 0,
+                now,
+                desired.task,
+                existing.revision,
+              ],
+            );
+            if (updated.rowsAffected !== 1) {
+              throw conflict("MODEL_HUB_ROUTE_CONFLICT");
+            }
+            changed = true;
+          }
+          desiredByTask.delete(desired.task);
+        }
+
+        for (const desired of desiredByTask.values()) {
+          await transaction.execute(
+            `INSERT INTO novel_task_routes (
+               task, primary_catalog_entry_id, fallback_catalog_entry_id, preset_id,
+               parameter_policy_json, maximum_cost_micros, currency, privacy_policy,
+               failure_policy, route_origin, enabled, revision, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'automatic', ?, 1, ?, ?)`,
+            [
+              desired.task,
+              desired.primaryCatalogEntryId,
+              desired.fallbackCatalogEntryId,
+              validated.preset.id,
+              desired.parameterPolicyJson,
+              desired.maximumCostMicros,
+              desired.currency,
+              desired.privacyPolicy,
+              desired.failurePolicy,
+              desired.enabled ? 1 : 0,
+              now,
+              now,
+            ],
+          );
+          changed = true;
+        }
+
+        const savedPresetRows = await transaction.select<PresetRow>(
+          `${PRESET_SELECT} WHERE id = ?`,
+          [validated.preset.id],
+        );
+        const savedRouteRows = await transaction.select<RouteRow>(
+          `${ROUTE_SELECT} ORDER BY task ASC`,
+        );
+        if (savedPresetRows[0] === undefined) {
+          throw modelHubError(
+            "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED",
+            "The automatic AI routing plan was not persisted.",
+          );
+        }
+        return Object.freeze({
+          preset: hydratePreset(savedPresetRows[0]),
+          routes: Object.freeze(savedRouteRows.map(hydrateRoute)),
+          changed,
+          preservedUserRouteCount: preservedUserRoutes.length,
+        });
+      });
+    } catch (cause: unknown) {
+      if (cause instanceof ModelHubStoreError) {
+        throw cause;
+      }
+      throw new ModelHubStoreError(
+        "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED",
+        "The AI routing plan was not committed; the previous plan remains active.",
+        true,
+      );
+    }
+  }
+
   public async listRecentAiFailures(limitValue = 25): Promise<readonly RecentAiFailure[]> {
     const limit = validateRecentFailureLimit(limitValue);
     const rows = await this.executor.select<RecentAiFailureRow>(RECENT_AI_FAILURE_SELECT, [limit]);
@@ -2610,6 +2839,163 @@ export class InMemoryModelHubStore implements ModelHubStore {
       Reflect.deleteProperty(this.state.routes, task);
       this.commit();
     });
+  }
+
+  public applyAutomaticRoutingPlan(
+    input: ApplyAutomaticModelHubRoutingPlanInput,
+  ): Promise<AppliedAutomaticModelHubRoutingPlan> {
+    return Promise.resolve()
+      .then(() => {
+        const validated = validateAutomaticRoutingPlanInput(input);
+        const nextState = structuredClone(this.state);
+        const preservedUserRoutes = Object.values(nextState.routes).filter(
+          ({ routeOrigin }) => routeOrigin === "user",
+        );
+        if (
+          validated.preset.privacyPolicy === "local_only" &&
+          preservedUserRoutes.some(
+            ({ privacyPolicy, enabled }) => enabled && privacyPolicy !== "local_only",
+          )
+        ) {
+          throw modelHubError(
+            "MODEL_HUB_MANUAL_ROUTE_PRIVACY_CONFLICT",
+            "A manual cloud route must be changed or disabled before applying local-only routing.",
+          );
+        }
+        const userTasks = new Set(preservedUserRoutes.map(({ task }) => task));
+        for (const route of validated.routes) {
+          if (userTasks.has(route.task)) continue;
+          assertMemoryRouteCatalogRequirements(nextState, route);
+        }
+
+        const now = this.clock.now();
+        let changed = false;
+        if (validated.preset.status === "active") {
+          for (const [id, preset] of Object.entries(nextState.presets)) {
+            if (id !== validated.preset.id && preset.status === "active") {
+              nextState.presets[id] = Object.freeze({
+                ...preset,
+                status: "superseded",
+                revision: preset.revision + 1,
+                updatedAt: now,
+              });
+              changed = true;
+            }
+          }
+        }
+
+        const existingPreset = nextState.presets[validated.preset.id];
+        if (
+          existingPreset === undefined ||
+          !memoryPresetMatchesAutomaticPlan(existingPreset, validated.preset)
+        ) {
+          nextState.presets[validated.preset.id] = Object.freeze({
+            id: validated.preset.id,
+            scheme: validated.preset.scheme,
+            displayName: validated.preset.displayName,
+            status: validated.preset.status,
+            privacyPolicy: validated.preset.privacyPolicy,
+            costPriority: validated.preset.costPriority,
+            routeGenerationVersion: validated.preset.routeGenerationVersion,
+            revision: existingPreset === undefined ? 1 : existingPreset.revision + 1,
+            createdAt: existingPreset?.createdAt ?? now,
+            updatedAt: now,
+          });
+          changed = true;
+        }
+
+        const desiredByTask = new Map(
+          validated.routes.map((route) => [route.task, route] as const),
+        );
+        for (const [task, existing] of Object.entries(nextState.routes)) {
+          if (existing.routeOrigin === "user") {
+            desiredByTask.delete(validateTask(task));
+            continue;
+          }
+          const desired = desiredByTask.get(validateTask(task));
+          if (desired === undefined) {
+            Reflect.deleteProperty(nextState.routes, task);
+            changed = true;
+            continue;
+          }
+          if (!memoryRouteMatchesAutomaticPlan(existing, desired, validated.preset.id)) {
+            nextState.routes[task] = Object.freeze({
+              task: desired.task,
+              primaryCatalogEntryId: desired.primaryCatalogEntryId,
+              fallbackCatalogEntryId: desired.fallbackCatalogEntryId,
+              presetId: validated.preset.id,
+              parameterPolicy: JSON.parse(desired.parameterPolicyJson) as Readonly<
+                Record<string, unknown>
+              >,
+              maximumCostMicros: desired.maximumCostMicros,
+              currency: desired.currency,
+              privacyPolicy: desired.privacyPolicy,
+              failurePolicy: desired.failurePolicy,
+              routeOrigin: "automatic",
+              enabled: desired.enabled,
+              revision: existing.revision + 1,
+              createdAt: existing.createdAt,
+              updatedAt: now,
+            });
+            changed = true;
+          }
+          desiredByTask.delete(desired.task);
+        }
+
+        for (const desired of desiredByTask.values()) {
+          nextState.routes[desired.task] = Object.freeze({
+            task: desired.task,
+            primaryCatalogEntryId: desired.primaryCatalogEntryId,
+            fallbackCatalogEntryId: desired.fallbackCatalogEntryId,
+            presetId: validated.preset.id,
+            parameterPolicy: JSON.parse(desired.parameterPolicyJson) as Readonly<
+              Record<string, unknown>
+            >,
+            maximumCostMicros: desired.maximumCostMicros,
+            currency: desired.currency,
+            privacyPolicy: desired.privacyPolicy,
+            failurePolicy: desired.failurePolicy,
+            routeOrigin: "automatic",
+            enabled: desired.enabled,
+            revision: 1,
+            createdAt: now,
+            updatedAt: now,
+          });
+          changed = true;
+        }
+
+        if (changed) {
+          this.persist(structuredClone(nextState));
+          this.state = nextState;
+        }
+        const savedPreset = nextState.presets[validated.preset.id];
+        if (savedPreset === undefined) {
+          throw modelHubError(
+            "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED",
+            "The automatic AI routing plan was not persisted.",
+          );
+        }
+        return Object.freeze({
+          preset: Object.freeze(structuredClone(savedPreset)),
+          routes: Object.freeze(
+            Object.values(nextState.routes)
+              .sort((left, right) => left.task.localeCompare(right.task))
+              .map((route) => Object.freeze(structuredClone(route))),
+          ),
+          changed,
+          preservedUserRouteCount: preservedUserRoutes.length,
+        });
+      })
+      .catch((cause: unknown) => {
+        if (cause instanceof ModelHubStoreError) {
+          throw cause;
+        }
+        throw new ModelHubStoreError(
+          "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED",
+          "The AI routing plan was not committed; the previous plan remains active.",
+          true,
+        );
+      });
   }
 
   public listRecentAiFailures(limitValue = 25): Promise<readonly RecentAiFailure[]> {
@@ -3672,6 +4058,139 @@ function validateRouteInput(input: SaveNovelTaskRouteInput) {
     enabled: input.enabled ?? true,
     expectedRevision: validateExpectedRevision(input.expectedRevision),
   });
+}
+
+function validateAutomaticRoutingPlanInput(input: ApplyAutomaticModelHubRoutingPlanInput) {
+  const preset = validatePresetInput({ ...input.preset, expectedRevision: null });
+  if (preset.scheme === "custom" || preset.status !== "active") {
+    throw modelHubError(
+      "MODEL_HUB_ROUTING_PLAN_INVALID",
+      "An automatic AI routing plan requires an active automatic preset.",
+    );
+  }
+  const seenTasks = new Set<NovelAiTask>();
+  const routes = input.routes.map((route) => {
+    const validated = validateRouteInput({
+      ...route,
+      presetId: preset.id,
+      routeOrigin: "automatic",
+      expectedRevision: null,
+    });
+    if (seenTasks.has(validated.task)) {
+      throw modelHubError(
+        "MODEL_HUB_ROUTING_PLAN_INVALID",
+        "An automatic AI routing plan cannot contain duplicate tasks.",
+      );
+    }
+    if (validated.privacyPolicy !== preset.privacyPolicy) {
+      throw modelHubError(
+        "MODEL_HUB_ROUTING_PLAN_INVALID",
+        "Every automatic task route must use the preset privacy policy.",
+      );
+    }
+    seenTasks.add(validated.task);
+    return validated;
+  });
+  return Object.freeze({ preset, routes: Object.freeze(routes) });
+}
+
+function presetRowMatchesAutomaticPlan(
+  existing: PresetRow,
+  desired: ReturnType<typeof validatePresetInput>,
+): boolean {
+  return (
+    existing.scheme === desired.scheme &&
+    existing.display_name === desired.displayName &&
+    existing.status === desired.status &&
+    existing.privacy_policy === desired.privacyPolicy &&
+    existing.cost_priority === desired.costPriority &&
+    existing.route_generation_version === desired.routeGenerationVersion
+  );
+}
+
+function memoryPresetMatchesAutomaticPlan(
+  existing: ModelHubPreset,
+  desired: ReturnType<typeof validatePresetInput>,
+): boolean {
+  return (
+    existing.scheme === desired.scheme &&
+    existing.displayName === desired.displayName &&
+    existing.status === desired.status &&
+    existing.privacyPolicy === desired.privacyPolicy &&
+    existing.costPriority === desired.costPriority &&
+    existing.routeGenerationVersion === desired.routeGenerationVersion
+  );
+}
+
+type ValidatedNovelTaskRoute = ReturnType<typeof validateRouteInput>;
+
+function routeRowMatchesAutomaticPlan(
+  existing: RouteRow,
+  desired: ValidatedNovelTaskRoute,
+  presetId: string,
+): boolean {
+  return (
+    existing.primary_catalog_entry_id === desired.primaryCatalogEntryId &&
+    existing.fallback_catalog_entry_id === desired.fallbackCatalogEntryId &&
+    existing.preset_id === presetId &&
+    existing.parameter_policy_json === desired.parameterPolicyJson &&
+    existing.maximum_cost_micros === desired.maximumCostMicros &&
+    existing.currency === desired.currency &&
+    existing.privacy_policy === desired.privacyPolicy &&
+    existing.failure_policy === desired.failurePolicy &&
+    existing.route_origin === "automatic" &&
+    existing.enabled === (desired.enabled ? 1 : 0)
+  );
+}
+
+function memoryRouteMatchesAutomaticPlan(
+  existing: NovelTaskRoute,
+  desired: ValidatedNovelTaskRoute,
+  presetId: string,
+): boolean {
+  return (
+    existing.primaryCatalogEntryId === desired.primaryCatalogEntryId &&
+    existing.fallbackCatalogEntryId === desired.fallbackCatalogEntryId &&
+    existing.presetId === presetId &&
+    JSON.stringify(existing.parameterPolicy) === desired.parameterPolicyJson &&
+    existing.maximumCostMicros === desired.maximumCostMicros &&
+    existing.currency === desired.currency &&
+    existing.privacyPolicy === desired.privacyPolicy &&
+    existing.failurePolicy === desired.failurePolicy &&
+    existing.routeOrigin === "automatic" &&
+    existing.enabled === desired.enabled
+  );
+}
+
+function assertMemoryRouteCatalogRequirements(
+  state: MemoryModelHubState,
+  route: Readonly<{
+    primaryCatalogEntryId: string;
+    fallbackCatalogEntryId: string | null;
+    privacyPolicy: ModelHubPrivacyPolicy;
+  }>,
+): void {
+  for (const id of [route.primaryCatalogEntryId, route.fallbackCatalogEntryId]) {
+    if (id === null) continue;
+    const catalog = state.catalog[id];
+    if (catalog?.availability !== "available") {
+      throw modelHubError("MODEL_HUB_MODEL_NOT_AVAILABLE", "The selected model is not available.");
+    }
+    if (route.privacyPolicy !== "local_only") continue;
+    const privacy = state.costPrivacyProfiles[id];
+    const connection = state.connections[catalog.connectionId];
+    if (
+      privacy?.dataDestination !== "local" ||
+      privacy.evidenceSource === "unknown" ||
+      connection === undefined ||
+      !isLoopbackModelBaseUrl(connection.baseUrl)
+    ) {
+      throw modelHubError(
+        "MODEL_HUB_PRIVACY_BLOCKED",
+        "Local-only routes require evidence-confirmed local models.",
+      );
+    }
+  }
 }
 
 function validateInvocationStart(input: StartModelInvocationInput) {

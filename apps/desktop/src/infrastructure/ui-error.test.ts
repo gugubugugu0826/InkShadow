@@ -112,6 +112,14 @@ describe("normalizeUiError SQLite persistence failures", () => {
       "MODEL_HUB_ROUTE_NOT_CONFIGURED",
       ["验证至少一个模型的写作能力", "应用智能推荐", "缺少 Embedding 不会阻止"],
     ],
+    [
+      "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED",
+      ["没有完整写入", "之前可用的分工仍保持不变", "重试“应用 AI 分工”"],
+    ],
+    [
+      "MODEL_HUB_MANUAL_ROUTE_PRIVACY_CONFLICT",
+      ["手动设置的云端任务", "没有覆盖", "本机模型或先停用"],
+    ],
   ])("gives an actionable, redacted recovery path for %s", (code, expectedFragments) => {
     const privateDetail = "Authorization: Bearer hidden private provider response";
     const normalized = normalizeUiError({ code, message: privateDetail, retryable: true });

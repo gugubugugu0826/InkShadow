@@ -28,12 +28,34 @@ export const GENERATION_PREFLIGHT_CODES = [
   "CONTEXT_WINDOW_NEAR_LIMIT",
   "BUDGET_WARNING",
   "BUDGET_EXCEEDED",
+  "PREFLIGHT_WARNING_PRICING_UNKNOWN",
+  "PREFLIGHT_WARNING_CONTEXT_UNKNOWN",
+  "PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE",
+  "PREFLIGHT_BLOCKED_NO_ROUTE",
+  "PREFLIGHT_BLOCKED_CREDENTIAL",
+  "PREFLIGHT_BLOCKED_MODEL_UNAVAILABLE",
+  "PREFLIGHT_BLOCKED_PRIVACY",
+  "PREFLIGHT_BLOCKED_CONTEXT_OVERFLOW",
+  "PREFLIGHT_BLOCKED_HARD_BUDGET",
   "READY",
 ] as const;
 
 export type GenerationPreflightCode = (typeof GENERATION_PREFLIGHT_CODES)[number];
 export type GenerationPreflightSeverity = "blocking" | "fix_recommended" | "notice";
 export type GenerationProviderLocation = "remote" | "local" | "demo";
+export type GenerationPreflightReadiness = "READY" | "READY_WITH_WARNINGS" | "BLOCKED";
+export type GenerationPreflightCostStatus = "estimated" | "pricing_unavailable" | "not_applicable";
+export type GenerationTokenizerStatus = "exact" | "approximate";
+
+/**
+ * The single fallback used when a provider does not publish a context limit.
+ * This is a conservative compilation budget, never a claim about the model's
+ * real context window.
+ */
+export const CONSERVATIVE_GENERATION_CONTEXT_POLICY = Object.freeze({
+  effectiveContextWindowTokens: 16_384,
+  maximumCompiledInputTokens: 7_000,
+});
 
 export const GENERATION_PREFLIGHT_ACTIONS = [
   "RUN_MIGRATION",
@@ -77,6 +99,8 @@ export interface GenerationPreflightInput {
   readonly inputTokens: number;
   readonly maximumOutputTokens: number;
   readonly contextWindowTokens: number | null;
+  readonly tokenizerStatus?: GenerationTokenizerStatus;
+  readonly privacyStatus?: "allowed" | "blocked";
   readonly pricing: ModelPricing | null;
   readonly budgets: readonly BudgetLimit[];
   readonly pricingMaximumAgeMilliseconds?: number;
@@ -85,15 +109,25 @@ export interface GenerationPreflightInput {
 
 export interface GenerationPreflightSnapshot {
   readonly checkedAt: string;
+  readonly readiness: GenerationPreflightReadiness;
   readonly canStart: boolean;
   readonly requiresConfirmation: boolean;
   readonly checks: readonly GenerationPreflightCheck[];
+  readonly blockers: readonly GenerationPreflightCheck[];
+  readonly warnings: readonly GenerationPreflightCheck[];
+  readonly defaultsApplied: readonly (
+    "CONSERVATIVE_CONTEXT_WINDOW" | "CONSERVATIVE_TOKEN_ESTIMATE" | "PRICING_UNAVAILABLE"
+  )[];
+  readonly suggestedActions: readonly GenerationPreflightAction[];
   readonly estimate: CostEstimate | null;
+  readonly costStatus: GenerationPreflightCostStatus;
   readonly budget: BudgetDecision | null;
   readonly inputTokens: number;
   readonly inputBytes: number;
   readonly maximumOutputTokens: number;
   readonly contextWindowTokens: number | null;
+  readonly effectiveContextBudget: number;
+  readonly tokenizerStatus: GenerationTokenizerStatus;
 }
 
 export class GenerationPreflightInputError extends Error {
@@ -142,25 +176,27 @@ export function runGenerationPreflight(
       add("NETWORK_OFFLINE", "blocking", "RETRY_CONNECTION", "network");
     }
     if (input.routeResolved === false) {
-      add("MODEL_ROUTE_UNRESOLVED", "blocking", "OPEN_MODEL_CENTER", "model");
+      add("PREFLIGHT_BLOCKED_NO_ROUTE", "blocking", "OPEN_MODEL_CENTER", "model");
     } else if (!input.profileConfigured) {
       add("MODEL_PROFILE_MISSING", "blocking", "OPEN_MODEL_CENTER", "model");
     } else if (!input.modelSelected) {
       add("MODEL_NOT_SELECTED", "blocking", "OPEN_MODEL_CENTER", "model");
     } else if (!input.credentialConfigured) {
-      add("MODEL_CREDENTIAL_MISSING", "blocking", "OPEN_MODEL_CENTER", "model");
+      add("PREFLIGHT_BLOCKED_CREDENTIAL", "blocking", "OPEN_MODEL_CENTER", "model");
     } else if (input.connectionStatus === "failed") {
-      add("MODEL_CONNECTION_FAILED", "blocking", "RETRY_CONNECTION", "model");
+      add("PREFLIGHT_BLOCKED_MODEL_UNAVAILABLE", "blocking", "RETRY_CONNECTION", "model");
     } else if (!input.selectedModelAvailable) {
-      add("SELECTED_MODEL_UNAVAILABLE", "blocking", "OPEN_MODEL_CENTER", "model");
+      add("PREFLIGHT_BLOCKED_MODEL_UNAVAILABLE", "blocking", "OPEN_MODEL_CENTER", "model");
     } else if (input.connectionStatus === "not_checked") {
       add("MODEL_CONNECTION_FAILED", "fix_recommended", "RETRY_CONNECTION", "model");
     }
   }
 
   let estimate: CostEstimate | null = null;
+  let costStatus: GenerationPreflightCostStatus = "estimated";
   let budget: BudgetDecision | null = null;
   if (input.providerLocation === "demo") {
+    costStatus = "not_applicable";
     estimate = estimateGenerationCost(
       {
         inputTokens: input.inputTokens,
@@ -175,7 +211,8 @@ export function runGenerationPreflight(
       },
     );
   } else if (input.pricing === null) {
-    add("MODEL_PRICING_MISSING", "blocking", "UPDATE_PRICING", "model");
+    costStatus = "pricing_unavailable";
+    add("PREFLIGHT_WARNING_PRICING_UNKNOWN", "fix_recommended", "UPDATE_PRICING", "model");
   } else {
     estimate = estimateGenerationCost(
       {
@@ -197,12 +234,17 @@ export function runGenerationPreflight(
     add("INPUT_TOO_LARGE", "blocking", "REDUCE_CONTEXT", "context");
   }
   if (input.providerLocation !== "demo" && input.contextWindowTokens === null) {
-    add("CONTEXT_WINDOW_UNKNOWN", "fix_recommended", "OPEN_MODEL_CENTER", "context");
+    add("PREFLIGHT_WARNING_CONTEXT_UNKNOWN", "fix_recommended", "OPEN_MODEL_CENTER", "context");
+    if (
+      requestedContextTokens > CONSERVATIVE_GENERATION_CONTEXT_POLICY.effectiveContextWindowTokens
+    ) {
+      add("PREFLIGHT_BLOCKED_CONTEXT_OVERFLOW", "blocking", "REDUCE_CONTEXT", "context");
+    }
   } else if (
     input.contextWindowTokens !== null &&
     requestedContextTokens > input.contextWindowTokens
   ) {
-    add("CONTEXT_WINDOW_EXCEEDED", "blocking", "REDUCE_CONTEXT", "context");
+    add("PREFLIGHT_BLOCKED_CONTEXT_OVERFLOW", "blocking", "REDUCE_CONTEXT", "context");
   } else if (
     input.contextWindowTokens !== null &&
     requestedContextTokens * 10_000 >=
@@ -212,10 +254,19 @@ export function runGenerationPreflight(
     add("CONTEXT_WINDOW_NEAR_LIMIT", "fix_recommended", "REDUCE_CONTEXT", "context");
   }
 
+  const tokenizerStatus = input.tokenizerStatus ?? "exact";
+  if (input.providerLocation !== "demo" && tokenizerStatus === "approximate") {
+    add("PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE", "fix_recommended", "CONTINUE", "context");
+  }
+
+  if (input.privacyStatus === "blocked") {
+    add("PREFLIGHT_BLOCKED_PRIVACY", "blocking", "OPEN_MODEL_CENTER", "access");
+  }
+
   if (estimate !== null) {
     budget = evaluateBudget(estimate, input.budgets);
     if (budget.level === "blocked") {
-      add("BUDGET_EXCEEDED", "blocking", "OPEN_BUDGET_SETTINGS", "budget");
+      add("PREFLIGHT_BLOCKED_HARD_BUDGET", "blocking", "OPEN_BUDGET_SETTINGS", "budget");
     } else if (budget.level === "warning") {
       add("BUDGET_WARNING", "fix_recommended", "OPEN_BUDGET_SETTINGS", "budget");
     }
@@ -225,18 +276,47 @@ export function runGenerationPreflight(
     add("READY", "notice", "CONTINUE", "model");
   }
 
-  const canStart = !checks.some(({ severity }) => severity === "blocking");
+  const blockers = Object.freeze(checks.filter(({ severity }) => severity === "blocking"));
+  const warnings = Object.freeze(checks.filter(({ severity }) => severity === "fix_recommended"));
+  const readiness: GenerationPreflightReadiness =
+    blockers.length > 0 ? "BLOCKED" : warnings.length > 0 ? "READY_WITH_WARNINGS" : "READY";
+  const canStart = readiness !== "BLOCKED";
+  const defaultsApplied = Object.freeze([
+    ...(input.contextWindowTokens === null && input.providerLocation !== "demo"
+      ? (["CONSERVATIVE_CONTEXT_WINDOW"] as const)
+      : []),
+    ...(tokenizerStatus === "approximate" ? (["CONSERVATIVE_TOKEN_ESTIMATE"] as const) : []),
+    ...(costStatus === "pricing_unavailable" ? (["PRICING_UNAVAILABLE"] as const) : []),
+  ]);
+  const suggestedActions = Object.freeze(
+    [...new Set(checks.map(({ action }) => action))].filter((action) => action !== "CONTINUE"),
+  );
+  const effectiveContextWindow =
+    input.contextWindowTokens ??
+    CONSERVATIVE_GENERATION_CONTEXT_POLICY.effectiveContextWindowTokens;
+  const effectiveContextBudget = Math.min(
+    CONSERVATIVE_GENERATION_CONTEXT_POLICY.maximumCompiledInputTokens,
+    Math.max(0, effectiveContextWindow - input.maximumOutputTokens),
+  );
   return Object.freeze({
     checkedAt: input.now,
+    readiness,
     canStart,
-    requiresConfirmation: canStart && checks.some(({ severity }) => severity === "fix_recommended"),
+    requiresConfirmation: canStart && warnings.length > 0,
     checks: Object.freeze(checks),
+    blockers,
+    warnings,
+    defaultsApplied,
+    suggestedActions,
     estimate,
+    costStatus,
     budget,
     inputTokens: input.inputTokens,
     inputBytes: input.inputBytes,
     maximumOutputTokens: input.maximumOutputTokens,
     contextWindowTokens: input.contextWindowTokens,
+    effectiveContextBudget,
+    tokenizerStatus,
   });
 }
 

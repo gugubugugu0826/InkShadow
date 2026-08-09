@@ -159,3 +159,20 @@ export {
   type MarkdownSanitizationResult,
 } from "./text.js";
 export { exportProjectToPlainText, type PlainTextExportArtifact } from "./text-export.js";
+export {
+  STORY_SETTINGS_FORMAT,
+  STORY_SETTINGS_SCHEMA_VERSION,
+  createStorySettingsTemplate,
+  preflightStorySettings,
+  preflightStorySettingsJson,
+  serializeStorySettings,
+  type ExistingStorySettingsIndex,
+  type InkShadowStorySettingsV1,
+  type StorySettingsCharacter,
+  type StorySettingsImportIssue,
+  type StorySettingsMemory,
+  type StorySettingsPreflightReport,
+  type StorySettingsRelationship,
+  type StorySettingsWorldRule,
+  type StorySettingsWritingPreference,
+} from "./story-settings.js";

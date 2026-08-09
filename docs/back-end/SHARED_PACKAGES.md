@@ -1,9 +1,9 @@
 # InkShadow 共享核心包逐文件指引
 
-> 基于源码快照：2026-08-09  
+> 基于源码快照：2026-08-10  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 应用版本：`0.2.0`；设计基线：`DESIGN v0.3.1b`  
-> 覆盖范围：`packages/*/src` 的 17 个 workspace package，以及 `packages/data/migrations` 的 56 个本地数据库迁移（最新 `0056`）
+> Desktop 发布基线：`0.2.1`；设计基线：`DESIGN v0.3.1b`  
+> 覆盖范围：`packages/*/src` 的 17 个 workspace package，以及 `packages/data/migrations` 的 59 个本地数据库迁移（最新 `0059`）
 
 这些包不是“页面”，也不应全部叫作后端。它们承载可被 Desktop、Cloud API、Web 或测试复用的领域规则、用例、契约、数据适配器和 UI 基础件。正常依赖方向是“领域与协议 → 应用用例 → 基础设施适配器 → 应用入口”；`scripts/check-boundaries.mjs` 会检查主要边界。
 
@@ -140,7 +140,7 @@
 | `packages/data/src/governed-extension-provider-url.ts`            | 对 provider URL 做确定性分类和比较；它明确不是完整 SSRF 防护，最终 DNS/IP/连接限制由 Rust 原生网关执行。                                                |
 | `packages/data/src/graph-rag-sqlite-store.ts`                     | Graph RAG 来源、节点、边、投影 epoch 和权威状态存储。                                                                                                   |
 | `packages/data/src/index.ts`                                      | 包的公开导出入口。                                                                                                                                      |
-| `packages/data/src/maintenance.ts`                                | integrity/FK 检查、`VACUUM INTO` 备份、141 张权威表 allowlist 恢复、4 个派生根表清空和 schema 恢复契约；142 张应用表中的 1 张临时远程派发租约表不恢复。 |
+| `packages/data/src/maintenance.ts`                                | integrity/FK 检查、`VACUUM INTO` 备份、142 张权威表 allowlist 恢复、4 个派生根表清空和 schema 恢复契约；143 张应用表中的 1 张临时远程派发租约表不恢复。 |
 | `packages/data/src/multi-agent-review-sqlite-store.ts`            | 多智能体评审任务、结论、证据和候选记录存储。                                                                                                            |
 | `packages/data/src/project-key-sqlite-store.ts`                   | 项目密钥版本、发布检查点和团队信封回执存储。                                                                                                            |
 | `packages/data/src/project-seed-sqlite-store.ts`                  | 新手创建旅程的 ProjectSeed、恢复点和一次性物化回执存储。                                                                                                |
@@ -218,6 +218,9 @@
 | `packages/data/migrations/0054_writing_feedback_explicit_idempotency.sql`            | 明确反馈的项目级幂等身份；配合存储层把反馈事件与偏好同步放进单个事务。                                                                                                         |
 | `packages/data/migrations/0055_continuous_story_state_historical_route_receipts.sql` | 允许合法历史版本回执随一致性备份恢复，同时保留版本归属与内容哈希校验。                                                                                                         |
 | `packages/data/migrations/0056_model_hub_failure_diagnostics.sql`                    | 向能力扫描和调用事实追加可空、受约束的 request ID、失败阶段、HTTP/终止原因、可见长度、推理/流式标记、尝试和输出预算，并增加失败查询索引；不保存 Prompt、正文、模型回答或凭据。 |
+| `packages/data/migrations/0057_model_hub_content_quality_task.sql`                   | 为 Model Hub 方案、路由与评测表前向补齐内容质量检查任务合同。                                                                                                                  |
+| `packages/data/migrations/0058_story_settings_import_receipts.sql`                   | 保存 Story Settings 原子导入、冲突决定、撤销栅栏和重启恢复所需的操作收据。                                                                                                     |
+| `packages/data/migrations/0059_generation_preflight_cost_status.sql`                 | 区分费用可估与供应商未提供价格；价格未知保留为可见警告，不误阻断基础写作。                                                                                                     |
 
 ## 8. `domain`：核心写作实体
 

@@ -4,6 +4,7 @@ import {
   getModelProviderPreset,
   isLoopbackModelBaseUrl,
   modelProviderTextCapabilityProbePolicy,
+  modelProviderVisibleProsePolicy,
   type NovelAiTask,
 } from "./model-hub-provider-registry";
 import {
@@ -49,8 +50,8 @@ export interface InspectModelHubTextTaskInput {
 export interface ExecuteModelHubTextTaskInput extends InspectModelHubTextTaskInput {
   readonly dispatchScope: NativeModelDispatchScope;
   readonly generationId?: string;
-  /** Applies only the shared, provider-aware reasoning policy used by content-free probes. */
-  readonly reasoningPolicy?: "capability_probe";
+  /** Applies a narrow provider-aware reasoning policy at the named task boundary. */
+  readonly reasoningPolicy?: "capability_probe" | "visible_prose";
   readonly onBeforeDispatch?: (
     selection: Readonly<{
       generationId: string;
@@ -263,10 +264,12 @@ export async function executeModelHubTextTask(
       }),
     );
     dispatched = true;
-    const probePolicy =
+    const reasoningPolicy =
       input.reasoningPolicy === "capability_probe"
         ? modelProviderTextCapabilityProbePolicy(current.target.connection.providerKind)
-        : null;
+        : input.reasoningPolicy === "visible_prose"
+          ? modelProviderVisibleProsePolicy(current.target.connection.providerKind)
+          : null;
     const generated = await dependencies.modelGateway.generate({
       generationId,
       config: modelHubNativeEndpointConfig(current.target.connection),
@@ -275,9 +278,9 @@ export async function executeModelHubTextTask(
       dispatchScope: input.dispatchScope,
       maxOutputTokens: target.maximumOutputTokens,
       ...(target.temperature === undefined ? {} : { temperature: target.temperature }),
-      ...(probePolicy?.reasoningMode === undefined || probePolicy.reasoningMode === null
+      ...(reasoningPolicy?.reasoningMode === undefined || reasoningPolicy.reasoningMode === null
         ? {}
-        : { reasoningMode: probePolicy.reasoningMode }),
+        : { reasoningMode: reasoningPolicy.reasoningMode }),
       ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
     });
     const cost = calculateActualCost(target.costPrivacy, generated.usage);

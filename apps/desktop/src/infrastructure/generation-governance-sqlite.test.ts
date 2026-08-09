@@ -16,6 +16,7 @@ const migration = [
   readMigration("0004_model_profiles.sql"),
   readMigration("0005_ai_generation_governance.sql"),
   readMigration("0007_model_routing_usage.sql"),
+  readMigration("0059_generation_preflight_cost_status.sql"),
 ].join("\n");
 
 const NOW = "2026-07-27T00:00:00.000Z";
@@ -316,6 +317,101 @@ describe("SQLite generation governance stores", () => {
     expect(deferredColumns.map(({ name }) => name)).not.toEqual(
       expect.arrayContaining(["content", "prompt", "messages", "secret"]),
     );
+    await executor.close();
+  });
+
+  it("persists pricing-unavailable runs and provider token usage without a fake amount", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    await seedChapter(executor);
+    const tasks = new TauriTaskCenterStore(executor, clock);
+    const governance = new TauriGenerationGovernanceStore(executor, clock);
+    const idempotencyKey = `ai.generate:${CHAPTER_ID}:${VERSION_ID}:unpriced`;
+    await tasks.enqueueTask({
+      id: TASK_ID,
+      type: "ai.generate",
+      idempotencyKey,
+      metadata: { projectId: PROJECT_ID, chapterId: CHAPTER_ID, operation: "generate" },
+      priority: 80,
+      maxAttempts: 3,
+      now: NOW,
+    });
+    const preflight = runGenerationPreflight({
+      now: NOW,
+      migrationReady: true,
+      chapterExists: true,
+      chapterSaved: true,
+      projectWritable: true,
+      gatewayAvailable: true,
+      networkAvailable: true,
+      providerLocation: "remote",
+      routeResolved: true,
+      profileConfigured: true,
+      modelSelected: true,
+      credentialConfigured: true,
+      connectionStatus: "verified",
+      selectedModelAvailable: true,
+      inputBytes: 12_000,
+      maximumInputBytes: 1_000_000,
+      inputTokens: 4_000,
+      maximumOutputTokens: 2_000,
+      contextWindowTokens: null,
+      tokenizerStatus: "approximate",
+      pricing: null,
+      budgets: [],
+    });
+    const created = await governance.createRun({
+      id: RUN_ID,
+      taskId: TASK_ID,
+      idempotencyKey,
+      projectId: PROJECT_ID,
+      chapterId: CHAPTER_ID,
+      baseVersionId: VERSION_ID,
+      providerId: "deepseek",
+      modelId: "deepseek-chat",
+      preflight,
+    });
+    expect(created.run).toMatchObject({
+      costStatus: "pricing_unavailable",
+      estimatedCostMicros: "0",
+      currency: "XXX",
+    });
+    let run = await governance.transitionRun({
+      runId: RUN_ID,
+      expectedRevision: created.run.revision,
+      state: "retrieving",
+    });
+    run = await governance.transitionRun({
+      runId: RUN_ID,
+      expectedRevision: run.revision,
+      state: "generating",
+    });
+    await governance.transitionRun({
+      runId: RUN_ID,
+      expectedRevision: run.revision,
+      state: "failed_retryable",
+      failureCode: "PROVIDER_RESPONSE_INVALID",
+      addIncurredCost: true,
+      attemptUsage: {
+        source: "provider_reported_unpriced",
+        inputTokens: 2_100,
+        outputTokens: 380,
+        cachedInputTokens: null,
+        usagePricedEstimateMicros: null,
+      },
+    });
+    await expect(governance.listAttemptUsage(RUN_ID)).resolves.toEqual([
+      expect.objectContaining({
+        source: "provider_reported_unpriced",
+        costStatus: "pricing_unavailable",
+        usagePricedEstimateMicros: null,
+      }),
+    ]);
+    await expect(
+      executor.select<{ cost_status: string }>(
+        "SELECT cost_status FROM ai_generation_runs WHERE id = ?",
+        [RUN_ID],
+      ),
+    ).resolves.toEqual([{ cost_status: "pricing_unavailable" }]);
     await executor.close();
   });
 });

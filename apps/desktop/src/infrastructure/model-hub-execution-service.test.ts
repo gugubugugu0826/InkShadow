@@ -170,6 +170,35 @@ describe("Model Hub text execution service", () => {
     });
   });
 
+  it("applies visible-prose reasoning suppression only to DeepSeek", async () => {
+    for (const providerKind of ["deepseek", "openai"] as const) {
+      const harness = createHarness();
+      const target = await seedTarget(harness.modelHub, {
+        connectionId: `visible-prose-${providerKind}`,
+        catalogEntryId: `visible-prose-${providerKind}-catalog`,
+        modelId: `visible-prose-${providerKind}-model`,
+        providerKind,
+      });
+      await saveRoute(harness.modelHub, { primaryCatalogEntryId: target.id });
+      harness.generate.mockResolvedValue({ text: PRIVATE_OUTPUT, usage: null });
+
+      await executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          generationId: `visible-prose-${providerKind}-generation`,
+          reasoningPolicy: "visible_prose",
+        }),
+      );
+
+      const dispatched = harness.generate.mock.calls[0]?.[0];
+      if (providerKind === "deepseek") {
+        expect(dispatched).toMatchObject({ reasoningMode: "disabled" });
+      } else {
+        expect(dispatched).not.toHaveProperty("reasoningMode");
+      }
+    }
+  });
+
   it("fails closed when the connection is disabled in the final async callback", async () => {
     const harness = createHarness();
     const target = await seedTarget(harness.modelHub, {

@@ -61,7 +61,7 @@ describe("governed generation runtime", () => {
     expect(prompt).not.toContain("潮雾会吞没无人看守的灯塔");
   });
 
-  it("blocks missing price metadata and exposes a source-backed estimate after configuration", async () => {
+  it("warns without price metadata and exposes a source-backed estimate after configuration", async () => {
     const { runtime, chapterId } = await createNativeRuntime();
     await runtime.modelCenter.save({
       providerId: "local-ollama",
@@ -73,12 +73,20 @@ describe("governed generation runtime", () => {
       expectedRevision: 1,
     });
 
-    const blocked = await prepareGenerationPlan(runtime, chapterId, {
+    const unpriced = await prepareGenerationPlan(runtime, chapterId, {
       chapterSaved: true,
       networkAvailable: false,
     });
-    expect(blocked.preflight.canStart).toBe(false);
-    expect(blocked.preflight.checks.map(({ code }) => code)).toContain("MODEL_PRICING_MISSING");
+    expect(unpriced.preflight.readiness).toBe("READY_WITH_WARNINGS");
+    expect(unpriced.preflight.canStart).toBe(true);
+    expect(unpriced.preflight.estimate).toBeNull();
+    expect(unpriced.preflight.checks.map(({ code }) => code)).toEqual(
+      expect.arrayContaining([
+        "PREFLIGHT_WARNING_PRICING_UNKNOWN",
+        "PREFLIGHT_WARNING_CONTEXT_UNKNOWN",
+        "PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE",
+      ]),
+    );
 
     await runtime.modelCenter.save({
       providerId: "local-ollama",
@@ -144,6 +152,104 @@ describe("governed generation runtime", () => {
       status: "visible",
       severity: "success",
     });
+  });
+
+  it("fails closed when the project is archived, trashed, or missing after preflight", async () => {
+    const cases = [
+      { lifecycle: "archived", expectedCode: "PROJECT_ARCHIVED" },
+      { lifecycle: "trashed", expectedCode: "PROJECT_DELETED" },
+      { lifecycle: "missing", expectedCode: "PROJECT_NOT_FOUND" },
+    ] as const;
+
+    for (const testCase of cases) {
+      window.localStorage.clear();
+      const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+        Promise.resolve(generationResult("绝不能保存的候选。", 100, 20)),
+      );
+      const { runtime, chapterId } = await createNativeRuntime(generate);
+      const chapterBefore = await runtime.repositories.chapters.findById(chapterId);
+      if (!chapterBefore.ok || chapterBefore.value === null) {
+        throw new Error("Expected the generated test chapter.");
+      }
+      const plan = await prepareGenerationPlan(runtime, chapterId, {
+        chapterSaved: true,
+        networkAvailable: true,
+      });
+
+      let executionRuntime = runtime;
+      if (testCase.lifecycle === "archived") {
+        const archived = await runtime.useCases.archiveProject.execute({
+          projectId: chapterBefore.value.projectId,
+        });
+        if (!archived.ok) throw archived.error;
+      } else if (testCase.lifecycle === "trashed") {
+        const trashed = await runtime.useCases.trashProject.execute({
+          projectId: chapterBefore.value.projectId,
+        });
+        if (!trashed.ok) throw trashed.error;
+      } else {
+        executionRuntime = {
+          ...runtime,
+          repositories: {
+            ...runtime.repositories,
+            projects: {
+              findById: () => Promise.resolve({ ok: true as const, value: null }),
+            } as unknown as DesktopRuntime["repositories"]["projects"],
+          },
+        };
+      }
+
+      const result = await executeGenerationPlan(executionRuntime, plan);
+      expect(result).toMatchObject({ ok: false, error: { code: testCase.expectedCode } });
+      expect(generate).not.toHaveBeenCalled();
+      const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapterId);
+      expect(candidates.ok && candidates.value).toEqual([]);
+      const chapterAfter = await runtime.repositories.chapters.findById(chapterId);
+      expect(chapterAfter.ok && chapterAfter.value?.content).toBe(chapterBefore.value.content);
+      await expect(runtime.taskCenter.load()).resolves.toMatchObject({ tasks: [] });
+    }
+  });
+
+  it("rechecks project write access immediately before provider dispatch", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult("绝不能发送后的候选。", 100, 20)),
+    );
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    const chapter = await runtime.repositories.chapters.findById(chapterId);
+    if (!chapter.ok || chapter.value === null) throw new Error("Expected the test chapter.");
+    const activeProject = await runtime.repositories.projects.findById(chapter.value.projectId);
+    if (!activeProject.ok || activeProject.value === null) {
+      throw new Error("Expected the active test project.");
+    }
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+    const archived = await runtime.useCases.archiveProject.execute({
+      projectId: chapter.value.projectId,
+    });
+    if (!archived.ok) throw archived.error;
+    const findProject = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true as const, value: activeProject.value })
+      .mockResolvedValue({ ok: true as const, value: archived.value });
+    const executionRuntime: DesktopRuntime = {
+      ...runtime,
+      repositories: {
+        ...runtime.repositories,
+        projects: {
+          findById: findProject,
+        } as unknown as DesktopRuntime["repositories"]["projects"],
+      },
+    };
+
+    const result = await executeGenerationPlan(executionRuntime, plan);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "PROJECT_ARCHIVED" } });
+    expect(findProject).toHaveBeenCalledTimes(2);
+    expect(generate).not.toHaveBeenCalled();
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapterId);
+    expect(candidates.ok && candidates.value).toEqual([]);
   });
 
   it("acknowledges cancellation and retains partial output as an incomplete candidate", async () => {

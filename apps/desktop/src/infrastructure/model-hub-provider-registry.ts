@@ -121,11 +121,19 @@ export interface ModelProviderPreset {
   readonly textCapabilityProbe?: Readonly<{
     readonly reasoningMode: "disabled";
   }>;
+  /** Provider-supported controls for tasks whose output is author-visible prose. */
+  readonly visibleProse?: Readonly<{
+    readonly reasoningMode: "disabled";
+  }>;
   readonly officialDocsUrl: string;
 }
 
 export interface ModelProviderTextCapabilityProbePolicy {
   readonly maxOutputTokens: 64;
+  readonly reasoningMode: "disabled" | null;
+}
+
+export interface ModelProviderVisibleProsePolicy {
   readonly reasoningMode: "disabled" | null;
 }
 
@@ -275,6 +283,7 @@ const PROVIDER_PRESETS: readonly ModelProviderPreset[] = Object.freeze([
       capabilityMetadata: false,
     },
     textCapabilityProbe: { reasoningMode: "disabled" },
+    visibleProse: { reasoningMode: "disabled" },
     officialDocsUrl: "https://api-docs.deepseek.com/api/list-models/",
   }),
   freezePreset({
@@ -523,6 +532,14 @@ export function modelProviderTextCapabilityProbePolicy(
   return Object.freeze({
     maxOutputTokens: 64,
     reasoningMode: getModelProviderPreset(provider).textCapabilityProbe?.reasoningMode ?? null,
+  });
+}
+
+export function modelProviderVisibleProsePolicy(
+  provider: ModelProviderKind,
+): ModelProviderVisibleProsePolicy {
+  return Object.freeze({
+    reasoningMode: getModelProviderPreset(provider).visibleProse?.reasoningMode ?? null,
   });
 }
 

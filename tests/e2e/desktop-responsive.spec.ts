@@ -147,13 +147,18 @@ test("keeps logical sizing stable on a Retina-like DPR2 display", async ({ brows
         ".editor-toolbar__actions .ink-button--primary, .editor-toolbar__actions .ink-button--ai-primary",
       );
       const actionStyle = action === null ? null : getComputedStyle(action);
+      const selectionProbe = document.createElement("span");
+      selectionProbe.style.backgroundColor = canvasStyle.getPropertyValue("--selection");
+      canvas.append(selectionProbe);
+      const selectionColor = getComputedStyle(selectionProbe).backgroundColor;
+      selectionProbe.remove();
       return {
         canvasBackground: canvasStyle.backgroundColor,
         canvasBorder: canvasStyle.borderColor,
         editorColor: editorStyle.color,
         editorCaret: editorStyle.caretColor,
         editorFontSize: editorStyle.fontSize,
-        selectionToken: canvasStyle.getPropertyValue("--selection").trim(),
+        selectionColor,
         actionHeight: actionStyle?.height ?? "",
         actionTransitionDuration: actionStyle?.transitionDuration ?? "",
       };
@@ -165,8 +170,8 @@ test("keeps logical sizing stable on a Retina-like DPR2 display", async ({ brows
       editorColor: "rgb(231, 234, 240)",
       editorCaret: "rgb(113, 128, 230)",
       editorFontSize: "16px",
-      selectionToken: "rgb(91 107 217 / 24%)",
-      actionHeight: "44px",
+      selectionColor: "rgba(91, 107, 217, 0.24)",
+      actionHeight: "48px",
       actionTransitionDuration: expect.any(String),
     });
     for (const duration of appearance.actionTransitionDuration.split(",")) {

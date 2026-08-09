@@ -64,6 +64,72 @@ export const projectSeeds = sqliteTable(
   ],
 );
 
+export const storySettingsImportReceipts = sqliteTable(
+  "story_settings_import_receipts",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    sourceSha256: text("source_sha256").notNull(),
+    requestSha256: text("request_sha256").notNull(),
+    status: text("status", { enum: ["committed", "undone"] }).notNull(),
+    createdRecordIdsJson: text("created_record_ids_json").notNull(),
+    updatedRecordFencesJson: text("updated_record_fences_json").notNull(),
+    createdFactIdsJson: text("created_fact_ids_json").notNull(),
+    createdMemoryIdsJson: text("created_memory_ids_json").notNull(),
+    importedCount: integer("imported_count").notNull(),
+    skippedCount: integer("skipped_count").notNull(),
+    createdAt: text("created_at").notNull(),
+    undoneAt: text("undone_at"),
+  },
+  (table) => [
+    check(
+      "story_settings_import_receipts_source_sha256",
+      sql`length(${table.sourceSha256}) = 64 AND ${table.sourceSha256} NOT GLOB '*[^0-9a-f]*'`,
+    ),
+    check(
+      "story_settings_import_receipts_request_sha256",
+      sql`length(${table.requestSha256}) = 64 AND ${table.requestSha256} NOT GLOB '*[^0-9a-f]*'`,
+    ),
+    check(
+      "story_settings_import_receipts_created_records_json",
+      sql`json_valid(${table.createdRecordIdsJson}) AND json_type(${table.createdRecordIdsJson}) = 'array'`,
+    ),
+    check(
+      "story_settings_import_receipts_updated_fences_json",
+      sql`json_valid(${table.updatedRecordFencesJson}) AND json_type(${table.updatedRecordFencesJson}) = 'array'`,
+    ),
+    check(
+      "story_settings_import_receipts_created_facts_json",
+      sql`json_valid(${table.createdFactIdsJson}) AND json_type(${table.createdFactIdsJson}) = 'array'`,
+    ),
+    check(
+      "story_settings_import_receipts_created_memories_json",
+      sql`json_valid(${table.createdMemoryIdsJson}) AND json_type(${table.createdMemoryIdsJson}) = 'array'`,
+    ),
+    check(
+      "story_settings_import_receipts_imported_count",
+      sql`${table.importedCount} BETWEEN 0 AND 5000`,
+    ),
+    check(
+      "story_settings_import_receipts_skipped_count",
+      sql`${table.skippedCount} BETWEEN 0 AND 5000`,
+    ),
+    index("story_settings_import_receipts_project_source_idx").on(
+      table.projectId,
+      table.sourceSha256,
+      table.createdAt,
+      table.id,
+    ),
+    index("story_settings_import_receipts_project_created_idx").on(
+      table.projectId,
+      table.createdAt,
+      table.id,
+    ),
+  ],
+);
+
 export const chapters = sqliteTable(
   "chapters",
   {
@@ -404,6 +470,9 @@ export const aiGenerationRuns = sqliteTable(
     maximumOutputTokens: integer("maximum_output_tokens").notNull(),
     estimatedCostMicros: text("estimated_cost_micros").notNull(),
     incurredCostMicros: text("incurred_cost_micros").notNull(),
+    costStatus: text("cost_status", {
+      enum: ["estimated", "pricing_unavailable"],
+    }).notNull(),
     currency: text("currency").notNull(),
     pricingVersion: text("pricing_version").notNull(),
     priceUpdatedAt: text("price_updated_at").notNull(),
@@ -496,12 +565,20 @@ export const aiGenerationAttemptUsage = sqliteTable(
       .references(() => aiGenerationRuns.id, { onDelete: "cascade" }),
     attempt: integer("attempt").notNull(),
     usageSource: text("usage_source", {
-      enum: ["provider_reported", "provider_unavailable", "local_demo"],
+      enum: [
+        "provider_reported",
+        "provider_reported_unpriced",
+        "provider_unavailable",
+        "local_demo",
+      ],
     }).notNull(),
     inputTokens: integer("input_tokens"),
     outputTokens: integer("output_tokens"),
     cachedInputTokens: integer("cached_input_tokens"),
     usagePricedEstimateMicros: text("usage_priced_estimate_micros"),
+    costStatus: text("cost_status", {
+      enum: ["estimated", "pricing_unavailable"],
+    }).notNull(),
     currency: text("currency").notNull(),
     pricingVersion: text("pricing_version").notNull(),
     priceUpdatedAt: text("price_updated_at").notNull(),
@@ -1607,6 +1684,8 @@ export type ProjectRow = typeof projects.$inferSelect;
 export type NewProjectRow = typeof projects.$inferInsert;
 export type ProjectSeedRow = typeof projectSeeds.$inferSelect;
 export type NewProjectSeedRow = typeof projectSeeds.$inferInsert;
+export type StorySettingsImportReceiptRow = typeof storySettingsImportReceipts.$inferSelect;
+export type NewStorySettingsImportReceiptRow = typeof storySettingsImportReceipts.$inferInsert;
 export type ChapterRow = typeof chapters.$inferSelect;
 export type NewChapterRow = typeof chapters.$inferInsert;
 export type ChapterVersionRow = typeof chapterVersions.$inferSelect;

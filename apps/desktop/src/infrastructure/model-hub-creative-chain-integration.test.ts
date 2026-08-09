@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { generateCreativeOpening } from "./creative-opening-service";
+import {
+  generateCreativeOpening,
+  MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS,
+} from "./creative-opening-service";
 import { createImportRewriteCandidate } from "./import-rewrite-service";
 import type { ModelProviderKind, NovelAiTask } from "./model-hub-provider-registry";
 import type { ModelHubStore } from "./model-hub-store";
@@ -66,6 +69,76 @@ describe("real creative chains use Model Hub routes", () => {
       expect(harness.listModels).not.toHaveBeenCalled();
     });
   }
+
+  it("exposes only a sufficiently visible DeepSeek truncation as an explicit partial opening", async () => {
+    const harness = createNativeHarness();
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "deepseek",
+      connectionId: "opening-deepseek",
+      catalogEntryId: "opening-deepseek-catalog",
+      modelId: "deepseek-chat",
+    });
+    const visible = "可见的小说正文。".repeat(32);
+    expect(visible.length).toBeGreaterThanOrEqual(MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS);
+    harness.generate.mockImplementation((input) => {
+      input.onDelta?.(visible);
+      return Promise.reject(
+        Object.assign(new Error("truncated"), { code: "MODEL_OUTPUT_TRUNCATED" }),
+      );
+    });
+
+    const result = await generateCreativeOpening(harness.runtime, {
+      idea: "停电后，只有影子仍在移动。",
+      requestId: "deepseek-partial-opening",
+    });
+
+    expect(result).toEqual({
+      requestId: "deepseek-partial-opening",
+      text: visible,
+      source: "provider",
+      completion: "partial",
+      providerId: "opening-deepseek",
+      modelId: "deepseek-chat",
+      noticeCode: "MODEL_OUTPUT_TRUNCATED",
+    });
+    expect(harness.generate.mock.calls[0]?.[0]).toMatchObject({
+      reasoningMode: "disabled",
+      maxOutputTokens: 1_200,
+    });
+  });
+
+  it("does not present a short truncated opening as provider content", async () => {
+    const harness = createNativeHarness();
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "deepseek",
+      connectionId: "opening-deepseek-short",
+      catalogEntryId: "opening-deepseek-short-catalog",
+      modelId: "deepseek-chat",
+    });
+    harness.generate.mockImplementation((input) => {
+      input.onDelta?.("太短");
+      return Promise.reject(
+        Object.assign(new Error("truncated"), { code: "MODEL_OUTPUT_TRUNCATED" }),
+      );
+    });
+
+    const result = await generateCreativeOpening(harness.runtime, {
+      idea: "停电后，只有影子仍在移动。",
+      requestId: "deepseek-short-opening",
+    });
+
+    expect(result).toMatchObject({
+      requestId: "deepseek-short-opening",
+      source: "local_fallback",
+      completion: "complete",
+      providerId: null,
+      modelId: null,
+      noticeCode: "MODEL_OUTPUT_TRUNCATED",
+    });
+    expect(result.text).not.toContain("太短");
+  });
 
   it("keeps the legacy opening profile working only when no Model Hub route exists", async () => {
     const harness = createNativeHarness();

@@ -30,6 +30,126 @@ describe("DOCX import boundary", () => {
     expect(JSON.stringify(documents)).not.toContain("attacker.example");
   });
 
+  it("combines namespaced text runs, entities, tabs, breaks, and hyperlink display text", async () => {
+    const bytes = await createDocx({
+      externalHyperlink: true,
+      documentXml: [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<x:document xmlns:x="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><x:body>',
+        "<x:p><x:r><x:t>第一</x:t></x:r><x:r><x:t>章 雾港</x:t></x:r></x:p>",
+        "<x:p><x:r><x:t>多</x:t></x:r><x:r><x:t>段 &amp; 实体 &#x96FE;&#38632;</x:t></x:r></x:p>",
+        '<x:p><x:hyperlink r:id="rId9"><x:r><x:t>链接显示文字</x:t></x:r></x:hyperlink></x:p>',
+        "<x:p><x:r><x:t>制表</x:t><x:tab/><x:t>之后</x:t><x:br/><x:t>换行</x:t><x:cr/><x:t>结束</x:t></x:r></x:p>",
+        "</x:body></x:document>",
+      ].join(""),
+    });
+
+    const documents = await importDocxDocuments("runs.docx", bytes);
+    const markdown = documents.map(({ markdown: value }) => value).join("\n");
+
+    expect(documents.map(({ title }) => title)).toContain("第一章 雾港");
+    expect(markdown).toContain("多段 &amp; 实体 雾雨");
+    expect(markdown).toContain("链接显示文字");
+    expect(markdown).toContain("制表\t之后\n换行\n结束");
+    expect(markdown).not.toContain("attacker.example");
+    expect(documents[0]?.issues).toContainEqual(
+      expect.objectContaining({
+        code: "MARKDOWN_EXTERNAL_REFERENCE_REMOVED",
+        severity: "warning",
+      }),
+    );
+  });
+
+  it("preserves table cells and paragraphs in reading order", async () => {
+    const bytes = await createDocx({
+      documentXml: [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<document xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><body>',
+        "<p><r><t>表格之前</t></r></p>",
+        "<tbl>",
+        "<tr><tc><p><r><t>甲</t></r></p></tc><tc><p><r><t>乙</t></r></p></tc></tr>",
+        "<tr><tc><p><r><t>丙一</t></r></p><p><r><t>丙二</t></r></p></tc><tc><p><r><t>丁</t></r></p></tc></tr>",
+        "</tbl>",
+        "<p><r><t>表格之后</t></r></p>",
+        "</body></document>",
+      ].join(""),
+    });
+
+    const documents = await importDocxDocuments("table.docx", bytes);
+    const markdown = documents.map(({ markdown: value }) => value).join("\n");
+
+    expect(markdown).toContain("表格之前");
+    expect(markdown).toContain("甲\t乙");
+    expect(markdown).toContain("丙一\n丙二\t丁");
+    expect(markdown).toContain("表格之后");
+  });
+
+  it("omits deleted text, field instructions, scripts, and external targets", async () => {
+    const bytes = await createDocx({
+      externalHyperlink: true,
+      documentXml: [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>',
+        "<w:p><w:r><w:t>保留正文</w:t></w:r>",
+        "<w:del><w:r><w:delText>已删除文字</w:delText><w:t>删除容器文字</w:t></w:r></w:del>",
+        "<w:r><w:instrText>HYPERLINK https://attacker.example/field</w:instrText><w:t>字段显示文字</w:t></w:r>",
+        "<script><w:r><w:t>脚本文字</w:t></w:r></script>",
+        '<w:hyperlink r:id="rId9"><w:r><w:t>链接显示文字</w:t></w:r></w:hyperlink></w:p>',
+        "</w:body></w:document>",
+      ].join(""),
+    });
+
+    const documents = await importDocxDocuments("omissions.docx", bytes);
+    const serialized = JSON.stringify(documents);
+
+    expect(serialized).toContain("保留正文");
+    expect(serialized).toContain("字段显示文字");
+    expect(serialized).toContain("链接显示文字");
+    expect(serialized).not.toContain("已删除文字");
+    expect(serialized).not.toContain("删除容器文字");
+    expect(serialized).not.toContain("HYPERLINK");
+    expect(serialized).not.toContain("脚本文字");
+    expect(serialized).not.toContain("attacker.example");
+  });
+
+  it.each([
+    {
+      name: "mismatched elements",
+      xml: '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>正文</w:t></w:r></w:body></w:document>',
+    },
+    {
+      name: "an undeclared entity",
+      xml: '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>正文&nbsp;</w:t></w:r></w:p></w:body></w:document>',
+    },
+    {
+      name: "an empty body",
+      xml: '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>',
+    },
+  ])("fails closed for $name", async ({ xml }) => {
+    const bytes = await createDocx({ documentXml: xml });
+
+    await expect(importDocxDocuments("malformed.docx", bytes)).rejects.toMatchObject({
+      code: "DOCX_PARSE_FAILED",
+    });
+  });
+
+  it("checks the validated CRC and declared expansion size before parsing document.xml", async () => {
+    const original = await createDocx({ paragraphs: ["第一章", "正文"] });
+    const corruptedCrc = rewriteZipEntryCrc(original, "word/document.xml", 0);
+    const forgedSize = rewriteZipEntryUncompressedSize(
+      original,
+      "word/document.xml",
+      64 * 1024 * 1024 + 1,
+    );
+
+    await expect(importDocxDocuments("crc.docx", corruptedCrc)).rejects.toMatchObject({
+      code: "IMPORT_ARCHIVE_INVALID",
+    });
+    await expect(importDocxDocuments("oversized.docx", forgedSize)).rejects.toMatchObject({
+      code: "IMPORT_ARCHIVE_LIMIT_EXCEEDED",
+    });
+  });
+
   it("rejects macro/embedded entries, expansion bombs, and extension disguises", async () => {
     const macro = await createDocx({
       paragraphs: ["第一章", "正文"],
@@ -390,13 +510,15 @@ function rewriteZipEntryUncompressedSize(
 }
 
 async function createDocx({
+  documentXml,
   externalHyperlink = false,
   extraEntries = [],
-  paragraphs,
+  paragraphs = [],
 }: {
+  readonly documentXml?: string;
   readonly externalHyperlink?: boolean;
   readonly extraEntries?: readonly (readonly [string, string | Uint8Array])[];
-  readonly paragraphs: readonly string[];
+  readonly paragraphs?: readonly string[];
 }): Promise<Uint8Array> {
   const zip = new JSZip();
   zip.file(
@@ -421,12 +543,15 @@ async function createDocx({
   );
   zip.file(
     "word/document.xml",
-    [
-      '<?xml version="1.0" encoding="UTF-8"?>',
-      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>',
-      ...paragraphs.map((paragraph) => `<w:p><w:r><w:t>${escapeXml(paragraph)}</w:t></w:r></w:p>`),
-      "</w:body></w:document>",
-    ].join(""),
+    documentXml ??
+      [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>',
+        ...paragraphs.map(
+          (paragraph) => `<w:p><w:r><w:t>${escapeXml(paragraph)}</w:t></w:r></w:p>`,
+        ),
+        "</w:body></w:document>",
+      ].join(""),
   );
   if (externalHyperlink) {
     zip.file(

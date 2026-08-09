@@ -118,6 +118,7 @@ function createSnapshot(): ProjectExportSnapshot {
           canStart: true,
           requiresConfirmation: false,
           codes: ["READY"],
+          costStatus: "estimated",
           estimateMicros: "2000",
           currency: "USD",
           pricingVersion: "2026-07",

@@ -1,8 +1,8 @@
 # InkShadow Desktop 原生层逐文件指引
 
-> 基于源码快照：2026-08-09  
+> 基于源码快照：2026-08-10  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 应用版本：`0.2.0`；设计基线：`DESIGN v0.3.1b`  
+> 应用版本：`0.2.1`；设计基线：`DESIGN v0.3.1b`  
 > 覆盖范围：`apps/desktop/src-tauri`、本地 SQLite 原生桥、自动备份、系统凭据库、原生网络、项目密钥、安全更新与系统容量
 
 ## 1. 它不是传统“后端”
@@ -52,7 +52,7 @@ React 页面
 | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
 | `apps/desktop/src-tauri/src/main.rs`                   | Windows GUI subsystem 入口；Release 隐藏控制台。                                                   |
 | `apps/desktop/src-tauri/src/lib.rs`                    | 模块组合、Tauri 启动、共享状态、插件和 59 个 command 注册。                                        |
-| `apps/desktop/src-tauri/src/local_migrations.rs`       | 把 `packages/data` 与 `packages/story-core` 的 59 个 SQL migration 编译进二进制并交给 SQLx。       |
+| `apps/desktop/src-tauri/src/local_migrations.rs`       | 把 `packages/data` 与 `packages/story-core` 的 62 个 SQL migration 编译进二进制并交给 SQLx。       |
 | `apps/desktop/src-tauri/src/automatic_backup.rs`       | 应用专属自动备份根、所有权标记、租约、清单 CAS、一次性目标票据、完整性核验和受限清理。             |
 | `apps/desktop/src-tauri/src/native_sqlite.rs`          | 固定库打开、迁移、查询、写入、事务、备份/恢复受控语句、资源上限和失败关闭。                        |
 | `apps/desktop/src-tauri/src/path_tickets.rs`           | 文件选择后的 5 分钟、会话绑定、不可伪造路径票据及文件身份防替换。                                  |
@@ -99,8 +99,10 @@ React 页面
 - 打开时强制 `foreign_keys=ON`、WAL、`synchronous=NORMAL`、5 秒 busy timeout。
 - 配置和全部 migration 验证成功后才返回随机会话 token。
 - migration 校验和不一致会报 `SQLITE_MIGRATION_INTEGRITY_FAILED` 并停止，而不是覆盖用户数据。
-- 当前前向上限为 Data `0056_model_hub_failure_diagnostics.sql` / Tauri `59`；Data 与 story-core
-  合并为一个原生连续序列，所以两个编号不要求相同。
+- 当前前向上限为 Data `0059_generation_preflight_cost_status.sql` / Tauri `62`；Data 与 story-core
+  合并为一个原生连续序列，所以两个编号不要求相同。尾部三次只向前追加分别是：`0057`/Tauri
+  `60` 补齐 Model Hub 的 `content_quality_check` 路由合同，`0058`/Tauri `61` 保存原子故事设定
+  导入收据，`0059`/Tauri `62` 记录生成费用是否可估而不因价格未知阻断写作。
 
 ### 5.2 SQL 与结果边界
 
@@ -126,7 +128,8 @@ React 页面
 - 备份目标必须不存在；恢复源必须是普通文件；票据 TTL 5 分钟。
 - 使用 `VACUUM INTO` 创建一致备份。
 - 恢复前检查 integrity、foreign key 和主库/备份 schema 完全一致。
-- 当前共有 142 张应用表；恢复契约复制其中 141 张权威表，1 张临时远程派发租约表不恢复；4 个可重建派生根表会清空后重建。
+- 当前作者数据口径为 143 张应用表：恢复契约复制其中 142 张可恢复表，1 张
+  `project_remote_dispatch_leases` 临时远程派发租约表明确不恢复；4 个可重建派生根表会清空后重建。
 - 一致性备份可能物理包含不含用户内容的 `project_remote_dispatch_leases` 临时表，但恢复事务明确不复制该表，不能把备份中的旧租约恢复为当前网络事实。
 - 新增权威表时必须同步维护恢复表清单、删除顺序、插入顺序和测试。
 
@@ -138,9 +141,9 @@ React 页面
 - 清理不枚举任意目录。只有直系路径、严格文件名、根标记、租约、清单状态、到期时间、文件身份、SQLite 完整性、大小与 SHA-256 全部匹配时才允许删除。
 - 手动备份不进入自动备份清单；浏览器开发模式没有原生备份能力，会明确返回不可用而不是伪造文件。
 
-## 6. 58 个原生 migration
+## 6. 62 个原生 migration
 
-原生版本号把 55 个 `data` migration 与 3 个 `story-core` migration 合并为一个连续序列，因此不等于单个目录中的文件名前缀。
+原生版本号把 59 个 `data` migration 与 3 个 `story-core` migration 合并为一个连续序列，因此不等于单个目录中的文件名前缀。
 
 | 原生版本 | SQL 来源                                                                             | 内容                                                             |
 | -------: | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
@@ -203,6 +206,9 @@ React 页面
 |       57 | `packages/data/migrations/0054_writing_feedback_explicit_idempotency.sql`            | 明确反馈幂等身份与反馈/偏好原子同步边界。                        |
 |       58 | `packages/data/migrations/0055_continuous_story_state_historical_route_receipts.sql` | 合法历史状态回执的备份恢复约束。                                 |
 |       59 | `packages/data/migrations/0056_model_hub_failure_diagnostics.sql`                    | 能力扫描与调用事实的可空、脱敏 AI 失败诊断字段和索引。           |
+|       60 | `packages/data/migrations/0057_model_hub_content_quality_task.sql`                   | 为三张 Model Hub 表前向补齐内容质量检查任务合同。                |
+|       61 | `packages/data/migrations/0058_story_settings_import_receipts.sql`                   | 原子故事设定导入、冲突处理和可验证撤销所需的收据。               |
+|       62 | `packages/data/migrations/0059_generation_preflight_cost_status.sql`                 | 区分可估费用与价格未知，后者只提示而不阻断基础写作。             |
 
 规则：SQL 通过 `include_str!` 编译进二进制；缺失迁移不忽略、迁移加锁且逐条事务执行。已发布 migration 的内容、描述和顺序不能修改，只能新增。
 

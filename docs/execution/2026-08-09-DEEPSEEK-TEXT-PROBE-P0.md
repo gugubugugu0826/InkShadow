@@ -98,7 +98,10 @@ data: [DONE]
 
 - 非空探针成功后才提交 `text_generation = supported`；失败扫描不能伪造支持证据；
 - 第一次成功验证且当前完全没有任何任务路由记录时，智能推荐可为 `16` 类仅依赖文本生成的核心
-  小说任务建立可执行分工；已有用户路由不会被覆盖；
+  小说任务建立可执行分工；旧版若在第 16 项失败并留下纯自动、同方案的 15/22 中断计划，会原子、
+  幂等补齐；任一用户路由（包括已禁用路由）都不会被覆盖；
+- `preset + 完整 novel_task_routes` 由一次事务提交；写入失败时完整旧方案保持不变。价格、上下文
+  长度与基础评测结果只参与可选排序，不再被误当成文本分工的提交门槛；
 - 总任务目录仍有 `22` 类。结构化输出、Embedding、Rerank、图片、视觉等任务继续等待各自能力
   证据，不能由文本探针冒充；
 - 本地基础评测仍是路由后的两条固定短测试，只检查指令/结构遵循和延迟。它不是能力发现器，
@@ -124,12 +127,19 @@ Data 迁移 `0056_model_hub_failure_diagnostics.sql` 只向现有 `model_capabil
 历史行保持 `NULL`，不会根据旧错误反推不存在的推理长度或可见内容。浏览器开发存储 schema 从
 5 前向升级为 6，并为旧记录补 `null`，不删除连接、目录、证据或路由。
 
+本报告完成后，共享树的迁移头继续只向前推进到 Data `0059` / Tauri `62`：`0057`/Tauri `60`
+补齐 Model Hub 的 `content_quality_check` 任务合同，`0058`/Tauri `61` 保存 Story Settings 原子导入
+收据，`0059`/Tauri `62` 区分生成费用可估与价格未知。后两项不改写 `0056`、探针协议、能力证据
+判定或 16 类文本分工，因此不改变本 P0 的根因和结论；这里只记录当前迁移头，不把后续产品增量
+算成本专项的验证证据。
+
 ## 6. 兼容性、安全和回滚
 
 ### 旧连接与配置
 
 - 已保存的 DeepSeek 连接、模型选择和 OS 凭据槽无需重新创建；
-- 已有启用、禁用或自定义路由均保持原样；首次探针自动分工只处理“当前完全没有任何路由记录”的情况；
+- 已有任一用户启用、禁用或自定义路由均保持原样；首次探针自动分工只处理“完全没有路由记录”或
+  “纯自动、同方案且未完成”的恢复情况；
 - 旧能力/调用记录继续可读，新诊断字段为 `NULL`；
 - 缺少 Embedding 路由只影响语义记忆相关能力，不再阻断文本能力验证和核心文本任务分工。
 
@@ -142,10 +152,13 @@ Data 迁移 `0056_model_hub_failure_diagnostics.sql` 只向现有 `model_capabil
 
 ### 回滚
 
-数据库迁移是只向前的，不能删除 `0056` 列或改写其校验和。若新探针策略需要回滚，应在新的
-应用构建中撤回探针行为但保留迁移 `0056`/Tauri `59` 的登记和可空列；回滚前先创建本地备份，
-不要让已迁移数据库直接降级到不认识迁移 59 的旧二进制。诊断列不参与正文、Candidate、版本或
-StoryFact 权威写入，停用读取后可以安全保持闲置。
+数据库迁移是只向前的，不能删除 `0056` 列、倒改已发布 `0031`，或改写其校验和。Data `0057` /
+Tauri `60` 通过重建 `model_evaluation_results`、`novel_task_routes` 与 `model_invocation_facts`，为三张
+表补入 `content_quality_check`，并保留既有行、0056 失败诊断列、索引、隐私触发器、自引用 fallback
+和外部 invocation link。若新探针策略需要回滚，应在新的应用构建中撤回探针行为但保留 `0056`/
+Tauri `59` 与 `0057`/Tauri `60`；当前迁移头另含 `0058`/Tauri `61` 和 `0059`/Tauri `62`，同样
+不能倒改或删除。回滚前先创建本地备份，不要让已迁移数据库直接降级到不认识迁移 62 的旧二进制。
+诊断列和任务枚举迁移不参与正文、Candidate、版本或 StoryFact 权威写入。
 
 ## 7. 本轮本地验证证据
 
@@ -172,7 +185,9 @@ DeepSeek P0 Desktop 回归：
 .\node_modules\.bin\vitest.cmd run --config apps/desktop/vitest.config.ts --configLoader runner apps/desktop/src/infrastructure/model-hub-text-capability-probe.test.ts apps/desktop/src/infrastructure/quick-model-connection-service.test.ts apps/desktop/src/infrastructure/model-hub-local-evaluation-service.test.ts apps/desktop/src/infrastructure/model-hub-execution-service.test.ts apps/desktop/src/infrastructure/model-hub-router.test.ts apps/desktop/src/infrastructure/model-hub-routing-service.test.ts apps/desktop/src/infrastructure/native-model-dispatch-scope-contract.test.ts apps/desktop/src/infrastructure/ui-error.test.ts apps/desktop/src/pages/settings-page.test.tsx
 ```
 
-结果：9 files，104 passed，0 failed。
+结果：9 files，114 passed，0 failed；其中设置页 33/33，通过 15→16 纯自动中断恢复、能力探针成功但
+路由事务失败时保留成功证据和旧分工、最终 enabled 数量展示，以及 legacy 兼容投影失败不回滚核心
+分工。
 
 Desktop TypeScript：
 
@@ -188,7 +203,26 @@ Data 迁移与维护：
 pnpm.cmd --filter @inkshadow/data exec vitest run tests/model-hub-migration.test.ts tests/maintenance.test.ts --config vitest.config.ts
 ```
 
-结果：2 files，14 passed，0 failed。
+结果：2 files，16 passed，0 failed。
+
+路由原子化与 `content_quality_check` 漂移修复的当前补充回归：
+
+```powershell
+.\node_modules\.bin\vitest.cmd run apps/desktop/src/infrastructure/model-hub-routing-service.test.ts apps/desktop/src/infrastructure/model-hub-store.test.ts apps/desktop/src/infrastructure/ui-error.test.ts --config apps/desktop/vitest.config.ts
+```
+
+结果：3 files，40 passed，0 failed。覆盖浏览器存储失败不改变内存/持久状态、SQLite 中途失败整批回滚、
+纯文本能力生成 16 条核心路由、`content_quality_check`、重开持久化、用户路由保留、可选费用/评测
+投影缺失，以及 legacy 投影失败不回滚权威 Model Hub 方案。
+
+```powershell
+cd packages/data
+..\..\node_modules\.bin\vitest.cmd run --config vitest.config.ts --configLoader runner tests/model-hub-migration.test.ts
+```
+
+结果：1 file，7 passed，0 failed。22 类任务逐项写入三张受影响表，未知任务仍拒绝；0056 升级夹具
+保留路由、评测、调用、失败诊断、自引用 fallback、外部 invocation link、索引和隐私触发器，且
+`foreign_key_check` 为空、`integrity_check` 为 `ok`。
 
 原生模型网关：
 

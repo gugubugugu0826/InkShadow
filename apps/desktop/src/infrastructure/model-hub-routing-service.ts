@@ -1,6 +1,3 @@
-import { MODEL_ROUTE_ROLES, type ModelRouteRole } from "@inkshadow/ai-core";
-
-import { NOVEL_AI_TASKS } from "./model-hub-provider-registry";
 import {
   buildLegacyCompatibilityPlan,
   buildModelHubRoutingPlan,
@@ -10,7 +7,11 @@ import {
   type ModelHubRoutingPlan,
 } from "./model-hub-router";
 import type { ModelHubStore, NovelTaskRoute } from "./model-hub-store";
-import type { ModelRoleRoute, ModelRoutingStore } from "./model-routing-store";
+import {
+  ModelRoutingStoreError,
+  type ModelRoleRoute,
+  type ModelRoutingStore,
+} from "./model-routing-store";
 
 export interface ApplyAutomaticModelHubRoutingInput {
   readonly modelHub: ModelHubStore;
@@ -26,8 +27,13 @@ export interface ApplyAutomaticModelHubRoutingInput {
 export interface AppliedModelHubRouting {
   readonly plan: ModelHubRoutingPlan;
   readonly legacy: LegacyCompatibilityPlan;
+  readonly routes: readonly NovelTaskRoute[];
   readonly savedNovelTaskCount: number;
   readonly savedLegacyRoleCount: number;
+  readonly preservedUserRouteCount: number;
+  readonly changed: boolean;
+  readonly legacySyncStatus: "succeeded" | "failed";
+  readonly legacySyncErrorCode: string | null;
 }
 
 export async function loadModelHubRoutingCandidates(
@@ -47,8 +53,12 @@ export async function loadModelHubRoutingCandidates(
           catalog.map(async (catalogEntry) => {
             const [capabilities, costPrivacy, evaluations] = await Promise.all([
               modelHub.listCapabilityEvidence(catalogEntry.id),
-              modelHub.findCostPrivacyProfile(catalogEntry.id),
-              modelHub.listEvaluationResults(catalogEntry.id),
+              // Pricing/privacy metadata and evaluations improve ranking, but
+              // are not required for ordinary cloud routing. A missing or
+              // temporarily unreadable optional projection must not disable
+              // otherwise proven text generation.
+              modelHub.findCostPrivacyProfile(catalogEntry.id).catch(() => null),
+              modelHub.listEvaluationResults(catalogEntry.id).catch(() => Object.freeze([])),
             ]);
             return Object.freeze({
               connection,
@@ -74,57 +84,43 @@ export async function applyAutomaticModelHubRouting(
     now: input.now,
   });
   const legacy = buildLegacyCompatibilityPlan(plan, candidates, input.now);
-  const existingNovelRoutes = await loadExistingNovelRoutes(input.modelHub);
-  const existingLegacyRoutes = await input.legacyRouting.listRoutes();
+  let existingLegacyRoutes: readonly ModelRoleRoute[] = Object.freeze([]);
+  let legacyReadErrorCode: string | null = null;
+  try {
+    existingLegacyRoutes = await input.legacyRouting.listRoutes();
+  } catch (cause: unknown) {
+    if (input.scheme === "local_privacy") {
+      throw cause;
+    }
+    legacyReadErrorCode = legacySyncErrorCode(cause);
+  }
 
-  // Switching to local-only is fail-closed. Clear every previous route before
-  // writing local replacements so a partial write can never retain cloud use.
+  // Legacy role routes are a rebuildable compatibility projection. Switching
+  // to local-only clears that projection first so a legacy cloud path cannot
+  // survive if later reconciliation is interrupted.
   if (input.scheme === "local_privacy") {
-    await clearNovelRoutes(input.modelHub, existingNovelRoutes);
     await clearLegacyRoutes(input.legacyRouting, existingLegacyRoutes);
+    existingLegacyRoutes = Object.freeze([]);
   }
 
   const presetId = `automatic-${input.scheme}`;
-  const preset = (await input.modelHub.listPresets()).find(({ id }) => id === presetId);
-  await input.modelHub.savePreset({
-    id: presetId,
-    scheme: input.scheme,
-    displayName: schemeLabel(input.scheme),
-    status: "active",
-    privacyPolicy: input.scheme === "local_privacy" ? "local_only" : "cloud_allowed",
-    costPriority:
-      input.scheme === "quality"
-        ? "quality_first"
-        : input.scheme === "economy"
-          ? "cost_first"
-          : "balanced",
-    routeGenerationVersion: "model-hub-evidence-router-v1",
-    expectedRevision: preset?.revision ?? null,
+  const appliedPlan = await input.modelHub.applyAutomaticRoutingPlan({
+    preset: {
+      id: presetId,
+      scheme: input.scheme,
+      displayName: schemeLabel(input.scheme),
+      status: "active",
+      privacyPolicy: input.scheme === "local_privacy" ? "local_only" : "cloud_allowed",
+      costPriority:
+        input.scheme === "quality"
+          ? "quality_first"
+          : input.scheme === "economy"
+            ? "cost_first"
+            : "balanced",
+      routeGenerationVersion: "model-hub-evidence-router-v1",
+    },
+    routes: plan.routes,
   });
-
-  const existingNovelByTask = new Map(
-    input.scheme === "local_privacy"
-      ? []
-      : existingNovelRoutes.map((route) => [route.task, route] as const),
-  );
-  for (const route of plan.routes) {
-    await input.modelHub.saveTaskRoute({
-      task: route.task,
-      primaryCatalogEntryId: route.primaryCatalogEntryId,
-      fallbackCatalogEntryId: route.fallbackCatalogEntryId,
-      presetId,
-      parameterPolicy: route.parameterPolicy,
-      maximumCostMicros: route.maximumCostMicros,
-      currency: route.currency,
-      privacyPolicy: route.privacyPolicy,
-      failurePolicy: route.failurePolicy,
-      routeOrigin: route.routeOrigin,
-      enabled: route.enabled,
-      expectedRevision: existingNovelByTask.get(route.task)?.revision ?? null,
-    });
-    existingNovelByTask.delete(route.task);
-  }
-  await clearNovelRoutes(input.modelHub, [...existingNovelByTask.values()]);
 
   const legacyReady = new Set(
     input.legacyReadyModels.map(({ connectionId, modelId }) => `${connectionId}\u0000${modelId}`),
@@ -136,52 +132,61 @@ export async function applyAutomaticModelHubRouting(
         (fallbackModelId !== null &&
           legacyReady.has(`${fallbackConnectionId}\u0000${fallbackModelId}`))),
   );
-  const applicableRoles = new Set(applicableLegacyRoutes.map(({ role }) => role));
-  const existingLegacyByRole = new Map<ModelRouteRole, ModelRoleRoute>(
-    input.scheme === "local_privacy"
-      ? []
-      : existingLegacyRoutes.map((route) => [route.role, route] as const),
-  );
-  for (const route of applicableLegacyRoutes) {
-    await input.legacyRouting.saveRoute({
-      role: route.role,
-      primaryProviderId: route.primaryConnectionId,
-      fallbackProviderId: route.fallbackConnectionId,
-      expectedRevision: existingLegacyByRole.get(route.role)?.revision ?? null,
-    });
-    existingLegacyByRole.delete(route.role);
+  let legacySyncStatus: AppliedModelHubRouting["legacySyncStatus"] =
+    legacyReadErrorCode === null ? "succeeded" : "failed";
+  let legacyFailureCode = legacyReadErrorCode;
+  if (legacyReadErrorCode === null) {
+    try {
+      await reconcileLegacyRoutes(
+        input.legacyRouting,
+        existingLegacyRoutes,
+        applicableLegacyRoutes,
+      );
+    } catch (cause: unknown) {
+      legacySyncStatus = "failed";
+      legacyFailureCode = legacySyncErrorCode(cause);
+    }
   }
-  const rolesToClear = new Set<ModelRouteRole>([
-    ...legacy.rolesToClear,
-    ...MODEL_ROUTE_ROLES.filter((role) => !applicableRoles.has(role)),
-  ]);
-  await clearLegacyRoutes(
-    input.legacyRouting,
-    [...existingLegacyByRole.values()].filter(({ role }) => rolesToClear.has(role)),
-  );
 
   return Object.freeze({
     plan,
     legacy,
-    savedNovelTaskCount: plan.routes.length,
-    savedLegacyRoleCount: applicableLegacyRoutes.length,
+    routes: appliedPlan.routes,
+    savedNovelTaskCount: appliedPlan.routes.filter(({ enabled }) => enabled).length,
+    savedLegacyRoleCount: legacySyncStatus === "succeeded" ? applicableLegacyRoutes.length : 0,
+    preservedUserRouteCount: appliedPlan.preservedUserRouteCount,
+    changed: appliedPlan.changed,
+    legacySyncStatus,
+    legacySyncErrorCode: legacyFailureCode,
   });
 }
 
-async function loadExistingNovelRoutes(
-  modelHub: ModelHubStore,
-): Promise<readonly NovelTaskRoute[]> {
-  const routes = await Promise.all(NOVEL_AI_TASKS.map((task) => modelHub.findTaskRoute(task)));
-  return Object.freeze(routes.filter((route): route is NovelTaskRoute => route !== null));
-}
-
-async function clearNovelRoutes(
-  modelHub: ModelHubStore,
-  routes: readonly NovelTaskRoute[],
+async function reconcileLegacyRoutes(
+  legacyRouting: ModelRoutingStore,
+  existingRoutes: readonly ModelRoleRoute[],
+  desiredRoutes: LegacyCompatibilityPlan["routes"],
 ): Promise<void> {
-  for (const route of routes) {
-    await modelHub.deleteTaskRoute(route.task, route.revision);
+  const desiredRoles = new Set(desiredRoutes.map(({ role }) => role));
+  const existingByRole = new Map(existingRoutes.map((route) => [route.role, route] as const));
+  for (const desired of desiredRoutes) {
+    const existing = existingByRole.get(desired.role);
+    if (
+      existing?.primaryProviderId !== desired.primaryConnectionId ||
+      existing.fallbackProviderId !== desired.fallbackConnectionId
+    ) {
+      await legacyRouting.saveRoute({
+        role: desired.role,
+        primaryProviderId: desired.primaryConnectionId,
+        fallbackProviderId: desired.fallbackConnectionId,
+        expectedRevision: existing?.revision ?? null,
+      });
+    }
+    existingByRole.delete(desired.role);
   }
+  await clearLegacyRoutes(
+    legacyRouting,
+    [...existingByRole.values()].filter(({ role }) => !desiredRoles.has(role)),
+  );
 }
 
 async function clearLegacyRoutes(
@@ -191,6 +196,10 @@ async function clearLegacyRoutes(
   for (const route of routes) {
     await legacyRouting.deleteRoute(route.role, route.revision);
   }
+}
+
+function legacySyncErrorCode(cause: unknown): string {
+  return cause instanceof ModelRoutingStoreError ? cause.code : "MODEL_HUB_LEGACY_SYNC_FAILED";
 }
 
 function schemeLabel(scheme: AutomaticModelHubScheme): string {

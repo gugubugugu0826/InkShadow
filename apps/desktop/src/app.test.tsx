@@ -315,7 +315,7 @@ describe("desktop vertical slice", () => {
     Object.defineProperty(window, "matchMedia", {
       configurable: true,
       value: vi.fn((query: string) => ({
-        matches: query === "(max-width: 63.9375rem)",
+        matches: query === "(max-width: 64rem)",
         media: query,
         onchange: null,
         addListener: vi.fn(),
@@ -968,7 +968,7 @@ describe("desktop vertical slice", () => {
     expect(chapters.ok && chapters.value.map(({ title }) => title)).toEqual(["第一章", "第二章"]);
   });
 
-  it("never accepts or renders a model secret field in browser development mode", async () => {
+  it("blocks credential-required model setup without rendering a secret field in browser development mode", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const user = userEvent.setup();
     renderRoute(runtime, "/settings#model-center");
@@ -977,31 +977,16 @@ describe("desktop vertical slice", () => {
     expect(screen.queryByLabelText("接口访问密钥")).not.toBeInTheDocument();
     expect(window.localStorage.getItem("model-secret")).toBeNull();
     expect(screen.getByRole("button", { name: "测试连接并发现模型" })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "保存供应商与模型" }));
-    expect(await screen.findByText("配置修订 1")).toBeInTheDocument();
-    await expect(runtime.modelCenter.listProfiles()).resolves.toMatchObject([
-      {
-        providerId: "openai",
-        provider: "open_ai_compatible",
-        selectedModel: null,
-      },
-    ]);
+    const saveProfile = screen.getByRole("button", { name: "保存供应商与模型" });
+    expect(saveProfile).toBeDisabled();
+    expect(screen.getByText("保存供应商与模型暂不可用")).toBeInTheDocument();
+    await expect(runtime.modelCenter.listProfiles()).resolves.toEqual([]);
+    await expect(runtime.modelHub.listConnections()).resolves.toEqual([]);
     await user.click(screen.getByRole("button", { name: "专家设置" }));
-    await user.type(screen.getByRole("textbox", { name: /^模型标识/u }), "gpt-test");
-    await user.type(screen.getByRole("spinbutton", { name: "上下文窗口（token）" }), "32000");
-    await user.type(screen.getByRole("spinbutton", { name: "输入价 / 百万 token" }), "1");
-    await user.type(screen.getByRole("spinbutton", { name: "输出价 / 百万 token" }), "2");
-    await user.type(screen.getByRole("textbox", { name: "价格版本" }), "test-2026-07");
-    fireEvent.change(screen.getByLabelText("价格更新时间"), {
-      target: { value: "2026-07-27" },
-    });
-    await user.click(screen.getByRole("button", { name: "保存供应商与模型" }));
-    await expect(runtime.modelCenter.listProfiles()).resolves.toMatchObject([
-      {
-        selectedModel: null,
-        pricing: null,
-      },
-    ]);
+    expect(screen.queryByLabelText("接口访问密钥")).not.toBeInTheDocument();
+    expect(saveProfile).toBeDisabled();
+    await expect(runtime.modelCenter.listProfiles()).resolves.toEqual([]);
+    await expect(runtime.modelHub.listConnections()).resolves.toEqual([]);
     expect(JSON.stringify(window.localStorage)).not.toMatch(
       /api[_-]?key|access[_-]?token|password|secret/iu,
     );

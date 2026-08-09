@@ -168,6 +168,70 @@ describe("BrowserDevelopmentGenerationGovernanceStore", () => {
     });
   });
 
+  it("keeps an unpriced generation runnable without fabricating a monetary amount", async () => {
+    const store = createStore();
+    const created = await store.createRun({
+      id: RUN_ID,
+      taskId: TASK_ID,
+      idempotencyKey: `ai.generate:${CHAPTER_ID}:${VERSION_ID}:unpriced`,
+      projectId: PROJECT_ID,
+      chapterId: CHAPTER_ID,
+      baseVersionId: VERSION_ID,
+      providerId: "deepseek",
+      modelId: "deepseek-chat",
+      preflight: unpricedPreflight(),
+    });
+
+    expect(created.run).toMatchObject({
+      costStatus: "pricing_unavailable",
+      estimatedCostMicros: "0",
+      currency: "XXX",
+      preflight: {
+        costStatus: "pricing_unavailable",
+        estimateMicros: null,
+        currency: null,
+      },
+    });
+    let run = await store.transitionRun({
+      runId: RUN_ID,
+      expectedRevision: created.run.revision,
+      state: "retrieving",
+    });
+    run = await store.transitionRun({
+      runId: RUN_ID,
+      expectedRevision: run.revision,
+      state: "generating",
+    });
+    await store.transitionRun({
+      runId: RUN_ID,
+      expectedRevision: run.revision,
+      state: "failed_retryable",
+      failureCode: "PROVIDER_RESPONSE_INVALID",
+      addIncurredCost: true,
+      attemptUsage: {
+        source: "provider_reported_unpriced",
+        inputTokens: 2_100,
+        outputTokens: 380,
+        cachedInputTokens: null,
+        usagePricedEstimateMicros: null,
+      },
+    });
+
+    await expect(store.findRunById(RUN_ID)).resolves.toMatchObject({
+      incurredCostMicros: "0",
+      costStatus: "pricing_unavailable",
+    });
+    await expect(store.listAttemptUsage(RUN_ID)).resolves.toEqual([
+      expect.objectContaining({
+        source: "provider_reported_unpriced",
+        costStatus: "pricing_unavailable",
+        inputTokens: 2_100,
+        outputTokens: 380,
+        usagePricedEstimateMicros: null,
+      }),
+    ]);
+  });
+
   it("lists only a project's generation runs in deterministic creation order", async () => {
     const store = createStore();
     const secondRunId = uuid(7);
@@ -390,6 +454,46 @@ function offlinePreflight() {
     },
     budgets: [],
   });
+}
+
+function unpricedPreflight() {
+  return runGenerationPreflight({
+    ...readyPreflightInput(),
+    pricing: null,
+    contextWindowTokens: null,
+    tokenizerStatus: "approximate",
+  });
+}
+
+function readyPreflightInput() {
+  return {
+    now: NOW,
+    migrationReady: true,
+    chapterExists: true,
+    chapterSaved: true,
+    projectWritable: true,
+    gatewayAvailable: true,
+    networkAvailable: true,
+    providerLocation: "remote" as const,
+    profileConfigured: true,
+    modelSelected: true,
+    credentialConfigured: true,
+    connectionStatus: "verified" as const,
+    selectedModelAvailable: true,
+    inputBytes: 12_000,
+    maximumInputBytes: 1_000_000,
+    inputTokens: 4_000,
+    maximumOutputTokens: 2_000,
+    contextWindowTokens: 16_000,
+    pricing: {
+      currency: "USD",
+      pricingVersion: "2026-07",
+      updatedAt: NOW,
+      inputMicrosPerMillionTokens: 1_000_000n,
+      outputMicrosPerMillionTokens: 2_000_000n,
+    },
+    budgets: [],
+  };
 }
 
 function uuid(sequence: number): string {
