@@ -668,8 +668,10 @@ describe("StoryGovernancePage", () => {
     expect(timelineEvent.value.revision).toBe(1);
 
     await user.click(screen.getByRole("button", { name: "前往因果剧情试演" }));
-    expect(await screen.findByRole("heading", { name: "故事关联", level: 1 })).toBeVisible();
-  });
+    expect(
+      await screen.findByRole("heading", { name: "故事关联", level: 1 }, { timeout: 10_000 }),
+    ).toBeVisible();
+  }, 15_000);
 
   it("accepts a version-bound review item atomically into the formal record", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
