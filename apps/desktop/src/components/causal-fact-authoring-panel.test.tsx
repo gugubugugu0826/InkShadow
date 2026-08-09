@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ChapterRepository } from "@inkshadow/application";
 import { Chapter, parseIsoUtcTimestamp, parseUuidV7 } from "@inkshadow/domain";
@@ -112,7 +112,7 @@ describe("CausalFactAuthoringPanel explicit knowledge gains", () => {
     );
     const add = screen.getByRole("button", { name: "添加一条明确知识获得" });
     for (let index = 0; index < 128; index += 1) {
-      await user.click(add);
+      fireEvent.click(add);
     }
     expect(screen.getAllByRole("group", { name: /明确知识获得/u })).toHaveLength(128);
     expect(add).toBeDisabled();
