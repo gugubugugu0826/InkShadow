@@ -76,7 +76,20 @@ describe("ProjectMaterialsPage", () => {
       "用于第一章钟声场景的出处说明。",
     );
     await user.click(screen.getByRole("button", { name: "确认引用" }));
-    expect(await screen.findByText("用于第一章钟声场景的出处说明。")).toBeInTheDocument();
+    await waitFor(
+      () => {
+        const referencedCard = screen
+          .getByRole("heading", { name: "雨夜钟楼", level: 3 })
+          .closest(".ink-card");
+        expect(referencedCard).not.toBeNull();
+        if (referencedCard instanceof HTMLElement) {
+          expect(
+            within(referencedCard).getByText("用于第一章钟声场景的出处说明。"),
+          ).toBeInTheDocument();
+        }
+      },
+      { timeout: 5_000 },
+    );
 
     materialCard = screen.getByRole("heading", { name: "雨夜钟楼", level: 3 }).closest(".ink-card");
     if (!(materialCard instanceof HTMLElement)) {

@@ -72,6 +72,30 @@ secrets、137 项 licenses、20 项 boundaries、17 项 Desktop release source/c
 34/34 通过后，仍从头执行上述完整 `release:check`，最终 Desktop 1,520 passed / 1 skipped、
 workspace 2,688 passed / 65 skipped / 0 failed。该最终 PASS 不删除这次失败记录。
 
+### 2026-08-10 PR #1 首次远端 CI 失败（保留，不计为通过）
+
+GitHub Actions run `31326891335` 在提交
+`e3cfd72f6f346aac82ff7329859746ed8653651c` 上执行。Cloud PostgreSQL/forced RLS 与
+Windows native shell 均通过；Windows 作业包含 Rust 检查、production 前端演练、未签名
+NSIS 打包和附件上传。质量作业的 build、typecheck 与 lint 通过，唯一失败位于
+`project-materials-page.test.tsx`：211 个 Desktop 测试文件通过、1 个失败，1,519 passed、
+1 skipped、1 failed。
+
+失败发生在点击“确认引用”以后。旧断言使用 Testing Library 默认 1 秒等待引用说明重新出现；
+远端高负载下，持久化与页面重新加载尚未完成，失败快照中的对话框仍处于提交状态。修复仅让
+该断言最多等待 5 秒，并在对应素材卡片内核对引用文本；没有修改生产素材或引用逻辑，也没有
+提高 Vitest 全局或整项测试时限。
+
+修复后的聚焦回归连续执行三次：
+
+```powershell
+pnpm.cmd --filter @inkshadow/desktop test src/pages/project-materials-page.test.tsx
+```
+
+每次均为 1 file / 2 tests passed、0 failed；三次测试耗时分别为 6.39、6.26 与 6.57 秒。
+该文件的 ESLint、Prettier 与 `git diff --check` 同时通过。上述聚焦结果不替代修复提交的新一轮
+完整 GitHub Actions；run `31326891335` 始终保留为失败证据。
+
 ## 2026-08-09 DeepSeek P0 历史工作树验证
 
 ### 全量门禁
