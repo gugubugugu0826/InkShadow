@@ -1008,7 +1008,7 @@ describe("ImportJourneyPage", () => {
 
     first.unmount();
     renderPage(runtime);
-    expect(await screen.findByText("第一份试改。")).toBeInTheDocument();
+    expect(await screen.findByText("第一份试改。", {}, { timeout: 5_000 })).toBeInTheDocument();
     expect(screen.getByText(/不会自动重复调用或重复计费/)).toBeInTheDocument();
   });
 

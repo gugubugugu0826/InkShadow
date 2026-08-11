@@ -87,10 +87,12 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
     // Several browser-level suites intentionally render the complete desktop
-    // shell and exercise SQLite/ZIP boundaries. Letting Vitest match a
-    // high-core workstation one-for-one starves lazy routes and file parsing,
-    // producing load-dependent UI failures that disappear in isolation.
-    maxWorkers: 2,
+    // shell and exercise real file-backed SQLite/ZIP boundaries. GitHub's
+    // Windows runner repeatedly timed out unrelated 5s/15s SQLite tests when
+    // two files shared its constrained disk and CPU, while each passed well
+    // within its unchanged limit in isolation. Keep file execution serial;
+    // assertions and per-test timeouts remain unchanged.
+    maxWorkers: 1,
     clearMocks: true,
     restoreMocks: true,
   },
