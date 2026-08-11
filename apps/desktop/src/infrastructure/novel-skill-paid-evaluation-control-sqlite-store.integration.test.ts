@@ -1,4 +1,4 @@
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -117,9 +117,14 @@ afterAll(async () => {
 async function prepareTemplateDatabase(): Promise<void> {
   temporaryDirectory = mkdtempSync(path.join(tmpdir(), "inkshadow-paid-blind-"));
   templateDatabasePath = path.join(temporaryDirectory, "template.sqlite3");
-  const executor = new NodeSqliteExecutor(migration, templateDatabasePath);
+  const executor = new NodeSqliteExecutor(migration);
   try {
     await seedCompleteBlindReviewEvidence(executor);
+    // Build the prerequisite-only template in memory, then persist one complete
+    // SQLite image. Thousands of fixture autocommits against a temporary file
+    // can otherwise monopolize Windows CI disk I/O while another worker is
+    // exercising its own file-backed database.
+    writeFileSync(templateDatabasePath, executor.database.serialize());
   } finally {
     await executor.close();
   }

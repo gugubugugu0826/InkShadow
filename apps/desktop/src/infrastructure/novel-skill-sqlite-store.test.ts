@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -39,15 +39,18 @@ const migration = [
   )
   .join("\n");
 
-const DATABASE_PATH = path.join(tmpdir(), `inkshadow-novel-skill-${String(process.pid)}.db`);
 const NOW = "2026-08-10T00:00:00.000Z";
 const PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const SNAPSHOT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
 const MODEL_INVOCATION_ID = "019f9f4a-b3c7-7350-9226-000000000102";
 const TRACE_ID = "novel-skill-store-trace";
 
-afterEach(() => {
-  rmSync(DATABASE_PATH, { force: true });
+const openExecutors = new Set<NodeSqliteExecutor>();
+const databaseDirectories = new Set<string>();
+
+afterEach(async () => {
+  await closeOpenExecutors();
+  removeDatabaseDirectories();
 });
 
 function repositoryRoot(): string {
@@ -56,102 +59,152 @@ function repositoryRoot(): string {
     : path.resolve(process.cwd(), "../..");
 }
 
+function createDatabasePath(): string {
+  const directory = mkdtempSync(path.join(tmpdir(), "inkshadow-novel-skill-"));
+  databaseDirectories.add(directory);
+  return path.join(directory, "store.db");
+}
+
+function createExecutor(migrationSql: string, databasePath = ":memory:"): NodeSqliteExecutor {
+  const executor = new NodeSqliteExecutor(migrationSql, databasePath);
+  openExecutors.add(executor);
+  return executor;
+}
+
+async function closeExecutor(executor: NodeSqliteExecutor): Promise<void> {
+  if (!openExecutors.has(executor)) {
+    return;
+  }
+  await executor.close();
+  openExecutors.delete(executor);
+}
+
+async function closeOpenExecutors(): Promise<void> {
+  const executors = [...openExecutors];
+  const results = await Promise.allSettled(executors.map((executor) => closeExecutor(executor)));
+  const errors = results
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map(({ reason }) => reason as unknown);
+  if (errors.length > 0) {
+    throw new AggregateError(errors, "Failed to close Novel Skill SQLite test executors.");
+  }
+}
+
+function removeDatabaseDirectories(): void {
+  for (const directory of databaseDirectories) {
+    rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+  databaseDirectories.clear();
+}
+
 describe("NovelSkillSqliteStore", () => {
   fileSqliteIt(
     "fails closed before dispatch, persists exact linkage, and survives restart",
     async () => {
-      const executor = new NodeSqliteExecutor(migration, DATABASE_PATH);
-      await insertFoundation(executor);
-      const store = new NovelSkillSqliteStore(executor);
-      const definitions = await createCoreNovelSkillDefinitions();
-      const scene = definitions.find(({ skillId }) => skillId === "core.scene_craft");
-      expect(scene).toBeDefined();
-      if (scene === undefined) {
-        throw new Error("scene fixture missing");
+      const databasePath = createDatabasePath();
+      let executor: NodeSqliteExecutor | undefined;
+      let reopened: NodeSqliteExecutor | undefined;
+      try {
+        executor = createExecutor(migration, databasePath);
+        await insertFoundation(executor);
+        const store = new NovelSkillSqliteStore(executor);
+        const definitions = await createCoreNovelSkillDefinitions();
+        const scene = definitions.find(({ skillId }) => skillId === "core.scene_craft");
+        expect(scene).toBeDefined();
+        if (scene === undefined) {
+          throw new Error("scene fixture missing");
+        }
+        await store.insertDefinition(scene);
+        const binding = bindingFor(scene.version);
+        await expect(store.saveBinding(binding, 0)).resolves.toMatchObject({ revision: 1 });
+        const compiled = await compileNovelSkills({
+          projectId: PROJECT_ID,
+          taskType: "continuation",
+          invocationMode: "draft",
+          maximumSkillTokens: 2_000,
+          genreTags: [],
+          explicitSkillIds: [scene.skillId],
+          availableContextLayers: ["current_task", "scene_goal"],
+          allowExperimental: true,
+          definitions: [scene],
+          bindings: [binding],
+        });
+        const input = invocationInput(compiled);
+        let dispatchCount = 0;
+
+        await expect(
+          store.snapshotThenDispatch(input, () => {
+            dispatchCount += 1;
+            return Promise.resolve("dispatched");
+          }),
+        ).rejects.toMatchObject({ code: "NOVEL_SKILL_TRACE_LINK_MISSING" });
+        expect(dispatchCount).toBe(0);
+        await expect(
+          executor.select<{ readonly count: number }>(
+            "SELECT count(*) AS count FROM novel_skill_invocation_snapshots",
+          ),
+        ).resolves.toEqual([{ count: 0 }]);
+
+        await insertExactModelLink(executor);
+        await expect(
+          store.snapshotThenDispatch(input, (snapshot) => {
+            dispatchCount += 1;
+            expect(snapshot.contextTraceId).toBe(TRACE_ID);
+            expect(snapshot.modelInvocationId).toBe(MODEL_INVOCATION_ID);
+            return Promise.resolve("dispatched");
+          }),
+        ).resolves.toBe("dispatched");
+        expect(dispatchCount).toBe(1);
+        await closeExecutor(executor);
+        executor = undefined;
+
+        reopened = createExecutor("", databasePath);
+        const reopenedStore = new NovelSkillSqliteStore(reopened);
+        await expect(reopenedStore.findInvocationSnapshot(SNAPSHOT_ID)).resolves.toMatchObject({
+          id: SNAPSHOT_ID,
+          contextTraceId: TRACE_ID,
+          modelInvocationId: MODEL_INVOCATION_ID,
+          selectionHash: compiled.selectionHash,
+          items: [{ skillId: scene.skillId, included: true }],
+        });
+        await expect(
+          reopenedStore.findInvocationSnapshotByContextTrace(TRACE_ID),
+        ).resolves.toMatchObject({
+          id: SNAPSHOT_ID,
+          contextTraceId: TRACE_ID,
+          items: [{ skillId: scene.skillId, included: true }],
+        });
+        await expect(
+          reopened.execute(
+            "UPDATE novel_skill_definitions SET summary = 'mutated' WHERE skill_id = ?",
+            [scene.skillId],
+          ),
+        ).rejects.toThrow(/immutable/iu);
+        await expect(
+          reopened.execute(
+            `INSERT INTO novel_skill_invocation_items (
+             snapshot_id, item_order, skill_id, skill_version, definition_hash,
+             activation_source, selection_reason, precedence, included,
+             discarded_reason, estimated_tokens
+           ) VALUES (?, 2, ?, ?, ?, 'explicit', 'selected', 500, 1, NULL, 1)`,
+            [SNAPSHOT_ID, scene.skillId, scene.version, "f".repeat(64)],
+          ),
+        ).rejects.toThrow();
+      } finally {
+        if (reopened !== undefined) {
+          await closeExecutor(reopened);
+        }
+        if (executor !== undefined) {
+          await closeExecutor(executor);
+        }
       }
-      await store.insertDefinition(scene);
-      const binding = bindingFor(scene.version);
-      await expect(store.saveBinding(binding, 0)).resolves.toMatchObject({ revision: 1 });
-      const compiled = await compileNovelSkills({
-        projectId: PROJECT_ID,
-        taskType: "continuation",
-        invocationMode: "draft",
-        maximumSkillTokens: 2_000,
-        genreTags: [],
-        explicitSkillIds: [scene.skillId],
-        availableContextLayers: ["current_task", "scene_goal"],
-        allowExperimental: true,
-        definitions: [scene],
-        bindings: [binding],
-      });
-      const input = invocationInput(compiled);
-      let dispatchCount = 0;
-
-      await expect(
-        store.snapshotThenDispatch(input, () => {
-          dispatchCount += 1;
-          return Promise.resolve("dispatched");
-        }),
-      ).rejects.toMatchObject({ code: "NOVEL_SKILL_TRACE_LINK_MISSING" });
-      expect(dispatchCount).toBe(0);
-      await expect(
-        executor.select<{ readonly count: number }>(
-          "SELECT count(*) AS count FROM novel_skill_invocation_snapshots",
-        ),
-      ).resolves.toEqual([{ count: 0 }]);
-
-      await insertExactModelLink(executor);
-      await expect(
-        store.snapshotThenDispatch(input, (snapshot) => {
-          dispatchCount += 1;
-          expect(snapshot.contextTraceId).toBe(TRACE_ID);
-          expect(snapshot.modelInvocationId).toBe(MODEL_INVOCATION_ID);
-          return Promise.resolve("dispatched");
-        }),
-      ).resolves.toBe("dispatched");
-      expect(dispatchCount).toBe(1);
-      await executor.close();
-
-      const reopened = new NodeSqliteExecutor("", DATABASE_PATH);
-      const reopenedStore = new NovelSkillSqliteStore(reopened);
-      await expect(reopenedStore.findInvocationSnapshot(SNAPSHOT_ID)).resolves.toMatchObject({
-        id: SNAPSHOT_ID,
-        contextTraceId: TRACE_ID,
-        modelInvocationId: MODEL_INVOCATION_ID,
-        selectionHash: compiled.selectionHash,
-        items: [{ skillId: scene.skillId, included: true }],
-      });
-      await expect(
-        reopenedStore.findInvocationSnapshotByContextTrace(TRACE_ID),
-      ).resolves.toMatchObject({
-        id: SNAPSHOT_ID,
-        contextTraceId: TRACE_ID,
-        items: [{ skillId: scene.skillId, included: true }],
-      });
-      await expect(
-        reopened.execute(
-          "UPDATE novel_skill_definitions SET summary = 'mutated' WHERE skill_id = ?",
-          [scene.skillId],
-        ),
-      ).rejects.toThrow(/immutable/iu);
-      await expect(
-        reopened.execute(
-          `INSERT INTO novel_skill_invocation_items (
-           snapshot_id, item_order, skill_id, skill_version, definition_hash,
-           activation_source, selection_reason, precedence, included,
-           discarded_reason, estimated_tokens
-         ) VALUES (?, 2, ?, ?, ?, 'explicit', 'selected', 500, 1, NULL, 1)`,
-          [SNAPSHOT_ID, scene.skillId, scene.version, "f".repeat(64)],
-        ),
-      ).rejects.toThrow();
-      await reopened.close();
     },
   );
 
   fileSqliteIt(
     "rejects missing or sensitive replay fields before any snapshot is saved",
     async () => {
-      const executor = new NodeSqliteExecutor(migration);
+      const executor = createExecutor(migration);
       await insertFoundation(executor);
       await insertExactModelLink(executor);
       const store = new NovelSkillSqliteStore(executor);
@@ -203,14 +256,14 @@ describe("NovelSkillSqliteStore", () => {
           "SELECT count(*) AS count FROM novel_skill_invocation_snapshots",
         ),
       ).resolves.toEqual([{ count: 0 }]);
-      await executor.close();
+      await closeExecutor(executor);
     },
   );
 
   fileSqliteIt(
     "normalizes invalid typed input and stored JSON corruption without dispatching",
     async () => {
-      const executor = new NodeSqliteExecutor(migration);
+      const executor = createExecutor(migration);
       await insertFoundation(executor);
       await insertExactModelLink(executor);
       const store = new NovelSkillSqliteStore(executor);
@@ -257,14 +310,14 @@ describe("NovelSkillSqliteStore", () => {
       await expect(store.findInvocationSnapshot(SNAPSHOT_ID)).rejects.toMatchObject({
         code: "NOVEL_SKILL_STORE_CORRUPT",
       });
-      await executor.close();
+      await closeExecutor(executor);
     },
   );
 
   fileSqliteIt(
     "replays immutable definitions and the exact binding revision before dispatch",
     async () => {
-      const executor = new NodeSqliteExecutor(migration);
+      const executor = createExecutor(migration);
       try {
         await insertFoundation(executor);
         await insertExactModelLink(executor);
@@ -323,7 +376,7 @@ describe("NovelSkillSqliteStore", () => {
           store.commitInvocationBeforeDispatch(invocationInput(compiled)),
         ).rejects.toMatchObject({ code: "NOVEL_SKILL_STORE_INVALID" });
       } finally {
-        await executor.close();
+        await closeExecutor(executor);
       }
     },
   );
@@ -331,7 +384,7 @@ describe("NovelSkillSqliteStore", () => {
   fileSqliteIt(
     "recomputes snapshot hash, token totals, counts, and item membership on read",
     async () => {
-      const executor = new NodeSqliteExecutor(migration);
+      const executor = createExecutor(migration);
       try {
         await insertFoundation(executor);
         await insertExactModelLink(executor);
@@ -412,13 +465,13 @@ describe("NovelSkillSqliteStore", () => {
           code: "NOVEL_SKILL_STORE_CORRUPT",
         });
       } finally {
-        await executor.close();
+        await closeExecutor(executor);
       }
     },
   );
 
   fileSqliteIt("rejects bindings for an archived project at the store seam", async () => {
-    const executor = new NodeSqliteExecutor(migration);
+    const executor = createExecutor(migration);
     await insertFoundation(executor);
     const store = new NovelSkillSqliteStore(executor);
     const scene = (await createCoreNovelSkillDefinitions()).find(
@@ -436,7 +489,7 @@ describe("NovelSkillSqliteStore", () => {
     await expect(store.saveBinding(bindingFor(scene.version), 0)).rejects.toMatchObject({
       code: "NOVEL_SKILL_STORE_INVALID",
     });
-    await executor.close();
+    await closeExecutor(executor);
   });
 });
 
