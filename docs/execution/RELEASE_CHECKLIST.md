@@ -1,35 +1,36 @@
 # InkShadow 持续发布门禁
 
-> 更新日期：2026-08-11  
-> 当前源码与待发布版本：`0.2.2`  
-> 当前结论：**`v0.2.2` 发布准备正在进行；当前工作树的完整工程门禁、Rust 和 production Chromium 响应式 E2E 已通过，但唯一提交、Tauri/NSIS 干净候选和 GitHub 发布均尚未完成；公开 `v0.2.0` 与 `v0.2.1` 均为不可覆盖的历史 Pre-release**
+> 更新日期：2026-08-12  
+> 当前源码与已发布工程预览版本：`0.2.2`  
+> 当前结论：**`v0.2.2` 已从唯一干净提交完成本地候选、PR/main GitHub Actions、标签和公开附件复核，并发布为未签名 Pre-release；真实供应商、付费 Skill 评测、Novel Skill 默认启用和异机安装仍未验证**
 
 状态只使用 `PASS`、`IN_PROGRESS`、`NOT_RUN`、`BLOCKED` 和 `N/A`。  
 代码存在不等于发布门禁通过；只有可复核的测试、构建、签名、安装或人工验收证据才能标记 `PASS`。
 
 ## v0.2.2 当前发布门禁
 
-| 门禁                           | 状态        | 可复核证据或下一步                                                                                                                           |
-| ------------------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| 版本与设计基线                 | IN_PROGRESS | Desktop 与根发布元数据已设为 `0.2.2`；DESIGN 保持 `v0.3.1b`，不能混写为应用版本。版本变更后的 17 项 release source/config 须随候选链重新执行 |
-| 开书有限动态计划               | PASS        | 初始 5 个重点、最多 12 个唯一重点；显示 N/M、百分比、剩余重点与扩展原因，不设“三问上限”，也不允许无限追问                                    |
-| DOCX 导入聚焦回归              | PASS        | `pnpm.cmd --filter @inkshadow/import-export test`：81/81                                                                                     |
-| Settings 聚焦回归              | PASS        | 设置页完整文件 40/40；高负载四文件组合 76/76；Desktop typecheck 与设置页聚焦 ESLint 同时通过                                                 |
-| Desktop 全量                   | PASS        | 238 files；1,759 passed / 1 skipped / 0 failed                                                                                               |
-| 付费评测 infrastructure        | PASS        | 10 files / 96 tests；仅证明本地派发、账本、盲评和恢复安全，不证明真实付费 A/B 已执行                                                         |
-| 最终全仓门禁与生产构建         | PASS        | `pnpm.cmd release:check` 退出码 0、1,459.6 秒；3,035 passed / 65 skipped / 0 failed；Vite payload `6,651,786 / 6,717,440` bytes              |
-| Rust 严格门禁                  | PASS        | `pnpm.cmd check:rust` 退出码 0；format、严格 Clippy、160 passed / 1 ignored / 0 failed                                                       |
-| 1440/1280/1024/800 与 200% E2E | PASS        | production `dist` 的 Chromium 规格 11/11；尚不是 Tauri WebView                                                                               |
-| 备份恢复表覆盖                 | PASS        | 166 张作者数据表进入恢复合同；内容无关的原生项目派发 lease 明确不恢复                                                                        |
-| 真实 DeepSeek Key 互操作       | NOT_RUN     | 没有读取或使用真实 Key；本地/模拟测试不能标记供应商 `VERIFIED`                                                                               |
-| 干净唯一提交与来源指纹         | IN_PROGRESS | 版本、文档和提交范围正在收口；Commit SHA 与 source fingerprint 只能在唯一提交生成后记录，不填写虚构占位值                                    |
-| 未签名 NSIS、大小与 SHA-256    | NOT_RUN     | 候选尚未生成；安装包文件名、大小、SHA-256 与 PE/签名状态须从实际产物读取                                                                     |
-| GitHub `v0.2.2` Pre-release    | NOT_RUN     | 尚未创建标签或 Release；只能在唯一提交、干净候选、Actions 和附件复核通过后发布；不得移动或覆盖 `v0.2.0`、`v0.2.1` 标签                       |
-| Authenticode 商业签名与时间戳  | BLOCKED     | 缺少获授权的 Windows 发布主体、代码签名证书和正式时间戳服务；因此 `v0.2.2` 只能作为未签名工程预览候选                                        |
+| 门禁                           | 状态    | 可复核证据或下一步                                                                                                                                                                 |
+| ------------------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 版本与设计基线                 | PASS    | Desktop 与根发布元数据为 `0.2.2`；DESIGN 保持 `v0.3.1b`，不能混写为应用版本；候选链已复核 17 项 release source/config                                                              |
+| 开书有限动态计划               | PASS    | 初始 5 个重点、最多 12 个唯一重点；显示 N/M、百分比、剩余重点与扩展原因，不设“三问上限”，也不允许无限追问                                                                          |
+| DOCX 导入聚焦回归              | PASS    | `pnpm.cmd --filter @inkshadow/import-export test`：81/81                                                                                                                           |
+| Settings 聚焦回归              | PASS    | 设置页完整文件 40/40；高负载四文件组合 76/76；Desktop typecheck 与设置页聚焦 ESLint 同时通过                                                                                       |
+| Desktop 全量                   | PASS    | 238 files；1,759 passed / 1 skipped / 0 failed                                                                                                                                     |
+| 付费评测 infrastructure        | PASS    | 10 files / 96 tests；仅证明本地派发、账本、盲评和恢复安全，不证明真实付费 A/B 已执行                                                                                               |
+| 最终全仓门禁与生产构建         | PASS    | `pnpm.cmd release:check` 退出码 0、1,459.6 秒；3,035 passed / 65 skipped / 0 failed；Vite payload `6,651,786 / 6,717,440` bytes                                                    |
+| Rust 严格门禁                  | PASS    | `pnpm.cmd check:rust` 退出码 0；format、严格 Clippy、160 passed / 1 ignored / 0 failed                                                                                             |
+| 1440/1280/1024/800 与 200% E2E | PASS    | production `dist` 的 Chromium 规格 11/11；尚不是 Tauri WebView                                                                                                                     |
+| 备份恢复表覆盖                 | PASS    | 166 张作者数据表进入恢复合同；内容无关的原生项目派发 lease 明确不恢复                                                                                                              |
+| 真实 DeepSeek Key 互操作       | NOT_RUN | 没有读取或使用真实 Key；本地/模拟测试不能标记供应商 `VERIFIED`                                                                                                                     |
+| 干净唯一提交与来源指纹         | PASS    | 提交 `7dd746e7b35d07f9ae9605738d16dd852fd513a4`；PR #2 merged exact SHA；源码指纹 SHA-256 `f6eea0d621dde929775a878319baf351c361cd05ca257ad8a9e11096468f2ddd`                       |
+| 未签名 NSIS、大小与 SHA-256    | PASS    | `InkShadow_0.2.2_x64-setup.exe`；7,458,168 bytes；SHA-256 `3048198c44bcb79ad240642ce81e698d499bfbf0bf443a62099d0a57ac5c128c`；`NotSigned`                                          |
+| PR 与 `main` GitHub Actions    | PASS    | PR run `31500721439` 与 main run `31502928893` 的 quality、Windows native shell、Cloud PostgreSQL 均通过                                                                           |
+| GitHub `v0.2.2` Pre-release    | PASS    | tag object `706b7d211f651e2a5eabdd738a79b93ff5ce10f0` 指向发布提交；Release 为 `draft=false`、`prerelease=true`：<https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.2> |
+| Authenticode 商业签名与时间戳  | BLOCKED | 缺少获授权的 Windows 发布主体、代码签名证书和正式时间戳服务；因此 `v0.2.2` 仅作为未签名工程预览 Pre-release 发布                                                                   |
 
-## v0.2.2 Pre-release 发布说明草稿
+## v0.2.2 已发布 Pre-release 说明与追踪
 
-> 草稿状态：`DRAFT / NOT_PUBLISHED`。以下内容仅供候选通过后发布；提交、文件、大小与摘要在实际生成前必须保持“待生成”，不得用历史值代填。
+> 发布状态：`PUBLISHED / PRE_RELEASE`。以下内容和追踪数据绑定提交 `7dd746e7b35d07f9ae9605738d16dd852fd513a4` 与公开 Release；附件不得静默替换。
 
 ### InkShadow 墨影 v0.2.2（未签名工程预览）
 
@@ -46,22 +47,25 @@
 
 发布限制：
 
-- 本版本计划作为 GitHub `Pre-release` 的未签名工程预览发布，不是 Beta、GA 或商业正式版；Windows 可能提示“未知发布者”；
+- 本版本已作为 GitHub `Pre-release` 的未签名工程预览发布，不是 Beta、GA 或商业正式版；Windows 可能提示“未知发布者”；
 - 本轮没有使用真实 DeepSeek API Key 完成线上目录、文本探针、任务路由和正文生成验收，不能宣称真实 DeepSeek 供应商已验证；
 - 请先备份重要作品，不要把工程预览用于敏感数据或唯一副本；商业签名和隔离 Windows 安装/升级/卸载矩阵仍未完成；
-- `v0.2.0`、`v0.2.1` 及其标签、附件与哈希保持不可变，`v0.2.2` 必须使用新的提交、标签和附件。
+- `v0.2.0`、`v0.2.1`、`v0.2.2` 及其标签、附件与哈希均保持不可变；后续修复必须使用新的补丁版本。
 
-候选追踪（发布前填写）：
+发布追踪：
 
-| 属性                        | 值                                             |
-| --------------------------- | ---------------------------------------------- |
-| 来源 Commit SHA             | 待生成                                         |
-| 源码指纹                    | 待生成                                         |
-| Windows x64 NSIS 文件名     | 待生成                                         |
-| 安装包大小                  | 待生成                                         |
-| 安装包 SHA-256              | 待生成                                         |
-| PE Subsystem / Authenticode | 待生成并复核；预期为 Windows GUI / `NotSigned` |
-| GitHub Release URL          | 待发布                                         |
+| 属性                      | 值                                                                                                                             |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| 来源 Commit SHA           | `7dd746e7b35d07f9ae9605738d16dd852fd513a4`                                                                                     |
+| Annotated tag object      | `706b7d211f651e2a5eabdd738a79b93ff5ce10f0`                                                                                     |
+| 源码指纹                  | 1,143 files / 18,948,527 bytes；SHA-256 `f6eea0d621dde929775a878319baf351c361cd05ca257ad8a9e11096468f2ddd`                     |
+| 本地候选链                | `PASS`；1,303.3 秒；本地候选安装包 7,457,530 bytes，SHA-256 `4157bcd289522533eefee970aabc533eb4907d48cc57d97d8f5ef464fce7bfe5` |
+| Windows x64 NSIS          | `InkShadow_0.2.2_x64-setup.exe`；7,458,168 bytes；SHA-256 `3048198c44bcb79ad240642ce81e698d499bfbf0bf443a62099d0a57ac5c128c`   |
+| Authenticode              | `NotSigned`                                                                                                                    |
+| Release manifest          | `inkshadow-release-manifest.json`；9,989 bytes；SHA-256 `49752eb2cce9a4f73054d946605f25a25d64968e00f7aff64945d19b0a673f01`     |
+| SHA 校验附件              | `SHA256SUMS`；194 bytes；SHA-256 `4aa1ce2b2bfd8e4268b3b815b9741da830a5775170fcd33beac44c1bea67bb80`                            |
+| PR / main CI              | run `31500721439`：22m38s / 22m41s / 1m03s；run `31502928893`：21m16s / 22m32s / 56s；两轮三项均通过                           |
+| GitHub Release URL 与状态 | <https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.2>；`draft=false`、`prerelease=true`                            |
 
 ## v0.2.1 已发布历史 Pre-release（不可覆盖）
 
@@ -177,7 +181,7 @@
 
 ## 商业发布阻断项
 
-以下任一项未关闭都不允许把当前候选标记为 Beta 或正式发布：
+以下任一项未关闭都不允许把当前 Pre-release 升级为 Beta、GA 或商业正式版：
 
 1. `P0`：轮换并审计项目附件中曾暴露的全部凭据；仓库秘密扫描通过不等于外部凭据已失效。
 2. `P1`：取得 Windows 发布主体授权、Authenticode 证书与时间戳，冻结正式更新域名、通道及独立签名密钥托管。
@@ -189,10 +193,10 @@
 
 ## 发布结论
 
-既有完整候选链、提交绑定、制品哈希、GitHub Actions 和公开附件回读只属于历史 `v0.2.0` 或
-`v0.2.1`。当前 `v0.2.2` 的工作树工程门禁、Rust 和 production Chromium E2E 已通过；唯一
-提交正在准备，Tauri WebView 候选、NSIS、制品哈希与 GitHub 发布仍为 `NOT_RUN`；
+`v0.2.2` 的唯一提交、完整候选链、制品哈希、GitHub Actions、标签与公开附件回读已经完成；
+真实 Tauri WebView 交互、另一台电脑安装、192 次付费调用、2,496 项人工评分和真实 DeepSeek
+仍为 `NOT_RUN`，Novel Skill 继续 `KEEP_DISABLED`；
 签名、真实供应商全矩阵、百万字真实作品全链路/WebView 压力、法律审批、生产部署与独立安全审计
 也仍有未关闭门禁。
 
-**当前结论：`v0.2.2` 尚未提交、生成候选或发布；`v0.2.0` 与 `v0.2.1` 是不可覆盖的历史未签名 Pre-release。外部门禁关闭前，不得宣称 Beta、GA 或商业正式版。**
+**当前结论：`v0.2.2` 已公开为不可静默替换的未签名 Pre-release；它不是 Beta、GA 或商业正式版。上述外部验证完成前，不得扩大发布结论。**

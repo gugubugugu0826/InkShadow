@@ -1,12 +1,12 @@
 # InkShadow 当前执行状态
 
-> 更新日期：2026-08-11  
-> 当前源码与待发布版本：`0.2.2`  
-> 工程状态：本轮完整 `release:check`、Rust 严格门禁和 production Chromium 响应式 E2E 已通过；`v0.2.2` 发布准备正在进行，真实 Tauri WebView 候选链仍须从唯一干净提交执行  
-> 发布结论：**`v0.2.2` 尚未提交、尚未生成安装包候选，也尚未发布；公开 `v0.2.0` 与 `v0.2.1` Pre-release 均为不可覆盖的历史发布**  
+> 更新日期：2026-08-12  
+> 当前源码与已发布工程预览版本：`0.2.2`  
+> 工程状态：唯一干净提交的未签名候选链、本地制品复核、PR/main GitHub Actions 与公开附件回读均已通过；真实 Tauri WebView 交互和隔离 Windows 安装矩阵仍须另行执行  
+> 发布结论：**`v0.2.2` 已发布为公开、未签名的 GitHub Pre-release；标签和三个附件绑定提交 `7dd746e7b35d07f9ae9605738d16dd852fd513a4`，不得移动或静默替换**  
 > 外部边界：没有读取或使用真实 DeepSeek API Key；商业签名、供应商真实互操作和隔离 Windows 安装矩阵仍未完成
 
-## 2026-08-11 v0.2.2 发布准备工作树
+## 2026-08-12 v0.2.2 已发布工程预览
 
 | 项目                      | 当前事实                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -35,14 +35,15 @@
 | 192 次付费 Skill A/B      | `LOCAL INFRA READY / NOT_RUN`；`observationCount=0`、`manualScoreCount=0`。固定协议、两个精确目录目标、Provider 可见输出哈希、商业授权、逐币种费用硬上限、跨重启歧义账本、内容无关派发前权威和本地盲评均已实现；本轮没有读取 Key、没有商业授权、没有发送真实请求，也没有把 fake 结果写成证据。真实执行只能由作者在专家区确认报价和授权后另行手动开始                                                                                                                                                                                                                              |
 | Novel Skill 默认启用      | `NOT_RUN / KEEP_DISABLED`；没有默认开启任何 Core/Genre，也没有“提升写作质量”的真实证据                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | 真实 DeepSeek 凭据端到端  | `NOT_RUN`；当前只有本地与模拟协议证据，不能标记真实供应商 `VERIFIED`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| v0.2.2 唯一发布提交       | `IN_PROGRESS`；版本与发布文档正在收口，尚未创建提交。Commit SHA 与源码指纹只能在明确暂存、复核并生成唯一提交后记录，当前不使用占位值冒充证据                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| v0.2.2 干净候选与哈希     | `NOT_RUN`；此前 `test:e2e:release` 在任何候选构建或 E2E 前正确拒绝脏工作树，只证明 clean-worktree gate 有效，不是 v0.2.2 候选证据。安装包大小、SHA-256 与 Tauri WebView 结果须从唯一干净提交重新执行后填写                                                                                                                                                                                                                                                                                                                                                                        |
-| GitHub v0.2.2 Pre-release | `NOT_RUN`；尚未创建或发布 `v0.2.2` 标签与 Release。必须等待唯一提交、干净候选、制品复核和 GitHub Actions 通过，且不得移动或覆盖既有 `v0.2.0`、`v0.2.1` 标签                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| v0.2.2 唯一发布提交       | `PASS`；PR #2 以 exact SHA 合并，发布提交为 `7dd746e7b35d07f9ae9605738d16dd852fd513a4`；源码指纹为 1,143 files / 18,948,527 bytes，SHA-256 `f6eea0d621dde929775a878319baf351c361cd05ca257ad8a9e11096468f2ddd`                                                                                                                                                                                                                                                                                                                                                                     |
+| v0.2.2 干净候选与哈希     | `PASS`；`CI=true pnpm.cmd release:candidate:unsigned` 从唯一干净提交执行通过，用时 1,303.3 秒；本地候选安装包为 7,457,530 bytes，SHA-256 `4157bcd289522533eefee970aabc533eb4907d48cc57d97d8f5ef464fce7bfe5`。公开附件采用同一提交的 main CI 重建安装包：7,458,168 bytes，SHA-256 `3048198c44bcb79ad240642ce81e698d499bfbf0bf443a62099d0a57ac5c128c`，Authenticode `NotSigned`；manifest 为 9,989 bytes，SHA-256 `49752eb2cce9a4f73054d946605f25a25d64968e00f7aff64945d19b0a673f01`                                                                                                |
+| GitHub v0.2.2 Pre-release | `PASS`；annotated tag object `706b7d211f651e2a5eabdd738a79b93ff5ce10f0` 指向上述提交。PR CI run `31500721439` 的 quality/native/cloud 分别以 22m38s/22m41s/1m03s 通过；main CI run `31502928893` 分别以 21m16s/22m32s/56s 通过。Release 为 `draft=false`、`prerelease=true`：<https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.2>；`SHA256SUMS` 为 194 bytes，SHA-256 `4aa1ce2b2bfd8e4268b3b815b9741da830a5775170fcd33beac44c1bea67bb80`                                                                                                                             |
 
 精确命令、最终数字和前一次失败记录见 [`TEST_RESULTS.md`](TEST_RESULTS.md)。上表聚焦 `PASS`
 绑定各自命令执行时的当前快照；`0060`–`0064` 的本地基础设施已独立复跑，仍不等于真实评测。完整
-工程门禁、Rust 与 production Chromium 已通过；真实 Tauri/DeepSeek、付费评测和默认启用保持 `NOT_RUN`。
-`v0.2.2` 唯一提交、干净候选与 GitHub Pre-release 仍必须按顺序执行并记录来源与哈希。
+工程门禁、Rust、production Chromium、唯一干净候选、PR/main CI 与 GitHub Pre-release 已通过。
+真实 Tauri/DeepSeek、192 次付费评测、2,496 项人工评分、Novel Skill 默认启用和另一台电脑安装仍保持
+`NOT_RUN`；公开发布不把这些边界升级为已验证。
 
 ### Novel Skill 真实评测边界
 
@@ -310,7 +311,7 @@ workspace 门禁并非同一个进程或同一环境，不把分层证据合并�
 
 ## 当前产品边界
 
-- 本地 Community 创作工程闭环和内部候选已具备；这不等于 Windows 商业发布获批。
+- 本地 Community 创作工程闭环和未签名 `v0.2.2` Pre-release 已公开；这不等于 Windows 商业发布获批。
 - 云身份、同步、团队和 Enterprise Feature Flag 在生产凭据、真实多设备 E2E、目标环境
   灾备与独立安全评审完成前保持默认关闭。
 - Web 目前只完成 Guest 本机加密工作区；云登录、云项目、团队、账号恢复和多设备同步未实现。
@@ -318,7 +319,7 @@ workspace 门禁并非同一个进程或同一环境，不把分层证据合并�
   instrumentation、真机 KeyStore、后台同步、移动 UI 或发行包证据。
 - DOCX 已完成结构与安全回读，但尚未在 Word/LibreOffice 做逐页视觉验收。
 - 图像型 PDF 没有可选择/搜索文字层，也不宣称 PDF/UA 或屏幕阅读器可访问。
-- v0.2.0 NSIS 是未签名工程预览候选；没有对其执行隔离用户安装、升级或卸载矩阵。
+- v0.2.2 NSIS 是未签名工程预览；没有对其执行另一台电脑或隔离用户的安装、升级或卸载矩阵。
 - 本地 Ollama 回归证明协议和实际推理路径可运行；GPU 显存、固定基准机冷/热启动和
   500 万字符真实 WebView 内存仍未测量。
 
