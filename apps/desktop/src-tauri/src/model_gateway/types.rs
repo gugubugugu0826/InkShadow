@@ -93,6 +93,12 @@ pub(crate) enum ReasoningMode {
     Disabled,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ResponseFormat {
+    JsonObject,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ModelMessage {
@@ -110,7 +116,11 @@ pub(crate) struct StartGenerationRequest {
     pub(crate) max_output_tokens: u32,
     pub(crate) temperature: Option<f32>,
     #[serde(default)]
+    pub(crate) top_p: Option<f32>,
+    #[serde(default)]
     pub(crate) reasoning_mode: Option<ReasoningMode>,
+    #[serde(default)]
+    pub(crate) response_format: Option<ResponseFormat>,
     pub(crate) dispatch_scope: NativeModelDispatchScope,
 }
 
@@ -265,6 +275,31 @@ mod tests {
             serde_json::to_string(&ProviderKind::Gemini).expect("serialize Gemini"),
             "\"gemini\""
         );
+    }
+
+    #[test]
+    fn generation_request_keeps_top_p_optional_for_existing_callers() {
+        let value = serde_json::json!({
+            "generationId": "generation-1",
+            "config": {
+                "providerId": "provider-1",
+                "provider": "open_ai_compatible",
+                "baseUrl": "https://models.example/v1",
+                "authentication": "none"
+            },
+            "model": "model-1",
+            "messages": [{ "role": "user", "content": "Continue." }],
+            "maxOutputTokens": 64,
+            "temperature": 0.0,
+            "dispatchScope": {
+                "kind": "non_project",
+                "reason": "connection_probe"
+            }
+        });
+
+        let request: StartGenerationRequest =
+            serde_json::from_value(value).expect("topP must remain optional");
+        assert_eq!(request.top_p, None);
     }
 
     #[test]

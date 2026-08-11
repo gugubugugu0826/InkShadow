@@ -51,6 +51,8 @@ export interface PersistedGenerationPreflight {
   readonly inputTokens: number;
   readonly maximumOutputTokens: number;
   readonly contextWindowTokens: number | null;
+  readonly generationBudget?: GenerationPreflightSnapshot["generationBudget"] | null;
+  readonly contextSelectionSummary?: GenerationPreflightSnapshot["contextSelectionSummary"] | null;
 }
 
 export type GenerationRouteReason =
@@ -1189,6 +1191,8 @@ function serializePreflight(preflight: GenerationPreflightSnapshot): PersistedGe
     inputTokens: preflight.inputTokens,
     maximumOutputTokens: preflight.maximumOutputTokens,
     contextWindowTokens: preflight.contextWindowTokens,
+    generationBudget: preflight.generationBudget ?? null,
+    contextSelectionSummary: preflight.contextSelectionSummary ?? null,
   });
 }
 
@@ -1412,7 +1416,7 @@ function validateGenerationRun(run: GenerationRun): GenerationRun {
   validateCurrency(run.currency);
   validateSafeIdentifier(run.pricingVersion, 128, "pricingVersion");
   validateTimestamp(run.priceUpdatedAt);
-  validatePersistedPreflight(run.preflight);
+  const preflight = validatePersistedPreflight(run.preflight);
   const route = validateRouteSelection(run.route);
   if (run.candidateId !== null) {
     validateUuid(run.candidateId, "candidateId");
@@ -1432,7 +1436,7 @@ function validateGenerationRun(run: GenerationRun): GenerationRun {
     ...run,
     costStatus,
     route,
-    preflight: Object.freeze({ ...run.preflight }),
+    preflight,
   });
 }
 
@@ -1443,6 +1447,8 @@ function validatePersistedPreflight(
     throw governanceError("AI_GENERATION_STORE_CORRUPT", "Stored generation preflight is invalid.");
   }
   const costStatus = (preflight as Partial<PersistedGenerationPreflight>).costStatus ?? "estimated";
+  const generationBudget = preflight.generationBudget ?? null;
+  const contextSelectionSummary = preflight.contextSelectionSummary ?? null;
   if (
     typeof preflight.canStart !== "boolean" ||
     typeof preflight.requiresConfirmation !== "boolean" ||
@@ -1463,6 +1469,8 @@ function validatePersistedPreflight(
     throw governanceError("AI_GENERATION_STORE_CORRUPT", "Stored generation preflight is invalid.");
   }
   validateTimestamp(preflight.checkedAt);
+  validatePersistedGenerationBudget(generationBudget);
+  validatePersistedContextSelectionSummary(contextSelectionSummary);
   if (!(["estimated", "pricing_unavailable"] as readonly string[]).includes(costStatus)) {
     throw governanceError("AI_GENERATION_STORE_CORRUPT", "Stored preflight cost is invalid.");
   }
@@ -1479,7 +1487,76 @@ function validatePersistedPreflight(
   ) {
     throw governanceError("AI_GENERATION_STORE_CORRUPT", "Stored preflight cost is invalid.");
   }
-  return Object.freeze({ ...preflight, costStatus });
+  return Object.freeze({
+    ...preflight,
+    costStatus,
+    generationBudget,
+    contextSelectionSummary,
+  });
+}
+
+function validatePersistedGenerationBudget(
+  budget: PersistedGenerationPreflight["generationBudget"],
+): void {
+  if (budget === null || budget === undefined) return;
+  if (
+    !isObject(budget) ||
+    typeof budget.outputProfile !== "string" ||
+    !/^[a-z_]{2,32}$/u.test(budget.outputProfile) ||
+    typeof budget.contextProfile !== "string" ||
+    !/^[a-z_]{2,32}$/u.test(budget.contextProfile) ||
+    !safeCount(budget.targetVisibleCharacters, 12_000) ||
+    !safeCount(budget.minimumVisibleCharacters, 12_000) ||
+    !safeCount(budget.maximumVisibleCharacters, 12_000) ||
+    !safeCount(budget.requestedMaximumOutputTokens, 1_000_000) ||
+    (budget.providerOutputLimit !== null && !safeCount(budget.providerOutputLimit, 1_000_000)) ||
+    !safeCount(budget.effectiveInputBudget, 1_000_000) ||
+    !isPersistedGenerationBudgetStatus(budget.budgetStatus)
+  ) {
+    throw governanceError("AI_GENERATION_STORE_CORRUPT", "Stored generation budget is invalid.");
+  }
+}
+
+function isPersistedGenerationBudgetStatus(value: unknown): boolean {
+  return value === "available" || value === "model_window_exhausted";
+}
+
+function validatePersistedContextSelectionSummary(
+  summary: PersistedGenerationPreflight["contextSelectionSummary"],
+): void {
+  if (summary === null || summary === undefined) return;
+  if (
+    !isObject(summary) ||
+    !safeCount(summary.availableSourceCount, 4_096) ||
+    !safeCount(summary.selectedSourceCount, 4_096) ||
+    !safeCount(summary.deduplicatedSourceCount, 4_096) ||
+    !safeCount(summary.excludedSourceCount, 4_096) ||
+    !safeCount(summary.estimatedSelectedTokens, 10_000_000) ||
+    !safeCount(summary.effectiveInputBudget, 1_000_000) ||
+    !Array.isArray(summary.excludedReasonCounts) ||
+    summary.excludedReasonCounts.length > 32 ||
+    summary.excludedReasonCounts.some(
+      (entry) =>
+        !isObject(entry) ||
+        typeof entry.reason !== "string" ||
+        !/^[a-z_]{2,64}$/u.test(entry.reason) ||
+        !safeCount(entry.count, 4_096),
+    ) ||
+    !Array.isArray(summary.missingSourceTypes) ||
+    summary.missingSourceTypes.length > 32 ||
+    summary.missingSourceTypes.some(
+      (value) => typeof value !== "string" || !/^[a-z_]{2,64}$/u.test(value),
+    )
+  ) {
+    throw governanceError(
+      "AI_GENERATION_STORE_CORRUPT",
+      "Stored context selection summary is invalid.",
+    );
+  }
+}
+
+function safeCount(value: unknown, maximum: number): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= maximum;
 }
 
 function sameGenerationRequest(left: GenerationRun, right: GenerationRun): boolean {

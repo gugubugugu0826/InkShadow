@@ -3,13 +3,18 @@ import type {
   AppError,
   AiCandidateSnapshot,
   AiCandidateStatus,
+  Chapter,
   IsoUtcTimestamp,
+  Project,
   Result,
   UuidV7,
 } from "@inkshadow/domain";
 import type { SqlExecutor, TransactionExecutor } from "@inkshadow/data";
 
-import type { ContextCompilationTraceStore } from "./context-compilation-trace-store";
+import type {
+  ContextCompilationTrace,
+  ContextCompilationTraceStore,
+} from "./context-compilation-trace-store";
 
 export type ContextTraceOutputCommitCapability =
   "sqlite_atomic" | "browser_development_compensating";
@@ -31,6 +36,7 @@ export type ContextTraceOutputCommitErrorCode =
   | "CONTEXT_TRACE_OUTPUT_INVALID"
   | "CONTEXT_TRACE_OUTPUT_CONFLICT"
   | "CONTEXT_TRACE_OUTPUT_CORRUPT"
+  | "CONTEXT_TRACE_OUTPUT_TARGET_CHANGED"
   | "CONTEXT_TRACE_OUTPUT_UNAVAILABLE";
 
 export class ContextTraceOutputCommitError extends Error {
@@ -53,9 +59,32 @@ interface CandidatePersistencePort {
   ): Promise<Result<void, AppError>>;
 }
 
+interface CreativeTargetAuthorityPort {
+  readonly projects: Readonly<{
+    findById(id: UuidV7): Promise<Result<Project | null, AppError>>;
+  }>;
+  readonly chapters: Readonly<{
+    findById(id: UuidV7): Promise<Result<Chapter | null, AppError>>;
+  }>;
+}
+
 interface TraceTargetRow {
   readonly projectId: string;
   readonly chapterId: string | null;
+}
+
+interface ProjectAuthorityRow {
+  readonly status: string;
+}
+
+interface ChapterAuthorityRow {
+  readonly projectId: string;
+  readonly status: string;
+  readonly currentVersionId: string;
+}
+
+interface TraceSourceVersionRow {
+  readonly sourceVersionId: string | null;
 }
 
 interface OutputLinkRow {
@@ -121,6 +150,7 @@ export class BrowserDevelopmentContextTraceOutputCommitUnitOfWork implements Con
   public constructor(
     private readonly candidates: CandidatePersistencePort,
     private readonly traces: ContextCompilationTraceStore,
+    private readonly authority: CreativeTargetAuthorityPort,
   ) {}
 
   public async commit(
@@ -138,6 +168,7 @@ export class BrowserDevelopmentContextTraceOutputCommitUnitOfWork implements Con
       ) {
         throw outputConflict();
       }
+      await assertDevelopmentCreativeTargetCurrent(this.authority, trace, input.snapshot);
       if (trace.outputCandidateId !== null && trace.outputCandidateId !== input.snapshot.id) {
         throw outputConflict();
       }
@@ -159,6 +190,7 @@ export class BrowserDevelopmentContextTraceOutputCommitUnitOfWork implements Con
 
       let created = false;
       if (existing === null) {
+        await assertDevelopmentCreativeTargetCurrent(this.authority, trace, input.snapshot);
         const saved = await this.candidates.create(input.candidate);
         if (!saved.ok) {
           throw saved.error;
@@ -166,6 +198,7 @@ export class BrowserDevelopmentContextTraceOutputCommitUnitOfWork implements Con
         created = true;
       }
       try {
+        await assertDevelopmentCreativeTargetCurrent(this.authority, trace, input.snapshot);
         await this.traces.linkOutputCandidate({
           traceId: input.traceId,
           outputCandidateId: input.snapshot.id,
@@ -198,6 +231,11 @@ function normalizeCommitInput(input: ContextTraceOutputCommitInput): NormalizedC
   const snapshot = input.candidate.toSnapshot();
   if (snapshot.status !== "ready" || snapshot.decidedAt !== null) {
     throw invalidOutput("Only a ready, undecided AI Candidate can be committed.");
+  }
+  if (snapshot.chapterId === null || snapshot.baseVersionId === null) {
+    throw invalidOutput(
+      "A creative context output must target one chapter and its exact accepted base version.",
+    );
   }
   if (new Date(input.linkedAt).toISOString() !== input.linkedAt) {
     throw invalidOutput("The output association timestamp must be canonical UTC.");
@@ -236,6 +274,7 @@ async function commitSqliteOutput(
   if (executionRows.length !== 1) {
     throw corruptOutput("The context trace has no exact generation binding.");
   }
+  await assertSqliteCreativeTargetCurrent(transaction, trace, input.snapshot, input.traceId);
 
   const linkRows = await transaction.select<OutputLinkRow>(
     `SELECT trace_id AS traceId, ai_candidate_id AS candidateId
@@ -280,6 +319,86 @@ async function commitSqliteOutput(
     [input.traceId, input.snapshot.id, input.linkedAt],
   );
   return existingCandidate === undefined ? "created" : "already_committed";
+}
+
+async function assertSqliteCreativeTargetCurrent(
+  transaction: TransactionExecutor,
+  trace: TraceTargetRow,
+  snapshot: AiCandidateSnapshot,
+  traceId: string,
+): Promise<void> {
+  if (trace.chapterId === null || snapshot.chapterId === null || snapshot.baseVersionId === null) {
+    throw invalidOutput("A creative context output requires exact chapter and version authority.");
+  }
+  const projectRows = await transaction.select<ProjectAuthorityRow>(
+    `SELECT status
+     FROM projects
+     WHERE id = ?
+     LIMIT 2`,
+    [snapshot.projectId],
+  );
+  const chapterRows = await transaction.select<ChapterAuthorityRow>(
+    `SELECT project_id AS projectId, status, current_version_id AS currentVersionId
+     FROM chapters
+     WHERE id = ?
+     LIMIT 2`,
+    [snapshot.chapterId],
+  );
+  const sourceVersions = await transaction.select<TraceSourceVersionRow>(
+    `SELECT source.source_version_id AS sourceVersionId
+     FROM context_compilation_entries AS entry
+     INNER JOIN context_compilation_entry_sources AS source
+       ON source.run_id = entry.run_id
+      AND source.candidate_id = entry.candidate_id
+     WHERE entry.run_id = ?
+       AND entry.layer = 'current_task'
+       AND entry.included = 1
+       AND source.source_type IN ('generation_task', 'chapter')
+     ORDER BY source.source_order`,
+    [traceId],
+  );
+  if (
+    projectRows.length !== 1 ||
+    projectRows[0]?.status !== "active" ||
+    chapterRows.length !== 1 ||
+    chapterRows[0]?.projectId !== snapshot.projectId ||
+    chapterRows[0].status !== "active" ||
+    chapterRows[0].currentVersionId !== snapshot.baseVersionId ||
+    sourceVersions.length === 0 ||
+    sourceVersions.some(({ sourceVersionId }) => sourceVersionId !== snapshot.baseVersionId)
+  ) {
+    throw outputTargetChanged();
+  }
+}
+
+async function assertDevelopmentCreativeTargetCurrent(
+  authority: CreativeTargetAuthorityPort,
+  trace: ContextCompilationTrace,
+  snapshot: AiCandidateSnapshot,
+): Promise<void> {
+  if (snapshot.chapterId === null || snapshot.baseVersionId === null) {
+    throw invalidOutput("A creative context output requires exact chapter and version authority.");
+  }
+  const [projectResult, chapterResult] = await Promise.all([
+    authority.projects.findById(snapshot.projectId),
+    authority.chapters.findById(snapshot.chapterId),
+  ]);
+  if (!projectResult.ok) throw projectResult.error;
+  if (!chapterResult.ok) throw chapterResult.error;
+  const currentTaskSources = trace.entries
+    .filter(({ layer, included }) => layer === "current_task" && included)
+    .flatMap(({ sources }) => sources)
+    .filter(({ sourceType }) => sourceType === "generation_task" || sourceType === "chapter");
+  if (
+    projectResult.value?.status !== "active" ||
+    chapterResult.value?.status !== "active" ||
+    chapterResult.value.projectId !== snapshot.projectId ||
+    chapterResult.value.currentVersionId !== snapshot.baseVersionId ||
+    currentTaskSources.length === 0 ||
+    currentTaskSources.some(({ sourceVersionId }) => sourceVersionId !== snapshot.baseVersionId)
+  ) {
+    throw outputTargetChanged();
+  }
 }
 
 function selectCandidateRows(
@@ -438,6 +557,14 @@ function outputConflict(): ContextTraceOutputCommitError {
 
 function corruptOutput(message: string): ContextTraceOutputCommitError {
   return new ContextTraceOutputCommitError("CONTEXT_TRACE_OUTPUT_CORRUPT", message);
+}
+
+function outputTargetChanged(): ContextTraceOutputCommitError {
+  return new ContextTraceOutputCommitError(
+    "CONTEXT_TRACE_OUTPUT_TARGET_CHANGED",
+    "The project, chapter, accepted version, or context source changed before the AI Candidate could be committed.",
+    true,
+  );
 }
 
 function normalizeCommitFailure(cause: unknown): ContextTraceOutputCommitError {

@@ -55,6 +55,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { normalizeUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 import { WritingPreferencesPanel } from "../components/writing-preferences-panel";
+import { NovelSkillPanel } from "../components/novel-skill-panel";
 import { ContextHistoryPanel } from "../components/context-history-panel";
 import { ChapterSummaryPanel } from "../components/chapter-summary-panel";
 import { StorySettingsTools } from "../components/story-settings-tools";
@@ -1582,7 +1583,11 @@ export function StoryGovernancePage() {
                 historicalBackfill={runtime.story.historicalBackfill}
                 readOnly={readonly}
               />
-              <ContextHistoryPanel projectId={projectIdParameter} store={runtime.contextTraces} />
+              <ContextHistoryPanel
+                projectId={projectIdParameter}
+                store={runtime.contextTraces}
+                novelSkills={runtime.novelSkills}
+              />
             </TabsContent>
 
             <TabsContent value="formal">
@@ -2015,11 +2020,18 @@ export function StoryGovernancePage() {
 
             <TabsContent value="preferences">
               {storyProjectId.ok && (
-                <WritingPreferencesPanel
-                  projectId={storyProjectId.value}
-                  service={runtime.story.writingFeedback}
-                  readonly={readonly}
-                />
+                <>
+                  <WritingPreferencesPanel
+                    projectId={storyProjectId.value}
+                    service={runtime.story.writingFeedback}
+                    readonly={readonly}
+                  />
+                  <NovelSkillPanel
+                    projectId={storyProjectId.value}
+                    runtime={runtime.novelSkills}
+                    readonly={readonly}
+                  />
+                </>
               )}
             </TabsContent>
 

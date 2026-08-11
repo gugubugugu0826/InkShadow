@@ -84,7 +84,7 @@ export interface ContextCompilationInput {
   readonly tokenEstimator?: ContextTokenEstimator;
 }
 
-export type ContextDiscardReason = "token_budget_exhausted";
+export type ContextDiscardReason = "token_budget_exhausted" | "duplicate_source";
 
 export interface CompiledContextEntry {
   readonly id: string;
@@ -153,6 +153,12 @@ export class ContextCompilationError extends Error {
 }
 
 const REQUIRED_LAYERS = new Set<ContextLayer>(["locked_hard_rules", "current_task"]);
+const CONTENT_WRAPPER_DEDUPE_SOURCE_TYPES = new Set<ContextEvidenceSourceType>([
+  "memory",
+  "search_document",
+  "rerank_result",
+  "story_rule",
+]);
 const MAXIMUM_CANDIDATES = 4_096;
 const MAXIMUM_CONTENT_CHARACTERS = 200_000;
 const MAXIMUM_TOTAL_CONTENT_CHARACTERS = 2_000_000;
@@ -173,6 +179,13 @@ interface EvaluatedCandidate {
   readonly sourceIndex: number;
   readonly layerOrder: number;
   readonly estimatedTokens: number;
+  readonly duplicateOfId: string | null;
+}
+
+interface DeduplicatedCandidate {
+  readonly candidate: ContextCandidate;
+  readonly sourceIndex: number;
+  readonly duplicateOfId: string | null;
 }
 
 export function estimateContextTokensUtf8Conservative(text: string): number {
@@ -213,21 +226,30 @@ export function compileContext(input: ContextCompilationInput): CompiledContext 
   const estimator = validateTokenEstimator(input.tokenEstimator ?? DEFAULT_TOKEN_ESTIMATOR);
   const ids = new Set<string>();
   let totalCharacters = 0;
-  const evaluated = rawCandidates.map((candidate, sourceIndex): EvaluatedCandidate => {
+  const validatedCandidates = rawCandidates.map((candidate, sourceIndex) => {
     const validated = validateCandidate(candidate, ids);
     totalCharacters += validated.content.length;
     if (totalCharacters > MAXIMUM_TOTAL_CONTENT_CHARACTERS) {
       throw invalidContextInput("Combined context candidate content is too large.");
     }
-    return {
-      candidate: validated,
-      sourceIndex,
-      layerOrder: CONTEXT_LAYER_ORDER.indexOf(validated.layer) + 1,
-      estimatedTokens: estimateCandidateTokens(estimator, validated.content),
-    };
+    return Object.freeze({ candidate: validated, sourceIndex });
   });
+  const evaluated = deduplicateContextCandidates(validatedCandidates).map(
+    ({ candidate, sourceIndex, duplicateOfId }): EvaluatedCandidate => ({
+      candidate,
+      sourceIndex,
+      layerOrder: CONTEXT_LAYER_ORDER.indexOf(candidate.layer) + 1,
+      estimatedTokens: estimateCandidateTokens(estimator, candidate.content),
+      duplicateOfId,
+    }),
+  );
 
-  if (!evaluated.some(({ candidate }) => candidate.layer === "current_task")) {
+  if (
+    !evaluated.some(
+      ({ candidate, duplicateOfId }) =>
+        candidate.layer === "current_task" && duplicateOfId === null,
+    )
+  ) {
     throw new ContextCompilationError(
       "CONTEXT_REQUIRED_LAYER_MISSING",
       "Context compilation requires a current-task entry.",
@@ -235,7 +257,10 @@ export function compileContext(input: ContextCompilationInput): CompiledContext 
   }
 
   const ordered = evaluated.sort(compareEvaluatedCandidates);
-  const required = ordered.filter(({ candidate }) => REQUIRED_LAYERS.has(candidate.layer));
+  const required = ordered.filter(
+    ({ candidate, duplicateOfId }) =>
+      duplicateOfId === null && REQUIRED_LAYERS.has(candidate.layer),
+  );
   const requiredTokens = required.reduce((total, entry) => total + entry.estimatedTokens, 0);
   if (requiredTokens > input.maximumContextTokens) {
     const requiredEntryIds = Object.freeze(required.map(({ candidate }) => candidate.id));
@@ -253,8 +278,9 @@ export function compileContext(input: ContextCompilationInput): CompiledContext 
 
   let remaining = input.maximumContextTokens;
   const entries = ordered.map((entry, evaluationIndex): CompiledContextEntry => {
-    const requiredEntry = REQUIRED_LAYERS.has(entry.candidate.layer);
-    const included = requiredEntry || entry.estimatedTokens <= remaining;
+    const duplicate = entry.duplicateOfId !== null;
+    const requiredEntry = !duplicate && REQUIRED_LAYERS.has(entry.candidate.layer);
+    const included = !duplicate && (requiredEntry || entry.estimatedTokens <= remaining);
     const before = remaining;
     if (included) {
       remaining -= entry.estimatedTokens;
@@ -272,7 +298,7 @@ export function compileContext(input: ContextCompilationInput): CompiledContext 
       relevanceScore: entry.candidate.relevanceScore ?? null,
       required: requiredEntry,
       included,
-      discardedReason: included ? null : "token_budget_exhausted",
+      discardedReason: included ? null : duplicate ? "duplicate_source" : "token_budget_exhausted",
       budgetRemainingBefore: before,
       budgetRemainingAfter: remaining,
     });
@@ -317,6 +343,137 @@ export function compiledContextToPromptSections(
         });
       }),
   );
+}
+
+function deduplicateContextCandidates(
+  input: readonly Readonly<{ candidate: ContextCandidate; sourceIndex: number }>[],
+): readonly DeduplicatedCandidate[] {
+  const preferenceOrder = [...input].sort(compareDeduplicationPreference);
+  const winners: Readonly<{ candidate: ContextCandidate; sourceIndex: number }>[] = [];
+  const duplicateWinnerById = new Map<string, string>();
+
+  for (const entry of preferenceOrder) {
+    const winnerIndex = winners.findIndex(({ candidate }) =>
+      candidatesAreEquivalent(candidate, entry.candidate),
+    );
+    if (winnerIndex < 0) {
+      winners.push(entry);
+      continue;
+    }
+    const winner = winners[winnerIndex];
+    if (winner === undefined) continue;
+    duplicateWinnerById.set(entry.candidate.id, winner.candidate.id);
+    winners[winnerIndex] = Object.freeze({
+      ...winner,
+      candidate: Object.freeze({
+        ...winner.candidate,
+        selectionReason:
+          `${winner.candidate.selectionReason} Equivalent source evidence was merged.`.slice(
+            0,
+            MAXIMUM_REASON_CHARACTERS,
+          ),
+        evidence: mergeEvidence(winner.candidate.evidence, entry.candidate.evidence),
+      }),
+    });
+  }
+
+  const winnerById = new Map(winners.map((entry) => [entry.candidate.id, entry.candidate]));
+  return Object.freeze(
+    input.map(({ candidate, sourceIndex }) =>
+      Object.freeze({
+        candidate: winnerById.get(candidate.id) ?? candidate,
+        sourceIndex,
+        duplicateOfId: duplicateWinnerById.get(candidate.id) ?? null,
+      }),
+    ),
+  );
+}
+
+function compareDeduplicationPreference(
+  left: Readonly<{ candidate: ContextCandidate; sourceIndex: number }>,
+  right: Readonly<{ candidate: ContextCandidate; sourceIndex: number }>,
+): number {
+  const leftRequired = REQUIRED_LAYERS.has(left.candidate.layer) ? 1 : 0;
+  const rightRequired = REQUIRED_LAYERS.has(right.candidate.layer) ? 1 : 0;
+  if (leftRequired !== rightRequired) return rightRequired - leftRequired;
+  const layerDelta =
+    CONTEXT_LAYER_ORDER.indexOf(left.candidate.layer) -
+    CONTEXT_LAYER_ORDER.indexOf(right.candidate.layer);
+  if (layerDelta !== 0) return layerDelta;
+  const priorityDelta = (right.candidate.priority ?? 0) - (left.candidate.priority ?? 0);
+  if (priorityDelta !== 0) return priorityDelta;
+  const relevanceDelta =
+    (right.candidate.relevanceScore ?? -1) - (left.candidate.relevanceScore ?? -1);
+  if (relevanceDelta !== 0) return relevanceDelta;
+  return left.sourceIndex - right.sourceIndex;
+}
+
+function candidatesAreEquivalent(left: ContextCandidate, right: ContextCandidate): boolean {
+  // A current task is structural, author-requested input. It must never
+  // disappear merely because another wrapper happens to repeat its wording.
+  if (left.layer === "current_task" || right.layer === "current_task") return false;
+  if (sameCanonicalSourceWithDifferentRevision(left, right)) return false;
+  const leftSourceKeys = new Set(canonicalSourceKeys(left));
+  if (canonicalSourceKeys(right).some((key) => leftSourceKeys.has(key))) return true;
+  return (
+    isContentWrapperCandidate(left) &&
+    isContentWrapperCandidate(right) &&
+    canonicalContextContent(left.content) === canonicalContextContent(right.content)
+  );
+}
+
+function isContentWrapperCandidate(candidate: ContextCandidate): boolean {
+  return candidate.evidence.every(({ sourceType }) =>
+    CONTENT_WRAPPER_DEDUPE_SOURCE_TYPES.has(sourceType),
+  );
+}
+
+function canonicalSourceKeys(candidate: ContextCandidate): readonly string[] {
+  const fallback = canonicalContextContent(candidate.content);
+  return candidate.evidence.map(
+    ({ sourceType, sourceId, sourceVersionId, contentHash }) =>
+      `${sourceType}|${sourceId.trim().toLowerCase()}|${sourceVersionId?.trim().toLowerCase() ?? "-"}|${contentHash?.trim().toLowerCase() ?? `content:${fallback}`}`,
+  );
+}
+
+function sameCanonicalSourceWithDifferentRevision(
+  left: ContextCandidate,
+  right: ContextCandidate,
+): boolean {
+  return left.evidence.some((leftReference) =>
+    right.evidence.some(
+      (rightReference) =>
+        leftReference.sourceType === rightReference.sourceType &&
+        leftReference.sourceId.trim().toLowerCase() ===
+          rightReference.sourceId.trim().toLowerCase() &&
+        (leftReference.sourceVersionId?.trim().toLowerCase() ?? null) !==
+          (rightReference.sourceVersionId?.trim().toLowerCase() ?? null),
+    ),
+  );
+}
+
+function canonicalContextContent(content: string): string {
+  return content
+    .normalize("NFKC")
+    .replace(/\r\n?/gu, "\n")
+    .trim()
+    .replace(/^(?:\[[^\]\r\n]{1,200}\]|【[^】\r\n]{1,200}】)\s*\n+/u, "")
+    .replace(/\s+/gu, " ");
+}
+
+function mergeEvidence(
+  left: readonly ContextEvidenceReference[],
+  right: readonly ContextEvidenceReference[],
+): readonly ContextEvidenceReference[] {
+  const merged: ContextEvidenceReference[] = [];
+  const seen = new Set<string>();
+  for (const reference of [...left, ...right]) {
+    const key = JSON.stringify(reference);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (merged.length < MAXIMUM_EVIDENCE_REFERENCES) merged.push(reference);
+  }
+  return Object.freeze(merged);
 }
 
 function validateCandidate(candidate: unknown, ids: Set<string>): ContextCandidate {

@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
+  NOVEL_SKILL_EVALUATION_FIXTURE_REGISTRY,
+  NOVEL_SKILL_EVALUATION_FIXTURE_SET_HASH,
   deriveIdeaProjectSeed,
   parseIsoUtcTimestamp,
   parseUuidV7,
@@ -20,7 +22,7 @@ import {
 import { DatabaseMaintenanceService } from "../src/maintenance.js";
 import { createSqliteRepositories } from "../src/sqlite-repositories.js";
 import { TeamTemplateApplicationSqliteStore } from "../src/team-template-application-sqlite-store.js";
-import type { SqlPrimitive } from "../src/executor.js";
+import type { SqlPrimitive, TransactionExecutor } from "../src/executor.js";
 import { fileSqliteIt, NodeSqliteExecutor } from "./node-sqlite-executor.js";
 
 const backupPath = path.join(tmpdir(), `inkshadow-maintenance-${process.pid}.db`);
@@ -197,6 +199,23 @@ const inkShadowMigration = [
     new URL("../migrations/0059_generation_preflight_cost_status.sql", import.meta.url),
     "utf8",
   ),
+  readFileSync(new URL("../migrations/0060_novel_skill_registry.sql", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../migrations/0061_novel_skill_evaluation_ledger.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0062_project_dispatch_active_guard.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0063_novel_skill_evaluation_paid_runner.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0064_novel_skill_evaluation_predispatch_authority.sql", import.meta.url),
+    "utf8",
+  ),
 ].join("\n");
 const BACKUP_PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const BACKUP_ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
@@ -362,6 +381,7 @@ describe("DatabaseMaintenanceService", () => {
     await insertProjectKeyMetadata(executor);
     await insertModelProfile(executor);
     await insertModelHubExpertConnection(executor);
+    await insertNovelSkillBackupScenario(executor);
     await insertSearchSnapshot(executor, "备份中的派生索引");
     await insertVectorProjection(executor);
     await insertGraphProjectionState(executor);
@@ -533,6 +553,16 @@ describe("DatabaseMaintenanceService", () => {
     await executor.execute(
       "DELETE FROM writing_feedback_events WHERE id = 'maintenance-feedback-event'",
     );
+    await executor.execute("DELETE FROM novel_skill_invocation_items WHERE snapshot_id = ?", [
+      "019f9f4a-b3c7-7350-9226-000000000753",
+    ]);
+    await executor.execute("DELETE FROM novel_skill_invocation_snapshots WHERE id = ?", [
+      "019f9f4a-b3c7-7350-9226-000000000753",
+    ]);
+    await executor.execute("DELETE FROM project_novel_skill_bindings");
+    await executor.execute(
+      "DELETE FROM novel_skill_definitions WHERE skill_id = 'core.maintenance'",
+    );
 
     const restored = await service.restoreConsistentBackup(backupPath);
 
@@ -541,9 +571,64 @@ describe("DatabaseMaintenanceService", () => {
       value: {
         sourceKind: "user_selected_file",
         integrityVerified: true,
-        restoredTableCount: 142,
+        restoredTableCount: 166,
       },
     });
+    await expect(
+      executor.select<{
+        readonly definitionCount: number;
+        readonly bindingCount: number;
+        readonly snapshotCount: number;
+        readonly itemCount: number;
+      }>(
+        `SELECT
+           (SELECT count(*) FROM novel_skill_definitions) AS definitionCount,
+           (SELECT count(*) FROM project_novel_skill_bindings) AS bindingCount,
+           (SELECT count(*) FROM novel_skill_invocation_snapshots) AS snapshotCount,
+           (SELECT count(*) FROM novel_skill_invocation_items) AS itemCount`,
+      ),
+    ).resolves.toEqual([{ definitionCount: 3, bindingCount: 1, snapshotCount: 2, itemCount: 2 }]);
+    await expect(
+      executor.select<{
+        readonly suites: number;
+        readonly fixtures: number;
+        readonly runs: number;
+        readonly attempts: number;
+        readonly succeededAttempts: number;
+        readonly observations: number;
+        readonly scores: number;
+        readonly decisions: number;
+        readonly evaluationCandidates: number;
+      }>(
+        `SELECT
+           (SELECT count(*) FROM novel_skill_evaluation_suites) AS suites,
+           (SELECT count(*) FROM novel_skill_evaluation_fixtures) AS fixtures,
+           (SELECT count(*) FROM novel_skill_evaluation_runs) AS runs,
+           (SELECT count(*) FROM novel_skill_evaluation_attempts) AS attempts,
+           (SELECT count(*) FROM novel_skill_evaluation_attempts
+             WHERE status = 'succeeded') AS succeededAttempts,
+           (SELECT count(*) FROM novel_skill_evaluation_observations) AS observations,
+           (SELECT count(*) FROM novel_skill_evaluation_scores) AS scores,
+           (SELECT count(*) FROM novel_skill_evaluation_manual_decisions) AS decisions,
+           (SELECT count(*) FROM ai_candidates
+             WHERE project_id = '019f9f4a-b3c7-7350-9226-000000000760') AS evaluationCandidates`,
+      ),
+    ).resolves.toEqual([
+      {
+        suites: 1,
+        fixtures: 12,
+        runs: 1,
+        attempts: 1,
+        succeededAttempts: 1,
+        observations: 1,
+        scores: 13,
+        decisions: 1,
+        evaluationCandidates: 1,
+      },
+    ]);
+    await expect(
+      executor.execute("DELETE FROM novel_skill_evaluation_manual_decisions"),
+    ).rejects.toThrow(/cannot be deleted/iu);
     await expect(
       executor.select<{ count: number }>(
         "SELECT COUNT(*) AS count FROM project_remote_dispatch_leases",
@@ -685,6 +770,7 @@ describe("DatabaseMaintenanceService", () => {
     ).resolves.toEqual([{ code: "less_environment_description" }]);
     await expect(executor.select<{ name: string }>("SELECT name FROM projects")).resolves.toEqual([
       { name: "备份中的项目" },
+      { name: "Internal Novel Skill evaluation fixture" },
     ]);
     await expect(
       executor.select<{ snapshotJson: string; revision: number; turnCount: number }>(
@@ -1160,6 +1246,718 @@ describe("DatabaseMaintenanceService", () => {
     ]);
     await executor.close();
   });
+
+  fileSqliteIt(
+    "rolls back restore-time guard removal when replayed evaluation evidence is invalid",
+    async () => {
+      const executor = new NodeSqliteExecutor(inkShadowMigration);
+      const service = new DatabaseMaintenanceService(executor);
+      const ids = await insertMinimalEvaluationLedger(executor);
+      expect(await service.createConsistentBackup(backupPath)).toMatchObject({ ok: true });
+
+      const backupInspection = new NodeSqliteExecutor("", backupPath);
+      await backupInspection.execute("DROP TRIGGER novel_skill_evaluation_run_revision_guard");
+      await backupInspection.execute(
+        `UPDATE novel_skill_evaluation_runs
+         SET model_assignments_json = ? WHERE id = ?`,
+        [
+          JSON.stringify([
+            {
+              slotId: "text_tier_a",
+              modelIdentityHash: "8".repeat(64),
+              modelArtifactHash: "a".repeat(64),
+            },
+            {
+              slotId: "text_tier_b",
+              modelIdentityHash: "9".repeat(64),
+              modelArtifactHash: "a".repeat(64),
+            },
+          ]),
+          ids.runId,
+        ],
+      );
+      await backupInspection.close();
+
+      expect(await service.restoreConsistentBackup(backupPath)).toMatchObject({
+        ok: false,
+        error: { details: { operation: "DATABASE_RESTORE_BACKUP_INCOMPATIBLE" } },
+      });
+      await expect(
+        executor.select<{ readonly count: number }>(
+          `SELECT count(*) AS count FROM sqlite_schema WHERE type = 'trigger' AND name IN (
+           'novel_skill_evaluation_manual_decision_delete_guard',
+           'novel_skill_evaluation_score_delete_guard',
+           'novel_skill_evaluation_observation_delete_guard',
+           'novel_skill_evaluation_attempt_delete_guard',
+           'novel_skill_evaluation_cell_delete_guard',
+           'novel_skill_evaluation_run_delete_guard',
+           'novel_skill_evaluation_fixture_delete_guard',
+           'novel_skill_evaluation_manifest_item_delete_guard',
+           'novel_skill_evaluation_suite_delete_guard',
+           'novel_skill_evaluation_run_insert_guard',
+           'novel_skill_evaluation_cell_plan_guard',
+           'novel_skill_evaluation_attempt_insert_guard',
+           'novel_skill_evaluation_observation_trace_guard',
+           'novel_skill_evaluation_manual_decision_gate',
+           'novel_skill_evaluation_suite_content_free_guard',
+           'novel_skill_evaluation_no_skill_late_snapshot_guard',
+           'novel_skill_evaluation_observed_item_insert_guard',
+           'novel_skill_evaluation_observed_item_delete_guard',
+           'novel_skill_evaluation_candidate_update_guard',
+           'novel_skill_evaluation_candidate_delete_guard',
+           'novel_skill_evaluation_trace_update_guard',
+           'novel_skill_evaluation_entry_insert_guard',
+           'novel_skill_evaluation_entry_delete_guard',
+           'novel_skill_evaluation_source_insert_guard',
+           'novel_skill_evaluation_source_update_guard',
+           'novel_skill_evaluation_source_delete_guard',
+           'novel_skill_evaluation_execution_link_delete_guard',
+           'novel_skill_evaluation_model_link_delete_guard',
+           'novel_skill_evaluation_invocation_update_guard',
+           'novel_skill_evaluation_chapter_insert_guard',
+           'novel_skill_evaluation_chapter_project_update_guard',
+           'novel_skill_evaluation_story_fact_insert_guard',
+           'novel_skill_evaluation_story_fact_project_update_guard',
+           'novel_skill_evaluation_project_seed_insert_guard',
+           'novel_skill_evaluation_project_seed_project_update_guard',
+           'novel_skill_evaluation_planning_candidate_insert_guard',
+           'novel_skill_evaluation_planning_candidate_project_update_guard',
+           'novel_skill_evaluation_writing_preference_insert_guard',
+           'novel_skill_evaluation_writing_preference_project_update_guard',
+           'novel_skill_evaluation_settings_receipt_insert_guard',
+           'novel_skill_evaluation_settings_receipt_project_update_guard',
+           'novel_skill_evaluation_skill_binding_insert_guard',
+           'novel_skill_evaluation_skill_binding_project_update_guard'
+         )`,
+        ),
+      ).resolves.toEqual([{ count: 43 }]);
+      await expect(
+        executor.execute("DELETE FROM novel_skill_evaluation_suites WHERE id = ?", [ids.suiteId]),
+      ).rejects.toThrow(/cannot be deleted/iu);
+      await executor.close();
+    },
+  );
+
+  fileSqliteIt(
+    "rejects a foreign-key-valid backup whose evaluation fixture source was rewritten",
+    async () => {
+      const executor = new NodeSqliteExecutor(inkShadowMigration);
+      const service = new DatabaseMaintenanceService(executor);
+      const now = "2026-07-27T00:00:00.000Z";
+      await executor.execute(
+        `INSERT INTO projects (
+           id, name, status, revision, deletion_generation, created_at, updated_at,
+           archived_at, trashed_at, retention_until, status_before_trash
+         ) VALUES (?, 'Restore semantic audit host', 'active', 1, 0,
+                   ?, ?, NULL, NULL, NULL, NULL)`,
+        [BACKUP_PROJECT_ID, now, now],
+      );
+      await insertModelHubExpertConnection(executor);
+      await insertNovelSkillBackupScenario(executor);
+      expect(await service.createConsistentBackup(backupPath)).toMatchObject({ ok: true });
+
+      const backupInspection = new NodeSqliteExecutor("", backupPath);
+      await backupInspection.execute("DROP TRIGGER context_compilation_source_immutable");
+      await backupInspection.execute("DROP TRIGGER novel_skill_evaluation_source_update_guard");
+      await backupInspection.execute(
+        `UPDATE context_compilation_entry_sources SET content_hash = ?
+         WHERE locator = 'novel_skill_evaluation_fixture'`,
+        ["f".repeat(64)],
+      );
+      await backupInspection.close();
+
+      expect(await service.restoreConsistentBackup(backupPath)).toMatchObject({
+        ok: false,
+        error: { details: { operation: "DATABASE_RESTORE_BACKUP_INCOMPATIBLE" } },
+      });
+      await expect(
+        executor.select<{ readonly content_hash: string }>(
+          `SELECT content_hash FROM context_compilation_entry_sources
+           WHERE locator = 'novel_skill_evaluation_fixture'`,
+        ),
+      ).resolves.toEqual([
+        { content_hash: NOVEL_SKILL_EVALUATION_FIXTURE_REGISTRY[0].inputContentHash },
+      ]);
+      await executor.close();
+    },
+  );
+
+  for (const [name, tamper] of [
+    [
+      "rejects restored evaluation evidence truncated by max_output_tokens",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_invocation_update_guard");
+        await backup.execute(
+          `UPDATE model_invocation_facts SET finish_reason = 'max_output_tokens'
+           WHERE id = '019f9f4a-b3c7-7350-9226-000000000767'`,
+        );
+      },
+    ],
+    [
+      "rejects a substituted fixture registry even when suite hashes are rewritten",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_fixture_immutable");
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_suite_immutable");
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_fixtures SET task_type = 'translation'
+           WHERE fixture_id = 'zh.mystery.third_limited.pov'`,
+        );
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_suites SET fixture_set_hash = ?, plan_hash = ?`,
+          ["1".repeat(64), "2".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a restored evaluation Candidate whose frozen status changed",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_candidate_update_guard");
+        await backup.execute(
+          `UPDATE ai_candidates SET status = 'rejected', decided_at = created_at
+           WHERE id = '019f9f4a-b3c7-7350-9226-000000000766'`,
+        );
+      },
+    ],
+    [
+      "rejects a restored evaluation trace whose output link was deleted",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER context_compilation_output_candidate_immutable");
+        await backup.execute("PRAGMA foreign_keys = OFF");
+        await backup.execute(
+          `DELETE FROM context_compilation_output_candidate_links
+           WHERE trace_id = '019f9f4a-b3c7-7350-9226-000000000768'`,
+        );
+        await backup.execute("PRAGMA foreign_keys = ON");
+      },
+    ],
+    [
+      "rejects a restored evaluation Skill snapshot whose selection hash changed",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_invocation_immutable");
+        await backup.execute(
+          `UPDATE novel_skill_invocation_snapshots SET selection_hash = ?
+           WHERE id = '019f9f4a-b3c7-7350-9226-00000000076a'`,
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a restored observation whose Candidate result hash changed",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_observation_immutable");
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_observations SET result_hash = ?
+           WHERE id = '019f9f4a-b3c7-7350-9226-00000000076b'`,
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a restored invalidated run forged back to planned",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_run_revision_guard");
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_runs
+           SET status = 'planned', evaluation_status = 'NOT_EVALUATED',
+               evaluation_result_hash = NULL, started_at = NULL, completed_at = NULL
+           WHERE id = '019f9f4a-b3c7-7350-9226-000000000762'`,
+        );
+      },
+    ],
+    [
+      "rejects a foreign-key-valid attempt moved to another evaluation cell",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_attempt_revision_guard");
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_attempts
+           SET cell_id = (
+             SELECT id FROM novel_skill_evaluation_cells
+             WHERE run_id = '019f9f4a-b3c7-7350-9226-000000000762'
+               AND id <> '019f9f4a-b3c7-7350-9226-000000000764'
+             ORDER BY id LIMIT 1
+           )
+           WHERE id = '019f9f4a-b3c7-7350-9226-000000000765'`,
+        );
+      },
+    ],
+    [
+      "rejects an evaluation project polluted by a Novel Skill binding",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_skill_binding_insert_guard");
+        await backup.execute("DROP TRIGGER project_novel_skill_binding_active_project_guard");
+        await backup.execute(
+          `INSERT INTO project_novel_skill_bindings (
+             project_id, skill_id, pinned_version, enabled, activation_mode,
+             task_overrides_json, revision, created_at, updated_at
+           ) VALUES ('019f9f4a-b3c7-7350-9226-000000000760',
+                     'core.evaluation_fixture', '1.0.0', 1, 'manual', '{}', 1, ?, ?)`,
+          ["2026-07-27T00:00:00.000Z", "2026-07-27T00:00:00.000Z"],
+        );
+      },
+    ],
+    [
+      "rejects an incomplete paid evaluation protocol even when remaining hashes are well formed",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_context_baseline_delete_guard");
+        await backup.execute(
+          `DELETE FROM novel_skill_evaluation_context_baselines
+           WHERE suite_id = '019f9f4a-b3c7-7350-9226-000000000761'
+             AND fixture_id = (
+               SELECT fixture_id FROM novel_skill_evaluation_context_baselines
+               WHERE suite_id = '019f9f4a-b3c7-7350-9226-000000000761'
+               ORDER BY fixture_id LIMIT 1
+             )`,
+        );
+      },
+    ],
+  ] as const) {
+    fileSqliteIt(name, async () => {
+      await expectNovelSkillBackupTamperRejected(tamper);
+    });
+  }
+
+  for (const state of ["authorized", "running", "settled"] as const) {
+    const description =
+      state === "settled"
+        ? "round-trips a fully reconstructible no-skill paid settled chain"
+        : `round-trips a canonical paid ${state} authority chain`;
+    fileSqliteIt(description, async () => {
+      const executor = new NodeSqliteExecutor(inkShadowMigration);
+      const service = new DatabaseMaintenanceService(executor);
+      const ids = await insertPaidRestoreScenario(executor, state);
+      expect(await service.createConsistentBackup(backupPath)).toMatchObject({ ok: true });
+
+      expect(await service.restoreConsistentBackup(backupPath)).toMatchObject({ ok: true });
+      await expect(
+        executor.select<{ readonly status: string }>(
+          "SELECT status FROM novel_skill_evaluation_runs WHERE id = ?",
+          [ids.runId],
+        ),
+      ).resolves.toEqual([{ status: state === "authorized" ? "planned" : "running" }]);
+      await expect(
+        executor.select<{ readonly state: string }>(
+          `SELECT state FROM novel_skill_evaluation_dispatch_reservations WHERE run_id = ?`,
+          [ids.runId],
+        ),
+      ).resolves.toEqual(state === "settled" ? [{ state: "settled" }] : []);
+      await expect(
+        executor.select<{ readonly reservation_id: string }>(
+          `SELECT authority.reservation_id
+           FROM novel_skill_evaluation_predispatch_authority_snapshots AS authority
+           INNER JOIN novel_skill_evaluation_dispatch_reservations AS reservation
+             ON reservation.id = authority.reservation_id
+           WHERE reservation.run_id = ?`,
+          [ids.runId],
+        ),
+      ).resolves.toEqual(state === "settled" ? [{ reservation_id: ids.reservationId }] : []);
+      await executor.close();
+    });
+  }
+
+  for (const [name, tamper] of [
+    [
+      "rejects a paid protocol hash tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_protocol_immutable");
+        await backup.execute("UPDATE novel_skill_evaluation_protocols SET protocol_hash = ?", [
+          "0".repeat(64),
+        ]);
+      },
+    ],
+    [
+      "rejects a paid request-profile manifest tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_protocol_immutable");
+        await backup.execute(
+          "UPDATE novel_skill_evaluation_protocols SET request_profile_manifest_hash = ?",
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid context-baseline manifest tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_protocol_immutable");
+        await backup.execute(
+          "UPDATE novel_skill_evaluation_protocols SET context_baseline_manifest_hash = ?",
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid request profile hash tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_request_profile_immutable");
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_request_profiles SET request_profile_hash = ?
+           WHERE task_type = 'continuation'`,
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid context baseline hash tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_context_baseline_immutable");
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_context_baselines SET compiled_baseline_hash = ?
+           WHERE fixture_id = ?`,
+          ["0".repeat(64), NOVEL_SKILL_EVALUATION_FIXTURE_REGISTRY[0].fixtureId],
+        );
+      },
+    ],
+    [
+      "rejects a paid exact target hash tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_target_immutable");
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_run_model_targets SET target_hash = ?
+           WHERE model_slot_id = 'text_tier_a'`,
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid pricing snapshot hash tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_target_immutable");
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_run_model_targets SET pricing_snapshot_hash = ?
+           WHERE model_slot_id = 'text_tier_a'`,
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid quote hash tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_authorization_immutable");
+        await backup.execute(
+          "UPDATE novel_skill_evaluation_dispatch_authorizations SET quote_hash = ?",
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid target manifest tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_authorization_immutable");
+        await backup.execute(
+          "UPDATE novel_skill_evaluation_dispatch_authorizations SET target_manifest_hash = ?",
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid pricing manifest tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_authorization_immutable");
+        await backup.execute(
+          "UPDATE novel_skill_evaluation_dispatch_authorizations SET pricing_manifest_hash = ?",
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid commercial confirmation tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_authorization_immutable");
+        await backup.execute(
+          "UPDATE novel_skill_evaluation_dispatch_authorizations SET confirmation_hash = ?",
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid per-currency limit tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_authorization_limit_immutable");
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_authorization_limits
+           SET estimated_max_cost_micros = '1919'`,
+        );
+      },
+    ],
+    [
+      "rejects a paid invariant request hash tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_reservation_revision_guard");
+        await backup.execute(
+          "UPDATE novel_skill_evaluation_dispatch_reservations SET invariant_request_hash = ?",
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid payload authority hash tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_reservation_revision_guard");
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_dispatch_reservations
+           SET payload_authority_manifest_hash = ?`,
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a missing paid predispatch authority snapshot and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute(
+          "DROP TRIGGER novel_skill_evaluation_predispatch_authority_immutable_delete",
+        );
+        await backup.execute("DELETE FROM novel_skill_evaluation_predispatch_authority_snapshots");
+      },
+    ],
+    [
+      "rejects a paid payload-authority sub-hash tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute(
+          "DROP TRIGGER novel_skill_evaluation_predispatch_authority_immutable_update",
+        );
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_predispatch_authority_snapshots
+           SET genre_tags_hash = ?`,
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid exact predispatch cost tamper even with a matching execution lock",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute(
+          "DROP TRIGGER novel_skill_evaluation_predispatch_authority_immutable_update",
+        );
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_reservation_revision_guard");
+        const rows = await backup.select<{
+          readonly target_identity_hash: string;
+          readonly request_profile_hash: string;
+          readonly request_payload_hash: string;
+          readonly currency: string;
+        }>(
+          `SELECT target_identity_hash, request_profile_hash, request_payload_hash, currency
+           FROM novel_skill_evaluation_predispatch_authority_snapshots LIMIT 1`,
+        );
+        const row = rows[0];
+        if (row === undefined) throw new Error("Paid authority fixture is missing.");
+        const forgedExecutionLock = await sha256Text(
+          canonicalJson({
+            version: "model-hub-exact-evaluation-execution-lock@1",
+            targetIdentityHash: row.target_identity_hash,
+            requestProfileHash: row.request_profile_hash,
+            payloadHash: row.request_payload_hash,
+            currency: row.currency,
+            estimatedMaximumCostMicros: "7",
+          }),
+        );
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_predispatch_authority_snapshots
+           SET exact_predispatch_estimated_max_cost_micros = '7', execution_lock_hash = ?`,
+          [forgedExecutionLock],
+        );
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_dispatch_reservations
+           SET execution_lock_hash = ?`,
+          [forgedExecutionLock],
+        );
+      },
+    ],
+    [
+      "rejects a paid capability-evidence authority tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute(
+          "DROP TRIGGER novel_skill_evaluation_predispatch_authority_immutable_update",
+        );
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_predispatch_authority_snapshots
+           SET capability_evidence_hash = ?`,
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid provider-receipt shape tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute(
+          "DROP TRIGGER novel_skill_evaluation_predispatch_authority_immutable_update",
+        );
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_predispatch_authority_snapshots
+           SET provider_receipt_shape_hash = ?`,
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid final-dispatch authority tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute(
+          "DROP TRIGGER novel_skill_evaluation_predispatch_authority_immutable_update",
+        );
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_predispatch_authority_snapshots
+           SET final_dispatch_authority_hash = ?`,
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid aggregate authority snapshot tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute(
+          "DROP TRIGGER novel_skill_evaluation_predispatch_authority_immutable_update",
+        );
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_predispatch_authority_snapshots
+           SET authority_snapshot_hash = ?`,
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "fails closed when a restored Skill arm lacks reconstructible compiled payload sub-hashes",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_attempt_revision_guard");
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_reservation_revision_guard");
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_attempts
+           SET cell_id = (
+             SELECT core.id
+             FROM novel_skill_evaluation_dispatch_reservations AS reservation
+             INNER JOIN novel_skill_evaluation_cells AS original
+               ON original.id = reservation.cell_id
+             INNER JOIN novel_skill_evaluation_cells AS core
+               ON core.run_id = original.run_id AND core.fixture_id = original.fixture_id
+              AND core.model_slot_id = original.model_slot_id
+              AND core.repetition = original.repetition AND core.arm = 'core'
+             LIMIT 1
+           )`,
+        );
+        await backup.execute(
+          `UPDATE novel_skill_evaluation_dispatch_reservations
+           SET cell_id = (SELECT cell_id FROM novel_skill_evaluation_attempts LIMIT 1),
+               skill_configuration_hash = (
+                 SELECT core_manifest_hash FROM novel_skill_evaluation_suites LIMIT 1
+               )`,
+        );
+      },
+    ],
+    [
+      "fails closed when an execution lock used an unpersisted lower predispatch estimate",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_reservation_revision_guard");
+        const rows = await backup.select<{
+          readonly target_hash: string;
+          readonly request_profile_hash: string;
+          readonly request_payload_hash: string;
+          readonly currency: string;
+        }>(
+          `SELECT target_hash, request_profile_hash, request_payload_hash, currency
+           FROM novel_skill_evaluation_dispatch_reservations LIMIT 1`,
+        );
+        const row = rows[0];
+        if (row === undefined) throw new Error("Paid execution-lock fixture is missing.");
+        const lowerEstimateLock = await sha256Text(
+          canonicalJson({
+            version: "model-hub-exact-evaluation-execution-lock@1",
+            targetIdentityHash: row.target_hash,
+            requestProfileHash: row.request_profile_hash,
+            payloadHash: row.request_payload_hash,
+            currency: row.currency,
+            estimatedMaximumCostMicros: "7",
+          }),
+        );
+        await backup.execute(
+          "UPDATE novel_skill_evaluation_dispatch_reservations SET execution_lock_hash = ?",
+          [lowerEstimateLock],
+        );
+      },
+    ],
+    [
+      "rejects a paid execution lock hash tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_reservation_revision_guard");
+        await backup.execute(
+          "UPDATE novel_skill_evaluation_dispatch_reservations SET execution_lock_hash = ?",
+          ["0".repeat(64)],
+        );
+      },
+    ],
+    [
+      "rejects a paid provider receipt hash tamper and rolls the restore back",
+      async (backup: NodeSqliteExecutor) => {
+        await backup.execute("DROP TRIGGER novel_skill_evaluation_reservation_revision_guard");
+        await backup.execute(
+          "UPDATE novel_skill_evaluation_dispatch_reservations SET provider_receipt_hash = ?",
+          ["0".repeat(64)],
+        );
+      },
+    ],
+  ] as const) {
+    fileSqliteIt(name, async () => {
+      const executor = new NodeSqliteExecutor(inkShadowMigration);
+      const service = new DatabaseMaintenanceService(executor);
+      const ids = await insertPaidRestoreScenario(executor, "settled");
+      const originalAuthorities = await executor.select<{
+        readonly reservation_id: string;
+        readonly authority_snapshot_hash: string;
+      }>(
+        `SELECT reservation_id, authority_snapshot_hash
+         FROM novel_skill_evaluation_predispatch_authority_snapshots
+         WHERE reservation_id = ?`,
+        [ids.reservationId],
+      );
+      expect(await service.createConsistentBackup(backupPath)).toMatchObject({ ok: true });
+      const backup = new NodeSqliteExecutor("", backupPath);
+      try {
+        await tamper(backup);
+      } finally {
+        await backup.close();
+      }
+
+      expect(await service.restoreConsistentBackup(backupPath)).toMatchObject({
+        ok: false,
+        error: { details: { operation: "DATABASE_RESTORE_BACKUP_INCOMPATIBLE" } },
+      });
+      await expect(
+        executor.select<{ readonly state: string }>(
+          "SELECT state FROM novel_skill_evaluation_dispatch_reservations WHERE id = ?",
+          [ids.reservationId],
+        ),
+      ).resolves.toEqual([{ state: "settled" }]);
+      await expect(
+        executor.select<{
+          readonly reservation_id: string;
+          readonly authority_snapshot_hash: string;
+        }>(
+          `SELECT reservation_id, authority_snapshot_hash
+           FROM novel_skill_evaluation_predispatch_authority_snapshots
+           WHERE reservation_id = ?`,
+          [ids.reservationId],
+        ),
+      ).resolves.toEqual(originalAuthorities);
+      await expect(
+        executor.select<{ readonly count: number }>(
+          `SELECT count(*) AS count FROM sqlite_schema
+           WHERE type = 'trigger' AND name = 'novel_skill_evaluation_reservation_revision_guard'`,
+        ),
+      ).resolves.toEqual([{ count: 1 }]);
+      await expect(
+        executor.select<{ readonly count: number }>(
+          `SELECT count(*) AS count FROM sqlite_schema
+           WHERE type = 'trigger'
+             AND name IN (
+               'novel_skill_evaluation_predispatch_authority_insert_guard',
+               'novel_skill_evaluation_predispatch_authority_immutable_update',
+               'novel_skill_evaluation_predispatch_authority_immutable_delete',
+               'novel_skill_evaluation_reservation_authority_bind_guard',
+               'novel_skill_evaluation_reservation_authority_dispatch_guard',
+               'novel_skill_evaluation_reservation_authority_settlement_guard'
+             )`,
+        ),
+      ).resolves.toEqual([{ count: 6 }]);
+      await executor.close();
+    });
+  }
 
   it("reports positive cloud acknowledgement evidence without claiming that zero proves absence", async () => {
     const executor = new NodeSqliteExecutor(inkShadowMigration);
@@ -2043,7 +2841,7 @@ async function insertCausalEventGraph(executor: NodeSqliteExecutor): Promise<voi
        ) VALUES (
          'maintenance-causal-relation', ?, 'main', 'maintenance-causal-event-a',
          'maintenance-causal-event-b', 'causes', ?, ?
-       )`,
+      )`,
       [BACKUP_PROJECT_ID, evidenceId, now],
     );
   });
@@ -2391,6 +3189,47 @@ async function sha256Text(value: string): Promise<string> {
   return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right, "en"))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function evaluationManifestHashes(): Promise<{
+  readonly core: string;
+  readonly coreGenre: string;
+  readonly coreGenrePreferences: string;
+}> {
+  const core = [
+    {
+      skillId: "core.evaluation_fixture",
+      version: "1.0.0",
+      definitionHash: "e".repeat(64),
+      kind: "core",
+    },
+  ];
+  const coreGenre = [
+    ...core,
+    {
+      skillId: "genre.evaluation_fixture",
+      version: "1.0.0",
+      definitionHash: "f".repeat(64),
+      kind: "genre",
+    },
+  ];
+  return {
+    core: await sha256Text(canonicalJson(core)),
+    coreGenre: await sha256Text(canonicalJson(coreGenre)),
+    coreGenrePreferences: await sha256Text(canonicalJson(coreGenre)),
+  };
+}
+
 async function insertSyncAndAccessMetadata(executor: NodeSqliteExecutor): Promise<void> {
   const now = "2026-07-27T00:00:00.000Z";
   await executor.execute(
@@ -2541,6 +3380,1844 @@ async function insertModelHubExpertConnection(executor: NodeSqliteExecutor): Pro
      )`,
     [now, now, now],
   );
+}
+
+async function insertEvaluationManifestFixtures(
+  executor: TransactionExecutor,
+  suiteId: string,
+  now: string,
+): Promise<void> {
+  const definitions = [
+    {
+      skillId: "core.evaluation_fixture",
+      kind: "core",
+      definitionHash: "e".repeat(64),
+      precedence: 200,
+      activation: '{"allowedModes":["draft"],"genreTags":[]}',
+    },
+    {
+      skillId: "genre.evaluation_fixture",
+      kind: "genre",
+      definitionHash: "f".repeat(64),
+      precedence: 300,
+      activation: '{"allowedModes":["draft"],"genreTags":["campus_romance"]}',
+    },
+  ] as const;
+  for (const definition of definitions) {
+    await executor.execute(
+      `INSERT OR IGNORE INTO novel_skill_definitions (
+         skill_id, version, display_name, summary, kind, owner_scope, status, default_enabled,
+         precedence, task_types_json, activation_json, context_requirements_json,
+         instructions_json, output_contract_json, validation_json, definition_hash,
+         provenance_url, provenance_commit, provenance_license, created_at
+       ) VALUES (?, '1.0.0', ?, 'restore evaluation manifest fixture', ?, 'builtin',
+                 'experimental', 0, ?, '["continuation"]', ?, '{}', '{}', '{}', '{}',
+                 ?, NULL, NULL, NULL, ?)`,
+      [
+        definition.skillId,
+        definition.skillId,
+        definition.kind,
+        definition.precedence,
+        definition.activation,
+        definition.definitionHash,
+        now,
+      ],
+    );
+  }
+  for (const [arm, items] of [
+    ["core", [definitions[0]]],
+    ["core_genre", definitions],
+    ["core_genre_preferences", definitions],
+  ] as const) {
+    for (const [index, definition] of items.entries()) {
+      await executor.execute(
+        `INSERT INTO novel_skill_evaluation_manifest_items (
+           suite_id, arm, item_order, skill_id, skill_version, definition_hash, kind
+         ) VALUES (?, ?, ?, ?, '1.0.0', ?, ?)`,
+        [suiteId, arm, index + 1, definition.skillId, definition.definitionHash, definition.kind],
+      );
+    }
+  }
+}
+
+async function insertMinimalEvaluationLedger(
+  executor: NodeSqliteExecutor,
+  modelAssignments:
+    | readonly Readonly<{
+        readonly slotId: string;
+        readonly modelIdentityHash: string;
+        readonly modelArtifactHash: string;
+      }>[]
+    | null = null,
+): Promise<{
+  readonly projectId: string;
+  readonly suiteId: string;
+  readonly runId: string;
+}> {
+  const now = "2026-07-27T00:00:00.000Z";
+  const projectId = "019f9f4a-b3c7-7350-9226-000000000770";
+  const suiteId = "019f9f4a-b3c7-7350-9226-000000000771";
+  const runId = "019f9f4a-b3c7-7350-9226-000000000772";
+  const manifests = await evaluationManifestHashes();
+  const preferenceConfigurationHash = "7".repeat(64);
+  const modelSlots = [
+    { slotId: "text_tier_a", modelTier: "economy" },
+    { slotId: "text_tier_b", modelTier: "quality" },
+  ] as const;
+  const targetManifestHash = await sha256Text(
+    canonicalJson({
+      coreManifestHash: manifests.core,
+      coreGenreManifestHash: manifests.coreGenre,
+      coreGenrePreferencesManifestHash: manifests.coreGenrePreferences,
+      preferenceConfigurationHash,
+    }),
+  );
+  const planHash = await sha256Text(
+    canonicalJson({
+      compilerVersion: "novel-skill-compiler@1",
+      evaluatorVersion: "novel-skill-ab@1",
+      fixtureSetHash: NOVEL_SKILL_EVALUATION_FIXTURE_SET_HASH,
+      minimumRepetitions: 2,
+      modelSlots,
+      targetManifestHash,
+    }),
+  );
+  await executor.execute(
+    `INSERT INTO projects (
+       id, name, status, revision, deletion_generation, created_at, updated_at,
+       archived_at, trashed_at, retention_until, status_before_trash
+     ) VALUES (?, 'Restore rollback evaluation fixture', 'archived', 1, 0,
+               ?, ?, ?, NULL, NULL, NULL)`,
+    [projectId, now, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO novel_skill_evaluation_suites (
+       id, schema_version, evaluator_version, compiler_version, evaluation_project_id,
+       plan_hash, fixture_set_hash, target_manifest_hash, core_manifest_hash,
+       core_genre_manifest_hash, core_genre_preferences_manifest_hash,
+       preference_configuration_hash, model_slots_json, minimum_repetitions, created_at
+     ) VALUES (?, 1, 'novel-skill-ab@1', 'novel-skill-compiler@1',
+               ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, ?)`,
+    [
+      suiteId,
+      projectId,
+      planHash,
+      NOVEL_SKILL_EVALUATION_FIXTURE_SET_HASH,
+      targetManifestHash,
+      manifests.core,
+      manifests.coreGenre,
+      manifests.coreGenrePreferences,
+      preferenceConfigurationHash,
+      JSON.stringify(modelSlots),
+      now,
+    ],
+  );
+  await insertEvaluationManifestFixtures(executor, suiteId, now);
+  for (const fixture of NOVEL_SKILL_EVALUATION_FIXTURE_REGISTRY) {
+    await executor.execute(
+      `INSERT INTO novel_skill_evaluation_fixtures (
+         suite_id, fixture_id, language, origin, task_type, invocation_mode,
+         genre_tags_json, coverage_dimensions_json, contract_hash, input_content_hash
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        suiteId,
+        fixture.fixtureId,
+        fixture.language,
+        fixture.origin,
+        fixture.taskType,
+        fixture.invocationMode,
+        JSON.stringify(fixture.genreTags),
+        JSON.stringify(fixture.coverageDimensions),
+        fixture.contractHash,
+        fixture.inputContentHash,
+      ],
+    );
+  }
+  await executor.execute(
+    `INSERT INTO novel_skill_evaluation_runs (
+       id, suite_id, status, evaluation_status, model_assignments_json,
+       revision, started_at, completed_at, created_at
+     ) VALUES (?, ?, 'planned', 'NOT_EVALUATED', ?, 1, NULL, NULL, ?)`,
+    [
+      runId,
+      suiteId,
+      JSON.stringify(
+        modelAssignments ?? [
+          {
+            slotId: "text_tier_a",
+            modelIdentityHash: "8".repeat(64),
+            modelArtifactHash: "a".repeat(64),
+          },
+          {
+            slotId: "text_tier_b",
+            modelIdentityHash: "9".repeat(64),
+            modelArtifactHash: "b".repeat(64),
+          },
+        ],
+      ),
+      now,
+    ],
+  );
+  let cellSequence = 0x2000;
+  for (const { fixtureId } of NOVEL_SKILL_EVALUATION_FIXTURE_REGISTRY) {
+    for (const [arm, armHash] of [
+      ["no_skill", null],
+      ["core", manifests.core],
+      ["core_genre", manifests.coreGenre],
+      ["core_genre_preferences", manifests.coreGenrePreferences],
+    ] as const) {
+      for (const [slotId, modelTier] of [
+        ["text_tier_a", "economy"],
+        ["text_tier_b", "quality"],
+      ] as const) {
+        for (const repetition of [1, 2] as const) {
+          const cellId = `019f9f4a-b3c7-7350-9226-${cellSequence.toString(16).padStart(12, "0")}`;
+          cellSequence += 1;
+          await executor.execute(
+            `INSERT INTO novel_skill_evaluation_cells (
+               id, run_id, suite_id, fixture_id, arm, arm_configuration_hash,
+               model_slot_id, model_tier, repetition, state, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?)`,
+            [cellId, runId, suiteId, fixtureId, arm, armHash, slotId, modelTier, repetition, now],
+          );
+        }
+      }
+    }
+  }
+  return { projectId, suiteId, runId };
+}
+
+interface PaidRestoreTargetFixture {
+  readonly slotId: "text_tier_a" | "text_tier_b";
+  readonly catalogEntryId: string;
+  readonly modelId: string;
+  readonly modelIdentityHash: string;
+  readonly modelArtifactHash: string;
+  readonly connectionConfigurationHash: string;
+  readonly catalogIdentityHash: string;
+  readonly pricingSnapshotHash: string;
+  readonly capabilityEvidenceHash: string;
+  readonly targetHash: string;
+  readonly exactTarget: Readonly<Record<string, unknown>>;
+}
+
+async function insertPaidRestoreModelHub(
+  executor: NodeSqliteExecutor,
+): Promise<readonly PaidRestoreTargetFixture[]> {
+  const now = "2026-07-27T00:00:00.000Z";
+  const connectionId = "paid-restore-connection";
+  const credentialRef = `keyring:model-hub:${connectionId}`;
+  await executor.execute(
+    `INSERT INTO model_provider_connections (
+       id, provider_kind, display_name, protocol, base_url, credential_ref,
+       credential_state, connection_status, authentication_mode,
+       credential_header_name, model_discovery_path, text_generation_path,
+       embedding_path, request_timeout_ms, retry_limit, enabled, revision,
+       created_at, updated_at
+     ) VALUES (?, 'custom_openai_compatible', 'Paid restore models',
+               'openai_compatible', 'https://paid-restore.example.test/v1', ?,
+               'present', 'ready', 'custom_header_keyring', 'x-api-key',
+               '/models', '/chat/completions', '/embeddings', 30000, 0, 1, 1, ?, ?)`,
+    [connectionId, credentialRef, now, now],
+  );
+  const connectionProjection = {
+    id: connectionId,
+    providerKind: "custom_openai_compatible",
+    protocol: "openai_compatible",
+    region: null,
+    workspaceId: null,
+    endpointId: null,
+    baseUrl: "https://paid-restore.example.test/v1",
+    credentialRef,
+    credentialState: "present",
+    authenticationMode: "custom_header_keyring",
+    credentialHeaderName: "x-api-key",
+    modelDiscoveryPath: "/models",
+    textGenerationPath: "/chat/completions",
+    embeddingPath: "/embeddings",
+    requestTimeoutMs: 30000,
+    retryLimit: 0,
+    revision: 1,
+  };
+  const connectionConfigurationHash = await sha256Text(canonicalJson(connectionProjection));
+  const result: PaidRestoreTargetFixture[] = [];
+  for (const [index, slotId, modelId] of [
+    [1, "text_tier_a", "paid-restore-writer-a"],
+    [2, "text_tier_b", "paid-restore-writer-b"],
+  ] as const) {
+    const catalogEntryId = `paid-restore-catalog-${index}`;
+    const evidenceId = `paid-restore-evidence-${index}`;
+    await executor.execute(
+      `INSERT INTO model_catalog_entries (
+         id, connection_id, provider_model_id, display_name, catalog_source,
+         availability, lifecycle, input_token_limit, output_token_limit,
+         first_discovered_at, last_seen_at, stale_after, revision
+       ) VALUES (?, ?, ?, ?, 'manual', 'available', 'stable', 100000, 100000,
+                 ?, ?, NULL, 1)`,
+      [catalogEntryId, connectionId, modelId, modelId, now, now],
+    );
+    await executor.execute(
+      `INSERT INTO model_capability_evidence (
+         id, catalog_entry_id, scan_id, capability, verdict, evidence_source,
+         evidence_version, evidence_summary, observed_at, expires_at
+       ) VALUES (?, ?, NULL, 'text_generation', 'supported', 'user_confirmed',
+                 'paid-restore@1', 'content-free restore fixture', ?, NULL)`,
+      [evidenceId, catalogEntryId, now],
+    );
+    await executor.execute(
+      `INSERT INTO model_cost_privacy_profiles (
+         catalog_entry_id, currency, input_micros_per_million_tokens,
+         output_micros_per_million_tokens, cached_input_micros_per_million_tokens,
+         pricing_version, price_updated_at, data_destination, retention_policy,
+         training_policy, evidence_source, evidence_version, evidence_summary,
+         evidence_updated_at, revision, created_at, updated_at
+       ) VALUES (?, 'USD', '1000000', '1000000', '500000', 'paid-restore@1', ?,
+                 'remote', 'none', 'not_used', 'user_confirmed', 'paid-restore@1',
+                 'content-free restore fixture', ?, 1, ?, ?)`,
+      [catalogEntryId, now, now, now, now],
+    );
+    const catalogProjection = {
+      id: catalogEntryId,
+      connectionId,
+      providerModelId: modelId,
+      catalogSource: "manual",
+      availability: "available",
+      lifecycle: "stable",
+      inputTokenLimit: 100000,
+      outputTokenLimit: 100000,
+      staleAfter: null,
+      revision: 1,
+    };
+    const costProjection = {
+      catalogEntryId,
+      currency: "USD",
+      inputMicrosPerMillionTokens: "1000000",
+      outputMicrosPerMillionTokens: "1000000",
+      cachedInputMicrosPerMillionTokens: "500000",
+      pricingVersion: "paid-restore@1",
+      priceUpdatedAt: now,
+      dataDestination: "remote",
+      retentionPolicy: "none",
+      trainingPolicy: "not_used",
+      evidenceSource: "user_confirmed",
+      evidenceVersion: "paid-restore@1",
+      evidenceSummary: "content-free restore fixture",
+      evidenceUpdatedAt: now,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const catalogIdentityHash = await sha256Text(canonicalJson(catalogProjection));
+    const pricingSnapshotHash = await sha256Text(canonicalJson(costProjection));
+    const capabilityEvidenceHash = await sha256Text(
+      canonicalJson({
+        requiredCapabilities: ["text_generation"],
+        evidence: [
+          {
+            id: evidenceId,
+            catalogEntryId,
+            scanId: null,
+            capability: "text_generation",
+            verdict: "supported",
+            evidenceSource: "user_confirmed",
+            evidenceVersion: "paid-restore@1",
+            evidenceSummary: "content-free restore fixture",
+            observedAt: now,
+            expiresAt: null,
+          },
+        ],
+      }),
+    );
+    const finalDispatchIdentity = JSON.stringify([
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      connectionId,
+      1,
+      true,
+      "custom_openai_compatible",
+      "openai_compatible",
+      "https://paid-restore.example.test/v1",
+      credentialRef,
+      "present",
+      catalogEntryId,
+      1,
+      connectionId,
+      modelId,
+      "available",
+      "stable",
+      null,
+      1,
+      connectionId,
+      "open_ai_compatible",
+      "https://paid-restore.example.test/v1",
+      "custom_header_keyring",
+      "x-api-key",
+      "/models",
+      "/chat/completions",
+      "/embeddings",
+      30000,
+      0,
+    ]);
+    const targetHash = await sha256Text(
+      canonicalJson({
+        version: "model-hub-exact-evaluation-target@1",
+        finalDispatchIdentity,
+        capabilityEvidenceHash,
+        costProfileHash: pricingSnapshotHash,
+      }),
+    );
+    const modelIdentityHash = await sha256Text(
+      JSON.stringify({
+        catalogEntryId,
+        connectionId,
+        modelId,
+        providerKind: "custom_openai_compatible",
+      }),
+    );
+    const modelArtifactHash = await sha256Text(
+      JSON.stringify({ modelId, providerKind: "custom_openai_compatible" }),
+    );
+    result.push({
+      slotId,
+      catalogEntryId,
+      modelId,
+      modelIdentityHash,
+      modelArtifactHash,
+      connectionConfigurationHash,
+      catalogIdentityHash,
+      pricingSnapshotHash,
+      capabilityEvidenceHash,
+      targetHash,
+      exactTarget: {
+        connectionId,
+        catalogEntryId,
+        providerKind: "custom_openai_compatible",
+        modelId,
+        connectionRevision: 1,
+        catalogRevision: 1,
+        costPrivacyRevision: 1,
+        capabilityEvidenceHash,
+        costProfileHash: pricingSnapshotHash,
+        targetIdentityHash: targetHash,
+      },
+    });
+  }
+  return result;
+}
+
+interface PaidRestoreScenarioIds {
+  readonly projectId: string;
+  readonly suiteId: string;
+  readonly runId: string;
+  readonly authorizationId: string;
+  readonly reservationId: string | null;
+  readonly targetCatalogId: string;
+}
+
+async function insertPaidRestoreScenario(
+  executor: NodeSqliteExecutor,
+  state: "authorized" | "running" | "settled",
+): Promise<PaidRestoreScenarioIds> {
+  const now = "2026-07-27T00:00:00.000Z";
+  const completedAt = "2026-07-27T00:00:01.000Z";
+  const authorizationId = "019f9f4a-b3c7-7350-9226-000000003001";
+  const reservationId = "019f9f4a-b3c7-7350-9226-000000003002";
+  const attemptId = "019f9f4a-b3c7-7350-9226-000000003003";
+  const traceId = "019f9f4a-b3c7-7350-9226-000000003004";
+  const invocationId = "019f9f4a-b3c7-7350-9226-000000003005";
+  const candidateId = "019f9f4a-b3c7-7350-9226-000000003006";
+  const targets = await insertPaidRestoreModelHub(executor);
+  const ledger = await insertMinimalEvaluationLedger(
+    executor,
+    targets.map((target) => ({
+      slotId: target.slotId,
+      modelIdentityHash: target.modelIdentityHash,
+      modelArtifactHash: target.modelArtifactHash,
+    })),
+  );
+  const selectedFixture = NOVEL_SKILL_EVALUATION_FIXTURE_REGISTRY[0];
+  const baselineEntry = {
+    contextCandidateId: `evaluation-fixture:${selectedFixture.fixtureId}`,
+    layer: "current_task",
+    selectionReason: "fixed_evaluation_context",
+    included: true,
+    discardedReason: null,
+    estimatedTokens: 1,
+    evaluationOrder: 1,
+    layerOrder: 2,
+    priority: 100,
+    relevanceScore: null,
+    required: true,
+    budgetRemainingBefore: 8,
+    budgetRemainingAfter: 7,
+    sources: [
+      {
+        sourceOrder: 1,
+        sourceType: "user_input",
+        sourceId: selectedFixture.fixtureId,
+        sourceVersionId: null,
+        locator: "novel_skill_evaluation_fixture",
+        contentHash: selectedFixture.inputContentHash,
+      },
+    ],
+  };
+  const traceBaseline = {
+    version: "novel-skill-paid-evaluation-trace-baseline@1",
+    taskType: selectedFixture.taskType,
+    maximumContextTokens: 8,
+    requiredTokens: 1,
+    usedTokens: 1,
+    remainingTokens: 7,
+    discardedTokens: 0,
+    tokenEstimateSource: "utf8_conservative",
+    entries: [baselineEntry],
+  };
+  const selectedBaselineHash = await sha256Text(canonicalJson(traceBaseline));
+  const stopPolicyHash = "896247754b670bf5c4ac89424e7c5f2fffa598df9adcdc1377d8fcf0868831a6";
+  const profiles = await Promise.all(
+    [...new Set(NOVEL_SKILL_EVALUATION_FIXTURE_REGISTRY.map(({ taskType }) => taskType))]
+      .sort((left, right) => left.localeCompare(right, "en"))
+      .map(async (taskType) => ({
+        taskType,
+        profileVersion: "model-hub-exact-evaluation-request@1",
+        requestProfileHash: await sha256Text(
+          canonicalJson({
+            version: "model-hub-exact-evaluation-request@1",
+            task: taskType,
+            maximumInputTokens: 8,
+            maximumOutputTokens: 2,
+            temperatureBasisPoints: 0,
+            topPBasisPoints: 10000,
+            reasoningMode: "disabled",
+            responseFormat: "text",
+            streaming: true,
+            stopPolicyHash,
+            providerCallPolicy: "single_attempt",
+          }),
+        ),
+        maximumInputTokens: 8,
+        maximumOutputTokens: 2,
+        temperatureBasisPoints: 0,
+        topPBasisPoints: 10000,
+        streaming: true,
+        stopPolicyHash,
+      })),
+  );
+  const baselines = await Promise.all(
+    [...NOVEL_SKILL_EVALUATION_FIXTURE_REGISTRY]
+      .sort((left, right) => left.fixtureId.localeCompare(right.fixtureId, "en"))
+      .map(async (fixture) => ({
+        fixtureId: fixture.fixtureId,
+        baselineContractHash: fixture.contractHash,
+        includedSourceManifestHash: await sha256Text(`paid-included:${fixture.fixtureId}`),
+        omittedSourceManifestHash: await sha256Text(`paid-omitted:${fixture.fixtureId}`),
+        compiledBaselineHash:
+          fixture.fixtureId === selectedFixture.fixtureId
+            ? selectedBaselineHash
+            : await sha256Text(`paid-baseline:${fixture.fixtureId}`),
+        baselineTokenBudget: 8,
+      })),
+  );
+  const requestProfileManifestHash = await sha256Text(canonicalJson(profiles));
+  const contextBaselineManifestHash = await sha256Text(canonicalJson(baselines));
+  const promptTemplateHash = await sha256Text("paid-restore-prompt-template");
+  const rubricContentHash = await sha256Text("paid-restore-rubric");
+  const evaluatorContractHash = await sha256Text("paid-restore-evaluator");
+  const blindingProtocolHash = await sha256Text("paid-restore-blinding");
+  const randomizationProtocolHash = await sha256Text("paid-restore-randomization");
+  const protocolHash = await sha256Text(
+    canonicalJson({
+      schemaVersion: 1,
+      executionProtocolVersion: "novel-skill-paid-ab@1",
+      suiteId: ledger.suiteId,
+      requestProfileManifestHash,
+      contextBaselineManifestHash,
+      promptTemplateVersion: "novel-skill-paid-prompt@1",
+      promptTemplateHash,
+      rubricVersion: "novel-skill-human-rubric@1",
+      rubricContentHash,
+      evaluatorContractHash,
+      blindingProtocolVersion: "paid-restore-blind@1",
+      blindingProtocolHash,
+      randomizationProtocolVersion: "paid-restore-random@1",
+      randomizationProtocolHash,
+    }),
+  );
+  await executor.execute(
+    `INSERT INTO novel_skill_evaluation_protocols (
+       suite_id, schema_version, execution_protocol_version, protocol_hash,
+       request_profile_manifest_hash, context_baseline_manifest_hash,
+       prompt_template_version, prompt_template_hash, rubric_version,
+       rubric_content_hash, evaluator_contract_hash, blinding_protocol_version,
+       blinding_protocol_hash, randomization_protocol_version,
+       randomization_protocol_hash, created_at
+     ) VALUES (?, 1, 'novel-skill-paid-ab@1', ?, ?, ?, 'novel-skill-paid-prompt@1', ?,
+               'novel-skill-human-rubric@1', ?, ?, 'paid-restore-blind@1', ?,
+               'paid-restore-random@1', ?, ?)`,
+    [
+      ledger.suiteId,
+      protocolHash,
+      requestProfileManifestHash,
+      contextBaselineManifestHash,
+      promptTemplateHash,
+      rubricContentHash,
+      evaluatorContractHash,
+      blindingProtocolHash,
+      randomizationProtocolHash,
+      now,
+    ],
+  );
+  for (const profile of profiles) {
+    await executor.execute(
+      `INSERT INTO novel_skill_evaluation_request_profiles (
+         suite_id, task_type, profile_version, request_profile_hash,
+         maximum_input_tokens, maximum_output_tokens, temperature_basis_points,
+         top_p_basis_points, reasoning_policy, response_format, streaming,
+         stop_policy_hash, created_at
+       ) VALUES (?, ?, 'model-hub-exact-evaluation-request@1', ?, 8, 2, 0, 10000,
+                 'disabled', 'text', 1, ?, ?)`,
+      [ledger.suiteId, profile.taskType, profile.requestProfileHash, stopPolicyHash, now],
+    );
+  }
+  for (const baseline of baselines) {
+    await executor.execute(
+      `INSERT INTO novel_skill_evaluation_context_baselines (
+         suite_id, fixture_id, baseline_contract_hash, included_source_manifest_hash,
+         omitted_source_manifest_hash, compiled_baseline_hash, baseline_token_budget, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, 8, ?)`,
+      [
+        ledger.suiteId,
+        baseline.fixtureId,
+        baseline.baselineContractHash,
+        baseline.includedSourceManifestHash,
+        baseline.omittedSourceManifestHash,
+        baseline.compiledBaselineHash,
+        now,
+      ],
+    );
+  }
+  for (const target of targets) {
+    await executor.execute(
+      `INSERT INTO novel_skill_evaluation_run_model_targets (
+         run_id, model_slot_id, connection_id, catalog_entry_id,
+         provider_kind_snapshot, connection_protocol_snapshot, connection_revision,
+         connection_configuration_hash, catalog_revision, provider_model_id_snapshot,
+         catalog_identity_hash, model_identity_hash, model_artifact_hash,
+         artifact_identity_source, cost_profile_revision, currency,
+         input_micros_per_million_tokens, output_micros_per_million_tokens,
+         cached_input_micros_per_million_tokens, pricing_version, price_updated_at,
+         pricing_snapshot_hash, target_hash, created_at
+       ) VALUES (?, ?, 'paid-restore-connection', ?, 'custom_openai_compatible',
+                 'openai_compatible', 1, ?, 1, ?, ?, ?, ?, 'provider_model_id', 1,
+                 'USD', '1000000', '1000000', '500000', 'paid-restore@1', ?, ?, ?, ?)`,
+      [
+        ledger.runId,
+        target.slotId,
+        target.catalogEntryId,
+        target.connectionConfigurationHash,
+        target.modelId,
+        target.catalogIdentityHash,
+        target.modelIdentityHash,
+        target.modelArtifactHash,
+        now,
+        target.pricingSnapshotHash,
+        target.targetHash,
+        now,
+      ],
+    );
+  }
+  const targetManifestHash = await sha256Text(
+    canonicalJson(
+      targets.map((target) => ({
+        modelSlotId: target.slotId,
+        connectionId: "paid-restore-connection",
+        catalogEntryId: target.catalogEntryId,
+        modelIdentityHash: target.modelIdentityHash,
+        modelArtifactHash: target.modelArtifactHash,
+        targetHash: target.targetHash,
+      })),
+    ),
+  );
+  const pricingManifestHash = await sha256Text(
+    canonicalJson(
+      targets.map((target) => ({
+        modelSlotId: target.slotId,
+        currency: "USD",
+        inputRate: "1000000",
+        outputRate: "1000000",
+        pricingSnapshotHash: target.pricingSnapshotHash,
+      })),
+    ),
+  );
+  const currencies = [{ currency: "USD", estimatedMaximumCostMicros: "1920" }];
+  const quoteHash = await sha256Text(
+    canonicalJson({
+      version: "novel-skill-paid-evaluation-quote@1",
+      runId: ledger.runId,
+      protocolHash,
+      targetManifestHash,
+      pricingManifestHash,
+      authorizedCallCount: 192,
+      currencies,
+    }),
+  );
+  const confirmationHash = await sha256Text(
+    canonicalJson({
+      version: "novel-skill-paid-commercial-confirmation@1",
+      runId: ledger.runId,
+      protocolHash,
+      targetManifestHash,
+      pricingManifestHash,
+      quoteHash,
+      authorizedCallCount: 192,
+      currencies: [{ ...currencies[0], hardCeilingMicros: "2500" }],
+      acknowledgements: {
+        commercialUse: true,
+        exactTargetsOnly: true,
+        fallbackAllowed: false,
+        automaticRetryAllowed: false,
+        automaticResumeAfterRestart: false,
+        perCurrencyHardCeilings: true,
+      },
+    }),
+  );
+  await executor.execute(
+    `INSERT INTO novel_skill_evaluation_dispatch_authorizations (
+       id, run_id, protocol_hash, target_manifest_hash, pricing_manifest_hash,
+       quote_hash, confirmation_hash, authorized_call_count, authorized_by,
+       commercial_use_acknowledged, authorized_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 192, 'local_user', 1, ?)`,
+    [
+      authorizationId,
+      ledger.runId,
+      protocolHash,
+      targetManifestHash,
+      pricingManifestHash,
+      quoteHash,
+      confirmationHash,
+      now,
+    ],
+  );
+  await executor.execute(
+    `INSERT INTO novel_skill_evaluation_authorization_limits (
+       authorization_id, currency, estimated_max_cost_micros, hard_ceiling_micros, created_at
+     ) VALUES (?, 'USD', '1920', '2500', ?)`,
+    [authorizationId, now],
+  );
+  if (state === "authorized") {
+    return {
+      ...ledger,
+      authorizationId,
+      reservationId: null,
+      targetCatalogId: targets[0]?.catalogEntryId ?? "",
+    };
+  }
+  await executor.execute(
+    `UPDATE novel_skill_evaluation_runs
+     SET status = 'running', started_at = ?, revision = revision + 1 WHERE id = ?`,
+    [now, ledger.runId],
+  );
+  if (state === "running") {
+    return {
+      ...ledger,
+      authorizationId,
+      reservationId: null,
+      targetCatalogId: targets[0]?.catalogEntryId ?? "",
+    };
+  }
+  const cells = await executor.select<{ readonly id: string }>(
+    `SELECT id FROM novel_skill_evaluation_cells
+     WHERE run_id = ? AND fixture_id = ? AND arm = 'no_skill'
+       AND model_slot_id = 'text_tier_a' AND repetition = 1`,
+    [ledger.runId, selectedFixture.fixtureId],
+  );
+  const cellId = cells[0]?.id;
+  const selectedProfile = profiles.find(({ taskType }) => taskType === selectedFixture.taskType);
+  const selectedBaseline = baselines.find(
+    ({ fixtureId }) => fixtureId === selectedFixture.fixtureId,
+  );
+  const target = targets[0];
+  if (
+    cellId === undefined ||
+    selectedProfile === undefined ||
+    selectedBaseline === undefined ||
+    target === undefined
+  ) {
+    throw new Error("Paid restore fixture is incomplete.");
+  }
+  const invariantRequestHash = await sha256Text(
+    canonicalJson({
+      version: "novel-skill-paid-evaluation-invariant-request@1",
+      runId: ledger.runId,
+      suiteId: ledger.suiteId,
+      fixtureId: selectedFixture.fixtureId,
+      taskType: selectedFixture.taskType,
+      modelSlotId: "text_tier_a",
+      repetition: 1,
+      protocolHash,
+      requestProfileHash: selectedProfile.requestProfileHash,
+      contextBaselineHash: selectedBaseline.compiledBaselineHash,
+      promptTemplateHash,
+    }),
+  );
+  const messagePayloadHash = await sha256Text("paid-restore-message-payload");
+  const requestPayloadHash = await sha256Text("paid-restore-request-payload");
+  const executionLockHash = await sha256Text(
+    canonicalJson({
+      version: "model-hub-exact-evaluation-execution-lock@1",
+      targetIdentityHash: target.targetHash,
+      requestProfileHash: selectedProfile.requestProfileHash,
+      payloadHash: requestPayloadHash,
+      currency: "USD",
+      estimatedMaximumCostMicros: "10",
+    }),
+  );
+  const contextBaselineProjectionHash = await sha256Text(
+    canonicalJson({
+      schemaVersion: 1,
+      version: "novel-skill-paid-context-baseline@1",
+      fixtureId: selectedFixture.fixtureId,
+      baselineContractHash: selectedBaseline.baselineContractHash,
+      includedSourceManifestHash: selectedBaseline.includedSourceManifestHash,
+      omittedSourceManifestHash: selectedBaseline.omittedSourceManifestHash,
+      compiledBaselineHash: selectedBaseline.compiledBaselineHash,
+      baselineTokenBudget: 8,
+      availableContextLayers: ["current_task"],
+      traceBaseline,
+    }),
+  );
+  const payloadAuthorityManifest = {
+    schemaVersion: 1,
+    authorityVersion: "novel-skill-paid-payload-authority@1",
+    runId: ledger.runId,
+    suiteId: ledger.suiteId,
+    cellId,
+    fixtureId: selectedFixture.fixtureId,
+    fixtureContractHash: selectedFixture.contractHash,
+    fixtureInputContentHash: selectedFixture.inputContentHash,
+    taskType: selectedFixture.taskType,
+    invocationMode: selectedFixture.invocationMode,
+    genreTagsHash: await sha256Text(canonicalJson(selectedFixture.genreTags)),
+    coverageDimensionsHash: await sha256Text(canonicalJson(selectedFixture.coverageDimensions)),
+    arm: "no_skill",
+    armConfigurationHash: null,
+    modelSlotId: "text_tier_a",
+    repetition: 1,
+    promptTemplateVersion: "novel-skill-paid-prompt@1",
+    promptTemplateHash,
+    contextBaselineHash: selectedBaseline.compiledBaselineHash,
+    contextBaselineProjectionHash,
+    availableContextLayersHash: await sha256Text(canonicalJson(["current_task"])),
+    skillCompilerVersion: "novel-skill-compiler@1",
+    skillSelectionHash: null,
+    compiledSkillSnapshotHash: null,
+    renderedSkillSectionHash: null,
+    preferenceConfigurationHash: null,
+    preferenceProjectionHash: null,
+    renderedPreferenceSectionHash: null,
+    baseMessagePayloadHash: messagePayloadHash,
+    messagePayloadHash,
+  } as const;
+  const payloadAuthorityManifestHash = await sha256Text(canonicalJson(payloadAuthorityManifest));
+  const idempotencyKeyHash = await sha256Text("paid-restore-idempotency-key");
+  await executor.execute(
+    `INSERT INTO novel_skill_evaluation_attempts (
+       id, run_id, cell_id, attempt_number, status, context_trace_id,
+       model_invocation_id, error_code, started_at, completed_at
+     ) VALUES (?, ?, ?, 1, 'started', NULL, NULL, NULL, ?, NULL)`,
+    [attemptId, ledger.runId, cellId, now],
+  );
+  await executor.execute(
+    `INSERT INTO novel_skill_evaluation_dispatch_reservations (
+       id, authorization_id, run_id, cell_id, attempt_id, model_slot_id,
+       dispatch_generation, planned_context_trace_id, planned_model_invocation_id,
+       planned_candidate_id, state, target_hash, pricing_snapshot_hash,
+       request_profile_hash, context_baseline_hash, prompt_template_hash,
+       invariant_request_hash, request_payload_hash, execution_lock_hash,
+       message_payload_hash, payload_authority_version,
+       payload_authority_manifest_hash, data_destination, skill_configuration_hash,
+       preference_configuration_hash, idempotency_key_hash, currency,
+       reserved_max_cost_micros, reserved_at, revision
+     ) VALUES (?, ?, ?, ?, ?, 'text_tier_a', 1, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?,
+               ?, ?, ?, ?, 'novel-skill-paid-payload-authority@1', ?, 'remote', NULL,
+               NULL, ?, 'USD', '10', ?, 1)`,
+    [
+      reservationId,
+      authorizationId,
+      ledger.runId,
+      cellId,
+      attemptId,
+      traceId,
+      invocationId,
+      candidateId,
+      target.targetHash,
+      target.pricingSnapshotHash,
+      selectedProfile.requestProfileHash,
+      selectedBaseline.compiledBaselineHash,
+      promptTemplateHash,
+      invariantRequestHash,
+      requestPayloadHash,
+      executionLockHash,
+      messagePayloadHash,
+      payloadAuthorityManifestHash,
+      idempotencyKeyHash,
+      now,
+    ],
+  );
+  const providerReceiptShape = {
+    version: "model-hub-exact-evaluation-predispatch-receipt@1",
+    generationId: invocationId,
+    target: target.exactTarget,
+    requestProfileHash: selectedProfile.requestProfileHash,
+    messagePayloadHash,
+    payloadHash: requestPayloadHash,
+    executionLockHash,
+    currency: "USD",
+    estimatedMaximumCostMicros: "10",
+    dataDestination: "remote",
+  } as const;
+  const providerReceiptShapeHash = await sha256Text(canonicalJson(providerReceiptShape));
+  const finalDispatchAuthority = {
+    version: "novel-skill-paid-final-dispatch-authority@1",
+    reservationId,
+    authorizationId,
+    runId: ledger.runId,
+    cellId,
+    attemptId,
+    modelSlotId: "text_tier_a",
+    dispatchGeneration: 1,
+    plannedContextTraceId: traceId,
+    plannedModelInvocationId: invocationId,
+    plannedCandidateId: candidateId,
+    idempotencyKeyHash,
+    payloadAuthorityManifestHash,
+    providerReceiptShapeHash,
+  } as const;
+  const finalDispatchAuthorityHash = await sha256Text(canonicalJson(finalDispatchAuthority));
+  const authoritySnapshot = {
+    schemaVersion: 1,
+    version: "novel-skill-paid-predispatch-authority@1",
+    reservationId,
+    payloadAuthorityManifest,
+    payloadAuthorityManifestHash,
+    providerReceiptShapeVersion: "model-hub-exact-evaluation-predispatch-receipt@1",
+    providerReceiptShapeHash,
+    finalDispatchAuthorityVersion: "novel-skill-paid-final-dispatch-authority@1",
+    finalDispatchAuthorityHash,
+    exactPredispatchEstimatedMaximumCostMicros: "10",
+    capturedAt: now,
+  } as const;
+  const authoritySnapshotHash = await sha256Text(canonicalJson(authoritySnapshot));
+  const sidecar = {
+    reservation_id: reservationId,
+    schema_version: 1,
+    authority_snapshot_version: "novel-skill-paid-predispatch-authority@1",
+    payload_authority_schema_version: 1,
+    payload_authority_version: payloadAuthorityManifest.authorityVersion,
+    payload_authority_manifest_hash: payloadAuthorityManifestHash,
+    run_id: payloadAuthorityManifest.runId,
+    suite_id: payloadAuthorityManifest.suiteId,
+    cell_id: payloadAuthorityManifest.cellId,
+    fixture_id: payloadAuthorityManifest.fixtureId,
+    fixture_contract_hash: payloadAuthorityManifest.fixtureContractHash,
+    fixture_input_content_hash: payloadAuthorityManifest.fixtureInputContentHash,
+    task_type: payloadAuthorityManifest.taskType,
+    invocation_mode: payloadAuthorityManifest.invocationMode,
+    genre_tags_hash: payloadAuthorityManifest.genreTagsHash,
+    coverage_dimensions_hash: payloadAuthorityManifest.coverageDimensionsHash,
+    arm: payloadAuthorityManifest.arm,
+    arm_configuration_hash: payloadAuthorityManifest.armConfigurationHash,
+    model_slot_id: payloadAuthorityManifest.modelSlotId,
+    repetition: payloadAuthorityManifest.repetition,
+    prompt_template_version: payloadAuthorityManifest.promptTemplateVersion,
+    prompt_template_hash: payloadAuthorityManifest.promptTemplateHash,
+    context_baseline_hash: payloadAuthorityManifest.contextBaselineHash,
+    context_baseline_projection_hash: payloadAuthorityManifest.contextBaselineProjectionHash,
+    available_context_layers_hash: payloadAuthorityManifest.availableContextLayersHash,
+    skill_compiler_version: payloadAuthorityManifest.skillCompilerVersion,
+    skill_selection_hash: payloadAuthorityManifest.skillSelectionHash,
+    compiled_skill_snapshot_hash: payloadAuthorityManifest.compiledSkillSnapshotHash,
+    rendered_skill_section_hash: payloadAuthorityManifest.renderedSkillSectionHash,
+    preference_configuration_hash: payloadAuthorityManifest.preferenceConfigurationHash,
+    preference_projection_hash: payloadAuthorityManifest.preferenceProjectionHash,
+    rendered_preference_section_hash: payloadAuthorityManifest.renderedPreferenceSectionHash,
+    base_message_payload_hash: payloadAuthorityManifest.baseMessagePayloadHash,
+    message_payload_hash: payloadAuthorityManifest.messagePayloadHash,
+    generation_id: invocationId,
+    connection_id: "paid-restore-connection",
+    catalog_entry_id: target.catalogEntryId,
+    provider_kind: "custom_openai_compatible",
+    provider_model_id: target.modelId,
+    connection_revision: 1,
+    catalog_revision: 1,
+    cost_privacy_revision: 1,
+    capability_evidence_hash: target.capabilityEvidenceHash,
+    cost_profile_hash: target.pricingSnapshotHash,
+    target_identity_hash: target.targetHash,
+    request_profile_hash: selectedProfile.requestProfileHash,
+    request_payload_hash: requestPayloadHash,
+    execution_lock_hash: executionLockHash,
+    currency: "USD",
+    exact_predispatch_estimated_max_cost_micros: "10",
+    data_destination: "remote",
+    provider_receipt_shape_version: "model-hub-exact-evaluation-predispatch-receipt@1",
+    provider_receipt_shape_hash: providerReceiptShapeHash,
+    final_dispatch_authority_version: "novel-skill-paid-final-dispatch-authority@1",
+    final_dispatch_authority_hash: finalDispatchAuthorityHash,
+    authority_snapshot_hash: authoritySnapshotHash,
+    captured_at: now,
+  } as const;
+  const sidecarColumns = Object.keys(sidecar);
+  await executor.execute(
+    `INSERT INTO novel_skill_evaluation_predispatch_authority_snapshots
+       (${sidecarColumns.join(", ")}) VALUES (${sidecarColumns.map(() => "?").join(", ")})`,
+    Object.values(sidecar),
+  );
+  await executor.execute(
+    `INSERT INTO context_compilation_runs (
+       id, project_id, chapter_id, task_type, maximum_context_tokens,
+       required_tokens, used_tokens, remaining_tokens, discarded_tokens,
+       token_estimate_source, candidate_count, included_count, discarded_count, created_at
+     ) VALUES (?, ?, NULL, ?, 8, 1, 1, 7, 0, 'utf8_conservative', 1, 1, 0, ?)`,
+    [traceId, ledger.projectId, selectedFixture.taskType, now],
+  );
+  await executor.execute(
+    `INSERT INTO context_compilation_entries (
+       run_id, candidate_id, layer, selection_reason, included, discarded_reason,
+       estimated_tokens, evaluation_order, layer_order, priority, relevance_score,
+       required, budget_remaining_before, budget_remaining_after
+     ) VALUES (?, ?, 'current_task', 'fixed_evaluation_context', 1, NULL,
+               1, 1, 2, 100, NULL, 1, 8, 7)`,
+    [traceId, baselineEntry.contextCandidateId],
+  );
+  await executor.execute(
+    `INSERT INTO context_compilation_entry_sources (
+       run_id, candidate_id, source_order, source_type, source_id,
+       source_version_id, locator, content_hash
+     ) VALUES (?, ?, 1, 'user_input', ?, NULL, 'novel_skill_evaluation_fixture', ?)`,
+    [
+      traceId,
+      baselineEntry.contextCandidateId,
+      selectedFixture.fixtureId,
+      selectedFixture.inputContentHash,
+    ],
+  );
+  await executor.execute(
+    `INSERT INTO context_compilation_execution_links (
+       trace_id, generation_id, generation_run_id, created_at
+     ) VALUES (?, ?, NULL, ?)`,
+    [traceId, invocationId, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_invocation_facts (
+       id, task, connection_id, catalog_entry_id, provider_kind_snapshot,
+       model_id_snapshot, route_reason, status, attempt, privacy_policy,
+       data_destination, maximum_cost_micros, currency, created_at,
+       requested_max_output_tokens, streamed
+     ) VALUES (?, ?, 'paid-restore-connection', ?, 'custom_openai_compatible', ?,
+               'user_override', 'queued', 1, 'cloud_allowed', 'remote', '10', 'USD', ?, 2, 1)`,
+    [invocationId, selectedFixture.taskType, target.catalogEntryId, target.modelId, now],
+  );
+  await executor.execute(
+    `INSERT INTO context_compilation_model_invocation_links (
+       trace_id, model_invocation_id, linked_at
+     ) VALUES (?, ?, ?)`,
+    [traceId, invocationId, now],
+  );
+  await executor.execute(
+    `UPDATE novel_skill_evaluation_attempts
+     SET context_trace_id = ?, model_invocation_id = ? WHERE id = ?`,
+    [traceId, invocationId, attemptId],
+  );
+  await executor.execute(
+    `UPDATE novel_skill_evaluation_dispatch_reservations
+     SET state = 'bound', bound_at = ?, revision = revision + 1 WHERE id = ?`,
+    [now, reservationId],
+  );
+  await executor.execute(
+    `UPDATE model_invocation_facts
+     SET status = 'running', started_at = ?, revision = revision + 1 WHERE id = ?`,
+    [now, invocationId],
+  );
+  await executor.execute(
+    `UPDATE novel_skill_evaluation_dispatch_reservations
+     SET state = 'dispatched', dispatched_at = ?, revision = revision + 1 WHERE id = ?`,
+    [now, reservationId],
+  );
+  const content = "paid restore output";
+  const visibleOutputHash = await sha256Text(content);
+  await executor.execute(
+    `INSERT INTO ai_candidates (
+       id, project_id, chapter_id, source, base_version_id, content, content_checksum,
+       status, incomplete, created_at, updated_at, decided_at
+     ) VALUES (?, ?, NULL, 'generate', NULL, ?, ?, 'ready', 0, ?, ?, NULL)`,
+    [candidateId, ledger.projectId, content, visibleOutputHash, completedAt, completedAt],
+  );
+  await executor.execute(
+    `INSERT INTO context_compilation_output_candidate_links (
+       trace_id, ai_candidate_id, linked_at
+     ) VALUES (?, ?, ?)`,
+    [traceId, candidateId, completedAt],
+  );
+  await executor.execute(
+    `UPDATE model_invocation_facts
+     SET status = 'succeeded', input_tokens = 3, output_tokens = 2,
+         cached_input_tokens = 1, estimated_cost_micros = '5', currency = 'USD',
+         finish_reason = 'stop', visible_content_length = ?, completed_at = ?,
+         revision = revision + 1 WHERE id = ?`,
+    [Array.from(content).length, completedAt, invocationId],
+  );
+  await executor.execute(
+    `UPDATE novel_skill_evaluation_attempts
+     SET status = 'succeeded', completed_at = ? WHERE id = ?`,
+    [completedAt, attemptId],
+  );
+  const providerReceiptHash = await sha256Text(
+    canonicalJson({
+      version: "novel-skill-paid-evaluation-provider-receipt@1",
+      target: target.exactTarget,
+      requestProfileHash: selectedProfile.requestProfileHash,
+      payloadHash: requestPayloadHash,
+      executionLockHash,
+      visibleOutputHash,
+      visibleContentLength: Array.from(content).length,
+      usage: { inputTokens: 3, outputTokens: 2, cachedInputTokens: 1 },
+      streamed: true,
+      actualCostMicros: "5",
+      currency: "USD",
+      completedAt,
+    }),
+  );
+  await executor.execute(
+    `UPDATE novel_skill_evaluation_dispatch_reservations
+     SET state = 'settled', settlement_outcome = 'succeeded',
+         provider_receipt_hash = ?, provider_visible_output_hash = ?,
+         output_candidate_id = ?, actual_cost_micros = '5', terminal_at = ?,
+         revision = revision + 1 WHERE id = ?`,
+    [providerReceiptHash, visibleOutputHash, candidateId, completedAt, reservationId],
+  );
+  return {
+    ...ledger,
+    authorizationId,
+    reservationId,
+    targetCatalogId: target.catalogEntryId,
+  };
+}
+
+async function insertNovelSkillBackupScenario(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  const completedAt = "2026-07-27T00:00:01.250Z";
+  const definitionHash = "a".repeat(64);
+  const selectionHash = "b".repeat(64);
+  const modelInvocationId = "019f9f4a-b3c7-7350-9226-000000000751";
+  const generationId = "019f9f4a-b3c7-7350-9226-000000000752";
+  const snapshotId = "019f9f4a-b3c7-7350-9226-000000000753";
+  const contextTraceId = "maintenance-novel-skill-context";
+  const evaluationProjectId = "019f9f4a-b3c7-7350-9226-000000000760";
+  const evaluationSuiteId = "019f9f4a-b3c7-7350-9226-000000000761";
+  const evaluationRunId = "019f9f4a-b3c7-7350-9226-000000000762";
+  const evaluationCellId = "019f9f4a-b3c7-7350-9226-000000000764";
+  const evaluationAttemptId = "019f9f4a-b3c7-7350-9226-000000000765";
+  const evaluationCandidateId = "019f9f4a-b3c7-7350-9226-000000000766";
+  const evaluationModelInvocationId = "019f9f4a-b3c7-7350-9226-000000000767";
+  const evaluationContextTraceId = "019f9f4a-b3c7-7350-9226-000000000768";
+  const evaluationGenerationId = "019f9f4a-b3c7-7350-9226-000000000769";
+  const evaluationSnapshotId = "019f9f4a-b3c7-7350-9226-00000000076a";
+  const evaluationObservationId = "019f9f4a-b3c7-7350-9226-00000000076b";
+  const evaluationContent = "isolated evaluation output";
+  const evaluationFixture = NOVEL_SKILL_EVALUATION_FIXTURE_REGISTRY[0];
+  const manifests = await evaluationManifestHashes();
+  const preferenceConfigurationHash = "7".repeat(64);
+  const modelSlots = [
+    { slotId: "text_tier_a", modelTier: "economy" },
+    { slotId: "text_tier_b", modelTier: "quality" },
+  ] as const;
+  const targetManifestHash = await sha256Text(
+    canonicalJson({
+      coreManifestHash: manifests.core,
+      coreGenreManifestHash: manifests.coreGenre,
+      coreGenrePreferencesManifestHash: manifests.coreGenrePreferences,
+      preferenceConfigurationHash,
+    }),
+  );
+  const planHash = await sha256Text(
+    canonicalJson({
+      compilerVersion: "novel-skill-compiler@1",
+      evaluatorVersion: "novel-skill-ab@1",
+      fixtureSetHash: NOVEL_SKILL_EVALUATION_FIXTURE_SET_HASH,
+      minimumRepetitions: 2,
+      modelSlots,
+      targetManifestHash,
+    }),
+  );
+  const evaluationContentHash = await sha256Text(evaluationContent);
+  const evaluationVisibleLength = Array.from(evaluationContent).length;
+  const evaluationModelIdentityHash = await sha256Text(
+    JSON.stringify({
+      catalogEntryId: "maintenance-model-catalog",
+      connectionId: "maintenance-custom-model",
+      modelId: "maintenance-writer",
+      providerKind: "custom_openai_compatible",
+    }),
+  );
+  const evaluationModelArtifactHash = await sha256Text(
+    JSON.stringify({
+      modelId: "maintenance-writer",
+      providerKind: "custom_openai_compatible",
+    }),
+  );
+  const paidStopPolicyHash = "896247754b670bf5c4ac89424e7c5f2fffa598df9adcdc1377d8fcf0868831a6";
+  const paidProfiles = await Promise.all(
+    [...new Set(NOVEL_SKILL_EVALUATION_FIXTURE_REGISTRY.map(({ taskType }) => taskType))]
+      .sort((left, right) => left.localeCompare(right, "en"))
+      .map(async (taskType) => ({
+        taskType,
+        profileVersion: "model-hub-exact-evaluation-request@1",
+        requestProfileHash: await sha256Text(
+          canonicalJson({
+            version: "model-hub-exact-evaluation-request@1",
+            task: taskType,
+            maximumInputTokens: 7000,
+            maximumOutputTokens: 2048,
+            temperatureBasisPoints: 0,
+            topPBasisPoints: 10000,
+            reasoningMode: "disabled",
+            responseFormat: "text",
+            streaming: true,
+            stopPolicyHash: paidStopPolicyHash,
+            providerCallPolicy: "single_attempt",
+          }),
+        ),
+        maximumInputTokens: 7000,
+        maximumOutputTokens: 2048,
+        temperatureBasisPoints: 0,
+        topPBasisPoints: 10000,
+        streaming: true,
+        stopPolicyHash: paidStopPolicyHash,
+      })),
+  );
+  const paidBaselines = await Promise.all(
+    [...NOVEL_SKILL_EVALUATION_FIXTURE_REGISTRY]
+      .sort((left, right) => left.fixtureId.localeCompare(right.fixtureId, "en"))
+      .map(async (fixture) => ({
+        fixtureId: fixture.fixtureId,
+        baselineContractHash: fixture.contractHash,
+        includedSourceManifestHash: await sha256Text(`included:${fixture.fixtureId}`),
+        omittedSourceManifestHash: await sha256Text(`omitted:${fixture.fixtureId}`),
+        compiledBaselineHash: await sha256Text(`baseline:${fixture.fixtureId}`),
+        baselineTokenBudget: 7000,
+      })),
+  );
+  const paidRequestProfileManifestHash = await sha256Text(canonicalJson(paidProfiles));
+  const paidContextBaselineManifestHash = await sha256Text(canonicalJson(paidBaselines));
+  const paidProtocolHash = await sha256Text(
+    canonicalJson({
+      schemaVersion: 1,
+      executionProtocolVersion: "novel-skill-paid-ab@1",
+      suiteId: evaluationSuiteId,
+      requestProfileManifestHash: paidRequestProfileManifestHash,
+      contextBaselineManifestHash: paidContextBaselineManifestHash,
+      promptTemplateVersion: "evaluation-template@1",
+      promptTemplateHash: "4".repeat(64),
+      rubricVersion: "novel-skill-human-rubric@1",
+      rubricContentHash: "5".repeat(64),
+      evaluatorContractHash: "6".repeat(64),
+      blindingProtocolVersion: "blind-review@1",
+      blindingProtocolHash: "7".repeat(64),
+      randomizationProtocolVersion: "randomized-review@1",
+      randomizationProtocolHash: "8".repeat(64),
+    }),
+  );
+  const configurationSnapshot = {
+    schemaVersion: 1,
+    compilerVersion: "novel-skill-compiler@1",
+    taskType: "continuation",
+    invocationMode: "draft",
+    maximumSkillTokens: 100,
+    experimentalAllowed: true,
+    genreTags: [],
+    explicitSkillIds: ["core.maintenance"],
+    availableContextLayers: ["current_task"],
+    consideredDefinitions: [
+      {
+        skillId: "core.maintenance",
+        version: "1.0.0",
+        definitionHash,
+        kind: "core",
+        status: "experimental",
+      },
+    ],
+    bindings: [
+      {
+        skillId: "core.maintenance",
+        version: "1.0.0",
+        enabled: true,
+        activationMode: "manual",
+        taskEnabled: null,
+        taskInvocationMode: null,
+        revision: 1,
+      },
+    ],
+  };
+
+  await executor.transaction(async (transaction) => {
+    await transaction.execute(
+      `INSERT INTO novel_skill_definitions (
+         skill_id, version, display_name, summary, kind, owner_scope, status,
+         default_enabled, precedence, task_types_json, activation_json,
+         context_requirements_json, instructions_json, output_contract_json,
+         validation_json, definition_hash, provenance_url, provenance_commit,
+         provenance_license, created_at
+       ) VALUES (
+         'core.maintenance', '1.0.0', 'Maintenance core skill',
+         'Content-free backup and restore fixture.', 'core', 'builtin',
+         'experimental', 0, 500, '["continuation"]',
+         '{"invocationModes":["draft"]}',
+         '{"requiredLayers":["current_task"]}',
+         '{"rules":[{"id":"maintenance-rule","text":"fixture"}]}',
+         '{"format":"prose"}',
+         '{"checks":["candidate_isolated"]}',
+         ?, NULL, NULL, NULL, ?
+       )`,
+      [definitionHash, now],
+    );
+    await transaction.execute(
+      `INSERT INTO project_novel_skill_bindings (
+         project_id, skill_id, pinned_version, enabled, activation_mode,
+         task_overrides_json, revision, created_at, updated_at
+       ) VALUES (?, 'core.maintenance', '1.0.0', 1, 'manual', '{}', 1, ?, ?)`,
+      [BACKUP_PROJECT_ID, now, now],
+    );
+    await transaction.execute(
+      `INSERT INTO model_invocation_facts (
+         id, task, connection_id, catalog_entry_id, provider_kind_snapshot,
+         model_id_snapshot, route_reason, status, attempt, privacy_policy,
+         data_destination, created_at
+       ) VALUES (
+         ?, 'continuation', 'maintenance-custom-model', 'maintenance-model-catalog',
+         'custom_openai_compatible', 'maintenance-writer', 'user_override',
+         'queued', 1, 'cloud_allowed', 'remote', ?
+       )`,
+      [modelInvocationId, now],
+    );
+    await transaction.execute(
+      `INSERT INTO context_compilation_runs (
+         id, project_id, chapter_id, task_type, maximum_context_tokens,
+         required_tokens, used_tokens, remaining_tokens, discarded_tokens,
+         token_estimate_source, candidate_count, included_count, discarded_count,
+         created_at
+       ) VALUES (
+         ?, ?, NULL, 'continuation', 1000, 1, 1, 999, 0,
+         'utf8_conservative', 1, 1, 0, ?
+       )`,
+      [contextTraceId, BACKUP_PROJECT_ID, now],
+    );
+    await transaction.execute(
+      `INSERT INTO context_compilation_entries (
+         run_id, candidate_id, layer, selection_reason, included,
+         discarded_reason, estimated_tokens, evaluation_order, layer_order,
+         priority, relevance_score, required, budget_remaining_before,
+         budget_remaining_after
+       ) VALUES (
+         ?, 'maintenance-novel-skill-task', 'current_task',
+         'The explicit continuation task is required.', 1, NULL, 1, 1, 2,
+         100, 1.0, 1, 1000, 999
+       )`,
+      [contextTraceId],
+    );
+    await transaction.execute(
+      `INSERT INTO context_compilation_execution_links (
+         trace_id, generation_id, generation_run_id, created_at
+       ) VALUES (?, ?, NULL, ?)`,
+      [contextTraceId, generationId, now],
+    );
+    await transaction.execute(
+      `INSERT INTO context_compilation_model_invocation_links (
+         trace_id, model_invocation_id, linked_at
+       ) VALUES (?, ?, ?)`,
+      [contextTraceId, modelInvocationId, now],
+    );
+    await transaction.execute(
+      `INSERT INTO novel_skill_invocation_snapshots (
+         id, project_id, context_trace_id, model_invocation_id, task_type,
+         invocation_mode, compiler_version, maximum_skill_tokens,
+         used_skill_tokens, discarded_skill_tokens, candidate_count,
+         included_count, discarded_count, selection_hash,
+         configuration_snapshot_json, created_at
+       ) VALUES (
+         ?, ?, ?, ?, 'continuation', 'draft', 'novel-skill-compiler@1',
+         100, 10, 0, 1, 1, 0, ?, ?, ?
+       )`,
+      [
+        snapshotId,
+        BACKUP_PROJECT_ID,
+        contextTraceId,
+        modelInvocationId,
+        selectionHash,
+        JSON.stringify(configurationSnapshot),
+        now,
+      ],
+    );
+    await transaction.execute(
+      `INSERT INTO novel_skill_invocation_items (
+         snapshot_id, item_order, skill_id, skill_version, definition_hash,
+         activation_source, selection_reason, precedence, included,
+         discarded_reason, estimated_tokens
+       ) VALUES (
+         ?, 1, 'core.maintenance', '1.0.0', ?, 'explicit', 'selected',
+         500, 1, NULL, 10
+       )`,
+      [snapshotId, definitionHash],
+    );
+    await transaction.execute(
+      `INSERT INTO projects (
+         id, name, status, revision, deletion_generation, created_at, updated_at,
+         archived_at, trashed_at, retention_until, status_before_trash
+       ) VALUES (?, 'Internal Novel Skill evaluation fixture', 'archived', 1, 0,
+                 ?, ?, ?, NULL, NULL, NULL)`,
+      [evaluationProjectId, now, now, now],
+    );
+    await transaction.execute(
+      `INSERT INTO novel_skill_evaluation_suites (
+         id, schema_version, evaluator_version, compiler_version, evaluation_project_id,
+         plan_hash, fixture_set_hash, target_manifest_hash, core_manifest_hash,
+         core_genre_manifest_hash, core_genre_preferences_manifest_hash,
+         preference_configuration_hash, model_slots_json, minimum_repetitions, created_at
+       ) VALUES (?, 1, 'novel-skill-ab@1', 'novel-skill-compiler@1',
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, ?)`,
+      [
+        evaluationSuiteId,
+        evaluationProjectId,
+        planHash,
+        NOVEL_SKILL_EVALUATION_FIXTURE_SET_HASH,
+        targetManifestHash,
+        manifests.core,
+        manifests.coreGenre,
+        manifests.coreGenrePreferences,
+        preferenceConfigurationHash,
+        JSON.stringify(modelSlots),
+        now,
+      ],
+    );
+    await insertEvaluationManifestFixtures(transaction, evaluationSuiteId, now);
+    for (const fixture of NOVEL_SKILL_EVALUATION_FIXTURE_REGISTRY) {
+      await transaction.execute(
+        `INSERT INTO novel_skill_evaluation_fixtures (
+           suite_id, fixture_id, language, origin, task_type, invocation_mode,
+           genre_tags_json, coverage_dimensions_json, contract_hash, input_content_hash
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          evaluationSuiteId,
+          fixture.fixtureId,
+          fixture.language,
+          fixture.origin,
+          fixture.taskType,
+          fixture.invocationMode,
+          JSON.stringify(fixture.genreTags),
+          JSON.stringify(fixture.coverageDimensions),
+          fixture.contractHash,
+          fixture.inputContentHash,
+        ],
+      );
+    }
+    await transaction.execute(
+      `INSERT INTO novel_skill_evaluation_runs (
+         id, suite_id, status, evaluation_status, model_assignments_json,
+         revision, started_at, completed_at, created_at
+       ) VALUES (?, ?, 'planned', 'NOT_EVALUATED', ?, 1, NULL, NULL, ?)`,
+      [
+        evaluationRunId,
+        evaluationSuiteId,
+        JSON.stringify([
+          {
+            slotId: "text_tier_a",
+            modelIdentityHash: evaluationModelIdentityHash,
+            modelArtifactHash: evaluationModelArtifactHash,
+          },
+          {
+            slotId: "text_tier_b",
+            modelIdentityHash: "a".repeat(64),
+            modelArtifactHash: "d".repeat(64),
+          },
+        ]),
+        now,
+      ],
+    );
+    await transaction.execute(
+      `UPDATE novel_skill_evaluation_runs
+       SET status = 'running', started_at = ?, revision = revision + 1
+       WHERE id = ?`,
+      [now, evaluationRunId],
+    );
+    await transaction.execute(
+      `INSERT INTO novel_skill_evaluation_cells (
+         id, run_id, suite_id, fixture_id, arm, arm_configuration_hash,
+         model_slot_id, model_tier, repetition, state, created_at
+       ) VALUES (?, ?, ?, ?, 'core', ?,
+                 'text_tier_a', 'economy', 1, 'planned', ?)`,
+      [
+        evaluationCellId,
+        evaluationRunId,
+        evaluationSuiteId,
+        evaluationFixture.fixtureId,
+        manifests.core,
+        now,
+      ],
+    );
+    let generatedCellId = 0x1000;
+    for (const { fixtureId } of NOVEL_SKILL_EVALUATION_FIXTURE_REGISTRY) {
+      for (const [arm, armHash] of [
+        ["no_skill", null],
+        ["core", manifests.core],
+        ["core_genre", manifests.coreGenre],
+        ["core_genre_preferences", manifests.coreGenrePreferences],
+      ] as const) {
+        for (const [slotId, modelTier] of [
+          ["text_tier_a", "economy"],
+          ["text_tier_b", "quality"],
+        ] as const) {
+          for (const repetition of [1, 2] as const) {
+            if (
+              fixtureId === evaluationFixture.fixtureId &&
+              arm === "core" &&
+              slotId === "text_tier_a" &&
+              repetition === 1
+            ) {
+              continue;
+            }
+            const cellId = `019f9f4a-b3c7-7350-9226-${generatedCellId
+              .toString(16)
+              .padStart(12, "0")}`;
+            generatedCellId += 1;
+            await transaction.execute(
+              `INSERT INTO novel_skill_evaluation_cells (
+                 id, run_id, suite_id, fixture_id, arm, arm_configuration_hash,
+                 model_slot_id, model_tier, repetition, state, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?)`,
+              [
+                cellId,
+                evaluationRunId,
+                evaluationSuiteId,
+                fixtureId,
+                arm,
+                armHash,
+                slotId,
+                modelTier,
+                repetition,
+                now,
+              ],
+            );
+          }
+        }
+      }
+    }
+    await transaction.execute(
+      `INSERT INTO novel_skill_evaluation_attempts (
+         id, run_id, cell_id, attempt_number, status, context_trace_id,
+         model_invocation_id, error_code, started_at, completed_at
+       ) VALUES (?, ?, ?, 1, 'started', NULL, NULL, NULL, ?, NULL)`,
+      [evaluationAttemptId, evaluationRunId, evaluationCellId, now],
+    );
+    await transaction.execute(
+      `INSERT INTO ai_candidates (
+         id, project_id, chapter_id, source, base_version_id, content, content_checksum,
+         status, incomplete, created_at, updated_at, decided_at
+       ) VALUES (?, ?, NULL, 'generate', NULL, ?, ?,
+                 'ready', 0, ?, ?, NULL)`,
+      [
+        evaluationCandidateId,
+        evaluationProjectId,
+        evaluationContent,
+        evaluationContentHash,
+        now,
+        now,
+      ],
+    );
+    await transaction.execute(
+      `INSERT INTO model_invocation_facts (
+         id, task, connection_id, catalog_entry_id, provider_kind_snapshot,
+         model_id_snapshot, route_reason, status, attempt, privacy_policy,
+         data_destination, input_tokens, output_tokens, estimated_cost_micros, currency,
+         started_at, completed_at, created_at, finish_reason, visible_content_length, streamed
+       ) VALUES (?, 'continuation', 'maintenance-custom-model', 'maintenance-model-catalog',
+                 'custom_openai_compatible', 'maintenance-writer', 'user_override',
+                 'succeeded', 1, 'cloud_allowed', 'remote', 10, 20, '30', 'USD',
+                 ?, ?, ?, 'stop', ?, 0)`,
+      [evaluationModelInvocationId, now, completedAt, now, evaluationVisibleLength],
+    );
+    await transaction.execute(
+      `INSERT INTO context_compilation_runs (
+         id, project_id, chapter_id, task_type, maximum_context_tokens,
+         required_tokens, used_tokens, remaining_tokens, discarded_tokens,
+         token_estimate_source, candidate_count, included_count, discarded_count,
+         created_at
+       ) VALUES (?, ?, NULL, 'continuation', 1000, 1, 1, 999, 0,
+                 'utf8_conservative', 1, 1, 0, ?)`,
+      [evaluationContextTraceId, evaluationProjectId, now],
+    );
+    await transaction.execute(
+      `INSERT INTO context_compilation_entries (
+         run_id, candidate_id, layer, selection_reason, included,
+         discarded_reason, estimated_tokens, evaluation_order, layer_order,
+         priority, relevance_score, required, budget_remaining_before,
+         budget_remaining_after
+       ) VALUES (?, ?, 'current_task',
+                 'Fixed evaluation task contract.', 1, NULL, 1, 1, 2,
+                 100, 1.0, 1, 1000, 999)`,
+      [evaluationContextTraceId, `evaluation-fixture:${evaluationFixture.fixtureId}`],
+    );
+    await transaction.execute(
+      `INSERT INTO context_compilation_entry_sources (
+         run_id, candidate_id, source_order, source_type, source_id,
+         source_version_id, locator, content_hash
+       ) VALUES (?, ?, 1, 'user_input', ?, NULL, 'novel_skill_evaluation_fixture', ?)`,
+      [
+        evaluationContextTraceId,
+        `evaluation-fixture:${evaluationFixture.fixtureId}`,
+        evaluationFixture.fixtureId,
+        evaluationFixture.inputContentHash,
+      ],
+    );
+    await transaction.execute(
+      `INSERT INTO context_compilation_execution_links (
+         trace_id, generation_id, generation_run_id, created_at
+       ) VALUES (?, ?, NULL, ?)`,
+      [evaluationContextTraceId, evaluationGenerationId, now],
+    );
+    await transaction.execute(
+      `INSERT INTO context_compilation_model_invocation_links (
+         trace_id, model_invocation_id, linked_at
+       ) VALUES (?, ?, ?)`,
+      [evaluationContextTraceId, evaluationModelInvocationId, now],
+    );
+    await transaction.execute(
+      `INSERT INTO context_compilation_output_candidate_links (
+         trace_id, ai_candidate_id, linked_at
+       ) VALUES (?, ?, ?)`,
+      [evaluationContextTraceId, evaluationCandidateId, now],
+    );
+    const evaluationConfigurationSnapshot = {
+      schemaVersion: 1,
+      compilerVersion: "novel-skill-compiler@1",
+      taskType: "continuation",
+      invocationMode: "draft",
+      maximumSkillTokens: 100,
+      experimentalAllowed: true,
+      genreTags: [...evaluationFixture.genreTags],
+      explicitSkillIds: ["core.evaluation_fixture"],
+      availableContextLayers: ["current_task"],
+      consideredDefinitions: [
+        {
+          skillId: "core.evaluation_fixture",
+          version: "1.0.0",
+          definitionHash: "e".repeat(64),
+          kind: "core",
+          status: "experimental",
+        },
+      ],
+      bindings: [],
+    };
+    await transaction.execute(
+      `INSERT INTO novel_skill_invocation_snapshots (
+         id, project_id, context_trace_id, model_invocation_id, task_type,
+         invocation_mode, compiler_version, maximum_skill_tokens,
+         used_skill_tokens, discarded_skill_tokens, candidate_count,
+         included_count, discarded_count, selection_hash,
+         configuration_snapshot_json, created_at
+       ) VALUES (?, ?, ?, ?, 'continuation', 'draft', 'novel-skill-compiler@1',
+                 100, 10, 0, 1, 1, 0, ?, ?, ?)`,
+      [
+        evaluationSnapshotId,
+        evaluationProjectId,
+        evaluationContextTraceId,
+        evaluationModelInvocationId,
+        await sha256Text(canonicalJson(evaluationConfigurationSnapshot)),
+        JSON.stringify(evaluationConfigurationSnapshot),
+        now,
+      ],
+    );
+    await transaction.execute(
+      `INSERT INTO novel_skill_invocation_items (
+         snapshot_id, item_order, skill_id, skill_version, definition_hash,
+         activation_source, selection_reason, precedence, included,
+         discarded_reason, estimated_tokens
+       ) VALUES (?, 1, 'core.evaluation_fixture', '1.0.0', ?, 'explicit',
+                 'selected', 200, 1, NULL, 10)`,
+      [evaluationSnapshotId, "e".repeat(64)],
+    );
+    await transaction.execute(
+      `UPDATE novel_skill_evaluation_attempts
+       SET context_trace_id = ?, model_invocation_id = ?
+       WHERE id = ? AND status = 'started'`,
+      [evaluationContextTraceId, evaluationModelInvocationId, evaluationAttemptId],
+    );
+    await transaction.execute(
+      `UPDATE novel_skill_evaluation_attempts
+       SET status = 'succeeded', context_trace_id = ?, model_invocation_id = ?,
+           error_code = NULL, completed_at = ?
+       WHERE id = ?`,
+      [evaluationContextTraceId, evaluationModelInvocationId, completedAt, evaluationAttemptId],
+    );
+    await transaction.execute(
+      `INSERT INTO novel_skill_evaluation_observations (
+         id, run_id, cell_id, attempt_id, context_trace_id, model_invocation_id,
+         output_candidate_id, novel_skill_snapshot_id, model_identity_hash,
+         model_artifact_hash,
+         arm_configuration_hash, preference_configuration_hash, evaluator_version,
+         result_hash, latency_milliseconds, input_tokens, output_tokens,
+         estimated_cost_micros, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'novel-skill-ab@1',
+                 ?, 1250, 10, 20, 30, ?)`,
+      [
+        evaluationObservationId,
+        evaluationRunId,
+        evaluationCellId,
+        evaluationAttemptId,
+        evaluationContextTraceId,
+        evaluationModelInvocationId,
+        evaluationCandidateId,
+        evaluationSnapshotId,
+        evaluationModelIdentityHash,
+        evaluationModelArtifactHash,
+        manifests.core,
+        evaluationContentHash,
+        now,
+      ],
+    );
+    for (const metric of [
+      "instruction_following",
+      "canon_preservation",
+      "character_consistency",
+      "pov_preservation",
+      "causal_progression",
+      "scene_function",
+      "dialogue_distinction",
+      "specificity",
+      "repetition_cliche_control",
+      "pacing",
+      "user_preference",
+      "unnecessary_rewrite_avoidance",
+      "evidence_completeness",
+    ] as const) {
+      await transaction.execute(
+        `INSERT INTO novel_skill_evaluation_scores (
+           observation_id, metric, score_basis_points, reviewer_id, rubric_version, scored_at
+         ) VALUES (?, ?, 9000, 'reviewer:maintenance', 'novel-skill-human-rubric@1', ?)`,
+        [evaluationObservationId, metric, now],
+      );
+    }
+    await transaction.execute(
+      `UPDATE novel_skill_evaluation_cells SET state = 'observed' WHERE id = ?`,
+      [evaluationCellId],
+    );
+    await transaction.execute(
+      `UPDATE novel_skill_evaluation_runs
+       SET status = 'invalidated', evaluation_status = 'EVIDENCE_INCOMPLETE',
+           completed_at = ?, revision = revision + 1 WHERE id = ?`,
+      [now, evaluationRunId],
+    );
+    await transaction.execute(
+      `UPDATE novel_skill_evaluation_cells SET state = 'invalidated'
+       WHERE run_id = ? AND state = 'planned'`,
+      [evaluationRunId],
+    );
+    await transaction.execute(
+      `INSERT INTO novel_skill_evaluation_manual_decisions (
+         id, run_id, target_manifest_hash, decision, rationale_hash, created_at
+       ) VALUES ('019f9f4a-b3c7-7350-9226-000000000763', ?, ?,
+                 'KEEP_DISABLED', ?, ?)`,
+      [evaluationRunId, targetManifestHash, "b".repeat(64), now],
+    );
+    await transaction.execute(
+      `INSERT INTO novel_skill_evaluation_protocols (
+         suite_id, schema_version, execution_protocol_version, protocol_hash,
+         request_profile_manifest_hash, context_baseline_manifest_hash,
+         prompt_template_version, prompt_template_hash, rubric_version,
+         rubric_content_hash, evaluator_contract_hash, blinding_protocol_version,
+         blinding_protocol_hash, randomization_protocol_version,
+         randomization_protocol_hash, created_at
+       ) VALUES (?, 1, 'novel-skill-paid-ab@1', ?, ?, ?, 'evaluation-template@1', ?,
+                 'novel-skill-human-rubric@1', ?, ?, 'blind-review@1', ?,
+                 'randomized-review@1', ?, ?)`,
+      [
+        evaluationSuiteId,
+        paidProtocolHash,
+        paidRequestProfileManifestHash,
+        paidContextBaselineManifestHash,
+        "4".repeat(64),
+        "5".repeat(64),
+        "6".repeat(64),
+        "7".repeat(64),
+        "8".repeat(64),
+        now,
+      ],
+    );
+    for (const profile of paidProfiles) {
+      await transaction.execute(
+        `INSERT INTO novel_skill_evaluation_request_profiles (
+           suite_id, task_type, profile_version, request_profile_hash,
+           maximum_input_tokens, maximum_output_tokens, temperature_basis_points,
+           top_p_basis_points, reasoning_policy, response_format, streaming,
+           stop_policy_hash, created_at
+         ) VALUES (?, ?, 'model-hub-exact-evaluation-request@1', ?, 7000, 2048, 0, 10000,
+                   'disabled', 'text', 1, ?, ?)`,
+        [evaluationSuiteId, profile.taskType, profile.requestProfileHash, paidStopPolicyHash, now],
+      );
+    }
+    for (const baseline of paidBaselines) {
+      await transaction.execute(
+        `INSERT INTO novel_skill_evaluation_context_baselines (
+           suite_id, fixture_id, baseline_contract_hash,
+           included_source_manifest_hash, omitted_source_manifest_hash,
+           compiled_baseline_hash, baseline_token_budget, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, 7000, ?)`,
+        [
+          evaluationSuiteId,
+          baseline.fixtureId,
+          baseline.baselineContractHash,
+          baseline.includedSourceManifestHash,
+          baseline.omittedSourceManifestHash,
+          baseline.compiledBaselineHash,
+          now,
+        ],
+      );
+    }
+  });
+}
+
+async function expectNovelSkillBackupTamperRejected(
+  tamper: (backup: NodeSqliteExecutor) => Promise<void>,
+): Promise<void> {
+  const executor = new NodeSqliteExecutor(inkShadowMigration);
+  const service = new DatabaseMaintenanceService(executor);
+  const now = "2026-07-27T00:00:00.000Z";
+  await executor.execute(
+    `INSERT INTO projects (
+       id, name, status, revision, deletion_generation, created_at, updated_at,
+       archived_at, trashed_at, retention_until, status_before_trash
+     ) VALUES (?, 'Restore semantic tamper host', 'active', 1, 0,
+               ?, ?, NULL, NULL, NULL, NULL)`,
+    [BACKUP_PROJECT_ID, now, now],
+  );
+  await insertModelHubExpertConnection(executor);
+  await insertNovelSkillBackupScenario(executor);
+  expect(await service.createConsistentBackup(backupPath)).toMatchObject({ ok: true });
+  const backup = new NodeSqliteExecutor("", backupPath);
+  try {
+    await tamper(backup);
+  } finally {
+    await backup.close();
+  }
+  expect(await service.restoreConsistentBackup(backupPath)).toMatchObject({
+    ok: false,
+    error: { details: { operation: "DATABASE_RESTORE_BACKUP_INCOMPATIBLE" } },
+  });
+  await executor.close();
 }
 
 async function insertProjectKeyMetadata(executor: NodeSqliteExecutor): Promise<void> {

@@ -93,6 +93,7 @@ describe("ChapterSummaryService", () => {
     });
     const payload = parseStoredChapterSummaryPayload(fact);
     expect(payload).toMatchObject({
+      authorityMode: "structured_verified",
       sourceProjectId: ids.project,
       sourceChapterId: ids.chapter,
       sourceVersionId: ids.version1,
@@ -107,6 +108,29 @@ describe("ChapterSummaryService", () => {
         maximumSegments: 48,
         tokenEstimate: "model_hub_estimate_not_provider_tokenizer",
       },
+    });
+  });
+
+  it("stores text-only fallback as a non-authoritative summary without structured events", async () => {
+    const harness = await createHarness("A saved chapter.");
+    harness.model.authorityMode = "plain_non_authoritative";
+    const receipt = await harness.service.summarizeSavedVersion({
+      projectId: ids.project,
+      chapterId: ids.chapter,
+      versionId: ids.version1,
+      trigger: "user_rebuild",
+    });
+
+    expect(receipt).toMatchObject({
+      status: "generated",
+      code: "CHAPTER_SUMMARY_GENERATED_PLAIN_NON_AUTHORITATIVE",
+      authorityMode: "plain_non_authoritative",
+    });
+    const payload = receipt.fact === null ? null : parseStoredChapterSummaryPayload(receipt.fact);
+    expect(payload).toMatchObject({
+      authorityMode: "plain_non_authoritative",
+      keyEvents: [],
+      continuityNotes: [],
     });
   });
 
@@ -290,6 +314,7 @@ class SummaryModel implements ChapterSummaryModelPort {
   public providerCalls = 0;
   public unavailable = false;
   public verifiedLocalEligible = true;
+  public authorityMode: ChapterSummaryModelOutput["authorityMode"] = "structured_verified";
   public beforeReturn: (() => Promise<void>) | null = null;
   public lastInput: ChapterSummaryModelInput | null = null;
 
@@ -310,6 +335,7 @@ class SummaryModel implements ChapterSummaryModelPort {
     const evidenceId = input.segments[0]?.evidenceId;
     if (evidenceId === undefined) throw new Error("missing segment");
     return Object.freeze({
+      authorityMode: this.authorityMode,
       summary: "Chapter summary",
       keyEvents: Object.freeze([{ text: "An event", evidenceIds: Object.freeze([evidenceId]) }]),
       continuityNotes: Object.freeze([

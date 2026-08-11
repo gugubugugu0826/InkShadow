@@ -3,6 +3,7 @@ import type { Clock, UuidV7Generator } from "@inkshadow/domain";
 import {
   getModelProviderPreset,
   isLoopbackModelBaseUrl,
+  modelProviderOfficialMetadataFallback,
   modelProviderTextCapabilityProbePolicy,
   modelProviderVisibleProsePolicy,
   type NovelAiTask,
@@ -43,6 +44,8 @@ export interface InspectModelHubTextTaskInput {
   readonly messages: readonly NativeModelMessage[];
   readonly maximumOutputTokens: number;
   readonly temperature?: number;
+  /** Narrow degradation used by rebuildable summaries; formal extraction keeps task defaults. */
+  readonly capabilityPolicy?: "task_default" | "text_generation_only";
   /** Fail closed before dispatch when chapter content must stay on this device. */
   readonly requiredDataDestination?: "local";
 }
@@ -52,6 +55,10 @@ export interface ExecuteModelHubTextTaskInput extends InspectModelHubTextTaskInp
   readonly generationId?: string;
   /** Applies a narrow provider-aware reasoning policy at the named task boundary. */
   readonly reasoningPolicy?: "capability_probe" | "visible_prose";
+  /** A one-shot recovery override after a reasoning-only truncation. */
+  readonly reasoningModeOverride?: "disabled";
+  /** Request provider JSON mode only after structured output has evidence. */
+  readonly responseFormat?: "json_object";
   readonly onBeforeDispatch?: (
     selection: Readonly<{
       generationId: string;
@@ -64,6 +71,12 @@ export interface ExecuteModelHubTextTaskInput extends InspectModelHubTextTaskInp
       localOnlyEligible?: boolean;
     }>,
   ) => void | Promise<void>;
+  /**
+   * Final synchronous cancellation/authorization latch. It runs after every
+   * async pre-dispatch check and immediately before the gateway call, so a
+   * cancellation raised while onBeforeDispatch is awaiting cannot be lost.
+   */
+  readonly assertBeforeProviderDispatch?: () => void;
   readonly onDelta?: (accumulatedText: string) => void;
 }
 
@@ -113,6 +126,14 @@ export interface ModelHubTextTaskInspection {
   readonly estimatedTotalTokens: number;
   readonly inputTokenLimit: number | null;
   readonly outputTokenLimit: number | null;
+  readonly tokenLimitEvidence: Readonly<{
+    readonly source: "catalog" | "provider_official_docs" | "unknown";
+    readonly version: string | null;
+    readonly updatedAt: string | null;
+    readonly sourceUrl: string | null;
+    /** Provider declaration is not an InkShadow runtime capability test. */
+    readonly verifiedByInkShadow: boolean;
+  }>;
   readonly pricing: Readonly<{
     currency: string | null;
     inputMicrosPerMillionTokens: string | null;
@@ -135,6 +156,7 @@ export class ModelHubExecutionError extends Error {
     message: string,
     public readonly retryable = false,
     public readonly dispatched = false,
+    public readonly failure: SafeAiFailureMetadata | null = null,
   ) {
     super(message);
     this.name = "ModelHubExecutionError";
@@ -151,6 +173,9 @@ interface ResolvedTextTarget {
   readonly estimatedInputTokens: number;
   readonly estimatedMaximumCostMicros: string | null;
   readonly costCurrency: string | null;
+  readonly inputTokenLimit: number | null;
+  readonly outputTokenLimit: number | null;
+  readonly tokenLimitEvidence: ModelHubTextTaskInspection["tokenLimitEvidence"];
 }
 
 interface ResolvedTextPlan {
@@ -263,6 +288,7 @@ export async function executeModelHubTextTask(
         costPrivacy: current.target.costPrivacy,
       }),
     );
+    input.assertBeforeProviderDispatch?.();
     dispatched = true;
     const reasoningPolicy =
       input.reasoningPolicy === "capability_probe"
@@ -278,9 +304,12 @@ export async function executeModelHubTextTask(
       dispatchScope: input.dispatchScope,
       maxOutputTokens: target.maximumOutputTokens,
       ...(target.temperature === undefined ? {} : { temperature: target.temperature }),
-      ...(reasoningPolicy?.reasoningMode === undefined || reasoningPolicy.reasoningMode === null
-        ? {}
-        : { reasoningMode: reasoningPolicy.reasoningMode }),
+      ...(input.reasoningModeOverride !== undefined
+        ? { reasoningMode: input.reasoningModeOverride }
+        : reasoningPolicy?.reasoningMode === undefined || reasoningPolicy.reasoningMode === null
+          ? {}
+          : { reasoningMode: reasoningPolicy.reasoningMode }),
+      ...(input.responseFormat === undefined ? {} : { responseFormat: input.responseFormat }),
       ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
     });
     const cost = calculateActualCost(target.costPrivacy, generated.usage);
@@ -296,6 +325,10 @@ export async function executeModelHubTextTask(
       cachedInputTokens: generated.usage?.cachedInputTokens ?? null,
       estimatedCostMicros: cost,
       currency: cost === null ? null : target.costCurrency,
+      completion: {
+        visibleContentLength: Array.from(generated.text).length,
+        stream: generated.streamed ?? null,
+      },
       expectedRevision: invocation.revision,
     });
     return Object.freeze({
@@ -342,7 +375,13 @@ export async function executeModelHubTextTask(
       expectedRevision: invocation.revision,
     });
     void invocation;
-    throw normalized;
+    throw new ModelHubExecutionError(
+      normalized.code,
+      normalized.message,
+      normalized.retryable,
+      normalized.dispatched,
+      failure,
+    );
   }
 }
 
@@ -412,8 +451,9 @@ async function resolveTextPlan(
     temperature: target.temperature,
     estimatedInputTokens: target.estimatedInputTokens,
     estimatedTotalTokens: target.estimatedInputTokens + target.maximumOutputTokens,
-    inputTokenLimit: target.catalogEntry.inputTokenLimit,
-    outputTokenLimit: target.catalogEntry.outputTokenLimit,
+    inputTokenLimit: target.inputTokenLimit,
+    outputTokenLimit: target.outputTokenLimit,
+    tokenLimitEvidence: target.tokenLimitEvidence,
     pricing: Object.freeze({
       currency: target.costPrivacy.currency,
       inputMicrosPerMillionTokens: target.costPrivacy.inputMicrosPerMillionTokens,
@@ -482,7 +522,11 @@ async function resolveTextTarget(
   }
 
   const evidence = await dependencies.modelHub.listCapabilityEvidence(catalogEntry.id);
-  const missingCapability = requiredCapabilitiesForNovelTask(input.task).find(
+  const requiredCapabilities =
+    input.capabilityPolicy === "text_generation_only"
+      ? (["text_generation"] as const)
+      : requiredCapabilitiesForNovelTask(input.task);
+  const missingCapability = requiredCapabilities.find(
     (capability) =>
       resolveModelCapabilityVerdict({
         catalogEntryId: catalogEntry.id,
@@ -546,27 +590,56 @@ async function resolveTextTarget(
     );
   }
 
-  const policy = resolveTextParameterPolicy(route, input, connection);
+  const officialFallback = modelProviderOfficialMetadataFallback(connection.providerKind, now, {
+    baseUrl: connection.baseUrl,
+    modelId: catalogEntry.providerModelId,
+  });
+  const inputTokenLimit =
+    catalogEntry.inputTokenLimit ?? officialFallback?.contextWindowTokens ?? null;
+  const outputTokenLimit =
+    catalogEntry.outputTokenLimit ?? officialFallback?.maximumOutputTokens ?? null;
+  const tokenLimitEvidence: ModelHubTextTaskInspection["tokenLimitEvidence"] =
+    catalogEntry.inputTokenLimit !== null || catalogEntry.outputTokenLimit !== null
+      ? Object.freeze({
+          source: "catalog" as const,
+          version: null,
+          updatedAt: catalogEntry.lastSeenAt,
+          sourceUrl: null,
+          verifiedByInkShadow: false,
+        })
+      : officialFallback === null
+        ? Object.freeze({
+            source: "unknown" as const,
+            version: null,
+            updatedAt: null,
+            sourceUrl: null,
+            verifiedByInkShadow: false,
+          })
+        : Object.freeze({
+            source: officialFallback.evidenceSource,
+            version: officialFallback.evidenceVersion,
+            updatedAt: officialFallback.evidenceUpdatedAt,
+            sourceUrl: officialFallback.sourceUrl,
+            verifiedByInkShadow: false,
+          });
+  const requestedPolicy = resolveTextParameterPolicy(route, input, connection);
+  const policy = Object.freeze({
+    ...requestedPolicy,
+    maximumOutputTokens:
+      outputTokenLimit === null
+        ? requestedPolicy.maximumOutputTokens
+        : Math.min(requestedPolicy.maximumOutputTokens, outputTokenLimit),
+  });
   const estimatedInputTokens = estimateMessageTokens(input.messages);
   if (
-    catalogEntry.inputTokenLimit !== null &&
-    estimatedInputTokens + policy.maximumOutputTokens > catalogEntry.inputTokenLimit
+    inputTokenLimit !== null &&
+    estimatedInputTokens + policy.maximumOutputTokens > inputTokenLimit
   ) {
     throw executionError(
       "MODEL_HUB_CONTEXT_LIMIT_EXCEEDED",
       "当前内容和预留输出超过所选模型的上下文上限。请缩短内容或切换长上下文模型。",
     );
   }
-  if (
-    catalogEntry.outputTokenLimit !== null &&
-    policy.maximumOutputTokens > catalogEntry.outputTokenLimit
-  ) {
-    throw executionError(
-      "MODEL_HUB_OUTPUT_LIMIT_EXCEEDED",
-      "这项任务请求的输出长度超过模型上限。请降低输出长度或切换模型。",
-    );
-  }
-
   const estimatedMaximumCostMicros = calculateMaximumCost(
     costPrivacy,
     estimatedInputTokens,
@@ -602,6 +675,9 @@ async function resolveTextTarget(
     estimatedInputTokens,
     estimatedMaximumCostMicros,
     costCurrency: estimatedMaximumCostMicros === null ? null : costPrivacy.currency,
+    inputTokenLimit,
+    outputTokenLimit,
+    tokenLimitEvidence,
   });
 }
 
@@ -612,7 +688,12 @@ function resolveTextParameterPolicy(
 ): Readonly<{ maximumOutputTokens: number; temperature: number | undefined }> {
   const configuredOutput = route.parameterPolicy.maximumOutputTokens;
   const maximumOutputTokens =
-    configuredOutput === undefined ? input.maximumOutputTokens : configuredOutput;
+    route.routeOrigin === "user" && configuredOutput !== undefined
+      ? Math.min(
+          input.maximumOutputTokens,
+          typeof configuredOutput === "number" ? configuredOutput : Number.NaN,
+        )
+      : input.maximumOutputTokens;
   if (
     typeof maximumOutputTokens !== "number" ||
     !Number.isSafeInteger(maximumOutputTokens) ||
@@ -796,7 +877,13 @@ function safePreDispatchCode(cause: unknown): string | null {
 
 function normalizeDispatchedError(cause: unknown): ModelHubExecutionError {
   if (cause instanceof ModelHubExecutionError) {
-    return new ModelHubExecutionError(cause.code, cause.message, cause.retryable, true);
+    return new ModelHubExecutionError(
+      cause.code,
+      cause.message,
+      cause.retryable,
+      true,
+      cause.failure,
+    );
   }
   if (
     typeof cause === "object" &&

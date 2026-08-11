@@ -2,7 +2,7 @@
 
 > 基于源码快照：2026-08-10  
 > 文档状态：`SUPPORTING_CURRENT`  
-> Desktop 发布基线：`0.2.1`；设计基线：`DESIGN v0.3.1b`  
+> Desktop 发布基线：`0.2.2`；设计基线：`DESIGN v0.3.1b`  
 > 覆盖范围：`packages/*/src` 的 17 个 workspace package，以及 `packages/data/migrations` 的 59 个本地数据库迁移（最新 `0059`）
 
 这些包不是“页面”，也不应全部叫作后端。它们承载可被 Desktop、Cloud API、Web 或测试复用的领域规则、用例、契约、数据适配器和 UI 基础件。正常依赖方向是“领域与协议 → 应用用例 → 基础设施适配器 → 应用入口”；`scripts/check-boundaries.mjs` 会检查主要边界。

@@ -1,3 +1,4 @@
+import { resolveContinuationOutputContract } from "@inkshadow/ai-core";
 import { createProjectSeed, updateProjectSeedField } from "@inkshadow/domain";
 import { describe, expect, it, vi } from "vitest";
 
@@ -31,6 +32,10 @@ const CHARACTER_ID = "character.lin-yao";
 const CONFIRMED_PREMISE = "林遥在永夜港寻找失踪的姐姐。";
 const CONFIRMED_BOUNDARY = "人物死亡状态必须服从已确认设定。";
 const SUMMARY_TEXT = "林遥死亡，钟楼大门随后开启。";
+const STANDARD_CONTINUATION_TOKENS = resolveContinuationOutputContract({
+  profile: "standard",
+  providerOutputLimit: 20_000,
+}).requestedMaxOutputTokens;
 
 /**
  * This is an internal closure test only. Its deterministic in-process gateway
@@ -136,7 +141,7 @@ describe("core creative loop internal closure", () => {
       status: "ready",
     });
     const continuationCall = harness.generate.mock.calls.find(
-      ([input]) => input.maxOutputTokens === 2_048,
+      ([input]) => input.maxOutputTokens === STANDARD_CONTINUATION_TOKENS,
     )?.[0];
     expect(joinMessages(continuationCall)).toContain(CONFIRMED_PREMISE);
     expect(joinMessages(continuationCall)).toContain(CONFIRMED_BOUNDARY);
@@ -364,6 +369,7 @@ function createInternalFakeHarness(): Readonly<{
   };
   const preferences = new BrowserChapterSummaryPreferenceStore(storage);
   const chapterSummaries = new ChapterSummaryService({
+    projects: developmentRuntime.repositories.projects,
     chapters: developmentRuntime.repositories.chapters,
     chapterVersions: developmentRuntime.repositories.chapterVersions,
     facts: developmentRuntime.story.facts,
@@ -402,7 +408,7 @@ function createInternalFakeHarness(): Readonly<{
 }
 
 function internalFakeGeneration(input: NativeModelGenerationInput): NativeModelGenerationResult {
-  if (input.maxOutputTokens === 2_048) {
+  if (input.maxOutputTokens === STANDARD_CONTINUATION_TOKENS) {
     return { text: OPENING, usage: null };
   }
   if (input.maxOutputTokens === 3_500) {

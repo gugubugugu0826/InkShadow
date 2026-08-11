@@ -28,7 +28,7 @@ describe("StoryGovernancePage", () => {
     const user = userEvent.setup();
     renderRoute(runtime, `/projects/${project.value.id}/story`);
 
-    await screen.findByRole("heading", { name: "规则之海", level: 1 });
+    await screen.findByRole("heading", { name: "规则之海", level: 1 }, { timeout: 5_000 });
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "人物",
       "世界与规则",

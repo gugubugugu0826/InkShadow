@@ -24,10 +24,16 @@ import {
   readSafeGenerationPreflightDiagnostic,
   type SafeGenerationPreflightDiagnostic,
 } from "./generation-preflight-diagnostics";
+import {
+  readSafeModelHubSessionDiagnostics,
+  type SafeModelHubActionDiagnostic,
+  type SafeModelHubUiSnapshotDiagnostic,
+} from "./model-hub-ui-diagnostics";
 import type { DesktopRuntime } from "./runtime";
+import type { PersistedGenerationPreflight } from "./generation-governance-store";
 
 export interface DesktopDiagnosticBundle {
-  readonly schemaVersion: 2;
+  readonly schemaVersion: 3;
   readonly summary: DiagnosticSummary;
   readonly database: {
     readonly integrityMessageCount: number | null;
@@ -40,7 +46,15 @@ export interface DesktopDiagnosticBundle {
   readonly aiRoutingSummary: AiRoutingDiagnosticSummary;
   readonly recentAiRoutingFailures: readonly [];
   readonly recentAiFailures: readonly RecentAiFailure[];
+  readonly modelHubUiSnapshot: SafeModelHubUiSnapshotDiagnostic | null;
+  readonly recentModelHubActions: readonly SafeModelHubActionDiagnostic[];
+  readonly currentSessionStartedAt: string;
+  readonly currentSessionErrorCodes: readonly string[];
+  readonly historicalErrorCodes: readonly string[];
   readonly generationPreflight: SafeGenerationPreflightDiagnostic | null;
+  readonly generationBudget: PersistedGenerationPreflight["generationBudget"] | null;
+  readonly contextSelectionSummary: PersistedGenerationPreflight["contextSelectionSummary"] | null;
+  readonly chapterSummaryStatus: null;
   readonly recentLogs: readonly [];
   readonly privacy: {
     readonly projectContentIncluded: false;
@@ -80,6 +94,8 @@ export async function collectDesktopDiagnosticArtifact(
   let modelHubCatalog: readonly ModelCatalogEntry[] = [];
   let modelHubRoutes: readonly NovelTaskRoute[] = [];
   let modelHubCapabilityEvidence: readonly ModelCapabilityEvidence[] = [];
+  let generationBudget: DesktopDiagnosticBundle["generationBudget"] = null;
+  let contextSelectionSummary: DesktopDiagnosticBundle["contextSelectionSummary"] = null;
 
   try {
     const taskCenter = await runtime.taskCenter.load();
@@ -174,6 +190,30 @@ export async function collectDesktopDiagnosticArtifact(
     errorCodes.push(errorCode(cause, "AI_FAILURE_DIAGNOSTIC_UNAVAILABLE"));
   }
 
+  try {
+    const projects = await runtime.repositories.projects.list({
+      statuses: ["active", "archived", "trashed"],
+      search: null,
+    });
+    if (projects.ok) {
+      const runs = (
+        await Promise.all(
+          projects.value.map((project) =>
+            runtime.generationGovernance.listRunsByProjectId(project.id),
+          ),
+        )
+      )
+        .flat()
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      generationBudget = runs[0]?.preflight.generationBudget ?? null;
+      contextSelectionSummary = runs[0]?.preflight.contextSelectionSummary ?? null;
+    } else {
+      errorCodes.push(projects.error.code);
+    }
+  } catch (cause: unknown) {
+    errorCodes.push(errorCode(cause, "GENERATION_BUDGET_DIAGNOSTIC_UNAVAILABLE"));
+  }
+
   const aiRoutingSummary = toAiRoutingDiagnosticSummary(
     buildModelHubRoutingVisibility({
       connections: modelHubConnections,
@@ -186,6 +226,12 @@ export async function collectDesktopDiagnosticArtifact(
       loadFailed: modelHubConnectionCount === null,
       saveFailed: false,
     }),
+  );
+  const modelHubSession = readSafeModelHubSessionDiagnostics(runtime, runtime.clock.now());
+  const { currentSessionErrorCodes, historicalErrorCodes } = partitionDiagnosticErrorCodes(
+    modelHubSession.currentSessionStartedAt,
+    modelHubSession.currentSessionErrorCodes,
+    recentAiFailures,
   );
 
   const searchHealth = runtime.search.health();
@@ -210,7 +256,7 @@ export async function collectDesktopDiagnosticArtifact(
     taskStateCounts,
     requestIds,
     configuration: {
-      diagnosticSchemaVersion: 2,
+      diagnosticSchemaVersion: 3,
       runtimeMode: runtime.mode,
       storageBackend: runtime.mode === "tauri" ? "sqlite" : "development_local_storage",
       telemetryEnabled: false,
@@ -258,9 +304,10 @@ export async function collectDesktopDiagnosticArtifact(
       : [
           "Browser development mode does not provide native embedding or persistent vector capability.",
         ]),
+    "A bounded global chapter-summary status reader is not available; chapterSummaryStatus is null rather than inferred from routes or tasks.",
   ];
   const bundle: DesktopDiagnosticBundle = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     summary,
     database: {
       integrityMessageCount,
@@ -270,7 +317,15 @@ export async function collectDesktopDiagnosticArtifact(
     aiRoutingSummary,
     recentAiRoutingFailures: [],
     recentAiFailures,
+    modelHubUiSnapshot: modelHubSession.modelHubUiSnapshot,
+    recentModelHubActions: modelHubSession.recentModelHubActions,
+    currentSessionStartedAt: modelHubSession.currentSessionStartedAt,
+    currentSessionErrorCodes,
+    historicalErrorCodes,
     generationPreflight: readSafeGenerationPreflightDiagnostic(runtime),
+    generationBudget,
+    contextSelectionSummary,
+    chapterSummaryStatus: null,
     recentLogs: [],
     privacy: {
       projectContentIncluded: false,
@@ -287,6 +342,33 @@ export async function collectDesktopDiagnosticArtifact(
     content: JSON.stringify(bundle, null, 2),
     bundle,
   };
+}
+
+export function partitionDiagnosticErrorCodes(
+  currentSessionStartedAt: string,
+  modelHubActionErrorCodes: readonly string[],
+  recentAiFailures: readonly Pick<RecentAiFailure, "timestamp" | "normalizedErrorCode">[],
+): Readonly<{
+  currentSessionErrorCodes: readonly string[];
+  historicalErrorCodes: readonly string[];
+}> {
+  return Object.freeze({
+    currentSessionErrorCodes: Object.freeze([
+      ...new Set([
+        ...modelHubActionErrorCodes,
+        ...recentAiFailures.flatMap(({ timestamp, normalizedErrorCode }) =>
+          timestamp >= currentSessionStartedAt ? [normalizedErrorCode] : [],
+        ),
+      ]),
+    ]),
+    historicalErrorCodes: Object.freeze([
+      ...new Set(
+        recentAiFailures.flatMap(({ timestamp, normalizedErrorCode }) =>
+          timestamp < currentSessionStartedAt ? [normalizedErrorCode] : [],
+        ),
+      ),
+    ]),
+  });
 }
 
 function emptyTaskStateCounts(): Record<TaskStatus, number> {

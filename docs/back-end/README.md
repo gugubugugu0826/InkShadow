@@ -2,7 +2,7 @@
 
 > 文档状态：`SUPPORTING_CURRENT`  
 > 基于源码复核：2026-08-10  
-> Desktop 发布基线（App Version）：`0.2.1`  
+> Desktop 发布基线（App Version）：`0.2.2`  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
 > 文档性质：当前实现指引，不把计划代码描述成已部署能力
 
@@ -18,7 +18,7 @@ InkShadow 不是只有“前端”和“后端”两块。除用户界面外，�
 称为云后端。
 
 DESIGN v0.3.1b 只约束目标界面与交互验收；它不会改变 Tauri、数据库或待发布安装包的
-0.2.1 Desktop 发布基线。
+0.2.2 Desktop 发布基线。
 
 ## 文档导航与状态
 

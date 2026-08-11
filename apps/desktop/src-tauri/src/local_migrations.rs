@@ -446,6 +446,41 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0059_generation_preflight_cost_status.sql"
                 ),
             ),
+            migration(
+                63,
+                "persist content-free novel skill registry and invocation receipts",
+                include_str!(
+                    "../../../../packages/data/migrations/0060_novel_skill_registry.sql"
+                ),
+            ),
+            migration(
+                64,
+                "persist content-free novel skill evaluation evidence ledger",
+                include_str!(
+                    "../../../../packages/data/migrations/0061_novel_skill_evaluation_ledger.sql"
+                ),
+            ),
+            migration(
+                65,
+                "keep projects active for the complete native model dispatch lifecycle",
+                include_str!(
+                    "../../../../packages/data/migrations/0062_project_dispatch_active_guard.sql"
+                ),
+            ),
+            migration(
+                66,
+                "persist paid novel skill evaluation dispatch and blind review authority",
+                include_str!(
+                    "../../../../packages/data/migrations/0063_novel_skill_evaluation_paid_runner.sql"
+                ),
+            ),
+            migration(
+                67,
+                "freeze content-free paid evaluation predispatch authority",
+                include_str!(
+                    "../../../../packages/data/migrations/0064_novel_skill_evaluation_predispatch_authority.sql"
+                ),
+            ),
         ]),
         ignore_missing: false,
         locking: true,
@@ -542,7 +577,10 @@ mod tests {
         Connection, Row, SqliteConnection,
     };
 
-    use super::{local_migrator, run_local_migrations};
+    use super::{
+        local_migrator, migration_subset, run_foreign_key_disabled_migration, run_local_migrations,
+        MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION, ZHIPU_GLM_MIGRATION_VERSION,
+    };
 
     fn test_migrator(migrations: Vec<Migration>) -> Migrator {
         Migrator {
@@ -618,6 +656,14 @@ mod tests {
         .await
         .expect("native dispatch lease schema");
         assert_eq!(dispatch_leases, 1);
+        let project_dispatch_status_guard: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'project_remote_dispatch_project_status_guard'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("project dispatch lifecycle guard");
+        assert_eq!(project_dispatch_status_guard, 1);
         let story_settings_receipts: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema
              WHERE type = 'table' AND name = 'story_settings_import_receipts'",
@@ -634,6 +680,72 @@ mod tests {
         .await
         .expect("generation cost status schema");
         assert_eq!(generation_cost_status, 1);
+        let novel_skill_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table'
+               AND name IN (
+                 'novel_skill_definitions',
+                 'project_novel_skill_bindings',
+                 'novel_skill_invocation_snapshots',
+                 'novel_skill_invocation_items'
+               )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("novel skill schema");
+        assert_eq!(novel_skill_tables, 4);
+        let (novel_skill_migration_succeeded, novel_skill_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 63")
+                .fetch_one(&mut connection)
+                .await
+                .expect("novel skill migration receipt");
+        assert_eq!(novel_skill_migration_succeeded, 1);
+        assert_eq!(novel_skill_checksum.len(), 48);
+        let predispatch_authority_table: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table'
+               AND name = 'novel_skill_evaluation_predispatch_authority_snapshots'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("predispatch authority schema");
+        assert_eq!(predispatch_authority_table, 1);
+        let predispatch_authority_guards: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'trigger'
+               AND name IN (
+                 'novel_skill_evaluation_predispatch_authority_insert_guard',
+                 'novel_skill_evaluation_predispatch_authority_immutable_update',
+                 'novel_skill_evaluation_predispatch_authority_immutable_delete',
+                 'novel_skill_evaluation_reservation_authority_bind_guard',
+                 'novel_skill_evaluation_reservation_authority_dispatch_guard',
+                 'novel_skill_evaluation_reservation_authority_settlement_guard'
+               )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("predispatch authority guards");
+        assert_eq!(predispatch_authority_guards, 6);
+        let (authority_migration_succeeded, authority_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 67")
+                .fetch_one(&mut connection)
+                .await
+                .expect("predispatch authority migration receipt");
+        assert_eq!(authority_migration_succeeded, 1);
+        assert_eq!(authority_checksum.len(), 48);
+        let forbidden_authority_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM pragma_table_info('novel_skill_evaluation_predispatch_authority_snapshots')
+             WHERE lower(name) IN (
+               'prompt_text', 'prompt_body', 'request_body', 'response_text', 'response_body',
+               'output_text', 'reasoning_text', 'reasoning_body', 'credential_ref', 'api_key',
+               'secret'
+             )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("content-free predispatch authority columns");
+        assert_eq!(forbidden_authority_columns, 0);
 
         sqlx::query(
             "INSERT INTO model_provider_connections (
@@ -696,6 +808,556 @@ mod tests {
             .await
             .expect("foreign-key enforcement restored");
         assert_eq!(foreign_keys, 1);
+    }
+
+    #[tokio::test]
+    async fn upgrades_a_version_62_database_to_the_novel_skill_registry_and_restarts() {
+        let mut connection = SqliteConnection::connect("sqlite::memory:")
+            .await
+            .expect("open sqlite");
+        let full = local_migrator();
+        let through_generation_cost_status = test_migrator(
+            full.iter()
+                .filter(|migration| migration.version <= 62)
+                .cloned()
+                .collect(),
+        );
+        let before_zhipu = migration_subset(&through_generation_cost_status, |migration| {
+            migration.version < ZHIPU_GLM_MIGRATION_VERSION
+        });
+        before_zhipu
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate before Zhipu provider registry");
+        run_foreign_key_disabled_migration(
+            &mut connection,
+            &through_generation_cost_status,
+            ZHIPU_GLM_MIGRATION_VERSION,
+            "foreign-key violations remained after test Zhipu migration",
+        )
+        .await
+        .expect("migrate Zhipu provider registry");
+        let before_content_quality =
+            migration_subset(&through_generation_cost_status, |migration| {
+                migration.version > ZHIPU_GLM_MIGRATION_VERSION
+                    && migration.version < MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+            });
+        before_content_quality
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate before Model Hub content quality task");
+        run_foreign_key_disabled_migration(
+            &mut connection,
+            &through_generation_cost_status,
+            MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION,
+            "foreign-key violations remained after test Model Hub task migration",
+        )
+        .await
+        .expect("migrate Model Hub content quality task");
+        let through_version_62 = migration_subset(&through_generation_cost_status, |migration| {
+            migration.version > MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+        });
+        through_version_62
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate through version 62");
+
+        sqlx::query(
+            "INSERT INTO projects (
+               id, name, status, revision, deletion_generation, created_at, updated_at
+             ) VALUES (
+               'native-skill-project', 'Novel skill migration', 'active', 1, 0,
+               '2026-08-10T00:00:00.000Z', '2026-08-10T00:00:00.000Z'
+             )",
+        )
+        .execute(&mut connection)
+        .await
+        .expect("insert pre-migration project");
+
+        run_local_migrations(&mut connection)
+            .await
+            .expect("upgrade through version 63");
+        run_local_migrations(&mut connection)
+            .await
+            .expect("reuse version 63 migration history");
+
+        sqlx::query(
+            "INSERT INTO novel_skill_definitions (
+               skill_id, version, display_name, summary, kind, owner_scope, status,
+               default_enabled, precedence, task_types_json, activation_json,
+               context_requirements_json, instructions_json, output_contract_json,
+               validation_json, definition_hash, created_at
+             ) VALUES (
+               'core.native_test', '1.0.0', 'Native test', 'Native migration fixture.',
+               'core', 'builtin', 'experimental', 0, 500, '[\"continuation\"]',
+               '{}', '{}', '{}', '{}', '{}', ?, '2026-08-10T00:00:00.000Z'
+             )",
+        )
+        .bind("a".repeat(64))
+        .execute(&mut connection)
+        .await
+        .expect("insert immutable skill definition");
+        sqlx::query(
+            "INSERT INTO project_novel_skill_bindings (
+               project_id, skill_id, pinned_version, enabled, activation_mode,
+               task_overrides_json, revision, created_at, updated_at
+             ) VALUES (
+               'native-skill-project', 'core.native_test', '1.0.0', 1, 'manual',
+               '{}', 1, '2026-08-10T00:00:00.000Z', '2026-08-10T00:00:00.000Z'
+             )",
+        )
+        .execute(&mut connection)
+        .await
+        .expect("bind migrated skill to active project");
+
+        let project_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE id = 'native-skill-project'")
+                .fetch_one(&mut connection)
+                .await
+                .expect("pre-migration project retained");
+        assert_eq!(project_count, 1);
+        let binding_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM project_novel_skill_bindings
+             WHERE project_id = 'native-skill-project'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("novel skill binding retained");
+        assert_eq!(binding_count, 1);
+        let foreign_key_violations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+                .fetch_one(&mut connection)
+                .await
+                .expect("foreign-key check");
+        assert_eq!(foreign_key_violations, 0);
+    }
+
+    #[tokio::test]
+    async fn upgrades_a_version_63_database_to_the_novel_skill_evaluation_ledger_and_restarts() {
+        let mut connection = SqliteConnection::connect("sqlite::memory:")
+            .await
+            .expect("open sqlite");
+        let full = local_migrator();
+        let through_registry = test_migrator(
+            full.iter()
+                .filter(|migration| migration.version <= 63)
+                .cloned()
+                .collect(),
+        );
+        let before_zhipu = migration_subset(&through_registry, |migration| {
+            migration.version < ZHIPU_GLM_MIGRATION_VERSION
+        });
+        before_zhipu
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate before Zhipu registry");
+        run_foreign_key_disabled_migration(
+            &mut connection,
+            &through_registry,
+            ZHIPU_GLM_MIGRATION_VERSION,
+            "foreign-key violations remained after test Zhipu migration",
+        )
+        .await
+        .expect("migrate Zhipu registry");
+        let before_content_quality = migration_subset(&through_registry, |migration| {
+            migration.version > ZHIPU_GLM_MIGRATION_VERSION
+                && migration.version < MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+        });
+        before_content_quality
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate before content quality task");
+        run_foreign_key_disabled_migration(
+            &mut connection,
+            &through_registry,
+            MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION,
+            "foreign-key violations remained after test content quality migration",
+        )
+        .await
+        .expect("migrate content quality task");
+        let after_content_quality = migration_subset(&through_registry, |migration| {
+            migration.version > MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+        });
+        after_content_quality
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate through published registry");
+        let registry_receipt: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 63 AND success = 1",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("registry receipt");
+        assert_eq!(registry_receipt, 1);
+
+        run_local_migrations(&mut connection)
+            .await
+            .expect("upgrade version 63 database through evaluation ledger");
+        run_local_migrations(&mut connection)
+            .await
+            .expect("restart with evaluation ledger history");
+        let evaluation_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN (
+              'novel_skill_evaluation_suites', 'novel_skill_evaluation_fixtures',
+              'novel_skill_evaluation_runs', 'novel_skill_evaluation_cells',
+              'novel_skill_evaluation_attempts',
+              'novel_skill_evaluation_observations', 'novel_skill_evaluation_scores',
+              'novel_skill_evaluation_manual_decisions'
+            )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("evaluation ledger tables");
+        assert_eq!(evaluation_tables, 8);
+        let evaluation_receipt: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 64 AND success = 1",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("evaluation receipt");
+        assert_eq!(evaluation_receipt, 1);
+        let foreign_key_violations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+                .fetch_one(&mut connection)
+                .await
+                .expect("foreign-key check");
+        assert_eq!(foreign_key_violations, 0);
+    }
+
+    #[tokio::test]
+    async fn upgrades_a_version_64_database_to_the_project_dispatch_active_guard_and_restarts() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000065";
+        let mut connection = SqliteConnection::connect("sqlite::memory:")
+            .await
+            .expect("open sqlite");
+        let full = local_migrator();
+        let through_evaluation = test_migrator(
+            full.iter()
+                .filter(|migration| migration.version <= 64)
+                .cloned()
+                .collect(),
+        );
+        let before_zhipu = migration_subset(&through_evaluation, |migration| {
+            migration.version < ZHIPU_GLM_MIGRATION_VERSION
+        });
+        before_zhipu
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate before Zhipu registry");
+        run_foreign_key_disabled_migration(
+            &mut connection,
+            &through_evaluation,
+            ZHIPU_GLM_MIGRATION_VERSION,
+            "foreign-key violations remained after test Zhipu migration",
+        )
+        .await
+        .expect("migrate Zhipu registry");
+        let before_content_quality = migration_subset(&through_evaluation, |migration| {
+            migration.version > ZHIPU_GLM_MIGRATION_VERSION
+                && migration.version < MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+        });
+        before_content_quality
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate before content quality task");
+        run_foreign_key_disabled_migration(
+            &mut connection,
+            &through_evaluation,
+            MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION,
+            "foreign-key violations remained after test content quality migration",
+        )
+        .await
+        .expect("migrate content quality task");
+        let after_content_quality = migration_subset(&through_evaluation, |migration| {
+            migration.version > MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+        });
+        after_content_quality
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate through version 64");
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, status, revision, deletion_generation, created_at, updated_at)
+             VALUES (?, 'Dispatch guard upgrade', 'active', 1, 0,
+                     '2026-08-10T00:00:00.000Z', '2026-08-10T00:00:00.000Z')",
+        )
+        .bind(PROJECT_ID)
+        .execute(&mut connection)
+        .await
+        .expect("seed active project before version 65");
+        sqlx::query(
+            "INSERT INTO project_remote_dispatch_leases (
+               lease_id, project_id, operation_kind, operation_id, owner_runtime_id,
+               authority_fingerprint, acquired_at, network_deadline_at
+             ) VALUES (
+               '019f9f4a-b3c7-7350-9226-000000000066', ?, 'generation',
+               'migration-65-dispatch', 'migration-65-runtime', ?,
+               '2026-08-10T00:00:00.000Z', '2026-08-10T00:12:00.000Z'
+             )",
+        )
+        .bind(PROJECT_ID)
+        .bind("a".repeat(64))
+        .execute(&mut connection)
+        .await
+        .expect("seed active dispatch lease before version 65");
+
+        run_local_migrations(&mut connection)
+            .await
+            .expect("upgrade version 64 database through project lifecycle guard");
+        let blocked = sqlx::query(
+            "UPDATE projects
+             SET status = 'archived', archived_at = '2026-08-10T00:01:00.000Z'
+             WHERE id = ?",
+        )
+        .bind(PROJECT_ID)
+        .execute(&mut connection)
+        .await
+        .expect_err("version 65 guard blocks archive while dispatch is live");
+        assert!(blocked
+            .as_database_error()
+            .is_some_and(|error| error.message().contains("INKSHADOW_REMOTE_DISPATCH_ACTIVE")));
+        sqlx::query("DELETE FROM project_remote_dispatch_leases WHERE project_id = ?")
+            .bind(PROJECT_ID)
+            .execute(&mut connection)
+            .await
+            .expect("release migration fixture lease");
+        sqlx::query(
+            "UPDATE projects
+             SET status = 'archived', archived_at = '2026-08-10T00:01:00.000Z'
+             WHERE id = ?",
+        )
+        .bind(PROJECT_ID)
+        .execute(&mut connection)
+        .await
+        .expect("archive succeeds after lease release");
+        run_local_migrations(&mut connection)
+            .await
+            .expect("restart with version 65 migration history");
+        let guard_receipt: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 65 AND success = 1",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 65 migration receipt");
+        assert_eq!(guard_receipt, 1);
+    }
+
+    #[tokio::test]
+    async fn upgrades_a_version_65_database_to_paid_novel_skill_evaluation_authority_and_restarts()
+    {
+        let mut connection = SqliteConnection::connect("sqlite::memory:")
+            .await
+            .expect("open sqlite");
+        let full = local_migrator();
+        let through_dispatch_guard = test_migrator(
+            full.iter()
+                .filter(|migration| migration.version <= 65)
+                .cloned()
+                .collect(),
+        );
+        let before_zhipu = migration_subset(&through_dispatch_guard, |migration| {
+            migration.version < ZHIPU_GLM_MIGRATION_VERSION
+        });
+        before_zhipu
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate before Zhipu registry");
+        run_foreign_key_disabled_migration(
+            &mut connection,
+            &through_dispatch_guard,
+            ZHIPU_GLM_MIGRATION_VERSION,
+            "foreign-key violations remained after test Zhipu migration",
+        )
+        .await
+        .expect("migrate Zhipu registry");
+        let before_content_quality = migration_subset(&through_dispatch_guard, |migration| {
+            migration.version > ZHIPU_GLM_MIGRATION_VERSION
+                && migration.version < MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+        });
+        before_content_quality
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate before content quality task");
+        run_foreign_key_disabled_migration(
+            &mut connection,
+            &through_dispatch_guard,
+            MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION,
+            "foreign-key violations remained after test content quality migration",
+        )
+        .await
+        .expect("migrate content quality task");
+        let through_version_65 = migration_subset(&through_dispatch_guard, |migration| {
+            migration.version > MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+        });
+        through_version_65
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate through version 65");
+
+        run_local_migrations(&mut connection)
+            .await
+            .expect("upgrade version 65 database through paid evaluation authority");
+        run_local_migrations(&mut connection)
+            .await
+            .expect("restart with version 66 migration history");
+
+        let authority_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN (
+              'novel_skill_evaluation_protocols',
+              'novel_skill_evaluation_request_profiles',
+              'novel_skill_evaluation_context_baselines',
+              'novel_skill_evaluation_run_model_targets',
+              'novel_skill_evaluation_dispatch_authorizations',
+              'novel_skill_evaluation_authorization_limits',
+              'novel_skill_evaluation_dispatch_reservations',
+              'novel_skill_evaluation_review_batches',
+              'novel_skill_evaluation_review_items',
+              'novel_skill_evaluation_review_receipts'
+            )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("paid evaluation authority tables");
+        assert_eq!(authority_tables, 10);
+        let migration_receipt: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 66 AND success = 1",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 66 migration receipt");
+        assert_eq!(migration_receipt, 1);
+        let foreign_key_violations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+                .fetch_one(&mut connection)
+                .await
+                .expect("foreign-key check");
+        assert_eq!(foreign_key_violations, 0);
+    }
+
+    #[tokio::test]
+    async fn upgrades_a_version_66_database_to_content_free_predispatch_authority_and_restarts() {
+        let mut connection = SqliteConnection::connect("sqlite::memory:")
+            .await
+            .expect("open sqlite");
+        let full = local_migrator();
+        let through_paid_authority = test_migrator(
+            full.iter()
+                .filter(|migration| migration.version <= 66)
+                .cloned()
+                .collect(),
+        );
+        let before_zhipu = migration_subset(&through_paid_authority, |migration| {
+            migration.version < ZHIPU_GLM_MIGRATION_VERSION
+        });
+        before_zhipu
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate before Zhipu registry");
+        run_foreign_key_disabled_migration(
+            &mut connection,
+            &through_paid_authority,
+            ZHIPU_GLM_MIGRATION_VERSION,
+            "foreign-key violations remained after test Zhipu migration",
+        )
+        .await
+        .expect("migrate Zhipu registry");
+        let before_content_quality = migration_subset(&through_paid_authority, |migration| {
+            migration.version > ZHIPU_GLM_MIGRATION_VERSION
+                && migration.version < MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+        });
+        before_content_quality
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate before content quality task");
+        run_foreign_key_disabled_migration(
+            &mut connection,
+            &through_paid_authority,
+            MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION,
+            "foreign-key violations remained after test content quality migration",
+        )
+        .await
+        .expect("migrate content quality task");
+        let through_version_66 = migration_subset(&through_paid_authority, |migration| {
+            migration.version > MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+        });
+        through_version_66
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate through version 66");
+
+        let authority_before_upgrade: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table'
+               AND name = 'novel_skill_evaluation_predispatch_authority_snapshots'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 66 predispatch authority absence");
+        assert_eq!(authority_before_upgrade, 0);
+
+        run_local_migrations(&mut connection)
+            .await
+            .expect("upgrade version 66 database through predispatch authority");
+        run_local_migrations(&mut connection)
+            .await
+            .expect("restart with version 67 migration history");
+
+        let authority_after_upgrade: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table'
+               AND name = 'novel_skill_evaluation_predispatch_authority_snapshots'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 67 predispatch authority schema");
+        assert_eq!(authority_after_upgrade, 1);
+        let authority_guards: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'trigger'
+               AND name IN (
+                 'novel_skill_evaluation_predispatch_authority_insert_guard',
+                 'novel_skill_evaluation_predispatch_authority_immutable_update',
+                 'novel_skill_evaluation_predispatch_authority_immutable_delete',
+                 'novel_skill_evaluation_reservation_authority_bind_guard',
+                 'novel_skill_evaluation_reservation_authority_dispatch_guard',
+                 'novel_skill_evaluation_reservation_authority_settlement_guard'
+               )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 67 authority guards");
+        assert_eq!(authority_guards, 6);
+        let (success, checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 67")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 67 migration receipt");
+        assert_eq!(success, 1);
+        assert_eq!(checksum.len(), 48);
+        let maximum_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&mut connection)
+            .await
+            .expect("maximum migration version");
+        assert_eq!(maximum_version, 67);
+        let forbidden_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM pragma_table_info('novel_skill_evaluation_predispatch_authority_snapshots')
+             WHERE lower(name) IN (
+               'prompt_text', 'prompt_body', 'request_body', 'response_text', 'response_body',
+               'output_text', 'reasoning_text', 'reasoning_body', 'credential_ref', 'api_key',
+               'secret'
+             )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("content-free version 67 columns");
+        assert_eq!(forbidden_columns, 0);
+        let foreign_key_violations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 67 foreign-key check");
+        assert_eq!(foreign_key_violations, 0);
     }
 
     #[tokio::test]

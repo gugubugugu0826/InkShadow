@@ -28,7 +28,7 @@ use super::types::{
     ConnectionCheckResponse, EmbeddingRequest, EmbeddingResponse, GenerationAccepted,
     GenerationEvent, GenerationEventStatus, GenerationUsage, ListModelsRequest, ModelDescriptor,
     ModelEndpointConfig, ModelListResponse, ModelMessage, ProviderKind, ReasoningMode,
-    RerankProtocol, RerankRequest, RerankResponse, StartGenerationRequest,
+    RerankProtocol, RerankRequest, RerankResponse, ResponseFormat, StartGenerationRequest,
 };
 use crate::native_sqlite::{
     NativeModelDispatchScope, NativeSqliteState, ProjectRemoteDispatchLease,
@@ -106,7 +106,11 @@ struct OpenAiGenerationBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<OpenAiThinking>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<OpenAiResponseFormat>,
 }
 
 #[derive(Serialize)]
@@ -121,10 +125,18 @@ struct OpenAiThinking {
 }
 
 #[derive(Serialize)]
+struct OpenAiResponseFormat {
+    #[serde(rename = "type")]
+    format: ResponseFormat,
+}
+
+#[derive(Serialize)]
 struct OllamaGenerationOptions {
     num_predict: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -143,6 +155,8 @@ struct AnthropicGenerationBody<'a> {
     system: Option<String>,
     stream: bool,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -192,6 +206,8 @@ struct GeminiGenerationConfig {
     max_output_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -783,21 +799,24 @@ async fn acquire_remote_dispatch_lease(
     operation_kind: &str,
     operation_id: &str,
 ) -> Result<Option<ProjectRemoteDispatchLease>, CommandError> {
-    if endpoint_is_loopback {
-        return Ok(None);
-    }
     let receipt = match scope {
         NativeModelDispatchScope::NonProject { reason } => {
             match reason {
                 crate::native_sqlite::NativeNonProjectDispatchReason::CreativeOpening
-                | crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe => {}
+                | crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe
+                | crate::native_sqlite::NativeNonProjectDispatchReason::NovelSkillEvaluation => {}
             }
             return Ok(None);
         }
         NativeModelDispatchScope::ProjectContext { receipt } => receipt,
     };
     sqlite
-        .acquire_project_remote_dispatch_lease(receipt, operation_kind, operation_id)
+        .acquire_project_remote_dispatch_lease(
+            receipt,
+            endpoint_is_loopback,
+            operation_kind,
+            operation_id,
+        )
         .await
         .map(Some)
         .map_err(map_dispatch_lease_error)
@@ -1209,7 +1228,11 @@ async fn prepare_generation(
                     include_usage: true,
                 },
                 temperature: request.temperature,
+                top_p: request.top_p,
                 thinking: request.reasoning_mode.map(|mode| OpenAiThinking { mode }),
+                response_format: request
+                    .response_format
+                    .map(|format| OpenAiResponseFormat { format }),
             };
             (
                 endpoint.api_url(
@@ -1230,6 +1253,7 @@ async fn prepare_generation(
                 options: OllamaGenerationOptions {
                     num_predict: request.max_output_tokens,
                     temperature: request.temperature,
+                    top_p: request.top_p,
                 },
             };
             (
@@ -1308,6 +1332,7 @@ fn build_anthropic_generation_body(
         system: (!system_parts.is_empty()).then(|| system_parts.join("\n\n")),
         stream: true,
         max_tokens: request.max_output_tokens,
+        top_p: request.top_p,
     })
 }
 
@@ -1360,6 +1385,7 @@ fn build_gemini_generation_body(
         generation_config: GeminiGenerationConfig {
             max_output_tokens: request.max_output_tokens,
             temperature: request.temperature,
+            top_p: request.top_p,
         },
     })
 }
@@ -1660,10 +1686,14 @@ fn validate_generation_request(request: &StartGenerationRequest) -> Result<(), C
         || request.temperature.is_some_and(|temperature| {
             !temperature.is_finite() || !(0.0..=2.0).contains(&temperature)
         })
+        || request
+            .top_p
+            .is_some_and(|top_p| !top_p.is_finite() || !(0.0..=1.0).contains(&top_p))
     {
         return Err(CommandError::request_invalid());
     }
-    if request.reasoning_mode.is_some() && request.config.provider != ProviderKind::OpenAiCompatible
+    if (request.reasoning_mode.is_some() || request.response_format.is_some())
+        && request.config.provider != ProviderKind::OpenAiCompatible
     {
         return Err(CommandError::operation_unsupported());
     }
@@ -2051,7 +2081,7 @@ mod tests {
     use super::*;
     use crate::model_gateway::types::{
         AuthenticationMode, EmbeddingRequest, ModelMessageRole, ProviderKind, ReasoningMode,
-        RerankProtocol, RerankRequest, StartGenerationRequest,
+        RerankProtocol, RerankRequest, ResponseFormat, StartGenerationRequest,
     };
     use crate::native_sqlite::{
         canonical_project_context_fingerprint, NativeProjectContextPrivacyReceipt,
@@ -2384,7 +2414,9 @@ mod tests {
             }],
             max_output_tokens: 1_024,
             temperature: Some(0.7),
+            top_p: None,
             reasoning_mode: None,
+            response_format: None,
         }
     }
 
@@ -2415,6 +2447,14 @@ mod tests {
     fn validates_generation_limits_without_network_access() {
         assert!(validate_generation_request(&generation_request()).is_ok());
 
+        let mut minimum_top_p = generation_request();
+        minimum_top_p.top_p = Some(0.0);
+        assert!(validate_generation_request(&minimum_top_p).is_ok());
+
+        let mut maximum_top_p = generation_request();
+        maximum_top_p.top_p = Some(1.0);
+        assert!(validate_generation_request(&maximum_top_p).is_ok());
+
         let mut empty_messages = generation_request();
         empty_messages.messages.clear();
         assert!(validate_generation_request(&empty_messages).is_err());
@@ -2426,6 +2466,15 @@ mod tests {
         let mut invalid_temperature = generation_request();
         invalid_temperature.temperature = Some(f32::NAN);
         assert!(validate_generation_request(&invalid_temperature).is_err());
+
+        for invalid in [-0.01, 1.01, f32::NAN, f32::INFINITY] {
+            let mut invalid_top_p = generation_request();
+            invalid_top_p.top_p = Some(invalid);
+            assert!(
+                validate_generation_request(&invalid_top_p).is_err(),
+                "top_p={invalid:?} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -2525,9 +2574,10 @@ mod tests {
         assert!(second.starts_with("GET /v1/custom/catalog HTTP/1.1\r\n"));
     }
 
-    #[test]
-    fn serializes_provider_specific_requests_with_hard_output_limits() {
-        let request = generation_request();
+    #[tokio::test]
+    async fn serializes_provider_specific_requests_with_hard_output_limits() {
+        let mut request = generation_request();
+        request.top_p = Some(0.5);
         let openai = OpenAiGenerationBody {
             model: &request.model,
             messages: &request.messages,
@@ -2537,7 +2587,9 @@ mod tests {
                 include_usage: true,
             },
             temperature: request.temperature,
+            top_p: request.top_p,
             thinking: None,
+            response_format: None,
         };
         let body = serialize_request_body(&openai).expect("request should serialize");
         let value: serde_json::Value =
@@ -2548,9 +2600,36 @@ mod tests {
         assert_eq!(value["max_tokens"], 1_024);
         assert_eq!(value["messages"][0]["role"], "user");
         assert_eq!(value["messages"][0]["content"], "Write a safe candidate.");
+        assert_eq!(value["top_p"], 0.5);
+
+        let mut ollama_request = request.clone();
+        ollama_request.config.provider = ProviderKind::Ollama;
+        ollama_request.config.base_url = "http://127.0.0.1:11434".to_owned();
+        let prepared = prepare_generation(&ollama_request)
+            .await
+            .expect("Ollama request should prepare");
+        let value: serde_json::Value =
+            serde_json::from_slice(&prepared.body).expect("Ollama body should be JSON");
+        assert_eq!(value["options"]["top_p"], 0.5);
+
+        request.top_p = None;
+        let prepared = prepare_generation(&request)
+            .await
+            .expect("OpenAI-compatible default sampling should prepare");
+        let value: serde_json::Value =
+            serde_json::from_slice(&prepared.body).expect("OpenAI body should be JSON");
+        assert!(value.get("top_p").is_none());
+        ollama_request.top_p = None;
+        let prepared = prepare_generation(&ollama_request)
+            .await
+            .expect("Ollama default sampling should prepare");
+        let value: serde_json::Value =
+            serde_json::from_slice(&prepared.body).expect("Ollama body should be JSON");
+        assert!(value["options"].get("top_p").is_none());
 
         let mut provider_request = generation_request();
         provider_request.temperature = None;
+        provider_request.top_p = Some(0.5);
         provider_request.messages = vec![
             ModelMessage {
                 role: ModelMessageRole::System,
@@ -2574,6 +2653,7 @@ mod tests {
         assert_eq!(value["messages"][1]["role"], "assistant");
         assert_eq!(value["stream"], true);
         assert_eq!(value["max_tokens"], 1_024);
+        assert_eq!(value["top_p"], 0.5);
         assert!(value.get("temperature").is_none());
 
         let gemini = build_gemini_generation_body(&provider_request)
@@ -2586,6 +2666,17 @@ mod tests {
         assert_eq!(value["contents"][0]["role"], "user");
         assert_eq!(value["contents"][1]["role"], "model");
         assert_eq!(value["generationConfig"]["maxOutputTokens"], 1_024);
+        assert_eq!(value["generationConfig"]["topP"], 0.5);
+
+        provider_request.top_p = None;
+        let anthropic = build_anthropic_generation_body(&provider_request)
+            .expect("Anthropic default sampling should remain expressible");
+        let value = serde_json::to_value(anthropic).expect("Anthropic body should serialize");
+        assert!(value.get("top_p").is_none());
+        let gemini = build_gemini_generation_body(&provider_request)
+            .expect("Gemini default sampling should remain expressible");
+        let value = serde_json::to_value(gemini).expect("Gemini body should serialize");
+        assert!(value["generationConfig"].get("topP").is_none());
 
         provider_request.messages.swap(0, 1);
         assert!(build_anthropic_generation_body(&provider_request).is_err());
@@ -2603,7 +2694,16 @@ mod tests {
             serde_json::from_slice(&prepared.body).expect("prepared body should be JSON");
         assert_eq!(value["thinking"]["type"], "disabled");
 
+        request.response_format = Some(ResponseFormat::JsonObject);
+        let prepared = prepare_generation(&request)
+            .await
+            .expect("OpenAI-compatible JSON mode should prepare");
+        let value: serde_json::Value =
+            serde_json::from_slice(&prepared.body).expect("prepared body should be JSON");
+        assert_eq!(value["response_format"]["type"], "json_object");
+
         request.reasoning_mode = None;
+        request.response_format = None;
         let prepared = prepare_generation(&request)
             .await
             .expect("default OpenAI-compatible request should prepare");
@@ -2619,6 +2719,17 @@ mod tests {
                 .await
                 .err()
                 .expect("unsupported protocols must not silently ignore reasoning mode")
+                .code(),
+            "MODEL_OPERATION_UNSUPPORTED"
+        );
+
+        request.reasoning_mode = None;
+        request.response_format = Some(ResponseFormat::JsonObject);
+        assert_eq!(
+            prepare_generation(&request)
+                .await
+                .err()
+                .expect("unsupported protocols must not silently ignore JSON mode")
                 .code(),
             "MODEL_OPERATION_UNSUPPORTED"
         );
@@ -3086,6 +3197,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delayed_loopback_project_dispatch_holds_the_same_project_lifecycle_barrier() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000081";
+        let (directory, sqlite, scope) =
+            seeded_empty_remote_project("loopback-project-barrier", PROJECT_ID).await;
+        let server = spawn_gated_fake_server(
+            "200 OK",
+            br#"{"data":[{"index":0,"embedding":[0.5,0.5]}],"model":"embed-local"}"#,
+        );
+        let request = embedding_request(
+            format!("{}/v1", server.base_url),
+            ProviderKind::OpenAiCompatible,
+            "embed-local",
+            &["local project context"],
+        );
+        let prepared = prepare_embedding(&request)
+            .await
+            .expect("prepare loopback embedding");
+        assert!(prepared.endpoint_is_loopback);
+        let gateway = Arc::new(ModelGatewayState::new().expect("gateway state"));
+        let worker_gateway = Arc::clone(&gateway);
+        let worker_sqlite = Arc::clone(&sqlite);
+        let worker = tokio::spawn(async move {
+            run_prepared_embedding_with_dispatch(
+                &worker_gateway,
+                &worker_sqlite,
+                &scope,
+                Duration::from_secs(5),
+                prepared,
+                "delayed-loopback-embedding".to_owned(),
+            )
+            .await
+        });
+
+        let mut writer = open_dispatch_inspector(&directory.join("inkshadow.db")).await;
+        wait_for_dispatch_lease_count(&mut writer, 1).await;
+        let archive = sqlx::query(
+            "UPDATE projects
+             SET status = 'archived', archived_at = '2026-08-08T00:01:00.000Z'
+             WHERE id = ?",
+        )
+        .bind(PROJECT_ID)
+        .execute(&mut writer)
+        .await
+        .expect_err("loopback project dispatch must also delay project archive");
+        assert!(archive
+            .as_database_error()
+            .is_some_and(|error| error.message().contains("INKSHADOW_REMOTE_DISPATCH_ACTIVE")));
+
+        server
+            .release
+            .send(())
+            .expect("release delayed loopback response");
+        let response = worker
+            .await
+            .expect("loopback gateway worker joins")
+            .expect("loopback response succeeds");
+        assert_eq!(response.vector_count, 1);
+        wait_for_dispatch_lease_count(&mut writer, 0).await;
+        sqlx::query(
+            "UPDATE projects
+             SET status = 'archived', archived_at = '2026-08-08T00:01:00.000Z'
+             WHERE id = ?",
+        )
+        .bind(PROJECT_ID)
+        .execute(&mut writer)
+        .await
+        .expect("project archive succeeds once the loopback future ends");
+        server.handle.join().expect("fake server stops");
+        drop(writer);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
     async fn reconciliation_snapshot_and_new_acquisition_are_one_atomic_lifecycle() {
         const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000091";
         let (directory, sqlite, scope) =
@@ -3095,7 +3280,12 @@ mod tests {
             NativeModelDispatchScope::NonProject { .. } => unreachable!("project fixture"),
         };
         sqlite
-            .acquire_project_remote_dispatch_lease(&receipt, "embedding", "ended-before-reconcile")
+            .acquire_project_remote_dispatch_lease(
+                &receipt,
+                false,
+                "embedding",
+                "ended-before-reconcile",
+            )
             .await
             .expect("seed a lease absent from the native live registry");
 
@@ -4185,7 +4375,9 @@ mod tests {
             ],
             max_output_tokens: 32,
             temperature: Some(0.0),
+            top_p: None,
             reasoning_mode: None,
+            response_format: None,
         })
         .await
         .expect("prepare the real local generation request");

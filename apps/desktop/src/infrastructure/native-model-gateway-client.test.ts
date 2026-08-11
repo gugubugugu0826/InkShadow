@@ -397,6 +397,47 @@ describe("Tauri native model gateway client", () => {
     expect(tauriMocks.invoke).not.toHaveBeenCalled();
   });
 
+  it("forwards an explicit native topP value", async () => {
+    let deliver: ((event: TestGenerationEvent) => void) | null = null;
+    tauriMocks.listen.mockImplementation(
+      (
+        _eventName: string,
+        handler: (event: Readonly<{ payload: TestGenerationEvent }>) => void,
+      ) => {
+        deliver = (event) => handler({ payload: event });
+        return Promise.resolve(vi.fn());
+      },
+    );
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command !== "start_native_generation") {
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      }
+      queueMicrotask(() => {
+        deliver?.(event(0, "", { phase: "started" }));
+        deliver?.(event(1, "Visible output", { phase: "delta" }));
+        deliver?.(event(2, "", { phase: "completed", usage: null }));
+      });
+      return Promise.resolve({ generationId: "generation-1", accepted: true });
+    });
+    const request = { ...input(), topP: 0.85 };
+
+    await expect(new TauriNativeModelGatewayClient().generate(request)).resolves.toEqual({
+      text: "Visible output",
+      usage: null,
+    });
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("start_native_generation", { request });
+  });
+
+  it("rejects topP outside the native 0..1 contract before dispatch", async () => {
+    for (const topP of [-0.01, 1.01, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        new TauriNativeModelGatewayClient().generate({ ...input(), topP }),
+      ).rejects.toMatchObject({ code: "MODEL_REQUEST_INVALID" });
+    }
+    expect(tauriMocks.listen).not.toHaveBeenCalled();
+    expect(tauriMocks.invoke).not.toHaveBeenCalled();
+  });
+
   it("accepts the native zero-based event sequence and accumulates streamed text", async () => {
     let deliver: ((event: TestGenerationEvent) => void) | null = null;
     const unlisten = vi.fn();
@@ -631,9 +672,15 @@ describe("Tauri native model gateway client", () => {
         },
       });
     });
+    const listModels = vi.fn<NativeModelGatewayClient["listModels"]>(() =>
+      Promise.resolve({
+        provider: "ollama",
+        models: [{ id: "writer-model", displayName: "Writer model" }],
+      }),
+    );
     const modelGateway: NativeModelGatewayClient = {
       available: true,
-      listModels: () => Promise.reject(new Error("not used")),
+      listModels,
       checkConnection: () => Promise.reject(new Error("not used")),
       embed: () => Promise.reject(new Error("not used")),
       generate,
@@ -679,6 +726,12 @@ describe("Tauri native model gateway client", () => {
         },
       }),
     );
+    expect(listModels).toHaveBeenCalledWith({
+      providerId: "local-ollama",
+      provider: "ollama",
+      baseUrl: "http://127.0.0.1:11434",
+      authentication: "none",
+    });
     const stableChapter = await developmentRuntime.repositories.chapters.findById(
       chapter.value.chapter.id,
     );

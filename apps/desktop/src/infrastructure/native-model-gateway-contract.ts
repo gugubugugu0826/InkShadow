@@ -31,7 +31,7 @@ export interface NativeProjectContextPrivacyReceipt {
 export type NativeModelDispatchScope =
   | Readonly<{
       kind: "non_project";
-      reason: "creative_opening" | "connection_probe";
+      reason: "creative_opening" | "connection_probe" | "novel_skill_evaluation";
     }>
   | Readonly<{
       kind: "project_context";
@@ -52,6 +52,11 @@ export interface NativeGatewayEndpointConfig {
   readonly requestTimeoutMs?: number;
   /** Applied only to idempotent connection/catalog GET requests. */
   readonly retryLimit?: number;
+}
+
+/** Native generation accepts the provider-neutral nucleus sampling range only. */
+export function isNativeGenerationTopP(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
 export function isNativeGatewayProviderKind(value: unknown): value is NativeGatewayProviderKind {

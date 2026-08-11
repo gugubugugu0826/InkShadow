@@ -70,12 +70,19 @@ describe("Model Hub text execution service", () => {
       dataDestination: "remote",
       privacyPolicy: "cloud_allowed",
       failurePolicy: "stop",
-      maximumOutputTokens: 40,
+      maximumOutputTokens: 20,
       temperature: undefined,
       estimatedInputTokens: expectedInputTokens,
-      estimatedTotalTokens: expectedInputTokens + 40,
+      estimatedTotalTokens: expectedInputTokens + 20,
       inputTokenLimit: 200_000,
       outputTokenLimit: 20_000,
+      tokenLimitEvidence: {
+        source: "catalog",
+        version: null,
+        updatedAt: NOW,
+        sourceUrl: null,
+        verifiedByInkShadow: false,
+      },
       pricing: {
         currency: "USD",
         inputMicrosPerMillionTokens: "1000000",
@@ -86,7 +93,7 @@ describe("Model Hub text execution service", () => {
         evidenceSource: "user_confirmed",
         evidenceVersion: "execution-test-v1",
         evidenceUpdatedAt: NOW,
-        estimatedMaximumCostMicros: String(expectedInputTokens + 80),
+        estimatedMaximumCostMicros: String(expectedInputTokens + 40),
         maximumCostMicros: "10000",
         maximumCostCurrency: "USD",
       },
@@ -170,6 +177,81 @@ describe("Model Hub text execution service", () => {
     });
   });
 
+  it("does not let an automatic legacy 1200-token default override the task output contract", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "automatic-output-contract",
+      catalogEntryId: "automatic-output-contract-catalog",
+      modelId: "writer-model",
+    });
+    await saveRoute(harness.modelHub, {
+      primaryCatalogEntryId: target.id,
+      routeOrigin: "automatic",
+      parameterPolicy: { maximumOutputTokens: 1_200 },
+    });
+    harness.generate.mockResolvedValue({ text: PRIVATE_OUTPUT, usage: null });
+
+    const result = await executeModelHubTextTask(
+      harness.dependencies,
+      request({ maximumOutputTokens: 3_328 }),
+    );
+
+    expect(result.invocation.status).toBe("succeeded");
+    expect(harness.generate.mock.calls[0]?.[0]?.maxOutputTokens).toBe(3_328);
+  });
+
+  it("treats an explicit user route output value as a hard cap", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "user-output-cap",
+      catalogEntryId: "user-output-cap-catalog",
+      modelId: "writer-model",
+    });
+    await saveRoute(harness.modelHub, {
+      primaryCatalogEntryId: target.id,
+      routeOrigin: "user",
+      parameterPolicy: { maximumOutputTokens: 1_200 },
+    });
+
+    const inspection = await inspectModelHubTextTask(
+      harness.dependencies,
+      request({ maximumOutputTokens: 3_328 }),
+    );
+
+    expect(inspection.maximumOutputTokens).toBe(1_200);
+  });
+
+  it("does not apply DeepSeek official limits to a proxy endpoint or unknown model", async () => {
+    for (const scenario of [
+      {
+        suffix: "proxy",
+        baseUrlOverride: "https://deepseek-proxy.example.test/v1",
+        modelId: "deepseek-v4-flash",
+      },
+      { suffix: "unknown-model", baseUrlOverride: undefined, modelId: "future-model" },
+    ] as const) {
+      const harness = createHarness();
+      const target = await seedTarget(harness.modelHub, {
+        connectionId: `deepseek-${scenario.suffix}`,
+        catalogEntryId: `deepseek-${scenario.suffix}-catalog`,
+        modelId: scenario.modelId,
+        providerKind: "deepseek",
+        ...(scenario.baseUrlOverride === undefined
+          ? {}
+          : { baseUrlOverride: scenario.baseUrlOverride }),
+        inputTokenLimit: null,
+        outputTokenLimit: null,
+      });
+      await saveRoute(harness.modelHub, { primaryCatalogEntryId: target.id });
+
+      const inspection = await inspectModelHubTextTask(harness.dependencies, request());
+
+      expect(inspection.inputTokenLimit).toBeNull();
+      expect(inspection.outputTokenLimit).toBeNull();
+      expect(inspection.tokenLimitEvidence.source).toBe("unknown");
+    }
+  });
+
   it("applies visible-prose reasoning suppression only to DeepSeek", async () => {
     for (const providerKind of ["deepseek", "openai"] as const) {
       const harness = createHarness();
@@ -243,6 +325,51 @@ describe("Model Hub text execution service", () => {
         }),
       ),
     ).rejects.toMatchObject({ code: "CONTEXT_TRACE_UNAVAILABLE", dispatched: false });
+    expect(harness.generate).not.toHaveBeenCalled();
+  });
+
+  it("honors cancellation raised while the async pre-dispatch hook is still settling", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "cancel-during-before-dispatch",
+      catalogEntryId: "cancel-during-before-dispatch-catalog",
+      modelId: "writer-model",
+    });
+    await saveRoute(harness.modelHub, { primaryCatalogEntryId: target.id });
+    let releaseHook!: () => void;
+    let hookStarted = false;
+    let cancelled = false;
+    const hookGate = new Promise<void>((resolve) => {
+      releaseHook = resolve;
+    });
+
+    const execution = executeModelHubTextTask(
+      harness.dependencies,
+      request({
+        onBeforeDispatch: async () => {
+          hookStarted = true;
+          await hookGate;
+        },
+        assertBeforeProviderDispatch: () => {
+          if (cancelled) {
+            throw new ModelHubExecutionError(
+              "MODEL_GENERATION_CANCELLED",
+              "cancelled before provider dispatch",
+              true,
+              false,
+            );
+          }
+        },
+      }),
+    );
+    await vi.waitFor(() => expect(hookStarted).toBe(true));
+    cancelled = true;
+    releaseHook();
+
+    await expect(execution).rejects.toMatchObject({
+      code: "MODEL_GENERATION_CANCELLED",
+      dispatched: false,
+    });
     expect(harness.generate).not.toHaveBeenCalled();
   });
 
@@ -366,8 +493,19 @@ describe("Model Hub text execution service", () => {
         cachedInputTokens: 4,
         estimatedCostMicros: "18",
         currency: "USD",
+        completion: {
+          visibleContentLength: Array.from(PRIVATE_OUTPUT).length,
+          stream: null,
+        },
       }),
     );
+    expect(result.invocation).toMatchObject({
+      completion: {
+        visibleContentLength: Array.from(PRIVATE_OUTPUT).length,
+        stream: null,
+      },
+      failure: null,
+    });
     const ledgerPayload = JSON.stringify({
       start: startInvocation.mock.calls,
       finish: finishInvocation.mock.calls,
@@ -664,7 +802,16 @@ describe("Model Hub text execution service", () => {
     }
 
     expect(error).toBeInstanceOf(ModelHubExecutionError);
-    expect(error).toMatchObject({ code: "UPSTREAM_TIMEOUT", dispatched: true, retryable: true });
+    expect(error).toMatchObject({
+      code: "UPSTREAM_TIMEOUT",
+      dispatched: true,
+      retryable: true,
+      failure: {
+        visibleContentLength: 0,
+        reasoningPresent: true,
+        finishReason: "length",
+      },
+    });
     expect(harness.generate).toHaveBeenCalledOnce();
     expect(harness.generate.mock.calls[0]?.[0]).toMatchObject({
       config: { providerId: "dispatched-primary" },
@@ -806,6 +953,8 @@ async function seedTarget(
     inputRate?: string;
     outputRate?: string;
     cachedInputRate?: string | null;
+    inputTokenLimit?: number | null;
+    outputTokenLimit?: number | null;
   }>,
 ): Promise<ModelCatalogEntry> {
   const providerKind = input.providerKind ?? "custom_openai_compatible";
@@ -841,8 +990,8 @@ async function seedTarget(
         id: input.catalogEntryId,
         providerModelId: input.modelId,
         lifecycle: input.lifecycle ?? "stable",
-        inputTokenLimit: 200_000,
-        outputTokenLimit: 20_000,
+        inputTokenLimit: input.inputTokenLimit === undefined ? 200_000 : input.inputTokenLimit,
+        outputTokenLimit: input.outputTokenLimit === undefined ? 20_000 : input.outputTokenLimit,
         staleAfter: input.staleAfter ?? "2026-08-02T00:00:00.000Z",
       },
     ],
@@ -897,6 +1046,7 @@ async function saveRoute(
     failurePolicy?: NovelTaskRoute["failurePolicy"];
     parameterPolicy?: Readonly<Record<string, unknown>>;
     task?: NovelAiTask;
+    routeOrigin?: NovelTaskRoute["routeOrigin"];
   }>,
 ): Promise<NovelTaskRoute> {
   return modelHub.saveTaskRoute({
@@ -912,7 +1062,7 @@ async function saveRoute(
       (input.fallbackCatalogEntryId === undefined || input.fallbackCatalogEntryId === null
         ? "stop"
         : "use_fallback"),
-    routeOrigin: "user",
+    routeOrigin: input.routeOrigin ?? "user",
     expectedRevision: null,
   });
 }

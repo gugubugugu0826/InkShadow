@@ -7,5 +7,6 @@ export * from "./entities/recovery-draft.js";
 export type * from "./ports/clock.js";
 export type * from "./ports/uuid-v7-generator.js";
 export * from "./shared/app-error.js";
+export * from "./shared/novel-skill-evaluation-contract.js";
 export * from "./shared/result.js";
 export * from "./shared/value-objects.js";

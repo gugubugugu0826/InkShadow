@@ -843,6 +843,13 @@ function inspection() {
     estimatedTotalTokens: 4_000,
     inputTokenLimit: 128_000,
     outputTokenLimit: 8_000,
+    tokenLimitEvidence: {
+      source: "catalog" as const,
+      version: "test-catalog-v1",
+      updatedAt: NOW_TEXT,
+      sourceUrl: null,
+      verifiedByInkShadow: true,
+    },
     pricing: {
       currency: null,
       inputMicrosPerMillionTokens: null,

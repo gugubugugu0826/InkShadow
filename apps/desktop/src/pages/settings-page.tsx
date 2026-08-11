@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MODEL_ROUTE_ROLES, type ModelRouteRole } from "@inkshadow/ai-core";
 import type { DatabaseIntegrityReport, NativePathTicket } from "@inkshadow/data";
 import type { MemoryPolicy, MemoryRecord } from "@inkshadow/story-core";
@@ -23,6 +23,10 @@ import { useAppearancePreference } from "../appearance-preference";
 import { DataTransferPanel } from "../components/data-transfer-panel";
 import { ModelHubEvaluationPanel } from "../components/model-hub-evaluation-panel";
 import { ModelHubImageGenerationPanel } from "../components/model-hub-image-generation-panel";
+import {
+  NovelSkillPaidEvaluationPanel,
+  type NovelSkillPaidEvaluationTargetOption,
+} from "../components/novel-skill-paid-evaluation-panel";
 import { useOnlineStatus } from "../hooks/use-online-status";
 import { collectDesktopDiagnosticArtifact } from "../infrastructure/diagnostics";
 import type { AutomaticBackupRuntimeCheckResult } from "../infrastructure/automatic-backup-runtime";
@@ -65,7 +69,6 @@ import {
   type NovelAiTask,
 } from "../infrastructure/model-hub-provider-registry";
 import {
-  modelHubCredentialProviderId,
   modelHubCredentialRef,
   modelHubNativeEndpointConfig,
 } from "../infrastructure/model-hub-native-config";
@@ -90,11 +93,42 @@ import {
 } from "../infrastructure/model-hub-routing-visibility";
 import { bridgeLegacyModelProfilesToModelHub } from "../infrastructure/model-hub-legacy-bridge";
 import { resolveModelHubFormReadiness } from "../infrastructure/model-hub-form-readiness";
+import {
+  ModelHubOperationCoordinator,
+  createInitialModelHubPageSnapshot,
+  createProviderDraftModelHubPageSnapshot,
+  isModelHubHydrationPending,
+  loadAuthoritativeModelHubHydration,
+  modelHubHydrationPhaseLabel,
+  preserveModelHubPageSnapshotAfterFailure,
+  transitionModelHubPageSnapshot,
+  type ModelHubHydrationPhase,
+  type ModelHubOperationToken,
+  type ModelHubPageAction,
+} from "../infrastructure/model-hub-page-hydration";
+import {
+  finishModelHubDiagnosticAction,
+  recordModelHubUiSnapshot,
+  startModelHubDiagnosticAction,
+} from "../infrastructure/model-hub-ui-diagnostics";
 import { ModelHubLocalEvaluationService } from "../infrastructure/model-hub-local-evaluation-service";
 import {
   modelHubTextCapabilityProbeFailureMetadata,
   runModelHubTextCapabilityProbe,
 } from "../infrastructure/model-hub-text-capability-probe";
+import {
+  MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_VERSION,
+  runModelHubStructuredCapabilityProbe,
+} from "../infrastructure/model-hub-structured-capability-probe";
+import {
+  MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_VERSION,
+  runModelHubTranslationCapabilityProbe,
+} from "../infrastructure/model-hub-translation-capability-probe";
+import {
+  recommendConnectedModelsForTask,
+  type ModelHubTaskRecommendation,
+} from "../infrastructure/model-hub-task-recommendation";
+import { providerRecommendationsForTask } from "../infrastructure/provider-recommendation-registry";
 import {
   assertModelHubFinalDispatchUnchanged,
   ModelHubFinalDispatchError,
@@ -260,6 +294,27 @@ function resolveSafeEditorReturnRoute(search: string): string | null {
   return `${parsed.pathname}${parsed.search}`;
 }
 
+function isCompletePaidEvaluationCostProfile(
+  profile: ModelCostPrivacyProfile | undefined,
+): profile is ModelCostPrivacyProfile {
+  const integerRate = /^(?:0|[1-9]\d{0,17})$/u;
+  return (
+    profile !== undefined &&
+    profile.dataDestination !== "unknown" &&
+    profile.evidenceSource !== "unknown" &&
+    profile.currency !== null &&
+    /^[A-Z]{3}$/u.test(profile.currency) &&
+    profile.inputMicrosPerMillionTokens !== null &&
+    integerRate.test(profile.inputMicrosPerMillionTokens) &&
+    profile.outputMicrosPerMillionTokens !== null &&
+    integerRate.test(profile.outputMicrosPerMillionTokens) &&
+    (profile.cachedInputMicrosPerMillionTokens === null ||
+      integerRate.test(profile.cachedInputMicrosPerMillionTokens)) &&
+    profile.pricingVersion !== null &&
+    profile.priceUpdatedAt !== null
+  );
+}
+
 export function SettingsPage() {
   const runtime = useRuntime();
   const {
@@ -290,6 +345,12 @@ export function SettingsPage() {
     configured: false,
     lastFour: null,
   });
+  const modelHubOperationCoordinatorRef = useRef(new ModelHubOperationCoordinator());
+  const modelHubSnapshotRevisionRef = useRef(0);
+  const [modelHubPageSnapshot, setModelHubPageSnapshot] = useState(
+    createInitialModelHubPageSnapshot,
+  );
+  const [modelHubMutationNotice, setModelHubMutationNotice] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<readonly ModelProfile[]>([]);
   const [, setProfile] = useState<ModelProfile | null>(null);
   const [hubConnections, setHubConnections] = useState<readonly ModelProviderConnection[]>([]);
@@ -315,9 +376,11 @@ export function SettingsPage() {
   const [schemeMessage, setSchemeMessage] = useState<string | null>(null);
   const [connectionChecked, setConnectionChecked] = useState(false);
   const [routeRole, setRouteRole] = useState<ModelRouteRole>("high_quality");
+  const [paidEvaluationExpanded, setPaidEvaluationExpanded] = useState(false);
   const [routePrimaryProviderId, setRoutePrimaryProviderId] = useState("");
   const [routeFallbackProviderId, setRouteFallbackProviderId] = useState("");
   const [routeSaving, setRouteSaving] = useState(false);
+  const [recommendedTaskBusy, setRecommendedTaskBusy] = useState<NovelAiTask | null>(null);
   const [routeError, setRouteError] = useState<unknown>(null);
   const [routeFailureRollbackConfirmed, setRouteFailureRollbackConfirmed] = useState<
     boolean | null
@@ -461,144 +524,244 @@ export function SettingsPage() {
     [runtime],
   );
 
-  const loadModelCenter = useCallback(async () => {
-    setLoading(true);
-    try {
-      await bridgeLegacyModelProfilesToModelHub({
-        modelCenter: runtime.modelCenter,
-        modelHub: runtime.modelHub,
-        credentials: runtime.credentials,
-        clock: runtime.clock,
-      });
-      const [storedConnections, storedProfiles, storedRoutes, storedNovelRoutes, activePreset] =
-        await Promise.all([
-          runtime.modelHub.listConnections(),
+  const loadModelCenter = useCallback(
+    async (
+      options: Readonly<{
+        action?: ModelHubPageAction;
+        token?: ModelHubOperationToken;
+        requestedConnectionId?: string | null;
+        requestedModelId?: string | null;
+        backendCommitted?: boolean;
+        catalogRefreshFailed?: boolean;
+      }> = {},
+    ): Promise<boolean> => {
+      const requested = new URLSearchParams(location.search);
+      const requestedConnectionId = options.requestedConnectionId ?? requested.get("connectionId");
+      const requestedModelId = options.requestedModelId ?? requested.get("modelId");
+      const action = options.action ?? "bootstrap";
+      const operationBackendCommitted = options.backendCommitted === true;
+      const coordinator = modelHubOperationCoordinatorRef.current;
+      const token =
+        options.token ??
+        coordinator.begin(action, {
+          connectionId: requestedConnectionId,
+          modelId: requestedModelId,
+        });
+      if (
+        options.token !== undefined &&
+        !coordinator.isCurrent(token, {
+          connectionId: requestedConnectionId,
+          modelId: requestedModelId,
+        })
+      ) {
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: "stale_ignored",
+          backendCommitted: operationBackendCommitted,
+          staleResultIgnored: true,
+        });
+        return false;
+      }
+      const activePhaseRef: { current: ModelHubHydrationPhase } = {
+        current: "BOOTSTRAPPING",
+      };
+      if (options.token === undefined) {
+        startModelHubDiagnosticAction(runtime, token, runtime.clock.now());
+      }
+      setLoading(true);
+      setModelHubMutationNotice(null);
+      setModelHubPageSnapshot((current) =>
+        transitionModelHubPageSnapshot(current, activePhaseRef.current, action),
+      );
+
+      try {
+        await coordinator.runDeduplicated("legacy-model-hub-bridge", () =>
+          bridgeLegacyModelProfilesToModelHub({
+            modelCenter: runtime.modelCenter,
+            modelHub: runtime.modelHub,
+            credentials: runtime.credentials,
+            clock: runtime.clock,
+          }),
+        );
+        if (!coordinator.isCurrent(token)) {
+          finishModelHubDiagnosticAction(runtime, token, {
+            completedAt: runtime.clock.now(),
+            outcome: "stale_ignored",
+            backendCommitted: operationBackendCommitted,
+            staleResultIgnored: true,
+          });
+          return false;
+        }
+
+        const nextSnapshotRevision = modelHubSnapshotRevisionRef.current + 1;
+        const [hydration, storedProfiles, storedRoutes] = await Promise.all([
+          loadAuthoritativeModelHubHydration({
+            modelHub: runtime.modelHub,
+            credentials: runtime.credentials,
+            mode: runtime.mode,
+            clock: runtime.clock,
+            requestedConnectionId,
+            requestedModelId,
+            snapshotRevision: nextSnapshotRevision,
+            lastAction: action,
+            onPhase: (phase) => {
+              activePhaseRef.current = phase;
+              if (!coordinator.isCurrent(token)) return;
+              setModelHubPageSnapshot((current) =>
+                transitionModelHubPageSnapshot(current, phase, action),
+              );
+            },
+          }),
           runtime.modelCenter.listProfiles(),
           runtime.modelRouting.listRoutes(),
-          Promise.all(NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task))),
-          runtime.modelHub.findActivePreset(),
         ]);
-      const requested = new URLSearchParams(location.search);
-      const requestedConnectionId = requested.get("connectionId");
-      const requestedModelId = requested.get("modelId");
-      const selectedConnection =
-        storedConnections.find(({ id }) => id === requestedConnectionId) ??
-        storedConnections[0] ??
-        null;
-      const selectedProfile =
-        storedProfiles.find(({ providerId: id }) => id === selectedConnection?.id) ?? null;
-      const catalog =
-        selectedConnection === null
-          ? []
-          : await runtime.modelHub.listCatalog(selectedConnection.id);
-      const allCatalogEntries = (
-        await Promise.all(
-          storedConnections.map((connection) => runtime.modelHub.listCatalog(connection.id)),
-        )
-      ).flat();
-      const confirmedLocalIds = await loadEvidenceConfirmedLocalCatalogIds(
-        runtime.modelHub,
-        allCatalogEntries,
-      );
-      const persistedNovelRoutes = storedNovelRoutes.filter(
-        (route): route is NovelTaskRoute => route !== null,
-      );
-      const proseRoute = storedNovelRoutes.find((route) => route?.task === "prose_generation");
-      const selectedCatalogEntry =
-        catalog.find(({ providerModelId }) => providerModelId === requestedModelId) ??
-        catalog.find(({ id }) => id === proseRoute?.primaryCatalogEntryId) ??
-        catalog.find(({ availability }) => availability === "available") ??
-        null;
-      const [costPrivacy, capabilities] =
-        selectedCatalogEntry === null
-          ? [null, []]
-          : await Promise.all([
-              runtime.modelHub.findCostPrivacyProfile(selectedCatalogEntry.id),
-              runtime.modelHub.listCapabilityEvidence(selectedCatalogEntry.id),
-            ]);
-      await refreshRoutingVisibilityEvidence(allCatalogEntries);
-      setHubConnections(storedConnections);
-      setHubConnection(selectedConnection);
-      setHubCatalog(catalog);
-      setRoutingCatalog(allCatalogEntries);
-      setLocalCatalogEntryIds(confirmedLocalIds);
-      setNovelTaskRoutes(persistedNovelRoutes);
-      setProfiles(storedProfiles);
-      setRoleRoutes(storedRoutes);
-      setNovelRoutePrimaryCatalogId(proseRoute?.primaryCatalogEntryId ?? "");
-      setNovelRouteFallbackCatalogId(proseRoute?.fallbackCatalogEntryId ?? "");
-      setNovelRouteMaximumCost(
-        proseRoute?.maximumCostMicros === null || proseRoute?.maximumCostMicros === undefined
-          ? ""
-          : formatMicrosStringAsCurrency(proseRoute.maximumCostMicros),
-      );
-      setNovelRouteCurrency(proseRoute?.currency ?? "USD");
-      setNovelRoutePrivacy(proseRoute?.privacyPolicy ?? "cloud_allowed");
-      setNovelRouteFailure(proseRoute?.failurePolicy ?? "use_fallback");
-      setNovelRouteRemoteContentConsent(false);
-      setModelHubScheme(activePreset?.scheme ?? inferModelHubScheme(storedRoutes));
-      const selectedRoute = storedRoutes.find(({ role }) => role === "high_quality");
-      setRoutePrimaryProviderId(
-        selectedRoute?.primaryProviderId ??
-          storedProfiles.find(({ selectedModel }) => selectedModel !== null)?.providerId ??
-          "",
-      );
-      setRouteFallbackProviderId(selectedRoute?.fallbackProviderId ?? "");
-      setProfile(selectedProfile);
-      setProviderPreset(selectedConnection?.providerKind ?? "openai");
-      setProviderId(selectedConnection?.id ?? DEFAULT_OPENAI_PROFILE.providerId);
-      setProvider(
-        selectedConnection === null
-          ? DEFAULT_OPENAI_PROFILE.provider
-          : legacyProviderKind(selectedConnection.providerKind),
-      );
-      setBaseUrl(selectedConnection?.baseUrl ?? DEFAULT_OPENAI_PROFILE.baseUrl);
-      setRegion(selectedConnection?.region ?? "china_beijing");
-      setWorkspaceId(selectedConnection?.workspaceId ?? "");
-      setEndpointId(selectedConnection?.endpointId ?? "");
-      setAuthentication(selectedConnection?.authenticationMode ?? "bearer_keyring");
-      setCredentialHeaderName(selectedConnection?.credentialHeaderName ?? "");
-      setModelDiscoveryPath(selectedConnection?.modelDiscoveryPath ?? "");
-      setTextGenerationPath(selectedConnection?.textGenerationPath ?? "");
-      setEmbeddingPath(selectedConnection?.embeddingPath ?? "");
-      setRequestTimeoutMs(
-        String(selectedConnection?.requestTimeoutMs ?? MODEL_HUB_DEFAULT_REQUEST_TIMEOUT_MS),
-      );
-      setRetryLimit(String(selectedConnection?.retryLimit ?? 0));
-      setSelectedModel(selectedCatalogEntry?.providerModelId ?? "");
-      applyHubModelToForm(selectedCatalogEntry, costPrivacy);
-      setConfirmedCapabilities(
-        capabilities
-          .filter(
-            ({ evidenceSource, verdict, expiresAt }) =>
-              evidenceSource === "user_confirmed" &&
-              verdict === "supported" &&
-              (expiresAt === null || expiresAt > new Date().toISOString()),
-          )
-          .map(({ capability }) => capability),
-      );
-      setModels(catalog.map(catalogEntryToDescriptor));
-      setConnection(null);
-      setConnectionChecked(false);
-      setModelCapacity(null);
-      setSummary(
-        runtime.mode === "tauri"
-          ? await runtime.credentials.getSummary(
-              selectedConnection === null
-                ? DEFAULT_OPENAI_PROFILE.providerId
-                : modelHubCredentialProviderId(selectedConnection),
+
+        if (!coordinator.isCurrent(token)) {
+          finishModelHubDiagnosticAction(runtime, token, {
+            completedAt: runtime.clock.now(),
+            outcome: "stale_ignored",
+            backendCommitted: operationBackendCommitted,
+            staleResultIgnored: true,
+            catalogCount: hydration.allCatalogEntries.length,
+          });
+          return false;
+        }
+
+        modelHubSnapshotRevisionRef.current = nextSnapshotRevision;
+        const selectedConnection = hydration.selectedConnection;
+        const selectedProfile =
+          storedProfiles.find(({ providerId: id }) => id === selectedConnection?.id) ?? null;
+        const proseRoute = hydration.routes.find(({ task }) => task === "prose_generation");
+        const selectedRoute = storedRoutes.find(({ role }) => role === "high_quality");
+
+        setHubConnections(hydration.page.connections);
+        setHubConnection(selectedConnection);
+        setHubCatalog(hydration.selectedCatalog);
+        setRoutingCatalog(hydration.allCatalogEntries);
+        setRoutingCapabilityEvidence(hydration.routingCapabilityEvidence);
+        setRoutingCostPrivacyProfiles(hydration.routingCostPrivacyProfiles);
+        setRoutingRecentAiFailures(hydration.recentAiFailures);
+        setLocalCatalogEntryIds(hydration.evidenceConfirmedLocalCatalogIds);
+        setNovelTaskRoutes(hydration.routes);
+        setProfiles(storedProfiles);
+        setRoleRoutes(storedRoutes);
+        setNovelRoutePrimaryCatalogId(proseRoute?.primaryCatalogEntryId ?? "");
+        setNovelRouteFallbackCatalogId(proseRoute?.fallbackCatalogEntryId ?? "");
+        setNovelRouteMaximumCost(
+          proseRoute?.maximumCostMicros === null || proseRoute?.maximumCostMicros === undefined
+            ? ""
+            : formatMicrosStringAsCurrency(proseRoute.maximumCostMicros),
+        );
+        setNovelRouteCurrency(proseRoute?.currency ?? "USD");
+        setNovelRoutePrivacy(proseRoute?.privacyPolicy ?? "cloud_allowed");
+        setNovelRouteFailure(proseRoute?.failurePolicy ?? "use_fallback");
+        setNovelRouteRemoteContentConsent(false);
+        setModelHubScheme(hydration.activePreset?.scheme ?? inferModelHubScheme(storedRoutes));
+        setRoutePrimaryProviderId(
+          selectedRoute?.primaryProviderId ??
+            storedProfiles.find(({ selectedModel }) => selectedModel !== null)?.providerId ??
+            "",
+        );
+        setRouteFallbackProviderId(selectedRoute?.fallbackProviderId ?? "");
+        setProfile(selectedProfile);
+        setProviderPreset(selectedConnection?.providerKind ?? "openai");
+        setProviderId(selectedConnection?.id ?? DEFAULT_OPENAI_PROFILE.providerId);
+        setProvider(
+          selectedConnection === null
+            ? DEFAULT_OPENAI_PROFILE.provider
+            : legacyProviderKind(selectedConnection.providerKind),
+        );
+        setBaseUrl(selectedConnection?.baseUrl ?? DEFAULT_OPENAI_PROFILE.baseUrl);
+        setRegion(selectedConnection?.region ?? "china_beijing");
+        setWorkspaceId(selectedConnection?.workspaceId ?? "");
+        setEndpointId(selectedConnection?.endpointId ?? "");
+        setAuthentication(selectedConnection?.authenticationMode ?? "bearer_keyring");
+        setCredentialHeaderName(selectedConnection?.credentialHeaderName ?? "");
+        setModelDiscoveryPath(selectedConnection?.modelDiscoveryPath ?? "");
+        setTextGenerationPath(selectedConnection?.textGenerationPath ?? "");
+        setEmbeddingPath(selectedConnection?.embeddingPath ?? "");
+        setRequestTimeoutMs(
+          String(selectedConnection?.requestTimeoutMs ?? MODEL_HUB_DEFAULT_REQUEST_TIMEOUT_MS),
+        );
+        setRetryLimit(String(selectedConnection?.retryLimit ?? 0));
+        setSelectedModel(hydration.selectedCatalogEntry?.providerModelId ?? "");
+        applyHubModelToForm(hydration.selectedCatalogEntry, hydration.selectedCostPrivacy);
+        setConfirmedCapabilities(
+          hydration.selectedCapabilities
+            .filter(
+              ({ evidenceSource, verdict, expiresAt }) =>
+                evidenceSource === "user_confirmed" &&
+                verdict === "supported" &&
+                (expiresAt === null || expiresAt > new Date().toISOString()),
             )
-          : { configured: false, lastFour: null },
-      );
-      setCredentialError(null);
-      setCapabilityProbeError(null);
-      setCapabilityProbeMessage(null);
-    } catch (reason: unknown) {
-      setCredentialError(reason);
-    } finally {
-      setLoading(false);
-    }
-  }, [applyHubModelToForm, location.search, refreshRoutingVisibilityEvidence, runtime]);
+            .map(({ capability }) => capability),
+        );
+        setModels(hydration.selectedCatalog.map(catalogEntryToDescriptor));
+        setConnection(null);
+        setConnectionChecked(false);
+        setModelCapacity(null);
+        setSummary(hydration.credential ?? { configured: false, lastFour: null });
+        setCredentialError(
+          hydration.credentialErrorCode === null
+            ? null
+            : Object.assign(new Error("Credential status unavailable"), {
+                code: hydration.credentialErrorCode,
+              }),
+        );
+        setCapabilityProbeError(null);
+        setCapabilityProbeMessage(null);
+        setModelHubPageSnapshot(hydration.page);
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome:
+            hydration.page.phase === "READY_WITH_WARNINGS" ? "succeeded_with_warning" : "succeeded",
+          backendCommitted: operationBackendCommitted,
+          storeRefreshed: true,
+          errorCode: hydration.page.errorCode,
+          catalogCount: hydration.allCatalogEntries.length,
+        });
+        return true;
+      } catch (reason: unknown) {
+        if (!coordinator.isCurrent(token)) {
+          finishModelHubDiagnosticAction(runtime, token, {
+            completedAt: runtime.clock.now(),
+            outcome: "stale_ignored",
+            backendCommitted: operationBackendCommitted,
+            staleResultIgnored: true,
+          });
+          return false;
+        }
+        const normalized = normalizeUiError(reason);
+        setCredentialError(activePhaseRef.current === "CHECKING_CREDENTIAL" ? reason : null);
+        setModelHubPageSnapshot((current) =>
+          preserveModelHubPageSnapshotAfterFailure(current, {
+            action,
+            failedPhase: activePhaseRef.current,
+            errorCode: normalized.code,
+            catalogRefreshFailed:
+              options.catalogRefreshFailed === true || activePhaseRef.current === "LOADING_CATALOG",
+            hydratedAt: runtime.clock.now(),
+          }),
+        );
+        if (options.backendCommitted === true) {
+          setModelHubMutationNotice(
+            "更改已经保存，但页面状态刷新失败。你可以重新加载 Model Hub，不需要重复保存。",
+          );
+        }
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: options.backendCommitted === true ? "succeeded_with_warning" : "failed",
+          backendCommitted: operationBackendCommitted,
+          storeRefreshed: false,
+          errorCode: normalized.code,
+        });
+        return false;
+      } finally {
+        if (coordinator.isCurrent(token)) setLoading(false);
+      }
+    },
+    [applyHubModelToForm, location.search, runtime],
+  );
 
   const inspectDatabase = useCallback(async () => {
     if (runtime.maintenance === null) {
@@ -688,14 +851,23 @@ export function SettingsPage() {
   }, [runtime]);
 
   useEffect(() => {
-    void Promise.resolve().then(loadModelCenter);
+    const operationCoordinator = modelHubOperationCoordinatorRef.current;
+    void Promise.resolve().then(() => loadModelCenter());
     if (runtime.maintenance !== null) {
       void Promise.resolve().then(inspectDatabase);
     }
     if (runtime.automaticBackup !== null) {
       void Promise.resolve().then(checkAutomaticBackup);
     }
+    return () => {
+      operationCoordinator.invalidate();
+    };
   }, [checkAutomaticBackup, inspectDatabase, loadModelCenter, runtime]);
+
+  useEffect(() => {
+    if (!isModelHubView) return;
+    recordModelHubUiSnapshot(runtime, modelHubPageSnapshot, runtime.clock.now());
+  }, [isModelHubView, modelHubPageSnapshot, runtime]);
 
   useEffect(() => {
     if (!isModelHubView) {
@@ -750,65 +922,21 @@ export function SettingsPage() {
     if (selected === undefined) {
       return;
     }
-    const catalog = await runtime.modelHub.listCatalog(selected.id);
-    const selectedCatalogEntry =
-      catalog.find(({ availability }) => availability === "available") ?? null;
-    const [costPrivacy, capabilities] =
-      selectedCatalogEntry === null
-        ? [null, []]
-        : await Promise.all([
-            runtime.modelHub.findCostPrivacyProfile(selectedCatalogEntry.id),
-            runtime.modelHub.listCapabilityEvidence(selectedCatalogEntry.id),
-          ]);
-    const legacyProfile = profiles.find(({ providerId: id }) => id === selected.id) ?? null;
-    setHubConnection(selected);
-    setHubCatalog(catalog);
-    setProfile(legacyProfile);
-    setProviderPreset(selected.providerKind);
-    setProviderId(selected.id);
-    setProvider(legacyProviderKind(selected.providerKind));
-    setBaseUrl(selected.baseUrl);
-    setRegion(selected.region ?? "china_beijing");
-    setWorkspaceId(selected.workspaceId ?? "");
-    setEndpointId(selected.endpointId ?? "");
-    setAuthentication(selected.authenticationMode);
-    setCredentialHeaderName(selected.credentialHeaderName ?? "");
-    setModelDiscoveryPath(selected.modelDiscoveryPath ?? "");
-    setTextGenerationPath(selected.textGenerationPath ?? "");
-    setEmbeddingPath(selected.embeddingPath ?? "");
-    setRequestTimeoutMs(String(selected.requestTimeoutMs));
-    setRetryLimit(String(selected.retryLimit));
-    setSelectedModel(selectedCatalogEntry?.providerModelId ?? "");
-    applyHubModelToForm(selectedCatalogEntry, costPrivacy);
-    setConfirmedCapabilities(
-      capabilities
-        .filter(
-          ({ evidenceSource, verdict }) =>
-            evidenceSource === "user_confirmed" && verdict === "supported",
-        )
-        .map(({ capability }) => capability),
-    );
-    setModels(catalog.map(catalogEntryToDescriptor));
-    setConnection(null);
-    setConnectionChecked(false);
-    setCapabilityProbeError(null);
-    setCapabilityProbeMessage(null);
-    setModelCapacity(null);
+    setProbingCapability(false);
     setSecret("");
-    try {
-      setSummary(
-        runtime.mode === "tauri"
-          ? await runtime.credentials.getSummary(modelHubCredentialProviderId(selected))
-          : { configured: false, lastFour: null },
-      );
-      setCredentialError(null);
-    } catch (reason: unknown) {
-      setCredentialError(reason);
-    }
+    const token = modelHubOperationCoordinatorRef.current.begin("restore_selection", {
+      providerKind: selected.providerKind,
+      connectionId: selected.id,
+    });
+    startModelHubDiagnosticAction(runtime, token, runtime.clock.now());
+    await loadModelCenter({
+      action: "restore_selection",
+      token,
+      requestedConnectionId: selected.id,
+    });
   }
 
   async function selectCatalogModel(providerModelId: string): Promise<void> {
-    setSelectedModel(providerModelId);
     const catalogEntry = hubCatalog.find(
       (candidate) => candidate.providerModelId === providerModelId,
     );
@@ -816,27 +944,37 @@ export function SettingsPage() {
       setConfirmedCapabilities([]);
       return;
     }
-    const [costPrivacy, capabilities] = await Promise.all([
-      runtime.modelHub.findCostPrivacyProfile(catalogEntry.id),
-      runtime.modelHub.listCapabilityEvidence(catalogEntry.id),
-    ]);
-    applyHubModelToForm(catalogEntry, costPrivacy);
-    setConfirmedCapabilities(
-      capabilities
-        .filter(
-          ({ evidenceSource, verdict }) =>
-            evidenceSource === "user_confirmed" && verdict === "supported",
-        )
-        .map(({ capability }) => capability),
-    );
+    setProbingCapability(false);
+    const token = modelHubOperationCoordinatorRef.current.begin("restore_selection", {
+      providerKind: hubConnection?.providerKind ?? providerPreset,
+      connectionId: hubConnection?.id ?? null,
+      modelId: providerModelId,
+    });
+    startModelHubDiagnosticAction(runtime, token, runtime.clock.now());
+    await loadModelCenter({
+      action: "restore_selection",
+      token,
+      requestedConnectionId: hubConnection?.id ?? null,
+      requestedModelId: providerModelId,
+    });
   }
 
   function applyProviderPreset(nextProvider: ConnectableProviderKind): void {
+    modelHubOperationCoordinatorRef.current.invalidate();
     const preset = getModelProviderPreset(nextProvider);
     const nativeProvider = legacyProviderKind(nextProvider);
     const nextBaseUrl =
       nextProvider === "custom_openai_compatible" ? "" : resolveProviderBaseUrl(nextProvider);
     setProviderPreset(nextProvider);
+    modelHubSnapshotRevisionRef.current += 1;
+    setModelHubPageSnapshot((current) =>
+      createProviderDraftModelHubPageSnapshot(current, {
+        providerKind: nextProvider,
+        credentialRequired: preset.credentialRequired,
+        hydratedAt: runtime.clock.now(),
+        snapshotRevision: modelHubSnapshotRevisionRef.current,
+      }),
+    );
     setProvider(nativeProvider);
     setHubConnection(null);
     setHubCatalog([]);
@@ -867,6 +1005,10 @@ export function SettingsPage() {
     setBaseUrl(nextBaseUrl);
     setAuthentication(preset.credentialRequired ? "bearer_keyring" : "none");
     setSummary({ configured: false, lastFour: null });
+    setCredentialError(null);
+    setModelHubMutationNotice(null);
+    setLoading(false);
+    setProbingCapability(false);
     setSchemeMessage(null);
     setCapabilityProbeError(null);
     setCapabilityProbeMessage(null);
@@ -940,7 +1082,9 @@ export function SettingsPage() {
     );
   }
 
-  async function persistConnectionWithAvailableCredential(): Promise<ModelProviderConnection> {
+  async function persistConnectionWithAvailableCredential(
+    token?: ModelHubOperationToken,
+  ): Promise<ModelProviderConnection> {
     if (authentication === "none" || secret.trim().length === 0) {
       return persistModelHubConnection(summary.configured, authentication);
     }
@@ -962,11 +1106,19 @@ export function SettingsPage() {
       connection: await modelHubConnectionInput(true, authentication),
       secret,
     });
-    setHubConnection(saved.connection);
-    setSummary(saved.credential);
-    setSecret("");
-    if (saved.oldCredentialCleanupPending) {
-      setSchemeMessage("新密钥已安全保存；旧密钥槽将在下次启动或重试时继续清理。");
+    if (
+      token === undefined ||
+      modelHubOperationCoordinatorRef.current.isCurrent(token, {
+        providerKind: saved.connection.providerKind,
+        connectionId: saved.connection.id,
+      })
+    ) {
+      setHubConnection(saved.connection);
+      setSummary(saved.credential);
+      setSecret("");
+      if (saved.oldCredentialCleanupPending) {
+        setSchemeMessage("新密钥已安全保存；旧密钥槽将在下次启动或重试时继续清理。");
+      }
     }
     return saved.connection;
   }
@@ -1012,9 +1164,18 @@ export function SettingsPage() {
   }
 
   async function saveModelProfile(): Promise<void> {
+    const token = modelHubOperationCoordinatorRef.current.begin("save_connection", {
+      providerKind: providerPreset,
+      connectionId: providerId,
+      modelId: selectedModel.trim().length === 0 ? null : selectedModel,
+    });
+    startModelHubDiagnosticAction(runtime, token, runtime.clock.now());
+    let backendCommitted = false;
+    let refreshAttempted = false;
     setSaving(true);
     try {
-      const savedConnection = await persistConnectionWithAvailableCredential();
+      const savedConnection = await persistConnectionWithAvailableCredential(token);
+      backendCommitted = true;
       const pricing = buildPricingProfile();
       const legacyPricing: ModelPricingProfile | null =
         pricing?.contextWindowTokens == null
@@ -1106,23 +1267,33 @@ export function SettingsPage() {
         });
       }
 
-      const [nextConnections, nextProfiles] = await Promise.all([
-        runtime.modelHub.listConnections(),
-        runtime.modelCenter.listProfiles(),
-      ]);
-      setHubConnections(nextConnections);
-      setHubConnection(
-        nextConnections.find(({ id }) => id === savedConnection.id) ?? savedConnection,
-      );
-      setHubCatalog(nextCatalog);
-      await refreshRoutingCatalogState(nextConnections);
-      setProfiles(nextProfiles);
-      setProfile(savedLegacyProfile);
-      setProviderId(savedConnection.id);
-      setBaseUrl(savedConnection.baseUrl);
-      setCredentialError(null);
+      void savedLegacyProfile;
+      refreshAttempted = true;
+      await loadModelCenter({
+        action: "save_connection",
+        token,
+        requestedConnectionId: savedConnection.id,
+        requestedModelId: selectedModel.trim().length === 0 ? null : selectedModel,
+        backendCommitted: true,
+      });
     } catch (reason: unknown) {
-      setCredentialError(reason);
+      const normalized = normalizeUiError(reason);
+      if (backendCommitted) {
+        setModelHubMutationNotice(
+          "连接已经保存，但后续模型资料没有全部更新。请重新加载 Model Hub 后再检查，无需重复填写密钥。",
+        );
+      } else {
+        setCredentialError(reason);
+      }
+      if (!refreshAttempted) {
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: backendCommitted ? "succeeded_with_warning" : "failed",
+          backendCommitted,
+          storeRefreshed: false,
+          errorCode: normalized.code,
+        });
+      }
     } finally {
       setSaving(false);
     }
@@ -1443,7 +1614,7 @@ export function SettingsPage() {
   > {
     const scanId = createModelHubId("probe-scan");
     const evidenceVersion = createModelHubId("lightweight-probe-v1");
-    const startedAt = Date.now();
+    const startedAt = Date.parse(runtime.clock.now());
     const expectedDispatchIdentity = settingsProbeDispatchIdentity(savedConnection, catalogEntry);
     try {
       const current = await readAuthoritativeProbeTarget(savedConnection.id, catalogEntry.id);
@@ -1509,7 +1680,7 @@ export function SettingsPage() {
       });
       return Object.freeze({
         streamed: result.streamed,
-        latencyMs: Math.max(0, Date.now() - startedAt),
+        latencyMs: Math.max(0, Date.parse(runtime.clock.now()) - startedAt),
         connection: committed.connection,
         catalog: verified.catalog,
         entry: verified.entry,
@@ -1559,10 +1730,224 @@ export function SettingsPage() {
     }
   }
 
-  async function applyInitialSmartRoutingIfEmpty(): Promise<number | null> {
+  async function verifyAndAssignRecommendedTask(
+    task: NovelAiTask,
+    recommendation: ModelHubTaskRecommendation,
+  ): Promise<void> {
+    if (recommendedTaskBusy !== null || routeSaving) return;
+    const routesBeforeSave = novelTaskRoutes;
+    setRecommendedTaskBusy(task);
+    setRouteSaving(true);
+    setRouteError(null);
+    setSchemeMessage(null);
+    try {
+      const initial = await readAuthoritativeProbeTarget(
+        recommendation.model.connection.id,
+        recommendation.model.catalogEntry.id,
+      );
+      assertModelHubFinalDispatchUnchanged(
+        settingsProbeDispatchIdentity(
+          recommendation.model.connection,
+          recommendation.model.catalogEntry,
+        ),
+        settingsProbeDispatchIdentity(initial.connection, initial.entry),
+      );
+
+      if (recommendation.readiness === "verify_structured_output") {
+        const scanId = createModelHubId("structured-probe-scan");
+        const evidenceVersion = MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_VERSION;
+        try {
+          const result = await runModelHubStructuredCapabilityProbe({
+            gateway: runtime.modelGateway,
+            providerKind: initial.connection.providerKind,
+            generationIds: [
+              createModelHubId("structured-probe"),
+              createModelHubId("structured-probe-repair"),
+            ],
+            config: modelHubNativeEndpointConfig(initial.connection),
+            model: initial.entry.providerModelId,
+          });
+          const verified = await readAuthoritativeProbeTarget(
+            initial.connection.id,
+            initial.entry.id,
+          );
+          assertModelHubFinalDispatchUnchanged(
+            settingsProbeDispatchIdentity(initial.connection, initial.entry),
+            settingsProbeDispatchIdentity(verified.connection, verified.entry),
+          );
+          await runtime.modelHub.commitCapabilityProbeResult({
+            connectionId: verified.connection.id,
+            expectedConnectionRevision: verified.connection.revision,
+            catalogEntryId: verified.entry.id,
+            expectedCatalogRevision: verified.entry.revision,
+            expectedProviderModelId: verified.entry.providerModelId,
+            scan: {
+              scanId,
+              catalogEntryId: verified.entry.id,
+              scanKind: "lightweight_probe",
+              status: "succeeded",
+              evidenceVersion,
+              evidence: [
+                {
+                  id: createModelHubId("capability"),
+                  capability: "structured_output",
+                  verdict: "supported",
+                  evidenceSource: "lightweight_probe",
+                  evidenceSummary: `固定 JSON schema 探针通过（${result.evidenceVersion}，${String(result.attempts)} 次尝试）；未发送或保存作品内容与模型响应。`,
+                },
+              ],
+            },
+          });
+        } catch (cause: unknown) {
+          const normalized = normalizeUiError(cause);
+          const current = await readAuthoritativeProbeTarget(
+            initial.connection.id,
+            initial.entry.id,
+          );
+          assertModelHubFinalDispatchUnchanged(
+            settingsProbeDispatchIdentity(initial.connection, initial.entry),
+            settingsProbeDispatchIdentity(current.connection, current.entry),
+          );
+          await runtime.modelHub.commitCapabilityProbeResult({
+            connectionId: current.connection.id,
+            expectedConnectionRevision: current.connection.revision,
+            catalogEntryId: current.entry.id,
+            expectedCatalogRevision: current.entry.revision,
+            expectedProviderModelId: current.entry.providerModelId,
+            scan: {
+              scanId,
+              catalogEntryId: current.entry.id,
+              scanKind: "lightweight_probe",
+              status: "failed",
+              evidenceVersion,
+              errorCode: normalized.code,
+              errorSummary: normalized.description,
+            },
+          });
+          throw cause;
+        }
+      }
+
+      if (recommendation.readiness === "verify_translation") {
+        const scanId = createModelHubId("translation-probe-scan");
+        try {
+          const result = await runModelHubTranslationCapabilityProbe({
+            gateway: runtime.modelGateway,
+            providerKind: initial.connection.providerKind,
+            generationId: createModelHubId("translation-probe"),
+            config: modelHubNativeEndpointConfig(initial.connection),
+            model: initial.entry.providerModelId,
+          });
+          const verified = await readAuthoritativeProbeTarget(
+            initial.connection.id,
+            initial.entry.id,
+          );
+          assertModelHubFinalDispatchUnchanged(
+            settingsProbeDispatchIdentity(initial.connection, initial.entry),
+            settingsProbeDispatchIdentity(verified.connection, verified.entry),
+          );
+          await runtime.modelHub.commitCapabilityProbeResult({
+            connectionId: verified.connection.id,
+            expectedConnectionRevision: verified.connection.revision,
+            catalogEntryId: verified.entry.id,
+            expectedCatalogRevision: verified.entry.revision,
+            expectedProviderModelId: verified.entry.providerModelId,
+            scan: {
+              scanId,
+              catalogEntryId: verified.entry.id,
+              scanKind: "lightweight_probe",
+              status: "succeeded",
+              evidenceVersion: MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_VERSION,
+              evidence: [
+                {
+                  id: createModelHubId("capability"),
+                  capability: "translation",
+                  verdict: "supported",
+                  evidenceSource: "lightweight_probe",
+                  evidenceSummary: `固定中英翻译探针通过（${result.evidenceVersion}）；未发送或保存作品内容与模型响应。`,
+                },
+              ],
+            },
+          });
+        } catch (cause: unknown) {
+          const normalized = normalizeUiError(cause);
+          const current = await readAuthoritativeProbeTarget(
+            initial.connection.id,
+            initial.entry.id,
+          );
+          assertModelHubFinalDispatchUnchanged(
+            settingsProbeDispatchIdentity(initial.connection, initial.entry),
+            settingsProbeDispatchIdentity(current.connection, current.entry),
+          );
+          await runtime.modelHub.commitCapabilityProbeResult({
+            connectionId: current.connection.id,
+            expectedConnectionRevision: current.connection.revision,
+            catalogEntryId: current.entry.id,
+            expectedCatalogRevision: current.entry.revision,
+            expectedProviderModelId: current.entry.providerModelId,
+            scan: {
+              scanId,
+              catalogEntryId: current.entry.id,
+              scanKind: "lightweight_probe",
+              status: "failed",
+              evidenceVersion: MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_VERSION,
+              errorCode: normalized.code,
+              errorSummary: normalized.description,
+              failure: modelHubTextCapabilityProbeFailureMetadata(
+                cause,
+                current.connection.providerKind,
+              ),
+            },
+          });
+          throw cause;
+        }
+      }
+
+      const existing = await runtime.modelHub.findTaskRoute(task);
+      if (existing !== null) {
+        throw new Error("这项任务已经由其他操作完成分配，请刷新后查看。");
+      }
+      const privacy = await runtime.modelHub.findCostPrivacyProfile(initial.entry.id);
+      const saved = await runtime.modelHub.saveTaskRoute({
+        task,
+        primaryCatalogEntryId: initial.entry.id,
+        fallbackCatalogEntryId: null,
+        presetId: null,
+        parameterPolicy: Object.freeze({}),
+        maximumCostMicros: null,
+        currency: null,
+        privacyPolicy: privacy?.dataDestination === "local" ? "local_only" : "cloud_allowed",
+        failurePolicy: "ask_user",
+        routeOrigin: "user",
+        enabled: true,
+        expectedRevision: null,
+      });
+      const [nextConnections, nextRoutes] = await Promise.all([
+        runtime.modelHub.listConnections(),
+        Promise.all(NOVEL_AI_TASKS.map((candidate) => runtime.modelHub.findTaskRoute(candidate))),
+      ]);
+      setHubConnections(nextConnections);
+      setNovelTaskRoutes(nextRoutes.filter((route): route is NovelTaskRoute => route !== null));
+      await refreshRoutingCatalogState(nextConnections);
+      setSchemeMessage(
+        `${recommendation.readiness === "verify_structured_output" ? "结构化输出已验证，并" : "已"}将“${novelAiTaskLabel(saved.task)}”分配给 ${catalogEntryLabel(initial.entry, nextConnections)}。`,
+      );
+    } catch (cause: unknown) {
+      setRouteError(cause);
+      await confirmNovelRoutingUnchanged(routesBeforeSave);
+    } finally {
+      setRouteSaving(false);
+      setRecommendedTaskBusy(null);
+    }
+  }
+
+  async function applyInitialSmartRoutingIfEmpty(
+    token: ModelHubOperationToken,
+  ): Promise<number | null> {
     const currentRoutes = await Promise.all(
       NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task)),
     );
+    if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) return null;
     const persistedRoutes = currentRoutes.filter(
       (route): route is NovelTaskRoute => route !== null,
     );
@@ -1578,10 +1963,11 @@ export function SettingsPage() {
         );
       if (!canRecoverInterruptedSmartPlan) return null;
     }
+    const currentProfiles = await runtime.modelCenter.listProfiles();
+    if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) return null;
     setRouteError(null);
     setRouteFailureRollbackConfirmed(null);
     setRouteFailureLegacyProjectionMayHaveChanged(false);
-    const currentProfiles = await runtime.modelCenter.listProfiles();
     const applied = await applyAutomaticModelHubRouting({
       modelHub: runtime.modelHub,
       legacyRouting: runtime.modelRouting,
@@ -1592,14 +1978,18 @@ export function SettingsPage() {
       scheme: "smart",
       now: new Date().toISOString(),
     });
+    if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) return null;
     let legacyRefreshFailed = applied.legacySyncStatus === "failed";
     if (!legacyRefreshFailed) {
       try {
-        setRoleRoutes(await runtime.modelRouting.listRoutes());
+        const refreshedRoleRoutes = await runtime.modelRouting.listRoutes();
+        if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) return null;
+        setRoleRoutes(refreshedRoleRoutes);
       } catch {
         legacyRefreshFailed = true;
       }
     }
+    if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) return null;
     setModelHubScheme("smart");
     setNovelTaskRoutes(applied.routes);
     if (legacyRefreshFailed) {
@@ -1614,41 +2004,113 @@ export function SettingsPage() {
     if (!runtime.modelGateway.available || selectedModel.trim().length === 0) {
       return;
     }
+    const token = modelHubOperationCoordinatorRef.current.begin("verify_capability", {
+      providerKind: providerPreset,
+      connectionId: hubConnection?.id ?? providerId,
+      modelId: selectedModel,
+    });
+    startModelHubDiagnosticAction(runtime, token, runtime.clock.now());
+    let backendCommitted = false;
+    let refreshAttempted = false;
     setProbingCapability(true);
     setCapabilityProbeError(null);
     setCapabilityProbeMessage(null);
     try {
-      const savedConnection = await persistConnectionWithAvailableCredential();
+      const savedConnection = await persistConnectionWithAvailableCredential(token);
+      backendCommitted = true;
+      if (
+        !modelHubOperationCoordinatorRef.current.isCurrent(token, {
+          providerKind: savedConnection.providerKind,
+          connectionId: savedConnection.id,
+          modelId: selectedModel,
+        })
+      ) {
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: "stale_ignored",
+          backendCommitted,
+          staleResultIgnored: true,
+        });
+        return;
+      }
       const target = await ensureCatalogEntryForModel(savedConnection, selectedModel);
       const result = await performLightweightTextProbe(target.connection, target.entry, true);
-      setHubCatalog(result.catalog);
-      setModels(result.catalog.map(catalogEntryToDescriptor));
-      const nextConnections = await runtime.modelHub.listConnections();
-      setHubConnections(nextConnections);
-      await refreshRoutingCatalogState(nextConnections);
+      if (
+        !modelHubOperationCoordinatorRef.current.isCurrent(token, {
+          providerKind: result.connection.providerKind,
+          connectionId: result.connection.id,
+          modelId: result.entry.providerModelId,
+        })
+      ) {
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: "stale_ignored",
+          backendCommitted,
+          staleResultIgnored: true,
+          catalogCount: result.catalog.length,
+        });
+        return;
+      }
       let automaticallyConfigured: number | null = null;
       let automaticRoutingFailed = false;
       const routesBeforeAutomaticConfiguration = novelTaskRoutes;
       try {
-        automaticallyConfigured = await applyInitialSmartRoutingIfEmpty();
+        automaticallyConfigured = await applyInitialSmartRoutingIfEmpty(token);
       } catch (cause: unknown) {
+        if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) return;
         automaticRoutingFailed = true;
         setRouteError(cause);
         await confirmNovelRoutingUnchanged(routesBeforeAutomaticConfiguration);
       }
-      setCapabilityProbeMessage(
-        `${
-          result.streamed
-            ? `已验证“${result.entry.displayName}”可生成文字并支持流式返回。`
-            : `已验证“${result.entry.displayName}”可生成文字；本次没有观察到流式增量。`
-        }${
-          automaticallyConfigured === null
-            ? ""
-            : ` 已自动配置 ${String(automaticallyConfigured)} 类可用 AI 任务。`
-        }${automaticRoutingFailed ? " 写作能力证据已保留；自动分工未完成，请重试应用 AI 分工。" : ""}`,
-      );
+      if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) {
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: "stale_ignored",
+          backendCommitted,
+          staleResultIgnored: true,
+          catalogCount: result.catalog.length,
+        });
+        return;
+      }
+      const successMessage = `${
+        result.streamed
+          ? `已验证“${result.entry.displayName}”可生成文字并支持流式返回。`
+          : `已验证“${result.entry.displayName}”可生成文字；本次没有观察到流式增量。`
+      }${
+        automaticallyConfigured === null
+          ? ""
+          : ` 已自动配置 ${String(automaticallyConfigured)} 类可用 AI 任务。`
+      }${automaticRoutingFailed ? " 写作能力证据已保留；自动分工未完成，请重试应用 AI 分工。" : ""}`;
+      setCapabilityProbeMessage(successMessage);
+      refreshAttempted = true;
+      const refreshed = await loadModelCenter({
+        action: "verify_capability",
+        token,
+        requestedConnectionId: result.connection.id,
+        requestedModelId: result.entry.providerModelId,
+        backendCommitted: true,
+      });
+      if (refreshed) setCapabilityProbeMessage(successMessage);
     } catch (cause: unknown) {
+      if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) {
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: "stale_ignored",
+          backendCommitted,
+          staleResultIgnored: true,
+        });
+        return;
+      }
       setCapabilityProbeError(cause);
+      if (!refreshAttempted) {
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: "failed",
+          backendCommitted,
+          storeRefreshed: false,
+          errorCode: normalizeUiError(cause).code,
+        });
+      }
     } finally {
       setProbingCapability(false);
     }
@@ -1658,6 +2120,16 @@ export function SettingsPage() {
     if (!runtime.modelGateway.available) {
       return;
     }
+    const automaticDiscovery = getModelProviderPreset(providerPreset).modelDiscovery.automatic;
+    const requestedOperationModelId = (
+      automaticDiscovery ? selectedModel : endpointId.trim() || selectedModel
+    ).trim();
+    const token = modelHubOperationCoordinatorRef.current.begin("discover_models", {
+      providerKind: providerPreset,
+      connectionId: hubConnection?.id ?? providerId,
+      modelId: requestedOperationModelId.length === 0 ? null : requestedOperationModelId,
+    });
+    startModelHubDiagnosticAction(runtime, token, runtime.clock.now());
     setCheckingModel(true);
     setConnectionChecked(false);
     setConnection(null);
@@ -1666,38 +2138,72 @@ export function SettingsPage() {
     setCapabilityProbeMessage(null);
     let savedConnection: ModelProviderConnection | null = null;
     let lightweightProbeOwnsConnectionOutcome = false;
+    let refreshAttempted = false;
     try {
-      savedConnection = await persistConnectionWithAvailableCredential();
+      savedConnection = await persistConnectionWithAvailableCredential(token);
+      if (
+        !modelHubOperationCoordinatorRef.current.isCurrent(token, {
+          providerKind: savedConnection.providerKind,
+          connectionId: savedConnection.id,
+          modelId: requestedOperationModelId.length === 0 ? null : requestedOperationModelId,
+        })
+      ) {
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: "stale_ignored",
+          backendCommitted: true,
+          staleResultIgnored: true,
+        });
+        return;
+      }
       const config = modelHubNativeEndpointConfig(savedConnection);
       const capacityInspection =
         providerPreset === "ollama" && runtime.modelGateway.inspectCapacity !== undefined
           ? runtime.modelGateway.inspectCapacity().catch(() => null)
           : Promise.resolve(null);
-      if (!getModelProviderPreset(providerPreset).modelDiscovery.automatic) {
-        const modelId = (endpointId.trim() || selectedModel.trim()).normalize("NFKC");
+      if (!automaticDiscovery) {
+        const modelId = requestedOperationModelId.normalize("NFKC");
         const target = await ensureCatalogEntryForModel(savedConnection, modelId);
         lightweightProbeOwnsConnectionOutcome = true;
         const result = await performLightweightTextProbe(target.connection, target.entry, true);
         const descriptors = result.catalog.map(catalogEntryToDescriptor);
-        setConnection({
-          provider: gatewayProviderKind(providerPreset),
-          endpointOrigin: new URL(result.connection.baseUrl).origin,
-          modelCount: descriptors.length,
-          latencyMs: result.latencyMs,
+        if (
+          !modelHubOperationCoordinatorRef.current.isCurrent(token, {
+            providerKind: result.connection.providerKind,
+            connectionId: result.connection.id,
+            modelId: result.entry.providerModelId,
+          })
+        ) {
+          finishModelHubDiagnosticAction(runtime, token, {
+            completedAt: runtime.clock.now(),
+            outcome: "stale_ignored",
+            backendCommitted: true,
+            staleResultIgnored: true,
+            catalogCount: result.catalog.length,
+          });
+          return;
+        }
+        const successMessage = result.streamed
+          ? `连接成功，并已验证“${result.entry.displayName}”可生成文字和流式返回。`
+          : `连接成功，并已验证“${result.entry.displayName}”可生成文字。`;
+        setCapabilityProbeMessage(successMessage);
+        refreshAttempted = true;
+        const refreshed = await loadModelCenter({
+          action: "discover_models",
+          token,
+          requestedConnectionId: result.connection.id,
+          requestedModelId: result.entry.providerModelId,
+          backendCommitted: true,
         });
-        setModels(descriptors);
-        setHubCatalog(result.catalog);
-        setHubConnection(result.connection);
-        setSelectedModel(result.entry.providerModelId);
-        const nextConnections = await runtime.modelHub.listConnections();
-        setHubConnections(nextConnections);
-        await refreshRoutingCatalogState(nextConnections);
-        setCapabilityProbeMessage(
-          result.streamed
-            ? `连接成功，并已验证“${result.entry.displayName}”可生成文字和流式返回。`
-            : `连接成功，并已验证“${result.entry.displayName}”可生成文字。`,
-        );
-        setCredentialError(null);
+        if (refreshed) {
+          setCapabilityProbeMessage(successMessage);
+          setConnection({
+            provider: gatewayProviderKind(providerPreset),
+            endpointOrigin: new URL(result.connection.baseUrl).origin,
+            modelCount: descriptors.length,
+            latencyMs: result.latencyMs,
+          });
+        }
         return;
       }
       const [checked, listed, capacity] = await Promise.all([
@@ -1705,6 +2211,16 @@ export function SettingsPage() {
         runtime.modelGateway.listModels(config),
         capacityInspection,
       ]);
+      if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) {
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: "stale_ignored",
+          backendCommitted: true,
+          staleResultIgnored: true,
+          catalogCount: listed.models.length,
+        });
+        return;
+      }
       const testedConnection = await runtime.modelHub.recordConnectionTest({
         connectionId: savedConnection.id,
         status: "ready",
@@ -1740,21 +2256,33 @@ export function SettingsPage() {
           })),
         });
       }
-      setConnection(checked);
-      setModels(listed.models);
-      setHubCatalog(catalog);
-      setHubConnection(
-        (await runtime.modelHub.findConnection(savedConnection.id)) ?? testedConnection,
-      );
-      const nextConnections = await runtime.modelHub.listConnections();
-      setHubConnections(nextConnections);
-      await refreshRoutingCatalogState(nextConnections);
-      setModelCapacity(capacity);
-      if (selectedModel.length === 0 && listed.models[0] !== undefined) {
-        setSelectedModel(listed.models[0].id);
+      void testedConnection;
+      void catalog;
+      const refreshedModelId =
+        selectedModel.length === 0 ? (listed.models[0]?.id ?? null) : selectedModel;
+      refreshAttempted = true;
+      const refreshed = await loadModelCenter({
+        action: "discover_models",
+        token,
+        requestedConnectionId: savedConnection.id,
+        requestedModelId: refreshedModelId,
+        backendCommitted: true,
+      });
+      if (refreshed) {
+        setConnection(checked);
+        setModels(listed.models);
+        setModelCapacity(capacity);
       }
-      setCredentialError(null);
     } catch (reason: unknown) {
+      if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) {
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: "stale_ignored",
+          backendCommitted: savedConnection !== null,
+          staleResultIgnored: true,
+        });
+        return;
+      }
       if (savedConnection !== null && !lightweightProbeOwnsConnectionOutcome) {
         const normalized = normalizeUiError(reason);
         await runtime.modelHub
@@ -1769,8 +2297,27 @@ export function SettingsPage() {
         setHubConnections(await runtime.modelHub.listConnections().catch(() => hubConnections));
       }
       setCredentialError(reason);
-      setModels([]);
       setModelCapacity(null);
+      const normalized = normalizeUiError(reason);
+      setModelHubPageSnapshot((current) =>
+        preserveModelHubPageSnapshotAfterFailure(current, {
+          action: "discover_models",
+          failedPhase: "LOADING_CATALOG",
+          errorCode: normalized.code,
+          catalogRefreshFailed: true,
+          hydratedAt: runtime.clock.now(),
+        }),
+      );
+      if (!refreshAttempted) {
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: "failed",
+          backendCommitted: savedConnection !== null,
+          storeRefreshed: false,
+          errorCode: normalized.code,
+          catalogCount: hubCatalog.length,
+        });
+      }
     } finally {
       setConnectionChecked(true);
       setCheckingModel(false);
@@ -1781,6 +2328,14 @@ export function SettingsPage() {
     if (runtime.mode !== "tauri") {
       return;
     }
+    const token = modelHubOperationCoordinatorRef.current.begin("save_credential", {
+      providerKind: providerPreset,
+      connectionId: providerId,
+      modelId: selectedModel.trim().length === 0 ? null : selectedModel,
+    });
+    startModelHubDiagnosticAction(runtime, token, runtime.clock.now());
+    let backendCommitted = false;
+    let refreshAttempted = false;
     setSaving(true);
     try {
       validateExpertConnectionDraft({
@@ -1806,16 +2361,37 @@ export function SettingsPage() {
         connection: await modelHubConnectionInput(true, nextAuthentication),
         secret,
       });
-      setHubConnection(saved.connection);
-      setHubConnections(await runtime.modelHub.listConnections());
-      setSummary(saved.credential);
+      backendCommitted = true;
       setSecret("");
-      setCredentialError(null);
       if (saved.oldCredentialCleanupPending) {
         setSchemeMessage("新密钥已安全保存；旧密钥槽将在下次启动或重试时继续清理。");
       }
+      refreshAttempted = true;
+      await loadModelCenter({
+        action: "save_credential",
+        token,
+        requestedConnectionId: saved.connection.id,
+        requestedModelId: selectedModel.trim().length === 0 ? null : selectedModel,
+        backendCommitted: true,
+      });
     } catch (reason: unknown) {
-      setCredentialError(reason);
+      const normalized = normalizeUiError(reason);
+      if (backendCommitted) {
+        setModelHubMutationNotice(
+          "密钥已经安全保存，但页面状态刷新失败。请重新加载 Model Hub，无需再次输入密钥。",
+        );
+      } else {
+        setCredentialError(reason);
+      }
+      if (!refreshAttempted) {
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: backendCommitted ? "succeeded_with_warning" : "failed",
+          backendCommitted,
+          storeRefreshed: false,
+          errorCode: normalized.code,
+        });
+      }
     } finally {
       setSaving(false);
     }
@@ -1877,6 +2453,14 @@ export function SettingsPage() {
     if (runtime.mode !== "tauri") {
       return;
     }
+    const token = modelHubOperationCoordinatorRef.current.begin("delete_credential", {
+      providerKind: providerPreset,
+      connectionId: providerId,
+      modelId: selectedModel.trim().length === 0 ? null : selectedModel,
+    });
+    startModelHubDiagnosticAction(runtime, token, runtime.clock.now());
+    let backendCommitted = false;
+    let refreshAttempted = false;
     setSaving(true);
     try {
       const targetConnection = await assertCredentialMutationTarget("delete");
@@ -1897,22 +2481,43 @@ export function SettingsPage() {
       const deleted = await deleteModelHubCredential(runtime, {
         connection: await modelHubConnectionInput(false, nextAuthentication),
       });
-      setHubConnection(deleted.connection);
-      setHubConnections(await runtime.modelHub.listConnections());
-      setSummary(deleted.credential);
+      backendCommitted = true;
       setSecret("");
-      setCredentialError(null);
       if (deleted.credentialCleanup === "skipped_unowned_reference") {
         setSchemeMessage(
           "连接已安全停用；检测到来源不明的旧凭据引用，因此没有猜测或删除任何系统凭据槽。",
         );
       }
+      refreshAttempted = true;
+      await loadModelCenter({
+        action: "delete_credential",
+        token,
+        requestedConnectionId: deleted.connection.id,
+        requestedModelId: selectedModel.trim().length === 0 ? null : selectedModel,
+        backendCommitted: true,
+      });
     } catch (reason: unknown) {
-      setCredentialError(reason);
+      const normalized = normalizeUiError(reason);
+      if (backendCommitted) {
+        setModelHubMutationNotice(
+          "密钥删除已经完成，但页面状态刷新失败。请重新加载 Model Hub，不要重复删除。",
+        );
+      } else {
+        setCredentialError(reason);
+      }
       const current = await runtime.modelHub.findConnection(providerId).catch(() => null);
       if (current !== null) {
         setHubConnection(current);
         setHubConnections(await runtime.modelHub.listConnections().catch(() => hubConnections));
+      }
+      if (!refreshAttempted) {
+        finishModelHubDiagnosticAction(runtime, token, {
+          completedAt: runtime.clock.now(),
+          outcome: backendCommitted ? "succeeded_with_warning" : "failed",
+          backendCommitted,
+          storeRefreshed: false,
+          errorCode: normalized.code,
+        });
       }
     } finally {
       setSaving(false);
@@ -2137,22 +2742,30 @@ export function SettingsPage() {
     await loadProjectMemoryGovernance(selectedMemoryProjectId);
   }
 
+  const modelHubHydrationPending = isModelHubHydrationPending(modelHubPageSnapshot.phase);
   const modelHubReadiness = useMemo(
     () =>
       projectModelHubReadiness({
         connections: hubConnections,
         catalog: routingCatalog,
         routes: novelTaskRoutes,
-        transientChecking: loading || checkingModel,
+        transientChecking: modelHubHydrationPending || checkingModel,
         loadFailed: credentialError !== null,
       }),
-    [checkingModel, credentialError, hubConnections, loading, novelTaskRoutes, routingCatalog],
+    [
+      checkingModel,
+      credentialError,
+      hubConnections,
+      modelHubHydrationPending,
+      novelTaskRoutes,
+      routingCatalog,
+    ],
   );
 
   useEffect(() => {
-    if (loading) return;
+    if (modelHubHydrationPending) return;
     window.dispatchEvent(new Event(MODEL_HUB_READINESS_CHANGED_EVENT));
-  }, [loading, modelHubReadiness]);
+  }, [modelHubHydrationPending, modelHubReadiness]);
 
   const normalizedCredentialError =
     credentialError === null ? null : normalizeUiError(credentialError);
@@ -2168,7 +2781,7 @@ export function SettingsPage() {
         capabilityEvidence: routingCapabilityEvidence,
         recentAiFailures: routingRecentAiFailures,
         now: runtime.clock.now(),
-        validating: loading || checkingModel || probingCapability,
+        validating: modelHubHydrationPending || checkingModel || probingCapability,
         loadFailed: credentialError !== null,
         saveFailed: normalizedRouteError !== null,
       }),
@@ -2176,7 +2789,7 @@ export function SettingsPage() {
       checkingModel,
       credentialError,
       hubConnections,
-      loading,
+      modelHubHydrationPending,
       novelTaskRoutes,
       normalizedRouteError,
       probingCapability,
@@ -2186,6 +2799,82 @@ export function SettingsPage() {
       runtime,
     ],
   );
+  const paidEvaluationTargets = useMemo<readonly NovelSkillPaidEvaluationTargetOption[]>(() => {
+    const connectionById = new Map(hubConnections.map((connection) => [connection.id, connection]));
+    const costByCatalogId = new Map(
+      routingCostPrivacyProfiles.map((profile) => [profile.catalogEntryId, profile]),
+    );
+    const now = runtime.clock.now();
+    return routingCatalog
+      .filter((entry) => {
+        const connection = connectionById.get(entry.connectionId);
+        const cost = costByCatalogId.get(entry.id);
+        const hasTextEvidence = routingCapabilityEvidence.some(
+          (evidence) =>
+            evidence.catalogEntryId === entry.id &&
+            evidence.capability === "text_generation" &&
+            evidence.verdict === "supported" &&
+            (evidence.expiresAt === null || evidence.expiresAt > now),
+        );
+        return (
+          connection?.enabled === true &&
+          connection.connectionStatus === "ready" &&
+          connection.catalogSyncStatus === "succeeded" &&
+          entry.availability === "available" &&
+          entry.lifecycle !== "deprecated" &&
+          (entry.staleAfter === null || entry.staleAfter > now) &&
+          entry.inputTokenLimit !== null &&
+          entry.inputTokenLimit >= 7_000 &&
+          entry.outputTokenLimit !== null &&
+          entry.outputTokenLimit >= 4_096 &&
+          hasTextEvidence &&
+          isCompletePaidEvaluationCostProfile(cost)
+        );
+      })
+      .map((entry) => {
+        const connection = connectionById.get(entry.connectionId);
+        if (connection === undefined) {
+          throw new Error("Paid evaluation target connection disappeared during projection.");
+        }
+        return Object.freeze({
+          targetId: entry.id,
+          providerLabel: connection.displayName,
+          modelLabel: entry.displayName,
+          providerModelId: entry.providerModelId,
+        });
+      })
+      .sort(
+        (left, right) =>
+          left.providerLabel.localeCompare(right.providerLabel, "zh-CN") ||
+          left.modelLabel.localeCompare(right.modelLabel, "zh-CN") ||
+          left.targetId.localeCompare(right.targetId, "en"),
+      );
+  }, [
+    hubConnections,
+    routingCapabilityEvidence,
+    routingCatalog,
+    routingCostPrivacyProfiles,
+    runtime,
+  ]);
+  const connectedTaskRecommendations = useMemo(
+    () =>
+      new Map(
+        routingVisibility.tasks.map(({ definition }) => [
+          definition.task,
+          recommendConnectedModelsForTask(definition.task, routingVisibility.models)[0] ?? null,
+        ]),
+      ),
+    [routingVisibility.models, routingVisibility.tasks],
+  );
+  const providerTaskRecommendations = useMemo(() => {
+    const now = runtime.clock.now();
+    return new Map(
+      routingVisibility.tasks.map(({ definition }) => [
+        definition.task,
+        providerRecommendationsForTask(definition.task, now)[0] ?? null,
+      ]),
+    );
+  }, [routingVisibility.tasks, runtime]);
   const missingNovelTaskRouteCount = routingVisibility.missingRouteCount;
   const modelHubRouteBadgeTone = modelHubOverallBadgeTone(routingVisibility.state);
   const modelHubRouteBadgeLabel = modelHubOverallBadgeLabel(routingVisibility.state);
@@ -2218,7 +2907,7 @@ export function SettingsPage() {
       (novelRoutePrivacy !== "local_only" || localCatalogEntryIds.includes(id)),
   );
   const modelHubFormReadiness = resolveModelHubFormReadiness({
-    busy: loading || saving || checkingModel || probingCapability,
+    busy: modelHubHydrationPending || saving || checkingModel || probingCapability,
     nativeGatewayAvailable: runtime.modelGateway.available,
     online,
     endpointCanRunOffline: canCheckModelEndpointWhileOffline(provider, baseUrl),
@@ -2651,13 +3340,19 @@ export function SettingsPage() {
                       连接供应商、测试连接并发现模型。普通模式只显示开始写作真正需要的选项。
                     </CardDescription>
                   </div>
-                  <SaveStatus
-                    state={saving ? "saving" : hubConnection === null ? "clean" : "saved_local"}
-                    labels={{
-                      clean: "配置未保存",
-                      saved_local: `配置修订 ${String(hubConnection?.revision ?? 0)}`,
-                    }}
-                  />
+                  {modelHubHydrationPending ? (
+                    <Badge tone="info">
+                      {modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)}
+                    </Badge>
+                  ) : (
+                    <SaveStatus
+                      state={saving ? "saving" : hubConnection === null ? "clean" : "saved_local"}
+                      labels={{
+                        clean: "配置未保存",
+                        saved_local: `配置修订 ${String(hubConnection?.revision ?? 0)}`,
+                      }}
+                    />
+                  )}
                 </div>
               </CardHeader>
               <CardContent>
@@ -2755,6 +3450,46 @@ export function SettingsPage() {
                     />
                   )}
 
+                  {normalizedCredentialError === null &&
+                    modelHubPageSnapshot.errorCode !== null && (
+                      <InlineAlert
+                        tone={
+                          modelHubPageSnapshot.catalogStatus === "cached_warning"
+                            ? "warning"
+                            : "error"
+                        }
+                        title={
+                          modelHubPageSnapshot.catalogStatus === "cached_warning"
+                            ? "模型目录重新检查未完成"
+                            : "Model Hub 状态没有完整载入"
+                        }
+                        description={`${
+                          modelHubPageSnapshot.catalogStatus === "cached_warning"
+                            ? `重新检查失败，已保留 ${String(modelHubPageSnapshot.catalogEntries.length)} 个缓存模型。`
+                            : "连接、模型目录或 AI 分工暂时无法读取。"
+                        }（${modelHubPageSnapshot.errorCode}）`}
+                      />
+                    )}
+
+                  {modelHubMutationNotice !== null && (
+                    <>
+                      <InlineAlert
+                        tone="warning"
+                        title="更改已保存，页面需要重新载入"
+                        description={modelHubMutationNotice}
+                      />
+                      <div className="settings-actions">
+                        <Button
+                          variant="secondary"
+                          disabled={modelHubHydrationPending || saving || checkingModel}
+                          onClick={() => void loadModelCenter({ action: "refresh_snapshot" })}
+                        >
+                          重新加载 Model Hub
+                        </Button>
+                      </div>
+                    </>
+                  )}
+
                   {retirementMessage !== null && (
                     <InlineAlert
                       tone="info"
@@ -2776,14 +3511,17 @@ export function SettingsPage() {
                       variant="secondary"
                       aria-expanded={expertMode}
                       aria-controls="model-hub-expert-settings"
-                      onClick={() => setExpertMode((current) => !current)}
+                      onClick={() => {
+                        if (expertMode) setPaidEvaluationExpanded(false);
+                        setExpertMode((current) => !current);
+                      }}
                     >
                       {expertMode ? "收起专家设置" : "专家设置"}
                     </Button>
                     {providerPreset !== "custom_openai_compatible" && (
                       <Button
                         variant="secondary"
-                        disabled={loading || saving || checkingModel}
+                        disabled={loading || saving || checkingModel || probingCapability}
                         onClick={restoreProviderConnectionDefaults}
                       >
                         恢复供应商默认配置
@@ -2795,7 +3533,13 @@ export function SettingsPage() {
                       (!isRetiredModelProviderConnection(hubConnection) || summary.configured) && (
                         <Button
                           variant="danger"
-                          disabled={loading || saving || checkingModel || retiringConnection}
+                          disabled={
+                            loading ||
+                            saving ||
+                            checkingModel ||
+                            probingCapability ||
+                            retiringConnection
+                          }
                           onClick={() => setRetireConnectionTarget(hubConnection)}
                         >
                           移除连接
@@ -2816,7 +3560,7 @@ export function SettingsPage() {
                               const preset = getModelProviderPreset(kind);
                               return { value: kind, label: preset.displayName };
                             })}
-                            disabled={loading || saving || checkingModel}
+                            disabled={loading || saving || checkingModel || probingCapability}
                             onChange={(event) =>
                               applyProviderPreset(
                                 event.currentTarget.value as ConnectableProviderKind,
@@ -2836,6 +3580,12 @@ export function SettingsPage() {
                                 value: candidate.id,
                                 label: `${getModelProviderPreset(candidate.providerKind).displayName} · ${isRetiredModelProviderConnection(candidate) ? "已移除" : connectionStatusLabel(candidate.connectionStatus)}`,
                               }))}
+                              disabled={
+                                modelHubHydrationPending ||
+                                saving ||
+                                checkingModel ||
+                                probingCapability
+                              }
                               onChange={(event) =>
                                 void selectStoredProfile(event.currentTarget.value)
                               }
@@ -2948,6 +3698,12 @@ export function SettingsPage() {
                                 value: candidate.id,
                                 label: `${candidate.id} · ${getModelProviderPreset(candidate.providerKind).displayName}`,
                               }))}
+                              disabled={
+                                modelHubHydrationPending ||
+                                saving ||
+                                checkingModel ||
+                                probingCapability
+                              }
                               onChange={(event) =>
                                 void selectStoredProfile(event.currentTarget.value)
                               }
@@ -3168,27 +3924,63 @@ export function SettingsPage() {
                   <section id="model-selection" aria-labelledby="model-selection-title">
                     <h3 id="model-selection-title">2. 测试连接并选择模型</h3>
                     {models.length > 0 ? (
-                      <FormField
-                        label="模型"
-                        hint={`本次从端点读取 ${String(models.length)} 个模型。`}
-                        required
-                      >
-                        {(fieldProps) => (
-                          <Select
-                            {...fieldProps}
-                            value={selectedModel}
-                            placeholder="选择模型"
-                            options={models.map((model) => ({
-                              value: model.id,
-                              label:
-                                model.sizeBytes === null || model.sizeBytes === undefined
-                                  ? model.displayName
-                                  : `${model.displayName} · ${formatBytes(model.sizeBytes)}`,
-                            }))}
-                            onChange={(event) => void selectCatalogModel(event.currentTarget.value)}
+                      <>
+                        <FormField
+                          label="模型"
+                          hint={
+                            modelHubPageSnapshot.catalogStatus === "cached_warning"
+                              ? `正在使用上次保存的 ${String(models.length)} 个模型；重新检查失败后没有清空目录。`
+                              : modelHubHydrationPending
+                                ? `${modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)} 已保存的模型仍可查看。`
+                                : `本次从端点读取 ${String(models.length)} 个模型。`
+                          }
+                          required
+                        >
+                          {(fieldProps) => (
+                            <Select
+                              {...fieldProps}
+                              value={selectedModel}
+                              placeholder="选择模型"
+                              options={models.map((model) => ({
+                                value: model.id,
+                                label:
+                                  model.sizeBytes === null || model.sizeBytes === undefined
+                                    ? model.displayName
+                                    : `${model.displayName} · ${formatBytes(model.sizeBytes)}`,
+                              }))}
+                              disabled={
+                                modelHubHydrationPending ||
+                                saving ||
+                                checkingModel ||
+                                probingCapability
+                              }
+                              onChange={(event) =>
+                                void selectCatalogModel(event.currentTarget.value)
+                              }
+                            />
+                          )}
+                        </FormField>
+                        {modelHubPageSnapshot.catalogStatus === "cached_warning" && (
+                          <InlineAlert
+                            tone="warning"
+                            title="正在使用上次保存的模型目录"
+                            description="本次重新检查没有完成，原有模型和选择已保留。你可以稍后再次测试连接。"
                           />
                         )}
-                      </FormField>
+                      </>
+                    ) : modelHubHydrationPending ? (
+                      <InlineAlert
+                        tone="info"
+                        title="正在恢复 Model Hub"
+                        description={modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)}
+                      />
+                    ) : modelHubPageSnapshot.phase === "ERROR" ||
+                      modelHubPageSnapshot.catalogStatus === "error" ? (
+                      <InlineAlert
+                        tone="error"
+                        title="模型目录暂时无法读取"
+                        description="已保存连接和密钥没有被清除。请重新加载 Model Hub；若仍失败，再检查本地数据库或供应商连接。"
+                      />
                     ) : expertMode ||
                       !getModelProviderPreset(providerPreset).modelDiscovery.automatic ? (
                       <FormField
@@ -3203,6 +3995,7 @@ export function SettingsPage() {
                             {...fieldProps}
                             value={selectedModel}
                             maxLength={512}
+                            disabled={saving || checkingModel || probingCapability}
                             onChange={(event) => setSelectedModel(event.currentTarget.value)}
                           />
                         )}
@@ -3487,13 +4280,26 @@ export function SettingsPage() {
                       <div className="secret-settings">
                         <div className="card-heading-row">
                           <strong>系统凭据库</strong>
-                          <SaveStatus
-                            state={saving ? "saving" : summary.configured ? "saved_local" : "clean"}
-                            labels={{
-                              clean: "未配置",
-                              saved_local: `已配置 ····${summary.lastFour ?? ""}`,
-                            }}
-                          />
+                          {modelHubPageSnapshot.credentialStatus === "checking" ||
+                          modelHubHydrationPending ? (
+                            <Badge tone="info">
+                              {modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)}
+                            </Badge>
+                          ) : modelHubPageSnapshot.credentialStatus === "error" ? (
+                            <Badge tone="warning">系统凭据状态暂时无法确认</Badge>
+                          ) : modelHubPageSnapshot.credentialStatus === "not_required" ? (
+                            <Badge tone="neutral">此连接不需要密钥</Badge>
+                          ) : (
+                            <SaveStatus
+                              state={
+                                saving ? "saving" : summary.configured ? "saved_local" : "clean"
+                              }
+                              labels={{
+                                clean: "未配置",
+                                saved_local: `已配置 ····${summary.lastFour ?? ""}`,
+                              }}
+                            />
+                          )}
                         </div>
                         <FormField
                           label={
@@ -3514,9 +4320,18 @@ export function SettingsPage() {
                               autoComplete="off"
                               value={secret}
                               placeholder={
-                                summary.configured ? "留空继续使用已保存凭据" : "输入新的 API Key"
+                                modelHubHydrationPending
+                                  ? "正在检查已保存凭据"
+                                  : summary.configured
+                                    ? "留空继续使用已保存凭据"
+                                    : "输入新的 API Key"
                               }
-                              disabled={loading || saving || checkingModel}
+                              disabled={
+                                modelHubHydrationPending ||
+                                saving ||
+                                checkingModel ||
+                                probingCapability
+                              }
                               onChange={(event) => setSecret(event.currentTarget.value)}
                             />
                           )}
@@ -3524,7 +4339,7 @@ export function SettingsPage() {
                         <div className="settings-actions">
                           <Button
                             loading={saving}
-                            disabled={secret.trim().length < 8}
+                            disabled={probingCapability || secret.trim().length < 8}
                             onClick={() => void saveSecret()}
                           >
                             保存到系统凭据库
@@ -3535,6 +4350,7 @@ export function SettingsPage() {
                               <Button
                                 variant="danger"
                                 loading={saving}
+                                disabled={probingCapability}
                                 onClick={() => void deleteSecret()}
                               >
                                 删除密钥
@@ -3772,27 +4588,105 @@ export function SettingsPage() {
                             <section key={group}>
                               <h4>{modelHubTaskGroupLabel(group)}</h4>
                               <ul className="model-routing-task-list">
-                                {tasks.map((task) => (
-                                  <li key={task.definition.task} data-state="missing">
-                                    <div>
-                                      <strong>{task.definition.displayName}</strong>
-                                      <small>{task.reason}</small>
-                                    </div>
-                                    <p>
-                                      <strong>影响：</strong>
-                                      {task.definition.impactWhenMissing}
-                                    </p>
-                                    <p>
-                                      <strong>下一步：</strong>
-                                      {task.nextStep}
-                                    </p>
-                                    {task.definition.isCoreWritingTask ? (
-                                      <Badge tone="danger">会阻止这项基础写作</Badge>
-                                    ) : (
-                                      <Badge tone="neutral">不阻止基础写作</Badge>
-                                    )}
-                                  </li>
-                                ))}
+                                {tasks.map((task) => {
+                                  const recommendation =
+                                    connectedTaskRecommendations.get(task.definition.task) ?? null;
+                                  const providerRecommendation =
+                                    providerTaskRecommendations.get(task.definition.task) ?? null;
+                                  return (
+                                    <li key={task.definition.task} data-state="missing">
+                                      <div>
+                                        <strong>{task.definition.displayName}</strong>
+                                        <small>{task.reason}</small>
+                                      </div>
+                                      <p>
+                                        <strong>影响：</strong>
+                                        {task.definition.impactWhenMissing}
+                                      </p>
+                                      <p>
+                                        <strong>下一步：</strong>
+                                        {recommendation === null
+                                          ? providerRecommendation === null
+                                            ? task.nextStep
+                                            : `可连接 ${providerRecommendation.providerLabel}，再发现并验证 ${providerRecommendation.modelFamilies.join(" / ")}；供应商文档不是墨影能力验证。`
+                                          : recommendation.reason}
+                                      </p>
+                                      {recommendation !== null && (
+                                        <div className="settings-actions">
+                                          <span>
+                                            建议：
+                                            {catalogEntryLabel(
+                                              recommendation.model.catalogEntry,
+                                              hubConnections,
+                                            )}
+                                          </span>
+                                          {task.definition.task === "rerank" ? (
+                                            <a
+                                              className="button-link button-link--secondary"
+                                              href="#expert-model-routing"
+                                            >
+                                              确认素材隐私后分配
+                                            </a>
+                                          ) : (
+                                            <Button
+                                              variant="secondary"
+                                              loading={recommendedTaskBusy === task.definition.task}
+                                              disabled={
+                                                recommendedTaskBusy !== null ||
+                                                routeSaving ||
+                                                modelHubHydrationPending
+                                              }
+                                              onClick={() =>
+                                                void verifyAndAssignRecommendedTask(
+                                                  task.definition.task,
+                                                  recommendation,
+                                                )
+                                              }
+                                            >
+                                              {recommendation.readiness !== "ready"
+                                                ? "验证并用于此任务"
+                                                : "用于此任务"}
+                                            </Button>
+                                          )}
+                                        </div>
+                                      )}
+                                      {recommendation === null &&
+                                        providerRecommendation !== null && (
+                                          <div className="settings-actions">
+                                            <span>
+                                              专用能力候选：
+                                              {providerRecommendation.providerLabel} ·
+                                              {providerRecommendation.modelFamilies.join(" / ")}
+                                            </span>
+                                            <a
+                                              className="button-link button-link--secondary"
+                                              href="#model-center"
+                                              onClick={() =>
+                                                applyProviderPreset(
+                                                  providerRecommendation.providerKind,
+                                                )
+                                              }
+                                            >
+                                              连接此供应商
+                                            </a>
+                                            <a
+                                              className="back-link"
+                                              href={providerRecommendation.evidenceUrl}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                            >
+                                              查看供应商说明
+                                            </a>
+                                          </div>
+                                        )}
+                                      {task.definition.isCoreWritingTask ? (
+                                        <Badge tone="danger">会阻止这项基础写作</Badge>
+                                      ) : (
+                                        <Badge tone="neutral">不阻止基础写作</Badge>
+                                      )}
+                                    </li>
+                                  );
+                                })}
                               </ul>
                             </section>
                           );
@@ -4382,6 +5276,35 @@ export function SettingsPage() {
                 service={modelEvaluation}
                 disabled={!runtime.modelGateway.available || hubCatalog.length === 0}
               />
+              {expertMode && (
+                <div className="settings-actions">
+                  <Button
+                    variant="secondary"
+                    aria-expanded={paidEvaluationExpanded}
+                    aria-controls="novel-skill-paid-evaluation"
+                    onClick={() => setPaidEvaluationExpanded((current) => !current)}
+                  >
+                    {paidEvaluationExpanded ? "收起写作方法 A/B 评测" : "写作方法 A/B 评测（专家）"}
+                  </Button>
+                </div>
+              )}
+              {expertMode && paidEvaluationExpanded && (
+                <div id="novel-skill-paid-evaluation">
+                  {paidEvaluationTargets.length < 2 && (
+                    <InlineAlert
+                      tone="warning"
+                      title="需要两个已验证且价格完整的文本模型"
+                      description="这里不会自动补模型或回退路由。请先完成两个不同模型的连接、文本能力验证、上下文上限和价格资料。"
+                    />
+                  )}
+                  <NovelSkillPaidEvaluationPanel
+                    expertMode
+                    targets={paidEvaluationTargets}
+                    initialSnapshot={runtime.novelSkillPaidEvaluation.getSnapshot()}
+                    port={runtime.novelSkillPaidEvaluation}
+                  />
+                </div>
+              )}
             </section>
 
             <section id="image-generation" className="settings-card--wide">

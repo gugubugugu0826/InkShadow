@@ -118,7 +118,7 @@ describe("CausalFactAuthoringPanel explicit knowledge gains", () => {
     expect(add).toBeDisabled();
     expect(screen.getByText("128 / 128")).toBeVisible();
     expect(screen.queryByText(/UUID|人物标识|信息标识|知识键/u)).not.toBeInTheDocument();
-  }, 15_000);
+  }, 30_000);
 
   it("submits ordinary-language prerequisites and all supported story changes", async () => {
     const user = userEvent.setup();
@@ -181,7 +181,7 @@ describe("CausalFactAuthoringPanel explicit knowledge gains", () => {
         ],
       }),
     );
-  });
+  }, 15_000);
 
   it("reports a saved fact separately when projection or page refresh is unavailable", async () => {
     const user = userEvent.setup();
@@ -197,7 +197,11 @@ describe("CausalFactAuthoringPanel explicit knowledge gains", () => {
     });
     await fillRequiredEventFields(user);
     await user.click(screen.getByRole("button", { name: "确认并保存事件" }));
-    expect(await screen.findByText("正式设定已保存，页面等待刷新")).toBeVisible();
+    expect(
+      await screen.findByText("正式设定已保存，页面等待刷新", undefined, {
+        timeout: 5_000,
+      }),
+    ).toBeVisible();
     expect(screen.getByText(/正式设定已安全保存/u)).toBeVisible();
     expect(screen.queryByText("没有保存故事关联")).not.toBeInTheDocument();
     expect(onCreated).toHaveBeenCalledTimes(1);

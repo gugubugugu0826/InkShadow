@@ -1,10 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseIsoUtcTimestamp } from "@inkshadow/domain";
 
-import {
-  ChapterSummaryModelUnavailableError,
-  type ChapterSummaryModelInput,
-} from "./chapter-summary-service";
+import { type ChapterSummaryModelInput } from "./chapter-summary-service";
 import {
   ModelHubChapterSummaryModel,
   parseChapterSummaryResponse,
@@ -62,6 +59,7 @@ describe("ModelHubChapterSummaryModel", () => {
     const output = await model.summarize(input(sourceCheck, projectCheck));
 
     expect(output).toMatchObject({
+      authorityMode: "structured_verified",
       summary: "A concise summary.",
       providerKind: "ollama",
       modelId: "model-a",
@@ -77,7 +75,9 @@ describe("ModelHubChapterSummaryModel", () => {
       task: "long_memory_compression",
       maximumOutputTokens: 3500,
       temperature: 0.1,
+      reasoningPolicy: "visible_prose",
     });
+    expect(executeText.mock.calls[0]?.[1].responseFormat).toBeUndefined();
   });
 
   it("rechecks project privacy in the final dispatch hook before provider code runs", async () => {
@@ -138,8 +138,25 @@ describe("ModelHubChapterSummaryModel", () => {
     expect(providerDispatch).not.toHaveBeenCalled();
   });
 
-  it("skips before dispatch when structured output is not verified", async () => {
-    const executeText = vi.fn();
+  it("uses strict local parsing without blocking when structured output is not verified", async () => {
+    const inspection = modelInspection();
+    const executeText = vi.fn(
+      async (
+        _dependencies: ModelHubTextExecutionDependencies,
+        request: ExecuteModelHubTextTaskInput,
+      ) => {
+        await request.onBeforeDispatch?.({
+          generationId: uuid(20),
+          invocationId: uuid(21),
+          connectionId: inspection.connectionId,
+          catalogEntryId: inspection.catalogEntryId,
+          modelId: inspection.modelId,
+          usedFallback: inspection.usedFallback,
+          localOnlyEligible: true,
+        });
+        return modelExecution();
+      },
+    );
     const model = new ModelHubChapterSummaryModel({
       modelHub: {
         listCapabilityEvidence: vi.fn().mockResolvedValue([capability("text_generation", 30)]),
@@ -148,14 +165,82 @@ describe("ModelHubChapterSummaryModel", () => {
       credentials: { getSummary: vi.fn().mockResolvedValue({ configured: true }) },
       clock: { now: () => timestamp("2026-08-01T00:00:00.000Z") },
       ids: { next: () => uuid(40) as never },
-      inspectText: vi.fn().mockResolvedValue(modelInspection()) as never,
-      executeText: executeText as never,
+      inspectText: vi.fn().mockResolvedValue(inspection) as never,
+      executeText,
     });
 
     await expect(
       model.summarize(input(vi.fn().mockResolvedValue(undefined))),
-    ).rejects.toBeInstanceOf(ChapterSummaryModelUnavailableError);
-    expect(executeText).not.toHaveBeenCalled();
+    ).resolves.toMatchObject({
+      authorityMode: "plain_non_authoritative",
+      summary: "A concise summary.",
+      keyEvents: [],
+      continuityNotes: [],
+    });
+    expect(executeText).toHaveBeenCalledOnce();
+    expect(executeText.mock.calls[0]?.[1].responseFormat).toBeUndefined();
+  });
+
+  it("requests provider JSON mode only for verified OpenAI-compatible structured output", async () => {
+    const inspection = modelInspection("deepseek");
+    const executeText = vi.fn(
+      async (
+        _dependencies: ModelHubTextExecutionDependencies,
+        request: ExecuteModelHubTextTaskInput,
+      ) => {
+        await request.onBeforeDispatch?.({
+          generationId: uuid(20),
+          invocationId: uuid(21),
+          connectionId: inspection.connectionId,
+          catalogEntryId: inspection.catalogEntryId,
+          modelId: inspection.modelId,
+          usedFallback: inspection.usedFallback,
+        });
+        return modelExecution("deepseek");
+      },
+    );
+    const model = new ModelHubChapterSummaryModel({
+      modelHub: {
+        listCapabilityEvidence: vi
+          .fn()
+          .mockResolvedValue([
+            capability("text_generation", 30),
+            capability("structured_output", 31),
+          ]),
+      } as unknown as ModelHubStore,
+      modelGateway: { available: true, generate: vi.fn() },
+      credentials: { getSummary: vi.fn().mockResolvedValue({ configured: true }) },
+      clock: { now: () => timestamp("2026-08-01T00:00:00.000Z") },
+      ids: { next: () => uuid(40) as never },
+      inspectText: vi.fn().mockResolvedValue(inspection) as never,
+      executeText,
+    });
+
+    await model.summarize(input(vi.fn().mockResolvedValue(undefined)));
+
+    expect(executeText.mock.calls[0]?.[1]).toMatchObject({
+      responseFormat: "json_object",
+      reasoningPolicy: "visible_prose",
+    });
+  });
+
+  it("does not promote malformed text-only output as a plain summary", async () => {
+    const inspection = modelInspection();
+    const model = new ModelHubChapterSummaryModel({
+      modelHub: {
+        listCapabilityEvidence: vi.fn().mockResolvedValue([capability("text_generation", 30)]),
+      } as unknown as ModelHubStore,
+      modelGateway: { available: true, generate: vi.fn() },
+      credentials: { getSummary: vi.fn().mockResolvedValue({ configured: true }) },
+      clock: { now: () => timestamp("2026-08-01T00:00:00.000Z") },
+      ids: { next: () => uuid(40) as never },
+      inspectText: vi.fn().mockResolvedValue(inspection) as never,
+      executeText: vi.fn().mockResolvedValue({ ...modelExecution(), text: "not-json" }) as never,
+    });
+
+    await expect(
+      model.summarize(input(vi.fn().mockResolvedValue(undefined))),
+    ).rejects.toMatchObject({ code: "CHAPTER_SUMMARY_RESPONSE_INVALID" });
   });
 
   it("rejects extra fields and invented evidence identifiers", () => {
@@ -227,7 +312,9 @@ function response(evidenceId = EVIDENCE_ID): string {
   });
 }
 
-function modelInspection(): ModelHubTextTaskInspection {
+function modelInspection(
+  providerKind: ModelHubTextTaskInspection["providerKind"] = "ollama",
+): ModelHubTextTaskInspection {
   return {
     task: "long_memory_compression",
     configuredPrimaryCatalogEntryId: "catalog-a",
@@ -237,7 +324,7 @@ function modelInspection(): ModelHubTextTaskInspection {
     attempt: 1,
     connectionId: "connection-a",
     catalogEntryId: "catalog-a",
-    providerKind: "ollama",
+    providerKind,
     modelId: "model-a",
     dataDestination: "local",
     privacyPolicy: "cloud_allowed",
@@ -248,6 +335,13 @@ function modelInspection(): ModelHubTextTaskInspection {
     estimatedTotalTokens: 4_000,
     inputTokenLimit: 10_000,
     outputTokenLimit: 4_000,
+    tokenLimitEvidence: {
+      source: "catalog",
+      version: "test-catalog-v1",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+      sourceUrl: null,
+      verifiedByInkShadow: true,
+    },
     pricing: {
       currency: null,
       inputMicrosPerMillionTokens: null,
@@ -265,7 +359,9 @@ function modelInspection(): ModelHubTextTaskInspection {
   };
 }
 
-function modelExecution(): ModelHubTextTaskExecutionResult {
+function modelExecution(
+  providerKind: ModelHubTextTaskInspection["providerKind"] = "ollama",
+): ModelHubTextTaskExecutionResult {
   return {
     text: response(),
     usage: { inputTokens: 100, outputTokens: 40, cachedInputTokens: null },
@@ -275,7 +371,7 @@ function modelExecution(): ModelHubTextTaskExecutionResult {
       routeTask: "long_memory_compression",
       connectionId: "connection-a",
       catalogEntryId: "catalog-a",
-      providerKindSnapshot: "ollama",
+      providerKindSnapshot: providerKind,
       modelIdSnapshot: "model-a",
       routeReason: "task_primary",
       attempt: 1,
@@ -296,7 +392,7 @@ function modelExecution(): ModelHubTextTaskExecutionResult {
     },
     connectionId: "connection-a",
     catalogEntryId: "catalog-a",
-    providerKind: "ollama",
+    providerKind,
     modelId: "model-a",
     usedFallback: false,
     costCeilingExceededAfterDispatch: false,

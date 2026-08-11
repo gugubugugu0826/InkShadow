@@ -377,22 +377,29 @@ export function resolveModelCapabilityVerdict(
   }>,
 ): ModelCapabilityEvidence["verdict"] {
   const now = normalizeTimestamp(input.now);
-  return (
-    input.evidence
-      .filter(
-        (evidence) =>
-          evidence.catalogEntryId === input.catalogEntryId &&
-          evidence.capability === input.capability &&
-          (evidence.expiresAt === null || evidence.expiresAt > now),
-      )
-      .sort(
-        (left, right) =>
-          CAPABILITY_SOURCE_PRIORITY[right.evidenceSource] -
-            CAPABILITY_SOURCE_PRIORITY[left.evidenceSource] ||
-          right.observedAt.localeCompare(left.observedAt) ||
-          left.id.localeCompare(right.id),
-      )[0]?.verdict ?? "unknown"
-  );
+  const selected = input.evidence
+    .filter(
+      (evidence) =>
+        evidence.catalogEntryId === input.catalogEntryId &&
+        evidence.capability === input.capability &&
+        (evidence.expiresAt === null || evidence.expiresAt > now),
+    )
+    .sort(
+      (left, right) =>
+        CAPABILITY_SOURCE_PRIORITY[right.evidenceSource] -
+          CAPABILITY_SOURCE_PRIORITY[left.evidenceSource] ||
+        right.observedAt.localeCompare(left.observedAt) ||
+        left.id.localeCompare(right.id),
+    )[0];
+  if (
+    input.capability === "structured_output" &&
+    selected?.verdict === "supported" &&
+    selected.evidenceSource !== "lightweight_probe" &&
+    selected.evidenceSource !== "user_confirmed"
+  ) {
+    return "unknown";
+  }
+  return selected?.verdict ?? "unknown";
 }
 
 function resolveCapability(

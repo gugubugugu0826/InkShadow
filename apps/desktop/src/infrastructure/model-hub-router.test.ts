@@ -7,6 +7,7 @@ import {
   buildModelHubRoutingPlan,
   preferredCapabilitiesForNovelTask,
   requiredCapabilitiesForNovelTask,
+  resolveModelCapabilityVerdict,
   type ModelHubRoutingCandidate,
 } from "./model-hub-router";
 import type {
@@ -166,6 +167,41 @@ describe("Model Hub evidence router", () => {
 
     expect(plan.routes).toEqual([]);
     expect(plan.unroutableTasks).toEqual(["embedding"]);
+  });
+
+  it("does not treat a provider declaration as verified structured-output evidence", () => {
+    expect(
+      resolveModelCapabilityVerdict({
+        catalogEntryId: "catalog-structured",
+        capability: "structured_output",
+        evidence: [
+          capability(
+            "declared-json",
+            "structured_output",
+            "supported",
+            "provider_metadata",
+            "catalog-structured",
+          ),
+        ],
+        now: NOW,
+      }),
+    ).toBe("unknown");
+    expect(
+      resolveModelCapabilityVerdict({
+        catalogEntryId: "catalog-structured",
+        capability: "structured_output",
+        evidence: [
+          capability(
+            "verified-json",
+            "structured_output",
+            "supported",
+            "lightweight_probe",
+            "catalog-structured",
+          ),
+        ],
+        now: NOW,
+      }),
+    ).toBe("supported");
   });
 
   it("routes all 16 core text tasks with only text evidence and no evaluations or embeddings", () => {

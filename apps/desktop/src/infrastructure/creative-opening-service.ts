@@ -1,4 +1,19 @@
-import { AiCandidate, AppError, err, ok, type Result, type UuidV7 } from "@inkshadow/domain";
+import {
+  compileContext,
+  compiledContextToPromptSections,
+  type CompiledContext,
+  type ContextCandidate,
+} from "@inkshadow/ai-core";
+import {
+  AiCandidate,
+  AppError,
+  err,
+  ok,
+  parseUuidV7,
+  type Chapter,
+  type Result,
+  type UuidV7,
+} from "@inkshadow/domain";
 
 import { ModelCenterError, type ModelProfile } from "./model-center-store";
 import { executeModelHubTextTask, ModelHubExecutionError } from "./model-hub-execution-service";
@@ -6,6 +21,15 @@ import {
   resolveFinalModelProfileGatewayConfig,
   resolveModelProfileGatewayConfig,
 } from "./model-profile-gateway-config";
+import { createContextCompilationTrace } from "./context-compilation-trace-store";
+import {
+  ProjectContextPrivacyError,
+  projectContextDispatchScope,
+  projectContextRequiredDataDestination,
+  type ProjectContextPrivacyReceipt,
+} from "./project-context-privacy-authority";
+import { selectProjectSeedContextCandidates } from "./project-seed-context-adapter";
+import type { PreparedNovelSkillInvocation } from "./novel-skill-runtime";
 import type { DesktopRuntime, NativeModelMessage } from "./runtime";
 
 export interface CreativeOpeningResult {
@@ -16,6 +40,8 @@ export interface CreativeOpeningResult {
   readonly providerId: string | null;
   readonly modelId: string | null;
   readonly noticeCode: string | null;
+  /** Exact project-context trace for a real provider result; never shown in ordinary UI. */
+  readonly contextTraceId: string | null;
 }
 
 export type CreativeOpeningAngle = "immediate_action" | "relationship_dialogue" | "mystery_clue";
@@ -25,6 +51,21 @@ export const MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS = 160;
 
 export type CreativeOpeningDestination =
   Readonly<{ kind: "local" }> | Readonly<{ kind: "provider"; providerId: string; modelId: string }>;
+
+export interface CreativeOpeningProjectContext {
+  readonly projectId: string;
+  readonly chapterId: string;
+}
+
+interface PreparedCreativeOpeningProjectContext extends CreativeOpeningProjectContext {
+  readonly compiled: CompiledContext;
+  readonly privacyReceipt: ProjectContextPrivacyReceipt;
+  readonly contextTraceId: string;
+  readonly novelSkillSnapshotId: string;
+  readonly novelSkillPreparation: PreparedNovelSkillInvocation;
+  readonly novelSkillPromptSection: string | null;
+  readonly chapterVersionId: string;
+}
 
 export async function inspectCreativeOpeningDestination(
   runtime: DesktopRuntime,
@@ -75,6 +116,10 @@ export async function generateCreativeOpening(
     partialOpening?: string;
     requestId?: string;
     onDelta?: (text: string) => void;
+    /** Final synchronous journey/slot latch immediately before native dispatch. */
+    assertBeforeProviderDispatch?: () => void;
+    /** Existing empty workspace that owns this traceable opening attempt. */
+    projectContext?: CreativeOpeningProjectContext;
   }>,
 ): Promise<CreativeOpeningResult> {
   const idea = validateCreativeText(input.idea, 4_000, "idea");
@@ -87,12 +132,30 @@ export async function generateCreativeOpening(
     input.partialOpening === undefined
       ? null
       : validateCreativeProse(input.partialOpening, 64_000, "partial opening");
+  let preparedProjectContext: PreparedCreativeOpeningProjectContext | null = null;
+  if (input.projectContext !== undefined) {
+    try {
+      preparedProjectContext = await prepareCreativeOpeningProjectContext(runtime, {
+        ...input.projectContext,
+        idea,
+        direction,
+        answers: input.answers ?? {},
+        openingAngle: input.openingAngle ?? null,
+        partialOpening,
+        requestId,
+      });
+    } catch (cause: unknown) {
+      return localOpening(requestId, idea, direction, safeModelFailureCode(cause));
+    }
+  }
   const messages = buildOpeningMessages(
     idea,
     direction,
     input.answers ?? {},
     input.openingAngle ?? null,
     partialOpening,
+    preparedProjectContext?.compiled ?? null,
+    preparedProjectContext?.novelSkillPromptSection ?? null,
   );
   let visibleText = partialOpening ?? "";
   const receiveVisibleText = (text: string) => {
@@ -107,19 +170,78 @@ export async function generateCreativeOpening(
     };
     try {
       const generated = await executeModelHubTextTask(runtime, {
-        dispatchScope: { kind: "non_project", reason: "creative_opening" },
+        dispatchScope:
+          preparedProjectContext === null
+            ? { kind: "non_project", reason: "creative_opening" }
+            : projectContextDispatchScope(preparedProjectContext.privacyReceipt),
         task: "book_start_guidance",
         messages,
         maximumOutputTokens: 1_200,
         temperature: 0.85,
         generationId: requestId,
         reasoningPolicy: "visible_prose",
-        onBeforeDispatch: ({ connectionId, modelId }) => {
+        ...(preparedProjectContext === null ||
+        projectContextRequiredDataDestination(preparedProjectContext.privacyReceipt) === undefined
+          ? {}
+          : { requiredDataDestination: "local" as const }),
+        onBeforeDispatch: async ({
+          connectionId,
+          modelId,
+          generationId,
+          invocationId,
+          localOnlyEligible,
+        }) => {
           dispatchedTarget.connectionId = connectionId;
           dispatchedTarget.modelId = modelId;
+          if (preparedProjectContext === null) {
+            return;
+          }
+          const createdAt = runtime.clock.now();
+          await runtime.contextTraces.save(
+            createContextCompilationTrace({
+              id: preparedProjectContext.contextTraceId,
+              projectId: preparedProjectContext.projectId,
+              chapterId: preparedProjectContext.chapterId,
+              taskType: "book_start_guidance",
+              compiled: preparedProjectContext.compiled,
+              createdAt,
+              execution: {
+                generationId,
+                modelInvocationId: null,
+              },
+            }),
+          );
+          await runtime.contextTraces.linkModelInvocation({
+            traceId: preparedProjectContext.contextTraceId,
+            modelInvocationId: invocationId,
+            linkedAt: createdAt,
+          });
+          await assertCreativeOpeningProjectCurrent(runtime, preparedProjectContext);
+          runtime.projectContextPrivacy.assertRouteEligible(
+            preparedProjectContext.privacyReceipt,
+            localOnlyEligible === true,
+          );
+          if (preparedProjectContext.novelSkillPreparation.compiled !== null) {
+            await runtime.novelSkills.commitBeforeDispatch({
+              snapshotId: preparedProjectContext.novelSkillSnapshotId,
+              projectId: preparedProjectContext.projectId,
+              contextTraceId: preparedProjectContext.contextTraceId,
+              modelInvocationId: invocationId,
+              taskType: "book_start_guidance",
+              invocationMode: "draft",
+              preparation: preparedProjectContext.novelSkillPreparation,
+              createdAt,
+            });
+          }
         },
+        ...(input.assertBeforeProviderDispatch === undefined
+          ? {}
+          : { assertBeforeProviderDispatch: input.assertBeforeProviderDispatch }),
         onDelta: receiveVisibleText,
       });
+      if (preparedProjectContext !== null) {
+        await assertCreativeOpeningProjectCurrent(runtime, preparedProjectContext);
+      }
       const text = combineOpeningText(partialOpening, generated.text).trim();
       if (text.length === 0) {
         return localOpening(requestId, idea, direction, "MODEL_OUTPUT_EMPTY");
@@ -134,6 +256,7 @@ export async function generateCreativeOpening(
         noticeCode: generated.costCeilingExceededAfterDispatch
           ? "MODEL_HUB_COST_CEILING_EXCEEDED_AFTER_DISPATCH"
           : null,
+        contextTraceId: preparedProjectContext?.contextTraceId ?? null,
       });
     } catch (cause: unknown) {
       const partial = usableTruncatedOpening(
@@ -142,8 +265,16 @@ export async function generateCreativeOpening(
         cause,
         dispatchedTarget.connectionId,
         dispatchedTarget.modelId,
+        preparedProjectContext?.contextTraceId ?? null,
       );
       if (partial !== null) {
+        if (preparedProjectContext !== null) {
+          try {
+            await assertCreativeOpeningProjectCurrent(runtime, preparedProjectContext);
+          } catch (workspaceCause: unknown) {
+            return localOpening(requestId, idea, direction, safeModelFailureCode(workspaceCause));
+          }
+        }
         return partial;
       }
       if (
@@ -153,6 +284,13 @@ export async function generateCreativeOpening(
         return localOpening(requestId, idea, direction, safeModelFailureCode(cause));
       }
     }
+  }
+
+  // Project-scoped generation must go through Model Hub so the invocation,
+  // context and optional writing-method snapshot remain one exact chain.
+  // The legacy profile route cannot produce that receipt.
+  if (preparedProjectContext !== null) {
+    return localOpening(requestId, idea, direction, "MODEL_HUB_ROUTE_NOT_CONFIGURED");
   }
 
   const profile = await resolveOpeningProfile(runtime).catch(() => null);
@@ -211,6 +349,7 @@ export async function generateCreativeOpening(
       providerId: profile.providerId,
       modelId: profile.selectedModel,
       noticeCode: null,
+      contextTraceId: null,
     });
   } catch (cause: unknown) {
     const partial = usableTruncatedOpening(
@@ -219,6 +358,7 @@ export async function generateCreativeOpening(
       cause,
       profile.providerId,
       profile.selectedModel,
+      null,
     );
     if (partial !== null) {
       return partial;
@@ -246,6 +386,7 @@ export async function persistCreativeOpeningCandidate(
   textValue: string,
   candidateId?: UuidV7,
   incomplete = false,
+  contextTraceId: string | null = null,
 ): Promise<Result<AiCandidate, AppError | ModelCenterError>> {
   const chapterResult = await runtime.repositories.chapters.findById(chapterId);
   if (!chapterResult.ok) {
@@ -280,8 +421,209 @@ export async function persistCreativeOpeningCandidate(
   if (!ready.ok) {
     return ready;
   }
+  if (contextTraceId !== null) {
+    try {
+      await assertCreativeOpeningCandidateTraceCurrent(runtime, contextTraceId, chapter);
+      await runtime.contextTraceOutputs.commit({
+        traceId: contextTraceId,
+        candidate: ready.value,
+        linkedAt: runtime.clock.now(),
+      });
+      return ok(ready.value);
+    } catch (cause: unknown) {
+      return err(
+        new ModelCenterError(
+          "CONTEXT_TRACE_UNAVAILABLE",
+          cause instanceof Error
+            ? cause.message
+            : "无法同时保存 AI 建议版本及其来源记录，正文和已有版本均未改变。",
+          true,
+        ),
+      );
+    }
+  }
   const saved = await runtime.repositories.aiCandidates.create(ready.value);
   return saved.ok ? ok(ready.value) : saved;
+}
+
+async function assertCreativeOpeningCandidateTraceCurrent(
+  runtime: DesktopRuntime,
+  contextTraceId: string,
+  chapter: Chapter,
+): Promise<void> {
+  const trace = await runtime.contextTraces.findById(contextTraceId);
+  if (trace === null) {
+    throw staleCreativeOpeningTrace();
+  }
+  const taskSource = trace.entries
+    .flatMap(({ sources }) => sources)
+    .find(
+      ({ sourceType, locator }) =>
+        sourceType === "generation_task" && locator === "idea-journey:opening-request",
+    );
+  if (trace.execution === null || taskSource === undefined) {
+    throw staleCreativeOpeningTrace();
+  }
+  if (
+    trace.taskType !== "book_start_guidance" ||
+    trace.projectId !== chapter.projectId ||
+    trace.chapterId !== chapter.id ||
+    trace.execution.modelInvocationId === null ||
+    taskSource.sourceVersionId !== chapter.currentVersionId ||
+    taskSource.sourceId !== trace.execution.generationId
+  ) {
+    throw staleCreativeOpeningTrace();
+  }
+}
+
+function staleCreativeOpeningTrace(): ModelCenterError {
+  return new ModelCenterError(
+    "CONTEXT_TRACE_UNAVAILABLE",
+    "AI 建议版本的来源记录与当前第一章版本不一致，因此没有创建建议版本；正文和已有版本均未改变。",
+    true,
+  );
+}
+
+const CREATIVE_OPENING_CONTEXT_TOKEN_BUDGET = 32_000;
+const CREATIVE_OPENING_SKILL_TOKEN_BUDGET = 1_200;
+
+async function prepareCreativeOpeningProjectContext(
+  runtime: DesktopRuntime,
+  input: CreativeOpeningProjectContext &
+    Readonly<{
+      idea: string;
+      direction: string | null;
+      answers: Readonly<Record<string, string>>;
+      openingAngle: CreativeOpeningAngle | null;
+      partialOpening: string | null;
+      requestId: string;
+    }>,
+): Promise<PreparedCreativeOpeningProjectContext> {
+  const projectId = parseUuidV7(input.projectId);
+  const chapterId = parseUuidV7(input.chapterId);
+  if (!projectId.ok) throw projectId.error;
+  if (!chapterId.ok) throw chapterId.error;
+  const [projectResult, chapterResult, seedRecord] = await Promise.all([
+    runtime.repositories.projects.findById(projectId.value),
+    runtime.repositories.chapters.findById(chapterId.value),
+    runtime.projectSeeds.findByProjectId(projectId.value),
+  ]);
+  if (!projectResult.ok) throw projectResult.error;
+  if (!chapterResult.ok) throw chapterResult.error;
+  const project = projectResult.value;
+  const chapter = chapterResult.value;
+  if (
+    project?.status !== "active" ||
+    chapter?.status !== "active" ||
+    chapter.projectId !== projectId.value ||
+    chapter.content.length !== 0
+  ) {
+    throw new ModelCenterError(
+      "CREATIVE_OPENING_WORKSPACE_CHANGED",
+      "开书使用的空白作品或第一章已经发生变化，因此本次没有调用 AI。正文和已有版本均未改变。",
+      true,
+    );
+  }
+  const privacyReceipt = await runtime.projectContextPrivacy.inspect(projectId.value);
+  runtime.projectContextPrivacy.assertChapterMatches(privacyReceipt, chapter);
+  const reservedSkillTokens = await runtime.novelSkills.getReservedTokens({
+    projectId: projectId.value,
+    taskType: "book_start_guidance",
+  });
+  const currentTask: ContextCandidate = Object.freeze({
+    id: `creative-opening-task:${input.requestId}`,
+    layer: "current_task",
+    content: buildOpeningTaskContent(
+      input.idea,
+      input.direction,
+      input.answers,
+      input.openingAngle,
+      input.partialOpening,
+    ),
+    selectionReason: "The author explicitly requested this exact opening proposal.",
+    evidence: Object.freeze([
+      Object.freeze({
+        sourceType: "generation_task" as const,
+        sourceId: input.requestId,
+        sourceVersionId: chapter.currentVersionId,
+        locator: "idea-journey:opening-request",
+        contentHash: null,
+        excerpt: null,
+      }),
+    ]),
+    priority: 1_000,
+    relevanceScore: 1,
+  });
+  const compiled = compileContext({
+    maximumContextTokens: Math.max(1, CREATIVE_OPENING_CONTEXT_TOKEN_BUDGET - reservedSkillTokens),
+    candidates: Object.freeze([currentTask, ...selectProjectSeedContextCandidates(seedRecord)]),
+  });
+  const novelSkillPreparation = await runtime.novelSkills.prepareInvocation({
+    projectId: projectId.value,
+    taskType: "book_start_guidance",
+    invocationMode: "draft",
+    maximumSkillTokens:
+      reservedSkillTokens === 0
+        ? CREATIVE_OPENING_SKILL_TOKEN_BUDGET
+        : Math.min(reservedSkillTokens, CREATIVE_OPENING_SKILL_TOKEN_BUDGET),
+    availableContextLayers: Object.freeze([
+      ...new Set(compiled.entries.filter(({ included }) => included).map(({ layer }) => layer)),
+    ]),
+  });
+  return Object.freeze({
+    projectId: projectId.value,
+    chapterId: chapterId.value,
+    chapterVersionId: chapter.currentVersionId,
+    compiled,
+    privacyReceipt,
+    contextTraceId: runtime.ids.next(),
+    novelSkillSnapshotId: runtime.ids.next(),
+    novelSkillPreparation,
+    novelSkillPromptSection: novelSkillPreparation.promptSection,
+  });
+}
+
+async function assertCreativeOpeningProjectCurrent(
+  runtime: DesktopRuntime,
+  prepared: PreparedCreativeOpeningProjectContext,
+): Promise<void> {
+  const projectId = parseUuidV7(prepared.projectId);
+  const chapterId = parseUuidV7(prepared.chapterId);
+  if (!projectId.ok || !chapterId.ok) {
+    throw new ModelHubExecutionError(
+      "CREATIVE_OPENING_WORKSPACE_CHANGED",
+      "开书作品的范围无法再次核对，本次请求在发送 0 字后停止。",
+      true,
+    );
+  }
+  const [projectResult, chapterResult] = await Promise.all([
+    runtime.repositories.projects.findById(projectId.value),
+    runtime.repositories.chapters.findById(chapterId.value),
+  ]);
+  const project = projectResult.ok ? projectResult.value : null;
+  const chapter = chapterResult.ok ? chapterResult.value : null;
+  if (
+    project?.status !== "active" ||
+    chapter?.status !== "active" ||
+    chapter.projectId !== projectId.value ||
+    chapter.currentVersionId !== prepared.chapterVersionId ||
+    chapter.content.length !== 0
+  ) {
+    throw new ModelHubExecutionError(
+      "CREATIVE_OPENING_WORKSPACE_CHANGED",
+      "开书作品或第一章在发送前发生了变化，本次请求在发送 0 字后停止。",
+      true,
+    );
+  }
+  try {
+    runtime.projectContextPrivacy.assertChapterMatches(prepared.privacyReceipt, chapter);
+    await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(prepared.privacyReceipt);
+  } catch (cause: unknown) {
+    if (cause instanceof ProjectContextPrivacyError) {
+      throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
+    }
+    throw cause;
+  }
 }
 
 async function resolveOpeningProfile(runtime: DesktopRuntime): Promise<ModelProfile | null> {
@@ -318,33 +660,72 @@ function buildOpeningMessages(
   answers: Readonly<Record<string, string>>,
   openingAngle: CreativeOpeningAngle | null,
   partialOpening: string | null,
+  compiled: CompiledContext | null,
+  novelSkillPromptSection: string | null,
 ): readonly NativeModelMessage[] {
   const known = Object.entries(answers)
     .filter(([, value]) => value.trim().length > 0)
     .slice(0, 12)
     .map(([key, value]) => `${key}：${value}`)
     .join("\n");
+  const baseSystemMessage =
+    partialOpening === null
+      ? "你是长篇小说开篇助手。根据作者的一句话灵感写一段 500 至 900 字、可直接继续修改的小说开头。只输出正文，不要标题、分析、设定表、Markdown 围栏或元评论。不要把推测写成已经确认的长期设定；聚焦具体场景、人物行动和一个能推动下一段的问题。"
+      : "你是长篇小说开篇助手。续写作者明确选择的未完整开头，只输出从已有文字结尾之后开始的新正文。不要复述已有文字，不要标题、分析、设定表、Markdown 围栏或元评论；让补全后的开头形成一个可继续修改的完整场景。";
+  const systemMessage =
+    novelSkillPromptSection === null
+      ? baseSystemMessage
+      : `${baseSystemMessage}\n\n以下是作者明确开启的实验性写作方法，只用于辅助本次开头建议。若它与作者当前要求、已确认并锁定的故事规则或写作边界冲突，必须忽略冲突的方法规则。不要向作者解释这些方法。\n${novelSkillPromptSection}`;
+  const compiledPrompt =
+    compiled === null
+      ? null
+      : compiledContextToPromptSections(compiled)
+          .map(({ text }) => text)
+          .join("\n\n");
   return Object.freeze([
     {
       role: "system",
-      content:
-        partialOpening === null
-          ? "你是长篇小说开篇助手。根据作者的一句话灵感写一段 500 至 900 字、可直接继续修改的小说开头。只输出正文，不要标题、分析、设定表、Markdown 围栏或元评论。不要把推测写成已经确认的长期设定；聚焦具体场景、人物行动和一个能推动下一段的问题。"
-          : "你是长篇小说开篇助手。续写作者明确选择的未完整开头，只输出从已有文字结尾之后开始的新正文。不要复述已有文字，不要标题、分析、设定表、Markdown 围栏或元评论；让补全后的开头形成一个可继续修改的完整场景。",
+      content: systemMessage,
     },
     {
       role: "user",
-      content: [
-        `作者的一句话灵感：${idea}`,
-        direction === null ? "" : `本轮修改方向：${direction}`,
-        openingAngle === null ? "" : `本次开头方案侧重：${openingAngleInstruction(openingAngle)}`,
-        known.length === 0 ? "" : `作者已经表达的偏好：\n${known}`,
-        partialOpening === null ? "" : `需要从结尾继续的已有开头：\n${partialOpening}`,
-      ]
-        .filter((value) => value.length > 0)
-        .join("\n\n"),
+      content:
+        compiledPrompt ??
+        [
+          `作者的一句话灵感：${idea}`,
+          direction === null ? "" : `本轮修改方向：${direction}`,
+          openingAngle === null ? "" : `本次开头方案侧重：${openingAngleInstruction(openingAngle)}`,
+          known.length === 0 ? "" : `作者已经表达的偏好：\n${known}`,
+          partialOpening === null ? "" : `需要从结尾继续的已有开头：\n${partialOpening}`,
+        ]
+          .filter((value) => value.length > 0)
+          .join("\n\n"),
     },
   ]);
+}
+
+function buildOpeningTaskContent(
+  idea: string,
+  direction: string | null,
+  answers: Readonly<Record<string, string>>,
+  openingAngle: CreativeOpeningAngle | null,
+  partialOpening: string | null,
+): string {
+  const known = Object.entries(answers)
+    .filter(([, value]) => value.trim().length > 0)
+    .slice(0, 12)
+    .map(([key, value]) => `${key}：${value}`)
+    .join("\n");
+  return [
+    "[本次开头创作任务]",
+    `作者的一句话灵感：${idea}`,
+    direction === null ? "" : `本轮修改方向：${direction}`,
+    openingAngle === null ? "" : `本次方案侧重：${openingAngleInstruction(openingAngle)}`,
+    known.length === 0 ? "" : `作者本次已表达的信息：\n${known}`,
+    partialOpening === null ? "" : `仅从以下未完整开头的结尾继续，不得复述：\n${partialOpening}`,
+  ]
+    .filter((value) => value.length > 0)
+    .join("\n\n");
 }
 
 function openingAngleInstruction(angle: CreativeOpeningAngle): string {
@@ -380,6 +761,7 @@ function localOpening(
     providerId: null,
     modelId: null,
     noticeCode,
+    contextTraceId: null,
   });
 }
 
@@ -389,6 +771,7 @@ function usableTruncatedOpening(
   cause: unknown,
   providerId: string | null,
   modelId: string | null,
+  contextTraceId: string | null,
 ): CreativeOpeningResult | null {
   const text = visibleText.trim();
   if (
@@ -407,6 +790,7 @@ function usableTruncatedOpening(
     providerId,
     modelId,
     noticeCode: "MODEL_OUTPUT_TRUNCATED",
+    contextTraceId,
   });
 }
 

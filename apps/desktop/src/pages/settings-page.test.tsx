@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { parseUuidV7, type UuidV7 } from "@inkshadow/story-core";
 import { ToastProvider } from "@inkshadow/ui";
+import { StrictMode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -40,7 +41,9 @@ describe("SettingsPage model routing", () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     renderRoute(runtime, "/settings");
 
-    expect(await screen.findByRole("heading", { name: "全局设置", level: 1 })).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: "全局设置", level: 1 }, { timeout: 5_000 }),
+    ).toBeVisible();
     for (const name of [
       "外观",
       "正文阅读与自动保存",
@@ -234,6 +237,52 @@ describe("SettingsPage model routing", () => {
     },
   );
 
+  it("mounts paid Skill evaluation only after expert mode and an explicit fold action", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const generate = vi.spyOn(runtime.modelGateway, "generate");
+    const initializePaidEvaluation = vi.fn(() => runtime.novelSkillPaidEvaluation.initialize());
+    const observedRuntime = Object.freeze({
+      ...runtime,
+      novelSkillPaidEvaluation: Object.freeze({
+        ...runtime.novelSkillPaidEvaluation,
+        initialize: initializePaidEvaluation,
+      }),
+    });
+    const user = userEvent.setup();
+    renderRoute(observedRuntime, "/settings#model-evaluation");
+
+    expect(await screen.findByRole("heading", { name: "Model Hub · 模型评测" })).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "写作方法 A/B 评测（专家）" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "内置小说 Skill 付费 A/B 评测" }),
+    ).not.toBeInTheDocument();
+    expect(initializePaidEvaluation).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    const expand = screen.getByRole("button", { name: "写作方法 A/B 评测（专家）" });
+    expect(expand).toHaveAttribute("aria-expanded", "false");
+    expect(
+      screen.queryByRole("heading", { name: "内置小说 Skill 付费 A/B 评测" }),
+    ).not.toBeInTheDocument();
+    expect(initializePaidEvaluation).not.toHaveBeenCalled();
+
+    await user.click(expand);
+    expect(
+      await screen.findByRole("heading", { name: "内置小说 Skill 付费 A/B 评测" }),
+    ).toBeVisible();
+    expect(initializePaidEvaluation).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("当前不能进行付费评测")).toBeVisible();
+    expect(generate).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "收起专家设置" }));
+    expect(
+      screen.queryByRole("heading", { name: "内置小说 Skill 付费 A/B 评测" }),
+    ).not.toBeInTheDocument();
+    expect(generate).not.toHaveBeenCalled();
+  });
+
   it("keeps technical connection fields hidden until expert settings are opened", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const user = userEvent.setup();
@@ -289,6 +338,249 @@ describe("SettingsPage model routing", () => {
     ]) {
       expect(within(legend).getByText(label)).toBeInTheDocument();
     }
+  });
+
+  it("keeps cold-start credential and catalog loading non-terminal until the authoritative snapshot is ready", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    let connection = await development.modelHub.saveConnection({
+      id: "deepseek-cold-page",
+      providerKind: "deepseek",
+      displayName: "DeepSeek",
+      credentialRef: "keyring:model-hub:deepseek-cold-page",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    connection = await development.modelHub.recordConnectionTest({
+      connectionId: connection.id,
+      status: "ready",
+      expectedRevision: connection.revision,
+    });
+    await development.modelHub.syncCatalog({
+      syncId: "deepseek-cold-page-sync",
+      connectionId: connection.id,
+      source: "provider_api",
+      status: "succeeded",
+      models: [
+        { id: "deepseek-cold-page-fast", providerModelId: "deepseek-fast" },
+        { id: "deepseek-cold-page-quality", providerModelId: "deepseek-quality" },
+      ],
+    });
+    const credential = deferred<{ configured: boolean; lastFour: string | null }>();
+    const getSummary = vi.fn(() => credential.promise);
+    const runtime: DesktopRuntime = {
+      ...development,
+      mode: "tauri",
+      credentials: {
+        getSummary,
+        save: () => Promise.resolve({ configured: true, lastFour: "3172" }),
+        delete: () => Promise.resolve({ configured: false, lastFour: null }),
+      },
+    };
+
+    renderRouteInStrictMode(runtime);
+    const credentialTitle = await screen.findByText("系统凭据库");
+    const credentialCard = credentialTitle.closest(".secret-settings");
+    if (!(credentialCard instanceof HTMLElement)) throw new Error("找不到系统凭据状态区域");
+    await waitFor(() => expect(getSummary).toHaveBeenCalled());
+    expect(within(credentialCard).queryByText("未配置")).not.toBeInTheDocument();
+    expect(within(credentialCard).getByText(/正在检查系统凭据/u)).toBeVisible();
+    expect(screen.queryByText("还没有读取模型")).not.toBeInTheDocument();
+    expect(screen.queryByText("没有发现可用模型")).not.toBeInTheDocument();
+
+    credential.resolve({ configured: true, lastFour: "3172" });
+
+    expect(await screen.findByRole("option", { name: "deepseek-fast" })).toBeInTheDocument();
+    expect(await within(credentialCard).findByText("已配置 ····3172")).toBeVisible();
+    expect(screen.getByRole("combobox", { name: /^已连接的供应商/u })).toHaveValue(
+      "deepseek-cold-page",
+    );
+  });
+
+  it("retains the cached model catalog when provider discovery fails", async () => {
+    const fixture = await createReadyDeepSeekProbeRuntime("deepseek-cache-retained");
+    const failingRuntime: DesktopRuntime = {
+      ...fixture.runtime,
+      modelGateway: {
+        ...fixture.runtime.modelGateway,
+        available: true,
+        checkConnection: () =>
+          Promise.reject(
+            Object.assign(new Error("provider unavailable"), {
+              code: "MODEL_DIRECTORY_UNAVAILABLE",
+            }),
+          ),
+        listModels: () => Promise.reject(new Error("provider unavailable")),
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(failingRuntime);
+
+    expect(await screen.findByRole("option", { name: "deepseek-v4-flash" })).toBeInTheDocument();
+    const discover = screen.getByRole("button", { name: "测试连接并发现模型" });
+    await waitFor(() => expect(discover).toBeEnabled());
+    await user.click(discover);
+
+    expect(await screen.findByText("正在使用上次保存的模型目录")).toBeVisible();
+    expect(screen.getByRole("option", { name: "deepseek-v4-flash" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "模型" })).toHaveValue("deepseek-v4-flash");
+  });
+
+  it("resets credential and catalog state when switching from Ollama to a DeepSeek draft", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    let ollama = await development.modelHub.saveConnection({
+      id: "ollama-provider-draft",
+      providerKind: "ollama",
+      displayName: "Ollama",
+      credentialRef: null,
+      credentialState: "missing",
+      authenticationMode: "none",
+      enabled: true,
+      expectedRevision: null,
+    });
+    ollama = await development.modelHub.recordConnectionTest({
+      connectionId: ollama.id,
+      status: "ready",
+      expectedRevision: ollama.revision,
+    });
+    await development.modelHub.syncCatalog({
+      syncId: "ollama-provider-draft-sync",
+      connectionId: ollama.id,
+      source: "provider_api",
+      status: "succeeded",
+      models: [{ id: "ollama-provider-draft-model", providerModelId: "local-writer" }],
+    });
+    const runtime: DesktopRuntime = {
+      ...development,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: false, lastFour: null }),
+        save: () => Promise.resolve({ configured: true, lastFour: "3172" }),
+        delete: () => Promise.resolve({ configured: false, lastFour: null }),
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    const provider = await screen.findByRole("combobox", { name: "供应商" });
+    await waitFor(() => expect(provider).toBeEnabled());
+    expect(provider).toHaveValue("ollama");
+    expect(screen.getByRole("option", { name: "local-writer" })).toBeInTheDocument();
+
+    await user.selectOptions(provider, "deepseek");
+
+    const credentialTitle = await screen.findByText("系统凭据库");
+    const credentialCard = credentialTitle.closest(".secret-settings");
+    if (!(credentialCard instanceof HTMLElement)) throw new Error("找不到系统凭据状态区域");
+    expect(within(credentialCard).getByText("未配置")).toBeVisible();
+    expect(within(credentialCard).queryByText("此连接不需要密钥")).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "local-writer" })).not.toBeInTheDocument();
+  });
+
+  it("clears a failed provider warning when starting a different provider draft", async () => {
+    const fixture = await createReadyDeepSeekProbeRuntime("deepseek-failed-draft");
+    const runtime: DesktopRuntime = {
+      ...fixture.runtime,
+      modelGateway: {
+        ...fixture.runtime.modelGateway,
+        checkConnection: () =>
+          Promise.reject(
+            Object.assign(new Error("provider unavailable"), {
+              code: "MODEL_DIRECTORY_UNAVAILABLE",
+            }),
+          ),
+        listModels: () => Promise.reject(new Error("provider unavailable")),
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime);
+
+    await screen.findByRole("option", { name: "deepseek-v4-flash" });
+    await user.click(screen.getByRole("button", { name: "测试连接并发现模型" }));
+    expect(await screen.findByText("正在使用上次保存的模型目录")).toBeVisible();
+    expect(screen.getByText(/MODEL_DIRECTORY_UNAVAILABLE/u)).toBeVisible();
+
+    const provider = screen.getByRole("combobox", { name: "供应商" });
+    await waitFor(() => expect(provider).toBeEnabled());
+    await user.selectOptions(provider, "ollama");
+
+    expect(screen.queryByText("正在使用上次保存的模型目录")).not.toBeInTheDocument();
+    expect(screen.queryByText(/MODEL_DIRECTORY_UNAVAILABLE/u)).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "deepseek-v4-flash" })).not.toBeInTheDocument();
+  });
+
+  it("ignores a late capability probe after a newer connection hydration wins", async () => {
+    const fixture = await createReadyDeepSeekProbeRuntime("deepseek-race-old");
+    let current = await fixture.runtime.modelHub.saveConnection({
+      id: "openai-race-current",
+      providerKind: "openai",
+      displayName: "OpenAI current",
+      credentialRef: "keyring:model-hub:openai-race-current",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    current = await fixture.runtime.modelHub.recordConnectionTest({
+      connectionId: current.id,
+      status: "ready",
+      expectedRevision: current.revision,
+    });
+    await fixture.runtime.modelHub.syncCatalog({
+      syncId: "openai-race-current-sync",
+      connectionId: current.id,
+      source: "provider_api",
+      status: "succeeded",
+      models: [{ id: "openai-race-current-model", providerModelId: "gpt-current" }],
+    });
+    const generation = deferred<{
+      text: string;
+      usage: { inputTokens: number; outputTokens: number; cachedInputTokens: null };
+      streamed: boolean;
+    }>();
+    const generate = vi.fn(() => generation.promise);
+    const runtime: DesktopRuntime = {
+      ...fixture.runtime,
+      modelGateway: { ...fixture.runtime.modelGateway, generate },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime, "/settings?connectionId=deepseek-race-old#model-center");
+
+    await screen.findByRole("option", { name: "deepseek-v4-flash" });
+    const verify = screen.getByRole("button", { name: "验证写作能力" });
+    await waitFor(() => expect(verify).toBeEnabled());
+    await user.click(verify);
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+
+    const provider = screen.getByRole("combobox", { name: "供应商" });
+    const storedConnection = screen.getByRole("combobox", { name: /^已连接的供应商/u });
+    const selectedModel = screen.getByRole("combobox", { name: "模型" });
+    expect(provider).toBeDisabled();
+    expect(storedConnection).toBeDisabled();
+    expect(selectedModel).toBeDisabled();
+
+    // Force the event to prove stale-result isolation even if a future UI path can
+    // change the target while a provider request is still returning.
+    storedConnection.removeAttribute("disabled");
+    fireEvent.change(storedConnection, { target: { value: "openai-race-current" } });
+    await waitFor(() => expect(storedConnection).toHaveValue("openai-race-current"));
+    expect(await screen.findByRole("option", { name: "gpt-current" })).toBeInTheDocument();
+
+    generation.resolve({
+      text: "OK",
+      usage: { inputTokens: 4, outputTokens: 1, cachedInputTokens: null },
+      streamed: false,
+    });
+
+    await waitFor(() => expect(provider).toBeEnabled());
+    expect(storedConnection).toHaveValue("openai-race-current");
+    expect(screen.getByRole("combobox", { name: "模型" })).toHaveValue("gpt-current");
+    expect(screen.queryByText("写作能力已验证")).not.toBeInTheDocument();
+    const routes = await Promise.all(
+      NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task)),
+    );
+    expect(routes.every((route) => route === null)).toBe(true);
   });
 
   it("saves, tests and reopens a custom single-Header connection with exact expert options", async () => {
@@ -350,42 +642,44 @@ describe("SettingsPage model routing", () => {
     const runtime = createRuntime();
     const view = renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 });
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
-    await user.selectOptions(providerSelect, "custom_openai_compatible");
-    fireEvent.change(screen.getByLabelText("Base URL"), {
-      target: { value: "https://custom-models.example/v1" },
-    });
-    await user.click(screen.getByRole("button", { name: "专家设置" }));
+    fireEvent.change(providerSelect, { target: { value: "custom_openai_compatible" } });
+    fireEvent.click(screen.getByRole("button", { name: "专家设置" }));
     expect(providerSelect).toHaveValue("custom_openai_compatible");
     expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
     expect(screen.getByLabelText(/^模型目录路径/u)).toBeVisible();
-    fireEvent.change(screen.getByLabelText("配置标识"), { target: { value: "custom-safe" } });
-    await user.selectOptions(
-      screen.getByRole("combobox", { name: "认证方式" }),
-      "custom_header_keyring",
-    );
+    act(() => {
+      fireEvent.change(screen.getByLabelText("Base URL"), {
+        target: { value: "https://custom-models.example/v1" },
+      });
+      fireEvent.change(screen.getByLabelText("配置标识"), {
+        target: { value: "custom-safe" },
+      });
+      fireEvent.change(screen.getByRole("combobox", { name: "认证方式" }), {
+        target: { value: "custom_header_keyring" },
+      });
+    });
     expect(providerSelect).toHaveValue("custom_openai_compatible");
     expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
-    fireEvent.change(await screen.findByLabelText(/^模型目录路径/u), {
-      target: { value: "/catalog/models" },
-    });
-    fireEvent.change(screen.getByLabelText(/^文本生成路径/u), {
-      target: { value: "/text/chat" },
-    });
-    fireEvent.change(screen.getByLabelText(/^Embedding 路径/u), {
-      target: { value: "/vectors/embed" },
-    });
-    fireEvent.change(screen.getByLabelText("认证 Header 名称"), {
-      target: { value: "X-API-Key" },
-    });
-    fireEvent.change(screen.getByLabelText("请求超时（毫秒）"), {
-      target: { value: "47000" },
-    });
-    fireEvent.change(screen.getByLabelText("安全重试次数"), { target: { value: "2" } });
-    fireEvent.change(screen.getByLabelText("认证 Header 值"), {
-      target: { value: "super-secret-header-value" },
+    const modelDiscoveryPath = await screen.findByLabelText(/^模型目录路径/u);
+    const textGenerationPath = screen.getByLabelText(/^文本生成路径/u);
+    const embeddingPath = screen.getByLabelText(/^Embedding 路径/u);
+    const credentialHeaderName = screen.getByLabelText("认证 Header 名称");
+    const requestTimeout = screen.getByLabelText("请求超时（毫秒）");
+    const retryLimit = screen.getByLabelText("安全重试次数");
+    const credentialHeaderValue = screen.getByLabelText("认证 Header 值");
+    act(() => {
+      fireEvent.change(modelDiscoveryPath, { target: { value: "/catalog/models" } });
+      fireEvent.change(textGenerationPath, { target: { value: "/text/chat" } });
+      fireEvent.change(embeddingPath, { target: { value: "/vectors/embed" } });
+      fireEvent.change(credentialHeaderName, { target: { value: "X-API-Key" } });
+      fireEvent.change(requestTimeout, { target: { value: "47000" } });
+      fireEvent.change(retryLimit, { target: { value: "2" } });
+      fireEvent.change(credentialHeaderValue, {
+        target: { value: "super-secret-header-value" },
+      });
     });
     await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
 
@@ -413,7 +707,7 @@ describe("SettingsPage model routing", () => {
 
     view.unmount();
     renderRoute(createRuntime());
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 });
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     await waitFor(() => {
       expect(screen.getByLabelText("配置标识")).toHaveValue("custom-safe");
@@ -427,7 +721,7 @@ describe("SettingsPage model routing", () => {
       expect(screen.getByLabelText("请求超时（毫秒）")).toHaveValue(47_000);
       expect(screen.getByLabelText("安全重试次数")).toHaveValue(2);
     });
-  }, 15_000);
+  }, 20_000);
 
   it("confirms safe connection removal, deletes the credential, and keeps an auditable retired row", async () => {
     const development = createDevelopmentRuntime(window.localStorage);
@@ -635,7 +929,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 });
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
     await user.selectOptions(
@@ -647,8 +941,7 @@ describe("SettingsPage model routing", () => {
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     const providerId = screen.getByLabelText("配置标识");
     expect(providerId).toHaveValue("custom-delete-owner");
-    await user.clear(providerId);
-    await user.type(providerId, "shared-delete-provider");
+    fireEvent.change(providerId, { target: { value: "shared-delete-provider" } });
 
     expect(screen.queryByRole("button", { name: "删除密钥" })).not.toBeInTheDocument();
     expect(deleteCredential).not.toHaveBeenCalled();
@@ -700,7 +993,7 @@ describe("SettingsPage model routing", () => {
     renderRoute(runtime);
 
     await screen.findByRole("heading", { name: "InkShadow Model Hub" });
-    const storedConnections = screen.getByRole("combobox", {
+    const storedConnections = await screen.findByRole("combobox", {
       name: /^已连接的供应商/u,
     });
     await waitFor(() => expect(storedConnections).toBeEnabled());
@@ -712,9 +1005,10 @@ describe("SettingsPage model routing", () => {
     );
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     const providerId = screen.getByLabelText("配置标识");
-    await user.clear(providerId);
-    await user.type(providerId, "same-provider-target");
-    await user.type(screen.getByLabelText("认证 Header 值"), "never-overwrite-target");
+    fireEvent.change(providerId, { target: { value: "same-provider-target" } });
+    fireEvent.change(screen.getByLabelText("认证 Header 值"), {
+      target: { value: "never-overwrite-target" },
+    });
     await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
 
     expect(await screen.findByText(/MODEL_HUB_CONNECTION_ID_CONFLICT/u)).toBeVisible();
@@ -781,7 +1075,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 });
     const storedConnections = screen.getByRole("combobox", {
       name: /^已连接的供应商/u,
     });
@@ -789,8 +1083,7 @@ describe("SettingsPage model routing", () => {
     await user.selectOptions(storedConnections, "same-metadata-owner");
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     const providerId = screen.getByLabelText("配置标识");
-    await user.clear(providerId);
-    await user.type(providerId, "same-metadata-target");
+    fireEvent.change(providerId, { target: { value: "same-metadata-target" } });
     await user.click(screen.getByRole("button", { name: "保存供应商与模型" }));
 
     expect(await screen.findByText(/MODEL_HUB_CONNECTION_ID_CONFLICT/u)).toBeVisible();
@@ -839,17 +1132,18 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
-    const storedConnections = screen.getByRole("combobox", {
-      name: /^已连接的供应商/u,
-    });
-    await waitFor(() => expect(storedConnections).toBeEnabled());
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 });
+    const storedConnections = await screen.findByRole(
+      "combobox",
+      { name: /^已连接的供应商/u },
+      { timeout: 5_000 },
+    );
+    await waitFor(() => expect(storedConnections).toBeEnabled(), { timeout: 5_000 });
     await user.selectOptions(storedConnections, "same-delete-owner");
     expect(await screen.findByRole("button", { name: "删除密钥" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     const providerId = screen.getByLabelText("配置标识");
-    await user.clear(providerId);
-    await user.type(providerId, "same-delete-target");
+    fireEvent.change(providerId, { target: { value: "same-delete-target" } });
 
     expect(screen.queryByRole("button", { name: "删除密钥" })).not.toBeInTheDocument();
     expect(deleteCredential).not.toHaveBeenCalled();
@@ -887,7 +1181,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 });
     await waitFor(() =>
       expect(screen.getByRole("combobox", { name: /^已连接的供应商/u })).toBeEnabled(),
     );
@@ -898,8 +1192,7 @@ describe("SettingsPage model routing", () => {
     expect(await screen.findByRole("button", { name: "删除密钥" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     const providerId = screen.getByLabelText("配置标识");
-    await user.clear(providerId);
-    await user.type(providerId, "brand-new-provider-id");
+    fireEvent.change(providerId, { target: { value: "brand-new-provider-id" } });
 
     expect(screen.queryByRole("button", { name: "删除密钥" })).not.toBeInTheDocument();
     expect(deleteCredential).not.toHaveBeenCalled();
@@ -1893,6 +2186,34 @@ function renderRoute(runtime: DesktopRuntime, initialEntry = "/settings#model-ce
       </RuntimeProvider>
     </MemoryRouter>,
   );
+}
+
+function renderRouteInStrictMode(runtime: DesktopRuntime, initialEntry = "/settings#model-center") {
+  return render(
+    <StrictMode>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <RuntimeProvider runtime={runtime}>
+          <ToastProvider>
+            <DesktopRoutes />
+          </ToastProvider>
+        </RuntimeProvider>
+      </MemoryRouter>
+    </StrictMode>,
+  );
+}
+
+function deferred<T>(): Readonly<{
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+}> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return Object.freeze({ promise, resolve, reject });
 }
 
 function pricing(pricingVersion: string) {

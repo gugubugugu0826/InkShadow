@@ -18,6 +18,8 @@ import {
 } from "@inkshadow/application";
 import type {
   CandidateQualityGateResult,
+  ContinuationDestinationId,
+  ContinuationOutputProfileId,
   ContextEvidenceSourceType,
   ContextLayer,
 } from "@inkshadow/ai-core";
@@ -28,6 +30,7 @@ import type {
   ChapterVersion,
   Project,
   RecoveryDraft,
+  UuidV7,
 } from "@inkshadow/domain";
 import { parseUuidV7 } from "@inkshadow/domain";
 import type { SaveState } from "@inkshadow/contracts/states";
@@ -107,6 +110,12 @@ import {
   type EditorTypography,
 } from "../infrastructure/editor-view-state-store";
 import {
+  DEFAULT_EDITOR_CONTINUATION_PREFERENCE,
+  loadEditorContinuationPreference,
+  saveEditorContinuationPreference,
+  type EditorContinuationPreference,
+} from "../infrastructure/editor-continuation-preference";
+import {
   EDITOR_PREFERENCES_CHANGED_EVENT,
   EDITOR_PREFERENCES_STORAGE_KEY,
   loadEditorPreferences,
@@ -119,7 +128,12 @@ import {
 } from "../infrastructure/persistence-lifecycle";
 import { useRuntime } from "../runtime-context";
 import { CrashRecoveryDialog } from "../components/crash-recovery-dialog";
+import {
+  GenerationProgressPanel,
+  type GenerationProgressStage,
+} from "../components/generation-progress-panel";
 import { CandidateFeedbackControls } from "../components/candidate-feedback-controls";
+import { PreparedNovelSkillReference } from "../components/novel-skill-reference";
 import {
   EditorAiSuggestionDiffViewer,
   type AiSuggestionDiffDecision,
@@ -318,6 +332,15 @@ export function EditorPage() {
   const parsedChapterId = parseUuidV7(params.chapterId ?? "");
   const projectId = parsedProjectId.ok ? parsedProjectId.value : null;
   const chapterId = parsedChapterId.ok ? parsedChapterId.value : null;
+  const editorRouteKey = `${params.projectId ?? ""}/${params.chapterId ?? ""}`;
+  const routeIdentityRef = useRef(editorRouteKey);
+  const loadOperationRevisionRef = useRef(0);
+  const generationOperationRevisionRef = useRef(0);
+  if (routeIdentityRef.current !== editorRouteKey) {
+    routeIdentityRef.current = editorRouteKey;
+    loadOperationRevisionRef.current += 1;
+    generationOperationRevisionRef.current += 1;
+  }
   const [project, setProject] = useState<Project | null>(null);
   const [chapter, setChapter] = useState<Chapter | null>(null);
   const [chapters, setChapters] = useState<readonly Chapter[]>([]);
@@ -383,6 +406,7 @@ export function EditorPage() {
   const [budgetSaving, setBudgetSaving] = useState(false);
   const [cancelBusy, setCancelBusy] = useState(false);
   const [generationPreview, setGenerationPreview] = useState("");
+  const [generationStage, setGenerationStage] = useState<GenerationProgressStage>("preparing");
   const [selectionRewriteInstruction, setSelectionRewriteInstruction] =
     useState("保持原意，让表达更自然。");
   const [selectionRewriteBusy, setSelectionRewriteBusy] = useState(false);
@@ -405,6 +429,8 @@ export function EditorPage() {
   const [editorPreferences, setEditorPreferences] = useState(() =>
     loadEditorPreferences(window.localStorage),
   );
+  const [continuationPreference, setContinuationPreference] =
+    useState<EditorContinuationPreference>(DEFAULT_EDITOR_CONTINUATION_PREFERENCE);
   const [selectionRequestId, setSelectionRequestId] = useState(0);
   const [selectionLength, setSelectionLength] = useState(0);
   const [chapterListOpen, setChapterListOpen] = useState(true);
@@ -469,6 +495,63 @@ export function EditorPage() {
   const generationEstimate = generationPlan?.preflight.estimate ?? null;
   const returnedFromAiSettings = searchParams.get("aiSettings") === "returned";
 
+  useEffect(() => {
+    let resetCancelled = false;
+    const activePlan = activeGenerationPlanRef.current;
+    activeGenerationPlanRef.current = null;
+    if (
+      activePlan !== null &&
+      (activePlan.projectId !== projectId || activePlan.chapterId !== chapterId)
+    ) {
+      void cancelGenerationPlan(runtime, activePlan).catch(() => undefined);
+    }
+    queueMicrotask(() => {
+      if (resetCancelled) return;
+      setGenerationPlan(null);
+      setPreflightOpen(false);
+      setContextSourcesOpen(false);
+      setGenerationError(null);
+      setGenerationReceipt(null);
+      setGenerationAttemptUsage([]);
+      setDeferredGeneration(null);
+      setCandidateQualityGate(null);
+      setGenerationPreview("");
+      setGenerationStage("preparing");
+      setCandidateBusy(false);
+      setCancelBusy(false);
+      setSelectionRewriteBusy(false);
+      setSelectionRewriteContext(null);
+    });
+    return () => {
+      resetCancelled = true;
+      loadOperationRevisionRef.current += 1;
+      generationOperationRevisionRef.current += 1;
+      const pendingPlan = activeGenerationPlanRef.current;
+      activeGenerationPlanRef.current = null;
+      if (pendingPlan !== null) {
+        void cancelGenerationPlan(runtime, pendingPlan).catch(() => undefined);
+      }
+    };
+  }, [chapterId, editorRouteKey, projectId, runtime]);
+
+  function beginGenerationOperation(): Readonly<{ revision: number; routeKey: string }> {
+    const revision = generationOperationRevisionRef.current + 1;
+    generationOperationRevisionRef.current = revision;
+    return Object.freeze({ revision, routeKey: editorRouteKey });
+  }
+
+  function isCurrentGenerationOperation(
+    operation: Readonly<{
+      revision: number;
+      routeKey: string;
+    }>,
+  ): boolean {
+    return (
+      generationOperationRevisionRef.current === operation.revision &&
+      routeIdentityRef.current === operation.routeKey
+    );
+  }
+
   const clearScheduledPersistence = useCallback((): void => {
     if (draftTimerRef.current !== null) {
       window.clearTimeout(draftTimerRef.current);
@@ -484,21 +567,23 @@ export function EditorPage() {
     if (chapterId === null) {
       return;
     }
+    const expectedRouteKey = editorRouteKey;
     const result = await runtime.useCases.listChapterVersions.execute(chapterId);
-    if (result.ok) {
+    if (routeIdentityRef.current === expectedRouteKey && result.ok) {
       setVersions(result.value);
     }
-  }, [chapterId, runtime]);
+  }, [chapterId, editorRouteKey, runtime]);
 
   const loadChapters = useCallback(async () => {
     if (projectId === null) {
       return;
     }
+    const expectedRouteKey = editorRouteKey;
     const result = await runtime.repositories.chapters.listByProjectId(projectId);
-    if (result.ok) {
+    if (routeIdentityRef.current === expectedRouteKey && result.ok) {
       setChapters(result.value);
     }
-  }, [projectId, runtime]);
+  }, [editorRouteKey, projectId, runtime]);
 
   const syncHistoryAvailability = useCallback((history: EditorHistory): void => {
     setHistoryAvailability({
@@ -554,11 +639,18 @@ export function EditorPage() {
   );
 
   const load = useCallback(async () => {
+    const loadRevision = loadOperationRevisionRef.current + 1;
+    loadOperationRevisionRef.current = loadRevision;
+    const expectedRouteKey = editorRouteKey;
+    const isCurrentLoad = (): boolean =>
+      loadOperationRevisionRef.current === loadRevision &&
+      routeIdentityRef.current === expectedRouteKey;
     if (chapterId === null || projectId === null) {
-      setPageState("fatal_error");
+      if (isCurrentLoad()) setPageState("fatal_error");
       return;
     }
 
+    setContinuationPreference(loadEditorContinuationPreference(window.localStorage, projectId));
     setPageState("loading");
     setRecoveryDecisionOpen(false);
     setRecoveryDraft(null);
@@ -591,6 +683,10 @@ export function EditorPage() {
       runtime.useCases.listChapterVersions.execute(chapterId),
       runtime.repositories.aiCandidates.listByChapterId(chapterId),
     ]);
+
+    if (!isCurrentLoad()) {
+      return;
+    }
 
     if (!projectResult.ok) {
       setError(projectResult.error);
@@ -683,7 +779,7 @@ export function EditorPage() {
       void continuousState
         .inspectProject(projectId)
         .then((dashboard) => {
-          if (dashboard.detectedCount > 0) {
+          if (isCurrentLoad() && dashboard.detectedCount > 0) {
             setStoryStateUpdate({
               state: "ready",
               detectedCount: dashboard.detectedCount,
@@ -694,15 +790,27 @@ export function EditorPage() {
           }
         })
         .catch(() => {
+          if (!isCurrentLoad()) return;
           // Story-state review is additive and must never block opening正文.
           globalThis.console.error("[CONTINUOUS_STORY_STATE_DASHBOARD_FAILED]");
         });
     }
-  }, [chapterId, projectId, requestedCandidateId, resetEditorHistory, runtime, scheduleSelection]);
+  }, [
+    chapterId,
+    editorRouteKey,
+    projectId,
+    requestedCandidateId,
+    resetEditorHistory,
+    runtime,
+    scheduleSelection,
+  ]);
 
   useEffect(() => {
     void Promise.resolve().then(load);
-    return clearScheduledPersistence;
+    return () => {
+      loadOperationRevisionRef.current += 1;
+      clearScheduledPersistence();
+    };
   }, [clearScheduledPersistence, load]);
 
   useEffect(() => {
@@ -1647,13 +1755,22 @@ export function EditorPage() {
     }
   }
 
-  async function generateCandidate(): Promise<void> {
+  function updateContinuationPreference(next: EditorContinuationPreference): void {
+    setContinuationPreference(next);
+    if (projectId !== null) {
+      saveEditorContinuationPreference(window.localStorage, projectId, next);
+    }
+  }
+
+  async function generateCandidate(partialCandidateId: UuidV7 | null = null): Promise<void> {
     if (chapterId === null || saveState === "dirty" || saveState === "saving") {
       return;
     }
+    const operation = beginGenerationOperation();
     setLastGenerationAction("continuation");
     setSelectionRewriteContext(null);
     setCandidateBusy(true);
+    setGenerationStage("preparing");
     setError(null);
     setGenerationError(null);
     setGenerationReceipt(null);
@@ -1664,19 +1781,32 @@ export function EditorPage() {
         networkAvailable: online,
         cursorUtf16: normalizeEditorSelection(selectionRef.current, contentRef.current.length)
           .start,
+        outputProfile: continuationPreference.profile,
+        customTargetVisibleCharacters: continuationPreference.customTargetVisibleCharacters,
+        destination: continuationPreference.destination,
+        customDestinationInstruction: continuationPreference.customDestinationInstruction,
+        contextBudgetProfile:
+          continuationPreference.profile === "long"
+            ? "long"
+            : continuationPreference.profile === "short"
+              ? "economy"
+              : "standard",
+        ...(partialCandidateId === null ? {} : { partialCandidateId }),
       });
+      if (!isCurrentGenerationOperation(operation)) return;
       setGenerationPlan(plan);
       setDeferredGeneration(plan.deferredRequest);
-      await loadBudgetForm(plan);
+      await loadBudgetForm(plan, () => isCurrentGenerationOperation(operation));
+      if (!isCurrentGenerationOperation(operation)) return;
       if (plan.preflight.canStart && !plan.preflight.requiresConfirmation) {
-        await executePreparedGeneration(plan);
+        await executePreparedGeneration(plan, operation);
       } else {
         setPreflightOpen(true);
       }
     } catch (cause: unknown) {
-      setGenerationError(cause);
+      if (isCurrentGenerationOperation(operation)) setGenerationError(cause);
     } finally {
-      setCandidateBusy(false);
+      if (isCurrentGenerationOperation(operation)) setCandidateBusy(false);
     }
   }
 
@@ -1703,6 +1833,7 @@ export function EditorPage() {
       );
       return;
     }
+    const operation = beginGenerationOperation();
 
     setLastGenerationAction("selection_rewrite");
     setSelectionRewriteBusy(true);
@@ -1721,6 +1852,7 @@ export function EditorPage() {
       if (!selectedHash.ok) {
         throw selectedHash.error;
       }
+      if (!isCurrentGenerationOperation(operation)) return;
       const result = await createSelectionRewriteCandidate(runtime, {
         chapterId: stableChapter.id,
         baseVersionId: stableChapter.currentVersionId,
@@ -1730,8 +1862,11 @@ export function EditorPage() {
           selectedTextSha256: selectedHash.value,
         },
         instruction: selectionRewriteInstruction,
-        onDelta: setGenerationPreview,
+        onDelta: (next) => {
+          if (isCurrentGenerationOperation(operation)) setGenerationPreview(next);
+        },
       });
+      if (!isCurrentGenerationOperation(operation)) return;
       const previousCandidate = candidate;
       setCandidate(result.candidate);
       setSelectionRewriteContext(result.contextCompilation);
@@ -1748,15 +1883,23 @@ export function EditorPage() {
         });
       }
     } catch (cause: unknown) {
-      setGenerationError(selectionRewriteUiError(cause));
+      if (isCurrentGenerationOperation(operation)) {
+        setGenerationError(selectionRewriteUiError(cause));
+      }
     } finally {
-      setSelectionRewriteBusy(false);
-      setCandidateBusy(false);
-      setGenerationPreview("");
+      if (isCurrentGenerationOperation(operation)) {
+        setSelectionRewriteBusy(false);
+        setCandidateBusy(false);
+        setGenerationPreview("");
+      }
     }
   }
 
-  async function loadBudgetForm(plan: PreparedGenerationPlan): Promise<void> {
+  async function loadBudgetForm(
+    plan: PreparedGenerationPlan,
+    isCurrent: () => boolean = () => true,
+  ): Promise<void> {
+    if (!isCurrent()) return;
     const estimate = plan.preflight.estimate;
     if (plan.projectId === null || estimate === null) {
       setBudgetPolicies([]);
@@ -1770,6 +1913,7 @@ export function EditorPage() {
       monthKey,
       estimate.currency,
     );
+    if (!isCurrent()) return;
     setBudgetPolicies(policies);
     const projectPolicy = policies.find(({ scope }) => scope === "project");
     const monthPolicy = policies.find(({ scope }) => scope === "month");
@@ -1784,18 +1928,17 @@ export function EditorPage() {
   }
 
   async function saveBudgetsAndRefresh(): Promise<void> {
-    if (
-      !generationPlan?.projectId ||
-      generationPlan.preflight.estimate === null ||
-      chapterId === null
-    ) {
+    const estimate = generationPlan?.preflight.estimate ?? null;
+    if (!generationPlan?.projectId || estimate === null || chapterId === null) {
       return;
     }
+    const operation = beginGenerationOperation();
+    const plan = generationPlan;
     setBudgetSaving(true);
     setError(null);
     try {
-      const currency = generationPlan.preflight.estimate.currency;
-      const monthKey = generationPlan.preflight.checkedAt.slice(0, 7);
+      const currency = estimate.currency;
+      const monthKey = plan.preflight.checkedAt.slice(0, 7);
       const projectPolicy = budgetPolicies.find(({ scope }) => scope === "project");
       const monthPolicy = budgetPolicies.find(({ scope }) => scope === "month");
       const writes: Promise<GenerationBudgetPolicy>[] = [];
@@ -1803,7 +1946,7 @@ export function EditorPage() {
         writes.push(
           runtime.generationGovernance.saveBudgetPolicy({
             scope: "project",
-            projectId: generationPlan.projectId,
+            projectId: plan.projectId,
             monthKey: null,
             currency,
             limitMicros: parseAmountToMicros(projectBudgetAmount),
@@ -1826,39 +1969,68 @@ export function EditorPage() {
         );
       }
       await Promise.all(writes);
+      if (!isCurrentGenerationOperation(operation)) return;
       const refreshed = await prepareGenerationPlan(runtime, chapterId, {
         chapterSaved: editorClean,
         networkAvailable: online,
-        cursorUtf16: generationPlan.applicationCursorUtf16,
+        cursorUtf16: plan.applicationCursorUtf16,
+        outputProfile: plan.outputContract.profile,
+        customTargetVisibleCharacters:
+          plan.outputContract.profile === "custom"
+            ? plan.outputContract.targetVisibleCharacters
+            : null,
+        destination: plan.outputContract.destination,
+        customDestinationInstruction: plan.outputContract.customDestinationInstruction,
+        contextBudgetProfile: plan.contextBudget.profile,
+        customContextBudget:
+          plan.contextBudget.profile === "custom" ? plan.contextBudget.taskProfileLimit : null,
+        ...(plan.partialCandidateId === null
+          ? {}
+          : { partialCandidateId: plan.partialCandidateId }),
       });
+      if (!isCurrentGenerationOperation(operation)) return;
       setGenerationPlan(refreshed);
-      await loadBudgetForm(refreshed);
+      await loadBudgetForm(refreshed, () => isCurrentGenerationOperation(operation));
     } catch (cause: unknown) {
-      setError(cause);
+      if (isCurrentGenerationOperation(operation)) setError(cause);
     } finally {
-      setBudgetSaving(false);
+      if (isCurrentGenerationOperation(operation)) setBudgetSaving(false);
     }
   }
 
-  async function executePreparedGeneration(plan: PreparedGenerationPlan): Promise<void> {
-    if (!plan.preflight.canStart) {
+  async function executePreparedGeneration(
+    plan: PreparedGenerationPlan,
+    existingOperation?: Readonly<{ revision: number; routeKey: string }>,
+  ): Promise<void> {
+    const operation = existingOperation ?? beginGenerationOperation();
+    if (
+      !plan.preflight.canStart ||
+      plan.projectId !== projectId ||
+      plan.chapterId !== chapterId ||
+      !isCurrentGenerationOperation(operation)
+    ) {
       return;
     }
     setPreflightOpen(false);
     setCandidateBusy(true);
+    setGenerationStage("generating");
     setGenerationPreview("");
     setError(null);
     setGenerationError(null);
     activeGenerationPlanRef.current = plan;
     try {
-      const result = await executeGenerationPlan(runtime, plan, setGenerationPreview);
+      const result = await executeGenerationPlan(runtime, plan, (next) => {
+        if (isCurrentGenerationOperation(operation)) setGenerationPreview(next);
+      });
+      if (!isCurrentGenerationOperation(operation)) return;
+      setGenerationStage("finalizing");
       if (plan.deferredRequest !== null) {
-        setDeferredGeneration(
-          await runtime.generationGovernance.findWaitingDeferredRequest(
-            plan.chapterId,
-            plan.modelRole,
-          ),
+        const deferred = await runtime.generationGovernance.findWaitingDeferredRequest(
+          plan.chapterId,
+          plan.modelRole,
         );
+        if (!isCurrentGenerationOperation(operation)) return;
+        setDeferredGeneration(deferred);
       }
       if (!result.ok) {
         setGenerationError(result.error);
@@ -1871,7 +2043,6 @@ export function EditorPage() {
       setCandidateQualityGate(result.value.qualityGate);
       if (
         projectId !== null &&
-        chapterId !== null &&
         result.value.candidate !== null &&
         previousCandidate !== null &&
         (previousCandidate.status === "accepted" || previousCandidate.status === "rejected")
@@ -1880,22 +2051,29 @@ export function EditorPage() {
           action: "regenerated",
           candidateId: previousCandidate.id,
         });
+        if (!isCurrentGenerationOperation(operation)) return;
       }
       const [receipt, usage] = await Promise.all([
         runtime.generationGovernance.findRunById(result.value.runId),
         runtime.generationGovernance.listAttemptUsage(result.value.runId),
       ]);
+      if (!isCurrentGenerationOperation(operation)) return;
       setGenerationReceipt(receipt);
       setGenerationAttemptUsage(usage);
       setError(null);
       setGenerationError(null);
     } catch (cause: unknown) {
-      setGenerationError(cause);
+      if (isCurrentGenerationOperation(operation)) setGenerationError(cause);
     } finally {
-      activeGenerationPlanRef.current = null;
-      setCandidateBusy(false);
-      setCancelBusy(false);
-      setGenerationPreview("");
+      if (activeGenerationPlanRef.current === plan) {
+        activeGenerationPlanRef.current = null;
+      }
+      if (isCurrentGenerationOperation(operation)) {
+        setCandidateBusy(false);
+        setCancelBusy(false);
+        setGenerationPreview("");
+        setGenerationStage("preparing");
+      }
     }
   }
 
@@ -1942,17 +2120,20 @@ export function EditorPage() {
     if (generationPlan === null || !canDeferGenerationPlan(generationPlan)) {
       return;
     }
+    const operation = beginGenerationOperation();
+    const plan = generationPlan;
     setCandidateBusy(true);
     setError(null);
     try {
-      const deferred = await saveDeferredGenerationPlan(runtime, generationPlan);
+      const deferred = await saveDeferredGenerationPlan(runtime, plan);
+      if (!isCurrentGenerationOperation(operation)) return;
       setDeferredGeneration(deferred);
-      setGenerationPlan(Object.freeze({ ...generationPlan, deferredRequest: deferred }));
+      setGenerationPlan(Object.freeze({ ...plan, deferredRequest: deferred }));
       setPreflightOpen(false);
     } catch (cause: unknown) {
-      setError(cause);
+      if (isCurrentGenerationOperation(operation)) setError(cause);
     } finally {
-      setCandidateBusy(false);
+      if (isCurrentGenerationOperation(operation)) setCandidateBusy(false);
     }
   }
 
@@ -2443,6 +2624,7 @@ export function EditorPage() {
   const privateGenerationBlocked = normalizedGenerationError?.code === "PRIVATE_CHAPTER_LOCAL_ONLY";
   const readonly = project?.status !== "active";
   const candidateReady = candidate?.status === "ready";
+  const candidateIncomplete = candidate?.toSnapshot().incomplete ?? false;
   const canGenerateCandidate =
     candidate === null || candidate.status === "accepted" || candidate.status === "rejected";
   const usesNativeModel = runtime.mode === "tauri";
@@ -2481,6 +2663,8 @@ export function EditorPage() {
     saveState === "saved_local" || saveState === "clean" || saveState === "pending_sync";
   const displayedContextCompilation =
     selectionRewriteContext ?? generationPlan?.contextCompilation ?? null;
+  const displayedNovelSkillPreparation =
+    selectionRewriteContext === null ? (generationPlan?.novelSkillPreparation ?? null) : null;
   const writingCanvasStyle = {
     "--editor-font-size": `${String(typography.fontSize)}px`,
     "--editor-line-height": String(typography.lineHeight),
@@ -2623,6 +2807,11 @@ export function EditorPage() {
               variant={candidateReady ? "ai-primary" : "primary"}
               disabled={primaryAction.disabled}
               loading={candidateBusy || saveState === "saving"}
+              onMouseDown={(event) => {
+                if (primaryAction.label === "修改选中内容") {
+                  event.preventDefault();
+                }
+              }}
               onClick={primaryAction.run}
             >
               {primaryAction.label}
@@ -3003,7 +3192,8 @@ export function EditorPage() {
                     : "当前使用本机示例帮助检查流程，不会联网；只有你接受后，内容才会进入正文。"
                 }
               />
-              {displayedContextCompilation !== null && (
+              {(displayedContextCompilation !== null ||
+                displayedNovelSkillPreparation !== null) && (
                 <button
                   type="button"
                   className="context-sources-trigger"
@@ -3014,11 +3204,11 @@ export function EditorPage() {
                     <small>查看 AI 为什么选用这些故事资料</small>
                   </span>
                   <Badge tone="info">
-                    {
-                      displayedContextCompilation.compiled.entries.filter(
-                        ({ included }) => included,
-                      ).length
-                    }{" "}
+                    {(displayedContextCompilation?.compiled.entries.filter(
+                      ({ included }) => included,
+                    ).length ?? 0) +
+                      (displayedNovelSkillPreparation?.methods.filter(({ included }) => included)
+                        .length ?? 0)}{" "}
                     项
                   </Badge>
                 </button>
@@ -3141,28 +3331,35 @@ export function EditorPage() {
               )}
 
               {candidateBusy && usesNativeModel ? (
-                <div className="candidate-content" aria-live="polite">
-                  <div className="candidate-content__meta">
-                    <Badge tone="ai">{selectionRewriteBusy ? "改写中" : "生成中"}</Badge>
-                    <span>{generationPreview.length} 字符</span>
+                selectionRewriteBusy || generationPlan === null ? (
+                  <div className="candidate-content" aria-live="polite">
+                    <div className="candidate-content__meta">
+                      <Badge tone="ai">改写中</Badge>
+                      <span>{generationPreview.length} 字符</span>
+                    </div>
+                    <pre>{generationPreview || "正在准备选区改写建议……"}</pre>
+                    <p className="candidate-panel__hint">
+                      当前内容尚未写入正式正文，也不会在完成前保存为 AI 建议版本。
+                    </p>
                   </div>
-                  <pre>
-                    {generationPreview ||
-                      (selectionRewriteBusy ? "正在准备选区改写建议……" : "正在准备第一段建议……")}
-                  </pre>
-                  <p className="candidate-panel__hint">
-                    当前内容尚未写入正式正文，也不会在完成前保存为 AI 建议版本。
-                  </p>
-                  {!selectionRewriteBusy && (
-                    <Button
-                      variant="secondary"
-                      loading={cancelBusy}
-                      onClick={() => void cancelActiveGeneration()}
-                    >
-                      取消生成
-                    </Button>
-                  )}
-                </div>
+                ) : (
+                  <GenerationProgressPanel
+                    providerLabel={generationPlan.providerId}
+                    modelLabel={generationPlan.modelId}
+                    reasoningMode={generationPlan.visibleProseReasoningMode}
+                    minimumVisibleCharacters={
+                      generationPlan.outputContract.minimumVisibleCharacters
+                    }
+                    maximumVisibleCharacters={
+                      generationPlan.outputContract.maximumVisibleCharacters
+                    }
+                    receivedVisibleCharacters={generationPreview.length}
+                    stage={generationStage}
+                    preview={generationPreview}
+                    cancelBusy={cancelBusy}
+                    onStop={() => void cancelActiveGeneration()}
+                  />
+                )
               ) : candidate === null || candidate.status === "rejected" ? (
                 <div className="candidate-content">
                   <EmptyState
@@ -3219,8 +3416,8 @@ export function EditorPage() {
                   {candidate.toSnapshot().incomplete && (
                     <InlineAlert
                       tone="warning"
-                      title="建议内容尚未完成"
-                      description="生成在取消后停止；已收到的内容仍需由你明确接受，才会进入正文。"
+                      title={`本次已保留 ${candidate.content.trim().length.toLocaleString("zh-CN")} 字，结尾尚未完成`}
+                      description="模型提前停止或生成被取消；所有已收到的可见正文都保留在这份隔离建议中。你可以调整本次长度后继续补全、保留当前部分并比较、重新生成或换模型；正文没有变化。"
                     />
                   )}
                   {candidateQualityGate?.candidateId === candidate.id &&
@@ -3275,14 +3472,42 @@ export function EditorPage() {
                   )}
                   {candidateReady && (
                     <div className="candidate-actions">
+                      {candidateIncomplete && (
+                        <Button
+                          variant="ai-primary"
+                          loading={candidateBusy}
+                          disabled={!editorClean}
+                          onClick={() => void generateCandidate(candidate.id)}
+                        >
+                          继续补全
+                        </Button>
+                      )}
                       <Button
-                        variant="ai-primary"
+                        variant={candidateIncomplete ? "secondary" : "ai-primary"}
                         loading={candidateBusy}
                         disabled={!editorClean}
                         onClick={openCandidateReview}
                       >
-                        比较 AI 建议
+                        {candidateIncomplete ? "保留当前部分并比较" : "比较 AI 建议"}
                       </Button>
+                      {candidateIncomplete && (
+                        <Button
+                          variant="secondary"
+                          loading={candidateBusy}
+                          disabled={!editorClean}
+                          onClick={() => void generateCandidate()}
+                        >
+                          重新生成
+                        </Button>
+                      )}
+                      {candidateIncomplete && usesNativeModel && (
+                        <Link
+                          className="button-link button-link--secondary"
+                          to={preflightModelHubLink("model-selection")}
+                        >
+                          换模型
+                        </Link>
+                      )}
                       <Button
                         variant="secondary"
                         disabled={candidateBusy}
@@ -3299,8 +3524,132 @@ export function EditorPage() {
                   请先保存当前正文，再处理 AI 建议版本。
                 </p>
               )}
-              {canGenerateCandidate && (
+              {(canGenerateCandidate || candidateIncomplete) && (
                 <>
+                  <section className="candidate-content" aria-label="续写长度">
+                    <FormField
+                      label="本次续写长度"
+                      hint="这是本设备对当前作品的编辑器偏好；每次生成前都可更改，不会写成故事设定。"
+                    >
+                      {(fieldProps) => (
+                        <Select
+                          {...fieldProps}
+                          value={continuationPreference.profile}
+                          options={[
+                            { value: "short", label: "短 · 约 1,000 字" },
+                            { value: "standard", label: "标准 · 约 2,200 字" },
+                            { value: "long", label: "长 · 约 4,000 字" },
+                            { value: "custom", label: "自定义" },
+                          ]}
+                          disabled={candidateBusy}
+                          onChange={(event) => {
+                            const profile = event.currentTarget
+                              .value as ContinuationOutputProfileId;
+                            updateContinuationPreference({
+                              schemaVersion: 1,
+                              profile,
+                              customTargetVisibleCharacters:
+                                profile === "custom"
+                                  ? (continuationPreference.customTargetVisibleCharacters ?? 2_200)
+                                  : null,
+                              destination: continuationPreference.destination,
+                              customDestinationInstruction:
+                                continuationPreference.customDestinationInstruction,
+                            });
+                          }}
+                        />
+                      )}
+                    </FormField>
+                    {continuationPreference.profile === "custom" && (
+                      <FormField label="目标字数" hint="可填写 200–12,000 字。">
+                        {(fieldProps) => (
+                          <Input
+                            {...fieldProps}
+                            type="number"
+                            min={200}
+                            max={12_000}
+                            step={100}
+                            value={continuationPreference.customTargetVisibleCharacters ?? 2_200}
+                            disabled={candidateBusy}
+                            onChange={(event) => {
+                              const value = Number(event.currentTarget.value);
+                              if (!Number.isSafeInteger(value) || value < 200 || value > 12_000) {
+                                return;
+                              }
+                              updateContinuationPreference({
+                                schemaVersion: 1,
+                                profile: "custom",
+                                customTargetVisibleCharacters: value,
+                                destination: continuationPreference.destination,
+                                customDestinationInstruction:
+                                  continuationPreference.customDestinationInstruction,
+                              });
+                            }}
+                          />
+                        )}
+                      </FormField>
+                    )}
+                    {continuationPreference.profile === "long" && (
+                      <p className="candidate-panel__hint" role="status">
+                        长篇续写通常需要更长等待时间，并可能产生更高的模型费用；正式发送前仍会按模型上限、预算和隐私策略预检。
+                      </p>
+                    )}
+                    <FormField
+                      label="写到哪里"
+                      hint="用于约束本次续写的收束位置；会进入本次任务指令，不会自动写成故事设定。"
+                    >
+                      {(fieldProps) => (
+                        <Select
+                          {...fieldProps}
+                          value={continuationPreference.destination}
+                          options={[
+                            { value: "complete_scene", label: "推进一个完整场景" },
+                            { value: "next_segment", label: "只写下一小段" },
+                            { value: "custom_instruction", label: "按我的要求" },
+                          ]}
+                          disabled={candidateBusy}
+                          onChange={(event) => {
+                            const destination = event.currentTarget
+                              .value as ContinuationDestinationId;
+                            updateContinuationPreference({
+                              ...continuationPreference,
+                              destination,
+                              customDestinationInstruction:
+                                destination === "custom_instruction"
+                                  ? continuationPreference.customDestinationInstruction
+                                  : null,
+                            });
+                          }}
+                        />
+                      )}
+                    </FormField>
+                    {continuationPreference.destination === "custom_instruction" && (
+                      <FormField
+                        label="本次写作要求"
+                        hint="例如：写到主角发现密信为止。最多 2,000 字。"
+                        required
+                      >
+                        {(fieldProps) => (
+                          <Textarea
+                            {...fieldProps}
+                            value={continuationPreference.customDestinationInstruction ?? ""}
+                            currentLength={
+                              continuationPreference.customDestinationInstruction?.length ?? 0
+                            }
+                            rows={3}
+                            maxLength={2_000}
+                            disabled={candidateBusy}
+                            onChange={(event) =>
+                              updateContinuationPreference({
+                                ...continuationPreference,
+                                customDestinationInstruction: event.currentTarget.value,
+                              })
+                            }
+                          />
+                        )}
+                      </FormField>
+                    )}
+                  </section>
                   {usesNativeModel && selectionLength > 0 && (
                     <section className="candidate-content" aria-label="修改选中内容">
                       <FormField
@@ -3351,7 +3700,12 @@ export function EditorPage() {
                   <Button
                     variant="ghost"
                     loading={candidateBusy}
-                    disabled={!editorClean}
+                    disabled={
+                      !editorClean ||
+                      (continuationPreference.destination === "custom_instruction" &&
+                        (continuationPreference.customDestinationInstruction?.trim().length ??
+                          0) === 0)
+                    }
                     onClick={() => void generateCandidate()}
                   >
                     {candidate?.status === "accepted"
@@ -3499,61 +3853,78 @@ export function EditorPage() {
           </Button>
         }
       >
-        {displayedContextCompilation === null ? (
-          <EmptyState
-            title="暂无参考记录"
-            description="开始一次创作后，这里会显示使用了哪些设定、事件与章节资料，以及选择原因。"
-          />
-        ) : (
-          <div className="context-sources" aria-label="本次故事资料来源">
-            <div className="context-sources__summary">
-              <div>
-                <span>实际参考</span>
-                <strong>
-                  {
-                    displayedContextCompilation.compiled.entries.filter(({ included }) => included)
-                      .length
-                  }{" "}
-                  项
-                </strong>
+        <>
+          {displayedNovelSkillPreparation !== null && (
+            <PreparedNovelSkillReference preparation={displayedNovelSkillPreparation} />
+          )}
+          {displayedContextCompilation === null ? (
+            <EmptyState
+              title="暂无故事资料记录"
+              description="浏览器演示不会生成正式参考收据；在桌面版完成一次真实创作后，这里会显示实际采用的设定、事件与章节资料。"
+            />
+          ) : (
+            <div className="context-sources" aria-label="本次故事资料来源">
+              <div className="context-sources__summary">
+                <div>
+                  <span>实际参考</span>
+                  <strong>
+                    {
+                      displayedContextCompilation.compiled.entries.filter(
+                        ({ included }) => included,
+                      ).length
+                    }{" "}
+                    项
+                  </strong>
+                </div>
+                <p>
+                  预计使用{" "}
+                  {displayedContextCompilation.compiled.trace.usedTokens.toLocaleString("zh-CN")}/
+                  {displayedContextCompilation.compiled.trace.maximumContextTokens.toLocaleString(
+                    "zh-CN",
+                  )}{" "}
+                  个输入 token（本机保守估算，不是计费回执）。
+                </p>
+                <p>{contextBudgetExplanation(displayedContextCompilation.compiled)}</p>
               </div>
-              <p>
-                使用约{" "}
-                {displayedContextCompilation.compiled.trace.usedTokens.toLocaleString("zh-CN")}/
-                {displayedContextCompilation.compiled.trace.maximumContextTokens.toLocaleString(
-                  "zh-CN",
-                )}{" "}
-                个上下文用量单位。
-              </p>
+              <div className="context-sources__groups">
+                {groupContextEntriesByLayer(displayedContextCompilation.compiled.entries).map(
+                  ({ layer, entries }) => (
+                    <section key={layer} aria-labelledby={`context-group-${layer}`}>
+                      <h3 id={`context-group-${layer}`}>{contextLayerLabel(layer)}</h3>
+                      <ol className="context-sources__list">
+                        {entries.map((entry) => (
+                          <li key={entry.id} data-included={entry.included ? "true" : "false"}>
+                            <div className="context-sources__item-heading">
+                              <Badge tone={entry.included ? "info" : "neutral"}>
+                                {contextEntryStatusLabel(entry)}
+                              </Badge>
+                              <span>约 {entry.estimatedTokens.toLocaleString("zh-CN")} token</span>
+                            </div>
+                            <p>{contextSelectionReasonLabel(entry)}</p>
+                            <p className="candidate-panel__hint">
+                              {contextEntryExcerpt(entry.content)}
+                            </p>
+                            {entry.evidence.length > 0 ? (
+                              <ul className="context-sources__evidence">
+                                {uniqueContextSourceTypes(entry.evidence).map((sourceType) => (
+                                  <li key={sourceType}>
+                                    <span>{contextSourceTypeLabel(sourceType)}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <small>由当前写作任务直接提供，没有额外资料来源。</small>
+                            )}
+                          </li>
+                        ))}
+                      </ol>
+                    </section>
+                  ),
+                )}
+              </div>
             </div>
-            <ol className="context-sources__list">
-              {displayedContextCompilation.compiled.entries.map((entry) => (
-                <li key={entry.id} data-included={entry.included ? "true" : "false"}>
-                  <div className="context-sources__item-heading">
-                    <Badge tone={entry.included ? "info" : "neutral"}>
-                      {entry.included ? "已参考" : "因篇幅未使用"}
-                    </Badge>
-                    <strong>{contextLayerLabel(entry.layer)}</strong>
-                    <span>约 {entry.estimatedTokens.toLocaleString("zh-CN")} 单位</span>
-                  </div>
-                  <p>{contextSelectionReasonLabel(entry.selectionReason)}</p>
-                  {entry.evidence.length > 0 ? (
-                    <ul className="context-sources__evidence">
-                      {entry.evidence.map((source) => (
-                        <li key={`${source.sourceType}:${source.sourceId}`}>
-                          <span>{contextSourceTypeLabel(source.sourceType)}</span>
-                          <code>{source.sourceId}</code>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <small>由当前写作任务直接提供，没有额外资料来源。</small>
-                  )}
-                </li>
-              ))}
-            </ol>
-          </div>
-        )}
+          )}
+        </>
       </Drawer>
 
       {versionToRestore !== null && chapter !== null && (
@@ -4107,7 +4478,8 @@ export function EditorPage() {
                 description={`${generationRouteRoleLabel(generationPlan.modelRole)} · ${
                   generationPlan.providerId
                 } / ${generationPlan.modelId} · ${
-                  generationPlan.profile?.provider === "ollama"
+                  generationPlan.profile?.provider === "ollama" ||
+                  generationPlan.modelHubInspection?.dataDestination === "local"
                     ? "数据仅发送到本机 AI 服务"
                     : generationPlan.routeReason === "local_demo"
                       ? "内置演示，不外发"
@@ -4144,25 +4516,23 @@ export function EditorPage() {
                     {generationPlan.contextCompilation.compiled.trace.maximumContextTokens.toLocaleString(
                       "zh-CN",
                     )}{" "}
-                    个上下文用量单位；未选资料不会发送给模型。
+                    个输入 token（本机保守估算，不是计费回执）；未选资料不会发送给模型。
                   </p>
+                  <p>{contextBudgetExplanation(generationPlan.contextCompilation.compiled)}</p>
                   <ul>
                     {generationPlan.contextCompilation.compiled.entries.map((entry) => (
                       <li key={entry.id}>
                         <Badge tone={entry.included ? "info" : "neutral"}>
-                          {entry.included ? "已参考" : "因篇幅未使用"}
+                          {contextEntryStatusLabel(entry)}
                         </Badge>{" "}
                         <strong>{contextLayerLabel(entry.layer)}</strong>
-                        <span> · 约 {entry.estimatedTokens.toLocaleString("zh-CN")} 单位</span>
-                        <p>{contextSelectionReasonLabel(entry.selectionReason)}</p>
+                        <span> · 约 {entry.estimatedTokens.toLocaleString("zh-CN")} token</span>
+                        <p>{contextSelectionReasonLabel(entry)}</p>
                         {entry.evidence.length > 0 && (
                           <small>
                             来源：
-                            {entry.evidence
-                              .map(
-                                (source) =>
-                                  `${contextSourceTypeLabel(source.sourceType)} · ${source.sourceId}`,
-                              )
+                            {uniqueContextSourceTypes(entry.evidence)
+                              .map(contextSourceTypeLabel)
                               .join("；")}
                           </small>
                         )}
@@ -4443,7 +4813,28 @@ function contextSourceTypeLabel(sourceType: ContextEvidenceSourceType): string {
   return labels[sourceType];
 }
 
-function contextSelectionReasonLabel(reason: string): string {
+type ContextCompilationEntry = StoryContextCompilationReceipt["compiled"]["entries"][number];
+
+function groupContextEntriesByLayer(
+  entries: readonly ContextCompilationEntry[],
+): readonly { layer: ContextLayer; entries: readonly ContextCompilationEntry[] }[] {
+  const groups: { layer: ContextLayer; entries: ContextCompilationEntry[] }[] = [];
+  const groupByLayer = new Map<ContextLayer, ContextCompilationEntry[]>();
+  for (const entry of entries) {
+    const existing = groupByLayer.get(entry.layer);
+    if (existing !== undefined) {
+      existing.push(entry);
+      continue;
+    }
+    const groupedEntries = [entry];
+    groupByLayer.set(entry.layer, groupedEntries);
+    groups.push({ layer: entry.layer, entries: groupedEntries });
+  }
+  return groups;
+}
+
+function contextSelectionReasonLabel(entry: ContextCompilationEntry): string {
+  const reason = entry.selectionReason;
   const normalized = reason.toLowerCase();
   if (normalized.includes("explicitly requested")) {
     return "这是你本次明确提出的写作任务。";
@@ -4472,7 +4863,67 @@ function contextSelectionReasonLabel(reason: string): string {
   if (normalized.includes("formal") || normalized.includes("user-confirmed")) {
     return "这是经过你确认的正式故事事实。";
   }
-  return "系统根据当前任务、证据可靠性和资料优先级选择。";
+  const layerReasons: Record<ContextLayer, string> = {
+    locked_hard_rules: "这是当前作品已经锁定的规则，本次创作必须优先遵守。",
+    current_task: "这是你为本次生成明确提出的写作任务。",
+    scene_goal: "这是当前场景需要推进的目标，用来约束下一段内容的方向。",
+    pov_known_information: "这是当前视角人物此刻知道或不知道的信息，用来避免视角越界。",
+    character_current_state: "这是相关人物在当前时间点的状态，用来保持行为和关系连续。",
+    recent_events: "这是紧邻当前写作位置发生的事件，用来衔接下一段正文。",
+    related_causal_chain: "这是会直接影响当前情节的前因后果，用来保持事件推进合理。",
+    unresolved_foreshadowing: "这是尚未回收的伏笔，用来避免遗忘或过早揭示。",
+    world_setting: "这是当前情节涉及的世界设定，用来避免违反既有背景。",
+    character_voice_samples: "这是相关人物过去的说话样例，用来保持人物口吻一致。",
+    semantic_retrieval: "本地检索发现这项资料与当前情节相关，因此作为补充参考。",
+    rerank_supplement: "检索结果复核后，这项资料与当前任务的相关性更高，因此作为补充参考。",
+  };
+  const sourceTypes = uniqueContextSourceTypes(entry.evidence);
+  if (sourceTypes.length === 0) {
+    return layerReasons[entry.layer];
+  }
+  return `${layerReasons[entry.layer]} 来源：${sourceTypes
+    .map(contextSourceTypeLabel)
+    .join("、")}。`;
+}
+
+function contextEntryStatusLabel(
+  entry: StoryContextCompilationReceipt["compiled"]["entries"][number],
+): string {
+  if (entry.included) return "已参考";
+  if (entry.discardedReason === "duplicate_source") return "已合并，未重复发送";
+  if (entry.discardedReason === "token_budget_exhausted") return "篇幅预算未使用";
+  return "未使用";
+}
+
+function contextEntryExcerpt(content: string): string {
+  const normalized = content.replace(/\s+/gu, " ").trim();
+  if (normalized.length === 0) return "这项资料没有可展示的文字摘要。";
+  return normalized.length <= 140 ? normalized : `${normalized.slice(0, 140)}…`;
+}
+
+function uniqueContextSourceTypes(
+  evidence: StoryContextCompilationReceipt["compiled"]["entries"][number]["evidence"],
+): readonly ContextEvidenceSourceType[] {
+  return [...new Set(evidence.map(({ sourceType }) => sourceType))];
+}
+
+function contextBudgetExplanation(compiled: StoryContextCompilationReceipt["compiled"]): string {
+  const duplicateCount = compiled.entries.filter(
+    ({ discardedReason }) => discardedReason === "duplicate_source",
+  ).length;
+  const budgetDiscardCount = compiled.entries.filter(
+    ({ discardedReason }) => discardedReason === "token_budget_exhausted",
+  ).length;
+  const parts: string[] = [];
+  if (budgetDiscardCount > 0) {
+    parts.push(`${String(budgetDiscardCount)} 项较低优先级资料因本次输入预算未发送`);
+  } else {
+    parts.push("没有更多需要为本次任务补充的高相关资料");
+  }
+  if (duplicateCount > 0) {
+    parts.push(`${String(duplicateCount)} 项重复资料已合并证据且不会重复发送`);
+  }
+  return `${parts.join("；")}。剩余预算不会为了凑满而加入无关内容。`;
 }
 
 function preflightCheckLabel(code: string): string {

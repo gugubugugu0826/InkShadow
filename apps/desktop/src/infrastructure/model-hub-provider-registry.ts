@@ -125,7 +125,26 @@ export interface ModelProviderPreset {
   readonly visibleProse?: Readonly<{
     readonly reasoningMode: "disabled";
   }>;
+  /**
+   * Time-bounded provider documentation fallback. Catalog values and local
+   * capability probes always take precedence; this is never an InkShadow test result.
+   */
+  readonly officialModelMetadataFallback?: ProviderOfficialModelMetadataFallback;
   readonly officialDocsUrl: string;
+}
+
+export interface ProviderOfficialModelMetadataFallback {
+  readonly evidenceSource: "provider_official_docs";
+  readonly evidenceVersion: string;
+  readonly evidenceUpdatedAt: string;
+  readonly expiresAt: string;
+  readonly sourceUrl: string;
+  readonly applicableModelIds: readonly string[];
+  readonly contextWindowTokens: number;
+  readonly maximumOutputTokens: number;
+  readonly structuredOutputDeclared: boolean;
+  readonly thinkingDeclared: boolean;
+  readonly thinkingDefault: "enabled" | "disabled" | "unknown";
 }
 
 export interface ModelProviderTextCapabilityProbePolicy {
@@ -284,6 +303,19 @@ const PROVIDER_PRESETS: readonly ModelProviderPreset[] = Object.freeze([
     },
     textCapabilityProbe: { reasoningMode: "disabled" },
     visibleProse: { reasoningMode: "disabled" },
+    officialModelMetadataFallback: {
+      evidenceSource: "provider_official_docs",
+      evidenceVersion: "deepseek-models-pricing-2026-08-10",
+      evidenceUpdatedAt: "2026-08-10T00:00:00.000Z",
+      expiresAt: "2026-09-10T00:00:00.000Z",
+      sourceUrl: "https://api-docs.deepseek.com/quick_start/pricing/",
+      applicableModelIds: Object.freeze(["deepseek-v4-flash", "deepseek-v4-pro"]),
+      contextWindowTokens: 1_000_000,
+      maximumOutputTokens: 384_000,
+      structuredOutputDeclared: true,
+      thinkingDeclared: true,
+      thinkingDefault: "enabled",
+    },
     officialDocsUrl: "https://api-docs.deepseek.com/api/list-models/",
   }),
   freezePreset({
@@ -543,6 +575,48 @@ export function modelProviderVisibleProsePolicy(
   });
 }
 
+export function modelProviderOfficialMetadataFallback(
+  provider: ModelProviderKind,
+  now: string,
+  target: Readonly<{ baseUrl: string; modelId: string }>,
+): ProviderOfficialModelMetadataFallback | null {
+  const declaration = getModelProviderPreset(provider).officialModelMetadataFallback;
+  if (
+    declaration === undefined ||
+    Date.parse(now) >= Date.parse(declaration.expiresAt) ||
+    modelProviderKindForOfficialEndpoint(target.baseUrl) !== provider ||
+    !declaration.applicableModelIds.includes(target.modelId)
+  ) {
+    return null;
+  }
+  return declaration;
+}
+
+/**
+ * Recognizes an official preset endpoint for legacy connections. Custom
+ * OpenAI-compatible endpoints intentionally remain unknown instead of being
+ * classified from a model name.
+ */
+export function modelProviderKindForOfficialEndpoint(baseUrl: string): ModelProviderKind | null {
+  let candidateOrigin: string;
+  try {
+    candidateOrigin = new URL(baseUrl).origin.toLowerCase();
+  } catch {
+    return null;
+  }
+  for (const preset of PROVIDER_PRESETS) {
+    if (preset.defaultBaseUrl === null) continue;
+    try {
+      if (new URL(preset.defaultBaseUrl).origin.toLowerCase() === candidateOrigin) {
+        return preset.id;
+      }
+    } catch {
+      // Built-in preset validation covers this; fail closed if a future preset is malformed.
+    }
+  }
+  return null;
+}
+
 export function isModelProviderKind(value: unknown): value is ModelProviderKind {
   return typeof value === "string" && (MODEL_PROVIDER_KINDS as readonly string[]).includes(value);
 }
@@ -745,6 +819,19 @@ function freezePreset(preset: ModelProviderPreset): ModelProviderPreset {
     ...(preset.textCapabilityProbe === undefined
       ? {}
       : { textCapabilityProbe: Object.freeze({ ...preset.textCapabilityProbe }) }),
+    ...(preset.visibleProse === undefined
+      ? {}
+      : { visibleProse: Object.freeze({ ...preset.visibleProse }) }),
+    ...(preset.officialModelMetadataFallback === undefined
+      ? {}
+      : {
+          officialModelMetadataFallback: Object.freeze({
+            ...preset.officialModelMetadataFallback,
+            applicableModelIds: Object.freeze([
+              ...preset.officialModelMetadataFallback.applicableModelIds,
+            ]),
+          }),
+        }),
   });
 }
 

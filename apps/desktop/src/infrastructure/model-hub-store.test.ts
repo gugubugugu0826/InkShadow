@@ -704,18 +704,37 @@ describe("TauriModelHubStore", () => {
       currency: "USD",
     });
     expect(started).toMatchObject({ status: "running", revision: 1 });
+    const completed = await store.finishInvocation({
+      id: started.id,
+      status: "succeeded",
+      inputTokens: 10,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      estimatedCostMicros: "0",
+      currency: "USD",
+      completion: { visibleContentLength: 4, stream: false },
+      expectedRevision: 1,
+    });
+    expect(completed).toMatchObject({
+      status: "succeeded",
+      completion: { visibleContentLength: 4, stream: false },
+      failure: null,
+      revision: 2,
+    });
+    await expect(store.findInvocation(started.id)).resolves.toMatchObject({
+      completion: { visibleContentLength: 4, stream: false },
+    });
     await expect(
       store.finishInvocation({
         id: started.id,
         status: "succeeded",
-        inputTokens: 10,
-        outputTokens: 0,
-        cachedInputTokens: 0,
-        estimatedCostMicros: "0",
-        currency: "USD",
-        expectedRevision: 1,
+        completion: {
+          visibleContentLength: 4,
+          response: "must-not-persist",
+        } as never,
+        expectedRevision: 2,
       }),
-    ).resolves.toMatchObject({ status: "succeeded", revision: 2 });
+    ).rejects.toMatchObject({ code: "MODEL_HUB_COMPLETION_METADATA_INVALID" });
 
     await expect(
       store.startInvocation({

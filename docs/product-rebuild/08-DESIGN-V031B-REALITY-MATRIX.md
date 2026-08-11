@@ -115,7 +115,36 @@ checkpoint 初始状态为：
   15 项前缀。
   这解决 checkpoint 中 `reasoning_content` 与截断归一化缺口，不代表运行期主备回退或真实 DeepSeek
   账号已端到端验收。
+- Model Hub 首次进入现由连接、持久化正文路由、系统凭据摘要、目录/能力/路由组成单一权威
+  hydration snapshot；loading 阶段不会先显示“未配置”，旧 generation 不能覆盖新选择，目录刷新失败
+  保留缓存。脱敏诊断已升级 schema v3，分开当前会话与历史错误，也不再把旧 Model Center 档案数
+  冒充 Model Hub 连接数。真实 Tauri 冷启动和 DeepSeek 凭据互操作仍为 `NOT_RUN`。
+- Provider Registry 只对官方 DeepSeek endpoint 与精确官方模型 ID 提供带有效期、
+  `verifiedByInkShadow=false` 的官方资料 fallback，目录证据优先且自定义端点不继承。Provider
+  recommendation 只对已连接目录项排序或显示带有效期的发现方向；阿里云 `text-embedding-v4`
+  等推荐不会创建能力证据。结构化输出和翻译分别使用固定严格 schema 与
+  `inkshadow.translation-probe.zh-en.v2` 无作品探针，成功后才保存对应能力/路由。
 - 三条创建旅程共享持久化 `ProjectSeed`。作者确认且非空的字段已进入真实续写 Context Compile：禁止项为必选硬规则，类型/基调/风格/POV/改写规则为当前任务，人物/关系、世界/起点和冲突/方向/大纲分别进入对应层；未确认的导入分析或 AI 推测被排除。
+- 续写现按短/标准/长/自定义目标动态计算输出和上下文预算，使用保守 CJK token 估算并从模型窗口
+  扣除系统、协议、输出与安全余量；不再以固定 Top-K 冒充长程上下文。截断或取消时的可见正文只
+  进入 `incomplete` 隔离 Candidate，可继续补全、保留比较、重生成或换模型，永不自动覆盖正文。
+  上下文历史以作者可读名称显示采用/舍弃原因、origin 和预算。章节摘要精确绑定当前不可变版本与
+  内容哈希；纯文本降级保存为可重建、低置信度的系统 `chapter_summary` StoryFact，不产生 key events、
+  continuity notes，也不晋升为正式故事事实。
+- Novel Skill 已由 Data `0060` / Tauri `63` 接入桌面 runtime 与 UI：7 Core + 5 Genre 全部
+  `EXPERIMENTAL`、默认关闭，ProjectSeed 只能提出 recommendation；作者在项目“写作方法（实验）”
+  显式启用后，第一次开书和续写才会把适用方法编译进独立预算段，并在同一
+  trace/generation/model invocation/Candidate 链保存精确 content-free snapshot。“本次参考”显示
+  名称、版本、采用/舍弃原因与预算，缺少回执不冒充已使用。浏览器开发模式明确不可用。
+- Data `0061` / Tauri `64` 已建立九表 content-free Novel Skill 评测账本，固定 192 个 cell、专用
+  空白归档项目、适用性 manifest、失败 attempt、Candidate/trace/invocation/snapshot 和人工决定链。
+  13 项人工评分及 reviewer/rubric/time 已成为硬合同；完整 run 需要 2,496 个评分槽，并重验互异模型
+  制品、完整证据摘要、派发 attempt 与恢复语义。Data `0063` / Tauri `66` 另固定 exact-target
+  协议、两模型目录目标、逐币种商业授权/硬上限、单次派发/歧义恢复和本地盲评；专家设置页只在作者
+  再次展开后显示，准备、报价、授权和重启恢复都不调用模型。Data `0064` / Tauri `67` 进一步把
+  每次派发的 payload 子哈希、能力/目标锁和精确预派发估价冻结为 content-free sidecar，缺少或无法
+  重算时禁止越过供应商发送边界。真实 192 次付费 A/B、2,496 项人工评分和默认启用仍全部为
+  `NOT_RUN / KEEP_DISABLED`，不能宣称提升写作质量。
 - P03/P40 作品库已区分真正空库、仅归档、仅回收站和搜索无结果；删除前可取消、改归档或移入 30 天回收站。跨页只显示真实持久节点，不伪造导入百分比。
 - P11/P12 规划空态与真实章节投影、P13–P15/P34–P36 人物/世界/故事参考记录与可见写作偏好、P17 证据修正建议版本、P18 项目统计、P22 原位生成错误、P25 用量中心、P26 全局写作/自动保存设置、P28/P31 紧凑编辑器抽屉、P32 上下文来源和 P33 可编辑建议版本均已接入目标入口。
 - P13–P15 另加入面向作者的设定维护链：自然语言先生成待确认结构化候选，AI 补充项不自动
@@ -144,12 +173,20 @@ checkpoint 初始状态为：
 - 导入与导出补齐 EPUB 3 正文制品；默认导出排除私密章节。DOCX/PDF/Markdown/TXT/Bundle 仍保留原有真实路径。
 - P39 自动备份已从页面/策略缺口推进为真实 Tauri 运行链：桌面运行时启动后立即执行一次到期检查，存活期间每小时以不重叠定时器重检；本地 03:00 槽位漏跑时只补最新一次，默认保留 30 天。浏览器开发运行时明确为 `null`，不伪造文件备份。
 - 自动备份创建复用现有 `DatabaseMaintenanceService.createConsistentBackup`，原生端只为清单中处于 `creating` 的严格命名文件签发一次性受限路径票据。清理不枚举目录；只有根标记、租约、清单状态、直系路径、到期时间、SQLite 完整性、文件身份、大小和 SHA-256 全部匹配时才删除，手动备份不在该清单内。
-- 新迁移连续追加到 Data `0059` / Tauri `62`，没有改写旧 migration：`0052` 保存连续状态提取的
+- 新迁移连续追加到 Data `0064` / Tauri `67`，没有改写旧 migration：`0052` 保存连续状态提取的
   精确路由完成收据，`0053` 保存反馈发生时的学习策略和自定义反馈哈希簇，`0054` 保存明确反馈
   幂等身份，`0055` 修正合法历史回执的恢复约束，`0056` 追加脱敏失败诊断，`0057` 前向补齐
   Model Hub 的 `content_quality_check` 任务合同，`0058` 新增原子 Story Settings 导入收据，`0059`
-  区分可估费用与价格未知。当前作者数据口径为 143 张应用表：142 张进入恢复白名单，1 张内容
-  无关的临时派发租约表明确不恢复；Tauri 自定义 command 数量仍为 59，不能与 62 个原生 migration
-  混用。维护清单和原生迁移注册是这些数字的代码来源。
-- 项目上下文远程 generation / embedding / rerank 在派发前由原生事务原子重验完整项目指纹，并在整个原生网络生命周期持有租约；租约期间只阻止新增/转入 `local_only` 和项目删除，普通正文/自动保存仍可写。Renderer SQL bridge 无法访问租约表，`non_project` 只保留固定白名单中的无既有项目正文探针与建项前创意开头。
+  区分可估费用与价格未知，`0060` 新增 Novel Skill registry/snapshot，`0061` 新增并硬化九表评测
+  账本，`0062` 只补上“持有既有项目派发 lease 时项目不得离开 active”的迁移门禁，`0063` 新增
+  精确目标、商业授权、reservation 与盲评合同，`0064` 冻结内容无关的派发前权威；同一变更集的
+  Rust/TS 代码把 `0045` 已有 lease 覆盖到回环本地派发，并加强 Candidate/context output 原子版本围栏。当前
+  166 张作者数据表进入恢复白名单，另 1 张内容无关的原生项目派发租约表明确不恢复；Tauri command
+  数量不能与 67 个原生 migration 混用。维护清单和原生迁移注册是这些数字的代码来源。
+- 项目上下文远程和回环本地 generation / embedding / rerank 在派发前由原生事务原子重验完整项目
+  指纹，并在整个原生网络生命周期持有租约；lease 期间项目不能转为非 active。Provider 返回后，
+  Candidate/context output 的同一 SQLite 事务再次复核项目、章节、当前版本、Candidate 基线与
+  context source version；迟到完成结果、项目或版本失效及归档竞态均失败关闭。用户取消时，只允许把取消前
+  已经可见的文本保存为 `incomplete` 隔离 Candidate，绝不写入正文。普通正文/自动保存仍可写；Renderer SQL
+  bridge 无法访问租约表，`non_project` 只保留固定白名单中的无既有项目正文探针与建项前创意开头。
 - 2026-08-08 曾保存过增量定向测试证据，但数字只属于对应历史工作树。当前结果应读取 `docs/execution/TEST_RESULTS.md`，并同时核对提交 SHA。历史证据不替代真实凭据、1440/1280/1024/800 与 Windows 200% 视觉矩阵、打包后休眠/磁盘满/旧库升级和百万字性能验收，因此不能标记 44/44 VERIFIED。

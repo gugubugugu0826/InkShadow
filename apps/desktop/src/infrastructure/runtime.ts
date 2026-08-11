@@ -29,7 +29,11 @@ import {
 import {
   CONSERVATIVE_GENERATION_CONTEXT_POLICY,
   estimateGenerationCost,
+  combineContinuationFragments,
+  recoverVisiblePartialOutput,
   rerankWithLocalEvidence,
+  resolveContinuationOutputContract,
+  resolveDynamicContextBudget,
   resolveModelRoute,
   runGenerationPreflight,
   type ContextCandidateDraft,
@@ -38,6 +42,10 @@ import {
   type ModelPricing,
   type ModelRouteCandidate,
   type ModelRouteRole,
+  type ContinuationOutputContract,
+  type ContinuationOutputProfileId,
+  type ContextBudgetProfileId,
+  type DynamicContextBudget,
 } from "@inkshadow/ai-core";
 import { CloudMarketplaceClient, InkShadowCloudApiClient } from "@inkshadow/cloud-client";
 import { DEFAULT_FEATURE_FLAGS, resolveFeatureFlags, type FeatureFlags } from "@inkshadow/config";
@@ -207,6 +215,18 @@ import {
   type GenerationAttemptUsageInput,
   type GenerationGovernanceStore,
 } from "./generation-governance-store";
+import {
+  DEFAULT_NOVEL_SKILL_TOKEN_BUDGET,
+  createNovelSkillRuntime,
+  type NovelSkillRuntimePort,
+  type PreparedNovelSkillInvocation,
+} from "./novel-skill-runtime";
+import { NovelSkillSqliteStore } from "./novel-skill-sqlite-store";
+import {
+  createLazyNovelSkillPaidEvaluationCoordinator,
+  createUnavailableNovelSkillPaidEvaluationCoordinator,
+} from "./novel-skill-paid-evaluation-lazy-coordinator";
+import type { NovelSkillPaidEvaluationCoordinatorPort } from "./novel-skill-paid-evaluation-coordinator";
 import { recordSafeGenerationPreflightDiagnostic } from "./generation-preflight-diagnostics";
 import {
   createAuthoritativeExtractionDesktopRuntime,
@@ -227,6 +247,7 @@ import {
   type ModelProfile,
 } from "./model-center-store";
 import {
+  isNativeGenerationTopP,
   isNativeGatewayProviderKind,
   type NativeGatewayEndpointConfig,
   type NativeModelDispatchScope,
@@ -248,9 +269,15 @@ import {
   executeModelHubTextTask,
   inspectModelHubTextTask,
   ModelHubExecutionError,
+  type ModelHubTextTaskExecutionResult,
   type ModelHubTextTaskInspection,
 } from "./model-hub-execution-service";
-import { isLoopbackModelBaseUrl } from "./model-hub-provider-registry";
+import {
+  getModelProviderPreset,
+  isLoopbackModelBaseUrl,
+  modelProviderKindForOfficialEndpoint,
+  modelProviderVisibleProsePolicy,
+} from "./model-hub-provider-registry";
 import {
   resolveFinalModelProfileGatewayConfig,
   resolveModelProfileGatewayConfig,
@@ -520,7 +547,10 @@ export interface NativeModelGenerationInput {
   readonly messages: readonly NativeModelMessage[];
   readonly maxOutputTokens: number;
   readonly temperature?: number;
+  readonly topP?: number;
   readonly reasoningMode?: "disabled";
+  /** OpenAI-compatible JSON mode. Callers still validate the returned JSON locally. */
+  readonly responseFormat?: "json_object";
   readonly dispatchScope: NativeModelDispatchScope;
   readonly onDelta?: (accumulatedText: string) => void;
 }
@@ -616,6 +646,8 @@ export interface DesktopRuntime {
   readonly storySettingsImport: StorySettingsImportService | null;
   readonly contextTraces: ContextCompilationTraceStore;
   readonly contextTraceOutputs: ContextTraceOutputCommitUnitOfWork;
+  readonly novelSkills: NovelSkillRuntimePort;
+  readonly novelSkillPaidEvaluation: NovelSkillPaidEvaluationCoordinatorPort;
   readonly projectContextPrivacy: ProjectContextPrivacyAuthority;
   readonly multiAgentReview: MultiAgentReviewRuntime | null;
   readonly governedCreativeExtensions: GovernedCreativeExtensionsRuntime | null;
@@ -790,6 +822,14 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
   }
 
   public generate(input: NativeModelGenerationInput): Promise<NativeModelGenerationResult> {
+    if (input.topP !== undefined && !isNativeGenerationTopP(input.topP)) {
+      return Promise.reject(
+        new ModelCenterError(
+          "MODEL_REQUEST_INVALID",
+          "Nucleus sampling topP must be a finite number between 0 and 1.",
+        ),
+      );
+    }
     if (
       input.config.provider === "anthropic" &&
       input.temperature !== undefined &&
@@ -931,7 +971,9 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
             messages: input.messages,
             maxOutputTokens: input.maxOutputTokens,
             ...(includeTemperature ? { temperature: input.temperature } : {}),
+            ...(input.topP === undefined ? {} : { topP: input.topP }),
             ...(input.reasoningMode === undefined ? {} : { reasoningMode: input.reasoningMode }),
+            ...(input.responseFormat === undefined ? {} : { responseFormat: input.responseFormat }),
             dispatchScope: input.dispatchScope,
           },
         });
@@ -1130,7 +1172,19 @@ function buildRuntime(
       : new BrowserDevelopmentContextTraceOutputCommitUnitOfWork(
           repositories.aiCandidates,
           contextTraces,
+          {
+            projects: repositories.projects,
+            chapters: repositories.chapters,
+          },
         );
+  const novelSkills =
+    mode === "tauri" && cloudExecutor !== null
+      ? createNovelSkillRuntime({
+          mode: "tauri",
+          store: new NovelSkillSqliteStore(cloudExecutor),
+          clock,
+        })
+      : createNovelSkillRuntime({ mode: "browser-development" });
   const chapterValidationSnapshotStore = createChapterValidationSnapshots();
   const writingFeedback = new WritingFeedbackLearningService(createWritingFeedback(), ids, clock);
   const modelGateway: NativeModelGatewayClient =
@@ -1395,6 +1449,26 @@ function buildRuntime(
     graphRag: storyGraph !== null,
   });
   const actorId = ids.next();
+  const novelSkillPaidEvaluation =
+    mode === "tauri" && cloudExecutor !== null
+      ? createLazyNovelSkillPaidEvaluationCoordinator(async () => {
+          const { createTauriNovelSkillPaidEvaluationCoordinator } =
+            await import("./novel-skill-paid-evaluation-tauri-factory");
+          return createTauriNovelSkillPaidEvaluationCoordinator({
+            executor: cloudExecutor,
+            projects: repositories.projects,
+            exactTargetDependencies: {
+              modelHub,
+              modelGateway,
+              credentials,
+              clock,
+            },
+            ids,
+          });
+        })
+      : createUnavailableNovelSkillPaidEvaluationCoordinator(
+          "付费写作方法评测只在桌面原生模式可用；浏览器模式不会发送或回退模型请求。",
+        );
   const factService = new StoryFactApplicationService({
     facts: storyPersistence.facts,
     clock,
@@ -1472,6 +1546,7 @@ function buildRuntime(
     projectContextPrivacy,
   });
   const chapterSummaries = new ChapterSummaryService({
+    projects: repositories.projects,
     chapters: repositories.chapters,
     chapterVersions: repositories.chapterVersions,
     facts: storyPersistence.facts,
@@ -1644,6 +1719,8 @@ function buildRuntime(
         : new StorySettingsImportService({ executor: cloudExecutor, ids, clock, hasher }),
     contextTraces,
     contextTraceOutputs,
+    novelSkills,
+    novelSkillPaidEvaluation,
     projectContextPrivacy,
     taskCenter,
     generationGovernance: createGenerationGovernance(clock),
@@ -1955,7 +2032,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.2.1",
+    appVersion: "0.2.2",
     platform: "browser",
     architecture: "web",
     environment: "development",
@@ -2192,6 +2269,7 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
       },
       executor,
     );
+    await baseRuntime.novelSkills.initialize();
     const configuredRuntime: DesktopRuntime = Object.freeze({
       ...baseRuntime,
       authoritativeExtraction: await createConfiguredAuthoritativeExtractionRuntime({
@@ -2446,6 +2524,8 @@ export interface PreparedGenerationPlan {
   readonly projectId: string | null;
   readonly chapterId: UuidV7;
   readonly baseVersionId: string | null;
+  readonly partialCandidateId: UuidV7 | null;
+  readonly partialCandidateContent: string | null;
   /** Exact saved-text UTF-16 anchor captured when the author requested continuation. */
   readonly applicationCursorUtf16: number;
   readonly providerId: string;
@@ -2465,6 +2545,10 @@ export interface PreparedGenerationPlan {
   readonly routeRequiresConfirmation: boolean;
   readonly deferredRequest: DeferredGenerationRequest | null;
   readonly maximumOutputTokens: number;
+  readonly outputContract: ContinuationOutputContract;
+  /** Request policy only; internal reasoning content is never exposed to the editor. */
+  readonly visibleProseReasoningMode: "disabled" | "provider_default";
+  readonly contextBudget: DynamicContextBudget;
   readonly tokenEstimateSource: "utf8_conservative" | "local_demo";
   readonly preflight: GenerationPreflightSnapshot;
   readonly profile: ModelProfile | null;
@@ -2475,6 +2559,7 @@ export interface PreparedGenerationPlan {
   /** In-memory only. Deferred/task persistence deliberately excludes prompt content. */
   readonly messages: readonly NativeModelMessage[];
   readonly contextCompilation: ChapterStoryContextCompilationReceipt | null;
+  readonly novelSkillPreparation: PreparedNovelSkillInvocation;
   readonly executionMode: "local_demo" | "model_hub" | "legacy_profile";
   readonly modelHubInspection: ModelHubTextTaskInspection | null;
   readonly approvedPricing: ModelPricing | null;
@@ -2485,6 +2570,8 @@ export interface GovernedGenerationOutcome {
   /** A synchronous, evidence-bounded gate; null for cancelled partial output. */
   readonly qualityGate: CandidateQualityGateResult | null;
   readonly cancelled: boolean;
+  /** True when provider-visible prose was preserved after an early stop. */
+  readonly incomplete: boolean;
   readonly reused: boolean;
   readonly taskId: string;
   readonly runId: string;
@@ -2493,6 +2580,9 @@ export interface GovernedGenerationOutcome {
 export type GovernedGenerationError =
   AppError | ModelCenterError | GenerationGovernanceError | TaskEngineError;
 
+const activeGenerationIdsByRuntime = new WeakMap<object, Map<string, string>>();
+const cancelledGenerationTasksByRuntime = new WeakMap<object, Set<string>>();
+
 export async function prepareGenerationPlan(
   runtime: DesktopRuntime,
   chapterId: UuidV7,
@@ -2500,6 +2590,14 @@ export async function prepareGenerationPlan(
     readonly chapterSaved: boolean;
     readonly networkAvailable: boolean;
     readonly cursorUtf16?: number;
+    readonly outputProfile?: ContinuationOutputProfileId;
+    readonly customTargetVisibleCharacters?: number | null;
+    readonly destination?: ContinuationOutputContract["destination"];
+    readonly customDestinationInstruction?: string | null;
+    readonly contextBudgetProfile?: ContextBudgetProfileId;
+    readonly customContextBudget?: number | null;
+    /** Resume an incomplete, still-isolated Candidate without changing正文. */
+    readonly partialCandidateId?: UuidV7 | null;
   },
 ): Promise<PreparedGenerationPlan> {
   await runtime.taskCenter.recoverExpiredTasks();
@@ -2515,6 +2613,27 @@ export async function prepareGenerationPlan(
     throw chapterResult.error;
   }
   const chapter = chapterResult.value;
+  let partialCandidate: AiCandidate | null = null;
+  if (input.partialCandidateId !== undefined && input.partialCandidateId !== null) {
+    const partialResult = await runtime.repositories.aiCandidates.findById(
+      input.partialCandidateId,
+    );
+    if (!partialResult.ok) throw partialResult.error;
+    const candidate = partialResult.value;
+    if (
+      candidate?.chapterId !== chapterId ||
+      candidate.status !== "ready" ||
+      !candidate.toSnapshot().incomplete ||
+      candidate.applicationIntent.task !== "continuation"
+    ) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "只能继续补全当前章节中仍待确认的不完整 AI 建议版本。",
+        details: { field: "partialCandidateId" },
+      });
+    }
+    partialCandidate = candidate;
+  }
   const projectResult =
     chapter === null ? null : await runtime.repositories.projects.findById(chapter.projectId);
   if (projectResult !== null && !projectResult.ok) {
@@ -2523,8 +2642,16 @@ export async function prepareGenerationPlan(
   const project = projectResult?.value ?? null;
   const applicationCursorUtf16 = resolveContinuationCursor(
     chapter?.content ?? "",
-    input.cursorUtf16,
+    partialCandidate?.applicationIntent.startUtf16 ?? input.cursorUtf16,
   );
+  if (partialCandidate !== null && partialCandidate.baseVersionId !== chapter?.currentVersionId) {
+    throw new AppError({
+      code: "BASE_VERSION_CHANGED",
+      message: "正文已在这段 AI 建议生成后发生变化，请保留当前建议并重新发起续写。",
+      retryable: true,
+      actions: ["RETRY", "EXPORT_DRAFT"],
+    });
+  }
   const demo = runtime.mode === "browser-development";
   let profile: ModelProfile | null = null;
   let routeResolved = true;
@@ -2612,35 +2739,48 @@ export async function prepareGenerationPlan(
 
   let providerId = demo ? "local-demo" : (profile?.providerId ?? "unconfigured");
   let modelId = demo ? "built-in-demo" : (profile?.selectedModel ?? "unselected");
-  let maximumOutputTokens = 2_048;
+  let outputContract = resolveContinuationOutputContract({
+    ...(input.outputProfile === undefined ? {} : { profile: input.outputProfile }),
+    ...(input.customTargetVisibleCharacters === undefined
+      ? {}
+      : { customTargetVisibleCharacters: input.customTargetVisibleCharacters }),
+    ...(input.destination === undefined ? {} : { destination: input.destination }),
+    ...(input.customDestinationInstruction === undefined
+      ? {}
+      : { customDestinationInstruction: input.customDestinationInstruction }),
+  });
+  let maximumOutputTokens = outputContract.requestedMaxOutputTokens;
+  let contextBudget = resolveDynamicContextBudget({
+    ...(input.contextBudgetProfile === undefined ? {} : { profile: input.contextBudgetProfile }),
+    ...(input.customContextBudget === undefined ? {} : { customLimit: input.customContextBudget }),
+    modelContextWindow: demo ? null : (profile?.pricing?.contextWindowTokens ?? null),
+    outputReserve: maximumOutputTokens,
+  });
   let messages: readonly NativeModelMessage[] = [];
   let contextCompilation: ChapterStoryContextCompilationReceipt | null = null;
-  if (chapter !== null) {
-    if (demo) {
-      messages = buildContinuationMessages(chapter);
-    } else {
-      try {
-        const preparedContext = await buildContextualContinuationMessages(runtime, chapter);
-        messages = preparedContext.messages;
-        contextCompilation = preparedContext.contextCompilation;
-      } catch (cause: unknown) {
-        throw normalizeStoryContextFailure(cause);
-      }
-    }
-  }
+  let novelSkillPreparation = runtime.novelSkills.describeNotApplied(
+    demo ? "browser_demo" : "legacy_route_untraceable",
+  );
   let modelHubInspection: ModelHubTextTaskInspection | null = null;
   let executionMode: PreparedGenerationPlan["executionMode"] = demo
     ? "local_demo"
     : "legacy_profile";
-  if (!demo && chapter !== null) {
-    const requiredDataDestination =
-      contextCompilation === null
-        ? undefined
-        : projectContextRequiredDataDestination(contextCompilation.projectPrivacy);
+  if (demo && chapter !== null) {
+    messages = buildContinuationMessages(chapter);
+  } else if (chapter !== null) {
+    const privacyPreview = await runtime.projectContextPrivacy.inspect(chapter.projectId);
+    runtime.projectContextPrivacy.assertChapterMatches(privacyPreview, chapter);
+    const requiredDataDestination = projectContextRequiredDataDestination(privacyPreview);
+    let metadataInspection: ModelHubTextTaskInspection | null = null;
     try {
-      modelHubInspection = await inspectModelHubTextTask(runtime, {
+      metadataInspection = await inspectModelHubTextTask(runtime, {
         task: "continuation",
-        messages,
+        messages: Object.freeze([
+          Object.freeze({
+            role: "system" as const,
+            content: "Inspect the configured continuation route without project content.",
+          }),
+        ]),
         maximumOutputTokens,
         temperature: 0.8,
         ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
@@ -2657,10 +2797,62 @@ export async function prepareGenerationPlan(
         );
       }
     }
-    if (modelHubInspection !== null) {
+    if (metadataInspection !== null) {
       executionMode = "model_hub";
-      providerId = modelHubInspection.connectionId;
-      modelId = modelHubInspection.modelId;
+      providerId = metadataInspection.connectionId;
+      modelId = metadataInspection.modelId;
+      outputContract = resolveContinuationOutputContract({
+        ...(input.outputProfile === undefined ? {} : { profile: input.outputProfile }),
+        ...(input.customTargetVisibleCharacters === undefined
+          ? {}
+          : { customTargetVisibleCharacters: input.customTargetVisibleCharacters }),
+        ...(input.destination === undefined ? {} : { destination: input.destination }),
+        ...(input.customDestinationInstruction === undefined
+          ? {}
+          : { customDestinationInstruction: input.customDestinationInstruction }),
+        providerOutputLimit: metadataInspection.maximumOutputTokens,
+      });
+      maximumOutputTokens = outputContract.requestedMaxOutputTokens;
+      contextBudget = resolveDynamicContextBudget({
+        ...(input.contextBudgetProfile === undefined
+          ? {}
+          : { profile: input.contextBudgetProfile }),
+        ...(input.customContextBudget === undefined
+          ? {}
+          : { customLimit: input.customContextBudget }),
+        modelContextWindow: metadataInspection.inputTokenLimit,
+        outputReserve: maximumOutputTokens,
+      });
+    }
+    if (contextBudget.budgetStatus === "model_window_exhausted") {
+      throw new ModelCenterError(
+        "MODEL_CONTEXT_WINDOW_EXHAUSTED",
+        "当前模型的上下文窗口不足以同时容纳本次续写输出和必要指令。请缩短输出长度或更换模型。",
+      );
+    }
+    try {
+      const preparedContext = await buildContextualContinuationMessages(
+        runtime,
+        chapter,
+        contextBudget.effectiveInputBudget,
+        partialCandidate?.content ?? null,
+        outputContract,
+        metadataInspection !== null,
+      );
+      messages = preparedContext.messages;
+      contextCompilation = preparedContext.contextCompilation;
+      novelSkillPreparation = preparedContext.novelSkillPreparation;
+    } catch (cause: unknown) {
+      throw normalizeStoryContextFailure(cause);
+    }
+    if (metadataInspection !== null) {
+      modelHubInspection = await inspectModelHubTextTask(runtime, {
+        task: "continuation",
+        messages,
+        maximumOutputTokens,
+        temperature: 0.8,
+        ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
+      });
       maximumOutputTokens = modelHubInspection.maximumOutputTokens;
       routeResolved = true;
       routeReason = modelHubInspection.usedFallback ? "model_hub_fallback" : "model_hub_primary";
@@ -2700,7 +2892,7 @@ export async function prepareGenerationPlan(
           monthKey,
           pricing.currency,
         );
-  const preflight = runGenerationPreflight({
+  const basePreflight = runGenerationPreflight({
     now: runtime.clock.now(),
     migrationReady: true,
     chapterExists: chapter !== null,
@@ -2724,12 +2916,31 @@ export async function prepareGenerationPlan(
     maximumInputBytes: 1_000_000,
     inputTokens,
     maximumOutputTokens,
+    maximumCompiledInputTokens: Math.max(1, contextBudget.effectiveInputBudget),
     contextWindowTokens: demo
       ? null
       : (modelHubInspection?.inputTokenLimit ?? profile?.pricing?.contextWindowTokens ?? null),
     tokenizerStatus: demo ? "exact" : "approximate",
     pricing,
     budgets,
+  });
+  const preflight: GenerationPreflightSnapshot = Object.freeze({
+    ...basePreflight,
+    generationBudget: Object.freeze({
+      outputProfile: outputContract.profile,
+      targetVisibleCharacters: outputContract.targetVisibleCharacters,
+      minimumVisibleCharacters: outputContract.minimumVisibleCharacters,
+      maximumVisibleCharacters: outputContract.maximumVisibleCharacters,
+      requestedMaximumOutputTokens: maximumOutputTokens,
+      providerOutputLimit: outputContract.providerOutputLimit,
+      contextProfile: contextBudget.profile,
+      effectiveInputBudget: contextBudget.effectiveInputBudget,
+      budgetStatus: contextBudget.budgetStatus,
+    }),
+    contextSelectionSummary: safeContextSelectionSummary(
+      contextCompilation,
+      contextBudget.effectiveInputBudget,
+    ),
   });
   recordSafeGenerationPreflightDiagnostic(runtime, {
     taskType: "continuation",
@@ -2797,6 +3008,8 @@ export async function prepareGenerationPlan(
     projectId: chapter?.projectId ?? null,
     chapterId,
     baseVersionId,
+    partialCandidateId: partialCandidate?.id ?? null,
+    partialCandidateContent: partialCandidate?.content ?? null,
     applicationCursorUtf16,
     providerId,
     modelId,
@@ -2806,6 +3019,13 @@ export async function prepareGenerationPlan(
     routeRequiresConfirmation,
     deferredRequest,
     maximumOutputTokens,
+    outputContract,
+    visibleProseReasoningMode: preparedGenerationReasoningMode({
+      executionMode,
+      modelHubInspection,
+      legacyGatewayConfig,
+    }),
+    contextBudget,
     tokenEstimateSource: demo ? "local_demo" : "utf8_conservative",
     preflight,
     profile,
@@ -2813,10 +3033,73 @@ export async function prepareGenerationPlan(
     legacyGatewayResolution,
     messages,
     contextCompilation,
+    novelSkillPreparation,
     executionMode,
     modelHubInspection,
     approvedPricing: pricing,
   });
+}
+
+function safeContextSelectionSummary(
+  receipt: ChapterStoryContextCompilationReceipt | null,
+  effectiveInputBudget: number,
+): NonNullable<GenerationPreflightSnapshot["contextSelectionSummary"]> {
+  if (receipt === null) {
+    return Object.freeze({
+      availableSourceCount: 0,
+      selectedSourceCount: 0,
+      deduplicatedSourceCount: 0,
+      excludedSourceCount: 0,
+      estimatedSelectedTokens: 0,
+      effectiveInputBudget,
+      excludedReasonCounts: Object.freeze([]),
+      missingSourceTypes: Object.freeze([]),
+    });
+  }
+  const entries = receipt.compiled.entries;
+  const excluded = entries.filter(({ included }) => !included);
+  const reasonCounts = new Map<string, number>();
+  for (const entry of excluded) {
+    const reason = entry.discardedReason ?? "unknown";
+    reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
+  }
+  const missingSourceTypes = receipt.compiled.trace.layers
+    .filter(({ candidateCount }) => candidateCount === 0)
+    .map(({ layer }) => layer);
+  return Object.freeze({
+    availableSourceCount: entries.length,
+    selectedSourceCount: entries.filter(({ included }) => included).length,
+    deduplicatedSourceCount: excluded.filter(
+      ({ discardedReason }) => discardedReason === "duplicate_source",
+    ).length,
+    excludedSourceCount: excluded.length,
+    estimatedSelectedTokens: receipt.compiled.trace.usedTokens,
+    effectiveInputBudget,
+    excludedReasonCounts: Object.freeze(
+      [...reasonCounts.entries()].map(([reason, count]) => Object.freeze({ reason, count })),
+    ),
+    missingSourceTypes: Object.freeze(missingSourceTypes),
+  });
+}
+
+function preparedGenerationReasoningMode(
+  plan: Pick<
+    PreparedGenerationPlan,
+    "executionMode" | "modelHubInspection" | "legacyGatewayConfig"
+  >,
+): PreparedGenerationPlan["visibleProseReasoningMode"] {
+  if (plan.executionMode === "model_hub" && plan.modelHubInspection !== null) {
+    return modelProviderVisibleProsePolicy(plan.modelHubInspection.providerKind).reasoningMode ===
+      "disabled"
+      ? "disabled"
+      : "provider_default";
+  }
+  if (plan.executionMode === "legacy_profile" && plan.legacyGatewayConfig !== null) {
+    return legacyVisibleProseReasoningPolicy(plan.legacyGatewayConfig).reasoningMode === "disabled"
+      ? "disabled"
+      : "provider_default";
+  }
+  return "provider_default";
 }
 
 function resolveContinuationCursor(content: string, requested: number | undefined): number {
@@ -3088,7 +3371,12 @@ export async function executeGenerationPlan(
           ),
         );
       }
-      await publishGenerationNotification(runtime, plan, "completed", run.attempt);
+      await publishGenerationNotification(
+        runtime,
+        plan,
+        candidate.value.toSnapshot().incomplete ? "partial" : "completed",
+        run.attempt,
+      );
       const qualityGate = await evaluateCandidateAgainstLocalGate(
         runtime,
         plan,
@@ -3099,6 +3387,7 @@ export async function executeGenerationPlan(
         candidate: candidate.value,
         qualityGate,
         cancelled: false,
+        incomplete: candidate.value.toSnapshot().incomplete,
         reused: true,
         taskId: enqueued.task.id,
         runId: run.id,
@@ -3165,7 +3454,8 @@ export async function executeGenerationPlan(
     );
 
     let accumulated = "";
-    let candidate: AiCandidate;
+    let candidate!: AiCandidate;
+    let activeExecutionPlan = plan;
     let attemptUsage: GenerationAttemptUsageInput = {
       source: "provider_unavailable",
       inputTokens: null,
@@ -3202,52 +3492,122 @@ export async function executeGenerationPlan(
           );
         }
         const requiredDataDestination = projectContextRequiredDataDestination(privacyReceipt);
-        const generated =
-          plan.executionMode === "model_hub"
-            ? await executeModelHubTextTask(runtime, {
-                dispatchScope: projectContextDispatchScope(privacyReceipt),
-                task: "continuation",
-                messages: plan.messages,
-                maximumOutputTokens: plan.maximumOutputTokens,
-                temperature: 0.8,
-                ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
-                generationId: plan.generationId,
-                onBeforeDispatch: async ({
-                  invocationId,
-                  connectionId,
-                  modelId,
-                  localOnlyEligible,
-                }) => {
-                  if (connectionId !== plan.providerId || modelId !== plan.modelId) {
-                    throw new ModelHubExecutionError(
-                      "MODEL_HUB_PLAN_CHANGED",
-                      "AI 分工在生成前发生变化。为避免使用未经本次检查的模型，请重新执行生成前检查。",
-                      true,
+        const executeProviderAttempt = (
+          attemptPlan: PreparedGenerationPlan,
+          forceReasoningDisabled: boolean,
+        ): Promise<NativeModelGenerationResult | ModelHubTextTaskExecutionResult> => {
+          assertGenerationTaskNotCancelled(runtime, attemptPlan.taskId);
+          setActiveGenerationId(runtime, attemptPlan.taskId, attemptPlan.generationId);
+          const execution =
+            attemptPlan.executionMode === "model_hub"
+              ? executeModelHubTextTask(runtime, {
+                  dispatchScope: projectContextDispatchScope(privacyReceipt),
+                  task: "continuation",
+                  messages: attemptPlan.messages,
+                  maximumOutputTokens: attemptPlan.maximumOutputTokens,
+                  temperature: 0.8,
+                  reasoningPolicy: "visible_prose",
+                  ...(forceReasoningDisabled ? { reasoningModeOverride: "disabled" as const } : {}),
+                  ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
+                  generationId: attemptPlan.generationId,
+                  onBeforeDispatch: async ({
+                    invocationId,
+                    connectionId,
+                    modelId,
+                    localOnlyEligible,
+                  }) => {
+                    if (
+                      connectionId !== attemptPlan.providerId ||
+                      modelId !== attemptPlan.modelId
+                    ) {
+                      throw new ModelHubExecutionError(
+                        "MODEL_HUB_PLAN_CHANGED",
+                        "AI 分工在生成前发生变化。为避免使用未经本次检查的模型，请重新执行生成前检查。",
+                        true,
+                      );
+                    }
+                    await linkPreparedContextModelInvocation(runtime, attemptPlan, invocationId);
+                    await assertGenerationProjectActive(runtime, attemptPlan.projectId);
+                    await assertProjectContextBeforeModelHubDispatch(
+                      runtime,
+                      privacyReceipt,
+                      localOnlyEligible === true,
                     );
-                  }
-                  await assertGenerationProjectActive(runtime, plan.projectId);
-                  await linkPreparedContextModelInvocation(runtime, plan, invocationId);
-                  await assertProjectContextBeforeModelHubDispatch(
-                    runtime,
-                    privacyReceipt,
-                    localOnlyEligible === true,
-                  );
-                },
-                onDelta: (next) => {
-                  accumulated = next;
-                  onDelta?.(next);
-                },
-              })
-            : await generateLegacyContinuation(runtime, plan, (next) => {
-                accumulated = next;
-                onDelta?.(next);
-              });
+                    await commitPreparedNovelSkillSnapshot(runtime, attemptPlan, invocationId);
+                    await assertPreparedGenerationTargetCurrent(runtime, attemptPlan);
+                    await assertProjectContextBeforeModelHubDispatch(
+                      runtime,
+                      privacyReceipt,
+                      localOnlyEligible === true,
+                    );
+                  },
+                  assertBeforeProviderDispatch: () =>
+                    assertGenerationTaskNotCancelled(runtime, attemptPlan.taskId),
+                  onDelta: (next) => {
+                    accumulated = next;
+                    onDelta?.(
+                      combineContinuationFragments(attemptPlan.partialCandidateContent ?? "", next),
+                    );
+                  },
+                })
+              : generateLegacyContinuation(
+                  runtime,
+                  attemptPlan,
+                  (next) => {
+                    accumulated = next;
+                    onDelta?.(
+                      combineContinuationFragments(attemptPlan.partialCandidateContent ?? "", next),
+                    );
+                  },
+                  {
+                    generationId: attemptPlan.generationId,
+                    forceReasoningDisabled,
+                  },
+                );
+          return execution.finally(() =>
+            clearActiveGenerationId(runtime, attemptPlan.taskId, attemptPlan.generationId),
+          );
+        };
+        let generated: NativeModelGenerationResult | ModelHubTextTaskExecutionResult;
+        try {
+          generated = await executeProviderAttempt(activeExecutionPlan, false);
+        } catch (firstCause: unknown) {
+          const normalizedFirst = normalizeGovernedGenerationError(firstCause);
+          if (!shouldRetryReasoningOnlyTruncation(plan, normalizedFirst, accumulated)) {
+            throw firstCause;
+          }
+          accumulated = "";
+          activeExecutionPlan = Object.freeze({
+            ...plan,
+            generationId: runtime.ids.next(),
+            contextTraceId: plan.contextTraceId === null ? null : runtime.ids.next(),
+          });
+          await persistPreparedContextTrace(runtime, activeExecutionPlan);
+          generated = await executeProviderAttempt(activeExecutionPlan, true);
+        }
+        let currentChapter: Chapter;
+        try {
+          currentChapter = await assertPreparedGenerationTargetCurrent(
+            runtime,
+            activeExecutionPlan,
+          );
+        } catch (cause: unknown) {
+          // A cancellation that wins after the provider returns is an explicit
+          // instruction to discard that late response, not to preserve it as
+          // an incomplete Candidate.
+          accumulated = "";
+          throw cause;
+        }
         attemptUsage = priceProviderReportedUsage(plan, generated.usage);
         accumulated = generated.text;
+        const completeVisibleText = combineContinuationFragments(
+          plan.partialCandidateContent ?? "",
+          generated.text,
+        );
         const built = await buildGeneratedCandidate(
           runtime,
-          chapter,
-          generated.text,
+          currentChapter,
+          completeVisibleText,
           false,
           plan.applicationCursorUtf16,
         );
@@ -3256,22 +3616,41 @@ export async function executeGenerationPlan(
         }
         candidate = built.value;
       }
-      await commitPreparedContextOutputCandidate(runtime, plan, candidate);
+      await commitPreparedContextOutputCandidate(runtime, activeExecutionPlan, candidate);
     } catch (cause: unknown) {
       const normalized = normalizeGovernedGenerationError(cause);
-      if (normalized.code === "MODEL_GENERATION_CANCELLED") {
-        let partialCandidate: AiCandidate | null = null;
-        if (accumulated.trim().length > 0) {
+      let recoveredTruncation = false;
+      if (normalized.code === "MODEL_OUTPUT_TRUNCATED") {
+        const visible = recoverVisiblePartialOutput(accumulated);
+        if (visible.preserved) {
           const built = await buildGeneratedCandidate(
             runtime,
             chapter,
-            accumulated,
+            combineContinuationFragments(plan.partialCandidateContent ?? "", visible.text),
+            true,
+            plan.applicationCursorUtf16,
+          );
+          if (built.ok) {
+            await commitPreparedContextOutputCandidate(runtime, activeExecutionPlan, built.value);
+            candidate = built.value;
+            recoveredTruncation = true;
+          }
+        }
+      }
+      if (normalized.code === "MODEL_GENERATION_CANCELLED") {
+        let partialCandidate: AiCandidate | null = null;
+        const visible = recoverVisiblePartialOutput(accumulated);
+        if (visible.preserved) {
+          const built = await buildGeneratedCandidate(
+            runtime,
+            chapter,
+            combineContinuationFragments(plan.partialCandidateContent ?? "", visible.text),
             true,
             plan.applicationCursorUtf16,
           );
           if (built.ok) {
             try {
-              await commitPreparedContextOutputCandidate(runtime, plan, built.value);
+              await commitPreparedContextOutputCandidate(runtime, activeExecutionPlan, built.value);
               partialCandidate = built.value;
             } catch {}
           }
@@ -3293,43 +3672,54 @@ export async function executeGenerationPlan(
           candidate: partialCandidate,
           qualityGate: null,
           cancelled: true,
+          incomplete: partialCandidate?.toSnapshot().incomplete ?? false,
           reused: false,
           taskId: plan.taskId,
           runId: run.id,
         });
       }
-      const retryable = normalized.retryable;
-      run = await runtime.generationGovernance.transitionRun({
-        runId: run.id,
-        expectedRevision: run.revision,
-        state: retryable ? "failed_retryable" : "failed_final",
-        failureCode: safeFailureCode(normalized.code),
-        addIncurredCost: true,
-        attemptUsage,
-      });
-      await runtime.taskCenter
-        .failTask(
-          plan.taskId,
-          plan.leaseToken,
-          {
-            code: safeFailureCode(normalized.code),
-            retryable,
-            actions: retryable
-              ? ["RETRY", "SWITCH_MODEL", "REDUCE_CONTEXT", "EXPORT_DIAGNOSTICS"]
-              : ["SWITCH_MODEL", "REDUCE_CONTEXT", "EXPORT_DIAGNOSTICS"],
-            requestId: plan.requestId,
-          },
-          retryable ? new Date(Date.parse(runtime.clock.now()) + 1_000).toISOString() : null,
-        )
-        .catch(() => undefined);
-      await publishGenerationNotification(
-        runtime,
-        plan,
-        "failed",
-        run.attempt,
-        safeFailureCode(normalized.code),
-      );
-      return err(normalized);
+      if (recoveredTruncation) {
+        // The provider stopped early, but all visible prose remains an isolated,
+        // incomplete Candidate. Validation and persistence continue below.
+      } else {
+        const retryable =
+          normalized.code === "MODEL_OUTPUT_TRUNCATED" ? true : normalized.retryable;
+        run = await runtime.generationGovernance.transitionRun({
+          runId: run.id,
+          expectedRevision: run.revision,
+          state: retryable ? "failed_retryable" : "failed_final",
+          failureCode: safeFailureCode(normalized.code),
+          addIncurredCost: true,
+          attemptUsage,
+        });
+        await runtime.taskCenter
+          .failTask(
+            plan.taskId,
+            plan.leaseToken,
+            {
+              code: safeFailureCode(normalized.code),
+              retryable,
+              actions: retryable
+                ? ["RETRY", "SWITCH_MODEL", "REDUCE_CONTEXT", "EXPORT_DIAGNOSTICS"]
+                : ["SWITCH_MODEL", "REDUCE_CONTEXT", "EXPORT_DIAGNOSTICS"],
+              requestId: plan.requestId,
+            },
+            retryable ? new Date(Date.parse(runtime.clock.now()) + 1_000).toISOString() : null,
+          )
+          .catch(() => undefined);
+        await publishGenerationNotification(
+          runtime,
+          plan,
+          "failed",
+          run.attempt,
+          safeFailureCode(normalized.code),
+        );
+        return err(
+          retryable && !normalized.retryable
+            ? new ModelCenterError(normalized.code, normalized.message, true)
+            : normalized,
+        );
+      }
     }
 
     run = await runtime.generationGovernance.transitionRun({
@@ -3390,6 +3780,7 @@ export async function executeGenerationPlan(
           candidate,
           qualityGate,
           cancelled: true,
+          incomplete: candidate.toSnapshot().incomplete,
           reused: false,
           taskId: plan.taskId,
           runId: run.id,
@@ -3403,17 +3794,25 @@ export async function executeGenerationPlan(
       state: "completed",
       candidateId: candidate.id,
     });
-    await publishGenerationNotification(runtime, plan, "completed", run.attempt);
+    await publishGenerationNotification(
+      runtime,
+      plan,
+      candidate.toSnapshot().incomplete ? "partial" : "completed",
+      run.attempt,
+    );
     return ok({
       candidate,
       qualityGate,
       cancelled: false,
+      incomplete: candidate.toSnapshot().incomplete,
       reused: false,
       taskId: plan.taskId,
       runId: run.id,
     });
   } catch (cause: unknown) {
     return err(normalizeGovernedGenerationError(cause));
+  } finally {
+    clearGenerationTaskCancellation(runtime, plan.taskId);
   }
 }
 
@@ -3421,16 +3820,57 @@ export async function cancelGenerationPlan(
   runtime: DesktopRuntime,
   plan: PreparedGenerationPlan,
 ): Promise<boolean> {
+  requestGenerationTaskCancellation(runtime, plan.taskId);
+  const generationId = activeGenerationId(runtime, plan.taskId) ?? plan.generationId;
   const [taskCancelled, gatewayCancelled] = await Promise.all([
     runtime.taskCenter
       .cancelTask(plan.taskId)
       .then(() => true)
       .catch(() => false),
     runtime.mode === "tauri"
-      ? runtime.modelGateway.cancelGeneration(plan.generationId).catch(() => false)
+      ? runtime.modelGateway.cancelGeneration(generationId).catch(() => false)
       : Promise.resolve(true),
   ]);
   return taskCancelled || gatewayCancelled;
+}
+
+function setActiveGenerationId(runtime: object, taskId: string, generationId: string): void {
+  const current = activeGenerationIdsByRuntime.get(runtime) ?? new Map<string, string>();
+  current.set(taskId, generationId);
+  activeGenerationIdsByRuntime.set(runtime, current);
+}
+
+function clearActiveGenerationId(runtime: object, taskId: string, generationId: string): void {
+  const current = activeGenerationIdsByRuntime.get(runtime);
+  if (current?.get(taskId) !== generationId) return;
+  current.delete(taskId);
+  if (current.size === 0) activeGenerationIdsByRuntime.delete(runtime);
+}
+
+function activeGenerationId(runtime: object, taskId: string): string | null {
+  return activeGenerationIdsByRuntime.get(runtime)?.get(taskId) ?? null;
+}
+
+function requestGenerationTaskCancellation(runtime: object, taskId: string): void {
+  const current = cancelledGenerationTasksByRuntime.get(runtime) ?? new Set<string>();
+  current.add(taskId);
+  cancelledGenerationTasksByRuntime.set(runtime, current);
+}
+
+function assertGenerationTaskNotCancelled(runtime: object, taskId: string): void {
+  if (!cancelledGenerationTasksByRuntime.get(runtime)?.has(taskId)) return;
+  throw new ModelHubExecutionError(
+    "MODEL_GENERATION_CANCELLED",
+    "Model generation was cancelled before provider dispatch.",
+    true,
+    false,
+  );
+}
+
+function clearGenerationTaskCancellation(runtime: object, taskId: string): void {
+  const current = cancelledGenerationTasksByRuntime.get(runtime);
+  current?.delete(taskId);
+  if (current?.size === 0) cancelledGenerationTasksByRuntime.delete(runtime);
 }
 
 async function persistPreparedContextTrace(
@@ -3488,6 +3928,33 @@ async function linkPreparedContextModelInvocation(
       true,
     );
   }
+}
+
+async function commitPreparedNovelSkillSnapshot(
+  runtime: DesktopRuntime,
+  plan: PreparedGenerationPlan,
+  modelInvocationId: string,
+): Promise<void> {
+  if (plan.contextTraceId === null || plan.projectId === null) {
+    if (plan.novelSkillPreparation.compiled !== null) {
+      throw new ModelCenterError(
+        "NOVEL_SKILL_RECEIPT_FAILED",
+        "无法建立本次写作方法与上下文的精确关联，因此没有发送正文。",
+        true,
+      );
+    }
+    return;
+  }
+  await runtime.novelSkills.commitBeforeDispatch({
+    snapshotId: runtime.ids.next(),
+    projectId: plan.projectId,
+    contextTraceId: plan.contextTraceId,
+    modelInvocationId,
+    taskType: "continuation",
+    invocationMode: "draft",
+    preparation: plan.novelSkillPreparation,
+    createdAt: runtime.clock.now(),
+  });
 }
 
 async function commitPreparedContextOutputCandidate(
@@ -3842,6 +4309,10 @@ async function generateLegacyContinuation(
   runtime: DesktopRuntime,
   plan: PreparedGenerationPlan,
   onDelta: (next: string) => void,
+  options: Readonly<{
+    generationId: string;
+    forceReasoningDisabled: boolean;
+  }>,
 ): Promise<NativeModelGenerationResult> {
   if (
     plan.profile?.selectedModel === null ||
@@ -3887,14 +4358,61 @@ async function generateLegacyContinuation(
   await assertGenerationProjectActive(runtime, plan.projectId);
   return runtime.modelGateway.generate({
     dispatchScope: projectContextDispatchScope(plan.contextCompilation.projectPrivacy),
-    generationId: plan.generationId,
+    generationId: options.generationId,
     config: current.resolution.config,
     model: current.profile.selectedModel ?? plan.profile.selectedModel,
     messages: plan.messages,
     maxOutputTokens: plan.maximumOutputTokens,
     temperature: 0.8,
+    ...(options.forceReasoningDisabled
+      ? { reasoningMode: "disabled" as const }
+      : legacyVisibleProseReasoningPolicy(current.resolution.config)),
     onDelta,
   });
+}
+
+function legacyVisibleProseReasoningPolicy(
+  config: NativeModelEndpointConfig,
+): Readonly<{ reasoningMode?: "disabled" }> {
+  const provider = modelProviderKindForOfficialEndpoint(config.baseUrl);
+  if (provider === null) return Object.freeze({});
+  const policy = modelProviderVisibleProsePolicy(provider);
+  return policy.reasoningMode === null
+    ? Object.freeze({})
+    : Object.freeze({ reasoningMode: policy.reasoningMode });
+}
+
+function shouldRetryReasoningOnlyTruncation(
+  plan: PreparedGenerationPlan,
+  failure: GovernedGenerationError,
+  accumulatedVisibleText: string,
+): boolean {
+  if (
+    !(failure instanceof ModelCenterError) ||
+    failure.code !== "MODEL_OUTPUT_TRUNCATED" ||
+    accumulatedVisibleText.length > 0 ||
+    failure.diagnostics?.reasoningPresent !== true ||
+    (failure.diagnostics.visibleContentLength !== null &&
+      failure.diagnostics.visibleContentLength !== 0)
+  ) {
+    return false;
+  }
+  if (plan.executionMode === "model_hub") {
+    const providerKind = plan.modelHubInspection?.providerKind;
+    if (providerKind === undefined) return false;
+    const preset = getModelProviderPreset(providerKind);
+    return (
+      preset.protocol === "openai_compatible" &&
+      modelProviderVisibleProsePolicy(providerKind).reasoningMode !== "disabled"
+    );
+  }
+  if (plan.executionMode === "legacy_profile") {
+    return (
+      plan.legacyGatewayConfig?.provider === "open_ai_compatible" &&
+      legacyVisibleProseReasoningPolicy(plan.legacyGatewayConfig).reasoningMode !== "disabled"
+    );
+  }
+  return false;
 }
 
 async function assertGenerationProjectActive(
@@ -3936,6 +4454,41 @@ async function assertGenerationProjectActive(
       actions: ["RESTORE"],
     });
   }
+}
+
+async function assertPreparedGenerationTargetCurrent(
+  runtime: Pick<DesktopRuntime, "repositories">,
+  plan: PreparedGenerationPlan,
+): Promise<Chapter> {
+  assertGenerationTaskNotCancelled(runtime, plan.taskId);
+  await assertGenerationProjectActive(runtime, plan.projectId);
+  const chapterResult = await runtime.repositories.chapters.findById(plan.chapterId);
+  if (!chapterResult.ok) {
+    throw chapterResult.error;
+  }
+  const chapter = chapterResult.value;
+  if (chapter?.projectId !== plan.projectId) {
+    throw new AppError({
+      code: "CHAPTER_NOT_FOUND",
+      message: "The chapter no longer exists in the prepared project.",
+    });
+  }
+  if (chapter.status !== "active") {
+    throw new AppError({
+      code: "CHAPTER_DELETED",
+      message: "Restore the chapter before creating a new AI Candidate.",
+      actions: ["RESTORE"],
+    });
+  }
+  if (chapter.currentVersionId !== plan.baseVersionId) {
+    throw new AppError({
+      code: "BASE_VERSION_CHANGED",
+      message: "The accepted chapter version changed while the model was generating.",
+      retryable: true,
+      actions: ["RETRY", "EXPORT_DRAFT"],
+    });
+  }
+  return chapter;
 }
 
 function isVerifiedLocalGatewayConfig(config: NativeModelEndpointConfig | null): boolean {
@@ -4061,6 +4614,7 @@ function buildContinuationMessages(chapter: Chapter): readonly NativeModelMessag
 interface ContextualContinuationMessages {
   readonly messages: readonly NativeModelMessage[];
   readonly contextCompilation: ChapterStoryContextCompilationReceipt;
+  readonly novelSkillPreparation: PreparedNovelSkillInvocation;
 }
 
 export interface ChapterStoryContextCompilationInput {
@@ -4161,11 +4715,24 @@ export async function compileChapterStoryContext(
 async function buildContextualContinuationMessages(
   runtime: DesktopRuntime,
   chapter: Chapter,
+  maximumContextTokens: number = CONSERVATIVE_GENERATION_CONTEXT_POLICY.maximumCompiledInputTokens,
+  partialCandidateContent: string | null = null,
+  outputContract = resolveContinuationOutputContract(),
+  applyNovelSkills = false,
 ): Promise<ContextualContinuationMessages> {
+  const reservedSkillTokens = applyNovelSkills
+    ? await runtime.novelSkills.getReservedTokens({
+        projectId: chapter.projectId,
+        taskType: "continuation",
+      })
+    : 0;
   const contextCompilation = await compileChapterStoryContext(runtime, chapter, {
     currentTask: {
       id: `continuation-task:${chapter.id}:${chapter.currentVersionId}`,
-      content: `续写《${chapter.title}》的下一场景，保持已保存正文、正式设定与锁定规则连续。`,
+      content:
+        partialCandidateContent === null
+          ? `续写《${chapter.title}》，${continuationDestinationTaskLabel(outputContract)}，保持已保存正文、正式设定与锁定规则连续。`
+          : `继续补全《${chapter.title}》中尚未完成的 AI 建议版本，不重复已有片段。`,
       selectionReason: "The author explicitly requested a continuation of the current chapter.",
       evidence: [
         {
@@ -4179,27 +4746,72 @@ async function buildContextualContinuationMessages(
       ],
       priority: 1_000,
     },
-    maximumContextTokens: CONSERVATIVE_GENERATION_CONTEXT_POLICY.maximumCompiledInputTokens,
+    maximumContextTokens: Math.max(1, maximumContextTokens - reservedSkillTokens),
+  });
+  const novelSkillPreparation = applyNovelSkills
+    ? await runtime.novelSkills.prepareInvocation({
+        projectId: chapter.projectId,
+        taskType: "continuation",
+        invocationMode: "draft",
+        maximumSkillTokens: Math.min(
+          reservedSkillTokens === 0 ? DEFAULT_NOVEL_SKILL_TOKEN_BUDGET : reservedSkillTokens,
+          Math.max(0, maximumContextTokens - contextCompilation.compiled.trace.usedTokens),
+        ),
+        availableContextLayers: Object.freeze([
+          ...new Set(
+            contextCompilation.compiled.entries
+              .filter(({ included }) => included)
+              .map(({ layer }) => layer),
+          ),
+        ]),
+      })
+    : runtime.novelSkills.describeNotApplied("legacy_route_untraceable");
+  const baseSystemMessage =
+    "你是长篇小说续写助手。只输出可直接追加到章节中的新正文，不输出思考过程、解释、标题、Markdown 代码围栏或元评论。保持既有人称、时态、语气和事实连续性；不得把推测或 AI 建议直接写成正式设定。";
+  const systemMessage =
+    novelSkillPreparation.promptSection === null
+      ? baseSystemMessage
+      : `${baseSystemMessage}\n\n以下是作者明确开启的实验性写作方法，只用于辅助完成本次任务。若方法与作者当前要求、已确认并锁定的故事规则、人物知识边界或已保存正文冲突，必须忽略冲突的方法规则并遵守更高优先级资料。不要向作者解释这些方法。\n${novelSkillPreparation.promptSection}`;
+  const messages: NativeModelMessage[] = [
+    {
+      role: "system",
+      content: systemMessage,
+    },
+    { role: "user", content: formatStoryContextPrompt(contextCompilation) },
+  ];
+  if (partialCandidateContent !== null && partialCandidateContent.trim().length > 0) {
+    messages.push({ role: "assistant", content: partialCandidateContent.trim() });
+  }
+  messages.push({
+    role: "user",
+    content:
+      partialCandidateContent === null
+        ? `请依据以上资料续写下一段情节，${continuationDestinationPrompt(outputContract)}目标约 ${String(outputContract.targetVisibleCharacters)} 字（可在 ${String(outputContract.minimumVisibleCharacters)}–${String(outputContract.maximumVisibleCharacters)} 字内自然收束）。若资料存在未确认或无法消解的冲突，优先遵守已确认并锁定的规则。只输出新增正文。`
+        : `从上次可见正文的结尾自然继续，完成当前场景；本次新补全部分目标约 ${String(outputContract.targetVisibleCharacters)} 字。不要复述、解释或重复已有片段，只输出新补全部分。`,
   });
   return Object.freeze({
     contextCompilation,
-    messages: Object.freeze([
-      Object.freeze({
-        role: "system" as const,
-        content:
-          "你是长篇小说续写助手。只输出可直接追加到章节末尾的新正文，不要解释、标题、Markdown 代码围栏或元评论。保持既有人称、时态、语气和事实连续性；不要把推测或 AI 建议直接写成正式设定。",
-      }),
-      Object.freeze({
-        role: "user" as const,
-        content: formatStoryContextPrompt(contextCompilation),
-      }),
-      Object.freeze({
-        role: "user" as const,
-        content:
-          "请依据以上资料续写下一段情节。若资料之间存在未确认或无法消解的冲突，优先遵守已确认并锁定的规则。只输出新增正文。",
-      }),
-    ]),
+    novelSkillPreparation,
+    messages: Object.freeze(messages.map((message) => Object.freeze(message))),
   });
+}
+
+function continuationDestinationTaskLabel(contract: ContinuationOutputContract): string {
+  if (contract.destination === "next_segment") return "只推进下一小段";
+  if (contract.destination === "custom_instruction") {
+    return `按作者要求推进到“${contract.customDestinationInstruction ?? "指定位置"}”`;
+  }
+  return "推进一个完整场景";
+}
+
+function continuationDestinationPrompt(contract: ContinuationOutputContract): string {
+  if (contract.destination === "next_segment") {
+    return "只写紧接当前正文的下一小段，不必强行完成整个场景；";
+  }
+  if (contract.destination === "custom_instruction") {
+    return `写到以下作者指定位置即自然收束：${contract.customDestinationInstruction ?? ""}；`;
+  }
+  return "推进并自然完成一个完整场景；";
 }
 
 async function buildVerifiedCurrentChapterVersionRegistry(
@@ -4545,7 +5157,23 @@ function normalizeGovernedGenerationError(cause: unknown): GovernedGenerationErr
     return normalizeProjectContextPrivacyFailure(cause);
   }
   if (cause instanceof ModelHubExecutionError) {
-    return new ModelCenterError(cause.code, cause.message, cause.retryable);
+    return new ModelCenterError(
+      cause.code,
+      cause.message,
+      cause.retryable,
+      cause.failure === null
+        ? null
+        : {
+            requestId: cause.failure.requestId ?? null,
+            httpStatus: cause.failure.httpStatus ?? null,
+            finishReason: cause.failure.finishReason ?? null,
+            visibleContentLength: cause.failure.visibleContentLength ?? null,
+            reasoningPresent: cause.failure.reasoningPresent ?? null,
+            stream: cause.failure.stream ?? null,
+            inputTokens: null,
+            outputTokens: null,
+          },
+    );
   }
   if (
     cause instanceof AppError ||
@@ -4569,7 +5197,7 @@ function safeFailureCode(value: string): string {
 async function publishGenerationNotification(
   runtime: DesktopRuntime,
   plan: PreparedGenerationPlan,
-  outcome: "completed" | "failed" | "cancelled",
+  outcome: "completed" | "partial" | "failed" | "cancelled",
   attempt: number,
   reasonCode: string | null = null,
 ): Promise<void> {
@@ -4586,7 +5214,7 @@ async function publishGenerationNotification(
         attempt,
         ...(reasonCode === null ? {} : { reasonCode }),
       },
-      requiresResolution: outcome === "failed",
+      requiresResolution: outcome === "failed" || outcome === "partial",
       expiresAt: null,
       now: runtime.clock.now(),
     });
@@ -4608,6 +5236,49 @@ export async function createConfiguredModelCandidate(
       ),
     );
   }
+  // Compatibility API: keep one production contract by delegating to the same
+  // governed plan used by the editor. The legacy implementation below remains
+  // unreachable only until downstream callers finish migrating their return type.
+  if (usesGovernedConfiguredCandidateCompatibility()) {
+    try {
+      const plan = await prepareGenerationPlan(runtime, chapterId, {
+        chapterSaved: true,
+        networkAvailable: typeof navigator === "undefined" ? true : navigator.onLine,
+        outputProfile: "standard",
+        contextBudgetProfile: "standard",
+      });
+      if (!plan.preflight.canStart) {
+        const blocker = plan.preflight.blockers[0];
+        return err(
+          new ModelCenterError(
+            blocker?.code ?? "AI_GENERATION_PREFLIGHT_BLOCKED",
+            "AI 续写预检未通过，请按提示检查模型连接、隐私范围、上下文或预算后重试。",
+            true,
+          ),
+        );
+      }
+      const executed = await executeGenerationPlan(runtime, plan, onDelta);
+      if (!executed.ok) {
+        return err(configuredCandidateCompatibilityError(executed.error));
+      }
+      if (executed.value.candidate === null) {
+        return err(
+          new ModelCenterError(
+            executed.value.cancelled ? "MODEL_GENERATION_CANCELLED" : "MODEL_OUTPUT_EMPTY",
+            executed.value.cancelled
+              ? "AI 续写已取消；正文和已有 AI 建议版本均未改变。"
+              : "AI 没有返回可保存的正文；正文和已有 AI 建议版本均未改变。",
+            true,
+          ),
+        );
+      }
+      return ok(executed.value.candidate);
+    } catch (cause: unknown) {
+      return err(configuredCandidateCompatibilityError(cause));
+    }
+  }
+
+  /* c8 ignore start -- unreachable runtime fallback retained for binary API transition */
   const chapterResult = await runtime.repositories.chapters.findById(chapterId);
   if (!chapterResult.ok) {
     return chapterResult;
@@ -4823,6 +5494,19 @@ export async function createConfiguredModelCandidate(
     );
   }
   return ok(ready.value);
+  /* c8 ignore stop */
+}
+
+function configuredCandidateCompatibilityError(cause: unknown): AppError | ModelCenterError {
+  const normalized = normalizeGovernedGenerationError(cause);
+  if (normalized instanceof AppError || normalized instanceof ModelCenterError) {
+    return normalized;
+  }
+  return new ModelCenterError(normalized.code, normalized.message, normalized.retryable);
+}
+
+function usesGovernedConfiguredCandidateCompatibility(): boolean {
+  return true;
 }
 
 export async function createLocalDemoCandidate(

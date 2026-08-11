@@ -16,6 +16,7 @@ import {
   type ModelHubTextTaskInspection,
 } from "./model-hub-execution-service";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
+import { getModelProviderPreset } from "./model-hub-provider-registry";
 import { projectContextDispatchScope } from "./project-context-privacy-authority";
 
 const MAXIMUM_RESPONSE_CHARACTERS = 32_000;
@@ -57,16 +58,22 @@ export class ModelHubChapterSummaryModel implements ChapterSummaryModelPort {
       messages: buildMessages(input),
       maximumOutputTokens: MAXIMUM_OUTPUT_TOKENS,
       temperature: 0.1,
+      capabilityPolicy: "text_generation_only",
       ...(input.requiresVerifiedLocal === true
         ? { requiredDataDestination: "local" as const }
         : {}),
     });
     let inspection: ModelHubTextTaskInspection;
+    let structuredOutputVerified = false;
     try {
       await input.assertProjectPrivacyCurrent();
       await input.assertSourceCurrent();
       inspection = await this.inspectText(this.dependencies, request);
-      await assertRequiredCapabilities(this.dependencies, inspection.catalogEntryId, false);
+      structuredOutputVerified = await assertRequiredCapabilities(
+        this.dependencies,
+        inspection.catalogEntryId,
+        false,
+      );
       await input.assertSourceCurrent();
     } catch (cause: unknown) {
       throw normalizePreDispatchUnavailable(cause);
@@ -74,12 +81,28 @@ export class ModelHubChapterSummaryModel implements ChapterSummaryModelPort {
 
     let executed: ModelHubTextTaskExecutionResult;
     try {
+      const useProviderJsonMode =
+        structuredOutputVerified &&
+        getModelProviderPreset(inspection.providerKind).protocol === "openai_compatible";
       executed = await this.executeText(this.dependencies, {
         ...request,
+        reasoningPolicy: "visible_prose",
+        ...(useProviderJsonMode ? { responseFormat: "json_object" as const } : {}),
         dispatchScope: projectContextDispatchScope(input.projectPrivacy),
         onBeforeDispatch: async (selection) => {
           assertSelectionMatches(inspection, selection);
-          await assertRequiredCapabilities(this.dependencies, selection.catalogEntryId, true);
+          const structuredOutputStillVerified = await assertRequiredCapabilities(
+            this.dependencies,
+            selection.catalogEntryId,
+            true,
+          );
+          if (useProviderJsonMode && !structuredOutputStillVerified) {
+            throw new ModelHubExecutionError(
+              "MODEL_HUB_CHAPTER_SUMMARY_CAPABILITY_CHANGED",
+              "结构化输出能力证据在发送前已失效，本次摘要未发送；正文和已保存版本不受影响。",
+              true,
+            );
+          }
           await input.assertSourceCurrent();
           await input.assertProjectPrivacyCurrent?.(selection.localOnlyEligible === true);
         },
@@ -105,6 +128,15 @@ export class ModelHubChapterSummaryModel implements ChapterSummaryModelPort {
     await input.assertProjectPrivacyCurrent();
     return Object.freeze({
       ...parsed,
+      authorityMode: structuredOutputVerified
+        ? ("structured_verified" as const)
+        : ("plain_non_authoritative" as const),
+      ...(structuredOutputVerified
+        ? {}
+        : {
+            keyEvents: Object.freeze([]),
+            continuityNotes: Object.freeze([]),
+          }),
       providerKind: executed.providerKind,
       modelId: executed.modelId,
       invocationId: executed.invocation.id,
@@ -190,25 +222,32 @@ async function assertRequiredCapabilities(
   dependencies: ModelHubTextExecutionDependencies,
   catalogEntryId: string,
   duringDispatch: boolean,
-): Promise<void> {
-  let supported = false;
+): Promise<boolean> {
+  let textGenerationSupported = false;
+  let structuredOutputSupported = false;
   try {
     const evidence = await dependencies.modelHub.listCapabilityEvidence(catalogEntryId);
-    supported = ["text_generation", "structured_output"].every(
-      (capability) =>
-        resolveModelCapabilityVerdict({
-          catalogEntryId,
-          capability: capability as "text_generation" | "structured_output",
-          evidence,
-          now: dependencies.clock.now(),
-        }) === "supported",
-    );
+    textGenerationSupported =
+      resolveModelCapabilityVerdict({
+        catalogEntryId,
+        capability: "text_generation",
+        evidence,
+        now: dependencies.clock.now(),
+      }) === "supported";
+    structuredOutputSupported =
+      resolveModelCapabilityVerdict({
+        catalogEntryId,
+        capability: "structured_output",
+        evidence,
+        now: dependencies.clock.now(),
+      }) === "supported";
   } catch {
-    supported = false;
+    textGenerationSupported = false;
+    structuredOutputSupported = false;
   }
-  if (!supported) {
+  if (!textGenerationSupported) {
     const message =
-      "当前 AI 分工缺少已验证的文本生成或结构化输出能力；请在模型中心验证能力或更换模型。";
+      "当前 AI 分工缺少已验证的文本生成能力；本次章节摘要已跳过，正文和已保存版本不受影响。";
     if (duringDispatch) {
       throw new ModelHubExecutionError(
         "MODEL_HUB_CHAPTER_SUMMARY_CAPABILITY_UNAVAILABLE",
@@ -221,6 +260,7 @@ async function assertRequiredCapabilities(
       message,
     );
   }
+  return structuredOutputSupported;
 }
 
 function parseEntries(

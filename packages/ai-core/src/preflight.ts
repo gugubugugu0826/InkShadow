@@ -98,6 +98,8 @@ export interface GenerationPreflightInput {
   readonly maximumInputBytes: number;
   readonly inputTokens: number;
   readonly maximumOutputTokens: number;
+  /** Task-aware input ceiling selected before prompt compilation. Legacy callers omit it. */
+  readonly maximumCompiledInputTokens?: number;
   readonly contextWindowTokens: number | null;
   readonly tokenizerStatus?: GenerationTokenizerStatus;
   readonly privacyStatus?: "allowed" | "blocked";
@@ -128,6 +130,29 @@ export interface GenerationPreflightSnapshot {
   readonly contextWindowTokens: number | null;
   readonly effectiveContextBudget: number;
   readonly tokenizerStatus: GenerationTokenizerStatus;
+  /** Safe task-aware budget facts. Optional for legacy/non-continuation callers. */
+  readonly generationBudget?: Readonly<{
+    outputProfile: string;
+    targetVisibleCharacters: number;
+    minimumVisibleCharacters: number;
+    maximumVisibleCharacters: number;
+    requestedMaximumOutputTokens: number;
+    providerOutputLimit: number | null;
+    contextProfile: string;
+    effectiveInputBudget: number;
+    budgetStatus: "available" | "model_window_exhausted";
+  }>;
+  /** Counts and bounded reason codes only; never prompt or source content. */
+  readonly contextSelectionSummary?: Readonly<{
+    availableSourceCount: number;
+    selectedSourceCount: number;
+    deduplicatedSourceCount: number;
+    excludedSourceCount: number;
+    estimatedSelectedTokens: number;
+    effectiveInputBudget: number;
+    excludedReasonCounts: readonly Readonly<{ reason: string; count: number }>[];
+    missingSourceTypes: readonly string[];
+  }>;
 }
 
 export class GenerationPreflightInputError extends Error {
@@ -295,7 +320,8 @@ export function runGenerationPreflight(
     input.contextWindowTokens ??
     CONSERVATIVE_GENERATION_CONTEXT_POLICY.effectiveContextWindowTokens;
   const effectiveContextBudget = Math.min(
-    CONSERVATIVE_GENERATION_CONTEXT_POLICY.maximumCompiledInputTokens,
+    input.maximumCompiledInputTokens ??
+      CONSERVATIVE_GENERATION_CONTEXT_POLICY.maximumCompiledInputTokens,
     Math.max(0, effectiveContextWindow - input.maximumOutputTokens),
   );
   return Object.freeze({
@@ -330,6 +356,16 @@ function validateInput(input: GenerationPreflightInput): void {
     throw new GenerationPreflightInputError("maximumInputBytes must be a positive safe integer.");
   }
   assertTokenCount(input.maximumOutputTokens, "maximumOutputTokens");
+  if (
+    input.maximumCompiledInputTokens !== undefined &&
+    (!Number.isSafeInteger(input.maximumCompiledInputTokens) ||
+      input.maximumCompiledInputTokens < 1 ||
+      input.maximumCompiledInputTokens > 10_000_000)
+  ) {
+    throw new GenerationPreflightInputError(
+      "maximumCompiledInputTokens must be a positive safe integer no greater than 10000000.",
+    );
+  }
   if (
     input.contextWindowTokens !== null &&
     (!Number.isSafeInteger(input.contextWindowTokens) || input.contextWindowTokens < 1)

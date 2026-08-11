@@ -1,28 +1,64 @@
 # InkShadow 当前执行状态
 
-> 更新日期：2026-08-10  
-> 当前源码与待发布版本：`0.2.1`  
-> 工程状态：当前工作树的完整 `release:check`、Rust 严格门禁和 production Chromium 响应式 E2E 已通过；干净唯一提交、Tauri WebView 候选链与公开发布仍待完成  
-> 发布结论：**`v0.2.1` 尚未生成干净安装包候选，也尚未发布；既有公开 `v0.2.0` Pre-release 只是不可覆盖的历史基线**  
+> 更新日期：2026-08-11  
+> 当前源码与待发布版本：`0.2.2`  
+> 工程状态：本轮完整 `release:check`、Rust 严格门禁和 production Chromium 响应式 E2E 已通过；`v0.2.2` 发布准备正在进行，真实 Tauri WebView 候选链仍须从唯一干净提交执行  
+> 发布结论：**`v0.2.2` 尚未提交、尚未生成安装包候选，也尚未发布；公开 `v0.2.0` 与 `v0.2.1` Pre-release 均为不可覆盖的历史发布**  
 > 外部边界：没有读取或使用真实 DeepSeek API Key；商业签名、供应商真实互操作和隔离 Windows 安装矩阵仍未完成
 
-## 2026-08-10 v0.2.1 当前工作树
+## 2026-08-11 v0.2.2 发布准备工作树
 
-| 项目                       | 当前事实                                                                                                                                                                                                      |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 开书引导                   | 已实现初始 5 个重点、最多 12 个唯一重点的有限动态计划；页面显示第 N/M 问、完成百分比、剩余重点和扩展原因。回答或跳过减少剩余项，作者可随时返回或结束；不是“三问上限”，也不会无限追问                          |
-| DOCX 导入聚焦回归          | `PASS`；`pnpm.cmd --filter @inkshadow/import-export test`，81/81 通过                                                                                                                                         |
-| Model Hub 设置页聚焦回归   | `PASS`；`pnpm.cmd --filter @inkshadow/desktop test src/pages/settings-page.test.tsx`，34/34 通过                                                                                                              |
-| Desktop TypeScript         | `PASS`；`pnpm.cmd --filter @inkshadow/desktop typecheck`，0 error                                                                                                                                             |
-| 设置页聚焦 ESLint          | `PASS`；设置页实现与测试文件的零警告 ESLint 检查通过                                                                                                                                                          |
-| 全仓门禁与生产构建         | `PASS`；`pnpm.cmd release:check` 退出码 0、520.9 秒；20/21 workspace scopes，2,688 passed / 65 skipped / 0 failed；Desktop 2,204 modules，49 files / 6,065,923 bytes，低于 6,422,528 bytes 预算 356,605 bytes |
-| Rust 原生层                | `PASS`；`pnpm.cmd check:rust` 退出码 0、116.7 秒；format、严格 Clippy 通过，152 passed / 1 ignored / 0 failed                                                                                                 |
-| 响应式 production E2E      | `PASS`；指定正式 `dist` 的四组 Chromium 规格 11/11，通过 1440、1280、1024、800 与 200% zoom 主路径；测试 23.1 秒、工具总计 29.4 秒；不外推为 Tauri WebView 验收                                               |
-| 真实 DeepSeek 凭据端到端   | `NOT_RUN`；当前只有本地与模拟协议证据，不能标记真实供应商 `VERIFIED`                                                                                                                                          |
-| 干净候选、提交、哈希与发布 | `NOT_RUN`；来源提交、源码指纹、安装包大小与 SHA-256 均须在干净唯一提交生成候选后填写，当前不得使用占位值冒充证据                                                                                              |
+| 项目                      | 当前事实                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 开书引导                  | 已实现初始 5 个重点、最多 12 个唯一重点的有限动态计划；页面显示第 N/M 问、完成百分比、剩余重点和扩展原因。回答或跳过减少剩余项，作者可随时返回或结束；不是“三问上限”，也不会无限追问                                                                                                                                                                                                                                                                                                                                                                                              |
+| DOCX 导入聚焦回归         | `PASS`；`pnpm.cmd --filter @inkshadow/import-export test`，81/81 通过                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Model Hub 首次进入 P0     | `PASS`；权威 hydration、路由恢复、系统凭据分段、旧请求隔离、缓存保留和 schema v3 安全诊断已接线；证据见 [`2026-08-10-MODEL-HUB-FIRST-ENTRY-HYDRATION-P0.md`](2026-08-10-MODEL-HUB-FIRST-ENTRY-HYDRATION-P0.md)                                                                                                                                                                                                                                                                                                                                                                    |
+| Model Hub 设置页聚焦回归  | `PASS`；设置页完整文件 40/40 通过；高负载四文件组合 76/76 通过                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Model Hub 当前能力        | 权威 hydration 与 schema v3 已接线；仅官方 DeepSeek 端点/精确模型 ID 可使用带有效期且 `verifiedByInkShadow=false` 的官方资料 fallback，目录证据优先。Provider 推荐只提示已连接目录项或官方发现方向，不制造能力证据；`text-embedding-v4` 只是时效性发现建议，翻译必须通过固定 `inkshadow.translation-probe.zh-en.v2` 无作品探针后才保存能力与路由                                                                                                                                                                                                                                  |
+| 续写、上下文与摘要        | 动态短/标准/长/自定义输出预算、保守 CJK token 估算、模型上下文余量、截断/取消的不完整隔离 Candidate、继续补全/保留比较/重生成/换模型、可读上下文采用/舍弃收据已接线。摘要精确绑定当前不可变版本与哈希；纯文本降级保存为可重建、低置信度的系统 `chapter_summary` StoryFact，但不会生成结构化 key events、continuity notes，也不会晋升为正式故事事实                                                                                                                                                                                                                                |
+| Novel Skill 实验链        | Data `0060` / Tauri `63` 的 7 Core + 5 Genre、桌面 runtime、项目“写作方法（实验）”、第一次开书/续写精确 Skill snapshot 和“本次参考”回执已接线；全部 `EXPERIMENTAL`、`defaultEnabled=false`，只有作者显式启用才进入调用                                                                                                                                                                                                                                                                                                                                                            |
+| Novel Skill 评测账本      | Data `0061` / Tauri `64` 的 content-free ledger 固定 `12 × 4 × 2 × 2 = 192` cells 和 13 项人工评分（完整 run 为 2,496 个评分槽），并绑定 reviewer/rubric/time、互异模型制品、完整 Candidate/trace/invocation/snapshot/evidence digest、派发前 attempt 回执、专用空白归档项目及恢复时语义审计。Data `0063` / Tauri `66` 增加精确目标、固定协议、商业授权、逐币种费用硬上限、reservation 与盲评 receipt；Data `0064` / Tauri `67` 再冻结内容无关的 payload 子哈希、能力/目标/价格 revision、精确派发前成本与最终派发权威。三层基础设施均获独立审查 `APPROVE`，但不构成真实 A/B 结论 |
+| 付费评测专家链            | 专家折叠区、Runner、精确目标单次执行、专用归档空白项目、盲评与跨重启恢复均已接线。普通 Browser/Tauri 启动只加载轻量 lazy coordinator；作者首次展开专家评测区时才动态加载付费 factory 并做纯本地恢复。挂载、准备、报价、授权、恢复和盲评都不会调用模型；只有作者另行点击“手动开始 192 次付费调用”才能进入唯一 provider 路径。运行中可取消；无 fallback、无自动 retry；越过发送边界后发生歧义会失效整次 run。Browser 与可选功能初始化失败均 fail closed，不阻断普通手动写作                                                                                                         |
+| 项目派发与 Candidate 围栏 | Data `0062` / Tauri `65` 只补上持有既有项目派发 lease 时项目不得离开 active；同一变更集的 Rust/TS 代码把 `0045` 已有 lease 覆盖到回环本地派发，并在 Candidate/context output 同一 SQLite 事务内重验项目、章节、当前版本与基线；迟到完成结果、项目或版本失效及归档竞态不能提交 Candidate。用户取消时，只允许把取消前已经可见的文本保存为 `incomplete` 隔离 Candidate，绝不写入正文                                                                                                                                                                                                 |
+| Desktop 集成聚焦回归      | `PASS`；当前 Desktop 全量为 238 files，1,759 passed / 1 skipped / 0 failed；0063/0064 infrastructure config 为 10 files / 96 tests。非付费融合链、付费专家接线、盲评与归档隔离的较早分组证据继续保留于测试记录                                                                                                                                                                                                                                                                                                                                                                    |
+| Desktop TypeScript        | `PASS`；`pnpm.cmd --filter @inkshadow/desktop typecheck`，exit code 0                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Provider 定向回归         | `PASS`；2 files / 10 tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Candidate 竞态定向回归    | `PASS`；2 files / 27 tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 开书定向回归              | `PASS`；2 files / 57 tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 维护与恢复                | `PASS`；当前付费迁移 + maintenance 为 2 files / 65 tests，其中恢复攻击组 49/49；166 张表进入恢复合同。恢复会重放固定题集/矩阵、run/cell/attempt/observation、Candidate/trace/link/invocation、Skill/派发权威 snapshot、13 分、盲评 receipt 与最终 evaluator/hash；任一 canonical hash、精确成本、能力或结算收据篡改都会整事务拒绝，内容无关的原生项目派发 lease 不恢复                                                                                                                                                                                                            |
+| 设置页聚焦 ESLint         | `PASS`；设置页实现与测试文件的零警告 ESLint 检查通过                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 本轮新增后的全量 release  | `PASS`；`pnpm.cmd release:check` 退出码 0，用时 1,459.6 秒；生产构建、格式、秘密扫描、137 项运行时许可证、20 包边界、17 项发布配置、全部工作区类型检查、ESLint 与 20 个工作区测试范围通过。测试合计 3,035 passed / 65 skipped / 0 failed                                                                                                                                                                                                                                                                                                                                          |
+| 当前生产构建体积          | `PASS`；2,240 modules；Vite payload `6,651,786 / 6,717,440` bytes，余量 65,654；普通 runtime `495,618 / 512,000`，付费异步 factory `287,543 / 512,000`。总预算比历史上限增加 288 KiB，单 chunk 上限不变，异步包仍计入总量                                                                                                                                                                                                                                                                                                                                                         |
+| Rust 原生严格门禁         | `PASS`；`pnpm.cmd check:rust` 完成 format、全 target `clippy -D warnings` 和完整测试；160 passed / 1 ignored / 0 failed                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| production Chromium E2E   | `PASS`；`pnpm.cmd test:e2e` 构建 production `dist` 后 11/11 通过，覆盖 1440/1280/1024/800、200% zoom、DPR2、本地生命周期、恢复/Candidate、导入导出与同步关闭；不等于 Tauri WebView                                                                                                                                                                                                                                                                                                                                                                                                |
+| 真实 Tauri 冷启动         | `NOT_RUN`；Rust 已验证迁移 62→63→64→65→66→67 与重启，但尚未在真实 WebView 冷启动后复核 hydration、续写恢复、Skill binding/snapshot、专家评测恢复与项目 lease                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| 192 次付费 Skill A/B      | `LOCAL INFRA READY / NOT_RUN`；`observationCount=0`、`manualScoreCount=0`。固定协议、两个精确目录目标、Provider 可见输出哈希、商业授权、逐币种费用硬上限、跨重启歧义账本、内容无关派发前权威和本地盲评均已实现；本轮没有读取 Key、没有商业授权、没有发送真实请求，也没有把 fake 结果写成证据。真实执行只能由作者在专家区确认报价和授权后另行手动开始                                                                                                                                                                                                                              |
+| Novel Skill 默认启用      | `NOT_RUN / KEEP_DISABLED`；没有默认开启任何 Core/Genre，也没有“提升写作质量”的真实证据                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| 真实 DeepSeek 凭据端到端  | `NOT_RUN`；当前只有本地与模拟协议证据，不能标记真实供应商 `VERIFIED`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| v0.2.2 唯一发布提交       | `IN_PROGRESS`；版本与发布文档正在收口，尚未创建提交。Commit SHA 与源码指纹只能在明确暂存、复核并生成唯一提交后记录，当前不使用占位值冒充证据                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| v0.2.2 干净候选与哈希     | `NOT_RUN`；此前 `test:e2e:release` 在任何候选构建或 E2E 前正确拒绝脏工作树，只证明 clean-worktree gate 有效，不是 v0.2.2 候选证据。安装包大小、SHA-256 与 Tauri WebView 结果须从唯一干净提交重新执行后填写                                                                                                                                                                                                                                                                                                                                                                        |
+| GitHub v0.2.2 Pre-release | `NOT_RUN`；尚未创建或发布 `v0.2.2` 标签与 Release。必须等待唯一提交、干净候选、制品复核和 GitHub Actions 通过，且不得移动或覆盖既有 `v0.2.0`、`v0.2.1` 标签                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
-精确命令、最终数字和前一次失败记录见 [`TEST_RESULTS.md`](TEST_RESULTS.md)。上述 `PASS` 绑定
-当前工作树，不继承下方历史运行；干净候选仍必须从唯一提交重新执行完整候选链并记录来源与哈希。
+精确命令、最终数字和前一次失败记录见 [`TEST_RESULTS.md`](TEST_RESULTS.md)。上表聚焦 `PASS`
+绑定各自命令执行时的当前快照；`0060`–`0064` 的本地基础设施已独立复跑，仍不等于真实评测。完整
+工程门禁、Rust 与 production Chromium 已通过；真实 Tauri/DeepSeek、付费评测和默认启用保持 `NOT_RUN`。
+`v0.2.2` 唯一提交、干净候选与 GitHub Pre-release 仍必须按顺序执行并记录来源与哈希。
+
+### Novel Skill 真实评测边界
+
+独立审查批准的是 `0060`–`0064` 的本地基础设施与零自动调用接线，不是写作质量结论。当前已经完成：
+
+1. 冻结 base prompt、最终 messages、上下文基线、temperature、输出上限、reasoning、response format 与 request profile，使四个 arm 的唯一变量可证明；
+2. 把两个模型槽绑定到真实已启用 connection 与非空 catalog entry，并核对 provider/model/endpoint/config/catalog revision；
+3. 在 Provider 完成边界产生 `visibleOutputHash`，由 chapter-null 评测 Candidate 原子提交核对，不能以同长度其他文本替代；
+4. 持久化 192 次调用的显式商业授权、逐币种费用硬上限、reservation 与 `dispatched/ambiguous/settled` 状态，未知价格或崩溃后无法证明未发送时 fail closed；
+5. live complete/decision 阶段拒绝专用项目中不属于当前 suite/run 的额外 Candidate、trace 与 link；
+6. 固定 rubric 内容哈希、盲评/随机顺序 receipt 与本地 reviewer 记录。
+
+仍未执行的是：由作者明确选择并授权两个当前真实可用模型，完成 192 次无 fallback/无自动 retry 的
+provider 调用，再由作者对 192 个匿名输出分别填写 13 项分数（共 2,496 项）。在这组外部证据完成、
+阻断指标通过并由作者作出不可变批准前，所有 Core/Genre Skill 继续 `EXPERIMENTAL`、
+`defaultEnabled=false`；本地 fake/SQLite 绿测不能替代真实结果。
 
 ## 2026-08-09 DeepSeek P0 历史验证快照
 
@@ -40,6 +76,15 @@
 
 精确命令与分包结果见 [`TEST_RESULTS.md`](TEST_RESULTS.md) 和
 [`2026-08-09-DEEPSEEK-TEXT-PROBE-P0.md`](2026-08-09-DEEPSEEK-TEXT-PROBE-P0.md)。
+
+## 已发布 v0.2.1 历史 Pre-release（不可覆盖）
+
+| 项目         | 历史事实                                                                                                                                 |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| GitHub       | `PASS`；公开未签名 Pre-release：<https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.1>；Release ID `367562352`                |
+| 标签与提交   | `PASS`；既有 tag object `3f13c7d` 指向提交 `fa2b567`（`main`）；不得移动、覆盖或复用 `v0.2.1` 标签                                       |
+| 历史附件     | `PASS`；该 Release 已包含当时的安装包、发布清单和 SHA 校验附件；它们只绑定历史提交，不得作为当前 v0.2.2 候选或测试证据                   |
+| 当前继承边界 | `N/A`；v0.2.1 的发布状态、候选与附件不能证明 v0.2.2 工作树、Novel Skill、真实供应商互操作、Tauri WebView 或另一台电脑的安装 smoke 已通过 |
 
 ## 2026-08-09 已发布 v0.2.0 历史基线（不含本轮 P0）
 
@@ -219,11 +264,11 @@ E2E 证据继续只证明当时的历史快照。
 
 - Windows Tauri 2 + React 19 桌面壳、本地无账号启动、项目/章节/大纲、自动保存、
   RecoveryDraft、追加式版本、回收站、备份恢复、任务通知、设置和脱敏诊断已形成真实纵切。
-- 本地原生迁移推进至 v48；135 张可恢复权威表覆盖同步、团队、审阅、用量、模板、
+- 本地原生迁移推进至 v67；166 张可恢复作者数据表覆盖同步、团队、审阅、用量、模板、
   权威提取、多 Agent、翻译/短剧、微调治理、Marketplace 安装、ProjectSeed、私密章节、
-  StoryFact、因果关系、上下文历史、反馈学习、检查快照与规划选择性采纳元数据。关键词、FTS、GraphRAG
-  与向量投影仍按可重建派生数据处理，不冒充恢复权威。另有 1 张不含用户内容的临时远程派发租约表，
-  因而应用相关持久表总计 136 张；一致性备份可能物理包含该表，但恢复事务明确不复制它。
+  StoryFact、因果关系、上下文历史、反馈学习、检查快照、规划选择性采纳、Novel Skill registry/
+  snapshot 与评测账本。关键词、FTS、GraphRAG 与向量投影仍按可重建派生数据处理，不冒充恢复
+  权威。另有 1 张不含用户内容的原生项目派发租约表，恢复事务明确不复制它。
 - 已恢复发布过的本地迁移 v4 原始字节，历史用户数据库的 v1–v11 SHA-384 全部重新匹配；
   `project_manifest` 仍由后续 v16 迁移引入。固定校验值回归阻止再次改写已发布迁移。
 - AI Candidate、逐项 Diff、三方冲突、预检、预算、取消/重试、幂等、离线任务、供应商

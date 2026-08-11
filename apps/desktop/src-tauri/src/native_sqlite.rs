@@ -102,6 +102,7 @@ pub(crate) enum NativeModelDispatchScope {
 pub(crate) enum NativeNonProjectDispatchReason {
     CreativeOpening,
     ConnectionProbe,
+    NovelSkillEvaluation,
 }
 
 #[derive(Clone, Debug)]
@@ -151,6 +152,7 @@ impl NativeSqliteState {
     pub(crate) async fn acquire_project_remote_dispatch_lease(
         &self,
         receipt: &NativeProjectContextPrivacyReceipt,
+        endpoint_is_loopback: bool,
         operation_kind: &str,
         operation_id: &str,
     ) -> Result<ProjectRemoteDispatchLease, ProjectRemoteDispatchLeaseError> {
@@ -181,6 +183,7 @@ impl NativeSqliteState {
         let result = acquire_project_remote_dispatch_lease_in_transaction(
             connection,
             receipt,
+            endpoint_is_loopback,
             operation_kind,
             operation_id,
             &self.runtime_id,
@@ -301,16 +304,19 @@ impl NativeSqliteState {
 async fn acquire_project_remote_dispatch_lease_in_transaction(
     connection: &mut SqliteConnection,
     receipt: &NativeProjectContextPrivacyReceipt,
+    endpoint_is_loopback: bool,
     operation_kind: &str,
     operation_id: &str,
     runtime_id: &str,
 ) -> Result<ProjectRemoteDispatchLease, ProjectRemoteDispatchLeaseError> {
-    let project_exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE id = ?")
-        .bind(&receipt.project_id)
-        .fetch_one(&mut *connection)
-        .await
-        .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
-    if project_exists != 1 {
+    let active_project_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM projects WHERE id = ? AND status = 'active'",
+    )
+    .bind(&receipt.project_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseUnavailable)?;
+    if active_project_count != 1 {
         return Err(ProjectRemoteDispatchLeaseError::AuthorityChanged);
     }
     let rows = sqlx::query(
@@ -364,7 +370,7 @@ async fn acquire_project_remote_dispatch_lease_in_transaction(
     {
         return Err(ProjectRemoteDispatchLeaseError::AuthorityChanged);
     }
-    if requires_verified_local {
+    if requires_verified_local && !endpoint_is_loopback {
         return Err(ProjectRemoteDispatchLeaseError::PrivateChapterLocalOnly);
     }
 
@@ -2726,7 +2732,7 @@ mod tests {
         );
 
         let lease = state
-            .acquire_project_remote_dispatch_lease(&receipt, "generation", "generation-1")
+            .acquire_project_remote_dispatch_lease(&receipt, false, "generation", "generation-1")
             .await
             .expect("exact authority acquires a lease");
         let mut bridge = state.inner.lock().await;
@@ -2746,6 +2752,28 @@ mod tests {
             NativeSqliteError::from_sqlx(error).code,
             "PROJECT_REMOTE_DISPATCH_ACTIVE"
         );
+        let archive_error = sqlx::query(
+            "UPDATE projects
+             SET status = 'archived', archived_at = '2026-08-08T00:01:00.000Z'
+             WHERE id = ?",
+        )
+        .bind(PROJECT_ID)
+        .execute(bridge.connection_mut().expect("connection"))
+        .await
+        .expect_err("project archive must wait for the complete native dispatch future");
+        assert_eq!(
+            NativeSqliteError::from_sqlx(archive_error).code,
+            "PROJECT_REMOTE_DISPATCH_ACTIVE"
+        );
+        let delete_error = sqlx::query("DELETE FROM projects WHERE id = ?")
+            .bind(PROJECT_ID)
+            .execute(bridge.connection_mut().expect("connection"))
+            .await
+            .expect_err("project deletion must wait for the complete native dispatch future");
+        assert_eq!(
+            NativeSqliteError::from_sqlx(delete_error).code,
+            "PROJECT_REMOTE_DISPATCH_ACTIVE"
+        );
         let maintenance_error = bridge
             .ensure_no_project_remote_dispatch_leases()
             .await
@@ -2757,6 +2785,16 @@ mod tests {
             .release_project_remote_dispatch_lease(&lease)
             .await
             .expect("release exact lease");
+        let mut bridge = state.inner.lock().await;
+        sqlx::query(
+            "UPDATE projects
+             SET status = 'archived', archived_at = '2026-08-08T00:01:00.000Z'
+             WHERE id = ?",
+        )
+        .bind(PROJECT_ID)
+        .execute(bridge.connection_mut().expect("connection"))
+        .await
+        .expect("archive succeeds after the native dispatch lease is released");
     }
 
     #[tokio::test]
@@ -2806,7 +2844,7 @@ mod tests {
             .expect("privacy write wins before lease");
         assert_eq!(
             state
-                .acquire_project_remote_dispatch_lease(&receipt, "generation", "w-before-l")
+                .acquire_project_remote_dispatch_lease(&receipt, false, "generation", "w-before-l",)
                 .await
                 .expect_err("stale standard authority must not acquire"),
             ProjectRemoteDispatchLeaseError::AuthorityChanged
@@ -2820,7 +2858,7 @@ mod tests {
         // L before W: BEGIN IMMEDIATE commits the durable barrier before the
         // network future starts, so the independent writer hits the trigger.
         let lease = state
-            .acquire_project_remote_dispatch_lease(&receipt, "generation", "l-before-w")
+            .acquire_project_remote_dispatch_lease(&receipt, false, "generation", "l-before-w")
             .await
             .expect("lease wins before privacy write");
         let blocked = sqlx::query("UPDATE chapters SET privacy_mode = 'local_only' WHERE id = ?")
@@ -2857,7 +2895,7 @@ mod tests {
 
         let empty = dispatch_receipt(EMPTY_PROJECT_ID, vec![]);
         let lease = state
-            .acquire_project_remote_dispatch_lease(&empty, "embedding", "embedding-1")
+            .acquire_project_remote_dispatch_lease(&empty, false, "embedding", "embedding-1")
             .await
             .expect("an existing empty project is a legal project context");
         state
@@ -2868,7 +2906,7 @@ mod tests {
         let missing = dispatch_receipt(MISSING_PROJECT_ID, vec![]);
         assert_eq!(
             state
-                .acquire_project_remote_dispatch_lease(&missing, "rerank", "rerank-1")
+                .acquire_project_remote_dispatch_lease(&missing, false, "rerank", "rerank-1")
                 .await
                 .expect_err("a nonexistent project must fail closed"),
             ProjectRemoteDispatchLeaseError::AuthorityChanged
@@ -2877,9 +2915,98 @@ mod tests {
         changed.fingerprint = "0".repeat(64);
         assert_eq!(
             state
-                .acquire_project_remote_dispatch_lease(&changed, "generation", "generation-2")
+                .acquire_project_remote_dispatch_lease(
+                    &changed,
+                    false,
+                    "generation",
+                    "generation-2",
+                )
                 .await
                 .expect_err("a forged fingerprint must fail closed"),
+            ProjectRemoteDispatchLeaseError::AuthorityChanged
+        );
+    }
+
+    #[tokio::test]
+    async fn project_dispatch_requires_an_active_project_and_allows_private_context_only_locally() {
+        const ACTIVE_PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000041";
+        const ACTIVE_CHAPTER_ID: &str = "019f9f4a-b3c7-7350-9226-000000000042";
+        const ACTIVE_VERSION_ID: &str = "019f9f4a-b3c7-7350-9226-000000000043";
+        const ARCHIVED_PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000044";
+        let directory = TestDirectory::create();
+        let (state, _) = open_migrated_state(&directory).await;
+        seed_dispatch_project(
+            &state,
+            ACTIVE_PROJECT_ID,
+            Some(ACTIVE_CHAPTER_ID),
+            Some(ACTIVE_VERSION_ID),
+            "local_only",
+        )
+        .await;
+        seed_dispatch_project(&state, ARCHIVED_PROJECT_ID, None, None, "standard").await;
+        {
+            let mut bridge = state.inner.lock().await;
+            sqlx::query(
+                "UPDATE projects
+                 SET status = 'archived', archived_at = '2026-08-08T00:01:00.000Z'
+                 WHERE id = ?",
+            )
+            .bind(ARCHIVED_PROJECT_ID)
+            .execute(bridge.connection_mut().expect("connection"))
+            .await
+            .expect("archive fixture project before dispatch");
+        }
+
+        let private_receipt = dispatch_receipt(
+            ACTIVE_PROJECT_ID,
+            vec![NativeProjectContextChapterAuthority {
+                chapter_id: ACTIVE_CHAPTER_ID.to_owned(),
+                current_version_id: ACTIVE_VERSION_ID.to_owned(),
+                revision: 1,
+                privacy_revision: 1,
+                privacy_mode: "local_only".to_owned(),
+                status: "active".to_owned(),
+            }],
+        );
+        assert_eq!(
+            state
+                .acquire_project_remote_dispatch_lease(
+                    &private_receipt,
+                    false,
+                    "generation",
+                    "remote-private",
+                )
+                .await
+                .expect_err("remote dispatch must reject private chapter context"),
+            ProjectRemoteDispatchLeaseError::PrivateChapterLocalOnly
+        );
+        let local_lease = state
+            .acquire_project_remote_dispatch_lease(
+                &private_receipt,
+                true,
+                "generation",
+                "local-private",
+            )
+            .await
+            .expect(
+                "verified loopback dispatch retains a lifecycle lease and may use private text",
+            );
+        state
+            .release_project_remote_dispatch_lease(&local_lease)
+            .await
+            .expect("release local project-context lease");
+
+        let archived_receipt = dispatch_receipt(ARCHIVED_PROJECT_ID, vec![]);
+        assert_eq!(
+            state
+                .acquire_project_remote_dispatch_lease(
+                    &archived_receipt,
+                    true,
+                    "embedding",
+                    "archived-local",
+                )
+                .await
+                .expect_err("an archived project cannot dispatch even to loopback"),
             ProjectRemoteDispatchLeaseError::AuthorityChanged
         );
     }
@@ -2892,11 +3019,11 @@ mod tests {
         seed_dispatch_project(&state, PROJECT_ID, None, None, "standard").await;
         let receipt = dispatch_receipt(PROJECT_ID, vec![]);
         state
-            .acquire_project_remote_dispatch_lease(&receipt, "generation", "generation-live")
+            .acquire_project_remote_dispatch_lease(&receipt, false, "generation", "generation-live")
             .await
             .expect("acquire live lease");
         state
-            .acquire_project_remote_dispatch_lease(&receipt, "embedding", "embedding-ended")
+            .acquire_project_remote_dispatch_lease(&receipt, false, "embedding", "embedding-ended")
             .await
             .expect("acquire ended lease");
 

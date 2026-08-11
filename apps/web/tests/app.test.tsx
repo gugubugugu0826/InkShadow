@@ -73,8 +73,7 @@ describe("Web Guest UI", () => {
     expect(await screen.findByRole("heading", { name: "潮汐信使" })).toBeVisible();
     const editor = screen.getByRole("textbox", { name: /^章节正文/u });
     expect(editor).toHaveValue(UI_BODY_CANARY);
-    await user.clear(editor);
-    await user.type(editor, UI_UPDATED_CANARY);
+    fireEvent.change(editor, { target: { value: UI_UPDATED_CANARY } });
     await user.click(screen.getByRole("button", { name: "保存密文版本" }));
     await waitFor(() => {
       expect(screen.getByText("已保存到本地")).toBeVisible();
@@ -85,13 +84,14 @@ describe("Web Guest UI", () => {
     expect(screen.getByRole("button", { name: "仅本次会话解锁" })).toBeVisible();
 
     const recoveryInput = screen.getByLabelText("恢复材料", { exact: true });
-    await user.type(recoveryInput, changeLastCharacter(recoveryMaterial));
+    fireEvent.change(recoveryInput, {
+      target: { value: changeLastCharacter(recoveryMaterial) },
+    });
     await user.click(screen.getByRole("button", { name: "仅本次会话解锁" }));
     expect(await screen.findByText(/WEB_UNLOCK_FAILED/u)).toBeVisible();
     expect(screen.queryByDisplayValue(UI_UPDATED_CANARY)).not.toBeInTheDocument();
 
-    await user.clear(recoveryInput);
-    await user.type(recoveryInput, recoveryMaterial);
+    fireEvent.change(recoveryInput, { target: { value: recoveryMaterial } });
     await user.click(screen.getByRole("button", { name: "仅本次会话解锁" }));
     expect(await screen.findByDisplayValue(UI_UPDATED_CANARY)).toBeVisible();
   });

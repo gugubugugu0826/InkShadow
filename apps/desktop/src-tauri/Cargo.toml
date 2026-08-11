@@ -1,6 +1,6 @@
 [package]
 name = "inkshadow-desktop"
-version = "0.2.1"
+version = "0.2.2"
 description = "InkShadow desktop application"
 authors = ["InkShadow"]
 edition = "2021"

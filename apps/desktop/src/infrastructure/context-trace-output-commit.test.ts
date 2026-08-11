@@ -34,6 +34,10 @@ const SECOND_PROJECT_ID = uuid(2);
 const TRACE_ID = uuid(3);
 const GENERATION_ID = uuid(4);
 const CANDIDATE_ID = uuid(5);
+const CHAPTER_ID = uuid(6);
+const VERSION_ID = uuid(7);
+const SECOND_CHAPTER_ID = uuid(8);
+const SECOND_VERSION_ID = uuid(9);
 
 const executors: NodeSqliteExecutor[] = [];
 
@@ -140,6 +144,52 @@ describe("atomic context trace output commit", () => {
       0,
     );
   });
+
+  it.each([
+    {
+      name: "project archive",
+      mutate: (executor: SqlExecutor) =>
+        executor.execute(
+          `UPDATE projects
+           SET status = 'archived', archived_at = ?
+           WHERE id = ?`,
+          [NOW, PROJECT_ID],
+        ),
+    },
+    {
+      name: "accepted chapter version change",
+      mutate: async (executor: SqlExecutor) => {
+        const nextVersionId = uuid(10);
+        await executor.execute(
+          `INSERT INTO chapter_versions (
+             id, project_id, chapter_id, parent_version_id, sequence, content,
+             content_checksum, reason, source_candidate_id, created_at
+           ) VALUES (?, ?, ?, ?, 2, 'new accepted text', ?, 'manual', NULL, ?)`,
+          [nextVersionId, PROJECT_ID, CHAPTER_ID, VERSION_ID, "f".repeat(64), NOW],
+        );
+        return executor.execute(
+          `UPDATE chapters
+           SET current_version_id = ?, revision = revision + 1, content = 'new accepted text',
+               updated_at = ?
+           WHERE id = ?`,
+          [nextVersionId, NOW, CHAPTER_ID],
+        );
+      },
+    },
+  ])("fails closed when a $name wins before the atomic output commit", async ({ mutate }) => {
+    const executor = await sqliteExecutor();
+    const unitOfWork = new SqliteContextTraceOutputCommitUnitOfWork(executor);
+    const candidate = readyCandidate(CANDIDATE_ID, PROJECT_ID, "stale output", "f");
+    await mutate(executor);
+
+    await expect(
+      unitOfWork.commit({ traceId: TRACE_ID, candidate, linkedAt: NOW }),
+    ).rejects.toMatchObject({ code: "CONTEXT_TRACE_OUTPUT_TARGET_CHANGED", retryable: true });
+    await expect(countRows(executor, "ai_candidates")).resolves.toBe(0);
+    await expect(countRows(executor, "context_compilation_output_candidate_links")).resolves.toBe(
+      0,
+    );
+  });
 });
 
 class FailOutputAssociationExecutor implements SqlExecutor {
@@ -211,13 +261,50 @@ async function sqliteExecutor(): Promise<NodeSqliteExecutor> {
       [id, name, NOW, NOW],
     );
   }
+  for (const [projectId, chapterId, versionId] of [
+    [PROJECT_ID, CHAPTER_ID, VERSION_ID],
+    [SECOND_PROJECT_ID, SECOND_CHAPTER_ID, SECOND_VERSION_ID],
+  ] as const) {
+    await executor.transaction(async (transaction) => {
+      await transaction.execute(
+        `INSERT INTO chapters (
+           id, project_id, title, content, status, revision, current_version_id,
+           created_at, updated_at
+         ) VALUES (?, ?, 'Chapter', 'accepted text', 'active', 1, ?, ?, ?)`,
+        [chapterId, projectId, versionId, NOW, NOW],
+      );
+      await transaction.execute(
+        `INSERT INTO chapter_versions (
+           id, project_id, chapter_id, parent_version_id, sequence, content,
+           content_checksum, reason, source_candidate_id, created_at
+         ) VALUES (?, ?, ?, NULL, 1, 'accepted text', ?, 'created', NULL, ?)`,
+        [versionId, projectId, chapterId, "a".repeat(64), NOW],
+      );
+    });
+  }
   await executor.execute(
     `INSERT INTO context_compilation_runs (
        id, project_id, chapter_id, task_type, maximum_context_tokens,
        required_tokens, used_tokens, remaining_tokens, discarded_tokens,
        token_estimate_source, candidate_count, included_count, discarded_count, created_at
-     ) VALUES (?, ?, NULL, 'continuation', 100, 1, 1, 99, 0, 'custom', 1, 1, 0, ?)`,
-    [TRACE_ID, PROJECT_ID, NOW],
+     ) VALUES (?, ?, ?, 'continuation', 100, 1, 1, 99, 0, 'custom', 1, 1, 0, ?)`,
+    [TRACE_ID, PROJECT_ID, CHAPTER_ID, NOW],
+  );
+  await executor.execute(
+    `INSERT INTO context_compilation_entries (
+       run_id, candidate_id, layer, selection_reason, included, discarded_reason,
+       estimated_tokens, evaluation_order, layer_order, priority, relevance_score,
+       required, budget_remaining_before, budget_remaining_after
+     ) VALUES (?, 'current-task', 'current_task', 'Author requested this exact task.',
+               1, NULL, 1, 1, 2, 1000, 1, 1, 100, 99)`,
+    [TRACE_ID],
+  );
+  await executor.execute(
+    `INSERT INTO context_compilation_entry_sources (
+       run_id, candidate_id, source_order, source_type, source_id,
+       source_version_id, locator, content_hash
+     ) VALUES (?, 'current-task', 1, 'generation_task', 'continuation-test', ?, NULL, NULL)`,
+    [TRACE_ID, VERSION_ID],
   );
   await executor.execute(
     `INSERT INTO context_compilation_execution_links (
@@ -234,12 +321,14 @@ function readyCandidate(
   content: string,
   checksumCharacter: string,
 ): AiCandidate {
+  const chapterId = projectId === SECOND_PROJECT_ID ? SECOND_CHAPTER_ID : CHAPTER_ID;
+  const baseVersionId = projectId === SECOND_PROJECT_ID ? SECOND_VERSION_ID : VERSION_ID;
   const streaming = AiCandidate.createStreaming({
     id,
     projectId,
-    chapterId: null,
-    source: "extract",
-    baseVersionId: null,
+    chapterId,
+    source: "generate",
+    baseVersionId,
     now: NOW,
   });
   if (!streaming.ok) {

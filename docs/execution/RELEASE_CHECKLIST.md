@@ -1,40 +1,46 @@
 # InkShadow 持续发布门禁
 
-> 更新日期：2026-08-10  
-> 当前源码与待发布版本：`0.2.1`  
-> 当前结论：**`v0.2.1` 当前工作树的完整工程门禁、Rust 和 production Chromium 响应式 E2E 已通过；干净唯一提交、Tauri/NSIS 候选和 GitHub 发布仍未完成，公开 `v0.2.0` 只作为不可覆盖的历史 Pre-release**
+> 更新日期：2026-08-11  
+> 当前源码与待发布版本：`0.2.2`  
+> 当前结论：**`v0.2.2` 发布准备正在进行；当前工作树的完整工程门禁、Rust 和 production Chromium 响应式 E2E 已通过，但唯一提交、Tauri/NSIS 干净候选和 GitHub 发布均尚未完成；公开 `v0.2.0` 与 `v0.2.1` 均为不可覆盖的历史 Pre-release**
 
 状态只使用 `PASS`、`IN_PROGRESS`、`NOT_RUN`、`BLOCKED` 和 `N/A`。  
 代码存在不等于发布门禁通过；只有可复核的测试、构建、签名、安装或人工验收证据才能标记 `PASS`。
 
-## v0.2.1 当前发布门禁
+## v0.2.2 当前发布门禁
 
-| 门禁                           | 状态    | 可复核证据或下一步                                                                                                                  |
-| ------------------------------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| 版本与设计基线                 | PASS    | 当前待发布应用版本为 `0.2.1`；17 项 Desktop release source/config 通过；DESIGN 保持 `v0.3.1b`，不能混写为应用版本                   |
-| 开书有限动态计划               | PASS    | 初始 5 个重点、最多 12 个唯一重点；显示 N/M、百分比、剩余重点与扩展原因，不设“三问上限”，也不允许无限追问                           |
-| DOCX 导入聚焦回归              | PASS    | `pnpm.cmd --filter @inkshadow/import-export test`：81/81                                                                            |
-| Settings 聚焦回归              | PASS    | `pnpm.cmd --filter @inkshadow/desktop test src/pages/settings-page.test.tsx`：34/34；Desktop typecheck 与设置页聚焦 ESLint 同时通过 |
-| 最终全仓门禁与生产构建         | PASS    | `pnpm.cmd release:check` 退出码 0、520.9 秒；2,688 passed / 65 skipped / 0 failed；49 files / 6,065,923 bytes，余量 356,605 bytes   |
-| Rust 严格门禁                  | PASS    | `pnpm.cmd check:rust` 退出码 0、116.7 秒；format、严格 Clippy、152 passed / 1 ignored / 0 failed                                    |
-| 1440/1280/1024/800 与 200% E2E | PASS    | production `dist` 的 Chromium 规格 11/11；测试 23.1 秒、工具 29.4 秒；尚不是 Tauri WebView                                          |
-| 真实 DeepSeek Key 互操作       | NOT_RUN | 没有读取或使用真实 Key；本地/模拟测试不能标记供应商 `VERIFIED`                                                                      |
-| 干净唯一提交与来源指纹         | NOT_RUN | Commit SHA 与 source fingerprint 待最终干净提交后生成，不填写虚构占位值                                                             |
-| 未签名 NSIS、大小与 SHA-256    | NOT_RUN | 候选尚未生成；安装包文件名、大小、SHA-256 与 PE/签名状态须从实际产物读取                                                            |
-| GitHub `v0.2.1` Pre-release    | NOT_RUN | 只能在门禁、候选和附件回读通过后发布；不得移动或覆盖 `v0.2.0` 标签                                                                  |
-| Authenticode 商业签名与时间戳  | BLOCKED | 缺少获授权的 Windows 发布主体、代码签名证书和正式时间戳服务；因此 `v0.2.1` 只能作为未签名工程预览候选                               |
+| 门禁                           | 状态        | 可复核证据或下一步                                                                                                                           |
+| ------------------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| 版本与设计基线                 | IN_PROGRESS | Desktop 与根发布元数据已设为 `0.2.2`；DESIGN 保持 `v0.3.1b`，不能混写为应用版本。版本变更后的 17 项 release source/config 须随候选链重新执行 |
+| 开书有限动态计划               | PASS        | 初始 5 个重点、最多 12 个唯一重点；显示 N/M、百分比、剩余重点与扩展原因，不设“三问上限”，也不允许无限追问                                    |
+| DOCX 导入聚焦回归              | PASS        | `pnpm.cmd --filter @inkshadow/import-export test`：81/81                                                                                     |
+| Settings 聚焦回归              | PASS        | 设置页完整文件 40/40；高负载四文件组合 76/76；Desktop typecheck 与设置页聚焦 ESLint 同时通过                                                 |
+| Desktop 全量                   | PASS        | 238 files；1,759 passed / 1 skipped / 0 failed                                                                                               |
+| 付费评测 infrastructure        | PASS        | 10 files / 96 tests；仅证明本地派发、账本、盲评和恢复安全，不证明真实付费 A/B 已执行                                                         |
+| 最终全仓门禁与生产构建         | PASS        | `pnpm.cmd release:check` 退出码 0、1,459.6 秒；3,035 passed / 65 skipped / 0 failed；Vite payload `6,651,786 / 6,717,440` bytes              |
+| Rust 严格门禁                  | PASS        | `pnpm.cmd check:rust` 退出码 0；format、严格 Clippy、160 passed / 1 ignored / 0 failed                                                       |
+| 1440/1280/1024/800 与 200% E2E | PASS        | production `dist` 的 Chromium 规格 11/11；尚不是 Tauri WebView                                                                               |
+| 备份恢复表覆盖                 | PASS        | 166 张作者数据表进入恢复合同；内容无关的原生项目派发 lease 明确不恢复                                                                        |
+| 真实 DeepSeek Key 互操作       | NOT_RUN     | 没有读取或使用真实 Key；本地/模拟测试不能标记供应商 `VERIFIED`                                                                               |
+| 干净唯一提交与来源指纹         | IN_PROGRESS | 版本、文档和提交范围正在收口；Commit SHA 与 source fingerprint 只能在唯一提交生成后记录，不填写虚构占位值                                    |
+| 未签名 NSIS、大小与 SHA-256    | NOT_RUN     | 候选尚未生成；安装包文件名、大小、SHA-256 与 PE/签名状态须从实际产物读取                                                                     |
+| GitHub `v0.2.2` Pre-release    | NOT_RUN     | 尚未创建标签或 Release；只能在唯一提交、干净候选、Actions 和附件复核通过后发布；不得移动或覆盖 `v0.2.0`、`v0.2.1` 标签                       |
+| Authenticode 商业签名与时间戳  | BLOCKED     | 缺少获授权的 Windows 发布主体、代码签名证书和正式时间戳服务；因此 `v0.2.2` 只能作为未签名工程预览候选                                        |
 
-## v0.2.1 Pre-release 发布说明草稿
+## v0.2.2 Pre-release 发布说明草稿
 
 > 草稿状态：`DRAFT / NOT_PUBLISHED`。以下内容仅供候选通过后发布；提交、文件、大小与摘要在实际生成前必须保持“待生成”，不得用历史值代填。
 
-### InkShadow 墨影 v0.2.1（未签名工程预览）
+### InkShadow 墨影 v0.2.2（未签名工程预览）
 
 本补丁继续收口从想法开书、Model Hub、设定维护和正文工作区的可用性与安全边界：
 
 - 开书引导使用有限动态问题计划：初始 5 个重点，最多 12 个唯一重点，并显示 N/M、完成百分比、剩余重点和扩展原因；作者可随时返回、跳过或结束；
 - AI 开头、续写、改写和设定建议继续先进入隔离建议版本；作者接受前不覆盖正式正文或重大正式设定；
 - 完善模型连接、能力证据、小说任务分工、生成前检查与可理解的失败恢复；缺少凭据、路由或能力时明确失败或跳过；
+- 增加默认关闭的 7 个 Core 与 5 个 Genre Novel Skill 实验能力；只有作者显式启用时才进入生成，并为每次开书或续写保留精确 Skill snapshot 与采用/舍弃回执；
+- 增加截断、取消和继续补全流程；任何不完整输出仍只保存为隔离 Candidate，不覆盖正文；
+- 增加内容无关的 Novel Skill 付费评测基础设施；准备、报价、授权和恢复均不会调用模型，只有作者另行点击“手动开始 192 次付费调用”才可能产生真实请求和费用；
 - 完善 Story Settings 严格导入、冲突处理、收据恢复、撤销与旧开书设定整理；
 - 调整正文三栏在窄窗口与高缩放下的抽屉/滚动行为，并收口 DOCX 安全导入路径。
 
@@ -43,7 +49,7 @@
 - 本版本计划作为 GitHub `Pre-release` 的未签名工程预览发布，不是 Beta、GA 或商业正式版；Windows 可能提示“未知发布者”；
 - 本轮没有使用真实 DeepSeek API Key 完成线上目录、文本探针、任务路由和正文生成验收，不能宣称真实 DeepSeek 供应商已验证；
 - 请先备份重要作品，不要把工程预览用于敏感数据或唯一副本；商业签名和隔离 Windows 安装/升级/卸载矩阵仍未完成；
-- `v0.2.0` 及其标签、附件与哈希保持不可变，`v0.2.1` 必须使用新的提交、标签和附件。
+- `v0.2.0`、`v0.2.1` 及其标签、附件与哈希保持不可变，`v0.2.2` 必须使用新的提交、标签和附件。
 
 候选追踪（发布前填写）：
 
@@ -56,6 +62,14 @@
 | 安装包 SHA-256              | 待生成                                         |
 | PE Subsystem / Authenticode | 待生成并复核；预期为 Windows GUI / `NotSigned` |
 | GitHub Release URL          | 待发布                                         |
+
+## v0.2.1 已发布历史 Pre-release（不可覆盖）
+
+| 门禁       | 状态 | 可复核证据                                                                                                                   |
+| ---------- | ---- | ---------------------------------------------------------------------------------------------------------------------------- |
+| GitHub     | PASS | 公开未签名 Pre-release：<https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.1>；Release ID `367562352`            |
+| 标签与提交 | PASS | 既有 tag object `3f13c7d` 指向提交 `fa2b567`（`main`）；不得移动、覆盖或复用 `v0.2.1` 标签                                   |
+| 历史附件   | PASS | 已包含当时的 installer、manifest 与 SHA 校验附件；只绑定历史提交，不得代替 v0.2.2 的候选、哈希、Tauri WebView 或异机安装证据 |
 
 ## v0.2.0 历史最终候选链路
 
@@ -111,7 +125,7 @@
 ## 2026-08-08 历史自动化能力门禁
 
 本节以及随后两个产品范围表冻结 2026-08-08 当时的工程证据；其中 `PASS` 不代表
-当前 `0.2.1` 工作树。历史 `v0.2.0` 候选状态只以上方“v0.2.0 历史最终候选链路”的
+当前 `0.2.2` 工作树。历史 `v0.2.0` 候选状态只以上方“v0.2.0 历史最终候选链路”的
 精确发布提交和证据为准，也不能替代当前门禁。
 
 | 范围                    | 状态 | 证据或限制                                                                                                  |
@@ -175,10 +189,10 @@
 
 ## 发布结论
 
-2026-08-09 的本地完整候选链、提交绑定、制品哈希、GitHub Actions 和公开附件回读只属于历史
-`v0.2.0`。当前 `v0.2.1` 的本地完整工程门禁、Rust 和 production Chromium E2E 已通过；干净
-提交、Tauri WebView 候选、NSIS、制品哈希与 GitHub 发布仍未完成；
+既有完整候选链、提交绑定、制品哈希、GitHub Actions 和公开附件回读只属于历史 `v0.2.0` 或
+`v0.2.1`。当前 `v0.2.2` 的工作树工程门禁、Rust 和 production Chromium E2E 已通过；唯一
+提交正在准备，Tauri WebView 候选、NSIS、制品哈希与 GitHub 发布仍为 `NOT_RUN`；
 签名、真实供应商全矩阵、百万字真实作品全链路/WebView 压力、法律审批、生产部署与独立安全审计
 也仍有未关闭门禁。
 
-**当前结论：`v0.2.1` 尚未发布；`v0.2.0` 是已发布的历史未签名 Pre-release。外部门禁关闭前，不得宣称 Beta、GA 或商业正式版。**
+**当前结论：`v0.2.2` 尚未提交、生成候选或发布；`v0.2.0` 与 `v0.2.1` 是不可覆盖的历史未签名 Pre-release。外部门禁关闭前，不得宣称 Beta、GA 或商业正式版。**

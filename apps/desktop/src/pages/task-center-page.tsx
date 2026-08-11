@@ -80,6 +80,7 @@ const NOTIFICATION_SEVERITY_LABELS: Record<NotificationSeverity, string> = {
 
 const NOTIFICATION_MESSAGES: Record<string, string> = {
   "task.completed": "后台任务已完成",
+  "task.partial": "AI 已保留未完整的建议版本，可继续补全",
   "task.failed": "后台任务执行失败",
   "task.cancelled": "后台任务已取消",
   "backup.completed": "本地备份已完成",

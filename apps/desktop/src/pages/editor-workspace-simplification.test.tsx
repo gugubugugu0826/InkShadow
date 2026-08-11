@@ -2,8 +2,8 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { AiCandidate, type Chapter, type Project } from "@inkshadow/domain";
 import { ToastProvider } from "@inkshadow/ui";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createDevelopmentRuntime,
@@ -14,6 +14,59 @@ import { RuntimeProvider } from "../runtime-context";
 import { EditorPage } from "./editor-page";
 
 describe("simplified editor workspace", () => {
+  it("ignores a previous project's delayed load after the route switches", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const first = await seedProject(runtime);
+    const secondProjectResult = await runtime.useCases.createProject.execute({
+      name: "Second delayed-load project",
+    });
+    if (!secondProjectResult.ok) throw secondProjectResult.error;
+    const secondChapter = await runtime.useCases.createChapter.execute({
+      projectId: secondProjectResult.value.id,
+      title: "Second chapter",
+      content: "Second project stable content",
+    });
+    if (!secondChapter.ok) throw secondChapter.error;
+    const second = { project: secondProjectResult.value, chapter: secondChapter.value.chapter };
+    const originalFindProject = runtime.repositories.projects.findById.bind(
+      runtime.repositories.projects,
+    );
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.spyOn(runtime.repositories.projects, "findById").mockImplementation((id) =>
+      id === first.project.id
+        ? firstGate.then(() => originalFindProject(id))
+        : originalFindProject(id),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={[`/projects/${first.project.id}/chapters/${first.chapter.id}`]}>
+        <RuntimeProvider runtime={runtime}>
+          <ToastProvider>
+            <Link to={`/projects/${second.project.id}/chapters/${second.chapter.id}`}>
+              switch project
+            </Link>
+            <Routes>
+              <Route path="/projects/:projectId/chapters/:chapterId" element={<EditorPage />} />
+            </Routes>
+          </ToastProvider>
+        </RuntimeProvider>
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("link", { name: "switch project" }));
+    expect(await screen.findByRole("textbox", { name: "章节正文" })).toHaveValue(
+      second.chapter.content,
+    );
+    releaseFirst();
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "章节正文" })).toHaveValue(second.chapter.content),
+    );
+  });
+
   it("keeps chapters,正文 and the AI assistant in one collapsible workspace", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const { chapter, project } = await seedProject(runtime);

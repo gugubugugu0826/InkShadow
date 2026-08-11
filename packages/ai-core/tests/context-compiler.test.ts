@@ -189,6 +189,146 @@ describe("layered context compiler", () => {
     });
   });
 
+  it("deduplicates the same fact across rule, memory and search while merging evidence", () => {
+    const sharedContent = "林知夏不能离开校园。";
+    const compiled = compileContext({
+      maximumContextTokens: 20,
+      candidates: [
+        candidate("current_task", "task", 1),
+        sourceCandidate("locked_hard_rules", "rule", sharedContent, "story_rule", "rule-1", "v1"),
+        sourceCandidate(
+          "character_current_state",
+          "memory",
+          sharedContent,
+          "memory",
+          "memory-1",
+          "v1",
+        ),
+        sourceCandidate(
+          "semantic_retrieval",
+          "search",
+          `[命中资料]\n${sharedContent}`,
+          "search_document",
+          "search-1",
+          "v1",
+        ),
+      ],
+      tokenEstimator: { source: "custom", estimateTokens: () => 1 },
+    });
+
+    expect(compiled.entries.find(({ id }) => id === "rule")).toMatchObject({
+      included: true,
+      evidence: expect.arrayContaining([
+        expect.objectContaining({ sourceType: "story_rule" }),
+        expect.objectContaining({ sourceType: "memory" }),
+        expect.objectContaining({ sourceType: "search_document" }),
+      ]),
+    });
+    expect(
+      compiled.entries.filter(({ discardedReason }) => discardedReason === "duplicate_source"),
+    ).toHaveLength(2);
+    expect(
+      compiledContextToPromptSections(compiled).filter(({ text }) => text.includes(sharedContent)),
+    ).toHaveLength(1);
+  });
+
+  it("never removes the current task when another source repeats its wording", () => {
+    const sharedContent = "继续写出雨夜重逢后的第一场对话。";
+    const compiled = compileContext({
+      maximumContextTokens: 10,
+      candidates: [
+        sourceCandidate("current_task", "task", sharedContent, "generation_task", "task-1", "v1"),
+        sourceCandidate("locked_hard_rules", "rule", sharedContent, "story_rule", "rule-1", "v1"),
+      ],
+      tokenEstimator: { source: "custom", estimateTokens: () => 1 },
+    });
+
+    expect(compiled.entries.find(({ id }) => id === "task")).toMatchObject({
+      included: true,
+      required: true,
+      discardedReason: null,
+    });
+    expect(compiled.entries.find(({ id }) => id === "rule")).toMatchObject({
+      included: true,
+      required: true,
+      discardedReason: null,
+    });
+  });
+
+  it("keeps identical dialogue samples owned by different characters", () => {
+    const compiled = compileContext({
+      maximumContextTokens: 10,
+      candidates: [
+        candidate("current_task", "task", 1),
+        sourceCandidate(
+          "character_voice_samples",
+          "voice-a",
+          "我知道。",
+          "character",
+          "character-a",
+          "v1",
+        ),
+        sourceCandidate(
+          "character_voice_samples",
+          "voice-b",
+          "我知道。",
+          "character",
+          "character-b",
+          "v1",
+        ),
+      ],
+      tokenEstimator: { source: "custom", estimateTokens: () => 1 },
+    });
+
+    expect(
+      compiled.entries
+        .filter(({ id }) => id.startsWith("voice-"))
+        .every(({ included, discardedReason }) => included && discardedReason === null),
+    ).toBe(true);
+  });
+
+  it("keeps distinct revisions from the same source even when their text is unchanged", () => {
+    const compiled = compileContext({
+      maximumContextTokens: 10,
+      candidates: [
+        candidate("current_task", "task", 1),
+        sourceCandidate("recent_events", "revision-1", "同一事件", "chapter", "chapter-1", "v1"),
+        sourceCandidate("recent_events", "revision-2", "同一事件", "chapter", "chapter-1", "v2"),
+      ],
+      tokenEstimator: { source: "custom", estimateTokens: () => 1 },
+    });
+
+    expect(
+      compiled.entries
+        .filter(({ id }) => id.startsWith("revision-"))
+        .every(({ included }) => included),
+    ).toBe(true);
+  });
+
+  it("falls back to canonical content when source hashes are unavailable", () => {
+    const compiled = compileContext({
+      maximumContextTokens: 10,
+      candidates: [
+        candidate("current_task", "task", 1),
+        sourceCandidate("world_setting", "plain", "夜间禁止鸣笛。", "world", "world-1", "v1"),
+        sourceCandidate(
+          "semantic_retrieval",
+          "wrapped",
+          "【世界设定】\n夜间禁止鸣笛。",
+          "world",
+          "world-1",
+          "v1",
+        ),
+      ],
+      tokenEstimator: { source: "custom", estimateTokens: () => 1 },
+    });
+
+    expect(compiled.entries.find(({ id }) => id === "plain")?.included).toBe(true);
+    expect(compiled.entries.find(({ id }) => id === "wrapped")?.discardedReason).toBe(
+      "duplicate_source",
+    );
+  });
+
   it("rejects duplicate identifiers, missing evidence, controls, and invalid estimates", () => {
     const task = candidate("current_task", "task", 1);
     expect(() =>
@@ -316,5 +456,31 @@ function evidence(id: string) {
     locator: `test:${id}`,
     contentHash: null,
     excerpt: `Evidence for ${id}.`,
+  };
+}
+
+function sourceCandidate(
+  layer: ContextLayer,
+  id: string,
+  content: string,
+  sourceType: ContextCandidate["evidence"][number]["sourceType"],
+  sourceId: string,
+  sourceVersionId: string | null,
+): ContextCandidate {
+  return {
+    id,
+    layer,
+    content,
+    selectionReason: `Relevant ${layer} context.`,
+    evidence: [
+      {
+        sourceType,
+        sourceId,
+        sourceVersionId,
+        locator: null,
+        contentHash: null,
+        excerpt: null,
+      },
+    ],
   };
 }

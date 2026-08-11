@@ -3,7 +3,7 @@
 > 基线日期：2026-08-01  
 > 最近复核：2026-08-10（DESIGN v0.3.1b 与当前工作树）  
 > 文档状态：`AUTHORITATIVE_CURRENT`（本目录索引与冲突规则）  
-> 应用版本：`0.2.1`；设计基线：`DESIGN v0.3.1b`  
+> 应用版本：`0.2.2`；设计基线：`DESIGN v0.3.1b`  
 > 适用范围：桌面端个人创作主链路、Model Hub、后续小说智能内核
 
 本目录是 2026-08-01 起的产品重构执行基线。它不删除旧文档中仍然有效的安全、数据、
@@ -11,7 +11,7 @@
 “系统模块驱动”信息架构。
 
 DESIGN v0.3.1b 是 P01–P44 的视觉与交互目标版本，不是安装包版本。除非发布决策另行改变，
-当前应用、数据库和待发布安装包版本为 0.2.1。
+当前应用、数据库和待发布安装包版本为 0.2.2。
 
 ## 文档状态与阅读顺序
 
@@ -29,6 +29,7 @@ DESIGN v0.3.1b 是 P01–P44 的视觉与交互目标版本，不是安装包版
 |   10 | `HISTORICAL_WITH_INCREMENT` | [DESIGN v0.3.1b 真实落地审计](08-DESIGN-V031B-REALITY-MATRIX.md)               | checkpoint 差距和后续增量；不是当前 P01–P44 验证表  |
 |   11 | `SUPPORTING_CURRENT`        | [ProjectSeed 与三条创建旅程](09-PROJECT-SEED-AND-CREATION-JOURNEYS.md)         | 共享创建输入和上下文映射                            |
 |   12 | `SUPPORTING_CURRENT`        | [已接受正文的派生资料管线与恢复](10-ACCEPTED-VERSION-PIPELINE-AND-RECOVERY.md) | 正文安全提交后的可重建任务                          |
+|   13 | `SUPPORTING_CURRENT`        | [Novel Skill 现状审计、最小合同与启用门禁](11-NOVEL-SKILL-AUDIT-AND-DESIGN.md) | Skill 实验性作者 opt-in 运行链、精确回执和 A/B 门禁 |
 
 ## 总指令交付覆盖
 

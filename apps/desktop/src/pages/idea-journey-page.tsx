@@ -63,6 +63,8 @@ interface IdeaJourneySnapshotV1 extends Readonly<Record<string, unknown>> {
   readonly openingBatchId: string | null;
   readonly openingBatchFailureCount: number;
   readonly provisioningPlan: IdeaJourneyProvisioningPlanV1 | null;
+  /** Explicit author opt-in; experimental writing methods remain off by default. */
+  readonly experimentalNovelSkillsOptIn: boolean;
   readonly answers: Readonly<Record<string, string>>;
   readonly skippedQuestionKeys: readonly string[];
   readonly questionHistory: readonly string[];
@@ -93,6 +95,7 @@ interface IdeaOpeningSuggestionV1 extends Readonly<Record<string, unknown>> {
   readonly providerId: string | null;
   readonly modelId: string | null;
   readonly noticeCode: string | null;
+  readonly contextTraceId: string | null;
 }
 
 interface PersistedIdeaOpeningSuggestionV1 extends Readonly<Record<string, unknown>> {
@@ -105,6 +108,7 @@ interface PersistedIdeaOpeningSuggestionV1 extends Readonly<Record<string, unkno
   readonly providerId: string | null;
   readonly modelId: string | null;
   readonly noticeCode: string | null;
+  readonly contextTraceId?: string | null;
 }
 
 interface IdeaJourneyProvisioningPlanV1 extends Readonly<Record<string, unknown>> {
@@ -310,6 +314,7 @@ export function IdeaJourneyPage() {
   const [openingPreference, setOpeningPreference] = useState<
     "ai" | "self" | "sample" | "local" | null
   >(null);
+  const [experimentalNovelSkillsOptIn, setExperimentalNovelSkillsOptIn] = useState(false);
   const operationSequence = useRef(0);
   const activeOperation = useRef<JourneyOperation | null>(null);
   const resumeLock = useRef<JourneyOperation | null>(null);
@@ -701,6 +706,16 @@ export function IdeaJourneyPage() {
     }>,
     questionKey = "opening_direction",
   ): Promise<CreativeJourneyRecord> {
+    if (current.projectId === null || current.chapterId === null) {
+      throw new UiActionError(
+        "IDEA_OPENING_WORKSPACE_NOT_READY",
+        "空白作品和第一章尚未安全创建，因此本次没有调用 AI。请重试，已有构思仍保存在本机。",
+      );
+    }
+    const projectContext = Object.freeze({
+      projectId: current.projectId,
+      chapterId: current.chapterId,
+    });
     setBatchProgress({ completed: 0, total: plan.requests.length });
     startRequestTimings(plan.requests.map(({ requestId }) => requestId));
     const settled = await Promise.allSettled(
@@ -710,6 +725,8 @@ export function IdeaJourneyPage() {
             ...input,
             requestId: request.requestId,
             openingAngle: request.openingAngle,
+            projectContext,
+            assertBeforeProviderDispatch: () => assertCurrentOperation(operation),
             onDelta: (text) => {
               if (isCurrentOperation(operation)) {
                 updateStreamingPreview(request.requestId, text);
@@ -815,6 +832,7 @@ export function IdeaJourneyPage() {
       openingBatchId: providerBatchPlan?.batchId ?? requestId,
       openingBatchFailureCount: 0,
       provisioningPlan: createJourneyProvisioningPlan(runtime),
+      experimentalNovelSkillsOptIn,
       answers: Object.freeze({}),
       skippedQuestionKeys: Object.freeze([]),
       questionHistory: Object.freeze([]),
@@ -876,6 +894,10 @@ export function IdeaJourneyPage() {
       if (providerBatchPlan === null) {
         startRequestTimings([requestId]);
       }
+      const generationRecord =
+        providerBatchPlan === null
+          ? record
+          : (await prepareJourneyProviderDispatch(record, initialSnapshot, boundOperation)).current;
       const updated =
         providerBatchPlan === null
           ? await persistGeneratedPreview(
@@ -894,7 +916,7 @@ export function IdeaJourneyPage() {
               "opening_direction",
               generationMode,
             )
-          : await runProviderOpeningBatch(boundOperation, record, providerBatchPlan, {
+          : await runProviderOpeningBatch(boundOperation, generationRecord, providerBatchPlan, {
               idea: normalizedIdea,
             });
       if (isCurrentOperation(boundOperation)) {
@@ -945,6 +967,7 @@ export function IdeaJourneyPage() {
       openingBatchId: null,
       openingBatchFailureCount: 0,
       provisioningPlan: createJourneyProvisioningPlan(runtime),
+      experimentalNovelSkillsOptIn: false,
       answers: Object.freeze({}),
       skippedQuestionKeys: Object.freeze([]),
       questionHistory: Object.freeze([]),
@@ -1560,6 +1583,10 @@ export function IdeaJourneyPage() {
         individuallyTrackedRequestId = requestId;
         startRequestTimings([requestId]);
       }
+      const providerPending =
+        providerBatchPlan === null
+          ? pending
+          : (await prepareJourneyProviderDispatch(pending, pendingSnapshot, operation)).current;
       const updated =
         providerBatchPlan === null
           ? await persistGeneratedPreview(
@@ -1580,7 +1607,7 @@ export function IdeaJourneyPage() {
               "opening_direction",
               generationMode,
             )
-          : await runProviderOpeningBatch(operation, pending, providerBatchPlan, {
+          : await runProviderOpeningBatch(operation, providerPending, providerBatchPlan, {
               idea: snapshot.idea,
               ...(direction === undefined ? {} : { direction }),
               answers: snapshot.answers,
@@ -1699,6 +1726,11 @@ export function IdeaJourneyPage() {
         setJourney(pending);
         setTurnCount(turnCount + 1);
       }
+      const preparedDispatch = await prepareJourneyProviderDispatch(
+        pending,
+        pendingSnapshot,
+        operation,
+      );
       startRequestTimings([requestId]);
       const generated = await generateCreativeOpening(runtime, {
         idea: snapshot.idea,
@@ -1709,6 +1741,8 @@ export function IdeaJourneyPage() {
         openingAngle: target.openingAngle,
         ...(mode === "continue" ? { partialOpening: target.text } : {}),
         requestId,
+        projectContext: preparedDispatch.projectContext,
+        assertBeforeProviderDispatch: () => assertCurrentOperation(operation),
         onDelta: (text) => {
           if (isCurrentOperation(operation)) {
             updateStreamingPreview(requestId, text);
@@ -1910,6 +1944,10 @@ export function IdeaJourneyPage() {
       projectName,
       storySummary,
       summaryCustomized,
+      provisioningPlan:
+        currentSnapshot.provisioningPlan === null
+          ? null
+          : Object.freeze({ ...currentSnapshot.provisioningPlan, projectName }),
       projectSeed: deriveIdeaProjectSeed({
         seedId: currentSnapshot.projectSeed.seedId,
         idea: storySummary,
@@ -1962,6 +2000,16 @@ export function IdeaJourneyPage() {
         );
       }
       const incompleteCandidate = selectedOpening.status === "partial";
+      if (current.projectId !== null) {
+        const precreatedProjectId = parseUuidV7(current.projectId);
+        if (!precreatedProjectId.ok) throw precreatedProjectId.error;
+        const renamed = await runtime.useCases.renameProject.execute({
+          projectId: precreatedProjectId.value,
+          name: projectSnapshot.projectName,
+        });
+        if (!renamed.ok) throw renamed.error;
+        assertCurrentOperation(operation);
+      }
       if (isCurrentOperation(operation)) {
         setJourney(current);
       }
@@ -1989,6 +2037,7 @@ export function IdeaJourneyPage() {
           projectSnapshot.preview,
           candidateId.value,
           incompleteCandidate,
+          selectedOpening.contextTraceId,
         );
         if (!persisted.ok) {
           throw persisted.error;
@@ -2130,6 +2179,60 @@ export function IdeaJourneyPage() {
       current = await saveScope(current, { chapterId: chapter.value.chapter.id }, operation);
     }
     return Object.freeze({ current, projectId, chapterId });
+  }
+
+  async function prepareJourneyProviderDispatch(
+    savedRecord: CreativeJourneyRecord,
+    savedSnapshot: IdeaJourneySnapshotV1,
+    operation: JourneyOperation,
+  ): Promise<
+    Readonly<{
+      current: CreativeJourneyRecord;
+      projectContext: Readonly<{ projectId: string; chapterId: string }>;
+    }>
+  > {
+    const provisioned = await provisionJourneyWorkspace(savedRecord, savedSnapshot, operation);
+    assertCurrentOperation(operation);
+    const latestSnapshot = readIdeaSnapshot(provisioned.current.snapshot, provisioned.current.id);
+    if (
+      latestSnapshot.experimentalNovelSkillsOptIn &&
+      runtime.novelSkills.getAvailability().status === "ready"
+    ) {
+      // Experimental methods remain disabled by default. These two bindings
+      // are created only after the author explicitly opts in on the landing page.
+      await runtime.novelSkills.setMethodEnabled(
+        provisioned.projectId.value,
+        "core.scene_craft",
+        true,
+      );
+      assertCurrentOperation(operation);
+      await runtime.novelSkills.setMethodEnabled(
+        provisioned.projectId.value,
+        "core.prose_specificity",
+        true,
+      );
+      assertCurrentOperation(operation);
+    }
+    let current = provisioned.current;
+    if (current.currentState !== "generation_pending") {
+      const pending = Object.freeze({
+        ...current,
+        currentState: "generation_pending",
+        revision: current.revision + 1,
+        updatedAt: runtime.clock.now(),
+      });
+      await runtime.creativeJourneys.update(pending, current.revision);
+      assertCurrentOperation(operation);
+      current = pending;
+      setJourney(pending);
+    }
+    return Object.freeze({
+      current,
+      projectContext: Object.freeze({
+        projectId: provisioned.projectId.value,
+        chapterId: provisioned.chapterId.value,
+      }),
+    });
   }
 
   async function ensureProvisioningPlan(
@@ -2295,7 +2398,7 @@ export function IdeaJourneyPage() {
                     {...fieldProps}
                     value={projectNameDraft}
                     maxLength={120}
-                    disabled={busy !== null || journey.projectId !== null}
+                    disabled={busy !== null}
                     onChange={(event) => setProjectNameDraft(event.currentTarget.value)}
                   />
                 )}
@@ -2311,7 +2414,7 @@ export function IdeaJourneyPage() {
                     value={storySummaryDraft}
                     rows={6}
                     maxLength={4_000}
-                    disabled={busy !== null || journey.projectId !== null}
+                    disabled={busy !== null}
                     onChange={(event) => setStorySummaryDraft(event.currentTarget.value)}
                   />
                 )}
@@ -2949,6 +3052,25 @@ export function IdeaJourneyPage() {
               />
             )}
           </FormField>
+          {runtime.mode === "tauri" &&
+            openingPreference === "ai" &&
+            destination?.kind === "provider" && (
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={experimentalNovelSkillsOptIn}
+                  disabled={busy !== null}
+                  onChange={(event) => setExperimentalNovelSkillsOptIn(event.currentTarget.checked)}
+                />
+                <span>
+                  试用仍在评测中的基础写作方法
+                  <small>
+                    默认关闭。开启后仅影响这次 AI
+                    开头建议，不会修改正式正文或把写作方法写成故事设定；之后仍可在项目中关闭。
+                  </small>
+                </span>
+              </label>
+            )}
           <Button
             loading={busy === "create"}
             disabled={busy !== null || (openingPreference !== "self" && idea.trim().length < 2)}
@@ -3071,6 +3193,8 @@ function readIdeaSnapshot(
     (value.provisioningPlan !== undefined &&
       value.provisioningPlan !== null &&
       !isProvisioningPlan(value.provisioningPlan)) ||
+    (value.experimentalNovelSkillsOptIn !== undefined &&
+      typeof value.experimentalNovelSkillsOptIn !== "boolean") ||
     !isStringRecord(value.answers) ||
     !isStringArray(value.skippedQuestionKeys) ||
     !isStringArray(value.questionHistory) ||
@@ -3166,6 +3290,7 @@ function readIdeaSnapshot(
       value.provisioningPlan !== undefined && value.provisioningPlan !== null
         ? normalizeProvisioningPlan(value.provisioningPlan)
         : null,
+    experimentalNovelSkillsOptIn: value.experimentalNovelSkillsOptIn === true,
     preview: selectedOpening?.text ?? "",
     previewSource: selectedOpening?.source ?? null,
     providerId: selectedOpening?.providerId ?? null,
@@ -3243,6 +3368,10 @@ function isOpeningSuggestionArray(
       (suggestion.providerId !== null && typeof suggestion.providerId !== "string") ||
       (suggestion.modelId !== null && typeof suggestion.modelId !== "string") ||
       (suggestion.noticeCode !== null && typeof suggestion.noticeCode !== "string") ||
+      (suggestion.contextTraceId !== undefined &&
+        suggestion.contextTraceId !== null &&
+        (typeof suggestion.contextTraceId !== "string" ||
+          !parseUuidV7(suggestion.contextTraceId).ok)) ||
       ((suggestion.status === "ready" || suggestion.status === "partial") &&
         suggestion.text.trim().length === 0) ||
       ((suggestion.status === "pending" || suggestion.status === "failed") &&
@@ -3255,7 +3384,8 @@ function isOpeningSuggestionArray(
         (suggestion.source !== "provider" ||
           suggestion.providerId !== null ||
           suggestion.modelId !== null ||
-          suggestion.noticeCode !== null))
+          suggestion.noticeCode !== null ||
+          (suggestion.contextTraceId !== undefined && suggestion.contextTraceId !== null)))
     ) {
       return false;
     }
@@ -3351,6 +3481,7 @@ function abandonPersistedOpeningGeneration(
       providerId: null,
       modelId: null,
       noticeCode: GENERATION_ABANDONED_BY_AUTHOR,
+      contextTraceId: null,
     });
     const existingIndex = history.findIndex(({ id }) => id === requestId);
     const existing = history[existingIndex];
@@ -3435,6 +3566,7 @@ function normalizeOpeningSuggestions(
       providerId: typeof value.providerId === "string" ? value.providerId : null,
       modelId: typeof value.modelId === "string" ? value.modelId : null,
       noticeCode: typeof value.noticeCode === "string" ? value.noticeCode : null,
+      contextTraceId: null,
     }),
   ]);
 }
@@ -3451,6 +3583,7 @@ function normalizePersistedOpeningSuggestions(value: unknown): readonly IdeaOpen
       Object.freeze({
         ...suggestion,
         openingAngle: suggestion.openingAngle === undefined ? null : suggestion.openingAngle,
+        contextTraceId: suggestion.contextTraceId ?? null,
       }),
     ),
   );
@@ -3556,6 +3689,7 @@ function pendingOpeningSuggestions(
         providerId: null,
         modelId: null,
         noticeCode: null,
+        contextTraceId: null,
       }),
     ),
   );
@@ -3711,7 +3845,8 @@ function sameOpeningSuggestion(
     first.openingAngle === second.openingAngle &&
     first.providerId === second.providerId &&
     first.modelId === second.modelId &&
-    first.noticeCode === second.noticeCode
+    first.noticeCode === second.noticeCode &&
+    first.contextTraceId === second.contextTraceId
   );
 }
 
@@ -3737,6 +3872,7 @@ function openingSuggestionFromResult(
     providerId: generated.providerId,
     modelId: generated.modelId,
     noticeCode: generated.noticeCode,
+    contextTraceId: status === "ready" || status === "partial" ? generated.contextTraceId : null,
   });
 }
 

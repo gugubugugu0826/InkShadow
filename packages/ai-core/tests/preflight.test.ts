@@ -210,6 +210,17 @@ describe("runGenerationPreflight", () => {
     ]);
   });
 
+  it("reports a task-aware compiled input ceiling instead of forcing the legacy 7K fallback", () => {
+    const snapshot = runGenerationPreflight({
+      ...baseInput,
+      maximumCompiledInputTokens: 32_000,
+      contextWindowTokens: 64_000,
+      maximumOutputTokens: 3_328,
+    });
+
+    expect(snapshot.effectiveContextBudget).toBe(32_000);
+  });
+
   it("blocks a known privacy denial even when optional model metadata is unknown", () => {
     const snapshot = runGenerationPreflight({
       ...baseInput,

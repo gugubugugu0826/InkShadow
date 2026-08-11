@@ -41,7 +41,12 @@ describe("model hub routing visibility", () => {
         catalog: [catalog()],
         routes: routes(routeCount),
         capabilityEvidence: capabilities.map((capability, index) =>
-          evidence(capability, index === 0 ? "lightweight_probe" : "provider_metadata"),
+          evidence(
+            capability,
+            index === 0 || capability === "structured_output"
+              ? "lightweight_probe"
+              : "provider_metadata",
+          ),
         ),
         recentAiFailures: [],
         now: NOW,

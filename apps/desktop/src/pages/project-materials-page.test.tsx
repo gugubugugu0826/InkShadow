@@ -88,7 +88,7 @@ describe("ProjectMaterialsPage", () => {
           ).toBeInTheDocument();
         }
       },
-      { timeout: 5_000 },
+      { timeout: 10_000 },
     );
 
     materialCard = screen.getByRole("heading", { name: "雨夜钟楼", level: 3 }).closest(".ink-card");

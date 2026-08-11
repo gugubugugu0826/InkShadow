@@ -32,10 +32,15 @@ const PDFJS_WORKER_LICENSE_BANNER = `/*!
  * pdfjsVersion = 6.1.200
  * pdfjsBuild = 6353acefe
  */`;
-// DESIGN v0.3.1b adds the complete three-entry creation and governed-memory
-// flows. Keep every per-chunk ceiling unchanged while allowing only 128 KiB
-// of explicit aggregate growth beyond the previous 6 MiB cap.
-const TOTAL_FRONTEND_BUDGET_BYTES = (6 * 1024 + 128) * 1024;
+// DESIGN v0.3.1b originally allowed 128 KiB of aggregate growth beyond 6 MiB.
+// The optional paid Novel Skill evaluation chain adds a content-free ledger,
+// crash-safe dispatch authority and local blind review. A production graph audit
+// measured 6,651,774 bytes after the whole chain was moved behind a true dynamic
+// import, with no duplicated modules and both ordinary/async chunks still below
+// their existing ceilings. Add exactly 288 KiB to the aggregate allowance so the
+// installed payload retains at least 64 KiB of headroom; per-output limits stay
+// unchanged and no optional chunk is excluded from the total.
+const TOTAL_FRONTEND_BUDGET_BYTES = (6 * 1024 + 416) * 1024;
 
 function isPdfJsWorkerModule(facadeModuleId: string | null): boolean {
   return (

@@ -42,7 +42,11 @@ export function ContextSourcesPage() {
         description="记录不会重复保存正文、创作指令或 AI 回复；使用云端 AI 时，只有当次被选中的内容才会发送给已连接的供应商。"
       />
 
-      <ContextHistoryPanel projectId={parsedProjectId.value} store={runtime.contextTraces} />
+      <ContextHistoryPanel
+        projectId={parsedProjectId.value}
+        store={runtime.contextTraces}
+        novelSkills={runtime.novelSkills}
+      />
     </div>
   );
 }

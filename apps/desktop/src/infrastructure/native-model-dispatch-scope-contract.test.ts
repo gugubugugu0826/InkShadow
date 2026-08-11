@@ -13,7 +13,10 @@ const CENTRAL_EXECUTORS = new Set([
 const DIRECT_GATEWAY_METHODS = new Set(["generate", "embed", "rerank", "executeText"]);
 const NON_PROJECT_ALLOWLIST = new Map<
   string,
-  Readonly<{ reason: "creative_opening" | "connection_probe"; occurrences: number }>
+  Readonly<{
+    reason: "creative_opening" | "connection_probe" | "novel_skill_evaluation";
+    occurrences: number;
+  }>
 >([
   ["infrastructure/creative-opening-service.ts", { reason: "creative_opening", occurrences: 2 }],
   [
@@ -21,9 +24,25 @@ const NON_PROJECT_ALLOWLIST = new Map<
     { reason: "connection_probe", occurrences: 1 },
   ],
   [
+    "infrastructure/model-hub-exact-evaluation-target.ts",
+    // The provider payload is rebuilt from the pinned 12-fixture registry and
+    // the code-owned Skill/preference authority before this single boundary.
+    { reason: "novel_skill_evaluation", occurrences: 1 },
+  ],
+  [
     "infrastructure/model-hub-text-capability-probe.ts",
     // Every fixed `只回复：OK` capability check must pass through the shared
     // provider-aware budget, reasoning, truncation and redaction boundary.
+    { reason: "connection_probe", occurrences: 1 },
+  ],
+  [
+    "infrastructure/model-hub-structured-capability-probe.ts",
+    // Both attempts use only the module-owned frozen JSON probe messages.
+    { reason: "connection_probe", occurrences: 1 },
+  ],
+  [
+    "infrastructure/model-hub-translation-capability-probe.ts",
+    // The request always translates the module-owned fixed sentence.
     { reason: "connection_probe", occurrences: 1 },
   ],
 ]);

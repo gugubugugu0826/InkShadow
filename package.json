@@ -1,6 +1,6 @@
 {
   "name": "inkshadow",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "InkShadow 墨影：本地优先、隐私优先的 AI 长篇内容创作工作台",
   "license": "UNLICENSED",
@@ -24,7 +24,7 @@
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "pnpm --recursive --if-present --workspace-concurrency=4 run test",
+    "test": "pnpm --recursive --if-present --workspace-concurrency=1 run test",
     "test:watch": "vitest",
     "test:e2e": "pnpm --filter @inkshadow/desktop build:web && node scripts/run-e2e.mjs",
     "test:e2e:release": "pnpm --filter @inkshadow/desktop build:web:release && node scripts/check-desktop-release.mjs --dist apps/desktop/dist-release && node scripts/run-e2e.mjs --dist apps/desktop/dist-release",

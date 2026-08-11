@@ -1,7 +1,7 @@
 # 创建入口与 ProjectSeed
 
 > 文档状态：`SUPPORTING_CURRENT`  
-> 应用版本：`0.2.1`；设计基线：`DESIGN v0.3.1b`
+> 应用版本：`0.2.2`；设计基线：`DESIGN v0.3.1b`
 
 三条创建入口使用同一个 `ProjectSeed` 契约，但界面继续使用各自的任务语言。
 

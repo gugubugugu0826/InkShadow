@@ -2,6 +2,7 @@ import type {
   ChapterRepository,
   ChapterVersionRepository,
   ContentHasher,
+  ProjectRepository,
 } from "@inkshadow/application";
 import type { ChapterPrivacyMode } from "@inkshadow/domain";
 import { parseUuidV7 as parseDomainUuid } from "@inkshadow/domain";
@@ -57,6 +58,7 @@ export interface ChapterSummaryModelInput {
 }
 
 export interface ChapterSummaryModelOutput {
+  readonly authorityMode: "structured_verified" | "plain_non_authoritative";
   readonly summary: string;
   readonly keyEvents: readonly ChapterSummaryModelEntry[];
   readonly continuityNotes: readonly ChapterSummaryModelEntry[];
@@ -141,6 +143,7 @@ export interface ChapterSummaryGenerationReceipt {
     readonly modelId: string;
     readonly invocationId: string;
   }> | null;
+  readonly authorityMode: ChapterSummaryModelOutput["authorityMode"] | null;
 }
 
 export interface ChapterSummaryDashboardEntry {
@@ -164,6 +167,7 @@ export interface ChapterSummaryDashboard {
 }
 
 interface ChapterSummaryServiceDependencies {
+  readonly projects?: Pick<ProjectRepository, "findById">;
   readonly chapters: Pick<ChapterRepository, "findById" | "listByProjectId">;
   readonly chapterVersions: Pick<ChapterVersionRepository, "findVersionById">;
   readonly facts: StoryFactStore;
@@ -195,6 +199,7 @@ export interface StoredChapterSummaryPayload {
   readonly sourceChapterId: string;
   readonly sourceVersionId: string;
   readonly sourceContentHash: string;
+  readonly authorityMode: ChapterSummaryModelOutput["authorityMode"];
   readonly citations: readonly Readonly<{
     readonly evidenceId: string;
     readonly startOffset: number;
@@ -385,6 +390,7 @@ export class ChapterSummaryService {
     readonly trigger: "manual_save" | "user_rebuild" | "historical_backfill";
   }): Promise<ChapterSummaryGenerationReceipt> {
     try {
+      await this.assertProjectActive(input.projectId);
       const projectPrivacy = await this.dependencies.projectContextPrivacy.inspect(input.projectId);
       const source = await this.readVerifiedSource(input);
       assertSummarySourceMatchesProjectReceipt(projectPrivacy, source);
@@ -422,6 +428,7 @@ export class ChapterSummaryService {
           await this.readVerifiedSource(source);
         },
         assertProjectPrivacyCurrent: async (verifiedLocalEligible) => {
+          await this.assertProjectActive(source.projectId);
           await this.dependencies.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
           if (verifiedLocalEligible !== undefined) {
             this.dependencies.projectContextPrivacy.assertRouteEligible(
@@ -432,6 +439,7 @@ export class ChapterSummaryService {
         },
       });
       await this.readVerifiedSource(source);
+      await this.assertProjectActive(source.projectId);
       await this.dependencies.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
       const citedSegments = resolveCitedSegments(output, segments);
       const primary = citedSegments.at(0);
@@ -447,6 +455,7 @@ export class ChapterSummaryService {
         sourceChapterId: source.chapterId,
         sourceVersionId: source.versionId,
         sourceContentHash: source.contentHash,
+        authorityMode: output.authorityMode,
         citations: Object.freeze(
           citedSegments.map((segment) =>
             Object.freeze({
@@ -457,8 +466,12 @@ export class ChapterSummaryService {
             }),
           ),
         ),
-        keyEvents: output.keyEvents,
-        continuityNotes: output.continuityNotes,
+        keyEvents:
+          output.authorityMode === "structured_verified" ? output.keyEvents : Object.freeze([]),
+        continuityNotes:
+          output.authorityMode === "structured_verified"
+            ? output.continuityNotes
+            : Object.freeze([]),
         generation: Object.freeze({
           task: CHAPTER_SUMMARY_TASK,
           providerKind: output.providerKind,
@@ -490,7 +503,7 @@ export class ChapterSummaryService {
           sourceLength: source.content.length,
           excerpt: primary.text,
         },
-        confidence: 1,
+        confidence: output.authorityMode === "structured_verified" ? 1 : 0.5,
       });
       if (!saved.ok) {
         throw saved.error;
@@ -499,8 +512,12 @@ export class ChapterSummaryService {
         ...receipt(
           input,
           "generated",
-          "CHAPTER_SUMMARY_GENERATED",
-          "章节摘要已从当前保存版本生成，可撤销且不会修改正文。",
+          output.authorityMode === "structured_verified"
+            ? "CHAPTER_SUMMARY_GENERATED"
+            : "CHAPTER_SUMMARY_GENERATED_PLAIN_NON_AUTHORITATIVE",
+          output.authorityMode === "structured_verified"
+            ? "章节摘要已从当前保存版本生成，可撤销且不会修改正文。"
+            : "已保存一份非权威普通摘要；结构化故事状态仍待配置，关键事件和连续性提示没有晋升为故事事实。",
         ),
         fact: saved.value.fact,
         replacedFactIds: saved.value.replacedFactIds,
@@ -510,6 +527,7 @@ export class ChapterSummaryService {
           modelId: output.modelId,
           invocationId: output.invocationId,
         }),
+        authorityMode: output.authorityMode,
       });
     } catch (cause: unknown) {
       if (cause instanceof ChapterSummaryModelUnavailableError) {
@@ -653,6 +671,25 @@ export class ChapterSummaryService {
       revision: chapter.value.revision,
     });
   }
+
+  private async assertProjectActive(projectIdValue: string): Promise<void> {
+    if (this.dependencies.projects === undefined) return;
+    const projectId = parseDomainUuid(projectIdValue);
+    if (!projectId.ok) {
+      throw new ChapterSummarySourceError(
+        "CHAPTER_SUMMARY_PROJECT_INVALID",
+        "章节摘要所属作品标识无效。",
+      );
+    }
+    const project = await this.dependencies.projects.findById(projectId.value);
+    if (!project.ok) throw project.error;
+    if (project.value?.status !== "active") {
+      throw new ChapterSummarySourceError(
+        "CHAPTER_SUMMARY_PROJECT_NOT_ACTIVE",
+        "作品已归档、进入回收站或不存在；本次章节摘要在发送正文前停止。",
+      );
+    }
+  }
 }
 
 function assertSummarySourceMatchesProjectReceipt(
@@ -724,19 +761,22 @@ export function parseStoredChapterSummaryPayload(
     return null;
   }
   const payload = value.payload;
+  const legacyKeys = [
+    "schemaVersion",
+    "sourceProjectId",
+    "sourceChapterId",
+    "sourceVersionId",
+    "sourceContentHash",
+    "citations",
+    "keyEvents",
+    "continuityNotes",
+    "generation",
+    "budget",
+  ] as const;
+  const currentKeys = [...legacyKeys, "authorityMode"] as const;
+  const payloadHasCurrentShape = hasExactKeys(payload, currentKeys);
   if (
-    !hasExactKeys(payload, [
-      "schemaVersion",
-      "sourceProjectId",
-      "sourceChapterId",
-      "sourceVersionId",
-      "sourceContentHash",
-      "citations",
-      "keyEvents",
-      "continuityNotes",
-      "generation",
-      "budget",
-    ]) ||
+    (!payloadHasCurrentShape && !hasExactKeys(payload, legacyKeys)) ||
     payload.schemaVersion !== CHAPTER_SUMMARY_PAYLOAD_SCHEMA_VERSION ||
     typeof payload.sourceProjectId !== "string" ||
     typeof payload.sourceChapterId !== "string" ||
@@ -756,7 +796,14 @@ export function parseStoredChapterSummaryPayload(
   ) {
     return null;
   }
-  const parsed = payload as unknown as StoredChapterSummaryPayload;
+  const authorityMode = payloadHasCurrentShape ? payload.authorityMode : "structured_verified";
+  if (authorityMode !== "structured_verified" && authorityMode !== "plain_non_authoritative") {
+    return null;
+  }
+  const parsed = Object.freeze({
+    ...payload,
+    authorityMode,
+  }) as unknown as StoredChapterSummaryPayload;
   const citationIds = new Set(parsed.citations.map(({ evidenceId }) => evidenceId));
   if (
     citationIds.size !== parsed.citations.length ||
@@ -842,6 +889,7 @@ function receipt(
     fact: null,
     replacedFactIds: Object.freeze([]),
     invocation: null,
+    authorityMode: null,
   });
 }
 

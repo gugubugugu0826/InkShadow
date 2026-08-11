@@ -3,10 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   generateCreativeOpening,
   MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS,
+  persistCreativeOpeningCandidate,
 } from "./creative-opening-service";
 import { createImportRewriteCandidate } from "./import-rewrite-service";
 import type { ModelProviderKind, NovelAiTask } from "./model-hub-provider-registry";
 import type { ModelHubStore } from "./model-hub-store";
+import type { PreparedNovelSkillInvocation } from "./novel-skill-runtime";
 import { createSelectionRewriteCandidate } from "./selection-rewrite-service";
 import {
   createConfiguredModelCandidate,
@@ -70,6 +72,114 @@ describe("real creative chains use Model Hub routes", () => {
     });
   }
 
+  it("links the opening trace and rechecks privacy before committing an exact zero-selection method receipt", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "ollama",
+      connectionId: "traceable-opening",
+      catalogEntryId: "traceable-opening-catalog",
+      modelId: "traceable-opening-model",
+      dataDestination: "local",
+    });
+    harness.generate.mockResolvedValue({ text: "可追溯的开头正文。", usage: null });
+    const compiled = Object.freeze({}) as NonNullable<PreparedNovelSkillInvocation["compiled"]>;
+    const preparation: PreparedNovelSkillInvocation = Object.freeze({
+      status: "prepared_none_selected",
+      notAppliedReason: null,
+      availability: Object.freeze({ status: "ready", reason: null }),
+      maximumSkillTokens: 1_200,
+      usedSkillTokens: 0,
+      promptSection: null,
+      methods: Object.freeze([]),
+      compiled,
+    });
+    vi.spyOn(harness.runtime.novelSkills, "getReservedTokens").mockResolvedValue(1_200);
+    const prepareSkill = vi
+      .spyOn(harness.runtime.novelSkills, "prepareInvocation")
+      .mockResolvedValue(preparation);
+    const commitSkill = vi
+      .spyOn(harness.runtime.novelSkills, "commitBeforeDispatch")
+      .mockResolvedValue(
+        Object.freeze({
+          taskType: "book_start_guidance",
+          invocationMode: "draft",
+          maximumSkillTokens: 1_200,
+          usedSkillTokens: 0,
+          methods: Object.freeze([]),
+          createdAt: harness.runtime.clock.now(),
+        }),
+      );
+    const saveTrace = vi.spyOn(harness.runtime.contextTraces, "save");
+    const linkInvocation = vi.spyOn(harness.runtime.contextTraces, "linkModelInvocation");
+    const recheckPrivacy = vi.spyOn(
+      harness.runtime.projectContextPrivacy,
+      "assertCurrentBeforeDispatch",
+    );
+
+    const requestId = harness.runtime.ids.next();
+    const result = await generateCreativeOpening(harness.runtime, {
+      idea: "旧车站在午夜多出一条不存在的站台。",
+      requestId,
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+    });
+
+    expect(saveTrace).toHaveBeenCalledOnce();
+    expect(linkInvocation).toHaveBeenCalledOnce();
+    expect(recheckPrivacy).toHaveBeenCalledTimes(2);
+    expect(commitSkill).toHaveBeenCalledOnce();
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(result.noticeCode).toBeNull();
+    expect(result).toMatchObject({
+      source: "provider",
+      providerId: "traceable-opening",
+      modelId: "traceable-opening-model",
+    });
+    expect(typeof result.contextTraceId).toBe("string");
+    expect(prepareSkill).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: chapter.projectId,
+        taskType: "book_start_guidance",
+        invocationMode: "draft",
+      }),
+    );
+    const committed = commitSkill.mock.calls[0]?.[0];
+    expect(committed).toMatchObject({
+      projectId: chapter.projectId,
+      contextTraceId: result.contextTraceId,
+      taskType: "book_start_guidance",
+      invocationMode: "draft",
+      preparation,
+    });
+    const trace = await harness.runtime.contextTraces.findById(result.contextTraceId ?? "missing");
+    expect(trace).toMatchObject({
+      id: result.contextTraceId,
+      projectId: chapter.projectId,
+      chapterId: chapter.id,
+      taskType: "book_start_guidance",
+      execution: {
+        generationId: requestId,
+        modelInvocationId: committed?.modelInvocationId,
+      },
+    });
+    expect(saveTrace.mock.invocationCallOrder[0]).toBeLessThan(
+      linkInvocation.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+    expect(linkInvocation.mock.invocationCallOrder[0]).toBeLessThan(
+      recheckPrivacy.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+    expect(recheckPrivacy.mock.invocationCallOrder[0]).toBeLessThan(
+      commitSkill.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+    expect(commitSkill.mock.invocationCallOrder[0]).toBeLessThan(
+      harness.generate.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+    expect(harness.generate.mock.invocationCallOrder[0]).toBeLessThan(
+      recheckPrivacy.mock.invocationCallOrder[1] ?? Number.MAX_SAFE_INTEGER,
+    );
+  });
+
   it("exposes only a sufficiently visible DeepSeek truncation as an explicit partial opening", async () => {
     const harness = createNativeHarness();
     await seedModelHubTextRoute(harness.runtime.modelHub, {
@@ -101,6 +211,7 @@ describe("real creative chains use Model Hub routes", () => {
       providerId: "opening-deepseek",
       modelId: "deepseek-chat",
       noticeCode: "MODEL_OUTPUT_TRUNCATED",
+      contextTraceId: null,
     });
     expect(harness.generate.mock.calls[0]?.[0]).toMatchObject({
       reasoningMode: "disabled",
@@ -138,6 +249,136 @@ describe("real creative chains use Model Hub routes", () => {
       noticeCode: "MODEL_OUTPUT_TRUNCATED",
     });
     expect(result.text).not.toContain("太短");
+  });
+
+  it("fails closed before a remote provider receives a private opening workspace", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    const privacy = await harness.runtime.useCases.setChapterPrivacy.execute({
+      chapterId: chapter.id,
+      privacyMode: "local_only",
+      expectedPrivacyRevision: chapter.privacyRevision,
+    });
+    if (!privacy.ok) throw privacy.error;
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "google_gemini",
+      connectionId: "remote-private-opening",
+      catalogEntryId: "remote-private-opening-catalog",
+      modelId: "remote-private-opening-model",
+    });
+
+    const result = await generateCreativeOpening(harness.runtime, {
+      idea: "这段灵感只能在本地处理。",
+      requestId: "private-opening-request",
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+    });
+
+    expect(result).toMatchObject({
+      requestId: "private-opening-request",
+      source: "local_fallback",
+      providerId: null,
+      modelId: null,
+      contextTraceId: null,
+    });
+    expect(harness.generate).not.toHaveBeenCalled();
+    await expectStableChapter(harness.runtime, chapter.id, "");
+    await expectCandidateCount(harness.runtime, chapter.id, 0);
+    const versions = await harness.runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    expect(versions.ok && versions.value).toHaveLength(1);
+  });
+
+  it("discards a provider opening when another window changes the empty base version in flight", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "ollama",
+      connectionId: "stale-opening",
+      catalogEntryId: "stale-opening-catalog",
+      modelId: "stale-opening-model",
+      dataDestination: "local",
+    });
+    harness.generate.mockImplementation(async () => {
+      const edited = await harness.runtime.useCases.editChapter.execute({
+        chapterId: chapter.id,
+        expectedRevision: chapter.revision,
+        content: "A different window saved正文 while the opening was generating.",
+        cursorOffset: 0,
+      });
+      if (!edited.ok) throw edited.error;
+      const saved = await harness.runtime.useCases.saveChapter.execute({
+        chapterId: chapter.id,
+        expectedRevision: chapter.revision,
+        reason: "manual",
+      });
+      if (!saved.ok) throw saved.error;
+      return { text: "This stale opening must be discarded.", usage: null };
+    });
+
+    const result = await generateCreativeOpening(harness.runtime, {
+      idea: "A station appears only after midnight.",
+      requestId: harness.runtime.ids.next(),
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+    });
+
+    expect(result).toMatchObject({
+      source: "local_fallback",
+      noticeCode: "CREATIVE_OPENING_WORKSPACE_CHANGED",
+      contextTraceId: null,
+    });
+    expect(result.text).not.toContain("stale opening");
+    await expectCandidateCount(harness.runtime, chapter.id, 0);
+    const versions = await harness.runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    expect(versions.ok && versions.value).toHaveLength(2);
+  });
+
+  it("rejects Candidate persistence when an opening trace belongs to an older base version", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "ollama",
+      connectionId: "candidate-trace-opening",
+      catalogEntryId: "candidate-trace-opening-catalog",
+      modelId: "candidate-trace-opening-model",
+      dataDestination: "local",
+    });
+    harness.generate.mockResolvedValue({ text: "A traceable opening.", usage: null });
+    const generated = await generateCreativeOpening(harness.runtime, {
+      idea: "A locked archive begins answering questions.",
+      requestId: harness.runtime.ids.next(),
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+    });
+    if (generated.contextTraceId === null) throw new Error("expected an opening trace");
+
+    const edited = await harness.runtime.useCases.editChapter.execute({
+      chapterId: chapter.id,
+      expectedRevision: chapter.revision,
+      content: "正文 now has a newer immutable version.",
+      cursorOffset: 0,
+    });
+    if (!edited.ok) throw edited.error;
+    const saved = await harness.runtime.useCases.saveChapter.execute({
+      chapterId: chapter.id,
+      expectedRevision: chapter.revision,
+      reason: "manual",
+    });
+    if (!saved.ok) throw saved.error;
+
+    const persisted = await persistCreativeOpeningCandidate(
+      harness.runtime,
+      chapter.id,
+      generated.text,
+      harness.runtime.ids.next(),
+      false,
+      generated.contextTraceId,
+    );
+
+    expect(persisted.ok).toBe(false);
+    if (persisted.ok) throw new Error("expected a stale trace rejection");
+    expect(persisted.error).toMatchObject({ code: "CONTEXT_TRACE_UNAVAILABLE" });
+    await expectCandidateCount(harness.runtime, chapter.id, 0);
   });
 
   it("keeps the legacy opening profile working only when no Model Hub route exists", async () => {
@@ -768,17 +1009,11 @@ describe("real creative chains use Model Hub routes", () => {
       model: "continuation-claude-model",
     });
     expect(harness.generate.mock.calls[0]?.[0]).not.toHaveProperty("temperature");
-    await expect(
-      harness.runtime.contextTraces.findByOutputCandidateId(result.value.id),
-    ).resolves.toMatchObject({
-      execution: {
-        generationRunId: null,
-      },
-      outputCandidateId: result.value.id,
-    });
     const directTrace = await harness.runtime.contextTraces.findByOutputCandidateId(
       result.value.id,
     );
+    expect(directTrace).toMatchObject({ outputCandidateId: result.value.id });
+    expect(typeof directTrace?.execution?.generationRunId).toBe("string");
     expect(typeof directTrace?.execution?.modelInvocationId).toBe("string");
     await expectStableChapter(harness.runtime, chapter.id, "编辑器中的稳定正文。");
     await expectCandidateCount(harness.runtime, chapter.id, 1);
@@ -896,6 +1131,7 @@ describe("real creative chains use Model Hub routes", () => {
       includeCapability: false,
     });
 
+    const modelCatalogReadsBeforeExecution = harness.listModels.mock.calls.length;
     const result = await createConfiguredModelCandidate(harness.runtime, chapter.id);
 
     expect(result.ok).toBe(false);
@@ -903,7 +1139,7 @@ describe("real creative chains use Model Hub routes", () => {
       throw new Error("expected continuation policy failure");
     }
     expect(result.error).toMatchObject({ code: "MODEL_HUB_CAPABILITY_NOT_VERIFIED" });
-    expect(harness.listModels).not.toHaveBeenCalled();
+    expect(harness.listModels).toHaveBeenCalledTimes(modelCatalogReadsBeforeExecution + 1);
     expect(harness.generate).not.toHaveBeenCalled();
     await expectStableChapter(harness.runtime, chapter.id, "不可绕过策略的正文。");
     await expectCandidateCount(harness.runtime, chapter.id, 0);
@@ -1009,6 +1245,7 @@ async function seedModelHubTextRoute(
     catalogEntryId: string;
     modelId: string;
     includeCapability?: boolean;
+    dataDestination?: "local" | "remote";
   }>,
 ): Promise<void> {
   const connection = await modelHub.saveConnection({
@@ -1065,7 +1302,7 @@ async function seedModelHubTextRoute(
     cachedInputMicrosPerMillionTokens: "0",
     pricingVersion: "creative-chain-zero-cost-v1",
     priceUpdatedAt: "2026-08-01T00:00:00.000Z",
-    dataDestination: "remote",
+    dataDestination: input.dataDestination ?? "remote",
     retentionPolicy: "provider_default",
     trainingPolicy: "unknown",
     evidenceSource: "user_confirmed",

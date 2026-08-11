@@ -6,6 +6,8 @@ import {
   NOVEL_AI_TASKS,
   getModelProviderPreset,
   modelProviderVisibleProsePolicy,
+  modelProviderKindForOfficialEndpoint,
+  modelProviderOfficialMetadataFallback,
   modelProviderTextCapabilityProbePolicy,
   isLoopbackModelBaseUrl,
   listModelProviderPresets,
@@ -35,6 +37,53 @@ describe("Model Hub provider registry", () => {
     for (const provider of MODEL_PROVIDER_KINDS.filter((provider) => provider !== "deepseek")) {
       expect(modelProviderVisibleProsePolicy(provider)).toEqual({ reasoningMode: null });
     }
+  });
+
+  it("recognizes legacy official endpoints without guessing from model names", () => {
+    expect(modelProviderKindForOfficialEndpoint("https://api.deepseek.com/v1")).toBe("deepseek");
+    expect(modelProviderKindForOfficialEndpoint("https://api.openai.com/v1")).toBe("openai");
+    expect(modelProviderKindForOfficialEndpoint("https://compatible.example.test/v1")).toBeNull();
+    expect(modelProviderKindForOfficialEndpoint("not a url")).toBeNull();
+  });
+
+  it("keeps DeepSeek limits as expiring provider declarations, not local verification", () => {
+    expect(
+      modelProviderOfficialMetadataFallback("deepseek", "2026-08-10T12:00:00.000Z", {
+        baseUrl: "https://api.deepseek.com",
+        modelId: "deepseek-v4-flash",
+      }),
+    ).toMatchObject({
+      evidenceSource: "provider_official_docs",
+      contextWindowTokens: 1_000_000,
+      maximumOutputTokens: 384_000,
+      structuredOutputDeclared: true,
+      thinkingDeclared: true,
+      thinkingDefault: "enabled",
+    });
+    expect(
+      modelProviderOfficialMetadataFallback("deepseek", "2026-09-10T00:00:00.000Z", {
+        baseUrl: "https://api.deepseek.com",
+        modelId: "deepseek-v4-flash",
+      }),
+    ).toBeNull();
+    expect(
+      modelProviderOfficialMetadataFallback("openai", "2026-08-10T12:00:00.000Z", {
+        baseUrl: "https://api.openai.com/v1",
+        modelId: "some-model",
+      }),
+    ).toBeNull();
+    expect(
+      modelProviderOfficialMetadataFallback("deepseek", "2026-08-10T12:00:00.000Z", {
+        baseUrl: "https://deepseek-proxy.example.test/v1",
+        modelId: "deepseek-v4-flash",
+      }),
+    ).toBeNull();
+    expect(
+      modelProviderOfficialMetadataFallback("deepseek", "2026-08-10T12:00:00.000Z", {
+        baseUrl: "https://api.deepseek.com",
+        modelId: "future-unknown-model",
+      }),
+    ).toBeNull();
   });
 
   it("registers the launch providers without hard-coding a model catalog", () => {

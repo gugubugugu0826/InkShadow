@@ -509,6 +509,9 @@ function projectModel(
 function supports(model: ModelHubModelProjection, capability: ModelHubCapability): boolean {
   if (!model.connectionUsable) return false;
   const state = model.capabilities.find((candidate) => candidate.capability === capability)?.state;
+  if (capability === "structured_output") {
+    return state === "verified" || state === "user_confirmed";
+  }
   return state === "verified" || state === "catalog_declared" || state === "user_confirmed";
 }
 

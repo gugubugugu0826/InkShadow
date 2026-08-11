@@ -1,7 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
-import { createProjectSeed, updateProjectSeedField } from "@inkshadow/domain";
+// @vitest-environment jsdom
+
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { NovelSkillDefinition, ProjectNovelSkillBinding } from "@inkshadow/ai-core";
+import { createProjectSeed, parseUuidV7, updateProjectSeedField } from "@inkshadow/domain";
 
 import { ModelCenterError } from "./model-center-store";
+import { TauriNovelSkillRuntime, type NovelSkillRuntimePersistence } from "./novel-skill-runtime";
+import type {
+  CommitNovelSkillInvocationInput,
+  NovelSkillInvocationSnapshotRecord,
+} from "./novel-skill-sqlite-store";
 import {
   canDeferGenerationPlan,
   cancelGenerationPlan,
@@ -14,6 +22,10 @@ import {
 } from "./runtime";
 
 describe("governed generation runtime", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
   it("includes confirmed ProjectSeed guidance in the real continuation context", async () => {
     const { runtime, chapterId } = await createNativeRuntime();
     const chapter = await runtime.repositories.chapters.findById(chapterId);
@@ -130,7 +142,20 @@ describe("governed generation runtime", () => {
     expect(run).toMatchObject({
       state: "completed",
       incurredCostMicros: plan.preflight.estimate?.micros.toString(),
+      preflight: {
+        generationBudget: {
+          outputProfile: "standard",
+          targetVisibleCharacters: 2_200,
+          requestedMaximumOutputTokens: 3_328,
+          budgetStatus: "available",
+        },
+      },
     });
+    const contextSummary = run?.preflight.contextSelectionSummary;
+    expect(typeof contextSummary?.selectedSourceCount).toBe("number");
+    expect(typeof contextSummary?.deduplicatedSourceCount).toBe("number");
+    expect(typeof contextSummary?.excludedSourceCount).toBe("number");
+    expect(typeof contextSummary?.estimatedSelectedTokens).toBe("number");
     await expect(runtime.generationGovernance.listAttemptUsage(plan.runId)).resolves.toEqual([
       expect.objectContaining({
         source: "provider_reported",
@@ -295,6 +320,403 @@ describe("governed generation runtime", () => {
       state: "cancelled",
       candidateId: result.value.candidate.id,
     });
+  });
+
+  it("retries one reasoning-only OpenAI-compatible truncation with thinking disabled", async () => {
+    const generate = vi
+      .fn<NativeModelGatewayClient["generate"]>()
+      .mockRejectedValueOnce(
+        new ModelCenterError("MODEL_OUTPUT_TRUNCATED", "reasoning used the output budget", true, {
+          requestId: "reasoning-only-1",
+          httpStatus: 200,
+          finishReason: "length",
+          visibleContentLength: 0,
+          reasoningPresent: true,
+          stream: true,
+          inputTokens: 80,
+          outputTokens: 64,
+        }),
+      )
+      .mockResolvedValueOnce(generationResult("关闭推理后的可见续写。", 80, 20));
+    const created = await createRemoteRuntime({ generate });
+    const experimental = await attachEnabledNovelSkills(created.runtime, created.chapterId);
+    const runtime = experimental.runtime;
+    const chapterId = created.chapterId;
+    await seedModelHubContinuationRoute(runtime);
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+    expect(plan.executionMode).toBe("model_hub");
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    if (!result.ok || result.value.candidate === null) {
+      throw new Error("Expected a complete Candidate from the second Model Hub attempt.");
+    }
+    expect(result.value).toMatchObject({ incomplete: false, cancelled: false });
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(generate.mock.calls[0]?.[0].reasoningMode).toBeUndefined();
+    expect(generate.mock.calls[1]?.[0]).toMatchObject({ reasoningMode: "disabled" });
+    expect(generate.mock.calls[1]?.[0].generationId).not.toBe(
+      generate.mock.calls[0]?.[0].generationId,
+    );
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapterId);
+    expect(candidates.ok && candidates.value).toHaveLength(1);
+    const chapter = await runtime.repositories.chapters.findById(chapterId);
+    if (!chapter.ok || chapter.value === null) throw new Error("Expected the test chapter.");
+    const traces = (await runtime.contextTraces.listByProjectId(chapter.value.projectId)).filter(
+      ({ execution }) => execution?.generationRunId === plan.runId,
+    );
+    expect(traces).toHaveLength(2);
+    expect(new Set(traces.map(({ id }) => id)).size).toBe(2);
+    expect(new Set(traces.map(({ execution }) => execution?.generationId)).size).toBe(2);
+    expect(
+      new Set(traces.map(({ execution }) => execution?.modelInvocationId).filter(Boolean)).size,
+    ).toBe(2);
+    expect(experimental.persistence.commits).toHaveLength(2);
+    expect(new Set(experimental.persistence.commits.map(({ snapshotId }) => snapshotId)).size).toBe(
+      2,
+    );
+    expect(
+      new Set(experimental.persistence.commits.map(({ contextTraceId }) => contextTraceId)).size,
+    ).toBe(2);
+    expect(
+      new Set(experimental.persistence.commits.map(({ modelInvocationId }) => modelInvocationId))
+        .size,
+    ).toBe(2);
+    expect(
+      new Set(experimental.persistence.commits.map(({ contextTraceId }) => contextTraceId)),
+    ).toEqual(new Set(traces.map(({ id }) => id)));
+    expect(traces).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ outputCandidateId: null }),
+        expect.objectContaining({ outputCandidateId: result.value.candidate.id }),
+      ]),
+    );
+  });
+
+  it("fails closed before provider dispatch when an enabled writing method changes after preparation", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult("This must never be dispatched.", 80, 20)),
+    );
+    const created = await createRemoteRuntime({ generate });
+    const experimental = await attachEnabledNovelSkills(created.runtime, created.chapterId);
+    const runtime = experimental.runtime;
+    await seedModelHubContinuationRoute(runtime);
+    const plan = await prepareGenerationPlan(runtime, created.chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    expect(plan.executionMode).toBe("model_hub");
+    expect(plan.novelSkillPreparation.status).toBe("prepared_applied");
+    expect(plan.messages.map(({ content }) => content).join("\n")).toContain("<novel_method>");
+    if (plan.projectId === null) {
+      throw new Error("Expected the prepared project.");
+    }
+    const scene = (await runtime.novelSkills.listProjectState(plan.projectId)).methods.find(
+      ({ displayName }) => displayName === "场景推进",
+    );
+    if (scene === undefined) {
+      throw new Error("Expected the enabled scene method and project.");
+    }
+    await runtime.novelSkills.setMethodEnabled(plan.projectId, scene.skillId, false);
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result.ok).toBe(false);
+    expect(generate).not.toHaveBeenCalled();
+    expect(experimental.persistence.commits).toHaveLength(0);
+  });
+
+  it("does not dispatch when cancellation arrives while the Novel Skill snapshot is awaiting commit", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(
+        generationResult("This cancelled request must not leave the device.", 80, 20),
+      ),
+    );
+    const cancelGeneration = vi.fn<NativeModelGatewayClient["cancelGeneration"]>(() =>
+      Promise.resolve(false),
+    );
+    const created = await createRemoteRuntime({ generate, cancelGeneration });
+    const experimental = await attachEnabledNovelSkills(created.runtime, created.chapterId);
+    const runtime = experimental.runtime;
+    await seedModelHubContinuationRoute(runtime);
+    const plan = await prepareGenerationPlan(runtime, created.chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+    const originalCommit = experimental.persistence.commitInvocationBeforeDispatch.bind(
+      experimental.persistence,
+    );
+    let releaseCommit!: () => void;
+    let commitStarted = false;
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    vi.spyOn(experimental.persistence, "commitInvocationBeforeDispatch").mockImplementation(
+      async (input) => {
+        commitStarted = true;
+        await commitGate;
+        return originalCommit(input);
+      },
+    );
+
+    const execution = executeGenerationPlan(runtime, plan);
+    await vi.waitFor(() => expect(commitStarted).toBe(true));
+    await expect(cancelGenerationPlan(runtime, plan)).resolves.toBe(true);
+    releaseCommit();
+    const result = await execution;
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: { cancelled: true, candidate: null },
+    });
+    expect(cancelGeneration).toHaveBeenCalledWith(plan.generationId);
+    expect(generate).not.toHaveBeenCalled();
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(created.chapterId);
+    expect(candidates.ok && candidates.value).toEqual([]);
+  });
+
+  it("does not dispatch when the project is archived while the Novel Skill snapshot is awaiting commit", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult("This archived request must not leave the device.", 80, 20)),
+    );
+    const created = await createRemoteRuntime({ generate });
+    const experimental = await attachEnabledNovelSkills(created.runtime, created.chapterId);
+    const runtime = experimental.runtime;
+    await seedModelHubContinuationRoute(runtime);
+    const plan = await prepareGenerationPlan(runtime, created.chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+    const originalCommit = experimental.persistence.commitInvocationBeforeDispatch.bind(
+      experimental.persistence,
+    );
+    let releaseCommit!: () => void;
+    let commitStarted = false;
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    vi.spyOn(experimental.persistence, "commitInvocationBeforeDispatch").mockImplementation(
+      async (input) => {
+        commitStarted = true;
+        await commitGate;
+        return originalCommit(input);
+      },
+    );
+
+    const execution = executeGenerationPlan(runtime, plan);
+    await vi.waitFor(() => expect(commitStarted).toBe(true));
+    if (plan.projectId === null) throw new Error("Expected a project-bound plan.");
+    const projectId = parseProjectId(plan.projectId);
+    const archived = await runtime.useCases.archiveProject.execute({ projectId });
+    if (!archived.ok) throw archived.error;
+    releaseCommit();
+    const result = await execution;
+
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_HUB_PREFLIGHT_FAILED" } });
+    expect(generate).not.toHaveBeenCalled();
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(created.chapterId);
+    expect(candidates.ok && candidates.value).toEqual([]);
+  });
+
+  it("discards a successful provider response when cancellation wins before Candidate creation", async () => {
+    let resolveGeneration!: (value: ReturnType<typeof generationResult>) => void;
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        }),
+    );
+    const cancelGeneration = vi.fn<NativeModelGatewayClient["cancelGeneration"]>(() =>
+      Promise.resolve(false),
+    );
+    const { runtime, chapterId } = await createRemoteRuntime({ generate, cancelGeneration });
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const execution = executeGenerationPlan(runtime, plan);
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    await cancelGenerationPlan(runtime, plan);
+    resolveGeneration(generationResult("Late successful response.", 80, 20));
+    const result = await execution;
+
+    expect(result).toMatchObject({ ok: true, value: { cancelled: true, candidate: null } });
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapterId);
+    expect(candidates.ok && candidates.value).toEqual([]);
+  });
+
+  it("rejects a successful provider response after a concurrent accepted-version save", async () => {
+    let resolveGeneration!: (value: ReturnType<typeof generationResult>) => void;
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(
+      () =>
+        new Promise((resolve) => {
+          resolveGeneration = resolve;
+        }),
+    );
+    const { runtime, chapterId, chapterRevision } = await createRemoteRuntime({ generate });
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const execution = executeGenerationPlan(runtime, plan);
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    const edited = await runtime.useCases.editChapter.execute({
+      chapterId,
+      expectedRevision: chapterRevision,
+      content: "A concurrent author save wins over the late provider response.",
+      cursorOffset: 20,
+    });
+    if (!edited.ok) throw edited.error;
+    const saved = await runtime.useCases.saveChapter.execute({
+      chapterId,
+      expectedRevision: chapterRevision,
+      reason: "manual",
+    });
+    if (!saved.ok) throw saved.error;
+    resolveGeneration(generationResult("Late stale response.", 80, 20));
+    const result = await execution;
+
+    expect(result).toMatchObject({ ok: false, error: { code: "BASE_VERSION_CHANGED" } });
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapterId);
+    expect(candidates.ok && candidates.value).toEqual([]);
+    const chapter = await runtime.repositories.chapters.findById(chapterId);
+    expect(chapter.ok && chapter.value?.content).toBe(
+      "A concurrent author save wins over the late provider response.",
+    );
+  });
+
+  it.each(["archive", "save"] as const)(
+    "fails the atomic output commit when a concurrent %s wins after the JS post-check",
+    async (mutation) => {
+      const created = await createRemoteRuntime();
+      const originalCommit = created.runtime.contextTraceOutputs;
+      let releaseCommit!: () => void;
+      let commitStarted = false;
+      const commitGate = new Promise<void>((resolve) => {
+        releaseCommit = resolve;
+      });
+      const runtime: DesktopRuntime = {
+        ...created.runtime,
+        contextTraceOutputs: {
+          capability: originalCommit.capability,
+          commit: async (input) => {
+            commitStarted = true;
+            await commitGate;
+            return originalCommit.commit(input);
+          },
+        },
+      };
+      const plan = await prepareGenerationPlan(runtime, created.chapterId, {
+        chapterSaved: true,
+        networkAvailable: true,
+      });
+
+      const execution = executeGenerationPlan(runtime, plan);
+      await vi.waitFor(() => expect(commitStarted).toBe(true));
+      if (mutation === "archive") {
+        if (plan.projectId === null) throw new Error("Expected a project-bound plan.");
+        const archived = await runtime.useCases.archiveProject.execute({
+          projectId: parseProjectId(plan.projectId),
+        });
+        if (!archived.ok) throw archived.error;
+      } else {
+        const edited = await runtime.useCases.editChapter.execute({
+          chapterId: created.chapterId,
+          expectedRevision: created.chapterRevision,
+          content: "A save committed after the provider result and before Candidate commit.",
+          cursorOffset: 10,
+        });
+        if (!edited.ok) throw edited.error;
+        const saved = await runtime.useCases.saveChapter.execute({
+          chapterId: created.chapterId,
+          expectedRevision: created.chapterRevision,
+          reason: "manual",
+        });
+        if (!saved.ok) throw saved.error;
+      }
+      releaseCommit();
+      const result = await execution;
+
+      expect(result).toMatchObject({ ok: false, error: { code: "CONTEXT_TRACE_UNAVAILABLE" } });
+      const candidates = await runtime.repositories.aiCandidates.listByChapterId(created.chapterId);
+      expect(candidates.ok && candidates.value).toEqual([]);
+    },
+  );
+
+  it("does not repeat a DeepSeek visible-prose request when thinking was already disabled", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>().mockRejectedValue(
+      new ModelCenterError("MODEL_OUTPUT_TRUNCATED", "reasoning-only response", true, {
+        requestId: "deepseek-reasoning-only",
+        httpStatus: 200,
+        finishReason: "length",
+        visibleContentLength: 0,
+        reasoningPresent: true,
+        stream: true,
+        inputTokens: 80,
+        outputTokens: 64,
+      }),
+    );
+    const { runtime, chapterId } = await createRemoteRuntime({
+      generate,
+      baseUrl: "https://api.deepseek.com",
+    });
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_OUTPUT_TRUNCATED" } });
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(generate.mock.calls[0]?.[0]).toMatchObject({ reasoningMode: "disabled" });
+  });
+
+  it("cancels the active reasoning-retry generation id rather than the first attempt", async () => {
+    let resolveSecond!: (value: ReturnType<typeof generationResult>) => void;
+    const generate = vi
+      .fn<NativeModelGatewayClient["generate"]>()
+      .mockRejectedValueOnce(
+        new ModelCenterError("MODEL_OUTPUT_TRUNCATED", "reasoning-only response", true, {
+          requestId: "reasoning-cancel-first",
+          httpStatus: 200,
+          visibleContentLength: 0,
+          reasoningPresent: true,
+          finishReason: "length",
+          stream: true,
+          inputTokens: 80,
+          outputTokens: 64,
+        }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+    const cancelGeneration = vi.fn(() => Promise.resolve(true));
+    const { runtime, chapterId } = await createRemoteRuntime({ generate, cancelGeneration });
+    await seedModelHubContinuationRoute(runtime);
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const execution = executeGenerationPlan(runtime, plan);
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    const firstId = generate.mock.calls[0]?.[0].generationId;
+    const retryId = generate.mock.calls[1]?.[0].generationId;
+    expect(retryId).not.toBe(firstId);
+    await cancelGenerationPlan(runtime, plan);
+    expect(cancelGeneration).toHaveBeenCalledWith(retryId);
+    resolveSecond(generationResult("停止前已返回的正文。", 80, 20));
+    await execution;
   });
 
   it("reuses a persisted retryable run and accumulates the next attempt estimate", async () => {
@@ -608,7 +1030,13 @@ function generationResult(text: string, inputTokens: number, outputTokens: numbe
   } as const;
 }
 
-async function createRemoteRuntime(): Promise<{
+async function createRemoteRuntime(
+  options: Readonly<{
+    generate?: NativeModelGatewayClient["generate"];
+    cancelGeneration?: NativeModelGatewayClient["cancelGeneration"];
+    baseUrl?: string;
+  }> = {},
+): Promise<{
   runtime: DesktopRuntime;
   chapterId: Parameters<typeof prepareGenerationPlan>[1];
   chapterRevision: number;
@@ -631,7 +1059,7 @@ async function createRemoteRuntime(): Promise<{
   await developmentRuntime.modelCenter.save({
     providerId: "remote-writer",
     provider: "open_ai_compatible",
-    baseUrl: "https://models.example/v1",
+    baseUrl: options.baseUrl ?? "https://models.example/v1",
     authentication: "none",
     selectedModel: "writer-model",
     pricing: {
@@ -651,8 +1079,10 @@ async function createRemoteRuntime(): Promise<{
       }),
     checkConnection: () => Promise.reject(new Error("not used")),
     embed: () => Promise.reject(new Error("not used")),
-    generate: () => Promise.resolve(generationResult("Freshly generated candidate.", 100, 20)),
-    cancelGeneration: () => Promise.resolve(true),
+    generate:
+      options.generate ??
+      (() => Promise.resolve(generationResult("Freshly generated candidate.", 100, 20))),
+    cancelGeneration: options.cancelGeneration ?? (() => Promise.resolve(true)),
   };
   return {
     runtime: {
@@ -665,6 +1095,194 @@ async function createRemoteRuntime(): Promise<{
   };
 }
 
+async function seedModelHubContinuationRoute(runtime: DesktopRuntime): Promise<void> {
+  const connection = await runtime.modelHub.saveConnection({
+    id: "reasoning-retry-model-hub",
+    providerKind: "custom_openai_compatible",
+    displayName: "Reasoning retry Model Hub fixture",
+    baseUrlOverride: "https://models.example/v1",
+    credentialState: "missing",
+    authenticationMode: "none",
+    expectedRevision: null,
+  });
+  await runtime.modelHub.recordConnectionTest({
+    connectionId: connection.id,
+    status: "ready",
+    expectedRevision: connection.revision,
+  });
+  await runtime.modelHub.syncCatalog({
+    syncId: "reasoning-retry-model-hub-sync",
+    connectionId: connection.id,
+    source: "manual",
+    status: "succeeded",
+    models: [
+      {
+        id: "reasoning-retry-model-hub-catalog",
+        providerModelId: "writer-model",
+        lifecycle: "stable",
+        inputTokenLimit: 32_000,
+        outputTokenLimit: 8_000,
+        staleAfter: "2027-08-10T00:00:00.000Z",
+      },
+    ],
+  });
+  await runtime.modelHub.recordCapabilityScan({
+    scanId: "reasoning-retry-model-hub-scan",
+    catalogEntryId: "reasoning-retry-model-hub-catalog",
+    scanKind: "lightweight_probe",
+    status: "succeeded",
+    evidenceVersion: "generation-runtime-reasoning-retry-v1",
+    evidence: [
+      {
+        id: "reasoning-retry-model-hub-text",
+        capability: "text_generation",
+        verdict: "supported",
+        evidenceSource: "lightweight_probe",
+      },
+    ],
+  });
+  await runtime.modelHub.saveCostPrivacyProfile({
+    catalogEntryId: "reasoning-retry-model-hub-catalog",
+    currency: "USD",
+    inputMicrosPerMillionTokens: "1000000",
+    outputMicrosPerMillionTokens: "2000000",
+    cachedInputMicrosPerMillionTokens: null,
+    pricingVersion: "generation-runtime-reasoning-retry-v1",
+    priceUpdatedAt: "2026-08-10T00:00:00.000Z",
+    dataDestination: "remote",
+    retentionPolicy: "provider_default",
+    trainingPolicy: "unknown",
+    evidenceSource: "user_confirmed",
+    evidenceVersion: "generation-runtime-reasoning-retry-v1",
+    expectedRevision: null,
+  });
+  await runtime.modelHub.saveTaskRoute({
+    task: "continuation",
+    primaryCatalogEntryId: "reasoning-retry-model-hub-catalog",
+    privacyPolicy: "cloud_allowed",
+    failurePolicy: "stop",
+    routeOrigin: "user",
+    expectedRevision: null,
+  });
+}
+
+async function attachEnabledNovelSkills(
+  runtime: DesktopRuntime,
+  chapterId: Parameters<typeof prepareGenerationPlan>[1],
+): Promise<{
+  readonly runtime: DesktopRuntime;
+  readonly persistence: GenerationNovelSkillPersistence;
+}> {
+  const chapter = await runtime.repositories.chapters.findById(chapterId);
+  if (!chapter.ok || chapter.value === null) {
+    throw new Error("Expected a chapter before enabling an experimental writing method.");
+  }
+  const persistence = new GenerationNovelSkillPersistence();
+  const novelSkills = new TauriNovelSkillRuntime(persistence, runtime.clock);
+  await novelSkills.initialize();
+  const state = await novelSkills.listProjectState(chapter.value.projectId);
+  const scene = state.methods.find(({ displayName }) => displayName === "场景推进");
+  if (scene === undefined) {
+    throw new Error("Expected the built-in scene method.");
+  }
+  await novelSkills.setMethodEnabled(chapter.value.projectId, scene.skillId, true);
+  return {
+    runtime: { ...runtime, novelSkills },
+    persistence,
+  };
+}
+
+class GenerationNovelSkillPersistence implements NovelSkillRuntimePersistence {
+  readonly definitions = new Map<string, NovelSkillDefinition>();
+  readonly bindings = new Map<string, ProjectNovelSkillBinding>();
+  readonly commits: CommitNovelSkillInvocationInput[] = [];
+  readonly snapshots = new Map<string, NovelSkillInvocationSnapshotRecord>();
+
+  public insertDefinition(value: NovelSkillDefinition): Promise<NovelSkillDefinition> {
+    this.definitions.set(`${value.skillId}@${value.version}`, value);
+    return Promise.resolve(value);
+  }
+
+  public listDefinitions(): Promise<readonly NovelSkillDefinition[]> {
+    return Promise.resolve([...this.definitions.values()]);
+  }
+
+  public listBindings(projectId: string): Promise<readonly ProjectNovelSkillBinding[]> {
+    return Promise.resolve(
+      [...this.bindings.values()].filter((binding) => binding.projectId === projectId),
+    );
+  }
+
+  public saveBinding(
+    value: ProjectNovelSkillBinding,
+    expectedRevision: number,
+  ): Promise<ProjectNovelSkillBinding> {
+    const key = `${value.projectId}:${value.skillId}`;
+    const current = this.bindings.get(key);
+    if ((current?.revision ?? 0) !== expectedRevision) {
+      return Promise.reject(new Error("Novel Skill test binding revision changed."));
+    }
+    this.bindings.set(key, value);
+    return Promise.resolve(value);
+  }
+
+  public async commitInvocationBeforeDispatch(
+    input: CommitNovelSkillInvocationInput,
+  ): Promise<NovelSkillInvocationSnapshotRecord> {
+    const currentBindings = await this.listBindings(input.projectId);
+    const actual = currentBindings
+      .map((binding) => ({
+        skillId: binding.skillId,
+        version: binding.pinnedVersion,
+        enabled: binding.enabled,
+        activationMode: binding.activationMode,
+        taskEnabled: binding.taskOverrides[input.taskType]?.enabled ?? null,
+        taskInvocationMode: binding.taskOverrides[input.taskType]?.invocationMode ?? null,
+        revision: binding.revision,
+      }))
+      .sort((left, right) => left.skillId.localeCompare(right.skillId, "en"));
+    const expected = input.compiled.configuration.bindings
+      .map((binding) => ({
+        skillId: binding.skillId,
+        version: binding.version,
+        enabled: binding.enabled,
+        activationMode: binding.activationMode,
+        taskEnabled: binding.taskEnabled,
+        taskInvocationMode: binding.taskInvocationMode,
+        revision: binding.revision,
+      }))
+      .sort((left, right) => left.skillId.localeCompare(right.skillId, "en"));
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw new Error("Novel Skill binding changed before dispatch.");
+    }
+    this.commits.push(input);
+    const snapshot: NovelSkillInvocationSnapshotRecord = Object.freeze({
+      id: input.snapshotId,
+      projectId: input.projectId,
+      contextTraceId: input.contextTraceId,
+      modelInvocationId: input.modelInvocationId,
+      taskType: input.taskType,
+      invocationMode: input.invocationMode,
+      compilerVersion: input.compiled.compilerVersion,
+      maximumSkillTokens: input.compiled.configuration.maximumSkillTokens,
+      usedSkillTokens: input.compiled.usedSkillTokens,
+      discardedSkillTokens: input.compiled.discardedSkillTokens,
+      selectionHash: input.compiled.selectionHash,
+      configuration: input.compiled.configuration,
+      items: input.compiled.items,
+      createdAt: input.createdAt,
+    });
+    this.snapshots.set(input.contextTraceId, snapshot);
+    return snapshot;
+  }
+
+  public findInvocationSnapshotByContextTrace(
+    contextTraceId: string,
+  ): Promise<NovelSkillInvocationSnapshotRecord | null> {
+    return Promise.resolve(this.snapshots.get(contextTraceId) ?? null);
+  }
+}
+
 function localPricing() {
   return {
     contextWindowTokens: 32_000,
@@ -675,4 +1293,10 @@ function localPricing() {
     pricingVersion: "local-zero-cost",
     priceUpdatedAt: "2026-07-27T00:00:00.000Z",
   } as const;
+}
+
+function parseProjectId(value: string) {
+  const parsed = parseUuidV7(value);
+  if (!parsed.ok) throw parsed.error;
+  return parsed.value;
 }

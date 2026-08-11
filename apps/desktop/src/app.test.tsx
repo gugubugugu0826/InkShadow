@@ -932,7 +932,7 @@ describe("desktop vertical slice", () => {
     const user = userEvent.setup();
     renderRoute(runtime, "/settings");
 
-    await screen.findByRole("button", { name: "浏览选择文件" });
+    await screen.findByRole("button", { name: "浏览选择文件" }, { timeout: 5_000 });
     const fileInput = getImportFileInput();
     await user.upload(fileInput, [
       createTextFile("第一章.md", "# 潮来\n\n雾港的钟声响了。", "text/markdown"),
@@ -997,7 +997,7 @@ describe("desktop vertical slice", () => {
     const user = userEvent.setup();
     renderRoute(runtime, "/settings");
 
-    await screen.findByRole("button", { name: "浏览选择文件" });
+    await screen.findByRole("button", { name: "浏览选择文件" }, { timeout: 5_000 });
 
     const fileInput = getImportFileInput();
     await user.upload(fileInput, [

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Badge,
   Button,
@@ -15,29 +15,58 @@ import type {
   ContextCompilationTraceStore,
   ContextCompilationTraceSummary,
 } from "../infrastructure/context-compilation-trace-store";
+import type {
+  NovelSkillInvocationLookup,
+  NovelSkillRuntimePort,
+} from "../infrastructure/novel-skill-runtime";
 import { normalizeUiError, UiActionError } from "../infrastructure/ui-error";
+import { NovelSkillInvocationReference } from "./novel-skill-reference";
 
 export interface ContextHistoryPanelProps {
   readonly projectId: string;
   readonly store: ContextCompilationTraceStore;
+  readonly novelSkills: Pick<NovelSkillRuntimePort, "findInvocationByContextTrace">;
 }
 
-export function ContextHistoryPanel({ projectId, store }: ContextHistoryPanelProps) {
+export function ContextHistoryPanel({ projectId, store, novelSkills }: ContextHistoryPanelProps) {
+  const operationRevision = useRef(0);
+  const projectIdentity = useRef(projectId);
   const [summaries, setSummaries] = useState<readonly ContextCompilationTraceSummary[]>([]);
   const [selected, setSelected] = useState<ContextCompilationTrace | null>(null);
+  const [selectedNovelSkills, setSelectedNovelSkills] = useState<NovelSkillInvocationLookup | null>(
+    null,
+  );
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
+  useLayoutEffect(() => {
+    if (projectIdentity.current !== projectId) {
+      projectIdentity.current = projectId;
+      operationRevision.current += 1;
+    }
+  }, [projectId]);
+
   const load = useCallback(async () => {
+    const revision = operationRevision.current + 1;
+    operationRevision.current = revision;
+    const expectedProjectId = projectId;
+    const isCurrent = (): boolean =>
+      operationRevision.current === revision && projectIdentity.current === expectedProjectId;
     setLoading(true);
+    setDetailLoading(false);
+    setSelected(null);
+    setSelectedNovelSkills(null);
     try {
-      setSummaries(await store.listByProjectId(projectId, 50));
-      setError(null);
+      const next = await store.listByProjectId(projectId, 50);
+      if (isCurrent()) {
+        setSummaries(next);
+        setError(null);
+      }
     } catch (cause: unknown) {
-      setError(cause);
+      if (isCurrent()) setError(cause);
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [projectId, store]);
 
@@ -46,30 +75,43 @@ export function ContextHistoryPanel({ projectId, store }: ContextHistoryPanelPro
     queueMicrotask(() => {
       if (!cancelled) {
         setSelected(null);
+        setSelectedNovelSkills(null);
+        setDetailLoading(false);
         void load();
       }
     });
     return () => {
       cancelled = true;
+      operationRevision.current += 1;
     };
   }, [load]);
 
   async function inspect(id: string): Promise<void> {
+    const revision = operationRevision.current + 1;
+    operationRevision.current = revision;
+    const expectedProjectId = projectId;
+    const isCurrent = (): boolean =>
+      operationRevision.current === revision && projectIdentity.current === expectedProjectId;
     setDetailLoading(true);
     try {
-      const trace = await store.findById(id);
-      if (trace?.projectId !== projectId) {
+      const [trace, skillLookup] = await Promise.all([
+        store.findById(id),
+        loadNovelSkillLookup(novelSkills, id),
+      ]);
+      if (!isCurrent()) return;
+      if (trace?.projectId !== expectedProjectId) {
         throw new UiActionError(
           "CONTEXT_TRACE_NOT_FOUND",
           "这条上下文记录已不存在，请刷新列表后重试。",
         );
       }
       setSelected(trace);
+      setSelectedNovelSkills(skillLookup);
       setError(null);
     } catch (cause: unknown) {
-      setError(cause);
+      if (isCurrent()) setError(cause);
     } finally {
-      setDetailLoading(false);
+      if (isCurrent()) setDetailLoading(false);
     }
   }
 
@@ -118,8 +160,8 @@ export function ContextHistoryPanel({ projectId, store }: ContextHistoryPanelPro
               </CardHeader>
               <CardContent>
                 <p>
-                  预算使用 {summary.usedTokens.toLocaleString("zh-CN")}/
-                  {summary.maximumContextTokens.toLocaleString("zh-CN")}；舍弃{" "}
+                  估算输入 token {summary.usedTokens.toLocaleString("zh-CN")}/
+                  {summary.maximumContextTokens.toLocaleString("zh-CN")}；未发送{" "}
                   {summary.discardedCount}
                   项。
                 </p>
@@ -155,7 +197,14 @@ export function ContextHistoryPanel({ projectId, store }: ContextHistoryPanelPro
                 <CardTitle>本次资料选择明细</CardTitle>
                 <p>{formatTimestamp(selected.createdAt)}，按实际评估顺序排列。</p>
               </div>
-              <Button size="sm" variant="ghost" onClick={() => setSelected(null)}>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setSelected(null);
+                  setSelectedNovelSkills(null);
+                }}
+              >
                 收起
               </Button>
             </div>
@@ -165,7 +214,27 @@ export function ContextHistoryPanel({ projectId, store }: ContextHistoryPanelPro
               <InlineAlert
                 tone="info"
                 title="这条记录与 AI 建议版本精确关联"
-                description={`建议版本标识：${selected.outputCandidateId}`}
+                description="你可以回到对应章节查看、比较或处理这份建议；普通界面不会显示内部标识。"
+              />
+            )}
+            {selectedNovelSkills?.status === "found" && (
+              <NovelSkillInvocationReference invocation={selectedNovelSkills.invocation} />
+            )}
+            {selectedNovelSkills?.status === "not_found" && (
+              <InlineAlert
+                tone="info"
+                title="这次没有可追溯的写作方法收据"
+                description="这可能是启用写作方法之前生成的旧记录，或使用了无法建立精确调用链的兼容路线；不会把它误报为已采用。"
+              />
+            )}
+            {selectedNovelSkills?.status === "unavailable" && (
+              <InlineAlert
+                tone="info"
+                title="本环境不提供写作方法收据"
+                description={
+                  selectedNovelSkills.availability.reason ??
+                  "写作方法记录当前不可用；故事资料记录仍可正常查看。"
+                }
               />
             )}
             <div className="story-governance-grid">
@@ -180,21 +249,24 @@ export function ContextHistoryPanel({ projectId, store }: ContextHistoryPanelPro
                   <p>
                     {entry.included ? entry.selectionReason : discardLabel(entry.discardedReason)}
                   </p>
+                  <p>
+                    <strong>资料：</strong>
+                    {humanReadableSourceTitle(entry)}
+                  </p>
                   <p className="candidate-panel__hint">
-                    估算 {entry.estimatedTokens.toLocaleString("zh-CN")} 个用量单位；处理前剩余
+                    为保护作品内容，历史记录只保存来源类别、选择原因与预算，不保存正文摘录。
+                  </p>
+                  <p className="candidate-panel__hint">
+                    估算 {entry.estimatedTokens.toLocaleString("zh-CN")} 个输入 token；处理前剩余
                     {entry.budgetRemainingBefore.toLocaleString("zh-CN")}，处理后剩余
                     {entry.budgetRemainingAfter.toLocaleString("zh-CN")}。
                   </p>
                   <details>
-                    <summary>查看来源标识（{entry.sources.length}）</summary>
+                    <summary>查看来源类别（{uniqueSourceTypes(entry.sources).length}）</summary>
                     <ul>
-                      {entry.sources.map((source, index) => (
-                        <li key={`${entry.contextCandidateId}-${String(index)}`}>
-                          {sourceTypeLabel(source.sourceType)} · {source.sourceId}
-                          {source.sourceVersionId === null
-                            ? ""
-                            : ` · 版本 ${source.sourceVersionId}`}
-                          {source.locator === null ? "" : ` · ${source.locator}`}
+                      {uniqueSourceTypes(entry.sources).map((sourceType) => (
+                        <li key={`${entry.contextCandidateId}-${sourceType}`}>
+                          {sourceTypeLabel(sourceType)}
                         </li>
                       ))}
                     </ul>
@@ -207,6 +279,25 @@ export function ContextHistoryPanel({ projectId, store }: ContextHistoryPanelPro
       )}
     </section>
   );
+}
+
+async function loadNovelSkillLookup(
+  novelSkills: Pick<NovelSkillRuntimePort, "findInvocationByContextTrace">,
+  contextTraceId: string,
+): Promise<NovelSkillInvocationLookup> {
+  try {
+    return await novelSkills.findInvocationByContextTrace(contextTraceId);
+  } catch {
+    return Object.freeze({
+      status: "unavailable",
+      availability: Object.freeze({
+        status: "degraded",
+        reason:
+          "这次写作方法收据暂时无法读取；故事资料记录仍可正常查看，也不会把未知状态误报为已采用。",
+      }),
+      invocation: null,
+    });
+  }
 }
 
 function taskLabel(taskType: string): string {
@@ -266,8 +357,21 @@ function sourceTypeLabel(
 function discardLabel(reason: string | null): string {
   const labels: Readonly<Record<string, string>> = {
     token_budget_exhausted: "本次上下文预算不足，未发送给模型。",
+    duplicate_source: "内容与更高优先级资料重复；证据已合并，没有重复发送。",
   };
   return reason === null ? "本次未采用。" : (labels[reason] ?? `未采用：${reason}`);
+}
+
+function uniqueSourceTypes(
+  sources: ContextCompilationTrace["entries"][number]["sources"],
+): readonly ContextCompilationTrace["entries"][number]["sources"][number]["sourceType"][] {
+  return [...new Set(sources.map(({ sourceType }) => sourceType))];
+}
+
+function humanReadableSourceTitle(entry: ContextCompilationTrace["entries"][number]): string {
+  const sourceLabels = uniqueSourceTypes(entry.sources).map(sourceTypeLabel);
+  if (sourceLabels.length === 0) return layerLabel(entry.layer);
+  return `${layerLabel(entry.layer)} · ${sourceLabels.join("、")}`;
 }
 
 function tokenSourceLabel(source: ContextCompilationTraceSummary["tokenEstimateSource"]): string {

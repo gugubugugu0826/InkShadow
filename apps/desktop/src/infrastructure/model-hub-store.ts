@@ -71,6 +71,20 @@ export interface SafeAiFailureMetadata {
   readonly requestedMaxOutputTokens?: number | null;
 }
 
+/**
+ * Bounded successful-generation observation. It deliberately stores only
+ * counts and transport shape, never the generated text itself.
+ */
+export interface SafeModelCompletionMetadata {
+  readonly visibleContentLength: number;
+  readonly stream: boolean | null;
+}
+
+export interface SafeAiCompletionMetadata {
+  readonly visibleContentLength: number;
+  readonly stream?: boolean | null;
+}
+
 export interface RecentAiFailure {
   readonly diagnosticId: string;
   readonly timestamp: string;
@@ -493,6 +507,7 @@ export interface ModelInvocationFact {
   readonly estimatedCostMicros: string | null;
   readonly errorCode: string | null;
   readonly errorSummary: string | null;
+  readonly completion?: SafeModelCompletionMetadata | null;
   readonly failure?: SafeModelFailureMetadata | null;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
@@ -527,6 +542,7 @@ export interface FinishModelInvocationInput {
   readonly currency?: string | null;
   readonly errorCode?: string | null;
   readonly errorSummary?: string | null;
+  readonly completion?: SafeAiCompletionMetadata | null;
   readonly failure?: SafeAiFailureMetadata | null;
   readonly expectedRevision: number;
 }
@@ -1917,9 +1933,11 @@ export class TauriModelHubStore implements ModelHubStore {
         nullableBooleanInteger(validated.failure?.retryable ?? null),
         validated.failure?.httpStatus ?? null,
         validated.failure?.finishReason ?? null,
-        validated.failure?.visibleContentLength ?? null,
+        validated.completion?.visibleContentLength ??
+          validated.failure?.visibleContentLength ??
+          null,
         nullableBooleanInteger(validated.failure?.reasoningPresent ?? null),
-        nullableBooleanInteger(validated.failure?.stream ?? null),
+        nullableBooleanInteger(validated.completion?.stream ?? validated.failure?.stream ?? null),
         validated.failure?.requestedMaxOutputTokens ?? null,
         this.clock.now(),
         validated.id,
@@ -3081,6 +3099,7 @@ export class InMemoryModelHubStore implements ModelHubStore {
         estimatedCostMicros: null,
         errorCode: null,
         errorSummary: null,
+        completion: null,
         failure: null,
         startedAt: now,
         completedAt: null,
@@ -3118,6 +3137,7 @@ export class InMemoryModelHubStore implements ModelHubStore {
         currency: validated.currency ?? existing.currency,
         errorCode: validated.errorCode,
         errorSummary: validated.errorSummary,
+        completion: validated.completion,
         failure: validated.failure,
         completedAt: this.clock.now(),
         revision: existing.revision + 1,
@@ -4254,10 +4274,20 @@ function validateInvocationFinish(input: FinishModelInvocationInput) {
     input.failure === undefined || input.failure === null
       ? null
       : validateSafeAiFailureMetadata(input.failure);
+  const completion =
+    input.completion === undefined || input.completion === null
+      ? null
+      : validateSafeAiCompletionMetadata(input.completion);
   if (input.status !== "failed" && input.status !== "timed_out" && failure !== null) {
     throw modelHubError(
       "MODEL_HUB_INVOCATION_INVALID",
       "Successful or cancelled invocations cannot contain failure metadata.",
+    );
+  }
+  if (input.status !== "succeeded" && completion !== null) {
+    throw modelHubError(
+      "MODEL_HUB_INVOCATION_INVALID",
+      "Only successful invocations can contain completion metadata.",
     );
   }
   return Object.freeze({
@@ -4270,6 +4300,7 @@ function validateInvocationFinish(input: FinishModelInvocationInput) {
     currency: validateCurrency(input.currency ?? null),
     errorCode,
     errorSummary: safeDiagnosticText(input.errorSummary, "invocation error summary", 1000),
+    completion,
     failure,
     expectedRevision: validateExpectedRevision(input.expectedRevision) ?? 0,
   });
@@ -5104,6 +5135,7 @@ function hydrateRoute(row: RouteRow): NovelTaskRoute {
 }
 
 function hydrateInvocation(row: InvocationRow): ModelInvocationFact {
+  const succeeded = row.status === "succeeded";
   return Object.freeze({
     id: row.id,
     task: validateTask(row.task),
@@ -5126,18 +5158,26 @@ function hydrateInvocation(row: InvocationRow): ModelInvocationFact {
     estimatedCostMicros: row.estimated_cost_micros,
     errorCode: row.error_code,
     errorSummary: row.error_summary,
-    failure: hydrateSafeFailureMetadata({
-      requestId: row.diagnostic_request_id,
-      stage: row.failure_stage,
-      retryable: row.failure_retryable,
-      httpStatus: row.http_status,
-      finishReason: row.finish_reason,
-      visibleContentLength: row.visible_content_length,
-      reasoningPresent: row.reasoning_present,
-      stream: row.streamed,
-      attempt: row.attempt,
-      requestedMaxOutputTokens: row.requested_max_output_tokens,
-    }),
+    completion: succeeded
+      ? hydrateSafeCompletionMetadata({
+          visibleContentLength: row.visible_content_length,
+          stream: row.streamed,
+        })
+      : null,
+    failure: succeeded
+      ? null
+      : hydrateSafeFailureMetadata({
+          requestId: row.diagnostic_request_id,
+          stage: row.failure_stage,
+          retryable: row.failure_retryable,
+          httpStatus: row.http_status,
+          finishReason: row.finish_reason,
+          visibleContentLength: row.visible_content_length,
+          reasoningPresent: row.reasoning_present,
+          stream: row.streamed,
+          attempt: row.attempt,
+          requestedMaxOutputTokens: row.requested_max_output_tokens,
+        }),
     startedAt: row.started_at,
     completedAt: row.completed_at,
     createdAt: row.created_at,
@@ -5498,6 +5538,47 @@ function validateSafeAiFailureMetadata(input: SafeAiFailureMetadata): SafeModelF
   });
 }
 
+function validateSafeAiCompletionMetadata(
+  input: SafeAiCompletionMetadata,
+): SafeModelCompletionMetadata {
+  const candidate: unknown = input;
+  if (
+    !isRecord(candidate) ||
+    containsProhibitedKey(candidate) ||
+    Object.keys(candidate).some((key) => key !== "visibleContentLength" && key !== "stream")
+  ) {
+    throw modelHubError(
+      "MODEL_HUB_COMPLETION_METADATA_INVALID",
+      "AI completion metadata contains an unsupported or sensitive field.",
+    );
+  }
+  if (!Object.hasOwn(candidate, "visibleContentLength")) {
+    throw modelHubError(
+      "MODEL_HUB_COMPLETION_METADATA_INVALID",
+      "AI completion metadata requires a visible content length.",
+    );
+  }
+  const metadata = candidate as unknown as SafeAiCompletionMetadata;
+  const stream = metadata.stream ?? null;
+  if (stream !== null && typeof stream !== "boolean") {
+    throw modelHubError(
+      "MODEL_HUB_COMPLETION_METADATA_INVALID",
+      "The AI completion stream flag is invalid.",
+    );
+  }
+  return Object.freeze({
+    visibleContentLength:
+      optionalNonNegativeInteger(metadata.visibleContentLength) ??
+      (() => {
+        throw modelHubError(
+          "MODEL_HUB_COMPLETION_METADATA_INVALID",
+          "The AI completion visible content length is invalid.",
+        );
+      })(),
+    stream,
+  });
+}
+
 function optionalBoolean(value: boolean | null | undefined, label: string): boolean | null {
   if (value === undefined || value === null) return null;
   if (typeof value !== "boolean") {
@@ -5551,6 +5632,25 @@ function hydrateSafeFailureMetadata(input: {
       input.requestedMaxOutputTokens === null
         ? null
         : (optionalPositiveInteger(input.requestedMaxOutputTokens) ?? null),
+  });
+}
+
+function hydrateSafeCompletionMetadata(input: {
+  readonly visibleContentLength: number | null;
+  readonly stream: number | null;
+}): SafeModelCompletionMetadata | null {
+  if (input.visibleContentLength === null && input.stream === null) return null;
+  if (input.visibleContentLength === null) {
+    throw modelHubError(
+      "MODEL_HUB_STORE_CORRUPT",
+      "A stored completion observation is missing its visible content length.",
+    );
+  }
+  return Object.freeze({
+    visibleContentLength:
+      validateNullableCount(input.visibleContentLength, "AI completion visible content length") ??
+      0,
+    stream: storedNullableBoolean(input.stream, "AI completion stream flag"),
   });
 }
 
