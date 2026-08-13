@@ -75,11 +75,19 @@ export interface ModelHubPageSnapshot {
 
 export interface ModelHubOperationToken {
   readonly operationId: string;
+  readonly coordinatorId: number;
   readonly generation: number;
   readonly action: ModelHubPageAction;
   readonly providerKind: ModelProviderKind | null;
   readonly connectionId: string | null;
   readonly modelId: string | null;
+}
+
+let nextModelHubOperationCoordinatorId = 0;
+
+function allocateModelHubOperationCoordinatorId(): number {
+  nextModelHubOperationCoordinatorId += 1;
+  return nextModelHubOperationCoordinatorId;
 }
 
 /**
@@ -88,6 +96,7 @@ export interface ModelHubOperationToken {
  * The deduplicated runner is used for idempotent StrictMode bootstrap work.
  */
 export class ModelHubOperationCoordinator {
+  private readonly coordinatorId = allocateModelHubOperationCoordinatorId();
   private generation = 0;
   private active: ModelHubOperationToken | null = null;
   private readonly inFlight = new Map<string, Promise<unknown>>();
@@ -102,7 +111,8 @@ export class ModelHubOperationCoordinator {
   ): ModelHubOperationToken {
     this.generation += 1;
     this.active = Object.freeze({
-      operationId: `model-hub:${action}:${String(this.generation)}`,
+      operationId: `model-hub:${String(this.coordinatorId)}:${action}:${String(this.generation)}`,
+      coordinatorId: this.coordinatorId,
       generation: this.generation,
       action,
       providerKind: target.providerKind ?? null,
@@ -125,7 +135,13 @@ export class ModelHubOperationCoordinator {
       modelId?: string | null;
     }> = {},
   ): boolean {
-    if (this.active?.generation !== token.generation) return false;
+    if (
+      this.active?.coordinatorId !== token.coordinatorId ||
+      this.active.operationId !== token.operationId ||
+      this.active.generation !== token.generation
+    ) {
+      return false;
+    }
     if (
       resultTarget.providerKind !== undefined &&
       token.providerKind !== null &&
@@ -190,6 +206,7 @@ export interface LoadAuthoritativeModelHubHydrationInput {
   readonly requestedModelId?: string | null;
   readonly snapshotRevision: number;
   readonly lastAction: ModelHubPageAction;
+  readonly credentialTimeoutMs?: number;
   readonly onPhase?: (phase: ModelHubHydrationPhase) => void;
 }
 
@@ -204,6 +221,9 @@ export async function loadAuthoritativeModelHubHydration(
     Promise.all(NOVEL_AI_TASKS.map((task) => input.modelHub.findTaskRoute(task))),
   ]);
   const allCatalogEntries = Object.freeze(catalogGroups.flat());
+  const selectableConnections = connections.filter(
+    ({ enabled, connectionStatus }) => enabled && connectionStatus !== "disabled",
+  );
   const proseRoute = routeGroups.find(
     (route) => route?.task === "prose_generation" && route.enabled,
   );
@@ -211,9 +231,9 @@ export async function loadAuthoritativeModelHubHydration(
     ({ id }) => id === proseRoute?.primaryCatalogEntryId,
   );
   const selectedConnection =
-    connections.find(({ id }) => id === input.requestedConnectionId) ??
-    connections.find(({ id }) => id === routedCatalogEntry?.connectionId) ??
-    connections[0] ??
+    selectableConnections.find(({ id }) => id === input.requestedConnectionId) ??
+    selectableConnections.find(({ id }) => id === routedCatalogEntry?.connectionId) ??
+    selectableConnections[0] ??
     null;
 
   input.onPhase?.("CHECKING_CREDENTIAL");
@@ -450,12 +470,47 @@ async function readCredentialSummary(
   }
   try {
     return Object.freeze({
-      summary: await input.credentials.getSummary(modelHubCredentialProviderId(selectedConnection)),
+      summary: await waitForCredentialSummary(
+        input.credentials.getSummary(modelHubCredentialProviderId(selectedConnection)),
+        input.credentialTimeoutMs ?? 5_000,
+      ),
       errorCode: null,
     });
   } catch (cause: unknown) {
-    return Object.freeze({ summary: null, errorCode: safeErrorCode(cause) });
+    return Object.freeze({
+      summary: null,
+      errorCode:
+        cause instanceof ModelHubCredentialStatusTimeoutError
+          ? "MODEL_HUB_CREDENTIAL_STATUS_TIMEOUT"
+          : safeErrorCode(cause),
+    });
   }
+}
+
+class ModelHubCredentialStatusTimeoutError extends Error {}
+
+function waitForCredentialSummary<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  const boundedTimeoutMs = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 5_000;
+  return new Promise<T>((resolve, reject) => {
+    const timeout = globalThis.setTimeout(() => {
+      reject(new ModelHubCredentialStatusTimeoutError());
+    }, boundedTimeoutMs);
+    void promise.then(
+      (value) => {
+        globalThis.clearTimeout(timeout);
+        resolve(value);
+      },
+      (cause: unknown) => {
+        globalThis.clearTimeout(timeout);
+        if (cause instanceof Error) {
+          reject(cause);
+          return;
+        }
+        const code = safeErrorCode(cause);
+        reject(Object.assign(new Error(code), { code }));
+      },
+    );
+  });
 }
 
 function connectionRequiresCredential(connection: ModelProviderConnection | null): boolean {

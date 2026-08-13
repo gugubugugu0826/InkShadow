@@ -1,7 +1,42 @@
 # InkShadow 测试与构建结果
 
-> 更新日期：2026-08-12  
-> 证据范围：本页保留各次命令对应的历史证据。`v0.2.2` 已从唯一干净提交完成本地候选、PR/main CI、标签、公开附件回读和 GitHub Pre-release；真实 DeepSeek、当前 Tauri WebView 交互、192 次付费 A/B、2,496 项人工评分与另一台电脑安装保持 `NOT_RUN`，Novel Skill 保持 `KEEP_DISABLED`。
+> 更新日期：2026-08-13  
+> 证据范围：本页把当前工作树证据与历史发布证据分开。`v0.2.2` 已从唯一干净提交完成本地候选、PR/main CI、标签、公开附件回读和 GitHub Pre-release；当前增量没有读取真实供应商 Key。真实 DeepSeek、当前代码的 Tauri WebView/Keyring 交互、192 次付费 A/B、2,496 项人工评分与另一台电脑安装保持 `NOT_RUN`，Novel Skill 保持 `KEEP_DISABLED`。
+
+## 2026-08-13 Model Hub、正文布局与 Novel Skill 受限 smoke
+
+### 聚焦回归
+
+```powershell
+node_modules\.bin\vitest.CMD run apps/desktop/src/infrastructure/model-hub-page-hydration.test.ts apps/desktop/src/infrastructure/model-hub-ui-diagnostics.test.ts apps/desktop/src/infrastructure/model-hub-connection-intent.test.ts apps/desktop/src/infrastructure/selectable-model-catalog-registry.test.ts apps/desktop/src/components/model-hub-selectable-catalog-browser.test.tsx apps/desktop/src/editor-layout-css-contract.test.ts apps/desktop/src/pages/editor-workspace-simplification.test.tsx apps/desktop/src/infrastructure/novel-skill-sqlite-store.test.ts apps/desktop/src/infrastructure/generation-runtime.test.ts apps/desktop/src/pages/settings-page.test.tsx --config apps/desktop/vitest.config.ts --configLoader runner --maxWorkers=1
+```
+
+结果：最终 `10 files / 117 tests PASS`，65.21 秒。覆盖：
+
+- 跨 mount 唯一 operation 身份、真实 effect 顺序诊断时间、5 秒凭据摘要超时、缓存保留、迟到结果隔离及停用连接排除；
+- 版本化官方候选目录的 22 项任务覆盖、普通投影、账户目录优先、全局/任务级浏览器与内容无关连接 intent；
+- 宽屏可访问 separator、1024px 及以下 Drawer、800px compact drawer 和 44px 直接操作目标；
+- 真实临时 SQLite 的 Novel Skill 启用→重启保留→关闭→重启关闭；一次 mocked 200–400 中文字符生成只进入隔离 Candidate，正文和不可变版本不变，拒绝及历史 trace 可跨重开保留。
+
+Novel Skill 两个文件在上述聚焦命令中为 `2 files / 28 tests PASS`。该 smoke 使用本地 mock，零网络、
+零真实 Provider、零付费评测调用；它不证明写作质量，不允许把任何 Core/Genre 改为默认启用。
+
+### 当前工作树工程门禁
+
+| 范围                           | 精确命令                                                                                                                                             | 结果                                                                                                                              | 状态                                |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| Desktop 全量                   | `pnpm.cmd --filter @inkshadow/desktop test`                                                                                                          | 242 files；1,792 passed / 1 skipped / 0 failed；584.79 秒                                                                         | PASS                                |
+| Desktop TypeScript             | `pnpm.cmd --filter @inkshadow/desktop typecheck`                                                                                                     | 退出码 0；26.4 秒                                                                                                                 | PASS                                |
+| Production build               | `pnpm.cmd --filter @inkshadow/desktop build`                                                                                                         | 2,244 modules；21.03 秒；Settings chunk 214.38 KiB；runtime 495.62 / 512 KiB                                                      | PASS                                |
+| Rust 原生严格门禁              | `pnpm.cmd check:rust`                                                                                                                                | 退出码 0；`cargo fmt --check`、全 target `clippy -D warnings`、完整测试通过；160 passed / 1 ignored / 0 failed；测试阶段 84.03 秒 | PASS                                |
+| 响应式 production Chromium     | `node scripts/run-e2e.mjs --dist apps/desktop/dist tests/e2e/desktop-production-reflow.spec.ts tests/e2e/desktop-responsive.spec.ts --reporter=line` | 6/6；覆盖 1440/1280/1024/800、200% 与 DPR2                                                                                        | PASS；不等于 Tauri WebView          |
+| 视觉矩阵                       | production Chromium 浏览器预览                                                                                                                       | 1536/1440/1280/1024/800、125%/150%/200% 等效视口、代表性明暗主题；未发现新的横向溢出、右侧裁切或不可达主操作                      | PASS；真实 Tauri/DPI `NOT_VERIFIED` |
+| Windows Tauri + SQLite/Keyring | 未执行                                                                                                                                               | 当前代码的冷启动、离开/返回、睡眠恢复、凭据超时故障注入与连接返回仍无真实 WebView 证据                                            | NOT_RUN / NOT_VERIFIED              |
+| 真实 Provider / Skill A/B      | 明确未执行                                                                                                                                           | DeepSeek/其他真实供应商、192 次付费调用与 2,496 项人工评分均为 0；全部实验 Skill 保持 `defaultEnabled=false`                      | NOT_RUN / KEEP_DISABLED             |
+
+首次在受限沙箱启动 Vitest/TypeScript 时，Windows pnpm junction 目标不可读，分别在 React 插件与
+`vite/client.d.ts` 解析阶段退出；这两次尝试没有进入断言或源码类型检查。允许读取工作区实际依赖链接后，上述
+聚焦测试、全量测试和类型检查通过。该工具环境失败保留在记录中，不改写为代码测试失败，也不从最终结果中删除。
 
 ## 2026-08-12 v0.2.2 已发布候选与远端门禁
 

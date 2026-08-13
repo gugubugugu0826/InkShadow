@@ -8,6 +8,7 @@ import {
   type CompositionEvent as ReactCompositionEvent,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type SyntheticEvent as ReactSyntheticEvent,
 } from "react";
 import {
@@ -161,6 +162,12 @@ const selectionDerivedInputTypes = new Set([
 const RECOVERY_DRAFT_DEBOUNCE_MS = 350;
 const BACKGROUND_FLUSH_TIMEOUT_MS = 3_000;
 const COMPACT_EDITOR_MEDIA_QUERY = "(max-width: 64rem)";
+const EDITOR_ASSISTANT_DEFAULT_WIDTH_PX = 360;
+const EDITOR_ASSISTANT_MIN_WIDTH_PX = 256;
+const EDITOR_ASSISTANT_MAX_WIDTH_PX = 560;
+const EDITOR_WRITING_MIN_WIDTH_PX = 320;
+const EDITOR_ASSISTANT_KEYBOARD_STEP_PX = 8;
+const EDITOR_ASSISTANT_KEYBOARD_LARGE_STEP_PX = 32;
 const COMPACT_ASSISTANT_FOCUSABLE_SELECTOR = [
   "a[href]",
   "button:not([disabled])",
@@ -186,6 +193,77 @@ const collapsedPanelStyle: CSSProperties = {
   alignSelf: "flex-start",
   padding: "var(--space-2)",
 };
+
+interface EditorAssistantResizeBounds {
+  readonly min: number;
+  readonly max: number;
+}
+
+interface EditorAssistantResizeDrag {
+  readonly pointerId: number;
+  readonly startClientX: number;
+  readonly startWidth: number;
+}
+
+function clampEditorAssistantWidth(width: number, bounds: EditorAssistantResizeBounds): number {
+  return Math.min(bounds.max, Math.max(bounds.min, Math.round(width)));
+}
+
+function initialEditorAssistantWidth(): number {
+  const viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth;
+  const preferredWidth =
+    viewportWidth > 0 ? viewportWidth * 0.24 : EDITOR_ASSISTANT_DEFAULT_WIDTH_PX;
+  return clampEditorAssistantWidth(preferredWidth, {
+    min: EDITOR_ASSISTANT_MIN_WIDTH_PX,
+    max: EDITOR_ASSISTANT_DEFAULT_WIDTH_PX,
+  });
+}
+
+interface EditorAssistantResizeSeparatorProps {
+  readonly width: number;
+  readonly maxWidth: number;
+  readonly onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  readonly onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  readonly onPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  readonly onPointerEnd: (event: ReactPointerEvent<HTMLDivElement>) => void;
+}
+
+/*
+ * A focusable separator with aria-valuenow is an interactive WAI-ARIA separator.
+ * jsx-a11y currently classifies every separator as static, so keep this exception
+ * local to the one standards-based resize control.
+ */
+/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */
+function EditorAssistantResizeSeparator({
+  width,
+  maxWidth,
+  onKeyDown,
+  onPointerDown,
+  onPointerMove,
+  onPointerEnd,
+}: EditorAssistantResizeSeparatorProps) {
+  return (
+    <div
+      className="editor-assistant-resizer"
+      role="separator"
+      aria-label="调整正文与 AI 创作助手宽度"
+      aria-controls="editor-ai-assistant-panel"
+      aria-orientation="vertical"
+      aria-valuemin={EDITOR_ASSISTANT_MIN_WIDTH_PX}
+      aria-valuemax={maxWidth}
+      aria-valuenow={width}
+      aria-valuetext={`AI 创作助手宽度 ${String(width)} 像素`}
+      tabIndex={0}
+      onKeyDown={onKeyDown}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerEnd}
+      onPointerCancel={onPointerEnd}
+      onLostPointerCapture={onPointerEnd}
+    />
+  );
+}
+/* eslint-enable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */
 
 interface CandidateRouteSelection {
   readonly candidate: AiCandidate | null;
@@ -442,6 +520,10 @@ export function EditorPage() {
     open: !compactEditorLayout,
     layoutRevision: editorLayoutRevision,
   }));
+  const [assistantPanelWidth, setAssistantPanelWidth] = useState(initialEditorAssistantWidth);
+  const [assistantPanelMaxWidth, setAssistantPanelMaxWidth] = useState(
+    EDITOR_ASSISTANT_MAX_WIDTH_PX,
+  );
   const chapterDrawerOpen =
     chapterDrawerState.open && chapterDrawerState.layoutRevision === editorLayoutRevision;
   const assistantOpen =
@@ -469,7 +551,9 @@ export function EditorPage() {
   const cursorRef = useRef(0);
   const selectionRef = useRef<EditorSelection>({ start: 0, end: 0 });
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const editorWorkspaceRef = useRef<HTMLDivElement | null>(null);
   const assistantPanelRef = useRef<HTMLElement | null>(null);
+  const assistantResizeDragRef = useRef<EditorAssistantResizeDrag | null>(null);
   const selectionRewriteInstructionRef = useRef<HTMLTextAreaElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const historyRef = useRef<EditorHistory>(createEmptyEditorHistory());
@@ -494,6 +578,102 @@ export function EditorPage() {
   const activeGenerationPlanRef = useRef<PreparedGenerationPlan | null>(null);
   const generationEstimate = generationPlan?.preflight.estimate ?? null;
   const returnedFromAiSettings = searchParams.get("aiSettings") === "returned";
+
+  const measureAssistantResizeBounds = useCallback((): EditorAssistantResizeBounds => {
+    const workspace = editorWorkspaceRef.current;
+    if (workspace === null) {
+      return {
+        min: EDITOR_ASSISTANT_MIN_WIDTH_PX,
+        max: EDITOR_ASSISTANT_MAX_WIDTH_PX,
+      };
+    }
+
+    const workspaceRect = workspace.getBoundingClientRect();
+    const writingCanvas = workspace.querySelector<HTMLElement>(".writing-canvas");
+    const writingRect = writingCanvas?.getBoundingClientRect();
+    if (workspaceRect.width <= 0 || writingRect === undefined) {
+      return {
+        min: EDITOR_ASSISTANT_MIN_WIDTH_PX,
+        max: EDITOR_ASSISTANT_MAX_WIDTH_PX,
+      };
+    }
+
+    const parsedColumnGap = Number.parseFloat(window.getComputedStyle(workspace).columnGap);
+    const columnGap = Number.isFinite(parsedColumnGap) ? parsedColumnGap : 0;
+    const writingOffset = Math.max(0, writingRect.left - workspaceRect.left);
+    const availableWidth = Math.floor(
+      workspaceRect.width - writingOffset - EDITOR_WRITING_MIN_WIDTH_PX - columnGap,
+    );
+    return {
+      min: EDITOR_ASSISTANT_MIN_WIDTH_PX,
+      max: Math.max(
+        EDITOR_ASSISTANT_MIN_WIDTH_PX,
+        Math.min(EDITOR_ASSISTANT_MAX_WIDTH_PX, availableWidth),
+      ),
+    };
+  }, []);
+
+  function handleAssistantResizePointerDown(event: ReactPointerEvent<HTMLDivElement>): void {
+    const bounds = measureAssistantResizeBounds();
+    setAssistantPanelMaxWidth(bounds.max);
+    const startWidth = clampEditorAssistantWidth(assistantPanelWidth, bounds);
+    setAssistantPanelWidth(startWidth);
+    assistantResizeDragRef.current = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startWidth,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.currentTarget.focus({ preventScroll: true });
+    event.preventDefault();
+  }
+
+  function handleAssistantResizePointerMove(event: ReactPointerEvent<HTMLDivElement>): void {
+    const drag = assistantResizeDragRef.current;
+    if (drag?.pointerId !== event.pointerId) return;
+
+    const bounds = measureAssistantResizeBounds();
+    setAssistantPanelMaxWidth(bounds.max);
+    setAssistantPanelWidth(
+      clampEditorAssistantWidth(drag.startWidth + drag.startClientX - event.clientX, bounds),
+    );
+  }
+
+  function finishAssistantResizePointerDrag(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (assistantResizeDragRef.current?.pointerId !== event.pointerId) return;
+
+    assistantResizeDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function handleAssistantResizeKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
+    const bounds = measureAssistantResizeBounds();
+    const step = event.shiftKey
+      ? EDITOR_ASSISTANT_KEYBOARD_LARGE_STEP_PX
+      : EDITOR_ASSISTANT_KEYBOARD_STEP_PX;
+    let requestedWidth: number | null = null;
+    switch (event.key) {
+      case "ArrowLeft":
+        requestedWidth = assistantPanelWidth + step;
+        break;
+      case "ArrowRight":
+        requestedWidth = assistantPanelWidth - step;
+        break;
+      case "Home":
+        requestedWidth = bounds.min;
+        break;
+      case "End":
+        requestedWidth = bounds.max;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    setAssistantPanelMaxWidth(bounds.max);
+    setAssistantPanelWidth(clampEditorAssistantWidth(requestedWidth, bounds));
+  }
 
   useEffect(() => {
     let resetCancelled = false;
@@ -1226,6 +1406,38 @@ export function EditorPage() {
       }
     };
   }, [assistantOpen, compactEditorLayout, setAssistantOpen]);
+
+  useEffect(() => {
+    if (compactEditorLayout || !assistantOpen) {
+      assistantResizeDragRef.current = null;
+      return undefined;
+    }
+
+    const updateBounds = (): void => {
+      const bounds = measureAssistantResizeBounds();
+      setAssistantPanelMaxWidth(bounds.max);
+      setAssistantPanelWidth((current) => clampEditorAssistantWidth(current, bounds));
+    };
+    updateBounds();
+    window.addEventListener("resize", updateBounds);
+    const resizeObserver =
+      typeof ResizeObserver === "function" && editorWorkspaceRef.current !== null
+        ? new ResizeObserver(updateBounds)
+        : null;
+    if (resizeObserver !== null && editorWorkspaceRef.current !== null) {
+      resizeObserver.observe(editorWorkspaceRef.current);
+    }
+    return () => {
+      window.removeEventListener("resize", updateBounds);
+      resizeObserver?.disconnect();
+    };
+  }, [
+    assistantOpen,
+    chapterListOpen,
+    compactEditorLayout,
+    measureAssistantResizeBounds,
+    pageState,
+  ]);
 
   useEffect(() => {
     const stableChapter = chapterRef.current;
@@ -2669,6 +2881,9 @@ export function EditorPage() {
     "--editor-font-size": `${String(typography.fontSize)}px`,
     "--editor-line-height": String(typography.lineHeight),
   } as CSSProperties;
+  const editorWorkspaceStyle = {
+    "--editor-assistant-width": `${String(assistantPanelWidth)}px`,
+  } as CSSProperties;
   const primaryAction = (() => {
     if (readonly) {
       return {
@@ -3037,7 +3252,9 @@ export function EditorPage() {
         )}
 
         <div
+          ref={editorWorkspaceRef}
           className="editor-workspace"
+          style={editorWorkspaceStyle}
           data-chapter-panel={
             compactEditorLayout ? "drawer" : chapterListOpen ? "open" : "collapsed"
           }
@@ -3150,6 +3367,17 @@ export function EditorPage() {
             />
           </section>
 
+          {!compactEditorLayout && assistantOpen && (
+            <EditorAssistantResizeSeparator
+              width={assistantPanelWidth}
+              maxWidth={assistantPanelMaxWidth}
+              onKeyDown={handleAssistantResizeKeyDown}
+              onPointerDown={handleAssistantResizePointerDown}
+              onPointerMove={handleAssistantResizePointerMove}
+              onPointerEnd={finishAssistantResizePointerDrag}
+            />
+          )}
+
           {compactEditorLayout && assistantOpen && (
             <button
               type="button"
@@ -3162,6 +3390,7 @@ export function EditorPage() {
           )}
           {assistantOpen ? (
             <aside
+              id="editor-ai-assistant-panel"
               ref={assistantPanelRef}
               className={`candidate-panel candidate-panel--assistant${compactEditorLayout ? " candidate-panel--assistant-overlay" : ""}`}
               aria-labelledby="candidate-title"

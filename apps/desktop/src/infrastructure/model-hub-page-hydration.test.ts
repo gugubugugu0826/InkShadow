@@ -263,6 +263,134 @@ describe("Model Hub page hydration", () => {
     expect(hydrated.page.selectedModelId).toBe("aaa-first-enabled-model");
   });
 
+  it("ignores requested disabled and routed retired connections before reading credentials", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const active = await runtime.modelHub.saveConnection({
+      id: "active-fallback",
+      providerKind: "openai",
+      displayName: "Active fallback",
+      credentialRef: "keyring:model-hub:active-fallback",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    const retiredSource = await runtime.modelHub.saveConnection({
+      id: "retired-route-target",
+      providerKind: "deepseek",
+      displayName: "Retired route target",
+      credentialRef: "keyring:model-hub:retired-route-target",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    await runtime.modelHub.saveConnection({
+      id: "disabled-request-target",
+      providerKind: "deepseek",
+      displayName: "Disabled request target",
+      credentialState: "missing",
+      authenticationMode: "bearer_keyring",
+      enabled: false,
+      expectedRevision: null,
+    });
+    await runtime.modelHub.syncCatalog({
+      syncId: "active-fallback-sync",
+      connectionId: active.id,
+      source: "provider_api",
+      status: "succeeded",
+      models: [{ id: "active-fallback-catalog", providerModelId: "active-model" }],
+    });
+    await runtime.modelHub.syncCatalog({
+      syncId: "retired-route-target-sync",
+      connectionId: retiredSource.id,
+      source: "provider_api",
+      status: "succeeded",
+      models: [{ id: "retired-route-target-catalog", providerModelId: "retired-model" }],
+    });
+    await runtime.modelHub.saveTaskRoute({
+      task: "prose_generation",
+      primaryCatalogEntryId: "retired-route-target-catalog",
+      privacyPolicy: "cloud_allowed",
+      failurePolicy: "stop",
+      routeOrigin: "user",
+      expectedRevision: null,
+    });
+    const currentRetiredSource = await runtime.modelHub.findConnection(retiredSource.id);
+    if (currentRetiredSource === null) throw new Error("Expected the route target connection.");
+    await runtime.modelHub.retireConnection({
+      connectionId: retiredSource.id,
+      expectedRevision: currentRetiredSource.revision,
+    });
+    const getSummary = vi.fn(() => Promise.resolve({ configured: true, lastFour: "3172" }));
+
+    const hydrated = await loadAuthoritativeModelHubHydration({
+      modelHub: runtime.modelHub,
+      credentials: { getSummary },
+      mode: "tauri",
+      clock: runtime.clock,
+      requestedConnectionId: "disabled-request-target",
+      snapshotRevision: 1,
+      lastAction: "bootstrap",
+    });
+
+    expect(hydrated.page.connections).toHaveLength(3);
+    expect(hydrated.page.selectedConnectionId).toBe("active-fallback");
+    expect(hydrated.page.selectedModelId).toBe("active-model");
+    expect(getSummary).toHaveBeenCalledTimes(1);
+    expect(getSummary).toHaveBeenCalledWith("active-fallback");
+  });
+
+  it("keeps the cached catalog ready when the system credential status reaches its deadline", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.modelHub.saveConnection({
+      id: "credential-timeout",
+      providerKind: "deepseek",
+      displayName: "DeepSeek timeout",
+      credentialRef: "keyring:model-hub:credential-timeout",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    await runtime.modelHub.syncCatalog({
+      syncId: "credential-timeout-sync",
+      connectionId: "credential-timeout",
+      source: "provider_api",
+      status: "succeeded",
+      models: [{ id: "credential-timeout-model", providerModelId: "deepseek-v4-flash" }],
+    });
+    const lateCredential = deferred<Readonly<{ configured: boolean; lastFour: string | null }>>();
+    const getSummary = vi.fn(() => lateCredential.promise);
+
+    const hydrated = await loadAuthoritativeModelHubHydration({
+      modelHub: runtime.modelHub,
+      credentials: { getSummary },
+      mode: "tauri",
+      clock: runtime.clock,
+      requestedConnectionId: "credential-timeout",
+      snapshotRevision: 1,
+      lastAction: "bootstrap",
+      credentialTimeoutMs: 0,
+    });
+
+    expect(hydrated.page).toMatchObject({
+      phase: "READY_WITH_WARNINGS",
+      credentialStatus: "error",
+      catalogStatus: "ready",
+      selectedConnectionId: "credential-timeout",
+      selectedModelId: "deepseek-v4-flash",
+      errorCode: "MODEL_HUB_CREDENTIAL_STATUS_TIMEOUT",
+    });
+    expect(hydrated.page.catalogEntries).toHaveLength(1);
+    expect(getSummary).toHaveBeenCalledTimes(1);
+
+    lateCredential.resolve({ configured: true, lastFour: "3172" });
+    await Promise.resolve();
+    expect(hydrated.page.credentialStatus).toBe("error");
+    expect(hydrated.page.catalogEntries).toHaveLength(1);
+  });
+
   it("creates a provider draft without carrying credential, catalog, or error state", () => {
     const current = {
       ...createInitialModelHubPageSnapshot(),
@@ -323,6 +451,21 @@ describe("Model Hub page hydration", () => {
         connectionId: "old-deepseek",
       }),
     ).toBe(false);
+  });
+
+  it("allocates unique operation identities for separate page mounts", () => {
+    const firstMount = new ModelHubOperationCoordinator();
+    const secondMount = new ModelHubOperationCoordinator();
+    const firstBootstrap = firstMount.begin("bootstrap");
+    const secondBootstrap = secondMount.begin("bootstrap");
+
+    expect(firstBootstrap.generation).toBe(1);
+    expect(secondBootstrap.generation).toBe(1);
+    expect(firstBootstrap.operationId).not.toBe(secondBootstrap.operationId);
+    expect(firstMount.isCurrent(firstBootstrap)).toBe(true);
+    expect(secondMount.isCurrent(secondBootstrap)).toBe(true);
+    expect(firstMount.isCurrent(secondBootstrap)).toBe(false);
+    expect(secondMount.isCurrent(firstBootstrap)).toBe(false);
   });
 
   it("deduplicates StrictMode bootstrap mutations while allowing the current generation to apply", async () => {

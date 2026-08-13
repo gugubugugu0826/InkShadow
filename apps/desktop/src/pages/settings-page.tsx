@@ -17,10 +17,15 @@ import {
   SaveStatus,
   Select,
 } from "@inkshadow/ui";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { useAppearancePreference } from "../appearance-preference";
 import { DataTransferPanel } from "../components/data-transfer-panel";
+import {
+  ModelHubSelectableCatalogBrowser,
+  type ModelHubSelectableCatalogConnectedModel,
+  type ModelHubSelectableCatalogSelection,
+} from "../components/model-hub-selectable-catalog-browser";
 import { ModelHubEvaluationPanel } from "../components/model-hub-evaluation-panel";
 import { ModelHubImageGenerationPanel } from "../components/model-hub-image-generation-panel";
 import {
@@ -72,6 +77,12 @@ import {
   modelHubCredentialRef,
   modelHubNativeEndpointConfig,
 } from "../infrastructure/model-hub-native-config";
+import {
+  clearModelHubConnectionIntent,
+  loadModelHubConnectionIntent,
+  saveModelHubConnectionIntent,
+  type ModelHubConnectionIntent,
+} from "../infrastructure/model-hub-connection-intent";
 import { retireModelHubConnection } from "../infrastructure/model-hub-connection-retirement-service";
 import {
   deleteModelHubCredential,
@@ -129,6 +140,15 @@ import {
   type ModelHubTaskRecommendation,
 } from "../infrastructure/model-hub-task-recommendation";
 import { providerRecommendationsForTask } from "../infrastructure/provider-recommendation-registry";
+import {
+  SELECTABLE_MODEL_CATALOG_ENTRIES,
+  SELECTABLE_MODEL_CATALOG_REGISTRY_VERSION,
+  mergeConnectedAndSelectableModels,
+  projectSelectableModelCatalog,
+  selectableModelsForTask,
+  type MergedSelectableModelCatalogEntry,
+  type SelectableModelCatalogProjection,
+} from "../infrastructure/selectable-model-catalog-registry";
 import {
   assertModelHubFinalDispatchUnchanged,
   ModelHubFinalDispatchError,
@@ -327,6 +347,7 @@ export function SettingsPage() {
     [runtime],
   );
   const location = useLocation();
+  const navigate = useNavigate();
   const activeModelHubSection = resolveModelHubSection(location.hash);
   const modelHubTargetSection = resolveModelHubTargetSection(location.search);
   const editorReturnRoute = resolveSafeEditorReturnRoute(location.search);
@@ -350,7 +371,10 @@ export function SettingsPage() {
   const [modelHubPageSnapshot, setModelHubPageSnapshot] = useState(
     createInitialModelHubPageSnapshot,
   );
-  const [modelHubMutationNotice, setModelHubMutationNotice] = useState<string | null>(null);
+  const [modelHubMutationNotice, setModelHubMutationNotice] = useState<Readonly<{
+    message: string;
+    reloadRequired: boolean;
+  }> | null>(null);
   const [profiles, setProfiles] = useState<readonly ModelProfile[]>([]);
   const [, setProfile] = useState<ModelProfile | null>(null);
   const [hubConnections, setHubConnections] = useState<readonly ModelProviderConnection[]>([]);
@@ -381,6 +405,16 @@ export function SettingsPage() {
   const [routeFallbackProviderId, setRouteFallbackProviderId] = useState("");
   const [routeSaving, setRouteSaving] = useState(false);
   const [recommendedTaskBusy, setRecommendedTaskBusy] = useState<NovelAiTask | null>(null);
+  const [expandedModelTasks, setExpandedModelTasks] = useState<readonly NovelAiTask[]>([]);
+  const [configuredTaskPartitionExpanded, setConfiguredTaskPartitionExpanded] = useState(false);
+  const [missingTaskPartitionExpanded, setMissingTaskPartitionExpanded] = useState(false);
+  const [connectionIntent, setConnectionIntent] = useState<ModelHubConnectionIntent | null>(() =>
+    loadModelHubConnectionIntent(
+      window.localStorage,
+      runtime.clock.now(),
+      SELECTABLE_MODEL_CATALOG_REGISTRY_VERSION,
+    ),
+  );
   const [routeError, setRouteError] = useState<unknown>(null);
   const [routeFailureRollbackConfirmed, setRouteFailureRollbackConfirmed] = useState<
     boolean | null
@@ -575,14 +609,16 @@ export function SettingsPage() {
       );
 
       try {
-        await coordinator.runDeduplicated("legacy-model-hub-bridge", () =>
-          bridgeLegacyModelProfilesToModelHub({
-            modelCenter: runtime.modelCenter,
-            modelHub: runtime.modelHub,
-            credentials: runtime.credentials,
-            clock: runtime.clock,
-          }),
-        );
+        if (runtime.mode !== "tauri") {
+          await coordinator.runDeduplicated("legacy-model-hub-bridge", () =>
+            bridgeLegacyModelProfilesToModelHub({
+              modelCenter: runtime.modelCenter,
+              modelHub: runtime.modelHub,
+              credentials: runtime.credentials,
+              clock: runtime.clock,
+            }),
+          );
+        }
         if (!coordinator.isCurrent(token)) {
           finishModelHubDiagnosticAction(runtime, token, {
             completedAt: runtime.clock.now(),
@@ -744,9 +780,10 @@ export function SettingsPage() {
           }),
         );
         if (options.backendCommitted === true) {
-          setModelHubMutationNotice(
-            "更改已经保存，但页面状态刷新失败。你可以重新加载 Model Hub，不需要重复保存。",
-          );
+          setModelHubMutationNotice({
+            message: "更改已经保存，但页面状态刷新失败。你可以重新加载 Model Hub，不需要重复保存。",
+            reloadRequired: true,
+          });
         }
         finishModelHubDiagnosticAction(runtime, token, {
           completedAt: runtime.clock.now(),
@@ -852,7 +889,7 @@ export function SettingsPage() {
 
   useEffect(() => {
     const operationCoordinator = modelHubOperationCoordinatorRef.current;
-    void Promise.resolve().then(() => loadModelCenter());
+    void loadModelCenter();
     if (runtime.maintenance !== null) {
       void Promise.resolve().then(inspectDatabase);
     }
@@ -917,7 +954,10 @@ export function SettingsPage() {
     return () => window.clearTimeout(timeout);
   }, [expertMode, location.hash, modelHubTargetSection]);
 
-  async function selectStoredProfile(providerIdValue: string): Promise<void> {
+  async function selectStoredProfile(
+    providerIdValue: string,
+    requestedModelId?: string,
+  ): Promise<void> {
     const selected = hubConnections.find((candidate) => candidate.id === providerIdValue);
     if (selected === undefined) {
       return;
@@ -927,12 +967,14 @@ export function SettingsPage() {
     const token = modelHubOperationCoordinatorRef.current.begin("restore_selection", {
       providerKind: selected.providerKind,
       connectionId: selected.id,
+      modelId: requestedModelId ?? null,
     });
     startModelHubDiagnosticAction(runtime, token, runtime.clock.now());
     await loadModelCenter({
       action: "restore_selection",
       token,
       requestedConnectionId: selected.id,
+      requestedModelId: requestedModelId ?? null,
     });
   }
 
@@ -1012,6 +1054,43 @@ export function SettingsPage() {
     setSchemeMessage(null);
     setCapabilityProbeError(null);
     setCapabilityProbeMessage(null);
+  }
+
+  function beginModelHubConnectionIntent(
+    task: NovelAiTask,
+    candidate: SelectableModelCatalogProjection,
+  ): void {
+    if (candidate.modelId === null || candidate.appSupport !== "routable_after_verification") {
+      return;
+    }
+    const intent = saveModelHubConnectionIntent(window.localStorage, {
+      task,
+      providerKind: candidate.providerKind,
+      providerModelId: candidate.modelId,
+      catalogRegistryVersion: SELECTABLE_MODEL_CATALOG_REGISTRY_VERSION,
+      now: runtime.clock.now(),
+    });
+    if (intent === null) {
+      setRouteError(new Error("无法保存本次连接返回位置；当前 AI 分工没有修改。"));
+      return;
+    }
+    setConnectionIntent(intent);
+    applyProviderPreset(candidate.providerKind);
+    setSelectedModel(candidate.modelId);
+    setModelHubMutationNotice({
+      message: `准备连接 ${candidate.displayName}；连接并同步账户目录后会返回“${novelAiTaskLabel(task)}”。当前分工尚未修改。`,
+      reloadRequired: false,
+    });
+    void navigate("/settings#model-center");
+  }
+
+  function cancelModelHubConnectionIntent(): void {
+    clearModelHubConnectionIntent(window.localStorage);
+    setConnectionIntent(null);
+    setModelHubMutationNotice({
+      message: "已取消本次模型选择；原有 AI 分工没有修改。",
+      reloadRequired: false,
+    });
   }
 
   function restoreProviderConnectionDefaults(): void {
@@ -1279,9 +1358,11 @@ export function SettingsPage() {
     } catch (reason: unknown) {
       const normalized = normalizeUiError(reason);
       if (backendCommitted) {
-        setModelHubMutationNotice(
-          "连接已经保存，但后续模型资料没有全部更新。请重新加载 Model Hub 后再检查，无需重复填写密钥。",
-        );
+        setModelHubMutationNotice({
+          message:
+            "连接已经保存，但后续模型资料没有全部更新。请重新加载 Model Hub 后再检查，无需重复填写密钥。",
+          reloadRequired: true,
+        });
       } else {
         setCredentialError(reason);
       }
@@ -1929,6 +2010,10 @@ export function SettingsPage() {
       setHubConnections(nextConnections);
       setNovelTaskRoutes(nextRoutes.filter((route): route is NovelTaskRoute => route !== null));
       await refreshRoutingCatalogState(nextConnections);
+      if (connectionIntent?.task === task) {
+        clearModelHubConnectionIntent(window.localStorage);
+        setConnectionIntent(null);
+      }
       setSchemeMessage(
         `${recommendation.readiness === "verify_structured_output" ? "结构化输出已验证，并" : "已"}将“${novelAiTaskLabel(saved.task)}”分配给 ${catalogEntryLabel(initial.entry, nextConnections)}。`,
       );
@@ -2054,13 +2139,15 @@ export function SettingsPage() {
       let automaticallyConfigured: number | null = null;
       let automaticRoutingFailed = false;
       const routesBeforeAutomaticConfiguration = novelTaskRoutes;
-      try {
-        automaticallyConfigured = await applyInitialSmartRoutingIfEmpty(token);
-      } catch (cause: unknown) {
-        if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) return;
-        automaticRoutingFailed = true;
-        setRouteError(cause);
-        await confirmNovelRoutingUnchanged(routesBeforeAutomaticConfiguration);
+      if (connectionIntent === null) {
+        try {
+          automaticallyConfigured = await applyInitialSmartRoutingIfEmpty(token);
+        } catch (cause: unknown) {
+          if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) return;
+          automaticRoutingFailed = true;
+          setRouteError(cause);
+          await confirmNovelRoutingUnchanged(routesBeforeAutomaticConfiguration);
+        }
       }
       if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) {
         finishModelHubDiagnosticAction(runtime, token, {
@@ -2377,9 +2464,10 @@ export function SettingsPage() {
     } catch (reason: unknown) {
       const normalized = normalizeUiError(reason);
       if (backendCommitted) {
-        setModelHubMutationNotice(
-          "密钥已经安全保存，但页面状态刷新失败。请重新加载 Model Hub，无需再次输入密钥。",
-        );
+        setModelHubMutationNotice({
+          message: "密钥已经安全保存，但页面状态刷新失败。请重新加载 Model Hub，无需再次输入密钥。",
+          reloadRequired: true,
+        });
       } else {
         setCredentialError(reason);
       }
@@ -2499,9 +2587,10 @@ export function SettingsPage() {
     } catch (reason: unknown) {
       const normalized = normalizeUiError(reason);
       if (backendCommitted) {
-        setModelHubMutationNotice(
-          "密钥删除已经完成，但页面状态刷新失败。请重新加载 Model Hub，不要重复删除。",
-        );
+        setModelHubMutationNotice({
+          message: "密钥删除已经完成，但页面状态刷新失败。请重新加载 Model Hub，不要重复删除。",
+          reloadRequired: true,
+        });
       } else {
         setCredentialError(reason);
       }
@@ -2866,6 +2955,189 @@ export function SettingsPage() {
       ),
     [routingVisibility.models, routingVisibility.tasks],
   );
+  const selectableCatalogOfficialCandidates = useMemo(
+    () => projectSelectableModelCatalog(runtime.clock.now()),
+    [runtime],
+  );
+  const selectableCatalogConnectedModels = useMemo<
+    readonly ModelHubSelectableCatalogConnectedModel[]
+  >(() => {
+    const now = runtime.clock.now();
+    return routingVisibility.models.flatMap((model) => {
+      const entry = model.catalogEntry;
+      const connection = model.connection;
+      if (
+        isRetiredModelProviderConnection(connection) ||
+        (entry.staleAfter !== null && entry.staleAfter <= now)
+      ) {
+        return [];
+      }
+      const supportedCapabilities = model.capabilities
+        .filter(({ state }) => state === "verified" || state === "user_confirmed")
+        .map(({ capability }) => capability);
+      const applicationVerifiedCapabilities = model.capabilities.filter(
+        ({ state }) => state === "verified",
+      );
+      return [
+        Object.freeze({
+          catalogEntryId: entry.id,
+          providerKind: connection.providerKind,
+          providerModelId: entry.providerModelId,
+          displayName: entry.displayName,
+          providerLabel: getModelProviderPreset(connection.providerKind).displayName,
+          connectionLabel: connection.displayName,
+          regionGroup: connectedModelRegionGroup(connection),
+          tags: Object.freeze(supportedCapabilities),
+          lifecycle: entry.lifecycle === "unknown" ? "not_provided" : entry.lifecycle,
+          appSupport:
+            applicationVerifiedCapabilities.length > 0 &&
+            model.connectionUsable &&
+            connection.connectionStatus === "ready" &&
+            connection.catalogSyncStatus === "succeeded" &&
+            entry.availability === "available"
+              ? "verified_in_app"
+              : "verification_required",
+        }),
+      ];
+    });
+  }, [routingVisibility.models, runtime]);
+  const selectableTaskModels = useMemo<
+    ReadonlyMap<
+      NovelAiTask,
+      readonly MergedSelectableModelCatalogEntry<
+        SelectableModelCatalogProjection,
+        ModelCatalogEntry
+      >[]
+    >
+  >(() => {
+    const now = runtime.clock.now();
+    return new Map(
+      routingVisibility.tasks.map(({ definition }) => {
+        const selectable: readonly SelectableModelCatalogProjection[] = expertMode
+          ? selectableModelsForTask(definition.task, now, { expert: true })
+          : selectableModelsForTask(definition.task, now);
+        const connected = recommendConnectedModelsForTask(
+          definition.task,
+          routingVisibility.models,
+        ).map(({ model }) => ({
+          providerKind: model.connection.providerKind,
+          entry: model.catalogEntry,
+        }));
+        return [definition.task, mergeConnectedAndSelectableModels(connected, selectable)] as const;
+      }),
+    );
+  }, [expertMode, routingVisibility.models, routingVisibility.tasks, runtime]);
+  const connectionIntentModel = useMemo(() => {
+    if (connectionIntent === null) return null;
+    const registryEntry = SELECTABLE_MODEL_CATALOG_ENTRIES.find(
+      (entry) =>
+        entry.providerKind === connectionIntent.providerKind &&
+        entry.modelId === connectionIntent.providerModelId,
+    );
+    const acceptedIds = new Set([
+      connectionIntent.providerModelId.toLocaleLowerCase("en-US"),
+      ...(registryEntry?.aliases.map((alias) => alias.toLocaleLowerCase("en-US")) ?? []),
+    ]);
+    const now = runtime.clock.now();
+    return (
+      routingVisibility.models
+        .filter(
+          (model) =>
+            model.connection.providerKind === connectionIntent.providerKind &&
+            model.connection.enabled &&
+            model.connection.connectionStatus !== "disabled" &&
+            !isRetiredModelProviderConnection(model.connection) &&
+            model.catalogEntry.availability === "available" &&
+            model.catalogEntry.lifecycle !== "deprecated" &&
+            (model.catalogEntry.staleAfter === null || model.catalogEntry.staleAfter > now) &&
+            acceptedIds.has(model.catalogEntry.providerModelId.toLocaleLowerCase("en-US")),
+        )
+        .sort((left, right) => {
+          const leftReady = recommendConnectedModelsForTask(connectionIntent.task, [left]).some(
+            ({ readiness }) => readiness === "ready",
+          );
+          const rightReady = recommendConnectedModelsForTask(connectionIntent.task, [right]).some(
+            ({ readiness }) => readiness === "ready",
+          );
+          const leftTrustedEvidence = left.capabilities.filter(
+            ({ state }) => state === "verified" || state === "user_confirmed",
+          ).length;
+          const rightTrustedEvidence = right.capabilities.filter(
+            ({ state }) => state === "verified" || state === "user_confirmed",
+          ).length;
+          return (
+            Number(rightReady) - Number(leftReady) ||
+            Number(right.connectionUsable) - Number(left.connectionUsable) ||
+            Number(right.connection.connectionStatus === "ready") -
+              Number(left.connection.connectionStatus === "ready") ||
+            rightTrustedEvidence - leftTrustedEvidence ||
+            left.catalogEntry.id.localeCompare(right.catalogEntry.id, "en")
+          );
+        })[0] ?? null
+    );
+  }, [connectionIntent, routingVisibility.models, runtime]);
+  const connectionIntentCatalogEntry = connectionIntentModel?.catalogEntry ?? null;
+  const connectionIntentTaskRecommendation = useMemo(() => {
+    if (connectionIntent === null || connectionIntentModel === null) return null;
+    return (
+      recommendConnectedModelsForTask(connectionIntent.task, [connectionIntentModel])[0] ?? null
+    );
+  }, [connectionIntent, connectionIntentModel]);
+  useEffect(() => {
+    if (
+      connectionIntent === null ||
+      connectionIntentCatalogEntry === null ||
+      connectionIntentTaskRecommendation === null
+    ) {
+      return;
+    }
+    if (activeModelHubSection !== "model-routing") {
+      void navigate("/settings#model-routing", { replace: true });
+      return;
+    }
+    const targetTask = routingVisibility.tasks.find(
+      ({ definition }) => definition.task === connectionIntent.task,
+    );
+    if (targetTask === undefined) return;
+    const targetsConfiguredPartition = targetTask.route !== null;
+    const targetPartitionExpanded = targetsConfiguredPartition
+      ? configuredTaskPartitionExpanded
+      : missingTaskPartitionExpanded;
+    const targetModelsExpanded = expandedModelTasks.includes(connectionIntent.task);
+    if (!targetPartitionExpanded || !targetModelsExpanded) {
+      const expansionTimeout = window.setTimeout(() => {
+        if (targetsConfiguredPartition) {
+          setConfiguredTaskPartitionExpanded(true);
+        } else {
+          setMissingTaskPartitionExpanded(true);
+        }
+        setExpandedModelTasks((current) =>
+          current.includes(connectionIntent.task)
+            ? current
+            : Object.freeze([...current, connectionIntent.task]),
+        );
+      }, 0);
+      return () => window.clearTimeout(expansionTimeout);
+    }
+    const timeout = window.setTimeout(() => {
+      const target = document.getElementById(`model-routing-task-${connectionIntent.task}`);
+      if (typeof target?.scrollIntoView === "function") {
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+      target?.focus({ preventScroll: true });
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [
+    activeModelHubSection,
+    configuredTaskPartitionExpanded,
+    connectionIntent,
+    connectionIntentCatalogEntry,
+    connectionIntentTaskRecommendation,
+    expandedModelTasks,
+    missingTaskPartitionExpanded,
+    navigate,
+    routingVisibility.tasks,
+  ]);
   const providerTaskRecommendations = useMemo(() => {
     const now = runtime.clock.now();
     return new Map(
@@ -2931,6 +3203,178 @@ export function SettingsPage() {
         (hubConnection.connectionStatus === "ready" ||
           hubConnection.connectionStatus === "degraded")),
   });
+
+  function selectableModelsForTaskDisclosure(task: NovelAiTask) {
+    const candidates = selectableTaskModels.get(task) ?? [];
+    const taskProjection = routingVisibility.tasks.find(
+      ({ definition }) => definition.task === task,
+    );
+    return (
+      <details
+        className="model-routing-model-options"
+        open={expandedModelTasks.includes(task)}
+        onToggle={(event) => {
+          const expanded = event.currentTarget.open;
+          setExpandedModelTasks((current) =>
+            expanded
+              ? current.includes(task)
+                ? current
+                : Object.freeze([...current, task])
+              : Object.freeze(current.filter((candidate) => candidate !== task)),
+          );
+        }}
+      >
+        <summary>查看可选模型（{String(candidates.length)}）</summary>
+        {expandedModelTasks.includes(task) && (
+          <>
+            <p>
+              账户目录中的模型优先；供应商官方候选只用于选择和连接，连接后仍需能力验证与明确分配。
+            </p>
+            <ul className="model-routing-model-options__list">
+              {candidates.map((candidate) => {
+                const connected = candidate.source === "connected";
+                const modelId = connected
+                  ? candidate.entry.providerModelId
+                  : candidate.entry.modelId;
+                const support = connected ? null : candidate.entry.appSupport;
+                const connectedRecommendation = connected
+                  ? (recommendConnectedModelsForTask(task, routingVisibility.models).find(
+                      ({ model }) => model.catalogEntry.id === candidate.entry.id,
+                    ) ?? null)
+                  : null;
+                return (
+                  <li
+                    key={
+                      connected
+                        ? `connected:${candidate.entry.id}`
+                        : `${candidate.source}:${candidate.providerKind}:${modelId ?? candidate.entry.displayName}`
+                    }
+                  >
+                    <div>
+                      <strong>{candidate.entry.displayName}</strong>
+                      <small>
+                        {getModelProviderPreset(candidate.providerKind).displayName} ·{" "}
+                        {connected
+                          ? connectedModelRegionLabel(candidate.providerKind)
+                          : selectableModelRegionLabel(candidate.entry.regionGroup)}
+                        {" · "}
+                        {connected
+                          ? connectedRecommendation?.readiness === "ready"
+                            ? "已连接且具备本任务所需证据"
+                            : "已连接；分配前仍需完成能力验证"
+                          : selectableModelSupportLabel(candidate.entry.appSupport)}
+                        {!connected && candidate.entry.lifecycle === "preview" ? " · 预览型号" : ""}
+                      </small>
+                    </div>
+                    {connected ? (
+                      taskProjection?.route === null ? (
+                        task === "rerank" ? (
+                          <a
+                            className="button-link button-link--secondary"
+                            href="#expert-model-routing"
+                          >
+                            确认素材隐私后分配
+                          </a>
+                        ) : (
+                          <Button
+                            variant="secondary"
+                            loading={recommendedTaskBusy === task}
+                            disabled={
+                              recommendedTaskBusy !== null ||
+                              routeSaving ||
+                              modelHubHydrationPending
+                            }
+                            onClick={() => {
+                              if (connectedRecommendation !== null) {
+                                void verifyAndAssignRecommendedTask(task, connectedRecommendation);
+                              }
+                            }}
+                          >
+                            {connectedRecommendation?.readiness === "ready"
+                              ? "用于此任务"
+                              : "验证并用于此任务"}
+                          </Button>
+                        )
+                      ) : (
+                        <Badge tone="success">账户目录 · 保留当前分工</Badge>
+                      )
+                    ) : support === "routable_after_verification" && modelId !== null ? (
+                      <Button
+                        variant="secondary"
+                        disabled={modelHubHydrationPending || routeSaving}
+                        onClick={() => beginModelHubConnectionIntent(task, candidate.entry)}
+                      >
+                        选择并连接
+                      </Button>
+                    ) : (
+                      <Badge tone="neutral">暂不可直接连接</Badge>
+                    )}
+                    {!connected && expertMode && "officialSource" in candidate.entry && (
+                      <a
+                        className="back-link"
+                        href={candidate.entry.officialSource.url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        查看供应商证据
+                      </a>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )}
+      </details>
+    );
+  }
+
+  function selectCatalogBrowserModel(selection: ModelHubSelectableCatalogSelection): void {
+    if (selection.source === "connected") {
+      const catalogEntry = routingCatalog.find(({ id }) => id === selection.model.catalogEntryId);
+      const connection =
+        catalogEntry === undefined
+          ? undefined
+          : hubConnections.find(({ id }) => id === catalogEntry.connectionId);
+      if (catalogEntry === undefined || connection === undefined) {
+        setRouteError(new Error("所选账户模型已经变化，请刷新目录后重试。"));
+        return;
+      }
+      setModelHubMutationNotice({
+        message: `已选择 ${catalogEntry.displayName}。请在任务清单中明确选择“用于此任务”；当前 AI 分工没有修改。`,
+        reloadRequired: false,
+      });
+      void navigate("/settings#model-center");
+      void selectStoredProfile(connection.id, catalogEntry.providerModelId);
+      return;
+    }
+
+    const candidate = selection.model;
+    if (candidate.appSupport === "protocol_not_implemented") {
+      setModelHubMutationNotice({
+        message: `${candidate.displayName} 可在目录中浏览，但墨影当前尚未实现它所需的调用协议，因此不会把它标记为可用。`,
+        reloadRequired: false,
+      });
+      return;
+    }
+    if (candidate.appSupport === "special_connection_required") {
+      setModelHubMutationNotice({
+        message: `${candidate.displayName} 需要专用连接方式；当前通用供应商预设不会冒充该连接。`,
+        reloadRequired: false,
+      });
+      return;
+    }
+    applyProviderPreset(candidate.providerKind);
+    if (candidate.modelId !== null) setSelectedModel(candidate.modelId);
+    setModelHubMutationNotice({
+      message:
+        candidate.modelId === null
+          ? `请先连接 ${candidate.displayName} 对应的供应商，再从账户真实目录发现模型标识。`
+          : `准备连接 ${candidate.displayName}；连接、目录同步和能力验证完成前，它不会参与 AI 分工。`,
+      reloadRequired: false,
+    });
+    void navigate("/settings#model-center");
+  }
 
   return (
     <div
@@ -3002,6 +3446,53 @@ export function SettingsPage() {
             导入与导出
           </Link>
         </nav>
+      )}
+
+      {isModelHubView && connectionIntent !== null && (
+        <div className="model-hub-connection-intent" role="status">
+          <InlineAlert
+            tone="info"
+            title={
+              connectionIntentCatalogEntry === null
+                ? `正在为“${novelAiTaskLabel(connectionIntent.task)}”连接模型`
+                : connectionIntentTaskRecommendation === null
+                  ? "所选模型已发现，仍需验证能力"
+                  : connectionIntentTaskRecommendation.readiness === "ready"
+                    ? "所选模型已验证，可以返回任务"
+                    : "基础能力已验证，可以返回任务继续验证"
+            }
+            description={
+              connectionIntentCatalogEntry === null
+                ? `目标：${connectionIntent.providerModelId}。请保存连接、同步账户目录并验证能力；在你明确分配前，原有 AI 分工不会改变。`
+                : connectionIntentTaskRecommendation === null
+                  ? `${connectionIntentCatalogEntry.displayName} 已出现在账户目录中，但“${novelAiTaskLabel(connectionIntent.task)}”所需能力还没有可信证据。请在 Model Hub 专家设置中补充或验证这项能力；系统不会自动返回或修改路由。`
+                  : connectionIntentTaskRecommendation.readiness === "ready"
+                    ? `${connectionIntentCatalogEntry.displayName} 已具备“${novelAiTaskLabel(connectionIntent.task)}”所需的可信能力证据。返回后仍需明确点击“用于此任务”，系统不会自动覆盖原路由。`
+                    : `${connectionIntentCatalogEntry.displayName} 已具备文本生成证据。返回任务后，点击“验证并用于此任务”完成剩余能力探针与明确分配；系统不会自动修改路由。`
+            }
+          />
+          <div className="settings-actions">
+            <Link
+              className="button-link button-link--secondary"
+              to={
+                connectionIntentCatalogEntry === null || connectionIntentTaskRecommendation === null
+                  ? "/settings#model-center"
+                  : "/settings#model-routing"
+              }
+            >
+              {connectionIntentCatalogEntry === null
+                ? "继续连接"
+                : connectionIntentTaskRecommendation === null
+                  ? "验证能力"
+                  : connectionIntentTaskRecommendation.readiness === "ready"
+                    ? "返回任务并分配"
+                    : "返回任务后验证并分配"}
+            </Link>
+            <Button variant="ghost" onClick={cancelModelHubConnectionIntent}>
+              取消选择
+            </Button>
+          </div>
+        </div>
       )}
 
       {!online && (
@@ -3474,19 +3965,25 @@ export function SettingsPage() {
                   {modelHubMutationNotice !== null && (
                     <>
                       <InlineAlert
-                        tone="warning"
-                        title="更改已保存，页面需要重新载入"
-                        description={modelHubMutationNotice}
+                        tone={modelHubMutationNotice.reloadRequired ? "warning" : "info"}
+                        title={
+                          modelHubMutationNotice.reloadRequired
+                            ? "更改已保存，页面状态需要刷新"
+                            : "模型选择提示"
+                        }
+                        description={modelHubMutationNotice.message}
                       />
-                      <div className="settings-actions">
-                        <Button
-                          variant="secondary"
-                          disabled={modelHubHydrationPending || saving || checkingModel}
-                          onClick={() => void loadModelCenter({ action: "refresh_snapshot" })}
-                        >
-                          重新加载 Model Hub
-                        </Button>
-                      </div>
+                      {modelHubMutationNotice.reloadRequired && (
+                        <div className="settings-actions">
+                          <Button
+                            variant="secondary"
+                            disabled={modelHubHydrationPending || saving || checkingModel}
+                            onClick={() => void loadModelCenter({ action: "refresh_snapshot" })}
+                          >
+                            刷新 Model Hub 状态
+                          </Button>
+                        </div>
+                      )}
                     </>
                   )}
 
@@ -4445,6 +4942,13 @@ export function SettingsPage() {
                     </span>
                   </div>
 
+                  <ModelHubSelectableCatalogBrowser
+                    connectedModels={selectableCatalogConnectedModels}
+                    officialCandidates={selectableCatalogOfficialCandidates}
+                    disabled={modelHubHydrationPending || routeSaving}
+                    onSelect={selectCatalogBrowserModel}
+                  />
+
                   {routingVisibility.models.length > 0 && (
                     <section
                       className="model-routing-capabilities"
@@ -4509,7 +5013,12 @@ export function SettingsPage() {
                   )}
 
                   <div className="model-routing-task-disclosure">
-                    <details>
+                    <details
+                      open={configuredTaskPartitionExpanded}
+                      onToggle={(event) =>
+                        setConfiguredTaskPartitionExpanded(event.currentTarget.open)
+                      }
+                    >
                       <summary>
                         查看已配置的 {String(routingVisibility.enabledRouteCount)} 项
                       </summary>
@@ -4524,7 +5033,12 @@ export function SettingsPage() {
                               <h4>{modelHubTaskGroupLabel(group)}</h4>
                               <ul className="model-routing-task-list">
                                 {tasks.map((task) => (
-                                  <li key={task.definition.task} data-state={task.status}>
+                                  <li
+                                    id={`model-routing-task-${task.definition.task}`}
+                                    key={task.definition.task}
+                                    data-state={task.status}
+                                    tabIndex={-1}
+                                  >
                                     <div>
                                       <strong>{task.definition.displayName}</strong>
                                       <small>{task.definition.description}</small>
@@ -4566,6 +5080,7 @@ export function SettingsPage() {
                                     {task.status === "failed" && (
                                       <p className="model-routing-task-warning">{task.reason}</p>
                                     )}
+                                    {selectableModelsForTaskDisclosure(task.definition.task)}
                                   </li>
                                 ))}
                               </ul>
@@ -4574,7 +5089,12 @@ export function SettingsPage() {
                         })}
                       </div>
                     </details>
-                    <details>
+                    <details
+                      open={missingTaskPartitionExpanded}
+                      onToggle={(event) =>
+                        setMissingTaskPartitionExpanded(event.currentTarget.open)
+                      }
+                    >
                       <summary>
                         查看尚未配置的 {String(routingVisibility.missingRouteCount)} 项
                       </summary>
@@ -4594,7 +5114,12 @@ export function SettingsPage() {
                                   const providerRecommendation =
                                     providerTaskRecommendations.get(task.definition.task) ?? null;
                                   return (
-                                    <li key={task.definition.task} data-state="missing">
+                                    <li
+                                      id={`model-routing-task-${task.definition.task}`}
+                                      key={task.definition.task}
+                                      data-state="missing"
+                                      tabIndex={-1}
+                                    >
                                       <div>
                                         <strong>{task.definition.displayName}</strong>
                                         <small>{task.reason}</small>
@@ -4669,16 +5194,19 @@ export function SettingsPage() {
                                             >
                                               连接此供应商
                                             </a>
-                                            <a
-                                              className="back-link"
-                                              href={providerRecommendation.evidenceUrl}
-                                              target="_blank"
-                                              rel="noreferrer"
-                                            >
-                                              查看供应商说明
-                                            </a>
+                                            {expertMode && (
+                                              <a
+                                                className="back-link"
+                                                href={providerRecommendation.evidenceUrl}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                              >
+                                                查看供应商证据
+                                              </a>
+                                            )}
                                           </div>
                                         )}
+                                      {selectableModelsForTaskDisclosure(task.definition.task)}
                                       {task.definition.isCoreWritingTask ? (
                                         <Badge tone="danger">会阻止这项基础写作</Badge>
                                       ) : (
@@ -6007,6 +6535,52 @@ function modelHubCapabilityLabel(capability: ModelHubCapability): string {
     long_context: "长上下文",
   };
   return labels[capability];
+}
+
+function selectableModelSupportLabel(
+  support: SelectableModelCatalogProjection["appSupport"],
+): string {
+  if (support === "routable_after_verification") return "连接后验证";
+  if (support === "special_connection_required") return "需要专用连接方式";
+  if (support === "protocol_not_implemented") return "当前应用协议尚未实现";
+  return "连接供应商后从账户目录发现";
+}
+
+function selectableModelRegionLabel(
+  region: SelectableModelCatalogProjection["regionGroup"],
+): string {
+  if (region === "DOMESTIC") return "国内";
+  if (region === "INTERNATIONAL") return "海外";
+  return "本地";
+}
+
+function connectedModelRegionLabel(providerKind: ModelProviderKind): string {
+  if (providerKind === "ollama") return "本机或自托管";
+  if (
+    providerKind === "deepseek" ||
+    providerKind === "zhipu_glm" ||
+    providerKind === "alibaba_qwen" ||
+    providerKind === "volcengine_doubao"
+  ) {
+    return "国内";
+  }
+  if (providerKind === "custom_openai_compatible") return "自定义位置";
+  return "海外";
+}
+
+function connectedModelRegionGroup(
+  connection: ModelProviderConnection,
+): SelectableModelCatalogProjection["regionGroup"] {
+  if (isLoopbackModelBaseUrl(connection.baseUrl)) return "LOCAL";
+  if (
+    connection.providerKind === "deepseek" ||
+    connection.providerKind === "zhipu_glm" ||
+    connection.providerKind === "alibaba_qwen" ||
+    connection.providerKind === "volcengine_doubao"
+  ) {
+    return "DOMESTIC";
+  }
+  return "INTERNATIONAL";
 }
 
 function modelHubOverallBadgeLabel(

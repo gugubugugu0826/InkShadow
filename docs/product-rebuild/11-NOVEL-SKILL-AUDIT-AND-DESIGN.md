@@ -239,9 +239,26 @@ observationCount = 0
 
 上表 14 文件结果属于较早执行快照；当前稳定点已完成 Desktop 238 files / 1,759 passed / 1 skipped、付费 infrastructure 10 files / 96 tests、Data 全量 65 files / 420 tests、AI Core 16 files / 120 tests、完整 `release:check`、Rust 160 passed / 1 ignored 和 production Chromium E2E 11/11。精确命令见 `docs/execution/TEST_RESULTS.md`。独立审查批准 Data `0060`–`0064` 的 content-free ledger、显式付费派发权威和零自动调用接线；真实 Provider A/B、可信 `ELIGIBLE_FOR_REVIEW`、人工批准和真实 Tauri 冷启动没有执行。`test:e2e:release` 已启动，但在 clean-worktree gate 处 `BLOCKED / NOT_COMPLETED`，未生成候选；这些本地测试不能外推为 `VERIFIED`。
 
-## 9. 上线顺序、回滚与未完成项
+## 9. 2026-08-13 本轮受限 smoke 结果
 
-### 9.1 安全上线顺序
+本轮不重做 Novel Skill 体系，也不执行专家区的 192 次付费 A/B 或 2,496 项人工评分。即使该基础
+设施仍可由作者显式展开，验收脚本和自动化也没有替作者创建商业授权或点击开始。本轮实际执行范围为：
+
+1. 使用真实临时 SQLite、零 Provider 调用验证 Scene Craft 初始关闭 → 显式启用 → 重开仍启用 →
+   显式关闭 → 再次重开仍关闭；
+2. 使用一个本地 mocked generation，固定目标 300 字符、上限 768 tokens，产生 200–400 个中文字符；
+   输出只进入隔离 Candidate，正文与不可变版本在生成、拒绝和重开后都不变；
+3. context trace 精确记录 `Scene Craft / 1.0.0 / included`；拒绝决定跨 runtime 重开保留，关闭 Skill
+   只影响后续调用，历史 trace 不被删除；
+4. 两个测试文件共 28 项通过；没有网络、真实 Provider、fallback、自动 retry 或付费 runner 调用。
+
+全部 Core/Genre 继续 `EXPERIMENTAL`、`defaultEnabled=false`。只有未来独立评测轮次得到完整真实
+证据并由作者另行批准，才允许讨论默认值。该本地 mock 只证明 SQLite 持久化、snapshot/trace 和
+Candidate 围栏，不证明模型可调用性或 Skill 质量提升。
+
+## 10. 上线顺序、回滚与未完成项
+
+### 10.1 安全上线顺序
 
 1. 保持现有实验开关默认关闭，先实现不绕过 trace/Candidate/项目围栏的受控 Runner；
 2. A/B 至少在两个当前真实可用文本模型档位完成 192 个计划 cell，保存 exact invocation receipt、失败 attempt、Candidate 与 Skill snapshot；
@@ -250,7 +267,7 @@ observationCount = 0
 5. 人工产品评审通过后，才可把经过评测的具体版本改为 `active`；
 6. `defaultEnabled=true` 必须另行决策，不能由评测账本或 ProjectSeed 推荐自动触发。
 
-### 9.2 回滚
+### 10.2 回滚
 
 - 立即回滚：保持所有 definitions experimental/default false，并关闭项目 binding 或实验 feature gate；
 - 回滚不会删除 definition/snapshot 审计记录，也不会改写已经接受的正文版本；
@@ -258,7 +275,7 @@ observationCount = 0
 - 删除项目会按外键清理 binding/snapshot，immutable definition 保留到无引用时由未来维护策略处理；
 - 任一 Skill 编译、快照或派生步骤失败时，AI 调用 fail closed，手动正文和已接受版本不回滚。
 
-### 9.3 已实现的真实评测基础与仍未执行的外部阶段
+### 10.3 已实现的真实评测基础与仍未执行的外部阶段
 
 Data `0063` / Tauri `66` 已实现固定实验协议、真实连接/目录目标锁、Provider 可见输出哈希、
 192-call 商业授权、分币种费用上限、跨重启派发状态、chapter-null 隔离 Candidate、受控

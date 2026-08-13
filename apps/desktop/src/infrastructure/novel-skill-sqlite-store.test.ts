@@ -8,8 +8,10 @@ import {
   type CompiledNovelSkills,
   type ProjectNovelSkillBinding,
 } from "@inkshadow/ai-core";
+import { parseIsoUtcTimestamp } from "@inkshadow/domain";
 import { afterEach, describe, expect } from "vitest";
 
+import { TauriNovelSkillRuntime } from "./novel-skill-runtime.js";
 import {
   NovelSkillSqliteStore,
   type CommitNovelSkillInvocationInput,
@@ -44,6 +46,9 @@ const PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const SNAPSHOT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
 const MODEL_INVOCATION_ID = "019f9f4a-b3c7-7350-9226-000000000102";
 const TRACE_ID = "novel-skill-store-trace";
+const parsedNow = parseIsoUtcTimestamp(NOW);
+if (!parsedNow.ok) throw parsedNow.error;
+const CLOCK = Object.freeze({ now: () => parsedNow.value });
 
 const openExecutors = new Set<NodeSqliteExecutor>();
 const databaseDirectories = new Set<string>();
@@ -98,6 +103,58 @@ function removeDatabaseDirectories(): void {
 }
 
 describe("NovelSkillSqliteStore", () => {
+  fileSqliteIt(
+    "persists an explicit Scene Craft enable and disable across restarts without a model",
+    async () => {
+      const databasePath = createDatabasePath();
+      let executor: NodeSqliteExecutor | undefined;
+      try {
+        executor = createExecutor(migration, databasePath);
+        await insertProjectOnly(executor);
+        const firstRuntime = new TauriNovelSkillRuntime(new NovelSkillSqliteStore(executor), CLOCK);
+        await expect(firstRuntime.initialize()).resolves.toEqual({ status: "ready", reason: null });
+        const initial = await firstRuntime.listProjectState(PROJECT_ID);
+        const scene = initial.methods.find(({ skillId }) => skillId === "core.scene_craft");
+        if (scene === undefined) throw new Error("scene fixture missing");
+        expect(initial.methods.filter(({ enabled }) => enabled)).toEqual([]);
+
+        await firstRuntime.setMethodEnabled(PROJECT_ID, scene.skillId, true);
+        await closeExecutor(executor);
+        executor = createExecutor("", databasePath);
+
+        const enabledAfterReopen = new TauriNovelSkillRuntime(
+          new NovelSkillSqliteStore(executor),
+          CLOCK,
+        );
+        await enabledAfterReopen.initialize();
+        expect(
+          (await enabledAfterReopen.listProjectState(PROJECT_ID)).methods
+            .filter(({ enabled }) => enabled)
+            .map(({ skillId }) => skillId),
+        ).toEqual(["core.scene_craft"]);
+
+        await enabledAfterReopen.setMethodEnabled(PROJECT_ID, scene.skillId, false);
+        await closeExecutor(executor);
+        executor = createExecutor("", databasePath);
+
+        const disabledAfterReopen = new TauriNovelSkillRuntime(
+          new NovelSkillSqliteStore(executor),
+          CLOCK,
+        );
+        await disabledAfterReopen.initialize();
+        expect(
+          (await disabledAfterReopen.listProjectState(PROJECT_ID)).methods.filter(
+            ({ enabled }) => enabled,
+          ),
+        ).toEqual([]);
+      } finally {
+        if (executor !== undefined) {
+          await closeExecutor(executor);
+        }
+      }
+    },
+  );
+
   fileSqliteIt(
     "fails closed before dispatch, persists exact linkage, and survives restart",
     async () => {
@@ -521,13 +578,7 @@ function invocationInput(compiled: CompiledNovelSkills): CommitNovelSkillInvocat
 }
 
 async function insertFoundation(executor: NodeSqliteExecutor): Promise<void> {
-  await executor.execute(
-    `INSERT INTO projects (
-       id, name, status, revision, deletion_generation, created_at, updated_at,
-       archived_at, trashed_at, retention_until, status_before_trash
-     ) VALUES (?, 'Novel Skill store', 'active', 1, 0, ?, ?, NULL, NULL, NULL, NULL)`,
-    [PROJECT_ID, NOW, NOW],
-  );
+  await insertProjectOnly(executor);
   await executor.execute(
     `INSERT INTO model_provider_connections (
        id, provider_kind, display_name, protocol, base_url,
@@ -578,6 +629,16 @@ async function insertFoundation(executor: NodeSqliteExecutor): Promise<void> {
        trace_id, generation_id, generation_run_id, created_at
      ) VALUES (?, '019f9f4a-b3c7-7350-9226-000000000103', NULL, ?)`,
     [TRACE_ID, NOW],
+  );
+}
+
+async function insertProjectOnly(executor: NodeSqliteExecutor): Promise<void> {
+  await executor.execute(
+    `INSERT INTO projects (
+       id, name, status, revision, deletion_generation, created_at, updated_at,
+       archived_at, trashed_at, retention_until, status_before_trash
+     ) VALUES (?, 'Novel Skill store', 'active', 1, 0, ?, ?, NULL, NULL, NULL, NULL)`,
+    [PROJECT_ID, NOW, NOW],
   );
 }
 

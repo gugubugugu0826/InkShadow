@@ -70,11 +70,16 @@ WebView 不能直接向任意外部地址发送请求。
 
 页面应依赖这些端口，而不是直接拼接 SQL、读取系统凭据或绕过安全中继。
 
-正文工作区采用全视口三栏合同：宽度大于 `1024px` 时，左栏是章节列表，中栏是正文编辑区，
-右栏是 AI 创作助手；中栏优先获得可用宽度，左右栏均可收起。宽度不超过 `1024px` 时，正文保留为
-唯一主栏，章节列表改为左侧 Drawer，AI 助手改为右侧模态面板；到 `800px` 时继续沿用单栏结构，
-顶部状态与操作允许换行，不能依靠隐藏横向滚动条掩盖溢出。抽屉和模态面板仍须满足 Escape、焦点约束与
-关闭后的焦点返回。
+正文工作区采用全视口三栏合同，并以 `border-box` 约束页面宽度，不能让 `width: 100%` 加内边距后
+再被父级 `overflow: hidden` 静默裁切。宽度大于 `1024px` 时，左栏是章节列表，中栏是正文编辑区，
+右栏是 AI 创作助手；中栏优先获得可用宽度，左右栏均可收起。正文与助手之间提供 ARIA
+`separator`：指针拖动限制助手为 256–560px、正文至少 320px；方向键每次调整 8px，Shift 加速到
+32px，Home/End 到边界。宽度不超过 `1024px` 时不挂载 separator，正文保留为唯一主栏，章节列表改为
+左侧 Drawer，AI 助手改为右侧模态面板；到 `800px` 时继续沿用单栏结构，compact drawer 的高度由
+top/bottom 约束，直接操作保持至少 44px。顶部状态与操作允许换行，不能依靠隐藏横向滚动条掩盖
+溢出。抽屉和模态面板仍须满足 Escape、焦点约束与关闭后的焦点返回。production Chromium 已覆盖
+1536/1440/1280/1024/800、125%/150%/200% 等效视口和代表性明暗主题；真实 Tauri WebView/DPI
+仍为 `NOT_VERIFIED`。
 
 ## 3. Tauri IPC 通用约定
 
@@ -332,6 +337,32 @@ active，且项目、章节、当前版本和隐私指纹精确匹配。原生 r
 这些门禁只约束 InkShadow 当前和未来的操作，不能撤回或删除此前已到达供应商或云端的内容。
 
 ## 6. 原生模型接口
+
+### 6.0 可选模型目录与连接返回合同（2026-08-13 当前实现）
+
+官方文档中的模型条目是“发现候选”，不是已连接目录、能力证据或路由。当前
+`model_catalog_entries` 继续只保存某个真实 connection 同步/确认的账户目录，不接受未连接候选混入。
+`selectable-model-catalog-registry.ts` 提供独立版本化 registry，保存 `providerKind`、精确 model ID
+（产品族发现方向可为 null）、展示名、22 项任务类别、能力类别、生命周期、支持状态、受控
+aliases/replacement 和带失效时间的官方来源。普通投影移除官方 URL、更新时间与 TTL；专家投影才保留。
+浏览地区只用于分组，不能冒充数据落点或隐私证明。所有官方条目固定为 `routable=false`、
+`capabilityEvidence=false`；只有真实账户目录及随后保存的能力证据能参与路由。
+
+`model-hub-connection-intent.ts` 只把内容无关的 UI 导航意图写入 localStorage：schema version、任务、
+供应商、精确型号、registry 版本、创建时间和失效时间；TTL 为 30 分钟。它没有作品内容、return target、
+旧路由指纹、route revision、凭据或业务状态，不是 Model Hub/路由的 source of truth。未知字段、损坏
+JSON、过期或 registry 版本变化都会 fail closed 并清除。账户真实目录出现 exact ID/受控 alias 但
+任务能力证据不足时仍停留在 Model Center；只有形成该任务的可信或待探针推荐后，页面才展开两层任务
+披露并聚焦原任务。能力探针不会自动创建初始智能路由，最终保存仍要求用户显式操作并执行已有路由
+CAS。取消会清除
+intent，缺失型号可显示真实账户目录供手动选择但不能自动替换。`ModelHubSelectableCatalogBrowser`
+默认折叠并延迟挂载列表，全局和 22 项任务入口均保持账户目录优先；选择全局已连接型号也不会自动
+分工。Browser 自动化已覆盖这条返回链，真实 Windows Tauri + Keyring 返回仍为 `NOT_VERIFIED`。
+
+Agent 层不新增第二套执行总线。当前结论是确定性轻编排：route → privacy/cost preflight →
+context/Skill snapshot → exact dispatch → isolated Candidate → explicit acceptance。未来任何模型驱动
+orchestrator 只能是专家可选、有限步骤/调用/费用/时间、可取消并逐步留收据；不得拥有正文、版本、
+StoryFact、凭据、备份或商业授权写权限。
 
 前端：
 

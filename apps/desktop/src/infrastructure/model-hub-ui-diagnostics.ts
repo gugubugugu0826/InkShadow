@@ -7,8 +7,10 @@ import type {
 export interface SafeModelHubUiSnapshotDiagnostic {
   readonly exportedAt: string;
   readonly pageMounted: true;
+  readonly pageMountedAt: string;
   readonly hydrationPhase: ModelHubPageSnapshot["phase"];
-  readonly hydrationStartedAt: string;
+  readonly phaseStartedAt: string;
+  readonly hydrationStartedAt: string | null;
   readonly hydrationCompletedAt: string | null;
   readonly selectedProviderKind: ModelHubPageSnapshot["providerKind"];
   readonly selectedConnectionId: string | null;
@@ -51,7 +53,17 @@ export interface SafeModelHubSessionDiagnostics {
 
 interface MutableSessionState {
   readonly startedAt: string;
+  pageMountedAt: string | null;
+  mountBootstrapCoordinatorId: number | null;
+  pendingMountBootstrap: Readonly<{
+    coordinatorId: number;
+    startedAt: string;
+  }> | null;
   hydrationStartedAt: string | null;
+  hydrationCompletedAt: string | null;
+  phase: ModelHubPageSnapshot["phase"] | null;
+  phaseStartedAt: string | null;
+  lastInitialSnapshot: ModelHubPageSnapshot | null;
   snapshot: SafeModelHubUiSnapshotDiagnostic | null;
   actions: SafeModelHubActionDiagnostic[];
 }
@@ -65,13 +77,44 @@ export function recordModelHubUiSnapshot(
   exportedAt: string,
 ): void {
   const state = ensureState(owner, exportedAt);
-  state.hydrationStartedAt ??= exportedAt;
+  if (
+    snapshot.phase === "UNINITIALIZED" &&
+    snapshot.hydratedAt === null &&
+    snapshot.snapshotRevision === 0 &&
+    state.lastInitialSnapshot !== snapshot
+  ) {
+    const pendingMountBootstrap = state.pendingMountBootstrap;
+    state.pageMountedAt = exportedAt;
+    state.mountBootstrapCoordinatorId = pendingMountBootstrap?.coordinatorId ?? null;
+    state.pendingMountBootstrap = null;
+    state.hydrationStartedAt = pendingMountBootstrap?.startedAt ?? null;
+    state.hydrationCompletedAt = null;
+    state.phase = null;
+    state.phaseStartedAt = null;
+    state.lastInitialSnapshot = snapshot;
+  }
+  state.pageMountedAt ??= exportedAt;
+  if (state.phase !== snapshot.phase) {
+    state.phase = snapshot.phase;
+    state.phaseStartedAt = exportedAt;
+  }
+  if (
+    snapshot.lastAction === "bootstrap" &&
+    snapshot.hydratedAt !== null &&
+    (snapshot.phase === "READY" ||
+      snapshot.phase === "READY_WITH_WARNINGS" ||
+      snapshot.phase === "ERROR")
+  ) {
+    state.hydrationCompletedAt = snapshot.hydratedAt;
+  }
   state.snapshot = Object.freeze({
     exportedAt,
     pageMounted: true,
+    pageMountedAt: state.pageMountedAt,
     hydrationPhase: snapshot.phase,
+    phaseStartedAt: state.phaseStartedAt ?? exportedAt,
     hydrationStartedAt: state.hydrationStartedAt,
-    hydrationCompletedAt: snapshot.hydratedAt,
+    hydrationCompletedAt: state.hydrationCompletedAt,
     selectedProviderKind: snapshot.providerKind,
     selectedConnectionId: snapshot.selectedConnectionId,
     connectionCountInUi: snapshot.connections.length,
@@ -89,6 +132,21 @@ export function startModelHubDiagnosticAction(
   timestamp: string,
 ): void {
   const state = ensureState(owner, timestamp);
+  if (token.action === "bootstrap") {
+    const bootstrapStartedBeforeInitialSnapshot = state.lastInitialSnapshot === null;
+    const bootstrapStartedByNewCoordinator =
+      state.mountBootstrapCoordinatorId !== null &&
+      state.mountBootstrapCoordinatorId !== token.coordinatorId;
+    if (bootstrapStartedBeforeInitialSnapshot || bootstrapStartedByNewCoordinator) {
+      state.pendingMountBootstrap = Object.freeze({
+        coordinatorId: token.coordinatorId,
+        startedAt: timestamp,
+      });
+    } else {
+      state.mountBootstrapCoordinatorId ??= token.coordinatorId;
+    }
+    state.hydrationStartedAt = timestamp;
+  }
   state.actions = [
     Object.freeze({
       diagnosticId: token.operationId,
@@ -178,7 +236,14 @@ function ensureState(owner: object, now: string): MutableSessionState {
   if (existing !== undefined) return existing;
   const created: MutableSessionState = {
     startedAt: now,
+    pageMountedAt: null,
+    mountBootstrapCoordinatorId: null,
+    pendingMountBootstrap: null,
     hydrationStartedAt: null,
+    hydrationCompletedAt: null,
+    phase: null,
+    phaseStartedAt: null,
+    lastInitialSnapshot: null,
     snapshot: null,
     actions: [],
   };

@@ -118,12 +118,26 @@ checkpoint 初始状态为：
 - Model Hub 首次进入现由连接、持久化正文路由、系统凭据摘要、目录/能力/路由组成单一权威
   hydration snapshot；loading 阶段不会先显示“未配置”，旧 generation 不能覆盖新选择，目录刷新失败
   保留缓存。脱敏诊断已升级 schema v3，分开当前会话与历史错误，也不再把旧 Model Center 档案数
-  冒充 Model Hub 连接数。真实 Tauri 冷启动和 DeepSeek 凭据互操作仍为 `NOT_RUN`。
+  冒充 Model Hub 连接数。2026-08-13 当前代码进一步加入跨 mount 唯一 coordinator 身份、真实阶段
+  时间、5 秒凭据摘要降级和停用连接排除；自动化已通过，但当前代码的真实 Windows Tauri + SQLite +
+  Keyring 冷启动和 DeepSeek 凭据互操作仍为 `NOT_VERIFIED`。
 - Provider Registry 只对官方 DeepSeek endpoint 与精确官方模型 ID 提供带有效期、
   `verifiedByInkShadow=false` 的官方资料 fallback，目录证据优先且自定义端点不继承。Provider
   recommendation 只对已连接目录项排序或显示带有效期的发现方向；阿里云 `text-embedding-v4`
   等推荐不会创建能力证据。结构化输出和翻译分别使用固定严格 schema 与
   `inkshadow.translation-probe.zh-en.v2` 无作品探针，成功后才保存对应能力/路由。
+- 完整未连接模型目录、普通/专家证据分层和“选模型→连接→返回原任务→确认分配”的本地 UI 切片
+  已实现。版本化 registry 覆盖 22 项任务；默认折叠的全局浏览器和任务级披露均让账户实际目录优先，
+  普通投影不暴露官方 URL/TTL。官方候选固定 `routable=false`、`capabilityEvidence=false`，不得自动
+  制造连接、目录、能力或分工。内容无关 localStorage intent 只有任务、供应商、精确型号、registry
+  版本与时间，30 分钟过期；exact ID/受控 alias 出现在真实账户目录但任务证据不足时仍停留在 Model
+  Center，只有形成可信或待探针任务推荐后才展开聚焦。能力探针不会自动创建路由，仍须显式验证、
+  分配和已有路由 CAS。连接失败、型号缺失、损坏/过期 intent 都保留旧路由。Browser 自动化已通过；
+  真实 Tauri + Keyring 返回仍为 `NOT_VERIFIED`。
+- Agent 方案选择固定工作流加确定性轻编排，不新增普通用户可见的 Agent 导航，也不让模型自主决定
+  任务、供应商或写入。现有多智能体复核继续作为专家 feature flag，默认关闭；自主写作 Agent 被拒绝。
+  autosave、数据库/迁移、不可变版本、备份、凭据、费用授权、私密章节、Candidate 接受和正式
+  StoryFact 始终由确定性代码与作者确认控制。
 - 三条创建旅程共享持久化 `ProjectSeed`。作者确认且非空的字段已进入真实续写 Context Compile：禁止项为必选硬规则，类型/基调/风格/POV/改写规则为当前任务，人物/关系、世界/起点和冲突/方向/大纲分别进入对应层；未确认的导入分析或 AI 推测被排除。
 - 续写现按短/标准/长/自定义目标动态计算输出和上下文预算，使用保守 CJK token 估算并从模型窗口
   扣除系统、协议、输出与安全余量；不再以固定 Top-K 冒充长程上下文。截断或取消时的可见正文只
@@ -136,6 +150,10 @@ checkpoint 初始状态为：
   显式启用后，第一次开书和续写才会把适用方法编译进独立预算段，并在同一
   trace/generation/model invocation/Candidate 链保存精确 content-free snapshot。“本次参考”显示
   名称、版本、采用/舍弃原因与预算，缺少回执不冒充已使用。浏览器开发模式明确不可用。
+- 2026-08-13 受限 smoke 使用真实临时 SQLite 完成零 Provider 的启用、重启保留、关闭和再次重启，
+  并用一次 mocked 200–400 中文字符生成验证 Scene Craft snapshot/trace、隔离 Candidate、拒绝与重开；
+  正文和不可变版本始终不变，关闭 Skill 也不删除历史 trace。该证据零网络、零真实 Provider、零付费
+  runner，只证明持久化和 Candidate 围栏，不证明质量；全部 Skill 继续 `defaultEnabled=false`。
 - Data `0061` / Tauri `64` 已建立九表 content-free Novel Skill 评测账本，固定 192 个 cell、专用
   空白归档项目、适用性 manifest、失败 attempt、Candidate/trace/invocation/snapshot 和人工决定链。
   13 项人工评分及 reviewer/rubric/time 已成为硬合同；完整 run 需要 2,496 个评分槽，并重验互异模型
@@ -152,10 +170,17 @@ checkpoint 初始状态为：
   模板说明、文件选择、严格 dry run、精确路径错误、逐项冲突决定和最终确认；SQLite 把正式记录、
   关系 StoryFact、偏好、记忆与导入收据放在同一事务中，撤销受 revision/version fence 和后续引用
   保护。旧开书原始 JSON 卡片或缺端点关系只进入逐条 legacy repair，不能静默提升为正式设定。
-- P19/P28 的当前正文布局已改为填满可用视口的章节、正文、AI 助手三栏，左右栏可独立收起且
-  助手独立滚动；1024px 及以下以单一正文列配合章节 Drawer 和 AI 助手对话式检查器，800px 下
-  工具栏继续换行并收紧内边距。该实现仍需 1440/1280/1024/800、深浅色、键盘和 Windows 200%
-  人工矩阵验收，不能据此把 P19/P28 标记 VERIFIED。
+- P19/P28 的当前正文布局已修复 `.editor-page` 的 `border-box` 边界，宽度大于 1024px 时以可指针
+  拖动、可方向键/Home/End 操作的 ARIA separator 调整正文与 AI 助手；1024px 及以下保持单一正文列、
+  章节 Drawer 和 AI 助手检查器。800px compact drawer 不再被固定高度裁切，直接操作保持 44px。
+  production Chromium 已复核 1536/1440/1280/1024/800、125%/150%/200% 等效视口、键盘路径与
+  代表性明暗主题，没有新的横向溢出或不可达主操作；正文、不可变版本和 Candidate 未受影响。
+  真实 Tauri WebView/DPI 仍为 `NOT_VERIFIED`，因此仍不能据此把 P19/P28 标记 VERIFIED。
+- 2026-08-13 v0.2.2 脱敏诊断只证明最新一次 Model Hub bootstrap 在真实 Tauri 中 76 ms 成功并
+  到达 READY；它同时暴露跨 mount operation ID 碰撞和 snapshot/action 时间语义混合，不能证明
+  首次进入从未失败。当前工作树已修诊断身份/时间语义、有限凭据等待、停用连接选择和对应自动化；
+  P23/P24 的代码状态为 `CODE_FIXED`，但当前 build 的真实 Tauri 冷启动/返回页面仍为
+  `NOT_VERIFIED`，不能用旧诊断或 Chromium 结果更新为 VERIFIED。
 - P15/P26/P36 的项目记忆治理已补充安全主链路：设置页按明确选择的项目执行“忘掉全部记忆”，原子关闭自动学习并排除记录；设定页只允许作者选定两条记忆、编辑合并内容并指定保留项。来源与不可变治理审计保留，不做自动相似度合并或物理删除。该增量仍须纳入当前全量回归。
 - P36 写作反馈学习现在把每条事件与“事件发生时是否允许学习”绑定；恢复学习后只统计新的启用期事件，不追溯暂停期或无法证明策略的旧事件。明确反馈、事件时策略、全量证据计数和偏好 upsert 在 SQLite 单事务或浏览器单 mutation 中提交；稳定幂等身份使断线重试不会重复增加事件、证据或偏好版本。重复自定义意见经 NFKC、空白和大小写规范化后只保存 SHA-256 聚类身份，最多 500 字，达到阈值才形成可见、可编辑偏好；不会把章节正文或 Candidate 正文写入反馈账本。导入页保存失败会保留已形成规则并显示可重试错误，不再把半成功描述为已保存。
 - P33 的建议编辑现可先保存为仍处于 `ready` 的隔离 Candidate，关闭并重开后继续；正文和不可变版本在明确应用前保持不变。Candidate 持久记录任务语义、载荷形状、UTF-16 锚点和单调 revision：保存修改、接受、拒绝均绑定用户实际看到的 revision，SQLite、浏览器开发存储和多智能体章节候选都在事务内二次 CAS。接受前复核 Candidate 内容哈希；续写只插入生成时光标，选区改写只替换生成时选区，整章改写只能替换整章或在当前/基线共同章末追加。基线漂移、行内容篡改、旧窗口决定、提交故障或错误策略均失败关闭并保留正文与赢家建议。

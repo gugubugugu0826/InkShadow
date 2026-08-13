@@ -115,6 +115,89 @@ describe("simplified editor workspace", () => {
     expect(await screen.findByRole("heading", { name: "AI 创作助手" })).toBeVisible();
   });
 
+  it("resizes the desktop assistant with pointer capture and the full keyboard contract", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedProject(runtime);
+    const user = userEvent.setup();
+
+    renderEditor(runtime, project, chapter);
+
+    const separator = await screen.findByRole("separator", {
+      name: "调整正文与 AI 创作助手宽度",
+    });
+    const writingCanvas = screen.getByRole("region", { name: "章节正文" });
+    const assistant = screen.getByRole("complementary", { name: "AI 创作助手" });
+    expect(separator).toHaveAttribute("aria-orientation", "vertical");
+    expect(separator).toHaveAttribute("aria-controls", "editor-ai-assistant-panel");
+    expect(separator.previousElementSibling).toBe(writingCanvas);
+    expect(separator.nextElementSibling).toBe(assistant);
+
+    const initialWidth = Number(separator.getAttribute("aria-valuenow"));
+    fireEvent.keyDown(separator, { key: "ArrowLeft" });
+    expect(separator).toHaveAttribute("aria-valuenow", String(initialWidth + 8));
+    fireEvent.keyDown(separator, { key: "ArrowRight", shiftKey: true });
+    expect(separator).toHaveAttribute("aria-valuenow", "256");
+    const workspace = separator.parentElement;
+    if (!(workspace instanceof HTMLElement)) {
+      throw new Error("找不到编辑器工作区");
+    }
+    vi.spyOn(workspace, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 900, 600));
+    vi.spyOn(writingCanvas, "getBoundingClientRect").mockReturnValue(new DOMRect(172, 0, 372, 600));
+    fireEvent.keyDown(separator, { key: "End" });
+    expect(separator).toHaveAttribute("aria-valuemax", "408");
+    expect(separator).toHaveAttribute("aria-valuenow", "408");
+    fireEvent.keyDown(separator, { key: "Home" });
+    expect(separator).toHaveAttribute("aria-valuenow", "256");
+
+    const setPointerCapture = vi.fn();
+    const releasePointerCapture = vi.fn();
+    Object.defineProperties(separator, {
+      hasPointerCapture: { configurable: true, value: vi.fn(() => true) },
+      releasePointerCapture: { configurable: true, value: releasePointerCapture },
+      setPointerCapture: { configurable: true, value: setPointerCapture },
+    });
+    fireEvent.pointerDown(separator, { clientX: 800, pointerId: 7 });
+    fireEvent.pointerMove(separator, { clientX: 700, pointerId: 7 });
+    fireEvent.pointerUp(separator, { clientX: 700, pointerId: 7 });
+    expect(setPointerCapture).toHaveBeenCalledWith(7);
+    expect(releasePointerCapture).toHaveBeenCalledWith(7);
+    expect(separator).toHaveAttribute("aria-valuenow", "356");
+
+    await user.click(within(assistant).getByRole("button", { name: "收起 AI 创作助手" }));
+    expect(screen.queryByRole("separator")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "展开 AI 创作助手" }));
+    expect(
+      await screen.findByRole("separator", { name: "调整正文与 AI 创作助手宽度" }),
+    ).toHaveAttribute("aria-valuenow", "356");
+  });
+
+  it("uses the drawer breakpoint without exposing the desktop resize separator", async () => {
+    const previousMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn((query: string) => createMediaQueryList(query, query === "(max-width: 64rem)")),
+    });
+    try {
+      const runtime = createDevelopmentRuntime(window.localStorage);
+      const { chapter, project } = await seedProject(runtime);
+      const user = userEvent.setup();
+
+      renderEditor(runtime, project, chapter);
+
+      expect(await screen.findByRole("textbox", { name: "章节正文" })).toBeVisible();
+      expect(screen.queryByRole("separator")).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "AI 助手" }));
+      expect(await screen.findByRole("dialog", { name: "AI 创作助手" })).toBeVisible();
+      expect(screen.queryByRole("separator")).not.toBeInTheDocument();
+    } finally {
+      if (previousMatchMedia === undefined) {
+        Reflect.deleteProperty(window, "matchMedia");
+      } else {
+        Object.defineProperty(window, "matchMedia", previousMatchMedia);
+      }
+    }
+  });
+
   it("keeps an existing AI suggestion action unambiguous when正文 is selected", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const { chapter, project } = await seedProject(runtime);
@@ -228,6 +311,19 @@ function renderEditor(runtime: DesktopRuntime, project: Project, chapter: Chapte
       </RuntimeProvider>
     </MemoryRouter>,
   );
+}
+
+function createMediaQueryList(query: string, matches: boolean): MediaQueryList {
+  return {
+    matches,
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(() => true),
+  };
 }
 
 async function seedProject(runtime: DesktopRuntime): Promise<{

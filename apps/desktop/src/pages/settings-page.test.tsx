@@ -16,6 +16,11 @@ import {
   EDITOR_TYPOGRAPHY_CHANGED_EVENT,
   EDITOR_VIEW_STATE_STORAGE_KEY,
 } from "../infrastructure/editor-view-state-store";
+import {
+  MODEL_HUB_CONNECTION_INTENT_STORAGE_KEY,
+  saveModelHubConnectionIntent,
+} from "../infrastructure/model-hub-connection-intent";
+import { SELECTABLE_MODEL_CATALOG_REGISTRY_VERSION } from "../infrastructure/selectable-model-catalog-registry";
 import { NOVEL_AI_TASKS } from "../infrastructure/model-hub-provider-registry";
 import { applyAutomaticModelHubRouting } from "../infrastructure/model-hub-routing-service";
 import { ModelHubStoreError } from "../infrastructure/model-hub-store";
@@ -65,6 +70,394 @@ describe("SettingsPage model routing", () => {
       "/settings#model-center",
     );
   });
+
+  it("keeps an exact unconnected model choice pending until connection and explicit assignment", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    renderRoute(runtime, "/settings#model-routing");
+
+    await screen.findByRole("heading", { name: "AI 分工" }, { timeout: 5_000 });
+    await user.click(screen.getByText("查看尚未配置的 22 项"));
+    const taskRow = screen
+      .getAllByText("正文生成")
+      .find((element) => element.tagName === "STRONG")
+      ?.closest("li");
+    if (taskRow === null || taskRow === undefined) {
+      throw new Error("Expected the prose generation task row.");
+    }
+    await user.click(within(taskRow).getByText(/查看可选模型/u));
+    const modelRow = within(taskRow).getByText("DeepSeek V4 Flash").closest("li");
+    if (modelRow === null) throw new Error("Expected the DeepSeek candidate row.");
+    await user.click(within(modelRow).getByRole("button", { name: "选择并连接" }));
+
+    expect(
+      await screen.findByText(/正在为“正文生成”连接模型/u, {}, { timeout: 5_000 }),
+    ).toBeVisible();
+    expect(screen.getByText(/deepseek-v4-flash.*原有 AI 分工不会改变/u)).toBeVisible();
+    expect(
+      JSON.parse(window.localStorage.getItem(MODEL_HUB_CONNECTION_INTENT_STORAGE_KEY) ?? "null"),
+    ).toMatchObject({
+      task: "prose_generation",
+      providerKind: "deepseek",
+      providerModelId: "deepseek-v4-flash",
+    });
+    await expect(runtime.modelHub.findTaskRoute("prose_generation")).resolves.toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "取消选择" }));
+    expect(window.localStorage.getItem(MODEL_HUB_CONNECTION_INTENT_STORAGE_KEY)).toBeNull();
+    await expect(runtime.modelHub.findTaskRoute("prose_generation")).resolves.toBeNull();
+  }, 10_000);
+
+  it("opens the ordinary global catalog lazily and hands an official choice to connection without routing it", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    renderRoute(runtime, "/settings#model-routing");
+
+    await screen.findByRole("heading", { name: "AI 分工" }, { timeout: 5_000 });
+    expect(screen.queryByRole("searchbox", { name: "搜索模型、供应商或用途" })).toBeNull();
+    await user.click(screen.getByText("浏览全部可选模型"));
+    const search = screen.getByRole("searchbox", { name: "搜索模型、供应商或用途" });
+    await user.type(search, "gpt-5.6-sol");
+    await user.click(screen.getByRole("button", { name: /选择 GPT-5.6 Sol/u }));
+
+    expect(
+      await screen.findByText(/准备连接 GPT-5.6 Sol.*不会参与 AI 分工/u, {}, { timeout: 5_000 }),
+    ).toBeVisible();
+    expect(screen.getByText("模型选择提示")).toBeVisible();
+    expect(screen.queryByText(/更改已保存.*需要刷新/u)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "刷新 Model Hub 状态" })).not.toBeInTheDocument();
+    await expect(runtime.modelHub.findTaskRoute("prose_generation")).resolves.toBeNull();
+    expect(screen.queryByText(/OpenAI model catalog/u)).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /供应商证据/u })).not.toBeInTheDocument();
+  }, 10_000);
+
+  it("keeps provider-declared capability rows visibly pending until InkShadow verifies them", async () => {
+    const developmentRuntime = createDevelopmentRuntime(window.localStorage);
+    let connection = await developmentRuntime.modelHub.saveConnection({
+      id: "catalog-declaration-only",
+      providerKind: "openai",
+      displayName: "Declaration-only provider",
+      credentialRef: "keyring:model-hub:catalog-declaration-only",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    connection = await developmentRuntime.modelHub.recordConnectionTest({
+      connectionId: connection.id,
+      status: "ready",
+      expectedRevision: connection.revision,
+    });
+    const catalog = await developmentRuntime.modelHub.syncCatalog({
+      syncId: "catalog-declaration-only-sync",
+      connectionId: connection.id,
+      source: "provider_api",
+      status: "succeeded",
+      models: [
+        {
+          id: "catalog-declaration-only-entry",
+          providerModelId: "declaration-only-model",
+          displayName: "Declaration-only model",
+        },
+      ],
+    });
+    await developmentRuntime.modelHub.recordCapabilityScan({
+      scanId: "catalog-declaration-only-scan",
+      catalogEntryId: catalog[0]?.id ?? "missing",
+      scanKind: "provider_metadata",
+      status: "succeeded",
+      evidenceVersion: "provider-catalog-v1",
+      evidence: [
+        {
+          id: "catalog-declaration-only-text",
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "provider_metadata",
+        },
+      ],
+    });
+    const runtime: DesktopRuntime = {
+      ...developmentRuntime,
+      mode: "tauri",
+      credentials: {
+        getSummary: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        save: () => Promise.resolve({ configured: true, lastFour: "1234" }),
+        delete: () => Promise.resolve({ configured: false, lastFour: null }),
+      },
+    };
+    const user = userEvent.setup();
+    renderRoute(runtime, "/settings#model-routing");
+
+    await screen.findByRole("heading", { name: "AI 分工" }, { timeout: 5_000 });
+    await user.click(screen.getByText("浏览全部可选模型"));
+    const search = screen.getByRole("searchbox", { name: "搜索模型、供应商或用途" });
+    await user.type(search, "declaration-only-model");
+    const modelRow = screen
+      .getByRole("button", { name: /选择 Declaration-only model/u })
+      .closest("li");
+    if (modelRow === null) throw new Error("Expected the declaration-only catalog row.");
+    expect(within(modelRow).getByText("待应用验证")).toBeVisible();
+    expect(within(modelRow).queryByText("已通过应用验证")).not.toBeInTheDocument();
+  }, 10_000);
+
+  it("keeps a catalog-only pending choice in Model Center without provider calls or route changes", async () => {
+    const prepared = await createReadyDeepSeekProbeRuntime("deepseek-return-intent");
+    const currentConnection =
+      await prepared.runtime.modelHub.findConnection("deepseek-return-intent");
+    if (currentConnection === null) throw new Error("Expected the pending connection.");
+    await prepared.runtime.modelHub.recordConnectionTest({
+      connectionId: currentConnection.id,
+      status: "ready",
+      expectedRevision: currentConnection.revision,
+    });
+    const checkConnection = vi.spyOn(prepared.runtime.modelGateway, "checkConnection");
+    const listModels = vi.spyOn(prepared.runtime.modelGateway, "listModels");
+    const generate = vi.spyOn(prepared.runtime.modelGateway, "generate");
+    expect(
+      saveModelHubConnectionIntent(window.localStorage, {
+        task: "prose_generation",
+        providerKind: "deepseek",
+        providerModelId: "deepseek-v4-flash",
+        catalogRegistryVersion: SELECTABLE_MODEL_CATALOG_REGISTRY_VERSION,
+        now: prepared.runtime.clock.now(),
+      }),
+    ).not.toBeNull();
+
+    renderRoute(prepared.runtime, "/settings#model-center");
+
+    expect(
+      await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 }),
+    ).toBeVisible();
+    expect(
+      await screen.findByText("所选模型已发现，仍需验证能力", {}, { timeout: 5_000 }),
+    ).toBeVisible();
+    expect(screen.getByRole("link", { name: "验证能力" })).toHaveAttribute(
+      "href",
+      "/settings#model-center",
+    );
+    const pendingTaskRow = document.getElementById("model-routing-task-prose_generation");
+    expect(pendingTaskRow).not.toHaveFocus();
+    expect(pendingTaskRow?.closest("details")).not.toHaveAttribute("open");
+    expect(
+      pendingTaskRow?.querySelector(":scope > details.model-routing-model-options"),
+    ).not.toHaveAttribute("open");
+    await expect(prepared.runtime.modelHub.findTaskRoute("prose_generation")).resolves.toBeNull();
+    expect(checkConnection).not.toHaveBeenCalled();
+    expect(listModels).not.toHaveBeenCalled();
+    expect(generate).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem(MODEL_HUB_CONNECTION_INTENT_STORAGE_KEY)).not.toBeNull();
+  }, 10_000);
+
+  it("returns a verified exact intent to an expanded task and assigns only after explicit confirmation", async () => {
+    const prepared = await createReadyDeepSeekProbeRuntime("deepseek-verified-return-intent");
+    let retiredDuplicate = await prepared.runtime.modelHub.saveConnection({
+      id: "deepseek-retired-return-duplicate",
+      providerKind: "deepseek",
+      displayName: "Retired duplicate",
+      credentialRef: "keyring:model-hub:deepseek-retired-return-duplicate",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    await prepared.runtime.modelHub.syncCatalog({
+      syncId: "deepseek-retired-return-duplicate-sync",
+      connectionId: retiredDuplicate.id,
+      source: "provider_api",
+      status: "succeeded",
+      models: [
+        {
+          id: "deepseek-retired-return-duplicate-catalog",
+          providerModelId: "deepseek-v4-flash",
+          displayName: "Retired deepseek-v4-flash",
+        },
+      ],
+    });
+    const currentRetiredDuplicate = await prepared.runtime.modelHub.findConnection(
+      retiredDuplicate.id,
+    );
+    if (currentRetiredDuplicate === null) throw new Error("Expected the duplicate connection.");
+    retiredDuplicate = await prepared.runtime.modelHub.retireConnection({
+      connectionId: retiredDuplicate.id,
+      expectedRevision: currentRetiredDuplicate.revision,
+    });
+    expect(retiredDuplicate.enabled).toBe(false);
+    let activeDuplicate = await prepared.runtime.modelHub.saveConnection({
+      id: "zz-deepseek-active-return-duplicate",
+      providerKind: "deepseek",
+      displayName: "Active duplicate",
+      credentialRef: "keyring:model-hub:zz-deepseek-active-return-duplicate",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    activeDuplicate = await prepared.runtime.modelHub.recordConnectionTest({
+      connectionId: activeDuplicate.id,
+      status: "ready",
+      expectedRevision: activeDuplicate.revision,
+    });
+    const activeDuplicateCatalog = await prepared.runtime.modelHub.syncCatalog({
+      syncId: "zz-deepseek-active-return-duplicate-sync",
+      connectionId: activeDuplicate.id,
+      source: "provider_api",
+      status: "succeeded",
+      models: [
+        {
+          id: "zz-deepseek-active-return-duplicate-catalog",
+          providerModelId: "deepseek-v4-flash",
+          displayName: "Active duplicate deepseek-v4-flash",
+        },
+      ],
+    });
+    const activeDuplicateCatalogEntry = activeDuplicateCatalog[0];
+    if (activeDuplicateCatalogEntry === undefined) {
+      throw new Error("Expected the active duplicate catalog entry.");
+    }
+    const checkConnection = vi.spyOn(prepared.runtime.modelGateway, "checkConnection");
+    const listModels = vi.spyOn(prepared.runtime.modelGateway, "listModels");
+    const generate = vi.spyOn(prepared.runtime.modelGateway, "generate");
+    expect(
+      saveModelHubConnectionIntent(window.localStorage, {
+        task: "prose_generation",
+        providerKind: "deepseek",
+        providerModelId: "deepseek-v4-flash",
+        catalogRegistryVersion: SELECTABLE_MODEL_CATALOG_REGISTRY_VERSION,
+        now: prepared.runtime.clock.now(),
+      }),
+    ).not.toBeNull();
+    const user = userEvent.setup();
+
+    renderRoute(prepared.runtime, "/settings#model-center");
+
+    expect(
+      await screen.findByText("所选模型已发现，仍需验证能力", {}, { timeout: 5_000 }),
+    ).toBeVisible();
+    const verify = screen.getByRole("button", { name: "验证写作能力" });
+    await waitFor(() => expect(verify).toBeEnabled());
+    await user.click(verify);
+
+    expect(
+      await screen.findByRole("heading", { name: "AI 分工" }, { timeout: 5_000 }),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(document.getElementById("model-routing-task-prose_generation")).toHaveFocus(),
+    );
+    const taskRow = document.getElementById("model-routing-task-prose_generation");
+    if (taskRow === null) throw new Error("Expected the prose generation task row.");
+    const outerDisclosure = taskRow.closest("details");
+    const modelDisclosure = taskRow.querySelector<HTMLDetailsElement>(
+      ":scope > details.model-routing-model-options",
+    );
+    expect(outerDisclosure).toHaveAttribute("open");
+    expect(modelDisclosure).toHaveAttribute("open");
+    expect(taskRow).toBeVisible();
+    if (modelDisclosure === null) throw new Error("Expected the task model disclosure.");
+    const probedCatalogEntries = (
+      await Promise.all(
+        [prepared.catalogEntryId, activeDuplicateCatalogEntry.id].map(async (catalogEntryId) => ({
+          catalogEntryId,
+          evidence: await prepared.runtime.modelHub.listCapabilityEvidence(catalogEntryId),
+        })),
+      )
+    ).filter(({ evidence }) =>
+      evidence.some(
+        ({ capability, verdict }) => capability === "text_generation" && verdict === "supported",
+      ),
+    );
+    expect(probedCatalogEntries).toHaveLength(1);
+    const probedCatalogEntry = probedCatalogEntries[0];
+    if (probedCatalogEntry === undefined) throw new Error("Expected one probed catalog entry.");
+    const probedDisplayName =
+      probedCatalogEntry.catalogEntryId === activeDuplicateCatalogEntry.id
+        ? "Active duplicate deepseek-v4-flash"
+        : "deepseek-v4-flash";
+    const probedModelLabel = within(modelDisclosure).getByText(probedDisplayName, {
+      selector: "strong",
+    });
+    expect(probedModelLabel).toBeVisible();
+    expect(
+      within(modelDisclosure).queryByText("Retired deepseek-v4-flash"),
+    ).not.toBeInTheDocument();
+
+    const routesAfterProbe = await Promise.all(
+      NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)),
+    );
+    expect(routesAfterProbe.every((route) => route === null)).toBe(true);
+    expect(window.localStorage.getItem(MODEL_HUB_CONNECTION_INTENT_STORAGE_KEY)).not.toBeNull();
+    expect(checkConnection).not.toHaveBeenCalled();
+    expect(listModels).not.toHaveBeenCalled();
+    expect(generate).toHaveBeenCalledTimes(1);
+
+    const probedModelRow = probedModelLabel.closest("li");
+    if (probedModelRow === null) throw new Error("Expected the probed model row.");
+    await user.click(within(probedModelRow).getByRole("button", { name: "用于此任务" }));
+
+    await waitFor(() =>
+      expect(window.localStorage.getItem(MODEL_HUB_CONNECTION_INTENT_STORAGE_KEY)).toBeNull(),
+    );
+    const routesAfterAssignment = (
+      await Promise.all(NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)))
+    ).filter((route) => route !== null);
+    expect(routesAfterAssignment).toHaveLength(1);
+    expect(routesAfterAssignment[0]).toMatchObject({
+      task: "prose_generation",
+      primaryCatalogEntryId: probedCatalogEntry.catalogEntryId,
+      routeOrigin: "user",
+      enabled: true,
+    });
+    expect(generate).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
+  it("returns a text-verified translation task to its probe action without assigning it", async () => {
+    const prepared = await createReadyDeepSeekProbeRuntime("deepseek-translation-return-intent");
+    await prepared.runtime.modelHub.recordCapabilityScan({
+      scanId: "deepseek-translation-return-text-scan",
+      catalogEntryId: prepared.catalogEntryId,
+      scanKind: "user_review",
+      status: "succeeded",
+      evidenceVersion: "translation-return-text-v1",
+      evidence: [
+        {
+          id: "deepseek-translation-return-text",
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "user_confirmed",
+        },
+      ],
+    });
+    expect(
+      saveModelHubConnectionIntent(window.localStorage, {
+        task: "translation",
+        providerKind: "deepseek",
+        providerModelId: "deepseek-v4-flash",
+        catalogRegistryVersion: SELECTABLE_MODEL_CATALOG_REGISTRY_VERSION,
+        now: prepared.runtime.clock.now(),
+      }),
+    ).not.toBeNull();
+    const generate = vi.spyOn(prepared.runtime.modelGateway, "generate");
+
+    renderRoute(prepared.runtime, "/settings#model-center");
+
+    expect(
+      await screen.findByRole("heading", { name: "AI 分工" }, { timeout: 5_000 }),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(document.getElementById("model-routing-task-translation")).toHaveFocus(),
+    );
+    const taskRow = document.getElementById("model-routing-task-translation");
+    if (taskRow === null) throw new Error("Expected the translation task row.");
+    expect(taskRow.closest("details")).toHaveAttribute("open");
+    const modelDisclosure = taskRow.querySelector<HTMLDetailsElement>(
+      ":scope > details.model-routing-model-options",
+    );
+    if (modelDisclosure === null) throw new Error("Expected the task model disclosure.");
+    expect(modelDisclosure).toHaveAttribute("open");
+    expect(within(modelDisclosure).getByRole("button", { name: "验证并用于此任务" })).toBeVisible();
+    await expect(prepared.runtime.modelHub.findTaskRoute("translation")).resolves.toBeNull();
+    expect(window.localStorage.getItem(MODEL_HUB_CONNECTION_INTENT_STORAGE_KEY)).not.toBeNull();
+    expect(generate).not.toHaveBeenCalled();
+  }, 10_000);
 
   it("lets the user choose and persist an appearance without exposing technical settings", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);

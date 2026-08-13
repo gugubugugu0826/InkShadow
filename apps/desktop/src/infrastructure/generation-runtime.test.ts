@@ -179,6 +179,129 @@ describe("governed generation runtime", () => {
     });
   });
 
+  it("keeps a bounded Skill-assisted response isolated through reject, reopen, and disable", async () => {
+    const boundedOutput =
+      "雨线斜落在檐角，林澈把湿透的纸页压在灯下。巷口传来一声短促铜铃，他没有追出去，只把门闩轻轻扣紧。" +
+      "桌上的旧地图被风掀起一角，露出背面新添的墨迹：今夜别去钟楼。字迹尚未干透，像有人刚从屋里离开。" +
+      "他摸到窗框上的细泥，泥里混着淡白盐粒。城南河道早已封冻，只有北门码头会留下这样的痕迹。" +
+      "林澈吹灭灯，把地图折进袖中。门外脚步停了片刻，随后沿石阶退远。他数到十，才从后窗翻进雨幕。" +
+      "远处钟声提前响了一下。他贴着墙根向北走，始终没有回头，也没有惊动守夜的人。";
+    expect(boundedOutput.length).toBeGreaterThanOrEqual(200);
+    expect(boundedOutput.length).toBeLessThanOrEqual(400);
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>((request) => {
+      expect(request.maxOutputTokens).toBe(768);
+      request.onDelta?.(boundedOutput);
+      return Promise.resolve(generationResult(boundedOutput, 180, 260));
+    });
+    const created = await createRemoteRuntime({ generate });
+    const experimental = await attachEnabledNovelSkills(created.runtime, created.chapterId);
+    const runtime = experimental.runtime;
+    await seedModelHubContinuationRoute(runtime);
+    const chapterBefore = await runtime.repositories.chapters.findById(created.chapterId);
+    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(
+      created.chapterId,
+    );
+    if (!chapterBefore.ok || chapterBefore.value === null || !versionsBefore.ok) {
+      throw new Error("Expected the stable chapter and its initial version.");
+    }
+
+    const plan = await prepareGenerationPlan(runtime, created.chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+      outputProfile: "custom",
+      customTargetVisibleCharacters: 300,
+      destination: "next_segment",
+    });
+    expect(plan.novelSkillPreparation.status).toBe("prepared_applied");
+    expect(
+      plan.novelSkillPreparation.methods.find(({ displayName }) => displayName === "场景推进"),
+    ).toMatchObject({ displayName: "场景推进", version: "1.0.0", included: true });
+
+    const executed = await executeGenerationPlan(runtime, plan);
+    if (!executed.ok || executed.value.candidate === null || plan.contextTraceId === null) {
+      throw new Error("Expected one isolated Skill-assisted Candidate and its trace.");
+    }
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(executed.value.candidate.content).toContain(boundedOutput);
+    const chapterAfterGeneration = await runtime.repositories.chapters.findById(created.chapterId);
+    const versionsAfterGeneration = await runtime.repositories.chapterVersions.listByChapterId(
+      created.chapterId,
+    );
+    expect(chapterAfterGeneration.ok && chapterAfterGeneration.value?.toSnapshot()).toEqual(
+      chapterBefore.value.toSnapshot(),
+    );
+    expect(
+      versionsAfterGeneration.ok
+        ? versionsAfterGeneration.value.map((version) => version.toSnapshot())
+        : null,
+    ).toEqual(versionsBefore.value.map((version) => version.toSnapshot()));
+    const invocationBeforeReject = await runtime.novelSkills.findInvocationByContextTrace(
+      plan.contextTraceId,
+    );
+    if (invocationBeforeReject.status !== "found") {
+      throw new Error("Expected the Skill invocation receipt by context trace.");
+    }
+    expect(
+      invocationBeforeReject.invocation.methods.find(
+        ({ displayName }) => displayName === "场景推进",
+      ),
+    ).toMatchObject({ displayName: "场景推进", version: "1.0.0", included: true });
+
+    const rejected = await runtime.useCases.rejectCandidate.execute({
+      candidateId: executed.value.candidate.id,
+      expectedCandidateRevision: executed.value.candidate.revision,
+    });
+    if (!rejected.ok) throw rejected.error;
+    expect(rejected.value.status).toBe("rejected");
+    if (plan.projectId === null) throw new Error("Expected a project-bound generation plan.");
+    const scene = (await runtime.novelSkills.listProjectState(plan.projectId)).methods.find(
+      ({ skillId }) => skillId === "core.scene_craft",
+    );
+    if (scene === undefined) throw new Error("Expected the enabled scene method.");
+    await runtime.novelSkills.setMethodEnabled(plan.projectId, scene.skillId, false);
+
+    const reopenedContentRuntime = createDevelopmentRuntime(window.localStorage);
+    const reopenedCandidate = await reopenedContentRuntime.repositories.aiCandidates.findById(
+      executed.value.candidate.id,
+    );
+    const reopenedChapter = await reopenedContentRuntime.repositories.chapters.findById(
+      created.chapterId,
+    );
+    const reopenedVersions =
+      await reopenedContentRuntime.repositories.chapterVersions.listByChapterId(created.chapterId);
+    expect(reopenedCandidate.ok && reopenedCandidate.value?.toSnapshot()).toMatchObject({
+      id: executed.value.candidate.id,
+      status: "rejected",
+      content: executed.value.candidate.content,
+    });
+    expect(reopenedChapter.ok && reopenedChapter.value?.toSnapshot()).toEqual(
+      chapterBefore.value.toSnapshot(),
+    );
+    expect(
+      reopenedVersions.ok ? reopenedVersions.value.map((version) => version.toSnapshot()) : null,
+    ).toEqual(versionsBefore.value.map((version) => version.toSnapshot()));
+    expect(generate).toHaveBeenCalledTimes(1);
+
+    const reopenedSkills = new TauriNovelSkillRuntime(experimental.persistence, runtime.clock);
+    await reopenedSkills.initialize();
+    expect(
+      (await reopenedSkills.listProjectState(plan.projectId)).methods.filter(
+        ({ enabled }) => enabled,
+      ),
+    ).toEqual([]);
+    const invocationAfterDisable = await reopenedSkills.findInvocationByContextTrace(
+      plan.contextTraceId,
+    );
+    if (invocationAfterDisable.status !== "found") {
+      throw new Error("Expected the historical Skill receipt after disable and reopen.");
+    }
+    expect(
+      invocationAfterDisable.invocation.methods.find(
+        ({ displayName }) => displayName === "场景推进",
+      ),
+    ).toMatchObject({ displayName: "场景推进", version: "1.0.0", included: true });
+  });
+
   it("fails closed when the project is archived, trashed, or missing after preflight", async () => {
     const cases = [
       { lifecycle: "archived", expectedCode: "PROJECT_ARCHIVED" },
