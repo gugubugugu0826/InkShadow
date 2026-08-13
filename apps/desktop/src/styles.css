@@ -1918,6 +1918,8 @@ select {
 }
 
 .editor-workspace {
+  --editor-assistant-width: clamp(20rem, 24vw, 22.5rem);
+
   position: relative;
   display: grid;
   width: 100%;
@@ -2079,6 +2081,8 @@ select {
 
 @media (max-width: 80rem) and (min-width: 64.0625rem) {
   .editor-workspace {
+    --editor-assistant-width: 18rem;
+
     grid-template-columns:
       minmax(9rem, 10rem) minmax(0, 1fr)
       var(--editor-assistant-width, 18rem);

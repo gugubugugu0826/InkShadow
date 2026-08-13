@@ -20,6 +20,20 @@ describe("editor layout CSS contract", () => {
     expect(editorPageRule).toMatch(/overflow:\s*hidden;/u);
   });
 
+  it("defines responsive assistant width defaults before runtime resizing overrides them", () => {
+    const workspaceRule = /\.editor-workspace\s*\{(?<body>[^}]*)\}/u.exec(desktopStyles)?.groups
+      ?.body;
+    const compactDesktopRule =
+      /@media\s*\(max-width:\s*80rem\)\s*and\s*\(min-width:\s*64\.0625rem\)\s*\{\s*\.editor-workspace\s*\{(?<body>[^}]*)\}/u.exec(
+        desktopStyles,
+      )?.groups?.body;
+
+    expect(workspaceRule).toMatch(
+      /--editor-assistant-width:\s*clamp\(20rem,\s*24vw,\s*22\.5rem\);/u,
+    );
+    expect(compactDesktopRule).toMatch(/--editor-assistant-width:\s*18rem;/u);
+  });
+
   it("lets compact assistant drawer top and bottom constraints own its height", () => {
     const assistantPanelRule =
       /\.candidate-panel--chapters,\s*\.candidate-panel--assistant\s*\{(?<body>[^}]*)\}/u.exec(

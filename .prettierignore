@@ -4,6 +4,7 @@ dist/
 dist-gate/
 coverage/
 .vite-cache/
+.qoder/
 **/.tmp/
 target/
 apps/desktop/src-tauri/target/

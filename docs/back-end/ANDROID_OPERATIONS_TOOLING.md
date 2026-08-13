@@ -2,7 +2,7 @@
 
 > 基于源码快照：2026-07-30  
 > 文档状态：`SUPPORTING_CURRENT`（工程索引）；Android 仍是 POC  
-> Desktop 发布基线：`0.2.2`；设计基线 `DESIGN v0.3.1b` 不代表 Android 客户端已实现  
+> Desktop 发布基线：`0.2.3`；设计基线 `DESIGN v0.3.1b` 不代表 Android 客户端已实现  
 > 本文覆盖 `apps/android`、`deploy/`、`scripts/`、`.github/`、`tests/` 和根工程配置
 
 ## 1. Android 当前不是产品客户端

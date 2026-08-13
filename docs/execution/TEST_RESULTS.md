@@ -1,7 +1,7 @@
 # InkShadow 测试与构建结果
 
 > 更新日期：2026-08-13  
-> 证据范围：本页把当前工作树证据与历史发布证据分开。`v0.2.2` 已从唯一干净提交完成本地候选、PR/main CI、标签、公开附件回读和 GitHub Pre-release；当前增量没有读取真实供应商 Key。真实 DeepSeek、当前代码的 Tauri WebView/Keyring 交互、192 次付费 A/B、2,496 项人工评分与另一台电脑安装保持 `NOT_RUN`，Novel Skill 保持 `KEEP_DISABLED`。
+> 证据范围：本页把 `v0.2.3` 当前源码证据与历史发布证据分开。`v0.2.2` 已从唯一干净提交完成本地候选、PR/main CI、标签、公开附件回读和 GitHub Pre-release；`v0.2.3` 当前增量没有读取真实供应商 Key。真实 DeepSeek、当前代码的 Tauri WebView/Keyring 交互、192 次付费 A/B、2,496 项人工评分与另一台电脑安装保持 `NOT_RUN`，Novel Skill 保持 `KEEP_DISABLED`。
 
 ## 2026-08-13 Model Hub、正文布局与 Novel Skill 受限 smoke
 
@@ -11,7 +11,7 @@
 node_modules\.bin\vitest.CMD run apps/desktop/src/infrastructure/model-hub-page-hydration.test.ts apps/desktop/src/infrastructure/model-hub-ui-diagnostics.test.ts apps/desktop/src/infrastructure/model-hub-connection-intent.test.ts apps/desktop/src/infrastructure/selectable-model-catalog-registry.test.ts apps/desktop/src/components/model-hub-selectable-catalog-browser.test.tsx apps/desktop/src/editor-layout-css-contract.test.ts apps/desktop/src/pages/editor-workspace-simplification.test.tsx apps/desktop/src/infrastructure/novel-skill-sqlite-store.test.ts apps/desktop/src/infrastructure/generation-runtime.test.ts apps/desktop/src/pages/settings-page.test.tsx --config apps/desktop/vitest.config.ts --configLoader runner --maxWorkers=1
 ```
 
-结果：最终 `10 files / 117 tests PASS`，65.21 秒。覆盖：
+结果：最终 `10 files / 118 tests PASS`，65.30 秒。覆盖：
 
 - 跨 mount 唯一 operation 身份、真实 effect 顺序诊断时间、5 秒凭据摘要超时、缓存保留、迟到结果隔离及停用连接排除；
 - 版本化官方候选目录的 22 项任务覆盖、普通投影、账户目录优先、全局/任务级浏览器与内容无关连接 intent；
@@ -25,7 +25,7 @@ Novel Skill 两个文件在上述聚焦命令中为 `2 files / 28 tests PASS`。
 
 | 范围                           | 精确命令                                                                                                                                             | 结果                                                                                                                              | 状态                                |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
-| Desktop 全量                   | `pnpm.cmd --filter @inkshadow/desktop test`                                                                                                          | 242 files；1,792 passed / 1 skipped / 0 failed；584.79 秒                                                                         | PASS                                |
+| Desktop 全量                   | `pnpm.cmd --filter @inkshadow/desktop test`                                                                                                          | 242 files；1,793 passed / 1 skipped / 0 failed；590.96 秒                                                                         | PASS                                |
 | Desktop TypeScript             | `pnpm.cmd --filter @inkshadow/desktop typecheck`                                                                                                     | 退出码 0；26.4 秒                                                                                                                 | PASS                                |
 | Production build               | `pnpm.cmd --filter @inkshadow/desktop build`                                                                                                         | 2,244 modules；21.03 秒；Settings chunk 214.38 KiB；runtime 495.62 / 512 KiB                                                      | PASS                                |
 | Rust 原生严格门禁              | `pnpm.cmd check:rust`                                                                                                                                | 退出码 0；`cargo fmt --check`、全 target `clippy -D warnings`、完整测试通过；160 passed / 1 ignored / 0 failed；测试阶段 84.03 秒 | PASS                                |
@@ -37,6 +37,12 @@ Novel Skill 两个文件在上述聚焦命令中为 `2 files / 28 tests PASS`。
 首次在受限沙箱启动 Vitest/TypeScript 时，Windows pnpm junction 目标不可读，分别在 React 插件与
 `vite/client.d.ts` 解析阶段退出；这两次尝试没有进入断言或源码类型检查。允许读取工作区实际依赖链接后，上述
 聚焦测试、全量测试和类型检查通过。该工具环境失败保留在记录中，不改写为代码测试失败，也不从最终结果中删除。
+
+候选准备阶段另有三次失败均保留：来源门禁先拒绝源码目录旁生成的 Vitest 缓存；全仓 Prettier 随后发现
+本地 `.qoder/` 知识库会被误扫；首次完整顺序测试又由共享 UI 合同发现
+`--editor-assistant-width` 缺少局部默认定义。前两项通过明确忽略本地知识库并清除生成缓存解决，未删除或
+格式化用户内容；第三项在 `.editor-workspace` 增加与原 fallback 相同的响应式默认值，并由共享 UI
+`42/42`、编辑器布局与交互 `11/11` 以及上述 Desktop 全量 `1,793 passed / 1 skipped / 0 failed` 验证。没有跳过断言、放宽预算或抬高超时。
 
 ## 2026-08-12 v0.2.2 已发布候选与远端门禁
 

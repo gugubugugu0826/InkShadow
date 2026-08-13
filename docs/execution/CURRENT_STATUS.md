@@ -1,14 +1,14 @@
 # InkShadow 当前执行状态
 
 > 更新日期：2026-08-13  
-> 当前源码与已发布工程预览版本：`0.2.2`  
-> 工程状态：唯一干净提交的未签名候选链、本地制品复核、PR/main GitHub Actions 与公开附件回读均已通过；真实 Tauri WebView 交互和隔离 Windows 安装矩阵仍须另行执行  
+> 当前源码目标版本：`0.2.3`；最近已发布工程预览版本：`0.2.2`  
+> 工程状态：`v0.2.3` 源码回归已通过，中文发布说明已就绪；唯一干净候选、制品哈希、PR/main GitHub Actions、标签与公开附件仍须逐项生成和复核  
 > 发布结论：**`v0.2.2` 已发布为公开、未签名的 GitHub Pre-release；标签和三个附件绑定提交 `7dd746e7b35d07f9ae9605738d16dd852fd513a4`，不得移动或静默替换**  
 > 外部边界：没有读取或使用真实 DeepSeek API Key；商业签名、供应商真实互操作和隔离 Windows 安装矩阵仍未完成
 
 ## 2026-08-13 当前未发布增量
 
-本节只描述当前工作树，不改写下方 v0.2.2 已发布提交的历史证据。
+本节只描述 `v0.2.3` 当前源码，不改写下方 v0.2.2 已发布提交的历史证据。
 
 | 项目                     | 当前事实                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -17,7 +17,7 @@
 | 正文工作区布局与可访问性 | `PASS (PRODUCTION CHROMIUM) / TAURI DPI NOT_VERIFIED`；修复 `border-box` 裁切、800px compact drawer 高度和 44px 直接操作目标；宽屏分栏增加可键盘操作的 ARIA separator，1024px 及以下保持 Drawer。1536/1440/1280/1024/800、125%/150%/200% 等效视口与代表性明暗主题未发现新的横向溢出或不可达主操作                                                                                                                                   |
 | Novel Skill 受限 smoke   | `PASS (LOCAL SQLITE + MOCK) / LIVE PROVIDER NOT_RUN / KEEP_DISABLED`；真实临时 SQLite 完成零 Provider 的开关、持久化和重启；一次 mocked 200–400 中文字符生成只创建隔离 Candidate，拒绝后重开仍为拒绝，正文与不可变版本不变。没有网络模型调用，没有启动 192 次付费 A/B 或 2,496 项人工评分                                                                                                                                           |
 | Agent 结论               | 默认保持固定安全工作流加确定性轻编排：route → privacy/cost preflight → Context/Skill snapshot → exact dispatch → isolated Candidate → explicit acceptance。现有多智能体复核只保留专家 feature flag 且默认关闭；自主写作 Agent 被拒绝，不新增普通用户导航或第二套执行总线                                                                                                                                                            |
-| 当前工作树工程门禁       | `PASS`；最终聚焦 10 files / 117 tests（65.21 秒）；Desktop 全量 242 files，1,792 passed / 1 skipped / 0 failed（584.79 秒）；Desktop typecheck 26.4 秒；production build 2,244 modules（21.03 秒），Settings chunk 214.38 KiB，runtime 495.62 / 512 KiB；Rust fmt、全 target `clippy -D warnings` 与测试通过，160 passed / 1 ignored / 0 failed（测试阶段 84.03 秒）                                                                |
+| 当前工作树工程门禁       | `PASS`；最终聚焦 10 files / 118 tests（65.30 秒）；Desktop 全量 242 files，1,793 passed / 1 skipped / 0 failed（590.96 秒）；Desktop typecheck 26.4 秒；production build 2,244 modules（21.03 秒），Settings chunk 214.38 KiB，runtime 495.62 / 512 KiB；Rust fmt、全 target `clippy -D warnings` 与测试通过，160 passed / 1 ignored / 0 failed（测试阶段 84.03 秒）                                                                |
 
 ## 2026-08-12 v0.2.2 已发布工程预览
 

@@ -129,6 +129,7 @@ installer/
 !.vscode/settings.json
 .codex/
 .agents/
+.qoder/
 .DS_Store
 Thumbs.db
 Desktop.ini
