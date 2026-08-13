@@ -1,15 +1,15 @@
 # InkShadow 持续发布门禁
 
 > 更新日期：2026-08-13  
-> 当前源码目标版本：`0.2.3`；最近已发布工程预览版本：`0.2.2`  
-> 当前结论：**`v0.2.3` 中文说明已就绪，但发布提交、干净候选、制品哈希、远端门禁、标签和 Release 仍须按本页流程逐项生成和复核；在这些证据完成前不得把草稿写成已发布事实**
+> 当前源码目标版本：`0.2.3`；最近已发布工程预览版本：`0.2.3`  
+> 当前结论：**`v0.2.3` 的唯一提交、完整候选链、PR/main 远端门禁、标签和三个公开附件均已复核；它已公开为未签名 GitHub Pre-release**
 
 状态只使用 `PASS`、`IN_PROGRESS`、`NOT_RUN`、`BLOCKED` 和 `N/A`。  
 代码存在不等于发布门禁通过；只有可复核的测试、构建、签名、安装或人工验收证据才能标记 `PASS`。
 
-## v0.2.3 Pre-release 中文说明（待发布）
+## v0.2.3 已发布 Pre-release 中文说明与追踪
 
-> 建议 Release 标题：`InkShadow 墨影 v0.2.3（未签名工程预览）`  
+> Release 标题：`墨影 InkShadow v0.2.3 — 未签名工程预览版`  
 > 发布类型：GitHub Pre-release  
 > 支持平台：Windows 10 / 11 x64  
 > 签名状态：未进行 Authenticode 商业签名，Windows 可能显示“未知发布者”
@@ -66,7 +66,7 @@ v0.2.3 是一次面向 Model Hub 与正文工作区的工程预览补丁。它�
 
 ### 下载与校验
 
-请只从本仓库的 [GitHub Releases](https://github.com/gugubugugu0826/InkShadow/releases) 下载
+请只从本仓库的 [v0.2.3 GitHub Release](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.3) 下载
 `v0.2.3` 附件。安装前将安装包与同一 Release 中的 `SHA256SUMS` 对照：
 
 ```powershell
@@ -82,7 +82,20 @@ Release manifest 用于核对源码提交、源码指纹和前端制品指纹；
 - 私密章节默认不发送给远程模型；读取全书资料的操作在作品仍含私密章节时只允许已验证的本地模型。
 - 缺少凭据、路由、能力证据或真实输出时明确失败或跳过，不以模拟结果冒充供应商成功。
 
-## v0.2.2 当前发布门禁
+### 发布追踪
+
+| 属性                   | 值                                                                                                                                      |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| 来源 Commit / tag peel | `3abdcfeb327567c632e440d55d11f0af6f4911d2`                                                                                              |
+| 本地候选链             | `PASS`；`CI=true pnpm.cmd release:candidate:unsigned`；1,290.7 秒                                                                       |
+| Windows x64 NSIS       | `InkShadow_0.2.3_x64-setup.exe`；7,469,168 bytes；SHA-256 `23413b1bf874e1b25ab77cd156cff75472744c0e73ec830fb83ef98048ea2bb4`            |
+| Authenticode           | `NotSigned`                                                                                                                             |
+| Release manifest       | `inkshadow-release-manifest.json`；10,167 bytes；SHA-256 `cd047a59e2bbb13e71f4263ba86feffab115cf47d7d9f7b396ab5d2d56111417`             |
+| SHA 校验附件           | `SHA256SUMS`；194 bytes；SHA-256 `89ad2c671bdaefa05bb4bbb1d0f6c37cdbbbd4a4e22d53cb7eef95a750def466`                                     |
+| PR / main CI           | run `31679607622` 与 run `31681304602`；两轮三项均通过                                                                                  |
+| GitHub Release         | <https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.3>；`draft=false`、`prerelease=true`；`publishedAt=2026-08-13T08:45:32Z` |
+
+## v0.2.2 历史发布门禁（不可覆盖）
 
 | 门禁                           | 状态    | 可复核证据或下一步                                                                                                                                                                 |
 | ------------------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -268,10 +281,10 @@ Release manifest 用于核对源码提交、源码指纹和前端制品指纹；
 
 ## 发布结论
 
-`v0.2.2` 的唯一提交、完整候选链、制品哈希、GitHub Actions、标签与公开附件回读已经完成；
-真实 Tauri WebView 交互、另一台电脑安装、192 次付费调用、2,496 项人工评分和真实 DeepSeek
+`v0.2.3` 的唯一提交、完整候选链、制品哈希、GitHub Actions、标签与公开附件回读已经完成；
+真实 Tauri WebView + Keyring 冷启动、另一台电脑安装、192 次付费调用、2,496 项人工评分和真实 Provider
 仍为 `NOT_RUN`，Novel Skill 继续 `KEEP_DISABLED`；
 签名、真实供应商全矩阵、百万字真实作品全链路/WebView 压力、法律审批、生产部署与独立安全审计
 也仍有未关闭门禁。
 
-**当前结论：`v0.2.2` 已公开为不可静默替换的未签名 Pre-release；它不是 Beta、GA 或商业正式版。上述外部验证完成前，不得扩大发布结论。**
+**当前结论：`v0.2.3` 已公开为不可静默替换的未签名 Pre-release；它不是 Beta、GA 或商业正式版。上述外部验证完成前，不得扩大发布结论。**

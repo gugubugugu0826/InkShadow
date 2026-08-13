@@ -1,7 +1,7 @@
 # InkShadow 测试与构建结果
 
 > 更新日期：2026-08-13  
-> 证据范围：本页把 `v0.2.3` 当前源码证据与历史发布证据分开。`v0.2.2` 已从唯一干净提交完成本地候选、PR/main CI、标签、公开附件回读和 GitHub Pre-release；`v0.2.3` 当前增量没有读取真实供应商 Key。真实 DeepSeek、当前代码的 Tauri WebView/Keyring 交互、192 次付费 A/B、2,496 项人工评分与另一台电脑安装保持 `NOT_RUN`，Novel Skill 保持 `KEEP_DISABLED`。
+> 证据范围：`v0.2.3` 已从唯一干净提交完成本地候选、PR/main CI、标签与公开 GitHub Pre-release；下方 v0.2.2 及更早记录保持历史快照。真实 Provider、当前二进制的 Tauri WebView/Keyring 冷启动、192 次付费 A/B、2,496 项人工评分与另一台电脑安装仍为 `NOT_RUN`，Novel Skill 保持 `KEEP_DISABLED`。
 
 ## 2026-08-13 Model Hub、正文布局与 Novel Skill 受限 smoke
 
@@ -21,7 +21,7 @@ node_modules\.bin\vitest.CMD run apps/desktop/src/infrastructure/model-hub-page-
 Novel Skill 两个文件在上述聚焦命令中为 `2 files / 28 tests PASS`。该 smoke 使用本地 mock，零网络、
 零真实 Provider、零付费评测调用；它不证明写作质量，不允许把任何 Core/Genre 改为默认启用。
 
-### 当前工作树工程门禁
+### v0.2.3 发布提交工程门禁
 
 | 范围                           | 精确命令                                                                                                                                             | 结果                                                                                                                              | 状态                                |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
@@ -33,6 +33,10 @@ Novel Skill 两个文件在上述聚焦命令中为 `2 files / 28 tests PASS`。
 | 视觉矩阵                       | production Chromium 浏览器预览                                                                                                                       | 1536/1440/1280/1024/800、125%/150%/200% 等效视口、代表性明暗主题；未发现新的横向溢出、右侧裁切或不可达主操作                      | PASS；真实 Tauri/DPI `NOT_VERIFIED` |
 | Windows Tauri + SQLite/Keyring | 未执行                                                                                                                                               | 当前代码的冷启动、离开/返回、睡眠恢复、凭据超时故障注入与连接返回仍无真实 WebView 证据                                            | NOT_RUN / NOT_VERIFIED              |
 | 真实 Provider / Skill A/B      | 明确未执行                                                                                                                                           | DeepSeek/其他真实供应商、192 次付费调用与 2,496 项人工评分均为 0；全部实验 Skill 保持 `defaultEnabled=false`                      | NOT_RUN / KEEP_DISABLED             |
+| 完整未签名候选链               | `CI=true pnpm.cmd release:candidate:unsigned`                                                                                                        | 退出码 0；1,290.7 秒；来源提交、Rust、production Chromium E2E、NSIS、manifest 与 provenance 全部通过                              | PASS                                |
+| PR GitHub Actions              | run `31679607622`                                                                                                                                    | quality、Windows native、Cloud PostgreSQL 三项均通过                                                                              | PASS                                |
+| `main` GitHub Actions          | run `31681304602`                                                                                                                                    | quality、Windows native、Cloud PostgreSQL 三项均通过                                                                              | PASS                                |
+| GitHub `v0.2.3` Release        | 标签与公开附件复核                                                                                                                                   | tag peel 为 `3abdcfeb327567c632e440d55d11f0af6f4911d2`；Release 为公开 Pre-release；三个附件摘要与本地校验一致                    | PASS                                |
 
 首次在受限沙箱启动 Vitest/TypeScript 时，Windows pnpm junction 目标不可读，分别在 React 插件与
 `vite/client.d.ts` 解析阶段退出；这两次尝试没有进入断言或源码类型检查。允许读取工作区实际依赖链接后，上述
@@ -43,6 +47,12 @@ Novel Skill 两个文件在上述聚焦命令中为 `2 files / 28 tests PASS`。
 `--editor-assistant-width` 缺少局部默认定义。前两项通过明确忽略本地知识库并清除生成缓存解决，未删除或
 格式化用户内容；第三项在 `.editor-workspace` 增加与原 fallback 相同的响应式默认值，并由共享 UI
 `42/42`、编辑器布局与交互 `11/11` 以及上述 Desktop 全量 `1,793 passed / 1 skipped / 0 failed` 验证。没有跳过断言、放宽预算或抬高超时。
+
+公开 Release：<https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.3>，发布时间
+`2026-08-13T08:45:32Z`。公开安装包为 7,469,168 bytes，SHA-256
+`23413b1bf874e1b25ab77cd156cff75472744c0e73ec830fb83ef98048ea2bb4`；manifest 为 10,167 bytes，
+SHA-256 `cd047a59e2bbb13e71f4263ba86feffab115cf47d7d9f7b396ab5d2d56111417`；`SHA256SUMS` 为
+194 bytes，SHA-256 `89ad2c671bdaefa05bb4bbb1d0f6c37cdbbbd4a4e22d53cb7eef95a750def466`。三个附件均已从公开 Release 回下载并复核一致。
 
 ## 2026-08-12 v0.2.2 已发布候选与远端门禁
 
