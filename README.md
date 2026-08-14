@@ -15,15 +15,27 @@ InkShadow 是一个本地优先、隐私优先、面向长篇小说创作的 AI 
 > `3abdcfeb327567c632e440d55d11f0af6f4911d2` 的真实 Windows 11 Tauri/Wry +
 > DeepSeek `deepseek-v4-flash` 测试发现：Candidate 正确接受并创建版本后，又隐式触发
 > `long_memory_compression`，把已接受正文发送到 Provider。测试随即按安全停止条件终止。
-> 因此不建议使用已发布 `v0.2.3` 通过真实 Provider 处理敏感正文。当前工作树已完成代码修复，
-> 但状态仍为 **`CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`**；
-> 尚无包含本轮修复的新安装包。
+> 因此不建议使用已发布 `v0.2.3` 通过真实 Provider 处理敏感正文。当前 `v0.2.4` 候选源码已完成
+> 代码修复和自动化验证，但状态仍为
+> **`CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`**；尚无包含本轮修复的公开安装包。
 
-当前源码目标版本与最新已发布工程预览版本均为 `0.2.3`，但当前工作树包含尚未发布的反馈修复。
+当前源码目标版本为 `0.2.4`，最新已发布工程预览版本仍为 `0.2.3`；`v0.2.4` 安全修复候选正在发布流程中。
 代码已完成新手三入口、导入试改、四区写作工作台、Model Hub、
 统一故事事实、因果关系、分层上下文和证据化检查的阶段性重构。它仍是工程预览：只有真正
 接通、具备能力证据且通过本地检查的模型功能才会显示为可用；缺少模型、证据或配置时会明确
 跳过，不以占位结果冒充成功。
+
+## v0.2.4 安全修复候选重点
+
+- 接受 Candidate 只保存正式正文、创建新的不可变版本并更新纯本地可重建状态；接受、保存、恢复和历史回填的默认后台链精确产生 0 次 Provider 调用。
+- 删除凭据后可重新绑定原连接；退役连接继续保留历史审计，但不进入 ready、推荐或普通路由，同供应商重新配置不再要求手工修改内部 ID。
+- 顶栏、作品库、Model Hub、任务推荐和实际生成共享同一权威 readiness；当前章节的隐私、上下文和请求预检失败时不会创建 invocation、Candidate 或费用记录。
+- 一批开头建议明确对应 3 次独立 Provider 调用；稳定槽位分别记录成功、失败、取消、未发送或结果不明确，重启只结清状态而不自动重发。
+- 200% 等效视口进入正文优先的单列/抽屉模式，并覆盖 Escape、焦点返回、44px 操作目标和页面无横向溢出。真实 Windows 系统 200% DPI 仍待复测。
+
+这些修复已经通过 fake/mock、真实临时 SQLite 与 production Chromium 自动化，但尚未完成真实
+Provider 或修复版 Windows Tauri 第二阶段复测。完整边界见
+[当前状态](docs/execution/CURRENT_STATUS.md) 与 [v0.2.4 中文发布说明](docs/execution/RELEASE_CHECKLIST.md#v024-pre-release-中文说明待发布)。
 
 ## v0.2.3 已发布工程预览重点
 
@@ -32,8 +44,8 @@ InkShadow 是一个本地优先、隐私优先、面向长篇小说创作的 AI 
 - 修复正文工作区右侧裁切；宽屏支持可由键盘调整的正文/助手分栏，1024px 及以下继续使用抽屉，并复核 1440、1280、1024、800 与 200% 等效视口。
 - Novel Skill 仅完成本地 SQLite 与模拟生成的离线冒烟测试，全部实验 Skill 继续默认关闭；没有执行真实供应商请求、192 次付费 A/B 或 2,496 项人工评分。
 
-当前代码尚未完成真实 Windows Tauri + 系统凭据库冷启动、真实供应商互操作和另一台电脑的安装验证。完整边界见
-[当前状态](docs/execution/CURRENT_STATUS.md) 与 [v0.2.3 中文发布说明](docs/execution/RELEASE_CHECKLIST.md#v023-已发布-pre-release-中文说明与追踪)。
+`v0.2.3` 的历史发布说明与固定证据继续保留在
+[持续发布门禁](docs/execution/RELEASE_CHECKLIST.md#v023-已发布-pre-release-中文说明与追踪)，不得用 `v0.2.4` 候选自动化改写。
 
 ## 主要能力
 
@@ -173,6 +185,7 @@ tests/         端到端测试
 
 内部预览安装包发布在 [GitHub Releases](https://github.com/gugubugugu0826/InkShadow/releases)，并标记为 Pre-release。
 [`v0.2.3`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.3) 已作为未签名工程预览发布，安装前请核对同一 Release 中的 `SHA256SUMS`。
+`v0.2.4` 安全修复候选正在发布流程中；在对应 Release 正式公开前，请勿从其他来源下载安装包。
 `v0.2.0`、`v0.2.1`、`v0.2.2` 和 `v0.2.3` 均为不可覆盖、不可移动的历史标签与公开附件。
 
 安装包未签名时，Windows 可能显示“未知发布者”提示。正式分发前仍需完成代码签名、
