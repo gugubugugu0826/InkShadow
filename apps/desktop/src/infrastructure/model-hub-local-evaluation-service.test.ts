@@ -31,6 +31,7 @@ function execution(text: string, catalogEntryId = "catalog-1"): ModelHubTextTask
       estimatedCostMicros: null,
       errorCode: null,
       errorSummary: null,
+      providerDispatchStartedAt: "2026-08-01T00:00:00.000Z",
       startedAt: "2026-08-01T00:00:00.000Z",
       completedAt: "2026-08-01T00:00:00.000Z",
       createdAt: "2026-08-01T00:00:00.000Z",

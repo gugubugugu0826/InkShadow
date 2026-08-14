@@ -509,6 +509,8 @@ export interface ModelInvocationFact {
   readonly errorSummary: string | null;
   readonly completion?: SafeModelCompletionMetadata | null;
   readonly failure?: SafeModelFailureMetadata | null;
+  /** Durable network-boundary receipt; no prompt, output, or credential is stored. */
+  readonly providerDispatchStartedAt: string | null;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
   readonly createdAt: string;
@@ -544,6 +546,12 @@ export interface FinishModelInvocationInput {
   readonly errorSummary?: string | null;
   readonly completion?: SafeAiCompletionMetadata | null;
   readonly failure?: SafeAiFailureMetadata | null;
+  readonly expectedRevision: number;
+}
+
+export interface MarkModelInvocationDispatchedInput {
+  readonly id: string;
+  readonly dispatchedAt: string;
   readonly expectedRevision: number;
 }
 
@@ -594,6 +602,7 @@ export interface ModelHubStore {
   listRecentAiFailures(limit?: number): Promise<readonly RecentAiFailure[]>;
   findInvocation(id: string): Promise<ModelInvocationFact | null>;
   startInvocation(input: StartModelInvocationInput): Promise<ModelInvocationFact>;
+  markInvocationDispatched(input: MarkModelInvocationDispatchedInput): Promise<ModelInvocationFact>;
   finishInvocation(input: FinishModelInvocationInput): Promise<ModelInvocationFact>;
 }
 
@@ -807,6 +816,7 @@ interface InvocationRow {
   reasoning_present: number | null;
   streamed: number | null;
   requested_max_output_tokens: number | null;
+  provider_dispatch_started_at: string | null;
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
@@ -904,6 +914,10 @@ export class TauriModelHubStore implements ModelHubStore {
     input: RecordConnectionTestInput,
   ): Promise<ModelProviderConnection> {
     const validated = validateConnectionTestInput(input);
+    const existing = await this.findConnection(validated.connectionId);
+    if (existing !== null && isRetiredModelProviderConnection(existing)) {
+      throw retiredConnectionMutation();
+    }
     const now = this.clock.now();
     const result = await this.executor.execute(
       `UPDATE model_provider_connections
@@ -991,6 +1005,10 @@ export class TauriModelHubStore implements ModelHubStore {
     input: PrepareModelHubConnectionCommitInput,
   ): Promise<ModelHubConnectionCommit> {
     const validated = validatePrepareConnectionCommitInput(input);
+    const existing = await this.findConnection(validated.connectionId);
+    if (existing !== null && isRetiredModelProviderConnection(existing)) {
+      throw retiredConnectionMutation();
+    }
     const now = this.clock.now();
     await this.executor.execute(
       `INSERT INTO model_hub_connection_commits (
@@ -1908,6 +1926,30 @@ export class TauriModelHubStore implements ModelHubStore {
     return rows[0] === undefined ? null : hydrateInvocation(rows[0]);
   }
 
+  public async markInvocationDispatched(
+    input: MarkModelInvocationDispatchedInput,
+  ): Promise<ModelInvocationFact> {
+    const validated = validateInvocationDispatch(input);
+    const result = await this.executor.execute(
+      `UPDATE model_invocation_facts
+       SET provider_dispatch_started_at = ?, revision = revision + 1
+       WHERE id = ? AND status = 'running'
+         AND provider_dispatch_started_at IS NULL AND revision = ?`,
+      [validated.dispatchedAt, validated.id, validated.expectedRevision],
+    );
+    if (result.rowsAffected === 1) {
+      return this.requireInvocation(validated.id);
+    }
+    const existing = await this.requireInvocation(validated.id);
+    if (
+      existing.status === "running" &&
+      existing.providerDispatchStartedAt === validated.dispatchedAt
+    ) {
+      return existing;
+    }
+    throw conflict("MODEL_HUB_INVOCATION_CONFLICT");
+  }
+
   public async finishInvocation(input: FinishModelInvocationInput): Promise<ModelInvocationFact> {
     const validated = validateInvocationFinish(input);
     const result = await this.executor.execute(
@@ -2026,6 +2068,9 @@ export class InMemoryModelHubStore implements ModelHubStore {
           "A connection id cannot be reassigned to a different provider kind.",
         );
       }
+      if (existing !== undefined && isRetiredModelProviderConnection(existing)) {
+        throw retiredConnectionMutation();
+      }
       const endpointIdentityChanged =
         existing !== undefined && connectionEndpointIdentityChanged(existing, validated);
       const now = this.clock.now();
@@ -2125,6 +2170,9 @@ export class InMemoryModelHubStore implements ModelHubStore {
       if (existing?.revision !== validated.expectedRevision) {
         throw conflict("MODEL_HUB_CONNECTION_CONFLICT");
       }
+      if (isRetiredModelProviderConnection(existing)) {
+        throw retiredConnectionMutation();
+      }
       const now = this.clock.now();
       const saved: ModelProviderConnection = Object.freeze({
         ...existing,
@@ -2183,6 +2231,9 @@ export class InMemoryModelHubStore implements ModelHubStore {
           "MODEL_HUB_CONNECTION_NOT_FOUND",
           "The provider connection does not exist.",
         );
+      }
+      if (isRetiredModelProviderConnection(connection)) {
+        throw retiredConnectionMutation();
       }
       if (this.state.catalogSyncs[validated.syncId] !== undefined) {
         throw conflict("MODEL_HUB_CATALOG_SYNC_CONFLICT");
@@ -2279,6 +2330,10 @@ export class InMemoryModelHubStore implements ModelHubStore {
   ): Promise<ModelHubConnectionCommit> {
     return Promise.resolve().then(() => {
       const validated = validatePrepareConnectionCommitInput(input);
+      const connection = this.state.connections[validated.connectionId];
+      if (connection !== undefined && isRetiredModelProviderConnection(connection)) {
+        throw retiredConnectionMutation();
+      }
       if (
         this.state.connectionCommits[validated.connectionId] !== undefined ||
         Object.values(this.state.connectionCommits).some(({ id }) => id === validated.id)
@@ -3101,6 +3156,7 @@ export class InMemoryModelHubStore implements ModelHubStore {
         errorSummary: null,
         completion: null,
         failure: null,
+        providerDispatchStartedAt: null,
         startedAt: now,
         completedAt: null,
         createdAt: now,
@@ -3118,6 +3174,36 @@ export class InMemoryModelHubStore implements ModelHubStore {
     return Promise.resolve(
       invocation === undefined ? null : Object.freeze(structuredClone(invocation)),
     );
+  }
+
+  public markInvocationDispatched(
+    input: MarkModelInvocationDispatchedInput,
+  ): Promise<ModelInvocationFact> {
+    return Promise.resolve().then(() => {
+      const validated = validateInvocationDispatch(input);
+      const existing = this.state.invocations[validated.id];
+      if (
+        existing?.status === "running" &&
+        existing.providerDispatchStartedAt === validated.dispatchedAt
+      ) {
+        return Object.freeze(structuredClone(existing));
+      }
+      if (
+        existing?.status !== "running" ||
+        existing.providerDispatchStartedAt !== null ||
+        existing.revision !== validated.expectedRevision
+      ) {
+        throw conflict("MODEL_HUB_INVOCATION_CONFLICT");
+      }
+      const fact: ModelInvocationFact = Object.freeze({
+        ...existing,
+        providerDispatchStartedAt: validated.dispatchedAt,
+        revision: existing.revision + 1,
+      });
+      this.state.invocations[fact.id] = fact;
+      this.commit();
+      return fact;
+    });
   }
 
   public finishInvocation(input: FinishModelInvocationInput): Promise<ModelInvocationFact> {
@@ -3156,14 +3242,14 @@ export class InMemoryModelHubStore implements ModelHubStore {
 export const DEVELOPMENT_MODEL_HUB_KEY = "inkshadow.development.model-hub.v1";
 
 interface BrowserModelHubDatabase {
-  readonly schemaVersion: 6;
+  readonly schemaVersion: 7;
   readonly state: MemoryModelHubState;
 }
 
 export class BrowserDevelopmentModelHubStore extends InMemoryModelHubStore {
   public constructor(storage: Storage, clock: Clock) {
     super(clock, readBrowserState(storage), (state) => {
-      const database: BrowserModelHubDatabase = { schemaVersion: 6, state };
+      const database: BrowserModelHubDatabase = { schemaVersion: 7, state };
       storage.setItem(DEVELOPMENT_MODEL_HUB_KEY, JSON.stringify(database));
     });
   }
@@ -3194,6 +3280,9 @@ function readBrowserState(storage: Storage): MemoryModelHubState {
     const parsed: unknown = JSON.parse(serialized);
     if (!isRecord(parsed)) {
       throw modelHubError("MODEL_HUB_STORE_CORRUPT", "The browser Model Hub store is corrupt.");
+    }
+    if (parsed.schemaVersion === 7 && isMemoryState(parsed.state)) {
+      return normalizeBrowserExpertOptions(parsed.state, false);
     }
     if (parsed.schemaVersion === 6 && isMemoryState(parsed.state)) {
       return normalizeBrowserExpertOptions(parsed.state, false);
@@ -3370,7 +3459,19 @@ function normalizeBrowserExpertOptions(
       value === null ? null : normalizeStoredCapabilityScanFact(key, value),
     ]),
   );
-  return { ...state, connectionCommits, connections, capabilityScans };
+  const invocations = Object.fromEntries(
+    Object.entries(state.invocations).map(([key, value]) => [
+      key,
+      Object.freeze({
+        ...value,
+        providerDispatchStartedAt: optionalIsoTimestamp(
+          value.providerDispatchStartedAt,
+          "provider dispatch start timestamp",
+        ),
+      }),
+    ]),
+  );
+  return { ...state, connectionCommits, connections, capabilityScans, invocations };
 }
 
 type VersionFiveMemoryState = Omit<MemoryModelHubState, "capabilityScans"> & {
@@ -4306,6 +4407,14 @@ function validateInvocationFinish(input: FinishModelInvocationInput) {
   });
 }
 
+function validateInvocationDispatch(input: MarkModelInvocationDispatchedInput) {
+  return Object.freeze({
+    id: boundedText(input.id, "invocation id", 128),
+    dispatchedAt: requireIsoTimestamp(input.dispatchedAt, "provider dispatch start timestamp"),
+    expectedRevision: validateRequiredRevision(input.expectedRevision),
+  });
+}
+
 async function findConnectionRow(
   executor: TransactionExecutor,
   id: string,
@@ -4348,6 +4457,9 @@ async function persistSqliteConnection(
       "MODEL_HUB_PROVIDER_KIND_IMMUTABLE",
       "A connection id cannot be reassigned to a different provider kind.",
     );
+  }
+  if (existing !== null && isRetiredConnectionRow(existing)) {
+    throw retiredConnectionMutation();
   }
   const endpointIdentityChanged =
     existing !== null && connectionEndpointIdentityChanged(hydrateConnection(existing), validated);
@@ -4443,6 +4555,9 @@ async function persistSqliteCatalogSync(
       "MODEL_HUB_CONNECTION_NOT_FOUND",
       "The provider connection does not exist.",
     );
+  }
+  if (isRetiredConnectionRow(connection)) {
+    throw retiredConnectionMutation();
   }
   await transaction.execute(
     `INSERT INTO model_catalog_syncs (
@@ -4568,6 +4683,9 @@ function persistMemoryConnection(
       "MODEL_HUB_PROVIDER_KIND_IMMUTABLE",
       "A connection id cannot be reassigned to a different provider kind.",
     );
+  }
+  if (existing !== undefined && isRetiredModelProviderConnection(existing)) {
+    throw retiredConnectionMutation();
   }
   const endpointIdentityChanged =
     existing !== undefined && connectionEndpointIdentityChanged(existing, validated);
@@ -4982,6 +5100,13 @@ function isRetiredConnectionRow(row: ConnectionRow): boolean {
   );
 }
 
+function retiredConnectionMutation(): ModelHubStoreError {
+  return modelHubError(
+    RETIRED_CONNECTION_ERROR_CODE,
+    "A retired provider connection is immutable. Create a new connection instead.",
+  );
+}
+
 function hydrateConnectionCommit(row: ConnectionCommitRow): ModelHubConnectionCommit {
   if (row.phase !== "prepared" && row.phase !== "cleanup_pending") {
     throw modelHubError("MODEL_HUB_STORE_CORRUPT", "A stored connection commit phase is invalid.");
@@ -5178,6 +5303,10 @@ function hydrateInvocation(row: InvocationRow): ModelInvocationFact {
           attempt: row.attempt,
           requestedMaxOutputTokens: row.requested_max_output_tokens,
         }),
+    providerDispatchStartedAt: optionalIsoTimestamp(
+      row.provider_dispatch_started_at,
+      "provider dispatch start timestamp",
+    ),
     startedAt: row.started_at,
     completedAt: row.completed_at,
     createdAt: row.created_at,
@@ -5860,5 +5989,6 @@ const INVOCATION_SELECT = `SELECT
   output_tokens, cached_input_tokens, estimated_cost_micros, error_code,
   error_summary, diagnostic_request_id, failure_stage, failure_retryable,
   http_status, finish_reason, visible_content_length, reasoning_present,
-  streamed, requested_max_output_tokens, started_at, completed_at, created_at, revision
+  streamed, requested_max_output_tokens, provider_dispatch_started_at,
+  started_at, completed_at, created_at, revision
 FROM model_invocation_facts`;

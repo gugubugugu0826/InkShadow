@@ -199,6 +199,42 @@ describe("automatic Model Hub routing application", () => {
     await expect(loadModelHubRoutingCandidates(modelHub)).resolves.toEqual([]);
   });
 
+  it("keeps only the active exact catalog when a retired duplicate has the same model id", async () => {
+    const storage = new MemoryStorage();
+    const modelHub = new BrowserDevelopmentModelHubStore(storage, clock);
+    await seedCandidate(modelHub, {
+      connectionId: "retired-duplicate-provider",
+      catalogEntryId: "retired-duplicate-catalog",
+      modelId: "shared-writer-model",
+      destination: "remote",
+      textOnly: true,
+    });
+    const retiredSource = await modelHub.findConnection("retired-duplicate-provider");
+    if (retiredSource === null) throw new Error("expected retired duplicate source");
+    await modelHub.retireConnection({
+      connectionId: retiredSource.id,
+      expectedRevision: retiredSource.revision,
+    });
+    await seedCandidate(modelHub, {
+      connectionId: "active-exact-provider",
+      catalogEntryId: "active-exact-catalog",
+      modelId: "shared-writer-model",
+      destination: "remote",
+      textOnly: true,
+    });
+
+    const candidates = await loadModelHubRoutingCandidates(modelHub);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      connection: { id: "active-exact-provider", enabled: true },
+      catalogEntry: {
+        id: "active-exact-catalog",
+        connectionId: "active-exact-provider",
+        providerModelId: "shared-writer-model",
+      },
+    });
+  });
+
   it("clears a legacy role when its selected-model snapshot differs from the catalog model", async () => {
     const storage = new MemoryStorage();
     const modelCenter = new BrowserDevelopmentModelCenterStore(storage, clock);
@@ -455,6 +491,7 @@ function modelHubMigration(): string {
     "0051_model_hub_connection_commits.sql",
     "0056_model_hub_failure_diagnostics.sql",
     "0057_model_hub_content_quality_task.sql",
+    "0065_model_invocation_dispatch_boundary.sql",
   ]
     .map(readMigration)
     .join("\n");

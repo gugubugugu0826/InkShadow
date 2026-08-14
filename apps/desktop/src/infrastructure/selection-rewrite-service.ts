@@ -137,6 +137,21 @@ export async function createSelectionRewriteCandidate(
           throw cause;
         }
       },
+      onFinalBeforeProviderDispatch: async ({ localOnlyEligible }) => {
+        await loadAnchoredSelection(runtime, input);
+        try {
+          await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(privacyReceipt);
+          runtime.projectContextPrivacy.assertRouteEligible(
+            privacyReceipt,
+            localOnlyEligible === true,
+          );
+        } catch (cause: unknown) {
+          if (cause instanceof ProjectContextPrivacyError) {
+            throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
+          }
+          throw cause;
+        }
+      },
       ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
     });
   } catch (cause: unknown) {

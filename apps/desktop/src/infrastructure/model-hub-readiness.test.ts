@@ -43,25 +43,31 @@ describe("projectModelHubReadiness", () => {
     },
   );
 
-  it("distinguishes basic writing from full writing readiness", () => {
+  it("distinguishes partial from complete base configuration without claiming request readiness", () => {
     const connections = [connection()];
     const catalog = [catalogEntry()];
     const basicRoutes = CORE_TASKS.slice(0, 4).map((task) => route(task));
-    expect(
-      projectModelHubReadiness({ connections, catalog, routes: basicRoutes, now: NOW }),
-    ).toMatchObject({
+    const basic = projectModelHubReadiness({ connections, catalog, routes: basicRoutes, now: NOW });
+    expect(basic).toMatchObject({
       state: "basic_ready",
       runnableCoreTaskCount: 4,
+      shortLabel: "AI 基础连接可用",
     });
+    expect(basic.description).toContain("当前作品仍会在发送前单独检查隐私、上下文和请求长度");
 
-    expect(
-      projectModelHubReadiness({
-        connections,
-        catalog,
-        routes: CORE_TASKS.map((task) => route(task)),
-        now: NOW,
-      }),
-    ).toMatchObject({ state: "fully_ready", runnableCoreTaskCount: 10, missingCoreTasks: [] });
+    const complete = projectModelHubReadiness({
+      connections,
+      catalog,
+      routes: CORE_TASKS.map((task) => route(task)),
+      now: NOW,
+    });
+    expect(complete).toMatchObject({
+      state: "fully_ready",
+      runnableCoreTaskCount: 10,
+      missingCoreTasks: [],
+      shortLabel: "AI 基础连接可用",
+    });
+    expect(complete.description).toContain("不代表任意章节都能跳过发送前预检");
   });
 
   it("reports partial availability when a configured fallback is actually required", () => {
@@ -91,6 +97,29 @@ describe("projectModelHubReadiness", () => {
         now: NOW,
       }),
     ).toMatchObject({ state: "partially_unavailable", runnableCoreTaskCount: 0 });
+  });
+
+  it("does not claim basic readiness when the exact continuation resolver blocks a shallow-ready route", () => {
+    const readiness = projectModelHubReadiness({
+      connections: [connection()],
+      catalog: [catalogEntry()],
+      routes: CORE_TASKS.slice(0, 4).map((task) => route(task)),
+      exactBlockers: [
+        {
+          task: "continuation",
+          code: "MODEL_HUB_CREDENTIAL_MISSING",
+        },
+      ],
+      now: NOW,
+    });
+    expect(readiness).toMatchObject({
+      state: "partially_unavailable",
+      runnableCoreTaskCount: 3,
+    });
+    expect(readiness.missingCoreTasks).toContain("continuation");
+    expect(readiness.exactBlockers).toEqual([
+      { task: "continuation", code: "MODEL_HUB_CREDENTIAL_MISSING" },
+    ]);
   });
 });
 

@@ -26,6 +26,8 @@ export const CHAPTER_SUMMARY_SEGMENT_CHARACTERS = 1_800;
 export const CHAPTER_SUMMARY_MAXIMUM_SEGMENTS = 48;
 export const CHAPTER_SUMMARY_MAXIMUM_SOURCE_CHARACTERS =
   CHAPTER_SUMMARY_SEGMENT_CHARACTERS * CHAPTER_SUMMARY_MAXIMUM_SEGMENTS;
+export const CHAPTER_SUMMARY_EXPLICIT_CLOUD_AUTHORIZATION_REQUIRED =
+  "CHAPTER_SUMMARY_EXPLICIT_CLOUD_AUTHORIZATION_REQUIRED" as const;
 
 export interface ChapterSummarySourceSegment {
   readonly evidenceId: string;
@@ -241,7 +243,9 @@ export function shouldRunChapterSummaryAfterSave(
   reason: "autosave" | "manual",
   automaticOnManualSaveEnabled: boolean,
 ): boolean {
-  return reason === "manual" && automaticOnManualSaveEnabled;
+  void reason;
+  void automaticOnManualSaveEnabled;
+  return false;
 }
 
 export class ChapterSummaryService {
@@ -250,11 +254,17 @@ export class ChapterSummaryService {
   public constructor(private readonly dependencies: ChapterSummaryServiceDependencies) {}
 
   public isAutomaticOnManualSaveEnabled(projectId: string): boolean {
-    return this.dependencies.preferences.isAutomaticOnManualSaveEnabled(projectId);
+    // A legacy preference is not an authorization to transmit chapter text.
+    // Keep the read API for compatibility, but never expose it as enabled.
+    void projectId;
+    return false;
   }
 
   public setAutomaticOnManualSaveEnabled(projectId: string, enabled: boolean): void {
-    this.dependencies.preferences.setAutomaticOnManualSaveEnabled(projectId, enabled);
+    // Retire the legacy switch fail closed. A future cloud-derived summary must
+    // use its own durable consent, dispatch receipt, and ambiguous terminal state.
+    void enabled;
+    this.dependencies.preferences.setAutomaticOnManualSaveEnabled(projectId, false);
   }
 
   public summarizeSavedVersion(input: {
@@ -263,24 +273,29 @@ export class ChapterSummaryService {
     readonly versionId: string;
     readonly trigger: "manual_save" | "user_rebuild" | "historical_backfill";
   }): Promise<ChapterSummaryGenerationReceipt> {
-    if (
-      input.trigger === "manual_save" &&
-      !this.dependencies.preferences.isAutomaticOnManualSaveEnabled(input.projectId)
-    ) {
-      return Promise.resolve(
-        receipt(input, "skipped", "CHAPTER_SUMMARY_AUTOMATION_PAUSED", "章节摘要自动更新已暂停。"),
-      );
+    if (isChapterSummaryCloudDispatchImplemented()) {
+      const key = `${input.projectId}:${input.chapterId}:${input.versionId}`;
+      const running = this.inFlight.get(key);
+      if (running !== undefined) {
+        return running;
+      }
+      const work = this.summarizeOnce(input).finally(() => {
+        this.inFlight.delete(key);
+      });
+      this.inFlight.set(key, work);
+      return work;
     }
-    const key = `${input.projectId}:${input.chapterId}:${input.versionId}`;
-    const running = this.inFlight.get(key);
-    if (running !== undefined) {
-      return running;
-    }
-    const work = this.summarizeOnce(input).finally(() => {
-      this.inFlight.delete(key);
-    });
-    this.inFlight.set(key, work);
-    return work;
+    // Model Hub configuration is not consent to send accepted chapter text.
+    // No production authorization/dispatch state machine exists for this old
+    // API, so every trigger (including rebuild/backfill) is local-only.
+    return Promise.resolve(
+      receipt(
+        input,
+        "skipped",
+        CHAPTER_SUMMARY_EXPLICIT_CLOUD_AUTHORIZATION_REQUIRED,
+        "章节摘要云端派生尚未提供独立授权；本次未发送正文，也未调用模型。",
+      ),
+    );
   }
 
   public async clearChapterSummary(input: {
@@ -377,8 +392,7 @@ export class ChapterSummaryService {
         }),
     );
     return Object.freeze({
-      automaticOnManualSaveEnabled:
-        this.dependencies.preferences.isAutomaticOnManualSaveEnabled(projectIdValue),
+      automaticOnManualSaveEnabled: false,
       entries: Object.freeze(entries),
     });
   }
@@ -1024,6 +1038,11 @@ function replacementKey(chapterId: string): string {
 
 function preferenceKey(projectId: string): string {
   return `inkshadow.chapter-summary.auto-on-manual-save.v1:${projectId}`;
+}
+
+/** No production implementation exists until the independent consent ledger is shipped. */
+function isChapterSummaryCloudDispatchImplemented(): boolean {
+  return false;
 }
 
 function continuousStoryStatePreferenceKey(projectId: string): string {

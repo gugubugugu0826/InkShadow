@@ -53,23 +53,23 @@ export interface InspectModelHubTextTaskInput {
 export interface ExecuteModelHubTextTaskInput extends InspectModelHubTextTaskInput {
   readonly dispatchScope: NativeModelDispatchScope;
   readonly generationId?: string;
+  /** Optional caller-reserved invocation id used to recover an interrupted local workflow. */
+  readonly invocationId?: string;
   /** Applies a narrow provider-aware reasoning policy at the named task boundary. */
   readonly reasoningPolicy?: "capability_probe" | "visible_prose";
   /** A one-shot recovery override after a reasoning-only truncation. */
   readonly reasoningModeOverride?: "disabled";
   /** Request provider JSON mode only after structured output has evidence. */
   readonly responseFormat?: "json_object";
-  readonly onBeforeDispatch?: (
-    selection: Readonly<{
-      generationId: string;
-      invocationId: string;
-      connectionId: string;
-      catalogEntryId: string;
-      modelId: string;
-      usedFallback: boolean;
-      /** True only for an evidence-backed local model on a loopback endpoint. */
-      localOnlyEligible?: boolean;
-    }>,
+  readonly onBeforeDispatch?: (selection: ModelHubTextDispatchSelection) => void | Promise<void>;
+  /**
+   * Rechecks mutable project/source/privacy authority after the final async
+   * route resolution. This hook must not persist a second trace or repeat an
+   * authorization side effect; it exists solely for last-moment fail-closed
+   * checks immediately before the synchronous dispatch latch.
+   */
+  readonly onFinalBeforeProviderDispatch?: (
+    selection: ModelHubTextDispatchSelection,
   ) => void | Promise<void>;
   /**
    * Final synchronous cancellation/authorization latch. It runs after every
@@ -77,8 +77,21 @@ export interface ExecuteModelHubTextTaskInput extends InspectModelHubTextTaskInp
    * cancellation raised while onBeforeDispatch is awaiting cannot be lost.
    */
   readonly assertBeforeProviderDispatch?: () => void;
+  /** Synchronous notification after the durable receipt and immediately before native dispatch. */
+  readonly onProviderDispatchStarted?: (selection: ModelHubTextDispatchSelection) => void;
   readonly onDelta?: (accumulatedText: string) => void;
 }
+
+export type ModelHubTextDispatchSelection = Readonly<{
+  generationId: string;
+  invocationId: string;
+  connectionId: string;
+  catalogEntryId: string;
+  modelId: string;
+  usedFallback: boolean;
+  /** True only for an evidence-backed local model on a loopback endpoint. */
+  localOnlyEligible?: boolean;
+}>;
 
 export interface ModelHubTextTaskExecutionResult {
   readonly text: string;
@@ -247,7 +260,7 @@ export async function executeModelHubTextTask(
   });
 
   const generationId = input.generationId ?? dependencies.ids.next();
-  const invocationId = dependencies.ids.next();
+  const invocationId = input.invocationId ?? dependencies.ids.next();
   let invocation = await dependencies.modelHub.startInvocation({
     id: invocationId,
     task: input.task,
@@ -288,8 +301,39 @@ export async function executeModelHubTextTask(
         costPrivacy: current.target.costPrivacy,
       }),
     );
+    await input.onFinalBeforeProviderDispatch?.({
+      generationId,
+      invocationId: invocation.id,
+      connectionId: current.target.connection.id,
+      catalogEntryId: current.target.catalogEntry.id,
+      modelId: current.target.catalogEntry.providerModelId,
+      usedFallback: current.usedFallback,
+      localOnlyEligible:
+        current.target.dataDestination === "local" &&
+        current.target.costPrivacy.evidenceSource !== "unknown" &&
+        isLoopbackModelBaseUrl(current.target.connection.baseUrl),
+    });
     input.assertBeforeProviderDispatch?.();
+    invocation = await dependencies.modelHub.markInvocationDispatched({
+      id: invocation.id,
+      dispatchedAt: dependencies.clock.now(),
+      expectedRevision: invocation.revision,
+    });
+    // From this durable point onward an interrupted result is ambiguous.  No
+    // async hook may run between the receipt and the native gateway boundary.
     dispatched = true;
+    input.onProviderDispatchStarted?.({
+      generationId,
+      invocationId: invocation.id,
+      connectionId: current.target.connection.id,
+      catalogEntryId: current.target.catalogEntry.id,
+      modelId: current.target.catalogEntry.providerModelId,
+      usedFallback: current.usedFallback,
+      localOnlyEligible:
+        current.target.dataDestination === "local" &&
+        current.target.costPrivacy.evidenceSource !== "unknown" &&
+        isLoopbackModelBaseUrl(current.target.connection.baseUrl),
+    });
     const reasoningPolicy =
       input.reasoningPolicy === "capability_probe"
         ? modelProviderTextCapabilityProbePolicy(current.target.connection.providerKind)
@@ -398,10 +442,16 @@ async function resolveTextPlan(
   }
 
   const route = await dependencies.modelHub.findTaskRoute(input.task);
-  if (!route?.enabled) {
+  if (route === null) {
     throw executionError(
       "MODEL_HUB_ROUTE_NOT_CONFIGURED",
       "这项写作任务还没有可用的 AI 分工。请在设置中应用一个方案或手动选择模型。",
+    );
+  }
+  if (!route.enabled) {
+    throw executionError(
+      "MODEL_HUB_ROUTE_DISABLED",
+      "这项写作任务的 AI 分工已被停用。本次请求不会改用旧配置；如需使用 AI，请先重新启用该分工。",
     );
   }
 

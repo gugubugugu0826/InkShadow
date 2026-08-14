@@ -226,6 +226,96 @@ describe("Model Hub credential mutation service", () => {
       pricing: null,
     });
   });
+
+  it("rebinds the same disabled connection after restart without changing its internal id", async () => {
+    const harness = createHarness({ "versioned-current-slot": "current-secret" });
+    const existing = await seedReadyConnection(harness.runtime, "versioned-current-slot");
+    const deleted = await deleteModelHubCredential(harness.runtime, {
+      connection: connectionInput(existing),
+    });
+    expect(deleted.connection).toMatchObject({
+      id: existing.id,
+      enabled: false,
+      credentialRef: null,
+      credentialState: "missing",
+    });
+
+    const reopenedBase = createDevelopmentRuntime(window.localStorage);
+    const reopened: DesktopRuntime = Object.freeze({
+      ...reopenedBase,
+      mode: "tauri",
+      credentials: harness.runtime.credentials,
+    });
+    const persistedDisabled = await reopened.modelHub.findConnection(existing.id);
+    if (persistedDisabled === null)
+      throw new Error("Expected the disabled connection after restart.");
+    const rebound = await saveModelHubCredential(reopened, {
+      connection: connectionInput(persistedDisabled),
+      secret: "test-rebound-credential",
+    });
+
+    expect(rebound.connection).toMatchObject({
+      id: existing.id,
+      enabled: true,
+      connectionStatus: "not_tested",
+      credentialState: "present",
+    });
+    expect(modelHubCredentialProviderId(rebound.connection)).toMatch(/^model-key-/u);
+    await expect(reopened.modelHub.findTaskRoute("book_start_guidance")).resolves.toMatchObject({
+      primaryCatalogEntryId: "credential-model",
+    });
+  });
+
+  it("serializes concurrent rebind attempts so only one credential publication wins", async () => {
+    const harness = createHarness({ "versioned-current-slot": "current-secret" });
+    const existing = await seedReadyConnection(harness.runtime, "versioned-current-slot");
+    const deleted = await deleteModelHubCredential(harness.runtime, {
+      connection: connectionInput(existing),
+    });
+    harness.saveCredential.mockClear();
+
+    const outcomes = await Promise.allSettled([
+      saveModelHubCredential(harness.runtime, {
+        connection: connectionInput(deleted.connection),
+        secret: "test-first-rebind-key",
+      }),
+      saveModelHubCredential(harness.runtime, {
+        connection: connectionInput(deleted.connection),
+        secret: "test-second-rebind-key",
+      }),
+    ]);
+
+    expect(outcomes.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter(({ status }) => status === "rejected")).toHaveLength(1);
+    expect(harness.saveCredential).toHaveBeenCalledTimes(1);
+    await expect(harness.runtime.modelHub.findConnection(existing.id)).resolves.toMatchObject({
+      enabled: true,
+      credentialState: "present",
+      connectionStatus: "not_tested",
+    });
+    await expect(harness.runtime.modelHub.listConnectionCommits()).resolves.toEqual([]);
+  });
+
+  it("never publishes a new vault slot into a retired connection id", async () => {
+    const harness = createHarness({ "versioned-current-slot": "current-secret" });
+    const existing = await seedReadyConnection(harness.runtime, "versioned-current-slot");
+    const retired = await harness.runtime.modelHub.retireConnection({
+      connectionId: existing.id,
+      expectedRevision: existing.revision,
+    });
+    harness.saveCredential.mockClear();
+
+    await expect(
+      saveModelHubCredential(harness.runtime, {
+        connection: connectionInput(retired),
+        secret: "test-must-not-be-published",
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_CONNECTION_RETIRED" });
+
+    expect(harness.saveCredential).not.toHaveBeenCalled();
+    await expect(harness.runtime.modelHub.findConnection(existing.id)).resolves.toEqual(retired);
+    await expect(harness.runtime.modelHub.listConnectionCommits()).resolves.toEqual([]);
+  });
 });
 
 function createHarness(

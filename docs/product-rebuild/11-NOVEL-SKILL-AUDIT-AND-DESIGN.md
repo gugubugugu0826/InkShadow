@@ -237,7 +237,15 @@ observationCount = 0
 | 一句话开书定向回归                          | `2 files / 57 tests PASS`            | 首次开书、隔离 Candidate、精确 Skill/trace 链                                                     |
 | maintenance                                 | `49/49 PASS`                         | 166 张可恢复表的备份、删除、恢复、语义重放、派发前权威审计与失败回滚合同                          |
 
-上表 14 文件结果属于较早执行快照；当前稳定点已完成 Desktop 238 files / 1,759 passed / 1 skipped、付费 infrastructure 10 files / 96 tests、Data 全量 65 files / 420 tests、AI Core 16 files / 120 tests、完整 `release:check`、Rust 160 passed / 1 ignored 和 production Chromium E2E 11/11。精确命令见 `docs/execution/TEST_RESULTS.md`。独立审查批准 Data `0060`–`0064` 的 content-free ledger、显式付费派发权威和零自动调用接线；真实 Provider A/B、可信 `ELIGIBLE_FOR_REVIEW`、人工批准和真实 Tauri 冷启动没有执行。`test:e2e:release` 已启动，但在 clean-worktree gate 处 `BLOCKED / NOT_COMPLETED`，未生成候选；这些本地测试不能外推为 `VERIFIED`。
+上表 14 文件结果属于较早执行快照。当前未发布反馈修复工作树的最新全量证据为 Desktop
+249 files / 1,855 passed / 1 skipped / 0 failed，Data 421 passed / 0 failed，Rust 160 passed /
+1 ignored / 0 failed，production Chromium 12/12；最终 production build 为 53 files /
+6,739,800 bytes，门禁 payload 为 6,739,000 / 7,340,032 bytes。付费 infrastructure 10 files /
+96 tests、AI Core 16 files / 120 tests 属于各自已记录的较早稳定快照。当前修复的完整
+当前未发布反馈修复工作树的完整 `pnpm.cmd release:check` 已以退出码 0 通过；发布候选链仍为
+`NOT_RUN / NOT_RELEASED`，不得用旧快照冒充。精确命令见 `docs/execution/TEST_RESULTS.md`。独立审查批准 Data `0060`–`0064` 的 content-free ledger、显式付费
+派发权威和零自动调用接线；真实 Provider A/B、可信 `ELIGIBLE_FOR_REVIEW`、人工批准和真实 Tauri
+冷启动没有执行。这些本地测试不能外推为 `VERIFIED`。
 
 ## 9. 2026-08-13 本轮受限 smoke 结果
 

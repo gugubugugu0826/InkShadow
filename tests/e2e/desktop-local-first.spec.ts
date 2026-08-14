@@ -93,19 +93,19 @@ test("autosaves, recovers a crash draft, and isolates AI candidates", async ({ b
   await expect(page.getByText("等待决定", { exact: true })).toBeVisible();
   await page.getByText("费用与调用记录（高级）", { exact: true }).click();
   await expect(page.getByText("尝试上界累计估算", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "比较 AI 建议" }).click();
-  const candidateReview = page.getByRole("dialog", { name: "比较 AI 建议与正文" });
+  await page.getByRole("button", { name: "比较建议" }).click();
+  const candidateReview = page.getByRole("dialog", { name: "比较建议与正文" });
   await candidateReview.getByRole("button", { name: "插入光标并创建版本", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "章节正文" })).toHaveValue(
     `${stableBody}\n\n【本地演示候选】暮色沿着窗棂缓慢下沉，人物在未说出口的决定前停了一瞬。`,
   );
   const assistant = page.getByRole("complementary", { name: "AI 创作助手" });
-  await expect(assistant.getByRole("button", { name: "继续创作" })).toBeVisible();
+  await expect(assistant.getByRole("button", { name: "生成续写建议" })).toBeVisible();
 
   await page.getByRole("button", { name: "版本历史" }).click();
   const versionDialog = page.getByRole("dialog", { name: "版本历史" });
   await expect(versionDialog.getByText("版本 3", { exact: true })).toBeVisible();
-  await expect(versionDialog.getByText("接受 AI 建议", { exact: true })).toBeVisible();
+  await expect(versionDialog.getByText("接受建议", { exact: true })).toBeVisible();
   await versionDialog.getByRole("button", { name: "关闭", exact: true }).last().click();
 
   const recoveryBody = `${await page

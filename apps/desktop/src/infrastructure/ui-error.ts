@@ -95,6 +95,27 @@ function recordErrorDescription(code: string): string {
   if (code === "MODEL_HUB_ROUTE_NOT_CONFIGURED") {
     return "这项写作任务还没有可用的 AI 分工。请先验证至少一个模型的写作能力，再在 Model Hub 中应用智能推荐；缺少 Embedding 不会阻止基础文本写作。";
   }
+  if (code === "MODEL_HUB_ROUTE_DISABLED") {
+    return "这项写作任务的 AI 分工已明确停用。本次请求没有调用模型，也不会改用旧配置；请在 Model Hub 重新启用或明确分配模型后再试。";
+  }
+  if (code === "MODEL_PROFILE_NOT_READY") {
+    return "当前没有可用于这次写作的兼容模型。你仍可继续手动编辑和保存正文；如需 AI，请选择一个已连接模型，或前往 Model Hub 完成任务分工。";
+  }
+  if (code === "CREATIVE_INPUT_INVALID_EMPTY") {
+    return "请先写下一句话灵感；当前页面不会创建空项目，也不会调用 AI。";
+  }
+  if (code === "CREATIVE_INPUT_INVALID_WHITESPACE_ONLY") {
+    return "输入中只有空白字符。请写下一句可读的故事想法，或返回选择空白写作。";
+  }
+  if (code === "CREATIVE_INPUT_INVALID_TOO_SHORT") {
+    return "当前想法太短，暂时不足以生成可区分的开头方案。请再补充一个人物、动作或冲突，也可以改为直接空白写作。";
+  }
+  if (code === "CREATIVE_INPUT_INVALID_TOO_LARGE") {
+    return "当前创作输入超过本步骤上限。内容仍保留在页面中；请精简后重试，或先保存到本地素材。";
+  }
+  if (code === "CREATIVE_INPUT_INVALID_CONTROL_CHARACTER") {
+    return "输入中包含不可见控制字符。请删除异常字符后重试；普通中文、全角标点和换行仍然支持。";
+  }
   if (code === "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED") {
     return "AI 分工没有完整写入，之前可用的分工仍保持不变。请直接重试“应用 AI 分工”；若问题持续，请下载脱敏诊断包后联系支持。";
   }

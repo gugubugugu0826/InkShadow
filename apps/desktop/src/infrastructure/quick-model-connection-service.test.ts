@@ -380,6 +380,49 @@ describe("quick Model Hub connection", () => {
     expect(ready.route.privacyPolicy).toBe("local_only");
   });
 
+  it("creates a fresh ordinary id after retirement and routes only the exact active catalog", async () => {
+    const harness = createHarness();
+    let retired = await harness.runtime.modelHub.saveConnection({
+      id: "deepseek",
+      providerKind: "deepseek",
+      displayName: "Retired DeepSeek",
+      credentialRef: "keyring:model-hub:retired-deepseek-slot",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: null,
+    });
+    await harness.runtime.modelHub.syncCatalog({
+      syncId: "retired-deepseek-sync",
+      connectionId: retired.id,
+      source: "provider_api",
+      status: "succeeded",
+      models: [{ id: "retired-deepseek-model", providerModelId: "novel-text-model" }],
+    });
+    const currentRetired = await harness.runtime.modelHub.findConnection(retired.id);
+    if (currentRetired === null) throw new Error("Expected the retired source connection.");
+    retired = await harness.runtime.modelHub.retireConnection({
+      connectionId: currentRetired.id,
+      expectedRevision: currentRetired.revision,
+    });
+
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "deepseek",
+      secret: "test-new-deepseek-key",
+    });
+
+    expect(connected.connection.id).toBe("deepseek-2");
+    expect(connected.connection).toMatchObject({ enabled: true, connectionStatus: "ready" });
+    await expect(harness.runtime.modelHub.findConnection(retired.id)).resolves.toEqual(retired);
+    const routed = await configureQuickBookStartRoute(harness.runtime, {
+      connectionId: connected.connection.id,
+      catalogEntryId: connected.catalog[0]?.id ?? "missing",
+    });
+    expect(routed.catalogEntry.connectionId).toBe("deepseek-2");
+    expect(routed.route.primaryCatalogEntryId).toBe(routed.catalogEntry.id);
+    expect(routed.route.primaryCatalogEntryId).not.toBe("retired-deepseek-model");
+  });
+
   it("verifies a Qwen manual model with a content-free probe and persists its region", async () => {
     const harness = createHarness();
     const connected = await connectQuickModelProvider(harness.runtime, {

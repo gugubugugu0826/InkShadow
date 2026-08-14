@@ -5,7 +5,7 @@ import { exportPortableBundle } from "@inkshadow/import-export";
 import { ToastProvider } from "@inkshadow/ui";
 import { describe, expect, it, vi } from "vitest";
 
-import { DesktopRoutes } from "./app";
+import { DesktopRoutes, StartupOpeningInvocationRecovery } from "./app";
 import { EDITOR_VIEW_STATE_STORAGE_KEY } from "./infrastructure/editor-view-state-store";
 import { desktopPersistenceLifecycle } from "./infrastructure/persistence-lifecycle";
 import { createDevelopmentRuntime, type DesktopRuntime } from "./infrastructure/runtime";
@@ -59,6 +59,19 @@ async function seedChapter(runtime: DesktopRuntime, content = "原始正文。")
 }
 
 describe("desktop vertical slice", () => {
+  it("checks durable opening invocations when the app starts before an opening page is visited", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const listActive = vi.spyOn(runtime.creativeJourneys, "listActive");
+
+    render(
+      <RuntimeProvider runtime={runtime}>
+        <StartupOpeningInvocationRecovery />
+      </RuntimeProvider>,
+    );
+
+    await waitFor(() => expect(listActive).toHaveBeenCalledWith("idea"));
+  });
+
   it("keeps direct Studio routes feature-limited without entitlement and sends no team request", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const listTeams = vi.fn();
@@ -250,11 +263,18 @@ describe("desktop vertical slice", () => {
   it("persists a recovery draft, debounces autosave, and keeps candidates isolated", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const { chapter, project } = await seedChapter(runtime);
+    const summarizeSavedVersion = vi.spyOn(runtime.story.chapterSummaries, "summarizeSavedVersion");
+    const extractSavedVersion = vi.spyOn(runtime.story.continuousState, "extractSavedVersion");
     const user = userEvent.setup();
     renderRoute(runtime, `/projects/${project.id}/chapters/${chapter.id}`);
 
     const editor = await screen.findByRole("textbox", { name: "章节正文" });
     expect(editor).toHaveValue("原始正文。");
+    await user.click(screen.getByRole("button", { name: "设为私密" }));
+    const privacyDialog = await screen.findByRole("dialog", {
+      name: "将本章设为私密章节？",
+    });
+    await user.click(within(privacyDialog).getByRole("button", { name: "确认仅限本地" }));
 
     fireEvent.change(editor, {
       target: { value: "修改后的正文。", selectionStart: 7 },
@@ -285,10 +305,20 @@ describe("desktop vertical slice", () => {
     expect(
       stableBeforeAcceptance.ok && stableBeforeAcceptance.value?.content === "修改后的正文。",
     ).toBe(true);
+    const versionsBeforeAcceptance = await runtime.repositories.chapterVersions.listByChapterId(
+      chapter.id,
+    );
+    if (!versionsBeforeAcceptance.ok) throw versionsBeforeAcceptance.error;
+    const immutableVersionsBeforeAcceptance = versionsBeforeAcceptance.value.map((version) =>
+      version.toSnapshot(),
+    );
+    const rebuildProject = vi
+      .spyOn(runtime.search, "rebuildProject")
+      .mockRejectedValueOnce(new Error("local search temporarily unavailable"));
 
-    await user.click(screen.getByRole("button", { name: "比较 AI 建议" }));
+    await user.click(screen.getByRole("button", { name: "比较建议" }));
     const candidateReview = await screen.findByRole("dialog", {
-      name: "比较 AI 建议与正文",
+      name: "比较建议与正文",
     });
     await user.click(within(candidateReview).getByRole("button", { name: "插入光标并创建版本" }));
     await waitFor(() => {
@@ -296,18 +326,45 @@ describe("desktop vertical slice", () => {
     });
     await waitFor(async () => {
       const tasks = await runtime.taskCenter.load();
-      expect(
-        tasks.tasks.some(
-          (task) =>
-            task.type === "story.accepted-version.process" &&
-            task.metadata.projectId === project.id &&
-            task.metadata.chapterId === chapter.id &&
-            task.metadata.source === "candidate_accept",
-        ),
-      ).toBe(true);
+      const acceptedRefresh = tasks.tasks.find(
+        (task) =>
+          task.type === "story.accepted-version.process" &&
+          task.metadata.projectId === project.id &&
+          task.metadata.chapterId === chapter.id &&
+          task.metadata.source === "candidate_accept",
+      );
+      expect(acceptedRefresh).toMatchObject({
+        status: "waiting_retry",
+        failure: { causeCode: "PIPELINE_STAGES_SEARCH" },
+        metadata: {
+          runChapterSummary: false,
+          runStoryState: false,
+        },
+      });
     });
+    expect(summarizeSavedVersion).not.toHaveBeenCalled();
+    expect(extractSavedVersion).not.toHaveBeenCalled();
+    expect(rebuildProject).toHaveBeenCalledOnce();
+    const versionsAfterAcceptance = await runtime.repositories.chapterVersions.listByChapterId(
+      chapter.id,
+    );
+    if (!versionsAfterAcceptance.ok) throw versionsAfterAcceptance.error;
+    expect(versionsAfterAcceptance.value).toHaveLength(
+      immutableVersionsBeforeAcceptance.length + 1,
+    );
+    for (const immutableVersion of immutableVersionsBeforeAcceptance) {
+      expect(
+        versionsAfterAcceptance.value
+          .find((version) => version.id === immutableVersion.id)
+          ?.toSnapshot(),
+      ).toEqual(immutableVersion);
+    }
+    const privateChapterAfterAcceptance = await runtime.repositories.chapters.findById(chapter.id);
+    expect(
+      privateChapterAfterAcceptance.ok && privateChapterAfterAcceptance.value?.toSnapshot(),
+    ).toMatchObject({ privacyMode: "local_only" });
     const assistant = screen.getByRole("complementary", { name: "AI 创作助手" });
-    expect(within(assistant).getByRole("button", { name: "继续创作" })).toBeEnabled();
+    expect(within(assistant).getByRole("button", { name: "生成续写建议" })).toBeEnabled();
   });
 
   it("keeps the writing canvas primary and opens chapters or the AI assistant on compact screens", async () => {
@@ -420,7 +477,7 @@ describe("desktop vertical slice", () => {
     expect(within(standardDialog).getByText("以后可能离开本机")).toBeVisible();
   });
 
-  it("keeps an edited AI suggestion isolated until the author explicitly applies it", async () => {
+  it("keeps an edited suggestion isolated until the author explicitly applies it", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const { chapter, project } = await seedChapter(runtime, "原始正文。");
     const user = userEvent.setup();
@@ -432,10 +489,10 @@ describe("desktop vertical slice", () => {
     editor.setSelectionRange(editor.value.length, editor.value.length);
     fireEvent.select(editor);
     await user.click(screen.getByRole("button", { name: "生成示例建议" }));
-    await user.click(await screen.findByRole("button", { name: "比较 AI 建议" }));
+    await user.click(await screen.findByRole("button", { name: "比较建议" }));
 
-    const review = await screen.findByRole("dialog", { name: "比较 AI 建议与正文" });
-    const suggestion = within(review).getByRole("textbox", { name: "可编辑的 AI 建议" });
+    const review = await screen.findByRole("dialog", { name: "比较建议与正文" });
+    const suggestion = within(review).getByRole("textbox", { name: "可编辑的建议" });
     await user.clear(suggestion);
     await user.type(suggestion, "作者修改后的最终建议。");
 
@@ -460,11 +517,11 @@ describe("desktop vertical slice", () => {
     const reopenedEditor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
       name: "章节正文",
     });
-    await user.click(await screen.findByRole("button", { name: "比较 AI 建议" }));
+    await user.click(await screen.findByRole("button", { name: "比较建议" }));
     const reopenedReview = await screen.findByRole("dialog", {
-      name: "比较 AI 建议与正文",
+      name: "比较建议与正文",
     });
-    expect(within(reopenedReview).getByRole("textbox", { name: "可编辑的 AI 建议" })).toHaveValue(
+    expect(within(reopenedReview).getByRole("textbox", { name: "可编辑的建议" })).toHaveValue(
       "作者修改后的最终建议。",
     );
     await user.click(within(reopenedReview).getByRole("button", { name: "插入光标并创建版本" }));
@@ -516,9 +573,9 @@ describe("desktop vertical slice", () => {
       { timeout: 3_000 },
     );
 
-    await user.click(screen.getByRole("button", { name: "比较 AI 建议" }));
+    await user.click(screen.getByRole("button", { name: "比较建议" }));
     const candidateReview = await screen.findByRole("dialog", {
-      name: "比较 AI 建议与正文",
+      name: "比较建议与正文",
     });
     expect(within(candidateReview).getByText("正文已在建议生成后变化")).toBeVisible();
     expect(
@@ -973,13 +1030,14 @@ describe("desktop vertical slice", () => {
     const user = userEvent.setup();
     renderRoute(runtime, "/settings#model-center");
 
+    fireEvent.click(await screen.findByRole("button", { name: "连接 AI 服务" }));
     expect(await screen.findByText("浏览器开发模式不接受模型密钥")).toBeInTheDocument();
     expect(screen.queryByLabelText("接口访问密钥")).not.toBeInTheDocument();
     expect(window.localStorage.getItem("model-secret")).toBeNull();
     expect(screen.getByRole("button", { name: "测试连接并发现模型" })).toBeDisabled();
     const saveProfile = screen.getByRole("button", { name: "保存供应商与模型" });
     expect(saveProfile).toBeDisabled();
-    expect(screen.getByText("保存供应商与模型暂不可用")).toBeInTheDocument();
+    expect(screen.queryByText("保存供应商与模型暂不可用")).not.toBeInTheDocument();
     await expect(runtime.modelCenter.listProfiles()).resolves.toEqual([]);
     await expect(runtime.modelHub.listConnections()).resolves.toEqual([]);
     await user.click(screen.getByRole("button", { name: "专家设置" }));

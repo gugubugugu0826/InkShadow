@@ -60,7 +60,7 @@ describe("HistoricalChapterBackfillService", () => {
       willRegisterLocalOnlyChapterCount: 1,
       excludedEmptyChapterCount: 1,
       excludedUnstableChapterCount: 0,
-      modelStages: { chapterSummaryEnabled: true, storyStateEnabled: true },
+      modelStages: { chapterSummaryEnabled: false, storyStateEnabled: false },
       possibleRemoteProviderCallUpperBound: { chapterSummary: 0, storyState: 0, total: 0 },
       boundary: "current_stable_versions_only",
     });
@@ -96,8 +96,8 @@ describe("HistoricalChapterBackfillService", () => {
         chapterId: publicChapter.id,
         versionId: publicChapter.currentVersionId,
         source: "manual_save",
-        runChapterSummary: true,
-        runStoryState: true,
+        runChapterSummary: false,
+        runStoryState: false,
       },
     });
     await expect(
@@ -110,8 +110,8 @@ describe("HistoricalChapterBackfillService", () => {
         chapterId: privateChapter.id,
         versionId: privateChapter.currentVersionId,
         source: "historical_backfill",
-        runChapterSummary: true,
-        runStoryState: true,
+        runChapterSummary: false,
+        runStoryState: false,
       },
     });
 
@@ -198,7 +198,7 @@ describe("HistoricalChapterBackfillService", () => {
     ).resolves.toBeNull();
   });
 
-  it("conservatively backfills model stages for a legacy ordinary success without outcome evidence", async () => {
+  it("treats legacy ordinary local success as covering the local backfill", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const project = await createProject(runtime, "旧成功不冒充模型完成证据");
     const chapter = await createChapter(
@@ -224,14 +224,15 @@ describe("HistoricalChapterBackfillService", () => {
     );
 
     await expect(runtime.story.historicalBackfill.plan(project.id)).resolves.toMatchObject({
-      willRegisterChapterCount: 1,
-      willRegisterTaskCount: 2,
+      registeredChapterCount: 1,
+      willRegisterChapterCount: 0,
+      willRegisterTaskCount: 0,
       missingStages: {
         search: 0,
-        chapterSummary: 1,
-        storyState: 1,
+        chapterSummary: 0,
+        storyState: 0,
         causalProjection: 0,
-        total: 2,
+        total: 0,
       },
     });
   });
@@ -252,14 +253,14 @@ describe("HistoricalChapterBackfillService", () => {
       projectId: chapter.projectId,
       chapterId: chapter.id,
       versionId: chapter.currentVersionId,
-      source: "candidate_accept",
+      source: "historical_backfill",
       acceptedCharacterCount: chapter.content.length,
     });
     await completeTaskByKey(
       runtime,
       acceptedChapterPipelineIdempotencyKey(chapter.currentVersionId),
       675,
-      ["search", "chapter_summary", "story_state", "causal_projection"],
+      ["search", "causal_projection"],
     );
 
     await expect(runtime.story.historicalBackfill.plan(project.id)).resolves.toMatchObject({
@@ -270,7 +271,7 @@ describe("HistoricalChapterBackfillService", () => {
     });
   });
 
-  it("treats a persisted not-applicable stage as terminal for the bound immutable version", async () => {
+  it("treats a persisted local not-applicable stage as terminal for the bound version", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const project = await createProject(runtime, "Terminal not-applicable stage");
     const chapter = await createChapter(
@@ -286,26 +287,26 @@ describe("HistoricalChapterBackfillService", () => {
       versionId: chapter.currentVersionId,
       source: "historical_backfill",
       acceptedCharacterCount: chapter.content.length,
-      runChapterSummary: true,
+      runChapterSummary: false,
       runStoryState: false,
     });
     await completeTaskByKey(
       runtime,
       acceptedChapterPipelineIdempotencyKey(chapter.currentVersionId),
       680,
-      ["search", "causal_projection"],
-      ["chapter_summary"],
+      ["search"],
+      ["causal_projection"],
     );
 
     await expect(runtime.story.historicalBackfill.plan(project.id)).resolves.toMatchObject({
       registeredChapterCount: 1,
       willRegisterChapterCount: 0,
       willRegisterTaskCount: 0,
-      missingStages: { chapterSummary: 0, total: 0 },
+      missingStages: { causalProjection: 0, total: 0 },
     });
   });
 
-  it("requires a new explicit backfill confirmation before restoring a deferred policy stage", async () => {
+  it("requires explicit backfill confirmation before restoring a deferred local stage", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const project = await createProject(runtime, "Deferred policy stage");
     const chapter = await createChapter(
@@ -320,16 +321,16 @@ describe("HistoricalChapterBackfillService", () => {
       versionId: chapter.currentVersionId,
       source: "manual_save",
       acceptedCharacterCount: chapter.content.length,
-      runChapterSummary: true,
+      runChapterSummary: false,
       runStoryState: false,
     });
     await completeTaskByKey(
       runtime,
       acceptedChapterPipelineIdempotencyKey(chapter.currentVersionId),
       685,
-      ["search", "causal_projection"],
+      ["search"],
       [],
-      ["chapter_summary"],
+      ["causal_projection"],
     );
     await expect(
       runtime.taskCenter.findTaskByIdempotencyKey(
@@ -337,16 +338,19 @@ describe("HistoricalChapterBackfillService", () => {
       ),
     ).resolves.toMatchObject({ status: "succeeded", attempt: 1 });
 
-    runtime.story.chapterSummaries.setAutomaticOnManualSaveEnabled(project.id, true);
     const plan = await runtime.story.historicalBackfill.plan(project.id);
     expect(plan).toMatchObject({
       willRegisterChapterCount: 1,
       willRegisterTaskCount: 1,
-      missingStages: { chapterSummary: 1, total: 1 },
+      missingStages: { causalProjection: 1, total: 1 },
     });
     await expect(
       runtime.taskCenter.findTaskByIdempotencyKey(
-        acceptedChapterPipelineStageIdempotencyKey(chapter.currentVersionId, "chapter_summary", 1),
+        acceptedChapterPipelineStageIdempotencyKey(
+          chapter.currentVersionId,
+          "causal_projection",
+          1,
+        ),
       ),
     ).resolves.toBeNull();
 
@@ -357,7 +361,11 @@ describe("HistoricalChapterBackfillService", () => {
     });
     await expect(
       runtime.taskCenter.findTaskByIdempotencyKey(
-        acceptedChapterPipelineStageIdempotencyKey(chapter.currentVersionId, "chapter_summary", 1),
+        acceptedChapterPipelineStageIdempotencyKey(
+          chapter.currentVersionId,
+          "causal_projection",
+          1,
+        ),
       ),
     ).resolves.toMatchObject({ status: "queued" });
   });
@@ -396,7 +404,7 @@ describe("HistoricalChapterBackfillService", () => {
     });
   });
 
-  it("fills only newly enabled model stages without repeating completed local stages", async () => {
+  it("ignores legacy automatic model preferences after local stages complete", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const project = await createProject(runtime, "补齐后来开启的阶段");
     const chapter = await createChapter(
@@ -424,45 +432,25 @@ describe("HistoricalChapterBackfillService", () => {
     runtime.story.continuousState.setAutomaticOnManualSaveEnabled(project.id, true);
     const enabledPlan = await service.plan(project.id);
     expect(enabledPlan).toMatchObject({
-      registeredChapterCount: 0,
-      willRegisterChapterCount: 1,
-      willRegisterTaskCount: 2,
+      registeredChapterCount: 1,
+      willRegisterChapterCount: 0,
+      willRegisterTaskCount: 0,
       missingStages: {
         search: 0,
-        chapterSummary: 1,
-        storyState: 1,
+        chapterSummary: 0,
+        storyState: 0,
         causalProjection: 0,
-        total: 2,
+        total: 0,
       },
-      possibleRemoteProviderCallUpperBound: { chapterSummary: 1, storyState: 2, total: 3 },
+      modelStages: { chapterSummaryEnabled: false, storyStateEnabled: false },
+      possibleRemoteProviderCallUpperBound: { chapterSummary: 0, storyState: 0, total: 0 },
     });
 
-    await expect(
-      service.register({
-        projectId: project.id,
-        expectedPlanFingerprint: enabledPlan.fingerprint,
-        humanConfirmed: true,
-      }),
-    ).resolves.toMatchObject({
-      status: "completed",
-      createdTaskCount: 2,
-      remainingTaskCount: 0,
-    });
     await expect(
       runtime.taskCenter.findTaskByIdempotencyKey(
         acceptedChapterPipelineStageIdempotencyKey(chapter.currentVersionId, "chapter_summary", 1),
       ),
-    ).resolves.toMatchObject({
-      metadata: {
-        runSearch: false,
-        runChapterSummary: true,
-        runStoryState: false,
-        runCausalProjection: false,
-        pipelineStage: "chapter_summary",
-        pipelineStageRuleVersion: 2,
-        pipelineStageGeneration: 1,
-      },
-    });
+    ).resolves.toBeNull();
     await expect(
       runtime.taskCenter.findTaskByIdempotencyKey(
         acceptedChapterPipelineStageIdempotencyKey(chapter.currentVersionId, "search", 1),
@@ -474,7 +462,7 @@ describe("HistoricalChapterBackfillService", () => {
     });
   });
 
-  it("recovers only a permanently failed stage and advances its supplemental generation", async () => {
+  it("recovers only a permanently failed local stage and advances its generation", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const project = await createProject(runtime, "失败阶段按代恢复");
     const chapter = await createChapter(
@@ -494,7 +482,7 @@ describe("HistoricalChapterBackfillService", () => {
       humanConfirmed: true,
     });
     const baseKey = acceptedChapterPipelineIdempotencyKey(chapter.currentVersionId);
-    await failTaskPermanently(runtime, baseKey, ["story_state"], 800);
+    await failTaskPermanently(runtime, baseKey, ["causal_projection"], 800);
 
     const retryPlan = await service.plan(project.id);
     expect(retryPlan).toMatchObject({
@@ -503,8 +491,8 @@ describe("HistoricalChapterBackfillService", () => {
       missingStages: {
         search: 0,
         chapterSummary: 0,
-        storyState: 1,
-        causalProjection: 0,
+        storyState: 0,
+        causalProjection: 1,
         total: 1,
       },
     });
@@ -515,10 +503,10 @@ describe("HistoricalChapterBackfillService", () => {
     });
     const generationOneKey = acceptedChapterPipelineStageIdempotencyKey(
       chapter.currentVersionId,
-      "story_state",
+      "causal_projection",
       1,
     );
-    await failTaskPermanently(runtime, generationOneKey, ["story_state"], 900);
+    await failTaskPermanently(runtime, generationOneKey, ["causal_projection"], 900);
 
     const generationTwoPlan = await service.plan(project.id);
     expect(generationTwoPlan).toMatchObject({ willRegisterTaskCount: 1 });
@@ -529,15 +517,19 @@ describe("HistoricalChapterBackfillService", () => {
     });
     await expect(
       runtime.taskCenter.findTaskByIdempotencyKey(
-        acceptedChapterPipelineStageIdempotencyKey(chapter.currentVersionId, "story_state", 2),
+        acceptedChapterPipelineStageIdempotencyKey(
+          chapter.currentVersionId,
+          "causal_projection",
+          2,
+        ),
       ),
     ).resolves.toMatchObject({
       status: "queued",
-      metadata: { pipelineStageGeneration: 2, pipelineStage: "story_state" },
+      metadata: { pipelineStageGeneration: 2, pipelineStage: "causal_projection" },
     });
   });
 
-  it("keeps a deferred stage missing when another stage exhausts retries", async () => {
+  it("keeps a deferred local stage missing when another local stage exhausts retries", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const project = await createProject(runtime, "Deferred plus exhausted failure");
     const chapter = await createChapter(
@@ -554,26 +546,26 @@ describe("HistoricalChapterBackfillService", () => {
       versionId: chapter.currentVersionId,
       source: "manual_save",
       acceptedCharacterCount: chapter.content.length,
-      runChapterSummary: true,
-      runStoryState: true,
+      runChapterSummary: false,
+      runStoryState: false,
     });
     await failTaskPermanently(
       runtime,
       acceptedChapterPipelineIdempotencyKey(chapter.currentVersionId),
-      ["story_state"],
+      ["causal_projection"],
       950,
       [],
-      ["chapter_summary"],
+      ["search"],
     );
 
     await expect(runtime.story.historicalBackfill.plan(project.id)).resolves.toMatchObject({
       willRegisterChapterCount: 1,
       willRegisterTaskCount: 2,
       missingStages: {
-        search: 0,
-        chapterSummary: 1,
-        storyState: 1,
-        causalProjection: 0,
+        search: 1,
+        chapterSummary: 0,
+        storyState: 0,
+        causalProjection: 1,
         total: 2,
       },
     });
@@ -596,13 +588,12 @@ describe("HistoricalChapterBackfillService", () => {
       expectedPlanFingerprint: basePlan.fingerprint,
       humanConfirmed: true,
     });
-    await completeTaskByKey(
+    await failTaskPermanently(
       runtime,
       acceptedChapterPipelineIdempotencyKey(chapter.currentVersionId),
+      ["search", "causal_projection"],
       1_000,
     );
-    runtime.story.chapterSummaries.setAutomaticOnManualSaveEnabled(project.id, true);
-    runtime.story.continuousState.setAutomaticOnManualSaveEnabled(project.id, true);
     const supplementalPlan = await service.plan(project.id);
     expect(supplementalPlan.willRegisterTaskCount).toBe(2);
 
@@ -623,7 +614,7 @@ describe("HistoricalChapterBackfillService", () => {
       alreadyRegisteredTaskCount: 0,
       failedTaskCount: 1,
       remainingTaskCount: 1,
-      failures: [{ stage: "story_state", code: "HISTORICAL_BACKFILL_REGISTRATION_FAILED" }],
+      failures: [{ stage: "causal_projection", code: "HISTORICAL_BACKFILL_REGISTRATION_FAILED" }],
     });
     expect(await runtime.repositories.chapters.findById(chapter.id)).toMatchObject({
       ok: true,
@@ -633,7 +624,7 @@ describe("HistoricalChapterBackfillService", () => {
     await expect(service.plan(project.id)).resolves.toMatchObject({
       willRegisterChapterCount: 1,
       willRegisterTaskCount: 1,
-      missingStages: { chapterSummary: 0, storyState: 1, total: 1 },
+      missingStages: { search: 0, causalProjection: 1, total: 1 },
     });
   });
 
@@ -654,13 +645,12 @@ describe("HistoricalChapterBackfillService", () => {
       expectedPlanFingerprint: basePlan.fingerprint,
       humanConfirmed: true,
     });
-    await completeTaskByKey(
+    await failTaskPermanently(
       runtime,
       acceptedChapterPipelineIdempotencyKey(chapter.currentVersionId),
+      ["search", "causal_projection"],
       1_100,
     );
-    runtime.story.chapterSummaries.setAutomaticOnManualSaveEnabled(project.id, true);
-    runtime.story.continuousState.setAutomaticOnManualSaveEnabled(project.id, true);
     const supplementalPlan = await service.plan(project.id);
     expect(supplementalPlan.willRegisterTaskCount).toBe(2);
 
@@ -693,11 +683,15 @@ describe("HistoricalChapterBackfillService", () => {
       createdTaskCount: 1,
       failedTaskCount: 1,
       remainingTaskCount: 1,
-      failures: [{ code: "HISTORICAL_BACKFILL_PLAN_STALE", stage: "story_state" }],
+      failures: [{ code: "HISTORICAL_BACKFILL_PLAN_STALE", stage: "causal_projection" }],
     });
     await expect(
       runtime.taskCenter.findTaskByIdempotencyKey(
-        acceptedChapterPipelineStageIdempotencyKey(chapter.currentVersionId, "story_state", 1),
+        acceptedChapterPipelineStageIdempotencyKey(
+          chapter.currentVersionId,
+          "causal_projection",
+          1,
+        ),
       ),
     ).resolves.toBeNull();
     enqueue.mockRestore();
@@ -795,14 +789,14 @@ describe("HistoricalChapterBackfillService", () => {
       runStoryState: true,
       runCausalProjection: true,
     });
-    expect(pipeline.status).toBe("completed_with_skips");
+    expect(pipeline.status).toBe("completed");
     expect(pipeline.chapterSummary).toMatchObject({
-      status: "not_applicable",
-      code: "CHAPTER_SUMMARY_SOURCE_NOT_CURRENT",
+      status: "skipped",
+      code: "CHAPTER_SUMMARY_REQUIRES_SEPARATE_AUTHORIZATION",
     });
     expect(pipeline.storyState).toMatchObject({
-      status: "not_applicable",
-      code: "STORY_STATE_SOURCE_NOT_CURRENT",
+      status: "skipped",
+      code: "STORY_STATE_REQUIRES_SEPARATE_AUTHORIZATION",
     });
     expect(generate).not.toHaveBeenCalled();
     expect(causalRebuild).toHaveBeenCalledWith(project.id, "main");
@@ -854,7 +848,7 @@ describe("HistoricalChapterBackfillService", () => {
       ),
     ).resolves.toMatchObject({
       status: "succeeded",
-      progress: { step: "pipeline.outcome.v2.search-c.summary-n.state-n.causal-c" },
+      progress: { step: "pipeline.outcome.search-causal" },
     });
     await expect(
       runtime.taskCenter.findTaskByIdempotencyKey(

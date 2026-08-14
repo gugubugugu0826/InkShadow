@@ -10,6 +10,8 @@ import {
   type DesktopRuntime,
   type NativeModelGatewayClient,
 } from "../infrastructure/runtime";
+import { readSafeGuidedOpeningStatus } from "../infrastructure/guided-opening-diagnostics";
+import { recoverOrphanedOpeningInvocationsAtStartup } from "../infrastructure/opening-startup-recovery";
 import { deriveIdeaProjectSeed, parseProjectSeed } from "../infrastructure/project-seed";
 import type {
   CreativeJourneyRecord,
@@ -23,7 +25,7 @@ describe("one-sentence idea journey", () => {
     window.localStorage.clear();
   });
 
-  it("creates a resumable opening from one sentence and asks only one question", async () => {
+  it("creates a resumable local opening and asks only bounded gap-driven questions", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const user = userEvent.setup();
     renderJourney(runtime);
@@ -38,8 +40,16 @@ describe("one-sentence idea journey", () => {
       await screen.findByRole("heading", { name: "先把一个想法写成可以继续的开头" }),
     ).toBeVisible();
     expect(screen.getAllByText("本地草案")[0]).toBeVisible();
-    expect(screen.getByRole("heading", { name: "你想先把这个开头往哪个方向推？" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "增加悬念" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "选择这个开头" })).toBeEnabled();
+    expect(
+      screen.queryByRole("heading", { name: "你最想让这个开头接下来发生什么？" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保留开头，确认创建" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "选择这个开头" }));
+    expect(
+      await screen.findByRole("heading", { name: "你最想让这个开头接下来发生什么？" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "增加一个悬念" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "跳过" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "保留开头，确认创建" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "换一批" })).not.toBeInTheDocument();
@@ -55,14 +65,15 @@ describe("one-sentence idea journey", () => {
     expect(active[0]?.snapshot.openingSuggestions).toEqual([
       expect.objectContaining({ source: "local_fallback", status: "ready" }),
     ]);
+    expect(screen.queryByText("AI 已生成")).not.toBeInTheDocument();
     expect(active[0]?.snapshot).toMatchObject({
-      expectedQuestionTotal: 5,
+      expectedQuestionTotal: 3,
       questionIndex: 0,
-      questionPlan: ["opening_direction", "protagonist", "conflict", "tone", "boundaries"],
+      questionPlan: ["opening_direction", "protagonist", "conflict"],
     });
   });
 
-  it("persists a finite plan, explains a bounded dynamic extension, and makes progress", async () => {
+  it("persists one bounded dynamic plan without appending surprise questions", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const user = userEvent.setup();
     renderJourney(runtime);
@@ -71,17 +82,20 @@ describe("one-sentence idea journey", () => {
       "一封来自十年后的信改变了女主的暑假。",
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
-    await user.click(await screen.findByRole("button", { name: "增加悬念" }));
+    await user.click(await screen.findByRole("button", { name: "选择这个开头" }));
+    await user.click(await screen.findByRole("button", { name: "增加一个悬念" }));
 
     expect(
-      await screen.findByRole("heading", { name: "这一段主要跟着怎样的主角？" }),
+      await screen.findByRole("heading", {
+        name: "为了继续写下去，主角当前最重要的特征是什么？",
+      }),
     ).toBeVisible();
-    expect(screen.getByText(/第 2\/6 问/u)).toBeVisible();
-    expect(screen.getByText(/已完成 1\/6（17%）/u)).toBeVisible();
-    expect(screen.getByText("问题计划已按你的新信息扩展")).toBeVisible();
+    expect(screen.getByText(/第 2\/3 问/u)).toBeVisible();
+    expect(screen.getByText(/已完成 1\/3（33%）/u)).toBeVisible();
+    expect(screen.queryByText("问题计划已按你的新信息扩展")).not.toBeInTheDocument();
     const active = await runtime.creativeJourneys.listActive("idea");
     expect(active[0]?.snapshot).toMatchObject({
-      expectedQuestionTotal: 6,
+      expectedQuestionTotal: 3,
       questionIndex: 1,
       questionHistory: ["opening_direction"],
     });
@@ -89,14 +103,11 @@ describe("one-sentence idea journey", () => {
       "opening_direction",
       "protagonist",
       "conflict",
-      "tone",
-      "boundaries",
-      "genre",
     ]);
     expect(active[0]?.snapshot.remainingQuestionFocus).not.toContain("opening_direction");
   });
 
-  it("finishes a no-new-information plan and allows exactly one explicit rewrite", async () => {
+  it("finishes a no-new-information plan and requires reselecting exactly one explicit rewrite", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const user = userEvent.setup();
     renderJourney(runtime);
@@ -105,17 +116,18 @@ describe("one-sentence idea journey", () => {
       "一间永远停在午夜的书店。 ",
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
-    for (let index = 0; index < 5; index += 1) {
+    await user.click(await screen.findByRole("button", { name: "选择这个开头" }));
+    for (let index = 0; index < 3; index += 1) {
       await user.click(await screen.findByRole("button", { name: "跳过" }));
     }
     expect(await screen.findByText("问题计划已完成")).toBeVisible();
-    expect(screen.getByText(/已走完 5\/5 问（100%）；剩余重点：无/u)).toBeVisible();
+    expect(screen.getByText(/已走完 3\/3 问（100%）；剩余重点：无/u)).toBeVisible();
     const beforeRewrite = (await runtime.creativeJourneys.listActive("idea"))[0];
     expect(beforeRewrite?.snapshot).toMatchObject({
-      expectedQuestionTotal: 5,
-      questionIndex: 5,
-      questionHistory: ["opening_direction", "protagonist", "conflict", "tone", "boundaries"],
-      skippedQuestionKeys: ["opening_direction", "protagonist", "conflict", "tone", "boundaries"],
+      expectedQuestionTotal: 3,
+      questionIndex: 3,
+      questionHistory: ["opening_direction", "protagonist", "conflict"],
+      skippedQuestionKeys: ["opening_direction", "protagonist", "conflict"],
       remainingQuestionFocus: [],
       guidanceRewriteUsed: false,
     });
@@ -123,12 +135,81 @@ describe("one-sentence idea journey", () => {
     const rewriteButton = screen.getAllByRole("button", { name: "根据回答重写一次" })[0];
     if (rewriteButton === undefined) throw new Error("完成态没有明确重写入口。 ");
     await user.click(rewriteButton);
+    const afterRegeneration = (await runtime.creativeJourneys.listActive("idea"))[0];
+    expect(afterRegeneration?.snapshot.selectedOpeningId).toBeNull();
+    expect(afterRegeneration?.snapshot.questionPlanner).toBeNull();
+    expect(screen.queryByText("问题计划已完成")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "直接确认创建" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择这个开头" }));
+    for (let index = 0; index < 3; index += 1) {
+      await user.click(await screen.findByRole("button", { name: "跳过" }));
+    }
+    expect(await screen.findByText("问题计划已完成")).toBeVisible();
     await waitFor(() => {
       expect(screen.getAllByRole("button", { name: "已明确重写一次" })[0]).toBeDisabled();
     });
     const afterRewrite = (await runtime.creativeJourneys.listActive("idea"))[0];
     expect(afterRewrite?.currentState).toBe("guidance_complete");
     expect(afterRewrite?.snapshot.guidanceRewriteUsed).toBe(true);
+    expect(afterRewrite?.snapshot.questionPlan).toHaveLength(3);
+    await user.click(screen.getByRole("button", { name: "直接确认创建" }));
+    expect(await screen.findByRole("heading", { name: "都准备好了，看一眼全貌" })).toBeVisible();
+  });
+
+  it("opens the creation summary immediately when the selected opening has zero actionable gaps", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    const first = renderJourney(runtime);
+    const idea = "一个转学生发现旧校舍每逢下雨就会响起铜铃。";
+    await user.type(screen.getByRole("textbox", { name: "一句话灵感" }), idea);
+    await user.click(screen.getByRole("button", { name: "生成第一段" }));
+    await screen.findByRole("button", { name: "选择这个开头" });
+    const [active] = await runtime.creativeJourneys.listActive("idea");
+    if (active === undefined) throw new Error("零问题测试没有保存本地草案。");
+    const answers = Object.freeze({
+      opening_direction: "追查铃声来源",
+      protagonist: "谨慎敏锐的转学生",
+      conflict: "必须在校舍封闭前找到铜铃",
+      relationship: "与值日生刚认识",
+      pov: "第三人称限知",
+      tone: "紧张悬疑",
+      genre: "校园悬疑",
+      world: "当代沿海小城",
+      style: "短句、克制",
+      boundaries: "不写超自然定论",
+    });
+    first.unmount();
+    const seeded: CreativeJourneyRecord = Object.freeze({
+      ...active,
+      revision: active.revision + 1,
+      snapshot: Object.freeze({
+        ...active.snapshot,
+        answers,
+        projectSeed: deriveIdeaProjectSeed({
+          seedId: `idea:${active.id}`,
+          idea,
+          answers,
+          skippedQuestionKeys: [],
+          now: runtime.clock.now(),
+        }),
+      }),
+      updatedAt: runtime.clock.now(),
+    });
+    await runtime.creativeJourneys.update(seeded, active.revision);
+
+    renderJourney(runtime);
+    await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
+    await user.click(await screen.findByRole("button", { name: "选择这个开头" }));
+    expect(await screen.findByText("问题计划已完成")).toBeVisible();
+    const [planned] = await runtime.creativeJourneys.listActive("idea");
+    expect(planned?.currentState).toBe("guidance_complete");
+    expect(planned?.snapshot.questionPlanner).toMatchObject({
+      source: "deterministic_fallback",
+      questions: [],
+    });
+    expect(screen.queryByRole("heading", { level: 2, name: /什么/u })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "直接确认创建" }));
+    expect(await screen.findByRole("heading", { name: "都准备好了，看一眼全貌" })).toBeVisible();
   });
 
   it("removes an earlier answer when the user returns and skips that question", async () => {
@@ -137,8 +218,8 @@ describe("one-sentence idea journey", () => {
     renderJourney(runtime);
     await user.type(screen.getByRole("textbox", { name: "一句话灵感" }), "雨会倒流的城市。 ");
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
-    await user.click(await screen.findByRole("button", { name: "更甜一点" }));
-    expect(screen.queryByText(/更更甜一点/)).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择这个开头" }));
+    await user.click(await screen.findByRole("button", { name: "增加一个悬念" }));
     await user.click(await screen.findByRole("button", { name: "嘴硬心软" }));
     await user.click(await screen.findByRole("button", { name: "返回上一问" }));
     await user.click(await screen.findByRole("button", { name: "跳过" }));
@@ -158,7 +239,8 @@ describe("one-sentence idea journey", () => {
     renderJourney(runtime);
     await user.type(screen.getByRole("textbox", { name: "一句话灵感" }), "雨夜车站的陌生来信。 ");
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
-    await screen.findByRole("heading", { name: "你想先把这个开头往哪个方向推？" });
+    await user.click(await screen.findByRole("button", { name: "选择这个开头" }));
+    await screen.findByRole("heading", { name: "你最想让这个开头接下来发生什么？" });
 
     const activeBefore = await runtime.creativeJourneys.listActive("idea");
     const journeyId = activeBefore[0]?.id;
@@ -171,6 +253,11 @@ describe("one-sentence idea journey", () => {
       );
     });
     await waitFor(() => expect(screen.getByRole("button", { name: "重新生成开头" })).toBeEnabled());
+    expect(
+      screen.queryByRole("heading", { name: "你最想让这个开头接下来发生什么？" }),
+    ).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "选择这个开头" }));
+    await screen.findByRole("heading", { name: "你最想让这个开头接下来发生什么？" });
     const regenerationCount = (await runtime.creativeJourneys.listTurns(journeyId)).filter(
       ({ kind }) => kind === "regenerate",
     ).length;
@@ -178,7 +265,9 @@ describe("one-sentence idea journey", () => {
     const customAnswer = screen.getByRole("textbox", { name: /^自己回答/ });
     await user.type(customAnswer, "保留悬念，但让对话更克制");
     await user.click(screen.getByRole("button", { name: "采用我的回答" }));
-    await screen.findByRole("heading", { name: "这一段主要跟着怎样的主角？" });
+    await screen.findByRole("heading", {
+      name: "为了继续写下去，主角当前最重要的特征是什么？",
+    });
     await user.click(screen.getByRole("button", { name: "返回上一问" }));
     const returnedAnswer = screen.getByRole("textbox", { name: /^自己回答/ });
     await user.clear(returnedAnswer);
@@ -206,6 +295,7 @@ describe("one-sentence idea journey", () => {
       "失忆少年每天醒来都会收到同一个陌生女孩的留言。",
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
+    await user.click(await screen.findByRole("button", { name: "选择这个开头" }));
     await user.click(await screen.findByRole("button", { name: "保留开头，确认创建" }));
 
     expect(await screen.findByRole("heading", { name: "都准备好了，看一眼全貌" })).toBeVisible();
@@ -216,7 +306,7 @@ describe("one-sentence idea journey", () => {
     await user.clear(storySummary);
     await user.type(storySummary, "失忆少年每天收到陌生女孩留言，并决定追查留言来自何处。");
     await user.click(screen.getByRole("button", { name: "返回修改" }));
-    await screen.findByRole("heading", { name: "你想先把这个开头往哪个方向推？" });
+    await screen.findByRole("heading", { name: "你最想让这个开头接下来发生什么？" });
     await user.click(screen.getByRole("button", { name: "保留开头，确认创建" }));
     expect(await screen.findByRole("textbox", { name: /^书名/ })).toHaveValue("午夜留言");
     expect(screen.getByRole("textbox", { name: /^故事摘要/ })).toHaveValue(
@@ -227,7 +317,7 @@ describe("one-sentence idea journey", () => {
     expect(reviewJourneys[0]?.snapshot.storySummary).toBe(
       "失忆少年每天收到陌生女孩留言，并决定追查留言来自何处。",
     );
-    await user.click(screen.getByRole("button", { name: "创建作品，查看 AI 建议" }));
+    await user.click(screen.getByRole("button", { name: "创建作品，查看本地草案" }));
 
     expect(await screen.findByText("已进入 AI 建议版本比较")).toBeVisible();
     const activeProjects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
@@ -281,21 +371,13 @@ describe("one-sentence idea journey", () => {
       "两名旧友在停电的小镇重逢。",
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
-    await user.click(await screen.findByRole("button", { name: "更甜一点" }));
+    await user.click(await screen.findByRole("button", { name: "选择这个开头" }));
+    await user.click(await screen.findByRole("button", { name: "增加一个悬念" }));
     await user.click(await screen.findByRole("button", { name: "嘴硬心软" }));
-    for (const heading of [
-      "眼前最先需要解决的麻烦是什么？",
-      "读者看完这一段，你最想让他们留下什么感觉？",
-      "目前有什么内容一定不要出现？",
-      "如果给这个故事一个类型标签，你最希望是什么？",
-    ]) {
-      expect(await screen.findByRole("heading", { name: heading })).toBeVisible();
-      await user.click(screen.getByRole("button", { name: "跳过" }));
-    }
     expect(
-      await screen.findByRole("heading", { name: "主角和关键人物目前是什么关系？" }),
+      await screen.findByRole("heading", { name: "眼前最先需要解决的麻烦是什么？" }),
     ).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "青梅竹马" }));
+    await user.click(screen.getByRole("button", { name: "跳过" }));
     expect(await screen.findByText("问题计划已完成")).toBeVisible();
     const completedPlan = (await runtime.creativeJourneys.listActive("idea"))[0];
     const questionPlan = completedPlan?.snapshot.questionPlan as readonly string[] | undefined;
@@ -305,7 +387,7 @@ describe("one-sentence idea journey", () => {
     expect(questionPlan.length).toBeLessThanOrEqual(12);
     expect(new Set(questionPlan).size).toBe(questionPlan.length);
     await user.click(screen.getByRole("button", { name: "直接确认创建" }));
-    await user.click(await screen.findByRole("button", { name: "创建作品，查看 AI 建议" }));
+    await user.click(await screen.findByRole("button", { name: "创建作品，查看本地草案" }));
 
     const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
     if (!projects.ok || projects.value[0] === undefined) throw new Error("引导作品没有创建。 ");
@@ -319,7 +401,7 @@ describe("one-sentence idea journey", () => {
     expect(facts.value.map((fact) => fact.toSnapshot().factType)).not.toContain("relationship");
     const seed = await runtime.projectSeeds.findByProjectId(projects.value[0].id);
     expect(seed?.seed.characters.values).toEqual(["嘴硬心软"]);
-    expect(seed?.seed.relationships.values).toEqual(["青梅竹马"]);
+    expect(seed?.seed.relationships.values).toEqual([]);
   }, 30_000);
 
   it("resumes an unfinished journey after reopening", async () => {
@@ -331,7 +413,8 @@ describe("one-sentence idea journey", () => {
       "城市里的影子会在午夜交换主人的秘密。",
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
-    await screen.findByRole("heading", { name: "你想先把这个开头往哪个方向推？" });
+    await user.click(await screen.findByRole("button", { name: "选择这个开头" }));
+    await screen.findByRole("heading", { name: "你最想让这个开头接下来发生什么？" });
     first.unmount();
 
     renderJourney(createDevelopmentRuntime(window.localStorage));
@@ -340,7 +423,7 @@ describe("one-sentence idea journey", () => {
     });
     await user.click(screen.getByRole("button", { name: "继续这次构思" }));
     expect(
-      await screen.findByRole("heading", { name: "你想先把这个开头往哪个方向推？" }),
+      await screen.findByRole("heading", { name: "你最想让这个开头接下来发生什么？" }),
     ).toBeVisible();
   });
 
@@ -353,6 +436,7 @@ describe("one-sentence idea journey", () => {
       "只有女主能听见废弃电台里的求救声。",
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
+    await user.click(await screen.findByRole("button", { name: "选择这个开头" }));
     await user.click(await screen.findByRole("button", { name: "保留开头，确认创建" }));
     await screen.findByRole("heading", { name: "都准备好了，看一眼全貌" });
     first.unmount();
@@ -379,6 +463,45 @@ describe("one-sentence idea journey", () => {
     expect(screen.queryByRole("heading", { name: "连接你的 AI" })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "一句话灵感" })).toBeEnabled();
   });
+
+  it("keeps the explicit local sample and its question plan off the configured provider", async () => {
+    const harness = createTauriIdeaRuntime(false);
+    const user = userEvent.setup();
+    renderJourney(harness.runtime);
+    await screen.findByText("AI 还没连接，也可以开始");
+    await user.click(screen.getByRole("button", { name: "去连接 AI" }));
+    await user.click(screen.getByRole("radio", { name: /Ollama/u }));
+    await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
+    await screen.findByText("连接成功 · 已找到模型");
+    await user.click(screen.getByRole("radio", { name: /先看看示例/u }));
+    await user.click(screen.getByRole("button", { name: "继续" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "连接你的 AI" })).not.toBeInTheDocument();
+    });
+    harness.generate.mockClear();
+
+    await user.type(
+      screen.getByRole("textbox", { name: "一句话灵感" }),
+      "一场大雾让小镇所有人忘记了昨天。",
+    );
+    await user.click(screen.getByRole("button", { name: "先看看示例" }));
+    expect(await screen.findByRole("button", { name: "选择这个开头" })).toBeEnabled();
+    expect(harness.generate).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "选择这个开头" }));
+    expect(
+      await screen.findByRole("heading", { name: "你最想让这个开头接下来发生什么？" }),
+    ).toBeVisible();
+    expect(harness.generate).not.toHaveBeenCalled();
+    const [active] = await harness.runtime.creativeJourneys.listActive("idea");
+    expect(active?.snapshot).toMatchObject({
+      openingMode: "sample",
+      previewSource: "local_fallback",
+      questionPlanner: {
+        source: "deterministic_fallback",
+        fallbackReasonCode: "LOCAL_ONLY_OPENING",
+      },
+    });
+  }, 30_000);
 
   it("starts a blank local work without requiring an idea or creating AI content", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
@@ -516,6 +639,9 @@ describe("one-sentence idea journey", () => {
     const user = userEvent.setup();
     renderJourney(harness.runtime);
     await connectOllamaForAiOpening(user);
+    expect(await screen.findByText(/并行发起 3 次独立模型调用，供应商可能分别计费/u)).toBeVisible();
+    expect(screen.getByText(/本操作不自动重试/u)).toBeVisible();
+    expect(screen.getByText(/当前模型：ollama · local-novel/u)).toBeVisible();
     harness.generate.mockClear();
     const releaseGeneration: (() => void)[] = [];
     harness.generate.mockImplementation(
@@ -611,14 +737,23 @@ describe("one-sentence idea journey", () => {
     const firstSelectedId = beforeSelection[0]?.snapshot.selectedOpeningId;
     const journeyId = beforeSelection[0]?.id;
     if (journeyId === undefined) throw new Error("AI 开书旅程没有保存。");
+    expect(firstSelectedId).toBeNull();
+    expect(screen.queryByRole("button", { name: "保留开头，确认创建" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "你最想让这个开头接下来发生什么？" }),
+    ).not.toBeInTheDocument();
     const turns = await harness.runtime.creativeJourneys.listTurns(journeyId);
     const generationTurns = turns.filter(({ generationSource }) => generationSource === "provider");
     expect(generationTurns).toHaveLength(3);
     expect(new Set(generationTurns.map(({ requestId }) => requestId)).size).toBe(3);
     expect(generationTurns.every(({ taskKey }) => taskKey === "opening_guidance")).toBe(true);
     await user.click(screen.getByRole("button", { name: "选择方案 2" }));
+    expect(
+      await screen.findByRole("heading", { name: "你最想让这个开头接下来发生什么？" }),
+    ).toBeVisible();
     const afterSelection = await harness.runtime.creativeJourneys.listActive("idea");
     expect(afterSelection[0]?.snapshot.selectedOpeningId).not.toBe(firstSelectedId);
+    expect(harness.generate).toHaveBeenCalledTimes(3);
 
     const projectsAfterSelection = await harness.runtime.useCases.listProjects.execute({
       statuses: ["active"],
@@ -629,6 +764,185 @@ describe("one-sentence idea journey", () => {
     );
     expect(chaptersAfterSelection.ok && chaptersAfterSelection.value[0]?.content).toBe("");
     expect(enableNovelSkill).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it("settles synchronous per-slot failures and requires explicit selection of the one usable result", async () => {
+    const harness = createTauriIdeaRuntime(false);
+    const user = userEvent.setup();
+    renderJourney(harness.runtime);
+    await connectOllamaForAiOpening(user);
+    harness.generate.mockClear();
+    let callIndex = 0;
+    harness.generate.mockImplementation((input) => {
+      callIndex += 1;
+      if (callIndex === 1) {
+        return Promise.resolve({ text: `唯一可用方案 ${input.generationId}`, usage: null });
+      }
+      throw Object.assign(new Error("synchronous provider failure"), {
+        code: "MODEL_PROVIDER_UNAVAILABLE",
+        diagnostics: Object.freeze({ httpStatus: 503 }),
+      });
+    });
+
+    await user.type(
+      screen.getByRole("textbox", { name: "一句话灵感" }),
+      "旧电影院只会为失踪的人放映下一场电影。",
+    );
+    await user.click(screen.getByRole("button", { name: "生成第一段" }));
+
+    await waitFor(() => expect(screen.getAllByText("AI 已生成")).toHaveLength(1));
+    await waitFor(() => expect(screen.getAllByText("生成失败")).toHaveLength(2));
+    const [settled] = await harness.runtime.creativeJourneys.listActive("idea");
+    if (settled === undefined) throw new Error("部分成功批次没有保存。");
+    const settledSuggestions = settled.snapshot.openingSuggestions as readonly Readonly<{
+      id: string;
+      status: string;
+    }>[];
+    expect(settledSuggestions.filter(({ status }) => status === "ready")).toHaveLength(1);
+    expect(settledSuggestions.filter(({ status }) => status === "failed")).toHaveLength(2);
+    expect(settled.snapshot.openingSuggestions).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ status: "pending" })]),
+    );
+    expect(settled.snapshot.selectedOpeningId).toBeNull();
+    expect(settled.snapshot.questionPlanner).toBeNull();
+    expect(screen.queryByRole("button", { name: "保留开头，确认创建" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "你最想让这个开头接下来发生什么？" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() => {
+      const diagnostic = readSafeGuidedOpeningStatus(harness.runtime);
+      expect(diagnostic).toMatchObject({
+        inputValidation: "valid",
+        batchState: "settled",
+        selectedSlot: null,
+        plannerMode: "not_started",
+        questionCount: 0,
+        currentQuestion: null,
+        lastError: "MODEL_PROVIDER_UNAVAILABLE",
+      });
+      expect(diagnostic?.slotStates.filter((status) => status === "ready")).toHaveLength(1);
+      expect(diagnostic?.slotStates.filter((status) => status === "failed")).toHaveLength(2);
+    });
+
+    const readyIndex = settledSuggestions.findIndex(({ status }) => status === "ready");
+    expect(readyIndex).toBeGreaterThanOrEqual(0);
+    await user.click(screen.getByRole("button", { name: `选择方案 ${String(readyIndex + 1)}` }));
+    expect(
+      await screen.findByRole("heading", { name: "你最想让这个开头接下来发生什么？" }),
+    ).toBeVisible();
+    const [selected] = await harness.runtime.creativeJourneys.listActive("idea");
+    expect(selected?.snapshot.selectedOpeningId).toBe(settledSuggestions[readyIndex]?.id);
+    await waitFor(() => {
+      expect(readSafeGuidedOpeningStatus(harness.runtime)).toMatchObject({
+        batchState: "settled",
+        selectedSlot: `slot_${String(readyIndex + 1)}`,
+        plannerMode: "deterministic_fallback",
+        questionCount: 3,
+        currentQuestion: "opening_direction",
+      });
+    });
+  }, 30_000);
+
+  it("settles a batch when every provider slot throws without inventing a choice or question", async () => {
+    const harness = createTauriIdeaRuntime(false);
+    const user = userEvent.setup();
+    renderJourney(harness.runtime);
+    await connectOllamaForAiOpening(user);
+    harness.generate.mockClear();
+    harness.generate.mockImplementation(() => {
+      throw Object.assign(new Error("synchronous provider failure"), {
+        code: "MODEL_PROVIDER_UNAVAILABLE",
+        diagnostics: Object.freeze({ httpStatus: 503 }),
+      });
+    });
+
+    await user.type(
+      screen.getByRole("textbox", { name: "一句话灵感" }),
+      "暴雨夜，整座城市的钟都停在同一秒。",
+    );
+    await user.click(screen.getByRole("button", { name: "生成第一段" }));
+
+    await waitFor(() => expect(screen.getAllByText("生成失败")).toHaveLength(3));
+    const [settled] = await harness.runtime.creativeJourneys.listActive("idea");
+    if (settled === undefined) throw new Error("全失败批次没有保存终态。");
+    const suggestions = settled.snapshot.openingSuggestions as readonly Readonly<{
+      status: string;
+    }>[];
+    expect(suggestions.map(({ status }) => status)).toEqual(["failed", "failed", "failed"]);
+    expect(settled.currentState).not.toBe("generation_pending");
+    expect(settled.snapshot.selectedOpeningId).toBeNull();
+    expect(settled.snapshot.questionPlanner).toBeNull();
+    expect(screen.queryByRole("button", { name: /^选择方案/u })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保留开头，确认创建" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "你最想让这个开头接下来发生什么？" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(readSafeGuidedOpeningStatus(harness.runtime)).toMatchObject({
+        batchState: "settled",
+        slotStates: ["failed", "failed", "failed"],
+        selectedSlot: null,
+        plannerMode: "not_started",
+        questionCount: 0,
+        currentQuestion: null,
+        lastError: "MODEL_PROVIDER_UNAVAILABLE",
+      });
+    });
+  }, 30_000);
+
+  it("recovers an old selected snapshot with no planner locally without a second provider dispatch", async () => {
+    const harness = createTauriIdeaRuntime(false);
+    const user = userEvent.setup();
+    const first = renderJourney(harness.runtime);
+    await connectOllamaForAiOpening(user);
+    await user.type(
+      screen.getByRole("textbox", { name: "一句话灵感" }),
+      "凌晨三点，废弃泳池里浮起一张明天的报纸。",
+    );
+    await user.click(screen.getByRole("button", { name: "生成第一段" }));
+    await waitFor(() => expect(screen.getAllByText("AI 已生成")).toHaveLength(3));
+
+    const [active] = await harness.runtime.creativeJourneys.listActive("idea");
+    if (active === undefined) throw new Error("旧规划恢复测试没有旅程。");
+    const suggestions = active.snapshot.openingSuggestions as readonly Readonly<{
+      id: string;
+      status: string;
+    }>[];
+    const selected = suggestions.find(({ status }) => status === "ready");
+    if (selected === undefined) throw new Error("旧规划恢复测试没有可选开头。");
+    first.unmount();
+    const legacyPlanningRecord: CreativeJourneyRecord = Object.freeze({
+      ...active,
+      currentState: "planning_questions",
+      revision: active.revision + 1,
+      snapshot: Object.freeze({
+        ...active.snapshot,
+        selectedOpeningId: selected.id,
+        questionPlanner: undefined,
+        questionPlan: undefined,
+        expectedQuestionTotal: undefined,
+        questionIndex: undefined,
+        remainingQuestionFocus: undefined,
+        currentQuestionKey: undefined,
+      }),
+      updatedAt: harness.runtime.clock.now(),
+    });
+    await harness.runtime.creativeJourneys.update(legacyPlanningRecord, active.revision);
+    const providerCallsBeforeResume = harness.generate.mock.calls.length;
+
+    renderJourney(harness.runtime);
+    await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
+    expect(
+      await screen.findByRole("heading", { name: "你最想让这个开头接下来发生什么？" }),
+    ).toBeVisible();
+    expect(harness.generate).toHaveBeenCalledTimes(providerCallsBeforeResume);
+    const recovered = await harness.runtime.creativeJourneys.findById(active.id);
+    expect(recovered?.currentState).toBe("asking_one_question");
+    expect(recovered?.snapshot.questionPlanner).toMatchObject({
+      source: "deterministic_fallback",
+      fallbackReasonCode: "PLANNER_RECOVERED_LOCALLY",
+    });
+    expect(recovered?.snapshot.pendingRequestId).toBeNull();
   }, 30_000);
 
   it("does not start a deferred provider slot after the author reopens and ends the pending batch", async () => {
@@ -659,15 +973,17 @@ describe("one-sentence idea journey", () => {
     expect(harness.generate).not.toHaveBeenCalled();
 
     const [pending] = await harness.runtime.creativeJourneys.listActive("idea");
-    const pendingProjectId = pending?.projectId;
-    if (pendingProjectId === null || pendingProjectId === undefined) {
+    if (pending === undefined) throw new Error("deferred opening was not saved");
+    const pendingProjectId = pending.projectId;
+    if (pendingProjectId === null) {
       throw new Error("deferred opening did not provision its recoverable workspace");
     }
     first.unmount();
     renderJourney(harness.runtime);
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
-    await user.click(screen.getByRole("button", { name: "结束未完成请求" }));
-    await waitFor(() => expect(harness.cancelGeneration).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.getAllByText("未发送")).toHaveLength(3));
+    expect(screen.queryByRole("button", { name: "结束未完成请求" })).not.toBeInTheDocument();
+    expect(harness.cancelGeneration).not.toHaveBeenCalled();
 
     releaseTraceSaves();
     let invocationIds: readonly string[] = [];
@@ -685,6 +1001,16 @@ describe("one-sentence idea journey", () => {
       );
       expect(invocations.every((invocation) => invocation?.status === "failed")).toBe(true);
     });
+    const ended = await harness.runtime.creativeJourneys.findById(pending.id);
+    expect(ended?.snapshot.selectedOpeningId).toBeNull();
+    expect(ended?.snapshot.questionPlanner).toBeNull();
+    expect(ended?.snapshot.openingSuggestions).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ status: "pending" })]),
+    );
+    expect(screen.queryByRole("button", { name: "保留开头，确认创建" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "你最想让这个开头接下来发生什么？" }),
+    ).not.toBeInTheDocument();
     expect(harness.generate).not.toHaveBeenCalled();
   }, 30_000);
 
@@ -791,7 +1117,7 @@ describe("one-sentence idea journey", () => {
     expect(candidate.toSnapshot()).toMatchObject({
       status: "ready",
       incomplete: true,
-      content: partialText.normalize("NFKC"),
+      content: partialText,
     });
     const versions = await harness.runtime.repositories.chapterVersions.listByChapterId(
       chapters.value[0].id,
@@ -835,7 +1161,7 @@ describe("one-sentence idea journey", () => {
       "末班电车会把乘客送到他们最不愿回去的地方。",
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
-    expect(await screen.findByRole("button", { name: "继续补全" })).toBeEnabled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "继续补全" })).toBeEnabled());
     const before = (await harness.runtime.creativeJourneys.listActive("idea"))[0];
     const beforeSuggestions = before?.snapshot.openingSuggestions as
       readonly Readonly<{ id: string; status: string; text: string }>[] | undefined;
@@ -985,10 +1311,10 @@ describe("one-sentence idea journey", () => {
     first.unmount();
     renderJourney(harness.runtime);
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
-    expect(await screen.findByText(/3 个方案尚未返回/u)).toBeVisible();
-    expect(screen.getByRole("button", { name: "换一批" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "增加悬念" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "保留开头，确认创建" })).toBeDisabled();
+    await waitFor(() => expect(screen.getAllByText("结果不明确")).toHaveLength(3));
+    expect(screen.getByRole("button", { name: "换一批" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "增加一个悬念" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保留开头，确认创建" })).not.toBeInTheDocument();
 
     const thirdRequestId = plannedSuggestions[2]?.id;
     if (thirdRequestId === undefined) throw new Error("第三个固定建议槽没有请求编号。");
@@ -997,14 +1323,23 @@ describe("one-sentence idea journey", () => {
       usage: null,
     });
     await waitFor(async () => {
+      const turns = await harness.runtime.creativeJourneys.listTurns(planned.id);
+      expect(
+        turns.some(
+          ({ requestId, snapshot }) => requestId === thirdRequestId && snapshot.status === "failed",
+        ),
+      ).toBe(true);
       const latest = await harness.runtime.creativeJourneys.findById(planned.id);
       const suggestions = latest?.snapshot.openingSuggestions as
-        readonly Readonly<{ status: string; text: string }>[] | undefined;
-      expect(suggestions?.filter(({ status }) => status === "ready")).toHaveLength(1);
-      expect(suggestions?.filter(({ status }) => status === "pending")).toHaveLength(2);
+        readonly Readonly<{ status: string; text: string; dispatchState: string }>[] | undefined;
+      expect(suggestions?.filter(({ status }) => status === "ready")).toHaveLength(0);
+      expect(
+        suggestions?.filter(({ dispatchState }) => dispatchState === "ambiguous"),
+      ).toHaveLength(3);
       expect(suggestions?.[2]).toMatchObject({
-        status: "ready",
-        text: "这是一段乱序返回但已经完成计费的正文。",
+        status: "failed",
+        text: "",
+        dispatchState: "ambiguous",
       });
     });
     expect(harness.generate).toHaveBeenCalledTimes(3);
@@ -1012,24 +1347,24 @@ describe("one-sentence idea journey", () => {
 
     await user.click(screen.getByRole("button", { name: "返回创作首页" }));
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
-    expect(await screen.findByText("这是一段乱序返回但已经完成计费的正文。")).toBeVisible();
-    expect(screen.getByText(/2 个方案尚未返回/u)).toBeVisible();
-    expect(screen.getByRole("button", { name: "换一批" })).toBeDisabled();
+    expect(screen.queryByText("这是一段乱序返回但已经完成计费的正文。")).not.toBeInTheDocument();
+    expect(screen.getAllByText("结果不明确")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "换一批" })).toBeEnabled();
     expect(harness.generate).toHaveBeenCalledTimes(3);
 
     const turns = await harness.runtime.creativeJourneys.listTurns(planned.id);
-    const resultTurn = turns.find(
-      ({ requestId, snapshot }) =>
-        requestId === plannedSuggestions[2]?.id && snapshot.status === "ready",
-    );
-    expect(resultTurn?.snapshot).toMatchObject({
+    expect(
+      turns.find(
+        ({ requestId, snapshot }) =>
+          requestId === plannedSuggestions[2]?.id && snapshot.status === "failed",
+      )?.snapshot,
+    ).toMatchObject({
       openingAngle: plannedSuggestions[2]?.openingAngle,
-      status: "ready",
+      status: "failed",
     });
-    await user.click(screen.getByRole("button", { name: "结束未完成请求" }));
   }, 30_000);
 
-  it("archives an old batch result after the author ends it and generates a replacement batch", async () => {
+  it("archives an interrupted old batch slot before replacement and ignores its late completion", async () => {
     const harness = createTauriIdeaRuntime(false);
     const user = userEvent.setup();
     const first = renderJourney(harness.runtime);
@@ -1058,8 +1393,8 @@ describe("one-sentence idea journey", () => {
     first.unmount();
     renderJourney(harness.runtime);
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
-    await user.click(screen.getByRole("button", { name: "结束未完成请求" }));
-    await waitFor(() => expect(harness.cancelGeneration).toHaveBeenCalledWith(oldRequestId));
+    await waitFor(() => expect(screen.getByText("结果不明确")).toBeVisible());
+    expect(harness.cancelGeneration).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.getByRole("button", { name: "换一批" })).toBeEnabled());
     await user.click(screen.getByRole("button", { name: "换一批" }));
     await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(6));
@@ -1068,26 +1403,30 @@ describe("one-sentence idea journey", () => {
     const replacementSelection = replacement?.snapshot.selectedOpeningId;
     const replacementPreview = replacement?.snapshot.preview;
 
-    resolveOldBatch({ text: "旧批次结束后才返回的已计费正文。", usage: null });
+    await act(async () => {
+      resolveOldBatch({ text: "旧批次结束后才返回的已计费正文。", usage: null });
+      await Promise.resolve();
+    });
     await waitFor(async () => {
       const latest = await harness.runtime.creativeJourneys.findById(active.id);
       const history = latest?.snapshot.openingResultHistory as
-        readonly Readonly<{ id: string; status: string; text: string }>[] | undefined;
+        | readonly Readonly<{
+            id: string;
+            status: string;
+            text: string;
+            dispatchState: string;
+          }>[]
+        | undefined;
       expect(history?.find(({ id }) => id === oldRequestId)).toMatchObject({
-        status: "ready",
-        text: "旧批次结束后才返回的已计费正文。",
+        status: "failed",
+        text: "",
+        dispatchState: "ambiguous",
       });
       expect(latest?.snapshot.selectedOpeningId).toBe(replacementSelection);
       expect(latest?.snapshot.preview).toBe(replacementPreview);
     });
     expect(harness.generate).toHaveBeenCalledTimes(6);
-    const turns = await harness.runtime.creativeJourneys.listTurns(active.id);
-    expect(
-      turns.find(
-        ({ requestId, snapshot }) =>
-          requestId === oldRequestId && snapshot.historicalResult === true,
-      )?.snapshot,
-    ).toMatchObject({ status: "ready", historicalResult: true });
+    expect(screen.queryByText("旧批次结束后才返回的已计费正文。")).not.toBeInTheDocument();
   }, 30_000);
 
   it("updates only ProjectSeed on answer and dispatches again only after an explicit request", async () => {
@@ -1103,13 +1442,20 @@ describe("one-sentence idea journey", () => {
     await screen.findByRole("heading", { name: "方案 3" });
     await waitFor(() => expect(screen.getAllByText("AI 已生成")).toHaveLength(3));
     await waitFor(() => expect(screen.getByRole("button", { name: "换一批" })).toBeEnabled());
+    expect(screen.queryByRole("button", { name: "增加一个悬念" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "选择方案 1" }));
+    expect(
+      await screen.findByRole("heading", { name: "你最想让这个开头接下来发生什么？" }),
+    ).toBeVisible();
     const previewBeforeAnswer = (await harness.runtime.creativeJourneys.listActive("idea"))[0]
       ?.snapshot.preview;
     const generationCountBeforeAnswer = harness.generate.mock.calls.length;
 
-    await user.click(screen.getByRole("button", { name: "增加悬念" }));
+    await user.click(screen.getByRole("button", { name: "增加一个悬念" }));
     expect(
-      await screen.findByRole("heading", { name: "这一段主要跟着怎样的主角？" }),
+      await screen.findByRole("heading", {
+        name: "为了继续写下去，主角当前最重要的特征是什么？",
+      }),
     ).toBeVisible();
     expect(harness.generate).toHaveBeenCalledTimes(generationCountBeforeAnswer);
     const active = (await harness.runtime.creativeJourneys.listActive("idea"))[0];
@@ -1118,7 +1464,7 @@ describe("one-sentence idea journey", () => {
     expect(active.snapshot.preview).toBe(previewBeforeAnswer);
     expect(active.currentState).toBe("asking_one_question");
     expect(parseProjectSeed(active.snapshot.projectSeed)?.currentDirection.values).toEqual([
-      "增加悬念",
+      "增加一个悬念",
     ]);
 
     await user.click(screen.getByRole("button", { name: "换一批" }));
@@ -1127,13 +1473,224 @@ describe("one-sentence idea journey", () => {
     );
   }, 30_000);
 
-  it("lets a reopened process end an orphaned pending request without calling the provider", async () => {
+  it.each([
+    ["reserved", "not_dispatched", "OPENING_NOT_DISPATCHED"],
+    ["bound", "not_dispatched", "OPENING_NOT_DISPATCHED"],
+    ["dispatched", "ambiguous", "OPENING_DISPATCH_AMBIGUOUS"],
+  ] as const)(
+    "reconciles an orphaned opening at startup from the %s crash point without redispatch or slot removal",
+    async (crashPoint, expectedDispatchState, expectedNoticeCode) => {
+      const harness = createTauriIdeaRuntime(false);
+      const now = harness.runtime.clock.now();
+      const journeyId = harness.runtime.ids.next();
+      const batchId = harness.runtime.ids.next();
+      const readyId = harness.runtime.ids.next();
+      const pendingId = harness.runtime.ids.next();
+      const record: CreativeJourneyRecord = Object.freeze({
+        id: journeyId,
+        kind: "idea",
+        status: "active",
+        currentState: "generation_pending",
+        projectId: null,
+        chapterId: null,
+        candidateId: null,
+        revision: 1,
+        snapshot: Object.freeze({
+          version: 1,
+          openingMode: "guided",
+          idea: "一座城市会在雨夜忘记一条街。",
+          preview: "雨落下来时，地图上先少了一条线。",
+          previewSource: "provider",
+          providerId: "ollama",
+          modelId: "local-novel",
+          noticeCode: null,
+          pendingRequestId: pendingId,
+          openingGenerationMode: "provider",
+          openingSuggestions: Object.freeze([
+            Object.freeze({
+              id: readyId,
+              batchId,
+              text: "雨落下来时，地图上先少了一条线。",
+              source: "provider",
+              status: "ready",
+              openingAngle: "immediate_action",
+              providerId: "ollama",
+              modelId: "local-novel",
+              noticeCode: null,
+            }),
+            Object.freeze({
+              id: pendingId,
+              batchId,
+              text: "",
+              source: "provider",
+              status: "pending",
+              openingAngle: "relationship_dialogue",
+              providerId: null,
+              modelId: null,
+              noticeCode: null,
+            }),
+          ]),
+          openingResultHistory: Object.freeze([]),
+          selectedOpeningId: readyId,
+          openingBatchId: batchId,
+          openingBatchFailureCount: 0,
+          provisioningPlan: null,
+          answers: Object.freeze({}),
+          skippedQuestionKeys: Object.freeze([]),
+          questionHistory: Object.freeze([]),
+          currentQuestionKey: "opening_direction",
+          projectName: "雨夜失街",
+          storySummary: "一座城市会在雨夜忘记一条街。",
+          summaryCustomized: false,
+          projectSeed: deriveIdeaProjectSeed({
+            seedId: `idea:${journeyId}`,
+            idea: "一座城市会在雨夜忘记一条街。",
+            answers: {},
+            skippedQuestionKeys: [],
+            now,
+          }),
+        }),
+        createdAt: now,
+        updatedAt: now,
+        completedAt: null,
+      });
+      await harness.runtime.modelHub.saveConnection({
+        id: "recovery-ollama",
+        providerKind: "ollama",
+        displayName: "Recovery Ollama",
+        credentialState: "missing",
+        expectedRevision: null,
+      });
+      let invocation =
+        crashPoint === "reserved"
+          ? null
+          : await harness.runtime.modelHub.startInvocation({
+              id: pendingId,
+              task: "book_start_guidance",
+              connectionId: "recovery-ollama",
+              providerKindSnapshot: "ollama",
+              modelIdSnapshot: "local-novel",
+              routeReason: "user_override",
+              attempt: 1,
+              privacyPolicy: "cloud_allowed",
+              dataDestination: "local",
+            });
+      if (crashPoint === "dispatched" && invocation !== null) {
+        invocation = await harness.runtime.modelHub.markInvocationDispatched({
+          id: invocation.id,
+          dispatchedAt: now,
+          expectedRevision: invocation.revision,
+        });
+      }
+      await harness.runtime.creativeJourneys.create(record, {
+        id: harness.runtime.ids.next(),
+        journeyId,
+        sequence: 1,
+        kind: "idea",
+        questionKey: null,
+        generationSource: null,
+        providerId: null,
+        modelId: null,
+        taskKey: "opening_guidance",
+        requestId: pendingId,
+        snapshot: Object.freeze({ status: "pending", batchId }),
+        createdAt: now,
+      });
+
+      const startupRecovery = await recoverOrphanedOpeningInvocationsAtStartup(harness.runtime);
+      expect(startupRecovery).toEqual({
+        inspectedJourneyCount: 1,
+        inspectedInvocationCount: 1,
+        terminalizedInvocationCount: crashPoint === "reserved" ? 0 : 1,
+        failedInvocationCount: 0,
+      });
+      renderJourney(harness.runtime);
+      await screen.findByRole("button", { name: "继续这次构思" });
+      await waitFor(async () => {
+        const saved = await harness.runtime.creativeJourneys.findById(journeyId);
+        expect(saved?.snapshot.pendingRequestId).toBeNull();
+      });
+      expect(harness.generate).not.toHaveBeenCalled();
+      expect(harness.cancelGeneration).not.toHaveBeenCalled();
+      const recovered = await harness.runtime.creativeJourneys.findById(journeyId);
+      expect(recovered?.snapshot.pendingRequestId).toBeNull();
+      expect(recovered?.snapshot.openingSuggestions).toHaveLength(2);
+      expect(recovered?.snapshot.openingSuggestions).toEqual([
+        expect.objectContaining({ id: readyId, status: "ready", slotNumber: 1 }),
+        expect.objectContaining({
+          id: pendingId,
+          status: "failed",
+          slotNumber: 2,
+          dispatchState: expectedDispatchState,
+          noticeCode: expectedNoticeCode,
+        }),
+      ]);
+      const recoveredInvocation = await harness.runtime.modelHub.findInvocation(pendingId);
+      if (crashPoint === "reserved") {
+        expect(recoveredInvocation).toBeNull();
+      } else {
+        expect(recoveredInvocation).toMatchObject({
+          status: "failed",
+          errorCode: expectedNoticeCode,
+          providerDispatchStartedAt: crashPoint === "dispatched" ? now : null,
+        });
+      }
+      const turns = await harness.runtime.creativeJourneys.listTurns(journeyId);
+      const recoverySnapshot = turns.at(-1)?.snapshot;
+      expect(recoverySnapshot?.status).toBe("interrupted_recovered");
+      expect(recoverySnapshot?.slots).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: pendingId,
+            slotNumber: 2,
+            dispatchState: expectedDispatchState,
+            noticeCode: expectedNoticeCode,
+          }),
+        ]),
+      );
+    },
+  );
+
+  it("recovers one succeeded, one cancelled, and one ambiguous slot without reordering or redispatch", async () => {
     const harness = createTauriIdeaRuntime(false);
     const now = harness.runtime.clock.now();
     const journeyId = harness.runtime.ids.next();
     const batchId = harness.runtime.ids.next();
     const readyId = harness.runtime.ids.next();
-    const pendingId = harness.runtime.ids.next();
+    const cancelledId = harness.runtime.ids.next();
+    const ambiguousId = harness.runtime.ids.next();
+    await harness.runtime.modelHub.saveConnection({
+      id: "mixed-recovery-ollama",
+      providerKind: "ollama",
+      displayName: "Mixed Recovery Ollama",
+      credentialState: "missing",
+      expectedRevision: null,
+    });
+    const startInvocation = async (id: string) => {
+      const queued = await harness.runtime.modelHub.startInvocation({
+        id,
+        task: "book_start_guidance",
+        connectionId: "mixed-recovery-ollama",
+        providerKindSnapshot: "ollama",
+        modelIdSnapshot: "local-novel",
+        routeReason: "user_override",
+        attempt: 1,
+        privacyPolicy: "cloud_allowed",
+        dataDestination: "local",
+      });
+      return harness.runtime.modelHub.markInvocationDispatched({
+        id,
+        dispatchedAt: now,
+        expectedRevision: queued.revision,
+      });
+    };
+    const cancelledInvocation = await startInvocation(cancelledId);
+    await harness.runtime.modelHub.finishInvocation({
+      id: cancelledId,
+      status: "cancelled",
+      expectedRevision: cancelledInvocation.revision,
+    });
+    await startInvocation(ambiguousId);
     const record: CreativeJourneyRecord = Object.freeze({
       id: journeyId,
       kind: "idea",
@@ -1146,53 +1703,76 @@ describe("one-sentence idea journey", () => {
       snapshot: Object.freeze({
         version: 1,
         openingMode: "guided",
-        idea: "一座城市会在雨夜忘记一条街。",
-        preview: "雨落下来时，地图上先少了一条线。",
+        idea: "雨夜里，三封信分别停在门前。",
+        preview: "第一封信已经被拆开。",
         previewSource: "provider",
-        providerId: "ollama",
+        providerId: "mixed-recovery-ollama",
         modelId: "local-novel",
         noticeCode: null,
-        pendingRequestId: pendingId,
+        pendingRequestId: ambiguousId,
         openingGenerationMode: "provider",
         openingSuggestions: Object.freeze([
           Object.freeze({
             id: readyId,
             batchId,
-            text: "雨落下来时，地图上先少了一条线。",
+            slotNumber: 1,
+            text: "第一封信已经被拆开。",
             source: "provider",
             status: "ready",
             openingAngle: "immediate_action",
-            providerId: "ollama",
+            providerId: "mixed-recovery-ollama",
             modelId: "local-novel",
             noticeCode: null,
+            contextTraceId: null,
+            providerInvocationId: null,
+            dispatchState: "succeeded",
           }),
           Object.freeze({
-            id: pendingId,
+            id: cancelledId,
             batchId,
+            slotNumber: 2,
             text: "",
             source: "provider",
             status: "pending",
             openingAngle: "relationship_dialogue",
-            providerId: null,
-            modelId: null,
+            providerId: "mixed-recovery-ollama",
+            modelId: "local-novel",
             noticeCode: null,
+            contextTraceId: null,
+            providerInvocationId: cancelledId,
+            dispatchState: "dispatched",
+          }),
+          Object.freeze({
+            id: ambiguousId,
+            batchId,
+            slotNumber: 3,
+            text: "",
+            source: "provider",
+            status: "pending",
+            openingAngle: "mystery_clue",
+            providerId: "mixed-recovery-ollama",
+            modelId: "local-novel",
+            noticeCode: null,
+            contextTraceId: null,
+            providerInvocationId: ambiguousId,
+            dispatchState: "dispatched",
           }),
         ]),
         openingResultHistory: Object.freeze([]),
-        selectedOpeningId: readyId,
+        selectedOpeningId: null,
         openingBatchId: batchId,
         openingBatchFailureCount: 0,
         provisioningPlan: null,
         answers: Object.freeze({}),
         skippedQuestionKeys: Object.freeze([]),
         questionHistory: Object.freeze([]),
-        currentQuestionKey: "opening_direction",
-        projectName: "雨夜失街",
-        storySummary: "一座城市会在雨夜忘记一条街。",
+        currentQuestionKey: null,
+        projectName: "雨夜三封信",
+        storySummary: "雨夜里，三封信分别停在门前。",
         summaryCustomized: false,
         projectSeed: deriveIdeaProjectSeed({
           seedId: `idea:${journeyId}`,
-          idea: "一座城市会在雨夜忘记一条街。",
+          idea: "雨夜里，三封信分别停在门前。",
           answers: {},
           skippedQuestionKeys: [],
           now,
@@ -1212,7 +1792,7 @@ describe("one-sentence idea journey", () => {
       providerId: null,
       modelId: null,
       taskKey: "opening_guidance",
-      requestId: pendingId,
+      requestId: ambiguousId,
       snapshot: Object.freeze({ status: "pending", batchId }),
       createdAt: now,
     });
@@ -1220,34 +1800,23 @@ describe("one-sentence idea journey", () => {
     const user = userEvent.setup();
     renderJourney(harness.runtime);
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
-    expect(await screen.findByText(/1 个方案尚未返回/u)).toBeVisible();
+    await waitFor(() => expect(screen.getByText("AI 已生成")).toBeVisible());
+    expect(screen.getByText("已取消")).toBeVisible();
+    expect(screen.getByText("结果不明确")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "方案 1" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "方案 2" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "方案 3" })).toBeVisible();
     expect(harness.generate).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole("button", { name: "结束未完成请求" }));
-    await waitFor(() => expect(screen.queryByText(/1 个方案尚未返回/u)).not.toBeInTheDocument());
-    expect(harness.cancelGeneration).toHaveBeenCalledWith(pendingId);
-    expect(screen.getByRole("button", { name: "换一批" })).toBeEnabled();
-    expect(screen.getByText("你已结束这次未完成请求；恢复流程不会自动重新调用 AI。")).toBeVisible();
-    expect(harness.generate).not.toHaveBeenCalled();
-
-    const saved = await harness.runtime.creativeJourneys.findById(journeyId);
-    expect(saved?.snapshot.pendingRequestId).toBeNull();
-    expect(saved?.snapshot.openingResultHistory).toEqual([
-      expect.objectContaining({
-        id: pendingId,
-        status: "failed",
-        noticeCode: "GENERATION_ABANDONED_BY_AUTHOR",
-      }),
+    expect(harness.cancelGeneration).not.toHaveBeenCalled();
+    const recovered = await harness.runtime.creativeJourneys.findById(journeyId);
+    expect(recovered?.snapshot.openingSuggestions).toEqual([
+      expect.objectContaining({ id: readyId, slotNumber: 1, dispatchState: "succeeded" }),
+      expect.objectContaining({ id: cancelledId, slotNumber: 2, dispatchState: "cancelled" }),
+      expect.objectContaining({ id: ambiguousId, slotNumber: 3, dispatchState: "ambiguous" }),
     ]);
-    const turns = await harness.runtime.creativeJourneys.listTurns(journeyId);
-    expect(turns.at(-1)?.snapshot).toMatchObject({
-      status: "abandoned",
-      requestIds: [pendingId],
-      batchId,
-    });
   });
 
-  it("archives a paid result that returns after abandonment without replacing the current choice", async () => {
+  it("keeps an interrupted paid slot ambiguous after replacement without changing the current choice", async () => {
     const harness = createTauriIdeaRuntime(false);
     const user = userEvent.setup();
     const first = renderJourney(harness.runtime);
@@ -1278,8 +1847,10 @@ describe("one-sentence idea journey", () => {
     first.unmount();
     renderJourney(harness.runtime);
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
-    await user.click(screen.getByRole("button", { name: "结束未完成请求" }));
+    await waitFor(() => expect(screen.getByText("结果不明确")).toBeVisible());
     await waitFor(() => expect(screen.getByRole("button", { name: "换一批" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "换一批" }));
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(6));
     const alternativeChoice = screen.getAllByRole("button", {
       name: /^选择方案 \d+$/u,
     })[0];
@@ -1289,24 +1860,36 @@ describe("one-sentence idea journey", () => {
     const selectedId = selectedBeforeReturn?.snapshot.selectedOpeningId;
     const selectedPreview = selectedBeforeReturn?.snapshot.preview;
 
-    resolveAnswer({ text: "这是一份结束等待后才返回、已经计费的正文。", usage: null });
+    await act(async () => {
+      resolveAnswer({ text: "这是一份结束等待后才返回、已经计费的正文。", usage: null });
+      await Promise.resolve();
+    });
     await waitFor(async () => {
       const latest = await harness.runtime.creativeJourneys.findById(active.id);
       const history = latest?.snapshot.openingResultHistory as
-        readonly Readonly<{ id: string; status: string; text: string }>[] | undefined;
+        | readonly Readonly<{
+            id: string;
+            status: string;
+            text: string;
+            dispatchState: string;
+          }>[]
+        | undefined;
       expect(history?.find(({ id }) => id === requestId)).toMatchObject({
-        status: "ready",
-        text: "这是一份结束等待后才返回、已经计费的正文。",
+        status: "failed",
+        text: "",
+        dispatchState: "ambiguous",
       });
       expect(latest?.snapshot.selectedOpeningId).toBe(selectedId);
       expect(latest?.snapshot.preview).toBe(selectedPreview);
     });
-    expect(harness.generate).toHaveBeenCalledTimes(3);
+    expect(harness.generate).toHaveBeenCalledTimes(6);
 
     await user.click(screen.getByRole("button", { name: "返回创作首页" }));
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
     expect(await screen.findByText("较早请求返回的结果")).toBeVisible();
-    expect(screen.getByText("这是一份结束等待后才返回、已经计费的正文。")).toBeVisible();
+    expect(
+      screen.queryByText("这是一份结束等待后才返回、已经计费的正文。"),
+    ).not.toBeInTheDocument();
     const reloaded = await harness.runtime.creativeJourneys.findById(active.id);
     expect(reloaded?.snapshot.selectedOpeningId).toBe(selectedId);
     expect(reloaded?.snapshot.preview).toBe(selectedPreview);

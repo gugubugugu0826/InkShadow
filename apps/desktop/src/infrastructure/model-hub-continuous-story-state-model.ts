@@ -105,6 +105,20 @@ export class ModelHubContinuousStoryStateModel implements ContinuousStoryStateMo
             );
           }
         },
+        onFinalBeforeProviderDispatch: async (selection) => {
+          await input.assertSourceCurrent?.();
+          await assertStructuredOutput(this.dependencies, selection.catalogEntryId, true);
+          await input.assertProjectPrivacyCurrent?.();
+          if (
+            input.projectPrivacy?.requiresVerifiedLocal === true &&
+            !selection.localOnlyEligible
+          ) {
+            throw new ModelHubExecutionError(
+              "PRIVATE_CHAPTER_LOCAL_ONLY",
+              PROJECT_CONTEXT_LOCAL_ONLY_MESSAGE,
+            );
+          }
+        },
       });
     } catch (cause: unknown) {
       if (isPreDispatchUnavailable(cause)) {

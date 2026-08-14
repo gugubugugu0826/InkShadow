@@ -34,87 +34,63 @@ describe("AcceptedChapterPipelineWorker", () => {
       status: "succeeded",
       attempt: 2,
       progress: {
-        step: "pipeline.outcome.search-summary-state-causal",
+        step: "pipeline.outcome.search-causal",
         completedUnits: 4,
         totalUnits: 4,
       },
     });
     expect(harness.search).toHaveBeenCalledTimes(2);
-    expect(harness.summary).toHaveBeenCalledTimes(1);
-    expect(harness.storyState).toHaveBeenCalledTimes(1);
+    expect(harness.summary).not.toHaveBeenCalled();
+    expect(harness.storyState).not.toHaveBeenCalled();
     expect(harness.causal).toHaveBeenCalledTimes(1);
   });
 
-  it("retries transient provider stages without repeating disabled local stages", async () => {
+  it("retires a legacy provider-only queued task without dispatch", async () => {
     const harness = createHarness();
-    harness.summary.mockResolvedValueOnce({
-      status: "skipped",
-      code: "CHAPTER_SUMMARY_MODEL_UNAVAILABLE",
-      message: "No summary provider is currently available.",
-      projectId: PROJECT_ID,
-      chapterId: CHAPTER_ID,
-      versionId: VERSION_ID,
-      fact: null,
-      replacedFactIds: [],
-      invocation: null,
-    } as never);
-    harness.storyState.mockResolvedValueOnce({
-      status: "skipped",
-      detectedCount: 0,
-      needsConfirmationCount: 0,
-      reversibleCount: 0,
-      skippedTasks: [{ task: "character_extraction", code: "MODEL_UNAVAILABLE" }],
-      providerInvocations: [],
-    } as never);
-    await runAcceptedChapterPipeline(harness.runtime, {
-      ...acceptedInput(),
-      source: "historical_backfill",
-      runSearch: false,
-      runChapterSummary: true,
-      runStoryState: true,
-      runCausalProjection: false,
-    });
-    expect((await harness.store.load()).tasks[0]).toMatchObject({
-      status: "waiting_retry",
-      failure: { causeCode: "PIPELINE_STAGES_SUMMARY_STATE" },
+    const supplementalKey = `story.accepted-version:${VERSION_ID}:backfill:v2:summary:1`;
+    await harness.store.enqueueTask({
+      id: uuid(20),
+      type: "story.accepted-version.process",
+      idempotencyKey: supplementalKey,
+      metadata: {
+        ...pipelineMetadata(),
+        source: "historical_backfill",
+        runSearch: false,
+        runChapterSummary: true,
+        runStoryState: false,
+        runCausalProjection: false,
+        pipelineIdempotencyKey: supplementalKey,
+        pipelineStage: "chapter_summary",
+        pipelineStageRuleVersion: 2,
+        pipelineStageGeneration: 1,
+      },
+      priority: 75,
+      maxAttempts: 3,
+      now: NOW,
     });
 
-    harness.setNow("2026-08-08T00:00:06.000Z");
-    const worker = new AcceptedChapterPipelineWorker(harness.runtime);
+    const worker = new AcceptedChapterPipelineWorker(harness.runtime, {
+      queuedGraceMilliseconds: 0,
+    });
     await expect(worker.runDueTasksNow()).resolves.toBe(1);
 
     expect(harness.search).not.toHaveBeenCalled();
     expect(harness.causal).not.toHaveBeenCalled();
-    expect(harness.summary).toHaveBeenCalledTimes(2);
-    expect(harness.storyState).toHaveBeenCalledTimes(2);
+    expect(harness.summary).not.toHaveBeenCalled();
+    expect(harness.storyState).not.toHaveBeenCalled();
     expect((await harness.store.load()).tasks[0]).toMatchObject({
-      status: "succeeded",
-      progress: { step: "pipeline.outcome.summary-state" },
+      status: "cancelled",
     });
   });
 
-  it("recovers an atomic manual-retry scope after restart without repeating terminal model stages", async () => {
+  it("recovers an atomic local retry after restart without provider dispatch", async () => {
     const harness = createHarness();
-    harness.summary.mockResolvedValueOnce({
-      status: "skipped",
-      code: "CHAPTER_SUMMARY_AUTOMATION_PAUSED",
-      message: "Automatic summaries are paused.",
-      projectId: PROJECT_ID,
-      chapterId: CHAPTER_ID,
-      versionId: VERSION_ID,
-      fact: null,
-      replacedFactIds: [],
-      invocation: null,
-    } as never);
-    harness.storyState.mockRejectedValueOnce(
-      Object.assign(new Error("The immutable source is no longer current."), {
-        details: { reasonCode: "STORY_STATE_SOURCE_NOT_CURRENT" },
-      }),
-    );
     harness.causal.mockRejectedValueOnce(new Error("Causal projection is unavailable."));
     await runAcceptedChapterPipeline(harness.runtime, {
       ...acceptedInput(),
       source: "historical_backfill",
+      runChapterSummary: true,
+      runStoryState: true,
     });
     const waiting = (await harness.store.load()).tasks[0];
     if (waiting?.failure === null || waiting?.failure === undefined) {
@@ -137,16 +113,16 @@ describe("AcceptedChapterPipelineWorker", () => {
     await expect(restartedWorker.runDueTasksNow()).resolves.toBe(1);
 
     expect(harness.search).toHaveBeenCalledTimes(1);
-    expect(harness.summary).toHaveBeenCalledTimes(1);
-    expect(harness.storyState).toHaveBeenCalledTimes(1);
+    expect(harness.summary).not.toHaveBeenCalled();
+    expect(harness.storyState).not.toHaveBeenCalled();
     expect(harness.causal).toHaveBeenCalledTimes(2);
     expect((await harness.store.load()).tasks[0]).toMatchObject({
       status: "succeeded",
-      progress: { step: "pipeline.outcome.v2.search-c.summary-d.state-n.causal-c" },
+      progress: { step: "pipeline.outcome.search-causal" },
     });
   });
 
-  it("keeps legacy queued manual retries recoverable with a conservative full rerun", async () => {
+  it("recovers legacy queued Candidate retries without replaying provider stages", async () => {
     const harness = createHarness();
     harness.search.mockRejectedValueOnce(new Error("Search failed before the legacy retry."));
     await runAcceptedChapterPipeline(harness.runtime, acceptedInput());
@@ -164,8 +140,8 @@ describe("AcceptedChapterPipelineWorker", () => {
     await expect(restartedWorker.runDueTasksNow()).resolves.toBe(1);
 
     expect(harness.search).toHaveBeenCalledTimes(2);
-    expect(harness.summary).toHaveBeenCalledTimes(2);
-    expect(harness.storyState).toHaveBeenCalledTimes(2);
+    expect(harness.summary).not.toHaveBeenCalled();
+    expect(harness.storyState).not.toHaveBeenCalled();
     expect(harness.causal).toHaveBeenCalledTimes(2);
     expect((await harness.store.load()).tasks[0]?.status).toBe("succeeded");
   });
@@ -209,13 +185,17 @@ describe("AcceptedChapterPipelineWorker", () => {
     expect(harness.causal).toHaveBeenCalledTimes(callsBeforeRecovery.causal);
   });
 
-  it("gives a fresh queued foreground task a grace window before crash recovery", async () => {
+  it("recovers a queued Candidate task with legacy model flags without provider work", async () => {
     const harness = createHarness();
     await harness.store.enqueueTask({
       id: uuid(30),
       type: "story.accepted-version.process",
       idempotencyKey: `story.accepted-version:${VERSION_ID}`,
-      metadata: pipelineMetadata(),
+      metadata: {
+        ...pipelineMetadata(),
+        runChapterSummary: true,
+        runStoryState: true,
+      },
       priority: 75,
       maxAttempts: 3,
       now: NOW,
@@ -228,6 +208,10 @@ describe("AcceptedChapterPipelineWorker", () => {
     harness.setNow("2026-08-08T00:00:31.000Z");
     await expect(worker.runDueTasksNow()).resolves.toBe(1);
     expect((await harness.store.load()).tasks[0]?.status).toBe("succeeded");
+    expect(harness.search).toHaveBeenCalledOnce();
+    expect(harness.causal).toHaveBeenCalledOnce();
+    expect(harness.summary).not.toHaveBeenCalled();
+    expect(harness.storyState).not.toHaveBeenCalled();
   });
 
   it("recovers an old due pipeline task hidden behind more than 200 newer UI rows", async () => {
@@ -327,7 +311,7 @@ describe("AcceptedChapterPipelineWorker", () => {
     ).toBeNull();
   });
 
-  it("restores manual-save analysis preferences from durable task metadata", async () => {
+  it("normalizes legacy manual-save provider flags to false during recovery", async () => {
     const harness = createHarness();
     await harness.store.enqueueTask({
       id: uuid(60),
@@ -351,7 +335,7 @@ describe("AcceptedChapterPipelineWorker", () => {
     expect(retryInput(task)).toMatchObject({
       source: "manual_save",
       runChapterSummary: false,
-      runStoryState: true,
+      runStoryState: false,
     });
     expect(
       retryInput({ ...task, metadata: { ...task.metadata, runStoryState: "yes" } }),
@@ -370,7 +354,7 @@ describe("AcceptedChapterPipelineWorker", () => {
     ).toBeNull();
   });
 
-  it("restores a stage-scoped supplemental identity instead of falling back to the version key", async () => {
+  it("rejects a retired provider-only supplemental identity before dispatch", async () => {
     const harness = createHarness();
     const supplementalKey = `story.accepted-version:${VERSION_ID}:backfill:v2:summary:1`;
     await harness.store.enqueueTask({
@@ -396,17 +380,7 @@ describe("AcceptedChapterPipelineWorker", () => {
     const task = (await harness.store.load()).tasks[0];
     if (task === undefined) throw new Error("Expected supplemental task.");
 
-    expect(retryInput(task)).toMatchObject({
-      source: "historical_backfill",
-      pipelineIdempotencyKey: supplementalKey,
-      pipelineStage: "chapter_summary",
-      pipelineStageRuleVersion: 2,
-      pipelineStageGeneration: 1,
-      runSearch: false,
-      runChapterSummary: true,
-      runStoryState: false,
-      runCausalProjection: false,
-    });
+    expect(retryInput(task)).toBeNull();
     expect(
       retryInput({
         ...task,
@@ -481,7 +455,7 @@ describe("AcceptedChapterPipelineWorker", () => {
           updatedAt: task.updatedAt,
         },
       }),
-    ).not.toBeNull();
+    ).toBeNull();
   });
 
   it("limits historical backfill recovery to five chapters per worker run", async () => {

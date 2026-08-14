@@ -73,8 +73,8 @@ import type {
   GenerationBudgetPolicy,
   GenerationRun,
 } from "../infrastructure/generation-governance-store";
-import type { ChapterSummaryGenerationReceipt } from "../infrastructure/chapter-summary-service";
 import {
+  createLocalCandidateAcceptancePipelineInput,
   ensureAcceptedChapterPipelineTask,
   runAcceptedChapterPipeline,
   type AcceptedChapterPipelineInput,
@@ -144,7 +144,7 @@ const versionReasonLabels: Record<ReturnType<ChapterVersion["toSnapshot"]>["reas
   created: "创建",
   autosave: "自动保存",
   manual: "手动保存",
-  candidate_accept: "接受 AI 建议",
+  candidate_accept: "接受建议",
   recovery: "恢复版本",
   import: "导入",
 };
@@ -342,22 +342,13 @@ function useCompactEditorLayout(): CompactEditorLayout {
 }
 
 type StoryStateUpdateNotice =
-  | Readonly<{ state: "idle" | "running" }>
+  | Readonly<{ state: "idle" }>
   | Readonly<{
       state: "ready";
       detectedCount: number;
       needsConfirmationCount: number;
       reversibleCount: number;
       skippedTaskCount: number;
-    }>
-  | Readonly<{ state: "failed"; message: string }>;
-
-type ChapterSummaryNotice =
-  | Readonly<{ state: "idle" | "running" }>
-  | Readonly<{
-      state: "finished";
-      status: ChapterSummaryGenerationReceipt["status"];
-      message: string;
     }>;
 
 function selectEditorCandidate(
@@ -445,6 +436,9 @@ export function EditorPage() {
   const [versionToRestore, setVersionToRestore] = useState<ChapterVersion | null>(null);
   const [versionRestoreBusy, setVersionRestoreBusy] = useState(false);
   const [candidate, setCandidate] = useState<AiCandidate | null>(null);
+  const [candidatePresentation, setCandidatePresentation] = useState<"ai" | "local" | "unknown">(
+    "unknown",
+  );
   const [candidateBusy, setCandidateBusy] = useState(false);
   const [candidateReviewOpen, setCandidateReviewOpen] = useState(false);
   const [candidateDiff, setCandidateDiff] = useState<CandidateTextDiff | null>(null);
@@ -539,9 +533,6 @@ export function EditorPage() {
     [editorLayoutRevision],
   );
   const [storyStateUpdate, setStoryStateUpdate] = useState<StoryStateUpdateNotice>({
-    state: "idle",
-  });
-  const [chapterSummaryUpdate, setChapterSummaryUpdate] = useState<ChapterSummaryNotice>({
     state: "idle",
   });
   const [privacyChangeTarget, setPrivacyChangeTarget] = useState<ChapterPrivacyMode | null>(null);
@@ -844,6 +835,8 @@ export function EditorPage() {
     setCandidateRevisionSaved(false);
     setCandidateReviewConflict(null);
     setCandidateCopySaved(false);
+    setCandidate(null);
+    setCandidatePresentation("unknown");
     setSelectionRewriteBusy(false);
     setSelectionRewriteContext(null);
     setEditorNotice(null);
@@ -917,7 +910,41 @@ export function EditorPage() {
       projectId,
       chapterId,
     );
+    let presentation: "ai" | "local" | "unknown" =
+      candidateSelection.candidate === null
+        ? "unknown"
+        : candidateSelection.candidate.toSnapshot().source === "generate"
+          ? "unknown"
+          : "ai";
+    if (candidateSelection.candidate?.toSnapshot().source === "generate") {
+      try {
+        const [journey, trace] = await Promise.all([
+          runtime.creativeJourneys.findById(candidateSelection.candidate.id),
+          runtime.contextTraces.findByOutputCandidateId(candidateSelection.candidate.id),
+        ]);
+        if (!isCurrentLoad()) return;
+        if (
+          journey?.kind === "idea" &&
+          journey.status === "completed" &&
+          journey.candidateId === candidateSelection.candidate.id
+        ) {
+          presentation =
+            journey.snapshot.previewSource === "local_fallback"
+              ? trace === null
+                ? "local"
+                : "unknown"
+              : journey.snapshot.previewSource === "provider"
+                ? "ai"
+                : "unknown";
+        } else if (trace !== null) {
+          presentation = "ai";
+        }
+      } catch {
+        presentation = "unknown";
+      }
+    }
     setCandidate(candidateSelection.candidate);
+    setCandidatePresentation(presentation);
 
     if (draft !== null && draft.baseRevision !== loadedChapter.revision) {
       setContent(loadedChapter.content);
@@ -1119,12 +1146,8 @@ export function EditorPage() {
         return;
       }
 
-      const continuousState = (runtime.story as Partial<RuntimeStory>).continuousState;
-      const chapterSummaries = (runtime.story as Partial<RuntimeStory>).chapterSummaries;
-      const runStoryState =
-        continuousState?.isAutomaticOnManualSaveEnabled(saved.value.chapter.projectId) ?? false;
-      const runChapterSummary =
-        chapterSummaries?.isAutomaticOnManualSaveEnabled(saved.value.chapter.projectId) ?? false;
+      // Legacy project preferences are not authorization to send正文. A manual
+      // save always registers only the local accepted-version refresh.
       const savedVersion = saved.value.version.toSnapshot();
       const pipelineInput: AcceptedChapterPipelineInput = {
         projectId: savedVersion.projectId,
@@ -1132,12 +1155,11 @@ export function EditorPage() {
         versionId: savedVersion.id,
         source: "manual_save",
         acceptedCharacterCount: snapshot.length,
-        runChapterSummary,
-        runStoryState,
+        runChapterSummary: false,
+        runStoryState: false,
       };
 
-      setStoryStateUpdate(runStoryState ? { state: "running" } : { state: "idle" });
-      setChapterSummaryUpdate(runChapterSummary ? { state: "running" } : { state: "idle" });
+      setStoryStateUpdate({ state: "idle" });
 
       try {
         // Persist the idempotent recovery task before returning from the save.
@@ -1148,51 +1170,19 @@ export function EditorPage() {
         const message =
           cause instanceof Error ? cause.message : "后台整理任务暂时无法加入本地队列。";
         setEditorNotice(`正文已安全保存；${message}`);
-        if (runStoryState) {
-          setStoryStateUpdate({ state: "failed", message });
-        }
-        if (runChapterSummary) {
-          setChapterSummaryUpdate({ state: "finished", status: "failed", message });
-        }
         return;
       }
 
       void runAcceptedChapterPipeline(runtime, pipelineInput)
         .then((receipt) => {
-          if (runStoryState) {
-            if (receipt.storyState.status === "failed") {
-              setStoryStateUpdate({ state: "failed", message: receipt.storyState.message });
-            } else {
-              setStoryStateUpdate({
-                state: "ready",
-                detectedCount: receipt.storyStateMetrics?.detectedCount ?? 0,
-                needsConfirmationCount: receipt.storyStateMetrics?.needsConfirmationCount ?? 0,
-                reversibleCount: receipt.storyStateMetrics?.reversibleCount ?? 0,
-                skippedTaskCount:
-                  receipt.storyStateMetrics?.skippedTaskCount ??
-                  (receipt.storyState.status === "skipped" ? 1 : 0),
-              });
-            }
-          }
-          if (runChapterSummary) {
-            setChapterSummaryUpdate({
-              state: "finished",
-              status:
-                receipt.chapterSummaryStatus ??
-                (receipt.chapterSummary.status === "failed" ? "failed" : "skipped"),
-              message: receipt.chapterSummary.message,
-            });
+          if (receipt.status === "partially_completed") {
+            setEditorNotice("正文已安全保存；部分本地搜索或故事关联暂未更新，可在任务中心重试。");
           }
         })
         .catch((cause: unknown) => {
           const message =
-            cause instanceof Error ? cause.message : "后台故事资料整理暂时失败，可稍后重试。";
-          if (runStoryState) {
-            setStoryStateUpdate({ state: "failed", message });
-          }
-          if (runChapterSummary) {
-            setChapterSummaryUpdate({ state: "finished", status: "failed", message });
-          }
+            cause instanceof Error ? cause.message : "本地搜索与故事关联暂时失败，可稍后重试。";
+          setEditorNotice(`正文已安全保存；本地派生暂未完成：${message}`);
         });
     },
     [loadVersions, runtime],
@@ -2383,7 +2373,7 @@ export function EditorPage() {
     setCandidateReviewComparedContent(candidate.content);
     if (baseVersion === undefined) {
       setCandidateReviewError(
-        "AI 建议所依据的稳定版本已经不可用；为避免覆盖正文，当前不能接受这份建议。",
+        `${candidateSuggestionLabel}所依据的稳定版本已经不可用；为避免覆盖正文，当前不能接受这份建议。`,
       );
       setCandidateReviewOpen(true);
       return;
@@ -2391,7 +2381,9 @@ export function EditorPage() {
     const baseline = baseVersion.toSnapshot();
     const materialized = materializeCandidateDraft(candidate, baseline, candidate.content);
     if (materialized === null) {
-      setCandidateReviewError("AI 建议的应用位置已失效；为避免改错位置，当前不能接受这份建议。");
+      setCandidateReviewError(
+        `${candidateSuggestionLabel}的应用位置已失效；为避免改错位置，当前不能接受这份建议。`,
+      );
       setCandidateReviewOpen(true);
       return;
     }
@@ -2425,7 +2417,7 @@ export function EditorPage() {
     if (baseVersion === undefined) {
       setCandidateDiff(null);
       setCandidateReviewError(
-        "AI 建议所依据的稳定版本已经不可用；为避免覆盖正文，当前不能接受这份建议。",
+        `${candidateSuggestionLabel}所依据的稳定版本已经不可用；为避免覆盖正文，当前不能接受这份建议。`,
       );
       return;
     }
@@ -2433,7 +2425,9 @@ export function EditorPage() {
     const materialized = materializeCandidateDraft(candidate, baseline, candidateReviewDraft);
     if (materialized === null) {
       setCandidateDiff(null);
-      setCandidateReviewError("AI 建议的应用位置已失效；为避免改错位置，当前不能接受这份建议。");
+      setCandidateReviewError(
+        `${candidateSuggestionLabel}的应用位置已失效；为避免改错位置，当前不能接受这份建议。`,
+      );
       return;
     }
     const diff = diffCandidateContent(baseline.content, materialized);
@@ -2472,7 +2466,9 @@ export function EditorPage() {
     }
     setCandidate(result.value);
     setCandidateRevisionSaved(true);
-    setEditorNotice("建议修改已保存在本机，仍是隔离的 AI 建议；稳定正文没有改变。");
+    setEditorNotice(
+      `建议修改已保存在本机，仍是隔离的${candidateSuggestionLabel}；稳定正文没有改变。`,
+    );
   }
 
   async function acceptCandidate(strategy: CandidateApplicationStrategy): Promise<void> {
@@ -2495,13 +2491,14 @@ export function EditorPage() {
     }
     const acceptedVersion = result.value.version.toSnapshot();
     const nextContent = result.value.chapter.content;
-    const pipelineInput: AcceptedChapterPipelineInput = {
-      projectId: acceptedVersion.projectId,
-      chapterId: acceptedVersion.chapterId,
-      versionId: acceptedVersion.id,
-      source: "candidate_accept",
-      acceptedCharacterCount: nextContent.length,
-    };
+    const pipelineInput: AcceptedChapterPipelineInput = createLocalCandidateAcceptancePipelineInput(
+      {
+        projectId: acceptedVersion.projectId,
+        chapterId: acceptedVersion.chapterId,
+        versionId: acceptedVersion.id,
+        acceptedCharacterCount: nextContent.length,
+      },
+    );
     let pipelineRegistrationError: string | null = null;
     try {
       // In Tauri this confirms the task created atomically with Candidate
@@ -2563,48 +2560,33 @@ export function EditorPage() {
       rejectedChangeCount,
     });
     if (pipelineRegistrationError !== null) {
-      setStoryStateUpdate({ state: "failed", message: pipelineRegistrationError });
-      setChapterSummaryUpdate({
-        state: "finished",
-        status: "failed",
-        message: pipelineRegistrationError,
-      });
+      setStoryStateUpdate({ state: "idle" });
       setEditorNotice(
-        `AI 建议已安全写入正文和不可变版本；后台整理任务登记失败：${pipelineRegistrationError}`,
+        `${candidateSuggestionLabel}已安全写入正文和不可变版本；本地搜索与故事关联任务登记失败：${pipelineRegistrationError}`,
       );
       await loadVersions();
       return;
     }
-    setStoryStateUpdate({ state: "running" });
-    setChapterSummaryUpdate({ state: "running" });
+    setStoryStateUpdate({ state: "idle" });
     void runAcceptedChapterPipeline(runtime, pipelineInput)
       .then((receipt) => {
-        if (receipt.storyState.status === "failed" || receipt.storyStateMetrics === null) {
-          setStoryStateUpdate({ state: "failed", message: receipt.storyState.message });
-        } else {
-          setStoryStateUpdate({ state: "ready", ...receipt.storyStateMetrics });
-        }
-        setChapterSummaryUpdate({
-          state: "finished",
-          status: receipt.chapterSummaryStatus ?? "failed",
-          message: receipt.chapterSummary.message,
-        });
         if (receipt.status === "partially_completed") {
           setEditorNotice(
-            "AI 建议已安全写入新版本；部分故事记忆或索引暂未更新，可在任务中心重试。",
+            `${candidateSuggestionLabel}已安全写入新版本；部分本地搜索或故事关联暂未更新，可在任务中心重试。`,
           );
         }
       })
       .catch((cause: unknown) => {
         const message =
-          cause instanceof Error ? cause.message : "后台故事记忆更新暂时失败，可稍后重试。";
-        setStoryStateUpdate({ state: "failed", message });
-        setChapterSummaryUpdate({ state: "finished", status: "failed", message });
+          cause instanceof Error ? cause.message : "本地搜索与故事关联暂时失败，可稍后重试。";
+        setEditorNotice(
+          `${candidateSuggestionLabel}已安全写入正文和不可变版本；本地派生暂未完成：${message}`,
+        );
       });
     setEditorNotice(
       strategy.kind === "apply_changes"
         ? "已按逐项决定创建新的稳定版本；可在本次会话撤销，原稳定版本仍保留在版本历史。"
-        : "AI 建议已按所选方式写入新的稳定版本；原稳定版本仍保留在版本历史。",
+        : `${candidateSuggestionLabel}已按所选方式写入新的稳定版本；原稳定版本仍保留在版本历史。`,
     );
     await loadVersions();
   }
@@ -2620,7 +2602,7 @@ export function EditorPage() {
       return;
     }
     setCandidateBusy(true);
-    const copyTitle = `${chapter.title.slice(0, 190)}（AI 建议副本）`;
+    const copyTitle = `${chapter.title.slice(0, 190)}（${candidateSuggestionLabel}副本）`;
     const baseVersion =
       candidate.baseVersionId === null
         ? undefined
@@ -2635,7 +2617,9 @@ export function EditorPage() {
           );
     if (copyContent === null) {
       setCandidateBusy(false);
-      setError(new Error("AI 建议的原始应用位置已失效，无法安全另存完整草稿。"));
+      setError(
+        new Error(`${candidateSuggestionLabel}的原始应用位置已失效，无法安全另存完整草稿。`),
+      );
       return;
     }
     const created = await runtime.useCases.createChapter.execute({
@@ -2652,7 +2636,9 @@ export function EditorPage() {
     await loadChapters();
     setCandidateCopySaved(true);
     setError(null);
-    setEditorNotice(`AI 建议已另存为新章节“${copyTitle}”，当前稳定正文和建议记录均未改变。`);
+    setEditorNotice(
+      `${candidateSuggestionLabel}已另存为新章节“${copyTitle}”，当前稳定正文和建议记录均未改变。`,
+    );
   }
 
   async function restoreSelectedVersion(): Promise<void> {
@@ -2712,6 +2698,8 @@ export function EditorPage() {
         versionId: result.value.version.id,
         source: "version_restore",
         acceptedCharacterCount: result.value.chapter.content.length,
+        runChapterSummary: false,
+        runStoryState: false,
       }).catch(() => {
         setEditorNotice("恢复版本与正文已安全保存；故事资料整理暂未完成，可在任务与通知中重试。");
       });
@@ -2836,6 +2824,14 @@ export function EditorPage() {
   const privateGenerationBlocked = normalizedGenerationError?.code === "PRIVATE_CHAPTER_LOCAL_ONLY";
   const readonly = project?.status !== "active";
   const candidateReady = candidate?.status === "ready";
+  const candidateSuggestionLabel =
+    candidatePresentation === "local"
+      ? "本地草案"
+      : candidatePresentation === "ai"
+        ? "AI 建议"
+        : "建议";
+  const candidateVersionLabel = `${candidateSuggestionLabel}版本`;
+  const candidateActionGap = candidatePresentation === "ai" ? " " : "";
   const candidateIncomplete = candidate?.toSnapshot().incomplete ?? false;
   const canGenerateCandidate =
     candidate === null || candidate.status === "accepted" || candidate.status === "rejected";
@@ -2901,7 +2897,7 @@ export function EditorPage() {
     }
     if (candidateReady) {
       return {
-        label: "查看 AI 建议版本",
+        label: `查看${candidateActionGap}${candidateVersionLabel}`,
         disabled: candidateBusy,
         run: () => {
           setAssistantOpen(true);
@@ -3405,6 +3401,7 @@ export function EditorPage() {
                 </div>
                 <Button
                   variant="ghost"
+                  size="lg"
                   aria-label={compactEditorLayout ? "关闭 AI 创作助手" : "收起 AI 创作助手"}
                   aria-expanded={assistantOpen}
                   onClick={() => setAssistantOpen(false)}
@@ -3501,13 +3498,6 @@ export function EditorPage() {
                 </section>
               )}
 
-              {storyStateUpdate.state === "running" && (
-                <InlineAlert
-                  tone="info"
-                  title="正在整理本章变化"
-                  description="正文已安全保存。墨影正在后台查找人物、世界、伏笔和剧情线变化；不会自动写成正式设定。"
-                />
-              )}
               {storyStateUpdate.state === "ready" && (
                 <InlineAlert
                   tone={storyStateUpdate.needsConfirmationCount > 0 ? "warning" : "info"}
@@ -3524,41 +3514,6 @@ export function EditorPage() {
                   查看并处理本章变化
                 </Link>
               )}
-              {storyStateUpdate.state === "failed" && (
-                <InlineAlert
-                  tone="warning"
-                  title="本章变化暂未整理"
-                  description={`${storyStateUpdate.message} 你可以继续写作，正文保存不受影响。`}
-                />
-              )}
-              {chapterSummaryUpdate.state === "running" && (
-                <InlineAlert
-                  tone="info"
-                  title="正在更新章节摘要"
-                  description="正文已经安全保存。本次仅因你启用了“手动保存后更新摘要”而调用一次长程记忆压缩；自动保存不会调用模型。"
-                />
-              )}
-              {chapterSummaryUpdate.state === "finished" && (
-                <InlineAlert
-                  tone={
-                    chapterSummaryUpdate.status === "generated" ||
-                    chapterSummaryUpdate.status === "already_current"
-                      ? "info"
-                      : "warning"
-                  }
-                  title={
-                    chapterSummaryUpdate.status === "generated"
-                      ? "章节摘要已更新"
-                      : chapterSummaryUpdate.status === "already_current"
-                        ? "章节摘要已是最新"
-                        : chapterSummaryUpdate.status === "skipped"
-                          ? "本次未生成章节摘要"
-                          : "章节摘要更新失败"
-                  }
-                  description={`${chapterSummaryUpdate.message} 正文和正式设定均未被修改。`}
-                />
-              )}
-
               {candidateBusy && usesNativeModel ? (
                 selectionRewriteBusy || generationPlan === null ? (
                   <div className="candidate-content" aria-live="polite">
@@ -3660,7 +3615,7 @@ export function EditorPage() {
                         }
                         description={
                           candidateQualityGate.outcome === "block"
-                            ? "本机规则发现句段重复超过安全阈值。建议重新生成；当前内容仍只是一份隔离的 AI 建议，不会自动进入正文。"
+                            ? `本机规则发现句段重复超过安全阈值。建议重新生成；当前内容仍只是一份隔离的${candidateSuggestionLabel}，不会自动进入正文。`
                             : "本机质量关卡发现需要留意的重复迹象。请在比较界面逐项决定。"
                         }
                       />
@@ -3717,7 +3672,9 @@ export function EditorPage() {
                         disabled={!editorClean}
                         onClick={openCandidateReview}
                       >
-                        {candidateIncomplete ? "保留当前部分并比较" : "比较 AI 建议"}
+                        {candidateIncomplete
+                          ? "保留当前部分并比较"
+                          : `比较${candidateActionGap}${candidateSuggestionLabel}`}
                       </Button>
                       {candidateIncomplete && (
                         <Button
@@ -3750,7 +3707,7 @@ export function EditorPage() {
               )}
               {!editorClean && (
                 <p className="candidate-panel__hint" role="status">
-                  请先保存当前正文，再处理 AI 建议版本。
+                  请先保存当前正文，再处理{candidateVersionLabel}。
                 </p>
               )}
               {(canGenerateCandidate || candidateIncomplete) && (
@@ -3938,13 +3895,13 @@ export function EditorPage() {
                     onClick={() => void generateCandidate()}
                   >
                     {candidate?.status === "accepted"
-                      ? "继续创作"
+                      ? "生成续写建议"
                       : candidate?.status === "rejected"
                         ? "重新生成"
                         : usesNativeModel
                           ? content.trim().length === 0
                             ? "生成开头"
-                            : "继续创作"
+                            : "生成续写建议"
                           : "生成示例建议"}
                   </Button>
                 </>
@@ -4277,7 +4234,7 @@ export function EditorPage() {
             setCandidateReviewOpen(open);
           }
         }}
-        title="比较 AI 建议与正文"
+        title={`比较${candidateActionGap}${candidateSuggestionLabel}与正文`}
         description="先把建议改到满意，再逐处决定或选择应用位置；点击创建版本前不会写入正文。"
         footer={
           <>
@@ -4316,7 +4273,10 @@ export function EditorPage() {
             <section className="candidate-review-dialog__editor">
               <div className="candidate-review-dialog__editor-heading">
                 <div>
-                  <h3>可编辑的 AI 建议</h3>
+                  <h3>
+                    可编辑的{candidateActionGap}
+                    {candidateSuggestionLabel}
+                  </h3>
                   <p>这里是临时建议草稿；采用前不会写进正文或创建正式版本。</p>
                 </div>
                 <Badge
@@ -4334,7 +4294,7 @@ export function EditorPage() {
                 </Badge>
               </div>
               <Textarea
-                aria-label="可编辑的 AI 建议"
+                aria-label={`可编辑的${candidateActionGap}${candidateSuggestionLabel}`}
                 value={candidateReviewDraft}
                 maxLength={5_000_000}
                 rows={10}
@@ -4383,7 +4343,7 @@ export function EditorPage() {
               <InlineAlert
                 tone="error"
                 title="正文已在建议生成后变化"
-                description="已阻止接受。下面同时保留生成时正文、当前正文和 AI 建议；请先另存或处理冲突，InkShadow 不会静默覆盖。"
+                description={`已阻止接受。下面同时保留生成时正文、当前正文和${candidateSuggestionLabel}；请先另存或处理冲突，InkShadow 不会静默覆盖。`}
               />
               <div className="candidate-review-dialog__three-way">
                 <section>
@@ -4395,13 +4355,14 @@ export function EditorPage() {
                   <pre>{boundedEditorPreview(candidateReviewConflict.currentContent)}</pre>
                 </section>
                 <section>
-                  <h3>AI 建议</h3>
+                  <h3>{candidateSuggestionLabel}</h3>
                   <pre>{boundedEditorPreview(candidate.content)}</pre>
                 </section>
               </div>
               <div className="candidate-review-dialog__conflict-actions">
                 <p>
-                  可先把完整 AI 建议保存成独立章节，从而同时保留当前正文与建议，再决定是否拒绝。
+                  可先把完整{candidateSuggestionLabel}
+                  保存成独立章节，从而同时保留当前正文与建议，再决定是否拒绝。
                 </p>
                 <Button
                   variant="secondary"
@@ -4417,7 +4378,7 @@ export function EditorPage() {
           {candidateReviewError !== null && (
             <InlineAlert
               tone={candidateReviewConflict === null ? "warning" : "error"}
-              title="AI 建议比较提示"
+              title={`${candidateSuggestionLabel}比较提示`}
               description={candidateReviewError}
             />
           )}

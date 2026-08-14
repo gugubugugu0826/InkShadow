@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 import { BrowserDevelopmentStoryFactStore } from "./story-fact-store";
 import { DEVELOPMENT_DATABASE_KEY } from "./development-atomic-journal";
 import {
+  CONTINUOUS_STORY_STATE_EXPLICIT_CLOUD_AUTHORIZATION_REQUIRED,
   ContinuousStoryStateExtractionService,
   ContinuousStoryStateModelUnavailableError,
   shouldRunContinuousStoryStateExtraction,
@@ -42,10 +43,10 @@ const ids = {
 };
 
 describe("ContinuousStoryStateExtractionService", () => {
-  it("defaults save-triggered extraction off and runs only after project opt-in", async () => {
+  it("keeps save and direct extraction closed even when a legacy preference is enabled", async () => {
     expect(shouldRunContinuousStoryStateExtraction("autosave", true)).toBe(false);
     expect(shouldRunContinuousStoryStateExtraction("manual", false)).toBe(false);
-    expect(shouldRunContinuousStoryStateExtraction("manual", true)).toBe(true);
+    expect(shouldRunContinuousStoryStateExtraction("manual", true)).toBe(false);
     const harness = await createHarness([]);
 
     expect(
@@ -59,6 +60,7 @@ describe("ContinuousStoryStateExtractionService", () => {
     expect(harness.model.callCount).toBe(0);
 
     harness.service.setAutomaticOnManualSaveEnabled(ids.project, true);
+    expect(harness.service.isAutomaticOnManualSaveEnabled(ids.project)).toBe(false);
     expect(
       await harness.service.extractAfterSave({
         projectId: ids.project,
@@ -66,8 +68,8 @@ describe("ContinuousStoryStateExtractionService", () => {
         versionId: ids.version1,
         reason: "manual",
       }),
-    ).toMatchObject({ status: "completed" });
-    expect(harness.model.callCount).toBe(2);
+    ).toBeNull();
+    expect(harness.model.callCount).toBe(0);
 
     expect(
       await harness.service.extractAfterSave({
@@ -77,7 +79,31 @@ describe("ContinuousStoryStateExtractionService", () => {
         reason: "autosave",
       }),
     ).toBeNull();
-    expect(harness.model.callCount).toBe(2);
+    expect(harness.model.callCount).toBe(0);
+
+    await expect(
+      harness.productionService.extractSavedVersion({
+        projectId: ids.project,
+        chapterId: ids.chapter1,
+        versionId: ids.version1,
+        force: true,
+      }),
+    ).resolves.toMatchObject({
+      status: "skipped",
+      providerInvocations: [],
+      detectedCount: 0,
+      skippedTasks: [
+        {
+          task: "character_extraction",
+          code: CONTINUOUS_STORY_STATE_EXPLICIT_CLOUD_AUTHORIZATION_REQUIRED,
+        },
+        {
+          task: "world_extraction",
+          code: CONTINUOUS_STORY_STATE_EXPLICIT_CLOUD_AUTHORIZATION_REQUIRED,
+        },
+      ],
+    });
+    expect(harness.model.callCount).toBe(0);
   });
 
   it("stages exact saved-version candidates without silently making them formal", async () => {
@@ -578,7 +604,7 @@ async function createHarness(candidates: ContinuousStoryStateModelCandidate[]) {
   const preferences = new MemoryContinuousStoryStatePreferences();
   const chapterRepository = new ChapterMapRepository(chapters);
   const hasher = new CryptoContentHasher();
-  const service = new ContinuousStoryStateExtractionService({
+  const productionService = new ContinuousStoryStateExtractionService({
     chapters: chapterRepository,
     chapterVersions: new VersionMapRepository(versions),
     facts: store,
@@ -590,21 +616,25 @@ async function createHarness(candidates: ContinuousStoryStateModelCandidate[]) {
     preferences,
     projectContextPrivacy: new ProjectContextPrivacyAuthority(chapterRepository, hasher),
   });
+  const service = exposeLegacyProviderPipelineForTransformationTests(productionService);
   const restart = () =>
-    new ContinuousStoryStateExtractionService({
-      chapters: chapterRepository,
-      chapterVersions: new VersionMapRepository(versions),
-      facts: store,
-      factService,
-      model,
-      hasher,
-      ids: storyIds,
-      clock,
-      preferences,
-      projectContextPrivacy: new ProjectContextPrivacyAuthority(chapterRepository, hasher),
-    });
+    exposeLegacyProviderPipelineForTransformationTests(
+      new ContinuousStoryStateExtractionService({
+        chapters: chapterRepository,
+        chapterVersions: new VersionMapRepository(versions),
+        facts: store,
+        factService,
+        model,
+        hasher,
+        ids: storyIds,
+        clock,
+        preferences,
+        projectContextPrivacy: new ProjectContextPrivacyAuthority(chapterRepository, hasher),
+      }),
+    );
   return {
     service,
+    productionService,
     restart,
     syncAuthority,
     store,
@@ -614,6 +644,37 @@ async function createHarness(candidates: ContinuousStoryStateModelCandidate[]) {
     versions,
     content,
   };
+}
+
+/**
+ * The old model-output transformation remains covered with strict fakes, but
+ * production callers only receive the fail-closed public API.
+ */
+function exposeLegacyProviderPipelineForTransformationTests(
+  service: ContinuousStoryStateExtractionService,
+): ContinuousStoryStateExtractionService {
+  return new Proxy(service, {
+    get(target, property): unknown {
+      if (property === "extractSavedVersion") {
+        return (
+          input: Readonly<{
+            projectId: string;
+            chapterId: string;
+            versionId: string;
+            force?: boolean;
+          }>,
+        ) =>
+          (
+            target as unknown as {
+              extractSavedVersionOnce(
+                request: typeof input,
+              ): ReturnType<ContinuousStoryStateExtractionService["extractSavedVersion"]>;
+            }
+          ).extractSavedVersionOnce(input);
+      }
+      return Reflect.get(target, property, target) as unknown;
+    },
+  });
 }
 
 class MemoryContinuousStoryStatePreferences {

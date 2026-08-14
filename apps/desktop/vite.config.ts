@@ -32,15 +32,14 @@ const PDFJS_WORKER_LICENSE_BANNER = `/*!
  * pdfjsVersion = 6.1.200
  * pdfjsBuild = 6353acefe
  */`;
-// DESIGN v0.3.1b originally allowed 128 KiB of aggregate growth beyond 6 MiB.
-// The optional paid Novel Skill evaluation chain adds a content-free ledger,
-// crash-safe dispatch authority and local blind review. A production graph audit
-// measured 6,651,774 bytes after the whole chain was moved behind a true dynamic
-// import, with no duplicated modules and both ordinary/async chunks still below
-// their existing ceilings. Add exactly 288 KiB to the aggregate allowance so the
-// installed payload retains at least 64 KiB of headroom; per-output limits stay
-// unchanged and no optional chunk is excluded from the total.
-const TOTAL_FRONTEND_BUDGET_BYTES = (6 * 1024 + 416) * 1024;
+// The original 6 MiB aggregate allowance grew to 6 MiB + 416 KiB for the DESIGN
+// and paid Novel Skill evaluation work. The v0.2.3 Windows feedback fixes add
+// authoritative routing, recoverable opening state, privacy-safe diagnostics and
+// responsive editor behavior. A production graph audit found no duplicated
+// runtimes, source maps, test code or dynamic modules pulled into the startup
+// graph. Raise only the aggregate allowance to exactly 7 MiB; every per-output
+// ceiling remains unchanged and every lazy chunk still counts toward the total.
+const TOTAL_FRONTEND_BUDGET_BYTES = 7 * 1024 * 1024;
 
 function isPdfJsWorkerModule(facadeModuleId: string | null): boolean {
   return (
@@ -285,6 +284,13 @@ export default defineConfig({
         generatedCode: "es2015",
         manualChunks(moduleId) {
           const normalizedModuleId = moduleId.replaceAll("\\", "/");
+          // The store is an ordinary runtime dependency shared by the root
+          // runtime and the dynamically loaded authoritative readiness check.
+          // Give that real shared dependency its own counted startup chunk so
+          // Rollup does not hoist its full implementation into the entry.
+          if (normalizedModuleId.endsWith("/apps/desktop/src/infrastructure/model-hub-store.ts")) {
+            return "model-hub-store-runtime";
+          }
           if (
             normalizedModuleId.includes("/node_modules/react/") ||
             normalizedModuleId.includes("/node_modules/react-dom/") ||

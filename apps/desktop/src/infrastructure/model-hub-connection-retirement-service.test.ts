@@ -88,4 +88,49 @@ describe("retireModelHubConnection", () => {
     expect(retired.credentialCleanup).toBe("skipped_unowned_reference");
     expect(deleteCredential).not.toHaveBeenCalled();
   });
+
+  it("finishes cleanup after a partial failure when retried with the refreshed CAS revision", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const created = await runtime.modelHub.saveConnection({
+      id: "retire-service-cleanup-retry",
+      providerKind: "custom_openai_compatible",
+      displayName: "Retire cleanup retry",
+      baseUrlOverride: "https://retire-retry.example.test/v1",
+      credentialRef: "keyring:model-hub:retire-service-cleanup-retry",
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      expectedRevision: null,
+    });
+    const deleteCredential = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("temporary vault failure"))
+      .mockResolvedValue({ configured: false, lastFour: null });
+    const dependencies = {
+      modelHub: runtime.modelHub,
+      modelCenter: runtime.modelCenter,
+      credentials: { delete: deleteCredential },
+    };
+
+    await expect(
+      retireModelHubConnection(dependencies, {
+        connectionId: created.id,
+        expectedRevision: created.revision,
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_CONNECTION_RETIREMENT_INCOMPLETE" });
+    const disabled = await runtime.modelHub.findConnection(created.id);
+    expect(disabled).toMatchObject({
+      enabled: false,
+      revision: created.revision + 1,
+      credentialRef: created.credentialRef,
+    });
+    if (disabled === null) throw new Error("Expected the disabled connection.");
+
+    const retired = await retireModelHubConnection(dependencies, {
+      connectionId: disabled.id,
+      expectedRevision: disabled.revision,
+    });
+    expect(isRetiredModelProviderConnection(retired.connection)).toBe(true);
+    expect(retired.connection.revision).toBe(created.revision + 2);
+    expect(deleteCredential).toHaveBeenCalledTimes(2);
+  });
 });

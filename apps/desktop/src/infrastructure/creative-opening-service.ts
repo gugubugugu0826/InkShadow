@@ -23,6 +23,12 @@ import {
 } from "./model-profile-gateway-config";
 import { createContextCompilationTrace } from "./context-compilation-trace-store";
 import {
+  validateCreativeOpeningDirection,
+  validateCreativeOpeningIdea,
+  validateCreativeOpeningProse,
+} from "./creative-opening-input-policy";
+import { recordSafeGenerationErrorCode } from "./generation-preflight-diagnostics";
+import {
   ProjectContextPrivacyError,
   projectContextDispatchScope,
   projectContextRequiredDataDestination,
@@ -118,20 +124,38 @@ export async function generateCreativeOpening(
     onDelta?: (text: string) => void;
     /** Final synchronous journey/slot latch immediately before native dispatch. */
     assertBeforeProviderDispatch?: () => void;
+    /** Persists the exact invocation owning this stable opening slot before dispatch. */
+    onInvocationPrepared?: (
+      input: Readonly<{
+        invocationId: string;
+        connectionId: string;
+        modelId: string;
+      }>,
+    ) => void | Promise<void>;
+    /** Synchronous UI notification backed by the durable invocation receipt. */
+    onProviderDispatchStarted?: (invocationId: string) => void;
     /** Existing empty workspace that owns this traceable opening attempt. */
     projectContext?: CreativeOpeningProjectContext;
   }>,
 ): Promise<CreativeOpeningResult> {
-  const idea = validateCreativeText(input.idea, 4_000, "idea");
-  const direction =
-    input.direction === undefined || input.direction.trim().length === 0
-      ? null
-      : validateCreativeText(input.direction, 1_000, "direction");
+  let idea: string;
+  let direction: string | null;
+  let partialOpening: string | null;
+  try {
+    idea = validateCreativeOpeningIdea(input.idea);
+    direction =
+      input.direction === undefined || input.direction.trim().length === 0
+        ? null
+        : validateCreativeOpeningDirection(input.direction);
+    partialOpening =
+      input.partialOpening === undefined
+        ? null
+        : validateCreativeOpeningProse(input.partialOpening, 64_000, "未完整开头");
+  } catch (cause: unknown) {
+    recordSafeGenerationErrorCode(runtime, safeModelFailureCode(cause));
+    throw cause;
+  }
   const requestId = input.requestId ?? runtime.ids.next();
-  const partialOpening =
-    input.partialOpening === undefined
-      ? null
-      : validateCreativeProse(input.partialOpening, 64_000, "partial opening");
   let preparedProjectContext: PreparedCreativeOpeningProjectContext | null = null;
   if (input.projectContext !== undefined) {
     try {
@@ -145,7 +169,7 @@ export async function generateCreativeOpening(
         requestId,
       });
     } catch (cause: unknown) {
-      return localOpening(requestId, idea, direction, safeModelFailureCode(cause));
+      return localOpening(runtime, requestId, idea, direction, safeModelFailureCode(cause));
     }
   }
   const messages = buildOpeningMessages(
@@ -179,6 +203,7 @@ export async function generateCreativeOpening(
         maximumOutputTokens: 1_200,
         temperature: 0.85,
         generationId: requestId,
+        invocationId: requestId,
         reasoningPolicy: "visible_prose",
         ...(preparedProjectContext === null ||
         projectContextRequiredDataDestination(preparedProjectContext.privacyReceipt) === undefined
@@ -193,6 +218,7 @@ export async function generateCreativeOpening(
         }) => {
           dispatchedTarget.connectionId = connectionId;
           dispatchedTarget.modelId = modelId;
+          await input.onInvocationPrepared?.({ invocationId, connectionId, modelId });
           if (preparedProjectContext === null) {
             return;
           }
@@ -234,9 +260,26 @@ export async function generateCreativeOpening(
             });
           }
         },
+        ...(preparedProjectContext === null
+          ? {}
+          : {
+              onFinalBeforeProviderDispatch: async ({ localOnlyEligible }) => {
+                await assertCreativeOpeningProjectCurrent(runtime, preparedProjectContext);
+                runtime.projectContextPrivacy.assertRouteEligible(
+                  preparedProjectContext.privacyReceipt,
+                  localOnlyEligible === true,
+                );
+              },
+            }),
         ...(input.assertBeforeProviderDispatch === undefined
           ? {}
           : { assertBeforeProviderDispatch: input.assertBeforeProviderDispatch }),
+        ...(input.onProviderDispatchStarted === undefined
+          ? {}
+          : {
+              onProviderDispatchStarted: ({ invocationId }) =>
+                input.onProviderDispatchStarted?.(invocationId),
+            }),
         onDelta: receiveVisibleText,
       });
       if (preparedProjectContext !== null) {
@@ -244,7 +287,7 @@ export async function generateCreativeOpening(
       }
       const text = combineOpeningText(partialOpening, generated.text).trim();
       if (text.length === 0) {
-        return localOpening(requestId, idea, direction, "MODEL_OUTPUT_EMPTY");
+        return localOpening(runtime, requestId, idea, direction, "MODEL_OUTPUT_EMPTY");
       }
       return Object.freeze({
         requestId,
@@ -268,11 +311,18 @@ export async function generateCreativeOpening(
         preparedProjectContext?.contextTraceId ?? null,
       );
       if (partial !== null) {
+        recordSafeGenerationErrorCode(runtime, "MODEL_OUTPUT_TRUNCATED");
         if (preparedProjectContext !== null) {
           try {
             await assertCreativeOpeningProjectCurrent(runtime, preparedProjectContext);
           } catch (workspaceCause: unknown) {
-            return localOpening(requestId, idea, direction, safeModelFailureCode(workspaceCause));
+            return localOpening(
+              runtime,
+              requestId,
+              idea,
+              direction,
+              safeModelFailureCode(workspaceCause),
+            );
           }
         }
         return partial;
@@ -281,7 +331,7 @@ export async function generateCreativeOpening(
         !(cause instanceof ModelHubExecutionError) ||
         cause.code !== "MODEL_HUB_ROUTE_NOT_CONFIGURED"
       ) {
-        return localOpening(requestId, idea, direction, safeModelFailureCode(cause));
+        return localOpening(runtime, requestId, idea, direction, safeModelFailureCode(cause));
       }
     }
   }
@@ -290,13 +340,13 @@ export async function generateCreativeOpening(
   // context and optional writing-method snapshot remain one exact chain.
   // The legacy profile route cannot produce that receipt.
   if (preparedProjectContext !== null) {
-    return localOpening(requestId, idea, direction, "MODEL_HUB_ROUTE_NOT_CONFIGURED");
+    return localOpening(runtime, requestId, idea, direction, "MODEL_HUB_ROUTE_NOT_CONFIGURED");
   }
 
   const profile = await resolveOpeningProfile(runtime).catch(() => null);
 
   if (runtime.mode !== "tauri" || profile?.selectedModel === null || profile === null) {
-    return localOpening(requestId, idea, direction, "MODEL_NOT_CONNECTED");
+    return localOpening(runtime, requestId, idea, direction, "MODEL_NOT_CONNECTED");
   }
 
   const resolvedEndpoint = await resolveModelProfileGatewayConfig(
@@ -304,7 +354,7 @@ export async function generateCreativeOpening(
     profile,
   ).catch(() => null);
   if (resolvedEndpoint === null) {
-    return localOpening(requestId, idea, direction, "MODEL_CREDENTIAL_MISSING");
+    return localOpening(runtime, requestId, idea, direction, "MODEL_CREDENTIAL_MISSING");
   }
 
   try {
@@ -312,11 +362,11 @@ export async function generateCreativeOpening(
       messages.map(({ content }) => content).join("\n"),
     ).length;
     if (inputBytes > 64_000) {
-      return localOpening(requestId, idea, direction, "MODEL_INPUT_TOO_LARGE");
+      return localOpening(runtime, requestId, idea, direction, "MODEL_INPUT_TOO_LARGE");
     }
     const listed = await runtime.modelGateway.listModels(resolvedEndpoint.config);
     if (!listed.models.some(({ id }) => id === profile.selectedModel)) {
-      return localOpening(requestId, idea, direction, "SELECTED_MODEL_UNAVAILABLE");
+      return localOpening(runtime, requestId, idea, direction, "SELECTED_MODEL_UNAVAILABLE");
     }
     const current = await resolveFinalModelProfileGatewayConfig(
       {
@@ -339,7 +389,7 @@ export async function generateCreativeOpening(
     });
     const text = combineOpeningText(partialOpening, generated.text).trim();
     if (text.length === 0) {
-      return localOpening(requestId, idea, direction, "MODEL_OUTPUT_EMPTY");
+      return localOpening(runtime, requestId, idea, direction, "MODEL_OUTPUT_EMPTY");
     }
     return Object.freeze({
       requestId,
@@ -361,9 +411,10 @@ export async function generateCreativeOpening(
       null,
     );
     if (partial !== null) {
+      recordSafeGenerationErrorCode(runtime, "MODEL_OUTPUT_TRUNCATED");
       return partial;
     }
-    return localOpening(requestId, idea, direction, safeModelFailureCode(cause));
+    return localOpening(runtime, requestId, idea, direction, safeModelFailureCode(cause));
   }
 }
 
@@ -372,12 +423,18 @@ export function generateLocalCreativeOpening(
   runtime: Pick<DesktopRuntime, "ids">,
   input: Readonly<{ idea: string; direction?: string; requestId?: string }>,
 ): CreativeOpeningResult {
-  const idea = validateCreativeText(input.idea, 4_000, "idea");
+  const idea = validateCreativeOpeningIdea(input.idea);
   const direction =
     input.direction === undefined || input.direction.trim().length === 0
       ? null
-      : validateCreativeText(input.direction, 1_000, "direction");
-  return localOpening(input.requestId ?? runtime.ids.next(), idea, direction, "LOCAL_SAMPLE");
+      : validateCreativeOpeningDirection(input.direction);
+  return localOpening(
+    runtime,
+    input.requestId ?? runtime.ids.next(),
+    idea,
+    direction,
+    "LOCAL_SAMPLE",
+  );
 }
 
 export async function persistCreativeOpeningCandidate(
@@ -401,7 +458,13 @@ export async function persistCreativeOpeningCandidate(
       }),
     );
   }
-  const text = validateCreativeText(textValue, 5_000_000, "opening");
+  let text: string;
+  try {
+    text = validateCreativeOpeningProse(textValue, 5_000_000, "开头正文");
+  } catch (cause: unknown) {
+    recordSafeGenerationErrorCode(runtime, safeModelFailureCode(cause));
+    throw cause;
+  }
   const streaming = AiCandidate.createStreaming({
     id: candidateId ?? runtime.ids.next(),
     projectId: chapter.projectId,
@@ -740,11 +803,15 @@ function openingAngleInstruction(angle: CreativeOpeningAngle): string {
 }
 
 function localOpening(
+  runtime: object,
   requestId: string,
   idea: string,
   direction: string | null,
   noticeCode: string,
 ): CreativeOpeningResult {
+  if (noticeCode !== "LOCAL_SAMPLE") {
+    recordSafeGenerationErrorCode(runtime, noticeCode);
+  }
   const subject = idea.replaceAll(/\s+/gu, " ").slice(0, 80);
   const directionHint = direction === null ? "" : localDirectionHint(direction);
   const text = [
@@ -812,34 +879,23 @@ function localDirectionHint(direction: string): string {
   );
 }
 
-function validateCreativeText(value: string, maximum: number, label: string): string {
-  const normalized = value.normalize("NFKC").trim();
-  if (
-    normalized.length < 1 ||
-    normalized.length > maximum ||
-    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(normalized)
-  ) {
-    throw new ModelCenterError(
-      "CREATIVE_INPUT_INVALID",
-      `${label} does not satisfy the creative input policy.`,
-    );
-  }
-  return normalized;
-}
-
-function validateCreativeProse(value: string, maximum: number, label: string): string {
-  const normalized = value.normalize("NFC").trim();
-  if (
-    normalized.length < 1 ||
-    normalized.length > maximum ||
-    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(normalized)
-  ) {
-    throw new ModelCenterError(
-      "CREATIVE_INPUT_INVALID",
-      `${label} does not satisfy the creative input policy.`,
-    );
-  }
-  return normalized;
+export function failedCreativeOpeningResult(
+  runtime: object,
+  requestId: string,
+  cause: unknown,
+): CreativeOpeningResult {
+  const code = safeModelFailureCode(cause);
+  recordSafeGenerationErrorCode(runtime, code);
+  return Object.freeze({
+    requestId,
+    text: "",
+    source: "local_fallback",
+    completion: "complete",
+    providerId: null,
+    modelId: null,
+    noticeCode: code,
+    contextTraceId: null,
+  });
 }
 
 function safeModelFailureCode(cause: unknown): string {

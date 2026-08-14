@@ -263,7 +263,7 @@ describe("Model Hub page hydration", () => {
     expect(hydrated.page.selectedModelId).toBe("aaa-first-enabled-model");
   });
 
-  it("ignores requested disabled and routed retired connections before reading credentials", async () => {
+  it("loads an explicitly requested disabled connection for rebind without reading a guessed credential slot", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const active = await runtime.modelHub.saveConnection({
       id: "active-fallback",
@@ -335,10 +335,10 @@ describe("Model Hub page hydration", () => {
     });
 
     expect(hydrated.page.connections).toHaveLength(3);
-    expect(hydrated.page.selectedConnectionId).toBe("active-fallback");
-    expect(hydrated.page.selectedModelId).toBe("active-model");
-    expect(getSummary).toHaveBeenCalledTimes(1);
-    expect(getSummary).toHaveBeenCalledWith("active-fallback");
+    expect(hydrated.page.selectedConnectionId).toBe("disabled-request-target");
+    expect(hydrated.page.selectedModelId).toBeNull();
+    expect(hydrated.credential).toEqual({ configured: false, lastFour: null });
+    expect(getSummary).not.toHaveBeenCalled();
   });
 
   it("keeps the cached catalog ready when the system credential status reaches its deadline", async () => {

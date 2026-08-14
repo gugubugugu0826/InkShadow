@@ -505,52 +505,6 @@ export function StoryGovernancePage() {
     await load();
   }
 
-  async function runLatestChapterRecognition(): Promise<void> {
-    if (busy || readonly) {
-      return;
-    }
-    const latestChapter = [...chapters]
-      .filter((chapter) => chapter.status === "active" && chapter.content.trim().length > 0)
-      .at(-1);
-    if (latestChapter === undefined) {
-      setCausalNotice({
-        tone: "warning",
-        title: "还没有可识别的正文",
-        description: "先保存至少一章正文，再回来整理人物、世界和剧情变化。",
-      });
-      return;
-    }
-    setBusy(true);
-    try {
-      const receipt = await runtime.story.continuousState.extractSavedVersion({
-        projectId: projectIdParameter,
-        chapterId: latestChapter.id,
-        versionId: latestChapter.currentVersionId,
-        force: true,
-      });
-      setCausalNotice({
-        tone: receipt.skippedTasks.length > 0 ? "warning" : "info",
-        title: `识别到 ${String(receipt.detectedCount)} 项变化，其中 ${String(receipt.needsConfirmationCount)} 项需要确认`,
-        description:
-          receipt.skippedTasks.length > 0
-            ? "部分识别因没有可用的 AI 分工而跳过，没有使用假数据。正文和已有设定均未改变。"
-            : "结果已作为可追溯候选保存；不会自动成为正式设定，也不会修改正文。",
-      });
-    } catch (cause: unknown) {
-      setCausalNotice({
-        tone: "warning",
-        title: "这次没有完成故事状态识别",
-        description:
-          cause instanceof Error
-            ? `${cause.message} 正文和已有设定均未改变。`
-            : "请检查 AI 分工后重试；正文和已有设定均未改变。",
-      });
-    } finally {
-      setBusy(false);
-    }
-    await load();
-  }
-
   async function toggleFactLock(fact: StoryFact): Promise<void> {
     const snapshot = fact.toSnapshot();
     if (busy || snapshot.status !== "formal") {
@@ -1161,6 +1115,12 @@ export function StoryGovernancePage() {
         />
       )}
 
+      <InlineAlert
+        tone="warning"
+        title="逐章云端识别暂不可用"
+        description="一次识别会把最新一章完整正文分别发送给人物提取和世界设定提取，最多两次 Provider 调用并可能产生两次费用。当前页面还不能在派发前持久展示精确 Provider、精确模型并把不确定结果锁定为不可重发，因此入口保持停用；正文和已有设定不受影响。"
+      />
+
       {normalizedError !== null && pageState !== "fatal_error" && (
         <InlineAlert
           tone="error"
@@ -1245,10 +1205,10 @@ export function StoryGovernancePage() {
                   <div className="story-governance-actions">
                     <Button
                       variant="secondary"
-                      disabled={readonly || busy}
-                      onClick={() => void runLatestChapterRecognition()}
+                      disabled
+                      title="独立云派生授权与不确定结果防重机制完成后开放"
                     >
-                      重新识别最近一章
+                      重新识别最近一章（暂不可用）
                     </Button>
                     <Button disabled={readonly || busy} onClick={openCreateFact}>
                       添加人物设定
@@ -1441,16 +1401,16 @@ export function StoryGovernancePage() {
                     <h2 id="unified-story-facts-title">当前故事设定</h2>
                     <p>
                       每项内容都保留来源、状态和修订记录；“重新识别”会调用已连接的
-                      AI，可能产生供应商费用。
+                      AI；独立授权和不确定结果防重机制完成前不会开放。
                     </p>
                   </div>
                   <div className="story-governance-actions">
                     <Button
                       variant="secondary"
-                      disabled={readonly || busy}
-                      onClick={() => void runLatestChapterRecognition()}
+                      disabled
+                      title="独立云派生授权与不确定结果防重机制完成后开放"
                     >
-                      重新识别最近一章
+                      重新识别最近一章（暂不可用）
                     </Button>
                     <Button disabled={readonly || busy} onClick={openCreateFact}>
                       添加设定

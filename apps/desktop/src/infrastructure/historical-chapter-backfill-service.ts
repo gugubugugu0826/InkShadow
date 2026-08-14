@@ -307,16 +307,13 @@ export class HistoricalChapterBackfillService {
     item: BackfillRegistrationItem,
     modelStages: HistoricalChapterBackfillPlan["modelStages"],
   ): Promise<"proceed" | "already_covered"> {
-    const summaryEnabled = this.dependencies.preferences.isAutomaticOnManualSaveEnabled(
-      item.input.projectId,
-    );
-    const storyStateEnabled =
-      this.dependencies.preferences.isContinuousStoryStateOnManualSaveEnabled(item.input.projectId);
+    const summaryEnabled = false;
+    const storyStateEnabled = false;
     if (
       summaryEnabled !== modelStages.chapterSummaryEnabled ||
       storyStateEnabled !== modelStages.storyStateEnabled
     ) {
-      staleRegistrationPlan("项目分析开关在登记期间发生变化，请刷新只读计划。");
+      staleRegistrationPlan("历史回填计划不是纯本地任务，请刷新只读计划。");
     }
 
     const chapterResult = await this.dependencies.chapters.findById(item.chapterId);
@@ -412,11 +409,11 @@ export class HistoricalChapterBackfillService {
       );
     }
 
-    const chapterSummaryEnabled = this.dependencies.preferences.isAutomaticOnManualSaveEnabled(
-      projectId.value,
-    );
-    const storyStateEnabled =
-      this.dependencies.preferences.isContinuousStoryStateOnManualSaveEnabled(projectId.value);
+    // Historical recovery is part of the accepted-version background pipeline
+    // and therefore local-only. Legacy preferences never authorize sending an
+    // existing chapter to a provider.
+    const chapterSummaryEnabled = false;
+    const storyStateEnabled = false;
     const requestedStages = requestedPipelineStages(chapterSummaryEnabled, storyStateEnabled);
     const active = loaded.value
       .map((chapter) => chapter.toSnapshot())

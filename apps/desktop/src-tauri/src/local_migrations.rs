@@ -481,6 +481,13 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0064_novel_skill_evaluation_predispatch_authority.sql"
                 ),
             ),
+            migration(
+                68,
+                "persist the content-free model provider dispatch boundary",
+                include_str!(
+                    "../../../../packages/data/migrations/0065_model_invocation_dispatch_boundary.sql"
+                ),
+            ),
         ]),
         ignore_missing: false,
         locking: true,
@@ -1300,7 +1307,7 @@ mod tests {
             .expect("upgrade version 66 database through predispatch authority");
         run_local_migrations(&mut connection)
             .await
-            .expect("restart with version 67 migration history");
+            .expect("restart with version 68 migration history");
 
         let authority_after_upgrade: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema
@@ -1334,11 +1341,26 @@ mod tests {
                 .expect("version 67 migration receipt");
         assert_eq!(success, 1);
         assert_eq!(checksum.len(), 48);
+        let (dispatch_success, dispatch_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 68")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 68 migration receipt");
+        assert_eq!(dispatch_success, 1);
+        assert_eq!(dispatch_checksum.len(), 48);
+        let dispatch_boundary_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('model_invocation_facts')
+             WHERE name = 'provider_dispatch_started_at'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 68 provider dispatch boundary column");
+        assert_eq!(dispatch_boundary_columns, 1);
         let maximum_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
             .fetch_one(&mut connection)
             .await
             .expect("maximum migration version");
-        assert_eq!(maximum_version, 67);
+        assert_eq!(maximum_version, 68);
         let forbidden_columns: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)
              FROM pragma_table_info('novel_skill_evaluation_predispatch_authority_snapshots')

@@ -1,8 +1,8 @@
 # InkShadow Desktop 原生层逐文件指引
 
-> 基于源码快照：2026-08-10  
+> 基于源码快照：2026-08-14  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 应用版本：`0.2.2`；设计基线：`DESIGN v0.3.1b`  
+> 应用版本：`0.2.3`；当前反馈修复尚未发布；设计基线：`DESIGN v0.3.1b`  
 > 覆盖范围：`apps/desktop/src-tauri`、本地 SQLite 原生桥、自动备份、系统凭据库、原生网络、项目密钥、安全更新与系统容量
 
 ## 1. 它不是传统“后端”
@@ -52,7 +52,7 @@ React 页面
 | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
 | `apps/desktop/src-tauri/src/main.rs`                   | Windows GUI subsystem 入口；Release 隐藏控制台。                                                   |
 | `apps/desktop/src-tauri/src/lib.rs`                    | 模块组合、Tauri 启动、共享状态、插件和 59 个 command 注册。                                        |
-| `apps/desktop/src-tauri/src/local_migrations.rs`       | 把 `packages/data` 与 `packages/story-core` 的 62 个 SQL migration 编译进二进制并交给 SQLx。       |
+| `apps/desktop/src-tauri/src/local_migrations.rs`       | 把 `packages/data` 与 `packages/story-core` 的 68 个 SQL migration 编译进二进制并交给 SQLx。       |
 | `apps/desktop/src-tauri/src/automatic_backup.rs`       | 应用专属自动备份根、所有权标记、租约、清单 CAS、一次性目标票据、完整性核验和受限清理。             |
 | `apps/desktop/src-tauri/src/native_sqlite.rs`          | 固定库打开、迁移、查询、写入、事务、备份/恢复受控语句、资源上限和失败关闭。                        |
 | `apps/desktop/src-tauri/src/path_tickets.rs`           | 文件选择后的 5 分钟、会话绑定、不可伪造路径票据及文件身份防替换。                                  |
@@ -99,10 +99,12 @@ React 页面
 - 打开时强制 `foreign_keys=ON`、WAL、`synchronous=NORMAL`、5 秒 busy timeout。
 - 配置和全部 migration 验证成功后才返回随机会话 token。
 - migration 校验和不一致会报 `SQLITE_MIGRATION_INTEGRITY_FAILED` 并停止，而不是覆盖用户数据。
-- 当前前向上限为 Data `0059_generation_preflight_cost_status.sql` / Tauri `62`；Data 与 story-core
-  合并为一个原生连续序列，所以两个编号不要求相同。尾部三次只向前追加分别是：`0057`/Tauri
-  `60` 补齐 Model Hub 的 `content_quality_check` 路由合同，`0058`/Tauri `61` 保存原子故事设定
-  导入收据，`0059`/Tauri `62` 记录生成费用是否可估而不因价格未知阻断写作。
+- 当前前向上限为 Data `0065_model_invocation_dispatch_boundary.sql` / Tauri `68`；Data 与 story-core
+  合并为一个原生连续序列，所以两个编号不要求相同。`0060`–`0064` 依次追加 Novel Skill
+  registry/snapshot、content-free 付费评测账本、项目 active 派发围栏、精确商业授权/盲评合同和
+  内容无关的派发前权威。`0065` 只在 `model_invocation_facts` 追加不含正文、Prompt、凭据或
+  模型结果的 Provider 发送边界时间，以便启动恢复将孤立调用安全结清为 `not_dispatched` 或
+  `ambiguous`，不自动重发。
 
 ### 5.2 SQL 与结果边界
 
@@ -128,7 +130,7 @@ React 页面
 - 备份目标必须不存在；恢复源必须是普通文件；票据 TTL 5 分钟。
 - 使用 `VACUUM INTO` 创建一致备份。
 - 恢复前检查 integrity、foreign key 和主库/备份 schema 完全一致。
-- 当前作者数据口径为 143 张应用表：恢复契约复制其中 142 张可恢复表，1 张
+- 当前作者数据口径为 167 张应用表：恢复契约复制其中 166 张可恢复表，1 张
   `project_remote_dispatch_leases` 临时远程派发租约表明确不恢复；4 个可重建派生根表会清空后重建。
 - 一致性备份可能物理包含不含用户内容的 `project_remote_dispatch_leases` 临时表，但恢复事务明确不复制该表，不能把备份中的旧租约恢复为当前网络事实。
 - 新增权威表时必须同步维护恢复表清单、删除顺序、插入顺序和测试。
@@ -141,74 +143,80 @@ React 页面
 - 清理不枚举任意目录。只有直系路径、严格文件名、根标记、租约、清单状态、到期时间、文件身份、SQLite 完整性、大小与 SHA-256 全部匹配时才允许删除。
 - 手动备份不进入自动备份清单；浏览器开发模式没有原生备份能力，会明确返回不可用而不是伪造文件。
 
-## 6. 62 个原生 migration
+## 6. 68 个原生 migration
 
-原生版本号把 59 个 `data` migration 与 3 个 `story-core` migration 合并为一个连续序列，因此不等于单个目录中的文件名前缀。
+原生版本号把 65 个 `data` migration 与 3 个 `story-core` migration 合并为一个连续序列，因此不等于单个目录中的文件名前缀。
 
-| 原生版本 | SQL 来源                                                                             | 内容                                                             |
-| -------: | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
-|        1 | `packages/data/migrations/0001_core.sql`                                             | 项目、章节、版本、草稿、AI 候选和审计。                          |
-|        2 | `packages/data/migrations/0002_tasks_notifications.sql`                              | 后台任务和通知。                                                 |
-|        3 | `packages/story-core/migrations/0001_story_core.sql`                                 | 大纲、正式记录、时间线、评审、记忆和 What-if。                   |
-|        4 | `packages/data/migrations/0003_sync_access.sql`                                      | 密文同步、访问快照和授权缓存。                                   |
-|        5 | `packages/data/migrations/0004_model_profiles.sql`                                   | 非秘密模型配置。                                                 |
-|        6 | `packages/story-core/migrations/0002_materials.sql`                                  | 素材和引用。                                                     |
-|        7 | `packages/data/migrations/0005_ai_generation_governance.sql`                         | 定价、预算和生成记录。                                           |
-|        8 | `packages/data/migrations/0006_search_index.sql`                                     | FTS 搜索投影。                                                   |
-|        9 | `packages/data/migrations/0007_model_routing_usage.sql`                              | 路由、尝试用量和延期生成。                                       |
-|       10 | `packages/data/migrations/0008_project_key_lifecycle.sql`                            | 设备公钥、项目密钥版本和信封。                                   |
-|       11 | `packages/data/migrations/0009_device_identity_names.sql`                            | 本地设备显示名。                                                 |
-|       12 | `packages/data/migrations/0010_sync_inbox.sql`                                       | 收件箱、远程 checkpoint 和设备序列。                             |
-|       13 | `packages/data/migrations/0011_cloud_project_key_checkpoints.sql`                    | 云项目密钥 checkpoint。                                          |
-|       14 | `packages/data/migrations/0012_cloud_project_key_publications.sql`                   | 崩溃安全发布状态。                                               |
-|       15 | `packages/data/migrations/0013_sync_snapshot_staging.sql`                            | 原子快照暂存。                                                   |
-|       16 | `packages/data/migrations/0014_sync_protocol_v2_object_types.sql`                    | 同步协议 v2 和对象类型。                                         |
-|       17 | `packages/data/migrations/0015_sync_materialization_authority.sql`                   | 注册、明文物化、冲突和投影任务。                                 |
-|       18 | `packages/data/migrations/0016_sync_snapshot_materialization_receipts.sql`           | 快照物化回执。                                                   |
-|       19 | `packages/data/migrations/0017_sync_projection_account_authority.sql`                | 投影任务绑定账户权威。                                           |
-|       20 | `packages/data/migrations/0018_sync_incremental_terminal_observations.sql`           | 增量拉取终态观察。                                               |
-|       21 | `packages/data/migrations/0019_cloud_deletion_journal.sql`                           | 云删除恢复日志。                                                 |
-|       22 | `packages/data/migrations/0020_graph_rag_projection.sql`                             | 可重建 Graph RAG 投影。                                          |
-|       23 | `packages/story-core/migrations/0003_ideation.sql`                                   | 构思草稿。                                                       |
-|       24 | `packages/data/migrations/0021_search_vector_index.sql`                              | 本地精确向量索引。                                               |
-|       25 | `packages/data/migrations/0022_team_project_key_receipts.sql`                        | 团队项目密钥回执元数据。                                         |
-|       26 | `packages/data/migrations/0023_authoritative_story_graph_epoch.sql`                  | 权威故事图 epoch。                                               |
-|       27 | `packages/data/migrations/0024_multi_agent_review.sql`                               | 多智能体评审。                                                   |
-|       28 | `packages/data/migrations/0025_governed_creative_extensions.sql`                     | 翻译、短剧、预算、同意和候选。                                   |
-|       29 | `packages/data/migrations/0026_team_template_applications.sql`                       | 团队模板本地应用回执。                                           |
-|       30 | `packages/data/migrations/0027_authoritative_extraction.sql`                         | 权威抽取任务、评估和决定。                                       |
-|       31 | `packages/data/migrations/0028_fine_tuning_governance.sql`                           | 微调数据、审批、任务、评估、部署和审计。                         |
-|       32 | `packages/data/migrations/0029_community_marketplace_installs.sql`                   | 社区市场安装记录。                                               |
-|       33 | `packages/data/migrations/0030_creative_journeys.sql`                                | 可恢复的一句话开书与导入创作旅程。                               |
-|       34 | `packages/data/migrations/0031_model_hub.sql`                                        | Model Hub 连接、目录、能力、路由、策略和调用事实。               |
-|       35 | `packages/data/migrations/0032_unified_story_facts.sql`                              | 统一、证据化 StoryFact 与修订/旧数据链接。                       |
-|       36 | `packages/data/migrations/0033_causal_event_graph.sql`                               | 可重建的因果事件图投影。                                         |
-|       37 | `packages/data/migrations/0034_context_compilation_trace.sql`                        | 不含正文的上下文编译历史。                                       |
-|       38 | `packages/data/migrations/0035_writing_feedback_learning.sql`                        | 用户可见、可控的写作反馈学习。                                   |
-|       39 | `packages/data/migrations/0036_story_planning_candidates.sql`                        | 只供审阅的 AI 剧情规划候选。                                     |
-|       40 | `packages/data/migrations/0037_model_hub_expert_options.sql`                         | 不含秘密的 Model Hub 专家连接元数据。                            |
-|       41 | `packages/data/migrations/0038_private_chapters.sql`                                 | 章节级仅本机隐私门禁与导出默认排除。                             |
-|       42 | `packages/data/migrations/0039_project_seeds.sql`                                    | 三条创建旅程共享、可修订的项目创作种子。                         |
-|       43 | `packages/data/migrations/0040_chapter_validation_snapshots.sql`                     | 绑定不可变章节版本的确定性检查快照。                             |
-|       44 | `packages/data/migrations/0041_story_planning_selective_acceptance.sql`              | 规划候选目标基线与逐项采纳回执。                                 |
-|       45 | `packages/data/migrations/0042_chapter_validation_snapshot_delete_cascade.sql`       | 修复检查快照在章节/项目删除与恢复时的级联语义。                  |
-|       46 | `packages/data/migrations/0043_story_fact_entity_alias_resolution.sql`               | 只允许受审计、带修订的实体别名人工消歧。                         |
-|       47 | `packages/data/migrations/0044_story_planning_selective_acceptance_intent.sql`       | 正式大纲变更前持久预留逐项采纳意图。                             |
-|       48 | `packages/data/migrations/0045_project_remote_dispatch_leases.sql`                   | 项目上下文远程派发的内容无关租约、隐私变更与删除防护。           |
-|       49 | `packages/data/migrations/0046_model_hub_zhipu_glm.sql`                              | 前向重建 Provider 连接约束，允许独立 GLM 连接类型。              |
-|       50 | `packages/data/migrations/0047_context_compilation_exact_provenance.sql`             | 上下文编译到 generation、调用事实和最终 Candidate 的不可变关联。 |
-|       51 | `packages/data/migrations/0048_candidate_application_intents.sql`                    | Candidate 任务语义、载荷形状、应用方式与 UTF-16 锚点。           |
-|       52 | `packages/data/migrations/0049_memory_governance_audit.sql`                          | 项目记忆忘却和人工合并的不可变治理审计。                         |
-|       53 | `packages/data/migrations/0050_candidate_revision_authority.sql`                     | Candidate 单调修订、CAS 决定和内容校验权威。                     |
-|       54 | `packages/data/migrations/0051_model_hub_connection_commits.sql`                     | 不含密钥的 Model Hub 跨存储提交与补偿 journal。                  |
-|       55 | `packages/data/migrations/0052_continuous_story_state_route_receipts.sql`            | 连续故事状态提取的版本/路由完成收据。                            |
-|       56 | `packages/data/migrations/0053_writing_feedback_learning_policy_context.sql`         | 反馈发生时学习策略与自定义意见哈希簇。                           |
-|       57 | `packages/data/migrations/0054_writing_feedback_explicit_idempotency.sql`            | 明确反馈幂等身份与反馈/偏好原子同步边界。                        |
-|       58 | `packages/data/migrations/0055_continuous_story_state_historical_route_receipts.sql` | 合法历史状态回执的备份恢复约束。                                 |
-|       59 | `packages/data/migrations/0056_model_hub_failure_diagnostics.sql`                    | 能力扫描与调用事实的可空、脱敏 AI 失败诊断字段和索引。           |
-|       60 | `packages/data/migrations/0057_model_hub_content_quality_task.sql`                   | 为三张 Model Hub 表前向补齐内容质量检查任务合同。                |
-|       61 | `packages/data/migrations/0058_story_settings_import_receipts.sql`                   | 原子故事设定导入、冲突处理和可验证撤销所需的收据。               |
-|       62 | `packages/data/migrations/0059_generation_preflight_cost_status.sql`                 | 区分可估费用与价格未知，后者只提示而不阻断基础写作。             |
+| 原生版本 | SQL 来源                                                                             | 内容                                                              |
+| -------: | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+|        1 | `packages/data/migrations/0001_core.sql`                                             | 项目、章节、版本、草稿、AI 候选和审计。                           |
+|        2 | `packages/data/migrations/0002_tasks_notifications.sql`                              | 后台任务和通知。                                                  |
+|        3 | `packages/story-core/migrations/0001_story_core.sql`                                 | 大纲、正式记录、时间线、评审、记忆和 What-if。                    |
+|        4 | `packages/data/migrations/0003_sync_access.sql`                                      | 密文同步、访问快照和授权缓存。                                    |
+|        5 | `packages/data/migrations/0004_model_profiles.sql`                                   | 非秘密模型配置。                                                  |
+|        6 | `packages/story-core/migrations/0002_materials.sql`                                  | 素材和引用。                                                      |
+|        7 | `packages/data/migrations/0005_ai_generation_governance.sql`                         | 定价、预算和生成记录。                                            |
+|        8 | `packages/data/migrations/0006_search_index.sql`                                     | FTS 搜索投影。                                                    |
+|        9 | `packages/data/migrations/0007_model_routing_usage.sql`                              | 路由、尝试用量和延期生成。                                        |
+|       10 | `packages/data/migrations/0008_project_key_lifecycle.sql`                            | 设备公钥、项目密钥版本和信封。                                    |
+|       11 | `packages/data/migrations/0009_device_identity_names.sql`                            | 本地设备显示名。                                                  |
+|       12 | `packages/data/migrations/0010_sync_inbox.sql`                                       | 收件箱、远程 checkpoint 和设备序列。                              |
+|       13 | `packages/data/migrations/0011_cloud_project_key_checkpoints.sql`                    | 云项目密钥 checkpoint。                                           |
+|       14 | `packages/data/migrations/0012_cloud_project_key_publications.sql`                   | 崩溃安全发布状态。                                                |
+|       15 | `packages/data/migrations/0013_sync_snapshot_staging.sql`                            | 原子快照暂存。                                                    |
+|       16 | `packages/data/migrations/0014_sync_protocol_v2_object_types.sql`                    | 同步协议 v2 和对象类型。                                          |
+|       17 | `packages/data/migrations/0015_sync_materialization_authority.sql`                   | 注册、明文物化、冲突和投影任务。                                  |
+|       18 | `packages/data/migrations/0016_sync_snapshot_materialization_receipts.sql`           | 快照物化回执。                                                    |
+|       19 | `packages/data/migrations/0017_sync_projection_account_authority.sql`                | 投影任务绑定账户权威。                                            |
+|       20 | `packages/data/migrations/0018_sync_incremental_terminal_observations.sql`           | 增量拉取终态观察。                                                |
+|       21 | `packages/data/migrations/0019_cloud_deletion_journal.sql`                           | 云删除恢复日志。                                                  |
+|       22 | `packages/data/migrations/0020_graph_rag_projection.sql`                             | 可重建 Graph RAG 投影。                                           |
+|       23 | `packages/story-core/migrations/0003_ideation.sql`                                   | 构思草稿。                                                        |
+|       24 | `packages/data/migrations/0021_search_vector_index.sql`                              | 本地精确向量索引。                                                |
+|       25 | `packages/data/migrations/0022_team_project_key_receipts.sql`                        | 团队项目密钥回执元数据。                                          |
+|       26 | `packages/data/migrations/0023_authoritative_story_graph_epoch.sql`                  | 权威故事图 epoch。                                                |
+|       27 | `packages/data/migrations/0024_multi_agent_review.sql`                               | 多智能体评审。                                                    |
+|       28 | `packages/data/migrations/0025_governed_creative_extensions.sql`                     | 翻译、短剧、预算、同意和候选。                                    |
+|       29 | `packages/data/migrations/0026_team_template_applications.sql`                       | 团队模板本地应用回执。                                            |
+|       30 | `packages/data/migrations/0027_authoritative_extraction.sql`                         | 权威抽取任务、评估和决定。                                        |
+|       31 | `packages/data/migrations/0028_fine_tuning_governance.sql`                           | 微调数据、审批、任务、评估、部署和审计。                          |
+|       32 | `packages/data/migrations/0029_community_marketplace_installs.sql`                   | 社区市场安装记录。                                                |
+|       33 | `packages/data/migrations/0030_creative_journeys.sql`                                | 可恢复的一句话开书与导入创作旅程。                                |
+|       34 | `packages/data/migrations/0031_model_hub.sql`                                        | Model Hub 连接、目录、能力、路由、策略和调用事实。                |
+|       35 | `packages/data/migrations/0032_unified_story_facts.sql`                              | 统一、证据化 StoryFact 与修订/旧数据链接。                        |
+|       36 | `packages/data/migrations/0033_causal_event_graph.sql`                               | 可重建的因果事件图投影。                                          |
+|       37 | `packages/data/migrations/0034_context_compilation_trace.sql`                        | 不含正文的上下文编译历史。                                        |
+|       38 | `packages/data/migrations/0035_writing_feedback_learning.sql`                        | 用户可见、可控的写作反馈学习。                                    |
+|       39 | `packages/data/migrations/0036_story_planning_candidates.sql`                        | 只供审阅的 AI 剧情规划候选。                                      |
+|       40 | `packages/data/migrations/0037_model_hub_expert_options.sql`                         | 不含秘密的 Model Hub 专家连接元数据。                             |
+|       41 | `packages/data/migrations/0038_private_chapters.sql`                                 | 章节级仅本机隐私门禁与导出默认排除。                              |
+|       42 | `packages/data/migrations/0039_project_seeds.sql`                                    | 三条创建旅程共享、可修订的项目创作种子。                          |
+|       43 | `packages/data/migrations/0040_chapter_validation_snapshots.sql`                     | 绑定不可变章节版本的确定性检查快照。                              |
+|       44 | `packages/data/migrations/0041_story_planning_selective_acceptance.sql`              | 规划候选目标基线与逐项采纳回执。                                  |
+|       45 | `packages/data/migrations/0042_chapter_validation_snapshot_delete_cascade.sql`       | 修复检查快照在章节/项目删除与恢复时的级联语义。                   |
+|       46 | `packages/data/migrations/0043_story_fact_entity_alias_resolution.sql`               | 只允许受审计、带修订的实体别名人工消歧。                          |
+|       47 | `packages/data/migrations/0044_story_planning_selective_acceptance_intent.sql`       | 正式大纲变更前持久预留逐项采纳意图。                              |
+|       48 | `packages/data/migrations/0045_project_remote_dispatch_leases.sql`                   | 项目上下文远程派发的内容无关租约、隐私变更与删除防护。            |
+|       49 | `packages/data/migrations/0046_model_hub_zhipu_glm.sql`                              | 前向重建 Provider 连接约束，允许独立 GLM 连接类型。               |
+|       50 | `packages/data/migrations/0047_context_compilation_exact_provenance.sql`             | 上下文编译到 generation、调用事实和最终 Candidate 的不可变关联。  |
+|       51 | `packages/data/migrations/0048_candidate_application_intents.sql`                    | Candidate 任务语义、载荷形状、应用方式与 UTF-16 锚点。            |
+|       52 | `packages/data/migrations/0049_memory_governance_audit.sql`                          | 项目记忆忘却和人工合并的不可变治理审计。                          |
+|       53 | `packages/data/migrations/0050_candidate_revision_authority.sql`                     | Candidate 单调修订、CAS 决定和内容校验权威。                      |
+|       54 | `packages/data/migrations/0051_model_hub_connection_commits.sql`                     | 不含密钥的 Model Hub 跨存储提交与补偿 journal。                   |
+|       55 | `packages/data/migrations/0052_continuous_story_state_route_receipts.sql`            | 连续故事状态提取的版本/路由完成收据。                             |
+|       56 | `packages/data/migrations/0053_writing_feedback_learning_policy_context.sql`         | 反馈发生时学习策略与自定义意见哈希簇。                            |
+|       57 | `packages/data/migrations/0054_writing_feedback_explicit_idempotency.sql`            | 明确反馈幂等身份与反馈/偏好原子同步边界。                         |
+|       58 | `packages/data/migrations/0055_continuous_story_state_historical_route_receipts.sql` | 合法历史状态回执的备份恢复约束。                                  |
+|       59 | `packages/data/migrations/0056_model_hub_failure_diagnostics.sql`                    | 能力扫描与调用事实的可空、脱敏 AI 失败诊断字段和索引。            |
+|       60 | `packages/data/migrations/0057_model_hub_content_quality_task.sql`                   | 为三张 Model Hub 表前向补齐内容质量检查任务合同。                 |
+|       61 | `packages/data/migrations/0058_story_settings_import_receipts.sql`                   | 原子故事设定导入、冲突处理和可验证撤销所需的收据。                |
+|       62 | `packages/data/migrations/0059_generation_preflight_cost_status.sql`                 | 区分可估费用与价格未知，后者只提示而不阻断基础写作。              |
+|       63 | `packages/data/migrations/0060_novel_skill_registry.sql`                             | 默认关闭的 Novel Skill definition、项目 binding 和调用 snapshot。 |
+|       64 | `packages/data/migrations/0061_novel_skill_evaluation_ledger.sql`                    | 不含题目和输出内容的付费评测账本、证据与人工决定链。              |
+|       65 | `packages/data/migrations/0062_project_dispatch_active_guard.sql`                    | 已有项目派发租约存续时禁止项目离开 active。                       |
+|       66 | `packages/data/migrations/0063_novel_skill_evaluation_paid_runner.sql`               | 精确付费目标、商业授权、费用上限、reservation 与盲评。            |
+|       67 | `packages/data/migrations/0064_novel_skill_evaluation_predispatch_authority.sql`     | 内容无关的 payload 子哈希、能力/目标锁和派发前估价权威。          |
+|       68 | `packages/data/migrations/0065_model_invocation_dispatch_boundary.sql`               | 在现有调用事实上持久不含内容的 Provider 发送边界。                |
 
 规则：SQL 通过 `include_str!` 编译进二进制；缺失迁移不忽略、迁移加锁且逐条事务执行。已发布 migration 的内容、描述和顺序不能修改，只能新增。
 

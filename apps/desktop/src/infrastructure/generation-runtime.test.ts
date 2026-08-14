@@ -5,6 +5,12 @@ import type { NovelSkillDefinition, ProjectNovelSkillBinding } from "@inkshadow/
 import { createProjectSeed, parseUuidV7, updateProjectSeedField } from "@inkshadow/domain";
 
 import { ModelCenterError } from "./model-center-store";
+import {
+  readSafeGenerationErrorCodes,
+  readSafeGenerationPreflightForScope,
+  readSafeGenerationPreflightDiagnostic,
+  readSafeInvocationRouteDiagnostic,
+} from "./generation-preflight-diagnostics";
 import { TauriNovelSkillRuntime, type NovelSkillRuntimePersistence } from "./novel-skill-runtime";
 import type {
   CommitNovelSkillInvocationInput,
@@ -517,6 +523,215 @@ describe("governed generation runtime", () => {
         expect.objectContaining({ outputCandidateId: result.value.candidate.id }),
       ]),
     );
+  });
+
+  it("uses a valid Model Hub continuation route without consulting an unselected legacy profile", async () => {
+    const created = await createRemoteRuntime();
+    const legacy = await created.runtime.modelCenter.findByProviderId("remote-writer");
+    if (legacy === null) throw new Error("Expected the compatibility profile.");
+    await created.runtime.modelCenter.save({
+      providerId: legacy.providerId,
+      provider: legacy.provider,
+      baseUrl: legacy.baseUrl,
+      authentication: legacy.authentication,
+      selectedModel: null,
+      pricing: null,
+      expectedRevision: legacy.revision,
+    });
+    await seedModelHubContinuationRoute(created.runtime);
+    const legacyRead = vi
+      .spyOn(created.runtime.modelCenter, "listProfiles")
+      .mockRejectedValue(new Error("legacy profiles must not gate Model Hub continuation"));
+
+    const plan = await prepareGenerationPlan(created.runtime, created.chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    expect(plan).toMatchObject({
+      executionMode: "model_hub",
+      providerId: "reasoning-retry-model-hub",
+      modelId: "writer-model",
+      profile: null,
+    });
+    expect(plan.preflight.canStart).toBe(true);
+    expect(legacyRead).not.toHaveBeenCalled();
+    expect(readSafeInvocationRouteDiagnostic(created.runtime)).toMatchObject({
+      modelHubRouteFound: true,
+      legacyProfileChecked: false,
+      routeSource: "model_hub",
+      ready: true,
+      blockerCode: null,
+    });
+  });
+
+  it("uses the full-input fallback as the frozen continuation target", async () => {
+    const created = await createRemoteRuntime();
+    await seedModelHubContinuationRoute(created.runtime, {
+      primaryInputTokenLimit: 3_400,
+      includeFallback: true,
+    });
+
+    const plan = await prepareGenerationPlan(created.runtime, created.chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    expect(plan).toMatchObject({
+      executionMode: "model_hub",
+      providerId: "reasoning-retry-fallback-model-hub",
+      modelId: "fallback-writer-model",
+      routeReason: "model_hub_fallback",
+      routeRequiresConfirmation: true,
+    });
+    expect(readSafeInvocationRouteDiagnostic(created.runtime)).toMatchObject({
+      resolvedConnectionId: "reasoning-retry-fallback-model-hub",
+      resolvedModelId: "fallback-writer-model",
+      routeSource: "model_hub",
+      ready: true,
+    });
+  });
+
+  it("fails closed on an invalid existing Model Hub route and records the early preflight blocker", async () => {
+    const created = await createRemoteRuntime();
+    await seedModelHubContinuationRoute(created.runtime);
+    await created.runtime.modelHub.syncCatalog({
+      syncId: "invalid-existing-continuation-route-sync",
+      connectionId: "reasoning-retry-model-hub",
+      source: "manual",
+      status: "succeeded",
+      models: [
+        {
+          id: "reasoning-retry-model-hub-catalog",
+          providerModelId: "writer-model",
+          lifecycle: "deprecated",
+          inputTokenLimit: 32_000,
+          outputTokenLimit: 8_000,
+        },
+      ],
+    });
+    const legacyRead = vi
+      .spyOn(created.runtime.modelCenter, "listProfiles")
+      .mockRejectedValue(new Error("invalid Model Hub routes must not fall back to legacy"));
+    const startInvocation = vi.spyOn(created.runtime.modelHub, "startInvocation");
+    const createCandidate = vi.spyOn(created.runtime.repositories.aiCandidates, "create");
+    const createRun = vi.spyOn(created.runtime.generationGovernance, "createRun");
+
+    await expect(
+      prepareGenerationPlan(created.runtime, created.chapterId, {
+        chapterSaved: true,
+        networkAvailable: true,
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_CATALOG_ENTRY_UNAVAILABLE" });
+
+    expect(legacyRead).not.toHaveBeenCalled();
+    expect(readSafeInvocationRouteDiagnostic(created.runtime)).toMatchObject({
+      modelHubRouteFound: true,
+      legacyProfileChecked: false,
+      routeSource: "none",
+      ready: false,
+      blockerCode: "MODEL_HUB_CATALOG_ENTRY_UNAVAILABLE",
+    });
+    expect(readSafeGenerationPreflightDiagnostic(created.runtime)).toMatchObject({
+      taskType: "continuation",
+      routeFound: true,
+      readiness: "BLOCKED",
+      blockerCodes: ["MODEL_HUB_CATALOG_ENTRY_UNAVAILABLE"],
+    });
+    expect(readSafeGenerationErrorCodes(created.runtime)).toContain(
+      "MODEL_HUB_CATALOG_ENTRY_UNAVAILABLE",
+    );
+    const chapter = await created.runtime.repositories.chapters.findById(created.chapterId);
+    if (!chapter.ok || chapter.value === null) throw new Error("Expected the test chapter.");
+    expect(
+      readSafeGenerationPreflightForScope(created.runtime, {
+        projectId: chapter.value.projectId,
+        chapterId: chapter.value.id,
+      }),
+    ).toMatchObject({
+      readiness: "BLOCKED",
+      blockerCodes: ["MODEL_HUB_CATALOG_ENTRY_UNAVAILABLE"],
+    });
+    expect(startInvocation).not.toHaveBeenCalled();
+    expect(createCandidate).not.toHaveBeenCalled();
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("does not bypass an explicitly disabled Model Hub route through the legacy profile", async () => {
+    const created = await createRemoteRuntime();
+    await seedModelHubContinuationRoute(created.runtime);
+    const route = await created.runtime.modelHub.findTaskRoute("continuation");
+    if (route === null) throw new Error("Expected the continuation route.");
+    await created.runtime.modelHub.saveTaskRoute({
+      task: route.task,
+      primaryCatalogEntryId: route.primaryCatalogEntryId,
+      fallbackCatalogEntryId: route.fallbackCatalogEntryId,
+      presetId: route.presetId,
+      parameterPolicy: route.parameterPolicy,
+      maximumCostMicros: route.maximumCostMicros,
+      currency: route.currency,
+      privacyPolicy: route.privacyPolicy,
+      failurePolicy: route.failurePolicy,
+      routeOrigin: route.routeOrigin,
+      enabled: false,
+      expectedRevision: route.revision,
+    });
+    const legacyRead = vi.spyOn(created.runtime.modelCenter, "listProfiles");
+
+    await expect(
+      prepareGenerationPlan(created.runtime, created.chapterId, {
+        chapterSaved: true,
+        networkAvailable: true,
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_ROUTE_DISABLED" });
+
+    expect(legacyRead).not.toHaveBeenCalled();
+    expect(readSafeInvocationRouteDiagnostic(created.runtime)).toMatchObject({
+      modelHubRouteFound: true,
+      legacyProfileChecked: false,
+      routeSource: "none",
+      ready: false,
+      blockerCode: "MODEL_HUB_ROUTE_DISABLED",
+    });
+  });
+
+  it("publishes a scoped private-chapter blocker without creating billable or candidate state", async () => {
+    const created = await createRemoteRuntime();
+    const chapter = await created.runtime.repositories.chapters.findById(created.chapterId);
+    if (!chapter.ok || chapter.value === null) throw new Error("Expected the test chapter.");
+    const privateChapter = await created.runtime.useCases.setChapterPrivacy.execute({
+      chapterId: chapter.value.id,
+      privacyMode: "local_only",
+      expectedPrivacyRevision: chapter.value.privacyRevision,
+    });
+    if (!privateChapter.ok) throw privateChapter.error;
+    await seedModelHubContinuationRoute(created.runtime);
+    const generate = vi.spyOn(created.runtime.modelGateway, "generate");
+    const startInvocation = vi.spyOn(created.runtime.modelHub, "startInvocation");
+    const createCandidate = vi.spyOn(created.runtime.repositories.aiCandidates, "create");
+    const createRun = vi.spyOn(created.runtime.generationGovernance, "createRun");
+
+    await expect(
+      prepareGenerationPlan(created.runtime, created.chapterId, {
+        chapterSaved: true,
+        networkAvailable: true,
+      }),
+    ).rejects.toMatchObject({ code: "PRIVATE_CHAPTER_LOCAL_ONLY" });
+
+    expect(
+      readSafeGenerationPreflightForScope(created.runtime, {
+        projectId: privateChapter.value.chapter.projectId,
+        chapterId: privateChapter.value.chapter.id,
+      }),
+    ).toMatchObject({
+      taskType: "continuation",
+      readiness: "BLOCKED",
+      blockerCodes: ["PRIVATE_CHAPTER_LOCAL_ONLY"],
+    });
+    expect(generate).not.toHaveBeenCalled();
+    expect(startInvocation).not.toHaveBeenCalled();
+    expect(createCandidate).not.toHaveBeenCalled();
+    expect(createRun).not.toHaveBeenCalled();
   });
 
   it("fails closed before provider dispatch when an enabled writing method changes after preparation", async () => {
@@ -1218,7 +1433,13 @@ async function createRemoteRuntime(
   };
 }
 
-async function seedModelHubContinuationRoute(runtime: DesktopRuntime): Promise<void> {
+async function seedModelHubContinuationRoute(
+  runtime: DesktopRuntime,
+  options: Readonly<{
+    primaryInputTokenLimit?: number;
+    includeFallback?: boolean;
+  }> = {},
+): Promise<void> {
   const connection = await runtime.modelHub.saveConnection({
     id: "reasoning-retry-model-hub",
     providerKind: "custom_openai_compatible",
@@ -1243,7 +1464,7 @@ async function seedModelHubContinuationRoute(runtime: DesktopRuntime): Promise<v
         id: "reasoning-retry-model-hub-catalog",
         providerModelId: "writer-model",
         lifecycle: "stable",
-        inputTokenLimit: 32_000,
+        inputTokenLimit: options.primaryInputTokenLimit ?? 32_000,
         outputTokenLimit: 8_000,
         staleAfter: "2027-08-10T00:00:00.000Z",
       },
@@ -1279,11 +1500,75 @@ async function seedModelHubContinuationRoute(runtime: DesktopRuntime): Promise<v
     evidenceVersion: "generation-runtime-reasoning-retry-v1",
     expectedRevision: null,
   });
+  if (options.includeFallback === true) {
+    const fallback = await runtime.modelHub.saveConnection({
+      id: "reasoning-retry-fallback-model-hub",
+      providerKind: "custom_openai_compatible",
+      displayName: "Reasoning retry fallback Model Hub fixture",
+      baseUrlOverride: "https://fallback-models.example/v1",
+      credentialState: "missing",
+      authenticationMode: "none",
+      expectedRevision: null,
+    });
+    await runtime.modelHub.recordConnectionTest({
+      connectionId: fallback.id,
+      status: "ready",
+      expectedRevision: fallback.revision,
+    });
+    await runtime.modelHub.syncCatalog({
+      syncId: "reasoning-retry-fallback-model-hub-sync",
+      connectionId: fallback.id,
+      source: "manual",
+      status: "succeeded",
+      models: [
+        {
+          id: "reasoning-retry-fallback-model-hub-catalog",
+          providerModelId: "fallback-writer-model",
+          lifecycle: "stable",
+          inputTokenLimit: 32_000,
+          outputTokenLimit: 8_000,
+          staleAfter: "2027-08-10T00:00:00.000Z",
+        },
+      ],
+    });
+    await runtime.modelHub.recordCapabilityScan({
+      scanId: "reasoning-retry-fallback-model-hub-scan",
+      catalogEntryId: "reasoning-retry-fallback-model-hub-catalog",
+      scanKind: "lightweight_probe",
+      status: "succeeded",
+      evidenceVersion: "generation-runtime-reasoning-retry-fallback-v1",
+      evidence: [
+        {
+          id: "reasoning-retry-fallback-model-hub-text",
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "lightweight_probe",
+        },
+      ],
+    });
+    await runtime.modelHub.saveCostPrivacyProfile({
+      catalogEntryId: "reasoning-retry-fallback-model-hub-catalog",
+      currency: "USD",
+      inputMicrosPerMillionTokens: "1000000",
+      outputMicrosPerMillionTokens: "2000000",
+      cachedInputMicrosPerMillionTokens: null,
+      pricingVersion: "generation-runtime-reasoning-retry-fallback-v1",
+      priceUpdatedAt: "2026-08-10T00:00:00.000Z",
+      dataDestination: "remote",
+      retentionPolicy: "provider_default",
+      trainingPolicy: "unknown",
+      evidenceSource: "user_confirmed",
+      evidenceVersion: "generation-runtime-reasoning-retry-fallback-v1",
+      expectedRevision: null,
+    });
+  }
   await runtime.modelHub.saveTaskRoute({
     task: "continuation",
     primaryCatalogEntryId: "reasoning-retry-model-hub-catalog",
+    fallbackCatalogEntryId:
+      options.includeFallback === true ? "reasoning-retry-fallback-model-hub-catalog" : null,
     privacyPolicy: "cloud_allowed",
-    failurePolicy: "stop",
+    failurePolicy: options.includeFallback === true ? "use_fallback" : "stop",
     routeOrigin: "user",
     expectedRevision: null,
   });

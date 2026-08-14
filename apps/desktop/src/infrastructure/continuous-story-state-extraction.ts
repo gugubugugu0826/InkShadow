@@ -312,13 +312,17 @@ interface ContinuousStoryStateExtractionDependencies {
 
 const REFERENCE_PREFIX = "continuous-story-state";
 const MAXIMUM_CANDIDATES_PER_TASK = 128;
+export const CONTINUOUS_STORY_STATE_EXPLICIT_CLOUD_AUTHORIZATION_REQUIRED =
+  "CONTINUOUS_STORY_STATE_EXPLICIT_CLOUD_AUTHORIZATION_REQUIRED" as const;
 
 /** Automatic persistence must never silently incur provider work or cost. */
 export function shouldRunContinuousStoryStateExtraction(
   reason: "autosave" | "manual",
   automaticOnManualSaveEnabled: boolean,
 ): boolean {
-  return reason === "manual" && automaticOnManualSaveEnabled;
+  void reason;
+  void automaticOnManualSaveEnabled;
+  return false;
 }
 
 /**
@@ -332,11 +336,14 @@ export class ContinuousStoryStateExtractionService {
   public constructor(private readonly dependencies: ContinuousStoryStateExtractionDependencies) {}
 
   public isAutomaticOnManualSaveEnabled(projectId: string): boolean {
-    return this.dependencies.preferences.isContinuousStoryStateOnManualSaveEnabled(projectId);
+    // A stored legacy preference is not consent to transmit accepted chapter text.
+    void projectId;
+    return false;
   }
 
   public setAutomaticOnManualSaveEnabled(projectId: string, enabled: boolean): void {
-    this.dependencies.preferences.setContinuousStoryStateOnManualSaveEnabled(projectId, enabled);
+    void enabled;
+    this.dependencies.preferences.setContinuousStoryStateOnManualSaveEnabled(projectId, false);
   }
 
   public extractAfterSave(input: {
@@ -362,16 +369,31 @@ export class ContinuousStoryStateExtractionService {
     readonly versionId: string;
     readonly force?: boolean;
   }): Promise<ContinuousStoryStateExtractionReceipt> {
-    const routeKey = `${input.projectId}:${input.chapterId}:${input.versionId}`;
-    const running = this.inFlight.get(routeKey);
-    if (running !== undefined) {
-      return running;
+    if (isContinuousStoryStateCloudDispatchImplemented()) {
+      const routeKey = `${input.projectId}:${input.chapterId}:${input.versionId}`;
+      const running = this.inFlight.get(routeKey);
+      if (running !== undefined) {
+        return running;
+      }
+      const extraction = this.extractSavedVersionOnce(input).finally(() => {
+        this.inFlight.delete(routeKey);
+      });
+      this.inFlight.set(routeKey, extraction);
+      return extraction;
     }
-    const extraction = this.extractSavedVersionOnce(input).finally(() => {
-      this.inFlight.delete(routeKey);
-    });
-    this.inFlight.set(routeKey, extraction);
-    return extraction;
+    // This legacy direct API has no independent disclosure/authorization token
+    // and no durable dispatched/ambiguous ledger. It therefore cannot cross the
+    // provider boundary, even when an old project preference or route exists.
+    void input;
+    return Promise.resolve(
+      emptyReceipt(
+        "skipped",
+        CONTINUOUS_STORY_STATE_TASKS.map((task) => ({
+          task,
+          code: CONTINUOUS_STORY_STATE_EXPLICIT_CLOUD_AUTHORIZATION_REQUIRED,
+        })),
+      ),
+    );
   }
 
   public async inspectProject(projectIdValue: string): Promise<ContinuousStoryStateDashboard> {
@@ -1557,6 +1579,11 @@ function evidenceReference(
   checksum: string,
 ): string {
   return `${REFERENCE_PREFIX}:${task}:${versionId}:sha256:${checksum}`;
+}
+
+/** No production implementation exists until the independent consent ledger is shipped. */
+function isContinuousStoryStateCloudDispatchImplemented(): boolean {
+  return false;
 }
 
 function readChecksumFromReference(reference: string): string | null {

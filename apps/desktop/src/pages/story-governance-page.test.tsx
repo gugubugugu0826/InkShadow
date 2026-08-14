@@ -37,10 +37,12 @@ describe("StoryGovernancePage", () => {
     ]);
     expect(screen.getByText("还没有人物设定")).toBeVisible();
     expect(screen.queryByRole("tab", { name: "AI 参考记录" })).not.toBeInTheDocument();
-    const recognitionButton = screen.getByRole("button", { name: "重新识别最近一章" });
+    const recognitionButton = screen.getByRole("button", {
+      name: "重新识别最近一章（暂不可用）",
+    });
     expect(recognitionButton).toBeVisible();
-    await user.click(recognitionButton);
-    expect(await screen.findByText("还没有可识别的正文")).toBeVisible();
+    expect(recognitionButton).toBeDisabled();
+    expect(screen.getByText("逐章云端识别暂不可用")).toBeVisible();
     await user.click(screen.getByRole("tab", { name: "世界与规则" }));
     expect(screen.getByText("还没有世界设定")).toBeVisible();
     const addButton = screen.getAllByRole("button", { name: "添加世界设定" })[0];
@@ -753,7 +755,7 @@ describe("StoryGovernancePage", () => {
       items.value[0]?.toSnapshot().sourceVersionId,
     );
   });
-  it("keeps save-triggered model work off until the project explicitly opts in", async () => {
+  it("retires legacy save-triggered model preferences and keeps cloud recognition unavailable", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const project = await runtime.useCases.createProject.execute({ name: "隐私门测试" });
     if (!project.ok) throw project.error;
@@ -770,13 +772,11 @@ describe("StoryGovernancePage", () => {
     expect(runtime.story.chapterSummaries.isAutomaticOnManualSaveEnabled(project.value.id)).toBe(
       false,
     );
-    expect(screen.getByText(/完整已保存章节.*人物提取.*世界设定提取/u)).toBeVisible();
-
-    await user.click(screen.getByRole("button", { name: "启用手动保存后识别" }));
+    expect(screen.getByText("逐章云端识别暂不可用")).toBeVisible();
+    expect(screen.getByText(/完整正文.*最多两次 Provider 调用/u)).toBeVisible();
     expect(runtime.story.continuousState.isAutomaticOnManualSaveEnabled(project.value.id)).toBe(
-      true,
+      false,
     );
-    expect(screen.getByRole("button", { name: "暂停自动识别" })).toBeVisible();
     expect(runtime.story.chapterSummaries.isAutomaticOnManualSaveEnabled(project.value.id)).toBe(
       false,
     );

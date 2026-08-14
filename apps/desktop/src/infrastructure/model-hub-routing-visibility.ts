@@ -8,6 +8,10 @@ import {
   preferredCapabilitiesForNovelTask,
   requiredCapabilitiesForNovelTask,
 } from "./model-hub-router";
+import {
+  modelHubReadinessBlockerLabel,
+  type ModelHubReadinessBlocker,
+} from "./model-hub-readiness";
 import type {
   ModelCapabilityEvidence,
   ModelCatalogEntry,
@@ -110,6 +114,8 @@ export interface BuildModelHubRoutingVisibilityInput {
   readonly validating: boolean;
   readonly loadFailed: boolean;
   readonly saveFailed: boolean;
+  /** Safe blockers from the exact no-dispatch resolver used by generation. */
+  readonly exactBlockers?: readonly ModelHubReadinessBlocker[];
 }
 
 export interface AiRoutingDiagnosticSummary {
@@ -283,6 +289,9 @@ export function buildModelHubRoutingVisibility(
   );
   const enabledRoutes = input.routes.filter(({ enabled }) => enabled);
   const routeByTask = new Map(enabledRoutes.map((route) => [route.task, route] as const));
+  const exactBlockerByTask = new Map(
+    (input.exactBlockers ?? []).map((blocker) => [blocker.task, blocker] as const),
+  );
   const taskProjections = MODEL_HUB_TASK_REGISTRY.map((definition) => {
     const route = routeByTask.get(definition.task) ?? null;
     if (route === null) {
@@ -317,7 +326,11 @@ export function buildModelHubRoutingVisibility(
     const missingCapabilities = definition.requiredCapabilities.filter(
       (capability) => primaryProjection === undefined || !supports(primaryProjection, capability),
     );
-    const failed = primaryProjection === undefined || missingCapabilities.length > 0;
+    const exactBlocker = exactBlockerByTask.get(definition.task);
+    const failed =
+      exactBlocker !== undefined ||
+      primaryProjection === undefined ||
+      missingCapabilities.length > 0;
     return Object.freeze({
       definition,
       route,
@@ -326,13 +339,19 @@ export function buildModelHubRoutingVisibility(
       status: failed ? ("failed" as const) : ("configured" as const),
       missingCapabilities: Object.freeze(missingCapabilities),
       reason: failed
-        ? primaryModel === null
-          ? "已保存的主模型已不在当前模型目录中。"
-          : primaryProjection === undefined
-            ? "已保存的主模型当前未连接或不可用。"
-            : `主模型缺少有效的${missingCapabilities.map(capabilityLabel).join("、")}能力证据。`
+        ? exactBlocker !== undefined
+          ? `基础配置检查未通过：${modelHubReadinessBlockerLabel(exactBlocker.code)}。`
+          : primaryModel === null
+            ? "已保存的主模型已不在当前模型目录中。"
+            : primaryProjection === undefined
+              ? "已保存的主模型当前未连接或不可用。"
+              : `主模型缺少有效的${missingCapabilities.map(capabilityLabel).join("、")}能力证据。`
         : "任务已分配给当前可用且能力匹配的模型。",
-      nextStep: failed ? "检查连接和能力验证，或在专家模式中重新选择这一项的模型。" : "无需操作。",
+      nextStep: failed
+        ? exactBlocker !== undefined
+          ? "前往“连接与模型”修复后重新验证；不要通过重复生成绕过确定性错误。"
+          : "检查连接和能力验证，或在专家模式中重新选择这一项的模型。"
+        : "无需操作。",
       lastVerifiedAt: primaryProjection?.lastVerifiedAt ?? null,
     });
   });

@@ -14,7 +14,6 @@ import {
 
 import type {
   ChapterSummaryDashboard,
-  ChapterSummaryGenerationReceipt,
   ChapterSummaryService,
 } from "../infrastructure/chapter-summary-service";
 import type {
@@ -28,10 +27,7 @@ import type {
 
 export type ChapterSummaryPanelService = Pick<
   ChapterSummaryService,
-  | "inspectProject"
-  | "setAutomaticOnManualSaveEnabled"
-  | "summarizeSavedVersion"
-  | "clearChapterSummary"
+  "inspectProject" | "setAutomaticOnManualSaveEnabled" | "clearChapterSummary"
 >;
 
 export type HistoricalChapterBackfillPanelService = Pick<
@@ -60,7 +56,6 @@ export function ChapterSummaryPanel({
   const [dashboard, setDashboard] = useState<ChapterSummaryDashboard | null>(null);
   const [continuousDashboard, setContinuousDashboard] =
     useState<ContinuousStoryStateDashboard | null>(null);
-  const [continuousAutomaticEnabled, setContinuousAutomaticEnabled] = useState(false);
   const [busyChapterId, setBusyChapterId] = useState<string | null>(null);
   const [storedBackfillPlan, setBackfillPlan] = useState<HistoricalChapterBackfillPlan | null>(
     null,
@@ -81,9 +76,17 @@ export function ChapterSummaryPanel({
         service.inspectProject(projectId),
         continuousState.inspectProject(projectId),
       ]);
-      setDashboard(summaryState);
+      // Earlier releases stored project-level switches that could cause a later
+      // manual save or recovery worker to send正文.  They are retired on read;
+      // accepted-version work is now local-only for every source.
+      if (summaryState.automaticOnManualSaveEnabled) {
+        service.setAutomaticOnManualSaveEnabled(projectId, false);
+      }
+      if (continuousState.isAutomaticOnManualSaveEnabled(projectId)) {
+        continuousState.setAutomaticOnManualSaveEnabled(projectId, false);
+      }
+      setDashboard({ ...summaryState, automaticOnManualSaveEnabled: false });
       setContinuousDashboard(continuousStateDashboard);
-      setContinuousAutomaticEnabled(continuousState.isAutomaticOnManualSaveEnabled(projectId));
     } catch (cause: unknown) {
       setNotice({
         tone: "error",
@@ -98,65 +101,6 @@ export function ChapterSummaryPanel({
   useEffect(() => {
     void Promise.resolve().then(load);
   }, [load]);
-
-  function toggleAutomatic(): void {
-    if (dashboard === null || readOnly) {
-      return;
-    }
-    const enabled = !dashboard.automaticOnManualSaveEnabled;
-    service.setAutomaticOnManualSaveEnabled(projectId, enabled);
-    setDashboard({ ...dashboard, automaticOnManualSaveEnabled: enabled });
-    setBackfillPlan(null);
-    setNotice({
-      tone: "info",
-      title: enabled ? "已启用手动保存后更新" : "已暂停自动更新",
-      description: enabled
-        ? "以后每次手动保存新版本时最多调用一次长程记忆压缩；自动保存仍不会调用模型，供应商可能收取费用。"
-        : "手动保存和自动保存都不会自动调用摘要模型；你仍可按章节显式重建。",
-    });
-  }
-
-  function toggleContinuousAutomatic(): void {
-    if (readOnly) {
-      return;
-    }
-    const enabled = !continuousAutomaticEnabled;
-    continuousState.setAutomaticOnManualSaveEnabled(projectId, enabled);
-    setContinuousAutomaticEnabled(enabled);
-    setBackfillPlan(null);
-    setNotice({
-      tone: "info",
-      title: enabled ? "已启用手动保存后识别故事变化" : "已暂停自动识别故事变化",
-      description: enabled
-        ? "以后每次手动保存新版本，完整已保存章节可能分别发送给“人物提取”和“世界设定提取”两个当前路由，最多两次模型调用并可能产生两次费用；自动保存仍不会发送。"
-        : "手动保存与自动保存都不会自动发送章节；你仍可显式使用“重新识别最近一章”。",
-    });
-  }
-
-  async function rebuild(chapterId: string, versionId: string): Promise<void> {
-    setBusyChapterId(chapterId);
-    try {
-      const receipt = await service.summarizeSavedVersion({
-        projectId,
-        chapterId,
-        versionId,
-        trigger: "user_rebuild",
-      });
-      setNotice(receiptNotice(receipt));
-      await load();
-    } catch (cause: unknown) {
-      setNotice({
-        tone: "error",
-        title: "章节摘要重建失败",
-        description:
-          cause instanceof Error
-            ? cause.message
-            : "正文与已有摘要均未被修改，请检查模型连接后重试。",
-      });
-    } finally {
-      setBusyChapterId(null);
-    }
-  }
 
   async function clear(chapterId: string): Promise<void> {
     setBusyChapterId(chapterId);
@@ -192,7 +136,7 @@ export function ChapterSummaryPanel({
         tone: "info",
         title: "只读计划已生成",
         description:
-          "本次只核验章节与现有后台任务，没有发送正文、调用模型或登记新任务。请确认数量与可能费用后再继续。",
+          "本次只核验章节与现有后台任务，没有发送正文、调用模型或登记新任务。确认后也只会登记本地搜索与故事关联重建。",
       });
     } catch (cause: unknown) {
       setNotice({
@@ -206,7 +150,12 @@ export function ChapterSummaryPanel({
   }
 
   async function confirmHistoricalBackfill(): Promise<void> {
-    if (backfillPlan === null || backfillPlan.willRegisterTaskCount === 0 || readOnly) {
+    if (
+      backfillPlan === null ||
+      backfillPlan.willRegisterTaskCount === 0 ||
+      backfillPlan.possibleRemoteProviderCallUpperBound.total > 0 ||
+      readOnly
+    ) {
       return;
     }
     setBackfillBusy(true);
@@ -236,7 +185,7 @@ export function ChapterSummaryPanel({
       setNotice({
         tone: "info",
         title: "现有章节任务已登记",
-        description: `新增 ${receipt.createdTaskCount.toLocaleString("zh-CN")} 个任务，已有 ${receipt.alreadyRegisteredTaskCount.toLocaleString("zh-CN")} 个任务无需重复登记。后台会分批恢复，登记不会阻塞或修改正文。${refreshNote}`,
+        description: `新增 ${receipt.createdTaskCount.toLocaleString("zh-CN")} 个本地任务，已有 ${receipt.alreadyRegisteredTaskCount.toLocaleString("zh-CN")} 个任务无需重复登记。后台只会分批重建本地搜索与故事关联，精确 0 次 Provider 调用，不会阻塞或修改正文。${refreshNote}`,
       });
     } catch (cause: unknown) {
       setNotice({
@@ -256,22 +205,15 @@ export function ChapterSummaryPanel({
         <div>
           <h2 id="continuous-story-state-title">手动保存后的故事变化识别</h2>
           <p>
-            默认关闭。启用后，墨影会在手动保存新版本后识别人设、人物状态、世界设定和剧情变化；自动保存永不发送正文。
+            已停用自动云处理。接受建议、手动保存、恢复版本和启动恢复都只更新本地正文、版本与本地派生状态。
           </p>
         </div>
-        <Button
-          size="sm"
-          variant={continuousAutomaticEnabled ? "secondary" : "primary"}
-          disabled={loading || readOnly}
-          onClick={toggleContinuousAutomatic}
-        >
-          {continuousAutomaticEnabled ? "暂停自动识别" : "启用手动保存后识别"}
-        </Button>
+        <Badge tone="neutral">自动云处理已停用</Badge>
       </div>
       <InlineAlert
-        tone="warning"
-        title="启用前请确认正文发送范围与费用"
-        description="一次手动保存可能把完整已保存章节分别发送给“人物提取”和“世界设定提取”两个当前 Model Hub 路由，最多产生两次模型调用及对应供应商费用。结果只会成为可追溯的待确认或可撤销变化，不会覆盖正文或自动成为重大正式设定。"
+        tone="info"
+        title="保存与恢复精确 0 次 Provider 调用"
+        description="配置模型不代表同意发送正文。故事变化识别只会在独立授权流程能够持久记录发送范围、精确 Provider/模型、费用、调用上限、取消和不确定结果后重新开放。"
       />
       {continuousProviderAssignments(continuousDashboard).length > 0 && (
         <p className="candidate-panel__hint">
@@ -287,16 +229,7 @@ export function ChapterSummaryPanel({
           </p>
         </div>
         <div className="story-governance-actions">
-          <Button
-            size="sm"
-            variant={dashboard?.automaticOnManualSaveEnabled === true ? "secondary" : "primary"}
-            disabled={loading || dashboard === null || readOnly}
-            onClick={toggleAutomatic}
-          >
-            {dashboard?.automaticOnManualSaveEnabled === true
-              ? "暂停自动更新"
-              : "启用手动保存后更新"}
-          </Button>
+          <Badge tone="neutral">自动云处理已停用</Badge>
           <Button size="sm" variant="secondary" disabled={loading} onClick={() => void load()}>
             刷新状态
           </Button>
@@ -305,8 +238,8 @@ export function ChapterSummaryPanel({
 
       <InlineAlert
         tone="warning"
-        title="默认关闭，自动保存永不调用模型"
-        description="启用后，只有你手动保存出一个新版本才会最多调用一次“长程记忆压缩”，可能产生供应商费用。按章节点击“重建摘要”也会明确调用一次模型。"
+        title="逐章云端重建暂不可用"
+        description="一次重建会发送完整已保存章节并可能产生一次费用。当前页面还不能在派发前持久展示精确 Provider、精确模型并把不确定结果锁定为不可重发，因此按钮保持停用；正文和已有摘要不受影响。"
       />
 
       <details className="chapter-backfill" data-testid="historical-backfill-advanced">
@@ -316,12 +249,13 @@ export function ChapterSummaryPanel({
             只检查当前作品中启用、非空且能与不可变保存版本完全核验的章节。计划和每次登记前都按当前稳定版本核验，不追溯所有历史版本；如果核验后恰好又保存了新版本，后台执行会再次拦截旧任务，正文不会改变。
           </p>
           <p className="candidate-panel__hint">
-            第一步只生成只读计划，不发送正文。你可以先关闭上方“手动保存后识别”和“手动保存后更新”开关，再重新生成计划以关闭对应模型阶段。
+            第一步只生成只读计划，不发送正文。确认后只登记本地搜索与故事关联重建，不包含章节摘要或设定识别，精确
+            0 次 Provider 调用。
           </p>
           <Button
             size="sm"
             variant="secondary"
-            disabled={backfillBusy || readOnly}
+            disabled={loading || backfillBusy || readOnly}
             loading={backfillBusy && backfillPlan === null}
             onClick={() => void previewHistoricalBackfill()}
           >
@@ -356,8 +290,16 @@ export function ChapterSummaryPanel({
                 tone={
                   backfillPlan.possibleRemoteProviderCallUpperBound.total > 0 ? "warning" : "info"
                 }
-                title="可能发送给远程供应商的调用上限"
-                description={`仅统计允许远程处理的标准章节：章节摘要 ${backfillPlan.possibleRemoteProviderCallUpperBound.chapterSummary.toLocaleString("zh-CN")} 次，人物与世界设定识别 ${backfillPlan.possibleRemoteProviderCallUpperBound.storyState.toLocaleString("zh-CN")} 次，合计最多 ${backfillPlan.possibleRemoteProviderCallUpperBound.total.toLocaleString("zh-CN")} 次。摘要阶段${backfillPlan.modelStages.chapterSummaryEnabled ? "已开启" : "已关闭"}，设定识别阶段${backfillPlan.modelStages.storyStateEnabled ? "已开启" : "已关闭"}。仅本机章节不计入远程上限；它们只能由已验证的本地模型处理，本地调用次数取决于实际路由。远程供应商可能按实际调用收费。`}
+                title={
+                  backfillPlan.possibleRemoteProviderCallUpperBound.total > 0
+                    ? "旧云阶段计划已停用"
+                    : "Provider 调用上限：0 次"
+                }
+                description={
+                  backfillPlan.possibleRemoteProviderCallUpperBound.total > 0
+                    ? "这份计划包含旧的自动云阶段，不能登记。请刷新页面退役旧开关，再重新生成只包含本地搜索与故事关联的计划。"
+                    : "历史章节回填只重建本地搜索与故事关联。不登记章节摘要或设定识别阶段，不发送正文，不产生 Provider 费用。"
+                }
               />
               <p className="candidate-panel__hint">
                 空章节排除 {backfillPlan.excludedEmptyChapterCount.toLocaleString("zh-CN")}{" "}
@@ -366,21 +308,27 @@ export function ChapterSummaryPanel({
                 章。符合条件的章节中有 {backfillPlan.localOnlyChapterCount.toLocaleString("zh-CN")}{" "}
                 个本地私密章节，本次待登记{" "}
                 {backfillPlan.willRegisterLocalOnlyChapterCount.toLocaleString("zh-CN")}{" "}
-                个；远程路由会在发送正文前失败关闭，配置并验证可用的本地模型后仍可继续处理，因此计入远程供应商调用上限的次数为
-                0。
+                个；私密章节与普通章节遵守同一纯本地回填边界。
               </p>
               <p className="candidate-panel__hint">
-                确认后只登记可恢复任务，不会立即把整本书发给模型。现有后台处理器会分批执行，基础本地派生阶段仍可运行，正文编辑不被阻塞。
+                确认后只登记可恢复的本地任务。现有后台处理器会分批执行，正文编辑不被阻塞。
               </p>
               <Button
                 size="sm"
-                disabled={readOnly || backfillBusy || backfillPlan.willRegisterTaskCount === 0}
+                disabled={
+                  readOnly ||
+                  backfillBusy ||
+                  backfillPlan.willRegisterTaskCount === 0 ||
+                  backfillPlan.possibleRemoteProviderCallUpperBound.total > 0
+                }
                 loading={backfillBusy}
                 onClick={() => void confirmHistoricalBackfill()}
               >
                 {backfillPlan.willRegisterTaskCount === 0
                   ? "当前无需登记"
-                  : `确认并登记 ${backfillPlan.willRegisterTaskCount.toLocaleString("zh-CN")} 个后台任务`}
+                  : backfillPlan.possibleRemoteProviderCallUpperBound.total > 0
+                    ? "旧云阶段计划不可登记"
+                    : `确认并登记 ${backfillPlan.willRegisterTaskCount.toLocaleString("zh-CN")} 个后台任务`}
               </Button>
             </div>
           )}
@@ -433,11 +381,11 @@ export function ChapterSummaryPanel({
               <CardFooter>
                 <Button
                   size="sm"
-                  disabled={readOnly || busyChapterId !== null}
+                  disabled
                   loading={busyChapterId === entry.chapterId}
-                  onClick={() => void rebuild(entry.chapterId, entry.currentVersionId)}
+                  title="独立云派生授权与不确定结果防重机制完成后开放"
                 >
-                  重建摘要（调用一次模型）
+                  重建摘要（暂不可用）
                 </Button>
                 {entry.factId !== null && (
                   <Button
@@ -468,27 +416,6 @@ function summaryStateLabel(state: ChapterSummaryDashboard["entries"][number]["st
       return "无法核验";
     case "missing":
       return "未生成";
-  }
-}
-
-function receiptNotice(receipt: ChapterSummaryGenerationReceipt) {
-  switch (receipt.status) {
-    case "generated":
-      return { tone: "info" as const, title: "章节摘要已重建", description: receipt.message };
-    case "already_current":
-      return { tone: "info" as const, title: "摘要已是最新", description: receipt.message };
-    case "skipped":
-      return {
-        tone: "warning" as const,
-        title: "本次未调用或未生成摘要",
-        description: `${receipt.message}（${receipt.code}）`,
-      };
-    case "failed":
-      return {
-        tone: "error" as const,
-        title: "章节摘要重建失败",
-        description: `${receipt.message}（${receipt.code}）`,
-      };
   }
 }
 

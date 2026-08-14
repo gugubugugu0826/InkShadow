@@ -7,6 +7,7 @@ import {
 import {
   finishModelHubDiagnosticAction,
   readSafeModelHubSessionDiagnostics,
+  recordModelHubUiUnmount,
   recordModelHubUiSnapshot,
   startModelHubDiagnosticAction,
 } from "./model-hub-ui-diagnostics";
@@ -109,8 +110,8 @@ describe("safe Model Hub UI diagnostics", () => {
       hydrationStartedAt: null,
       credentialUiStatus: "configured",
       catalogUiStatus: "ready",
-      selectedConnectionId: "deepseek",
-      selectedModelIdInUi: "deepseek-model",
+      selectedConnectionId: null,
+      selectedModelIdInUi: null,
       lastSnapshotRevision: 2,
     });
     expect(diagnostic.recentModelHubActions).toEqual([
@@ -125,6 +126,49 @@ describe("safe Model Hub UI diagnostics", () => {
     expect(JSON.stringify(diagnostic)).not.toContain("apiKey");
     expect(JSON.stringify(diagnostic)).not.toContain("Authorization");
     expect(JSON.stringify(diagnostic)).not.toContain("prompt");
+  });
+
+  it("projects untrusted identifiers and error text before they enter diagnostics", () => {
+    const owner = {};
+    const sentinel = "LEAK_ME_正文_sk-secret";
+    const token = new ModelHubOperationCoordinator().begin("discover_models", {
+      providerKind: "deepseek",
+      connectionId: `connection-${sentinel}`,
+      modelId: `model-${sentinel}`,
+    });
+    startModelHubDiagnosticAction(owner, token, "2026-08-10T00:00:00.000Z");
+    finishModelHubDiagnosticAction(owner, token, {
+      completedAt: "2026-08-10T00:00:01.000Z",
+      outcome: "failed",
+      errorCode: `API_KEY_${sentinel}`,
+    });
+    const diagnostic = readSafeModelHubSessionDiagnostics(owner, "2026-08-10T00:00:02.000Z");
+
+    expect(diagnostic.recentModelHubActions[0]).toMatchObject({
+      connectionId: null,
+      modelId: null,
+      errorCode: "MODEL_HUB_ACTION_FAILED",
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain(sentinel);
+  });
+
+  it("marks the Model Hub UI unmounted without discarding its last safe snapshot", () => {
+    const owner = {};
+    recordModelHubUiSnapshot(
+      owner,
+      createInitialModelHubPageSnapshot(),
+      "2026-08-10T00:00:00.000Z",
+    );
+
+    recordModelHubUiUnmount(owner, "2026-08-10T00:00:01.000Z");
+
+    expect(
+      readSafeModelHubSessionDiagnostics(owner, "2026-08-10T00:00:02.000Z").modelHubUiSnapshot,
+    ).toMatchObject({
+      pageMounted: false,
+      pageMountedAt: "2026-08-10T00:00:00.000Z",
+      pageUnmountedAt: "2026-08-10T00:00:01.000Z",
+    });
   });
 
   it("keeps a new mount bootstrap distinct when the old mount finishes late", () => {

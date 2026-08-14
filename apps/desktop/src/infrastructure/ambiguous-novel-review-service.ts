@@ -362,6 +362,26 @@ export class AmbiguousNovelReviewService {
             selection.localOnlyEligible === true,
           );
         },
+        onFinalBeforeProviderDispatch: async (selection) => {
+          await assertReviewCapabilities(
+            this.dependencies.modelHub,
+            selection.catalogEntryId,
+            "dispatch",
+          );
+          const refreshed = await this.preparePlanForTask(request, plan.task);
+          if (refreshed.plan?.fingerprint !== plan.fingerprint) {
+            throw new ModelHubExecutionError(
+              "AMBIGUOUS_REVIEW_EVIDENCE_CHANGED",
+              "发送 AI 复核前章节版本或证据发生了变化，请重新运行检查。",
+              true,
+            );
+          }
+          await assertProjectPrivacyBeforeDispatch(
+            this.dependencies.projectContextPrivacy,
+            projectPrivacy,
+            selection.localOnlyEligible === true,
+          );
+        },
       });
     } catch (cause: unknown) {
       return executionFailure(plan.task, cause);
