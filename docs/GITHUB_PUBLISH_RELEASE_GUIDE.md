@@ -4,12 +4,14 @@
 > 仓库可见性：Public  
 > 默认分支：`main`  
 > 适用环境：Windows PowerShell  
-> 更新日期：2026-08-13  
+> 更新日期：2026-08-14  
+> 当前 Desktop 源码目标版本：`0.2.4`（候选，尚未发布）  
 > 当前已发布工程预览版本：`0.2.3`（标签 `v0.2.3`；不得覆盖或移动任何已公开版本）
 
 本文是每次向 GitHub 上传源码或发布安装包时必须执行的检查清单。它只描述操作流程，
 不替代 [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md) 中的产品发布门禁。
-`v0.2.3` 的已发布事实记录在该门禁文档；后续版本仍须在候选生成前保持提交、大小和哈希为空。
+`v0.2.3` 的已发布事实记录在该门禁文档；`v0.2.4` 的提交、大小和哈希在实际候选生成前保持
+`NOT_RUN`，不得沿用任何历史版本数据。
 
 ## v0.2.3 已发布记录
 
@@ -117,8 +119,8 @@ git diff --cached
 - `apps/desktop/src-tauri/tauri.conf.json`
 - `apps/desktop/src-tauri/Cargo.lock` 中由 Cargo 更新的 InkShadow 包版本
 
-版本号使用不带 `v` 的 SemVer，例如 `0.2.3`；Git 标签使用带 `v` 的形式，例如
-`v0.2.3`。`0.2.0` / `v0.2.0`、`0.2.1` / `v0.2.1`、`0.2.2` / `v0.2.2` 与 `0.2.3` / `v0.2.3` 均已公开，
+版本号使用不带 `v` 的 SemVer；当前候选使用 `0.2.4`，Git 标签只能在候选通过后创建为
+`v0.2.4`。`0.2.0` / `v0.2.0`、`0.2.1` / `v0.2.1`、`0.2.2` / `v0.2.2` 与 `0.2.3` / `v0.2.3` 均已公开，
 不得覆盖或移动任何已公开标签；新的二进制修复必须使用新的补丁版本。
 
 ```powershell
@@ -129,8 +131,8 @@ rg --no-ignore -n '"version"\s*:\s*"|^version\s*=' `
   apps/desktop/src-tauri/tauri.conf.json
 ```
 
-`apps/web`、`apps/cloud-api` 和内部 workspace 包有独立的 `0.1.x` 版本线，不是已公开 Windows
-Desktop `v0.2.3` Release 资产，也不要求随桌面标签同步。文档提到“当前应用版本”时必须明确
+`apps/web`、`apps/cloud-api` 和内部 workspace 包有独立的 `0.1.x` 版本线，不是 Windows
+Desktop `v0.2.4` 候选或已公开 `v0.2.3` Release 资产，也不要求随桌面标签同步。文档提到“当前应用版本”时必须明确
 指 Desktop，不能把这些内部包误写成同一可下载产品版本。
 
 ## 5. 源码上传前门禁

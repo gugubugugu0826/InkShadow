@@ -125,8 +125,8 @@ checkpoint 初始状态为：
   冒充 Model Hub 连接数。2026-08-13 当前代码进一步加入跨 mount 唯一 coordinator 身份、真实阶段
   时间、5 秒凭据摘要降级和停用连接排除；自动化已通过，但当前代码的真实 Windows Tauri + SQLite +
   Keyring 冷启动和 DeepSeek 凭据互操作仍为 `NOT_VERIFIED`。
-- 2026-08-13 `v0.2.3` 真实 Windows 附件暴露了“界面就绪投影”和“真实续写解析”不同口径。当前未发布源码让顶栏、作品库、Model Hub 和任务分工共享同一个**无正文的全局 exact 基础 readiness resolver**，统一核验 connection、catalog entry、Provider/model、capability evidence、route/revision 与 credential summary；它只能证明基础配置可供后续预检，不能宣称某章已经可以派发。真实续写在同一基础结果上再加入当前章节的 privacy、编译后 context、request profile 与费用/派发前门禁；任一附加检查失败会同步显示该任务需修复，且不会创建 invocation、Candidate 或费用记录。既有 Model Hub 路由失败也不会降级到旧 Model Profile。当前状态为 `CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`，原附件不能作为新源码的 Tauri 通过证据。
-- 同一次 `v0.2.3` 真实测试还证明删除 DeepSeek 凭据后会留下不可重绑的幽灵连接并与同供应商默认 ID 冲突。当前未提交源码已把删除凭据、暂时停用、重新绑定和退役拆成明确语义：原连接可用 revision CAS 就地重绑，退役行保留历史 invocation 但不进入 ready/推荐/普通路由，同供应商新连接自动分配新 ID。该结论已有 store/UI/临时 SQLite 回归，真实 Windows Credential Manager 语义仍为 `NOT_RETESTED`。
+- 2026-08-13 `v0.2.3` 真实 Windows 附件暴露了“界面就绪投影”和“真实续写解析”不同口径。当前 `v0.2.4` 候选源码让顶栏、作品库、Model Hub 和任务分工共享同一个**无正文的全局 exact 基础 readiness resolver**，统一核验 connection、catalog entry、Provider/model、capability evidence、route/revision 与 credential summary；它只能证明基础配置可供后续预检，不能宣称某章已经可以派发。真实续写在同一基础结果上再加入当前章节的 privacy、编译后 context、request profile 与费用/派发前门禁；任一附加检查失败会同步显示该任务需修复，且不会创建 invocation、Candidate 或费用记录。既有 Model Hub 路由失败也不会降级到旧 Model Profile。当前状态为 `CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`，原附件不能作为新源码的 Tauri 通过证据。
+- 同一次 `v0.2.3` 真实测试还证明删除 DeepSeek 凭据后会留下不可重绑的幽灵连接并与同供应商默认 ID 冲突。当前 `v0.2.4` 候选源码已把删除凭据、暂时停用、重新绑定和退役拆成明确语义：原连接可用 revision CAS 就地重绑，退役行保留历史 invocation 但不进入 ready/推荐/普通路由，同供应商新连接自动分配新 ID。该结论已有 store/UI/临时 SQLite 回归，真实 Windows Credential Manager 语义仍为 `NOT_RETESTED`。
 - Provider Registry 只对官方 DeepSeek endpoint 与精确官方模型 ID 提供带有效期、
   `verifiedByInkShadow=false` 的官方资料 fallback，目录证据优先且自定义端点不继承。Provider
   recommendation 只对已连接目录项排序或显示带有效期的发现方向；阿里云 `text-embedding-v4`

@@ -1,19 +1,92 @@
 # InkShadow 持续发布门禁
 
 > 更新日期：2026-08-14  
-> 当前源码目标版本：`0.2.3`；最近已发布工程预览版本：`0.2.3`  
-> 当前结论：**`v0.2.3` 历史 Pre-release 已发布；当前反馈修复尚未提交、打包或发布，状态为 `CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`**
+> 当前源码目标版本：`0.2.4`；最近已发布工程预览版本：`0.2.3`  
+> 当前结论：**`v0.2.4` 是针对 `v0.2.3` 真实 Windows 反馈的安全修复候选；源码自动化已完成，但唯一干净候选、PR/main CI、标签、附件哈希和公开 Release 仍须逐项生成和复核，状态为 `CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`**
 
 > [!WARNING]
 > **v0.2.3 发布后安全公告：**提交
 > `3abdcfeb327567c632e440d55d11f0af6f4911d2` 的真实 Windows 11 Tauri/Wry +
 > DeepSeek `deepseek-v4-flash` 测试发现，Candidate 接受与不可变版本创建完成后又隐式派发
 > `long_memory_compression`，并发送已接受正文。测试已按安全停止条件终止。已发布 `v0.2.3`
-> 不建议用于真实 Provider 的敏感正文处理。当前源码修复只有 fake/mock、SQLite 与 Chromium
-> 自动化证据；新 Windows Tauri 安装包和 Provider live 复测均未运行，也未发布替代 Release。
+> 不建议用于真实 Provider 的敏感正文处理。当前 `v0.2.4` 候选修复只有 fake/mock、SQLite 与
+> Chromium 自动化证据；新 Windows Tauri 安装包和 Provider live 复测均未运行，也未发布替代 Release。
 
 状态只使用 `PASS`、`IN_PROGRESS`、`NOT_RUN`、`BLOCKED` 和 `N/A`。  
 代码存在不等于发布门禁通过；只有可复核的测试、构建、签名、安装或人工验收证据才能标记 `PASS`。
+
+## v0.2.4 Pre-release 中文说明（待发布）
+
+> 建议 Release 标题：`墨影 InkShadow v0.2.4 — Windows 安全修复工程预览版（未签名）`  
+> 发布类型：GitHub Pre-release  
+> 支持平台：Windows 10 / 11 x64  
+> 签名状态：未进行 Authenticode 商业签名，Windows 可能显示“未知发布者”
+
+v0.2.4 是针对 v0.2.3 真实 Windows Tauri 用户测试反馈准备的安全修复版，继续遵守本地优先、
+Candidate 隔离和作者最终确认原则。它不是 Beta、GA 或商业正式版。
+
+### 本次更新
+
+#### Candidate 接受保持本地事务
+
+- 接受 Candidate 只保存正式正文、创建新的不可变版本并更新纯本地可重建状态。
+- 接受、保存、恢复、worker 重试和历史回填的默认后台链精确产生 0 次 Provider 调用；云摘要、长期记忆、事实抽取和其他正文派生不会因为已经配置模型而自动执行。
+- 派生任务失败不会回滚或污染已接受正文；私密章节继续在任何远程派发前失败关闭。
+
+#### Model Hub 连接恢复与统一 readiness
+
+- 删除凭据后可以重新绑定原连接；退役连接保留历史调用审计，但不进入 ready、推荐或普通路由。
+- 同一供应商重新配置不要求普通用户手工修改内部 ID；路由始终绑定精确 active connection 与 catalog entry。
+- 顶栏、作品库、Model Hub、任务推荐和实际生成共享权威 readiness；当前章节的隐私、上下文或请求预检失败时不会创建 invocation、Candidate 或费用记录。
+
+#### 开书调用终态与重启恢复
+
+- 一批开头建议明确对应 3 次独立 Provider 调用，并在操作前披露可能费用。
+- 每个方案使用稳定槽位 ID，分别记录成功、失败、取消、未发送或结果不明确；部分成功不会被通用错误覆盖。
+- 应用重启只结清孤立状态，不会自动再次发送已经越过网络边界的请求。
+
+#### 响应式与可访问性
+
+- 200% 等效视口进入正文优先的单列/抽屉布局，修复正文裁切、页面级横向溢出和不可达操作。
+- 覆盖 Escape、焦点返回、键盘操作和 44px 主要操作目标。
+- production Chromium 的 zoom/DPR2 证据不等于 Windows 系统 200% DPI，后者仍待真实 Tauri 复测。
+
+#### 数据与前端预算
+
+- 只新增 forward-only Data `0065` / Tauri `68`，没有修改任何已发布 migration 或 checksum。
+- production 前端总预算调整为 7 MiB；入口、异步 chunk、CSS、worker 和通用资产的单文件上限保持不变。
+
+### 当前自动化证据与边界
+
+- 当前源码记录的完整 `release:check`、Rust/Tauri 原生门禁、真实临时 SQLite 与 production Chromium 均已通过；精确命令和结果见 [`TEST_RESULTS.md`](TEST_RESULTS.md)。
+- 本轮没有读取真实 API Key，没有执行真实 Provider 或付费调用。
+- `v0.2.4` 唯一干净候选、NSIS 打包、PR/main CI、标签、公开附件与 Release 回下载校验仍为 `NOT_RUN`；不得沿用 `v0.2.3` 的提交、大小或哈希。
+- 修复版 Windows Tauri/Wry + Credential Manager 第二阶段复测、真实 DeepSeek 故障矩阵、Windows 系统 200% DPI 和另一台电脑安装仍为 `NOT_RUN / NOT_RETESTED`。
+
+### 待生成的发布追踪
+
+| 属性                   | 当前状态                                                        |
+| ---------------------- | --------------------------------------------------------------- |
+| 来源 Commit / tag peel | `NOT_RUN`；仅在唯一干净候选和公开标签实际存在后填写             |
+| Windows x64 NSIS       | `NOT_RUN`；文件名、字节数与 SHA-256 必须从最终安装包读取        |
+| Authenticode           | 预期为 `NotSigned`，仍须对最终安装包实际检查                    |
+| Release manifest       | `NOT_RUN`；字节数、SHA-256 与 `gitCommitSha` 必须从最终清单读取 |
+| SHA 校验附件           | `NOT_RUN`；只能由最终公开附件生成并回下载复核                   |
+| PR / main CI           | `NOT_RUN`；必须等待对应提交的两轮远端门禁实际结束               |
+| GitHub Release         | `NOT_RUN / NOT_RELEASED`；不得预填 URL、发布时间或公开状态      |
+
+### 中文 Release notes（待发布）
+
+InkShadow v0.2.4 修复了 v0.2.3 真实 Windows 用户测试发现的隐式云调用和恢复状态问题：
+接受 AI 建议版本现在只执行本地事务，默认产生 0 次 Provider 调用；Model Hub 支持凭据删除后的
+重新绑定和明确退役；全局状态与实际生成共享权威 readiness；开书的 3 次独立调用拥有稳定身份、
+独立终态和不自动重发的重启恢复；200% 等效视口改为正文优先的单列/抽屉布局。
+
+本版本仍是未签名工程预览。当前修复只有 fake/mock、真实临时 SQLite 与 production Chromium
+自动化证据，尚未完成真实 Provider 或修复版 Windows Tauri 第二阶段复测。Chromium zoom/DPR2
+不能替代 Windows 系统 200% DPI。在这些复测完成前，请勿将本版本用于敏感正文、唯一数据副本
+或正式生产环境。发布时必须补充最终安装包文件名、字节数、SHA-256、manifest、`SHA256SUMS`、
+来源提交和实际 CI 结果；任何字段仍为 `NOT_RUN` 时不得发布。
 
 ## v0.2.3 已发布 Pre-release 中文说明与追踪
 
@@ -275,9 +348,9 @@ Release manifest 用于核对源码提交、源码指纹和前端制品指纹；
 | SSO 与组织策略                 | BLOCKED     | 需要目标 IdP、商业配置和真实租户。                                                              |
 | RPO/RTO、容量与故障演练        | NOT_RUN     | 需要生产等价环境、监控和已批准的恢复目标。                                                      |
 
-## v0.2.3 反馈修复后的第二阶段真实 Windows Tauri 测试 Prompt
+## v0.2.4 修复版第二阶段真实 Windows Tauri 测试 Prompt
 
-> 适用对象：包含 v0.2.3 反馈修复的后续唯一干净候选提交和 Windows Tauri 安装包。  
+> 适用对象：`v0.2.4` 唯一干净候选提交和对应 Windows Tauri 安装包。  
 > 当前结论：`CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`。  
 > 调用预算：阶段 A 最多 6 次低成本真实模型动作；安全门禁通过后，阶段 B 才可进行 20–30 次长篇调用。
 
@@ -354,6 +427,9 @@ connection/catalog/provider/model/route/revision/capability、dispatch boundary/
 7. `P1`：完成最新 NSIS 的隔离用户安装/升级/卸载矩阵、真实 Tauri WebView 压力矩阵、DOCX 视觉 QA 和 Android 真机门禁。
 
 ## 发布结论
+
+`v0.2.4` 当前只是安全修复候选，唯一干净候选、制品哈希、远端 CI、标签和公开 Release 均须以
+实际结果补录；真实 Provider 与修复版 Windows Tauri 第二阶段复测保持 `NOT_RUN / NOT_RETESTED`。
 
 `v0.2.3` 的唯一提交、完整候选链、制品哈希、GitHub Actions、标签与公开附件回读已经完成；
 真实 Tauri WebView + Keyring 冷启动、另一台电脑安装、192 次付费调用、2,496 项人工评分和真实 Provider

@@ -1,9 +1,9 @@
 # 墨影 InkShadow 文档入口
 
-> 当前源码目标版本（App Version）：`0.2.3`；最近已发布版本：`0.2.3`  
+> 当前源码目标版本（App Version）：`0.2.4`；最近已发布版本：`0.2.3`  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
 > 最近治理复核：2026-08-14  
-> 当前反馈修复：`NOT_RELEASED`；真实 Tauri/Provider 复测：`NOT_RUN`  
+> `v0.2.4` 安全修复候选：`NOT_RELEASED`；真实 Tauri/Provider 第二阶段复测：`NOT_RUN`  
 > 注意：设计版本用于界面与交互验收，不会自动改变应用版本。
 
 本目录同时保存当前规则、实现说明、执行证据和历史基线。为避免把旧页面说明或一次历史测试
@@ -56,7 +56,7 @@
 
 ## 目标与历史文档
 
-- `DESIGN/`：`TARGET_BASELINE`。DESIGN v0.3.1b 规定视觉与交互目标；当前已发布工程预览应用版本是 0.2.3，本轮反馈修复仍未发布。
+- `DESIGN/`：`TARGET_BASELINE`。DESIGN v0.3.1b 规定视觉与交互目标；当前源码目标版本是 0.2.4，最近已发布工程预览应用版本是 0.2.3，v0.2.4 安全修复候选仍未发布。
 - [`product-rebuild/00-PHASE-0-REALITY-AUDIT.md`](product-rebuild/00-PHASE-0-REALITY-AUDIT.md)：
   `HISTORICAL` Phase 0 起始审计；当前差异须再读增量现实矩阵。
 - `docs/prototypes/`、`docs/state-matrices/`：目标原型或状态设计；除非文件明确标为当前，否则不是
