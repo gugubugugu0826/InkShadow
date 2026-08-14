@@ -28,6 +28,8 @@ describe("UsageCenterPage", () => {
     expect(screen.getAllByText("¥0.12").length).toBeGreaterThan(0);
     expect(screen.getByText("1 次费用未知 · 已知金额均为估算")).toBeInTheDocument();
     expect(screen.getByText("供应商未返回")).toBeInTheDocument();
+    expect(screen.getByText("调用账本有 1 次失败或结果不明确、1 次费用未知")).toBeVisible();
+    expect(screen.getByText("第一章 雨停以前")).toBeVisible();
     expect(screen.getAllByText("本地运算").length).toBeGreaterThan(0);
     expect(
       screen.getByText(
@@ -69,6 +71,24 @@ describe("UsageCenterPage", () => {
     expect(screen.queryByText("¥4.20")).not.toBeInTheDocument();
   });
 
+  it("raises unfinished and unknown-cost calls above the neutral summaries", async () => {
+    const reader: UsageCenterReader = {
+      read: vi.fn<UsageCenterReader["read"]>().mockResolvedValue({
+        ...SNAPSHOT,
+        summary: {
+          ...SUMMARY,
+          failureCount: 0,
+          activeCount: 2,
+          costUnknownCount: 2,
+        },
+      }),
+    };
+    render(<UsageCenterPage reader={reader} now={NOW} />);
+
+    const title = await screen.findByText("调用账本有 2 次尚未终结、2 次费用未知");
+    expect(title.closest(".ink-inline-alert")).toHaveClass("ink-inline-alert--warning");
+  });
+
   it("recovers from a local ledger read failure", async () => {
     const read = vi
       .fn<UsageCenterReader["read"]>()
@@ -95,6 +115,8 @@ const REMOTE_RECORD: UsageCenterEvent = Object.freeze({
   occurredAt: "2026-08-08T10:00:00.000Z",
   projectId: PROJECT_ID,
   projectName: "五更夜巡",
+  chapterId: "019f9f4a-b3c7-7350-9226-000000000002",
+  chapterName: "第一章 雨停以前",
   task: "continuation",
   providerId: "deepseek-connection",
   providerLabel: "DeepSeek",
@@ -117,6 +139,8 @@ const LOCAL_RECORD: UsageCenterEvent = Object.freeze({
   occurredAt: "2026-08-08T09:00:00.000Z",
   projectId: null,
   projectName: null,
+  chapterId: null,
+  chapterName: null,
   task: "embedding",
   providerId: "ollama-connection",
   providerLabel: "本机 Ollama",

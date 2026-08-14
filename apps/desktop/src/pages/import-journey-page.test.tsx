@@ -223,7 +223,9 @@ describe("ImportJourneyPage", () => {
         tasks.tasks.some(
           (task) =>
             task.type === "story.accepted-version.process" &&
-            task.metadata.source === "chapter_import",
+            task.metadata.source === "candidate_accept" &&
+            task.metadata.runChapterSummary === false &&
+            task.metadata.runStoryState === false,
         ),
       ).toBe(true);
     });

@@ -3,9 +3,18 @@ import { AppShell, Badge, Button, InkIcon, SaveStatus } from "@inkshadow/ui";
 import { Link, NavLink, useLocation } from "react-router-dom";
 
 import { useAppearancePreference } from "../appearance-preference";
-import { NOVEL_AI_TASKS } from "../infrastructure/model-hub-provider-registry";
+import {
+  GENERATION_PREFLIGHT_CHANGED_EVENT,
+  clearSafeGenerationPreflightScope,
+  isGenerationPreflightEventForRuntime,
+  readSafeGenerationPreflightForScope,
+  type SafeGenerationPreflightDiagnostic,
+} from "../infrastructure/generation-preflight-diagnostics";
 import {
   MODEL_HUB_READINESS_CHANGED_EVENT,
+  MODEL_HUB_READINESS_REFRESH_INTERVAL_MS,
+  modelHubReadinessBlockerLabel,
+  modelHubReadinessTaskLabel,
   projectModelHubReadiness,
 } from "../infrastructure/model-hub-readiness";
 import { useRuntime } from "../runtime-context";
@@ -100,6 +109,39 @@ function pageTitle(pathname: string): string {
   return "页面不存在";
 }
 
+function generationPreflightRepair(
+  code: string,
+  projectId: string | null,
+): Readonly<{ href: string; guidance: string; linkAction: string }> {
+  if (code === "PRIVATE_CHAPTER_LOCAL_ONLY") {
+    return Object.freeze({
+      href: "/settings#model-center",
+      guidance:
+        "当前章节保持仅限本地；如需 AI，请在当前章节明确调整隐私，或在 Model Hub 配置并验证本地模型",
+      linkAction: "打开 Model Hub 配置本地模型",
+    });
+  }
+  if (code === "MODEL_CONTEXT_WINDOW_EXHAUSTED" || code === "MODEL_HUB_CONTEXT_LIMIT_EXCEEDED") {
+    return Object.freeze({
+      href: "/settings#model-center",
+      guidance: "请在当前续写设置中缩短输出或上下文，或在 Model Hub 选择更长上下文的模型",
+      linkAction: "打开 Model Hub 检查模型窗口",
+    });
+  }
+  if (code === "STORY_CONTEXT_COMPILATION_FAILED" && projectId !== null) {
+    return Object.freeze({
+      href: `/projects/${projectId}/context`,
+      guidance: "请打开“本次参考”检查当前作品的正式设定和上下文预算",
+      linkAction: "打开本次参考",
+    });
+  }
+  return Object.freeze({
+    href: "/settings#model-center",
+    guidance: "请在 Model Hub 的“连接与模型”中修复后重试",
+    linkAction: "打开 Model Hub",
+  });
+}
+
 export function DesktopShell({ children }: DesktopShellProps) {
   const runtime = useRuntime();
   const { resolvedSurface, setPreference: setAppearance } = useAppearancePreference();
@@ -116,6 +158,8 @@ export function DesktopShell({ children }: DesktopShellProps) {
       transientChecking: true,
     }),
   );
+  const [scopedGenerationPreflight, setScopedGenerationPreflight] =
+    useState<SafeGenerationPreflightDiagnostic | null>(null);
   const mainRef = useRef<HTMLElement>(null);
   const previousRouteRef = useRef<string | null>(null);
   const modelHubActive = location.pathname === "/settings" && location.hash === "#model-center";
@@ -131,6 +175,7 @@ export function DesktopShell({ children }: DesktopShellProps) {
     mainRef.current = element;
   }, []);
   const projectId = /^\/projects\/([^/]+)/u.exec(location.pathname)?.[1] ?? null;
+  const chapterId = /^\/projects\/[^/]+\/chapters\/([^/]+)/u.exec(location.pathname)?.[1] ?? null;
   const bodyAreaActive =
     projectId !== null &&
     /^\/projects\/[^/]+(?:\/context|\/chapters\/[^/]+(?:\/extensions|\/multi-agent-review)?)?$/u.test(
@@ -141,6 +186,26 @@ export function DesktopShell({ children }: DesktopShellProps) {
     /^\/projects\/[^/]+\/(?:checks|search|graph|extraction|materials|multi-agent-review|fine-tuning|sync(?:\/conflicts)?)$/u.test(
       location.pathname,
     );
+
+  useEffect(() => {
+    const refresh = (): void => {
+      if (projectId === null) {
+        setScopedGenerationPreflight(null);
+        return;
+      }
+      setScopedGenerationPreflight(
+        readSafeGenerationPreflightForScope(runtime, { projectId, chapterId }),
+      );
+    };
+    const handleChanged = (event: Event): void => {
+      if (isGenerationPreflightEventForRuntime(event, runtime)) refresh();
+    };
+    window.addEventListener(GENERATION_PREFLIGHT_CHANGED_EVENT, handleChanged);
+    refresh();
+    return () => {
+      window.removeEventListener(GENERATION_PREFLIGHT_CHANGED_EVENT, handleChanged);
+    };
+  }, [chapterId, projectId, runtime]);
 
   useEffect(() => {
     const update = () => {
@@ -156,31 +221,30 @@ export function DesktopShell({ children }: DesktopShellProps) {
 
   useEffect(() => {
     let active = true;
-    const refresh = async (): Promise<void> => {
-      setAiReadiness((current) =>
-        projectModelHubReadiness({
-          connections: [],
-          catalog: [],
-          routes: [],
-          transientChecking: true,
-          loadFailed: current.state === "connection_failed",
-        }),
-      );
+    let refreshSequence = 0;
+    const isActive = (): boolean => active;
+    const refresh = async (showChecking: boolean): Promise<void> => {
+      const sequence = refreshSequence + 1;
+      refreshSequence = sequence;
+      if (showChecking) {
+        setAiReadiness((current) =>
+          projectModelHubReadiness({
+            connections: [],
+            catalog: [],
+            routes: [],
+            transientChecking: true,
+            loadFailed: current.state === "connection_failed",
+          }),
+        );
+      }
       try {
-        const connections = await runtime.modelHub.listConnections();
-        const [catalog, routes] = await Promise.all([
-          Promise.all(connections.map(({ id }) => runtime.modelHub.listCatalog(id))).then((rows) =>
-            rows.flat(),
-          ),
-          Promise.all(NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task))).then(
-            (rows) => rows.filter((route) => route !== null),
-          ),
-        ]);
-        if (active) {
-          setAiReadiness(projectModelHubReadiness({ connections, catalog, routes }));
-        }
+        const { loadAuthoritativeModelHubReadiness } =
+          await import("../infrastructure/model-hub-authoritative-readiness");
+        const readiness = await loadAuthoritativeModelHubReadiness(runtime);
+        if (!isActive() || sequence !== refreshSequence) return;
+        setAiReadiness(readiness);
       } catch {
-        if (active) {
+        if (active && sequence === refreshSequence) {
           setAiReadiness(
             projectModelHubReadiness({
               connections: [],
@@ -193,12 +257,18 @@ export function DesktopShell({ children }: DesktopShellProps) {
       }
     };
     const handleChanged = (): void => {
-      void refresh();
+      clearSafeGenerationPreflightScope(runtime);
+      setScopedGenerationPreflight(null);
+      void refresh(true);
     };
     window.addEventListener(MODEL_HUB_READINESS_CHANGED_EVENT, handleChanged);
-    void refresh();
+    const refreshTimer = window.setInterval(() => {
+      void refresh(false);
+    }, MODEL_HUB_READINESS_REFRESH_INTERVAL_MS);
+    void refresh(true);
     return () => {
       active = false;
+      window.clearInterval(refreshTimer);
       window.removeEventListener(MODEL_HUB_READINESS_CHANGED_EVENT, handleChanged);
     };
   }, [runtime]);
@@ -265,6 +335,25 @@ export function DesktopShell({ children }: DesktopShellProps) {
     };
   }, [routeIdentity]);
 
+  const scopedBlockerCode =
+    scopedGenerationPreflight?.readiness === "BLOCKED"
+      ? (scopedGenerationPreflight.blockerCodes[0] ?? "MODEL_HUB_PREFLIGHT_FAILED")
+      : null;
+  const scopedTaskLabel = modelHubReadinessTaskLabel(
+    scopedGenerationPreflight?.taskType ?? "continuation",
+  );
+  const scopedRepair = generationPreflightRepair(
+    scopedBlockerCode ?? "MODEL_HUB_PREFLIGHT_FAILED",
+    projectId,
+  );
+  const aiStatusShortLabel =
+    scopedBlockerCode === null ? aiReadiness.shortLabel : `当前${scopedTaskLabel}需修复`;
+  const aiStatusDescription =
+    scopedBlockerCode === null
+      ? aiReadiness.description
+      : `${scopedTaskLabel}受影响：${modelHubReadinessBlockerLabel(scopedBlockerCode)}。${scopedRepair.guidance}；正文、不可变版本和隔离建议均未改变。`;
+  const aiStatusTone = scopedBlockerCode === null ? aiReadiness.tone : "warning";
+
   const topBar = (
     <div className="desktop-topbar">
       <div className="desktop-topbar__leading">
@@ -325,10 +414,11 @@ export function DesktopShell({ children }: DesktopShellProps) {
       <div className="desktop-topbar__meta">
         <Link
           className="desktop-topbar__ai-status"
-          to="/settings#model-center"
-          aria-label={`${aiReadiness.shortLabel}，打开 Model Hub`}
+          to={scopedBlockerCode === null ? "/settings#model-center" : scopedRepair.href}
+          aria-label={`${aiStatusDescription} ${scopedBlockerCode === null ? "打开 Model Hub" : scopedRepair.linkAction}`}
+          title={aiStatusDescription}
         >
-          <Badge tone={aiReadiness.tone}>{aiReadiness.shortLabel}</Badge>
+          <Badge tone={aiStatusTone}>{aiStatusShortLabel}</Badge>
         </Link>
         <Button
           variant="ghost"

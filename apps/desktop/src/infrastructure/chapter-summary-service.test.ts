@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import { BrowserDevelopmentStoryFactStore } from "./story-fact-store";
 import {
   CHAPTER_SUMMARY_MAXIMUM_SOURCE_CHARACTERS,
+  CHAPTER_SUMMARY_EXPLICIT_CLOUD_AUTHORIZATION_REQUIRED,
   BrowserChapterSummaryPreferenceStore,
   ChapterSummaryModelUnavailableError,
   ChapterSummaryService,
@@ -36,29 +37,38 @@ const ids = {
 };
 
 describe("ChapterSummaryService", () => {
-  it("never runs for autosave and defaults manual-save automation to off", async () => {
+  it("fails every legacy trigger closed with exactly zero provider calls", async () => {
     expect(shouldRunChapterSummaryAfterSave("autosave", true)).toBe(false);
     expect(shouldRunChapterSummaryAfterSave("manual", false)).toBe(false);
-    expect(shouldRunChapterSummaryAfterSave("manual", true)).toBe(true);
+    expect(shouldRunChapterSummaryAfterSave("manual", true)).toBe(false);
 
     const harness = await createHarness("A saved chapter.");
-    const receipt = await harness.service.summarizeSavedVersion({
-      projectId: ids.project,
-      chapterId: ids.chapter,
-      versionId: ids.version1,
-      trigger: "manual_save",
-    });
-    expect(receipt).toMatchObject({
-      status: "skipped",
-      code: "CHAPTER_SUMMARY_AUTOMATION_PAUSED",
-    });
+    harness.service.setAutomaticOnManualSaveEnabled(ids.project, true);
+    expect(harness.service.isAutomaticOnManualSaveEnabled(ids.project)).toBe(false);
+    for (const trigger of ["manual_save", "user_rebuild", "historical_backfill"] as const) {
+      await expect(
+        harness.service.summarizeSavedVersion({
+          projectId: ids.project,
+          chapterId: ids.chapter,
+          versionId: ids.version1,
+          trigger,
+        }),
+      ).resolves.toMatchObject({
+        status: "skipped",
+        code: CHAPTER_SUMMARY_EXPLICIT_CLOUD_AUTHORIZATION_REQUIRED,
+        invocation: null,
+        fact: null,
+      });
+    }
     expect(harness.model.callCount).toBe(0);
+    const facts = await harness.store.listByProjectId(storyUuid(ids.project));
+    expect(facts.ok && facts.value).toEqual([]);
   });
 
   it("generates one reversible system fact from the exact immutable version", async () => {
     const content = `${"A".repeat(1_799)}🙂tail`;
     const harness = await createHarness(content);
-    const receipt = await harness.service.summarizeSavedVersion({
+    const receipt = await summarizeLegacyProviderPipeline(harness.service, {
       projectId: ids.project,
       chapterId: ids.chapter,
       versionId: ids.version1,
@@ -114,7 +124,7 @@ describe("ChapterSummaryService", () => {
   it("stores text-only fallback as a non-authoritative summary without structured events", async () => {
     const harness = await createHarness("A saved chapter.");
     harness.model.authorityMode = "plain_non_authoritative";
-    const receipt = await harness.service.summarizeSavedVersion({
+    const receipt = await summarizeLegacyProviderPipeline(harness.service, {
       projectId: ids.project,
       chapterId: ids.chapter,
       versionId: ids.version1,
@@ -136,13 +146,13 @@ describe("ChapterSummaryService", () => {
 
   it("replaces and clears only the generated summary for the chapter", async () => {
     const harness = await createHarness("First version text.");
-    const first = await harness.service.summarizeSavedVersion({
+    const first = await summarizeLegacyProviderPipeline(harness.service, {
       projectId: ids.project,
       chapterId: ids.chapter,
       versionId: ids.version1,
       trigger: "user_rebuild",
     });
-    const second = await harness.service.summarizeSavedVersion({
+    const second = await summarizeLegacyProviderPipeline(harness.service, {
       projectId: ids.project,
       chapterId: ids.chapter,
       versionId: ids.version1,
@@ -169,7 +179,7 @@ describe("ChapterSummaryService", () => {
 
   it("does not repeat an already-current summary during historical recovery", async () => {
     const harness = await createHarness("Stable historical chapter text.");
-    await harness.service.summarizeSavedVersion({
+    await summarizeLegacyProviderPipeline(harness.service, {
       projectId: ids.project,
       chapterId: ids.chapter,
       versionId: ids.version1,
@@ -177,7 +187,7 @@ describe("ChapterSummaryService", () => {
     });
 
     await expect(
-      harness.service.summarizeSavedVersion({
+      summarizeLegacyProviderPipeline(harness.service, {
         projectId: ids.project,
         chapterId: ids.chapter,
         versionId: ids.version1,
@@ -201,7 +211,7 @@ describe("ChapterSummaryService", () => {
       harness.chapters.set(ids.chapter, makeChapter(ids.version2, changed, 2));
     };
 
-    const receipt = await harness.service.summarizeSavedVersion({
+    const receipt = await summarizeLegacyProviderPipeline(harness.service, {
       projectId: ids.project,
       chapterId: ids.chapter,
       versionId: ids.version1,
@@ -224,7 +234,7 @@ describe("ChapterSummaryService", () => {
     );
     harness.model.verifiedLocalEligible = false;
 
-    const receipt = await harness.service.summarizeSavedVersion({
+    const receipt = await summarizeLegacyProviderPipeline(harness.service, {
       projectId: ids.project,
       chapterId: ids.chapter,
       versionId: ids.version1,
@@ -243,7 +253,7 @@ describe("ChapterSummaryService", () => {
     const missing = await createHarness("Short chapter.");
     missing.model.unavailable = true;
     expect(
-      await missing.service.summarizeSavedVersion({
+      await summarizeLegacyProviderPipeline(missing.service, {
         projectId: ids.project,
         chapterId: ids.chapter,
         versionId: ids.version1,
@@ -255,7 +265,7 @@ describe("ChapterSummaryService", () => {
       "x".repeat(CHAPTER_SUMMARY_MAXIMUM_SOURCE_CHARACTERS + 1),
     );
     expect(
-      await oversized.service.summarizeSavedVersion({
+      await summarizeLegacyProviderPipeline(oversized.service, {
         projectId: ids.project,
         chapterId: ids.chapter,
         versionId: ids.version1,
@@ -280,6 +290,28 @@ describe("ChapterSummaryService", () => {
     expect(segments[0]?.endOffset).toBe(1_799);
   });
 });
+
+/**
+ * Keeps the old output-validation coverage as a private transformation test.
+ * The production `summarizeSavedVersion` API cannot reach this provider path.
+ */
+function summarizeLegacyProviderPipeline(
+  service: ChapterSummaryService,
+  input: Readonly<{
+    projectId: string;
+    chapterId: string;
+    versionId: string;
+    trigger: "manual_save" | "user_rebuild" | "historical_backfill";
+  }>,
+) {
+  return (
+    service as unknown as {
+      summarizeOnce(
+        request: typeof input,
+      ): ReturnType<ChapterSummaryService["summarizeSavedVersion"]>;
+    }
+  ).summarizeOnce(input);
+}
 
 async function createHarness(content: string) {
   const versions = new Map<string, ChapterVersion>();

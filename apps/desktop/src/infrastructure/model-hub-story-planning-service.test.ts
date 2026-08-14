@@ -520,6 +520,23 @@ describe("Model Hub story planning service", () => {
     expect(await harness.candidates.listByProjectId(PROJECT_ID)).toEqual([]);
   });
 
+  it("stops before provider dispatch when structured output evidence is revoked at the final latch", async () => {
+    const harness = createHarness(outlineResponse(), {
+      structuredOutputRevokedBeforeFinal: true,
+    });
+    const outcome = await harness.service.generate({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+
+    expect(outcome).toMatchObject({
+      status: "skipped",
+      code: "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED",
+    });
+    expect(harness.listCapabilityEvidence).toHaveBeenCalledTimes(3);
+    expect(await harness.candidates.listByProjectId(PROJECT_ID)).toEqual([]);
+  });
+
   it("rejects non-JSON model output and leaves the authoritative outline untouched", async () => {
     const harness = createHarness("```json\n{}\n```");
     const before = harness.repository.current?.toSnapshot();
@@ -593,7 +610,10 @@ describe("Model Hub story planning service", () => {
 
 function createHarness(
   responseText: string,
-  options: Readonly<{ structuredOutput?: boolean }> = {},
+  options: Readonly<{
+    structuredOutput?: boolean;
+    structuredOutputRevokedBeforeFinal?: boolean;
+  }> = {},
 ) {
   const responseTask = responseText.includes('"scene_breakdown"')
     ? ("scene_breakdown" as const)
@@ -604,10 +624,24 @@ function createHarness(
   const outlineService = new OutlineApplicationService({ outlines: repository, ids, clock });
   const candidates = new BrowserDevelopmentStoryPlanningCandidateStore(new MemoryStorage());
   const executeText = vi.fn(
-    (_dependencies: ModelHubTextExecutionDependencies, _input: ExecuteModelHubTextTaskInput) => {
+    async (
+      _dependencies: ModelHubTextExecutionDependencies,
+      _input: ExecuteModelHubTextTaskInput,
+    ) => {
       void _dependencies;
-      void _input;
-      return Promise.resolve({
+      const selected = inspection();
+      const selection = {
+        generationId: "generation-planning",
+        invocationId: "invocation-outline",
+        connectionId: selected.connectionId,
+        catalogEntryId: selected.catalogEntryId,
+        modelId: selected.modelId,
+        usedFallback: selected.usedFallback,
+        localOnlyEligible: false,
+      } as const;
+      await _input.onBeforeDispatch?.(selection);
+      await _input.onFinalBeforeProviderDispatch?.(selection);
+      return {
         text: responseText,
         usage: { inputTokens: 100, outputTokens: 200, cachedInputTokens: null },
         invocation: invocation(responseTask),
@@ -617,12 +651,21 @@ function createHarness(
         modelId: "planning-model",
         usedFallback: false,
         costCeilingExceededAfterDispatch: false,
-      });
+      };
     },
   );
   const capabilityEvidence = options.structuredOutput === false ? [] : [structuredEvidence()];
+  let evidenceReadCount = 0;
+  const listCapabilityEvidence = vi.fn(() => {
+    evidenceReadCount += 1;
+    return Promise.resolve(
+      options.structuredOutputRevokedBeforeFinal === true && evidenceReadCount >= 3
+        ? []
+        : capabilityEvidence,
+    );
+  });
   const modelHub = {
-    listCapabilityEvidence: vi.fn(() => Promise.resolve(capabilityEvidence)),
+    listCapabilityEvidence,
   } as unknown as ModelHubStore;
   const service = new ModelHubStoryPlanningService({
     modelHub,
@@ -641,7 +684,14 @@ function createHarness(
     executeText,
     projectContextPrivacy: standardProjectPrivacyAuthority(),
   });
-  return { service, repository, outlineService, candidates, executeText };
+  return {
+    service,
+    repository,
+    outlineService,
+    candidates,
+    executeText,
+    listCapabilityEvidence,
+  };
 }
 
 function standardProjectPrivacyAuthority() {
@@ -907,6 +957,7 @@ function invocation(
     estimatedCostMicros: null,
     errorCode: null,
     errorSummary: null,
+    providerDispatchStartedAt: NOW_TEXT,
     startedAt: NOW_TEXT,
     completedAt: NOW_TEXT,
     createdAt: NOW_TEXT,

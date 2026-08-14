@@ -43,7 +43,7 @@ const STANDARD_CONTINUATION_TOKENS = resolveContinuationOutputContract({
  * or verified.
  */
 describe("core creative loop internal closure", () => {
-  it("connects confirmed seed, isolated Candidate, accepted version, P41 projections, context, and dual-evidence validation", async () => {
+  it("connects confirmed seed, isolated Candidate, accepted version, local projections, and evidence-safe validation", async () => {
     const harness = createInternalFakeHarness();
     await seedInternalFakeRoutes(harness.runtime.modelHub);
 
@@ -189,56 +189,61 @@ describe("core creative loop internal closure", () => {
       actorId: harness.runtime.story.actorId,
     });
 
-    const pipeline = await runAcceptedChapterPipeline(harness.runtime, {
+    const providerCallsBeforeAcceptanceRefresh = harness.generate.mock.calls.length;
+    const localAcceptanceRefresh = await runAcceptedChapterPipeline(harness.runtime, {
       projectId: project.id,
       chapterId: target.chapter.id,
       versionId: accepted.version.id,
       source: "candidate_accept",
       acceptedCharacterCount: OPENING.length,
     });
-    expect(pipeline).toMatchObject({
+    expect(localAcceptanceRefresh).toMatchObject({
       status: "completed",
       search: { status: "completed" },
-      chapterSummary: { status: "completed" },
-      storyState: { status: "completed" },
-      causalProjection: { status: "completed" },
-      storyStateMetrics: {
-        detectedCount: 1,
-        needsConfirmationCount: 0,
-        reversibleCount: 1,
-        skippedTaskCount: 0,
+      chapterSummary: {
+        status: "skipped",
+        code: "CHAPTER_SUMMARY_REQUIRES_EXPLICIT_OPT_IN",
       },
+      storyState: {
+        status: "skipped",
+        code: "STORY_STATE_REQUIRES_EXPLICIT_OPT_IN",
+      },
+      causalProjection: { status: "completed" },
     });
+    expect(harness.generate).toHaveBeenCalledTimes(providerCallsBeforeAcceptanceRefresh);
+
+    // Legacy enrichment flags are retained only as historical input. Until a
+    // separate authorization and ambiguous-result state machine exists, this
+    // durable background task stays local-only for every source.
+    const providerCallsBeforeLegacyBackfill = harness.generate.mock.calls.length;
+    await expect(
+      runAcceptedChapterPipeline(harness.runtime, {
+        projectId: project.id,
+        chapterId: target.chapter.id,
+        versionId: accepted.version.id,
+        source: "historical_backfill",
+        acceptedCharacterCount: OPENING.length,
+        runSearch: false,
+        runChapterSummary: true,
+        runStoryState: true,
+        runCausalProjection: false,
+        pipelineIdempotencyKey: `story.accepted-version:${accepted.version.id}:explicit-enrichment-v1`,
+      }),
+    ).rejects.toThrow("must enable at least one stage");
+    expect(harness.generate).toHaveBeenCalledTimes(providerCallsBeforeLegacyBackfill);
 
     const listedFacts = await harness.runtime.story.facts.listByProjectId(
       project.id as unknown as Parameters<DesktopRuntime["story"]["facts"]["listByProjectId"]>[0],
     );
     if (!listedFacts.ok) throw listedFacts.error;
     const snapshots = listedFacts.value.map((fact) => fact.toSnapshot());
-    const summary = snapshots.find(
-      (fact) =>
-        fact.factType === "chapter_summary" &&
-        String(fact.source.versionId) === String(accepted.version.id),
-    );
-    const extractedState = snapshots.find(
-      (fact) =>
-        fact.factType === "character_state" &&
-        String(fact.source.versionId) === String(accepted.version.id),
-    );
-    if (summary === undefined || extractedState === undefined) {
-      throw new Error("P41 did not persist both the chapter summary and extracted story state");
-    }
-    expect(summary).toMatchObject({
-      contentText: SUMMARY_TEXT,
-      status: "temporary",
-      origin: "system",
-    });
-    expect(extractedState).toMatchObject({
-      contentText: `${CURRENT_CLAIM}。`,
-      status: "temporary",
-      origin: "system",
-      source: { excerpt: CURRENT_CLAIM },
-    });
+    expect(
+      snapshots.filter(
+        (fact) =>
+          (fact.factType === "chapter_summary" || fact.factType === "character_state") &&
+          String(fact.source.versionId) === String(accepted.version.id),
+      ),
+    ).toEqual([]);
 
     const indexed = await harness.runtime.search.search(project.id, "钟楼", 10);
     if (!indexed.ok) throw indexed.error;
@@ -290,51 +295,24 @@ describe("core creative loop internal closure", () => {
     expect(compiledText).toContain(CONFIRMED_BOUNDARY);
     expect(compiledText).toContain(REFERENCE_EVIDENCE);
     expect(compiledText).toContain(OPENING);
-    expect(compiledText).toContain(SUMMARY_TEXT);
     expect(compiledText).toContain("钟楼大门被打开");
     expect(secondContext.compiled.entries.map(({ layer }) => layer)).toEqual(
-      expect.arrayContaining([
-        "locked_hard_rules",
-        "character_current_state",
-        "recent_events",
-        "related_causal_chain",
-      ]),
+      expect.arrayContaining(["locked_hard_rules", "recent_events", "related_causal_chain"]),
     );
     expect(secondContext.includedFactIds).toEqual(
-      expect.arrayContaining([
-        referenceFact.id,
-        summary.id,
-        extractedState.id,
-        causalEvent.fact.id,
-      ]),
+      expect.arrayContaining([referenceFact.id, causalEvent.fact.id]),
     );
 
     const validation = await harness.runtime.story.chapterValidation.checkChapter({
       projectId: project.id,
       chapterId: target.chapter.id,
     });
-    expect(validation.status).toBe("checked");
-    const issue = validation.issues.find(({ type }) => type === "character_life_status_conflict");
-    expect(issue?.currentTextExcerpt).toBe(CURRENT_CLAIM);
-    expect(issue?.conflictingFact.source).toBe("confirmed_fact");
-    expect(issue?.conflictingFact.value).toBe("alive");
-    expect(
-      issue?.currentEvidence.some(
-        (evidence) =>
-          evidence.sourceId === target.chapter.id &&
-          evidence.sourceVersionId === accepted.version.id &&
-          evidence.excerpt === CURRENT_CLAIM,
-      ),
-    ).toBe(true);
-    expect(
-      issue?.conflictingEvidence.some(
-        (evidence) =>
-          evidence.sourceId === reference.chapter.id &&
-          evidence.sourceVersionId === reference.version.id &&
-          evidence.excerpt === REFERENCE_EVIDENCE,
-      ),
-    ).toBe(true);
-    expect(harness.generate).toHaveBeenCalledTimes(4);
+    expect(validation.status).toBe("skipped");
+    expect(validation.issues).toEqual([]);
+    expect(validation.missingRequirements).toContain(
+      "current_claim_with_explicit_structured_fields_and_current_version_evidence",
+    );
+    expect(harness.generate).toHaveBeenCalledTimes(1);
   });
 });
 

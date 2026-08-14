@@ -1,6 +1,9 @@
 import type { SqlExecutor, SqlPrimitive } from "@inkshadow/data";
 
-export type UsageEventStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+import { OPENING_INVOCATION_USAGE_STATUS_SQL } from "./opening-invocation-terminal";
+
+export type UsageEventStatus =
+  "queued" | "running" | "succeeded" | "failed" | "cancelled" | "ambiguous" | "not_dispatched";
 export type UsagePrivacyPolicy =
   "cloud_allowed" | "local_preferred" | "local_only" | "not_recorded";
 export type UsageDataDestination = "local" | "remote" | "not_recorded";
@@ -26,6 +29,8 @@ export interface UsageCenterEvent {
   readonly occurredAt: string;
   readonly projectId: string | null;
   readonly projectName: string | null;
+  readonly chapterId: string | null;
+  readonly chapterName: string | null;
   readonly task: string;
   readonly providerId: string;
   readonly providerLabel: string;
@@ -114,6 +119,8 @@ interface UsageEventRow {
   occurred_at: string;
   project_id: string | null;
   project_name: string | null;
+  chapter_id: string | null;
+  chapter_name: string | null;
   task: string;
   provider_id: string;
   provider_label: string;
@@ -339,7 +346,7 @@ function buildTimeBoundUsageQuery(query: ValidatedUsageCenterQuery): {
     sql: `${USAGE_EVENTS_CTE}
       SELECT
         event.event_id, event.source, event.occurred_at,
-        event.project_id, event.project_name, event.task,
+        event.project_id, event.project_name, event.chapter_id, event.chapter_name, event.task,
         event.provider_id, event.provider_label, event.model_id,
         event.status, event.input_tokens, event.output_tokens,
         event.cached_input_tokens, event.cost_micros, event.currency,
@@ -360,6 +367,8 @@ const USAGE_EVENTS_CTE = `WITH usage_events AS (
     usage.reported_at AS occurred_at,
     run.project_id AS project_id,
     project.name AS project_name,
+    run.chapter_id AS chapter_id,
+    chapter.title AS chapter_name,
     'continuation' AS task,
     run.provider_id AS provider_id,
     COALESCE(hub_connection.display_name, run.provider_id) AS provider_label,
@@ -400,6 +409,7 @@ const USAGE_EVENTS_CTE = `WITH usage_events AS (
   FROM ai_generation_attempt_usage AS usage
   JOIN ai_generation_runs AS run ON run.id = usage.run_id
   JOIN projects AS project ON project.id = run.project_id
+  JOIN chapters AS chapter ON chapter.id = run.chapter_id
   LEFT JOIN ai_generation_route_selections AS route ON route.run_id = run.id
   LEFT JOIN model_provider_connections AS hub_connection ON hub_connection.id = run.provider_id
   LEFT JOIN model_profiles AS legacy_profile ON legacy_profile.provider_id = run.provider_id
@@ -410,19 +420,15 @@ const USAGE_EVENTS_CTE = `WITH usage_events AS (
     'hub:' || invocation.id AS event_id,
     'model_hub_invocation' AS source,
     COALESCE(invocation.completed_at, invocation.started_at, invocation.created_at) AS occurred_at,
-    NULL AS project_id,
-    NULL AS project_name,
+    trace.project_id AS project_id,
+    project.name AS project_name,
+    trace.chapter_id AS chapter_id,
+    chapter.title AS chapter_name,
     invocation.task AS task,
     invocation.connection_id AS provider_id,
     COALESCE(connection.display_name, invocation.provider_kind_snapshot) AS provider_label,
     invocation.model_id_snapshot AS model_id,
-    CASE
-      WHEN invocation.status = 'succeeded' THEN 'succeeded'
-      WHEN invocation.status IN ('failed', 'timed_out') THEN 'failed'
-      WHEN invocation.status = 'cancelled' THEN 'cancelled'
-      WHEN invocation.status = 'running' THEN 'running'
-      ELSE 'queued'
-    END AS status,
+    ${OPENING_INVOCATION_USAGE_STATUS_SQL} AS status,
     invocation.input_tokens AS input_tokens,
     invocation.output_tokens AS output_tokens,
     invocation.cached_input_tokens AS cached_input_tokens,
@@ -437,6 +443,11 @@ const USAGE_EVENTS_CTE = `WITH usage_events AS (
     invocation.error_code AS error_code
   FROM model_invocation_facts AS invocation
   LEFT JOIN model_provider_connections AS connection ON connection.id = invocation.connection_id
+  LEFT JOIN context_compilation_model_invocation_links AS invocation_link
+    ON invocation_link.model_invocation_id = invocation.id
+  LEFT JOIN context_compilation_runs AS trace ON trace.id = invocation_link.trace_id
+  LEFT JOIN projects AS project ON project.id = trace.project_id
+  LEFT JOIN chapters AS chapter ON chapter.id = trace.chapter_id
   WHERE invocation.task <> 'continuation'
 )`;
 
@@ -471,6 +482,8 @@ function hydrateUsageEvent(row: UsageEventRow): UsageCenterEvent {
     occurredAt: validateTimestamp(row.occurred_at),
     projectId: row.project_id,
     projectName: row.project_name,
+    chapterId: row.chapter_id,
+    chapterName: row.chapter_name,
     task: validateRequiredText(row.task, "任务", 128),
     providerId: validateRequiredText(row.provider_id, "供应商", 128),
     providerLabel: validateRequiredText(row.provider_label, "供应商名称", 160),
@@ -568,8 +581,8 @@ function aggregateUsage(events: readonly UsageCenterEvent[]): UsageAggregate {
 
   for (const event of events) {
     if (event.status === "succeeded") successCount += 1;
-    else if (event.status === "failed") failureCount += 1;
-    else if (event.status === "cancelled") cancelledCount += 1;
+    else if (event.status === "failed" || event.status === "ambiguous") failureCount += 1;
+    else if (event.status === "cancelled" || event.status === "not_dispatched") cancelledCount += 1;
     else activeCount += 1;
 
     if (event.dataDestination === "local") localCount += 1;
@@ -688,7 +701,17 @@ export const TASK_LABELS: Readonly<Record<string, string>> = Object.freeze({
 });
 
 function parseStatus(value: string): UsageEventStatus {
-  if (["queued", "running", "succeeded", "failed", "cancelled"].includes(value)) {
+  if (
+    [
+      "queued",
+      "running",
+      "succeeded",
+      "failed",
+      "cancelled",
+      "ambiguous",
+      "not_dispatched",
+    ].includes(value)
+  ) {
     return value as UsageEventStatus;
   }
   throw corruptLedger("调用状态无效。");

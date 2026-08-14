@@ -225,6 +225,7 @@ const BACKUP_FINE_TUNING_DATASET_ID = "maintenance-fine-tuning-dataset";
 const BACKUP_FINE_TUNING_JOB_ID = "maintenance-fine-tuning-job";
 const BACKUP_FINE_TUNING_ARTIFACT_ID = "maintenance-fine-tuning-artifact";
 const BACKUP_MARKETPLACE_ARTIFACT_ID = "maintenance-marketplace-artifact";
+const BACKUP_RETIRED_MODEL_CONNECTION_ID = "maintenance-retired-model";
 const BACKUP_CHAPTER_ID = "019f9f4a-b3c7-7350-9226-000000000201";
 const BACKUP_CHAPTER_VERSION_ID = "019f9f4a-b3c7-7350-9226-000000000202";
 const BACKUP_CURRENT_CHAPTER_VERSION_ID = "019f9f4a-b3c7-7350-9226-000000000203";
@@ -381,6 +382,7 @@ describe("DatabaseMaintenanceService", () => {
     await insertProjectKeyMetadata(executor);
     await insertModelProfile(executor);
     await insertModelHubExpertConnection(executor);
+    await insertRetiredModelHubConnection(executor);
     await insertNovelSkillBackupScenario(executor);
     await insertSearchSnapshot(executor, "备份中的派生索引");
     await insertVectorProjection(executor);
@@ -479,7 +481,15 @@ describe("DatabaseMaintenanceService", () => {
            model_discovery_path = '/changed/models',
            text_generation_path = '/changed/chat', embedding_path = '/changed/embed',
            request_timeout_ms = 120000, retry_limit = 0
-      WHERE id = 'maintenance-custom-model'`,
+       WHERE id = 'maintenance-custom-model'`,
+    );
+    await executor.execute(
+      `UPDATE model_provider_connections
+       SET credential_ref = 'keyring:model-hub:unsafe-reactivation',
+           credential_state = 'present', connection_status = 'ready',
+           last_error_code = NULL, enabled = 1
+       WHERE id = ?`,
+      [BACKUP_RETIRED_MODEL_CONNECTION_ID],
     );
     await executor.execute(
       "DELETE FROM model_hub_connection_commits WHERE connection_id = 'maintenance-custom-model'",
@@ -899,6 +909,30 @@ describe("DatabaseMaintenanceService", () => {
         embeddingPath: "/vectors/embed",
         requestTimeoutMs: 47_000,
         retryLimit: 2,
+      },
+    ]);
+    await expect(
+      executor.select<{
+        enabled: number;
+        connectionStatus: string;
+        credentialState: string;
+        credentialRef: string | null;
+        lastErrorCode: string | null;
+      }>(
+        `SELECT enabled, connection_status AS connectionStatus,
+                credential_state AS credentialState, credential_ref AS credentialRef,
+                last_error_code AS lastErrorCode
+         FROM model_provider_connections
+         WHERE id = ?`,
+        [BACKUP_RETIRED_MODEL_CONNECTION_ID],
+      ),
+    ).resolves.toEqual([
+      {
+        enabled: 0,
+        connectionStatus: "disabled",
+        credentialState: "missing",
+        credentialRef: null,
+        lastErrorCode: "MODEL_HUB_CONNECTION_RETIRED",
       },
     ]);
     await expect(
@@ -3379,6 +3413,24 @@ async function insertModelHubExpertConnection(executor: NodeSqliteExecutor): Pro
        NULL, 0, 0, 1, 512
      )`,
     [now, now, now],
+  );
+}
+
+async function insertRetiredModelHubConnection(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  await executor.execute(
+    `INSERT INTO model_provider_connections (
+       id, provider_kind, display_name, protocol, base_url,
+       credential_ref, credential_state, connection_status, authentication_mode,
+       last_error_code, last_error_summary, enabled, revision, created_at, updated_at
+     ) VALUES (
+       ?, 'deepseek', 'Retired DeepSeek', 'openai_compatible', 'https://api.deepseek.com',
+       NULL, 'missing', 'disabled', 'bearer_keyring',
+       'MODEL_HUB_CONNECTION_RETIRED',
+       'The connection was retired while immutable invocation history was retained.',
+       0, 3, ?, ?
+     )`,
+    [BACKUP_RETIRED_MODEL_CONNECTION_ID, now, now],
   );
 }
 

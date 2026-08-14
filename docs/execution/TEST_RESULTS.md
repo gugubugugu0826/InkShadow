@@ -1,7 +1,85 @@
 # InkShadow 测试与构建结果
 
-> 更新日期：2026-08-13  
-> 证据范围：`v0.2.3` 已从唯一干净提交完成本地候选、PR/main CI、标签与公开 GitHub Pre-release；下方 v0.2.2 及更早记录保持历史快照。真实 Provider、当前二进制的 Tauri WebView/Keyring 冷启动、192 次付费 A/B、2,496 项人工评分与另一台电脑安装仍为 `NOT_RUN`，Novel Skill 保持 `KEEP_DISABLED`。
+> 更新日期：2026-08-14  
+> 证据范围：`v0.2.3` 已从唯一干净提交完成本地候选、PR/main CI、标签与公开 GitHub Pre-release；下方 v0.2.2 及更早记录保持历史快照。`v0.2.3` 发布包后来完成过一次 Windows 11 Tauri/Wry + 真实 DeepSeek 的受控历史测试，并因隐式云调用按安全规则提前终止；它不证明当前未提交修复。当前源码的 Provider live、重新打包 Tauri WebView/Keyring、系统 200% DPI、192 次付费 A/B、2,496 项人工评分与另一台电脑安装仍为 `NOT_RUN` / `NOT_RETESTED`，Novel Skill 保持 `KEEP_DISABLED`。
+
+## 2026-08-13 发布后专项修复基线
+
+在修改续写路由、开书状态机和 Model Hub 未连接界面之前运行：
+
+```powershell
+node node_modules/vitest/vitest.mjs run --config apps/desktop/vitest.config.ts --configLoader runner --maxWorkers=1 apps/desktop/src/infrastructure/generation-runtime.test.ts apps/desktop/src/infrastructure/model-hub-creative-chain-integration.test.ts apps/desktop/src/pages/idea-journey-page.test.tsx apps/desktop/src/pages/settings-page.test.tsx apps/desktop/src/infrastructure/diagnostics.test.ts
+```
+
+结果：`5 files / 126 tests PASS`，64.56 秒。该结果只证明修改前现有测试基线，不覆盖“Model Hub
+有效但旧档案 selected model 为空”、每槽同步输入异常、方案选择状态门、真实缺口规划或局部路由
+错误边界；也不是 Provider/Tauri 验收。首次沙箱内运行因外部 `node_modules` junction 权限无法解析
+React 插件，随后在已批准的工作区依赖上下文中复跑成功；工具环境失败不计为用例失败。
+
+## 2026-08-13 v0.2.3 真实反馈修复证据（当前未发布源码）
+
+下表不把测试替身写成真实平台验收。当前工作树存在未提交并行修改，所以本节也不是发布
+Candidate 证据；唯一合法结论是
+**`CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`**。
+
+| 证据层                        | 当前覆盖                                                                                                                                                                                                                                                                        | 结论                                                                                                                                      |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| 严格 fake/mock gateway        | Candidate 接受以及接受/保存/恢复后的持久后台管线均为 0 次模型调用；旧队列中的云阶段开关也会被清洗。开书合法生成批次断言精确 3 次调用，选择/确定性规划/回答断言 0 次，并覆盖全成功、部分失败、取消、结果不明确和失败原因；Model Hub 基础 readiness 漂移与当前章节 preflight 阻断 | 新增回归只证明本地管线、派发编排、门禁和隔离候选，不证明 Provider 兼容性或文学质量。云摘要/识别在独立授权状态机完整前不可派发             |
+| 真实临时 SQLite               | 接受 Candidate 事务保存新正文/新不可变版本、旧版不变、本地派生失败不回滚、重启后 0 自动模型调用；凭据删除后重绑、退役与同供应商新建、历史 invocation 保留；开书 `reserved/bound/dispatched` 崩溃点和终态恢复                                                                    | Data `0065` 只新增不含内容的 `provider_dispatch_started_at`；已发布迁移和 checksum 未改写                                                 |
+| production Chromium           | 1440/1280/1024/800、200% zoom、DPR2、窄屏 Drawer、焦点返回/Escape、44px 目标和水平 overflow；Shell/Model Hub 显示无正文的基础 readiness，当前章节 blocked preflight 会覆盖顶栏                                                                                                  | 只是 Chromium CSS viewport 证据；不得把 CSS zoom/DPR2 写成 Windows 系统 200% DPI                                                          |
+| Windows Tauri + Provider live | 当前修复尚未使用真实 Key、Credential Manager、Wry 或真实 DeepSeek 复测                                                                                                                                                                                                          | `NOT_RUN / REAL_TAURI_NOT_RETESTED`；按[二阶段 Prompt](RELEASE_CHECKLIST.md#v023-反馈修复后的第二阶段真实-windows-tauri-测试-prompt) 执行 |
+
+### production bundle graph 与预算（最终当前构建）
+
+审计未发现重复 React/runtime/PDF/ZIP/付费评测模块，未发现应懒加载的付费评测或 PDF 同时进入
+普通启动图，也未发现 source map、HMR 或测试代码进入 production bundle。因此本次只把
+内部总量回归门禁从 `6 MiB + 416 KiB = 6,717,440 bytes` 调整为
+`7 MiB = 7,340,032 bytes`；不通过排除异步包或迁移到不计量位置规避检查。
+
+最终构建仍会报告 DOCX、EPUB、PDF exporter 同时存在动态和包根静态引用；逐产物检查证明三份
+实现各只出现一次，并统一落在按路由加载的 `import-journey-page` chunk，没有进入
+`index.html` 的普通启动 preload，也没有重复总量。其影响是进入设置/导入路由时会一并加载三个
+exporter，动作级懒加载没有单独分包；这是后续 bundle hardening，而不是本次 7 MiB 调整的依据
+缺口。JSZip、PDF rasterizer 和付费评测 factory 仍保持独立按需 chunk。
+
+| 指标                                     |      最终 production build |                                          门禁 |
+| ---------------------------------------- | -------------------------: | --------------------------------------------: |
+| 前端 payload（不含 800-byte favicon）    |            6,739,000 bytes |      总量 7,340,032 bytes，余量 601,032 bytes |
+| 全部发行前端文件（含 favicon）           | 53 files / 6,739,800 bytes | 物理总量对同一预算仍有 600,232 bytes 可用余量 |
+| 入口 chunk `index-Up6b06Qb.js`           |              267,401 bytes |                       300 KiB = 307,200 bytes |
+| 最大异步 chunk `runtime-U-oR9CDm.js`     |              498,767 bytes |                       500 KiB = 512,000 bytes |
+| `desktop-local` 启动共享 chunk           |              477,450 bytes |                       500 KiB = 512,000 bytes |
+| `model-hub-store-runtime` 启动共享 chunk |              127,403 bytes |                       500 KiB = 512,000 bytes |
+| CSS                                      |              131,053 bytes |                       128 KiB = 131,072 bytes |
+| PDF worker                               |            1,187,649 bytes |                   1,536 KiB = 1,572,864 bytes |
+
+入口 300 KiB、异步 chunk 500 KiB、CSS 128 KiB、worker 1,536 KiB 和通用资产 2 MiB
+的单文件上限全部保持不变。CSS 距上限只剩 19 bytes，后续样式增长必须先消除重复，
+不得再用总量预算调整掩盖单文件风险。
+最终 payload 若继续使用旧 `6,717,440` byte 门禁会超出 21,560 bytes；把 800-byte favicon 也计入
+物理总量时超出 22,360 bytes。经上述生产依赖图审计后，新 `7,340,032` byte 门禁分别保留
+601,032 bytes payload 余量与 600,232 bytes 物理总量余量。该结果是当前未发布工作树的最终
+production build 证据，不是干净提交、NSIS 安装包或 GitHub Release 证据。
+
+### 当前已完成的项目级门禁
+
+| 门禁                 | 命令                                                                                                            | 结果                                                                                                                         |
+| -------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Desktop 最终全量     | `pnpm.cmd --filter @inkshadow/desktop test`                                                                     | PASS；249 files / 1,855 passed / 1 skipped / 0 failed                                                                        |
+| Data 最终全量        | `pnpm.cmd --filter @inkshadow/data test`                                                                        | PASS；421 passed / 0 failed                                                                                                  |
+| Desktop TypeScript   | `pnpm.cmd --filter @inkshadow/desktop typecheck`                                                                | PASS                                                                                                                         |
+| Rust/Tauri 原生门禁  | `pnpm.cmd check:rust`                                                                                           | PASS；`cargo fmt`、全 target `clippy -D warnings` 与测试完成，160 passed / 1 ignored / 0 failed；测试 80.14 秒，整体 92.1 秒 |
+| Production build     | `pnpm.cmd --filter @inkshadow/desktop build`                                                                    | PASS；53 files / 6,739,800 bytes；预算与最大 chunks 见上表                                                                   |
+| production 响应式    | `node scripts/run-e2e.mjs --dist apps/desktop/dist tests/e2e/desktop-production-reflow.spec.ts --reporter=line` | 3/3 PASS；不等于真实 Tauri/DPI                                                                                               |
+| local-first 安全边界 | `node scripts/run-e2e.mjs --dist apps/desktop/dist tests/e2e/desktop-local-first.spec.ts --reporter=line`       | 4/4 PASS；只使用本地/测试数据                                                                                                |
+| 最终 Chromium 合计   | 相关 production Chromium 套件                                                                                   | 12/12 PASS：11 项直接通过；导入/导出 1 项首次受本机 `pdfjs` ACL 阻断，在沙箱外同一代码路径复跑通过；不等于 Tauri WebView     |
+
+全仓 `pnpm.cmd release:check` 最终退出码为 0，用时 924.9 秒。它从当前工作树重新完成
+20 个工作区的 production build、Prettier、秘密扫描、137 项运行时许可证、20 包架构边界、
+17 项 Desktop 发布配置、全部工作区 TypeScript、ESLint 和串行测试；测试合计
+3,132 passed / 65 skipped / 0 failed。该 PASS 只证明当前未提交源码的工程门禁，不等于干净唯一
+提交、NSIS/Tauri 安装包、真实 Provider 或 GitHub Release。最终 `git diff --check` 也为 PASS；
+完整发布候选链仍为 `NOT_RUN / NOT_RELEASED`。
 
 ## 2026-08-13 Model Hub、正文布局与 Novel Skill 受限 smoke
 

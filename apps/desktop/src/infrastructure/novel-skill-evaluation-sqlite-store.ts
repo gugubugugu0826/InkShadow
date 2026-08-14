@@ -18,6 +18,10 @@ import {
   NOVEL_SKILL_EVALUATION_FIXTURE_SET_HASH,
 } from "@inkshadow/domain";
 
+const EVALUATION_INVALID_CODE = "NOVEL_SKILL_EVALUATION_INVALID";
+const EVALUATION_CONFLICT_CODE = "NOVEL_SKILL_EVALUATION_CONFLICT";
+const EVALUATION_EVIDENCE_CODE = "NOVEL_SKILL_EVALUATION_EVIDENCE";
+
 export interface NovelSkillEvaluationManifestItem {
   readonly skillId: string;
   readonly version: string;
@@ -77,7 +81,7 @@ export async function hashNovelSkillEvaluationModelIdentity(
     !isPortableLocator(identity.providerKind, 128)
   ) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_INVALID",
+      EVALUATION_INVALID_CODE,
       "Model identity contains an invalid content-free locator.",
     );
   }
@@ -90,7 +94,7 @@ export async function hashNovelSkillEvaluationModelArtifact(
   assertExactObjectKeys(identity, ["modelId", "providerKind"], "model artifact identity");
   if (!isPortableLocator(identity.modelId, 512) || !isPortableLocator(identity.providerKind, 128)) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_INVALID",
+      EVALUATION_INVALID_CODE,
       "Model artifact identity contains an invalid content-free locator.",
     );
   }
@@ -102,7 +106,7 @@ export async function hashNovelSkillEvaluationPreferenceConfiguration(
 ): Promise<string> {
   if (!Array.isArray(evidenceValue) || evidenceValue.length < 1 || evidenceValue.length > 64) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_INVALID",
+      EVALUATION_INVALID_CODE,
       "Preference evidence must contain between one and 64 content-free sources.",
     );
   }
@@ -121,7 +125,7 @@ export async function hashNovelSkillEvaluationPreferenceConfiguration(
       !isHash(contentHash)
     ) {
       throw storeError(
-        "NOVEL_SKILL_EVALUATION_INVALID",
+        EVALUATION_INVALID_CODE,
         "Preference evidence contains an invalid locator or content hash.",
       );
     }
@@ -139,7 +143,7 @@ export async function hashNovelSkillEvaluationPreferenceConfiguration(
   );
   if (new Set(ordered.map(({ sourceId }) => sourceId)).size !== ordered.length) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_INVALID",
+      EVALUATION_INVALID_CODE,
       "Preference evidence source identifiers must be unique.",
     );
   }
@@ -340,7 +344,7 @@ export class NovelSkillEvaluationSqliteStore {
       })
     ) {
       throw storeError(
-        "NOVEL_SKILL_EVALUATION_INVALID",
+        EVALUATION_INVALID_CODE,
         "The built-in evaluation fixture registry does not match its pinned contract.",
       );
     }
@@ -470,12 +474,12 @@ export class NovelSkillEvaluationSqliteStore {
       );
       const suite = suites[0];
       if (suite === undefined) {
-        throw storeError("NOVEL_SKILL_EVALUATION_CONFLICT", "Evaluation suite does not exist.");
+        throw storeError(EVALUATION_CONFLICT_CODE, "Evaluation suite does not exist.");
       }
       const slots = parseModelSlots(suite.model_slots_json);
       if (!sameSlotIds(slots, assignments)) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_INVALID",
+          EVALUATION_INVALID_CODE,
           "Run model assignments do not match the suite's two slots.",
         );
       }
@@ -500,7 +504,7 @@ export class NovelSkillEvaluationSqliteStore {
       );
       if (fixtures.length !== 12) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Evaluation suite must contain exactly 12 immutable fixture contracts.",
         );
       }
@@ -544,7 +548,7 @@ export class NovelSkillEvaluationSqliteStore {
     );
     if (result.rowsAffected !== 1) {
       throw storeError(
-        "NOVEL_SKILL_EVALUATION_CONFLICT",
+        EVALUATION_CONFLICT_CODE,
         "Evaluation run was already started or cannot be resumed.",
       );
     }
@@ -568,7 +572,7 @@ export class NovelSkillEvaluationSqliteStore {
         [invalidatedAt, runId],
       );
       if (result.rowsAffected !== 1) {
-        throw storeError("NOVEL_SKILL_EVALUATION_CONFLICT", "Evaluation run is already terminal.");
+        throw storeError(EVALUATION_CONFLICT_CODE, "Evaluation run is already terminal.");
       }
       await transaction.execute(
         `UPDATE novel_skill_evaluation_cells SET state = 'invalidated'
@@ -625,10 +629,7 @@ export class NovelSkillEvaluationSqliteStore {
     assertUuidV7(input.attemptId, "attemptId");
     assertUuidV7(input.contextTraceId, "contextTraceId");
     if (!isPortableLocator(input.modelInvocationId, 512)) {
-      throw storeError(
-        "NOVEL_SKILL_EVALUATION_INVALID",
-        "Attempt model invocation identifier is invalid.",
-      );
+      throw storeError(EVALUATION_INVALID_CODE, "Attempt model invocation identifier is invalid.");
     }
     await this.executor.transaction(async (transaction) => {
       const rows = await transaction.select<{
@@ -656,7 +657,7 @@ export class NovelSkillEvaluationSqliteStore {
       const row = rows[0];
       if (row === undefined) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_CONFLICT",
+          EVALUATION_CONFLICT_CODE,
           "Evaluation attempt dispatch receipt is missing or already bound.",
         );
       }
@@ -679,7 +680,7 @@ export class NovelSkillEvaluationSqliteStore {
         assignment.modelArtifactHash !== modelArtifactHash
       ) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Pre-dispatch provider/model receipt does not match the immutable evaluation slot.",
         );
       }
@@ -692,7 +693,7 @@ export class NovelSkillEvaluationSqliteStore {
       );
       if (changed.rowsAffected !== 1) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_CONFLICT",
+          EVALUATION_CONFLICT_CODE,
           "Evaluation attempt dispatch receipt is missing or already bound.",
         );
       }
@@ -719,7 +720,7 @@ export class NovelSkillEvaluationSqliteStore {
         attemptNumber > 8
       ) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_CONFLICT",
+          EVALUATION_CONFLICT_CODE,
           "Evaluation cell exhausted its bounded eight-attempt retry budget.",
         );
       }
@@ -744,16 +745,13 @@ export class NovelSkillEvaluationSqliteStore {
     assertIsoUtc(input.completedAt, "completedAt");
     if ((input.contextTraceId === null) !== (input.modelInvocationId === null)) {
       throw storeError(
-        "NOVEL_SKILL_EVALUATION_INVALID",
+        EVALUATION_INVALID_CODE,
         "Attempt trace and invocation receipts must either both be present or both be absent.",
       );
     }
     if (input.contextTraceId !== null) assertUuidV7(input.contextTraceId, "contextTraceId");
     if (input.modelInvocationId !== null && !isPortableLocator(input.modelInvocationId, 512)) {
-      throw storeError(
-        "NOVEL_SKILL_EVALUATION_INVALID",
-        "Attempt model invocation identifier is invalid.",
-      );
+      throw storeError(EVALUATION_INVALID_CODE, "Attempt model invocation identifier is invalid.");
     }
     if (
       (input.status === "succeeded" &&
@@ -761,7 +759,7 @@ export class NovelSkillEvaluationSqliteStore {
       (input.status !== "succeeded" && !isErrorCode(input.errorCode))
     ) {
       throw storeError(
-        "NOVEL_SKILL_EVALUATION_INVALID",
+        EVALUATION_INVALID_CODE,
         "Attempt terminal metadata does not match its status.",
       );
     }
@@ -780,7 +778,7 @@ export class NovelSkillEvaluationSqliteStore {
     );
     if (changed.rowsAffected !== 1) {
       throw storeError(
-        "NOVEL_SKILL_EVALUATION_CONFLICT",
+        EVALUATION_CONFLICT_CODE,
         "Evaluation attempt is missing or already terminal.",
       );
     }
@@ -823,7 +821,7 @@ export class NovelSkillEvaluationSqliteStore {
       const cell = rows[0];
       if (cell?.state !== "planned" || cell.run_status !== "running") {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_CONFLICT",
+          EVALUATION_CONFLICT_CODE,
           "Evaluation cell is not pending in this active run.",
         );
       }
@@ -843,7 +841,7 @@ export class NovelSkillEvaluationSqliteStore {
       const invocation = invocations[0];
       if (!usableInvocation(invocation)) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Evaluation requires a succeeded, completed, visible and non-truncated invocation.",
         );
       }
@@ -865,7 +863,7 @@ export class NovelSkillEvaluationSqliteStore {
         assignment.modelArtifactHash !== modelArtifactHash
       ) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Provider/model receipt does not match this run's immutable slot assignment.",
         );
       }
@@ -878,7 +876,7 @@ export class NovelSkillEvaluationSqliteStore {
       );
       if (actualArmHash !== cell.arm_configuration_hash) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Invocation Skill membership does not match its planned A/B arm.",
         );
       }
@@ -892,7 +890,7 @@ export class NovelSkillEvaluationSqliteStore {
         input.observation.methodApplicability.genre !== methodApplicability.genre
       ) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Evaluation applicability does not match the exact compiler receipt.",
         );
       }
@@ -909,7 +907,7 @@ export class NovelSkillEvaluationSqliteStore {
             actualPreferenceConfigurationHash !== null))
       ) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Preference evidence does not match the planned A/B arm.",
         );
       }
@@ -918,14 +916,14 @@ export class NovelSkillEvaluationSqliteStore {
         input.observation.finishReason !== invocation.finish_reason
       ) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Evaluation completion metadata does not match the exact provider receipt.",
         );
       }
       const latencyMilliseconds = invocationLatencyMilliseconds(invocation);
       if (input.observation.latencyMilliseconds !== latencyMilliseconds) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Evaluation latency must match the exact invocation timestamps.",
         );
       }
@@ -1019,13 +1017,13 @@ export class NovelSkillEvaluationSqliteStore {
       const row = rows[0];
       if (rows.length !== 1 || row === undefined) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Settled observation repair requires one exact successful reservation chain.",
         );
       }
       if (row.terminal_at === null || input.createdAt < row.terminal_at) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_INVALID",
+          EVALUATION_INVALID_CODE,
           "Observation repair time must not precede the settled provider receipt.",
         );
       }
@@ -1039,7 +1037,7 @@ export class NovelSkillEvaluationSqliteStore {
         Array.from(row.content).length !== row.visible_content_length
       ) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Settled observation repair found a mismatched provider output Candidate.",
         );
       }
@@ -1053,7 +1051,7 @@ export class NovelSkillEvaluationSqliteStore {
           row.observed_result_hash !== actualResultHash
         ) {
           throw storeError(
-            "NOVEL_SKILL_EVALUATION_CONFLICT",
+            EVALUATION_CONFLICT_CODE,
             "The settled evaluation cell already has a different observation receipt.",
           );
         }
@@ -1071,7 +1069,7 @@ export class NovelSkillEvaluationSqliteStore {
         (row.arm !== "no_skill" && snapshotRows.length !== 1)
       ) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Settled observation repair found an invalid Novel Skill snapshot chain.",
         );
       }
@@ -1091,7 +1089,7 @@ export class NovelSkillEvaluationSqliteStore {
         (row.arm !== "core_genre_preferences" && actualPreferenceConfigurationHash !== null)
       ) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Settled observation repair found preference evidence in the wrong A/B arm.",
         );
       }
@@ -1182,14 +1180,14 @@ export class NovelSkillEvaluationSqliteStore {
       !/^[a-z0-9][a-z0-9._:-]{2,127}$/u.test(input.reviewerId)
     ) {
       throw storeError(
-        "NOVEL_SKILL_EVALUATION_INVALID",
+        EVALUATION_INVALID_CODE,
         "Manual score reviewer identifier must be a portable pseudonymous locator.",
       );
     }
     if (
       (input as { readonly rubricVersion: unknown }).rubricVersion !== "novel-skill-human-rubric@1"
     ) {
-      throw storeError("NOVEL_SKILL_EVALUATION_INVALID", "Manual score rubric version is invalid.");
+      throw storeError(EVALUATION_INVALID_CODE, "Manual score rubric version is invalid.");
     }
     assertIsoUtc(input.scoredAt, "scoredAt");
     assertScores(input.scores);
@@ -1205,7 +1203,7 @@ export class NovelSkillEvaluationSqliteStore {
       );
       if (observations.length !== 1) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_CONFLICT",
+          EVALUATION_CONFLICT_CODE,
           "Manual scores require one collected evidence record in an active run.",
         );
       }
@@ -1232,7 +1230,7 @@ export class NovelSkillEvaluationSqliteStore {
       );
       if (marked.rowsAffected !== 1) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_CONFLICT",
+          EVALUATION_CONFLICT_CODE,
           "Evaluation cell changed before its receipt was committed.",
         );
       }
@@ -1315,7 +1313,7 @@ export class NovelSkillEvaluationSqliteStore {
     );
     const row = rows[0];
     if (row === undefined) {
-      throw storeError("NOVEL_SKILL_EVALUATION_CONFLICT", "Evaluation run does not exist.");
+      throw storeError(EVALUATION_CONFLICT_CODE, "Evaluation run does not exist.");
     }
     const evidenceDigest = await readVerifiedEvidenceDigest(this.executor, runId);
     if (row.status === "completed") {
@@ -1328,7 +1326,7 @@ export class NovelSkillEvaluationSqliteStore {
         (await evaluationResultHash(recomputed, evidenceDigest)) !== row.evaluation_result_hash
       ) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "Persisted evaluation result does not match its exact 192-cell evidence.",
         );
       }
@@ -1365,7 +1363,7 @@ export class NovelSkillEvaluationSqliteStore {
       const row = rows[0];
       if (row === undefined) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_CONFLICT",
+          EVALUATION_CONFLICT_CODE,
           "Evaluation run cannot be completed from its current state.",
         );
       }
@@ -1375,7 +1373,7 @@ export class NovelSkillEvaluationSqliteStore {
       const result = evaluateNovelSkillAbEvidence(observations, modelSlots);
       if (result.status === "NOT_EVALUATED" || result.status === "EVIDENCE_INCOMPLETE") {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           `Evaluation requires the exact 192-cell matrix; ${String(result.missingCells.length)} cells remain.`,
         );
       }
@@ -1389,7 +1387,7 @@ export class NovelSkillEvaluationSqliteStore {
       );
       if (changed.rowsAffected !== 1) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_CONFLICT",
+          EVALUATION_CONFLICT_CODE,
           "Evaluation run cannot be completed from its current state.",
         );
       }
@@ -1425,7 +1423,7 @@ export class NovelSkillEvaluationSqliteStore {
       const run = rows[0];
       if (run === undefined) {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_CONFLICT",
+          EVALUATION_CONFLICT_CODE,
           "Manual decision requires a terminal run in its archived evaluation workspace.",
         );
       }
@@ -1442,13 +1440,13 @@ export class NovelSkillEvaluationSqliteStore {
           (decision === "APPROVE_EXPERIMENTAL_BINDING" && result.status !== "ELIGIBLE_FOR_REVIEW")
         ) {
           throw storeError(
-            "NOVEL_SKILL_EVALUATION_EVIDENCE",
+            EVALUATION_EVIDENCE_CODE,
             "Persisted evaluation status does not match the exact recomputed 192-cell result.",
           );
         }
       } else if (decision === "APPROVE_EXPERIMENTAL_BINDING") {
         throw storeError(
-          "NOVEL_SKILL_EVALUATION_EVIDENCE",
+          EVALUATION_EVIDENCE_CODE,
           "An incomplete evaluation run cannot approve experimental bindings.",
         );
       }
@@ -1612,7 +1610,7 @@ async function assertExactSuiteReplayOrMissing(
     canonicalJson(fixtureRows) === canonicalJson(expectedFixtures);
   if (!exact) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_CONFLICT",
+      EVALUATION_CONFLICT_CODE,
       "An evaluation suite with this id already exists under different canonical authority.",
     );
   }
@@ -1693,7 +1691,7 @@ async function assertExactRunReplayOrMissing(
     canonicalJson(cells) === canonicalJson(expectedCells);
   if (!exact) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_CONFLICT",
+      EVALUATION_CONFLICT_CODE,
       "An evaluation run with this id already exists under different canonical authority.",
     );
   }
@@ -1924,7 +1922,7 @@ async function assertStoredSuitePlan(
   );
   const suite = suites[0];
   if (suite === undefined) {
-    throw storeError("NOVEL_SKILL_EVALUATION_EVIDENCE", "Evaluation suite is missing.");
+    throw storeError(EVALUATION_EVIDENCE_CODE, "Evaluation suite is missing.");
   }
   const fixtures = await transaction.select<{
     readonly fixture_id: string;
@@ -2020,7 +2018,7 @@ async function assertStoredSuitePlan(
     suite.plan_hash !== planHash
   ) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "Stored evaluation suite no longer matches the pinned fixture and plan contract.",
     );
   }
@@ -2074,7 +2072,7 @@ async function assertEvaluationProjectClean(
     row.skill_bindings !== 0
   ) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "Evaluation workspace is no longer archived and content-free.",
     );
   }
@@ -2086,7 +2084,7 @@ function normalizeRunCell(row: RunCellRow): NovelSkillEvaluationCellRecord {
     genreTags = JSON.parse(row.genre_tags_json);
   } catch (cause) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "Stored evaluation fixture genre tags are invalid.",
       cause,
     );
@@ -2096,10 +2094,7 @@ function normalizeRunCell(row: RunCellRow): NovelSkillEvaluationCellRecord {
     genreTags.length < 1 ||
     genreTags.some((tag) => !isPortableLocator(tag, 64))
   ) {
-    throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
-      "Stored evaluation fixture genre tags are invalid.",
-    );
+    throw storeError(EVALUATION_EVIDENCE_CODE, "Stored evaluation fixture genre tags are invalid.");
   }
   return Object.freeze({
     id: row.id,
@@ -2148,10 +2143,7 @@ async function readObservations(
       [...grouped.values()].map(async (values) => {
         const first = values[0];
         if (first === undefined || values.length !== NOVEL_SKILL_EVALUATION_METRICS.length) {
-          throw storeError(
-            "NOVEL_SKILL_EVALUATION_EVIDENCE",
-            "Stored evaluation scores are incomplete.",
-          );
+          throw storeError(EVALUATION_EVIDENCE_CODE, "Stored evaluation scores are incomplete.");
         }
         const scores = Object.fromEntries(
           values.map(({ metric, score_basis_points }) => [
@@ -2279,7 +2271,7 @@ async function readVerifiedEvidenceDigest(
   );
   if (rows.length !== (expectedRows[0]?.count ?? -1)) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "Stored evaluation evidence has lost an exact trace, model or Candidate link.",
     );
   }
@@ -2361,7 +2353,7 @@ async function readVerifiedEvidenceDigest(
           row.snapshot_compiler_version !== row.suite_compiler_version)
     ) {
       throw storeError(
-        "NOVEL_SKILL_EVALUATION_EVIDENCE",
+        EVALUATION_EVIDENCE_CODE,
         "Stored evaluation evidence no longer matches its exact immutable chain.",
       );
     }
@@ -2464,7 +2456,7 @@ async function readVerifiedEvidenceDigest(
       ))
   ) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "A completed evaluation requires one successful paid attempt per exact cell.",
     );
   }
@@ -2539,7 +2531,7 @@ async function readAndValidateTraceSources(
     [evidence.context_trace_id],
   );
   if (rows.length === 0) {
-    throw storeError("NOVEL_SKILL_EVALUATION_EVIDENCE", "Evaluation trace has no context source.");
+    throw storeError(EVALUATION_EVIDENCE_CODE, "Evaluation trace has no context source.");
   }
   const entryStates = new Map<string, number>();
   for (const row of rows) entryStates.set(row.candidate_id, row.included);
@@ -2550,7 +2542,7 @@ async function readAndValidateTraceSources(
     entryStates.size - includedCount !== evidence.trace_discarded_count
   ) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "Evaluation trace entry counts no longer match its immutable budget receipt.",
     );
   }
@@ -2559,7 +2551,7 @@ async function readAndValidateTraceSources(
   for (const row of rows) {
     if (row.source_order === null || row.source_type === null || row.source_id === null) {
       throw storeError(
-        "NOVEL_SKILL_EVALUATION_EVIDENCE",
+        EVALUATION_EVIDENCE_CODE,
         "Evaluation trace contains an unproven context entry.",
       );
     }
@@ -2587,7 +2579,7 @@ async function readAndValidateTraceSources(
       isHash(row.content_hash);
     if (!currentTask && !fixtureLayer && !preference) {
       throw storeError(
-        "NOVEL_SKILL_EVALUATION_EVIDENCE",
+        EVALUATION_EVIDENCE_CODE,
         "Evaluation trace includes a non-evaluation project source.",
       );
     }
@@ -2616,7 +2608,7 @@ async function readAndValidateTraceSources(
   }
   if (!hasCurrentTask) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "Evaluation trace lacks its exact fixture task source.",
     );
   }
@@ -2632,14 +2624,14 @@ function assertSnapshotConfigurationMatchesTrace(
     snapshot = JSON.parse(evidence.snapshot_configuration_json ?? "null");
   } catch (cause) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "Evaluation Skill snapshot configuration is invalid.",
       cause,
     );
   }
   if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "Evaluation Skill snapshot configuration is invalid.",
     );
   }
@@ -2671,7 +2663,7 @@ function assertSnapshotConfigurationMatchesTrace(
     ) !== canonicalJson(traceLayers)
   ) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "Evaluation Skill snapshot does not match its fixture and trace contract.",
     );
   }
@@ -2701,7 +2693,7 @@ async function readNovelSkillItemDigest(
   );
   if (rows.length === 0) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "Evaluation Skill snapshot has lost its considered items.",
     );
   }
@@ -2722,14 +2714,14 @@ async function readActualArmHash(
   if (arm === "no_skill") {
     if (snapshotId !== null || hiddenSnapshots.length !== 0) {
       throw storeError(
-        "NOVEL_SKILL_EVALUATION_EVIDENCE",
+        EVALUATION_EVIDENCE_CODE,
         "No-Skill evidence cannot hide a Novel Skill snapshot.",
       );
     }
     return null;
   }
   if (snapshotId === null || hiddenSnapshots[0]?.id !== snapshotId) {
-    throw storeError("NOVEL_SKILL_EVALUATION_EVIDENCE", "Skill arm lacks its exact snapshot.");
+    throw storeError(EVALUATION_EVIDENCE_CODE, "Skill arm lacks its exact snapshot.");
   }
   const items = await transaction.select<ManifestItemRow>(
     `SELECT item.skill_id, item.skill_version, item.definition_hash, definition.kind
@@ -2750,7 +2742,7 @@ async function readActualArmHash(
     (arm !== "core" && !items.some(({ kind }) => kind === "genre"))
   ) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "Snapshot considered Skill kinds do not match the planned A/B arm.",
     );
   }
@@ -2765,14 +2757,14 @@ async function readMethodApplicability(
   if (arm === "no_skill") {
     if (snapshotId !== null) {
       throw storeError(
-        "NOVEL_SKILL_EVALUATION_EVIDENCE",
+        EVALUATION_EVIDENCE_CODE,
         "No-Skill evidence cannot report method applicability.",
       );
     }
     return Object.freeze({ core: false, genre: false });
   }
   if (snapshotId === null) {
-    throw storeError("NOVEL_SKILL_EVALUATION_EVIDENCE", "Skill evidence lacks its snapshot.");
+    throw storeError(EVALUATION_EVIDENCE_CODE, "Skill evidence lacks its snapshot.");
   }
   const rows = await transaction.select<{
     readonly kind: "core" | "genre" | "custom";
@@ -2816,7 +2808,7 @@ async function readPreferenceConfigurationHash(
       ({ source_id: sourceId, source_version_id: sourceVersionId, content_hash: contentHash }) => {
         if (!isHash(contentHash)) {
           throw storeError(
-            "NOVEL_SKILL_EVALUATION_EVIDENCE",
+            EVALUATION_EVIDENCE_CODE,
             "Preference context evidence lacks an exact content hash.",
           );
         }
@@ -2835,10 +2827,7 @@ interface ManifestItemRow {
 
 function normalizeManifestRow(row: ManifestItemRow): NovelSkillEvaluationManifestItem {
   if (row.kind === "custom") {
-    throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
-      "Custom Skills are outside the fixed A/B arms.",
-    );
+    throw storeError(EVALUATION_EVIDENCE_CODE, "Custom Skills are outside the fixed A/B arms.");
   }
   return {
     skillId: row.skill_id,
@@ -2884,7 +2873,7 @@ function assertExactPlan(plan: NovelSkillEvaluationExecutionPlan): void {
     canonicalJson(plan.cells) !== canonicalJson(expected.cells)
   ) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_INVALID",
+      EVALUATION_INVALID_CODE,
       "Evaluation plan must be the exact 12 x 4 x 2 x 2 matrix.",
     );
   }
@@ -2895,7 +2884,7 @@ async function manifestHash(
   arm: Exclude<NovelSkillEvaluationArm, "no_skill">,
 ): Promise<string> {
   if (values.length === 0 || values.length > 64) {
-    throw storeError("NOVEL_SKILL_EVALUATION_INVALID", `${arm} manifest is empty or too large.`);
+    throw storeError(EVALUATION_INVALID_CODE, `${arm} manifest is empty or too large.`);
   }
   const ordered = orderedManifest(values);
   if (
@@ -2911,7 +2900,7 @@ async function manifestHash(
     (arm === "core" && ordered.some(({ kind }) => kind !== "core")) ||
     (arm !== "core" && !ordered.some(({ kind }) => kind === "genre"))
   ) {
-    throw storeError("NOVEL_SKILL_EVALUATION_INVALID", `${arm} manifest has invalid membership.`);
+    throw storeError(EVALUATION_INVALID_CODE, `${arm} manifest has invalid membership.`);
   }
   return sha256Hex(canonicalJson(ordered));
 }
@@ -2932,10 +2921,7 @@ function orderedModelSlots(
     new Set(values.map(({ slotId }) => slotId)).size !== 2 ||
     new Set(values.map(({ modelTier }) => modelTier)).size !== 2
   ) {
-    throw storeError(
-      "NOVEL_SKILL_EVALUATION_INVALID",
-      "Exactly two distinct model slots are required.",
-    );
+    throw storeError(EVALUATION_INVALID_CODE, "Exactly two distinct model slots are required.");
   }
   return Object.freeze(
     [...values]
@@ -2962,7 +2948,7 @@ function orderedAssignments(
     })
   ) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_INVALID",
+      EVALUATION_INVALID_CODE,
       "Run requires two distinct dispatch identities and two distinct provider/model artifacts.",
     );
   }
@@ -2973,7 +2959,7 @@ function parseModelSlots(serialized: string): readonly NovelSkillEvaluationModel
   try {
     return orderedModelSlots(JSON.parse(serialized) as NovelSkillEvaluationModelSlot[]);
   } catch (cause) {
-    throw storeError("NOVEL_SKILL_EVALUATION_EVIDENCE", "Stored model slots are invalid.", cause);
+    throw storeError(EVALUATION_EVIDENCE_CODE, "Stored model slots are invalid.", cause);
   }
 }
 
@@ -2981,11 +2967,7 @@ function parseAssignments(serialized: string): readonly NovelSkillEvaluationMode
   try {
     return orderedAssignments(JSON.parse(serialized) as NovelSkillEvaluationModelAssignment[]);
   } catch (cause) {
-    throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
-      "Stored model assignments are invalid.",
-      cause,
-    );
+    throw storeError(EVALUATION_EVIDENCE_CODE, "Stored model assignments are invalid.", cause);
   }
 }
 
@@ -3018,10 +3000,7 @@ function assertObservationMatchesCell(
     observation.repetition !== cell.repetition ||
     observation.modelInvocationId !== invocationId
   ) {
-    throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
-      "Evaluation score does not match its planned cell.",
-    );
+    throw storeError(EVALUATION_EVIDENCE_CODE, "Evaluation score does not match its planned cell.");
   }
 }
 
@@ -3044,7 +3023,7 @@ function parseCost(value: string | null): number | null {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 2_147_483_647) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "Invocation cost is outside the evaluation ledger range.",
     );
   }
@@ -3055,17 +3034,14 @@ function invocationLatencyMilliseconds(
   invocation: Pick<InvocationEvidenceRow, "started_at" | "completed_at">,
 ): number {
   if (invocation.started_at === null || invocation.completed_at === null) {
-    throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
-      "Evaluation invocation is missing timing evidence.",
-    );
+    throw storeError(EVALUATION_EVIDENCE_CODE, "Evaluation invocation is missing timing evidence.");
   }
   const startedAt = Date.parse(invocation.started_at);
   const completedAt = Date.parse(invocation.completed_at);
   const elapsed = completedAt - startedAt;
   if (!Number.isSafeInteger(elapsed) || elapsed < 0 || elapsed > 86_400_000) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_EVIDENCE",
+      EVALUATION_EVIDENCE_CODE,
       "Evaluation invocation timestamps produce an invalid latency.",
     );
   }
@@ -3096,7 +3072,7 @@ function assertScores(scores: NovelSkillEvaluationObservation["scores"]): void {
     const score = scores[metric];
     if (score === null || !Number.isFinite(score) || score < 0 || score > 1) {
       throw storeError(
-        "NOVEL_SKILL_EVALUATION_INVALID",
+        EVALUATION_INVALID_CODE,
         `Manual ${metric} score must be present and between zero and one.`,
       );
     }
@@ -3140,7 +3116,7 @@ async function deterministicCellId(
 
 function assertUuidV7(value: string, field: string): void {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value)) {
-    throw storeError("NOVEL_SKILL_EVALUATION_INVALID", `${field} must be a lowercase UUIDv7.`);
+    throw storeError(EVALUATION_INVALID_CODE, `${field} must be a lowercase UUIDv7.`);
   }
 }
 
@@ -3149,7 +3125,7 @@ function assertIsoUtc(value: string, field: string): void {
     !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value) ||
     !Number.isFinite(Date.parse(value))
   ) {
-    throw storeError("NOVEL_SKILL_EVALUATION_INVALID", `${field} must be an ISO UTC timestamp.`);
+    throw storeError(EVALUATION_INVALID_CODE, `${field} must be an ISO UTC timestamp.`);
   }
 }
 
@@ -3204,7 +3180,7 @@ function assertManifestHierarchy(
   assertExactObjectKeys(manifests, ["core", "coreGenre", "coreGenrePreferences"], "manifest set");
   for (const values of [manifests.core, manifests.coreGenre, manifests.coreGenrePreferences]) {
     if (!Array.isArray(values)) {
-      throw storeError("NOVEL_SKILL_EVALUATION_INVALID", "Skill manifests must be arrays.");
+      throw storeError(EVALUATION_INVALID_CODE, "Skill manifests must be arrays.");
     }
     for (const item of values) {
       assertExactObjectKeys(
@@ -3232,7 +3208,7 @@ function assertManifestHierarchy(
   );
   if (core !== coreInGenre || genre !== preferenceArm) {
     throw storeError(
-      "NOVEL_SKILL_EVALUATION_INVALID",
+      EVALUATION_INVALID_CODE,
       "A/B manifests must add only Genre Skills, then keep identical Skill membership for preferences.",
     );
   }

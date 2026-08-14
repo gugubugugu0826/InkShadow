@@ -373,6 +373,48 @@ describe("Model Hub text execution service", () => {
     expect(harness.generate).not.toHaveBeenCalled();
   });
 
+  it("runs the mutable-authority check after final route resolution and before dispatch", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "final-authority-before-dispatch",
+      catalogEntryId: "final-authority-before-dispatch-catalog",
+      modelId: "writer-model",
+    });
+    await saveRoute(harness.modelHub, { primaryCatalogEntryId: target.id });
+    const events: string[] = [];
+    const originalFindTaskRoute = harness.modelHub.findTaskRoute.bind(harness.modelHub);
+    let routeReadCount = 0;
+    vi.spyOn(harness.modelHub, "findTaskRoute").mockImplementation(async (...args) => {
+      routeReadCount += 1;
+      events.push(`resolve:${String(routeReadCount)}`);
+      return originalFindTaskRoute(...args);
+    });
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          onBeforeDispatch: () => {
+            events.push("prepare");
+          },
+          onFinalBeforeProviderDispatch: () => {
+            events.push("final-authority");
+            throw new ModelHubExecutionError(
+              "PRIVATE_CHAPTER_LOCAL_ONLY",
+              "privacy changed before dispatch",
+            );
+          },
+          assertBeforeProviderDispatch: () => {
+            events.push("sync-latch");
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "PRIVATE_CHAPTER_LOCAL_ONLY", dispatched: false });
+
+    expect(events).toEqual(["resolve:1", "prepare", "resolve:2", "final-authority"]);
+    expect(harness.generate).not.toHaveBeenCalled();
+  });
+
   it("does not propagate an arbitrary duck-typed pre-dispatch code", async () => {
     const harness = createHarness();
     const target = await seedTarget(harness.modelHub, {
@@ -448,6 +490,7 @@ describe("Model Hub text execution service", () => {
       usage: { inputTokens: 10, outputTokens: 5, cachedInputTokens: 4 },
     });
     const startInvocation = vi.spyOn(harness.modelHub, "startInvocation");
+    const markInvocationDispatched = vi.spyOn(harness.modelHub, "markInvocationDispatched");
     const finishInvocation = vi.spyOn(harness.modelHub, "finishInvocation");
 
     const result = await executeModelHubTextTask(harness.dependencies, request());
@@ -485,6 +528,13 @@ describe("Model Hub text execution service", () => {
         routeReason: "task_primary",
       }),
     );
+    expect(markInvocationDispatched).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: result.invocation.id,
+        dispatchedAt: NOW,
+        expectedRevision: 1,
+      }),
+    );
     expect(finishInvocation).toHaveBeenCalledWith(
       expect.objectContaining({
         status: "succeeded",
@@ -500,6 +550,7 @@ describe("Model Hub text execution service", () => {
       }),
     );
     expect(result.invocation).toMatchObject({
+      providerDispatchStartedAt: NOW,
       completion: {
         visibleContentLength: Array.from(PRIVATE_OUTPUT).length,
         stream: null,

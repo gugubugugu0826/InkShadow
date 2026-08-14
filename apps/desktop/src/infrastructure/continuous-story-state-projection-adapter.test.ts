@@ -78,18 +78,20 @@ describe("continuous story-state detector projections", () => {
     ).chapter.toSnapshot();
 
     const model = new ScriptedContinuousModel(() => String(runtime.ids.next()));
-    const extraction = new ContinuousStoryStateExtractionService({
-      chapters: runtime.repositories.chapters,
-      chapterVersions: runtime.repositories.chapterVersions,
-      facts: runtime.story.facts,
-      factService: runtime.story.factService,
-      model,
-      hasher: runtime.hasher,
-      ids: runtime.ids,
-      clock: runtime.clock,
-      preferences: new DisabledPreferences(),
-      projectContextPrivacy: runtime.projectContextPrivacy,
-    });
+    const extraction = exposeLegacyProviderPipelineForProjectionTests(
+      new ContinuousStoryStateExtractionService({
+        chapters: runtime.repositories.chapters,
+        chapterVersions: runtime.repositories.chapterVersions,
+        facts: runtime.story.facts,
+        factService: runtime.story.factService,
+        model,
+        hasher: runtime.hasher,
+        ids: runtime.ids,
+        clock: runtime.clock,
+        preferences: new DisabledPreferences(),
+        projectContextPrivacy: runtime.projectContextPrivacy,
+      }),
+    );
 
     model.set(history.id, [identityCandidate()]);
     expect(
@@ -776,6 +778,34 @@ function exactSpan(content: string, excerpt: string) {
   const start = content.indexOf(excerpt);
   if (start < 0) throw new Error(`Missing test evidence: ${excerpt}`);
   return Object.freeze({ start, end: start + excerpt.length, excerpt });
+}
+
+/** Exercises local projection settlement with scripted output only. */
+function exposeLegacyProviderPipelineForProjectionTests(
+  service: ContinuousStoryStateExtractionService,
+): ContinuousStoryStateExtractionService {
+  return new Proxy(service, {
+    get(target, property): unknown {
+      if (property === "extractSavedVersion") {
+        return (
+          input: Readonly<{
+            projectId: string;
+            chapterId: string;
+            versionId: string;
+            force?: boolean;
+          }>,
+        ) =>
+          (
+            target as unknown as {
+              extractSavedVersionOnce(
+                request: typeof input,
+              ): ReturnType<ContinuousStoryStateExtractionService["extractSavedVersion"]>;
+            }
+          ).extractSavedVersionOnce(input);
+      }
+      return Reflect.get(target, property, target) as unknown;
+    },
+  });
 }
 
 async function confirmChapterFacts(

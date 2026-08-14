@@ -6,15 +6,16 @@ import {
   type ModelProviderKind,
   type NovelAiTask,
 } from "./model-hub-provider-registry";
-import type {
-  ModelCapabilityEvidence,
-  ModelCatalogEntry,
-  ModelCostPrivacyProfile,
-  ModelHubPreset,
-  ModelHubStore,
-  ModelProviderConnection,
-  NovelTaskRoute,
-  RecentAiFailure,
+import {
+  isRetiredModelProviderConnection,
+  type ModelCapabilityEvidence,
+  type ModelCatalogEntry,
+  type ModelCostPrivacyProfile,
+  type ModelHubPreset,
+  type ModelHubStore,
+  type ModelProviderConnection,
+  type NovelTaskRoute,
+  type RecentAiFailure,
 } from "./model-hub-store";
 import type { CredentialStore, RuntimeMode, SecretSummary } from "./runtime";
 
@@ -224,6 +225,13 @@ export async function loadAuthoritativeModelHubHydration(
   const selectableConnections = connections.filter(
     ({ enabled, connectionStatus }) => enabled && connectionStatus !== "disabled",
   );
+  const requestedConnection = connections.find(({ id }) => id === input.requestedConnectionId);
+  const requestedRebindTarget =
+    requestedConnection !== undefined &&
+    !requestedConnection.enabled &&
+    !isRetiredModelProviderConnection(requestedConnection)
+      ? requestedConnection
+      : undefined;
   const proseRoute = routeGroups.find(
     (route) => route?.task === "prose_generation" && route.enabled,
   );
@@ -232,8 +240,12 @@ export async function loadAuthoritativeModelHubHydration(
   );
   const selectedConnection =
     selectableConnections.find(({ id }) => id === input.requestedConnectionId) ??
+    requestedRebindTarget ??
     selectableConnections.find(({ id }) => id === routedCatalogEntry?.connectionId) ??
     selectableConnections[0] ??
+    connections.find(
+      (connection) => !connection.enabled && !isRetiredModelProviderConnection(connection),
+    ) ??
     null;
 
   input.onPhase?.("CHECKING_CREDENTIAL");
@@ -463,6 +475,14 @@ async function readCredentialSummary(
     return Object.freeze({ summary: null, errorCode: null });
   }
   if (selectedConnection === null) {
+    return Object.freeze({ summary: { configured: false, lastFour: null }, errorCode: null });
+  }
+  if (
+    selectedConnection.credentialRef === null &&
+    selectedConnection.credentialState === "missing"
+  ) {
+    // A deleted credential is an explicit local recovery state. Never guess a
+    // vault slot from the connection id merely to render the rebind form.
     return Object.freeze({ summary: { configured: false, lastFour: null }, errorCode: null });
   }
   if (!connectionRequiresCredential(selectedConnection)) {

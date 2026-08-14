@@ -125,7 +125,7 @@ describe("runAcceptedChapterPipeline", () => {
       kind: "malformed",
     });
   });
-  it("rebuilds every derived source and records a durable successful task", async () => {
+  it("keeps Candidate acceptance local-only even when model stages are requested", async () => {
     const harness = createHarness();
 
     const receipt = await runAcceptedChapterPipeline(harness.runtime, {
@@ -134,6 +134,8 @@ describe("runAcceptedChapterPipeline", () => {
       versionId: VERSION_ID as never,
       source: "candidate_accept",
       acceptedCharacterCount: 1_234,
+      runChapterSummary: true,
+      runStoryState: true,
     });
 
     expect(receipt).toMatchObject({
@@ -142,29 +144,21 @@ describe("runAcceptedChapterPipeline", () => {
       chapterId: CHAPTER_ID,
       versionId: VERSION_ID,
       search: { status: "completed" },
-      chapterSummary: { status: "completed" },
-      storyState: { status: "completed" },
-      causalProjection: { status: "completed" },
-      chapterSummaryStatus: "generated",
-      storyStateMetrics: {
-        detectedCount: 3,
-        needsConfirmationCount: 1,
-        reversibleCount: 2,
-        skippedTaskCount: 0,
+      chapterSummary: {
+        status: "skipped",
+        code: "CHAPTER_SUMMARY_REQUIRES_EXPLICIT_OPT_IN",
       },
+      storyState: {
+        status: "skipped",
+        code: "STORY_STATE_REQUIRES_EXPLICIT_OPT_IN",
+      },
+      causalProjection: { status: "completed" },
+      chapterSummaryStatus: null,
+      storyStateMetrics: null,
     });
     expect(harness.search).toHaveBeenCalledWith(PROJECT_ID);
-    expect(harness.summary).toHaveBeenCalledWith({
-      projectId: PROJECT_ID,
-      chapterId: CHAPTER_ID,
-      versionId: VERSION_ID,
-      trigger: "user_rebuild",
-    });
-    expect(harness.storyState).toHaveBeenCalledWith({
-      projectId: PROJECT_ID,
-      chapterId: CHAPTER_ID,
-      versionId: VERSION_ID,
-    });
+    expect(harness.summary).not.toHaveBeenCalled();
+    expect(harness.storyState).not.toHaveBeenCalled();
     expect(harness.causal).toHaveBeenCalledWith(PROJECT_ID, "main");
 
     const taskCenter = await harness.store.load();
@@ -174,7 +168,7 @@ describe("runAcceptedChapterPipeline", () => {
       type: "story.accepted-version.process",
       status: "succeeded",
       progress: {
-        step: "pipeline.outcome.search-summary-state-causal",
+        step: "pipeline.outcome.search-causal",
         completedUnits: 4,
         totalUnits: 4,
       },
@@ -183,6 +177,8 @@ describe("runAcceptedChapterPipeline", () => {
         chapterId: CHAPTER_ID,
         versionId: VERSION_ID,
         acceptedCharacterCount: 1_234,
+        runChapterSummary: false,
+        runStoryState: false,
       },
     });
     expect(taskCenter.notifications[0]).toMatchObject({
@@ -191,207 +187,86 @@ describe("runAcceptedChapterPipeline", () => {
     });
   });
 
-  it("keeps unavailable ordinary model work recoverable without inventing provider output", async () => {
-    const harness = createHarness({
-      summary: {
-        status: "skipped",
-        code: "CHAPTER_SUMMARY_MODEL_UNAVAILABLE",
-        message: "No configured model route.",
-        projectId: PROJECT_ID,
-        chapterId: CHAPTER_ID,
-        versionId: VERSION_ID,
-        fact: null,
-        replacedFactIds: [],
-        invocation: null,
-      },
-      storyState: {
-        status: "skipped",
-        detectedCount: 0,
-        needsConfirmationCount: 0,
-        reversibleCount: 0,
-        skippedTasks: [{ task: "character_extraction", code: "MODEL_UNAVAILABLE" }],
-        providerInvocations: [],
-      },
-    });
-
-    const receipt = await runAcceptedChapterPipeline(harness.runtime, {
+  it("deduplicates the Candidate local refresh without creating a second dispatch path", async () => {
+    const harness = createHarness();
+    const input = {
       projectId: PROJECT_ID as never,
       chapterId: CHAPTER_ID as never,
       versionId: VERSION_ID as never,
-      source: "candidate_accept",
-      acceptedCharacterCount: 20,
+      source: "candidate_accept" as const,
+      acceptedCharacterCount: 88,
+      runChapterSummary: true,
+      runStoryState: true,
+    };
+
+    await expect(runAcceptedChapterPipeline(harness.runtime, input)).resolves.toMatchObject({
+      status: "completed",
+    });
+    await expect(runAcceptedChapterPipeline(harness.runtime, input)).resolves.toMatchObject({
+      status: "already_scheduled",
     });
 
-    expect(receipt.status).toBe("partially_completed");
-    expect(receipt.chapterSummary).toMatchObject({
-      status: "skipped",
-      code: "CHAPTER_SUMMARY_MODEL_UNAVAILABLE",
-    });
-    expect(receipt.storyState).toMatchObject({
-      status: "skipped",
-      code: "STORY_STATE_PROVIDER_UNAVAILABLE",
-    });
-    expect(receipt.storyStateMetrics?.skippedTaskCount).toBe(1);
-    expect((await harness.store.load()).tasks[0]).toMatchObject({
-      status: "waiting_retry",
-      failure: { causeCode: "PIPELINE_STAGES_SUMMARY_STATE" },
-    });
+    expect(harness.search).toHaveBeenCalledOnce();
+    expect(harness.causal).toHaveBeenCalledOnce();
+    expect(harness.summary).not.toHaveBeenCalled();
+    expect(harness.storyState).not.toHaveBeenCalled();
+    expect((await harness.store.load()).tasks).toHaveLength(1);
   });
 
-  it.each([
-    ["CHAPTER_SUMMARY_EMPTY_CHAPTER", "skipped", "not_applicable", "n"],
-    ["CHAPTER_SUMMARY_SOURCE_TOO_LARGE", "skipped", "not_applicable", "n"],
-    ["CHAPTER_SUMMARY_AUTOMATION_PAUSED", "skipped", "deferred", "d"],
-    ["CHAPTER_SUMMARY_SOURCE_NOT_CURRENT", "skipped", "not_applicable", "n"],
-    ["CHAPTER_SUMMARY_PRIVACY_CHANGED", "failed", "not_applicable", "n"],
-  ] as const)(
-    "settles the permanent summary condition %s without a same-task retry",
-    async (code, serviceStatus, expectedStatus, dispositionCode) => {
-      const harness = createHarness({
-        summary: {
-          status: serviceStatus,
-          code,
-          message: "Summary preflight stopped before provider dispatch.",
-          projectId: PROJECT_ID,
-          chapterId: CHAPTER_ID,
-          versionId: VERSION_ID,
-          fact: null,
-          replacedFactIds: [],
-          invocation: null,
-        },
-      });
+  it.each(["manual_save", "chapter_import", "version_restore", "historical_backfill"] as const)(
+    "keeps %s local-only even when legacy flags request provider work",
+    async (source) => {
+      const harness = createHarness();
 
       const receipt = await runAcceptedChapterPipeline(harness.runtime, {
         projectId: PROJECT_ID as never,
         chapterId: CHAPTER_ID as never,
         versionId: VERSION_ID as never,
-        source: "historical_backfill",
+        source,
         acceptedCharacterCount: 20,
+        runChapterSummary: true,
+        runStoryState: true,
       });
 
       expect(receipt).toMatchObject({
-        status: "completed_with_skips",
-        chapterSummary: { status: expectedStatus, code },
-      });
-      expect((await harness.store.load()).tasks[0]).toMatchObject({
-        status: "succeeded",
-        progress: {
-          step: `pipeline.outcome.v2.search-c.summary-${dispositionCode}.state-c.causal-c`,
+        status: "completed",
+        chapterSummary: {
+          status: "skipped",
+          code: "CHAPTER_SUMMARY_REQUIRES_SEPARATE_AUTHORIZATION",
         },
+        storyState: {
+          status: "skipped",
+          code: "STORY_STATE_REQUIRES_SEPARATE_AUTHORIZATION",
+        },
+      });
+      expect(harness.summary).not.toHaveBeenCalled();
+      expect(harness.storyState).not.toHaveBeenCalled();
+      expect((await harness.store.load()).tasks[0]?.metadata).toMatchObject({
+        source,
+        runChapterSummary: false,
+        runStoryState: false,
       });
     },
   );
 
-  it("settles empty story-state extraction as not applicable", async () => {
-    const harness = createHarness({
-      storyState: {
-        status: "skipped",
-        detectedCount: 0,
-        needsConfirmationCount: 0,
-        reversibleCount: 0,
-        skippedTasks: [
-          { task: "character_extraction", code: "EMPTY_CHAPTER" },
-          { task: "world_extraction", code: "EMPTY_CHAPTER" },
-        ],
-        providerInvocations: [],
-      },
-    });
-
-    const receipt = await runAcceptedChapterPipeline(harness.runtime, {
-      projectId: PROJECT_ID as never,
-      chapterId: CHAPTER_ID as never,
-      versionId: VERSION_ID as never,
-      source: "historical_backfill",
-      acceptedCharacterCount: 0,
-    });
-
-    expect(receipt.storyState).toMatchObject({
-      status: "not_applicable",
-      code: "STORY_STATE_EMPTY_CHAPTER",
-    });
-    expect((await harness.store.load()).tasks[0]).toMatchObject({
-      status: "succeeded",
-      progress: { step: "pipeline.outcome.v2.search-c.summary-c.state-n.causal-c" },
-    });
-  });
-
-  it("persists terminal disposition beside another stage's retry scope", async () => {
-    const harness = createHarness({
-      summary: {
-        status: "skipped",
-        code: "CHAPTER_SUMMARY_SOURCE_TOO_LARGE",
-        message: "The immutable source exceeds the bounded summary contract.",
-        projectId: PROJECT_ID,
-        chapterId: CHAPTER_ID,
-        versionId: VERSION_ID,
-        fact: null,
-        replacedFactIds: [],
-        invocation: null,
-      },
-      storyState: {
-        status: "skipped",
-        detectedCount: 0,
-        needsConfirmationCount: 0,
-        reversibleCount: 0,
-        skippedTasks: [{ task: "character_extraction", code: "MODEL_UNAVAILABLE" }],
-        providerInvocations: [],
-      },
-    });
-
-    await runAcceptedChapterPipeline(harness.runtime, {
-      projectId: PROJECT_ID as never,
-      chapterId: CHAPTER_ID as never,
-      versionId: VERSION_ID as never,
-      source: "historical_backfill",
-      acceptedCharacterCount: 20,
-    });
-
-    expect((await harness.store.load()).tasks[0]).toMatchObject({
-      status: "waiting_retry",
-      failure: { causeCode: "PIPELINE_V2_F_T_N_S" },
-    });
-  });
-
-  it("preserves not-applicable and deferred evidence through manual retries and exhaustion", async () => {
-    const sourceNotCurrent = Object.assign(
-      new Error("The story-state source is no longer current."),
-      {
-        details: { reasonCode: "STORY_STATE_SOURCE_NOT_CURRENT" },
-      },
-    );
-    const harness = createHarness({
-      summary: {
-        status: "skipped",
-        code: "CHAPTER_SUMMARY_AUTOMATION_PAUSED",
-        message: "Automatic summaries are paused.",
-        projectId: PROJECT_ID,
-        chapterId: CHAPTER_ID,
-        versionId: VERSION_ID,
-        fact: null,
-        replacedFactIds: [],
-        invocation: null,
-      },
-      storyStateError: sourceNotCurrent,
-    });
+  it("retries only failed local work and never promotes legacy provider scope", async () => {
+    const harness = createHarness();
     harness.causal.mockRejectedValue(new Error("Causal projection is temporarily unavailable."));
     const input = {
       projectId: PROJECT_ID as never,
       chapterId: CHAPTER_ID as never,
       versionId: VERSION_ID as never,
-      source: "historical_backfill" as const,
+      source: "manual_save" as const,
       acceptedCharacterCount: 20,
+      runChapterSummary: true,
+      runStoryState: true,
     };
-    const expectedCause = pipelineStageFailureCauseCode(
-      ["causal_projection"],
-      ["story_state"],
-      ["chapter_summary"],
-    );
 
     await runAcceptedChapterPipeline(harness.runtime, input);
     for (let retry = 0; retry < 2; retry += 1) {
       const waiting = (await harness.store.load()).tasks[0];
       if (waiting?.failure?.causeCode === null || waiting?.failure?.causeCode === undefined) {
-        throw new Error("Expected the retry disposition evidence to remain persisted.");
+        throw new Error("Expected a retryable local failure.");
       }
       const queued = await harness.store.retryTaskNow(waiting.id, {
         expectedSequence: waiting.sequence,
@@ -407,12 +282,12 @@ describe("runAcceptedChapterPipeline", () => {
       });
     }
 
-    expect(harness.summary).toHaveBeenCalledTimes(1);
-    expect(harness.storyState).toHaveBeenCalledTimes(1);
+    expect(harness.summary).not.toHaveBeenCalled();
+    expect(harness.storyState).not.toHaveBeenCalled();
     expect(harness.causal).toHaveBeenCalledTimes(3);
     expect((await harness.store.load()).tasks[0]).toMatchObject({
       status: "failed",
-      failure: { code: "TASK_RETRY_EXHAUSTED", causeCode: expectedCause },
+      failure: { code: "TASK_RETRY_EXHAUSTED", causeCode: "PIPELINE_STAGES_CAUSAL" },
     });
   });
 
@@ -504,114 +379,26 @@ describe("runAcceptedChapterPipeline", () => {
     expect(harness.causal).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ["STORY_STATE_SOURCE_NOT_CURRENT", "not_applicable", "n"],
-    ["STORY_STATE_SOURCE_CHANGED", "not_applicable", "n"],
-    ["STORY_STATE_VERSION_NOT_FOUND", "not_applicable", "n"],
-  ] as const)(
-    "settles story-state preflight condition %s without retrying the same task",
-    async (reasonCode, expectedStatus, dispositionCode) => {
-      const failure = Object.assign(new Error("Story-state preflight stopped."), {
-        details: { reasonCode },
-      });
-      const harness = createHarness({ storyStateError: failure });
-
-      const receipt = await runAcceptedChapterPipeline(harness.runtime, {
-        projectId: PROJECT_ID as never,
-        chapterId: CHAPTER_ID as never,
-        versionId: VERSION_ID as never,
-        source: "historical_backfill",
-        acceptedCharacterCount: 20,
-      });
-
-      expect(receipt.storyState).toMatchObject({ status: expectedStatus, code: reasonCode });
-      expect((await harness.store.load()).tasks[0]).toMatchObject({
-        status: "succeeded",
-        progress: {
-          step: `pipeline.outcome.v2.search-c.summary-c.state-${dispositionCode}.causal-c`,
-        },
-      });
-    },
-  );
-
-  it("keeps requested historical model stages recoverable when the provider is unavailable", async () => {
-    const harness = createHarness({
-      summary: {
-        status: "skipped",
-        code: "CHAPTER_SUMMARY_MODEL_UNAVAILABLE",
-        message: "No configured model route.",
-        projectId: PROJECT_ID,
-        chapterId: CHAPTER_ID,
-        versionId: VERSION_ID,
-        fact: null,
-        replacedFactIds: [],
-        invocation: null,
-      },
-      storyState: {
-        status: "partially_completed",
-        detectedCount: 1,
-        needsConfirmationCount: 0,
-        reversibleCount: 1,
-        skippedTasks: [{ task: "world_extraction", code: "MODEL_UNAVAILABLE" }],
-        providerInvocations: [],
-      },
-    });
-
-    const receipt = await runAcceptedChapterPipeline(harness.runtime, {
+  it("rejects a provider-only pipeline request before enqueue or dispatch", async () => {
+    const harness = createHarness();
+    const input = {
       projectId: PROJECT_ID as never,
       chapterId: CHAPTER_ID as never,
       versionId: VERSION_ID as never,
-      source: "historical_backfill",
+      source: "historical_backfill" as const,
       acceptedCharacterCount: 20,
       runSearch: false,
       runChapterSummary: true,
       runStoryState: true,
       runCausalProjection: false,
-    });
+    };
 
-    expect(receipt.status).toBe("partially_completed");
-    expect((await harness.store.load()).tasks[0]).toMatchObject({
-      status: "waiting_retry",
-      failure: {
-        code: "ACCEPTED_VERSION_PIPELINE_PARTIAL",
-        causeCode: "PIPELINE_STAGES_SUMMARY_STATE",
-      },
-    });
-    expect(harness.search).not.toHaveBeenCalled();
-    expect(harness.causal).not.toHaveBeenCalled();
-  });
-
-  it("treats already-processed continuous state as durable completion evidence", async () => {
-    const harness = createHarness({
-      storyState: {
-        status: "already_processed",
-        detectedCount: 0,
-        needsConfirmationCount: 0,
-        reversibleCount: 0,
-        skippedTasks: [],
-        providerInvocations: [],
-      },
-    });
-
-    const receipt = await runAcceptedChapterPipeline(harness.runtime, {
-      projectId: PROJECT_ID as never,
-      chapterId: CHAPTER_ID as never,
-      versionId: VERSION_ID as never,
-      source: "historical_backfill",
-      acceptedCharacterCount: 20,
-    });
-
-    expect(receipt).toMatchObject({
-      status: "completed",
-      storyState: {
-        status: "completed",
-        code: "STORY_STATE_ALREADY_PROCESSED",
-      },
-    });
-    expect((await harness.store.load()).tasks[0]).toMatchObject({
-      status: "succeeded",
-      progress: { step: "pipeline.outcome.search-summary-state-causal" },
-    });
+    await expect(runAcceptedChapterPipeline(harness.runtime, input)).rejects.toThrow(
+      /at least one stage/u,
+    );
+    expect(harness.summary).not.toHaveBeenCalled();
+    expect(harness.storyState).not.toHaveBeenCalled();
+    expect((await harness.store.load()).tasks).toHaveLength(0);
   });
 
   it("keeps local search and causal projection durable when manual-save model work is disabled", async () => {
@@ -628,13 +415,16 @@ describe("runAcceptedChapterPipeline", () => {
     });
 
     expect(receipt).toMatchObject({
-      status: "completed_with_skips",
+      status: "completed",
       search: { status: "completed", code: "SEARCH_INDEX_REBUILT" },
       chapterSummary: {
         status: "skipped",
-        code: "CHAPTER_SUMMARY_DISABLED_BY_PREFERENCE",
+        code: "CHAPTER_SUMMARY_REQUIRES_SEPARATE_AUTHORIZATION",
       },
-      storyState: { status: "skipped", code: "STORY_STATE_DISABLED_BY_PREFERENCE" },
+      storyState: {
+        status: "skipped",
+        code: "STORY_STATE_REQUIRES_SEPARATE_AUTHORIZATION",
+      },
       causalProjection: { status: "completed", code: "CAUSAL_PROJECTION_REBUILT" },
     });
     expect(harness.search).toHaveBeenCalledOnce();
@@ -648,10 +438,9 @@ describe("runAcceptedChapterPipeline", () => {
     });
   });
 
-  it("keeps running independent stages and leaves a retryable task when derived work fails", async () => {
+  it("keeps the accepted version safe when a local derived stage fails", async () => {
     const harness = createHarness();
     harness.search.mockRejectedValueOnce(new Error("index unavailable"));
-    harness.storyState.mockRejectedValueOnce(new Error("extractor unavailable"));
 
     const receipt = await runAcceptedChapterPipeline(harness.runtime, {
       projectId: PROJECT_ID as never,
@@ -667,17 +456,22 @@ describe("runAcceptedChapterPipeline", () => {
       code: "SEARCH_INDEX_REBUILD_FAILED",
     });
     expect(receipt.storyState).toMatchObject({
-      status: "failed",
-      code: "STORY_STATE_UPDATE_FAILED",
+      status: "skipped",
+      code: "STORY_STATE_REQUIRES_EXPLICIT_OPT_IN",
     });
-    expect(receipt.chapterSummary.status).toBe("completed");
+    expect(receipt.chapterSummary).toMatchObject({
+      status: "skipped",
+      code: "CHAPTER_SUMMARY_REQUIRES_EXPLICIT_OPT_IN",
+    });
     expect(receipt.causalProjection.status).toBe("completed");
+    expect(harness.summary).not.toHaveBeenCalled();
+    expect(harness.storyState).not.toHaveBeenCalled();
     const task = (await harness.store.load()).tasks[0];
     expect(task).toMatchObject({
       status: "waiting_retry",
       failure: {
         code: "ACCEPTED_VERSION_PIPELINE_PARTIAL",
-        causeCode: "PIPELINE_STAGES_SEARCH_STATE",
+        causeCode: "PIPELINE_STAGES_SEARCH",
         retryable: true,
         actions: ["RETRY", "OPEN_SETTINGS", "EXPORT_DIAGNOSTICS"],
       },
@@ -685,13 +479,7 @@ describe("runAcceptedChapterPipeline", () => {
   });
 });
 
-function createHarness(
-  overrides: Readonly<{
-    summary?: unknown;
-    storyState?: unknown;
-    storyStateError?: Error;
-  }> = {},
-) {
+function createHarness() {
   const storage = new MemoryStorage();
   const clock = { now: () => NOW };
   const store = new BrowserDevelopmentTaskCenterStore(storage, clock);
@@ -710,40 +498,33 @@ function createHarness(
     }),
   );
   const summary = vi.fn(() =>
-    Promise.resolve(
-      (overrides.summary ?? {
-        status: "generated",
-        code: "CHAPTER_SUMMARY_GENERATED",
-        message: "Summary updated.",
-        projectId: PROJECT_ID,
-        chapterId: CHAPTER_ID,
-        versionId: VERSION_ID,
-        fact: null,
-        replacedFactIds: [],
-        invocation: {
-          task: "chapter_summary",
-          providerKind: "openai",
-          modelId: "model-a",
-          invocationId: uuid(80),
-        },
-      }) as never,
-    ),
+    Promise.resolve({
+      status: "generated",
+      code: "CHAPTER_SUMMARY_GENERATED",
+      message: "Summary updated.",
+      projectId: PROJECT_ID,
+      chapterId: CHAPTER_ID,
+      versionId: VERSION_ID,
+      fact: null,
+      replacedFactIds: [],
+      invocation: {
+        task: "chapter_summary",
+        providerKind: "openai",
+        modelId: "model-a",
+        invocationId: uuid(80),
+      },
+    } as never),
   );
-  const storyState = vi.fn(() => {
-    if (overrides.storyStateError !== undefined) {
-      return Promise.reject(overrides.storyStateError);
-    }
-    return Promise.resolve(
-      (overrides.storyState ?? {
-        status: "completed",
-        detectedCount: 3,
-        needsConfirmationCount: 1,
-        reversibleCount: 2,
-        skippedTasks: [],
-        providerInvocations: [],
-      }) as never,
-    );
-  });
+  const storyState = vi.fn(() =>
+    Promise.resolve({
+      status: "completed",
+      detectedCount: 3,
+      needsConfirmationCount: 1,
+      reversibleCount: 2,
+      skippedTasks: [],
+      providerInvocations: [],
+    } as never),
+  );
   const causal = vi.fn(() =>
     Promise.resolve({
       projectId: PROJECT_ID,

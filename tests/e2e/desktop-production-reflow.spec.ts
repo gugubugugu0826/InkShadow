@@ -25,6 +25,8 @@ test("keeps every primary writing region reachable at 1440, 1280, 1024, and 800"
     await expect(workspace).toBeVisible();
     await expect(editor).toBeVisible();
     await expectFocusable(editor);
+    await expectMinimumWidth(editor);
+    await expectMinimumTarget(primaryEditorAction(page));
     await expectFocusable(primaryEditorAction(page));
     await expectNoHorizontalPageOverflow(page);
 
@@ -85,6 +87,8 @@ test("keeps writing, Story Settings import, and all 22 Model Hub tasks reachable
     const editor = page.getByRole("textbox", { name: "章节正文" });
     await expect(editor).toBeVisible();
     await expectFocusable(editor);
+    await expectMinimumWidth(editor);
+    await expectMinimumTarget(primaryEditorAction(page));
     await expectFocusable(primaryEditorAction(page));
     const primaryNavigation = page.getByRole("navigation", { name: "墨影主导航" });
     await expect(primaryNavigation).toBeVisible();
@@ -141,6 +145,44 @@ test("keeps writing, Story Settings import, and all 22 Model Hub tasks reachable
   }
 });
 
+test("keeps the 200% writing path usable in light appearance", async ({ browser, browserName }) => {
+  expect(browserName).toBe("chromium");
+  const context = await browser.newContext({
+    viewport: PHYSICAL_ZOOM_VIEWPORT,
+    colorScheme: "light",
+    locale: "zh-CN",
+    reducedMotion: "reduce",
+  });
+  const page = await context.newPage();
+  const cdp = await context.newCDPSession(page);
+
+  try {
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+      width: TWO_HUNDRED_PERCENT_CSS_VIEWPORT.width,
+      height: TWO_HUNDRED_PERCENT_CSS_VIEWPORT.height,
+      screenWidth: PHYSICAL_ZOOM_VIEWPORT.width,
+      screenHeight: PHYSICAL_ZOOM_VIEWPORT.height,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+
+    await openFreshSampleEditor(page);
+    const editor = page.getByRole("textbox", { name: "章节正文" });
+    await expect(page.locator(".writing-canvas")).toHaveAttribute("data-surface", "light");
+    await expectMinimumWidth(editor);
+    await expectMinimumTarget(primaryEditorAction(page));
+    await expectNoHorizontalPageOverflow(page);
+    await expect(page.locator(".editor-workspace")).toHaveAttribute(
+      "data-assistant-panel",
+      "drawer",
+    );
+    await exerciseCompactWritingPanels(page);
+  } finally {
+    await cdp.detach().catch(() => undefined);
+    await context.close();
+  }
+});
+
 async function openFreshSampleEditor(page: Page): Promise<string> {
   await page.goto("/#/start");
   await page.evaluate(() => window.localStorage.clear());
@@ -153,6 +195,8 @@ async function openFreshSampleEditor(page: Page): Promise<string> {
 async function exerciseCompactWritingPanels(page: Page): Promise<void> {
   const chapterTrigger = page.getByRole("button", { name: "章节", exact: true });
   const assistantTrigger = page.getByRole("button", { name: "AI 助手", exact: true });
+  await expectMinimumTarget(chapterTrigger);
+  await expectMinimumTarget(assistantTrigger);
   await expectFocusable(chapterTrigger);
   await expectFocusable(assistantTrigger);
 
@@ -169,7 +213,9 @@ async function exerciseCompactWritingPanels(page: Page): Promise<void> {
   const assistantDrawer = page.getByRole("dialog", { name: "AI 创作助手" });
   await expect(assistantDrawer).toBeVisible();
   await expectNoHorizontalOverflow(assistantDrawer);
-  await expectFocusable(assistantDrawer.getByRole("button", { name: "关闭 AI 创作助手" }));
+  const assistantClose = assistantDrawer.getByRole("button", { name: "关闭 AI 创作助手" });
+  await expectMinimumTarget(assistantClose);
+  await expectFocusable(assistantClose);
   await page.keyboard.press("Escape");
   await expect(assistantDrawer).toBeHidden();
   await expect(assistantTrigger).toBeFocused();
@@ -193,6 +239,18 @@ async function expectFocusable(locator: Locator): Promise<void> {
   await expect(locator).toBeVisible();
   await locator.focus();
   await expect(locator).toBeFocused();
+}
+
+async function expectMinimumWidth(locator: Locator, minimum = 320): Promise<void> {
+  const bounds = await locator.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds?.width ?? 0).toBeGreaterThanOrEqual(minimum);
+}
+
+async function expectMinimumTarget(locator: Locator, minimum = 44): Promise<void> {
+  const bounds = await locator.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds?.height ?? 0).toBeGreaterThanOrEqual(minimum);
 }
 
 async function expectNoHorizontalPageOverflow(page: Page): Promise<void> {

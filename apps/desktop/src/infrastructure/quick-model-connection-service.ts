@@ -22,12 +22,13 @@ import {
   modelHubTextCapabilityProbeFailureMetadata,
   runModelHubTextCapabilityProbe,
 } from "./model-hub-text-capability-probe";
-import type {
-  ModelCatalogEntry,
-  ModelHubConnectionCommit,
-  ModelProviderConnection,
-  NovelTaskRoute,
-  SaveModelProviderConnectionInput,
+import {
+  isRetiredModelProviderConnection,
+  type ModelCatalogEntry,
+  type ModelHubConnectionCommit,
+  type ModelProviderConnection,
+  type NovelTaskRoute,
+  type SaveModelProviderConnectionInput,
 } from "./model-hub-store";
 import type { DesktopRuntime, NativeModelEndpointConfig, NativeModelListResponse } from "./runtime";
 
@@ -613,10 +614,24 @@ async function resolveConnectionId(
     return requested;
   }
   const connections = await runtime.modelHub.listConnections();
-  const exact = connections.find(({ id }) => id === input.provider);
+  const reusable = connections.filter(
+    (connection) =>
+      connection.providerKind === input.provider && !isRetiredModelProviderConnection(connection),
+  );
+  const exact = reusable.find(({ id }) => id === input.provider);
   if (exact !== undefined) return exact.id;
-  return (
-    connections.find(({ providerKind }) => providerKind === input.provider)?.id ?? input.provider
+  const existing = reusable[0];
+  if (existing !== undefined) return existing.id;
+  const occupied = new Set(connections.map(({ id }) => id));
+  if (!occupied.has(input.provider)) return input.provider;
+  for (let suffix = 2; suffix < 10_000; suffix += 1) {
+    const candidate = `${input.provider}-${String(suffix)}`;
+    if (!occupied.has(candidate)) return candidate;
+  }
+  throw quickError(
+    "QUICK_MODEL_CONNECTION_ID_EXHAUSTED",
+    "无法为新的供应商连接分配本地标识。请到完整 Model Hub 检查已退役连接。",
+    false,
   );
 }
 

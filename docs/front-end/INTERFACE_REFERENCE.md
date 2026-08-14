@@ -146,12 +146,13 @@ interface NativeSqliteError {
 
 正式数据库固定在应用配置目录中的 `inkshadow.db`；WebView 不能指定任意数据库路径。
 
-当前前向迁移上限为 Data `0064_novel_skill_evaluation_predispatch_authority.sql` / Tauri `67`。Tauri 原生版本把
+当前前向迁移上限为 Data `0065_model_invocation_dispatch_boundary.sql` / Tauri `68`。Tauri 原生版本把
 Data 迁移和 story-core 迁移合并成一个连续序列，所以两个编号不要求相同。`0060`/Tauri `63`
 新增 Novel Skill definition、binding 与调用 snapshot；`0061`/Tauri `64` 新增并硬化九表、
 content-free 的评测账本；`0062`/Tauri `65` 只补上持有既有项目派发 lease 时项目不得离开 active。
 `0063`/Tauri `66` 新增精确目标、商业授权、reservation 与盲评合同；`0064`/Tauri `67` 以前向
-sidecar 冻结内容无关的派发前权威。
+sidecar 冻结内容无关的派发前权威；`0065`/Tauri `68` 只在现有模型调用事实上追加不含内容的
+Provider 发送边界时间，用于把启动恢复分为未发送与结果不明确，两者都不自动重发。
 同一变更集的 Rust/TS 代码把 `0045` 已有 lease 覆盖到回环本地派发，并加强 Candidate/context output
 原子版本围栏。当前 166 张作者数据表进入备份恢复，另 1 张内容无关的原生
 项目派发租约表明确不恢复。已登记 migration 只校验和验证、不可改写；新结构必须继续追加更高版本。
@@ -261,13 +262,12 @@ interface ProjectSeedField {
 `ProjectSeed` 是创建输入，不是稳定正文、正式设定或已确认 StoryFact。页面不能仅凭字段存在就把
 它显示为已经由用户确认的故事事实。
 
-一句话开书的可恢复快照同时保存有限问题计划和三个开头槽位。问题计划初始包含 5 个重点，
-`questionPlan` 只允许唯一问题键，`expectedQuestionTotal` 始终等于计划长度，最多扩展到 12 个重点；
-`questionIndex`、`remainingQuestionFocus`、`questionHistory`、`skippedQuestionKeys` 和
-`questionPlanExpansionNotice` 共同支持页面显示 N/M、百分比、剩余重点和扩展原因。回答或跳过必须
-移除当前剩余重点；没有尚未问过的新重点时进入 `guidance_complete`。作者始终可以返回上一问、
-跳过或直接结束并创建。回答仅重算并保存 `ProjectSeed`，不会隐式重写开头；计划结束后只有作者
-明确点击，才允许一次基于全部回答的重写。
+一句话开书的可恢复快照同时保存三个开头槽位、作者明确选择和一次性确定性缺口计划。计划中的每个
+问题至少包含稳定 `questionId`、问题文本、目的、目标 `ProjectSeed` 字段、选项、自定义回答许可、
+提问原因和来源；选择开头后一次生成最多 3 个，信息充分时允许 0–2 个。`questionIndex`、历史、
+跳过项和 planner version 支持恢复，但不能在没有可用且已选择的开头时伪造 `guidance` 状态。
+回答仅重算并保存 `ProjectSeed`，不会追加问题、再次运行 planner 或隐式重写开头；当前不存在第 4 次
+AI planner 调用。既定问题结束后只有作者明确点击，才允许一次基于全部回答的重写。
 
 开头批次固定由 `immediate_action`、`relationship_dialogue`、`mystery_clue` 三个请求组成并发执行，
 每槽保存独立 request/batch ID、状态、来源、供应商、模型和失败码。旅程 revision CAS 与当前批次
@@ -275,6 +275,13 @@ interface ProjectSeedField {
 `MODEL_OUTPUT_TRUNCATED` 且已收到至少 160 个可见字符、供应商和模型均可确定时，才返回显式
 `partial`；作者可继续补全、重新生成或明确保留。这个例外不放宽普通正文、改写或 Candidate 的
 截断失败合同。
+
+每个合法生成批次的预期 Provider 调用数精确为 3；选择开头、确定性缺口规划和逐题回答均为 0。
+调用数由自动化断言，不能把选择或回答伪装为新的模型规划动作。
+
+开书输入策略对作者自然语言统一执行 NFC，返回字段级 `CREATIVE_INPUT_INVALID` 原因；批次编排器
+必须把 pre-dispatch 校验异常和每槽异步异常都持久化为该槽的失败状态。诊断只保存错误分类、阶段、
+槽位、模型身份和计数，不保存原始想法、Prompt 或生成正文。
 
 ### 5.5 Story Settings JSON 与导入事务
 
@@ -492,15 +499,69 @@ Candidate 生成遇到截断仍严格失败；只有固定、无作品内容的�
 
 ### 6.1 Model Hub 与小说智能前端服务
 
+模型选择的唯一权威链应为：
+
+```text
+Provider Connection
+→ Model Catalog Entry
+→ Capability Evidence
+→ Task Route
+→ Resolved Invocation Route
+→ Model Invocation
+```
+
+页面 readiness、生成前检查和真实调用必须读取同一份 `Resolved Invocation Route`；连接行、目录名、
+HTTP 200、旧 Model Profile 或顶部绿色徽标都不能单独证明可调用。2026-08-13 审计时各入口如下，
+用于约束迁移范围而不是把旧路径冒充完成：
+
+| 入口                                         | 审计时来源                                              | 处理策略                                                                                            |
+| -------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| 开书三个方案                                 | 项目内 Model Hub；非项目兼容路径仍可落旧配置            | 项目内保持 Model Hub fail closed；旧配置只作明确兼容，不得绕过已存在但失败的任务路由                |
+| 正文续写                                     | Model Hub + 旧 Model Profile 混合；计划阶段旧配置先执行 | 改为 Model Hub exact resolver 优先；仅 `MODEL_HUB_ROUTE_NOT_CONFIGURED` 才检查旧兼容配置            |
+| 选区改写、检查、剧情试演、章节摘要、连续状态 | 已使用 Model Hub text task 服务                         | 保留统一 resolver、最终身份复核与 Candidate/StoryFact 边界                                          |
+| 导入改写                                     | Model Hub-first，路由不存在时旧配置兼容                 | 保留窄兼容，其他 Model Hub blocker 不得降级                                                         |
+| Multi-Agent、原生受治理扩展、权威提取        | 仍有直接原生/旧配置适配器                               | 本轮记录为待逐入口迁移；继续受 feature flag、隐私、预算、Candidate 与最终身份门禁约束，不一次性删除 |
+
+旧 Model Profile 仍可能包含历史用户配置，因此本轮不删除表、不伪造 selection、不搬移 Key，也不
+改写已发布迁移。有效 Model Hub task route 存在时运行时忽略未选择的旧档案；真正没有 task route
+时才允许明确标注 `legacy_compatibility` 的兼容解析。若 readiness 认为 task 可用而 exact resolver
+无法得到同一身份，应返回 `ROUTE_RESOLUTION_INCONSISTENT` 并留下脱敏决议记录，而不是回退为
+`MODEL_PROFILE_NOT_READY`。
+
 普通模式提供连接、测试、模型同步/确认，以及智能推荐、高质量、经济模式、本地隐私和完全自定义
 五种方案。专家模式才显示受限 Base URL/路径/Header 元数据、超时/重试、能力证据、逐任务主备、
-费用与隐私策略。API Key 值不会回传页面。移除连接采用停用/墓碑语义：清除系统凭据并阻止新调用，
-但保留目录、历史调用和审计；重复移除保持幂等。
+费用与隐私策略。API Key 值不会回传页面。连接恢复语义必须区分：
+
+- “删除凭据”只清除系统凭据并停止新调用，保留原连接 ID、目录和历史审计；用户可对该精确连接做 revision CAS 重新绑定，无需手改 ID；
+- “暂时停用”保留凭据与可恢复连接，但不能进入 ready 或普通路由；
+- “退役连接”保留被历史 invocation 引用的行，但从普通选择、推荐、全局 ready 和路由候选中永久排除。同供应商新建使用自动分配的新 ID，不与退役行冲突。
+
+重新绑定与退役使用事务/revision 约束，并发操作只有一个确定胜者。路由始终绑定精确的 active
+connection/catalog entry，同模型的退役重复项不能被意外选中。
 
 设置页首次进入和连接切换由单一权威 hydration 快照驱动。它按“连接 → 持久化正文路由选择 →
 系统凭据摘要 → 本地目录/能力/路由”恢复页面；每次操作携带 generation，较慢旧请求不能覆盖新选择。
 无连接保持“未配置”，只有明确 `authenticationMode=none` 的已保存连接标为无需密钥。目录重新发现
 失败会保留缓存并给出重试原因；非凭据阶段故障不会污染系统凭据状态。
+
+Model Hub 普通状态的视觉语义固定为：`loading` 使用单一读取进度；`unconnected` 使用中性连接引导，
+并明确手动写作仍可用；`connected` 显示账户真实目录与可执行任务；`partially_available` 只在相关
+能力旁显示缺口；`error` 只用于用户已经执行的保存、发现、验证或路由动作失败。未连接时不能同时
+渲染保存、发现、验证三个 warning。官方候选目录默认折叠，并与账户目录、能力证据和任务路由分开。
+
+顶栏、作品库、Model Hub 和任务推荐共用无正文的权威基础 readiness 投影。它复用真实派发的
+connection、catalog entry、Provider/model、capability evidence、credential summary、route/revision 和费用
+resolver，但不含当前章节隐私、编译后上下文和本次 request profile，因此全局只显示“AI 基础连接可用”
+或“基础配置检查 10/10”，不再显示“AI 写作已就绪”。当前章节的真实 preflight 在派发前复用同一
+resolver 并加上内容级检查。失败会把当前作品顶栏覆盖为“当前续写需修复”，指出受影响任务、原因和修复入口，
+并明确正文、不可变版本和 Candidate 未改变。确定性 preflight 失败不创建 invocation、Candidate 或费用记录，
+也不通过重试隐藏。
+
+受影响页面使用现有 DESIGN token：普通内容容器遵循页面既有最大宽度；Card 内容至少使用
+`--space-4`，Input、Textarea、Select 的内边距至少使用 `--space-3`；标题、说明和动作保持 token
+间距。普通空状态低于 warning/error 的视觉权重。目录长模型名允许换行，800px 与 200% 等效窄屏
+下操作按钮改为整行可达；验收宽度为 1440、1280、1024、800 和 200% zoom，不能用隐藏 overflow
+冒充适配。
 
 首次文本能力验证成功且当前完全没有任何任务路由记录时，智能推荐可建立 16 类只依赖
 `text_generation` 的核心小说任务分工；旧版本留下的纯自动、同方案 15/22 中断计划可幂等补齐。
@@ -520,21 +581,21 @@ ID、阶段、HTTP/终止原因、可见长度、推理/流式标记、尝试和
 
 | 服务/存储                                                               | 用户入口与合同                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ContinuousStoryStateExtractionService`                                 | “设定 → 章节摘要与长程记忆”；项目级默认关闭，仅手动保存或显式重识别，人物/世界最多两次模型调用；结果为可撤销或待确认 StoryFact                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `ContinuousStoryStateExtractionService`                                 | 底层模型服务保留，但当前生产入口不可派发：手动保存、Candidate 接受、导入、版本恢复和历史回填只运行本地派生；逐章重识别按钮在独立逐次授权、精确 Provider/model 披露、持久发送边界和 ambiguous 防重发完整前保持禁用。已有结果仍为可撤销或待确认 StoryFact                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `ContinuousStoryStateProjectionAdapter`                                 | 无独立按钮；只读地把显式合法投影交给验证、声纹/POV 和叙事分析；POV 取得链同时核验人物、知识键、信息标识、取得时间、已确认事件、来源事实和叙事顺序，任一证据、分支、当前性或权威门禁失败即跳过并返回诊断                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `NovelSkillRuntime` / `NovelSkillPanel`                                 | “设定 → 写作方法（实验）”；内置 7 Core + 5 Genre 全部 `EXPERIMENTAL`、默认关闭。ProjectSeed 只生成 recommendation，只有作者显式开关才写项目 binding。开书与续写在 dispatch 前编译有界 `<novel_method>` 并把 exact snapshot 绑定到同一 trace/generation/model invocation；浏览器开发模式明确不可用且不生成伪回执                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `NovelSkillPaidEvaluationCoordinator` / `NovelSkillPaidEvaluationPanel` | “设置 → Model Hub → 模型评测”的专家折叠区；固定 12 × 4 × 2 × 2 的 192-cell 计划，只接受两个已连接、已验证且价格完整的精确目录目标。挂载、准备、报价、授权和重启恢复都不会调用模型；商业确认与“手动开始 192 次付费调用”是两个动作，只有后者可进入无 fallback、无自动 retry 的串行 exact-target 派发。取消或崩溃越过发送边界后整次 run 标为歧义并禁止自动重发。盲评只显示随机题号、任务、边界、锁定事实、期望结果与隔离 Candidate，不显示 arm、模型、槽位、重复、成本或持久化哈希；13 项人工分必须全部填写。当前真实调用与人工评分仍为 `NOT_RUN`，所有 Skill 继续默认关闭                                                                                                                                                                      |
 | `parseNaturalLanguageSetting` / `StorySettingsImportService`            | “设定 → 快速维护故事设定”；自然语言只形成待确认候选，关系必须解析出两个不同人物端点。Story Settings JSON 先严格 dry run，再逐项解决冲突并用单事务提交正式记录、StoryFact、偏好、记忆和收据；撤销受 revision/version fence 与后续引用保护，旧开书坏记录另走逐条 repair                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `CausalFactAuthoringService` / `CausalFactAuthoringPanel`               | “设定 → 高级工具 → 故事关联”；事件可填写前置条件、人物状态、关系、物品和伏笔变化，并展开“明确获得的知识”。人物只从当前作品中主分支、正式、用户确认且仍有效且实体键唯一的人物身份中选择；两个有效人物共享同一实体键时失败关闭。正式事实插入会在同一事务精确复核有效来源章节、当前不可变版本、证据片段、事实类型与 schema、关系端点、前置事件和全部人物引用；保存瞬间任一权限失效都会失败关闭，相同重试返回原事实而不重复。正式事实已保存但派生图或页面刷新失败时会明确显示“已保存、等待刷新”，不会谎报未保存。空列表允许保存但不会授权 POV 取得，服务不会从事件正文或知情人物自动猜测；参与者和知情者各最多 128 个，明确知识最多 128 条，结构化事实超过 16 KiB 时会在保存前提示拆成两个事件。动态字段提供上限播报、新增焦点和删除后的焦点返回 |
 | `StoryFactApplicationService.resolveEntityAlias`                        | “设定 → 待确认内容”；只能从候选允许列表选择已有对象，或明确保留独立对象；CAS 防并发覆盖，畸形候选结构失败关闭并要求废弃、重新识别或手动新建                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `ChapterSummaryService`                                                 | 项目级默认关闭；手动保存后最多一次 `long_memory_compression`，也可逐章显式重建/清除。摘要绑定精确当前不可变版本与内容哈希；有已验证结构化能力时保存严格结构摘要，只有文本生成时仅可经本地严格解析保存 `plain_non_authoritative` 摘要，`keyEvents` / `continuityNotes` 保持为空且绝不提升为 StoryFact；过期或校验失败摘要从上下文排除                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `ChapterSummaryService`                                                 | 底层摘要读取与清除合同保留，但当前生产入口不可派发 `long_memory_compression`：手动保存和所有 accepted-version 后台任务只运行本地阶段，逐章云端重建按钮保持禁用。既有摘要仍绑定精确当前不可变版本与内容哈希；过期或校验失败摘要从上下文排除，历史 `plain_non_authoritative` 摘要绝不提升为 StoryFact                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `MemoryService.forgetProjectMemory` / `mergeRecords`                    | 设置页按明确项目执行记忆忘却：同一事务关闭自动学习并排除全部现有记录；设定页人工选择两条记忆、编辑合并内容、指定保留项并排除来源项。两种操作都需要人工确认、修订校验和不可变审计，不按相似度自动合并，不物理删除来源                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `ContextCompilationTraceStore`                                          | “设定 → AI 参考记录”；保存、按项目列最近 50 次、按 ID 展开并按最终 AI 建议版本精确反查。普通详情显示可读来源、采用/舍弃原因、origin 和预算；有精确 Novel Skill snapshot 时另显示方法名称、版本、采用/舍弃原因和独立预算，缺失回执不冒充已使用。记录只关联真实网关生成、Model Hub 调用事实和隔离 Candidate，不保存正文、Prompt、摘录、模型回复或向量；编译器输入条目标识名为 `contextCandidateId`，不是 AI Candidate ID                                                                                                                                                                                                                                                                                                                       |
 | `TaskOutputProfile` / continuation recovery                             | 续写短档为 800/1,000/1,200、标准档为 1,800/2,200/2,500、长档为 3,000/4,000/5,000 个最小/目标/最大可见字符，自定义目标限制 200–12,000；context economy/standard/long 上限为 12k/32k/64k token，并按模型窗口、输出、系统/协议开销和保守 CJK 估算再收紧。截断或取消后的可见正文只能保存为 `incomplete` 隔离 Candidate；边界安全预览可以省略末尾残句，但持久化 Candidate 完整保留供应商已返回的可见文本。继续补全固定原基线版本，以原始尾部作为 assistant 上下文并去除安全重叠；末句未完成时直接接写，不强插段落。作者也可保留比较、重生成或换模型，任何路径都不自动覆盖正文                                                                                                                                                                     |
 | `AmbiguousNovelReviewService`                                           | “检查”；语义矛盾、POV、人物声纹和内容质量四个只读任务，严格能力/路由/证据/JSON/返回后复核，所有发现需要人工判断                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `ModelHubStoryPlanningService` / `StoryPlanningCandidateStore`          | “规划”；全书方向或章节场景拆解，严格 JSON，先存独立可编辑候选；可整体采纳，或按生成时目标简介基线逐项追加固定结构化条目。逐项采纳会先用候选 revision CAS 持久预留选择和前后摘要，再写正式大纲；在途状态禁用编辑、拒绝和整体采纳，只允许恢复同一选择。空选择、未知条目、旧候选无基线、损坏回执和并发变化均失败关闭                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `createSelectionRewriteCandidate`                                       | 编辑器“修改选中内容”；固定当前不可变版本、UTF-16 选区和原文 SHA-256，复用 `rewrite` 路由与上下文编译器；发送前后防漂移，只把改写片段连同 `selection_rewrite / replace_selection` 精确锚点保存为 `polish` Candidate，并可由该 Candidate 精确反查实际上下文 trace 与 Model Hub 调用；项目保留任一 `local_only` 章节时，远程生成和远程重排均为 0 调用，已验证回环本地模型仍可执行                                                                                                                                                                                                                                                                                                                                                               |
-| `ReviseAiCandidate` / `AcceptAiCandidate` / `RejectAiCandidate`         | 编辑器建议比较；作者修改可先持久保存为仍隔离的 `ready` Candidate。命令必须携带页面实际展示的 Candidate revision，存储事务再以状态 + revision 做 CAS，不能在执行前重读最新版冒充用户已看过。接受时先复核 Candidate 内容 SHA-256，再读取任务应用意图：续写片段只插入记录光标，选区片段只替换记录范围；整章改写只允许覆盖全文或在当前与基线共同末尾追加。Candidate/context output 事务还复核项目 active、章节 active、当前版本、Candidate 基线和 context source version；正文、新版本和 Candidate 决定在同一事务中提交，失败或迟到结果不改变正文或赢家建议                                                                                                                                                                                      |
+| `ReviseAiCandidate` / `AcceptAiCandidate` / `RejectAiCandidate`         | 编辑器建议比较；作者修改可先持久保存为仍隔离的 `ready` Candidate。命令必须携带页面实际展示的 Candidate revision，存储事务再以状态 + revision 做 CAS，不能在执行前重读最新版冒充用户已看过。接受时先复核 Candidate 内容 SHA-256，再读取任务应用意图：续写片段只插入记录光标，选区片段只替换记录范围；整章改写只允许覆盖全文或在当前与基线共同末尾追加。Candidate/context output 事务还复核项目 active、章节 active、当前版本、Candidate 基线和 context source version；正文、新版本和 Candidate 决定在同一事务中提交，失败或迟到结果不改变正文或赢家建议。接受后只登记搜索/因果等纯本地可重建阶段，精确 0 次 Provider 调用；摘要、记忆和事实抽取只能从接受完成后的独立显式授权动作进入                                                        |
 | `HistoricalChapterBackfillService`                                      | 章节整理高级区域；先生成零写入只读计划，再经明确确认按登记前核验的当前稳定版本、阶段规则 v2 幂等登记缺失工作；首次写入前过期为零写入 `stale`，中途过期为保留已登记计数的 `partial`，相同权威任务并发落地计入 `alreadyRegistered`；复核后竞态产生的旧任务由执行前版本/隐私门禁在模型发送前以永久“不适用”结清；旧成功任务兼容，disabled→enabled 只补对应阶段，终态失败按阶段和代数恢复；worker 每轮最多处理 5 个历史回填任务                                                                                                                                                                                                                                                                                                                   |
 | `ChapterValidationSnapshotStore`                                        | “检查”；把确定性检查结果、证据摘要和规则版本绑定到不可变章节版本；正文版本变化后旧快照只作历史证据，不冒充当前结果                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `NovelValidationRuntime`                                                | “检查”；逐类记录 `checked` / `not_checked`，证据不足不会显示为通过。声纹、POV、多线、伏笔和节奏提醒的忽略/允许/撤销必须由运行时可信重算当前不可变版本的 finding 与完整证据签名，并通过存储层版本 fence、revision CAS 和幂等提交；页面字符串本身不构成处置权限                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -553,33 +614,32 @@ ID、阶段、HTTP/终止原因、可见长度、推理/流式标记、尝试和
 `story.accepted-version:<versionId>`，输入只接受有效项目、章节、版本 ID、来源和非负安全整数
 字符数。
 
-一次执行依次记录四个可重建阶段：
+任务元数据仍保留四阶段兼容形状，但当前生产执行会在任务创建、直接执行、人工重试和 worker 启动恢复时
+把两个 Provider 阶段强制归一为关闭。一次执行只运行：
 
 1. 重建本地项目搜索索引；
-2. 为已保存版本更新章节摘要；
-3. 提取连续 StoryFact/故事状态候选；
-4. 重建因果事件投影。
+2. 重建因果事件投影。
 
-每个阶段独立产生 `completed`、`skipped`、`not_applicable`、`deferred`、
-`partially_completed` 或 `failed` 回执。模型、路由、
-索引或投影失败不会回滚或改写已接受正文；缺少供应商能力时明确跳过，但任务要求的模型阶段
-不会再把该跳过写成成功。部分失败以 `ACCEPTED_VERSION_PIPELINE_PARTIAL` 进入可重试状态，并发布持久通知。
+本地阶段独立产生 `completed`、`skipped`、`not_applicable`、`partially_completed` 或 `failed` 回执。
+索引或投影失败不会回滚或改写已接受正文；重试也只重试本地范围。旧任务元数据中的
+`runChapterSummary=true` / `runStoryState=true` 仅作为历史审计保留，不会恢复云端派发。
 
 成功任务以规范 `pipeline.outcome.search-summary-state-causal` 子集写入持久 progress，只有列出的阶段
-才有完成证据。旧 `succeeded` 任务没有 outcome 时，历史回填只保守承认本地搜索与因果阶段，摘要和
-连续故事状态按缺失处理；`already_processed` 是连续故事状态的完成证据，不会形成重试/升代循环。
+才有完成证据。旧 `succeeded` 任务没有 outcome 时只保守承认本地搜索与因果阶段；摘要和连续故事
+状态不再作为当前后台任务的待补阶段。
 
 含终态的成功任务使用 `pipeline.outcome.v2.<stage>-<c|n|d>`：`c` 表示完成，`n` 表示对绑定的
 不可变版本永久不适用，`d` 表示等待未来显式重规划。空章节、来源过大、来源/隐私已变化、绑定版本
-不存在均为 `n`，不会自动重试或为同一版本升代；自动摘要暂停为 `d`，同一任务成功结束，恢复开关后
-也必须由用户重新查看计划并确认才会补建。真正供应商不可用或临时错误仍进入 `waiting_retry`。
+不存在均为 `n`，不会自动重试或为同一版本升代。当前回填计划固定 Provider 上限为 0；旧 Provider-only
+补充任务到期时被取消，不会进入发送或自动重试。
 
 历史补缺任务可额外携带 `runSearch`、`runChapterSummary`、`runStoryState`、
 `runCausalProjection`、`pipelineStage`、`pipelineStageRuleVersion`、
 `pipelineStageGeneration` 与完整 `pipelineIdempotencyKey`。首个版本任务仍使用原键；阶段补充键为
 `story.accepted-version:<versionId>:backfill:v2:<stage>:<generation>`。worker 必须校验键和元数据一致，
 同一任务等待重试时从 `failure.causeCode` 的阶段掩码收窄执行范围。重试耗尽会保留该具体原因，
-供后续只补失败阶段。掩码必须使用规范顺序且只能包含任务启用阶段；补充任务必须绑定
+供后续只补失败的本地阶段。新任务的两个 Provider flags 必须显式为 `false`；旧值为 `true` 或缺失时，
+worker 也只生成本地执行输入。掩码必须使用规范顺序且只能包含任务启用阶段；补充任务必须绑定
 `historical_backfill`、规范键、版本/阶段/代数和 one-hot `runX`。未知、重复、乱序、越界或非布尔
 元数据全部失败关闭；四个 `runX` 全为 `false` 的空范围任务在登记、直接执行和 worker 恢复三处也
 失败关闭，不生成空 outcome。该机制复用现有任务表，不引入迁移。
@@ -588,7 +648,7 @@ ID、阶段、HTTP/终止原因、可见长度、推理/流式标记、尝试和
 避免任务失败转换清空普通 progress 后丢失终态。重试耗尽时历史回填优先读取该证据：完成和永久不适用
 算覆盖，延期仍算缺失；只有没有 v2 证据的旧失败任务才按旧失败掩码保守推断。
 
-任务中心的“立即重试后台整理”不是通用重放按钮。它只对以下任务显示：类型匹配、状态为
+任务中心的“立即重试后台整理”不是通用重放按钮，也绝不会恢复 Provider 阶段。它只对以下任务显示：类型匹配、状态为
 `waiting_retry`、失败声明 `retryable` 且包含 `RETRY`，并且项目/章节/版本 UUID、来源
 （`candidate_accept`、`chapter_import`、`manual_save`、`version_restore` 或 `historical_backfill`）及字符数元数据全部有效。页面先调用
 `taskCenter.retryTaskNow(task.id)`，再以原版本作用域执行同一幂等管线；不完整元数据会失败关闭。
@@ -1024,7 +1084,7 @@ send_cloud_api_request({
 | `inkshadow.development.project-search.v1`                  |      1 | 项目搜索快照                                                                 | `project-search-store.ts`              |
 | `inkshadow.development.task-center.v1`                     |      1 | 任务与通知                                                                   | `task-center-store.ts`                 |
 | `inkshadow.marketplace.installs.v1`                        |      1 | 浏览器模式已安装市场资产                                                     | `marketplace-runtime.ts`               |
-| `inkshadow.development.creative-journeys.v1`               |      1 | 一句话开书三槽请求、有限动态问题计划、回答/跳过、扩展原因和逐轮恢复          | `creative-journey-store.ts`            |
+| `inkshadow.development.creative-journeys.v1`               |      1 | 一句话开书三槽请求、一次性 0–3 问确定性计划、回答/跳过和逐轮恢复             | `creative-journey-store.ts`            |
 | `inkshadow.development.project-seeds.v1`                   |      1 | 项目创建后的 `ProjectSeed` 副本                                              | `project-seed-local-store.ts`          |
 | `inkshadow.development.model-hub.v1`                       |      6 | Model Hub 连接、目录、能力、路由、策略、调用及脱敏失败元数据；原位升级 v1–v5 | `model-hub-store.ts`                   |
 | `inkshadow.development.story-facts.v1`                     |      2 | 浏览器调试模式统一 StoryFact、修订与连续提取回执                             | `story-fact-store.ts`                  |
@@ -1048,8 +1108,8 @@ StoryFact，但创建/改写表单本身可能包含用户输入，因此仍属�
 | `inkshadow.import-rewrite-journey.v2`                                 | 导入项目指针、分析检查点、改写目标、试改候选指针、反馈、规则和逐章 Candidate 精确修订号；不复制已导入稳定正文。逐章生成的 Candidate 指针与修订号同步落盘后才继续派发，失败时在当前页保留可见指针并停止批次 |
 | `inkshadow.import-rewrite-pending.v1`                                 | 尚未收尾的导入分析/改写请求 ID、供应商、模型、章节与任务类型；不保存请求正文                                                                                                                               |
 | `inkshadow.professional-create-recovery.v1`                           | 专业创建表单、项目恢复指针和 `ProjectSeed`；不保存章节正文                                                                                                                                                 |
-| `inkshadow.chapter-summary.auto-on-manual-save.v1:<projectId>`        | 是否允许手动保存后更新章节摘要                                                                                                                                                                             |
-| `inkshadow.continuous-story-state.auto-on-manual-save.v1:<projectId>` | 是否允许手动保存后识别故事变化                                                                                                                                                                             |
+| `inkshadow.chapter-summary.auto-on-manual-save.v1:<projectId>`        | 旧偏好兼容键；当前页面读到后立即归一为关闭，不能授权手动保存发送正文                                                                                                                                       |
+| `inkshadow.continuous-story-state.auto-on-manual-save.v1:<projectId>` | 旧偏好兼容键；当前页面读到后立即归一为关闭，不能授权手动保存发送正文                                                                                                                                       |
 
 编辑器另用 `inkshadow.editor.view-state.v1` 保存：
 

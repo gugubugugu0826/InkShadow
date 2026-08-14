@@ -28,6 +28,7 @@ const migration = [
   readMigration("0051_model_hub_connection_commits.sql"),
   readMigration("0056_model_hub_failure_diagnostics.sql"),
   readMigration("0057_model_hub_content_quality_task.sql"),
+  readMigration("0065_model_invocation_dispatch_boundary.sql"),
 ].join("\n");
 
 describe("TauriModelHubStore", () => {
@@ -703,7 +704,35 @@ describe("TauriModelHubStore", () => {
       maximumCostMicros: "0",
       currency: "USD",
     });
-    expect(started).toMatchObject({ status: "running", revision: 1 });
+    expect(started).toMatchObject({
+      status: "running",
+      providerDispatchStartedAt: null,
+      revision: 1,
+    });
+    const marked = await store.markInvocationDispatched({
+      id: started.id,
+      dispatchedAt: "2026-03-12T08:00:00.000Z",
+      expectedRevision: started.revision,
+    });
+    expect(marked).toMatchObject({
+      status: "running",
+      providerDispatchStartedAt: "2026-03-12T08:00:00.000Z",
+      revision: 2,
+    });
+    await expect(
+      store.markInvocationDispatched({
+        id: started.id,
+        dispatchedAt: "2026-03-12T08:00:00.000Z",
+        expectedRevision: started.revision,
+      }),
+    ).resolves.toEqual(marked);
+    await expect(
+      store.markInvocationDispatched({
+        id: started.id,
+        dispatchedAt: "2026-03-12T08:00:01.000Z",
+        expectedRevision: marked.revision,
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_INVOCATION_CONFLICT" });
     const completed = await store.finishInvocation({
       id: started.id,
       status: "succeeded",
@@ -713,17 +742,25 @@ describe("TauriModelHubStore", () => {
       estimatedCostMicros: "0",
       currency: "USD",
       completion: { visibleContentLength: 4, stream: false },
-      expectedRevision: 1,
+      expectedRevision: marked.revision,
     });
     expect(completed).toMatchObject({
       status: "succeeded",
       completion: { visibleContentLength: 4, stream: false },
       failure: null,
-      revision: 2,
+      providerDispatchStartedAt: "2026-03-12T08:00:00.000Z",
+      revision: 3,
     });
     await expect(store.findInvocation(started.id)).resolves.toMatchObject({
       completion: { visibleContentLength: 4, stream: false },
     });
+    await expect(
+      store.markInvocationDispatched({
+        id: started.id,
+        dispatchedAt: "2026-03-12T08:00:00.000Z",
+        expectedRevision: completed.revision,
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_INVOCATION_CONFLICT" });
     await expect(
       store.finishInvocation({
         id: started.id,
@@ -732,7 +769,7 @@ describe("TauriModelHubStore", () => {
           visibleContentLength: 4,
           response: "must-not-persist",
         } as never,
-        expectedRevision: 2,
+        expectedRevision: completed.revision,
       }),
     ).rejects.toMatchObject({ code: "MODEL_HUB_COMPLETION_METADATA_INVALID" });
 
@@ -1281,6 +1318,43 @@ async function assertConnectionRetirement(
     providerKindSnapshot: "openai",
     modelIdSnapshot: "writer-model",
   });
+  await expect(
+    reopened.saveConnection({
+      id,
+      providerKind: "openai",
+      displayName: "Unsafe retired reactivation",
+      credentialRef: `keyring:model-hub:${id}-replacement`,
+      credentialState: "present",
+      authenticationMode: "bearer_keyring",
+      enabled: true,
+      expectedRevision: retired.revision,
+    }),
+  ).rejects.toMatchObject({ code: "MODEL_HUB_CONNECTION_RETIRED" });
+  await expect(
+    reopened.prepareConnectionCommit({
+      id: `${id}-blocked-commit`,
+      connectionId: id,
+      credentialProviderId: `${id}-blocked-slot`,
+    }),
+  ).rejects.toMatchObject({ code: "MODEL_HUB_CONNECTION_RETIRED" });
+  await expect(
+    reopened.recordConnectionTest({
+      connectionId: id,
+      status: "ready",
+      expectedRevision: retired.revision,
+    }),
+  ).rejects.toMatchObject({ code: "MODEL_HUB_CONNECTION_RETIRED" });
+  await expect(
+    reopened.syncCatalog({
+      syncId: `${id}-blocked-sync`,
+      connectionId: id,
+      source: "manual",
+      status: "succeeded",
+      models: [{ id: `${id}-blocked-model`, providerModelId: "writer-model" }],
+    }),
+  ).rejects.toMatchObject({ code: "MODEL_HUB_CONNECTION_RETIRED" });
+  await expect(reopened.findConnection(id)).resolves.toEqual(retired);
+  await expect(reopened.listConnectionCommits()).resolves.toEqual([]);
   await expect(
     reopened.retireConnection({ connectionId: id, expectedRevision: current.revision }),
   ).resolves.toEqual(retired);

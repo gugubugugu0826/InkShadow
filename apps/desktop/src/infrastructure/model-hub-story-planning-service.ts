@@ -169,25 +169,40 @@ export class ModelHubStoryPlanningService {
 
     try {
       const inspection = await this.inspectText(this.dependencies, request);
-      const evidence = await this.dependencies.modelHub.listCapabilityEvidence(
-        inspection.catalogEntryId,
-      );
-      if (
-        resolveModelCapabilityVerdict({
-          catalogEntryId: inspection.catalogEntryId,
-          capability: "structured_output",
-          evidence,
-          now: this.dependencies.clock.now(),
-        }) !== "supported"
-      ) {
-        return Object.freeze({
-          status: "skipped",
-          code: "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED",
-          message:
-            "当前 AI 分工没有经过结构化输出能力验证。请在设置中验证该能力或为这项任务选择其他模型；正式大纲没有改变。",
-        });
+      const assertStructuredOutputCurrent = async (catalogEntryId: string) => {
+        const evidence = await this.dependencies.modelHub.listCapabilityEvidence(catalogEntryId);
+        if (
+          resolveModelCapabilityVerdict({
+            catalogEntryId,
+            capability: "structured_output",
+            evidence,
+            now: this.dependencies.clock.now(),
+          }) !== "supported"
+        ) {
+          throw new ModelHubExecutionError(
+            "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED",
+            "发送规划建议前无法确认结构化输出能力，本次请求在发送 0 字后停止。",
+          );
+        }
+        return evidence;
+      };
+      let evidence;
+      try {
+        evidence = await assertStructuredOutputCurrent(inspection.catalogEntryId);
+      } catch (cause: unknown) {
+        if (
+          cause instanceof ModelHubExecutionError &&
+          cause.code === "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED"
+        ) {
+          return Object.freeze({
+            status: "skipped",
+            code: cause.code,
+            message:
+              "当前 AI 分工没有经过结构化输出能力验证。请在设置中验证该能力或为这项任务选择其他模型；正式大纲没有改变。",
+          });
+        }
+        throw cause;
       }
-
       const executed = await this.executeText(this.dependencies, {
         ...request,
         dispatchScope: projectContextDispatchScope(context.projectPrivacy),
@@ -204,26 +219,19 @@ export class ModelHubStoryPlanningService {
               true,
             );
           }
-          const dispatchEvidence = await this.dependencies.modelHub.listCapabilityEvidence(
-            selection.catalogEntryId,
-          );
-          if (
-            resolveModelCapabilityVerdict({
-              catalogEntryId: selection.catalogEntryId,
-              capability: "structured_output",
-              evidence: dispatchEvidence,
-              now: this.dependencies.clock.now(),
-            }) !== "supported"
-          ) {
-            throw new ModelHubExecutionError(
-              "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED",
-              "发送规划建议前无法确认结构化输出能力，本次请求在发送 0 字后停止。",
-            );
-          }
+          await assertStructuredOutputCurrent(selection.catalogEntryId);
           await assertPlanningPrivacyBeforeDispatch(
             this.dependencies.projectContextPrivacy,
             context.projectPrivacy,
             selection.localOnlyEligible === true,
+          );
+        },
+        onFinalBeforeProviderDispatch: async ({ catalogEntryId, localOnlyEligible }) => {
+          await assertStructuredOutputCurrent(catalogEntryId);
+          await assertPlanningPrivacyBeforeDispatch(
+            this.dependencies.projectContextPrivacy,
+            context.projectPrivacy,
+            localOnlyEligible === true,
           );
         },
       });

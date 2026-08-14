@@ -9,7 +9,7 @@ import {
   type Project,
 } from "@inkshadow/domain";
 import { ToastProvider } from "@inkshadow/ui";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { DesktopRoutes } from "../app";
 import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
@@ -31,6 +31,119 @@ describe("editor candidate route selection", () => {
 
     expect(await screen.findByText("路由明确指定的候选正文")).toBeVisible();
     expect(screen.queryByText("不应替代指定候选的其他正文")).not.toBeInTheDocument();
+  });
+
+  it("keeps a locally generated opening labeled as a local draft after entering the editor", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime);
+    const candidate = await createReadyCandidate(runtime, project, chapter, "本地开头草案", {
+      source: "generate",
+    });
+    const now = runtime.clock.now();
+    await runtime.creativeJourneys.create(
+      {
+        id: candidate.id,
+        kind: "idea",
+        status: "active",
+        currentState: "opening_selected",
+        projectId: project.id,
+        chapterId: chapter.id,
+        candidateId: null,
+        revision: 1,
+        snapshot: { previewSource: "local_fallback" },
+        createdAt: now,
+        updatedAt: now,
+        completedAt: null,
+      },
+      {
+        id: runtime.ids.next(),
+        journeyId: candidate.id,
+        sequence: 1,
+        kind: "idea",
+        questionKey: null,
+        generationSource: "local_fallback",
+        providerId: null,
+        modelId: null,
+        taskKey: null,
+        requestId: null,
+        snapshot: { previewSource: "local_fallback" },
+        createdAt: now,
+      },
+    );
+    await runtime.creativeJourneys.update(
+      {
+        id: candidate.id,
+        kind: "idea",
+        status: "completed",
+        currentState: "candidate_ready",
+        projectId: project.id,
+        chapterId: chapter.id,
+        candidateId: candidate.id,
+        revision: 2,
+        snapshot: { previewSource: "local_fallback" },
+        createdAt: now,
+        updatedAt: now,
+        completedAt: now,
+      },
+      1,
+      {
+        id: runtime.ids.next(),
+        journeyId: candidate.id,
+        sequence: 2,
+        kind: "keep",
+        questionKey: null,
+        generationSource: "local_fallback",
+        providerId: null,
+        modelId: null,
+        taskKey: null,
+        requestId: null,
+        snapshot: { candidateId: candidate.id, previewSource: "local_fallback" },
+        createdAt: now,
+      },
+    );
+
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
+
+    expect(await screen.findByRole("button", { name: "查看本地草案版本" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "比较本地草案" }));
+    expect(await screen.findByRole("dialog", { name: "比较本地草案与正文" })).toBeVisible();
+  });
+
+  it("uses a neutral label when a generate candidate has no trustworthy origin receipt", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime);
+    const candidate = await createReadyCandidate(runtime, project, chapter, "来源记录缺失的候选", {
+      source: "generate",
+    });
+
+    renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
+
+    expect(await screen.findByRole("button", { name: "查看建议版本" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "查看 AI 建议版本" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "查看本地草案版本" })).not.toBeInTheDocument();
+  });
+
+  it("does not relabel a generate candidate as AI when its origin receipt cannot be read", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime);
+    const candidate = await createReadyCandidate(
+      runtime,
+      project,
+      chapter,
+      "来源记录读取失败的候选",
+      {
+        source: "generate",
+      },
+    );
+    vi.spyOn(runtime.creativeJourneys, "findById").mockRejectedValueOnce(
+      new Error("journey unavailable"),
+    );
+
+    renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
+
+    expect(await screen.findByRole("button", { name: "查看建议版本" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "查看 AI 建议版本" })).not.toBeInTheDocument();
   });
 
   it("shows a visible error and does not fall back for an invalid candidate query", async () => {

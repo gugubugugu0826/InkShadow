@@ -1,0 +1,96 @@
+import type { DesktopRuntime } from "./runtime";
+
+export interface OpeningStartupRecoveryReceipt {
+  readonly inspectedJourneyCount: number;
+  readonly inspectedInvocationCount: number;
+  readonly terminalizedInvocationCount: number;
+  readonly failedInvocationCount: number;
+}
+
+/**
+ * Terminalizes only already-persisted opening invocations during desktop
+ * startup. The journey page later projects these same authoritative facts into
+ * its stable slots. This never creates an invocation or calls the gateway.
+ */
+export async function recoverOrphanedOpeningInvocationsAtStartup(
+  runtime: DesktopRuntime,
+): Promise<OpeningStartupRecoveryReceipt> {
+  const journeys = await runtime.creativeJourneys.listActive("idea");
+  const invocationIds = new Set<string>();
+  let inspectedJourneyCount = 0;
+  for (const journey of journeys) {
+    const ids = pendingProviderInvocationIds(journey.snapshot);
+    if (ids.length === 0) continue;
+    inspectedJourneyCount += 1;
+    ids.forEach((id) => invocationIds.add(id));
+  }
+
+  let terminalizedInvocationCount = 0;
+  let failedInvocationCount = 0;
+  for (const invocationId of invocationIds) {
+    try {
+      let invocation = await runtime.modelHub.findInvocation(invocationId);
+      if (
+        invocation === null ||
+        (invocation.status !== "queued" && invocation.status !== "running")
+      ) {
+        continue;
+      }
+      const crossedBoundary = invocation.providerDispatchStartedAt !== null;
+      try {
+        invocation = await runtime.modelHub.finishInvocation({
+          id: invocation.id,
+          status: "failed",
+          errorCode: crossedBoundary ? "OPENING_DISPATCH_AMBIGUOUS" : "OPENING_NOT_DISPATCHED",
+          errorSummary: crossedBoundary
+            ? "应用在模型返回前中断；调用结果不明确，系统不会自动重发。"
+            : "应用在模型发送前中断；没有发生供应商调用。",
+          expectedRevision: invocation.revision,
+        });
+      } catch (cause: unknown) {
+        const current = await runtime.modelHub.findInvocation(invocationId);
+        if (current === null || current.status === "queued" || current.status === "running") {
+          throw cause;
+        }
+        invocation = current;
+      }
+      if (invocation.status !== "queued" && invocation.status !== "running") {
+        terminalizedInvocationCount += 1;
+      }
+    } catch {
+      failedInvocationCount += 1;
+    }
+  }
+
+  return Object.freeze({
+    inspectedJourneyCount,
+    inspectedInvocationCount: invocationIds.size,
+    terminalizedInvocationCount,
+    failedInvocationCount,
+  });
+}
+
+function pendingProviderInvocationIds(
+  snapshot: Readonly<Record<string, unknown>>,
+): readonly string[] {
+  const suggestionsValue: unknown = snapshot.openingSuggestions;
+  if (snapshot.openingGenerationMode !== "provider" || !Array.isArray(suggestionsValue)) {
+    return Object.freeze([]);
+  }
+  const invocationIds: string[] = [];
+  for (const candidateValue of suggestionsValue as readonly unknown[]) {
+    if (typeof candidateValue !== "object" || candidateValue === null) continue;
+    const candidate = candidateValue as Readonly<Record<string, unknown>>;
+    if (candidate.source !== "provider" || candidate.status !== "pending") continue;
+    const invocationId =
+      typeof candidate.providerInvocationId === "string"
+        ? candidate.providerInvocationId
+        : typeof candidate.id === "string"
+          ? candidate.id
+          : null;
+    if (invocationId !== null && /^[A-Za-z0-9._:-]{1,128}$/u.test(invocationId)) {
+      invocationIds.push(invocationId);
+    }
+  }
+  return Object.freeze(invocationIds);
+}

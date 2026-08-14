@@ -129,6 +129,21 @@ export async function createImportRewriteCandidate(
             throw cause;
           }
         },
+        onFinalBeforeProviderDispatch: async ({ localOnlyEligible }) => {
+          await assertLatestRewriteSource(runtime, chapter);
+          try {
+            await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
+            runtime.projectContextPrivacy.assertRouteEligible(
+              projectPrivacy,
+              localOnlyEligible === true,
+            );
+          } catch (cause: unknown) {
+            if (cause instanceof ProjectContextPrivacyError) {
+              throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
+            }
+            throw cause;
+          }
+        },
         ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
       });
       generated = Object.freeze({ text: modelHubResult.text, usage: modelHubResult.usage });

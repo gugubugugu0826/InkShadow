@@ -132,6 +132,14 @@ export class ModelHubCausalWhatIfModelPort implements CausalWhatIfModelPort {
             selection.localOnlyEligible === true,
           );
         },
+        onFinalBeforeProviderDispatch: async (selection) => {
+          await assertStructuredOutputSupported(this.dependencies, selection.catalogEntryId, true);
+          await assertProjectPrivacyBeforeDispatch(
+            this.dependencies.projectContextPrivacy,
+            projectPrivacy,
+            selection.localOnlyEligible === true,
+          );
+        },
       });
     } catch (cause: unknown) {
       throw normalizeModelHubFailure(cause);

@@ -3,6 +3,13 @@ import type { ModelCatalogEntry, ModelProviderConnection, NovelTaskRoute } from 
 
 export const MODEL_HUB_READINESS_CHANGED_EVENT = "inkshadow:model-hub-readiness-changed";
 
+/**
+ * Catalog and capability evidence can expire without any store mutation. Keep
+ * every long-lived readiness surface close to the exact dispatch resolver's
+ * current-time decision instead of waiting for navigation or a manual retry.
+ */
+export const MODEL_HUB_READINESS_REFRESH_INTERVAL_MS = 30_000;
+
 export const USER_FACING_MODEL_HUB_STATES = [
   "unconnected",
   "checking",
@@ -28,6 +35,12 @@ export interface ModelHubReadinessProjection {
   readonly runnableCoreTaskCount: number;
   readonly totalCoreTaskCount: number;
   readonly missingCoreTasks: readonly NovelAiTask[];
+  readonly exactBlockers: readonly ModelHubReadinessBlocker[];
+}
+
+export interface ModelHubReadinessBlocker {
+  readonly task: NovelAiTask;
+  readonly code: string;
 }
 
 export interface ProjectModelHubReadinessInput {
@@ -36,6 +49,10 @@ export interface ProjectModelHubReadinessInput {
   readonly routes: readonly NovelTaskRoute[];
   readonly transientChecking?: boolean;
   readonly loadFailed?: boolean;
+  /** Tasks rejected by the exact, no-dispatch resolver after the shallow store projection. */
+  readonly exactBlockedTasks?: readonly NovelAiTask[];
+  /** Safe blocker codes produced by the same resolver used before dispatch. */
+  readonly exactBlockers?: readonly ModelHubReadinessBlocker[];
   readonly now?: string;
 }
 
@@ -51,16 +68,19 @@ export const MODEL_HUB_STATE_EXPLANATIONS: Readonly<
     description: "正在检查网络、凭据、模型目录和可用能力。",
   }),
   basic_ready: Object.freeze({
-    label: "基础写作可用",
-    description: "正文生成、续写、改写和润色已经可用；长程回顾或深度检查可能尚未配置。",
+    label: "基础配置可用",
+    description:
+      "正文生成、续写、改写和润色的连接、模型与分工基础检查已通过；当前作品仍会在发送前单独检查隐私、上下文和请求长度。",
   }),
   fully_ready: Object.freeze({
-    label: "完整可用",
-    description: "写作、续写、润色、长程记忆和核心检查都已有可运行的 AI 分工。",
+    label: "基础配置完整",
+    description:
+      "写作、续写、润色、长程记忆和核心检查的基础配置均已通过；这不代表任意章节都能跳过发送前预检。",
   }),
   partially_unavailable: Object.freeze({
     label: "部分能力不可用",
-    description: "已有连接仍可承担部分任务；缺失任务会明确停止或使用已配置的备用模型。",
+    description:
+      "部分任务的基础配置已通过；缺失任务会明确停止或使用已配置的备用模型，当前请求仍需单独预检。",
   }),
   connection_failed: Object.freeze({
     label: "连接失败",
@@ -89,14 +109,61 @@ const COMPLETE_WRITING_TASKS: readonly NovelAiTask[] = Object.freeze([
   "content_quality_check",
 ]);
 
+export function modelHubReadinessBlockerLabel(code: string): string {
+  if (code === "MODEL_HUB_CREDENTIAL_MISSING") return "API Key 已删除或不可用";
+  if (code === "MODEL_HUB_CONNECTION_NOT_READY") return "供应商连接尚未通过测试";
+  if (code === "MODEL_HUB_CAPABILITY_NOT_VERIFIED") return "模型能力尚未完成验证";
+  if (code === "MODEL_HUB_ROUTE_NOT_CONFIGURED") return "这项 AI 分工尚未配置";
+  if (code === "MODEL_HUB_ROUTE_DISABLED") return "这项 AI 分工已停用";
+  if (code === "MODEL_HUB_ROUTE_TARGET_MISSING") return "AI 分工引用的模型已经不存在";
+  if (code === "MODEL_HUB_CATALOG_ENTRY_UNAVAILABLE") return "模型目录信息已失效或过期";
+  if (code === "MODEL_HUB_CONTEXT_LIMIT_EXCEEDED") return "所选模型的上下文上限不足";
+  if (code === "MODEL_CONTEXT_WINDOW_EXHAUSTED") {
+    return "当前请求的输出长度与必要上下文超过模型窗口";
+  }
+  if (code === "MODEL_HUB_DATA_DESTINATION_UNKNOWN") {
+    return "模型的数据去向与隐私信息尚未确认";
+  }
+  if (code.startsWith("MODEL_HUB_COST_")) return "费用证据或费用上限阻止本次调用";
+  if (code === "MODEL_HUB_PRIVACY_BLOCKED" || code === "PRIVATE_CHAPTER_LOCAL_ONLY") {
+    return "当前隐私规则不允许使用这个模型";
+  }
+  if (code === "MODEL_HUB_GATEWAY_UNAVAILABLE") return "当前环境不能调用已连接的模型";
+  if (code === "STORY_CONTEXT_COMPILATION_FAILED") return "当前作品的上下文未能安全整理";
+  return "基础配置检查尚未通过";
+}
+
+export function modelHubReadinessTaskLabel(task: string): string {
+  const labels: Readonly<Record<string, string>> = Object.freeze({
+    prose_generation: "正文生成",
+    continuation: "续写",
+    rewrite: "改写",
+    polish: "润色",
+    chapter_summary: "章节摘要",
+    long_memory_compression: "长期记忆",
+    contradiction_check: "矛盾检查",
+    pov_check: "视角检查",
+    character_voice_check: "人物说话一致性",
+    content_quality_check: "内容质量复核",
+  });
+  return labels[task] ?? "当前 AI 任务";
+}
+
 export function projectModelHubReadiness(
   input: ProjectModelHubReadinessInput,
 ): ModelHubReadinessProjection {
   const enabledConnections = input.connections.filter(({ enabled }) => enabled);
   const now = normalizeNow(input.now);
+  const exactBlockers = Object.freeze([
+    ...(input.exactBlockers ?? []),
+    ...(input.exactBlockedTasks ?? []).map((task) =>
+      Object.freeze({ task, code: "MODEL_HUB_PREFLIGHT_FAILED" }),
+    ),
+  ]);
   const base = {
     enabledConnectionCount: enabledConnections.length,
     totalCoreTaskCount: COMPLETE_WRITING_TASKS.length,
+    exactBlockers,
   } as const;
 
   if (
@@ -151,9 +218,11 @@ export function projectModelHubReadiness(
   }
 
   const routeByTask = new Map(input.routes.map((route) => [route.task, route]));
+  const exactBlockedTasks = new Set(exactBlockers.map(({ task }) => task));
   const runnableTasks: NovelAiTask[] = [];
   let usesFallback = false;
   for (const task of COMPLETE_WRITING_TASKS) {
+    if (exactBlockedTasks.has(task)) continue;
     const route = routeByTask.get(task);
     if (!route?.enabled) continue;
     if (healthyCatalogIds.has(route.primaryCatalogEntryId)) {
@@ -226,7 +295,11 @@ export function projectModelHubReadiness(
 
 function projection(
   state: UserFacingModelHubState,
-  base: Readonly<{ enabledConnectionCount: number; totalCoreTaskCount: number }>,
+  base: Readonly<{
+    enabledConnectionCount: number;
+    totalCoreTaskCount: number;
+    exactBlockers: readonly ModelHubReadinessBlocker[];
+  }>,
   usableConnectionCount: number,
   runnableCoreTaskCount: number,
   missingCoreTasks: readonly NovelAiTask[],
@@ -234,17 +307,13 @@ function projection(
   const copy = MODEL_HUB_STATE_EXPLANATIONS[state];
   const taskSummary =
     state === "basic_ready" || state === "fully_ready" || state === "partially_unavailable"
-      ? ` 当前 ${String(runnableCoreTaskCount)} / ${String(base.totalCoreTaskCount)} 类核心任务可运行。`
+      ? ` 当前 ${String(runnableCoreTaskCount)} / ${String(base.totalCoreTaskCount)} 类任务通过基础配置检查。`
       : "";
   return Object.freeze({
     state,
     label: copy.label,
     shortLabel:
-      state === "fully_ready"
-        ? "AI 写作已就绪"
-        : state === "basic_ready"
-          ? "AI 基础写作可用"
-          : `AI ${copy.label}`,
+      state === "fully_ready" || state === "basic_ready" ? "AI 基础连接可用" : `AI ${copy.label}`,
     description: `${copy.description}${taskSummary}`,
     tone: readinessTone(state),
     enabledConnectionCount: base.enabledConnectionCount,
@@ -252,6 +321,7 @@ function projection(
     runnableCoreTaskCount,
     totalCoreTaskCount: base.totalCoreTaskCount,
     missingCoreTasks: Object.freeze([...missingCoreTasks]),
+    exactBlockers: Object.freeze([...base.exactBlockers]),
   });
 }
 

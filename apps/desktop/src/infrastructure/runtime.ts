@@ -178,7 +178,10 @@ import {
   type AutomaticBackupRuntime,
 } from "./automatic-backup-runtime";
 import { AcceptedChapterPipelineWorker } from "./accepted-chapter-pipeline-worker";
-import { createAcceptedChapterPipelineTaskInput } from "./accepted-chapter-pipeline";
+import {
+  createAcceptedChapterPipelineTaskInput,
+  createLocalCandidateAcceptancePipelineInput,
+} from "./accepted-chapter-pipeline";
 import { HistoricalChapterBackfillService } from "./historical-chapter-backfill-service";
 import { StorySettingsImportService } from "./story-settings-import-service";
 import { CloudAiUsageService, type CloudAiUsageRuntimePort } from "./cloud-ai-usage-service";
@@ -227,7 +230,12 @@ import {
   createUnavailableNovelSkillPaidEvaluationCoordinator,
 } from "./novel-skill-paid-evaluation-lazy-coordinator";
 import type { NovelSkillPaidEvaluationCoordinatorPort } from "./novel-skill-paid-evaluation-coordinator";
-import { recordSafeGenerationPreflightDiagnostic } from "./generation-preflight-diagnostics";
+import {
+  recordSafeGenerationErrorCode,
+  recordSafeGenerationPreflightDiagnostic,
+  recordSafeGenerationPreflightFailureDiagnostic,
+  recordSafeInvocationRouteDiagnostic,
+} from "./generation-preflight-diagnostics";
 import {
   createAuthoritativeExtractionDesktopRuntime,
   type AuthoritativeExtractionDesktopPort,
@@ -2202,13 +2210,12 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
         return createAcceptedChapterPipelineTaskInput(
           acceptedCandidateTaskIds.next(),
           version.createdAt,
-          {
+          createLocalCandidateAcceptancePipelineInput({
             projectId: version.projectId,
             chapterId: version.chapterId,
             versionId: version.id,
-            source: "candidate_accept",
             acceptedCharacterCount: version.content.length,
-          },
+          }),
         );
       },
     });
@@ -2603,10 +2610,8 @@ export async function prepareGenerationPlan(
   await runtime.taskCenter.recoverExpiredTasks();
   const requestId = runtime.ids.next();
   const modelRole: ModelRouteRole = "high_quality";
-  const [chapterResult, profiles, roleRoute, waitingDeferred] = await Promise.all([
+  const [chapterResult, waitingDeferred] = await Promise.all([
     runtime.repositories.chapters.findById(chapterId),
-    runtime.modelCenter.listProfiles(),
-    runtime.modelRouting.findRoute(modelRole),
     runtime.generationGovernance.findWaitingDeferredRequest(chapterId, modelRole),
   ]);
   if (!chapterResult.ok) {
@@ -2640,6 +2645,10 @@ export async function prepareGenerationPlan(
     throw projectResult.error;
   }
   const project = projectResult?.value ?? null;
+  const generationPreflightScope =
+    chapter === null
+      ? undefined
+      : Object.freeze({ projectId: chapter.projectId, chapterId: chapter.id });
   const applicationCursorUtf16 = resolveContinuationCursor(
     chapter?.content ?? "",
     partialCandidate?.applicationIntent.startUtf16 ?? input.cursorUtf16,
@@ -2653,92 +2662,6 @@ export async function prepareGenerationPlan(
     });
   }
   const demo = runtime.mode === "browser-development";
-  let profile: ModelProfile | null = null;
-  let routeResolved = true;
-  let routeReason: PreparedGenerationPlan["routeReason"] = demo ? "local_demo" : "legacy_default";
-  let routeRequiresConfirmation = false;
-  let routeFallback =
-    roleRoute?.fallbackProviderId === null ||
-    roleRoute?.fallbackProviderId === undefined ||
-    roleRoute.fallbackModelId === null
-      ? null
-      : Object.freeze({
-          providerId: roleRoute.fallbackProviderId,
-          modelId: roleRoute.fallbackModelId,
-        });
-  let credentialConfigured = demo;
-  let connectionStatus: "verified" | "failed" | "not_checked" = demo ? "verified" : "not_checked";
-  let selectedModelAvailable = demo;
-  let legacyGatewayConfig: NativeModelEndpointConfig | null = null;
-  let legacyGatewayResolution: ModelProfileGatewayConfigResolution | null = null;
-
-  if (!demo && roleRoute !== null) {
-    const routeProfiles = profiles.filter(
-      (candidate) =>
-        candidate.selectedModel !== null &&
-        ((candidate.providerId === roleRoute.primaryProviderId &&
-          candidate.selectedModel === roleRoute.primaryModelId) ||
-          (candidate.providerId === roleRoute.fallbackProviderId &&
-            candidate.selectedModel === roleRoute.fallbackModelId)),
-    );
-    const inspections = await Promise.all(
-      routeProfiles.map((candidate) =>
-        inspectModelRouteProfile(runtime, candidate, input.networkAvailable),
-      ),
-    );
-    const resolution = resolveModelRoute(
-      {
-        role: modelRole,
-        primary: {
-          providerId: roleRoute.primaryProviderId,
-          modelId: roleRoute.primaryModelId,
-        },
-        fallback: routeFallback,
-      },
-      inspections.map(({ candidate }) => candidate),
-    );
-    routeResolved = resolution.status === "resolved";
-    const selectedReference =
-      resolution.status === "resolved" ? resolution.selected : resolution.preferred;
-    const selectedInspection =
-      selectedReference === null
-        ? null
-        : (inspections.find(
-            ({ candidate }) =>
-              candidate.providerId === selectedReference.providerId &&
-              candidate.modelId === selectedReference.modelId,
-          ) ?? null);
-    profile =
-      selectedInspection?.profile ??
-      profiles.find(({ providerId }) => providerId === roleRoute.primaryProviderId) ??
-      null;
-    if (selectedInspection !== null) {
-      credentialConfigured = selectedInspection.credentialConfigured;
-      connectionStatus = selectedInspection.connectionStatus;
-      selectedModelAvailable = selectedInspection.selectedModelAvailable;
-      legacyGatewayConfig = selectedInspection.gatewayConfig;
-      legacyGatewayResolution = selectedInspection.gatewayResolution;
-    }
-    if (resolution.status === "resolved") {
-      routeReason = resolution.reason === "fallback_verified" ? "role_fallback" : "role_primary";
-      routeRequiresConfirmation = resolution.requiresConfirmation;
-    } else {
-      routeReason = "role_primary";
-    }
-  } else if (!demo) {
-    profile = profiles.find((candidate) => candidate.selectedModel !== null) ?? profiles[0] ?? null;
-    if (profile !== null) {
-      const inspected = await inspectModelRouteProfile(runtime, profile, input.networkAvailable);
-      credentialConfigured = inspected.credentialConfigured;
-      connectionStatus = inspected.connectionStatus;
-      selectedModelAvailable = inspected.selectedModelAvailable;
-      legacyGatewayConfig = inspected.gatewayConfig;
-      legacyGatewayResolution = inspected.gatewayResolution;
-    }
-  }
-
-  let providerId = demo ? "local-demo" : (profile?.providerId ?? "unconfigured");
-  let modelId = demo ? "built-in-demo" : (profile?.selectedModel ?? "unselected");
   let outputContract = resolveContinuationOutputContract({
     ...(input.outputProfile === undefined ? {} : { profile: input.outputProfile }),
     ...(input.customTargetVisibleCharacters === undefined
@@ -2750,28 +2673,12 @@ export async function prepareGenerationPlan(
       : { customDestinationInstruction: input.customDestinationInstruction }),
   });
   let maximumOutputTokens = outputContract.requestedMaxOutputTokens;
-  let contextBudget = resolveDynamicContextBudget({
-    ...(input.contextBudgetProfile === undefined ? {} : { profile: input.contextBudgetProfile }),
-    ...(input.customContextBudget === undefined ? {} : { customLimit: input.customContextBudget }),
-    modelContextWindow: demo ? null : (profile?.pricing?.contextWindowTokens ?? null),
-    outputReserve: maximumOutputTokens,
-  });
-  let messages: readonly NativeModelMessage[] = [];
-  let contextCompilation: ChapterStoryContextCompilationReceipt | null = null;
-  let novelSkillPreparation = runtime.novelSkills.describeNotApplied(
-    demo ? "browser_demo" : "legacy_route_untraceable",
-  );
-  let modelHubInspection: ModelHubTextTaskInspection | null = null;
-  let executionMode: PreparedGenerationPlan["executionMode"] = demo
-    ? "local_demo"
-    : "legacy_profile";
-  if (demo && chapter !== null) {
-    messages = buildContinuationMessages(chapter);
-  } else if (chapter !== null) {
-    const privacyPreview = await runtime.projectContextPrivacy.inspect(chapter.projectId);
+  let metadataInspection: ModelHubTextTaskInspection | null = null;
+  let privacyPreview: ProjectContextPrivacyReceipt | null = null;
+  if (!demo && chapter !== null) {
+    privacyPreview = await runtime.projectContextPrivacy.inspect(chapter.projectId);
     runtime.projectContextPrivacy.assertChapterMatches(privacyPreview, chapter);
     const requiredDataDestination = projectContextRequiredDataDestination(privacyPreview);
-    let metadataInspection: ModelHubTextTaskInspection | null = null;
     try {
       metadataInspection = await inspectModelHubTextTask(runtime, {
         task: "continuation",
@@ -2785,18 +2692,199 @@ export async function prepareGenerationPlan(
         temperature: 0.8,
         ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
       });
+      recordSafeInvocationRouteDiagnostic(runtime, {
+        taskType: "continuation",
+        modelHubRouteFound: true,
+        legacyProfileChecked: false,
+        legacyProfileSelected: false,
+        resolvedConnectionId: metadataInspection.connectionId,
+        resolvedModelId: metadataInspection.modelId,
+        routeSource: "model_hub",
+        ready: true,
+        blockerCode: null,
+        checkedAt: runtime.clock.now(),
+      });
     } catch (cause: unknown) {
-      if (
-        !(cause instanceof ModelHubExecutionError) ||
-        cause.code !== "MODEL_HUB_ROUTE_NOT_CONFIGURED"
-      ) {
+      const routeMissing =
+        cause instanceof ModelHubExecutionError && cause.code === "MODEL_HUB_ROUTE_NOT_CONFIGURED";
+      if (!routeMissing) {
+        const code =
+          cause instanceof ModelHubExecutionError ? cause.code : "MODEL_HUB_PREFLIGHT_FAILED";
+        recordSafeInvocationRouteDiagnostic(runtime, {
+          taskType: "continuation",
+          modelHubRouteFound:
+            cause instanceof ModelHubExecutionError &&
+            cause.code !== "MODEL_HUB_GATEWAY_UNAVAILABLE"
+              ? true
+              : null,
+          legacyProfileChecked: false,
+          legacyProfileSelected: false,
+          resolvedConnectionId: null,
+          resolvedModelId: null,
+          routeSource: "none",
+          ready: false,
+          blockerCode: code,
+          checkedAt: runtime.clock.now(),
+        });
+        recordSafeGenerationPreflightFailureDiagnostic(runtime, {
+          taskType: "continuation",
+          routeFound: code !== "MODEL_HUB_ROUTE_NOT_CONFIGURED",
+          blockerCode: code,
+          checkedAt: runtime.clock.now(),
+          scope: generationPreflightScope,
+        });
         throw new ModelCenterError(
-          cause instanceof ModelHubExecutionError ? cause.code : "MODEL_HUB_PREFLIGHT_FAILED",
+          code,
           cause instanceof Error ? cause.message : "AI 分工检查失败，请检查模型、隐私和费用设置。",
           cause instanceof ModelHubExecutionError ? cause.retryable : true,
         );
       }
     }
+  }
+
+  let profile: ModelProfile | null = null;
+  let routeResolved = demo || metadataInspection !== null;
+  let routeReason: PreparedGenerationPlan["routeReason"] = demo ? "local_demo" : "legacy_default";
+  let routeRequiresConfirmation = false;
+  let routeFallback: PreparedGenerationPlan["routeFallback"] = null;
+  let credentialConfigured = demo;
+  let connectionStatus: "verified" | "failed" | "not_checked" = demo ? "verified" : "not_checked";
+  let selectedModelAvailable = demo;
+  let legacyGatewayConfig: NativeModelEndpointConfig | null = null;
+  let legacyGatewayResolution: ModelProfileGatewayConfigResolution | null = null;
+
+  if (!demo && metadataInspection === null) {
+    const [profiles, roleRoute] = await Promise.all([
+      runtime.modelCenter.listProfiles(),
+      runtime.modelRouting.findRoute(modelRole),
+    ]);
+    routeFallback =
+      roleRoute?.fallbackProviderId === null ||
+      roleRoute?.fallbackProviderId === undefined ||
+      roleRoute.fallbackModelId === null
+        ? null
+        : Object.freeze({
+            providerId: roleRoute.fallbackProviderId,
+            modelId: roleRoute.fallbackModelId,
+          });
+    if (roleRoute !== null) {
+      const routeProfiles = profiles.filter(
+        (candidate) =>
+          candidate.selectedModel !== null &&
+          ((candidate.providerId === roleRoute.primaryProviderId &&
+            candidate.selectedModel === roleRoute.primaryModelId) ||
+            (candidate.providerId === roleRoute.fallbackProviderId &&
+              candidate.selectedModel === roleRoute.fallbackModelId)),
+      );
+      const inspections = await Promise.all(
+        routeProfiles.map((candidate) =>
+          inspectModelRouteProfile(runtime, candidate, input.networkAvailable),
+        ),
+      );
+      const resolution = resolveModelRoute(
+        {
+          role: modelRole,
+          primary: {
+            providerId: roleRoute.primaryProviderId,
+            modelId: roleRoute.primaryModelId,
+          },
+          fallback: routeFallback,
+        },
+        inspections.map(({ candidate }) => candidate),
+      );
+      routeResolved = resolution.status === "resolved";
+      const selectedReference =
+        resolution.status === "resolved" ? resolution.selected : resolution.preferred;
+      const selectedInspection =
+        selectedReference === null
+          ? null
+          : (inspections.find(
+              ({ candidate }) =>
+                candidate.providerId === selectedReference.providerId &&
+                candidate.modelId === selectedReference.modelId,
+            ) ?? null);
+      profile =
+        selectedInspection?.profile ??
+        profiles.find(({ providerId }) => providerId === roleRoute.primaryProviderId) ??
+        null;
+      if (selectedInspection !== null) {
+        credentialConfigured = selectedInspection.credentialConfigured;
+        connectionStatus = selectedInspection.connectionStatus;
+        selectedModelAvailable = selectedInspection.selectedModelAvailable;
+        legacyGatewayConfig = selectedInspection.gatewayConfig;
+        legacyGatewayResolution = selectedInspection.gatewayResolution;
+      }
+      if (resolution.status === "resolved") {
+        routeReason = resolution.reason === "fallback_verified" ? "role_fallback" : "role_primary";
+        routeRequiresConfirmation = resolution.requiresConfirmation;
+      } else {
+        routeReason = "role_primary";
+      }
+    } else {
+      profile =
+        profiles.find((candidate) => candidate.selectedModel !== null) ?? profiles[0] ?? null;
+      if (profile !== null && profile.selectedModel !== null) {
+        const inspected = await inspectModelRouteProfile(runtime, profile, input.networkAvailable);
+        credentialConfigured = inspected.credentialConfigured;
+        connectionStatus = inspected.connectionStatus;
+        selectedModelAvailable = inspected.selectedModelAvailable;
+        legacyGatewayConfig = inspected.gatewayConfig;
+        legacyGatewayResolution = inspected.gatewayResolution;
+        routeResolved = inspected.gatewayResolution !== null;
+      }
+    }
+    const legacyConnectionId = profile?.providerId ?? null;
+    const legacySelectedModel = profile?.selectedModel ?? null;
+    const legacySelection =
+      routeResolved &&
+      legacyConnectionId !== null &&
+      legacySelectedModel !== null &&
+      legacyGatewayResolution !== null
+        ? Object.freeze({ connectionId: legacyConnectionId, modelId: legacySelectedModel })
+        : null;
+    const legacyReady = legacySelection !== null;
+    const blockerCode = legacyReady ? null : "MODEL_PROFILE_NOT_READY";
+    recordSafeInvocationRouteDiagnostic(runtime, {
+      taskType: "continuation",
+      modelHubRouteFound: false,
+      legacyProfileChecked: true,
+      legacyProfileSelected: profile?.selectedModel !== null && profile !== null,
+      resolvedConnectionId: legacySelection?.connectionId ?? null,
+      resolvedModelId: legacySelection?.modelId ?? null,
+      routeSource: legacyReady ? "legacy_profile" : "none",
+      ready: legacyReady,
+      blockerCode,
+      checkedAt: runtime.clock.now(),
+    });
+  }
+
+  let providerId = demo ? "local-demo" : (profile?.providerId ?? "unconfigured");
+  let modelId = demo ? "built-in-demo" : (profile?.selectedModel ?? "unselected");
+  let contextBudget = resolveDynamicContextBudget({
+    ...(input.contextBudgetProfile === undefined ? {} : { profile: input.contextBudgetProfile }),
+    ...(input.customContextBudget === undefined ? {} : { customLimit: input.customContextBudget }),
+    modelContextWindow: demo
+      ? null
+      : (metadataInspection?.inputTokenLimit ?? profile?.pricing?.contextWindowTokens ?? null),
+    outputReserve: maximumOutputTokens,
+  });
+  let messages: readonly NativeModelMessage[] = [];
+  let contextCompilation: ChapterStoryContextCompilationReceipt | null = null;
+  let novelSkillPreparation = runtime.novelSkills.describeNotApplied(
+    demo ? "browser_demo" : "legacy_route_untraceable",
+  );
+  let modelHubInspection: ModelHubTextTaskInspection | null = null;
+  let executionMode: PreparedGenerationPlan["executionMode"] = demo
+    ? "local_demo"
+    : metadataInspection === null
+      ? "legacy_profile"
+      : "model_hub";
+  if (demo && chapter !== null) {
+    messages = buildContinuationMessages(chapter);
+  } else if (chapter !== null) {
+    privacyPreview ??= await runtime.projectContextPrivacy.inspect(chapter.projectId);
+    runtime.projectContextPrivacy.assertChapterMatches(privacyPreview, chapter);
+    const requiredDataDestination = projectContextRequiredDataDestination(privacyPreview);
     if (metadataInspection !== null) {
       executionMode = "model_hub";
       providerId = metadataInspection.connectionId;
@@ -2825,6 +2913,13 @@ export async function prepareGenerationPlan(
       });
     }
     if (contextBudget.budgetStatus === "model_window_exhausted") {
+      recordSafeGenerationPreflightFailureDiagnostic(runtime, {
+        taskType: "continuation",
+        routeFound: metadataInspection !== null || routeResolved,
+        blockerCode: "MODEL_CONTEXT_WINDOW_EXHAUSTED",
+        checkedAt: runtime.clock.now(),
+        scope: generationPreflightScope,
+      });
       throw new ModelCenterError(
         "MODEL_CONTEXT_WINDOW_EXHAUSTED",
         "当前模型的上下文窗口不足以同时容纳本次续写输出和必要指令。请缩短输出长度或更换模型。",
@@ -2843,17 +2938,56 @@ export async function prepareGenerationPlan(
       contextCompilation = preparedContext.contextCompilation;
       novelSkillPreparation = preparedContext.novelSkillPreparation;
     } catch (cause: unknown) {
-      throw normalizeStoryContextFailure(cause);
+      const normalized = normalizeStoryContextFailure(cause);
+      recordSafeGenerationPreflightFailureDiagnostic(runtime, {
+        taskType: "continuation",
+        routeFound: metadataInspection !== null || routeResolved,
+        blockerCode: normalized.code,
+        checkedAt: runtime.clock.now(),
+        scope: generationPreflightScope,
+      });
+      throw normalized;
     }
     if (metadataInspection !== null) {
-      modelHubInspection = await inspectModelHubTextTask(runtime, {
-        task: "continuation",
-        messages,
-        maximumOutputTokens,
-        temperature: 0.8,
-        ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
-      });
+      try {
+        modelHubInspection = await inspectModelHubTextTask(runtime, {
+          task: "continuation",
+          messages,
+          maximumOutputTokens,
+          temperature: 0.8,
+          ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
+        });
+      } catch (cause: unknown) {
+        const code =
+          cause instanceof ModelHubExecutionError ? cause.code : "MODEL_HUB_PREFLIGHT_FAILED";
+        recordSafeInvocationRouteDiagnostic(runtime, {
+          taskType: "continuation",
+          modelHubRouteFound: true,
+          legacyProfileChecked: false,
+          legacyProfileSelected: false,
+          resolvedConnectionId: metadataInspection.connectionId,
+          resolvedModelId: metadataInspection.modelId,
+          routeSource: "model_hub",
+          ready: false,
+          blockerCode: code,
+          checkedAt: runtime.clock.now(),
+        });
+        recordSafeGenerationPreflightFailureDiagnostic(runtime, {
+          taskType: "continuation",
+          routeFound: true,
+          blockerCode: code,
+          checkedAt: runtime.clock.now(),
+          scope: generationPreflightScope,
+        });
+        throw new ModelCenterError(
+          code,
+          cause instanceof Error ? cause.message : "AI 分工检查失败，请检查模型、隐私和费用设置。",
+          cause instanceof ModelHubExecutionError ? cause.retryable : true,
+        );
+      }
       maximumOutputTokens = modelHubInspection.maximumOutputTokens;
+      providerId = modelHubInspection.connectionId;
+      modelId = modelHubInspection.modelId;
       routeResolved = true;
       routeReason = modelHubInspection.usedFallback ? "model_hub_fallback" : "model_hub_primary";
       routeRequiresConfirmation = modelHubInspection.usedFallback;
@@ -2864,6 +2998,18 @@ export async function prepareGenerationPlan(
       profile = null;
       legacyGatewayConfig = null;
       legacyGatewayResolution = null;
+      recordSafeInvocationRouteDiagnostic(runtime, {
+        taskType: "continuation",
+        modelHubRouteFound: true,
+        legacyProfileChecked: false,
+        legacyProfileSelected: false,
+        resolvedConnectionId: modelHubInspection.connectionId,
+        resolvedModelId: modelHubInspection.modelId,
+        routeSource: "model_hub",
+        ready: true,
+        blockerCode: null,
+        checkedAt: runtime.clock.now(),
+      });
     }
   }
   if (
@@ -2872,6 +3018,13 @@ export async function prepareGenerationPlan(
     modelHubInspection === null &&
     !isVerifiedLocalGatewayConfig(legacyGatewayConfig)
   ) {
+    recordSafeGenerationPreflightFailureDiagnostic(runtime, {
+      taskType: "continuation",
+      routeFound: metadataInspection !== null || routeResolved,
+      blockerCode: "PRIVATE_CHAPTER_LOCAL_ONLY",
+      checkedAt: runtime.clock.now(),
+      scope: generationPreflightScope,
+    });
     throw privateChapterModelBlocked();
   }
   const inputBytes = demo ? 0 : measureMessageBytes(messages);
@@ -2954,6 +3107,7 @@ export async function prepareGenerationPlan(
           ? "supported"
           : "unknown",
     snapshot: preflight,
+    scope: generationPreflightScope,
   });
   const baseVersionId = chapter?.currentVersionId ?? null;
   let deferredRequest = waitingDeferred;
@@ -3541,6 +3695,15 @@ export async function executeGenerationPlan(
                       localOnlyEligible === true,
                     );
                   },
+                  onFinalBeforeProviderDispatch: async ({ localOnlyEligible }) => {
+                    await assertGenerationProjectActive(runtime, attemptPlan.projectId);
+                    await assertPreparedGenerationTargetCurrent(runtime, attemptPlan);
+                    await assertProjectContextBeforeModelHubDispatch(
+                      runtime,
+                      privacyReceipt,
+                      localOnlyEligible === true,
+                    );
+                  },
                   assertBeforeProviderDispatch: () =>
                     assertGenerationTaskNotCancelled(runtime, attemptPlan.taskId),
                   onDelta: (next) => {
@@ -3619,6 +3782,7 @@ export async function executeGenerationPlan(
       await commitPreparedContextOutputCandidate(runtime, activeExecutionPlan, candidate);
     } catch (cause: unknown) {
       const normalized = normalizeGovernedGenerationError(cause);
+      recordSafeGenerationErrorCode(runtime, normalized.code);
       let recoveredTruncation = false;
       if (normalized.code === "MODEL_OUTPUT_TRUNCATED") {
         const visible = recoverVisiblePartialOutput(accumulated);
@@ -3810,7 +3974,9 @@ export async function executeGenerationPlan(
       runId: run.id,
     });
   } catch (cause: unknown) {
-    return err(normalizeGovernedGenerationError(cause));
+    const normalized = normalizeGovernedGenerationError(cause);
+    recordSafeGenerationErrorCode(runtime, normalized.code);
+    return err(normalized);
   } finally {
     clearGenerationTaskCancellation(runtime, plan.taskId);
   }
@@ -5340,6 +5506,13 @@ export async function createConfiguredModelCandidate(
             modelInvocationId: invocationId,
           },
         );
+        await assertProjectContextBeforeModelHubDispatch(
+          runtime,
+          privacyReceipt,
+          localOnlyEligible === true,
+        );
+      },
+      onFinalBeforeProviderDispatch: async ({ localOnlyEligible }) => {
         await assertProjectContextBeforeModelHubDispatch(
           runtime,
           privacyReceipt,

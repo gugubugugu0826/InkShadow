@@ -1,4 +1,4 @@
-import { lazy, Suspense, useMemo } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import {
   createHashRouter,
   Link,
@@ -16,6 +16,8 @@ import {
 } from "./components/desktop-persistence-boundary";
 import { AppErrorBoundary } from "./components/app-error-boundary";
 import { DesktopShell } from "./components/desktop-shell";
+import { SettingsRouteBoundary } from "./components/settings-route-boundary";
+import { recoverOrphanedOpeningInvocationsAtStartup } from "./infrastructure/opening-startup-recovery";
 import { RuntimeProvider, useRuntime, type RuntimeProviderProps } from "./runtime-context";
 
 const EditorPage = lazy(() =>
@@ -73,9 +75,15 @@ const MarketplaceRoutePage = lazy(() =>
     default: Page,
   })),
 );
-const SettingsPage = lazy(() =>
-  import("./pages/settings-page").then(({ SettingsPage: Page }) => ({ default: Page })),
-);
+function loadSettingsPage() {
+  return import("./pages/settings-page")
+    .then(({ SettingsPage: Page }) => ({ default: Page }))
+    .catch(() => {
+      throw Object.assign(new Error("设置页面代码加载失败。"), {
+        code: "UI_LAZY_LOAD_FAILED",
+      });
+    });
+}
 const SyncSecurityPage = lazy(() =>
   import("./pages/sync-security-page").then(({ SyncSecurityPage: Page }) => ({
     default: Page,
@@ -284,6 +292,23 @@ function StudioTeamTemplatesFeatureRoute() {
   );
 }
 
+function SettingsRouteElement() {
+  const [RetryableSettingsPage, setRetryableSettingsPage] = useState(() => lazy(loadSettingsPage));
+  return (
+    <SettingsRouteBoundary onRetry={() => setRetryableSettingsPage(() => lazy(loadSettingsPage))}>
+      <Suspense
+        fallback={
+          <div className="desktop-route-loading desktop-route-loading--local" role="status">
+            正在打开设置页面
+          </div>
+        }
+      >
+        <RetryableSettingsPage />
+      </Suspense>
+    </SettingsRouteBoundary>
+  );
+}
+
 export function DesktopRoutes() {
   return (
     <Suspense
@@ -345,7 +370,7 @@ export function DesktopRoutes() {
             path="/projects/:projectId/chapters/:chapterId/multi-agent-review"
             element={<MultiAgentReviewRoutePage />}
           />
-          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/settings" element={<SettingsRouteElement />} />
           <Route path="/settings/sync" element={<SyncSecurityPage />} />
           <Route path="/teams" element={<StudioTeamRoute />} />
           <Route path="/teams/:teamId/usage" element={<StudioUsageRoute />} />
@@ -384,6 +409,19 @@ function HashRoutedDesktop() {
   return <RouterProvider router={router} />;
 }
 
+export function StartupOpeningInvocationRecovery() {
+  const runtime = useRuntime();
+
+  useEffect(() => {
+    void recoverOrphanedOpeningInvocationsAtStartup(runtime).catch(() => {
+      // Keep the Shell usable. The durable facts remain untouched and can be
+      // retried by a later startup/page recovery without redispatch.
+    });
+  }, [runtime]);
+
+  return null;
+}
+
 export function App({ factory, router = "hash", runtime }: AppProps) {
   return (
     <RuntimeProvider
@@ -393,6 +431,7 @@ export function App({ factory, router = "hash", runtime }: AppProps) {
       <ToastProvider>
         <AppErrorBoundary>
           <DesktopPersistenceBoundary>
+            <StartupOpeningInvocationRecovery />
             {router === "hash" ? <HashRoutedDesktop /> : <DesktopRoutes />}
           </DesktopPersistenceBoundary>
         </AppErrorBoundary>

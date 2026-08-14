@@ -4,7 +4,12 @@ import { describe, expect, it } from "vitest";
 import { runGenerationPreflight } from "@inkshadow/ai-core";
 
 import { collectDesktopDiagnosticArtifact, partitionDiagnosticErrorCodes } from "./diagnostics";
-import { recordSafeGenerationPreflightDiagnostic } from "./generation-preflight-diagnostics";
+import {
+  recordSafeGenerationPreflightDiagnostic,
+  recordSafeGenerationPreflightFailureDiagnostic,
+  recordSafeInvocationRouteDiagnostic,
+} from "./generation-preflight-diagnostics";
+import { recordSafeGuidedOpeningStatus } from "./guided-opening-diagnostics";
 import {
   ModelHubOperationCoordinator,
   createInitialModelHubPageSnapshot,
@@ -48,6 +53,67 @@ describe("desktop diagnostics", () => {
         "CURRENT_AI_FAILURE",
       ],
       historicalErrorCodes: ["HISTORICAL_FAILURE"],
+    });
+  });
+
+  it("exports an early continuation route blocker in the current session without content", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    recordSafeInvocationRouteDiagnostic(runtime, {
+      taskType: "continuation",
+      modelHubRouteFound: true,
+      legacyProfileChecked: false,
+      legacyProfileSelected: false,
+      resolvedConnectionId: null,
+      resolvedModelId: null,
+      routeSource: "none",
+      ready: false,
+      blockerCode: "MODEL_HUB_CAPABILITY_NOT_VERIFIED",
+      checkedAt: runtime.clock.now(),
+    });
+    recordSafeGenerationPreflightFailureDiagnostic(runtime, {
+      taskType: "continuation",
+      routeFound: true,
+      blockerCode: "MODEL_HUB_CAPABILITY_NOT_VERIFIED",
+      checkedAt: runtime.clock.now(),
+    });
+    recordSafeGuidedOpeningStatus(runtime, {
+      inputValidation: "invalid",
+      batchId: null,
+      batchState: "idle",
+      slotStates: [],
+      selectedSlot: null,
+      plannerMode: "not_started",
+      questionCount: 0,
+      currentQuestion: null,
+      lastError: "CREATIVE_INPUT_INVALID",
+    });
+
+    const artifact = await collectDesktopDiagnosticArtifact(runtime);
+
+    expect(artifact.bundle.currentSessionErrorCodes).toContain("MODEL_HUB_CAPABILITY_NOT_VERIFIED");
+    expect(artifact.bundle.generationPreflight).toMatchObject({
+      taskType: "continuation",
+      readiness: "BLOCKED",
+      blockerCodes: ["MODEL_HUB_CAPABILITY_NOT_VERIFIED"],
+    });
+    expect(artifact.bundle.lastRouteResolution).toMatchObject({
+      resolverVersion: "continuation-route-resolver@1",
+      modelHubRouteFound: true,
+      legacyProfileChecked: false,
+      routeSource: "none",
+      ready: false,
+      blockerCode: "MODEL_HUB_CAPABILITY_NOT_VERIFIED",
+    });
+    expect(artifact.bundle.guidedOpeningStatus).toMatchObject({
+      inputValidation: "invalid",
+      batchState: "idle",
+      plannerMode: "not_started",
+      lastError: "CREATIVE_INPUT_INVALID",
+    });
+    expect(artifact.bundle.privacy).toMatchObject({
+      projectContentIncluded: false,
+      promptContentIncluded: false,
+      credentialsIncluded: false,
     });
   });
 
@@ -146,6 +212,18 @@ describe("desktop diagnostics", () => {
       capabilityStatus: "supported",
       snapshot: preflight,
     });
+    recordSafeInvocationRouteDiagnostic(runtime, {
+      taskType: "continuation",
+      modelHubRouteFound: true,
+      legacyProfileChecked: false,
+      legacyProfileSelected: false,
+      resolvedConnectionId: "diagnostic-provider",
+      resolvedModelId: "diagnostic-writer",
+      routeSource: "model_hub",
+      ready: true,
+      blockerCode: null,
+      checkedAt: runtime.clock.now(),
+    });
     const operation = new ModelHubOperationCoordinator().begin("load_cached_catalog", {
       providerKind: "custom_openai_compatible",
       connectionId: "ui-diagnostic-connection",
@@ -185,7 +263,7 @@ describe("desktop diagnostics", () => {
         indexHealth: "healthy",
         syncState: "local_only",
         errorCodes: ["MODEL_OUTPUT_TRUNCATED"],
-        requestIds: ["req-diagnostic-probe-0001"],
+        requestIds: [],
       },
       privacy: {
         projectContentIncluded: false,
@@ -218,8 +296,8 @@ describe("desktop diagnostics", () => {
         credentialUiStatus: "configured",
         catalogUiStatus: "cached_warning",
         catalogEntryCountInUi: 0,
-        selectedConnectionId: "ui-diagnostic-connection",
-        selectedModelIdInUi: "ui-diagnostic-model",
+        selectedConnectionId: null,
+        selectedModelIdInUi: null,
         lastSnapshotRevision: 7,
       },
       recentModelHubActions: [
@@ -234,14 +312,10 @@ describe("desktop diagnostics", () => {
       currentSessionErrorCodes: ["MODEL_HUB_CATALOG_REFRESH_FAILED"],
       recentAiFailures: [
         {
-          diagnosticId: "capability_scan:diagnostic-failed-probe",
           providerKind: "custom_openai_compatible",
-          connectionId: "diagnostic-provider",
-          modelId: "diagnostic-writer",
           taskType: "capability_probe",
           normalizedErrorCode: "MODEL_OUTPUT_TRUNCATED",
           stage: "response_normalization",
-          requestId: "req-diagnostic-probe-0001",
           retryable: false,
           httpStatus: 200,
           finishReason: "length",
@@ -274,6 +348,18 @@ describe("desktop diagnostics", () => {
           "CONSERVATIVE_TOKEN_ESTIMATE",
           "PRICING_UNAVAILABLE",
         ],
+      },
+      lastRouteResolution: {
+        taskType: "continuation",
+        resolverVersion: "continuation-route-resolver@1",
+        modelHubRouteFound: true,
+        legacyProfileChecked: false,
+        legacyProfileSelected: false,
+        resolvedConnectionId: null,
+        resolvedModelId: null,
+        routeSource: "model_hub",
+        ready: true,
+        blockerCode: null,
       },
       generationBudget: null,
       contextSelectionSummary: null,
@@ -315,5 +401,30 @@ describe("desktop diagnostics", () => {
     });
     expect(typeof artifact.bundle.currentSessionStartedAt).toBe("string");
     expect(Array.isArray(artifact.bundle.historicalErrorCodes)).toBe(true);
+  });
+
+  it("exports only an embedding endpoint origin and drops provider-derived sentinels", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const sentinel = "API_KEY_SUPERSECRET_正文";
+    const originalDiagnostics = runtime.search.embeddingDiagnostics.bind(runtime.search);
+    Object.defineProperty(runtime.search, "embeddingDiagnostics", {
+      configurable: true,
+      value: () => ({
+        ...originalDiagnostics(),
+        providerId: `provider-${sentinel}`,
+        model: `model-${sentinel}`,
+        endpointUrl: `https://models.example/${sentinel}?token=${sentinel}`,
+        queryFailureCode: sentinel,
+      }),
+    });
+
+    const artifact = await collectDesktopDiagnosticArtifact(runtime);
+
+    expect(artifact.bundle.summary.configuration).toMatchObject({
+      embeddingProviderId: null,
+      embeddingModel: null,
+      embeddingEndpoint: "https://models.example",
+    });
+    expect(artifact.content).not.toContain(sentinel);
   });
 });

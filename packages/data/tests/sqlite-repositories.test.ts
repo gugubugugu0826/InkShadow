@@ -675,6 +675,13 @@ describe("SQLite repositories with node:sqlite", () => {
       reason: "candidate_accept",
       sourceCandidateId: candidate.id,
     });
+    const persistedVersions = expectOk(
+      await repositories.chapterVersions.listByChapterId(fixture.chapter.id),
+    );
+    expect(persistedVersions).toHaveLength(2);
+    expect(
+      persistedVersions.find((version) => version.id === fixture.initialVersion.id)?.toSnapshot(),
+    ).toEqual(fixture.initialVersion.toSnapshot());
     const taskRepository = new SqliteTaskRepository(executor);
     const parsedTaskId = parseTaskUuidV7(taskId);
     if (!parsedTaskId.ok) {
@@ -696,6 +703,8 @@ describe("SQLite repositories with node:sqlite", () => {
         versionId: commit.version.id,
         source: "candidate_accept",
         acceptedCharacterCount: commit.version.toSnapshot().content.length,
+        runChapterSummary: false,
+        runStoryState: false,
         operation: "rebuild-derived-story-state",
       },
     });
@@ -1021,6 +1030,8 @@ function acceptedPipelineTask(taskId: UuidV7, commit: AcceptCandidateCommit): Cr
       versionId: version.id,
       source: "candidate_accept",
       acceptedCharacterCount: version.content.length,
+      runChapterSummary: false,
+      runStoryState: false,
       operation: "rebuild-derived-story-state",
     },
     priority: 75,

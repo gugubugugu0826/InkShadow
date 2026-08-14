@@ -1,8 +1,16 @@
 # InkShadow 持续发布门禁
 
-> 更新日期：2026-08-13  
+> 更新日期：2026-08-14  
 > 当前源码目标版本：`0.2.3`；最近已发布工程预览版本：`0.2.3`  
-> 当前结论：**`v0.2.3` 的唯一提交、完整候选链、PR/main 远端门禁、标签和三个公开附件均已复核；它已公开为未签名 GitHub Pre-release**
+> 当前结论：**`v0.2.3` 历史 Pre-release 已发布；当前反馈修复尚未提交、打包或发布，状态为 `CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`**
+
+> [!WARNING]
+> **v0.2.3 发布后安全公告：**提交
+> `3abdcfeb327567c632e440d55d11f0af6f4911d2` 的真实 Windows 11 Tauri/Wry +
+> DeepSeek `deepseek-v4-flash` 测试发现，Candidate 接受与不可变版本创建完成后又隐式派发
+> `long_memory_compression`，并发送已接受正文。测试已按安全停止条件终止。已发布 `v0.2.3`
+> 不建议用于真实 Provider 的敏感正文处理。当前源码修复只有 fake/mock、SQLite 与 Chromium
+> 自动化证据；新 Windows Tauri 安装包和 Provider live 复测均未运行，也未发布替代 Release。
 
 状态只使用 `PASS`、`IN_PROGRESS`、`NOT_RUN`、`BLOCKED` 和 `N/A`。  
 代码存在不等于发布门禁通过；只有可复核的测试、构建、签名、安装或人工验收证据才能标记 `PASS`。
@@ -266,6 +274,72 @@ Release manifest 用于核对源码提交、源码指纹和前端制品指纹；
 | 私有部署升级、回滚与恢复脚本   | PASS        | 自动化 `8/8`；不代表客户目标环境验收。                                                          |
 | SSO 与组织策略                 | BLOCKED     | 需要目标 IdP、商业配置和真实租户。                                                              |
 | RPO/RTO、容量与故障演练        | NOT_RUN     | 需要生产等价环境、监控和已批准的恢复目标。                                                      |
+
+## v0.2.3 反馈修复后的第二阶段真实 Windows Tauri 测试 Prompt
+
+> 适用对象：包含 v0.2.3 反馈修复的后续唯一干净候选提交和 Windows Tauri 安装包。  
+> 当前结论：`CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`。  
+> 调用预算：阶段 A 最多 6 次低成本真实模型动作；安全门禁通过后，阶段 B 才可进行 20–30 次长篇调用。
+
+请在第二台 Windows 电脑上执行下列任务。测试人员可在 InkShadow 界面中手动输入自己的 Provider 凭据，但不得让
+Codex、测试脚本、日志、诊断包或截图读取、打印、传输或保存 API Key。fake、临时 SQLite、Chromium CSS
+zoom 和旧 v0.2.3 报告都不是新候选的真实 Tauri 通过证据。
+
+### 测试前记录
+
+记录候选版本、唯一 commit SHA、干净工作树、安装包字节数/SHA-256/签名、Windows 版本、系统显示缩放、分辨率、
+Tauri/Wry/WebView2 版本、Provider/精确模型 ID，以及 InkShadow 账本和 Provider 控制台的脱敏计数基线。准备两份隔离数据：
+全新 Windows 用户/AppData；从原 v0.2.3 测试备份制作的可丢弃副本（含幽灵连接和挂起账本）。不在原取证数据上就地测试。
+
+### 强制安全停止条件
+
+任一情况发生时立即停止所有后续 Provider 动作，保留当前窗口、账本、脱敏诊断和 Provider 计数，不重复点击：
+
+- Candidate 接受/拒绝、页面打开/切换、应用启动、备份或恢复触发未披露的模型调用；
+- 同一动作、授权 ID 或幂等键产生重复派发/重复计费；
+- 私密章节、密钥、Prompt、正文或模型完整回复出现在不应出现的日志、诊断或 payload；
+- 正文、旧不可变版本、Candidate 或确认设定被静默覆盖、丢失、串作品或串章节；
+- 取消、崩溃或重启后长期 `running`，或 `ambiguous` 被自动重发；
+- UI 显示就绪/10 项核心任务可用，同一任务的真实派发前检查却确定性失败；
+- 超过当前阶段调用预算，或本地账本与 Provider 控制台保守计数无法对账。
+
+### 阶段 A：最多 6 次低成本回归
+
+每次动作前后立即对账，目录读取、失败或“可能没计费”也要保守记录。
+
+1. **全新配置（最多 1 次）**：从空 AppData 启动，未配置界面不显示幽灵 ready；手动保存 Provider/精确模型，只执行 1 次无作品内容能力验证。重启后连接、目录、路由、凭据摘要和 readiness 一致，重启为 0 调用。
+2. **Candidate 拒绝与接受（最多 2 次）**：一次短续写后拒绝 Candidate 并重启，正文/旧版/拒绝决定不变；再做一次短续写并接受 Candidate，正文与新不可变版本正确。从接受到重启，Provider invocation 增量必须精确为 0。本地搜索、因果投影或故事关联等无需 Provider 的可重建任务可以执行；不得出现新的云端摘要、长期记忆、事实抽取或其他正文派发。报告必须把已发布 `v0.2.3` 的历史隐式调用与新候选的当前结果分栏记录。
+3. **开书三槽（最多 3 次）**：事前披露 3 次独立调用、Provider/精确模型、可能费用和无自动重试；只执行一批。三槽稳定 ID、显示序号、invocation ID 与终态一一对账；部分成功保留成功卡且不重编号，取消/`not_dispatched`/`ambiguous`/失败各自终结，页面、任务中心与账本不留 `running`。
+
+穿插执行下列 0 调用检查：v0.2.3 升级副本启动时孤立调用按 dispatch boundary 结清为
+`not_dispatched`/`ambiguous` 且不重发；保存连接→删除凭据→重启→原 ID 就地重绑；退役旧连接后新建同供应商连接且历史 invocation 仍可审计、retired duplicate 不进入 ready/路由；私密章节远程生成在 invocation/payload 前失败关闭；credential、route、catalog 或 capability 任一漂移时所有页面同步不可用，正文/版本/Candidate 不变。
+
+只有保守计数不超过 6、用户动作与两个账本一一解释，且没有隐式调用、重复计费、长期 `running`、幽灵 ready、正文损坏或隐私越界，并导出脱敏报告得到人工明确批准后，才能进入阶段 B。
+
+### 阶段 B：20–30 次长篇与故障恢复
+
+另行明确费用授权后手动开始。通过合并长输出、大上下文和可合并的故障注入，将批次控制在 20–30 次；不得为了达数而自动重试、循环点击或放宽停止条件。必须覆盖：
+
+1. 全新 Windows 用户/AppData 的干净首次配置（可引用阶段 A）。
+2. 从 v0.2.3 幽灵连接和挂起账本升级后的恢复。
+3. Candidate 拒绝后重启。
+4. dispatch 前取消、dispatch 后 `ambiguous`、失败后只经用户新授权手动重试，同一授权/幂等键不二次进网。
+5. 至少 8 次长输出，累计至少约 30,000 个中文可见字符，每次仍只生成隔离 Candidate。
+6. 至少 3 次在大于 20,000 字符项目上下文中调用，记录采用/舍弃来源和 token 预算。
+7. 条件允许时 1 次大于 50,000 字符上下文调用；不允许时记录 `NOT_RUN` 和精确原因。
+8. 私密章节云端 dispatch fail closed；本地路径仅绑定已验证回环身份。
+9. DeepSeek 401、429、超时、断流、截断和格式异常；保留真实 invocation 与脱敏底层 cause。
+10. 在 reserved、bound 和 dispatched 边界分别结束应用进程；重启后不自动重发。
+11. 备份/恢复正文、不可变版本、Candidate、路由、调用账本、取消/`ambiguous` 和不含密钥的连接摘要；恢复不含密钥且不自动发送。
+12. 真实 Windows 系统 200% DPI：正文为视觉中心、可关闭 Drawer、无页面水平/不可达嵌套滚动、主操作至少 44px、键盘/焦点/Escape/焦点返回有效；不得用 CSS zoom/DPR2 代替。
+13. 真实 Markdown/DOCX/PDF/EPUB 导出，用独立工具打开检查内容、章节、编码、排版和非占位产物。
+14. 真实卸载/重装后的本地数据、正文/版本/备份和 Credential Manager 行为，不导出密钥。
+
+每个动作使用稳定测试 ID，记录事前披露和预期调用数、脱敏项目/章节/Candidate/版本 ID、精确
+connection/catalog/provider/model/route/revision/capability、dispatch boundary/invocation ID/终态/token/费用/脱敏 cause、操作前后正文 SHA-256/版本/Candidate 和两个账本差值。只用
+`PASS / FAIL / BLOCKED / NOT_RUN / AMBIGUOUS`，不用“看起来正常”。
+
+交付脱敏压缩包：中文报告/开发摘要、动作→预期→本地账本→Provider 保守计数 CSV、脱敏诊断、关键截图、四种导出及 SHA-256、安装/升级/卸载记录与未执行清单。报告必须分开 v0.2.3 历史发现、新候选自动化、新候选真实 Tauri 复测和仍未运行项。只有真实执行的对应项目才可写 `VERIFIED_IN_WINDOWS_TAURI`。
 
 ## 商业发布阻断项
 

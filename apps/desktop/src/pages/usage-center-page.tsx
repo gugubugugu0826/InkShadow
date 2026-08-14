@@ -219,6 +219,8 @@ export function UsageCenterPage({ reader, now = currentDate }: UsageCenterPagePr
 
             <UsageSummaryCards summary={snapshot.summary} />
 
+            <UsageAttentionSummary summary={snapshot.summary} />
+
             {snapshot.budgets.length > 0 && <BudgetPanel budgets={snapshot.budgets} />}
 
             {snapshot.totalMatchingRecords === 0 ? (
@@ -387,6 +389,24 @@ function UsageSummaryCards({ summary }: { readonly summary: UsageAggregate }) {
   );
 }
 
+function UsageAttentionSummary({ summary }: { readonly summary: UsageAggregate }) {
+  if (summary.failureCount === 0 && summary.activeCount === 0 && summary.costUnknownCount === 0) {
+    return null;
+  }
+  const facts = [
+    summary.failureCount > 0 ? `${formatInteger(summary.failureCount)} 次失败或结果不明确` : null,
+    summary.activeCount > 0 ? `${formatInteger(summary.activeCount)} 次尚未终结` : null,
+    summary.costUnknownCount > 0 ? `${formatInteger(summary.costUnknownCount)} 次费用未知` : null,
+  ].filter((fact): fact is string => fact !== null);
+  return (
+    <InlineAlert
+      tone={summary.failureCount > 0 ? "error" : "warning"}
+      title={`调用账本有 ${facts.join("、")}`}
+      description="请在下方明细按作品、章节和任务核对。结果不明确的调用不会自动重发；费用未知也不会按 0 计算。"
+    />
+  );
+}
+
 function SummaryCard({
   description,
   title,
@@ -499,7 +519,7 @@ function BreakdownPanel({
                 </TableCell>
                 <TableCell>
                   {formatInteger(entry.successCount)} 成功 · {formatInteger(entry.failureCount)}{" "}
-                  失败
+                  失败 · {formatInteger(entry.activeCount)} 进行中
                 </TableCell>
                 <TableCell>{formatInteger(entry.localCount)}</TableCell>
               </TableRow>
@@ -531,7 +551,7 @@ function UsageDetailsTable({ snapshot }: { readonly snapshot: UsageCenterSnapsho
           <TableHeader>
             <TableRow>
               <TableHead>时间</TableHead>
-              <TableHead>作品 / 任务</TableHead>
+              <TableHead>作品 / 章节 / 任务</TableHead>
               <TableHead>供应商 / 模型</TableHead>
               <TableHead>Token</TableHead>
               <TableHead>费用估算</TableHead>
@@ -545,6 +565,11 @@ function UsageDetailsTable({ snapshot }: { readonly snapshot: UsageCenterSnapsho
                 <TableCell>{formatDateTime(record.occurredAt)}</TableCell>
                 <TableCell>
                   <strong>{record.projectName ?? "未关联作品"}</strong>
+                  <br />
+                  <span>
+                    {record.chapterName ??
+                      (record.projectId === null ? "未关联章节" : "作品级调用")}
+                  </span>
                   <br />
                   {taskLabel(record.task)}
                 </TableCell>
@@ -668,6 +693,8 @@ function statusLabel(status: UsageEventStatus): string {
     succeeded: "成功",
     failed: "失败",
     cancelled: "已取消",
+    ambiguous: "结果不明确",
+    not_dispatched: "未发送",
   }[status];
 }
 
@@ -678,6 +705,8 @@ function statusTone(status: UsageEventStatus): BadgeTone {
     succeeded: "success",
     failed: "danger",
     cancelled: "neutral",
+    ambiguous: "warning",
+    not_dispatched: "neutral",
   }[status] as BadgeTone;
 }
 

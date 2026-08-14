@@ -112,6 +112,9 @@ describe("normalizeUiError SQLite persistence failures", () => {
       "MODEL_HUB_ROUTE_NOT_CONFIGURED",
       ["验证至少一个模型的写作能力", "应用智能推荐", "缺少 Embedding 不会阻止"],
     ],
+    ["MODEL_HUB_ROUTE_DISABLED", ["已明确停用", "没有调用模型", "不会改用旧配置"]],
+    ["MODEL_PROFILE_NOT_READY", ["没有可用于这次写作", "继续手动编辑", "前往 Model Hub"]],
+    ["CREATIVE_INPUT_INVALID_CONTROL_CHARACTER", ["不可见控制字符", "全角标点", "换行仍然支持"]],
     [
       "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED",
       ["没有完整写入", "之前可用的分工仍保持不变", "重试“应用 AI 分工”"],

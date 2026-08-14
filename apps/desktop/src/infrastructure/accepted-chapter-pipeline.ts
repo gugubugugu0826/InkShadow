@@ -41,8 +41,9 @@ export interface AcceptedChapterPipelineInput {
   readonly source: AcceptedChapterPipelineSource;
   readonly acceptedCharacterCount: number;
   /**
-   * Manual saves honour the author's automatic-analysis preferences. Other
-   * accepted-version sources omit these flags and keep the complete pipeline.
+   * Legacy compatibility fields. Durable accepted-version work is a local-only
+   * commit follower for every source, so these values are always normalized to
+   * false before registration, execution, retry, or startup recovery.
    */
   readonly runChapterSummary?: boolean;
   readonly runStoryState?: boolean;
@@ -62,6 +63,30 @@ export interface AcceptedChapterPipelineInput {
    */
   readonly retryTaskSequence?: number;
   readonly retryTaskAttempt?: number;
+}
+
+type LocalCandidateAcceptancePipelineIdentity = Pick<
+  AcceptedChapterPipelineInput,
+  "projectId" | "chapterId" | "versionId" | "acceptedCharacterCount"
+>;
+
+/**
+ * Candidate acceptance is a local commit boundary. It may refresh rebuildable
+ * local projections, but it must never inherit a model-backed stage merely
+ * because a provider is configured. Cloud enrichment, if offered, needs a
+ * separate user-authorized operation and durable identity.
+ */
+export function createLocalCandidateAcceptancePipelineInput(
+  input: LocalCandidateAcceptancePipelineIdentity,
+): AcceptedChapterPipelineInput {
+  return Object.freeze({
+    ...input,
+    source: "candidate_accept",
+    runSearch: true,
+    runChapterSummary: false,
+    runStoryState: false,
+    runCausalProjection: true,
+  });
 }
 
 export type AcceptedChapterPipelineStageStatus =
@@ -122,6 +147,13 @@ export async function runAcceptedChapterPipeline(
   runtime: AcceptedChapterPipelineRuntime,
   input: AcceptedChapterPipelineInput,
 ): Promise<AcceptedChapterPipelineReceipt> {
+  if (input.runChapterSummary !== false || input.runStoryState !== false) {
+    return runAcceptedChapterPipeline(runtime, {
+      ...input,
+      runChapterSummary: false,
+      runStoryState: false,
+    });
+  }
   const enabledStages = enabledPipelineStages(input);
   if (enabledStages.size === 0) {
     throw new Error("An accepted chapter pipeline task must enable at least one stage.");
@@ -152,12 +184,15 @@ export async function runAcceptedChapterPipeline(
   if (
     retryScope.kind === "valid" &&
     [...retryScope.stages, ...retryScope.notApplicableStages, ...retryScope.deferredStages].some(
-      (stage) => !enabledStages.has(stage),
+      (stage) => isLocalPipelineStage(stage) && !enabledStages.has(stage),
     )
   ) {
     throw new Error("Accepted chapter pipeline failure scope exceeds the task's enabled stages.");
   }
-  const retryStages = retryScope.kind === "valid" ? retryScope.stages : null;
+  const retryStages =
+    retryScope.kind === "valid"
+      ? new Set([...retryScope.stages].filter((stageName) => enabledStages.has(stageName)))
+      : null;
   const shouldRun = (pipelineStage: AcceptedChapterPipelineStage, enabled = true): boolean =>
     enabled && (retryStages === null || retryStages.has(pipelineStage));
   const leaseExpiresAt = new Date(Date.parse(runtime.clock.now()) + 15 * 60 * 1_000).toISOString();
@@ -192,13 +227,15 @@ export async function runAcceptedChapterPipeline(
   }
   await reportProgress(runtime.taskCenter, stableTaskId, leaseToken, "search.rebuilt", 1);
 
-  if (!shouldRun("chapter_summary", input.runChapterSummary !== false)) {
+  if (!shouldRun("chapter_summary", providerStageEnabled(input, "chapter_summary"))) {
     chapterSummary = stage(
       "skipped",
-      input.runChapterSummary === false
-        ? "CHAPTER_SUMMARY_DISABLED_BY_PREFERENCE"
-        : "CHAPTER_SUMMARY_COMPLETED_IN_PRIOR_ATTEMPT",
-      "已按写作偏好跳过章节摘要；可随时在设置中重新开启。",
+      input.source === "candidate_accept"
+        ? "CHAPTER_SUMMARY_REQUIRES_EXPLICIT_OPT_IN"
+        : "CHAPTER_SUMMARY_REQUIRES_SEPARATE_AUTHORIZATION",
+      input.source === "candidate_accept"
+        ? "接受建议只更新本地正文、版本和本地派生状态；未向模型发送正文。"
+        : "正文提交、恢复和后台整理只运行本地派生；章节摘要未向模型发送正文。",
     );
   } else {
     try {
@@ -221,13 +258,15 @@ export async function runAcceptedChapterPipeline(
   }
   await reportProgress(runtime.taskCenter, stableTaskId, leaseToken, "summary.updated", 2);
 
-  if (!shouldRun("story_state", input.runStoryState !== false)) {
+  if (!shouldRun("story_state", providerStageEnabled(input, "story_state"))) {
     storyState = stage(
       "skipped",
-      input.runStoryState === false
-        ? "STORY_STATE_DISABLED_BY_PREFERENCE"
-        : "STORY_STATE_COMPLETED_IN_PRIOR_ATTEMPT",
-      "已按写作偏好跳过故事设定识别；本地搜索与故事关联仍会更新。",
+      input.source === "candidate_accept"
+        ? "STORY_STATE_REQUIRES_EXPLICIT_OPT_IN"
+        : "STORY_STATE_REQUIRES_SEPARATE_AUTHORIZATION",
+      input.source === "candidate_accept"
+        ? "接受建议不会自动调用模型提取故事设定；本地搜索与故事关联仍会更新。"
+        : "正文提交、恢复和后台整理不会调用模型提取故事设定；本地搜索与故事关联仍会更新。",
     );
   } else {
     try {
@@ -354,8 +393,10 @@ async function loadManualRetryTask(
     task.metadata.source !== input.source ||
     task.metadata.acceptedCharacterCount !== input.acceptedCharacterCount ||
     task.metadata.runSearch !== input.runSearch ||
-    task.metadata.runChapterSummary !== input.runChapterSummary ||
-    task.metadata.runStoryState !== input.runStoryState ||
+    !isLegacyProviderStageFlag(task.metadata.runChapterSummary) ||
+    input.runChapterSummary !== false ||
+    !isLegacyProviderStageFlag(task.metadata.runStoryState) ||
+    input.runStoryState !== false ||
     task.metadata.runCausalProjection !== input.runCausalProjection ||
     task.metadata.pipelineIdempotencyKey !== input.pipelineIdempotencyKey ||
     task.metadata.pipelineStage !== input.pipelineStage ||
@@ -393,13 +434,53 @@ export function ensureAcceptedChapterPipelineTask(
   runtime: Pick<AcceptedChapterPipelineRuntime, "taskCenter" | "ids" | "clock">,
   input: AcceptedChapterPipelineInput,
 ): Promise<CreateTaskSnapshotResult> {
+  return ensureAcceptedChapterPipelineTaskInternal(runtime, input);
+}
+
+async function ensureAcceptedChapterPipelineTaskInternal(
+  runtime: Pick<AcceptedChapterPipelineRuntime, "taskCenter" | "ids" | "clock">,
+  input: AcceptedChapterPipelineInput,
+): Promise<CreateTaskSnapshotResult> {
   if (enabledPipelineStages(input).size === 0) {
-    return Promise.reject(
-      new Error("An accepted chapter pipeline task must enable at least one stage."),
-    );
+    throw new Error("An accepted chapter pipeline task must enable at least one stage.");
+  }
+  const idempotencyKey =
+    input.pipelineIdempotencyKey ?? acceptedChapterPipelineIdempotencyKey(input.versionId);
+  const existing = await runtime.taskCenter.findTaskByIdempotencyKey(idempotencyKey);
+  if (existing !== null) {
+    if (!matchesLocalAcceptedChapterTask(existing, input, idempotencyKey)) {
+      throw new Error("The accepted-version local refresh task authority is invalid.");
+    }
+    return Object.freeze({ task: existing, created: false });
   }
   return runtime.taskCenter.enqueueTask(
     createAcceptedChapterPipelineTaskInput(runtime.ids.next(), runtime.clock.now(), input),
+  );
+}
+
+function matchesLocalAcceptedChapterTask(
+  task: Awaited<ReturnType<TaskCenterStore["findTaskByIdempotencyKey"]>>,
+  input: AcceptedChapterPipelineInput,
+  idempotencyKey: string,
+): boolean {
+  if (task === null) return false;
+  return (
+    task.type === ACCEPTED_CHAPTER_PIPELINE_TASK_TYPE &&
+    task.idempotencyKey === idempotencyKey &&
+    task.metadata.operation === ACCEPTED_CHAPTER_PIPELINE_OPERATION &&
+    task.metadata.projectId === input.projectId &&
+    task.metadata.chapterId === input.chapterId &&
+    task.metadata.versionId === input.versionId &&
+    task.metadata.source === input.source &&
+    task.metadata.acceptedCharacterCount === input.acceptedCharacterCount &&
+    (task.metadata.runSearch !== false) === (input.runSearch !== false) &&
+    (task.metadata.runCausalProjection !== false) === (input.runCausalProjection !== false) &&
+    isLegacyProviderStageFlag(task.metadata.runChapterSummary) &&
+    isLegacyProviderStageFlag(task.metadata.runStoryState) &&
+    task.metadata.pipelineIdempotencyKey === input.pipelineIdempotencyKey &&
+    task.metadata.pipelineStage === input.pipelineStage &&
+    task.metadata.pipelineStageRuleVersion === input.pipelineStageRuleVersion &&
+    task.metadata.pipelineStageGeneration === input.pipelineStageGeneration
   );
 }
 
@@ -424,10 +505,8 @@ export function createAcceptedChapterPipelineTaskInput(
       versionId: input.versionId,
       source: input.source,
       acceptedCharacterCount: input.acceptedCharacterCount,
-      ...(input.runChapterSummary === undefined
-        ? {}
-        : { runChapterSummary: input.runChapterSummary }),
-      ...(input.runStoryState === undefined ? {} : { runStoryState: input.runStoryState }),
+      runChapterSummary: false,
+      runStoryState: false,
       ...(input.runSearch === undefined ? {} : { runSearch: input.runSearch }),
       ...(input.runCausalProjection === undefined
         ? {}
@@ -980,14 +1059,31 @@ function enabledPipelineStages(
         case "search":
           return input.runSearch !== false;
         case "chapter_summary":
-          return input.runChapterSummary !== false;
+          return providerStageEnabled(input, "chapter_summary");
         case "story_state":
-          return input.runStoryState !== false;
+          return providerStageEnabled(input, "story_state");
         case "causal_projection":
           return input.runCausalProjection !== false;
       }
     }),
   );
+}
+
+function providerStageEnabled(
+  input: AcceptedChapterPipelineInput,
+  stageName: "chapter_summary" | "story_state",
+): boolean {
+  void input;
+  void stageName;
+  return false;
+}
+
+function isLocalPipelineStage(stage: AcceptedChapterPipelineStage): boolean {
+  return stage === "search" || stage === "causal_projection";
+}
+
+function isLegacyProviderStageFlag(value: unknown): boolean {
+  return value === undefined || typeof value === "boolean";
 }
 
 function pipelineStageDispositions(
@@ -1062,8 +1158,13 @@ function recoverableFailureStages(
     }
   };
   addIfFailed("search", receipt.search, input.runSearch !== false);
-  addIfFailed("chapter_summary", receipt.chapterSummary, input.runChapterSummary !== false, true);
-  addIfFailed("story_state", receipt.storyState, input.runStoryState !== false, true);
+  addIfFailed(
+    "chapter_summary",
+    receipt.chapterSummary,
+    providerStageEnabled(input, "chapter_summary"),
+    true,
+  );
+  addIfFailed("story_state", receipt.storyState, providerStageEnabled(input, "story_state"), true);
   addIfFailed("causal_projection", receipt.causalProjection, input.runCausalProjection !== false);
   return Object.freeze(stages);
 }
@@ -1080,12 +1181,17 @@ function buildReceipt(
     storyStateMetrics: AcceptedChapterPipelineReceipt["storyStateMetrics"];
   }>,
 ): AcceptedChapterPipelineReceipt {
-  const values = [stages.search, stages.chapterSummary, stages.storyState, stages.causalProjection];
+  const values = [
+    ...(input.runSearch === false ? [] : [stages.search]),
+    ...(providerStageEnabled(input, "chapter_summary") ? [stages.chapterSummary] : []),
+    ...(providerStageEnabled(input, "story_state") ? [stages.storyState] : []),
+    ...(input.runCausalProjection === false ? [] : [stages.causalProjection]),
+  ];
   const requestedModelStageIncomplete =
-    (input.runChapterSummary !== false &&
+    (providerStageEnabled(input, "chapter_summary") &&
       stages.chapterSummary.status === "skipped" &&
       !stages.chapterSummary.code.endsWith("_COMPLETED_IN_PRIOR_ATTEMPT")) ||
-    (input.runStoryState !== false &&
+    (providerStageEnabled(input, "story_state") &&
       stages.storyState.status === "skipped" &&
       !stages.storyState.code.endsWith("_COMPLETED_IN_PRIOR_ATTEMPT"));
   const status =

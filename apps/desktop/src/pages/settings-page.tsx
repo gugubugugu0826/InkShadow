@@ -89,10 +89,13 @@ import {
   saveModelHubCredential,
 } from "../infrastructure/model-hub-credential-mutation-service";
 import {
+  modelHubReadinessBlockerLabel,
   MODEL_HUB_READINESS_CHANGED_EVENT,
+  MODEL_HUB_READINESS_REFRESH_INTERVAL_MS,
   MODEL_HUB_STATE_EXPLANATIONS,
   USER_FACING_MODEL_HUB_STATES,
   projectModelHubReadiness,
+  type ModelHubReadinessProjection,
 } from "../infrastructure/model-hub-readiness";
 import { applyAutomaticModelHubRouting } from "../infrastructure/model-hub-routing-service";
 import {
@@ -119,6 +122,7 @@ import {
 } from "../infrastructure/model-hub-page-hydration";
 import {
   finishModelHubDiagnosticAction,
+  recordModelHubUiUnmount,
   recordModelHubUiSnapshot,
   startModelHubDiagnosticAction,
 } from "../infrastructure/model-hub-ui-diagnostics";
@@ -371,6 +375,10 @@ export function SettingsPage() {
   const [modelHubPageSnapshot, setModelHubPageSnapshot] = useState(
     createInitialModelHubPageSnapshot,
   );
+  const [authoritativeModelHubReadiness, setAuthoritativeModelHubReadiness] = useState<Readonly<{
+    fingerprint: string;
+    readiness: ModelHubReadinessProjection;
+  }> | null>(null);
   const [modelHubMutationNotice, setModelHubMutationNotice] = useState<Readonly<{
     message: string;
     reloadRequired: boolean;
@@ -395,6 +403,7 @@ export function SettingsPage() {
   const [roleRoutes, setRoleRoutes] = useState<readonly ModelRoleRoute[]>([]);
   const [providerPreset, setProviderPreset] = useState<ConnectableProviderKind>("openai");
   const [expertMode, setExpertMode] = useState(false);
+  const [connectionSetupExpanded, setConnectionSetupExpanded] = useState(false);
   const [modelHubScheme, setModelHubScheme] = useState<ModelHubScheme>("smart");
   const [schemeSaving, setSchemeSaving] = useState(false);
   const [schemeMessage, setSchemeMessage] = useState<string | null>(null);
@@ -888,18 +897,24 @@ export function SettingsPage() {
   }, [runtime]);
 
   useEffect(() => {
-    const operationCoordinator = modelHubOperationCoordinatorRef.current;
-    void loadModelCenter();
+    if (isModelHubView) return;
     if (runtime.maintenance !== null) {
       void Promise.resolve().then(inspectDatabase);
     }
     if (runtime.automaticBackup !== null) {
       void Promise.resolve().then(checkAutomaticBackup);
     }
+  }, [checkAutomaticBackup, inspectDatabase, isModelHubView, runtime]);
+
+  useEffect(() => {
+    if (!isModelHubView) return;
+    const operationCoordinator = modelHubOperationCoordinatorRef.current;
+    void loadModelCenter();
     return () => {
       operationCoordinator.invalidate();
+      recordModelHubUiUnmount(runtime, runtime.clock.now());
     };
-  }, [checkAutomaticBackup, inspectDatabase, loadModelCenter, runtime]);
+  }, [isModelHubView, loadModelCenter, runtime]);
 
   useEffect(() => {
     if (!isModelHubView) return;
@@ -1002,6 +1017,18 @@ export function SettingsPage() {
   }
 
   function applyProviderPreset(nextProvider: ConnectableProviderKind): void {
+    const reusableConnection =
+      nextProvider === "custom_openai_compatible"
+        ? undefined
+        : hubConnections.find(
+            (connection) =>
+              connection.providerKind === nextProvider &&
+              !isRetiredModelProviderConnection(connection),
+          );
+    if (reusableConnection !== undefined) {
+      void selectStoredProfile(reusableConnection.id);
+      return;
+    }
     modelHubOperationCoordinatorRef.current.invalidate();
     const preset = getModelProviderPreset(nextProvider);
     const nativeProvider = legacyProviderKind(nextProvider);
@@ -1043,7 +1070,7 @@ export function SettingsPage() {
     setCachedInputPricePerMillion("");
     setPricingVersion(nativeProvider === "ollama" ? "local-zero-cost" : "");
     setPriceUpdatedDate(nativeProvider === "ollama" ? new Date().toISOString().slice(0, 10) : "");
-    setProviderId(nextProvider === "custom_openai_compatible" ? "custom-provider" : nextProvider);
+    setProviderId(nextAvailableProviderConnectionId(nextProvider, hubConnections));
     setBaseUrl(nextBaseUrl);
     setAuthentication(preset.credentialRequired ? "bearer_keyring" : "none");
     setSummary({ configured: false, lastFour: null });
@@ -1209,7 +1236,11 @@ export function SettingsPage() {
         "这个配置标识已经属于另一家供应商。请使用新的配置标识，原配置和凭据不会被覆盖。",
       );
     }
-    if (existingConnection !== null && hubConnection?.id !== existingConnection.id) {
+    if (
+      existingConnection !== null &&
+      hubConnection?.id !== existingConnection.id &&
+      !(hubConnection === null && isCredentialDeletedConnection(existingConnection))
+    ) {
       throw new ModelHubStoreError(
         "MODEL_HUB_CONNECTION_ID_CONFLICT",
         "这个配置标识已经属于另一项已保存配置。请先从已保存配置中加载它，原配置和凭据不会被覆盖。",
@@ -2166,7 +2197,7 @@ export function SettingsPage() {
       }${
         automaticallyConfigured === null
           ? ""
-          : ` 已自动配置 ${String(automaticallyConfigured)} 类可用 AI 任务。`
+          : ` 已自动完成 ${String(automaticallyConfigured)} 类 AI 任务的基础分工。`
       }${automaticRoutingFailed ? " 写作能力证据已保留；自动分工未完成，请重试应用 AI 分工。" : ""}`;
       setCapabilityProbeMessage(successMessage);
       refreshAttempted = true;
@@ -2525,7 +2556,7 @@ export function SettingsPage() {
         modelHubScheme === "local_privacy"
           ? missing === 0
             ? `本地隐私方案已覆盖 ${String(applied.savedNovelTaskCount)} 类任务；主模型和备用模型都只会使用本机连接${legacyWarning}。`
-            : `本地隐私方案已安全应用；${String(applied.savedNovelTaskCount)} 类任务可用，${String(missing)} 类缺少本机能力证据，且不会回退到云端${legacyWarning}。`
+            : `本地隐私方案已安全应用；${String(applied.savedNovelTaskCount)} 类任务基础配置完成，${String(missing)} 类缺少本机能力证据，且不会回退到云端${legacyWarning}。`
           : `已按当前可用能力配置 ${String(applied.savedNovelTaskCount)} 类任务；${String(missing)} 类任务等待能力证据${legacyWarning}。`,
       );
     } catch (cause: unknown) {
@@ -2635,9 +2666,7 @@ export function SettingsPage() {
         runtime.modelCenter.listProfiles(),
       ]);
       setHubConnections(nextConnections);
-      setHubConnection(
-        nextConnections.find(({ id }) => id === result.connection.id) ?? result.connection,
-      );
+      setHubConnection(null);
       setProfiles(nextProfiles);
       setProfile(null);
       setSummary(result.credential);
@@ -2645,12 +2674,16 @@ export function SettingsPage() {
       setConnection(null);
       setConnectionChecked(false);
       setModelCapacity(null);
+      setProviderId(nextAvailableProviderConnectionId(target.providerKind, nextConnections));
+      setSelectedModel("");
+      setModels([]);
+      setHubCatalog([]);
       setRetirementMessage(
-        `“${target.displayName}”已移除：不会再参与 AI 分工，系统凭据已清理；已有正文、模型目录和调用记录仍会保留。`,
+        `“${target.displayName}”已退役：不会再参与选择、推荐或 AI 分工，系统凭据已清理；已有正文、模型目录和调用记录仍会保留。`,
       );
       if (result.credentialCleanup === "skipped_unowned_reference") {
         setRetirementMessage(
-          `“${target.displayName}”已安全停用并移除；检测到来源不明的旧凭据引用，因此没有猜测或删除任何系统凭据槽。正文、模型目录和调用记录仍然保留。`,
+          `“${target.displayName}”已退役；检测到来源不明的旧凭据引用，因此没有猜测或删除任何系统凭据槽。正文、模型目录和调用记录仍然保留。`,
         );
       }
       setRetireConnectionTarget(null);
@@ -2660,6 +2693,11 @@ export function SettingsPage() {
       if (current !== null) {
         setHubConnection(current);
         setHubConnections(await runtime.modelHub.listConnections().catch(() => hubConnections));
+        // Disabling the connection is committed before credential/profile
+        // cleanup. If cleanup fails, that commit advances the authoritative CAS
+        // revision. Keep the dialog open but bind the retry to the fresh row so
+        // the user can safely finish cleanup without an artificial conflict.
+        setRetireConnectionTarget(current);
       }
     } finally {
       setRetiringConnection(false);
@@ -2832,7 +2870,7 @@ export function SettingsPage() {
   }
 
   const modelHubHydrationPending = isModelHubHydrationPending(modelHubPageSnapshot.phase);
-  const modelHubReadiness = useMemo(
+  const shallowModelHubReadiness = useMemo(
     () =>
       projectModelHubReadiness({
         connections: hubConnections,
@@ -2850,11 +2888,134 @@ export function SettingsPage() {
       routingCatalog,
     ],
   );
+  const authoritativeModelHubReadinessFingerprint = useMemo(
+    () =>
+      JSON.stringify({
+        connections: hubConnections.map(
+          ({ id, revision, enabled, connectionStatus, catalogSyncStatus, credentialState }) => [
+            id,
+            revision,
+            enabled,
+            connectionStatus,
+            catalogSyncStatus,
+            credentialState,
+          ],
+        ),
+        catalog: routingCatalog.map(({ id, revision, availability, lifecycle, staleAfter }) => [
+          id,
+          revision,
+          availability,
+          lifecycle,
+          staleAfter,
+        ]),
+        routes: novelTaskRoutes.map(
+          ({ task, revision, enabled, primaryCatalogEntryId, fallbackCatalogEntryId }) => [
+            task,
+            revision,
+            enabled,
+            primaryCatalogEntryId,
+            fallbackCatalogEntryId,
+          ],
+        ),
+        evidence: routingCapabilityEvidence.map(({ id, verdict, observedAt, expiresAt }) => [
+          id,
+          verdict,
+          observedAt,
+          expiresAt,
+        ]),
+        costPrivacy: routingCostPrivacyProfiles.map(({ catalogEntryId, revision }) => [
+          catalogEntryId,
+          revision,
+        ]),
+        credentialConfigured: summary.configured,
+      }),
+    [
+      hubConnections,
+      novelTaskRoutes,
+      routingCapabilityEvidence,
+      routingCatalog,
+      routingCostPrivacyProfiles,
+      summary.configured,
+    ],
+  );
+  const matchingAuthoritativeModelHubReadiness =
+    authoritativeModelHubReadiness?.fingerprint === authoritativeModelHubReadinessFingerprint
+      ? authoritativeModelHubReadiness.readiness
+      : null;
+  const authoritativeModelHubReadinessPending =
+    isModelHubView && !modelHubHydrationPending && matchingAuthoritativeModelHubReadiness === null;
 
   useEffect(() => {
-    if (modelHubHydrationPending) return;
+    if (!isModelHubView || modelHubHydrationPending) return;
+    let active = true;
+    let refreshSequence = 0;
+    const refresh = (): void => {
+      const sequence = refreshSequence + 1;
+      refreshSequence = sequence;
+      void import("../infrastructure/model-hub-authoritative-readiness")
+        .then(({ loadAuthoritativeModelHubReadiness }) =>
+          loadAuthoritativeModelHubReadiness(runtime),
+        )
+        .then((readiness) => {
+          if (!active || sequence !== refreshSequence) return;
+          setAuthoritativeModelHubReadiness({
+            fingerprint: authoritativeModelHubReadinessFingerprint,
+            readiness,
+          });
+        })
+        .catch(() => {
+          if (!active || sequence !== refreshSequence) return;
+          setAuthoritativeModelHubReadiness({
+            fingerprint: authoritativeModelHubReadinessFingerprint,
+            readiness: projectModelHubReadiness({
+              connections: [],
+              catalog: [],
+              routes: [],
+              loadFailed: true,
+            }),
+          });
+        });
+    };
+    const refreshTimer = window.setInterval(refresh, MODEL_HUB_READINESS_REFRESH_INTERVAL_MS);
+    refresh();
+    return () => {
+      active = false;
+      window.clearInterval(refreshTimer);
+    };
+  }, [
+    authoritativeModelHubReadinessFingerprint,
+    isModelHubView,
+    modelHubHydrationPending,
+    runtime,
+  ]);
+  const modelHubReadiness =
+    matchingAuthoritativeModelHubReadiness ??
+    (authoritativeModelHubReadinessPending
+      ? projectModelHubReadiness({
+          connections: hubConnections,
+          catalog: routingCatalog,
+          routes: novelTaskRoutes,
+          transientChecking: true,
+        })
+      : shallowModelHubReadiness);
+  const modelHubReadinessEventFingerprint = JSON.stringify({
+    state: modelHubReadiness.state,
+    enabledConnectionCount: modelHubReadiness.enabledConnectionCount,
+    usableConnectionCount: modelHubReadiness.usableConnectionCount,
+    runnableCoreTaskCount: modelHubReadiness.runnableCoreTaskCount,
+    totalCoreTaskCount: modelHubReadiness.totalCoreTaskCount,
+    missingCoreTasks: modelHubReadiness.missingCoreTasks,
+    exactBlockers: modelHubReadiness.exactBlockers,
+  });
+
+  useEffect(() => {
+    if (modelHubHydrationPending || authoritativeModelHubReadinessPending) return;
     window.dispatchEvent(new Event(MODEL_HUB_READINESS_CHANGED_EVENT));
-  }, [modelHubHydrationPending, modelHubReadiness]);
+  }, [
+    authoritativeModelHubReadinessPending,
+    modelHubHydrationPending,
+    modelHubReadinessEventFingerprint,
+  ]);
 
   const normalizedCredentialError =
     credentialError === null ? null : normalizeUiError(credentialError);
@@ -2873,11 +3034,13 @@ export function SettingsPage() {
         validating: modelHubHydrationPending || checkingModel || probingCapability,
         loadFailed: credentialError !== null,
         saveFailed: normalizedRouteError !== null,
+        exactBlockers: matchingAuthoritativeModelHubReadiness?.exactBlockers ?? [],
       }),
     [
       checkingModel,
       credentialError,
       hubConnections,
+      matchingAuthoritativeModelHubReadiness,
       modelHubHydrationPending,
       novelTaskRoutes,
       normalizedRouteError,
@@ -2948,9 +3111,12 @@ export function SettingsPage() {
   const connectedTaskRecommendations = useMemo(
     () =>
       new Map(
-        routingVisibility.tasks.map(({ definition }) => [
+        routingVisibility.tasks.map(({ definition, status }) => [
           definition.task,
-          recommendConnectedModelsForTask(definition.task, routingVisibility.models)[0] ?? null,
+          status === "configured"
+            ? (recommendConnectedModelsForTask(definition.task, routingVisibility.models)[0] ??
+              null)
+            : null,
         ]),
       ),
     [routingVisibility.models, routingVisibility.tasks],
@@ -3173,9 +3339,22 @@ export function SettingsPage() {
   const automaticBackupPresentation = describeAutomaticBackupCheck(automaticBackupCheck);
   const selectedModelDescriptor = models.find(({ id }) => id === selectedModel) ?? null;
   const localCapacityAssessment = assessLocalModelCapacity(selectedModelDescriptor, modelCapacity);
+  const manageableHubConnections = hubConnections.filter(
+    (connection) => !isRetiredModelProviderConnection(connection),
+  );
+  const retiredHubConnections = hubConnections.filter(isRetiredModelProviderConnection);
+  const credentialDeletedConnection =
+    hubConnection !== null && isCredentialDeletedConnection(hubConnection) ? hubConnection : null;
   const selectableRoutingCatalog = routingCatalog.filter(
-    ({ id, availability }) =>
+    ({ id, availability, connectionId }) =>
       availability === "available" &&
+      hubConnections.some(
+        (connection) =>
+          connection.id === connectionId &&
+          connection.enabled &&
+          connection.connectionStatus !== "disabled" &&
+          !isRetiredModelProviderConnection(connection),
+      ) &&
       (novelRoutePrivacy !== "local_only" || localCatalogEntryIds.includes(id)),
   );
   const modelHubFormReadiness = resolveModelHubFormReadiness({
@@ -3203,9 +3382,23 @@ export function SettingsPage() {
         (hubConnection.connectionStatus === "ready" ||
           hubConnection.connectionStatus === "degraded")),
   });
+  const showModelHubOnboarding =
+    activeModelHubSection === "model-center" &&
+    !connectionSetupExpanded &&
+    !expertMode &&
+    connectionIntent === null &&
+    modelHubMutationNotice === null &&
+    !modelHubHydrationPending &&
+    manageableHubConnections.length === 0 &&
+    !summary.configured &&
+    secret.trim().length === 0;
+  const hasRetirementResult = retirementMessage !== null;
 
   function selectableModelsForTaskDisclosure(task: NovelAiTask) {
     const candidates = selectableTaskModels.get(task) ?? [];
+    const connectedCandidateCount = candidates.filter(
+      ({ source }) => source === "connected",
+    ).length;
     const taskProjection = routingVisibility.tasks.find(
       ({ definition }) => definition.task === task,
     );
@@ -3228,7 +3421,9 @@ export function SettingsPage() {
         {expandedModelTasks.includes(task) && (
           <>
             <p>
-              账户目录中的模型优先；供应商官方候选只用于选择和连接，连接后仍需能力验证与明确分配。
+              {connectedCandidateCount > 0
+                ? "已连接账户中的模型优先显示；内置推荐只用于选择和连接，连接后仍需能力验证与明确分配。"
+                : "以下是内置推荐连接，不是你的账户目录；连接并同步真实目录后，才会显示账户中的模型。"}
             </p>
             <ul className="model-routing-model-options__list">
               {candidates.map((candidate) => {
@@ -3391,9 +3586,24 @@ export function SettingsPage() {
               "调整外观、本地数据、同步安全和维护方式；这些设置不会改变作品正文。"}
           </p>
         </div>
-        <Badge tone={isModelHubView ? "info" : "success"}>
-          {isModelHubView ? (expertMode ? "专家模式" : "普通模式") : "本地优先"}
-        </Badge>
+        <div className="page-heading__actions">
+          <Badge tone={isModelHubView ? "info" : "success"}>
+            {isModelHubView ? (expertMode ? "专家模式" : "普通模式") : "本地优先"}
+          </Badge>
+          {isModelHubView && (
+            <Button
+              variant="secondary"
+              aria-expanded={expertMode}
+              aria-controls="model-hub-expert-settings"
+              onClick={() => {
+                if (expertMode) setPaidEvaluationExpanded(false);
+                setExpertMode((current) => !current);
+              }}
+            >
+              {expertMode ? "收起专家设置" : "专家设置"}
+            </Button>
+          )}
+        </div>
       </header>
 
       {isModelHubView ? (
@@ -3822,337 +4032,342 @@ export function SettingsPage() {
 
         {isModelHubView && (
           <>
-            <Card id="model-center" className="settings-card--wide">
-              <CardHeader>
-                <div className="card-heading-row">
-                  <div>
-                    <CardTitle headingLevel={2}>InkShadow Model Hub</CardTitle>
-                    <CardDescription>
-                      连接供应商、测试连接并发现模型。普通模式只显示开始写作真正需要的选项。
-                    </CardDescription>
-                  </div>
-                  {modelHubHydrationPending ? (
-                    <Badge tone="info">
-                      {modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)}
-                    </Badge>
-                  ) : (
-                    <SaveStatus
-                      state={saving ? "saving" : hubConnection === null ? "clean" : "saved_local"}
-                      labels={{
-                        clean: "配置未保存",
-                        saved_local: `配置修订 ${String(hubConnection?.revision ?? 0)}`,
-                      }}
-                    />
-                  )}
-                </div>
-              </CardHeader>
-              <CardContent>
-                {editorReturnRoute !== null && (
-                  <>
-                    <InlineAlert
-                      tone="info"
-                      title="正在修复本章的 AI 设置"
-                      description="已定位到这次生成所需的连接或模型字段；返回时会恢复原章节、滚动位置和光标。"
-                    />
-                    <div className="settings-actions">
-                      <Link className="button-link button-link--secondary" to={editorReturnRoute}>
-                        返回原章节
-                      </Link>
+            {activeModelHubSection === "model-center" && (
+              <Card id="model-center" className="settings-card--wide">
+                <CardHeader>
+                  <div className="card-heading-row">
+                    <div>
+                      <CardTitle headingLevel={2}>InkShadow Model Hub</CardTitle>
+                      <CardDescription>
+                        连接供应商、测试连接并发现模型。普通模式只显示开始写作真正需要的选项。
+                      </CardDescription>
                     </div>
-                  </>
-                )}
-                <div className="model-center-settings">
-                  <section className="model-hub-readiness" aria-labelledby="model-hub-status-title">
-                    <div className="model-hub-readiness__heading">
-                      <div>
-                        <p className="page-heading__eyebrow">当前 AI 状态</p>
-                        <h3 id="model-hub-status-title">{modelHubReadiness.label}</h3>
-                      </div>
-                      <Badge tone={modelHubReadiness.tone}>当前</Badge>
-                    </div>
-                    <p>{modelHubReadiness.description}</p>
-                    <div className="model-hub-readiness__metrics" aria-label="AI 就绪情况">
-                      <span>
-                        可用连接 <strong>{modelHubReadiness.usableConnectionCount}</strong>
-                      </span>
-                      <span>
-                        核心任务 <strong>{modelHubReadiness.runnableCoreTaskCount}</strong> /{" "}
-                        {modelHubReadiness.totalCoreTaskCount}
-                      </span>
-                    </div>
-                    {modelHubReadiness.missingCoreTasks.length > 0 &&
-                      modelHubReadiness.usableConnectionCount > 0 && (
-                        <p className="model-hub-readiness__missing">
-                          尚未完整分工：
-                          {modelHubReadiness.missingCoreTasks
-                            .slice(0, 4)
-                            .map(novelAiTaskLabel)
-                            .join("、")}
-                          {modelHubReadiness.missingCoreTasks.length > 4 ? "等" : ""}。
-                        </p>
-                      )}
-                    {hubConnections.length > 0 && (
-                      <ul className="model-hub-connection-summary" aria-label="已保存的 AI 连接">
-                        {hubConnections.map((candidate) => (
-                          <li key={candidate.id}>
-                            <span>
-                              <strong>
-                                {getModelProviderPreset(candidate.providerKind).displayName}
-                              </strong>
-                              <small>{connectionEndpointLabel(candidate.baseUrl)}</small>
-                            </span>
-                            <Badge
-                              tone={
-                                candidate.connectionStatus === "ready"
-                                  ? "success"
-                                  : candidate.connectionStatus === "error"
-                                    ? "danger"
-                                    : candidate.connectionStatus === "degraded"
-                                      ? "warning"
-                                      : "neutral"
-                              }
-                            >
-                              {isRetiredModelProviderConnection(candidate)
-                                ? "已移除"
-                                : connectionStatusLabel(candidate.connectionStatus)}
-                            </Badge>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                    <details>
-                      <summary>了解全部 7 种 AI 状态</summary>
-                      <ul className="model-hub-state-legend" aria-label="AI 状态说明">
-                        {USER_FACING_MODEL_HUB_STATES.map((state) => (
-                          <li key={state} data-current={state === modelHubReadiness.state}>
-                            <strong>{MODEL_HUB_STATE_EXPLANATIONS[state].label}</strong>
-                            <span>{MODEL_HUB_STATE_EXPLANATIONS[state].description}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </details>
-                  </section>
-
-                  {normalizedCredentialError !== null && (
-                    <InlineAlert
-                      tone="error"
-                      title={normalizedCredentialError.title}
-                      description={`${normalizedCredentialError.description}（${normalizedCredentialError.code}）`}
-                    />
-                  )}
-
-                  {normalizedCredentialError === null &&
-                    modelHubPageSnapshot.errorCode !== null && (
-                      <InlineAlert
-                        tone={
-                          modelHubPageSnapshot.catalogStatus === "cached_warning"
-                            ? "warning"
-                            : "error"
-                        }
-                        title={
-                          modelHubPageSnapshot.catalogStatus === "cached_warning"
-                            ? "模型目录重新检查未完成"
-                            : "Model Hub 状态没有完整载入"
-                        }
-                        description={`${
-                          modelHubPageSnapshot.catalogStatus === "cached_warning"
-                            ? `重新检查失败，已保留 ${String(modelHubPageSnapshot.catalogEntries.length)} 个缓存模型。`
-                            : "连接、模型目录或 AI 分工暂时无法读取。"
-                        }（${modelHubPageSnapshot.errorCode}）`}
+                    {modelHubHydrationPending ? (
+                      <Badge tone="info">
+                        {modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)}
+                      </Badge>
+                    ) : (
+                      <SaveStatus
+                        state={saving ? "saving" : hubConnection === null ? "clean" : "saved_local"}
+                        labels={{
+                          clean: "配置未保存",
+                          saved_local: `配置修订 ${String(hubConnection?.revision ?? 0)}`,
+                        }}
                       />
                     )}
-
-                  {modelHubMutationNotice !== null && (
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {editorReturnRoute !== null && (
                     <>
                       <InlineAlert
-                        tone={modelHubMutationNotice.reloadRequired ? "warning" : "info"}
-                        title={
-                          modelHubMutationNotice.reloadRequired
-                            ? "更改已保存，页面状态需要刷新"
-                            : "模型选择提示"
-                        }
-                        description={modelHubMutationNotice.message}
+                        tone="info"
+                        title="正在修复本章的 AI 设置"
+                        description="已定位到这次生成所需的连接或模型字段；返回时会恢复原章节、滚动位置和光标。"
                       />
-                      {modelHubMutationNotice.reloadRequired && (
-                        <div className="settings-actions">
-                          <Button
-                            variant="secondary"
-                            disabled={modelHubHydrationPending || saving || checkingModel}
-                            onClick={() => void loadModelCenter({ action: "refresh_snapshot" })}
-                          >
-                            刷新 Model Hub 状态
-                          </Button>
-                        </div>
-                      )}
+                      <div className="settings-actions">
+                        <Link className="button-link button-link--secondary" to={editorReturnRoute}>
+                          返回原章节
+                        </Link>
+                      </div>
                     </>
                   )}
-
-                  {retirementMessage !== null && (
-                    <InlineAlert
-                      tone="info"
-                      title="连接已安全移除"
-                      description={retirementMessage}
-                    />
-                  )}
-
-                  {runtime.mode === "browser-development" && (
-                    <InlineAlert
-                      tone="warning"
-                      title="浏览器开发模式不连接模型"
-                      description="可查看和填写非敏感配置，但需要密钥的连接只能在 Tauri 桌面应用中保存、测试和验证；这里不会接收密钥、访问端点或伪造模型目录。"
-                    />
-                  )}
-
-                  <div className="settings-actions">
-                    <Button
-                      variant="secondary"
-                      aria-expanded={expertMode}
-                      aria-controls="model-hub-expert-settings"
-                      onClick={() => {
-                        if (expertMode) setPaidEvaluationExpanded(false);
-                        setExpertMode((current) => !current);
-                      }}
+                  {showModelHubOnboarding && !hasRetirementResult ? (
+                    <section
+                      className="model-hub-readiness model-hub-onboarding"
+                      aria-labelledby="model-hub-onboarding-title"
                     >
-                      {expertMode ? "收起专家设置" : "专家设置"}
-                    </Button>
-                    {providerPreset !== "custom_openai_compatible" && (
-                      <Button
-                        variant="secondary"
-                        disabled={loading || saving || checkingModel || probingCapability}
-                        onClick={restoreProviderConnectionDefaults}
-                      >
-                        恢复供应商默认配置
-                      </Button>
-                    )}
-                    {hubConnection !== null &&
-                      hubConnection.id === providerId &&
-                      hubConnection.providerKind === providerPreset &&
-                      (!isRetiredModelProviderConnection(hubConnection) || summary.configured) && (
-                        <Button
-                          variant="danger"
-                          disabled={
-                            loading ||
-                            saving ||
-                            checkingModel ||
-                            probingCapability ||
-                            retiringConnection
-                          }
-                          onClick={() => setRetireConnectionTarget(hubConnection)}
-                        >
-                          移除连接
+                      <p className="page-heading__eyebrow">首次使用</p>
+                      <h3 id="model-hub-onboarding-title">需要 AI 时，再连接一个模型服务</h3>
+                      <p>
+                        墨影没有检测到已连接服务或本地凭据。你可以连接
+                        DeepSeek、通义千问、OpenAI、Claude、Gemini 或 Ollama；不连接 AI
+                        也可以继续手动写作。
+                      </p>
+                      <div className="settings-actions">
+                        <Button onClick={() => setConnectionSetupExpanded(true)}>
+                          连接 AI 服务
                         </Button>
-                      )}
-                  </div>
-
-                  <section aria-labelledby="provider-choice-title">
-                    <h3 id="provider-choice-title">1. 连接供应商</h3>
-                    <p>选择供应商后只填写必要信息；模型列表和能力证据会在连接测试后更新。</p>
-                    <div className="model-center-grid">
-                      <FormField label="供应商" required>
-                        {(fieldProps) => (
-                          <Select
-                            {...fieldProps}
-                            value={providerPreset}
-                            options={CONNECTABLE_PROVIDER_KINDS.map((kind) => {
-                              const preset = getModelProviderPreset(kind);
-                              return { value: kind, label: preset.displayName };
-                            })}
-                            disabled={loading || saving || checkingModel || probingCapability}
-                            onChange={(event) =>
-                              applyProviderPreset(
-                                event.currentTarget.value as ConnectableProviderKind,
-                              )
-                            }
+                        <Link className="button-link button-link--secondary" to="/start">
+                          稍后再说
+                        </Link>
+                      </div>
+                    </section>
+                  ) : (
+                    <div className="model-center-settings">
+                      <section
+                        className="model-hub-readiness"
+                        aria-labelledby="model-hub-status-title"
+                      >
+                        <div className="model-hub-readiness__heading">
+                          <div>
+                            <p className="page-heading__eyebrow">当前 AI 状态</p>
+                            <h3 id="model-hub-status-title">{modelHubReadiness.label}</h3>
+                          </div>
+                          <Badge tone={modelHubReadiness.tone}>当前</Badge>
+                        </div>
+                        <p>{modelHubReadiness.description}</p>
+                        <div className="model-hub-readiness__metrics" aria-label="AI 基础配置情况">
+                          <span>
+                            可用连接 <strong>{modelHubReadiness.usableConnectionCount}</strong>
+                          </span>
+                          <span>
+                            基础配置检查 <strong>{modelHubReadiness.runnableCoreTaskCount}</strong>{" "}
+                            / {modelHubReadiness.totalCoreTaskCount}
+                          </span>
+                        </div>
+                        {modelHubReadiness.missingCoreTasks.length > 0 &&
+                          modelHubReadiness.usableConnectionCount > 0 && (
+                            <p className="model-hub-readiness__missing">
+                              尚未通过基础配置检查：
+                              {modelHubReadiness.missingCoreTasks
+                                .slice(0, 4)
+                                .map(novelAiTaskLabel)
+                                .join("、")}
+                              {modelHubReadiness.missingCoreTasks.length > 4 ? "等" : ""}。
+                            </p>
+                          )}
+                        {modelHubReadiness.exactBlockers.length > 0 && (
+                          <InlineAlert
+                            tone="warning"
+                            title={`${novelAiTaskLabel(modelHubReadiness.exactBlockers[0]?.task ?? "continuation")}尚未通过基础配置检查`}
+                            description={`${modelHubReadinessBlockerLabel(modelHubReadiness.exactBlockers[0]?.code ?? "MODEL_HUB_PREFLIGHT_FAILED")}。这里没有读取或发送作品内容；请在“连接与模型”中修复后重新验证。当前章节仍会在真正发送前单独检查隐私、上下文与请求长度；作品正文、不可变版本和隔离建议均未改变。`}
                           />
                         )}
-                      </FormField>
-                      {hubConnections.length > 0 && (
-                        <FormField label="已连接的供应商">
-                          {(fieldProps) => (
-                            <Select
-                              {...fieldProps}
-                              value={hubConnection?.id ?? ""}
-                              placeholder="选择已有连接"
-                              options={hubConnections.map((candidate) => ({
-                                value: candidate.id,
-                                label: `${getModelProviderPreset(candidate.providerKind).displayName} · ${isRetiredModelProviderConnection(candidate) ? "已移除" : connectionStatusLabel(candidate.connectionStatus)}`,
-                              }))}
+                        {manageableHubConnections.length > 0 && (
+                          <ul className="model-hub-connection-summary" aria-label="当前 AI 连接">
+                            {manageableHubConnections.map((candidate) => (
+                              <li key={candidate.id}>
+                                <span>
+                                  <strong>
+                                    {getModelProviderPreset(candidate.providerKind).displayName}
+                                  </strong>
+                                  <small>{connectionEndpointLabel(candidate.baseUrl)}</small>
+                                </span>
+                                <Badge
+                                  tone={
+                                    candidate.connectionStatus === "ready"
+                                      ? "success"
+                                      : candidate.connectionStatus === "error"
+                                        ? "danger"
+                                        : candidate.connectionStatus === "degraded"
+                                          ? "warning"
+                                          : "neutral"
+                                  }
+                                >
+                                  {connectionManagementLabel(candidate)}
+                                </Badge>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {retiredHubConnections.length > 0 && (
+                          <details>
+                            <summary>
+                              已退役连接历史（{String(retiredHubConnections.length)}）
+                            </summary>
+                            <p>这些记录只用于调用审计，不再参与选择、推荐或 AI 分工。</p>
+                            <ul
+                              className="model-hub-connection-summary"
+                              aria-label="已退役连接历史"
+                            >
+                              {retiredHubConnections.map((candidate) => (
+                                <li key={candidate.id}>
+                                  <span>
+                                    <strong>
+                                      {getModelProviderPreset(candidate.providerKind).displayName}
+                                    </strong>
+                                    <small>{connectionEndpointLabel(candidate.baseUrl)}</small>
+                                  </span>
+                                  <Badge tone="neutral">已退役</Badge>
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        )}
+                        <details>
+                          <summary>了解全部 7 种 AI 状态</summary>
+                          <ul className="model-hub-state-legend" aria-label="AI 状态说明">
+                            {USER_FACING_MODEL_HUB_STATES.map((state) => (
+                              <li key={state} data-current={state === modelHubReadiness.state}>
+                                <strong>{MODEL_HUB_STATE_EXPLANATIONS[state].label}</strong>
+                                <span>{MODEL_HUB_STATE_EXPLANATIONS[state].description}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      </section>
+
+                      {normalizedCredentialError !== null && (
+                        <InlineAlert
+                          tone="error"
+                          title={normalizedCredentialError.title}
+                          description={`${normalizedCredentialError.description}（${normalizedCredentialError.code}）`}
+                        />
+                      )}
+
+                      {normalizedCredentialError === null &&
+                        modelHubPageSnapshot.errorCode !== null && (
+                          <InlineAlert
+                            tone={
+                              modelHubPageSnapshot.catalogStatus === "cached_warning"
+                                ? "warning"
+                                : "error"
+                            }
+                            title={
+                              modelHubPageSnapshot.catalogStatus === "cached_warning"
+                                ? "模型目录重新检查未完成"
+                                : "Model Hub 状态没有完整载入"
+                            }
+                            description={`${
+                              modelHubPageSnapshot.catalogStatus === "cached_warning"
+                                ? `重新检查失败，已保留 ${String(modelHubPageSnapshot.catalogEntries.length)} 个缓存模型。`
+                                : "连接、模型目录或 AI 分工暂时无法读取。"
+                            }（${modelHubPageSnapshot.errorCode}）`}
+                          />
+                        )}
+
+                      {modelHubMutationNotice !== null && (
+                        <>
+                          <InlineAlert
+                            tone={modelHubMutationNotice.reloadRequired ? "warning" : "info"}
+                            title={
+                              modelHubMutationNotice.reloadRequired
+                                ? "更改已保存，页面状态需要刷新"
+                                : "模型选择提示"
+                            }
+                            description={modelHubMutationNotice.message}
+                          />
+                          {modelHubMutationNotice.reloadRequired && (
+                            <div className="settings-actions">
+                              <Button
+                                variant="secondary"
+                                disabled={modelHubHydrationPending || saving || checkingModel}
+                                onClick={() => void loadModelCenter({ action: "refresh_snapshot" })}
+                              >
+                                刷新 Model Hub 状态
+                              </Button>
+                            </div>
+                          )}
+                        </>
+                      )}
+
+                      {retirementMessage !== null && (
+                        <InlineAlert
+                          tone="info"
+                          title="连接已退役"
+                          description={retirementMessage}
+                        />
+                      )}
+
+                      {credentialDeletedConnection !== null && (
+                        <InlineAlert
+                          tone="warning"
+                          title="凭据已删除，可重新绑定"
+                          description={`“${credentialDeletedConnection.displayName}”仍保留模型目录和历史调用，但不会参与 AI 分工。输入新的 API Key 并选择“重新绑定原连接”，无需修改配置标识；也可选择“退役连接”后建立一条新连接。`}
+                        />
+                      )}
+
+                      {runtime.mode === "browser-development" && (
+                        <InlineAlert
+                          tone="warning"
+                          title="浏览器开发模式不连接模型"
+                          description="可查看和填写非敏感配置，但需要密钥的连接只能在 Tauri 桌面应用中保存、测试和验证；这里不会接收密钥、访问端点或伪造模型目录。"
+                        />
+                      )}
+
+                      <div className="settings-actions">
+                        {providerPreset !== "custom_openai_compatible" && (
+                          <Button
+                            variant="secondary"
+                            disabled={loading || saving || checkingModel || probingCapability}
+                            onClick={restoreProviderConnectionDefaults}
+                          >
+                            恢复供应商默认配置
+                          </Button>
+                        )}
+                        {hubConnection !== null &&
+                          hubConnection.id === providerId &&
+                          hubConnection.providerKind === providerPreset &&
+                          (!isRetiredModelProviderConnection(hubConnection) ||
+                            summary.configured) && (
+                            <Button
+                              variant="danger"
                               disabled={
-                                modelHubHydrationPending ||
+                                loading ||
                                 saving ||
                                 checkingModel ||
-                                probingCapability
+                                probingCapability ||
+                                retiringConnection
                               }
-                              onChange={(event) =>
-                                void selectStoredProfile(event.currentTarget.value)
-                              }
-                            />
+                              onClick={() => setRetireConnectionTarget(hubConnection)}
+                            >
+                              退役连接
+                            </Button>
                           )}
-                        </FormField>
-                      )}
-                      {providerPreset === "custom_openai_compatible" && (
-                        <FormField
-                          label="Base URL"
-                          hint="自定义兼容接口必须提供地址；远程地址必须使用 HTTPS。"
-                          required
-                        >
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              type="url"
-                              value={baseUrl}
-                              maxLength={2048}
-                              disabled={loading || saving || checkingModel}
-                              onChange={(event) => {
-                                setBaseUrl(event.currentTarget.value);
-                                setConnection(null);
-                                setConnectionChecked(false);
-                              }}
-                            />
-                          )}
-                        </FormField>
-                      )}
-                      {providerPreset === "alibaba_qwen" && (
-                        <>
-                          <FormField label="地域" required>
+                      </div>
+
+                      <section aria-labelledby="provider-choice-title">
+                        <h3 id="provider-choice-title">1. 连接供应商</h3>
+                        <p>选择供应商后只填写必要信息；模型列表和能力证据会在连接测试后更新。</p>
+                        <div className="model-center-grid">
+                          <FormField label="供应商" required>
                             {(fieldProps) => (
                               <Select
                                 {...fieldProps}
-                                value={region}
-                                options={qwenRegionOptions()}
-                                disabled={loading || saving || checkingModel}
-                                onChange={(event) => {
-                                  const nextRegion = event.currentTarget.value;
-                                  setRegion(nextRegion);
-                                  setBaseUrl(resolveQwenBaseUrl(nextRegion, workspaceId));
-                                  setConnection(null);
-                                  setConnectionChecked(false);
-                                }}
+                                value={providerPreset}
+                                options={CONNECTABLE_PROVIDER_KINDS.map((kind) => {
+                                  const preset = getModelProviderPreset(kind);
+                                  return { value: kind, label: preset.displayName };
+                                })}
+                                disabled={loading || saving || checkingModel || probingCapability}
+                                onChange={(event) =>
+                                  applyProviderPreset(
+                                    event.currentTarget.value as ConnectableProviderKind,
+                                  )
+                                }
                               />
                             )}
                           </FormField>
-                          {qwenRegionShowsWorkspace(region) && (
+                          {manageableHubConnections.length > 0 && (
+                            <FormField label="已连接的供应商">
+                              {(fieldProps) => (
+                                <Select
+                                  {...fieldProps}
+                                  value={hubConnection?.id ?? ""}
+                                  placeholder="选择已有连接"
+                                  options={manageableHubConnections.map((candidate) => ({
+                                    value: candidate.id,
+                                    label: `${getModelProviderPreset(candidate.providerKind).displayName} · ${connectionManagementLabel(candidate)}`,
+                                  }))}
+                                  disabled={
+                                    modelHubHydrationPending ||
+                                    saving ||
+                                    checkingModel ||
+                                    probingCapability
+                                  }
+                                  onChange={(event) =>
+                                    void selectStoredProfile(event.currentTarget.value)
+                                  }
+                                />
+                              )}
+                            </FormField>
+                          )}
+                          {providerPreset === "custom_openai_compatible" && (
                             <FormField
-                              label="Workspace ID"
-                              hint={
-                                qwenRegionNeedsWorkspace(region)
-                                  ? "日本和德国地域必须填写。"
-                                  : region === "china_beijing"
-                                    ? "北京地域可留空使用普通文本接口；如需使用已验证的官方文本重排协议，请填写 Workspace ID。"
-                                    : "新加坡可留空使用共享端点；填写后使用专属 Workspace 端点。"
-                              }
-                              required={qwenRegionNeedsWorkspace(region)}
+                              label="Base URL"
+                              hint="自定义兼容接口必须提供地址；远程地址必须使用 HTTPS。"
+                              required
                             >
                               {(fieldProps) => (
                                 <Input
                                   {...fieldProps}
-                                  value={workspaceId}
-                                  maxLength={256}
+                                  type="url"
+                                  value={baseUrl}
+                                  maxLength={2048}
                                   disabled={loading || saving || checkingModel}
                                   onChange={(event) => {
-                                    const nextWorkspaceId = event.currentTarget.value;
-                                    setWorkspaceId(nextWorkspaceId);
-                                    setBaseUrl(resolveQwenBaseUrl(region, nextWorkspaceId));
+                                    setBaseUrl(event.currentTarget.value);
                                     setConnection(null);
                                     setConnectionChecked(false);
                                   }}
@@ -4160,895 +4375,1313 @@ export function SettingsPage() {
                               )}
                             </FormField>
                           )}
-                        </>
-                      )}
-                      {providerPreset === "volcengine_doubao" && (
-                        <FormField label="Endpoint ID" hint="仅专属推理接入点需要填写。">
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              value={endpointId}
-                              maxLength={512}
-                              disabled={loading || saving || checkingModel}
-                              onChange={(event) => setEndpointId(event.currentTarget.value)}
-                            />
-                          )}
-                        </FormField>
-                      )}
-                    </div>
-                  </section>
-
-                  {expertMode && (
-                    <section
-                      id="model-hub-expert-settings"
-                      aria-labelledby="model-connection-title"
-                    >
-                      <h3 id="model-connection-title">专家连接设置</h3>
-                      {hubConnections.length > 0 && (
-                        <FormField label="已保存配置">
-                          {(fieldProps) => (
-                            <Select
-                              {...fieldProps}
-                              value={hubConnection?.id ?? ""}
-                              placeholder="选择已保存配置"
-                              options={hubConnections.map((candidate) => ({
-                                value: candidate.id,
-                                label: `${candidate.id} · ${getModelProviderPreset(candidate.providerKind).displayName}`,
-                              }))}
-                              disabled={
-                                modelHubHydrationPending ||
-                                saving ||
-                                checkingModel ||
-                                probingCapability
-                              }
-                              onChange={(event) =>
-                                void selectStoredProfile(event.currentTarget.value)
-                              }
-                            />
-                          )}
-                        </FormField>
-                      )}
-
-                      <div className="model-center-grid">
-                        <FormField label="协议" required>
-                          {(fieldProps) => (
-                            <Select
-                              {...fieldProps}
-                              value={gatewayProviderKind(providerPreset)}
-                              options={[
-                                {
-                                  value: "open_ai_compatible",
-                                  label: "OpenAI 兼容",
-                                },
-                                { value: "ollama", label: "Ollama" },
-                                { value: "anthropic", label: "Anthropic" },
-                                { value: "gemini", label: "Gemini" },
-                              ]}
-                              disabled
-                            />
-                          )}
-                        </FormField>
-                        <FormField
-                          label="配置标识"
-                          hint="只允许小写字母、数字、点、下划线和连字符。"
-                          required
-                        >
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              value={providerId}
-                              maxLength={128}
-                              disabled={loading || saving || checkingModel}
-                              onChange={(event) => {
-                                const nextProviderId = event.currentTarget.value;
-                                setProviderId(nextProviderId);
-                                if (nextProviderId !== hubConnection?.id) {
-                                  setSummary({ configured: false, lastFour: null });
-                                }
-                                setProfile(null);
-                                setConnection(null);
-                              }}
-                            />
-                          )}
-                        </FormField>
-                        <FormField label="基础地址" required>
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              type="url"
-                              value={baseUrl}
-                              maxLength={2048}
-                              disabled={loading || saving || checkingModel}
-                              onChange={(event) => {
-                                setBaseUrl(event.currentTarget.value);
-                                setConnection(null);
-                              }}
-                            />
-                          )}
-                        </FormField>
-                        <FormField label="认证方式" required>
-                          {(fieldProps) => (
-                            <Select
-                              {...fieldProps}
-                              value={authentication}
-                              options={authenticationOptions(providerPreset)}
-                              disabled={loading || saving || checkingModel}
-                              onChange={(event) => {
-                                const nextAuthentication = event.currentTarget
-                                  .value as NativeGatewayAuthenticationMode;
-                                setAuthentication(nextAuthentication);
-                                if (nextAuthentication !== "custom_header_keyring") {
-                                  setCredentialHeaderName("");
-                                }
-                                setConnection(null);
-                                setConnectionChecked(false);
-                              }}
-                            />
-                          )}
-                        </FormField>
-                        {providerPreset === "custom_openai_compatible" && (
-                          <>
-                            <FormField
-                              label="模型目录路径"
-                              hint="留空使用 /models；必须是无查询参数的绝对路径。"
-                            >
-                              {(fieldProps) => (
-                                <Input
-                                  {...fieldProps}
-                                  value={modelDiscoveryPath}
-                                  placeholder="/models"
-                                  maxLength={1024}
-                                  disabled={loading || saving || checkingModel}
-                                  onChange={(event) => {
-                                    setModelDiscoveryPath(event.currentTarget.value);
-                                    setConnection(null);
-                                  }}
-                                />
-                              )}
-                            </FormField>
-                            <FormField label="文本生成路径" hint="留空使用 /chat/completions。">
-                              {(fieldProps) => (
-                                <Input
-                                  {...fieldProps}
-                                  value={textGenerationPath}
-                                  placeholder="/chat/completions"
-                                  maxLength={1024}
-                                  disabled={loading || saving || checkingModel}
-                                  onChange={(event) => {
-                                    setTextGenerationPath(event.currentTarget.value);
-                                    setConnection(null);
-                                  }}
-                                />
-                              )}
-                            </FormField>
-                            <FormField label="Embedding 路径" hint="留空使用 /embeddings。">
-                              {(fieldProps) => (
-                                <Input
-                                  {...fieldProps}
-                                  value={embeddingPath}
-                                  placeholder="/embeddings"
-                                  maxLength={1024}
-                                  disabled={loading || saving || checkingModel}
-                                  onChange={(event) => {
-                                    setEmbeddingPath(event.currentTarget.value);
-                                    setConnection(null);
-                                  }}
-                                />
-                              )}
-                            </FormField>
-                            {authentication === "custom_header_keyring" && (
-                              <FormField
-                                label="认证 Header 名称"
-                                hint="这里只保存名称；值使用下方同一份系统凭据。"
-                                required
-                              >
+                          {providerPreset === "alibaba_qwen" && (
+                            <>
+                              <FormField label="地域" required>
                                 {(fieldProps) => (
-                                  <Input
+                                  <Select
                                     {...fieldProps}
-                                    value={credentialHeaderName}
-                                    placeholder="x-api-key"
-                                    maxLength={128}
-                                    autoComplete="off"
+                                    value={region}
+                                    options={qwenRegionOptions()}
                                     disabled={loading || saving || checkingModel}
                                     onChange={(event) => {
-                                      setCredentialHeaderName(event.currentTarget.value);
+                                      const nextRegion = event.currentTarget.value;
+                                      setRegion(nextRegion);
+                                      setBaseUrl(resolveQwenBaseUrl(nextRegion, workspaceId));
                                       setConnection(null);
+                                      setConnectionChecked(false);
                                     }}
                                   />
                                 )}
                               </FormField>
+                              {qwenRegionShowsWorkspace(region) && (
+                                <FormField
+                                  label="Workspace ID"
+                                  hint={
+                                    qwenRegionNeedsWorkspace(region)
+                                      ? "日本和德国地域必须填写。"
+                                      : region === "china_beijing"
+                                        ? "北京地域可留空使用普通文本接口；如需使用已验证的官方文本重排协议，请填写 Workspace ID。"
+                                        : "新加坡可留空使用共享端点；填写后使用专属 Workspace 端点。"
+                                  }
+                                  required={qwenRegionNeedsWorkspace(region)}
+                                >
+                                  {(fieldProps) => (
+                                    <Input
+                                      {...fieldProps}
+                                      value={workspaceId}
+                                      maxLength={256}
+                                      disabled={loading || saving || checkingModel}
+                                      onChange={(event) => {
+                                        const nextWorkspaceId = event.currentTarget.value;
+                                        setWorkspaceId(nextWorkspaceId);
+                                        setBaseUrl(resolveQwenBaseUrl(region, nextWorkspaceId));
+                                        setConnection(null);
+                                        setConnectionChecked(false);
+                                      }}
+                                    />
+                                  )}
+                                </FormField>
+                              )}
+                            </>
+                          )}
+                          {providerPreset === "volcengine_doubao" && (
+                            <FormField label="Endpoint ID" hint="仅专属推理接入点需要填写。">
+                              {(fieldProps) => (
+                                <Input
+                                  {...fieldProps}
+                                  value={endpointId}
+                                  maxLength={512}
+                                  disabled={loading || saving || checkingModel}
+                                  onChange={(event) => setEndpointId(event.currentTarget.value)}
+                                />
+                              )}
+                            </FormField>
+                          )}
+                        </div>
+                      </section>
+
+                      {expertMode && (
+                        <section
+                          id="model-hub-expert-settings"
+                          aria-labelledby="model-connection-title"
+                        >
+                          <h3 id="model-connection-title">专家连接设置</h3>
+                          {manageableHubConnections.length > 0 && (
+                            <FormField label="已保存配置">
+                              {(fieldProps) => (
+                                <Select
+                                  {...fieldProps}
+                                  value={hubConnection?.id ?? ""}
+                                  placeholder="选择已保存配置"
+                                  options={manageableHubConnections.map((candidate) => ({
+                                    value: candidate.id,
+                                    label: `${candidate.id} · ${getModelProviderPreset(candidate.providerKind).displayName} · ${connectionManagementLabel(candidate)}`,
+                                  }))}
+                                  disabled={
+                                    modelHubHydrationPending ||
+                                    saving ||
+                                    checkingModel ||
+                                    probingCapability
+                                  }
+                                  onChange={(event) =>
+                                    void selectStoredProfile(event.currentTarget.value)
+                                  }
+                                />
+                              )}
+                            </FormField>
+                          )}
+
+                          <div className="model-center-grid">
+                            <FormField label="协议" required>
+                              {(fieldProps) => (
+                                <Select
+                                  {...fieldProps}
+                                  value={gatewayProviderKind(providerPreset)}
+                                  options={[
+                                    {
+                                      value: "open_ai_compatible",
+                                      label: "OpenAI 兼容",
+                                    },
+                                    { value: "ollama", label: "Ollama" },
+                                    { value: "anthropic", label: "Anthropic" },
+                                    { value: "gemini", label: "Gemini" },
+                                  ]}
+                                  disabled
+                                />
+                              )}
+                            </FormField>
+                            <FormField
+                              label="配置标识"
+                              hint="只允许小写字母、数字、点、下划线和连字符。"
+                              required
+                            >
+                              {(fieldProps) => (
+                                <Input
+                                  {...fieldProps}
+                                  value={providerId}
+                                  maxLength={128}
+                                  disabled={loading || saving || checkingModel}
+                                  onChange={(event) => {
+                                    const nextProviderId = event.currentTarget.value;
+                                    setProviderId(nextProviderId);
+                                    if (nextProviderId !== hubConnection?.id) {
+                                      setSummary({ configured: false, lastFour: null });
+                                    }
+                                    setProfile(null);
+                                    setConnection(null);
+                                  }}
+                                />
+                              )}
+                            </FormField>
+                            <FormField label="基础地址" required>
+                              {(fieldProps) => (
+                                <Input
+                                  {...fieldProps}
+                                  type="url"
+                                  value={baseUrl}
+                                  maxLength={2048}
+                                  disabled={loading || saving || checkingModel}
+                                  onChange={(event) => {
+                                    setBaseUrl(event.currentTarget.value);
+                                    setConnection(null);
+                                  }}
+                                />
+                              )}
+                            </FormField>
+                            <FormField label="认证方式" required>
+                              {(fieldProps) => (
+                                <Select
+                                  {...fieldProps}
+                                  value={authentication}
+                                  options={authenticationOptions(providerPreset)}
+                                  disabled={loading || saving || checkingModel}
+                                  onChange={(event) => {
+                                    const nextAuthentication = event.currentTarget
+                                      .value as NativeGatewayAuthenticationMode;
+                                    setAuthentication(nextAuthentication);
+                                    if (nextAuthentication !== "custom_header_keyring") {
+                                      setCredentialHeaderName("");
+                                    }
+                                    setConnection(null);
+                                    setConnectionChecked(false);
+                                  }}
+                                />
+                              )}
+                            </FormField>
+                            {providerPreset === "custom_openai_compatible" && (
+                              <>
+                                <FormField
+                                  label="模型目录路径"
+                                  hint="留空使用 /models；必须是无查询参数的绝对路径。"
+                                >
+                                  {(fieldProps) => (
+                                    <Input
+                                      {...fieldProps}
+                                      value={modelDiscoveryPath}
+                                      placeholder="/models"
+                                      maxLength={1024}
+                                      disabled={loading || saving || checkingModel}
+                                      onChange={(event) => {
+                                        setModelDiscoveryPath(event.currentTarget.value);
+                                        setConnection(null);
+                                      }}
+                                    />
+                                  )}
+                                </FormField>
+                                <FormField label="文本生成路径" hint="留空使用 /chat/completions。">
+                                  {(fieldProps) => (
+                                    <Input
+                                      {...fieldProps}
+                                      value={textGenerationPath}
+                                      placeholder="/chat/completions"
+                                      maxLength={1024}
+                                      disabled={loading || saving || checkingModel}
+                                      onChange={(event) => {
+                                        setTextGenerationPath(event.currentTarget.value);
+                                        setConnection(null);
+                                      }}
+                                    />
+                                  )}
+                                </FormField>
+                                <FormField label="Embedding 路径" hint="留空使用 /embeddings。">
+                                  {(fieldProps) => (
+                                    <Input
+                                      {...fieldProps}
+                                      value={embeddingPath}
+                                      placeholder="/embeddings"
+                                      maxLength={1024}
+                                      disabled={loading || saving || checkingModel}
+                                      onChange={(event) => {
+                                        setEmbeddingPath(event.currentTarget.value);
+                                        setConnection(null);
+                                      }}
+                                    />
+                                  )}
+                                </FormField>
+                                {authentication === "custom_header_keyring" && (
+                                  <FormField
+                                    label="认证 Header 名称"
+                                    hint="这里只保存名称；值使用下方同一份系统凭据。"
+                                    required
+                                  >
+                                    {(fieldProps) => (
+                                      <Input
+                                        {...fieldProps}
+                                        value={credentialHeaderName}
+                                        placeholder="x-api-key"
+                                        maxLength={128}
+                                        autoComplete="off"
+                                        disabled={loading || saving || checkingModel}
+                                        onChange={(event) => {
+                                          setCredentialHeaderName(event.currentTarget.value);
+                                          setConnection(null);
+                                        }}
+                                      />
+                                    )}
+                                  </FormField>
+                                )}
+                              </>
+                            )}
+                            <FormField
+                              label="请求超时（毫秒）"
+                              hint={`${String(MODEL_HUB_MIN_REQUEST_TIMEOUT_MS)}–${String(MODEL_HUB_MAX_REQUEST_TIMEOUT_MS)}；生成仅约束发出请求阶段，流式读取仍有独立空闲保护。`}
+                              required
+                            >
+                              {(fieldProps) => (
+                                <Input
+                                  {...fieldProps}
+                                  type="number"
+                                  min={MODEL_HUB_MIN_REQUEST_TIMEOUT_MS}
+                                  max={MODEL_HUB_MAX_REQUEST_TIMEOUT_MS}
+                                  step={1000}
+                                  value={requestTimeoutMs}
+                                  disabled={loading || saving || checkingModel}
+                                  onChange={(event) => {
+                                    setRequestTimeoutMs(event.currentTarget.value);
+                                    setConnection(null);
+                                  }}
+                                />
+                              )}
+                            </FormField>
+                            <FormField
+                              label="安全重试次数"
+                              hint={`0–${String(MODEL_HUB_MAX_RETRY_LIMIT)}；只用于连接测试和模型目录 GET。`}
+                              required
+                            >
+                              {(fieldProps) => (
+                                <Input
+                                  {...fieldProps}
+                                  type="number"
+                                  min={0}
+                                  max={MODEL_HUB_MAX_RETRY_LIMIT}
+                                  step={1}
+                                  value={retryLimit}
+                                  disabled={loading || saving || checkingModel}
+                                  onChange={(event) => {
+                                    setRetryLimit(event.currentTarget.value);
+                                    setConnection(null);
+                                  }}
+                                />
+                              )}
+                            </FormField>
+                          </div>
+                          <InlineAlert
+                            tone="info"
+                            title="重试不会重复计费请求"
+                            description="这里只会自动重试读取连接和模型目录。文本生成、Embedding、Rerank 与图片生成一旦发送都不会自动重试，避免重复生成或重复计费。温度、Top P、结构化输出与推理强度仍由任务预设管理。"
+                          />
+                          {providerPreset === "custom_openai_compatible" && (
+                            <InlineAlert
+                              tone="info"
+                              title="当前只支持一个认证 Header"
+                              description="Header 值只保存到系统凭据库。图片生成路径暂不支持自定义；图片任务仍使用经过验证的固定 /images/generations 路径。"
+                            />
+                          )}
+                        </section>
+                      )}
+
+                      <section id="model-selection" aria-labelledby="model-selection-title">
+                        <h3 id="model-selection-title">2. 测试连接并选择模型</h3>
+                        {models.length > 0 ? (
+                          <>
+                            <FormField
+                              label="模型"
+                              hint={
+                                modelHubPageSnapshot.catalogStatus === "cached_warning"
+                                  ? `正在使用上次保存的 ${String(models.length)} 个模型；重新检查失败后没有清空目录。`
+                                  : modelHubHydrationPending
+                                    ? `${modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)} 已保存的模型仍可查看。`
+                                    : `本次从端点读取 ${String(models.length)} 个模型。`
+                              }
+                              required
+                            >
+                              {(fieldProps) => (
+                                <Select
+                                  {...fieldProps}
+                                  value={selectedModel}
+                                  placeholder="选择模型"
+                                  options={models.map((model) => ({
+                                    value: model.id,
+                                    label:
+                                      model.sizeBytes === null || model.sizeBytes === undefined
+                                        ? model.displayName
+                                        : `${model.displayName} · ${formatBytes(model.sizeBytes)}`,
+                                  }))}
+                                  disabled={
+                                    modelHubHydrationPending ||
+                                    saving ||
+                                    checkingModel ||
+                                    probingCapability
+                                  }
+                                  onChange={(event) =>
+                                    void selectCatalogModel(event.currentTarget.value)
+                                  }
+                                />
+                              )}
+                            </FormField>
+                            {modelHubPageSnapshot.catalogStatus === "cached_warning" && (
+                              <InlineAlert
+                                tone="warning"
+                                title="正在使用上次保存的模型目录"
+                                description="本次重新检查没有完成，原有模型和选择已保留。你可以稍后再次测试连接。"
+                              />
                             )}
                           </>
+                        ) : modelHubHydrationPending ? (
+                          <InlineAlert
+                            tone="info"
+                            title="正在恢复 Model Hub"
+                            description={modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)}
+                          />
+                        ) : modelHubPageSnapshot.phase === "ERROR" ||
+                          modelHubPageSnapshot.catalogStatus === "error" ? (
+                          <InlineAlert
+                            tone="error"
+                            title="模型目录暂时无法读取"
+                            description="已保存连接和密钥没有被清除。请重新加载 Model Hub；若仍失败，再检查本地数据库或供应商连接。"
+                          />
+                        ) : expertMode ||
+                          !getModelProviderPreset(providerPreset).modelDiscovery.automatic ? (
+                          <FormField
+                            label={
+                              providerPreset === "volcengine_doubao"
+                                ? "模型或 Endpoint ID"
+                                : "模型标识"
+                            }
+                            hint="该供应商不保证提供模型列表，请填写控制台显示的真实模型或接入点标识。"
+                            required={
+                              !getModelProviderPreset(providerPreset).modelDiscovery.automatic
+                            }
+                          >
+                            {(fieldProps) => (
+                              <Input
+                                {...fieldProps}
+                                value={selectedModel}
+                                maxLength={512}
+                                disabled={saving || checkingModel || probingCapability}
+                                onChange={(event) => setSelectedModel(event.currentTarget.value)}
+                              />
+                            )}
+                          </FormField>
+                        ) : (
+                          <InlineAlert
+                            tone={connectionChecked ? "warning" : "info"}
+                            title={connectionChecked ? "没有发现可用模型" : "还没有读取模型"}
+                            description={
+                              connectionChecked
+                                ? "请检查密钥权限和供应商服务状态后重试；如供应商确实不提供模型目录，可在专家设置中手动填写模型标识。"
+                                : provider === "ollama"
+                                  ? "请先启动本机 Ollama，然后点击“测试连接并发现模型”。"
+                                  : summary.configured
+                                    ? "密钥已保存。点击“测试连接并发现模型”读取当前账号真正可用的模型。"
+                                    : "先把 API Key 保存到系统凭据库，再测试连接；密钥不会写入普通数据库。"
+                            }
+                          />
                         )}
-                        <FormField
-                          label="请求超时（毫秒）"
-                          hint={`${String(MODEL_HUB_MIN_REQUEST_TIMEOUT_MS)}–${String(MODEL_HUB_MAX_REQUEST_TIMEOUT_MS)}；生成仅约束发出请求阶段，流式读取仍有独立空闲保护。`}
-                          required
-                        >
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              type="number"
-                              min={MODEL_HUB_MIN_REQUEST_TIMEOUT_MS}
-                              max={MODEL_HUB_MAX_REQUEST_TIMEOUT_MS}
-                              step={1000}
-                              value={requestTimeoutMs}
-                              disabled={loading || saving || checkingModel}
-                              onChange={(event) => {
-                                setRequestTimeoutMs(event.currentTarget.value);
-                                setConnection(null);
-                              }}
-                            />
-                          )}
-                        </FormField>
-                        <FormField
-                          label="安全重试次数"
-                          hint={`0–${String(MODEL_HUB_MAX_RETRY_LIMIT)}；只用于连接测试和模型目录 GET。`}
-                          required
-                        >
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              type="number"
-                              min={0}
-                              max={MODEL_HUB_MAX_RETRY_LIMIT}
-                              step={1}
-                              value={retryLimit}
-                              disabled={loading || saving || checkingModel}
-                              onChange={(event) => {
-                                setRetryLimit(event.currentTarget.value);
-                                setConnection(null);
-                              }}
-                            />
-                          )}
-                        </FormField>
-                      </div>
-                      <InlineAlert
-                        tone="info"
-                        title="重试不会重复计费请求"
-                        description="这里只会自动重试读取连接和模型目录。文本生成、Embedding、Rerank 与图片生成一旦发送都不会自动重试，避免重复生成或重复计费。温度、Top P、结构化输出与推理强度仍由任务预设管理。"
-                      />
-                      {providerPreset === "custom_openai_compatible" && (
+                      </section>
+
+                      {expertMode && (
+                        <section id="model-pricing" aria-labelledby="model-pricing-title">
+                          <h3 id="model-pricing-title">计价信息</h3>
+                          <InlineAlert
+                            tone="info"
+                            title="费用预估依据"
+                            description="这些字段只用于整理上下文、费用估算和预算，不是开始写作的必填项。不确定时可以留空；价格单位为每百万 token，供应商仍可能正常计费。"
+                          />
+                          <div className="model-center-grid">
+                            <FormField
+                              label="上下文窗口（token）"
+                              hint="模型一次可读取的最大 token。目录没有提供时可留空，墨影会使用保守默认长度；这里不是小说字数。"
+                            >
+                              {(fieldProps) => (
+                                <Input
+                                  {...fieldProps}
+                                  type="number"
+                                  min={1}
+                                  max={100_000_000}
+                                  step={1}
+                                  value={contextWindowTokens}
+                                  disabled={selectedModel.trim().length === 0}
+                                  onChange={(event) =>
+                                    setContextWindowTokens(event.currentTarget.value)
+                                  }
+                                />
+                              )}
+                            </FormField>
+                            <FormField
+                              label="计价币种"
+                              hint="只在填写价格时使用；三位大写代码，例如 USD。"
+                            >
+                              {(fieldProps) => (
+                                <Input
+                                  {...fieldProps}
+                                  value={pricingCurrency}
+                                  minLength={3}
+                                  maxLength={3}
+                                  disabled={selectedModel.trim().length === 0}
+                                  onChange={(event) =>
+                                    setPricingCurrency(event.currentTarget.value)
+                                  }
+                                />
+                              )}
+                            </FormField>
+                            <FormField
+                              label="输入价 / 百万 token"
+                              hint="从供应商价格页获取；不确定可留空。"
+                            >
+                              {(fieldProps) => (
+                                <Input
+                                  {...fieldProps}
+                                  type="number"
+                                  min={0}
+                                  step="0.000001"
+                                  value={inputPricePerMillion}
+                                  disabled={selectedModel.trim().length === 0}
+                                  onChange={(event) =>
+                                    setInputPricePerMillion(event.currentTarget.value)
+                                  }
+                                />
+                              )}
+                            </FormField>
+                            <FormField
+                              label="输出价 / 百万 token"
+                              hint="从供应商价格页获取；不确定可留空。"
+                            >
+                              {(fieldProps) => (
+                                <Input
+                                  {...fieldProps}
+                                  type="number"
+                                  min={0}
+                                  step="0.000001"
+                                  value={outputPricePerMillion}
+                                  disabled={selectedModel.trim().length === 0}
+                                  onChange={(event) =>
+                                    setOutputPricePerMillion(event.currentTarget.value)
+                                  }
+                                />
+                              )}
+                            </FormField>
+                            <FormField
+                              label="缓存输入价 / 百万 token"
+                              hint="供应商未区分时可留空。"
+                            >
+                              {(fieldProps) => (
+                                <Input
+                                  {...fieldProps}
+                                  type="number"
+                                  min={0}
+                                  step="0.000001"
+                                  value={cachedInputPricePerMillion}
+                                  disabled={selectedModel.trim().length === 0}
+                                  onChange={(event) =>
+                                    setCachedInputPricePerMillion(event.currentTarget.value)
+                                  }
+                                />
+                              )}
+                            </FormField>
+                            <FormField
+                              label="价格版本"
+                              hint="仅在填写价格时使用，例如 provider-2026-07。"
+                            >
+                              {(fieldProps) => (
+                                <Input
+                                  {...fieldProps}
+                                  value={pricingVersion}
+                                  maxLength={128}
+                                  disabled={selectedModel.trim().length === 0}
+                                  onChange={(event) => setPricingVersion(event.currentTarget.value)}
+                                />
+                              )}
+                            </FormField>
+                            <FormField label="价格更新时间" hint="仅在填写价格时使用。">
+                              {(fieldProps) => (
+                                <Input
+                                  {...fieldProps}
+                                  type="date"
+                                  value={priceUpdatedDate}
+                                  disabled={selectedModel.trim().length === 0}
+                                  onChange={(event) =>
+                                    setPriceUpdatedDate(event.currentTarget.value)
+                                  }
+                                />
+                              )}
+                            </FormField>
+                          </div>
+                        </section>
+                      )}
+
+                      {expertMode && (
+                        <section id="model-capabilities" aria-labelledby="model-capabilities-title">
+                          <h3 id="model-capabilities-title">模型能力确认</h3>
+                          <InlineAlert
+                            tone="info"
+                            title="只确认实际验证过的能力"
+                            description="普通用户不需要勾选；能力由目录和真实探针验证。专家手动确认只影响路由选择，不代表墨影已经实际验证；语义向量、图片和工具调用都不是基础写作的前提。"
+                          />
+                          <div className="model-center-grid" role="group" aria-label="模型能力">
+                            {MODEL_HUB_CAPABILITIES.map((capability) => (
+                              <label key={capability} className="checkbox-row">
+                                <input
+                                  type="checkbox"
+                                  checked={confirmedCapabilities.includes(capability)}
+                                  disabled={selectedModel.trim().length === 0}
+                                  onChange={(event) => {
+                                    setConfirmedCapabilities((current) =>
+                                      event.currentTarget.checked
+                                        ? Object.freeze([...new Set([...current, capability])])
+                                        : Object.freeze(
+                                            current.filter((candidate) => candidate !== capability),
+                                          ),
+                                    );
+                                  }}
+                                />
+                                <span>{modelHubCapabilityLabel(capability)}</span>
+                              </label>
+                            ))}
+                          </div>
+                        </section>
+                      )}
+
+                      {selectedModel.trim().length > 0 && runtime.modelGateway.available && (
                         <InlineAlert
-                          tone="info"
-                          title="当前只支持一个认证 Header"
-                          description="Header 值只保存到系统凭据库。图片生成路径暂不支持自定义；图片任务仍使用经过验证的固定 /images/generations 路径。"
+                          tone="warning"
+                          title="能力验证会调用一次模型"
+                          description="点击“验证写作能力”会发送一条不含作品内容的固定短测试，最多请求 64 个输出 token；DeepSeek 探针会关闭推理，供应商可能收取极少费用。测试输入和输出不会写入能力记录。"
                         />
                       )}
-                    </section>
-                  )}
 
-                  <section id="model-selection" aria-labelledby="model-selection-title">
-                    <h3 id="model-selection-title">2. 测试连接并选择模型</h3>
-                    {models.length > 0 ? (
-                      <>
-                        <FormField
-                          label="模型"
-                          hint={
-                            modelHubPageSnapshot.catalogStatus === "cached_warning"
-                              ? `正在使用上次保存的 ${String(models.length)} 个模型；重新检查失败后没有清空目录。`
-                              : modelHubHydrationPending
-                                ? `${modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)} 已保存的模型仍可查看。`
-                                : `本次从端点读取 ${String(models.length)} 个模型。`
-                          }
-                          required
-                        >
-                          {(fieldProps) => (
-                            <Select
-                              {...fieldProps}
-                              value={selectedModel}
-                              placeholder="选择模型"
-                              options={models.map((model) => ({
-                                value: model.id,
-                                label:
-                                  model.sizeBytes === null || model.sizeBytes === undefined
-                                    ? model.displayName
-                                    : `${model.displayName} · ${formatBytes(model.sizeBytes)}`,
-                              }))}
-                              disabled={
-                                modelHubHydrationPending ||
-                                saving ||
-                                checkingModel ||
-                                probingCapability
-                              }
-                              onChange={(event) =>
-                                void selectCatalogModel(event.currentTarget.value)
-                              }
-                            />
-                          )}
-                        </FormField>
-                        {modelHubPageSnapshot.catalogStatus === "cached_warning" && (
-                          <InlineAlert
-                            tone="warning"
-                            title="正在使用上次保存的模型目录"
-                            description="本次重新检查没有完成，原有模型和选择已保留。你可以稍后再次测试连接。"
-                          />
-                        )}
-                      </>
-                    ) : modelHubHydrationPending ? (
-                      <InlineAlert
-                        tone="info"
-                        title="正在恢复 Model Hub"
-                        description={modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)}
-                      />
-                    ) : modelHubPageSnapshot.phase === "ERROR" ||
-                      modelHubPageSnapshot.catalogStatus === "error" ? (
-                      <InlineAlert
-                        tone="error"
-                        title="模型目录暂时无法读取"
-                        description="已保存连接和密钥没有被清除。请重新加载 Model Hub；若仍失败，再检查本地数据库或供应商连接。"
-                      />
-                    ) : expertMode ||
-                      !getModelProviderPreset(providerPreset).modelDiscovery.automatic ? (
-                      <FormField
-                        label={
-                          providerPreset === "volcengine_doubao" ? "模型或 Endpoint ID" : "模型标识"
-                        }
-                        hint="该供应商不保证提供模型列表，请填写控制台显示的真实模型或接入点标识。"
-                        required={!getModelProviderPreset(providerPreset).modelDiscovery.automatic}
-                      >
-                        {(fieldProps) => (
-                          <Input
-                            {...fieldProps}
-                            value={selectedModel}
-                            maxLength={512}
-                            disabled={saving || checkingModel || probingCapability}
-                            onChange={(event) => setSelectedModel(event.currentTarget.value)}
-                          />
-                        )}
-                      </FormField>
-                    ) : (
-                      <InlineAlert
-                        tone={connectionChecked ? "warning" : "info"}
-                        title={connectionChecked ? "没有发现可用模型" : "还没有读取模型"}
-                        description={
-                          connectionChecked
-                            ? "请检查密钥权限和供应商服务状态后重试；如供应商确实不提供模型目录，可在专家设置中手动填写模型标识。"
-                            : provider === "ollama"
-                              ? "请先启动本机 Ollama，然后点击“测试连接并发现模型”。"
-                              : summary.configured
-                                ? "密钥已保存。点击“测试连接并发现模型”读取当前账号真正可用的模型。"
-                                : "先把 API Key 保存到系统凭据库，再测试连接；密钥不会写入普通数据库。"
-                        }
-                      />
-                    )}
-                  </section>
-
-                  {expertMode && (
-                    <section id="model-pricing" aria-labelledby="model-pricing-title">
-                      <h3 id="model-pricing-title">计价信息</h3>
-                      <InlineAlert
-                        tone="info"
-                        title="费用预估依据"
-                        description="这些字段只用于整理上下文、费用估算和预算，不是开始写作的必填项。不确定时可以留空；价格单位为每百万 token，供应商仍可能正常计费。"
-                      />
-                      <div className="model-center-grid">
-                        <FormField
-                          label="上下文窗口（token）"
-                          hint="模型一次可读取的最大 token。目录没有提供时可留空，墨影会使用保守默认长度；这里不是小说字数。"
-                        >
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              type="number"
-                              min={1}
-                              max={100_000_000}
-                              step={1}
-                              value={contextWindowTokens}
-                              disabled={selectedModel.trim().length === 0}
-                              onChange={(event) =>
-                                setContextWindowTokens(event.currentTarget.value)
-                              }
-                            />
-                          )}
-                        </FormField>
-                        <FormField
-                          label="计价币种"
-                          hint="只在填写价格时使用；三位大写代码，例如 USD。"
-                        >
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              value={pricingCurrency}
-                              minLength={3}
-                              maxLength={3}
-                              disabled={selectedModel.trim().length === 0}
-                              onChange={(event) => setPricingCurrency(event.currentTarget.value)}
-                            />
-                          )}
-                        </FormField>
-                        <FormField
-                          label="输入价 / 百万 token"
-                          hint="从供应商价格页获取；不确定可留空。"
-                        >
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              type="number"
-                              min={0}
-                              step="0.000001"
-                              value={inputPricePerMillion}
-                              disabled={selectedModel.trim().length === 0}
-                              onChange={(event) =>
-                                setInputPricePerMillion(event.currentTarget.value)
-                              }
-                            />
-                          )}
-                        </FormField>
-                        <FormField
-                          label="输出价 / 百万 token"
-                          hint="从供应商价格页获取；不确定可留空。"
-                        >
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              type="number"
-                              min={0}
-                              step="0.000001"
-                              value={outputPricePerMillion}
-                              disabled={selectedModel.trim().length === 0}
-                              onChange={(event) =>
-                                setOutputPricePerMillion(event.currentTarget.value)
-                              }
-                            />
-                          )}
-                        </FormField>
-                        <FormField label="缓存输入价 / 百万 token" hint="供应商未区分时可留空。">
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              type="number"
-                              min={0}
-                              step="0.000001"
-                              value={cachedInputPricePerMillion}
-                              disabled={selectedModel.trim().length === 0}
-                              onChange={(event) =>
-                                setCachedInputPricePerMillion(event.currentTarget.value)
-                              }
-                            />
-                          )}
-                        </FormField>
-                        <FormField
-                          label="价格版本"
-                          hint="仅在填写价格时使用，例如 provider-2026-07。"
-                        >
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              value={pricingVersion}
-                              maxLength={128}
-                              disabled={selectedModel.trim().length === 0}
-                              onChange={(event) => setPricingVersion(event.currentTarget.value)}
-                            />
-                          )}
-                        </FormField>
-                        <FormField label="价格更新时间" hint="仅在填写价格时使用。">
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              type="date"
-                              value={priceUpdatedDate}
-                              disabled={selectedModel.trim().length === 0}
-                              onChange={(event) => setPriceUpdatedDate(event.currentTarget.value)}
-                            />
-                          )}
-                        </FormField>
-                      </div>
-                    </section>
-                  )}
-
-                  {expertMode && (
-                    <section id="model-capabilities" aria-labelledby="model-capabilities-title">
-                      <h3 id="model-capabilities-title">模型能力确认</h3>
-                      <InlineAlert
-                        tone="info"
-                        title="只确认实际验证过的能力"
-                        description="普通用户不需要勾选；能力由目录和真实探针验证。专家手动确认只影响路由选择，不代表墨影已经实际验证；语义向量、图片和工具调用都不是基础写作的前提。"
-                      />
-                      <div className="model-center-grid" role="group" aria-label="模型能力">
-                        {MODEL_HUB_CAPABILITIES.map((capability) => (
-                          <label key={capability} className="checkbox-row">
-                            <input
-                              type="checkbox"
-                              checked={confirmedCapabilities.includes(capability)}
-                              disabled={selectedModel.trim().length === 0}
-                              onChange={(event) => {
-                                setConfirmedCapabilities((current) =>
-                                  event.currentTarget.checked
-                                    ? Object.freeze([...new Set([...current, capability])])
-                                    : Object.freeze(
-                                        current.filter((candidate) => candidate !== capability),
-                                      ),
-                                );
-                              }}
-                            />
-                            <span>{modelHubCapabilityLabel(capability)}</span>
-                          </label>
-                        ))}
-                      </div>
-                    </section>
-                  )}
-
-                  {selectedModel.trim().length > 0 && runtime.modelGateway.available && (
-                    <InlineAlert
-                      tone="warning"
-                      title="能力验证会调用一次模型"
-                      description="点击“验证写作能力”会发送一条不含作品内容的固定短测试，最多请求 64 个输出 token；DeepSeek 探针会关闭推理，供应商可能收取极少费用。测试输入和输出不会写入能力记录。"
-                    />
-                  )}
-
-                  {normalizedCapabilityProbeError !== null && (
-                    <InlineAlert
-                      tone="error"
-                      title="写作能力验证失败"
-                      description={`${normalizedCapabilityProbeError.description}（${normalizedCapabilityProbeError.code}）连接和模型目录会保留，修正模型或接入点后可以重试。`}
-                    />
-                  )}
-
-                  {capabilityProbeMessage !== null && (
-                    <InlineAlert
-                      tone="info"
-                      title="写作能力已验证"
-                      description={capabilityProbeMessage}
-                    />
-                  )}
-
-                  <div className="settings-actions">
-                    <Button
-                      loading={saving}
-                      disabled={!modelHubFormReadiness.save.enabled}
-                      onClick={() => void saveModelProfile()}
-                    >
-                      保存供应商与模型
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      loading={checkingModel}
-                      disabled={!modelHubFormReadiness.discover.enabled}
-                      onClick={() => void checkModelConnection()}
-                    >
-                      {getModelProviderPreset(providerPreset).modelDiscovery.automatic
-                        ? "测试连接并发现模型"
-                        : "验证连接与写作能力"}
-                    </Button>
-                    {getModelProviderPreset(providerPreset).modelDiscovery.automatic && (
-                      <Button
-                        variant="secondary"
-                        loading={probingCapability}
-                        disabled={!modelHubFormReadiness.verify.enabled}
-                        onClick={() => void probeSelectedModelCapability()}
-                      >
-                        验证写作能力
-                      </Button>
-                    )}
-                  </div>
-
-                  {(
-                    [
-                      ["保存供应商与模型", modelHubFormReadiness.save],
-                      ["测试连接并发现模型", modelHubFormReadiness.discover],
-                      ...(getModelProviderPreset(providerPreset).modelDiscovery.automatic
-                        ? ([["验证写作能力", modelHubFormReadiness.verify]] as const)
-                        : []),
-                    ] as const
-                  ).map(([label, state]) =>
-                    state.enabled ? null : (
-                      <InlineAlert
-                        key={label}
-                        tone="warning"
-                        title={`${label}暂不可用`}
-                        description={state.blockers.map(({ message }) => message).join(" ")}
-                      />
-                    ),
-                  )}
-
-                  {connection !== null && (
-                    <InlineAlert
-                      tone="info"
-                      title={
-                        getModelProviderPreset(providerPreset).modelDiscovery.automatic
-                          ? "模型目录连接成功"
-                          : "供应商连接成功"
-                      }
-                      description={`${connection.endpointOrigin} · ${String(connection.modelCount)} 个模型 · ${String(connection.latencyMs)} ms。${getModelProviderPreset(providerPreset).modelDiscovery.automatic ? "目录检查不会自动证明模型可生成正文，请按需继续验证写作能力。" : "已通过固定短文本验证模型可生成文字。"}`}
-                    />
-                  )}
-
-                  {connection !== null && providerPreset === "ollama" && (
-                    <InlineAlert
-                      tone={localCapacityAssessment.status === "warning" ? "warning" : "info"}
-                      title="本地模型容量初步体检"
-                      description={describeLocalModelCapacity(
-                        localCapacityAssessment,
-                        modelCapacity,
+                      {normalizedCapabilityProbeError !== null && (
+                        <InlineAlert
+                          tone="error"
+                          title="写作能力验证失败"
+                          description={`${normalizedCapabilityProbeError.description}（${normalizedCapabilityProbeError.code}）连接和模型目录会保留，修正模型或接入点后可以重试。`}
+                        />
                       )}
-                    />
-                  )}
 
-                  {(authentication === "bearer_keyring" ||
-                    providerPreset === "custom_openai_compatible") &&
-                    (runtime.mode === "browser-development" ? (
-                      <InlineAlert
-                        tone="warning"
-                        title="浏览器开发模式不接受模型密钥"
-                        description="请在桌面应用中配置。页面不会把密钥写入浏览器调试存储或模型配置表。"
-                      />
-                    ) : (
-                      <div className="secret-settings">
-                        <div className="card-heading-row">
-                          <strong>系统凭据库</strong>
-                          {modelHubPageSnapshot.credentialStatus === "checking" ||
-                          modelHubHydrationPending ? (
-                            <Badge tone="info">
-                              {modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)}
-                            </Badge>
-                          ) : modelHubPageSnapshot.credentialStatus === "error" ? (
-                            <Badge tone="warning">系统凭据状态暂时无法确认</Badge>
-                          ) : modelHubPageSnapshot.credentialStatus === "not_required" ? (
-                            <Badge tone="neutral">此连接不需要密钥</Badge>
-                          ) : (
-                            <SaveStatus
-                              state={
-                                saving ? "saving" : summary.configured ? "saved_local" : "clean"
-                              }
-                              labels={{
-                                clean: "未配置",
-                                saved_local: `已配置 ····${summary.lastFour ?? ""}`,
-                              }}
-                            />
-                          )}
-                        </div>
-                        <FormField
-                          label={
-                            authentication === "custom_header_keyring"
-                              ? "认证 Header 值"
-                              : "API Key（接口访问密钥）"
-                          }
-                          hint="保存后仅显示末四位；页面不会再次读取完整密钥，也不会写入配置数据库或日志。"
-                          required={authentication !== "none"}
-                        >
-                          {(fieldProps) => (
-                            <Input
-                              {...fieldProps}
-                              type="password"
-                              revealable
-                              revealLabel="显示接口访问密钥"
-                              concealLabel="隐藏接口访问密钥"
-                              autoComplete="off"
-                              value={secret}
-                              placeholder={
-                                modelHubHydrationPending
-                                  ? "正在检查已保存凭据"
-                                  : summary.configured
-                                    ? "留空继续使用已保存凭据"
-                                    : "输入新的 API Key"
-                              }
-                              disabled={
-                                modelHubHydrationPending ||
-                                saving ||
-                                checkingModel ||
-                                probingCapability
-                              }
-                              onChange={(event) => setSecret(event.currentTarget.value)}
-                            />
-                          )}
-                        </FormField>
-                        <div className="settings-actions">
-                          <Button
-                            loading={saving}
-                            disabled={probingCapability || secret.trim().length < 8}
-                            onClick={() => void saveSecret()}
-                          >
-                            保存到系统凭据库
-                          </Button>
-                          {summary.configured &&
-                            hubConnection?.id === providerId &&
-                            hubConnection.providerKind === providerPreset && (
-                              <Button
-                                variant="danger"
-                                loading={saving}
-                                disabled={probingCapability}
-                                onClick={() => void deleteSecret()}
-                              >
-                                删除密钥
-                              </Button>
-                            )}
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              </CardContent>
-            </Card>
+                      {capabilityProbeMessage !== null && (
+                        <InlineAlert
+                          tone="info"
+                          title="写作能力已验证"
+                          description={capabilityProbeMessage}
+                        />
+                      )}
 
-            <Card id="model-routing" className="settings-card--wide">
-              <CardHeader>
-                <div className="card-heading-row">
-                  <div>
-                    <CardTitle headingLevel={2}>AI 分工</CardTitle>
-                    <CardDescription>
-                      选择一种使用方案，让写作、规划和检查使用合适的已连接模型。
-                    </CardDescription>
-                  </div>
-                  <Badge tone={modelHubRouteBadgeTone}>{modelHubRouteBadgeLabel}</Badge>
-                </div>
-              </CardHeader>
-              <CardContent>
-                <div className="model-center-settings">
-                  {normalizedRouteError !== null && (
-                    <div className="model-routing-save-failure">
-                      <InlineAlert
-                        tone="error"
-                        title="AI 分工没有保存"
-                        description={`系统在保存模型分配时遇到本地数据问题。${
-                          routeFailureRollbackConfirmed === true
-                            ? routeFailureLegacyProjectionMayHaveChanged
-                              ? "已重新读取并确认：Model Hub 的 22 项分工未修改；为防止云端回退，旧版兼容分工可能已被安全停用。请重试应用本地隐私方案。"
-                              : "已重新读取并确认：Model Hub 的 22 项分工没有被修改，本次任务路由事务已回滚。"
-                            : routeFailureRollbackConfirmed === false
-                              ? "重新读取后发现分工状态发生变化，请先查看下面的 22 项清单再重试。"
-                              : "暂时无法重新读取并确认旧分工状态；请先导出诊断包。"
-                        }（${normalizedRouteError.code}）`}
-                      />
                       <div className="settings-actions">
                         <Button
-                          variant="secondary"
-                          disabled={schemeSaving || routeSaving}
-                          onClick={() => void applyModelHubScheme()}
+                          loading={saving}
+                          disabled={!modelHubFormReadiness.save.enabled}
+                          onClick={() => void saveModelProfile()}
                         >
-                          重试保存
+                          保存供应商与模型
                         </Button>
                         <Button
                           variant="secondary"
-                          loading={diagnosticBusy}
-                          onClick={() => void downloadDiagnostics()}
+                          loading={checkingModel}
+                          disabled={!modelHubFormReadiness.discover.enabled}
+                          onClick={() => void checkModelConnection()}
                         >
-                          导出脱敏诊断
+                          {getModelProviderPreset(providerPreset).modelDiscovery.automatic
+                            ? "测试连接并发现模型"
+                            : "验证连接与写作能力"}
                         </Button>
+                        {getModelProviderPreset(providerPreset).modelDiscovery.automatic && (
+                          <Button
+                            variant="secondary"
+                            loading={probingCapability}
+                            disabled={!modelHubFormReadiness.verify.enabled}
+                            onClick={() => void probeSelectedModelCapability()}
+                          >
+                            验证写作能力
+                          </Button>
+                        )}
                       </div>
-                      {expertMode && (
-                        <p className="model-routing-technical-detail">
-                          技术详情：{normalizedRouteError.code}；旧状态校验：
-                          {routeFailureRollbackConfirmed === null
-                            ? "未能确认"
-                            : routeFailureRollbackConfirmed
-                              ? routeFailureLegacyProjectionMayHaveChanged
-                                ? "Model Hub 快照未变化；旧兼容分工可能已安全停用"
-                                : "Model Hub 快照未变化"
-                              : "检测到变化"}
-                          。原始 SQL 不会在界面中显示。
-                        </p>
+
+                      {connection !== null && (
+                        <InlineAlert
+                          tone="info"
+                          title={
+                            getModelProviderPreset(providerPreset).modelDiscovery.automatic
+                              ? "模型目录连接成功"
+                              : "供应商连接成功"
+                          }
+                          description={`${connection.endpointOrigin} · ${String(connection.modelCount)} 个模型 · ${String(connection.latencyMs)} ms。${getModelProviderPreset(providerPreset).modelDiscovery.automatic ? "目录检查不会自动证明模型可生成正文，请按需继续验证写作能力。" : "已通过固定短文本验证模型可生成文字。"}`}
+                        />
                       )}
+
+                      {connection !== null && providerPreset === "ollama" && (
+                        <InlineAlert
+                          tone={localCapacityAssessment.status === "warning" ? "warning" : "info"}
+                          title="本地模型容量初步体检"
+                          description={describeLocalModelCapacity(
+                            localCapacityAssessment,
+                            modelCapacity,
+                          )}
+                        />
+                      )}
+
+                      {(authentication === "bearer_keyring" ||
+                        providerPreset === "custom_openai_compatible") &&
+                        (runtime.mode === "browser-development" ? (
+                          <InlineAlert
+                            tone="warning"
+                            title="浏览器开发模式不接受模型密钥"
+                            description="请在桌面应用中配置。页面不会把密钥写入浏览器调试存储或模型配置表。"
+                          />
+                        ) : (
+                          <div className="secret-settings">
+                            <div className="card-heading-row">
+                              <strong>系统凭据库</strong>
+                              {modelHubPageSnapshot.credentialStatus === "checking" ||
+                              modelHubHydrationPending ? (
+                                <Badge tone="info">
+                                  {modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)}
+                                </Badge>
+                              ) : modelHubPageSnapshot.credentialStatus === "error" ? (
+                                <Badge tone="warning">系统凭据状态暂时无法确认</Badge>
+                              ) : modelHubPageSnapshot.credentialStatus === "not_required" ? (
+                                <Badge tone="neutral">此连接不需要密钥</Badge>
+                              ) : (
+                                <SaveStatus
+                                  state={
+                                    saving ? "saving" : summary.configured ? "saved_local" : "clean"
+                                  }
+                                  labels={{
+                                    clean: "未配置",
+                                    saved_local: `已配置 ····${summary.lastFour ?? ""}`,
+                                  }}
+                                />
+                              )}
+                            </div>
+                            <FormField
+                              label={
+                                authentication === "custom_header_keyring"
+                                  ? "认证 Header 值"
+                                  : "API Key（接口访问密钥）"
+                              }
+                              hint="保存后仅显示末四位；页面不会再次读取完整密钥，也不会写入配置数据库或日志。"
+                              required={authentication !== "none"}
+                            >
+                              {(fieldProps) => (
+                                <Input
+                                  {...fieldProps}
+                                  type="password"
+                                  revealable
+                                  revealLabel="显示接口访问密钥"
+                                  concealLabel="隐藏接口访问密钥"
+                                  autoComplete="off"
+                                  value={secret}
+                                  placeholder={
+                                    modelHubHydrationPending
+                                      ? "正在检查已保存凭据"
+                                      : summary.configured
+                                        ? "留空继续使用已保存凭据"
+                                        : "输入新的 API Key"
+                                  }
+                                  disabled={
+                                    modelHubHydrationPending ||
+                                    saving ||
+                                    checkingModel ||
+                                    probingCapability
+                                  }
+                                  onChange={(event) => setSecret(event.currentTarget.value)}
+                                />
+                              )}
+                            </FormField>
+                            <div className="settings-actions">
+                              <Button
+                                loading={saving}
+                                disabled={probingCapability || secret.trim().length < 8}
+                                onClick={() => void saveSecret()}
+                              >
+                                {credentialDeletedConnection === null
+                                  ? "保存到系统凭据库"
+                                  : "重新绑定原连接"}
+                              </Button>
+                              {summary.configured &&
+                                hubConnection?.id === providerId &&
+                                hubConnection.providerKind === providerPreset && (
+                                  <Button
+                                    variant="danger"
+                                    loading={saving}
+                                    disabled={probingCapability}
+                                    onClick={() => void deleteSecret()}
+                                  >
+                                    删除密钥
+                                  </Button>
+                                )}
+                            </div>
+                          </div>
+                        ))}
                     </div>
                   )}
 
-                  <InlineAlert
-                    tone={modelHubOverallAlertTone(routingVisibility.state)}
-                    title={modelHubOverallTitle(routingVisibility.state)}
-                    description={modelHubOverallDescription(routingVisibility)}
-                  />
-                  <div className="model-routing-summary" aria-label="AI 分工总体状态">
-                    <strong>
-                      {`${String(routingVisibility.enabledRouteCount)} / ${String(
-                        NOVEL_AI_TASKS.length,
-                      )} 类已配置${
-                        missingNovelTaskRouteCount > 0
-                          ? ` · ${String(missingNovelTaskRouteCount)} 类缺能力`
-                          : ""
-                      }`}
-                    </strong>
-                    <span>
-                      手动 {String(routingVisibility.manuallyConfiguredCount)} 项 · 智能推荐{" "}
-                      {String(routingVisibility.automaticallyConfiguredCount)} 项
-                    </span>
-                  </div>
-
-                  <ModelHubSelectableCatalogBrowser
-                    connectedModels={selectableCatalogConnectedModels}
-                    officialCandidates={selectableCatalogOfficialCandidates}
-                    disabled={modelHubHydrationPending || routeSaving}
-                    onSelect={selectCatalogBrowserModel}
-                  />
-
-                  {routingVisibility.models.length > 0 && (
-                    <section
-                      className="model-routing-capabilities"
-                      aria-labelledby="connected-model-capabilities-title"
-                    >
-                      <h3 id="connected-model-capabilities-title">当前模型能做什么</h3>
-                      <div className="model-routing-model-grid">
-                        {routingVisibility.models.map((model) => (
-                          <article className="model-routing-model" key={model.catalogEntry.id}>
-                            <header>
-                              <div>
-                                <strong>
-                                  {
-                                    getModelProviderPreset(model.connection.providerKind)
-                                      .displayName
-                                  }
-                                  {" / "}
-                                  {model.catalogEntry.displayName}
-                                </strong>
-                                <small>
-                                  协议：{model.connection.protocol} · 最后验证：
-                                  {formatVerificationTime(model.lastVerifiedAt)}
-                                </small>
-                              </div>
-                              <Badge
-                                tone={
-                                  !model.connectionUsable
-                                    ? "danger"
-                                    : model.latestProbeFailureCode === null
-                                      ? "success"
-                                      : "warning"
-                                }
-                              >
-                                {!model.connectionUsable
-                                  ? "连接异常"
-                                  : model.latestProbeFailureCode === null
-                                    ? "能力证据已读取"
-                                    : "最近实测失败"}
-                              </Badge>
-                            </header>
-                            <ul className="model-capability-list">
-                              {model.capabilities.map((capability) => (
-                                <li key={capability.capability} data-state={capability.state}>
-                                  <span>{capabilityLabel(capability.capability)}</span>
-                                  <small>
-                                    {capabilityDisplayStateLabel(capability.state)} ·{" "}
-                                    {capabilityEvidenceSourceLabel(capability.source)}
-                                    {capability.observedAt === null
-                                      ? ""
-                                      : ` · ${formatVerificationTime(capability.observedAt)}`}
-                                    {capability.failureCode === null
-                                      ? ""
-                                      : ` · ${capability.failureCode}`}
-                                  </small>
-                                </li>
-                              ))}
-                            </ul>
-                          </article>
-                        ))}
-                      </div>
-                    </section>
+                  {normalizedRouteError !== null && (
+                    <InlineAlert
+                      tone="error"
+                      title="AI 分工没有保存"
+                      description={`写作能力证据已保留，但自动分工没有完成。请打开“AI 分工”查看回读结果并重试。（${normalizedRouteError.code}）`}
+                    />
                   )}
+                </CardContent>
+              </Card>
+            )}
 
-                  <div className="model-routing-task-disclosure">
-                    <details
-                      open={configuredTaskPartitionExpanded}
-                      onToggle={(event) =>
-                        setConfiguredTaskPartitionExpanded(event.currentTarget.open)
-                      }
+            {activeModelHubSection === "model-routing" && (
+              <Card id="model-routing" className="settings-card--wide">
+                <CardHeader>
+                  <div className="card-heading-row">
+                    <div>
+                      <CardTitle headingLevel={2}>AI 分工</CardTitle>
+                      <CardDescription>
+                        选择一种使用方案，让写作、规划和检查使用合适的已连接模型。
+                      </CardDescription>
+                    </div>
+                    <Badge tone={modelHubRouteBadgeTone}>{modelHubRouteBadgeLabel}</Badge>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <div className="model-center-settings">
+                    {normalizedRouteError !== null && (
+                      <div className="model-routing-save-failure">
+                        <InlineAlert
+                          tone="error"
+                          title="AI 分工没有保存"
+                          description={`系统在保存模型分配时遇到本地数据问题。${
+                            routeFailureRollbackConfirmed === true
+                              ? routeFailureLegacyProjectionMayHaveChanged
+                                ? "已重新读取并确认：Model Hub 的 22 项分工未修改；为防止云端回退，旧版兼容分工可能已被安全停用。请重试应用本地隐私方案。"
+                                : "已重新读取并确认：Model Hub 的 22 项分工没有被修改，本次任务路由事务已回滚。"
+                              : routeFailureRollbackConfirmed === false
+                                ? "重新读取后发现分工状态发生变化，请先查看下面的 22 项清单再重试。"
+                                : "暂时无法重新读取并确认旧分工状态；请先导出诊断包。"
+                          }（${normalizedRouteError.code}）`}
+                        />
+                        <div className="settings-actions">
+                          <Button
+                            variant="secondary"
+                            disabled={schemeSaving || routeSaving}
+                            onClick={() => void applyModelHubScheme()}
+                          >
+                            重试保存
+                          </Button>
+                          <Button
+                            variant="secondary"
+                            loading={diagnosticBusy}
+                            onClick={() => void downloadDiagnostics()}
+                          >
+                            导出脱敏诊断
+                          </Button>
+                        </div>
+                        {expertMode && (
+                          <p className="model-routing-technical-detail">
+                            技术详情：{normalizedRouteError.code}；旧状态校验：
+                            {routeFailureRollbackConfirmed === null
+                              ? "未能确认"
+                              : routeFailureRollbackConfirmed
+                                ? routeFailureLegacyProjectionMayHaveChanged
+                                  ? "Model Hub 快照未变化；旧兼容分工可能已安全停用"
+                                  : "Model Hub 快照未变化"
+                                : "检测到变化"}
+                            。原始 SQL 不会在界面中显示。
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {normalizedRouteError === null && (
+                      <InlineAlert
+                        tone={modelHubOverallAlertTone(routingVisibility.state)}
+                        title={modelHubOverallTitle(routingVisibility.state)}
+                        description={modelHubOverallDescription(routingVisibility)}
+                      />
+                    )}
+                    <div className="model-routing-summary" aria-label="AI 分工总体状态">
+                      <strong>
+                        {`${String(routingVisibility.enabledRouteCount)} / ${String(
+                          NOVEL_AI_TASKS.length,
+                        )} 类已配置${
+                          missingNovelTaskRouteCount > 0
+                            ? ` · ${String(missingNovelTaskRouteCount)} 类缺能力`
+                            : ""
+                        }`}
+                      </strong>
+                      <span>
+                        手动 {String(routingVisibility.manuallyConfiguredCount)} 项 · 智能推荐{" "}
+                        {String(routingVisibility.automaticallyConfiguredCount)} 项
+                      </span>
+                    </div>
+
+                    <ModelHubSelectableCatalogBrowser
+                      connectedModels={selectableCatalogConnectedModels}
+                      officialCandidates={selectableCatalogOfficialCandidates}
+                      disabled={modelHubHydrationPending || routeSaving}
+                      onSelect={selectCatalogBrowserModel}
+                    />
+
+                    {routingVisibility.models.length > 0 && (
+                      <section
+                        className="model-routing-capabilities"
+                        aria-labelledby="connected-model-capabilities-title"
+                      >
+                        <h3 id="connected-model-capabilities-title">当前模型能做什么</h3>
+                        <div className="model-routing-model-grid">
+                          {routingVisibility.models.map((model) => (
+                            <article className="model-routing-model" key={model.catalogEntry.id}>
+                              <header>
+                                <div>
+                                  <strong>
+                                    {
+                                      getModelProviderPreset(model.connection.providerKind)
+                                        .displayName
+                                    }
+                                    {" / "}
+                                    {model.catalogEntry.displayName}
+                                  </strong>
+                                  <small>
+                                    协议：{model.connection.protocol} · 最后验证：
+                                    {formatVerificationTime(model.lastVerifiedAt)}
+                                  </small>
+                                </div>
+                                <Badge
+                                  tone={
+                                    !model.connectionUsable
+                                      ? "danger"
+                                      : model.latestProbeFailureCode === null
+                                        ? "success"
+                                        : "warning"
+                                  }
+                                >
+                                  {!model.connectionUsable
+                                    ? "连接异常"
+                                    : model.latestProbeFailureCode === null
+                                      ? "能力证据已读取"
+                                      : "最近实测失败"}
+                                </Badge>
+                              </header>
+                              <ul className="model-capability-list">
+                                {model.capabilities.map((capability) => (
+                                  <li key={capability.capability} data-state={capability.state}>
+                                    <span>{capabilityLabel(capability.capability)}</span>
+                                    <small>
+                                      {capabilityDisplayStateLabel(capability.state)} ·{" "}
+                                      {capabilityEvidenceSourceLabel(capability.source)}
+                                      {capability.observedAt === null
+                                        ? ""
+                                        : ` · ${formatVerificationTime(capability.observedAt)}`}
+                                      {capability.failureCode === null
+                                        ? ""
+                                        : ` · ${capability.failureCode}`}
+                                    </small>
+                                  </li>
+                                ))}
+                              </ul>
+                            </article>
+                          ))}
+                        </div>
+                      </section>
+                    )}
+
+                    <div className="model-routing-task-disclosure">
+                      <details
+                        open={configuredTaskPartitionExpanded}
+                        onToggle={(event) =>
+                          setConfiguredTaskPartitionExpanded(event.currentTarget.open)
+                        }
+                      >
+                        <summary>
+                          查看已配置的 {String(routingVisibility.enabledRouteCount)} 项
+                        </summary>
+                        <div className="model-routing-task-groups">
+                          {MODEL_HUB_TASK_GROUPS.map((group) => {
+                            const tasks = routingVisibility.tasks.filter(
+                              ({ definition, route }) =>
+                                definition.group === group && route !== null,
+                            );
+                            if (tasks.length === 0) return null;
+                            return (
+                              <section key={group}>
+                                <h4>{modelHubTaskGroupLabel(group)}</h4>
+                                <ul className="model-routing-task-list">
+                                  {tasks.map((task) => (
+                                    <li
+                                      id={`model-routing-task-${task.definition.task}`}
+                                      key={task.definition.task}
+                                      data-state={task.status}
+                                      tabIndex={-1}
+                                    >
+                                      <div>
+                                        <strong>{task.definition.displayName}</strong>
+                                        <small>{task.definition.description}</small>
+                                      </div>
+                                      <dl>
+                                        <div>
+                                          <dt>主模型</dt>
+                                          <dd>
+                                            {task.primaryModel === null
+                                              ? "模型已不可用"
+                                              : catalogEntryLabel(
+                                                  task.primaryModel,
+                                                  hubConnections,
+                                                )}
+                                          </dd>
+                                        </div>
+                                        <div>
+                                          <dt>备用模型</dt>
+                                          <dd>
+                                            {task.fallbackModel === null
+                                              ? "未配置"
+                                              : catalogEntryLabel(
+                                                  task.fallbackModel,
+                                                  hubConnections,
+                                                )}
+                                          </dd>
+                                        </div>
+                                        <div>
+                                          <dt>所需能力</dt>
+                                          <dd>
+                                            {task.definition.requiredCapabilities
+                                              .map(capabilityLabel)
+                                              .join("、")}
+                                          </dd>
+                                        </div>
+                                        <div>
+                                          <dt>来源</dt>
+                                          <dd>
+                                            {task.route === null
+                                              ? "未配置"
+                                              : routeOriginLabel(task.route.routeOrigin)}
+                                          </dd>
+                                        </div>
+                                      </dl>
+                                      {task.status === "failed" && (
+                                        <p className="model-routing-task-warning">{task.reason}</p>
+                                      )}
+                                      {selectableModelsForTaskDisclosure(task.definition.task)}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </section>
+                            );
+                          })}
+                        </div>
+                      </details>
+                      <details
+                        open={missingTaskPartitionExpanded}
+                        onToggle={(event) =>
+                          setMissingTaskPartitionExpanded(event.currentTarget.open)
+                        }
+                      >
+                        <summary>
+                          查看尚未配置的 {String(routingVisibility.missingRouteCount)} 项
+                        </summary>
+                        <div className="model-routing-task-groups">
+                          {MODEL_HUB_TASK_GROUPS.map((group) => {
+                            const tasks = routingVisibility.tasks.filter(
+                              ({ definition, route }) =>
+                                definition.group === group && route === null,
+                            );
+                            if (tasks.length === 0) return null;
+                            return (
+                              <section key={group}>
+                                <h4>{modelHubTaskGroupLabel(group)}</h4>
+                                <ul className="model-routing-task-list">
+                                  {tasks.map((task) => {
+                                    const recommendation =
+                                      connectedTaskRecommendations.get(task.definition.task) ??
+                                      null;
+                                    const providerRecommendation =
+                                      providerTaskRecommendations.get(task.definition.task) ?? null;
+                                    return (
+                                      <li
+                                        id={`model-routing-task-${task.definition.task}`}
+                                        key={task.definition.task}
+                                        data-state="missing"
+                                        tabIndex={-1}
+                                      >
+                                        <div>
+                                          <strong>{task.definition.displayName}</strong>
+                                          <small>{task.reason}</small>
+                                        </div>
+                                        <p>
+                                          <strong>影响：</strong>
+                                          {task.definition.impactWhenMissing}
+                                        </p>
+                                        <p>
+                                          <strong>下一步：</strong>
+                                          {recommendation === null
+                                            ? providerRecommendation === null
+                                              ? task.nextStep
+                                              : `可连接 ${providerRecommendation.providerLabel}，再发现并验证 ${providerRecommendation.modelFamilies.join(" / ")}；供应商文档不是墨影能力验证。`
+                                            : recommendation.reason}
+                                        </p>
+                                        {recommendation !== null && (
+                                          <div className="settings-actions">
+                                            <span>
+                                              建议：
+                                              {catalogEntryLabel(
+                                                recommendation.model.catalogEntry,
+                                                hubConnections,
+                                              )}
+                                            </span>
+                                            {task.definition.task === "rerank" ? (
+                                              <a
+                                                className="button-link button-link--secondary"
+                                                href="#expert-model-routing"
+                                              >
+                                                确认素材隐私后分配
+                                              </a>
+                                            ) : (
+                                              <Button
+                                                variant="secondary"
+                                                loading={
+                                                  recommendedTaskBusy === task.definition.task
+                                                }
+                                                disabled={
+                                                  recommendedTaskBusy !== null ||
+                                                  routeSaving ||
+                                                  modelHubHydrationPending
+                                                }
+                                                onClick={() =>
+                                                  void verifyAndAssignRecommendedTask(
+                                                    task.definition.task,
+                                                    recommendation,
+                                                  )
+                                                }
+                                              >
+                                                {recommendation.readiness !== "ready"
+                                                  ? "验证并用于此任务"
+                                                  : "用于此任务"}
+                                              </Button>
+                                            )}
+                                          </div>
+                                        )}
+                                        {recommendation === null &&
+                                          providerRecommendation !== null && (
+                                            <div className="settings-actions">
+                                              <span>
+                                                专用能力候选：
+                                                {providerRecommendation.providerLabel} ·
+                                                {providerRecommendation.modelFamilies.join(" / ")}
+                                              </span>
+                                              <a
+                                                className="button-link button-link--secondary"
+                                                href="#model-center"
+                                                onClick={() =>
+                                                  applyProviderPreset(
+                                                    providerRecommendation.providerKind,
+                                                  )
+                                                }
+                                              >
+                                                连接此供应商
+                                              </a>
+                                              {expertMode && (
+                                                <a
+                                                  className="back-link"
+                                                  href={providerRecommendation.evidenceUrl}
+                                                  target="_blank"
+                                                  rel="noreferrer"
+                                                >
+                                                  查看供应商证据
+                                                </a>
+                                              )}
+                                            </div>
+                                          )}
+                                        {selectableModelsForTaskDisclosure(task.definition.task)}
+                                        {task.definition.isCoreWritingTask ? (
+                                          <Badge tone="danger">会阻止这项基础任务配置</Badge>
+                                        ) : (
+                                          <Badge tone="neutral">不阻止其他基础配置</Badge>
+                                        )}
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              </section>
+                            );
+                          })}
+                        </div>
+                      </details>
+                    </div>
+
+                    <section
+                      className="model-routing-missing-capabilities"
+                      aria-labelledby="missing-capabilities-title"
                     >
-                      <summary>
-                        查看已配置的 {String(routingVisibility.enabledRouteCount)} 项
-                      </summary>
-                      <div className="model-routing-task-groups">
-                        {MODEL_HUB_TASK_GROUPS.map((group) => {
-                          const tasks = routingVisibility.tasks.filter(
-                            ({ definition, route }) => definition.group === group && route !== null,
-                          );
-                          if (tasks.length === 0) return null;
-                          return (
-                            <section key={group}>
-                              <h4>{modelHubTaskGroupLabel(group)}</h4>
-                              <ul className="model-routing-task-list">
-                                {tasks.map((task) => (
-                                  <li
-                                    id={`model-routing-task-${task.definition.task}`}
-                                    key={task.definition.task}
-                                    data-state={task.status}
-                                    tabIndex={-1}
-                                  >
-                                    <div>
-                                      <strong>{task.definition.displayName}</strong>
-                                      <small>{task.definition.description}</small>
-                                    </div>
+                      <h3 id="missing-capabilities-title">完善全部功能还需要</h3>
+                      {routingVisibility.missingCapabilities.length === 0 ? (
+                        <p>当前 22 项任务所需能力均已满足。</p>
+                      ) : (
+                        <ul>
+                          {routingVisibility.missingCapabilities.map((missing) => (
+                            <li key={missing.capability}>
+                              <div>
+                                <strong>{capabilityLabel(missing.capability)}</strong>
+                                <span>
+                                  {missing.core ? "核心写作能力" : "非核心扩展能力"} · 影响
+                                  {String(missing.tasks.length)} 项任务
+                                </span>
+                              </div>
+                              <p>{missing.degradedBehavior}</p>
+                              <Badge tone={missing.blocksBasicWriting ? "danger" : "neutral"}>
+                                {missing.blocksBasicWriting
+                                  ? "会阻止部分基础任务配置"
+                                  : "其他基础配置不受影响"}
+                              </Badge>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      <a className="button-link button-link--secondary" href="#model-center">
+                        新增或验证模型连接
+                      </a>
+                    </section>
+
+                    <FormField label="使用方案" required>
+                      {(fieldProps) => (
+                        <Select
+                          {...fieldProps}
+                          value={modelHubScheme}
+                          options={MODEL_HUB_SCHEME_OPTIONS.map((option) => ({
+                            value: option.value,
+                            label: option.label,
+                          }))}
+                          disabled={schemeSaving || routeSaving}
+                          onChange={(event) => {
+                            setModelHubScheme(event.currentTarget.value as ModelHubScheme);
+                            setSchemeMessage(null);
+                          }}
+                        />
+                      )}
+                    </FormField>
+                    <p>
+                      {MODEL_HUB_SCHEME_OPTIONS.find(({ value }) => value === modelHubScheme)
+                        ?.description ?? ""}
+                    </p>
+                    <ul className="privacy-list" aria-label="小说任务分工示例">
+                      <li>正文：开书引导、正文生成、续写、改写与润色。</li>
+                      <li>规划：大纲、场景拆解、章节摘要与长期记忆压缩。</li>
+                      <li>检查：矛盾、视角边界、人物说话一致性与深度复核。</li>
+                    </ul>
+                    <div className="settings-actions">
+                      <Button
+                        loading={schemeSaving}
+                        disabled={routeSaving}
+                        onClick={() => void applyModelHubScheme()}
+                      >
+                        应用 AI 分工
+                      </Button>
+                    </div>
+                    {schemeMessage !== null && (
+                      <InlineAlert
+                        tone={schemeMessageIsWarning ? "warning" : "info"}
+                        title={schemeMessageIsWarning ? "AI 分工部分配置完成" : "AI 分工已更新"}
+                        description={schemeMessage}
+                      />
+                    )}
+
+                    {hubCatalog.every(({ availability }) => availability !== "available") && (
+                      <InlineAlert
+                        tone="warning"
+                        title="还没有可用模型"
+                        description="请先在上方连接供应商、测试连接并保存一个模型。手动写作仍可使用，但需要 AI 的功能会明确提示尚未就绪。"
+                      />
+                    )}
+
+                    {expertMode && (
+                      <>
+                        <section
+                          className="model-routing-expert-matrix"
+                          aria-labelledby="model-routing-expert-matrix-title"
+                        >
+                          <div className="model-routing-expert-matrix__heading">
+                            <div>
+                              <h3 id="model-routing-expert-matrix-title">22 项任务矩阵</h3>
+                              <p>
+                                这里复用下方单项编辑器，不会创建第二套路由入口。内部任务和能力代码只在专家模式显示。
+                              </p>
+                            </div>
+                            <FormField label="矩阵筛选">
+                              {(fieldProps) => (
+                                <Select
+                                  {...fieldProps}
+                                  value={taskMatrixFilter}
+                                  options={[
+                                    { value: "all", label: "全部 22 项" },
+                                    { value: "missing", label: "只看未配置" },
+                                    { value: "failed", label: "只看失败" },
+                                  ]}
+                                  onChange={(event) =>
+                                    setTaskMatrixFilter(
+                                      event.currentTarget.value as "all" | "missing" | "failed",
+                                    )
+                                  }
+                                />
+                              )}
+                            </FormField>
+                          </div>
+                          <div className="model-routing-expert-rows">
+                            {visibleExpertTasks.length === 0 ? (
+                              <p className="model-routing-expert-empty">当前筛选下没有任务。</p>
+                            ) : (
+                              visibleExpertTasks.map((task) => {
+                                const costProfile =
+                                  task.primaryModel === null
+                                    ? null
+                                    : (routingCostPrivacyProfiles.find(
+                                        ({ catalogEntryId }) =>
+                                          catalogEntryId === task.primaryModel?.id,
+                                      ) ?? null);
+                                const primaryProjection =
+                                  task.primaryModel === null
+                                    ? null
+                                    : (routingVisibility.models.find(
+                                        ({ catalogEntry }) =>
+                                          catalogEntry.id === task.primaryModel?.id,
+                                      ) ?? null);
+                                return (
+                                  <article key={task.definition.task} data-state={task.status}>
+                                    <header>
+                                      <div>
+                                        <strong>{task.definition.displayName}</strong>
+                                        <code>{task.definition.task}</code>
+                                      </div>
+                                      <Badge
+                                        tone={
+                                          task.status === "configured"
+                                            ? "success"
+                                            : task.status === "failed"
+                                              ? "danger"
+                                              : "neutral"
+                                        }
+                                      >
+                                        {task.status === "configured"
+                                          ? "已配置"
+                                          : task.status === "failed"
+                                            ? "需要修复"
+                                            : "未配置"}
+                                      </Badge>
+                                    </header>
                                     <dl>
+                                      <div>
+                                        <dt>任务组</dt>
+                                        <dd>{modelHubTaskGroupLabel(task.definition.group)}</dd>
+                                      </div>
+                                      <div>
+                                        <dt>所需能力</dt>
+                                        <dd>
+                                          {task.definition.requiredCapabilities.map(
+                                            (capability) => (
+                                              <code key={capability}>{capability}</code>
+                                            ),
+                                          )}
+                                        </dd>
+                                      </div>
                                       <div>
                                         <dt>主模型</dt>
                                         <dd>
                                           {task.primaryModel === null
-                                            ? "模型已不可用"
+                                            ? "未配置"
                                             : catalogEntryLabel(task.primaryModel, hubConnections)}
                                         </dd>
                                       </div>
@@ -5061,11 +5694,40 @@ export function SettingsPage() {
                                         </dd>
                                       </div>
                                       <div>
-                                        <dt>所需能力</dt>
+                                        <dt>能力证据</dt>
                                         <dd>
-                                          {task.definition.requiredCapabilities
-                                            .map(capabilityLabel)
-                                            .join("、")}
+                                          {primaryProjection === null
+                                            ? "没有可读证据"
+                                            : task.definition.requiredCapabilities
+                                                .map((capability) => {
+                                                  const evidence =
+                                                    primaryProjection.capabilities.find(
+                                                      (item) => item.capability === capability,
+                                                    );
+                                                  return evidence === undefined
+                                                    ? `${capability}: unknown`
+                                                    : `${capability}: ${evidence.state} / ${evidence.source ?? "none"}`;
+                                                })
+                                                .join("；")}
+                                        </dd>
+                                      </div>
+                                      <div>
+                                        <dt>费用</dt>
+                                        <dd>
+                                          {task.route?.maximumCostMicros === null ||
+                                          task.route?.maximumCostMicros === undefined
+                                            ? costProfile?.pricingVersion === null ||
+                                              costProfile?.pricingVersion === undefined
+                                              ? "未设置上限；价格证据未知"
+                                              : `未设置上限；价格版本 ${costProfile.pricingVersion}`
+                                            : `${task.route.maximumCostMicros} 微单位 / ${task.route.currency ?? "币种未知"}`}
+                                        </dd>
+                                      </div>
+                                      <div>
+                                        <dt>隐私</dt>
+                                        <dd>
+                                          {task.route?.privacyPolicy ?? "未配置"}；证据
+                                          {costProfile?.evidenceSource ?? "unknown"}
                                         </dd>
                                       </div>
                                       <div>
@@ -5076,771 +5738,409 @@ export function SettingsPage() {
                                             : routeOriginLabel(task.route.routeOrigin)}
                                         </dd>
                                       </div>
-                                    </dl>
-                                    {task.status === "failed" && (
-                                      <p className="model-routing-task-warning">{task.reason}</p>
-                                    )}
-                                    {selectableModelsForTaskDisclosure(task.definition.task)}
-                                  </li>
-                                ))}
-                              </ul>
-                            </section>
-                          );
-                        })}
-                      </div>
-                    </details>
-                    <details
-                      open={missingTaskPartitionExpanded}
-                      onToggle={(event) =>
-                        setMissingTaskPartitionExpanded(event.currentTarget.open)
-                      }
-                    >
-                      <summary>
-                        查看尚未配置的 {String(routingVisibility.missingRouteCount)} 项
-                      </summary>
-                      <div className="model-routing-task-groups">
-                        {MODEL_HUB_TASK_GROUPS.map((group) => {
-                          const tasks = routingVisibility.tasks.filter(
-                            ({ definition, route }) => definition.group === group && route === null,
-                          );
-                          if (tasks.length === 0) return null;
-                          return (
-                            <section key={group}>
-                              <h4>{modelHubTaskGroupLabel(group)}</h4>
-                              <ul className="model-routing-task-list">
-                                {tasks.map((task) => {
-                                  const recommendation =
-                                    connectedTaskRecommendations.get(task.definition.task) ?? null;
-                                  const providerRecommendation =
-                                    providerTaskRecommendations.get(task.definition.task) ?? null;
-                                  return (
-                                    <li
-                                      id={`model-routing-task-${task.definition.task}`}
-                                      key={task.definition.task}
-                                      data-state="missing"
-                                      tabIndex={-1}
-                                    >
                                       <div>
-                                        <strong>{task.definition.displayName}</strong>
-                                        <small>{task.reason}</small>
+                                        <dt>最后验证</dt>
+                                        <dd>{formatVerificationTime(task.lastVerifiedAt)}</dd>
                                       </div>
-                                      <p>
-                                        <strong>影响：</strong>
-                                        {task.definition.impactWhenMissing}
-                                      </p>
-                                      <p>
-                                        <strong>下一步：</strong>
-                                        {recommendation === null
-                                          ? providerRecommendation === null
-                                            ? task.nextStep
-                                            : `可连接 ${providerRecommendation.providerLabel}，再发现并验证 ${providerRecommendation.modelFamilies.join(" / ")}；供应商文档不是墨影能力验证。`
-                                          : recommendation.reason}
-                                      </p>
-                                      {recommendation !== null && (
-                                        <div className="settings-actions">
-                                          <span>
-                                            建议：
-                                            {catalogEntryLabel(
-                                              recommendation.model.catalogEntry,
-                                              hubConnections,
-                                            )}
-                                          </span>
-                                          {task.definition.task === "rerank" ? (
-                                            <a
-                                              className="button-link button-link--secondary"
-                                              href="#expert-model-routing"
-                                            >
-                                              确认素材隐私后分配
-                                            </a>
-                                          ) : (
-                                            <Button
-                                              variant="secondary"
-                                              loading={recommendedTaskBusy === task.definition.task}
-                                              disabled={
-                                                recommendedTaskBusy !== null ||
-                                                routeSaving ||
-                                                modelHubHydrationPending
-                                              }
-                                              onClick={() =>
-                                                void verifyAndAssignRecommendedTask(
-                                                  task.definition.task,
-                                                  recommendation,
-                                                )
-                                              }
-                                            >
-                                              {recommendation.readiness !== "ready"
-                                                ? "验证并用于此任务"
-                                                : "用于此任务"}
-                                            </Button>
-                                          )}
-                                        </div>
-                                      )}
-                                      {recommendation === null &&
-                                        providerRecommendation !== null && (
-                                          <div className="settings-actions">
-                                            <span>
-                                              专用能力候选：
-                                              {providerRecommendation.providerLabel} ·
-                                              {providerRecommendation.modelFamilies.join(" / ")}
-                                            </span>
-                                            <a
-                                              className="button-link button-link--secondary"
-                                              href="#model-center"
-                                              onClick={() =>
-                                                applyProviderPreset(
-                                                  providerRecommendation.providerKind,
-                                                )
-                                              }
-                                            >
-                                              连接此供应商
-                                            </a>
-                                            {expertMode && (
-                                              <a
-                                                className="back-link"
-                                                href={providerRecommendation.evidenceUrl}
-                                                target="_blank"
-                                                rel="noreferrer"
-                                              >
-                                                查看供应商证据
-                                              </a>
-                                            )}
-                                          </div>
-                                        )}
-                                      {selectableModelsForTaskDisclosure(task.definition.task)}
-                                      {task.definition.isCoreWritingTask ? (
-                                        <Badge tone="danger">会阻止这项基础写作</Badge>
-                                      ) : (
-                                        <Badge tone="neutral">不阻止基础写作</Badge>
-                                      )}
-                                    </li>
-                                  );
-                                })}
-                              </ul>
-                            </section>
-                          );
-                        })}
-                      </div>
-                    </details>
-                  </div>
-
-                  <section
-                    className="model-routing-missing-capabilities"
-                    aria-labelledby="missing-capabilities-title"
-                  >
-                    <h3 id="missing-capabilities-title">完善全部功能还需要</h3>
-                    {routingVisibility.missingCapabilities.length === 0 ? (
-                      <p>当前 22 项任务所需能力均已满足。</p>
-                    ) : (
-                      <ul>
-                        {routingVisibility.missingCapabilities.map((missing) => (
-                          <li key={missing.capability}>
-                            <div>
-                              <strong>{capabilityLabel(missing.capability)}</strong>
-                              <span>
-                                {missing.core ? "核心写作能力" : "非核心扩展能力"} · 影响
-                                {String(missing.tasks.length)} 项任务
-                              </span>
-                            </div>
-                            <p>{missing.degradedBehavior}</p>
-                            <Badge tone={missing.blocksBasicWriting ? "danger" : "neutral"}>
-                              {missing.blocksBasicWriting ? "会阻止部分基础写作" : "基础写作仍可用"}
-                            </Badge>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                    <a className="button-link button-link--secondary" href="#model-center">
-                      新增或验证模型连接
-                    </a>
-                  </section>
-
-                  <FormField label="使用方案" required>
-                    {(fieldProps) => (
-                      <Select
-                        {...fieldProps}
-                        value={modelHubScheme}
-                        options={MODEL_HUB_SCHEME_OPTIONS.map((option) => ({
-                          value: option.value,
-                          label: option.label,
-                        }))}
-                        disabled={schemeSaving || routeSaving}
-                        onChange={(event) => {
-                          setModelHubScheme(event.currentTarget.value as ModelHubScheme);
-                          setSchemeMessage(null);
-                        }}
-                      />
-                    )}
-                  </FormField>
-                  <p>
-                    {MODEL_HUB_SCHEME_OPTIONS.find(({ value }) => value === modelHubScheme)
-                      ?.description ?? ""}
-                  </p>
-                  <ul className="privacy-list" aria-label="小说任务分工示例">
-                    <li>正文：开书引导、正文生成、续写、改写与润色。</li>
-                    <li>规划：大纲、场景拆解、章节摘要与长期记忆压缩。</li>
-                    <li>检查：矛盾、视角边界、人物说话一致性与深度复核。</li>
-                  </ul>
-                  <div className="settings-actions">
-                    <Button
-                      loading={schemeSaving}
-                      disabled={routeSaving}
-                      onClick={() => void applyModelHubScheme()}
-                    >
-                      应用 AI 分工
-                    </Button>
-                  </div>
-                  {schemeMessage !== null && (
-                    <InlineAlert
-                      tone={schemeMessageIsWarning ? "warning" : "info"}
-                      title={schemeMessageIsWarning ? "AI 分工部分可用" : "AI 分工已更新"}
-                      description={schemeMessage}
-                    />
-                  )}
-
-                  {hubCatalog.every(({ availability }) => availability !== "available") && (
-                    <InlineAlert
-                      tone="warning"
-                      title="还没有可用模型"
-                      description="请先在上方连接供应商、测试连接并保存一个模型。基础写作仍可使用，但需要 AI 的功能会明确提示尚未就绪。"
-                    />
-                  )}
-
-                  {expertMode && (
-                    <>
-                      <section
-                        className="model-routing-expert-matrix"
-                        aria-labelledby="model-routing-expert-matrix-title"
-                      >
-                        <div className="model-routing-expert-matrix__heading">
-                          <div>
-                            <h3 id="model-routing-expert-matrix-title">22 项任务矩阵</h3>
-                            <p>
-                              这里复用下方单项编辑器，不会创建第二套路由入口。内部任务和能力代码只在专家模式显示。
-                            </p>
+                                      <div>
+                                        <dt>状态说明</dt>
+                                        <dd>{task.reason}</dd>
+                                      </div>
+                                    </dl>
+                                    <Button
+                                      variant="secondary"
+                                      onClick={() => {
+                                        selectNovelTaskRoute(task.definition.task);
+                                        document
+                                          .getElementById("novel-task-route-editor")
+                                          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                                      }}
+                                    >
+                                      在单项编辑器中查看
+                                    </Button>
+                                  </article>
+                                );
+                              })
+                            )}
                           </div>
-                          <FormField label="矩阵筛选">
-                            {(fieldProps) => (
-                              <Select
-                                {...fieldProps}
-                                value={taskMatrixFilter}
-                                options={[
-                                  { value: "all", label: "全部 22 项" },
-                                  { value: "missing", label: "只看未配置" },
-                                  { value: "failed", label: "只看失败" },
-                                ]}
-                                onChange={(event) =>
-                                  setTaskMatrixFilter(
-                                    event.currentTarget.value as "all" | "missing" | "failed",
-                                  )
+                        </section>
+                        <InlineAlert
+                          tone="info"
+                          title="小说任务路由"
+                          description={`逐项覆盖 ${String(NOVEL_AI_TASKS.length)} 类小说任务的主模型、备用模型、费用上限、隐私与失败处理。未明确保存的任务继续使用当前自动方案。`}
+                        />
+                        {routingCatalog.some(
+                          ({ availability }) => availability === "available",
+                        ) && (
+                          <>
+                            <div id="novel-task-route-editor" className="model-center-grid">
+                              <FormField label="小说任务" required>
+                                {(fieldProps) => (
+                                  <Select
+                                    {...fieldProps}
+                                    value={novelRouteTask}
+                                    options={NOVEL_AI_TASKS.map((task) => ({
+                                      value: task,
+                                      label: novelAiTaskLabel(task),
+                                    }))}
+                                    disabled={routeSaving}
+                                    onChange={(event) =>
+                                      selectNovelTaskRoute(event.currentTarget.value as NovelAiTask)
+                                    }
+                                  />
+                                )}
+                              </FormField>
+                              <FormField label="主模型" required>
+                                {(fieldProps) => (
+                                  <Select
+                                    {...fieldProps}
+                                    value={novelRoutePrimaryCatalogId}
+                                    placeholder="选择主模型"
+                                    options={selectableRoutingCatalog.map((catalogEntry) => ({
+                                      value: catalogEntry.id,
+                                      label: catalogEntryLabel(catalogEntry, hubConnections),
+                                    }))}
+                                    disabled={routeSaving}
+                                    onChange={(event) => {
+                                      const next = event.currentTarget.value;
+                                      setNovelRoutePrimaryCatalogId(next);
+                                      if (novelRouteFallbackCatalogId === next) {
+                                        setNovelRouteFallbackCatalogId("");
+                                      }
+                                    }}
+                                  />
+                                )}
+                              </FormField>
+                              <FormField
+                                label="备用模型"
+                                hint="建议选择不同连接；本地隐私只能选择本机模型。"
+                              >
+                                {(fieldProps) => (
+                                  <Select
+                                    {...fieldProps}
+                                    value={novelRouteFallbackCatalogId}
+                                    options={[
+                                      { value: "", label: "不配置备用模型" },
+                                      ...selectableRoutingCatalog
+                                        .filter(({ id }) => id !== novelRoutePrimaryCatalogId)
+                                        .map((catalogEntry) => ({
+                                          value: catalogEntry.id,
+                                          label: catalogEntryLabel(catalogEntry, hubConnections),
+                                        })),
+                                    ]}
+                                    disabled={routeSaving}
+                                    onChange={(event) =>
+                                      setNovelRouteFallbackCatalogId(event.currentTarget.value)
+                                    }
+                                  />
+                                )}
+                              </FormField>
+                              <FormField
+                                label="单次费用上限"
+                                hint="留空表示不设置；按所选币种填写。"
+                              >
+                                {(fieldProps) => (
+                                  <Input
+                                    {...fieldProps}
+                                    type="number"
+                                    min={0}
+                                    step="0.000001"
+                                    value={novelRouteMaximumCost}
+                                    disabled={routeSaving}
+                                    onChange={(event) =>
+                                      setNovelRouteMaximumCost(event.currentTarget.value)
+                                    }
+                                  />
+                                )}
+                              </FormField>
+                              <FormField label="费用币种">
+                                {(fieldProps) => (
+                                  <Input
+                                    {...fieldProps}
+                                    value={novelRouteCurrency}
+                                    minLength={3}
+                                    maxLength={3}
+                                    disabled={
+                                      routeSaving || novelRouteMaximumCost.trim().length === 0
+                                    }
+                                    onChange={(event) =>
+                                      setNovelRouteCurrency(event.currentTarget.value)
+                                    }
+                                  />
+                                )}
+                              </FormField>
+                              <FormField label="隐私限制" required>
+                                {(fieldProps) => (
+                                  <Select
+                                    {...fieldProps}
+                                    value={novelRoutePrivacy}
+                                    options={[
+                                      { value: "cloud_allowed", label: "允许云端" },
+                                      { value: "local_preferred", label: "优先本机" },
+                                      { value: "local_only", label: "仅限本机" },
+                                    ]}
+                                    disabled={routeSaving}
+                                    onChange={(event) => {
+                                      const nextPrivacy = event.currentTarget
+                                        .value as ModelHubPrivacyPolicy;
+                                      setNovelRoutePrivacy(nextPrivacy);
+                                      if (nextPrivacy === "local_only") {
+                                        setNovelRouteRemoteContentConsent(false);
+                                        if (
+                                          !localCatalogEntryIds.includes(novelRoutePrimaryCatalogId)
+                                        ) {
+                                          setNovelRoutePrimaryCatalogId("");
+                                        }
+                                        if (
+                                          !localCatalogEntryIds.includes(
+                                            novelRouteFallbackCatalogId,
+                                          )
+                                        ) {
+                                          setNovelRouteFallbackCatalogId("");
+                                        }
+                                      }
+                                    }}
+                                  />
+                                )}
+                              </FormField>
+                              <FormField label="失败处理" required>
+                                {(fieldProps) => (
+                                  <Select
+                                    {...fieldProps}
+                                    value={novelRouteFailure}
+                                    options={[
+                                      { value: "use_fallback", label: "使用备用模型" },
+                                      { value: "ask_user", label: "询问我" },
+                                      { value: "stop", label: "停止任务" },
+                                    ]}
+                                    disabled={routeSaving}
+                                    onChange={(event) =>
+                                      setNovelRouteFailure(
+                                        event.currentTarget
+                                          .value as NovelTaskRoute["failurePolicy"],
+                                      )
+                                    }
+                                  />
+                                )}
+                              </FormField>
+                            </div>
+                            {novelRouteTask === "rerank" && (
+                              <div className="maintenance-settings">
+                                <label className="checkbox-row">
+                                  <input
+                                    type="checkbox"
+                                    checked={novelRouteRemoteContentConsent}
+                                    disabled={routeSaving || novelRoutePrivacy !== "cloud_allowed"}
+                                    onChange={(event) =>
+                                      setNovelRouteRemoteContentConsent(event.currentTarget.checked)
+                                    }
+                                  />
+                                  <span>
+                                    允许检索重排任务把一次写作所需的查询与候选片段发送到所选云端供应商
+                                  </span>
+                                </label>
+                                <InlineAlert
+                                  tone={novelRouteRemoteContentConsent ? "warning" : "info"}
+                                  title={
+                                    novelRouteRemoteContentConsent
+                                      ? "已明确允许远程候选片段发送"
+                                      : "远程重排默认关闭"
+                                  }
+                                  description={
+                                    novelRouteRemoteContentConsent
+                                      ? "保存后，仅在已验证的阿里云百炼北京地域 Workspace、重排能力、隐私与费用检查全部通过时发送；失败会继续使用本地排序。"
+                                      : "不勾选时，正文续写只使用本地确定性复核，不会为了重排把候选片段发送到云端。"
+                                  }
+                                />
+                              </div>
+                            )}
+                            {novelRoutePrivacy === "local_only" && (
+                              <InlineAlert
+                                tone={selectableRoutingCatalog.length === 0 ? "warning" : "info"}
+                                title="仅显示证据确认的本机模型"
+                                description={
+                                  selectableRoutingCatalog.length === 0
+                                    ? "当前没有已确认数据仅在本机处理的可用模型。请先保存本机连接的隐私信息；墨影不会用云端模型补位。"
+                                    : "主模型和备用模型列表已过滤为数据去向明确为本机、且证据来源不是未知的模型。"
                                 }
                               />
                             )}
-                          </FormField>
-                        </div>
-                        <div className="model-routing-expert-rows">
-                          {visibleExpertTasks.length === 0 ? (
-                            <p className="model-routing-expert-empty">当前筛选下没有任务。</p>
-                          ) : (
-                            visibleExpertTasks.map((task) => {
-                              const costProfile =
-                                task.primaryModel === null
-                                  ? null
-                                  : (routingCostPrivacyProfiles.find(
-                                      ({ catalogEntryId }) =>
-                                        catalogEntryId === task.primaryModel?.id,
-                                    ) ?? null);
-                              const primaryProjection =
-                                task.primaryModel === null
-                                  ? null
-                                  : (routingVisibility.models.find(
-                                      ({ catalogEntry }) =>
-                                        catalogEntry.id === task.primaryModel?.id,
-                                    ) ?? null);
-                              return (
-                                <article key={task.definition.task} data-state={task.status}>
-                                  <header>
-                                    <div>
-                                      <strong>{task.definition.displayName}</strong>
-                                      <code>{task.definition.task}</code>
-                                    </div>
-                                    <Badge
-                                      tone={
-                                        task.status === "configured"
-                                          ? "success"
-                                          : task.status === "failed"
-                                            ? "danger"
-                                            : "neutral"
-                                      }
-                                    >
-                                      {task.status === "configured"
-                                        ? "已配置"
-                                        : task.status === "failed"
-                                          ? "需要修复"
-                                          : "未配置"}
-                                    </Badge>
-                                  </header>
-                                  <dl>
-                                    <div>
-                                      <dt>任务组</dt>
-                                      <dd>{modelHubTaskGroupLabel(task.definition.group)}</dd>
-                                    </div>
-                                    <div>
-                                      <dt>所需能力</dt>
-                                      <dd>
-                                        {task.definition.requiredCapabilities.map((capability) => (
-                                          <code key={capability}>{capability}</code>
-                                        ))}
-                                      </dd>
-                                    </div>
-                                    <div>
-                                      <dt>主模型</dt>
-                                      <dd>
-                                        {task.primaryModel === null
-                                          ? "未配置"
-                                          : catalogEntryLabel(task.primaryModel, hubConnections)}
-                                      </dd>
-                                    </div>
-                                    <div>
-                                      <dt>备用模型</dt>
-                                      <dd>
-                                        {task.fallbackModel === null
-                                          ? "未配置"
-                                          : catalogEntryLabel(task.fallbackModel, hubConnections)}
-                                      </dd>
-                                    </div>
-                                    <div>
-                                      <dt>能力证据</dt>
-                                      <dd>
-                                        {primaryProjection === null
-                                          ? "没有可读证据"
-                                          : task.definition.requiredCapabilities
-                                              .map((capability) => {
-                                                const evidence =
-                                                  primaryProjection.capabilities.find(
-                                                    (item) => item.capability === capability,
-                                                  );
-                                                return evidence === undefined
-                                                  ? `${capability}: unknown`
-                                                  : `${capability}: ${evidence.state} / ${evidence.source ?? "none"}`;
-                                              })
-                                              .join("；")}
-                                      </dd>
-                                    </div>
-                                    <div>
-                                      <dt>费用</dt>
-                                      <dd>
-                                        {task.route?.maximumCostMicros === null ||
-                                        task.route?.maximumCostMicros === undefined
-                                          ? costProfile?.pricingVersion === null ||
-                                            costProfile?.pricingVersion === undefined
-                                            ? "未设置上限；价格证据未知"
-                                            : `未设置上限；价格版本 ${costProfile.pricingVersion}`
-                                          : `${task.route.maximumCostMicros} 微单位 / ${task.route.currency ?? "币种未知"}`}
-                                      </dd>
-                                    </div>
-                                    <div>
-                                      <dt>隐私</dt>
-                                      <dd>
-                                        {task.route?.privacyPolicy ?? "未配置"}；证据
-                                        {costProfile?.evidenceSource ?? "unknown"}
-                                      </dd>
-                                    </div>
-                                    <div>
-                                      <dt>来源</dt>
-                                      <dd>
-                                        {task.route === null
-                                          ? "未配置"
-                                          : routeOriginLabel(task.route.routeOrigin)}
-                                      </dd>
-                                    </div>
-                                    <div>
-                                      <dt>最后验证</dt>
-                                      <dd>{formatVerificationTime(task.lastVerifiedAt)}</dd>
-                                    </div>
-                                    <div>
-                                      <dt>状态说明</dt>
-                                      <dd>{task.reason}</dd>
-                                    </div>
-                                  </dl>
-                                  <Button
-                                    variant="secondary"
-                                    onClick={() => {
-                                      selectNovelTaskRoute(task.definition.task);
-                                      document
-                                        .getElementById("novel-task-route-editor")
-                                        ?.scrollIntoView({ behavior: "smooth", block: "start" });
-                                    }}
-                                  >
-                                    在单项编辑器中查看
-                                  </Button>
-                                </article>
-                              );
-                            })
-                          )}
-                        </div>
-                      </section>
-                      <InlineAlert
-                        tone="info"
-                        title="小说任务路由"
-                        description={`逐项覆盖 ${String(NOVEL_AI_TASKS.length)} 类小说任务的主模型、备用模型、费用上限、隐私与失败处理。未明确保存的任务继续使用当前自动方案。`}
-                      />
-                      {routingCatalog.some(({ availability }) => availability === "available") && (
-                        <>
-                          <div id="novel-task-route-editor" className="model-center-grid">
-                            <FormField label="小说任务" required>
-                              {(fieldProps) => (
-                                <Select
-                                  {...fieldProps}
-                                  value={novelRouteTask}
-                                  options={NOVEL_AI_TASKS.map((task) => ({
-                                    value: task,
-                                    label: novelAiTaskLabel(task),
-                                  }))}
-                                  disabled={routeSaving}
-                                  onChange={(event) =>
-                                    selectNovelTaskRoute(event.currentTarget.value as NovelAiTask)
-                                  }
-                                />
-                              )}
-                            </FormField>
-                            <FormField label="主模型" required>
-                              {(fieldProps) => (
-                                <Select
-                                  {...fieldProps}
-                                  value={novelRoutePrimaryCatalogId}
-                                  placeholder="选择主模型"
-                                  options={selectableRoutingCatalog.map((catalogEntry) => ({
-                                    value: catalogEntry.id,
-                                    label: catalogEntryLabel(catalogEntry, hubConnections),
-                                  }))}
-                                  disabled={routeSaving}
-                                  onChange={(event) => {
-                                    const next = event.currentTarget.value;
-                                    setNovelRoutePrimaryCatalogId(next);
-                                    if (novelRouteFallbackCatalogId === next) {
-                                      setNovelRouteFallbackCatalogId("");
-                                    }
-                                  }}
-                                />
-                              )}
-                            </FormField>
-                            <FormField
-                              label="备用模型"
-                              hint="建议选择不同连接；本地隐私只能选择本机模型。"
-                            >
-                              {(fieldProps) => (
-                                <Select
-                                  {...fieldProps}
-                                  value={novelRouteFallbackCatalogId}
-                                  options={[
-                                    { value: "", label: "不配置备用模型" },
-                                    ...selectableRoutingCatalog
-                                      .filter(({ id }) => id !== novelRoutePrimaryCatalogId)
-                                      .map((catalogEntry) => ({
-                                        value: catalogEntry.id,
-                                        label: catalogEntryLabel(catalogEntry, hubConnections),
-                                      })),
-                                  ]}
-                                  disabled={routeSaving}
-                                  onChange={(event) =>
-                                    setNovelRouteFallbackCatalogId(event.currentTarget.value)
-                                  }
-                                />
-                              )}
-                            </FormField>
-                            <FormField label="单次费用上限" hint="留空表示不设置；按所选币种填写。">
-                              {(fieldProps) => (
-                                <Input
-                                  {...fieldProps}
-                                  type="number"
-                                  min={0}
-                                  step="0.000001"
-                                  value={novelRouteMaximumCost}
-                                  disabled={routeSaving}
-                                  onChange={(event) =>
-                                    setNovelRouteMaximumCost(event.currentTarget.value)
-                                  }
-                                />
-                              )}
-                            </FormField>
-                            <FormField label="费用币种">
-                              {(fieldProps) => (
-                                <Input
-                                  {...fieldProps}
-                                  value={novelRouteCurrency}
-                                  minLength={3}
-                                  maxLength={3}
-                                  disabled={
-                                    routeSaving || novelRouteMaximumCost.trim().length === 0
-                                  }
-                                  onChange={(event) =>
-                                    setNovelRouteCurrency(event.currentTarget.value)
-                                  }
-                                />
-                              )}
-                            </FormField>
-                            <FormField label="隐私限制" required>
-                              {(fieldProps) => (
-                                <Select
-                                  {...fieldProps}
-                                  value={novelRoutePrivacy}
-                                  options={[
-                                    { value: "cloud_allowed", label: "允许云端" },
-                                    { value: "local_preferred", label: "优先本机" },
-                                    { value: "local_only", label: "仅限本机" },
-                                  ]}
-                                  disabled={routeSaving}
-                                  onChange={(event) => {
-                                    const nextPrivacy = event.currentTarget
-                                      .value as ModelHubPrivacyPolicy;
-                                    setNovelRoutePrivacy(nextPrivacy);
-                                    if (nextPrivacy === "local_only") {
-                                      setNovelRouteRemoteContentConsent(false);
-                                      if (
-                                        !localCatalogEntryIds.includes(novelRoutePrimaryCatalogId)
-                                      ) {
-                                        setNovelRoutePrimaryCatalogId("");
-                                      }
-                                      if (
-                                        !localCatalogEntryIds.includes(novelRouteFallbackCatalogId)
-                                      ) {
-                                        setNovelRouteFallbackCatalogId("");
-                                      }
-                                    }
-                                  }}
-                                />
-                              )}
-                            </FormField>
-                            <FormField label="失败处理" required>
-                              {(fieldProps) => (
-                                <Select
-                                  {...fieldProps}
-                                  value={novelRouteFailure}
-                                  options={[
-                                    { value: "use_fallback", label: "使用备用模型" },
-                                    { value: "ask_user", label: "询问我" },
-                                    { value: "stop", label: "停止任务" },
-                                  ]}
-                                  disabled={routeSaving}
-                                  onChange={(event) =>
-                                    setNovelRouteFailure(
-                                      event.currentTarget.value as NovelTaskRoute["failurePolicy"],
-                                    )
-                                  }
-                                />
-                              )}
-                            </FormField>
-                          </div>
-                          {novelRouteTask === "rerank" && (
-                            <div className="maintenance-settings">
-                              <label className="checkbox-row">
-                                <input
-                                  type="checkbox"
-                                  checked={novelRouteRemoteContentConsent}
-                                  disabled={routeSaving || novelRoutePrivacy !== "cloud_allowed"}
-                                  onChange={(event) =>
-                                    setNovelRouteRemoteContentConsent(event.currentTarget.checked)
-                                  }
-                                />
-                                <span>
-                                  允许检索重排任务把一次写作所需的查询与候选片段发送到所选云端供应商
-                                </span>
-                              </label>
-                              <InlineAlert
-                                tone={novelRouteRemoteContentConsent ? "warning" : "info"}
-                                title={
-                                  novelRouteRemoteContentConsent
-                                    ? "已明确允许远程候选片段发送"
-                                    : "远程重排默认关闭"
-                                }
-                                description={
-                                  novelRouteRemoteContentConsent
-                                    ? "保存后，仅在已验证的阿里云百炼北京地域 Workspace、重排能力、隐私与费用检查全部通过时发送；失败会继续使用本地排序。"
-                                    : "不勾选时，正文续写只使用本地确定性复核，不会为了重排把候选片段发送到云端。"
-                                }
-                              />
+                            <div className="settings-actions">
+                              <Button
+                                loading={routeSaving}
+                                disabled={novelRoutePrimaryCatalogId.length === 0}
+                                onClick={() => void saveNovelTaskRoute()}
+                              >
+                                保存小说任务分工
+                              </Button>
                             </div>
-                          )}
-                          {novelRoutePrivacy === "local_only" && (
-                            <InlineAlert
-                              tone={selectableRoutingCatalog.length === 0 ? "warning" : "info"}
-                              title="仅显示证据确认的本机模型"
-                              description={
-                                selectableRoutingCatalog.length === 0
-                                  ? "当前没有已确认数据仅在本机处理的可用模型。请先保存本机连接的隐私信息；墨影不会用云端模型补位。"
-                                  : "主模型和备用模型列表已过滤为数据去向明确为本机、且证据来源不是未知的模型。"
-                              }
-                            />
-                          )}
-                          <div className="settings-actions">
-                            <Button
-                              loading={routeSaving}
-                              disabled={novelRoutePrimaryCatalogId.length === 0}
-                              onClick={() => void saveNovelTaskRoute()}
-                            >
-                              保存小说任务分工
-                            </Button>
-                          </div>
-                        </>
-                      )}
-                      <InlineAlert
-                        tone="info"
-                        title="专家兼容设置：旧 7 角色路由"
-                        description={`${String(NOVEL_AI_TASKS.length)} 类小说任务由 Model Hub 负责；这组旧角色仅桥接尚未迁移的生成链路。应用方案时会完整刷新，无法安全映射的旧角色会被清除。`}
-                      />
-                      {profiles.some(({ selectedModel: model }) => model !== null) && (
-                        <>
-                          <div className="model-center-grid">
-                            <FormField label="任务角色" required>
-                              {(fieldProps) => (
-                                <Select
-                                  {...fieldProps}
-                                  value={routeRole}
-                                  options={MODEL_ROUTE_ROLES.map((role) => ({
-                                    value: role,
-                                    label: modelRouteRoleLabel(role),
-                                  }))}
-                                  disabled={routeSaving}
-                                  onChange={(event) =>
-                                    selectRouteRole(event.currentTarget.value as ModelRouteRole)
-                                  }
-                                />
-                              )}
-                            </FormField>
-                            <FormField label="兼容主模型" required>
-                              {(fieldProps) => (
-                                <Select
-                                  {...fieldProps}
-                                  value={routePrimaryProviderId}
-                                  placeholder="选择主模型"
-                                  options={profiles
-                                    .filter(
-                                      (
-                                        candidate,
-                                      ): candidate is ModelProfile & {
-                                        readonly selectedModel: string;
-                                      } => candidate.selectedModel !== null,
-                                    )
-                                    .map((candidate) => ({
-                                      value: candidate.providerId,
-                                      label: `${candidate.providerId} · ${candidate.selectedModel}`,
+                          </>
+                        )}
+                        <InlineAlert
+                          tone="info"
+                          title="专家兼容设置：旧 7 角色路由"
+                          description={`${String(NOVEL_AI_TASKS.length)} 类小说任务由 Model Hub 负责；这组旧角色仅桥接尚未迁移的生成链路。应用方案时会完整刷新，无法安全映射的旧角色会被清除。`}
+                        />
+                        {profiles.some(({ selectedModel: model }) => model !== null) && (
+                          <>
+                            <div className="model-center-grid">
+                              <FormField label="任务角色" required>
+                                {(fieldProps) => (
+                                  <Select
+                                    {...fieldProps}
+                                    value={routeRole}
+                                    options={MODEL_ROUTE_ROLES.map((role) => ({
+                                      value: role,
+                                      label: modelRouteRoleLabel(role),
                                     }))}
-                                  disabled={routeSaving}
-                                  onChange={(event) => {
-                                    const next = event.currentTarget.value;
-                                    setRoutePrimaryProviderId(next);
-                                    if (routeFallbackProviderId === next) {
-                                      setRouteFallbackProviderId("");
+                                    disabled={routeSaving}
+                                    onChange={(event) =>
+                                      selectRouteRole(event.currentTarget.value as ModelRouteRole)
                                     }
-                                  }}
-                                />
-                              )}
-                            </FormField>
-                            <FormField label="兼容备用模型" hint="可选；切换前仍需在预检中确认。">
-                              {(fieldProps) => (
-                                <Select
-                                  {...fieldProps}
-                                  value={routeFallbackProviderId}
-                                  options={[
-                                    { value: "", label: "不配置备用模型" },
-                                    ...profiles
+                                  />
+                                )}
+                              </FormField>
+                              <FormField label="兼容主模型" required>
+                                {(fieldProps) => (
+                                  <Select
+                                    {...fieldProps}
+                                    value={routePrimaryProviderId}
+                                    placeholder="选择主模型"
+                                    options={profiles
                                       .filter(
                                         (
                                           candidate,
                                         ): candidate is ModelProfile & {
                                           readonly selectedModel: string;
-                                        } =>
-                                          candidate.selectedModel !== null &&
-                                          candidate.providerId !== routePrimaryProviderId,
+                                        } => candidate.selectedModel !== null,
                                       )
                                       .map((candidate) => ({
                                         value: candidate.providerId,
                                         label: `${candidate.providerId} · ${candidate.selectedModel}`,
-                                      })),
-                                  ]}
-                                  disabled={routeSaving}
-                                  onChange={(event) =>
-                                    setRouteFallbackProviderId(event.currentTarget.value)
-                                  }
-                                />
-                              )}
-                            </FormField>
-                          </div>
-                          <div className="settings-actions">
-                            <Button
-                              loading={routeSaving}
-                              disabled={routePrimaryProviderId.length === 0}
-                              onClick={() => void saveModelRoleRoute()}
-                            >
-                              保存角色路由
-                            </Button>
-                          </div>
-                        </>
-                      )}
-                    </>
-                  )}
+                                      }))}
+                                    disabled={routeSaving}
+                                    onChange={(event) => {
+                                      const next = event.currentTarget.value;
+                                      setRoutePrimaryProviderId(next);
+                                      if (routeFallbackProviderId === next) {
+                                        setRouteFallbackProviderId("");
+                                      }
+                                    }}
+                                  />
+                                )}
+                              </FormField>
+                              <FormField label="兼容备用模型" hint="可选；切换前仍需在预检中确认。">
+                                {(fieldProps) => (
+                                  <Select
+                                    {...fieldProps}
+                                    value={routeFallbackProviderId}
+                                    options={[
+                                      { value: "", label: "不配置备用模型" },
+                                      ...profiles
+                                        .filter(
+                                          (
+                                            candidate,
+                                          ): candidate is ModelProfile & {
+                                            readonly selectedModel: string;
+                                          } =>
+                                            candidate.selectedModel !== null &&
+                                            candidate.providerId !== routePrimaryProviderId,
+                                        )
+                                        .map((candidate) => ({
+                                          value: candidate.providerId,
+                                          label: `${candidate.providerId} · ${candidate.selectedModel}`,
+                                        })),
+                                    ]}
+                                    disabled={routeSaving}
+                                    onChange={(event) =>
+                                      setRouteFallbackProviderId(event.currentTarget.value)
+                                    }
+                                  />
+                                )}
+                              </FormField>
+                            </div>
+                            <div className="settings-actions">
+                              <Button
+                                loading={routeSaving}
+                                disabled={routePrimaryProviderId.length === 0}
+                                onClick={() => void saveModelRoleRoute()}
+                              >
+                                保存角色路由
+                              </Button>
+                            </div>
+                          </>
+                        )}
+                      </>
+                    )}
 
-                  {expertMode && roleRoutes.length > 0 && (
-                    <ul className="privacy-list" aria-label="已配置模型角色">
-                      {roleRoutes.map((route) => (
-                        <li key={route.role}>
-                          <strong>{modelRouteRoleLabel(route.role)}</strong>
-                          {"："}
-                          {route.primaryProviderId} / {route.primaryModelId}
-                          {route.fallbackProviderId === null
-                            ? "；无备用模型"
-                            : `；备用 ${route.fallbackProviderId} / ${route.fallbackModelId ?? ""}`}
-                          {`；修订 ${String(route.revision)}`}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
+                    {expertMode && roleRoutes.length > 0 && (
+                      <ul className="privacy-list" aria-label="已配置模型角色">
+                        {roleRoutes.map((route) => (
+                          <li key={route.role}>
+                            <strong>{modelRouteRoleLabel(route.role)}</strong>
+                            {"："}
+                            {route.primaryProviderId} / {route.primaryModelId}
+                            {route.fallbackProviderId === null
+                              ? "；无备用模型"
+                              : `；备用 ${route.fallbackProviderId} / ${route.fallbackModelId ?? ""}`}
+                            {`；修订 ${String(route.revision)}`}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
-            <section id="model-evaluation" className="settings-card--wide">
-              <ModelHubEvaluationPanel
-                service={modelEvaluation}
-                disabled={!runtime.modelGateway.available || hubCatalog.length === 0}
-              />
-              {expertMode && (
-                <div className="settings-actions">
-                  <Button
-                    variant="secondary"
-                    aria-expanded={paidEvaluationExpanded}
-                    aria-controls="novel-skill-paid-evaluation"
-                    onClick={() => setPaidEvaluationExpanded((current) => !current)}
-                  >
-                    {paidEvaluationExpanded ? "收起写作方法 A/B 评测" : "写作方法 A/B 评测（专家）"}
-                  </Button>
-                </div>
-              )}
-              {expertMode && paidEvaluationExpanded && (
-                <div id="novel-skill-paid-evaluation">
-                  {paidEvaluationTargets.length < 2 && (
-                    <InlineAlert
-                      tone="warning"
-                      title="需要两个已验证且价格完整的文本模型"
-                      description="这里不会自动补模型或回退路由。请先完成两个不同模型的连接、文本能力验证、上下文上限和价格资料。"
+            {activeModelHubSection === "model-evaluation" && (
+              <section id="model-evaluation" className="settings-card--wide">
+                <ModelHubEvaluationPanel
+                  service={modelEvaluation}
+                  disabled={!runtime.modelGateway.available || hubCatalog.length === 0}
+                />
+                {expertMode && (
+                  <div className="settings-actions">
+                    <Button
+                      variant="secondary"
+                      aria-expanded={paidEvaluationExpanded}
+                      aria-controls="novel-skill-paid-evaluation"
+                      onClick={() => setPaidEvaluationExpanded((current) => !current)}
+                    >
+                      {paidEvaluationExpanded
+                        ? "收起写作方法 A/B 评测"
+                        : "写作方法 A/B 评测（专家）"}
+                    </Button>
+                  </div>
+                )}
+                {expertMode && paidEvaluationExpanded && (
+                  <div id="novel-skill-paid-evaluation">
+                    {paidEvaluationTargets.length < 2 && (
+                      <InlineAlert
+                        tone="warning"
+                        title="需要两个已验证且价格完整的文本模型"
+                        description="这里不会自动补模型或回退路由。请先完成两个不同模型的连接、文本能力验证、上下文上限和价格资料。"
+                      />
+                    )}
+                    <NovelSkillPaidEvaluationPanel
+                      expertMode
+                      targets={paidEvaluationTargets}
+                      initialSnapshot={runtime.novelSkillPaidEvaluation.getSnapshot()}
+                      port={runtime.novelSkillPaidEvaluation}
                     />
-                  )}
-                  <NovelSkillPaidEvaluationPanel
-                    expertMode
-                    targets={paidEvaluationTargets}
-                    initialSnapshot={runtime.novelSkillPaidEvaluation.getSnapshot()}
-                    port={runtime.novelSkillPaidEvaluation}
-                  />
-                </div>
-              )}
-            </section>
+                  </div>
+                )}
+              </section>
+            )}
 
-            <section id="image-generation" className="settings-card--wide">
-              <ModelHubImageGenerationPanel
-                service={runtime.imageGeneration}
-                disabled={!runtime.modelGateway.available}
-              />
-            </section>
+            {activeModelHubSection === "image-generation" && (
+              <section id="image-generation" className="settings-card--wide">
+                <ModelHubImageGenerationPanel
+                  service={runtime.imageGeneration}
+                  disabled={!runtime.modelGateway.available}
+                />
+              </section>
+            )}
           </>
         )}
 
@@ -6113,10 +6413,10 @@ export function SettingsPage() {
         }}
         title={
           retireConnectionTarget === null
-            ? "移除模型连接？"
-            : `移除“${retireConnectionTarget.displayName}”连接？`
+            ? "退役模型连接？"
+            : `退役“${retireConnectionTarget.displayName}”连接？`
         }
-        description="连接会立即停止参与 AI 分工，并删除系统凭据库中的密钥。已生成内容、模型目录和不可变调用记录会保留。"
+        description="退役会永久停止这条连接参与选择、推荐和 AI 分工，并删除仍存在的系统凭据。模型目录与不可变调用记录只作为历史审计保留。"
         footer={
           <>
             <Button
@@ -6131,15 +6431,15 @@ export function SettingsPage() {
               loading={retiringConnection}
               onClick={() => void confirmRetireConnection()}
             >
-              停用并移除凭据
+              确认退役连接
             </Button>
           </>
         }
       >
         <InlineAlert
           tone="warning"
-          title="不会删除创作与审计历史"
-          description="正文、AI 建议版本、模型调用记录和费用凭据都不会被删除。以后如需重新连接，可再次保存密钥并测试连接。"
+          title="退役不同于删除凭据或暂时停用"
+          description="正文、AI 建议版本、模型调用记录和费用凭据不会删除；这条连接本身将只读保留。以后连接同一供应商时，墨影会自动建立新连接，无需手工修改内部标识。"
         />
       </Dialog>
 
@@ -6460,6 +6760,37 @@ function connectionStatusLabel(status: ModelProviderConnection["connectionStatus
   return labels[status];
 }
 
+function isCredentialDeletedConnection(connection: ModelProviderConnection): boolean {
+  return (
+    !connection.enabled &&
+    !isRetiredModelProviderConnection(connection) &&
+    connection.connectionStatus === "disabled" &&
+    connection.credentialRef === null &&
+    connection.credentialState === "missing"
+  );
+}
+
+function connectionManagementLabel(connection: ModelProviderConnection): string {
+  if (isRetiredModelProviderConnection(connection)) return "已退役";
+  if (isCredentialDeletedConnection(connection)) return "凭据已删除 · 可重新绑定";
+  if (!connection.enabled) return "已停用";
+  return connectionStatusLabel(connection.connectionStatus);
+}
+
+function nextAvailableProviderConnectionId(
+  providerKind: ConnectableProviderKind,
+  connections: readonly ModelProviderConnection[],
+): string {
+  const base = providerKind === "custom_openai_compatible" ? "custom-provider" : providerKind;
+  const occupied = new Set(connections.map(({ id }) => id));
+  if (!occupied.has(base)) return base;
+  for (let suffix = 2; suffix < 10_000; suffix += 1) {
+    const candidate = `${base}-${String(suffix)}`;
+    if (!occupied.has(candidate)) return candidate;
+  }
+  return `${base}-${crypto.randomUUID()}`;
+}
+
 function connectionEndpointLabel(baseUrl: string): string {
   try {
     return new URL(baseUrl).host;
@@ -6589,9 +6920,9 @@ function modelHubOverallBadgeLabel(
   const labels = {
     unconnected: "AI 未连接",
     validating: "正在验证",
-    writing_ready: "基础写作可用",
-    partial: "部分高级能力不可用",
-    complete: "全部功能可用",
+    writing_ready: "基础配置可用",
+    partial: "部分基础配置需完善",
+    complete: "基础配置完整",
     anomaly: "连接或分工异常",
     save_failed: "配置写入失败",
   } as const;
@@ -6622,9 +6953,9 @@ function modelHubOverallTitle(
   const titles = {
     unconnected: "AI 尚未连接",
     validating: "正在验证 AI 连接与能力",
-    writing_ready: "AI 基础写作已可用",
-    partial: "部分 AI 功能可用",
-    complete: "全部 AI 功能可用",
+    writing_ready: "AI 基础配置已可用",
+    partial: "部分 AI 基础配置可用",
+    complete: "AI 基础配置已完整",
     anomaly: "AI 连接或分工需要修复",
     save_failed: "AI 分工没有保存",
   } as const;
@@ -6647,14 +6978,14 @@ function modelHubOverallDescription(
     return "连接、模型目录、能力证据或已保存分工存在失效项；手动写作和已有正文不会受影响。";
   }
   if (visibility.state === "complete") {
-    return "22 项小说任务均已配置；仍可在下方查看每项使用的模型与证据来源。";
+    return "22 项小说任务均已通过无正文的基础配置检查；当前章节仍会在发送前检查隐私、上下文与请求长度。";
   }
   if (visibility.coreWritingReady) {
-    return `开书、正文生成、续写、改写和润色已经可用；${String(
+    return `开书、正文生成、续写、改写和润色的基础配置已通过；${String(
       visibility.missingRouteCount,
-    )} 项高级能力尚未配置，但不会阻止基础写作。`;
+    )} 项高级能力尚未配置。实际请求仍需通过当前作品预检。`;
   }
-  return `${String(visibility.enabledRouteCount)} 项任务可用；基础写作链仍有缺口，请按下方建议验证所需能力。`;
+  return `${String(visibility.enabledRouteCount)} 项任务已配置；基础写作链仍有缺口，请按下方建议验证所需能力。`;
 }
 
 function capabilityDisplayStateLabel(state: ModelHubCapabilityDisplayState): string {

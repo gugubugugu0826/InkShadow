@@ -40,6 +40,14 @@ describe("ModelHubChapterSummaryModel", () => {
           modelId: inspection.modelId,
           usedFallback: inspection.usedFallback,
         });
+        await request.onFinalBeforeProviderDispatch?.({
+          generationId: uuid(20),
+          invocationId: uuid(21),
+          connectionId: inspection.connectionId,
+          catalogEntryId: inspection.catalogEntryId,
+          modelId: inspection.modelId,
+          usedFallback: inspection.usedFallback,
+        });
         return modelExecution();
       },
     );
@@ -68,7 +76,7 @@ describe("ModelHubChapterSummaryModel", () => {
     });
     expect(inspectText).toHaveBeenCalledTimes(2);
     expect(executeText).toHaveBeenCalledTimes(1);
-    expect(listCapabilityEvidence).toHaveBeenCalledTimes(3);
+    expect(listCapabilityEvidence).toHaveBeenCalledTimes(4);
     expect(sourceCheck.mock.calls.length).toBeGreaterThanOrEqual(5);
     expect(projectCheck.mock.calls.length).toBeGreaterThanOrEqual(4);
     expect(executeText.mock.calls[0]?.[1]).toMatchObject({
@@ -83,8 +91,10 @@ describe("ModelHubChapterSummaryModel", () => {
   it("rechecks project privacy in the final dispatch hook before provider code runs", async () => {
     const inspection = modelInspection();
     const providerDispatch = vi.fn();
-    const projectCheck = vi.fn((verifiedLocalEligible?: boolean) =>
-      verifiedLocalEligible === false
+    let dispatchChecks = 0;
+    const projectCheck = vi.fn((verifiedLocalEligible?: boolean) => {
+      if (verifiedLocalEligible === false) dispatchChecks += 1;
+      return dispatchChecks === 2
         ? Promise.reject(
             new ProjectContextPrivacyError(
               "PROJECT_CONTEXT_PRIVACY_CHANGED",
@@ -92,14 +102,23 @@ describe("ModelHubChapterSummaryModel", () => {
               true,
             ),
           )
-        : Promise.resolve(),
-    );
+        : Promise.resolve();
+    });
     const executeText = vi.fn(
       async (
         _dependencies: ModelHubTextExecutionDependencies,
         request: ExecuteModelHubTextTaskInput,
       ) => {
         await request.onBeforeDispatch?.({
+          generationId: uuid(20),
+          invocationId: uuid(21),
+          connectionId: inspection.connectionId,
+          catalogEntryId: inspection.catalogEntryId,
+          modelId: inspection.modelId,
+          usedFallback: inspection.usedFallback,
+          localOnlyEligible: false,
+        });
+        await request.onFinalBeforeProviderDispatch?.({
           generationId: uuid(20),
           invocationId: uuid(21),
           connectionId: inspection.connectionId,
@@ -135,6 +154,55 @@ describe("ModelHubChapterSummaryModel", () => {
 
     expect(executeText).toHaveBeenCalledTimes(1);
     expect(executeText.mock.calls[0]?.[1]).toMatchObject({ requiredDataDestination: "local" });
+    expect(providerDispatch).not.toHaveBeenCalled();
+  });
+
+  it("rechecks structured output evidence at the final latch before provider code runs", async () => {
+    const inspection = modelInspection("openai");
+    const providerDispatch = vi.fn();
+    const executeText = vi.fn(
+      async (
+        _dependencies: ModelHubTextExecutionDependencies,
+        request: ExecuteModelHubTextTaskInput,
+      ) => {
+        const selection = {
+          generationId: uuid(20),
+          invocationId: uuid(21),
+          connectionId: inspection.connectionId,
+          catalogEntryId: inspection.catalogEntryId,
+          modelId: inspection.modelId,
+          usedFallback: inspection.usedFallback,
+          localOnlyEligible: false,
+        } as const;
+        await request.onBeforeDispatch?.(selection);
+        await request.onFinalBeforeProviderDispatch?.(selection);
+        providerDispatch();
+        return modelExecution("openai");
+      },
+    );
+    const verified = [capability("text_generation", 30), capability("structured_output", 31)];
+    const listCapabilityEvidence = vi
+      .fn()
+      .mockResolvedValueOnce(verified)
+      .mockResolvedValueOnce(verified)
+      .mockResolvedValueOnce([capability("text_generation", 30)]);
+    const model = new ModelHubChapterSummaryModel({
+      modelHub: { listCapabilityEvidence } as unknown as ModelHubStore,
+      modelGateway: { available: true, generate: vi.fn() },
+      credentials: { getSummary: vi.fn().mockResolvedValue({ configured: true }) },
+      clock: { now: () => timestamp("2026-08-01T00:00:00.000Z") },
+      ids: { next: () => uuid(40) as never },
+      inspectText: vi.fn().mockResolvedValue(inspection) as never,
+      executeText,
+    });
+
+    await expect(
+      model.summarize(
+        input(vi.fn().mockResolvedValue(undefined), vi.fn().mockResolvedValue(undefined)),
+      ),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_CHAPTER_SUMMARY_CAPABILITY_CHANGED" });
+
+    expect(listCapabilityEvidence).toHaveBeenCalledTimes(3);
     expect(providerDispatch).not.toHaveBeenCalled();
   });
 
@@ -386,6 +454,7 @@ function modelExecution(
       estimatedCostMicros: null,
       errorCode: null,
       errorSummary: null,
+      providerDispatchStartedAt: "2026-08-01T00:00:00.000Z",
       startedAt: "2026-08-01T00:00:00.000Z",
       completedAt: "2026-08-01T00:00:01.000Z",
       revision: 2,

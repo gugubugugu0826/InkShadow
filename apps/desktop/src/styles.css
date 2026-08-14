@@ -426,6 +426,10 @@ select {
   color: var(--text-secondary);
 }
 
+.settings-route-error-boundary .ink-error-state {
+  width: min(100%, 42rem);
+}
+
 .app-error-boundary {
   box-sizing: border-box;
   min-height: 100vh;
@@ -1049,6 +1053,12 @@ select {
 .model-center-settings {
   display: grid;
   gap: var(--space-4);
+}
+
+.model-hub-onboarding > p:not(.page-heading__eyebrow) {
+  max-width: 52rem;
+  color: var(--text-secondary);
+  line-height: var(--line-base);
 }
 
 .model-routing-save-failure,
@@ -2942,6 +2952,11 @@ select {
   .model-routing-task-list .model-routing-model-options__list > li {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .model-routing-task-list .model-routing-model-options__list > li > button,
+  .model-hub-onboarding .settings-actions > :is(button, a) {
+    width: 100%;
   }
 }
 

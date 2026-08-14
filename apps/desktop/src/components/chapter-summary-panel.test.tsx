@@ -2,12 +2,53 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import type { ChapterSummaryDashboard } from "../infrastructure/chapter-summary-service";
 import type { HistoricalChapterBackfillPlan } from "../infrastructure/historical-chapter-backfill-service";
 import { ChapterSummaryPanel } from "./chapter-summary-panel";
 
 const PROJECT_ID = "018f0f00-0000-7000-8000-000000000001";
 
 describe("ChapterSummaryPanel historical backfill", () => {
+  it("retires legacy automatic cloud preferences and keeps direct actions disabled", async () => {
+    const summaryService = createSummaryService();
+    summaryService.inspectProject.mockResolvedValue({
+      automaticOnManualSaveEnabled: true,
+      entries: [
+        {
+          chapterId: PROJECT_ID,
+          chapterTitle: "第一章",
+          currentVersionId: PROJECT_ID,
+          state: "missing",
+          message: "尚无摘要",
+          summary: null,
+          sourceVersionId: null,
+          sourceContentHash: null,
+          factId: null,
+          modelId: null,
+          providerKind: null,
+          invocationId: null,
+        },
+      ],
+    });
+    const continuousState = createContinuousStateService();
+    continuousState.isAutomaticOnManualSaveEnabled.mockReturnValue(true);
+
+    render(
+      <ChapterSummaryPanel
+        projectId={PROJECT_ID}
+        service={summaryService}
+        continuousState={continuousState}
+        historicalBackfill={{ plan: vi.fn(), register: vi.fn() }}
+      />,
+    );
+
+    await screen.findByText("第一章");
+    expect(summaryService.setAutomaticOnManualSaveEnabled).toHaveBeenCalledWith(PROJECT_ID, false);
+    expect(continuousState.setAutomaticOnManualSaveEnabled).toHaveBeenCalledWith(PROJECT_ID, false);
+    expect(screen.getByRole("button", { name: "重建摘要（暂不可用）" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /启用手动保存/u })).not.toBeInTheDocument();
+  });
+
   it("shows a read-only cost plan and requires an explicit registration action", async () => {
     const user = userEvent.setup();
     const pendingPlan = createPlan();
@@ -61,10 +102,8 @@ describe("ChapterSummaryPanel historical backfill", () => {
     const planRegion = await screen.findByLabelText("现有章节回填只读计划");
     expect(within(planRegion).getByText("3 章")).toBeVisible();
     expect(within(planRegion).getByText("12,345 字符")).toBeVisible();
-    expect(within(planRegion).getByText(/合计最多 6 次/)).toBeVisible();
-    expect(
-      within(planRegion).getByText(/本次待登记 1 个.*计入远程供应商调用上限的次数为 0/),
-    ).toBeVisible();
+    expect(within(planRegion).getByText(/Provider 调用上限：0 次/)).toBeVisible();
+    expect(within(planRegion).getByText(/本次待登记 1 个.*纯本地回填边界/)).toBeVisible();
     expect(historicalBackfill.register).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "确认并登记 3 个后台任务" }));
@@ -124,7 +163,7 @@ describe("ChapterSummaryPanel historical backfill", () => {
           {
             chapterId: PROJECT_ID,
             versionId: PROJECT_ID,
-            stage: "story_state",
+            stage: "causal_projection",
             code: "HISTORICAL_BACKFILL_REGISTRATION_FAILED",
             message: "disk busy",
           },
@@ -156,7 +195,7 @@ describe("ChapterSummaryPanel historical backfill", () => {
 
 function createSummaryService() {
   return {
-    inspectProject: vi.fn().mockResolvedValue({
+    inspectProject: vi.fn<() => Promise<ChapterSummaryDashboard>>().mockResolvedValue({
       automaticOnManualSaveEnabled: false,
       entries: [],
     }),
@@ -195,10 +234,10 @@ function createPlan(
     willRegisterTaskCount: 3,
     missingStages: {
       search: 3,
-      chapterSummary: 3,
-      storyState: 3,
+      chapterSummary: 0,
+      storyState: 0,
       causalProjection: 3,
-      total: 12,
+      total: 6,
     },
     eligibleCharacterCount: 20_000,
     willRegisterCharacterCount: 12_345,
@@ -206,8 +245,8 @@ function createPlan(
     willRegisterLocalOnlyChapterCount: 1,
     excludedEmptyChapterCount: 1,
     excludedUnstableChapterCount: 0,
-    modelStages: { chapterSummaryEnabled: true, storyStateEnabled: true },
-    possibleRemoteProviderCallUpperBound: { chapterSummary: 2, storyState: 4, total: 6 },
+    modelStages: { chapterSummaryEnabled: false, storyStateEnabled: false },
+    possibleRemoteProviderCallUpperBound: { chapterSummary: 0, storyState: 0, total: 0 },
     boundary: "current_stable_versions_only",
     ...overrides,
   };

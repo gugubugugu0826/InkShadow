@@ -29,6 +29,7 @@ import {
 import { Link } from "react-router-dom";
 
 import {
+  inspectPipelineStageFailureCauseCode,
   pipelineRetryProgressStep,
   runAcceptedChapterPipeline,
   type AcceptedChapterPipelineInput,
@@ -483,9 +484,7 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
                     <InlineAlert
                       tone="error"
                       title="任务失败"
-                      description={`${taskFailureLabel(task.failure.code)}（${task.failure.code}）${
-                        task.failure.retryable ? "，请求已安全保留，可返回章节重新检查后重试。" : ""
-                      }`}
+                      description={taskFailureDescription(task.failure)}
                     />
                     <div className="task-failure-actions">
                       {canRetryAcceptedVersion && (
@@ -730,6 +729,39 @@ function taskFailureLabel(code: string): string {
     ACCEPTED_VERSION_PIPELINE_PARTIAL: "正文已安全保留，但部分故事资料尚未更新",
   };
   return labels[code] ?? "后台任务未能完成";
+}
+
+function taskFailureDescription(failure: NonNullable<TaskSnapshot["failure"]>): string {
+  const cause =
+    failure.causeCode === null || failure.causeCode === failure.code
+      ? ""
+      : `；底层原因：${taskFailureCauseLabel(failure.causeCode)}（${failure.causeCode}）`;
+  const recovery = failure.retryable ? "，请求已安全保留，可返回章节重新检查后重试。" : "";
+  return `${taskFailureLabel(failure.code)}（${failure.code}）${cause}${recovery}`;
+}
+
+function taskFailureCauseLabel(causeCode: string): string {
+  const pipeline = inspectPipelineStageFailureCauseCode(causeCode);
+  if (pipeline.kind === "valid") {
+    const stageLabels: Record<string, string> = {
+      search: "本地搜索索引",
+      chapter_summary: "章节摘要",
+      story_state: "故事设定",
+      causal_projection: "故事关联",
+    };
+    return `未完成步骤：${[...pipeline.stages]
+      .map((stage) => stageLabels[stage] ?? stage)
+      .join("、")}`;
+  }
+  const labels: Record<string, string> = {
+    PROVIDER_UNAVAILABLE: "模型服务暂时不可用",
+    MODEL_PROVIDER_UNAVAILABLE: "模型服务暂时不可用",
+    MODEL_PROFILE_NOT_READY: "模型配置尚未就绪",
+    UPSTREAM_TEMPORARY: "模型服务暂时不可用",
+    UPSTREAM_AUTH_FAILED: "模型凭据无效",
+    DISK_FULL: "本地磁盘空间不足",
+  };
+  return labels[causeCode] ?? "具体失败原因见诊断码";
 }
 
 function taskEditorRoute(task: TaskSnapshot): string | null {

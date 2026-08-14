@@ -199,7 +199,7 @@ describe("Model Hub runtime wiring", () => {
     });
     expect(
       JSON.parse(window.localStorage.getItem(DEVELOPMENT_MODEL_HUB_KEY) ?? "{}"),
-    ).toMatchObject({ schemaVersion: 6 });
+    ).toMatchObject({ schemaVersion: 7 });
     await upgraded.close();
   });
 });

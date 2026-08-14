@@ -192,6 +192,35 @@ describe("model hub routing visibility", () => {
     expect(visibility.enabledRouteCount).toBe(15);
     expect(visibility.coreWritingReady).toBe(true);
   });
+
+  it("projects an exact preflight blocker into the task matrix instead of claiming writing ready", () => {
+    const visibility = buildModelHubRoutingVisibility({
+      connections: [connection()],
+      catalog: [catalog()],
+      routes: routes(15),
+      capabilityEvidence: [evidence("text_generation", "lightweight_probe")],
+      recentAiFailures: [],
+      now: NOW,
+      validating: false,
+      loadFailed: false,
+      saveFailed: false,
+      exactBlockers: [
+        {
+          task: "continuation",
+          code: "MODEL_HUB_CREDENTIAL_MISSING",
+        },
+      ],
+    });
+
+    expect(visibility.state).toBe("anomaly");
+    expect(visibility.coreWritingReady).toBe(false);
+    expect(
+      visibility.tasks.find(({ definition }) => definition.task === "continuation"),
+    ).toMatchObject({
+      status: "failed",
+      reason: "基础配置检查未通过：API Key 已删除或不可用。",
+    });
+  });
 });
 
 function connection(): ModelProviderConnection {

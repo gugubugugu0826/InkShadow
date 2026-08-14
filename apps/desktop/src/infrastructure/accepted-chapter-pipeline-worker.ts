@@ -138,6 +138,11 @@ export class AcceptedChapterPipelineWorker {
         const input = retryInput(task);
         if (input === null) {
           this.dueTaskCursor = nextCursor;
+          if (isDue(task, now, this.queuedGraceMilliseconds) && isRetiredProviderOnlyTask(task)) {
+            processedCount += 1;
+            await this.runtime.taskCenter.cancelTask(task.id).catch(this.reportError);
+            continue;
+          }
           this.reportInvalidTaskOnce(task.id);
           continue;
         }
@@ -288,7 +293,7 @@ export function retryInput(task: TaskSnapshot): AcceptedChapterPipelineInput | n
         ...failureScope.stages,
         ...failureScope.notApplicableStages,
         ...failureScope.deferredStages,
-      ].some((stage) => !enabledStages.has(stage))) ||
+      ].some((stage) => isLocalPipelineStage(stage) && !enabledStages.has(stage))) ||
     retryProgress.kind === "malformed" ||
     (retryProgress.kind === "valid" &&
       (task.status !== "queued" ||
@@ -300,11 +305,11 @@ export function retryInput(task: TaskSnapshot): AcceptedChapterPipelineInput | n
             ...persistedRetryScope.stages,
             ...persistedRetryScope.notApplicableStages,
             ...persistedRetryScope.deferredStages,
-          ].some((stage) => !enabledStages.has(stage))))) ||
+          ].some((stage) => isLocalPipelineStage(stage) && !enabledStages.has(stage))))) ||
     outcome.kind === "malformed" ||
     (outcome.kind === "valid" &&
       [...outcome.stages, ...outcome.notApplicableStages, ...outcome.deferredStages].some(
-        (stage) => !enabledStages.has(stage),
+        (stage) => isLocalPipelineStage(stage) && !enabledStages.has(stage),
       ))
   ) {
     return null;
@@ -315,8 +320,8 @@ export function retryInput(task: TaskSnapshot): AcceptedChapterPipelineInput | n
     versionId,
     source,
     acceptedCharacterCount,
-    ...(runChapterSummary === undefined ? {} : { runChapterSummary }),
-    ...(runStoryState === undefined ? {} : { runStoryState }),
+    runChapterSummary: false,
+    runStoryState: false,
     ...(runSearch === undefined ? {} : { runSearch }),
     ...(runCausalProjection === undefined ? {} : { runCausalProjection }),
     ...(pipelineIdempotencyKey === undefined ? {} : { pipelineIdempotencyKey }),
@@ -358,20 +363,34 @@ function isOneHotSupplement(
 function stageEnabled(
   stage: (typeof ACCEPTED_CHAPTER_PIPELINE_STAGES)[number],
   runSearch: boolean | undefined,
-  runChapterSummary: boolean | undefined,
-  runStoryState: boolean | undefined,
+  _runChapterSummary: boolean | undefined,
+  _runStoryState: boolean | undefined,
   runCausalProjection: boolean | undefined,
 ): boolean {
   switch (stage) {
     case "search":
       return runSearch !== false;
     case "chapter_summary":
-      return runChapterSummary !== false;
+      return false;
     case "story_state":
-      return runStoryState !== false;
+      return false;
     case "causal_projection":
       return runCausalProjection !== false;
   }
+}
+
+function isLocalPipelineStage(stage: (typeof ACCEPTED_CHAPTER_PIPELINE_STAGES)[number]): boolean {
+  return stage === "search" || stage === "causal_projection";
+}
+
+function isRetiredProviderOnlyTask(task: TaskSnapshot): boolean {
+  return (
+    task.type === ACCEPTED_CHAPTER_PIPELINE_TASK_TYPE &&
+    task.metadata.operation === ACCEPTED_CHAPTER_PIPELINE_OPERATION &&
+    task.metadata.runSearch === false &&
+    task.metadata.runCausalProjection === false &&
+    (task.metadata.runChapterSummary === true || task.metadata.runStoryState === true)
+  );
 }
 
 function optionalBoolean(value: unknown): boolean | undefined | null {

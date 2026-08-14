@@ -84,6 +84,19 @@ describe("TaskCenterPage", () => {
     expect(causal).not.toHaveBeenCalled();
   });
 
+  it("shows the preserved cause after task retries are exhausted", async () => {
+    seedRetryExhaustedTask();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    renderRoute(runtime);
+
+    expect(
+      await screen.findByText(
+        "重试次数已用尽（TASK_RETRY_EXHAUSTED）；底层原因：模型服务暂时不可用（PROVIDER_UNAVAILABLE）",
+      ),
+    ).toBeVisible();
+    expect(screen.getByRole("link", { name: "调整模型或上下文" })).toBeVisible();
+  });
+
   it("explains accepted正文 changes in user language and links to confirmation", async () => {
     seedAcceptedVersionNotification();
     const runtime = createDevelopmentRuntime(window.localStorage);
@@ -242,6 +255,52 @@ function seedAcceptedVersionNotification(): void {
       schemaVersion: 1,
       tasks: [],
       notifications: [visible.toSnapshot()],
+    }),
+  );
+}
+
+function seedRetryExhaustedTask(): void {
+  const queued = expectOk(
+    Task.create({
+      id: uuid(30),
+      type: "ai.generate",
+      idempotencyKey: "generation:retry-exhausted:0001",
+      metadata: { projectId: uuid(32), chapterId: uuid(33) },
+      priority: 80,
+      maxAttempts: 1,
+      now: INITIAL_TIME,
+    }),
+  );
+  const running = expectOk(
+    queued.claim({
+      ownerId: "desktop.test",
+      leaseToken: uuid(31),
+      now: "2026-07-26T00:00:01.000Z",
+      leaseExpiresAt: "2026-07-26T00:15:00.000Z",
+    }),
+  );
+  const failure = expectOk(
+    createTaskFailure({
+      code: "PROVIDER_UNAVAILABLE",
+      retryable: true,
+      actions: ["RETRY", "SWITCH_MODEL"],
+      requestId: "req-task-center-page-retry-exhausted",
+    }),
+  );
+  const exhausted = expectOk(
+    running.recordFailure({
+      leaseToken: uuid(31),
+      failure,
+      now: "2026-07-26T00:00:02.000Z",
+      retryAt: null,
+    }),
+  );
+  window.localStorage.setItem(
+    DEVELOPMENT_TASK_CENTER_KEY,
+    JSON.stringify({
+      schemaVersion: 1,
+      tasks: [exhausted.toSnapshot()],
+      notifications: [],
     }),
   );
 }

@@ -18,6 +18,7 @@ import { Link } from "react-router-dom";
 
 import { DataTransferPanel, type CompletedImport } from "../components/data-transfer-panel";
 import {
+  createLocalCandidateAcceptancePipelineInput,
   ensureAcceptedChapterPipelineTask,
   runAcceptedChapterPipeline,
 } from "../infrastructure/accepted-chapter-pipeline";
@@ -849,13 +850,14 @@ export function ImportJourneyPage() {
           candidateId: result.value.candidate.id,
           action: "accepted",
         });
-        scheduleDerivedStoryRefresh({
-          projectId: result.value.chapter.projectId,
-          chapterId: result.value.chapter.id,
-          versionId: result.value.version.id,
-          source: "chapter_import",
-          acceptedCharacterCount: result.value.chapter.content.length,
-        });
+        scheduleDerivedStoryRefresh(
+          createLocalCandidateAcceptancePipelineInput({
+            projectId: result.value.chapter.projectId,
+            chapterId: result.value.chapter.id,
+            versionId: result.value.version.id,
+            acceptedCharacterCount: result.value.chapter.content.length,
+          }),
+        );
         setNotice("试改已作为新的稳定版本写入；接受前的原文仍保留在版本历史中，可随时恢复。");
       } else if (decision === "reject") {
         const result = await runtime.useCases.rejectCandidate.execute({
@@ -886,6 +888,8 @@ export function ImportJourneyPage() {
           versionId: restored.value.versionId,
           source: "version_restore",
           acceptedCharacterCount: restored.value.chapterContent.length,
+          runChapterSummary: false,
+          runStoryState: false,
         });
         updateTrialPointerDurably(trialView.candidate, {
           restoredAt: new Date().toISOString(),
@@ -1322,13 +1326,14 @@ export function ImportJourneyPage() {
           candidateId: accepted.value.candidate.id,
           action: "accepted",
         });
-        scheduleDerivedStoryRefresh({
-          projectId: accepted.value.chapter.projectId,
-          chapterId: accepted.value.chapter.id,
-          versionId: accepted.value.version.id,
-          source: "chapter_import",
-          acceptedCharacterCount: accepted.value.chapter.content.length,
-        });
+        scheduleDerivedStoryRefresh(
+          createLocalCandidateAcceptancePipelineInput({
+            projectId: accepted.value.chapter.projectId,
+            chapterId: accepted.value.chapter.id,
+            versionId: accepted.value.version.id,
+            acceptedCharacterCount: accepted.value.chapter.content.length,
+          }),
+        );
       } else if (decision === "reject") {
         const rejected = await runtime.useCases.rejectCandidate.execute({
           candidateId: found.value.id,
@@ -1358,6 +1363,8 @@ export function ImportJourneyPage() {
           versionId: restored.value.versionId,
           source: "version_restore",
           acceptedCharacterCount: restored.value.chapterContent.length,
+          runChapterSummary: false,
+          runStoryState: false,
         });
         updateBatchItemDurably(item.chapterId, { status: "restored", errorCode: null });
         await recordImportAction({
@@ -1484,13 +1491,14 @@ export function ImportJourneyPage() {
           candidateId: accepted.value.candidate.id,
           action: "accepted",
         });
-        scheduleDerivedStoryRefresh({
-          projectId: accepted.value.chapter.projectId,
-          chapterId: accepted.value.chapter.id,
-          versionId: accepted.value.version.id,
-          source: "chapter_import",
-          acceptedCharacterCount: accepted.value.chapter.content.length,
-        });
+        scheduleDerivedStoryRefresh(
+          createLocalCandidateAcceptancePipelineInput({
+            projectId: accepted.value.chapter.projectId,
+            chapterId: accepted.value.chapter.id,
+            versionId: accepted.value.version.id,
+            acceptedCharacterCount: accepted.value.chapter.content.length,
+          }),
+        );
       }
     } finally {
       setOperation("idle");

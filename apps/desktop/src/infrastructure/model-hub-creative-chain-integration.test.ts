@@ -72,7 +72,7 @@ describe("real creative chains use Model Hub routes", () => {
     });
   }
 
-  it("links the opening trace and rechecks privacy before committing an exact zero-selection method receipt", async () => {
+  it("links the opening trace and rechecks privacy before skill commit, final dispatch, and return", async () => {
     const harness = createNativeHarness();
     const chapter = await createChapter(harness.runtime, "");
     await seedModelHubTextRoute(harness.runtime.modelHub, {
@@ -127,7 +127,7 @@ describe("real creative chains use Model Hub routes", () => {
 
     expect(saveTrace).toHaveBeenCalledOnce();
     expect(linkInvocation).toHaveBeenCalledOnce();
-    expect(recheckPrivacy).toHaveBeenCalledTimes(2);
+    expect(recheckPrivacy).toHaveBeenCalledTimes(3);
     expect(commitSkill).toHaveBeenCalledOnce();
     expect(harness.generate).toHaveBeenCalledOnce();
     expect(result.noticeCode).toBeNull();
@@ -173,10 +173,13 @@ describe("real creative chains use Model Hub routes", () => {
       commitSkill.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
     );
     expect(commitSkill.mock.invocationCallOrder[0]).toBeLessThan(
+      recheckPrivacy.mock.invocationCallOrder[1] ?? Number.MAX_SAFE_INTEGER,
+    );
+    expect(recheckPrivacy.mock.invocationCallOrder[1]).toBeLessThan(
       harness.generate.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
     );
     expect(harness.generate.mock.invocationCallOrder[0]).toBeLessThan(
-      recheckPrivacy.mock.invocationCallOrder[1] ?? Number.MAX_SAFE_INTEGER,
+      recheckPrivacy.mock.invocationCallOrder[2] ?? Number.MAX_SAFE_INTEGER,
     );
   });
 
@@ -1131,7 +1134,6 @@ describe("real creative chains use Model Hub routes", () => {
       includeCapability: false,
     });
 
-    const modelCatalogReadsBeforeExecution = harness.listModels.mock.calls.length;
     const result = await createConfiguredModelCandidate(harness.runtime, chapter.id);
 
     expect(result.ok).toBe(false);
@@ -1139,7 +1141,7 @@ describe("real creative chains use Model Hub routes", () => {
       throw new Error("expected continuation policy failure");
     }
     expect(result.error).toMatchObject({ code: "MODEL_HUB_CAPABILITY_NOT_VERIFIED" });
-    expect(harness.listModels).toHaveBeenCalledTimes(modelCatalogReadsBeforeExecution + 1);
+    expect(harness.listModels).not.toHaveBeenCalled();
     expect(harness.generate).not.toHaveBeenCalled();
     await expectStableChapter(harness.runtime, chapter.id, "不可绕过策略的正文。");
     await expectCandidateCount(harness.runtime, chapter.id, 0);

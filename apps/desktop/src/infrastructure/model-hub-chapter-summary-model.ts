@@ -84,6 +84,20 @@ export class ModelHubChapterSummaryModel implements ChapterSummaryModelPort {
       const useProviderJsonMode =
         structuredOutputVerified &&
         getModelProviderPreset(inspection.providerKind).protocol === "openai_compatible";
+      const assertDispatchCapabilities = async (catalogEntryId: string) => {
+        const structuredOutputCurrent = await assertRequiredCapabilities(
+          this.dependencies,
+          catalogEntryId,
+          true,
+        );
+        if (useProviderJsonMode && !structuredOutputCurrent) {
+          throw new ModelHubExecutionError(
+            "MODEL_HUB_CHAPTER_SUMMARY_CAPABILITY_CHANGED",
+            "结构化输出能力已变化，本次摘要未发送。",
+            true,
+          );
+        }
+      };
       executed = await this.executeText(this.dependencies, {
         ...request,
         reasoningPolicy: "visible_prose",
@@ -91,18 +105,12 @@ export class ModelHubChapterSummaryModel implements ChapterSummaryModelPort {
         dispatchScope: projectContextDispatchScope(input.projectPrivacy),
         onBeforeDispatch: async (selection) => {
           assertSelectionMatches(inspection, selection);
-          const structuredOutputStillVerified = await assertRequiredCapabilities(
-            this.dependencies,
-            selection.catalogEntryId,
-            true,
-          );
-          if (useProviderJsonMode && !structuredOutputStillVerified) {
-            throw new ModelHubExecutionError(
-              "MODEL_HUB_CHAPTER_SUMMARY_CAPABILITY_CHANGED",
-              "结构化输出能力证据在发送前已失效，本次摘要未发送；正文和已保存版本不受影响。",
-              true,
-            );
-          }
+          await assertDispatchCapabilities(selection.catalogEntryId);
+          await input.assertSourceCurrent();
+          await input.assertProjectPrivacyCurrent?.(selection.localOnlyEligible === true);
+        },
+        onFinalBeforeProviderDispatch: async (selection) => {
+          await assertDispatchCapabilities(selection.catalogEntryId);
           await input.assertSourceCurrent();
           await input.assertProjectPrivacyCurrent?.(selection.localOnlyEligible === true);
         },

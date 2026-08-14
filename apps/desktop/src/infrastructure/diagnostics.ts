@@ -7,28 +7,44 @@ import { TASK_STATUSES, type TaskStatus } from "@inkshadow/task-engine";
 import type { LocalAccessStoreHealth } from "@inkshadow/data/access-sqlite-store";
 import type { LocalSyncStoreHealth } from "@inkshadow/data/sync-sqlite-store";
 
-import { NOVEL_AI_TASKS } from "./model-hub-provider-registry";
+import {
+  NOVEL_AI_TASKS,
+  isModelProviderKind,
+  isNovelAiTask,
+  type ModelProviderKind,
+  type NovelAiTask,
+} from "./model-hub-provider-registry";
 import {
   buildModelHubRoutingVisibility,
   toAiRoutingDiagnosticSummary,
   type AiRoutingDiagnosticSummary,
 } from "./model-hub-routing-visibility";
-import type {
-  ModelCapabilityEvidence,
-  ModelCatalogEntry,
-  ModelProviderConnection,
-  NovelTaskRoute,
-  RecentAiFailure,
+import {
+  MODEL_FAILURE_STAGES,
+  type ModelFailureStage,
+  type ModelCapabilityEvidence,
+  type ModelCatalogEntry,
+  type ModelProviderConnection,
+  type NovelTaskRoute,
+  type RecentAiFailure,
 } from "./model-hub-store";
 import {
+  readSafeGenerationErrorCodes,
   readSafeGenerationPreflightDiagnostic,
+  readSafeInvocationRouteDiagnostic,
   type SafeGenerationPreflightDiagnostic,
+  type SafeInvocationRouteDiagnostic,
 } from "./generation-preflight-diagnostics";
+import {
+  readSafeGuidedOpeningStatus,
+  type SafeGuidedOpeningStatus,
+} from "./guided-opening-diagnostics";
 import {
   readSafeModelHubSessionDiagnostics,
   type SafeModelHubActionDiagnostic,
   type SafeModelHubUiSnapshotDiagnostic,
 } from "./model-hub-ui-diagnostics";
+import { readSafeUiRouteIncidents, type SafeUiRouteIncident } from "./ui-route-diagnostics";
 import type { DesktopRuntime } from "./runtime";
 import type { PersistedGenerationPreflight } from "./generation-governance-store";
 
@@ -45,13 +61,16 @@ export interface DesktopDiagnosticBundle {
   } | null;
   readonly aiRoutingSummary: AiRoutingDiagnosticSummary;
   readonly recentAiRoutingFailures: readonly [];
-  readonly recentAiFailures: readonly RecentAiFailure[];
+  readonly recentAiFailures: readonly SafeRecentAiFailureDiagnostic[];
+  readonly recentUiFailures: readonly SafeUiRouteIncident[];
   readonly modelHubUiSnapshot: SafeModelHubUiSnapshotDiagnostic | null;
   readonly recentModelHubActions: readonly SafeModelHubActionDiagnostic[];
   readonly currentSessionStartedAt: string;
   readonly currentSessionErrorCodes: readonly string[];
   readonly historicalErrorCodes: readonly string[];
   readonly generationPreflight: SafeGenerationPreflightDiagnostic | null;
+  readonly lastRouteResolution: SafeInvocationRouteDiagnostic | null;
+  readonly guidedOpeningStatus: SafeGuidedOpeningStatus | null;
   readonly generationBudget: PersistedGenerationPreflight["generationBudget"] | null;
   readonly contextSelectionSummary: PersistedGenerationPreflight["contextSelectionSummary"] | null;
   readonly chapterSummaryStatus: null;
@@ -63,6 +82,22 @@ export interface DesktopDiagnosticBundle {
     readonly uploadedFilesIncluded: false;
   };
   readonly limitations: readonly string[];
+}
+
+export interface SafeRecentAiFailureDiagnostic {
+  readonly timestamp: string;
+  readonly providerKind: ModelProviderKind;
+  readonly taskType: NovelAiTask | "capability_probe";
+  readonly stage: ModelFailureStage | null;
+  readonly normalizedErrorCode: string;
+  readonly retryable: boolean | null;
+  readonly httpStatus: number | null;
+  readonly finishReason: "stop" | "length" | "content_filter" | "tool_calls" | null;
+  readonly visibleContentLength: number | null;
+  readonly reasoningPresent: boolean | null;
+  readonly stream: boolean | null;
+  readonly attempt: number;
+  readonly requestedMaxOutputTokens: number | null;
 }
 
 export interface DesktopDiagnosticArtifact {
@@ -83,7 +118,8 @@ export async function collectDesktopDiagnosticArtifact(
   let integrityMessageCount: number | null = null;
   let foreignKeyViolationCount: number | null = null;
   let localCloudFoundation: DesktopDiagnosticBundle["localCloudFoundation"] = null;
-  let recentAiFailures: readonly RecentAiFailure[] = [];
+  let rawRecentAiFailures: readonly RecentAiFailure[] = [];
+  let recentAiFailures: readonly SafeRecentAiFailureDiagnostic[] = [];
   let legacyModelProfileCount: number | null = null;
   let legacyModelProfilesWithSelection: number | null = null;
   let modelHubConnectionCount: number | null = null;
@@ -179,12 +215,10 @@ export async function collectDesktopDiagnosticArtifact(
   }
 
   try {
-    recentAiFailures = await runtime.modelHub.listRecentAiFailures(25);
+    rawRecentAiFailures = await runtime.modelHub.listRecentAiFailures(25);
+    recentAiFailures = Object.freeze(rawRecentAiFailures.map(projectRecentAiFailure));
     for (const failure of recentAiFailures) {
       errorCodes.push(failure.normalizedErrorCode);
-      if (failure.requestId !== null) {
-        requestIds.push(failure.requestId);
-      }
     }
   } catch (cause: unknown) {
     errorCodes.push(errorCode(cause, "AI_FAILURE_DIAGNOSTIC_UNAVAILABLE"));
@@ -220,7 +254,7 @@ export async function collectDesktopDiagnosticArtifact(
       catalog: modelHubCatalog,
       routes: modelHubRoutes,
       capabilityEvidence: modelHubCapabilityEvidence,
-      recentAiFailures,
+      recentAiFailures: rawRecentAiFailures,
       now: runtime.clock.now(),
       validating: false,
       loadFailed: modelHubConnectionCount === null,
@@ -228,10 +262,41 @@ export async function collectDesktopDiagnosticArtifact(
     }),
   );
   const modelHubSession = readSafeModelHubSessionDiagnostics(runtime, runtime.clock.now());
+  const safeModelHubActions = Object.freeze(
+    modelHubSession.recentModelHubActions.map((action) =>
+      Object.freeze({
+        ...action,
+        connectionId: null,
+        modelId: null,
+        errorCode: action.errorCode === null ? null : safeDiagnosticErrorCode(action.errorCode),
+      }),
+    ),
+  );
+  const safeModelHubSnapshot =
+    modelHubSession.modelHubUiSnapshot === null
+      ? null
+      : Object.freeze({
+          ...modelHubSession.modelHubUiSnapshot,
+          selectedConnectionId: null,
+          selectedModelIdInUi: null,
+        });
+  const recentUiFailures = Object.freeze(
+    readSafeUiRouteIncidents(runtime).map((incident) =>
+      Object.freeze({
+        ...incident,
+        normalizedErrorCode: safeDiagnosticErrorCode(incident.normalizedErrorCode),
+      }),
+    ),
+  );
+  errorCodes.push(...recentUiFailures.map(({ normalizedErrorCode }) => normalizedErrorCode));
   const { currentSessionErrorCodes, historicalErrorCodes } = partitionDiagnosticErrorCodes(
     modelHubSession.currentSessionStartedAt,
-    modelHubSession.currentSessionErrorCodes,
+    [
+      ...safeModelHubActions.flatMap(({ errorCode }) => (errorCode === null ? [] : [errorCode])),
+      ...readSafeGenerationErrorCodes(runtime),
+    ],
     recentAiFailures,
+    recentUiFailures,
   );
 
   const searchHealth = runtime.search.health();
@@ -252,7 +317,7 @@ export async function collectDesktopDiagnosticArtifact(
     databaseHealth,
     indexHealth,
     syncState: "local_only",
-    errorCodes,
+    errorCodes: errorCodes.map(safeDiagnosticErrorCode),
     taskStateCounts,
     requestIds,
     configuration: {
@@ -266,16 +331,19 @@ export async function collectDesktopDiagnosticArtifact(
       indexedDocumentCount: searchHealth.documentCount,
       indexedEmbeddingCount: searchHealth.embeddingCount,
       vectorStatus: searchHealth.vectorStatus,
-      embeddingProviderId: embeddingDiagnostics.providerId,
+      embeddingProviderId: null,
       embeddingProvider: embeddingDiagnostics.provider,
-      embeddingModel: embeddingDiagnostics.model,
+      embeddingModel: null,
       embeddingDimension: embeddingDiagnostics.dimension,
       embeddingDestination: embeddingDiagnostics.destination,
-      embeddingEndpoint: embeddingDiagnostics.endpointUrl,
+      embeddingEndpoint: safeEndpointOrigin(embeddingDiagnostics.endpointUrl),
       embeddingReason: embeddingDiagnostics.reason,
       embeddingGeneration: embeddingDiagnostics.generation,
       embeddingLastRebuiltAt: embeddingDiagnostics.lastRebuiltAt,
-      embeddingQueryFailureCode: embeddingDiagnostics.queryFailureCode,
+      embeddingQueryFailureCode:
+        embeddingDiagnostics.queryFailureCode === null
+          ? null
+          : safeDiagnosticErrorCode(embeddingDiagnostics.queryFailureCode),
       legacyModelProfileCount,
       legacyModelProfilesWithSelection,
       modelHubConnectionCount,
@@ -317,12 +385,19 @@ export async function collectDesktopDiagnosticArtifact(
     aiRoutingSummary,
     recentAiRoutingFailures: [],
     recentAiFailures,
-    modelHubUiSnapshot: modelHubSession.modelHubUiSnapshot,
-    recentModelHubActions: modelHubSession.recentModelHubActions,
+    recentUiFailures,
+    modelHubUiSnapshot: safeModelHubSnapshot,
+    recentModelHubActions: safeModelHubActions,
     currentSessionStartedAt: modelHubSession.currentSessionStartedAt,
     currentSessionErrorCodes,
     historicalErrorCodes,
-    generationPreflight: readSafeGenerationPreflightDiagnostic(runtime),
+    generationPreflight: projectGenerationPreflightDiagnostic(
+      readSafeGenerationPreflightDiagnostic(runtime),
+    ),
+    lastRouteResolution: projectInvocationRouteDiagnostic(
+      readSafeInvocationRouteDiagnostic(runtime),
+    ),
+    guidedOpeningStatus: projectGuidedOpeningStatus(readSafeGuidedOpeningStatus(runtime)),
     generationBudget,
     contextSelectionSummary,
     chapterSummaryStatus: null,
@@ -348,6 +423,7 @@ export function partitionDiagnosticErrorCodes(
   currentSessionStartedAt: string,
   modelHubActionErrorCodes: readonly string[],
   recentAiFailures: readonly Pick<RecentAiFailure, "timestamp" | "normalizedErrorCode">[],
+  recentUiFailures: readonly Pick<SafeUiRouteIncident, "timestamp" | "normalizedErrorCode">[] = [],
 ): Readonly<{
   currentSessionErrorCodes: readonly string[];
   historicalErrorCodes: readonly string[];
@@ -355,18 +431,28 @@ export function partitionDiagnosticErrorCodes(
   return Object.freeze({
     currentSessionErrorCodes: Object.freeze([
       ...new Set([
-        ...modelHubActionErrorCodes,
+        ...modelHubActionErrorCodes.map(safeDiagnosticErrorCode),
         ...recentAiFailures.flatMap(({ timestamp, normalizedErrorCode }) =>
-          timestamp >= currentSessionStartedAt ? [normalizedErrorCode] : [],
+          timestamp >= currentSessionStartedAt
+            ? [safeDiagnosticErrorCode(normalizedErrorCode)]
+            : [],
+        ),
+        ...recentUiFailures.flatMap(({ timestamp, normalizedErrorCode }) =>
+          timestamp >= currentSessionStartedAt
+            ? [safeDiagnosticErrorCode(normalizedErrorCode)]
+            : [],
         ),
       ]),
     ]),
     historicalErrorCodes: Object.freeze([
-      ...new Set(
-        recentAiFailures.flatMap(({ timestamp, normalizedErrorCode }) =>
-          timestamp < currentSessionStartedAt ? [normalizedErrorCode] : [],
+      ...new Set([
+        ...recentAiFailures.flatMap(({ timestamp, normalizedErrorCode }) =>
+          timestamp < currentSessionStartedAt ? [safeDiagnosticErrorCode(normalizedErrorCode)] : [],
         ),
-      ),
+        ...recentUiFailures.flatMap(({ timestamp, normalizedErrorCode }) =>
+          timestamp < currentSessionStartedAt ? [safeDiagnosticErrorCode(normalizedErrorCode)] : [],
+        ),
+      ]),
     ]),
   });
 }
@@ -379,10 +465,140 @@ function emptyTaskStateCounts(): Record<TaskStatus, number> {
 }
 
 function errorCode(cause: unknown, fallback: string): string {
-  return typeof cause === "object" &&
-    cause !== null &&
-    "code" in cause &&
-    typeof cause.code === "string"
-    ? cause.code
-    : fallback;
+  const candidate =
+    typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "string"
+      ? cause.code
+      : fallback;
+  return safeDiagnosticErrorCode(candidate);
+}
+
+const SAFE_PROVIDER_ERROR_CODES = new Set([
+  "AI_UPSTREAM_UNAVAILABLE",
+  "MODEL_OUTPUT_TRUNCATED",
+  "UPSTREAM_TIMEOUT",
+]);
+const SAFE_DIAGNOSTIC_ERROR_CODES = new Set([
+  ...SAFE_PROVIDER_ERROR_CODES,
+  "AI_PROVIDER_REQUEST_FAILED",
+  "CREATIVE_INPUT_INVALID",
+  "CURRENT_ACTION_FAILED",
+  "CURRENT_AI_FAILURE",
+  "HISTORICAL_FAILURE",
+  "MODEL_HUB_ACTION_FAILED",
+  "MODEL_HUB_CAPABILITY_NOT_VERIFIED",
+  "MODEL_HUB_CATALOG_REFRESH_FAILED",
+  "MODEL_HUB_STALE_RESULT_IGNORED",
+  "PREFLIGHT_BLOCKED_CONTEXT_OVERFLOW",
+  "PREFLIGHT_BLOCKED_CREDENTIAL",
+  "PREFLIGHT_BLOCKED_HARD_BUDGET",
+  "PREFLIGHT_BLOCKED_MODEL_UNAVAILABLE",
+  "PREFLIGHT_BLOCKED_NO_ROUTE",
+  "PREFLIGHT_BLOCKED_PRIVACY",
+  "PREFLIGHT_WARNING_CONTEXT_UNKNOWN",
+  "PREFLIGHT_WARNING_PRICING_UNKNOWN",
+  "PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE",
+  "UI_CHUNK_LOAD_FAILED",
+  "UI_RENDER_FAILED",
+]);
+const SAFE_FINISH_REASONS = new Set(["stop", "length", "content_filter", "tool_calls"]);
+
+function projectRecentAiFailure(input: RecentAiFailure): SafeRecentAiFailureDiagnostic {
+  return Object.freeze({
+    timestamp: safeTimestamp(input.timestamp),
+    providerKind: isModelProviderKind(input.providerKind)
+      ? input.providerKind
+      : "custom_openai_compatible",
+    taskType:
+      input.taskType === "capability_probe" || isNovelAiTask(input.taskType)
+        ? input.taskType
+        : "capability_probe",
+    stage: (MODEL_FAILURE_STAGES as readonly unknown[]).includes(input.stage) ? input.stage : null,
+    normalizedErrorCode: SAFE_PROVIDER_ERROR_CODES.has(input.normalizedErrorCode)
+      ? input.normalizedErrorCode
+      : "AI_PROVIDER_REQUEST_FAILED",
+    retryable: typeof input.retryable === "boolean" ? input.retryable : null,
+    httpStatus: safeInteger(input.httpStatus, 100, 599),
+    finishReason: SAFE_FINISH_REASONS.has(input.finishReason ?? "")
+      ? (input.finishReason as SafeRecentAiFailureDiagnostic["finishReason"])
+      : null,
+    visibleContentLength: safeInteger(input.visibleContentLength, 0, 1_000_000_000),
+    reasoningPresent: typeof input.reasoningPresent === "boolean" ? input.reasoningPresent : null,
+    stream: typeof input.stream === "boolean" ? input.stream : null,
+    attempt: safeInteger(input.attempt, 1, 100) ?? 1,
+    requestedMaxOutputTokens: safeInteger(input.requestedMaxOutputTokens, 1, 1_000_000),
+  });
+}
+
+function projectInvocationRouteDiagnostic(
+  input: SafeInvocationRouteDiagnostic | null,
+): SafeInvocationRouteDiagnostic | null {
+  if (input === null) return null;
+  return Object.freeze({
+    ...input,
+    taskType: isNovelAiTask(input.taskType) ? input.taskType : "continuation",
+    resolvedConnectionId: null,
+    resolvedModelId: null,
+    blockerCode: input.blockerCode === null ? null : safeDiagnosticErrorCode(input.blockerCode),
+    checkedAt: safeTimestamp(input.checkedAt),
+  });
+}
+
+function projectGenerationPreflightDiagnostic(
+  input: SafeGenerationPreflightDiagnostic | null,
+): SafeGenerationPreflightDiagnostic | null {
+  if (input === null) return null;
+  return Object.freeze({
+    ...input,
+    taskType: isNovelAiTask(input.taskType) ? input.taskType : "continuation",
+    blockerCodes: Object.freeze(input.blockerCodes.map(safeDiagnosticErrorCode)),
+    warningCodes: Object.freeze(input.warningCodes.map(safeDiagnosticErrorCode)),
+    checkedAt: safeTimestamp(input.checkedAt),
+  });
+}
+
+function projectGuidedOpeningStatus(
+  input: SafeGuidedOpeningStatus | null,
+): SafeGuidedOpeningStatus | null {
+  if (input === null) return null;
+  return Object.freeze({
+    ...input,
+    batchId: null,
+    selectedSlot: /^slot_[1-3]$/u.test(input.selectedSlot ?? "") ? input.selectedSlot : null,
+    currentQuestion: /^[a-z][a-z0-9_]{0,63}$/u.test(input.currentQuestion ?? "")
+      ? input.currentQuestion
+      : null,
+    lastError: input.lastError === null ? null : safeDiagnosticErrorCode(input.lastError),
+  });
+}
+
+function safeEndpointOrigin(value: string | null): string | null {
+  if (value === null) return null;
+  try {
+    const endpoint = new URL(value);
+    return endpoint.username === "" &&
+      endpoint.password === "" &&
+      (endpoint.protocol === "https:" || endpoint.protocol === "http:")
+      ? endpoint.origin
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeDiagnosticErrorCode(value: string): string {
+  return SAFE_DIAGNOSTIC_ERROR_CODES.has(value) ? value : "DIAGNOSTIC_VALUE_REDACTED";
+}
+
+function safeInteger(
+  value: number | null | undefined,
+  minimum: number,
+  maximum: number,
+): number | null {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) return null;
+  return value >= minimum && value <= maximum ? value : null;
+}
+
+function safeTimestamp(value: string): string {
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.valueOf()) ? parsed.toISOString() : "1970-01-01T00:00:00.000Z";
 }

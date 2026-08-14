@@ -77,6 +77,7 @@ interface FineTuningDeploymentRestoreRow {
   readonly id: string;
 }
 
+const BACKUP_INCOMPATIBLE_OPERATION = "DATABASE_RESTORE_BACKUP_INCOMPATIBLE";
 const RESTORABLE_TABLES = [
   "projects",
   "project_seeds",
@@ -1068,7 +1069,7 @@ export class DatabaseMaintenanceService {
         foreignKeyRows.length > 0 ||
         RESTORABLE_TABLES.some((table) => !sourceTables.has(table))
       ) {
-        throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+        throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
       }
 
       await this.executor.transaction(async (transaction) => {
@@ -1098,7 +1099,7 @@ export class DatabaseMaintenanceService {
               !/^CREATE TRIGGER\b/iu.test(sql),
           )
         ) {
-          throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+          throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
         }
         for (const trigger of NOVEL_SKILL_EVALUATION_RESTORE_GUARDS) {
           await transaction.execute(`DROP TRIGGER main.${trigger}`);
@@ -1206,7 +1207,7 @@ export class DatabaseMaintenanceService {
         await auditRestoredNovelSkillEvaluationLedger(transaction);
         for (const { sql } of evaluationDeleteGuards) {
           if (sql === null) {
-            throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+            throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
           }
           await transaction.execute(sql);
         }
@@ -1528,7 +1529,7 @@ async function auditRestoredNovelSkillEvaluationLedger(
                    WHERE project_id = suite.evaluation_project_id)
      LIMIT 1`,
   );
-  if (invalidSuites.length > 0) throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+  if (invalidSuites.length > 0) throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
 
   const invalidRelationships = await transaction.select<{ readonly id: string }>(
     `SELECT attempt.id
@@ -1546,7 +1547,7 @@ async function auditRestoredNovelSkillEvaluationLedger(
      LIMIT 1`,
   );
   if (invalidRelationships.length > 0) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
 
   const runs = await transaction.select<RestoredEvaluationRunAuditRow>(
@@ -1585,7 +1586,7 @@ async function auditRestoredNovelSkillEvaluationLedger(
       (run.status === "invalidated" &&
         (run.observed_count + run.invalidated_count !== 192 || run.started_attempt_count !== 0))
     ) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     await auditRestoredEvaluationRunStructure(transaction, run, assignments);
   }
@@ -1604,7 +1605,7 @@ async function auditRestoredNovelSkillEvaluationLedger(
             AND min(strftime('%Y-%m-%dT%H:%M:%fZ', score.scored_at)) IS NULL)
      LIMIT 1`,
   );
-  if (scoreViolations.length > 0) throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+  if (scoreViolations.length > 0) throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
 
   const observations = await transaction.select<RestoredEvaluationObservationAuditRow>(
     `SELECT observation.id, observation.run_id, observation.cell_id,
@@ -1711,7 +1712,7 @@ async function auditRestoredNovelSkillEvaluationLedger(
     "SELECT count(*) AS count FROM novel_skill_evaluation_observations",
   );
   if (observations.length !== (observationCount[0]?.count ?? -1)) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   const verifiedObservations: RestoredVerifiedObservation[] = [];
   for (const observation of observations) {
@@ -1741,7 +1742,7 @@ async function auditRestoredNovelSkillEvaluationLedger(
      LIMIT 1`,
   );
   if (invalidDecisions.length > 0) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
 
   const unownedArtifacts = await transaction.select<{ readonly id: string }>(
@@ -1848,7 +1849,7 @@ async function auditRestoredNovelSkillEvaluationLedger(
      LIMIT 1`,
   );
   if (unownedArtifacts.length > 0) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
 }
 
@@ -1887,7 +1888,7 @@ async function auditRestoredNovelSkillPaidEvaluationAuthority(
      LIMIT 1`,
   );
   if (invalidProtocols.length > 0) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
 
   const invalidRuns = await transaction.select<{ readonly id: string }>(
@@ -1964,7 +1965,7 @@ async function auditRestoredNovelSkillPaidEvaluationAuthority(
      LIMIT 1`,
   );
   if (invalidRuns.length > 0) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
 
   const invalidReservations = await transaction.select<{ readonly id: string }>(
@@ -2052,7 +2053,7 @@ async function auditRestoredNovelSkillPaidEvaluationAuthority(
      LIMIT 1`,
   );
   if (invalidReservations.length > 0) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
 
   const visibleOutputs = await transaction.select<{
@@ -2067,7 +2068,7 @@ async function auditRestoredNovelSkillPaidEvaluationAuthority(
   );
   for (const output of visibleOutputs) {
     if (output.content_checksum !== output.provider_visible_output_hash) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
   }
 
@@ -2125,7 +2126,7 @@ async function auditRestoredNovelSkillPaidEvaluationAuthority(
      LIMIT 1`,
   );
   if (invalidReviews.length > 0) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
 }
 
@@ -2218,10 +2219,10 @@ async function auditRestoredPaidProtocolHashes(transaction: TransactionExecutor)
         }),
       );
       if (requestProfileHash !== profile.request_profile_hash) {
-        throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+        throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
       }
       if (profile.maximum_output_tokens > 1_000_000) {
-        throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+        throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
       }
     }
     const baselines = await transaction.select<RestoredPaidContextBaselineRow>(
@@ -2240,7 +2241,7 @@ async function auditRestoredPaidProtocolHashes(transaction: TransactionExecutor)
         (baseline) => baseline.baseline_contract_hash !== baseline.fixture_contract_hash,
       )
     ) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     const normalizedBaselines = baselines.map((baseline) => ({
       fixtureId: baseline.fixture_id,
@@ -2278,7 +2279,7 @@ async function auditRestoredPaidProtocolHashes(transaction: TransactionExecutor)
       protocol.context_baseline_manifest_hash !== contextBaselineManifestHash ||
       protocol.protocol_hash !== protocolHash
     ) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
   }
 }
@@ -2639,7 +2640,7 @@ async function auditRestoredPaidTargetsAndAuthorizations(
       target.pricing_snapshot_hash !== pricingSnapshotHash ||
       target.target_hash !== targetHash
     ) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     exactTargets.set(`${target.run_id}/${target.model_slot_id}`, {
       connectionId: target.connection_id,
@@ -2694,7 +2695,7 @@ async function auditRestoredPaidCommercialAuthorizations(
   for (const authorization of authorizations) {
     const runTargets = targets.filter(({ run_id }) => run_id === authorization.run_id);
     if (runTargets.length !== 2) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     const targetManifestHash = await sha256Text(
       canonicalJson(
@@ -2745,7 +2746,7 @@ async function auditRestoredPaidCommercialAuthorizations(
       [authorization.run_id],
     );
     if (work.reduce((total, row) => total + row.cell_count, 0) !== 192) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     const totals = new Map<string, bigint>();
     for (const row of work) {
@@ -2755,7 +2756,7 @@ async function auditRestoredPaidCommercialAuthorizations(
         row.maximum_output_tokens > row.output_token_limit ||
         row.maximum_input_tokens + row.maximum_output_tokens > row.input_token_limit
       ) {
-        throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+        throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
       }
       const maximumPerCall = restoredPaidMaximumCost(
         row.maximum_input_tokens,
@@ -2794,13 +2795,13 @@ async function auditRestoredPaidCommercialAuthorizations(
     const confirmationCurrencies = currencies.map((currency) => {
       const limit = limits.find((candidate) => candidate.currency === currency.currency);
       if (limit === undefined) {
-        throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+        throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
       }
       if (
         limit.estimated_max_cost_micros !== currency.estimatedMaximumCostMicros ||
         BigInt(limit.hard_ceiling_micros) < BigInt(currency.estimatedMaximumCostMicros)
       ) {
-        throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+        throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
       }
       return { ...currency, hardCeilingMicros: limit.hard_ceiling_micros };
     });
@@ -2834,7 +2835,7 @@ async function auditRestoredPaidCommercialAuthorizations(
       authorization.quote_hash !== quoteHash ||
       authorization.confirmation_hash !== confirmationHash
     ) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
   }
 }
@@ -3016,7 +3017,7 @@ async function restoredPaidTraceBaselineProjection(
     [traceId],
   );
   const trace = traces[0];
-  if (trace === undefined) throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+  if (trace === undefined) throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   const rows = await transaction.select<RestoredPaidTraceEntryRow>(
     `SELECT entry.candidate_id, entry.layer, entry.selection_reason, entry.included,
             entry.discarded_reason, entry.estimated_tokens, entry.evaluation_order,
@@ -3040,7 +3041,7 @@ async function restoredPaidTraceBaselineProjection(
   const projectedEntries = [...entries.values()].map((group) => {
     const entry = group[0];
     if (entry === undefined || group.some((candidate) => candidate.layer !== entry.layer)) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     const sources = group.map((source) => {
       if (
@@ -3049,7 +3050,7 @@ async function restoredPaidTraceBaselineProjection(
         source.source_id === null ||
         source.content_hash === null
       ) {
-        throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+        throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
       }
       return {
         sourceOrder: source.source_order,
@@ -3106,7 +3107,7 @@ async function auditRestoredPaidReservationPayloadAuthority(
   );
   const authority = authorities[0];
   if (authorities.length !== 1 || authority === undefined) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   const { availableContextLayers, traceBaseline } = await restoredPaidTraceBaselineProjection(
     transaction,
@@ -3290,7 +3291,7 @@ async function auditRestoredPaidReservationPayloadAuthority(
     reservation.payload_authority_manifest_hash !== manifestHash ||
     authority.authority_snapshot_hash !== snapshotHash
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
 }
 
@@ -3305,7 +3306,7 @@ function restoredPaidUsage(
     outputTokens === null ||
     (cachedInputTokens !== null && cachedInputTokens > inputTokens)
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   return {
     inputTokens,
@@ -3339,7 +3340,7 @@ async function auditRestoredPaidProviderReceipt(
       !["ambiguous", "not_dispatched"].includes(reservation.state) &&
       reservation.provider_receipt_hash !== null
     ) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     return;
   }
@@ -3351,7 +3352,7 @@ async function auditRestoredPaidProviderReceipt(
     reservation.invocation_currency !== reservation.currency ||
     reservation.invocation_requested_max_output_tokens !== reservation.maximum_output_tokens
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   const usage = restoredPaidUsage(
     reservation.invocation_input_tokens,
@@ -3362,7 +3363,7 @@ async function auditRestoredPaidProviderReceipt(
     (usage?.inputTokens ?? 0) > reservation.maximum_input_tokens ||
     (usage?.outputTokens ?? 0) > reservation.maximum_output_tokens
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   if (reservation.settlement_outcome === "succeeded") {
     if (
@@ -3382,7 +3383,7 @@ async function auditRestoredPaidProviderReceipt(
         reservation.target_cached_input_rate,
       ) !== reservation.actual_cost_micros
     ) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     const providerReceiptHash = await sha256Text(
       canonicalJson({
@@ -3401,7 +3402,7 @@ async function auditRestoredPaidProviderReceipt(
       }),
     );
     if (providerReceiptHash !== reservation.provider_receipt_hash) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     return;
   }
@@ -3410,7 +3411,7 @@ async function auditRestoredPaidProviderReceipt(
     reservation.output_candidate_id !== null ||
     reservation.attempt_error_code === null
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   const expectedOutcome =
     reservation.attempt_error_code === "USER_CANCELLED"
@@ -3434,7 +3435,7 @@ async function auditRestoredPaidProviderReceipt(
     reservation.invocation_error_code !== expectedInvocationErrorCode ||
     reservation.invocation_cost_micros !== reservation.actual_cost_micros
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   if (
     usage !== null &&
@@ -3446,10 +3447,10 @@ async function auditRestoredPaidProviderReceipt(
         reservation.target_cached_input_rate,
       )
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   if (usage === null && reservation.actual_cost_micros !== null) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   const providerReceiptHash = await sha256Text(
     canonicalJson({
@@ -3468,7 +3469,7 @@ async function auditRestoredPaidProviderReceipt(
     }),
   );
   if (providerReceiptHash !== reservation.provider_receipt_hash) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
 }
 
@@ -3538,7 +3539,7 @@ async function auditRestoredPaidReservationHashes(
   for (const reservation of reservations) {
     const exactTarget = exactTargets.get(`${reservation.run_id}/${reservation.model_slot_id}`);
     if (exactTarget === undefined) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     const invariantRequestHash = await sha256Text(
       canonicalJson({
@@ -3559,7 +3560,7 @@ async function auditRestoredPaidReservationHashes(
       reservation.invariant_request_hash !== invariantRequestHash ||
       reservation.payload_authority_version !== "novel-skill-paid-payload-authority@1"
     ) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     await auditRestoredPaidReservationPayloadAuthority(transaction, reservation, exactTarget);
     await auditRestoredPaidProviderReceipt(reservation, exactTarget);
@@ -3642,7 +3643,7 @@ async function auditRestoredEvaluationRunStructure(
     slots === null ||
     slots.some((slot) => !assignments.some((assignment) => assignment.slotId === slot.slotId))
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   const fixtures = await transaction.select<RestoredEvaluationFixtureAuditRow>(
     `SELECT fixture_id, language, origin, task_type, invocation_mode,
@@ -3730,7 +3731,7 @@ async function auditRestoredEvaluationRunStructure(
     run.target_manifest_hash !== targetManifestHash ||
     run.plan_hash !== planHash
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   const cells = await transaction.select<RestoredEvaluationCellAuditRow>(
     `SELECT id, run_id, suite_id, fixture_id, arm, arm_configuration_hash,
@@ -3776,11 +3777,11 @@ async function auditRestoredEvaluationRunStructure(
       cell.created_at !== run.created_at ||
       !validState
     ) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
   }
   if (cells.length !== 192 || expectedCells.size !== 0) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
 
   const attempts = await transaction.select<RestoredEvaluationAttemptAuditRow>(
@@ -3835,7 +3836,7 @@ async function auditRestoredEvaluationRunStructure(
         run.status !== "running") ||
       !statusCompatible
     ) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     nextAttemptByCell.set(attempt.cell_id, expectedAttempt + 1);
     if (receiptBound) {
@@ -3854,7 +3855,7 @@ async function auditRestoredEvaluationRunStructure(
           attempt.observation_id === null,
       ))
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
 }
 
@@ -3973,7 +3974,7 @@ async function auditRestoredEvaluationAttemptReceipt(
           ],
         );
   if (receipts.length !== 1 || receipt === undefined) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   if (
     receipt.trace_project_id !== (await restoredEvaluationProjectId(transaction, run.suite_id)) ||
@@ -3989,7 +3990,7 @@ async function auditRestoredEvaluationAttemptReceipt(
     (["failed", "cancelled"].includes(attempt.status) &&
       ["queued", "running"].includes(receipt.invocation_status))
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
 }
 
@@ -4002,7 +4003,7 @@ async function restoredEvaluationProjectId(
     [suiteId],
   );
   const projectId = rows[0]?.evaluation_project_id;
-  if (projectId === undefined) throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+  if (projectId === undefined) throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   return projectId;
 }
 
@@ -4133,7 +4134,7 @@ async function auditRestoredEvaluationObservation(
         existing.budget_remaining_before !== source.budget_remaining_before ||
         existing.budget_remaining_after !== source.budget_remaining_after)
     ) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     traceEntries.set(source.candidate_id, source);
   }
@@ -4198,7 +4199,7 @@ async function auditRestoredEvaluationObservation(
       : includedPreferences.length !== 0 ||
         observation.observation_preference_configuration_hash !== null)
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   if (observation.arm === "no_skill") {
     const hidden = await transaction.select<{ readonly id: string }>(
@@ -4211,7 +4212,7 @@ async function auditRestoredEvaluationObservation(
       observation.observation_arm_configuration_hash !== null ||
       hidden.length > 0
     ) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     return buildRestoredVerifiedObservation(transaction, observation, sources, [], {
       core: false,
@@ -4223,7 +4224,7 @@ async function auditRestoredEvaluationObservation(
     observation.snapshot_compiler_version !== observation.suite_compiler_version ||
     observation.snapshot_configuration_json === null
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   const manifestMismatch = await transaction.select<{ readonly mismatch: number }>(
     `SELECT CASE WHEN
@@ -4253,7 +4254,7 @@ async function auditRestoredEvaluationObservation(
     ],
   );
   if (manifestMismatch[0]?.mismatch !== 0) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   const items = await transaction.select<RestoredEvaluationSkillItemAuditRow>(
     `SELECT item.item_order, item.skill_id, item.skill_version, item.definition_hash,
@@ -4283,7 +4284,7 @@ async function auditRestoredEvaluationObservation(
     observation.cell_arm_configuration_hash !== actualArmHash ||
     observation.observation_arm_configuration_hash !== actualArmHash
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   let configuration: Record<string, unknown>;
   let fixtureGenres: unknown;
@@ -4291,7 +4292,7 @@ async function auditRestoredEvaluationObservation(
     configuration = JSON.parse(observation.snapshot_configuration_json) as Record<string, unknown>;
     fixtureGenres = JSON.parse(observation.fixture_genre_tags_json);
   } catch {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   const includedLayers = [
     ...new Set(sources.filter(({ included }) => included === 1).map(({ layer }) => layer)),
@@ -4336,7 +4337,7 @@ async function auditRestoredEvaluationObservation(
     JSON.stringify(configuredLayers) !== JSON.stringify(includedLayers) ||
     JSON.stringify(considered) !== JSON.stringify(expectedConsidered)
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   for (const [index, item] of items.entries()) {
     const taskTypes = parseStringArray(item.task_types_json);
@@ -4373,7 +4374,7 @@ async function auditRestoredEvaluationObservation(
       item.selection_reason !== expectedReason ||
       item.discarded_reason !== (expectedReason === "selected" ? null : expectedReason)
     ) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
   }
   return buildRestoredVerifiedObservation(transaction, observation, sources, items, {
@@ -4413,14 +4414,14 @@ async function buildRestoredVerifiedObservation(
         !Number.isFinite(Date.parse(score.scored_at)),
     )
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   const scores = Object.fromEntries(
     scoreRows.map((score) => [score.metric, score.score_basis_points / 10_000]),
   ) as Record<RestoredEvaluationMetric, number>;
   const normalizedSources = sources.map((source) => {
     if (source.source_order === null || source.source_type === null || source.source_id === null) {
-      throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
     }
     return {
       candidateId: source.candidate_id,
@@ -4523,7 +4524,7 @@ async function auditRestoredCompletedEvaluationRun(
   verified: readonly RestoredVerifiedObservation[],
 ): Promise<void> {
   if (verified.length !== 192) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
   const attempts = await transaction.select<{
     readonly id: string;
@@ -4558,7 +4559,7 @@ async function auditRestoredCompletedEvaluationRun(
     }),
   );
   const slots = parseRestoredModelSlots(run.model_slots_json);
-  if (slots === null) throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+  if (slots === null) throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   const result = evaluateRestoredNovelSkillEvidence(
     verified.map(({ evaluation }) => evaluation),
     slots,
@@ -4569,7 +4570,7 @@ async function auditRestoredCompletedEvaluationRun(
     run.evaluation_result_hash !== resultHash ||
     !["FAILED", "ELIGIBLE_FOR_REVIEW"].includes(result.status)
   ) {
-    throw restoreError("DATABASE_RESTORE_BACKUP_INCOMPATIBLE");
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
   }
 }
 

@@ -14,6 +14,10 @@ const MIGRATION = [
   "0005_ai_generation_governance.sql",
   "0007_model_routing_usage.sql",
   "0031_model_hub.sql",
+  "0034_context_compilation_trace.sql",
+  "0047_context_compilation_exact_provenance.sql",
+  "0056_model_hub_failure_diagnostics.sql",
+  "0065_model_invocation_dispatch_boundary.sql",
 ]
   .map(readMigration)
   .join("\n");
@@ -31,6 +35,108 @@ afterEach(async () => {
 });
 
 describe("SqliteUsageCenterService", () => {
+  it("projects immediate and recovered opening uncertainty from the durable dispatch boundary", async () => {
+    const executor = await createSeededExecutor();
+    await seedInvocation(executor, {
+      id: "opening-timeout",
+      task: "book_start_guidance",
+      connectionId: "openai-connection",
+      providerKind: "openai",
+      modelId: "cloud-model",
+      status: "timed_out",
+      privacyPolicy: "cloud_allowed",
+      destination: "remote",
+      inputTokens: null,
+      outputTokens: null,
+      costMicros: null,
+      currency: null,
+      occurredAt: "2026-08-08T11:00:00.000Z",
+      errorCode: "PROVIDER_TIMEOUT",
+      failureStage: "transport",
+      providerDispatchStartedAt: "2026-08-08T10:59:59.000Z",
+    });
+    await seedInvocation(executor, {
+      id: "opening-network-recovered",
+      task: "book_start_guidance",
+      connectionId: "openai-connection",
+      providerKind: "openai",
+      modelId: "cloud-model",
+      status: "failed",
+      privacyPolicy: "cloud_allowed",
+      destination: "remote",
+      inputTokens: null,
+      outputTokens: null,
+      costMicros: null,
+      currency: null,
+      occurredAt: "2026-08-08T11:01:00.000Z",
+      errorCode: "PROVIDER_NETWORK_ERROR",
+      failureStage: "transport",
+      providerDispatchStartedAt: "2026-08-08T11:00:59.000Z",
+    });
+    await seedInvocation(executor, {
+      id: "opening-http-failed",
+      task: "book_start_guidance",
+      connectionId: "openai-connection",
+      providerKind: "openai",
+      modelId: "cloud-model",
+      status: "failed",
+      privacyPolicy: "cloud_allowed",
+      destination: "remote",
+      inputTokens: null,
+      outputTokens: null,
+      costMicros: null,
+      currency: null,
+      occurredAt: "2026-08-08T11:02:00.000Z",
+      errorCode: "PROVIDER_HTTP_ERROR",
+      failureStage: "http_response",
+      providerDispatchStartedAt: "2026-08-08T11:01:59.000Z",
+    });
+    await seedInvocation(executor, {
+      id: "opening-not-dispatched",
+      task: "book_start_guidance",
+      connectionId: "openai-connection",
+      providerKind: "openai",
+      modelId: "cloud-model",
+      status: "failed",
+      privacyPolicy: "cloud_allowed",
+      destination: "remote",
+      inputTokens: null,
+      outputTokens: null,
+      costMicros: null,
+      currency: null,
+      occurredAt: "2026-08-08T11:03:00.000Z",
+      errorCode: "MODEL_HUB_PREFLIGHT_FAILED",
+      failureStage: "request_preparation",
+      providerDispatchStartedAt: null,
+    });
+
+    const snapshot = await new SqliteUsageCenterService(executor).read(query());
+    expect(snapshot.records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "hub:opening-timeout",
+          status: "ambiguous",
+          errorCode: "PROVIDER_TIMEOUT",
+        }),
+        expect.objectContaining({
+          id: "hub:opening-network-recovered",
+          status: "ambiguous",
+          errorCode: "PROVIDER_NETWORK_ERROR",
+        }),
+        expect.objectContaining({ id: "hub:opening-http-failed", status: "failed" }),
+        expect.objectContaining({
+          id: "hub:opening-not-dispatched",
+          status: "not_dispatched",
+        }),
+      ]),
+    );
+    expect(
+      snapshot.records.some(
+        ({ id, status }) => id.startsWith("hub:opening-") && status === "running",
+      ),
+    ).toBe(false);
+  });
+
   it("combines the durable ledgers without double-counting continuations", async () => {
     const executor = await createSeededExecutor();
     const service = new SqliteUsageCenterService(executor);
@@ -67,8 +173,19 @@ describe("SqliteUsageCenterService", () => {
     });
     expect(snapshot.breakdowns.project).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ key: "__unlinked__", label: "未关联作品", invocationCount: 2 }),
-        expect.objectContaining({ key: PROJECT_ID, label: "测试长篇", invocationCount: 1 }),
+        expect.objectContaining({ key: "__unlinked__", label: "未关联作品", invocationCount: 1 }),
+        expect.objectContaining({ key: PROJECT_ID, label: "测试长篇", invocationCount: 2 }),
+      ]),
+    );
+    expect(snapshot.records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "hub:embedding-call",
+          projectId: PROJECT_ID,
+          projectName: "测试长篇",
+          chapterId: CHAPTER_ID,
+          chapterName: "第一章",
+        }),
       ]),
     );
     expect(snapshot.breakdowns.task).toEqual(
@@ -94,13 +211,25 @@ describe("SqliteUsageCenterService", () => {
     const service = new SqliteUsageCenterService(executor);
 
     const projectSnapshot = await service.read({ ...query(), projectId: PROJECT_ID });
-    expect(projectSnapshot.totalMatchingRecords).toBe(1);
-    expect(projectSnapshot.records[0]).toMatchObject({
-      projectId: PROJECT_ID,
-      task: "continuation",
-      providerId: "legacy-provider",
-      modelId: "legacy-model",
-    });
+    expect(projectSnapshot.totalMatchingRecords).toBe(2);
+    expect(projectSnapshot.records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          projectId: PROJECT_ID,
+          chapterId: CHAPTER_ID,
+          task: "continuation",
+          providerId: "legacy-provider",
+          modelId: "legacy-model",
+        }),
+        expect.objectContaining({
+          projectId: PROJECT_ID,
+          chapterId: CHAPTER_ID,
+          task: "embedding",
+          providerId: "openai-connection",
+          modelId: "embedding-model",
+        }),
+      ]),
+    );
     expect(projectSnapshot.facets.tasks).toHaveLength(3);
     expect(projectSnapshot.budgets).toEqual(
       expect.arrayContaining([
@@ -296,6 +425,7 @@ async function createSeededExecutor(): Promise<NodeSqliteExecutor> {
     occurredAt: "2026-08-08T09:00:00.000Z",
     errorCode: "PROVIDER_TIMEOUT",
   });
+  await seedInvocationContext(executor, "embedding-call");
   await seedInvocation(executor, {
     id: "image-call",
     task: "image_generation",
@@ -331,6 +461,34 @@ async function createSeededExecutor(): Promise<NodeSqliteExecutor> {
   return executor;
 }
 
+async function seedInvocationContext(
+  executor: NodeSqliteExecutor,
+  invocationId: string,
+): Promise<void> {
+  const traceId = uuid(30);
+  await executor.execute(
+    `INSERT INTO context_compilation_runs (
+       id, project_id, chapter_id, task_type, maximum_context_tokens,
+       required_tokens, used_tokens, remaining_tokens, discarded_tokens,
+       token_estimate_source, candidate_count, included_count, discarded_count, created_at
+     ) VALUES (?, ?, ?, 'embedding', 100, 10, 10, 90, 0,
+       'utf8_conservative', 1, 1, 0, ?)`,
+    [traceId, PROJECT_ID, CHAPTER_ID, NOW],
+  );
+  await executor.execute(
+    `INSERT INTO context_compilation_execution_links (
+       trace_id, generation_id, generation_run_id, created_at
+     ) VALUES (?, ?, NULL, ?)`,
+    [traceId, uuid(31), NOW],
+  );
+  await executor.execute(
+    `INSERT INTO context_compilation_model_invocation_links (
+       trace_id, model_invocation_id, linked_at
+     ) VALUES (?, ?, ?)`,
+    [traceId, invocationId, NOW],
+  );
+}
+
 async function seedConnection(
   executor: NodeSqliteExecutor,
   id: string,
@@ -357,7 +515,7 @@ async function seedInvocation(
     connectionId: string;
     providerKind: string;
     modelId: string;
-    status: "succeeded" | "failed";
+    status: "succeeded" | "failed" | "cancelled" | "timed_out";
     privacyPolicy: "cloud_allowed" | "local_only";
     destination: "local" | "remote";
     inputTokens: number | null;
@@ -366,6 +524,15 @@ async function seedInvocation(
     currency: string | null;
     occurredAt: string;
     errorCode: string | null;
+    failureStage?:
+      | "request_preparation"
+      | "dispatch"
+      | "transport"
+      | "http_response"
+      | "stream_parse"
+      | "response_normalization"
+      | null;
+    providerDispatchStartedAt?: string | null;
   }>,
 ): Promise<void> {
   await executor.execute(
@@ -375,9 +542,10 @@ async function seedInvocation(
        attempt, fallback_from_invocation_id, privacy_policy, data_destination,
        maximum_cost_micros, currency, input_tokens, output_tokens,
        cached_input_tokens, estimated_cost_micros, error_code, error_summary,
+       failure_stage, provider_dispatch_started_at,
        started_at, completed_at, created_at, revision
      ) VALUES (?, ?, NULL, ?, NULL, ?, ?, 'task_primary', ?, 1, NULL, ?, ?,
-       NULL, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 2)`,
+       NULL, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 2)`,
     [
       input.id,
       input.task,
@@ -393,6 +561,8 @@ async function seedInvocation(
       input.costMicros,
       input.errorCode,
       input.errorCode === null ? null : "供应商请求超时",
+      input.failureStage ?? null,
+      input.providerDispatchStartedAt ?? null,
       input.occurredAt,
       input.occurredAt,
       input.occurredAt,

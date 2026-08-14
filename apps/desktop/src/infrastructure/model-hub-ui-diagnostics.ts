@@ -1,13 +1,16 @@
-import type {
-  ModelHubOperationToken,
-  ModelHubPageAction,
-  ModelHubPageSnapshot,
+import {
+  MODEL_HUB_PAGE_ACTIONS,
+  type ModelHubOperationToken,
+  type ModelHubPageAction,
+  type ModelHubPageSnapshot,
 } from "./model-hub-page-hydration";
+import { isModelProviderKind } from "./model-hub-provider-registry";
 
 export interface SafeModelHubUiSnapshotDiagnostic {
   readonly exportedAt: string;
-  readonly pageMounted: true;
+  readonly pageMounted: boolean;
   readonly pageMountedAt: string;
+  readonly pageUnmountedAt: string | null;
   readonly hydrationPhase: ModelHubPageSnapshot["phase"];
   readonly phaseStartedAt: string;
   readonly hydrationStartedAt: string | null;
@@ -53,7 +56,9 @@ export interface SafeModelHubSessionDiagnostics {
 
 interface MutableSessionState {
   readonly startedAt: string;
+  pageMounted: boolean;
   pageMountedAt: string | null;
+  pageUnmountedAt: string | null;
   mountBootstrapCoordinatorId: number | null;
   pendingMountBootstrap: Readonly<{
     coordinatorId: number;
@@ -69,6 +74,10 @@ interface MutableSessionState {
 }
 
 const MAX_ACTIONS = 25;
+const SAFE_ACTION_ERROR_CODES = new Set([
+  "MODEL_HUB_CATALOG_REFRESH_FAILED",
+  "MODEL_HUB_STALE_RESULT_IGNORED",
+]);
 const states = new WeakMap<object, MutableSessionState>();
 
 export function recordModelHubUiSnapshot(
@@ -76,7 +85,10 @@ export function recordModelHubUiSnapshot(
   snapshot: ModelHubPageSnapshot,
   exportedAt: string,
 ): void {
+  exportedAt = safeTimestamp(exportedAt);
   const state = ensureState(owner, exportedAt);
+  state.pageMounted = true;
+  state.pageUnmountedAt = null;
   if (
     snapshot.phase === "UNINITIALIZED" &&
     snapshot.hydratedAt === null &&
@@ -105,25 +117,41 @@ export function recordModelHubUiSnapshot(
       snapshot.phase === "READY_WITH_WARNINGS" ||
       snapshot.phase === "ERROR")
   ) {
-    state.hydrationCompletedAt = snapshot.hydratedAt;
+    state.hydrationCompletedAt = safeTimestamp(snapshot.hydratedAt);
   }
   state.snapshot = Object.freeze({
     exportedAt,
-    pageMounted: true,
+    pageMounted: state.pageMounted,
     pageMountedAt: state.pageMountedAt,
+    pageUnmountedAt: state.pageUnmountedAt,
     hydrationPhase: snapshot.phase,
     phaseStartedAt: state.phaseStartedAt ?? exportedAt,
     hydrationStartedAt: state.hydrationStartedAt,
     hydrationCompletedAt: state.hydrationCompletedAt,
-    selectedProviderKind: snapshot.providerKind,
-    selectedConnectionId: snapshot.selectedConnectionId,
+    selectedProviderKind: isModelProviderKind(snapshot.providerKind) ? snapshot.providerKind : null,
+    selectedConnectionId: null,
     connectionCountInUi: snapshot.connections.length,
     credentialUiStatus: snapshot.credentialStatus,
     catalogUiStatus: snapshot.catalogStatus,
     catalogEntryCountInUi: snapshot.catalogEntries.length,
-    selectedModelIdInUi: snapshot.selectedModelId,
+    selectedModelIdInUi: null,
     lastSnapshotRevision: snapshot.snapshotRevision,
   });
+}
+
+export function recordModelHubUiUnmount(owner: object, timestamp: string): void {
+  timestamp = safeTimestamp(timestamp);
+  const state = ensureState(owner, timestamp);
+  state.pageMounted = false;
+  state.pageUnmountedAt = timestamp;
+  if (state.snapshot !== null) {
+    state.snapshot = Object.freeze({
+      ...state.snapshot,
+      exportedAt: timestamp,
+      pageMounted: false,
+      pageUnmountedAt: timestamp,
+    });
+  }
 }
 
 export function startModelHubDiagnosticAction(
@@ -131,7 +159,9 @@ export function startModelHubDiagnosticAction(
   token: ModelHubOperationToken,
   timestamp: string,
 ): void {
+  timestamp = safeTimestamp(timestamp);
   const state = ensureState(owner, timestamp);
+  const operationId = safeOperationId(token);
   if (token.action === "bootstrap") {
     const bootstrapStartedBeforeInitialSnapshot = state.lastInitialSnapshot === null;
     const bootstrapStartedByNewCoordinator =
@@ -149,13 +179,13 @@ export function startModelHubDiagnosticAction(
   }
   state.actions = [
     Object.freeze({
-      diagnosticId: token.operationId,
+      diagnosticId: operationId,
       timestamp,
       action: token.action,
-      operationId: token.operationId,
-      providerKind: token.providerKind,
-      connectionId: token.connectionId,
-      modelId: token.modelId,
+      operationId,
+      providerKind: isModelProviderKind(token.providerKind) ? token.providerKind : null,
+      connectionId: null,
+      modelId: null,
       startedAt: timestamp,
       completedAt: null,
       outcome: "running",
@@ -166,7 +196,7 @@ export function startModelHubDiagnosticAction(
       httpStatus: null,
       catalogCount: null,
     }),
-    ...state.actions.filter(({ operationId }) => operationId !== token.operationId),
+    ...state.actions.filter((action) => action.operationId !== operationId),
   ].slice(0, MAX_ACTIONS);
 }
 
@@ -184,30 +214,32 @@ export function finishModelHubDiagnosticAction(
     catalogCount?: number | null;
   }>,
 ): void {
-  const state = ensureState(owner, input.completedAt);
-  const existing = state.actions.find(({ operationId }) => operationId === token.operationId);
-  const startedAt = existing?.startedAt ?? input.completedAt;
+  const completedAt = safeTimestamp(input.completedAt);
+  const state = ensureState(owner, completedAt);
+  const operationId = safeOperationId(token);
+  const existing = state.actions.find((action) => action.operationId === operationId);
+  const startedAt = existing?.startedAt ?? completedAt;
   const completed = Object.freeze({
-    diagnosticId: token.operationId,
+    diagnosticId: operationId,
     timestamp: startedAt,
     action: token.action,
-    operationId: token.operationId,
-    providerKind: token.providerKind,
-    connectionId: token.connectionId,
-    modelId: token.modelId,
+    operationId,
+    providerKind: isModelProviderKind(token.providerKind) ? token.providerKind : null,
+    connectionId: null,
+    modelId: null,
     startedAt,
-    completedAt: input.completedAt,
+    completedAt,
     outcome: input.outcome,
     backendCommitted: input.backendCommitted ?? false,
     storeRefreshed: input.storeRefreshed ?? false,
     staleResultIgnored: input.staleResultIgnored ?? input.outcome === "stale_ignored",
-    errorCode: input.errorCode ?? null,
-    httpStatus: input.httpStatus ?? null,
-    catalogCount: input.catalogCount ?? null,
+    errorCode: safeActionErrorCode(input.errorCode),
+    httpStatus: safeInteger(input.httpStatus, 100, 599),
+    catalogCount: safeInteger(input.catalogCount, 0, 1_000_000),
   } satisfies SafeModelHubActionDiagnostic);
   state.actions = [
     completed,
-    ...state.actions.filter(({ operationId }) => operationId !== token.operationId),
+    ...state.actions.filter((action) => action.operationId !== operationId),
   ].slice(0, MAX_ACTIONS);
 }
 
@@ -215,6 +247,7 @@ export function readSafeModelHubSessionDiagnostics(
   owner: object,
   now: string,
 ): SafeModelHubSessionDiagnostics {
+  now = safeTimestamp(now);
   const state = ensureState(owner, now);
   return Object.freeze({
     currentSessionStartedAt: state.startedAt,
@@ -236,7 +269,9 @@ function ensureState(owner: object, now: string): MutableSessionState {
   if (existing !== undefined) return existing;
   const created: MutableSessionState = {
     startedAt: now,
+    pageMounted: false,
     pageMountedAt: null,
+    pageUnmountedAt: null,
     mountBootstrapCoordinatorId: null,
     pendingMountBootstrap: null,
     hydrationStartedAt: null,
@@ -249,4 +284,32 @@ function ensureState(owner: object, now: string): MutableSessionState {
   };
   states.set(owner, created);
   return created;
+}
+
+function safeOperationId(token: ModelHubOperationToken): string {
+  const coordinatorId = safeInteger(token.coordinatorId, 1, Number.MAX_SAFE_INTEGER) ?? 0;
+  const generation = safeInteger(token.generation, 1, Number.MAX_SAFE_INTEGER) ?? 0;
+  const action = (MODEL_HUB_PAGE_ACTIONS as readonly unknown[]).includes(token.action)
+    ? token.action
+    : "bootstrap";
+  return `model-hub:${String(coordinatorId)}:${action}:${String(generation)}`;
+}
+
+function safeActionErrorCode(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  return SAFE_ACTION_ERROR_CODES.has(value) ? value : "MODEL_HUB_ACTION_FAILED";
+}
+
+function safeInteger(
+  value: number | null | undefined,
+  minimum: number,
+  maximum: number,
+): number | null {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) return null;
+  return value >= minimum && value <= maximum ? value : null;
+}
+
+function safeTimestamp(value: string): string {
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.valueOf()) ? parsed.toISOString() : "1970-01-01T00:00:00.000Z";
 }

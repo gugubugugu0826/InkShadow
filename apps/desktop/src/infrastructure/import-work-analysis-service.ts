@@ -292,6 +292,21 @@ export async function analyzeImportedChapter(
           throw cause;
         }
       },
+      onFinalBeforeProviderDispatch: async (selection) => {
+        await assertStructuredOutputSupported(runtime, selection.catalogEntryId);
+        try {
+          await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
+          runtime.projectContextPrivacy.assertRouteEligible(
+            projectPrivacy,
+            selection.localOnlyEligible === true,
+          );
+        } catch (cause: unknown) {
+          if (cause instanceof ProjectContextPrivacyError) {
+            throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
+          }
+          throw cause;
+        }
+      },
     }).catch((cause: unknown) => {
       throw normalizeAnalysisFailure(cause);
     });
