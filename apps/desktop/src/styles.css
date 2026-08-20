@@ -304,7 +304,6 @@ select {
 
 .desktop-navigation {
   display: flex;
-  height: 100%;
   min-height: 0;
   flex-direction: column;
   padding: var(--space-3);
@@ -2511,9 +2510,7 @@ select {
 }
 
 .candidate-diff-viewer__comparison pre {
-  max-height: 12rem;
   margin-top: var(--space-2);
-  overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -2523,113 +2520,9 @@ select {
   justify-content: flex-end;
 }
 
-.candidate-review-dialog {
-  display: grid;
-  min-width: 0;
-  gap: var(--space-4);
-}
-
-.candidate-review-dialog__editor {
-  display: grid;
-  min-width: 0;
-  gap: var(--space-3);
-  padding: var(--space-4);
-  border: 0.0625rem solid var(--ai-text);
-  border-radius: var(--radius-md);
-  background: var(--ai-soft);
-}
-
-.candidate-review-dialog__editor-heading,
-.candidate-review-dialog__editor-actions {
-  display: flex;
-  min-width: 0;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.candidate-review-dialog__editor-heading h3,
-.candidate-review-dialog__editor-heading p {
-  margin: 0;
-}
-
-.candidate-review-dialog__editor-heading p,
-.candidate-review-dialog__editor-actions > span {
-  color: var(--text-secondary);
-  font-size: var(--font-caption-size);
-}
-
-.candidate-review-dialog__editor .ink-textarea {
-  min-height: 14rem;
-  resize: vertical;
-  background: var(--bg-surface);
-  line-height: 1.75;
-}
-
-.candidate-review-dialog__editor-actions {
-  align-items: center;
-}
-
-.candidate-review-dialog__three-way {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-2);
-}
-
-.candidate-review-dialog__three-way section,
-.candidate-review-dialog__placement {
-  min-width: 0;
-  padding: var(--space-3);
-  border: 0.0625rem solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--bg-subtle);
-}
-
-.candidate-review-dialog__three-way h3,
-.candidate-review-dialog__three-way pre,
-.candidate-review-dialog__placement h3,
-.candidate-review-dialog__placement p {
-  margin: 0;
-}
-
-.candidate-review-dialog__three-way pre {
-  max-height: 18rem;
-  margin-top: var(--space-2);
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.candidate-review-dialog__placement,
-.candidate-review-dialog__placement > div {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-}
-
-.candidate-review-dialog__conflict-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border: 0.0625rem solid var(--border-subtle);
-  border-radius: var(--radius-md);
-}
-
-.candidate-review-dialog__conflict-actions p {
-  flex: 1 1 24rem;
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: var(--font-caption-size);
-}
-
-.candidate-review-dialog__placement p {
-  color: var(--text-secondary);
-  font-size: var(--font-caption-size);
+.candidate-review-overlay {
+  width: min(72rem, calc(100vw - var(--space-8)));
+  height: min(52rem, calc(100dvh - var(--space-8)));
 }
 
 .generation-preflight {
@@ -2898,7 +2791,6 @@ select {
   .first-launch__actions,
   .crash-recovery-dialog__comparison,
   .candidate-diff-viewer__comparison,
-  .candidate-review-dialog__three-way,
   .version-restore-comparison > div,
   .editor-workspace,
   .search-form {
@@ -5570,20 +5462,13 @@ select {
 
 .quick-ai-drawer__provider small,
 .quick-ai-drawer__choice small,
-.quick-ai-drawer__privacy-note,
-.quick-ai-drawer__error-code {
+.quick-ai-drawer__privacy-note {
   color: var(--text-secondary);
   font-size: var(--font-size-sm);
 }
 
-.quick-ai-drawer__privacy-note,
-.quick-ai-drawer__error-code {
+.quick-ai-drawer__privacy-note {
   margin: 0;
-}
-
-.quick-ai-drawer__error-code {
-  font-family: var(--font-mono);
-  overflow-wrap: anywhere;
 }
 
 .quick-ai-drawer__footer {

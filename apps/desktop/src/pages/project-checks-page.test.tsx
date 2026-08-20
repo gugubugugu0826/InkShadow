@@ -7,7 +7,7 @@ import {
   type StoryFact,
 } from "@inkshadow/story-core";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
 import {
@@ -101,6 +101,7 @@ describe("ProjectChecksPage", () => {
   it("lets the user select a chapter and honestly explains a skipped check", async () => {
     const user = userEvent.setup();
     const fixture = await seededRuntime(false);
+    const aiReview = vi.spyOn(fixture.runtime.story.ambiguousReview, "review");
     unwrap(
       await fixture.runtime.useCases.createChapter.execute({
         projectId: fixture.projectId,
@@ -125,26 +126,15 @@ describe("ProjectChecksPage", () => {
     expect(screen.getByRole("heading", { name: "确定性检查" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "本次实际检查范围" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "因证据不足未检查（10）" })).toBeInTheDocument();
-    const aiHeading = await screen.findByRole("heading", { name: "AI 模糊复核" });
-    const aiSection = aiHeading.closest("section");
-    if (!(aiSection instanceof HTMLElement)) {
-      throw new Error("Expected the separate AI review section.");
-    }
-    expect(within(aiSection).getAllByText("未运行 / 证据不足")).toHaveLength(3);
-    expect(within(aiSection).queryByText("已通过")).not.toBeInTheDocument();
-    const qualityHeading = screen.getByRole("heading", { name: "AI 内容质量建议" });
-    const qualitySection = qualityHeading.closest("section");
-    if (!(qualitySection instanceof HTMLElement)) {
-      throw new Error("Expected the separate content-quality review section.");
-    }
-    expect(within(qualitySection).getByText("AI 建议，需要作者判断")).toBeInTheDocument();
-    expect(within(qualitySection).getByText("未运行 / 证据不足")).toBeInTheDocument();
-    expect(within(qualitySection).queryByText("已通过")).not.toBeInTheDocument();
+    expect(screen.getByText("普通检查不会调用 AI")).toBeInTheDocument();
+    expect(screen.getByText(/使用页面上方的一致性调查/u)).toBeInTheDocument();
+    expect(aiReview).not.toHaveBeenCalled();
   });
 
   it("shows both evidence sources and persists a reversible ignore", async () => {
     const user = userEvent.setup();
     const fixture = await seededRuntime(true);
+    const aiReview = vi.spyOn(fixture.runtime.story.ambiguousReview, "review");
     renderPage(fixture.runtime, fixture.projectId);
 
     await user.click(await screen.findByRole("button", { name: "检查本章" }));
@@ -161,6 +151,14 @@ describe("ProjectChecksPage", () => {
     expect(within(issueCard).getByText(CURRENT_EXCERPT)).toBeInTheDocument();
     expect(within(issueCard).getByText("林遥在这一时间段仍然存活。")).toBeInTheDocument();
     expect(within(issueCard).getAllByText("查看来源")).toHaveLength(2);
+    const storedChapter = unwrap(
+      await fixture.runtime.repositories.chapters.findById(fixture.chapterId),
+    );
+    expect(storedChapter).not.toBeNull();
+    expect(document.body).not.toHaveTextContent(
+      storedChapter?.currentVersionId ?? "missing-version",
+    );
+    expect(document.body).not.toHaveTextContent(fixture.referenceFactId ?? "missing-fact");
     expect(within(issueCard).getByRole("button", { name: "忽略" })).toBeEnabled();
     expect(within(issueCard).getByRole("button", { name: "标记为允许" })).toBeEnabled();
     expect(within(issueCard).getByRole("button", { name: "用当前正文更新正式设定" })).toBeEnabled();
@@ -178,6 +176,7 @@ describe("ProjectChecksPage", () => {
     ).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("button", { name: "忽略" })).toBeEnabled());
     expect(screen.getByText("已撤销")).toBeInTheDocument();
+    expect(aiReview).not.toHaveBeenCalled();
   });
 
   it("reopens the latest version-bound snapshot and records an explicit rerun", async () => {
@@ -330,7 +329,7 @@ describe("ProjectChecksPage", () => {
     expect(screen.getByRole("heading", { name: "伏笔推进" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "节奏与章节质量" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "找到失踪的钥匙" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "foreshadow-key" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "伏笔线索 1" })).toBeInTheDocument();
     const findingText = screen.getByText(/既未推进剧情，也未改变人物状态/u);
     const finding = findingText.closest(".chapter-check-issue");
     if (!(finding instanceof HTMLElement)) throw new Error("Expected a narrative finding card.");
@@ -344,6 +343,12 @@ describe("ProjectChecksPage", () => {
       expect(within(finding).getByRole("button", { name: "忽略" })).toBeEnabled(),
     );
     expect(screen.queryByText(/(?:质量总分|综合评分)[:：]\s*\d/u)).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("plot-main");
+    expect(document.body).not.toHaveTextContent("scene-one");
+    expect(document.body).not.toHaveTextContent("foreshadow-key");
+    expect(document.body).not.toHaveTextContent("character-hero");
+    expect(document.body).not.toHaveTextContent("old-house");
+    expect(document.body).not.toHaveTextContent(fixture.chapterId);
   });
 });
 

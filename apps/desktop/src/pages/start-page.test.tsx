@@ -2,7 +2,7 @@ import { ToastProvider } from "@inkshadow/ui";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createDevelopmentRuntime } from "../infrastructure/runtime";
 import {
@@ -35,13 +35,70 @@ describe("local-first start page", () => {
     window.localStorage.clear();
   });
 
-  it("presents the three creation paths with one recommended starting point", () => {
+  it("presents a new local user with the direct-mode safety promise and one primary action", async () => {
+    const user = userEvent.setup();
     renderStartPage();
 
     expect(
       screen.getByRole("heading", { name: "把你的第一个想法，写成一个故事", level: 1 }),
     ).toBeVisible();
-    expect(screen.getByRole("link", { name: /从一个想法开始/ })).toHaveAttribute(
+    expect(await screen.findByText("直接模式")).toBeVisible();
+    expect(screen.getByText(/只有你明确选择使用后，才会写入正文/u)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "同意并启用直接模式" }));
+    expect(screen.getByRole("link", { name: "开始写作" })).toHaveAttribute("href", "/create/idea");
+    expect(screen.getByRole("button", { name: "使用专业模式" })).toBeVisible();
+    expect(document.querySelectorAll(".start-page__entry")).toHaveLength(0);
+  });
+
+  it("keeps an empty direct-mode library free of technical creation choices", async () => {
+    const user = userEvent.setup();
+    renderStartPage();
+
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "回到刚才停下的地方" })).not.toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "同意并启用直接模式" }));
+    expect(await screen.findByRole("link", { name: "开始写作" })).toBeVisible();
+    expect(document.querySelectorAll(".start-page__entry")).toHaveLength(0);
+  });
+
+  it("requires and persists one explicit local-organization authorization without Provider calls", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const providerGenerate = vi.spyOn(runtime.modelGateway, "generate");
+    const user = userEvent.setup();
+    const rendered = renderStartPage(runtime);
+
+    expect(await screen.findByRole("dialog", { name: "启用直接模式前，请确认一次" })).toBeVisible();
+    expect(screen.getByText("授权本地整理，不授权联网或修改正文")).toBeVisible();
+    expect(screen.getByText(/只有你明确选择使用后，正文和不可变版本才会改变/u)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(async () => {
+      expect(await runtime.writingExperience.getOrInitialize()).toMatchObject({
+        mode: "professional",
+        directLocalOrganizationAuthorizedAt: null,
+      });
+    });
+
+    expect(providerGenerate).not.toHaveBeenCalled();
+
+    rendered.unmount();
+    const cancelled = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.authorizeDirectMode(cancelled.revision);
+    renderStartPage(runtime);
+    await screen.findByRole("link", { name: "开始写作" });
+    expect(
+      screen.queryByRole("dialog", { name: "启用直接模式前，请确认一次" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("reveals the three established creation paths only after an explicit professional switch", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    renderStartPage(runtime);
+
+    await user.click(await screen.findByRole("button", { name: "取消" }));
+
+    expect(await screen.findByRole("link", { name: /从一个想法开始/ })).toHaveAttribute(
       "href",
       "/create/idea",
     );
@@ -53,16 +110,8 @@ describe("local-first start page", () => {
       "href",
       "/create/professional",
     );
-    expect(screen.getByText("推荐首次使用")).toBeVisible();
-  });
-
-  it("keeps an empty library focused on the three creation entries", async () => {
-    renderStartPage();
-
-    await waitFor(() => {
-      expect(screen.queryByRole("heading", { name: "回到刚才停下的地方" })).not.toBeInTheDocument();
-    });
     expect(document.querySelectorAll(".start-page__entry")).toHaveLength(3);
+    expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("professional");
   });
 
   it("continues the real most recently edited chapter and reports its saved cursor", async () => {

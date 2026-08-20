@@ -28,7 +28,7 @@ import type {
   CloudAccountManagementSnapshot,
 } from "../infrastructure/cloud-account-management-service";
 import type { PendingProjectRecoveryDisplay } from "../infrastructure/project-key-lifecycle";
-import { normalizeUiError } from "../infrastructure/ui-error";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 import { CloudDeletionSecurityCard } from "./cloud-deletion-security-card";
 
@@ -395,7 +395,7 @@ export function SyncSecurityPage() {
     }
   }
 
-  const normalizedError = error === null ? null : normalizeUiError(error);
+  const normalizedError = error === null ? null : projectOrdinaryUiError(error);
   const selectedProject = projects.find(({ id }) => id === selectedProjectId) ?? null;
   const nativeSecurityAvailable =
     runtime.mode === "tauri" &&
@@ -461,7 +461,7 @@ export function SyncSecurityPage() {
         <InlineAlert
           tone="error"
           title={normalizedError.title}
-          description={`${normalizedError.description}（${normalizedError.code}）`}
+          description={normalizedError.description}
         />
       )}
 
@@ -488,7 +488,7 @@ export function SyncSecurityPage() {
               <InlineAlert
                 tone="error"
                 title="无法读取同步安全状态"
-                description={`${normalizedError.description}（${normalizedError.code}）`}
+                description={normalizedError.description}
               />
             ),
         }}
@@ -1040,9 +1040,11 @@ function ProjectSyncRegistrationAlert({
     error: {
       tone: "error",
       title: "此项目的云同步需要处理",
-      description: `安全启动没有完成${
-        registration.lastErrorCode === null ? "" : `（${registration.lastErrorCode}）`
-      }。项目不会被当作已启用，可检查状态后重试。`,
+      description: `安全启动没有完成。${
+        registration.lastErrorCode === null
+          ? ""
+          : ` ${projectOrdinaryUiError({ code: registration.lastErrorCode }).description}`
+      } 项目不会被当作已启用，可检查状态后重试。`,
     },
     disabled: {
       tone: "info",
@@ -1120,7 +1122,7 @@ function CloudAccountSecurityCard({
     }
   }
 
-  const normalizedError = error === null ? null : normalizeUiError(error);
+  const normalizedError = error === null ? null : projectOrdinaryUiError(error);
   const trustedDevices = snapshot?.devices.filter(({ device }) => device.state === "trusted") ?? [];
   const activeSessions = snapshot?.sessions.filter((session) => session.revokedAt === null) ?? [];
 
@@ -1160,7 +1162,7 @@ function CloudAccountSecurityCard({
               <InlineAlert
                 tone="error"
                 title={normalizedError.title}
-                description={`${normalizedError.description}（${normalizedError.code}）`}
+                description={normalizedError.description}
               />
             )}
             {snapshot !== null && !loading && (

@@ -25,6 +25,8 @@ export interface ContextTraceOutputCommitInput {
   readonly traceId: string;
   readonly candidate: AiCandidate;
   readonly linkedAt: IsoUtcTimestamp;
+  /** Optional existing task latch checked atomically before a SQLite output commit. */
+  readonly executionTaskId?: UuidV7;
 }
 
 export interface ContextTraceOutputCommitUnitOfWork {
@@ -113,6 +115,11 @@ interface CandidateRow {
   readonly anchorEndUtf16: number | null;
 }
 
+interface ExecutionTaskGuardRow {
+  readonly status: string;
+  readonly cancelRequestedAt: string | null;
+}
+
 const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 /**
@@ -157,6 +164,12 @@ export class BrowserDevelopmentContextTraceOutputCommitUnitOfWork implements Con
     inputValue: ContextTraceOutputCommitInput,
   ): Promise<ContextTraceOutputCommitOutcome> {
     const input = normalizeCommitInput(inputValue);
+    if (input.executionTaskId !== null) {
+      throw new ContextTraceOutputCommitError(
+        "CONTEXT_TRACE_OUTPUT_UNAVAILABLE",
+        "The development Candidate commit cannot enforce the production task cancellation latch.",
+      );
+    }
     try {
       const trace = await this.traces.findById(input.traceId);
       if (trace?.execution === undefined || trace.execution === null) {
@@ -222,6 +235,7 @@ interface NormalizedCommitInput {
   readonly candidate: AiCandidate;
   readonly snapshot: AiCandidateSnapshot;
   readonly linkedAt: IsoUtcTimestamp;
+  readonly executionTaskId: UuidV7 | null;
 }
 
 function normalizeCommitInput(input: ContextTraceOutputCommitInput): NormalizedCommitInput {
@@ -240,13 +254,21 @@ function normalizeCommitInput(input: ContextTraceOutputCommitInput): NormalizedC
   if (new Date(input.linkedAt).toISOString() !== input.linkedAt) {
     throw invalidOutput("The output association timestamp must be canonical UTC.");
   }
-  return Object.freeze({ ...input, snapshot: Object.freeze(snapshot) });
+  if (input.executionTaskId !== undefined && !UUID_V7_PATTERN.test(input.executionTaskId)) {
+    throw invalidOutput("The execution task cancellation guard must be a UUIDv7.");
+  }
+  return Object.freeze({
+    ...input,
+    snapshot: Object.freeze(snapshot),
+    executionTaskId: input.executionTaskId ?? null,
+  });
 }
 
 async function commitSqliteOutput(
   transaction: TransactionExecutor,
   input: NormalizedCommitInput,
 ): Promise<ContextTraceOutputCommitOutcome> {
+  await assertSqliteExecutionTaskCanCommit(transaction, input.executionTaskId);
   const traceRows = await transaction.select<TraceTargetRow>(
     `SELECT project_id AS projectId, chapter_id AS chapterId
      FROM context_compilation_runs
@@ -309,6 +331,7 @@ async function commitSqliteOutput(
     return "already_committed";
   }
 
+  await assertSqliteExecutionTaskCanCommit(transaction, input.executionTaskId);
   if (existingCandidate === undefined) {
     await insertCandidate(transaction, input.snapshot);
   }
@@ -319,6 +342,23 @@ async function commitSqliteOutput(
     [input.traceId, input.snapshot.id, input.linkedAt],
   );
   return existingCandidate === undefined ? "created" : "already_committed";
+}
+
+async function assertSqliteExecutionTaskCanCommit(
+  transaction: TransactionExecutor,
+  executionTaskId: UuidV7 | null,
+): Promise<void> {
+  if (executionTaskId === null) return;
+  const rows = await transaction.select<ExecutionTaskGuardRow>(
+    `SELECT status, cancel_requested_at AS cancelRequestedAt
+     FROM background_tasks
+     WHERE id = ?
+     LIMIT 2`,
+    [executionTaskId],
+  );
+  if (rows.length !== 1 || rows[0]?.status !== "running" || rows[0].cancelRequestedAt !== null) {
+    throw outputTargetChanged();
+  }
 }
 
 async function assertSqliteCreativeTargetCurrent(

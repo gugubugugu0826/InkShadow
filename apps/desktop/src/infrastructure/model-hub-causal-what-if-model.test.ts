@@ -100,10 +100,33 @@ describe("ModelHubCausalWhatIfModelPort", () => {
       code: "CAUSAL_WHAT_IF_RESPONSE_INVALID",
       dispatched: true,
     } satisfies Partial<CausalWhatIfModelHubError>);
-    await expect(simulation).rejects.toThrow("Markdown");
+    await expect(simulation).rejects.toThrow("未通过严格 JSON 与证据校验");
 
     expect(startInvocation).toHaveBeenCalledOnce();
-    expect(finishInvocation).toHaveBeenCalledWith(expect.objectContaining({ status: "succeeded" }));
+    expect(finishInvocation).toHaveBeenCalledOnce();
+    expect(finishInvocation.mock.calls[0]?.[0]).toMatchObject({
+      status: "failed",
+      errorCode: "CAUSAL_WHAT_IF_RESPONSE_INVALID",
+      failure: { stage: "response_normalization" },
+    });
+  });
+
+  it("projects a transport-disconnected provider result as ambiguous without redispatch", async () => {
+    const harness = createHarness();
+    await seedRoute(harness.runtime.modelHub, true);
+    harness.generate.mockRejectedValue({
+      code: "UPSTREAM_TIMEOUT",
+      retryable: true,
+      message: "socket disconnected",
+    });
+
+    await expect(harness.adapter.simulate(modelInput())).rejects.toMatchObject({
+      code: "CAUSAL_WHAT_IF_RESULT_AMBIGUOUS",
+      sourceCode: "PROVIDER_RESULT_AMBIGUOUS",
+      dispatched: true,
+      retryable: false,
+    } satisfies Partial<CausalWhatIfModelHubError>);
+    expect(harness.generate).toHaveBeenCalledOnce();
   });
 
   it("rejects effects outside the supplied deterministic event scope and exact-schema violations", () => {

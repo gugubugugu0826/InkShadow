@@ -4,6 +4,7 @@ import {
   Card,
   CardContent,
   CardDescription,
+  CardFooter,
   CardHeader,
   CardTitle,
   EmptyState,
@@ -26,6 +27,8 @@ import {
   type MultiAgentReviewRuntime,
   type StartMultiAgentReviewInput,
 } from "../infrastructure/multi-agent-review-runtime";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
+import { handleCandidateDecisionNavigation } from "../components/candidate-decision-navigation";
 
 import "./multi-agent-review-page.css";
 
@@ -572,7 +575,9 @@ export function MultiAgentReviewPage({
                               <InlineAlert
                                 tone="error"
                                 title="回合失败"
-                                description={`错误代码：${turn.errorCode}`}
+                                description={
+                                  projectOrdinaryUiError({ code: turn.errorCode }).description
+                                }
                               />
                             )}
                             <ConclusionList conclusions={turn.conclusions} />
@@ -596,7 +601,12 @@ export function MultiAgentReviewPage({
               </section>
 
               {selected.candidate !== null && (
-                <Card className="multi-agent-candidate">
+                <Card
+                  className={`multi-agent-candidate${
+                    selected.candidate.status === "ready" ? " candidate-decision-surface" : ""
+                  }`}
+                  aria-label="多智能体审稿候选决策"
+                >
                   <CardHeader>
                     <div className="multi-agent-overview__title">
                       <div>
@@ -618,41 +628,48 @@ export function MultiAgentReviewPage({
                       </Badge>
                     </div>
                   </CardHeader>
-                  <CardContent>
+                  <CardContent
+                    tabIndex={selected.candidate.status === "ready" ? 0 : undefined}
+                    aria-label="多智能体审稿候选内容"
+                    onKeyDown={handleCandidateDecisionNavigation}
+                  >
                     <CandidatePreview payloadJson={selected.candidate.payloadJson} />
-                    {selected.candidate.status === "ready" && featureEnabled && (
-                      <div className="multi-agent-candidate__actions">
-                        <Button
-                          variant="ai-primary"
-                          loading={busy === "candidate"}
-                          disabled={
-                            busy !== null ||
-                            (selected.candidate.targetKind === "chapter" &&
-                              onOpenChapterCandidate === undefined)
-                          }
-                          onClick={() => void decideCandidate("accept")}
-                        >
-                          {selected.candidate.targetKind === "chapter"
-                            ? "在编辑器中查看候选"
-                            : "应用大纲候选"}
-                        </Button>
-                        <Button
-                          variant="secondary"
-                          disabled={busy !== null}
-                          onClick={() => void decideCandidate("reject")}
-                        >
-                          拒绝候选
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          disabled={busy !== null}
-                          onClick={() => void decideCandidate("expire")}
-                        >
-                          标记失效
-                        </Button>
-                      </div>
-                    )}
                   </CardContent>
+                  {selected.candidate.status === "ready" && featureEnabled && (
+                    <CardFooter className="candidate-decision-actions">
+                      <Button
+                        size="lg"
+                        variant="ai-primary"
+                        loading={busy === "candidate"}
+                        disabled={
+                          busy !== null ||
+                          (selected.candidate.targetKind === "chapter" &&
+                            onOpenChapterCandidate === undefined)
+                        }
+                        onClick={() => void decideCandidate("accept")}
+                      >
+                        {selected.candidate.targetKind === "chapter"
+                          ? "在编辑器中查看候选"
+                          : "应用大纲候选"}
+                      </Button>
+                      <Button
+                        size="lg"
+                        variant="secondary"
+                        disabled={busy !== null}
+                        onClick={() => void decideCandidate("reject")}
+                      >
+                        拒绝候选
+                      </Button>
+                      <Button
+                        size="lg"
+                        variant="ghost"
+                        disabled={busy !== null}
+                        onClick={() => void decideCandidate("expire")}
+                      >
+                        标记失效
+                      </Button>
+                    </CardFooter>
+                  )}
                 </Card>
               )}
             </>
@@ -973,11 +990,7 @@ function formatDate(value: string): string {
 }
 
 function publicErrorMessage(error: unknown): string {
-  if (typeof error === "object" && error !== null && "code" in error) {
-    const code = String(error.code);
-    return `${code}：${error instanceof Error ? error.message : "操作失败"}`;
-  }
-  return error instanceof Error ? error.message : "未知错误";
+  return projectOrdinaryUiError(error).description;
 }
 
 function readNeedsInputQuestion(session: MultiAgentReviewSession | null): string | null {

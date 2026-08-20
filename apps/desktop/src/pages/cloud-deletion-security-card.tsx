@@ -21,6 +21,7 @@ import {
   matchesAccountDeletionConfirmation,
   matchesProjectDeletionConfirmation,
 } from "../infrastructure/cloud-deletion-lifecycle-service";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 
 type DeletionDialog =
   | "account_cancel"
@@ -303,7 +304,7 @@ export function CloudDeletionSecurityCard({
               <InlineAlert
                 tone="error"
                 title="云端删除操作未完成"
-                description={`未保存密码或服务器错误详情；请根据安全错误码重试。（${errorCode}）`}
+                description={`${projectOrdinaryUiError({ code: errorCode }).description} 未保存密码或服务器错误详情；本地项目不受影响。`}
               />
             )}
             {notice !== null && (
@@ -644,13 +645,13 @@ export function CloudDeletionSecurityCard({
             <div>
               <dt>删除证明</dt>
               <dd>
-                <code>
-                  {accountJournal?.deletionRequestId ??
-                    (accountJournal?.activeMutation?.confirmationId === null ||
-                    accountJournal?.activeMutation?.confirmationId === undefined
-                      ? "不可用"
-                      : "已安全保存确认号")}
-                </code>
+                {accountJournal?.deletionRequestId !== null &&
+                accountJournal?.deletionRequestId !== undefined
+                  ? "已安全保存删除请求凭据"
+                  : accountJournal?.activeMutation?.confirmationId === null ||
+                      accountJournal?.activeMutation?.confirmationId === undefined
+                    ? "不可用"
+                    : "已安全保存确认号"}
               </dd>
             </div>
           </dl>

@@ -106,6 +106,7 @@ describe("MultiAgentReviewPage", () => {
     render(<MultiAgentReviewPage runtime={runtime} projectId={session.projectId} featureEnabled />);
 
     expect(await screen.findByText(/提供方未返回，不进行估算/u)).toBeVisible();
+    expect(screen.queryByText("MODEL_USAGE_UNAVAILABLE")).not.toBeInTheDocument();
     expect(screen.getAllByText("部分未知")).toHaveLength(2);
     expect(screen.getByText("不可核算")).toBeVisible();
   });
@@ -125,7 +126,14 @@ describe("MultiAgentReviewPage", () => {
 
     render(<MultiAgentReviewPage runtime={runtime} projectId={session.projectId} featureEnabled />);
 
-    await user.click(await screen.findByRole("button", { name: "拒绝候选" }));
+    const decisionSurface = await screen.findByLabelText("多智能体审稿候选决策");
+    expect(decisionSurface).toHaveClass("candidate-decision-surface");
+    expect(screen.getByLabelText("多智能体审稿候选内容")).toHaveAttribute("tabindex", "0");
+    expect(decisionSurface.querySelector(":scope > .ink-card__footer")).toHaveClass(
+      "candidate-decision-actions",
+    );
+
+    await user.click(screen.getByRole("button", { name: "拒绝候选" }));
     await waitFor(() =>
       expect(runtime.rejectCandidate).toHaveBeenCalledWith(candidate.id, candidate.revision),
     );

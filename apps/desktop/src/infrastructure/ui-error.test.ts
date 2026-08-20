@@ -1,7 +1,12 @@
 import { AppError } from "@inkshadow/domain";
 import { describe, expect, it } from "vitest";
 
-import { isUiErrorRetryable, normalizeUiError, UiActionError } from "./ui-error";
+import {
+  isUiErrorRetryable,
+  normalizeUiError,
+  projectOrdinaryUiError,
+  UiActionError,
+} from "./ui-error";
 
 describe("normalizeUiError SQLite persistence failures", () => {
   it("shows only explicitly source-authored recovery messages verbatim", () => {
@@ -106,6 +111,23 @@ describe("normalizeUiError SQLite persistence failures", () => {
   });
 
   it.each([
+    ["FORMAL_RECORD_PLAN_MISMATCH", "这条建议依据的设定已经变化，请重新整理后再确认。"],
+    [
+      "DIFF_COMPLEXITY_LIMIT_EXCEEDED",
+      "这次改动较长，无法安全逐句比较；你仍可查看完整建议并整段采用、另存或放弃。",
+    ],
+  ])("projects %s to ordinary UI without exposing its internal code", (code, description) => {
+    const error = { code, message: "private implementation detail", retryable: false };
+
+    expect(projectOrdinaryUiError(error)).toEqual({
+      title: "操作未完成",
+      description,
+    });
+    expect(projectOrdinaryUiError(error)).not.toHaveProperty("code");
+    expect(normalizeUiError(error).code).toBe(code);
+  });
+
+  it.each([
     ["MODEL_OUTPUT_TRUNCATED", ["更充足的固定预算", "DeepSeek 关闭推理", "重新同步模型"]],
     ["MODEL_OUTPUT_EMPTY", ["可用于写作的可见文字", "支持文本生成", "普通文本模型"]],
     [
@@ -123,6 +145,18 @@ describe("normalizeUiError SQLite persistence failures", () => {
       "MODEL_HUB_MANUAL_ROUTE_PRIVACY_CONFLICT",
       ["手动设置的云端任务", "没有覆盖", "本机模型或先停用"],
     ],
+    ["IMPORT_ANALYSIS_ROUTE_NOT_CONFIGURED", ["作品分析", "模型设置", "已导入原文不会因此改变"]],
+    ["IMPORT_JOURNEY_PERSIST_FAILED", ["本地导入进度", "保持当前页面打开", "不会被静默覆盖"]],
+    [
+      "IMPORT_PENDING_REQUEST_CLEAR_FAILED",
+      ["未能清除请求恢复标记", "不会自动重复调用", "重新打开页面"],
+    ],
+    [
+      "IMPORT_PENDING_REQUEST_PERSIST_FAILED",
+      ["发送前保存请求恢复标记", "没有调用模型", "释放存储空间"],
+    ],
+    ["EXTENSION_USAGE_UNAVAILABLE", ["没有返回可核对的用量", "正文没有被覆盖", "导出历史"]],
+    ["UPDATE_MANIFEST_UNAVAILABLE", ["安全更新未完成", "仍可离线使用", "官方发行说明"]],
   ])("gives an actionable, redacted recovery path for %s", (code, expectedFragments) => {
     const privateDetail = "Authorization: Bearer hidden private provider response";
     const normalized = normalizeUiError({ code, message: privateDetail, retryable: true });

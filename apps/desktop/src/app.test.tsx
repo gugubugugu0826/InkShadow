@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { exportPortableBundle } from "@inkshadow/import-export";
+import { exportPortableBundle } from "@inkshadow/import-export/core";
 import { ToastProvider } from "@inkshadow/ui";
 import { describe, expect, it, vi } from "vitest";
 

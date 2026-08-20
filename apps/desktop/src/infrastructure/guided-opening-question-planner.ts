@@ -1,8 +1,15 @@
 import { parseUuidV7, type ProjectSeed, type ProjectSeedFieldKey } from "@inkshadow/domain";
 
-import { executeModelHubTextTask } from "./model-hub-execution-service";
+import {
+  executeModelHubTextTask,
+  inspectModelHubTextTask,
+  ModelHubExecutionError,
+} from "./model-hub-execution-service";
+import { selectSingleAttemptStrictJsonPolicy } from "./model-execution-policy";
+import { getModelProviderPreset } from "./model-hub-provider-registry";
 import { recordSafeGenerationErrorCode } from "./generation-preflight-diagnostics";
 import { GUIDED_OPENING_QUESTION_CATALOG } from "./guided-opening-question-catalog";
+import { resolveModelCapabilityVerdict } from "./model-hub-router";
 import {
   projectContextDispatchScope,
   projectContextRequiredDataDestination,
@@ -215,24 +222,85 @@ export async function planGuidedOpeningQuestions(
     }
     const receipt = await runtime.projectContextPrivacy.inspect(projectId.value);
     runtime.projectContextPrivacy.assertChapterMatches(receipt, chapter);
-    const generated = await executeModelHubTextTask(runtime, {
+    const messages = plannerMessages(input, fallback.gaps);
+    const inspection = await inspectModelHubTextTask(runtime, {
       task: "idea_discussion",
-      dispatchScope: projectContextDispatchScope(receipt),
-      messages: plannerMessages(input, fallback.gaps),
+      messages,
       maximumOutputTokens: 1_200,
       temperature: 0.2,
-      // The planner contract is visible JSON. Reasoning-only output must not be
-      // mistaken for a valid empty plan on providers with optional thinking.
-      reasoningPolicy: "visible_prose",
       capabilityPolicy: "text_generation_only",
       ...(projectContextRequiredDataDestination(receipt) === undefined
         ? {}
         : { requiredDataDestination: "local" as const }),
-      onBeforeDispatch: async ({ localOnlyEligible }) => {
-        await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(receipt);
-        runtime.projectContextPrivacy.assertRouteEligible(receipt, localOnlyEligible === true);
+    });
+    const structuredOutputSupported =
+      resolveModelCapabilityVerdict({
+        catalogEntryId: inspection.catalogEntryId,
+        capability: "structured_output",
+        evidence: await runtime.modelHub.listCapabilityEvidence(inspection.catalogEntryId),
+        now: runtime.clock.now(),
+      }) === "supported";
+    const assertStructuredOutputCurrent = async (catalogEntryId: string) => {
+      if (!structuredOutputSupported) return;
+      const verdict = resolveModelCapabilityVerdict({
+        catalogEntryId,
+        capability: "structured_output",
+        evidence: await runtime.modelHub.listCapabilityEvidence(catalogEntryId),
+        now: runtime.clock.now(),
+      });
+      if (verdict !== "supported") {
+        throw new ModelHubExecutionError(
+          "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED",
+          "问题规划发送前无法确认结构化输出能力，本次请求在发送 0 字后停止。",
+        );
+      }
+    };
+    const executionPolicy = selectSingleAttemptStrictJsonPolicy({
+      structuredOutputVerified: structuredOutputSupported,
+      jsonObjectTransportSupported:
+        getModelProviderPreset(inspection.providerKind).protocol === "openai_compatible",
+    });
+    const generated = await executeModelHubTextTask(runtime, {
+      task: "idea_discussion",
+      dispatchScope: projectContextDispatchScope(receipt),
+      messages,
+      maximumOutputTokens: 1_200,
+      temperature: 0.2,
+      executionPolicy,
+      reasoningModeOverride: "disabled",
+      generationRetryLimitOverride: 0,
+      capabilityPolicy: "text_generation_only",
+      ...(executionPolicy.transportResponseFormat === "json_object"
+        ? { responseFormat: "json_object" as const }
+        : {}),
+      validateGeneratedText: (text) => {
+        parseAiQuestions(text, fallback.gaps);
       },
-      onFinalBeforeProviderDispatch: async ({ localOnlyEligible }) => {
+      ...(projectContextRequiredDataDestination(receipt) === undefined
+        ? {}
+        : { requiredDataDestination: "local" as const }),
+      onBeforeDispatch: async (selection) => {
+        if (
+          selection.connectionId !== inspection.connectionId ||
+          selection.catalogEntryId !== inspection.catalogEntryId ||
+          selection.modelId !== inspection.modelId ||
+          selection.usedFallback !== inspection.usedFallback
+        ) {
+          throw new ModelHubExecutionError(
+            "MODEL_HUB_PLAN_CHANGED",
+            "问题规划发送前 AI 分工发生了变化，请重新整理问题。",
+            true,
+          );
+        }
+        await assertStructuredOutputCurrent(selection.catalogEntryId);
+        await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(receipt);
+        runtime.projectContextPrivacy.assertRouteEligible(
+          receipt,
+          selection.localOnlyEligible === true,
+        );
+      },
+      onFinalBeforeProviderDispatch: async ({ catalogEntryId, localOnlyEligible }) => {
+        await assertStructuredOutputCurrent(catalogEntryId);
         await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(receipt);
         runtime.projectContextPrivacy.assertRouteEligible(receipt, localOnlyEligible === true);
       },

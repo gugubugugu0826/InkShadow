@@ -220,6 +220,7 @@ describe("Model Hub embedding execution service", () => {
     harness.embed.mockResolvedValue(
       embeddingResult("open_ai_compatible", "shared-embedding-model", [PRIVATE_VECTOR]),
     );
+    const markDispatched = vi.spyOn(harness.modelHub, "markInvocationDispatched");
 
     const inspection = await inspectModelHubEmbeddingTask(harness.dependencies, {
       inputs: [PRIVATE_INPUT],
@@ -248,6 +249,10 @@ describe("Model Hub embedding execution service", () => {
       model: inspection.modelId,
       inputs: [PRIVATE_INPUT],
     });
+    expect(markDispatched).toHaveBeenCalledOnce();
+    expect(markDispatched.mock.invocationCallOrder[0]).toBeLessThan(
+      harness.embed.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
   });
 
   it("does not embed when the credential slot rotates in onBeforeDispatch", async () => {
@@ -651,7 +656,7 @@ describe("Model Hub embedding execution service", () => {
     );
   });
 
-  it("does not call the fallback after a dispatched provider failure and records no content", async () => {
+  it("projects an unknown dispatched transport result as ambiguous and records no content", async () => {
     const harness = createHarness();
     const primary = await seedTarget(harness.modelHub, {
       connectionId: "dispatched-primary",
@@ -686,7 +691,11 @@ describe("Model Hub embedding execution service", () => {
     }
 
     expect(error).toBeInstanceOf(ModelHubExecutionError);
-    expect(error).toMatchObject({ code: "UPSTREAM_TIMEOUT", dispatched: true, retryable: true });
+    expect(error).toMatchObject({
+      code: "PROVIDER_RESULT_AMBIGUOUS",
+      dispatched: true,
+      retryable: false,
+    });
     expect(harness.embed).toHaveBeenCalledOnce();
     expect(harness.embed.mock.calls[0]?.[0]).toMatchObject({
       config: { providerId: "dispatched-primary" },
@@ -695,11 +704,39 @@ describe("Model Hub embedding execution service", () => {
     expect(finishInvocation).toHaveBeenCalledOnce();
     expect(finishInvocation).toHaveBeenCalledWith(
       expect.objectContaining({
-        status: "failed",
-        errorCode: "UPSTREAM_TIMEOUT",
+        status: "timed_out",
+        errorCode: "PROVIDER_RESULT_AMBIGUOUS",
       }),
     );
     expect(JSON.stringify(finishInvocation.mock.calls)).not.toContain(PRIVATE_INPUT);
+  });
+
+  it("records a confirmed HTTP 504 embedding response as failed", async () => {
+    const harness = createHarness();
+    const primary = await seedTarget(harness.modelHub, {
+      connectionId: "confirmed-http-embedding",
+      catalogEntryId: "confirmed-http-embedding-catalog",
+      modelId: "confirmed-http-embedding-model",
+    });
+    await saveRoute(harness.modelHub, { primaryCatalogEntryId: primary.id });
+    harness.embed.mockRejectedValue({
+      code: "UPSTREAM_TIMEOUT",
+      retryable: true,
+      diagnostics: { httpStatus: 504 },
+    });
+    const finishInvocation = vi.spyOn(harness.modelHub, "finishInvocation");
+
+    await expect(
+      executeModelHubEmbeddingTask(harness.dependencies, {
+        dispatchScope: TEST_DISPATCH_SCOPE,
+        inputs: ["confirmed-http-failure"],
+      }),
+    ).rejects.toMatchObject({ code: "UPSTREAM_TIMEOUT", dispatched: true });
+
+    expect(harness.embed).toHaveBeenCalledOnce();
+    expect(finishInvocation).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "failed", errorCode: "UPSTREAM_TIMEOUT" }),
+    );
   });
 
   it("rejects invalid input and unsupported Anthropic embedding before native dispatch", async () => {

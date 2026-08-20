@@ -23,12 +23,12 @@ describe("Model Hub structured output capability probe", () => {
       repaired: false,
       verificationMethod: "openai_compatible_json_object",
     });
-    expect(generate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        responseFormat: "json_object",
-        reasoningMode: "disabled",
-        maxOutputTokens: MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
-      }),
+    const dispatched = generate.mock.calls[0]?.[0];
+    expect(dispatched?.config.retryLimit).toBe(0);
+    expect(dispatched?.responseFormat).toBe("json_object");
+    expect(dispatched?.reasoningMode).toBe("disabled");
+    expect(dispatched?.maxOutputTokens).toBe(
+      MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
     );
     expect(generate.mock.calls[0]?.[0].messages.map(({ content }) => content).join(" ")).toContain(
       "JSON",
@@ -49,37 +49,29 @@ describe("Model Hub structured output capability probe", () => {
     );
   });
 
-  it("repairs one invalid response with the same model and a fresh generation id", async () => {
-    const generate = vi
-      .fn<NativeModelGatewayClient["generate"]>()
-      .mockResolvedValueOnce({ text: "not json", usage: null, streamed: true })
-      .mockResolvedValueOnce({
-        text: ' {"schemaVersion":1,"ok":true,"label":"inkshadow"} ',
-        usage: null,
-        streamed: true,
-      });
-
-    await expect(runModelHubStructuredCapabilityProbe(input(generate))).resolves.toMatchObject({
-      attempts: 2,
-      repaired: true,
+  it("fails one invalid response without a hidden repair request", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>().mockResolvedValue({
+      text: "not json",
+      usage: { inputTokens: 9, outputTokens: 3, cachedInputTokens: null },
+      streamed: true,
     });
-    expect(generate.mock.calls.map(([request]) => request.generationId)).toEqual([
-      "structured-probe-1",
-      "structured-probe-2",
-    ]);
+
+    await expect(runModelHubStructuredCapabilityProbe(input(generate))).rejects.toMatchObject({
+      code: "MODEL_STRUCTURED_OUTPUT_PROBE_FAILED",
+    });
+    expect(generate).toHaveBeenCalledOnce();
   });
 
-  it("retries one truncated response but never treats partial JSON as verified", async () => {
+  it("does not retry a truncated response", async () => {
     const generate = vi
       .fn<NativeModelGatewayClient["generate"]>()
-      .mockRejectedValueOnce(new ModelCenterError("MODEL_OUTPUT_TRUNCATED", "length", true))
-      .mockRejectedValueOnce(new ModelCenterError("MODEL_OUTPUT_TRUNCATED", "length", true));
+      .mockRejectedValue(new ModelCenterError("MODEL_OUTPUT_TRUNCATED", "length", true));
 
     await expect(runModelHubStructuredCapabilityProbe(input(generate))).rejects.toMatchObject({
       code: "MODEL_STRUCTURED_OUTPUT_PROBE_FAILED",
       retryable: true,
     });
-    expect(generate).toHaveBeenCalledTimes(2);
+    expect(generate).toHaveBeenCalledOnce();
   });
 
   it("fails closed for a non OpenAI-compatible provider protocol", async () => {
@@ -89,13 +81,29 @@ describe("Model Hub structured output capability probe", () => {
     ).rejects.toMatchObject({ code: "MODEL_STRUCTURED_OUTPUT_PROBE_UNSUPPORTED" });
     expect(generate).not.toHaveBeenCalled();
   });
+
+  it("rechecks the disclosed target before dispatch and makes zero calls when it changed", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>();
+    const assertBeforeProviderDispatch = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValue(new Error("MODEL_HUB_TASK_PROBE_DISCLOSURE_CHANGED"));
+
+    await expect(
+      runModelHubStructuredCapabilityProbe({
+        ...input(generate),
+        assertBeforeProviderDispatch,
+      }),
+    ).rejects.toThrow("MODEL_HUB_TASK_PROBE_DISCLOSURE_CHANGED");
+    expect(assertBeforeProviderDispatch).toHaveBeenCalledOnce();
+    expect(generate).not.toHaveBeenCalled();
+  });
 });
 
 function input(generate: NativeModelGatewayClient["generate"]) {
   return {
     gateway: { generate },
     providerKind: "deepseek" as const,
-    generationIds: ["structured-probe-1", "structured-probe-2"] as const,
+    generationId: "structured-probe-1",
     config: endpoint(),
     model: "deepseek-v4-flash",
   };

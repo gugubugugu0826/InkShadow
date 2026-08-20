@@ -28,6 +28,7 @@ import {
   type FormalStoryRecordListReader,
   type FormalStoryRecordSnapshot,
   type ReviewItemListReader,
+  type StoryFactStore,
   type StoryCoreError,
   type StructuredReviewItemSnapshot,
   type UuidV7 as StoryUuidV7,
@@ -111,6 +112,8 @@ export interface AuthoritativeStoryGraphRebuildReceipt extends AuthoritativeStor
  * into accepted story state.
  */
 export interface AuthoritativeStoryGraphReadSources {
+  /** Production authority. Legacy formal records are a compatibility fallback for old callers only. */
+  readonly confirmedFacts?: Pick<StoryFactStore, "listByProjectId">;
   readonly formalRecords: FormalStoryRecordListReader;
   readonly extractionReviews: ReviewItemListReader<"extraction">;
   readonly consistencyReviews: ReviewItemListReader<"consistency">;
@@ -159,6 +162,16 @@ export class BuildAuthoritativeStoryGraphProjection {
     domainProjectId: DomainUuidV7,
     storyProjectId: StoryUuidV7,
   ): Promise<AuthoritativeStoryGraphProjectionBuild> {
+    if (this.sources.confirmedFacts !== undefined) {
+      return buildFromConfirmedStoryFacts(
+        domainProjectId,
+        storyProjectId,
+        this.sources.confirmedFacts,
+        this.sources.chapters,
+        this.sources.chapterVersions,
+        (content) => this.requireHash(content),
+      );
+    }
     const [formalResult, extractionResult, consistencyResult, chapterResult] = await Promise.all([
       this.sources.formalRecords.listByProjectId(storyProjectId),
       this.sources.extractionReviews.listByProjectId(storyProjectId),
@@ -470,6 +483,224 @@ export class BuildAuthoritativeStoryGraphProjection {
     }
     return digest;
   }
+}
+
+/**
+ * Compatibility projection for the legacy expert GraphRAG surface. It reads
+ * only confirmed StoryFact authority and current immutable chapter evidence;
+ * the resulting graph remains disposable and cannot publish facts back.
+ */
+async function buildFromConfirmedStoryFacts(
+  domainProjectId: DomainUuidV7,
+  storyProjectId: StoryUuidV7,
+  facts: Pick<StoryFactStore, "listByProjectId">,
+  chapters: ChapterRepository,
+  versions: ChapterVersionRepository,
+  hash: (content: string) => Promise<string>,
+): Promise<AuthoritativeStoryGraphProjectionBuild> {
+  const [factResult, chapterResult] = await Promise.all([
+    facts.listByProjectId(storyProjectId),
+    chapters.listByProjectId(domainProjectId),
+  ]);
+  if (!factResult.ok) throw normalizeStoryReadFailure(factResult.error, "STORY_FACT_LIST");
+  if (!chapterResult.ok) throw chapterResult.error;
+
+  const confirmed = factResult.value
+    .map((fact) => fact.toSnapshot())
+    .filter(
+      (fact) =>
+        fact.projectId === storyProjectId &&
+        fact.branchId === null &&
+        fact.status === "formal" &&
+        fact.userConfirmed &&
+        !fact.needsReview &&
+        !fact.deprecated,
+    )
+    .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+  if (confirmed.length > MAX_FORMAL_RECORDS) {
+    throw new ProjectionCapacityFailure(
+      "confirmed_story_facts",
+      MAX_FORMAL_RECORDS,
+      confirmed.length,
+    );
+  }
+  if (chapterResult.value.length > MAX_CHAPTERS) {
+    throw new ProjectionCapacityFailure("chapters", MAX_CHAPTERS, chapterResult.value.length);
+  }
+
+  const chapterById = new Map(
+    chapterResult.value.map((chapter) => {
+      const snapshot = chapter.toSnapshot();
+      return [String(snapshot.id), snapshot] as const;
+    }),
+  );
+  const sourceVersions: GraphSourceVersion[] = [];
+  const entities: GraphEntity[] = [];
+  const relations: GraphRelation[] = [];
+  const projectedChapters = new Set<string>();
+  const skipCounts = new Map<AuthoritativeStoryGraphSkipReason, number>();
+  let sourceUtf8Bytes = 0;
+
+  for (const fact of confirmed) {
+    const content = canonicalJson({
+      schema: "inkshadow.confirmed-story-fact-graph-source/v1",
+      id: fact.id,
+      projectId: fact.projectId,
+      factType: fact.factType,
+      contentText: fact.contentText,
+      structuredValue: fact.structuredValue,
+      effectiveAt: fact.effectiveAt,
+      invalidatedAt: fact.invalidatedAt,
+      revision: fact.revision,
+    });
+    sourceUtf8Bytes = consumeSourceBudget(sourceUtf8Bytes, content);
+    const contentHash = await hash(content);
+    const sourceId = `fact-source:${fact.id}`;
+    const sourceVersionId = `${sourceId}:revision:${String(fact.revision)}`;
+    sourceVersions.push({
+      projectId: fact.projectId,
+      sourceId,
+      sourceVersionId,
+      contentHash,
+      content,
+      createdAt: fact.updatedAt,
+    });
+    entities.push({
+      id: `fact:${fact.id}`,
+      projectId: fact.projectId,
+      kind: String(fact.factType),
+      label: fact.contentText?.slice(0, 160) ?? String(fact.factType),
+      source: { sourceId, sourceVersionId, contentHash },
+      documentId: `story-fact:${fact.id}`,
+      updatedAt: fact.updatedAt,
+    });
+
+    const chapterId = fact.source.chapterId === null ? null : String(fact.source.chapterId);
+    const versionId = fact.source.versionId === null ? null : String(fact.source.versionId);
+    const chapter = chapterId === null ? undefined : chapterById.get(chapterId);
+    if (
+      chapterId === null ||
+      chapter === undefined ||
+      versionId === null ||
+      fact.source.startOffset === null ||
+      fact.source.endOffset === null ||
+      fact.source.sourceLength === null ||
+      fact.source.excerpt === null
+    ) {
+      continue;
+    }
+    if (chapter.status === "trashed") {
+      incrementSkip(skipCounts, "current_chapter_trashed");
+      continue;
+    }
+    if (String(chapter.currentVersionId) !== versionId) {
+      incrementSkip(skipCounts, "current_chapter_version_changed");
+      continue;
+    }
+    const version = await loadVersionSnapshot(versions, chapter.currentVersionId);
+    const chapterHash = await hash(chapter.content);
+    if (version.contentChecksum !== chapterHash) {
+      throw new ProjectionIntegrityFailure("CHAPTER_VERSION_CHECKSUM_MISMATCH");
+    }
+    const start = fact.source.startOffset;
+    const end = fact.source.endOffset;
+    if (
+      fact.source.sourceLength !== chapter.content.length ||
+      start < 0 ||
+      end <= start ||
+      end > chapter.content.length ||
+      chapter.content.slice(start, end) !== fact.source.excerpt ||
+      !isUtf16CodePointBoundary(chapter.content, start) ||
+      !isUtf16CodePointBoundary(chapter.content, end)
+    ) {
+      throw new ProjectionIntegrityFailure("STORY_FACT_EVIDENCE_MISMATCH");
+    }
+    const exactChapterId = chapterId;
+    const exactVersionId = versionId;
+    const chapterSourceId = chapterSourceIdentity(exactChapterId);
+    if (!projectedChapters.has(exactChapterId)) {
+      projectedChapters.add(exactChapterId);
+      sourceUtf8Bytes = consumeSourceBudget(sourceUtf8Bytes, chapter.content);
+      sourceVersions.push({
+        projectId: chapter.projectId,
+        sourceId: chapterSourceId,
+        sourceVersionId: exactVersionId,
+        contentHash: chapterHash,
+        content: chapter.content,
+        createdAt: version.createdAt,
+      });
+      entities.push({
+        id: chapterEntityIdentity(exactChapterId),
+        projectId: chapter.projectId,
+        kind: "chapter",
+        label: chapter.title,
+        source: {
+          sourceId: chapterSourceId,
+          sourceVersionId: exactVersionId,
+          contentHash: chapterHash,
+        },
+        documentId: `chapter:${exactChapterId}`,
+        updatedAt: chapter.updatedAt,
+      });
+    }
+    relations.push({
+      id: `story-fact-evidence:${fact.id}`,
+      projectId: fact.projectId,
+      fromEntityId: chapterEntityIdentity(exactChapterId),
+      toEntityId: `fact:${fact.id}`,
+      kind: AUTHORITATIVE_STORY_GRAPH_RELATION_KIND,
+      polarity: "affirmed",
+      confidence: 1,
+      evidence: [
+        {
+          id: `story-fact-evidence-span:${fact.id}`,
+          projectId: fact.projectId,
+          sourceId: chapterSourceId,
+          sourceVersionId: exactVersionId,
+          contentHash: chapterHash,
+          span: { startOffset: start, endOffset: end, encoding: "utf16" },
+          quote: fact.source.excerpt,
+          spanHash: graphEvidenceSpanHash(fact.source.excerpt),
+          citation: { label: chapter.title, locator: `utf16:${String(start)}-${String(end)}` },
+        },
+      ],
+      updatedAt: fact.updatedAt,
+    });
+  }
+
+  const candidate: GraphRagProjectSnapshot = {
+    projectId: domainProjectId,
+    sourceVersions: sourceVersions.map((source) => ({ source, state: "current" as const })),
+    entities,
+    relations,
+  };
+  const index = new InMemoryGraphRagIndex();
+  index.restoreProject(candidate);
+  const snapshot = index.snapshotProject(domainProjectId);
+  if (snapshot === undefined)
+    throw new ProjectionIntegrityFailure("DERIVED_GRAPH_SNAPSHOT_MISSING");
+  const skipped = [...skipCounts.entries()].map(([reason, count]) => ({ reason, count }));
+  const invalidatedSupportCount = skipped.reduce((total, item) => total + item.count, 0);
+  return {
+    snapshot,
+    diagnostics: Object.freeze({
+      formalRecordCount: confirmed.length,
+      reviewItemCount: 0,
+      chapterCount: chapterResult.value.length,
+      formalEntityCount: confirmed.length,
+      chapterEntityCount: projectedChapters.size,
+      relationCount: relations.length,
+      sourceVersionCount: snapshot.sourceVersions.length,
+      skippedRelationCount: invalidatedSupportCount,
+      invalidatedSupportCount,
+      projectionOmissionCount: 0,
+      nonReviewDerivedFormalCount: 0,
+      nonExtractionReviewFormalCount: 0,
+      skipped: Object.freeze(skipped),
+      partial: false,
+      stale: invalidatedSupportCount > 0,
+    }),
+  };
 }
 
 /**
@@ -816,17 +1047,24 @@ function isExclusivelyStoryOwnedProjection(snapshot: GraphRagProjectSnapshot): b
     snapshot.sourceVersions.every(
       ({ source }) =>
         source.sourceId.startsWith("formal-source:") ||
+        source.sourceId.startsWith("fact-source:") ||
         source.sourceId.startsWith("chapter-source:"),
     ) &&
     snapshot.entities.every(
-      (entity) => entity.id.startsWith("formal:") || entity.id.startsWith("chapter:"),
+      (entity) =>
+        entity.id.startsWith("formal:") ||
+        entity.id.startsWith("fact:") ||
+        entity.id.startsWith("chapter:"),
     ) &&
     snapshot.relations.every(
       (relation) =>
-        relation.id.startsWith("extraction-review:") &&
+        (relation.id.startsWith("extraction-review:") ||
+          relation.id.startsWith("story-fact-evidence:")) &&
         relation.kind === AUTHORITATIVE_STORY_GRAPH_RELATION_KIND &&
-        relation.evidence.every((evidence) =>
-          evidence.id.startsWith("extraction-review-evidence:"),
+        relation.evidence.every(
+          (evidence) =>
+            evidence.id.startsWith("extraction-review-evidence:") ||
+            evidence.id.startsWith("story-fact-evidence-span:"),
         ),
     )
   );

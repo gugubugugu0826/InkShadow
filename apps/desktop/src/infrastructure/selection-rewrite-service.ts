@@ -2,7 +2,14 @@ import { AiCandidate, AppError, type Chapter, type UuidV7 } from "@inkshadow/dom
 
 import { createContextCompilationTrace } from "./context-compilation-trace-store";
 import { ModelCenterError } from "./model-center-store";
-import { executeModelHubTextTask, ModelHubExecutionError } from "./model-hub-execution-service";
+import {
+  executeModelHubTextTask,
+  inspectModelHubTextTask,
+  ModelHubExecutionError,
+  type InspectModelHubTextTaskInput,
+  type ModelHubTextTaskInspection,
+} from "./model-hub-execution-service";
+import { SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY } from "./model-execution-policy";
 import {
   ProjectContextPrivacyError,
   projectContextRequiredDataDestination,
@@ -19,6 +26,14 @@ import {
   StoryContextRuntimeError,
   type StoryContextCompilationReceipt,
 } from "./story-context-runtime";
+import {
+  assertDisclosedSelection,
+  assertModelHubInspectionAuthority,
+  modelHubInspectionAuthority,
+  providerActionFingerprint,
+  providerConnectionDisplayName,
+  type ProviderActionDisclosure,
+} from "./provider-action-disclosure";
 
 export interface SelectionRewriteAnchor {
   /** Textarea offsets are UTF-16 code-unit positions, matching slice/setSelectionRange. */
@@ -32,6 +47,8 @@ export interface SelectionRewriteCandidateInput {
   readonly baseVersionId: UuidV7;
   readonly selection: SelectionRewriteAnchor;
   readonly instruction: string;
+  readonly disclosureFingerprint?: string;
+  readonly humanConfirmed?: boolean;
   readonly onDelta?: (text: string) => void;
   readonly onBeforeDispatch?: (
     request: Readonly<{
@@ -40,6 +57,12 @@ export interface SelectionRewriteCandidateInput {
       modelId: string;
     }>,
   ) => void | Promise<void>;
+}
+
+export interface SelectionRewriteDisclosure extends ProviderActionDisclosure {
+  readonly maximumProviderCalls: 1;
+  readonly automaticRetryCount: 0;
+  readonly selectedCharacterCount: number;
 }
 
 export interface SelectionRewriteCandidateResult {
@@ -81,38 +104,45 @@ export async function createSelectionRewriteCandidate(
     );
   }
 
-  const instruction = normalizeInstruction(input.instruction);
-  const anchored = await loadAnchoredSelection(runtime, input);
-  const contextCompilation = await compileRewriteContext(runtime, anchored, input, instruction);
-  const messages = buildSelectionRewriteMessages(contextCompilation);
-  if (measureMessageBytes(messages) > MAXIMUM_INPUT_BYTES) {
+  if (input.humanConfirmed !== true || input.disclosureFingerprint === undefined) {
     throw new ModelCenterError(
-      "SELECTION_REWRITE_CONTEXT_TOO_LARGE",
-      "本次选区和故事资料超过安全上下文上限。请缩小选区后重试。",
+      "SELECTION_REWRITE_CONFIRMATION_REQUIRED",
+      "请先查看并确认这次选区改写的模型、发送范围和费用状态。",
     );
   }
+
+  const prepared = await prepareSelectionRewriteCurrent(runtime, input);
+  if (prepared.disclosure.fingerprint !== input.disclosureFingerprint) {
+    throw selectionRewriteDisclosureChanged();
+  }
+  const { contextCompilation, inspection, request } = prepared;
 
   const requestId = runtime.ids.next();
   const contextTraceId = runtime.ids.next();
   const privacyReceipt = contextCompilation.projectPrivacy;
-  const requiredDataDestination = projectContextRequiredDataDestination(privacyReceipt);
   let generated;
   try {
     generated = await executeModelHubTextTask(runtime, {
       dispatchScope: projectContextDispatchScope(privacyReceipt),
-      task: "rewrite",
-      messages,
-      maximumOutputTokens: 4_096,
-      temperature: 0.65,
+      ...request,
       generationId: requestId,
-      ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
+      executionPolicy: SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
       onBeforeDispatch: async ({
         generationId,
         invocationId,
         connectionId,
         modelId,
         localOnlyEligible,
+        catalogEntryId,
+        usedFallback,
       }) => {
+        assertSelectionRewriteDisclosure(inspection, {
+          connectionId,
+          catalogEntryId,
+          modelId,
+          usedFallback,
+        });
+        await assertSelectionRewriteInspectionCurrent(runtime, request, inspection);
         const latest = await loadAnchoredSelection(runtime, input);
         await saveRewriteContextTrace(runtime, latest.chapter, contextCompilation, {
           traceId: contextTraceId,
@@ -137,13 +167,15 @@ export async function createSelectionRewriteCandidate(
           throw cause;
         }
       },
-      onFinalBeforeProviderDispatch: async ({ localOnlyEligible }) => {
+      onFinalBeforeProviderDispatch: async (selection) => {
+        assertSelectionRewriteDisclosure(inspection, selection);
+        await assertSelectionRewriteInspectionCurrent(runtime, request, inspection);
         await loadAnchoredSelection(runtime, input);
         try {
           await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(privacyReceipt);
           runtime.projectContextPrivacy.assertRouteEligible(
             privacyReceipt,
-            localOnlyEligible === true,
+            selection.localOnlyEligible === true,
           );
         } catch (cause: unknown) {
           if (cause instanceof ProjectContextPrivacyError) {
@@ -199,6 +231,144 @@ export async function createSelectionRewriteCandidate(
     selection: Object.freeze({ ...input.selection }),
     contextCompilation,
   });
+}
+
+/** Resolves and fingerprints the complete provider action without dispatching. */
+export async function prepareSelectionRewrite(
+  runtime: DesktopRuntime,
+  input: SelectionRewriteCandidateInput,
+): Promise<SelectionRewriteDisclosure> {
+  if (runtime.mode !== "tauri" || !runtime.modelGateway.available) {
+    throw new ModelCenterError(
+      "MODEL_NATIVE_GATEWAY_UNAVAILABLE",
+      "选区改写需要桌面版中已连接的 AI 服务。请先连接模型，再返回继续。",
+    );
+  }
+  return (await prepareSelectionRewriteCurrent(runtime, input)).disclosure;
+}
+
+interface PreparedSelectionRewrite {
+  readonly anchored: AnchoredSelection;
+  readonly contextCompilation: ChapterStoryContextCompilationReceipt;
+  readonly messages: readonly NativeModelMessage[];
+  readonly request: InspectModelHubTextTaskInput;
+  readonly inspection: ModelHubTextTaskInspection;
+  readonly disclosure: SelectionRewriteDisclosure;
+}
+
+async function prepareSelectionRewriteCurrent(
+  runtime: DesktopRuntime,
+  input: SelectionRewriteCandidateInput,
+): Promise<PreparedSelectionRewrite> {
+  const instruction = normalizeInstruction(input.instruction);
+  const anchored = await loadAnchoredSelection(runtime, input);
+  const contextCompilation = await compileRewriteContext(runtime, anchored, input, instruction);
+  const messages = buildSelectionRewriteMessages(contextCompilation);
+  if (measureMessageBytes(messages) > MAXIMUM_INPUT_BYTES) {
+    throw new ModelCenterError(
+      "SELECTION_REWRITE_CONTEXT_TOO_LARGE",
+      "本次选区和故事资料超过安全上下文上限。请缩小选区后重试。",
+    );
+  }
+  const requiredDataDestination = projectContextRequiredDataDestination(
+    contextCompilation.projectPrivacy,
+  );
+  const request: InspectModelHubTextTaskInput = Object.freeze({
+    task: "rewrite",
+    messages,
+    maximumOutputTokens: 4_096,
+    temperature: 0.65,
+    ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
+  });
+  const inspection = await inspectModelHubTextTask(runtime, request);
+  try {
+    runtime.projectContextPrivacy.assertRouteEligible(
+      contextCompilation.projectPrivacy,
+      inspection.dataDestination === "local",
+    );
+  } catch (cause: unknown) {
+    if (cause instanceof ProjectContextPrivacyError) {
+      throw new ModelCenterError(cause.code, cause.message, cause.retryable);
+    }
+    throw cause;
+  }
+  let connectionDisplayName: string;
+  try {
+    connectionDisplayName = await providerConnectionDisplayName(runtime.modelHub, inspection);
+  } catch {
+    throw selectionRewriteDisclosureChanged();
+  }
+  const fingerprint = await providerActionFingerprint({
+    anchor: input.selection,
+    baseVersionId: input.baseVersionId,
+    instruction,
+    privacyFingerprint: contextCompilation.projectPrivacy.fingerprint,
+    inspection: modelHubInspectionAuthority(inspection),
+    messages,
+    connectionDisplayName,
+    maximumProviderCalls: 1,
+    automaticRetryCount: 0,
+  });
+  const estimate = inspection.pricing.estimatedMaximumCostMicros;
+  return Object.freeze({
+    anchored,
+    contextCompilation,
+    messages,
+    request,
+    inspection,
+    disclosure: Object.freeze({
+      fingerprint,
+      connectionDisplayName,
+      modelId: inspection.modelId,
+      dataDestination: inspection.dataDestination,
+      privacy:
+        inspection.dataDestination === "local"
+          ? "选区与相关故事资料只发送给当前已验证的本机模型。"
+          : "选区、改写要求和本次编译的相关故事资料会发送到所选 AI 服务。",
+      sends: Object.freeze([
+        `当前选中的 ${String(anchored.selectedText.length)} 个字符`,
+        "你填写的改写要求",
+        "本次上下文编译明确选中的大纲、已确认设定与相关正文片段",
+      ]),
+      maximumProviderCalls: 1 as const,
+      automaticRetryCount: 0 as const,
+      estimatedMaximumCostMicros: estimate,
+      currency: estimate === null ? null : inspection.pricing.currency,
+      selectedCharacterCount: anchored.selectedText.length,
+    }),
+  });
+}
+
+async function assertSelectionRewriteInspectionCurrent(
+  runtime: DesktopRuntime,
+  request: InspectModelHubTextTaskInput,
+  expected: ModelHubTextTaskInspection,
+): Promise<void> {
+  const current = await inspectModelHubTextTask(runtime, request);
+  try {
+    assertModelHubInspectionAuthority(expected, current);
+  } catch {
+    throw selectionRewriteDisclosureChanged();
+  }
+}
+
+function assertSelectionRewriteDisclosure(
+  inspection: ModelHubTextTaskInspection,
+  selection: Parameters<typeof assertDisclosedSelection>[1],
+): void {
+  try {
+    assertDisclosedSelection(inspection, selection);
+  } catch {
+    throw selectionRewriteDisclosureChanged();
+  }
+}
+
+function selectionRewriteDisclosureChanged(): ModelCenterError {
+  return new ModelCenterError(
+    "SELECTION_REWRITE_DISCLOSURE_CHANGED",
+    "模型、发送范围、费用或选区内容已经改变；本次没有发送，请重新查看并确认。",
+    true,
+  );
 }
 
 async function compileRewriteContext(

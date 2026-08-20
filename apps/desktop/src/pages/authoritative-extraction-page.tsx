@@ -25,7 +25,11 @@ import {
   type AuthoritativeExtractionDashboardCandidate,
   type AuthoritativeExtractionDesktopPort,
 } from "../infrastructure/authoritative-extraction-runtime";
-import { normalizeUiError } from "../infrastructure/ui-error";
+import {
+  fitCandidateDecisionTextarea,
+  handleCandidateDecisionNavigation,
+} from "../components/candidate-decision-navigation";
+import { normalizeUiError, projectOrdinaryUiError } from "../infrastructure/ui-error";
 import "./authoritative-extraction-page.css";
 
 export interface AuthoritativeExtractionPageProps {
@@ -103,7 +107,9 @@ export function AuthoritativeExtractionPage({
   );
 
   useEffect(() => {
-    void Promise.resolve().then(() => load(true));
+    // Opening or restoring the page is read-only. Provider work starts only
+    // from the explicit scan action, so a restart cannot redispatch a job.
+    void Promise.resolve().then(() => load(false));
   }, [load]);
 
   const perform = useCallback(
@@ -230,7 +236,7 @@ export function AuthoritativeExtractionPage({
         <InlineAlert
           tone="error"
           title={normalizedError.title}
-          description={`${normalizedError.description}（${normalizedError.code}）`}
+          description={normalizedError.description}
           action={{ label: "重新加载", onClick: () => void load(false) }}
         />
       )}
@@ -453,7 +459,12 @@ function CandidateCard(props: CandidateCardProps) {
   }
 
   return (
-    <Card className="authoritative-extraction-candidate">
+    <Card
+      className={`authoritative-extraction-candidate${
+        pending || deferred ? " candidate-decision-surface" : ""
+      }`}
+      aria-label={`${candidate.key}的正式设定候选决策`}
+    >
       <CardHeader>
         <div className="authoritative-extraction-card-heading">
           <div>
@@ -473,7 +484,11 @@ function CandidateCard(props: CandidateCardProps) {
           </div>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent
+        tabIndex={pending || deferred ? 0 : undefined}
+        aria-label={`${candidate.key}的正式设定候选内容`}
+        onKeyDown={handleCandidateDecisionNavigation}
+      >
         <dl className="authoritative-extraction-provenance">
           <div>
             <dt>来源章节 / 版本</dt>
@@ -536,7 +551,9 @@ function CandidateCard(props: CandidateCardProps) {
             <label htmlFor={`modify-${identity}`}>修改后写入的正式结构化值（JSON）</label>
             <Textarea
               id={`modify-${identity}`}
+              ref={fitCandidateDecisionTextarea}
               value={props.modifiedJson}
+              onInput={(event) => fitCandidateDecisionTextarea(event.currentTarget)}
               onChange={(event) => props.onModifiedJsonChange(event.currentTarget.value)}
               rows={7}
               spellCheck={false}
@@ -545,10 +562,11 @@ function CandidateCard(props: CandidateCardProps) {
           </div>
         )}
       </CardContent>
-      <CardFooter className="authoritative-extraction-candidate-actions">
+      <CardFooter className="candidate-decision-actions">
         {pending && !props.editing && (
           <>
             <Button
+              size="lg"
               loading={props.busyKey === `accept:${identity}`}
               disabled={props.busyKey !== null}
               onClick={() =>
@@ -569,6 +587,7 @@ function CandidateCard(props: CandidateCardProps) {
               接受候选
             </Button>
             <Button
+              size="lg"
               variant="secondary"
               disabled={props.busyKey !== null}
               onClick={props.onStartModify}
@@ -576,6 +595,7 @@ function CandidateCard(props: CandidateCardProps) {
               修改后接受
             </Button>
             <Button
+              size="lg"
               variant="secondary"
               disabled={props.busyKey !== null}
               onClick={() =>
@@ -597,6 +617,7 @@ function CandidateCard(props: CandidateCardProps) {
               暂缓 24 小时
             </Button>
             <Button
+              size="lg"
               variant="danger"
               disabled={props.busyKey !== null}
               onClick={() =>
@@ -621,6 +642,7 @@ function CandidateCard(props: CandidateCardProps) {
         {pending && props.editing && (
           <>
             <Button
+              size="lg"
               loading={props.busyKey === `modify:${identity}`}
               disabled={props.busyKey !== null}
               onClick={runModify}
@@ -628,6 +650,7 @@ function CandidateCard(props: CandidateCardProps) {
               确认修改并接受
             </Button>
             <Button
+              size="lg"
               variant="secondary"
               disabled={props.busyKey !== null}
               onClick={props.onCancelModify}
@@ -638,6 +661,7 @@ function CandidateCard(props: CandidateCardProps) {
         )}
         {deferred && (
           <Button
+            size="lg"
             disabled={props.busyKey !== null}
             onClick={() =>
               void props.onPerform(
@@ -659,6 +683,7 @@ function CandidateCard(props: CandidateCardProps) {
         )}
         {canUndo && (
           <Button
+            size="lg"
             variant="secondary"
             loading={props.busyKey === `undo:${identity}`}
             disabled={props.busyKey !== null}
@@ -711,7 +736,9 @@ function JobCard({
         </div>
         <Badge tone={jobStateTone(job.state)}>{jobStateLabel(job.state)}</Badge>
         <span>尝试 {job.attemptCount}</span>
-        {job.failure !== null && <span>原因：{job.failure.code}</span>}
+        {job.failure !== null && (
+          <span>原因：{projectOrdinaryUiError({ code: job.failure.code }).description}</span>
+        )}
         {cancellable && (
           <Button size="sm" variant="ghost" loading={busy} disabled={disabled} onClick={onCancel}>
             取消

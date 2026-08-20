@@ -28,6 +28,8 @@ export interface NativePathTicketReceipt {
 type ExecutorLifecycle = "closed" | "opening" | "open";
 
 let executorLifecycle: ExecutorLifecycle = "closed";
+let activeExecutor: TauriSqliteExecutor | null = null;
+let openingExecutor: Promise<TauriSqliteExecutor> | null = null;
 
 class AsyncMutex {
   private tail: Promise<void> = Promise.resolve();
@@ -79,24 +81,40 @@ export class TauriSqliteExecutor implements SqlExecutor {
     if (path !== FIXED_DATABASE_URL) {
       throw new Error("InkShadow only opens its fixed local database.");
     }
-    if (executorLifecycle !== "closed") {
-      throw new Error("The InkShadow local database is already open.");
+    if (activeExecutor !== null && !activeExecutor.closed) {
+      return activeExecutor;
+    }
+    if (openingExecutor !== null) {
+      return openingExecutor;
     }
     executorLifecycle = "opening";
 
-    try {
+    const opening = (async () => {
       // The native open boundary applies and validates SQLx migrations before
-      // returning the only renderer-visible session token.
+      // returning the only renderer-visible session token. Native may adopt an
+      // existing connection after a WebView reload, but always rotates the
+      // renderer session token before this facade becomes callable.
       const receipt = await invoke<NativeOpenReceipt>("native_sqlite_open");
       if (!TOKEN_PATTERN.test(receipt.sessionToken)) {
         throw new Error("The native SQLite bridge returned an invalid session.");
       }
 
+      const executor = new TauriSqliteExecutor(receipt.sessionToken);
+      activeExecutor = executor;
       executorLifecycle = "open";
-      return new TauriSqliteExecutor(receipt.sessionToken);
+      return executor;
+    })();
+    openingExecutor = opening;
+
+    try {
+      return await opening;
     } catch (error: unknown) {
       executorLifecycle = "closed";
       throw error;
+    } finally {
+      if (openingExecutor === opening) {
+        openingExecutor = null;
+      }
     }
   }
 
@@ -163,6 +181,9 @@ export class TauriSqliteExecutor implements SqlExecutor {
         });
         this.closed = true;
         executorLifecycle = "closed";
+        if (activeExecutor === this) {
+          activeExecutor = null;
+        }
       } catch (error: unknown) {
         if (!isRemoteDispatchActiveError(error)) {
           // Preserve the established fail-closed behavior for uncertain native
@@ -170,6 +191,9 @@ export class TauriSqliteExecutor implements SqlExecutor {
           // proves the connection is still valid and must remain open.
           this.closed = true;
           executorLifecycle = "closed";
+          if (activeExecutor === this) {
+            activeExecutor = null;
+          }
         }
         throw error;
       }
@@ -337,6 +361,9 @@ export class TauriSqliteExecutor implements SqlExecutor {
     } finally {
       this.closed = true;
       executorLifecycle = "closed";
+      if (activeExecutor === this) {
+        activeExecutor = null;
+      }
     }
   }
 
@@ -373,6 +400,9 @@ export class TauriSqliteExecutor implements SqlExecutor {
       if (isInvalidatedNativeSession(error)) {
         this.closed = true;
         executorLifecycle = "closed";
+        if (activeExecutor === this) {
+          activeExecutor = null;
+        }
       }
       throw error;
     }

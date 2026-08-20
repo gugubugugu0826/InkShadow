@@ -31,7 +31,9 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   ref,
 ) {
   const unavailable = disabled || loading;
-  const resolvedSize = size ?? (variant === "primary" ? "lg" : "md");
+  const resolvedSize =
+    size ??
+    (variant === "primary" || variant === "ai-primary" || variant === "danger" ? "lg" : "md");
 
   return (
     <button

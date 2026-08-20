@@ -110,9 +110,13 @@ interface ResolvedImagePlan {
 export class ModelHubImageGenerationService {
   public constructor(private readonly dependencies: ModelHubImageGenerationDependencies) {}
 
-  public async inspect(): Promise<ModelHubImageGenerationInspection> {
+  public async inspect(prompt?: string): Promise<ModelHubImageGenerationInspection> {
     const plan = await resolvePlan(this.dependencies);
-    return createInspectionFromPlan(plan, this.dependencies.clock.now());
+    return createInspectionFromPlan(
+      plan,
+      this.dependencies.clock.now(),
+      prompt === undefined ? null : validatePrompt(prompt),
+    );
   }
 
   public chooseDestination(): Promise<NativeImageDestinationReceipt | null> {
@@ -137,11 +141,15 @@ export class ModelHubImageGenerationService {
       input.expectedConfirmationFingerprint,
     );
     const { route, target, usedFallback } = await resolvePlan(this.dependencies);
-    await assertImageConfirmationMatches(expectedConfirmationFingerprint, {
-      route,
-      target,
-      usedFallback,
-    });
+    await assertImageConfirmationMatches(
+      expectedConfirmationFingerprint,
+      {
+        route,
+        target,
+        usedFallback,
+      },
+      prompt,
+    );
     const expectedDispatchIdentity = modelHubFinalDispatchIdentity({
       route,
       connection: target.connection,
@@ -178,7 +186,14 @@ export class ModelHubImageGenerationService {
           costPrivacy: current.target.privacy,
         }),
       );
-      await assertImageConfirmationMatches(expectedConfirmationFingerprint, current);
+      await assertImageConfirmationMatches(expectedConfirmationFingerprint, current, prompt);
+      invocation = await this.dependencies.modelHub.markInvocationDispatched({
+        id: invocation.id,
+        dispatchedAt: this.dependencies.clock.now(),
+        expectedRevision: invocation.revision,
+      });
+      // The durable receipt is the restart boundary: once present, this exact
+      // image action must never be automatically sent a second time.
       dispatched = true;
       generated = await this.dependencies.imageGateway.generateToFile({
         destinationTicket: input.destination.ticket,
@@ -188,16 +203,20 @@ export class ModelHubImageGenerationService {
       });
     } catch (cause: unknown) {
       const error = dispatched ? normalizeDispatchedError(cause) : normalizePreDispatchError(cause);
+      const ambiguous = dispatched && isAmbiguousTransportFailure(cause, error);
+      const projected = ambiguous ? ambiguousImageResult() : error;
       await this.dependencies.modelHub
         .finishInvocation({
           id: invocation.id,
-          status: "failed",
-          errorCode: error.code,
-          errorSummary: "图片生成或本地保存失败；正文、设定和已有图片均未改变。",
+          status: ambiguous ? "timed_out" : "failed",
+          errorCode: projected.code,
+          errorSummary: ambiguous
+            ? "图片请求已发送，但连接在收到明确结果前中断；不会自动重发。"
+            : "图片生成或本地保存失败；正文、设定和已有图片均未改变。",
           expectedRevision: invocation.revision,
         })
         .catch(() => undefined);
-      throw error;
+      throw projected;
     }
 
     try {
@@ -397,6 +416,7 @@ async function resolveTarget(
 async function createInspectionFromPlan(
   plan: ResolvedImagePlan,
   now: string,
+  confirmedPrompt: string | null,
 ): Promise<ModelHubImageGenerationInspection> {
   const { target } = plan;
   return Object.freeze({
@@ -432,15 +452,16 @@ async function createInspectionFromPlan(
     maximumPromptCharacters: MAXIMUM_PROMPT_CHARACTERS,
     outputFormat: "png",
     usedFallback: plan.usedFallback,
-    confirmationFingerprint: await imageConfirmationFingerprint(plan),
+    confirmationFingerprint: await imageConfirmationFingerprint(plan, confirmedPrompt),
   });
 }
 
 async function assertImageConfirmationMatches(
   expected: string,
   current: ResolvedImagePlan,
+  confirmedPrompt: string,
 ): Promise<void> {
-  if ((await imageConfirmationFingerprint(current)) !== expected) {
+  if ((await imageConfirmationFingerprint(current, confirmedPrompt)) !== expected) {
     throw executionError(
       "MODEL_HUB_IMAGE_CONFIRMATION_STALE",
       "图片模型、连接、凭据、数据去向、隐私或费用规则已发生变化。请重新检查并再次确认后生成。",
@@ -449,7 +470,10 @@ async function assertImageConfirmationMatches(
   }
 }
 
-async function imageConfirmationFingerprint(plan: ResolvedImagePlan): Promise<string> {
+async function imageConfirmationFingerprint(
+  plan: ResolvedImagePlan,
+  confirmedPrompt: string | null,
+): Promise<string> {
   const { route, target } = plan;
   const canonical = JSON.stringify({
     version: 1,
@@ -485,6 +509,7 @@ async function imageConfirmationFingerprint(plan: ResolvedImagePlan): Promise<st
       })),
     outputFormat: "png",
     pricingNotice: "per_image_price_not_modeled",
+    confirmedPrompt,
   });
   const digest = await globalThis.crypto.subtle.digest(
     "SHA-256",
@@ -573,6 +598,32 @@ function normalizeDispatchedError(cause: unknown): ModelHubExecutionError {
     true,
     true,
   );
+}
+
+function isAmbiguousTransportFailure(cause: unknown, normalized: ModelHubExecutionError): boolean {
+  const diagnostics = isRecord(cause) && isRecord(cause.diagnostics) ? cause.diagnostics : null;
+  const httpStatus =
+    diagnostics !== null &&
+    typeof diagnostics.httpStatus === "number" &&
+    Number.isSafeInteger(diagnostics.httpStatus)
+      ? diagnostics.httpStatus
+      : null;
+  return (
+    httpStatus === null && /(?:NETWORK|TIMEOUT|DNS|TLS|TRANSPORT|DISCONNECT)/u.test(normalized.code)
+  );
+}
+
+function ambiguousImageResult(): ModelHubExecutionError {
+  return new ModelHubExecutionError(
+    "PROVIDER_RESULT_AMBIGUOUS",
+    "图片请求已发送，但连接在收到明确结果前中断。结果可能已由服务端生成；为避免重复费用，本次不会自动重发。",
+    false,
+    true,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function executionError(code: string, message: string, retryable = false): ModelHubExecutionError {

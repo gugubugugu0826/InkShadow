@@ -1,13 +1,8 @@
 import { AiCandidate, AppError, err, ok, type Result, type UuidV7 } from "@inkshadow/domain";
 
-import { ModelCenterError, type ModelProfile } from "./model-center-store";
+import { ModelCenterError } from "./model-center-store";
 import { executeModelHubTextTask, ModelHubExecutionError } from "./model-hub-execution-service";
-import { isLoopbackModelBaseUrl } from "./model-hub-provider-registry";
-import {
-  resolveFinalModelProfileGatewayConfig,
-  resolveModelProfileGatewayConfig,
-  type ModelProfileGatewayConfigResolution,
-} from "./model-profile-gateway-config";
+import { SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY } from "./model-execution-policy";
 import {
   ProjectContextPrivacyError,
   projectContextRequiredDataDestination,
@@ -43,7 +38,9 @@ export interface ImportRewriteCandidateInput {
 }
 
 /**
- * Calls a configured native model and persists its output as an isolated candidate.
+ * Calls the explicitly governed Model Hub rewrite route and persists its output
+ * as an isolated candidate. Legacy profile/gateway fallback is intentionally
+ * forbidden so a missing route always stops before Provider dispatch.
  * It never writes generated text to the stable chapter.
  */
 export async function createImportRewriteCandidate(
@@ -94,121 +91,69 @@ export async function createImportRewriteCandidate(
     );
   }
 
-  let generated: NativeModelGenerationResult | null = null;
-  let selectedProviderId: string | null = null;
-  let selectedModelId: string | null = null;
-  let modelHubRouteMissing = runtime.mode !== "tauri" || !runtime.modelGateway.available;
-
-  if (!modelHubRouteMissing) {
-    try {
-      const modelHubResult = await executeModelHubTextTask(runtime, {
-        dispatchScope: projectContextDispatchScope(projectPrivacy),
-        task: "rewrite",
-        messages,
-        maximumOutputTokens: input.mode === "trial" ? 1_500 : 8_000,
-        temperature: 0.65,
-        generationId: requestId,
-        ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
-        onBeforeDispatch: async ({ connectionId, modelId, localOnlyEligible }) => {
-          await input.onBeforeDispatch?.({
-            requestId,
-            providerId: connectionId,
-            modelId,
-          });
-          await assertLatestRewriteSource(runtime, chapter);
-          try {
-            await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
-            runtime.projectContextPrivacy.assertRouteEligible(
-              projectPrivacy,
-              localOnlyEligible === true,
-            );
-          } catch (cause: unknown) {
-            if (cause instanceof ProjectContextPrivacyError) {
-              throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
-            }
-            throw cause;
-          }
-        },
-        onFinalBeforeProviderDispatch: async ({ localOnlyEligible }) => {
-          await assertLatestRewriteSource(runtime, chapter);
-          try {
-            await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
-            runtime.projectContextPrivacy.assertRouteEligible(
-              projectPrivacy,
-              localOnlyEligible === true,
-            );
-          } catch (cause: unknown) {
-            if (cause instanceof ProjectContextPrivacyError) {
-              throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
-            }
-            throw cause;
-          }
-        },
-        ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
-      });
-      generated = Object.freeze({ text: modelHubResult.text, usage: modelHubResult.usage });
-      selectedProviderId = modelHubResult.connectionId;
-      selectedModelId = modelHubResult.modelId;
-    } catch (cause: unknown) {
-      modelHubRouteMissing =
-        cause instanceof ModelHubExecutionError && cause.code === "MODEL_HUB_ROUTE_NOT_CONFIGURED";
-      if (!modelHubRouteMissing) {
-        throw normalizeProviderError(cause);
-      }
-    }
-  }
-
-  if (modelHubRouteMissing) {
-    const profile = await resolveRewriteProfile(runtime);
-    const resolvedEndpoint = await assertProfileReady(runtime, profile);
-    selectedProviderId = profile.providerId;
-    selectedModelId = requireSelectedModel(profile);
-    try {
-      runtime.projectContextPrivacy.assertRouteEligible(
-        projectPrivacy,
-        isVerifiedLocalEndpoint(resolvedEndpoint),
-      );
-      await input.onBeforeDispatch?.({
-        requestId,
-        providerId: selectedProviderId,
-        modelId: selectedModelId,
-      });
-      await assertLatestRewriteSource(runtime, chapter);
-      await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
-      runtime.projectContextPrivacy.assertRouteEligible(
-        projectPrivacy,
-        isVerifiedLocalEndpoint(resolvedEndpoint),
-      );
-      const current = await resolveFinalModelProfileGatewayConfig(
-        {
-          modelCenter: runtime.modelCenter,
-          modelHub: runtime.modelHub,
-          credentials: runtime.credentials,
-        },
-        profile,
-        resolvedEndpoint,
-      );
-      generated = await runtime.modelGateway.generate({
-        dispatchScope: projectContextDispatchScope(projectPrivacy),
-        generationId: requestId,
-        config: current.resolution.config,
-        model: current.profile.selectedModel ?? selectedModelId,
-        messages,
-        maxOutputTokens: input.mode === "trial" ? 1_500 : 8_000,
-        temperature: 0.65,
-        ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
-      });
-    } catch (cause: unknown) {
-      throw normalizeProviderError(cause);
-    }
-  }
-  if (generated === null || selectedProviderId === null || selectedModelId === null) {
+  if (runtime.mode !== "tauri" || !runtime.modelGateway.available) {
     throw new ModelCenterError(
-      "MODEL_GENERATION_FAILED",
-      "模型调用没有返回可保存的结果。原文和已有 AI 建议版本均未改变。",
-      true,
+      "MODEL_HUB_ROUTE_NOT_CONFIGURED",
+      "当前没有可由模型中心验证的改写分工。请求未发送，请先配置模型中心路由。",
     );
   }
+  let modelHubResult;
+  try {
+    modelHubResult = await executeModelHubTextTask(runtime, {
+      dispatchScope: projectContextDispatchScope(projectPrivacy),
+      task: "rewrite",
+      messages,
+      maximumOutputTokens: input.mode === "trial" ? 1_500 : 8_000,
+      temperature: 0.65,
+      generationId: requestId,
+      executionPolicy: SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
+      ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
+      onBeforeDispatch: async ({ connectionId, modelId, localOnlyEligible }) => {
+        await input.onBeforeDispatch?.({
+          requestId,
+          providerId: connectionId,
+          modelId,
+        });
+        await assertLatestRewriteSource(runtime, chapter);
+        try {
+          await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
+          runtime.projectContextPrivacy.assertRouteEligible(
+            projectPrivacy,
+            localOnlyEligible === true,
+          );
+        } catch (cause: unknown) {
+          if (cause instanceof ProjectContextPrivacyError) {
+            throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
+          }
+          throw cause;
+        }
+      },
+      onFinalBeforeProviderDispatch: async ({ localOnlyEligible }) => {
+        await assertLatestRewriteSource(runtime, chapter);
+        try {
+          await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
+          runtime.projectContextPrivacy.assertRouteEligible(
+            projectPrivacy,
+            localOnlyEligible === true,
+          );
+        } catch (cause: unknown) {
+          if (cause instanceof ProjectContextPrivacyError) {
+            throw new ModelHubExecutionError(cause.code, cause.message, cause.retryable);
+          }
+          throw cause;
+        }
+      },
+      ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
+    });
+  } catch (cause: unknown) {
+    throw normalizeProviderError(cause);
+  }
+  const generated: NativeModelGenerationResult = Object.freeze({
+    text: modelHubResult.text,
+    usage: modelHubResult.usage,
+  });
+  const selectedProviderId = modelHubResult.connectionId;
+  const selectedModelId = modelHubResult.modelId;
   const rewrittenExcerpt = normalizeGeneratedText(generated.text);
   if (
     input.mode === "chapter" &&
@@ -278,10 +223,6 @@ async function assertLatestRewriteSource(
   }
 }
 
-function isVerifiedLocalEndpoint(resolved: ModelProfileGatewayConfigResolution): boolean {
-  return resolved.config.provider === "ollama" && isLoopbackModelBaseUrl(resolved.config.baseUrl);
-}
-
 async function persistCandidate(
   runtime: DesktopRuntime,
   input: Readonly<{
@@ -322,81 +263,6 @@ async function persistCandidate(
     throw saved.error;
   }
   return ready.value;
-}
-
-async function resolveRewriteProfile(runtime: DesktopRuntime): Promise<ModelProfile> {
-  if (runtime.mode !== "tauri" || !runtime.modelGateway.available) {
-    throw new ModelCenterError(
-      "MODEL_NOT_CONNECTED",
-      "尚未连接可用于改写的模型。请先在设置中连接供应商并选择模型，再返回继续；墨影不会用本地占位文字冒充 AI 结果。",
-    );
-  }
-  const profiles = await runtime.modelCenter.listProfiles();
-  const [highQuality, fast] = await Promise.all([
-    runtime.modelRouting.findRoute("high_quality").catch(() => null),
-    runtime.modelRouting.findRoute("fast").catch(() => null),
-  ]);
-  for (const route of [highQuality, fast]) {
-    if (route === null) {
-      continue;
-    }
-    for (const reference of [
-      { providerId: route.primaryProviderId, modelId: route.primaryModelId },
-      route.fallbackProviderId === null || route.fallbackModelId === null
-        ? null
-        : { providerId: route.fallbackProviderId, modelId: route.fallbackModelId },
-    ]) {
-      if (reference === null) {
-        continue;
-      }
-      const matched = profiles.find(
-        ({ providerId, selectedModel }) =>
-          providerId === reference.providerId && selectedModel === reference.modelId,
-      );
-      if (matched !== undefined) {
-        return matched;
-      }
-    }
-  }
-  const selected = profiles.find(({ selectedModel }) => selectedModel !== null);
-  if (selected === undefined) {
-    throw new ModelCenterError(
-      "MODEL_NOT_CONNECTED",
-      "尚未连接可用于改写的模型。请先在设置中连接供应商并选择模型，再返回继续；墨影不会用本地占位文字冒充 AI 结果。",
-    );
-  }
-  return selected;
-}
-
-async function assertProfileReady(
-  runtime: DesktopRuntime,
-  profile: ModelProfile,
-): Promise<ModelProfileGatewayConfigResolution> {
-  const model = requireSelectedModel(profile);
-  const resolvedEndpoint = await resolveModelProfileGatewayConfig(
-    { modelHub: runtime.modelHub, credentials: runtime.credentials },
-    profile,
-  );
-  if (resolvedEndpoint === null) {
-    throw new ModelCenterError(
-      "MODEL_CREDENTIAL_MISSING",
-      "供应商连接尚未保存可用 API Key。请在设置中补充凭据并测试连接。",
-    );
-  }
-  let listed;
-  try {
-    listed = await runtime.modelGateway.listModels(resolvedEndpoint.config);
-  } catch (cause: unknown) {
-    throw normalizeProviderError(cause);
-  }
-  if (!listed.models.some(({ id }) => id === model)) {
-    throw new ModelCenterError(
-      "SELECTED_MODEL_UNAVAILABLE",
-      "已选择的模型当前不可用。请在设置中重新同步模型并选择可用模型。",
-      true,
-    );
-  }
-  return resolvedEndpoint;
 }
 
 function buildRewriteMessages(
@@ -472,16 +338,6 @@ function normalizeGeneratedText(value: string): string {
     );
   }
   return normalized;
-}
-
-function requireSelectedModel(profile: ModelProfile): string {
-  if (profile.selectedModel === null || profile.selectedModel.trim().length === 0) {
-    throw new ModelCenterError(
-      "MODEL_NOT_CONNECTED",
-      "供应商尚未选择可用于改写的模型。请在设置中完成模型选择。",
-    );
-  }
-  return profile.selectedModel;
 }
 
 function normalizeProviderError(cause: unknown): ModelCenterError {

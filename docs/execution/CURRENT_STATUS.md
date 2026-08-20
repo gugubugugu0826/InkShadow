@@ -1,25 +1,68 @@
 # InkShadow 当前执行状态
 
-> 更新日期：2026-08-14  
-> 当前源码目标版本：`0.2.4`；最近已发布工程预览版本：`0.2.3`  
-> 工程状态：`v0.2.4` 安全修复候选已完成源码自动化；唯一干净候选、PR/main GitHub Actions、标签与公开附件仍须逐项生成和复核  
-> 发布结论：**`v0.2.3` 已发布为公开、未签名的 GitHub Pre-release；标签与三个附件绑定提交 `3abdcfeb327567c632e440d55d11f0af6f4911d2`，不得移动或静默替换**  
-> 外部边界：`v0.2.3` 发布包已有一次受控 Windows Tauri + DeepSeek 历史反馈，但 `v0.2.4` 候选的真实 Provider、重新打包 Tauri WebView + Keyring、系统 200% DPI、另一台电脑安装、192 次付费 A/B 与 2,496 项人工评分仍为 `NOT_RUN` / `NOT_RETESTED`
+> 更新日期：2026-08-20  
+> 当前应用清单版本：`0.2.5`；最新已发布 `v0.2.4` 标签指向基线提交 `b74d36ef3342db6813d1d43771bc82c0ed2aa1fb`  
+> 工程状态：`v0.2.5` Pre-release 候选正在收口；尚无唯一提交、安装包或发布，最终门禁为 `PENDING_FINAL_RUN`  
+> 历史边界：远端只读审计已确认 `v0.2.4` 于 2026-08-14 公开为 Pre-release；`v0.2.3` 隐式云调用安全公告继续保留  
+> 外部边界：当前工作树的 Provider live、Windows Tauri/Wry + Credential Manager、系统 200% DPI 和另一台电脑安装均为 `NOT_RUN / NOT_RETESTED`
 
-## 2026-08-13 v0.2.3 真实 Windows 反馈与 v0.2.4 安全修复候选
+## 2026-08-20 v0.2.5 Pre-release 候选
+
+当前 HEAD 仍是已发布 `v0.2.4` 标签提交，工作树已统一为 `0.2.5` 版本但尚未提交。R12 四份报告来自
+另一个工作区 `E:\InkShadow` 的提交 `6abd16c`；其中真实 DeepSeek、Tauri UI、静态截图、测试
+数量、migration 与 bundle 数字均为历史证据，不是当前工作树的通过结果。
+
+| 范围                          | 当前结论                           | 当前边界                                                                                                                                                                                                                                                                                            |
+| ----------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 直接/专业模式                 | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 新安装直接、升级专业、CAS 偏好、一次性本地整理授权与可撤销已接线；两种模式的 AI 结果都保持隔离 Candidate，不自动接受正文                                                                                                                                                                            |
+| Candidate 与版本安全          | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 作者明确选择“使用这版”后才经正文替换 fence 接受 Candidate，创建新不可变版本；接受/拒绝/恢复默认为 0 Provider；Candidate 决策聚焦 7 files / 59 tests PASS；最终 Chromium 与真实 Tauri/Provider 对账未跑                                                                                              |
+| 本地设定整理                  | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 候选被明确接受后，只对新增 delta 做确定性本地整理，界面只提示“已整理 N 条”；重大设定仍拦截确认；授权可撤销；整理为 0 Provider                                                                                                                                                                       |
+| StoryMemory / Narrative / FTS | `CURRENT_IMPLEMENTED_NOT_RETESTED` | L0–L3/EvidenceRef、Narrative State 只读/重建、MemoryRecord 明确提升、最多 4×80 的本地查询、多粒度范围化 FTS 和 content-free trace 已接线；不宣称所有可选 vector/graph/rerank 都统一完成                                                                                                             |
+| Production Agent / TaskGraph  | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 有界调查为 5 个只读本地步骤 + 1 invocation/0 retry；调查与修复 Candidate 使用两次独立授权，完整 inspection/capability/connection/privacy/context/messages 指纹在确认后和 dispatch 前重检，任一漂移 0 Provider；聚焦 2 files / 36 tests PASS；不是通用自治 Agent                                     |
+| Provider 动作披露             | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 可达面为编辑器续写/选区改写、规划、调查/修复、图片、本地评测、快捷连接与三类 probe；续写 31/31、开书 2/79、Settings 3/69 与最终 55/55、图片/编辑器 3/46、调查/修复 2/36 已通过。固定 probe 完成点击冻结/权威重检，豆包有效模型统一；dispatch surface 无剩余 P0/P1。冻结全量与真实 Provider 仍待验收 |
+| 普通 UI 标识脱敏              | `CURRENT_IMPLEMENTED_NOT_RETESTED` | Usage 缺失连接不回退 raw provider ID；通知 metadata 白名单阻止 project/chapter/version/connection/debug ID 显示但保留导航；检查页使用可读章节/剧情线/场景名和安全占位；未知任务进度码安全降级。聚焦 4 files / 22 tests 与 Desktop typecheck PASS；冻结全路由 DOM 仍待                               |
+| 四格式图片导出                | `CURRENT_IMPLEMENTED_NOT_RETESTED` | Markdown data URI、DOCX/EPUB 真实 media+关系、PDF 本地 Blob/drawImage；只接受安全内联 PNG/基线 JPEG 或显式内存资产，不读磁盘 path/网络；四个外部应用实际打开仍 `BLOCKED_EXTERNAL`                                                                                                                   |
+| 导出保存回执                  | `CURRENT_IMPLEMENTED_NOT_RETESTED` | Tauri 一次性 ticket、目标身份/竞态校验、原子安装及回读 size+SHA；成功回执含 format/fileName/绝对 path/bytes/status，取消 0 写入，失败不泄露 path；浏览器不冒充路径已验证                                                                                                                            |
+| 长篇 production benchmark     | `FINAL_BENCHMARK_PENDING`          | 已接线真实临时 SQLite/当前 FTS/StoryMemory/一致性调查 production path 的 5k/20k/50k/200k、≥30 样本 runner；只接受冻结源 commit 绑定，原始 JSON 和指标必须在唯一提交后实跑补录                                                                                                                       |
+| SQLite reload                 | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 原生连接复用、session token 轮换和孤立事务回滚已有代码/测试；真实 WebView reload 未复测                                                                                                                                                                                                             |
+| Data `0066`–`0070`            | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 当前分项 70 files / 432 tests PASS；70 Data + 3 story-core = Tauri internal `73`；`0070` 为可重建搜索投影追加 chunk kind、父子定位、权威/隐私/当前性及 branch/POV/story-time 范围；冻结候选仍须重跑                                                                                                 |
+| TencentDB 学习与取舍          | `RESEARCH_VERIFIED`                | 已固定上游 commit 完成官方源码审计和适配矩阵；只借鉴记忆分层、检索评测和任务可观测性，不引入 sidecar、第二数据库/Key/路由/队列/事实源或隐式后台模型                                                                                                                                                 |
+| 视觉证据                      | `CURRENT_IMPLEMENTED_NOT_RETESTED` | dirty HEAD 静态 Chromium manifest 32/32 个不同 PNG；Tauri=`not_run`、系统 DPI=`not_measured`                                                                                                                                                                                                        |
+| Production build              | `PENDING_FINAL_RUN`                | 当前总预算仍为 7,340,032 bytes；中间 build 不是冻结源证据，最终入口/CSS/最大 async 字节仍为 `FINAL_BUILD_PENDING`。若冻结 source graph 证明确有必要，可按精确增量、理由、余量和单文件守卫做有界调整，不得无节制放宽                                                                                 |
+| Provider live                 | `BLOCKED_EXTERNAL`                 | 本轮不读取 Key、不发真实调用；只能由凭据所有者按第二阶段 Prompt 执行                                                                                                                                                                                                                                |
+
+权威映射见
+[`../product-rebuild/12-NEXT-UNRELEASED-WRITING-MEMORY-AGENT-REALITY.md`](../product-rebuild/12-NEXT-UNRELEASED-WRITING-MEMORY-AGENT-REALITY.md)，
+当前架构与延期边界见
+[`../product-rebuild/13-LOCAL-AGENT-RAG-ARCHITECTURE.md`](../product-rebuild/13-LOCAL-AGENT-RAG-ARCHITECTURE.md)，
+界面合同见
+[`../front-end/WRITING_EXPERIENCE_AND_CONSISTENCY.md`](../front-end/WRITING_EXPERIENCE_AND_CONSISTENCY.md)，
+独立真实测试说明见
+[`NEXT-UNRELEASED-WINDOWS-TAURI-PHASE-2-PROMPT.md`](NEXT-UNRELEASED-WINDOWS-TAURI-PHASE-2-PROMPT.md)。
+
+当前非冻结工作树先后完成 17 个共享包、Cloud/Web、20/21 workspace typecheck、秘密/边界/许可证/
+发布配置及 Rust fmt + clippy `-D warnings` + 169 passed / 1 explicit local Ollama ignored；最新 Provider
+收口后 Desktop typecheck 也已单独复跑 PASS。逐包数字与精确命令见
+[`TEST_RESULTS.md`](TEST_RESULTS.md)。Candidate 7 files / 59、开书 2 files / 79 也已权威复跑；这些仍
+只是各自执行时的 `CURRENT_RUN`，完整 Desktop 测试、最新全 workspace typecheck、production
+build/E2E、production benchmark、bundle、Playwright 与
+`release:check` 仍须在唯一冻结候选上统一重跑，不能把当前分项合并成 Release PASS。
+
+## 历史：2026-08-13 v0.2.3 真实反馈与 2026-08-14 v0.2.4 已发布安全修复版
 
 `v0.2.3` 历史安装版（提交
 `3abdcfeb327567c632e440d55d11f0af6f4911d2`）在 Windows 11、Tauri/Wry、真实
 DeepSeek `deepseek-v4-flash` 下进行了受控用户测试。证据包含 20 张产品截图、
 脱敏诊断和调用账本；发现 Candidate 接受后的隐式云调用后，测试按安全停止条件终止。
-因此它是有效的历史缺陷证据，但不是当前 `v0.2.4` 候选源码的复测结果。
+因此它是有效的历史缺陷证据，但不是 `v0.2.4` 已发布修复源码的复测结果。
 
-当前 `v0.2.4` 候选源码结论为 **`CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`**。自动化只使用严格
-fake/mock gateway 和真实临时 SQLite，未读取 API Key，未产生付费 Provider 调用。必须按
+`v0.2.4` 已公开为 Pre-release；其源码结论为
+**`RELEASED_PREVIEW / CODE_FIXED_AUTOMATION / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN`**。
+自动化只使用严格 fake/mock gateway 和真实临时 SQLite，未读取 API Key，未产生付费 Provider 调用。必须按
 [二阶段真实 Tauri 复测 Prompt](RELEASE_CHECKLIST.md#v024-修复版第二阶段真实-windows-tauri-测试-prompt)
 在新安装包上复测后，才能把以下“当前代码”提升为真实 Tauri 结论。
 
-| 优先级 | v0.2.3 历史现象                                                               | v0.2.4 候选源码事实                                                                                                                                                                                                                                                                                                                                                  | 当前证据边界                                                                                                                  |
+| 优先级 | v0.2.3 历史现象                                                               | v0.2.4 已发布源码事实                                                                                                                                                                                                                                                                                                                                                | 当前证据边界                                                                                                                  |
 | ------ | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | P0     | 接受 Candidate 后又触发 `long_memory_compression`，向 DeepSeek 发送已接受正文 | Candidate 接受只事务性保存正文、新不可变版本和纯本地可重建状态；即使旧队列元数据要求摘要/故事状态，重启也不会派发模型。接受/保存/恢复后的持久后台管线全部限于本地；云摘要和故事识别在独立授权、派发边界、结果不明确与幂等保护完整前保持不可派发                                                                                                                      | fake gateway 断言接受为 0 调用；SQLite 覆盖正文/新版本/旧版本/重启与派生失败不回滚。真实 Provider 与 Tauri 重启仍 `NOT_RUN`   |
 | P1     | 删除 DeepSeek 凭据后留下不可恢复的停用连接，同供应商再配置发生 ID 冲突        | 删除凭据、暂时停用、重新绑定和退役拆成明确语义；凭据删除后可对原 ID 做 CAS 重绑，退役历史仍可审计但不进入 ready/推荐/普通选择，同供应商新连接自动取安全新 ID                                                                                                                                                                                                         | fake/store/UI/SQLite 回归覆盖删除→重启→重绑、退役→新建、历史调用可审计和精确 active 路由；Windows Credential Manager 仍待复测 |
@@ -28,12 +71,15 @@ fake/mock gateway 和真实临时 SQLite，未读取 API Key，未产生付费 P
 | P1     | Windows 200% 等效缩放下正文裁切、操作不可达且多层滚动                         | 响应式使用有效 CSS viewport，窄屏把章节与 AI 助手收入可关闭 Drawer，保持正文为视觉中心、主操作 44px、Escape/焦点返回和页面无水平溢出                                                                                                                                                                                                                                 | 1440/1280/1024/800、200% zoom 与 DPR2 的 production Chromium 证据；真实 Windows 系统 200% DPI 严格为 `NOT_RETESTED`           |
 | P2     | 健康状态矛盾、引导错误归因、底层 cause 被隐藏、助手操作同名和账本状态不清     | 已统一权威 readiness，开书先选可用方案再生成有界缺口问题，任务中心显示脱敏 `causeCode`，助手动作改为“生成续写建议”，账本区分失败/结果不明确/未发送并关联可证明的作品和章节                                                                                                                                                                                           | 属于当前代码与 Chromium/fake/SQLite 结论；关键操作视觉、开书与 Shell 过渡、版本历史辨识度仍需后续产品验收                     |
 
-当前 `v0.2.4` 候选源码的最新全量自动化为 Desktop 249 files / 1,855 passed / 1 skipped /
+`v0.2.4` 已发布源码的最终全量自动化为 Desktop 249 files / 1,855 passed / 1 skipped /
 0 failed，Data 421 passed / 0 failed，Rust 160 passed / 1 ignored / 0 failed，production Chromium
 12/12。最终 production build 为 53 files / 6,739,800 bytes，其中门禁 payload 为
 6,739,000 / 7,340,032 bytes；完整 `pnpm.cmd release:check` 已以退出码 0 通过（924.9 秒，
-3,132 passed / 65 skipped / 0 failed）。`v0.2.4` 唯一干净候选、打包与发布仍保持
-`NOT_RUN / NOT_RELEASED`。精确证据见 [`TEST_RESULTS.md`](TEST_RESULTS.md)。
+3,132 passed / 65 skipped / 0 failed）。唯一来源提交与 tag peel 均为
+`b74d36ef3342db6813d1d43771bc82c0ed2aa1fb`；公开 Release 为
+<https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.4>，installer 为 7,482,560 bytes。
+完整资产哈希见 [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md)，自动化证据见
+[`TEST_RESULTS.md`](TEST_RESULTS.md)。
 
 自动化命令与当前 bundle 证据见 [`TEST_RESULTS.md`](TEST_RESULTS.md)。在一台新的 Windows
 机器完成安装、凭据、SQLite 升级、系统 DPI、备份恢复和故障注入前，不得写成
@@ -77,7 +123,7 @@ fake/mock gateway 和真实临时 SQLite，未读取 API Key，未产生付费 P
 | 维护与恢复                | `PASS`；当前付费迁移 + maintenance 为 2 files / 65 tests，其中恢复攻击组 49/49；166 张表进入恢复合同。恢复会重放固定题集/矩阵、run/cell/attempt/observation、Candidate/trace/link/invocation、Skill/派发权威 snapshot、13 分、盲评 receipt 与最终 evaluator/hash；任一 canonical hash、精确成本、能力或结算收据篡改都会整事务拒绝，内容无关的原生项目派发 lease 不恢复                                                                                                                                                                                                            |
 | 设置页聚焦 ESLint         | `PASS`；设置页实现与测试文件的零警告 ESLint 检查通过                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | 本轮新增后的全量 release  | `PASS`；`pnpm.cmd release:check` 退出码 0，用时 1,459.6 秒；生产构建、格式、秘密扫描、137 项运行时许可证、20 包边界、17 项发布配置、全部工作区类型检查、ESLint 与 20 个工作区测试范围通过。测试合计 3,035 passed / 65 skipped / 0 failed                                                                                                                                                                                                                                                                                                                                          |
-| v0.2.3 发布构建体积       | `PASS`；2,240 modules；Vite payload `6,651,786 / 6,717,440` bytes，余量 65,654；普通 runtime `495,618 / 512,000`，付费异步 factory `287,543 / 512,000`。这是已发布提交的历史快照，不是 v0.2.4 候选的 7 MiB 当前门禁；当前字节见 [`TEST_RESULTS.md`](TEST_RESULTS.md)                                                                                                                                                                                                                                                                                                              |
+| v0.2.3 发布构建体积       | `PASS`；2,240 modules；Vite payload `6,651,786 / 6,717,440` bytes，余量 65,654；普通 runtime `495,618 / 512,000`，付费异步 factory `287,543 / 512,000`。这是 v0.2.3 已发布提交的历史快照，不是 v0.2.4 已发布源码采用的 7 MiB 门禁；对应字节见 [`TEST_RESULTS.md`](TEST_RESULTS.md)                                                                                                                                                                                                                                                                                                |
 | Rust 原生严格门禁         | `PASS`；`pnpm.cmd check:rust` 完成 format、全 target `clippy -D warnings` 和完整测试；160 passed / 1 ignored / 0 failed                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | production Chromium E2E   | `PASS`；`pnpm.cmd test:e2e` 构建 production `dist` 后 11/11 通过，覆盖 1440/1280/1024/800、200% zoom、DPR2、本地生命周期、恢复/Candidate、导入导出与同步关闭；不等于 Tauri WebView                                                                                                                                                                                                                                                                                                                                                                                                |
 | 真实 Tauri 冷启动         | `NOT_RUN`；Rust 已验证迁移 62→63→64→65→66→67 与重启，但发布时尚未在真实 WebView 冷启动后复核 hydration、续写恢复、Skill binding/snapshot、专家评测恢复与项目 lease                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -163,7 +209,7 @@ provider 调用，再由作者对 192 个匿名输出分别填写 13 项分数�
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Phase 1            | 三入口、可恢复的一句话开书、创建前摘要、空正文+AI 建议版本、导入试改/逐章处理、四区工作区、作品库状态和示例作品已接入；P08–P10 原位连接、成功分流和失败恢复已闭环                                                                                                                                                                                                                                                                                        |
 | 正文安全链（历史） | 这是 2026-08-08 快照当时的实现：接受 AI 建议、接受导入改写或追加式恢复历史版本后，以稳定版本 ID 幂等登记搜索、摘要、故事变化和故事关联任务；派生失败不回滚正文。该历史行为不能作为当前安全合同                                                                                                                                                                                                                                                           |
-| 当前安全覆盖       | v0.2.4 候选源码已把接受、导入、恢复、手动保存、worker 重试和历史回填统一限制为本地-only：只补搜索与因果/故事关联，摘要/故事状态标记在登记和恢复时强制关闭，旧 true/缺省元数据先清洗，Provider 调用上限为 0；“重建摘要/重新识别最近一章”等直接云按钮保持停用，等待独立授权、精确披露、派发边界、取消/结果不明确与幂等恢复合同                                                                                                                             |
+| 当前安全覆盖       | v0.2.4 已发布源码（并由 v0.2.5 候选继承）已把接受、导入、恢复、手动保存、worker 重试和历史回填统一限制为本地-only：只补搜索与因果/故事关联，摘要/故事状态标记在登记和恢复时强制关闭，旧 true/缺省元数据先清洗，Provider 调用上限为 0；“重建摘要/重新识别最近一章”等直接云按钮保持停用，等待独立授权、精确披露、派发边界、取消/结果不明确与幂等恢复合同                                                                                                   |
 | 后台恢复           | Tauri worker 启动即检查、每 15 秒补跑，排队任务有 30 秒前台宽限；任务中心对合法失败提供立即重试；失败阶段掩码让重试跳过已成功阶段；历史回填规则 v2 兼容旧版本任务，开关后来开启时只补缺失阶段，终态失败按阶段代数恢复；专用到期查询按最早到期分页，常规单轮扫描 1,000/处理 200，历史回填单轮最多 5 条，不受任务中心展示窗口限制                                                                                                                          |
 | 创建资料           | 三条创建旅程共享 ProjectSeed；只有作者确认且非空字段进入真实续写上下文，未确认 AI 推测被排除                                                                                                                                                                                                                                                                                                                                                             |
 | 数据与隐私         | Data migration 到 `0045`、Tauri migration 到 `48`；应用相关持久表共 136 张，其中恢复契约只复制 135 张权威表并清空 4 个派生根表，内容无关的远程派发租约表不恢复；`0042`–`0044` 分别完成检查快照级联、StoryFact 人工别名消歧和规划逐项采纳意图，`0045` 为项目上下文远程 generation / embedding / rerank 增加完整原生网络生命周期租约与派发前原子指纹复核；租约期间只阻止新增或转入 `local_only` 及项目删除，普通正文和自动保存仍可写；默认导出排除私密章节 |

@@ -16,7 +16,6 @@ export function ContextSourcesPage() {
         <ErrorState
           title="无法读取本次参考记录"
           description="项目地址无效。请返回作品库，重新打开这部作品。"
-          errorCode={parsedProjectId.error.code}
           primaryAction={{ label: "返回作品库", onClick: () => history.back() }}
         />
       </div>

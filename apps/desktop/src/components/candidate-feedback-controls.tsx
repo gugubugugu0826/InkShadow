@@ -6,6 +6,7 @@ import {
   WRITING_FEEDBACK_CODE_LABELS,
   type WritingFeedbackCode,
 } from "../infrastructure/writing-feedback-store";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 
 const QUICK_CODES: readonly WritingFeedbackCode[] = [
   "smaller_changes",
@@ -60,7 +61,7 @@ export function CandidateFeedbackControls({
       });
       setSubmitted(true);
     } catch (cause: unknown) {
-      setError(cause instanceof Error ? cause.message : "暂时无法保存这次意见，请稍后重试。");
+      setError(projectOrdinaryUiError(cause).description);
     } finally {
       setLocalBusy(false);
     }

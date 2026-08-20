@@ -76,7 +76,7 @@ checkpoint 初始状态为：
 - 编辑器有未保存正文保护、RecoveryDraft、版本比较、恢复和会话撤销。
 - 一句话 Journey 可保存回答、跳过、返回、重生成和恢复状态；首段进入隔离 Candidate。
 - Model Hub 支持多连接、系统凭据库、连接测试、模型目录、能力证据、小说任务主备路由及调用账本。
-- Context Compiler 能读取稳定正文、已确认 StoryFact、有效摘要、因果候选、写作偏好、搜索及 rerank，并记录采用/舍弃来源和预算。
+- Context Compiler 能读取稳定正文、已确认 StoryFact、有效摘要、因果候选、写作偏好和范围化本地 FTS，并记录采用/舍弃来源和预算；vector/rerank 只保留可选底层槽，当前无远程 production caller。
 - StoryFact、连续状态提取、章节摘要、证据化检查、确认事实因果投影、任务中心、图片生成、手动一致性备份均为真实底座。
 - EPUB 导入是真实且具备压缩炸弹、脚本、路径穿越、DRM、CRC 和远程引用防护的实现。
 
@@ -125,13 +125,17 @@ checkpoint 初始状态为：
   冒充 Model Hub 连接数。2026-08-13 当前代码进一步加入跨 mount 唯一 coordinator 身份、真实阶段
   时间、5 秒凭据摘要降级和停用连接排除；自动化已通过，但当前代码的真实 Windows Tauri + SQLite +
   Keyring 冷启动和 DeepSeek 凭据互操作仍为 `NOT_VERIFIED`。
-- 2026-08-13 `v0.2.3` 真实 Windows 附件暴露了“界面就绪投影”和“真实续写解析”不同口径。当前 `v0.2.4` 候选源码让顶栏、作品库、Model Hub 和任务分工共享同一个**无正文的全局 exact 基础 readiness resolver**，统一核验 connection、catalog entry、Provider/model、capability evidence、route/revision 与 credential summary；它只能证明基础配置可供后续预检，不能宣称某章已经可以派发。真实续写在同一基础结果上再加入当前章节的 privacy、编译后 context、request profile 与费用/派发前门禁；任一附加检查失败会同步显示该任务需修复，且不会创建 invocation、Candidate 或费用记录。既有 Model Hub 路由失败也不会降级到旧 Model Profile。当前状态为 `CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`，原附件不能作为新源码的 Tauri 通过证据。
-- 同一次 `v0.2.3` 真实测试还证明删除 DeepSeek 凭据后会留下不可重绑的幽灵连接并与同供应商默认 ID 冲突。当前 `v0.2.4` 候选源码已把删除凭据、暂时停用、重新绑定和退役拆成明确语义：原连接可用 revision CAS 就地重绑，退役行保留历史 invocation 但不进入 ready/推荐/普通路由，同供应商新连接自动分配新 ID。该结论已有 store/UI/临时 SQLite 回归，真实 Windows Credential Manager 语义仍为 `NOT_RETESTED`。
+- 2026-08-13 `v0.2.3` 真实 Windows 附件暴露了“界面就绪投影”和“真实续写解析”不同口径。已发布 `v0.2.4` 标签基线及当前 `v0.2.5` 候选让顶栏、作品库、Model Hub 和任务分工共享同一个**无正文的全局 exact 基础 readiness resolver**，统一核验 connection、catalog entry、Provider/model、capability evidence、route/revision 与 credential summary；它只能证明基础配置可供后续预检，不能宣称某章已经可以派发。真实续写在同一基础结果上再加入当前章节的 privacy、编译后 context、request profile 与费用/派发前门禁；任一附加检查失败会同步显示该任务需修复，且不会创建 invocation、Candidate 或费用记录。既有 Model Hub 路由失败也不会降级到旧 Model Profile。发布状态分别为 `v0.2.4=RELEASED_PREVIEW`、`v0.2.5=NOT_RELEASED`，二者的真实 Tauri/Provider 边界仍为 `REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN`；原附件不能作为修复源码的 Tauri 通过证据。
+- 同一次 `v0.2.3` 真实测试还证明删除 DeepSeek 凭据后会留下不可重绑的幽灵连接并与同供应商默认 ID 冲突。已发布 `v0.2.4` 标签基线及当前 `v0.2.5` 候选已把删除凭据、暂时停用、重新绑定和退役拆成明确语义：原连接可用 revision CAS 就地重绑，退役行保留历史 invocation 但不进入 ready/推荐/普通路由，同供应商新连接自动分配新 ID。该结论已有 store/UI/临时 SQLite 回归，真实 Windows Credential Manager 语义仍为 `NOT_RETESTED`。
 - Provider Registry 只对官方 DeepSeek endpoint 与精确官方模型 ID 提供带有效期、
   `verifiedByInkShadow=false` 的官方资料 fallback，目录证据优先且自定义端点不继承。Provider
   recommendation 只对已连接目录项排序或显示带有效期的发现方向；阿里云 `text-embedding-v4`
   等推荐不会创建能力证据。结构化输出和翻译分别使用固定严格 schema 与
   `inkshadow.translation-probe.zh-en.v2` 无作品探针，成功后才保存对应能力/路由。
+- Settings 两个固定、无作品内容的 probe 入口已把点击时表单、精确目标和 content-free SHA-256
+  authority 绑定到同一 prepared input，并在生成前复核；四类漂移 0 call、成功精确 1 call。豆包
+  Endpoint ID 非空时优先作为唯一有效模型，同一值进入普通披露、授权、catalog/connection 保存和
+  实际派发；设置页聚焦 55/55 PASS，Provider dispatch surface 当前无剩余 P0/P1。
 - 完整未连接模型目录、普通/专家证据分层和“选模型→连接→返回原任务→确认分配”的本地 UI 切片
   已实现。版本化 registry 覆盖 22 项任务；默认折叠的全局浏览器和任务级披露均让账户实际目录优先，
   普通投影不暴露官方 URL/TTL。官方候选固定 `routable=false`、`capabilityEvidence=false`，不得自动
@@ -191,8 +195,11 @@ checkpoint 初始状态为：
 - P36 写作反馈学习现在把每条事件与“事件发生时是否允许学习”绑定；恢复学习后只统计新的启用期事件，不追溯暂停期或无法证明策略的旧事件。明确反馈、事件时策略、全量证据计数和偏好 upsert 在 SQLite 单事务或浏览器单 mutation 中提交；稳定幂等身份使断线重试不会重复增加事件、证据或偏好版本。重复自定义意见经 NFKC、空白和大小写规范化后只保存 SHA-256 聚类身份，最多 500 字，达到阈值才形成可见、可编辑偏好；不会把章节正文或 Candidate 正文写入反馈账本。导入页保存失败会保留已形成规则并显示可重试错误，不再把半成功描述为已保存。
 - P33 的建议编辑现可先保存为仍处于 `ready` 的隔离 Candidate，关闭并重开后继续；正文和不可变版本在明确应用前保持不变。Candidate 持久记录任务语义、载荷形状、UTF-16 锚点和单调 revision：保存修改、接受、拒绝均绑定用户实际看到的 revision，SQLite、浏览器开发存储和多智能体章节候选都在事务内二次 CAS。接受前复核 Candidate 内容哈希；续写只插入生成时光标，选区改写只替换生成时选区，整章改写只能替换整章或在当前/基线共同章末追加。基线漂移、行内容篡改、旧窗口决定、提交故障或错误策略均失败关闭并保留正文与赢家建议。
 - 证据修正和多智能体章节审查产生的载荷都是完整章节，现均显式保存为 `whole_chapter_rewrite / replace_document / full_document`，不会退回允许任意片段应用的 legacy 语义。导入旧批次缺少修订权威时在任何付费派发前失败关闭；新批次每次状态和 Candidate 修订号同步写入本机存储，写入失败停止余下章节并保留当前可见建议与中断标记。
-- P37 Model Hub 使用七态普通用户状态投影；P38 使用项目级仅本机 authority：项目仍保留任一私密章节时，全书上下文、远程 Embedding/Rerank、改写、审稿、规划、连续提取和剧情试演只允许已验证的本地模型，派发前复核章节集合、版本、状态与隐私修订；项目导出默认排除私密章节。真实供应商凭据互操作仍未验收。
+- P37 Model Hub 使用七态普通用户状态投影；P38 使用项目级仅本机 authority：项目仍保留任一私密章节时，全书上下文、改写、审稿、规划、连续提取和剧情试演只允许已验证的本地模型，派发前复核章节集合、版本、状态与隐私修订；普通 Embedding/Rerank 入口当前关闭且 rerank 无 production caller。项目导出默认排除私密章节，真实供应商凭据互操作仍未验收。
 - P42 图片生成在展示费用与数据去向时生成不可变确认指纹，覆盖实际连接、目录模型、任务分工、隐私/费用策略、数据去向、能力证据和非秘密凭据身份；生成提交与最终网关派发前均必须匹配，变化后要求重新检查，过期确认不会创建调用记录或调用网关。
+- 2026-08-20 Provider/UI ID 聚焦审计确认可达动作清单和旧入口关闭边界；Usage 缺失连接不回退 raw
+  provider ID，通知 metadata 使用白名单，任务/检查页显示可读名称或安全占位。受限沙箱首跑因
+  依赖 ACL 失败后，相同测试完整权限复跑 4 files / 22 tests PASS；冻结全路由 DOM 仍待验收。
 - 普通“设定”页面已停止新建旧版自由 What-if；既有分支和大纲草稿只读保留并明确标记迁移说明，新的用户入口统一跳到确认因果图上的剧情试演。因果试演会编译全部锁定正式规则并保存 included/omitted 收据，任一硬规则因 8,000 token/100 条安全预算无法完整纳入时模型调用为 0。
 - `accepted-chapter-pipeline.ts` 已覆盖编辑器接受 AI 建议、导入接受和追加式历史恢复。当前 Candidate 接受的稳定版本 ID 任务被硬锁为本地搜索与本地因果投影，登记、执行、重试和 worker 恢复均不运行摘要或故事状态 Provider 阶段；即使旧任务元数据要求这两项，重启也为 0 次模型调用。摘要、记忆和事实抽取只能从接受完成后的独立显式授权流程进入；所有派生失败均不回滚正文或新不可变版本。
 - Tauri 启动后运行派生任务 worker：立即检查，之后每 15 秒检查；排队任务有 30 秒前台宽限，到期失败可在任务中心“立即重试后台整理”。重叠轮询合并，关闭应用时等待当前安全边界。专用到期查询按游标读取，不受任务中心最近 200 条展示窗口限制；单轮最多扫描 1,000 条、处理 200 条，历史回填另限 5 条，其余留待后续轮询。
@@ -201,19 +208,23 @@ checkpoint 初始状态为：
 - StoryFact 实体别名出现多个已确认匹配时不能直接确认，作者只能选择允许列表中的已有对象或明确保留独立对象；畸形结构同样失败关闭。POV 证据链会验证取得事件、来源事实和叙事顺序，章节检查结果另绑定不可变版本保存快照。
 - 连续状态提取已用 `0052` / Tauri `55` 增加持久路由完成回执，并由 `0055` / Tauri `58` 修正历史回执恢复：派发前按项目、章节、不可变版本和任务查重，SQLite 把旧自动投影退休/修订、新事实与回执放进同一事务，浏览器开发存储在一次 mutation 中完成同等提交；重启、强制重试和零候选结果都不会重复调用模型。新提交仍要求当前版本/内容哈希 CAS；恢复历史回执只接受同项目、章节、不可变版本与哈希匹配的记录。同一人物与不同对象的关系变化使用已确认目标实体与关系属性形成独立替换身份，只退休对应对象；缺失、冒用或无法由精确证据确认的目标失败关闭。上下文排除全部已失效事实，自动章节投影必须匹配当前版本/内容哈希并按实体、类型、替换键只采用最新有效项；当前章节定位使用原始正文绝对 UTF-16 范围和当前哈希。POV 派生只有在调用方同时提供经确认的人物与叙事序号时才参与；生产 UI 尚无该确认元数据，默认失败关闭且不猜测。
 - P41 已有持久任务/通知入口和合法任务的一键重试；P43 根错误边界、P44 Ctrl/Cmd+K 命令面板、52px 图标轨、统一 tokens/图标和四区项目导航已接入。键盘与所有目标宽度仍需统一人工矩阵验收。
-- 导入与导出补齐 EPUB 3 正文制品；默认导出排除私密章节。DOCX/PDF/Markdown/TXT/Bundle 仍保留原有真实路径。
+- 导入与导出补齐 EPUB 3 正文制品；默认导出排除私密章节。Markdown/DOCX/EPUB/PDF 可真实嵌入经安全校验的内联或显式内存项目图片，不从磁盘/网络补读 path。Tauri 保存成功必须经一次性 ticket、原子写入与回读 size+SHA 验证；浏览器只报已发起下载，不冒充路径已核验。
 - P39 自动备份已从页面/策略缺口推进为真实 Tauri 运行链：桌面运行时启动后立即执行一次到期检查，存活期间每小时以不重叠定时器重检；本地 03:00 槽位漏跑时只补最新一次，默认保留 30 天。浏览器开发运行时明确为 `null`，不伪造文件备份。
 - 自动备份创建复用现有 `DatabaseMaintenanceService.createConsistentBackup`，原生端只为清单中处于 `creating` 的严格命名文件签发一次性受限路径票据。清理不枚举目录；只有根标记、租约、清单状态、直系路径、到期时间、SQLite 完整性、文件身份、大小和 SHA-256 全部匹配时才删除，手动备份不在该清单内。
-- 新迁移连续追加到 Data `0065` / Tauri `68`，没有改写旧 migration：`0052` 保存连续状态提取的
+- 当前迁移从该增量的 Data `0065` / Tauri `68` 继续只向前追加到 Data `0070` / Tauri `73`，没有改写旧 migration：`0052` 保存连续状态提取的
   精确路由完成收据，`0053` 保存反馈发生时的学习策略和自定义反馈哈希簇，`0054` 保存明确反馈
   幂等身份，`0055` 修正合法历史回执的恢复约束，`0056` 追加脱敏失败诊断，`0057` 前向补齐
   Model Hub 的 `content_quality_check` 任务合同，`0058` 新增原子 Story Settings 导入收据，`0059`
   区分可估费用与价格未知，`0060` 新增 Novel Skill registry/snapshot，`0061` 新增并硬化九表评测
   账本，`0062` 只补上“持有既有项目派发 lease 时项目不得离开 active”的迁移门禁，`0063` 新增
-  精确目标、商业授权、reservation 与盲评合同，`0064` 冻结内容无关的派发前权威，`0065` 只在现有模型调用事实上追加 content-free Provider 发送边界，将启动恢复安全分为 `not_dispatched` 与 `ambiguous` 且都不自动重发；同一变更集的
-  Rust/TS 代码把 `0045` 已有 lease 覆盖到回环本地派发，并加强 Candidate/context output 原子版本围栏。当前
-  166 张作者数据表进入恢复白名单，另 1 张内容无关的原生项目派发租约表明确不恢复；Tauri command
-  数量不能与 68 个原生 migration 混用。维护清单和原生迁移注册是这些数字的代码来源。
+  精确目标、商业授权、reservation 与盲评合同，`0064` 冻结内容无关的派发前权威，`0065` 只在
+  现有模型调用事实上追加 content-free Provider 发送边界。后续当前增量 `0066`–`0068` 追加写作
+  偏好/披露 grant、有界调查四表和 active grant 上限修复；`0069` 为模型 step 预留 content-free
+  invocation UUID，并让账本 INSERT 原子绑定 step/context trace；`0070` 为可重建搜索投影追加多粒度、父子 UTF-16 定位和 current/branch/POV/story-time/authority/privacy 范围。启动恢复会安全结清 ledger/run、
+  对账非终态 task，且不自动重发；同一变更集的 Rust/TS 代码继续复用 `0045` lease 并加强
+  Candidate/context output 原子版本围栏。当前 172 张作者数据表进入恢复白名单，另 1 张内容无关的
+  原生项目派发租约表明确不恢复；Tauri command 数量不能与 73 个原生 migration（70 Data + 3
+  story-core）混用。维护清单和原生迁移注册是这些数字的代码来源。
 - 项目上下文远程和回环本地 generation / embedding / rerank 在派发前由原生事务原子重验完整项目
   指纹，并在整个原生网络生命周期持有租约；lease 期间项目不能转为非 active。Provider 返回后，
   Candidate/context output 的同一 SQLite 事务再次复核项目、章节、当前版本、Candidate 基线与

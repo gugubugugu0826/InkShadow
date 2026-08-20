@@ -4,14 +4,24 @@
 > 仓库可见性：Public  
 > 默认分支：`main`  
 > 适用环境：Windows PowerShell  
-> 更新日期：2026-08-14  
-> 当前 Desktop 源码目标版本：`0.2.4`（候选，尚未发布）  
-> 当前已发布工程预览版本：`0.2.3`（标签 `v0.2.3`；不得覆盖或移动任何已公开版本）
+> 更新日期：2026-08-19  
+> 当前 Desktop 源码目标版本：`0.2.5`（Pre-release 候选，尚未发布）  
+> 最新公开工程预览版本：`v0.2.4`（Pre-release；标签与附件不得移动或静默替换）
 
 本文是每次向 GitHub 上传源码或发布安装包时必须执行的检查清单。它只描述操作流程，
 不替代 [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md) 中的产品发布门禁。
-`v0.2.3` 的已发布事实记录在该门禁文档；`v0.2.4` 的提交、大小和哈希在实际候选生成前保持
+`v0.2.3`/`v0.2.4` 的已发布事实记录在该门禁文档；`v0.2.5` 的提交、大小和哈希在实际候选生成前保持
 `NOT_RUN`，不得沿用任何历史版本数据。
+
+## v0.2.4 已发布记录
+
+| 项目       | 已复核事实                                                                                                                                                                                                                                                                                                                                   |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 来源       | annotated tag object `9f613572c7f6892ba5aca4700a784c79872457e2`；tag peel 与来源提交均为 `b74d36ef3342db6813d1d43771bc82c0ed2aa1fb`                                                                                                                                                                                                          |
+| Release    | <https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.4>；`draft=false`、`prerelease=true`；`publishedAt=2026-08-14T06:19:17Z`                                                                                                                                                                                                      |
+| 公开附件   | installer `InkShadow_0.2.4_x64-setup.exe` 7,482,560 bytes，SHA-256 `12ba4382c79f8c7a6bea8a310c21e4f0c0663c5a7e18e9b87729bb1057628c6c`；manifest 10,551 bytes，SHA-256 `7e0a8d2cd34c38948fcf880be43c4c44b844cfe4f6df9f7870a290c7ee4016f5`；`SHA256SUMS` 194 bytes，SHA-256 `aaf721500f73cdad58b6d59b8babb9ee9924b16affc16e098b7dfc74d88262f4` |
+| 签名       | 本轮远端元数据审计未重新下载检查 Authenticode；不得仅凭历史候选说明推断最终文件签名状态                                                                                                                                                                                                                                                      |
+| 未验证边界 | 真实 Provider、v0.2.4 修复版 Windows Tauri/Wry + Credential Manager、系统 200% DPI 和另一台电脑安装仍为 `NOT_RUN / NOT_RETESTED`                                                                                                                                                                                                             |
 
 ## v0.2.3 已发布记录
 
@@ -118,10 +128,13 @@ git diff --cached
 - `apps/desktop/src-tauri/Cargo.toml`
 - `apps/desktop/src-tauri/tauri.conf.json`
 - `apps/desktop/src-tauri/Cargo.lock` 中由 Cargo 更新的 InkShadow 包版本
+- `apps/desktop/src/infrastructure/runtime.ts` 中非 Tauri 环境的诊断 fallback
+- `apps/desktop/src/infrastructure/diagnostics.test.ts` 中对应的脱敏诊断断言
 
-版本号使用不带 `v` 的 SemVer；当前候选使用 `0.2.4`，Git 标签只能在候选通过后创建为
-`v0.2.4`。`0.2.0` / `v0.2.0`、`0.2.1` / `v0.2.1`、`0.2.2` / `v0.2.2` 与 `0.2.3` / `v0.2.3` 均已公开，
-不得覆盖或移动任何已公开标签；新的二进制修复必须使用新的补丁版本。
+版本号使用不带 `v` 的 SemVer；当前候选使用 `0.2.5`，Git 标签只能在候选通过后创建为
+`v0.2.5`。`0.2.0` / `v0.2.0`、`0.2.1` / `v0.2.1`、`0.2.2` / `v0.2.2`、
+`0.2.3` / `v0.2.3` 与 `0.2.4` / `v0.2.4` 是既有公开版本，不能删除、移动或复用；新的二进制
+修复必须继续使用新的补丁版本。
 
 ```powershell
 rg --no-ignore -n '"version"\s*:\s*"|^version\s*=' `
@@ -132,7 +145,7 @@ rg --no-ignore -n '"version"\s*:\s*"|^version\s*=' `
 ```
 
 `apps/web`、`apps/cloud-api` 和内部 workspace 包有独立的 `0.1.x` 版本线，不是 Windows
-Desktop `v0.2.4` 候选或已公开 `v0.2.3` Release 资产，也不要求随桌面标签同步。文档提到“当前应用版本”时必须明确
+Desktop `v0.2.5` 候选或已公开 `v0.2.4` Release 资产，也不要求随桌面标签同步。文档提到“当前应用版本”时必须明确
 指 Desktop，不能把这些内部包误写成同一可下载产品版本。
 
 ## 5. 源码上传前门禁

@@ -35,6 +35,12 @@ export default defineConfig({
         ),
       },
       {
+        find: "@inkshadow/import-export/core",
+        replacement: fileURLToPath(
+          new URL("../../packages/import-export/src/core.ts", import.meta.url),
+        ),
+      },
+      {
         find: "@inkshadow/import-export/docx-export",
         replacement: fileURLToPath(
           new URL("../../packages/import-export/src/docx-export.ts", import.meta.url),

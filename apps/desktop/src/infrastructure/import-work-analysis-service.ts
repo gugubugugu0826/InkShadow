@@ -7,6 +7,8 @@ import {
   ModelHubExecutionError,
   type ModelHubTextTask,
 } from "./model-hub-execution-service";
+import { selectSingleAttemptStrictJsonPolicy } from "./model-execution-policy";
+import { getModelProviderPreset } from "./model-hub-provider-registry";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
 import {
   ProjectContextPrivacyError,
@@ -247,6 +249,11 @@ export async function analyzeImportedChapter(
       throw normalizeAnalysisFailure(cause);
     });
     await assertStructuredOutputSupported(runtime, inspection.catalogEntryId);
+    const executionPolicy = selectSingleAttemptStrictJsonPolicy({
+      structuredOutputVerified: true,
+      jsonObjectTransportSupported:
+        getModelProviderPreset(inspection.providerKind).protocol === "openai_compatible",
+    });
 
     const requestId = runtime.ids.next();
     const generated = await executeModelHubTextTask(runtime, {
@@ -256,6 +263,20 @@ export async function analyzeImportedChapter(
       maximumOutputTokens: 8_000,
       temperature: 0,
       generationId: requestId,
+      executionPolicy,
+      ...(executionPolicy.transportResponseFormat === "json_object"
+        ? { responseFormat: "json_object" as const }
+        : {}),
+      reasoningModeOverride: "disabled",
+      generationRetryLimitOverride: 0,
+      validateGeneratedText: (text) => {
+        parseImportedWorkAnalysisResponse(text, {
+          chapterId: snapshot.id,
+          versionId: snapshot.currentVersionId,
+          stage: input.stage,
+          chunk,
+        });
+      },
       ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
       onBeforeDispatch: async (selection) => {
         if (

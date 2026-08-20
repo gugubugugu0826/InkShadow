@@ -400,6 +400,10 @@ describe("local multi-agent review runtime", () => {
         usage,
       }),
     );
+    const dispatched = gateway.generate.mock.calls[0]?.[0];
+    expect(dispatched?.config.retryLimit).toBe(0);
+    expect(dispatched?.reasoningMode).toBe("disabled");
+    expect(dispatched).not.toHaveProperty("responseFormat");
   });
 
   it("rejects an early candidate instead of persisting it before the final turn", async () => {

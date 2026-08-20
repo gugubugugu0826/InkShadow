@@ -461,10 +461,13 @@ function projectModel(
     .sort((left, right) => right.timestamp.localeCompare(left.timestamp))[0];
   const capabilities = MODEL_HUB_CAPABILITIES.map((capability) => {
     const evidence = selectEvidence(relevantEvidence, capability, input.now);
+    // Scan timestamps have millisecond precision. When success evidence and a
+    // failure tie, their order is not provable, so the ordinary view must fail
+    // closed instead of presenting the model as verified.
     const failedAfterEvidence =
       capability === "text_generation" &&
       latestProbeFailure !== undefined &&
-      (evidence === null || latestProbeFailure.timestamp > evidence.observedAt);
+      (evidence === null || latestProbeFailure.timestamp >= evidence.observedAt);
     if (failedAfterEvidence) {
       return Object.freeze({
         capability,

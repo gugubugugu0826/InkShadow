@@ -652,12 +652,64 @@ describe("Tauri native model gateway client", () => {
     if (!chapter.ok) {
       throw chapter.error;
     }
-    await developmentRuntime.modelCenter.save({
-      providerId: "local-ollama",
-      provider: "ollama",
-      baseUrl: "http://127.0.0.1:11434",
-      authentication: "none",
-      selectedModel: "writer-model",
+    const connection = await developmentRuntime.modelHub.saveConnection({
+      id: "local-ollama",
+      providerKind: "ollama",
+      displayName: "本机 Ollama",
+      credentialState: "missing",
+      expectedRevision: null,
+    });
+    await developmentRuntime.modelHub.recordConnectionTest({
+      connectionId: connection.id,
+      status: "ready",
+      expectedRevision: connection.revision,
+    });
+    await developmentRuntime.modelHub.syncCatalog({
+      syncId: "local-ollama-sync",
+      connectionId: connection.id,
+      source: "manual",
+      status: "succeeded",
+      models: [
+        {
+          id: "local-ollama-writer",
+          providerModelId: "writer-model",
+          lifecycle: "stable",
+          inputTokenLimit: 200_000,
+          outputTokenLimit: 20_000,
+          staleAfter: "2027-08-20T00:00:00.000Z",
+        },
+      ],
+    });
+    await developmentRuntime.modelHub.recordCapabilityScan({
+      scanId: "local-ollama-text-scan",
+      catalogEntryId: "local-ollama-writer",
+      scanKind: "lightweight_probe",
+      status: "succeeded",
+      evidenceVersion: "native-candidate-test-v1",
+      evidence: [
+        {
+          id: "local-ollama-text-evidence",
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "lightweight_probe",
+        },
+      ],
+    });
+    await developmentRuntime.modelHub.saveCostPrivacyProfile({
+      catalogEntryId: "local-ollama-writer",
+      dataDestination: "local",
+      retentionPolicy: "none",
+      trainingPolicy: "not_used",
+      evidenceSource: "user_confirmed",
+      evidenceVersion: "native-candidate-test-v1",
+      expectedRevision: null,
+    });
+    await developmentRuntime.modelHub.saveTaskRoute({
+      task: "continuation",
+      primaryCatalogEntryId: "local-ollama-writer",
+      privacyPolicy: "local_only",
+      failurePolicy: "stop",
+      routeOrigin: "user",
       expectedRevision: null,
     });
     const generate = vi.fn<NativeModelGatewayClient["generate"]>((request) => {
@@ -715,23 +767,18 @@ describe("Tauri native model gateway client", () => {
       },
     });
     expect(onDelta).toHaveBeenLastCalledWith("候选续写。");
-    expect(generate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        model: "writer-model",
-        config: {
-          providerId: "local-ollama",
-          provider: "ollama",
-          baseUrl: "http://127.0.0.1:11434",
-          authentication: "none",
-        },
-      }),
-    );
-    expect(listModels).toHaveBeenCalledWith({
-      providerId: "local-ollama",
-      provider: "ollama",
-      baseUrl: "http://127.0.0.1:11434",
-      authentication: "none",
+    expect(generate).toHaveBeenCalledOnce();
+    expect(generate.mock.calls[0]?.[0]).toMatchObject({
+      model: "writer-model",
+      config: {
+        providerId: "local-ollama",
+        provider: "ollama",
+        baseUrl: "http://127.0.0.1:11434",
+        authentication: "none",
+        retryLimit: 0,
+      },
     });
+    expect(listModels).not.toHaveBeenCalled();
     const stableChapter = await developmentRuntime.repositories.chapters.findById(
       chapter.value.chapter.id,
     );

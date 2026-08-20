@@ -5,6 +5,8 @@ import {
   MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES,
   StoryCoreError,
   StoryFact,
+  FormalStoryRecord,
+  MemoryRecord,
   err,
   ok,
   parseIsoUtcTimestamp,
@@ -15,6 +17,11 @@ import {
   type ContinuousStoryStateRouteCommitReceipt,
   type ContinuousStoryStateRouteIdentity,
   type ContinuousStoryStateRouteReceipt,
+  type LegacyStoryFactCompatibilityStore,
+  type LegacyStoryFactKind,
+  type StageLegacyStoryFactInput,
+  type StageLegacyStoryFactReceipt,
+  type StoryFactLegacyLink,
   type StoryFactListFilter,
   type StoryFactAuthorityFence,
   type StoryFactConditionalCreateReceipt,
@@ -24,10 +31,16 @@ import {
   type StoryFactSnapshot,
   type StoryFactStore,
   type StoryFactSupplementalResolutionUndoFence,
+  type FormalStoryRecordSnapshot,
+  type MemoryRecordSnapshot,
+  type StoryValue,
   type UuidV7,
 } from "@inkshadow/story-core";
 
-import { DEVELOPMENT_DATABASE_KEY } from "./development-atomic-journal";
+import {
+  DEVELOPMENT_DATABASE_KEY,
+  DEVELOPMENT_STORY_STORE_KEY,
+} from "./development-atomic-journal";
 
 export const DEVELOPMENT_STORY_FACT_STORE_KEY = "inkshadow.development.story-facts.v1";
 const CHAPTER_SUPPLEMENTAL_FINDING_RESOLUTION_SCHEMA =
@@ -51,6 +64,126 @@ interface DevelopmentChapterAuthority {
   readonly status: string;
   readonly versionContent: string;
   readonly contentChecksum: string | null;
+}
+
+interface DevelopmentLegacyFactMaterial {
+  readonly projectId: UuidV7;
+  readonly factType: string;
+  readonly contentText: string | null;
+  readonly structuredValue: StoryValue;
+  readonly reference: string;
+}
+
+const LEGACY_SOURCE_REFERENCE =
+  /^legacy:story_(formal|memory)_records:([0-9a-f-]+):r([1-9][0-9]*)$/u;
+
+function requireDevelopmentLegacyRecord(
+  storage: Storage,
+  input: StageLegacyStoryFactInput,
+): DevelopmentLegacyFactMaterial {
+  const projectId = parseUuidV7(input.projectId);
+  const legacyId = parseUuidV7(input.legacyId);
+  if (!projectId.ok || !legacyId.ok) {
+    throw validationFailure("Legacy story fact scope is invalid.");
+  }
+  const serialized = storage.getItem(DEVELOPMENT_STORY_STORE_KEY);
+  if (serialized === null) {
+    throw new StoryCoreError({
+      code:
+        input.legacyKind === "memory_record"
+          ? "MEMORY_RECORD_NOT_FOUND"
+          : "FORMAL_RECORD_NOT_FOUND",
+      message: "The legacy story record was not found.",
+    });
+  }
+  const parsed: unknown = JSON.parse(serialized);
+  if (!isPlainObject(parsed) || hasProhibitedKey(parsed)) {
+    throw corruptStore();
+  }
+  if (input.legacyKind === "memory_record") {
+    if (!isPlainObject(parsed.memoryRecords)) {
+      throw corruptStore();
+    }
+    const raw: unknown = parsed.memoryRecords[legacyId.value];
+    if (raw === undefined) {
+      throw new StoryCoreError({
+        code: "MEMORY_RECORD_NOT_FOUND",
+        message: "The legacy memory record was not found.",
+      });
+    }
+    const memory = MemoryRecord.rehydrate(raw as MemoryRecordSnapshot);
+    if (!memory.ok) throw memory.error;
+    const snapshot = memory.value.toSnapshot();
+    if (snapshot.id !== legacyId.value || snapshot.projectId !== projectId.value) {
+      throw corruptStore();
+    }
+    return Object.freeze({
+      projectId: projectId.value,
+      factType: "memory",
+      contentText: snapshot.content,
+      structuredValue: {
+        level: snapshot.level,
+        content: snapshot.content,
+        sourceKind: snapshot.source.kind,
+        sourceId: snapshot.source.sourceId,
+        sourceVersionId: snapshot.source.sourceVersionId,
+        legacyOrigin: snapshot.origin,
+      },
+      reference: `legacy:story_memory_records:${snapshot.id}:r${String(snapshot.revision)}`,
+    });
+  }
+  if (!isPlainObject(parsed.formalRecords)) {
+    throw corruptStore();
+  }
+  const raw: unknown = parsed.formalRecords[legacyId.value];
+  if (raw === undefined) {
+    throw new StoryCoreError({
+      code: "FORMAL_RECORD_NOT_FOUND",
+      message: "The legacy formal story record was not found.",
+    });
+  }
+  const formal = FormalStoryRecord.rehydrate(raw as FormalStoryRecordSnapshot);
+  if (!formal.ok) throw formal.error;
+  const snapshot = formal.value.toSnapshot();
+  if (snapshot.id !== legacyId.value || snapshot.projectId !== projectId.value) {
+    throw corruptStore();
+  }
+  const value = formal.value.currentValue;
+  return Object.freeze({
+    projectId: projectId.value,
+    factType: snapshot.kind,
+    contentText: typeof value === "string" ? value : null,
+    structuredValue: value,
+    reference: `legacy:story_formal_records:${snapshot.id}:r${String(snapshot.revision)}`,
+  });
+}
+
+function legacyLinkFromFact(fact: StoryFact): StoryFactLegacyLink {
+  const snapshot = fact.toSnapshot();
+  const match = LEGACY_SOURCE_REFERENCE.exec(snapshot.source.reference);
+  const legacyId = match?.[2] === undefined ? null : parseUuidV7(match[2]);
+  const legacyRevision = Number(match?.[3]);
+  if (
+    snapshot.source.kind !== "legacy_record" ||
+    snapshot.origin !== "legacy" ||
+    match === null ||
+    legacyId === null ||
+    !legacyId.ok ||
+    !Number.isSafeInteger(legacyRevision) ||
+    legacyRevision < 1
+  ) {
+    throw corruptStore();
+  }
+  const legacyKind: LegacyStoryFactKind = match[1] === "formal" ? "formal_record" : "memory_record";
+  return Object.freeze({
+    factId: snapshot.id,
+    projectId: snapshot.projectId,
+    legacyKind,
+    legacyId: legacyId.value,
+    legacyRevision,
+    linkMode: "backfill",
+    createdAt: snapshot.createdAt,
+  });
 }
 
 function readDevelopmentChapterAuthority(
@@ -451,7 +584,9 @@ function boundedResolutionIdentityPart(value: unknown, maximumLength: number): s
 }
 
 /** Browser-development parity adapter for the Tauri/SQLite story-fact store. */
-export class BrowserDevelopmentStoryFactStore implements StoryFactStore {
+export class BrowserDevelopmentStoryFactStore
+  implements StoryFactStore, LegacyStoryFactCompatibilityStore
+{
   public constructor(private readonly storage: Storage) {}
 
   public create(fact: StoryFact): Promise<Result<void, StoryCoreError>> {
@@ -775,6 +910,99 @@ export class BrowserDevelopmentStoryFactStore implements StoryFactStore {
         }),
       ),
     );
+  }
+
+  public stageLegacyRecord(
+    input: StageLegacyStoryFactInput,
+  ): Promise<Result<StageLegacyStoryFactReceipt, StoryCoreError>> {
+    return this.mutate<StageLegacyStoryFactReceipt>((database) => {
+      const legacy = requireDevelopmentLegacyRecord(this.storage, input);
+      const existingSnapshots = Object.values(database.facts).filter(
+        (candidate) =>
+          candidate.projectId === legacy.projectId &&
+          candidate.origin === "legacy" &&
+          candidate.source.kind === "legacy_record" &&
+          candidate.source.reference === legacy.reference,
+      );
+      if (existingSnapshots.length > 1) {
+        return err(storeFailure("Legacy StoryFact source link is not unique."));
+      }
+      const existingSnapshot = existingSnapshots[0];
+      if (existingSnapshot !== undefined) {
+        const fact = requireFact(existingSnapshot);
+        return ok(
+          Object.freeze({
+            fact,
+            link: legacyLinkFromFact(fact),
+            created: false,
+          }),
+        );
+      }
+      const factId = parseUuidV7(input.factId);
+      if (!factId.ok) return factId;
+      if (database.facts[factId.value] !== undefined) {
+        return err(storeFailure("Legacy StoryFact identity already exists."));
+      }
+      const created = StoryFact.create({
+        id: factId.value,
+        projectId: legacy.projectId,
+        factType: legacy.factType,
+        contentText: legacy.contentText,
+        structuredValue: legacy.structuredValue,
+        source: { kind: "legacy_record", reference: legacy.reference },
+        confidence: 0.5,
+        status: "unconfirmed",
+        origin: "legacy",
+        needsReview: true,
+        humanConfirmed: false,
+        now: input.now,
+      });
+      if (!created.ok) return created;
+      const snapshot = created.value.toSnapshot();
+      database.facts[snapshot.id] = snapshot;
+      database.revisions[snapshot.id] = Object.freeze([
+        Object.freeze({
+          changeKind: "legacy_backfill" as const,
+          recordedAt: snapshot.updatedAt,
+          snapshot,
+        }),
+      ]);
+      return ok(
+        Object.freeze({
+          fact: created.value,
+          link: legacyLinkFromFact(created.value),
+          created: true,
+        }),
+      );
+    });
+  }
+
+  public listLegacyLinks(
+    projectId: UuidV7,
+  ): Promise<Result<readonly StoryFactLegacyLink[], StoryCoreError>> {
+    return this.readResult((database) => {
+      const links = Object.values(database.facts)
+        .filter(
+          (snapshot) =>
+            snapshot.projectId === projectId &&
+            snapshot.origin === "legacy" &&
+            snapshot.source.kind === "legacy_record",
+        )
+        .map((snapshot) => legacyLinkFromFact(requireFact(snapshot)))
+        .sort(
+          (left, right) =>
+            left.legacyKind.localeCompare(right.legacyKind) ||
+            String(left.legacyId).localeCompare(String(right.legacyId)) ||
+            left.legacyRevision - right.legacyRevision,
+        );
+      const identities = new Set<string>();
+      for (const link of links) {
+        const identity = `${link.legacyKind}:${String(link.legacyId)}:r${String(link.legacyRevision)}`;
+        if (identities.has(identity)) throw corruptStore();
+        identities.add(identity);
+      }
+      return Object.freeze(links);
+    });
   }
 
   public findContinuousStoryStateRouteReceipt(

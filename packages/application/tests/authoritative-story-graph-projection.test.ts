@@ -16,6 +16,7 @@ import {
   ConsistencyIssue,
   ExtractionSuggestion,
   FormalStoryRecord,
+  StoryFact,
   StructuredReviewItem,
   ok as storyOk,
   parseUuidV7 as parseStoryUuidV7,
@@ -70,6 +71,61 @@ const EVIDENCE_START = CHAPTER_CONTENT.indexOf(EVIDENCE_QUOTE);
 const EVIDENCE_END = EVIDENCE_START + EVIDENCE_QUOTE.length;
 
 describe("BuildAuthoritativeStoryGraphProjection", () => {
+  it("projects confirmed StoryFact authority without reading the legacy formal-record authority", async () => {
+    const hasher = new WebCryptoHasher();
+    const chapterState = await activeChapter(hasher);
+    const fact = requireStory(
+      StoryFact.create({
+        id: RECORD_ID,
+        projectId: PROJECT_ID,
+        factType: "character_state",
+        contentText: "角色在雨中出现。",
+        source: {
+          kind: "chapter_span",
+          reference: `chapter:${CHAPTER_ID}:${VERSION_ID}`,
+          chapterId: CHAPTER_ID,
+          versionId: VERSION_ID,
+          startOffset: EVIDENCE_START,
+          endOffset: EVIDENCE_END,
+          sourceLength: CHAPTER_CONTENT.length,
+          excerpt: EVIDENCE_QUOTE,
+        },
+        confidence: 1,
+        status: "formal",
+        origin: "user",
+        needsReview: false,
+        humanConfirmed: true,
+        confirmationActorId: ACTOR_ID,
+        now: NOW,
+      }),
+    );
+    const readSources = sources({
+      records: [],
+      reviews: [],
+      chapters: [chapterState.chapter],
+      versions: [chapterState.version],
+    });
+    const result = await new BuildAuthoritativeStoryGraphProjection(
+      {
+        ...readSources,
+        confirmedFacts: { listByProjectId: () => Promise.resolve(storyOk([fact])) },
+      },
+      hasher,
+    ).execute(PROJECT_ID);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(readSources.formalListCalls()).toBe(0);
+    expect(result.value.snapshot.entities.map(({ id: entityId }) => entityId)).toEqual([
+      `chapter:${CHAPTER_ID}`,
+      `fact:${RECORD_ID}`,
+    ]);
+    expect(result.value.snapshot.relations[0]).toMatchObject({
+      id: `story-fact-evidence:${RECORD_ID}`,
+      toEntityId: `fact:${RECORD_ID}`,
+    });
+  });
+
   it("deterministically derives only exact accepted/modified extraction support edges", async () => {
     const hasher = new WebCryptoHasher();
     const accepted = governedRecord({

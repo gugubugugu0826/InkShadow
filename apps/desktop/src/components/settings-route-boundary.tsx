@@ -60,7 +60,6 @@ class SettingsRouteErrorBoundary extends Component<
   public override render(): ReactNode {
     if (!this.state.failed) return this.props.children;
 
-    const incidentId = this.state.incidentId ?? "UI-PENDING";
     const recover = (recoveryAction: "retry" | "navigate_start"): void => {
       if (this.state.incidentId !== null) {
         recoverUiRouteIncident(
@@ -79,9 +78,7 @@ class SettingsRouteErrorBoundary extends Component<
         <ErrorState
           title="设置页面暂时没有正常打开"
           description="可以只重试这个设置页面，或先返回创作首页。已保存的正文、版本和本地凭据不会因为这个界面错误被修改。"
-          errorCode="UI_RENDER_FAILED"
-          requestId={incidentId}
-          savedState="本地数据保持原样；错误详情只记录脱敏后的页面、阶段和错误码。"
+          savedState="本地数据保持原样；错误详情只记录脱敏后的页面与恢复阶段。"
           primaryAction={{
             label: "重试设置页面",
             onClick: () => {

@@ -9,7 +9,7 @@ import type {
   TransactionExecutor,
 } from "@inkshadow/data";
 import { parseContentChecksum } from "@inkshadow/domain";
-import { createStorySettingsTemplate } from "@inkshadow/import-export";
+import { createStorySettingsTemplate } from "@inkshadow/import-export/core";
 import {
   FormalStoryRecord,
   StoryFact,

@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { switchFreshInstallToProfessionalMode } from "./support/writing-experience";
+
 test("starts locally through the three creation paths without requiring cloud login", async ({
   page,
 }) => {
@@ -18,6 +20,8 @@ test("starts locally through the three creation paths without requiring cloud lo
     window.localStorage.clear();
   });
   await page.reload();
+
+  await switchFreshInstallToProfessionalMode(page);
 
   await expect(
     page.getByRole("heading", { level: 1, name: "把你的第一个想法，写成一个故事" }),

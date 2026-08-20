@@ -40,6 +40,7 @@ import {
   projectContextDispatchScope,
   type ProjectContextPrivacyAuthority,
 } from "./project-context-privacy-authority";
+import { SINGLE_ATTEMPT_STRICT_JSON_TEXT_TRANSPORT_POLICY } from "./model-execution-policy";
 
 export const MULTI_AGENT_LOCAL_ROLES = [
   "planner",
@@ -557,14 +558,24 @@ export class MultiAgentReviewRuntime {
           "The participant credential or endpoint changed before dispatch.",
         );
       }
+      // Participant snapshots come from the legacy role router and do not bind
+      // Model Hub structured-output evidence. Parse strict JSON locally while
+      // leaving Provider JSON mode off.
+      const executionPolicy = SINGLE_ATTEMPT_STRICT_JSON_TEXT_TRANSPORT_POLICY;
       const generated = await this.dependencies.modelGateway.generate({
         dispatchScope: projectContextDispatchScope(projectPrivacy),
         generationId,
-        config: currentGatewayConfig,
+        config: Object.freeze({
+          ...currentGatewayConfig,
+          retryLimit: executionPolicy.providerRetryLimit,
+        }),
         model: participant.modelId,
         messages,
         maxOutputTokens: reservation.maximumOutputTokens,
         temperature: participant.role === "critic" ? 0.2 : 0.5,
+        ...(currentGatewayConfig.provider === "open_ai_compatible"
+          ? { reasoningMode: "disabled" as const }
+          : {}),
       });
       if (isAbortRequested(options.signal) || this.cancellations.has(session.id)) {
         session = await this.cancelReview(session.id);

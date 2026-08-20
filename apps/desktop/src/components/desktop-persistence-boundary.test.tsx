@@ -94,6 +94,47 @@ describe("PersistenceRouteBoundary", () => {
       unregister();
     }
   });
+
+  it("keeps a blocked route change in place without exposing the persistence code", async () => {
+    const user = userEvent.setup();
+    const unregister = desktopPersistenceLifecycle.register("test:blocked-route", {
+      hasPendingWork: () => true,
+      flush: vi.fn(() =>
+        Promise.resolve({
+          status: "blocked" as const,
+          code: "COMPOSITION_ACTIVE" as const,
+          message: "请先完成当前中文输入，再切换页面。",
+        }),
+      ),
+    });
+    const router = createMemoryRouter(
+      [
+        {
+          path: "*",
+          element: (
+            <ToastProvider>
+              <PersistenceRouteBoundary>
+                <RouteControls />
+              </PersistenceRouteBoundary>
+            </ToastProvider>
+          ),
+        },
+      ],
+      { initialEntries: ["/start"] },
+    );
+
+    try {
+      render(<RouterProvider router={router} />);
+      await user.click(screen.getByRole("link", { name: "Link 跳转" }));
+
+      expect(await screen.findByText("尚不能离开")).toBeVisible();
+      expect(screen.getByText("请先完成当前中文输入，再切换页面。")).toBeVisible();
+      expect(screen.queryByText(/PERSISTENCE_BLOCKED|COMPOSITION_ACTIVE/u)).not.toBeInTheDocument();
+      expect(screen.getByTestId("route-path")).toHaveTextContent("/start");
+    } finally {
+      unregister();
+    }
+  });
 });
 
 function RouteControls() {

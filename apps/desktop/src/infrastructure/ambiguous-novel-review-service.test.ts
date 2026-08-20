@@ -198,7 +198,11 @@ describe("AmbiguousNovelReviewService", () => {
       code: "AMBIGUOUS_REVIEW_RESPONSE_INVALID",
     });
     expect(contradiction?.invocation).not.toBeNull();
-    expect(finishInvocation).toHaveBeenCalledWith(expect.objectContaining({ status: "succeeded" }));
+    expect(finishInvocation.mock.calls.at(-1)?.[0]).toMatchObject({
+      status: "failed",
+      errorCode: "AMBIGUOUS_REVIEW_RESPONSE_INVALID",
+      failure: { stage: "response_normalization" },
+    });
   });
 
   it("skips every model task when exact confirmed evidence is absent", async () => {

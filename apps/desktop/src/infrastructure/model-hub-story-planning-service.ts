@@ -15,8 +15,12 @@ import {
   type ModelHubTextInspectionDependencies,
   type ModelHubTextTaskExecutionResult,
   type ModelHubTextExecutionDependencies,
+  type ModelHubTextTaskInspection,
 } from "./model-hub-execution-service";
+import { selectSingleAttemptStrictJsonPolicy } from "./model-execution-policy";
+import { getModelProviderPreset } from "./model-hub-provider-registry";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
+import type { ModelCapabilityEvidence } from "./model-hub-store";
 import {
   normalizeStoryPlanningPayload,
   type StoryPlanningCandidate,
@@ -38,12 +42,29 @@ import {
   type ProjectContextPrivacyAuthority,
   type ProjectContextPrivacyReceipt,
 } from "./project-context-privacy-authority";
+import {
+  assertDisclosedSelection,
+  assertModelHubInspectionAuthority,
+  modelHubInspectionAuthority,
+  providerActionFingerprint,
+  providerConnectionDisplayName,
+  type ProviderActionDisclosure,
+} from "./provider-action-disclosure";
 
 export interface GenerateStoryPlanningInput {
   readonly projectId: string;
   readonly task: StoryPlanningTask;
   readonly targetNodeId?: string;
   readonly userDirection?: string;
+  readonly disclosureFingerprint?: string;
+  readonly humanConfirmed?: boolean;
+}
+
+export interface StoryPlanningDisclosure extends ProviderActionDisclosure {
+  readonly task: StoryPlanningTask;
+  readonly targetTitle: string;
+  readonly maximumProviderCalls: 1;
+  readonly automaticRetryCount: 0;
 }
 
 export type StoryPlanningGenerationOutcome =
@@ -129,6 +150,15 @@ interface PlanningContext {
   readonly projectPrivacy: ProjectContextPrivacyReceipt;
 }
 
+interface PreparedStoryPlanningAction {
+  readonly context: PlanningContext;
+  readonly request: InspectModelHubTextTaskInput;
+  readonly inspection: ModelHubTextTaskInspection;
+  readonly evidence: readonly ModelCapabilityEvidence[];
+  readonly executionPolicy: ReturnType<typeof selectSingleAttemptStrictJsonPolicy>;
+  readonly disclosure: StoryPlanningDisclosure;
+}
+
 const MAXIMUM_USER_DIRECTION_CHARACTERS = 2_000;
 const MAXIMUM_FACTS = 80;
 const MAXIMUM_CAUSAL_EVENTS = 60;
@@ -153,85 +183,58 @@ export class ModelHubStoryPlanningService {
     return this.dependencies.candidates.listByProjectId(projectId, limit);
   }
 
+  public async prepareGeneration(
+    input: GenerateStoryPlanningInput,
+  ): Promise<StoryPlanningDisclosure> {
+    return (await this.prepareProviderAction(input)).disclosure;
+  }
+
   public async generate(
     input: GenerateStoryPlanningInput,
   ): Promise<StoryPlanningGenerationOutcome> {
-    const direction = normalizeOptionalDirection(input.userDirection);
-    const context = await this.buildContext(input);
-    const requiredDataDestination = projectContextRequiredDataDestination(context.projectPrivacy);
-    const request: InspectModelHubTextTaskInput = {
-      task: input.task,
-      messages: buildPlanningMessages(input.task, context, direction),
-      maximumOutputTokens: input.task === "outline_planning" ? 3_000 : 2_400,
-      temperature: 0.65,
-      ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
-    };
-
+    if (input.humanConfirmed !== true || input.disclosureFingerprint === undefined) {
+      return Object.freeze({
+        status: "skipped",
+        code: "STORY_PLANNING_CONFIRMATION_REQUIRED",
+        message: "请先查看并确认本次剧情规划的模型、发送范围和费用状态。",
+      });
+    }
     try {
-      const inspection = await this.inspectText(this.dependencies, request);
-      const assertStructuredOutputCurrent = async (catalogEntryId: string) => {
-        const evidence = await this.dependencies.modelHub.listCapabilityEvidence(catalogEntryId);
-        if (
-          resolveModelCapabilityVerdict({
-            catalogEntryId,
-            capability: "structured_output",
-            evidence,
-            now: this.dependencies.clock.now(),
-          }) !== "supported"
-        ) {
-          throw new ModelHubExecutionError(
-            "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED",
-            "发送规划建议前无法确认结构化输出能力，本次请求在发送 0 字后停止。",
-          );
-        }
-        return evidence;
-      };
-      let evidence;
-      try {
-        evidence = await assertStructuredOutputCurrent(inspection.catalogEntryId);
-      } catch (cause: unknown) {
-        if (
-          cause instanceof ModelHubExecutionError &&
-          cause.code === "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED"
-        ) {
-          return Object.freeze({
-            status: "skipped",
-            code: cause.code,
-            message:
-              "当前 AI 分工没有经过结构化输出能力验证。请在设置中验证该能力或为这项任务选择其他模型；正式大纲没有改变。",
-          });
-        }
-        throw cause;
+      const prepared = await this.prepareProviderAction(input);
+      if (prepared.disclosure.fingerprint !== input.disclosureFingerprint) {
+        throw planningDisclosureChanged();
       }
+      const { context, request, inspection, evidence, executionPolicy } = prepared;
       const executed = await this.executeText(this.dependencies, {
         ...request,
         dispatchScope: projectContextDispatchScope(context.projectPrivacy),
+        executionPolicy,
+        ...(executionPolicy.transportResponseFormat === "json_object"
+          ? { responseFormat: "json_object" as const }
+          : {}),
+        reasoningModeOverride: "disabled",
+        generationRetryLimitOverride: 0,
+        validateGeneratedText: (text) => {
+          parsePlanningResponse(text, input.task);
+        },
         onBeforeDispatch: async (selection) => {
-          if (
-            selection.connectionId !== inspection.connectionId ||
-            selection.catalogEntryId !== inspection.catalogEntryId ||
-            selection.modelId !== inspection.modelId ||
-            selection.usedFallback !== inspection.usedFallback
-          ) {
-            throw new ModelHubExecutionError(
-              "MODEL_HUB_PLAN_CHANGED",
-              "规划建议发送前 AI 分工发生了变化，请重新运行。",
-              true,
-            );
-          }
-          await assertStructuredOutputCurrent(selection.catalogEntryId);
+          assertPlanningSelection(inspection, selection);
+          await this.assertInspectionCurrent(request, inspection);
+          await this.assertStructuredOutputCurrent(selection.catalogEntryId);
           await assertPlanningPrivacyBeforeDispatch(
             this.dependencies.projectContextPrivacy,
             context.projectPrivacy,
             selection.localOnlyEligible === true,
           );
         },
-        onFinalBeforeProviderDispatch: async ({ catalogEntryId, localOnlyEligible }) => {
-          await assertStructuredOutputCurrent(catalogEntryId);
+        onFinalBeforeProviderDispatch: async (selection) => {
+          assertPlanningSelection(inspection, selection);
+          await this.assertInspectionCurrent(request, inspection);
+          await this.assertStructuredOutputCurrent(selection.catalogEntryId);
           await assertPlanningPrivacyBeforeDispatch(
             this.dependencies.projectContextPrivacy,
             context.projectPrivacy,
-            localOnlyEligible === true,
+            selection.localOnlyEligible === true,
           );
         },
       });
@@ -290,12 +293,131 @@ export class ModelHubStoryPlanningService {
       return Object.freeze({ status: "completed", candidate });
     } catch (cause: unknown) {
       if (cause instanceof ProjectContextPrivacyError) {
-        return Object.freeze({ status: "skipped", code: cause.code, message: cause.message });
+        return Object.freeze({
+          status: "skipped",
+          code: cause.code,
+          message: "作品隐私范围已变化，本次没有发送规划资料；请重新查看发送信息。",
+        });
       }
       if (cause instanceof ModelHubExecutionError && !cause.dispatched) {
-        return Object.freeze({ status: "skipped", code: cause.code, message: cause.message });
+        return Object.freeze({
+          status: "skipped",
+          code: cause.code,
+          message: planningSkippedMessage(cause.code),
+        });
       }
       throw cause;
+    }
+  }
+
+  private async prepareProviderAction(
+    input: GenerateStoryPlanningInput,
+  ): Promise<PreparedStoryPlanningAction> {
+    const direction = normalizeOptionalDirection(input.userDirection);
+    const context = await this.buildContext(input);
+    const requiredDataDestination = projectContextRequiredDataDestination(context.projectPrivacy);
+    const request: InspectModelHubTextTaskInput = Object.freeze({
+      task: input.task,
+      messages: buildPlanningMessages(input.task, context, direction),
+      maximumOutputTokens: input.task === "outline_planning" ? 3_000 : 2_400,
+      temperature: 0.65,
+      ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
+    });
+    const inspection = await this.inspectText(this.dependencies, request);
+    this.dependencies.projectContextPrivacy.assertRouteEligible(
+      context.projectPrivacy,
+      inspection.dataDestination === "local",
+    );
+    const evidence = await this.assertStructuredOutputCurrent(inspection.catalogEntryId);
+    const executionPolicy = selectSingleAttemptStrictJsonPolicy({
+      structuredOutputVerified: true,
+      jsonObjectTransportSupported:
+        getModelProviderPreset(inspection.providerKind).protocol === "openai_compatible",
+    });
+    let connectionDisplayName: string;
+    try {
+      connectionDisplayName = await providerConnectionDisplayName(
+        this.dependencies.modelHub,
+        inspection,
+      );
+    } catch {
+      throw planningDisclosureChanged();
+    }
+    const fingerprint = await providerActionFingerprint({
+      projectId: input.projectId,
+      task: input.task,
+      target: context.targetNode,
+      outlineRevision: context.outlineRevision,
+      direction,
+      contextReceipt: context.receipt,
+      privacyFingerprint: context.projectPrivacy.fingerprint,
+      inspection: modelHubInspectionAuthority(inspection),
+      structuredOutputEvidence: evidence,
+      messages: request.messages,
+      connectionDisplayName,
+      maximumProviderCalls: 1,
+      automaticRetryCount: 0,
+    });
+    const estimate = inspection.pricing.estimatedMaximumCostMicros;
+    return Object.freeze({
+      context,
+      request,
+      inspection,
+      evidence,
+      executionPolicy,
+      disclosure: Object.freeze({
+        fingerprint,
+        task: input.task,
+        targetTitle: context.targetNode.title,
+        connectionDisplayName,
+        modelId: inspection.modelId,
+        dataDestination: inspection.dataDestination,
+        privacy:
+          inspection.dataDestination === "local"
+            ? "规划资料只发送给当前已验证的本机模型。"
+            : "下列规划资料会发送到所选 AI 服务。",
+        sends: Object.freeze([
+          `“${context.targetNode.title}”的当前正式大纲与本次写作方向`,
+          `${String(context.receipt.formalFactIds.length)} 条已确认设定`,
+          `${String(context.receipt.causalEventIds.length)} 个有正文证据的主线事件`,
+        ]),
+        maximumProviderCalls: 1 as const,
+        automaticRetryCount: 0 as const,
+        estimatedMaximumCostMicros: estimate,
+        currency: estimate === null ? null : inspection.pricing.currency,
+      }),
+    });
+  }
+
+  private async assertStructuredOutputCurrent(
+    catalogEntryId: string,
+  ): Promise<readonly ModelCapabilityEvidence[]> {
+    const evidence = await this.dependencies.modelHub.listCapabilityEvidence(catalogEntryId);
+    if (
+      resolveModelCapabilityVerdict({
+        catalogEntryId,
+        capability: "structured_output",
+        evidence,
+        now: this.dependencies.clock.now(),
+      }) !== "supported"
+    ) {
+      throw new ModelHubExecutionError(
+        "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED",
+        "发送规划建议前无法确认结构化输出能力，本次请求在发送 0 字后停止。",
+      );
+    }
+    return evidence;
+  }
+
+  private async assertInspectionCurrent(
+    request: InspectModelHubTextTaskInput,
+    expected: ModelHubTextTaskInspection,
+  ): Promise<void> {
+    const current = await this.inspectText(this.dependencies, request);
+    try {
+      assertModelHubInspectionAuthority(expected, current);
+    } catch {
+      throw planningDisclosureChanged();
     }
   }
 
@@ -827,6 +949,35 @@ export class ModelHubStoryPlanningService {
       }),
     });
   }
+}
+
+function assertPlanningSelection(
+  inspection: ModelHubTextTaskInspection,
+  selection: Parameters<typeof assertDisclosedSelection>[1],
+): void {
+  try {
+    assertDisclosedSelection(inspection, selection);
+  } catch {
+    throw planningDisclosureChanged();
+  }
+}
+
+function planningDisclosureChanged(): ModelHubExecutionError {
+  return new ModelHubExecutionError(
+    "STORY_PLANNING_DISCLOSURE_CHANGED",
+    "模型、发送范围、费用或规划资料已经改变；本次没有发送，请重新查看并确认。",
+    true,
+  );
+}
+
+function planningSkippedMessage(code: string): string {
+  if (code === "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED") {
+    return "当前模型尚未通过规划所需的结构化输出验证；本次没有调用 AI，请在设置中重新验证或改选模型。";
+  }
+  if (code === "STORY_PLANNING_DISCLOSURE_CHANGED" || code === "MODEL_HUB_PLAN_CHANGED") {
+    return "模型、发送范围、费用或规划资料已经改变；本次没有调用 AI，请重新查看并确认。";
+  }
+  return "AI 服务的连接、能力或任务分工已变化；本次没有调用 AI，请在设置中检查后重新查看发送信息。";
 }
 
 function buildPlanningMessages(

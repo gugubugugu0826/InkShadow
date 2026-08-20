@@ -10,6 +10,7 @@ import type {
   NativeModelGenerationResult,
   NativeModelMessage,
 } from "./runtime";
+import type { NativeModelDispatchScope } from "./native-model-gateway-contract";
 
 export const MODEL_HUB_TEXT_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS =
   modelProviderTextCapabilityProbePolicy("openai").maxOutputTokens;
@@ -17,6 +18,11 @@ export const MODEL_HUB_TEXT_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS =
 export const MODEL_HUB_TEXT_CAPABILITY_PROBE_MESSAGES = Object.freeze([
   Object.freeze({ role: "user" as const, content: "只回复：OK" }),
 ]) satisfies readonly NativeModelMessage[];
+
+export const MODEL_HUB_TEXT_CAPABILITY_PROBE_DISPATCH_SCOPE = Object.freeze({
+  kind: "non_project",
+  reason: "connection_probe",
+}) satisfies NativeModelDispatchScope;
 
 export interface ModelHubTextCapabilityProbeResult extends NativeModelGenerationResult {
   /** True only when a probe accepted already-visible text from a truncated native response. */
@@ -54,7 +60,7 @@ export async function runModelHubTextCapabilityProbe(
   let visibleText = "";
   try {
     const generated = await input.gateway.generate({
-      dispatchScope: { kind: "non_project", reason: "connection_probe" },
+      dispatchScope: MODEL_HUB_TEXT_CAPABILITY_PROBE_DISPATCH_SCOPE,
       generationId: input.generationId,
       config: input.config,
       model: input.model,

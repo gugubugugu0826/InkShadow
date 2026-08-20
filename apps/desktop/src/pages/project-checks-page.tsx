@@ -38,12 +38,6 @@ import type {
   ChapterCharacterVoicePovIssue,
   ChapterCharacterVoicePovRuntimeResult,
 } from "../infrastructure/chapter-character-voice-pov-runtime";
-import type {
-  AmbiguousNovelReviewEvidence,
-  AmbiguousNovelReviewFinding,
-  AmbiguousNovelReviewResult,
-  AmbiguousNovelReviewTask,
-} from "../infrastructure/ambiguous-novel-review-service";
 import {
   characterVoicePovSupplementalFinding,
   findSupplementalFindingResolution,
@@ -53,8 +47,9 @@ import {
   type SupplementalFindingEvidenceIdentity,
 } from "../infrastructure/chapter-supplemental-finding-verifier";
 import { createEvidenceCorrectionCandidate } from "../infrastructure/evidence-correction-candidate";
-import { normalizeUiError, UiActionError } from "../infrastructure/ui-error";
+import { projectOrdinaryUiError, UiActionError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
+import { ConsistencyInvestigationPanel } from "../components/consistency-investigation-panel";
 
 const checkCategories = [
   ["人物与事实", "人物身份、生死、年龄、关系、能力和物品归属是否前后一致。"],
@@ -153,8 +148,6 @@ export function ProjectChecksPage() {
   );
   const [voicePovResult, setVoicePovResult] =
     useState<ChapterCharacterVoicePovRuntimeResult | null>(null);
-  const [ambiguousReviewResult, setAmbiguousReviewResult] =
-    useState<AmbiguousNovelReviewResult | null>(null);
   const [supplementalResolutions, setSupplementalResolutions] = useState<
     readonly ChapterSupplementalFindingResolutionSummary[]
   >([]);
@@ -194,7 +187,6 @@ export function ProjectChecksPage() {
       setResult(null);
       setNarrativeResult(null);
       setVoicePovResult(null);
-      setAmbiguousReviewResult(null);
       setSupplementalResolutions([]);
       if (projectId === null || selectedChapterId.length === 0) {
         setSnapshotLoading(false);
@@ -263,12 +255,6 @@ export function ProjectChecksPage() {
         setResult(checked);
         setNarrativeResult(narrative);
         setVoicePovResult(voicePov);
-        const ambiguous = await runtime.story.ambiguousReview.review({
-          projectId,
-          chapterId: chapterId.value,
-          expectedChapterVersionId: checked.chapterVersionId,
-        });
-        setAmbiguousReviewResult(ambiguous);
         if (checked.chapterVersionId !== null) {
           setSupplementalResolutions(
             await runtime.story.chapterValidation.listSupplementalFindingResolutions({
@@ -480,9 +466,9 @@ export function ProjectChecksPage() {
     }
   }
 
-  const normalizedLoadError = loadError === null ? null : normalizeUiError(loadError);
+  const normalizedLoadError = loadError === null ? null : projectOrdinaryUiError(loadError);
   const normalizedOperationError =
-    operationError === null ? null : normalizeUiError(operationError);
+    operationError === null ? null : projectOrdinaryUiError(operationError);
   const unresolvedCount =
     result?.issues.filter(({ resolution }) => resolution.status === "unresolved").length ?? 0;
   const selectedChapter = chapters.find(({ id }) => id === selectedChapterId) ?? null;
@@ -512,11 +498,22 @@ export function ProjectChecksPage() {
         description="结果会同时展示当前原文、冲突设定、双方来源、严重程度和修改建议。检查只读，不会自动修改正文或正式设定。"
       />
 
+      {projectId !== null && runtime.consistencyInvestigation !== null && (
+        <ConsistencyInvestigationPanel
+          projectId={projectId}
+          runtime={runtime.consistencyInvestigation}
+          onOpenCandidate={(candidate) =>
+            navigate(
+              `${projectRoot}/chapters/${candidate.chapterId}?candidate=${candidate.candidateId}`,
+            )
+          }
+        />
+      )}
+
       {normalizedLoadError !== null ? (
         <ErrorState
           title={normalizedLoadError.title}
           description={normalizedLoadError.description}
-          errorCode={normalizedLoadError.code}
           primaryAction={{ label: "重新读取章节", onClick: () => void loadChapters() }}
         />
       ) : loading ? (
@@ -554,7 +551,6 @@ export function ProjectChecksPage() {
                       setResult(null);
                       setNarrativeResult(null);
                       setVoicePovResult(null);
-                      setAmbiguousReviewResult(null);
                       setOperationError(null);
                       setActionNotice(null);
                     }}
@@ -578,7 +574,7 @@ export function ProjectChecksPage() {
         <InlineAlert
           tone="error"
           title={normalizedOperationError.title}
-          description={`${normalizedOperationError.description}（${normalizedOperationError.code}）`}
+          description={normalizedOperationError.description}
         />
       )}
       {actionNotice !== null && <InlineAlert title="处理结果已保存" description={actionNotice} />}
@@ -638,6 +634,7 @@ export function ProjectChecksPage() {
       {narrativeResult !== null && (
         <NarrativeAnalysisSections
           result={narrativeResult}
+          chapters={chapters}
           projectRoot={projectRoot}
           expectedChapterVersionId={result?.chapterVersionId ?? null}
           actionsDisabled={!snapshotIsCurrent}
@@ -662,11 +659,12 @@ export function ProjectChecksPage() {
         />
       )}
 
-      {ambiguousReviewResult !== null && (
-        <>
-          <AmbiguousNovelReviewSection result={ambiguousReviewResult} />
-          <ContentQualityReviewSection result={ambiguousReviewResult} />
-        </>
+      {result !== null && (
+        <InlineAlert
+          tone="info"
+          title="普通检查不会调用 AI"
+          description="旧版批量 AI 模糊复核已安全关闭。需要模型参与时，请使用页面上方的一致性调查，并在发送前核对该次调查展示的模型、调用与费用信息。"
+        />
       )}
 
       {result !== null && result.resolutions.length > 0 && (
@@ -706,239 +704,6 @@ export function ProjectChecksPage() {
       </details>
     </div>
   );
-}
-
-const ambiguousReviewTaskLabels: Readonly<Record<AmbiguousNovelReviewTask, string>> = {
-  contradiction_check: "语义矛盾复核",
-  pov_check: "视角与知情边界复核",
-  character_voice_check: "人物说话方式复核",
-  content_quality_check: "内容质量复核",
-};
-
-function AmbiguousNovelReviewSection({ result }: { result: AmbiguousNovelReviewResult }) {
-  const tasks = result.tasks.filter(({ task }) => task !== "content_quality_check");
-  const findings = result.findings.filter(({ task }) => task !== "content_quality_check");
-  const reviewedCount = tasks.filter(({ status }) => status === "reviewed").length;
-  return (
-    <section aria-labelledby="ambiguous-review-heading">
-      <div className="section-heading">
-        <div>
-          <p className="page-heading__eyebrow">与确定性检查分开显示</p>
-          <h2 id="ambiguous-review-heading">AI 模糊复核</h2>
-          <p>
-            仅在模型具备经过验证的文本生成与结构化输出能力、且精确证据充足时运行。所有发现都需要人工判断。
-          </p>
-        </div>
-        <Badge tone={findings.length > 0 ? "warning" : "neutral"}>
-          {findings.length} 项需要人工判断
-        </Badge>
-      </div>
-
-      <InlineAlert
-        tone="info"
-        title="只读复核，不会自动修复"
-        description={`本次共有 ${String(reviewedCount)} / ${String(tasks.length)} 项 AI 模糊复核实际运行。未运行、证据不足或返回内容未通过校验的项目都不会显示为通过。`}
-      />
-
-      <div className="settings-grid">
-        {tasks.map((task) => (
-          <Card key={task.task}>
-            <CardHeader>
-              <div className="card-heading-row">
-                <CardTitle headingLevel={3}>{ambiguousReviewTaskLabels[task.task]}</CardTitle>
-                <Badge
-                  tone={
-                    task.status === "reviewed"
-                      ? task.findings.length > 0
-                        ? "warning"
-                        : "neutral"
-                      : task.status === "failed"
-                        ? "danger"
-                        : "neutral"
-                  }
-                >
-                  {task.status === "reviewed"
-                    ? `${String(task.findings.length)} 项需判断`
-                    : "未运行 / 证据不足"}
-                </Badge>
-              </div>
-              <CardDescription>{task.explanation}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {task.invocation === null ? (
-                <p>
-                  <small>没有可展示的已验证模型调用。</small>
-                </p>
-              ) : (
-                <p>
-                  <small>
-                    调用记录 {task.invocation.id} · {task.invocation.providerKind} /{" "}
-                    {task.invocation.modelId}
-                    {task.invocation.usedFallback ? " · 已使用备用模型" : ""}
-                  </small>
-                </p>
-              )}
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-
-      {findings.length === 0 ? (
-        <InlineAlert
-          tone="info"
-          title={reviewedCount === 0 ? "本次 AI 复核未运行" : "AI 没有提出新的人工判断项"}
-          description={
-            reviewedCount === 0
-              ? "请查看上方每项的模型配置或证据说明。这里不会把未运行显示成通过。"
-              : "这只代表实际运行且证据充足的项目没有返回发现，不代表未运行项目或整章已经通过。"
-          }
-        />
-      ) : (
-        <div className="chapter-check-results">
-          {findings.map((finding) => (
-            <AmbiguousNovelReviewFindingCard key={finding.id} finding={finding} />
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function ContentQualityReviewSection({ result }: { result: AmbiguousNovelReviewResult }) {
-  const task = result.tasks.find(({ task: taskName }) => taskName === "content_quality_check");
-  if (task === undefined) {
-    return null;
-  }
-  return (
-    <section aria-labelledby="content-quality-review-heading">
-      <div className="section-heading">
-        <div>
-          <p className="page-heading__eyebrow">与确定性检查分开显示</p>
-          <h2 id="content-quality-review-heading">AI 内容质量建议</h2>
-          <p>
-            复核场景目标与因果、节奏与张力、信息密度、对话/描写/内心活动比例、重复功能场景、高潮铺垫和章节目标。
-          </p>
-        </div>
-        <Badge
-          tone={
-            task.status === "reviewed" && task.findings.length > 0
-              ? "warning"
-              : task.status === "failed"
-                ? "danger"
-                : "neutral"
-          }
-        >
-          {task.status === "reviewed"
-            ? `${String(task.findings.length)} 项 AI 建议`
-            : "未运行 / 证据不足"}
-        </Badge>
-      </div>
-
-      <InlineAlert
-        tone="info"
-        title="AI 建议，需要作者判断"
-        description="这是基于当前不可变章节版本和已确认资料的只读主观复核，不是质量总分，也不会修改正文、候选版本或正式故事设定。"
-      />
-
-      <Card>
-        <CardHeader>
-          <CardTitle headingLevel={3}>本次运行状态</CardTitle>
-          <CardDescription>{task.explanation}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {task.invocation === null ? (
-            <p>
-              <small>没有可展示的已验证模型调用。</small>
-            </p>
-          ) : (
-            <p>
-              <small>
-                调用记录 {task.invocation.id} · {task.invocation.providerKind} /{" "}
-                {task.invocation.modelId}
-                {task.invocation.usedFallback ? " · 已使用备用模型" : ""}
-              </small>
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
-      {task.status === "reviewed" && task.findings.length === 0 ? (
-        <InlineAlert
-          tone="info"
-          title="AI 没有提出新的内容质量建议"
-          description="这只表示本次实际运行的主观复核没有返回建议，不代表章节已经通过，也不替代作者判断。"
-        />
-      ) : task.findings.length > 0 ? (
-        <div className="chapter-check-results">
-          {task.findings.map((finding) => (
-            <AmbiguousNovelReviewFindingCard key={finding.id} finding={finding} />
-          ))}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function AmbiguousNovelReviewFindingCard({ finding }: { finding: AmbiguousNovelReviewFinding }) {
-  return (
-    <Card>
-      <CardHeader>
-        <div className="card-heading-row">
-          <div>
-            <CardTitle headingLevel={3}>{finding.title}</CardTitle>
-            <CardDescription>
-              {ambiguousReviewTaskLabels[finding.task]} · AI 建议，需要人工判断
-            </CardDescription>
-          </div>
-          <Badge tone={finding.severity === "error" ? "danger" : "warning"}>
-            {finding.severity === "error" ? "严重" : "需要留意"}
-          </Badge>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <p>{finding.explanation}</p>
-        <AmbiguousNovelReviewEvidenceList evidence={finding.evidence} />
-        <InlineAlert tone="info" title="修改建议" description={finding.suggestion} />
-      </CardContent>
-    </Card>
-  );
-}
-
-function AmbiguousNovelReviewEvidenceList({
-  evidence,
-}: {
-  evidence: readonly AmbiguousNovelReviewEvidence[];
-}) {
-  return (
-    <div>
-      <h4>精确证据</h4>
-      <ul className="privacy-list">
-        {evidence.map((source) => (
-          <li key={source.id}>
-            <strong>{ambiguousEvidenceRoleLabel(source.role)}</strong>：“{source.excerpt}”
-            <br />
-            <small>
-              版本 {source.chapterVersionId} · {source.locator} · UTF-16 {source.startOffset}–
-              {source.endOffset}
-            </small>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function ambiguousEvidenceRoleLabel(role: AmbiguousNovelReviewEvidence["role"]): string {
-  const labels: Readonly<Record<AmbiguousNovelReviewEvidence["role"], string>> = {
-    current_chapter: "当前正文",
-    confirmed_fact: "已确认设定",
-    locked_rule: "锁定规则",
-    current_pov_claim: "当前视角原文",
-    confirmed_knowledge: "已确认知情范围",
-    current_dialogue: "当前台词",
-    historical_dialogue: "历史台词",
-  };
-  return labels[role];
 }
 
 function CharacterVoicePovSection({
@@ -1067,7 +832,7 @@ function CharacterVoicePovIssueCard({
         <div className="card-heading-row">
           <div>
             <CardTitle headingLevel={3}>{issue.title}</CardTitle>
-            <CardDescription>{issue.summary}</CardDescription>
+            <CardDescription>{characterVoiceIssueSummary(issue)}</CardDescription>
           </div>
           <Badge tone={issue.severity === "error" ? "danger" : "warning"}>
             {issue.severity === "error" ? "严重" : "需要留意"}
@@ -1142,7 +907,8 @@ function CharacterEvidenceList({
               “{source.excerpt}”
               <br />
               <small>
-                版本 {source.chapterVersionId} · {source.locator}
+                {evidenceSourceLabel(source.sourceKind)} · 已绑定对应不可变版本 · 位置
+                {source.startOffset}–{source.endOffset}
               </small>
             </li>
           ))}
@@ -1155,6 +921,7 @@ function CharacterEvidenceList({
 function NarrativeAnalysisSections({
   actionsDisabled,
   busyIssue,
+  chapters,
   expectedChapterVersionId,
   onResolve,
   onUndo,
@@ -1163,6 +930,7 @@ function NarrativeAnalysisSections({
   result,
 }: Readonly<
   SupplementalFindingActionProps & {
+    readonly chapters: readonly Chapter[];
     readonly result: ChapterNarrativeAnalysisResult;
     readonly projectRoot: string;
   }
@@ -1213,6 +981,7 @@ function NarrativeAnalysisSections({
 
       <NarrativePlotlineSection
         result={result}
+        chapters={chapters}
         projectRoot={projectRoot}
         expectedChapterVersionId={expectedChapterVersionId}
         actionsDisabled={actionsDisabled}
@@ -1232,6 +1001,7 @@ function NarrativeAnalysisSections({
       />
       <NarrativePacingSection
         result={result}
+        chapters={chapters}
         expectedChapterVersionId={expectedChapterVersionId}
         actionsDisabled={actionsDisabled}
         busyIssue={busyIssue}
@@ -1259,6 +1029,7 @@ function NarrativeAnalysisSections({
 function NarrativePlotlineSection({
   actionsDisabled,
   busyIssue,
+  chapters,
   expectedChapterVersionId,
   onResolve,
   onUndo,
@@ -1267,6 +1038,7 @@ function NarrativePlotlineSection({
   result,
 }: Readonly<
   SupplementalFindingActionProps & {
+    readonly chapters: readonly Chapter[];
     readonly result: ChapterNarrativeAnalysisResult;
     readonly projectRoot: string;
   }
@@ -1277,6 +1049,12 @@ function NarrativePlotlineSection({
   }
   const conflicts = analysis.timeLocationConflicts;
   const hasContent = analysis.plotlines.length > 0;
+  const plotlineLabels = new Map(
+    analysis.plotlines.map((plotline, index) => [
+      plotline.plotlineId,
+      narrativeLabel(analyzedValue(plotline.goal), `剧情线 ${String(index + 1)}`),
+    ]),
+  );
   return (
     <section aria-labelledby="plotline-analysis-heading">
       <div className="section-heading">
@@ -1290,12 +1068,12 @@ function NarrativePlotlineSection({
       ) : (
         <div className="settings-grid">
           {analysis.plotlines.map((plotline) => {
-            const goal = analyzedValue(plotline.goal);
             const stagnation = analyzedValue(plotline.stagnation);
             const latest = analyzedValue(plotline.latestProgress);
             const characters = analyzedValue(plotline.characterIds);
             const dependencies = analyzedValue(plotline.dependencies);
             const convergences = analyzedValue(plotline.upcomingConvergences);
+            const plotlineLabel = plotlineLabels.get(plotline.plotlineId) ?? "未命名剧情线";
             const evidence = analyzedEvidence(
               plotline.goal,
               plotline.latestProgress,
@@ -1307,7 +1085,7 @@ function NarrativePlotlineSection({
               <Card key={plotline.plotlineId}>
                 <CardHeader>
                   <div className="card-heading-row">
-                    <CardTitle headingLevel={4}>{goal ?? "未命名剧情线"}</CardTitle>
+                    <CardTitle headingLevel={4}>{plotlineLabel}</CardTitle>
                     {stagnation !== null && (
                       <Badge tone={stagnation.state === "stagnant" ? "warning" : "neutral"}>
                         {plotlineStateLabel(stagnation.state)}
@@ -1323,7 +1101,7 @@ function NarrativePlotlineSection({
                         ? plotline.latestProgress.status === "analyzed"
                           ? "尚未开始"
                           : "尚无足够证据"
-                        : `${latest.summary}（章节 ${latest.chapterId}）`}
+                        : `${latest.summary}（${chapterDisplayLabel(chapters, latest.chapterId)}）`}
                     </li>
                     <li>
                       <strong>推进状态：</strong>
@@ -1335,7 +1113,11 @@ function NarrativePlotlineSection({
                     </li>
                     <li>
                       <strong>参与人物：</strong>
-                      {characters === null ? "尚无足够证据" : listOrNone(characters)}
+                      {characters === null
+                        ? "尚无足够证据"
+                        : characters.length === 0
+                          ? "没有已确认人物"
+                          : `${String(characters.length)} 位已确认人物`}
                     </li>
                     <li>
                       <strong>依赖：</strong>
@@ -1346,7 +1128,7 @@ function NarrativePlotlineSection({
                           : dependencies
                               .map(
                                 (dependency) =>
-                                  `${dependency.toPlotlineId}（${dependencyStatusLabel(dependency.status)}）`,
+                                  `${plotlineLabels.get(dependency.toPlotlineId) ?? "另一条剧情线"}（${dependencyStatusLabel(dependency.status)}）`,
                               )
                               .join("；")}
                     </li>
@@ -1368,7 +1150,7 @@ function NarrativePlotlineSection({
                     <NarrativeFindingDisposition
                       title="剧情线长期未推进"
                       severity="warning"
-                      explanation={`“${goal ?? plotline.plotlineId}”已超过 ${String(stagnation.threshold)} 章未推进。`}
+                      explanation={`“${plotlineLabel}”已超过 ${String(stagnation.threshold)} 章未推进。`}
                       suggestion="在接下来的场景推进该剧情线、明确安排交汇点，或在确认有意搁置时标记为允许。"
                       finding={{
                         id: `narrative:plotline:${plotline.plotlineId}:stagnant`,
@@ -1408,7 +1190,7 @@ function NarrativePlotlineSection({
                   key={conflict.id}
                   title="人物时空冲突"
                   severity="error"
-                  explanation={`${conflict.characterId} 在故事时间 ${String(conflict.overlappingStoryTime.start)}–${String(conflict.overlappingStoryTime.end)} 同时出现在 ${conflict.locationIds.join(" 和 ")}。`}
+                  explanation={`一位已确认人物在故事时间 ${String(conflict.overlappingStoryTime.start)}–${String(conflict.overlappingStoryTime.end)} 同时出现在两个不同地点。`}
                   suggestion="核对两条事件的时间、地点和参与人物，保留有原文依据的一条；若这是有意设定，可标记为允许。"
                   finding={{
                     id: `narrative:time-location:${conflict.id}`,
@@ -1459,12 +1241,13 @@ function NarrativeForeshadowSection({
         <NarrativeEvidenceMissing />
       ) : (
         <div className="settings-grid">
-          {analysis.foreshadows.map((foreshadow) => {
+          {analysis.foreshadows.map((foreshadow, index) => {
+            const foreshadowLabel = `伏笔线索 ${String(index + 1)}`;
             if (foreshadow.progress.status === "skipped") {
               return (
                 <Card key={foreshadow.foreshadowId}>
                   <CardHeader>
-                    <CardTitle headingLevel={4}>{foreshadow.foreshadowId}</CardTitle>
+                    <CardTitle headingLevel={4}>{foreshadowLabel}</CardTitle>
                   </CardHeader>
                   <CardContent>
                     <p>尚无足够证据</p>
@@ -1477,7 +1260,7 @@ function NarrativeForeshadowSection({
               <Card key={foreshadow.foreshadowId}>
                 <CardHeader>
                   <div className="card-heading-row">
-                    <CardTitle headingLevel={4}>{foreshadow.foreshadowId}</CardTitle>
+                    <CardTitle headingLevel={4}>{foreshadowLabel}</CardTitle>
                     <Badge tone={progress.stagnant ? "warning" : "neutral"}>
                       {foreshadowStateLabel(progress.state)}
                     </Badge>
@@ -1519,7 +1302,7 @@ function NarrativeForeshadowSection({
                     <NarrativeFindingDisposition
                       title="伏笔长期未推进"
                       severity="warning"
-                      explanation={`“${foreshadow.foreshadowId}”距最近一次推进已经 ${String(progress.chaptersSinceProgress ?? progress.threshold)} 章。`}
+                      explanation={`“${foreshadowLabel}”距最近一次推进已经 ${String(progress.chaptersSinceProgress ?? progress.threshold)} 章。`}
                       suggestion="在后续场景安排推进或回收；若有意延后，可以标记为允许并保留审计记录。"
                       finding={{
                         id: `narrative:foreshadow:${foreshadow.foreshadowId}:stagnant:${progress.latestProgress?.id ?? "none"}`,
@@ -1549,12 +1332,18 @@ function NarrativeForeshadowSection({
 function NarrativePacingSection({
   actionsDisabled,
   busyIssue,
+  chapters,
   expectedChapterVersionId,
   onResolve,
   onUndo,
   resolutions,
   result,
-}: Readonly<SupplementalFindingActionProps & { readonly result: ChapterNarrativeAnalysisResult }>) {
+}: Readonly<
+  SupplementalFindingActionProps & {
+    readonly chapters: readonly Chapter[];
+    readonly result: ChapterNarrativeAnalysisResult;
+  }
+>) {
   const analysis = result.analysis;
   if (analysis === null) {
     return null;
@@ -1564,6 +1353,12 @@ function NarrativePacingSection({
       chapter.conflict.status === "analyzed" ||
       chapter.tension.status === "analyzed" ||
       chapter.composition.status === "analyzed",
+  );
+  const sceneLabels = new Map(
+    analysis.scenes.map((scene, index) => [
+      scene.sceneId,
+      narrativeLabel(analyzedValue(scene.goal), `场景 ${String(index + 1)}`),
+    ]),
   );
   return (
     <section aria-labelledby="pacing-analysis-heading">
@@ -1637,7 +1432,7 @@ function NarrativePacingSection({
                   key={narrativeQualityFindingId(finding)}
                   title="节奏与章节功能提醒"
                   severity="warning"
-                  explanation={qualityFindingLabel(finding)}
+                  explanation={qualityFindingLabel(finding, chapters, sceneLabels)}
                   suggestion={qualityFindingSuggestion(finding)}
                   finding={{
                     id: narrativeQualityFindingId(finding),
@@ -1666,9 +1461,7 @@ function NarrativePacingSection({
           <ul className="privacy-list">
             {analysis.scenes.map((scene) => (
               <li key={scene.sceneId}>
-                <strong>
-                  {scene.goal.status === "analyzed" ? scene.goal.value : `场景 ${scene.sceneId}`}
-                </strong>
+                <strong>{sceneLabels.get(scene.sceneId) ?? "未命名场景"}</strong>
                 ：冲突
                 {scene.conflictIntensity.status === "analyzed"
                   ? ` ${formatDecimal(scene.conflictIntensity.value)}`
@@ -1787,7 +1580,7 @@ function SupplementalFindingActions({
     );
   }
   return (
-    <div className="settings-actions" aria-label={`${finding.id}处理操作`}>
+    <div className="settings-actions" aria-label="检查提醒处理操作">
       {resolution === undefined ? (
         <>
           <Button
@@ -1844,8 +1637,8 @@ function SupplementalEvidenceList({
             “{source.excerpt}”
             <br />
             <small>
-              {source.locator} · 版本 {source.sourceVersionId} · UTF-16 {source.startOffset}–
-              {source.endOffset}
+              {evidenceSourceLabel(source.sourceKind)} · 已绑定对应不可变版本 · 位置
+              {source.startOffset}–{source.endOffset}
             </small>
           </li>
         ))}
@@ -1890,8 +1683,8 @@ function NarrativeEvidenceList({ evidence }: { evidence: readonly NarrativeEvide
             <span>“{source.excerpt}”</span>
             <br />
             <small>
-              {source.locator} · 版本 {source.sourceVersionId} · UTF-16 {source.startOffset}–
-              {source.endOffset}
+              {evidenceSourceLabel(source.sourceKind)} · 已绑定对应不可变版本 · 位置
+              {source.startOffset}–{source.endOffset}
             </small>
           </li>
         ))}
@@ -1902,6 +1695,30 @@ function NarrativeEvidenceList({ evidence }: { evidence: readonly NarrativeEvide
 
 function analyzedValue<Value>(field: NarrativeAnalysisField<Value>): Value | null {
   return field.status === "analyzed" ? field.value : null;
+}
+
+function characterVoiceIssueSummary(issue: ChapterCharacterVoicePovIssue): string {
+  return issue.kind === "character_voice_deviation"
+    ? "一位已确认人物的当前表达与已确认历史台词存在明显差异。"
+    : "一位已确认人物在当前片段中的知识状态与已确认记录存在冲突。";
+}
+
+function evidenceSourceLabel(sourceKind: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    chapter: "章节原文",
+    chapter_version: "章节版本",
+    story_fact: "已确认事实",
+    character_state: "人物状态",
+    relationship: "人物关系",
+    timeline: "时间线",
+    world_rule: "世界规则",
+    causal_event: "因果事件",
+    outline: "规划资料",
+    scene_metric: "场景指标",
+    foreshadow: "伏笔记录",
+    import: "导入资料",
+  };
+  return labels[sourceKind] ?? "已确认资料";
 }
 
 function analyzedEvidence(
@@ -1932,16 +1749,39 @@ function booleanMeasurement<
   return measured === undefined ? "尚无足够证据" : measured ? yes : no;
 }
 
-function qualityFindingLabel(finding: NarrativeQualityFinding): string {
+function narrativeLabel(value: string | null, fallback: string): string {
+  const normalized = value?.trim() ?? "";
+  return normalized.length > 0 ? normalized : fallback;
+}
+
+function chapterDisplayLabel(chapters: readonly Chapter[], chapterId: string): string {
+  const title = chapters.find(({ id }) => id === chapterId)?.title.trim() ?? "";
+  return title.length > 0 ? `《${title}》` : "相关章节";
+}
+
+function qualityFindingLabel(
+  finding: NarrativeQualityFinding,
+  chapters: readonly Chapter[],
+  sceneLabels: ReadonlyMap<string, string>,
+): string {
   switch (finding.kind) {
     case "scene_changes_neither_plot_nor_character":
-      return `场景 ${finding.sceneId} 既未推进剧情，也未改变人物状态。`;
-    case "repeated_scene_function":
-      return `场景 ${finding.sceneIds.join("、")} 承担了重复的叙事功能。`;
+      return `“${sceneLabels.get(finding.sceneId) ?? "相关场景"}”既未推进剧情，也未改变人物状态。`;
+    case "repeated_scene_function": {
+      const labels = finding.sceneIds.map(
+        (sceneId, index) => sceneLabels.get(sceneId) ?? `相关场景 ${String(index + 1)}`,
+      );
+      return `${labels.join("、")}承担了重复的叙事功能。`;
+    }
     case "climax_missing_required_setup":
-      return `高潮场景 ${finding.sceneId} 缺少明确要求的铺垫：${finding.missingSetupBeatIds.join("、")}。`;
-    case "consecutive_chapters_have_similar_pacing":
-      return `连续章节 ${finding.chapterIds.join("、")} 的已测节奏过于相似。`;
+      return `“${sceneLabels.get(finding.sceneId) ?? "高潮场景"}”缺少 ${String(finding.missingSetupBeatIds.length)} 项明确要求的铺垫。`;
+    case "consecutive_chapters_have_similar_pacing": {
+      const chapterLabels = finding.chapterIds.map((chapterId, index) => {
+        const label = chapterDisplayLabel(chapters, chapterId);
+        return label === "相关章节" ? `相关章节 ${String(index + 1)}` : label;
+      });
+      return `连续章节 ${chapterLabels.join("、")} 的已测节奏过于相似。`;
+    }
   }
 }
 
@@ -1998,10 +1838,6 @@ function foreshadowIssueSuggestion(
 
 function tensionTrendLabel(trend: "rising" | "falling" | "flat"): string {
   return trend === "rising" ? "上升" : trend === "falling" ? "下降" : "平稳";
-}
-
-function listOrNone(values: readonly string[]): string {
-  return values.length === 0 ? "没有已确认记录" : values.join("、");
 }
 
 function formatDecimal(value: number): string {
@@ -2237,8 +2073,8 @@ function EvidencePanel({
         <ul>
           {evidence.map((source) => (
             <li key={`${source.sourceVersionId}:${String(source.startOffset)}`}>
-              <span>{source.locator}</span>
-              <code>{source.sourceVersionId}</code>
+              <span>{evidenceSourceLabel(source.sourceKind)}</span>
+              <span>已绑定对应不可变版本</span>
               <span>
                 位置 {source.startOffset}–{source.endOffset}
               </span>
@@ -2264,7 +2100,6 @@ function ResolutionHistory({
             <strong>{resolutionActionLabel(resolution.action)}</strong>
             <span>{resolutionStateLabel(resolution.state)}</span>
             <time dateTime={resolution.decidedAt}>{formatTimestamp(resolution.decidedAt)}</time>
-            <code>{resolution.factId}</code>
           </li>
         ))}
       </ul>

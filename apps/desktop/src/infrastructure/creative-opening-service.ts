@@ -15,12 +15,15 @@ import {
   type UuidV7,
 } from "@inkshadow/domain";
 
-import { ModelCenterError, type ModelProfile } from "./model-center-store";
-import { executeModelHubTextTask, ModelHubExecutionError } from "./model-hub-execution-service";
+import { ModelCenterError } from "./model-center-store";
 import {
-  resolveFinalModelProfileGatewayConfig,
-  resolveModelProfileGatewayConfig,
-} from "./model-profile-gateway-config";
+  executeModelHubTextTask,
+  inspectModelHubTextTask,
+  ModelHubExecutionError,
+  type InspectModelHubTextTaskInput,
+  type ModelHubTextTaskInspection,
+} from "./model-hub-execution-service";
+import { SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY } from "./model-execution-policy";
 import { createContextCompilationTrace } from "./context-compilation-trace-store";
 import {
   validateCreativeOpeningDirection,
@@ -36,6 +39,15 @@ import {
 } from "./project-context-privacy-authority";
 import { selectProjectSeedContextCandidates } from "./project-seed-context-adapter";
 import type { PreparedNovelSkillInvocation } from "./novel-skill-runtime";
+import {
+  assertDisclosedSelection,
+  assertModelHubInspectionAuthority,
+  modelHubInspectionAuthority,
+  providerActionFingerprint,
+  providerConnectionDisplayName,
+  totalDisclosedCost,
+  type ProviderActionDisclosure,
+} from "./provider-action-disclosure";
 import type { DesktopRuntime, NativeModelMessage } from "./runtime";
 
 export interface CreativeOpeningResult {
@@ -52,11 +64,78 @@ export interface CreativeOpeningResult {
 
 export type CreativeOpeningAngle = "immediate_action" | "relationship_dialogue" | "mystery_clue";
 
+export const CREATIVE_OPENING_BATCH_ANGLES = Object.freeze([
+  "immediate_action",
+  "relationship_dialogue",
+  "mystery_clue",
+] as const satisfies readonly CreativeOpeningAngle[]);
+
+export type CreativeOpeningProviderActionKind =
+  "initial_batch" | "replacement_batch" | "complete_partial" | "regenerate_single";
+
+export interface CreativeOpeningProviderActionInput {
+  readonly actionId: string;
+  readonly kind: CreativeOpeningProviderActionKind;
+  readonly idea: string;
+  readonly direction?: string;
+  readonly answers?: Readonly<Record<string, string>>;
+  readonly projectContext: CreativeOpeningProjectContext;
+  /** Three stable slot ids for a batch, or one stable id for a single-slot action. */
+  readonly requestIds: readonly string[];
+  /** Required for single-slot actions and derived from the fixed angle set for batches. */
+  readonly openingAngle?: CreativeOpeningAngle;
+  /** Required only when completing one explicitly selected partial proposal. */
+  readonly partialOpening?: string;
+}
+
+export interface CreativeOpeningProviderCallDisclosure {
+  readonly requestId: string;
+  readonly openingAngle: CreativeOpeningAngle;
+  readonly connectionDisplayName: string;
+  readonly modelId: string;
+  readonly dataDestination: "local" | "remote";
+  readonly estimatedMaximumCostMicros: string | null;
+  readonly currency: string | null;
+}
+
+export interface CreativeOpeningProviderActionDisclosure extends ProviderActionDisclosure {
+  readonly kind: CreativeOpeningProviderActionKind;
+  readonly requestCount: 1 | 3;
+  readonly maximumProviderCalls: 1 | 3;
+  readonly perRequestMaximumProviderCalls: 1;
+  readonly automaticRetryCount: 0;
+  readonly calls: readonly CreativeOpeningProviderCallDisclosure[];
+}
+
+export interface ExecuteCreativeOpeningProviderActionInput extends CreativeOpeningProviderActionInput {
+  readonly humanConfirmed?: boolean;
+  readonly disclosureFingerprint?: string;
+  readonly assertBeforeProviderDispatch?: (requestId: string) => void;
+  readonly onInvocationPrepared?: (
+    requestId: string,
+    input: Readonly<{
+      invocationId: string;
+      connectionId: string;
+      modelId: string;
+    }>,
+  ) => void | Promise<void>;
+  readonly onProviderDispatchStarted?: (requestId: string, invocationId: string) => void;
+  readonly onDelta?: (requestId: string, text: string) => void;
+  /** Persists each independently settled slot without waiting for the rest of a batch. */
+  readonly onResult?: (result: CreativeOpeningResult) => void | Promise<void>;
+}
+
 /** A truncated proposal below this boundary is not useful enough to offer to the author. */
 export const MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS = 160;
 
 export type CreativeOpeningDestination =
-  Readonly<{ kind: "local" }> | Readonly<{ kind: "provider"; providerId: string; modelId: string }>;
+  | Readonly<{ kind: "local" }>
+  | Readonly<{
+      kind: "provider";
+      providerId: string;
+      connectionDisplayName: string;
+      modelId: string;
+    }>;
 
 export interface CreativeOpeningProjectContext {
   readonly projectId: string;
@@ -71,6 +150,110 @@ interface PreparedCreativeOpeningProjectContext extends CreativeOpeningProjectCo
   readonly novelSkillPreparation: PreparedNovelSkillInvocation;
   readonly novelSkillPromptSection: string | null;
   readonly chapterVersionId: string;
+}
+
+interface NormalizedCreativeOpeningProviderRequest {
+  readonly requestId: string;
+  readonly openingAngle: CreativeOpeningAngle;
+  readonly partialOpening: string | null;
+}
+
+interface CreativeOpeningDispatchBinding {
+  readonly inspection: ModelHubTextTaskInspection;
+  readonly sourceFingerprint: string;
+}
+
+interface PreparedCreativeOpeningProviderCall {
+  readonly request: NormalizedCreativeOpeningProviderRequest;
+  readonly inspectionRequest: InspectModelHubTextTaskInput;
+  readonly inspection: ModelHubTextTaskInspection;
+  readonly connectionDisplayName: string;
+  readonly sourceFingerprint: string;
+}
+
+interface PreparedCreativeOpeningProviderAction {
+  readonly calls: readonly PreparedCreativeOpeningProviderCall[];
+  readonly disclosure: CreativeOpeningProviderActionDisclosure;
+}
+
+/**
+ * Resolves the complete bounded opening action without creating an invocation
+ * or crossing the native Provider boundary. The caller must present this exact
+ * fingerprint and obtain a fresh explicit confirmation before execution.
+ */
+export async function prepareCreativeOpeningProviderAction(
+  runtime: DesktopRuntime,
+  input: CreativeOpeningProviderActionInput,
+): Promise<CreativeOpeningProviderActionDisclosure> {
+  return (await prepareCreativeOpeningProviderActionCurrent(runtime, input)).disclosure;
+}
+
+/**
+ * Executes exactly the disclosed opening slots. Every slot is a separate
+ * single-attempt invocation; batches contain three slots and single-slot
+ * completion/regeneration contains one. No action inherits Provider retries.
+ */
+export async function executeCreativeOpeningProviderAction(
+  runtime: DesktopRuntime,
+  input: ExecuteCreativeOpeningProviderActionInput,
+): Promise<readonly CreativeOpeningResult[]> {
+  if (input.humanConfirmed !== true || input.disclosureFingerprint === undefined) {
+    throw new ModelCenterError(
+      "CREATIVE_OPENING_CONFIRMATION_REQUIRED",
+      "请先查看并确认这次开头生成的模型、发送范围、隐私和费用状态。",
+    );
+  }
+  const prepared = await prepareCreativeOpeningProviderActionCurrent(runtime, input);
+  if (prepared.disclosure.fingerprint !== input.disclosureFingerprint) {
+    throw creativeOpeningDisclosureChanged();
+  }
+  return Promise.all(
+    prepared.calls.map(async (call) => {
+      const result = await generateCreativeOpeningInternal(
+        runtime,
+        {
+          idea: input.idea,
+          ...(input.direction === undefined ? {} : { direction: input.direction }),
+          answers: input.answers ?? {},
+          openingAngle: call.request.openingAngle,
+          ...(call.request.partialOpening === null
+            ? {}
+            : { partialOpening: call.request.partialOpening }),
+          requestId: call.request.requestId,
+          projectContext: input.projectContext,
+          ...(input.assertBeforeProviderDispatch === undefined
+            ? {}
+            : {
+                assertBeforeProviderDispatch: () =>
+                  input.assertBeforeProviderDispatch?.(call.request.requestId),
+              }),
+          ...(input.onInvocationPrepared === undefined
+            ? {}
+            : {
+                onInvocationPrepared: (selection) =>
+                  input.onInvocationPrepared?.(call.request.requestId, selection),
+              }),
+          ...(input.onProviderDispatchStarted === undefined
+            ? {}
+            : {
+                onProviderDispatchStarted: (invocationId) =>
+                  input.onProviderDispatchStarted?.(call.request.requestId, invocationId),
+              }),
+          ...(input.onDelta === undefined
+            ? {}
+            : {
+                onDelta: (text) => input.onDelta?.(call.request.requestId, text),
+              }),
+        },
+        Object.freeze({
+          inspection: call.inspection,
+          sourceFingerprint: call.sourceFingerprint,
+        }),
+      );
+      await input.onResult?.(result);
+      return result;
+    }),
+  );
 }
 
 export async function inspectCreativeOpeningDestination(
@@ -97,6 +280,7 @@ export async function inspectCreativeOpeningDestination(
             return {
               kind: "provider",
               providerId: connection.id,
+              connectionDisplayName: connection.displayName,
               modelId: entry.providerModelId,
             };
           }
@@ -105,10 +289,276 @@ export async function inspectCreativeOpeningDestination(
       return { kind: "local" };
     }
   }
-  const profile = await resolveOpeningProfile(runtime).catch(() => null);
-  return runtime.mode === "tauri" && profile?.selectedModel !== null && profile !== null
-    ? { kind: "provider", providerId: profile.providerId, modelId: profile.selectedModel }
-    : { kind: "local" };
+  return { kind: "local" };
+}
+
+async function prepareCreativeOpeningProviderActionCurrent(
+  runtime: DesktopRuntime,
+  input: CreativeOpeningProviderActionInput,
+): Promise<PreparedCreativeOpeningProviderAction> {
+  if (runtime.mode !== "tauri" || !runtime.modelGateway.available) {
+    throw new ModelCenterError(
+      "MODEL_NATIVE_GATEWAY_UNAVAILABLE",
+      "AI 开头需要桌面版中已连接的模型。请先连接模型，再返回继续。",
+    );
+  }
+  const actionId = normalizeOpeningActionIdentifier(input.actionId, "动作");
+  const idea = validateCreativeOpeningIdea(input.idea);
+  const direction =
+    input.direction === undefined || input.direction.trim().length === 0
+      ? null
+      : validateCreativeOpeningDirection(input.direction);
+  const answers = input.answers ?? {};
+  const requests = normalizeCreativeOpeningProviderRequests(input);
+  const calls: PreparedCreativeOpeningProviderCall[] = [];
+
+  for (const request of requests) {
+    const preparedProjectContext = await prepareCreativeOpeningProjectContext(runtime, {
+      ...input.projectContext,
+      idea,
+      direction,
+      answers,
+      openingAngle: request.openingAngle,
+      partialOpening: request.partialOpening,
+      requestId: request.requestId,
+    });
+    const messages = buildOpeningMessages(
+      idea,
+      direction,
+      answers,
+      request.openingAngle,
+      request.partialOpening,
+      preparedProjectContext.compiled,
+      preparedProjectContext.novelSkillPromptSection,
+    );
+    const inspectionRequest = creativeOpeningInspectionRequest(
+      messages,
+      preparedProjectContext.privacyReceipt,
+    );
+    const inspection = await inspectModelHubTextTask(runtime, inspectionRequest);
+    try {
+      runtime.projectContextPrivacy.assertRouteEligible(
+        preparedProjectContext.privacyReceipt,
+        inspection.dataDestination === "local",
+      );
+    } catch (cause: unknown) {
+      if (cause instanceof ProjectContextPrivacyError) {
+        throw new ModelCenterError(cause.code, cause.message, cause.retryable);
+      }
+      throw cause;
+    }
+    let connectionDisplayName: string;
+    try {
+      connectionDisplayName = await providerConnectionDisplayName(runtime.modelHub, inspection);
+    } catch {
+      throw creativeOpeningDisclosureChanged();
+    }
+    calls.push(
+      Object.freeze({
+        request,
+        inspectionRequest,
+        inspection,
+        connectionDisplayName,
+        sourceFingerprint: await creativeOpeningSourceFingerprint({
+          requestId: request.requestId,
+          idea,
+          direction,
+          answers,
+          openingAngle: request.openingAngle,
+          partialOpening: request.partialOpening,
+          messages,
+          preparedProjectContext,
+        }),
+      }),
+    );
+  }
+
+  const first = calls[0];
+  if (first === undefined || calls.some((call) => !sameOpeningDisclosureTarget(first, call))) {
+    throw new ModelCenterError(
+      "CREATIVE_OPENING_ACTION_ROUTE_INCONSISTENT",
+      "同一次开头操作解析到了不同模型或隐私去向，本次没有发送；请检查任务分工后重试。",
+      true,
+    );
+  }
+  const maximumProviderCalls = openingActionMaximumProviderCalls(input.kind);
+  const cost = totalDisclosedCost(calls.map(({ inspection }) => inspection));
+  const fingerprint = await providerActionFingerprint({
+    actionId,
+    kind: input.kind,
+    projectContext: input.projectContext,
+    idea,
+    direction,
+    answers,
+    calls: calls.map(({ request, inspection, connectionDisplayName, sourceFingerprint }) => ({
+      request,
+      inspection: modelHubInspectionAuthority(inspection),
+      connectionDisplayName,
+      sourceFingerprint,
+    })),
+    maximumProviderCalls,
+    perRequestMaximumProviderCalls: 1,
+    automaticRetryCount: 0,
+  });
+  const disclosureCalls = calls.map(
+    ({ request, inspection, connectionDisplayName }): CreativeOpeningProviderCallDisclosure =>
+      Object.freeze({
+        requestId: request.requestId,
+        openingAngle: request.openingAngle,
+        connectionDisplayName,
+        modelId: inspection.modelId,
+        dataDestination: inspection.dataDestination,
+        estimatedMaximumCostMicros: inspection.pricing.estimatedMaximumCostMicros,
+        currency:
+          inspection.pricing.estimatedMaximumCostMicros === null
+            ? null
+            : inspection.pricing.currency,
+      }),
+  );
+  const disclosure: CreativeOpeningProviderActionDisclosure = Object.freeze({
+    fingerprint,
+    kind: input.kind,
+    requestCount: maximumProviderCalls,
+    connectionDisplayName: first.connectionDisplayName,
+    modelId: first.inspection.modelId,
+    dataDestination: first.inspection.dataDestination,
+    privacy:
+      first.inspection.dataDestination === "local"
+        ? "本次开头资料只发送给当前已验证的本机模型。"
+        : "下列开头资料会发送到所选 AI 服务；生成结果仍是隔离建议，不会自动写入正文。",
+    sends: creativeOpeningSendingScope({
+      idea,
+      direction,
+      answers,
+      calls,
+    }),
+    maximumProviderCalls,
+    perRequestMaximumProviderCalls: 1 as const,
+    automaticRetryCount: 0 as const,
+    estimatedMaximumCostMicros: cost.estimatedMaximumCostMicros,
+    currency: cost.currency,
+    calls: Object.freeze(disclosureCalls),
+  });
+  return Object.freeze({ calls: Object.freeze(calls), disclosure });
+}
+
+function normalizeCreativeOpeningProviderRequests(
+  input: CreativeOpeningProviderActionInput,
+): readonly NormalizedCreativeOpeningProviderRequest[] {
+  const maximumProviderCalls = openingActionMaximumProviderCalls(input.kind);
+  if (input.requestIds.length !== maximumProviderCalls) {
+    throw invalidCreativeOpeningAction(
+      `“${input.kind}”必须绑定 ${String(maximumProviderCalls)} 个稳定请求。`,
+    );
+  }
+  const requestIds = input.requestIds.map((requestId) =>
+    normalizeOpeningActionIdentifier(requestId, "请求"),
+  );
+  if (new Set(requestIds).size !== requestIds.length) {
+    throw invalidCreativeOpeningAction("同一次开头操作不能重复使用请求标识。");
+  }
+  if (maximumProviderCalls === 3) {
+    if (input.openingAngle !== undefined || input.partialOpening !== undefined) {
+      throw invalidCreativeOpeningAction("三方案动作使用固定的三个创作角度，不能附带单方案参数。");
+    }
+    return Object.freeze(
+      CREATIVE_OPENING_BATCH_ANGLES.map((openingAngle, index) =>
+        Object.freeze({
+          requestId: requestIds[index] ?? "",
+          openingAngle,
+          partialOpening: null,
+        }),
+      ),
+    );
+  }
+  if (input.openingAngle === undefined) {
+    throw invalidCreativeOpeningAction("单方案动作必须绑定原方案的创作角度。");
+  }
+  if (input.kind === "complete_partial") {
+    if (input.partialOpening === undefined) {
+      throw invalidCreativeOpeningAction("补全动作必须绑定作者明确选择的未完整开头。");
+    }
+    return Object.freeze([
+      Object.freeze({
+        requestId: requestIds[0] ?? "",
+        openingAngle: input.openingAngle,
+        partialOpening: validateCreativeOpeningProse(input.partialOpening, 64_000, "未完整开头"),
+      }),
+    ]);
+  }
+  if (input.partialOpening !== undefined) {
+    throw invalidCreativeOpeningAction("单方案重新生成不能把旧方案作为续写正文发送。");
+  }
+  return Object.freeze([
+    Object.freeze({
+      requestId: requestIds[0] ?? "",
+      openingAngle: input.openingAngle,
+      partialOpening: null,
+    }),
+  ]);
+}
+
+function openingActionMaximumProviderCalls(kind: CreativeOpeningProviderActionKind): 1 | 3 {
+  return kind === "initial_batch" || kind === "replacement_batch" ? 3 : 1;
+}
+
+function normalizeOpeningActionIdentifier(value: string, label: string): string {
+  const normalized = value.normalize("NFC").trim();
+  if (
+    normalized.length === 0 ||
+    normalized.length > 256 ||
+    /[\u0000-\u001f\u007f]/u.test(normalized)
+  ) {
+    throw invalidCreativeOpeningAction(`${label}标识无效。`);
+  }
+  return normalized;
+}
+
+function invalidCreativeOpeningAction(message: string): ModelCenterError {
+  return new ModelCenterError("CREATIVE_OPENING_ACTION_INVALID", message);
+}
+
+function sameOpeningDisclosureTarget(
+  first: PreparedCreativeOpeningProviderCall,
+  candidate: PreparedCreativeOpeningProviderCall,
+): boolean {
+  return (
+    first.inspection.connectionId === candidate.inspection.connectionId &&
+    first.inspection.catalogEntryId === candidate.inspection.catalogEntryId &&
+    first.inspection.modelId === candidate.inspection.modelId &&
+    first.inspection.dataDestination === candidate.inspection.dataDestination &&
+    first.inspection.privacyPolicy === candidate.inspection.privacyPolicy &&
+    first.connectionDisplayName === candidate.connectionDisplayName
+  );
+}
+
+function creativeOpeningSendingScope(input: {
+  readonly idea: string;
+  readonly direction: string | null;
+  readonly answers: Readonly<Record<string, string>>;
+  readonly calls: readonly PreparedCreativeOpeningProviderCall[];
+}): readonly string[] {
+  const answerCount = Object.values(input.answers).filter(
+    (value) => value.trim().length > 0,
+  ).length;
+  const includedContextCount =
+    input.calls[0]?.inspectionRequest.messages.length === 0 ? 0 : input.calls.length;
+  const partialCharacters = input.calls.reduce(
+    (sum, { request }) => sum + (request.partialOpening?.length ?? 0),
+    0,
+  );
+  return Object.freeze(
+    [
+      `一句话灵感（${String(input.idea.length)} 个字符）`,
+      input.direction === null ? null : `本轮方向（${String(input.direction.length)} 个字符）`,
+      answerCount === 0 ? null : `${String(answerCount)} 项作者已填写偏好`,
+      `${String(input.calls.length)} 个独立开头请求及其固定创作角度`,
+      includedContextCount === 0 ? null : "当前空白作品中本次编译明确选中的来源与实验性写作方法",
+      partialCharacters === 0
+        ? null
+        : `作者明确选择的未完整开头（${String(partialCharacters)} 个字符）`,
+    ].filter((value): value is string => value !== null),
+  );
 }
 
 export async function generateCreativeOpening(
@@ -137,6 +587,14 @@ export async function generateCreativeOpening(
     /** Existing empty workspace that owns this traceable opening attempt. */
     projectContext?: CreativeOpeningProjectContext;
   }>,
+): Promise<CreativeOpeningResult> {
+  return generateCreativeOpeningInternal(runtime, input, null);
+}
+
+async function generateCreativeOpeningInternal(
+  runtime: DesktopRuntime,
+  input: Parameters<typeof generateCreativeOpening>[1],
+  dispatchBinding: CreativeOpeningDispatchBinding | null,
 ): Promise<CreativeOpeningResult> {
   let idea: string;
   let direction: string | null;
@@ -181,6 +639,10 @@ export async function generateCreativeOpening(
     preparedProjectContext?.compiled ?? null,
     preparedProjectContext?.novelSkillPromptSection ?? null,
   );
+  const inspectionRequest = creativeOpeningInspectionRequest(
+    messages,
+    preparedProjectContext?.privacyReceipt ?? null,
+  );
   let visibleText = partialOpening ?? "";
   const receiveVisibleText = (text: string) => {
     visibleText = combineOpeningText(partialOpening, text);
@@ -193,17 +655,34 @@ export async function generateCreativeOpening(
       modelId: null,
     };
     try {
+      const currentInspection = await inspectModelHubTextTask(runtime, inspectionRequest);
+      const expectedInspection = dispatchBinding?.inspection ?? currentInspection;
+      assertCreativeOpeningInspection(expectedInspection, currentInspection);
+      if (dispatchBinding !== null) {
+        const currentSourceFingerprint = await creativeOpeningSourceFingerprint({
+          requestId,
+          idea,
+          direction,
+          answers: input.answers ?? {},
+          openingAngle: input.openingAngle ?? null,
+          partialOpening,
+          messages,
+          preparedProjectContext,
+        });
+        if (currentSourceFingerprint !== dispatchBinding.sourceFingerprint) {
+          throw creativeOpeningDisclosureChanged();
+        }
+      }
       const generated = await executeModelHubTextTask(runtime, {
         dispatchScope:
           preparedProjectContext === null
             ? { kind: "non_project", reason: "creative_opening" }
             : projectContextDispatchScope(preparedProjectContext.privacyReceipt),
-        task: "book_start_guidance",
-        messages,
-        maximumOutputTokens: 1_200,
-        temperature: 0.85,
+        ...inspectionRequest,
         generationId: requestId,
         invocationId: requestId,
+        executionPolicy: SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
+        generationRetryLimitOverride: 0,
         reasoningPolicy: "visible_prose",
         ...(preparedProjectContext === null ||
         projectContextRequiredDataDestination(preparedProjectContext.privacyReceipt) === undefined
@@ -215,7 +694,20 @@ export async function generateCreativeOpening(
           generationId,
           invocationId,
           localOnlyEligible,
+          catalogEntryId,
+          usedFallback,
         }) => {
+          assertCreativeOpeningSelection(expectedInspection, {
+            connectionId,
+            catalogEntryId,
+            modelId,
+            usedFallback,
+          });
+          await assertCreativeOpeningInspectionCurrent(
+            runtime,
+            inspectionRequest,
+            expectedInspection,
+          );
           dispatchedTarget.connectionId = connectionId;
           dispatchedTarget.modelId = modelId;
           await input.onInvocationPrepared?.({ invocationId, connectionId, modelId });
@@ -263,11 +755,29 @@ export async function generateCreativeOpening(
         ...(preparedProjectContext === null
           ? {}
           : {
-              onFinalBeforeProviderDispatch: async ({ localOnlyEligible }) => {
+              onFinalBeforeProviderDispatch: async (selection) => {
+                assertCreativeOpeningSelection(expectedInspection, selection);
+                await assertCreativeOpeningInspectionCurrent(
+                  runtime,
+                  inspectionRequest,
+                  expectedInspection,
+                );
+                if (dispatchBinding !== null) {
+                  await assertCreativeOpeningSourceCurrent(runtime, {
+                    requestId,
+                    idea,
+                    direction,
+                    answers: input.answers ?? {},
+                    openingAngle: input.openingAngle ?? null,
+                    partialOpening,
+                    projectContext: preparedProjectContext,
+                    expectedSourceFingerprint: dispatchBinding.sourceFingerprint,
+                  });
+                }
                 await assertCreativeOpeningProjectCurrent(runtime, preparedProjectContext);
                 runtime.projectContextPrivacy.assertRouteEligible(
                   preparedProjectContext.privacyReceipt,
-                  localOnlyEligible === true,
+                  selection.localOnlyEligible === true,
                 );
               },
             }),
@@ -336,86 +846,10 @@ export async function generateCreativeOpening(
     }
   }
 
-  // Project-scoped generation must go through Model Hub so the invocation,
-  // context and optional writing-method snapshot remain one exact chain.
-  // The legacy profile route cannot produce that receipt.
-  if (preparedProjectContext !== null) {
-    return localOpening(runtime, requestId, idea, direction, "MODEL_HUB_ROUTE_NOT_CONFIGURED");
-  }
-
-  const profile = await resolveOpeningProfile(runtime).catch(() => null);
-
-  if (runtime.mode !== "tauri" || profile?.selectedModel === null || profile === null) {
-    return localOpening(runtime, requestId, idea, direction, "MODEL_NOT_CONNECTED");
-  }
-
-  const resolvedEndpoint = await resolveModelProfileGatewayConfig(
-    { modelHub: runtime.modelHub, credentials: runtime.credentials },
-    profile,
-  ).catch(() => null);
-  if (resolvedEndpoint === null) {
-    return localOpening(runtime, requestId, idea, direction, "MODEL_CREDENTIAL_MISSING");
-  }
-
-  try {
-    const inputBytes = new TextEncoder().encode(
-      messages.map(({ content }) => content).join("\n"),
-    ).length;
-    if (inputBytes > 64_000) {
-      return localOpening(runtime, requestId, idea, direction, "MODEL_INPUT_TOO_LARGE");
-    }
-    const listed = await runtime.modelGateway.listModels(resolvedEndpoint.config);
-    if (!listed.models.some(({ id }) => id === profile.selectedModel)) {
-      return localOpening(runtime, requestId, idea, direction, "SELECTED_MODEL_UNAVAILABLE");
-    }
-    const current = await resolveFinalModelProfileGatewayConfig(
-      {
-        modelCenter: runtime.modelCenter,
-        modelHub: runtime.modelHub,
-        credentials: runtime.credentials,
-      },
-      profile,
-      resolvedEndpoint,
-    );
-    const generated = await runtime.modelGateway.generate({
-      dispatchScope: { kind: "non_project", reason: "creative_opening" },
-      generationId: requestId,
-      config: current.resolution.config,
-      model: current.profile.selectedModel ?? profile.selectedModel,
-      messages,
-      maxOutputTokens: 1_200,
-      temperature: 0.85,
-      onDelta: receiveVisibleText,
-    });
-    const text = combineOpeningText(partialOpening, generated.text).trim();
-    if (text.length === 0) {
-      return localOpening(runtime, requestId, idea, direction, "MODEL_OUTPUT_EMPTY");
-    }
-    return Object.freeze({
-      requestId,
-      text,
-      source: "provider",
-      completion: "complete",
-      providerId: profile.providerId,
-      modelId: profile.selectedModel,
-      noticeCode: null,
-      contextTraceId: null,
-    });
-  } catch (cause: unknown) {
-    const partial = usableTruncatedOpening(
-      requestId,
-      visibleText,
-      cause,
-      profile.providerId,
-      profile.selectedModel,
-      null,
-    );
-    if (partial !== null) {
-      recordSafeGenerationErrorCode(runtime, "MODEL_OUTPUT_TRUNCATED");
-      return partial;
-    }
-    return localOpening(runtime, requestId, idea, direction, safeModelFailureCode(cause));
-  }
+  // Every real opening request must be traceable through Model Hub. A legacy
+  // profile cannot provide the invocation, cost, privacy and recovery receipt,
+  // so a missing route fails closed to the labelled local example.
+  return localOpening(runtime, requestId, idea, direction, "MODEL_HUB_ROUTE_NOT_CONFIGURED");
 }
 
 /** Returns the deterministic, clearly labelled local example without contacting a provider. */
@@ -689,32 +1123,166 @@ async function assertCreativeOpeningProjectCurrent(
   }
 }
 
-async function resolveOpeningProfile(runtime: DesktopRuntime): Promise<ModelProfile | null> {
-  const [profiles, highQuality, fast] = await Promise.all([
-    runtime.modelCenter.listProfiles(),
-    runtime.modelRouting.findRoute("high_quality"),
-    runtime.modelRouting.findRoute("fast"),
-  ]);
-  for (const route of [highQuality, fast]) {
-    if (route === null) {
-      continue;
-    }
-    const primary = profiles.find(
-      ({ providerId, selectedModel }) =>
-        providerId === route.primaryProviderId && selectedModel === route.primaryModelId,
+function creativeOpeningInspectionRequest(
+  messages: readonly NativeModelMessage[],
+  privacyReceipt: ProjectContextPrivacyReceipt | null,
+): InspectModelHubTextTaskInput {
+  const requiredDataDestination =
+    privacyReceipt === null ? undefined : projectContextRequiredDataDestination(privacyReceipt);
+  return Object.freeze({
+    task: "book_start_guidance" as const,
+    messages,
+    maximumOutputTokens: 1_200,
+    temperature: 0.85,
+    ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
+  });
+}
+
+async function creativeOpeningSourceFingerprint(input: {
+  readonly requestId: string;
+  readonly idea: string;
+  readonly direction: string | null;
+  readonly answers: Readonly<Record<string, string>>;
+  readonly openingAngle: CreativeOpeningAngle | null;
+  readonly partialOpening: string | null;
+  readonly messages: readonly NativeModelMessage[];
+  readonly preparedProjectContext: PreparedCreativeOpeningProjectContext | null;
+}): Promise<string> {
+  const prepared = input.preparedProjectContext;
+  return providerActionFingerprint({
+    authority: "creative_opening_source_v1",
+    requestId: input.requestId,
+    idea: input.idea,
+    direction: input.direction,
+    answers: input.answers,
+    openingAngle: input.openingAngle,
+    partialOpening: input.partialOpening,
+    messages: input.messages,
+    project:
+      prepared === null
+        ? null
+        : {
+            projectId: prepared.projectId,
+            chapterId: prepared.chapterId,
+            chapterVersionId: prepared.chapterVersionId,
+            privacyFingerprint: prepared.privacyReceipt.fingerprint,
+            compiledSources: prepared.compiled.entries.map((entry) => ({
+              id: entry.id,
+              layer: entry.layer,
+              content: entry.content,
+              evidence: entry.evidence,
+              included: entry.included,
+              discardedReason: entry.discardedReason,
+            })),
+            novelSkill: {
+              promptSection: prepared.novelSkillPreparation.promptSection,
+              methods: prepared.novelSkillPreparation.methods,
+            },
+          },
+  });
+}
+
+async function assertCreativeOpeningSourceCurrent(
+  runtime: DesktopRuntime,
+  input: Readonly<{
+    requestId: string;
+    idea: string;
+    direction: string | null;
+    answers: Readonly<Record<string, string>>;
+    openingAngle: CreativeOpeningAngle | null;
+    partialOpening: string | null;
+    projectContext: CreativeOpeningProjectContext;
+    expectedSourceFingerprint: string;
+  }>,
+): Promise<void> {
+  try {
+    const preparedProjectContext = await prepareCreativeOpeningProjectContext(runtime, {
+      ...input.projectContext,
+      idea: input.idea,
+      direction: input.direction,
+      answers: input.answers,
+      openingAngle: input.openingAngle,
+      partialOpening: input.partialOpening,
+      requestId: input.requestId,
+    });
+    const messages = buildOpeningMessages(
+      input.idea,
+      input.direction,
+      input.answers,
+      input.openingAngle,
+      input.partialOpening,
+      preparedProjectContext.compiled,
+      preparedProjectContext.novelSkillPromptSection,
     );
-    if (primary !== undefined) {
-      return primary;
+    const current = await creativeOpeningSourceFingerprint({
+      requestId: input.requestId,
+      idea: input.idea,
+      direction: input.direction,
+      answers: input.answers,
+      openingAngle: input.openingAngle,
+      partialOpening: input.partialOpening,
+      messages,
+      preparedProjectContext,
+    });
+    if (current !== input.expectedSourceFingerprint) {
+      throw creativeOpeningDisclosureChanged();
     }
-    const fallback = profiles.find(
-      ({ providerId, selectedModel }) =>
-        providerId === route.fallbackProviderId && selectedModel === route.fallbackModelId,
-    );
-    if (fallback !== undefined) {
-      return fallback;
+  } catch (cause: unknown) {
+    if (cause instanceof ModelCenterError && cause.code === "CREATIVE_OPENING_DISCLOSURE_CHANGED") {
+      throw creativeOpeningDispatchDisclosureChanged();
     }
+    throw creativeOpeningDispatchDisclosureChanged();
   }
-  return profiles.find(({ selectedModel }) => selectedModel !== null) ?? null;
+}
+
+async function assertCreativeOpeningInspectionCurrent(
+  runtime: DesktopRuntime,
+  request: InspectModelHubTextTaskInput,
+  expected: ModelHubTextTaskInspection,
+): Promise<void> {
+  try {
+    assertModelHubInspectionAuthority(expected, await inspectModelHubTextTask(runtime, request));
+  } catch {
+    throw creativeOpeningDispatchDisclosureChanged();
+  }
+}
+
+function assertCreativeOpeningInspection(
+  expected: ModelHubTextTaskInspection,
+  current: ModelHubTextTaskInspection,
+): void {
+  try {
+    assertModelHubInspectionAuthority(expected, current);
+  } catch {
+    throw creativeOpeningDisclosureChanged();
+  }
+}
+
+function assertCreativeOpeningSelection(
+  expected: ModelHubTextTaskInspection,
+  selection: Parameters<typeof assertDisclosedSelection>[1],
+): void {
+  try {
+    assertDisclosedSelection(expected, selection);
+  } catch {
+    throw creativeOpeningDispatchDisclosureChanged();
+  }
+}
+
+function creativeOpeningDisclosureChanged(): ModelCenterError {
+  return new ModelCenterError(
+    "CREATIVE_OPENING_DISCLOSURE_CHANGED",
+    "模型、费用、发送来源或隐私范围已经改变；本次没有发送，请重新查看并确认。",
+    true,
+  );
+}
+
+function creativeOpeningDispatchDisclosureChanged(): ModelHubExecutionError {
+  return new ModelHubExecutionError(
+    "CREATIVE_OPENING_DISCLOSURE_CHANGED",
+    "模型、费用、发送来源或隐私范围已经改变；本次请求在发送 0 字后停止。",
+    true,
+  );
 }
 
 function buildOpeningMessages(

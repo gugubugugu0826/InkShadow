@@ -19,7 +19,7 @@ import { Link, useParams } from "react-router-dom";
 import { parseUuidV7 } from "@inkshadow/domain";
 
 import { useOnlineStatus } from "../hooks/use-online-status";
-import { normalizeUiError } from "../infrastructure/ui-error";
+import { normalizeUiError, projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 import {
   calculateWorkspaceInsights,
@@ -155,8 +155,9 @@ export function WorkspacePage() {
     await load();
   }
 
-  const normalizedError = loadError === null ? null : normalizeUiError(loadError);
-  const normalizedInsightsError = insightsError === null ? null : normalizeUiError(insightsError);
+  const normalizedError = loadError === null ? null : projectOrdinaryUiError(loadError);
+  const normalizedInsightsError =
+    insightsError === null ? null : projectOrdinaryUiError(insightsError);
   const readonly = project?.status !== "active";
   const activeChapters = chapters.filter((chapter) => chapter.status === "active");
   const latestChapter = activeChapters.reduce<Chapter | null>((latest, current) => {
@@ -240,7 +241,6 @@ export function WorkspacePage() {
               <ErrorState
                 title={normalizedError.title}
                 description={normalizedError.description}
-                errorCode={normalizedError.code}
                 primaryAction={{ label: "重试", onClick: () => void load() }}
               />
             ),

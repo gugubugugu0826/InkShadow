@@ -1,8 +1,8 @@
 # InkShadow 前端文档
 
 > 文档状态：`SUPPORTING_CURRENT`  
-> 基于源码复核：2026-08-14  
-> 当前源码目标版本（App Version）：`0.2.4`；最近已发布版本：`0.2.3`；v0.2.4 安全修复候选尚未发布  
+> 基于源码复核：2026-08-20  
+> 当前应用清单版本（App Version）：`0.2.5`；最新已发布版本 `v0.2.4` 之后是当前 Pre-release 候选工作树  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
 > 文档性质：实现现状说明；页面存在不等于 P01–P44 已验证
 
@@ -10,8 +10,9 @@
 它与 `docs/prototypes/` 中的原型规划不同：原型文档说明目标形态，本目录说明当前源码已经注册
 和接线的内容。
 
-DESIGN v0.3.1b 决定目标视觉、交互和响应式验收，不会把应用版本自动改成 0.3.1b。当前源码与
-数据库配置目标版本为 0.2.4，最近已发布工程预览安装包为 0.2.3；v0.2.4 安全修复仍是未发布候选，DESIGN 版本不会替代应用版本。
+DESIGN v0.3.1b 决定目标视觉、交互和响应式验收，不会把应用版本自动改成 0.3.1b。当前 Desktop
+清单版本为 0.2.5，已发布 `v0.2.4` 标签指向基线提交；当前未提交工作树尚无唯一候选提交或安装包。
+DESIGN 版本不会替代应用版本，也不能证明远端 Release 已经存在。
 
 ## 文档导航与状态
 
@@ -20,6 +21,7 @@ DESIGN v0.3.1b 决定目标视觉、交互和响应式验收，不会把应用�
 | `SUPPORTING_CURRENT`    | [`PAGE_CATALOG.md`](PAGE_CATALOG.md)                                                                                         | Desktop 全部路由、页面文件、主要操作、守卫，以及 Web Guest 单页和非路由组件    |
 | `SUPPORTING_CURRENT`    | [`INTERFACE_REFERENCE.md`](INTERFACE_REFERENCE.md)                                                                           | DesktopRuntime、Tauri IPC、SQLite、Model Hub、Cloud HTTP 与 Web Guest 数据边界 |
 | `SUPPORTING_CURRENT`    | [`CREATION_JOURNEYS_AND_PROJECT_SEED.md`](CREATION_JOURNEYS_AND_PROJECT_SEED.md)                                             | 三条创建入口共享的 ProjectSeed 状态与安全合同                                  |
+| `SUPPORTING_CURRENT`    | [`WRITING_EXPERIENCE_AND_CONSISTENCY.md`](WRITING_EXPERIENCE_AND_CONSISTENCY.md)                                             | 直接/专业模式、本地设定整理、StoryMemory 与一致性调查界面合同                  |
 | `AUTHORITATIVE_CURRENT` | [`../product-rebuild/01-INFORMATION-ARCHITECTURE-AND-FLOWS.md`](../product-rebuild/01-INFORMATION-ARCHITECTURE-AND-FLOWS.md) | 普通用户三入口、四区工作台和术语基线                                           |
 | `TARGET_BASELINE`       | `DESIGN/` P01–P44                                                                                                            | 目标状态；不能由本目录的文件说明替代验收                                       |
 
@@ -57,8 +59,24 @@ DESIGN v0.3.1b 决定目标视觉、交互和响应式验收，不会把应用�
   项目密钥未满足而重定向或显示受限状态。
 - 页面中的计划文案、测试 Fixture 或类型定义不等于生产服务已部署；以运行时接线和发布门禁
   为准。
-- 连续状态提取、章节摘要、AI 模糊/质量复核和剧情规划均为明确触发、可审阅的模型能力；
-  缺少 Model Hub 路由、有效能力证据或用户凭据时会跳过，不能把页面入口当作真实供应商验收。
+- 连续状态提取、章节摘要与旧批量 AI 模糊/质量复核保留底层合同和历史记录，但当前普通生产入口
+  已关闭，配置 Model Hub 也不构成派发授权。检查页保留本地确定性检查，并把需要模型的调查引导到
+  单独披露的一致性调查；剧情规划等仍可达动作也必须经过各自的精确披露和确认。
+- 专业/直接续写及其他真实 Provider 动作都先以 0-call 准备态展示连接显示名、精确模型、发送范围、
+  本地/远程隐私、最多调用次数、自动重试和费用上限或 unknown；确认前和 Provider 边界前都复核
+  inspection/pricing/privacy/source/version fingerprint。价格或路线漂移会保持 0 dispatch；设置页已
+  提供本地整理授权撤销。opening 聚焦链 2 files / 79、Settings 固定能力探针 3 files / 69、图片/
+  普通编辑器 3 files / 46、调查/修复 2 files / 36 已通过。Settings 两个固定、无作品内容的 probe
+  入口另以 1 file / 55 tests 通过点击时表单/精确目标/content-free authority 冻结、同一 prepared
+  input 持久化和生成前重检；漂移 0 call、成功精确 1 call。豆包 Endpoint ID 非空时作为同一有效
+  模型贯穿普通披露、授权、持久化与派发。Provider grant 的逐项普通 UI 管理不是本轮要求，精确
+  失配、同族轮换、active 128、恢复与历史审计合同继续生效。
+- Provider 面与普通 UI ID 聚焦 4 files / 22 tests 通过：Usage 不回退 raw provider ID，通知 metadata
+  使用白名单，任务/检查页显示可读名称或安全占位，不把 project/chapter/version/connection/debug/
+  fact/locator 等内部标识暴露给普通用户；冻结全路由 DOM 仍待验收。
+- 四格式发布导出可嵌入经验证的内存 PNG/JPEG 资产。Desktop 使用系统保存对话框与经落盘回读
+  验证的真实保存回执；浏览器只报告 `browser_download` / `path_not_available`，不会伪造本地路径。
+  数据传输面板按项目恢复最近一次回执；真实 Windows Tauri 对话框和外部应用打开仍是外部验收项。
 
 ## Model Hub 的普通与专家体验
 
@@ -113,6 +131,38 @@ Web Guest 也支持导入本页导出的 `.encrypted.json` 副本。文件大小
 - 团队模板页面主体文案已统一为中文；
 - Web Guest 风险说明允许拒绝并在不载入正文和密钥的状态下重新查看；恢复材料可下载为带项目
   名称与完整项目标识的文件。
+
+## 静态 Chromium 视觉证据
+
+`tests/e2e/desktop-visual-evidence.spec.ts` 为桌面 Web 生产分发提供可复跑的静态 Chromium
+视觉矩阵。它覆盖浅色与深色的直接模式启动页、长 Candidate 比较固定动作区和现有检查页，
+并逐一检查 1440×900、1280×720、1024×640、800×600，以及 1440×900 外窗对应
+720×450 有效 CSS 视口的“等效 200%”状态。测试只使用本机开发数据与本机示例 Candidate，
+不会读取凭据或调用 Provider；静态浏览器没有原生 Agent 执行器，因此检查页证据不会伪造
+Agent 已运行。
+
+运行生产 Web 构建后，可执行：
+
+```powershell
+node scripts/run-e2e.mjs tests/e2e/desktop-visual-evidence.spec.ts
+node scripts/check-visual-evidence.mjs
+```
+
+本地产物位于被 `.gitignore` 排除的 `test-results/visual-evidence/`。`manifest.json` 为每张截图
+记录当前 commit、工作树是否有未提交修改、Hash route、从 DOM 实际读取的 `data-surface`、
+CSS viewport、DPR、PNG 实际像素、时间戳、文件字节数与 SHA-256。PNG 以 SHA-256 命名；
+相同内容只保存一次，不同场景可引用同一个文件。校验脚本会重新计算每个 PNG 的哈希，确认
+图片像素等于 CSS viewport × DPR，并拒绝路径逃逸、元数据漂移，以及把静态 Chromium 结果
+声明成真实 Tauri 或已测 Windows 系统缩放的记录。
+
+本次 dirty HEAD 的静态 Chromium 运行已经生成并通过 checker：manifest 共 32 条，引用 32 个
+不同 SHA-256 的 PNG，覆盖上述浅/深主题与视口矩阵。该证据只对应 manifest 中记录的 dirty
+`b74d36ef3342db6813d1d43771bc82c0ed2aa1fb` 工作树；它不是干净候选或安装包。工作树后续仍有
+小幅变化，最终 production build 文件名和精确字节保持 `FINAL_BUILD_PENDING`。
+
+“等效 200%”只证明应用按照有效 CSS viewport 进入响应式布局。它不是 Windows 系统 200%
+DPI，也不是 Tauri WebView 证据；清单固定将系统缩放记为 `not_measured`、Tauri 记为
+`not_run`。真实 Windows 200% DPI/Tauri 仍须在安装版中单独复测。
 
 ## 维护规则
 

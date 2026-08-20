@@ -25,6 +25,8 @@ import {
   type ModelHubTextTaskExecutionResult,
   type ModelHubTextTaskInspection,
 } from "./model-hub-execution-service";
+import { selectSingleAttemptStrictJsonPolicy } from "./model-execution-policy";
+import { getModelProviderPreset } from "./model-hub-provider-registry";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
 import {
   ProjectContextPrivacyError,
@@ -305,6 +307,12 @@ export class AmbiguousNovelReviewService {
     }
 
     let generated: ModelHubTextTaskExecutionResult;
+    const invocationId = this.dependencies.modelHub.ids.next();
+    const executionPolicy = selectSingleAttemptStrictJsonPolicy({
+      structuredOutputVerified: true,
+      jsonObjectTransportSupported:
+        getModelProviderPreset(inspection.providerKind).protocol === "openai_compatible",
+    });
     try {
       generated = await executeModelHubTextTask(this.dependencies.modelHub, {
         dispatchScope: projectContextDispatchScope(projectPrivacy),
@@ -312,6 +320,16 @@ export class AmbiguousNovelReviewService {
         messages: plan.messages,
         maximumOutputTokens: 6_000,
         temperature: 0.1,
+        invocationId,
+        executionPolicy,
+        ...(executionPolicy.transportResponseFormat === "json_object"
+          ? { responseFormat: "json_object" as const }
+          : {}),
+        reasoningModeOverride: "disabled",
+        generationRetryLimitOverride: 0,
+        validateGeneratedText: (text) => {
+          parseAmbiguousNovelReviewResponse(text, plan.task, plan.evidence, invocationId);
+        },
         ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
         onBeforeDispatch: async (selection) => {
           if (
@@ -384,7 +402,23 @@ export class AmbiguousNovelReviewService {
         },
       });
     } catch (cause: unknown) {
-      return executionFailure(plan.task, cause);
+      const failedInvocation = await this.dependencies.modelHub.modelHub
+        .findInvocation(invocationId)
+        .catch(() => null);
+      return executionFailure(
+        plan.task,
+        cause,
+        failedInvocation === null
+          ? null
+          : Object.freeze({
+              id: failedInvocation.id,
+              connectionId: failedInvocation.connectionId,
+              catalogEntryId: failedInvocation.catalogEntryId ?? inspection.catalogEntryId,
+              providerKind: failedInvocation.providerKindSnapshot,
+              modelId: failedInvocation.modelIdSnapshot,
+              usedFallback: inspection.usedFallback,
+            }),
+      );
     }
 
     const invocation = invocationSummary(generated);
@@ -1206,11 +1240,13 @@ function preflightFailure(
 function executionFailure(
   task: AmbiguousNovelReviewTask,
   cause: unknown,
+  invocation: AmbiguousNovelReviewInvocationSummary | null = null,
 ): AmbiguousNovelReviewTaskResult {
   return failedTask(
     task,
     cause instanceof ModelHubExecutionError ? cause.code : "AMBIGUOUS_REVIEW_MODEL_REQUEST_FAILED",
     safeFailureMessage(cause, "AI 复核调用没有完成；正文、正式设定和现有确定性检查结果均未改变。"),
+    invocation,
   );
 }
 
@@ -1419,6 +1455,7 @@ function failedTask(
   task: AmbiguousNovelReviewTask,
   code: string,
   explanation: string,
+  invocation: AmbiguousNovelReviewInvocationSummary | null = null,
 ): AmbiguousNovelReviewTaskResult {
   return Object.freeze({
     task,
@@ -1426,7 +1463,7 @@ function failedTask(
     findings: Object.freeze([]),
     explanation,
     code,
-    invocation: null,
+    invocation,
   });
 }
 

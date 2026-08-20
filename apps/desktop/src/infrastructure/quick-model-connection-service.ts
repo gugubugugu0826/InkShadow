@@ -30,6 +30,10 @@ import {
   type NovelTaskRoute,
   type SaveModelProviderConnectionInput,
 } from "./model-hub-store";
+import {
+  providerActionFingerprint,
+  type ProviderActionDisclosure,
+} from "./provider-action-disclosure";
 import type { DesktopRuntime, NativeModelEndpointConfig, NativeModelListResponse } from "./runtime";
 
 export const QUICK_MODEL_PROVIDERS = [
@@ -65,6 +69,18 @@ export interface QuickBookStartRouteResult {
   readonly connection: ModelProviderConnection;
   readonly catalogEntry: ModelCatalogEntry;
   readonly route: NovelTaskRoute;
+}
+
+export interface QuickBookStartProbeDisclosure extends ProviderActionDisclosure {
+  readonly probeKind: "fixed_content_free_text_capability";
+  readonly maximumOutputTokens: 64;
+}
+
+export interface ConfigureQuickBookStartRouteInput {
+  readonly connectionId: string;
+  readonly catalogEntryId: string;
+  readonly humanConfirmed: boolean;
+  readonly disclosureFingerprint: string;
 }
 
 export class QuickModelConnectionError extends Error {
@@ -154,7 +170,7 @@ export async function connectQuickModelProvider(
       await savePreparedCredential(runtime, credentialProviderId, submittedSecret);
       credentialConfigured = true;
     }
-    const listed = await inspectQuickEndpoint(runtime, endpoint, input.provider, manualModelId);
+    const listed = await inspectQuickEndpoint(runtime, endpoint, manualModelId);
     if (listed.models.length === 0) {
       throw quickError(
         "QUICK_MODEL_CATALOG_EMPTY",
@@ -372,17 +388,10 @@ async function cleanupPublishedCredential(
 async function inspectQuickEndpoint(
   runtime: DesktopRuntime,
   endpoint: NativeModelEndpointConfig,
-  providerKind: ModelProviderKind,
   manualModelId: string | null,
 ): Promise<NativeModelListResponse> {
   if (manualModelId !== null) {
-    await runModelHubTextCapabilityProbe({
-      gateway: runtime.modelGateway,
-      providerKind,
-      generationId: runtime.ids.next(),
-      config: endpoint,
-      model: manualModelId,
-    });
+    await runtime.modelGateway.checkConnection(endpoint);
     return Object.freeze({
       provider: endpoint.provider,
       models: Object.freeze([Object.freeze({ id: manualModelId, displayName: manualModelId })]),
@@ -393,6 +402,19 @@ async function inspectQuickEndpoint(
     runtime.modelGateway.listModels(endpoint),
   ]);
   return listed;
+}
+
+/**
+ * Resolves the exact non-secret target for the fixed capability probe without
+ * dispatching a model request or changing Model Hub state.
+ */
+export async function inspectQuickBookStartRouteProbe(
+  runtime: DesktopRuntime,
+  input: Readonly<{ connectionId: string; catalogEntryId: string }>,
+): Promise<QuickBookStartProbeDisclosure> {
+  assertDesktopGateway(runtime);
+  const target = await readQuickBookStartTarget(runtime, input);
+  return quickBookStartProbeDisclosure(target.connection, target.catalogEntry);
 }
 
 function quickEndpointConfig(
@@ -428,27 +450,24 @@ function quickEndpointConfig(
  */
 export async function configureQuickBookStartRoute(
   runtime: DesktopRuntime,
-  input: Readonly<{ connectionId: string; catalogEntryId: string }>,
+  input: ConfigureQuickBookStartRouteInput,
 ): Promise<QuickBookStartRouteResult> {
   assertDesktopGateway(runtime);
-  const connection = await runtime.modelHub.findConnection(input.connectionId);
-  if (
-    connection === null ||
-    !connection.enabled ||
-    (connection.connectionStatus !== "ready" && connection.connectionStatus !== "degraded")
-  ) {
+  if (!input.humanConfirmed || input.disclosureFingerprint.length === 0) {
     throw quickError(
-      "QUICK_MODEL_CONNECTION_NOT_READY",
-      "这条连接还没有通过验证。请重新测试连接后再选择模型。",
+      "QUICK_MODEL_PROBE_CONFIRMATION_REQUIRED",
+      "请先查看这次固定验证的模型、发送范围、调用次数和费用说明，再明确确认。",
+      false,
     );
   }
-  const catalogEntry = (await runtime.modelHub.listCatalog(connection.id)).find(
-    ({ id }) => id === input.catalogEntryId,
-  );
-  if (catalogEntry?.availability !== "available" || catalogEntry.lifecycle === "deprecated") {
+  const target = await readQuickBookStartTarget(runtime, input);
+  const connection = target.connection;
+  const catalogEntry = target.catalogEntry;
+  const disclosure = await quickBookStartProbeDisclosure(connection, catalogEntry);
+  if (disclosure.fingerprint !== input.disclosureFingerprint) {
     throw quickError(
-      "QUICK_MODEL_NOT_AVAILABLE",
-      "所选模型已不在当前可用目录中。请重新连接并选择其他模型。",
+      "QUICK_MODEL_PROBE_DISCLOSURE_CHANGED",
+      "连接、模型或验证范围已经变化。墨影没有发送请求，请重新查看说明后确认。",
     );
   }
   const expectedDispatchIdentity = modelHubFinalDispatchIdentity({ connection, catalogEntry });
@@ -495,7 +514,7 @@ export async function configureQuickBookStartRoute(
       gateway: runtime.modelGateway,
       providerKind: currentConnection.providerKind,
       generationId: runtime.ids.next(),
-      config: modelHubNativeEndpointConfig(currentConnection),
+      config: Object.freeze({ ...modelHubNativeEndpointConfig(currentConnection), retryLimit: 0 }),
       model: currentCatalogEntry.providerModelId,
     });
     await runtime.modelHub.recordCapabilityScan({
@@ -596,6 +615,68 @@ export async function configureQuickBookStartRoute(
     window.dispatchEvent(new Event(MODEL_HUB_READINESS_CHANGED_EVENT));
   }
   return Object.freeze({ connection, catalogEntry, route });
+}
+
+async function readQuickBookStartTarget(
+  runtime: DesktopRuntime,
+  input: Readonly<{ connectionId: string; catalogEntryId: string }>,
+): Promise<Readonly<{ connection: ModelProviderConnection; catalogEntry: ModelCatalogEntry }>> {
+  const connection = await runtime.modelHub.findConnection(input.connectionId);
+  if (
+    connection === null ||
+    !connection.enabled ||
+    (connection.connectionStatus !== "ready" && connection.connectionStatus !== "degraded")
+  ) {
+    throw quickError(
+      "QUICK_MODEL_CONNECTION_NOT_READY",
+      "这条连接还没有通过验证。请重新测试连接后再选择模型。",
+    );
+  }
+  const catalogEntry = (await runtime.modelHub.listCatalog(connection.id)).find(
+    ({ id }) => id === input.catalogEntryId,
+  );
+  if (catalogEntry?.availability !== "available" || catalogEntry.lifecycle === "deprecated") {
+    throw quickError(
+      "QUICK_MODEL_NOT_AVAILABLE",
+      "所选模型已不在当前可用目录中。请重新连接并选择其他模型。",
+    );
+  }
+  return Object.freeze({ connection, catalogEntry });
+}
+
+async function quickBookStartProbeDisclosure(
+  connection: ModelProviderConnection,
+  catalogEntry: ModelCatalogEntry,
+): Promise<QuickBookStartProbeDisclosure> {
+  const local = isLoopbackModelBaseUrl(connection.baseUrl);
+  const authority = Object.freeze({
+    schemaVersion: "quick-book-start-probe-disclosure-v1",
+    dispatchIdentity: modelHubFinalDispatchIdentity({ connection, catalogEntry }),
+    task: "book_start_guidance_capability_probe",
+    probeKind: "fixed_content_free_text_capability",
+    maximumOutputTokens: 64,
+    maximumProviderCalls: 1,
+    automaticRetryCount: 0,
+    dataDestination: local ? "local" : "remote",
+    estimatedMaximumCostMicros: null,
+    currency: null,
+  });
+  return Object.freeze({
+    fingerprint: await providerActionFingerprint(authority),
+    connectionDisplayName: connection.displayName,
+    modelId: catalogEntry.providerModelId,
+    dataDestination: local ? "local" : "remote",
+    privacy: local
+      ? "固定验证只发给这台电脑上的模型，不发送作品正文或灵感。"
+      : "固定验证会发到所选供应商；不包含作品正文、灵感、设定或凭据。供应商留存与训练政策以其当前条款为准。",
+    sends: Object.freeze(["固定短句“只回复：OK”", "最多 64 个输出 token"]),
+    maximumProviderCalls: 1,
+    automaticRetryCount: 0,
+    estimatedMaximumCostMicros: null,
+    currency: null,
+    probeKind: "fixed_content_free_text_capability",
+    maximumOutputTokens: 64,
+  });
 }
 
 async function resolveConnectionId(

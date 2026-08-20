@@ -136,6 +136,26 @@ describe("model hub routing visibility", () => {
       source: "lightweight_probe",
       failureCode: "MODEL_OUTPUT_TRUNCATED",
     });
+
+    const sameTimestampVisibility = buildModelHubRoutingVisibility({
+      connections: [connection()],
+      catalog: [catalog()],
+      routes: [],
+      capabilityEvidence: [evidence("text_generation", "lightweight_probe", pastFailure.timestamp)],
+      recentAiFailures: [pastFailure],
+      now: NOW,
+      validating: false,
+      loadFailed: false,
+      saveFailed: false,
+    });
+    expect(
+      sameTimestampVisibility.models[0]?.capabilities.find(
+        ({ capability }) => capability === "text_generation",
+      ),
+    ).toMatchObject({
+      state: "failed",
+      failureCode: "MODEL_OUTPUT_TRUNCATED",
+    });
   });
 
   it("summarizes missing capability types and route origins without model identifiers", () => {

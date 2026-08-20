@@ -30,6 +30,7 @@ describe("TaskCenterPage", () => {
     ).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "AI 章节生成" })).toBeInTheDocument();
     expect(screen.getByText("等待执行")).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(uuid(1));
 
     await user.click(screen.getByRole("button", { name: "取消任务" }));
     expect(await screen.findByRole("dialog", { name: "确认取消任务" })).toBeVisible();
@@ -39,6 +40,7 @@ describe("TaskCenterPage", () => {
 
     await user.click(screen.getByRole("tab", { name: "通知 1" }));
     expect(await screen.findByRole("heading", { name: "后台任务执行失败" })).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(uuid(2));
     await user.click(screen.getByRole("button", { name: "全部标为已读" }));
 
     await waitFor(() => {
@@ -89,11 +91,12 @@ describe("TaskCenterPage", () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     renderRoute(runtime);
 
+    expect(await screen.findByText("重试次数已用尽；底层原因：模型服务暂时不可用")).toBeVisible();
     expect(
-      await screen.findByText(
-        "重试次数已用尽（TASK_RETRY_EXHAUSTED）；底层原因：模型服务暂时不可用（PROVIDER_UNAVAILABLE）",
-      ),
-    ).toBeVisible();
+      screen.queryByText(/TASK_RETRY_EXHAUSTED|PROVIDER_UNAVAILABLE/u),
+    ).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("provider.internal.secret_step");
+    expect(screen.getByText("正在处理后台步骤")).toBeVisible();
     expect(screen.getByRole("link", { name: "调整模型或上下文" })).toBeVisible();
   });
 
@@ -115,6 +118,11 @@ describe("TaskCenterPage", () => {
     );
     expect(screen.queryByText("story.accepted-version.completed")).not.toBeInTheDocument();
     expect(screen.getByText("整理已接受的正文")).toBeVisible();
+    expect(document.body).not.toHaveTextContent(uuid(21));
+    expect(document.body).not.toHaveTextContent(uuid(22));
+    expect(document.body).not.toHaveTextContent(uuid(23));
+    expect(document.body).not.toHaveTextContent(uuid(25));
+    expect(screen.queryByText("MODEL_HUB_ROUTE_STALE")).not.toBeInTheDocument();
   });
 });
 
@@ -240,6 +248,8 @@ function seedAcceptedVersionNotification(): void {
         pipelineStatus: "completed",
         detectedCount: 8,
         needsConfirmationCount: 1,
+        connectionId: uuid(25),
+        internalDebugCode: "MODEL_HUB_ROUTE_STALE",
       },
       requiresResolution: false,
       expiresAt: null,
@@ -287,8 +297,17 @@ function seedRetryExhaustedTask(): void {
       requestId: "req-task-center-page-retry-exhausted",
     }),
   );
+  const progressing = expectOk(
+    running.reportProgress({
+      leaseToken: uuid(31),
+      step: "provider.internal.secret_step",
+      completedUnits: 1,
+      totalUnits: null,
+      now: "2026-07-26T00:00:01.500Z",
+    }),
+  );
   const exhausted = expectOk(
-    running.recordFailure({
+    progressing.recordFailure({
       leaseToken: uuid(31),
       failure,
       now: "2026-07-26T00:00:02.000Z",

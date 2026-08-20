@@ -1,11 +1,18 @@
 import {
   PDF_EXPORT_LIMITS,
   PdfExportError,
+  exportProjectToPdf,
   type PdfPageRasterizer,
   type PdfPageRasterizerContext,
   type PdfRasterPage,
 } from "@inkshadow/import-export/pdf-export";
-import type { PortablePublication, PublicationBlock } from "@inkshadow/import-export";
+import type {
+  PortablePublication,
+  PublicationBlock,
+  PublicationImageBlock,
+} from "@inkshadow/import-export/core";
+
+export { exportProjectToPdf };
 
 const SERIF_FONT = '"Noto Serif SC", "Source Han Serif SC", "Songti SC", SimSun, Georgia, serif';
 const SANS_FONT = '"Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", system-ui, sans-serif';
@@ -68,7 +75,21 @@ interface RectangleCommand {
   readonly color: string;
 }
 
-type DrawCommand = TextCommand | LineCommand | RectangleCommand;
+interface ImageCommand {
+  readonly kind: "image";
+  readonly image: PublicationImageBlock;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+type DrawCommand = TextCommand | LineCommand | RectangleCommand | ImageCommand;
+
+interface LoadedImage {
+  readonly source: CanvasImageSource;
+  readonly release: () => void;
+}
 
 interface PageLayout {
   readonly kind: "cover" | "content";
@@ -99,9 +120,10 @@ interface LayoutState {
 /**
  * Browser-local page renderer for the shared semantic publication model.
  *
- * The implementation never resolves URLs or creates image elements. CJK text
- * is painted with a system font fallback stack and then embedded as pixels, so
- * the receiving PDF viewer does not need the original font.
+ * The implementation never resolves URLs or filesystem paths. Accepted image
+ * bytes are decoded from local Blobs only. CJK text is painted with a system
+ * font fallback stack and then embedded as pixels, so the receiving PDF viewer
+ * does not need the original font.
  */
 export const rasterizePublicationToJpegPages: PdfPageRasterizer = async function* (
   publication,
@@ -115,23 +137,38 @@ export const rasterizePublicationToJpegPages: PdfPageRasterizer = async function
   }
 
   await awaitLocalFonts(context.signal);
-  const pages = await createPageLayouts(publication, drawingContext, context);
-  for (const [index, page] of pages.entries()) {
-    throwIfCancelled(context.signal);
-    renderPage(drawingContext, page, publication.project.title, index, pages.length, context);
-    const jpegBytes = await encodeCanvasAsJpeg(canvas, context);
-    context.reportProgress({
-      stage: "rasterizing",
-      completedUnits: index + 1,
-      totalUnits: pages.length,
-    });
-    yield Object.freeze({
-      pixelWidth: context.renderSpec.pixelWidth,
-      pixelHeight: context.renderSpec.pixelHeight,
-      jpegBytes,
-    }) satisfies PdfRasterPage;
-    if ((index + 1) % 4 === 0) {
-      await yieldToBrowser();
+  const loadedImages = await loadPublicationImages(publication, context.signal);
+  try {
+    const pages = await createPageLayouts(publication, drawingContext, context);
+    for (const [index, page] of pages.entries()) {
+      throwIfCancelled(context.signal);
+      renderPage(
+        drawingContext,
+        page,
+        publication.project.title,
+        index,
+        pages.length,
+        context,
+        loadedImages,
+      );
+      const jpegBytes = await encodeCanvasAsJpeg(canvas, context);
+      context.reportProgress({
+        stage: "rasterizing",
+        completedUnits: index + 1,
+        totalUnits: pages.length,
+      });
+      yield Object.freeze({
+        pixelWidth: context.renderSpec.pixelWidth,
+        pixelHeight: context.renderSpec.pixelHeight,
+        jpegBytes,
+      }) satisfies PdfRasterPage;
+      if ((index + 1) % 4 === 0) {
+        await yieldToBrowser();
+      }
+    }
+  } finally {
+    for (const { release } of loadedImages.values()) {
+      release();
     }
   }
 };
@@ -505,7 +542,33 @@ async function placeBlock(
         context,
         "center",
       );
+      return;
+    case "image":
+      placeImage(state, block);
   }
+}
+
+function placeImage(state: LayoutState, block: PublicationImageBlock): void {
+  const maximumWidth = contentWidth();
+  const maximumHeight = PAGE.contentBottom - PAGE.contentTop - 64;
+  const scale = Math.min(1, maximumWidth / block.pixelWidth, maximumHeight / block.pixelHeight);
+  const width = Math.max(1, Math.round(block.pixelWidth * scale));
+  const height = Math.max(1, Math.round(block.pixelHeight * scale));
+  const before = 24;
+  const after = 28;
+  if (state.y + before + height + after > PAGE.contentBottom) {
+    startContentPage(state, state.chapterTitle);
+  }
+  state.y += before;
+  state.current.commands.push({
+    kind: "image",
+    image: block,
+    x: PAGE.marginLeft + (maximumWidth - width) / 2,
+    y: state.y,
+    width,
+    height,
+  });
+  state.y += height + after;
 }
 
 async function placeText(
@@ -702,6 +765,7 @@ function renderPage(
   pageIndex: number,
   pageCount: number,
   context: PdfPageRasterizerContext,
+  loadedImages: ReadonlyMap<PublicationImageBlock, LoadedImage>,
 ): void {
   drawingContext.save();
   drawingContext.setTransform(1, 0, 0, 1, 0, 0);
@@ -727,12 +791,116 @@ function renderPage(
       drawingContext.moveTo(command.x1, command.y1);
       drawingContext.lineTo(command.x2, command.y2);
       drawingContext.stroke();
-    } else {
+    } else if (command.kind === "rectangle") {
       drawingContext.fillStyle = command.color;
       drawingContext.fillRect(command.x, command.y, command.width, command.height);
+    } else {
+      const loaded = loadedImages.get(command.image);
+      if (loaded === undefined) {
+        throw new PdfExportError(
+          "PDF_RENDER_FAILED",
+          "An accepted publication image could not be decoded for the PDF page.",
+        );
+      }
+      drawingContext.drawImage(loaded.source, command.x, command.y, command.width, command.height);
     }
   }
   drawingContext.restore();
+}
+
+async function loadPublicationImages(
+  publication: PortablePublication,
+  signal: AbortSignal | undefined,
+): Promise<ReadonlyMap<PublicationImageBlock, LoadedImage>> {
+  const loaded = new Map<PublicationImageBlock, LoadedImage>();
+  try {
+    for (const chapter of publication.chapters) {
+      for (const block of chapter.blocks) {
+        if (block.kind === "image") {
+          throwIfCancelled(signal);
+          loaded.set(block, await decodeLocalImage(block, signal));
+        }
+      }
+    }
+    return loaded;
+  } catch (error: unknown) {
+    for (const { release } of loaded.values()) {
+      release();
+    }
+    if (error instanceof PdfExportError) {
+      throw error;
+    }
+    throw new PdfExportError(
+      signal?.aborted === true ? "EXPORT_CANCELLED" : "PDF_RENDER_FAILED",
+      signal?.aborted === true
+        ? "The PDF export was cancelled."
+        : "A publication image could not be decoded from its local bytes.",
+    );
+  }
+}
+
+async function decodeLocalImage(
+  block: PublicationImageBlock,
+  signal: AbortSignal | undefined,
+): Promise<LoadedImage> {
+  const imageBuffer = new ArrayBuffer(block.bytes.byteLength);
+  new Uint8Array(imageBuffer).set(block.bytes);
+  const blob = new Blob([imageBuffer], { type: block.mediaType });
+  if (typeof globalThis.createImageBitmap === "function") {
+    const bitmap = await globalThis.createImageBitmap(blob);
+    if (signal?.aborted === true) {
+      bitmap.close();
+      throw new PdfExportError("EXPORT_CANCELLED", "The PDF export was cancelled.");
+    }
+    if (bitmap.width !== block.pixelWidth || bitmap.height !== block.pixelHeight) {
+      bitmap.close();
+      throw new PdfExportError(
+        "PDF_RENDER_FAILED",
+        "The decoded publication image dimensions do not match its validated header.",
+      );
+    }
+    return { source: bitmap, release: () => bitmap.close() };
+  }
+
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const image = document.createElement("img");
+    image.decoding = "async";
+    await new Promise<void>((resolve, reject) => {
+      const abort = (): void =>
+        reject(new PdfExportError("EXPORT_CANCELLED", "The PDF export was cancelled."));
+      const finish = (callback: () => void): void => {
+        signal?.removeEventListener("abort", abort);
+        callback();
+      };
+      image.addEventListener("load", () => finish(resolve), { once: true });
+      image.addEventListener(
+        "error",
+        () =>
+          finish(() =>
+            reject(
+              new PdfExportError(
+                "PDF_RENDER_FAILED",
+                "A publication image could not be decoded from its local bytes.",
+              ),
+            ),
+          ),
+        { once: true },
+      );
+      signal?.addEventListener("abort", abort, { once: true });
+      image.src = objectUrl;
+    });
+    throwIfCancelled(signal);
+    if (image.naturalWidth !== block.pixelWidth || image.naturalHeight !== block.pixelHeight) {
+      throw new PdfExportError(
+        "PDF_RENDER_FAILED",
+        "The decoded publication image dimensions do not match its validated header.",
+      );
+    }
+    return { source: image, release: () => undefined };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 function drawHeaderAndFooter(

@@ -123,8 +123,11 @@ describe("native authoritative extraction provider", () => {
     expect(call?.generationId).toBe(GENERATION_ID);
     expect(call?.config.provider).toBe("ollama");
     expect(call?.config.authentication).toBe("none");
+    expect(call?.config.retryLimit).toBe(0);
     expect(call?.model).toBe("qwen2.5:7b-instruct");
     expect(call?.temperature).toBe(0);
+    expect(call).not.toHaveProperty("reasoningMode");
+    expect(call).not.toHaveProperty("responseFormat");
     expect(call?.dispatchScope).toEqual({
       kind: "project_context",
       receipt: projectContextPrivacyReceipt(false),

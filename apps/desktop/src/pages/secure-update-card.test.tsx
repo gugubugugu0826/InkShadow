@@ -62,7 +62,8 @@ describe("SecureUpdateCard", () => {
 
     expect(await screen.findByText("此构建未启用在线更新")).toBeVisible();
     expect(screen.queryByRole("button", { name: "检查签名更新" })).not.toBeInTheDocument();
-    expect(screen.getByText(/UPDATE_PUBLIC_KEY_NOT_PINNED/u)).toBeVisible();
+    expect(screen.getByText(/只有发行流水线固定清单地址/u)).toBeVisible();
+    expect(screen.queryByText(/UPDATE_PUBLIC_KEY_NOT_PINNED/u)).not.toBeInTheDocument();
   });
 
   it("checks and stages an upgrade while keeping installation unavailable", async () => {

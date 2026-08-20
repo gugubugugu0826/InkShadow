@@ -27,6 +27,7 @@ import type {
   CausalFactAuthoringService,
   ConfirmedCausalCharacter,
 } from "../infrastructure/causal-fact-authoring-service";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import {
   MAXIMUM_CAUSAL_CHARACTER_SELECTIONS,
   MAXIMUM_CAUSAL_EVENT_CHANGES,
@@ -200,11 +201,7 @@ export function CausalFactAuthoringPanel(props: CausalFactAuthoringPanelProps) {
       );
     } catch (cause: unknown) {
       setConfirmedCharacters([]);
-      setError(
-        cause instanceof Error
-          ? cause.message
-          : "暂时无法读取已确认人物，因此人物相关内容不能保存。请稍后重试。",
-      );
+      setError(projectOrdinaryUiError(cause).description);
     }
   }, [props.projectId, props.service]);
 
@@ -653,8 +650,7 @@ export function CausalFactAuthoringPanel(props: CausalFactAuthoringPanelProps) {
       }
       if (refreshFailed) {
         setSavedWarning(
-          receipt.projectionError ??
-            "正式设定已经安全保存，但当前页面未能刷新。请使用下方“重新整理”恢复显示；重复提交不会创建副本。",
+          "正式设定已安全保存，但故事关联暂未更新。请使用下方“重新整理”恢复显示；重复提交不会创建副本。",
         );
       } else {
         const recovered = receipt.persistence === "existing" ? "已恢复先前保存的相同记录。" : "";
@@ -665,7 +661,7 @@ export function CausalFactAuthoringPanel(props: CausalFactAuthoringPanelProps) {
         );
       }
     } catch (cause: unknown) {
-      setError(cause instanceof Error ? cause.message : "没有保存，请检查输入后重试。");
+      setError(projectOrdinaryUiError(cause).description);
     } finally {
       setBusy(false);
     }

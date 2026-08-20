@@ -14,6 +14,7 @@ import { resolveModelProfileGatewayConfig } from "./model-profile-gateway-config
 import type { ModelHubStore } from "./model-hub-store";
 import type { NativeGatewayEndpointConfig } from "./native-model-gateway-contract";
 import type { ModelRoleRoute, ModelRoutingStore } from "./model-routing-store";
+import { SINGLE_ATTEMPT_STRICT_JSON_TEXT_TRANSPORT_POLICY } from "./model-execution-policy";
 
 type ConfiguredRouteDependencies = Readonly<{
   modelCenter: Pick<ModelCenterStore, "findByProviderId">;
@@ -122,14 +123,18 @@ export class NativeGovernedCreativeExtensionGateway implements GovernedCreativeE
     options.signal.addEventListener("abort", cancel, { once: true });
     try {
       const config = await this.resolveCurrentGatewayConfig(request);
+      // This legacy route has no catalog-entry capability receipt. Keep the
+      // strict JSON schema but do not claim verified Provider JSON mode.
+      const executionPolicy = SINGLE_ATTEMPT_STRICT_JSON_TEXT_TRANSPORT_POLICY;
       const generated = await this.gateway.generate({
         dispatchScope: request.dispatchScope,
         generationId,
-        config,
+        config: Object.freeze({ ...config, retryLimit: executionPolicy.providerRetryLimit }),
         model: request.snapshot.provider.modelId,
         messages: buildGovernedMessages(request),
         maxOutputTokens: request.snapshot.limits.maximumOutputTokens,
         temperature: 0.1,
+        ...(config.provider === "open_ai_compatible" ? { reasoningMode: "disabled" as const } : {}),
       });
       if (signalIsAborted(options.signal)) {
         throw new GovernedCreativeExtensionGatewayError(

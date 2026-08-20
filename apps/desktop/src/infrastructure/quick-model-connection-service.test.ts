@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   configureQuickBookStartRoute,
   connectQuickModelProvider,
+  inspectQuickBookStartRouteProbe,
   QUICK_MODEL_PROVIDERS,
   QuickModelConnectionError,
 } from "./quick-model-connection-service";
@@ -76,7 +77,7 @@ describe("quick Model Hub connection", () => {
     expect(serializedMetadata).not.toContain("test-verified-secret-value");
     expect(JSON.stringify(window.localStorage)).not.toContain("test-verified-secret-value");
 
-    const ready = await configureQuickBookStartRoute(harness.runtime, {
+    const ready = await configureConfirmedQuickBookStartRoute(harness.runtime, {
       connectionId: connected.connection.id,
       catalogEntryId: connected.catalog[0]?.id ?? "missing",
     });
@@ -109,7 +110,7 @@ describe("quick Model Hub connection", () => {
       secret: "test-deepseek-secret",
     });
 
-    await configureQuickBookStartRoute(harness.runtime, {
+    await configureConfirmedQuickBookStartRoute(harness.runtime, {
       connectionId: connected.connection.id,
       catalogEntryId: connected.catalog[0]?.id ?? "missing",
     });
@@ -119,6 +120,25 @@ describe("quick Model Hub connection", () => {
       reasoningMode: "disabled",
       messages: [{ role: "user", content: "只回复：OK" }],
     });
+  });
+
+  it("does not dispatch the fixed probe before an explicit disclosure confirmation", async () => {
+    const harness = createHarness();
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "openai",
+      secret: "test-disclosure-secret",
+    });
+    harness.generate.mockClear();
+
+    await expect(
+      configureQuickBookStartRoute(harness.runtime, {
+        connectionId: connected.connection.id,
+        catalogEntryId: connected.catalog[0]?.id ?? "missing",
+        humanConfirmed: true,
+        disclosureFingerprint: "",
+      }),
+    ).rejects.toMatchObject({ code: "QUICK_MODEL_PROBE_CONFIRMATION_REQUIRED" });
+    expect(harness.generate).not.toHaveBeenCalled();
   });
 
   it("records a truthful partial scan when a truncated probe already emitted visible text", async () => {
@@ -143,7 +163,7 @@ describe("quick Model Hub connection", () => {
       );
     });
 
-    const ready = await configureQuickBookStartRoute(harness.runtime, {
+    const ready = await configureConfirmedQuickBookStartRoute(harness.runtime, {
       connectionId: connected.connection.id,
       catalogEntryId: connected.catalog[0]?.id ?? "missing",
     });
@@ -201,7 +221,7 @@ describe("quick Model Hub connection", () => {
     harness.generate.mockClear();
 
     await expect(
-      configureQuickBookStartRoute(harness.runtime, {
+      configureConfirmedQuickBookStartRoute(harness.runtime, {
         connectionId: connected.connection.id,
         catalogEntryId: connected.catalog[0]?.id ?? "missing",
       }),
@@ -372,7 +392,7 @@ describe("quick Model Hub connection", () => {
       authenticationMode: "none",
       connectionStatus: "ready",
     });
-    const ready = await configureQuickBookStartRoute(harness.runtime, {
+    const ready = await configureConfirmedQuickBookStartRoute(harness.runtime, {
       connectionId: connected.connection.id,
       catalogEntryId: connected.catalog[0]?.id ?? "missing",
     });
@@ -414,7 +434,7 @@ describe("quick Model Hub connection", () => {
     expect(connected.connection.id).toBe("deepseek-2");
     expect(connected.connection).toMatchObject({ enabled: true, connectionStatus: "ready" });
     await expect(harness.runtime.modelHub.findConnection(retired.id)).resolves.toEqual(retired);
-    const routed = await configureQuickBookStartRoute(harness.runtime, {
+    const routed = await configureConfirmedQuickBookStartRoute(harness.runtime, {
       connectionId: connected.connection.id,
       catalogEntryId: connected.catalog[0]?.id ?? "missing",
     });
@@ -423,7 +443,7 @@ describe("quick Model Hub connection", () => {
     expect(routed.route.primaryCatalogEntryId).not.toBe("retired-deepseek-model");
   });
 
-  it("verifies a Qwen manual model with a content-free probe and persists its region", async () => {
+  it("connects a manual Qwen model without generation, then probes only after disclosure", async () => {
     const harness = createHarness();
     const connected = await connectQuickModelProvider(harness.runtime, {
       provider: "alibaba_qwen",
@@ -433,14 +453,34 @@ describe("quick Model Hub connection", () => {
       manualModelId: "qwen-account-model",
     });
 
-    expect(harness.checkConnection).not.toHaveBeenCalled();
+    expect(harness.checkConnection).toHaveBeenCalledOnce();
     expect(harness.listModels).not.toHaveBeenCalled();
+    expect(harness.generate).not.toHaveBeenCalled();
+    const disclosure = await inspectQuickBookStartRouteProbe(harness.runtime, {
+      connectionId: connected.connection.id,
+      catalogEntryId: connected.catalog[0]?.id ?? "missing",
+    });
+    expect(disclosure).toMatchObject({
+      connectionDisplayName: "阿里云百炼 / Qwen",
+      modelId: "qwen-account-model",
+      maximumProviderCalls: 1,
+      automaticRetryCount: 0,
+      estimatedMaximumCostMicros: null,
+      dataDestination: "remote",
+    });
+    await configureQuickBookStartRoute(harness.runtime, {
+      connectionId: connected.connection.id,
+      catalogEntryId: connected.catalog[0]?.id ?? "missing",
+      humanConfirmed: true,
+      disclosureFingerprint: disclosure.fingerprint,
+    });
     expect(harness.generate).toHaveBeenCalledOnce();
     expect(harness.generate.mock.calls[0]?.[0]).toMatchObject({
       model: "qwen-account-model",
       messages: [{ role: "user", content: "只回复：OK" }],
       dispatchScope: { kind: "non_project", reason: "connection_probe" },
       maxOutputTokens: 64,
+      config: { retryLimit: 0 },
     });
     expect(harness.generate.mock.calls[0]?.[0]).not.toHaveProperty("reasoningMode");
     expect(connected.connection).toMatchObject({
@@ -479,7 +519,7 @@ describe("quick Model Hub connection", () => {
       manualModelId: "qwen-updated-model",
     });
 
-    expect(harness.generate.mock.calls[0]?.[0].config.baseUrl).toBe(
+    expect(harness.checkConnection.mock.calls[0]?.[0].baseUrl).toBe(
       "https://workspace-updated.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
     );
     expect(connected.connection).toMatchObject({
@@ -621,6 +661,18 @@ describe("quick Model Hub connection", () => {
     expect(harness.generate).not.toHaveBeenCalled();
   });
 });
+
+async function configureConfirmedQuickBookStartRoute(
+  runtime: DesktopRuntime,
+  input: Readonly<{ connectionId: string; catalogEntryId: string }>,
+) {
+  const disclosure = await inspectQuickBookStartRouteProbe(runtime, input);
+  return configureQuickBookStartRoute(runtime, {
+    ...input,
+    humanConfirmed: true,
+    disclosureFingerprint: disclosure.fingerprint,
+  });
+}
 
 function createHarness(
   input: Readonly<{

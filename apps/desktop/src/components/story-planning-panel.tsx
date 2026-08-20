@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   CardContent,
+  CardFooter,
   CardHeader,
   CardTitle,
   FormField,
@@ -13,12 +14,20 @@ import {
   Textarea,
 } from "@inkshadow/ui";
 
-import type { ModelHubStoryPlanningService } from "../infrastructure/model-hub-story-planning-service";
+import type {
+  ModelHubStoryPlanningService,
+  StoryPlanningDisclosure,
+} from "../infrastructure/model-hub-story-planning-service";
 import type {
   StoryPlanningCandidate,
   StoryPlanningTask,
 } from "../infrastructure/story-planning-candidate-store";
 import { listStoryPlanningSelectableItems } from "../infrastructure/story-planning-selective-acceptance";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
+import {
+  fitCandidateDecisionTextarea,
+  handleCandidateDecisionNavigation,
+} from "./candidate-decision-navigation";
 
 export interface StoryPlanningPanelProps {
   readonly projectId: string;
@@ -26,6 +35,7 @@ export interface StoryPlanningPanelProps {
   readonly service: Pick<
     ModelHubStoryPlanningService,
     | "listCandidates"
+    | "prepareGeneration"
     | "generate"
     | "updateCandidate"
     | "acceptCandidate"
@@ -57,6 +67,7 @@ export function StoryPlanningPanel({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Readonly<{ title: string; message: string }> | null>(null);
+  const [disclosure, setDisclosure] = useState<StoryPlanningDisclosure | null>(null);
   const resolvedTargetNodeId = chapters.some(({ id }) => id === targetNodeId)
     ? targetNodeId
     : (chapters[0]?.id ?? "");
@@ -103,14 +114,25 @@ export function StoryPlanningPanel({
     setError(null);
     setNotice(null);
     try {
-      const outcome = await service.generate({
+      const request = {
         projectId,
         task,
         ...(task === "scene_breakdown" ? { targetNodeId: resolvedTargetNodeId } : {}),
         ...(direction.trim().length === 0 ? {} : { userDirection: direction }),
+      } as const;
+      if (disclosure === null) {
+        setDisclosure(await service.prepareGeneration(request));
+        setNotice({ title: "发送信息已准备好", message: "确认前不会调用 AI。请核对后再继续。" });
+        return;
+      }
+      const outcome = await service.generate({
+        ...request,
+        disclosureFingerprint: disclosure.fingerprint,
+        humanConfirmed: true,
       });
+      setDisclosure(null);
       if (outcome.status === "skipped") {
-        setNotice({ title: "本次没有调用 AI", message: `${outcome.message}（${outcome.code}）` });
+        setNotice({ title: "本次没有调用 AI", message: outcome.message });
         return;
       }
       setCandidates((current) => Object.freeze([outcome.candidate, ...current]));
@@ -123,6 +145,7 @@ export function StoryPlanningPanel({
         message: "正式大纲和正文都没有改变。你可以先编辑，再明确采纳或拒绝。",
       });
     } catch (cause: unknown) {
+      setDisclosure(null);
       setError(errorMessage(cause, "规划建议生成失败；正式大纲和正文没有改变。"));
     } finally {
       setBusyAction(null);
@@ -248,7 +271,10 @@ export function StoryPlanningPanel({
                   { value: "outline_planning", label: "规划全书故事方向" },
                   { value: "scene_breakdown", label: "拆解一个章节的场景" },
                 ]}
-                onChange={(event) => setTask(event.currentTarget.value as StoryPlanningTask)}
+                onChange={(event) => {
+                  setTask(event.currentTarget.value as StoryPlanningTask);
+                  setDisclosure(null);
+                }}
               />
             )}
           </FormField>
@@ -265,7 +291,10 @@ export function StoryPlanningPanel({
                     value: chapter.id,
                     label: chapter.title,
                   }))}
-                  onChange={(event) => setTargetNodeId(event.currentTarget.value)}
+                  onChange={(event) => {
+                    setTargetNodeId(event.currentTarget.value);
+                    setDisclosure(null);
+                  }}
                 />
               )}
             </FormField>
@@ -284,11 +313,22 @@ export function StoryPlanningPanel({
                 rows={4}
                 disabled={disabled || busyAction !== null}
                 placeholder="例如：下一卷让男女主因为误会短暂分开，但不要新增超自然设定。"
-                onChange={(event) => setDirection(event.currentTarget.value)}
+                onChange={(event) => {
+                  setDirection(event.currentTarget.value);
+                  setDisclosure(null);
+                }}
               />
             )}
           </FormField>
 
+          {disclosure !== null && (
+            <InlineAlert
+              tone="warning"
+              title="确认后会调用 1 次"
+              description={`${disclosure.connectionDisplayName} · ${disclosure.modelId}；${disclosure.privacy} 发送内容：${disclosure.sends.join("；")}。自动重试 0 次；${formatPlanningCost(disclosure)}。`}
+              onDismiss={() => setDisclosure(null)}
+            />
+          )}
           <Button
             loading={busyAction === "generate"}
             disabled={
@@ -298,8 +338,23 @@ export function StoryPlanningPanel({
             }
             onClick={() => void generate()}
           >
-            {task === "outline_planning" ? "生成故事方向建议" : "生成场景拆解建议"}
+            {disclosure === null
+              ? task === "outline_planning"
+                ? "查看故事方向发送信息"
+                : "查看场景拆解发送信息"
+              : task === "outline_planning"
+                ? "确认并生成故事方向建议"
+                : "确认并生成场景拆解建议"}
           </Button>
+          {disclosure !== null && (
+            <Button
+              variant="ghost"
+              disabled={busyAction !== null}
+              onClick={() => setDisclosure(null)}
+            >
+              取消，不调用
+            </Button>
+          )}
 
           {notice !== null && (
             <InlineAlert
@@ -339,7 +394,11 @@ export function StoryPlanningPanel({
               candidate.selectiveAcceptanceIntent !== null &&
               candidate.selectiveAcceptanceIntent !== undefined;
             return (
-              <Card key={candidate.id}>
+              <Card
+                key={candidate.id}
+                className={candidate.status === "review" ? "candidate-decision-surface" : undefined}
+                aria-label={`${candidate.targetNodeTitle}的规划候选决策`}
+              >
                 <CardHeader>
                   <div className="card-heading-row">
                     <div>
@@ -348,9 +407,9 @@ export function StoryPlanningPanel({
                         {candidate.targetNodeTitle}
                       </CardTitle>
                       <p>
-                        使用 {candidate.providerKind} / {candidate.modelId}
-                        {candidate.usedFallback ? "（备用模型）" : ""} · 调用记录{" "}
-                        {candidate.invocationId}
+                        使用模型 {candidate.modelId}
+                        {candidate.usedFallback ? "（备用模型）" : ""} ·
+                        本次模型结果已记录，可在调用与费用中核对
                       </p>
                     </div>
                     <Badge tone={candidateStatusTone(candidate.status)}>
@@ -360,7 +419,11 @@ export function StoryPlanningPanel({
                     </Badge>
                   </div>
                 </CardHeader>
-                <CardContent>
+                <CardContent
+                  tabIndex={candidate.status === "review" ? 0 : undefined}
+                  aria-label={`${candidate.targetNodeTitle}的规划候选内容`}
+                  onKeyDown={handleCandidateDecisionNavigation}
+                >
                   {selectiveAcceptanceApplying && (
                     <InlineAlert
                       tone="info"
@@ -453,12 +516,14 @@ export function StoryPlanningPanel({
                     {(fieldProps) => (
                       <Textarea
                         {...fieldProps}
+                        ref={fitCandidateDecisionTextarea}
                         value={text}
                         rows={12}
                         maxLength={20_000}
                         currentLength={text.length}
                         readOnly={candidate.status !== "review" || selectiveAcceptanceApplying}
                         disabled={candidateBusy}
+                        onInput={(event) => fitCandidateDecisionTextarea(event.currentTarget)}
                         onChange={(event) => {
                           const nextValue = event.currentTarget.value;
                           setEditable((current) => ({
@@ -469,58 +534,58 @@ export function StoryPlanningPanel({
                       />
                     )}
                   </FormField>
-                  {candidate.status === "review" && (
-                    <div className="outline-node-actions">
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        loading={busyAction === `save:${candidate.id}`}
-                        disabled={
-                          disabled ||
-                          busyAction !== null ||
-                          selectiveAcceptanceApplying ||
-                          !dirty ||
-                          text.trim().length === 0
-                        }
-                        onClick={() => void save(candidate)}
-                      >
-                        保存对建议的修改
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        loading={busyAction === `partial:${candidate.id}`}
-                        disabled={
-                          disabled || busyAction !== null || !hasBaseline || selected.length === 0
-                        }
-                        onClick={() => void acceptSelected(candidate)}
-                      >
-                        {selectiveAcceptanceApplying
-                          ? "恢复上次逐项采纳"
-                          : `采纳已选 ${String(selected.length)} 项并保留当前简介`}
-                      </Button>
-                      <Button
-                        size="sm"
-                        loading={busyAction === `accept:${candidate.id}`}
-                        disabled={
-                          disabled || busyAction !== null || dirty || selectiveAcceptanceApplying
-                        }
-                        onClick={() => void accept(candidate)}
-                      >
-                        采纳并替换“{candidate.targetNodeTitle}”的简介
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        loading={busyAction === `reject:${candidate.id}`}
-                        disabled={disabled || busyAction !== null || selectiveAcceptanceApplying}
-                        onClick={() => void reject(candidate)}
-                      >
-                        拒绝这份建议
-                      </Button>
-                    </div>
-                  )}
                 </CardContent>
+                {candidate.status === "review" && (
+                  <CardFooter className="candidate-decision-actions">
+                    <Button
+                      size="lg"
+                      variant="secondary"
+                      loading={busyAction === `save:${candidate.id}`}
+                      disabled={
+                        disabled ||
+                        busyAction !== null ||
+                        selectiveAcceptanceApplying ||
+                        !dirty ||
+                        text.trim().length === 0
+                      }
+                      onClick={() => void save(candidate)}
+                    >
+                      保存对建议的修改
+                    </Button>
+                    <Button
+                      size="lg"
+                      variant="secondary"
+                      loading={busyAction === `partial:${candidate.id}`}
+                      disabled={
+                        disabled || busyAction !== null || !hasBaseline || selected.length === 0
+                      }
+                      onClick={() => void acceptSelected(candidate)}
+                    >
+                      {selectiveAcceptanceApplying
+                        ? "恢复上次逐项采纳"
+                        : `采纳已选 ${String(selected.length)} 项并保留当前简介`}
+                    </Button>
+                    <Button
+                      size="lg"
+                      loading={busyAction === `accept:${candidate.id}`}
+                      disabled={
+                        disabled || busyAction !== null || dirty || selectiveAcceptanceApplying
+                      }
+                      onClick={() => void accept(candidate)}
+                    >
+                      采纳并替换“{candidate.targetNodeTitle}”的简介
+                    </Button>
+                    <Button
+                      size="lg"
+                      variant="ghost"
+                      loading={busyAction === `reject:${candidate.id}`}
+                      disabled={disabled || busyAction !== null || selectiveAcceptanceApplying}
+                      onClick={() => void reject(candidate)}
+                    >
+                      拒绝这份建议
+                    </Button>
+                  </CardFooter>
+                )}
               </Card>
             );
           })}
@@ -554,6 +619,16 @@ function candidateStatusTone(
   }
 }
 
+function formatPlanningCost(disclosure: StoryPlanningDisclosure): string {
+  if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
+    return "当前无法核定费用上限，AI 服务仍可能收费";
+  }
+  return `本次费用上限 ${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
+}
+
 function errorMessage(cause: unknown, fallback: string): string {
-  return cause instanceof Error && cause.message.trim().length > 0 ? cause.message : fallback;
+  if (typeof cause === "object" && cause !== null && "code" in cause) {
+    return projectOrdinaryUiError(cause).description;
+  }
+  return fallback;
 }

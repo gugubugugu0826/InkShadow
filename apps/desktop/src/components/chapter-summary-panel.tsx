@@ -24,6 +24,11 @@ import type {
   HistoricalChapterBackfillPlan,
   HistoricalChapterBackfillService,
 } from "../infrastructure/historical-chapter-backfill-service";
+import {
+  getModelProviderPreset,
+  isModelProviderKind,
+} from "../infrastructure/model-hub-provider-registry";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 
 export type ChapterSummaryPanelService = Pick<
   ChapterSummaryService,
@@ -91,7 +96,7 @@ export function ChapterSummaryPanel({
       setNotice({
         tone: "error",
         title: "无法读取章节摘要状态",
-        description: cause instanceof Error ? cause.message : "请稍后重试。",
+        description: projectOrdinaryUiError(cause).description,
       });
     } finally {
       setLoading(false);
@@ -119,7 +124,7 @@ export function ChapterSummaryPanel({
       setNotice({
         tone: "error",
         title: "无法撤销章节摘要",
-        description: cause instanceof Error ? cause.message : "请稍后重试。",
+        description: projectOrdinaryUiError(cause).description,
       });
     } finally {
       setBusyChapterId(null);
@@ -142,7 +147,7 @@ export function ChapterSummaryPanel({
       setNotice({
         tone: "error",
         title: "无法生成回填计划",
-        description: cause instanceof Error ? cause.message : "正文没有变化，请稍后刷新后重试。",
+        description: projectOrdinaryUiError(cause).description,
       });
     } finally {
       setBackfillBusy(false);
@@ -191,8 +196,7 @@ export function ChapterSummaryPanel({
       setNotice({
         tone: "error",
         title: "现有章节任务未能登记",
-        description:
-          cause instanceof Error ? cause.message : "正文没有变化；请重新生成只读计划后再试。",
+        description: projectOrdinaryUiError(cause).description,
       });
     } finally {
       setBackfillBusy(false);
@@ -374,7 +378,8 @@ export function ChapterSummaryPanel({
                 )}
                 {entry.modelId !== null && (
                   <p className="candidate-panel__hint">
-                    模型：{entry.providerKind}/{entry.modelId} · 调用记录：{entry.invocationId}
+                    模型：{providerDisplayName(entry.providerKind)} · {entry.modelId} ·
+                    本次模型结果已记录，可在调用与费用中核对
                   </p>
                 )}
               </CardContent>
@@ -442,11 +447,17 @@ function continuousProviderAssignments(
       typeof record.modelId === "string"
     ) {
       assignments.add(
-        `${continuousTaskLabel(record.task)}：${record.providerKind}/${record.modelId}`,
+        `${continuousTaskLabel(record.task)}：${providerDisplayName(record.providerKind)} · ${record.modelId}`,
       );
     }
   }
   return [...assignments].sort();
+}
+
+function providerDisplayName(providerKind: unknown): string {
+  return isModelProviderKind(providerKind)
+    ? getModelProviderPreset(providerKind).displayName
+    : "已确认的模型服务";
 }
 
 function continuousTaskLabel(task: string): string {

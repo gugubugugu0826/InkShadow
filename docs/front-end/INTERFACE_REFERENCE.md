@@ -1,15 +1,15 @@
 # InkShadow 前端接口与数据边界
 
-> 基于源码快照：2026-08-13  
+> 基于源码快照：2026-08-20  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 当前源码目标版本：`0.2.4`；最近已发布版本：`0.2.3`；设计基线：`DESIGN v0.3.1b`  
+> 当前源码目标版本：`0.2.5`；最新已发布版本：`0.2.4`；设计基线：`DESIGN v0.3.1b`  
 > 本文记录当前代码接口；它不代表所有云能力已部署或已开放
 
 ## 1. 接口总览
 
 当前代码确认：
 
-- 59 个 Tauri 自定义 command；
+- 61 个 Tauri 自定义 command；
 - 1 个 Tauri 自定义事件；
 - 81 个 Cloud REST operation；
 - Web Guest 使用 1 个 IndexedDB 数据库和 2 个 Object Store；
@@ -146,16 +146,19 @@ interface NativeSqliteError {
 
 正式数据库固定在应用配置目录中的 `inkshadow.db`；WebView 不能指定任意数据库路径。
 
-当前前向迁移上限为 Data `0065_model_invocation_dispatch_boundary.sql` / Tauri `68`。Tauri 原生版本把
-Data 迁移和 story-core 迁移合并成一个连续序列，所以两个编号不要求相同。`0060`/Tauri `63`
-新增 Novel Skill definition、binding 与调用 snapshot；`0061`/Tauri `64` 新增并硬化九表、
-content-free 的评测账本；`0062`/Tauri `65` 只补上持有既有项目派发 lease 时项目不得离开 active。
-`0063`/Tauri `66` 新增精确目标、商业授权、reservation 与盲评合同；`0064`/Tauri `67` 以前向
-sidecar 冻结内容无关的派发前权威；`0065`/Tauri `68` 只在现有模型调用事实上追加不含内容的
-Provider 发送边界时间，用于把启动恢复分为未发送与结果不明确，两者都不自动重发。
-同一变更集的 Rust/TS 代码把 `0045` 已有 lease 覆盖到回环本地派发，并加强 Candidate/context output
-原子版本围栏。当前 166 张作者数据表进入备份恢复，另 1 张内容无关的原生
-项目派发租约表明确不恢复。已登记 migration 只校验和验证、不可改写；新结构必须继续追加更高版本。
+当前前向迁移上限为 Data `0070_multigranular_search_retrieval.sql` / Tauri `73`。
+Tauri 原生版本把 70 个 Data migration 和 3 个 story-core migration 合并成一个连续序列，所以两个
+编号不要求相同。`0060`–`0065` 保留 Novel Skill、付费评测、项目派发围栏与内容无关 Provider
+发送边界；`0066`/Tauri `69` 追加写作体验偏好和披露 grant，`0067`/Tauri `70` 追加有界调查
+run/step/finding/evidence，`0068`/Tauri `71` 让 grant 上限只统计 active 行。`0069`/Tauri `72`
+为模型 step 预留 content-free invocation UUID，并让账本 INSERT 原子绑定 step/context trace；
+`0070`/Tauri `73` 只为可重建搜索投影追加多粒度、父子 UTF-16 定位与 current/branch/POV/
+story-time/authority/privacy 范围，旧行为 `legacy_unknown`。
+启动恢复按 Provider 发送边界把 ledger/run 结清为发送前终态或 `ambiguous`，同时对账仍非终态的
+task，且不自动重发。同一变更集继续复用 `0045` lease 与 Candidate/context output 原子版本围栏。
+当前 172 张作者数据表进入备份恢复，另 1 张内容无关的原生项目派发租约表明确不恢复；
+`consistency_investigation_steps.planned_invocation_id` 随整表复制。已登记 migration 只校验和验证、
+不可改写；新结构必须继续追加更高版本。
 
 ### 5.1 连接与查询
 
@@ -197,14 +200,19 @@ type NativeSqlValue =
 
 ### 5.3 文件选择与路径票据
 
-| Command                                        | 参数               | 返回                 |
-| ---------------------------------------------- | ------------------ | -------------------- |
-| `native_choose_backup_destination`             | 当前有效数据库会话 | `{ticket}` 或 `null` |
-| `native_choose_pre_restore_backup_destination` | 当前有效数据库会话 | `{ticket}` 或 `null` |
-| `native_choose_restore_source`                 | 当前有效数据库会话 | `{ticket}` 或 `null` |
+| Command                                        | 参数                                                       | 返回                          |
+| ---------------------------------------------- | ---------------------------------------------------------- | ----------------------------- |
+| `native_choose_backup_destination`             | 当前有效数据库会话                                         | `{ticket}` 或 `null`          |
+| `native_choose_pre_restore_backup_destination` | 当前有效数据库会话                                         | `{ticket}` 或 `null`          |
+| `native_choose_restore_source`                 | 当前有效数据库会话                                         | `{ticket}` 或 `null`          |
+| `native_choose_export_destination`             | 默认文件名、格式、精确 media type                          | `{ticket,fileName}` 或 `null` |
+| `native_write_export_artifact`                 | 一次性目标 ticket、格式、media type、期望字节、base64 内容 | 已验证的保存回执              |
 
-返回的是 64 位十六进制不透明授权票据，不是文件路径。票据与数据库会话和特定操作绑定，
+前三个数据库路径 command 返回 64 位十六进制不透明授权票据，不是文件路径。票据与数据库会话和特定操作绑定，
 不能跨会话或跨用途使用，避免 WebView 获得任意文件系统路径。
+导出 ticket 同样是一次性的，但它与原生对话框选定的目标、格式和 media type 绑定。写入前重验父目录与
+现有目标身份，使用 no-clobber 原子安装或 Windows `ReplaceFileW`，再从磁盘回读 size 与 SHA-256。成功回执含
+format、fileName、绝对 path、byteLength 和 status；取消为 0 写入，失败错误不回显目标 path。
 
 主要错误：
 
@@ -331,7 +339,8 @@ interface SetChapterPrivacyOutcome {
 仅发送单章的操作会把私密目标章节的 `requiredDataDestination` 固定为 `local`。可能读取全书
 StoryFact、正式记录、因果关系、检索候选或其他章节资料的操作还必须取得项目级
 `ProjectContextPrivacyReceipt`；只要项目仍保留任一私密章节，续写、改写、Embedding、Rerank、
-规划、审稿、连续/权威提取、导入分析和 What-if 都只允许已验证的回环本地模型。真实派发前最后
+规划、审稿、连续/权威提取和 What-if 都只允许已验证的回环本地模型；保留的导入分析服务若未来
+重新启用也必须遵守同一限制，但当前导入 Provider 入口完全关闭。真实派发前最后
 一次异步检查会重读保留章节集合、状态、当前版本、章节修订和隐私修订；不一致时以
 `PROJECT_CONTEXT_PRIVACY_CHANGED` 或 `PRIVATE_CHAPTER_LOCAL_ONLY` 失败关闭并发送 0 字。
 远程和回环本地的项目上下文模型调用都必须持有同一原生生命周期 lease；lease 取得时项目必须
@@ -342,6 +351,38 @@ active，且项目、章节、当前版本和隐私指纹精确匹配。原生 r
 同步物化跳过 `local_only`；项目导出默认排除私密章节及可定位的相关派生记录，只有用户显式选择
 `includeLocalOnlyChapters: true` 才纳入。
 这些门禁只约束 InkShadow 当前和未来的操作，不能撤回或删除此前已到达供应商或云端的内容。
+
+### 5.7 写作体验偏好与 Provider 披露授权
+
+Data `0066` 保存一条全局写作体验偏好与内容无关的续写披露 grant。新安装保守初始化为直接模式，
+旧数据库升级初始化为专业模式；模式、本地整理授权和 revision 使用 CAS 更新。一次性本地整理授权
+只允许在作者明确接受 Candidate 后处理新增 delta，不允许 Provider 派发或自动接受正文。
+
+`WritingExperienceStore` 提供 `getOrInitialize`、`switchMode`、`authorizeDirectMode`、
+`revokeDirectModeAuthorization`、`record/find/list/consume/revokeDisclosureGrant`。Data `0068` 只对
+active grant 执行 128 条上限，consumed/revoked 记录仍保留审计；备份恢复复制这些权威记录但不包含
+API Key。设置页已有本地整理授权撤销；固定能力探针聚焦回归实际收集 3 files / 69 tests 并通过，
+该按钮只撤销直接模式的本地普通设定整理授权。普通 UI 没有逐 grant 查看/撤销/清空面板；这不是
+当前 release requirement。Provider grant 仍通过精确 fingerprint 失配、同族轮换、active 128、
+SQLite/Browser/备份一致性与历史审计治理。
+
+专业/直接续写共用 `continuation-generation-disclosure.ts`。prepare 阶段为 0 Provider call，普通界面
+显示连接显示名、精确模型、发送范围、local/remote 隐私、最大调用数 1、自动重试 0 与费用上限或
+unknown。确认前和 Provider 边界前都复核完整 inspection/pricing/privacy/source/version fingerprint；
+直接模式只可复用同一精确 fingerprint 的 active grant。价格、路线、能力、隐私或源版本漂移会在
+派发前失败关闭并保持 0 dispatch。opening 聚焦链已 2 files / 79 tests 通过；Settings 固定能力探针
+先前实际收集 3 files / 69 tests，最终固定文本入口又以 1 file / 55 tests 通过点击时表单/目标/
+content-free authority 冻结、prepared input 持久化、生成前权威重检与四类漂移 0-call。豆包
+Endpoint ID 非空时优先作为唯一有效模型，同一值进入普通披露、授权、catalog/connection 保存和
+`gateway.generate`；当前 Provider dispatch surface 无剩余 P0/P1。
+
+2026-08-20 Provider 面审计确认当前可达动作只有：编辑器续写/选区改写、故事规划、一致性调查与
+单条 repair Candidate、图片生成、Model Hub 本地评测、快捷连接/Settings 固定文本 probe、结构化
+probe、翻译 probe，以及由开书专项收口的 opening。Candidate 接受、普通正文检查、接受后的本地
+普通设定整理和本地派生均为 0 Provider。旧检查批量 AI、无授权摘要/连续状态、translation/
+short-drama governed dispatch 与普通搜索 vector/rerank 均在 production caller 前关闭；权威提取需
+`authoritativeExtraction + graphRag` 双开关，Multi-Agent 默认关闭并受 guard，rerank 没有
+production caller。Provider/UI ID 聚焦回归为 4 files / 22 tests PASS。
 
 ## 6. 原生模型接口
 
@@ -440,6 +481,11 @@ context、384,000 token output 及官方结构/思考资料，但始终标记 `v
 `thinking: {"type":"disabled"}`；其他供应商不会收到该专有参数。设置页、快捷连接的手动/已配置
 连接检查和本地基础评测复用这项策略。它只证明模型能输出可见文本，不证明文笔、结构化输出或
 其他能力，也不按模型名称猜测支持项。
+Settings 两个固定文本 probe 均披露当前 destination、retry0、cost unknown，并在点击时冻结表单、
+精确目标与 content-free SHA-256 authority；同一 prepared input 持久化后，在
+`gateway.generate` 前复核表单、fingerprint 与 authoritative identity。四类漂移为 0 call，成功
+精确 1 call；固定短句不发送作品正文、灵感或设定。豆包 Endpoint ID 非空时作为同一有效模型贯穿
+披露、授权、保存和派发，双字段不一致不能再确认 A 发送 B。
 
 供应商预设与能力资料会变化，Registry 应按官方接口/地域说明更新，而不是把某个模型写成永久
 最佳： [OpenAI models](https://platform.openai.com/docs/api-reference/models/object)、
@@ -457,10 +503,11 @@ Provider recommendation registry 只提供带版本和有效期的发现方向�
 严格 schema 探针；翻译只在固定无作品内容的 `inkshadow.translation-probe.zh-en.v2` 成功后保存
 translation 能力和路由。文档声明或模型名称本身都不是能力证明。
 
-远程 Rerank 当前是独立、窄范围协议：只允许 Model Hub 已确认的阿里云百炼北京地域 Qwen
-OpenAI-compatible `/reranks`。它要求显式远程内容同意、ready 连接、Workspace、OS 凭据库中的
-API Key、有效 `rerank` 能力证据、已确认隐私/保留/训练政策和可核验费用上限；否则前端继续使用
-本地确定性排序。尚未用真实 Qwen 凭据完成线上端到端，不得外推为其他供应商或自定义路径可用。
+远程 Rerank 底层保留独立、窄范围协议，但当前没有 production caller，普通搜索固定使用本地 FTS。
+未来若重新开放，只允许 Model Hub 已确认的阿里云百炼北京地域 Qwen OpenAI-compatible
+`/reranks`，并要求显式远程内容同意、ready 连接、Workspace、OS 凭据库中的 API Key、有效
+`rerank` 能力证据、已确认隐私/保留/训练政策和可核验费用上限；否则继续使用本地确定性排序。
+尚未用真实 Qwen 凭据完成线上端到端，也不得把底层协议外推为当前或其他供应商可用。
 
 图片生成当前只接受受限的 OpenAI-compatible base64 PNG，并通过原生单次文件票据安全另存；
 不会自动下载模型返回 URL、插入正文或写入素材库。
@@ -511,8 +558,9 @@ Provider Connection
 ```
 
 页面 readiness、生成前检查和真实调用必须读取同一份 `Resolved Invocation Route`；连接行、目录名、
-HTTP 200、旧 Model Profile 或顶部绿色徽标都不能单独证明可调用。2026-08-13 审计时各入口如下，
-用于约束迁移范围而不是把旧路径冒充完成：
+HTTP 200、旧 Model Profile 或顶部绿色徽标都不能单独证明可调用。下表是
+**2026-08-13 历史审计快照**，只用于解释迁移来源；它不代表 2026-08-20 工作树中这些入口仍然
+可达，也不能把旧路径冒充当前完成状态：
 
 | 入口                                         | 审计时来源                                              | 处理策略                                                                                            |
 | -------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
@@ -521,6 +569,12 @@ HTTP 200、旧 Model Profile 或顶部绿色徽标都不能单独证明可调用
 | 选区改写、检查、剧情试演、章节摘要、连续状态 | 已使用 Model Hub text task 服务                         | 保留统一 resolver、最终身份复核与 Candidate/StoryFact 边界                                          |
 | 导入改写                                     | Model Hub-first，路由不存在时旧配置兼容                 | 保留窄兼容，其他 Model Hub blocker 不得降级                                                         |
 | Multi-Agent、原生受治理扩展、权威提取        | 仍有直接原生/旧配置适配器                               | 本轮记录为待逐入口迁移；继续受 feature flag、隐私、预算、Candidate 与最终身份门禁约束，不一次性删除 |
+
+当前状态以本文件后续服务表和
+[`WRITING_EXPERIENCE_AND_CONSISTENCY.md`](WRITING_EXPERIENCE_AND_CONSISTENCY.md#provider-动作的普通界面披露)
+为准：开书、续写、Settings 固定能力探针、图片生成、调查/修复已有聚焦披露证据；旧导入、普通
+检查批量 AI review、无授权摘要/连续状态和普通搜索向量入口已安全关闭。Provider dispatch surface
+当前无剩余 P0/P1；冻结全量仍为 `PENDING_FINAL_RUN`，不得从历史快照外推为已验证。
 
 旧 Model Profile 仍可能包含历史用户配置，因此本轮不删除表、不伪造 selection、不搬移 Key，也不
 改写已发布迁移。有效 Model Hub task route 存在时运行时忽略未选择的旧档案；真正没有 task route
@@ -592,7 +646,9 @@ ID、阶段、HTTP/终止原因、可见长度、推理/流式标记、尝试和
 | `MemoryService.forgetProjectMemory` / `mergeRecords`                    | 设置页按明确项目执行记忆忘却：同一事务关闭自动学习并排除全部现有记录；设定页人工选择两条记忆、编辑合并内容、指定保留项并排除来源项。两种操作都需要人工确认、修订校验和不可变审计，不按相似度自动合并，不物理删除来源                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `ContextCompilationTraceStore`                                          | “设定 → AI 参考记录”；保存、按项目列最近 50 次、按 ID 展开并按最终 AI 建议版本精确反查。普通详情显示可读来源、采用/舍弃原因、origin 和预算；有精确 Novel Skill snapshot 时另显示方法名称、版本、采用/舍弃原因和独立预算，缺失回执不冒充已使用。记录只关联真实网关生成、Model Hub 调用事实和隔离 Candidate，不保存正文、Prompt、摘录、模型回复或向量；编译器输入条目标识名为 `contextCandidateId`，不是 AI Candidate ID                                                                                                                                                                                                                                                                                                                       |
 | `TaskOutputProfile` / continuation recovery                             | 续写短档为 800/1,000/1,200、标准档为 1,800/2,200/2,500、长档为 3,000/4,000/5,000 个最小/目标/最大可见字符，自定义目标限制 200–12,000；context economy/standard/long 上限为 12k/32k/64k token，并按模型窗口、输出、系统/协议开销和保守 CJK 估算再收紧。截断或取消后的可见正文只能保存为 `incomplete` 隔离 Candidate；边界安全预览可以省略末尾残句，但持久化 Candidate 完整保留供应商已返回的可见文本。继续补全固定原基线版本，以原始尾部作为 assistant 上下文并去除安全重叠；末句未完成时直接接写，不强插段落。作者也可保留比较、重生成或换模型，任何路径都不自动覆盖正文                                                                                                                                                                     |
-| `AmbiguousNovelReviewService`                                           | “检查”；语义矛盾、POV、人物声纹和内容质量四个只读任务，严格能力/路由/证据/JSON/返回后复核，所有发现需要人工判断                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `AmbiguousNovelReviewService`                                           | 保留旧语义矛盾、POV、人物声纹和内容质量的 service/历史兼容合同，但普通检查页的新批量 Provider 入口已安全关闭；配置 route/credential 不会使其可达。需要模型的当前用户链是另行精确披露、确认和记账的有界一致性调查                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `ConsistencyInvestigationService` / `ConsistencyInvestigationPanel`     | “检查 → 长篇一致性调查”；准备为 0 call。发送前显示本机/远程、连接显示名、精确模型、发送范围、1 call/0 retry 与费用上限或“未知；提供方可能计费”。确认 fingerprint 覆盖完整 inspection authority、全部 capability evidence、connection display、隐私、context/messages，并在确认后与最终 dispatch 前重读；route、价格、目的地、能力、正文或 EvidenceRef 漂移均 0 Provider。内部记录 `INVESTIGATION_DISCLOSURE_CHANGED`，普通界面只提示“本次发送 0 字，请重新查看范围与费用”                                                                                                                                                                                                                                                                    |
+| `ConsistencyRepairCandidateService`                                     | finding 修复是调查之外的第二次独立 Provider 动作，不能复用调查授权；重复同样披露和双重 fingerprint 复核。合法响应只形成一处补丁并本地合成为隔离 Candidate，作者仍须在编辑器显式接受才创建新不可变版本；取消、无效输出、known failure、ambiguous 或重启都不自动重发。调查/修复披露聚焦 2 files / 36 tests PASS，真实 Provider/Tauri 未跑                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `ModelHubStoryPlanningService` / `StoryPlanningCandidateStore`          | “规划”；全书方向或章节场景拆解，严格 JSON，先存独立可编辑候选；可整体采纳，或按生成时目标简介基线逐项追加固定结构化条目。逐项采纳会先用候选 revision CAS 持久预留选择和前后摘要，再写正式大纲；在途状态禁用编辑、拒绝和整体采纳，只允许恢复同一选择。空选择、未知条目、旧候选无基线、损坏回执和并发变化均失败关闭                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `createSelectionRewriteCandidate`                                       | 编辑器“修改选中内容”；固定当前不可变版本、UTF-16 选区和原文 SHA-256，复用 `rewrite` 路由与上下文编译器；发送前后防漂移，只把改写片段连同 `selection_rewrite / replace_selection` 精确锚点保存为 `polish` Candidate，并可由该 Candidate 精确反查实际上下文 trace 与 Model Hub 调用；项目保留任一 `local_only` 章节时，远程生成和远程重排均为 0 调用，已验证回环本地模型仍可执行                                                                                                                                                                                                                                                                                                                                                               |
 | `ReviseAiCandidate` / `AcceptAiCandidate` / `RejectAiCandidate`         | 编辑器建议比较；作者修改可先持久保存为仍隔离的 `ready` Candidate。命令必须携带页面实际展示的 Candidate revision，存储事务再以状态 + revision 做 CAS，不能在执行前重读最新版冒充用户已看过。接受时先复核 Candidate 内容 SHA-256，再读取任务应用意图：续写片段只插入记录光标，选区片段只替换记录范围；整章改写只允许覆盖全文或在当前与基线共同末尾追加。Candidate/context output 事务还复核项目 active、章节 active、当前版本、Candidate 基线和 context source version；正文、新版本和 Candidate 决定在同一事务中提交，失败或迟到结果不改变正文或赢家建议。接受后只登记搜索/因果等纯本地可重建阶段，精确 0 次 Provider 调用；摘要、记忆和事实抽取只能从接受完成后的独立显式授权动作进入                                                        |
@@ -652,6 +708,8 @@ worker 也只生成本地执行输入。掩码必须使用规范顺序且只能�
 `waiting_retry`、失败声明 `retryable` 且包含 `RETRY`，并且项目/章节/版本 UUID、来源
 （`candidate_accept`、`chapter_import`、`manual_save`、`version_restore` 或 `historical_backfill`）及字符数元数据全部有效。页面先调用
 `taskCenter.retryTaskNow(task.id)`，再以原版本作用域执行同一幂等管线；不完整元数据会失败关闭。
+通知 metadata 只从显式白名单生成普通文案；project/chapter/version/connection/debug ID 不显示，但
+经过验证的导航目标继续可用。未知任务进度码使用安全占位，不把 raw code 当作标签。
 
 ### 6.3 个人调用账本
 
@@ -661,6 +719,9 @@ worker 也只生成本地执行输入。掩码必须使用规范顺序且只能�
 数据目的地、错误码及可确认的费用元数据，不保存正文、Prompt 或 API Key。金额缺少价格或
 token 证据时保持“未知”，不会冒充供应商最终账单。浏览器开发运行时把 `usageCenter` 设为
 `null`，页面显示能力受限而不是生成示例账本。
+连接资料缺失时只显示安全的供应商占位，不回退 `provider_id`。检查页同样把章节、剧情线和场景
+映射为可读名称；人物、伏笔或未知引用使用安全占位，不显示 version/fact/locator/aria 内部标识。
+这些普通 UI 边界已由 4 files / 22 tests 聚焦覆盖，冻结全路由 DOM 扫描仍待运行。
 
 ## 7. Tauri 事件
 
@@ -1093,23 +1154,25 @@ send_cloud_api_request({
 | `inkshadow.development.writing-feedback.v1`                |      3 | 可见、可编辑且幂等的写作反馈学习                                             | `writing-feedback-store.ts`            |
 | `inkshadow.development.story-planning-candidates.v1`       |      1 | 可审阅 AI 剧情规划候选                                                       | `story-planning-candidate-store.ts`    |
 | `inkshadow.development.chapter-validation-snapshots.v1`    |      1 | 绑定当前不可变章节版本的确定性检查快照                                       | `chapter-validation-snapshot-store.ts` |
+| `inkshadow.development.writing-experience.v1`              |      1 | 浏览器调试模式写作方式、本地整理授权与内容无关 Provider 披露 grant           | `writing-experience-store.ts`          |
 
 正式 Tauri Marketplace 安装记录使用 SQLite 表 `community_marketplace_installs`。
 
 以下页面恢复与偏好键也会在正式 Desktop WebView 使用。它们不保存稳定正文、模型密钥或正式
 StoryFact，但创建/改写表单本身可能包含用户输入，因此仍属于本机恢复数据：
 
-| 键                                                                    | 内容                                                                                                                                                                                                       |
-| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `inkshadow.appearance.preference.v1`                                  | `system`、`light` 或 `dark` 外观选择                                                                                                                                                                       |
-| `inkshadow.editor.preferences.v1`                                     | 自动保存开关和延迟；损坏或越界值回退到安全默认值                                                                                                                                                           |
-| `inkshadow.editor.view-state.v1`                                      | 排版、光标和滚动位置                                                                                                                                                                                       |
-| `inkshadow.example-project.v1`                                        | 示例项目和章节的本地快捷指针；不复制正文                                                                                                                                                                   |
-| `inkshadow.import-rewrite-journey.v2`                                 | 导入项目指针、分析检查点、改写目标、试改候选指针、反馈、规则和逐章 Candidate 精确修订号；不复制已导入稳定正文。逐章生成的 Candidate 指针与修订号同步落盘后才继续派发，失败时在当前页保留可见指针并停止批次 |
-| `inkshadow.import-rewrite-pending.v1`                                 | 尚未收尾的导入分析/改写请求 ID、供应商、模型、章节与任务类型；不保存请求正文                                                                                                                               |
-| `inkshadow.professional-create-recovery.v1`                           | 专业创建表单、项目恢复指针和 `ProjectSeed`；不保存章节正文                                                                                                                                                 |
-| `inkshadow.chapter-summary.auto-on-manual-save.v1:<projectId>`        | 旧偏好兼容键；当前页面读到后立即归一为关闭，不能授权手动保存发送正文                                                                                                                                       |
-| `inkshadow.continuous-story-state.auto-on-manual-save.v1:<projectId>` | 旧偏好兼容键；当前页面读到后立即归一为关闭，不能授权手动保存发送正文                                                                                                                                       |
+| 键                                                                    | 内容                                                                                                                                                              |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `inkshadow.appearance.preference.v1`                                  | `system`、`light` 或 `dark` 外观选择                                                                                                                              |
+| `inkshadow.editor.preferences.v1`                                     | 自动保存开关和延迟；损坏或越界值回退到安全默认值                                                                                                                  |
+| `inkshadow.editor.view-state.v1`                                      | 排版、光标和滚动位置                                                                                                                                              |
+| `inkshadow.export.last-receipt.v1`                                    | 最近一次导出回执及项目 ID；原生绝对路径只来自已验证回执，浏览器状态固定为 `path_not_available`                                                                    |
+| `inkshadow.example-project.v1`                                        | 示例项目和章节的本地快捷指针；不复制正文                                                                                                                          |
+| `inkshadow.import-rewrite-journey.v2`                                 | 导入项目指针、历史分析检查点、改写目标、试改候选指针、反馈、规则和逐章 Candidate 精确修订号；不复制已导入稳定正文。当前只恢复查看与显式决定，不恢复 Provider 派发 |
+| `inkshadow.import-rewrite-pending.v1`                                 | 旧的未收尾导入分析/改写请求 ID、供应商、模型、章节与任务类型；不保存请求正文，也不会在当前入口自动恢复或重发                                                      |
+| `inkshadow.professional-create-recovery.v1`                           | 专业创建表单、项目恢复指针和 `ProjectSeed`；不保存章节正文                                                                                                        |
+| `inkshadow.chapter-summary.auto-on-manual-save.v1:<projectId>`        | 旧偏好兼容键；当前页面读到后立即归一为关闭，不能授权手动保存发送正文                                                                                              |
+| `inkshadow.continuous-story-state.auto-on-manual-save.v1:<projectId>` | 旧偏好兼容键；当前页面读到后立即归一为关闭，不能授权手动保存发送正文                                                                                              |
 
 编辑器另用 `inkshadow.editor.view-state.v1` 保存：
 

@@ -17,6 +17,12 @@ import {
   type NovelTaskRoute,
 } from "./model-hub-store";
 import type { NativeModelGatewayClient } from "./runtime";
+import {
+  SINGLE_ATTEMPT_PROVIDER_DEFAULT_TEXT_POLICY,
+  SINGLE_ATTEMPT_STRICT_JSON_POLICY,
+  SINGLE_ATTEMPT_STRICT_JSON_TEXT_TRANSPORT_POLICY,
+  SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
+} from "./model-execution-policy";
 
 const NOW = "2026-08-01T00:00:00.000Z";
 const parsedNow = parseIsoUtcTimestamp(NOW);
@@ -177,6 +183,189 @@ describe("Model Hub text execution service", () => {
     });
   });
 
+  it("narrows a connection retry setting to zero for one authorized continuation POST", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "direct-zero-retry",
+      catalogEntryId: "direct-zero-retry-catalog",
+      modelId: "direct-writer",
+      retryLimit: 3,
+    });
+    await saveRoute(harness.modelHub, {
+      task: "continuation",
+      primaryCatalogEntryId: target.id,
+    });
+    harness.generate.mockResolvedValue({ text: PRIVATE_OUTPUT, usage: null });
+
+    await executeModelHubTextTask(
+      harness.dependencies,
+      request({
+        task: "continuation",
+        executionPolicy: SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
+      }),
+    );
+
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(harness.generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
+  });
+
+  it("records an HTTP 200 structured schema rejection as failed before success is committed", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "structured-response-validation",
+      catalogEntryId: "structured-response-validation-catalog",
+      modelId: "structured-writer",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "outline_planning",
+      primaryCatalogEntryId: target.id,
+    });
+    harness.generate.mockResolvedValue({
+      text: '{"unexpected":true}',
+      usage: { inputTokens: 12, outputTokens: 4, cachedInputTokens: null },
+      streamed: false,
+    });
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          task: "outline_planning",
+          invocationId: "019c2000-0000-7000-8000-000000000001",
+          executionPolicy: SINGLE_ATTEMPT_STRICT_JSON_POLICY,
+          validateGeneratedText: () => {
+            throw Object.assign(new Error("schema mismatch"), {
+              code: "STORY_PLANNING_RESPONSE_INVALID",
+            });
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "STORY_PLANNING_RESPONSE_INVALID",
+      dispatched: true,
+      failure: {
+        stage: "response_normalization",
+        visibleContentLength: 19,
+        reasoningPresent: null,
+        stream: false,
+      },
+    });
+
+    const invocation = await harness.modelHub.findInvocation(
+      "019c2000-0000-7000-8000-000000000001",
+    );
+    expect(invocation).toMatchObject({
+      status: "failed",
+      errorCode: "STORY_PLANNING_RESPONSE_INVALID",
+      inputTokens: 12,
+      outputTokens: 4,
+      estimatedCostMicros: "1",
+      currency: "USD",
+      failure: {
+        stage: "response_normalization",
+        visibleContentLength: 19,
+        reasoningPresent: null,
+        stream: false,
+      },
+    });
+    expect(harness.generate).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["Markdown fence", '```json\n{"schemaVersion":1,"ok":true}\n```'],
+    ["half string", '{"schemaVersion":1,"value":"unfinished'],
+    ["trailing comma", '{"schemaVersion":1,"ok":true,}'],
+  ])("does not silently repair a %s structured response", async (_label, response) => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: `structured-invalid-${String(response.length)}`,
+      catalogEntryId: `structured-invalid-${String(response.length)}-catalog`,
+      modelId: "structured-invalid-model",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "outline_planning",
+      primaryCatalogEntryId: target.id,
+    });
+    harness.generate.mockResolvedValue({
+      text: response,
+      usage: { inputTokens: 8, outputTokens: 3, cachedInputTokens: null },
+      streamed: false,
+    });
+    const finishInvocation = vi.spyOn(harness.modelHub, "finishInvocation");
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          task: "outline_planning",
+          executionPolicy: SINGLE_ATTEMPT_STRICT_JSON_POLICY,
+          validateGeneratedText: (text) => {
+            const value = JSON.parse(text) as unknown;
+            if (
+              typeof value !== "object" ||
+              value === null ||
+              (value as { readonly schemaVersion?: unknown }).schemaVersion !== 1
+            ) {
+              throw Object.assign(new Error("schema mismatch"), {
+                code: "MODEL_STRUCTURED_OUTPUT_SCHEMA_MISMATCH",
+              });
+            }
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      dispatched: true,
+      failure: { stage: "response_normalization" },
+    });
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(finishInvocation).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        status: "failed",
+        inputTokens: 8,
+        outputTokens: 3,
+      }),
+    );
+  });
+
+  it("classifies an empty visible result with output usage as reasoning-only", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "structured-reasoning-only",
+      catalogEntryId: "structured-reasoning-only-catalog",
+      modelId: "reasoning-model",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "outline_planning",
+      primaryCatalogEntryId: target.id,
+    });
+    harness.generate.mockResolvedValue({
+      text: "",
+      usage: { inputTokens: 20, outputTokens: 80, cachedInputTokens: null },
+      streamed: true,
+    });
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          task: "outline_planning",
+          executionPolicy: SINGLE_ATTEMPT_STRICT_JSON_TEXT_TRANSPORT_POLICY,
+          validateGeneratedText: (text) => {
+            JSON.parse(text);
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "MODEL_STRUCTURED_OUTPUT_REASONING_ONLY",
+      failure: {
+        stage: "response_normalization",
+        visibleContentLength: 0,
+        reasoningPresent: true,
+        stream: true,
+      },
+    });
+  });
+
   it("does not let an automatic legacy 1200-token default override the task output contract", async () => {
     const harness = createHarness();
     const target = await seedTarget(harness.modelHub, {
@@ -268,6 +457,7 @@ describe("Model Hub text execution service", () => {
         harness.dependencies,
         request({
           generationId: `visible-prose-${providerKind}-generation`,
+          executionPolicy: SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
           reasoningPolicy: "visible_prose",
         }),
       );
@@ -300,6 +490,35 @@ describe("Model Hub text execution service", () => {
         }),
       ),
     ).rejects.toMatchObject({ dispatched: false });
+    expect(harness.generate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a strict structured policy without a synchronous validator before creating an invocation", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "structured-policy-missing-validator",
+      catalogEntryId: "structured-policy-missing-validator-catalog",
+      modelId: "structured-policy-missing-validator-model",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "outline_planning",
+      primaryCatalogEntryId: target.id,
+    });
+    const startInvocation = vi.spyOn(harness.modelHub, "startInvocation");
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          task: "outline_planning",
+          executionPolicy: SINGLE_ATTEMPT_STRICT_JSON_POLICY,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "MODEL_EXECUTION_POLICY_VALIDATOR_REQUIRED",
+      dispatched: false,
+    });
+    expect(startInvocation).not.toHaveBeenCalled();
     expect(harness.generate).not.toHaveBeenCalled();
   });
 
@@ -813,7 +1032,7 @@ describe("Model Hub text execution service", () => {
     );
   });
 
-  it("does not blindly call the fallback after a dispatched provider failure", async () => {
+  it("records a confirmed HTTP 504 as failed and does not call the fallback", async () => {
     const harness = createHarness();
     const primary = await seedTarget(harness.modelHub, {
       connectionId: "dispatched-primary",
@@ -875,7 +1094,7 @@ describe("Model Hub text execution service", () => {
     expect(finishInvocation).toHaveBeenCalledOnce();
     expect(finishInvocation).toHaveBeenCalledWith(
       expect.objectContaining({
-        status: "timed_out",
+        status: "failed",
         errorCode: "UPSTREAM_TIMEOUT",
         failure: {
           requestId: "upstream-request-1",
@@ -904,6 +1123,49 @@ describe("Model Hub text execution service", () => {
         }),
       ]),
     );
+  });
+
+  it("projects a dispatched transport timeout without an HTTP response as ambiguous", async () => {
+    const harness = createHarness();
+    const primary = await seedTarget(harness.modelHub, {
+      connectionId: "ambiguous-transport",
+      catalogEntryId: "ambiguous-transport-catalog",
+      modelId: "ambiguous-transport-model",
+    });
+    await saveRoute(harness.modelHub, { primaryCatalogEntryId: primary.id });
+    harness.generate.mockRejectedValue(
+      new ModelCenterError("UPSTREAM_TIMEOUT", "socket disconnected", true, {
+        requestId: "transport-request-1",
+        httpStatus: null,
+        finishReason: null,
+        visibleContentLength: null,
+        reasoningPresent: null,
+        stream: null,
+        inputTokens: null,
+        outputTokens: null,
+      }),
+    );
+
+    const invocationId = "019c2000-0000-7000-8000-000000000099";
+    await expect(
+      executeModelHubTextTask(harness.dependencies, request({ invocationId })),
+    ).rejects.toMatchObject({
+      code: "PROVIDER_RESULT_AMBIGUOUS",
+      dispatched: true,
+      retryable: false,
+      failure: {
+        requestId: "transport-request-1",
+        stage: "transport",
+        httpStatus: null,
+      },
+    });
+
+    expect(harness.generate).toHaveBeenCalledOnce();
+    await expect(harness.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      status: "timed_out",
+      errorCode: "PROVIDER_RESULT_AMBIGUOUS",
+      providerDispatchStartedAt: NOW,
+    });
   });
 
   it("records actual over-ceiling usage after dispatch without hiding the result", async () => {
@@ -943,7 +1205,220 @@ describe("Model Hub text execution service", () => {
     );
     expect(harness.generate).toHaveBeenCalledOnce();
   });
+
+  it("accepts one complete strict JSON response and commits success only after validation", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "structured-complete",
+      catalogEntryId: "structured-complete-catalog",
+      modelId: "structured-complete-model",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "outline_planning",
+      primaryCatalogEntryId: target.id,
+    });
+    harness.generate.mockResolvedValue({
+      text: '{"schemaVersion":1,"items":[]}',
+      usage: { inputTokens: 7, outputTokens: 5, cachedInputTokens: null },
+      streamed: true,
+    });
+
+    const result = await executeModelHubTextTask(
+      harness.dependencies,
+      request({
+        task: "outline_planning",
+        executionPolicy: SINGLE_ATTEMPT_STRICT_JSON_POLICY,
+        validateGeneratedText: strictFixtureValidator,
+      }),
+    );
+
+    expect(result.invocation).toMatchObject({
+      status: "succeeded",
+      inputTokens: 7,
+      outputTokens: 5,
+    });
+    const dispatched = harness.generate.mock.calls[0]?.[0];
+    expect(dispatched?.config.retryLimit).toBe(0);
+    expect(dispatched?.reasoningMode).toBe("disabled");
+    expect(dispatched?.responseFormat).toBe("json_object");
+  });
+
+  it("records an interrupted HTTP 200 stream as stream_parse and preserves usage and cost", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "structured-stream-interrupted",
+      catalogEntryId: "structured-stream-interrupted-catalog",
+      modelId: "structured-stream-interrupted-model",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "outline_planning",
+      primaryCatalogEntryId: target.id,
+    });
+    harness.generate.mockRejectedValue(
+      new ModelCenterError("MODEL_STREAM_TRUNCATED", "stream ended", true, {
+        requestId: null,
+        httpStatus: 200,
+        finishReason: null,
+        visibleContentLength: 18,
+        reasoningPresent: false,
+        stream: true,
+        inputTokens: 10,
+        outputTokens: 6,
+      }),
+    );
+    const invocationId = "019c2000-0000-7000-8000-000000000077";
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          task: "outline_planning",
+          invocationId,
+          executionPolicy: SINGLE_ATTEMPT_STRICT_JSON_POLICY,
+          validateGeneratedText: strictFixtureValidator,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "MODEL_STREAM_TRUNCATED",
+      failure: { stage: "stream_parse", httpStatus: 200, stream: true },
+    });
+    await expect(harness.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      status: "failed",
+      inputTokens: 10,
+      outputTokens: 6,
+      estimatedCostMicros: "1",
+      failure: { stage: "stream_parse", httpStatus: 200 },
+    });
+    expect(harness.generate).toHaveBeenCalledOnce();
+  });
+
+  it("records a length finish as a terminal response-normalization failure without retry", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "structured-length-finish",
+      catalogEntryId: "structured-length-finish-catalog",
+      modelId: "structured-length-finish-model",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "outline_planning",
+      primaryCatalogEntryId: target.id,
+    });
+    harness.generate.mockRejectedValue(
+      new ModelCenterError("MODEL_OUTPUT_TRUNCATED", "length", false, {
+        requestId: null,
+        httpStatus: 200,
+        finishReason: "length",
+        visibleContentLength: 24,
+        reasoningPresent: false,
+        stream: true,
+        inputTokens: 11,
+        outputTokens: 20,
+      }),
+    );
+    const invocationId = "019c2000-0000-7000-8000-000000000078";
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          task: "outline_planning",
+          invocationId,
+          executionPolicy: SINGLE_ATTEMPT_STRICT_JSON_POLICY,
+          validateGeneratedText: strictFixtureValidator,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "MODEL_OUTPUT_TRUNCATED",
+      retryable: false,
+      failure: {
+        stage: "response_normalization",
+        httpStatus: 200,
+        finishReason: "length",
+      },
+    });
+    await expect(harness.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      status: "failed",
+      inputTokens: 11,
+      outputTokens: 20,
+      estimatedCostMicros: "1",
+      failure: { stage: "response_normalization", finishReason: "length" },
+    });
+    expect(harness.generate).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a manual retry as a separate billed action and never redispatches a terminal invocation", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "structured-manual-retry",
+      catalogEntryId: "structured-manual-retry-catalog",
+      modelId: "structured-manual-retry-model",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "outline_planning",
+      primaryCatalogEntryId: target.id,
+    });
+    harness.generate
+      .mockResolvedValueOnce({
+        text: '{"schemaVersion":1,"items":[',
+        usage: { inputTokens: 8, outputTokens: 4, cachedInputTokens: null },
+        streamed: true,
+      })
+      .mockResolvedValueOnce({
+        text: '{"schemaVersion":1,"items":[]}',
+        usage: { inputTokens: 9, outputTokens: 5, cachedInputTokens: null },
+        streamed: true,
+      });
+    const firstInvocationId = "019c2000-0000-7000-8000-000000000081";
+    const secondInvocationId = "019c2000-0000-7000-8000-000000000082";
+    const strictRequest = (invocationId: string) =>
+      request({
+        task: "outline_planning",
+        invocationId,
+        executionPolicy: SINGLE_ATTEMPT_STRICT_JSON_POLICY,
+        validateGeneratedText: strictFixtureValidator,
+      });
+
+    await expect(
+      executeModelHubTextTask(harness.dependencies, strictRequest(firstInvocationId)),
+    ).rejects.toMatchObject({ failure: { stage: "response_normalization" } });
+    await expect(
+      executeModelHubTextTask(harness.dependencies, strictRequest(secondInvocationId)),
+    ).resolves.toMatchObject({ invocation: { status: "succeeded" } });
+    expect(harness.generate).toHaveBeenCalledTimes(2);
+
+    await expect(
+      executeModelHubTextTask(harness.dependencies, strictRequest(firstInvocationId)),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_INVOCATION_CONFLICT" });
+    expect(harness.generate).toHaveBeenCalledTimes(2);
+    await expect(harness.modelHub.findInvocation(firstInvocationId)).resolves.toMatchObject({
+      status: "failed",
+      inputTokens: 8,
+      outputTokens: 4,
+    });
+    await expect(harness.modelHub.findInvocation(secondInvocationId)).resolves.toMatchObject({
+      status: "succeeded",
+      inputTokens: 9,
+      outputTokens: 5,
+    });
+  });
 });
+
+function strictFixtureValidator(text: string): undefined {
+  const parsed = JSON.parse(text) as unknown;
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    Object.keys(parsed).sort().join(",") !== "items,schemaVersion" ||
+    (parsed as { readonly schemaVersion?: unknown }).schemaVersion !== 1 ||
+    !Array.isArray((parsed as { readonly items?: unknown }).items)
+  ) {
+    throw Object.assign(new Error("fixture schema mismatch"), {
+      code: "MODEL_STRUCTURED_OUTPUT_SCHEMA_MISMATCH",
+    });
+  }
+  return undefined;
+}
 
 function createHarness(): Readonly<{
   modelHub: BrowserDevelopmentModelHubStore;
@@ -983,6 +1458,7 @@ function request(
     messages: [{ role: "user", content: PRIVATE_INPUT }],
     maximumOutputTokens: 20,
     temperature: 0.6,
+    executionPolicy: SINGLE_ATTEMPT_PROVIDER_DEFAULT_TEXT_POLICY,
     generationId: "test-generation",
     ...overrides,
   };
@@ -1006,6 +1482,7 @@ async function seedTarget(
     cachedInputRate?: string | null;
     inputTokenLimit?: number | null;
     outputTokenLimit?: number | null;
+    retryLimit?: number;
   }>,
 ): Promise<ModelCatalogEntry> {
   const providerKind = input.providerKind ?? "custom_openai_compatible";
@@ -1021,6 +1498,7 @@ async function seedTarget(
         : {}),
     credentialRef: local ? null : `keyring:model-hub:${input.connectionId}`,
     credentialState: local ? "missing" : "present",
+    ...(input.retryLimit === undefined ? {} : { retryLimit: input.retryLimit }),
     expectedRevision: null,
   });
   await modelHub.recordConnectionTest({

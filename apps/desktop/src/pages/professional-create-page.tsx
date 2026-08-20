@@ -15,7 +15,7 @@ import {
   parseProjectSeed,
   type ProjectSeed,
 } from "../infrastructure/project-seed";
-import { normalizeUiError } from "../infrastructure/ui-error";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
 export const PROFESSIONAL_CREATE_RECOVERY_KEY = "inkshadow.professional-create-recovery.v1";
@@ -141,7 +141,7 @@ export function ProfessionalCreatePage() {
           name: draft.projectName,
         });
         if (!created.ok) {
-          setNameError(normalizeUiError(created.error).description);
+          setNameError(projectOrdinaryUiError(created.error).description);
           return;
         }
         projectId = created.value.id;
@@ -686,7 +686,7 @@ function labeledLines(values: readonly (readonly [string, string])[]): string {
 }
 
 function describeProvisioningError(error: unknown, projectCreated: boolean): ProvisioningError {
-  const normalized = normalizeUiError(error);
+  const normalized = projectOrdinaryUiError(error);
   const storyCode = readErrorCode(error);
   const reason =
     error instanceof ProfessionalProvisioningError
@@ -695,7 +695,7 @@ function describeProvisioningError(error: unknown, projectCreated: boolean): Pro
           (storyCode.startsWith("STORY_") ||
             storyCode.startsWith("OUTLINE_") ||
             storyCode.startsWith("FORMAL_"))
-        ? `本地规划或设定没有通过安全写入检查（${storyCode}）。`
+        ? "本地规划或设定没有通过安全写入检查。"
         : normalized.description;
   return projectCreated
     ? {

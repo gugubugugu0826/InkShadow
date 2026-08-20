@@ -95,10 +95,14 @@ describe("native governed creative-extension adapter", () => {
     });
     const input = generate.mock.calls[0]?.[0] as {
       readonly messages: readonly { readonly role: string; readonly content: string }[];
-      readonly config: { readonly baseUrl: string };
+      readonly config: { readonly baseUrl: string; readonly retryLimit: number };
       readonly maxOutputTokens: number;
+      readonly reasoningMode: string;
     };
     expect(input.config.baseUrl).toBe("https://models.example/v1");
+    expect(input.config.retryLimit).toBe(0);
+    expect(input.reasoningMode).toBe("disabled");
+    expect(input).not.toHaveProperty("responseFormat");
     expect(input.maxOutputTokens).toBe(4_096);
     expect(input.messages[0]?.content).toContain("exactly one JSON object");
     expect(input.messages[1]?.content).toContain('"sourceVersionId":"version-1"');

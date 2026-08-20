@@ -10,6 +10,7 @@
       "@inkshadow/config": ["../../packages/config/src/index.ts"],
       "@inkshadow/platform": ["../../packages/platform/src/index.ts"],
       "@inkshadow/import-export": ["../../packages/import-export/src/index.ts"],
+      "@inkshadow/import-export/core": ["../../packages/import-export/src/core.ts"],
       "@inkshadow/import-export/docx-export": ["../../packages/import-export/src/docx-export.ts"],
       "@inkshadow/import-export/epub-export": ["../../packages/import-export/src/epub-export.ts"],
       "@inkshadow/import-export/pdf-export": ["../../packages/import-export/src/pdf-export.ts"],

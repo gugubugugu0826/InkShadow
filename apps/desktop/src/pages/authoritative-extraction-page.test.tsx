@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   StoryCoreError,
@@ -86,7 +86,21 @@ describe("AuthoritativeExtractionPage", () => {
     ).toBeVisible();
     expect(screen.getByTitle(`${CHAPTER_ID} / ${VERSION_ID}`)).toBeVisible();
     expect(screen.getByTitle(CHECKSUM)).toBeVisible();
-    expect(fixture.runCycle).toHaveBeenCalledWith(PROJECT_ID, { online: false });
+    expect(fixture.runCycle).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "扫描当前章节" }));
+    await waitFor(() => {
+      expect(fixture.runCycle).toHaveBeenCalledWith(PROJECT_ID, { online: false });
+    });
+
+    const decisionSurface = screen.getByLabelText("linzhou.location的正式设定候选决策");
+    expect(decisionSurface).toHaveClass("candidate-decision-surface");
+    expect(
+      within(decisionSurface).getByLabelText("linzhou.location的正式设定候选内容"),
+    ).toHaveAttribute("tabindex", "0");
+    expect(decisionSurface.querySelector(":scope > .ink-card__footer")).toHaveClass(
+      "candidate-decision-actions",
+    );
 
     await user.click(screen.getByRole("button", { name: "接受候选" }));
 

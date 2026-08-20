@@ -147,7 +147,7 @@ function showPersistentNotice(
   notice: PersistentLifecycleNotice,
 ): void {
   toast({
-    title: `${notice.title}（${notice.code}）`,
+    title: notice.title,
     description: notice.description,
     tone: "error",
     duration: null,
@@ -161,7 +161,7 @@ function showRouteFlushFailure(
   switch (outcome.status) {
     case "blocked":
       toast({
-        title: "尚不能离开（PERSISTENCE_BLOCKED）",
+        title: "尚不能离开",
         description: outcome.blockers[0]?.message ?? "请先完成当前输入，再切换页面。",
         tone: "warning",
         duration: null,
@@ -169,7 +169,7 @@ function showRouteFlushFailure(
       return;
     case "failed":
       toast({
-        title: "本地草稿保存失败（PERSISTENCE_FAILED）",
+        title: "本地草稿保存失败",
         description: "页面切换已取消。请重试保存或导出草稿。",
         tone: "error",
         duration: null,
@@ -177,7 +177,7 @@ function showRouteFlushFailure(
       return;
     case "timeout":
       toast({
-        title: "本地草稿保存超时（PERSISTENCE_TIMEOUT）",
+        title: "本地草稿保存超时",
         description: "页面切换已取消。请等待当前写入完成后重试。",
         tone: "error",
         duration: null,

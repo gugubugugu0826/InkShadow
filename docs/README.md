@@ -1,9 +1,9 @@
 # 墨影 InkShadow 文档入口
 
-> 当前源码目标版本（App Version）：`0.2.4`；最近已发布版本：`0.2.3`  
+> 当前源码目标版本（App Version）：`0.2.5`；最新已发布版本：`0.2.4`（Pre-release；不可移动或复用）  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
-> 最近治理复核：2026-08-14  
-> `v0.2.4` 安全修复候选：`NOT_RELEASED`；真实 Tauri/Provider 第二阶段复测：`NOT_RUN`  
+> 最近治理复核：2026-08-20  
+> `v0.2.5` Pre-release 候选：`FINAL_GATE_PENDING / NOT_RELEASED`；真实 Tauri/Provider 第二阶段复测：`NOT_RUN`  
 > 注意：设计版本用于界面与交互验收，不会自动改变应用版本。
 
 本目录同时保存当前规则、实现说明、执行证据和历史基线。为避免把旧页面说明或一次历史测试
@@ -25,17 +25,19 @@
 
 ## 当前权威入口
 
-| 状态                    | 文档                                                                                                                   | 负责回答的问题                                     |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `AUTHORITATIVE_CURRENT` | [`product-rebuild/README.md`](product-rebuild/README.md)                                                               | 下一阶段产品重构的当前阅读顺序、冲突规则和阶段边界 |
-| `AUTHORITATIVE_CURRENT` | [`product-rebuild/01-INFORMATION-ARCHITECTURE-AND-FLOWS.md`](product-rebuild/01-INFORMATION-ARCHITECTURE-AND-FLOWS.md) | 三个创建入口、四区工作台和核心用户流程             |
-| `AUTHORITATIVE_CURRENT` | [`product-rebuild/02-DATA-REUSE-AND-MIGRATION.md`](product-rebuild/02-DATA-REUSE-AND-MIGRATION.md)                     | 数据复用、前向迁移、兼容与回滚                     |
-| `AUTHORITATIVE_CURRENT` | [`product-rebuild/03-DELIVERY-PLAN-ACCEPTANCE-ROLLBACK.md`](product-rebuild/03-DELIVERY-PLAN-ACCEPTANCE-ROLLBACK.md)   | Phase 0–5 顺序、验收、风险和回滚                   |
-| `SUPPORTING_CURRENT`    | [`front-end/README.md`](front-end/README.md)                                                                           | 当前前端页面、路由、普通/专家体验和接口索引        |
-| `SUPPORTING_CURRENT`    | [`back-end/README.md`](back-end/README.md)                                                                             | Cloud、Desktop 原生层、共享包与工程工具索引        |
-| `EVIDENCE_CURRENT`      | [`execution/CURRENT_STATUS.md`](execution/CURRENT_STATUS.md)                                                           | 当前执行状态；必须同时核对其中绑定的提交与运行日期 |
-| `EVIDENCE_CURRENT`      | [`execution/TEST_RESULTS.md`](execution/TEST_RESULTS.md)                                                               | 当前和历史测试证据；失败不得省略                   |
-| `EVIDENCE_CURRENT`      | [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md)                                                     | 当前候选是否达到构建、打包或发布门禁               |
+| 状态                    | 文档                                                                                                                                       | 负责回答的问题                                     |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- |
+| `AUTHORITATIVE_CURRENT` | [`product-rebuild/README.md`](product-rebuild/README.md)                                                                                   | 下一阶段产品重构的当前阅读顺序、冲突规则和阶段边界 |
+| `AUTHORITATIVE_CURRENT` | [`product-rebuild/01-INFORMATION-ARCHITECTURE-AND-FLOWS.md`](product-rebuild/01-INFORMATION-ARCHITECTURE-AND-FLOWS.md)                     | 三个创建入口、四区工作台和核心用户流程             |
+| `AUTHORITATIVE_CURRENT` | [`product-rebuild/02-DATA-REUSE-AND-MIGRATION.md`](product-rebuild/02-DATA-REUSE-AND-MIGRATION.md)                                         | 数据复用、前向迁移、兼容与回滚                     |
+| `AUTHORITATIVE_CURRENT` | [`product-rebuild/03-DELIVERY-PLAN-ACCEPTANCE-ROLLBACK.md`](product-rebuild/03-DELIVERY-PLAN-ACCEPTANCE-ROLLBACK.md)                       | Phase 0–5 顺序、验收、风险和回滚                   |
+| `AUTHORITATIVE_CURRENT` | [`product-rebuild/12-NEXT-UNRELEASED-WRITING-MEMORY-AGENT-REALITY.md`](product-rebuild/12-NEXT-UNRELEASED-WRITING-MEMORY-AGENT-REALITY.md) | v0.2.5 写作模式、记忆、Agent 与当前证据边界        |
+| `AUTHORITATIVE_CURRENT` | [`product-rebuild/14-V025-REQUIREMENT-COMPLETION-LEDGER.md`](product-rebuild/14-V025-REQUIREMENT-COMPLETION-LEDGER.md)                     | 用户增量要求逐项完成状态与最终缺口                 |
+| `SUPPORTING_CURRENT`    | [`front-end/README.md`](front-end/README.md)                                                                                               | 当前前端页面、路由、普通/专家体验和接口索引        |
+| `SUPPORTING_CURRENT`    | [`back-end/README.md`](back-end/README.md)                                                                                                 | Cloud、Desktop 原生层、共享包与工程工具索引        |
+| `EVIDENCE_CURRENT`      | [`execution/CURRENT_STATUS.md`](execution/CURRENT_STATUS.md)                                                                               | 当前执行状态；必须同时核对其中绑定的提交与运行日期 |
+| `EVIDENCE_CURRENT`      | [`execution/TEST_RESULTS.md`](execution/TEST_RESULTS.md)                                                                                   | 当前和历史测试证据；失败不得省略                   |
+| `EVIDENCE_CURRENT`      | [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md)                                                                         | 当前候选是否达到构建、打包或发布门禁               |
 
 ## 支撑文档
 
@@ -45,18 +47,24 @@
   IPC、Model Hub、SQLite、Cloud API 与 Web Guest 数据边界。
 - [`front-end/CREATION_JOURNEYS_AND_PROJECT_SEED.md`](front-end/CREATION_JOURNEYS_AND_PROJECT_SEED.md)：
   三条创建旅程共享的 ProjectSeed 合同。
+- [`front-end/WRITING_EXPERIENCE_AND_CONSISTENCY.md`](front-end/WRITING_EXPERIENCE_AND_CONSISTENCY.md)：
+  直接/专业模式、本地设定整理、StoryMemory、受控调查与 Provider 披露界面合同。
 - [`back-end/CLOUD_BACKEND.md`](back-end/CLOUD_BACKEND.md)：Cloud API 代码边界；不代表生产云已部署。
 - [`back-end/DESKTOP_NATIVE.md`](back-end/DESKTOP_NATIVE.md)：Tauri/Rust 可信边界、SQLite、凭据、
   模型网络和备份恢复。
 - [`back-end/SHARED_PACKAGES.md`](back-end/SHARED_PACKAGES.md)：领域、应用、数据和共享包职责。
 - [`back-end/ANDROID_OPERATIONS_TOOLING.md`](back-end/ANDROID_OPERATIONS_TOOLING.md)：Android POC、
   部署和工程工具；不属于当前 Phase 1 默认产品范围。
+- [`product-rebuild/13-LOCAL-AGENT-RAG-ARCHITECTURE.md`](product-rebuild/13-LOCAL-AGENT-RAG-ARCHITECTURE.md)：
+  本地 StoryMemory/RAG/TaskGraph 当前架构和明确延期项。
+- [`product-rebuild/15-TENCENTDB-AGENT-MEMORY-ADAPTATION-AUDIT.md`](product-rebuild/15-TENCENTDB-AGENT-MEMORY-ADAPTATION-AUDIT.md)：
+  固定上游提交的只读适配研究与不引入第二事实源/数据库/Key 的边界。
 - [`GITHUB_PUBLISH_RELEASE_GUIDE.md`](GITHUB_PUBLISH_RELEASE_GUIDE.md)：公开仓库上传与 Release
   注意事项。实际公开范围以根 `.gitignore` 和当次提交清单为准。
 
 ## 目标与历史文档
 
-- `DESIGN/`：`TARGET_BASELINE`。DESIGN v0.3.1b 规定视觉与交互目标；当前源码目标版本是 0.2.4，最近已发布工程预览应用版本是 0.2.3，v0.2.4 安全修复候选仍未发布。
+- `DESIGN/`：`TARGET_BASELINE`。DESIGN v0.3.1b 规定视觉与交互目标；当前源码目标版本是 0.2.5，最新已发布工程预览应用版本是 0.2.4，v0.2.5 候选仍待最终门禁、打包与发布。
 - [`product-rebuild/00-PHASE-0-REALITY-AUDIT.md`](product-rebuild/00-PHASE-0-REALITY-AUDIT.md)：
   `HISTORICAL` Phase 0 起始审计；当前差异须再读增量现实矩阵。
 - `docs/prototypes/`、`docs/state-matrices/`：目标原型或状态设计；除非文件明确标为当前，否则不是
@@ -69,6 +77,8 @@
 
 - 默认入口是“从一个想法开始、导入小说、专业创建”；项目一级区域只有正文、规划、设定、检查。
 - AI 结果先进入隔离的“AI 建议版本”（内部 Candidate）；明确接受前不得覆盖正文。
+- 直接模式只简化交互，并授权接受后的确定性本地 delta 整理；它不授权自动接受正文或额外联网，
+  重大设定仍须作者确认。
 - 每次接受都创建不可变版本；当前接受后台只允许本地搜索、因果/故事关联等无需 Provider 的可重建投影，Provider 调用增量必须为 0；派生失败不得回滚已接受正文。
 - 密钥保存在操作系统凭据库；正文、Prompt、密钥和完整模型响应不得写入调用账本或普通日志。
 - 项目含仅本机章节时，所有读取项目内容的远程模型派发失败关闭。

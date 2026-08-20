@@ -12,6 +12,7 @@ export * from "./ideation-local-suggestions.js";
 export * from "./ideation-use-cases.js";
 export * from "./memory.js";
 export * from "./memory-use-cases.js";
+export * from "./legacy-memory-promotion.js";
 export * from "./material.js";
 export * from "./material-use-cases.js";
 export * from "./narrative-analysis.js";

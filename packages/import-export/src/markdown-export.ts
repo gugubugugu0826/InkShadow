@@ -9,6 +9,7 @@ import {
   type PortableProjectV1,
 } from "./schemas.js";
 import { sanitizeMarkdown, sanitizePlainText } from "./text.js";
+import type { PublicationImageAsset } from "./publication-images.js";
 
 export interface MarkdownExportArtifact {
   readonly fileName: string;
@@ -16,6 +17,10 @@ export interface MarkdownExportArtifact {
   readonly content: string;
   readonly byteLength: number;
   readonly issues: readonly ImportIssue[];
+}
+
+export interface MarkdownExportOptions {
+  readonly imageAssets?: readonly PublicationImageAsset[];
 }
 
 function schemaError(
@@ -61,14 +66,17 @@ function finishArtifact(
   };
 }
 
-export function exportChapterToMarkdown(input: PortableChapterV1): MarkdownExportArtifact {
+export function exportChapterToMarkdown(
+  input: PortableChapterV1,
+  options: MarkdownExportOptions = {},
+): MarkdownExportArtifact {
   const parsed = portableChapterV1Schema.safeParse(input);
   if (!parsed.success) {
     throw schemaError("Chapter export input", parsed);
   }
 
   const title = sanitizePlainText(parsed.data.title);
-  const body = sanitizeMarkdown(parsed.data.markdown, parsed.data.path);
+  const body = sanitizeMarkdown(parsed.data.markdown, parsed.data.path, options);
   return finishArtifact(
     sanitizeFilename(parsed.data.title, ".md"),
     [`# ${title.markdown}`, body.markdown],
@@ -76,7 +84,10 @@ export function exportChapterToMarkdown(input: PortableChapterV1): MarkdownExpor
   );
 }
 
-export function exportProjectToMarkdown(input: PortableProjectV1): MarkdownExportArtifact {
+export function exportProjectToMarkdown(
+  input: PortableProjectV1,
+  options: MarkdownExportOptions = {},
+): MarkdownExportArtifact {
   const parsed = portableProjectV1Schema.safeParse(input);
   if (!parsed.success) {
     throw schemaError("Project export input", parsed);
@@ -96,7 +107,7 @@ export function exportProjectToMarkdown(input: PortableProjectV1): MarkdownExpor
 
   for (const chapter of [...parsed.data.chapters].sort((left, right) => left.order - right.order)) {
     const title = sanitizePlainText(chapter.title);
-    const body = sanitizeMarkdown(chapter.markdown, chapter.path);
+    const body = sanitizeMarkdown(chapter.markdown, chapter.path, options);
     sections.push(`## ${title.markdown}\n\n${body.markdown}`);
     issues.push(...title.issues, ...body.issues);
   }

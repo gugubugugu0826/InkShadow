@@ -16,7 +16,7 @@ import type {
   SignedUpdateCheck,
   StagedUpdateReceipt,
 } from "../infrastructure/secure-updater";
-import { normalizeUiError } from "../infrastructure/ui-error";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 
 export interface SecureUpdateCardProps {
   readonly updater: SecureUpdaterPort | undefined;
@@ -100,7 +100,7 @@ export function SecureUpdateCard({ updater, online }: SecureUpdateCardProps) {
     }
   };
 
-  const normalizedError = error === null ? null : normalizeUiError(error);
+  const normalizedError = error === null ? null : projectOrdinaryUiError(error);
   const enabled = configuration?.enabled === true;
 
   return (
@@ -124,7 +124,7 @@ export function SecureUpdateCard({ updater, online }: SecureUpdateCardProps) {
             <InlineAlert
               tone="error"
               title={normalizedError.title}
-              description={`${normalizedError.description}（${normalizedError.code}）`}
+              description={normalizedError.description}
             />
           )}
 
@@ -132,7 +132,7 @@ export function SecureUpdateCard({ updater, online }: SecureUpdateCardProps) {
             <InlineAlert
               tone="warning"
               title="此构建未启用在线更新"
-              description={`当前版本 ${configuration.currentVersion} 仍可离线使用。只有发行流水线固定清单地址和 Ed25519 公钥后才会开放检查；不会从运行时输入接受更新源。（${configuration.disabledReason ?? "UPDATE_DISABLED"}）`}
+              description={`当前版本 ${configuration.currentVersion} 仍可离线使用。只有发行流水线固定清单地址和 Ed25519 公钥后才会开放检查；不会从运行时输入接受更新源。`}
             />
           )}
 

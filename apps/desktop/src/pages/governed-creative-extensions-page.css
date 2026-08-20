@@ -336,19 +336,10 @@
   background: rgb(255 255 255 / 3.5%);
 }
 
-.governed-extensions-review__actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-top: 16px;
-}
-
 .governed-extensions-translation-preview {
   display: grid;
   gap: 8px;
   margin-top: 14px;
-  overflow: hidden;
   border: 1px solid rgb(255 255 255 / 8%);
   border-radius: 12px;
 }

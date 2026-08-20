@@ -186,6 +186,7 @@ describe("IdeationPage", () => {
     await user.click(screen.getByRole("button", { name: "保存当前步骤" }));
 
     expect(await screen.findByText(/草稿修订冲突/u)).toBeInTheDocument();
+    expect(screen.queryByText(/STORY_REVISION_CONFLICT/u)).not.toBeInTheDocument();
     expect(screen.getByLabelText("你的决定")).toHaveValue("当前窗口未保存的类型");
     await user.click(screen.getByRole("button", { name: "重新读取草稿" }));
     expect(await screen.findByDisplayValue("外部窗口保存的类型")).toBeInTheDocument();
@@ -272,6 +273,7 @@ describe("IdeationPage", () => {
     expect(screen.getByLabelText("你的决定")).toHaveValue("必须继续留在页面的文本");
     expect(harness.onlyDraft().toSnapshot().steps[0]?.value).toBe("");
     expect(await screen.findByText(/构思操作未完成/u)).toBeInTheDocument();
+    expect(screen.queryByText(/STORY_REPOSITORY_ERROR/u)).not.toBeInTheDocument();
   });
 });
 

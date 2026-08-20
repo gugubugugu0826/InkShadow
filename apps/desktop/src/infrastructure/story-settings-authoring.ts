@@ -5,7 +5,7 @@ import {
   type StorySettingsCharacter,
   type StorySettingsRelationship,
   type StorySettingsWorldRule,
-} from "@inkshadow/import-export";
+} from "@inkshadow/import-export/core";
 import type {
   FormalStoryRecord,
   MemoryRecord,

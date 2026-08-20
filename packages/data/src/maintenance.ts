@@ -79,6 +79,8 @@ interface FineTuningDeploymentRestoreRow {
 
 const BACKUP_INCOMPATIBLE_OPERATION = "DATABASE_RESTORE_BACKUP_INCOMPATIBLE";
 const RESTORABLE_TABLES = [
+  "writing_experience_preferences",
+  "writing_provider_disclosure_grants",
   "projects",
   "project_seeds",
   "story_settings_import_receipts",
@@ -107,6 +109,10 @@ const RESTORABLE_TABLES = [
   "context_compilation_execution_links",
   "context_compilation_model_invocation_links",
   "context_compilation_output_candidate_links",
+  "consistency_investigation_runs",
+  "consistency_investigation_steps",
+  "consistency_investigation_findings",
+  "consistency_investigation_evidence",
   "novel_skill_definitions",
   "project_novel_skill_bindings",
   "novel_skill_invocation_snapshots",
@@ -258,6 +264,12 @@ const DERIVED_TABLES_TO_CLEAR = [
 ] as const;
 
 const RESTORE_DELETE_ORDER = [
+  "writing_provider_disclosure_grants",
+  "writing_experience_preferences",
+  "consistency_investigation_evidence",
+  "consistency_investigation_findings",
+  "consistency_investigation_steps",
+  "consistency_investigation_runs",
   "story_settings_import_receipts",
   "novel_skill_evaluation_manual_decisions",
   "novel_skill_evaluation_review_receipts",
@@ -520,6 +532,8 @@ const NOVEL_SKILL_EVALUATION_RESTORE_GUARDS = [
 ] as const;
 
 const RESTORE_INSERT_ORDER = [
+  "writing_experience_preferences",
+  "writing_provider_disclosure_grants",
   "novel_skill_definitions",
   "projects",
   "project_novel_skill_bindings",
@@ -652,6 +666,10 @@ const RESTORE_INSERT_ORDER = [
   "context_compilation_execution_links",
   "context_compilation_model_invocation_links",
   "context_compilation_output_candidate_links",
+  "consistency_investigation_runs",
+  "consistency_investigation_steps",
+  "consistency_investigation_findings",
+  "consistency_investigation_evidence",
   "novel_skill_invocation_snapshots",
   "novel_skill_invocation_items",
   "novel_skill_evaluation_suites",

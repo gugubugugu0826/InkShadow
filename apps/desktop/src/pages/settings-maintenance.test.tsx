@@ -122,10 +122,10 @@ describe("SettingsPage native maintenance tickets", () => {
     await waitFor(() => expect(backupButton).toBeEnabled());
     await user.click(backupButton);
 
-    expect(await screen.findByText(/SQLITE_PATH_TICKET_INVALID/u)).toBeVisible();
     expect(
-      screen.getByText(/所选本地数据库文件授权已失效或不再匹配。请重新选择文件后再试。/u),
+      await screen.findByText(/所选本地数据库文件授权已失效或不再匹配。请重新选择文件后再试。/u),
     ).toBeVisible();
+    expect(document.body.textContent).not.toContain("SQLITE_PATH_TICKET_INVALID");
     expect(document.body.textContent).not.toContain(rawPath);
   });
 

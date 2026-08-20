@@ -64,7 +64,6 @@ export function GovernedCreativeExtensionsRoutePage() {
           headingLevel={1}
           title="无法打开创作扩展"
           description="项目、章节或当前权威版本无效。请返回项目列表并重新选择仍存在的章节。"
-          errorCode="EXTENSION_ROUTE_INVALID"
           primaryAction={{ label: "返回项目列表", onClick: () => void navigate("/projects") }}
         />
       </div>

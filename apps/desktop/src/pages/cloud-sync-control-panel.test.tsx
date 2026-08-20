@@ -42,6 +42,8 @@ describe("CloudSyncControlPanel", () => {
     render(<CloudSyncControlPanel projectId={PROJECT_ID} service={service} />);
 
     expect(await screen.findByText("当前无法连接云端")).toBeVisible();
+    expect(screen.getByText(/网络请求未完成/u)).toBeVisible();
+    expect(screen.queryByText(/SYNC_NETWORK_UNAVAILABLE/u)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "立即重试" }));
     await waitFor(() =>
       expect(service.retryProject).toHaveBeenCalledWith(PROJECT_ID, expect.any(AbortSignal)),

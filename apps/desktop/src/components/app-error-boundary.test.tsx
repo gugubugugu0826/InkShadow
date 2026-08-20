@@ -19,8 +19,8 @@ describe("AppErrorBoundary", () => {
     );
 
     expect(screen.getByRole("heading", { name: "这个页面暂时没有正常打开" })).toBeVisible();
-    expect(screen.getByText("UI_RENDER_FAILED")).toBeVisible();
-    expect(screen.getByText(/^UI-/u)).toBeVisible();
+    expect(screen.queryByText("UI_RENDER_FAILED")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^UI-/u)).not.toBeInTheDocument();
     expect(screen.queryByText("private remote detail")).not.toBeInTheDocument();
     expect(screen.getByText(/已保存的正文、版本和本地备份不会/u)).toBeVisible();
 

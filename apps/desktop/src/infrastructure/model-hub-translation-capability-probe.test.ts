@@ -23,7 +23,7 @@ describe("Model Hub translation capability probe", () => {
         baseUrl: "https://api.deepseek.com",
         authentication: "none",
         requestTimeoutMs: 30_000,
-        retryLimit: 0,
+        retryLimit: 3,
       },
       model: "current-text-model",
     });
@@ -32,9 +32,37 @@ describe("Model Hub translation capability probe", () => {
     const request = generate.mock.calls[0]?.[0];
     expect(request?.dispatchScope).toEqual({ kind: "non_project", reason: "connection_probe" });
     expect(request?.reasoningMode).toBe("disabled");
+    expect(request?.config.retryLimit).toBe(0);
     expect(request?.maxOutputTokens).toBe(64);
     expect(request?.messages[0]?.content).toContain("fixed Chinese sentence");
     expect(request?.messages[1]).toEqual({ role: "user", content: "雨停了。" });
+  });
+
+  it("rechecks the disclosed target before dispatch and makes zero calls when it changed", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>();
+    const assertBeforeProviderDispatch = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValue(new Error("MODEL_HUB_TASK_PROBE_DISCLOSURE_CHANGED"));
+
+    await expect(
+      runModelHubTranslationCapabilityProbe({
+        gateway: { generate },
+        providerKind: "openai",
+        generationId: "019fa000-0000-7000-8000-000000000005",
+        config: {
+          providerId: "translation-probe",
+          provider: "open_ai_compatible",
+          baseUrl: "https://api.openai.com/v1",
+          authentication: "none",
+          requestTimeoutMs: 30_000,
+          retryLimit: 4,
+        },
+        model: "current-text-model",
+        assertBeforeProviderDispatch,
+      }),
+    ).rejects.toThrow("MODEL_HUB_TASK_PROBE_DISCLOSURE_CHANGED");
+    expect(assertBeforeProviderDispatch).toHaveBeenCalledOnce();
+    expect(generate).not.toHaveBeenCalled();
   });
 
   it("does not promote an unrelated visible-text answer", async () => {

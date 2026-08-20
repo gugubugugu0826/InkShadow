@@ -705,14 +705,17 @@ pub(crate) async fn native_sqlite_open(
     let path = directory.join(DATABASE_FILE_NAME);
 
     let mut bridge = state.inner.lock().await;
-    if bridge.connection.is_some() {
-        return Err(NativeSqliteError::new(
-            "SQLITE_ALREADY_OPEN",
-            "The local database is already open in this runtime.",
-            false,
-        ));
-    }
-    let receipt = bridge.open_file(&path).await?;
+    let receipt = if bridge.connection.is_some() {
+        // A WebView reload resets the renderer-side module state while the
+        // native process and its single SQLite connection remain alive. Adopt
+        // that connection instead of opening a second handle or forcing the
+        // user into a reload loop. Any renderer-owned transaction is orphaned
+        // at this point and must be rolled back before the new session token is
+        // issued. The token rotation invalidates every stale renderer facade.
+        bridge.adopt_renderer_session().await?
+    } else {
+        bridge.open_file(&path).await?
+    };
     // A previous process cannot still own a native request: the desktop app is
     // single-instance and this runs before the WebView receives its database
     // session. Remove crash-orphaned leases before any privacy mutation is
@@ -1123,6 +1126,31 @@ impl NativeSqliteBridge {
         self.connection = Some(connection);
         self.session_token = Some(session_token.clone());
         self.transaction = None;
+        Ok(NativeSqliteOpenReceipt { session_token })
+    }
+
+    async fn adopt_renderer_session(
+        &mut self,
+    ) -> Result<NativeSqliteOpenReceipt, NativeSqliteError> {
+        if self.connection.is_none() {
+            return Err(NativeSqliteError::unavailable());
+        }
+        if self.transaction.is_some() && self.rollback_active_transaction().await.is_err() {
+            self.invalidate_connection().await;
+            return Err(NativeSqliteError::invalidated());
+        }
+        if self.restore_query_only().await.is_err()
+            || verify_connection_configuration(self.connection_mut()?)
+                .await
+                .is_err()
+        {
+            self.invalidate_connection().await;
+            return Err(NativeSqliteError::invalidated());
+        }
+
+        self.transaction = None;
+        let session_token = random_token();
+        self.session_token = Some(session_token.clone());
         Ok(NativeSqliteOpenReceipt { session_token })
     }
 
@@ -3513,6 +3541,58 @@ mod tests {
             .await
             .expect("reopen");
         assert_ne!(reopened.session_token, session);
+    }
+
+    #[tokio::test]
+    async fn webview_reload_adopts_the_connection_and_rolls_back_the_orphaned_transaction() {
+        let (mut bridge, session) = open_memory().await;
+        bridge
+            .execute(
+                &session,
+                "CREATE TABLE records (id INTEGER PRIMARY KEY)",
+                vec![],
+            )
+            .await
+            .expect("create table");
+        bridge
+            .execute(&session, "INSERT INTO records (id) VALUES (1)", vec![])
+            .await
+            .expect("seed committed row");
+        let transaction = bridge.begin(&session, false).await.expect("begin orphan");
+        bridge
+            .transaction_execute(
+                &session,
+                &transaction,
+                "INSERT INTO records (id) VALUES (2)",
+                vec![],
+            )
+            .await
+            .expect("insert orphaned row");
+
+        let adopted = bridge
+            .adopt_renderer_session()
+            .await
+            .expect("adopt existing native connection");
+
+        assert_ne!(adopted.session_token, session);
+        assert_eq!(
+            bridge
+                .select(&session, "SELECT id FROM records", vec![])
+                .await
+                .expect_err("old renderer session must be invalid")
+                .code,
+            "SQLITE_SESSION_INVALID"
+        );
+        let rows = bridge
+            .select(
+                &adopted.session_token,
+                "SELECT id FROM records ORDER BY id",
+                vec![],
+            )
+            .await
+            .expect("read through adopted session");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("id"), Some(&JsonValue::from(1)));
     }
 
     #[tokio::test]

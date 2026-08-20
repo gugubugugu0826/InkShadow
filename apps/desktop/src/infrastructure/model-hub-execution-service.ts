@@ -37,6 +37,12 @@ import type {
   NativeModelMessage,
 } from "./runtime";
 import type { NativeModelDispatchScope } from "./native-model-gateway-contract";
+import {
+  MODEL_EXECUTION_POLICY_VERSION,
+  SINGLE_ATTEMPT_AUTO_FALLBACK_CONDITIONS,
+  SINGLE_ATTEMPT_STOP_CONDITIONS,
+  type ModelExecutionPolicy,
+} from "./model-execution-policy";
 import { UiActionError } from "./ui-error";
 
 export interface InspectModelHubTextTaskInput {
@@ -55,12 +61,27 @@ export interface ExecuteModelHubTextTaskInput extends InspectModelHubTextTaskInp
   readonly generationId?: string;
   /** Optional caller-reserved invocation id used to recover an interrupted local workflow. */
   readonly invocationId?: string;
+  /**
+   * Unified one-attempt execution authority. Callers should pass a named
+   * policy; legacy fields below are accepted only when they describe the same
+   * policy and are never allowed to widen it.
+   */
+  readonly executionPolicy: ModelExecutionPolicy;
   /** Applies a narrow provider-aware reasoning policy at the named task boundary. */
   readonly reasoningPolicy?: "capability_probe" | "visible_prose";
   /** A one-shot recovery override after a reasoning-only truncation. */
   readonly reasoningModeOverride?: "disabled";
+  /** Narrows Provider POST retry authority without changing connection discovery policy. */
+  readonly generationRetryLimitOverride?: 0;
   /** Request provider JSON mode only after structured output has evidence. */
   readonly responseFormat?: "json_object";
+  /**
+   * Synchronously validates the complete visible provider response before the
+   * invocation can be committed as succeeded. Structured callers use this
+   * boundary for JSON/schema validation so an HTTP 200 with unusable output is
+   * recorded as a response-normalization failure, not a successful call.
+   */
+  readonly validateGeneratedText?: (text: string) => undefined;
   readonly onBeforeDispatch?: (selection: ModelHubTextDispatchSelection) => void | Promise<void>;
   /**
    * Rechecks mutable project/source/privacy authority after the final async
@@ -251,7 +272,9 @@ export async function executeModelHubTextTask(
   dependencies: ModelHubTextExecutionDependencies,
   input: ExecuteModelHubTextTaskInput,
 ): Promise<ModelHubTextTaskExecutionResult> {
+  const executionPolicy = resolveModelExecutionPolicy(input);
   const { route, target, usedFallback } = await resolveTextPlan(dependencies, input);
+  assertExecutionPolicyTransportSupported(executionPolicy, target.connection);
   const expectedDispatchIdentity = modelHubFinalDispatchIdentity({
     route,
     connection: target.connection,
@@ -278,6 +301,8 @@ export async function executeModelHubTextTask(
   });
 
   let dispatched = false;
+  let generatedObservation: NativeModelGenerationResult | null = null;
+  let generatedCostMicros: string | null = null;
   try {
     await input.onBeforeDispatch?.({
       generationId,
@@ -335,28 +360,47 @@ export async function executeModelHubTextTask(
         isLoopbackModelBaseUrl(current.target.connection.baseUrl),
     });
     const reasoningPolicy =
-      input.reasoningPolicy === "capability_probe"
+      executionPolicy.reasoningMode === "capability_probe"
         ? modelProviderTextCapabilityProbePolicy(current.target.connection.providerKind)
-        : input.reasoningPolicy === "visible_prose"
+        : executionPolicy.reasoningMode === "provider_visible_prose"
           ? modelProviderVisibleProsePolicy(current.target.connection.providerKind)
           : null;
+    const nativeConfig = modelHubNativeEndpointConfig(current.target.connection);
     const generated = await dependencies.modelGateway.generate({
       generationId,
-      config: modelHubNativeEndpointConfig(current.target.connection),
+      config: Object.freeze({ ...nativeConfig, retryLimit: executionPolicy.providerRetryLimit }),
       model: current.target.catalogEntry.providerModelId,
       messages: input.messages,
       dispatchScope: input.dispatchScope,
       maxOutputTokens: target.maximumOutputTokens,
       ...(target.temperature === undefined ? {} : { temperature: target.temperature }),
-      ...(input.reasoningModeOverride !== undefined
-        ? { reasoningMode: input.reasoningModeOverride }
+      ...(executionPolicy.reasoningMode === "disabled" &&
+      nativeConfig.provider === "open_ai_compatible"
+        ? { reasoningMode: "disabled" as const }
         : reasoningPolicy?.reasoningMode === undefined || reasoningPolicy.reasoningMode === null
           ? {}
           : { reasoningMode: reasoningPolicy.reasoningMode }),
-      ...(input.responseFormat === undefined ? {} : { responseFormat: input.responseFormat }),
+      ...(executionPolicy.transportResponseFormat === "text"
+        ? {}
+        : { responseFormat: executionPolicy.transportResponseFormat }),
       ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
     });
-    const cost = calculateActualCost(target.costPrivacy, generated.usage);
+    generatedObservation = generated;
+    generatedCostMicros = calculateActualCost(target.costPrivacy, generated.usage);
+    if (input.validateGeneratedText !== undefined) {
+      try {
+        const validator = input.validateGeneratedText as (text: string) => unknown;
+        const validationResult = validator(generated.text);
+        if (validationResult !== undefined) {
+          throw Object.assign(new Error("response validator must be synchronous"), {
+            code: "MODEL_RESPONSE_VALIDATOR_ASYNC_UNSUPPORTED",
+          });
+        }
+      } catch (cause: unknown) {
+        throw responseValidationFailure(cause, generated);
+      }
+    }
+    const cost = generatedCostMicros;
     const costCeilingExceededAfterDispatch =
       route.maximumCostMicros !== null &&
       cost !== null &&
@@ -390,29 +434,44 @@ export async function executeModelHubTextTask(
     const normalized = dispatched
       ? normalizeDispatchedError(cause)
       : normalizePreDispatchError(cause);
+    const failureMetadata = safeExecutionFailureMetadata(
+      cause,
+      normalized,
+      usedFallback ? 2 : 1,
+      target.maximumOutputTokens,
+      dispatched,
+    );
+    const ambiguous = isAmbiguousDispatchedTransportFailure(
+      dispatched,
+      normalized,
+      failureMetadata,
+    );
+    const projected = ambiguous ? ambiguousProviderResult(normalized, failureMetadata) : normalized;
     const status =
       normalized.code === "MODEL_GENERATION_CANCELLED"
         ? "cancelled"
-        : normalized.code.includes("TIMEOUT")
+        : ambiguous
           ? "timed_out"
           : "failed";
-    const failure =
-      status === "failed" || status === "timed_out"
-        ? safeExecutionFailureMetadata(
-            cause,
-            normalized,
-            usedFallback ? 2 : 1,
-            target.maximumOutputTokens,
-            dispatched,
-          )
-        : null;
+    const failure = status === "failed" || status === "timed_out" ? failureMetadata : null;
+    const observedUsage = generatedObservation?.usage ?? safeFailureUsage(cause);
+    const observedCostMicros =
+      generatedCostMicros ??
+      (observedUsage === null ? null : calculateActualCost(target.costPrivacy, observedUsage));
     invocation = await dependencies.modelHub.finishInvocation({
       id: invocation.id,
       status,
+      inputTokens: observedUsage?.inputTokens ?? null,
+      outputTokens: observedUsage?.outputTokens ?? null,
+      cachedInputTokens: observedUsage?.cachedInputTokens ?? null,
+      estimatedCostMicros: observedCostMicros,
+      currency: observedCostMicros === null ? null : target.costCurrency,
       ...(status === "failed" || status === "timed_out"
         ? {
-            errorCode: normalized.code,
-            errorSummary: "模型调用失败；作品正文和已有 AI 建议版本均未改变。",
+            errorCode: projected.code,
+            errorSummary: ambiguous
+              ? "模型请求已发送，但连接在收到明确结果前中断；结果未知且不会自动重发。"
+              : "模型调用失败；作品正文和已有 AI 建议版本均未改变。",
             failure,
           }
         : {}),
@@ -420,13 +479,160 @@ export async function executeModelHubTextTask(
     });
     void invocation;
     throw new ModelHubExecutionError(
-      normalized.code,
-      normalized.message,
-      normalized.retryable,
-      normalized.dispatched,
+      projected.code,
+      projected.message,
+      projected.retryable,
+      projected.dispatched,
       failure,
     );
   }
+}
+
+function assertExecutionPolicyTransportSupported(
+  policy: ModelExecutionPolicy,
+  connection: ModelProviderConnection,
+): void {
+  if (
+    policy.transportResponseFormat === "json_object" &&
+    getModelProviderPreset(connection.providerKind).protocol !== "openai_compatible"
+  ) {
+    throw executionError(
+      "MODEL_EXECUTION_POLICY_TRANSPORT_UNSUPPORTED",
+      "所选模型协议不能安全启用 JSON 传输模式；本次请求在发送前停止。",
+    );
+  }
+}
+
+function resolveModelExecutionPolicy(input: ExecuteModelHubTextTaskInput): ModelExecutionPolicy {
+  const policy = input.executionPolicy;
+  assertModelExecutionPolicy(policy, input);
+  return policy;
+}
+
+function assertModelExecutionPolicy(
+  policy: ModelExecutionPolicy,
+  input: ExecuteModelHubTextTaskInput,
+): void {
+  const policyRecord = policy as unknown as Readonly<Record<string, unknown>>;
+  if (
+    policyRecord.version !== MODEL_EXECUTION_POLICY_VERSION ||
+    policyRecord.primaryRoute !== "configured_task_route" ||
+    policyRecord.orderedFallbackRoutes !== "configured_predispatch_only" ||
+    policyRecord.requiredCapabilities !== "resolved_task_contract" ||
+    policyRecord.privacyDestination !== "authoritative_dispatch_scope" ||
+    policyRecord.maximumProviderCalls !== 1 ||
+    policyRecord.maximumAttempts !== 1 ||
+    policyRecord.automaticRetryCount !== 0 ||
+    policyRecord.providerRetryLimit !== 0 ||
+    policyRecord.costPolicy !== "authoritative_preflight_or_explicit_unknown" ||
+    policyRecord.preDispatchFallback !== "configured_route_only" ||
+    policyRecord.postDispatchFallback !== "forbidden" ||
+    policyRecord.ambiguousRedispatch !== "forbidden" ||
+    !samePolicyList(policy.autoFallbackConditions, SINGLE_ATTEMPT_AUTO_FALLBACK_CONDITIONS) ||
+    !samePolicyList(policy.stopConditions, SINGLE_ATTEMPT_STOP_CONDITIONS) ||
+    policy.outputValidation !==
+      (policy.outputContract === "strict_json"
+        ? "strict_json_caller_validator_before_success"
+        : "visible_text_contract")
+  ) {
+    throw executionError(
+      "MODEL_EXECUTION_POLICY_UNSAFE",
+      "这项 AI 操作的调用边界不安全；本次请求在发送前停止。",
+    );
+  }
+  if (policy.transportResponseFormat === "json_object" && policy.outputContract !== "strict_json") {
+    throw executionError(
+      "MODEL_EXECUTION_POLICY_OUTPUT_CONFLICT",
+      "这项 AI 操作的输出格式合同不一致；本次请求在发送前停止。",
+    );
+  }
+  if (policy.outputContract === "strict_json" && input.validateGeneratedText === undefined) {
+    throw executionError(
+      "MODEL_EXECUTION_POLICY_VALIDATOR_REQUIRED",
+      "这项结构化 AI 操作缺少完整结果校验；本次请求在发送前停止。",
+    );
+  }
+  if (input.validateGeneratedText !== undefined && policy.outputContract !== "strict_json") {
+    throw executionError(
+      "MODEL_EXECUTION_POLICY_VALIDATOR_CONFLICT",
+      "这项 AI 操作的结果校验与输出合同不一致；本次请求在发送前停止。",
+    );
+  }
+  if (
+    input.responseFormat !== undefined &&
+    input.responseFormat !== policy.transportResponseFormat
+  ) {
+    throw executionError(
+      "MODEL_EXECUTION_POLICY_OUTPUT_CONFLICT",
+      "这项 AI 操作的输出格式合同不一致；本次请求在发送前停止。",
+    );
+  }
+  if (input.reasoningModeOverride === "disabled" && policy.reasoningMode !== "disabled") {
+    throw executionError(
+      "MODEL_EXECUTION_POLICY_REASONING_CONFLICT",
+      "这项 AI 操作的推理模式合同不一致；本次请求在发送前停止。",
+    );
+  }
+  if (input.reasoningPolicy === "capability_probe" && policy.reasoningMode !== "capability_probe") {
+    throw executionError(
+      "MODEL_EXECUTION_POLICY_REASONING_CONFLICT",
+      "这项 AI 操作的推理模式合同不一致；本次请求在发送前停止。",
+    );
+  }
+  if (
+    input.reasoningPolicy === "visible_prose" &&
+    policy.reasoningMode !== "provider_visible_prose"
+  ) {
+    throw executionError(
+      "MODEL_EXECUTION_POLICY_REASONING_CONFLICT",
+      "这项 AI 操作的推理模式合同不一致；本次请求在发送前停止。",
+    );
+  }
+}
+
+function samePolicyList(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+class ModelHubResponseValidationFailure extends Error {
+  public readonly retryable = false;
+  public readonly diagnostics: Readonly<{
+    visibleContentLength: number;
+    reasoningPresent: boolean | null;
+    stream: boolean | null;
+  }>;
+
+  public constructor(
+    public readonly code: string,
+    generated: NativeModelGenerationResult,
+  ) {
+    super("模型已返回，但结果不符合这项任务要求的完整结构；本次结果不会进入作品。");
+    this.name = "ModelHubResponseValidationFailure";
+    const visibleContentLength = Array.from(generated.text).length;
+    this.diagnostics = Object.freeze({
+      visibleContentLength,
+      reasoningPresent:
+        visibleContentLength === 0 && (generated.usage?.outputTokens ?? 0) > 0 ? true : null,
+      stream: generated.streamed ?? null,
+    });
+  }
+}
+
+function responseValidationFailure(
+  cause: unknown,
+  generated: NativeModelGenerationResult,
+): ModelHubResponseValidationFailure {
+  const explicitCode = safePreDispatchCode(cause);
+  const visibleContentLength = Array.from(generated.text).length;
+  const code =
+    visibleContentLength === 0
+      ? (generated.usage?.outputTokens ?? 0) > 0
+        ? "MODEL_STRUCTURED_OUTPUT_REASONING_ONLY"
+        : "MODEL_STRUCTURED_OUTPUT_EMPTY"
+      : explicitCode !== null && /(?:JSON|OUTPUT|RESPONSE|SCHEMA)/u.test(explicitCode)
+        ? explicitCode
+        : "MODEL_STRUCTURED_OUTPUT_SCHEMA_MISMATCH";
+  return new ModelHubResponseValidationFailure(code, generated);
 }
 
 async function resolveTextPlan(
@@ -990,12 +1196,37 @@ function executionFailureStage(
   httpStatus: number | null,
 ): ModelFailureStage {
   if (!dispatched) return "request_preparation";
-  if (httpStatus !== null) return "http_response";
-  if (/STREAM|SSE/u.test(code)) return "stream_parse";
+  if (/(?:^|_)(?:STREAM|SSE)(?:_|$)/u.test(code)) return "stream_parse";
   if (/OUTPUT|RESPONSE|MALFORMED|JSON/u.test(code)) return "response_normalization";
-  if (code.includes("HTTP")) return "http_response";
+  if (httpStatus !== null || code.includes("HTTP")) return "http_response";
   if (/NETWORK|TIMEOUT|DNS|TLS|TRANSPORT/u.test(code)) return "transport";
   return "dispatch";
+}
+
+function isAmbiguousDispatchedTransportFailure(
+  dispatched: boolean,
+  normalized: ModelHubExecutionError,
+  failure: SafeAiFailureMetadata,
+): boolean {
+  return (
+    dispatched &&
+    normalized.code !== "MODEL_GENERATION_CANCELLED" &&
+    failure.stage === "transport" &&
+    failure.httpStatus === null
+  );
+}
+
+function ambiguousProviderResult(
+  normalized: ModelHubExecutionError,
+  failure: SafeAiFailureMetadata,
+): ModelHubExecutionError {
+  return new ModelHubExecutionError(
+    "PROVIDER_RESULT_AMBIGUOUS",
+    "模型请求已发送，但连接在收到明确结果前中断。结果可能已在服务端产生；为避免重复费用，本次不会自动重发。",
+    false,
+    true,
+    Object.freeze({ ...failure, retryable: normalized.retryable }),
+  );
 }
 
 function safeFailureString(value: unknown): string | null {
@@ -1011,6 +1242,14 @@ function safeFailureInteger(value: unknown, minimum: number, maximum: number): n
   return Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) <= maximum
     ? (value as number)
     : null;
+}
+
+function safeFailureUsage(cause: unknown): NativeModelGenerationResult["usage"] {
+  const diagnostics = isRecord(cause) && isRecord(cause.diagnostics) ? cause.diagnostics : null;
+  const inputTokens = safeFailureInteger(diagnostics?.inputTokens, 0, 100_000_000);
+  const outputTokens = safeFailureInteger(diagnostics?.outputTokens, 0, 100_000_000);
+  if (inputTokens === null || outputTokens === null) return null;
+  return Object.freeze({ inputTokens, outputTokens, cachedInputTokens: null });
 }
 
 function executionError(code: string, message: string, retryable = false): ModelHubExecutionError {

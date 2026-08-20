@@ -5,7 +5,7 @@ import {
   serializeStorySettings,
   type InkShadowStorySettingsV1,
   type StorySettingsPreflightReport,
-} from "@inkshadow/import-export";
+} from "@inkshadow/import-export/core";
 import type { FormalStoryRecord, MemoryRecord, StoryFact } from "@inkshadow/story-core";
 import {
   Badge,
@@ -26,6 +26,7 @@ import {
 
 import type { DesktopRuntime } from "../infrastructure/runtime";
 import { downloadBrowserExportArtifact } from "../infrastructure/export-artifact-download";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import {
   inspectLegacyGuidedOpeningRecords,
   parseNaturalLanguageSetting,
@@ -68,7 +69,13 @@ interface StorySettingsToolsProps {
   readonly activeSection: "characters" | "world" | "memory" | "preferences" | "other";
   readonly readonly: boolean;
   readonly onChanged: () => Promise<void> | void;
-  readonly onOpenManualForm: () => void;
+  readonly onOpenManualForm: (draft: ManualFactFormDraft) => void;
+}
+
+export interface ManualFactFormDraft {
+  readonly contentText: string;
+  readonly suggestedFactType: "character_identity" | "world_setting" | "writing_rule" | null;
+  readonly returnFocusElementId: string;
 }
 
 interface StorySettingsConflictEntry {
@@ -122,6 +129,8 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
   const fileInspectionSequence = useRef(0);
   const importOperationId = useRef<string | null>(null);
   const receiptInspectionSequence = useRef(0);
+  const manualFormFrame = useRef<number | null>(null);
+  const plainLanguageTriggerId = `story-settings-plain-language-${props.projectId}`;
 
   const characterRecords = useMemo(
     () => props.records.filter(({ kind }) => kind === "character"),
@@ -202,7 +211,7 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
         setNotice({
           tone: "error",
           title: "无法读取最近导入记录",
-          description: `${cause instanceof Error ? cause.message : "本地收据暂时不可用。"} 当前页面内容没有改变，可关闭后重试。`,
+          description: `${projectOrdinaryUiError(cause).description} 当前页面内容没有改变，可关闭后重试。`,
         });
       }
     })();
@@ -212,6 +221,15 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
       }
     };
   }, [props.projectId, props.runtime.storySettingsImport, transferOpen]);
+
+  useEffect(
+    () => () => {
+      if (manualFormFrame.current !== null) {
+        window.cancelAnimationFrame(manualFormFrame.current);
+      }
+    },
+    [],
+  );
 
   const conflicts = useMemo<readonly StorySettingsConflictEntry[]>(() => {
     const candidate = preflight?.candidate;
@@ -264,7 +282,18 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
     }
     if (plainCandidate.kind === "manual") {
       setPlainLanguageOpen(false);
-      props.onOpenManualForm();
+      if (manualFormFrame.current !== null) {
+        window.cancelAnimationFrame(manualFormFrame.current);
+      }
+      const draft: ManualFactFormDraft = {
+        contentText: plainLanguage,
+        suggestedFactType: suggestedManualFactType(props.activeSection),
+        returnFocusElementId: plainLanguageTriggerId,
+      };
+      manualFormFrame.current = window.requestAnimationFrame(() => {
+        manualFormFrame.current = null;
+        props.onOpenManualForm(draft);
+      });
       return;
     }
     if (props.runtime.storySettingsImport === null) {
@@ -534,7 +563,7 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
       setNotice({
         tone: "error",
         title: "故事设定没有导出",
-        description: `${cause instanceof Error ? cause.message : "无法生成完整的设定文件。"} 没有产生可下载的半成品，请检查设定后重试。`,
+        description: `${projectOrdinaryUiError(cause).description} 没有产生可下载的半成品，请检查设定后重试。`,
       });
     }
   }
@@ -748,6 +777,7 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
         </div>
         <div className="story-governance-actions">
           <Button
+            id={plainLanguageTriggerId}
             variant="secondary"
             disabled={props.readonly}
             onClick={() => {
@@ -1359,6 +1389,15 @@ function plainCandidateBundle(
   };
 }
 
+function suggestedManualFactType(
+  section: StorySettingsToolsProps["activeSection"],
+): ManualFactFormDraft["suggestedFactType"] {
+  if (section === "characters") return "character_identity";
+  if (section === "world") return "world_setting";
+  if (section === "preferences") return "writing_rule";
+  return null;
+}
+
 function portableCharacter(
   id: string,
   name: string,
@@ -1464,16 +1503,17 @@ function errorNotice(cause: unknown): Readonly<{
   title: string;
   description: string;
 }> {
+  const projected = projectOrdinaryUiError(cause);
   if (cause instanceof StorySettingsImportError) {
     return {
       tone: "error",
       title: "设定没有写入",
-      description: `${cause.message}（${cause.code}）`,
+      description: projected.description,
     };
   }
   return {
     tone: "error",
-    title: "操作未完成",
-    description: cause instanceof Error ? cause.message : "请检查输入并重试。",
+    title: projected.title,
+    description: projected.description,
   };
 }

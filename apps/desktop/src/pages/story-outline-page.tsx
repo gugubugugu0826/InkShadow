@@ -26,7 +26,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { StoryPlanningPanel } from "../components/story-planning-panel";
 import type { ChapterSummaryDashboardEntry } from "../infrastructure/chapter-summary-service";
-import { normalizeUiError } from "../infrastructure/ui-error";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
 interface AddTarget {
@@ -138,7 +138,7 @@ export function StoryOutlinePage() {
     [book, outline],
   );
   const readonly = project?.status !== "active";
-  const normalizedError = error === null ? null : normalizeUiError(error);
+  const normalizedError = error === null ? null : projectOrdinaryUiError(error);
   const currentOutline = outline;
 
   async function createOutline(): Promise<void> {
@@ -271,7 +271,7 @@ export function StoryOutlinePage() {
         <InlineAlert
           tone="error"
           title={normalizedError.title}
-          description={`${normalizedError.description}（${normalizedError.code}）`}
+          description={normalizedError.description}
           onDismiss={() => setError(null)}
         />
       )}
@@ -357,7 +357,6 @@ export function StoryOutlinePage() {
               <ErrorState
                 title={normalizedError.title}
                 description={normalizedError.description}
-                errorCode={normalizedError.code}
                 primaryAction={{ label: "重试", onClick: () => void load() }}
               />
             ),

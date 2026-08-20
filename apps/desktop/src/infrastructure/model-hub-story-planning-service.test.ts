@@ -12,7 +12,11 @@ import {
 } from "@inkshadow/story-core";
 import { describe, expect, it, vi } from "vitest";
 
-import { ModelHubStoryPlanningService } from "./model-hub-story-planning-service";
+import {
+  ModelHubStoryPlanningService,
+  type GenerateStoryPlanningInput,
+  type StoryPlanningDisclosure,
+} from "./model-hub-story-planning-service";
 import type {
   ExecuteModelHubTextTaskInput,
   ModelHubTextExecutionDependencies,
@@ -38,11 +42,41 @@ if (!parsedNow.ok) {
 const NOW = parsedNow.value;
 
 describe("Model Hub story planning service", () => {
+  it("requires confirmation and rejects route drift before Provider dispatch", async () => {
+    const harness = createHarness(outlineResponse());
+
+    await expect(
+      harness.service.generate({ projectId: PROJECT_ID, task: "outline_planning" }),
+    ).resolves.toMatchObject({
+      status: "skipped",
+      code: "STORY_PLANNING_CONFIRMATION_REQUIRED",
+    });
+    expect(harness.executeText).not.toHaveBeenCalled();
+
+    const disclosure = await harness.service.prepareGeneration({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    harness.inspectText.mockResolvedValue({ ...inspection(), modelId: "changed-model" });
+    await expect(
+      harness.service.generate({
+        projectId: PROJECT_ID,
+        task: "outline_planning",
+        humanConfirmed: true,
+        disclosureFingerprint: disclosure.fingerprint,
+      }),
+    ).resolves.toMatchObject({
+      status: "skipped",
+      code: "STORY_PLANNING_DISCLOSURE_CHANGED",
+    });
+    expect(harness.executeText).not.toHaveBeenCalled();
+  });
+
   it("creates an outline review candidate from only authoritative context, then applies one explicit synopsis update", async () => {
     const harness = createHarness(outlineResponse());
     const before = harness.repository.current?.toSnapshot();
 
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
       userDirection: "让误会在第一卷结尾解开。",
@@ -88,7 +122,7 @@ describe("Model Hub story planning service", () => {
 
   it("supports scene breakdown as a chapter-only candidate and never changes chapter prose", async () => {
     const harness = createHarness(sceneResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "scene_breakdown",
       targetNodeId: CHAPTER_ID,
@@ -116,7 +150,7 @@ describe("Model Hub story planning service", () => {
 
   it("appends only selected immutable rows while preserving the exact baseline synopsis", async () => {
     const harness = createHarness(outlineResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -145,7 +179,7 @@ describe("Model Hub story planning service", () => {
 
   it("rejects an empty selection without changing the outline or candidate", async () => {
     const harness = createHarness(outlineResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -170,7 +204,7 @@ describe("Model Hub story planning service", () => {
 
   it("makes a repeated identical selective acceptance idempotent", async () => {
     const harness = createHarness(outlineResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -197,7 +231,7 @@ describe("Model Hub story planning service", () => {
 
   it("reserves selective acceptance before concurrent reject or edit can win", async () => {
     const harness = createHarness(outlineResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -245,7 +279,7 @@ describe("Model Hub story planning service", () => {
 
   it("makes two concurrent identical selective accepts converge on one outline write", async () => {
     const harness = createHarness(outlineResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -272,7 +306,7 @@ describe("Model Hub story planning service", () => {
 
   it("does not touch the outline when persisting the applying intent fails", async () => {
     const harness = createHarness(outlineResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -301,7 +335,7 @@ describe("Model Hub story planning service", () => {
 
   it("keeps an applying intent after a definite pre-commit outline failure and can retry", async () => {
     const harness = createHarness(outlineResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -336,7 +370,7 @@ describe("Model Hub story planning service", () => {
 
   it("keeps reject and edit locked between one failed apply and an identical concurrent commit", async () => {
     const harness = createHarness(outlineResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -405,7 +439,7 @@ describe("Model Hub story planning service", () => {
 
   it("recovers when the outline commit succeeds but its result is reported as failed", async () => {
     const harness = createHarness(outlineResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -435,7 +469,7 @@ describe("Model Hub story planning service", () => {
 
   it("keeps the applying intent after finalize interruption and completes it on retry", async () => {
     const harness = createHarness(outlineResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -476,7 +510,7 @@ describe("Model Hub story planning service", () => {
 
   it("recognizes a finalize that committed before its caller observed an error", async () => {
     const harness = createHarness(outlineResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -507,7 +541,7 @@ describe("Model Hub story planning service", () => {
 
   it("reports a skipped result before dispatch when structured output is not verified", async () => {
     const harness = createHarness(outlineResponse(), { structuredOutput: false });
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -524,7 +558,7 @@ describe("Model Hub story planning service", () => {
     const harness = createHarness(outlineResponse(), {
       structuredOutputRevokedBeforeFinal: true,
     });
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -542,7 +576,7 @@ describe("Model Hub story planning service", () => {
     const before = harness.repository.current?.toSnapshot();
 
     await expect(
-      harness.service.generate({ projectId: PROJECT_ID, task: "outline_planning" }),
+      generateConfirmed(harness.service, { projectId: PROJECT_ID, task: "outline_planning" }),
     ).rejects.toMatchObject({ code: "STORY_PLANNING_RESPONSE_INVALID" });
     expect(harness.repository.current?.toSnapshot()).toEqual(before);
     expect(await harness.candidates.listByProjectId(PROJECT_ID)).toEqual([]);
@@ -550,7 +584,7 @@ describe("Model Hub story planning service", () => {
 
   it("blocks acceptance after any unrelated outline revision instead of overwriting newer work", async () => {
     const harness = createHarness(outlineResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -579,7 +613,7 @@ describe("Model Hub story planning service", () => {
 
   it("blocks selective acceptance after an unrelated outline revision", async () => {
     const harness = createHarness(outlineResponse());
-    const outcome = await harness.service.generate({
+    const outcome = await generateConfirmed(harness.service, {
       projectId: PROJECT_ID,
       task: "outline_planning",
     });
@@ -607,6 +641,29 @@ describe("Model Hub story planning service", () => {
     ).toBe("原始故事方向");
   });
 });
+
+async function generateConfirmed(
+  service: ModelHubStoryPlanningService,
+  input: GenerateStoryPlanningInput,
+) {
+  let disclosure: StoryPlanningDisclosure;
+  try {
+    disclosure = await service.prepareGeneration(input);
+  } catch {
+    // Let generate project known pre-dispatch failures into its existing
+    // skipped outcome contract without creating a Provider call.
+    return await service.generate({
+      ...input,
+      humanConfirmed: true,
+      disclosureFingerprint: "unavailable",
+    });
+  }
+  return await service.generate({
+    ...input,
+    humanConfirmed: true,
+    disclosureFingerprint: disclosure.fingerprint,
+  });
+}
 
 function createHarness(
   responseText: string,
@@ -666,7 +723,11 @@ function createHarness(
   });
   const modelHub = {
     listCapabilityEvidence,
+    findConnection: vi.fn(() =>
+      Promise.resolve({ id: "connection-planning", displayName: "我的规划服务" }),
+    ),
   } as unknown as ModelHubStore;
+  const inspectText = vi.fn(() => Promise.resolve(inspection()));
   const service = new ModelHubStoryPlanningService({
     modelHub,
     modelGateway: { available: true, generate: vi.fn() },
@@ -680,7 +741,7 @@ function createHarness(
     outlines: repository,
     outlineService,
     candidates,
-    inspectText: vi.fn(() => Promise.resolve(inspection())),
+    inspectText,
     executeText,
     projectContextPrivacy: standardProjectPrivacyAuthority(),
   });
@@ -690,6 +751,7 @@ function createHarness(
     outlineService,
     candidates,
     executeText,
+    inspectText,
     listCapabilityEvidence,
   };
 }

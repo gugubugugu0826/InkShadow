@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { HybridSearchHit, HybridSearchResponse, SearchHealth } from "@inkshadow/search-core";
+import {
+  type HybridSearchHit,
+  type HybridSearchResponse,
+  type SearchHealth,
+} from "@inkshadow/search-core";
 import type { Project } from "@inkshadow/domain";
 import { parseUuidV7 } from "@inkshadow/domain";
 import {
@@ -19,7 +23,8 @@ import {
 import { Link, useParams } from "react-router-dom";
 
 import type { ProjectEmbeddingDiagnostics } from "../infrastructure/project-search-vector-service";
-import { normalizeUiError } from "../infrastructure/ui-error";
+import { defaultProjectSearchRetrievalScope } from "../infrastructure/project-search-store";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
 export function ProjectSearchPage() {
@@ -38,7 +43,7 @@ export function ProjectSearchPage() {
   );
   const [pageState, setPageState] = useState<"loading" | "ready" | "fatal_error">("loading");
   const [error, setError] = useState<unknown>(parsedProjectId.ok ? null : parsedProjectId.error);
-  const [busy, setBusy] = useState<"rebuild" | "vector" | "disable_vector" | "search" | null>(null);
+  const [busy, setBusy] = useState<"rebuild" | "disable_vector" | "search" | null>(null);
 
   const rebuild = useCallback(async () => {
     if (projectId === null) {
@@ -89,7 +94,12 @@ export function ProjectSearchPage() {
     setError(null);
     setResponse(null);
     setResponseQuery(null);
-    const result = await runtime.search.search(projectId, submittedQuery, 30);
+    const result = await runtime.search.searchFtsOnly(
+      projectId,
+      submittedQuery,
+      defaultProjectSearchRetrievalScope(projectId),
+      30,
+    );
     if (requestId !== searchRequestRef.current) {
       return;
     }
@@ -107,37 +117,6 @@ export function ProjectSearchPage() {
   async function rebuildAndRepeat(): Promise<void> {
     const rebuilt = await rebuild();
     if (rebuilt && query.trim().length > 0) {
-      await runSearch();
-    }
-  }
-
-  async function rebuildVectors(): Promise<void> {
-    if (projectId === null || embedding.confirmationId === null) {
-      return;
-    }
-    let confirmationId: string | null = null;
-    if (embedding.destination === "remote") {
-      const endpoint = embedding.endpointUrl ?? embedding.endpointOrigin ?? "未识别端点";
-      const confirmed = window.confirm(
-        `这会把当前项目的稳定正文与大纲发送到远程嵌入端点：\n${endpoint}\n\n重建完成后，只要此向量配置保持就绪，今后的每次搜索词也会发送到同一端点。你可以随时使用“停用并清除向量”停止后续发送。确认继续？`,
-      );
-      if (!confirmed) {
-        return;
-      }
-      confirmationId = embedding.confirmationId;
-    }
-
-    setBusy("vector");
-    setError(null);
-    const result = await runtime.search.rebuildVectorProject(projectId, confirmationId);
-    setBusy(null);
-    setEmbedding(runtime.search.embeddingDiagnostics());
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    setHealth(result.value);
-    if (query.trim().length > 0) {
       await runSearch();
     }
   }
@@ -166,7 +145,7 @@ export function ProjectSearchPage() {
     setResponse(null);
   }
 
-  const normalizedError = error === null ? null : normalizeUiError(error);
+  const normalizedError = error === null ? null : projectOrdinaryUiError(error);
 
   return (
     <div className="desktop-page search-page">
@@ -193,16 +172,10 @@ export function ProjectSearchPage() {
           </Button>
           <Button
             variant="secondary"
-            loading={busy === "vector"}
-            disabled={
-              busy !== null ||
-              projectId === null ||
-              embedding.confirmationId === null ||
-              runtime.mode !== "tauri"
-            }
-            onClick={() => void rebuildVectors()}
+            disabled
+            title="远程或本机模型向量重建尚未开放；当前搜索固定使用本地关键词索引。"
           >
-            明确重建向量
+            向量重建尚未开放
           </Button>
           <Button
             variant="secondary"
@@ -224,7 +197,6 @@ export function ProjectSearchPage() {
               <ErrorState
                 title={normalizedError.title}
                 description={normalizedError.description}
-                errorCode={normalizedError.code}
                 primaryAction={{ label: "重试", onClick: () => void load() }}
               />
             ),
@@ -245,17 +217,13 @@ export function ProjectSearchPage() {
           </div>
 
           <InlineAlert
-            tone={embedding.destination === "remote" ? "warning" : "info"}
+            tone={embedding.embeddingCount > 0 ? "warning" : "info"}
             title={`向量数据去向：${embeddingDestinationLabel(embedding)}`}
             description={`${embedding.endpointUrl ?? "浏览器开发模式不提供真实嵌入能力。"} ${
               embedding.reason === null
                 ? "持久向量与当前来源版本、内容哈希完全匹配。"
                 : `当前状态：${embeddingReasonLabel(embedding.reason)}。`
-            }${
-              embedding.destination === "remote"
-                ? " 重建会发送稳定正文与大纲；配置就绪期间，每次搜索词也会发送到该端点。可使用“停用并清除向量”停止后续发送，或在模型设置中改用本机 Ollama。"
-                : ""
-            }`}
+            } 当前版本不会从普通搜索页发起向量重建或查询嵌入；搜索固定使用本地关键词索引。已有向量可使用“停用并清除向量”移除。`}
           />
 
           <form
@@ -303,7 +271,7 @@ export function ProjectSearchPage() {
           <InlineAlert
             tone="error"
             title={normalizedError.title}
-            description={`${normalizedError.description}（${normalizedError.code}）`}
+            description={normalizedError.description}
           />
         )}
 
@@ -312,7 +280,7 @@ export function ProjectSearchPage() {
           <InlineAlert
             tone="info"
             title="当前使用关键词与关系检索"
-            description={`没有为本次查询提供兼容向量；结果不会伪装成语义检索。${embedding.queryFailureCode === null ? "" : ` 降级原因：${embedding.queryFailureCode}。`}`}
+            description={`没有为本次查询提供兼容向量；结果不会伪装成语义检索。${embedding.queryFailureCode === null ? "" : " 向量查询未完成，已安全回退到本地关键词与关系检索。"}`}
           />
         )}
 
@@ -403,9 +371,7 @@ function SearchResultCard({
           </div>
         </dl>
         <div className="search-result-footer">
-          <span title={hit.evidence.sourceVersionId}>
-            来源版本 {compactIdentifier(hit.evidence.sourceVersionId)}
-          </span>
+          <span>来源版本：已绑定</span>
           <span>
             命中词：
             {hit.evidence.matchedTerms.length === 0
@@ -476,10 +442,6 @@ function embeddingReasonLabel(reason: NonNullable<ProjectEmbeddingDiagnostics["r
     query_embedding_failed: "查询嵌入失败，已回退",
   };
   return labels[reason];
-}
-
-function compactIdentifier(value: string): string {
-  return value.length <= 16 ? value : `${value.slice(0, 8)}…${value.slice(-6)}`;
 }
 
 function formatScore(value: number): string {

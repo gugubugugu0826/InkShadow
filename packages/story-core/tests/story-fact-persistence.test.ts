@@ -7,9 +7,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   FormalStoryRecord,
   MemoryRecord,
+  LegacyMemoryStoryFactPromotionService,
   SqliteFormalStoryRecordRepository,
   SqliteMemoryRecordCreationUnitOfWork,
+  SqliteMemoryRecordRepository,
   SqliteStoryFactStore,
+  StoryFactApplicationService,
   StoryFact,
   MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES,
   parseUuidV7,
@@ -17,7 +20,7 @@ import {
   type StorySqlPrimitive,
   type StorySqlTransaction,
 } from "../src/index.js";
-import { unwrap, uuid } from "./helpers.js";
+import { ManualClock, SequenceUuidV7Generator, unwrap, uuid } from "./helpers.js";
 import { NodeStorySqliteExecutor } from "./node-sqlite-executor.js";
 
 const baseMigration = [
@@ -619,6 +622,163 @@ describe("unified story fact SQLite store", () => {
     expect(second.link.legacyRevision).toBe(2);
     expect(second.fact.id).not.toBe(first.fact.id);
     expect(unwrap(await facts.listLegacyLinks(first.fact.projectId))).toHaveLength(2);
+  });
+
+  it("explicitly promotes a legacy memory, survives service restart, and exposes duplicate and conflict states", async () => {
+    const executor = createExecutor();
+    const facts = new SqliteStoryFactStore(executor);
+    const memoryCreation = new SqliteMemoryRecordCreationUnitOfWork(executor);
+    const memoryRecords = new SqliteMemoryRecordRepository(executor);
+    const clock = new ManualClock(T1);
+    const ids = new SequenceUuidV7Generator(4_000);
+    const factService = new StoryFactApplicationService({ facts, clock, ids });
+    const memory = unwrap(
+      MemoryRecord.create({
+        id: uuid(3_900),
+        projectId: PROJECT_ID,
+        level: "L4",
+        content: "所有预言都必须付出可见代价。",
+        source: { kind: "user_rule", sourceId: ACTOR_ID, sourceVersionId: null },
+        origin: "user",
+        now: T0,
+      }),
+    );
+    expect(
+      (
+        await memoryCreation.create({
+          record: memory,
+          expectedAutomaticLearningPolicyRevision: null,
+        })
+      ).ok,
+    ).toBe(true);
+    const createPromotion = () =>
+      new LegacyMemoryStoryFactPromotionService({
+        facts,
+        factService,
+        memories: memoryRecords,
+        ids,
+        clock,
+      });
+    const promotion = createPromotion();
+    expect(
+      unwrap(await promotion.preview({ projectId: PROJECT_ID, memoryId: memory.id })),
+    ).toMatchObject({ status: "available", canConfirm: true, linkedLegacyRevision: null });
+    const denied = await promotion.confirm({
+      projectId: PROJECT_ID,
+      memoryId: memory.id,
+      expectedMemoryRevision: 1,
+      actorId: ACTOR_ID,
+      humanConfirmed: false,
+    });
+    expect(denied.ok).toBe(false);
+    if (!denied.ok) expect(denied.error.code).toBe("HUMAN_DECISION_REQUIRED");
+
+    const converted = unwrap(
+      await promotion.confirm({
+        projectId: PROJECT_ID,
+        memoryId: memory.id,
+        expectedMemoryRevision: 1,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+      }),
+    );
+    expect(converted).toMatchObject({
+      status: "converted",
+      memoryRevision: 1,
+      fact: { revision: 2 },
+      link: { legacyKind: "memory_record", legacyRevision: 1, linkMode: "backfill" },
+    });
+    if (converted.fact === null) throw new Error("Converted legacy memory lost its StoryFact.");
+    expect(converted.fact?.toSnapshot()).toMatchObject({
+      factType: "memory",
+      contentText: "所有预言都必须付出可见代价。",
+      source: {
+        kind: "legacy_record",
+        reference: `legacy:story_memory_records:${memory.id}:r1`,
+      },
+      status: "formal",
+      origin: "legacy",
+      userConfirmed: true,
+      locked: true,
+      needsReview: false,
+      revision: 2,
+    });
+    expect(unwrap(await memoryRecords.findById(memory.id))?.toSnapshot()).toEqual(
+      memory.toSnapshot(),
+    );
+    expect(unwrap(await facts.listRevisions(converted.fact.id))).toHaveLength(2);
+
+    const restartedPromotion = createPromotion();
+    expect(
+      unwrap(await restartedPromotion.preview({ projectId: PROJECT_ID, memoryId: memory.id })),
+    ).toMatchObject({ status: "converted", canConfirm: false, linkedLegacyRevision: 1 });
+    expect(
+      unwrap(
+        await restartedPromotion.confirm({
+          projectId: PROJECT_ID,
+          memoryId: memory.id,
+          expectedMemoryRevision: 1,
+          actorId: ACTOR_ID,
+          humanConfirmed: true,
+        }),
+      ).status,
+    ).toBe("duplicate");
+    expect(unwrap(await facts.listByProjectId(memory.projectId))).toHaveLength(1);
+
+    clock.set(T2);
+    const edited = unwrap(
+      memory.edit({
+        content: "所有预言都必须由施术者付出可见代价。",
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: T2,
+      }),
+    );
+    expect((await memoryRecords.save(edited, 1)).ok).toBe(true);
+    expect(
+      unwrap(await restartedPromotion.preview({ projectId: PROJECT_ID, memoryId: memory.id })),
+    ).toMatchObject({
+      status: "conflict",
+      canConfirm: true,
+      requiresConflictConfirmation: true,
+      linkedLegacyRevision: 1,
+    });
+    const blockedConflict = unwrap(
+      await restartedPromotion.confirm({
+        projectId: PROJECT_ID,
+        memoryId: memory.id,
+        expectedMemoryRevision: 2,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+      }),
+    );
+    expect(blockedConflict.status).toBe("conflict");
+    expect(unwrap(await facts.listByProjectId(memory.projectId))).toHaveLength(1);
+
+    const acceptedConflict = unwrap(
+      await restartedPromotion.confirm({
+        projectId: PROJECT_ID,
+        memoryId: memory.id,
+        expectedMemoryRevision: 2,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        acceptConflict: true,
+      }),
+    );
+    expect(acceptedConflict).toMatchObject({
+      status: "converted",
+      link: { legacyRevision: 2 },
+    });
+    expect(acceptedConflict.fact?.toSnapshot()).toMatchObject({
+      contentText: "所有预言都必须由施术者付出可见代价。",
+      status: "formal",
+      revision: 2,
+    });
+    expect(unwrap(await facts.listByProjectId(memory.projectId))).toHaveLength(2);
+    expect(unwrap(await facts.listLegacyLinks(memory.projectId))).toHaveLength(2);
+    expect(unwrap(await memoryRecords.findById(memory.id))?.toSnapshot()).toEqual(
+      edited.toSnapshot(),
+    );
   });
 
   it("atomically fences the current chapter version, relation endpoints, and duplicate submissions", async () => {

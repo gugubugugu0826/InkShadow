@@ -1,5 +1,10 @@
 import { sanitizeFilename } from "./filename.js";
 import { normalizePortablePublication, type PortablePublication } from "./publication-model.js";
+import {
+  PUBLICATION_IMAGE_LIMITS,
+  isValidatedPublicationImage,
+  type PublicationImageAsset,
+} from "./publication-images.js";
 import { isoTimestampSchema, type PortableProjectV1 } from "./schemas.js";
 
 export type PdfExportErrorCode =
@@ -48,6 +53,7 @@ export interface PdfExportOptions {
   readonly rasterize: PdfPageRasterizer;
   readonly signal?: AbortSignal;
   readonly onProgress?: (progress: PdfExportProgress) => void;
+  readonly imageAssets?: readonly PublicationImageAsset[];
 }
 
 export interface PdfAssemblyOptions {
@@ -115,6 +121,7 @@ const PUBLICATION_BLOCK_KINDS = new Set([
   "quote",
   "code",
   "sceneBreak",
+  "image",
 ]);
 
 interface JpegDimensions {
@@ -188,6 +195,7 @@ export async function exportProjectToPdf(
   try {
     const publication = normalizePortablePublication(input, {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.imageAssets === undefined ? {} : { imageAssets: options.imageAssets }),
       onProgress: () => {
         throwIfCancelled(options.signal);
       },
@@ -439,6 +447,8 @@ function assertPublicationWithinPdfLimits(publication: PortablePublication): voi
 
   let blocks = 0;
   let textCharacters = projectTitle.length + (description?.length ?? 0);
+  let imageCount = 0;
+  let imageBytes = 0;
   for (const chapter of chapters) {
     if (!isRecord(chapter)) {
       throw new PdfExportError("PDF_RENDER_FAILED", "A publication chapter is invalid.");
@@ -466,7 +476,9 @@ function assertPublicationWithinPdfLimits(publication: PortablePublication): voi
         throw new PdfExportError("PDF_RENDER_FAILED", "A publication block is invalid.");
       }
       if (kind !== "sceneBreak" && typeof text !== "string") {
-        throw new PdfExportError("PDF_RENDER_FAILED", "A publication text block is invalid.");
+        if (kind !== "image") {
+          throw new PdfExportError("PDF_RENDER_FAILED", "A publication text block is invalid.");
+        }
       }
       if (typeof text === "string") {
         textCharacters += text.length;
@@ -478,6 +490,50 @@ function assertPublicationWithinPdfLimits(publication: PortablePublication): voi
             PDF_EXPORT_LIMITS.maximumTextCharacters,
           )} character limit.`,
         );
+      }
+      if (kind === "image") {
+        const mediaType = block.mediaType;
+        const bytes = block.bytes;
+        const pixelWidth = block.pixelWidth;
+        const pixelHeight = block.pixelHeight;
+        const altText = block.altText;
+        if (
+          (mediaType !== "image/png" && mediaType !== "image/jpeg") ||
+          !(bytes instanceof Uint8Array) ||
+          bytes.byteLength === 0 ||
+          bytes.byteLength > PUBLICATION_IMAGE_LIMITS.maximumImageBytes ||
+          typeof pixelWidth !== "number" ||
+          typeof pixelHeight !== "number" ||
+          !Number.isSafeInteger(pixelWidth) ||
+          !Number.isSafeInteger(pixelHeight) ||
+          pixelWidth <= 0 ||
+          pixelHeight <= 0 ||
+          pixelWidth > PUBLICATION_IMAGE_LIMITS.maximumDimensionPixels ||
+          pixelHeight > PUBLICATION_IMAGE_LIMITS.maximumDimensionPixels ||
+          pixelWidth * pixelHeight > PUBLICATION_IMAGE_LIMITS.maximumPixelCount ||
+          typeof altText !== "string" ||
+          altText.length > PUBLICATION_IMAGE_LIMITS.maximumAltCharacters ||
+          !isValidatedPublicationImage({
+            bytes,
+            mediaType,
+            pixelHeight,
+            pixelWidth,
+          })
+        ) {
+          throw new PdfExportError("PDF_RENDER_FAILED", "A publication image block is invalid.");
+        }
+        imageCount += 1;
+        imageBytes += bytes.byteLength;
+        if (
+          imageCount > PUBLICATION_IMAGE_LIMITS.maximumImages ||
+          imageBytes > PUBLICATION_IMAGE_LIMITS.maximumTotalImageBytes
+        ) {
+          throw new PdfExportError(
+            "PDF_COMPLEXITY_LIMIT_EXCEEDED",
+            "The PDF publication exceeds the fixed image budget.",
+          );
+        }
+        textCharacters += altText.length;
       }
     }
   }

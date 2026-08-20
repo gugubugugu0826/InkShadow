@@ -1,5 +1,10 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+import {
+  authorizeDirectMode,
+  switchFreshInstallToProfessionalMode,
+} from "./support/writing-experience";
+
 const DESKTOP_VIEWPORTS = [
   { width: 1440, height: 900 },
   { width: 1280, height: 720 },
@@ -10,6 +15,12 @@ const DESKTOP_VIEWPORTS = [
 test("keeps the creative home reachable without horizontal overflow at every desktop target", async ({
   page,
 }) => {
+  await page.setViewportSize(DESKTOP_VIEWPORTS[0]);
+  await page.goto("/#/start");
+  await page.evaluate(() => window.localStorage.clear());
+  await page.reload();
+  await switchFreshInstallToProfessionalMode(page);
+
   for (const viewport of DESKTOP_VIEWPORTS) {
     await page.setViewportSize(viewport);
     await page.goto("/#/start");
@@ -26,6 +37,10 @@ test("keeps the creative home reachable without horizontal overflow at every des
 
 test("uses the 680px single-column settings layout at 1024 by 640", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 640 });
+  await page.goto("/#/start");
+  await page.evaluate(() => window.localStorage.clear());
+  await page.reload();
+  await authorizeDirectMode(page);
   await page.goto("/#/settings");
   await expect(page.getByRole("heading", { level: 1, name: "全局设置" })).toBeVisible();
 
@@ -57,6 +72,7 @@ test("keeps the 800 by 600 writing path visible and pointer targets usable", asy
   await page.goto("/#/start");
   await page.evaluate(() => window.localStorage.clear());
   await page.reload();
+  await authorizeDirectMode(page);
 
   await expectMinimumTarget(page.getByRole("link", { name: "恢复备份" }));
   await expectMinimumTarget(page.getByRole("link", { name: "浏览作品库" }));
@@ -109,6 +125,7 @@ test("keeps logical sizing stable on a Retina-like DPR2 display", async ({ brows
     await page.goto("http://127.0.0.1:1420/#/start");
     await page.evaluate(() => window.localStorage.clear());
     await page.reload();
+    await authorizeDirectMode(page);
     await expect(
       page.getByRole("heading", { level: 1, name: "把你的第一个想法，写成一个故事" }),
     ).toBeVisible();

@@ -14,7 +14,7 @@ export const MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_VERSION =
   "inkshadow.translation-probe.zh-en.v2";
 export const MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS = 64;
 
-const MESSAGES = Object.freeze([
+export const MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_MESSAGES = Object.freeze([
   Object.freeze({
     role: "system" as const,
     content: "Translate the fixed Chinese sentence to English. Return the translation only.",
@@ -35,14 +35,17 @@ export async function runModelHubTranslationCapabilityProbe(input: {
   readonly generationId: string;
   readonly config: NativeModelEndpointConfig;
   readonly model: string;
+  /** Revalidates the exact user-disclosed target immediately before dispatch. */
+  readonly assertBeforeProviderDispatch?: () => Promise<void>;
 }): Promise<ModelHubTranslationCapabilityProbeResult> {
   const policy = modelProviderTextCapabilityProbePolicy(input.providerKind);
+  await input.assertBeforeProviderDispatch?.();
   const generated = await input.gateway.generate({
     dispatchScope: { kind: "non_project", reason: "connection_probe" },
     generationId: input.generationId,
-    config: input.config,
+    config: Object.freeze({ ...input.config, retryLimit: 0 }),
     model: input.model,
-    messages: MESSAGES,
+    messages: MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_MESSAGES,
     maxOutputTokens: MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
     ...(policy.reasoningMode === null ? {} : { reasoningMode: policy.reasoningMode }),
   });

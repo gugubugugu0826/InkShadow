@@ -35,7 +35,7 @@ import {
   type AcceptedChapterPipelineInput,
 } from "../infrastructure/accepted-chapter-pipeline";
 import { retryInput as persistedAcceptedChapterPipelineInput } from "../infrastructure/accepted-chapter-pipeline-worker";
-import { normalizeUiError } from "../infrastructure/ui-error";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import type { TaskCenterSnapshot } from "../infrastructure/task-center-store";
 import { useRuntime } from "../runtime-context";
 
@@ -141,7 +141,7 @@ export function TaskCenterPage() {
     () => snapshot.tasks.filter((task) => !isTerminalTask(task.status)),
     [snapshot.tasks],
   );
-  const normalizedError = error === null ? null : normalizeUiError(error);
+  const normalizedError = error === null ? null : projectOrdinaryUiError(error);
 
   async function cancelTask(task: TaskSnapshot): Promise<void> {
     setBusyId(task.id);
@@ -298,7 +298,7 @@ export function TaskCenterPage() {
         <InlineAlert
           tone="error"
           title={normalizedError.title}
-          description={`${normalizedError.description}（${normalizedError.code}）`}
+          description={normalizedError.description}
           action={{ label: "重试", onClick: () => void load(true) }}
           onDismiss={() => setError(null)}
         />
@@ -520,7 +520,6 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
                 )}
 
                 <div className="task-card__footer">
-                  <code title={task.id}>{shortId(task.id)}</code>
                   {!isTerminalTask(task.status) && (
                     <Button
                       size="sm"
@@ -547,6 +546,15 @@ interface NotificationListProps {
   readonly busyId: string | null;
   readonly onMarkRead: (notification: NotificationSnapshot) => void;
 }
+
+const ORDINARY_NOTIFICATION_METADATA_KEYS = new Set([
+  "taskType",
+  "attempt",
+  "reasonCode",
+  "pipelineStatus",
+  "detectedCount",
+  "needsConfirmationCount",
+]);
 
 function NotificationList({ busyId, notifications, onMarkRead }: NotificationListProps) {
   if (notifications.length === 0) {
@@ -593,7 +601,6 @@ function NotificationList({ busyId, notifications, onMarkRead }: NotificationLis
               )}
               <NotificationAction notification={notification} />
               <div className="notification-card__footer">
-                <code title={notification.id}>{shortId(notification.id)}</code>
                 {canMarkRead(notification) && (
                   <Button
                     size="sm"
@@ -630,8 +637,10 @@ function NotificationMetadata({
 }: {
   readonly metadata: NotificationSnapshot["metadata"];
 }) {
-  const entries = Object.entries(metadata).filter(([, value]) =>
-    ["string", "number", "boolean"].includes(typeof value),
+  const entries = Object.entries(metadata).filter(
+    ([key, value]) =>
+      ORDINARY_NOTIFICATION_METADATA_KEYS.has(key) &&
+      ["string", "number", "boolean"].includes(typeof value),
   );
   if (entries.length === 0) {
     return null;
@@ -687,9 +696,10 @@ function taskTypeLabel(type: string): string {
     "backup.create": "创建备份",
     "index.rebuild": "重建搜索索引",
     "story.accepted-version.process": "整理已接受的正文",
+    "consistency.repair-candidate": "生成一致性修复建议",
     "sync.project": "同步项目",
   };
-  return labels[type] ?? type;
+  return labels[type] ?? "其他后台任务";
 }
 
 function progressStepLabel(step: string): string {
@@ -711,7 +721,7 @@ function progressStepLabel(step: string): string {
     "story-state.updated": "更新故事设定",
     "causal.projected": "更新故事关联",
   };
-  return labels[step] ?? step;
+  return labels[step] ?? "正在处理后台步骤";
 }
 
 function taskFailureLabel(code: string): string {
@@ -727,6 +737,8 @@ function taskFailureLabel(code: string): string {
     MODEL_GENERATION_CANCELLED: "模型生成已取消",
     MODEL_OUTPUT_EMPTY: "模型没有返回可用内容",
     ACCEPTED_VERSION_PIPELINE_PARTIAL: "正文已安全保留，但部分故事资料尚未更新",
+    CONSISTENCY_REPAIR_FAILED: "一致性修复建议未能完成",
+    CONSISTENCY_REPAIR_RESULT_AMBIGUOUS: "模型结果不确定，未自动重发",
   };
   return labels[code] ?? "后台任务未能完成";
 }
@@ -735,9 +747,9 @@ function taskFailureDescription(failure: NonNullable<TaskSnapshot["failure"]>): 
   const cause =
     failure.causeCode === null || failure.causeCode === failure.code
       ? ""
-      : `；底层原因：${taskFailureCauseLabel(failure.causeCode)}（${failure.causeCode}）`;
+      : `；底层原因：${taskFailureCauseLabel(failure.causeCode)}`;
   const recovery = failure.retryable ? "，请求已安全保留，可返回章节重新检查后重试。" : "";
-  return `${taskFailureLabel(failure.code)}（${failure.code}）${cause}${recovery}`;
+  return `${taskFailureLabel(failure.code)}${cause}${recovery}`;
 }
 
 function taskFailureCauseLabel(causeCode: string): string {
@@ -761,7 +773,7 @@ function taskFailureCauseLabel(causeCode: string): string {
     UPSTREAM_AUTH_FAILED: "模型凭据无效",
     DISK_FULL: "本地磁盘空间不足",
   };
-  return labels[causeCode] ?? "具体失败原因见诊断码";
+  return labels[causeCode] ?? "后台步骤报告了未识别的失败原因";
 }
 
 function taskEditorRoute(task: TaskSnapshot): string | null {
@@ -832,16 +844,12 @@ function metadataLabel(key: string): string {
   const labels: Record<string, string> = {
     taskType: "任务",
     attempt: "尝试次数",
-    entityLabel: "对象",
     reasonCode: "原因码",
-    projectId: "作品编号",
-    chapterId: "章节编号",
-    versionId: "版本编号",
     pipelineStatus: "整理状态",
     detectedCount: "识别变化",
     needsConfirmationCount: "需要确认",
   };
-  return labels[key] ?? key;
+  return labels[key] ?? "详情";
 }
 
 function metadataValue(key: string, value: unknown): string {
@@ -874,8 +882,4 @@ function formatTimestamp(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(timestamp));
-}
-
-function shortId(value: string): string {
-  return `#${value.slice(-8)}`;
 }

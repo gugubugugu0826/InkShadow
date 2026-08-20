@@ -13,6 +13,7 @@ import {
   Card,
   CardContent,
   CardDescription,
+  CardFooter,
   CardHeader,
   CardTitle,
   EmptyState,
@@ -35,6 +36,8 @@ import {
   type SyntheticEvent,
 } from "react";
 
+import { handleCandidateDecisionNavigation } from "../components/candidate-decision-navigation";
+
 import {
   DEFAULT_GOVERNED_CREATIVE_EXTENSION_FLAGS,
   type GovernedCreativeExtensionDraft,
@@ -43,6 +46,7 @@ import {
   type GovernedCreativeExtensionsRuntime,
   type GovernedExtensionHistory,
 } from "../infrastructure/governed-creative-extensions-runtime";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 
 import "./governed-creative-extensions-page.css";
 
@@ -540,15 +544,15 @@ export function GovernedCreativeExtensionsPage({
                       </div>
                       <div>
                         <dt>版本</dt>
-                        <dd title={source.sourceVersionId}>{shortId(source.sourceVersionId)}</dd>
+                        <dd>当前已接受版本</dd>
                       </div>
                       <div>
                         <dt>项目</dt>
-                        <dd title={source.projectId}>{shortId(source.projectId)}</dd>
+                        <dd>当前作品</dd>
                       </div>
                       <div>
                         <dt>SHA-256</dt>
-                        <dd title={source.sourceChecksum}>{shortHash(source.sourceChecksum)}</dd>
+                        <dd>来源已校验</dd>
                       </div>
                     </dl>
                   </CardContent>
@@ -819,17 +823,23 @@ export function GovernedCreativeExtensionsPage({
         {selectedRequest === null ? (
           <EmptyState title="选择一条历史记录" description="可查看费用、用量与候选内容。" />
         ) : (
-          <Card>
+          <Card
+            className={
+              selectedCandidate?.status === "ready" ? "candidate-decision-surface" : undefined
+            }
+            aria-label="受治理创意成果候选决策"
+          >
             <CardHeader>
               <CardTitle>
                 {selectedRequest.kind === "translation" ? "翻译候选" : "短剧脚本候选"}
               </CardTitle>
-              <CardDescription>
-                请求 {shortId(selectedRequest.id)} · 来源版本{" "}
-                {shortId(selectedRequest.sourceVersionId)}
-              </CardDescription>
+              <CardDescription>已绑定当前来源版本；只会在明确采纳后写入独立成果。</CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent
+              tabIndex={selectedCandidate?.status === "ready" ? 0 : undefined}
+              aria-label="受治理创意成果候选内容"
+              onKeyDown={handleCandidateDecisionNavigation}
+            >
               <div className="governed-extensions-review__metrics">
                 <Metric label="状态" value={requestStatusLabel(selectedRequest.status)} />
                 <Metric label="输入 token" value={tokenValue(selectedRequest, "input")} />
@@ -864,7 +874,7 @@ export function GovernedCreativeExtensionsPage({
                   description={
                     selectedRequest.errorCode === null
                       ? "此请求尚未完成。"
-                      : `终止代码：${selectedRequest.errorCode}`
+                      : projectOrdinaryUiError({ code: selectedRequest.errorCode }).description
                   }
                 />
               ) : preview.kind === "translation" ? (
@@ -872,9 +882,13 @@ export function GovernedCreativeExtensionsPage({
               ) : (
                 <ShortDramaPreview candidate={preview} />
               )}
-              <div className="governed-extensions-review__actions">
+            </CardContent>
+            {(isRetryableStatus(selectedRequest.status) ||
+              selectedCandidate?.status === "ready") && (
+              <CardFooter className="candidate-decision-actions">
                 {isRetryableStatus(selectedRequest.status) && (
                   <Button
+                    size="lg"
                     variant="secondary"
                     loading={busy === "retry"}
                     disabled={!featureEnabled || capabilities.environment.readOnly}
@@ -886,6 +900,7 @@ export function GovernedCreativeExtensionsPage({
                 {selectedCandidate?.status === "ready" && (
                   <>
                     <Button
+                      size="lg"
                       variant="secondary"
                       loading={busy === "decision"}
                       disabled={!featureEnabled || capabilities.environment.readOnly}
@@ -894,6 +909,7 @@ export function GovernedCreativeExtensionsPage({
                       拒绝候选
                     </Button>
                     <Button
+                      size="lg"
                       variant="ai-primary"
                       loading={busy === "decision"}
                       disabled={!featureEnabled || capabilities.environment.readOnly}
@@ -903,8 +919,8 @@ export function GovernedCreativeExtensionsPage({
                     </Button>
                   </>
                 )}
-              </div>
-            </CardContent>
+              </CardFooter>
+            )}
           </Card>
         )}
       </section>
@@ -972,12 +988,6 @@ function PreflightPanel({
                 <dd>
                   {preflight.snapshot.pricing.priceVersion} ·{" "}
                   {formatTimestamp(preflight.snapshot.pricing.priceUpdatedAt)}
-                </dd>
-              </div>
-              <div>
-                <dt>请求指纹</dt>
-                <dd className="governed-extensions-monospace" title={preflight.requestFingerprint}>
-                  {shortHash(preflight.requestFingerprint)}
                 </dd>
               </div>
               <div>
@@ -1258,17 +1268,6 @@ function formatTimestamp(value: string): string {
   return Number.isNaN(time) ? value : new Date(time).toLocaleString();
 }
 
-function shortHash(value: string): string {
-  return value.length <= 16 ? value : `${value.slice(0, 8)}…${value.slice(-8)}`;
-}
-
-function shortId(value: string): string {
-  return value.length <= 18 ? value : `${value.slice(0, 8)}…${value.slice(-6)}`;
-}
-
 function publicError(error: unknown): string {
-  if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message;
-  }
-  return "操作失败，请查看预检与历史状态后重试。";
+  return projectOrdinaryUiError(error).description;
 }

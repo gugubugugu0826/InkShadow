@@ -33,4 +33,16 @@ describe("candidate feedback controls", () => {
       customFeedback: "不要用总结句收尾",
     });
   });
+
+  it("does not expose an uncontrolled failure message in the ordinary candidate UI", async () => {
+    const user = userEvent.setup();
+    const rawMessage = "SQLITE_CONSTRAINT candidate-feedback-row-019f-secret";
+    render(<CandidateFeedbackControls onSubmit={() => Promise.reject(new Error(rawMessage))} />);
+
+    await user.click(screen.getByRole("button", { name: "让对话更自然" }));
+    await user.click(screen.getByRole("button", { name: "记住这次意见" }));
+
+    expect(await screen.findByRole("alert")).toBeVisible();
+    expect(document.body).not.toHaveTextContent(rawMessage);
+  });
 });

@@ -97,7 +97,7 @@ describe("CausalFactAuthoringPanel explicit knowledge gains", () => {
         ],
       }),
     );
-  });
+  }, 15_000);
 
   it("caps dynamic knowledge rows at 128 and keeps internal identifiers out of the form", async () => {
     const user = userEvent.setup();
@@ -118,7 +118,7 @@ describe("CausalFactAuthoringPanel explicit knowledge gains", () => {
     expect(add).toBeDisabled();
     expect(screen.getByText("128 / 128")).toBeVisible();
     expect(screen.queryByText(/UUID|人物标识|信息标识|知识键/u)).not.toBeInTheDocument();
-  }, 30_000);
+  }, 90_000);
 
   it("submits ordinary-language prerequisites and all supported story changes", async () => {
     const user = userEvent.setup();

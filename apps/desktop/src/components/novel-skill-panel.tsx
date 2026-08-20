@@ -15,6 +15,7 @@ import type {
   NovelSkillProjectState,
   NovelSkillRuntimePort,
 } from "../infrastructure/novel-skill-runtime";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 
 export interface NovelSkillPanelProps {
   readonly projectId: string;
@@ -41,9 +42,7 @@ export function NovelSkillPanel({ projectId, runtime, readonly = false }: NovelS
       }
     } catch (cause: unknown) {
       if (operationRevision.current === revision) {
-        setError(
-          cause instanceof Error ? cause.message : "无法读取写作方法设置。正文和已有版本均未改变。",
-        );
+        setError(projectOrdinaryUiError(cause).description);
       }
     } finally {
       if (operationRevision.current === revision) setLoading(false);
@@ -76,9 +75,7 @@ export function NovelSkillPanel({ projectId, runtime, readonly = false }: NovelS
       }
     } catch (cause: unknown) {
       if (operationRevision.current === revision) {
-        setError(
-          cause instanceof Error ? cause.message : "写作方法设置没有保存。正文和已有版本均未改变。",
-        );
+        setError(projectOrdinaryUiError(cause).description);
       }
     } finally {
       if (operationRevision.current === revision) setBusySkillId(null);

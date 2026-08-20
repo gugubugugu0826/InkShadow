@@ -33,12 +33,14 @@ import {
   type CausalWhatIfSimulationService,
   type CausalWhatIfSimulationValue,
 } from "../infrastructure/causal-what-if-simulation-service";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 
 interface CausalStoryLinksPageProps {
   readonly projectId: string;
   readonly graph: CausalEventGraphStore;
   readonly projector: CausalStoryFactProjector;
   readonly whatIf: Pick<CausalWhatIfSimulationService, "simulate" | "list">;
+  readonly whatIfEnabled: boolean;
   readonly authoring: Pick<
     CausalFactAuthoringService,
     "createEvent" | "createRelation" | "listConfirmedCharacters"
@@ -71,7 +73,9 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
     try {
       const [loaded, history, characters] = await Promise.all([
         props.graph.loadProjectBranch(props.projectId, "main"),
-        props.whatIf.list(props.projectId).catch(() => Object.freeze([])),
+        props.whatIfEnabled
+          ? props.whatIf.list(props.projectId).catch(() => Object.freeze([]))
+          : Promise.resolve(Object.freeze([])),
         props.authoring.listConfirmedCharacters(props.projectId).catch(() => Object.freeze([])),
       ]);
       setGraph(loaded);
@@ -88,7 +92,7 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
       setError(cause);
       setPageState("fatal_error");
     }
-  }, [props.authoring, props.graph, props.projectId, props.whatIf]);
+  }, [props.authoring, props.graph, props.projectId, props.whatIf, props.whatIfEnabled]);
 
   useEffect(() => {
     void Promise.resolve().then(load);
@@ -112,6 +116,15 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
     () => new Map(confirmedCharacters.map(({ id, name }) => [id, name] as const)),
     [confirmedCharacters],
   );
+  const eventLabels = useMemo(
+    () =>
+      new Map(
+        (graph?.events ?? []).map(
+          (event) => [event.id, `${event.narrativeTime.label} · ${event.eventText}`] as const,
+        ),
+      ),
+    [graph],
+  );
 
   async function rebuild(): Promise<void> {
     if (busy) {
@@ -134,7 +147,7 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
   }
 
   async function traceImpact(): Promise<void> {
-    if (selectedEvent === null || busy) {
+    if (!props.whatIfEnabled || selectedEvent === null || busy) {
       return;
     }
     setBusy(true);
@@ -158,7 +171,12 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
 
   async function simulateAlternateDirection(): Promise<void> {
     const normalizedHypothesis = hypothesis.trim();
-    if (selectedEvent === null || normalizedHypothesis.length === 0 || busy) {
+    if (
+      !props.whatIfEnabled ||
+      selectedEvent === null ||
+      normalizedHypothesis.length === 0 ||
+      busy
+    ) {
       return;
     }
     setBusy(true);
@@ -178,8 +196,7 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
     }
   }
 
-  const errorMessage =
-    error instanceof Error ? error.message : error === null ? null : "故事关联暂时无法读取。";
+  const normalizedError = error === null ? null : projectOrdinaryUiError(error);
 
   return (
     <div className="desktop-page causal-story-links-page">
@@ -214,11 +231,11 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
         />
       )}
 
-      {errorMessage !== null && pageState !== "fatal_error" && (
+      {normalizedError !== null && pageState !== "fatal_error" && (
         <InlineAlert
           tone="error"
-          title="故事关联操作未完成"
-          description={`${errorMessage} 已保存的正文和设定没有改变，可以重试重新整理。`}
+          title={normalizedError.title}
+          description={`${normalizedError.description} 已保存的正文和设定没有改变，可以重试重新整理。`}
           onDismiss={() => setError(null)}
         />
       )}
@@ -230,9 +247,8 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
         fallbacks={{
           fatal_error: (
             <ErrorState
-              title="无法读取故事关联"
-              description={errorMessage ?? "请重试；正文和故事设定不会受影响。"}
-              errorCode="CAUSAL_GRAPH_UNAVAILABLE"
+              title={normalizedError?.title ?? "无法读取故事关联"}
+              description={normalizedError?.description ?? "请重试；正文和故事设定不会受影响。"}
               primaryAction={{ label: "重试", onClick: () => void load() }}
             />
           ),
@@ -322,7 +338,10 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
                         <dt>参与人物</dt>
                         <dd>
                           {selectedEvent.participantCharacterIds
-                            .map((id) => characterNames.get(id) ?? id)
+                            .map(
+                              (id, index) =>
+                                characterNames.get(id) ?? `未命名人物 ${String(index + 1)}`,
+                            )
                             .join("、") || "未标注"}
                         </dd>
                       </div>
@@ -330,7 +349,10 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
                         <dt>谁已经知道</dt>
                         <dd>
                           {selectedEvent.informedCharacterIds
-                            .map((id) => characterNames.get(id) ?? id)
+                            .map(
+                              (id, index) =>
+                                characterNames.get(id) ?? `未命名人物 ${String(index + 1)}`,
+                            )
                             .join("、") || "未标注"}
                         </dd>
                       </div>
@@ -344,7 +366,7 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
                               {selectedEvent.prerequisites.map((prerequisite) => (
                                 <li key={prerequisite.id}>
                                   {prerequisiteKindLabel(prerequisite.kind)} ·{" "}
-                                  {prerequisite.referenceLabel ?? prerequisite.referenceId}：
+                                  {prerequisite.referenceLabel ?? "已确认前置项"}：
                                   {prerequisite.description}
                                 </li>
                               ))}
@@ -361,8 +383,8 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
                             <ul className="privacy-list">
                               {selectedEvent.characterStateChanges.map((change) => (
                                 <li key={change.id}>
-                                  {characterNames.get(change.characterId) ?? change.characterId} ·{" "}
-                                  {change.attributeLabel ?? change.attributeKey}：
+                                  {characterNames.get(change.characterId) ?? "未命名人物"} ·{" "}
+                                  {change.attributeLabel ?? "状态"}：
                                   {formatCausalState(change.beforeValue)} →{" "}
                                   {formatCausalState(change.afterValue)}
                                 </li>
@@ -380,11 +402,9 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
                             <ul className="privacy-list">
                               {selectedEvent.relationshipChanges.map((change) => (
                                 <li key={change.id}>
-                                  {characterNames.get(change.fromCharacterId) ??
-                                    change.fromCharacterId}{" "}
-                                  与{" "}
-                                  {characterNames.get(change.toCharacterId) ?? change.toCharacterId}{" "}
-                                  · {change.relationshipLabel ?? change.relationshipKey}：
+                                  {characterNames.get(change.fromCharacterId) ?? "未命名人物"} 与{" "}
+                                  {characterNames.get(change.toCharacterId) ?? "未命名人物"} ·{" "}
+                                  {change.relationshipLabel ?? "人物关系"}：
                                   {formatCausalState(change.beforeValue)} →{" "}
                                   {formatCausalState(change.afterValue)}
                                 </li>
@@ -402,14 +422,14 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
                             <ul className="privacy-list">
                               {selectedEvent.itemChanges.map((change) => (
                                 <li key={change.id}>
-                                  {change.itemLabel ?? change.itemId} ·{" "}
+                                  {change.itemLabel ?? "未命名物品"} ·{" "}
                                   {itemChangeKindLabel(change.kind)}
                                   {change.fromCharacterId === null
                                     ? ""
-                                    : ` · 原持有人：${characterNames.get(change.fromCharacterId) ?? change.fromCharacterId}`}
+                                    : ` · 原持有人：${characterNames.get(change.fromCharacterId) ?? "未命名人物"}`}
                                   {change.toCharacterId === null
                                     ? ""
-                                    : ` · 新持有人：${characterNames.get(change.toCharacterId) ?? change.toCharacterId}`}
+                                    : ` · 新持有人：${characterNames.get(change.toCharacterId) ?? "未命名人物"}`}
                                 </li>
                               ))}
                             </ul>
@@ -425,7 +445,7 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
                             <ul className="privacy-list">
                               {selectedEvent.foreshadowProgress.map((progress) => (
                                 <li key={progress.id}>
-                                  {progress.foreshadowLabel ?? progress.foreshadowId} ·{" "}
+                                  {progress.foreshadowLabel ?? "未命名伏笔"} ·{" "}
                                   {foreshadowChangeKindLabel(progress.kind)}：{progress.description}
                                 </li>
                               ))}
@@ -442,20 +462,23 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
                       <ul className="privacy-list">
                         {relatedRelations.map((relation) => (
                           <li key={relation.id}>
-                            {relation.fromEventId} → {relationKindLabel(relation.kind)} →{" "}
-                            {relation.toEventId}
+                            {eventLabels.get(relation.fromEventId) ?? "已确认事件"} →{" "}
+                            {relationKindLabel(relation.kind)} →{" "}
+                            {eventLabels.get(relation.toEventId) ?? "已确认事件"}
                           </li>
                         ))}
                       </ul>
                     )}
-                    <Button loading={busy} onClick={() => void traceImpact()}>
-                      试演改变它会影响哪里
-                    </Button>
+                    {props.whatIfEnabled && (
+                      <Button loading={busy} onClick={() => void traceImpact()}>
+                        试演改变它会影响哪里
+                      </Button>
+                    )}
                   </CardContent>
                 </Card>
               )}
 
-              {impact !== null && (
+              {props.whatIfEnabled && impact !== null && (
                 <Card>
                   <CardHeader>
                     <CardTitle>受影响的后续剧情</CardTitle>
@@ -468,10 +491,16 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
                       <p>当前没有找到会被这个改变波及的已确认后续事件。</p>
                     ) : (
                       <ol className="privacy-list">
-                        {impact.impactedEvents.map((event) => (
+                        {impact.impactedEvents.map((event, index) => (
                           <li key={event.eventId}>
-                            {event.eventId} · 相隔 {String(event.depth)} 层 · 路径{" "}
-                            {event.pathEventIds.join(" → ")}
+                            {eventLabels.get(event.eventId) ?? `后续事件 ${String(index + 1)}`} ·
+                            相隔 {String(event.depth)} 层 · 路径{" "}
+                            {event.pathEventIds
+                              .map(
+                                (eventId, pathIndex) =>
+                                  eventLabels.get(eventId) ?? `路径节点 ${String(pathIndex + 1)}`,
+                              )
+                              .join(" → ")}
                           </li>
                         ))}
                       </ol>
@@ -516,7 +545,7 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
                 </Card>
               )}
 
-              {simulation !== null && (
+              {props.whatIfEnabled && simulation !== null && (
                 <Card>
                   <CardHeader>
                     <CardTitle>沙盒剧情方案</CardTitle>
@@ -526,10 +555,12 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
                     <p>{simulation.alternateDirection}</p>
                     {simulation.effects.length > 0 && (
                       <ul className="privacy-list">
-                        {simulation.effects.map((effect) => (
+                        {simulation.effects.map((effect, index) => (
                           <li key={effect.eventId}>
-                            <strong>{effect.eventId}</strong>：{effect.summary}（把握度{" "}
-                            {Math.round(effect.confidence * 100)}%）
+                            <strong>
+                              {eventLabels.get(effect.eventId) ?? `受影响事件 ${String(index + 1)}`}
+                            </strong>
+                            ：{effect.summary}（把握度 {Math.round(effect.confidence * 100)}%）
                           </li>
                         ))}
                       </ul>
@@ -541,7 +572,7 @@ export function CausalStoryLinksPage(props: CausalStoryLinksPageProps) {
                 </Card>
               )}
 
-              {simulationHistory.length > 0 && (
+              {props.whatIfEnabled && simulationHistory.length > 0 && (
                 <Card>
                   <CardHeader>
                     <CardTitle>此前的沙盒试演</CardTitle>

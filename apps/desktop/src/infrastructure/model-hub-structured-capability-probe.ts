@@ -14,7 +14,7 @@ import type {
 export const MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS = 512;
 export const MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_VERSION = "inkshadow.structured-output-probe.v1";
 
-const FIRST_PROBE_MESSAGES = Object.freeze([
+export const MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_MESSAGES = Object.freeze([
   Object.freeze({
     role: "system" as const,
     content:
@@ -27,28 +27,22 @@ const FIRST_PROBE_MESSAGES = Object.freeze([
   }),
 ]) satisfies readonly NativeModelMessage[];
 
-const REPAIR_PROBE_MESSAGES = Object.freeze([
-  ...FIRST_PROBE_MESSAGES,
-  Object.freeze({
-    role: "user" as const,
-    content:
-      "The previous response was empty, truncated, or invalid. Repair it now and return only the exact JSON object from the schema.",
-  }),
-]) satisfies readonly NativeModelMessage[];
-
 export interface RunModelHubStructuredCapabilityProbeInput {
   readonly gateway: Pick<NativeModelGatewayClient, "generate">;
   readonly providerKind: ModelProviderKind;
-  readonly generationIds: readonly [string, string];
+  /** One user-triggered probe maps to exactly one Provider request. */
+  readonly generationId: string;
   readonly config: NativeModelEndpointConfig;
   readonly model: string;
+  /** Revalidates the exact user-disclosed target immediately before dispatch. */
+  readonly assertBeforeProviderDispatch?: () => Promise<void>;
 }
 
 export interface ModelHubStructuredCapabilityProbeResult {
   readonly verificationMethod: "openai_compatible_json_object";
   readonly evidenceVersion: typeof MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_VERSION;
-  readonly attempts: 1 | 2;
-  readonly repaired: boolean;
+  readonly attempts: 1;
+  readonly repaired: false;
   readonly streamed: boolean;
   readonly usage: NativeModelGenerationUsage | null;
 }
@@ -69,44 +63,35 @@ export async function runModelHubStructuredCapabilityProbe(
     );
   }
   const reasoningMode = modelProviderVisibleProsePolicy(input.providerKind).reasoningMode;
-  for (const attempt of [1, 2] as const) {
-    const generationId = attempt === 1 ? input.generationIds[0] : input.generationIds[1];
-    try {
-      const generated = await input.gateway.generate({
-        dispatchScope: { kind: "non_project", reason: "connection_probe" },
-        generationId,
-        config: input.config,
-        model: input.model,
-        messages: attempt === 1 ? FIRST_PROBE_MESSAGES : REPAIR_PROBE_MESSAGES,
-        maxOutputTokens: MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
-        responseFormat: "json_object",
-        ...(reasoningMode === null ? {} : { reasoningMode }),
-      });
-      assertStructuredProbeResponse(generated.text);
-      return Object.freeze({
-        verificationMethod: "openai_compatible_json_object",
-        evidenceVersion: MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_VERSION,
-        attempts: attempt,
-        repaired: attempt === 2,
-        streamed: generated.streamed === true,
-        usage: generated.usage,
-      });
-    } catch (cause: unknown) {
-      if (attempt === 1 && isRepairableStructuredProbeFailure(cause)) {
-        continue;
-      }
-      throw new ModelCenterError(
-        "MODEL_STRUCTURED_OUTPUT_PROBE_FAILED",
-        "模型没有通过 JSON 结构化输出验证；没有写入能力证据或修改 AI 分工。",
-        isRetryable(cause),
-        cause instanceof ModelCenterError ? cause.diagnostics : null,
-      );
-    }
+  await input.assertBeforeProviderDispatch?.();
+  try {
+    const generated = await input.gateway.generate({
+      dispatchScope: { kind: "non_project", reason: "connection_probe" },
+      generationId: input.generationId,
+      config: Object.freeze({ ...input.config, retryLimit: 0 }),
+      model: input.model,
+      messages: MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_MESSAGES,
+      maxOutputTokens: MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
+      responseFormat: "json_object",
+      ...(reasoningMode === null ? {} : { reasoningMode }),
+    });
+    assertStructuredProbeResponse(generated.text);
+    return Object.freeze({
+      verificationMethod: "openai_compatible_json_object",
+      evidenceVersion: MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_VERSION,
+      attempts: 1,
+      repaired: false,
+      streamed: generated.streamed === true,
+      usage: generated.usage,
+    });
+  } catch (cause: unknown) {
+    throw new ModelCenterError(
+      "MODEL_STRUCTURED_OUTPUT_PROBE_FAILED",
+      "模型没有通过 JSON 结构化输出验证；没有写入能力证据或修改 AI 分工。再次验证需要用户重新触发。",
+      isRetryable(cause),
+      cause instanceof ModelCenterError ? cause.diagnostics : null,
+    );
   }
-  throw new ModelCenterError(
-    "MODEL_STRUCTURED_OUTPUT_PROBE_FAILED",
-    "模型没有通过 JSON 结构化输出验证。",
-  );
 }
 
 export function assertStructuredProbeResponse(response: string): void {
@@ -140,21 +125,6 @@ function probeResponseError(code: string): ModelCenterError {
     "结构化输出探针响应为空、不是纯 JSON 或不符合固定 schema。",
     true,
   );
-}
-
-function isRepairableStructuredProbeFailure(cause: unknown): boolean {
-  const code = errorCode(cause);
-  return (
-    code === "MODEL_OUTPUT_TRUNCATED" ||
-    code === "MODEL_OUTPUT_EMPTY" ||
-    code === "MODEL_STRUCTURED_OUTPUT_EMPTY" ||
-    code === "MODEL_STRUCTURED_OUTPUT_INVALID_JSON" ||
-    code === "MODEL_STRUCTURED_OUTPUT_SCHEMA_MISMATCH"
-  );
-}
-
-function errorCode(cause: unknown): string | null {
-  return isRecord(cause) && typeof cause.code === "string" ? cause.code : null;
 }
 
 function isRetryable(cause: unknown): boolean {

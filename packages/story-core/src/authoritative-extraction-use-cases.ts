@@ -292,6 +292,13 @@ export class AuthoritativeExtractionCoordinator {
         continue;
       }
 
+      // A runCycle call is one user-triggered Provider action. It may finish
+      // the resulting local materialization, but it must never silently claim
+      // a second Provider job. A later scan is a separate, visible action.
+      if (processedCount >= 1) {
+        break;
+      }
+
       const claimed = await this.claimProviderJob(projectId.value);
       if (!claimed.ok) {
         return claimed;

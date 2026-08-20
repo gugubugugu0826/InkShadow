@@ -28,14 +28,13 @@ import {
   type ImportRewriteCandidateResult,
 } from "../infrastructure/import-rewrite-service";
 import {
-  analyzeImportedChapter,
   IMPORT_WORK_ANALYSIS_FACT_TYPES,
-  IMPORT_WORK_ANALYSIS_STAGES,
   type ImportWorkAnalysisFactType,
   type ImportWorkAnalysisStage,
 } from "../infrastructure/import-work-analysis-service";
 import {
   normalizeUiError,
+  projectOrdinaryUiError,
   UiActionError,
   type NormalizedUiError,
 } from "../infrastructure/ui-error";
@@ -335,22 +334,23 @@ export function ImportJourneyPage() {
         : null,
     [trialView],
   );
+  // This legacy journey cannot yet prove an exact whole-operation route, call
+  // ceiling, cost and privacy fingerprint before dispatch. Keep every new
+  // Provider entry fail-closed while preserving local import and old Candidate decisions.
+  const providerGenerationAvailable = isLegacyImportProviderGenerationAvailable();
   const canGenerateTrial =
+    providerGenerationAvailable &&
     analysis.status === "ready" &&
     analysis.value.representativeChapter !== null &&
     targetInstructions.length > 0 &&
     operation === "idle";
   const canStartBatch =
+    providerGenerationAvailable &&
     analysis.status === "ready" &&
     analysis.value.chapters.length > 0 &&
     draft.rulesSavedAt !== null &&
     activeRules.length > 0 &&
     operation === "idle";
-  const canAnalyzeWork =
-    analysis.status === "ready" &&
-    analysis.value.chapters.some(({ content }) => content.trim().length > 0) &&
-    operation === "idle";
-
   useEffect(() => {
     if (draft.importedWork === null || draft.projectSeed === null) return;
     let active = true;
@@ -550,7 +550,6 @@ export function ImportJourneyPage() {
     input: Readonly<{
       previousDraft: ImportJourneyDraft;
       previousPointer: TrialPointer;
-      failureCode: string;
     }>,
   ): Promise<void> {
     const latest = await runtime.repositories.aiCandidates.findById(
@@ -574,132 +573,7 @@ export function ImportJourneyPage() {
     );
     const restoredView = await loadTrialView(runtime, restoredPointer);
     setTrialView(restoredView);
-    setNotice(
-      `旧试改建议在替换时发生变化（${input.failureCode}）；已恢复其最新可定位状态，新建议正在安全清理。`,
-    );
-  }
-
-  async function runWorkAnalysis(includeSkipped = false): Promise<void> {
-    if (!canAnalyzeWork || draft.importedWork === null) {
-      return;
-    }
-    const now = new Date().toISOString();
-    const prepared = reconcileWorkAnalysisDraft(
-      draft.workAnalysis,
-      draft.importedWork.projectId,
-      analysis.value.chapters,
-      now,
-    );
-    let workingJobs = prepared.jobs.map((job) =>
-      includeSkipped && job.status === "skipped" ? { ...job, status: "pending" as const } : job,
-    );
-
-    function commitJobs(completedAt: string | null = null): void {
-      const nextAnalysis: WorkAnalysisDraft = {
-        ...prepared,
-        jobs: Object.freeze([...workingJobs]),
-        updatedAt: new Date().toISOString(),
-        completedAt,
-      };
-      setDraft((current) => ({
-        ...current,
-        workAnalysis: nextAnalysis,
-        updatedAt: nextAnalysis.updatedAt,
-      }));
-    }
-
-    commitJobs();
-    setOperation("analysis");
-    setOperationError(null);
-    setNotice(null);
-    let stoppedByError = false;
-    for (const job of workingJobs) {
-      if (job.status !== "pending" && job.status !== "error") {
-        continue;
-      }
-      const chapter = analysis.value.chapters.find(({ id }) => id === job.chapterId);
-      if (chapter?.currentVersionId !== job.sourceVersionId) {
-        const error = normalizeUiError({
-          code: "IMPORT_ANALYSIS_SOURCE_CHANGED",
-          message:
-            "章节在分析开始前发生了变化。请重新点击继续分析，墨影会基于最新正式版本创建新的待确认结果。",
-        });
-        workingJobs = updateWorkAnalysisJob(workingJobs, job, {
-          status: "error",
-          errorCode: error.code,
-        });
-        commitJobs();
-        setOperationError(error);
-        stoppedByError = true;
-        break;
-      }
-      workingJobs = updateWorkAnalysisJob(workingJobs, job, {
-        status: "running",
-        errorCode: null,
-      });
-      commitJobs();
-      try {
-        const result = await analyzeImportedChapter(runtime, {
-          projectId: draft.importedWork.projectId,
-          chapter,
-          chapterIndex: analysis.value.chapters.findIndex(({ id }) => id === chapter.id),
-          stage: job.stage,
-          onBeforeDispatch: (request) =>
-            rememberPendingRequest(
-              request.stage === "character" ? "analysis_character" : "analysis_story",
-              job.chapterId,
-              request,
-            ),
-        });
-        const firstSelection = result.selections[0] ?? null;
-        const selectionChanged = result.selections.some(
-          ({ providerId, modelId }) =>
-            firstSelection !== null &&
-            (providerId !== firstSelection.providerId || modelId !== firstSelection.modelId),
-        );
-        workingJobs = updateWorkAnalysisJob(workingJobs, job, {
-          status: "ready",
-          factCount: result.factIds.length,
-          criticalFactCount: result.criticalFactCount,
-          factTypeCounts: result.factTypeCounts,
-          requestCount: result.requestCount,
-          providerId:
-            firstSelection === null
-              ? null
-              : selectionChanged
-                ? "多个已验证连接"
-                : firstSelection.providerId,
-          modelId:
-            firstSelection === null
-              ? null
-              : selectionChanged
-                ? "多个已验证模型"
-                : firstSelection.modelId,
-          errorCode: null,
-        });
-        commitJobs();
-      } catch (cause: unknown) {
-        const error = normalizeUiError(cause);
-        workingJobs = updateWorkAnalysisJob(workingJobs, job, {
-          status: "error",
-          errorCode: error.code,
-        });
-        commitJobs();
-        setOperationError(error);
-        stoppedByError = true;
-        break;
-      } finally {
-        clearPendingRequest();
-      }
-    }
-    const completed = workingJobs.every(({ status }) => status === "ready" || status === "skipped");
-    commitJobs(completed ? new Date().toISOString() : null);
-    setOperation("idle");
-    if (completed) {
-      setNotice("作品分析已结束。AI 提取内容均以带原文证据的待确认事实保存；原文没有改变。");
-    } else if (!stoppedByError) {
-      setNotice("当前可执行的作品分析项已经处理完成。原文没有改变。");
-    }
+    setNotice("旧试改建议在替换时发生了变化；已恢复其最新可定位状态，新建议正在安全清理。");
   }
 
   function skipAnalysisJob(job: WorkAnalysisJobDraft): void {
@@ -796,7 +670,6 @@ export function ImportJourneyPage() {
           await restoreTrialReplacementAfterFailure({
             previousDraft,
             previousPointer,
-            failureCode: rejected.error.code,
           });
           const cleanedUp = await runtime.useCases.rejectCandidate.execute({
             candidateId: generated.candidate.id,
@@ -1616,7 +1489,7 @@ export function ImportJourneyPage() {
           title={operationError.title}
           description={
             <span>
-              {operationError.description}（{operationError.code}）{" "}
+              {operationError.description}{" "}
               {(operationError.code.includes("MODEL") ||
                 operationError.code === "IMPORT_ANALYSIS_ROUTE_NOT_CONFIGURED" ||
                 operationError.code === "IMPORT_ANALYSIS_STRUCTURED_OUTPUT_UNVERIFIED") && (
@@ -1630,14 +1503,14 @@ export function ImportJourneyPage() {
         <InlineAlert
           tone="error"
           title={pendingCleanupError.title}
-          description={`${pendingCleanupError.description}（${pendingCleanupError.code}）`}
+          description={pendingCleanupError.description}
         />
       )}
       {pendingRequest !== null && operation === "idle" && (
         <InlineAlert
           tone="warning"
           title="上次模型调用可能在中断前已发送"
-          description={`请求 ${pendingRequest.requestId} 曾发送到 ${pendingRequest.providerId} / ${pendingRequest.modelId}。墨影不会自动重复调用或重复计费；请先查看供应商记录，再手动重试。`}
+          description="上次请求可能已经到达已配置的供应商。墨影不会自动重复调用或重复计费；请先查看供应商记录，再决定是否继续处理已有建议。"
         />
       )}
 
@@ -1691,40 +1564,27 @@ export function ImportJourneyPage() {
                 </details>
               )}
               <InlineAlert
-                tone="info"
-                title="分析结果不会直接变成正式设定"
-                description="墨影会通过已配置的 AI 分工分两遍读取每个章节，并严格核对章节版本、原文位置和结构格式。模型推测不会被接受；人物身份、核心关系、世界规则、重要事件等都会进入待确认。"
+                tone="warning"
+                title="批量 AI 作品分析已安全关闭"
+                description="当前入口无法在发送前一次性准确展示整批任务的模型、分块调用上限、总费用与隐私去向，因此不会发送任何正文。章节结构分析和本地导入仍可正常使用；你可以跳过这一步继续。"
               />
               <div className="settings-actions">
-                <Button
-                  disabled={
-                    !canAnalyzeWork ||
-                    (draft.workAnalysis !== null && workAnalysisSummary.remainingJobs === 0)
-                  }
-                  onClick={() => void runWorkAnalysis()}
-                >
-                  {operation === "analysis"
-                    ? `正在分析 ${String(workAnalysisSummary.finishedJobs)}/${String(workAnalysisSummary.totalJobs)}…`
-                    : draft.workAnalysis === null
-                      ? "开始分析作品"
-                      : workAnalysisSummary.remainingJobs > 0
-                        ? "继续或重试分析"
-                        : "作品分析已结束"}
-                </Button>
+                <Button disabled>批量 AI 分析暂不可用</Button>
                 {workAnalysisSummary.remainingJobs > 0 && operation === "idle" && (
                   <Button variant="secondary" onClick={skipRemainingAnalysis}>
                     跳过剩余分析
                   </Button>
                 )}
                 {workAnalysisSummary.skippedJobs > 0 && operation === "idle" && (
-                  <Button variant="secondary" onClick={() => void runWorkAnalysis(true)}>
+                  <Button variant="secondary" disabled>
                     重新分析已跳过项
                   </Button>
                 )}
               </div>
               {draft.workAnalysis === null ? (
                 <p className="maintenance-note">
-                  分析是可选步骤。未配置模型时可以跳过并直接描述目标；原文已经安全保存在本地。
+                  批量 AI
+                  分析是可选步骤，目前不会调用模型。可以直接描述目标；原文已经安全保存在本地。
                 </p>
               ) : (
                 <section aria-label="作品分析结果">
@@ -1742,16 +1602,6 @@ export function ImportJourneyPage() {
                       </li>
                     ))}
                   </ul>
-                  {workAnalysisSummary.models.length > 0 && (
-                    <details>
-                      <summary>查看本次使用的模型</summary>
-                      <ul>
-                        {workAnalysisSummary.models.map((model) => (
-                          <li key={model}>{model}</li>
-                        ))}
-                      </ul>
-                    </details>
-                  )}
                   {workAnalysisSummary.problemJobs.length > 0 && (
                     <div>
                       <h3>需要处理的分析项</h3>
@@ -1760,7 +1610,9 @@ export function ImportJourneyPage() {
                           <li key={workAnalysisJobKey(job)}>
                             <span>
                               {job.chapterTitle} · {analysisStageLabel(job.stage)}：
-                              {job.errorCode ?? "等待继续"}
+                              {job.errorCode === null
+                                ? "等待继续"
+                                : ordinaryErrorDescription(job.errorCode)}
                             </span>{" "}
                             <Button
                               size="sm"
@@ -1871,7 +1723,7 @@ export function ImportJourneyPage() {
         <CardHeader>
           <CardTitle headingLevel={2}>第 4 步：先试改代表段落</CardTitle>
           <CardDescription>
-            真实调用已连接模型，并把结果保存为独立建议版本；未连接模型时不会生成占位内容。
+            已有建议仍可查看和决定；当前旧入口不会再发送新的模型请求。
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -1898,7 +1750,7 @@ export function ImportJourneyPage() {
             <InlineAlert
               tone="error"
               title={trialView.error.title}
-              description={`${trialView.error.description}（${trialView.error.code}）`}
+              description={trialView.error.description}
             />
           )}
           {trialView.status === "ready" && (
@@ -1910,10 +1762,7 @@ export function ImportJourneyPage() {
                 </Badge>
               </div>
               {draft.trial !== null && (
-                <p className="maintenance-note">
-                  本次调用：{draft.trial.providerId} / {draft.trial.modelId}；请求{" "}
-                  {draft.trial.requestId}
-                </p>
+                <p className="maintenance-note">这是此前保存的独立建议；内部连接标识已隐藏。</p>
               )}
               <h4>原文</h4>
               <pre style={{ whiteSpace: "pre-wrap" }}>{trialView.originalExcerpt}</pre>
@@ -2066,9 +1915,9 @@ export function ImportJourneyPage() {
           {draft.rulesSavedAt !== null && (
             <>
               <InlineAlert
-                tone="info"
-                title="批量前安全确认"
-                description="开始后按章节逐个调用模型和创建建议版本；不会自动接受，单章失败也不会改动其他章节原文。"
+                tone="warning"
+                title="新的逐章改写已安全关闭"
+                description="当前旧入口不能在发送前准确锁定并展示整批模型、总调用上限、总费用和隐私去向，因此不会发送。已有建议仍可逐章接受、拒绝或恢复原文。"
               />
               <div className="settings-actions">
                 <Button disabled={!canStartBatch} onClick={() => void generateBatch()}>
@@ -2096,12 +1945,9 @@ export function ImportJourneyPage() {
               {draft.batchItems.map((item) => (
                 <li key={item.chapterId}>
                   <strong>{item.chapterTitle}</strong>：{batchStatusLabel(item)}
-                  {item.providerId !== null && item.modelId !== null && (
-                    <span>
-                      ；{item.providerId} / {item.modelId}
-                    </span>
+                  {item.errorCode !== null && (
+                    <span>；{ordinaryErrorDescription(item.errorCode)}</span>
                   )}
-                  {item.errorCode !== null && <span>（{item.errorCode}）</span>}
                   {item.candidateId !== null && (
                     <div className="settings-actions">
                       {draft.importedWork !== null && (
@@ -2148,7 +1994,7 @@ export function ImportJourneyPage() {
                     <Button
                       size="sm"
                       variant="secondary"
-                      disabled={operation !== "idle"}
+                      disabled={!providerGenerationAvailable || operation !== "idle"}
                       onClick={() => void decideBatchItem(item, "regenerate")}
                     >
                       重新生成
@@ -2210,7 +2056,11 @@ function trialBlockedReason(
     return "导入作品没有含正文的章节，无法选择代表段落。";
   if (buildTargetInstructions(draft).length === 0) return "请先写一句处理目标或选择一个常用方向。";
   if (operation !== "idle") return "当前操作完成后即可继续。";
-  return "可以生成试改。";
+  return "当前旧入口无法提供完整的调用与费用确认，因此不会发送新的模型请求。";
+}
+
+function isLegacyImportProviderGenerationAvailable(): boolean {
+  return false;
 }
 
 function trialPointerFromResult(result: ImportRewriteCandidateResult): TrialPointer {
@@ -2404,6 +2254,10 @@ function shouldStopBatchAfterFailure(cause: unknown): boolean {
 function errorCodeFromUnknown(cause: unknown): string | null {
   if (typeof cause !== "object" || cause === null || !("code" in cause)) return null;
   return typeof cause.code === "string" ? cause.code : null;
+}
+
+function ordinaryErrorDescription(code: string): string {
+  return projectOrdinaryUiError({ code }).description;
 }
 
 function requireBatchCandidateRevision(item: BatchItemDraft): number {
@@ -2614,73 +2468,6 @@ function parseBatchItems(value: unknown): readonly BatchItemDraft[] {
       ];
     })
     .slice(0, 10_000);
-}
-
-function reconcileWorkAnalysisDraft(
-  existing: WorkAnalysisDraft | null,
-  projectId: UuidV7,
-  chapters: readonly Chapter[],
-  now: string,
-): WorkAnalysisDraft {
-  const reusable = new Map(
-    existing?.projectId === projectId
-      ? existing.jobs.map((job) => [workAnalysisJobKey(job), job] as const)
-      : [],
-  );
-  const jobs = chapters
-    .filter(({ status, content }) => status === "active" && content.trim().length > 0)
-    .flatMap((chapter) =>
-      IMPORT_WORK_ANALYSIS_STAGES.map((stage) => {
-        const key = `${chapter.id}:${chapter.currentVersionId}:${stage}`;
-        const previous = reusable.get(key);
-        return (
-          previous ??
-          Object.freeze({
-            chapterId: chapter.id,
-            chapterTitle: chapter.title,
-            sourceVersionId: chapter.currentVersionId,
-            stage,
-            status: "pending" as const,
-            factCount: 0,
-            criticalFactCount: 0,
-            factTypeCounts: Object.freeze({}),
-            requestCount: 0,
-            providerId: null,
-            modelId: null,
-            errorCode: null,
-          })
-        );
-      }),
-    );
-  const completed = jobs.every(({ status }) => status === "ready" || status === "skipped");
-  return Object.freeze({
-    version: 1,
-    projectId,
-    jobs: Object.freeze(jobs),
-    startedAt: existing?.projectId === projectId ? existing.startedAt : now,
-    updatedAt: now,
-    completedAt: completed ? (existing?.completedAt ?? now) : null,
-  });
-}
-
-function updateWorkAnalysisJob(
-  jobs: readonly WorkAnalysisJobDraft[],
-  target: WorkAnalysisJobDraft,
-  patch: Partial<
-    Pick<
-      WorkAnalysisJobDraft,
-      | "status"
-      | "factCount"
-      | "criticalFactCount"
-      | "factTypeCounts"
-      | "requestCount"
-      | "providerId"
-      | "modelId"
-      | "errorCode"
-    >
-  >,
-): WorkAnalysisJobDraft[] {
-  return jobs.map((job) => (sameWorkAnalysisJob(job, target) ? { ...job, ...patch } : job));
 }
 
 function sameWorkAnalysisJob(left: WorkAnalysisJobDraft, right: WorkAnalysisJobDraft): boolean {

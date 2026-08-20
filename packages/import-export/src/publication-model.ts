@@ -1,4 +1,11 @@
 import { portableProjectV1Schema, type PortableProjectV1 } from "./schemas.js";
+import {
+  PublicationImageResolver,
+  parseMarkdownImageReferences,
+  sanitizePublicationImageAltText,
+  type PublicationImageAsset,
+  type PublicationImageMediaType,
+} from "./publication-images.js";
 
 export const PUBLICATION_FORMAT = "inkshadow-portable-publication";
 export const PUBLICATION_VERSION = 1;
@@ -48,6 +55,8 @@ export type PublicationWarningCode =
   | "PUBLICATION_RAW_HTML_PRESERVED_AS_TEXT"
   | "PUBLICATION_EXTERNAL_REFERENCE_FLATTENED"
   | "PUBLICATION_IMAGE_REFERENCE_REMOVED"
+  | "PUBLICATION_IMAGE_INVALID"
+  | "PUBLICATION_IMAGE_LIMIT_REACHED"
   | "PUBLICATION_UNSAFE_CONTROL_REMOVED"
   | "PUBLICATION_UNCLOSED_CODE_FENCE"
   | "PUBLICATION_LIST_DEPTH_CLAMPED"
@@ -103,6 +112,16 @@ export interface PublicationSceneBreakBlock {
   readonly sourceLine: number;
 }
 
+export interface PublicationImageBlock {
+  readonly kind: "image";
+  readonly altText: string;
+  readonly mediaType: PublicationImageMediaType;
+  readonly bytes: Uint8Array;
+  readonly pixelWidth: number;
+  readonly pixelHeight: number;
+  readonly sourceLine: number;
+}
+
 export type PublicationBlock =
   | PublicationHeadingBlock
   | PublicationParagraphBlock
@@ -110,6 +129,7 @@ export type PublicationBlock =
   | PublicationOrderedListItemBlock
   | PublicationQuoteBlock
   | PublicationCodeBlock
+  | PublicationImageBlock
   | PublicationSceneBreakBlock;
 
 export interface PublicationChapter {
@@ -150,6 +170,7 @@ export interface PublicationNormalizationProgress {
 export interface PublicationNormalizationOptions {
   readonly signal?: AbortSignal;
   readonly onProgress?: (progress: PublicationNormalizationProgress) => void;
+  readonly imageAssets?: readonly PublicationImageAsset[];
 }
 
 interface WarningContext {
@@ -779,6 +800,7 @@ function normalizeChapter(
   warnings: WarningCollector,
   budget: PublicationBudget,
   options: PublicationNormalizationOptions,
+  imageResolver: PublicationImageResolver,
   progress: {
     readonly completedChapters: number;
     readonly totalChapters: number;
@@ -821,6 +843,8 @@ function normalizeChapter(
     budget.addBlock(blocks.length, context);
     if ("text" in block) {
       budget.addText(block.text, context);
+    } else if (block.kind === "image") {
+      budget.addText(block.altText, context);
     }
   };
 
@@ -873,6 +897,18 @@ function normalizeChapter(
     codeLines = [];
   };
 
+  const addInlineParagraph = (value: string, sourceLine: number): void => {
+    const candidate = value.trim();
+    if (candidate.length === 0) {
+      return;
+    }
+    addBlock({
+      kind: "paragraph",
+      text: normalizeInlineText(candidate, warnings, warningContext(context, sourceLine)),
+      sourceLine,
+    });
+  };
+
   for (let index = 0; index < lines.length; index += 1) {
     if (index % 128 === 0) {
       reportProgress(options, {
@@ -906,6 +942,49 @@ function normalizeChapter(
 
     if (line.trim().length === 0) {
       flushParagraph();
+      continue;
+    }
+
+    const parsedImages = parseMarkdownImageReferences(line);
+    if (parsedImages.length > 0) {
+      flushParagraph();
+      let segmentStart = 0;
+      for (const parsedImage of parsedImages) {
+        addInlineParagraph(line.slice(segmentStart, parsedImage.start), sourceLine);
+        const imageContext = warningContext(context, sourceLine);
+        const altText = normalizeInlineText(
+          sanitizePublicationImageAltText(parsedImage.altText),
+          warnings,
+          imageContext,
+        );
+        const resolution = imageResolver.resolve(parsedImage.source);
+        if (resolution.ok) {
+          addBlock({
+            kind: "image",
+            altText,
+            mediaType: resolution.image.mediaType,
+            bytes: resolution.image.bytes,
+            pixelWidth: resolution.image.pixelWidth,
+            pixelHeight: resolution.image.pixelHeight,
+            sourceLine,
+          });
+        } else {
+          const warningCode: PublicationWarningCode =
+            resolution.reason === "image_limit_reached"
+              ? "PUBLICATION_IMAGE_LIMIT_REACHED"
+              : resolution.reason === "image_invalid"
+                ? "PUBLICATION_IMAGE_INVALID"
+                : "PUBLICATION_IMAGE_REFERENCE_REMOVED";
+          warnings.add(warningCode, resolution.message, imageContext);
+          addBlock({
+            kind: "paragraph",
+            text: `[image omitted: ${altText || "unlabelled"}]`,
+            sourceLine,
+          });
+        }
+        segmentStart = parsedImage.end;
+      }
+      addInlineParagraph(line.slice(segmentStart), sourceLine);
       continue;
     }
 
@@ -998,7 +1077,9 @@ function normalizeChapter(
 /**
  * Revalidates and normalizes a portable project into the only semantic block
  * shapes shared by document exporters. The function performs no I/O, never
- * resolves HTML, links, or images, and never truncates body text.
+ * resolves HTML, links, network URLs, or filesystem paths, and never truncates
+ * body text. Images are accepted only from validated inline bytes or explicit
+ * caller-owned in-memory assets.
  */
 export function normalizePortablePublication(
   input: PortableProjectV1,
@@ -1027,6 +1108,16 @@ export function normalizePortablePublication(
 
   const budget = new PublicationBudget();
   const warnings = new WarningCollector();
+  let imageResolver: PublicationImageResolver;
+  try {
+    imageResolver = new PublicationImageResolver(options.imageAssets);
+  } catch (error: unknown) {
+    throw new PublicationNormalizationError(
+      "PUBLICATION_LIMIT_EXCEEDED",
+      error instanceof Error ? error.message : "The publication image asset limit was exceeded.",
+      { limit: 256 },
+    );
+  }
   const projectContext = warningContext(undefined);
   budget.addSourceCharacters(
     parsed.data.project.id.length +
@@ -1066,7 +1157,7 @@ export function normalizePortablePublication(
   });
   for (const { chapter } of sortedChapters) {
     chapters.push(
-      normalizeChapter(chapter, warnings, budget, options, {
+      normalizeChapter(chapter, warnings, budget, options, imageResolver, {
         completedChapters: chapters.length,
         totalChapters: sortedChapters.length,
       }),

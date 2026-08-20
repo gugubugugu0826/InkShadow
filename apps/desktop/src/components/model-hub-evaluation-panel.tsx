@@ -16,12 +16,14 @@ import {
   type ModelHubTextTask,
 } from "../infrastructure/model-hub-execution-service";
 import type {
+  ModelHubLocalEvaluationDisclosure,
   ModelHubLocalEvaluationReceipt,
   ModelHubLocalEvaluationService,
 } from "../infrastructure/model-hub-local-evaluation-service";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 
 export interface ModelHubEvaluationPanelProps {
-  readonly service: Pick<ModelHubLocalEvaluationService, "evaluate">;
+  readonly service: Pick<ModelHubLocalEvaluationService, "prepare" | "evaluate">;
   readonly disabled?: boolean;
 }
 
@@ -32,15 +34,37 @@ export function ModelHubEvaluationPanel({
   const [task, setTask] = useState<ModelHubTextTask>("continuation");
   const [busy, setBusy] = useState(false);
   const [receipt, setReceipt] = useState<ModelHubLocalEvaluationReceipt | null>(null);
+  const [disclosure, setDisclosure] = useState<ModelHubLocalEvaluationDisclosure | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function run(): Promise<void> {
+  async function prepare(): Promise<void> {
     setBusy(true);
     setError(null);
     try {
-      setReceipt(await service.evaluate(task));
+      setDisclosure(await service.prepare(task));
     } catch (cause: unknown) {
-      setError(cause instanceof Error ? cause.message : "基础评测未完成，请稍后重试。");
+      setError(projectOrdinaryUiError(cause).description);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function run(): Promise<void> {
+    if (disclosure === null) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setReceipt(
+        await service.evaluate({
+          task,
+          disclosureFingerprint: disclosure.fingerprint,
+          humanConfirmed: true,
+        }),
+      );
+      setDisclosure(null);
+    } catch (cause: unknown) {
+      setDisclosure(null);
+      setError(projectOrdinaryUiError(cause).description);
     } finally {
       setBusy(false);
     }
@@ -73,13 +97,34 @@ export function ModelHubEvaluationPanel({
                 value,
                 label: taskLabel(value),
               }))}
-              onChange={(event) => setTask(event.currentTarget.value as ModelHubTextTask)}
+              onChange={(event) => {
+                setTask(event.currentTarget.value as ModelHubTextTask);
+                setDisclosure(null);
+              }}
             />
           )}
         </FormField>
-        <Button loading={busy} disabled={disabled} onClick={() => void run()}>
-          运行两项基础测试
-        </Button>
+        {disclosure === null ? (
+          <Button loading={busy} disabled={disabled} onClick={() => void prepare()}>
+            查看两项测试的发送信息
+          </Button>
+        ) : (
+          <section aria-label="两项基础测试发送确认">
+            <InlineAlert
+              tone="warning"
+              title="确认后会固定调用 2 次"
+              description={`${disclosure.connectionDisplayName} · ${disclosure.modelId}；${disclosure.privacy} 发送内容：${disclosure.sends.join("；")}。自动重试 0 次；${formatDisclosedCost(disclosure)}。`}
+            />
+            <div className="button-row">
+              <Button loading={busy} disabled={disabled} onClick={() => void run()}>
+                确认并运行 2 次固定测试
+              </Button>
+              <Button variant="ghost" disabled={busy} onClick={() => setDisclosure(null)}>
+                取消，不调用
+              </Button>
+            </div>
+          </section>
+        )}
         {error !== null && (
           <InlineAlert
             tone="error"
@@ -102,6 +147,13 @@ export function ModelHubEvaluationPanel({
 
 function formatScore(basisPoints: number): string {
   return `${(basisPoints / 100).toFixed(0)}%`;
+}
+
+function formatDisclosedCost(disclosure: ModelHubLocalEvaluationDisclosure): string {
+  if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
+    return "当前无法核定费用上限，供应商仍可能收费";
+  }
+  return `两次合计费用上限 ${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
 }
 
 function taskLabel(task: ModelHubTextTask): string {

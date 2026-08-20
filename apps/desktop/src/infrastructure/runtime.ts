@@ -82,10 +82,11 @@ import type { AccessSqliteStore } from "@inkshadow/data/access-sqlite-store";
 import type { ProjectKeySqliteStore } from "@inkshadow/data/project-key-sqlite-store";
 import type { SyncSqliteStore } from "@inkshadow/data/sync-sqlite-store";
 import { CryptoContentHasher, CryptoUuidV7Generator, SystemClock } from "@inkshadow/platform";
-import type { HybridSearchHit } from "@inkshadow/search-core";
+import type { HybridSearchHit, SearchRetrievalScopeTrace } from "@inkshadow/search-core";
 import {
   FormalRecordApplicationService,
   IdeationApplicationService,
+  LegacyMemoryStoryFactPromotionService,
   MaterialApplicationService,
   MemoryApplicationService,
   OutlineApplicationService,
@@ -132,6 +133,7 @@ import {
   type MemoryRecordCreationUnitOfWork,
   type MemoryRecordListReader,
   type MemoryRecordRepository,
+  type LegacyStoryFactCompatibilityStore,
   type OutlineDraftReader,
   type OutlineRepository,
   type Result as StoryResult,
@@ -219,6 +221,11 @@ import {
   type GenerationGovernanceStore,
 } from "./generation-governance-store";
 import {
+  BrowserDevelopmentWritingExperienceStore,
+  TauriWritingExperienceStore,
+  type WritingExperienceStore,
+} from "./writing-experience-store";
+import {
   DEFAULT_NOVEL_SKILL_TOKEN_BUDGET,
   createNovelSkillRuntime,
   type NovelSkillRuntimePort,
@@ -281,7 +288,11 @@ import {
   type ModelHubTextTaskInspection,
 } from "./model-hub-execution-service";
 import {
-  getModelProviderPreset,
+  SINGLE_ATTEMPT_DISABLED_REASONING_TEXT_POLICY,
+  SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
+} from "./model-execution-policy";
+import { assertModelHubInspectionAuthority } from "./provider-action-disclosure";
+import {
   isLoopbackModelBaseUrl,
   modelProviderKindForOfficialEndpoint,
   modelProviderVisibleProsePolicy,
@@ -297,6 +308,13 @@ import {
   StoryContextRuntimeError,
   type StoryContextCompilationReceipt,
 } from "./story-context-runtime";
+import {
+  planBoundedLocalRecoveryQueries,
+  planBoundedLocalRetrievalQueries,
+  type BoundedLocalQueryRecoveryType,
+  type BoundedLocalRecoveryQueryPlan,
+  type BoundedLocalRetrievalQueryPlan,
+} from "./bounded-local-retrieval-query-plan";
 import {
   MultiAgentReviewRuntime,
   SqliteMultiAgentReviewContextReader,
@@ -373,10 +391,7 @@ import {
 } from "./chapter-summary-service";
 import { ModelHubChapterSummaryModel } from "./model-hub-chapter-summary-model";
 import { ModelHubImageGenerationService } from "./model-hub-image-generation-service";
-import {
-  mergeRemoteRerankWithLocalFallback,
-  ModelHubRerankService,
-} from "./model-hub-rerank-service";
+import { ModelHubRerankService } from "./model-hub-rerank-service";
 import { ModelHubStoryPlanningService } from "./model-hub-story-planning-service";
 import {
   BrowserDevelopmentStoryPlanningCandidateStore,
@@ -408,6 +423,8 @@ import {
   TauriTaskCenterStore,
   type TaskCenterStore,
 } from "./task-center-store";
+import type { ConsistencyInvestigationRuntimePort } from "./consistency-investigation-port";
+import { createLazyTauriConsistencyInvestigationRuntime } from "./consistency-investigation-loader";
 import { createStudioReviewRuntime, type StudioReviewRuntime } from "./studio-review-runtime";
 import {
   createStudioTeamTemplateRuntime,
@@ -587,8 +604,9 @@ export interface NativeModelGatewayClient extends NativeEmbeddingGatewayClient {
 }
 
 export interface RuntimeStory {
-  readonly facts: StoryFactStore;
+  readonly facts: StoryFactStore & LegacyStoryFactCompatibilityStore;
   readonly factService: StoryFactApplicationService;
+  readonly legacyMemoryPromotion: LegacyMemoryStoryFactPromotionService;
   readonly chapterValidation: ChapterNovelValidationRuntime;
   readonly chapterValidationSnapshots: ChapterValidationSnapshotService;
   readonly characterVoicePov: ChapterCharacterVoicePovRuntime;
@@ -642,6 +660,7 @@ export interface DesktopRuntime {
   readonly useCases: RuntimeUseCases;
   readonly taskCenter: TaskCenterStore;
   readonly generationGovernance: GenerationGovernanceStore;
+  readonly writingExperience: WritingExperienceStore;
   readonly usageCenter: UsageCenterReader | null;
   readonly modelCenter: ModelCenterStore;
   readonly modelRouting: ModelRoutingStore;
@@ -657,6 +676,7 @@ export interface DesktopRuntime {
   readonly novelSkills: NovelSkillRuntimePort;
   readonly novelSkillPaidEvaluation: NovelSkillPaidEvaluationCoordinatorPort;
   readonly projectContextPrivacy: ProjectContextPrivacyAuthority;
+  readonly consistencyInvestigation: ConsistencyInvestigationRuntimePort | null;
   readonly multiAgentReview: MultiAgentReviewRuntime | null;
   readonly governedCreativeExtensions: GovernedCreativeExtensionsRuntime | null;
   readonly projectKeyVault: ProjectKeyVault;
@@ -1148,6 +1168,7 @@ function buildRuntime(
   maintenance: RuntimeMaintenance | null,
   createTaskCenter: (clock: Clock) => TaskCenterStore,
   createGenerationGovernance: (clock: Clock) => GenerationGovernanceStore,
+  createWritingExperience: (clock: Clock) => WritingExperienceStore,
   createModelCenter: (clock: Clock) => ModelCenterStore,
   createModelRouting: (clock: Clock, modelCenter: ModelCenterStore) => ModelRoutingStore,
   createModelHub: (clock: Clock) => ModelHubStore,
@@ -1650,11 +1671,39 @@ function buildRuntime(
     projects: repositories.projects,
     chapters: repositories.chapters,
     outlines: storyPersistence.outlines,
+    storyFacts: storyPersistence.facts,
     snapshots: createSearchSnapshots(),
     hasher,
     clock,
     vectors: searchVectors,
   });
+  const consistencyInvestigation =
+    mode === "tauri" && cloudExecutor !== null
+      ? createLazyTauriConsistencyInvestigationRuntime({
+          executor: cloudExecutor,
+          repositories,
+          projectSeeds,
+          credentials,
+          runtime: {
+            taskCenter,
+            contextTraces,
+            contextTraceOutputs,
+            modelHub,
+            modelGateway,
+            projectContextPrivacy,
+            search,
+            ids,
+            clock,
+            hasher,
+            story: {
+              facts: storyPersistence.facts,
+              memoryRecords: storyPersistence.memoryRecords,
+              causalGraph: storyPersistence.causalGraph,
+              chapterValidation,
+            },
+          },
+        })
+      : null;
   const acceptCandidate = new AcceptAiCandidate(
     repositories.aiCandidates,
     repositories.chapters,
@@ -1730,8 +1779,10 @@ function buildRuntime(
     novelSkills,
     novelSkillPaidEvaluation,
     projectContextPrivacy,
+    consistencyInvestigation,
     taskCenter,
     generationGovernance: createGenerationGovernance(clock),
+    writingExperience: createWritingExperience(clock),
     usageCenter,
     modelCenter,
     modelRouting,
@@ -1747,6 +1798,13 @@ function buildRuntime(
       actorId,
       facts: storyPersistence.facts,
       factService,
+      legacyMemoryPromotion: new LegacyMemoryStoryFactPromotionService({
+        facts: storyPersistence.facts,
+        factService,
+        memories: storyPersistence.memoryRecords,
+        ids,
+        clock,
+      }),
       chapterValidation,
       chapterValidationSnapshots,
       characterVoicePov,
@@ -1950,7 +2008,7 @@ function assertAtomicContextTraceOutputCapability(
 }
 
 interface StoryPersistence {
-  readonly facts: StoryFactStore;
+  readonly facts: StoryFactStore & LegacyStoryFactCompatibilityStore;
   readonly causalGraph: CausalEventGraphStore;
   readonly planningCandidates: StoryPlanningCandidateStore;
   readonly ideationDrafts: IdeationDraftRepository;
@@ -2040,7 +2098,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.2.4",
+    appVersion: "0.2.5",
     platform: "browser",
     architecture: "web",
     environment: "development",
@@ -2234,6 +2292,7 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
       createTauriRuntimeMaintenance(executor),
       (clock) => new TauriTaskCenterStore(executor, clock),
       (clock) => new TauriGenerationGovernanceStore(executor, clock),
+      (clock) => new TauriWritingExperienceStore(executor, clock),
       (clock) => new TauriModelCenterStore(executor, clock),
       (clock) => new TauriModelRoutingStore(executor, clock),
       (clock) => new TauriModelHubStore(executor, clock),
@@ -2276,6 +2335,7 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
       },
       executor,
     );
+    await baseRuntime.writingExperience.getOrInitialize();
     await baseRuntime.novelSkills.initialize();
     const configuredRuntime: DesktopRuntime = Object.freeze({
       ...baseRuntime,
@@ -2341,6 +2401,29 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
       runtime.governedCreativeExtensions,
       runtime.clock.now(),
     );
+    await import("./consistency-investigation-recovery")
+      .then(({ recoverConsistencyInvestigationsAtStartup }) =>
+        recoverConsistencyInvestigationsAtStartup({
+          executor,
+          taskCenter: runtime.taskCenter,
+          clock: runtime.clock,
+          ids: runtime.ids,
+        }),
+      )
+      .catch(() => {
+        globalThis.console.error(
+          "[CONSISTENCY_INVESTIGATION_RECOVERY_FAILED] Accepted正文 and immutable versions remain unchanged; the interrupted investigation is not resent.",
+        );
+      });
+    await import("./consistency-repair-candidate-recovery")
+      .then(({ recoverConsistencyRepairCandidatesAtStartup }) =>
+        recoverConsistencyRepairCandidatesAtStartup(executor, runtime.clock.now()),
+      )
+      .catch(() => {
+        globalThis.console.error(
+          "[CONSISTENCY_REPAIR_RECOVERY_FAILED] 正文和不可变版本保持不变；中断的修复建议不会自动重发。",
+        );
+      });
     automaticBackup.start();
     acceptedChapterPipelineWorker.start();
     return runtime;
@@ -2459,6 +2542,7 @@ export function createDevelopmentRuntime(storage: Storage): DesktopRuntime {
     null,
     (clock) => new BrowserDevelopmentTaskCenterStore(storage, clock),
     (clock) => new BrowserDevelopmentGenerationGovernanceStore(storage, clock),
+    (clock) => new BrowserDevelopmentWritingExperienceStore(storage, clock),
     (clock) => new BrowserDevelopmentModelCenterStore(storage, clock),
     (clock, modelCenter) => new BrowserDevelopmentModelRoutingStore(storage, clock, modelCenter),
     (clock) => new BrowserDevelopmentModelHubStore(storage, clock),
@@ -2518,6 +2602,7 @@ export function createDevelopmentRuntime(storage: Storage): DesktopRuntime {
 
 export interface ChapterStoryContextCompilationReceipt extends StoryContextCompilationReceipt {
   readonly projectPrivacy: ProjectContextPrivacyReceipt;
+  readonly retrievalTrace: StoryContextRetrievalTrace;
 }
 
 export interface PreparedGenerationPlan {
@@ -2582,6 +2667,11 @@ export interface GovernedGenerationOutcome {
   readonly reused: boolean;
   readonly taskId: string;
   readonly runId: string;
+}
+
+export interface GenerationExecutionPolicy {
+  /** One direct-writing action authorizes one Provider POST and no automatic retry. */
+  readonly generationRetryLimit: 0;
 }
 
 export type GovernedGenerationError =
@@ -2739,6 +2829,30 @@ export async function prepareGenerationPlan(
           cause instanceof ModelHubExecutionError ? cause.retryable : true,
         );
       }
+      recordSafeInvocationRouteDiagnostic(runtime, {
+        taskType: "continuation",
+        modelHubRouteFound: false,
+        legacyProfileChecked: false,
+        legacyProfileSelected: false,
+        resolvedConnectionId: null,
+        resolvedModelId: null,
+        routeSource: "none",
+        ready: false,
+        blockerCode: "MODEL_HUB_ROUTE_NOT_CONFIGURED",
+        checkedAt: runtime.clock.now(),
+      });
+      recordSafeGenerationPreflightFailureDiagnostic(runtime, {
+        taskType: "continuation",
+        routeFound: false,
+        blockerCode: "MODEL_HUB_ROUTE_NOT_CONFIGURED",
+        checkedAt: runtime.clock.now(),
+        scope: generationPreflightScope,
+      });
+      throw new ModelCenterError(
+        "MODEL_HUB_ROUTE_NOT_CONFIGURED",
+        "续写必须通过 Model Hub 的可审计分工执行；当前没有可用分工，因此没有调用旧连接或发送正文。",
+        true,
+      );
     }
   }
 
@@ -3217,16 +3331,20 @@ function safeContextSelectionSummary(
     const reason = entry.discardedReason ?? "unknown";
     reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
   }
+  for (const omission of receipt.retrievalTrace.omissions) {
+    const reason = `retrieval_${omission.reason}`;
+    reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
+  }
   const missingSourceTypes = receipt.compiled.trace.layers
     .filter(({ candidateCount }) => candidateCount === 0)
     .map(({ layer }) => layer);
   return Object.freeze({
-    availableSourceCount: entries.length,
+    availableSourceCount: entries.length + receipt.retrievalTrace.omissions.length,
     selectedSourceCount: entries.filter(({ included }) => included).length,
     deduplicatedSourceCount: excluded.filter(
       ({ discardedReason }) => discardedReason === "duplicate_source",
     ).length,
-    excludedSourceCount: excluded.length,
+    excludedSourceCount: excluded.length + receipt.retrievalTrace.omissions.length,
     estimatedSelectedTokens: receipt.compiled.trace.usedTokens,
     effectiveInputBudget,
     excludedReasonCounts: Object.freeze(
@@ -3337,11 +3455,14 @@ export function canDeferGenerationPlan(plan: PreparedGenerationPlan): boolean {
   const blockingCodes = plan.preflight.checks
     .filter(({ severity }) => severity === "blocking")
     .map(({ code }) => code);
+  const remoteProviderAction =
+    (plan.executionMode === "model_hub" && plan.modelHubInspection?.dataDestination === "remote") ||
+    (plan.executionMode === "legacy_profile" && plan.profile?.provider === "open_ai_compatible");
   return (
     plan.deferredRequest === null &&
     plan.projectId !== null &&
     plan.baseVersionId !== null &&
-    plan.profile?.provider === "open_ai_compatible" &&
+    remoteProviderAction &&
     plan.preflight.estimate !== null &&
     !plan.preflight.canStart &&
     blockingCodes.length === 1 &&
@@ -3402,7 +3523,9 @@ export async function executeGenerationPlan(
   runtime: DesktopRuntime,
   plan: PreparedGenerationPlan,
   onDelta?: (accumulatedText: string) => void,
+  policy?: GenerationExecutionPolicy,
 ): Promise<Result<GovernedGenerationOutcome, GovernedGenerationError>> {
+  const generationRetryLimit = policy?.generationRetryLimit ?? 0;
   if (!plan.preflight.canStart || plan.projectId === null || plan.baseVersionId === null) {
     return err(
       new GenerationGovernanceError(
@@ -3609,7 +3732,7 @@ export async function executeGenerationPlan(
 
     let accumulated = "";
     let candidate!: AiCandidate;
-    let activeExecutionPlan = plan;
+    const activeExecutionPlan = plan;
     let attemptUsage: GenerationAttemptUsageInput = {
       source: "provider_unavailable",
       inputTokens: null,
@@ -3660,8 +3783,13 @@ export async function executeGenerationPlan(
                   messages: attemptPlan.messages,
                   maximumOutputTokens: attemptPlan.maximumOutputTokens,
                   temperature: 0.8,
-                  reasoningPolicy: "visible_prose",
-                  ...(forceReasoningDisabled ? { reasoningModeOverride: "disabled" as const } : {}),
+                  executionPolicy: forceReasoningDisabled
+                    ? SINGLE_ATTEMPT_DISABLED_REASONING_TEXT_POLICY
+                    : SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
+                  generationRetryLimitOverride: generationRetryLimit,
+                  ...(forceReasoningDisabled
+                    ? { reasoningModeOverride: "disabled" as const }
+                    : { reasoningPolicy: "visible_prose" as const }),
                   ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
                   generationId: attemptPlan.generationId,
                   onBeforeDispatch: async ({
@@ -3677,6 +3805,32 @@ export async function executeGenerationPlan(
                       throw new ModelHubExecutionError(
                         "MODEL_HUB_PLAN_CHANGED",
                         "AI 分工在生成前发生变化。为避免使用未经本次检查的模型，请重新执行生成前检查。",
+                        true,
+                      );
+                    }
+                    if (attemptPlan.modelHubInspection === null) {
+                      throw new ModelHubExecutionError(
+                        "CONTINUATION_DISCLOSURE_CHANGED",
+                        "模型、发送范围、费用或隐私已经变化；本次没有发送，请重新查看生成前检查。",
+                        true,
+                      );
+                    }
+                    const currentInspection = await inspectModelHubTextTask(runtime, {
+                      task: "continuation",
+                      messages: attemptPlan.messages,
+                      maximumOutputTokens: attemptPlan.maximumOutputTokens,
+                      temperature: 0.8,
+                      ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
+                    });
+                    try {
+                      assertModelHubInspectionAuthority(
+                        attemptPlan.modelHubInspection,
+                        currentInspection,
+                      );
+                    } catch {
+                      throw new ModelHubExecutionError(
+                        "CONTINUATION_DISCLOSURE_CHANGED",
+                        "模型、发送范围、费用或隐私已经变化；本次没有发送，请重新查看生成前检查。",
                         true,
                       );
                     }
@@ -3725,29 +3879,14 @@ export async function executeGenerationPlan(
                   {
                     generationId: attemptPlan.generationId,
                     forceReasoningDisabled,
+                    generationRetryLimit,
                   },
                 );
           return execution.finally(() =>
             clearActiveGenerationId(runtime, attemptPlan.taskId, attemptPlan.generationId),
           );
         };
-        let generated: NativeModelGenerationResult | ModelHubTextTaskExecutionResult;
-        try {
-          generated = await executeProviderAttempt(activeExecutionPlan, false);
-        } catch (firstCause: unknown) {
-          const normalizedFirst = normalizeGovernedGenerationError(firstCause);
-          if (!shouldRetryReasoningOnlyTruncation(plan, normalizedFirst, accumulated)) {
-            throw firstCause;
-          }
-          accumulated = "";
-          activeExecutionPlan = Object.freeze({
-            ...plan,
-            generationId: runtime.ids.next(),
-            contextTraceId: plan.contextTraceId === null ? null : runtime.ids.next(),
-          });
-          await persistPreparedContextTrace(runtime, activeExecutionPlan);
-          generated = await executeProviderAttempt(activeExecutionPlan, true);
-        }
+        const generated = await executeProviderAttempt(activeExecutionPlan, false);
         let currentChapter: Chapter;
         try {
           currentChapter = await assertPreparedGenerationTargetCurrent(
@@ -4478,6 +4617,7 @@ async function generateLegacyContinuation(
   options: Readonly<{
     generationId: string;
     forceReasoningDisabled: boolean;
+    generationRetryLimit: 0 | null;
   }>,
 ): Promise<NativeModelGenerationResult> {
   if (
@@ -4525,7 +4665,10 @@ async function generateLegacyContinuation(
   return runtime.modelGateway.generate({
     dispatchScope: projectContextDispatchScope(plan.contextCompilation.projectPrivacy),
     generationId: options.generationId,
-    config: current.resolution.config,
+    config:
+      options.generationRetryLimit === 0
+        ? Object.freeze({ ...current.resolution.config, retryLimit: 0 })
+        : current.resolution.config,
     model: current.profile.selectedModel ?? plan.profile.selectedModel,
     messages: plan.messages,
     maxOutputTokens: plan.maximumOutputTokens,
@@ -4546,39 +4689,6 @@ function legacyVisibleProseReasoningPolicy(
   return policy.reasoningMode === null
     ? Object.freeze({})
     : Object.freeze({ reasoningMode: policy.reasoningMode });
-}
-
-function shouldRetryReasoningOnlyTruncation(
-  plan: PreparedGenerationPlan,
-  failure: GovernedGenerationError,
-  accumulatedVisibleText: string,
-): boolean {
-  if (
-    !(failure instanceof ModelCenterError) ||
-    failure.code !== "MODEL_OUTPUT_TRUNCATED" ||
-    accumulatedVisibleText.length > 0 ||
-    failure.diagnostics?.reasoningPresent !== true ||
-    (failure.diagnostics.visibleContentLength !== null &&
-      failure.diagnostics.visibleContentLength !== 0)
-  ) {
-    return false;
-  }
-  if (plan.executionMode === "model_hub") {
-    const providerKind = plan.modelHubInspection?.providerKind;
-    if (providerKind === undefined) return false;
-    const preset = getModelProviderPreset(providerKind);
-    return (
-      preset.protocol === "openai_compatible" &&
-      modelProviderVisibleProsePolicy(providerKind).reasoningMode !== "disabled"
-    );
-  }
-  if (plan.executionMode === "legacy_profile") {
-    return (
-      plan.legacyGatewayConfig?.provider === "open_ai_compatible" &&
-      legacyVisibleProseReasoningPolicy(plan.legacyGatewayConfig).reasoningMode !== "disabled"
-    );
-  }
-  return false;
 }
 
 async function assertGenerationProjectActive(
@@ -4787,6 +4897,8 @@ export interface ChapterStoryContextCompilationInput {
   readonly currentTask: ContextCandidateDraft;
   readonly retrievalQuery?: string;
   readonly maximumContextTokens?: number;
+  /** Null is the accepted main story line; chapter/outline sources are shared canon. */
+  readonly currentBranchId?: string | null;
   /** Supply only from author-confirmed scene/chapter metadata; the pair is fail-closed. */
   readonly currentPovCharacterId?: string | null;
   readonly currentNarrativeOrder?: number | null;
@@ -4809,11 +4921,24 @@ export async function compileChapterStoryContext(
 ): Promise<ChapterStoryContextCompilationReceipt> {
   const projectPrivacy = await runtime.projectContextPrivacy.inspect(chapter.projectId);
   runtime.projectContextPrivacy.assertChapterMatches(projectPrivacy, chapter);
+  const currentChapterVersions = await buildVerifiedCurrentChapterVersionRegistry(
+    runtime,
+    chapter.projectId,
+  );
+  const currentVersionAuthority = currentChapterVersions[chapter.id];
+  if (currentVersionAuthority?.versionId !== chapter.currentVersionId) {
+    throw new StoryContextRuntimeError(
+      "STORY_CONTEXT_COMPILATION_FAILED",
+      "The current chapter version and checksum could not be verified for context compilation.",
+    );
+  }
+  const currentBranchId = input.currentBranchId ?? null;
+  const currentPovCharacterId = input.currentPovCharacterId ?? null;
+  const currentNarrativeOrder = input.currentNarrativeOrder ?? currentVersionAuthority.storyOrder;
   const [
     retrieval,
     causalCandidates,
     preferenceCandidates,
-    currentChapterVersions,
     creationSeedCandidates,
     verifiedPovKnowledgeFacts,
   ] = await Promise.all([
@@ -4822,14 +4947,18 @@ export async function compileChapterStoryContext(
       chapter,
       projectPrivacy,
       input.retrievalQuery,
-      (input.allowRemoteRerank ?? true) && !projectPrivacy.requiresVerifiedLocal,
+      (input.allowRemoteRerank ?? false) && !projectPrivacy.requiresVerifiedLocal,
+      currentChapterVersions,
+      currentBranchId,
+      currentPovCharacterId,
+      currentNarrativeOrder,
+      input.currentTask.id,
     ),
-    retrieveCausalContinuationCandidates(runtime, chapter, input.retrievalQuery),
+    retrieveCausalContinuationCandidates(runtime, chapter, input.retrievalQuery, currentBranchId),
     runtime.story.writingFeedback
       .loadDashboard(chapter.projectId)
       .then(({ preferences }) => selectWritingPreferenceContextCandidates(preferences))
       .catch(() => Object.freeze([])),
-    buildVerifiedCurrentChapterVersionRegistry(runtime, chapter.projectId),
     runtime.projectSeeds
       .findByProjectId(chapter.projectId)
       .then(selectProjectSeedContextCandidates)
@@ -4845,15 +4974,9 @@ export async function compileChapterStoryContext(
       )
       .catch(() => Object.freeze([])),
   ]);
-  const currentVersionAuthority = currentChapterVersions[chapter.id];
-  if (currentVersionAuthority?.versionId !== chapter.currentVersionId) {
-    throw new StoryContextRuntimeError(
-      "STORY_CONTEXT_COMPILATION_FAILED",
-      "The current chapter version and checksum could not be verified for context compilation.",
-    );
-  }
   const compiled = await compileStoryContextForGeneration(runtime.story.facts, {
     projectId: chapter.projectId,
+    currentBranchId,
     currentTask: input.currentTask,
     currentTaskSupplements: preferenceCandidates,
     creationSeedCandidates,
@@ -4865,17 +4988,34 @@ export async function compileChapterStoryContext(
       content: chapter.content,
     },
     currentChapterVersions,
-    causalCandidates,
+    causalCandidates: causalCandidates.candidates,
     semanticCandidates: retrieval.semanticCandidates,
     rerankCandidates: retrieval.rerankCandidates,
     verifiedDerivedFacts: verifiedPovKnowledgeFacts,
-    currentPovCharacterId: input.currentPovCharacterId ?? null,
-    currentNarrativeOrder: input.currentNarrativeOrder ?? null,
+    currentPovCharacterId,
+    currentNarrativeOrder,
     maximumContextTokens:
       input.maximumContextTokens ??
       CONSERVATIVE_GENERATION_CONTEXT_POLICY.maximumCompiledInputTokens,
   });
-  return Object.freeze({ ...compiled, projectPrivacy });
+  const includedContextIds = new Set(
+    compiled.compiled.entries.filter(({ included }) => included).map(({ id }) => id),
+  );
+  const retrievalTrace = Object.freeze({
+    ...retrieval.trace,
+    includedDocumentIds: Object.freeze(
+      retrieval.candidateDocumentBindings
+        .filter(({ candidateId }) => includedContextIds.has(candidateId))
+        .map(({ documentId }) => documentId),
+    ),
+    graphStatus: causalCandidates.status,
+    graphBranchId: causalCandidates.branchId,
+    notices: Object.freeze([
+      ...retrieval.trace.notices,
+      ...(causalCandidates.notice === null ? [] : [causalCandidates.notice]),
+    ]),
+  });
+  return Object.freeze({ ...compiled, projectPrivacy, retrievalTrace });
 }
 
 async function buildContextualContinuationMessages(
@@ -4913,6 +5053,11 @@ async function buildContextualContinuationMessages(
       priority: 1_000,
     },
     maximumContextTokens: Math.max(1, maximumContextTokens - reservedSkillTokens),
+    // A continuation authorization covers exactly the selected generation
+    // request. Remote reranking would be a second Provider dispatch, so the
+    // normal creative path keeps retrieval local unless a future, separately
+    // disclosed action opts in explicitly.
+    allowRemoteRerank: false,
   });
   const novelSkillPreparation = applyNovelSkills
     ? await runtime.novelSkills.prepareInvocation({
@@ -4980,42 +5125,51 @@ function continuationDestinationPrompt(contract: ContinuationOutputContract): st
   return "推进并自然完成一个完整场景；";
 }
 
+interface VerifiedCurrentChapterAuthority {
+  readonly versionId: string;
+  readonly contentHash: string;
+  readonly storyOrder: number;
+}
+
 async function buildVerifiedCurrentChapterVersionRegistry(
   runtime: DesktopRuntime,
   projectId: UuidV7,
-): Promise<Readonly<Record<string, Readonly<{ versionId: string; contentHash: string }>>>> {
+): Promise<Readonly<Record<string, VerifiedCurrentChapterAuthority>>> {
   const chapters = await runtime.repositories.chapters.listByProjectId(projectId).catch(() => null);
   if (!chapters?.ok) {
     return Object.freeze({});
   }
+  const activeChapters = chapters.value.filter((candidate) => candidate.status === "active");
   const verified = await Promise.all(
-    chapters.value
-      .filter((candidate) => candidate.status === "active")
-      .map(async (candidate) => {
-        const version = await runtime.repositories.chapterVersions
-          .findVersionById(candidate.currentVersionId)
-          .catch(() => null);
-        if (version === null || !version.ok || version.value === null) {
-          return null;
-        }
-        const snapshot = version.value.toSnapshot();
-        if (
-          snapshot.projectId !== projectId ||
-          snapshot.chapterId !== candidate.id ||
-          snapshot.id !== candidate.currentVersionId ||
-          snapshot.content !== candidate.content
-        ) {
-          return null;
-        }
-        const hash = await runtime.hasher.sha256(snapshot.content).catch(() => null);
-        if (hash === null || !hash.ok || hash.value !== snapshot.contentChecksum) {
-          return null;
-        }
-        return [
-          candidate.id,
-          Object.freeze({ versionId: snapshot.id, contentHash: hash.value }),
-        ] as const;
-      }),
+    activeChapters.map(async (candidate, index) => {
+      const version = await runtime.repositories.chapterVersions
+        .findVersionById(candidate.currentVersionId)
+        .catch(() => null);
+      if (version === null || !version.ok || version.value === null) {
+        return null;
+      }
+      const snapshot = version.value.toSnapshot();
+      if (
+        snapshot.projectId !== projectId ||
+        snapshot.chapterId !== candidate.id ||
+        snapshot.id !== candidate.currentVersionId ||
+        snapshot.content !== candidate.content
+      ) {
+        return null;
+      }
+      const hash = await runtime.hasher.sha256(snapshot.content).catch(() => null);
+      if (hash === null || !hash.ok || hash.value !== snapshot.contentChecksum) {
+        return null;
+      }
+      return [
+        candidate.id,
+        Object.freeze({
+          versionId: snapshot.id,
+          contentHash: hash.value,
+          storyOrder: index + 1,
+        }),
+      ] as const;
+    }),
   );
   return Object.freeze(
     Object.fromEntries(
@@ -5024,13 +5178,22 @@ async function buildVerifiedCurrentChapterVersionRegistry(
   );
 }
 
+interface CausalContinuationCandidates {
+  readonly candidates: readonly ContextCandidateDraft[];
+  readonly status: "optional_used" | "optional_empty" | "optional_unavailable";
+  readonly branchId: string;
+  readonly notice: "causal_graph_unavailable" | null;
+}
+
 async function retrieveCausalContinuationCandidates(
   runtime: DesktopRuntime,
   chapter: Chapter,
   retrievalQuery?: string,
-): Promise<readonly ContextCandidateDraft[]> {
+  currentBranchId: string | null = null,
+): Promise<CausalContinuationCandidates> {
+  const branchId = currentBranchId ?? "main";
   try {
-    const graph = await runtime.story.causalGraph.loadProjectBranch(chapter.projectId, "main");
+    const graph = await runtime.story.causalGraph.loadProjectBranch(chapter.projectId, branchId);
     const source = chapter.content.trim();
     const requestedQuery = retrievalQuery?.trim() ?? "";
     const query = (
@@ -5040,28 +5203,109 @@ async function retrieveCausalContinuationCandidates(
           ? chapter.title
           : source.slice(-480)
     ).trim();
-    return selectCausalContextCandidates({
+    const candidates = selectCausalContextCandidates({
       graph,
       query: query.length === 0 ? "继续创作" : query,
       maximumEvents: 8,
+    });
+    return Object.freeze({
+      candidates,
+      status: candidates.length === 0 ? ("optional_empty" as const) : ("optional_used" as const),
+      branchId,
+      notice: null,
     });
   } catch {
     // A corrupt or unavailable derived graph must not block access to the
     // saved chapter. Other governed context layers remain usable, while the
     // graph store itself fails closed and can be rebuilt from verified facts.
-    return Object.freeze([]);
+    return Object.freeze({
+      candidates: Object.freeze([]),
+      status: "optional_unavailable" as const,
+      branchId,
+      notice: "causal_graph_unavailable" as const,
+    });
   }
 }
 
 interface SemanticContinuationCandidates {
   readonly semanticCandidates: readonly ContextCandidateDraft[];
   readonly rerankCandidates: readonly ContextCandidateDraft[];
+  readonly candidateDocumentBindings: readonly Readonly<{
+    candidateId: string;
+    documentId: string;
+  }>[];
+  readonly trace: SemanticStoryContextRetrievalTrace;
 }
 
-const EMPTY_SEMANTIC_CONTINUATION_CANDIDATES: SemanticContinuationCandidates = Object.freeze({
-  semanticCandidates: Object.freeze([]),
-  rerankCandidates: Object.freeze([]),
-});
+type SemanticStoryContextRetrievalTrace = Omit<
+  StoryContextRetrievalTrace,
+  "graphStatus" | "graphBranchId"
+>;
+
+export type StoryContextRetrievalOmissionReason =
+  | "project_mismatch"
+  | "stale_version"
+  | "chapter_not_active"
+  | "current_chapter_duplicate"
+  | "empty_content"
+  | "non_canon_authority"
+  | "branch_mismatch"
+  | "pov_mismatch"
+  | "future_knowledge"
+  | "privacy_scope_mismatch"
+  | "private_remote_denied"
+  | "search_unavailable";
+
+export interface StoryContextRetrievalOmission {
+  readonly documentId: string | null;
+  readonly sourceId: string;
+  readonly reason: StoryContextRetrievalOmissionReason;
+}
+
+export type StoryContextRetrievalRecoveryReason = BoundedLocalQueryRecoveryType | "expand_k";
+
+export interface StoryContextRetrievalQueryTrace {
+  /** Stable identity only; the source question and query text remain transient. */
+  readonly sourceId: string | null;
+  readonly sourceType: string;
+  /** Opaque action-local identity; expand_k reuses the initial queryPlanId. */
+  readonly queryPlanId: string;
+  readonly queryType: BoundedLocalRetrievalQueryPlan["queryType"];
+  readonly stage: "initial" | "expand_k" | "recovery";
+  readonly limit: number;
+  readonly appliedFilterCategories: readonly string[];
+  readonly retrievalMethod: "fts";
+  readonly resultCount: number;
+  readonly eligibleResultCount: number;
+  readonly fusionWeight: number;
+  readonly omissionReason:
+    | "search_unavailable"
+    | "retrieval_scope_trace_incomplete"
+    | "no_match"
+    | "no_eligible_match"
+    | null;
+  readonly recoveryReason: StoryContextRetrievalRecoveryReason | null;
+  readonly scopeTrace: SearchRetrievalScopeTrace | null;
+}
+
+export interface StoryContextRetrievalTrace {
+  readonly baseline: "fts_keyword";
+  readonly hardFilters: typeof STORY_CONTEXT_RETRIEVAL_HARD_FILTERS;
+  readonly baselineStatus: "used" | "no_match" | "empty_query" | "unavailable";
+  readonly vectorStatus: "optional_used" | "optional_unavailable" | "optional_not_needed";
+  readonly graphStatus: "optional_used" | "optional_empty" | "optional_unavailable";
+  readonly graphBranchId: string;
+  readonly remoteRerankStatus: "optional_used" | "optional_skipped" | "private_remote_denied";
+  readonly scopeOmissions: SearchRetrievalScopeTrace["omittedHardFilters"];
+  readonly authorityNeutralOmissions: SearchRetrievalScopeTrace["authorityNeutralOmissions"];
+  readonly versionMode: SearchRetrievalScopeTrace["versionMode"];
+  readonly includedDocumentIds: readonly string[];
+  readonly omissions: readonly StoryContextRetrievalOmission[];
+  readonly queryTrace: readonly StoryContextRetrievalQueryTrace[];
+  readonly uniqueQueryCount: number;
+  readonly recoveryOutcome: "not_needed" | "recovered" | "evidence_insufficient";
+  readonly notices: readonly string[];
+}
 
 async function retrieveSemanticContinuationCandidates(
   runtime: DesktopRuntime,
@@ -5069,40 +5313,233 @@ async function retrieveSemanticContinuationCandidates(
   projectPrivacy: ProjectContextPrivacyReceipt,
   retrievalQuery?: string,
   allowRemoteRerank = !projectPrivacy.requiresVerifiedLocal,
+  currentChapterVersions: Readonly<Record<string, VerifiedCurrentChapterAuthority>> = Object.freeze(
+    {},
+  ),
+  currentBranchId: string | null = null,
+  currentPovCharacterId: string | null = null,
+  maximumStoryOrder = 0,
+  currentTaskSourceId: string = chapter.id,
 ): Promise<SemanticContinuationCandidates> {
-  // Context preparation must not create an unreviewed remote data transfer.
-  // Remote embedding is enabled only through the explicit Model Hub rebuild flow.
-  if (runtime.search.embeddingDiagnostics().destination !== "local_ollama") {
-    return EMPTY_SEMANTIC_CONTINUATION_CANDIDATES;
-  }
   const querySource = chapter.content.trim();
   const requestedQuery = retrievalQuery?.trim() ?? "";
-  const query = (
+  const transientSourceQuestion = (
     requestedQuery.length > 0
       ? requestedQuery.slice(0, 480)
       : querySource.length === 0
         ? chapter.title
         : querySource.slice(-480)
   ).trim();
-  if (query.length === 0) {
-    return EMPTY_SEMANTIC_CONTINUATION_CANDIDATES;
+  const querySources = Object.freeze([
+    Object.freeze({
+      sourceId: requestedQuery.length > 0 ? currentTaskSourceId : chapter.id,
+      sourceType: requestedQuery.length > 0 ? "current_task" : "accepted_chapter",
+      content: transientSourceQuestion,
+    }),
+  ]);
+  const initialPlans = planBoundedLocalRetrievalQueries(querySources);
+  const privacyScope = projectPrivacy.requiresVerifiedLocal
+    ? ("include_local_only" as const)
+    : ("standard_only" as const);
+  const retrievalScope = Object.freeze({
+    projectId: chapter.projectId,
+    taskType: "continuation" as const,
+    privacy: privacyScope,
+    currentness: "current" as const,
+    branchId: currentBranchId,
+    povCharacterId: currentPovCharacterId,
+    maximumStoryOrder,
+  });
+  const omissions: StoryContextRetrievalOmission[] = [];
+  const omissionKeys = new Set<string>();
+  const queryTrace: StoryContextRetrievalQueryTrace[] = [];
+  const queryPlanIds = new Map<string, string>();
+  const notices = new Set<string>();
+  const scopeOmissions = new Set<SearchRetrievalScopeTrace["omittedHardFilters"][number]>();
+  const authorityNeutralOmissions = new Set<
+    SearchRetrievalScopeTrace["authorityNeutralOmissions"][number]
+  >();
+  const eligibleByDocumentId = new Map<
+    string,
+    Readonly<{ hit: HybridSearchHit; fusionScore: number; sequence: number }>
+  >();
+  let sequence = 0;
+  let successfulScopedQueries = 0;
+
+  const executePlan = async (
+    plan: BoundedLocalRetrievalQueryPlan | BoundedLocalRecoveryQueryPlan,
+    stage: StoryContextRetrievalQueryTrace["stage"],
+    limit: number,
+    recoveryReason: StoryContextRetrievalRecoveryReason | null,
+  ): Promise<void> => {
+    let queryPlanId = queryPlanIds.get(plan.query);
+    if (queryPlanId === undefined) {
+      queryPlanId = `local-query-${String(queryPlanIds.size + 1)}`;
+      queryPlanIds.set(plan.query, queryPlanId);
+    }
+    let response: Awaited<ReturnType<typeof runtime.search.searchFtsOnly>> | null = null;
+    let omissionReason: StoryContextRetrievalQueryTrace["omissionReason"] = null;
+    try {
+      response = await runtime.search.searchFtsOnly(
+        chapter.projectId,
+        plan.query,
+        retrievalScope,
+        limit,
+      );
+    } catch {
+      response = null;
+    }
+    if (!response?.ok) {
+      omissionReason = "search_unavailable";
+      notices.add("continuation_fts_query_failed_without_remote_fallback");
+    }
+    const value = response?.ok === true ? response.value : null;
+    const scopeTrace = value?.retrievalScopeTrace ?? null;
+    let eligibleResultCount = 0;
+    if (value !== null) {
+      value.notices.forEach((notice) => notices.add(notice));
+      if (!isCompleteContinuationScopeTrace(scopeTrace)) {
+        omissionReason = "retrieval_scope_trace_incomplete";
+        notices.add("continuation_fts_scope_trace_failed_closed");
+      } else {
+        successfulScopedQueries += 1;
+        scopeTrace.omittedHardFilters.forEach((filter) => scopeOmissions.add(filter));
+        scopeTrace.authorityNeutralOmissions.forEach((filter) =>
+          authorityNeutralOmissions.add(filter),
+        );
+        for (const hit of value.hits) {
+          const reason = continuationHitOmissionReason({
+            hit,
+            chapter,
+            projectPrivacy,
+            privacyScope,
+            currentChapterVersions,
+            currentBranchId,
+            currentPovCharacterId,
+            maximumStoryOrder,
+          });
+          if (reason !== null) {
+            const key = `${hit.document.id}:${reason}`;
+            if (!omissionKeys.has(key)) {
+              omissionKeys.add(key);
+              omissions.push(
+                Object.freeze({
+                  documentId: hit.document.id,
+                  sourceId: hit.document.sourceId,
+                  reason,
+                }),
+              );
+            }
+            continue;
+          }
+          if (hit.scores.keyword <= 0) {
+            notices.add("continuation_fts_hit_without_keyword_score_omitted");
+            continue;
+          }
+          eligibleResultCount += 1;
+          const fusionScore = clampNormalizedScore(hit.scores.total) * plan.fusionWeight;
+          const existing = eligibleByDocumentId.get(hit.document.id);
+          if (existing === undefined || fusionScore > existing.fusionScore) {
+            eligibleByDocumentId.set(
+              hit.document.id,
+              Object.freeze({ hit, fusionScore, sequence: existing?.sequence ?? sequence++ }),
+            );
+          }
+        }
+        if (value.hits.length === 0) {
+          omissionReason = "no_match";
+        } else if (eligibleResultCount === 0) {
+          omissionReason = "no_eligible_match";
+        }
+      }
+    }
+    queryTrace.push(
+      Object.freeze({
+        sourceId: plan.sourceId,
+        sourceType: plan.sourceType,
+        queryPlanId,
+        queryType: plan.queryType,
+        stage,
+        limit,
+        appliedFilterCategories: continuationAppliedFilterCategories(plan),
+        retrievalMethod: plan.retrievalMethod,
+        resultCount: value?.hits.length ?? 0,
+        eligibleResultCount,
+        fusionWeight: plan.fusionWeight,
+        omissionReason,
+        recoveryReason,
+        scopeTrace,
+      }),
+    );
+  };
+
+  for (const plan of initialPlans) {
+    await executePlan(plan, "initial", CONTINUATION_INITIAL_SEARCH_K, null);
   }
-  const searched = await runtime.search.search(chapter.projectId, query, 32).catch(() => null);
-  if (!searched?.ok || searched.value.capabilities.vector !== "ready") {
-    return EMPTY_SEMANTIC_CONTINUATION_CANDIDATES;
+  const initialEvidenceCount = eligibleByDocumentId.size;
+  if (eligibleByDocumentId.size < MINIMUM_CONTINUATION_SEARCH_EVIDENCE) {
+    for (const plan of initialPlans) {
+      await executePlan(plan, "expand_k", CONTINUATION_EXPANDED_SEARCH_K, "expand_k");
+      if (eligibleByDocumentId.size >= MINIMUM_CONTINUATION_SEARCH_EVIDENCE) break;
+    }
   }
-  const eligibleHits = searched.value.hits.filter(
-    (hit) =>
-      !(
-        hit.document.sourceType === "chapter" &&
-        hit.document.sourceId === chapter.id &&
-        hit.document.sourceVersionId === chapter.currentVersionId
-      ) && hit.document.text.trim().length > 0,
-  );
+  if (eligibleByDocumentId.size < MINIMUM_CONTINUATION_SEARCH_EVIDENCE) {
+    const recoveryPlans = planBoundedLocalRecoveryQueries(querySources, initialPlans);
+    for (const plan of recoveryPlans) {
+      await executePlan(plan, "recovery", CONTINUATION_RECOVERY_SEARCH_K, plan.recoveryType);
+      if (eligibleByDocumentId.size >= MINIMUM_CONTINUATION_SEARCH_EVIDENCE) break;
+    }
+  }
+  const recoveryOutcome =
+    initialEvidenceCount >= MINIMUM_CONTINUATION_SEARCH_EVIDENCE
+      ? ("not_needed" as const)
+      : eligibleByDocumentId.size >= MINIMUM_CONTINUATION_SEARCH_EVIDENCE
+        ? ("recovered" as const)
+        : ("evidence_insufficient" as const);
+  if (recoveryOutcome === "evidence_insufficient") {
+    notices.add("continuation_evidence_insufficient_after_bounded_local_recovery");
+  }
+  notices.add("continuation_retrieval_lexical_only_vector_weight_zero");
+  const eligibleHits = [...eligibleByDocumentId.values()]
+    .sort(
+      (left, right) =>
+        right.fusionScore - left.fusionScore ||
+        left.sequence - right.sequence ||
+        left.hit.document.id.localeCompare(right.hit.document.id),
+    )
+    .map(({ hit }) => hit);
   if (eligibleHits.length === 0) {
-    return EMPTY_SEMANTIC_CONTINUATION_CANDIDATES;
+    return emptySemanticContinuationCandidates({
+      baselineStatus: successfulScopedQueries === 0 ? "unavailable" : "no_match",
+      vectorStatus: "optional_not_needed",
+      remoteRerankStatus: projectPrivacy.requiresVerifiedLocal
+        ? "private_remote_denied"
+        : "optional_skipped",
+      omissions: Object.freeze([
+        ...omissions,
+        ...(projectPrivacy.requiresVerifiedLocal
+          ? [
+              Object.freeze({
+                documentId: null,
+                sourceId: chapter.projectId,
+                reason: "private_remote_denied" as const,
+              }),
+            ]
+          : []),
+      ]),
+      queryTrace,
+      uniqueQueryCount: queryPlanIds.size,
+      recoveryOutcome,
+      scopeOmissions: Object.freeze([...scopeOmissions]),
+      authorityNeutralOmissions: Object.freeze([...authorityNeutralOmissions]),
+      notices: Object.freeze([...notices]),
+    });
   }
-  const semanticHits = eligibleHits.slice(0, 6);
+  // The scoped read path is intentionally FTS-only. Existing vector data can
+  // be evaluated separately, but continuation preparation never embeds a
+  // query or performs an undisclosed second Provider action.
+  const keywordHits = eligibleHits;
+  const semanticHits = keywordHits.slice(0, 6);
   const semanticHitIds = new Set(semanticHits.map(({ document }) => document.id));
   const semanticCandidates = semanticHits.map((hit) => searchHitContextCandidate(hit, "none"));
   const rerankInputs = eligibleHits.map((hit) => ({
@@ -5115,34 +5552,15 @@ async function retrieveSemanticContinuationCandidates(
       sourceType: searchContextSourceType(hit.document.sourceType),
       sourceId: hit.document.sourceId,
       sourceVersionId: hit.document.sourceVersionId,
-      locator: `search-document:${hit.document.id}`,
+      locator: searchDocumentEvidenceLocator(hit.document),
       contentHash: hit.document.contentHash,
     },
   }));
   const localReranked = rerankWithLocalEvidence({
-    query,
+    query: initialPlans[0]?.query ?? "人物 时间 地点 关系",
     candidates: rerankInputs,
     limit: Math.min(8, Math.max(1, eligibleHits.length)),
   });
-  if (allowRemoteRerank) {
-    await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy);
-  }
-  const remoteAttempt = allowRemoteRerank
-    ? await runtime.rerank.tryRerank({
-        dispatchScope: projectContextDispatchScope(projectPrivacy),
-        query,
-        documents: rerankInputs.map(({ text }) => text),
-        topN: Math.min(12, rerankInputs.length),
-        onBeforeDispatch: () =>
-          runtime.projectContextPrivacy.assertCurrentBeforeDispatch(projectPrivacy),
-      })
-    : Object.freeze({
-        status: "skipped" as const,
-        source: "local_deterministic_fallback" as const,
-        code: "REMOTE_RERANK_NOT_ALLOWED",
-        message:
-          "Remote reranking was disabled for this chapter task; local evidence order was used.",
-      });
   const indexById = new Map(rerankInputs.map(({ id }, index) => [id, index] as const));
   const localReasonByIndex = new Map<number, string>();
   const localRankings = localReranked.ranked.flatMap((ranked) => {
@@ -5153,25 +5571,17 @@ async function retrieveSemanticContinuationCandidates(
     localReasonByIndex.set(index, ranked.selectionReason);
     return [{ index, score: ranked.scores.total }];
   });
-  const mergedRankings = mergeRemoteRerankWithLocalFallback({
-    documentCount: rerankInputs.length,
-    remoteRankings:
-      remoteAttempt.status === "applied" ? remoteAttempt.result.rankings : Object.freeze([]),
-    localRankings,
-  });
-  const rankedSupplements = mergedRankings.map((ranking) => ({
+  const rankedSupplements = localRankings.map((ranking) => ({
     id: rerankInputs[ranking.index]?.id ?? "",
     score: ranking.score,
-    source: ranking.source,
+    source: "local" as const,
     reason:
-      ranking.source === "qwen_remote"
-        ? "The author explicitly enabled Alibaba Qwen remote reranking for this task; only the bounded candidate set was sent."
-        : `${localReasonByIndex.get(ranking.index) ?? "The local retrieval order preserved this source."} ${
-            remoteAttempt.status === "skipped" ? remoteAttempt.message : ""
-          }`.trim(),
+      localReasonByIndex.get(ranking.index) ??
+      "The local deterministic evidence reranker preserved this source.",
   }));
   const hitsById = new Map(eligibleHits.map((hit) => [hit.document.id, hit]));
   const rerankCandidates: ContextCandidateDraft[] = [];
+  const rerankDocumentIds: string[] = [];
   for (const ranked of rankedSupplements) {
     if (semanticHitIds.has(ranked.id)) {
       continue;
@@ -5183,6 +5593,7 @@ async function retrieveSemanticContinuationCandidates(
     rerankCandidates.push(
       searchHitContextCandidate(hit, ranked.source, ranked.reason, ranked.score),
     );
+    rerankDocumentIds.push(hit.document.id);
     if (rerankCandidates.length >= 4) {
       break;
     }
@@ -5190,8 +5601,220 @@ async function retrieveSemanticContinuationCandidates(
   return Object.freeze({
     semanticCandidates: Object.freeze(semanticCandidates),
     rerankCandidates: Object.freeze(rerankCandidates),
+    candidateDocumentBindings: Object.freeze([
+      ...semanticCandidates.map((candidate, index) =>
+        Object.freeze({
+          candidateId: candidate.id,
+          documentId: semanticHits[index]?.document.id ?? "",
+        }),
+      ),
+      ...rerankCandidates.map((candidate, index) =>
+        Object.freeze({
+          candidateId: candidate.id,
+          documentId: rerankDocumentIds[index] ?? "",
+        }),
+      ),
+    ]),
+    trace: Object.freeze({
+      baseline: "fts_keyword" as const,
+      hardFilters: STORY_CONTEXT_RETRIEVAL_HARD_FILTERS,
+      baselineStatus: keywordHits.length > 0 ? ("used" as const) : ("no_match" as const),
+      vectorStatus: "optional_not_needed" as const,
+      remoteRerankStatus: projectPrivacy.requiresVerifiedLocal
+        ? ("private_remote_denied" as const)
+        : ("optional_skipped" as const),
+      scopeOmissions: Object.freeze([...scopeOmissions]),
+      authorityNeutralOmissions: Object.freeze([...authorityNeutralOmissions]),
+      versionMode: "per_source_current" as const,
+      includedDocumentIds: Object.freeze([
+        ...semanticHits.map(({ document }) => document.id),
+        ...rerankDocumentIds,
+      ]),
+      omissions: Object.freeze([
+        ...omissions,
+        ...(projectPrivacy.requiresVerifiedLocal
+          ? [
+              Object.freeze({
+                documentId: null,
+                sourceId: chapter.projectId,
+                reason: "private_remote_denied" as const,
+              }),
+            ]
+          : []),
+      ]),
+      queryTrace: Object.freeze(queryTrace),
+      uniqueQueryCount: queryPlanIds.size,
+      recoveryOutcome,
+      notices: Object.freeze([
+        ...notices,
+        ...(allowRemoteRerank ? ["remote_rerank_requires_separate_authorization"] : []),
+      ]),
+    }),
   });
 }
+
+const CONTINUATION_INITIAL_SEARCH_K = 32;
+const CONTINUATION_EXPANDED_SEARCH_K = 64;
+const CONTINUATION_RECOVERY_SEARCH_K = 32;
+const MINIMUM_CONTINUATION_SEARCH_EVIDENCE = 2;
+
+function isCompleteContinuationScopeTrace(
+  trace: SearchRetrievalScopeTrace | null,
+): trace is SearchRetrievalScopeTrace {
+  return (
+    trace !== null &&
+    trace.taskType === "continuation" &&
+    trace.versionMode === "per_source_current" &&
+    trace.omittedHardFilters.length === 0
+  );
+}
+
+function continuationAppliedFilterCategories(
+  plan: BoundedLocalRetrievalQueryPlan | BoundedLocalRecoveryQueryPlan,
+): readonly string[] {
+  return Object.freeze([
+    ...STORY_CONTEXT_RETRIEVAL_HARD_FILTERS,
+    ...(plan.filters.timeTerms.length > 0 ? ["query_time_terms"] : []),
+    ...(plan.filters.locationTerms.length > 0 ? ["query_location_terms"] : []),
+  ]);
+}
+
+function continuationHitOmissionReason(
+  input: Readonly<{
+    hit: HybridSearchHit;
+    chapter: Chapter;
+    projectPrivacy: ProjectContextPrivacyReceipt;
+    privacyScope: "standard_only" | "include_local_only";
+    currentChapterVersions: Readonly<Record<string, VerifiedCurrentChapterAuthority>>;
+    currentBranchId: string | null;
+    currentPovCharacterId: string | null;
+    maximumStoryOrder: number;
+  }>,
+): StoryContextRetrievalOmissionReason | null {
+  const document = input.hit.document;
+  if (document.projectId !== input.chapter.projectId) {
+    return "project_mismatch";
+  }
+  if (document.text.trim().length === 0) {
+    return "empty_content";
+  }
+  if (document.currentness !== "current") {
+    return "stale_version";
+  }
+  if (document.authority !== "accepted_text" && document.authority !== "confirmed_fact") {
+    return "non_canon_authority";
+  }
+  if (
+    document.privacy !== "standard" &&
+    !(input.privacyScope === "include_local_only" && document.privacy === "local_only")
+  ) {
+    return "privacy_scope_mismatch";
+  }
+  if (
+    input.currentBranchId === null
+      ? document.branchId !== null && document.branchId !== undefined
+      : document.branchId !== null &&
+        document.branchId !== undefined &&
+        document.branchId !== input.currentBranchId
+  ) {
+    return "branch_mismatch";
+  }
+  if (
+    input.currentPovCharacterId === null
+      ? document.povCharacterId !== null && document.povCharacterId !== undefined
+      : document.povCharacterId !== null &&
+        document.povCharacterId !== undefined &&
+        document.povCharacterId !== input.currentPovCharacterId
+  ) {
+    return "pov_mismatch";
+  }
+  if (
+    document.storyOrder !== null &&
+    document.storyOrder !== undefined &&
+    document.storyOrder > input.maximumStoryOrder
+  ) {
+    return "future_knowledge";
+  }
+  if (document.sourceType === "chapter") {
+    const privacyBinding = input.projectPrivacy.chapters.find(
+      ({ chapterId }) => chapterId === document.sourceId,
+    );
+    const current = input.currentChapterVersions[document.sourceId];
+    if (privacyBinding?.status !== "active") {
+      return "chapter_not_active";
+    }
+    if (
+      current?.versionId !== document.sourceVersionId ||
+      privacyBinding.currentVersionId !== document.sourceVersionId
+    ) {
+      return "stale_version";
+    }
+    if (
+      document.sourceId === input.chapter.id &&
+      document.sourceVersionId === input.chapter.currentVersionId
+    ) {
+      return "current_chapter_duplicate";
+    }
+  } else if (
+    document.authority === "confirmed_fact" &&
+    !Object.values(input.currentChapterVersions).some(
+      ({ versionId }) => versionId === document.sourceVersionId,
+    )
+  ) {
+    return "stale_version";
+  }
+  return null;
+}
+
+function emptySemanticContinuationCandidates(
+  input: Readonly<{
+    baselineStatus: StoryContextRetrievalTrace["baselineStatus"];
+    vectorStatus: StoryContextRetrievalTrace["vectorStatus"];
+    remoteRerankStatus: StoryContextRetrievalTrace["remoteRerankStatus"];
+    omissions?: readonly StoryContextRetrievalOmission[];
+    queryTrace?: readonly StoryContextRetrievalQueryTrace[];
+    uniqueQueryCount?: number;
+    recoveryOutcome?: StoryContextRetrievalTrace["recoveryOutcome"];
+    scopeOmissions?: SearchRetrievalScopeTrace["omittedHardFilters"];
+    authorityNeutralOmissions?: SearchRetrievalScopeTrace["authorityNeutralOmissions"];
+    notices?: readonly string[];
+  }>,
+): SemanticContinuationCandidates {
+  return Object.freeze({
+    semanticCandidates: Object.freeze([]),
+    rerankCandidates: Object.freeze([]),
+    candidateDocumentBindings: Object.freeze([]),
+    trace: Object.freeze({
+      baseline: "fts_keyword" as const,
+      hardFilters: STORY_CONTEXT_RETRIEVAL_HARD_FILTERS,
+      baselineStatus: input.baselineStatus,
+      vectorStatus: input.vectorStatus,
+      remoteRerankStatus: input.remoteRerankStatus,
+      scopeOmissions: Object.freeze([...(input.scopeOmissions ?? [])]),
+      authorityNeutralOmissions: Object.freeze([...(input.authorityNeutralOmissions ?? [])]),
+      versionMode: "per_source_current" as const,
+      includedDocumentIds: Object.freeze([]),
+      omissions: Object.freeze([...(input.omissions ?? [])]),
+      queryTrace: Object.freeze([...(input.queryTrace ?? [])]),
+      uniqueQueryCount: input.uniqueQueryCount ?? 0,
+      recoveryOutcome: input.recoveryOutcome ?? "evidence_insufficient",
+      notices: Object.freeze([...(input.notices ?? [])]),
+    }),
+  });
+}
+
+const STORY_CONTEXT_RETRIEVAL_HARD_FILTERS = Object.freeze([
+  "project",
+  "canon",
+  "current_version",
+  "active_chapter",
+  "branch",
+  "privacy",
+  "currentness",
+  "story_time",
+  "pov",
+  "task_type",
+] as const);
 
 function searchHitContextCandidate(
   hit: HybridSearchHit,
@@ -5202,8 +5825,9 @@ function searchHitContextCandidate(
   const content = hit.document.text.trim().slice(0, 4_000);
   const score = clampNormalizedScore(rerankScore ?? hit.scores.total);
   const reranked = rerankSource !== "none";
+  const selectedByFts = hit.scores.keyword > 0;
   return Object.freeze({
-    id: `${rerankSource === "qwen_remote" ? "qwen-rerank" : reranked ? "local-rerank" : "semantic-search"}:${hit.document.id}`,
+    id: `${rerankSource === "qwen_remote" ? "qwen-rerank" : reranked ? "local-rerank" : selectedByFts ? "fts-search" : "semantic-search"}:${hit.document.id}`,
     content: `[${hit.document.title}]\n${content}`,
     selectionReason: reranked
       ? `${
@@ -5211,13 +5835,15 @@ function searchHitContextCandidate(
             ? "The explicit Alibaba Qwen remote reranker selected this additional source."
             : "The local deterministic evidence reranker selected this additional source."
         } ${rerankReason ?? ""}`.trim()
-      : "The local hybrid index found this source relevant and its vector capability was ready.",
+      : selectedByFts
+        ? "The local FTS/keyword baseline found this current accepted source relevant."
+        : "The optional local vector index supplemented the FTS/keyword baseline with this current accepted source.",
     evidence: Object.freeze([
       Object.freeze({
         sourceType: reranked ? "rerank_result" : searchContextSourceType(hit.document.sourceType),
         sourceId: hit.document.sourceId,
         sourceVersionId: hit.document.sourceVersionId,
-        locator: `search-document:${hit.document.id}`,
+        locator: searchDocumentEvidenceLocator(hit.document),
         contentHash: hit.document.contentHash,
         excerpt: null,
       }),
@@ -5225,6 +5851,26 @@ function searchHitContextCandidate(
     priority: Math.round(score * 1_000),
     relevanceScore: score,
   });
+}
+
+function searchDocumentEvidenceLocator(document: HybridSearchHit["document"]): string {
+  const start = document.utf16Start;
+  const end = document.utf16End;
+  const sourceLength = document.sourceLength;
+  if (
+    start !== undefined &&
+    end !== undefined &&
+    sourceLength !== undefined &&
+    Number.isSafeInteger(start) &&
+    Number.isSafeInteger(end) &&
+    Number.isSafeInteger(sourceLength) &&
+    start >= 0 &&
+    start < end &&
+    end <= sourceLength
+  ) {
+    return `utf16:${String(start)}-${String(end)}/${String(sourceLength)};search-document:${document.id}`;
+  }
+  return `search-document:${document.id}`;
 }
 
 function clampNormalizedScore(value: number): number {
@@ -5489,6 +6135,7 @@ export async function createConfiguredModelCandidate(
       messages,
       maximumOutputTokens: 2_048,
       temperature: 0.8,
+      executionPolicy: SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
       generationId,
       ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
       onBeforeDispatch: async ({

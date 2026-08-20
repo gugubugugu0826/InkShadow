@@ -30,7 +30,7 @@ import {
 } from "@inkshadow/ui";
 import { Link, useParams } from "react-router-dom";
 
-import { normalizeUiError } from "../infrastructure/ui-error";
+import { normalizeUiError, projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
 const LICENSE_OPTIONS = MATERIAL_LICENSE_KINDS.map((license) => ({
@@ -161,7 +161,7 @@ export function ProjectMaterialsPage() {
   }, [load]);
 
   const readonly = project?.status !== "active";
-  const normalizedPageError = pageError === null ? null : normalizeUiError(pageError);
+  const normalizedPageError = pageError === null ? null : projectOrdinaryUiError(pageError);
   const activeMaterials = materials.filter(({ status }) => status === "active");
   const disposedMaterials = materials.filter(({ status }) => status !== "active");
   const referenceCount = Object.values(references).reduce(
@@ -400,7 +400,6 @@ export function ProjectMaterialsPage() {
               <ErrorState
                 title={normalizedPageError.title}
                 description={normalizedPageError.description}
-                errorCode={normalizedPageError.code}
                 primaryAction={{ label: "重试", onClick: () => void load() }}
               />
             ),

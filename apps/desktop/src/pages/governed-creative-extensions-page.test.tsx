@@ -53,6 +53,8 @@ describe("GovernedCreativeExtensionsPage", () => {
 
     expect(await screen.findByText("翻译服务尚未启用")).toBeInTheDocument();
     expect((await screen.findAllByText("Token 用量未知")).length).toBeGreaterThan(0);
+    expect(screen.getByText(/供应商没有返回可核对的用量/u)).toBeInTheDocument();
+    expect(screen.queryByText(/EXTENSION_USAGE_UNAVAILABLE/u)).not.toBeInTheDocument();
     const generate = await screen.findByRole("button", { name: "生成隔离候选" });
     expect(generate).toBeDisabled();
 
@@ -102,6 +104,10 @@ describe("GovernedCreativeExtensionsPage", () => {
 
     expect(await screen.findByText("https://provider.example/v1")).toBeInTheDocument();
     expect(screen.getByText("remote-provider / translation-v1")).toBeInTheDocument();
+    expect(screen.queryByText(PROJECT_ID)).not.toBeInTheDocument();
+    expect(screen.queryByText(VERSION_ID)).not.toBeInTheDocument();
+    expect(screen.queryByText(SOURCE_CHECKSUM)).not.toBeInTheDocument();
+    expect(screen.queryByText(remote.requestFingerprint)).not.toBeInTheDocument();
     const blockedRun = screen.getByRole("button", { name: "先确认远程发送" });
     expect(blockedRun).toBeDisabled();
     expect(runtime.run).not.toHaveBeenCalled();
@@ -171,6 +177,13 @@ describe("GovernedCreativeExtensionsPage", () => {
     expect(screen.getByText("300")).toBeInTheDocument();
     expect(screen.getByText("450")).toBeInTheDocument();
     expect(runtime.acceptCandidate).not.toHaveBeenCalled();
+
+    const decisionSurface = screen.getByLabelText("受治理创意成果候选决策");
+    expect(decisionSurface).toHaveClass("candidate-decision-surface");
+    expect(screen.getByLabelText("受治理创意成果候选内容")).toHaveAttribute("tabindex", "0");
+    expect(decisionSurface.querySelector(":scope > .ink-card__footer")).toHaveClass(
+      "candidate-decision-actions",
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "采纳为独立成果" }));
     await waitFor(() =>

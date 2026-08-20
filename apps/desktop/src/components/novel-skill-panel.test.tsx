@@ -123,6 +123,18 @@ describe("NovelSkillPanel", () => {
     expect(await screen.findByText(/浏览器演示不会应用写作方法/u)).toBeVisible();
     expect(screen.queryByRole("button", { name: /实验性开启/u })).not.toBeInTheDocument();
   });
+
+  it("does not expose an uncontrolled runtime error in the ordinary writing-method UI", async () => {
+    const rawMessage = "SQLITE_IOERR /users/private/novel-skill.json";
+    const runtime = {
+      listProjectState: vi.fn(() => Promise.reject(new Error(rawMessage))),
+    } as Pick<NovelSkillRuntimePort, "listProjectState"> as NovelSkillRuntimePort;
+
+    render(<NovelSkillPanel projectId={PROJECT_ID} runtime={runtime} />);
+
+    expect(await screen.findByRole("alert")).toBeVisible();
+    expect(document.body).not.toHaveTextContent(rawMessage);
+  });
 });
 
 function projectState(enabled: boolean, displayName = "场景推进"): NovelSkillProjectState {

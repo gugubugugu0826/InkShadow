@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Chapter, Project } from "@inkshadow/domain";
 import { parseUuidV7 as parseDomainUuid } from "@inkshadow/domain";
 import {
@@ -12,6 +12,7 @@ import {
   type FormalStoryRecord,
   type DecideReviewItemCommand,
   type MemoryLevel,
+  type LegacyMemoryPromotionPreview,
   type MemoryPolicy,
   type MemoryRecord,
   type MemorySourceKind,
@@ -52,13 +53,13 @@ import {
 } from "@inkshadow/ui";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { normalizeUiError } from "../infrastructure/ui-error";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 import { WritingPreferencesPanel } from "../components/writing-preferences-panel";
 import { NovelSkillPanel } from "../components/novel-skill-panel";
 import { ContextHistoryPanel } from "../components/context-history-panel";
 import { ChapterSummaryPanel } from "../components/chapter-summary-panel";
-import { StorySettingsTools } from "../components/story-settings-tools";
+import { StorySettingsTools, type ManualFactFormDraft } from "../components/story-settings-tools";
 import type { ContinuousStoryStateDashboard } from "../infrastructure/continuous-story-state-extraction";
 
 const FORMAL_KIND_OPTIONS = FORMAL_RECORD_KINDS.map((kind) => ({
@@ -122,6 +123,9 @@ export function StoryGovernancePage() {
   const [facts, setFacts] = useState<readonly StoryFact[]>([]);
   const [policy, setPolicy] = useState<MemoryPolicy | null>(null);
   const [memories, setMemories] = useState<readonly MemoryRecord[]>([]);
+  const [memoryPromotionPreviews, setMemoryPromotionPreviews] = useState<
+    readonly LegacyMemoryPromotionPreview[]
+  >([]);
   const [whatIfBranches, setWhatIfBranches] = useState<readonly WhatIfBranch[]>([]);
   const [outlineDrafts, setOutlineDrafts] = useState<readonly OutlineDraftCandidate[]>([]);
   const [chapters, setChapters] = useState<readonly Chapter[]>([]);
@@ -141,6 +145,8 @@ export function StoryGovernancePage() {
   const [formalTitle, setFormalTitle] = useState("");
   const [formalDescription, setFormalDescription] = useState("");
   const [memoryDialog, setMemoryDialog] = useState<MemoryRecord | "create" | null>(null);
+  const [memoryPromotionDialog, setMemoryPromotionDialog] =
+    useState<LegacyMemoryPromotionPreview | null>(null);
   const [memoryLevel, setMemoryLevel] = useState<MemoryLevel>("L2");
   const [memoryContent, setMemoryContent] = useState("");
   const [policyDialogOpen, setPolicyDialogOpen] = useState(false);
@@ -155,6 +161,11 @@ export function StoryGovernancePage() {
   const [factType, setFactType] = useState("character_identity");
   const [factContent, setFactContent] = useState("");
   const [factLocked, setFactLocked] = useState(false);
+  const factContentInputRef = useRef<HTMLTextAreaElement>(null);
+  const factReturnFocusRef = useRef<Readonly<{
+    element: HTMLElement | null;
+    elementId: string | null;
+  }> | null>(null);
   const [causalNotice, setCausalNotice] = useState<Readonly<{
     tone: "info" | "warning";
     title: string;
@@ -185,6 +196,7 @@ export function StoryGovernancePage() {
       recordResult,
       policyResult,
       memoryResult,
+      memoryPromotionResult,
       branchResult,
       draftResult,
       chapterResult,
@@ -196,6 +208,7 @@ export function StoryGovernancePage() {
       runtime.story.formalRecords.listByProjectId(storyProjectId.value),
       runtime.story.memoryService.ensureDefaultPolicy(storyProjectId.value),
       runtime.story.memoryRecords.listByProjectId(storyProjectId.value),
+      runtime.story.legacyMemoryPromotion.previewProject(storyProjectId.value),
       runtime.story.whatIfBranches.listByProjectId(storyProjectId.value),
       runtime.story.outlineDrafts.listByProjectId(storyProjectId.value),
       runtime.repositories.chapters.listByProjectId(domainProjectId.value),
@@ -208,6 +221,7 @@ export function StoryGovernancePage() {
       recordResult,
       policyResult,
       memoryResult,
+      memoryPromotionResult,
       branchResult,
       draftResult,
       chapterResult,
@@ -229,6 +243,7 @@ export function StoryGovernancePage() {
       !factResult.ok ||
       !policyResult.ok ||
       !memoryResult.ok ||
+      !memoryPromotionResult.ok ||
       !branchResult.ok ||
       !draftResult.ok ||
       !chapterResult.ok ||
@@ -242,6 +257,7 @@ export function StoryGovernancePage() {
     setRecords(recordResult.value);
     setPolicy(policyResult.value);
     setMemories(memoryResult.value);
+    setMemoryPromotionPreviews(memoryPromotionResult.value);
     setWhatIfBranches(branchResult.value);
     setOutlineDrafts(draftResult.value);
     setChapters(chapterResult.value);
@@ -263,7 +279,7 @@ export function StoryGovernancePage() {
   }, [load]);
 
   const readonly = project?.status !== "active";
-  const normalizedError = error === null ? null : normalizeUiError(error);
+  const normalizedError = error === null ? null : projectOrdinaryUiError(error);
   const reviewItems = useMemo(
     () =>
       [...extractionItems, ...consistencyItems].sort(
@@ -301,6 +317,11 @@ export function StoryGovernancePage() {
   const selectedCharacter = characterGroups.find(({ key }) => key === selectedCharacterKey) ?? null;
   const selectedWorld = worldGroups.find(({ key }) => key === selectedWorldKey) ?? null;
   const selectedMemory = memories.find(({ id }) => id === selectedMemoryId) ?? null;
+  const promotedMemory = memories.find(({ id }) => id === memoryPromotionDialog?.memoryId) ?? null;
+  const memoryPromotionById = useMemo(
+    () => new Map(memoryPromotionPreviews.map((preview) => [preview.memoryId, preview] as const)),
+    [memoryPromotionPreviews],
+  );
   const mergeMemories = mergeMemoryIds
     .map((id) => memories.find((memory) => memory.id === id) ?? null)
     .filter((memory): memory is MemoryRecord => memory !== null);
@@ -329,19 +350,91 @@ export function StoryGovernancePage() {
   );
 
   function openCreateFact(): void {
+    factReturnFocusRef.current = {
+      element: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+      elementId: null,
+    };
     setFactType("character_identity");
     setFactContent("");
     setFactLocked(false);
     setFactDialogOpen(true);
   }
 
-  function keepMemoryAsSetting(memory: MemoryRecord): void {
-    const snapshot = memory.toSnapshot();
-    setFactType(snapshot.level === "L4" ? "writing_rule" : "world_setting");
-    setFactContent(snapshot.content);
-    setFactLocked(snapshot.level === "L4");
-    setSelectedMemoryId(null);
+  function openManualFactForm(draft: ManualFactFormDraft): void {
+    factReturnFocusRef.current = {
+      element: null,
+      elementId: draft.returnFocusElementId,
+    };
+    setFactType(draft.suggestedFactType ?? "character_identity");
+    setFactContent(draft.contentText);
+    setFactLocked(false);
     setFactDialogOpen(true);
+  }
+
+  function restoreFactDialogFocus(): void {
+    const target = factReturnFocusRef.current;
+    factReturnFocusRef.current = null;
+    window.requestAnimationFrame(() => {
+      const connectedElement = target?.element?.isConnected === true ? target.element : null;
+      const identifiedElement =
+        target?.elementId === null || target?.elementId === undefined
+          ? null
+          : document.getElementById(target.elementId);
+      (connectedElement ?? identifiedElement)?.focus();
+    });
+  }
+
+  function closeFactDialog(): void {
+    setFactDialogOpen(false);
+    restoreFactDialogFocus();
+  }
+
+  async function keepMemoryAsSetting(memory: MemoryRecord): Promise<void> {
+    if (!storyProjectId.ok || busy) return;
+    setBusy(true);
+    const preview = await runtime.story.legacyMemoryPromotion.preview({
+      projectId: storyProjectId.value,
+      memoryId: memory.id,
+    });
+    setBusy(false);
+    if (!preview.ok) {
+      setError(preview.error);
+      return;
+    }
+    setSelectedMemoryId(null);
+    setMemoryPromotionDialog(preview.value);
+    setError(null);
+  }
+
+  async function confirmMemoryPromotion(): Promise<void> {
+    if (!storyProjectId.ok || memoryPromotionDialog === null || busy) return;
+    setBusy(true);
+    const result = await runtime.story.legacyMemoryPromotion.confirm({
+      projectId: storyProjectId.value,
+      memoryId: memoryPromotionDialog.memoryId,
+      expectedMemoryRevision: memoryPromotionDialog.memoryRevision,
+      actorId: runtime.story.actorId,
+      humanConfirmed: true,
+      acceptConflict: memoryPromotionDialog.requiresConflictConfirmation,
+    });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      await load();
+      return;
+    }
+    const status = result.value.status;
+    setMemoryPromotionDialog(
+      Object.freeze({
+        ...memoryPromotionDialog,
+        status,
+        linkedLegacyRevision: result.value.link?.legacyRevision ?? null,
+        canConfirm: false,
+        requiresConflictConfirmation: false,
+      }),
+    );
+    setError(null);
+    await load();
   }
 
   async function forgetMemory(memory: MemoryRecord): Promise<void> {
@@ -434,6 +527,7 @@ export function StoryGovernancePage() {
     setFactDialogOpen(false);
     setError(null);
     await load();
+    restoreFactDialogFocus();
   }
 
   async function confirmFact(fact: StoryFact): Promise<void> {
@@ -967,11 +1061,14 @@ export function StoryGovernancePage() {
               <dl className="story-entity-detail__metadata">
                 <div>
                   <dt>来源章节</dt>
-                  <dd>{chapter?.title ?? snapshot.source.chapterId ?? "非章节来源"}</dd>
+                  <dd>
+                    {chapter?.title ??
+                      (snapshot.source.chapterId === null ? "非章节来源" : "已绑定来源章节")}
+                  </dd>
                 </div>
                 <div>
                   <dt>来源引用</dt>
-                  <dd>{snapshot.source.reference}</dd>
+                  <dd>已保留可审计的来源定位</dd>
                 </div>
                 <div>
                   <dt>状态</dt>
@@ -1045,7 +1142,6 @@ export function StoryGovernancePage() {
               <div className="card-heading-row">
                 <div>
                   <h3>{fields.title}</h3>
-                  <p>{snapshot.recordKey}</p>
                 </div>
                 <Badge tone={formalKindTone(record.kind)}>{formalKindLabel(record.kind)}</Badge>
               </div>
@@ -1125,7 +1221,7 @@ export function StoryGovernancePage() {
         <InlineAlert
           tone="error"
           title={normalizedError.title}
-          description={`${normalizedError.description}（${normalizedError.code}）`}
+          description={normalizedError.description}
           onDismiss={() => setError(null)}
         />
       )}
@@ -1148,7 +1244,6 @@ export function StoryGovernancePage() {
               <ErrorState
                 title={normalizedError.title}
                 description={normalizedError.description}
-                errorCode={normalizedError.code}
                 primaryAction={{ label: "重试", onClick: () => void load() }}
               />
             ),
@@ -1172,7 +1267,7 @@ export function StoryGovernancePage() {
             }
             readonly={readonly}
             onChanged={load}
-            onOpenManualForm={openCreateFact}
+            onOpenManualForm={openManualFactForm}
           />
           <Tabs defaultValue="characters" value={activeTab} onValueChange={setActiveTab}>
             <TabsList label="故事设定分类">
@@ -1586,7 +1681,6 @@ export function StoryGovernancePage() {
                             <div className="card-heading-row">
                               <div>
                                 <CardTitle>{fields.title}</CardTitle>
-                                <CardDescription>{snapshot.recordKey}</CardDescription>
                               </div>
                               <Badge tone={formalKindTone(record.kind)}>
                                 {formalKindLabel(record.kind)}
@@ -1695,6 +1789,7 @@ export function StoryGovernancePage() {
                   <div className="story-memory-list">
                     {memories.map((memory) => {
                       const snapshot = memory.toSnapshot();
+                      const promotion = memoryPromotionById.get(memory.id) ?? null;
                       return (
                         <Card key={memory.id}>
                           <CardHeader>
@@ -1714,6 +1809,11 @@ export function StoryGovernancePage() {
                                 {snapshot.excluded && <Badge tone="danger">排除</Badge>}
                                 {!snapshot.pinned && !snapshot.excluded && snapshot.weight < 1 && (
                                   <Badge tone="warning">权重 {snapshot.weight.toFixed(1)}</Badge>
+                                )}
+                                {promotion !== null && (
+                                  <Badge tone={memoryPromotionTone(promotion.status)}>
+                                    {memoryPromotionLabel(promotion.status)}
+                                  </Badge>
                                 )}
                               </div>
                             </div>
@@ -1897,12 +1997,11 @@ export function StoryGovernancePage() {
                                 <CardTitle>
                                   {reviewTypeLabel(item.itemType)} ·{" "}
                                   {target === undefined
-                                    ? snapshot.targetRecordId
+                                    ? "待恢复的正式设定"
                                     : readFormalFields(target).title}
                                 </CardTitle>
                                 <CardDescription>
-                                  {chapter?.title ?? snapshot.sourceChapterId} · 版本{" "}
-                                  {snapshot.sourceVersionId.slice(-8)}
+                                  {chapter?.title ?? "来源章节待恢复"} · 已绑定对应不可变版本
                                 </CardDescription>
                               </div>
                               <div className="story-memory-badges">
@@ -2033,7 +2132,7 @@ export function StoryGovernancePage() {
                                 <CardDescription>
                                   基于{" "}
                                   {sourceRecord === undefined
-                                    ? snapshot.sourceEventId
+                                    ? "待恢复的来源事件"
                                     : readFormalFields(sourceRecord).title}{" "}
                                   · 时间线修订 {String(snapshot.baseTimelineRevision)}
                                 </CardDescription>
@@ -2167,6 +2266,7 @@ export function StoryGovernancePage() {
         {selectedMemory !== null &&
           (() => {
             const snapshot = selectedMemory.toSnapshot();
+            const promotion = memoryPromotionById.get(selectedMemory.id) ?? null;
             const sourceChapter = chapters.find(
               ({ id }) => String(id) === snapshot.source.sourceId,
             );
@@ -2194,15 +2294,25 @@ export function StoryGovernancePage() {
                   </div>
                   <div>
                     <dt>来源章节或对象</dt>
-                    <dd>{sourceChapter?.title ?? snapshot.source.sourceId}</dd>
+                    <dd>{sourceChapter?.title ?? "已绑定来源对象"}</dd>
                   </div>
                   <div>
                     <dt>来源版本</dt>
-                    <dd>{snapshot.source.sourceVersionId ?? "没有版本引用"}</dd>
+                    <dd>
+                      {snapshot.source.sourceVersionId === null
+                        ? "没有版本引用"
+                        : "已绑定不可变版本"}
+                    </dd>
                   </div>
                   <div>
                     <dt>已使用</dt>
                     <dd>{String(snapshot.useCount)} 次</dd>
+                  </div>
+                  <div>
+                    <dt>正式设定转换</dt>
+                    <dd>
+                      {promotion === null ? "尚未检查" : memoryPromotionLabel(promotion.status)}
+                    </dd>
                   </div>
                 </dl>
                 <blockquote className="story-source-quote">
@@ -2217,10 +2327,21 @@ export function StoryGovernancePage() {
                 />
                 <div className="story-governance-actions">
                   <Button
-                    disabled={readonly || busy}
-                    onClick={() => keepMemoryAsSetting(selectedMemory)}
+                    disabled={
+                      readonly ||
+                      busy ||
+                      promotion?.status === "converted" ||
+                      promotion?.status === "duplicate"
+                    }
+                    onClick={() => void keepMemoryAsSetting(selectedMemory)}
                   >
-                    保留为设定
+                    {promotion?.status === "converted"
+                      ? "已保留为设定"
+                      : promotion?.status === "duplicate"
+                        ? "已有重复转换"
+                        : promotion?.status === "conflict"
+                          ? "处理转换冲突"
+                          : "保留为设定"}
                   </Button>
                   <Button
                     variant="secondary"
@@ -2241,6 +2362,53 @@ export function StoryGovernancePage() {
             );
           })()}
       </Drawer>
+
+      <Dialog
+        open={memoryPromotionDialog !== null}
+        onOpenChange={(open) => {
+          if (!open && !busy) setMemoryPromotionDialog(null);
+        }}
+        title="保留为正式设定"
+        description="这里只把这条旧记忆的当前内容写入唯一的正式故事事实链。预览不会写入；只有下方的明确确认才会晋升，旧记忆和审计来源都会保留。"
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              disabled={busy}
+              onClick={() => setMemoryPromotionDialog(null)}
+            >
+              {memoryPromotionDialog?.canConfirm === true ? "取消" : "完成"}
+            </Button>
+            {memoryPromotionDialog?.canConfirm === true && (
+              <Button loading={busy} onClick={() => void confirmMemoryPromotion()}>
+                {memoryPromotionDialog.requiresConflictConfirmation
+                  ? "确认保留为新设定"
+                  : "确认保留为正式设定"}
+              </Button>
+            )}
+          </>
+        }
+      >
+        {memoryPromotionDialog !== null && promotedMemory !== null && (
+          <div className="story-governance-form">
+            <InlineAlert
+              tone={memoryPromotionDialog.status === "conflict" ? "warning" : "info"}
+              title={memoryPromotionLabel(memoryPromotionDialog.status)}
+              description={memoryPromotionDescription(memoryPromotionDialog)}
+            />
+            <div className="story-review-suggestion">
+              <strong>将保留的内容</strong>
+              <blockquote className="story-source-quote">
+                {promotedMemory.toSnapshot().content}
+              </blockquote>
+            </div>
+            <p className="story-governance-copy">
+              目标是正式故事事实。转换会留下旧记忆修订与正式事实
+              的来源关联，不会删除、改写或自动再次提升这条记忆。
+            </p>
+          </div>
+        )}
+      </Dialog>
 
       <Dialog
         open={aliasResolutionFact !== null}
@@ -2296,14 +2464,19 @@ export function StoryGovernancePage() {
         open={factDialogOpen}
         onOpenChange={(open) => {
           if (!busy) {
-            setFactDialogOpen(open);
+            if (open) {
+              setFactDialogOpen(true);
+            } else {
+              closeFactDialog();
+            }
           }
         }}
+        initialFocusRef={factContentInputRef}
         title="添加故事设定"
         description="保存表示这条内容由你本人确认。你可以以后取消锁定或标记为不再生效，历史记录仍会保留。"
         footer={
           <>
-            <Button variant="secondary" disabled={busy} onClick={() => setFactDialogOpen(false)}>
+            <Button variant="secondary" disabled={busy} onClick={closeFactDialog}>
               取消
             </Button>
             <Button
@@ -2335,6 +2508,7 @@ export function StoryGovernancePage() {
             {(fieldProps) => (
               <Textarea
                 {...fieldProps}
+                ref={factContentInputRef}
                 value={factContent}
                 maxLength={10_000}
                 currentLength={factContent.length}
@@ -2489,8 +2663,10 @@ export function StoryGovernancePage() {
                 <CardContent>
                   <p className="story-governance-copy">{snapshot.content}</p>
                   <div className="story-governance-meta">
-                    <span>来源对象：{snapshot.source.sourceId}</span>
-                    <span>来源版本：{snapshot.source.sourceVersionId ?? "无"}</span>
+                    <span>来源对象：已绑定</span>
+                    <span>
+                      来源版本：{snapshot.source.sourceVersionId === null ? "无" : "已绑定"}
+                    </span>
                   </div>
                 </CardContent>
               </Card>
@@ -2976,7 +3152,7 @@ function readFormalFields(record: FormalStoryRecord): {
   readonly title: string;
   readonly description: string;
 } {
-  return readStoryValueFields(record.currentValue, record.toSnapshot().recordKey);
+  return readStoryValueFields(record.currentValue, "旧结构化设定");
 }
 
 function readStoryValueFields(
@@ -2995,7 +3171,7 @@ function readStoryValueFields(
   }
   return {
     title: fallbackTitle,
-    description: JSON.stringify(value, null, 2),
+    description: "这条旧设定使用结构化格式保存；普通视图不会显示内部字段，请在人工表单中复核。",
   };
 }
 
@@ -3114,7 +3290,7 @@ function storyFactContent(snapshot: StoryFactSnapshot): string {
   }
   return snapshot.structuredValue === null
     ? "（这条设定没有可显示的内容）"
-    : JSON.stringify(snapshot.structuredValue, null, 2);
+    : "这条设定已按结构化字段保存；当前没有可显示的文字说明。";
 }
 
 function formalKindLabel(kind: FormalRecordKind): string {
@@ -3156,6 +3332,46 @@ function memorySourceLabel(kind: MemorySourceKind): string {
     import: "导入",
   } as const;
   return labels[kind];
+}
+
+function memoryPromotionLabel(status: LegacyMemoryPromotionPreview["status"]): string {
+  const labels: Record<LegacyMemoryPromotionPreview["status"], string> = {
+    available: "尚未转换",
+    converted: "已转换",
+    duplicate: "重复转换",
+    conflict: "转换冲突",
+  };
+  return labels[status];
+}
+
+function memoryPromotionTone(
+  status: LegacyMemoryPromotionPreview["status"],
+): "neutral" | "success" | "accent" | "warning" {
+  const tones: Record<
+    LegacyMemoryPromotionPreview["status"],
+    "neutral" | "success" | "accent" | "warning"
+  > = {
+    available: "neutral",
+    converted: "success",
+    duplicate: "accent",
+    conflict: "warning",
+  };
+  return tones[status];
+}
+
+function memoryPromotionDescription(preview: LegacyMemoryPromotionPreview): string {
+  if (preview.status === "converted") {
+    return "这条旧记忆的当前修订已经由你确认并保留为正式故事事实；再次操作不会重复创建。";
+  }
+  if (preview.status === "duplicate") {
+    return "相同内容已经通过这条旧记忆的较早修订转换；系统不会再创建一条重复的正式事实。";
+  }
+  if (preview.status === "conflict") {
+    return preview.requiresConflictConfirmation
+      ? "这条记忆在上次转换后改过内容。旧正式事实不会被覆盖；只有你再次明确确认，当前修订才会另存为一条新正式事实。"
+      : "当前修订已有不一致或失效的转换记录。为避免覆盖历史，本次转换已拦截。";
+  }
+  return "这条记忆尚未转换。确认后会先建立可审计的旧记录来源关联，再单独晋升为正式故事事实。";
 }
 
 function whatIfStatusLabel(status: WhatIfBranch["status"]): string {

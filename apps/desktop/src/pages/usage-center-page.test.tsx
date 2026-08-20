@@ -2,13 +2,14 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import type {
-  UsageAggregate,
-  UsageBreakdownDimension,
-  UsageBreakdownEntry,
-  UsageCenterEvent,
-  UsageCenterReader,
-  UsageCenterSnapshot,
+import {
+  UsageCenterError,
+  type UsageAggregate,
+  type UsageBreakdownDimension,
+  type UsageBreakdownEntry,
+  type UsageCenterEvent,
+  type UsageCenterReader,
+  type UsageCenterSnapshot,
 } from "../infrastructure/usage-center-service";
 import { UsageCenterPage } from "./usage-center-page";
 
@@ -31,6 +32,10 @@ describe("UsageCenterPage", () => {
     expect(screen.getByText("调用账本有 1 次失败或结果不明确、1 次费用未知")).toBeVisible();
     expect(screen.getByText("第一章 雨停以前")).toBeVisible();
     expect(screen.getAllByText("本地运算").length).toBeGreaterThan(0);
+    expect(document.body).not.toHaveTextContent("deepseek-connection");
+    expect(document.body).not.toHaveTextContent("ollama-connection");
+    expect(screen.getByText(/AI 服务暂未完成本次操作。请到设置中的 AI 模型检查/u)).toBeVisible();
+    expect(screen.queryByText("LOCAL_MODEL_UNAVAILABLE_INTERNAL_SENTINEL")).not.toBeInTheDocument();
     expect(
       screen.getByText(
         "这里不保存正文、提示词或 API Key。金额是按本地价格元数据计算的估算，不代表供应商最终账单；缺少 token 回执或价格时会明确显示“费用未知”。",
@@ -90,9 +95,10 @@ describe("UsageCenterPage", () => {
   });
 
   it("recovers from a local ledger read failure", async () => {
+    const privateCause = "sqlite table invocation_ledger is malformed";
     const read = vi
       .fn<UsageCenterReader["read"]>()
-      .mockRejectedValueOnce(new Error("sqlite temporarily unavailable"))
+      .mockRejectedValueOnce(new UsageCenterError("USAGE_CENTER_LEDGER_INVALID", privateCause))
       .mockResolvedValue(EMPTY_SNAPSHOT);
     const reader: UsageCenterReader = {
       read,
@@ -101,7 +107,9 @@ describe("UsageCenterPage", () => {
     render(<UsageCenterPage reader={reader} now={NOW} />);
 
     expect(await screen.findByText("暂时无法读取调用账本")).toBeInTheDocument();
-    expect(screen.queryByText("sqlite temporarily unavailable")).not.toBeInTheDocument();
+    expect(screen.getByText(/发生了未预期的本地错误。请先重试/u)).toBeInTheDocument();
+    expect(screen.queryByText("USAGE_CENTER_LEDGER_INVALID")).not.toBeInTheDocument();
+    expect(screen.queryByText(privateCause)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重新读取" }));
 
     expect(await screen.findByText("还没有调用记录")).toBeInTheDocument();
@@ -154,7 +162,7 @@ const LOCAL_RECORD: UsageCenterEvent = Object.freeze({
   costSource: "unknown",
   privacyPolicy: "local_only",
   dataDestination: "local",
-  errorCode: "LOCAL_MODEL_UNAVAILABLE",
+  errorCode: "LOCAL_MODEL_UNAVAILABLE_INTERNAL_SENTINEL",
 });
 
 const SUMMARY: UsageAggregate = Object.freeze({

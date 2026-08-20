@@ -186,6 +186,18 @@ describe("SyncSecurityPage", () => {
     expect(await screen.findByText("此项目的云同步已关闭")).toBeVisible();
   });
 
+  it("explains an enrollment failure without exposing its internal sync code", async () => {
+    const baseRuntime = createDevelopmentRuntime(window.localStorage);
+    const projectId = await seedProject(baseRuntime);
+    const fixture = createEnrollmentRuntime(baseRuntime, [projectId], "error");
+
+    renderRoute(fixture.runtime);
+
+    expect(await screen.findByText("此项目的云同步需要处理")).toBeVisible();
+    expect(screen.getByText(/云端操作未完成/u)).toBeVisible();
+    expect(screen.queryByText(/SYNC_TEST_BLOCKED/u)).not.toBeInTheDocument();
+  });
+
   it("loads durable state when switching projects without implicitly enabling either project", async () => {
     const baseRuntime = createDevelopmentRuntime(window.localStorage);
     const firstProjectId = await seedProject(baseRuntime);

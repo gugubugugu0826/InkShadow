@@ -16,6 +16,7 @@ import type {
   ModelHubImageGenerationReceipt,
   ModelHubImageGenerationService,
 } from "../infrastructure/model-hub-image-generation-service";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 
 export interface ModelHubImageGenerationPanelProps {
   readonly service: Pick<
@@ -32,6 +33,8 @@ export function ModelHubImageGenerationPanel({
   const [inspection, setInspection] = useState<ModelHubImageGenerationInspection | null>(null);
   const [prompt, setPrompt] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
+  const [acknowledgedPrompt, setAcknowledgedPrompt] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -45,9 +48,10 @@ export function ModelHubImageGenerationPanel({
       const nextInspection = await service.inspect();
       setInspection(nextInspection);
       setAcknowledged(false);
+      setAcknowledgedPrompt(null);
     } catch (cause: unknown) {
       setInspection(null);
-      setError(messageFrom(cause, "还没有找到可安全使用的图片模型。"));
+      setError(projectOrdinaryUiError(cause).description);
     } finally {
       setChecking(false);
     }
@@ -66,7 +70,12 @@ export function ModelHubImageGenerationPanel({
   }, [inspect]);
 
   async function generate(): Promise<void> {
-    if (inspection === null || !acknowledged || prompt.trim() === "") {
+    if (
+      inspection === null ||
+      !acknowledged ||
+      prompt.trim() === "" ||
+      acknowledgedPrompt !== prompt.trim()
+    ) {
       return;
     }
     setBusy(true);
@@ -90,14 +99,40 @@ export function ModelHubImageGenerationPanel({
         `图片已保存为 ${generated.file.fileName}。它不会自动插入正文，也不会覆盖已有图片。`,
       );
     } catch (cause: unknown) {
-      const message = messageFrom(cause, "图片生成未完成，未改变正文和已有图片。");
+      const message = projectOrdinaryUiError(cause).description;
       setAcknowledged(false);
       if (errorCodeFrom(cause) === "MODEL_HUB_IMAGE_CONFIRMATION_STALE") {
         await inspect();
       }
       setError(message);
     } finally {
+      setAcknowledged(false);
+      setAcknowledgedPrompt(null);
       setBusy(false);
+    }
+  }
+
+  async function toggleAcknowledgement(): Promise<void> {
+    if (acknowledged) {
+      setAcknowledged(false);
+      setAcknowledgedPrompt(null);
+      return;
+    }
+    const normalizedPrompt = prompt.trim();
+    if (normalizedPrompt === "") return;
+    setConfirming(true);
+    setError(null);
+    try {
+      const prepared = await service.inspect(normalizedPrompt);
+      setInspection(prepared);
+      setAcknowledgedPrompt(normalizedPrompt);
+      setAcknowledged(true);
+    } catch (cause: unknown) {
+      setAcknowledged(false);
+      setAcknowledgedPrompt(null);
+      setError(projectOrdinaryUiError(cause).description);
+    } finally {
+      setConfirming(false);
     }
   }
 
@@ -135,7 +170,7 @@ export function ModelHubImageGenerationPanel({
             <InlineAlert
               tone="warning"
               title="生成前请确认费用与隐私"
-              description={`${inspection.connectionDisplayName} · ${inspection.modelId}；${destinationLabel(inspection.dataDestination)}。Model Hub 当前没有可审计的逐张图片价格，供应商可能收费，请以供应商价格页为准。`}
+              description={`${inspection.connectionDisplayName} · ${inspection.modelId}；${destinationLabel(inspection.dataDestination)}。数据保留：${retentionPolicyLabel(inspection.retentionPolicy)}；训练使用：${trainingPolicyLabel(inspection.trainingPolicy)}。本次最多发起 1 次图片模型调用，自动重试 0 次。Model Hub 当前没有可审计的逐张图片价格，供应商可能收费，请以供应商价格页为准。确认只绑定当前这段图片描述；修改后必须重新确认。`}
             />
 
             <FormField
@@ -152,7 +187,14 @@ export function ModelHubImageGenerationPanel({
                   rows={5}
                   disabled={disabled || busy}
                   placeholder="例如：雨夜的旧书店门口，两位年轻人隔着暖黄色灯光重逢，克制的青春小说插画"
-                  onChange={(event) => setPrompt(event.currentTarget.value)}
+                  onChange={(event) => {
+                    const nextPrompt = event.currentTarget.value;
+                    setPrompt(nextPrompt);
+                    if (acknowledgedPrompt !== nextPrompt.trim()) {
+                      setAcknowledged(false);
+                      setAcknowledgedPrompt(null);
+                    }
+                  }}
                 />
               )}
             </FormField>
@@ -160,8 +202,10 @@ export function ModelHubImageGenerationPanel({
             <Button
               variant={acknowledged ? "secondary" : "ghost"}
               aria-pressed={acknowledged}
-              disabled={disabled || busy}
-              onClick={() => setAcknowledged((current) => !current)}
+              loading={confirming}
+              loadingLabel="正在确认当前描述"
+              disabled={disabled || busy || prompt.trim() === ""}
+              onClick={() => void toggleAcknowledgement()}
             >
               {acknowledged ? "已确认费用与数据去向" : "确认提示会发送给模型并可能产生费用"}
             </Button>
@@ -170,7 +214,14 @@ export function ModelHubImageGenerationPanel({
               variant="ai-primary"
               loading={busy}
               loadingLabel="正在生成并保存"
-              disabled={disabled || checking || !acknowledged || prompt.trim() === ""}
+              disabled={
+                disabled ||
+                checking ||
+                confirming ||
+                !acknowledged ||
+                prompt.trim() === "" ||
+                acknowledgedPrompt !== prompt.trim()
+              }
               onClick={() => void generate()}
             >
               选择保存位置并生成
@@ -196,8 +247,8 @@ export function ModelHubImageGenerationPanel({
         )}
         {receipt !== null && (
           <p>
-            实际调用：{receipt.providerKind} / {receipt.modelId}；文件大小{" "}
-            {formatBytes(receipt.file.bytesWritten)}。
+            实际调用：{inspection?.connectionDisplayName ?? "已确认的图片模型"} · {receipt.modelId}
+            ；文件大小 {formatBytes(receipt.file.bytesWritten)}。
           </p>
         )}
       </CardContent>
@@ -209,6 +260,21 @@ function destinationLabel(value: "local" | "remote"): string {
   return value === "local" ? "提示仅在本机模型处理" : "图片描述会发送到远程供应商";
 }
 
+function retentionPolicyLabel(value: ModelHubImageGenerationInspection["retentionPolicy"]): string {
+  if (value === "none") return "不保留";
+  if (value === "temporary") return "临时保留";
+  if (value === "provider_default") return "遵循供应商默认政策";
+  return "未知";
+}
+
+function trainingPolicyLabel(value: ModelHubImageGenerationInspection["trainingPolicy"]): string {
+  if (value === "not_used") return "不用于训练";
+  if (value === "opt_out") return "已选择退出训练";
+  if (value === "may_be_used") return "可能用于训练";
+  if (value === "provider_default") return "遵循供应商默认政策";
+  return "未知";
+}
+
 function formatBytes(value: number): string {
   if (value < 1_024) {
     return `${String(value)} B`;
@@ -217,10 +283,6 @@ function formatBytes(value: number): string {
     return `${(value / 1_024).toFixed(1)} KB`;
   }
   return `${(value / (1_024 * 1_024)).toFixed(1)} MB`;
-}
-
-function messageFrom(cause: unknown, fallback: string): string {
-  return cause instanceof Error && cause.message.trim() !== "" ? cause.message : fallback;
 }
 
 function errorCodeFrom(cause: unknown): string | null {

@@ -1,9 +1,9 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { ErrorState, PageStateBoundary } from "@inkshadow/ui";
 
 import { AppearancePreferenceProvider } from "./appearance-preference";
 import type { DesktopRuntime } from "./infrastructure/runtime";
-import { isUiErrorRetryable, normalizeUiError } from "./infrastructure/ui-error";
+import { isUiErrorRetryable, projectOrdinaryUiError } from "./infrastructure/ui-error";
 
 async function createDefaultDesktopRuntime(): Promise<DesktopRuntime> {
   const { createDesktopRuntime } = await import("./infrastructure/runtime");
@@ -11,6 +11,14 @@ async function createDefaultDesktopRuntime(): Promise<DesktopRuntime> {
 }
 
 const RuntimeContext = createContext<DesktopRuntime | null>(null);
+
+interface RuntimeBootstrap {
+  readonly factory: () => Promise<DesktopRuntime>;
+  readonly promise: Promise<DesktopRuntime>;
+  consumers: number;
+  runtime: DesktopRuntime | null;
+  closeStarted: boolean;
+}
 
 export interface RuntimeProviderProps {
   readonly children: ReactNode;
@@ -38,21 +46,50 @@ function RuntimeProviderContent({
 }: RuntimeProviderProps) {
   const [runtime, setRuntime] = useState<DesktopRuntime | null>(providedRuntime ?? null);
   const [error, setError] = useState<unknown>(null);
+  const bootstrapRef = useRef<RuntimeBootstrap | null>(null);
 
   useEffect(() => {
     if (providedRuntime !== undefined) {
       return;
     }
 
+    let bootstrap = bootstrapRef.current;
+    if (bootstrap?.factory !== factory) {
+      bootstrap = {
+        factory,
+        promise: Promise.resolve().then(factory),
+        consumers: 0,
+        runtime: null,
+        closeStarted: false,
+      };
+      bootstrapRef.current = bootstrap;
+    }
+    bootstrap.consumers += 1;
+    const currentBootstrap = bootstrap;
     let active = true;
-    let createdRuntime: DesktopRuntime | null = null;
-    void factory()
+
+    const closeIfUnused = () => {
+      if (
+        currentBootstrap.consumers !== 0 ||
+        currentBootstrap.runtime === null ||
+        currentBootstrap.closeStarted
+      ) {
+        return;
+      }
+      currentBootstrap.closeStarted = true;
+      if (bootstrapRef.current === currentBootstrap) {
+        bootstrapRef.current = null;
+      }
+      void currentBootstrap.runtime.close();
+    };
+
+    void currentBootstrap.promise
       .then((value) => {
-        createdRuntime = value;
+        currentBootstrap.runtime = value;
         if (active) {
           setRuntime(value);
-        } else {
-          void value.close();
+        } else if (currentBootstrap.consumers === 0) {
+          closeIfUnused();
         }
       })
       .catch((reason: unknown) => {
@@ -63,14 +100,17 @@ function RuntimeProviderContent({
 
     return () => {
       active = false;
-      if (createdRuntime !== null) {
-        void createdRuntime.close();
-      }
+      currentBootstrap.consumers -= 1;
+      // React StrictMode intentionally tears down and recreates effects once.
+      // Deferring release by one microtask lets that immediate replacement
+      // reuse the same in-flight runtime instead of closing it underneath the
+      // second bootstrap.
+      queueMicrotask(closeIfUnused);
     };
   }, [factory, providedRuntime]);
 
   if (error !== null) {
-    const normalized = normalizeUiError(error);
+    const normalized = projectOrdinaryUiError(error);
     const actionProps = isUiErrorRetryable(error)
       ? {
           primaryAction: {
@@ -83,12 +123,7 @@ function RuntimeProviderContent({
       : {};
     return (
       <main className="desktop-bootstrap">
-        <ErrorState
-          title="无法启动墨影"
-          description={normalized.description}
-          errorCode={normalized.code}
-          {...actionProps}
-        />
+        <ErrorState title="无法启动墨影" description={normalized.description} {...actionProps} />
       </main>
     );
   }

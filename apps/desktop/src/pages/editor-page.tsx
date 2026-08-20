@@ -50,7 +50,9 @@ import {
   Select,
   Textarea,
 } from "@inkshadow/ui";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+
+import "../components/candidate-decision.css";
 
 import {
   canDeferGenerationPlan,
@@ -64,9 +66,15 @@ import {
 import {
   createSelectionRewriteCandidate,
   MAXIMUM_SELECTION_REWRITE_CHARACTERS,
+  prepareSelectionRewrite,
+  type SelectionRewriteDisclosure,
 } from "../infrastructure/selection-rewrite-service";
 import type { StoryContextCompilationReceipt } from "../infrastructure/story-context-runtime";
-import { normalizeUiError, UiActionError } from "../infrastructure/ui-error";
+import {
+  normalizeUiError,
+  projectOrdinaryUiError,
+  UiActionError,
+} from "../infrastructure/ui-error";
 import type {
   DeferredGenerationRequest,
   GenerationAttemptUsage,
@@ -81,6 +89,21 @@ import {
 } from "../infrastructure/accepted-chapter-pipeline";
 import { useAppearancePreference } from "../appearance-preference";
 import { useOnlineStatus } from "../hooks/use-online-status";
+import { useWritingExperience } from "../hooks/use-writing-experience";
+import {
+  disclosureGrantMatches,
+  projectDirectWritingDisclosure,
+  type DirectWritingDisclosure,
+} from "../infrastructure/direct-writing-disclosure";
+import {
+  assertContinuationDisclosureMatches,
+  prepareContinuationGenerationDisclosure,
+  type ContinuationGenerationDisclosure,
+} from "../infrastructure/continuation-generation-disclosure";
+import {
+  directStoryFactOrganizerNotice,
+  organizeDirectStoryFacts,
+} from "../infrastructure/direct-story-fact-organizer";
 import {
   EDITOR_FIND_QUERY_LIMIT,
   EDITOR_REPLACEMENT_LIMIT,
@@ -389,11 +412,70 @@ function selectEditorCandidate(
   });
 }
 
+function readDirectOpeningOrganizationNotice(state: unknown): string | null {
+  if (typeof state !== "object" || state === null || Array.isArray(state)) return null;
+  const organization = (state as Readonly<Record<string, unknown>>).directOpeningOrganization;
+  if (typeof organization !== "object" || organization === null || Array.isArray(organization)) {
+    return null;
+  }
+  const value = organization as Readonly<Record<string, unknown>>;
+  if (value.kind !== "direct_opening_local_organization") return null;
+  if (value.status === "failed") {
+    return "正文和版本已保存；本地设定整理暂未完成，可稍后重新整理。";
+  }
+  if (value.status !== "organized") return null;
+  const organizedCount = readBoundedOrganizationCount(value.organizedCount);
+  const importantReviewCount = readBoundedOrganizationCount(value.importantReviewCount);
+  if (organizedCount === null || importantReviewCount === null) return null;
+  return directStoryFactOrganizerNotice({
+    organizedCount,
+    importantReviewCount,
+    alreadyOrganizedCount: 0,
+    sourceWasCurrent: true,
+  });
+}
+
+function readBoundedOrganizationCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 128
+    ? value
+    : null;
+}
+
+function acceptedTextDelta(
+  before: string,
+  after: string,
+): Readonly<{ text: string; startOffset: number; sourceLength: number }> {
+  let startOffset = 0;
+  const sharedLength = Math.min(before.length, after.length);
+  while (startOffset < sharedLength && before[startOffset] === after[startOffset]) {
+    startOffset += 1;
+  }
+  let sharedSuffixLength = 0;
+  while (
+    sharedSuffixLength < before.length - startOffset &&
+    sharedSuffixLength < after.length - startOffset &&
+    before[before.length - 1 - sharedSuffixLength] === after[after.length - 1 - sharedSuffixLength]
+  ) {
+    sharedSuffixLength += 1;
+  }
+  return Object.freeze({
+    text: after.slice(startOffset, after.length - sharedSuffixLength),
+    startOffset,
+    sourceLength: after.length,
+  });
+}
+
 export function EditorPage() {
   const runtime = useRuntime();
+  const writingExperience = useWritingExperience();
+  const directModeAuthorized =
+    writingExperience.preference?.mode === "direct" &&
+    writingExperience.preference.directLocalOrganizationAuthorizedAt !== null;
   const { resolvedSurface } = useAppearancePreference();
   const online = useOnlineStatus();
   const { compact: compactEditorLayout, revision: editorLayoutRevision } = useCompactEditorLayout();
+  const location = useLocation();
+  const navigate = useNavigate();
   const params = useParams<{ projectId: string; chapterId: string }>();
   const [searchParams] = useSearchParams();
   const requestedCandidateId = searchParams.get("candidate");
@@ -402,6 +484,7 @@ export function EditorPage() {
   const projectId = parsedProjectId.ok ? parsedProjectId.value : null;
   const chapterId = parsedChapterId.ok ? parsedChapterId.value : null;
   const editorRouteKey = `${params.projectId ?? ""}/${params.chapterId ?? ""}`;
+  const directOpeningRouteNoticeRef = useRef(readDirectOpeningOrganizationNotice(location.state));
   const routeIdentityRef = useRef(editorRouteKey);
   const loadOperationRevisionRef = useRef(0);
   const generationOperationRevisionRef = useRef(0);
@@ -440,7 +523,9 @@ export function EditorPage() {
     "unknown",
   );
   const [candidateBusy, setCandidateBusy] = useState(false);
+  const [editorReplacementLocked, setEditorReplacementLocked] = useState(false);
   const [candidateReviewOpen, setCandidateReviewOpen] = useState(false);
+  const candidateReviewTextareaRef = useRef<HTMLTextAreaElement>(null);
   const [candidateDiff, setCandidateDiff] = useState<CandidateTextDiff | null>(null);
   const [candidateReviewDraft, setCandidateReviewDraft] = useState("");
   const [candidateReviewComparedContent, setCandidateReviewComparedContent] = useState("");
@@ -460,6 +545,12 @@ export function EditorPage() {
   });
   const [preflightOpen, setPreflightOpen] = useState(false);
   const [generationPlan, setGenerationPlan] = useState<PreparedGenerationPlan | null>(null);
+  const directGenerationRequestIdsRef = useRef(new Set<string>());
+  const [directGenerationRequestId, setDirectGenerationRequestId] = useState<string | null>(null);
+  const [directDisclosure, setDirectDisclosure] = useState<DirectWritingDisclosure | null>(null);
+  const [continuationDisclosure, setContinuationDisclosure] =
+    useState<ContinuationGenerationDisclosure | null>(null);
+  const [directDisclosureSaving, setDirectDisclosureSaving] = useState(false);
   const [generationError, setGenerationError] = useState<unknown>(null);
   const [generationReceipt, setGenerationReceipt] = useState<GenerationRun | null>(null);
   const [candidateQualityGate, setCandidateQualityGate] =
@@ -484,6 +575,8 @@ export function EditorPage() {
   const [selectionRewriteBusy, setSelectionRewriteBusy] = useState(false);
   const [selectionRewriteContext, setSelectionRewriteContext] =
     useState<StoryContextCompilationReceipt | null>(null);
+  const [selectionRewriteDisclosure, setSelectionRewriteDisclosure] =
+    useState<SelectionRewriteDisclosure | null>(null);
   const [lastGenerationAction, setLastGenerationAction] = useState<
     "continuation" | "selection_rewrite"
   >("continuation");
@@ -542,6 +635,7 @@ export function EditorPage() {
   const cursorRef = useRef(0);
   const selectionRef = useRef<EditorSelection>({ start: 0, end: 0 });
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const primaryEditorActionRef = useRef<HTMLButtonElement | null>(null);
   const editorWorkspaceRef = useRef<HTMLDivElement | null>(null);
   const assistantPanelRef = useRef<HTMLElement | null>(null);
   const assistantResizeDragRef = useRef<EditorAssistantResizeDrag | null>(null);
@@ -566,6 +660,7 @@ export function EditorPage() {
   const autosaveTimerRef = useRef<number | null>(null);
   const operationQueueRef = useRef(new SerializedPersistenceQueue());
   const flushInFlightRef = useRef<Promise<PersistenceFlushHandlerResult> | null>(null);
+  const editorReplacementFenceRef = useRef(false);
   const activeGenerationPlanRef = useRef<PreparedGenerationPlan | null>(null);
   const generationEstimate = generationPlan?.preflight.estimate ?? null;
   const returnedFromAiSettings = searchParams.get("aiSettings") === "returned";
@@ -774,6 +869,7 @@ export function EditorPage() {
       selectionRef.current = selection;
       cursorRef.current = selection.start;
       setSelectionLength(Math.max(0, selection.end - selection.start));
+      setSelectionRewriteDisclosure(null);
       pendingSelectionRef.current = Object.freeze({ selection, focus, scrollTop });
       setSelectionRequestId((current) => current + 1);
     },
@@ -977,7 +1073,9 @@ export function EditorPage() {
     setRecoveryDraft(draft);
     setRecoveryDecisionOpen(draft !== null);
     setSaveState("saved_local");
-    setEditorNotice(candidateSelection.notice);
+    const directOpeningRouteNotice = directOpeningRouteNoticeRef.current;
+    directOpeningRouteNoticeRef.current = null;
+    setEditorNotice(candidateSelection.notice ?? directOpeningRouteNotice);
     setFindStatus(null);
     setError(null);
     setPageState("ready");
@@ -1019,6 +1117,14 @@ export function EditorPage() {
       clearScheduledPersistence();
     };
   }, [clearScheduledPersistence, load]);
+
+  useEffect(() => {
+    if (readDirectOpeningOrganizationNotice(location.state) === null) return;
+    void navigate(
+      { pathname: location.pathname, search: location.search, hash: location.hash },
+      { replace: true, state: null },
+    );
+  }, [location.hash, location.pathname, location.search, location.state, navigate]);
 
   useEffect(() => {
     if (pageState !== "ready") {
@@ -1167,8 +1273,7 @@ export function EditorPage() {
         // affect rebuildable story data, never the author's saved text.
         await ensureAcceptedChapterPipelineTask(runtime, pipelineInput);
       } catch (cause: unknown) {
-        const message =
-          cause instanceof Error ? cause.message : "后台整理任务暂时无法加入本地队列。";
+        const message = projectOrdinaryUiError(cause).description;
         setEditorNotice(`正文已安全保存；${message}`);
         return;
       }
@@ -1180,8 +1285,7 @@ export function EditorPage() {
           }
         })
         .catch((cause: unknown) => {
-          const message =
-            cause instanceof Error ? cause.message : "本地搜索与故事关联暂时失败，可稍后重试。";
+          const message = projectOrdinaryUiError(cause).description;
           setEditorNotice(`正文已安全保存；本地派生暂未完成：${message}`);
         });
     },
@@ -1194,6 +1298,7 @@ export function EditorPage() {
       composingRef.current ||
       draftTimerRef.current !== null ||
       autosaveTimerRef.current !== null ||
+      flushInFlightRef.current !== null ||
       operationQueueRef.current.hasPendingWork() ||
       (stableChapter !== null &&
         pageState === "ready" &&
@@ -1201,6 +1306,29 @@ export function EditorPage() {
         contentRef.current !== stableChapter.content)
     );
   }, [pageState, project?.status]);
+
+  const editorPersistenceSettled = useCallback((): boolean => {
+    const stableChapter = chapterRef.current;
+    return (
+      stableChapter !== null &&
+      contentRef.current === stableChapter.content &&
+      !hasPendingPersistence()
+    );
+  }, [hasPendingPersistence]);
+
+  const beginEditorReplacement = useCallback((): boolean => {
+    if (editorReplacementFenceRef.current || !editorPersistenceSettled()) {
+      return false;
+    }
+    editorReplacementFenceRef.current = true;
+    setEditorReplacementLocked(true);
+    return true;
+  }, [editorPersistenceSettled]);
+
+  const finishEditorReplacement = useCallback((): void => {
+    editorReplacementFenceRef.current = false;
+    setEditorReplacementLocked(false);
+  }, []);
 
   const flushEditorPersistence = useCallback((): Promise<PersistenceFlushHandlerResult> => {
     if (flushInFlightRef.current !== null) {
@@ -1547,6 +1675,54 @@ export function EditorPage() {
     };
   }, [reportBackgroundFlushOutcome]);
 
+  useEffect(() => {
+    if (!candidateReviewOpen) {
+      return;
+    }
+    let frame = 0;
+    let settleFrame = 0;
+    const fitTextarea = (): void => {
+      const textarea = candidateReviewTextareaRef.current;
+      if (textarea === null) {
+        return;
+      }
+      textarea.style.height = "auto";
+      if (textarea.scrollHeight > 0) {
+        const computed = window.getComputedStyle(textarea);
+        const borderHeight =
+          computed.boxSizing === "border-box"
+            ? Number.parseFloat(computed.borderTopWidth) +
+              Number.parseFloat(computed.borderBottomWidth)
+            : 0;
+        textarea.style.height = `${String(Math.ceil(textarea.scrollHeight + borderHeight + 4))}px`;
+      }
+    };
+    const scheduleFit = (): void => {
+      window.cancelAnimationFrame(frame);
+      window.cancelAnimationFrame(settleFrame);
+      frame = window.requestAnimationFrame(() => {
+        fitTextarea();
+        settleFrame = window.requestAnimationFrame(fitTextarea);
+      });
+    };
+    scheduleFit();
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            scheduleFit();
+          });
+    const reviewScroller = candidateReviewTextareaRef.current?.closest(".ink-overlay__content");
+    if (reviewScroller instanceof HTMLElement) resizeObserver?.observe(reviewScroller);
+    window.addEventListener("resize", scheduleFit);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", scheduleFit);
+      window.cancelAnimationFrame(frame);
+      window.cancelAnimationFrame(settleFrame);
+    };
+  }, [candidateReviewDraft, candidateReviewOpen]);
+
   const recoverPendingDraft = useCallback((): void => {
     const draft = recoveryDraft;
     if (draft === null) {
@@ -1647,10 +1823,14 @@ export function EditorPage() {
   }
 
   function markEditorContentDirty(nextContent: string, selection: EditorSelection): void {
+    if (editorReplacementFenceRef.current) {
+      return;
+    }
     contentRef.current = nextContent;
     selectionRef.current = selection;
     cursorRef.current = selection.start;
     setSelectionLength(Math.max(0, selection.end - selection.start));
+    setSelectionRewriteDisclosure(null);
     setContent(nextContent);
     setRecovered(false);
     setSaveState("dirty");
@@ -1788,6 +1968,10 @@ export function EditorPage() {
   function handleEditorBeforeInput(
     event: ReactSyntheticEvent<HTMLTextAreaElement, InputEvent>,
   ): void {
+    if (editorReplacementFenceRef.current) {
+      event.preventDefault();
+      return;
+    }
     selectionRef.current = normalizeEditorSelection(
       {
         start: event.currentTarget.selectionStart,
@@ -1799,6 +1983,10 @@ export function EditorPage() {
   }
 
   function handleEditorChange(event: ReactChangeEvent<HTMLTextAreaElement>): void {
+    if (editorReplacementFenceRef.current) {
+      event.currentTarget.value = contentRef.current;
+      return;
+    }
     const before = contentRef.current;
     const after = event.currentTarget.value;
     const selectionAfter = normalizeEditorSelection(
@@ -1826,6 +2014,10 @@ export function EditorPage() {
   }
 
   function handleCompositionStart(event: ReactCompositionEvent<HTMLTextAreaElement>): void {
+    if (editorReplacementFenceRef.current) {
+      event.preventDefault();
+      return;
+    }
     const selection = normalizeEditorSelection(
       {
         start: event.currentTarget.selectionStart,
@@ -1848,6 +2040,13 @@ export function EditorPage() {
   }
 
   function handleCompositionEnd(event: ReactCompositionEvent<HTMLTextAreaElement>): void {
+    if (editorReplacementFenceRef.current) {
+      compositionBaseRef.current = null;
+      composingRef.current = false;
+      setIsComposing(false);
+      event.currentTarget.value = contentRef.current;
+      return;
+    }
     const finalContent = event.currentTarget.value;
     const selectionAfter = normalizeEditorSelection(
       {
@@ -1867,6 +2066,7 @@ export function EditorPage() {
     selectionRef.current = selectionAfter;
     cursorRef.current = selectionAfter.start;
     setSelectionLength(Math.max(0, selectionAfter.end - selectionAfter.start));
+    setSelectionRewriteDisclosure(null);
     setContent(finalContent);
     setRecovered(false);
     setSaveState("dirty");
@@ -1876,7 +2076,8 @@ export function EditorPage() {
   }
 
   function handleEditorPaste(event: ReactClipboardEvent<HTMLTextAreaElement>): void {
-    if (project?.status !== "active") {
+    if (project?.status !== "active" || editorReplacementFenceRef.current) {
+      if (editorReplacementFenceRef.current) event.preventDefault();
       return;
     }
     event.preventDefault();
@@ -1968,9 +2169,12 @@ export function EditorPage() {
     if (chapterId === null || saveState === "dirty" || saveState === "saving") {
       return;
     }
+    const directAtStart = directModeAuthorized;
     const operation = beginGenerationOperation();
     setLastGenerationAction("continuation");
     setSelectionRewriteContext(null);
+    setContinuationDisclosure(null);
+    setDirectDisclosure(null);
     setCandidateBusy(true);
     setGenerationStage("preparing");
     setError(null);
@@ -1981,14 +2185,20 @@ export function EditorPage() {
       const plan = await prepareGenerationPlan(runtime, chapterId, {
         chapterSaved: editorClean,
         networkAvailable: online,
-        cursorUtf16: normalizeEditorSelection(selectionRef.current, contentRef.current.length)
-          .start,
-        outputProfile: continuationPreference.profile,
-        customTargetVisibleCharacters: continuationPreference.customTargetVisibleCharacters,
-        destination: continuationPreference.destination,
-        customDestinationInstruction: continuationPreference.customDestinationInstruction,
-        contextBudgetProfile:
-          continuationPreference.profile === "long"
+        cursorUtf16: directAtStart
+          ? contentRef.current.length
+          : normalizeEditorSelection(selectionRef.current, contentRef.current.length).start,
+        outputProfile: directAtStart ? "standard" : continuationPreference.profile,
+        customTargetVisibleCharacters: directAtStart
+          ? null
+          : continuationPreference.customTargetVisibleCharacters,
+        destination: directAtStart ? "complete_scene" : continuationPreference.destination,
+        customDestinationInstruction: directAtStart
+          ? null
+          : continuationPreference.customDestinationInstruction,
+        contextBudgetProfile: directAtStart
+          ? "standard"
+          : continuationPreference.profile === "long"
             ? "long"
             : continuationPreference.profile === "short"
               ? "economy"
@@ -1997,10 +2207,32 @@ export function EditorPage() {
       });
       if (!isCurrentGenerationOperation(operation)) return;
       setGenerationPlan(plan);
+      if (directAtStart) directGenerationRequestIdsRef.current.add(plan.requestId);
+      setDirectGenerationRequestId(directAtStart ? plan.requestId : null);
+      const continuationActionDisclosure = await prepareContinuationGenerationDisclosure(
+        runtime,
+        plan,
+      );
+      const disclosure = directAtStart ? await projectDirectWritingDisclosure(runtime, plan) : null;
+      if (!isCurrentGenerationOperation(operation)) return;
+      setContinuationDisclosure(continuationActionDisclosure);
+      setDirectDisclosure(disclosure);
       setDeferredGeneration(plan.deferredRequest);
       await loadBudgetForm(plan, () => isCurrentGenerationOperation(operation));
       if (!isCurrentGenerationOperation(operation)) return;
-      if (plan.preflight.canStart && !plan.preflight.requiresConfirmation) {
+      const grant =
+        disclosure === null
+          ? null
+          : await runtime.writingExperience.findDisclosureGrant(disclosure.input.fingerprint);
+      if (!isCurrentGenerationOperation(operation)) return;
+      const providerAuthorityReady =
+        continuationActionDisclosure === null ||
+        (directAtStart && disclosure !== null && disclosureGrantMatches(disclosure, grant));
+      if (
+        plan.preflight.canStart &&
+        !plan.preflight.requiresConfirmation &&
+        providerAuthorityReady
+      ) {
         await executePreparedGeneration(plan, operation);
       } else {
         setPreflightOpen(true);
@@ -2055,6 +2287,22 @@ export function EditorPage() {
         throw selectedHash.error;
       }
       if (!isCurrentGenerationOperation(operation)) return;
+      if (selectionRewriteDisclosure === null) {
+        const disclosure = await prepareSelectionRewrite(runtime, {
+          chapterId: stableChapter.id,
+          baseVersionId: stableChapter.currentVersionId,
+          selection: {
+            startUtf16: selection.start,
+            endUtf16: selection.end,
+            selectedTextSha256: selectedHash.value,
+          },
+          instruction: selectionRewriteInstruction,
+        });
+        if (!isCurrentGenerationOperation(operation)) return;
+        setSelectionRewriteDisclosure(disclosure);
+        setEditorNotice("发送信息已准备好；确认前不会调用 AI。请核对后再继续。");
+        return;
+      }
       const result = await createSelectionRewriteCandidate(runtime, {
         chapterId: stableChapter.id,
         baseVersionId: stableChapter.currentVersionId,
@@ -2064,11 +2312,14 @@ export function EditorPage() {
           selectedTextSha256: selectedHash.value,
         },
         instruction: selectionRewriteInstruction,
+        disclosureFingerprint: selectionRewriteDisclosure.fingerprint,
+        humanConfirmed: true,
         onDelta: (next) => {
           if (isCurrentGenerationOperation(operation)) setGenerationPreview(next);
         },
       });
       if (!isCurrentGenerationOperation(operation)) return;
+      setSelectionRewriteDisclosure(null);
       const previousCandidate = candidate;
       setCandidate(result.candidate);
       setSelectionRewriteContext(result.contextCompilation);
@@ -2086,6 +2337,7 @@ export function EditorPage() {
       }
     } catch (cause: unknown) {
       if (isCurrentGenerationOperation(operation)) {
+        setSelectionRewriteDisclosure(null);
         setGenerationError(selectionRewriteUiError(cause));
       }
     } finally {
@@ -2136,6 +2388,7 @@ export function EditorPage() {
     }
     const operation = beginGenerationOperation();
     const plan = generationPlan;
+    const directPlan = directGenerationRequestIdsRef.current.has(plan.requestId);
     setBudgetSaving(true);
     setError(null);
     try {
@@ -2192,6 +2445,21 @@ export function EditorPage() {
       });
       if (!isCurrentGenerationOperation(operation)) return;
       setGenerationPlan(refreshed);
+      if (directPlan) {
+        directGenerationRequestIdsRef.current.delete(plan.requestId);
+        directGenerationRequestIdsRef.current.add(refreshed.requestId);
+        setDirectGenerationRequestId(refreshed.requestId);
+      }
+      const refreshedContinuationDisclosure = await prepareContinuationGenerationDisclosure(
+        runtime,
+        refreshed,
+      );
+      if (!isCurrentGenerationOperation(operation)) return;
+      setContinuationDisclosure(refreshedContinuationDisclosure);
+      setDirectDisclosure(
+        directPlan ? await projectDirectWritingDisclosure(runtime, refreshed) : null,
+      );
+      if (!isCurrentGenerationOperation(operation)) return;
       await loadBudgetForm(refreshed, () => isCurrentGenerationOperation(operation));
     } catch (cause: unknown) {
       if (isCurrentGenerationOperation(operation)) setError(cause);
@@ -2221,9 +2489,27 @@ export function EditorPage() {
     setGenerationError(null);
     activeGenerationPlanRef.current = plan;
     try {
-      const result = await executeGenerationPlan(runtime, plan, (next) => {
-        if (isCurrentGenerationOperation(operation)) setGenerationPreview(next);
-      });
+      const directExecution = directGenerationRequestIdsRef.current.has(plan.requestId);
+      if (directExecution) {
+        const currentAuthority = await runtime.writingExperience.getOrInitialize();
+        if (
+          currentAuthority.mode !== "direct" ||
+          currentAuthority.directLocalOrganizationAuthorizedAt === null
+        ) {
+          setGenerationError(
+            new Error("直接模式授权已经撤销；本次没有调用 AI，正文和版本保持不变。"),
+          );
+          return;
+        }
+      }
+      const result = await executeGenerationPlan(
+        runtime,
+        plan,
+        (next) => {
+          if (isCurrentGenerationOperation(operation)) setGenerationPreview(next);
+        },
+        { generationRetryLimit: 0 },
+      );
       if (!isCurrentGenerationOperation(operation)) return;
       setGenerationStage("finalizing");
       if (plan.deferredRequest !== null) {
@@ -2239,9 +2525,7 @@ export function EditorPage() {
         return;
       }
       const previousCandidate = candidate;
-      if (result.value.candidate !== null) {
-        setCandidate(result.value.candidate);
-      }
+      if (result.value.candidate !== null) setCandidate(result.value.candidate);
       setCandidateQualityGate(result.value.qualityGate);
       if (
         projectId !== null &&
@@ -2264,6 +2548,13 @@ export function EditorPage() {
       setGenerationAttemptUsage(usage);
       setError(null);
       setGenerationError(null);
+      if (result.value.candidate?.status === "ready") {
+        setEditorNotice(
+          result.value.candidate.toSnapshot().incomplete || result.value.incomplete
+            ? "本次结果未完整结束，已保留为隔离 Candidate；正文和版本没有改变。"
+            : "建议已生成并保持隔离；正文和版本没有改变，请查看后决定是否使用。",
+        );
+      }
     } catch (cause: unknown) {
       if (isCurrentGenerationOperation(operation)) setGenerationError(cause);
     } finally {
@@ -2271,6 +2562,8 @@ export function EditorPage() {
         activeGenerationPlanRef.current = null;
       }
       if (isCurrentGenerationOperation(operation)) {
+        directGenerationRequestIdsRef.current.delete(plan.requestId);
+        setDirectGenerationRequestId((current) => (current === plan.requestId ? null : current));
         setCandidateBusy(false);
         setCancelBusy(false);
         setGenerationPreview("");
@@ -2283,12 +2576,60 @@ export function EditorPage() {
     if (generationPlan === null) {
       return;
     }
-    await executePreparedGeneration(generationPlan);
+    const plan = generationPlan;
+    setDirectDisclosureSaving(true);
+    try {
+      const currentDisclosure = await prepareContinuationGenerationDisclosure(runtime, plan);
+      assertContinuationDisclosureMatches(continuationDisclosure, currentDisclosure);
+      setContinuationDisclosure(currentDisclosure);
+    } catch (cause: unknown) {
+      setGenerationError(cause);
+      return;
+    } finally {
+      setDirectDisclosureSaving(false);
+    }
+    if (directGenerationRequestIdsRef.current.has(plan.requestId)) {
+      setDirectDisclosureSaving(true);
+      try {
+        const currentAuthority = await runtime.writingExperience.getOrInitialize();
+        if (
+          currentAuthority.mode !== "direct" ||
+          currentAuthority.directLocalOrganizationAuthorizedAt === null
+        ) {
+          setGenerationError(
+            new Error("直接模式授权已经撤销；本次没有调用 AI，正文和版本保持不变。"),
+          );
+          return;
+        }
+        const disclosure = await projectDirectWritingDisclosure(runtime, plan);
+        setDirectDisclosure(disclosure);
+        if (disclosure !== null) {
+          const existing = await runtime.writingExperience.findDisclosureGrant(
+            disclosure.input.fingerprint,
+          );
+          if (!disclosureGrantMatches(disclosure, existing)) {
+            await runtime.writingExperience.recordDisclosureGrant(disclosure.input);
+          }
+        }
+      } catch (cause: unknown) {
+        setGenerationError(cause);
+        return;
+      } finally {
+        setDirectDisclosureSaving(false);
+      }
+    }
+    await executePreparedGeneration(plan);
   }
 
   function closePreflightAndFocusEditor(): void {
     const selection = normalizeEditorSelection(selectionRef.current, contentRef.current.length);
     persistEditorView(selection);
+    if (generationPlan !== null) {
+      directGenerationRequestIdsRef.current.delete(generationPlan.requestId);
+    }
+    setDirectGenerationRequestId(null);
+    setDirectDisclosure(null);
+    setContinuationDisclosure(null);
     setPreflightOpen(false);
     window.requestAnimationFrame(() => {
       scheduleSelection(selection, true, scrollTopRef.current);
@@ -2389,9 +2730,7 @@ export function EditorPage() {
     }
     const diff = diffCandidateContent(baseline.content, materialized);
     if (diff.status === "error") {
-      setCandidateReviewError(
-        `逐项比较超出安全边界（${diff.error.code}）；仍可按这份建议原本记录的应用位置创建版本。`,
-      );
+      setCandidateReviewError(projectOrdinaryUiError(diff.error).description);
     } else {
       setCandidateDiff(diff.diff);
     }
@@ -2406,6 +2745,44 @@ export function EditorPage() {
       });
     }
     setCandidateReviewOpen(true);
+  }
+
+  function handleCandidateReviewNavigation(event: ReactKeyboardEvent<HTMLButtonElement>): void {
+    const scrollContainer = event.currentTarget.closest(".ink-overlay__content");
+    if (!scrollContainer?.classList.contains("ink-overlay__content")) {
+      return;
+    }
+    const pageDistance = Math.max(1, Math.floor(scrollContainer.clientHeight * 0.85));
+    if (event.key === "PageDown") {
+      event.preventDefault();
+      scrollContainer.scrollTop += pageDistance;
+    } else if (event.key === "PageUp") {
+      event.preventDefault();
+      scrollContainer.scrollTop -= pageDistance;
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      scrollContainer.scrollTop = 0;
+    } else if (event.key === "End") {
+      event.preventDefault();
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    }
+  }
+
+  function dismissCandidateReview(): void {
+    setCandidateReviewOpen(false);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const activeElement = document.activeElement;
+        if (
+          activeElement instanceof HTMLElement &&
+          activeElement !== document.body &&
+          activeElement.isConnected
+        ) {
+          return;
+        }
+        primaryEditorActionRef.current?.focus({ preventScroll: true });
+      });
+    });
   }
 
   function compareEditedCandidate(): void {
@@ -2435,9 +2812,7 @@ export function EditorPage() {
     setCandidateReviewComparedContent(candidateReviewDraft);
     if (diff.status === "error") {
       setCandidateDiff(null);
-      setCandidateReviewError(
-        `逐项比较超出安全边界（${diff.error.code}）；仍可按这份建议原本记录的应用位置创建版本。`,
-      );
+      setCandidateReviewError(projectOrdinaryUiError(diff.error).description);
       return;
     }
     setCandidateReviewError(null);
@@ -2462,35 +2837,60 @@ export function EditorPage() {
     setCandidateBusy(false);
     if (!result.ok) {
       setError(result.error);
+      setCandidateReviewError(projectOrdinaryUiError(result.error).description);
       return;
     }
     setCandidate(result.value);
+    setCandidateReviewError(null);
     setCandidateRevisionSaved(true);
     setEditorNotice(
       `建议修改已保存在本机，仍是隔离的${candidateSuggestionLabel}；稳定正文没有改变。`,
     );
   }
 
-  async function acceptCandidate(strategy: CandidateApplicationStrategy): Promise<void> {
-    if (candidate?.status !== "ready" || saveState === "dirty" || saveState === "saving") {
-      return;
+  async function acceptCandidate(
+    strategy: CandidateApplicationStrategy,
+    candidateOverride: AiCandidate | null = candidate,
+  ): Promise<boolean> {
+    if (candidateOverride?.status !== "ready") {
+      return false;
     }
+    if (!beginEditorReplacement()) {
+      setEditorNotice(
+        "正文仍有尚未完成的本地保存；这份 Candidate 继续保持隔离，没有写入正文或创建版本。",
+      );
+      return false;
+    }
+    try {
+      return await acceptCandidateWhileEditorLocked(strategy, candidateOverride);
+    } finally {
+      setCandidateBusy(false);
+      finishEditorReplacement();
+    }
+  }
+
+  async function acceptCandidateWhileEditorLocked(
+    strategy: CandidateApplicationStrategy,
+    candidateOverride: AiCandidate,
+  ): Promise<boolean> {
+    const editedContent =
+      candidateOverride.id === candidate?.id ? candidateReviewDraft : candidateOverride.content;
+    const contentBeforeAcceptance = contentRef.current;
     setCandidateBusy(true);
     const result = await runtime.useCases.acceptCandidate.execute({
-      candidateId: candidate.id,
-      expectedCandidateRevision: candidate.revision,
+      candidateId: candidateOverride.id,
+      expectedCandidateRevision: candidateOverride.revision,
       strategy,
-      ...(candidateReviewDraft === candidate.content
-        ? {}
-        : { editedContent: candidateReviewDraft }),
+      ...(editedContent === candidateOverride.content ? {} : { editedContent }),
     });
     if (!result.ok) {
-      setCandidateBusy(false);
       setError(result.error);
-      return;
+      setCandidateReviewError(projectOrdinaryUiError(result.error).description);
+      return false;
     }
     const acceptedVersion = result.value.version.toSnapshot();
     const nextContent = result.value.chapter.content;
+    const acceptedDelta = acceptedTextDelta(contentBeforeAcceptance, nextContent);
     const pipelineInput: AcceptedChapterPipelineInput = createLocalCandidateAcceptancePipelineInput(
       {
         projectId: acceptedVersion.projectId,
@@ -2506,10 +2906,8 @@ export function EditorPage() {
       // before the accept action can return to the author.
       await ensureAcceptedChapterPipelineTask(runtime, pipelineInput);
     } catch (cause: unknown) {
-      pipelineRegistrationError =
-        cause instanceof Error ? cause.message : "后台整理任务暂时无法加入本地队列。";
+      pipelineRegistrationError = projectOrdinaryUiError(cause).description;
     }
-    setCandidateBusy(false);
     setCandidate(result.value.candidate);
     setChapter(result.value.chapter);
     chapterRef.current = result.value.chapter;
@@ -2565,7 +2963,7 @@ export function EditorPage() {
         `${candidateSuggestionLabel}已安全写入正文和不可变版本；本地搜索与故事关联任务登记失败：${pipelineRegistrationError}`,
       );
       await loadVersions();
-      return;
+      return true;
     }
     setStoryStateUpdate({ state: "idle" });
     void runAcceptedChapterPipeline(runtime, pipelineInput)
@@ -2577,8 +2975,7 @@ export function EditorPage() {
         }
       })
       .catch((cause: unknown) => {
-        const message =
-          cause instanceof Error ? cause.message : "本地搜索与故事关联暂时失败，可稍后重试。";
+        const message = projectOrdinaryUiError(cause).description;
         setEditorNotice(
           `${candidateSuggestionLabel}已安全写入正文和不可变版本；本地派生暂未完成：${message}`,
         );
@@ -2588,7 +2985,49 @@ export function EditorPage() {
         ? "已按逐项决定创建新的稳定版本；可在本次会话撤销，原稳定版本仍保留在版本历史。"
         : `${candidateSuggestionLabel}已按所选方式写入新的稳定版本；原稳定版本仍保留在版本历史。`,
     );
+    if (
+      candidateOverride.toSnapshot().source === "generate" &&
+      !candidateOverride.toSnapshot().incomplete &&
+      acceptedDelta.text.length > 0
+    ) {
+      void runtime.writingExperience
+        .getOrInitialize()
+        .then((preference) => {
+          if (
+            preference.mode !== "direct" ||
+            preference.directLocalOrganizationAuthorizedAt === null
+          ) {
+            return null;
+          }
+          return organizeDirectStoryFacts(
+            {
+              facts: runtime.story.facts,
+              factService: runtime.story.factService,
+              hasher: runtime.hasher,
+              now: () => runtime.clock.now(),
+            },
+            {
+              projectId: acceptedVersion.projectId,
+              chapterId: acceptedVersion.chapterId,
+              versionId: acceptedVersion.id,
+              versionCreatedAt: acceptedVersion.createdAt,
+              acceptedText: acceptedDelta.text,
+              acceptedStartOffset: acceptedDelta.startOffset,
+              sourceLength: acceptedDelta.sourceLength,
+              currentVersionId: result.value.chapter.currentVersionId,
+              localOnly: result.value.chapter.isLocalOnly,
+            },
+          );
+        })
+        .then((receipt) => {
+          if (receipt !== null) setEditorNotice(directStoryFactOrganizerNotice(receipt));
+        })
+        .catch(() => {
+          setEditorNotice("正文和版本已保存；本地设定整理暂未完成，可稍后重新整理。");
+        });
+    }
     await loadVersions();
+    return true;
   }
 
   async function saveCandidateAsChapterCopy(): Promise<void> {
@@ -2617,9 +3056,9 @@ export function EditorPage() {
           );
     if (copyContent === null) {
       setCandidateBusy(false);
-      setError(
-        new Error(`${candidateSuggestionLabel}的原始应用位置已失效，无法安全另存完整草稿。`),
-      );
+      const message = `${candidateSuggestionLabel}的原始应用位置已失效，无法安全另存完整草稿。`;
+      setCandidateReviewError(message);
+      setError(new Error(message));
       return;
     }
     const created = await runtime.useCases.createChapter.execute({
@@ -2631,6 +3070,7 @@ export function EditorPage() {
     setCandidateBusy(false);
     if (!created.ok) {
       setError(created.error);
+      setCandidateReviewError(projectOrdinaryUiError(created.error).description);
       return;
     }
     await loadChapters();
@@ -2648,9 +3088,12 @@ export function EditorPage() {
       selected === null ||
       stableChapter === null ||
       project?.status !== "active" ||
-      !editorClean ||
       selected.toSnapshot().content === stableChapter.content
     ) {
+      return;
+    }
+    if (!beginEditorReplacement()) {
+      setEditorNotice("正文仍有尚未完成的本地保存；当前没有恢复版本，正文和历史版本均未改变。");
       return;
     }
     setVersionRestoreBusy(true);
@@ -2709,12 +3152,13 @@ export function EditorPage() {
       setError(cause);
     } finally {
       setVersionRestoreBusy(false);
+      finishEditorReplacement();
     }
   }
 
-  async function rejectCandidate(): Promise<void> {
+  async function rejectCandidate(): Promise<boolean> {
     if (candidate?.status !== "ready") {
-      return;
+      return false;
     }
     setCandidateBusy(true);
     const result = await runtime.useCases.rejectCandidate.execute({
@@ -2724,7 +3168,10 @@ export function EditorPage() {
     setCandidateBusy(false);
     if (!result.ok) {
       setError(result.error);
-      return;
+      if (candidateReviewOpen) {
+        setCandidateReviewError(projectOrdinaryUiError(result.error).description);
+      }
+      return false;
     }
     setCandidate(result.value);
     setCandidateCopySaved(false);
@@ -2733,6 +3180,7 @@ export function EditorPage() {
       action: "rejected",
       candidateId: result.value.id,
     });
+    return true;
   }
 
   async function confirmChapterPrivacyChange(): Promise<void> {
@@ -2818,9 +3266,11 @@ export function EditorPage() {
     }
   }
 
-  const normalizedError = error === null ? null : normalizeUiError(error);
+  const normalizedError = error === null ? null : projectOrdinaryUiError(error);
   const normalizedGenerationError =
     generationError === null ? null : normalizeUiError(generationError);
+  const ordinaryGenerationError =
+    generationError === null ? null : projectOrdinaryUiError(generationError);
   const privateGenerationBlocked = normalizedGenerationError?.code === "PRIVATE_CHAPTER_LOCAL_ONLY";
   const readonly = project?.status !== "active";
   const candidateReady = candidate?.status === "ready";
@@ -2938,7 +3388,6 @@ export function EditorPage() {
             <ErrorState
               title={normalizedError.title}
               description={normalizedError.description}
-              errorCode={normalizedError.code}
               primaryAction={{ label: "重新加载", onClick: () => void load() }}
             />
           ),
@@ -2947,7 +3396,6 @@ export function EditorPage() {
             <ErrorState
               title="恢复草稿需要处理"
               description={normalizedError.description}
-              errorCode="BASE_VERSION_CHANGED"
               savedState="稳定正文未被覆盖"
               primaryAction={{ label: "返回章节列表", onClick: () => history.back() }}
             />
@@ -3015,6 +3463,7 @@ export function EditorPage() {
               版本历史
             </Button>
             <Button
+              ref={primaryEditorActionRef}
               variant={candidateReady ? "ai-primary" : "primary"}
               disabled={primaryAction.disabled}
               loading={candidateBusy || saveState === "saving"}
@@ -3070,7 +3519,7 @@ export function EditorPage() {
           <InlineAlert
             tone="error"
             title={normalizedError.title}
-            description={`${normalizedError.description}（${normalizedError.code}）`}
+            description={normalizedError.description}
           />
         )}
         {returnedFromAiSettings && (
@@ -3335,7 +3784,7 @@ export function EditorPage() {
               aria-label="章节正文"
               value={content}
               currentLength={content.length}
-              readOnly={readonly}
+              readOnly={readonly || editorReplacementLocked}
               maxLength={5_000_000}
               onBeforeInput={handleEditorBeforeInput}
               onKeyDown={handleEditorKeyDown}
@@ -3353,6 +3802,7 @@ export function EditorPage() {
                 selectionRef.current = selection;
                 cursorRef.current = selection.start;
                 setSelectionLength(Math.max(0, selection.end - selection.start));
+                setSelectionRewriteDisclosure(null);
                 scheduleEditorViewPersistence(selection);
               }}
               onScroll={(event) => {
@@ -3398,6 +3848,7 @@ export function EditorPage() {
                 <div>
                   <p className="page-heading__eyebrow">陪伴创作</p>
                   <h2 id="candidate-title">AI 创作助手</h2>
+                  <Badge tone="neutral">{directModeAuthorized ? "直接模式" : "专业模式"}</Badge>
                 </div>
                 <Button
                   variant="ghost"
@@ -3413,9 +3864,11 @@ export function EditorPage() {
                 tone="ai-clarification"
                 title="正文始终由你决定"
                 description={
-                  usesNativeModel
-                    ? "生成内容会先成为 AI 建议版本；只有你比较并接受后，才会创建新的正文版本。"
-                    : "当前使用本机示例帮助检查流程，不会联网；只有你接受后，内容才会进入正文。"
+                  directModeAuthorized
+                    ? "续写会先保存为隔离 Candidate；只有你明确选择使用后，才会接到本章末尾并创建不可变版本。本地整理授权不会代替这次确认。"
+                    : usesNativeModel
+                      ? "生成内容会先成为 AI 建议版本；只有你比较并接受后，才会创建新的正文版本。"
+                      : "当前使用本机示例帮助检查流程，不会联网；只有你接受后，内容才会进入正文。"
                 }
               />
               {(displayedContextCompilation !== null ||
@@ -3444,7 +3897,7 @@ export function EditorPage() {
                   查看 AI 参考记录
                 </Link>
               )}
-              {normalizedGenerationError !== null && (
+              {normalizedGenerationError !== null && ordinaryGenerationError !== null && (
                 <section className="generation-error-card" role="alert" aria-live="assertive">
                   <div>
                     <Badge tone="danger">生成未完成</Badge>
@@ -3453,12 +3906,11 @@ export function EditorPage() {
                   <p>
                     {privateGenerationBlocked
                       ? "本章处于私密模式，但目前没有可用且已验证的本地模型。本次请求在发送 0 字后停止。"
-                      : normalizedGenerationError.description}
+                      : ordinaryGenerationError.description}
                   </p>
                   <p className="generation-error-card__saved-state">
                     正文和已保存版本没有变化，你可以继续写作。
                   </p>
-                  <code>{normalizedGenerationError.code}</code>
                   <div className="generation-error-card__actions">
                     <Button
                       variant="ai-primary"
@@ -3528,7 +3980,9 @@ export function EditorPage() {
                   </div>
                 ) : (
                   <GenerationProgressPanel
-                    providerLabel={generationPlan.providerId}
+                    providerLabel={
+                      continuationDisclosure?.connectionDisplayName ?? "已确认的 AI 服务"
+                    }
                     modelLabel={generationPlan.modelId}
                     reasoningMode={generationPlan.visibleProseReasoningMode}
                     minimumVisibleCharacters={
@@ -3654,7 +4108,49 @@ export function EditorPage() {
                       面板仅显示前 4,000 个字符；完整建议仍保留，可在比较界面逐项处理或另存。
                     </p>
                   )}
-                  {candidateReady && (
+                  {candidateReady && directModeAuthorized && (
+                    <div className="candidate-actions">
+                      <Button
+                        variant="ai-primary"
+                        loading={candidateBusy}
+                        disabled={!editorClean}
+                        onClick={openCandidateReview}
+                      >
+                        使用这版
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        loading={candidateBusy}
+                        onClick={() => void rejectCandidate()}
+                      >
+                        放弃
+                      </Button>
+                      {candidateIncomplete && (
+                        <details>
+                          <summary>更多选项</summary>
+                          <div className="candidate-actions">
+                            <Button
+                              variant="secondary"
+                              loading={candidateBusy}
+                              disabled={!editorClean}
+                              onClick={() => void generateCandidate(candidate.id)}
+                            >
+                              继续补全
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              loading={candidateBusy}
+                              disabled={!editorClean}
+                              onClick={() => void generateCandidate()}
+                            >
+                              重新生成
+                            </Button>
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                  )}
+                  {candidateReady && !directModeAuthorized && (
                     <div className="candidate-actions">
                       {candidateIncomplete && (
                         <Button
@@ -3699,7 +4195,7 @@ export function EditorPage() {
                         disabled={candidateBusy}
                         onClick={() => void rejectCandidate()}
                       >
-                        拒绝
+                        放弃
                       </Button>
                     </div>
                   )}
@@ -3710,7 +4206,28 @@ export function EditorPage() {
                   请先保存当前正文，再处理{candidateVersionLabel}。
                 </p>
               )}
-              {(canGenerateCandidate || candidateIncomplete) && (
+              {(canGenerateCandidate || candidateIncomplete) && directModeAuthorized && (
+                <section className="candidate-content" aria-label="直接续写">
+                  <p>
+                    生成完成后会先保存为隔离
+                    Candidate；正文和版本保持不变，直到你查看并明确选择使用。
+                  </p>
+                  <Button
+                    variant="ai-primary"
+                    loading={candidateBusy}
+                    disabled={!editorClean}
+                    onClick={() => void generateCandidate()}
+                  >
+                    继续写
+                  </Button>
+                  {usesNativeModel && (
+                    <Link className="back-link" to="/settings#model-center">
+                      设置 AI 服务
+                    </Link>
+                  )}
+                </section>
+              )}
+              {(canGenerateCandidate || candidateIncomplete) && !directModeAuthorized && (
                 <>
                   <section className="candidate-content" aria-label="续写长度">
                     <FormField
@@ -3857,12 +4374,21 @@ export function EditorPage() {
                             currentLength={selectionRewriteInstruction.length}
                             disabled={candidateBusy}
                             placeholder="例如：保留原意，让对话更自然"
-                            onChange={(event) =>
-                              setSelectionRewriteInstruction(event.currentTarget.value)
-                            }
+                            onChange={(event) => {
+                              setSelectionRewriteInstruction(event.currentTarget.value);
+                              setSelectionRewriteDisclosure(null);
+                            }}
                           />
                         )}
                       </FormField>
+                      {selectionRewriteDisclosure !== null && (
+                        <InlineAlert
+                          tone="warning"
+                          title="确认后会调用 1 次"
+                          description={`${selectionRewriteDisclosure.connectionDisplayName} · ${selectionRewriteDisclosure.modelId}；${selectionRewriteDisclosure.privacy} 发送内容：${selectionRewriteDisclosure.sends.join("；")}。自动重试 0 次；${formatSelectionRewriteCost(selectionRewriteDisclosure)}。`}
+                          onDismiss={() => setSelectionRewriteDisclosure(null)}
+                        />
+                      )}
                       <Button
                         variant="ai-primary"
                         loading={selectionRewriteBusy}
@@ -3874,8 +4400,19 @@ export function EditorPage() {
                         }
                         onClick={() => void rewriteSelectedText()}
                       >
-                        生成选区改写建议
+                        {selectionRewriteDisclosure === null
+                          ? "查看选区改写发送信息"
+                          : "确认并生成选区改写建议"}
                       </Button>
+                      {selectionRewriteDisclosure !== null && (
+                        <Button
+                          variant="ghost"
+                          disabled={selectionRewriteBusy}
+                          onClick={() => setSelectionRewriteDisclosure(null)}
+                        >
+                          取消，不调用
+                        </Button>
+                      )}
                     </section>
                   )}
                   {usesNativeModel && (
@@ -3906,7 +4443,8 @@ export function EditorPage() {
                   </Button>
                 </>
               )}
-              {runtime.featureFlags.multiAgent &&
+              {!directModeAuthorized &&
+                runtime.featureFlags.multiAgent &&
                 runtime.multiAgentReview !== null &&
                 projectId !== null &&
                 chapterId !== null && (
@@ -4228,10 +4766,15 @@ export function EditorPage() {
       )}
 
       <Dialog
+        className="candidate-review-overlay"
         open={candidateReviewOpen}
         onOpenChange={(open) => {
           if (!candidateBusy) {
-            setCandidateReviewOpen(open);
+            if (open) {
+              setCandidateReviewOpen(true);
+            } else {
+              dismissCandidateReview();
+            }
           }
         }}
         title={`比较${candidateActionGap}${candidateSuggestionLabel}与正文`}
@@ -4239,14 +4782,31 @@ export function EditorPage() {
         footer={
           <>
             <Button
+              size="lg"
               variant="secondary"
               disabled={candidateBusy}
-              onClick={() => setCandidateReviewOpen(false)}
+              onClick={dismissCandidateReview}
             >
               取消
             </Button>
+            <Button
+              size="lg"
+              variant="secondary"
+              loading={candidateBusy}
+              disabled={candidateBusy || candidate?.status !== "ready"}
+              onClick={() => {
+                void rejectCandidate().then((rejected) => {
+                  if (rejected) {
+                    setCandidateReviewOpen(false);
+                  }
+                });
+              }}
+            >
+              放弃
+            </Button>
             {candidateAllowsPartialDecisions && (
               <Button
+                size="lg"
                 variant="ai-primary"
                 loading={candidateBusy}
                 disabled={
@@ -4265,10 +4825,41 @@ export function EditorPage() {
                 按逐项决定创建版本
               </Button>
             )}
+            <Button
+              size="lg"
+              variant="ai-primary"
+              loading={candidateBusy}
+              disabled={
+                candidate === null ||
+                candidateBusy ||
+                candidateReviewConflict !== null ||
+                candidateApplicationBlocked ||
+                !candidateReviewDraftValid
+              }
+              onClick={() => {
+                if (candidate !== null) {
+                  void acceptCandidate(candidateDefaultStrategy(candidate));
+                }
+              }}
+            >
+              使用这版
+            </Button>
           </>
         }
       >
-        <div className="candidate-review-dialog">
+        <div
+          className="candidate-review-dialog"
+          role="region"
+          aria-label={`${candidateSuggestionLabel}审阅内容`}
+        >
+          <Button
+            className="candidate-review-dialog__scroll-control"
+            variant="ghost"
+            onKeyDown={handleCandidateReviewNavigation}
+          >
+            浏览{candidateActionGap}
+            {candidateSuggestionLabel}内容（PageUp / PageDown / Home / End）
+          </Button>
           {candidate !== null && candidateReviewConflict === null && (
             <section className="candidate-review-dialog__editor">
               <div className="candidate-review-dialog__editor-heading">
@@ -4294,6 +4885,7 @@ export function EditorPage() {
                 </Badge>
               </div>
               <Textarea
+                ref={candidateReviewTextareaRef}
                 aria-label={`可编辑的${candidateActionGap}${candidateSuggestionLabel}`}
                 value={candidateReviewDraft}
                 maxLength={5_000_000}
@@ -4556,7 +5148,7 @@ export function EditorPage() {
       <Dialog
         open={preflightOpen}
         onOpenChange={(open) => {
-          if (!budgetSaving) {
+          if (!budgetSaving && !directDisclosureSaving) {
             setPreflightOpen(open);
           }
         }}
@@ -4617,7 +5209,10 @@ export function EditorPage() {
               )}
               <Button
                 variant="ai-primary"
-                disabled={!generationPlan?.preflight.canStart || budgetSaving}
+                loading={directDisclosureSaving}
+                disabled={
+                  !generationPlan?.preflight.canStart || budgetSaving || directDisclosureSaving
+                }
                 onClick={() => void confirmGeneration()}
               >
                 {generationPlan?.preflight.readiness === "READY_WITH_WARNINGS"
@@ -4656,6 +5251,22 @@ export function EditorPage() {
               }
             />
 
+            {continuationDisclosure === null ? (
+              generationPlan.executionMode === "local_demo" ? (
+                <InlineAlert
+                  tone="info"
+                  title="本次不会发送到外部 AI 服务"
+                  description="这是本机演示流程。完整结果只会保存为隔离 Candidate；只有你稍后明确选择使用，才会改变正文并创建不可变版本。"
+                />
+              ) : null
+            ) : (
+              <InlineAlert
+                tone="warning"
+                title="确认本次 AI 调用"
+                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 发送内容：${continuationDisclosure.sends.join("；")}。本次最多调用 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。${generationPlan.requestId === directGenerationRequestId && directDisclosure !== null ? "相同 Provider、精确模型、发送范围、调用上限、费用状态和隐私策略不变时，可复用这项本机授权；任一项变化都会再次询问。" : "这次确认只适用于当前正文版本与本次生成计划；任一项变化都会停止发送并要求重新确认。"}完整结果只会保存为隔离 Candidate，正文和版本保持不变，直到你明确选择使用。`}
+              />
+            )}
+
             <details>
               <summary>AI 分工与隐私详情（高级）</summary>
               <InlineAlert
@@ -4666,7 +5277,8 @@ export function EditorPage() {
                     : "本次 AI 分工"
                 }
                 description={`${generationRouteRoleLabel(generationPlan.modelRole)} · ${
-                  generationPlan.providerId
+                  continuationDisclosure?.connectionDisplayName ??
+                  (generationPlan.executionMode === "local_demo" ? "本机演示" : "已确认的 AI 服务")
                 } / ${generationPlan.modelId} · ${
                   generationPlan.profile?.provider === "ollama" ||
                   generationPlan.modelHubInspection?.dataDestination === "local"
@@ -4677,7 +5289,7 @@ export function EditorPage() {
                 }${
                   generationPlan.routeFallback === null
                     ? ""
-                    : `；备用服务 ${generationPlan.routeFallback.providerId} / ${generationPlan.routeFallback.modelId}`
+                    : "；已配置备用模型，实际调用对象以上方确认信息为准"
                 }。`}
               />
             </details>
@@ -4943,9 +5555,27 @@ function selectionRewriteUiError(cause: unknown): unknown {
       cause.code,
     )
   ) {
-    return new UiActionError(cause.code, cause.message, "选区改写未完成");
+    return new UiActionError(
+      cause.code,
+      projectOrdinaryUiError(cause).description,
+      "选区改写未完成",
+    );
   }
   return cause;
+}
+
+function formatSelectionRewriteCost(disclosure: SelectionRewriteDisclosure): string {
+  if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
+    return "当前无法核定费用上限，AI 服务仍可能收费";
+  }
+  return `本次费用上限 ${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
+}
+
+function formatProviderActionCost(disclosure: ContinuationGenerationDisclosure): string {
+  if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
+    return "当前无法核定费用上限，AI 服务仍可能收费";
+  }
+  return `本次费用上限 ${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
 }
 
 function boundedEditorPreview(content: string): string {

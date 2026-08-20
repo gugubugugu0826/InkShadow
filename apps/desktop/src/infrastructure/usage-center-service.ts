@@ -371,7 +371,7 @@ const USAGE_EVENTS_CTE = `WITH usage_events AS (
     chapter.title AS chapter_name,
     'continuation' AS task,
     run.provider_id AS provider_id,
-    COALESCE(hub_connection.display_name, run.provider_id) AS provider_label,
+    COALESCE(hub_connection.display_name, '历史 AI 服务') AS provider_label,
     run.model_id AS model_id,
     CASE
       WHEN usage.attempt < run.attempt THEN 'failed'
@@ -426,7 +426,7 @@ const USAGE_EVENTS_CTE = `WITH usage_events AS (
     chapter.title AS chapter_name,
     invocation.task AS task,
     invocation.connection_id AS provider_id,
-    COALESCE(connection.display_name, invocation.provider_kind_snapshot) AS provider_label,
+    COALESCE(connection.display_name, '历史 AI 服务') AS provider_label,
     invocation.model_id_snapshot AS model_id,
     ${OPENING_INVOCATION_USAGE_STATUS_SQL} AS status,
     invocation.input_tokens AS input_tokens,

@@ -23,6 +23,7 @@ import {
 } from "@inkshadow/data";
 import type { GraphRagQuery } from "@inkshadow/search-core";
 import {
+  SqliteStoryFactStore,
   SqliteFormalStoryRecordRepository,
   SqliteReviewItemRepository,
 } from "@inkshadow/story-core";
@@ -186,7 +187,9 @@ class SqliteStoryGraphRuntimeService implements StoryGraphRuntimePort {
         const receipt = await this.dependencies.executor.transaction(async (transaction) => {
           await requireExistingProject(transaction, projectId.value);
           const state = await readAuthorityState(transaction, projectId.value);
-          const currentEpoch = state?.authority_epoch ?? 0;
+          const currentEpoch =
+            (state?.authority_epoch ?? 0) +
+            (await readConfirmedStoryFactRevisionSum(transaction, projectId.value));
           if (currentEpoch !== authority.epoch) {
             throw new StoryGraphEpochChanged();
           }
@@ -248,7 +251,7 @@ class SqliteStoryGraphRuntimeService implements StoryGraphRuntimePort {
                excluded.authority_epoch`,
             [
               projectId.value,
-              authority.epoch,
+              state?.authority_epoch ?? 0,
               authority.epoch,
               replaced.value.revision,
               authority.build.diagnostics.partial ? 0 : 1,
@@ -323,6 +326,7 @@ class SqliteStoryGraphRuntimeService implements StoryGraphRuntimePort {
   }
 
   private async buildAuthorityAttempt(projectId: string): Promise<AuthorityBuildAttempt> {
+    const useConfirmedFacts = await hasConfirmedStoryFactAuthority(this.dependencies.executor);
     const before = await readAuthorityEpoch(this.dependencies.executor, projectId);
     if (!before.ok) {
       return { kind: "error", error: before.error };
@@ -331,6 +335,7 @@ class SqliteStoryGraphRuntimeService implements StoryGraphRuntimePort {
       this.dependencies.executor,
       projectId,
       this.dependencies.capacityLimits ?? AUTHORITATIVE_STORY_GRAPH_LIMITS,
+      useConfirmedFacts,
     );
     if (!capacity.ok) {
       const after = await readAuthorityEpoch(this.dependencies.executor, projectId);
@@ -340,7 +345,7 @@ class SqliteStoryGraphRuntimeService implements StoryGraphRuntimePort {
     }
 
     const built = await new BuildAuthoritativeStoryGraphProjection(
-      createAuthoritativeSources(this.dependencies.executor),
+      createAuthoritativeSources(this.dependencies.executor, useConfirmedFacts),
       this.dependencies.hasher,
     ).execute(projectId);
     const after = await readAuthorityEpoch(this.dependencies.executor, projectId);
@@ -363,8 +368,12 @@ export function createSqliteStoryGraphRuntime(
   return new SqliteStoryGraphRuntimeService(dependencies);
 }
 
-function createAuthoritativeSources(executor: SqlExecutor): AuthoritativeStoryGraphReadSources {
+function createAuthoritativeSources(
+  executor: SqlExecutor,
+  useConfirmedFacts: boolean,
+): AuthoritativeStoryGraphReadSources {
   return {
+    ...(useConfirmedFacts ? { confirmedFacts: new SqliteStoryFactStore(executor) } : {}),
     formalRecords: new SqliteFormalStoryRecordRepository(executor),
     extractionReviews: new SqliteReviewItemRepository(executor, "extraction"),
     consistencyReviews: new SqliteReviewItemRepository(executor, "consistency"),
@@ -373,19 +382,47 @@ function createAuthoritativeSources(executor: SqlExecutor): AuthoritativeStoryGr
   };
 }
 
+async function hasConfirmedStoryFactAuthority(
+  executor: Pick<SqlExecutor, "select">,
+): Promise<boolean> {
+  const rows = await executor.select<{ readonly present: number }>(
+    `SELECT CASE WHEN EXISTS (
+       SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'story_facts'
+     ) THEN 1 ELSE 0 END AS present`,
+  );
+  return rows[0]?.present === 1;
+}
+
+async function readConfirmedStoryFactRevisionSum(
+  executor: Pick<SqlExecutor, "select">,
+  projectId: string,
+): Promise<number> {
+  if (!(await hasConfirmedStoryFactAuthority(executor))) return 0;
+  const rows = await executor.select<{ readonly revision_sum: number }>(
+    `SELECT COALESCE(SUM(revision), 0) AS revision_sum
+     FROM story_facts
+     WHERE project_id = ?`,
+    [projectId],
+  );
+  const value = rows[0]?.revision_sum ?? 0;
+  if (!safeEpoch(value)) throw new Error("STORY_FACT_AUTHORITY_REVISION_INVALID");
+  return value;
+}
+
 async function readAuthorityEpoch(
   executor: SqlExecutor,
   projectId: string,
 ): Promise<Result<number, AppError>> {
   try {
+    const factRevisionSum = await readConfirmedStoryFactRevisionSum(executor, projectId);
     const rows = await executor.select<{ readonly authority_epoch: number }>(
-      `SELECT COALESCE(state.authority_epoch, 0) AS authority_epoch
+      `SELECT (COALESCE(state.authority_epoch, 0) + ?) AS authority_epoch
        FROM projects AS project
        LEFT JOIN authoritative_story_graph_state AS state
          ON state.project_id = project.id
        WHERE project.id = ?
        LIMIT 1`,
-      [projectId],
+      [factRevisionSum, projectId],
     );
     const row = rows[0];
     if (row === undefined) {
@@ -405,6 +442,7 @@ async function readCheckpoint(
   projectId: string,
 ): Promise<Result<StoryGraphCheckpoint, AppError>> {
   try {
+    const factRevisionSum = await readConfirmedStoryFactRevisionSum(executor, projectId);
     const rows = await executor.select<
       Readonly<{
         authority_epoch: number;
@@ -417,7 +455,7 @@ async function readCheckpoint(
       }>
     >(
       `SELECT
-         COALESCE(state.authority_epoch, 0) AS authority_epoch,
+         (COALESCE(state.authority_epoch, 0) + ?) AS authority_epoch,
          state.projected_epoch,
          state.projected_graph_revision,
          state.projection_complete,
@@ -431,7 +469,7 @@ async function readCheckpoint(
          ON graph.project_id = project.id
        WHERE project.id = ?
        LIMIT 1`,
-      [projectId],
+      [factRevisionSum, projectId],
     );
     const row = rows[0];
     if (row === undefined) {
@@ -473,17 +511,21 @@ async function preflightAuthorityCapacity(
   executor: SqlExecutor,
   projectId: string,
   limits: AuthoritativeStoryGraphCapacityLimits,
+  useConfirmedFacts: boolean,
 ): Promise<Result<void, AppError>> {
   try {
     const rows = await executor.select<AuthorityCapacityRow>(
-      `SELECT
-           (SELECT COUNT(*) FROM story_formal_records WHERE project_id = ?) AS formal_record_count,
+      useConfirmedFacts
+        ? `SELECT
+           (SELECT COUNT(*) FROM story_facts
+             WHERE project_id = ? AND status = 'formal' AND user_confirmed = 1
+               AND deprecated = 0 AND needs_review = 0 AND branch_id IS NULL) AS formal_record_count,
            (SELECT COUNT(*) FROM story_review_items WHERE project_id = ?) AS review_item_count,
            (SELECT COUNT(*) FROM chapters WHERE project_id = ?) AS chapter_count,
            COALESCE((
-             SELECT SUM(json_array_length(snapshot_json, '$.versions'))
-             FROM story_formal_records
-             WHERE project_id = ?
+             SELECT SUM(revision)
+             FROM story_facts
+             WHERE project_id = ? AND status = 'formal' AND user_confirmed = 1
            ), 0) AS formal_version_count,
            COALESCE((
              SELECT SUM(json_array_length(snapshot_json, '$.decisions'))
@@ -492,9 +534,9 @@ async function preflightAuthorityCapacity(
            ), 0) AS review_decision_count,
            (
              COALESCE((
-               SELECT SUM(length(CAST(snapshot_json AS BLOB)))
-               FROM story_formal_records
-               WHERE project_id = ?
+               SELECT SUM(length(CAST(COALESCE(content_text, '') AS BLOB)) + length(CAST(COALESCE(value_json, '') AS BLOB)))
+               FROM story_facts
+               WHERE project_id = ? AND status = 'formal' AND user_confirmed = 1
              ), 0)
              + COALESCE((
                SELECT SUM(length(CAST(snapshot_json AS BLOB)))
@@ -516,7 +558,20 @@ async function preflightAuthorityCapacity(
              ), 0)
            ) AS stored_authority_bytes
          FROM projects
-         WHERE id = ?`,
+         WHERE id = ?`
+        : `SELECT
+           (SELECT COUNT(*) FROM story_formal_records WHERE project_id = ?) AS formal_record_count,
+           (SELECT COUNT(*) FROM story_review_items WHERE project_id = ?) AS review_item_count,
+           (SELECT COUNT(*) FROM chapters WHERE project_id = ?) AS chapter_count,
+           COALESCE((SELECT SUM(json_array_length(snapshot_json, '$.versions')) FROM story_formal_records WHERE project_id = ?), 0) AS formal_version_count,
+           COALESCE((SELECT SUM(json_array_length(snapshot_json, '$.decisions')) FROM story_review_items WHERE project_id = ?), 0) AS review_decision_count,
+           (
+             COALESCE((SELECT SUM(length(CAST(snapshot_json AS BLOB))) FROM story_formal_records WHERE project_id = ?), 0) +
+             COALESCE((SELECT SUM(length(CAST(snapshot_json AS BLOB))) FROM story_review_items WHERE project_id = ?), 0) +
+             COALESCE((SELECT SUM(length(CAST(content AS BLOB))) FROM chapters WHERE project_id = ?), 0) +
+             COALESCE((SELECT SUM(length(CAST(version.content AS BLOB))) FROM chapter_versions AS version INNER JOIN chapters AS chapter ON chapter.project_id = version.project_id AND chapter.current_version_id = version.id WHERE version.project_id = ?), 0)
+           ) AS stored_authority_bytes
+         FROM projects WHERE id = ?`,
       Array.from({ length: 10 }, () => projectId),
     );
     const row = rows[0];

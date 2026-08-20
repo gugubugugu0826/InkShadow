@@ -1,5 +1,21 @@
-import type { SqlExecutor, TransactionExecutor } from "@inkshadow/data";
-import type { SearchDocument, SearchSourceType } from "@inkshadow/search-core";
+import type { SqlExecutor, SqlPrimitive, TransactionExecutor } from "@inkshadow/data";
+import {
+  SEARCH_CHUNK_KINDS,
+  SEARCH_DOCUMENT_AUTHORITIES,
+  SEARCH_DOCUMENT_CURRENTNESS,
+  SEARCH_DOCUMENT_PRIVACY_MODES,
+  SEARCH_RETRIEVAL_PRIVACY_SCOPES,
+  SEARCH_RETRIEVAL_TASK_TYPES,
+  type SearchChunkKind,
+  type SearchDocument,
+  type SearchDocumentAuthority,
+  type SearchDocumentCurrentness,
+  type SearchDocumentPrivacyMode,
+  type SearchRetrievalScope,
+  type SearchRetrievalScopeTrace,
+  type SearchRetrievalTaskType,
+  type SearchSourceType,
+} from "@inkshadow/search-core";
 
 export const DEVELOPMENT_PROJECT_SEARCH_KEY = "inkshadow.development.project-search.v1";
 
@@ -47,17 +63,25 @@ export interface ProjectSearchKeywordCandidates {
   readonly backend: "sqlite_fts5" | "in_memory";
   readonly recovered: boolean;
   readonly degraded: boolean;
+  readonly scopeTrace: SearchRetrievalScopeTrace;
 }
 
 export interface ProjectSearchSnapshotStore {
   loadProject(projectId: string): Promise<ProjectSearchSnapshot | null>;
   synchronizeProject(input: SynchronizeProjectSearchInput): Promise<ProjectSearchSynchronization>;
-  findKeywordCandidates(projectId: string, query: string): Promise<ProjectSearchKeywordCandidates>;
+  findKeywordCandidates(
+    projectId: string,
+    query: string,
+    scope: SearchRetrievalScope,
+  ): Promise<ProjectSearchKeywordCandidates>;
   resetProject(projectId: string): Promise<void>;
 }
 
 export type ProjectSearchSnapshotStoreErrorCode =
-  "SEARCH_SNAPSHOT_CORRUPT" | "SEARCH_SNAPSHOT_CONFLICT" | "SEARCH_SNAPSHOT_UNAVAILABLE";
+  | "SEARCH_SNAPSHOT_CORRUPT"
+  | "SEARCH_SNAPSHOT_CONFLICT"
+  | "SEARCH_SNAPSHOT_UNAVAILABLE"
+  | "SEARCH_SCOPE_INVALID";
 
 export class ProjectSearchSnapshotStoreError extends Error {
   public constructor(
@@ -91,10 +115,35 @@ interface SearchIndexDocumentRow {
   readonly sourceUpdatedAt: string;
   readonly importance: number;
   readonly pinned: number;
+  readonly chunkKind: string;
+  readonly parentDocumentId: string | null;
+  readonly utf16Start: number;
+  readonly utf16End: number;
+  readonly sourceLength: number;
+  readonly sceneId: string | null;
+  readonly eventId: string | null;
+  readonly characterIdsJson: string;
+  readonly locationIdsJson: string;
+  readonly storyTime: string | null;
+  readonly branchId: string | null;
+  readonly povCharacterId: string | null;
+  readonly storyOrder: number | null;
+  readonly authority: string;
+  readonly privacy: string;
+  readonly currentness: string;
+  readonly omittedScopeFieldsJson: string;
 }
 
 interface SearchCandidateRow {
   readonly documentId: string;
+  readonly branchId: string | null;
+  readonly povCharacterId: string | null;
+  readonly storyOrder: number | null;
+}
+
+interface ScopedCandidates {
+  readonly documentIds: readonly string[];
+  readonly scopeTrace: SearchRetrievalScopeTrace;
 }
 
 export class TauriProjectSearchSnapshotStore implements ProjectSearchSnapshotStore {
@@ -252,59 +301,100 @@ export class TauriProjectSearchSnapshotStore implements ProjectSearchSnapshotSto
   public async findKeywordCandidates(
     projectIdValue: string,
     queryValue: string,
+    scopeValue: SearchRetrievalScope,
   ): Promise<ProjectSearchKeywordCandidates> {
     const projectId = validateIdentifier(projectIdValue, "projectId");
+    const scope = prepareRetrievalScope(projectId, scopeValue);
     const query = prepareFtsQuery(queryValue);
     if (query === null) {
+      const candidates = await this.selectScopeCandidates(scope);
       return {
-        documentIds: null,
+        documentIds: candidates.documentIds,
         backend: "in_memory",
         recovered: false,
         degraded: false,
+        scopeTrace: candidates.scopeTrace,
       };
     }
     try {
+      const candidates = await this.selectFtsCandidates(query, scope);
       return {
-        documentIds: await this.selectFtsCandidates(projectId, query),
+        documentIds: candidates.documentIds,
         backend: "sqlite_fts5",
         recovered: false,
         degraded: false,
+        scopeTrace: candidates.scopeTrace,
       };
     } catch {
+      if (scope.readOnly) {
+        return {
+          documentIds: Object.freeze([]),
+          backend: "sqlite_fts5",
+          recovered: false,
+          degraded: true,
+          scopeTrace: scope.trace,
+        };
+      }
       try {
         await this.rebuildFtsProjection();
+        const candidates = await this.selectFtsCandidates(query, scope);
         return {
-          documentIds: await this.selectFtsCandidates(projectId, query),
+          documentIds: candidates.documentIds,
           backend: "sqlite_fts5",
           recovered: true,
           degraded: false,
+          scopeTrace: candidates.scopeTrace,
         };
       } catch {
         return {
-          documentIds: null,
-          backend: "in_memory",
+          documentIds: Object.freeze([]),
+          backend: "sqlite_fts5",
           recovered: false,
           degraded: true,
+          scopeTrace: scope.trace,
         };
       }
     }
   }
 
-  private async selectFtsCandidates(projectId: string, query: string): Promise<readonly string[]> {
+  private async selectFtsCandidates(
+    query: string,
+    scope: PreparedSearchRetrievalScope,
+  ): Promise<ScopedCandidates> {
+    const filter = buildScopedWhere(scope, "document");
     const rows = await this.executor.select<SearchCandidateRow>(
-      `SELECT document.document_id AS documentId
+      `SELECT document.document_id AS documentId,
+              document.branch_id AS branchId,
+              document.pov_character_id AS povCharacterId,
+              document.story_order AS storyOrder
        FROM search_index_fts
        JOIN search_index_documents AS document
          ON document.rowid = search_index_fts.rowid
        WHERE search_index_fts MATCH ?
-         AND document.project_id = ?
+         AND ${filter.sql}
        ORDER BY bm25(search_index_fts) ASC, document.document_id ASC
        LIMIT 100000`,
-      [query, projectId],
+      [query, ...filter.parameters],
     );
-    return Object.freeze(
-      rows.map(({ documentId }) => validateIdentifier(documentId, "documentId")),
+    return createScopedCandidates(scope, rows);
+  }
+
+  private async selectScopeCandidates(
+    scope: PreparedSearchRetrievalScope,
+  ): Promise<ScopedCandidates> {
+    const filter = buildScopedWhere(scope, "document");
+    const rows = await this.executor.select<SearchCandidateRow>(
+      `SELECT document.document_id AS documentId,
+              document.branch_id AS branchId,
+              document.pov_character_id AS povCharacterId,
+              document.story_order AS storyOrder
+       FROM search_index_documents AS document
+       WHERE ${filter.sql}
+       ORDER BY document.document_id ASC
+       LIMIT 100000`,
+      filter.parameters,
     );
+    return createScopedCandidates(scope, rows);
   }
 }
 
@@ -391,12 +481,32 @@ export class BrowserDevelopmentProjectSearchSnapshotStore implements ProjectSear
     });
   }
 
-  public findKeywordCandidates(): Promise<ProjectSearchKeywordCandidates> {
-    return Promise.resolve({
-      documentIds: null,
-      backend: "in_memory",
-      recovered: false,
-      degraded: false,
+  public findKeywordCandidates(
+    projectIdValue: string,
+    _query: string,
+    scopeValue: SearchRetrievalScope,
+  ): Promise<ProjectSearchKeywordCandidates> {
+    return Promise.resolve().then(() => {
+      const projectId = validateIdentifier(projectIdValue, "projectId");
+      const scope = prepareRetrievalScope(projectId, scopeValue);
+      const stored = this.readDatabase().projects[projectId];
+      const documents = stored === undefined ? [] : validateSnapshot(stored).documents;
+      const candidates = documents
+        .filter((document) => documentMatchesScope(document, scope))
+        .map((document) => ({
+          documentId: document.id,
+          branchId: document.branchId ?? null,
+          povCharacterId: document.povCharacterId ?? null,
+          storyOrder: document.storyOrder ?? null,
+        }));
+      const scoped = createScopedCandidates(scope, candidates);
+      return {
+        documentIds: scoped.documentIds,
+        backend: "in_memory",
+        recovered: false,
+        degraded: false,
+        scopeTrace: scoped.scopeTrace,
+      };
     });
   }
 
@@ -441,6 +551,289 @@ interface PreparedSynchronization {
   readonly indexedAt: string;
   readonly contentCharacters: number;
   readonly force: boolean;
+}
+
+interface PreparedSearchRetrievalScope {
+  readonly projectId: string;
+  readonly taskType: SearchRetrievalTaskType;
+  readonly privacy: SearchRetrievalScope["privacy"];
+  readonly currentness: SearchDocumentCurrentness;
+  readonly sourceId: string | undefined;
+  readonly currentVersionId: string | undefined;
+  readonly branch: Readonly<{ provided: boolean; value: string | null }>;
+  readonly pov: Readonly<{ provided: boolean; value: string | null }>;
+  readonly maximumStoryOrder: number | undefined;
+  readonly authorities: readonly SearchDocumentAuthority[];
+  readonly chunkKinds: readonly SearchChunkKind[];
+  readonly readOnly: boolean;
+  readonly trace: SearchRetrievalScopeTrace;
+}
+
+interface SqlScopeFilter {
+  readonly sql: string;
+  readonly parameters: readonly SqlPrimitive[];
+}
+
+const TASK_AUTHORITIES: Readonly<
+  Record<SearchRetrievalTaskType, readonly SearchDocumentAuthority[]>
+> = Object.freeze({
+  project_search: Object.freeze(["accepted_text", "confirmed_fact", "rebuildable"] as const),
+  continuation: Object.freeze(["accepted_text", "confirmed_fact"] as const),
+  consistency: Object.freeze(["accepted_text", "confirmed_fact", "rebuildable"] as const),
+  agent_fts: Object.freeze(["accepted_text", "confirmed_fact"] as const),
+});
+
+const TASK_CHUNK_KINDS: Readonly<Record<SearchRetrievalTaskType, readonly SearchChunkKind[]>> =
+  Object.freeze({
+    project_search: Object.freeze(["chapter", "scene", "event", "story_fact_evidence"] as const),
+    continuation: Object.freeze([
+      "chapter",
+      "event",
+      "paragraph",
+      "dialogue",
+      "story_fact_evidence",
+    ] as const),
+    consistency: Object.freeze([...SEARCH_CHUNK_KINDS]),
+    agent_fts: Object.freeze([...SEARCH_CHUNK_KINDS]),
+  });
+
+export function defaultProjectSearchRetrievalScope(projectId: string): SearchRetrievalScope {
+  return Object.freeze({
+    projectId,
+    taskType: "project_search",
+    privacy: "include_local_only",
+    currentness: "current",
+  });
+}
+
+function prepareRetrievalScope(
+  projectId: string,
+  value: SearchRetrievalScope,
+): PreparedSearchRetrievalScope {
+  if (
+    !isRecord(value) ||
+    validateScopeIdentifier(value.projectId, "scope.projectId") !== projectId ||
+    !SEARCH_RETRIEVAL_TASK_TYPES.includes(value.taskType) ||
+    !SEARCH_RETRIEVAL_PRIVACY_SCOPES.includes(value.privacy) ||
+    !SEARCH_DOCUMENT_CURRENTNESS.includes(value.currentness)
+  ) {
+    throw invalidScope("Project search retrieval scope is invalid.");
+  }
+  const currentVersionId =
+    value.currentVersionId === undefined
+      ? undefined
+      : validateScopeIdentifier(value.currentVersionId, "scope.currentVersionId");
+  const sourceId =
+    value.sourceId === undefined
+      ? undefined
+      : validateScopeIdentifier(value.sourceId, "scope.sourceId");
+  if ((sourceId === undefined) !== (currentVersionId === undefined)) {
+    throw invalidScope("A version filter must identify exactly one source and version.");
+  }
+  const branch = Object.freeze({
+    provided: value.branchId !== undefined,
+    value:
+      value.branchId === undefined
+        ? null
+        : validateNullableScopeIdentifier(value.branchId, "scope.branchId"),
+  });
+  const pov = Object.freeze({
+    provided: value.povCharacterId !== undefined,
+    value:
+      value.povCharacterId === undefined
+        ? null
+        : validateNullableScopeIdentifier(value.povCharacterId, "scope.povCharacterId"),
+  });
+  const maximumStoryOrder = value.maximumStoryOrder;
+  if (
+    maximumStoryOrder !== undefined &&
+    (!Number.isSafeInteger(maximumStoryOrder) || maximumStoryOrder < 0)
+  ) {
+    throw invalidScope("Project search story-order scope is invalid.");
+  }
+  const omittedHardFilters: SearchRetrievalScopeTrace["omittedHardFilters"][number][] = [];
+  if (!branch.provided) {
+    omittedHardFilters.push("branch");
+  }
+  if (!pov.provided) {
+    omittedHardFilters.push("pov");
+  }
+  if (maximumStoryOrder === undefined) {
+    omittedHardFilters.push("story_order");
+  }
+  if (
+    (value.taskType === "agent_fts" || value.taskType === "continuation") &&
+    (omittedHardFilters.length > 0 || value.currentness !== "current")
+  ) {
+    throw invalidScope(
+      "Generation and Agent FTS scopes require current per-source rows, branch, POV, and story-order authority.",
+    );
+  }
+  return Object.freeze({
+    projectId,
+    taskType: value.taskType,
+    privacy: value.privacy,
+    currentness: value.currentness,
+    sourceId,
+    currentVersionId,
+    branch,
+    pov,
+    maximumStoryOrder,
+    authorities: TASK_AUTHORITIES[value.taskType],
+    chunkKinds: TASK_CHUNK_KINDS[value.taskType],
+    readOnly: value.taskType !== "project_search",
+    trace: Object.freeze({
+      taskType: value.taskType,
+      omittedHardFilters: Object.freeze(omittedHardFilters),
+      authorityNeutralOmissions: Object.freeze([]),
+      versionMode:
+        sourceId === undefined ? "per_source_current" : ("single_source_version" as const),
+    }),
+  });
+}
+
+function buildScopedWhere(scope: PreparedSearchRetrievalScope, alias: "document"): SqlScopeFilter {
+  const clauses = [
+    `${alias}.project_id = ?`,
+    `${alias}.currentness = ?`,
+    `${alias}.privacy IN (${privacyValues(scope.privacy)
+      .map(() => "?")
+      .join(", ")})`,
+    `${alias}.authority IN (${scope.authorities.map(() => "?").join(", ")})`,
+    `${alias}.chunk_kind IN (${scope.chunkKinds.map(() => "?").join(", ")})`,
+  ];
+  const parameters: SqlPrimitive[] = [
+    scope.projectId,
+    scope.currentness,
+    ...privacyValues(scope.privacy),
+    ...scope.authorities,
+    ...scope.chunkKinds,
+  ];
+  if (scope.sourceId !== undefined && scope.currentVersionId !== undefined) {
+    clauses.push(`${alias}.source_id = ?`, `${alias}.source_version_id = ?`);
+    parameters.push(scope.sourceId, scope.currentVersionId);
+  }
+  appendAuthorityNeutralScope(clauses, parameters, `${alias}.branch_id`, scope.branch);
+  appendAuthorityNeutralScope(clauses, parameters, `${alias}.pov_character_id`, scope.pov);
+  if (scope.maximumStoryOrder !== undefined) {
+    clauses.push(
+      `(${alias}.story_order <= ? OR (` +
+        `${alias}.story_order IS NULL AND ${alias}.branch_id IS NULL ` +
+        `AND ${alias}.pov_character_id IS NULL))`,
+    );
+    parameters.push(scope.maximumStoryOrder);
+  }
+  return Object.freeze({ sql: clauses.join(" AND "), parameters: Object.freeze(parameters) });
+}
+
+function appendAuthorityNeutralScope(
+  clauses: string[],
+  parameters: SqlPrimitive[],
+  column: string,
+  filter: Readonly<{ provided: boolean; value: string | null }>,
+): void {
+  if (!filter.provided) {
+    return;
+  }
+  if (filter.value === null) {
+    clauses.push(`${column} IS NULL`);
+    return;
+  }
+  clauses.push(`(${column} IS NULL OR ${column} = ?)`);
+  parameters.push(filter.value);
+}
+
+function privacyValues(
+  privacy: SearchRetrievalScope["privacy"],
+): readonly SearchDocumentPrivacyMode[] {
+  switch (privacy) {
+    case "standard_only":
+      return Object.freeze(["standard"]);
+    case "local_only":
+      return Object.freeze(["local_only"]);
+    case "include_local_only":
+      return Object.freeze(["standard", "local_only"]);
+  }
+}
+
+function documentMatchesScope(
+  document: SearchDocument,
+  scope: PreparedSearchRetrievalScope,
+): boolean {
+  return (
+    document.projectId === scope.projectId &&
+    document.currentness === scope.currentness &&
+    privacyValues(scope.privacy).includes(document.privacy ?? "standard") &&
+    scope.authorities.includes(document.authority ?? "rebuildable") &&
+    scope.chunkKinds.includes(document.chunkKind ?? "chapter") &&
+    (scope.sourceId === undefined ||
+      (document.sourceId === scope.sourceId &&
+        document.sourceVersionId === scope.currentVersionId)) &&
+    (!scope.branch.provided ||
+      document.branchId === null ||
+      document.branchId === undefined ||
+      document.branchId === scope.branch.value) &&
+    (!scope.pov.provided ||
+      document.povCharacterId === null ||
+      document.povCharacterId === undefined ||
+      document.povCharacterId === scope.pov.value) &&
+    (scope.maximumStoryOrder === undefined ||
+      (document.storyOrder !== null &&
+        document.storyOrder !== undefined &&
+        document.storyOrder <= scope.maximumStoryOrder) ||
+      ((document.storyOrder === null || document.storyOrder === undefined) &&
+        (document.branchId === null || document.branchId === undefined) &&
+        (document.povCharacterId === null || document.povCharacterId === undefined)))
+  );
+}
+
+function createScopedCandidates(
+  scope: PreparedSearchRetrievalScope,
+  rows: readonly SearchCandidateRow[],
+): ScopedCandidates {
+  const validated = rows.map((row) => {
+    if (row.storyOrder !== null && (!Number.isSafeInteger(row.storyOrder) || row.storyOrder < 0)) {
+      throw corruptSnapshot("Persistent project search story order is invalid.");
+    }
+    return {
+      documentId: validateIdentifier(row.documentId, "documentId"),
+      branchId: validateNullableIdentifier(row.branchId, "candidate.branchId"),
+      povCharacterId: validateNullableIdentifier(row.povCharacterId, "candidate.povCharacterId"),
+      storyOrder: row.storyOrder,
+    };
+  });
+  const authorityNeutralOmissions: SearchRetrievalScopeTrace["authorityNeutralOmissions"][number][] =
+    [];
+  if (
+    scope.branch.provided &&
+    scope.branch.value !== null &&
+    validated.some(({ branchId }) => branchId === null)
+  ) {
+    authorityNeutralOmissions.push("branch");
+  }
+  if (
+    scope.pov.provided &&
+    scope.pov.value !== null &&
+    validated.some(({ povCharacterId }) => povCharacterId === null)
+  ) {
+    authorityNeutralOmissions.push("pov");
+  }
+  if (
+    scope.maximumStoryOrder !== undefined &&
+    validated.some(
+      ({ branchId, povCharacterId, storyOrder }) =>
+        storyOrder === null && branchId === null && povCharacterId === null,
+    )
+  ) {
+    authorityNeutralOmissions.push("story_order");
+  }
+  return Object.freeze({
+    documentIds: Object.freeze(validated.map(({ documentId }) => documentId)),
+    scopeTrace: Object.freeze({
+      ...scope.trace,
+      authorityNeutralOmissions: Object.freeze(authorityNeutralOmissions),
+    }),
+  });
 }
 
 interface SnapshotDifference {
@@ -501,7 +894,24 @@ async function readSqlSnapshot(
        content_hash AS contentHash,
        source_updated_at AS sourceUpdatedAt,
        importance,
-       pinned
+       pinned,
+       chunk_kind AS chunkKind,
+       parent_document_id AS parentDocumentId,
+       utf16_start AS utf16Start,
+       utf16_end AS utf16End,
+       source_length AS sourceLength,
+       scene_id AS sceneId,
+       event_id AS eventId,
+       character_ids_json AS characterIdsJson,
+       location_ids_json AS locationIdsJson,
+       story_time AS storyTime,
+       branch_id AS branchId,
+       pov_character_id AS povCharacterId,
+       story_order AS storyOrder,
+       authority,
+       privacy,
+       currentness,
+       omitted_scope_fields_json AS omittedScopeFieldsJson
      FROM search_index_documents
      WHERE project_id = ?
      ORDER BY document_id ASC`,
@@ -537,8 +947,13 @@ async function upsertSqlDocument(
     `INSERT INTO search_index_documents (
        project_id, document_id, source_type, source_id, source_version_id,
        title, search_text, normalized_title, normalized_search_text,
-       content_hash, source_updated_at, importance, pinned, indexed_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       content_hash, source_updated_at, importance, pinned, indexed_at,
+       chunk_kind, parent_document_id, utf16_start, utf16_end,
+       source_length, scene_id, event_id, character_ids_json,
+       location_ids_json, story_time,
+       branch_id, pov_character_id, story_order, authority, privacy,
+       currentness, omitted_scope_fields_json
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(project_id, document_id) DO UPDATE SET
        source_type = excluded.source_type,
        source_id = excluded.source_id,
@@ -551,7 +966,24 @@ async function upsertSqlDocument(
        source_updated_at = excluded.source_updated_at,
        importance = excluded.importance,
        pinned = excluded.pinned,
-       indexed_at = excluded.indexed_at`,
+       indexed_at = excluded.indexed_at,
+       chunk_kind = excluded.chunk_kind,
+       parent_document_id = excluded.parent_document_id,
+       utf16_start = excluded.utf16_start,
+       utf16_end = excluded.utf16_end,
+       source_length = excluded.source_length,
+       scene_id = excluded.scene_id,
+       event_id = excluded.event_id,
+       character_ids_json = excluded.character_ids_json,
+       location_ids_json = excluded.location_ids_json,
+       story_time = excluded.story_time,
+       branch_id = excluded.branch_id,
+       pov_character_id = excluded.pov_character_id,
+       story_order = excluded.story_order,
+       authority = excluded.authority,
+       privacy = excluded.privacy,
+       currentness = excluded.currentness,
+       omitted_scope_fields_json = excluded.omitted_scope_fields_json`,
     [
       document.projectId,
       document.id,
@@ -567,6 +999,23 @@ async function upsertSqlDocument(
       document.importance ?? 0,
       document.pinned === true ? 1 : 0,
       indexedAt,
+      document.chunkKind ?? "chapter",
+      document.parentDocumentId ?? null,
+      document.utf16Start ?? 0,
+      document.utf16End ?? 0,
+      document.sourceLength ?? document.text.length,
+      document.sceneId ?? null,
+      document.eventId ?? null,
+      JSON.stringify(document.characterIds ?? []),
+      JSON.stringify(document.locationIds ?? []),
+      document.storyTime ?? null,
+      document.branchId ?? null,
+      document.povCharacterId ?? null,
+      document.storyOrder ?? null,
+      document.authority ?? "rebuildable",
+      document.privacy ?? "standard",
+      document.currentness ?? "legacy_unknown",
+      JSON.stringify(document.omittedScopeFields ?? []),
     ],
   );
 }
@@ -587,6 +1036,23 @@ function hydrateSqlDocument(row: SearchIndexDocumentRow): SearchDocument {
     updatedAt: row.sourceUpdatedAt,
     importance: row.importance,
     pinned: row.pinned === 1,
+    chunkKind: row.chunkKind as SearchChunkKind,
+    parentDocumentId: row.parentDocumentId,
+    utf16Start: row.utf16Start,
+    utf16End: row.utf16End,
+    sourceLength: row.sourceLength,
+    sceneId: row.sceneId,
+    eventId: row.eventId,
+    characterIds: parseIdentifierList(row.characterIdsJson, "characterIds"),
+    locationIds: parseIdentifierList(row.locationIdsJson, "locationIds"),
+    storyTime: row.storyTime,
+    branchId: row.branchId,
+    povCharacterId: row.povCharacterId,
+    storyOrder: row.storyOrder,
+    authority: row.authority as SearchDocumentAuthority,
+    privacy: row.privacy as SearchDocumentPrivacyMode,
+    currentness: row.currentness as SearchDocumentCurrentness,
+    omittedScopeFields: parseOmittedScopeFields(row.omittedScopeFieldsJson),
   });
 }
 
@@ -633,6 +1099,33 @@ function validateDocuments(
     }
     return document;
   });
+  const documentsById = new Map(documents.map((document) => [document.id, document]));
+  for (const document of documents) {
+    if (document.parentDocumentId === null || document.parentDocumentId === undefined) {
+      continue;
+    }
+    const parent = documentsById.get(document.parentDocumentId);
+    const supportedCrossSourceEvidenceParent =
+      document.chunkKind === "story_fact_evidence" &&
+      parent?.sourceType === "chapter" &&
+      parent.chunkKind === "chapter";
+    if (
+      parent?.projectId !== document.projectId ||
+      (!supportedCrossSourceEvidenceParent && parent.sourceId !== document.sourceId) ||
+      parent.sourceVersionId !== document.sourceVersionId ||
+      parent.utf16Start === undefined ||
+      parent.utf16End === undefined ||
+      parent.sourceLength === undefined ||
+      document.utf16Start === undefined ||
+      document.utf16End === undefined ||
+      document.sourceLength === undefined ||
+      parent.sourceLength !== document.sourceLength ||
+      parent.utf16Start > document.utf16Start ||
+      parent.utf16End < document.utf16End
+    ) {
+      throw corruptSnapshot("Persistent project search parent evidence is invalid.");
+    }
+  }
   return Object.freeze(documents.sort((left, right) => left.id.localeCompare(right.id)));
 }
 
@@ -655,6 +1148,58 @@ function validateDocument(value: SearchDocument): SearchDocument {
   if (!Number.isFinite(importance) || importance < 0 || importance > 1) {
     throw corruptSnapshot("Persistent project search importance is invalid.");
   }
+  const chunkKind = value.chunkKind ?? "chapter";
+  const authority = value.authority ?? "rebuildable";
+  const privacy = value.privacy ?? "standard";
+  const currentness = value.currentness ?? "legacy_unknown";
+  const utf16Start = value.utf16Start ?? 0;
+  const utf16End = value.utf16End ?? 0;
+  const sourceLength =
+    value.sourceLength ?? (currentness === "legacy_unknown" ? value.text.length : Number.NaN);
+  const parentDocumentId =
+    value.parentDocumentId === undefined || value.parentDocumentId === null
+      ? null
+      : validateIdentifier(value.parentDocumentId, "document.parentDocumentId");
+  const sceneId = validateNullableIdentifier(value.sceneId, "document.sceneId");
+  const eventId = validateNullableIdentifier(value.eventId, "document.eventId");
+  const characterIds = validateIdentifierList(value.characterIds ?? [], "document.characterIds");
+  const locationIds = validateIdentifierList(value.locationIds ?? [], "document.locationIds");
+  const storyTime = validateNullableBoundedText(value.storyTime, "document.storyTime", 500);
+  const branchId = validateNullableIdentifier(value.branchId, "document.branchId");
+  const povCharacterId = validateNullableIdentifier(
+    value.povCharacterId,
+    "document.povCharacterId",
+  );
+  const storyOrder = value.storyOrder ?? null;
+  const omittedScopeFields = validateOmittedScopeFields(
+    value.omittedScopeFields ?? [
+      "current_version",
+      "branch",
+      "pov",
+      "story_order",
+      "scene",
+      "event",
+      "characters",
+      "locations",
+      "story_time",
+    ],
+  );
+  if (
+    !SEARCH_CHUNK_KINDS.includes(chunkKind) ||
+    !SEARCH_DOCUMENT_AUTHORITIES.includes(authority) ||
+    !SEARCH_DOCUMENT_PRIVACY_MODES.includes(privacy) ||
+    !SEARCH_DOCUMENT_CURRENTNESS.includes(currentness) ||
+    !Number.isSafeInteger(utf16Start) ||
+    !Number.isSafeInteger(utf16End) ||
+    !Number.isSafeInteger(sourceLength) ||
+    utf16Start < 0 ||
+    utf16End < utf16Start ||
+    sourceLength < utf16End ||
+    (currentness !== "legacy_unknown" && utf16End - utf16Start !== value.text.length) ||
+    (storyOrder !== null && (!Number.isSafeInteger(storyOrder) || storyOrder < 0))
+  ) {
+    throw corruptSnapshot("Persistent project search retrieval evidence is invalid.");
+  }
   return Object.freeze({
     id: validateIdentifier(value.id, "document.id"),
     projectId: validateIdentifier(value.projectId, "document.projectId"),
@@ -667,6 +1212,23 @@ function validateDocument(value: SearchDocument): SearchDocument {
     updatedAt: validateIsoTimestamp(value.updatedAt, "document.updatedAt"),
     importance,
     pinned: value.pinned === true,
+    chunkKind,
+    parentDocumentId,
+    utf16Start,
+    utf16End,
+    sourceLength,
+    sceneId,
+    eventId,
+    characterIds,
+    locationIds,
+    storyTime,
+    branchId,
+    povCharacterId,
+    storyOrder,
+    authority,
+    privacy,
+    currentness,
+    omittedScopeFields,
   });
 }
 
@@ -712,7 +1274,24 @@ function sameDocument(left: SearchDocument, right: SearchDocument): boolean {
     left.contentHash === right.contentHash &&
     left.updatedAt === right.updatedAt &&
     (left.importance ?? 0) === (right.importance ?? 0) &&
-    (left.pinned === true) === (right.pinned === true)
+    (left.pinned === true) === (right.pinned === true) &&
+    left.chunkKind === right.chunkKind &&
+    left.parentDocumentId === right.parentDocumentId &&
+    left.utf16Start === right.utf16Start &&
+    left.utf16End === right.utf16End &&
+    left.sourceLength === right.sourceLength &&
+    left.sceneId === right.sceneId &&
+    left.eventId === right.eventId &&
+    sameStringList(left.characterIds, right.characterIds) &&
+    sameStringList(left.locationIds, right.locationIds) &&
+    left.storyTime === right.storyTime &&
+    left.branchId === right.branchId &&
+    left.povCharacterId === right.povCharacterId &&
+    left.storyOrder === right.storyOrder &&
+    left.authority === right.authority &&
+    left.privacy === right.privacy &&
+    left.currentness === right.currentness &&
+    sameStringList(left.omittedScopeFields, right.omittedScopeFields)
   );
 }
 
@@ -746,6 +1325,101 @@ function validateIdentifier(value: unknown, field: string): string {
   return normalized;
 }
 
+function validateNullableIdentifier(value: unknown, field: string): string | null {
+  return value === undefined || value === null ? null : validateIdentifier(value, field);
+}
+
+function validateIdentifierList(value: unknown, field: string): readonly string[] {
+  if (!Array.isArray(value) || value.length > 512) {
+    throw corruptSnapshot(`${field} is not a bounded identifier list.`);
+  }
+  const identifiers = value.map((identifier) => validateIdentifier(identifier, field)).sort();
+  if (new Set(identifiers).size !== identifiers.length) {
+    throw corruptSnapshot(`${field} contains duplicate identifiers.`);
+  }
+  return Object.freeze(identifiers);
+}
+
+function parseIdentifierList(value: string, field: string): readonly string[] {
+  try {
+    return validateIdentifierList(JSON.parse(value) as unknown, `document.${field}`);
+  } catch (cause: unknown) {
+    if (cause instanceof ProjectSearchSnapshotStoreError) {
+      throw cause;
+    }
+    throw corruptSnapshot(`Persistent project search ${field} cannot be decoded.`);
+  }
+}
+
+function validateNullableBoundedText(
+  value: unknown,
+  field: string,
+  maximumLength: number,
+): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "string") {
+    throw corruptSnapshot(`${field} is not text.`);
+  }
+  const normalized = value.trim();
+  if (
+    normalized.length === 0 ||
+    normalized.length > maximumLength ||
+    /[\u0000-\u001f\u007f]/u.test(normalized)
+  ) {
+    throw corruptSnapshot(`${field} is not bounded safe text.`);
+  }
+  return normalized;
+}
+
+function validateScopeIdentifier(value: unknown, field: string): string {
+  try {
+    return validateIdentifier(value, field);
+  } catch {
+    throw invalidScope(`${field} is not a safe identifier.`);
+  }
+}
+
+function validateNullableScopeIdentifier(value: unknown, field: string): string | null {
+  return value === null ? null : validateScopeIdentifier(value, field);
+}
+
+function validateOmittedScopeFields(value: readonly string[]): readonly string[] {
+  if (!Array.isArray(value) || value.length > 32) {
+    throw corruptSnapshot("Persistent project search omission evidence is invalid.");
+  }
+  const fields = value.map((field) => validateIdentifier(field, "document.omittedScopeField"));
+  if (new Set(fields).size !== fields.length) {
+    throw corruptSnapshot("Persistent project search omission evidence is duplicated.");
+  }
+  return Object.freeze([...fields].sort());
+}
+
+function parseOmittedScopeFields(value: string): readonly string[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.some((field) => typeof field !== "string")) {
+      throw new Error("invalid omission evidence");
+    }
+    return validateOmittedScopeFields(parsed);
+  } catch {
+    throw corruptSnapshot("Persistent project search omission evidence cannot be decoded.");
+  }
+}
+
+function sameStringList(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): boolean {
+  const leftValues = left ?? [];
+  const rightValues = right ?? [];
+  return (
+    leftValues.length === rightValues.length &&
+    leftValues.every((value, index) => value === rightValues[index])
+  );
+}
+
 function validateIsoTimestamp(value: string, field: string): string {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) {
@@ -756,12 +1430,14 @@ function validateIsoTimestamp(value: string, field: string): string {
 
 function prepareFtsQuery(value: string): string | null {
   const normalized = normalizePersistentSearchText(value);
-  if (normalized.length < 3 || normalized.includes(" ")) {
-    return null;
-  }
   const trigrams = new Set<string>();
-  for (let index = 0; index <= normalized.length - 3; index += 1) {
-    trigrams.add(normalized.slice(index, index + 3));
+  for (const term of normalized.split(" ")) {
+    for (let index = 0; index <= term.length - 3; index += 1) {
+      trigrams.add(term.slice(index, index + 3));
+    }
+  }
+  if (trigrams.size === 0) {
+    return null;
   }
   return [...trigrams].map((trigram) => `"${trigram.replaceAll('"', '""')}"`).join(" OR ");
 }
@@ -778,6 +1454,10 @@ function normalizeStoreFailure(cause: unknown, message: string): ProjectSearchSn
 
 function corruptSnapshot(message: string): ProjectSearchSnapshotStoreError {
   return new ProjectSearchSnapshotStoreError("SEARCH_SNAPSHOT_CORRUPT", message, false);
+}
+
+function invalidScope(message: string): ProjectSearchSnapshotStoreError {
+  return new ProjectSearchSnapshotStoreError("SEARCH_SCOPE_INVALID", message, false);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

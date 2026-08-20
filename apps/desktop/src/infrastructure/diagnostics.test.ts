@@ -258,7 +258,7 @@ describe("desktop diagnostics", () => {
     expect(artifact.bundle).toMatchObject({
       schemaVersion: 3,
       summary: {
-        appVersion: "0.2.4",
+        appVersion: "0.2.5",
         databaseHealth: "unknown",
         indexHealth: "healthy",
         syncState: "local_only",
@@ -384,7 +384,7 @@ describe("desktop diagnostics", () => {
     expect(artifact.bundle.summary.configuration).toMatchObject({
       indexIntegrated: true,
       indexPersistence: "runtime_rebuild",
-      indexedDocumentCount: 1,
+      indexedDocumentCount: 4,
       vectorStatus: "disabled",
       legacyModelProfileCount: 1,
       legacyModelProfilesWithSelection: 1,

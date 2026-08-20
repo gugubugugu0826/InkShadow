@@ -13,6 +13,7 @@ import {
 } from "../src/pdf-export.js";
 import type { PortablePublication } from "../src/publication-model.js";
 import type { PortableProjectV1 } from "../src/schemas.js";
+import { ONE_PIXEL_PNG, ONE_PIXEL_PNG_BASE64 } from "./image-fixture.js";
 
 const GENERATED_AT = "2026-07-28T00:30:45.123Z";
 
@@ -118,6 +119,46 @@ describe("image-based PDF export", () => {
     expect(new Set(progress.map(({ stage }) => stage))).toEqual(
       new Set(["normalizing", "laying_out", "rasterizing", "assembling"]),
     );
+  });
+
+  it("passes a validated source image into the real image-based PDF rasterization contract", async () => {
+    const seen: PortablePublication[] = [];
+    const longEndToken = "PDF长正文终点令牌";
+    const imageProject = {
+      ...project,
+      chapters: [
+        {
+          id: "chapter-inline-image",
+          title: "第一章 雾港",
+          order: 0,
+          path: "chapters/0001.md",
+          markdown: `中文正文开始。${"长正文内容。".repeat(20_000)}${longEndToken}\n\n![雾港场景](data:image/png;base64,${ONE_PIXEL_PNG_BASE64})\n\n中文正文结束。`,
+        },
+      ],
+    } satisfies PortableProjectV1;
+    const artifact = await exportProjectToPdf(imageProject, {
+      generatedAt: GENERATED_AT,
+      rasterize: function* (normalized) {
+        seen.push(normalized);
+        yield rasterPage(0x51);
+      },
+    });
+    const image = seen[0]?.chapters[0]?.blocks.find(({ kind }) => kind === "image");
+
+    expect(image).toMatchObject({
+      kind: "image",
+      altText: "雾港场景",
+      mediaType: "image/png",
+      pixelWidth: 1,
+      pixelHeight: 1,
+    });
+    expect(image !== undefined && "bytes" in image ? image.bytes : undefined).toEqual(
+      ONE_PIXEL_PNG,
+    );
+    expect(JSON.stringify(seen[0])).toContain(longEndToken);
+    expect(artifact.pageCount).toBe(1);
+    expect(decodeSingleByte(artifact.bytes)).toContain("/Subtype /Image");
+    expect(artifact.issues).toEqual([]);
   });
 
   it("writes a valid classic xref table whose offsets address every object", () => {

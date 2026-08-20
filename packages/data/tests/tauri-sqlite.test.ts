@@ -59,6 +59,27 @@ describe("TauriSqliteExecutor native bridge", () => {
     expect(events.filter((event) => event === "native_sqlite_open")).toHaveLength(1);
   });
 
+  it("coalesces concurrent renderer bootstrap onto one executor and native open", async () => {
+    const openCall = deferred<{ sessionToken: string }>();
+    mocks.invoke.mockImplementation(async (command: string) => {
+      events.push(command);
+      if (command === "native_sqlite_open") {
+        return openCall.promise;
+      }
+      return undefined;
+    });
+
+    const first = TauriSqliteExecutor.open();
+    const second = TauriSqliteExecutor.open();
+    expect(events.filter((event) => event === "native_sqlite_open")).toHaveLength(1);
+
+    openCall.resolve({ sessionToken: nativeSessionToken });
+    const [firstExecutor, secondExecutor] = await Promise.all([first, second]);
+    executor = firstExecutor;
+    expect(secondExecutor).toBe(firstExecutor);
+    expect(events.filter((event) => event === "native_sqlite_open")).toHaveLength(1);
+  });
+
   it("rejects every database URL except the fixed migration URL", async () => {
     await expect(TauriSqliteExecutor.open("sqlite:other.db")).rejects.toThrow(
       "fixed local database",

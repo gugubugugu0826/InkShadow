@@ -15,6 +15,7 @@ import type {
   CloudSyncControlSnapshot,
   CloudSyncControlState,
 } from "../infrastructure/cloud-sync-control-service";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 
 import "./cloud-sync-control-panel.css";
 
@@ -226,7 +227,11 @@ export function CloudSyncControlPanel({
             <div className="cloud-sync-control__summary" aria-live="polite">
               <strong>{copy.title}</strong>
               <p>{copy.description}</p>
-              {snapshot.lastErrorCode !== null && <small>诊断代码：{snapshot.lastErrorCode}</small>}
+              {snapshot.lastErrorCode !== null && (
+                <small>
+                  {projectOrdinaryUiError({ code: snapshot.lastErrorCode }).description}
+                </small>
+              )}
             </div>
 
             {failure && (

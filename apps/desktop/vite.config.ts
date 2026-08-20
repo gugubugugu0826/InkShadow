@@ -174,6 +174,12 @@ export default defineConfig({
         ),
       },
       {
+        find: "@inkshadow/import-export/core",
+        replacement: fileURLToPath(
+          new URL("../../packages/import-export/src/core.ts", import.meta.url),
+        ),
+      },
+      {
         find: "@inkshadow/import-export/docx-export",
         replacement: fileURLToPath(
           new URL("../../packages/import-export/src/docx-export.ts", import.meta.url),
@@ -280,7 +286,7 @@ export default defineConfig({
       output: {
         // Merge very small route fragments so their import/export wrappers and
         // duplicated bootstrap code do not dominate the installed application.
-        experimentalMinChunkSize: 240_000,
+        experimentalMinChunkSize: 160_000,
         generatedCode: "es2015",
         manualChunks(moduleId) {
           const normalizedModuleId = moduleId.replaceAll("\\", "/");
@@ -290,6 +296,33 @@ export default defineConfig({
           // Rollup does not hoist its full implementation into the entry.
           if (normalizedModuleId.endsWith("/apps/desktop/src/infrastructure/model-hub-store.ts")) {
             return "model-hub-store-runtime";
+          }
+          if (
+            [
+              "/apps/desktop/src/infrastructure/consistency-investigation-query-plan.ts",
+              "/apps/desktop/src/infrastructure/consistency-investigation-service.ts",
+              "/apps/desktop/src/infrastructure/consistency-investigation-store.ts",
+              "/apps/desktop/src/infrastructure/consistency-investigation-tool-registry.ts",
+            ].some((modulePath) => normalizedModuleId.endsWith(modulePath))
+          ) {
+            return "consistency-investigation-runtime";
+          }
+          if (
+            normalizedModuleId.endsWith(
+              "/apps/desktop/src/infrastructure/consistency-repair-candidate-service.ts",
+            )
+          ) {
+            return "consistency-repair-candidate-runtime";
+          }
+          if (
+            normalizedModuleId.includes(
+              "/apps/desktop/src/infrastructure/continuous-story-state-",
+            ) ||
+            normalizedModuleId.endsWith(
+              "/apps/desktop/src/infrastructure/model-hub-continuous-story-state-model.ts",
+            )
+          ) {
+            return "continuous-story-runtime";
           }
           if (
             normalizedModuleId.includes("/node_modules/react/") ||
@@ -319,6 +352,12 @@ export default defineConfig({
           }
           if (
             normalizedModuleId.includes("/apps/desktop/src/infrastructure/") &&
+            normalizedModuleId.includes("/project-search")
+          ) {
+            return "desktop-search-runtime";
+          }
+          if (
+            normalizedModuleId.includes("/apps/desktop/src/infrastructure/") &&
             [
               "/authoritative-extraction-",
               "/desktop-close-",
@@ -334,7 +373,6 @@ export default defineConfig({
               "/native-authoritative-",
               "/native-embedding-",
               "/native-governed-",
-              "/project-search",
               "/story-graph-",
               "/story-storage",
               "/task-center-",

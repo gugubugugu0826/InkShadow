@@ -2,6 +2,7 @@ mod automatic_backup;
 mod cloud_session;
 mod local_migrations;
 mod model_gateway;
+mod native_export_artifact;
 mod native_sqlite;
 mod network_egress;
 mod path_tickets;
@@ -28,6 +29,9 @@ use model_gateway::{
     embed_native_model, generate_native_image_to_file, list_native_models,
     reconcile_native_model_dispatch_leases, rerank_native_model, start_native_generation,
     CommandError, ModelGatewayState, NativeImageDestinationState,
+};
+use native_export_artifact::{
+    native_choose_export_destination, native_write_export_artifact, NativeExportDestinationState,
 };
 use native_sqlite::{
     native_choose_backup_destination, native_choose_pre_restore_backup_destination,
@@ -181,6 +185,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(model_gateway)
         .manage(NativeImageDestinationState::default())
+        .manage(NativeExportDestinationState::default())
         .manage(CloudSessionVaultState::default())
         .manage(NativeSqliteState::default())
         .manage(PathTicketState::default())
@@ -230,6 +235,8 @@ pub fn run() {
             rerank_native_model,
             choose_native_image_destination,
             generate_native_image_to_file,
+            native_choose_export_destination,
+            native_write_export_artifact,
             start_native_generation,
             cancel_native_generation,
             reconcile_native_model_dispatch_leases,

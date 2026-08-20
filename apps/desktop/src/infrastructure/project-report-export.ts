@@ -1,4 +1,4 @@
-import { sanitizeFilename } from "@inkshadow/import-export";
+import { sanitizeFilename } from "@inkshadow/import-export/core";
 
 import type { ProjectExportSnapshot } from "./project-export-snapshot";
 

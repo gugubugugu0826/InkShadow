@@ -4,6 +4,8 @@ import {
   ModelHubExecutionError,
   type ModelHubTextExecutionDependencies,
 } from "./model-hub-execution-service";
+import { selectSingleAttemptStrictJsonPolicy } from "./model-execution-policy";
+import { getModelProviderPreset } from "./model-hub-provider-registry";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
 import {
   ProjectContextPrivacyError,
@@ -43,6 +45,7 @@ export type CausalWhatIfModelHubErrorCode =
   | "CAUSAL_WHAT_IF_CAPABILITY_UNAVAILABLE"
   | "CAUSAL_WHAT_IF_MODEL_UNAVAILABLE"
   | "CAUSAL_WHAT_IF_MODEL_REQUEST_FAILED"
+  | "CAUSAL_WHAT_IF_RESULT_AMBIGUOUS"
   | "CAUSAL_WHAT_IF_RESPONSE_INVALID";
 
 export class CausalWhatIfModelHubError extends Error {
@@ -102,6 +105,11 @@ export class ModelHubCausalWhatIfModelPort implements CausalWhatIfModelPort {
       throw normalizeModelHubFailure(cause);
     }
     await assertStructuredOutputSupported(this.dependencies, inspection.catalogEntryId, false);
+    const executionPolicy = selectSingleAttemptStrictJsonPolicy({
+      structuredOutputVerified: true,
+      jsonObjectTransportSupported:
+        getModelProviderPreset(inspection.providerKind).protocol === "openai_compatible",
+    });
 
     let generated;
     try {
@@ -111,6 +119,15 @@ export class ModelHubCausalWhatIfModelPort implements CausalWhatIfModelPort {
         messages,
         maximumOutputTokens: 8_000,
         temperature: 0.2,
+        executionPolicy,
+        ...(executionPolicy.transportResponseFormat === "json_object"
+          ? { responseFormat: "json_object" as const }
+          : {}),
+        reasoningModeOverride: "disabled",
+        generationRetryLimitOverride: 0,
+        validateGeneratedText: (text) => {
+          parseCausalWhatIfModelResponse(text, allowedEventIds);
+        },
         ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
         onBeforeDispatch: async (selection) => {
           if (
@@ -471,6 +488,24 @@ function normalizeModelHubFailure(cause: unknown): CausalWhatIfModelHubError {
       false,
       cause.code,
       cause.dispatched,
+    );
+  }
+  if (cause.code === "CAUSAL_WHAT_IF_RESPONSE_INVALID") {
+    return new CausalWhatIfModelHubError(
+      "CAUSAL_WHAT_IF_RESPONSE_INVALID",
+      "模型已返回，但剧情试演结果未通过严格 JSON 与证据校验；结果不会展示或写入作品。",
+      false,
+      cause.code,
+      cause.dispatched,
+    );
+  }
+  if (cause.code === "PROVIDER_RESULT_AMBIGUOUS") {
+    return new CausalWhatIfModelHubError(
+      "CAUSAL_WHAT_IF_RESULT_AMBIGUOUS",
+      "剧情试演请求已发送，但连接在收到明确结果前中断。结果不会写入作品，也不会自动重发；如需再试，请重新发起一次明确操作。",
+      false,
+      cause.code,
+      true,
     );
   }
   return new CausalWhatIfModelHubError(

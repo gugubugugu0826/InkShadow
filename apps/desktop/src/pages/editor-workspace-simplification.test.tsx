@@ -246,7 +246,7 @@ describe("simplified editor workspace", () => {
       name: "改写选中的 3 个字符",
     });
     expect(instruction).toHaveValue("保持原意，让表达更自然。");
-    expect(screen.getByRole("button", { name: "生成选区改写建议" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "查看选区改写发送信息" })).toBeEnabled();
 
     await user.click(rewriteAction);
     await waitFor(() => expect(instruction).toHaveFocus());

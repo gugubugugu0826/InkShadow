@@ -45,8 +45,7 @@
 }
 
 .multi-agent-page__header-actions,
-.multi-agent-overview__actions,
-.multi-agent-candidate__actions {
+.multi-agent-overview__actions {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -228,16 +227,10 @@
 }
 
 .multi-agent-candidate pre {
-  max-height: 360px;
-  overflow: auto;
   padding: 14px;
   white-space: pre-wrap;
   border-radius: 10px;
   background: rgb(0 0 0 / 20%);
-}
-
-.multi-agent-candidate__actions {
-  margin-top: 14px;
 }
 
 .multi-agent-composer {

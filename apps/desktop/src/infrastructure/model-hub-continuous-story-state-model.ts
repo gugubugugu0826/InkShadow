@@ -6,6 +6,8 @@ import {
   ModelHubExecutionError,
   type ModelHubTextExecutionDependencies,
 } from "./model-hub-execution-service";
+import { selectSingleAttemptStrictJsonPolicy } from "./model-execution-policy";
+import { getModelProviderPreset } from "./model-hub-provider-registry";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
 import {
   PROJECT_CONTEXT_LOCAL_ONLY_MESSAGE,
@@ -70,6 +72,11 @@ export class ModelHubContinuousStoryStateModel implements ContinuousStoryStateMo
       throw normalizeAvailabilityFailure(cause);
     }
 
+    const executionPolicy = selectSingleAttemptStrictJsonPolicy({
+      structuredOutputVerified: true,
+      jsonObjectTransportSupported:
+        getModelProviderPreset(inspection.providerKind).protocol === "openai_compatible",
+    });
     let generated;
     try {
       generated = await executeModelHubTextTask(this.dependencies, {
@@ -78,6 +85,15 @@ export class ModelHubContinuousStoryStateModel implements ContinuousStoryStateMo
         messages,
         maximumOutputTokens: 12_000,
         temperature: 0.1,
+        executionPolicy,
+        ...(executionPolicy.transportResponseFormat === "json_object"
+          ? { responseFormat: "json_object" as const }
+          : {}),
+        reasoningModeOverride: "disabled",
+        generationRetryLimitOverride: 0,
+        validateGeneratedText: (text) => {
+          parseContinuousStoryStateResponse(text, input);
+        },
         ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
         onBeforeDispatch: async (selection) => {
           if (

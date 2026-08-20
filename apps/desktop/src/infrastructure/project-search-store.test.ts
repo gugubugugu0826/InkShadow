@@ -10,15 +10,19 @@ import {
   DEVELOPMENT_PROJECT_SEARCH_KEY,
   ProjectSearchSnapshotStoreError,
   TauriProjectSearchSnapshotStore,
+  defaultProjectSearchRetrievalScope,
 } from "./project-search-store";
 
-const migration = [readMigration("0001_core.sql"), readMigration("0006_search_index.sql")].join(
-  "\n",
-);
+const migration = [
+  readMigration("0001_core.sql"),
+  readMigration("0006_search_index.sql"),
+  readMigration("0070_multigranular_search_retrieval.sql"),
+].join("\n");
 
 const NOW = "2026-07-27T00:00:00.000Z";
 const LATER = "2026-07-27T00:01:00.000Z";
 const PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
+const PROJECT_SCOPE = defaultProjectSearchRetrievalScope(PROJECT_ID);
 
 describe("persistent project search snapshot stores", () => {
   beforeEach(() => {
@@ -36,9 +40,21 @@ describe("persistent project search snapshot stores", () => {
       documents: [firstDocument],
       indexedAt: NOW,
     });
-    const firstCandidates = await firstStore.findKeywordCandidates(PROJECT_ID, "旧日航标");
-    const normalizedCandidates = await firstStore.findKeywordCandidates(PROJECT_ID, "abc");
-    const shortQueryFallback = await firstStore.findKeywordCandidates(PROJECT_ID, "正文");
+    const firstCandidates = await firstStore.findKeywordCandidates(
+      PROJECT_ID,
+      "旧日航标",
+      PROJECT_SCOPE,
+    );
+    const normalizedCandidates = await firstStore.findKeywordCandidates(
+      PROJECT_ID,
+      "abc",
+      PROJECT_SCOPE,
+    );
+    const shortQueryFallback = await firstStore.findKeywordCandidates(
+      PROJECT_ID,
+      "正文",
+      PROJECT_SCOPE,
+    );
     const secondStore = new TauriProjectSearchSnapshotStore(executor);
     const loaded = await secondStore.loadProject(PROJECT_ID);
     const unchanged = await secondStore.synchronizeProject({
@@ -52,9 +68,21 @@ describe("persistent project search snapshot stores", () => {
       documents: [changedDocument],
       indexedAt: LATER,
     });
-    const staleCandidates = await secondStore.findKeywordCandidates(PROJECT_ID, "旧日航标");
-    const changedCandidates = await secondStore.findKeywordCandidates(PROJECT_ID, "第二版正文");
-    const partialCandidates = await secondStore.findKeywordCandidates(PROJECT_ID, "第二版正文延伸");
+    const staleCandidates = await secondStore.findKeywordCandidates(
+      PROJECT_ID,
+      "旧日航标",
+      PROJECT_SCOPE,
+    );
+    const changedCandidates = await secondStore.findKeywordCandidates(
+      PROJECT_ID,
+      "第二版正文",
+      PROJECT_SCOPE,
+    );
+    const partialCandidates = await secondStore.findKeywordCandidates(
+      PROJECT_ID,
+      "第二版正文延伸",
+      PROJECT_SCOPE,
+    );
     const deleted = await secondStore.synchronizeProject({
       projectId: PROJECT_ID,
       documents: [],
@@ -66,22 +94,33 @@ describe("persistent project search snapshot stores", () => {
       unchangedCount: 0,
       snapshot: { revision: 1 },
     });
-    expect(firstCandidates).toEqual({
+    expect(firstCandidates).toMatchObject({
       documentIds: [`chapter:${PROJECT_ID}:0`],
       backend: "sqlite_fts5",
       recovered: false,
       degraded: false,
     });
     expect(normalizedCandidates.documentIds).toEqual([`chapter:${PROJECT_ID}:0`]);
-    expect(shortQueryFallback).toEqual({
-      documentIds: null,
+    expect(shortQueryFallback).toMatchObject({
+      documentIds: [`chapter:${PROJECT_ID}:0`],
       backend: "in_memory",
       recovered: false,
       degraded: false,
     });
     expect(loaded).toMatchObject({
       revision: 1,
-      documents: [{ sourceVersionId: "version-1", text: "旧日航标 ＡＢＣ" }],
+      documents: [
+        {
+          sourceVersionId: "version-1",
+          text: "旧日航标 ＡＢＣ",
+          sourceLength: "旧日航标 ＡＢＣ".length,
+          sceneId: null,
+          eventId: null,
+          characterIds: [],
+          locationIds: [],
+          storyTime: null,
+        },
+      ],
     });
     expect(unchanged).toMatchObject({
       changed: false,
@@ -143,6 +182,148 @@ describe("persistent project search snapshot stores", () => {
     await expect(store.loadProject(PROJECT_ID)).resolves.toBeNull();
   });
 
+  it("hard-filters current version, branch, POV, chronology, privacy, currentness, and task before FTS", async () => {
+    const executor = new NodeSqliteExecutor(migration);
+    await seedProject(executor);
+    const store = new TauriProjectSearchSnapshotStore(executor);
+    const matching = scopedDocument("matching", {
+      sourceVersionId: "version-current-a",
+      branchId: "branch-current",
+      povCharacterId: "character-alice",
+      storyOrder: 2,
+      privacy: "standard",
+      currentness: "current",
+      authority: "accepted_text",
+    });
+    const previousChapter = scopedDocument("previous-chapter", {
+      sourceVersionId: "version-current-b",
+      branchId: null,
+      povCharacterId: null,
+      storyOrder: 1,
+    });
+    const timelessCanon = scopedDocument("timeless-canon", {
+      sourceType: "memory",
+      sourceVersionId: "version-current-c",
+      chunkKind: "story_fact_evidence",
+      branchId: null,
+      povCharacterId: null,
+      storyOrder: null,
+      authority: "confirmed_fact",
+    });
+    const documents = [
+      matching,
+      previousChapter,
+      timelessCanon,
+      scopedDocument("wrong-branch", { branchId: "alternate" }),
+      scopedDocument("wrong-pov", { povCharacterId: "character-bob" }),
+      scopedDocument("future", { storyOrder: 3 }),
+      scopedDocument("private", { privacy: "local_only" }),
+      scopedDocument("stale", { currentness: "stale" }),
+      scopedDocument("rebuildable", { authority: "rebuildable" }),
+    ];
+    await store.synchronizeProject({ projectId: PROJECT_ID, documents, indexedAt: NOW });
+
+    const scope = {
+      projectId: PROJECT_ID,
+      taskType: "agent_fts",
+      privacy: "standard_only",
+      currentness: "current",
+      branchId: "branch-current",
+      povCharacterId: "character-alice",
+      maximumStoryOrder: 2,
+    } as const;
+    const result = await store.findKeywordCandidates(PROJECT_ID, "scope marker", scope);
+    const injectedBranch = await store.findKeywordCandidates(PROJECT_ID, "scope marker", {
+      ...scope,
+      branchId: "branch-current' OR 1=1 --",
+    });
+    const local = await store.findKeywordCandidates(PROJECT_ID, "scope marker", {
+      ...scope,
+      privacy: "include_local_only",
+    });
+    const privateOnly = await store.findKeywordCandidates(PROJECT_ID, "scope marker", {
+      ...scope,
+      privacy: "local_only",
+    });
+    const singleSource = await store.findKeywordCandidates(PROJECT_ID, "scope marker", {
+      ...scope,
+      sourceId: matching.sourceId,
+      currentVersionId: matching.sourceVersionId,
+    });
+
+    expect(result).toMatchObject({
+      backend: "sqlite_fts5",
+      degraded: false,
+      scopeTrace: {
+        taskType: "agent_fts",
+        omittedHardFilters: [],
+        authorityNeutralOmissions: ["branch", "pov", "story_order"],
+        versionMode: "per_source_current",
+      },
+    });
+    expect(result.documentIds).toHaveLength(3);
+    expect(result.documentIds).toEqual(
+      expect.arrayContaining([matching.id, previousChapter.id, timelessCanon.id]),
+    );
+    expect(injectedBranch.documentIds).toHaveLength(2);
+    expect(injectedBranch.documentIds).toEqual(
+      expect.arrayContaining([previousChapter.id, timelessCanon.id]),
+    );
+    expect(injectedBranch.documentIds).not.toContain(matching.id);
+    expect(local.documentIds).toHaveLength(4);
+    expect(local.documentIds).toContain("paragraph:private");
+    expect(privateOnly.documentIds).toEqual(["paragraph:private"]);
+    expect(singleSource.documentIds).toEqual([matching.id]);
+    expect(singleSource.scopeTrace.versionMode).toBe("single_source_version");
+    await expect(
+      store.findKeywordCandidates(PROJECT_ID, "scope marker", {
+        ...scope,
+        currentVersionId: matching.sourceVersionId,
+      }),
+    ).rejects.toMatchObject({ code: "SEARCH_SCOPE_INVALID" });
+    await executor.close();
+  });
+
+  it("keeps browser scope filtering deterministic across restart without a provider", async () => {
+    const first = new BrowserDevelopmentProjectSearchSnapshotStore(window.localStorage);
+    const current = scopedDocument("browser-current", {
+      branchId: null,
+      povCharacterId: null,
+    });
+    const stale = scopedDocument("browser-stale", {
+      branchId: null,
+      povCharacterId: null,
+      currentness: "stale",
+    });
+    await first.synchronizeProject({
+      projectId: PROJECT_ID,
+      documents: [current, stale],
+      indexedAt: NOW,
+    });
+
+    const second = new BrowserDevelopmentProjectSearchSnapshotStore(window.localStorage);
+    await expect(
+      second.findKeywordCandidates(PROJECT_ID, "scope marker", {
+        projectId: PROJECT_ID,
+        taskType: "agent_fts",
+        privacy: "standard_only",
+        currentness: "current",
+      }),
+    ).rejects.toMatchObject({ code: "SEARCH_SCOPE_INVALID", retryable: false });
+    const result = await second.findKeywordCandidates(PROJECT_ID, "scope marker", {
+      projectId: PROJECT_ID,
+      taskType: "agent_fts",
+      privacy: "standard_only",
+      currentness: "current",
+      branchId: null,
+      povCharacterId: null,
+      maximumStoryOrder: 2,
+    });
+
+    expect(result.documentIds).toEqual([current.id]);
+    expect(result.backend).toBe("in_memory");
+  });
+
   it("keeps SQLite FTS5 trigram searches over one million synthetic characters below the gate", async () => {
     const executor = new NodeSqliteExecutor(migration);
     await seedProject(executor);
@@ -159,6 +340,23 @@ describe("persistent project search snapshot stores", () => {
         text: `${marker}${"星河边境风暴潮汐".repeat(1_250)}`.slice(0, 10_000),
         contentHash: index.toString(16).padStart(64, "0"),
         updatedAt: NOW,
+        chunkKind: "chapter",
+        parentDocumentId: null,
+        utf16Start: 0,
+        utf16End: `${marker}${"星河边境风暴潮汐".repeat(1_250)}`.slice(0, 10_000).length,
+        sourceLength: `${marker}${"星河边境风暴潮汐".repeat(1_250)}`.slice(0, 10_000).length,
+        sceneId: null,
+        eventId: null,
+        characterIds: [],
+        locationIds: [],
+        storyTime: null,
+        branchId: null,
+        povCharacterId: null,
+        storyOrder: index + 1,
+        authority: "accepted_text",
+        privacy: "standard",
+        currentness: "current",
+        omittedScopeFields: ["pov", "story_time"],
       };
     });
     await store.synchronizeProject({
@@ -168,12 +366,16 @@ describe("persistent project search snapshot stores", () => {
     });
 
     const coldStartedAt = performance.now();
-    const cold = await store.findKeywordCandidates(PROJECT_ID, "终局独有信标");
+    const cold = await store.findKeywordCandidates(PROJECT_ID, "终局独有信标", PROJECT_SCOPE);
     const coldMilliseconds = performance.now() - coldStartedAt;
     const durations: number[] = [];
     for (let run = 0; run < 20; run += 1) {
       const startedAt = performance.now();
-      const candidates = await store.findKeywordCandidates(PROJECT_ID, "终局独有信标");
+      const candidates = await store.findKeywordCandidates(
+        PROJECT_ID,
+        "终局独有信标",
+        PROJECT_SCOPE,
+      );
       durations.push(performance.now() - startedAt);
       expect(candidates.documentIds).toEqual([`chapter:${PROJECT_ID}:99`]);
     }
@@ -205,6 +407,56 @@ function document(sourceVersionId: string, text: string, contentHash: string): S
     text,
     contentHash,
     updatedAt: NOW,
+    chunkKind: "chapter",
+    parentDocumentId: null,
+    utf16Start: 0,
+    utf16End: text.length,
+    sourceLength: text.length,
+    sceneId: null,
+    eventId: null,
+    characterIds: [],
+    locationIds: [],
+    storyTime: null,
+    branchId: null,
+    povCharacterId: null,
+    storyOrder: 1,
+    authority: "accepted_text",
+    privacy: "standard",
+    currentness: "current",
+    omittedScopeFields: ["pov", "story_time"],
+  };
+}
+
+function scopedDocument(suffix: string, overrides: Partial<SearchDocument> = {}): SearchDocument {
+  const text = "scope marker evidence";
+  return {
+    id: `paragraph:${suffix}`,
+    projectId: PROJECT_ID,
+    sourceType: "chapter",
+    sourceId: `chapter-${suffix}`,
+    sourceVersionId: "version-current",
+    title: `Scope ${suffix}`,
+    text,
+    contentHash: suffix.codePointAt(0)?.toString(16).padStart(64, "0") ?? "a".repeat(64),
+    updatedAt: NOW,
+    chunkKind: "paragraph",
+    parentDocumentId: null,
+    utf16Start: 0,
+    utf16End: text.length,
+    sourceLength: text.length,
+    sceneId: `scene:${suffix}`,
+    eventId: null,
+    characterIds: [],
+    locationIds: [],
+    storyTime: null,
+    branchId: "branch-current",
+    povCharacterId: "character-alice",
+    storyOrder: 2,
+    authority: "accepted_text",
+    privacy: "standard",
+    currentness: "current",
+    omittedScopeFields: ["event", "characters", "locations", "story_time"],
+    ...overrides,
   };
 }
 

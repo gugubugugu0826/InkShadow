@@ -140,7 +140,7 @@ describe("quick AI connection drawer", () => {
     expect(
       await screen.findByRole("heading", { name: "连接没成功" }, ASYNC_UI_TIMEOUT),
     ).toBeVisible();
-    expect(screen.getByText("错误码：MODEL_HTTP_UNAUTHORIZED")).toBeVisible();
+    expect(screen.queryByText(/MODEL_HTTP_UNAUTHORIZED/u)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回修改" }));
     expect(screen.getByLabelText(/^API Key/u)).toHaveValue("");
 
@@ -169,9 +169,16 @@ describe("quick AI connection drawer", () => {
     await waitFor(() => expect(connectButton).toBeEnabled(), ASYNC_UI_TIMEOUT);
     await user.click(connectButton);
     await screen.findByText("连接成功 · 已找到模型", {}, ASYNC_UI_TIMEOUT);
+    expect(harness.generate).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "继续" }));
+    await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
+    expect(await screen.findByText("发送固定验证前确认")).toBeVisible();
+    expect(screen.getByText(/最多调用 1 次，自动重试 0 次/u)).toBeVisible();
+    expect(screen.getByText(/不发送作品正文、灵感、设定或 API Key/u)).toBeVisible();
+    expect(harness.generate).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "确认 1 次固定验证并继续" }));
     expect(await screen.findByRole("button", { name: "返回选择" }, ASYNC_UI_TIMEOUT)).toBeEnabled();
+    expect(harness.generate).toHaveBeenCalledOnce();
     await user.click(screen.getByRole("button", { name: "返回选择" }));
 
     const modelSelect = screen.getByLabelText("开书使用的模型");
@@ -285,6 +292,15 @@ function createTauriHarness(
       });
     },
   );
+  const generate = vi.fn(() =>
+    options.probeFails === true
+      ? Promise.reject(
+          Object.assign(new Error("model does not support text"), {
+            code: "MODEL_TEXT_UNSUPPORTED",
+          }),
+        )
+      : Promise.resolve({ text: "OK", usage: null }),
+  );
   const modelGateway: NativeModelGatewayClient = {
     available: true,
     checkConnection,
@@ -298,14 +314,7 @@ function createTauriHarness(
             : []),
         ],
       }),
-    generate: () =>
-      options.probeFails === true
-        ? Promise.reject(
-            Object.assign(new Error("model does not support text"), {
-              code: "MODEL_TEXT_UNSUPPORTED",
-            }),
-          )
-        : Promise.resolve({ text: "OK", usage: null }),
+    generate,
     cancelGeneration: () => Promise.resolve(false),
     embed: base.modelGateway.embed.bind(base.modelGateway),
     ...(base.modelGateway.rerank === undefined
@@ -318,5 +327,5 @@ function createTauriHarness(
     credentials,
     modelGateway,
   });
-  return { runtime, secrets, checkConnection };
+  return { runtime, secrets, checkConnection, generate };
 }

@@ -12,18 +12,24 @@ import type {
   EmbeddingConfiguration,
   HybridSearchResponse,
   InMemoryHybridSearchIndex,
+  SearchChunkKind,
   SearchDocument,
   SearchHealth,
   SearchIndexErrorCode,
+  SearchRetrievalScope,
 } from "@inkshadow/search-core";
 import {
   parseUuidV7 as parseStoryUuidV7,
   type OutlineRepository,
   type OutlineSnapshot,
+  type StoryFact,
+  type StoryFactSnapshot,
+  type StoryFactStore,
 } from "@inkshadow/story-core";
 
 import {
   ProjectSearchSnapshotStoreError,
+  defaultProjectSearchRetrievalScope,
   type ProjectSearchSnapshot,
   type ProjectSearchSnapshotStore,
   type ProjectSearchSynchronization,
@@ -33,10 +39,10 @@ import {
   type ProjectEmbeddingDiagnostics,
   type ProjectSearchVectorService,
   type ProjectVectorLoad,
+  type QueryEmbeddingOutcome,
 } from "./project-search-vector-service";
 
 const MAX_SEARCH_DOCUMENT_UTF8_BYTES = 48 * 1024;
-const SEARCH_DOCUMENT_OVERLAP_UTF8_BYTES = 1_024;
 const MAX_SEARCH_QUERY_LENGTH = 500;
 const MAX_SEARCH_RESULTS = 100;
 const COLD_SEARCH_HEALTH: SearchHealth = Object.freeze({
@@ -64,6 +70,27 @@ export interface ProjectSearchSynchronizationDiagnostics {
   readonly forced: boolean;
   readonly changed: boolean;
   readonly synchronizedAt: string;
+  readonly storyFactEvidenceCount: number;
+  readonly projectionOmissions: readonly ProjectSearchProjectionOmission[];
+}
+
+export const PROJECT_SEARCH_PROJECTION_OMISSION_REASONS = [
+  "story_fact_source_unavailable",
+  "story_fact_not_confirmed_current_canon",
+  "story_fact_source_not_exact_chapter_span",
+  "story_fact_source_chapter_missing",
+  "story_fact_source_version_not_current",
+  "story_fact_source_span_invalid",
+  "story_fact_source_excerpt_mismatch",
+] as const;
+
+export type ProjectSearchProjectionOmissionReason =
+  (typeof PROJECT_SEARCH_PROJECTION_OMISSION_REASONS)[number];
+
+export interface ProjectSearchProjectionOmission {
+  readonly sourceType: "story_fact_evidence";
+  readonly sourceId: string | null;
+  readonly reason: ProjectSearchProjectionOmissionReason;
 }
 
 export interface ProjectSearchService {
@@ -78,6 +105,13 @@ export interface ProjectSearchService {
     projectId: UuidV7,
     query: string,
     limit?: number,
+    scope?: SearchRetrievalScope,
+  ): Promise<Result<HybridSearchResponse, AppError>>;
+  searchFtsOnly(
+    projectId: UuidV7,
+    query: string,
+    scope: SearchRetrievalScope,
+    limit?: number,
   ): Promise<Result<HybridSearchResponse, AppError>>;
   health(): SearchHealth;
   embeddingDiagnostics(): ProjectEmbeddingDiagnostics;
@@ -88,6 +122,7 @@ export interface LocalProjectSearchDependencies {
   readonly projects: ProjectRepository;
   readonly chapters: ChapterRepository;
   readonly outlines: OutlineRepository;
+  readonly storyFacts: Pick<StoryFactStore, "listByProjectId">;
   readonly snapshots: ProjectSearchSnapshotStore;
   readonly hasher: ContentHasher;
   readonly clock: Clock;
@@ -100,12 +135,44 @@ interface DocumentBuildResult {
   readonly hashedDocumentCount: number;
   readonly integrityHashedDocumentCount: number;
   readonly integrityMismatch: boolean;
+  readonly omissions: readonly ProjectSearchProjectionOmission[];
 }
+
+interface SearchTextSpan {
+  readonly start: number;
+  readonly end: number;
+  readonly text: string;
+}
+
+interface ChapterProjectionUnit extends SearchTextSpan {
+  readonly id: string;
+  readonly title: string;
+  readonly chunkKind: SearchChunkKind;
+  readonly parentDocumentId: string | null;
+  readonly sceneId: string | null;
+  readonly eventId: string | null;
+}
+
+type StoryFactEvidenceResolution =
+  | Readonly<{
+      ok: true;
+      snapshot: StoryFactSnapshot;
+      chapter: Chapter;
+      storyOrder: number;
+      start: number;
+      end: number;
+    }>
+  | Readonly<{
+      ok: false;
+      sourceId: string;
+      reason: ProjectSearchProjectionOmissionReason;
+    }>;
 
 interface SynchronizationOutcome {
   readonly health: SearchHealth;
   readonly recoveredFromCorruption: boolean;
   readonly snapshot: ProjectSearchSnapshot;
+  readonly projectionOmissions: readonly ProjectSearchProjectionOmission[];
 }
 
 export class LocalProjectSearchService implements ProjectSearchService {
@@ -222,8 +289,9 @@ export class LocalProjectSearchService implements ProjectSearchService {
     projectId: UuidV7,
     query: string,
     limit = 20,
+    scope: SearchRetrievalScope = defaultProjectSearchRetrievalScope(projectId),
   ): Promise<Result<HybridSearchResponse, AppError>> {
-    if (!isValidSearchQuery(query) || !isValidSearchLimit(limit)) {
+    if (!isValidSearchQuery(query) || !isValidSearchLimit(limit) || scope.projectId !== projectId) {
       return Promise.resolve(
         err(
           new AppError({
@@ -232,6 +300,9 @@ export class LocalProjectSearchService implements ProjectSearchService {
           }),
         ),
       );
+    }
+    if (scope.taskType !== "project_search") {
+      return this.searchFtsOnly(projectId, query, scope, limit);
     }
 
     return this.runExclusive(async () => {
@@ -244,13 +315,21 @@ export class LocalProjectSearchService implements ProjectSearchService {
         const keywordCandidates = await this.dependencies.snapshots.findKeywordCandidates(
           projectId,
           query,
+          scope,
         );
         const index = await this.getIndex();
         const vectorLoad = this.vectorLoads.get(projectId);
-        const vectorQuery =
-          this.dependencies.vectors === undefined || vectorLoad === undefined
-            ? null
-            : await this.dependencies.vectors.embedQuery(vectorLoad, query);
+        let vectorQuery: QueryEmbeddingOutcome | null = null;
+        if (this.dependencies.vectors !== undefined && vectorLoad !== undefined) {
+          try {
+            vectorQuery = await this.dependencies.vectors.embedQuery(vectorLoad, query);
+          } catch (cause: unknown) {
+            // FTS/keyword retrieval is the baseline. A missing Ollama process,
+            // stale embedding route or query-vector failure only removes the
+            // optional vector score; it must not erase locally indexed hits.
+            this.lastVectorFailureCode = safeErrorCode(cause, "QUERY_EMBEDDING_FAILED");
+          }
+        }
         const queryEmbedding = vectorQuery?.embedding ?? null;
         if (vectorQuery !== null && vectorLoad !== undefined) {
           this.vectorLoads.set(projectId, {
@@ -263,11 +342,9 @@ export class LocalProjectSearchService implements ProjectSearchService {
           query,
           limit,
           ...(queryEmbedding === null ? {} : { queryEmbedding }),
-          ...(queryEmbedding !== null
+          ...(keywordCandidates.documentIds === null
             ? {}
-            : keywordCandidates.documentIds === null
-              ? {}
-              : { candidateDocumentIds: keywordCandidates.documentIds }),
+            : { candidateDocumentIds: keywordCandidates.documentIds }),
         });
         const notices = [...response.notices];
         if (vectorQuery?.notice !== null && vectorQuery?.notice !== undefined) {
@@ -281,22 +358,141 @@ export class LocalProjectSearchService implements ProjectSearchService {
         if (synchronized.value.recoveredFromCorruption) {
           notices.push("persistent_index_recovered_from_authoritative_sources");
         }
+        if (synchronized.value.projectionOmissions.length > 0) {
+          notices.push(
+            `retrieval_projection_omitted_${[
+              ...new Set(synchronized.value.projectionOmissions.map(({ reason }) => reason)),
+            ].join("_")}`,
+          );
+        }
         if (keywordCandidates.recovered) {
           notices.push("persistent_fts5_rebuilt_from_search_documents");
         }
         if (keywordCandidates.degraded) {
-          notices.push("persistent_fts5_unavailable_in_memory_fallback");
+          notices.push("persistent_fts5_unavailable_scope_failed_closed");
+        }
+        if (keywordCandidates.scopeTrace.omittedHardFilters.length > 0) {
+          notices.push(
+            `retrieval_scope_omitted_${keywordCandidates.scopeTrace.omittedHardFilters.join("_")}`,
+          );
+        }
+        if (keywordCandidates.scopeTrace.authorityNeutralOmissions.length > 0) {
+          notices.push(
+            `retrieval_scope_authority_neutral_${keywordCandidates.scopeTrace.authorityNeutralOmissions.join("_")}`,
+          );
         }
         const embeddingDiagnostics =
-          vectorQuery?.diagnostics ?? vectorLoad?.diagnostics ?? this.embeddingDiagnostics();
+          this.lastVectorFailureCode === null
+            ? (vectorQuery?.diagnostics ?? vectorLoad?.diagnostics ?? this.embeddingDiagnostics())
+            : this.embeddingDiagnostics();
         return ok({
           ...response,
+          retrievalScopeTrace: keywordCandidates.scopeTrace,
           health: mergeVectorHealth(response.health, embeddingDiagnostics),
           capabilities: {
             ...response.capabilities,
             vector: embeddingDiagnostics.status,
           },
           notices: [...new Set(notices)],
+        });
+      } catch (cause: unknown) {
+        return err(toSearchAppError(cause));
+      }
+    });
+  }
+
+  public searchFtsOnly(
+    projectId: UuidV7,
+    query: string,
+    scope: SearchRetrievalScope,
+    limit = 20,
+  ): Promise<Result<HybridSearchResponse, AppError>> {
+    if (!isValidSearchQuery(query) || !isValidSearchLimit(limit) || scope.projectId !== projectId) {
+      return Promise.resolve(
+        err(
+          new AppError({
+            code: "VALIDATION_FAILED",
+            message: "The read-only FTS request or retrieval scope is invalid.",
+          }),
+        ),
+      );
+    }
+
+    return this.runExclusive(async () => {
+      const projectResult = await this.dependencies.projects.findById(projectId);
+      if (!projectResult.ok) {
+        return projectResult;
+      }
+      if (projectResult.value === null || projectResult.value.status === "trashed") {
+        return err(
+          new AppError({
+            code: projectResult.value === null ? "PROJECT_NOT_FOUND" : "PROJECT_DELETED",
+            message:
+              projectResult.value === null
+                ? "The project does not exist."
+                : "The project is in the trash and cannot be searched.",
+          }),
+        );
+      }
+
+      try {
+        const snapshot = await this.dependencies.snapshots.loadProject(projectId);
+        if (snapshot === null) {
+          return err(
+            new AppError({
+              code: "REPOSITORY_ERROR",
+              message: "The authoritative local FTS snapshot has not been prepared.",
+              retryable: true,
+              actions: ["RETRY"],
+              details: { sourceCode: "SEARCH_SNAPSHOT_REQUIRED" },
+            }),
+          );
+        }
+        const candidates = await this.dependencies.snapshots.findKeywordCandidates(
+          projectId,
+          query,
+          scope,
+        );
+        const { InMemoryHybridSearchIndex: SearchIndex } = await import("@inkshadow/search-core");
+        const index = new SearchIndex();
+        index.rebuildProject(
+          {
+            projectId,
+            documents: snapshot.documents,
+            rebuiltAt: snapshot.indexedAt,
+          },
+          index.health().generation,
+        );
+        const response = index.search({
+          projectId,
+          query,
+          limit,
+          candidateDocumentIds: candidates.documentIds ?? Object.freeze([]),
+        });
+        const { embeddingConfiguration: _embeddingConfiguration, ...ftsHealth } = response.health;
+        void _embeddingConfiguration;
+        return ok({
+          ...response,
+          retrievalScopeTrace: candidates.scopeTrace,
+          health: {
+            ...ftsHealth,
+            vectorStatus: "disabled",
+            embeddingCount: 0,
+          },
+          capabilities: { ...response.capabilities, vector: "disabled" },
+          notices: [
+            ...response.notices,
+            "fts_only_read_only_no_embedding_or_gateway",
+            ...(candidates.degraded ? ["persistent_fts5_unavailable_scope_failed_closed"] : []),
+            ...(candidates.scopeTrace.omittedHardFilters.length === 0
+              ? []
+              : [`retrieval_scope_omitted_${candidates.scopeTrace.omittedHardFilters.join("_")}`]),
+            ...(candidates.scopeTrace.authorityNeutralOmissions.length === 0
+              ? []
+              : [
+                  `retrieval_scope_authority_neutral_${candidates.scopeTrace.authorityNeutralOmissions.join("_")}`,
+                ]),
+          ],
         });
       } catch (cause: unknown) {
         return err(toSearchAppError(cause));
@@ -340,10 +536,11 @@ export class LocalProjectSearchService implements ProjectSearchService {
         }),
       );
     }
-    const [projectResult, chaptersResult, outlineResult] = await Promise.all([
+    const [projectResult, chaptersResult, outlineResult, storyFactsResult] = await Promise.all([
       this.dependencies.projects.findById(projectId),
       this.dependencies.chapters.listByProjectId(projectId),
       this.dependencies.outlines.findByProjectId(storyProjectId.value),
+      this.dependencies.storyFacts.listByProjectId(storyProjectId.value),
     ]);
     if (!projectResult.ok) {
       return projectResult;
@@ -414,11 +611,41 @@ export class LocalProjectSearchService implements ProjectSearchService {
     if (!outlineDocuments.ok) {
       return outlineDocuments;
     }
+    const storyFactDocuments = storyFactsResult.ok
+      ? await this.createStoryFactEvidenceDocuments(storyFactsResult.value, chaptersResult.value)
+      : ok<DocumentBuildResult>({
+          documents: Object.freeze([]),
+          reusedSourceCount: 0,
+          hashedDocumentCount: 0,
+          integrityHashedDocumentCount: 0,
+          integrityMismatch: false,
+          omissions: Object.freeze([
+            {
+              sourceType: "story_fact_evidence",
+              sourceId: null,
+              reason: "story_fact_source_unavailable",
+            },
+          ]),
+        });
+    if (!storyFactDocuments.ok) {
+      return storyFactDocuments;
+    }
     const recoveredFromIntegrityMismatch =
-      chapterDocuments.value.integrityMismatch || outlineDocuments.value.integrityMismatch;
+      chapterDocuments.value.integrityMismatch ||
+      outlineDocuments.value.integrityMismatch ||
+      storyFactDocuments.value.integrityMismatch;
     recoveredFromCorruption ||= recoveredFromIntegrityMismatch;
 
-    const documents = [...chapterDocuments.value.documents, ...outlineDocuments.value.documents];
+    const documents = [
+      ...chapterDocuments.value.documents,
+      ...outlineDocuments.value.documents,
+      ...storyFactDocuments.value.documents,
+    ];
+    const projectionOmissions = Object.freeze([
+      ...chapterDocuments.value.omissions,
+      ...outlineDocuments.value.omissions,
+      ...storyFactDocuments.value.omissions,
+    ]);
     const synchronizedAt = this.dependencies.clock.now();
     let synchronization: ProjectSearchSynchronization;
     try {
@@ -460,22 +687,30 @@ export class LocalProjectSearchService implements ProjectSearchService {
         deletedCount: synchronization.deletedDocumentIds.length,
         unchangedCount: synchronization.unchangedCount,
         reusedSourceCount:
-          chapterDocuments.value.reusedSourceCount + outlineDocuments.value.reusedSourceCount,
+          chapterDocuments.value.reusedSourceCount +
+          outlineDocuments.value.reusedSourceCount +
+          storyFactDocuments.value.reusedSourceCount,
         hashedDocumentCount:
-          chapterDocuments.value.hashedDocumentCount + outlineDocuments.value.hashedDocumentCount,
+          chapterDocuments.value.hashedDocumentCount +
+          outlineDocuments.value.hashedDocumentCount +
+          storyFactDocuments.value.hashedDocumentCount,
         integrityHashedDocumentCount:
           chapterDocuments.value.integrityHashedDocumentCount +
-          outlineDocuments.value.integrityHashedDocumentCount,
+          outlineDocuments.value.integrityHashedDocumentCount +
+          storyFactDocuments.value.integrityHashedDocumentCount,
         recoveredFromIntegrityMismatch,
         recoveredFromCorruption,
         forced: force,
         changed: synchronization.changed,
         synchronizedAt: synchronization.snapshot.indexedAt,
+        storyFactEvidenceCount: storyFactDocuments.value.documents.length,
+        projectionOmissions,
       });
       return ok({
         health,
         recoveredFromCorruption,
         snapshot: synchronization.snapshot,
+        projectionOmissions,
       });
     } catch (cause: unknown) {
       return err(toSearchAppError(cause));
@@ -491,12 +726,14 @@ export class LocalProjectSearchService implements ProjectSearchService {
     let hashedDocumentCount = 0;
     let integrityHashedDocumentCount = 0;
     let integrityMismatch = false;
-    for (const chapter of chapters) {
+    for (const [chapterIndex, chapter] of chapters.entries()) {
       if (chapter.status !== "active") {
         continue;
       }
       const snapshot = chapter.toSnapshot();
-      const reusable = findReusableChapterDocuments(chapter, persistedDocuments);
+      const units = buildChapterProjectionUnits(chapter);
+      const storyOrder = chapterIndex + 1;
+      const reusable = findReusableChapterDocuments(chapter, units, storyOrder, persistedDocuments);
       if (reusable !== null) {
         let verified = true;
         for (const document of reusable) {
@@ -522,26 +759,40 @@ export class LocalProjectSearchService implements ProjectSearchService {
         }
       }
 
-      const chunks = splitSearchText(chapter.content);
-      for (const [chunkIndex, text] of chunks.entries()) {
-        const checksum = await this.dependencies.hasher.sha256(text);
+      for (const unit of units) {
+        const checksum = await this.dependencies.hasher.sha256(unit.text);
         if (!checksum.ok) {
           return checksum;
         }
         hashedDocumentCount += 1;
         const document: SearchDocument = {
-          id: `chapter:${chapter.id}:${String(chunkIndex)}`,
+          id: unit.id,
           projectId: chapter.projectId,
           sourceType: "chapter",
           sourceId: chapter.id,
           sourceVersionId: chapter.currentVersionId,
-          title:
-            chunks.length === 1
-              ? chapter.title
-              : `${chapter.title} · 片段 ${String(chunkIndex + 1)}`,
-          text,
+          title: unit.title,
+          text: unit.text,
           contentHash: checksum.value,
           updatedAt: snapshot.updatedAt,
+          chunkKind: unit.chunkKind,
+          parentDocumentId: unit.parentDocumentId,
+          utf16Start: unit.start,
+          utf16End: unit.end,
+          sourceLength: chapter.content.length,
+          sceneId: unit.sceneId,
+          eventId: unit.eventId,
+          characterIds: Object.freeze([]),
+          locationIds: Object.freeze([]),
+          storyTime: null,
+          // Story authority uses null for the canonical/main line.
+          branchId: null,
+          povCharacterId: null,
+          storyOrder,
+          authority: "accepted_text",
+          privacy: chapter.privacyMode,
+          currentness: "current",
+          omittedScopeFields: chapterProjectionOmissions(unit),
         };
         documents.push(document);
         this.rememberDocumentIntegrity(document);
@@ -553,6 +804,93 @@ export class LocalProjectSearchService implements ProjectSearchService {
       hashedDocumentCount,
       integrityHashedDocumentCount,
       integrityMismatch,
+      omissions: Object.freeze([]),
+    });
+  }
+
+  private async createStoryFactEvidenceDocuments(
+    facts: readonly StoryFact[],
+    chapters: readonly Chapter[],
+  ): Promise<Result<DocumentBuildResult, AppError>> {
+    const documents: SearchDocument[] = [];
+    const omissions: ProjectSearchProjectionOmission[] = [];
+    let hashedDocumentCount = 0;
+    const activeChapters = new Map<string, Readonly<{ chapter: Chapter; storyOrder: number }>>();
+    for (const [index, chapter] of chapters.entries()) {
+      if (chapter.status === "active") {
+        activeChapters.set(chapter.id, { chapter, storyOrder: index + 1 });
+      }
+    }
+    const orderedFacts = [...facts].sort((left, right) => left.id.localeCompare(right.id));
+    for (const fact of orderedFacts) {
+      const resolved = resolveStoryFactEvidence(fact.toSnapshot(), activeChapters);
+      if (!resolved.ok) {
+        omissions.push({
+          sourceType: "story_fact_evidence",
+          sourceId: resolved.sourceId,
+          reason: resolved.reason,
+        });
+        continue;
+      }
+      const chapterParents = buildChapterProjectionUnits(resolved.chapter).filter(
+        (unit) => unit.chunkKind === "chapter",
+      );
+      for (const parent of chapterParents) {
+        const start = Math.max(resolved.start, parent.start);
+        const end = Math.min(resolved.end, parent.end);
+        if (start >= end) {
+          continue;
+        }
+        const text = resolved.chapter.content.slice(start, end);
+        const checksum = await this.dependencies.hasher.sha256(text);
+        if (!checksum.ok) {
+          return checksum;
+        }
+        hashedDocumentCount += 1;
+        documents.push({
+          id: `story-fact-evidence:${resolved.snapshot.id}:r${String(resolved.snapshot.revision)}:${String(start)}:${String(end)}`,
+          projectId: resolved.snapshot.projectId,
+          sourceType: "memory",
+          sourceId: resolved.snapshot.id,
+          sourceVersionId: resolved.chapter.currentVersionId,
+          title: `已确认设定证据 · ${resolved.snapshot.factType}`,
+          text,
+          contentHash: checksum.value,
+          updatedAt: resolved.snapshot.updatedAt,
+          chunkKind: "story_fact_evidence",
+          parentDocumentId: parent.id,
+          utf16Start: start,
+          utf16End: end,
+          sourceLength: resolved.chapter.content.length,
+          sceneId: null,
+          eventId: null,
+          characterIds: Object.freeze([]),
+          locationIds: Object.freeze([]),
+          storyTime: resolved.snapshot.effectiveAt,
+          branchId: resolved.snapshot.branchId,
+          povCharacterId: null,
+          storyOrder: resolved.storyOrder,
+          authority: "confirmed_fact",
+          privacy: resolved.chapter.privacyMode,
+          currentness: "current",
+          omittedScopeFields: Object.freeze([
+            "scene",
+            "event",
+            "pov",
+            "characters",
+            "locations",
+            ...(resolved.snapshot.effectiveAt === null ? ["story_time"] : []),
+          ]),
+        });
+      }
+    }
+    return ok({
+      documents: Object.freeze(documents),
+      reusedSourceCount: 0,
+      hashedDocumentCount,
+      integrityHashedDocumentCount: 0,
+      integrityMismatch: false,
+      omissions: Object.freeze(omissions),
     });
   }
 
@@ -567,6 +905,7 @@ export class LocalProjectSearchService implements ProjectSearchService {
         hashedDocumentCount: 0,
         integrityHashedDocumentCount: 0,
         integrityMismatch: false,
+        omissions: Object.freeze([]),
       });
     }
 
@@ -613,6 +952,33 @@ export class LocalProjectSearchService implements ProjectSearchService {
         text: node.synopsis,
         contentHash: checksum.value,
         updatedAt: node.updatedAt,
+        chunkKind: "chapter",
+        parentDocumentId: null,
+        utf16Start: 0,
+        utf16End: node.synopsis.length,
+        sourceLength: node.synopsis.length,
+        sceneId: null,
+        eventId: null,
+        characterIds: Object.freeze([]),
+        locationIds: Object.freeze([]),
+        storyTime: null,
+        branchId: null,
+        povCharacterId: null,
+        storyOrder: null,
+        authority: "rebuildable",
+        privacy: "standard",
+        currentness: "current",
+        omittedScopeFields: Object.freeze([
+          "accepted_version",
+          "branch",
+          "characters",
+          "event",
+          "locations",
+          "pov",
+          "scene",
+          "story_order",
+          "story_time",
+        ]),
       };
       documents.push(document);
       this.rememberDocumentIntegrity(document);
@@ -623,6 +989,7 @@ export class LocalProjectSearchService implements ProjectSearchService {
       hashedDocumentCount,
       integrityHashedDocumentCount,
       integrityMismatch,
+      omissions: Object.freeze([]),
     });
   }
 
@@ -765,6 +1132,8 @@ export class LocalProjectSearchService implements ProjectSearchService {
 
 function findReusableChapterDocuments(
   chapter: Chapter,
+  units: readonly ChapterProjectionUnit[],
+  storyOrder: number,
   persistedDocuments: readonly SearchDocument[],
 ): readonly SearchDocument[] | null {
   const candidates = persistedDocuments
@@ -778,20 +1147,35 @@ function findReusableChapterDocuments(
   if (candidates.length === 0) {
     return null;
   }
-  const expectedChunks = splitSearchText(chapter.content);
-  if (candidates.length !== expectedChunks.length) {
+  if (candidates.length !== units.length) {
     return null;
   }
+  const candidatesById = new Map(candidates.map((document) => [document.id, document]));
   const updatedAt = chapter.toSnapshot().updatedAt;
-  const coherent = candidates.every((document, index) => {
-    const expectedTitle =
-      candidates.length === 1 ? chapter.title : `${chapter.title} · 片段 ${String(index + 1)}`;
+  const coherent = units.every((unit) => {
+    const document = candidatesById.get(unit.id);
     return (
-      document.id === `chapter:${chapter.id}:${String(index)}` &&
-      document.sourceVersionId === chapter.currentVersionId &&
+      document?.sourceVersionId === chapter.currentVersionId &&
       document.updatedAt === updatedAt &&
-      document.title === expectedTitle &&
-      document.text === expectedChunks[index]
+      document.title === unit.title &&
+      document.text === unit.text &&
+      document.chunkKind === unit.chunkKind &&
+      document.parentDocumentId === unit.parentDocumentId &&
+      document.utf16Start === unit.start &&
+      document.utf16End === unit.end &&
+      document.sourceLength === chapter.content.length &&
+      document.sceneId === unit.sceneId &&
+      document.eventId === unit.eventId &&
+      sameStringValues(document.characterIds, []) &&
+      sameStringValues(document.locationIds, []) &&
+      document.storyTime === null &&
+      document.branchId === null &&
+      document.povCharacterId === null &&
+      document.storyOrder === storyOrder &&
+      document.authority === "accepted_text" &&
+      document.privacy === chapter.privacyMode &&
+      document.currentness === "current" &&
+      sameStringValues(document.omittedScopeFields, chapterProjectionOmissions(unit))
     );
   });
   return coherent ? Object.freeze(candidates) : null;
@@ -815,7 +1199,34 @@ function findReusableOutlineDocument(
     candidate.sourceVersionId !== `outline:${node.id}:r${String(node.revision)}` ||
     candidate.title !== node.title ||
     candidate.text !== node.synopsis ||
-    candidate.updatedAt !== node.updatedAt
+    candidate.updatedAt !== node.updatedAt ||
+    candidate.chunkKind !== "chapter" ||
+    candidate.parentDocumentId !== null ||
+    candidate.utf16Start !== 0 ||
+    candidate.utf16End !== node.synopsis.length ||
+    candidate.sourceLength !== node.synopsis.length ||
+    candidate.sceneId !== null ||
+    candidate.eventId !== null ||
+    !sameStringValues(candidate.characterIds, []) ||
+    !sameStringValues(candidate.locationIds, []) ||
+    candidate.storyTime !== null ||
+    candidate.branchId !== null ||
+    candidate.povCharacterId !== null ||
+    candidate.storyOrder !== null ||
+    candidate.authority !== "rebuildable" ||
+    candidate.privacy !== "standard" ||
+    candidate.currentness !== "current" ||
+    !sameStringValues(candidate.omittedScopeFields, [
+      "accepted_version",
+      "branch",
+      "characters",
+      "event",
+      "locations",
+      "pov",
+      "scene",
+      "story_order",
+      "story_time",
+    ])
   ) {
     return null;
   }
@@ -830,12 +1241,204 @@ function documentIntegrityMarker(document: SearchDocument): string {
   return `${document.sourceVersionId}\u0000${document.contentHash}`;
 }
 
-function splitSearchText(text: string): readonly string[] {
-  if (utf8Length(text) <= MAX_SEARCH_DOCUMENT_UTF8_BYTES) {
-    return [text];
+function resolveStoryFactEvidence(
+  snapshot: StoryFactSnapshot,
+  activeChapters: ReadonlyMap<string, Readonly<{ chapter: Chapter; storyOrder: number }>>,
+): StoryFactEvidenceResolution {
+  if (
+    snapshot.status !== "formal" ||
+    !snapshot.userConfirmed ||
+    snapshot.needsReview ||
+    snapshot.deprecated
+  ) {
+    return {
+      ok: false,
+      sourceId: snapshot.id,
+      reason: "story_fact_not_confirmed_current_canon",
+    };
+  }
+  const source = snapshot.source;
+  if (
+    source.kind !== "chapter_span" ||
+    source.chapterId === null ||
+    source.versionId === null ||
+    source.startOffset === null ||
+    source.endOffset === null ||
+    source.sourceLength === null
+  ) {
+    return {
+      ok: false,
+      sourceId: snapshot.id,
+      reason: "story_fact_source_not_exact_chapter_span",
+    };
+  }
+  const chapterAuthority = activeChapters.get(source.chapterId);
+  if (
+    chapterAuthority === undefined ||
+    String(chapterAuthority.chapter.projectId) !== String(snapshot.projectId)
+  ) {
+    return {
+      ok: false,
+      sourceId: snapshot.id,
+      reason: "story_fact_source_chapter_missing",
+    };
+  }
+  if (String(source.versionId) !== String(chapterAuthority.chapter.currentVersionId)) {
+    return {
+      ok: false,
+      sourceId: snapshot.id,
+      reason: "story_fact_source_version_not_current",
+    };
+  }
+  if (
+    !Number.isSafeInteger(source.startOffset) ||
+    !Number.isSafeInteger(source.endOffset) ||
+    !Number.isSafeInteger(source.sourceLength) ||
+    source.startOffset < 0 ||
+    source.endOffset <= source.startOffset ||
+    source.endOffset > chapterAuthority.chapter.content.length ||
+    source.sourceLength !== chapterAuthority.chapter.content.length
+  ) {
+    return {
+      ok: false,
+      sourceId: snapshot.id,
+      reason: "story_fact_source_span_invalid",
+    };
+  }
+  const exactText = chapterAuthority.chapter.content.slice(source.startOffset, source.endOffset);
+  if (source.excerpt !== null && source.excerpt !== exactText) {
+    return {
+      ok: false,
+      sourceId: snapshot.id,
+      reason: "story_fact_source_excerpt_mismatch",
+    };
+  }
+  return {
+    ok: true,
+    snapshot,
+    chapter: chapterAuthority.chapter,
+    storyOrder: chapterAuthority.storyOrder,
+    start: source.startOffset,
+    end: source.endOffset,
+  };
+}
+
+function buildChapterProjectionUnits(chapter: Chapter): readonly ChapterProjectionUnit[] {
+  const chapterSpans = splitSearchText(chapter.content);
+  const chapterUnits = chapterSpans.map((span, index): ChapterProjectionUnit => ({
+    ...span,
+    id: `chapter:${chapter.id}:${String(index)}`,
+    title:
+      chapterSpans.length === 1 ? chapter.title : `${chapter.title} · 片段 ${String(index + 1)}`,
+    chunkKind: "chapter",
+    parentDocumentId: null,
+    sceneId: null,
+    eventId: null,
+  }));
+  const sceneUnits: ChapterProjectionUnit[] = [];
+  for (const scene of sceneSpans(chapter.content)) {
+    for (const parent of chapterUnits) {
+      const child = intersectTrimmedSpan(scene, parent);
+      if (child === null) {
+        continue;
+      }
+      const id = `scene:${chapter.id}:${String(child.start)}:${String(child.end)}`;
+      sceneUnits.push({
+        ...child,
+        id,
+        title: `${chapter.title} · 场景`,
+        chunkKind: "scene",
+        parentDocumentId: parent.id,
+        sceneId: id,
+        eventId: null,
+      });
+    }
+  }
+  const paragraphUnits: ChapterProjectionUnit[] = [];
+  for (const paragraph of paragraphSpans(chapter.content)) {
+    for (const parent of sceneUnits) {
+      const child = intersectTrimmedSpan(paragraph, parent);
+      if (child === null) {
+        continue;
+      }
+      paragraphUnits.push({
+        ...child,
+        id: `paragraph:${chapter.id}:${String(child.start)}:${String(child.end)}`,
+        title: `${chapter.title} · 段落`,
+        chunkKind: "paragraph",
+        parentDocumentId: parent.id,
+        sceneId: parent.sceneId,
+        eventId: null,
+      });
+    }
   }
 
-  const chunks: string[] = [];
+  // Event chunks are deterministic sentence-level evidence spans. They are
+  // retrieval granularity only and never claim a semantic event extraction.
+  const eventUnits: ChapterProjectionUnit[] = [];
+  for (const paragraph of paragraphUnits) {
+    for (const event of eventSpans(paragraph)) {
+      const id = `event:${chapter.id}:${String(event.start)}:${String(event.end)}`;
+      eventUnits.push({
+        ...event,
+        id,
+        title: `${chapter.title} · 事件段`,
+        chunkKind: "event",
+        parentDocumentId: paragraph.id,
+        sceneId: paragraph.sceneId,
+        eventId: id,
+      });
+    }
+  }
+
+  const dialogueUnits: ChapterProjectionUnit[] = [];
+  const dialogueIds = new Set<string>();
+  for (const event of eventUnits) {
+    for (const dialogue of dialogueSpans(event)) {
+      const id = `dialogue:${chapter.id}:${String(dialogue.start)}:${String(dialogue.end)}`;
+      if (dialogueIds.has(id)) {
+        continue;
+      }
+      dialogueIds.add(id);
+      dialogueUnits.push({
+        ...dialogue,
+        id,
+        title: `${chapter.title} · 对话`,
+        chunkKind: "dialogue",
+        parentDocumentId: event.id,
+        sceneId: event.sceneId,
+        eventId: event.id,
+      });
+    }
+  }
+  return Object.freeze([
+    ...chapterUnits,
+    ...sceneUnits,
+    ...paragraphUnits,
+    ...eventUnits,
+    ...dialogueUnits,
+  ]);
+}
+
+function chapterProjectionOmissions(unit: ChapterProjectionUnit): readonly string[] {
+  return Object.freeze(
+    [
+      ...(unit.sceneId === null ? ["scene"] : []),
+      ...(unit.eventId === null ? ["event"] : []),
+      "characters",
+      "locations",
+      "pov",
+      "story_time",
+    ].sort(),
+  );
+}
+
+function splitSearchText(text: string): readonly SearchTextSpan[] {
+  if (utf8Length(text) <= MAX_SEARCH_DOCUMENT_UTF8_BYTES) {
+    return Object.freeze([{ start: 0, end: text.length, text }]);
+  }
+
+  const chunks: SearchTextSpan[] = [];
   let start = 0;
   while (start < text.length) {
     let end = start;
@@ -855,41 +1458,119 @@ function splitSearchText(text: string): readonly string[] {
     if (end === start) {
       throw new Error("A search document code point exceeds the UTF-8 chunk limit.");
     }
-    chunks.push(text.slice(start, end));
+    chunks.push({ start, end, text: text.slice(start, end) });
     if (end === text.length) {
       break;
     }
-
-    let overlapStart = end;
-    let overlapBytes = 0;
-    while (overlapStart > start) {
-      const previous = previousCodePointStart(text, overlapStart);
-      const codePoint = text.codePointAt(previous);
-      if (codePoint === undefined) {
-        break;
-      }
-      const codePointBytes = utf8CodePointLength(codePoint);
-      if (overlapBytes + codePointBytes > SEARCH_DOCUMENT_OVERLAP_UTF8_BYTES) {
-        break;
-      }
-      overlapStart = previous;
-      overlapBytes += codePointBytes;
-    }
-    start = overlapStart;
+    start = end;
   }
-  return chunks;
+  return Object.freeze(chunks);
 }
 
-function previousCodePointStart(value: string, exclusiveEnd: number): number {
-  const previous = exclusiveEnd - 1;
-  if (
-    previous > 0 &&
-    isLowSurrogate(value.charCodeAt(previous)) &&
-    isHighSurrogate(value.charCodeAt(previous - 1))
-  ) {
-    return previous - 1;
+function paragraphSpans(text: string): readonly SearchTextSpan[] {
+  const spans: SearchTextSpan[] = [];
+  const lines = /[^\r\n]+/gu;
+  for (const match of text.matchAll(lines)) {
+    const start = match.index;
+    const value = match[0];
+    const trimmed = trimSourceSpan(text, start, start + value.length);
+    if (trimmed !== null) {
+      spans.push(trimmed);
+    }
   }
-  return previous;
+  return Object.freeze(spans);
+}
+
+function sceneSpans(text: string): readonly SearchTextSpan[] {
+  const spans: SearchTextSpan[] = [];
+  const boundary =
+    /(?:\r?\n[^\S\r\n]*\r?\n)|(?:^|\r?\n)[^\S\r\n]*(?:\*{3,}|-{3,}|#{3,})[^\S\r\n]*(?=\r?\n|$)/gmu;
+  let start = 0;
+  for (const match of text.matchAll(boundary)) {
+    const span = trimSourceSpan(text, start, match.index);
+    if (span !== null) {
+      spans.push(span);
+    }
+    start = match.index + match[0].length;
+  }
+  const finalSpan = trimSourceSpan(text, start, text.length);
+  if (finalSpan !== null) {
+    spans.push(finalSpan);
+  }
+  return Object.freeze(spans);
+}
+
+function eventSpans(paragraph: ChapterProjectionUnit): readonly SearchTextSpan[] {
+  const spans: SearchTextSpan[] = [];
+  const sentences = /[^。！？!?；;\r\n]+(?:[。！？!?；;]+[”」』"']*|$)/gu;
+  for (const match of paragraph.text.matchAll(sentences)) {
+    const span = trimSourceSpan(
+      paragraph.text,
+      match.index,
+      match.index + match[0].length,
+      paragraph.start,
+    );
+    if (span !== null) {
+      spans.push(span);
+    }
+  }
+  return Object.freeze(spans);
+}
+
+function intersectTrimmedSpan(span: SearchTextSpan, parent: SearchTextSpan): SearchTextSpan | null {
+  const start = Math.max(span.start, parent.start);
+  const end = Math.min(span.end, parent.end);
+  if (start >= end) {
+    return null;
+  }
+  return trimSourceSpan(span.text, start - span.start, end - span.start, span.start);
+}
+
+function trimSourceSpan(
+  source: string,
+  start: number,
+  end: number,
+  offset = 0,
+): SearchTextSpan | null {
+  let trimmedStart = start;
+  let trimmedEnd = end;
+  while (trimmedStart < trimmedEnd && /\s/u.test(source[trimmedStart] ?? "")) {
+    trimmedStart += 1;
+  }
+  while (trimmedEnd > trimmedStart && /\s/u.test(source[trimmedEnd - 1] ?? "")) {
+    trimmedEnd -= 1;
+  }
+  if (trimmedStart === trimmedEnd) {
+    return null;
+  }
+  return Object.freeze({
+    start: offset + trimmedStart,
+    end: offset + trimmedEnd,
+    text: source.slice(trimmedStart, trimmedEnd),
+  });
+}
+
+function dialogueSpans(paragraph: ChapterProjectionUnit): readonly SearchTextSpan[] {
+  const matches: SearchTextSpan[] = [];
+  const quoted = /[“「『"][^”」』"\r\n]+[”」』"]/gu;
+  for (const match of paragraph.text.matchAll(quoted)) {
+    const start = paragraph.start + match.index;
+    matches.push(Object.freeze({ start, end: start + match[0].length, text: match[0] }));
+  }
+  if (matches.length === 0 && /^(?:[-—]|[^：:\r\n]{1,30}[：:])/u.test(paragraph.text)) {
+    matches.push(
+      Object.freeze({
+        start: paragraph.start,
+        end: paragraph.end,
+        text: paragraph.text,
+      }),
+    );
+  }
+  return Object.freeze(matches);
+}
+
+function sameStringValues(left: readonly string[] | undefined, right: readonly string[]): boolean {
+  return left?.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function utf8Length(value: string): number {
@@ -911,14 +1592,6 @@ function utf8CodePointLength(codePoint: number): number {
     return 2;
   }
   return codePoint <= 0xffff ? 3 : 4;
-}
-
-function isHighSurrogate(value: number): boolean {
-  return value >= 0xd800 && value <= 0xdbff;
-}
-
-function isLowSurrogate(value: number): boolean {
-  return value >= 0xdc00 && value <= 0xdfff;
 }
 
 function isValidSearchQuery(value: string): boolean {
@@ -951,6 +1624,13 @@ function toSearchAppError(cause: unknown): AppError {
     });
   }
   if (cause instanceof ProjectSearchSnapshotStoreError) {
+    if (cause.code === "SEARCH_SCOPE_INVALID") {
+      return new AppError({
+        code: "VALIDATION_FAILED",
+        message: "The retrieval scope is incomplete or invalid.",
+        details: { sourceCode: cause.code },
+      });
+    }
     return new AppError({
       code: "REPOSITORY_ERROR",
       message: "The persistent local search snapshot is unavailable.",

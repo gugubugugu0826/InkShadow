@@ -1,15 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
+import { createProjectSeed } from "@inkshadow/domain";
 
 import {
+  executeCreativeOpeningProviderAction,
   generateCreativeOpening,
   MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS,
   persistCreativeOpeningCandidate,
+  prepareCreativeOpeningProviderAction,
+  type CreativeOpeningResult,
+  type CreativeOpeningProviderActionInput,
 } from "./creative-opening-service";
 import { createImportRewriteCandidate } from "./import-rewrite-service";
 import type { ModelProviderKind, NovelAiTask } from "./model-hub-provider-registry";
 import type { ModelHubStore } from "./model-hub-store";
 import type { PreparedNovelSkillInvocation } from "./novel-skill-runtime";
-import { createSelectionRewriteCandidate } from "./selection-rewrite-service";
+import {
+  createSelectionRewriteCandidate,
+  prepareSelectionRewrite,
+  type SelectionRewriteCandidateInput,
+} from "./selection-rewrite-service";
 import {
   createConfiguredModelCandidate,
   createDevelopmentRuntime,
@@ -71,6 +80,335 @@ describe("real creative chains use Model Hub routes", () => {
       expect(harness.listModels).not.toHaveBeenCalled();
     });
   }
+
+  it("prepares all four bounded opening actions with zero Provider calls and exact disclosures", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-disclosure",
+      catalogEntryId: "opening-disclosure-catalog",
+      modelId: "opening-disclosure-model",
+    });
+    const projectContext = { projectId: chapter.projectId, chapterId: chapter.id };
+    const actions: readonly CreativeOpeningProviderActionInput[] = [
+      {
+        actionId: "initial-action",
+        kind: "initial_batch",
+        idea: "一座只在雨夜出现的旧车站。",
+        answers: { tone: "克制" },
+        projectContext,
+        requestIds: nextOpeningRequestIds(harness.runtime, 3),
+      },
+      {
+        actionId: "replacement-action",
+        kind: "replacement_batch",
+        idea: "一座只在雨夜出现的旧车站。",
+        direction: "让冲突更快出现",
+        projectContext,
+        requestIds: nextOpeningRequestIds(harness.runtime, 3),
+      },
+      {
+        actionId: "completion-action",
+        kind: "complete_partial",
+        idea: "一座只在雨夜出现的旧车站。",
+        projectContext,
+        requestIds: nextOpeningRequestIds(harness.runtime, 1),
+        openingAngle: "mystery_clue",
+        partialOpening: "雨水沿着废弃站牌往下流，站台尽头忽然亮起一盏灯。",
+      },
+      {
+        actionId: "single-action",
+        kind: "regenerate_single",
+        idea: "一座只在雨夜出现的旧车站。",
+        projectContext,
+        requestIds: nextOpeningRequestIds(harness.runtime, 1),
+        openingAngle: "relationship_dialogue",
+      },
+    ];
+
+    const disclosures = await Promise.all(
+      actions.map((action) => prepareCreativeOpeningProviderAction(harness.runtime, action)),
+    );
+
+    expect(harness.generate).not.toHaveBeenCalled();
+    expect(disclosures.map(({ maximumProviderCalls }) => maximumProviderCalls)).toEqual([
+      3, 3, 1, 1,
+    ]);
+    expect(disclosures.map(({ requestCount }) => requestCount)).toEqual([3, 3, 1, 1]);
+    expect(disclosures.map(({ automaticRetryCount }) => automaticRetryCount)).toEqual([0, 0, 0, 0]);
+    expect(
+      disclosures.map(({ perRequestMaximumProviderCalls }) => perRequestMaximumProviderCalls),
+    ).toEqual([1, 1, 1, 1]);
+    expect(
+      disclosures.every(
+        ({ connectionDisplayName }) => connectionDisplayName === "opening-disclosure",
+      ),
+    ).toBe(true);
+    expect(disclosures.every(({ modelId }) => modelId === "opening-disclosure-model")).toBe(true);
+    expect(disclosures.every(({ dataDestination }) => dataDestination === "remote")).toBe(true);
+    expect(
+      disclosures.every(({ estimatedMaximumCostMicros }) => estimatedMaximumCostMicros === "0"),
+    ).toBe(true);
+    expect(disclosures.every(({ currency }) => currency === "USD")).toBe(true);
+    expect(disclosures.map(({ calls }) => calls.length)).toEqual([3, 3, 1, 1]);
+    expect(new Set(disclosures.map(({ fingerprint }) => fingerprint)).size).toBe(4);
+    expect(disclosures.every(({ fingerprint }) => /^[a-f0-9]{64}$/u.test(fingerprint))).toBe(true);
+  });
+
+  it("labels the total action cost unknown when exact pricing is unavailable", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-cost-unknown",
+      catalogEntryId: "opening-cost-unknown-catalog",
+      modelId: "opening-cost-unknown-model",
+      pricing: "unknown",
+    });
+
+    const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, {
+      actionId: "unknown-cost-action",
+      kind: "initial_batch",
+      idea: "海边小镇每年会忘记同一个人。",
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      requestIds: nextOpeningRequestIds(harness.runtime, 3),
+    });
+
+    expect(disclosure).toMatchObject({
+      maximumProviderCalls: 3,
+      automaticRetryCount: 0,
+      estimatedMaximumCostMicros: null,
+      currency: null,
+    });
+    expect(
+      disclosure.calls.every(
+        ({ estimatedMaximumCostMicros }) => estimatedMaximumCostMicros === null,
+      ),
+    ).toBe(true);
+    expect(harness.generate).not.toHaveBeenCalled();
+  });
+
+  it("requires explicit confirmation and executes only the disclosed 3/3/1/1 call budgets with zero retries", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-confirmed",
+      catalogEntryId: "opening-confirmed-catalog",
+      modelId: "opening-confirmed-model",
+    });
+    harness.generate.mockImplementation((input) =>
+      Promise.resolve({ text: `开头 ${input.generationId}`, usage: null }),
+    );
+    const projectContext = { projectId: chapter.projectId, chapterId: chapter.id };
+    const actions: readonly CreativeOpeningProviderActionInput[] = [
+      {
+        actionId: "confirmed-initial",
+        kind: "initial_batch",
+        idea: "城市里最后一封纸质信来自未来。",
+        projectContext,
+        requestIds: nextOpeningRequestIds(harness.runtime, 3),
+      },
+      {
+        actionId: "confirmed-replacement",
+        kind: "replacement_batch",
+        idea: "城市里最后一封纸质信来自未来。",
+        direction: "换一批更有行动感的方案",
+        projectContext,
+        requestIds: nextOpeningRequestIds(harness.runtime, 3),
+      },
+      {
+        actionId: "confirmed-completion",
+        kind: "complete_partial",
+        idea: "城市里最后一封纸质信来自未来。",
+        projectContext,
+        requestIds: nextOpeningRequestIds(harness.runtime, 1),
+        openingAngle: "mystery_clue",
+        partialOpening: "信封上的邮戳比今天晚了整整十年。",
+      },
+      {
+        actionId: "confirmed-single",
+        kind: "regenerate_single",
+        idea: "城市里最后一封纸质信来自未来。",
+        projectContext,
+        requestIds: nextOpeningRequestIds(harness.runtime, 1),
+        openingAngle: "immediate_action",
+      },
+    ];
+
+    const firstAction = actions[0];
+    if (firstAction === undefined) throw new Error("expected an opening action");
+    await expect(
+      executeCreativeOpeningProviderAction(harness.runtime, firstAction),
+    ).rejects.toMatchObject({
+      code: "CREATIVE_OPENING_CONFIRMATION_REQUIRED",
+    });
+    expect(harness.generate).not.toHaveBeenCalled();
+
+    const results: CreativeOpeningResult[][] = [];
+    for (const action of actions) {
+      const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+      results.push([
+        ...(await executeCreativeOpeningProviderAction(harness.runtime, {
+          ...action,
+          humanConfirmed: true,
+          disclosureFingerprint: disclosure.fingerprint,
+        })),
+      ]);
+    }
+
+    expect(results.map((batch) => batch.length)).toEqual([3, 3, 1, 1]);
+    expect(results.flat().map(({ source, noticeCode }) => ({ source, noticeCode }))).toEqual(
+      Array.from({ length: 8 }, () => ({ source: "provider", noticeCode: null })),
+    );
+    expect(harness.generate).toHaveBeenCalledTimes(8);
+    expect(
+      harness.generate.mock.calls.every(
+        ([request]) => request.config.retryLimit === 0 && request.maxOutputTokens === 1_200,
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects route, cost and request-source drift against the confirmed fingerprint before dispatch", async () => {
+    for (const drift of ["route", "cost", "source"] as const) {
+      const harness = createNativeHarness();
+      const chapter = await createChapter(harness.runtime, "");
+      await seedModelHubTextRoute(harness.runtime.modelHub, {
+        task: "book_start_guidance",
+        providerKind: "openai",
+        connectionId: `opening-${drift}-original`,
+        catalogEntryId: `opening-${drift}-original-catalog`,
+        modelId: `opening-${drift}-original-model`,
+      });
+      const action: CreativeOpeningProviderActionInput = {
+        actionId: `opening-${drift}-action`,
+        kind: "regenerate_single",
+        idea: "一名钟表匠发现城市时间每天都会少一分钟。",
+        answers: { atmosphere: "安静" },
+        projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+        requestIds: nextOpeningRequestIds(harness.runtime, 1),
+        openingAngle: "immediate_action",
+      };
+      const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+      let executionInput: CreativeOpeningProviderActionInput = action;
+      if (drift === "route") {
+        await seedModelHubTextRoute(harness.runtime.modelHub, {
+          task: "idea_discussion",
+          providerKind: "google_gemini",
+          connectionId: "opening-route-new",
+          catalogEntryId: "opening-route-new-catalog",
+          modelId: "opening-route-new-model",
+        });
+        await changeModelHubRoute(
+          harness.runtime.modelHub,
+          "book_start_guidance",
+          "opening-route-new-catalog",
+        );
+      } else if (drift === "cost") {
+        await changeModelHubPricing(harness.runtime.modelHub, "opening-cost-original-catalog");
+      } else {
+        executionInput = { ...action, answers: { atmosphere: "明快" } };
+      }
+
+      await expect(
+        executeCreativeOpeningProviderAction(harness.runtime, {
+          ...executionInput,
+          humanConfirmed: true,
+          disclosureFingerprint: disclosure.fingerprint,
+        }),
+      ).rejects.toMatchObject({ code: "CREATIVE_OPENING_DISCLOSURE_CHANGED" });
+      expect(harness.generate).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rechecks compiled sources after confirmation and stops at zero Provider calls when they drift", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-source-final",
+      catalogEntryId: "opening-source-final-catalog",
+      modelId: "opening-source-final-model",
+    });
+    const action: CreativeOpeningProviderActionInput = {
+      actionId: "opening-source-final-action",
+      kind: "regenerate_single",
+      idea: "一个没有影子的人来到冬天的港口。",
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      requestIds: nextOpeningRequestIds(harness.runtime, 1),
+      openingAngle: "relationship_dialogue",
+    };
+    const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+
+    const results = await executeCreativeOpeningProviderAction(harness.runtime, {
+      ...action,
+      humanConfirmed: true,
+      disclosureFingerprint: disclosure.fingerprint,
+      onInvocationPrepared: async () => {
+        await harness.runtime.projectSeeds.saveForProject(
+          chapter.projectId,
+          createProjectSeed({
+            seedId: harness.runtime.ids.next(),
+            journeyKind: "idea",
+            premise: "这是确认后才出现的新来源，不能沿用旧披露发送。",
+            now: harness.runtime.clock.now(),
+          }),
+        );
+      },
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      source: "local_fallback",
+      noticeCode: "CREATIVE_OPENING_DISCLOSURE_CHANGED",
+    });
+    expect(harness.generate).not.toHaveBeenCalled();
+  });
+
+  it("rechecks privacy after confirmation and blocks a newly private opening before dispatch", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-privacy-final",
+      catalogEntryId: "opening-privacy-final-catalog",
+      modelId: "opening-privacy-final-model",
+    });
+    const action: CreativeOpeningProviderActionInput = {
+      actionId: "opening-privacy-final-action",
+      kind: "complete_partial",
+      idea: "一间只在凌晨开门的照相馆。",
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      requestIds: nextOpeningRequestIds(harness.runtime, 1),
+      openingAngle: "mystery_clue",
+      partialOpening: "快门响过之后，照片里多出了一个没有来过的人。",
+    };
+    const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+
+    const results = await executeCreativeOpeningProviderAction(harness.runtime, {
+      ...action,
+      humanConfirmed: true,
+      disclosureFingerprint: disclosure.fingerprint,
+      onInvocationPrepared: async () => {
+        const changed = await harness.runtime.useCases.setChapterPrivacy.execute({
+          chapterId: chapter.id,
+          privacyMode: "local_only",
+          expectedPrivacyRevision: chapter.privacyRevision,
+        });
+        if (!changed.ok) throw changed.error;
+      },
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ source: "local_fallback" });
+    expect(harness.generate).not.toHaveBeenCalled();
+  });
 
   it("links the opening trace and rechecks privacy before skill commit, final dispatch, and return", async () => {
     const harness = createNativeHarness();
@@ -384,7 +722,7 @@ describe("real creative chains use Model Hub routes", () => {
     await expectCandidateCount(harness.runtime, chapter.id, 0);
   });
 
-  it("keeps the legacy opening profile working only when no Model Hub route exists", async () => {
+  it("keeps opening generation local when only a legacy profile exists", async () => {
     const harness = createNativeHarness();
     await seedLegacyProfile(harness.runtime, "legacy-opening", "legacy-opening-model");
     harness.listModels.mockResolvedValue({
@@ -398,25 +736,19 @@ describe("real creative chains use Model Hub routes", () => {
       requestId: "legacy-opening-request",
     });
 
-    expect(result).toMatchObject({
-      source: "provider",
-      providerId: "legacy-opening",
-      modelId: "legacy-opening-model",
-      text: "旧配置生成的开头。",
-    });
-    expect(harness.listModels).toHaveBeenCalledOnce();
-    expect(harness.generate.mock.calls[0]?.[0]).toMatchObject({
-      config: { providerId: "legacy-opening", provider: "ollama" },
-      model: "legacy-opening-model",
-    });
+    expect(result).toMatchObject({ source: "local_fallback", providerId: null, modelId: null });
+    expect(result.text).not.toBe("旧配置生成的开头。");
+    expect(harness.listModels).not.toHaveBeenCalled();
+    expect(harness.generate).not.toHaveBeenCalled();
   });
 
-  it("dispatches a fallback opening through the current versioned Model Hub credential slot", async () => {
+  it("keeps all three opening slots local when no governed route exists", async () => {
     const harness = createNativeHarness();
     await seedVersionedModelHubBackedLegacyProfile(harness.runtime, {
       providerId: "versioned-opening",
       credentialProviderId: "model-key-opening-v2",
       selectedModel: "opening-model",
+      retryLimit: 3,
     });
     harness.credentialSummary.mockImplementation((providerId: string) =>
       Promise.resolve({
@@ -428,27 +760,36 @@ describe("real creative chains use Model Hub routes", () => {
       provider: "open_ai_compatible",
       models: [{ id: "opening-model", displayName: "Opening model" }],
     });
-    harness.generate.mockResolvedValue({ text: "versioned opening", usage: null });
+    harness.generate.mockImplementation((input) =>
+      Promise.resolve({ text: `versioned opening ${input.generationId}`, usage: null }),
+    );
 
-    const result = await generateCreativeOpening(harness.runtime, {
-      idea: "A letter arrives from a forgotten future.",
-      requestId: "versioned-opening-request",
-    });
+    const requestIds = [
+      "versioned-opening-slot-1",
+      "versioned-opening-slot-2",
+      "versioned-opening-slot-3",
+    ];
+    const results = await Promise.all(
+      requestIds.map((requestId) =>
+        generateCreativeOpening(harness.runtime, {
+          idea: "A letter arrives from a forgotten future.",
+          requestId,
+        }),
+      ),
+    );
 
-    expect(result).toMatchObject({
-      source: "provider",
-      providerId: "versioned-opening",
-      modelId: "opening-model",
-      text: "versioned opening",
-    });
-    expect(harness.credentialSummary).toHaveBeenCalledWith("model-key-opening-v2");
+    expect(results).toHaveLength(3);
+    for (const result of results) {
+      expect(result).toMatchObject({
+        source: "local_fallback",
+        providerId: null,
+        modelId: null,
+      });
+    }
+    expect(harness.credentialSummary).not.toHaveBeenCalled();
     expect(harness.credentialSummary).not.toHaveBeenCalledWith("versioned-opening");
-    expect(harness.listModels.mock.calls[0]?.[0]).toMatchObject({
-      providerId: "model-key-opening-v2",
-    });
-    expect(harness.generate.mock.calls[0]?.[0].config).toMatchObject({
-      providerId: "model-key-opening-v2",
-    });
+    expect(harness.listModels).not.toHaveBeenCalled();
+    expect(harness.generate).not.toHaveBeenCalled();
   });
 
   it("never bypasses a failing opening route through a legacy profile", async () => {
@@ -525,7 +866,7 @@ describe("real creative chains use Model Hub routes", () => {
     expect(harness.listModels).not.toHaveBeenCalled();
   });
 
-  it("dispatches fallback import rewriting through the current versioned credential slot", async () => {
+  it("fails closed when import rewriting only has a versioned legacy profile", async () => {
     const harness = createNativeHarness();
     const chapter = await createChapter(harness.runtime, "Original chapter text remains stable.");
     await seedVersionedModelHubBackedLegacyProfile(harness.runtime, {
@@ -545,27 +886,20 @@ describe("real creative chains use Model Hub routes", () => {
     });
     harness.generate.mockResolvedValue({ text: "Rewritten candidate text.", usage: null });
 
-    const result = await createImportRewriteCandidate(harness.runtime, {
-      chapterId: chapter.id,
-      instructions: ["Make the dialogue more natural."],
-      mode: "trial",
-    });
+    await expect(
+      createImportRewriteCandidate(harness.runtime, {
+        chapterId: chapter.id,
+        instructions: ["Make the dialogue more natural."],
+        mode: "trial",
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_ROUTE_NOT_CONFIGURED" });
 
-    expect(result).toMatchObject({
-      providerId: "versioned-rewrite",
-      modelId: "rewrite-model",
-      rewrittenExcerpt: "Rewritten candidate text.",
-    });
-    expect(harness.credentialSummary).toHaveBeenCalledWith("model-key-rewrite-v3");
+    expect(harness.credentialSummary).not.toHaveBeenCalled();
     expect(harness.credentialSummary).not.toHaveBeenCalledWith("versioned-rewrite");
-    expect(harness.listModels.mock.calls[0]?.[0]).toMatchObject({
-      providerId: "model-key-rewrite-v3",
-    });
-    expect(harness.generate.mock.calls[0]?.[0].config).toMatchObject({
-      providerId: "model-key-rewrite-v3",
-    });
+    expect(harness.listModels).not.toHaveBeenCalled();
+    expect(harness.generate).not.toHaveBeenCalled();
     await expectStableChapter(harness.runtime, chapter.id, "Original chapter text remains stable.");
-    await expectCandidateCount(harness.runtime, chapter.id, 1);
+    await expectCandidateCount(harness.runtime, chapter.id, 0);
   });
 
   it("blocks private chapter rewriting before a remote provider receives any text", async () => {
@@ -622,7 +956,7 @@ describe("real creative chains use Model Hub routes", () => {
     });
     harness.generate.mockResolvedValue({ text: "这一段经过了自然改写。", usage: null });
 
-    const result = await createSelectionRewriteCandidate(harness.runtime, {
+    const result = await createConfirmedSelectionRewriteCandidate(harness.runtime, {
       chapterId: chapter.id,
       baseVersionId: chapter.currentVersionId,
       selection: {
@@ -718,7 +1052,7 @@ describe("real creative chains use Model Hub routes", () => {
     });
 
     await expect(
-      createSelectionRewriteCandidate(harness.runtime, {
+      createConfirmedSelectionRewriteCandidate(harness.runtime, {
         chapterId: chapter.id,
         baseVersionId: chapter.currentVersionId,
         selection: {
@@ -755,7 +1089,7 @@ describe("real creative chains use Model Hub routes", () => {
     );
 
     await expect(
-      createSelectionRewriteCandidate(harness.runtime, {
+      createConfirmedSelectionRewriteCandidate(harness.runtime, {
         chapterId: chapter.id,
         baseVersionId: chapter.currentVersionId,
         selection: {
@@ -793,7 +1127,7 @@ describe("real creative chains use Model Hub routes", () => {
       .mockRejectedValueOnce(new Error("simulated atomic commit failure"));
 
     await expect(
-      createSelectionRewriteCandidate(harness.runtime, {
+      createConfirmedSelectionRewriteCandidate(harness.runtime, {
         chapterId: chapter.id,
         baseVersionId: chapter.currentVersionId,
         selection: {
@@ -850,7 +1184,7 @@ describe("real creative chains use Model Hub routes", () => {
     });
 
     await expect(
-      createSelectionRewriteCandidate(harness.runtime, {
+      createConfirmedSelectionRewriteCandidate(harness.runtime, {
         chapterId: chapter.id,
         baseVersionId: chapter.currentVersionId,
         selection: {
@@ -893,7 +1227,7 @@ describe("real creative chains use Model Hub routes", () => {
     const rerankSpy = vi.spyOn(harness.runtime.rerank, "tryRerank");
 
     await expect(
-      createSelectionRewriteCandidate(harness.runtime, {
+      createConfirmedSelectionRewriteCandidate(harness.runtime, {
         chapterId: chapter.id,
         baseVersionId: chapter.currentVersionId,
         selection: {
@@ -911,7 +1245,7 @@ describe("real creative chains use Model Hub routes", () => {
     await expectCandidateCount(harness.runtime, chapter.id, 0);
   });
 
-  it("falls back to the legacy rewrite chain only when the route is absent", async () => {
+  it("fails closed when rewrite only has a legacy profile", async () => {
     const harness = createNativeHarness();
     const chapter = await createChapter(harness.runtime, "等待旧配置改写的原文。");
     const privacy = await harness.runtime.useCases.setChapterPrivacy.execute({
@@ -930,24 +1264,20 @@ describe("real creative chains use Model Hub routes", () => {
     harness.generate.mockResolvedValue({ text: "旧链生成的建议版本。", usage: null });
     const onBeforeDispatch = vi.fn();
 
-    const result = await createImportRewriteCandidate(harness.runtime, {
-      chapterId: chapter.id,
-      instructions: ["节奏更快"],
-      mode: "trial",
-      onBeforeDispatch,
-    });
+    await expect(
+      createImportRewriteCandidate(harness.runtime, {
+        chapterId: chapter.id,
+        instructions: ["节奏更快"],
+        mode: "trial",
+        onBeforeDispatch,
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_ROUTE_NOT_CONFIGURED" });
 
-    expect(result).toMatchObject({
-      providerId: "legacy-rewrite",
-      modelId: "legacy-rewrite-model",
-    });
-    expect(onBeforeDispatch).toHaveBeenCalledWith({
-      requestId: result.requestId,
-      providerId: "legacy-rewrite",
-      modelId: "legacy-rewrite-model",
-    });
-    expect(harness.listModels).toHaveBeenCalledOnce();
+    expect(onBeforeDispatch).not.toHaveBeenCalled();
+    expect(harness.listModels).not.toHaveBeenCalled();
+    expect(harness.generate).not.toHaveBeenCalled();
     await expectStableChapter(harness.runtime, chapter.id, "等待旧配置改写的原文。");
+    await expectCandidateCount(harness.runtime, chapter.id, 0);
   });
 
   it("never bypasses a failing rewrite route through a legacy profile", async () => {
@@ -1175,6 +1505,22 @@ describe("real creative chains use Model Hub routes", () => {
   });
 });
 
+async function createConfirmedSelectionRewriteCandidate(
+  runtime: DesktopRuntime,
+  input: Omit<SelectionRewriteCandidateInput, "humanConfirmed" | "disclosureFingerprint">,
+) {
+  const disclosure = await prepareSelectionRewrite(runtime, input);
+  return createSelectionRewriteCandidate(runtime, {
+    ...input,
+    humanConfirmed: true,
+    disclosureFingerprint: disclosure.fingerprint,
+  });
+}
+
+function nextOpeningRequestIds(runtime: DesktopRuntime, count: number): readonly string[] {
+  return Object.freeze(Array.from({ length: count }, () => runtime.ids.next()));
+}
+
 function createNativeHarness(): Readonly<{
   runtime: DesktopRuntime;
   generate: ReturnType<typeof vi.fn<NativeModelGatewayClient["generate"]>>;
@@ -1218,6 +1564,7 @@ async function seedVersionedModelHubBackedLegacyProfile(
     providerId: string;
     credentialProviderId: string;
     selectedModel: string;
+    retryLimit?: number;
   }>,
 ): Promise<void> {
   await runtime.modelCenter.save({
@@ -1234,6 +1581,7 @@ async function seedVersionedModelHubBackedLegacyProfile(
     displayName: input.providerId,
     credentialRef: `keyring:model-hub:${input.credentialProviderId}`,
     credentialState: "present",
+    ...(input.retryLimit === undefined ? {} : { retryLimit: input.retryLimit }),
     expectedRevision: null,
   });
 }
@@ -1248,6 +1596,7 @@ async function seedModelHubTextRoute(
     modelId: string;
     includeCapability?: boolean;
     dataDestination?: "local" | "remote";
+    pricing?: "known_zero" | "unknown";
   }>,
 ): Promise<void> {
   const connection = await modelHub.saveConnection({
@@ -1298,12 +1647,12 @@ async function seedModelHubTextRoute(
   }
   await modelHub.saveCostPrivacyProfile({
     catalogEntryId: input.catalogEntryId,
-    currency: "USD",
-    inputMicrosPerMillionTokens: "0",
-    outputMicrosPerMillionTokens: "0",
-    cachedInputMicrosPerMillionTokens: "0",
-    pricingVersion: "creative-chain-zero-cost-v1",
-    priceUpdatedAt: "2026-08-01T00:00:00.000Z",
+    currency: input.pricing === "unknown" ? null : "USD",
+    inputMicrosPerMillionTokens: input.pricing === "unknown" ? null : "0",
+    outputMicrosPerMillionTokens: input.pricing === "unknown" ? null : "0",
+    cachedInputMicrosPerMillionTokens: input.pricing === "unknown" ? null : "0",
+    pricingVersion: input.pricing === "unknown" ? null : "creative-chain-zero-cost-v1",
+    priceUpdatedAt: input.pricing === "unknown" ? null : "2026-08-01T00:00:00.000Z",
     dataDestination: input.dataDestination ?? "remote",
     retentionPolicy: "provider_default",
     trainingPolicy: "unknown",
@@ -1318,6 +1667,46 @@ async function seedModelHubTextRoute(
     failurePolicy: "stop",
     routeOrigin: "user",
     expectedRevision: null,
+  });
+}
+
+async function changeModelHubPricing(
+  modelHub: ModelHubStore,
+  catalogEntryId: string,
+): Promise<void> {
+  const current = await modelHub.findCostPrivacyProfile(catalogEntryId);
+  if (current === null) throw new Error("expected a cost/privacy profile");
+  await modelHub.saveCostPrivacyProfile({
+    catalogEntryId,
+    currency: "USD",
+    inputMicrosPerMillionTokens: "1000000",
+    outputMicrosPerMillionTokens: "2000000",
+    cachedInputMicrosPerMillionTokens: "500000",
+    pricingVersion: "creative-chain-drifted-cost-v2",
+    priceUpdatedAt: "2026-08-02T00:00:00.000Z",
+    dataDestination: current.dataDestination,
+    retentionPolicy: current.retentionPolicy,
+    trainingPolicy: current.trainingPolicy,
+    evidenceSource: current.evidenceSource,
+    evidenceVersion: "creative-chain-drifted-cost-v2",
+    expectedRevision: current.revision,
+  });
+}
+
+async function changeModelHubRoute(
+  modelHub: ModelHubStore,
+  task: NovelAiTask,
+  catalogEntryId: string,
+): Promise<void> {
+  const current = await modelHub.findTaskRoute(task);
+  if (current === null) throw new Error("expected a task route");
+  await modelHub.saveTaskRoute({
+    task,
+    primaryCatalogEntryId: catalogEntryId,
+    privacyPolicy: current.privacyPolicy,
+    failurePolicy: current.failurePolicy,
+    routeOrigin: current.routeOrigin,
+    expectedRevision: current.revision,
   });
 }
 

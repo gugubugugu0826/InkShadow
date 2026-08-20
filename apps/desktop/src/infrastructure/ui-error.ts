@@ -6,6 +6,8 @@ export interface NormalizedUiError {
   readonly code: string;
 }
 
+export type OrdinaryUiError = Pick<NormalizedUiError, "title" | "description">;
+
 /** A source-authored recovery message that is explicitly safe to show verbatim. */
 export class UiActionError extends Error {
   public constructor(
@@ -44,6 +46,16 @@ export function normalizeUiError(error: unknown): NormalizedUiError {
       "发生了未预期的本地错误。请先重试；若问题持续，请保留当前窗口中的内容，并在设置中下载脱敏诊断包后联系支持。",
     code: "UNEXPECTED_ERROR",
   };
+}
+
+/**
+ * Projects an error into the fields that are safe for ordinary product surfaces.
+ * The diagnostic code remains available through `normalizeUiError` for expert and
+ * diagnostic views, but is deliberately absent from this projection.
+ */
+export function projectOrdinaryUiError(error: unknown): OrdinaryUiError {
+  const { title, description } = normalizeUiError(error);
+  return { title, description };
 }
 
 function databaseErrorDescription(error: AppError): string | null {
@@ -86,6 +98,42 @@ function chineseErrorDescription(code: AppError["code"]): string {
 }
 
 function recordErrorDescription(code: string): string {
+  if (code === "VERSION_CONFLICT") {
+    return "内容已在其他操作中变化，请重新加载并比较版本；当前正文和已有建议均未被覆盖。";
+  }
+  if (code === "CANDIDATE_REVISION_MISSING") {
+    return "这条 AI 建议的当前版本已缺失或发生变化。请重新加载后再生成；原文和已有版本没有改变。";
+  }
+  if (code === "FORMAL_RECORD_PLAN_MISMATCH") {
+    return "这条建议依据的设定已经变化，请重新整理后再确认。";
+  }
+  if (code === "DIFF_COMPLEXITY_LIMIT_EXCEEDED") {
+    return "这次改动较长，无法安全逐句比较；你仍可查看完整建议并整段采用、另存或放弃。";
+  }
+  if (code === "IMPORT_ANALYSIS_ROUTE_NOT_CONFIGURED") {
+    return "作品分析还没有可用的 AI 分工。请前往模型设置验证写作能力并完成任务分工；已导入原文不会因此改变。";
+  }
+  if (code === "IMPORT_ANALYSIS_STRUCTURED_OUTPUT_UNVERIFIED") {
+    return "当前模型尚未通过作品分析所需的结构化输出验证。请在模型设置中重新验证或改选模型。";
+  }
+  if (code === "IMPORT_ANALYSIS_SOURCE_CHANGED") {
+    return "章节在分析期间发生了变化。请基于最新正式版本重新分析，已接受正文不会被回滚。";
+  }
+  if (code === "IMPORT_JOURNEY_PERSIST_FAILED") {
+    return "本地导入进度没有安全保存。请保持当前页面打开，释放存储空间后重试；已有正文和建议版本不会被静默覆盖。";
+  }
+  if (code === "IMPORT_PENDING_REQUEST_CLEAR_FAILED") {
+    return "模型结果已经处理，但本机未能清除请求恢复标记。墨影不会自动重复调用；请释放存储空间后重新打开页面。";
+  }
+  if (code === "IMPORT_PENDING_REQUEST_PERSIST_FAILED") {
+    return "本机未能在发送前保存请求恢复标记，因此没有调用模型。请保持页面打开，释放存储空间后重试。";
+  }
+  if (code === "EXTENSION_USAGE_UNAVAILABLE") {
+    return "这次扩展请求已经结束，但供应商没有返回可核对的用量。正文没有被覆盖；可先导出历史，确认供应商记录后再决定是否重试。";
+  }
+  if (code.startsWith("UPDATE_")) {
+    return "安全更新未完成。当前版本仍可离线使用；请检查网络并只按已验证的官方发行说明重试。";
+  }
   if (code === "MODEL_OUTPUT_TRUNCATED") {
     return "模型在返回可见文字前或返回过程中达到输出上限。能力验证会使用更充足的固定预算并为 DeepSeek 关闭推理；若仍失败，请重新同步模型后重试，或改选另一个文本模型。";
   }

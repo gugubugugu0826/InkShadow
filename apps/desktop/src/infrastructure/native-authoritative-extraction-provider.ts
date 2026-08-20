@@ -28,6 +28,7 @@ import {
   projectContextDispatchScope,
   type ProjectContextPrivacyAuthority,
 } from "./project-context-privacy-authority";
+import { SINGLE_ATTEMPT_STRICT_JSON_TEXT_TRANSPORT_POLICY } from "./model-execution-policy";
 
 const PROMPT_REGISTRY_ID = "authoritative.extraction";
 const PROMPT_VERSION = 1;
@@ -250,14 +251,23 @@ export class NativeAuthoritativeExtractionProvider implements AuthoritativeExtra
       ) {
         return err(providerFailure("provider_configuration_changed", true, false));
       }
+      // Model Center routes do not bind a structured-output capability receipt.
+      // Preserve strict local parsing without pretending JSON mode was verified.
+      const executionPolicy = SINGLE_ATTEMPT_STRICT_JSON_TEXT_TRANSPORT_POLICY;
       const generated = await this.gateway.generate({
         dispatchScope: projectContextDispatchScope(projectPrivacy),
         generationId,
-        config: resolvedEndpoint.config,
+        config: Object.freeze({
+          ...resolvedEndpoint.config,
+          retryLimit: executionPolicy.providerRetryLimit,
+        }),
         model: this.route.modelId,
         messages,
         maxOutputTokens: this.route.maximumOutputTokens,
         temperature: 0,
+        ...(resolvedEndpoint.config.provider === "open_ai_compatible"
+          ? { reasoningMode: "disabled" as const }
+          : {}),
       });
       if (isAborted(signal)) {
         return err(providerFailure("provider_cancelled", false, false));

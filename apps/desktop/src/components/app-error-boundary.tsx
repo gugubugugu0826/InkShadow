@@ -7,17 +7,13 @@ interface AppErrorBoundaryProps {
 
 interface AppErrorBoundaryState {
   readonly error: Error | null;
-  readonly incidentId: string | null;
 }
 
 export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundaryState> {
-  public override state: AppErrorBoundaryState = { error: null, incidentId: null };
+  public override state: AppErrorBoundaryState = { error: null };
 
   public static getDerivedStateFromError(error: Error): AppErrorBoundaryState {
-    return {
-      error,
-      incidentId: `UI-${Date.now().toString(36).toUpperCase()}`,
-    };
+    return { error };
   }
 
   public override componentDidCatch(): void {
@@ -36,18 +32,16 @@ export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorB
           headingLevel={1}
           title="这个页面暂时没有正常打开"
           description="可以重试当前页面，或先返回创作首页。已保存的正文、版本和本地备份不会因为这个界面错误被删除。"
-          errorCode="UI_RENDER_FAILED"
-          requestId={this.state.incidentId ?? "UI-UNKNOWN"}
           savedState="本地数据保持原样；未保存输入仍以恢复草稿策略为准。"
           primaryAction={{
             label: "重试当前页面",
-            onClick: () => this.setState({ error: null, incidentId: null }),
+            onClick: () => this.setState({ error: null }),
           }}
           secondaryAction={{
             label: "返回创作首页",
             onClick: () => {
               window.location.hash = "/start";
-              this.setState({ error: null, incidentId: null });
+              this.setState({ error: null });
             },
           }}
         />

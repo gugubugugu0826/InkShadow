@@ -18,7 +18,12 @@ const NON_PROJECT_ALLOWLIST = new Map<
     occurrences: number;
   }>
 >([
-  ["infrastructure/creative-opening-service.ts", { reason: "creative_opening", occurrences: 2 }],
+  [
+    "infrastructure/creative-opening-service.ts",
+    // The sole blank-project path is the governed Model Hub executor. The
+    // removed legacy gateway must not return as a second unreviewed boundary.
+    { reason: "creative_opening", occurrences: 1 },
+  ],
   [
     "infrastructure/model-hub-local-evaluation-service.ts",
     { reason: "connection_probe", occurrences: 1 },

@@ -1,27 +1,27 @@
 # InkShadow 共享核心包逐文件指引
 
-> 基于源码快照：2026-08-14  
+> 基于源码快照：2026-08-20  
 > 文档状态：`SUPPORTING_CURRENT`  
-> Desktop 当前源码目标：`0.2.4`；最近已发布版本：`0.2.3`；v0.2.4 安全修复候选尚未发布；设计基线：`DESIGN v0.3.1b`  
-> 覆盖范围：`packages/*/src` 的 17 个 workspace package，以及 `packages/data/migrations` 的 65 个本地数据库迁移（最新 `0065`）
+> Desktop 当前源码目标：`0.2.5`；最新已发布版本：`0.2.4`；v0.2.5 候选尚未发布；设计基线：`DESIGN v0.3.1b`  
+> 覆盖范围：`packages/*/src` 的 17 个 workspace package，以及 `packages/data/migrations` 的 70 个本地数据库迁移（最新 `0070`）
 
 这些包不是“页面”，也不应全部叫作后端。它们承载可被 Desktop、Cloud API、Web 或测试复用的领域规则、用例、契约、数据适配器和 UI 基础件。正常依赖方向是“领域与协议 → 应用用例 → 基础设施适配器 → 应用入口”；`scripts/check-boundaries.mjs` 会检查主要边界。
 
 | Package         | 源文件数 | 定位                                                |
 | --------------- | -------: | --------------------------------------------------- |
 | `access-core`   |        7 | 身份、权益、许可和 RBAC 规则                        |
-| `ai-core`       |       14 | 模型协议、路由、上下文、重排、预算和 AI 治理        |
+| `ai-core`       |       27 | 模型协议、路由、上下文、重排、预算和 AI 治理        |
 | `application`   |       14 | 应用用例与持久化端口                                |
 | `cloud-client`  |        7 | Cloud API 客户端                                    |
 | `config`        |        4 | 环境、功能开关和设置                                |
-| `contracts`     |       13 | 跨进程/网络契约和 OpenAPI                           |
+| `contracts`     |       14 | 跨进程/网络契约和 OpenAPI                           |
 | `data`          |       23 | Desktop SQLite 适配                                 |
-| `domain`        |       12 | 核心写作实体和值对象                                |
-| `import-export` |       17 | 导入、导出和便携包                                  |
+| `domain`        |       13 | 核心写作实体和值对象                                |
+| `import-export` |       20 | 导入、导出和便携包                                  |
 | `observability` |        5 | 本地结构化日志和脱敏诊断                            |
 | `platform`      |        4 | 时钟、哈希和 UUID 平台实现                          |
 | `search-core`   |        6 | 内存搜索、混合评分和 Graph RAG 规则                 |
-| `story-core`    |       44 | StoryFact、因果、验证、声纹、叙事、创作工作流和仓储 |
+| `story-core`    |       45 | StoryFact、因果、验证、声纹、叙事、创作工作流和仓储 |
 | `sync-core`     |        9 | 加密同步协议                                        |
 | `task-engine`   |       10 | 耐久任务领域模型和调度                              |
 | `test-utils`    |        5 | 仅测试辅助                                          |
@@ -43,22 +43,29 @@
 
 该包定义策略和协议，不包含模型 provider 实现，也不会直接发起网络调用。
 
-| 文件                                                   | 内容                                                                           |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------ |
-| `packages/ai-core/src/budget.ts`                       | Token 成本估算、任务/项目/月预算和 warn/hard 预算决策。                        |
-| `packages/ai-core/src/candidate.ts`                    | AI 候选状态、应用模式和把候选内容合入正文前的安全计划。                        |
-| `packages/ai-core/src/connection-test.ts`              | 模型连接测试各步骤、脱敏后的端点来源和结果报告。                               |
-| `packages/ai-core/src/context-compiler.ts`             | 十二层上下文顺序、逐条来源与 Token 追踪、必选预算失败及旧 PromptSection 适配。 |
-| `packages/ai-core/src/evidence-rerank.ts`              | 本机确定性证据重排、评分拆分、选择理由和稳定回退顺序。                         |
-| `packages/ai-core/src/generation-state.ts`             | 生成任务状态机、允许的状态转换与终态判定。                                     |
-| `packages/ai-core/src/governed-creative-extensions.ts` | 翻译、短剧等受治理创意扩展的严格 JSON 协议、大小上限和解析/序列化。            |
-| `packages/ai-core/src/index.ts`                        | 包的公开导出入口。                                                             |
-| `packages/ai-core/src/model.ts`                        | 模型配置、生成/嵌入/计数请求、流事件、适配器与原生模型网关契约。               |
-| `packages/ai-core/src/multi-agent-protocol.ts`         | 多智能体评审结论、来源引用、任务建议和候选补丁的严格公开协议。                 |
-| `packages/ai-core/src/preflight.ts`                    | 生成前对模型可用性、上下文、定价、预算和数据边界的检查。                       |
-| `packages/ai-core/src/prompt-registry.ts`              | Prompt 版本、变量、激活计划、规范化校验与安全渲染。                            |
-| `packages/ai-core/src/quality-gate.ts`                 | 候选质量指标、证据、阈值和重复度等质量门禁。                                   |
-| `packages/ai-core/src/routing.ts`                      | 按模型角色、位置和验证状态解析实际模型路由。                                   |
+| 文件                                                             | 内容                                                                           |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `packages/ai-core/src/budget.ts`                                 | Token 成本估算、任务/项目/月预算和 warn/hard 预算决策。                        |
+| `packages/ai-core/src/candidate.ts`                              | AI 候选状态、应用模式和把候选内容合入正文前的安全计划。                        |
+| `packages/ai-core/src/connection-test.ts`                        | 模型连接测试各步骤、脱敏后的端点来源和结果报告。                               |
+| `packages/ai-core/src/context-compiler.ts`                       | 十二层上下文顺序、逐条来源与 Token 追踪、必选预算失败及旧 PromptSection 适配。 |
+| `packages/ai-core/src/continuation-recovery.ts`                  | 续写运行在中断、未派发与结果不明确状态间的保守恢复规则。                       |
+| `packages/ai-core/src/evidence-rerank.ts`                        | 本机确定性证据重排、评分拆分、选择理由和稳定回退顺序。                         |
+| `packages/ai-core/src/generation-state.ts`                       | 生成任务状态机、允许的状态转换与终态判定。                                     |
+| `packages/ai-core/src/governed-creative-extensions.ts`           | 翻译、短剧等受治理创意扩展的严格 JSON 协议、大小上限和解析/序列化。            |
+| `packages/ai-core/src/index.ts`                                  | 包的公开导出入口。                                                             |
+| `packages/ai-core/src/long-form-retrieval-benchmark-fixtures.ts` | 固定、可复现的长篇检索评测夹具，不包含真实作品内容。                           |
+| `packages/ai-core/src/long-form-retrieval-benchmark.ts`          | Production 长篇检索 benchmark 编排、分层指标与安全阈值；最终实跑仍 PENDING。   |
+| `packages/ai-core/src/model.ts`                                  | 模型配置、生成/嵌入/计数请求、流事件、适配器与原生模型网关契约。               |
+| `packages/ai-core/src/multi-agent-protocol.ts`                   | 多智能体评审结论、来源引用、任务建议和候选补丁的严格公开协议。                 |
+| `packages/ai-core/src/novel-skill*.ts`                           | Novel Skill 定义、内建模板、编译、类型、激活与评测合同；默认关闭并由作者启用。 |
+| `packages/ai-core/src/preflight.ts`                              | 生成前对模型可用性、上下文、定价、预算和数据边界的检查。                       |
+| `packages/ai-core/src/prompt-registry.ts`                        | Prompt 版本、变量、激活计划、规范化校验与安全渲染。                            |
+| `packages/ai-core/src/quality-gate.ts`                           | 候选质量指标、证据、阈值和重复度等质量门禁。                                   |
+| `packages/ai-core/src/retrieval-evaluation.ts`                   | Recall@K、MRR、nDCG、权威精度、污染与隐私泄漏等确定性检索指标。                |
+| `packages/ai-core/src/routing.ts`                                | 按模型角色、位置和验证状态解析实际模型路由。                                   |
+| `packages/ai-core/src/story-memory-read-model.ts`                | 从已接受正文与确认事实构建只读 StoryMemory 视图并隔离非 canon 内容。           |
+| `packages/ai-core/src/task-output-profile.ts`                    | 任务类型对应的结构化输出、预算和能力要求。                                     |
 
 ## 3. `application`：应用用例与端口
 
@@ -140,7 +147,7 @@
 | `packages/data/src/governed-extension-provider-url.ts`            | 对 provider URL 做确定性分类和比较；它明确不是完整 SSRF 防护，最终 DNS/IP/连接限制由 Rust 原生网关执行。                                                |
 | `packages/data/src/graph-rag-sqlite-store.ts`                     | Graph RAG 来源、节点、边、投影 epoch 和权威状态存储。                                                                                                   |
 | `packages/data/src/index.ts`                                      | 包的公开导出入口。                                                                                                                                      |
-| `packages/data/src/maintenance.ts`                                | integrity/FK 检查、`VACUUM INTO` 备份、166 张权威表 allowlist 恢复、4 个派生根表清空和 schema 恢复契约；167 张应用表中的 1 张临时远程派发租约表不恢复。 |
+| `packages/data/src/maintenance.ts`                                | integrity/FK 检查、`VACUUM INTO` 备份、172 张权威表 allowlist 恢复、4 个派生根表清空和 schema 恢复契约；173 张应用表中的 1 张临时远程派发租约表不恢复。 |
 | `packages/data/src/multi-agent-review-sqlite-store.ts`            | 多智能体评审任务、结论、证据和候选记录存储。                                                                                                            |
 | `packages/data/src/project-key-sqlite-store.ts`                   | 项目密钥版本、发布检查点和团队信封回执存储。                                                                                                            |
 | `packages/data/src/project-seed-sqlite-store.ts`                  | 新手创建旅程的 ProjectSeed、恢复点和一次性物化回执存储。                                                                                                |
@@ -221,6 +228,21 @@
 | `packages/data/migrations/0057_model_hub_content_quality_task.sql`                   | 为 Model Hub 方案、路由与评测表前向补齐内容质量检查任务合同。                                                                                                                  |
 | `packages/data/migrations/0058_story_settings_import_receipts.sql`                   | 保存 Story Settings 原子导入、冲突决定、撤销栅栏和重启恢复所需的操作收据。                                                                                                     |
 | `packages/data/migrations/0059_generation_preflight_cost_status.sql`                 | 区分费用可估与供应商未提供价格；价格未知保留为可见警告，不误阻断基础写作。                                                                                                     |
+| `packages/data/migrations/0060_novel_skill_registry.sql`                             | 默认关闭的 Novel Skill definition、项目 binding 与调用 snapshot。                                                                                                              |
+| `packages/data/migrations/0061_novel_skill_evaluation_ledger.sql`                    | 不含题目和输出内容的付费评测账本、证据与人工决定链。                                                                                                                           |
+| `packages/data/migrations/0062_project_dispatch_active_guard.sql`                    | 已有项目派发租约存续时禁止项目离开 active。                                                                                                                                    |
+| `packages/data/migrations/0063_novel_skill_evaluation_paid_runner.sql`               | 精确付费目标、商业授权、费用上限、reservation 与盲评。                                                                                                                         |
+| `packages/data/migrations/0064_novel_skill_evaluation_predispatch_authority.sql`     | 内容无关的 payload 子哈希、能力/目标锁和派发前估价权威。                                                                                                                       |
+| `packages/data/migrations/0065_model_invocation_dispatch_boundary.sql`               | 在现有调用事实上持久不含内容的 Provider 发送边界。                                                                                                                             |
+| `packages/data/migrations/0066_writing_experience_preferences.sql`                   | 写作模式、一次性本地整理授权与内容无关的 Provider 披露 grant。                                                                                                                 |
+| `packages/data/migrations/0067_consistency_investigation_agent.sql`                  | 有界一致性调查 run、step、finding 和 evidence。                                                                                                                                |
+| `packages/data/migrations/0068_writing_disclosure_active_grant_limit.sql`            | 披露 grant 上限只统计 active 行，保留 terminal 审计。                                                                                                                          |
+| `packages/data/migrations/0069_consistency_investigation_invocation_reservation.sql` | 为调查模型 step 预留 content-free invocation UUID，并原子绑定调用账本与 context trace。                                                                                        |
+| `packages/data/migrations/0070_multigranular_search_retrieval.sql`                   | 为可重建搜索投影追加多粒度范围、父子锚点、权威性、隐私与 currentness；旧行标记为 `legacy_unknown` 等待重建。                                                                   |
+
+当前六张写作体验/调查权威表全部进入既有备份删除与恢复顺序；`planned_invocation_id` 随
+`consistency_investigation_steps` 整表恢复。当前恢复断言为 172 张表；唯一排除项仍是 1 张不含用户
+内容的临时 `project_remote_dispatch_leases`，凭据值不进入备份。
 
 ## 8. `domain`：核心写作实体
 
@@ -241,25 +263,34 @@
 
 ## 9. `import-export`：导入、导出与便携包
 
-| 文件                                              | 内容                                                                          |
-| ------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `packages/import-export/src/binary.ts`            | 加固 DOCX/PDF 导入：ZIP/path、外部 relationship、密码、大小、进度与取消检查。 |
-| `packages/import-export/src/checksum.ts`          | 导入导出内容的 SHA-256 校验。                                                 |
-| `packages/import-export/src/constants.ts`         | 格式版本、大小上限和受支持类型常量。                                          |
-| `packages/import-export/src/docx-export.ts`       | 根据发布模型生成 DOCX。                                                       |
-| `packages/import-export/src/epub-export.ts`       | 根据发布模型生成 EPUB 3，并保持正文与元数据边界。                             |
-| `packages/import-export/src/errors.ts`            | 导入导出稳定错误码。                                                          |
-| `packages/import-export/src/filename.ts`          | 安全文件名清理、扩展名和冲突处理。                                            |
-| `packages/import-export/src/index.ts`             | 包的公开导出入口。                                                            |
-| `packages/import-export/src/markdown-export.ts`   | 根据发布模型生成 Markdown。                                                   |
-| `packages/import-export/src/pdf-export.ts`        | 将受控栅格页面封装为 PDF，避免在输出中引入脚本、附件或活动内容。              |
-| `packages/import-export/src/portable-bundle.ts`   | InkShadow Bundle 的严格打包、解析、校验和与兼容性检查。                       |
-| `packages/import-export/src/preflight.ts`         | 导入前格式、大小、文件名、内容和风险预检。                                    |
-| `packages/import-export/src/publication-model.ts` | 将项目/章节转换为多种导出格式共享的发布模型。                                 |
-| `packages/import-export/src/schemas.ts`           | 导入、便携包和 manifest 的严格 schema。                                       |
-| `packages/import-export/src/text.ts`              | 纯文本/Markdown 解码、换行和 Unicode 规范化。                                 |
-| `packages/import-export/src/text-export.ts`       | 根据发布模型生成纯文本。                                                      |
-| `packages/import-export/src/vite-assets.d.ts`     | DOCX/PDF 运行时资源的 Vite 类型声明。                                         |
+| 文件                                               | 内容                                                                          |
+| -------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `packages/import-export/src/binary.ts`             | 加固 DOCX/PDF 导入：ZIP/path、外部 relationship、密码、大小、进度与取消检查。 |
+| `packages/import-export/src/checksum.ts`           | 导入导出内容的 SHA-256 校验。                                                 |
+| `packages/import-export/src/constants.ts`          | 格式版本、大小上限和受支持类型常量。                                          |
+| `packages/import-export/src/core.ts`               | 四种发布格式共用的文本、二进制、压缩包与安全资源辅助。                        |
+| `packages/import-export/src/docx-export.ts`        | 根据发布模型生成 DOCX。                                                       |
+| `packages/import-export/src/epub-export.ts`        | 根据发布模型生成 EPUB 3，并保持正文与元数据边界。                             |
+| `packages/import-export/src/errors.ts`             | 导入导出稳定错误码。                                                          |
+| `packages/import-export/src/filename.ts`           | 安全文件名清理、扩展名和冲突处理。                                            |
+| `packages/import-export/src/index.ts`              | 包的公开导出入口。                                                            |
+| `packages/import-export/src/markdown-export.ts`    | 根据发布模型生成 Markdown。                                                   |
+| `packages/import-export/src/pdf-export.ts`         | 将受控栅格页面封装为 PDF，避免在输出中引入脚本、附件或活动内容。              |
+| `packages/import-export/src/portable-bundle.ts`    | InkShadow Bundle 的严格打包、解析、校验和与兼容性检查。                       |
+| `packages/import-export/src/preflight.ts`          | 导入前格式、大小、文件名、内容和风险预检。                                    |
+| `packages/import-export/src/publication-images.ts` | 内存图片资产解析、PNG CRC/JPEG 结构验证、尺寸/像素/数量/总量门禁。            |
+| `packages/import-export/src/publication-model.ts`  | 将项目/章节转换为多种导出格式共享的发布模型。                                 |
+| `packages/import-export/src/schemas.ts`            | 导入、便携包和 manifest 的严格 schema。                                       |
+| `packages/import-export/src/story-settings.ts`     | 故事设定包的预检、解析与安全字段约束。                                        |
+| `packages/import-export/src/text.ts`               | 纯文本/Markdown 解码、换行和 Unicode 规范化。                                 |
+| `packages/import-export/src/text-export.ts`        | 根据发布模型生成纯文本。                                                      |
+| `packages/import-export/src/vite-assets.d.ts`      | DOCX/PDF 运行时资源的 Vite 类型声明。                                         |
+
+发布图片只接受安全内联 PNG、基线 JPEG 或调用方显式提供的内存项目资产；`path` 仅是资产键，
+包不会据此读取磁盘或网络。单次最多 128 图、每图 4 MiB、总计 24 MiB、单边不超过 8192 像素且
+总像素不超过 2000 万；PNG 必须通过 chunk/CRC 检查，JPEG 必须通过受限结构检查。Markdown 写入
+data URI，DOCX/EPUB 写入真实 media 与 relationship，PDF 由调用方提供的本地 Blob 解码器取得像素后
+执行 `drawImage`；缺图、坏图和超限一律失败，不会退化成文件名占位。
 
 ## 10. `observability`：脱敏诊断
 
@@ -315,6 +346,7 @@
 | `packages/story-core/src/ideation-local-suggestions.ts`         | 不调用远程模型的本地灵感建议。                                                   |
 | `packages/story-core/src/ideation-use-cases.ts`                 | 灵感创建、更新、排序和转化用例。                                                 |
 | `packages/story-core/src/index.ts`                              | 包的公开导出入口。                                                               |
+| `packages/story-core/src/legacy-memory-promotion.ts`            | 把兼容旧记忆显式提升为带来源与人工决定的 MemoryRecord；不会静默成为 canon。      |
 | `packages/story-core/src/material.ts`                           | 素材条目、来源和分类模型。                                                       |
 | `packages/story-core/src/material-use-cases.ts`                 | 素材创建、更新、检索和引用用例。                                                 |
 | `packages/story-core/src/memory.ts`                             | 长期记忆条目、作用域和权威性模型。                                               |

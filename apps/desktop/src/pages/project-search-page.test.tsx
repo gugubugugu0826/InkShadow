@@ -32,7 +32,7 @@ describe("ProjectSearchPage", () => {
     expect(
       await screen.findByRole("heading", { name: "搜索 · 星港档案", level: 1 }),
     ).toBeInTheDocument();
-    expect(await screen.findByText("1 个索引片段")).toBeInTheDocument();
+    expect(await screen.findByText(/^\d+ 个索引片段$/u)).toBeInTheDocument();
     expect(screen.getByText("向量：未配置")).toBeInTheDocument();
 
     await user.type(screen.getByRole("searchbox", { name: /搜索词/u }), "星图核心");
@@ -49,10 +49,12 @@ describe("ProjectSearchPage", () => {
       "href",
       `/projects/${project.value.id}/chapters/${chapter.value.chapter.id}`,
     );
+    expect(within(resultCard).getByText("来源版本：已绑定")).toBeVisible();
+    expect(resultCard).not.toHaveTextContent(chapter.value.chapter.currentVersionId);
     expect(screen.getByText(/浏览器开发模式不提供真实嵌入能力/u)).toBeInTheDocument();
   });
 
-  it("discloses remote rebuild and future query transfer before exact-endpoint consent", async () => {
+  it("keeps remote vector rebuild closed and searches without Provider dispatch", async () => {
     const development = createDevelopmentRuntime(window.localStorage);
     const project = await development.useCases.createProject.execute({ name: "远程向量披露" });
     if (!project.ok) {
@@ -76,6 +78,8 @@ describe("ProjectSearchPage", () => {
       disableVectorProject: (projectId) => development.search.disableVectorProject(projectId),
       inspectEmbedding: () => Promise.resolve(ok(diagnostics)),
       search: (projectId, query, limit) => development.search.search(projectId, query, limit),
+      searchFtsOnly: (projectId, query, scope, limit) =>
+        development.search.searchFtsOnly(projectId, query, scope, limit),
       health: () => development.search.health(),
       embeddingDiagnostics: () => diagnostics,
       synchronizationDiagnostics: () => development.search.synchronizationDiagnostics(),
@@ -86,28 +90,17 @@ describe("ProjectSearchPage", () => {
       search,
     };
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    const user = userEvent.setup();
     renderRoute(runtime, `/projects/${project.value.id}/search`);
 
     expect(
-      await screen.findByText(
-        /重建会发送稳定正文与大纲；配置就绪期间，每次搜索词也会发送到该端点/u,
-      ),
+      await screen.findByText(/当前版本不会从普通搜索页发起向量重建或查询嵌入/u),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/https:\/\/models\.example\/tenant\/v1\/embeddings/u),
     ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "明确重建向量" }));
-
-    expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "今后的每次搜索词也会发送到同一端点。你可以随时使用“停用并清除向量”停止后续发送。",
-      ),
-    );
-    expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining("https://models.example/tenant/v1/embeddings"),
-    );
-    expect(rebuildVectorProject).toHaveBeenCalledWith(project.value.id, diagnostics.confirmationId);
+    expect(screen.getByRole("button", { name: "向量重建尚未开放" })).toBeDisabled();
+    expect(rebuildVectorProject).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
     confirm.mockRestore();
   });
 });

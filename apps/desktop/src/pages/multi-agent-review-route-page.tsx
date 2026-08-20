@@ -20,7 +20,6 @@ export function MultiAgentReviewRoutePage() {
           headingLevel={1}
           title="无法打开多智能体审查"
           description="项目或章节标识无效。请返回项目列表并重新选择。"
-          errorCode="MULTI_AGENT_ROUTE_INVALID"
           primaryAction={{ label: "返回项目列表", onClick: () => void navigate("/projects") }}
         />
       </div>

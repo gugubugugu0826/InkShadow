@@ -18,7 +18,6 @@ export function ProjectSyncRoutePage() {
           headingLevel={1}
           title="无法打开项目同步"
           description="项目标识无效。请返回项目列表并重新选择。"
-          errorCode="SYNC_CONTROL_ROUTE_INVALID"
           primaryAction={{ label: "返回项目列表", onClick: () => void navigate("/projects") }}
         />
       </div>

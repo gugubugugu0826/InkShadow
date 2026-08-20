@@ -174,10 +174,14 @@ test("autosaves, recovers a crash draft, and isolates AI candidates", async ({ b
 test("imports into the first chapter and exports validated artifacts and diagnostics", async ({
   page,
 }) => {
-  await createProject(page, "导入导出验收长篇");
+  test.setTimeout(120_000);
+  const projectTitle = "导入导出验收长篇";
+  const publicTailMarker = "PUBLIC_LONG_EXPORT_TAIL_终";
+  const privateMarker = "PRIVATE_CHAPTER_MUST_REQUIRE_OPT_IN";
+  await createProject(page, projectTitle);
   await page.getByRole("link", { name: "打开", exact: true }).click();
   await createChapter(page, "第一章");
-  const exportBody = "这是用于导出校验的正文。";
+  const exportBody = `${"这是用于导出校验的长篇正文，包含中文标点与段落。\n\n".repeat(320)}${publicTailMarker}`;
   await page.getByRole("textbox", { name: "章节正文" }).fill(exportBody);
   await expect
     .poll(
@@ -192,24 +196,74 @@ test("imports into the first chapter and exports validated artifacts and diagnos
       { message: "export body should be committed before opening settings" },
     )
     .toBe(true);
+
+  const exportProjectId = projectIdFromEditorUrl(page.url());
+  await page.goto(`/#/projects/${exportProjectId}`);
+  await createChapter(page, "私密附录");
+  await page.getByRole("textbox", { name: "章节正文" }).fill(privateMarker);
+  await expect
+    .poll(
+      async () =>
+        inspectRecoveryPersistence(
+          await page.evaluate(
+            (storageKey) => window.localStorage.getItem(storageKey),
+            DEVELOPMENT_DATABASE_KEY,
+          ),
+          privateMarker,
+        ).stableCommitted,
+      { message: "private export fixture should be committed before changing privacy" },
+    )
+    .toBe(true);
+  await page.getByRole("button", { name: "设为私密" }).click();
+  const privacyDialog = page.getByRole("dialog", { name: "将本章设为私密章节？" });
+  await privacyDialog.getByRole("button", { name: "确认仅限本地" }).click();
+  await expect(page.getByText(/本章现已设为私密章节/u)).toBeVisible();
   await page.getByRole("link", { name: "设置", exact: true }).click();
+  const includePrivate = page.getByRole("checkbox", { name: "包含私密章节" });
+  await expect(includePrivate).not.toBeChecked();
 
   const markdownDownloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "下载 Markdown" }).click();
   const markdownDownload = await markdownDownloadPromise;
-  expect(markdownDownload.suggestedFilename()).toBe("导入导出验收长篇.md");
+  expect(markdownDownload.suggestedFilename()).toBe(`${projectTitle}.md`);
   const markdownPath = await markdownDownload.path();
   if (markdownPath === null) {
     throw new Error("Playwright did not expose the Markdown download.");
   }
   const markdown = await readFile(markdownPath, "utf8");
-  expect(markdown).toContain("# 导入导出验收长篇");
-  expect(markdown).toContain("这是用于导出校验的正文。");
+  expect(Buffer.byteLength(markdown, "utf8")).toBeGreaterThan(10_000);
+  expect(markdown).toContain(`# ${projectTitle}`);
+  expect(markdown).toContain(publicTailMarker);
+  expect(markdown).not.toContain(privateMarker);
+  await expect(page.getByText(new RegExp(`文件：${projectTitle}\\.md`, "u"))).toBeVisible();
+  await expect(
+    page.getByText(/状态：已请求浏览器下载；最终位置与写入结果无法由应用核验/u),
+  ).toBeVisible();
+  await expect(page.getByText(/排除 1 个私密章节/u)).toBeVisible();
+
+  const epubDownloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载 EPUB" }).click();
+  const epubDownload = await epubDownloadPromise;
+  expect(epubDownload.suggestedFilename()).toBe(`${projectTitle}.epub`);
+  const epubPath = await epubDownload.path();
+  if (epubPath === null) {
+    throw new Error("Playwright did not expose the EPUB download.");
+  }
+  const epub = await readFile(epubPath);
+  expect(epub.byteLength).toBeGreaterThan(1_000);
+  const epubArchive = await loadZipArchive(epub);
+  const epubPackage = await requiredZipText(epubArchive, "EPUB/package.opf");
+  const epubChapter = await requiredZipText(epubArchive, "EPUB/chapter-00001.xhtml");
+  expect(epubPackage).toContain(projectTitle);
+  expect(epubChapter).toContain(publicTailMarker);
+  expect(epubChapter).not.toContain(privateMarker);
+  await expect(page.getByText(new RegExp(`文件：${projectTitle}\\.epub`, "u"))).toBeVisible();
+  await expect(page.getByText(/排除 1 个私密章节/u)).toBeVisible();
 
   const docxDownloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "下载 DOCX" }).click();
   const docxDownload = await docxDownloadPromise;
-  expect(docxDownload.suggestedFilename()).toBe("导入导出验收长篇.docx");
+  expect(docxDownload.suggestedFilename()).toBe(`${projectTitle}.docx`);
   const docxPath = await docxDownload.path();
   if (docxPath === null) {
     throw new Error("Playwright did not expose the DOCX download.");
@@ -217,11 +271,30 @@ test("imports into the first chapter and exports validated artifacts and diagnos
   const docx = await readFile(docxPath);
   expect(docx.byteLength).toBeGreaterThan(1_000);
   expect([...docx.subarray(0, 4)]).toEqual([0x50, 0x4b, 0x03, 0x04]);
+  const docxArchive = await loadZipArchive(docx);
+  expect(await requiredZipText(docxArchive, "docProps/core.xml")).toContain(projectTitle);
+  const docxDocument = await requiredZipText(docxArchive, "word/document.xml");
+  expect(docxDocument).toContain(publicTailMarker);
+  expect(docxDocument).not.toContain(privateMarker);
+  await expect(page.getByText(new RegExp(`文件：${projectTitle}\\.docx`, "u"))).toBeVisible();
+  await expect(page.getByText(/排除 1 个私密章节/u)).toBeVisible();
+
+  await includePrivate.check();
+  const privateMarkdownDownloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载 Markdown" }).click();
+  const privateMarkdownDownload = await privateMarkdownDownloadPromise;
+  const privateMarkdownPath = await privateMarkdownDownload.path();
+  if (privateMarkdownPath === null) {
+    throw new Error("Playwright did not expose the explicitly authorized private export.");
+  }
+  expect(await readFile(privateMarkdownPath, "utf8")).toContain(privateMarker);
+  await expect(page.getByText(new RegExp(`文件：${projectTitle}\\.md`, "u"))).toBeVisible();
+  await includePrivate.uncheck();
 
   const pdfDownloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "下载 PDF" }).click();
   const pdfDownload = await pdfDownloadPromise;
-  expect(pdfDownload.suggestedFilename()).toBe("导入导出验收长篇.pdf");
+  expect(pdfDownload.suggestedFilename()).toBe(`${projectTitle}.pdf`);
   const pdfPath = await pdfDownload.path();
   if (pdfPath === null) {
     throw new Error("Playwright did not expose the PDF download.");
@@ -230,7 +303,10 @@ test("imports into the first chapter and exports validated artifacts and diagnos
   expect(pdf.byteLength).toBeGreaterThan(1_000);
   expect([...pdf.subarray(0, 8)]).toEqual([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]);
   expect(pdf.subarray(-6).toString("ascii")).toBe("%%EOF\n");
+  expect(pdf.toString("latin1")).toContain(`/Title <${pdfUtf16Hex(projectTitle)}>`);
   await expectPdfReaderCanOpenImageOnlyA4Document(pdf);
+  await expect(page.getByText(new RegExp(`文件：${projectTitle}\\.pdf`, "u"))).toBeVisible();
+  await expect(page.getByText(/排除 1 个私密章节/u)).toBeVisible();
   if (process.env.INKSHADOW_PDF_QA_OUTPUT !== undefined) {
     await pdfDownload.saveAs(process.env.INKSHADOW_PDF_QA_OUTPUT);
   }
@@ -248,12 +324,12 @@ test("imports into the first chapter and exports validated artifacts and diagnos
     .getByRole("listitem")
     .filter({ hasText: "图像型安全检查.pdf" });
   await expect(pdfIssue).toContainText("PDF 没有可提取文本；扫描件与 OCR 暂不支持。");
-  await expect(pdfIssue).toContainText("PDF_TEXT_UNAVAILABLE");
+  await expect(pdfIssue).not.toContainText("PDF_TEXT_UNAVAILABLE");
 
   const bundleDownloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "下载 Bundle" }).click();
   const bundleDownload = await bundleDownloadPromise;
-  expect(bundleDownload.suggestedFilename()).toBe("导入导出验收长篇.inkshadow.json");
+  expect(bundleDownload.suggestedFilename()).toBe(`${projectTitle}.inkshadow.json`);
   const bundlePath = await bundleDownload.path();
   if (bundlePath === null) {
     throw new Error("Playwright did not expose the Bundle download.");
@@ -270,7 +346,12 @@ test("imports into the first chapter and exports validated artifacts and diagnos
   });
   await expect(page.getByText("预检通过，尚未写入项目", { exact: true })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "章节标题" })).toHaveValue("安全导入");
-  await expect(page.getByText("MARKDOWN_RAW_HTML_ESCAPED")).toBeVisible();
+  await expect(page.getByRole("list", { name: "预检提示" })).toContainText(
+    "原始 HTML 已转为普通文本。",
+  );
+  await expect(page.getByRole("list", { name: "预检提示" })).not.toContainText(
+    "MARKDOWN_RAW_HTML_ESCAPED",
+  );
 
   await page.getByRole("textbox", { name: "导入为项目名称" }).fill("安全导入验收长篇");
   await page.getByRole("button", { name: "确认导入" }).click();
@@ -286,7 +367,7 @@ test("imports into the first chapter and exports validated artifacts and diagnos
   }
   const diagnostics = await readFile(diagnosticsPath, "utf8");
   expect(diagnostics).toContain('"credentialsIncluded": false');
-  expect(diagnostics).not.toContain("这是用于导出校验的正文。");
+  expect(diagnostics).not.toContain(publicTailMarker);
   expect(diagnostics).not.toContain("可预览正文。");
 
   await page.getByRole("link", { name: "打开第一章" }).click();
@@ -337,6 +418,14 @@ async function createChapter(page: Page, title: string): Promise<void> {
   await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
 }
 
+function projectIdFromEditorUrl(editorUrl: string): string {
+  const match = /#\/projects\/([^/]+)\/chapters\//u.exec(editorUrl);
+  if (match?.[1] === undefined) {
+    throw new Error(`Could not read a project id from ${editorUrl}`);
+  }
+  return match[1];
+}
+
 function inspectRecoveryPersistence(
   serialized: string | null,
   expectedContent: string,
@@ -371,6 +460,35 @@ function hasStoredContent(value: unknown, expectedContent: string): boolean {
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null;
+}
+
+interface ZipArchive {
+  file(name: string): { async(type: "string"): Promise<string> } | null;
+}
+
+async function loadZipArchive(bytes: Buffer): Promise<ZipArchive> {
+  const requireFromImportExport = createRequire(
+    path.resolve("packages/import-export/package.json"),
+  );
+  const modulePath = requireFromImportExport.resolve("jszip");
+  const module = (await import(pathToFileURL(modulePath).href)) as {
+    readonly default: { loadAsync(data: Uint8Array): Promise<ZipArchive> };
+  };
+  return module.default.loadAsync(new Uint8Array(bytes));
+}
+
+async function requiredZipText(archive: ZipArchive, name: string): Promise<string> {
+  const entry = archive.file(name);
+  if (entry === null) throw new Error(`Missing required archive entry: ${name}`);
+  return entry.async("string");
+}
+
+function pdfUtf16Hex(value: string): string {
+  let result = "FEFF";
+  for (let index = 0; index < value.length; index += 1) {
+    result += value.charCodeAt(index).toString(16).padStart(4, "0").toUpperCase();
+  }
+  return result;
 }
 
 interface PdfReaderPage {

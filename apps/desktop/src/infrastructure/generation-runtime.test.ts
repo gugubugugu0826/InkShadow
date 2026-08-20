@@ -2,7 +2,8 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { NovelSkillDefinition, ProjectNovelSkillBinding } from "@inkshadow/ai-core";
-import { createProjectSeed, parseUuidV7, updateProjectSeedField } from "@inkshadow/domain";
+import { createProjectSeed, ok, parseUuidV7, updateProjectSeedField } from "@inkshadow/domain";
+import type { HybridSearchHit } from "@inkshadow/search-core";
 
 import { ModelCenterError } from "./model-center-store";
 import {
@@ -19,6 +20,7 @@ import type {
 import {
   canDeferGenerationPlan,
   cancelGenerationPlan,
+  compileChapterStoryContext,
   createDevelopmentRuntime,
   executeGenerationPlan,
   prepareGenerationPlan,
@@ -34,6 +36,9 @@ describe("governed generation runtime", () => {
 
   it("includes confirmed ProjectSeed guidance in the real continuation context", async () => {
     const { runtime, chapterId } = await createNativeRuntime();
+    const rerank = vi.spyOn(runtime.rerank, "tryRerank");
+    const hybridSearch = vi.spyOn(runtime.search, "search");
+    const ftsOnlySearch = vi.spyOn(runtime.search, "searchFtsOnly");
     const chapter = await runtime.repositories.chapters.findById(chapterId);
     if (!chapter.ok || chapter.value === null) {
       throw new Error("Expected the generated test chapter.");
@@ -77,23 +82,403 @@ describe("governed generation runtime", () => {
     const prompt = plan.messages.map(({ content }) => content).join("\n");
     expect(prompt).toContain("禁止死者复生。");
     expect(prompt).not.toContain("潮雾会吞没无人看守的灯塔");
+    expect(rerank).not.toHaveBeenCalled();
+    expect(hybridSearch).not.toHaveBeenCalled();
+    expect(ftsOnlySearch).toHaveBeenCalledWith(
+      chapter.value.projectId,
+      expect.any(String),
+      expect.objectContaining({
+        projectId: chapter.value.projectId,
+        taskType: "continuation",
+        privacy: "standard_only",
+        currentness: "current",
+        branchId: null,
+        povCharacterId: null,
+        maximumStoryOrder: expect.any(Number) as number,
+      }),
+      32,
+    );
+    expect(plan.contextCompilation?.retrievalTrace).toMatchObject({
+      hardFilters: [
+        "project",
+        "canon",
+        "current_version",
+        "active_chapter",
+        "branch",
+        "privacy",
+        "currentness",
+        "story_time",
+        "pov",
+        "task_type",
+      ],
+      scopeOmissions: [],
+      versionMode: "per_source_current",
+      vectorStatus: "optional_not_needed",
+      remoteRerankStatus: "optional_skipped",
+    });
+  });
+
+  it("runs fact, alias, time and location queries through content-free scoped traces only", async () => {
+    const { runtime, chapterId } = await createNativeRuntime();
+    const chapter = await runtime.repositories.chapters.findById(chapterId);
+    if (!chapter.ok || chapter.value === null) {
+      throw new Error("Expected the generated test chapter.");
+    }
+    const generated = vi.spyOn(runtime.modelGateway, "generate");
+    const embedded = vi.spyOn(runtime.modelGateway, "embed");
+    const hybridSearch = vi.spyOn(runtime.search, "search");
+    const remoteRerank = vi.spyOn(runtime.rerank, "tryRerank");
+    const plannedHits = [
+      retrievalHit(
+        "fact-plan",
+        "FACT_PLAN_EVIDENCE",
+        chapter.value.projectId,
+        chapter.value.currentVersionId,
+        {},
+      ),
+      retrievalHit(
+        "alias-plan",
+        "ALIAS_PLAN_EVIDENCE",
+        chapter.value.projectId,
+        chapter.value.currentVersionId,
+        {},
+      ),
+      retrievalHit(
+        "time-plan",
+        "TIME_PLAN_EVIDENCE",
+        chapter.value.projectId,
+        chapter.value.currentVersionId,
+        {},
+      ),
+      retrievalHit(
+        "location-plan",
+        "LOCATION_PLAN_EVIDENCE",
+        chapter.value.projectId,
+        chapter.value.currentVersionId,
+        {},
+      ),
+    ];
+    let callIndex = 0;
+    const ftsOnlySearch = vi.spyOn(runtime.search, "searchFtsOnly").mockImplementation(() => {
+      const hit = plannedHits[callIndex++];
+      if (hit === undefined) throw new Error("The bounded query plan exceeded its fixture.");
+      return Promise.resolve(scopedFtsResponse(runtime, [hit]));
+    });
+    const sourceQuestion = "林晚又名阿晚，翌日清晨在北塔门口交出铜钥匙。";
+
+    const compiled = await compileChapterStoryContext(runtime, chapter.value, {
+      currentTask: continuationContextTask(chapter.value.currentVersionId, "trace-task"),
+      retrievalQuery: sourceQuestion,
+      maximumContextTokens: 20_000,
+    });
+
+    expect(ftsOnlySearch).toHaveBeenCalledTimes(4);
+    expect(ftsOnlySearch.mock.calls.every(([, query]) => query.length <= 80)).toBe(true);
+    expect(compiled.retrievalTrace.queryTrace).toEqual([
+      expect.objectContaining({
+        sourceId: "trace-task",
+        sourceType: "current_task",
+        queryType: "fact",
+        stage: "initial",
+        resultCount: 1,
+        eligibleResultCount: 1,
+        fusionWeight: 1,
+        omissionReason: null,
+        recoveryReason: null,
+      }),
+      expect.objectContaining({ queryType: "alias", fusionWeight: 0.9 }),
+      expect.objectContaining({ queryType: "time", fusionWeight: 0.75 }),
+      expect.objectContaining({ queryType: "location", fusionWeight: 0.75 }),
+    ]);
+    expect(compiled.retrievalTrace.recoveryOutcome).toBe("not_needed");
+    expect(compiled.retrievalTrace.uniqueQueryCount).toBe(4);
+    expect(
+      compiled.retrievalTrace.queryTrace.every(
+        ({ appliedFilterCategories, scopeTrace }) =>
+          [
+            "project",
+            "canon",
+            "current_version",
+            "active_chapter",
+            "branch",
+            "privacy",
+            "currentness",
+            "story_time",
+            "pov",
+            "task_type",
+          ].every((filter) => appliedFilterCategories.includes(filter)) &&
+          scopeTrace?.taskType === "continuation",
+      ),
+    ).toBe(true);
+    const serializedTrace = JSON.stringify(compiled.retrievalTrace.queryTrace);
+    expect(serializedTrace).not.toContain(sourceQuestion);
+    expect(serializedTrace).not.toMatch(/林晚|阿晚|北塔|铜钥匙/u);
+    expect(Object.keys(compiled.retrievalTrace.queryTrace[0] ?? {})).not.toEqual(
+      expect.arrayContaining(["query", "sourceQuestion"]),
+    );
+    expect(compiled.retrievalTrace.includedDocumentIds).toEqual(
+      expect.arrayContaining(plannedHits.map(({ document }) => document.id)),
+    );
+    expect(generated).not.toHaveBeenCalled();
+    expect(embedded).not.toHaveBeenCalled();
+    expect(hybridSearch).not.toHaveBeenCalled();
+    expect(remoteRerank).not.toHaveBeenCalled();
+  });
+
+  it("records a deterministic fallback query without persisting its text", async () => {
+    const { runtime, chapterId } = await createNativeRuntime();
+    const chapter = await runtime.repositories.chapters.findById(chapterId);
+    if (!chapter.ok || chapter.value === null) {
+      throw new Error("Expected the generated test chapter.");
+    }
+    const ftsOnlySearch = vi
+      .spyOn(runtime.search, "searchFtsOnly")
+      .mockResolvedValue(
+        scopedFtsResponse(runtime, [
+          retrievalHit(
+            "fallback-one",
+            "FALLBACK_ONE",
+            chapter.value.projectId,
+            chapter.value.currentVersionId,
+            {},
+          ),
+          retrievalHit(
+            "fallback-two",
+            "FALLBACK_TWO",
+            chapter.value.projectId,
+            chapter.value.currentVersionId,
+            {},
+          ),
+        ]),
+      );
+
+    const compiled = await compileChapterStoryContext(runtime, chapter.value, {
+      currentTask: continuationContextTask(chapter.value.currentVersionId, "fallback-task"),
+      retrievalQuery: "……",
+      maximumContextTokens: 20_000,
+    });
+
+    expect(ftsOnlySearch).toHaveBeenCalledWith(
+      chapter.value.projectId,
+      "人物 时间 地点 关系",
+      expect.objectContaining({ taskType: "continuation" }),
+      32,
+    );
+    expect(compiled.retrievalTrace.queryTrace).toEqual([
+      expect.objectContaining({
+        sourceId: "fallback-task",
+        sourceType: "current_task",
+        queryType: "fallback",
+        stage: "initial",
+        fusionWeight: 0.5,
+      }),
+    ]);
+    expect(JSON.stringify(compiled.retrievalTrace.queryTrace)).not.toContain("人物 时间 地点 关系");
+    expect(compiled.retrievalTrace.recoveryOutcome).toBe("not_needed");
+    expect(compiled.retrievalTrace.uniqueQueryCount).toBe(1);
+  });
+
+  it("expands K then performs bounded FTS rewrite and multi-query recovery", async () => {
+    const { runtime, chapterId } = await createNativeRuntime();
+    const chapter = await runtime.repositories.chapters.findById(chapterId);
+    if (!chapter.ok || chapter.value === null) {
+      throw new Error("Expected the generated test chapter.");
+    }
+    const currentChapter = chapter.value;
+    let callIndex = 0;
+    vi.spyOn(runtime.search, "searchFtsOnly").mockImplementation(() => {
+      const currentCall = callIndex++;
+      const hits =
+        currentCall === 2
+          ? [
+              retrievalHit(
+                "rewrite-recovery",
+                "REWRITE_RECOVERY_EVIDENCE",
+                currentChapter.projectId,
+                currentChapter.currentVersionId,
+                {},
+              ),
+            ]
+          : currentCall === 3
+            ? [
+                retrievalHit(
+                  "multi-query-recovery",
+                  "MULTI_QUERY_RECOVERY_EVIDENCE",
+                  currentChapter.projectId,
+                  currentChapter.currentVersionId,
+                  {},
+                ),
+              ]
+            : [];
+      return Promise.resolve(scopedFtsResponse(runtime, hits));
+    });
+
+    const compiled = await compileChapterStoryContext(runtime, currentChapter, {
+      currentTask: continuationContextTask(currentChapter.currentVersionId, "recovery-task"),
+      retrievalQuery:
+        "林晚追查那枚消失已久的青铜钥匙背后的隐秘线索；周野核对旧港仓库遗留多年的航行记录与签章",
+      maximumContextTokens: 20_000,
+    });
+
+    expect(compiled.retrievalTrace.queryTrace.map(({ stage }) => stage)).toEqual([
+      "initial",
+      "expand_k",
+      "recovery",
+      "recovery",
+    ]);
+    expect(compiled.retrievalTrace.queryTrace.map(({ recoveryReason }) => recoveryReason)).toEqual([
+      null,
+      "expand_k",
+      "fts_rewrite",
+      "bounded_multi_query",
+    ]);
+    expect(compiled.retrievalTrace.queryTrace.map(({ omissionReason }) => omissionReason)).toEqual([
+      "no_match",
+      "no_match",
+      null,
+      null,
+    ]);
+    expect(compiled.retrievalTrace.queryTrace.map(({ limit }) => limit)).toEqual([32, 64, 32, 32]);
+    expect(compiled.retrievalTrace.queryTrace.map(({ queryPlanId }) => queryPlanId)).toEqual([
+      "local-query-1",
+      "local-query-1",
+      "local-query-2",
+      "local-query-3",
+    ]);
+    expect(compiled.retrievalTrace.uniqueQueryCount).toBe(3);
+    expect(compiled.retrievalTrace.uniqueQueryCount).toBeLessThanOrEqual(4);
+    expect(compiled.retrievalTrace.recoveryOutcome).toBe("recovered");
+    expect(compiled.retrievalTrace.notices).not.toContain(
+      "continuation_evidence_insufficient_after_bounded_local_recovery",
+    );
+  });
+
+  it("keeps stale, future, private, branch and POV search hits out of the final request", async () => {
+    const { runtime, chapterId } = await createNativeRuntime();
+    const chapter = await runtime.repositories.chapters.findById(chapterId);
+    if (!chapter.ok || chapter.value === null) {
+      throw new Error("Expected the generated test chapter.");
+    }
+    const safeText = "SAFE_CURRENT_CANON_EVIDENCE";
+    const unsafeTexts = [
+      "STALE_EVIDENCE",
+      "FUTURE_EVIDENCE",
+      "PRIVATE_REMOTE_EVIDENCE",
+      "WRONG_BRANCH_EVIDENCE",
+      "WRONG_POV_EVIDENCE",
+      "REBUILDABLE_EVIDENCE",
+    ] as const;
+    const hits = [
+      retrievalHit("safe", safeText, chapter.value.projectId, chapter.value.currentVersionId, {}),
+      retrievalHit(
+        "stale",
+        unsafeTexts[0],
+        chapter.value.projectId,
+        chapter.value.currentVersionId,
+        {
+          currentness: "stale",
+        },
+      ),
+      retrievalHit(
+        "future",
+        unsafeTexts[1],
+        chapter.value.projectId,
+        chapter.value.currentVersionId,
+        { storyOrder: 99 },
+      ),
+      retrievalHit(
+        "private",
+        unsafeTexts[2],
+        chapter.value.projectId,
+        chapter.value.currentVersionId,
+        {
+          privacy: "local_only",
+        },
+      ),
+      retrievalHit(
+        "branch",
+        unsafeTexts[3],
+        chapter.value.projectId,
+        chapter.value.currentVersionId,
+        {
+          branchId: "what-if",
+        },
+      ),
+      retrievalHit("pov", unsafeTexts[4], chapter.value.projectId, chapter.value.currentVersionId, {
+        povCharacterId: "other-character",
+      }),
+      retrievalHit(
+        "rebuildable",
+        unsafeTexts[5],
+        chapter.value.projectId,
+        chapter.value.currentVersionId,
+        {
+          authority: "rebuildable",
+        },
+      ),
+    ];
+    vi.spyOn(runtime.search, "searchFtsOnly").mockResolvedValue(
+      ok({
+        hits,
+        retrievalScopeTrace: {
+          taskType: "continuation",
+          omittedHardFilters: [],
+          authorityNeutralOmissions: ["branch", "pov"],
+          versionMode: "per_source_current",
+        },
+        health: runtime.search.health(),
+        capabilities: { keyword: "ready", vector: "disabled", relation: "ready" },
+        notices: [],
+      }),
+    );
+
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+    const prompt = plan.messages.map(({ content }) => content).join("\n");
+    expect(prompt).toContain(safeText);
+    for (const unsafeText of unsafeTexts) {
+      expect(prompt).not.toContain(unsafeText);
+    }
+    expect(plan.contextCompilation?.retrievalTrace.omissions.map(({ reason }) => reason)).toEqual(
+      expect.arrayContaining([
+        "stale_version",
+        "future_knowledge",
+        "privacy_scope_mismatch",
+        "branch_mismatch",
+        "pov_mismatch",
+        "non_canon_authority",
+      ]),
+    );
+    const retrievalTrace = plan.contextCompilation?.retrievalTrace;
+    expect(retrievalTrace?.recoveryOutcome).toBe("evidence_insufficient");
+    expect(retrievalTrace?.uniqueQueryCount).toBe(1);
+    expect(retrievalTrace?.queryTrace[0]).toMatchObject({
+      queryPlanId: "local-query-1",
+      stage: "initial",
+      omissionReason: null,
+    });
+    expect(retrievalTrace?.queryTrace[1]).toMatchObject({
+      queryPlanId: "local-query-1",
+      stage: "expand_k",
+      recoveryReason: "expand_k",
+    });
+    expect(retrievalTrace?.notices).toContain(
+      "continuation_evidence_insufficient_after_bounded_local_recovery",
+    );
   });
 
   it("warns without price metadata and exposes a source-backed estimate after configuration", async () => {
-    const { runtime, chapterId } = await createNativeRuntime();
-    await runtime.modelCenter.save({
-      providerId: "local-ollama",
-      provider: "ollama",
-      baseUrl: "http://127.0.0.1:11434",
-      authentication: "none",
-      selectedModel: "writer-model",
-      pricing: null,
-      expectedRevision: 1,
+    const { runtime, chapterId } = await createRemoteRuntime({ seedModelHubRoute: false });
+    await seedModelHubContinuationRoute(runtime, {
+      pricing: "unknown",
+      knownTokenLimits: false,
     });
 
     const unpriced = await prepareGenerationPlan(runtime, chapterId, {
       chapterSaved: true,
-      networkAvailable: false,
+      networkAvailable: true,
     });
     expect(unpriced.preflight.readiness).toBe("READY_WITH_WARNINGS");
     expect(unpriced.preflight.canStart).toBe(true);
@@ -106,24 +491,34 @@ describe("governed generation runtime", () => {
       ]),
     );
 
-    await runtime.modelCenter.save({
-      providerId: "local-ollama",
-      provider: "ollama",
-      baseUrl: "http://127.0.0.1:11434",
-      authentication: "none",
-      selectedModel: "writer-model",
-      pricing: localPricing(),
-      expectedRevision: 2,
+    const unknownPricing = await runtime.modelHub.findCostPrivacyProfile(
+      "reasoning-retry-model-hub-catalog",
+    );
+    if (unknownPricing === null) throw new Error("Expected the unpriced Model Hub fixture.");
+    await runtime.modelHub.saveCostPrivacyProfile({
+      catalogEntryId: unknownPricing.catalogEntryId,
+      currency: "USD",
+      inputMicrosPerMillionTokens: "1000000",
+      outputMicrosPerMillionTokens: "2000000",
+      cachedInputMicrosPerMillionTokens: "0",
+      pricingVersion: "configured-remote-test",
+      priceUpdatedAt: "2026-08-10T00:00:00.000Z",
+      dataDestination: unknownPricing.dataDestination,
+      retentionPolicy: unknownPricing.retentionPolicy,
+      trainingPolicy: unknownPricing.trainingPolicy,
+      evidenceSource: unknownPricing.evidenceSource,
+      evidenceVersion: unknownPricing.evidenceVersion,
+      expectedRevision: unknownPricing.revision,
     });
     const ready = await prepareGenerationPlan(runtime, chapterId, {
       chapterSaved: true,
-      networkAvailable: false,
+      networkAvailable: true,
     });
     expect(ready.preflight.canStart).toBe(true);
     expect(ready.preflight.estimate).toMatchObject({
-      micros: 0n,
-      pricingVersion: "local-zero-cost",
+      pricingVersion: "configured-remote-test",
     });
+    expect(ready.preflight.estimate?.micros).toBeGreaterThan(0n);
     expect(ready.tokenEstimateSource).toBe("utf8_conservative");
   });
 
@@ -199,7 +594,7 @@ describe("governed generation runtime", () => {
       request.onDelta?.(boundedOutput);
       return Promise.resolve(generationResult(boundedOutput, 180, 260));
     });
-    const created = await createRemoteRuntime({ generate });
+    const created = await createRemoteRuntime({ generate, seedModelHubRoute: false });
     const experimental = await attachEnabledNovelSkills(created.runtime, created.chapterId);
     const runtime = experimental.runtime;
     await seedModelHubContinuationRoute(runtime);
@@ -399,7 +794,7 @@ describe("governed generation runtime", () => {
 
     const result = await executeGenerationPlan(executionRuntime, plan);
 
-    expect(result).toMatchObject({ ok: false, error: { code: "PROJECT_ARCHIVED" } });
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_HUB_PREFLIGHT_FAILED" } });
     expect(findProject).toHaveBeenCalledTimes(2);
     expect(generate).not.toHaveBeenCalled();
     const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapterId);
@@ -451,7 +846,7 @@ describe("governed generation runtime", () => {
     });
   });
 
-  it("retries one reasoning-only OpenAI-compatible truncation with thinking disabled", async () => {
+  it("does not hide a second Provider call behind reasoning-only truncation", async () => {
     const generate = vi
       .fn<NativeModelGatewayClient["generate"]>()
       .mockRejectedValueOnce(
@@ -467,7 +862,7 @@ describe("governed generation runtime", () => {
         }),
       )
       .mockResolvedValueOnce(generationResult("关闭推理后的可见续写。", 80, 20));
-    const created = await createRemoteRuntime({ generate });
+    const created = await createRemoteRuntime({ generate, seedModelHubRoute: false });
     const experimental = await attachEnabledNovelSkills(created.runtime, created.chapterId);
     const runtime = experimental.runtime;
     const chapterId = created.chapterId;
@@ -480,53 +875,77 @@ describe("governed generation runtime", () => {
 
     const result = await executeGenerationPlan(runtime, plan);
 
-    if (!result.ok || result.value.candidate === null) {
-      throw new Error("Expected a complete Candidate from the second Model Hub attempt.");
-    }
-    expect(result.value).toMatchObject({ incomplete: false, cancelled: false });
-    expect(generate).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_OUTPUT_TRUNCATED" } });
+    expect(generate).toHaveBeenCalledOnce();
+    expect(generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
     expect(generate.mock.calls[0]?.[0].reasoningMode).toBeUndefined();
-    expect(generate.mock.calls[1]?.[0]).toMatchObject({ reasoningMode: "disabled" });
-    expect(generate.mock.calls[1]?.[0].generationId).not.toBe(
-      generate.mock.calls[0]?.[0].generationId,
-    );
     const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapterId);
-    expect(candidates.ok && candidates.value).toHaveLength(1);
+    expect(candidates.ok && candidates.value).toHaveLength(0);
     const chapter = await runtime.repositories.chapters.findById(chapterId);
     if (!chapter.ok || chapter.value === null) throw new Error("Expected the test chapter.");
     const traces = (await runtime.contextTraces.listByProjectId(chapter.value.projectId)).filter(
       ({ execution }) => execution?.generationRunId === plan.runId,
     );
-    expect(traces).toHaveLength(2);
-    expect(new Set(traces.map(({ id }) => id)).size).toBe(2);
-    expect(new Set(traces.map(({ execution }) => execution?.generationId)).size).toBe(2);
+    expect(traces).toHaveLength(1);
+    expect(new Set(traces.map(({ id }) => id)).size).toBe(1);
+    expect(new Set(traces.map(({ execution }) => execution?.generationId)).size).toBe(1);
     expect(
       new Set(traces.map(({ execution }) => execution?.modelInvocationId).filter(Boolean)).size,
-    ).toBe(2);
-    expect(experimental.persistence.commits).toHaveLength(2);
+    ).toBe(1);
+    expect(experimental.persistence.commits).toHaveLength(1);
     expect(new Set(experimental.persistence.commits.map(({ snapshotId }) => snapshotId)).size).toBe(
-      2,
+      1,
     );
     expect(
       new Set(experimental.persistence.commits.map(({ contextTraceId }) => contextTraceId)).size,
-    ).toBe(2);
+    ).toBe(1);
     expect(
       new Set(experimental.persistence.commits.map(({ modelInvocationId }) => modelInvocationId))
         .size,
-    ).toBe(2);
+    ).toBe(1);
     expect(
       new Set(experimental.persistence.commits.map(({ contextTraceId }) => contextTraceId)),
     ).toEqual(new Set(traces.map(({ id }) => id)));
-    expect(traces).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ outputCandidateId: null }),
-        expect.objectContaining({ outputCandidateId: result.value.candidate.id }),
-      ]),
-    );
+    expect(traces).toEqual([expect.objectContaining({ outputCandidateId: null })]);
+  });
+
+  it("executes a direct continuation once with zero retries despite connection retry settings", async () => {
+    const generate = vi
+      .fn<NativeModelGatewayClient["generate"]>()
+      .mockRejectedValueOnce(
+        new ModelCenterError("MODEL_OUTPUT_TRUNCATED", "reasoning used the output budget", true, {
+          requestId: "direct-zero-retry",
+          httpStatus: 200,
+          finishReason: "length",
+          visibleContentLength: 0,
+          reasoningPresent: true,
+          stream: true,
+          inputTokens: 80,
+          outputTokens: 64,
+        }),
+      )
+      .mockResolvedValueOnce(generationResult("不应自动发起的第二次调用。", 80, 20));
+    const { runtime, chapterId } = await createRemoteRuntime({
+      generate,
+      seedModelHubRoute: false,
+    });
+    await seedModelHubContinuationRoute(runtime, { retryLimit: 3 });
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const result = await executeGenerationPlan(runtime, plan, undefined, {
+      generationRetryLimit: 0,
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_OUTPUT_TRUNCATED" } });
+    expect(generate).toHaveBeenCalledOnce();
+    expect(generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
   });
 
   it("uses a valid Model Hub continuation route without consulting an unselected legacy profile", async () => {
-    const created = await createRemoteRuntime();
+    const created = await createRemoteRuntime({ seedModelHubRoute: false });
     const legacy = await created.runtime.modelCenter.findByProviderId("remote-writer");
     if (legacy === null) throw new Error("Expected the compatibility profile.");
     await created.runtime.modelCenter.save({
@@ -566,7 +985,7 @@ describe("governed generation runtime", () => {
   });
 
   it("uses the full-input fallback as the frozen continuation target", async () => {
-    const created = await createRemoteRuntime();
+    const created = await createRemoteRuntime({ seedModelHubRoute: false });
     await seedModelHubContinuationRoute(created.runtime, {
       primaryInputTokenLimit: 3_400,
       includeFallback: true,
@@ -593,7 +1012,7 @@ describe("governed generation runtime", () => {
   });
 
   it("fails closed on an invalid existing Model Hub route and records the early preflight blocker", async () => {
-    const created = await createRemoteRuntime();
+    const created = await createRemoteRuntime({ seedModelHubRoute: false });
     await seedModelHubContinuationRoute(created.runtime);
     await created.runtime.modelHub.syncCatalog({
       syncId: "invalid-existing-continuation-route-sync",
@@ -658,7 +1077,7 @@ describe("governed generation runtime", () => {
   });
 
   it("does not bypass an explicitly disabled Model Hub route through the legacy profile", async () => {
-    const created = await createRemoteRuntime();
+    const created = await createRemoteRuntime({ seedModelHubRoute: false });
     await seedModelHubContinuationRoute(created.runtime);
     const route = await created.runtime.modelHub.findTaskRoute("continuation");
     if (route === null) throw new Error("Expected the continuation route.");
@@ -696,7 +1115,7 @@ describe("governed generation runtime", () => {
   });
 
   it("publishes a scoped private-chapter blocker without creating billable or candidate state", async () => {
-    const created = await createRemoteRuntime();
+    const created = await createRemoteRuntime({ seedModelHubRoute: false });
     const chapter = await created.runtime.repositories.chapters.findById(created.chapterId);
     if (!chapter.ok || chapter.value === null) throw new Error("Expected the test chapter.");
     const privateChapter = await created.runtime.useCases.setChapterPrivacy.execute({
@@ -738,7 +1157,7 @@ describe("governed generation runtime", () => {
     const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
       Promise.resolve(generationResult("This must never be dispatched.", 80, 20)),
     );
-    const created = await createRemoteRuntime({ generate });
+    const created = await createRemoteRuntime({ generate, seedModelHubRoute: false });
     const experimental = await attachEnabledNovelSkills(created.runtime, created.chapterId);
     const runtime = experimental.runtime;
     await seedModelHubContinuationRoute(runtime);
@@ -777,7 +1196,11 @@ describe("governed generation runtime", () => {
     const cancelGeneration = vi.fn<NativeModelGatewayClient["cancelGeneration"]>(() =>
       Promise.resolve(false),
     );
-    const created = await createRemoteRuntime({ generate, cancelGeneration });
+    const created = await createRemoteRuntime({
+      generate,
+      cancelGeneration,
+      seedModelHubRoute: false,
+    });
     const experimental = await attachEnabledNovelSkills(created.runtime, created.chapterId);
     const runtime = experimental.runtime;
     await seedModelHubContinuationRoute(runtime);
@@ -821,7 +1244,7 @@ describe("governed generation runtime", () => {
     const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
       Promise.resolve(generationResult("This archived request must not leave the device.", 80, 20)),
     );
-    const created = await createRemoteRuntime({ generate });
+    const created = await createRemoteRuntime({ generate, seedModelHubRoute: false });
     const experimental = await attachEnabledNovelSkills(created.runtime, created.chapterId);
     const runtime = experimental.runtime;
     await seedModelHubContinuationRoute(runtime);
@@ -871,7 +1294,10 @@ describe("governed generation runtime", () => {
     const cancelGeneration = vi.fn<NativeModelGatewayClient["cancelGeneration"]>(() =>
       Promise.resolve(false),
     );
-    const { runtime, chapterId } = await createRemoteRuntime({ generate, cancelGeneration });
+    const { runtime, chapterId } = await createRemoteRuntime({
+      generate,
+      cancelGeneration,
+    });
     const plan = await prepareGenerationPlan(runtime, chapterId, {
       chapterSaved: true,
       networkAvailable: true,
@@ -1016,8 +1442,7 @@ describe("governed generation runtime", () => {
     expect(generate.mock.calls[0]?.[0]).toMatchObject({ reasoningMode: "disabled" });
   });
 
-  it("cancels the active reasoning-retry generation id rather than the first attempt", async () => {
-    let resolveSecond!: (value: ReturnType<typeof generationResult>) => void;
+  it("does not create a phantom retry generation after reasoning-only truncation", async () => {
     const generate = vi
       .fn<NativeModelGatewayClient["generate"]>()
       .mockRejectedValueOnce(
@@ -1032,32 +1457,30 @@ describe("governed generation runtime", () => {
           outputTokens: 64,
         }),
       )
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            resolveSecond = resolve;
-          }),
-      );
+      .mockResolvedValueOnce(generationResult("不应自动发起的第二次调用。", 80, 20));
     const cancelGeneration = vi.fn(() => Promise.resolve(true));
-    const { runtime, chapterId } = await createRemoteRuntime({ generate, cancelGeneration });
+    const { runtime, chapterId } = await createRemoteRuntime({
+      generate,
+      cancelGeneration,
+      seedModelHubRoute: false,
+    });
     await seedModelHubContinuationRoute(runtime);
     const plan = await prepareGenerationPlan(runtime, chapterId, {
       chapterSaved: true,
       networkAvailable: true,
     });
 
-    const execution = executeGenerationPlan(runtime, plan);
-    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
-    const firstId = generate.mock.calls[0]?.[0].generationId;
-    const retryId = generate.mock.calls[1]?.[0].generationId;
-    expect(retryId).not.toBe(firstId);
-    await cancelGenerationPlan(runtime, plan);
-    expect(cancelGeneration).toHaveBeenCalledWith(retryId);
-    resolveSecond(generationResult("停止前已返回的正文。", 80, 20));
-    await execution;
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_OUTPUT_TRUNCATED" } });
+    expect(generate).toHaveBeenCalledOnce();
+    expect(generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
+    await expect(cancelGenerationPlan(runtime, plan)).resolves.toBe(true);
+    expect(cancelGeneration).toHaveBeenCalledOnce();
+    expect(cancelGeneration).toHaveBeenCalledWith(plan.generationId);
   });
 
-  it("reuses a persisted retryable run and accumulates the next attempt estimate", async () => {
+  it("does not reuse an ambiguously failed Provider action as an automatic retry", async () => {
     const generate = vi
       .fn<NativeModelGatewayClient["generate"]>()
       .mockRejectedValueOnce(
@@ -1065,23 +1488,24 @@ describe("governed generation runtime", () => {
       )
       .mockResolvedValueOnce(generationResult("重试后的候选。", 80, 20));
     const { runtime, chapterId } = await createNativeRuntime(generate);
-    const current = await runtime.modelCenter.findByProviderId("local-ollama");
-    if (current === null) {
-      throw new Error("Expected a model profile.");
-    }
-    await runtime.modelCenter.save({
-      providerId: current.providerId,
-      provider: current.provider,
-      baseUrl: current.baseUrl,
-      authentication: current.authentication,
-      selectedModel: current.selectedModel,
-      pricing: {
-        ...localPricing(),
-        inputMicrosPerMillionTokens: 1_000_000,
-        outputMicrosPerMillionTokens: 2_000_000,
-        pricingVersion: "paid-test",
-      },
-      expectedRevision: current.revision,
+    const currentPricing = await runtime.modelHub.findCostPrivacyProfile(
+      "reasoning-retry-model-hub-catalog",
+    );
+    if (currentPricing === null) throw new Error("Expected Model Hub pricing evidence.");
+    await runtime.modelHub.saveCostPrivacyProfile({
+      catalogEntryId: currentPricing.catalogEntryId,
+      currency: "USD",
+      inputMicrosPerMillionTokens: "1000000",
+      outputMicrosPerMillionTokens: "2000000",
+      cachedInputMicrosPerMillionTokens: "0",
+      pricingVersion: "paid-model-hub-test",
+      priceUpdatedAt: "2026-08-10T00:00:00.000Z",
+      dataDestination: currentPricing.dataDestination,
+      retentionPolicy: currentPricing.retentionPolicy,
+      trainingPolicy: currentPricing.trainingPolicy,
+      evidenceSource: currentPricing.evidenceSource,
+      evidenceVersion: currentPricing.evidenceVersion,
+      expectedRevision: currentPricing.revision,
     });
     const firstPlan = await prepareGenerationPlan(runtime, chapterId, {
       chapterSaved: true,
@@ -1089,32 +1513,48 @@ describe("governed generation runtime", () => {
     });
     const first = await executeGenerationPlan(runtime, firstPlan);
     expect(first.ok).toBe(false);
-    await new Promise((resolve) => window.setTimeout(resolve, 1_050));
+    const firstRun = await runtime.generationGovernance.findRunById(firstPlan.runId);
+    expect(firstRun).toMatchObject({
+      state: "failed_final",
+      attempt: 1,
+      providerId: firstPlan.providerId,
+      modelId: firstPlan.modelId,
+      pricingVersion: "paid-model-hub-test",
+      estimatedCostMicros: firstPlan.preflight.estimate?.micros.toString(),
+    });
 
-    const retryPlan = await prepareGenerationPlan(runtime, chapterId, {
+    const nextPlan = await prepareGenerationPlan(runtime, chapterId, {
       chapterSaved: true,
       networkAvailable: true,
     });
-    expect(retryPlan.taskId).toBe(firstPlan.taskId);
-    expect(retryPlan.runId).toBe(firstPlan.runId);
-    expect(retryPlan.idempotencyKey).toBe(firstPlan.idempotencyKey);
-    const retry = await executeGenerationPlan(runtime, retryPlan);
+    expect(nextPlan.preflight.estimate).toEqual(firstPlan.preflight.estimate);
+    expect(nextPlan.taskId).not.toBe(firstPlan.taskId);
+    expect(nextPlan.runId).not.toBe(firstPlan.runId);
+    expect(nextPlan.idempotencyKey).not.toBe(firstPlan.idempotencyKey);
+    const next = await executeGenerationPlan(runtime, nextPlan);
 
-    if (!retry.ok) {
-      throw retry.error;
+    if (!next.ok) {
+      throw next.error;
     }
     expect(generate).toHaveBeenCalledTimes(2);
-    const run = await runtime.generationGovernance.findRunById(firstPlan.runId);
-    expect(run).toMatchObject({ state: "completed", attempt: 2 });
+    await expect(runtime.generationGovernance.findRunById(firstPlan.runId)).resolves.toMatchObject({
+      state: "failed_final",
+      attempt: 1,
+    });
+    const nextRun = await runtime.generationGovernance.findRunById(nextPlan.runId);
+    expect(nextRun).toMatchObject({ state: "completed", attempt: 1 });
     const estimate = firstPlan.preflight.estimate;
     if (estimate === null) {
       throw new Error("Expected a priced generation plan.");
     }
-    expect(run?.incurredCostMicros).toBe((estimate.micros * 2n).toString());
+    expect(firstRun?.incurredCostMicros).toBe(estimate.micros.toString());
+    expect(nextRun?.incurredCostMicros).toBe(estimate.micros.toString());
     await expect(runtime.generationGovernance.listAttemptUsage(firstPlan.runId)).resolves.toEqual([
       expect.objectContaining({ attempt: 1, source: "provider_unavailable" }),
+    ]);
+    await expect(runtime.generationGovernance.listAttemptUsage(nextPlan.runId)).resolves.toEqual([
       expect.objectContaining({
-        attempt: 2,
+        attempt: 1,
         source: "provider_reported",
         inputTokens: 80,
         outputTokens: 20,
@@ -1172,6 +1612,7 @@ describe("governed generation runtime", () => {
       mode: "tauri",
       modelGateway,
     };
+    await seedModelHubContinuationRoute(runtime);
 
     const offlinePlan = await prepareGenerationPlan(runtime, chapter.value.chapter.id, {
       chapterSaved: true,
@@ -1212,7 +1653,7 @@ describe("governed generation runtime", () => {
     );
   });
 
-  it("selects only the exact verified fallback and marks it for explicit confirmation", async () => {
+  it("does not bypass the frozen Model Hub target through a legacy role fallback", async () => {
     const { runtime, chapterId } = await createNativeRuntime();
     await runtime.modelCenter.save({
       providerId: "remote-primary",
@@ -1239,15 +1680,14 @@ describe("governed generation runtime", () => {
     });
 
     expect(plan).toMatchObject({
-      providerId: "local-ollama",
+      executionMode: "model_hub",
+      providerId: "reasoning-retry-model-hub",
       modelId: "writer-model",
       modelRole: "high_quality",
-      routeReason: "role_fallback",
-      routeRequiresConfirmation: true,
-      routeFallback: {
-        providerId: "local-ollama",
-        modelId: "writer-model",
-      },
+      routeReason: "model_hub_primary",
+      routeRequiresConfirmation: false,
+      routeFallback: null,
+      profile: null,
     });
     expect(plan.preflight.canStart).toBe(true);
   });
@@ -1347,12 +1787,19 @@ async function createNativeRuntime(
     generate,
     cancelGeneration,
   };
+  const runtime: DesktopRuntime = {
+    ...developmentRuntime,
+    mode: "tauri",
+    modelGateway,
+  };
+  await seedModelHubContinuationRoute(runtime, {
+    providerKind: "ollama",
+    baseUrl: "http://127.0.0.1:11434",
+    dataDestination: "local",
+    pricing: "local_zero",
+  });
   return {
-    runtime: {
-      ...developmentRuntime,
-      mode: "tauri",
-      modelGateway,
-    },
+    runtime,
     chapterId: chapter.value.chapter.id,
   };
 }
@@ -1373,6 +1820,7 @@ async function createRemoteRuntime(
     generate?: NativeModelGatewayClient["generate"];
     cancelGeneration?: NativeModelGatewayClient["cancelGeneration"];
     baseUrl?: string;
+    seedModelHubRoute?: boolean;
   }> = {},
 ): Promise<{
   runtime: DesktopRuntime;
@@ -1422,12 +1870,33 @@ async function createRemoteRuntime(
       (() => Promise.resolve(generationResult("Freshly generated candidate.", 100, 20))),
     cancelGeneration: options.cancelGeneration ?? (() => Promise.resolve(true)),
   };
+  const usesFixtureCredential = options.baseUrl === "https://api.deepseek.com";
+  const runtime: DesktopRuntime = {
+    ...developmentRuntime,
+    mode: "tauri",
+    modelGateway,
+    ...(usesFixtureCredential
+      ? {
+          credentials: {
+            getSummary: () => Promise.resolve({ configured: true, lastFour: "test" }),
+            save: () => Promise.resolve({ configured: true, lastFour: "test" }),
+            delete: () => Promise.resolve({ configured: false, lastFour: null }),
+          },
+        }
+      : {}),
+  };
+  if (options.seedModelHubRoute !== false) {
+    const baseUrl = options.baseUrl ?? "https://models.example/v1";
+    await seedModelHubContinuationRoute(runtime, {
+      providerKind:
+        baseUrl === "https://api.deepseek.com" ? "deepseek" : "custom_openai_compatible",
+      baseUrl,
+      dataDestination: "remote",
+      pricing: "remote_test",
+    });
+  }
   return {
-    runtime: {
-      ...developmentRuntime,
-      mode: "tauri",
-      modelGateway,
-    },
+    runtime,
     chapterId: chapter.value.chapter.id,
     chapterRevision: chapter.value.chapter.revision,
   };
@@ -1438,15 +1907,26 @@ async function seedModelHubContinuationRoute(
   options: Readonly<{
     primaryInputTokenLimit?: number;
     includeFallback?: boolean;
+    retryLimit?: number;
+    providerKind?: "ollama" | "deepseek" | "custom_openai_compatible";
+    baseUrl?: string;
+    dataDestination?: "local" | "remote";
+    pricing?: "local_zero" | "remote_test" | "unknown";
+    knownTokenLimits?: boolean;
   }> = {},
 ): Promise<void> {
+  const providerKind = options.providerKind ?? "custom_openai_compatible";
+  const connectionId = "reasoning-retry-model-hub";
+  const usesCredential = providerKind === "deepseek";
   const connection = await runtime.modelHub.saveConnection({
-    id: "reasoning-retry-model-hub",
-    providerKind: "custom_openai_compatible",
+    id: connectionId,
+    providerKind,
     displayName: "Reasoning retry Model Hub fixture",
-    baseUrlOverride: "https://models.example/v1",
-    credentialState: "missing",
-    authenticationMode: "none",
+    baseUrlOverride: options.baseUrl ?? "https://models.example/v1",
+    credentialState: usesCredential ? "present" : "missing",
+    authenticationMode: usesCredential ? "bearer_keyring" : "none",
+    ...(usesCredential ? { credentialRef: `keyring:model-hub:${connectionId}` } : {}),
+    ...(options.retryLimit === undefined ? {} : { retryLimit: options.retryLimit }),
     expectedRevision: null,
   });
   await runtime.modelHub.recordConnectionTest({
@@ -1464,8 +1944,9 @@ async function seedModelHubContinuationRoute(
         id: "reasoning-retry-model-hub-catalog",
         providerModelId: "writer-model",
         lifecycle: "stable",
-        inputTokenLimit: options.primaryInputTokenLimit ?? 32_000,
-        outputTokenLimit: 8_000,
+        inputTokenLimit:
+          options.knownTokenLimits === false ? null : (options.primaryInputTokenLimit ?? 32_000),
+        outputTokenLimit: options.knownTokenLimits === false ? null : 8_000,
         staleAfter: "2027-08-10T00:00:00.000Z",
       },
     ],
@@ -1485,17 +1966,20 @@ async function seedModelHubContinuationRoute(
       },
     ],
   });
+  const pricing = options.pricing ?? "remote_test";
   await runtime.modelHub.saveCostPrivacyProfile({
     catalogEntryId: "reasoning-retry-model-hub-catalog",
-    currency: "USD",
-    inputMicrosPerMillionTokens: "1000000",
-    outputMicrosPerMillionTokens: "2000000",
-    cachedInputMicrosPerMillionTokens: null,
-    pricingVersion: "generation-runtime-reasoning-retry-v1",
-    priceUpdatedAt: "2026-08-10T00:00:00.000Z",
-    dataDestination: "remote",
-    retentionPolicy: "provider_default",
-    trainingPolicy: "unknown",
+    currency: pricing === "unknown" ? null : "USD",
+    inputMicrosPerMillionTokens:
+      pricing === "unknown" ? null : pricing === "local_zero" ? "0" : "1000000",
+    outputMicrosPerMillionTokens:
+      pricing === "unknown" ? null : pricing === "local_zero" ? "0" : "2000000",
+    cachedInputMicrosPerMillionTokens: pricing === "unknown" ? null : "0",
+    pricingVersion: pricing === "unknown" ? null : `generation-runtime-${pricing}-v1`,
+    priceUpdatedAt: pricing === "unknown" ? null : "2026-08-10T00:00:00.000Z",
+    dataDestination: options.dataDestination ?? "remote",
+    retentionPolicy: options.dataDestination === "local" ? "none" : "provider_default",
+    trainingPolicy: options.dataDestination === "local" ? "not_used" : "unknown",
     evidenceSource: "user_confirmed",
     evidenceVersion: "generation-runtime-reasoning-retry-v1",
     expectedRevision: null,
@@ -1689,6 +2173,91 @@ class GenerationNovelSkillPersistence implements NovelSkillRuntimePersistence {
   ): Promise<NovelSkillInvocationSnapshotRecord | null> {
     return Promise.resolve(this.snapshots.get(contextTraceId) ?? null);
   }
+}
+
+function retrievalHit(
+  id: string,
+  text: string,
+  projectId: string,
+  sourceVersionId: string,
+  documentOverrides: Partial<HybridSearchHit["document"]>,
+): HybridSearchHit {
+  return Object.freeze({
+    document: Object.freeze({
+      id: `retrieval-${id}`,
+      projectId,
+      sourceType: "memory" as const,
+      sourceId: `fact-${id}`,
+      sourceVersionId,
+      title: `Evidence ${id}`,
+      text,
+      contentHash: "a".repeat(64),
+      updatedAt: "2026-08-20T00:00:00.000Z",
+      chunkKind: "story_fact_evidence" as const,
+      parentDocumentId: null,
+      utf16Start: 0,
+      utf16End: text.length,
+      sourceLength: text.length,
+      sceneId: null,
+      eventId: null,
+      characterIds: Object.freeze([]),
+      locationIds: Object.freeze([]),
+      storyTime: null,
+      branchId: null,
+      povCharacterId: null,
+      storyOrder: 1,
+      authority: "confirmed_fact" as const,
+      privacy: "standard" as const,
+      currentness: "current" as const,
+      omittedScopeFields: Object.freeze([]),
+      ...documentOverrides,
+    }),
+    scores: Object.freeze({ keyword: 1, vector: 0, relation: 0, rule: 0, total: 1 }),
+    evidence: Object.freeze({
+      matchedTerms: Object.freeze([id]),
+      relationIds: Object.freeze([]),
+      sourceVersionId,
+      contentHash: "a".repeat(64),
+    }),
+  });
+}
+
+function scopedFtsResponse(runtime: DesktopRuntime, hits: readonly HybridSearchHit[]) {
+  return ok({
+    hits: Object.freeze([...hits]),
+    retrievalScopeTrace: Object.freeze({
+      taskType: "continuation" as const,
+      omittedHardFilters: Object.freeze([]),
+      authorityNeutralOmissions: Object.freeze([]),
+      versionMode: "per_source_current" as const,
+    }),
+    health: runtime.search.health(),
+    capabilities: Object.freeze({
+      keyword: "ready" as const,
+      vector: "disabled" as const,
+      relation: "ready" as const,
+    }),
+    notices: Object.freeze([]),
+  });
+}
+
+function continuationContextTask(sourceVersionId: string, id: string) {
+  return Object.freeze({
+    id,
+    content: "Continue the current accepted chapter without changing confirmed canon.",
+    selectionReason: "The test explicitly requests a governed continuation context.",
+    evidence: Object.freeze([
+      Object.freeze({
+        sourceType: "generation_task" as const,
+        sourceId: id,
+        sourceVersionId,
+        locator: null,
+        contentHash: null,
+        excerpt: null,
+      }),
+    ]),
+    priority: 1_000,
+  });
 }
 
 function localPricing() {

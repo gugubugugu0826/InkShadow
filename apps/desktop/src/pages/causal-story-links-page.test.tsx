@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { CausalEventGraph, StoryFact } from "@inkshadow/story-core";
 
+import { CausalEventGraphStoreError } from "../infrastructure/causal-event-graph-store";
 import { CausalStoryLinksPage } from "./causal-story-links-page";
 
 const PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
@@ -152,7 +153,13 @@ describe("causal story links page", () => {
       projectId: PROJECT_ID,
       branchId: "main",
       changedEventIds: [EVENT_ID],
-      impactedEvents: [],
+      impactedEvents: [
+        {
+          eventId: "raw-downstream-event-id",
+          depth: 1,
+          pathEventIds: [EVENT_ID, "raw-downstream-event-id"],
+        },
+      ],
       cycleEdgesSkipped: [],
       truncated: false,
       truncationReasons: [],
@@ -174,6 +181,7 @@ describe("causal story links page", () => {
           }}
           projector={{ rebuildProject: vi.fn() } as never}
           whatIf={{ simulate: vi.fn(), list: vi.fn().mockResolvedValue([]) }}
+          whatIfEnabled={true}
           authoring={{
             createEvent: vi.fn(),
             createRelation: vi.fn(),
@@ -193,9 +201,50 @@ describe("causal story links page", () => {
     expect(screen.getByText(/信任程度.*怀疑.*信任/u)).toBeInTheDocument();
     expect(screen.getByText(/旧门钥匙.*转移/u)).toBeInTheDocument();
     expect(screen.getByText(/午夜钟声.*埋设.*第一次听见异常钟声/u)).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(EVENT_ID);
+    expect(document.body).not.toHaveTextContent("character-linxia");
+    expect(document.body).not.toHaveTextContent("character-zhouming");
     await userEvent.click(screen.getByRole("button", { name: "试演改变它会影响哪里" }));
     await waitFor(() => expect(traceImpacts).toHaveBeenCalled());
-    expect(screen.getByText("当前没有找到会被这个改变波及的已确认后续事件。")).toBeInTheDocument();
+    expect(screen.getByText(/后续事件 1.*相隔 1 层/u)).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("raw-downstream-event-id");
+  });
+
+  it("fully gates ordinary what-if UI and provider access when the feature is closed", async () => {
+    const list = vi.fn().mockResolvedValue([]);
+    const simulate = vi.fn();
+    const traceImpacts = vi.fn();
+    render(
+      <MemoryRouter>
+        <CausalStoryLinksPage
+          projectId={PROJECT_ID}
+          graph={{
+            loadProjectBranch: vi.fn().mockResolvedValue(graph),
+            replace: vi.fn(),
+            append: vi.fn(),
+            traceImpacts,
+          }}
+          projector={{ rebuildProject: vi.fn() } as never}
+          whatIf={{ simulate, list }}
+          whatIfEnabled={false}
+          authoring={{
+            createEvent: vi.fn(),
+            createRelation: vi.fn(),
+            listConfirmedCharacters: vi.fn().mockResolvedValue([]),
+          }}
+          chapters={{ listByProjectId: vi.fn().mockResolvedValue({ ok: true, value: [] }) }}
+          actorId="019f9f4a-b3c7-7350-9226-000000000005"
+          legacyProjectionAvailable={false}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "林夏打开旧门" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "试演改变它会影响哪里" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("想改变什么")).not.toBeInTheDocument();
+    expect(list).not.toHaveBeenCalled();
+    expect(traceImpacts).not.toHaveBeenCalled();
+    expect(simulate).not.toHaveBeenCalled();
   });
 
   it("generates an isolated alternate direction only after showing deterministic impact", async () => {
@@ -255,6 +304,7 @@ describe("causal story links page", () => {
           }}
           projector={{ rebuildProject: vi.fn() } as never}
           whatIf={{ simulate, list: vi.fn().mockResolvedValue([]) }}
+          whatIfEnabled={true}
           authoring={{
             createEvent: vi.fn(),
             createRelation: vi.fn(),
@@ -279,5 +329,82 @@ describe("causal story links page", () => {
     );
     expect(await screen.findByText("林夏先去找老师，钟声因此延后。")).toBeInTheDocument();
     expect(screen.getByText(/正式正文、确认设定和主因果链保持不变/u)).toBeInTheDocument();
+  });
+
+  it("projects fatal graph failures into safe ordinary-language recovery guidance", async () => {
+    const rawMessage = "SQLITE_BUSY: fatal-causal-graph-sentinel";
+    render(
+      <MemoryRouter>
+        <CausalStoryLinksPage
+          projectId={PROJECT_ID}
+          graph={{
+            loadProjectBranch: vi
+              .fn()
+              .mockRejectedValue(
+                new CausalEventGraphStoreError("CAUSAL_GRAPH_UNAVAILABLE", rawMessage, true),
+              ),
+            replace: vi.fn(),
+            append: vi.fn(),
+            traceImpacts: vi.fn(),
+          }}
+          projector={{ rebuildProject: vi.fn() } as never}
+          whatIf={{ simulate: vi.fn(), list: vi.fn().mockResolvedValue([]) }}
+          whatIfEnabled={false}
+          authoring={{
+            createEvent: vi.fn(),
+            createRelation: vi.fn(),
+            listConfirmedCharacters: vi.fn().mockResolvedValue([]),
+          }}
+          chapters={{ listByProjectId: vi.fn().mockResolvedValue({ ok: true, value: [] }) }}
+          actorId="019f9f4a-b3c7-7350-9226-000000000005"
+          legacyProjectionAvailable={false}
+        />
+      </MemoryRouter>,
+    );
+
+    const errorState = await screen.findByRole("alert");
+    expect(errorState).toHaveTextContent("发生了未预期的本地错误");
+    expect(errorState).toHaveTextContent("请先重试");
+    expect(document.body).not.toHaveTextContent("CAUSAL_GRAPH_UNAVAILABLE");
+    expect(document.body).not.toHaveTextContent(rawMessage);
+  });
+
+  it("does not expose raw graph details when an inline operation fails", async () => {
+    const rawMessage = "SQLITE_CORRUPT: trace-impact-sentinel";
+    render(
+      <MemoryRouter>
+        <CausalStoryLinksPage
+          projectId={PROJECT_ID}
+          graph={{
+            loadProjectBranch: vi.fn().mockResolvedValue(graph),
+            replace: vi.fn(),
+            append: vi.fn(),
+            traceImpacts: vi
+              .fn()
+              .mockRejectedValue(
+                new CausalEventGraphStoreError("CAUSAL_GRAPH_UNAVAILABLE", rawMessage, true),
+              ),
+          }}
+          projector={{ rebuildProject: vi.fn() } as never}
+          whatIf={{ simulate: vi.fn(), list: vi.fn().mockResolvedValue([]) }}
+          whatIfEnabled={true}
+          authoring={{
+            createEvent: vi.fn(),
+            createRelation: vi.fn(),
+            listConfirmedCharacters: vi.fn().mockResolvedValue([]),
+          }}
+          chapters={{ listByProjectId: vi.fn().mockResolvedValue({ ok: true, value: [] }) }}
+          actorId="019f9f4a-b3c7-7350-9226-000000000005"
+          legacyProjectionAvailable={false}
+        />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "试演改变它会影响哪里" }));
+
+    const inlineError = await screen.findByText(/发生了未预期的本地错误/u);
+    expect(inlineError).toHaveTextContent("已保存的正文和设定没有改变");
+    expect(document.body).not.toHaveTextContent("CAUSAL_GRAPH_UNAVAILABLE");
+    expect(document.body).not.toHaveTextContent(rawMessage);
   });
 });

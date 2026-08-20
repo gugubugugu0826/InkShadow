@@ -5,6 +5,7 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  Dialog,
   EmptyState,
   ErrorState,
   FormField,
@@ -13,20 +14,24 @@ import {
   PageStateBoundary,
   Textarea,
 } from "@inkshadow/ui";
-import { parseUuidV7 } from "@inkshadow/domain";
+import { parseUuidV7, type Chapter, type ChapterVersion } from "@inkshadow/domain";
 import { parseUuidV7 as parseStoryUuidV7, type StoryFact } from "@inkshadow/story-core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import {
+  executeCreativeOpeningProviderAction,
   failedCreativeOpeningResult,
   generateCreativeOpening,
   generateLocalCreativeOpening,
   inspectCreativeOpeningDestination,
   MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS,
   persistCreativeOpeningCandidate,
+  prepareCreativeOpeningProviderAction,
   type CreativeOpeningAngle,
   type CreativeOpeningDestination,
+  type CreativeOpeningProviderActionDisclosure,
+  type CreativeOpeningProviderActionKind,
   type CreativeOpeningResult,
 } from "../infrastructure/creative-opening-service";
 import {
@@ -59,13 +64,27 @@ import {
   parseProjectSeed,
   type ProjectSeed,
 } from "../infrastructure/project-seed";
-import { normalizeUiError, UiActionError } from "../infrastructure/ui-error";
+import {
+  normalizeUiError,
+  projectOrdinaryUiError,
+  UiActionError,
+} from "../infrastructure/ui-error";
 import type { ModelInvocationFact } from "../infrastructure/model-hub-store";
+import {
+  createLocalCandidateAcceptancePipelineInput,
+  ensureAcceptedChapterPipelineTask,
+  runAcceptedChapterPipeline,
+} from "../infrastructure/accepted-chapter-pipeline";
+import {
+  organizeDirectStoryFacts,
+  type DirectStoryFactOrganizerReceipt,
+} from "../infrastructure/direct-story-fact-organizer";
 import {
   projectOpeningInvocationDispatchState,
   type OpeningInvocationDispatchState,
 } from "../infrastructure/opening-invocation-terminal";
 import type { DesktopRuntime } from "../infrastructure/runtime";
+import { useWritingExperience } from "../hooks/use-writing-experience";
 import { useRuntime } from "../runtime-context";
 
 interface IdeaJourneySnapshotV1 extends Readonly<Record<string, unknown>> {
@@ -128,6 +147,13 @@ interface IdeaOpeningSuggestionV1 extends Readonly<Record<string, unknown>> {
 
 type OpeningDispatchState = OpeningInvocationDispatchState;
 
+interface DirectOpeningOrganizationNavigationState {
+  readonly kind: "direct_opening_local_organization";
+  readonly status: "organized" | "failed";
+  readonly organizedCount: number;
+  readonly importantReviewCount: number;
+}
+
 interface PersistedIdeaOpeningSuggestionV1 extends Readonly<Record<string, unknown>> {
   readonly id: string;
   readonly batchId: string;
@@ -179,6 +205,11 @@ interface BlankWorkspaceAttempt {
   readonly initialTurn: CreativeJourneyTurnRecord;
 }
 
+interface OpeningProviderConfirmationState {
+  readonly disclosure: CreativeOpeningProviderActionDisclosure;
+  readonly actionLabel: string;
+}
+
 interface JourneyQuestion {
   readonly key: string;
   readonly prompt: string;
@@ -228,9 +259,31 @@ function firstQuestion(questions: readonly JourneyQuestion[]): JourneyQuestion {
   return question;
 }
 
+function formatOpeningProviderEstimatedCost(
+  disclosure: CreativeOpeningProviderActionDisclosure,
+): string {
+  const { currency, estimatedMaximumCostMicros } = disclosure;
+  if (currency === null || estimatedMaximumCostMicros === null) {
+    return "unknown（当前模型连接没有提供可核对的费用上限）";
+  }
+  if (!/^-?\d+$/u.test(estimatedMaximumCostMicros)) {
+    return `${currency} ${estimatedMaximumCostMicros} 微单位`;
+  }
+  const micros = BigInt(estimatedMaximumCostMicros);
+  const absolute = micros < 0n ? -micros : micros;
+  const whole = absolute / 1_000_000n;
+  const fraction = (absolute % 1_000_000n).toString().padStart(6, "0").replace(/0+$/u, "");
+  const decimal = `${micros < 0n ? "-" : ""}${String(whole)}${fraction.length === 0 ? "" : `.${fraction}`}`;
+  return `${currency} ${decimal}（本动作上限估算，共 ${estimatedMaximumCostMicros} 微单位）`;
+}
+
 export function IdeaJourneyPage() {
   const runtime = useRuntime();
   const navigate = useNavigate();
+  const writingExperience = useWritingExperience();
+  const directMode =
+    writingExperience.preference?.mode === "direct" &&
+    writingExperience.preference.directLocalOrganizationAuthorizedAt !== null;
   const [listState, setListState] = useState<"loading" | "ready" | "empty" | "error">("loading");
   const [activeJourneys, setActiveJourneys] = useState<readonly CreativeJourneyRecord[]>([]);
   const [unreadableJourneyCount, setUnreadableJourneyCount] = useState(0);
@@ -260,11 +313,37 @@ export function IdeaJourneyPage() {
     "ai" | "self" | "sample" | "local" | null
   >(null);
   const [experimentalNovelSkillsOptIn, setExperimentalNovelSkillsOptIn] = useState(false);
+  const [openingProviderConfirmation, setOpeningProviderConfirmation] =
+    useState<OpeningProviderConfirmationState | null>(null);
   const operationSequence = useRef(0);
   const activeOperation = useRef<JourneyOperation | null>(null);
   const resumeLock = useRef<JourneyOperation | null>(null);
   const blankWorkspaceLock = useRef<JourneyOperation | null>(null);
   const listRequestSequence = useRef(0);
+  const openingProviderConfirmationResolver = useRef<((confirmed: boolean) => void) | null>(null);
+
+  function requestOpeningProviderConfirmation(
+    disclosure: CreativeOpeningProviderActionDisclosure,
+    actionLabel: string,
+  ): Promise<boolean> {
+    if (openingProviderConfirmationResolver.current !== null) {
+      throw new UiActionError(
+        "CREATIVE_OPENING_CONFIRMATION_ALREADY_OPEN",
+        "另一项开头操作仍在等待确认，请先处理当前确认窗口。",
+      );
+    }
+    setOpeningProviderConfirmation(Object.freeze({ disclosure, actionLabel }));
+    return new Promise<boolean>((resolve) => {
+      openingProviderConfirmationResolver.current = resolve;
+    });
+  }
+
+  function settleOpeningProviderConfirmation(confirmed: boolean): void {
+    const resolve = openingProviderConfirmationResolver.current;
+    openingProviderConfirmationResolver.current = null;
+    setOpeningProviderConfirmation(null);
+    resolve?.(confirmed);
+  }
 
   function startRequestTimings(requestIds: readonly string[]): void {
     const startedAt = Date.parse(runtime.clock.now());
@@ -386,6 +465,8 @@ export function IdeaJourneyPage() {
 
   useEffect(
     () => () => {
+      openingProviderConfirmationResolver.current?.(false);
+      openingProviderConfirmationResolver.current = null;
       activeOperation.current = null;
       resumeLock.current = null;
       blankWorkspaceLock.current = null;
@@ -806,6 +887,10 @@ export function IdeaJourneyPage() {
     operation: JourneyOperation,
     current: CreativeJourneyRecord,
     plan: ProviderOpeningBatchPlan,
+    authority: Readonly<{
+      kind: "initial_batch" | "replacement_batch";
+      disclosureFingerprint: string;
+    }>,
     input: Readonly<{
       idea: string;
       direction?: string;
@@ -825,41 +910,33 @@ export function IdeaJourneyPage() {
     });
     setBatchProgress({ completed: 0, total: plan.requests.length });
     startRequestTimings(plan.requests.map(({ requestId }) => requestId));
-    const settled = await Promise.allSettled(
-      plan.requests.map(async (request) => {
+    const reconciliations = new Map<string, Promise<CreativeJourneyRecord>>();
+    function reconcileProviderResult(
+      providerResult: CreativeOpeningResult,
+    ): Promise<CreativeJourneyRecord> {
+      const existing = reconciliations.get(providerResult.requestId);
+      if (existing !== undefined) return existing;
+      const reconciliation = (async () => {
+        const request = plan.requests.find(
+          ({ requestId }) => requestId === providerResult.requestId,
+        );
+        if (request === undefined) {
+          throw new UiActionError(
+            "IDEA_OPENING_REQUEST_NOT_PLANNED",
+            "AI 返回结果与已确认的开头请求不一致，结果没有写入当前方案。",
+          );
+        }
         try {
-          let generated: CreativeOpeningResult;
-          try {
-            generated = await generateCreativeOpening(runtime, {
-              ...input,
-              requestId: request.requestId,
-              openingAngle: request.openingAngle,
-              projectContext,
-              assertBeforeProviderDispatch: () => assertCurrentOperation(operation),
-              onInvocationPrepared: (selection) =>
-                persistOpeningInvocation(operation, current.id, plan, request, selection),
-              onProviderDispatchStarted: (invocationId) =>
-                projectOpeningDispatchInMemory(request.requestId, invocationId),
-              onDelta: (text) => {
-                if (isCurrentOperation(operation)) {
-                  updateStreamingPreview(request.requestId, text);
-                }
-              },
-            });
-            // Provider batches may only offer real provider prose. Local prose is
-            // reserved for the author's explicit “本地示例” choice.
-            if (generated.source !== "provider") {
-              generated = failedCreativeOpeningResult(
-                runtime,
-                request.requestId,
-                Object.assign(new Error(generated.noticeCode ?? "MODEL_GENERATION_FAILED"), {
-                  code: generated.noticeCode ?? "MODEL_GENERATION_FAILED",
-                }),
-              );
-            }
-          } catch (cause: unknown) {
-            generated = failedCreativeOpeningResult(runtime, request.requestId, cause);
-          }
+          const generated =
+            providerResult.source === "provider"
+              ? providerResult
+              : failedCreativeOpeningResult(
+                  runtime,
+                  request.requestId,
+                  Object.assign(new Error(providerResult.noticeCode ?? "MODEL_GENERATION_FAILED"), {
+                    code: providerResult.noticeCode ?? "MODEL_GENERATION_FAILED",
+                  }),
+                );
           let saved: CreativeJourneyRecord;
           try {
             saved = await reconcileOpeningResult(current.id, generated, {
@@ -902,8 +979,50 @@ export function IdeaJourneyPage() {
             );
           }
         }
-      }),
-    );
+      })();
+      reconciliations.set(providerResult.requestId, reconciliation);
+      return reconciliation;
+    }
+    let generatedResults: readonly CreativeOpeningResult[];
+    try {
+      generatedResults = await executeCreativeOpeningProviderAction(runtime, {
+        actionId: plan.batchId,
+        kind: authority.kind,
+        ...input,
+        projectContext,
+        requestIds: plan.requests.map(({ requestId }) => requestId),
+        humanConfirmed: true,
+        disclosureFingerprint: authority.disclosureFingerprint,
+        assertBeforeProviderDispatch: () => assertCurrentOperation(operation),
+        onInvocationPrepared: (requestId, selection) => {
+          const request = plan.requests.find((candidate) => candidate.requestId === requestId);
+          if (request === undefined) {
+            throw new UiActionError(
+              "IDEA_OPENING_REQUEST_NOT_PLANNED",
+              "开头请求与已确认方案不一致，本次没有继续发送。",
+            );
+          }
+          return persistOpeningInvocation(operation, current.id, plan, request, selection);
+        },
+        onProviderDispatchStarted: (requestId, invocationId) =>
+          projectOpeningDispatchInMemory(requestId, invocationId),
+        onDelta: (requestId, text) => {
+          if (isCurrentOperation(operation)) {
+            updateStreamingPreview(requestId, text);
+          }
+        },
+        onResult: async (result) => {
+          await reconcileProviderResult(result);
+        },
+      });
+    } catch (cause: unknown) {
+      generatedResults = Object.freeze(
+        plan.requests.map(({ requestId }) =>
+          failedCreativeOpeningResult(runtime, requestId, cause),
+        ),
+      );
+    }
+    const settled = await Promise.allSettled(generatedResults.map(reconcileProviderResult));
     // Reconciliation failures are infrastructure failures and still surface;
     // generation failures themselves have already become terminal slot states.
     const rejected = settled.find(
@@ -918,6 +1037,68 @@ export function IdeaJourneyPage() {
       );
     }
     return latest;
+  }
+
+  async function discloseAndConfirmOpeningProviderAction(
+    operation: JourneyOperation,
+    actionLabel: string,
+    input: Parameters<typeof prepareCreativeOpeningProviderAction>[1],
+  ): Promise<CreativeOpeningProviderActionDisclosure | null> {
+    assertCurrentOperation(operation);
+    const disclosure = await prepareCreativeOpeningProviderAction(runtime, input);
+    assertCurrentOperation(operation);
+    const confirmed = await requestOpeningProviderConfirmation(disclosure, actionLabel);
+    assertCurrentOperation(operation);
+    return confirmed ? disclosure : null;
+  }
+
+  async function abandonPreparedOpeningProviderAction(
+    operation: JourneyOperation,
+    journeyId: string,
+  ): Promise<CreativeJourneyRecord> {
+    assertCurrentOperation(operation);
+    const [latest, turns] = await Promise.all([
+      runtime.creativeJourneys.findById(journeyId),
+      runtime.creativeJourneys.listTurns(journeyId),
+    ]);
+    assertCurrentOperation(operation);
+    if (latest === null) {
+      throw new UiActionError(
+        "IDEA_JOURNEY_NOT_FOUND",
+        "这次构思已经不在当前设备上，未确认的 AI 请求没有发送。",
+      );
+    }
+    const latestSnapshot = readIdeaSnapshot(latest.snapshot, latest.id);
+    const abandonment = abandonPersistedOpeningGeneration(latestSnapshot);
+    if (abandonment === null) {
+      return latest;
+    }
+    const updated = Object.freeze({
+      ...latest,
+      currentState: guidanceStateForSnapshot(abandonment.snapshot),
+      revision: latest.revision + 1,
+      snapshot: abandonment.snapshot,
+      updatedAt: runtime.clock.now(),
+    });
+    await runtime.creativeJourneys.update(
+      updated,
+      latest.revision,
+      createTurn(runtime, updated, turns.length + 1, "regenerate", null, {
+        requestId: abandonment.requestIds[0] ?? null,
+        taskKey: "opening_guidance",
+        snapshot: {
+          status: "cancelled_before_confirmation",
+          requestIds: abandonment.requestIds,
+          batchId: abandonment.batchId,
+        },
+      }),
+    );
+    assertCurrentOperation(operation);
+    setJourney(updated);
+    setTurnCount(turns.length + 1);
+    clearStreamingPreviews(abandonment.requestIds);
+    setBatchProgress(null);
+    return updated;
   }
 
   const snapshot = useMemo(
@@ -1079,35 +1260,69 @@ export function IdeaJourneyPage() {
       if (providerBatchPlan === null) {
         startRequestTimings([requestId]);
       }
+      const providerPreparation =
+        providerBatchPlan === null
+          ? null
+          : await prepareJourneyProviderDispatch(record, initialSnapshot, boundOperation);
       const generationRecord =
-        providerBatchPlan === null
-          ? (await provisionJourneyWorkspace(record, initialSnapshot, boundOperation)).current
-          : (await prepareJourneyProviderDispatch(record, initialSnapshot, boundOperation)).current;
+        providerPreparation?.current ??
+        (await provisionJourneyWorkspace(record, initialSnapshot, boundOperation)).current;
       const generationSnapshot = readIdeaSnapshot(generationRecord.snapshot, generationRecord.id);
-      const updated =
-        providerBatchPlan === null
-          ? await persistGeneratedPreview(
-              generationRecord,
-              generationSnapshot,
-              await generateOpening(
-                {
-                  idea: normalizedIdea,
-                  requestId,
-                  onDelta: (text) => {
-                    if (isCurrentOperation(boundOperation)) {
-                      updateStreamingPreview(requestId, text);
-                    }
-                  },
-                },
-                generationMode,
-              ),
-              2,
-              "opening_direction",
-              generationMode,
-            )
-          : await runProviderOpeningBatch(boundOperation, generationRecord, providerBatchPlan, {
+      const providerDisclosure =
+        providerBatchPlan === null || providerPreparation === null
+          ? null
+          : await discloseAndConfirmOpeningProviderAction(boundOperation, "生成首批三个开头", {
+              actionId: providerBatchPlan.batchId,
+              kind: "initial_batch",
               idea: normalizedIdea,
+              projectContext: providerPreparation.projectContext,
+              requestIds: providerBatchPlan.requests.map(({ requestId }) => requestId),
             });
+      if (providerBatchPlan !== null && providerDisclosure === null) {
+        await abandonPreparedOpeningProviderAction(boundOperation, generationRecord.id);
+        return;
+      }
+      let updated: CreativeJourneyRecord;
+      if (providerBatchPlan === null) {
+        updated = await persistGeneratedPreview(
+          generationRecord,
+          generationSnapshot,
+          await generateOpening(
+            {
+              idea: normalizedIdea,
+              requestId,
+              onDelta: (text) => {
+                if (isCurrentOperation(boundOperation)) {
+                  updateStreamingPreview(requestId, text);
+                }
+              },
+            },
+            generationMode,
+          ),
+          2,
+          "opening_direction",
+          generationMode,
+        );
+      } else {
+        if (providerDisclosure === null) {
+          throw new UiActionError(
+            "CREATIVE_OPENING_CONFIRMATION_REQUIRED",
+            "请先确认本次开头生成的连接、模型、发送范围、隐私和费用状态。",
+          );
+        }
+        updated = await runProviderOpeningBatch(
+          boundOperation,
+          generationRecord,
+          providerBatchPlan,
+          {
+            kind: "initial_batch",
+            disclosureFingerprint: providerDisclosure.fingerprint,
+          },
+          {
+            idea: normalizedIdea,
+          },
+        );
+      }
       if (isCurrentOperation(boundOperation)) {
         const persistedTurns = await runtime.creativeJourneys.listTurns(updated.id);
         assertCurrentOperation(boundOperation);
@@ -1407,6 +1622,10 @@ export function IdeaJourneyPage() {
         return;
       }
       if (loaded.openingMode === "sample") setOpeningPreference("sample");
+      if (latest.currentState === "accepting_direct_opening" && loaded.selectedOpeningId !== null) {
+        await completeSelectedOpening(latest, loaded, operation, { acceptIntoChapter: true });
+        return;
+      }
       if (latest.currentState === "planning_questions" && loaded.selectedOpeningId !== null) {
         const selected = [...loaded.openingSuggestions, ...loaded.openingResultHistory].find(
           ({ id }) => id === loaded.selectedOpeningId,
@@ -1861,38 +2080,72 @@ export function IdeaJourneyPage() {
         individuallyTrackedRequestId = requestId;
         startRequestTimings([requestId]);
       }
-      const providerPending =
+      const providerPreparation =
         providerBatchPlan === null
-          ? pending
-          : (await prepareJourneyProviderDispatch(pending, pendingSnapshot, operation)).current;
-      const updated =
-        providerBatchPlan === null
-          ? await persistGeneratedPreview(
-              pending,
-              pendingSnapshot,
-              await generateOpening(
-                {
-                  idea: validatedIdea,
-                  ...(direction === undefined ? {} : { direction }),
-                  answers: snapshot.answers,
-                  requestId,
-                  onDelta: (text) => {
-                    if (isCurrentOperation(operation)) {
-                      updateStreamingPreview(requestId, text);
-                    }
-                  },
-                },
-                generationMode,
-              ),
-              persistedTurnCount + 2,
-              "opening_direction",
-              generationMode,
-            )
-          : await runProviderOpeningBatch(operation, providerPending, providerBatchPlan, {
+          ? null
+          : await prepareJourneyProviderDispatch(pending, pendingSnapshot, operation);
+      const providerPending = providerPreparation?.current ?? pending;
+      const providerDisclosure =
+        providerBatchPlan === null || providerPreparation === null
+          ? null
+          : await discloseAndConfirmOpeningProviderAction(operation, "换一批三个开头", {
+              actionId: providerBatchPlan.batchId,
+              kind: "replacement_batch",
               idea: validatedIdea,
               ...(direction === undefined ? {} : { direction }),
               answers: snapshot.answers,
+              projectContext: providerPreparation.projectContext,
+              requestIds: providerBatchPlan.requests.map(({ requestId: id }) => id),
             });
+      if (providerBatchPlan !== null && providerDisclosure === null) {
+        await abandonPreparedOpeningProviderAction(operation, providerPending.id);
+        return;
+      }
+      let updated: CreativeJourneyRecord;
+      if (providerBatchPlan === null) {
+        updated = await persistGeneratedPreview(
+          pending,
+          pendingSnapshot,
+          await generateOpening(
+            {
+              idea: validatedIdea,
+              ...(direction === undefined ? {} : { direction }),
+              answers: snapshot.answers,
+              requestId,
+              onDelta: (text) => {
+                if (isCurrentOperation(operation)) {
+                  updateStreamingPreview(requestId, text);
+                }
+              },
+            },
+            generationMode,
+          ),
+          persistedTurnCount + 2,
+          "opening_direction",
+          generationMode,
+        );
+      } else {
+        if (providerDisclosure === null) {
+          throw new UiActionError(
+            "CREATIVE_OPENING_CONFIRMATION_REQUIRED",
+            "请先确认本次开头生成的连接、模型、发送范围、隐私和费用状态。",
+          );
+        }
+        updated = await runProviderOpeningBatch(
+          operation,
+          providerPending,
+          providerBatchPlan,
+          {
+            kind: "replacement_batch",
+            disclosureFingerprint: providerDisclosure.fingerprint,
+          },
+          {
+            idea: validatedIdea,
+            ...(direction === undefined ? {} : { direction }),
+            answers: snapshot.answers,
+          },
+        );
+      }
       if (isCurrentOperation(operation)) {
         const persistedTurns = await runtime.creativeJourneys.listTurns(updated.id);
         assertCurrentOperation(operation);
@@ -1952,16 +2205,15 @@ export function IdeaJourneyPage() {
     setBusy("regenerate");
     setError(null);
     const requestId = runtime.ids.next();
+    const plannedRequest = Object.freeze({
+      requestId,
+      slotNumber: target.slotNumber,
+      openingAngle: target.openingAngle,
+      replacesOpeningId: target.id,
+    });
     const plan: ProviderOpeningBatchPlan = Object.freeze({
       batchId: runtime.ids.next(),
-      requests: Object.freeze([
-        Object.freeze({
-          requestId,
-          slotNumber: target.slotNumber,
-          openingAngle: target.openingAngle,
-          replacesOpeningId: target.id,
-        }),
-      ]),
+      requests: Object.freeze([plannedRequest]),
     });
     try {
       const persistedTurnCount = (await runtime.creativeJourneys.listTurns(journey.id)).length;
@@ -2013,24 +2265,68 @@ export function IdeaJourneyPage() {
         pendingSnapshot,
         operation,
       );
+      const actionKind: CreativeOpeningProviderActionKind =
+        mode === "continue" ? "complete_partial" : "regenerate_single";
+      const disclosure = await discloseAndConfirmOpeningProviderAction(
+        operation,
+        mode === "continue" ? "补全这个开头" : "重新生成这个方案",
+        {
+          actionId: plan.batchId,
+          kind: actionKind,
+          idea: snapshot.idea,
+          ...(snapshot.answers.opening_direction === undefined
+            ? {}
+            : { direction: snapshot.answers.opening_direction }),
+          answers: snapshot.answers,
+          projectContext: preparedDispatch.projectContext,
+          requestIds: [requestId],
+          openingAngle: target.openingAngle,
+          ...(mode === "continue" ? { partialOpening: target.text } : {}),
+        },
+      );
+      if (disclosure === null) {
+        await abandonPreparedOpeningProviderAction(operation, preparedDispatch.current.id);
+        return;
+      }
       startRequestTimings([requestId]);
-      const generated = await generateCreativeOpening(runtime, {
+      const generatedResults = await executeCreativeOpeningProviderAction(runtime, {
+        actionId: plan.batchId,
+        kind: actionKind,
         idea: snapshot.idea,
         ...(snapshot.answers.opening_direction === undefined
           ? {}
           : { direction: snapshot.answers.opening_direction }),
         answers: snapshot.answers,
+        projectContext: preparedDispatch.projectContext,
+        requestIds: [requestId],
         openingAngle: target.openingAngle,
         ...(mode === "continue" ? { partialOpening: target.text } : {}),
-        requestId,
-        projectContext: preparedDispatch.projectContext,
+        humanConfirmed: true,
+        disclosureFingerprint: disclosure.fingerprint,
         assertBeforeProviderDispatch: () => assertCurrentOperation(operation),
-        onDelta: (text) => {
+        onInvocationPrepared: (_requestId, selection) =>
+          persistOpeningInvocation(
+            operation,
+            preparedDispatch.current.id,
+            plan,
+            plannedRequest,
+            selection,
+          ),
+        onProviderDispatchStarted: (_requestId, invocationId) =>
+          projectOpeningDispatchInMemory(requestId, invocationId),
+        onDelta: (_requestId, text) => {
           if (isCurrentOperation(operation)) {
             updateStreamingPreview(requestId, text);
           }
         },
       });
+      const generated = generatedResults[0];
+      if (generated === undefined) {
+        throw new UiActionError(
+          "IDEA_OPENING_RESULT_MISSING",
+          "已确认的开头请求没有返回可核对结果，当前方案保持不变。",
+        );
+      }
       const updated = await reconcileOpeningResult(journey.id, generated, {
         batchId: plan.batchId,
         openingAngle: target.openingAngle,
@@ -2064,7 +2360,10 @@ export function IdeaJourneyPage() {
     }
   }
 
-  async function chooseOpeningSuggestion(suggestionId: string): Promise<void> {
+  async function chooseOpeningSuggestion(
+    suggestionId: string,
+    options: Readonly<{ askQuestions?: boolean }> = {},
+  ): Promise<void> {
     if (
       journey === null ||
       snapshot === null ||
@@ -2126,7 +2425,10 @@ export function IdeaJourneyPage() {
       });
       const selectedRecord = Object.freeze({
         ...currentRecord,
-        currentState: "planning_questions",
+        currentState:
+          directMode && options.askQuestions !== true
+            ? "accepting_direct_opening"
+            : "planning_questions",
         revision: currentRecord.revision + 1,
         snapshot: selectedSnapshot,
         updatedAt: runtime.clock.now(),
@@ -2146,6 +2448,12 @@ export function IdeaJourneyPage() {
         }),
       );
       if (isCurrentOperation(operation)) setJourney(selectedRecord);
+      if (directMode && options.askQuestions !== true) {
+        await completeSelectedOpening(selectedRecord, selectedSnapshot, operation, {
+          acceptIntoChapter: true,
+        });
+        return;
+      }
       const plannerInput = {
         originalIdea: selectedSnapshot.idea,
         selectedOpening: currentSuggestion.text,
@@ -2361,104 +2669,7 @@ export function IdeaJourneyPage() {
     setError(null);
     try {
       const committed = await persistSummaryDraft(journey, snapshot, "creating_project");
-      let current = committed.record;
-      const projectSnapshot = committed.snapshot;
-      const selectedOpening = [
-        ...projectSnapshot.openingSuggestions,
-        ...projectSnapshot.openingResultHistory,
-      ].find(
-        (suggestion) =>
-          suggestion.id === projectSnapshot.selectedOpeningId &&
-          isUsableOpeningSuggestion(suggestion),
-      );
-      if (selectedOpening?.text !== projectSnapshot.preview) {
-        throw new UiActionError(
-          "IDEA_OPENING_SELECTION_INVALID",
-          "当前开头没有可核对的选择记录，墨影已停止创建以保护正文。请重新选择一个开头。",
-        );
-      }
-      const incompleteCandidate = selectedOpening.status === "partial";
-      if (current.projectId !== null) {
-        const precreatedProjectId = parseUuidV7(current.projectId);
-        if (!precreatedProjectId.ok) throw precreatedProjectId.error;
-        const renamed = await runtime.useCases.renameProject.execute({
-          projectId: precreatedProjectId.value,
-          name: projectSnapshot.projectName,
-        });
-        if (!renamed.ok) throw renamed.error;
-        assertCurrentOperation(operation);
-      }
-      if (isCurrentOperation(operation)) {
-        setJourney(current);
-      }
-      const provisioned = await provisionJourneyWorkspace(current, projectSnapshot, operation);
-      current = provisioned.current;
-      const { projectId, chapterId } = provisioned;
-      assertCurrentOperation(operation);
-      await persistGuidedStorySetup(runtime, projectId.value, projectSnapshot);
-      assertCurrentOperation(operation);
-      const candidateId = parseUuidV7(current.id);
-      if (!candidateId.ok) {
-        throw candidateId.error;
-      }
-      const existingCandidate = await runtime.repositories.aiCandidates.findById(candidateId.value);
-      assertCurrentOperation(operation);
-      if (!existingCandidate.ok) {
-        throw existingCandidate.error;
-      }
-      let candidate = existingCandidate.value;
-      if (candidate === null) {
-        assertCurrentOperation(operation);
-        const persisted = await persistCreativeOpeningCandidate(
-          runtime,
-          chapterId.value,
-          projectSnapshot.preview,
-          candidateId.value,
-          incompleteCandidate,
-          selectedOpening.contextTraceId,
-        );
-        if (!persisted.ok) {
-          throw persisted.error;
-        }
-        assertCurrentOperation(operation);
-        candidate = persisted.value;
-      } else if (
-        candidate.chapterId !== chapterId.value ||
-        candidate.content !== projectSnapshot.preview ||
-        candidate.status !== "ready" ||
-        candidate.toSnapshot().incomplete !== incompleteCandidate
-      ) {
-        throw new UiActionError(
-          "IDEA_CANDIDATE_SCOPE_MISMATCH",
-          "已有 AI 建议版本与当前开书流程不一致，系统已停止写入以保护正文。请从作品库打开项目确认版本后再继续。",
-        );
-      }
-      if (current.candidateId === null) {
-        current = await saveScope(current, { candidateId: candidate.id }, operation);
-      }
-      const now = runtime.clock.now();
-      const completed = Object.freeze({
-        ...current,
-        status: "completed" as const,
-        currentState: "candidate_ready",
-        candidateId: candidate.id,
-        revision: current.revision + 1,
-        updatedAt: now,
-        completedAt: now,
-      });
-      assertCurrentOperation(operation);
-      await runtime.creativeJourneys.update(
-        completed,
-        current.revision,
-        createTurn(runtime, completed, turnCount + 1, "keep", null, {
-          candidateId: candidate.id,
-        }),
-      );
-      if (isCurrentOperation(operation)) {
-        void navigate(
-          `/projects/${String(projectId.value)}/chapters/${String(chapterId.value)}?candidate=${candidate.id}`,
-        );
-      }
+      await completeSelectedOpening(committed.record, committed.snapshot, operation);
     } catch (cause: unknown) {
       if (isCurrentOperation(operation)) {
         setError(cause);
@@ -2472,6 +2683,167 @@ export function IdeaJourneyPage() {
         setBusy(null);
       }
       finishOperation(operation);
+    }
+  }
+
+  async function completeSelectedOpening(
+    initialRecord: CreativeJourneyRecord,
+    projectSnapshot: IdeaJourneySnapshotV1,
+    operation: JourneyOperation,
+    options: Readonly<{ acceptIntoChapter?: boolean }> = {},
+  ): Promise<void> {
+    let current = initialRecord;
+    const selectedOpening = [
+      ...projectSnapshot.openingSuggestions,
+      ...projectSnapshot.openingResultHistory,
+    ].find(
+      (suggestion) =>
+        suggestion.id === projectSnapshot.selectedOpeningId &&
+        isUsableOpeningSuggestion(suggestion),
+    );
+    if (selectedOpening?.text !== projectSnapshot.preview) {
+      throw new UiActionError(
+        "IDEA_OPENING_SELECTION_INVALID",
+        "当前开头没有可核对的选择记录，墨影已停止创建以保护正文。请重新选择一个开头。",
+      );
+    }
+    const incompleteCandidate = selectedOpening.status === "partial";
+    if (current.projectId !== null) {
+      const precreatedProjectId = parseUuidV7(current.projectId);
+      if (!precreatedProjectId.ok) throw precreatedProjectId.error;
+      const renamed = await runtime.useCases.renameProject.execute({
+        projectId: precreatedProjectId.value,
+        name: projectSnapshot.projectName,
+      });
+      if (!renamed.ok) throw renamed.error;
+      assertCurrentOperation(operation);
+    }
+    if (isCurrentOperation(operation)) setJourney(current);
+    const provisioned = await provisionJourneyWorkspace(current, projectSnapshot, operation);
+    current = provisioned.current;
+    const { projectId, chapterId } = provisioned;
+    assertCurrentOperation(operation);
+    const candidateId = parseUuidV7(current.id);
+    if (!candidateId.ok) throw candidateId.error;
+    const existingCandidate = await runtime.repositories.aiCandidates.findById(candidateId.value);
+    assertCurrentOperation(operation);
+    if (!existingCandidate.ok) throw existingCandidate.error;
+    if (existingCandidate.value === null) {
+      // Candidate persistence is the durable checkpoint proving ProjectSeed
+      // and guided local setup finished. Recovery skips those non-Candidate
+      // writes once this exact scoped Candidate exists.
+      await runtime.projectSeeds.saveForProject(projectId.value, projectSnapshot.projectSeed);
+      assertCurrentOperation(operation);
+      await persistGuidedStorySetup(runtime, projectId.value, projectSnapshot);
+      assertCurrentOperation(operation);
+    }
+    let candidate = existingCandidate.value;
+    if (candidate === null) {
+      const persisted = await persistCreativeOpeningCandidate(
+        runtime,
+        chapterId.value,
+        projectSnapshot.preview,
+        candidateId.value,
+        incompleteCandidate,
+        selectedOpening.contextTraceId,
+      );
+      if (!persisted.ok) throw persisted.error;
+      assertCurrentOperation(operation);
+      candidate = persisted.value;
+    } else if (
+      candidate.chapterId !== chapterId.value ||
+      candidate.content !== projectSnapshot.preview ||
+      (candidate.status !== "ready" &&
+        !(options.acceptIntoChapter === true && candidate.status === "accepted")) ||
+      candidate.toSnapshot().incomplete !== incompleteCandidate
+    ) {
+      throw new UiActionError(
+        "IDEA_CANDIDATE_SCOPE_MISMATCH",
+        "已有 AI 建议版本与当前开书流程不一致，系统已停止写入以保护正文。请从作品库打开项目确认版本后再继续。",
+      );
+    }
+    let acceptedIntoChapter = candidate.status === "accepted";
+    if (
+      options.acceptIntoChapter === true &&
+      !incompleteCandidate &&
+      candidate.status === "ready"
+    ) {
+      const accepted = await runtime.useCases.acceptCandidate.execute({
+        candidateId: candidate.id,
+        expectedCandidateRevision: candidate.revision,
+      });
+      if (!accepted.ok) throw accepted.error;
+      assertCurrentOperation(operation);
+      candidate = accepted.value.candidate;
+      acceptedIntoChapter = true;
+    }
+    let directOpeningOrganization: DirectOpeningOrganizationNavigationState | null = null;
+    if (acceptedIntoChapter) {
+      const acceptedChapter = await runtime.repositories.chapters.findById(chapterId.value);
+      const acceptedChapterValue = acceptedChapter.ok ? acceptedChapter.value : null;
+      if (acceptedChapterValue?.content !== projectSnapshot.preview) {
+        throw new UiActionError(
+          "IDEA_OPENING_ACCEPTANCE_MISMATCH",
+          "开头建议的正文版本没有通过最终核对；系统已停止后续写入，请从作品库检查该章节。",
+        );
+      }
+      const acceptedVersion = await runtime.repositories.chapterVersions.findVersionById(
+        acceptedChapterValue.currentVersionId,
+      );
+      const acceptedVersionSnapshot = acceptedVersion.ok
+        ? (acceptedVersion.value?.toSnapshot() ?? null)
+        : null;
+      if (
+        acceptedVersionSnapshot?.sourceCandidateId !== candidate.id ||
+        acceptedVersionSnapshot.content !== acceptedChapterValue.content
+      ) {
+        throw new UiActionError(
+          "IDEA_OPENING_ACCEPTANCE_MISMATCH",
+          "开头建议的新版本没有通过最终核对；系统已停止后续写入，请从作品库检查该章节。",
+        );
+      }
+      assertCurrentOperation(operation);
+      if (options.acceptIntoChapter === true) {
+        directOpeningOrganization = await finishAcceptedDirectOpeningLocally(
+          runtime,
+          acceptedChapterValue,
+          acceptedVersionSnapshot,
+        );
+        assertCurrentOperation(operation);
+      }
+    }
+    if (current.candidateId === null) {
+      current = await saveScope(current, { candidateId: candidate.id }, operation);
+    }
+    const now = runtime.clock.now();
+    const completed = Object.freeze({
+      ...current,
+      status: "completed" as const,
+      currentState: acceptedIntoChapter ? "candidate_accepted" : "candidate_ready",
+      candidateId: candidate.id,
+      revision: current.revision + 1,
+      updatedAt: now,
+      completedAt: now,
+    });
+    assertCurrentOperation(operation);
+    const persistedTurnCount = (await runtime.creativeJourneys.listTurns(current.id)).length;
+    assertCurrentOperation(operation);
+    await runtime.creativeJourneys.update(
+      completed,
+      current.revision,
+      createTurn(runtime, completed, persistedTurnCount + 1, "keep", null, {
+        candidateId: candidate.id,
+        snapshot: { accepted: acceptedIntoChapter },
+      }),
+    );
+    if (isCurrentOperation(operation)) {
+      const destination = acceptedIntoChapter
+        ? `/projects/${String(projectId.value)}/chapters/${String(chapterId.value)}`
+        : `/projects/${String(projectId.value)}/chapters/${String(chapterId.value)}?candidate=${candidate.id}`;
+      void navigate(
+        destination,
+        directOpeningOrganization === null ? undefined : { state: { directOpeningOrganization } },
+      );
     }
   }
 
@@ -2534,6 +2906,27 @@ export function IdeaJourneyPage() {
         "已保存的第一章与本次构思计划不一致，系统已停止创建以保护正文。",
       );
     }
+    if (current.chapterId !== null) {
+      const [existingChapter, initialVersion] = await Promise.all([
+        runtime.repositories.chapters.findById(chapterId.value),
+        runtime.repositories.chapterVersions.findVersionById(initialVersionId.value),
+      ]);
+      const existingChapterValue = existingChapter.ok ? existingChapter.value : null;
+      const initialVersionSnapshot = initialVersion.ok
+        ? (initialVersion.value?.toSnapshot() ?? null)
+        : null;
+      if (
+        existingChapterValue?.projectId !== projectId.value ||
+        initialVersionSnapshot?.chapterId !== chapterId.value ||
+        initialVersionSnapshot.projectId !== projectId.value
+      ) {
+        throw new UiActionError(
+          "IDEA_CHAPTER_SCOPE_MISMATCH",
+          "已保存的第一章与初始版本无法通过恢复核对，系统已停止创建以保护正文。",
+        );
+      }
+      return Object.freeze({ current, projectId, chapterId });
+    }
     assertCurrentOperation(operation);
     const chapter = await runtime.useCases.createChapter.execute({
       projectId: projectId.value,
@@ -2553,9 +2946,7 @@ export function IdeaJourneyPage() {
       );
     }
     assertCurrentOperation(operation);
-    if (current.chapterId === null) {
-      current = await saveScope(current, { chapterId: chapter.value.chapter.id }, operation);
-    }
+    current = await saveScope(current, { chapterId: chapter.value.chapter.id }, operation);
     return Object.freeze({ current, projectId, chapterId });
   }
 
@@ -2673,11 +3064,13 @@ export function IdeaJourneyPage() {
     const updated = Object.freeze({
       ...current,
       currentState:
-        scope.candidateId !== undefined
-          ? "candidate_ready"
-          : scope.chapterId !== undefined
-            ? "creating_candidate"
-            : "creating_chapter",
+        current.currentState === "accepting_direct_opening"
+          ? "accepting_direct_opening"
+          : scope.candidateId !== undefined
+            ? "candidate_ready"
+            : scope.chapterId !== undefined
+              ? "creating_candidate"
+              : "creating_chapter",
       projectId: scope.projectId ?? current.projectId,
       chapterId: scope.chapterId ?? current.chapterId,
       candidateId: scope.candidateId ?? current.candidateId,
@@ -2711,8 +3104,8 @@ export function IdeaJourneyPage() {
     void loadActive();
   }
 
-  const normalizedError = error === null ? null : normalizeUiError(error);
-  const normalizedListError = listError === null ? null : normalizeUiError(listError);
+  const normalizedError = error === null ? null : projectOrdinaryUiError(error);
+  const normalizedListError = listError === null ? null : projectOrdinaryUiError(listError);
   const quickAiDrawer = (
     <QuickAiConnectionDrawer
       open={quickAiOpen}
@@ -2721,16 +3114,94 @@ export function IdeaJourneyPage() {
       onContinue={handleQuickAiContinue}
     />
   );
+  const openingProviderConfirmationDialog = (
+    <Dialog
+      open={openingProviderConfirmation !== null}
+      onOpenChange={(open) => {
+        if (!open) settleOpeningProviderConfirmation(false);
+      }}
+      title={openingProviderConfirmation?.actionLabel ?? "确认 AI 开头操作"}
+      description="这是本次动作单独的模型调用授权。关闭或取消不会调用 AI，也不会产生新的模型费用。"
+      footer={
+        <>
+          <Button variant="secondary" onClick={() => settleOpeningProviderConfirmation(false)}>
+            取消，不调用 AI
+          </Button>
+          <Button onClick={() => settleOpeningProviderConfirmation(true)}>
+            {openingProviderConfirmation === null
+              ? "确认"
+              : `确认并发起最多 ${String(
+                  openingProviderConfirmation.disclosure.maximumProviderCalls,
+                )} 次调用`}
+          </Button>
+        </>
+      }
+    >
+      {openingProviderConfirmation !== null && (
+        <div className="idea-journey__provider-disclosure">
+          <InlineAlert
+            tone="ai-clarification"
+            title="生成结果仍是隔离建议"
+            description="本次调用不会自动写入正式正文；你仍需在比较界面明确选择并接受。"
+          />
+          <dl className="idea-journey__summary-list">
+            <div>
+              <dt>模型连接</dt>
+              <dd>{openingProviderConfirmation.disclosure.connectionDisplayName}</dd>
+            </div>
+            <div>
+              <dt>模型</dt>
+              <dd>{openingProviderConfirmation.disclosure.modelId}</dd>
+            </div>
+            <div>
+              <dt>发送到</dt>
+              <dd>
+                {openingProviderConfirmation.disclosure.dataDestination === "local"
+                  ? "当前已验证的本机模型"
+                  : "所选外部 AI 服务"}
+              </dd>
+            </div>
+            <div>
+              <dt>本动作调用上限</dt>
+              <dd>
+                最多 {String(openingProviderConfirmation.disclosure.maximumProviderCalls)} 次；
+                每个请求最多{" "}
+                {String(openingProviderConfirmation.disclosure.perRequestMaximumProviderCalls)} 次
+              </dd>
+            </div>
+            <div>
+              <dt>自动重试</dt>
+              <dd>{String(openingProviderConfirmation.disclosure.automaticRetryCount)} 次</dd>
+            </div>
+            <div>
+              <dt>本动作总费用</dt>
+              <dd>{formatOpeningProviderEstimatedCost(openingProviderConfirmation.disclosure)}</dd>
+            </div>
+          </dl>
+          <p>{openingProviderConfirmation.disclosure.privacy}</p>
+          <section aria-label="将发送的资料">
+            <h3>将发送的资料</h3>
+            <ul>
+              {openingProviderConfirmation.disclosure.sends.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </section>
+        </div>
+      )}
+    </Dialog>
+  );
 
   if (journey !== null && snapshot !== null && isSummaryReviewState(journey.currentState)) {
     const answeredCount = Object.keys(snapshot.answers).length;
     const providerPreview = snapshot.previewSource === "provider";
     const sourceLabel =
       snapshot.previewSource === "provider"
-        ? `${snapshot.providerId ?? "已选供应商"} · ${snapshot.modelId ?? "已选模型"}`
+        ? `已确认的模型 · ${snapshot.modelId ?? "已选模型"}`
         : "本地草案（未调用云端 AI）";
     return (
       <div className="desktop-page idea-journey idea-journey--summary">
+        {openingProviderConfirmationDialog}
         <header className="page-heading idea-journey__heading">
           <div>
             <button
@@ -2752,7 +3223,6 @@ export function IdeaJourneyPage() {
           <ErrorState
             title={normalizedError.title}
             description={normalizedError.description}
-            errorCode={normalizedError.code}
             savedState="此前已保存的开头、回答和摘要仍在本机"
             primaryAction={{ label: "重试创建", onClick: () => void keepAndContinue() }}
             secondaryAction={{ label: "返回修改", onClick: () => void returnToQuestions() }}
@@ -2877,9 +3347,16 @@ export function IdeaJourneyPage() {
     const remainingFocusLabels = snapshot.remainingQuestionFocus.map(
       (key) => QUESTION_BY_KEY.get(key)?.prompt ?? key,
     );
+    const recommendedOpening =
+      snapshot.openingSuggestions.find(
+        (suggestion) =>
+          suggestion.status === "ready" &&
+          (suggestion.source === "local_fallback" || suggestion.dispatchState === "succeeded"),
+      ) ?? null;
     return (
       <div className="desktop-page idea-journey">
         {quickAiDrawer}
+        {openingProviderConfirmationDialog}
         <header className="page-heading idea-journey__heading">
           <div>
             <button
@@ -2890,11 +3367,12 @@ export function IdeaJourneyPage() {
             >
               返回创作首页
             </button>
-            <p className="page-heading__eyebrow">AI 陪伴开书</p>
+            <p className="page-heading__eyebrow">{directMode ? "直接开书" : "AI 陪伴开书"}</p>
             <h1>先把一个想法写成可以继续的开头</h1>
             <p>
-              这次问题计划预计 {String(snapshot.expectedQuestionTotal)}
-              问，一次只解决一件事；可跳过、返回或随时创建。
+              {directMode
+                ? "选定完整方案后会直接建立本地作品和待确认开头，不会再调用 AI，也不会先追问设定。"
+                : `这次问题计划预计 ${String(snapshot.expectedQuestionTotal)}问，一次只解决一件事；可跳过、返回或随时创建。`}
             </p>
           </div>
           <Badge tone={readySuggestionCount > 0 ? "success" : "info"}>
@@ -2912,7 +3390,6 @@ export function IdeaJourneyPage() {
           <ErrorState
             title={normalizedError.title}
             description={normalizedError.description}
-            errorCode={normalizedError.code}
             primaryAction={{ label: "重新读取", onClick: () => void resume(journey) }}
           />
         )}
@@ -2996,12 +3473,13 @@ export function IdeaJourneyPage() {
                 <div className="idea-journey__suggestions" aria-label="开头建议列表" role="list">
                   {snapshot.openingSuggestions.map((suggestion) => {
                     const selected = snapshot.selectedOpeningId === suggestion.id;
+                    const recommended = recommendedOpening?.id === suggestion.id;
                     const streamingText = streamingPreviews[suggestion.id] ?? "";
                     const timing = requestTimings[suggestion.id];
                     const elapsedMs = timing === undefined ? null : timing.elapsedMs;
                     return (
                       <article
-                        className={`idea-journey__suggestion${selected ? " idea-journey__suggestion--selected" : ""}${suggestion.status === "failed" ? " idea-journey__suggestion--failed" : ""}${suggestion.status === "partial" ? " idea-journey__suggestion--partial" : ""}${suggestion.status === "pending" ? " idea-journey__suggestion--pending" : ""}`}
+                        className={`idea-journey__suggestion${selected || (recommended && directMode) ? " idea-journey__suggestion--selected" : ""}${recommended && directMode ? " idea-journey__suggestion--recommended" : ""}${suggestion.status === "failed" ? " idea-journey__suggestion--failed" : ""}${suggestion.status === "partial" ? " idea-journey__suggestion--partial" : ""}${suggestion.status === "pending" ? " idea-journey__suggestion--pending" : ""}`}
                         key={suggestion.id}
                         role="listitem"
                       >
@@ -3011,6 +3489,7 @@ export function IdeaJourneyPage() {
                               ? `方案 ${String(suggestion.slotNumber)}`
                               : "本地草案"}
                           </h3>
+                          {recommended && directMode && <Badge tone="success">推荐</Badge>}
                           <Badge
                             tone={
                               suggestion.status === "failed"
@@ -3058,10 +3537,9 @@ export function IdeaJourneyPage() {
                         ) : (
                           <div className="idea-journey__suggestion-failure">
                             <p>{openingDispatchStateDescription(suggestion.dispatchState)}</p>
-                            <code>{suggestion.noticeCode ?? "MODEL_GENERATION_FAILED"}</code>
                           </div>
                         )}
-                        {suggestion.status === "partial" && (
+                        {suggestion.status === "partial" && !directMode && (
                           <div className="idea-journey__partial-actions">
                             <InlineAlert
                               tone="warning"
@@ -3094,7 +3572,7 @@ export function IdeaJourneyPage() {
                             </Button>
                           </div>
                         )}
-                        {suggestion.status === "failed" && providerOpeningMode && (
+                        {suggestion.status === "failed" && providerOpeningMode && !directMode && (
                           <Button
                             variant="secondary"
                             disabled={busy !== null || persistedGenerationPending}
@@ -3105,12 +3583,24 @@ export function IdeaJourneyPage() {
                         )}
                         {suggestion.status === "ready" && providerOpeningMode && (
                           <Button
-                            variant={selected ? "ghost" : "secondary"}
+                            variant={
+                              recommended && directMode
+                                ? "primary"
+                                : selected
+                                  ? "ghost"
+                                  : "secondary"
+                            }
                             aria-pressed={selected}
                             disabled={busy !== null || persistedGenerationPending || selected}
                             onClick={() => void chooseOpeningSuggestion(suggestion.id)}
                           >
-                            {selected ? "已选择" : `选择方案 ${String(suggestion.slotNumber)}`}
+                            {selected
+                              ? "已选择"
+                              : directMode
+                                ? recommended
+                                  ? "使用推荐方案"
+                                  : "使用这个方案"
+                                : `选择方案 ${String(suggestion.slotNumber)}`}
                           </Button>
                         )}
                         {suggestion.status === "ready" && !providerOpeningMode && (
@@ -3120,7 +3610,13 @@ export function IdeaJourneyPage() {
                             disabled={busy !== null || persistedGenerationPending || selected}
                             onClick={() => void chooseOpeningSuggestion(suggestion.id)}
                           >
-                            {selected ? "已选择" : "选择这个开头"}
+                            {selected
+                              ? "已选择"
+                              : directMode && recommended
+                                ? "使用推荐方案"
+                                : directMode
+                                  ? "使用这个方案"
+                                  : "选择这个开头"}
                           </Button>
                         )}
                       </article>
@@ -3160,7 +3656,6 @@ export function IdeaJourneyPage() {
                                 ? "你已结束这次未完成请求；恢复流程不会自动重新调用 AI。"
                                 : "这次历史请求没有可用正文。"}
                             </p>
-                            <code>{suggestion.noticeCode ?? "MODEL_GENERATION_FAILED"}</code>
                           </div>
                         )}
                       </article>
@@ -3169,24 +3664,52 @@ export function IdeaJourneyPage() {
                 </section>
               )}
               <div className="idea-journey__preview-actions">
-                <Button
-                  variant="secondary"
-                  loading={busy === "regenerate"}
-                  disabled={
-                    busy !== null ||
-                    persistedGenerationPending ||
-                    (guidanceComplete && snapshot.guidanceRewriteUsed)
-                  }
-                  onClick={() => void regenerate()}
-                >
-                  {guidanceComplete
-                    ? snapshot.guidanceRewriteUsed
-                      ? "已完成一次明确重写"
-                      : "根据全部回答重写一次"
-                    : providerOpeningMode
-                      ? "换一批"
-                      : "重新生成开头"}
-                </Button>
+                {directMode && !hasExplicitOpening ? (
+                  <>
+                    <Button
+                      variant="secondary"
+                      disabled={
+                        busy !== null || persistedGenerationPending || recommendedOpening === null
+                      }
+                      onClick={() =>
+                        recommendedOpening === null
+                          ? undefined
+                          : void chooseOpeningSuggestion(recommendedOpening.id, {
+                              askQuestions: true,
+                            })
+                      }
+                    >
+                      再补充几个问题
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      loading={writingExperience.switching}
+                      disabled={busy !== null || writingExperience.switching}
+                      onClick={() => void writingExperience.switchMode("professional")}
+                    >
+                      专业设置
+                    </Button>
+                  </>
+                ) : !directMode ? (
+                  <Button
+                    variant="secondary"
+                    loading={busy === "regenerate"}
+                    disabled={
+                      busy !== null ||
+                      persistedGenerationPending ||
+                      (guidanceComplete && snapshot.guidanceRewriteUsed)
+                    }
+                    onClick={() => void regenerate()}
+                  >
+                    {guidanceComplete
+                      ? snapshot.guidanceRewriteUsed
+                        ? "已完成一次明确重写"
+                        : "根据全部回答重写一次"
+                      : providerOpeningMode
+                        ? "换一批"
+                        : "重新生成开头"}
+                  </Button>
+                ) : null}
                 {hasExplicitOpening && snapshot.questionPlanner !== null && (
                   <Button
                     loading={busy === "keep"}
@@ -3215,14 +3738,24 @@ export function IdeaJourneyPage() {
 
           {!hasExplicitOpening ? (
             <InlineAlert
-              tone={usableSuggestionCount > 0 ? "info" : "warning"}
-              title={usableSuggestionCount > 0 ? "请先选择一个开头方案" : "暂时没有可用开头方案"}
+              tone={recommendedOpening !== null || usableSuggestionCount > 0 ? "info" : "warning"}
+              title={
+                directMode
+                  ? recommendedOpening === null
+                    ? "暂时没有可直接使用的完整方案"
+                    : "推荐方案已经准备好"
+                  : usableSuggestionCount > 0
+                    ? "请先选择一个开头方案"
+                    : "暂时没有可用开头方案"
+              }
               description={
-                usableSuggestionCount > 0
-                  ? "选择后才会整理最多 3 个关键问题；系统不会自动替你选择。"
-                  : pendingSuggestionCount > 0
-                    ? "方案仍在生成中。当前不会显示问题或创建入口。"
-                    : "三个方案均未得到可用正文。可以重试或改用明确标注的本地示例。"
+                directMode && recommendedOpening !== null
+                  ? "使用推荐方案或任一完整方案后，将只在本机完成 ProjectSeed、作品、空白第一章、初始不可变版本和 Candidate；选择后不会产生第 4 次模型调用。"
+                  : usableSuggestionCount > 0
+                    ? "选择后才会整理最多 3 个关键问题；系统不会自动替你选择。"
+                    : pendingSuggestionCount > 0
+                      ? "方案仍在生成中。当前不会显示问题或创建入口。"
+                      : "三个方案均未得到可用正文。可以重试或改用明确标注的本地示例。"
               }
             />
           ) : snapshot.questionPlanner === null ? (
@@ -3398,6 +3931,7 @@ export function IdeaJourneyPage() {
   return (
     <div className="desktop-page idea-journey idea-journey--landing">
       {quickAiDrawer}
+      {openingProviderConfirmationDialog}
       <header className="page-heading idea-journey__heading">
         <div>
           <Link className="back-link" to="/start">
@@ -3405,7 +3939,11 @@ export function IdeaJourneyPage() {
           </Link>
           <p className="page-heading__eyebrow">从一个想法开始</p>
           <h1>一句话就够了</h1>
-          <p>连接 AI 后先得到三种可选开头，再由 AI 每次只问一个真正有用的问题。</p>
+          <p>
+            {directMode
+              ? "生成三个独立开头后，直接使用推荐方案；想补充细节时再进入本地问题。"
+              : "连接 AI 后先得到三种可选开头，再由本地规则每次只问一个真正有用的问题。"}
+          </p>
         </div>
         <Badge tone="success">无需先填设定</Badge>
       </header>
@@ -3414,7 +3952,6 @@ export function IdeaJourneyPage() {
         <ErrorState
           title={normalizedError.title}
           description={normalizedError.description}
-          errorCode={normalizedError.code}
           {...(blankWorkspaceAttempt === null
             ? {}
             : {
@@ -3441,7 +3978,7 @@ export function IdeaJourneyPage() {
             openingPreference === "self"
               ? "一句话可以留空；墨影会直接创建本地项目和空白第一章，不会生成 AI 建议版本，也不会向正文填入占位内容。"
               : destination.kind === "provider"
-                ? `点击“生成第一段”会并行发起 3 次独立模型调用，供应商可能分别计费；本操作不自动重试。每个方案都保留稳定身份和真实来源，只有你明确选择的方案才能进入后续确认。当前模型：${destination.providerId} · ${destination.modelId}。`
+                ? `点击“${directMode ? "生成开头" : "生成第一段"}”会并行发起 3 次独立模型调用，供应商可能分别计费；本操作不自动重试。每个方案都保留稳定身份和真实来源，只有你明确选择的方案才能进入后续确认。选择、推荐、问题规划和创建均在本机完成，不会产生第 4 次调用。当前模型：${destination.connectionDisplayName} · ${destination.modelId}。`
                 : "这句话不会发送到网络，墨影会先准备一份明确标注的本地草案；你仍能完成构思并安全创建作品。"
           }
           {...(destination.kind === "local" && openingPreference !== "self"
@@ -3501,15 +4038,31 @@ export function IdeaJourneyPage() {
             )}
           <Button
             loading={busy === "create"}
-            disabled={busy !== null || (openingPreference !== "self" && idea.trim().length < 2)}
+            disabled={
+              writingExperience.loading ||
+              busy !== null ||
+              (openingPreference !== "self" && idea.trim().length < 2)
+            }
             onClick={() => void begin()}
           >
             {openingPreference === "self"
               ? "创建空白作品"
               : openingPreference === "sample"
                 ? "先看看示例"
-                : "生成第一段"}
+                : directMode
+                  ? "生成开头"
+                  : "生成第一段"}
           </Button>
+          {directMode && (
+            <Button
+              variant="ghost"
+              loading={writingExperience.switching}
+              disabled={busy !== null || writingExperience.switching}
+              onClick={() => void writingExperience.switchMode("professional")}
+            >
+              专业设置
+            </Button>
+          )}
           {openingPreference !== "self" && (
             <Button
               variant="ghost"
@@ -3549,7 +4102,6 @@ export function IdeaJourneyPage() {
                 <ErrorState
                   title={normalizedListError.title}
                   description={normalizedListError.description}
-                  errorCode={normalizedListError.code}
                   primaryAction={{ label: "重试", onClick: () => void loadActive() }}
                 />
               ),
@@ -4828,6 +5380,115 @@ function isSummaryReviewState(state: string): boolean {
     state === "creating_candidate" ||
     state === "candidate_ready"
   );
+}
+
+async function finishAcceptedDirectOpeningLocally(
+  runtime: DesktopRuntime,
+  chapter: Chapter,
+  version: ReturnType<ChapterVersion["toSnapshot"]>,
+): Promise<DirectOpeningOrganizationNavigationState> {
+  const pipelineInput = createLocalCandidateAcceptancePipelineInput({
+    projectId: version.projectId,
+    chapterId: version.chapterId,
+    versionId: version.id,
+    acceptedCharacterCount: version.content.length,
+  });
+  let localWorkFailed = false;
+  let pipelineRegistered = false;
+  try {
+    // Tauri creates this task atomically with Candidate acceptance. Browser
+    // development uses the same idempotent registration before navigation.
+    await ensureAcceptedChapterPipelineTask(runtime, pipelineInput);
+    pipelineRegistered = true;
+  } catch {
+    localWorkFailed = true;
+    globalThis.console.error("[DIRECT_OPENING_LOCAL_PIPELINE_REGISTRATION_FAILED]");
+  }
+
+  let receipt: DirectStoryFactOrganizerReceipt | null = null;
+  try {
+    const preference = await runtime.writingExperience.getOrInitialize();
+    if (preference.mode !== "direct" || preference.directLocalOrganizationAuthorizedAt === null) {
+      localWorkFailed = true;
+    } else {
+      receipt = await organizeDirectStoryFacts(
+        {
+          facts: runtime.story.facts,
+          factService: runtime.story.factService,
+          hasher: runtime.hasher,
+          now: () => runtime.clock.now(),
+        },
+        {
+          projectId: version.projectId,
+          chapterId: version.chapterId,
+          versionId: version.id,
+          versionCreatedAt: version.createdAt,
+          acceptedText: version.content,
+          acceptedStartOffset: 0,
+          sourceLength: version.content.length,
+          currentVersionId: chapter.currentVersionId,
+          localOnly: chapter.isLocalOnly,
+        },
+      );
+    }
+  } catch {
+    localWorkFailed = true;
+    globalThis.console.error("[DIRECT_OPENING_LOCAL_FACT_ORGANIZATION_FAILED]");
+  }
+
+  if (pipelineRegistered) {
+    void runAcceptedChapterPipeline(runtime, pipelineInput).catch(() => {
+      globalThis.console.error("[DIRECT_OPENING_LOCAL_PIPELINE_FAILED]");
+    });
+  }
+
+  const counts =
+    receipt === null
+      ? { organizedCount: 0, importantReviewCount: 0 }
+      : receipt.alreadyOrganizedCount === 0
+        ? {
+            organizedCount: receipt.organizedCount,
+            importantReviewCount: receipt.importantReviewCount,
+          }
+        : await countAcceptedDirectOpeningFacts(runtime, version.projectId, version.id).catch(() =>
+            Object.freeze({
+              organizedCount: receipt.organizedCount,
+              importantReviewCount: receipt.importantReviewCount,
+            }),
+          );
+  return Object.freeze({
+    kind: "direct_opening_local_organization",
+    status: localWorkFailed ? "failed" : "organized",
+    ...counts,
+  });
+}
+
+async function countAcceptedDirectOpeningFacts(
+  runtime: DesktopRuntime,
+  projectId: string,
+  versionId: string,
+): Promise<Readonly<{ organizedCount: number; importantReviewCount: number }>> {
+  const parsedProjectId = parseStoryUuidV7(projectId);
+  if (!parsedProjectId.ok) throw parsedProjectId.error;
+  const listed = await runtime.story.facts.listByProjectId(parsedProjectId.value);
+  if (!listed.ok) throw listed.error;
+  const referencePrefix = "direct-local:inkshadow.direct-local-story-fact.v1:";
+  let organizedCount = 0;
+  let importantReviewCount = 0;
+  for (const fact of listed.value) {
+    const snapshot = fact.toSnapshot();
+    if (
+      snapshot.origin !== "system" ||
+      snapshot.source.versionId !== versionId ||
+      !snapshot.source.reference.startsWith(referencePrefix) ||
+      snapshot.status === "deprecated"
+    ) {
+      continue;
+    }
+    if (snapshot.needsReview) importantReviewCount += 1;
+    else organizedCount += 1;
+  }
+  return Object.freeze({ organizedCount, importantReviewCount });
 }
 
 async function persistGuidedStorySetup(

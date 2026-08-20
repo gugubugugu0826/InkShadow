@@ -9,8 +9,32 @@ const desktopStyles = readFileSync(
     : resolve(process.cwd(), "apps/desktop/src/styles.css"),
   "utf8",
 );
+const packageRelativeUiStyles = resolve(
+  process.cwd(),
+  "../../packages/ui/src/styles/components.css",
+);
+const uiStyles = readFileSync(
+  existsSync(packageRelativeUiStyles)
+    ? packageRelativeUiStyles
+    : resolve(process.cwd(), "packages/ui/src/styles/components.css"),
+  "utf8",
+);
 
 describe("editor layout CSS contract", () => {
+  it("keeps exactly one vertical scroll owner inside desktop navigation", () => {
+    const navigationRule = /\.desktop-navigation\s*\{(?<body>[^}]*)\}/u.exec(desktopStyles)?.groups
+      ?.body;
+    const navigationSlotRule = /\.ink-app-shell__navigation\s*\{(?<body>[^}]*)\}/u.exec(uiStyles)
+      ?.groups?.body;
+    const navigationBodyRule = /\.desktop-navigation__body\s*\{(?<body>[^}]*)\}/u.exec(
+      desktopStyles,
+    )?.groups?.body;
+
+    expect(navigationRule).not.toMatch(/(?:height:\s*100%|overflow(?:-y)?:\s*auto)/u);
+    expect(navigationSlotRule).toMatch(/overflow:\s*hidden;/u);
+    expect(navigationBodyRule).toMatch(/overflow-y:\s*auto;/u);
+  });
+
   it("keeps the padded editor page inside its element boundary", () => {
     const editorPageRule = /\.editor-page\s*\{(?<body>[^}]*)\}/u.exec(desktopStyles)?.groups?.body;
 

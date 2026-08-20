@@ -12,6 +12,10 @@ export function ProjectGraphRoutePage() {
   const params = useParams<{ projectId: string }>();
   const [searchParams] = useSearchParams();
   const parsedProjectId = parseUuidV7(params.projectId ?? "");
+  // The model-backed what-if path does not yet expose a persisted
+  // prepare/disclosure/confirmation receipt to ordinary users. Keep it closed
+  // even when the lower-level experimental flag is enabled.
+  const governedWhatIfConfirmationAvailable = false;
   const causalAuthoring = useMemo(
     () =>
       new CausalFactAuthoringService({
@@ -40,6 +44,7 @@ export function ProjectGraphRoutePage() {
       graph={runtime.story.causalGraph}
       projector={runtime.story.causalProjector}
       whatIf={runtime.story.causalWhatIf}
+      whatIfEnabled={runtime.featureFlags.whatIf && governedWhatIfConfirmationAvailable}
       authoring={causalAuthoring}
       chapters={runtime.repositories.chapters}
       actorId={runtime.story.actorId}

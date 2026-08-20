@@ -216,6 +216,33 @@ const inkShadowMigration = [
     new URL("../migrations/0064_novel_skill_evaluation_predispatch_authority.sql", import.meta.url),
     "utf8",
   ),
+  readFileSync(
+    new URL("../migrations/0065_model_invocation_dispatch_boundary.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0066_writing_experience_preferences.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0067_consistency_investigation_agent.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0068_writing_disclosure_active_grant_limit.sql", import.meta.url),
+    "utf8",
+  ),
+  readFileSync(
+    new URL(
+      "../migrations/0069_consistency_investigation_invocation_reservation.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+  readFileSync(
+    new URL("../migrations/0070_multigranular_search_retrieval.sql", import.meta.url),
+    "utf8",
+  ),
 ].join("\n");
 const BACKUP_PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const BACKUP_ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
@@ -362,6 +389,23 @@ describe("DatabaseMaintenanceService", () => {
     const executor = new NodeSqliteExecutor(inkShadowMigration);
     const service = new DatabaseMaintenanceService(executor);
     await insertProject(executor, BACKUP_PROJECT_ID, "备份中的项目");
+    await executor.execute(
+      `INSERT INTO writing_experience_preferences (
+         scope, mode, initialization_source, direct_local_organization_authorized_at,
+         revision, created_at, updated_at
+       ) VALUES ('global', 'direct', 'new_install', ?, 1, ?, ?)`,
+      ["2026-07-27T00:00:00.000Z", "2026-07-27T00:00:00.000Z", "2026-07-27T00:00:00.000Z"],
+    );
+    await executor.execute(
+      `INSERT INTO writing_provider_disclosure_grants (
+         fingerprint, task, provider_id, model_id, sent_scope, sent_scope_hash,
+         call_count, retry_limit, cost_status, estimated_cost_micros, currency,
+         privacy_policy, state, revision, created_at, updated_at
+       ) VALUES (?, 'continuation', 'deepseek', 'deepseek-v4-flash',
+         'chapter_and_selected_context', ?, 1, 0, 'unknown', NULL, NULL,
+         'cloud_allowed', 'active', 1, ?, ?)`,
+      ["e".repeat(64), "f".repeat(64), "2026-07-27T00:00:00.000Z", "2026-07-27T00:00:00.000Z"],
+    );
     await insertMemoryGovernanceAudit(executor);
     await insertApplyingStoryPlanningCandidate(executor);
     await insertCloudDeletionJournal(executor);
@@ -382,6 +426,7 @@ describe("DatabaseMaintenanceService", () => {
     await insertProjectKeyMetadata(executor);
     await insertModelProfile(executor);
     await insertModelHubExpertConnection(executor);
+    await insertConsistencyInvestigationBackup(executor);
     await insertRetiredModelHubConnection(executor);
     await insertNovelSkillBackupScenario(executor);
     await insertSearchSnapshot(executor, "备份中的派生索引");
@@ -415,6 +460,20 @@ describe("DatabaseMaintenanceService", () => {
     ).resolves.toEqual([{ count: 1 }]);
     await backupInspection.close();
     await executor.execute("DELETE FROM project_remote_dispatch_leases");
+    await executor.execute(
+      `UPDATE writing_experience_preferences
+       SET mode = 'professional', initialization_source = 'user', revision = 2,
+           updated_at = '2026-07-27T00:01:00.000Z'
+       WHERE scope = 'global' AND revision = 1`,
+    );
+    await executor.execute(
+      `UPDATE writing_provider_disclosure_grants
+       SET state = 'revoked', revision = 2,
+           updated_at = '2026-07-27T00:01:00.000Z',
+           revoked_at = '2026-07-27T00:01:00.000Z'
+       WHERE fingerprint = ? AND revision = 1`,
+      ["e".repeat(64)],
+    );
     await executor.execute("DELETE FROM continuous_story_state_route_receipts");
     await executor.execute("DELETE FROM story_settings_import_receipts");
     await executor.execute("DELETE FROM story_memory_governance_events");
@@ -457,6 +516,7 @@ describe("DatabaseMaintenanceService", () => {
        WHERE project_id = ?`,
       [BACKUP_PROJECT_ID],
     );
+    await executor.execute("DELETE FROM consistency_investigation_runs");
     await executor.execute(
       "DELETE FROM context_compilation_runs WHERE id = 'maintenance-context-run'",
     );
@@ -573,7 +633,6 @@ describe("DatabaseMaintenanceService", () => {
     await executor.execute(
       "DELETE FROM novel_skill_definitions WHERE skill_id = 'core.maintenance'",
     );
-
     const restored = await service.restoreConsistentBackup(backupPath);
 
     expect(restored).toEqual({
@@ -581,9 +640,37 @@ describe("DatabaseMaintenanceService", () => {
       value: {
         sourceKind: "user_selected_file",
         integrityVerified: true,
-        restoredTableCount: 166,
+        restoredTableCount: 172,
       },
     });
+    await expect(
+      executor.select<{
+        readonly mode: string;
+        readonly preferenceRevision: number;
+        readonly directAuthorization: string | null;
+        readonly grantState: string;
+        readonly grantRevision: number;
+      }>(
+        `SELECT
+           preference.mode AS mode,
+           preference.revision AS preferenceRevision,
+           preference.direct_local_organization_authorized_at AS directAuthorization,
+           grant.state AS grantState,
+           grant.revision AS grantRevision
+         FROM writing_experience_preferences AS preference
+         CROSS JOIN writing_provider_disclosure_grants AS grant
+         WHERE preference.scope = 'global' AND grant.fingerprint = ?`,
+        ["e".repeat(64)],
+      ),
+    ).resolves.toEqual([
+      {
+        mode: "direct",
+        preferenceRevision: 1,
+        directAuthorization: "2026-07-27T00:00:00.000Z",
+        grantState: "active",
+        grantRevision: 1,
+      },
+    ]);
     await expect(
       executor.select<{
         readonly definitionCount: number;
@@ -598,6 +685,20 @@ describe("DatabaseMaintenanceService", () => {
            (SELECT count(*) FROM novel_skill_invocation_items) AS itemCount`,
       ),
     ).resolves.toEqual([{ definitionCount: 3, bindingCount: 1, snapshotCount: 2, itemCount: 2 }]);
+    await expect(
+      executor.select<{
+        readonly runCount: number;
+        readonly stepCount: number;
+        readonly findingCount: number;
+        readonly evidenceCount: number;
+      }>(
+        `SELECT
+           (SELECT count(*) FROM consistency_investigation_runs) AS runCount,
+           (SELECT count(*) FROM consistency_investigation_steps) AS stepCount,
+           (SELECT count(*) FROM consistency_investigation_findings) AS findingCount,
+           (SELECT count(*) FROM consistency_investigation_evidence) AS evidenceCount`,
+      ),
+    ).resolves.toEqual([{ runCount: 1, stepCount: 7, findingCount: 1, evidenceCount: 1 }]);
     await expect(
       executor.select<{
         readonly suites: number;
@@ -3157,8 +3258,8 @@ async function advanceChapterAfterContinuousStoryStateReceipt(
       `INSERT INTO chapter_versions (
          id, project_id, chapter_id, parent_version_id, sequence, content,
          content_checksum, reason, source_candidate_id, created_at
-       ) VALUES (?, ?, ?, ?, 2, '备份中的新正文', ?, 'manual', NULL,
-                 '2026-07-27T00:01:00.000Z')`,
+      ) VALUES (?, ?, ?, ?, 2, '备份中的新正文', ?, 'manual', NULL,
+                '2026-07-27T00:01:00.000Z')`,
       [
         BACKUP_CURRENT_CHAPTER_VERSION_ID,
         BACKUP_PROJECT_ID,
@@ -3414,6 +3515,123 @@ async function insertModelHubExpertConnection(executor: NodeSqliteExecutor): Pro
      )`,
     [now, now, now],
   );
+}
+
+async function insertConsistencyInvestigationBackup(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  const runId = "019f9f4a-b3c7-7350-9226-000000000910";
+  const taskId = "019f9f4a-b3c7-7350-9226-000000000911";
+  await executor.transaction(async (transaction) => {
+    await transaction.execute(
+      `INSERT INTO background_tasks (
+         id, task_type, idempotency_key, metadata_json, priority, status,
+         attempt, max_attempts, sequence, run_after, created_at, updated_at,
+         started_at, finished_at
+       ) VALUES (?, 'consistency_investigation', 'maintenance.consistency.0001', ?,
+         50, 'succeeded', 1, 1, 3, NULL, ?, ?, ?, ?)`,
+      [
+        taskId,
+        JSON.stringify({
+          operation: "long_form_consistency_investigation",
+          projectId: BACKUP_PROJECT_ID,
+          runId,
+        }),
+        now,
+        now,
+        now,
+        now,
+      ],
+    );
+    await transaction.execute(
+      `INSERT INTO consistency_investigation_runs (
+         id, task_id, project_id, restart_of_run_id, idempotency_key,
+         request_fingerprint, status, chapter_count, maximum_model_calls,
+         maximum_tool_steps, maximum_context_characters, maximum_output_tokens,
+         maximum_duration_ms, automatic_retry_count, estimated_input_tokens,
+         estimated_maximum_cost_micros, currency, connection_id, catalog_entry_id,
+         provider_kind_snapshot, model_id_snapshot, privacy_fingerprint,
+         context_trace_id, generation_id, summary, finding_count,
+         dropped_finding_count, cancellation_requested, failure_code, revision,
+         created_at, updated_at, completed_at
+       ) VALUES (?, ?, ?, NULL, 'maintenance.consistency.0001', ?, 'succeeded',
+         2, 1, 5, 120000, 4096, 120000, 0, 800, '42', 'USD',
+         'maintenance-custom-model', 'maintenance-model-catalog',
+         'custom_openai_compatible', 'maintenance-writer', ?,
+         'maintenance-context-run', ?, '备份中的长篇一致性调查。', 1, 0, 0, NULL, 5,
+         ?, ?, ?)`,
+      [
+        runId,
+        taskId,
+        BACKUP_PROJECT_ID,
+        "a".repeat(64),
+        "b".repeat(64),
+        "019f9f4a-b3c7-7350-9226-000000000912",
+        now,
+        now,
+        now,
+      ],
+    );
+    const names = [
+      ["read_story_memory", "local_tool", "local_read_only"],
+      ["inspect_fact", "local_tool", "local_read_only"],
+      ["search_fts", "local_tool", "local_read_only"],
+      ["inspect_causal", "local_tool", "local_read_only"],
+      ["validate_evidence", "local_tool", "local_read_only"],
+      ["model_synthesis", "model", "model_dispatch"],
+      ["verify_findings", "verifier", "local_verify"],
+    ] as const;
+    for (const [index, [name, kind, permission]] of names.entries()) {
+      await transaction.execute(
+        `INSERT INTO consistency_investigation_steps (
+           id, run_id, ordinal, step_kind, tool_name, tool_version, permission,
+           input_digest, status, invocation_id, observation_digest,
+           terminal_cause, created_at, updated_at, completed_at
+         ) VALUES (?, ?, ?, ?, ?, '1', ?, ?, 'succeeded', NULL, ?,
+           'BACKUP_FIXTURE_COMPLETED', ?, ?, ?)`,
+        [
+          `019f9f4a-b3c7-7350-9226-${(920 + index).toString().padStart(12, "0")}`,
+          runId,
+          index + 1,
+          kind,
+          name,
+          permission,
+          (index + 1).toString(16).repeat(64).slice(0, 64),
+          (index + 8).toString(16).repeat(64).slice(0, 64),
+          now,
+          now,
+          now,
+        ],
+      );
+    }
+    const modelStepId = "019f9f4a-b3c7-7350-9226-000000000925";
+    const findingId = "019f9f4a-b3c7-7350-9226-000000000930";
+    await transaction.execute(
+      `INSERT INTO consistency_investigation_findings (
+         id, run_id, model_step_id, ordinal, severity, authority_group,
+         category, title, explanation, status, revision, created_at, updated_at, decided_at
+       ) VALUES (?, ?, ?, 1, 'warning', 'accepted_body', 'timeline',
+         '备份中的时间线提醒', '这条说明只用于验证调查结论和用户决策能够恢复。',
+         'allowed', 2, ?, ?, ?)`,
+      [findingId, runId, modelStepId, now, now, now],
+    );
+    await transaction.execute(
+      `INSERT INTO consistency_investigation_evidence (
+         finding_id, ordinal, project_id, chapter_id, immutable_version_id,
+         source_kind, locator_json, excerpt_digest, source_created_at,
+         observed_at, currentness, branch_id, privacy
+       ) VALUES (?, 0, ?, ?, ?, 'chapter', ?, ?, ?, ?, 'current', NULL, 'local_only')`,
+      [
+        findingId,
+        BACKUP_PROJECT_ID,
+        BACKUP_CHAPTER_ID,
+        BACKUP_CHAPTER_VERSION_ID,
+        JSON.stringify({ kind: "utf16", startOffset: 0, endOffset: 4, sourceLength: 4 }),
+        "e".repeat(64),
+        now,
+        now,
+      ],
+    );
+  });
 }
 
 async function insertRetiredModelHubConnection(executor: NodeSqliteExecutor): Promise<void> {
@@ -5389,8 +5607,15 @@ async function insertSearchSnapshot(
     `INSERT INTO search_index_documents (
        project_id, document_id, source_type, source_id, source_version_id,
        title, search_text, normalized_title, normalized_search_text,
-       content_hash, source_updated_at, indexed_at
-     ) VALUES (?, ?, 'chapter', ?, ?, '第一章', ?, '第一章', ?, ?, ?, ?)`,
+       content_hash, source_updated_at, indexed_at, chunk_kind,
+       parent_document_id, utf16_start, utf16_end, source_length,
+       scene_id, event_id, character_ids_json, location_ids_json, story_time, branch_id,
+       pov_character_id, story_order, authority, privacy, currentness,
+       omitted_scope_fields_json
+     ) VALUES (?, ?, 'chapter', ?, ?, '第一章', ?, '第一章', ?, ?, ?, ?,
+               'chapter', NULL, 0, ?, ?, NULL, NULL, '[]', '[]', NULL, NULL, NULL, 1,
+               'accepted_text', 'standard', 'current',
+               '["scene","event","pov","characters","locations","story_time"]')`,
     [
       BACKUP_PROJECT_ID,
       `chapter:${BACKUP_OBJECT_ID}:0`,
@@ -5401,6 +5626,8 @@ async function insertSearchSnapshot(
       "a".repeat(64),
       now,
       now,
+      searchText.length,
+      searchText.length,
     ],
   );
 }

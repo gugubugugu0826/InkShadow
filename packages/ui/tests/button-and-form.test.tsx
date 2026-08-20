@@ -5,10 +5,12 @@ import { describe, expect, it, vi } from "vitest";
 import { Button, FormField, IconButton, InkIcon, Input, Select, Textarea } from "../src";
 
 describe("Button", () => {
-  it("uses the DESIGN primary and secondary default height classes", () => {
+  it("keeps primary and destructive actions on the 44px default height class", () => {
     render(
       <>
         <Button>主操作</Button>
+        <Button variant="ai-primary">AI 主操作</Button>
+        <Button variant="danger">危险操作</Button>
         <Button variant="secondary">次操作</Button>
         <Button size="sm" variant="ghost">
           行内操作
@@ -17,6 +19,8 @@ describe("Button", () => {
     );
 
     expect(screen.getByRole("button", { name: "主操作" })).toHaveClass("ink-button--lg");
+    expect(screen.getByRole("button", { name: "AI 主操作" })).toHaveClass("ink-button--lg");
+    expect(screen.getByRole("button", { name: "危险操作" })).toHaveClass("ink-button--lg");
     expect(screen.getByRole("button", { name: "次操作" })).toHaveClass("ink-button--md");
     expect(screen.getByRole("button", { name: "行内操作" })).toHaveClass("ink-button--sm");
   });

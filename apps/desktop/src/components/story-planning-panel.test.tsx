@@ -13,6 +13,20 @@ const BOOK_ID = "019f9f4a-b3c7-7350-9226-000000000002";
 const CANDIDATE_ID = "019f9f4a-b3c7-7350-9226-000000000003";
 
 describe("StoryPlanningPanel", () => {
+  it("cancels a prepared planning action without generating", async () => {
+    const user = userEvent.setup();
+    const generate = vi.fn();
+    const service = planningService({ generate });
+    renderPanel(service);
+    await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: "查看故事方向发送信息" }));
+    await user.click(screen.getByRole("button", { name: "取消，不调用" }));
+
+    expect(generate).not.toHaveBeenCalled();
+    expect(screen.queryByText("确认后会调用 1 次")).not.toBeInTheDocument();
+  });
+
   it("states explicitly that no AI ran when the route is missing", async () => {
     const user = userEvent.setup();
     const generate = vi.fn(() =>
@@ -26,10 +40,11 @@ describe("StoryPlanningPanel", () => {
     renderPanel(service);
     await waitFor(() => expect(service.listCandidates).toHaveBeenCalledWith(PROJECT_ID, 20));
 
-    await user.click(screen.getByRole("button", { name: "生成故事方向建议" }));
+    await confirmStoryPlanning(user);
 
     expect(await screen.findByText("本次没有调用 AI")).toBeInTheDocument();
-    expect(screen.getByText(/MODEL_HUB_ROUTE_NOT_CONFIGURED/u)).toBeInTheDocument();
+    expect(screen.getByText("请先为大纲规划配置 AI 分工。")).toBeInTheDocument();
+    expect(screen.queryByText(/MODEL_HUB_ROUTE_NOT_CONFIGURED/u)).not.toBeInTheDocument();
     expect(screen.queryByLabelText("AI 剧情规划建议版本")).not.toBeInTheDocument();
   });
 
@@ -69,9 +84,21 @@ describe("StoryPlanningPanel", () => {
     renderPanel(service, onOutlineChanged);
     await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
 
-    await user.click(screen.getByRole("button", { name: "生成故事方向建议" }));
+    await confirmStoryPlanning(user);
     expect(await screen.findByText("已生成待审阅建议")).toBeInTheDocument();
     expect(screen.getByText(/正式大纲和正文都没有改变/u)).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(generated.invocationId);
+    expect(document.body).not.toHaveTextContent(generated.providerKind);
+    expect(screen.getByText(/本次模型结果已记录，可在调用与费用中核对/u)).toBeVisible();
+
+    const decisionSurface = screen.getByLabelText(`${generated.targetNodeTitle}的规划候选决策`);
+    expect(decisionSurface).toHaveClass("candidate-decision-surface");
+    expect(
+      within(decisionSurface).getByLabelText(`${generated.targetNodeTitle}的规划候选内容`),
+    ).toHaveAttribute("tabindex", "0");
+    expect(decisionSurface.querySelector(":scope > .ink-card__footer")).toHaveClass(
+      "candidate-decision-actions",
+    );
 
     const editor = screen.getByRole("textbox", {
       name: new RegExp(`^整体替换“${generated.targetNodeTitle}”简介的候选内容(?:可选)?$`, "u"),
@@ -268,6 +295,22 @@ function planningService(
 ): StoryPlanningPanelProps["service"] {
   return {
     listCandidates: vi.fn(() => Promise.resolve([])),
+    prepareGeneration: vi.fn(() =>
+      Promise.resolve({
+        fingerprint: "a".repeat(64),
+        task: "outline_planning" as const,
+        targetTitle: "雨夜车站",
+        connectionDisplayName: "我的写作服务",
+        modelId: "planning-model",
+        dataDestination: "remote" as const,
+        privacy: "规划资料会发送到所选 AI 服务。",
+        sends: ["当前正式大纲", "已确认设定", "有证据的主线事件"],
+        maximumProviderCalls: 1 as const,
+        automaticRetryCount: 0 as const,
+        estimatedMaximumCostMicros: null,
+        currency: null,
+      }),
+    ),
     generate: vi.fn(() =>
       Promise.resolve({
         status: "skipped" as const,
@@ -281,6 +324,14 @@ function planningService(
     rejectCandidate: vi.fn(() => Promise.reject(new Error("unexpected rejection"))),
     ...overrides,
   };
+}
+
+async function confirmStoryPlanning(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  await user.click(screen.getByRole("button", { name: "查看故事方向发送信息" }));
+  expect(screen.getByText(/我的写作服务 · planning-model/u)).toBeInTheDocument();
+  expect(screen.getByText(/自动重试 0 次/u)).toBeInTheDocument();
+  expect(screen.getByText(/当前无法核定费用上限/u)).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "确认并生成故事方向建议" }));
 }
 
 function outline(): Outline {

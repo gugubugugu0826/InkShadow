@@ -24,7 +24,7 @@ describe("Model Hub image generation service", () => {
     const harness = createHarness();
     const entry = await seedTarget(harness.modelHub, {});
     await saveRoute(harness.modelHub, entry.id);
-    const inspection = await harness.service.inspect();
+    const inspection = await harness.service.inspect(PRIVATE_PROMPT);
 
     expect(inspection).toMatchObject({
       task: "image_generation",
@@ -44,8 +44,9 @@ describe("Model Hub image generation service", () => {
     const harness = createHarness();
     const entry = await seedTarget(harness.modelHub, {});
     await saveRoute(harness.modelHub, entry.id);
-    const inspection = await harness.service.inspect();
+    const inspection = await harness.service.inspect(PRIVATE_PROMPT);
     const start = vi.spyOn(harness.modelHub, "startInvocation");
+    const markDispatched = vi.spyOn(harness.modelHub, "markInvocationDispatched");
     const finish = vi.spyOn(harness.modelHub, "finishInvocation");
     harness.gateway.generateToFile.mockResolvedValue({
       provider: "open_ai_compatible",
@@ -103,6 +104,10 @@ describe("Model Hub image generation service", () => {
         estimatedCostMicros: null,
       }),
     );
+    expect(markDispatched).toHaveBeenCalledOnce();
+    expect(markDispatched.mock.invocationCallOrder[0]).toBeLessThan(
+      harness.gateway.generateToFile.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
     const ledger = JSON.stringify({ start: start.mock.calls, finish: finish.mock.calls });
     expect(ledger).not.toContain(PRIVATE_PROMPT);
     expect(ledger).not.toContain("c".repeat(64));
@@ -113,7 +118,7 @@ describe("Model Hub image generation service", () => {
     const harness = createHarness();
     const entry = await seedTarget(harness.modelHub, {});
     await saveRoute(harness.modelHub, entry.id);
-    const inspection = await harness.service.inspect();
+    const inspection = await harness.service.inspect(PRIVATE_PROMPT);
     const startInvocation = harness.modelHub.startInvocation.bind(harness.modelHub);
     vi.spyOn(harness.modelHub, "startInvocation").mockImplementationOnce(async (input) => {
       const invocation = await startInvocation(input);
@@ -204,7 +209,7 @@ describe("Model Hub image generation service", () => {
     const harness = createHarness();
     const entry = await seedTarget(harness.modelHub, {});
     const route = await saveRoute(harness.modelHub, entry.id);
-    const inspection = await harness.service.inspect();
+    const inspection = await harness.service.inspect(PRIVATE_PROMPT);
     const start = vi.spyOn(harness.modelHub, "startInvocation");
     await harness.modelHub.saveTaskRoute({
       task: route.task,
@@ -236,7 +241,7 @@ describe("Model Hub image generation service", () => {
     expect(start).not.toHaveBeenCalled();
   });
 
-  it("does not retry a fallback after dispatch and records a content-free failure", async () => {
+  it("does not retry a fallback after a confirmed HTTP 504 and records a content-free failure", async () => {
     const harness = createHarness();
     const primary = await seedTarget(harness.modelHub, {});
     const fallback = await seedTarget(harness.modelHub, {
@@ -245,11 +250,12 @@ describe("Model Hub image generation service", () => {
       modelId: "fallback-image-model",
     });
     await saveRoute(harness.modelHub, primary.id, fallback.id);
-    const inspection = await harness.service.inspect();
+    const inspection = await harness.service.inspect(PRIVATE_PROMPT);
     harness.gateway.generateToFile.mockRejectedValue({
-      code: "MODEL_HTTP_RATE_LIMITED",
+      code: "UPSTREAM_TIMEOUT",
       retryable: true,
       message: PRIVATE_PROMPT,
+      diagnostics: { httpStatus: 504 },
     });
     const finish = vi.spyOn(harness.modelHub, "finishInvocation");
 
@@ -260,12 +266,68 @@ describe("Model Hub image generation service", () => {
         acknowledgedCostAndPrivacy: true,
         expectedConfirmationFingerprint: inspection.confirmationFingerprint,
       }),
-    ).rejects.toMatchObject({ code: "MODEL_HTTP_RATE_LIMITED", dispatched: true });
+    ).rejects.toMatchObject({ code: "UPSTREAM_TIMEOUT", dispatched: true });
     expect(harness.gateway.generateToFile).toHaveBeenCalledOnce();
     expect(finish).toHaveBeenCalledWith(
-      expect.objectContaining({ status: "failed", errorCode: "MODEL_HTTP_RATE_LIMITED" }),
+      expect.objectContaining({ status: "failed", errorCode: "UPSTREAM_TIMEOUT" }),
     );
     expect(JSON.stringify(finish.mock.calls)).not.toContain(PRIVATE_PROMPT);
+  });
+
+  it("projects an unknown dispatched image transport result as ambiguous", async () => {
+    const harness = createHarness();
+    const primary = await seedTarget(harness.modelHub, {});
+    await saveRoute(harness.modelHub, primary.id);
+    const inspection = await harness.service.inspect("safe prompt");
+    harness.gateway.generateToFile.mockRejectedValue({
+      code: "UPSTREAM_TIMEOUT",
+      retryable: true,
+    });
+    const finish = vi.spyOn(harness.modelHub, "finishInvocation");
+
+    await expect(
+      harness.service.generate({
+        prompt: "safe prompt",
+        destination: { ticket: "f".repeat(64), fileName: "image.png" },
+        acknowledgedCostAndPrivacy: true,
+        expectedConfirmationFingerprint: inspection.confirmationFingerprint,
+      }),
+    ).rejects.toMatchObject({
+      code: "PROVIDER_RESULT_AMBIGUOUS",
+      dispatched: true,
+      retryable: false,
+    });
+
+    expect(harness.gateway.generateToFile).toHaveBeenCalledOnce();
+    expect(finish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "timed_out",
+        errorCode: "PROVIDER_RESULT_AMBIGUOUS",
+      }),
+    );
+  });
+
+  it("requires a fresh confirmation when the prompt changes and creates no invocation", async () => {
+    const harness = createHarness();
+    const entry = await seedTarget(harness.modelHub, {});
+    await saveRoute(harness.modelHub, entry.id);
+    const inspection = await harness.service.inspect("雨夜书店");
+    const start = vi.spyOn(harness.modelHub, "startInvocation");
+
+    await expect(
+      harness.service.generate({
+        prompt: "晴日广场",
+        destination: { ticket: "b".repeat(64), fileName: "image.png" },
+        acknowledgedCostAndPrivacy: true,
+        expectedConfirmationFingerprint: inspection.confirmationFingerprint,
+      }),
+    ).rejects.toMatchObject({
+      code: "MODEL_HUB_IMAGE_CONFIRMATION_STALE",
+      dispatched: false,
+    });
+
+    expect(start).not.toHaveBeenCalled();
+    expect(harness.gateway.generateToFile).not.toHaveBeenCalled();
   });
 });
 

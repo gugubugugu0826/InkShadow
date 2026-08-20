@@ -9,6 +9,8 @@ import {
   QuickModelConnectionError,
   configureQuickBookStartRoute,
   connectQuickModelProvider,
+  inspectQuickBookStartRouteProbe,
+  type QuickBookStartProbeDisclosure,
   type QuickModelConnectionResult,
   type QuickModelProvider,
 } from "../infrastructure/quick-model-connection-service";
@@ -96,6 +98,9 @@ function OpenQuickAiConnectionDrawer({
   const [result, setResult] = useState<QuickModelConnectionResult | null>(null);
   const [selectedCatalogEntryId, setSelectedCatalogEntryId] = useState("");
   const [choice, setChoice] = useState<QuickAiContinueChoice>("ai");
+  const [probeDisclosure, setProbeDisclosure] = useState<QuickBookStartProbeDisclosure | null>(
+    null,
+  );
   const [failure, setFailure] = useState<QuickModelConnectionError | null>(null);
   const [failureStage, setFailureStage] = useState<FailureStage>("connection");
 
@@ -205,6 +210,7 @@ function OpenQuickAiConnectionDrawer({
       });
       setResult(connected);
       setSelectedCatalogEntryId(connected.catalog[0]?.id ?? "");
+      setProbeDisclosure(null);
       setSecret("");
       setPhase("catalog");
     } catch (cause: unknown) {
@@ -219,6 +225,7 @@ function OpenQuickAiConnectionDrawer({
   async function continueWithChoice(): Promise<void> {
     if (busy) return;
     if (choice !== "ai") {
+      setProbeDisclosure(null);
       await onContinue(choice);
       onOpenChange(false);
       return;
@@ -227,13 +234,24 @@ function OpenQuickAiConnectionDrawer({
     setBusy(true);
     setFailure(null);
     try {
+      if (probeDisclosure === null) {
+        const inspected = await inspectQuickBookStartRouteProbe(runtime, {
+          connectionId: result.connection.id,
+          catalogEntryId: selectedCatalogEntryId,
+        });
+        setProbeDisclosure(inspected);
+        return;
+      }
       await configureQuickBookStartRoute(runtime, {
         connectionId: result.connection.id,
         catalogEntryId: selectedCatalogEntryId,
+        humanConfirmed: true,
+        disclosureFingerprint: probeDisclosure.fingerprint,
       });
       await onContinue("ai");
       onOpenChange(false);
     } catch (cause: unknown) {
+      setProbeDisclosure(null);
       setFailure(normalizeDrawerError(cause));
       setFailureStage("route");
       setPhase("failure");
@@ -258,6 +276,7 @@ function OpenQuickAiConnectionDrawer({
 
   function returnToCatalog(): void {
     setFailure(null);
+    setProbeDisclosure(null);
     setPhase("catalog");
   }
 
@@ -287,7 +306,11 @@ function OpenQuickAiConnectionDrawer({
               disabled={choice === "ai" && selectedCatalogEntryId.length === 0}
               onClick={() => void continueWithChoice()}
             >
-              继续
+              {choice === "ai"
+                ? probeDisclosure === null
+                  ? "查看固定验证说明"
+                  : "确认 1 次固定验证并继续"
+                : "继续"}
             </Button>
           </div>
         ) : phase === "failure" ? (
@@ -305,12 +328,11 @@ function OpenQuickAiConnectionDrawer({
                 返回选择
               </Button>
             )}
-            <Button
-              loading={busy}
-              onClick={() => void (failureStage === "route" ? continueWithChoice() : connect())}
-            >
-              重试
-            </Button>
+            {failureStage === "connection" && (
+              <Button loading={busy} onClick={() => void connect()}>
+                重试
+              </Button>
+            )}
           </div>
         ) : (
           <div className="quick-ai-drawer__footer">
@@ -512,7 +534,7 @@ function OpenQuickAiConnectionDrawer({
           <InlineAlert
             tone="info"
             title="连接成功 · 已找到模型"
-            description={`真实连接测试已通过，共找到 ${String(result.catalog.length)} 个可用模型。选择“让 AI 起个头”后，还会用固定短句验证所选模型确实能生成文字。`}
+            description={`连接和模型目录检查已完成，共找到 ${String(result.catalog.length)} 个可用模型；这一步没有发送作品内容，也没有调用模型生成。选择“让 AI 起个头”后，墨影会先展示固定验证的精确范围。`}
           />
           <FormField label="开书使用的模型" required>
             {(fieldProps) => (
@@ -520,7 +542,10 @@ function OpenQuickAiConnectionDrawer({
                 {...fieldProps}
                 value={selectedCatalogEntryId}
                 options={modelOptions}
-                onChange={(event) => setSelectedCatalogEntryId(event.currentTarget.value)}
+                onChange={(event) => {
+                  setSelectedCatalogEntryId(event.currentTarget.value);
+                  setProbeDisclosure(null);
+                }}
               />
             )}
           </FormField>
@@ -540,7 +565,10 @@ function OpenQuickAiConnectionDrawer({
                   name="quick-ai-next-step"
                   value={value}
                   checked={choice === value}
-                  onChange={() => setChoice(value)}
+                  onChange={() => {
+                    setChoice(value);
+                    setProbeDisclosure(null);
+                  }}
                 />
                 <span>
                   <strong>{label}</strong>
@@ -549,13 +577,19 @@ function OpenQuickAiConnectionDrawer({
               </label>
             ))}
           </fieldset>
+          {choice === "ai" && probeDisclosure !== null && (
+            <InlineAlert
+              tone="warning"
+              title="发送固定验证前确认"
+              description={`将通过“${probeDisclosure.connectionDisplayName}”的“${probeDisclosure.modelId}”发送固定短句“只回复：OK”，最多 ${String(probeDisclosure.maximumOutputTokens)} 个输出 token；最多调用 ${String(probeDisclosure.maximumProviderCalls)} 次，自动重试 ${String(probeDisclosure.automaticRetryCount)} 次。${probeDisclosure.dataDestination === "local" ? "验证只在本机运行。" : "验证会发送到所选远程供应商。"} 不发送作品正文、灵感、设定或 API Key；当前没有可核验的费用上限，供应商仍可能收取少量费用。`}
+            />
+          )}
         </div>
       )}
 
       {phase === "failure" && failure !== null && (
         <div className="quick-ai-drawer__content">
           <InlineAlert tone="error" title="连接没成功" description={failure.message} />
-          <p className="quick-ai-drawer__error-code">错误码：{failure.code}</p>
           <p>已有项目、正文和 AI 建议版本都没有被修改。你可以重试，也可以先跳过继续写。</p>
           <Link
             className="back-link"

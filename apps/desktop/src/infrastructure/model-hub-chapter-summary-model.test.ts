@@ -83,7 +83,8 @@ describe("ModelHubChapterSummaryModel", () => {
       task: "long_memory_compression",
       maximumOutputTokens: 3500,
       temperature: 0.1,
-      reasoningPolicy: "visible_prose",
+      reasoningModeOverride: "disabled",
+      generationRetryLimitOverride: 0,
     });
     expect(executeText.mock.calls[0]?.[1].responseFormat).toBeUndefined();
   });
@@ -288,7 +289,8 @@ describe("ModelHubChapterSummaryModel", () => {
 
     expect(executeText.mock.calls[0]?.[1]).toMatchObject({
       responseFormat: "json_object",
-      reasoningPolicy: "visible_prose",
+      reasoningModeOverride: "disabled",
+      generationRetryLimitOverride: 0,
     });
   });
 

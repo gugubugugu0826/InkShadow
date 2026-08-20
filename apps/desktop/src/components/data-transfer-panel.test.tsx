@@ -3,6 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const tauriMocks = vi.hoisted(() => ({ invoke: vi.fn() }));
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: tauriMocks.invoke }));
+
 import { createDevelopmentRuntime } from "../infrastructure/runtime";
 import { RuntimeProvider } from "../runtime-context";
 import { DataTransferPanel } from "./data-transfer-panel";
@@ -10,6 +14,7 @@ import { DataTransferPanel } from "./data-transfer-panel";
 describe("DataTransferPanel import journey", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    tauriMocks.invoke.mockReset();
   });
 
   it("shows the five formats, previews bytes without writing, then commits edited candidates", async () => {
@@ -41,6 +46,10 @@ describe("DataTransferPanel import journey", () => {
     await user.upload(fileInput, file);
 
     await screen.findByText("预检通过，尚未写入项目");
+    expect(screen.getByRole("list", { name: "预检提示" })).toHaveTextContent(
+      "HTML 标签和属性已移除，仅保留本地文本。",
+    );
+    expect(screen.queryByText(/HTML_MARKUP_REMOVED/u)).not.toBeInTheDocument();
     await expect(
       runtime.useCases.listProjects.execute({ statuses: ["active"] }),
     ).resolves.toMatchObject({ ok: true, value: [] });
@@ -168,7 +177,7 @@ describe("DataTransferPanel import journey", () => {
       await user.selectOptions(screen.getByRole("combobox", { name: /^领域报告/u }), "ai_usage");
       await user.click(screen.getByRole("button", { name: "下载领域报告" }));
 
-      await screen.findByText(/可导出项目-AI用量报告\.json（0 条记录）/);
+      await screen.findByText(/文件：可导出项目-AI用量报告\.json.*内容：0 条记录/u);
       expect(createObjectUrl).toHaveBeenCalledWith(expect.any(Blob));
       expect(click).toHaveBeenCalledOnce();
     } finally {
@@ -213,7 +222,7 @@ describe("DataTransferPanel import journey", () => {
 
       await screen.findByRole("option", { name: "版本一致性" });
       await user.click(screen.getByRole("button", { name: "下载 Bundle" }));
-      await screen.findByText(/已下载 版本一致性\.inkshadow\.json/u);
+      await screen.findByText(/文件：版本一致性\.inkshadow\.json/u);
 
       const downloaded = createObjectUrl.mock.calls[0]?.[0];
       expect(downloaded).toBeInstanceOf(Blob);
@@ -230,6 +239,95 @@ describe("DataTransferPanel import journey", () => {
       restoreProperty(URL, "createObjectURL", originalCreate);
       restoreProperty(URL, "revokeObjectURL", originalRevoke);
     }
+  });
+
+  it("shows verified, cancelled, and unknown native Markdown write outcomes", async () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    const runtime = Object.freeze({ ...development, mode: "tauri" as const });
+    const created = await runtime.useCases.createProject.execute({ name: "原生回执长篇" });
+    if (!created.ok) {
+      throw created.error;
+    }
+    tauriMocks.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "native_choose_export_destination") {
+        return Promise.resolve({
+          ticket: "c".repeat(64),
+          fileName: "原生回执长篇-定稿.md",
+        });
+      }
+      if (command === "native_write_export_artifact") {
+        const request = (args as { readonly request: { readonly expectedByteLength: number } })
+          .request;
+        return Promise.resolve({
+          format: "markdown",
+          fileName: "原生回执长篇-定稿.md",
+          path: "D:\\作品\\原生回执长篇-定稿.md",
+          byteLength: request.expectedByteLength,
+          status: "success",
+          verified: true,
+        });
+      }
+      return Promise.reject(new Error("unexpected native command"));
+    });
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click");
+    const user = userEvent.setup();
+    const view = render(
+      <MemoryRouter>
+        <RuntimeProvider runtime={runtime}>
+          <DataTransferPanel />
+        </RuntimeProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("option", { name: "原生回执长篇" });
+    await user.click(screen.getByRole("button", { name: "保存 Markdown" }));
+    expect(await screen.findByText(/状态：已写入并从磁盘回读核验/u)).toHaveTextContent(
+      "位置：D:\\作品\\原生回执长篇-定稿.md",
+    );
+    expect(screen.getByText(/格式：Markdown/u)).toHaveTextContent("文件：原生回执长篇-定稿.md");
+    expect(tauriMocks.invoke).toHaveBeenCalledTimes(2);
+    expect(anchorClick).not.toHaveBeenCalled();
+
+    view.unmount();
+    render(
+      <MemoryRouter>
+        <RuntimeProvider runtime={runtime}>
+          <DataTransferPanel />
+        </RuntimeProvider>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/状态：已写入并从磁盘回读核验/u)).toHaveTextContent(
+      "原生回执长篇-定稿.md",
+    );
+    expect(screen.getByText("上次导出完成")).toBeVisible();
+    expect(tauriMocks.invoke).toHaveBeenCalledTimes(2);
+
+    tauriMocks.invoke.mockReset().mockResolvedValueOnce(null);
+    await user.click(screen.getByRole("button", { name: "保存 Markdown" }));
+    expect(await screen.findByText("已取消保存")).toBeVisible();
+    expect(screen.getByText(/状态：已取消，写入 0 B/u)).toHaveTextContent("位置：未选择保存位置");
+    expect(tauriMocks.invoke).toHaveBeenCalledOnce();
+    expect(anchorClick).not.toHaveBeenCalled();
+
+    tauriMocks.invoke
+      .mockReset()
+      .mockResolvedValueOnce({
+        ticket: "d".repeat(64),
+        fileName: "原生回执长篇-待确认.md",
+      })
+      .mockRejectedValueOnce({
+        code: "EXPORT_SAVE_OUTCOME_UNKNOWN",
+        message: "D:\\private\\must-not-leak.md",
+      });
+    await user.click(screen.getByRole("button", { name: "保存 Markdown" }));
+    expect(await screen.findByText("保存结果待确认")).toBeVisible();
+    const unknownNotice = screen.getByText(/状态：保存结果不明确/u);
+    expect(unknownNotice).toHaveTextContent("文件可能已写入");
+    expect(unknownNotice).toHaveTextContent("位置：保存位置已隐藏（写入结果不明确）");
+    expect(unknownNotice).toHaveTextContent("待写入内容：");
+    expect(unknownNotice).not.toHaveTextContent("private");
+    expect(tauriMocks.invoke).toHaveBeenCalledTimes(2);
+    expect(anchorClick).not.toHaveBeenCalled();
   });
 
   it("excludes private chapters by default and includes them only after explicit opt-in", async () => {
@@ -346,7 +444,7 @@ describe("DataTransferPanel import journey", () => {
       await screen.findByRole("option", { name: "雾港交付稿" });
       await user.click(screen.getByRole("button", { name: "下载 DOCX" }));
 
-      await screen.findByText(/已下载 雾港交付稿\.docx/);
+      await screen.findByText(/文件：雾港交付稿\.docx/u);
       expect(click).toHaveBeenCalledOnce();
       const downloaded = createObjectUrl.mock.calls[0]?.[0];
       expect(downloaded).toBeInstanceOf(Blob);
@@ -403,7 +501,7 @@ describe("DataTransferPanel import journey", () => {
       await screen.findByRole("option", { name: "雾港电子书" });
       await user.click(screen.getByRole("button", { name: "下载 EPUB" }));
 
-      await screen.findByText(/已下载 雾港电子书\.epub/);
+      await screen.findByText(/文件：雾港电子书\.epub/u);
       expect(click).toHaveBeenCalledOnce();
       expect(suggestedFilename).toBe("雾港电子书.epub");
       const downloaded = createObjectUrl.mock.calls[0]?.[0];
@@ -479,7 +577,7 @@ describe("DataTransferPanel import journey", () => {
       await screen.findByRole("option", { name: "雾港定稿" });
       await user.click(screen.getByRole("button", { name: "下载 PDF" }));
 
-      await screen.findByText(/已下载 雾港定稿\.pdf（1 页图像型 PDF/);
+      await screen.findByText(/文件：雾港定稿\.pdf.*内容：1 页图像型 PDF/u);
       expect(click).toHaveBeenCalledOnce();
       expect(suggestedFilename).toBe("雾港定稿.pdf");
       expect(fillText).toHaveBeenCalledWith("雾港定稿", expect.any(Number), expect.any(Number));

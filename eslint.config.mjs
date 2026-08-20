@@ -27,6 +27,7 @@ export default tseslint.config(
       "**/.tmp-*/**",
       "**/target/**",
       "DESIGN/**",
+      "Design-temp/**",
       "playwright-report/**",
       "test-results/**",
     ],

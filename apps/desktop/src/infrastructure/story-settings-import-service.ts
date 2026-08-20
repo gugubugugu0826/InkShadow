@@ -6,7 +6,7 @@ import {
   type InkShadowStorySettingsV1,
   type StorySettingsCharacter,
   type StorySettingsWorldRule,
-} from "@inkshadow/import-export";
+} from "@inkshadow/import-export/core";
 import {
   FormalStoryRecord,
   MemoryRecord,

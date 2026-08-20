@@ -43,7 +43,22 @@ describe("project sync route boundaries", () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     renderRoute(runtime, "/projects/not-a-uuid/sync", <ProjectSyncRoutePage />);
 
-    expect(screen.getByText("SYNC_CONTROL_ROUTE_INVALID")).toBeVisible();
+    expect(screen.getByText("无法打开项目同步")).toBeVisible();
+    expect(screen.getByText("项目标识无效。请返回项目列表并重新选择。")).toBeVisible();
+    expect(document.body).not.toHaveTextContent("SYNC_CONTROL_ROUTE_INVALID");
+  });
+
+  it("keeps malformed conflict routes free of internal error codes", () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    renderRoute(
+      runtime,
+      "/projects/not-a-uuid/sync/conflicts",
+      <SyncConflictResolutionRoutePage />,
+    );
+
+    expect(screen.getByText("无法打开冲突处理")).toBeVisible();
+    expect(screen.getByText("项目标识无效。请返回项目列表并重新选择。")).toBeVisible();
+    expect(document.body).not.toHaveTextContent("SYNC_CONFLICT_ROUTE_INVALID");
   });
 });
 

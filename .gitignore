@@ -67,6 +67,7 @@ installer/
 
 # External reference repositories and optional experiments
 /distill-novels/
+/Design-temp/
 
 # Repository publication scope
 # Publish only the curated user/developer documentation requested for this project.
@@ -83,6 +84,7 @@ installer/
 !/docs/front-end/PAGE_CATALOG.md
 !/docs/front-end/INTERFACE_REFERENCE.md
 !/docs/front-end/CREATION_JOURNEYS_AND_PROJECT_SEED.md
+!/docs/front-end/WRITING_EXPERIENCE_AND_CONSISTENCY.md
 !/docs/back-end/
 !/docs/back-end/README.md
 !/docs/back-end/DESKTOP_NATIVE.md
@@ -104,6 +106,10 @@ installer/
 !/docs/product-rebuild/09-PROJECT-SEED-AND-CREATION-JOURNEYS.md
 !/docs/product-rebuild/10-ACCEPTED-VERSION-PIPELINE-AND-RECOVERY.md
 !/docs/product-rebuild/11-NOVEL-SKILL-AUDIT-AND-DESIGN.md
+!/docs/product-rebuild/12-NEXT-UNRELEASED-WRITING-MEMORY-AGENT-REALITY.md
+!/docs/product-rebuild/13-LOCAL-AGENT-RAG-ARCHITECTURE.md
+!/docs/product-rebuild/14-V025-REQUIREMENT-COMPLETION-LEDGER.md
+!/docs/product-rebuild/15-TENCENTDB-AGENT-MEMORY-ADAPTATION-AUDIT.md
 !/docs/execution/
 !/docs/execution/CURRENT_STATUS.md
 !/docs/execution/TEST_RESULTS.md
@@ -111,6 +117,7 @@ installer/
 !/docs/execution/2026-08-09-DEEPSEEK-TEXT-PROBE-P0.md
 !/docs/execution/2026-08-10-MODEL-HUB-FIRST-ENTRY-HYDRATION-P0.md
 !/docs/execution/2026-08-10-NOVEL-SKILL-EVALUATION-LEDGER.md
+!/docs/execution/NEXT-UNRELEASED-WINDOWS-TAURI-PHASE-2-PROMPT.md
 *.mdx
 *.doc
 *.docx

@@ -9,6 +9,45 @@ import { ChapterSummaryPanel } from "./chapter-summary-panel";
 const PROJECT_ID = "018f0f00-0000-7000-8000-000000000001";
 
 describe("ChapterSummaryPanel historical backfill", () => {
+  it("keeps the invocation identifier out of the ordinary summary card", async () => {
+    const invocationId = "019f9f4a-b3c7-7350-9226-raw-invocation";
+    const summaryService = createSummaryService();
+    summaryService.inspectProject.mockResolvedValue({
+      automaticOnManualSaveEnabled: false,
+      entries: [
+        {
+          chapterId: PROJECT_ID,
+          chapterTitle: "第一章",
+          currentVersionId: PROJECT_ID,
+          state: "current",
+          message: "摘要已更新",
+          summary: "林舟抵达雾港。",
+          sourceVersionId: PROJECT_ID,
+          sourceContentHash: "a".repeat(64),
+          factId: PROJECT_ID,
+          modelId: "summary-model",
+          providerKind: "openai",
+          invocationId,
+        },
+      ],
+    });
+
+    render(
+      <ChapterSummaryPanel
+        projectId={PROJECT_ID}
+        service={summaryService}
+        continuousState={createContinuousStateService()}
+        historicalBackfill={{ plan: vi.fn(), register: vi.fn() }}
+      />,
+    );
+
+    expect(await screen.findByText("林舟抵达雾港。")).toBeVisible();
+    expect(document.body).not.toHaveTextContent(invocationId);
+    expect(screen.getByText(/模型：OpenAI · summary-model/u)).toBeVisible();
+    expect(document.body).not.toHaveTextContent("模型：openai");
+    expect(screen.getByText(/本次模型结果已记录，可在调用与费用中核对/u)).toBeVisible();
+  });
+
   it("retires legacy automatic cloud preferences and keeps direct actions disabled", async () => {
     const summaryService = createSummaryService();
     summaryService.inspectProject.mockResolvedValue({

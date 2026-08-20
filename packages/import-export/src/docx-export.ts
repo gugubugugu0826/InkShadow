@@ -1,5 +1,11 @@
 import { sanitizeFilename } from "./filename.js";
 import { normalizePortablePublication, type PortablePublication } from "./publication-model.js";
+import {
+  isValidatedPublicationImage,
+  publicationImageExtension,
+  type PublicationImageAsset,
+  type ValidatedPublicationImage,
+} from "./publication-images.js";
 import { isoTimestampSchema, type PortableProjectV1 } from "./schemas.js";
 
 export type DocxExportErrorCode =
@@ -17,6 +23,7 @@ export interface DocxExportOptions {
   readonly generatedAt: string;
   readonly signal?: AbortSignal;
   readonly onProgress?: (progress: DocxExportProgress) => void;
+  readonly imageAssets?: readonly PublicationImageAsset[];
 }
 
 export interface DocxExportArtifact {
@@ -78,6 +85,13 @@ interface OrderedNumberingInstance {
 interface RenderedDocument {
   readonly documentXml: string;
   readonly numberingXml: string;
+  readonly images: readonly DocxImage[];
+}
+
+interface DocxImage {
+  readonly name: string;
+  readonly relationshipId: string;
+  readonly image: ValidatedPublicationImage;
 }
 
 export async function exportProjectToDocx(
@@ -88,6 +102,7 @@ export async function exportProjectToDocx(
   reportProgress(options, "normalizing", 0, 1);
   const publication = normalizePortablePublication(input, {
     ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.imageAssets === undefined ? {} : { imageAssets: options.imageAssets }),
     onProgress: () => {
       throwIfCancelled(options.signal);
     },
@@ -119,28 +134,22 @@ export async function exportPublicationToDocx(
       generatedAt,
       documentXml: rendered.documentXml,
       numberingXml: rendered.numberingXml,
+      images: rendered.images,
     });
     const { default: JSZip } = await import("jszip");
     throwIfCancelled(options.signal);
     const zip = new JSZip();
-    reportProgress(options, "packaging", 0, DOCX_ENTRY_NAMES.length);
-    for (const [index, name] of DOCX_ENTRY_NAMES.entries()) {
+    reportProgress(options, "packaging", 0, entries.size);
+    for (const [index, [name, content]] of [...entries.entries()].entries()) {
       throwIfCancelled(options.signal);
-      const content = entries.get(name);
-      if (content === undefined) {
-        throw new DocxExportError(
-          "DOCX_RENDER_FAILED",
-          "The DOCX package could not be assembled safely.",
-        );
-      }
       zip.file(name, content, {
-        binary: false,
+        binary: content instanceof Uint8Array,
         compression: "DEFLATE",
         compressionOptions: { level: 9 },
         createFolders: false,
         date: fixedZipDate(),
       });
-      reportProgress(options, "packaging", index + 1, DOCX_ENTRY_NAMES.length);
+      reportProgress(options, "packaging", index + 1, entries.size);
     }
     throwIfCancelled(options.signal);
 
@@ -195,6 +204,7 @@ function renderDocument(
   let completedUnits = 0;
   let nextOrderedNumId = 2;
   const orderedNumbering: OrderedNumberingInstance[] = [];
+  const images: DocxImage[] = [];
   const body: string[] = [];
 
   reportProgress(options, "rendering", completedUnits, totalUnits);
@@ -219,6 +229,23 @@ function renderDocument(
           ordinal: block.ordinal,
         });
         body.push(renderOrderedListItem(block, numId));
+      } else if (block.kind === "image") {
+        if (!isValidatedPublicationImage(block)) {
+          throw new DocxExportError(
+            "DOCX_RENDER_FAILED",
+            "An accepted publication image no longer matches its validated local bytes.",
+          );
+        }
+        const imageIndex = images.length + 1;
+        const image: DocxImage = {
+          name: `word/media/image-${String(imageIndex).padStart(4, "0")}.${publicationImageExtension(
+            block.mediaType,
+          )}`,
+          relationshipId: `rId${String(imageIndex + 5)}`,
+          image: block,
+        };
+        images.push(image);
+        body.push(renderImage(block.altText, image, imageIndex));
       } else {
         body.push(renderBlock(block));
       }
@@ -229,10 +256,11 @@ function renderDocument(
   throwIfCancelled(options.signal);
 
   body.push(renderSectionProperties());
-  const documentXml = `${XML_DECLARATION}<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${body.join("")}</w:body></w:document>`;
+  const documentXml = `${XML_DECLARATION}<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${body.join("")}</w:body></w:document>`;
   return {
     documentXml,
     numberingXml: renderNumbering(orderedNumbering),
+    images,
   };
 }
 
@@ -255,7 +283,10 @@ function renderCover(publication: PortablePublication): string {
 }
 
 function renderBlock(
-  block: Exclude<PublicationBlock, { readonly kind: "orderedListItem" }>,
+  block: Exclude<
+    PublicationBlock,
+    { readonly kind: "orderedListItem" } | { readonly kind: "image" }
+  >,
 ): string {
   switch (block.kind) {
     case "heading": {
@@ -273,6 +304,28 @@ function renderBlock(
     case "sceneBreak":
       return renderParagraph("＊　＊　＊", "SceneBreak");
   }
+}
+
+function renderImage(altText: string, entry: DocxImage, imageIndex: number): string {
+  const maximumWidthEmu = 6_000_000;
+  const maximumHeightEmu = 7_000_000;
+  const naturalWidthEmu = Math.max(1, Math.round((entry.image.pixelWidth / 96) * 914_400));
+  const naturalHeightEmu = Math.max(1, Math.round((entry.image.pixelHeight / 96) * 914_400));
+  const scale = Math.min(1, maximumWidthEmu / naturalWidthEmu, maximumHeightEmu / naturalHeightEmu);
+  const width = Math.max(1, Math.round(naturalWidthEmu * scale));
+  const height = Math.max(1, Math.round(naturalHeightEmu * scale));
+  const safeAlt = escapeXml(sanitizeXmlText(altText || "Image"));
+  return [
+    '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:before="240" w:after="240"/></w:pPr><w:r><w:drawing>',
+    `<wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${String(width)}" cy="${String(height)}"/>`,
+    `<wp:docPr id="${String(1_000 + imageIndex)}" name="Image ${String(imageIndex)}" descr="${safeAlt}"/>`,
+    '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>',
+    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic>',
+    `<pic:nvPicPr><pic:cNvPr id="${String(imageIndex)}" name="${safeAlt}"/><pic:cNvPicPr/></pic:nvPicPr>`,
+    `<pic:blipFill><a:blip r:embed="${entry.relationshipId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>`,
+    `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${String(width)}" cy="${String(height)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>`,
+    "</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>",
+  ].join("");
 }
 
 function renderOrderedListItem(
@@ -343,9 +396,10 @@ function createEntries(input: {
   readonly generatedAt: string;
   readonly documentXml: string;
   readonly numberingXml: string;
-}): ReadonlyMap<(typeof DOCX_ENTRY_NAMES)[number], string> {
-  return new Map([
-    ["[Content_Types].xml", contentTypesXml()],
+  readonly images: readonly DocxImage[];
+}): ReadonlyMap<string, string | Uint8Array> {
+  return new Map<string, string | Uint8Array>([
+    ["[Content_Types].xml", contentTypesXml(input.images)],
     ["_rels/.rels", packageRelationshipsXml()],
     ["docProps/core.xml", corePropertiesXml(input)],
     ["docProps/app.xml", applicationPropertiesXml()],
@@ -355,20 +409,35 @@ function createEntries(input: {
     ["word/settings.xml", settingsXml()],
     ["word/fontTable.xml", fontTableXml()],
     ["word/header1.xml", headerXml(input.title)],
-    ["word/_rels/document.xml.rels", documentRelationshipsXml()],
+    ["word/_rels/document.xml.rels", documentRelationshipsXml(input.images)],
+    ...input.images.map(({ name, image }) => [name, image.bytes] as const),
   ]);
 }
 
-function contentTypesXml(): string {
-  return `${XML_DECLARATION}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>`;
+function contentTypesXml(images: readonly DocxImage[]): string {
+  const imageTypes = [
+    ...(images.some(({ image }) => image.mediaType === "image/png")
+      ? ['<Default Extension="png" ContentType="image/png"/>']
+      : []),
+    ...(images.some(({ image }) => image.mediaType === "image/jpeg")
+      ? ['<Default Extension="jpg" ContentType="image/jpeg"/>']
+      : []),
+  ].join("");
+  return `${XML_DECLARATION}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>${imageTypes}<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>`;
 }
 
 function packageRelationshipsXml(): string {
   return `${XML_DECLARATION}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>`;
 }
 
-function documentRelationshipsXml(): string {
-  return `${XML_DECLARATION}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`;
+function documentRelationshipsXml(images: readonly DocxImage[]): string {
+  const imageRelationships = images
+    .map(
+      ({ name, relationshipId }) =>
+        `<Relationship Id="${relationshipId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${escapeXml(name.slice("word/media/".length))}"/>`,
+    )
+    .join("");
+  return `${XML_DECLARATION}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>${imageRelationships}</Relationships>`;
 }
 
 function corePropertiesXml(input: {

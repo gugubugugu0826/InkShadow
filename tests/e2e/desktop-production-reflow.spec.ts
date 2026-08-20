@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+import { authorizeDirectMode } from "./support/writing-experience";
+
 const TARGET_VIEWPORTS = [
   { width: 1440, height: 900 },
   { width: 1280, height: 720 },
@@ -39,6 +41,23 @@ test("keeps every primary writing region reachable at 1440, 1280, 1024, and 800"
       await expect(page.getByRole("complementary", { name: "AI 创作助手" })).toBeVisible();
       await expectFocusable(page.getByRole("button", { name: "收起章节列表" }));
       await expectFocusable(page.getByRole("button", { name: "收起 AI 创作助手" }));
+    }
+  }
+});
+
+test("keeps ordinary project cards inside their responsive columns", async ({ page }) => {
+  await page.setViewportSize(TARGET_VIEWPORTS[0]);
+  const editorUrl = await openFreshSampleEditor(page);
+  const projectId = projectIdFromEditorUrl(editorUrl);
+  const ordinaryAreas = ["outline", "story", "checks"] as const;
+
+  for (const viewport of TARGET_VIEWPORTS) {
+    await page.setViewportSize(viewport);
+    for (const area of ordinaryAreas) {
+      await page.goto(`/#/projects/${projectId}/${area}`);
+      await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+      await expectNoHorizontalPageOverflow(page);
+      await expectVisibleCardsNoInternalHorizontalOverflow(page);
     }
   }
 });
@@ -101,6 +120,7 @@ test("keeps writing, Story Settings import, and all 22 Model Hub tasks reachable
     await page.goto(`/#/projects/${projectId}/story`);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     await expectNoHorizontalPageOverflow(page);
+    await expectVisibleCardsNoInternalHorizontalOverflow(page);
 
     const transferTrigger = page.getByRole("button", { name: "导入或导出" });
     await transferTrigger.scrollIntoViewIfNeeded();
@@ -187,6 +207,7 @@ async function openFreshSampleEditor(page: Page): Promise<string> {
   await page.goto("/#/start");
   await page.evaluate(() => window.localStorage.clear());
   await page.reload();
+  await authorizeDirectMode(page);
   await page.getByRole("button", { name: "体验示例作品" }).click();
   await expect(page.getByRole("textbox", { name: "章节正文" })).toBeVisible();
   return page.url();
@@ -270,6 +291,23 @@ async function expectNoHorizontalOverflow(locator: Locator): Promise<void> {
     scrollWidth: element.scrollWidth,
   }));
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth + 1);
+}
+
+async function expectVisibleCardsNoInternalHorizontalOverflow(page: Page): Promise<void> {
+  const overflowingCards = await page.locator(".ink-card").evaluateAll((cards) =>
+    cards
+      .filter((card) => card.getClientRects().length > 0)
+      .map((card, index) => ({
+        index,
+        label:
+          card.querySelector("h1, h2, h3, h4, [role='heading']")?.textContent?.trim() ??
+          "未命名卡片",
+        clientWidth: card.clientWidth,
+        scrollWidth: card.scrollWidth,
+      }))
+      .filter(({ clientWidth, scrollWidth }) => scrollWidth > clientWidth + 1),
+  );
+  expect(overflowingCards).toEqual([]);
 }
 
 async function expectScrollable(locator: Locator): Promise<void> {

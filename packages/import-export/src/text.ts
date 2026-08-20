@@ -6,10 +6,21 @@ import {
   sanitizeFilename,
 } from "./filename.js";
 import { utf8ByteLength } from "./checksum.js";
+import {
+  PublicationImageResolver,
+  parseMarkdownImageReferences,
+  publicationImageDataUri,
+  sanitizePublicationImageAltText,
+  type PublicationImageAsset,
+} from "./publication-images.js";
 
 export interface MarkdownSanitizationResult {
   readonly markdown: string;
   readonly issues: readonly ImportIssue[];
+}
+
+export interface MarkdownSanitizationOptions {
+  readonly imageAssets?: readonly PublicationImageAsset[];
 }
 
 export interface ImportedTextDocument {
@@ -112,7 +123,11 @@ function removeExternalReferences(value: string): {
   };
 }
 
-export function sanitizeMarkdown(input: string, fileName?: string): MarkdownSanitizationResult {
+export function sanitizeMarkdown(
+  input: string,
+  fileName?: string,
+  options: MarkdownSanitizationOptions = {},
+): MarkdownSanitizationResult {
   const issues: ImportIssue[] = [];
   let normalized = assertTextPayload(input, fileName);
 
@@ -123,9 +138,11 @@ export function sanitizeMarkdown(input: string, fileName?: string): MarkdownSani
     );
   }
 
+  const protectedImages = protectPublicationImages(normalized, options.imageAssets);
+  normalized = protectedImages.value;
   const withoutReferences = removeExternalReferences(normalized);
   normalized = withoutReferences.value;
-  if (withoutReferences.changed) {
+  if (withoutReferences.changed || protectedImages.omitted) {
     issues.push(
       warning(
         "MARKDOWN_EXTERNAL_REFERENCE_REMOVED",
@@ -146,7 +163,10 @@ export function sanitizeMarkdown(input: string, fileName?: string): MarkdownSani
     );
   }
 
-  const markdown = escapedHtml.trim();
+  let markdown = escapedHtml.trim();
+  for (const [placeholder, imageMarkdown] of protectedImages.restorations) {
+    markdown = markdown.replaceAll(placeholder, imageMarkdown);
+  }
   if (markdown.length === 0) {
     throw new ImportExportError(
       "MARKDOWN_EMPTY",
@@ -166,6 +186,99 @@ export function sanitizeMarkdown(input: string, fileName?: string): MarkdownSani
     markdown,
     issues,
   };
+}
+
+function protectPublicationImages(
+  input: string,
+  assets: readonly PublicationImageAsset[] | undefined,
+): {
+  readonly value: string;
+  readonly restorations: ReadonlyMap<string, string>;
+  readonly omitted: boolean;
+} {
+  let resolver: PublicationImageResolver;
+  try {
+    resolver = new PublicationImageResolver(assets);
+  } catch (error: unknown) {
+    throw new ImportExportError(
+      "BUNDLE_LIMIT_EXCEEDED",
+      error instanceof Error ? error.message : "The publication image asset limit was exceeded.",
+    );
+  }
+  const restorations = new Map<string, string>();
+  let omitted = false;
+  let fence: { readonly marker: "`" | "~"; readonly length: number } | undefined;
+  const lines = input.split("\n");
+  const output = lines.map((line, index) => {
+    const fenceCandidate = markdownFence(line);
+    if (fence !== undefined) {
+      if (
+        fenceCandidate?.marker === fence.marker &&
+        fenceCandidate.length >= fence.length &&
+        fenceCandidate.trailing.length === 0
+      ) {
+        fence = undefined;
+      }
+      return line;
+    }
+    if (fenceCandidate !== null) {
+      fence = { marker: fenceCandidate.marker, length: fenceCandidate.length };
+      return line;
+    }
+
+    const references = parseMarkdownImageReferences(line);
+    if (references.length === 0) {
+      return line;
+    }
+    let cursor = 0;
+    let protectedLine = "";
+    for (const [referenceIndex, parsed] of references.entries()) {
+      protectedLine += line.slice(cursor, parsed.start);
+      const altText = sanitizePublicationImageAltText(parsed.altText);
+      const resolution = resolver.resolve(parsed.source);
+      if (!resolution.ok) {
+        omitted = true;
+        protectedLine += `[image omitted: ${escapeImageAltText(altText || "unlabelled")}]`;
+      } else {
+        let placeholder = `\uE000INKSHADOW_IMAGE_${String(index)}_${String(referenceIndex)}\uE001`;
+        while (input.includes(placeholder) || restorations.has(placeholder)) {
+          placeholder += "_";
+        }
+        restorations.set(
+          placeholder,
+          `![${escapeImageAltText(altText)}](${publicationImageDataUri(resolution.image)})`,
+        );
+        protectedLine += placeholder;
+      }
+      cursor = parsed.end;
+    }
+    return protectedLine + line.slice(cursor);
+  });
+  return { value: output.join("\n"), restorations, omitted };
+}
+
+function markdownFence(
+  line: string,
+): { readonly marker: "`" | "~"; readonly length: number; readonly trailing: string } | null {
+  const match = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+  const token = match?.[1];
+  if (token === undefined) {
+    return null;
+  }
+  return {
+    marker: token[0] as "`" | "~",
+    length: token.length,
+    trailing: (match?.[2] ?? "").trim(),
+  };
+}
+
+function escapeImageAltText(value: string): string {
+  return value
+    .replaceAll("<", "‹")
+    .replaceAll(">", "›")
+    .replaceAll("\\", "＼")
+    .replaceAll("[", "［")
+    .replaceAll("]", "］");
 }
 
 function escapeMarkdownSyntax(input: string): string {

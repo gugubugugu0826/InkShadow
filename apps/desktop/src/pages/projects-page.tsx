@@ -24,7 +24,7 @@ import {
 import { Link } from "react-router-dom";
 
 import { useOnlineStatus } from "../hooks/use-online-status";
-import { normalizeUiError } from "../infrastructure/ui-error";
+import { normalizeUiError, projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
 const statusLabels: Record<ProjectStatus, string> = {
@@ -231,7 +231,7 @@ export function ProjectsPage() {
     await loadProjects();
   }
 
-  const normalizedLoadError = loadError === null ? null : normalizeUiError(loadError);
+  const normalizedLoadError = loadError === null ? null : projectOrdinaryUiError(loadError);
   const normalizedSearch = search.trim();
   const hasSearch = normalizedSearch.length > 0;
   const completelyEmpty = allProjects.length === 0;
@@ -366,7 +366,6 @@ export function ProjectsPage() {
                         <ErrorState
                           title={normalizedLoadError.title}
                           description={normalizedLoadError.description}
-                          errorCode={normalizedLoadError.code}
                           primaryAction={{ label: "重试", onClick: () => void loadProjects() }}
                         />
                       ),

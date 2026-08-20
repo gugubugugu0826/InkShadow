@@ -1,0 +1,158 @@
+.candidate-decision-surface {
+  display: grid;
+  height: min(46rem, 70dvh);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.candidate-decision-surface > .ink-card__content {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.candidate-decision-surface .ink-textarea {
+  overflow-y: visible;
+  resize: none;
+}
+
+.candidate-decision-surface > :focus-visible {
+  outline: 0.125rem solid var(--focus-ring);
+  outline-offset: -0.125rem;
+}
+
+.candidate-decision-surface > .ink-card__footer {
+  border-top: 0.0625rem solid var(--border-subtle);
+}
+
+.candidate-decision-actions .ink-button__label,
+.candidate-review-overlay > .ink-overlay__footer .ink-button__label {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.candidate-review-dialog {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  gap: var(--space-4);
+  outline: none;
+}
+
+.candidate-review-dialog__scroll-control {
+  justify-self: start;
+}
+
+.candidate-review-dialog__editor {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 0.0625rem solid var(--ai-text);
+  border-radius: var(--radius-md);
+  background: var(--ai-soft);
+}
+
+.candidate-review-dialog__editor-heading,
+.candidate-review-dialog__editor-actions {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.candidate-review-dialog__editor-heading h3,
+.candidate-review-dialog__editor-heading p {
+  margin: 0;
+}
+
+.candidate-review-dialog__editor-heading p,
+.candidate-review-dialog__editor-actions > span {
+  color: var(--text-secondary);
+  font-size: var(--font-caption-size);
+}
+
+.candidate-review-dialog__editor .ink-textarea {
+  min-height: 14rem;
+  overflow-y: auto;
+  resize: none;
+  background: var(--bg-surface);
+  line-height: 1.75;
+}
+
+.candidate-review-dialog__editor-actions {
+  align-items: center;
+}
+
+.candidate-review-dialog__three-way {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.candidate-review-dialog__three-way section,
+.candidate-review-dialog__placement {
+  min-width: 0;
+  padding: var(--space-3);
+  border: 0.0625rem solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+}
+
+.candidate-review-dialog__three-way h3,
+.candidate-review-dialog__three-way pre,
+.candidate-review-dialog__placement h3,
+.candidate-review-dialog__placement p {
+  margin: 0;
+}
+
+.candidate-review-dialog__three-way pre {
+  margin-top: var(--space-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.candidate-review-dialog__placement,
+.candidate-review-dialog__placement > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.candidate-review-dialog__conflict-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 0.0625rem solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.candidate-review-dialog__conflict-actions p {
+  flex: 1 1 24rem;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-caption-size);
+}
+
+.candidate-review-dialog__placement p {
+  color: var(--text-secondary);
+  font-size: var(--font-caption-size);
+}
+
+@media (max-width: 52rem) {
+  .candidate-review-overlay > .ink-overlay__footer .ink-button,
+  .candidate-decision-actions .ink-button {
+    flex: 1 1 14rem;
+  }
+}
+
+@media (max-width: 59.9375rem) {
+  .candidate-review-dialog__three-way {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

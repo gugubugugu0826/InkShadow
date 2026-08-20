@@ -130,6 +130,22 @@ describe("SqliteUsageCenterService", () => {
         }),
       ]),
     );
+    expect(snapshot.records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: `generation:${RUN_ID}:1`,
+          providerId: "legacy-provider",
+          providerLabel: "历史 AI 服务",
+        }),
+      ]),
+    );
+    expect(snapshot.facets.providers).toContainEqual({
+      value: "legacy-provider",
+      label: "历史 AI 服务",
+    });
+    expect(snapshot.records.map(({ providerLabel }) => providerLabel)).not.toContain(
+      "legacy-provider",
+    );
     expect(
       snapshot.records.some(
         ({ id, status }) => id.startsWith("hub:opening-") && status === "running",

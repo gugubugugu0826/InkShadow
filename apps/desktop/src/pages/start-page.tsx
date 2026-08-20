@@ -1,11 +1,13 @@
-import { Button, InkIcon, InlineAlert } from "@inkshadow/ui";
+import { Badge, Button, InkIcon, InlineAlert } from "@inkshadow/ui";
 import { parseUuidV7, type Chapter, type Project, type UuidV7 } from "@inkshadow/domain";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
+import { DirectModeAuthorizationDialog } from "../components/direct-mode-authorization-dialog";
 import { loadEditorView, type EditorViewState } from "../infrastructure/editor-view-state-store";
 import type { DesktopRuntime } from "../infrastructure/runtime";
 import { normalizeUiError } from "../infrastructure/ui-error";
+import { useWritingExperience } from "../hooks/use-writing-experience";
 import { useRuntime } from "../runtime-context";
 
 const creationEntries = [
@@ -48,10 +50,16 @@ interface RecentWritingTarget {
 export function StartPage() {
   const runtime = useRuntime();
   const navigate = useNavigate();
+  const writingExperience = useWritingExperience();
   const [exampleBusy, setExampleBusy] = useState(false);
   const [exampleError, setExampleError] = useState<string | null>(null);
   const [recentWriting, setRecentWriting] = useState<RecentWritingTarget | null>(null);
   const [recentWritingError, setRecentWritingError] = useState<string | null>(null);
+  const [directAuthorizationDismissed, setDirectAuthorizationDismissed] = useState(false);
+  const directAuthorizationOpen =
+    !directAuthorizationDismissed &&
+    writingExperience.preference?.mode === "direct" &&
+    writingExperience.preference.directLocalOrganizationAuthorizedAt === null;
 
   useEffect(() => {
     let active = true;
@@ -130,32 +138,83 @@ export function StartPage() {
   return (
     <div className="start-page">
       <header className="start-page__header" aria-labelledby="start-heading">
-        <h1 id="start-heading">把你的第一个想法，写成一个故事</h1>
+        <div className="settings-actions">
+          <h1 id="start-heading">把你的第一个想法，写成一个故事</h1>
+          {writingExperience.preference !== null && (
+            <Badge tone="neutral">
+              {writingExperience.preference.mode === "direct" ? "直接模式" : "专业模式"}
+            </Badge>
+          )}
+        </div>
         <p>无需注册，本地保存。连接你自己的 AI 模型后，续写、改写与检查都由你掌控。</p>
       </header>
 
-      <section className="start-page__entries" aria-label="选择创作方式">
-        {creationEntries.map((entry) => (
-          <Link
-            className={`start-page__entry${entry.primary ? " start-page__entry--primary" : ""}`}
-            key={entry.to}
-            to={entry.to}
-          >
-            <span className="start-page__entry-mark" aria-hidden="true">
-              <InkIcon name={entry.icon} decorative size={24} />
-            </span>
-            <span className="start-page__entry-copy">
-              <span className="start-page__entry-eyebrow">{entry.eyebrow}</span>
-              <span className="start-page__entry-title">{entry.title}</span>
-              <span className="start-page__entry-description">{entry.description}</span>
-            </span>
-            <span className="start-page__entry-action" aria-hidden="true">
-              {entry.action}
-              <span>→</span>
-            </span>
-          </Link>
-        ))}
-      </section>
+      {writingExperience.loading && writingExperience.preference === null ? (
+        <p role="status">正在读取本机写作方式……</p>
+      ) : writingExperience.preference?.mode === "direct" ? (
+        <section className="start-page__recent" aria-labelledby="direct-writing-title">
+          <div className="start-page__recent-copy">
+            <p className="start-page__recent-eyebrow">第一次写作</p>
+            <h2 id="direct-writing-title">直接写下你的想法</h2>
+            <p className="start-page__entry-description">
+              直接模式会使用安全默认值生成隔离建议；只有你明确选择使用后，才会写入正文并保留上一版本。本地整理不会联网，重大设定仍会停下来请你确认。
+            </p>
+          </div>
+          <div className="settings-actions">
+            <Link
+              className="start-page__continue-link"
+              to="/create/idea"
+              onClick={(event) => {
+                if (writingExperience.preference?.directLocalOrganizationAuthorizedAt === null) {
+                  event.preventDefault();
+                  setDirectAuthorizationDismissed(false);
+                }
+              }}
+            >
+              开始写作
+              <span aria-hidden="true">→</span>
+            </Link>
+            <Button
+              variant="secondary"
+              loading={writingExperience.switching}
+              onClick={() => void writingExperience.switchMode("professional")}
+            >
+              使用专业模式
+            </Button>
+          </div>
+        </section>
+      ) : (
+        <section className="start-page__entries" aria-label="选择创作方式">
+          {creationEntries.map((entry) => (
+            <Link
+              className={`start-page__entry${entry.primary ? " start-page__entry--primary" : ""}`}
+              key={entry.to}
+              to={entry.to}
+            >
+              <span className="start-page__entry-mark" aria-hidden="true">
+                <InkIcon name={entry.icon} decorative size={24} />
+              </span>
+              <span className="start-page__entry-copy">
+                <span className="start-page__entry-eyebrow">{entry.eyebrow}</span>
+                <span className="start-page__entry-title">{entry.title}</span>
+                <span className="start-page__entry-description">{entry.description}</span>
+              </span>
+              <span className="start-page__entry-action" aria-hidden="true">
+                {entry.action}
+                <span>→</span>
+              </span>
+            </Link>
+          ))}
+        </section>
+      )}
+
+      {writingExperience.error !== null && (
+        <InlineAlert
+          tone="warning"
+          title="写作方式暂时无法读取"
+          description={`${writingExperience.error} 为避免自动应用建议，当前按专业模式显示。`}
+        />
+      )}
 
       {recentWriting !== null && (
         <section className="start-page__recent" aria-labelledby="recent-writing-title">
@@ -228,6 +287,21 @@ export function StartPage() {
           description={`${exampleError} 请重试；已有本地作品不会受到影响。`}
         />
       )}
+
+      <DirectModeAuthorizationDialog
+        open={directAuthorizationOpen}
+        busy={writingExperience.switching}
+        onCancel={() => {
+          void writingExperience.revokeDirectModeAuthorization().then((revoked) => {
+            if (revoked) setDirectAuthorizationDismissed(true);
+          });
+        }}
+        onAuthorize={() => {
+          void writingExperience.authorizeDirectMode().then((authorized) => {
+            if (authorized) setDirectAuthorizationDismissed(true);
+          });
+        }}
+      />
     </div>
   );
 }

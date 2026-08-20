@@ -488,6 +488,41 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0065_model_invocation_dispatch_boundary.sql"
                 ),
             ),
+            migration(
+                69,
+                "persist the writing experience and content-free disclosure authority",
+                include_str!(
+                    "../../../../packages/data/migrations/0066_writing_experience_preferences.sql"
+                ),
+            ),
+            migration(
+                70,
+                "persist bounded long-form consistency investigation receipts",
+                include_str!(
+                    "../../../../packages/data/migrations/0067_consistency_investigation_agent.sql"
+                ),
+            ),
+            migration(
+                71,
+                "retain rotated writing disclosure grants outside the active authority limit",
+                include_str!(
+                    "../../../../packages/data/migrations/0068_writing_disclosure_active_grant_limit.sql"
+                ),
+            ),
+            migration(
+                72,
+                "reserve consistency investigation model invocations before ledger start",
+                include_str!(
+                    "../../../../packages/data/migrations/0069_consistency_investigation_invocation_reservation.sql"
+                ),
+            ),
+            migration(
+                73,
+                "add scoped multigranular local FTS projections",
+                include_str!(
+                    "../../../../packages/data/migrations/0070_multigranular_search_retrieval.sql"
+                ),
+            ),
         ]),
         ignore_missing: false,
         locking: true,
@@ -1307,7 +1342,7 @@ mod tests {
             .expect("upgrade version 66 database through predispatch authority");
         run_local_migrations(&mut connection)
             .await
-            .expect("restart with version 68 migration history");
+            .expect("restart with version 73 migration history");
 
         let authority_after_upgrade: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema
@@ -1356,11 +1391,105 @@ mod tests {
         .await
         .expect("version 68 provider dispatch boundary column");
         assert_eq!(dispatch_boundary_columns, 1);
+        let (writing_success, writing_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 69")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 69 writing experience migration receipt");
+        assert_eq!(writing_success, 1);
+        assert_eq!(writing_checksum.len(), 48);
+        let writing_authority_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table'
+               AND name IN (
+                 'writing_experience_preferences',
+                 'writing_provider_disclosure_grants'
+               )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 69 writing experience authority tables");
+        assert_eq!(writing_authority_tables, 2);
+        let (investigation_success, investigation_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 70")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 70 consistency investigation migration receipt");
+        assert_eq!(investigation_success, 1);
+        assert_eq!(investigation_checksum.len(), 48);
+        let investigation_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table'
+               AND name IN (
+                 'consistency_investigation_runs',
+                 'consistency_investigation_steps',
+                 'consistency_investigation_findings',
+                 'consistency_investigation_evidence'
+               )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 70 consistency investigation authority tables");
+        assert_eq!(investigation_tables, 4);
+        let (writing_rotation_success, writing_rotation_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 71")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 71 writing disclosure rotation migration receipt");
+        assert_eq!(writing_rotation_success, 1);
+        assert_eq!(writing_rotation_checksum.len(), 48);
+        let active_limit_trigger: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger'
+               AND name = 'writing_provider_disclosure_grants_limit'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 71 active disclosure limit trigger");
+        assert!(active_limit_trigger.contains("WHERE state = 'active'"));
+        let (investigation_reservation_success, investigation_reservation_checksum): (
+            i64,
+            Vec<u8>,
+        ) = sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 72")
+            .fetch_one(&mut connection)
+            .await
+            .expect("version 72 consistency invocation reservation migration receipt");
+        assert_eq!(investigation_reservation_success, 1);
+        assert_eq!(investigation_reservation_checksum.len(), 48);
+        let planned_invocation_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('consistency_investigation_steps')
+             WHERE name = 'planned_invocation_id'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 72 planned invocation column");
+        assert_eq!(planned_invocation_columns, 1);
+        let (search_scope_success, search_scope_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 73")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 73 multigranular search migration receipt");
+        assert_eq!(search_scope_success, 1);
+        assert_eq!(search_scope_checksum.len(), 48);
+        let search_scope_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('search_index_documents')
+             WHERE name IN (
+               'chunk_kind', 'parent_document_id', 'utf16_start', 'utf16_end',
+               'source_length', 'scene_id', 'event_id', 'character_ids_json',
+               'location_ids_json', 'story_time',
+               'branch_id', 'pov_character_id', 'story_order', 'authority',
+               'privacy', 'currentness', 'omitted_scope_fields_json'
+             )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 73 multigranular search columns");
+        assert_eq!(search_scope_columns, 17);
         let maximum_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
             .fetch_one(&mut connection)
             .await
             .expect("maximum migration version");
-        assert_eq!(maximum_version, 68);
+        assert_eq!(maximum_version, 73);
         let forbidden_columns: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)
              FROM pragma_table_info('novel_skill_evaluation_predispatch_authority_snapshots')

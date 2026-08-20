@@ -68,6 +68,19 @@ export interface StageLegacyStoryFactReceipt {
   readonly created: boolean;
 }
 
+/**
+ * Compatibility boundary for legacy records. Implementations keep the legacy
+ * row immutable and use StoryFact as the only fact authority.
+ */
+export interface LegacyStoryFactCompatibilityStore {
+  stageLegacyRecord(
+    input: StageLegacyStoryFactInput,
+  ): Promise<Result<StageLegacyStoryFactReceipt, StoryCoreError>>;
+  listLegacyLinks(
+    projectId: UuidV7,
+  ): Promise<Result<readonly StoryFactLegacyLink[], StoryCoreError>>;
+}
+
 interface StoryFactRow {
   readonly id: string;
   readonly project_id: string;
@@ -264,7 +277,7 @@ function boundedResolutionIdentityPart(value: unknown, maximumLength: number): s
  * a forward migration permits only the domain-validated ambiguous-alias
  * resolution inside structuredValue and captures it as the next revision.
  */
-export class SqliteStoryFactStore implements StoryFactStore {
+export class SqliteStoryFactStore implements StoryFactStore, LegacyStoryFactCompatibilityStore {
   public constructor(private readonly executor: StorySqlExecutor) {}
 
   public create(fact: StoryFact): Promise<Result<void, StoryCoreError>> {

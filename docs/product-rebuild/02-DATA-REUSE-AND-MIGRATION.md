@@ -1,12 +1,12 @@
 # 数据复用与迁移方案
 
 > 文档状态：`AUTHORITATIVE_CURRENT`  
-> 当前迁移上限：Data `0065` / Tauri `68`  
-> 规则：只向前追加；当前源码目标版本为 `0.2.4`，最近已发布版本为 `0.2.3`。
+> 当前迁移上限：Data `0070` / Tauri `73`  
+> 规则：只向前追加；当前源码目标版本为 `0.2.5`，最新已发布版本为 `0.2.4`。
 
 ## 1. 迁移原则
 
-1. 只追加新迁移，不修改当前已登记的 Data `0001`–`0064` 和 story-core `0001`–`0003`。
+1. 只追加新迁移，不修改当前已发布的 Data `0001`–`0065` 和 story-core `0001`–`0003`。
 2. 现有项目、章节、版本、恢复草稿和 AI 候选 ID 全部保持不变。
 3. 新投影必须可重建；正式事实和用户确认记录必须不可被重建任务覆盖。
 4. 重大事实更新必须带用户决定；弱事实允许自动更新但可撤销。
@@ -209,7 +209,25 @@ journal。新密钥先写入版本化 owned 槽，真实连接与目录验证完
 不含 Prompt、正文、输出、凭据或 Provider 响应；恢复中的 `running` 行没有该时间时可结清为
 `not_dispatched`，有该时间时必须保守结清为 `ambiguous`，两者都不得因启动恢复而自动重发。
 
-当前共有 167 张应用表：恢复权威白名单为 166 张表，另有 1 张不恢复的临时租约表。`project_remote_dispatch_leases` 是单独的短期网络事实，不进入
+`0066`–`0068` / Tauri `69`–`71` 追加写作体验偏好、一次性本地整理授权、有界一致性调查
+及 active 披露授权上限；`0069_consistency_investigation_invocation_reservation.sql` / Tauri `72`
+只追加 content-free 的 planned invocation UUID 和约束。Agent 在启动 Model Hub 账本前先持久化该
+精确 ID；账本创建会在同一 SQLite 语句中绑定 step 与 context trace。若进程在回调前退出，启动
+恢复会把未发送账本结清为 `cancelled`、run 结清为 `not_dispatched`；若已越过 Provider 发送边界，
+账本结清为 `timed_out`、run 结清为 `ambiguous`。恢复还会把 terminal run 对应的非终态 task
+确定性对账为 succeeded/cancelled/failed，所有分支都绝不创建第二次网络调用。
+
+`0070_multigranular_search_retrieval.sql` / Tauri `73` 只扩展可重建的
+`search_index_documents`，不新建 canon：追加 chapter/scene/event/paragraph/dialogue/
+story-fact-evidence 类型、父文档与 UTF-16 定位、scene/event/人物/地点/故事时间、branch/POV/
+story order、authority/privacy/currentness 和缺失范围声明。旧行升级为 `legacy_unknown`，并列出缺失的
+范围字段；在权威源重建前不得冒充当前检索证据。该迁移没有新增用户正文表，因此备份恢复
+白名单仍为 172 张权威表。
+
+当前共有 173 张应用表：恢复权威白名单为 172 张表，另有 1 张不恢复的临时租约表。写作体验
+偏好、Provider 披露 grant 与调查 run/step/finding/evidence 六张表均进入删除/恢复顺序；
+`consistency_investigation_steps.planned_invocation_id` 随整表恢复并继续受 `0069` 的唯一性与绑定
+约束保护。`project_remote_dispatch_leases` 是单独的短期网络事实，不进入
 恢复白名单；`VACUUM INTO` 一致性备份即使物理包含租约行，恢复事务也明确不复制它，并继续
 清空 4 个可重建派生根表。旧网络租约不能借备份恢复成当前网络事实。
 
@@ -230,7 +248,7 @@ journal。新密钥先写入版本化 owned 槽，真实连接与目录验证完
 
 - POV 严格投影已能绑定取得事件、来源事实、人物、知识键、信息标识和叙事顺序；旧记录缺任一绑定字段时失败关闭。完整人物知识状态（知道/不知道/怀疑/误信）的全书维护体验仍需在真实长篇上继续验证；
 - 从自然语言正文持续生成、归并和撤销声纹、剧情线与场景指标的安全抽取任务/收据；
-- 图片资产清单、来源/授权和正文引用模型目前尚未建立；本机导出的图片文件不应被当作项目内正式资产。
+- 持久图片资产清单、来源/授权和正文引用模型目前尚未建立；四格式导出只接受安全内联图片或调用方明确交付的项目内存资产，`path` 只作键，不从磁盘/网络补读或将导出文件反向冒充为正式项目资产。
 
 ## 4. 兼容读取与回填
 

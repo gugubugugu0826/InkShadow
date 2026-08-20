@@ -18,7 +18,10 @@ describe("ModelHubImageGenerationPanel", () => {
     const generate = screen.getByRole("button", { name: "选择保存位置并生成" });
     expect(generate).toBeDisabled();
     await user.click(screen.getByRole("button", { name: /确认提示会发送/u }));
-    expect(generate).toBeEnabled();
+    await waitFor(() => expect(generate).toBeEnabled());
+    expect(screen.getByText(/最多发起 1 次图片模型调用，自动重试 0 次/u)).toBeInTheDocument();
+    expect(screen.getByText(/数据保留：遵循供应商默认政策/u)).toBeInTheDocument();
+    expect(screen.getByText(/训练使用：未知/u)).toBeInTheDocument();
     await user.click(generate);
 
     await waitFor(() => expect(service.generate).toHaveBeenCalledOnce());
@@ -26,10 +29,12 @@ describe("ModelHubImageGenerationPanel", () => {
       prompt: "月色下的旧书店",
       destination: { ticket: "a".repeat(64), fileName: "illustration.png" },
       acknowledgedCostAndPrivacy: true,
-      expectedConfirmationFingerprint: "f".repeat(64),
+      expectedConfirmationFingerprint: "b".repeat(64),
     });
+    expect(service.inspect).toHaveBeenCalledWith("月色下的旧书店");
     expect(await screen.findByText(/不会自动插入正文/u)).toBeInTheDocument();
-    expect(screen.getByText(/实际调用：openai/u)).toBeInTheDocument();
+    expect(screen.getByText(/实际调用：OpenAI · provider-image-model/u)).toBeInTheDocument();
+    expect(screen.queryByText(/实际调用：openai/u)).not.toBeInTheDocument();
   });
 
   it("does not dispatch or imply a charge when the save dialog is cancelled", async () => {
@@ -56,11 +61,65 @@ describe("ModelHubImageGenerationPanel", () => {
     expect(screen.getByText(/AI 分工/u)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "选择保存位置并生成" })).not.toBeInTheDocument();
   });
+
+  it("keeps provider and transport details out of ordinary errors", async () => {
+    const user = userEvent.setup();
+    const service = createService();
+    service.generate.mockRejectedValue(
+      Object.assign(new Error("SQLITE_SECRET_PATH C:\\Users\\author\\private.db"), {
+        code: "UPSTREAM_IMAGE_INTERNAL_SENTINEL",
+      }),
+    );
+    render(<ModelHubImageGenerationPanel service={service} />);
+
+    await screen.findByText(/最多发起 1 次图片模型调用/u);
+    await user.type(screen.getByLabelText("你想生成什么画面？"), "雨夜车站");
+    await user.click(screen.getByRole("button", { name: /确认提示会发送/u }));
+    await user.click(screen.getByRole("button", { name: "选择保存位置并生成" }));
+
+    expect(await screen.findByText("图片生成未完成")).toBeInTheDocument();
+    expect(screen.queryByText(/UPSTREAM_IMAGE_INTERNAL_SENTINEL/u)).not.toBeInTheDocument();
+    expect(screen.queryByText(/SQLITE_SECRET_PATH|private\.db/u)).not.toBeInTheDocument();
+  });
+
+  it("invalidates acknowledgement when the prompt changes and requires a fresh binding", async () => {
+    const user = userEvent.setup();
+    const service = createService();
+    render(<ModelHubImageGenerationPanel service={service} />);
+
+    await screen.findByText(/图片描述会发送到远程供应商/u);
+    const prompt = screen.getByLabelText("你想生成什么画面？");
+    const generate = screen.getByRole("button", { name: "选择保存位置并生成" });
+    await user.type(prompt, "雨夜书店");
+    await user.click(screen.getByRole("button", { name: /确认提示会发送/u }));
+    await waitFor(() => expect(generate).toBeEnabled());
+
+    await user.clear(prompt);
+    await user.type(prompt, "晴日广场");
+    expect(generate).toBeDisabled();
+    expect(service.generate).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: /确认提示会发送/u }));
+    await waitFor(() => expect(generate).toBeEnabled());
+    await user.click(generate);
+
+    await waitFor(() => expect(service.generate).toHaveBeenCalledOnce());
+    expect(service.inspect).toHaveBeenCalledWith("雨夜书店");
+    expect(service.inspect).toHaveBeenCalledWith("晴日广场");
+    expect(service.generate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: "晴日广场",
+        expectedConfirmationFingerprint: "b".repeat(64),
+      }),
+    );
+  });
 });
 
 function createService() {
   return {
-    inspect: vi.fn(() => Promise.resolve(inspection())),
+    inspect: vi.fn((prompt?: string) =>
+      Promise.resolve(inspection(prompt === undefined ? "f".repeat(64) : "b".repeat(64))),
+    ),
     chooseDestination: vi.fn<() => Promise<Readonly<{ ticket: string; fileName: string }> | null>>(
       () => Promise.resolve({ ticket: "a".repeat(64), fileName: "illustration.png" }),
     ),
@@ -86,7 +145,7 @@ function createService() {
   };
 }
 
-function inspection(): ModelHubImageGenerationInspection {
+function inspection(confirmationFingerprint: string): ModelHubImageGenerationInspection {
   return {
     task: "image_generation",
     connectionId: "connection-1",
@@ -111,6 +170,6 @@ function inspection(): ModelHubImageGenerationInspection {
     maximumPromptCharacters: 1_000,
     outputFormat: "png",
     usedFallback: false,
-    confirmationFingerprint: "f".repeat(64),
+    confirmationFingerprint,
   };
 }

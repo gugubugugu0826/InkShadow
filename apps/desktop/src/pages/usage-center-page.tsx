@@ -26,7 +26,6 @@ import {
 
 import {
   TASK_LABELS,
-  UsageCenterError,
   type UsageAggregate,
   type UsageBreakdownDimension,
   type UsageBreakdownEntry,
@@ -40,6 +39,7 @@ import {
   type UsageEventStatus,
   type UsagePrivacyPolicy,
 } from "../infrastructure/usage-center-service";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 
 type UsagePeriod = "today" | "7d" | "30d" | "all";
 
@@ -185,7 +185,6 @@ export function UsageCenterPage({ reader, now = currentDate }: UsageCenterPagePr
             <ErrorState
               title="暂时无法读取调用账本"
               description={errorDescription(error)}
-              errorCode={errorCode(error)}
               savedState="正文与已有版本不受影响"
               primaryAction={{
                 label: "重新读取",
@@ -585,7 +584,7 @@ function UsageDetailsTable({ snapshot }: { readonly snapshot: UsageCenterSnapsho
                   {record.errorCode !== null && (
                     <>
                       <br />
-                      <span>{record.errorCode}</span>
+                      <span>{usageRecordErrorDescription(record.errorCode)}</span>
                     </>
                   )}
                 </TableCell>
@@ -741,11 +740,10 @@ function breakdownHeading(dimension: UsageBreakdownDimension): string {
   }[dimension];
 }
 
-function errorCode(error: unknown): string {
-  return error instanceof UsageCenterError ? error.code : "USAGE_CENTER_READ_FAILED";
+function errorDescription(error: unknown): string {
+  return projectOrdinaryUiError(error).description;
 }
 
-function errorDescription(error: unknown): string {
-  if (error instanceof UsageCenterError) return error.message;
-  return "本地账本读取失败。请重试；如果持续失败，可先检查数据库完整性。";
+function usageRecordErrorDescription(errorCode: string): string {
+  return projectOrdinaryUiError({ code: errorCode }).description;
 }

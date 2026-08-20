@@ -1,5 +1,11 @@
 import { sanitizeFilename } from "./filename.js";
 import { normalizePortablePublication, type PortablePublication } from "./publication-model.js";
+import {
+  isValidatedPublicationImage,
+  publicationImageExtension,
+  type PublicationImageAsset,
+  type ValidatedPublicationImage,
+} from "./publication-images.js";
 import { isoTimestampSchema, type PortableProjectV1 } from "./schemas.js";
 
 export type EpubExportErrorCode =
@@ -17,6 +23,7 @@ export interface EpubExportOptions {
   readonly generatedAt: string;
   readonly signal?: AbortSignal;
   readonly onProgress?: (progress: EpubExportProgress) => void;
+  readonly imageAssets?: readonly PublicationImageAsset[];
 }
 
 export interface EpubExportArtifact {
@@ -54,8 +61,14 @@ type PublicationBlock = PublicationChapter["blocks"][number];
 
 interface EpubEntry {
   readonly name: string;
-  readonly content: string;
+  readonly content: string | Uint8Array;
   readonly compression: "STORE" | "DEFLATE";
+}
+
+interface EpubImage {
+  readonly id: string;
+  readonly href: string;
+  readonly image: ValidatedPublicationImage;
 }
 
 export async function exportProjectToEpub(
@@ -66,6 +79,7 @@ export async function exportProjectToEpub(
   reportProgress(options, "normalizing", 0, 1);
   const publication = normalizePortablePublication(input, {
     ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.imageAssets === undefined ? {} : { imageAssets: options.imageAssets }),
     onProgress: () => throwIfCancelled(options.signal),
   });
   throwIfCancelled(options.signal);
@@ -92,6 +106,34 @@ export async function exportPublicationToEpub(
       512,
     );
     const chapters = [...publication.chapters].sort(compareChapters);
+    const imagesByBlock = new Map<
+      Extract<PublicationBlock, { readonly kind: "image" }>,
+      EpubImage
+    >();
+    const images: EpubImage[] = [];
+    for (const chapter of chapters) {
+      for (const block of chapter.blocks) {
+        if (block.kind !== "image") {
+          continue;
+        }
+        if (!isValidatedPublicationImage(block)) {
+          throw new EpubExportError(
+            "EPUB_RENDER_FAILED",
+            "An accepted publication image no longer matches its validated local bytes.",
+          );
+        }
+        const index = images.length + 1;
+        const image: EpubImage = {
+          id: `image-${String(index)}`,
+          href: `images/image-${String(index).padStart(4, "0")}.${publicationImageExtension(
+            block.mediaType,
+          )}`,
+          image: block,
+        };
+        images.push(image);
+        imagesByBlock.set(block, image);
+      }
+    }
     const renderedChapters: EpubEntry[] = [];
     const renderUnits = Math.max(
       1,
@@ -102,7 +144,7 @@ export async function exportPublicationToEpub(
     for (const [index, chapter] of chapters.entries()) {
       throwIfCancelled(options.signal);
       const fileName = chapterFileName(index);
-      const rendered = renderChapter(chapter, language, () => {
+      const rendered = renderChapter(chapter, language, imagesByBlock, () => {
         completedUnits += 1;
         reportProgress(options, "rendering", completedUnits, renderUnits);
       });
@@ -133,6 +175,7 @@ export async function exportPublicationToEpub(
           generatedAt,
           identifier,
           language,
+          images,
           title,
         }),
         compression: "DEFLATE",
@@ -148,6 +191,14 @@ export async function exportPublicationToEpub(
         compression: "DEFLATE",
       },
       ...renderedChapters,
+      ...images.map(
+        ({ href, image }) =>
+          ({
+            name: `${EPUB_ROOT}/${href}`,
+            content: image.bytes,
+            compression: "DEFLATE",
+          }) satisfies EpubEntry,
+      ),
     ];
 
     const { default: JSZip } = await import("jszip");
@@ -157,7 +208,7 @@ export async function exportPublicationToEpub(
     for (const [index, entry] of entries.entries()) {
       throwIfCancelled(options.signal);
       zip.file(entry.name, entry.content, {
-        binary: false,
+        binary: entry.content instanceof Uint8Array,
         compression: entry.compression,
         ...(entry.compression === "DEFLATE" ? { compressionOptions: { level: 9 } } : {}),
         createFolders: false,
@@ -216,6 +267,7 @@ function renderPackage(input: {
   readonly generatedAt: string;
   readonly identifier: string;
   readonly language: string;
+  readonly images: readonly EpubImage[];
   readonly title: string;
 }): string {
   const manifest = [
@@ -224,6 +276,9 @@ function renderPackage(input: {
     ...input.chapters.map(
       (_chapter, index) =>
         `<item id="chapter-${String(index + 1)}" href="${chapterFileName(index)}" media-type="application/xhtml+xml"/>`,
+    ),
+    ...input.images.map(
+      ({ href, id, image }) => `<item id="${id}" href="${href}" media-type="${image.mediaType}"/>`,
     ),
   ].join("");
   const spine = input.chapters
@@ -269,6 +324,7 @@ function renderNavigation(
 function renderChapter(
   chapter: PublicationChapter,
   language: string,
+  imagesByBlock: ReadonlyMap<Extract<PublicationBlock, { readonly kind: "image" }>, EpubImage>,
   onBlockRendered: () => void,
 ): string {
   const body: string[] = [];
@@ -314,7 +370,7 @@ function renderChapter(
       }
       continue;
     }
-    body.push(renderBlock(block));
+    body.push(renderBlock(block, imagesByBlock));
     onBlockRendered();
   }
   const title = escapeXml(chapter.title);
@@ -326,6 +382,7 @@ function renderBlock(
     PublicationBlock,
     { readonly kind: "unorderedListItem" } | { readonly kind: "orderedListItem" }
   >,
+  imagesByBlock: ReadonlyMap<Extract<PublicationBlock, { readonly kind: "image" }>, EpubImage>,
 ): string {
   switch (block.kind) {
     case "heading": {
@@ -340,6 +397,18 @@ function renderBlock(
       const languageClass =
         block.language === undefined ? "" : ` class="language-${escapeXml(block.language)}"`;
       return `<pre><code${languageClass}>${escapeXml(block.text)}</code></pre>`;
+    }
+    case "image": {
+      const entry = imagesByBlock.get(block);
+      if (entry === undefined) {
+        throw new EpubExportError(
+          "EPUB_RENDER_FAILED",
+          "An accepted publication image is missing from the EPUB package plan.",
+        );
+      }
+      return `<figure class="publication-image"><img src="${escapeXml(entry.href)}" alt="${escapeXml(
+        block.altText,
+      )}" width="${String(block.pixelWidth)}" height="${String(block.pixelHeight)}"/></figure>`;
     }
     case "sceneBreak":
       return '<hr class="scene-break" aria-label="场景分隔"/>';
@@ -367,6 +436,8 @@ function renderStyles(): string {
     ".list-depth-1 { margin-left: 3em; }",
     ".list-depth-2, .list-depth-3, .list-depth-4, .list-depth-5, .list-depth-6, .list-depth-7, .list-depth-8 { margin-left: 4em; }",
     ".scene-break { width: 30%; margin: 2em auto; border: 0; border-top: 0.08em solid #9aa3b2; }",
+    ".publication-image { margin: 1.5em auto; text-align: center; break-inside: avoid; }",
+    ".publication-image img { display: inline-block; max-width: 100%; height: auto; }",
     "nav ol { line-height: 1.8; }",
     "nav a { color: inherit; text-decoration: none; }",
   ].join("\n");

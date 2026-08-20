@@ -90,6 +90,8 @@ describe("CloudDeletionSecurityCard", () => {
 
     await user.click(await screen.findByRole("button", { name: "使用邮箱和密码查询" }));
     let dialog = await screen.findByRole("dialog", { name: "查询账户删除状态" });
+    expect(within(dialog).getByText("已安全保存删除请求凭据")).toBeVisible();
+    expect(within(dialog).queryByText(DELETION_REQUEST_ID)).not.toBeInTheDocument();
     const lookupPassword = within(dialog).getByLabelText("当前云账户密码");
     await waitFor(() => expect(lookupPassword).toHaveFocus());
     expect(within(dialog).getByRole("button", { name: "查询状态" })).not.toHaveFocus();
@@ -165,6 +167,22 @@ describe("CloudDeletionSecurityCard", () => {
         password: PASSWORD,
       }),
     );
+  });
+
+  it("keeps cloud deletion diagnostics out of the ordinary error alert", async () => {
+    const service = createService();
+    service.listRecoverable.mockRejectedValue({
+      code: "CLOUD_DELETE_PRIVATE_CAUSE",
+      message: "Authorization: Bearer must-not-render",
+    });
+
+    render(<CloudDeletionSecurityCard selectedProject={project()} service={asService(service)} />);
+
+    expect(await screen.findByText("云端删除操作未完成")).toBeVisible();
+    expect(screen.getByText(/云端操作未完成。本地正文仍可使用/u)).toBeVisible();
+    expect(
+      screen.queryByText(/CLOUD_DELETE_PRIVATE_CAUSE|Authorization: Bearer/u),
+    ).not.toBeInTheDocument();
   });
 });
 

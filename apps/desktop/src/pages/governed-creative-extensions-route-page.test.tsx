@@ -12,7 +12,7 @@ describe("GovernedCreativeExtensionsRoutePage", () => {
     renderRoute(runtime, "/projects/not-a-uuid/chapters/not-a-uuid/extensions");
 
     expect(await screen.findByText("无法打开创作扩展")).toBeVisible();
-    expect(screen.getByText("EXTENSION_ROUTE_INVALID")).toBeVisible();
+    expect(screen.queryByText("EXTENSION_ROUTE_INVALID")).not.toBeInTheDocument();
   });
 
   it("does not impersonate the production governed runtime in browser development", async () => {

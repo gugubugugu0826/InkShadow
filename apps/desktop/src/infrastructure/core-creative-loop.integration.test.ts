@@ -269,6 +269,7 @@ describe("core creative loop internal closure", () => {
     if (!currentChapter.ok || currentChapter.value === null) {
       throw new Error("accepted chapter disappeared before context compilation");
     }
+    const ftsOnlySearch = vi.spyOn(harness.runtime.search, "searchFtsOnly");
     const secondContext = await compileChapterStoryContext(harness.runtime, currentChapter.value, {
       currentTask: {
         id: "internal-closure-next-scene",
@@ -302,6 +303,39 @@ describe("core creative loop internal closure", () => {
     expect(secondContext.includedFactIds).toEqual(
       expect.arrayContaining([referenceFact.id, causalEvent.fact.id]),
     );
+    expect(secondContext.retrievalTrace).toMatchObject({
+      baseline: "fts_keyword",
+      baselineStatus: "used",
+      vectorStatus: "optional_not_needed",
+      graphStatus: "optional_used",
+      graphBranchId: "main",
+      remoteRerankStatus: "optional_skipped",
+      scopeOmissions: [],
+      versionMode: "per_source_current",
+    });
+    expect(ftsOnlySearch).toHaveBeenCalledWith(
+      currentChapter.value.projectId,
+      "林遥 钟楼",
+      expect.objectContaining({
+        projectId: currentChapter.value.projectId,
+        taskType: "continuation",
+        privacy: "standard_only",
+        currentness: "current",
+        branchId: null,
+        povCharacterId: null,
+        maximumStoryOrder: expect.any(Number) as number,
+      }),
+      32,
+    );
+    const ftsContext = secondContext.compiled.entries.find(({ id }) =>
+      id.startsWith("fts-search:"),
+    );
+    expect(ftsContext?.selectionReason).toContain("FTS/keyword baseline");
+    expect(
+      secondContext.retrievalTrace.includedDocumentIds.some((documentId) =>
+        ftsContext?.id.endsWith(`:${documentId}`),
+      ),
+    ).toBe(true);
 
     const validation = await harness.runtime.story.chapterValidation.checkChapter({
       projectId: project.id,

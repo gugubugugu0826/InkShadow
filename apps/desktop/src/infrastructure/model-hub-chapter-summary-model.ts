@@ -15,6 +15,10 @@ import {
   type ModelHubTextTaskExecutionResult,
   type ModelHubTextTaskInspection,
 } from "./model-hub-execution-service";
+import {
+  SINGLE_ATTEMPT_STRICT_JSON_POLICY,
+  SINGLE_ATTEMPT_STRICT_JSON_TEXT_TRANSPORT_POLICY,
+} from "./model-execution-policy";
 import { resolveModelCapabilityVerdict } from "./model-hub-router";
 import { getModelProviderPreset } from "./model-hub-provider-registry";
 import { projectContextDispatchScope } from "./project-context-privacy-authority";
@@ -100,8 +104,18 @@ export class ModelHubChapterSummaryModel implements ChapterSummaryModelPort {
       };
       executed = await this.executeText(this.dependencies, {
         ...request,
-        reasoningPolicy: "visible_prose",
+        executionPolicy: useProviderJsonMode
+          ? SINGLE_ATTEMPT_STRICT_JSON_POLICY
+          : SINGLE_ATTEMPT_STRICT_JSON_TEXT_TRANSPORT_POLICY,
+        reasoningModeOverride: "disabled",
+        generationRetryLimitOverride: 0,
         ...(useProviderJsonMode ? { responseFormat: "json_object" as const } : {}),
+        validateGeneratedText: (text) => {
+          parseChapterSummaryResponse(
+            text,
+            new Set(input.segments.map(({ evidenceId }) => evidenceId)),
+          );
+        },
         dispatchScope: projectContextDispatchScope(input.projectPrivacy),
         onBeforeDispatch: async (selection) => {
           assertSelectionMatches(inspection, selection);

@@ -35,6 +35,7 @@ import {
   desktopPersistenceLifecycle,
   type PersistenceFlushHandlerResult,
 } from "../infrastructure/persistence-lifecycle";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
 type IdeationServicePort = Pick<
@@ -646,7 +647,7 @@ export function IdeationPage({
       {error !== null && (
         <InlineAlert
           tone="error"
-          title={`${error.title}（${error.code}）`}
+          title={error.title}
           description={error.description}
           {...(error.conflict && currentDraft !== null
             ? {
@@ -1326,9 +1327,7 @@ function normalizeIdeationError(error: StoryCoreError): VisibleIdeationError {
       return {
         code: error.code,
         title: "构思操作未完成",
-        description: error.retryable
-          ? "本地操作暂时未完成，请重试。"
-          : "本地服务拒绝了此状态变化；原始内部错误不会直接显示。",
+        description: projectOrdinaryUiError(error).description,
         conflict: false,
       };
   }

@@ -1,28 +1,198 @@
 # InkShadow 持续发布门禁
 
-> 更新日期：2026-08-14  
-> 当前源码目标版本：`0.2.4`；最近已发布工程预览版本：`0.2.3`  
-> 当前结论：**`v0.2.4` 是针对 `v0.2.3` 真实 Windows 反馈的安全修复候选；源码自动化已完成，但唯一干净候选、PR/main CI、标签、附件哈希和公开 Release 仍须逐项生成和复核，状态为 `CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`**
+> [!IMPORTANT]
+> 2026-08-20 发布准备：当前 Desktop 应用清单已统一为 `0.2.5`。已发布 `v0.2.4` 标签指向
+> `b74d36ef3342db6813d1d43771bc82c0ed2aa1fb`，不得复用。当前工作树尚未冻结为唯一提交，也没有
+> 最终安装包、字节、SHA-256、远端 CI 或公开 Release；下列 v0.2.5 字段只能在对应步骤实际完成
+> 后回填。v0.2.4 说明按原日期保留为历史记录，不得外推为当前工作树证据。真实测试使用独立
+> [`NEXT-UNRELEASED-WINDOWS-TAURI-PHASE-2-PROMPT.md`](NEXT-UNRELEASED-WINDOWS-TAURI-PHASE-2-PROMPT.md)，
+> 最终门禁为 `PENDING_FINAL_RUN`，Provider live 与真实 Tauri 为 `NOT_RUN / NOT_RETESTED`。
+
+> 更新日期：2026-08-20  
+> 当前源码目标版本：`0.2.5`；最新已发布工程预览版本：`0.2.4`  
+> 当前结论：**`v0.2.5` 的功能与中文发布说明已准备，冻结候选门禁、唯一提交、main CI、标签、打包、哈希和公开 Release 仍待实际执行；状态为 `FINAL_GATE_PENDING / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`**
 
 > [!WARNING]
 > **v0.2.3 发布后安全公告：**提交
 > `3abdcfeb327567c632e440d55d11f0af6f4911d2` 的真实 Windows 11 Tauri/Wry +
 > DeepSeek `deepseek-v4-flash` 测试发现，Candidate 接受与不可变版本创建完成后又隐式派发
 > `long_memory_compression`，并发送已接受正文。测试已按安全停止条件终止。已发布 `v0.2.3`
-> 不建议用于真实 Provider 的敏感正文处理。当前 `v0.2.4` 候选修复只有 fake/mock、SQLite 与
-> Chromium 自动化证据；新 Windows Tauri 安装包和 Provider live 复测均未运行，也未发布替代 Release。
+> 不建议用于真实 Provider 的敏感正文处理。当前 `v0.2.5` 候选的证据仅来自 fake/mock、SQLite
+> 与静态 Chromium；新 Windows Tauri 安装包和 Provider live 复测均未运行，不能把源码自动化
+> 写成真实平台验证。
 
 状态只使用 `PASS`、`IN_PROGRESS`、`NOT_RUN`、`BLOCKED` 和 `N/A`。  
 代码存在不等于发布门禁通过；只有可复核的测试、构建、签名、安装或人工验收证据才能标记 `PASS`。
 
-## v0.2.4 Pre-release 中文说明（待发布）
+## v0.2.5 Pre-release 中文说明（待发布）
 
-> 建议 Release 标题：`墨影 InkShadow v0.2.4 — Windows 安全修复工程预览版（未签名）`  
+> 建议 Release 标题：`墨影 InkShadow v0.2.5 — Windows 安全与写作体验工程预览版（未签名）`  
 > 发布类型：GitHub Pre-release  
 > 支持平台：Windows 10 / 11 x64  
-> 签名状态：未进行 Authenticode 商业签名，Windows 可能显示“未知发布者”
+> 签名状态：`FINAL_PACKAGE_SIGNATURE_PENDING`；未取得实际检查结果前不得写成已签名
 
-v0.2.4 是针对 v0.2.3 真实 Windows Tauri 用户测试反馈准备的安全修复版，继续遵守本地优先、
+v0.2.5 在已发布 `v0.2.4` 标签基线上收口直接/专业写作模式、本地设定整理、StoryMemory/RAG
+基础链路和受控一致性调查，同时继承 Candidate、本地版本与隐私边界。它不是 Beta、GA 或商业
+正式版。
+
+### 本次更新
+
+#### 直接/专业写作模式与一次性授权
+
+- 新用户可使用直接模式，既有用户保持专业模式；作者可在设置中切换，偏好使用 revision/CAS 持久化。
+- 直接模式首次启用只会一次性说明并授权确定性本地整理，不授权额外联网，也不授权自动接受正文。第一次真实续写会另行披露精确 Provider、模型、任务、发送范围、调用上限、费用状态和隐私边界；任一绑定条件变化时必须重新披露。
+- 直接模式和专业模式都先持久化隔离 Candidate；作者明确选择“使用这版”后，才经同一正文替换 fence 在本地接受并创建新不可变版本。
+- 配置模型不等于同意后台处理正文；私密章节继续在远程派发前失败关闭。
+
+#### 普通设定自动整理与重大设定确认
+
+- 首次启用直接模式时一并说明并授权本地设定整理；以后仅在作者明确接受 Candidate 后，对此次新增 delta 做确定性本地提取，界面只提示“已整理 N 条”。
+- 本地整理精确产生 0 次 Provider 调用，不把正文、Prompt 或凭据写入诊断记录。
+- 重大设定不会自动晋升为正式事实，仍进入作者确认；整理失败不会回滚正文或不可变版本。
+
+#### 受控长篇一致性调查
+
+- 在现有“检查”页面提供受控调查，不新增普通用户一级导航；Provider、route、trace 和内部 ID 仍保留为专家/诊断概念。
+- 每次调查只使用固定注册的 5 个本地只读工具，作者确认后最多派发 1 次模型调用，自动重试上限为 0。
+- 调查结果只持久化有界 EvidenceRef 与 Finding，不直接修改正文；修复 Candidate 使用调查之外的
+  第二次独立披露和确认，固定 1 call/0 retry，并通过既有 trace/output commit 保持隔离。
+- 两次授权不能互相复用：普通界面分别显示本机/远程、连接显示名、精确模型、发送范围、1 次调用、
+  0 自动重试和费用上限或“费用未知；提供方可能计费”。完整 inspection authority、全部 capability
+  evidence、connection display、隐私、context/messages 会在确认后和最终 dispatch 前重读；route、
+  价格、目的地、能力、正文或证据任一漂移都保持 0 Provider 并要求重新确认。
+- reserved/bound/dispatched 边界、取消和重启使用同一持久终态；越过网络边界后无法确认的结果标为 `ambiguous`，绝不自动重发。
+
+#### StoryMemory、RAG 与检索评估
+
+- 接线 L0–L3 StoryMemory 读模型、Narrative State 只读/重建、MemoryRecord 明确提升、现有 FTS/本地 rerank、最多 4 条且每条最多 80 字符的确定性查询规划，以及不含原始正文/查询的 trace 摘要。
+- 新增 chapter/scene/event/paragraph/dialogue/story-fact-evidence 多粒度本地投影，父子 UTF-16 定位与 branch/POV/story-time/authority/privacy/currentness 范围在 FTS 排名前失败关闭；Agent 的 FTS-only 入口不触发 embedding 或写入。
+- 新增 Recall@K、Precision@K、MRR、nDCG、hit rate、权威命中、陈旧命中、拒绝事实污染和私密泄漏等纯本地评估指标。
+- 5k/20k/50k/200k、≥30 样本的 production-path benchmark runner 已接线，但原始结果必须绑定最终唯一 commit，当前为 `FINAL_BENCHMARK_PENDING`，不拿 fixture 数字冒充。
+- 自动多模型 fallback 与确认后动态 replanning 仍保持关闭；调查本身继续遵守 1 次调用、0 次重试，finding 修复则必须重新披露并建立另一个独立 1 次调用。
+
+#### 本地数据、恢复与响应式证据
+
+- 在 `v0.2.4` 基线上只向前追加 Data `0066`–`0070`；70 个 Data migration 与 3 个 story-core
+  migration 合并为 Tauri internal `73`，不修改已发布 migration 或 checksum。`0069` 的
+  content-free planned invocation 会在账本 INSERT 时原子绑定 step/context trace；启动恢复按发送
+  边界结清 ledger/run，并把非终态 task 对账为终态，绝不自动重发。
+- `0070` 只为可重建搜索投影追加多粒度类型、父子定位与范围字段；旧行升级为 `legacy_unknown`，在权威源重建前不冒充当前证据。
+- 写作偏好、披露 grant 与调查 run/step/finding/evidence 六张权威表进入 172 表备份恢复合同；
+  `planned_invocation_id` 随 investigation step 整表恢复，临时派发租约与凭据值仍不恢复。
+- SQLite reload 复用原生连接、轮换 renderer session token，并回滚孤立事务；真实 Tauri WebView reload 仍待安装版复测。
+- 静态 Chromium 视觉矩阵覆盖浅/深主题、1440/1280/1024/800 与等效 200% CSS viewport；它不是 Windows 系统 200% DPI 或 Tauri WebView 证据。
+
+#### Provider 发送前披露与关闭入口
+
+- 当前可达动作已固定为：编辑器续写/选区改写、故事规划、一致性调查与单条修复 Candidate、图片生成、Model Hub 本地评测、快捷连接/Settings 固定文本 probe、结构化 probe、翻译 probe，以及另行收口的 opening。Candidate 接受、普通正文检查、接受后的本地普通设定整理和本地派生均为 0 Provider。
+- 可达动作在发送前显示连接显示名、精确模型、任务、发送/不发送范围、本地/远程去向、精确调用上限、0 自动重试与费用状态；确认 fingerprint 与当前连接/模型/能力漂移时，Provider 调用增量为 0。
+- 快速 AI 连接的固定短探针也先显示精确目标、1 次调用、0 次重试、最多 64 个输出 token、费用未知和不发送作品内容；连接元数据检查本身不隐式发起模型生成。
+- Settings 两个固定、无作品内容的 probe 入口已完成点击冻结、fingerprint authority、同一 prepared input 持久化和 `gateway.generate` 前的表单/fingerprint/权威身份复核；四类漂移为 0 call，成功精确 1 call。豆包 Endpoint ID 非空时优先作为唯一有效模型，同一值进入普通披露、授权、catalog/connection 保存与派发，双字段不一致不能再确认 A 发送 B；Provider dispatch surface 当前无剩余 P0/P1。
+- 旧 post-dispatch/ambiguous 续写 fallback、普通检查页 AI review、导入批处理隐藏 Agent、无授权连续状态/摘要、translation/short-drama governed dispatch 和普通搜索的向量/rerank 入口均保持关闭；权威提取需 `authoritativeExtraction + graphRag` 双开关，Multi-Agent 默认关闭且受 guard，rerank 没有 production caller。缺 route/能力/凭据时显示跳过或失败，不使用伪 Provider 结果。
+- 设置 → 写作体验提供“撤销本地整理授权”；该授权只涵盖接受后的本地普通设定整理，不授权联网、接受正文或重大设定。Provider disclosure grant 仍按 fingerprint 失配、同族轮换、active 128、恢复与历史审计合同治理；本轮不要求普通 UI 逐 grant 管理。
+
+#### 四格式图片导出与真实保存回执
+
+- Markdown 使用 data URI，DOCX/EPUB 写入真实 media 与关系，PDF 对本地 Blob 解码后绘制图像页。只接受通过 CRC/结构验证的内联 PNG/基线 JPEG 或由项目显式提供的内存资产；path 只是项目键，不读磁盘或网络。安全上限为 128 图、4 MiB/图、24 MiB 总量、8192 边长和 2000 万像素。
+- Tauri 先由原生对话框签发一次性目标 ticket，写入前重验父目录/已选文件身份和竞态，用 no-clobber 原子安装或 `ReplaceFileW`，写后回读字节、大小与 SHA-256。只有此验证成功才返回含 format/fileName/绝对 path/bytes/status 的成功回执；取消为 0 写入，失败不泄露 path。
+- 浏览器开发模式只记录 `browser_download / path_not_available`，不冒充保存位置或磁盘回读已验证。真实 Windows Tauri 保存对话框、Markdown/DOCX/PDF/EPUB 由四个独立应用实际打开仍为 `BLOCKED_EXTERNAL`。
+
+#### 前端包体守卫
+
+- 沿用 7 MiB（7,340,032 bytes）前端总预算；入口 300 KiB、异步 chunk 500 KiB、CSS 128 KiB、worker 1,536 KiB、通用资产 2 MiB 的单文件上限不变。
+- 该数字是当前门禁，不是永远禁止调整。只有冻结 build 的 source graph 证明实际需要时，才可记录精确新增字节、必要性、替代方案、保留余量与各单文件守卫后做有界修改；不得为通过门禁无节制抬高总量或掩盖单个大文件。
+- 调整前必须排除重复模块、测试/HMR/sourcemap、错误静态依赖和可安全拆分的重型模块；总量优先只增加 128/256 KiB，确实无法拆分的单文件才按 32/64 KiB 最小增量调整。同步更新所有守卫并记录调整前后预算、physical dist、policy payload、余量和最大 chunk；不得排除 async 包、改变统计口径或临时关闭检查。
+- Agent 重型入口保持延迟加载；没有通过排除异步包、移动测试代码或放宽单文件上限绕过检查。
+- 最终 payload、最大入口、最大异步 chunk 和余量均为 `FINAL_BUILD_PENDING`，只能从冻结候选的 production build 回填；若确需增额，必须先给出 bundle graph、重复依赖与 lazy 边界审计证据，并记录增额原因与精确差值。
+
+### 当前证据与不得外推的边界
+
+- 本轮未读取真实 API Key，未执行真实 Provider 或付费调用；模型链测试只允许严格 fake/mock。
+- 当前非冻结工作树已完成 17 个共享包、Cloud/Web、20/21 workspace typecheck、秘密/边界/许可证/
+  Desktop 发布配置和 Rust fmt + clippy `-D warnings` + 169 passed / 1 explicit local Ollama ignored；
+  精确命令与逐包数字见 `TEST_RESULTS.md`。这些分项不等于最终冻结候选门禁。
+- 续写披露聚焦回归为 31/31 PASS；开书链聚焦 2 files / 79 tests PASS，覆盖四类动作的二次确认、
+  取消 0-call 与 route/cost/source/privacy 最终复核。Settings 固定能力探针先前实际收集 3 files /
+  69 tests PASS，最终固定 probe 与豆包有效模型统一复跑 1 file / 55 tests PASS；图片生成/普通编辑器
+  聚焦 3 files / 46 tests PASS。冻结全量与真实 Provider 仍待验收，不得把这些分项提前写成全入口
+  最终证明。
+- 旧导入 Provider 入口关闭后的历史隔离 Candidate 决定链已定向复跑 5/5 PASS；已保存 Candidate
+  仍需作者显式接受，接受阶段 0 Provider 并创建新不可变版本。首次 4 pass / 1 fail 是测试 fixture
+  错用 continuation intent 后被产品安全拒绝，修正仅限 fixture；完整 Desktop 仍待冻结后重跑。
+- Candidate 决策共享链已用精确 7 文件命令权威复跑 59/59 PASS；冻结 production Chromium
+  全矩阵与真实 Tauri 仍分别保持 `PENDING_FINAL_RUN` / `BLOCKED_EXTERNAL`。
+- 一致性调查与独立修复披露聚焦 2 files / 36 tests PASS，相关 5 文件 ESLint/Prettier PASS；最新
+  Desktop typecheck 也已复跑 PASS。冻结候选仍须执行最新全 workspace typecheck、完整 Desktop
+  测试和 release 门禁。
+- Provider 面与普通 UI ID 聚焦 4 files / 22 tests PASS；受限沙箱首跑因依赖 ACL 启动失败，同命令
+  完整权限复跑通过。7 文件 ESLint 的受限首跑产生 418 个依赖类型不可读连锁错误，完整权限复跑
+  0 error；Prettier 和 scoped diff 首跑即 PASS。Settings 最终 2 文件 ESLint/Prettier/diff 与 Desktop
+  typecheck 也通过；Provider dispatch surface 当前无剩余 P0/P1。
+- 分项自动化、真实临时 SQLite、Rust/Tauri 单元集成和静态 Chromium 证据见 [`TEST_RESULTS.md`](TEST_RESULTS.md)；冻结候选完整 `release:check` 与 production build 仍以最后一次实际结果为准。
+- 真实 Windows Tauri/Wry、Credential Manager、系统 200% DPI、升级/卸载、Provider 故障矩阵与长篇付费调用均为 `NOT_RUN / NOT_RETESTED`。
+- 真实 Tauri 导出保存对话框与 Markdown/DOCX/PDF/EPUB 外部应用打开均为 `BLOCKED_EXTERNAL`；结构解析、浏览器下载和 Rust 文件写入测试不替代它们。
+- 当前工作树不是发布制品；在唯一提交、main CI、标签、安装包、manifest、`SHA256SUMS` 与回下载校验全部有实际证据前不得把 v0.2.5 写成已发布。
+
+### 待生成的发布追踪
+
+| 属性                     | 当前值                        | 回填规则                                                               |
+| ------------------------ | ----------------------------- | ---------------------------------------------------------------------- |
+| 来源 Commit              | `FINAL_COMMIT_PENDING`        | 必须是构建来源的唯一干净提交                                           |
+| `v0.2.5` tag peel        | `TAG_PENDING`                 | 必须精确等于来源 Commit；既有 `v0.2.4` 不得移动或复用                  |
+| Windows x64 NSIS 文件名  | `PACKAGE_PENDING`             | 从最终 Tauri/NSIS 产物读取                                             |
+| 安装包字节数 / SHA-256   | `PACKAGE_HASH_PENDING`        | 从最终文件计算，不得沿用 v0.2.3/v0.2.4 或中间构建                      |
+| Authenticode             | `SIGNATURE_CHECK_PENDING`     | 对最终安装包实际检查                                                   |
+| Release manifest         | `MANIFEST_PENDING`            | 记录来源提交、源指纹、文件字节和 SHA-256                               |
+| `SHA256SUMS`             | `CHECKSUM_ATTACHMENT_PENDING` | 只能由最终公开附件生成并在回下载后复核                                 |
+| production bundle        | `FINAL_BUILD_PENDING`         | 记录 payload、最大入口、最大异步 chunk、CSS 和既有守卫                 |
+| production benchmark     | `FINAL_BENCHMARK_PENDING`     | 在唯一冻结 Commit 上运行 5k/20k/50k/200k、≥30 样本，保存原始结果与汇总 |
+| PR / main CI             | `REMOTE_CI_PENDING`           | 记录对应唯一提交的实际 run 与结论                                      |
+| GitHub Release           | `RELEASE_PENDING`             | 记录实际 URL、发布时间、`draft`/`prerelease` 和公开附件列表            |
+| Windows Tauri / Provider | `NOT_RUN / NOT_RETESTED`      | 只能由第二阶段真实测试报告更新，发布动作本身不能自动把它改成 PASS      |
+
+### 中文 Release notes（待发布）
+
+InkShadow v0.2.5 是一次面向 Windows 桌面端的安全与写作体验工程预览更新。
+
+本次更新加入直接/专业写作模式：首次启用只授权确定性本地整理，不授权额外联网或自动接受正文；
+第一次真实续写会另行披露 Provider、精确模型、发送范围、预算、费用状态和隐私边界。生成成功后
+仍先形成隔离 Candidate，作者明确选择“使用这版”后才由本地事务接受并创建不可变版本。
+普通设定随后只针对新增 delta 在本机整理，界面提示“已整理 N 条”，重大设定继续等待作者确认。配置模型
+不代表同意后台发送正文，私密章节继续在远程派发前失败关闭。
+
+“检查”页新增受控长篇一致性调查：固定只读工具、确认后最多 1 次模型调用、0 次自动重试，
+取消、崩溃或结果不明确时不会自动重发，也不会直接改写正文。本地 StoryMemory/FTS 查询规划和
+检索评估同时补强。已核验 finding 可在单独查看 Provider、模型、范围、费用和隐私后，再确认一次
+独立的 1 call/0 retry 修复动作；结果只进入隔离 Candidate，取消、无效输出、结果不明或重启均不
+自动重发，接受仍由现有事务创建不可变版本。自动多模型 fallback 与动态 replanning 仍未作为已
+完成功能发布。
+修复动作只在既有 task metadata 中保存内容无关的 invocation、trace、目标版本和请求指纹；启动
+对账只结清 planned/bound/dispatched/迟到成功窗口，不恢复发送权限。发送后取消统一显示结果不明，
+晚到内容不创建 Candidate。修复上下文目前只使用 L0/L1 中与 finding 精确匹配的 EvidenceRef，
+FTS/causal 计数收据不能冒充权威正文或设定证据。
+
+导出链现在能把经安全校验的 PNG/基线 JPEG 真实嵌入 Markdown、DOCX、EPUB 和图像型 PDF。
+Tauri 只在一次性保存票据、原子写入与磁盘回读核验全部成功后显示格式、文件名、绝对路径、
+字节和成功状态；浏览器只说明已发起下载且路径不可核验。真实 Windows Tauri 对话框和四个外部应用的
+实际打开仍待第二阶段人工验证。
+
+本版本继续保留 Candidate 隔离、本地优先、不可变版本和 forward-only migration，并沿用 7 MiB
+总包体预算及既有单文件上限。最终安装包文件名、字节数、SHA-256、manifest、`SHA256SUMS`、
+来源提交、远端 CI 与 Release URL 必须在实际打包和发布后按上表回填。
+
+当前证据来自 fake/mock、真实临时 SQLite、Rust/Tauri 单元集成与静态 Chromium。真实 Provider、
+Windows Tauri/Wry、Credential Manager、系统 200% DPI、升级/卸载和长篇付费调用仍为
+`NOT_RUN / NOT_RETESTED`。当前按未签名工程预览准备，最终签名状态仍须对安装包实际检查；
+不应承载敏感正文、唯一数据副本或正式生产任务。
+
+## v0.2.4 已发布 Pre-release 中文说明与追踪
+
+> Release：<https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.4>  
+> 发布类型：GitHub Pre-release  
+> 支持平台：Windows 10 / 11 x64  
+> 签名状态：本轮远端元数据审计未重新下载检查 Authenticode，不从历史候选说明推断最终文件签名
+
+v0.2.4 已作为针对 v0.2.3 真实 Windows Tauri 用户测试反馈的安全修复版公开，继续遵守本地优先、
 Candidate 隔离和作者最终确认原则。它不是 Beta、GA 或商业正式版。
 
 ### 本次更新
@@ -60,20 +230,21 @@ Candidate 隔离和作者最终确认原则。它不是 Beta、GA 或商业正�
 
 - 当前源码记录的完整 `release:check`、Rust/Tauri 原生门禁、真实临时 SQLite 与 production Chromium 均已通过；精确命令和结果见 [`TEST_RESULTS.md`](TEST_RESULTS.md)。
 - 本轮没有读取真实 API Key，没有执行真实 Provider 或付费调用。
-- `v0.2.4` 唯一干净候选、NSIS 打包、PR/main CI、标签、公开附件与 Release 回下载校验仍为 `NOT_RUN`；不得沿用 `v0.2.3` 的提交、大小或哈希。
+- `v0.2.4` 已从唯一提交生成标签并公开 Pre-release 与三个附件；来源、字节和 SHA-256 见下表。
+- 本轮只读审计复核了远端 Release 元数据和附件摘要，没有重新运行当时的 PR/main CI，也没有回下载附件复算哈希。
 - 修复版 Windows Tauri/Wry + Credential Manager 第二阶段复测、真实 DeepSeek 故障矩阵、Windows 系统 200% DPI 和另一台电脑安装仍为 `NOT_RUN / NOT_RETESTED`。
 
-### 待生成的发布追踪
+### 已发布追踪
 
-| 属性                   | 当前状态                                                        |
-| ---------------------- | --------------------------------------------------------------- |
-| 来源 Commit / tag peel | `NOT_RUN`；仅在唯一干净候选和公开标签实际存在后填写             |
-| Windows x64 NSIS       | `NOT_RUN`；文件名、字节数与 SHA-256 必须从最终安装包读取        |
-| Authenticode           | 预期为 `NotSigned`，仍须对最终安装包实际检查                    |
-| Release manifest       | `NOT_RUN`；字节数、SHA-256 与 `gitCommitSha` 必须从最终清单读取 |
-| SHA 校验附件           | `NOT_RUN`；只能由最终公开附件生成并回下载复核                   |
-| PR / main CI           | `NOT_RUN`；必须等待对应提交的两轮远端门禁实际结束               |
-| GitHub Release         | `NOT_RUN / NOT_RELEASED`；不得预填 URL、发布时间或公开状态      |
+| 属性                   | 已复核事实                                                                                                                              |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| 来源 Commit / tag peel | tag object `9f613572c7f6892ba5aca4700a784c79872457e2`；peel 与来源提交均为 `b74d36ef3342db6813d1d43771bc82c0ed2aa1fb`                   |
+| Windows x64 NSIS       | `InkShadow_0.2.4_x64-setup.exe`；7,482,560 bytes；SHA-256 `12ba4382c79f8c7a6bea8a310c21e4f0c0663c5a7e18e9b87729bb1057628c6c`            |
+| Authenticode           | 本轮未回下载检查；保持 `NOT_RECHECKED`                                                                                                  |
+| Release manifest       | 10,551 bytes；SHA-256 `7e0a8d2cd34c38948fcf880be43c4c44b844cfe4f6df9f7870a290c7ee4016f5`                                                |
+| SHA 校验附件           | `SHA256SUMS`；194 bytes；SHA-256 `aaf721500f73cdad58b6d59b8babb9ee9924b16affc16e098b7dfc74d88262f4`                                     |
+| PR / main CI           | 本轮未重新查询；保持历史记录，不从 Release 存在反推 CI 结果                                                                             |
+| GitHub Release         | <https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.4>；`draft=false`、`prerelease=true`、`publishedAt=2026-08-14T06:19:17Z` |
 
 ### 中文 Release notes（待发布）
 
@@ -350,8 +521,8 @@ Release manifest 用于核对源码提交、源码指纹和前端制品指纹；
 
 ## v0.2.4 修复版第二阶段真实 Windows Tauri 测试 Prompt
 
-> 适用对象：`v0.2.4` 唯一干净候选提交和对应 Windows Tauri 安装包。  
-> 当前结论：`CODE_FIXED / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`。  
+> 适用对象：`v0.2.4` 已发布唯一提交和对应 Windows Tauri 安装包。  
+> 当前结论：`RELEASED_PREVIEW / CODE_FIXED_AUTOMATION / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN`。  
 > 调用预算：阶段 A 最多 6 次低成本真实模型动作；安全门禁通过后，阶段 B 才可进行 20–30 次长篇调用。
 
 请在第二台 Windows 电脑上执行下列任务。测试人员可在 InkShadow 界面中手动输入自己的 Provider 凭据，但不得让
@@ -428,8 +599,10 @@ connection/catalog/provider/model/route/revision/capability、dispatch boundary/
 
 ## 发布结论
 
-`v0.2.4` 当前只是安全修复候选，唯一干净候选、制品哈希、远端 CI、标签和公开 Release 均须以
-实际结果补录；真实 Provider 与修复版 Windows Tauri 第二阶段复测保持 `NOT_RUN / NOT_RETESTED`。
+`v0.2.5` 当前只是 Pre-release 候选。唯一干净提交、制品哈希、远端 CI、标签和公开 Release
+均须以实际结果回填上方占位；真实 Provider 与 Windows Tauri 第二阶段复测保持
+`NOT_RUN / NOT_RETESTED`。`v0.2.4` 是当前最新公开 Pre-release 与既有标签基线，不能复用、移动
+或静默替换。
 
 `v0.2.3` 的唯一提交、完整候选链、制品哈希、GitHub Actions、标签与公开附件回读已经完成；
 真实 Tauri WebView + Keyring 冷启动、另一台电脑安装、192 次付费调用、2,496 项人工评分和真实 Provider
@@ -437,4 +610,4 @@ connection/catalog/provider/model/route/revision/capability、dispatch boundary/
 签名、真实供应商全矩阵、百万字真实作品全链路/WebView 压力、法律审批、生产部署与独立安全审计
 也仍有未关闭门禁。
 
-**当前结论：`v0.2.3` 已公开为不可静默替换的未签名 Pre-release；它不是 Beta、GA 或商业正式版。上述外部验证完成前，不得扩大发布结论。**
+**当前结论：`v0.2.4` 已公开为不可静默替换的最新 Pre-release；`v0.2.3` 的隐式云调用安全公告继续有效，`v0.2.5` 仍为待最终门禁、打包与发布的候选。它们都不是 Beta、GA 或商业正式版；上述外部验证完成前不得扩大发布结论。**

@@ -1,35 +1,41 @@
 # InkShadow 下一阶段产品重构基线
 
 > 基线日期：2026-08-01  
-> 最近复核：2026-08-14（DESIGN v0.3.1b、v0.2.3 历史发布与 v0.2.4 安全修复候选）  
+> 最近复核：2026-08-20（DESIGN v0.3.1b、已发布 v0.2.4 基线与 v0.2.5 Pre-release 候选）  
 > 文档状态：`AUTHORITATIVE_CURRENT`（本目录索引与冲突规则）  
-> 当前源码目标版本：`0.2.4`；最近已发布版本：`0.2.3`；设计基线：`DESIGN v0.3.1b`  
+> 当前应用清单版本：`0.2.5`；已发布 `v0.2.4` 标签基线之后是当前 Pre-release 候选修改；设计基线：`DESIGN v0.3.1b`  
 > 适用范围：桌面端个人创作主链路、Model Hub、后续小说智能内核
 
 本目录是 2026-08-01 起的产品重构执行基线。它不删除旧文档中仍然有效的安全、数据、
 同步和商业约束，但在首页、创作工作区、开书流程、导入改写和模型配置方面取代旧的
 “系统模块驱动”信息架构。
 
-DESIGN v0.3.1b 是 P01–P44 的视觉与交互目标版本，不是安装包版本。当前应用与数据库目标版本
-为 0.2.4，最近已发布工程预览安装包版本为 0.2.3；v0.2.4 安全修复候选尚未重新打包或发布。
+DESIGN v0.3.1b 是 P01–P44 的视觉与交互目标版本，不是安装包版本。当前应用清单为 0.2.5；
+已发布 annotated tag `v0.2.4` 指向基线提交 `b74d36ef3342db6813d1d43771bc82c0ed2aa1fb`。当前
+未提交实现是 `v0.2.5` Pre-release 候选；在最终门禁、唯一提交、安装包和远端发布实际完成前，
+不得把它写成已发布版本。
 
 ## 文档状态与阅读顺序
 
-| 顺序 | 状态                        | 文档                                                                           | 用途                                                |
-| ---: | --------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------------- |
-|    1 | `HISTORICAL`                | [Phase 0 真实能力审计](00-PHASE-0-REALITY-AUDIT.md)                            | 记录 2026-08-01 重构起点；第 1–6 节不是当前实现结论 |
-|    2 | `AUTHORITATIVE_CURRENT`     | [新旧信息架构与核心用户流程](01-INFORMATION-ARCHITECTURE-AND-FLOWS.md)         | 三入口、四区工作台、术语和核心流程                  |
-|    3 | `AUTHORITATIVE_CURRENT`     | [数据复用与迁移方案](02-DATA-REUSE-AND-MIGRATION.md)                           | 复用、前向迁移、兼容、备份与回滚                    |
-|    4 | `AUTHORITATIVE_CURRENT`     | [实施计划、验收标准、风险与回滚](03-DELIVERY-PLAN-ACCEPTANCE-ROLLBACK.md)      | Phase 0–5 顺序与门禁                                |
-|    5 | `SUPPORTING_CURRENT`        | [统一故事状态库](04-PHASE-3-UNIFIED-STORY-STATE.md)                            | StoryFact 的生产、治理和消费边界                    |
-|    6 | `SUPPORTING_CURRENT`        | [分层上下文编译器](04-PHASE-3-CONTEXT-COMPILER.md)                             | 十二层上下文、来源和预算审计                        |
-|    7 | `SUPPORTING_CURRENT`        | [导入作品分析闭环](05-PHASE-1-IMPORT-WORK-ANALYSIS.md)                         | 导入分析、试改和 StoryFact 候选边界                 |
-|    8 | `SUPPORTING_CURRENT`        | [Phase 3–5 真实能力台账](06-PHASE-3-TO-5-CAPABILITY-LEDGER.md)                 | 当前条件可用范围与未达标项；不替代当次测试证据      |
-|    9 | `SUPPORTING_CURRENT`        | [图片生成最小闭环](07-PHASE-5-IMAGE-GENERATION.md)                             | 当前图片协议与限制                                  |
-|   10 | `HISTORICAL_WITH_INCREMENT` | [DESIGN v0.3.1b 真实落地审计](08-DESIGN-V031B-REALITY-MATRIX.md)               | checkpoint 差距和后续增量；不是当前 P01–P44 验证表  |
-|   11 | `SUPPORTING_CURRENT`        | [ProjectSeed 与三条创建旅程](09-PROJECT-SEED-AND-CREATION-JOURNEYS.md)         | 共享创建输入和上下文映射                            |
-|   12 | `SUPPORTING_CURRENT`        | [已接受正文的派生资料管线与恢复](10-ACCEPTED-VERSION-PIPELINE-AND-RECOVERY.md) | 正文安全提交后的可重建任务                          |
-|   13 | `SUPPORTING_CURRENT`        | [Novel Skill 现状审计、最小合同与启用门禁](11-NOVEL-SKILL-AUDIT-AND-DESIGN.md) | Skill 实验性作者 opt-in 运行链、精确回执和 A/B 门禁 |
+| 顺序 | 状态                        | 文档                                                                                     | 用途                                                             |
+| ---: | --------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+|    1 | `HISTORICAL`                | [Phase 0 真实能力审计](00-PHASE-0-REALITY-AUDIT.md)                                      | 记录 2026-08-01 重构起点；第 1–6 节不是当前实现结论              |
+|    2 | `AUTHORITATIVE_CURRENT`     | [新旧信息架构与核心用户流程](01-INFORMATION-ARCHITECTURE-AND-FLOWS.md)                   | 三入口、四区工作台、术语和核心流程                               |
+|    3 | `AUTHORITATIVE_CURRENT`     | [数据复用与迁移方案](02-DATA-REUSE-AND-MIGRATION.md)                                     | 复用、前向迁移、兼容、备份与回滚                                 |
+|    4 | `AUTHORITATIVE_CURRENT`     | [实施计划、验收标准、风险与回滚](03-DELIVERY-PLAN-ACCEPTANCE-ROLLBACK.md)                | Phase 0–5 顺序与门禁                                             |
+|    5 | `SUPPORTING_CURRENT`        | [统一故事状态库](04-PHASE-3-UNIFIED-STORY-STATE.md)                                      | StoryFact 的生产、治理和消费边界                                 |
+|    6 | `SUPPORTING_CURRENT`        | [分层上下文编译器](04-PHASE-3-CONTEXT-COMPILER.md)                                       | 十二层上下文、来源和预算审计                                     |
+|    7 | `SUPPORTING_CURRENT`        | [导入作品分析合同与停用边界](05-PHASE-1-IMPORT-WORK-ANALYSIS.md)                         | 安全导入、历史 Candidate 决定链及新 Provider 入口关闭事实        |
+|    8 | `SUPPORTING_CURRENT`        | [Phase 3–5 真实能力台账](06-PHASE-3-TO-5-CAPABILITY-LEDGER.md)                           | 当前条件可用范围与未达标项；不替代当次测试证据                   |
+|    9 | `SUPPORTING_CURRENT`        | [图片生成最小闭环](07-PHASE-5-IMAGE-GENERATION.md)                                       | 当前图片协议与限制                                               |
+|   10 | `HISTORICAL_WITH_INCREMENT` | [DESIGN v0.3.1b 真实落地审计](08-DESIGN-V031B-REALITY-MATRIX.md)                         | checkpoint 差距和后续增量；不是当前 P01–P44 验证表               |
+|   11 | `SUPPORTING_CURRENT`        | [ProjectSeed 与三条创建旅程](09-PROJECT-SEED-AND-CREATION-JOURNEYS.md)                   | 共享创建输入和上下文映射                                         |
+|   12 | `SUPPORTING_CURRENT`        | [已接受正文的派生资料管线与恢复](10-ACCEPTED-VERSION-PIPELINE-AND-RECOVERY.md)           | 正文安全提交后的可重建任务                                       |
+|   13 | `SUPPORTING_CURRENT`        | [Novel Skill 现状审计、最小合同与启用门禁](11-NOVEL-SKILL-AUDIT-AND-DESIGN.md)           | Skill 实验性作者 opt-in 运行链、精确回执和 A/B 门禁              |
+|   14 | `AUTHORITATIVE_CURRENT`     | [下一未发布写作/记忆/Agent 现实矩阵](12-NEXT-UNRELEASED-WRITING-MEMORY-AGENT-REALITY.md) | R12 映射、直接/专业模式、StoryMemory、Agent 与当前验证边界       |
+|   15 | `SUPPORTING_CURRENT`        | [本地 Agent 与 RAG 当前架构](13-LOCAL-AGENT-RAG-ARCHITECTURE.md)                         | 当前系统/容器/状态机/Tool/RAG/Candidate 图、离线指标与明确延期项 |
+|   16 | `AUTHORITATIVE_CURRENT`     | [v0.2.5 需求完成台账](14-V025-REQUIREMENT-COMPLETION-LEDGER.md)                          | 用户增量要求逐项状态、当前证据与最终门禁缺口                     |
+|   17 | `SUPPORTING_CURRENT`        | [TencentDB Agent Memory 只读适配审计](15-TENCENTDB-AGENT-MEMORY-ADAPTATION-AUDIT.md)     | 固定上游提交、许可证、分层/检索/资产治理取舍及公开风险           |
 
 ## 总指令交付覆盖
 
@@ -48,16 +54,32 @@ DESIGN v0.3.1b 是 P01–P44 的视觉与交互目标版本，不是安装包版
 “覆盖”表示要求已经被文档化，不表示相应代码、真实供应商、Windows 安装矩阵或长篇性能已经
 全部验收。
 
+2026-08-20 之后判断直接/专业模式、本地设定整理、StoryMemory/Narrative、Production Agent/TaskGraph、`0066`–
+`0070`、SQLite reload、四格式导出和视觉证据时，以第 14 份增量现实矩阵为准；第 15 份文档解释当前本地
+Agent/RAG 架构及其延期边界。R12 报告只属于另一个工作区
+提交 `6abd16c` 的历史证据，不能覆盖当前代码事实。
+
+当前迁移头为 Data `0070`；70 个 Data migration 与 3 个 story-core migration 合并为 Tauri
+internal `73`。`0069` 的 content-free planned invocation 预留、重启后的 ledger/run 结清与 task
+对账，以及 `0070` 的多粒度搜索范围与备份恢复合同，以第 3、14、15 份文档为准。
+当前恢复 allowlist 为 172 张表；唯一不恢复的应用表仍是临时远程派发租约。
+
 ## 当前状态速览
 
-| 阶段    | 当前判定                       | 说明                                                                                                                                                                                                                                                                                  |
-| ------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Phase 0 | 历史基线完成                   | 起始审计已归档；当前实现差异以第 6、8 份增量台账及当前执行证据为准                                                                                                                                                                                                                    |
-| Phase 1 | 主链路已接线，待完整矩阵验收   | 三入口、可恢复开书/导入、创建前摘要、四区工作区、AI 建议版本安全链和作品库状态已有当前代码路径                                                                                                                                                                                        |
-| Phase 2 | 主链路已接线，待真实供应商矩阵 | Model Hub 连接、目录、能力证据、小说任务路由、主备、调用账本和普通用户状态已有当前代码路径                                                                                                                                                                                            |
-| Phase 3 | 条件可用、接受链已本地化       | 接受 AI 建议、导入建议、恢复版本或手动保存后只持久登记本地搜索与因果/故事关联任务，并支持启动补跑和人工重试；该后台链及旧作品回填的 Provider 调用上限均为 0。云端章节摘要与连续故事状态按钮当前停用，等待独立授权、派发边界和结果不明确恢复合同；ProjectSeed 确认字段仍进入续写上下文 |
-| Phase 4 | 条件可用、证据处置闭环         | 确定性检查逐类披露已检查/证据不足；声纹、POV、多线、伏笔和节奏提醒携带证据并支持持久忽略、允许与撤销。检查页另有只读 AI 模糊复核与内容质量建议；未配置路由、能力或证据不足时明确跳过，不会冒充“通过”或自动修改正文                                                                    |
-| Phase 5 | 条件闭环                       | 因果 What-if、可见且原子幂等的反馈学习、基础模型评测、统一证据深度审稿、图片生成和可审阅 AI 剧情规划已接入；规划仍由用户按需触发并明确采纳，不是后台自动持续改大纲；真实供应商效果仍需外部凭据验收                                                                                    |
+| 阶段    | 当前判定                       | 说明                                                                                                                                                                                                                                               |
+| ------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Phase 0 | 历史基线完成                   | 起始审计已归档；当前实现差异以第 6、8 份增量台账及当前执行证据为准                                                                                                                                                                                 |
+| Phase 1 | 本地导入与历史决定链已接线     | 三入口、安全导入、创建前摘要、四区工作区、作品库和历史隔离 Candidate 显式决定已有当前代码路径；旧导入入口因缺完整精确披露而关闭新的 Provider 分析/试改/逐章生成，待统一确认链后再开放                                                              |
+| Phase 2 | 主链路已接线，待真实供应商矩阵 | Model Hub 连接、目录、能力证据、小说任务路由、主备、调用账本和普通用户状态已有当前代码路径                                                                                                                                                         |
+| Phase 3 | 本地主链已接线，接受链本地化   | 接受 AI 建议、导入建议、恢复版本或手动保存后只持久登记本地 FTS 与因果/故事关联任务；该后台链及旧作品回填的 Provider 上限均为 0。云端摘要/连续状态、普通 vector/rerank 入口停用且 rerank 无 production caller；ProjectSeed 确认字段仍进入续写上下文 |
+| Phase 4 | 条件可用、证据处置闭环         | 确定性检查逐类披露已检查/证据不足；声纹、POV、多线、伏笔和节奏提醒携带证据并支持持久忽略、允许与撤销。旧批量 AI 模糊/质量复核入口已安全关闭；需要模型时使用另行披露、确认和记账的有界一致性调查，结果仍只读且修复只进入隔离 Candidate              |
+| Phase 5 | 条件闭环                       | 因果 What-if、可见且原子幂等的反馈学习、基础模型评测、统一证据深度审稿、图片生成和可审阅 AI 剧情规划已接入；规划仍由用户按需触发并明确采纳，不是后台自动持续改大纲；真实供应商效果仍需外部凭据验收                                                 |
+
+2026-08-20 Provider 面审计已固定当前可达动作与安全关闭旧入口；Settings 两个固定、无作品内容的
+probe 入口已完成点击冻结、fingerprint authority、同一 prepared input 持久化和派发前权威重检，
+豆包 Endpoint ID/模型也统一为同一有效身份，聚焦 55/55 PASS。Provider dispatch surface 当前无
+剩余 P0/P1。Provider/UI ID 聚焦 4 files / 22 tests 在受限沙箱依赖 ACL 首跑失败后以同命令完整
+权限复跑 PASS；冻结全量与真实 Provider 仍待。
 
 跨阶段体验已补充“跟随系统 / 浅色 / 深色”三态外观。选择保存在本机，应用挂载前即生效；
 设置页可随时更改，编辑纸张仍维持独立的长文阅读表面。

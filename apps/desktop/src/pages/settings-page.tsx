@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MODEL_ROUTE_ROLES, type ModelRouteRole } from "@inkshadow/ai-core";
 import type { DatabaseIntegrityReport, NativePathTicket } from "@inkshadow/data";
 import type { MemoryPolicy, MemoryRecord } from "@inkshadow/story-core";
@@ -21,6 +21,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { useAppearancePreference } from "../appearance-preference";
 import { DataTransferPanel } from "../components/data-transfer-panel";
+import { DirectModeAuthorizationDialog } from "../components/direct-mode-authorization-dialog";
 import {
   ModelHubSelectableCatalogBrowser,
   type ModelHubSelectableCatalogConnectedModel,
@@ -33,6 +34,7 @@ import {
   type NovelSkillPaidEvaluationTargetOption,
 } from "../components/novel-skill-paid-evaluation-panel";
 import { useOnlineStatus } from "../hooks/use-online-status";
+import { useWritingExperience } from "../hooks/use-writing-experience";
 import { collectDesktopDiagnosticArtifact } from "../infrastructure/diagnostics";
 import type { AutomaticBackupRuntimeCheckResult } from "../infrastructure/automatic-backup-runtime";
 import {
@@ -128,6 +130,9 @@ import {
 } from "../infrastructure/model-hub-ui-diagnostics";
 import { ModelHubLocalEvaluationService } from "../infrastructure/model-hub-local-evaluation-service";
 import {
+  MODEL_HUB_TEXT_CAPABILITY_PROBE_DISPATCH_SCOPE,
+  MODEL_HUB_TEXT_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
+  MODEL_HUB_TEXT_CAPABILITY_PROBE_MESSAGES,
   modelHubTextCapabilityProbeFailureMetadata,
   runModelHubTextCapabilityProbe,
 } from "../infrastructure/model-hub-text-capability-probe";
@@ -143,6 +148,12 @@ import {
   recommendConnectedModelsForTask,
   type ModelHubTaskRecommendation,
 } from "../infrastructure/model-hub-task-recommendation";
+import {
+  assertConfirmedModelHubTaskCapabilityProbeDisclosure,
+  ModelHubTaskCapabilityProbeDisclosureError,
+  prepareModelHubTaskCapabilityProbeDisclosure,
+  type ModelHubTaskCapabilityProbeDisclosure,
+} from "../infrastructure/model-hub-task-capability-probe-disclosure";
 import { providerRecommendationsForTask } from "../infrastructure/provider-recommendation-registry";
 import {
   SELECTABLE_MODEL_CATALOG_ENTRIES,
@@ -158,6 +169,7 @@ import {
   ModelHubFinalDispatchError,
   modelHubFinalDispatchIdentity,
 } from "../infrastructure/model-hub-final-dispatch-guard";
+import { providerActionFingerprint } from "../infrastructure/provider-action-disclosure";
 import {
   isRetiredModelProviderConnection,
   ModelHubStoreError,
@@ -181,7 +193,11 @@ import {
   type NativeModelDescriptor,
   type SecretSummary,
 } from "../infrastructure/runtime";
-import { normalizeUiError } from "../infrastructure/ui-error";
+import {
+  normalizeUiError,
+  projectOrdinaryUiError,
+  UiActionError,
+} from "../infrastructure/ui-error";
 import type {
   ModelPricingProfile,
   ModelProfile,
@@ -203,6 +219,44 @@ const DEFAULT_OPENAI_PROFILE = {
 const CONNECTABLE_PROVIDER_KINDS = MODEL_PROVIDER_KINDS;
 
 type ConnectableProviderKind = (typeof CONNECTABLE_PROVIDER_KINDS)[number];
+
+interface SettingsTextProbeFormSnapshot {
+  readonly providerId: string;
+  readonly providerKind: ConnectableProviderKind;
+  readonly loadedConnectionId: string | null;
+  readonly baseUrl: string;
+  readonly region: string;
+  readonly workspaceId: string;
+  readonly endpointId: string;
+  readonly authentication: NativeGatewayAuthenticationMode;
+  readonly credentialHeaderName: string;
+  readonly modelDiscoveryPath: string;
+  readonly textGenerationPath: string;
+  readonly embeddingPath: string;
+  readonly requestTimeoutMs: string;
+  readonly retryLimit: string;
+  readonly selectedModel: string;
+  readonly credentialConfigured: boolean;
+  readonly credentialEditRevision: number;
+}
+
+interface PreparedSettingsTextProbeAuthorization {
+  readonly form: SettingsTextProbeFormSnapshot;
+  readonly connectionInput: SaveModelProviderConnectionInput;
+  readonly submittedSecret: string | null;
+  readonly modelId: string;
+  readonly disclosureFingerprint: string;
+}
+
+class SettingsTextProbePostDispatchConflictError extends Error {
+  public readonly code = "MODEL_HUB_PROBE_TARGET_CHANGED_AFTER_DISPATCH";
+  public readonly retryable = true;
+
+  public constructor() {
+    super("The fixed probe target changed after the provider call and its result was not saved.");
+    this.name = "SettingsTextProbePostDispatchConflictError";
+  }
+}
 
 type SettingsPricingProfile = Omit<ModelPricingProfile, "contextWindowTokens"> & {
   readonly contextWindowTokens: number | null;
@@ -341,6 +395,7 @@ function isCompletePaidEvaluationCostProfile(
 
 export function SettingsPage() {
   const runtime = useRuntime();
+  const writingExperience = useWritingExperience();
   const {
     preference: appearance,
     resolvedSurface,
@@ -366,6 +421,7 @@ export function SettingsPage() {
     loadEditorPreferences(window.localStorage),
   );
   const [writingPreferenceError, setWritingPreferenceError] = useState<string | null>(null);
+  const [directAuthorizationOpen, setDirectAuthorizationOpen] = useState(false);
   const [summary, setSummary] = useState<SecretSummary>({
     configured: false,
     lastFour: null,
@@ -414,6 +470,11 @@ export function SettingsPage() {
   const [routeFallbackProviderId, setRouteFallbackProviderId] = useState("");
   const [routeSaving, setRouteSaving] = useState(false);
   const [recommendedTaskBusy, setRecommendedTaskBusy] = useState<NovelAiTask | null>(null);
+  const [taskProbeConfirmation, setTaskProbeConfirmation] = useState<Readonly<{
+    task: NovelAiTask;
+    recommendation: ModelHubTaskRecommendation;
+    disclosure: ModelHubTaskCapabilityProbeDisclosure;
+  }> | null>(null);
   const [expandedModelTasks, setExpandedModelTasks] = useState<readonly NovelAiTask[]>([]);
   const [configuredTaskPartitionExpanded, setConfiguredTaskPartitionExpanded] = useState(false);
   const [missingTaskPartitionExpanded, setMissingTaskPartitionExpanded] = useState(false);
@@ -481,6 +542,47 @@ export function SettingsPage() {
   const [probingCapability, setProbingCapability] = useState(false);
   const [capabilityProbeMessage, setCapabilityProbeMessage] = useState<string | null>(null);
   const [capabilityProbeError, setCapabilityProbeError] = useState<unknown>(null);
+  const credentialEditRevisionRef = useRef(0);
+  const settingsTextProbeFormRef = useRef<SettingsTextProbeFormSnapshot | null>(null);
+  useLayoutEffect(() => {
+    settingsTextProbeFormRef.current = Object.freeze({
+      providerId,
+      providerKind: providerPreset,
+      loadedConnectionId: hubConnection?.id ?? null,
+      baseUrl,
+      region,
+      workspaceId,
+      endpointId,
+      authentication,
+      credentialHeaderName,
+      modelDiscoveryPath,
+      textGenerationPath,
+      embeddingPath,
+      requestTimeoutMs,
+      retryLimit,
+      selectedModel,
+      credentialConfigured: summary.configured || secret.trim().length > 0,
+      credentialEditRevision: credentialEditRevisionRef.current,
+    });
+  }, [
+    authentication,
+    baseUrl,
+    credentialHeaderName,
+    embeddingPath,
+    endpointId,
+    hubConnection?.id,
+    modelDiscoveryPath,
+    providerId,
+    providerPreset,
+    region,
+    requestTimeoutMs,
+    retryLimit,
+    secret,
+    selectedModel,
+    summary.configured,
+    textGenerationPath,
+    workspaceId,
+  ]);
   const [credentialError, setCredentialError] = useState<unknown>(null);
   const [retirementMessage, setRetirementMessage] = useState<string | null>(null);
   const [retireConnectionTarget, setRetireConnectionTarget] =
@@ -1139,44 +1241,164 @@ export function SettingsPage() {
     setSchemeMessage("已恢复供应商默认连接参数；系统凭据、已保存连接和 AI 分工均未删除。");
   }
 
-  async function modelHubConnectionInput(
-    credentialConfigured = summary.configured,
-    authenticationOverride: NativeGatewayAuthenticationMode = authentication,
-  ): Promise<SaveModelProviderConnectionInput> {
-    const existing = await findOwnedConnectionTarget();
-    const resolvedBaseUrl = resolveProviderBaseUrl(providerPreset, {
+  function captureSettingsTextProbeForm(): SettingsTextProbeFormSnapshot {
+    return Object.freeze({
+      providerId,
+      providerKind: providerPreset,
+      loadedConnectionId: hubConnection?.id ?? null,
+      baseUrl,
       region,
       workspaceId,
-      baseUrlOverride: baseUrl,
+      endpointId,
+      authentication,
+      credentialHeaderName,
+      modelDiscoveryPath,
+      textGenerationPath,
+      embeddingPath,
+      requestTimeoutMs,
+      retryLimit,
+      selectedModel,
+      credentialConfigured: summary.configured || secret.trim().length > 0,
+      credentialEditRevision: credentialEditRevisionRef.current,
     });
-    return {
-      id: providerId,
-      providerKind: providerPreset,
-      displayName: getModelProviderPreset(providerPreset).displayName,
-      region: region.trim().length === 0 ? null : region,
-      workspaceId: workspaceId.trim().length === 0 ? null : workspaceId,
-      endpointId: endpointId.trim().length === 0 ? null : endpointId,
+  }
+
+  function assertSettingsTextProbeFormUnchanged(expected: SettingsTextProbeFormSnapshot): void {
+    const current = settingsTextProbeFormRef.current;
+    if (
+      current === null ||
+      settingsTextProbeFormIdentity(current) !== settingsTextProbeFormIdentity(expected)
+    ) {
+      throw settingsTextProbeDisclosureChanged();
+    }
+  }
+
+  async function modelHubConnectionInputFromSnapshot(
+    form: SettingsTextProbeFormSnapshot,
+    credentialConfigured: boolean,
+    authenticationOverride: NativeGatewayAuthenticationMode,
+  ): Promise<SaveModelProviderConnectionInput> {
+    const existing = await runtime.modelHub.findConnection(form.providerId);
+    assertProbeConnectionTargetIsOwned(existing, form);
+    const resolvedBaseUrl = resolveProviderBaseUrl(form.providerKind, {
+      region: form.region,
+      workspaceId: form.workspaceId,
+      baseUrlOverride: form.baseUrl,
+    });
+    return Object.freeze({
+      id: form.providerId,
+      providerKind: form.providerKind,
+      displayName: existing?.displayName ?? getModelProviderPreset(form.providerKind).displayName,
+      region: form.region.trim().length === 0 ? null : form.region,
+      workspaceId: form.workspaceId.trim().length === 0 ? null : form.workspaceId,
+      endpointId: form.endpointId.trim().length === 0 ? null : form.endpointId,
       baseUrlOverride: resolvedBaseUrl,
       credentialRef:
         credentialConfigured && authenticationOverride !== "none"
-          ? (existing?.credentialRef ?? modelHubCredentialRef(providerId))
+          ? (existing?.credentialRef ?? modelHubCredentialRef(form.providerId))
           : null,
       credentialState:
         credentialConfigured && authenticationOverride !== "none" ? "present" : "missing",
       authenticationMode: authenticationOverride,
       credentialHeaderName:
-        providerPreset === "custom_openai_compatible" &&
+        form.providerKind === "custom_openai_compatible" &&
         authenticationOverride === "custom_header_keyring"
-          ? credentialHeaderName
+          ? form.credentialHeaderName
           : null,
-      modelDiscoveryPath: providerPreset === "custom_openai_compatible" ? modelDiscoveryPath : null,
-      textGenerationPath: providerPreset === "custom_openai_compatible" ? textGenerationPath : null,
-      embeddingPath: providerPreset === "custom_openai_compatible" ? embeddingPath : null,
-      requestTimeoutMs: Number(requestTimeoutMs),
-      retryLimit: Number(retryLimit),
+      modelDiscoveryPath:
+        form.providerKind === "custom_openai_compatible" ? form.modelDiscoveryPath : null,
+      textGenerationPath:
+        form.providerKind === "custom_openai_compatible" ? form.textGenerationPath : null,
+      embeddingPath: form.providerKind === "custom_openai_compatible" ? form.embeddingPath : null,
+      requestTimeoutMs: Number(form.requestTimeoutMs),
+      retryLimit: Number(form.retryLimit),
       enabled: authenticationOverride === "none" || credentialConfigured,
       expectedRevision: existing?.revision ?? null,
-    };
+    });
+  }
+
+  async function prepareSettingsTextProbeAuthorization(
+    form: SettingsTextProbeFormSnapshot,
+    submittedSecretValue: string,
+    requestedModelId: string,
+  ): Promise<PreparedSettingsTextProbeAuthorization> {
+    const modelId = requestedModelId.normalize("NFKC").trim();
+    if (modelId.length === 0) {
+      throw new Error("请先填写模型标识；豆包也可以填写 Endpoint ID。");
+    }
+    validateExpertConnectionDraft({
+      provider: form.providerKind,
+      baseUrl: form.baseUrl,
+      region: form.region,
+      workspaceId: form.workspaceId,
+      authentication: form.authentication,
+      credentialHeaderName: form.credentialHeaderName,
+      modelDiscoveryPath: form.modelDiscoveryPath,
+      textGenerationPath: form.textGenerationPath,
+      embeddingPath: form.embeddingPath,
+      requestTimeoutMs: form.requestTimeoutMs,
+      retryLimit: form.retryLimit,
+    });
+    const submittedSecret = submittedSecretValue.trim().length === 0 ? null : submittedSecretValue;
+    const credentialConfigured =
+      form.authentication !== "none" && (form.credentialConfigured || submittedSecret !== null);
+    const connectionInput = await modelHubConnectionInputFromSnapshot(
+      form,
+      credentialConfigured,
+      form.authentication,
+    );
+    assertSettingsTextProbeFormUnchanged(form);
+    const disclosureFingerprint = await settingsTextProbeFingerprintFromInput(
+      connectionInput,
+      modelId,
+    );
+    assertSettingsTextProbeFormUnchanged(form);
+    return Object.freeze({
+      form,
+      connectionInput,
+      submittedSecret,
+      modelId,
+      disclosureFingerprint,
+    });
+  }
+
+  async function persistPreparedSettingsTextProbeConnection(
+    prepared: PreparedSettingsTextProbeAuthorization,
+    token: ModelHubOperationToken,
+  ): Promise<ModelProviderConnection> {
+    assertSettingsTextProbeFormUnchanged(prepared.form);
+    if (prepared.submittedSecret === null || prepared.form.authentication === "none") {
+      return runtime.modelHub.saveConnection(prepared.connectionInput);
+    }
+    const saved = await saveModelHubCredential(runtime, {
+      connection: prepared.connectionInput,
+      secret: prepared.submittedSecret,
+    });
+    if (
+      modelHubOperationCoordinatorRef.current.isCurrent(token, {
+        providerKind: saved.connection.providerKind,
+        connectionId: saved.connection.id,
+      })
+    ) {
+      setHubConnection(saved.connection);
+      setSummary(saved.credential);
+      setSecret("");
+      if (saved.oldCredentialCleanupPending) {
+        setSchemeMessage("新密钥已安全保存；旧密钥槽将在下次启动或重试时继续清理。");
+      }
+    }
+    return saved.connection;
+  }
+
+  async function modelHubConnectionInput(
+    credentialConfigured = summary.configured,
+    authenticationOverride: NativeGatewayAuthenticationMode = authentication,
+  ): Promise<SaveModelProviderConnectionInput> {
+    return modelHubConnectionInputFromSnapshot(
+      captureSettingsTextProbeForm(),
+      credentialConfigured,
+      authenticationOverride,
+    );
   }
 
   async function persistModelHubConnection(
@@ -1240,6 +1462,28 @@ export function SettingsPage() {
       existingConnection !== null &&
       hubConnection?.id !== existingConnection.id &&
       !(hubConnection === null && isCredentialDeletedConnection(existingConnection))
+    ) {
+      throw new ModelHubStoreError(
+        "MODEL_HUB_CONNECTION_ID_CONFLICT",
+        "这个配置标识已经属于另一项已保存配置。请先从已保存配置中加载它，原配置和凭据不会被覆盖。",
+      );
+    }
+  }
+
+  function assertProbeConnectionTargetIsOwned(
+    existingConnection: ModelProviderConnection | null,
+    form: SettingsTextProbeFormSnapshot,
+  ): void {
+    if (existingConnection !== null && existingConnection.providerKind !== form.providerKind) {
+      throw new ModelHubStoreError(
+        "MODEL_HUB_PROVIDER_KIND_IMMUTABLE",
+        "这个配置标识已经属于另一家供应商。请使用新的配置标识，原配置和凭据不会被覆盖。",
+      );
+    }
+    if (
+      existingConnection !== null &&
+      form.loadedConnectionId !== existingConnection.id &&
+      !(form.loadedConnectionId === null && isCredentialDeletedConnection(existingConnection))
     ) {
       throw new ModelHubStoreError(
         "MODEL_HUB_CONNECTION_ID_CONFLICT",
@@ -1714,6 +1958,7 @@ export function SettingsPage() {
   async function performLightweightTextProbe(
     savedConnection: ModelProviderConnection,
     catalogEntry: ModelCatalogEntry,
+    authorization: PreparedSettingsTextProbeAuthorization,
     updateConnectionStatus = false,
   ): Promise<
     Readonly<{
@@ -1728,18 +1973,40 @@ export function SettingsPage() {
     const evidenceVersion = createModelHubId("lightweight-probe-v1");
     const startedAt = Date.parse(runtime.clock.now());
     const expectedDispatchIdentity = settingsProbeDispatchIdentity(savedConnection, catalogEntry);
+    let providerDispatched = false;
     try {
       const current = await readAuthoritativeProbeTarget(savedConnection.id, catalogEntry.id);
       assertModelHubFinalDispatchUnchanged(
         expectedDispatchIdentity,
         settingsProbeDispatchIdentity(current.connection, current.entry),
       );
+      assertSettingsTextProbeFormUnchanged(authorization.form);
+      const currentDisclosureFingerprint = await settingsTextProbeFingerprintFromConnection(
+        current.connection,
+        current.entry.providerModelId,
+      );
+      if (currentDisclosureFingerprint !== authorization.disclosureFingerprint) {
+        throw settingsTextProbeDisclosureChanged();
+      }
+      const dispatchTarget = await readAuthoritativeProbeTarget(
+        savedConnection.id,
+        catalogEntry.id,
+      );
+      assertModelHubFinalDispatchUnchanged(
+        expectedDispatchIdentity,
+        settingsProbeDispatchIdentity(dispatchTarget.connection, dispatchTarget.entry),
+      );
+      assertSettingsTextProbeFormUnchanged(authorization.form);
+      providerDispatched = true;
       const result = await runModelHubTextCapabilityProbe({
         gateway: runtime.modelGateway,
-        providerKind: current.connection.providerKind,
+        providerKind: dispatchTarget.connection.providerKind,
         generationId: createModelHubId("capability-probe"),
-        config: modelHubNativeEndpointConfig(current.connection),
-        model: current.entry.providerModelId,
+        config: Object.freeze({
+          ...modelHubNativeEndpointConfig(dispatchTarget.connection),
+          retryLimit: 0,
+        }),
+        model: dispatchTarget.entry.providerModelId,
       });
       const verified = await readAuthoritativeProbeTarget(savedConnection.id, catalogEntry.id);
       assertModelHubFinalDispatchUnchanged(
@@ -1798,6 +2065,16 @@ export function SettingsPage() {
         entry: verified.entry,
       });
     } catch (cause: unknown) {
+      if (!providerDispatched && cause instanceof ModelHubFinalDispatchError) {
+        throw settingsTextProbeDisclosureChanged();
+      }
+      if (
+        !providerDispatched &&
+        cause instanceof UiActionError &&
+        cause.code === "MODEL_HUB_PROBE_DISCLOSURE_CHANGED"
+      ) {
+        throw cause;
+      }
       const normalized = normalizeUiError(cause);
       try {
         await runtime.modelHub.commitCapabilityProbeResult({
@@ -1834,17 +2111,60 @@ export function SettingsPage() {
           commitCause instanceof ModelHubStoreError &&
           commitCause.code === "MODEL_HUB_PROBE_TARGET_CONFLICT"
         ) {
-          throw new ModelHubFinalDispatchError();
+          throw providerDispatched
+            ? new SettingsTextProbePostDispatchConflictError()
+            : new ModelHubFinalDispatchError();
         }
         throw commitCause;
       }
+      if (providerDispatched && cause instanceof ModelHubFinalDispatchError) {
+        throw new SettingsTextProbePostDispatchConflictError();
+      }
       throw cause;
+    }
+  }
+
+  async function requestRecommendedTaskAssignment(
+    task: NovelAiTask,
+    recommendation: ModelHubTaskRecommendation,
+  ): Promise<void> {
+    if (recommendation.readiness === "ready") {
+      await verifyAndAssignRecommendedTask(task, recommendation);
+      return;
+    }
+    if (recommendedTaskBusy !== null || routeSaving || taskProbeConfirmation !== null) {
+      return;
+    }
+    setRecommendedTaskBusy(task);
+    setRouteError(null);
+    setSchemeMessage(null);
+    try {
+      const prepared = await prepareModelHubTaskCapabilityProbeDisclosure(
+        { modelHub: runtime.modelHub, clock: runtime.clock },
+        {
+          task,
+          connectionId: recommendation.model.connection.id,
+          catalogEntryId: recommendation.model.catalogEntry.id,
+          readiness: recommendation.readiness,
+        },
+      );
+      setTaskProbeConfirmation(
+        Object.freeze({ task, recommendation, disclosure: prepared.disclosure }),
+      );
+    } catch (cause: unknown) {
+      setRouteError(cause);
+    } finally {
+      setRecommendedTaskBusy(null);
     }
   }
 
   async function verifyAndAssignRecommendedTask(
     task: NovelAiTask,
     recommendation: ModelHubTaskRecommendation,
+    confirmation?: Readonly<{
+      humanConfirmed: boolean;
+      disclosedFingerprint: string;
+    }>,
   ): Promise<void> {
     if (recommendedTaskBusy !== null || routeSaving) return;
     const routesBeforeSave = novelTaskRoutes;
@@ -1853,10 +2173,23 @@ export function SettingsPage() {
     setRouteError(null);
     setSchemeMessage(null);
     try {
-      const initial = await readAuthoritativeProbeTarget(
-        recommendation.model.connection.id,
-        recommendation.model.catalogEntry.id,
-      );
+      const initial =
+        recommendation.readiness === "ready"
+          ? await readAuthoritativeProbeTarget(
+              recommendation.model.connection.id,
+              recommendation.model.catalogEntry.id,
+            )
+          : await assertConfirmedModelHubTaskCapabilityProbeDisclosure(
+              { modelHub: runtime.modelHub, clock: runtime.clock },
+              {
+                task,
+                connectionId: recommendation.model.connection.id,
+                catalogEntryId: recommendation.model.catalogEntry.id,
+                readiness: recommendation.readiness,
+                humanConfirmed: confirmation?.humanConfirmed === true,
+                disclosedFingerprint: confirmation?.disclosedFingerprint ?? "",
+              },
+            ).then(({ connection, catalogEntry }) => ({ connection, entry: catalogEntry }));
       assertModelHubFinalDispatchUnchanged(
         settingsProbeDispatchIdentity(
           recommendation.model.connection,
@@ -1872,12 +2205,22 @@ export function SettingsPage() {
           const result = await runModelHubStructuredCapabilityProbe({
             gateway: runtime.modelGateway,
             providerKind: initial.connection.providerKind,
-            generationIds: [
-              createModelHubId("structured-probe"),
-              createModelHubId("structured-probe-repair"),
-            ],
+            generationId: createModelHubId("structured-probe"),
             config: modelHubNativeEndpointConfig(initial.connection),
             model: initial.entry.providerModelId,
+            assertBeforeProviderDispatch: async () => {
+              await assertConfirmedModelHubTaskCapabilityProbeDisclosure(
+                { modelHub: runtime.modelHub, clock: runtime.clock },
+                {
+                  task,
+                  connectionId: initial.connection.id,
+                  catalogEntryId: initial.entry.id,
+                  readiness: "verify_structured_output",
+                  humanConfirmed: confirmation?.humanConfirmed === true,
+                  disclosedFingerprint: confirmation?.disclosedFingerprint ?? "",
+                },
+              );
+            },
           });
           const verified = await readAuthoritativeProbeTarget(
             initial.connection.id,
@@ -1911,6 +2254,12 @@ export function SettingsPage() {
             },
           });
         } catch (cause: unknown) {
+          if (
+            cause instanceof ModelHubTaskCapabilityProbeDisclosureError ||
+            cause instanceof ModelHubFinalDispatchError
+          ) {
+            throw cause;
+          }
           const normalized = normalizeUiError(cause);
           const current = await readAuthoritativeProbeTarget(
             initial.connection.id,
@@ -1949,6 +2298,19 @@ export function SettingsPage() {
             generationId: createModelHubId("translation-probe"),
             config: modelHubNativeEndpointConfig(initial.connection),
             model: initial.entry.providerModelId,
+            assertBeforeProviderDispatch: async () => {
+              await assertConfirmedModelHubTaskCapabilityProbeDisclosure(
+                { modelHub: runtime.modelHub, clock: runtime.clock },
+                {
+                  task,
+                  connectionId: initial.connection.id,
+                  catalogEntryId: initial.entry.id,
+                  readiness: "verify_translation",
+                  humanConfirmed: confirmation?.humanConfirmed === true,
+                  disclosedFingerprint: confirmation?.disclosedFingerprint ?? "",
+                },
+              );
+            },
           });
           const verified = await readAuthoritativeProbeTarget(
             initial.connection.id,
@@ -1982,6 +2344,12 @@ export function SettingsPage() {
             },
           });
         } catch (cause: unknown) {
+          if (
+            cause instanceof ModelHubTaskCapabilityProbeDisclosureError ||
+            cause instanceof ModelHubFinalDispatchError
+          ) {
+            throw cause;
+          }
           const normalized = normalizeUiError(cause);
           const current = await readAuthoritativeProbeTarget(
             initial.connection.id,
@@ -2052,6 +2420,7 @@ export function SettingsPage() {
       setRouteError(cause);
       await confirmNovelRoutingUnchanged(routesBeforeSave);
     } finally {
+      setTaskProbeConfirmation(null);
       setRouteSaving(false);
       setRecommendedTaskBusy(null);
     }
@@ -2120,10 +2489,16 @@ export function SettingsPage() {
     if (!runtime.modelGateway.available || selectedModel.trim().length === 0) {
       return;
     }
+    const probeForm = captureSettingsTextProbeForm();
+    const requestedModelId = effectiveSettingsTextProbeModelId({
+      automaticDiscovery: getModelProviderPreset(probeForm.providerKind).modelDiscovery.automatic,
+      endpointModelId: probeForm.endpointId,
+      selectedModelId: probeForm.selectedModel,
+    });
     const token = modelHubOperationCoordinatorRef.current.begin("verify_capability", {
-      providerKind: providerPreset,
-      connectionId: hubConnection?.id ?? providerId,
-      modelId: selectedModel,
+      providerKind: probeForm.providerKind,
+      connectionId: probeForm.loadedConnectionId ?? probeForm.providerId,
+      modelId: requestedModelId,
     });
     startModelHubDiagnosticAction(runtime, token, runtime.clock.now());
     let backendCommitted = false;
@@ -2132,13 +2507,21 @@ export function SettingsPage() {
     setCapabilityProbeError(null);
     setCapabilityProbeMessage(null);
     try {
-      const savedConnection = await persistConnectionWithAvailableCredential(token);
+      const authorization = await prepareSettingsTextProbeAuthorization(
+        probeForm,
+        secret,
+        requestedModelId,
+      );
+      const savedConnection = await persistPreparedSettingsTextProbeConnection(
+        authorization,
+        token,
+      );
       backendCommitted = true;
       if (
         !modelHubOperationCoordinatorRef.current.isCurrent(token, {
           providerKind: savedConnection.providerKind,
           connectionId: savedConnection.id,
-          modelId: selectedModel,
+          modelId: authorization.modelId,
         })
       ) {
         finishModelHubDiagnosticAction(runtime, token, {
@@ -2149,8 +2532,13 @@ export function SettingsPage() {
         });
         return;
       }
-      const target = await ensureCatalogEntryForModel(savedConnection, selectedModel);
-      const result = await performLightweightTextProbe(target.connection, target.entry, true);
+      const target = await ensureCatalogEntryForModel(savedConnection, authorization.modelId);
+      const result = await performLightweightTextProbe(
+        target.connection,
+        target.entry,
+        authorization,
+        true,
+      );
       if (
         !modelHubOperationCoordinatorRef.current.isCurrent(token, {
           providerKind: result.connection.providerKind,
@@ -2219,14 +2607,16 @@ export function SettingsPage() {
         });
         return;
       }
-      setCapabilityProbeError(cause);
+      const visibleCause =
+        cause instanceof ModelHubFinalDispatchError ? settingsTextProbeDisclosureChanged() : cause;
+      setCapabilityProbeError(visibleCause);
       if (!refreshAttempted) {
         finishModelHubDiagnosticAction(runtime, token, {
           completedAt: runtime.clock.now(),
           outcome: "failed",
           backendCommitted,
           storeRefreshed: false,
-          errorCode: normalizeUiError(cause).code,
+          errorCode: normalizeUiError(visibleCause).code,
         });
       }
     } finally {
@@ -2239,9 +2629,12 @@ export function SettingsPage() {
       return;
     }
     const automaticDiscovery = getModelProviderPreset(providerPreset).modelDiscovery.automatic;
-    const requestedOperationModelId = (
-      automaticDiscovery ? selectedModel : endpointId.trim() || selectedModel
-    ).trim();
+    const probeForm = automaticDiscovery ? null : captureSettingsTextProbeForm();
+    const requestedOperationModelId = effectiveSettingsTextProbeModelId({
+      automaticDiscovery,
+      endpointModelId: probeForm?.endpointId ?? endpointId,
+      selectedModelId: probeForm?.selectedModel ?? selectedModel,
+    });
     const token = modelHubOperationCoordinatorRef.current.begin("discover_models", {
       providerKind: providerPreset,
       connectionId: hubConnection?.id ?? providerId,
@@ -2255,10 +2648,22 @@ export function SettingsPage() {
     setCapabilityProbeError(null);
     setCapabilityProbeMessage(null);
     let savedConnection: ModelProviderConnection | null = null;
+    let probeAuthorization: PreparedSettingsTextProbeAuthorization | null = null;
     let lightweightProbeOwnsConnectionOutcome = false;
     let refreshAttempted = false;
     try {
-      savedConnection = await persistConnectionWithAvailableCredential(token);
+      probeAuthorization =
+        probeForm === null
+          ? null
+          : await prepareSettingsTextProbeAuthorization(
+              probeForm,
+              secret,
+              requestedOperationModelId,
+            );
+      savedConnection =
+        probeAuthorization === null
+          ? await persistConnectionWithAvailableCredential(token)
+          : await persistPreparedSettingsTextProbeConnection(probeAuthorization, token);
       if (
         !modelHubOperationCoordinatorRef.current.isCurrent(token, {
           providerKind: savedConnection.providerKind,
@@ -2280,10 +2685,18 @@ export function SettingsPage() {
           ? runtime.modelGateway.inspectCapacity().catch(() => null)
           : Promise.resolve(null);
       if (!automaticDiscovery) {
+        if (probeAuthorization === null) {
+          throw settingsTextProbeDisclosureChanged();
+        }
         const modelId = requestedOperationModelId.normalize("NFKC");
         const target = await ensureCatalogEntryForModel(savedConnection, modelId);
         lightweightProbeOwnsConnectionOutcome = true;
-        const result = await performLightweightTextProbe(target.connection, target.entry, true);
+        const result = await performLightweightTextProbe(
+          target.connection,
+          target.entry,
+          probeAuthorization,
+          true,
+        );
         const descriptors = result.catalog.map(catalogEntryToDescriptor);
         if (
           !modelHubOperationCoordinatorRef.current.isCurrent(token, {
@@ -2401,8 +2814,16 @@ export function SettingsPage() {
         });
         return;
       }
-      if (savedConnection !== null && !lightweightProbeOwnsConnectionOutcome) {
-        const normalized = normalizeUiError(reason);
+      const visibleReason =
+        probeAuthorization !== null && reason instanceof ModelHubFinalDispatchError
+          ? settingsTextProbeDisclosureChanged()
+          : reason;
+      if (
+        savedConnection !== null &&
+        !lightweightProbeOwnsConnectionOutcome &&
+        !(visibleReason instanceof UiActionError)
+      ) {
+        const normalized = normalizeUiError(visibleReason);
         await runtime.modelHub
           .recordConnectionTest({
             connectionId: savedConnection.id,
@@ -2414,9 +2835,9 @@ export function SettingsPage() {
           .catch(() => undefined);
         setHubConnections(await runtime.modelHub.listConnections().catch(() => hubConnections));
       }
-      setCredentialError(reason);
+      setCredentialError(visibleReason);
       setModelCapacity(null);
-      const normalized = normalizeUiError(reason);
+      const normalized = normalizeUiError(visibleReason);
       setModelHubPageSnapshot((current) =>
         preserveModelHubPageSnapshotAfterFailure(current, {
           action: "discover_models",
@@ -3018,10 +3439,16 @@ export function SettingsPage() {
   ]);
 
   const normalizedCredentialError =
-    credentialError === null ? null : normalizeUiError(credentialError);
+    credentialError === null ? null : projectOrdinaryUiError(credentialError);
+  const normalizedModelHubPageError =
+    modelHubPageSnapshot.errorCode === null
+      ? null
+      : projectOrdinaryUiError({ code: modelHubPageSnapshot.errorCode });
   const normalizedCapabilityProbeError =
     capabilityProbeError === null ? null : normalizeUiError(capabilityProbeError);
   const normalizedRouteError = routeError === null ? null : normalizeUiError(routeError);
+  const taskProbeDisclosureError =
+    routeError instanceof ModelHubTaskCapabilityProbeDisclosureError ? routeError : null;
   const routingVisibility = useMemo(
     () =>
       buildModelHubRoutingVisibility({
@@ -3033,7 +3460,7 @@ export function SettingsPage() {
         now: runtime.clock.now(),
         validating: modelHubHydrationPending || checkingModel || probingCapability,
         loadFailed: credentialError !== null,
-        saveFailed: normalizedRouteError !== null,
+        saveFailed: normalizedRouteError !== null && taskProbeDisclosureError === null,
         exactBlockers: matchingAuthoritativeModelHubReadiness?.exactBlockers ?? [],
       }),
     [
@@ -3044,6 +3471,7 @@ export function SettingsPage() {
       modelHubHydrationPending,
       novelTaskRoutes,
       normalizedRouteError,
+      taskProbeDisclosureError,
       probingCapability,
       routingCapabilityEvidence,
       routingCatalog,
@@ -3345,6 +3773,12 @@ export function SettingsPage() {
   const retiredHubConnections = hubConnections.filter(isRetiredModelProviderConnection);
   const credentialDeletedConnection =
     hubConnection !== null && isCredentialDeletedConnection(hubConnection) ? hubConnection : null;
+  const automaticModelDiscovery = getModelProviderPreset(providerPreset).modelDiscovery.automatic;
+  const effectiveTextProbeModelId = effectiveSettingsTextProbeModelId({
+    automaticDiscovery: automaticModelDiscovery,
+    endpointModelId: endpointId,
+    selectedModelId: selectedModel,
+  });
   const selectableRoutingCatalog = routingCatalog.filter(
     ({ id, availability, connectionId }) =>
       availability === "available" &&
@@ -3373,7 +3807,7 @@ export function SettingsPage() {
     authenticationRequired: authentication !== "none",
     storedCredentialConfigured: summary.configured,
     newlyEnteredCredentialValid: secret.trim().length >= 8,
-    automaticDiscovery: getModelProviderPreset(providerPreset).modelDiscovery.automatic,
+    automaticDiscovery: automaticModelDiscovery,
     selectedModelId: selectedModel,
     endpointModelId: endpointId,
     connectionReady:
@@ -3477,17 +3911,21 @@ export function SettingsPage() {
                             disabled={
                               recommendedTaskBusy !== null ||
                               routeSaving ||
+                              taskProbeConfirmation !== null ||
                               modelHubHydrationPending
                             }
                             onClick={() => {
                               if (connectedRecommendation !== null) {
-                                void verifyAndAssignRecommendedTask(task, connectedRecommendation);
+                                void requestRecommendedTaskAssignment(
+                                  task,
+                                  connectedRecommendation,
+                                );
                               }
                             }}
                           >
                             {connectedRecommendation?.readiness === "ready"
                               ? "用于此任务"
-                              : "验证并用于此任务"}
+                              : "查看验证说明"}
                           </Button>
                         )
                       ) : (
@@ -3631,6 +4069,9 @@ export function SettingsPage() {
           <Link className="button-link button-link--secondary" to="/settings#writing-preferences">
             正文与自动保存
           </Link>
+          <Link className="button-link button-link--secondary" to="/settings#writing-experience">
+            写作体验
+          </Link>
           <Link className="button-link button-link--secondary" to="/settings#data-privacy">
             数据与隐私
           </Link>
@@ -3678,7 +4119,7 @@ export function SettingsPage() {
                   ? `${connectionIntentCatalogEntry.displayName} 已出现在账户目录中，但“${novelAiTaskLabel(connectionIntent.task)}”所需能力还没有可信证据。请在 Model Hub 专家设置中补充或验证这项能力；系统不会自动返回或修改路由。`
                   : connectionIntentTaskRecommendation.readiness === "ready"
                     ? `${connectionIntentCatalogEntry.displayName} 已具备“${novelAiTaskLabel(connectionIntent.task)}”所需的可信能力证据。返回后仍需明确点击“用于此任务”，系统不会自动覆盖原路由。`
-                    : `${connectionIntentCatalogEntry.displayName} 已具备文本生成证据。返回任务后，点击“验证并用于此任务”完成剩余能力探针与明确分配；系统不会自动修改路由。`
+                    : `${connectionIntentCatalogEntry.displayName} 已具备文本生成证据。返回任务后，点击“查看验证说明”，明确确认固定探针的连接、模型、发送范围、隐私与费用信息后再验证和分配；系统不会自动发送或修改路由。`
             }
           />
           <div className="settings-actions">
@@ -3696,7 +4137,7 @@ export function SettingsPage() {
                   ? "验证能力"
                   : connectionIntentTaskRecommendation.readiness === "ready"
                     ? "返回任务并分配"
-                    : "返回任务后验证并分配"}
+                    : "返回任务后查看验证说明"}
             </Link>
             <Button variant="ghost" onClick={cancelModelHubConnectionIntent}>
               取消选择
@@ -3915,6 +4356,88 @@ export function SettingsPage() {
               </CardContent>
             </Card>
 
+            <Card id="writing-experience" className="settings-card--wide">
+              <CardHeader>
+                <div className="card-heading-row">
+                  <div>
+                    <CardTitle headingLevel={2}>写作体验</CardTitle>
+                    <CardDescription>
+                      只改变下一次写作操作的交互方式；不会调用模型，也不会修改正文、候选、版本、路由或任务。
+                    </CardDescription>
+                  </div>
+                  <Badge tone="neutral">
+                    {writingExperience.preference?.mode === "direct"
+                      ? "直接模式"
+                      : writingExperience.preference?.mode === "professional"
+                        ? "专业模式"
+                        : "正在读取"}
+                  </Badge>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <FormField
+                  label="默认写作方式"
+                  hint="生成中切换只影响下一次操作；备份恢复后仍保留这个选择。"
+                >
+                  {(fieldProps) => (
+                    <Select
+                      {...fieldProps}
+                      value={writingExperience.preference?.mode ?? ""}
+                      placeholder="正在读取本机设置"
+                      disabled={
+                        writingExperience.loading ||
+                        writingExperience.switching ||
+                        writingExperience.preference === null
+                      }
+                      options={[
+                        { value: "direct", label: "直接写作" },
+                        { value: "professional", label: "专业创作" },
+                      ]}
+                      onChange={(event) => {
+                        const mode = event.currentTarget.value;
+                        if (
+                          mode === "direct" &&
+                          writingExperience.preference?.directLocalOrganizationAuthorizedAt === null
+                        ) {
+                          setDirectAuthorizationOpen(true);
+                        } else if (mode === "direct" || mode === "professional") {
+                          void writingExperience.switchMode(mode);
+                        }
+                      }}
+                    />
+                  )}
+                </FormField>
+                <InlineAlert
+                  tone="info"
+                  title={writingExperience.preference?.mode === "direct" ? "直接写作" : "专业创作"}
+                  description={
+                    writingExperience.preference?.mode === "direct"
+                      ? "续写会先持久化为隔离 Candidate；只有你明确选择使用后，才会写入正文并创建不可变版本。本地整理授权不允许自动接受正文。"
+                      : "所有 AI 建议保持隔离，明确点击“使用这版”后才写入正文并创建不可变版本。"
+                  }
+                />
+                {writingExperience.preference?.directLocalOrganizationAuthorizedAt !== undefined &&
+                  writingExperience.preference.directLocalOrganizationAuthorizedAt !== null && (
+                    <div className="settings-actions">
+                      <Button
+                        variant="secondary"
+                        loading={writingExperience.switching}
+                        onClick={() => void writingExperience.revokeDirectModeAuthorization()}
+                      >
+                        撤销本地整理授权
+                      </Button>
+                    </div>
+                  )}
+                {writingExperience.error !== null && (
+                  <InlineAlert
+                    tone="error"
+                    title="写作体验设置没有保存"
+                    description={writingExperience.error}
+                  />
+                )}
+              </CardContent>
+            </Card>
+
             <Card id="data-privacy">
               <CardHeader>
                 <CardTitle headingLevel={2}>数据与隐私</CardTitle>
@@ -3993,7 +4516,7 @@ export function SettingsPage() {
                     <InlineAlert
                       tone="error"
                       title={normalizedMemoryGovernanceError.title}
-                      description={`${normalizedMemoryGovernanceError.description}（${normalizedMemoryGovernanceError.code}）请重新核对当前项目后再试。`}
+                      description={`${normalizedMemoryGovernanceError.description} 请重新核对当前项目后再试。`}
                     />
                   )}
                   {memoryClearMessage !== null && (
@@ -4139,9 +4662,7 @@ export function SettingsPage() {
                             {manageableHubConnections.map((candidate) => (
                               <li key={candidate.id}>
                                 <span>
-                                  <strong>
-                                    {getModelProviderPreset(candidate.providerKind).displayName}
-                                  </strong>
+                                  <strong>{candidate.displayName}</strong>
                                   <small>{connectionEndpointLabel(candidate.baseUrl)}</small>
                                 </span>
                                 <Badge
@@ -4174,9 +4695,7 @@ export function SettingsPage() {
                               {retiredHubConnections.map((candidate) => (
                                 <li key={candidate.id}>
                                   <span>
-                                    <strong>
-                                      {getModelProviderPreset(candidate.providerKind).displayName}
-                                    </strong>
+                                    <strong>{candidate.displayName}</strong>
                                     <small>{connectionEndpointLabel(candidate.baseUrl)}</small>
                                   </span>
                                   <Badge tone="neutral">已退役</Badge>
@@ -4202,12 +4721,12 @@ export function SettingsPage() {
                         <InlineAlert
                           tone="error"
                           title={normalizedCredentialError.title}
-                          description={`${normalizedCredentialError.description}（${normalizedCredentialError.code}）`}
+                          description={normalizedCredentialError.description}
                         />
                       )}
 
                       {normalizedCredentialError === null &&
-                        modelHubPageSnapshot.errorCode !== null && (
+                        normalizedModelHubPageError !== null && (
                           <InlineAlert
                             tone={
                               modelHubPageSnapshot.catalogStatus === "cached_warning"
@@ -4223,7 +4742,7 @@ export function SettingsPage() {
                               modelHubPageSnapshot.catalogStatus === "cached_warning"
                                 ? `重新检查失败，已保留 ${String(modelHubPageSnapshot.catalogEntries.length)} 个缓存模型。`
                                 : "连接、模型目录或 AI 分工暂时无法读取。"
-                            }（${modelHubPageSnapshot.errorCode}）`}
+                            } ${normalizedModelHubPageError.description}`}
                           />
                         )}
 
@@ -4338,7 +4857,7 @@ export function SettingsPage() {
                                   placeholder="选择已有连接"
                                   options={manageableHubConnections.map((candidate) => ({
                                     value: candidate.id,
-                                    label: `${getModelProviderPreset(candidate.providerKind).displayName} · ${connectionManagementLabel(candidate)}`,
+                                    label: `${candidate.displayName} · ${connectionManagementLabel(candidate)}`,
                                   }))}
                                   disabled={
                                     modelHubHydrationPending ||
@@ -4456,7 +4975,7 @@ export function SettingsPage() {
                                   placeholder="选择已保存配置"
                                   options={manageableHubConnections.map((candidate) => ({
                                     value: candidate.id,
-                                    label: `${candidate.id} · ${getModelProviderPreset(candidate.providerKind).displayName} · ${connectionManagementLabel(candidate)}`,
+                                    label: `${candidate.id} · ${candidate.displayName} · ${connectionManagementLabel(candidate)}`,
                                   }))}
                                   disabled={
                                     modelHubHydrationPending ||
@@ -4943,11 +5462,11 @@ export function SettingsPage() {
                         </section>
                       )}
 
-                      {selectedModel.trim().length > 0 && runtime.modelGateway.available && (
+                      {effectiveTextProbeModelId.length > 0 && runtime.modelGateway.available && (
                         <InlineAlert
                           tone="warning"
-                          title="能力验证会调用一次模型"
-                          description="点击“验证写作能力”会发送一条不含作品内容的固定短测试，最多请求 64 个输出 token；DeepSeek 探针会关闭推理，供应商可能收取极少费用。测试输入和输出不会写入能力记录。"
+                          title="固定能力验证需要明确确认"
+                          description={`点击“${automaticModelDiscovery ? "确认 1 次固定验证" : "确认 1 次固定验证并检查连接"}”将通过“${hubConnection?.displayName ?? getModelProviderPreset(providerPreset).displayName}”的“${effectiveTextProbeModelId}”发送固定短句“只回复：OK”，最多请求 64 个输出 token；本次最多调用 1 次，自动重试 0 次。${modelProbeDestinationDisclosure(providerPreset, { region, workspaceId, baseUrl })}不发送作品正文、灵感、设定或 API Key；当前费用上限未知，供应商可能收取少量费用。测试输入和输出不会写入能力记录。`}
                         />
                       )}
 
@@ -4955,7 +5474,7 @@ export function SettingsPage() {
                         <InlineAlert
                           tone="error"
                           title="写作能力验证失败"
-                          description={`${normalizedCapabilityProbeError.description}（${normalizedCapabilityProbeError.code}）连接和模型目录会保留，修正模型或接入点后可以重试。`}
+                          description={`${normalizedCapabilityProbeError.description} 连接和模型目录会保留，修正模型或接入点后可以重试。`}
                         />
                       )}
 
@@ -4981,18 +5500,18 @@ export function SettingsPage() {
                           disabled={!modelHubFormReadiness.discover.enabled}
                           onClick={() => void checkModelConnection()}
                         >
-                          {getModelProviderPreset(providerPreset).modelDiscovery.automatic
+                          {automaticModelDiscovery
                             ? "测试连接并发现模型"
-                            : "验证连接与写作能力"}
+                            : "确认 1 次固定验证并检查连接"}
                         </Button>
-                        {getModelProviderPreset(providerPreset).modelDiscovery.automatic && (
+                        {automaticModelDiscovery && (
                           <Button
                             variant="secondary"
                             loading={probingCapability}
                             disabled={!modelHubFormReadiness.verify.enabled}
                             onClick={() => void probeSelectedModelCapability()}
                           >
-                            验证写作能力
+                            确认 1 次固定验证
                           </Button>
                         )}
                       </div>
@@ -5005,7 +5524,7 @@ export function SettingsPage() {
                               ? "模型目录连接成功"
                               : "供应商连接成功"
                           }
-                          description={`${connection.endpointOrigin} · ${String(connection.modelCount)} 个模型 · ${String(connection.latencyMs)} ms。${getModelProviderPreset(providerPreset).modelDiscovery.automatic ? "目录检查不会自动证明模型可生成正文，请按需继续验证写作能力。" : "已通过固定短文本验证模型可生成文字。"}`}
+                          description={`${connection.endpointOrigin} · ${String(connection.modelCount)} 个模型 · ${String(connection.latencyMs)} ms。${getModelProviderPreset(providerPreset).modelDiscovery.automatic ? "目录检查不会自动证明模型可生成正文，请按需继续验证写作能力。" : "已通过明确确认的固定短文本验证模型可生成文字。"}`}
                         />
                       )}
 
@@ -5084,7 +5603,10 @@ export function SettingsPage() {
                                     checkingModel ||
                                     probingCapability
                                   }
-                                  onChange={(event) => setSecret(event.currentTarget.value)}
+                                  onChange={(event) => {
+                                    credentialEditRevisionRef.current += 1;
+                                    setSecret(event.currentTarget.value);
+                                  }}
                                 />
                               )}
                             </FormField>
@@ -5119,8 +5641,16 @@ export function SettingsPage() {
                   {normalizedRouteError !== null && (
                     <InlineAlert
                       tone="error"
-                      title="AI 分工没有保存"
-                      description={`写作能力证据已保留，但自动分工没有完成。请打开“AI 分工”查看回读结果并重试。（${normalizedRouteError.code}）`}
+                      title={
+                        taskProbeDisclosureError === null
+                          ? "AI 分工没有保存"
+                          : "固定能力验证没有发送"
+                      }
+                      description={
+                        taskProbeDisclosureError === null
+                          ? "写作能力证据已保留，但自动分工没有完成。请打开“AI 分工”查看回读结果并重试。"
+                          : taskProbeDisclosureError.message
+                      }
                     />
                   )}
                 </CardContent>
@@ -5142,7 +5672,14 @@ export function SettingsPage() {
                 </CardHeader>
                 <CardContent>
                   <div className="model-center-settings">
-                    {normalizedRouteError !== null && (
+                    {taskProbeDisclosureError !== null && (
+                      <InlineAlert
+                        tone="warning"
+                        title="固定能力验证没有发送"
+                        description={taskProbeDisclosureError.message}
+                      />
+                    )}
+                    {normalizedRouteError !== null && taskProbeDisclosureError === null && (
                       <div className="model-routing-save-failure">
                         <InlineAlert
                           tone="error"
@@ -5155,7 +5692,7 @@ export function SettingsPage() {
                               : routeFailureRollbackConfirmed === false
                                 ? "重新读取后发现分工状态发生变化，请先查看下面的 22 项清单再重试。"
                                 : "暂时无法重新读取并确认旧分工状态；请先导出诊断包。"
-                          }（${normalizedRouteError.code}）`}
+                          }`}
                         />
                         <div className="settings-actions">
                           <Button
@@ -5271,7 +5808,7 @@ export function SettingsPage() {
                                         : ` · ${formatVerificationTime(capability.observedAt)}`}
                                       {capability.failureCode === null
                                         ? ""
-                                        : ` · ${capability.failureCode}`}
+                                        : ` · ${capabilityFailureLabel(capability.failureCode)}`}
                                     </small>
                                   </li>
                                 ))}
@@ -5440,17 +5977,18 @@ export function SettingsPage() {
                                                 disabled={
                                                   recommendedTaskBusy !== null ||
                                                   routeSaving ||
+                                                  taskProbeConfirmation !== null ||
                                                   modelHubHydrationPending
                                                 }
                                                 onClick={() =>
-                                                  void verifyAndAssignRecommendedTask(
+                                                  void requestRecommendedTaskAssignment(
                                                     task.definition.task,
                                                     recommendation,
                                                   )
                                                 }
                                               >
                                                 {recommendation.readiness !== "ready"
-                                                  ? "验证并用于此任务"
+                                                  ? "查看验证说明"
                                                   : "用于此任务"}
                                               </Button>
                                             )}
@@ -6254,7 +6792,7 @@ export function SettingsPage() {
                       <InlineAlert
                         tone="error"
                         title={normalizedMaintenanceError.title}
-                        description={`${normalizedMaintenanceError.description}（${normalizedMaintenanceError.code}）`}
+                        description={normalizedMaintenanceError.description}
                       />
                     )}
                     {integrity !== null && (
@@ -6336,7 +6874,7 @@ export function SettingsPage() {
                     <InlineAlert
                       tone="error"
                       title={normalizedDiagnosticError.title}
-                      description={`${normalizedDiagnosticError.description}（${normalizedDiagnosticError.code}）`}
+                      description={normalizedDiagnosticError.description}
                     />
                   )}
                   {diagnosticId !== null && (
@@ -6364,6 +6902,76 @@ export function SettingsPage() {
           </>
         )}
       </div>
+
+      <Dialog
+        open={taskProbeConfirmation !== null}
+        onOpenChange={(open) => {
+          if (!open && recommendedTaskBusy === null && !routeSaving) {
+            setTaskProbeConfirmation(null);
+          }
+        }}
+        title="确认 1 次固定能力验证？"
+        description={
+          taskProbeConfirmation === null
+            ? "请先查看固定能力验证的发送说明。"
+            : `将通过“${taskProbeConfirmation.disclosure.connectionDisplayName}”使用模型“${taskProbeConfirmation.disclosure.modelId}”，验证“${novelAiTaskLabel(taskProbeConfirmation.task)}”所需能力。只有点击下方明确确认按钮后才会发送。`
+        }
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              disabled={recommendedTaskBusy !== null || routeSaving}
+              onClick={() => setTaskProbeConfirmation(null)}
+            >
+              取消（不发送）
+            </Button>
+            <Button
+              loading={
+                taskProbeConfirmation !== null && recommendedTaskBusy === taskProbeConfirmation.task
+              }
+              disabled={taskProbeConfirmation === null || routeSaving}
+              onClick={() => {
+                if (taskProbeConfirmation === null) return;
+                void verifyAndAssignRecommendedTask(
+                  taskProbeConfirmation.task,
+                  taskProbeConfirmation.recommendation,
+                  {
+                    humanConfirmed: true,
+                    disclosedFingerprint: taskProbeConfirmation.disclosure.fingerprint,
+                  },
+                );
+              }}
+            >
+              确认 1 次验证并用于此任务
+            </Button>
+          </>
+        }
+      >
+        {taskProbeConfirmation !== null && (
+          <div className="maintenance-settings">
+            <InlineAlert
+              tone="info"
+              title="本次发送范围"
+              description={taskProbeConfirmation.disclosure.privacy}
+            />
+            <ul className="privacy-list">
+              {taskProbeConfirmation.disclosure.sends.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+              <li>
+                最大输出：
+                {String(taskProbeConfirmation.disclosure.maximumOutputTokens)} 个 token。
+              </li>
+              <li>
+                最大 Provider 调用：
+                {String(taskProbeConfirmation.disclosure.maximumProviderCalls)} 次；自动重试：
+                {String(taskProbeConfirmation.disclosure.automaticRetryCount)} 次。
+              </li>
+              <li>费用上限：unknown；远程供应商可能收取少量费用。</li>
+            </ul>
+          </div>
+        )}
+      </Dialog>
 
       <Dialog
         open={memoryClearDialogOpen}
@@ -6403,6 +7011,17 @@ export function SettingsPage() {
           description="所有记录和自动学习策略会在同一个原子操作中更新；若其中任何一项版本已变化，则不会留下部分清空状态。"
         />
       </Dialog>
+
+      <DirectModeAuthorizationDialog
+        open={directAuthorizationOpen}
+        busy={writingExperience.switching}
+        onCancel={() => setDirectAuthorizationOpen(false)}
+        onAuthorize={() => {
+          void writingExperience.authorizeDirectMode().then((authorized) => {
+            if (authorized) setDirectAuthorizationOpen(false);
+          });
+        }}
+      />
 
       <Dialog
         open={retireConnectionTarget !== null}
@@ -6552,7 +7171,8 @@ function describeAutomaticBackupCheck(
     return {
       tone: "error",
       title: "自动备份需要处理",
-      description: `${check.errorCode ?? "AUTOMATIC_BACKUP_CHECK_FAILED"}：没有删除或覆盖现有备份。请先使用下方“创建一致性备份”保存一份副本，再检查应用数据目录权限。`,
+      description:
+        "没有删除或覆盖现有备份。请先使用下方“创建一致性备份”保存一份副本，再检查应用数据目录权限。",
     };
   }
 
@@ -6705,6 +7325,166 @@ function createModelHubId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
+function settingsTextProbeFormIdentity(form: SettingsTextProbeFormSnapshot): string {
+  return JSON.stringify([
+    form.providerId,
+    form.providerKind,
+    form.baseUrl,
+    form.region,
+    form.workspaceId,
+    form.endpointId,
+    form.authentication,
+    form.credentialHeaderName,
+    form.modelDiscoveryPath,
+    form.textGenerationPath,
+    form.embeddingPath,
+    form.requestTimeoutMs,
+    form.retryLimit,
+    form.selectedModel,
+    form.credentialConfigured,
+    form.credentialEditRevision,
+  ]);
+}
+
+function effectiveSettingsTextProbeModelId(
+  input: Readonly<{
+    automaticDiscovery: boolean;
+    endpointModelId: string;
+    selectedModelId: string;
+  }>,
+): string {
+  const selectedModelId = input.selectedModelId.normalize("NFKC").trim();
+  if (input.automaticDiscovery) return selectedModelId;
+  const endpointModelId = input.endpointModelId.normalize("NFKC").trim();
+  return endpointModelId.length > 0 ? endpointModelId : selectedModelId;
+}
+
+function settingsTextProbeDisclosureChanged(): UiActionError {
+  return new UiActionError(
+    "MODEL_HUB_PROBE_DISCLOSURE_CHANGED",
+    "连接、接入地址、凭据、模型或发送范围已经变化。本次没有发送请求，请重新查看固定验证说明并再次确认。",
+    "需要重新确认",
+  );
+}
+
+async function settingsTextProbeFingerprintFromInput(
+  input: SaveModelProviderConnectionInput,
+  modelId: string,
+): Promise<string> {
+  const authentication =
+    input.authenticationMode ?? (input.credentialState === "present" ? "bearer_keyring" : "none");
+  const endpoint = Object.freeze({
+    providerKind: input.providerKind,
+    protocol: getModelProviderPreset(input.providerKind).protocol,
+    baseUrl: resolveProviderBaseUrl(input.providerKind, {
+      region: input.region,
+      workspaceId: input.workspaceId,
+      baseUrlOverride: input.baseUrlOverride,
+    }),
+    authentication,
+    credentialHeaderName: normalizeCredentialHeaderName(input.credentialHeaderName),
+    modelDiscoveryPath: normalizeModelHubApiPath(input.modelDiscoveryPath, "Model discovery path"),
+    textGenerationPath: normalizeModelHubApiPath(input.textGenerationPath, "Text generation path"),
+    embeddingPath: normalizeModelHubApiPath(input.embeddingPath, "Embedding path"),
+    requestTimeoutMs: normalizeModelHubRequestTimeoutMs(input.requestTimeoutMs),
+    persistedRetryLimit: normalizeModelHubRetryLimit(input.retryLimit),
+  });
+  return settingsTextProbeFingerprint({
+    connectionId: input.id,
+    connectionDisplayName: input.displayName,
+    providerKind: input.providerKind,
+    region: normalizeSettingsProbeOptionalText(input.region),
+    workspaceId: normalizeSettingsProbeOptionalText(input.workspaceId),
+    endpointId: normalizeSettingsProbeOptionalText(input.endpointId),
+    endpointFingerprint: await providerActionFingerprint(endpoint),
+    authentication,
+    credentialState: input.credentialState,
+    enabled: input.enabled ?? true,
+    modelId,
+    dataDestination: isLoopbackModelBaseUrl(endpoint.baseUrl) ? "local" : "remote",
+  });
+}
+
+async function settingsTextProbeFingerprintFromConnection(
+  connection: ModelProviderConnection,
+  modelId: string,
+): Promise<string> {
+  const endpoint = Object.freeze({
+    providerKind: connection.providerKind,
+    protocol: connection.protocol,
+    baseUrl: connection.baseUrl,
+    authentication: connection.authenticationMode,
+    credentialHeaderName: connection.credentialHeaderName,
+    modelDiscoveryPath: connection.modelDiscoveryPath,
+    textGenerationPath: connection.textGenerationPath,
+    embeddingPath: connection.embeddingPath,
+    requestTimeoutMs: connection.requestTimeoutMs,
+    persistedRetryLimit: connection.retryLimit,
+  });
+  return settingsTextProbeFingerprint({
+    connectionId: connection.id,
+    connectionDisplayName: connection.displayName,
+    providerKind: connection.providerKind,
+    region: connection.region,
+    workspaceId: connection.workspaceId,
+    endpointId: connection.endpointId,
+    endpointFingerprint: await providerActionFingerprint(endpoint),
+    authentication: connection.authenticationMode,
+    credentialState: connection.credentialState,
+    enabled: connection.enabled,
+    modelId,
+    dataDestination: isLoopbackModelBaseUrl(connection.baseUrl) ? "local" : "remote",
+  });
+}
+
+function settingsTextProbeFingerprint(
+  target: Readonly<{
+    connectionId: string;
+    connectionDisplayName: string;
+    providerKind: ModelProviderKind;
+    region: string | null;
+    workspaceId: string | null;
+    endpointId: string | null;
+    endpointFingerprint: string;
+    authentication: NativeGatewayAuthenticationMode;
+    credentialState: ModelProviderConnection["credentialState"];
+    enabled: boolean;
+    modelId: string;
+    dataDestination: "local" | "remote";
+  }>,
+): Promise<string> {
+  return providerActionFingerprint({
+    schemaVersion: "settings-text-capability-probe-disclosure-v1",
+    task: "settings_text_generation_capability_probe",
+    probeKind: "fixed_content_free_text_capability",
+    connectionId: target.connectionId,
+    connectionDisplayName: target.connectionDisplayName,
+    providerKind: target.providerKind,
+    region: target.region,
+    workspaceId: target.workspaceId,
+    endpointId: target.endpointId,
+    endpointFingerprint: target.endpointFingerprint,
+    authentication: target.authentication,
+    credentialState: target.credentialState,
+    enabled: target.enabled,
+    modelId: target.modelId.normalize("NFKC").trim(),
+    dataDestination: target.dataDestination,
+    dispatchScope: MODEL_HUB_TEXT_CAPABILITY_PROBE_DISPATCH_SCOPE,
+    fixedMessages: MODEL_HUB_TEXT_CAPABILITY_PROBE_MESSAGES,
+    maximumOutputTokens: MODEL_HUB_TEXT_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
+    maximumProviderCalls: 1,
+    automaticRetryCount: 0,
+    estimatedMaximumCostMicros: null,
+    currency: null,
+  });
+}
+
+function normalizeSettingsProbeOptionalText(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const normalized = value.normalize("NFKC").trim();
+  return normalized.length === 0 ? null : normalized;
+}
+
 function settingsProbeDispatchIdentity(
   connection: ModelProviderConnection,
   catalogEntry: ModelCatalogEntry,
@@ -6796,6 +7576,22 @@ function connectionEndpointLabel(baseUrl: string): string {
     return new URL(baseUrl).host;
   } catch {
     return "自定义端点";
+  }
+}
+
+function modelProbeDestinationDisclosure(
+  providerKind: ConnectableProviderKind,
+  input: Readonly<{ region: string; workspaceId: string; baseUrl: string }>,
+): string {
+  try {
+    const resolved = resolveProviderBaseUrl(providerKind, {
+      region: input.region,
+      workspaceId: input.workspaceId,
+      baseUrlOverride: input.baseUrl,
+    });
+    return isLoopbackModelBaseUrl(resolved) ? "请求只在本机运行。" : "请求会发送到所选远程供应商。";
+  } catch {
+    return "当前接入地址尚未通过校验；修正前不会发送请求。";
   }
 }
 
@@ -7014,6 +7810,12 @@ function capabilityEvidenceSourceLabel(
     },
   );
   return labels[source];
+}
+
+function capabilityFailureLabel(code: string): string {
+  return code === "MODEL_OUTPUT_TRUNCATED"
+    ? "最近一次验证未返回完整可见内容"
+    : "最近一次验证未通过";
 }
 
 function routeOriginLabel(origin: NovelTaskRoute["routeOrigin"]): string {

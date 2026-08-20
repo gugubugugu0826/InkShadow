@@ -277,6 +277,13 @@ export async function executeModelHubEmbeddingTask(
         costPrivacy: current.target.costPrivacy,
       }),
     );
+    invocation = await dependencies.modelHub.markInvocationDispatched({
+      id: invocation.id,
+      dispatchedAt: dependencies.clock.now(),
+      expectedRevision: invocation.revision,
+    });
+    // Persist the dispatch receipt immediately before crossing the synchronous
+    // native boundary. A restarted process can now see that redispatch is unsafe.
     dispatched = true;
     embedded = await dependencies.modelGateway.embed({
       config: modelHubNativeEndpointConfig(current.target.connection),
@@ -288,18 +295,22 @@ export async function executeModelHubEmbeddingTask(
     const normalized = dispatched
       ? normalizeDispatchedError(cause)
       : normalizePreDispatchError(cause);
+    const ambiguous = dispatched && isAmbiguousTransportFailure(cause, normalized);
+    const projected = ambiguous ? ambiguousEmbeddingResult() : normalized;
     await dependencies.modelHub
       .finishInvocation({
         id: invocation.id,
-        status: "failed",
-        errorCode: normalized.code,
-        errorSummary: dispatched
-          ? "Embedding provider request failed; source text and stored vectors were not changed."
-          : "Embedding request was blocked before provider dispatch.",
+        status: ambiguous ? "timed_out" : "failed",
+        errorCode: projected.code,
+        errorSummary: ambiguous
+          ? "Embedding request was dispatched, but the transport ended before a confirmed result; it will not be redispatched automatically."
+          : dispatched
+            ? "Embedding provider request failed; source text and stored vectors were not changed."
+            : "Embedding request was blocked before provider dispatch.",
         expectedRevision: invocation.revision,
       })
       .catch(() => undefined);
-    throw normalized;
+    throw projected;
   }
 
   try {
@@ -770,6 +781,32 @@ function normalizeDispatchedError(cause: unknown): ModelHubExecutionError {
     true,
     true,
   );
+}
+
+function isAmbiguousTransportFailure(cause: unknown, normalized: ModelHubExecutionError): boolean {
+  const diagnostics = isRecord(cause) && isRecord(cause.diagnostics) ? cause.diagnostics : null;
+  const httpStatus =
+    diagnostics !== null &&
+    typeof diagnostics.httpStatus === "number" &&
+    Number.isSafeInteger(diagnostics.httpStatus)
+      ? diagnostics.httpStatus
+      : null;
+  return (
+    httpStatus === null && /(?:NETWORK|TIMEOUT|DNS|TLS|TRANSPORT|DISCONNECT)/u.test(normalized.code)
+  );
+}
+
+function ambiguousEmbeddingResult(): ModelHubExecutionError {
+  return new ModelHubExecutionError(
+    "PROVIDER_RESULT_AMBIGUOUS",
+    "Embedding 请求已发送，但连接在收到明确结果前中断。为避免重复费用，本次不会自动重发。",
+    false,
+    true,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function executionError(code: string, message: string, retryable = false): ModelHubExecutionError {
