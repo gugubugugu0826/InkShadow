@@ -2,7 +2,7 @@
 
 > 文档状态：`SUPPORTING_CURRENT`  
 > 基于源码复核：2026-08-20  
-> 当前应用清单版本（App Version）：`0.2.5`；最新已发布版本 `v0.2.4` 之后是当前 Pre-release 候选工作树  
+> 当前应用清单版本（App Version）：`0.2.5`；`v0.2.5` 已发布  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
 > 文档性质：实现现状说明；页面存在不等于 P01–P44 已验证
 
@@ -11,8 +11,29 @@
 和接线的内容。
 
 DESIGN v0.3.1b 决定目标视觉、交互和响应式验收，不会把应用版本自动改成 0.3.1b。当前 Desktop
-清单版本为 0.2.5，已发布 `v0.2.4` 标签指向基线提交；当前未提交工作树尚无唯一候选提交或安装包。
-DESIGN 版本不会替代应用版本，也不能证明远端 Release 已经存在。
+清单版本为 0.2.5，已发布 `v0.2.5` annotated tag object
+`51dfd64ba22e9771131f251cdc778ee06f89192d` peel 到唯一 source commit
+`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`。DESIGN 版本不会替代应用版本；发布事实以
+[GitHub v0.2.5 Release](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5) 为准。
+
+## v0.2.5 发布证据
+
+- source fingerprint：`c4260cc189a73c02a53aa0a8eca1b2012b55e77e24bb7ff0e11de5ccf4d27897`
+  （1,238 files / 20,794,217 B）。
+- artifact fingerprint：`213370d1e2f57dc323203747997071cbee883ffc26cc35339ceec94758f9200d`
+  （59 files / 7,035,736 B physical）；bundle policy 7,034,936 / 7,340,032 B，余量 305,096 B。
+- 单文件守卫：entry 261,016 / 307,200 B；Agent async 481,776 / 512,000 B；CSS
+  128,810 / 131,072 B；worker 1,187,649 / 1,572,864 B。包大小只能根据可审计需要有界调整。
+- 安装包 7,606,152 B，SHA-256
+  `f422467fa5fdff4236f3d453cb21de3927c89375e106ff372852f918079f20ad`；manifest 11,717 B，SHA-256
+  `4dce031a71eaa1664dcc993bd4f68362fb3d97b7843110b5ebc0b7c45b0bed0c`；`SHA256SUMS` 194 B，SHA-256
+  `0f4330efd42cd7d898497de2d0b6866fc2c9ba7b3533e8c11a233dd6a8439eec`。
+- RC 自动门禁：Desktop 265 files / 2,049 pass / 1 skip / 0 fail；Rust 169 pass / 1 ignored /
+  0 fail；Chromium 17/17 PASS。Data `0066`–`0070` 对应 Tauri `69`–`73`。
+
+后续文档提交不移动 `v0.2.5` 标签。真人 Windows Tauri/Wry、真实 Provider、Windows 系统 200%
+DPI 和四格式制品在外部应用中打开继续为 `BLOCKED_EXTERNAL`，不能由上述自动化或静态 Chromium
+证据替代。
 
 ## 文档导航与状态
 
@@ -73,7 +94,8 @@ DESIGN 版本不会替代应用版本，也不能证明远端 Release 已经存�
   失配、同族轮换、active 128、恢复与历史审计合同继续生效。
 - Provider 面与普通 UI ID 聚焦 4 files / 22 tests 通过：Usage 不回退 raw provider ID，通知 metadata
   使用白名单，任务/检查页显示可读名称或安全占位，不把 project/chapter/version/connection/debug/
-  fact/locator 等内部标识暴露给普通用户；冻结全路由 DOM 仍待验收。
+  fact/locator 等内部标识暴露给普通用户；相关自动化已纳入 `v0.2.5` Desktop RC，真人 WebView
+  全路由巡检仍为 `BLOCKED_EXTERNAL`。
 - 四格式发布导出可嵌入经验证的内存 PNG/JPEG 资产。Desktop 使用系统保存对话框与经落盘回读
   验证的真实保存回执；浏览器只报告 `browser_download` / `path_not_available`，不会伪造本地路径。
   数据传输面板按项目恢复最近一次回执；真实 Windows Tauri 对话框和外部应用打开仍是外部验收项。
@@ -155,10 +177,10 @@ CSS viewport、DPR、PNG 实际像素、时间戳、文件字节数与 SHA-256�
 图片像素等于 CSS viewport × DPR，并拒绝路径逃逸、元数据漂移，以及把静态 Chromium 结果
 声明成真实 Tauri 或已测 Windows 系统缩放的记录。
 
-本次 dirty HEAD 的静态 Chromium 运行已经生成并通过 checker：manifest 共 32 条，引用 32 个
-不同 SHA-256 的 PNG，覆盖上述浅/深主题与视口矩阵。该证据只对应 manifest 中记录的 dirty
-`b74d36ef3342db6813d1d43771bc82c0ed2aa1fb` 工作树；它不是干净候选或安装包。工作树后续仍有
-小幅变化，最终 production build 文件名和精确字节保持 `FINAL_BUILD_PENDING`。
+开发期静态 Chromium 运行曾生成并通过 checker：manifest 共 32 条，引用 32 个不同 SHA-256
+的 PNG，覆盖上述浅/深主题与视口矩阵。该 manifest 只对应其中记录的 dirty
+`b74d36ef3342db6813d1d43771bc82c0ed2aa1fb` 工作树，保留为 `HISTORICAL_ONLY`，不冒充发布安装包
+证据。已发布 source/artifact fingerprint、最终包预算和 17/17 Chromium RC 结果以上述发布证据为准。
 
 “等效 200%”只证明应用按照有效 CSS viewport 进入响应式布局。它不是 Windows 系统 200%
 DPI，也不是 Tauri WebView 证据；清单固定将系统缩放记为 `not_measured`、Tauri 记为
@@ -189,6 +211,6 @@ DPI，也不是 Tauri WebView 证据；清单固定将系统缩放记为 `not_me
 
 ## GitHub 发布范围
 
-本目录属于根 `.gitignore` 允许的精选公开文档范围。发布前仍须查看 `git status` 和暂存清单，
-确保只提交允许的 Markdown，不包含内部审计原文、凭据、数据库、安装缓存或本机构建目录。
-不要用 `git add -f` 绕过公开范围。
+本目录属于根 `.gitignore` 允许的精选公开文档范围。后续文档维护仍须查看 `git status` 和暂存清单，
+确保只提交允许的 Markdown，不包含内部审计原文、凭据、数据库、安装缓存或本机构建目录；不要用
+`git add -f` 绕过公开范围，也不要移动已发布的 `v0.2.5` 标签。

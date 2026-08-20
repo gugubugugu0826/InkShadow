@@ -237,13 +237,14 @@ observationCount = 0
 | 一句话开书定向回归                          | `2 files / 57 tests PASS`            | 首次开书、隔离 Candidate、精确 Skill/trace 链                                                     |
 | maintenance                                 | `49/49 PASS`                         | 166 张可恢复表的备份、删除、恢复、语义重放、派发前权威审计与失败回滚合同                          |
 
-上表 14 文件结果属于较早执行快照。当前未发布反馈修复工作树的最新全量证据为 Desktop
-249 files / 1,855 passed / 1 skipped / 0 failed，Data 421 passed / 0 failed，Rust 160 passed /
-1 ignored / 0 failed，production Chromium 12/12；最终 production build 为 53 files /
-6,739,800 bytes，门禁 payload 为 6,739,000 / 7,340,032 bytes。付费 infrastructure 10 files /
-96 tests、AI Core 16 files / 120 tests 属于各自已记录的较早稳定快照。当前修复的完整
-当前未发布反馈修复工作树的完整 `pnpm.cmd release:check` 已以退出码 0 通过；发布候选链仍为
-`NOT_RUN / NOT_RELEASED`，不得用旧快照冒充。精确命令见 `docs/execution/TEST_RESULTS.md`。独立审查批准 Data `0060`–`0064` 的 content-free ledger、显式付费
+上表 14 文件结果属于较早执行快照。`v0.2.5` 冻结来源提交
+`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d` 的最终全量证据为 Desktop 265 files /
+2,049 passed / 1 skipped / 0 failed，Rust 169 passed / 1 ignored / 0 failed，production Chromium
+17/17；最终 production build 为 59 files / 7,035,736 bytes，门禁 payload 为 7,034,936 /
+7,340,032 bytes。付费 infrastructure 与 AI Core 的较早切片仍只作为历史证据；最终来源提交的
+完整 `release:candidate:unsigned` 已以退出码 0 通过，且 `v0.2.5` 已作为 GitHub Pre-release 发布。
+精确命令、CI、安装包与哈希见 `docs/execution/TEST_RESULTS.md` 和
+`docs/execution/RELEASE_CHECKLIST.md`。独立审查批准 Data `0060`–`0064` 的 content-free ledger、显式付费
 派发权威和零自动调用接线；真实 Provider A/B、可信 `ELIGIBLE_FOR_REVIEW`、人工批准和真实 Tauri
 冷启动没有执行。这些本地测试不能外推为 `VERIFIED`。
 

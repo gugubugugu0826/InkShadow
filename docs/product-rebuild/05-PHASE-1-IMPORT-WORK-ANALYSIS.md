@@ -90,4 +90,5 @@ Schema 强制输出。当前停用状态下调用上限为 0。
 - 当前导入页聚焦回归为 1 file / 5 tests PASS：新的 Provider 入口关闭，已保存 whole-chapter
   `replace_document` Candidate 仍需显式接受，接受阶段 0 Provider，并创建新不可变版本；
 - 首次有效运行 4 pass / 1 fail 是测试 fixture 错用 continuation intent，被产品策略安全拒绝；只修正
-  fixture 后 5/5 PASS。完整 Desktop 与真实 Provider 仍为 `PENDING_FINAL_RUN / BLOCKED_EXTERNAL`。
+  fixture 后 5/5 PASS。冻结发布候选的完整 Desktop 为 265 files / 2,049 passed / 1 skipped /
+  0 failed；真实 Provider 仍为 `BLOCKED_EXTERNAL`。

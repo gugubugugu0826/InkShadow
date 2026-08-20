@@ -2,12 +2,19 @@
 
 > 文档状态：`SUPPORTING_CURRENT`  
 > 源码复核：2026-08-20  
-> 当前实现：下一未发布工作树；最终门禁 `PENDING_FINAL_RUN`  
-> 目标环境：`REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN`
+> 当前实现：已发布 [`v0.2.5`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5)；自动门禁 `RELEASE_VERIFIED`  
+> 外部环境：`BLOCKED_EXTERNAL`（真人 Windows Tauri/Wry、真实 Provider、系统 200% DPI、外部应用打开）
 
 本文说明直接模式、专业模式、本地设定整理、StoryMemory 投影和长篇一致性调查在普通界面中的
 当前交互。领域内部仍使用 Candidate、route、trace、Agent step 等准确名称；普通用户一级导航
 继续只有正文、规划、设定、检查。
+
+发布源由 annotated tag object `51dfd64ba22e9771131f251cdc778ee06f89192d` peel 到 commit
+`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`；source fingerprint 为
+`c4260cc189a73c02a53aa0a8eca1b2012b55e77e24bb7ff0e11de5ccf4d27897`（1,238 files /
+20,794,217 B），artifact fingerprint 为
+`213370d1e2f57dc323203747997071cbee883ffc26cc35339ceec94758f9200d`（59 files /
+7,035,736 B physical）。后续文档提交不移动该标签。
 
 ## 模式选择
 
@@ -89,7 +96,7 @@ gateway、credential、route、invocation 或 retry 接口。
 MemoryRecord 和可重建投影。它不是新的导航，也不在普通界面暴露“GraphRAG”“Embedding”或
 “Memory 层”作为一级概念。
 
-当前界面可以依靠它提供带来源的检查/上下文。当前已实现但尚待冻结全量回归的部分包括：
+当前界面可以依靠它提供带来源的检查/上下文。下列实现已进入 v0.2.5 冻结全量回归：
 
 - L0–L3 与 `EvidenceRef` 已有当前代码合同；
 - 未确认、temporary、needsReview、deprecated、rejected Candidate、stale 与其他分支不会成为
@@ -135,7 +142,7 @@ EvidenceRef 任一漂移都保持 0 Provider 并回到确认界面。内部终�
 同一区域使用现有只读 TaskGraph 投影展示“目标 → 计划 → 行动 → 工具 → 观察 → 核验 →
 结果/阻断”的安全摘要；重启只重建展示，不续跑或派发，内部 ID 与失败码不进入普通视图。
 
-当前调查是固定 allowlist 的有界生产切片，状态为 `IMPLEMENTED_NOT_FINAL_RETESTED`：它不是通用 Agent，也没有完整
+当前调查是固定 allowlist 的有界生产切片，状态为 `RELEASE_VERIFIED_AUTOMATED`：它不是通用 Agent，也没有完整
 Observation → 自适应 Replan。Agent 不修改正文。已核验 finding 若包含当前章节证据，会按章节提供
 “查看修复范围与费用”：准备阶段为 0 次 Provider 调用，另行披露精确 Provider、模型、任务、发送
 范围、本机/远程去向、费用、隐私、精确 1 次调用和 0 次重试；作者再次确认后才创建独立 task、Model Hub
@@ -145,7 +152,7 @@ invocation、context trace 和隔离 Candidate。模型只返回一处严格校�
 发送前与 Candidate 提交前失败关闭。只有作者随后在既有编辑器接受 Candidate，原有 0-call 事务才
 会创建新的不可变版本。
 调查授权与修复授权彼此独立，不能从第一次调查确认推导第二次发送。当前聚焦回归为 2 files /
-36 tests PASS；冻结 Desktop 全量与真实 Provider/Tauri 仍待验证。
+36 tests PASS；冻结 Desktop 全量已纳入 `v0.2.5` RC，真实 Provider/Tauri 仍为 `BLOCKED_EXTERNAL`。
 修复 task 在既有 `background_tasks.metadata_json` 中只保存 invocation、trace、目标版本和请求
 指纹等内容无关的恢复权威。启动恢复只结清状态：未确认的 planned 任务取消，bound 且未发送的
 调用结清为 not-dispatched，越过发送边界的取消/中断结清为 ambiguous，已成功但来不及原子提交
@@ -154,7 +161,11 @@ EvidenceRef 精确匹配的当前权威证据，不会把 FTS 或 causal 的计�
 发送前可以按已配置 route 的 `use_fallback` 选择实际 fallback，确认页必须披露最终精确
 Provider/model；这仍是最多 1 个 invocation、0 网络重试。确认后或 dispatch 后自动 fallback、
 多 invocation fallback 收据和云端执行均保持 `DEFERRED`。多粒度 chunk 已接线；5k/20k/50k/200k、
-≥30 样本 production benchmark runner 已接线，但唯一冻结 commit 上的原始结果仍是 `FINAL_BENCHMARK_PENDING`。
+≥30 样本 production benchmark runner 已接线。冻结 commit 的最终 production 结果为 371,204 B，
+SHA-256 `7b8eef0ed8bd544f23e7efabe74ad09ff187013404730cbec43c7c42d84ec1c5`，48 samples、
+2/2 PASS；Recall@K 0.666667、Precision@K 0.597222、MRR/nDCG/hit rate 0.666667、false
+inclusion 0.069444，authority/stale/rejected/branch/POV/future/private leak 均为 0，evidence/trace
+completeness 均为 1，平均 search 3.2295 ms，Provider/network/key/vector calls 均为 0。
 
 ## Provider 动作的普通界面披露
 
@@ -178,7 +189,8 @@ probe 入口另以 1 file / 55 tests 通过：点击时冻结表单、精确目�
 持久化同一 prepared input，并在 `gateway.generate` 前复核表单、fingerprint 与权威身份；四类漂移
 均为 0 call，成功精确 1 call，发送前阻断与发送后落库冲突分别呈现。豆包 Endpoint ID 非空时
 优先作为唯一有效模型，同一值进入普通披露、授权、catalog/connection 保存与最终派发。
-冻结全量与真实 Provider 仍为 `PENDING_FINAL_RUN / NOT_RUN`，这里的界面合同不能提前外推为全入口最终证明。
+冻结全量已纳入 `v0.2.5` RC；真实 Provider 仍为 `BLOCKED_EXTERNAL`，这里的自动化界面合同不能
+外推为真实账户、网络或计费结论。
 
 旧 post-dispatch/ambiguous 续写 fallback、普通检查 AI review、导入批处理隐藏 Agent、未授权连续
 状态/摘要、translation/short-drama governed dispatch 和普通搜索 vector/rerank 入口均关闭；权威提取
@@ -208,8 +220,9 @@ Tauri 保存成功后，界面显示格式、文件名、绝对路径、字节�
 
 静态视觉证据脚本已覆盖浅/深主题的首次直接授权、直接模式启动、12,265 字符 Candidate 固定动作
 区和检查页，并记录 commit、dirty 状态、Hash route、真实 `data-surface`、CSS viewport、DPR、
-时间、字节和 SHA-256；相同 PNG 内容按哈希去重。本次 dirty HEAD manifest 为 32 条，对应 32 个
-不同 SHA-256 PNG。runtime 明确为静态 Chromium，检查页没有伪造原生 Agent 已运行状态。
+时间、字节和 SHA-256；相同 PNG 内容按哈希去重。开发期 dirty HEAD manifest 为 32 条，对应
+32 个不同 SHA-256 PNG，保留为 `HISTORICAL_ONLY`。发布 RC 的 Chromium 门禁为 17/17 PASS；两者
+都明确是静态 Chromium，检查页没有伪造原生 Agent 已运行状态。
 
 浏览器等效 200% 只能证明有效 CSS viewport 触发响应式布局，DPR2 也不是系统缩放。真实 Windows
 系统 200% DPI、Tauri WebView、IME、滚动、hover、键盘和焦点必须按
@@ -218,9 +231,12 @@ Tauri 保存成功后，界面显示格式、文件名、绝对路径、字节�
 
 ## 当前验证边界
 
-当前非冻结工作树的 17 个共享包、Cloud/Web、workspace typecheck 与 Rust 分项已通过，精确命令和
-数字见 `docs/execution/TEST_RESULTS.md`。Desktop 完整测试、格式/lint、production build、bundle、
-Playwright、benchmark 与 release 门禁仍需在主线停止变化后统一重跑；最终 build 文件名和字节仍
-为 `FINAL_BUILD_PENDING`。本文件只描述当前实现，
-不以页面存在或局部用例代替发布证明；真实 Provider 保持 `NOT_RUN`，当前代码的真实 Tauri 保持
-`NOT_RETESTED`。
+`v0.2.5` RC 已完成 Desktop 265 files / 2,049 pass / 1 skip / 0 fail、Rust 169 pass / 1 ignored /
+0 fail 和 Chromium 17/17 PASS。bundle policy 为 7,034,936 / 7,340,032 B，余量 305,096 B；entry
+261,016 / 307,200 B、Agent async 481,776 / 512,000 B、CSS 128,810 / 131,072 B、worker
+1,187,649 / 1,572,864 B。安装包 7,606,152 B，SHA-256
+`f422467fa5fdff4236f3d453cb21de3927c89375e106ff372852f918079f20ad`；manifest 11,717 B，SHA-256
+`4dce031a71eaa1664dcc993bd4f68362fb3d97b7843110b5ebc0b7c45b0bed0c`；`SHA256SUMS` 194 B，SHA-256
+`0f4330efd42cd7d898497de2d0b6866fc2c9ba7b3533e8c11a233dd6a8439eec`。本文件不以页面存在或局部
+用例代替发布证明；真人 Windows Tauri/Wry、真实 Provider、系统 200% DPI 和外部应用打开继续为
+`BLOCKED_EXTERNAL`。

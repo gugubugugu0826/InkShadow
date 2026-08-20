@@ -16,18 +16,21 @@ InkShadow 是一个本地优先、隐私优先、面向长篇小说创作的 AI 
 > DeepSeek `deepseek-v4-flash` 测试发现：Candidate 正确接受并创建版本后，又隐式触发
 > `long_memory_compression`，把已接受正文发送到 Provider。测试随即按安全停止条件终止。
 > 因此不建议使用已发布 `v0.2.3` 通过真实 Provider 处理敏感正文。已发布 `v0.2.4` 标签基线与
-> 当前 `v0.2.5` 候选均已纳入代码修复和自动化覆盖，但当前候选仍为
-> **`FINAL_GATE_PENDING / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`**；不得把源码测试写成真实安装版复测。
+> 已发布 `v0.2.5` 均已纳入代码修复和自动化覆盖；但 v0.2.5 的真实 Provider、Windows
+> Tauri/Wry、Credential Manager、系统 200% DPI 与外部应用打开仍为 **`BLOCKED_EXTERNAL`**，
+> 不得把源码或 Chromium 测试写成真实安装版复测。
 
-当前源码目标版本为 `0.2.5`；最新公开工程预览版为
-[`v0.2.4`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.4)，其标签和附件不得
-移动或静默替换。`v0.2.5` 正在进行 Pre-release 最终门禁与发布准备。
+当前源码与最新公开工程预览版均为
+[`v0.2.5`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5)。annotated tag
+`v0.2.5` 精确指向来源提交 `5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`；该提交的
+[GitHub CI run 32367317531](https://github.com/gugubugugu0826/InkShadow/actions/runs/32367317531)
+三个作业全部成功。既有 `v0.2.4` 标签和附件仍不得移动或静默替换。
 代码已完成新手三入口、导入试改、四区写作工作台、Model Hub、
 统一故事事实、因果关系、分层上下文和证据化检查的阶段性重构。它仍是工程预览：只有真正
 接通、具备能力证据且通过本地检查的模型功能才会显示为可用；缺少模型、证据或配置时会明确
 跳过，不以占位结果冒充成功。
 
-## v0.2.5 Pre-release 候选重点
+## v0.2.5 已发布 Pre-release 重点
 
 - 接受 Candidate 只保存正式正文、创建新的不可变版本并更新纯本地可重建状态；接受、保存、恢复和历史回填的默认后台链精确产生 0 次 Provider 调用。
 - 删除凭据后可重新绑定原连接；退役连接继续保留历史审计，但不进入 ready、推荐或普通路由，同供应商重新配置不再要求手工修改内部 ID。
@@ -36,18 +39,18 @@ InkShadow 是一个本地优先、隐私优先、面向长篇小说创作的 AI 
 - 新安装默认直接模式，既有用户保留原写作方式并可随时切换；首次启用只授权确定性本地整理，不授权额外联网或自动接受正文。第一次真实续写会另行披露发送范围、精确连接/模型、1 次调用、0 次重试、费用和隐私边界，重要条件变化时 0 dispatch 并重新确认。
 - 两种模式的生成都先保留为隔离 Candidate；只有作者明确选择“使用这版”后，直接模式才对此次新增 delta 在本机整理普通设定，并只提示“已整理 N 条”；重大设定仍进入作者确认，整理过程为 0 次 Provider 调用。
 - 检查页提供受控的长篇一致性调查：固定只读工具、确认后最多 1 次模型调用、0 次自动重试；取消、崩溃或结果不明确不会静默重发，也不会直接修改正文。
-- StoryMemory/Narrative State、多粒度范围化 FTS、有界 4×80 查询、只读 TaskGraph 与独立修复 Candidate 已接线；自动多模型 fallback、确认后动态 replanning 和云端 Agent 保持关闭。5k/20k/50k/200k、≥30 样本 production benchmark 只在唯一冻结 commit 上出结果，当前为 `FINAL_BENCHMARK_PENDING`。
+- StoryMemory/Narrative State、多粒度范围化 FTS、有界 4×80 查询、只读 TaskGraph 与独立修复 Candidate 已接线；自动多模型 fallback、确认后动态 replanning 和云端 Agent 保持关闭。绑定来源提交的 5k/20k/50k/200k production-path benchmark 共 48 个样本，原始 JSON 为 371,204 bytes、SHA-256 `7b8eef0ed8bd544f23e7efabe74ad09ff187013404730cbec43c7c42d84ec1c5`；它使用确定性 fixture 与 counted fake gateway，真实 Provider 调用为 0，不能外推真实模型质量。
 - Markdown、DOCX、EPUB 和 PDF 已能真实嵌入经安全校验的项目图片；Tauri 保存只在一次性票据、原子写入和磁盘回读 size+SHA 验证成功后返回路径/字节/状态回执。真实 Tauri 对话框和四个外部应用打开仍待第二阶段验证。
 - 200% 等效视口进入正文优先的单列/抽屉模式，并覆盖 Escape、焦点返回、44px 操作目标和页面无横向溢出。真实 Windows 系统 200% DPI 仍待复测。
 
-当前分项证据来自 fake/mock、真实临时 SQLite 与静态 production Chromium；冻结候选的完整门禁、
-最终构建字节、安装包哈希和远端 CI 仍须按实际结果补录，真实 Provider 与 Windows Tauri 第二
-阶段复测尚未执行。Settings 两个固定、无作品内容的 probe 入口现已把点击时表单、精确目标和
+来源提交的完整本地候选门禁、最终构建、安装包哈希与远端 CI 已通过并绑定到上述 Release；
+真实 Provider 与 Windows Tauri 第二阶段复测仍未执行。Settings 两个固定、无作品内容的 probe
+入口现已把点击时表单、精确目标和
 content-free SHA-256 authority 绑定到同一 prepared input，并在生成前复核；漂移为 0 call，成功
 精确 1 call。豆包 Endpoint ID 非空时作为唯一有效模型贯穿披露、保存和派发，避免确认 A 却发送 B；
 设置页聚焦 55/55 PASS。完整边界见
 [当前状态](docs/execution/CURRENT_STATUS.md) 与
-[v0.2.5 中文发布说明](docs/execution/RELEASE_CHECKLIST.md#v025-pre-release-中文说明待发布)。
+[v0.2.5 中文发布说明](docs/execution/RELEASE_CHECKLIST.md#v025-已发布-pre-release-中文说明与追踪)。
 
 ## v0.2.3 已发布工程预览重点
 
@@ -197,9 +200,15 @@ tests/         端到端测试
 
 内部预览安装包发布在 [GitHub Releases](https://github.com/gugubugugu0826/InkShadow/releases)，并标记为 Pre-release。
 [`v0.2.3`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.3) 已作为未签名工程预览发布，安装前请核对同一 Release 中的 `SHA256SUMS`。
-[`v0.2.4`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.4) 已于 2026-08-14 公开为未签名 Pre-release；`v0.2.5` 候选仍待最终门禁、打包和公开发布。
+[`v0.2.4`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.4) 已于 2026-08-14 公开为未签名 Pre-release；
+[`v0.2.5`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5) 已于 2026-08-20 公开为未签名 Pre-release，包含以下 3 个附件：
+
+- `InkShadow_0.2.5_x64-setup.exe`：7,606,152 bytes；SHA-256 `f422467fa5fdff4236f3d453cb21de3927c89375e106ff372852f918079f20ad`
+- `inkshadow-release-manifest.json`：11,717 bytes；SHA-256 `4dce031a71eaa1664dcc993bd4f68362fb3d97b7843110b5ebc0b7c45b0bed0c`
+- `SHA256SUMS`：194 bytes；SHA-256 `0f4330efd42cd7d898497de2d0b6866fc2c9ba7b3533e8c11a233dd6a8439eec`
+
 在对应 Release 正式公开并附带校验文件前，请勿从其他来源下载安装包。
-`v0.2.0`、`v0.2.1`、`v0.2.2`、`v0.2.3` 和 `v0.2.4` 均为不可覆盖、不可移动的历史标签与公开附件。
+`v0.2.0`、`v0.2.1`、`v0.2.2`、`v0.2.3`、`v0.2.4` 和 `v0.2.5` 均为不可覆盖、不可移动的标签与公开附件。
 
 安装包未签名时，Windows 可能显示“未知发布者”提示。正式分发前仍需完成代码签名、
 时间戳、隔离安装/升级/卸载测试以及法律和安全审批。当前预览不应承载敏感数据或唯一副本。

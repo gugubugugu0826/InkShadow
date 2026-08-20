@@ -1,7 +1,7 @@
 # 创建入口与 ProjectSeed
 
 > 文档状态：`SUPPORTING_CURRENT`  
-> 当前源码目标版本：`0.2.5`；最新已发布版本：`0.2.4`；设计基线：`DESIGN v0.3.1b`
+> 当前源码与最新已发布版本：`0.2.5` Pre-release；设计基线：`DESIGN v0.3.1b`
 
 三条创建入口使用同一个 `ProjectSeed` 契约，但界面继续使用各自的任务语言。
 

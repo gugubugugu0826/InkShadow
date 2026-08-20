@@ -1,9 +1,9 @@
 # InkShadow 下一阶段产品重构基线
 
 > 基线日期：2026-08-01  
-> 最近复核：2026-08-20（DESIGN v0.3.1b、已发布 v0.2.4 基线与 v0.2.5 Pre-release 候选）  
+> 最近复核：2026-08-20（DESIGN v0.3.1b 与已发布 v0.2.5 Pre-release）  
 > 文档状态：`AUTHORITATIVE_CURRENT`（本目录索引与冲突规则）  
-> 当前应用清单版本：`0.2.5`；已发布 `v0.2.4` 标签基线之后是当前 Pre-release 候选修改；设计基线：`DESIGN v0.3.1b`  
+> 当前应用清单与最新已发布版本：`0.2.5`；设计基线：`DESIGN v0.3.1b`  
 > 适用范围：桌面端个人创作主链路、Model Hub、后续小说智能内核
 
 本目录是 2026-08-01 起的产品重构执行基线。它不删除旧文档中仍然有效的安全、数据、
@@ -11,9 +11,12 @@
 “系统模块驱动”信息架构。
 
 DESIGN v0.3.1b 是 P01–P44 的视觉与交互目标版本，不是安装包版本。当前应用清单为 0.2.5；
-已发布 annotated tag `v0.2.4` 指向基线提交 `b74d36ef3342db6813d1d43771bc82c0ed2aa1fb`。当前
-未提交实现是 `v0.2.5` Pre-release 候选；在最终门禁、唯一提交、安装包和远端发布实际完成前，
-不得把它写成已发布版本。
+已发布 annotated tag `v0.2.5` 精确指向来源提交
+`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`。同提交的
+[GitHub CI run 32367317531](https://github.com/gugubugugu0826/InkShadow/actions/runs/32367317531)
+三个作业全部成功，未签名 Pre-release 与 3 个附件已在
+[GitHub Release](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5) 公开；真实 Provider、
+Windows Tauri 人工路径、系统 200% DPI 与外部应用打开仍是 `BLOCKED_EXTERNAL`。
 
 ## 文档状态与阅读顺序
 
@@ -34,7 +37,7 @@ DESIGN v0.3.1b 是 P01–P44 的视觉与交互目标版本，不是安装包版
 |   13 | `SUPPORTING_CURRENT`        | [Novel Skill 现状审计、最小合同与启用门禁](11-NOVEL-SKILL-AUDIT-AND-DESIGN.md)           | Skill 实验性作者 opt-in 运行链、精确回执和 A/B 门禁              |
 |   14 | `AUTHORITATIVE_CURRENT`     | [下一未发布写作/记忆/Agent 现实矩阵](12-NEXT-UNRELEASED-WRITING-MEMORY-AGENT-REALITY.md) | R12 映射、直接/专业模式、StoryMemory、Agent 与当前验证边界       |
 |   15 | `SUPPORTING_CURRENT`        | [本地 Agent 与 RAG 当前架构](13-LOCAL-AGENT-RAG-ARCHITECTURE.md)                         | 当前系统/容器/状态机/Tool/RAG/Candidate 图、离线指标与明确延期项 |
-|   16 | `AUTHORITATIVE_CURRENT`     | [v0.2.5 需求完成台账](14-V025-REQUIREMENT-COMPLETION-LEDGER.md)                          | 用户增量要求逐项状态、当前证据与最终门禁缺口                     |
+|   16 | `AUTHORITATIVE_CURRENT`     | [v0.2.5 需求完成台账](14-V025-REQUIREMENT-COMPLETION-LEDGER.md)                          | 用户增量要求逐项状态、发布证据与外部边界                         |
 |   17 | `SUPPORTING_CURRENT`        | [TencentDB Agent Memory 只读适配审计](15-TENCENTDB-AGENT-MEMORY-ADAPTATION-AUDIT.md)     | 固定上游提交、许可证、分层/检索/资产治理取舍及公开风险           |
 
 ## 总指令交付覆盖
@@ -79,7 +82,7 @@ internal `73`。`0069` 的 content-free planned invocation 预留、重启后的
 probe 入口已完成点击冻结、fingerprint authority、同一 prepared input 持久化和派发前权威重检，
 豆包 Endpoint ID/模型也统一为同一有效身份，聚焦 55/55 PASS。Provider dispatch surface 当前无
 剩余 P0/P1。Provider/UI ID 聚焦 4 files / 22 tests 在受限沙箱依赖 ACL 首跑失败后以同命令完整
-权限复跑 PASS；冻结全量与真实 Provider 仍待。
+权限复跑 PASS；来源提交的完整候选链与远端 CI 已通过，真实 Provider 仍待外部环境验证。
 
 跨阶段体验已补充“跟随系统 / 浅色 / 深色”三态外观。选择保存在本机，应用挂载前即生效；
 设置页可随时更改，编辑纸张仍维持独立的长文阅读表面。

@@ -1,9 +1,9 @@
 # 墨影 InkShadow 文档入口
 
-> 当前源码目标版本（App Version）：`0.2.5`；最新已发布版本：`0.2.4`（Pre-release；不可移动或复用）  
+> 当前源码与最新已发布版本（App Version）：`0.2.5`（Pre-release；不可移动或复用）  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
 > 最近治理复核：2026-08-20  
-> `v0.2.5` Pre-release 候选：`FINAL_GATE_PENDING / NOT_RELEASED`；真实 Tauri/Provider 第二阶段复测：`NOT_RUN`  
+> [`v0.2.5` Pre-release](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5)：来源提交 `5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`，同提交 CI 三个作业全部成功；真实 Provider、Tauri/Wry、Credential Manager、系统 200% DPI 与外部应用打开仍为 `BLOCKED_EXTERNAL`  
 > 注意：设计版本用于界面与交互验收，不会自动改变应用版本。
 
 本目录同时保存当前规则、实现说明、执行证据和历史基线。为避免把旧页面说明或一次历史测试
@@ -32,12 +32,12 @@
 | `AUTHORITATIVE_CURRENT` | [`product-rebuild/02-DATA-REUSE-AND-MIGRATION.md`](product-rebuild/02-DATA-REUSE-AND-MIGRATION.md)                                         | 数据复用、前向迁移、兼容与回滚                     |
 | `AUTHORITATIVE_CURRENT` | [`product-rebuild/03-DELIVERY-PLAN-ACCEPTANCE-ROLLBACK.md`](product-rebuild/03-DELIVERY-PLAN-ACCEPTANCE-ROLLBACK.md)                       | Phase 0–5 顺序、验收、风险和回滚                   |
 | `AUTHORITATIVE_CURRENT` | [`product-rebuild/12-NEXT-UNRELEASED-WRITING-MEMORY-AGENT-REALITY.md`](product-rebuild/12-NEXT-UNRELEASED-WRITING-MEMORY-AGENT-REALITY.md) | v0.2.5 写作模式、记忆、Agent 与当前证据边界        |
-| `AUTHORITATIVE_CURRENT` | [`product-rebuild/14-V025-REQUIREMENT-COMPLETION-LEDGER.md`](product-rebuild/14-V025-REQUIREMENT-COMPLETION-LEDGER.md)                     | 用户增量要求逐项完成状态与最终缺口                 |
+| `AUTHORITATIVE_CURRENT` | [`product-rebuild/14-V025-REQUIREMENT-COMPLETION-LEDGER.md`](product-rebuild/14-V025-REQUIREMENT-COMPLETION-LEDGER.md)                     | 用户增量要求逐项完成、发布证据与外部边界           |
 | `SUPPORTING_CURRENT`    | [`front-end/README.md`](front-end/README.md)                                                                                               | 当前前端页面、路由、普通/专家体验和接口索引        |
 | `SUPPORTING_CURRENT`    | [`back-end/README.md`](back-end/README.md)                                                                                                 | Cloud、Desktop 原生层、共享包与工程工具索引        |
 | `EVIDENCE_CURRENT`      | [`execution/CURRENT_STATUS.md`](execution/CURRENT_STATUS.md)                                                                               | 当前执行状态；必须同时核对其中绑定的提交与运行日期 |
 | `EVIDENCE_CURRENT`      | [`execution/TEST_RESULTS.md`](execution/TEST_RESULTS.md)                                                                                   | 当前和历史测试证据；失败不得省略                   |
-| `EVIDENCE_CURRENT`      | [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md)                                                                         | 当前候选是否达到构建、打包或发布门禁               |
+| `EVIDENCE_CURRENT`      | [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md)                                                                         | 当前版本的构建、打包、发布与外部门禁               |
 
 ## 支撑文档
 
@@ -64,7 +64,7 @@
 
 ## 目标与历史文档
 
-- `DESIGN/`：`TARGET_BASELINE`。DESIGN v0.3.1b 规定视觉与交互目标；当前源码目标版本是 0.2.5，最新已发布工程预览应用版本是 0.2.4，v0.2.5 候选仍待最终门禁、打包与发布。
+- `DESIGN/`：`TARGET_BASELINE`。DESIGN v0.3.1b 规定视觉与交互目标；当前源码与最新已发布工程预览应用版本是 0.2.5。发布页恰有安装包、release manifest 与 `SHA256SUMS` 三个附件，精确大小和 SHA-256 见 v0.2.5 完成台账。
 - [`product-rebuild/00-PHASE-0-REALITY-AUDIT.md`](product-rebuild/00-PHASE-0-REALITY-AUDIT.md)：
   `HISTORICAL` Phase 0 起始审计；当前差异须再读增量现实矩阵。
 - `docs/prototypes/`、`docs/state-matrices/`：目标原型或状态设计；除非文件明确标为当前，否则不是

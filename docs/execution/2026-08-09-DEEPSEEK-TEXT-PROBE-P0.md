@@ -242,7 +242,8 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml local_migrations --
 
 当前 Provider Registry 为 9 类供应商；发布脚本门禁为 17 项。这里的数字来自本轮实际命令，不能
 与较早候选的 8 类供应商或旧版发布测试数量混用。上述 `release:check` 本身不生成安装包；若随后
-从干净提交生成候选，其 SHA-256、大小和来源提交需另行记录。当前尚未发布新的 GitHub Release。
+从干净提交生成候选，其 SHA-256、大小和来源提交需另行记录。截至本历史执行快照，尚未发布新的
+GitHub Release；后续 `v0.2.5` 的最终发布事实以 `RELEASE_CHECKLIST.md` 为准。
 
 ## 8. 尚未完成的真实验收
 

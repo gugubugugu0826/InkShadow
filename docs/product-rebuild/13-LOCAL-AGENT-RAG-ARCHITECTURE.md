@@ -1,14 +1,18 @@
-# 下一未发布增量：本地 Agent 与 RAG 当前架构
+# v0.2.5 已发布：本地 Agent 与 RAG 当前架构
 
 > 现实快照日期：2026-08-20  
-> 当前源码目标：`0.2.5`；最近已发布版本：`v0.2.4`；最终交付提交与 source fingerprint：`FINAL_COMMIT_PENDING` / `FINAL_SOURCE_FINGERPRINT_PENDING`  
-> 状态：`IMPLEMENTED_NOT_FINAL_RETESTED / PROVIDER_LIVE_NOT_RUN / REAL_TAURI_NOT_RETESTED`  
+> 当前版本：[`v0.2.5`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5)；source commit：`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`  
+> annotated tag object：`51dfd64ba22e9771131f251cdc778ee06f89192d`；自动门禁：`RELEASE_VERIFIED`  
+> 外部环境：`BLOCKED_EXTERNAL`（真人 Windows Tauri/Wry、真实 Provider、系统 200% DPI、外部应用打开）  
 > 图例：实线表示当前代码路径；虚线只表示 `DEFERRED` 或 `NOT_IMPLEMENTED`，不能按已交付理解。
 
 本文把新增工程深度要求映射到当前生产切片。它不把历史 R12、单元测试 fixture、静态 Chromium
 或设计目标外推为真实 Provider、真实 Tauri、完整 GraphRAG 或云端 Agent 已验证。
-本文现有 11 张 Mermaid 架构/时序/状态图；当前 scoped 内部链接检查已通过，冻结提交后仍须随
-最终 source graph 再做一次事实与链接校验，不能把“图存在”升格为生产门禁 PASS。
+本文现有 11 张 Mermaid 架构/时序/状态图；scoped 内部链接检查已通过。发布 source fingerprint 为
+`c4260cc189a73c02a53aa0a8eca1b2012b55e77e24bb7ff0e11de5ccf4d27897`（1,238 files /
+20,794,217 B），artifact fingerprint 为
+`213370d1e2f57dc323203747997071cbee883ffc26cc35339ceec94758f9200d`（59 files /
+7,035,736 B physical）。后续文档提交不移动 `v0.2.5` 标签；“图存在”本身仍不能替代生产门禁。
 
 ## 1. 系统上下文
 
@@ -194,8 +198,13 @@ count。输入只有稳定 ID 与集合标签，不需要正文，也不调用�
 0 dispatch / 0 network。对照已完成，但当前产品默认仍采用简单 FTS；不会因 fixture 自动打开
 vector、graph 或 rerank。此外已接线 production-path runner：使用真实临时 SQLite、当前 `0070`
 FTS/StoryMemory/一致性调查 consumer，覆盖 5k/20k/50k/200k 和不少于 30 个语义样本。
-该 runner 拒绝 `WORKTREE_UNBOUND`，必须由 `INKSHADOW_SOURCE_REVISION` 绑定冻结的 40 位 commit。因此在唯一提交上实际运行并
-保存原始 JSON/汇总前，只能记 `FINAL_BENCHMARK_PENDING`，不得把 fixture 数字填成 production 结论。
+该 runner 拒绝 `WORKTREE_UNBOUND`，必须由 `INKSHADOW_SOURCE_REVISION` 绑定冻结的 40 位 commit。
+`v0.2.5` 最终 production 原始 JSON 为 371,204 B，SHA-256
+`7b8eef0ed8bd544f23e7efabe74ad09ff187013404730cbec43c7c42d84ec1c5`，48 samples、2/2 PASS；
+Recall@K 0.666667、Precision@K 0.597222、MRR/nDCG/hit rate 0.666667、false inclusion
+0.069444，authority/stale/rejected/branch/POV/future/private leak 均为 0，evidence/trace
+completeness 均为 1，平均 search 3.2295 ms，Provider/network/key/vector calls 均为 0。fixture
+数字仍不得冒充 production 结论。
 
 ## 5. 一致性调查状态机
 
@@ -419,29 +428,29 @@ flowchart TD
 
 ## 8. 完成度与延期项
 
-| 能力                                           | 当前状态                           | 不得外推的边界                                                                                                                                                                                                                                  |
-| ---------------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 有界本地 query rewrite / multi-query（4 × 80） | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 聚焦 1 file / 4 tests PASS；不是模型改写，也不是任意 SQL。                                                                                                                                                                                      |
-| content-free `queryTrace`                      | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 本次内存观察可含查询文本；持久层只存 redacted receipt 的 digest。                                                                                                                                                                               |
-| 离线检索指标与固定六臂矩阵                     | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 六臂确定性对照已完成且 0 dispatch；不是冻结 production benchmark 或真实长篇质量结论。                                                                                                                                                           |
-| FTS 基线与可选 local rerank                    | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 默认仍为简单 FTS；vector/graph/rerank 不自动启用，冻结 production consumer 全链仍待复跑。                                                                                                                                                       |
-| continuation / investigation query recovery    | `CURRENT_IMPLEMENTED_NOT_RETESTED` | `initial → rewrite → expand_k → evidence_insufficient` 已接线；证据不足不远程派发或扩大范围。                                                                                                                                                   |
-| StoryFact→Graph / Narrative / TaskGraph        | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 三条投影已实现并复用当前权威；冻结后的 restart/restore/consumer 全链仍待复跑。                                                                                                                                                                  |
-| 直接模式一次性本地整理授权                     | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 与 Provider 权威分离；只保存本地时间戳，0 次联网授权。                                                                                                                                                                                          |
-| 披露 grant 轮换（Data 0068 / Tauri 71）        | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 同一授权族事务轮换；只限制 128 条 active，terminal 保留审计。                                                                                                                                                                                   |
-| 调查 invocation 预留（Data 0069 / Tauri 72）   | `CURRENT_IMPLEMENTED_NOT_RETESTED` | content-free ID 原子绑定、ledger/run 结清与 task 对账已实现；最终门禁待复跑。                                                                                                                                                                   |
-| 多粒度范围化 FTS（Data 0070 / Tauri 73）       | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 当前 Data 70 files / 432、Search Core 3/34 PASS；六类 chunk、父子 UTF-16 定位与 current/branch/POV/story-time/authority/privacy 过滤已覆盖，冻结候选仍须重跑。                                                                                  |
-| Production Agent 调查                          | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 固定 5 工具、1 call、0 retry；调查/修复各自披露和双重 fingerprint 重检已 2 files/36 PASS，通用自适应 Agent 不在当前范围。                                                                                                                       |
-| 自适应 Observation → Replan                    | `NOT_IMPLEMENTED`                  | 当前工具顺序固定。                                                                                                                                                                                                                              |
-| 确认后/dispatch 后自动 fallback                | `DEFERRED`                         | 仅保留发送前已配置 route 的降级选择；仍为 1 invocation/0 retry。                                                                                                                                                                                |
-| 多 invocation fallback receipts                | `DEFERRED`                         | 当前一个 run 最多一个模型 invocation。                                                                                                                                                                                                          |
-| 多粒度 chunk / 父子引用                        | `CURRENT_IMPLEMENTED_NOT_RETESTED` | Data 0070 与生产 FTS 范围已接线；当前 Data 70 files / 432、Search Core 3/34 PASS，冻结候选仍须重跑。                                                                                                                                            |
-| 完整检索 benchmark / 消融 / 延迟基线           | `FINAL_BENCHMARK_PENDING`          | 5k/20k/50k/200k、≥30 样本 runner 已接线；必须在唯一冻结 commit 上保存原始结果后才可更新。                                                                                                                                                       |
-| 云端 Agent 执行                                | `DEFERRED_CLOUD_EXECUTION`         | 当前没有云端生产执行平面。                                                                                                                                                                                                                      |
-| 从 finding 生成修复 Candidate                  | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 独立披露与 1 call/0 retry；EvidenceRef trace、Candidate 隔离、取消/重启不重发已覆盖；真实 Provider/Tauri 待测。                                                                                                                                 |
-| Provider 发送前精确披露                        | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 续写 31/31、opening 2 files/79、Settings 3 files/69 + 55/55、图片/编辑器 3 files/46、调查/修复 2 files/36、旧导入决定链 5/5 已通过；固定 probe 冻结/重检与豆包有效模型统一已关闭 scoped P1。冻结全量仍待，真实 Provider 为 `BLOCKED_EXTERNAL`。 |
-| 四格式图片嵌入与原生保存回执                   | `CURRENT_IMPLEMENTED_NOT_RETESTED` | 内部产物解析、安全图片上限、原生票据和写后 size+SHA 已覆盖；外部应用打开与真实 Tauri 对话框仍 `BLOCKED_EXTERNAL`。                                                                                                                              |
-| 本增量包预算                                   | `UNCHANGED_PENDING_FINAL_BUILD`    | 当前沿用 7 MiB 与既有单文件上限；若冻结 source graph 证明需要，只允许带精确增量、理由、余量与单文件守卫的有界调整，不得无节制放宽。                                                                                                             |
+| 能力                                           | 当前状态                     | 不得外推的边界                                                                                                                                                                                                                    |
+| ---------------------------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 有界本地 query rewrite / multi-query（4 × 80） | `RELEASE_VERIFIED_AUTOMATED` | 聚焦 1 file / 4 tests PASS；不是模型改写，也不是任意 SQL。                                                                                                                                                                        |
+| content-free `queryTrace`                      | `RELEASE_VERIFIED_AUTOMATED` | 本次内存观察可含查询文本；持久层只存 redacted receipt 的 digest。                                                                                                                                                                 |
+| 离线检索指标与固定六臂矩阵                     | `RELEASE_VERIFIED_AUTOMATED` | 六臂确定性对照与冻结 production benchmark 都已完成且 0 dispatch；不冒充真实 Provider 长篇质量结论。                                                                                                                               |
+| FTS 基线与可选 local rerank                    | `RELEASE_VERIFIED_AUTOMATED` | 默认仍为简单 FTS；vector/graph/rerank 不自动启用。                                                                                                                                                                                |
+| continuation / investigation query recovery    | `RELEASE_VERIFIED_AUTOMATED` | `initial → rewrite → expand_k → evidence_insufficient` 已接线；证据不足不远程派发或扩大范围。                                                                                                                                     |
+| StoryFact→Graph / Narrative / TaskGraph        | `RELEASE_VERIFIED_AUTOMATED` | 三条投影已实现并复用当前权威；真人 Tauri 的 restart/restore 下钻仍 `BLOCKED_EXTERNAL`。                                                                                                                                           |
+| 直接模式一次性本地整理授权                     | `RELEASE_VERIFIED_AUTOMATED` | 与 Provider 权威分离；只保存本地时间戳，0 次联网授权。                                                                                                                                                                            |
+| 披露 grant 轮换（Data 0068 / Tauri 71）        | `RELEASE_VERIFIED_AUTOMATED` | 同一授权族事务轮换；只限制 128 条 active，terminal 保留审计。                                                                                                                                                                     |
+| 调查 invocation 预留（Data 0069 / Tauri 72）   | `RELEASE_VERIFIED_AUTOMATED` | content-free ID 原子绑定、ledger/run 结清与 task 对账已纳入发布门禁。                                                                                                                                                             |
+| 多粒度范围化 FTS（Data 0070 / Tauri 73）       | `RELEASE_VERIFIED_AUTOMATED` | Data 70 files / 432、Search Core 3/34 PASS；六类 chunk、父子 UTF-16 定位与 current/branch/POV/story-time/authority/privacy 过滤已覆盖。                                                                                           |
+| Production Agent 调查                          | `RELEASE_VERIFIED_AUTOMATED` | 固定 5 工具、1 call、0 retry；调查/修复各自披露和双重 fingerprint 重检已 2 files/36 PASS，通用自适应 Agent 不在当前范围。                                                                                                         |
+| 自适应 Observation → Replan                    | `NOT_IMPLEMENTED`            | 当前工具顺序固定。                                                                                                                                                                                                                |
+| 确认后/dispatch 后自动 fallback                | `DEFERRED`                   | 仅保留发送前已配置 route 的降级选择；仍为 1 invocation/0 retry。                                                                                                                                                                  |
+| 多 invocation fallback receipts                | `DEFERRED`                   | 当前一个 run 最多一个模型 invocation。                                                                                                                                                                                            |
+| 多粒度 chunk / 父子引用                        | `RELEASE_VERIFIED_AUTOMATED` | Data 0070 与生产 FTS 范围已接线；Data 70 files / 432、Search Core 3/34 PASS。                                                                                                                                                     |
+| 完整检索 benchmark / 消融 / 延迟基线           | `RELEASE_VERIFIED_AUTOMATED` | 冻结结果 371,204 B / 48 samples / 2/2 PASS；SHA-256 `7b8eef0ed8bd544f23e7efabe74ad09ff187013404730cbec43c7c42d84ec1c5`。                                                                                                          |
+| 云端 Agent 执行                                | `DEFERRED_CLOUD_EXECUTION`   | 当前没有云端生产执行平面。                                                                                                                                                                                                        |
+| 从 finding 生成修复 Candidate                  | `RELEASE_VERIFIED_AUTOMATED` | 独立披露与 1 call/0 retry；EvidenceRef trace、Candidate 隔离、取消/重启不重发已覆盖；真实 Provider/Tauri 为 `BLOCKED_EXTERNAL`。                                                                                                  |
+| Provider 发送前精确披露                        | `RELEASE_VERIFIED_AUTOMATED` | 续写 31/31、opening 2 files/79、Settings 3 files/69 + 55/55、图片/编辑器 3 files/46、调查/修复 2 files/36、旧导入决定链 5/5 已通过；固定 probe 冻结/重检与豆包有效模型统一已关闭 scoped P1，真实 Provider 为 `BLOCKED_EXTERNAL`。 |
+| 四格式图片嵌入与原生保存回执                   | `RELEASE_VERIFIED_AUTOMATED` | 内部产物解析、安全图片上限、原生票据和写后 size+SHA 已覆盖；外部应用打开与真实 Tauri 对话框仍 `BLOCKED_EXTERNAL`。                                                                                                                |
+| 本增量包预算                                   | `RELEASE_VERIFIED`           | policy 7,034,936 / 7,340,032 B，余量 305,096 B；只允许带精确增量、理由、余量与单文件守卫的有界调整，不得无节制放宽。                                                                                                              |
 
 ## 9. 代码对应关系
 
@@ -461,7 +470,14 @@ flowchart TD
 | 数据迁移与备份                        | [`../../packages/data/migrations/0066_writing_experience_preferences.sql`](../../packages/data/migrations/0066_writing_experience_preferences.sql)、[`../../packages/data/migrations/0067_consistency_investigation_agent.sql`](../../packages/data/migrations/0067_consistency_investigation_agent.sql)、[`../../packages/data/migrations/0068_writing_disclosure_active_grant_limit.sql`](../../packages/data/migrations/0068_writing_disclosure_active_grant_limit.sql)、[`../../packages/data/migrations/0069_consistency_investigation_invocation_reservation.sql`](../../packages/data/migrations/0069_consistency_investigation_invocation_reservation.sql)、[`../../packages/data/migrations/0070_multigranular_search_retrieval.sql`](../../packages/data/migrations/0070_multigranular_search_retrieval.sql)、[`../../packages/data/src/maintenance.ts`](../../packages/data/src/maintenance.ts) |
 | Candidate / 写作体验                  | [`../../apps/desktop/src/pages/editor-page.tsx`](../../apps/desktop/src/pages/editor-page.tsx)、[`../../apps/desktop/src/infrastructure/direct-story-fact-organizer.ts`](../../apps/desktop/src/infrastructure/direct-story-fact-organizer.ts)、[`../../apps/desktop/src/infrastructure/direct-writing-disclosure.ts`](../../apps/desktop/src/infrastructure/direct-writing-disclosure.ts)、[`../../apps/desktop/src/infrastructure/writing-experience-store.ts`](../../apps/desktop/src/infrastructure/writing-experience-store.ts)                                                                                                                                                                                                                                                                                                                                                                       |
 
-生产 build 的最终文件名和精确字节仍为 `FINAL_BUILD_PENDING`；工作树在最后一次 build 后又有小幅
-变化，不能抄用旧 `dist`。当前静态视觉证据已生成 32 条 manifest、32 个不同 SHA-256 的 PNG，
-运行时明确是 `static_web_distribution` / Chromium，`tauriWebView=not_run`、
-`systemScale=not_measured`。真实 Tauri 与 Windows 系统 DPI 仍须按第二阶段 Prompt 复测。
+`v0.2.5` artifact fingerprint 为
+`213370d1e2f57dc323203747997071cbee883ffc26cc35339ceec94758f9200d`：59 files /
+7,035,736 B physical；bundle policy 7,034,936 / 7,340,032 B，余量 305,096 B。单文件守卫为 entry
+261,016 / 307,200 B、Agent async 481,776 / 512,000 B、CSS 128,810 / 131,072 B、worker
+1,187,649 / 1,572,864 B。RC 为 Desktop 265 files / 2,049 pass / 1 skip / 0 fail、Rust 169 pass /
+1 ignored / 0 fail、Chromium 17/17 PASS。安装包 7,606,152 B，SHA-256
+`f422467fa5fdff4236f3d453cb21de3927c89375e106ff372852f918079f20ad`；manifest 11,717 B，SHA-256
+`4dce031a71eaa1664dcc993bd4f68362fb3d97b7843110b5ebc0b7c45b0bed0c`；`SHA256SUMS` 194 B，SHA-256
+`0f4330efd42cd7d898497de2d0b6866fc2c9ba7b3533e8c11a233dd6a8439eec`。开发期 32 条静态 Chromium
+manifest 只作历史支持；真人 Windows Tauri/Wry 与系统 200% DPI 仍须按第二阶段 Prompt 复测，并
+保持 `BLOCKED_EXTERNAL`。

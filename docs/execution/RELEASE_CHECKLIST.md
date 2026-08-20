@@ -1,35 +1,36 @@
 # InkShadow 持续发布门禁
 
 > [!IMPORTANT]
-> 2026-08-20 发布准备：当前 Desktop 应用清单已统一为 `0.2.5`。已发布 `v0.2.4` 标签指向
-> `b74d36ef3342db6813d1d43771bc82c0ed2aa1fb`，不得复用。当前工作树尚未冻结为唯一提交，也没有
-> 最终安装包、字节、SHA-256、远端 CI 或公开 Release；下列 v0.2.5 字段只能在对应步骤实际完成
-> 后回填。v0.2.4 说明按原日期保留为历史记录，不得外推为当前工作树证据。真实测试使用独立
+> `v0.2.5` 已从唯一来源提交 `5b3e212cafde10cd75fa87b7b74bfdfff9347a3d` 完成干净候选、main CI、
+> annotated tag、Windows NSIS 未签名打包、公开 Pre-release 与三个附件回下载核验。`v0.2.4` 仍绑定
+> `b74d36ef3342db6813d1d43771bc82c0ed2aa1fb`，不得移动或复用。v0.2.4 说明按原日期保留为历史记录。
+> 真实测试使用独立
 > [`NEXT-UNRELEASED-WINDOWS-TAURI-PHASE-2-PROMPT.md`](NEXT-UNRELEASED-WINDOWS-TAURI-PHASE-2-PROMPT.md)，
-> 最终门禁为 `PENDING_FINAL_RUN`，Provider live 与真实 Tauri 为 `NOT_RUN / NOT_RETESTED`。
+> Provider live、真实 Windows Tauri/Wry、系统 200% DPI 与外部应用打开仍为 `BLOCKED_EXTERNAL`。
 
 > 更新日期：2026-08-20  
-> 当前源码目标版本：`0.2.5`；最新已发布工程预览版本：`0.2.4`  
-> 当前结论：**`v0.2.5` 的功能与中文发布说明已准备，冻结候选门禁、唯一提交、main CI、标签、打包、哈希和公开 Release 仍待实际执行；状态为 `FINAL_GATE_PENDING / REAL_TAURI_NOT_RETESTED / PROVIDER_LIVE_NOT_RUN / NOT_RELEASED`**
+> 当前源码版本：`0.2.5`；最新已发布工程预览版本：`0.2.5`  
+> 当前结论：**`RELEASED_PREVIEW / FINAL_GATE_PASS / MAIN_CI_PASS / UNSIGNED / REAL_TAURI_BLOCKED_EXTERNAL / PROVIDER_LIVE_BLOCKED_EXTERNAL`**
 
 > [!WARNING]
 > **v0.2.3 发布后安全公告：**提交
 > `3abdcfeb327567c632e440d55d11f0af6f4911d2` 的真实 Windows 11 Tauri/Wry +
 > DeepSeek `deepseek-v4-flash` 测试发现，Candidate 接受与不可变版本创建完成后又隐式派发
 > `long_memory_compression`，并发送已接受正文。测试已按安全停止条件终止。已发布 `v0.2.3`
-> 不建议用于真实 Provider 的敏感正文处理。当前 `v0.2.5` 候选的证据仅来自 fake/mock、SQLite
-> 与静态 Chromium；新 Windows Tauri 安装包和 Provider live 复测均未运行，不能把源码自动化
-> 写成真实平台验证。
+> 不建议用于真实 Provider 的敏感正文处理。`v0.2.5` 的自动化证据来自 fake/mock、真实临时 SQLite、
+> Rust/Tauri 单元集成与 production Chromium；虽已生成并公开新的未签名 Windows 安装包，Provider
+> live 与真实 Tauri 人工复测仍未运行，不能把源码自动化写成真实平台验证。
 
 状态只使用 `PASS`、`IN_PROGRESS`、`NOT_RUN`、`BLOCKED` 和 `N/A`。  
 代码存在不等于发布门禁通过；只有可复核的测试、构建、签名、安装或人工验收证据才能标记 `PASS`。
 
-## v0.2.5 Pre-release 中文说明（待发布）
+## v0.2.5 已发布 Pre-release 中文说明与追踪
 
-> 建议 Release 标题：`墨影 InkShadow v0.2.5 — Windows 安全与写作体验工程预览版（未签名）`  
+> Release：<https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5>  
+> 标题：`墨影 InkShadow v0.2.5 — Windows 安全与写作体验工程预览版（未签名）`  
 > 发布类型：GitHub Pre-release  
 > 支持平台：Windows 10 / 11 x64  
-> 签名状态：`FINAL_PACKAGE_SIGNATURE_PENDING`；未取得实际检查结果前不得写成已签名
+> 签名状态：最终安装包实测 `Authenticode=NotSigned`；Windows 可能显示“未知发布者”
 
 v0.2.5 在已发布 `v0.2.4` 标签基线上收口直接/专业写作模式、本地设定整理、StoryMemory/RAG
 基础链路和受控一致性调查，同时继承 Candidate、本地版本与隐私边界。它不是 Beta、GA 或商业
@@ -67,7 +68,7 @@ v0.2.5 在已发布 `v0.2.4` 标签基线上收口直接/专业写作模式、�
 - 接线 L0–L3 StoryMemory 读模型、Narrative State 只读/重建、MemoryRecord 明确提升、现有 FTS/本地 rerank、最多 4 条且每条最多 80 字符的确定性查询规划，以及不含原始正文/查询的 trace 摘要。
 - 新增 chapter/scene/event/paragraph/dialogue/story-fact-evidence 多粒度本地投影，父子 UTF-16 定位与 branch/POV/story-time/authority/privacy/currentness 范围在 FTS 排名前失败关闭；Agent 的 FTS-only 入口不触发 embedding 或写入。
 - 新增 Recall@K、Precision@K、MRR、nDCG、hit rate、权威命中、陈旧命中、拒绝事实污染和私密泄漏等纯本地评估指标。
-- 5k/20k/50k/200k、≥30 样本的 production-path benchmark runner 已接线，但原始结果必须绑定最终唯一 commit，当前为 `FINAL_BENCHMARK_PENDING`，不拿 fixture 数字冒充。
+- 5k/20k/50k/200k、48 samples 的 production-path benchmark 已绑定最终来源提交运行；2/2 PASS，8.29 秒，原始 JSON 371,204 bytes，SHA-256 `7b8eef0ed8bd544f23e7efabe74ad09ff187013404730cbec43c7c42d84ec1c5`，不拿 fixture 数字冒充。
 - 自动多模型 fallback 与确认后动态 replanning 仍保持关闭；调查本身继续遵守 1 次调用、0 次重试，finding 修复则必须重新披露并建立另一个独立 1 次调用。
 
 #### 本地数据、恢复与响应式证据
@@ -103,54 +104,43 @@ v0.2.5 在已发布 `v0.2.4` 标签基线上收口直接/专业写作模式、�
 - 该数字是当前门禁，不是永远禁止调整。只有冻结 build 的 source graph 证明实际需要时，才可记录精确新增字节、必要性、替代方案、保留余量与各单文件守卫后做有界修改；不得为通过门禁无节制抬高总量或掩盖单个大文件。
 - 调整前必须排除重复模块、测试/HMR/sourcemap、错误静态依赖和可安全拆分的重型模块；总量优先只增加 128/256 KiB，确实无法拆分的单文件才按 32/64 KiB 最小增量调整。同步更新所有守卫并记录调整前后预算、physical dist、policy payload、余量和最大 chunk；不得排除 async 包、改变统计口径或临时关闭检查。
 - Agent 重型入口保持延迟加载；没有通过排除异步包、移动测试代码或放宽单文件上限绕过检查。
-- 最终 payload、最大入口、最大异步 chunk 和余量均为 `FINAL_BUILD_PENDING`，只能从冻结候选的 production build 回填；若确需增额，必须先给出 bundle graph、重复依赖与 lazy 边界审计证据，并记录增额原因与精确差值。
+- 最终冻结 build 为 59 files / 7,035,736 physical bytes；policy payload 7,034,936 / 7,340,032，余量 305,096 bytes；入口 261,016、最大异步 chunk 481,776、CSS 128,810、worker 1,187,649 bytes。总量预算与全部单文件守卫均未调整。
 
 ### 当前证据与不得外推的边界
 
 - 本轮未读取真实 API Key，未执行真实 Provider 或付费调用；模型链测试只允许严格 fake/mock。
-- 当前非冻结工作树已完成 17 个共享包、Cloud/Web、20/21 workspace typecheck、秘密/边界/许可证/
-  Desktop 发布配置和 Rust fmt + clippy `-D warnings` + 169 passed / 1 explicit local Ollama ignored；
-  精确命令与逐包数字见 `TEST_RESULTS.md`。这些分项不等于最终冻结候选门禁。
-- 续写披露聚焦回归为 31/31 PASS；开书链聚焦 2 files / 79 tests PASS，覆盖四类动作的二次确认、
-  取消 0-call 与 route/cost/source/privacy 最终复核。Settings 固定能力探针先前实际收集 3 files /
-  69 tests PASS，最终固定 probe 与豆包有效模型统一复跑 1 file / 55 tests PASS；图片生成/普通编辑器
-  聚焦 3 files / 46 tests PASS。冻结全量与真实 Provider 仍待验收，不得把这些分项提前写成全入口
-  最终证明。
-- 旧导入 Provider 入口关闭后的历史隔离 Candidate 决定链已定向复跑 5/5 PASS；已保存 Candidate
-  仍需作者显式接受，接受阶段 0 Provider 并创建新不可变版本。首次 4 pass / 1 fail 是测试 fixture
-  错用 continuation intent 后被产品安全拒绝，修正仅限 fixture；完整 Desktop 仍待冻结后重跑。
-- Candidate 决策共享链已用精确 7 文件命令权威复跑 59/59 PASS；冻结 production Chromium
-  全矩阵与真实 Tauri 仍分别保持 `PENDING_FINAL_RUN` / `BLOCKED_EXTERNAL`。
-- 一致性调查与独立修复披露聚焦 2 files / 36 tests PASS，相关 5 文件 ESLint/Prettier PASS；最新
-  Desktop typecheck 也已复跑 PASS。冻结候选仍须执行最新全 workspace typecheck、完整 Desktop
-  测试和 release 门禁。
-- Provider 面与普通 UI ID 聚焦 4 files / 22 tests PASS；受限沙箱首跑因依赖 ACL 启动失败，同命令
-  完整权限复跑通过。7 文件 ESLint 的受限首跑产生 418 个依赖类型不可读连锁错误，完整权限复跑
-  0 error；Prettier 和 scoped diff 首跑即 PASS。Settings 最终 2 文件 ESLint/Prettier/diff 与 Desktop
-  typecheck 也通过；Provider dispatch surface 当前无剩余 P0/P1。
-- 分项自动化、真实临时 SQLite、Rust/Tauri 单元集成和静态 Chromium 证据见 [`TEST_RESULTS.md`](TEST_RESULTS.md)；冻结候选完整 `release:check` 与 production build 仍以最后一次实际结果为准。
-- 真实 Windows Tauri/Wry、Credential Manager、系统 200% DPI、升级/卸载、Provider 故障矩阵与长篇付费调用均为 `NOT_RUN / NOT_RETESTED`。
+- 唯一来源提交上的完整候选重新执行 `release:check`、Rust、production Chromium、Tauri/NSIS 和
+  provenance；Desktop 为 265 files / 2,049 passed / 1 skipped / 0 failed，600.74 秒；Rust 为
+  169 passed / 1 ignored / 0 failed；E2E 为 17/17。精确命令、候选前失败→修复→复跑和逐包数字见
+  [`TEST_RESULTS.md`](TEST_RESULTS.md)。
+- production benchmark 精确绑定同一 40 位来源提交，48 samples、2/2 PASS；它验证本地检索路径与
+  Agent 调用预算，不证明真实 Provider 兼容性、文学质量或付费长篇调用。
+- GitHub Actions run `32367317531` 的 Cloud PostgreSQL / forced RLS、Windows native、
+  type/lint/test/web build 三项均为 success；job IDs 分别为 `96419578521`、`96419578642`、
+  `96419578743`。
+- Provider dispatch surface 当前无剩余 P0/P1，但这是 fake/mock 与静态审计结论；真实 Provider、
+  Windows Tauri/Wry 人工路径、Credential Manager、系统 200% DPI、升级/卸载和另一台电脑安装均为
+  `BLOCKED_EXTERNAL`。
 - 真实 Tauri 导出保存对话框与 Markdown/DOCX/PDF/EPUB 外部应用打开均为 `BLOCKED_EXTERNAL`；结构解析、浏览器下载和 Rust 文件写入测试不替代它们。
-- 当前工作树不是发布制品；在唯一提交、main CI、标签、安装包、manifest、`SHA256SUMS` 与回下载校验全部有实际证据前不得把 v0.2.5 写成已发布。
+- 发布为未签名工程预览，不是 Beta、GA 或商业正式版；不得承载敏感正文、唯一数据副本或正式生产任务。
 
-### 待生成的发布追踪
+### 已发布追踪
 
-| 属性                     | 当前值                        | 回填规则                                                               |
-| ------------------------ | ----------------------------- | ---------------------------------------------------------------------- |
-| 来源 Commit              | `FINAL_COMMIT_PENDING`        | 必须是构建来源的唯一干净提交                                           |
-| `v0.2.5` tag peel        | `TAG_PENDING`                 | 必须精确等于来源 Commit；既有 `v0.2.4` 不得移动或复用                  |
-| Windows x64 NSIS 文件名  | `PACKAGE_PENDING`             | 从最终 Tauri/NSIS 产物读取                                             |
-| 安装包字节数 / SHA-256   | `PACKAGE_HASH_PENDING`        | 从最终文件计算，不得沿用 v0.2.3/v0.2.4 或中间构建                      |
-| Authenticode             | `SIGNATURE_CHECK_PENDING`     | 对最终安装包实际检查                                                   |
-| Release manifest         | `MANIFEST_PENDING`            | 记录来源提交、源指纹、文件字节和 SHA-256                               |
-| `SHA256SUMS`             | `CHECKSUM_ATTACHMENT_PENDING` | 只能由最终公开附件生成并在回下载后复核                                 |
-| production bundle        | `FINAL_BUILD_PENDING`         | 记录 payload、最大入口、最大异步 chunk、CSS 和既有守卫                 |
-| production benchmark     | `FINAL_BENCHMARK_PENDING`     | 在唯一冻结 Commit 上运行 5k/20k/50k/200k、≥30 样本，保存原始结果与汇总 |
-| PR / main CI             | `REMOTE_CI_PENDING`           | 记录对应唯一提交的实际 run 与结论                                      |
-| GitHub Release           | `RELEASE_PENDING`             | 记录实际 URL、发布时间、`draft`/`prerelease` 和公开附件列表            |
-| Windows Tauri / Provider | `NOT_RUN / NOT_RETESTED`      | 只能由第二阶段真实测试报告更新，发布动作本身不能自动把它改成 PASS      |
+| 属性                     | 最终值                                                                                                                                                                                                                             |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 来源 Commit              | `5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`                                                                                                                                                                                         |
+| source fingerprint       | 1,238 files / 20,794,217 bytes；SHA-256 `c4260cc189a73c02a53aa0a8eca1b2012b55e77e24bb7ff0e11de5ccf4d27897`                                                                                                                         |
+| `v0.2.5` tag             | annotated tag object `51dfd64ba22e9771131f251cdc778ee06f89192d`；peel 精确等于来源 Commit                                                                                                                                          |
+| Windows x64 NSIS         | `InkShadow_0.2.5_x64-setup.exe`；7,606,152 bytes；SHA-256 `f422467fa5fdff4236f3d453cb21de3927c89375e106ff372852f918079f20ad`；ProductVersion `0.2.5`；Authenticode `NotSigned`                                                     |
+| Release manifest         | `inkshadow-release-manifest.json`；11,717 bytes；SHA-256 `4dce031a71eaa1664dcc993bd4f68362fb3d97b7843110b5ebc0b7c45b0bed0c`                                                                                                        |
+| `SHA256SUMS`             | 194 bytes；SHA-256 `0f4330efd42cd7d898497de2d0b6866fc2c9ba7b3533e8c11a233dd6a8439eec`                                                                                                                                              |
+| production bundle        | 59 files / 7,035,736 physical bytes；payload 7,034,936 / 7,340,032；入口 261,016、最大 async 481,776、CSS 128,810、worker 1,187,649 bytes；artifact fingerprint `213370d1e2f57dc323203747997071cbee883ffc26cc35339ceec94758f9200d` |
+| production benchmark     | 48 samples；2/2 PASS，8.29 秒；JSON 371,204 bytes；SHA-256 `7b8eef0ed8bd544f23e7efabe74ad09ff187013404730cbec43c7c42d84ec1c5`；绑定来源 Commit                                                                                     |
+| main CI                  | GitHub Actions run `32367317531`；Cloud PostgreSQL / forced RLS `96419578521`、Windows native `96419578642`、type/lint/test/web build `96419578743` 均 success                                                                     |
+| GitHub Release           | <https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5>；`publishedAt=2026-08-20T12:41:52Z`、`draft=false`、`prerelease=true`；安装包、manifest、`SHA256SUMS` 三个公开附件重新下载后的文件名、字节和 SHA-256 均匹配      |
+| Windows Tauri / Provider | `BLOCKED_EXTERNAL`；只能由第二阶段真实测试报告更新，发布动作本身不把它们改成 PASS                                                                                                                                                  |
 
-### 中文 Release notes（待发布）
+### 中文 Release notes（已发布）
 
 InkShadow v0.2.5 是一次面向 Windows 桌面端的安全与写作体验工程预览更新。
 
@@ -177,12 +167,12 @@ Tauri 只在一次性保存票据、原子写入与磁盘回读核验全部成�
 实际打开仍待第二阶段人工验证。
 
 本版本继续保留 Candidate 隔离、本地优先、不可变版本和 forward-only migration，并沿用 7 MiB
-总包体预算及既有单文件上限。最终安装包文件名、字节数、SHA-256、manifest、`SHA256SUMS`、
-来源提交、远端 CI 与 Release URL 必须在实际打包和发布后按上表回填。
+总包体预算及既有单文件上限，最终构建没有调整任何预算。安装包、manifest、`SHA256SUMS`、
+来源提交、远端 CI、tag 与 Release URL 已按上表绑定并经公开回下载复核。
 
 当前证据来自 fake/mock、真实临时 SQLite、Rust/Tauri 单元集成与静态 Chromium。真实 Provider、
-Windows Tauri/Wry、Credential Manager、系统 200% DPI、升级/卸载和长篇付费调用仍为
-`NOT_RUN / NOT_RETESTED`。当前按未签名工程预览准备，最终签名状态仍须对安装包实际检查；
+Windows Tauri/Wry 人工流程、Credential Manager、系统 200% DPI、升级/卸载和长篇付费调用仍为
+`BLOCKED_EXTERNAL`。本版已按 `Authenticode=NotSigned` 的工程预览发布；
 不应承载敏感正文、唯一数据副本或正式生产任务。
 
 ## v0.2.4 已发布 Pre-release 中文说明与追踪
@@ -246,7 +236,7 @@ Candidate 隔离和作者最终确认原则。它不是 Beta、GA 或商业正�
 | PR / main CI           | 本轮未重新查询；保持历史记录，不从 Release 存在反推 CI 结果                                                                             |
 | GitHub Release         | <https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.4>；`draft=false`、`prerelease=true`、`publishedAt=2026-08-14T06:19:17Z` |
 
-### 中文 Release notes（待发布）
+### 中文 Release notes（v0.2.4 历史发布稿）
 
 InkShadow v0.2.4 修复了 v0.2.3 真实 Windows 用户测试发现的隐式云调用和恢复状态问题：
 接受 AI 建议版本现在只执行本地事务，默认产生 0 次 Provider 调用；Model Hub 支持凭据删除后的
@@ -599,10 +589,10 @@ connection/catalog/provider/model/route/revision/capability、dispatch boundary/
 
 ## 发布结论
 
-`v0.2.5` 当前只是 Pre-release 候选。唯一干净提交、制品哈希、远端 CI、标签和公开 Release
-均须以实际结果回填上方占位；真实 Provider 与 Windows Tauri 第二阶段复测保持
-`NOT_RUN / NOT_RETESTED`。`v0.2.4` 是当前最新公开 Pre-release 与既有标签基线，不能复用、移动
-或静默替换。
+`v0.2.5` 已从唯一干净来源提交 `5b3e212cafde10cd75fa87b7b74bfdfff9347a3d` 完成源码门禁、
+unsigned candidate、远端 CI、annotated tag、三个公开附件与回下载复核，并作为 Pre-release 发布。
+真实 Provider 与 Windows Tauri 第二阶段复测保持 `BLOCKED_EXTERNAL`；`v0.2.4` 与 `v0.2.5` 的既有
+标签和附件均不能复用、移动或静默替换。
 
 `v0.2.3` 的唯一提交、完整候选链、制品哈希、GitHub Actions、标签与公开附件回读已经完成；
 真实 Tauri WebView + Keyring 冷启动、另一台电脑安装、192 次付费调用、2,496 项人工评分和真实 Provider
@@ -610,4 +600,4 @@ connection/catalog/provider/model/route/revision/capability、dispatch boundary/
 签名、真实供应商全矩阵、百万字真实作品全链路/WebView 压力、法律审批、生产部署与独立安全审计
 也仍有未关闭门禁。
 
-**当前结论：`v0.2.4` 已公开为不可静默替换的最新 Pre-release；`v0.2.3` 的隐式云调用安全公告继续有效，`v0.2.5` 仍为待最终门禁、打包与发布的候选。它们都不是 Beta、GA 或商业正式版；上述外部验证完成前不得扩大发布结论。**
+**当前结论：`v0.2.5` 已公开为不可静默替换的最新 Pre-release；`v0.2.3` 的隐式云调用安全公告继续有效。它们都不是 Beta、GA 或商业正式版；上述外部验证完成前不得扩大发布结论。**

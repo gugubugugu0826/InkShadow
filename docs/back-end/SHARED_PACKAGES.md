@@ -2,7 +2,7 @@
 
 > 基于源码快照：2026-08-20  
 > 文档状态：`SUPPORTING_CURRENT`  
-> Desktop 当前源码目标：`0.2.5`；最新已发布版本：`0.2.4`；v0.2.5 候选尚未发布；设计基线：`DESIGN v0.3.1b`  
+> Desktop 当前版本：`0.2.5`；最新已发布版本：`v0.2.5` Pre-release；设计基线：`DESIGN v0.3.1b`  
 > 覆盖范围：`packages/*/src` 的 17 个 workspace package，以及 `packages/data/migrations` 的 70 个本地数据库迁移（最新 `0070`）
 
 这些包不是“页面”，也不应全部叫作后端。它们承载可被 Desktop、Cloud API、Web 或测试复用的领域规则、用例、契约、数据适配器和 UI 基础件。正常依赖方向是“领域与协议 → 应用用例 → 基础设施适配器 → 应用入口”；`scripts/check-boundaries.mjs` 会检查主要边界。
@@ -43,29 +43,29 @@
 
 该包定义策略和协议，不包含模型 provider 实现，也不会直接发起网络调用。
 
-| 文件                                                             | 内容                                                                           |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `packages/ai-core/src/budget.ts`                                 | Token 成本估算、任务/项目/月预算和 warn/hard 预算决策。                        |
-| `packages/ai-core/src/candidate.ts`                              | AI 候选状态、应用模式和把候选内容合入正文前的安全计划。                        |
-| `packages/ai-core/src/connection-test.ts`                        | 模型连接测试各步骤、脱敏后的端点来源和结果报告。                               |
-| `packages/ai-core/src/context-compiler.ts`                       | 十二层上下文顺序、逐条来源与 Token 追踪、必选预算失败及旧 PromptSection 适配。 |
-| `packages/ai-core/src/continuation-recovery.ts`                  | 续写运行在中断、未派发与结果不明确状态间的保守恢复规则。                       |
-| `packages/ai-core/src/evidence-rerank.ts`                        | 本机确定性证据重排、评分拆分、选择理由和稳定回退顺序。                         |
-| `packages/ai-core/src/generation-state.ts`                       | 生成任务状态机、允许的状态转换与终态判定。                                     |
-| `packages/ai-core/src/governed-creative-extensions.ts`           | 翻译、短剧等受治理创意扩展的严格 JSON 协议、大小上限和解析/序列化。            |
-| `packages/ai-core/src/index.ts`                                  | 包的公开导出入口。                                                             |
-| `packages/ai-core/src/long-form-retrieval-benchmark-fixtures.ts` | 固定、可复现的长篇检索评测夹具，不包含真实作品内容。                           |
-| `packages/ai-core/src/long-form-retrieval-benchmark.ts`          | Production 长篇检索 benchmark 编排、分层指标与安全阈值；最终实跑仍 PENDING。   |
-| `packages/ai-core/src/model.ts`                                  | 模型配置、生成/嵌入/计数请求、流事件、适配器与原生模型网关契约。               |
-| `packages/ai-core/src/multi-agent-protocol.ts`                   | 多智能体评审结论、来源引用、任务建议和候选补丁的严格公开协议。                 |
-| `packages/ai-core/src/novel-skill*.ts`                           | Novel Skill 定义、内建模板、编译、类型、激活与评测合同；默认关闭并由作者启用。 |
-| `packages/ai-core/src/preflight.ts`                              | 生成前对模型可用性、上下文、定价、预算和数据边界的检查。                       |
-| `packages/ai-core/src/prompt-registry.ts`                        | Prompt 版本、变量、激活计划、规范化校验与安全渲染。                            |
-| `packages/ai-core/src/quality-gate.ts`                           | 候选质量指标、证据、阈值和重复度等质量门禁。                                   |
-| `packages/ai-core/src/retrieval-evaluation.ts`                   | Recall@K、MRR、nDCG、权威精度、污染与隐私泄漏等确定性检索指标。                |
-| `packages/ai-core/src/routing.ts`                                | 按模型角色、位置和验证状态解析实际模型路由。                                   |
-| `packages/ai-core/src/story-memory-read-model.ts`                | 从已接受正文与确认事实构建只读 StoryMemory 视图并隔离非 canon 内容。           |
-| `packages/ai-core/src/task-output-profile.ts`                    | 任务类型对应的结构化输出、预算和能力要求。                                     |
+| 文件                                                             | 内容                                                                               |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `packages/ai-core/src/budget.ts`                                 | Token 成本估算、任务/项目/月预算和 warn/hard 预算决策。                            |
+| `packages/ai-core/src/candidate.ts`                              | AI 候选状态、应用模式和把候选内容合入正文前的安全计划。                            |
+| `packages/ai-core/src/connection-test.ts`                        | 模型连接测试各步骤、脱敏后的端点来源和结果报告。                                   |
+| `packages/ai-core/src/context-compiler.ts`                       | 十二层上下文顺序、逐条来源与 Token 追踪、必选预算失败及旧 PromptSection 适配。     |
+| `packages/ai-core/src/continuation-recovery.ts`                  | 续写运行在中断、未派发与结果不明确状态间的保守恢复规则。                           |
+| `packages/ai-core/src/evidence-rerank.ts`                        | 本机确定性证据重排、评分拆分、选择理由和稳定回退顺序。                             |
+| `packages/ai-core/src/generation-state.ts`                       | 生成任务状态机、允许的状态转换与终态判定。                                         |
+| `packages/ai-core/src/governed-creative-extensions.ts`           | 翻译、短剧等受治理创意扩展的严格 JSON 协议、大小上限和解析/序列化。                |
+| `packages/ai-core/src/index.ts`                                  | 包的公开导出入口。                                                                 |
+| `packages/ai-core/src/long-form-retrieval-benchmark-fixtures.ts` | 固定、可复现的长篇检索评测夹具，不包含真实作品内容。                               |
+| `packages/ai-core/src/long-form-retrieval-benchmark.ts`          | Production 长篇检索 benchmark 编排、分层指标与安全阈值；v0.2.5 冻结实跑 2/2 PASS。 |
+| `packages/ai-core/src/model.ts`                                  | 模型配置、生成/嵌入/计数请求、流事件、适配器与原生模型网关契约。                   |
+| `packages/ai-core/src/multi-agent-protocol.ts`                   | 多智能体评审结论、来源引用、任务建议和候选补丁的严格公开协议。                     |
+| `packages/ai-core/src/novel-skill*.ts`                           | Novel Skill 定义、内建模板、编译、类型、激活与评测合同；默认关闭并由作者启用。     |
+| `packages/ai-core/src/preflight.ts`                              | 生成前对模型可用性、上下文、定价、预算和数据边界的检查。                           |
+| `packages/ai-core/src/prompt-registry.ts`                        | Prompt 版本、变量、激活计划、规范化校验与安全渲染。                                |
+| `packages/ai-core/src/quality-gate.ts`                           | 候选质量指标、证据、阈值和重复度等质量门禁。                                       |
+| `packages/ai-core/src/retrieval-evaluation.ts`                   | Recall@K、MRR、nDCG、权威精度、污染与隐私泄漏等确定性检索指标。                    |
+| `packages/ai-core/src/routing.ts`                                | 按模型角色、位置和验证状态解析实际模型路由。                                       |
+| `packages/ai-core/src/story-memory-read-model.ts`                | 从已接受正文与确认事实构建只读 StoryMemory 视图并隔离非 canon 内容。               |
+| `packages/ai-core/src/task-output-profile.ts`                    | 任务类型对应的结构化输出、预算和能力要求。                                         |
 
 ## 3. `application`：应用用例与端口
 

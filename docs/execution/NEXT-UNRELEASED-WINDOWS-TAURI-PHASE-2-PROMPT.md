@@ -1,9 +1,30 @@
-# v0.2.5：真实 Windows Tauri 第二阶段测试 Prompt
+# v0.2.5 已发布版：真实 Windows Tauri 第二阶段测试 Prompt
 
 > 本文件是可独立交付给测试人员的执行 Prompt。  
-> 适用对象：从 `v0.2.5` 唯一干净候选提交构建的 Windows Tauri 安装包；`v0.2.4` 是升级基线。  
-> 当前状态：`NOT_RUN`。只有实际执行的项目才可改为 `VERIFIED_IN_WINDOWS_TAURI`。  
+> 适用对象：从已发布 `v0.2.5` 冻结提交构建的 Windows Tauri 安装包；`v0.2.4` 是升级基线。  
+> 当前状态：`BLOCKED_EXTERNAL`。只有实际执行的项目才可改为 `VERIFIED_IN_WINDOWS_TAURI`。  
 > 本地自动化、fake gateway、临时 SQLite、静态 Chromium、CSS zoom、DPR2 和 R12 报告均不能替代本测试。
+
+## 已冻结的 v0.2.5 发布对象
+
+- GitHub Release：<https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5>；annotated tag object
+  为 `51dfd64ba22e9771131f251cdc778ee06f89192d`，tag peel/source commit 为
+  `5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`。后续文档提交不移动该标签。
+- source fingerprint 为 `c4260cc189a73c02a53aa0a8eca1b2012b55e77e24bb7ff0e11de5ccf4d27897`
+  （1,238 files / 20,794,217 B）。
+- artifact fingerprint 为 `213370d1e2f57dc323203747997071cbee883ffc26cc35339ceec94758f9200d`
+  （59 files / 7,035,736 B physical）；bundle policy 为 7,034,936 / 7,340,032 B，余量 305,096 B。
+- 单文件守卫：entry 261,016 / 307,200 B；Agent async 481,776 / 512,000 B；CSS
+  128,810 / 131,072 B；worker 1,187,649 / 1,572,864 B。包预算只可按可审计需要有界调整，不能无节制放宽。
+- 安装包 7,606,152 B，SHA-256
+  `f422467fa5fdff4236f3d453cb21de3927c89375e106ff372852f918079f20ad`；manifest 11,717 B，SHA-256
+  `4dce031a71eaa1664dcc993bd4f68362fb3d97b7843110b5ebc0b7c45b0bed0c`；`SHA256SUMS` 194 B，SHA-256
+  `0f4330efd42cd7d898497de2d0b6866fc2c9ba7b3533e8c11a233dd6a8439eec`。
+- 发布候选自动门禁：Desktop 265 files / 2,049 pass / 1 skip / 0 fail；Rust 169 pass / 1 ignored /
+  0 fail；Chromium 17/17 PASS。Data `0066`–`0070` 对应 Tauri `69`–`73`。
+
+这些证据关闭的是已发布源与自动化门禁，不关闭本 Prompt 所要求的真人 Windows Tauri/Wry、真实
+Provider、Windows 系统 200% DPI、系统保存对话框或外部应用打开；它们继续保持 `BLOCKED_EXTERNAL`。
 
 请在隔离的 Windows 11 测试机上执行本 Prompt。测试人员只能在 InkShadow 原生界面中手动输入
 自己的 Provider API Key；Codex、WebDriver、脚本、终端、日志、截图、诊断包和报告不得读取、
@@ -14,7 +35,7 @@
 
 开始前记录并冻结：
 
-1. 候选版本、唯一 commit SHA、分支、干净工作树证明和 source fingerprint；
+1. 发布版本、冻结 commit SHA、tag object、Release URL 和 source fingerprint；
 2. 安装包文件名、字节数、SHA-256、签名状态和构建 manifest；
 3. Windows 版本/补丁、系统显示缩放、分辨率、DPR、WebView2、Tauri/Wry 和测试用户；
 4. Provider、精确模型 ID、账户目录 entry、连接 ID、route revision 与能力证据摘要；
@@ -122,8 +143,9 @@ readiness 在顶栏、作品库、Model Hub、任务推荐和实际预检一致�
    若脱敏诊断提供 `queryTrace`，只能含来源 ID、类型、`fts`、结果数和权重；当前 SQLite 应只保存
    redacted receipt 的 digest，不能保存 query、正文、prompt 或 receipt 本体。
 6. 页面不得显示内部码或 raw connection ID；不得有通用 Agent、任意工具或正文写入能力。
-7. 当前“生成修复 Candidate”为 `NOT_IMPLEMENTED`；不得因为按钮、提示或历史 R12 报告声称已
-   产生修复 Candidate。
+7. “生成修复 Candidate”当前是调查之外的独立动作：准备保持 0 次调用，另行披露精确目标、范围、
+   费用、隐私、1 次调用和 0 次重试；不得复用调查授权。若本阶段执行，须单独计入调用预算，结果
+   保持隔离 Candidate，只有作者随后接受才以 0 次调用创建不可变版本。
 8. 发送前允许按已配置 route 的 `use_fallback` 选择实际 fallback，但确认页、run 与账本必须一致
    显示最终精确 Provider/model，且仍只有 1 个 invocation、0 网络重试。响应确认后或 dispatch 后
    不得自动换模、fallback 或重发；多 invocation fallback 收据与云端 Agent 当前均未实现。
@@ -160,8 +182,11 @@ readiness 在顶栏、作品库、Model Hub、任务推荐和实际预检一致�
    Precision@K、MRR、nDCG、hit rate、authority precision、stale hit rate、rejected Candidate
    contamination rate 和 private leakage count；另保留原始 FTS 与 local rerank 排序对照。章节、
    场景、事件、段落、对话与 StoryFact 证据多粒度 chunk、父子引用和范围过滤已经进入当前实现，
-   但 Production benchmark 的最终长篇实跑仍须记录为 `FINAL_BENCHMARK_PENDING`，完成前不能写成
-   发布门禁通过。
+   Production benchmark 已绑定冻结 source commit 运行：原始 JSON 371,204 B，SHA-256
+   `7b8eef0ed8bd544f23e7efabe74ad09ff187013404730cbec43c7c42d84ec1c5`，48 samples、2/2 PASS；
+   Recall@K 0.666667、Precision@K 0.597222、MRR/nDCG/hit rate 0.666667、false inclusion
+   0.069444，authority/stale/rejected/branch/POV/future/private leak 均为 0，evidence/trace
+   completeness 均为 1，平均 search 3.2295 ms，Provider/network/key/vector calls 均为 0。
 9. 一致性调查全成功、partial、模型输出解析失败、证据核验丢弃、取消、not_dispatched 和 ambiguous；
    每次最多 1 次模型、0 自动重试。分别在 planned invocation 已保存、running ledger 已创建、
    Provider 发送边界已越过以及 run 已终结但 task 尚未终结时结束进程；重启后 ledger/run/task/step/
@@ -211,7 +236,7 @@ readiness 在顶栏、作品库、Model Hub、任务推荐和实际预检一致�
 
 ## 六、视觉证据
 
-每张真实 Tauri 截图记录 candidate commit、route、DOM `data-surface`、CSS viewport、DPR、Windows
+每张真实 Tauri 截图记录发布 source commit、route、DOM `data-surface`、CSS viewport、DPR、Windows
 系统缩放、Tauri/WebView2、主题、时间、字节数和 SHA-256。截图后做哈希去重；相同内容不能用
 不同文件名冒充不同状态。至少覆盖：
 
@@ -238,10 +263,11 @@ readiness 在顶栏、作品库、Model Hub、任务推荐和实际预检一致�
 报告必须严格分栏：
 
 - `v0.2.4` 及 R12 的历史事实；
-- 当前候选的 mock/fake/SQLite/Chromium 自动化；
-- 当前候选本次真实 Windows Tauri 结果；
-- 当前候选 Provider live 结果；
+- 已发布 `v0.2.5` 的 mock/fake/SQLite/Chromium 自动化与冻结 benchmark；
+- `v0.2.5` 本次真实 Windows Tauri 结果；
+- `v0.2.5` Provider live 结果；
 - 仍为 `NOT_RUN / NOT_RETESTED / NOT_IMPLEMENTED / PARTIAL` 的项目。
 
 未完成阶段 B、真实系统 200% DPI、安装/升级/卸载、Provider 对账或停止条件审计时，不得把整体
-版本写成 `VERIFIED_IN_WINDOWS_TAURI`，更不得据此发布。
+版本写成 `VERIFIED_IN_WINDOWS_TAURI`。这不撤销 `v0.2.5` 已发布事实，只表示相应外部人工结论仍为
+`BLOCKED_EXTERNAL`。

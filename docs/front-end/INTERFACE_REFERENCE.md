@@ -2,8 +2,27 @@
 
 > 基于源码快照：2026-08-20  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 当前源码目标版本：`0.2.5`；最新已发布版本：`0.2.4`；设计基线：`DESIGN v0.3.1b`  
+> 当前版本：已发布 [`v0.2.5`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5)；设计基线：`DESIGN v0.3.1b`  
+> 冻结 source commit：`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`；tag object：`51dfd64ba22e9771131f251cdc778ee06f89192d`  
 > 本文记录当前代码接口；它不代表所有云能力已部署或已开放
+
+`v0.2.5` source fingerprint 为
+`c4260cc189a73c02a53aa0a8eca1b2012b55e77e24bb7ff0e11de5ccf4d27897`（1,238 files /
+20,794,217 B），artifact fingerprint 为
+`213370d1e2f57dc323203747997071cbee883ffc26cc35339ceec94758f9200d`（59 files /
+7,035,736 B physical）。发布 RC 为 Desktop 265 files / 2,049 pass / 1 skip / 0 fail、Rust 169 pass /
+1 ignored / 0 fail、Chromium 17/17 PASS；Data `0066`–`0070` 对应 Tauri `69`–`73`。后续文档提交
+不移动标签。真人 Windows Tauri/Wry、真实 Provider、Windows 系统 200% DPI 与外部应用打开仍为
+`BLOCKED_EXTERNAL`。
+
+bundle policy 为 7,034,936 / 7,340,032 B，余量 305,096 B；entry 261,016 / 307,200 B、Agent async
+481,776 / 512,000 B、CSS 128,810 / 131,072 B、worker 1,187,649 / 1,572,864 B。安装包
+7,606,152 B，SHA-256 `f422467fa5fdff4236f3d453cb21de3927c89375e106ff372852f918079f20ad`；
+manifest 11,717 B，SHA-256 `4dce031a71eaa1664dcc993bd4f68362fb3d97b7843110b5ebc0b7c45b0bed0c`；
+`SHA256SUMS` 194 B，SHA-256 `0f4330efd42cd7d898497de2d0b6866fc2c9ba7b3533e8c11a233dd6a8439eec`。
+冻结 production benchmark 为 371,204 B，SHA-256
+`7b8eef0ed8bd544f23e7efabe74ad09ff187013404730cbec43c7c42d84ec1c5`，48 samples / 2/2 PASS；
+Provider/network/key/vector calls 均为 0。
 
 ## 1. 接口总览
 
@@ -574,7 +593,8 @@ HTTP 200、旧 Model Profile 或顶部绿色徽标都不能单独证明可调用
 [`WRITING_EXPERIENCE_AND_CONSISTENCY.md`](WRITING_EXPERIENCE_AND_CONSISTENCY.md#provider-动作的普通界面披露)
 为准：开书、续写、Settings 固定能力探针、图片生成、调查/修复已有聚焦披露证据；旧导入、普通
 检查批量 AI review、无授权摘要/连续状态和普通搜索向量入口已安全关闭。Provider dispatch surface
-当前无剩余 P0/P1；冻结全量仍为 `PENDING_FINAL_RUN`，不得从历史快照外推为已验证。
+当前无剩余 P0/P1；`v0.2.5` 冻结 RC 自动门禁已通过。真实 Provider 调用与目标 Windows 人工结论仍
+是 `BLOCKED_EXTERNAL`，不得从自动化或历史快照外推。
 
 旧 Model Profile 仍可能包含历史用户配置，因此本轮不删除表、不伪造 selection、不搬移 Key，也不
 改写已发布迁移。有效 Model Hub task route 存在时运行时忽略未选择的旧档案；真正没有 task route
@@ -721,7 +741,8 @@ token 证据时保持“未知”，不会冒充供应商最终账单。浏览�
 `null`，页面显示能力受限而不是生成示例账本。
 连接资料缺失时只显示安全的供应商占位，不回退 `provider_id`。检查页同样把章节、剧情线和场景
 映射为可读名称；人物、伏笔或未知引用使用安全占位，不显示 version/fact/locator/aria 内部标识。
-这些普通 UI 边界已由 4 files / 22 tests 聚焦覆盖，冻结全路由 DOM 扫描仍待运行。
+这些普通 UI 边界已由 4 files / 22 tests 聚焦覆盖并纳入 `v0.2.5` Desktop RC；真人 WebView 全路由
+巡检仍为 `BLOCKED_EXTERNAL`。
 
 ## 7. Tauri 事件
 
