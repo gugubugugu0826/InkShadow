@@ -76,6 +76,21 @@ function createExecutor(migrationSql: string, databasePath = ":memory:"): NodeSq
   return executor;
 }
 
+async function createMigratedFileExecutor(databasePath: string): Promise<NodeSqliteExecutor> {
+  // Materialize the migrated schema once instead of forcing every historical
+  // DDL statement through Windows temporary storage.
+  const template = createExecutor(migration);
+  try {
+    await template.execute("VACUUM INTO ?", [databasePath]);
+  } finally {
+    await closeExecutor(template);
+  }
+
+  const executor = createExecutor("", databasePath);
+  executor.database.exec("PRAGMA foreign_keys = ON");
+  return executor;
+}
+
 async function closeExecutor(executor: NodeSqliteExecutor): Promise<void> {
   if (!openExecutors.has(executor)) {
     return;
@@ -109,7 +124,7 @@ describe("NovelSkillSqliteStore", () => {
       const databasePath = createDatabasePath();
       let executor: NodeSqliteExecutor | undefined;
       try {
-        executor = createExecutor(migration, databasePath);
+        executor = await createMigratedFileExecutor(databasePath);
         await insertProjectOnly(executor);
         const firstRuntime = new TauriNovelSkillRuntime(new NovelSkillSqliteStore(executor), CLOCK);
         await expect(firstRuntime.initialize()).resolves.toEqual({ status: "ready", reason: null });
@@ -162,7 +177,7 @@ describe("NovelSkillSqliteStore", () => {
       let executor: NodeSqliteExecutor | undefined;
       let reopened: NodeSqliteExecutor | undefined;
       try {
-        executor = createExecutor(migration, databasePath);
+        executor = await createMigratedFileExecutor(databasePath);
         await insertFoundation(executor);
         const store = new NovelSkillSqliteStore(executor);
         const definitions = await createCoreNovelSkillDefinitions();

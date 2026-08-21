@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  waitForElementToBeRemoved,
+  within,
+} from "@testing-library/react";
 import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { parseUuidV7 as parseStoryUuid } from "@inkshadow/story-core";
 import { ToastProvider } from "@inkshadow/ui";
@@ -71,25 +78,25 @@ describe("ProjectMaterialsPage", () => {
       throw new Error("找不到素材卡片。");
     }
     await user.click(within(materialCard).getByRole("button", { name: "记录引用" }));
-    await user.type(
-      screen.getByRole("textbox", { name: "引用说明" }),
-      "用于第一章钟声场景的出处说明。",
-    );
-    await user.click(screen.getByRole("button", { name: "确认引用" }));
-    await waitFor(
-      () => {
-        const referencedCard = screen
-          .getByRole("heading", { name: "雨夜钟楼", level: 3 })
-          .closest(".ink-card");
-        expect(referencedCard).not.toBeNull();
-        if (referencedCard instanceof HTMLElement) {
-          expect(
-            within(referencedCard).getByText("用于第一章钟声场景的出处说明。"),
-          ).toBeInTheDocument();
-        }
-      },
-      { timeout: 10_000 },
-    );
+    fireEvent.change(screen.getByRole("textbox", { name: "引用说明" }), {
+      target: { value: "用于第一章钟声场景的出处说明。" },
+    });
+    const referenceDialog = screen.getByRole("dialog", { name: "记录章节引用" });
+    const referenceDialogClosed = waitForElementToBeRemoved(referenceDialog, {
+      timeout: 10_000,
+    });
+    await user.click(within(referenceDialog).getByRole("button", { name: "确认引用" }));
+    await referenceDialogClosed;
+
+    const referencedCard = screen
+      .getByRole("heading", { name: "雨夜钟楼", level: 3 })
+      .closest(".ink-card");
+    expect(referencedCard).not.toBeNull();
+    if (referencedCard instanceof HTMLElement) {
+      expect(
+        within(referencedCard).getByText("用于第一章钟声场景的出处说明。"),
+      ).toBeInTheDocument();
+    }
 
     materialCard = screen.getByRole("heading", { name: "雨夜钟楼", level: 3 }).closest(".ink-card");
     if (!(materialCard instanceof HTMLElement)) {
@@ -252,28 +259,39 @@ async function fillMaterialForm(
     readonly allowGeneration?: boolean;
   },
 ): Promise<void> {
-  await user.type(screen.getByRole("textbox", { name: "素材标题" }), input.title);
-  await user.type(screen.getByRole("textbox", { name: "来源名称" }), input.sourceName);
+  fireEvent.change(screen.getByRole("textbox", { name: "素材标题" }), {
+    target: { value: input.title },
+  });
+  fireEvent.change(screen.getByRole("textbox", { name: "来源名称" }), {
+    target: { value: input.sourceName },
+  });
   if (input.author !== undefined) {
-    await user.type(screen.getByRole("textbox", { name: /^作者/u }), input.author);
+    fireEvent.change(screen.getByRole("textbox", { name: /^作者/u }), {
+      target: { value: input.author },
+    });
   }
   if (input.sourceUrl !== undefined) {
-    await user.type(screen.getByRole("textbox", { name: /^来源网址/u }), input.sourceUrl);
+    fireEvent.change(screen.getByRole("textbox", { name: /^来源网址/u }), {
+      target: { value: input.sourceUrl },
+    });
   }
   if (input.license !== undefined) {
     await user.selectOptions(screen.getByRole("combobox", { name: "许可类型" }), input.license);
   }
   const rightsBasis = screen.getByRole("textbox", { name: "权利依据" });
-  await user.clear(rightsBasis);
-  await user.type(rightsBasis, input.rightsBasis);
+  fireEvent.change(rightsBasis, { target: { value: input.rightsBasis } });
   if (input.license !== undefined) {
     await user.click(screen.getByRole("checkbox", { name: "我已核对上述权利依据" }));
   }
   if (input.allowGeneration === true) {
     await user.click(screen.getByRole("checkbox", { name: "允许作为生成参考" }));
   }
-  await user.type(screen.getByRole("textbox", { name: "摘要" }), input.summary);
-  await user.type(screen.getByRole("textbox", { name: "素材正文" }), input.body);
+  fireEvent.change(screen.getByRole("textbox", { name: "摘要" }), {
+    target: { value: input.summary },
+  });
+  fireEvent.change(screen.getByRole("textbox", { name: "素材正文" }), {
+    target: { value: input.body },
+  });
 }
 
 async function createMaterial(
