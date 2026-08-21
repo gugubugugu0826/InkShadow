@@ -16,5 +16,8 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
+    // Full-schema SQLite fixtures are synchronous. Running files in parallel makes
+    // Windows CI contend on CPU, temporary storage, and antivirus scanning.
+    maxWorkers: 1,
   },
 });
