@@ -27,13 +27,13 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::credential_service;
 use crate::model_gateway::CommandError;
 use crate::network_egress::{host_is_ip_literal, literal_ip_is_allowed, RestrictedDnsResolver};
 
 const PRODUCT_ID: &str = "com.inkshadow.desktop";
 const MANIFEST_SCHEMA_VERSION: u8 = 1;
 const CHECKPOINT_SCHEMA_VERSION: u8 = 1;
-const CHECKPOINT_CREDENTIAL_SERVICE: &str = "com.inkshadow.desktop";
 const CHECKPOINT_CREDENTIAL_PREFIX: &str = "secure-update-checkpoint:v1";
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_CHECKPOINT_BYTES: usize = 4 * 1024;
@@ -656,7 +656,7 @@ async fn enforce_and_persist_checkpoint(
     let plan = plan.clone();
     tokio::task::spawn_blocking(move || {
         let account = format!("{CHECKPOINT_CREDENTIAL_PREFIX}:{PRODUCT_ID}:{channel}");
-        let entry = keyring::Entry::new(CHECKPOINT_CREDENTIAL_SERVICE, &account)
+        let entry = keyring::Entry::new(credential_service(), &account)
             .map_err(|_| update_checkpoint_unavailable())?;
         let existing = match entry.get_password() {
             Ok(serialized) => {

@@ -4,8 +4,8 @@
 > 仓库可见性：Public  
 > 默认分支：`main`  
 > 适用环境：Windows PowerShell  
-> 更新日期：2026-08-20  
-> 当前 Desktop 版本：`0.2.5`  
+> 更新日期：2026-08-21  
+> 当前桌面应用清单版本：`0.2.6`（尚未发布）  
 > 最新公开工程预览版本：`v0.2.5`（Pre-release；标签与附件不得移动或静默替换）
 
 本文是每次向 GitHub 上传源码或发布安装包时必须执行的检查清单。它只描述操作流程，
@@ -142,8 +142,9 @@ git diff --cached
 - `apps/desktop/src/infrastructure/runtime.ts` 中非 Tauri 环境的诊断 fallback
 - `apps/desktop/src/infrastructure/diagnostics.test.ts` 中对应的脱敏诊断断言
 
-版本号使用不带 `v` 的 SemVer；本次已发布版本使用 `0.2.5`。annotated tag `v0.2.5` 已在候选
-通过后创建，并固定指向来源提交 `5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`。`0.2.0` / `v0.2.0`、
+版本号使用不带 `v` 的 SemVer；当前待发布应用清单使用 `0.2.6`，只有干净候选、远端检查和制品核验
+全部通过后才能创建 `v0.2.6` 标签。已发布的 `v0.2.5` 标签固定指向来源提交
+`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`。`0.2.0` / `v0.2.0`、
 `0.2.1` / `v0.2.1`、`0.2.2` / `v0.2.2`、`0.2.3` / `v0.2.3`、`0.2.4` / `v0.2.4` 与
 `0.2.5` / `v0.2.5` 都是既有公开版本，不能删除、移动或复用；新的二进制修复必须继续使用新的
 补丁版本。
@@ -156,8 +157,8 @@ rg --no-ignore -n '"version"\s*:\s*"|^version\s*=' `
   apps/desktop/src-tauri/tauri.conf.json
 ```
 
-`apps/web`、`apps/cloud-api` 和内部 workspace 包有独立的 `0.1.x` 版本线，不是 Windows
-Desktop `v0.2.5` Release 资产，也不要求随桌面标签同步。文档提到“当前应用版本”时必须明确
+`apps/web`、`apps/cloud-api` 和内部 workspace 包有独立的 `0.1.x` 版本线，不属于 Windows
+桌面应用 `v0.2.6` 的发行资产，也不要求随桌面标签同步。文档提到“当前应用版本”时必须明确
 指 Desktop，不能把这些内部包误写成同一可下载产品版本。
 
 ## 5. 源码上传前门禁

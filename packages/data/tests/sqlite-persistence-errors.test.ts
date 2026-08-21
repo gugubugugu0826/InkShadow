@@ -51,6 +51,48 @@ describe("SQLite persistence error normalization", () => {
       expect(error.message).not.toContain("engine-specific");
     },
   );
+
+  it.each([
+    {
+      nativeCode: "SQLITE_OPERATION_TIMEOUT",
+      retryable: true,
+      expectedOutcome: "not_confirmed",
+    },
+    {
+      nativeCode: "SQLITE_WRITE_OUTCOME_UNKNOWN",
+      retryable: false,
+      expectedOutcome: "unknown",
+    },
+    {
+      nativeCode: "SQLITE_COMMIT_OUTCOME_UNKNOWN",
+      retryable: false,
+      expectedOutcome: "unknown",
+    },
+  ] as const)(
+    "keeps $nativeCode distinct so the caller cannot mistake an unknown write for a failure",
+    async ({ expectedOutcome, nativeCode, retryable }) => {
+      const repository = new SqliteRecoveryDraftRepository(
+        new FailingExecutor({
+          code: nativeCode,
+          message: "private engine phase and path",
+          retryable,
+        }),
+      );
+
+      const error = expectError(await repository.upsert(makeDraft()));
+      expect(error).toMatchObject({
+        code: "REPOSITORY_ERROR",
+        retryable,
+        details: {
+          databaseCode: nativeCode,
+          operation: "save recovery draft",
+          outcome: expectedOutcome,
+        },
+      });
+      expect(error.actions).toEqual(retryable ? ["RETRY", "EXPORT_DRAFT"] : ["EXPORT_DRAFT"]);
+      expect(JSON.stringify(error)).not.toContain("private engine phase");
+    },
+  );
 });
 
 class FailingExecutor implements SqlExecutor {

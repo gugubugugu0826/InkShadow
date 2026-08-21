@@ -273,6 +273,61 @@ describe("real creative chains use Model Hub routes", () => {
     ).toBe(true);
   });
 
+  it("keeps all three provider slots independent when one local result callback rejects", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-result-isolation",
+      catalogEntryId: "opening-result-isolation-catalog",
+      modelId: "opening-result-isolation-model",
+    });
+    const requestIds = nextOpeningRequestIds(harness.runtime, 3);
+    harness.generate.mockImplementation((input) =>
+      Promise.resolve({ text: `独立结果 ${input.generationId}`, usage: null }),
+    );
+    const action: CreativeOpeningProviderActionInput = {
+      actionId: "opening-result-isolation-action",
+      kind: "initial_batch",
+      idea: "三座灯塔在同一晚收到不同年份的求救信号。",
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      requestIds,
+    };
+    const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+    const observedResults: CreativeOpeningResult[] = [];
+    const onResult = vi.fn((result: CreativeOpeningResult) => {
+      observedResults.push(result);
+      if (result.requestId === requestIds[0]) {
+        return Promise.reject(new Error("simulated local slot persistence failure"));
+      }
+      return Promise.resolve();
+    });
+
+    await expect(
+      executeCreativeOpeningProviderAction(harness.runtime, {
+        ...action,
+        humanConfirmed: true,
+        disclosureFingerprint: disclosure.fingerprint,
+        onResult,
+      }),
+    ).rejects.toThrow("simulated local slot persistence failure");
+
+    expect(new Set(observedResults.map(({ requestId }) => requestId))).toEqual(new Set(requestIds));
+    expect(onResult).toHaveBeenCalledTimes(3);
+    expect(harness.generate).toHaveBeenCalledTimes(3);
+    expect(harness.generate.mock.calls.every(([request]) => request.config.retryLimit === 0)).toBe(
+      true,
+    );
+    for (const requestId of requestIds) {
+      await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toMatchObject({
+        task: "book_start_guidance",
+        status: "succeeded",
+        attempt: 1,
+      });
+    }
+  });
+
   it("rejects route, cost and request-source drift against the confirmed fingerprint before dispatch", async () => {
     for (const drift of ["route", "cost", "source"] as const) {
       const harness = createNativeHarness();

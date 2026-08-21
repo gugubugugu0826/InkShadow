@@ -25,10 +25,12 @@ export function normalizeUiError(error: unknown): NormalizedUiError {
     return { title: error.title, description: error.message, code: error.code };
   }
   if (error instanceof AppError) {
-    const databaseDescription = databaseErrorDescription(error);
+    const databasePresentation = databaseErrorPresentation(error);
     return {
-      title: error.code === "VERSION_CONFLICT" ? "检测到版本冲突" : "操作未完成",
-      description: databaseDescription ?? chineseErrorDescription(error.code),
+      title:
+        databasePresentation?.title ??
+        (error.code === "VERSION_CONFLICT" ? "检测到版本冲突" : "操作未完成"),
+      description: databasePresentation?.description ?? chineseErrorDescription(error.code),
       code: error.code,
     };
   }
@@ -58,12 +60,36 @@ export function projectOrdinaryUiError(error: unknown): OrdinaryUiError {
   return { title, description };
 }
 
-function databaseErrorDescription(error: AppError): string | null {
+function databaseErrorPresentation(error: AppError): OrdinaryUiError | null {
+  if (
+    error.details.databaseCode === "SQLITE_WRITE_OUTCOME_UNKNOWN" ||
+    error.details.databaseCode === "SQLITE_COMMIT_OUTCOME_UNKNOWN"
+  ) {
+    return {
+      title: "写入结果需要核对",
+      description:
+        "本机暂时无法确认这次写入是否已经完成。请重新打开当前页面，核对正文、版本和 AI 建议草稿状态；系统不会自动再次提交。",
+    };
+  }
+  if (error.details.databaseCode === "SQLITE_OPERATION_TIMEOUT") {
+    return {
+      title: "本地操作等待超时",
+      description:
+        "本地数据操作等待超时，本次操作没有被报告为成功。请重新打开当前页面核对内容；系统不会自动重试。",
+    };
+  }
   if (error.details.databaseCode === "SQLITE_BUSY") {
-    return "本地数据库正忙，本次写入未被报告为成功。编辑器会保留当前文字，请稍后重试保存。";
+    return {
+      title: "操作未完成",
+      description: "本地数据库正忙，本次写入未被报告为成功。编辑器会保留当前文字，请稍后重试保存。",
+    };
   }
   if (error.details.databaseCode === "SQLITE_DISK_FULL") {
-    return "本地磁盘空间不足，本次写入未提交。请保持窗口打开，释放空间后重试，或将草稿导出到其他磁盘。";
+    return {
+      title: "操作未完成",
+      description:
+        "本地磁盘空间不足，本次写入未提交。请保持窗口打开，释放空间后重试，或将草稿导出到其他磁盘。",
+    };
   }
   return null;
 }
@@ -211,6 +237,22 @@ export function isUiErrorRetryable(error: unknown): boolean {
     return error.retryable;
   }
   return !isRecord(error) || typeof error.retryable !== "boolean" || error.retryable;
+}
+
+const DATABASE_REOPEN_CODES = new Set([
+  "SQLITE_BRIDGE_UNAVAILABLE",
+  "SQLITE_CONNECTION_INVALIDATED",
+  "SQLITE_SESSION_INVALID",
+  "SQLITE_OPERATION_TIMEOUT",
+  "SQLITE_WRITE_OUTCOME_UNKNOWN",
+  "SQLITE_COMMIT_OUTCOME_UNKNOWN",
+]);
+
+/** True only when the current renderer facade must be replaced before more database work. */
+export function requiresRuntimeDatabaseReopen(error: unknown): boolean {
+  const code =
+    error instanceof AppError ? error.details.databaseCode : isRecord(error) ? error.code : null;
+  return typeof code === "string" && DATABASE_REOPEN_CODES.has(code);
 }
 
 function nativeDatabaseBootstrapDescription(code: string): string | null {

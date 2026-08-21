@@ -19,7 +19,7 @@ export async function recoverOrphanedOpeningInvocationsAtStartup(
   const invocationIds = new Set<string>();
   let inspectedJourneyCount = 0;
   for (const journey of journeys) {
-    const ids = pendingProviderInvocationIds(journey.snapshot);
+    const ids = recoverableProviderInvocationIds(journey.snapshot);
     if (ids.length === 0) continue;
     inspectedJourneyCount += 1;
     ids.forEach((id) => invocationIds.add(id));
@@ -40,10 +40,10 @@ export async function recoverOrphanedOpeningInvocationsAtStartup(
       try {
         invocation = await runtime.modelHub.finishInvocation({
           id: invocation.id,
-          status: "failed",
+          status: crossedBoundary ? "timed_out" : "failed",
           errorCode: crossedBoundary ? "OPENING_DISPATCH_AMBIGUOUS" : "OPENING_NOT_DISPATCHED",
           errorSummary: crossedBoundary
-            ? "应用在模型返回前中断；调用结果不明确，系统不会自动重发。"
+            ? "应用在模型返回前中断；调用结果待核对，系统不会自动重发。"
             : "应用在模型发送前中断；没有发生供应商调用。",
           expectedRevision: invocation.revision,
         });
@@ -70,7 +70,7 @@ export async function recoverOrphanedOpeningInvocationsAtStartup(
   });
 }
 
-function pendingProviderInvocationIds(
+function recoverableProviderInvocationIds(
   snapshot: Readonly<Record<string, unknown>>,
 ): readonly string[] {
   const suggestionsValue: unknown = snapshot.openingSuggestions;
@@ -81,13 +81,21 @@ function pendingProviderInvocationIds(
   for (const candidateValue of suggestionsValue as readonly unknown[]) {
     if (typeof candidateValue !== "object" || candidateValue === null) continue;
     const candidate = candidateValue as Readonly<Record<string, unknown>>;
-    if (candidate.source !== "provider" || candidate.status !== "pending") continue;
-    const invocationId =
-      typeof candidate.providerInvocationId === "string"
-        ? candidate.providerInvocationId
-        : typeof candidate.id === "string"
-          ? candidate.id
-          : null;
+    const requiresRecovery =
+      candidate.status === "pending" ||
+      candidate.dispatchState === "planned" ||
+      candidate.dispatchState === "dispatched";
+    const explicitInvocationId =
+      typeof candidate.providerInvocationId === "string" ? candidate.providerInvocationId : null;
+    const legacyPendingInvocationId =
+      candidate.source === "provider" &&
+      candidate.status === "pending" &&
+      typeof candidate.id === "string"
+        ? candidate.id
+        : null;
+    const invocationId = requiresRecovery
+      ? (explicitInvocationId ?? legacyPendingInvocationId)
+      : null;
     if (invocationId !== null && /^[A-Za-z0-9._:-]{1,128}$/u.test(invocationId)) {
       invocationIds.push(invocationId);
     }

@@ -7,6 +7,7 @@ use sqlx::{
 
 const ZHIPU_GLM_MIGRATION_VERSION: i64 = 49;
 const MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION: i64 = 60;
+const MODEL_CAPABILITY_PROBE_LEDGER_MIGRATION_VERSION: i64 = 74;
 
 fn migration(version: i64, description: &'static str, sql: &'static str) -> Migration {
     // tauri-plugin-sql represented every prior `MigrationKind::Up` as a
@@ -523,6 +524,13 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0070_multigranular_search_retrieval.sql"
                 ),
             ),
+            migration(
+                74,
+                "record capability probe calls in the ordinary model invocation ledger",
+                include_str!(
+                    "../../../../packages/data/migrations/0071_model_capability_probe_invocation_ledger.sql"
+                ),
+            ),
         ]),
         ignore_missing: false,
         locking: true,
@@ -561,8 +569,24 @@ pub(crate) async fn run_local_migrations(
     )
     .await?;
 
-    let future = migration_subset(&full, |migration| {
+    let before_capability_probe_ledger = migration_subset(&full, |migration| {
         migration.version > MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+            && migration.version < MODEL_CAPABILITY_PROBE_LEDGER_MIGRATION_VERSION
+    });
+    before_capability_probe_ledger
+        .run_direct(&mut *connection)
+        .await?;
+
+    run_foreign_key_disabled_migration(
+        connection,
+        &full,
+        MODEL_CAPABILITY_PROBE_LEDGER_MIGRATION_VERSION,
+        "foreign-key violations remained after capability probe ledger migration",
+    )
+    .await?;
+
+    let future = migration_subset(&full, |migration| {
+        migration.version > MODEL_CAPABILITY_PROBE_LEDGER_MIGRATION_VERSION
     });
     future.run_direct(connection).await
 }
@@ -621,6 +645,7 @@ mod tests {
 
     use super::{
         local_migrator, migration_subset, run_foreign_key_disabled_migration, run_local_migrations,
+        MODEL_CAPABILITY_PROBE_LEDGER_MIGRATION_VERSION,
         MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION, ZHIPU_GLM_MIGRATION_VERSION,
     };
 
@@ -850,6 +875,546 @@ mod tests {
             .await
             .expect("foreign-key enforcement restored");
         assert_eq!(foreign_keys, 1);
+    }
+
+    #[tokio::test]
+    async fn upgrades_a_populated_version_73_ledger_without_losing_authority() {
+        const NOW: &str = "2026-08-20T00:00:00.000Z";
+        const PROJECT_ID: &str = "capability-probe-upgrade-project";
+        const CONNECTION_ID: &str = "capability-probe-upgrade-connection";
+        const CATALOG_ID: &str = "capability-probe-upgrade-catalog";
+        const TRACE_ID: &str = "019f9f4a-b3c7-7350-9226-000000000201";
+        const INVOCATION_ID: &str = "capability-probe-upgrade-invocation";
+        const FALLBACK_INVOCATION_ID: &str = "capability-probe-upgrade-fallback";
+        const TASK_ID: &str = "019f9f4a-b3c7-7350-9226-000000000202";
+        const RUN_ID: &str = "019f9f4a-b3c7-7350-9226-000000000203";
+        const STEP_ID: &str = "019f9f4a-b3c7-7350-9226-000000000204";
+        const GENERATION_ID: &str = "019f9f4a-b3c7-7350-9226-000000000205";
+        const SCAN_ID: &str = "capability-probe-upgrade-scan";
+
+        let mut connection = SqliteConnection::connect("sqlite::memory:")
+            .await
+            .expect("open sqlite");
+        let full = local_migrator();
+        let through_version_73 = test_migrator(
+            full.iter()
+                .filter(|migration| migration.version <= 73)
+                .cloned()
+                .collect(),
+        );
+
+        let before_zhipu = migration_subset(&through_version_73, |migration| {
+            migration.version < ZHIPU_GLM_MIGRATION_VERSION
+        });
+        before_zhipu
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate populated fixture before Zhipu registry");
+        run_foreign_key_disabled_migration(
+            &mut connection,
+            &through_version_73,
+            ZHIPU_GLM_MIGRATION_VERSION,
+            "foreign-key violations remained after test Zhipu migration",
+        )
+        .await
+        .expect("migrate populated fixture through Zhipu registry");
+        let before_content_quality = migration_subset(&through_version_73, |migration| {
+            migration.version > ZHIPU_GLM_MIGRATION_VERSION
+                && migration.version < MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+        });
+        before_content_quality
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate populated fixture before content-quality task");
+        run_foreign_key_disabled_migration(
+            &mut connection,
+            &through_version_73,
+            MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION,
+            "foreign-key violations remained after test content-quality migration",
+        )
+        .await
+        .expect("migrate populated fixture through content-quality task");
+        let after_content_quality = migration_subset(&through_version_73, |migration| {
+            migration.version > MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+        });
+        after_content_quality
+            .run_direct(&mut connection)
+            .await
+            .expect("migrate populated fixture through version 73");
+
+        sqlx::query(
+            "INSERT INTO projects (
+               id, name, status, revision, deletion_generation, created_at, updated_at
+             ) VALUES (?, 'Capability probe upgrade', 'active', 1, 0, ?, ?)",
+        )
+        .bind(PROJECT_ID)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist upgrade project");
+        sqlx::query(
+            "INSERT INTO model_provider_connections (
+               id, provider_kind, display_name, protocol, base_url, created_at, updated_at
+             ) VALUES (?, 'custom_openai_compatible', 'Upgrade provider',
+                       'openai_compatible', 'https://models.example.test/v1', ?, ?)",
+        )
+        .bind(CONNECTION_ID)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist upgrade provider");
+        sqlx::query(
+            "INSERT INTO model_catalog_entries (
+               id, connection_id, provider_model_id, display_name, catalog_source,
+               availability, lifecycle, first_discovered_at, last_seen_at
+             ) VALUES (?, ?, 'upgrade-writer', 'Upgrade writer', 'manual',
+                       'available', 'stable', ?, ?)",
+        )
+        .bind(CATALOG_ID)
+        .bind(CONNECTION_ID)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist upgrade catalog entry");
+        sqlx::query(
+            "INSERT INTO model_evaluation_results (
+               id, catalog_entry_id, task, score_basis_points, latency_p50_ms,
+               sample_count, evaluation_source, evaluation_version, observed_at
+             ) VALUES ('capability-probe-upgrade-evaluation', ?, 'contradiction_check',
+                       7500, 120, 2, 'local_evaluation', 'upgrade-v1', ?)",
+        )
+        .bind(CATALOG_ID)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist upgrade evaluation");
+        sqlx::query(
+            "INSERT INTO context_compilation_runs (
+               id, project_id, chapter_id, task_type, maximum_context_tokens,
+               required_tokens, used_tokens, remaining_tokens, discarded_tokens,
+               token_estimate_source, candidate_count, included_count, discarded_count,
+               created_at
+             ) VALUES (?, ?, NULL, 'contradiction_check', 1000, 1, 1, 999, 0,
+                       'utf8_conservative', 1, 1, 0, ?)",
+        )
+        .bind(TRACE_ID)
+        .bind(PROJECT_ID)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist upgrade context trace");
+        sqlx::query(
+            "INSERT INTO model_invocation_facts (
+               id, task, connection_id, catalog_entry_id, provider_kind_snapshot,
+               model_id_snapshot, route_reason, status, attempt, privacy_policy,
+               data_destination, input_tokens, output_tokens, started_at,
+               completed_at, created_at, finish_reason, visible_content_length,
+               reasoning_present, streamed, requested_max_output_tokens,
+               provider_dispatch_started_at
+             ) VALUES (?, 'contradiction_check', ?, ?, 'custom_openai_compatible',
+                       'upgrade-writer', 'user_override', 'succeeded', 1,
+                       'cloud_allowed', 'remote', 11, 3, ?, ?, ?, 'stop', 12, 0, 0,
+                       128, ?)",
+        )
+        .bind(INVOCATION_ID)
+        .bind(CONNECTION_ID)
+        .bind(CATALOG_ID)
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist authoritative invocation");
+        sqlx::query(
+            "INSERT INTO model_invocation_facts (
+               id, task, connection_id, catalog_entry_id, provider_kind_snapshot,
+               model_id_snapshot, route_reason, status, attempt,
+               fallback_from_invocation_id, privacy_policy, data_destination,
+               error_code, started_at, completed_at, created_at, failure_stage,
+               failure_retryable, http_status, visible_content_length,
+               reasoning_present, streamed, requested_max_output_tokens,
+               provider_dispatch_started_at
+             ) VALUES (?, 'contradiction_check', ?, ?, 'custom_openai_compatible',
+                       'upgrade-writer', 'task_fallback', 'failed', 2, ?,
+                       'cloud_allowed', 'remote', 'MODEL_PROVIDER_ERROR', ?, ?, ?,
+                       'http_response', 0, 503, 0, 0, 0, 128, ?)",
+        )
+        .bind(FALLBACK_INVOCATION_ID)
+        .bind(CONNECTION_ID)
+        .bind(CATALOG_ID)
+        .bind(INVOCATION_ID)
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist fallback invocation");
+        sqlx::query(
+            "INSERT INTO context_compilation_execution_links (
+               trace_id, generation_id, generation_run_id, created_at
+             ) VALUES (?, ?, NULL, ?)",
+        )
+        .bind(TRACE_ID)
+        .bind(GENERATION_ID)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist upgrade execution link");
+        sqlx::query(
+            "INSERT INTO context_compilation_model_invocation_links (
+               trace_id, model_invocation_id, linked_at
+             ) VALUES (?, ?, ?)",
+        )
+        .bind(TRACE_ID)
+        .bind(INVOCATION_ID)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist upgrade invocation link");
+        sqlx::query(
+            "INSERT INTO background_tasks (
+               id, task_type, idempotency_key, metadata_json, priority, status,
+               attempt, max_attempts, sequence, run_after, created_at, updated_at,
+               started_at, finished_at
+             ) VALUES (?, 'consistency_investigation', 'upgrade.consistency.0001', ?,
+                       50, 'succeeded', 1, 1, 1, NULL, ?, ?, ?, ?)",
+        )
+        .bind(TASK_ID)
+        .bind(format!(
+            "{{\"operation\":\"long_form_consistency_investigation\",\"projectId\":\"{PROJECT_ID}\"}}"
+        ))
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist upgrade background task");
+        sqlx::query(
+            "INSERT INTO consistency_investigation_runs (
+               id, task_id, project_id, restart_of_run_id, idempotency_key,
+               request_fingerprint, status, chapter_count, maximum_model_calls,
+               maximum_tool_steps, maximum_context_characters, maximum_output_tokens,
+               maximum_duration_ms, automatic_retry_count, estimated_input_tokens,
+               estimated_maximum_cost_micros, currency, connection_id, catalog_entry_id,
+               provider_kind_snapshot, model_id_snapshot, privacy_fingerprint,
+               context_trace_id, generation_id, summary, finding_count,
+               dropped_finding_count, cancellation_requested, failure_code, revision,
+               created_at, updated_at, completed_at
+             ) VALUES (?, ?, ?, NULL, 'upgrade.consistency.0001', ?, 'succeeded',
+                       1, 1, 5, 1000, 128, 1000, 0, 10, NULL, NULL, ?, ?,
+                       'custom_openai_compatible', 'upgrade-writer', ?, ?, ?,
+                       'Upgrade consistency result', 0, 0, 0, NULL, 1, ?, ?, ?)",
+        )
+        .bind(RUN_ID)
+        .bind(TASK_ID)
+        .bind(PROJECT_ID)
+        .bind("a".repeat(64))
+        .bind(CONNECTION_ID)
+        .bind(CATALOG_ID)
+        .bind("b".repeat(64))
+        .bind(TRACE_ID)
+        .bind(GENERATION_ID)
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist upgrade consistency run");
+        sqlx::query(
+            "INSERT INTO consistency_investigation_steps (
+               id, run_id, ordinal, step_kind, tool_name, tool_version, permission,
+               input_digest, status, invocation_id, observation_digest,
+               terminal_cause, created_at, updated_at, completed_at
+             ) VALUES (?, ?, 1, 'model', 'model_synthesis', '1', 'model_dispatch',
+                       ?, 'succeeded', ?, ?, 'UPGRADE_TEST_COMPLETED', ?, ?, ?)",
+        )
+        .bind(STEP_ID)
+        .bind(RUN_ID)
+        .bind("c".repeat(64))
+        .bind(INVOCATION_ID)
+        .bind("d".repeat(64))
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist upgrade consistency step");
+        sqlx::query(
+            "INSERT INTO model_capability_scans (
+               id, catalog_entry_id, scan_kind, status, evidence_version,
+               supported_count, requested_at, started_at, completed_at,
+               visible_content_length, reasoning_present, streamed, attempt,
+               requested_max_output_tokens
+             ) VALUES (?, ?, 'lightweight_probe', 'succeeded', 'upgrade-probe-v1',
+                       1, ?, ?, ?, 2, 0, 0, 1, 8)",
+        )
+        .bind(SCAN_ID)
+        .bind(CATALOG_ID)
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist upgrade capability scan");
+        sqlx::query(
+            "INSERT INTO model_capability_evidence (
+               id, catalog_entry_id, scan_id, capability, verdict, evidence_source,
+               evidence_version, evidence_summary, observed_at
+             ) VALUES ('capability-probe-upgrade-evidence', ?, ?, 'text_generation',
+                       'supported', 'lightweight_probe', 'upgrade-probe-v1',
+                       'content-free upgrade fixture', ?)",
+        )
+        .bind(CATALOG_ID)
+        .bind(SCAN_ID)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist upgrade capability evidence");
+
+        run_foreign_key_disabled_migration(
+            &mut connection,
+            &full,
+            MODEL_CAPABILITY_PROBE_LEDGER_MIGRATION_VERSION,
+            "foreign-key violations remained after populated capability probe migration",
+        )
+        .await
+        .expect("upgrade populated version 73 ledger");
+
+        let preserved_invocations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM model_invocation_facts
+             WHERE id IN (?, ?) AND task = 'contradiction_check'",
+        )
+        .bind(INVOCATION_ID)
+        .bind(FALLBACK_INVOCATION_ID)
+        .fetch_one(&mut connection)
+        .await
+        .expect("preserved invocations");
+        assert_eq!(preserved_invocations, 2);
+        let preserved_fallback: Option<String> = sqlx::query_scalar(
+            "SELECT fallback_from_invocation_id FROM model_invocation_facts WHERE id = ?",
+        )
+        .bind(FALLBACK_INVOCATION_ID)
+        .fetch_one(&mut connection)
+        .await
+        .expect("preserved fallback link");
+        assert_eq!(preserved_fallback.as_deref(), Some(INVOCATION_ID));
+        let preserved_trace_link: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM context_compilation_model_invocation_links
+             WHERE trace_id = ? AND model_invocation_id = ?",
+        )
+        .bind(TRACE_ID)
+        .bind(INVOCATION_ID)
+        .fetch_one(&mut connection)
+        .await
+        .expect("preserved context invocation link");
+        assert_eq!(preserved_trace_link, 1);
+        let preserved_evaluation: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM model_evaluation_results
+             WHERE id = 'capability-probe-upgrade-evaluation' AND catalog_entry_id = ?",
+        )
+        .bind(CATALOG_ID)
+        .fetch_one(&mut connection)
+        .await
+        .expect("preserved model evaluation");
+        assert_eq!(preserved_evaluation, 1);
+        let preserved_consistency_step: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM consistency_investigation_steps
+             WHERE id = ? AND invocation_id = ? AND status = 'succeeded'",
+        )
+        .bind(STEP_ID)
+        .bind(INVOCATION_ID)
+        .fetch_one(&mut connection)
+        .await
+        .expect("preserved consistency step");
+        assert_eq!(preserved_consistency_step, 1);
+        let preserved_probe_evidence: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM model_capability_scans AS scan
+             INNER JOIN model_capability_evidence AS evidence ON evidence.scan_id = scan.id
+             WHERE scan.id = ? AND scan.model_invocation_id IS NULL",
+        )
+        .bind(SCAN_ID)
+        .fetch_one(&mut connection)
+        .await
+        .expect("preserved unlinked historical capability evidence");
+        assert_eq!(preserved_probe_evidence, 1);
+
+        let invocation_indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'index' AND name IN (
+               'model_invocation_facts_task_idx',
+               'model_invocation_facts_connection_idx',
+               'model_invocation_facts_fallback_idx',
+               'model_invocation_facts_recent_failure_idx'
+             )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("preserved 0031 and 0056 invocation indexes");
+        assert_eq!(invocation_indexes, 4);
+        let invocation_authority_triggers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'trigger' AND name IN (
+               'novel_skill_invocation_exact_trace_guard',
+               'novel_skill_evaluation_attempt_revision_guard',
+               'novel_skill_evaluation_observation_trace_guard',
+               'novel_skill_evaluation_invocation_update_guard',
+               'novel_skill_evaluation_reservation_revision_guard',
+               'novel_skill_evaluation_settlement_evidence_guard',
+               'novel_skill_paid_settled_invocation_update_guard',
+               'novel_skill_paid_settled_invocation_delete_guard',
+               'consistency_investigation_step_model_guard',
+               'consistency_investigation_step_model_update_guard',
+               'consistency_investigation_invocation_start_guard',
+               'consistency_investigation_invocation_bind_after_start'
+             )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("preserved invocation authority triggers");
+        assert_eq!(invocation_authority_triggers, 12);
+        let self_reference: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('model_invocation_facts')
+             WHERE \"from\" = 'fallback_from_invocation_id'
+               AND \"table\" = 'model_invocation_facts'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("preserved invocation self reference");
+        assert_eq!(self_reference, 1);
+        let foreign_key_violations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+                .fetch_one(&mut connection)
+                .await
+                .expect("populated version 74 foreign-key check");
+        assert_eq!(foreign_key_violations, 0);
+
+        sqlx::query(
+            "INSERT INTO model_invocation_facts (
+               id, task, connection_id, catalog_entry_id, provider_kind_snapshot,
+               model_id_snapshot, route_reason, status, attempt, privacy_policy,
+               data_destination, started_at, created_at,
+               requested_max_output_tokens, provider_dispatch_started_at
+             ) VALUES ('capability-probe-upgrade-running-invocation', 'capability_probe',
+                       ?, ?, 'custom_openai_compatible', 'upgrade-writer',
+                       'user_override', 'running', 1, 'cloud_allowed', 'remote',
+                       ?, ?, 8, ?)",
+        )
+        .bind(CONNECTION_ID)
+        .bind(CATALOG_ID)
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist interrupted capability probe after upgrade");
+        let premature_scan = sqlx::query(
+            "INSERT INTO model_capability_scans (
+               id, catalog_entry_id, scan_kind, status, evidence_version,
+               error_code, requested_at, started_at, completed_at,
+               attempt, requested_max_output_tokens, model_invocation_id
+             ) VALUES ('capability-probe-upgrade-premature-scan', ?,
+                       'lightweight_probe', 'failed', 'upgrade-probe-v2',
+                       'PROVIDER_RESULT_AMBIGUOUS', ?, ?, ?, 1, 8,
+                       'capability-probe-upgrade-running-invocation')",
+        )
+        .bind(CATALOG_ID)
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await;
+        assert!(
+            premature_scan.is_err(),
+            "a scan must not link to a running capability invocation"
+        );
+
+        sqlx::query(
+            "UPDATE model_invocation_facts
+             SET status = 'timed_out', completed_at = ?,
+                 error_code = 'PROVIDER_RESULT_AMBIGUOUS'
+             WHERE id = 'capability-probe-upgrade-running-invocation'",
+        )
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("terminalize uncertain capability probe after upgrade");
+        let ambiguous_scan = sqlx::query(
+            "INSERT INTO model_capability_scans (
+               id, catalog_entry_id, scan_kind, status, evidence_version,
+               error_code, requested_at, started_at, completed_at,
+               attempt, requested_max_output_tokens, model_invocation_id
+             ) VALUES ('capability-probe-upgrade-ambiguous-scan', ?,
+                       'lightweight_probe', 'failed', 'upgrade-probe-v2',
+                       'PROVIDER_RESULT_AMBIGUOUS', ?, ?, ?, 1, 8,
+                       'capability-probe-upgrade-running-invocation')",
+        )
+        .bind(CATALOG_ID)
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await;
+        assert!(
+            ambiguous_scan.is_err(),
+            "an uncertain timed-out invocation must never become a failed capability scan"
+        );
+
+        sqlx::query(
+            "INSERT INTO model_invocation_facts (
+               id, task, connection_id, catalog_entry_id, provider_kind_snapshot,
+               model_id_snapshot, route_reason, status, attempt, privacy_policy,
+               data_destination, started_at, completed_at, created_at,
+               visible_content_length, reasoning_present, streamed,
+               requested_max_output_tokens, provider_dispatch_started_at
+             ) VALUES ('capability-probe-upgrade-new-invocation', 'capability_probe',
+                       ?, ?, 'custom_openai_compatible', 'upgrade-writer',
+                       'user_override', 'succeeded', 1, 'cloud_allowed', 'remote',
+                       ?, ?, ?, 2, 0, 0, 8, ?)",
+        )
+        .bind(CONNECTION_ID)
+        .bind(CATALOG_ID)
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("persist capability probe invocation after upgrade");
+        sqlx::query(
+            "INSERT INTO model_capability_scans (
+               id, catalog_entry_id, scan_kind, status, evidence_version,
+               supported_count, requested_at, started_at, completed_at,
+               visible_content_length, reasoning_present, streamed, attempt,
+               requested_max_output_tokens, model_invocation_id
+             ) VALUES ('capability-probe-upgrade-new-scan', ?, 'lightweight_probe',
+                       'succeeded', 'upgrade-probe-v2', 1, ?, ?, ?, 2, 0, 0, 1, 8,
+                       'capability-probe-upgrade-new-invocation')",
+        )
+        .bind(CATALOG_ID)
+        .bind(NOW)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut connection)
+        .await
+        .expect("link capability evidence to its exact invocation after upgrade");
+        let exact_probe_links: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM model_capability_scans AS scan
+             INNER JOIN model_invocation_facts AS invocation
+               ON invocation.id = scan.model_invocation_id
+             WHERE invocation.task = 'capability_probe' AND scan.catalog_entry_id = ?",
+        )
+        .bind(CATALOG_ID)
+        .fetch_one(&mut connection)
+        .await
+        .expect("exact capability probe invocation link");
+        assert_eq!(exact_probe_links, 1);
     }
 
     #[tokio::test]
@@ -1485,11 +2050,26 @@ mod tests {
         .await
         .expect("version 73 multigranular search columns");
         assert_eq!(search_scope_columns, 17);
+        let (probe_ledger_success, probe_ledger_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 74")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 74 capability probe ledger migration receipt");
+        assert_eq!(probe_ledger_success, 1);
+        assert_eq!(probe_ledger_checksum.len(), 48);
+        let probe_ledger_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('model_capability_scans')
+             WHERE name = 'model_invocation_id'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 74 capability probe invocation link");
+        assert_eq!(probe_ledger_columns, 1);
         let maximum_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
             .fetch_one(&mut connection)
             .await
             .expect("maximum migration version");
-        assert_eq!(maximum_version, 73);
+        assert_eq!(maximum_version, 74);
         let forbidden_columns: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)
              FROM pragma_table_info('novel_skill_evaluation_predispatch_authority_snapshots')

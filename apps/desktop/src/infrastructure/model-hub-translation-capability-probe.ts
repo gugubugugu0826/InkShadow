@@ -4,8 +4,16 @@ import {
   type ModelProviderKind,
 } from "./model-hub-provider-registry";
 import type {
+  ModelCatalogEntry,
+  ModelHubStore,
+  ModelInvocationFact,
+  ModelProviderConnection,
+} from "./model-hub-store";
+import { executeAuditedModelHubCapabilityProbe } from "./model-hub-text-capability-probe";
+import type {
   NativeModelEndpointConfig,
   NativeModelGatewayClient,
+  NativeModelGenerationInput,
   NativeModelGenerationUsage,
   NativeModelMessage,
 } from "./runtime";
@@ -26,17 +34,87 @@ export interface ModelHubTranslationCapabilityProbeResult {
   readonly evidenceVersion: typeof MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_VERSION;
   readonly streamed: boolean;
   readonly usage: NativeModelGenerationUsage | null;
+  readonly visibleContentLength: number;
+}
+
+export interface AuditedModelHubTranslationCapabilityProbeResult extends ModelHubTranslationCapabilityProbeResult {
+  readonly invocation: ModelInvocationFact;
+}
+
+export interface ExecuteAuditedModelHubTranslationCapabilityProbeInput {
+  readonly gateway: Pick<
+    NativeModelGatewayClient,
+    "generate" | "supportsNativeInvocationDispatchLedger"
+  >;
+  readonly providerKind: ModelProviderKind;
+  readonly generationId: string;
+  readonly config: NativeModelEndpointConfig;
+  readonly model: string;
+  readonly modelHub: Pick<
+    ModelHubStore,
+    "startInvocation" | "markInvocationDispatched" | "finishInvocation" | "findInvocation"
+  >;
+  readonly clock: Readonly<{ now(): string }>;
+  readonly invocationId: string;
+  readonly connection: Pick<
+    ModelProviderConnection,
+    "id" | "revision" | "providerKind" | "baseUrl"
+  >;
+  readonly catalogEntry: Pick<ModelCatalogEntry, "id" | "revision" | "providerModelId">;
+  readonly assertBeforeProviderDispatch?: () => void | Promise<void>;
+  readonly onProviderDispatchStarted?: (invocation: ModelInvocationFact) => void;
+}
+
+export async function executeAuditedModelHubTranslationCapabilityProbe(
+  input: ExecuteAuditedModelHubTranslationCapabilityProbeInput,
+): Promise<AuditedModelHubTranslationCapabilityProbeResult> {
+  const audited = await executeAuditedModelHubCapabilityProbe({
+    modelHub: input.modelHub,
+    clock: input.clock,
+    providerKind: input.providerKind,
+    invocationId: input.invocationId,
+    connection: input.connection,
+    catalogEntry: input.catalogEntry,
+    ...(input.assertBeforeProviderDispatch === undefined
+      ? {}
+      : { assertBeforeProviderDispatch: input.assertBeforeProviderDispatch }),
+    ...(input.onProviderDispatchStarted === undefined
+      ? {}
+      : { onProviderDispatchStarted: input.onProviderDispatchStarted }),
+    supportsNativeInvocationDispatchLedger:
+      input.gateway.supportsNativeInvocationDispatchLedger === true,
+    runProbe: (boundary) =>
+      runModelHubTranslationCapabilityProbe({
+        gateway: input.gateway,
+        providerKind: input.providerKind,
+        generationId: input.generationId,
+        config: input.config,
+        model: input.model,
+        ...boundary,
+      }),
+    observeSuccess: (result) => ({
+      usage: result.usage,
+      streamed: result.streamed,
+      visibleContentLength: result.visibleContentLength,
+    }),
+  });
+  return Object.freeze({ ...audited.result, invocation: audited.invocation });
 }
 
 /** Proves a fixed, content-free translation task; no project text or response is persisted. */
 export async function runModelHubTranslationCapabilityProbe(input: {
-  readonly gateway: Pick<NativeModelGatewayClient, "generate">;
+  readonly gateway: Pick<
+    NativeModelGatewayClient,
+    "generate" | "supportsNativeInvocationDispatchLedger"
+  >;
   readonly providerKind: ModelProviderKind;
   readonly generationId: string;
   readonly config: NativeModelEndpointConfig;
   readonly model: string;
   /** Revalidates the exact user-disclosed target immediately before dispatch. */
   readonly assertBeforeProviderDispatch?: () => Promise<void>;
+  readonly invocationDispatchLedger?: NativeModelGenerationInput["invocationDispatchLedger"];
+  readonly onInvocationDispatchAccepted?: NativeModelGenerationInput["onInvocationDispatchAccepted"];
 }): Promise<ModelHubTranslationCapabilityProbeResult> {
   const policy = modelProviderTextCapabilityProbePolicy(input.providerKind);
   await input.assertBeforeProviderDispatch?.();
@@ -48,6 +126,12 @@ export async function runModelHubTranslationCapabilityProbe(input: {
     messages: MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_MESSAGES,
     maxOutputTokens: MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
     ...(policy.reasoningMode === null ? {} : { reasoningMode: policy.reasoningMode }),
+    ...(input.invocationDispatchLedger === undefined
+      ? {}
+      : { invocationDispatchLedger: input.invocationDispatchLedger }),
+    ...(input.onInvocationDispatchAccepted === undefined
+      ? {}
+      : { onInvocationDispatchAccepted: input.onInvocationDispatchAccepted }),
   });
   if (!isAcceptedTranslation(generated.text)) {
     throw new ModelCenterError(
@@ -60,6 +144,7 @@ export async function runModelHubTranslationCapabilityProbe(input: {
     evidenceVersion: MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_VERSION,
     streamed: generated.streamed === true,
     usage: generated.usage,
+    visibleContentLength: Array.from(generated.text).length,
   });
 }
 

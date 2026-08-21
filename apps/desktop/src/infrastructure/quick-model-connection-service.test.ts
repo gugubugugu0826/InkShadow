@@ -54,6 +54,7 @@ describe("quick Model Hub connection", () => {
   it("commits only a verified key, stores no secret in Model Hub, and routes book start after a text probe", async () => {
     const harness = createHarness();
     const publishConnectionCommit = vi.spyOn(harness.runtime.modelHub, "publishConnectionCommit");
+    const startInvocation = vi.spyOn(harness.runtime.modelHub, "startInvocation");
     const connected = await connectQuickModelProvider(harness.runtime, {
       provider: "openai",
       secret: "test-verified-secret-value",
@@ -90,6 +91,30 @@ describe("quick Model Hub connection", () => {
     expect(harness.generate.mock.calls[0]?.[0].maxOutputTokens).toBe(64);
     expect(harness.generate.mock.calls[0]?.[0]).not.toHaveProperty("reasoningMode");
     expect(harness.generate.mock.calls[0]?.[0].config.providerId).toBe(credentialProviderId);
+    expect(startInvocation).toHaveBeenCalledOnce();
+    expect(startInvocation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        task: "capability_probe",
+        routeTask: null,
+        connectionId: connected.connection.id,
+        catalogEntryId: ready.catalogEntry.id,
+        routeReason: "user_override",
+        attempt: 1,
+        maximumCostMicros: null,
+        currency: null,
+      }),
+    );
+    const invocationId = startInvocation.mock.calls[0]?.[0].id;
+    expect(invocationId).toBeDefined();
+    const invocation = await harness.runtime.modelHub.findInvocation(invocationId ?? "missing");
+    expect(invocation).toMatchObject({
+      task: "capability_probe",
+      status: "succeeded",
+      inputTokens: null,
+      outputTokens: null,
+      estimatedCostMicros: null,
+    });
+    expect(typeof invocation?.providerDispatchStartedAt).toBe("string");
     await expect(
       harness.runtime.modelHub.listCapabilityEvidence(ready.catalogEntry.id),
     ).resolves.not.toEqual(
@@ -124,6 +149,7 @@ describe("quick Model Hub connection", () => {
 
   it("does not dispatch the fixed probe before an explicit disclosure confirmation", async () => {
     const harness = createHarness();
+    const startInvocation = vi.spyOn(harness.runtime.modelHub, "startInvocation");
     const connected = await connectQuickModelProvider(harness.runtime, {
       provider: "openai",
       secret: "test-disclosure-secret",
@@ -139,6 +165,143 @@ describe("quick Model Hub connection", () => {
       }),
     ).rejects.toMatchObject({ code: "QUICK_MODEL_PROBE_CONFIRMATION_REQUIRED" });
     expect(harness.generate).not.toHaveBeenCalled();
+    expect(startInvocation).not.toHaveBeenCalled();
+  });
+
+  it("records one capability invocation with exact usage while keeping unknown cost unknown", async () => {
+    const harness = createHarness();
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "openai",
+      secret: "test-usage-secret",
+    });
+    const startInvocation = vi.spyOn(harness.runtime.modelHub, "startInvocation");
+    harness.generate.mockResolvedValueOnce({
+      text: "OK",
+      streamed: true,
+      usage: { inputTokens: 11, outputTokens: 2, cachedInputTokens: 3 },
+    });
+
+    await configureConfirmedQuickBookStartRoute(harness.runtime, {
+      connectionId: connected.connection.id,
+      catalogEntryId: connected.catalog[0]?.id ?? "missing",
+    });
+
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(startInvocation).toHaveBeenCalledOnce();
+    const invocationId = startInvocation.mock.calls[0]?.[0].id ?? "missing";
+    await expect(harness.runtime.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      task: "capability_probe",
+      status: "succeeded",
+      inputTokens: 11,
+      outputTokens: 2,
+      cachedInputTokens: 3,
+      estimatedCostMicros: null,
+      currency: null,
+    });
+    const stored = JSON.parse(
+      window.localStorage.getItem("inkshadow.development.model-hub.v1") ?? "{}",
+    ) as { state?: { capabilityScans?: Record<string, { modelInvocationId?: string | null }> } };
+    expect(Object.values(stored.state?.capabilityScans ?? {})).toEqual(
+      expect.arrayContaining([expect.objectContaining({ modelInvocationId: invocationId })]),
+    );
+  });
+
+  it("uses the native accepted boundary before settling a capability invocation", async () => {
+    const harness = createHarness({ nativeInvocationLedger: true });
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "openai",
+      secret: "test-native-ledger-secret",
+    });
+    const startInvocation = vi.spyOn(harness.runtime.modelHub, "startInvocation");
+
+    await configureConfirmedQuickBookStartRoute(harness.runtime, {
+      connectionId: connected.connection.id,
+      catalogEntryId: connected.catalog[0]?.id ?? "missing",
+    });
+
+    expect(harness.generate).toHaveBeenCalledOnce();
+    const dispatched = harness.generate.mock.calls[0]?.[0];
+    expect(dispatched?.invocationDispatchLedger).toMatchObject({ expectedRevision: 1 });
+    expect(dispatched?.onInvocationDispatchAccepted).toBeTypeOf("function");
+    const invocationId = startInvocation.mock.calls[0]?.[0].id ?? "missing";
+    await expect(harness.runtime.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      task: "capability_probe",
+      status: "succeeded",
+      providerDispatchStartedAt: "2026-08-21T00:00:00.000Z",
+      revision: 3,
+    });
+  });
+
+  it("keeps native preparation rejection at zero provider dispatch receipts", async () => {
+    const harness = createHarness({
+      nativeInvocationLedger: true,
+      rejectBeforeNativeInvocationReceipt: true,
+    });
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "openai",
+      secret: "test-native-predispatch-secret",
+    });
+    const startInvocation = vi.spyOn(harness.runtime.modelHub, "startInvocation");
+
+    await expect(
+      configureConfirmedQuickBookStartRoute(harness.runtime, {
+        connectionId: connected.connection.id,
+        catalogEntryId: connected.catalog[0]?.id ?? "missing",
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_CREDENTIAL_MISSING" });
+
+    const invocationId = startInvocation.mock.calls[0]?.[0].id ?? "missing";
+    await expect(harness.runtime.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      task: "capability_probe",
+      status: "failed",
+      providerDispatchStartedAt: null,
+      errorCode: "CAPABILITY_PROBE_NOT_DISPATCHED",
+    });
+  });
+
+  it("settles an uncertain post-dispatch probe once and never resends it automatically", async () => {
+    const harness = createHarness();
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "openai",
+      secret: "test-ambiguous-secret",
+    });
+    const startInvocation = vi.spyOn(harness.runtime.modelHub, "startInvocation");
+    const recordCapabilityScan = vi.spyOn(harness.runtime.modelHub, "recordCapabilityScan");
+    harness.generate.mockRejectedValueOnce(
+      Object.assign(new Error("connection ended before a response"), {
+        code: "MODEL_NETWORK_TIMEOUT",
+        retryable: true,
+        diagnostics: { requestId: "probe-request-ambiguous" },
+      }),
+    );
+
+    await expect(
+      configureConfirmedQuickBookStartRoute(harness.runtime, {
+        connectionId: connected.connection.id,
+        catalogEntryId: connected.catalog[0]?.id ?? "missing",
+      }),
+    ).rejects.toMatchObject({ code: "PROVIDER_RESULT_AMBIGUOUS", retryable: false });
+
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(startInvocation).toHaveBeenCalledOnce();
+    const invocationId = startInvocation.mock.calls[0]?.[0].id ?? "missing";
+    const invocation = await harness.runtime.modelHub.findInvocation(invocationId);
+    expect(invocation).toMatchObject({
+      task: "capability_probe",
+      status: "timed_out",
+      errorCode: "PROVIDER_RESULT_AMBIGUOUS",
+    });
+    expect(typeof invocation?.providerDispatchStartedAt).toBe("string");
+    expect(
+      recordCapabilityScan.mock.calls.filter(([scan]) => scan.status === "failed"),
+    ).toHaveLength(0);
+    const recentFailures = await harness.runtime.modelHub.listRecentAiFailures();
+    expect(recentFailures).toHaveLength(1);
+    expect(recentFailures[0]).toMatchObject({
+      taskType: "capability_probe",
+      normalizedErrorCode: "PROVIDER_RESULT_AMBIGUOUS",
+    });
+    expect(recentFailures[0]?.diagnosticId.startsWith("model_invocation:")).toBe(true);
   });
 
   it("records a truthful partial scan when a truncated probe already emitted visible text", async () => {
@@ -680,6 +843,8 @@ function createHarness(
     failAuthentication?: boolean;
     failCredentialSave?: boolean;
     failDeleteOnceFor?: string;
+    nativeInvocationLedger?: boolean;
+    rejectBeforeNativeInvocationReceipt?: boolean;
   }> = {},
 ) {
   const base = createDevelopmentRuntime(window.localStorage);
@@ -734,12 +899,35 @@ function createHarness(
       models: [{ id: "novel-text-model", displayName: "Novel Text Model" }],
     }),
   );
-  const generate = vi.fn((request: Parameters<NativeModelGatewayClient["generate"]>[0]) => {
+  const generate = vi.fn<NativeModelGatewayClient["generate"]>(async (request) => {
+    if (input.rejectBeforeNativeInvocationReceipt === true) {
+      throw Object.assign(new Error("native preparation rejected"), {
+        code: "MODEL_CREDENTIAL_MISSING",
+        retryable: false,
+      });
+    }
+    if (input.nativeInvocationLedger === true) {
+      const ledger = request.invocationDispatchLedger;
+      if (ledger === undefined) throw new Error("missing native invocation ledger boundary");
+      const persisted = await base.modelHub.markInvocationDispatched({
+        id: ledger.invocationId,
+        dispatchedAt: "2026-08-21T00:00:00.000Z",
+        expectedRevision: ledger.expectedRevision,
+      });
+      await request.onInvocationDispatchAccepted?.({
+        invocationId: persisted.id,
+        dispatchedAt: persisted.providerDispatchStartedAt ?? "",
+        revision: persisted.revision,
+      });
+    }
     request.onDelta?.("OK");
-    return Promise.resolve({ text: "OK", usage: null });
+    return { text: "OK", usage: null };
   });
   const modelGateway: NativeModelGatewayClient = {
     available: true,
+    ...(input.nativeInvocationLedger === true
+      ? { supportsNativeInvocationDispatchLedger: true as const }
+      : {}),
     checkConnection,
     listModels,
     generate,

@@ -142,9 +142,7 @@ test("keeps writing, Story Settings import, and all 22 Model Hub tasks reachable
     await expect(transferTrigger).toBeFocused();
 
     await page.goto("/#/settings#model-routing");
-    await expect(
-      page.getByRole("heading", { level: 1, name: "Model Hub · AI 分工" }),
-    ).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "模型中心 · AI 分工" })).toBeVisible();
     const expertSettings = page.getByRole("button", { name: /专家设置/u });
     await expertSettings.scrollIntoViewIfNeeded();
     await expectFocusable(expertSettings);
@@ -156,7 +154,7 @@ test("keeps writing, Story Settings import, and all 22 Model Hub tasks reachable
     const taskCoverage = page.getByText(/逐项覆盖 22 类小说任务/u);
     await taskCoverage.scrollIntoViewIfNeeded();
     await expect(taskCoverage).toBeVisible();
-    await expect(page.getByText(/22 类小说任务由 Model Hub 负责/u)).toBeVisible();
+    await expect(page.getByText(/22 类小说任务由模型中心负责/u)).toBeVisible();
     await expectNoHorizontalPageOverflow(page);
     await expectMainReachedScrolledContent(page, taskCoverage);
   } finally {

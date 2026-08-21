@@ -28,7 +28,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     for (const viewport of TARGET_VIEWPORTS) {
       await page.setViewportSize(viewport);
       await page.goto("/#/settings#model-center");
-      await expect(page.getByRole("heading", { name: "InkShadow Model Hub" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "InkShadow 模型中心" })).toBeVisible();
       await selectConnection(page, LONG_MODEL_HUB_CONNECTION_ID);
       await expect(
         page.getByRole("combobox", { name: /^已连接的供应商/u }).locator("option:checked"),
@@ -50,7 +50,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expectNoPageOrCardOverflow(page);
 
       await page.goto("/#/settings#model-routing");
-      await expect(page.getByRole("heading", { name: "Model Hub · AI 分工" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "模型中心 · AI 分工" })).toBeVisible();
       await openExpertSettings(page);
       await expect(page.getByText(LONG_MODEL_HUB_MODEL_ID, { exact: false }).first()).toBeVisible();
       await expect(page.getByText(/123\.456789|123456789|USD/u).first()).toBeVisible();
@@ -77,7 +77,7 @@ test("keeps long Model Hub data usable at DPR2 and equivalent 200%", async ({
     await page.evaluate(() => window.localStorage.clear());
     await seedLongModelHubFixture(page);
     await page.goto("/#/settings#model-center");
-    await expect(page.getByRole("heading", { name: "InkShadow Model Hub" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "InkShadow 模型中心" })).toBeVisible();
     await selectConnection(page, LONG_MODEL_HUB_CONNECTION_ID);
     await expectNoPageOrCardOverflow(page);
     expect(await page.evaluate(() => window.devicePixelRatio)).toBe(2);
@@ -93,7 +93,7 @@ test("keeps long Model Hub data usable at DPR2 and equivalent 200%", async ({
         mobile: false,
       });
       await page.reload();
-      await expect(page.getByRole("heading", { name: "InkShadow Model Hub" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "InkShadow 模型中心" })).toBeVisible();
       await selectConnection(page, LONG_MODEL_HUB_CONNECTION_ID);
       await openExpertSettings(page);
       await expect(page.getByLabel("Base URL")).toHaveValue(LONG_MODEL_HUB_BASE_URL);

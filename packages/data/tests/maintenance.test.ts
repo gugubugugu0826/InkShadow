@@ -34,6 +34,11 @@ const corruptedBackupPath = path.join(
   tmpdir(),
   `inkshadow-maintenance-corrupted-${process.pid}.db`,
 );
+const historicalV73BackupPath = path.join(tmpdir(), `inkshadow-maintenance-v73-${process.pid}.db`);
+const capabilityProbeInvocationLedgerMigration = readFileSync(
+  new URL("../migrations/0071_model_capability_probe_invocation_ledger.sql", import.meta.url),
+  "utf8",
+);
 const inkShadowMigration = [
   readFileSync(new URL("../migrations/0001_core.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../migrations/0002_tasks_notifications.sql", import.meta.url), "utf8"),
@@ -243,7 +248,12 @@ const inkShadowMigration = [
     new URL("../migrations/0070_multigranular_search_retrieval.sql", import.meta.url),
     "utf8",
   ),
+  capabilityProbeInvocationLedgerMigration,
 ].join("\n");
+const inkShadowMigrationV73 = inkShadowMigration.replace(
+  capabilityProbeInvocationLedgerMigration,
+  "",
+);
 const BACKUP_PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const BACKUP_ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
 const BACKUP_OBJECT_ID = "019f9f4a-b3c7-7350-9226-000000000102";
@@ -276,6 +286,7 @@ afterEach(() => {
   rmSync(backupPath, { force: true });
   rmSync(incompatibleBackupPath, { force: true });
   rmSync(corruptedBackupPath, { force: true });
+  rmSync(historicalV73BackupPath, { force: true });
 });
 
 describe("DatabaseMaintenanceService", () => {
@@ -355,6 +366,97 @@ describe("DatabaseMaintenanceService", () => {
     expect(existsSync(corruptedBackupPath)).toBe(true);
     await executor.close();
   });
+
+  fileSqliteIt(
+    "restores a populated version 73 backup after the capability ledger migration",
+    async () => {
+      const historical = new NodeSqliteExecutor(inkShadowMigrationV73, historicalV73BackupPath);
+      await insertHistoricalV73CapabilityRestoreScenario(historical);
+      await expect(
+        historical.select<{ readonly name: string }>(
+          `SELECT name
+           FROM pragma_table_info('model_capability_scans')
+           WHERE name = 'model_invocation_id'`,
+        ),
+      ).resolves.toEqual([]);
+      await historical.close();
+
+      const current = new RestoreFailureCapturingExecutor(inkShadowMigration);
+      const service = new DatabaseMaintenanceService(current);
+
+      const restored = await service.restoreConsistentBackup(historicalV73BackupPath);
+      if (!restored.ok && current.lastFailure !== null) throw current.lastFailure;
+      expect(restored).toEqual({
+        ok: true,
+        value: {
+          sourceKind: "user_selected_file",
+          integrityVerified: true,
+          restoredTableCount: 172,
+        },
+      });
+      await expect(
+        current.select<{ readonly count: number }>(
+          "SELECT COUNT(*) AS count FROM pragma_foreign_key_check",
+        ),
+      ).resolves.toEqual([{ count: 0 }]);
+      await expect(
+        current.select<{
+          readonly projectName: string;
+          readonly chapterContent: string;
+          readonly currentVersionId: string;
+          readonly versionContent: string;
+          readonly candidateContent: string;
+          readonly candidateStatus: string;
+          readonly taskStatus: string;
+          readonly invocationStatus: string;
+          readonly inputTokens: number;
+          readonly outputTokens: number;
+          readonly scanStatus: string;
+          readonly modelInvocationId: string | null;
+        }>(
+          `SELECT project.name AS projectName,
+                  chapter.content AS chapterContent,
+                  chapter.current_version_id AS currentVersionId,
+                  version.content AS versionContent,
+                  candidate.content AS candidateContent,
+                  candidate.status AS candidateStatus,
+                  task.status AS taskStatus,
+                  invocation.status AS invocationStatus,
+                  invocation.input_tokens AS inputTokens,
+                  invocation.output_tokens AS outputTokens,
+                  scan.status AS scanStatus,
+                  scan.model_invocation_id AS modelInvocationId
+           FROM projects AS project
+           INNER JOIN chapters AS chapter ON chapter.project_id = project.id
+           INNER JOIN chapter_versions AS version ON version.id = chapter.current_version_id
+           INNER JOIN ai_candidates AS candidate ON candidate.chapter_id = chapter.id
+           INNER JOIN background_tasks AS task
+             ON task.id = 'maintenance-v73-background-task'
+           INNER JOIN model_invocation_facts AS invocation
+             ON invocation.id = 'maintenance-v73-invocation'
+           INNER JOIN model_capability_scans AS scan
+             ON scan.id = 'maintenance-v73-scan'
+           WHERE project.id = '019f9f4a-b3c7-7350-9226-000000000071'`,
+        ),
+      ).resolves.toEqual([
+        {
+          projectName: "七十三版恢复项目",
+          chapterContent: "七十三版正文必须原样恢复。",
+          currentVersionId: "019f9f4a-b3c7-7350-9226-000000000073",
+          versionContent: "七十三版正文必须原样恢复。",
+          candidateContent: "隔离中的 AI 建议草稿",
+          candidateStatus: "ready",
+          taskStatus: "succeeded",
+          invocationStatus: "succeeded",
+          inputTokens: 17,
+          outputTokens: 4,
+          scanStatus: "succeeded",
+          modelInvocationId: null,
+        },
+      ]);
+      await current.close();
+    },
+  );
 
   fileSqliteIt("restores a historical story-state receipt after its chapter advances", async () => {
     const executor = new NodeSqliteExecutor(inkShadowMigration);
@@ -567,6 +669,15 @@ describe("DatabaseMaintenanceService", () => {
        WHERE id = 'maintenance-failed-invocation'`,
     );
     await executor.execute(
+      "DELETE FROM model_capability_evidence WHERE id = 'maintenance-audited-probe-evidence'",
+    );
+    await executor.execute(
+      "DELETE FROM model_capability_scans WHERE id = 'maintenance-audited-probe'",
+    );
+    await executor.execute(
+      "DELETE FROM model_invocation_facts WHERE id = 'maintenance-audited-probe-invocation'",
+    );
+    await executor.execute(
       `UPDATE device_public_key_records
        SET state = 'credential_missing', display_name = '恢复前改名', updated_at = ?
        WHERE device_id = ?`,
@@ -643,6 +754,44 @@ describe("DatabaseMaintenanceService", () => {
         restoredTableCount: 172,
       },
     });
+    await expect(
+      executor.select<{ count: number }>("SELECT COUNT(*) AS count FROM pragma_foreign_key_check"),
+    ).resolves.toEqual([{ count: 0 }]);
+    await expect(
+      executor.select<{
+        invocationId: string;
+        task: string;
+        status: string;
+        inputTokens: number;
+        outputTokens: number;
+        estimatedCostMicros: string | null;
+        scanId: string;
+        evidenceCount: number;
+      }>(
+        `SELECT invocation.id AS invocationId, invocation.task, invocation.status,
+                invocation.input_tokens AS inputTokens,
+                invocation.output_tokens AS outputTokens,
+                invocation.estimated_cost_micros AS estimatedCostMicros,
+                scan.id AS scanId,
+                (SELECT COUNT(*) FROM model_capability_evidence AS evidence
+                  WHERE evidence.scan_id = scan.id) AS evidenceCount
+         FROM model_invocation_facts AS invocation
+         INNER JOIN model_capability_scans AS scan
+           ON scan.model_invocation_id = invocation.id
+         WHERE invocation.id = 'maintenance-audited-probe-invocation'`,
+      ),
+    ).resolves.toEqual([
+      {
+        invocationId: "maintenance-audited-probe-invocation",
+        task: "capability_probe",
+        status: "succeeded",
+        inputTokens: 7,
+        outputTokens: 1,
+        estimatedCostMicros: null,
+        scanId: "maintenance-audited-probe",
+        evidenceCount: 1,
+      },
+    ]);
     await expect(
       executor.select<{
         readonly mode: string;
@@ -2303,6 +2452,133 @@ class CorruptingBackupExecutor extends NodeSqliteExecutor {
   }
 }
 
+class RestoreFailureCapturingExecutor extends NodeSqliteExecutor {
+  public lastFailure: unknown = null;
+
+  public override async select<Row extends object>(
+    query: string,
+    bindValues: readonly SqlPrimitive[] = [],
+  ): Promise<Row[]> {
+    try {
+      return await super.select<Row>(query, bindValues);
+    } catch (cause: unknown) {
+      this.lastFailure = cause;
+      throw cause;
+    }
+  }
+
+  public override async execute(
+    query: string,
+    bindValues: readonly SqlPrimitive[] = [],
+  ): Promise<{ rowsAffected: number; lastInsertId?: number }> {
+    try {
+      return await super.execute(query, bindValues);
+    } catch (cause: unknown) {
+      this.lastFailure = cause;
+      throw cause;
+    }
+  }
+}
+
+async function insertHistoricalV73CapabilityRestoreScenario(
+  executor: NodeSqliteExecutor,
+): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  const projectId = "019f9f4a-b3c7-7350-9226-000000000071";
+  const chapterId = "019f9f4a-b3c7-7350-9226-000000000072";
+  const versionId = "019f9f4a-b3c7-7350-9226-000000000073";
+  await insertProject(executor, projectId, "七十三版恢复项目");
+  await executor.transaction(async (transaction) => {
+    await transaction.execute(
+      `INSERT INTO chapters (
+         id, project_id, title, content, status, revision,
+         current_version_id, created_at, updated_at, trashed_at
+       ) VALUES (?, ?, '第一章', '七十三版正文必须原样恢复。',
+         'active', 1, ?, ?, ?, NULL)`,
+      [chapterId, projectId, versionId, now, now],
+    );
+    await transaction.execute(
+      `INSERT INTO chapter_versions (
+         id, project_id, chapter_id, parent_version_id, sequence, content,
+         content_checksum, reason, source_candidate_id, created_at
+       ) VALUES (?, ?, ?, NULL, 1, '七十三版正文必须原样恢复。', ?,
+         'created', NULL, ?)`,
+      [versionId, projectId, chapterId, "7".repeat(64), now],
+    );
+  });
+  await executor.execute(
+    `INSERT INTO ai_candidates (
+       id, project_id, chapter_id, source, base_version_id, content,
+       content_checksum, status, incomplete, created_at, updated_at, decided_at
+     ) VALUES (
+       '019f9f4a-b3c7-7350-9226-000000000074', ?, ?, 'generate', ?,
+       '隔离中的 AI 建议草稿', ?, 'ready', 0, ?, ?, NULL
+     )`,
+    [projectId, chapterId, versionId, "8".repeat(64), now, now],
+  );
+  await executor.execute(
+    `INSERT INTO background_tasks (
+       id, task_type, idempotency_key, metadata_json, priority, status,
+       attempt, max_attempts, sequence, run_after, created_at, updated_at,
+       started_at, finished_at
+     ) VALUES (
+       'maintenance-v73-background-task', 'chapter.summary',
+       'maintenance.v73.background-task', ?, 50, 'succeeded',
+       1, 1, 1, NULL, ?, ?, ?, ?
+     )`,
+    [JSON.stringify({ projectId, chapterId }), now, now, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_provider_connections (
+       id, provider_kind, display_name, protocol, base_url,
+       credential_state, connection_status, catalog_sync_status,
+       enabled, revision, created_at, updated_at
+     ) VALUES (
+       'maintenance-v73-connection', 'openai', '七十三版模型服务',
+       'openai_compatible', 'https://models.example.test/v1',
+       'missing', 'not_tested', 'never', 1, 1, ?, ?
+     )`,
+    [now, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_catalog_entries (
+       id, connection_id, provider_model_id, display_name, catalog_source,
+       availability, lifecycle, first_discovered_at, last_seen_at, revision
+     ) VALUES (
+       'maintenance-v73-catalog', 'maintenance-v73-connection',
+       'maintenance-v73-model', '七十三版模型', 'manual',
+       'available', 'stable', ?, ?, 1
+     )`,
+    [now, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_invocation_facts (
+       id, task, route_task, connection_id, catalog_entry_id,
+       provider_kind_snapshot, model_id_snapshot, route_reason, status,
+       attempt, privacy_policy, data_destination, input_tokens, output_tokens,
+       cached_input_tokens, estimated_cost_micros, started_at, completed_at,
+       created_at, provider_dispatch_started_at
+     ) VALUES (
+       'maintenance-v73-invocation', 'continuation', NULL,
+       'maintenance-v73-connection', 'maintenance-v73-catalog',
+       'openai', 'maintenance-v73-model', 'user_override', 'succeeded',
+       1, 'cloud_allowed', 'remote', 17, 4, NULL, NULL, ?, ?, ?, ?
+     )`,
+    [now, now, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_capability_scans (
+       id, catalog_entry_id, scan_kind, status, evidence_version,
+       supported_count, requested_at, started_at, completed_at
+     ) VALUES (
+       'maintenance-v73-scan', 'maintenance-v73-catalog',
+       'lightweight_probe', 'succeeded', 'maintenance-v73-probe-v1',
+       1, ?, ?, ?
+     )`,
+    [now, now, now],
+  );
+}
+
 async function insertProject(
   executor: NodeSqliteExecutor,
   id: string,
@@ -3514,6 +3790,48 @@ async function insertModelHubExpertConnection(executor: NodeSqliteExecutor): Pro
        NULL, 0, 0, 1, 512
      )`,
     [now, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_invocation_facts (
+       id, task, connection_id, catalog_entry_id, provider_kind_snapshot,
+       model_id_snapshot, route_reason, status, attempt, privacy_policy,
+       data_destination, input_tokens, output_tokens, cached_input_tokens,
+       estimated_cost_micros, started_at, completed_at, created_at,
+       finish_reason, visible_content_length, reasoning_present, streamed,
+       requested_max_output_tokens, provider_dispatch_started_at
+     ) VALUES (
+       'maintenance-audited-probe-invocation', 'capability_probe',
+       'maintenance-custom-model', 'maintenance-model-catalog',
+       'custom_openai_compatible', 'maintenance-writer', 'user_override',
+       'succeeded', 1, 'cloud_allowed', 'remote', 7, 1, 0, NULL, ?, ?, ?,
+       'stop', 2, 0, 0, 64, ?
+     )`,
+    [now, now, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_capability_scans (
+       id, catalog_entry_id, model_invocation_id, scan_kind, status,
+       evidence_version, supported_count, requested_at, started_at, completed_at,
+       visible_content_length, reasoning_present, streamed, attempt,
+       requested_max_output_tokens
+     ) VALUES (
+       'maintenance-audited-probe', 'maintenance-model-catalog',
+       'maintenance-audited-probe-invocation', 'lightweight_probe', 'succeeded',
+       'maintenance-audited-probe-v1', 1, ?, ?, ?, 2, 0, 0, 1, 64
+     )`,
+    [now, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_capability_evidence (
+       id, catalog_entry_id, scan_id, capability, verdict, evidence_source,
+       evidence_version, evidence_summary, observed_at, expires_at
+     ) VALUES (
+       'maintenance-audited-probe-evidence', 'maintenance-model-catalog',
+       'maintenance-audited-probe', 'text_generation', 'supported',
+       'lightweight_probe', 'maintenance-audited-probe-v1',
+       'content-free audited capability probe backup fixture', ?, NULL
+     )`,
+    [now],
   );
 }
 

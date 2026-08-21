@@ -207,7 +207,7 @@ export async function executeCreativeOpeningProviderAction(
   if (prepared.disclosure.fingerprint !== input.disclosureFingerprint) {
     throw creativeOpeningDisclosureChanged();
   }
-  return Promise.all(
+  const settled = await Promise.allSettled(
     prepared.calls.map(async (call) => {
       const result = await generateCreativeOpeningInternal(
         runtime,
@@ -250,8 +250,29 @@ export async function executeCreativeOpeningProviderAction(
           sourceFingerprint: call.sourceFingerprint,
         }),
       );
+      // Await the exact slot checkpoint, but do not let its rejection stop the
+      // other confirmed calls. The aggregate error is surfaced only after
+      // every slot has independently reached a provider/local terminal.
       await input.onResult?.(result);
       return result;
+    }),
+  );
+  const rejected = settled.filter(
+    (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+  );
+  const rejectionReasons = rejected.map(({ reason }) => reason as unknown);
+  if (rejected.length === 1) {
+    throw rejectionReasons[0];
+  }
+  if (rejected.length > 1) {
+    throw new AggregateError(rejectionReasons, "多个开头位置未能独立完成本地归档。");
+  }
+  return Object.freeze(
+    settled.map((outcome) => {
+      if (outcome.status !== "fulfilled") {
+        throw new Error("开头位置结算状态不完整。");
+      }
+      return outcome.value;
     }),
   );
 }

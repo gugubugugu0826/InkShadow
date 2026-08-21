@@ -192,6 +192,39 @@ describe("quick AI connection drawer", () => {
     expect(modelSelect).toHaveValue(alternateValue);
   }, 30_000);
 
+  it("shows an uncertain fixed probe as pending review without offering another dispatch", async () => {
+    const harness = createTauriHarness({}, { probeAmbiguous: true });
+    const user = userEvent.setup();
+    renderDrawer(harness.runtime);
+    fireEvent.change(screen.getByLabelText(/^API Key/u), {
+      target: { value: "good-key" },
+    });
+    const connectButton = screen.getByRole("button", { name: "测试连接并查找模型" });
+    await waitFor(() => expect(connectButton).toBeEnabled(), ASYNC_UI_TIMEOUT);
+    await user.click(connectButton);
+    await screen.findByText("连接成功 · 已找到模型", {}, ASYNC_UI_TIMEOUT);
+
+    await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
+    await user.click(screen.getByRole("button", { name: "确认 1 次固定验证并继续" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "固定能力验证结果待核对" }, ASYNC_UI_TIMEOUT),
+    ).toBeVisible();
+    expect(screen.getAllByText(/不会自动重发/u).length).toBeGreaterThan(0);
+    expect(screen.queryByText("连接没成功")).not.toBeInTheDocument();
+    expect(screen.queryByText(/你可以重试/u)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "返回选择" })).not.toBeInTheDocument();
+    expect(harness.generate).toHaveBeenCalledOnce();
+    const failures = await harness.runtime.modelHub.listRecentAiFailures();
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.diagnosticId.startsWith("model_invocation:")).toBe(true);
+    expect(failures[0]?.normalizedErrorCode).toBe("PROVIDER_RESULT_AMBIGUOUS");
+    const connections = await harness.runtime.modelHub.listConnections();
+    expect(connections).toHaveLength(1);
+    expect(connections[0]?.connectionStatus).toBe("ready");
+  }, 30_000);
+
   it("cannot be dismissed while a credential and catalog check is still running", async () => {
     const harness = createTauriHarness();
     const onOpenChange = vi.fn();
@@ -223,7 +256,7 @@ describe("quick AI connection drawer", () => {
     if (backdrop === null) throw new Error("应显示 AI 连接抽屉遮罩");
     fireEvent.mouseDown(backdrop);
     expect(onOpenChange).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("link", { name: "更多供应商与完整 Model Hub 设置" }));
+    await user.click(screen.getByRole("link", { name: "更多供应商与完整模型中心设置" }));
     expect(onOpenChange).not.toHaveBeenCalled();
 
     if (finishConnection === undefined) throw new Error("连接检查尚未开始");
@@ -256,7 +289,11 @@ function renderDrawer(runtime: DesktopRuntime, onOpenChange = vi.fn()) {
 
 function createTauriHarness(
   initialSecrets: Readonly<Record<string, string>> = {},
-  options: Readonly<{ probeFails?: boolean; twoModels?: boolean }> = {},
+  options: Readonly<{
+    probeFails?: boolean;
+    probeAmbiguous?: boolean;
+    twoModels?: boolean;
+  }> = {},
 ) {
   const base = createDevelopmentRuntime(window.localStorage);
   const secrets = new Map(Object.entries(initialSecrets));
@@ -293,13 +330,21 @@ function createTauriHarness(
     },
   );
   const generate = vi.fn(() =>
-    options.probeFails === true
+    options.probeAmbiguous === true
       ? Promise.reject(
-          Object.assign(new Error("model does not support text"), {
-            code: "MODEL_TEXT_UNSUPPORTED",
+          Object.assign(new Error("connection ended before a response"), {
+            code: "MODEL_NETWORK_TIMEOUT",
+            retryable: true,
+            diagnostics: { stage: "transport" },
           }),
         )
-      : Promise.resolve({ text: "OK", usage: null }),
+      : options.probeFails === true
+        ? Promise.reject(
+            Object.assign(new Error("model does not support text"), {
+              code: "MODEL_TEXT_UNSUPPORTED",
+            }),
+          )
+        : Promise.resolve({ text: "OK", usage: null }),
   );
   const modelGateway: NativeModelGatewayClient = {
     available: true,

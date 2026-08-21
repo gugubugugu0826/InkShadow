@@ -1,10 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { DatabaseBackupReceipt, NativePathTicket } from "@inkshadow/data";
-import { AppError, err, ok } from "@inkshadow/domain";
-
 import type {
   AutomaticBackupFilePresent,
+  AutomaticBackupManifestWritingEntry,
   AutomaticBackupRunResult,
   VerifiedAutomaticBackupRoot,
 } from "./automatic-backup-service";
@@ -23,90 +21,67 @@ const ROOT = {
   pathStyle: "windows",
 } as VerifiedAutomaticBackupRoot;
 const LEASE = { token: "a".repeat(64) };
-const TICKET = "b".repeat(64) as NativePathTicket;
 const BACKUP_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const FILE_NAME = `inkshadow-auto-v1-20260808T040000000Z-${BACKUP_ID}.sqlite3`;
 const ABSOLUTE_PATH = `${ROOT.absolutePath}/${FILE_NAME}`;
 
 describe("TauriAutomaticBackupPort", () => {
-  it("uses a native managed ticket and the existing consistent-backup creator", async () => {
+  it("uses one native command to write, install and verify the exact manifest target", async () => {
     const file = presentFile();
     const bridge = new StubNativeBridge({
-      native_automatic_backup_prepare_destination: { ticket: TICKET },
-      native_automatic_backup_inspect_file: file,
+      native_automatic_backup_create_verified: { outcome: "succeeded", file },
     });
-    const createConsistentBackup = vi.fn().mockResolvedValue(
-      ok<DatabaseBackupReceipt>({
-        destinationKind: "user_selected_file",
-        integrityVerified: true,
-      }),
-    );
-    const port = new TauriAutomaticBackupPort({ createConsistentBackup }, bridge);
+    const port = new TauriAutomaticBackupPort(bridge);
 
-    await expect(
-      port.createConsistentBackup(ROOT, LEASE, {
-        backupId: BACKUP_ID,
-        fileName: FILE_NAME,
-        absolutePath: ABSOLUTE_PATH,
-      }),
-    ).resolves.toEqual(file);
+    await expect(port.createConsistentBackup(ROOT, LEASE, writingEntry())).resolves.toEqual({
+      outcome: "succeeded",
+      file,
+    });
 
-    expect(createConsistentBackup).toHaveBeenCalledWith(TICKET);
     expect(bridge.calls.map(({ command }) => command)).toEqual([
-      "native_automatic_backup_prepare_destination",
-      "native_automatic_backup_inspect_file",
+      "native_automatic_backup_create_verified",
     ]);
-    expect(JSON.stringify(bridge.calls)).not.toContain("inkshadow.db");
-  });
-
-  it("requests exact pending-file cleanup when consistent backup fails", async () => {
-    const bridge = new StubNativeBridge({
-      native_automatic_backup_prepare_destination: { ticket: TICKET },
-      native_automatic_backup_cleanup_failed_creation: null,
-    });
-    const createConsistentBackup = vi.fn().mockResolvedValue(
-      err(
-        new AppError({
-          code: "REPOSITORY_ERROR",
-          message: "safe test failure",
-        }),
-      ),
-    );
-    const port = new TauriAutomaticBackupPort({ createConsistentBackup }, bridge);
-
-    await expect(
-      port.createConsistentBackup(ROOT, LEASE, {
-        backupId: BACKUP_ID,
-        fileName: FILE_NAME,
-        absolutePath: ABSOLUTE_PATH,
-      }),
-    ).rejects.toMatchObject({ code: "REPOSITORY_ERROR" });
-    expect(bridge.calls.map(({ command }) => command)).toEqual([
-      "native_automatic_backup_prepare_destination",
-      "native_automatic_backup_cleanup_failed_creation",
-    ]);
-  });
-
-  it("never sends a raw destination to the native ticket command without manifest identity", async () => {
-    const bridge = new StubNativeBridge({
-      native_automatic_backup_prepare_destination: { ticket: "not-a-ticket" },
-    });
-    const createConsistentBackup = vi.fn();
-    const port = new TauriAutomaticBackupPort({ createConsistentBackup }, bridge);
-
-    await expect(
-      port.createConsistentBackup(ROOT, LEASE, {
-        backupId: BACKUP_ID,
-        fileName: FILE_NAME,
-        absolutePath: ABSOLUTE_PATH,
-      }),
-    ).rejects.toMatchObject({ code: "AUTOMATIC_BACKUP_TICKET_INVALID" });
-    expect(createConsistentBackup).not.toHaveBeenCalled();
     expect(bridge.calls[0]?.arguments_).toMatchObject({
       rootId: ROOT.rootId,
       leaseToken: LEASE.token,
-      request: { backupId: BACKUP_ID, fileName: FILE_NAME, absolutePath: ABSOLUTE_PATH },
+      request: {
+        backupId: BACKUP_ID,
+        fileName: FILE_NAME,
+        absolutePath: ABSOLUTE_PATH,
+        status: "writing",
+      },
     });
+    expect(JSON.stringify(bridge.calls)).not.toContain("inkshadow.db");
+  });
+
+  it("forwards an explicit native failure without deleting or retrying", async () => {
+    const bridge = new StubNativeBridge({
+      native_automatic_backup_create_verified: {
+        outcome: "failed",
+        failureKind: "disk_full",
+      },
+    });
+    const port = new TauriAutomaticBackupPort(bridge);
+
+    await expect(port.createConsistentBackup(ROOT, LEASE, writingEntry())).resolves.toEqual({
+      outcome: "failed",
+      failureKind: "disk_full",
+    });
+    expect(bridge.calls.map(({ command }) => command)).toEqual([
+      "native_automatic_backup_create_verified",
+    ]);
+  });
+
+  it("surfaces a lost native response for conservative unknown handling by the service", async () => {
+    const bridge = new StubNativeBridge({
+      native_automatic_backup_create_verified: new Error("transport closed"),
+    });
+    const port = new TauriAutomaticBackupPort(bridge);
+
+    await expect(port.createConsistentBackup(ROOT, LEASE, writingEntry())).rejects.toThrow(
+      "transport closed",
+    );
+    expect(bridge.calls).toHaveLength(1);
   });
 });
 
@@ -168,6 +143,46 @@ describe("ScheduledAutomaticBackupRuntime", () => {
     expect(timer.pendingCount).toBe(0);
     expect(timer.clearCount).toBe(1);
   });
+
+  it("bounds shutdown while native creation is deferred and never reschedules the old runtime", async () => {
+    let resolveOldRun: ((value: AutomaticBackupRunResult) => void) | undefined;
+    const oldRun = new Promise<AutomaticBackupRunResult>((resolve) => {
+      resolveOldRun = resolve;
+    });
+    const oldRunIfDue = vi.fn().mockReturnValue(oldRun);
+    const oldTimer = new ManualTimer();
+    const oldRuntime = new ScheduledAutomaticBackupRuntime(
+      { runIfDue: oldRunIfDue },
+      fixedClock(),
+      oldTimer,
+      { failure: vi.fn() },
+      60_000,
+      5,
+    );
+    oldRuntime.start();
+    await vi.waitFor(() => expect(oldRunIfDue).toHaveBeenCalledOnce());
+
+    await expect(oldRuntime.stop()).resolves.toBeUndefined();
+    expect(oldTimer.pendingCount).toBe(0);
+
+    const replacementRunIfDue = vi.fn().mockResolvedValue(notDueRun());
+    const replacementTimer = new ManualTimer();
+    const replacement = new ScheduledAutomaticBackupRuntime(
+      { runIfDue: replacementRunIfDue },
+      fixedClock(),
+      replacementTimer,
+      { failure: vi.fn() },
+      60_000,
+      5,
+    );
+    replacement.start();
+    await vi.waitFor(() => expect(replacementRunIfDue).toHaveBeenCalledOnce());
+
+    resolveOldRun?.(notDueRun());
+    await Promise.resolve();
+    expect(oldTimer.pendingCount).toBe(0);
+    await replacement.stop();
+  });
 });
 
 class StubNativeBridge implements AutomaticBackupNativeBridge {
@@ -183,7 +198,9 @@ class StubNativeBridge implements AutomaticBackupNativeBridge {
     if (!(command in this.responses)) {
       return Promise.reject(new Error(`unexpected command ${command}`));
     }
-    return Promise.resolve(structuredClone(this.responses[command]) as Output);
+    const response = this.responses[command];
+    if (response instanceof Error) return Promise.reject(response);
+    return Promise.resolve(structuredClone(response) as Output);
   }
 }
 
@@ -228,9 +245,28 @@ function notDueRun(): AutomaticBackupRunResult {
     dueSlot: "2026-08-08",
     nextDueAt: "2026-08-09T03:00:00.000Z",
     createdBackup: null,
+    attention: null,
     recoveredPendingCount: 0,
     prunedCount: 0,
     missedSlotCount: 0,
+  };
+}
+
+function writingEntry(): AutomaticBackupManifestWritingEntry {
+  return {
+    backupId: BACKUP_ID,
+    createdBy: "inkshadow_automatic_backup_service",
+    scheduleSlot: "2026-08-08",
+    fileName: FILE_NAME,
+    absolutePath: ABSOLUTE_PATH,
+    createdAt: "2026-08-08T04:00:00.000Z",
+    retentionUntil: "2026-09-07T04:00:00.000Z",
+    status: "writing",
+    byteLength: null,
+    sha256: null,
+    writeStartedAt: "2026-08-08T04:00:00.000Z",
+    finishedAt: null,
+    failureKind: null,
   };
 }
 

@@ -429,7 +429,7 @@ export function ConsistencyInvestigationPanel({
           <CardHeader>
             <CardTitle headingLevel={3}>修复建议发送前确认</CardTitle>
             <CardDescription>
-              这是调查之外的一次独立模型动作。确认前不会调用模型，也不会创建 Candidate。
+              这是调查之外的一次独立模型动作。确认前不会调用模型，也不会创建 AI 建议草稿。
             </CardDescription>
           </CardHeader>
           <CardContent>

@@ -1214,7 +1214,7 @@ export function StoryGovernancePage() {
       <InlineAlert
         tone="warning"
         title="逐章云端识别暂不可用"
-        description="一次识别会把最新一章完整正文分别发送给人物提取和世界设定提取，最多两次 Provider 调用并可能产生两次费用。当前页面还不能在派发前持久展示精确 Provider、精确模型并把不确定结果锁定为不可重发，因此入口保持停用；正文和已有设定不受影响。"
+        description="一次识别会把最新一章完整正文分别发送给人物提取和世界设定提取，最多两次模型服务调用并可能产生两次费用。当前页面还不能在发送前持久展示精确模型服务、精确模型并把不确定结果锁定为不可重发，因此入口保持停用；正文和已有设定不受影响。"
       />
 
       {normalizedError !== null && pageState !== "fatal_error" && (
@@ -3218,7 +3218,7 @@ function factTypeLabel(factType: string): string {
     event_category: "事件分类",
     weak_inference: "待验证推测",
   };
-  return labels[factType] ?? factType.replaceAll(/[._-]+/gu, " ");
+  return labels[factType] ?? "其他故事设定";
 }
 
 function storyFactMergeNotice(snapshot: StoryFactSnapshot): string | null {

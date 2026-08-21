@@ -79,11 +79,7 @@ export interface AutomaticBackupPort {
   createConsistentBackup(
     root: VerifiedAutomaticBackupRoot,
     lease: AutomaticBackupLease,
-    request: Readonly<{
-      backupId: string;
-      fileName: string;
-      absolutePath: string;
-    }>,
+    entry: AutomaticBackupManifestWritingEntry,
   ): Promise<unknown>;
   /** Must use no-follow/reparse-safe inspection for this exact direct child. */
   inspectBackupFile(
@@ -95,7 +91,7 @@ export interface AutomaticBackupPort {
   deleteBackupFile(
     root: VerifiedAutomaticBackupRoot,
     lease: AutomaticBackupLease,
-    entry: AutomaticBackupManifestReadyEntry,
+    entry: AutomaticBackupManifestSucceededEntry,
   ): Promise<unknown>;
 }
 
@@ -107,25 +103,96 @@ interface AutomaticBackupManifestEntryBase {
   readonly absolutePath: string;
   readonly createdAt: string;
   readonly retentionUntil: string;
+  readonly writeStartedAt: string | null;
+  readonly finishedAt: string | null;
+  readonly failureKind: AutomaticBackupFailureKind | null;
 }
 
-export interface AutomaticBackupManifestCreatingEntry extends AutomaticBackupManifestEntryBase {
-  readonly status: "creating";
+export type AutomaticBackupFailureKind =
+  | "database_busy"
+  | "database_unavailable"
+  | "disk_full"
+  | "permission_denied"
+  | "result_unconfirmed"
+  | "target_conflict"
+  | "verification_failed"
+  | "write_failed";
+
+export interface AutomaticBackupManifestReservedEntry extends AutomaticBackupManifestEntryBase {
+  readonly status: "reserved";
   readonly byteLength: null;
   readonly sha256: null;
+  readonly writeStartedAt: null;
+  readonly finishedAt: null;
+  readonly failureKind: null;
 }
 
-export interface AutomaticBackupManifestReadyEntry extends AutomaticBackupManifestEntryBase {
-  readonly status: "ready";
+export interface AutomaticBackupManifestWritingEntry extends AutomaticBackupManifestEntryBase {
+  readonly status: "writing";
+  readonly byteLength: null;
+  readonly sha256: null;
+  readonly writeStartedAt: string;
+  readonly finishedAt: null;
+  readonly failureKind: null;
+}
+
+export interface AutomaticBackupManifestVerifyingEntry extends AutomaticBackupManifestEntryBase {
+  readonly status: "verifying";
   readonly byteLength: number;
   readonly sha256: string;
+  readonly writeStartedAt: string;
+  readonly finishedAt: null;
+  readonly failureKind: null;
+}
+
+export interface AutomaticBackupManifestNotStartedEntry extends AutomaticBackupManifestEntryBase {
+  readonly status: "not_started";
+  readonly byteLength: null;
+  readonly sha256: null;
+  readonly writeStartedAt: null;
+  readonly finishedAt: string;
+  readonly failureKind: AutomaticBackupFailureKind;
+}
+
+export interface AutomaticBackupManifestFailedEntry extends AutomaticBackupManifestEntryBase {
+  readonly status: "failed";
+  readonly byteLength: null;
+  readonly sha256: null;
+  readonly writeStartedAt: string;
+  readonly finishedAt: string;
+  readonly failureKind: AutomaticBackupFailureKind;
+}
+
+export interface AutomaticBackupManifestUnknownEntry extends AutomaticBackupManifestEntryBase {
+  readonly status: "unknown";
+  /** Kept only when the verifying state had already committed exact evidence. */
+  readonly byteLength: number | null;
+  readonly sha256: string | null;
+  readonly writeStartedAt: string | null;
+  readonly finishedAt: string;
+  readonly failureKind: "result_unconfirmed";
+}
+
+export interface AutomaticBackupManifestSucceededEntry extends AutomaticBackupManifestEntryBase {
+  readonly status: "succeeded";
+  readonly byteLength: number;
+  readonly sha256: string;
+  readonly writeStartedAt: string;
+  readonly finishedAt: string;
+  readonly failureKind: null;
 }
 
 export type AutomaticBackupManifestEntry =
-  AutomaticBackupManifestCreatingEntry | AutomaticBackupManifestReadyEntry;
+  | AutomaticBackupManifestReservedEntry
+  | AutomaticBackupManifestWritingEntry
+  | AutomaticBackupManifestVerifyingEntry
+  | AutomaticBackupManifestNotStartedEntry
+  | AutomaticBackupManifestFailedEntry
+  | AutomaticBackupManifestUnknownEntry
+  | AutomaticBackupManifestSucceededEntry;
 
 export interface AutomaticBackupManifest {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly rootId: string;
   readonly revision: number;
   readonly policy: Readonly<{
@@ -138,14 +205,25 @@ export interface AutomaticBackupManifest {
 }
 
 export interface AutomaticBackupRunResult {
-  readonly status: "completed" | "not_due" | "busy";
+  readonly status: "completed" | "not_due" | "busy" | "attention";
   readonly dueSlot: string;
   readonly nextDueAt: string;
-  readonly createdBackup: AutomaticBackupManifestReadyEntry | null;
+  readonly createdBackup: AutomaticBackupManifestSucceededEntry | null;
+  readonly attention: Readonly<{
+    readonly status: "not_started" | "failed" | "unknown";
+    readonly failureKind: AutomaticBackupFailureKind;
+  }> | null;
   readonly recoveredPendingCount: number;
   readonly prunedCount: number;
   readonly missedSlotCount: number;
 }
+
+type AutomaticBackupCreationOutcome =
+  | Readonly<{ outcome: "succeeded"; file: AutomaticBackupFilePresent }>
+  | Readonly<{
+      outcome: "not_started" | "failed" | "unknown";
+      failureKind: AutomaticBackupFailureKind;
+    }>;
 
 export interface AutomaticBackupIdGenerator {
   next(): string;
@@ -179,6 +257,21 @@ const ENTRY_KEYS = [
   "status",
   "byteLength",
   "sha256",
+  "writeStartedAt",
+  "finishedAt",
+  "failureKind",
+] as const;
+const LEGACY_ENTRY_KEYS = [
+  "backupId",
+  "createdBy",
+  "scheduleSlot",
+  "fileName",
+  "absolutePath",
+  "createdAt",
+  "retentionUntil",
+  "status",
+  "byteLength",
+  "sha256",
 ] as const;
 const ROOT_INSPECTION_KEYS = ["absolutePath", "canonicalAbsolutePath", "ownershipMarker"] as const;
 const ROOT_MARKER_KEYS = ["product", "purpose", "schemaVersion", "rootId"] as const;
@@ -191,6 +284,18 @@ const FILE_PRESENT_KEYS = [
   "sha256",
   "integrityVerified",
 ] as const;
+const CREATION_SUCCESS_KEYS = ["outcome", "file"] as const;
+const CREATION_FAILURE_KEYS = ["outcome", "failureKind"] as const;
+const FAILURE_KINDS = new Set<AutomaticBackupFailureKind>([
+  "database_busy",
+  "database_unavailable",
+  "disk_full",
+  "permission_denied",
+  "result_unconfirmed",
+  "target_conflict",
+  "verification_failed",
+  "write_failed",
+]);
 
 /**
  * Pure scheduling and safety coordinator for P39.
@@ -228,6 +333,7 @@ export class AutomaticBackupService {
         dueSlot: schedule.dueSlot,
         nextDueAt: schedule.nextDueAt,
         createdBackup: null,
+        attention: null,
         recoveredPendingCount: 0,
         prunedCount: 0,
         missedSlotCount: 0,
@@ -236,55 +342,159 @@ export class AutomaticBackupService {
     validateLease(lease);
 
     try {
-      let manifest = readManifest(
+      const loaded = readManifest(
         await this.port.readManifest(root, lease),
         root,
         this.policy,
         now,
       );
+      let manifest = loaded.manifest;
+      let upgradedLegacyManifest = false;
+      if (loaded.requiresUpgrade) {
+        manifest = await this.saveManifest(
+          root,
+          lease,
+          manifest,
+          manifest.entries,
+          manifest.lastSuccessfulSlot,
+          now,
+        );
+        upgradedLegacyManifest = true;
+      }
       const recovered = await this.recoverPendingEntries(root, lease, manifest, now);
       manifest = recovered.manifest;
 
       const missedSlotCount = countMissedSlots(manifest.lastSuccessfulSlot, schedule.dueSlot);
-      let createdBackup: AutomaticBackupManifestReadyEntry | null = null;
-      if (missedSlotCount > 0) {
+      let createdBackup: AutomaticBackupManifestSucceededEntry | null = null;
+      let attention = attentionForSlot(manifest, schedule.dueSlot);
+      if (missedSlotCount > 0 && attention === null) {
         const reserved = await this.reserveBackup(root, lease, manifest, schedule.dueSlot, now);
         manifest = reserved.manifest;
-        const receipt = validatePresentFile(
-          await this.port.createConsistentBackup(root, lease, {
-            backupId: reserved.entry.backupId,
-            fileName: reserved.entry.fileName,
-            absolutePath: reserved.entry.absolutePath,
-          }),
-          root,
-          reserved.entry,
-          null,
-        );
-        createdBackup = Object.freeze({
+
+        const writing: AutomaticBackupManifestWritingEntry = Object.freeze({
           ...reserved.entry,
-          status: "ready",
-          byteLength: receipt.byteLength,
-          sha256: receipt.sha256,
+          status: "writing",
+          writeStartedAt: now,
         });
         manifest = await this.replaceEntry(
           root,
           lease,
           manifest,
-          createdBackup,
-          maxDateKey(manifest.lastSuccessfulSlot, createdBackup.scheduleSlot),
+          writing,
+          manifest.lastSuccessfulSlot,
           now,
         );
+
+        let outcome: AutomaticBackupCreationOutcome | null;
+        try {
+          outcome = validateCreationOutcome(
+            await this.port.createConsistentBackup(root, lease, writing),
+            root,
+            writing,
+          );
+        } catch {
+          const unknown = unknownEntry(writing, now);
+          manifest = await this.replaceEntry(
+            root,
+            lease,
+            manifest,
+            unknown,
+            manifest.lastSuccessfulSlot,
+            now,
+          );
+          attention = attentionFromEntry(unknown);
+          outcome = null;
+        }
+
+        if (outcome?.outcome === "succeeded") {
+          const verifying: AutomaticBackupManifestVerifyingEntry = Object.freeze({
+            ...writing,
+            status: "verifying",
+            byteLength: outcome.file.byteLength,
+            sha256: outcome.file.sha256,
+          });
+          manifest = await this.replaceEntry(
+            root,
+            lease,
+            manifest,
+            verifying,
+            manifest.lastSuccessfulSlot,
+            now,
+          );
+          createdBackup = Object.freeze({
+            ...verifying,
+            status: "succeeded",
+            finishedAt: now,
+          });
+          manifest = await this.replaceEntry(
+            root,
+            lease,
+            manifest,
+            createdBackup,
+            maxDateKey(manifest.lastSuccessfulSlot, createdBackup.scheduleSlot),
+            now,
+          );
+        } else if (outcome?.outcome === "not_started") {
+          const notStarted: AutomaticBackupManifestNotStartedEntry = Object.freeze({
+            ...reserved.entry,
+            status: "not_started",
+            finishedAt: now,
+            failureKind: outcome.failureKind,
+          });
+          manifest = await this.replaceEntry(
+            root,
+            lease,
+            manifest,
+            notStarted,
+            manifest.lastSuccessfulSlot,
+            now,
+          );
+          attention = attentionFromEntry(notStarted);
+        } else if (outcome?.outcome === "failed") {
+          const failed: AutomaticBackupManifestFailedEntry = Object.freeze({
+            ...writing,
+            status: "failed",
+            finishedAt: now,
+            failureKind: outcome.failureKind,
+          });
+          manifest = await this.replaceEntry(
+            root,
+            lease,
+            manifest,
+            failed,
+            manifest.lastSuccessfulSlot,
+            now,
+          );
+          attention = attentionFromEntry(failed);
+        } else if (outcome?.outcome === "unknown") {
+          const unknown = unknownEntry(writing, now);
+          manifest = await this.replaceEntry(
+            root,
+            lease,
+            manifest,
+            unknown,
+            manifest.lastSuccessfulSlot,
+            now,
+          );
+          attention = attentionFromEntry(unknown);
+        }
       }
 
-      const pruned = await this.pruneExpiredEntries(root, lease, manifest, now);
-      manifest = pruned.manifest;
+      const pruned =
+        createdBackup === null
+          ? { manifest, prunedCount: 0 }
+          : await this.pruneExpiredEntries(root, lease, manifest, now);
       const changed =
-        createdBackup !== null || recovered.recoveredCount > 0 || pruned.prunedCount > 0;
+        upgradedLegacyManifest ||
+        createdBackup !== null ||
+        recovered.recoveredCount > 0 ||
+        pruned.prunedCount > 0;
       return Object.freeze({
-        status: changed ? "completed" : "not_due",
+        status: attention === null ? (changed ? "completed" : "not_due") : "attention",
         dueSlot: schedule.dueSlot,
         nextDueAt: schedule.nextDueAt,
         createdBackup,
+        attention,
         recoveredPendingCount: recovered.recoveredCount,
         prunedCount: pruned.prunedCount,
         missedSlotCount,
@@ -303,29 +513,115 @@ export class AutomaticBackupService {
     let manifest = initialManifest;
     let recoveredCount = 0;
     for (const entry of [...manifest.entries]) {
-      if (entry.status !== "creating") continue;
-      const inspection = validateFileInspection(
-        await this.port.inspectBackupFile(root, lease, entry),
-        root,
-        entry,
-        null,
-      );
-      if (!inspection.exists) {
-        manifest = await this.removeEntry(root, lease, manifest, entry.backupId, now);
+      if (!isPendingEntry(entry) && entry.status !== "unknown" && entry.status !== "succeeded") {
         continue;
       }
-      const ready: AutomaticBackupManifestReadyEntry = Object.freeze({
+
+      let inspection: AutomaticBackupFileInspection;
+      try {
+        inspection = validateFileInspection(
+          await this.port.inspectBackupFile(root, lease, entry),
+          root,
+          entry,
+          recordedFileEvidence(entry),
+        );
+      } catch {
+        if (entry.status === "unknown") continue;
+        const unknown = unknownEntry(entry, now);
+        manifest = await this.replaceEntry(
+          root,
+          lease,
+          manifest,
+          unknown,
+          entry.status === "succeeded"
+            ? latestSucceededSlotExcept(manifest, entry.backupId)
+            : manifest.lastSuccessfulSlot,
+          now,
+        );
+        recoveredCount += 1;
+        continue;
+      }
+
+      if (entry.status === "succeeded") {
+        if (inspection.exists) continue;
+        const unknown = unknownEntry(entry, now);
+        manifest = await this.replaceEntry(
+          root,
+          lease,
+          manifest,
+          unknown,
+          latestSucceededSlotExcept(manifest, entry.backupId),
+          now,
+        );
+        recoveredCount += 1;
+        continue;
+      }
+
+      if (entry.status === "unknown") {
+        if (!inspection.exists) continue;
+        const succeeded: AutomaticBackupManifestSucceededEntry = Object.freeze({
+          ...entry,
+          status: "succeeded",
+          byteLength: inspection.byteLength,
+          sha256: inspection.sha256,
+          writeStartedAt: entry.writeStartedAt ?? entry.createdAt,
+          finishedAt: now,
+          failureKind: null,
+        });
+        manifest = await this.replaceEntry(
+          root,
+          lease,
+          manifest,
+          succeeded,
+          maxDateKey(manifest.lastSuccessfulSlot, succeeded.scheduleSlot),
+          now,
+        );
+        recoveredCount += 1;
+        continue;
+      }
+
+      if (entry.status === "reserved") {
+        const terminal = inspection.exists
+          ? unknownEntry(entry, now)
+          : notStartedEntry(entry, now, "write_failed");
+        manifest = await this.replaceEntry(
+          root,
+          lease,
+          manifest,
+          terminal,
+          manifest.lastSuccessfulSlot,
+          now,
+        );
+        recoveredCount += 1;
+        continue;
+      }
+      if (!inspection.exists) {
+        const unknown = unknownEntry(entry, now);
+        manifest = await this.replaceEntry(
+          root,
+          lease,
+          manifest,
+          unknown,
+          manifest.lastSuccessfulSlot,
+          now,
+        );
+        recoveredCount += 1;
+        continue;
+      }
+      const succeeded: AutomaticBackupManifestSucceededEntry = Object.freeze({
         ...entry,
-        status: "ready",
+        status: "succeeded",
         byteLength: inspection.byteLength,
         sha256: inspection.sha256,
+        finishedAt: now,
+        failureKind: null,
       });
       manifest = await this.replaceEntry(
         root,
         lease,
         manifest,
-        ready,
-        maxDateKey(manifest.lastSuccessfulSlot, ready.scheduleSlot),
+        succeeded,
+        maxDateKey(manifest.lastSuccessfulSlot, succeeded.scheduleSlot),
         now,
       );
       recoveredCount += 1;
@@ -341,7 +637,7 @@ export class AutomaticBackupService {
     now: string,
   ): Promise<{
     readonly manifest: AutomaticBackupManifest;
-    readonly entry: AutomaticBackupManifestCreatingEntry;
+    readonly entry: AutomaticBackupManifestReservedEntry;
   }> {
     if (manifest.entries.some((entry) => entry.scheduleSlot === scheduleSlot)) {
       throw backupError(
@@ -351,7 +647,7 @@ export class AutomaticBackupService {
     }
     const backupId = validateUuid(this.ids.next(), "backup id");
     const fileName = automaticBackupFileName(now, backupId);
-    const entry: AutomaticBackupManifestCreatingEntry = Object.freeze({
+    const entry: AutomaticBackupManifestReservedEntry = Object.freeze({
       backupId,
       createdBy: "inkshadow_automatic_backup_service",
       scheduleSlot,
@@ -359,9 +655,12 @@ export class AutomaticBackupService {
       absolutePath: joinDirectChild(root, fileName),
       createdAt: now,
       retentionUntil: addDays(now, this.policy.retentionDays),
-      status: "creating",
+      status: "reserved",
       byteLength: null,
       sha256: null,
+      writeStartedAt: null,
+      finishedAt: null,
+      failureKind: null,
     });
     const next = await this.saveManifest(
       root,
@@ -423,8 +722,18 @@ export class AutomaticBackupService {
   ): Promise<{ readonly manifest: AutomaticBackupManifest; readonly prunedCount: number }> {
     let manifest = initialManifest;
     let prunedCount = 0;
+    const newestSucceededId = [...manifest.entries]
+      .filter(
+        (entry): entry is AutomaticBackupManifestSucceededEntry => entry.status === "succeeded",
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .at(-1)?.backupId;
     for (const entry of [...manifest.entries]) {
-      if (entry.status !== "ready" || Date.parse(entry.retentionUntil) > Date.parse(now)) {
+      if (
+        entry.status !== "succeeded" ||
+        entry.backupId === newestSucceededId ||
+        Date.parse(entry.retentionUntil) > Date.parse(now)
+      ) {
         continue;
       }
       // Revalidate the manifest entry before every destructive call. The port
@@ -460,7 +769,7 @@ export class AutomaticBackupService {
     now: string,
   ): Promise<AutomaticBackupManifest> {
     const next = normalizeManifest({
-      schemaVersion: 1,
+      schemaVersion: 2,
       rootId: root.rootId,
       revision: current.revision + 1,
       policy: {
@@ -471,12 +780,13 @@ export class AutomaticBackupService {
       entries,
       updatedAt: now,
     });
-    const persisted = readManifest(
+    const loaded = readManifest(
       await this.port.writeManifest(root, lease, current.revision, next),
       root,
       this.policy,
       now,
     );
+    const persisted = loaded.manifest;
     if (JSON.stringify(persisted) !== JSON.stringify(next)) {
       throw backupError(
         "AUTOMATIC_BACKUP_MANIFEST_COMMIT_FAILED",
@@ -565,26 +875,29 @@ function readManifest(
   root: VerifiedAutomaticBackupRoot,
   policy: AutomaticBackupPolicy,
   now: string,
-): AutomaticBackupManifest {
+): Readonly<{ manifest: AutomaticBackupManifest; requiresUpgrade: boolean }> {
   if (value === null) {
-    return normalizeManifest({
-      schemaVersion: 1,
-      rootId: root.rootId,
-      revision: 0,
-      policy: {
-        scheduleHourLocal: policy.scheduleHourLocal,
-        retentionDays: policy.retentionDays,
-      },
-      lastSuccessfulSlot: null,
-      entries: [],
-      updatedAt: now,
+    return Object.freeze({
+      manifest: normalizeManifest({
+        schemaVersion: 2,
+        rootId: root.rootId,
+        revision: 0,
+        policy: {
+          scheduleHourLocal: policy.scheduleHourLocal,
+          retentionDays: policy.retentionDays,
+        },
+        lastSuccessfulSlot: null,
+        entries: [],
+        updatedAt: now,
+      }),
+      requiresUpgrade: false,
     });
   }
   if (!isRecord(value) || !hasExactKeys(value, MANIFEST_KEYS)) {
     throw manifestInvalid("自动备份清单结构无效。");
   }
   if (
-    value.schemaVersion !== 1 ||
+    (value.schemaVersion !== 1 && value.schemaVersion !== 2) ||
     value.rootId !== root.rootId ||
     !Number.isSafeInteger(value.revision) ||
     (value.revision as number) < 0 ||
@@ -598,7 +911,11 @@ function readManifest(
   ) {
     throw manifestInvalid("自动备份清单元数据无效或与当前策略不一致。");
   }
-  const entries = value.entries.map((entry) => validateManifestEntry(entry, root, policy));
+  const updatedAt = validateTimestamp(value.updatedAt, "manifest updatedAt");
+  const entries =
+    value.schemaVersion === 1
+      ? value.entries.map((entry) => validateLegacyManifestEntry(entry, root, policy, updatedAt))
+      : value.entries.map((entry) => validateManifestEntry(entry, root, policy));
   const ids = new Set(entries.map((entry) => entry.backupId));
   const fileNames = new Set(entries.map((entry) => entry.fileName));
   const slots = new Set(entries.map((entry) => entry.scheduleSlot));
@@ -609,28 +926,70 @@ function readManifest(
   ) {
     throw manifestInvalid("自动备份清单包含重复标识、文件名或计划日期。");
   }
-  const latestReadySlot = entries
-    .filter((entry): entry is AutomaticBackupManifestReadyEntry => entry.status === "ready")
+  const latestSucceededSlot = entries
+    .filter((entry): entry is AutomaticBackupManifestSucceededEntry => entry.status === "succeeded")
     .map((entry) => entry.scheduleSlot)
     .sort()
     .at(-1);
   if (
-    latestReadySlot !== undefined &&
-    (value.lastSuccessfulSlot === null || value.lastSuccessfulSlot < latestReadySlot)
+    latestSucceededSlot !== undefined &&
+    (value.lastSuccessfulSlot === null || value.lastSuccessfulSlot < latestSucceededSlot)
   ) {
     throw manifestInvalid("自动备份清单的最近成功日期早于现有备份记录。");
   }
-  return normalizeManifest({
-    schemaVersion: 1,
-    rootId: root.rootId,
-    revision: value.revision as number,
-    policy: {
-      scheduleHourLocal: policy.scheduleHourLocal,
-      retentionDays: policy.retentionDays,
-    },
-    lastSuccessfulSlot: value.lastSuccessfulSlot,
-    entries,
-    updatedAt: validateTimestamp(value.updatedAt, "manifest updatedAt"),
+  return Object.freeze({
+    manifest: normalizeManifest({
+      schemaVersion: 2,
+      rootId: root.rootId,
+      revision: value.revision as number,
+      policy: {
+        scheduleHourLocal: policy.scheduleHourLocal,
+        retentionDays: policy.retentionDays,
+      },
+      lastSuccessfulSlot: value.lastSuccessfulSlot,
+      entries,
+      updatedAt,
+    }),
+    requiresUpgrade: value.schemaVersion === 1,
+  });
+}
+
+function validateLegacyManifestEntry(
+  value: unknown,
+  root: VerifiedAutomaticBackupRoot,
+  policy: AutomaticBackupPolicy,
+  manifestUpdatedAt: string,
+): AutomaticBackupManifestEntry {
+  if (!isRecord(value) || !hasExactKeys(value, LEGACY_ENTRY_KEYS)) {
+    throw manifestInvalid("旧版自动备份清单条目结构无效。");
+  }
+  if (value.status !== "creating" && value.status !== "ready") {
+    throw manifestInvalid("旧版自动备份清单条目状态无效。");
+  }
+  const base = validateManifestEntryBase(value, root, policy);
+  ensureTimestampOrder(base.createdAt, null, manifestUpdatedAt);
+  if (value.status === "creating") {
+    if (value.byteLength !== null || value.sha256 !== null) {
+      throw manifestInvalid("旧版创建中备份不能提前声明大小或校验和。");
+    }
+    return Object.freeze({
+      ...base,
+      status: "unknown",
+      byteLength: null,
+      sha256: null,
+      writeStartedAt: null,
+      finishedAt: manifestUpdatedAt,
+      failureKind: "result_unconfirmed",
+    });
+  }
+  const completed = validateCompletedFileFields(value);
+  return Object.freeze({
+    ...base,
+    status: "succeeded",
+    ...completed,
+    writeStartedAt: base.createdAt,
+    finishedAt: manifestUpdatedAt,
+    failureKind: null,
   });
 }
 
@@ -642,6 +1001,142 @@ function validateManifestEntry(
   if (!isRecord(value) || !hasExactKeys(value, ENTRY_KEYS)) {
     throw manifestInvalid("自动备份清单条目结构无效。");
   }
+  const base = validateManifestEntryBase(value, root, policy);
+  switch (value.status) {
+    case "reserved": {
+      requireEmptyFileFields(value);
+      if (
+        value.writeStartedAt !== null ||
+        value.finishedAt !== null ||
+        value.failureKind !== null
+      ) {
+        throw manifestInvalid("已预留备份条目包含不应出现的写入或终结信息。");
+      }
+      return Object.freeze({
+        ...base,
+        status: "reserved",
+        byteLength: null,
+        sha256: null,
+        writeStartedAt: null,
+        finishedAt: null,
+        failureKind: null,
+      });
+    }
+    case "writing": {
+      requireEmptyFileFields(value);
+      const writeStartedAt = requireEntryTimestamp(value.writeStartedAt, "backup writeStartedAt");
+      if (value.finishedAt !== null || value.failureKind !== null) {
+        throw manifestInvalid("写入中的备份条目不能提前终结或声明失败。");
+      }
+      ensureTimestampOrder(base.createdAt, writeStartedAt, null);
+      return Object.freeze({
+        ...base,
+        status: "writing",
+        byteLength: null,
+        sha256: null,
+        writeStartedAt,
+        finishedAt: null,
+        failureKind: null,
+      });
+    }
+    case "verifying": {
+      const completed = validateCompletedFileFields(value);
+      const writeStartedAt = requireEntryTimestamp(value.writeStartedAt, "backup writeStartedAt");
+      if (value.finishedAt !== null || value.failureKind !== null) {
+        throw manifestInvalid("校验中的备份条目不能提前终结或声明失败。");
+      }
+      ensureTimestampOrder(base.createdAt, writeStartedAt, null);
+      return Object.freeze({
+        ...base,
+        status: "verifying",
+        ...completed,
+        writeStartedAt,
+        finishedAt: null,
+        failureKind: null,
+      });
+    }
+    case "not_started": {
+      requireEmptyFileFields(value);
+      const finishedAt = requireEntryTimestamp(value.finishedAt, "backup finishedAt");
+      const failureKind = validateFailureKind(value.failureKind);
+      if (value.writeStartedAt !== null) {
+        throw manifestInvalid("未开始的备份不能声明写入开始时间。");
+      }
+      ensureTimestampOrder(base.createdAt, null, finishedAt);
+      return Object.freeze({
+        ...base,
+        status: "not_started",
+        byteLength: null,
+        sha256: null,
+        writeStartedAt: null,
+        finishedAt,
+        failureKind,
+      });
+    }
+    case "failed": {
+      requireEmptyFileFields(value);
+      const writeStartedAt = requireEntryTimestamp(value.writeStartedAt, "backup writeStartedAt");
+      const finishedAt = requireEntryTimestamp(value.finishedAt, "backup finishedAt");
+      const failureKind = validateFailureKind(value.failureKind);
+      ensureTimestampOrder(base.createdAt, writeStartedAt, finishedAt);
+      return Object.freeze({
+        ...base,
+        status: "failed",
+        byteLength: null,
+        sha256: null,
+        writeStartedAt,
+        finishedAt,
+        failureKind,
+      });
+    }
+    case "unknown": {
+      const recorded = validateOptionalCompletedFileFields(value);
+      const writeStartedAt =
+        value.writeStartedAt === null
+          ? null
+          : requireEntryTimestamp(value.writeStartedAt, "backup writeStartedAt");
+      const finishedAt = requireEntryTimestamp(value.finishedAt, "backup finishedAt");
+      if (value.failureKind !== "result_unconfirmed") {
+        throw manifestInvalid("结果待确认的备份必须使用保守的未确认原因。");
+      }
+      ensureTimestampOrder(base.createdAt, writeStartedAt, finishedAt);
+      return Object.freeze({
+        ...base,
+        status: "unknown",
+        byteLength: recorded?.byteLength ?? null,
+        sha256: recorded?.sha256 ?? null,
+        writeStartedAt,
+        finishedAt,
+        failureKind: "result_unconfirmed",
+      });
+    }
+    case "succeeded": {
+      const completed = validateCompletedFileFields(value);
+      const writeStartedAt = requireEntryTimestamp(value.writeStartedAt, "backup writeStartedAt");
+      const finishedAt = requireEntryTimestamp(value.finishedAt, "backup finishedAt");
+      if (value.failureKind !== null) {
+        throw manifestInvalid("成功的备份不能声明失败原因。");
+      }
+      ensureTimestampOrder(base.createdAt, writeStartedAt, finishedAt);
+      return Object.freeze({
+        ...base,
+        status: "succeeded",
+        ...completed,
+        writeStartedAt,
+        finishedAt,
+        failureKind: null,
+      });
+    }
+    default:
+      throw manifestInvalid("自动备份清单条目状态无效。");
+  }
+}
+
+function validateManifestEntryBase(
+  value: Readonly<Record<string, unknown>>,
+  root: VerifiedAutomaticBackupRoot,
+  policy: AutomaticBackupPolicy,
+): Omit<AutomaticBackupManifestEntryBase, "writeStartedAt" | "finishedAt" | "failureKind"> {
   if (
     typeof value.backupId !== "string" ||
     value.createdBy !== "inkshadow_automatic_backup_service" ||
@@ -649,8 +1144,7 @@ function validateManifestEntry(
     typeof value.fileName !== "string" ||
     typeof value.absolutePath !== "string" ||
     typeof value.createdAt !== "string" ||
-    typeof value.retentionUntil !== "string" ||
-    (value.status !== "creating" && value.status !== "ready")
+    typeof value.retentionUntil !== "string"
   ) {
     throw manifestInvalid("自动备份清单条目元数据无效。");
   }
@@ -661,18 +1155,16 @@ function validateManifestEntry(
   const createdAt = validateTimestamp(value.createdAt, "backup createdAt");
   const retentionUntil = validateTimestamp(value.retentionUntil, "backup retentionUntil");
   const match = AUTOMATIC_BACKUP_FILE_PATTERN.exec(value.fileName);
-  const fileTimestamp = match?.[1];
-  const fileBackupId = match?.[2];
   if (
-    fileTimestamp !== compactTimestamp(createdAt) ||
-    fileBackupId !== backupId ||
+    match?.[1] !== compactTimestamp(createdAt) ||
+    match[2] !== backupId ||
     value.fileName !== automaticBackupFileName(createdAt, backupId) ||
     value.absolutePath !== joinDirectChild(root, value.fileName) ||
     retentionUntil !== addDays(createdAt, policy.retentionDays)
   ) {
     throw manifestInvalid("自动备份文件名、绝对路径或保留期限不符合受管策略。");
   }
-  const base = {
+  return Object.freeze({
     backupId,
     createdBy: "inkshadow_automatic_backup_service" as const,
     scheduleSlot: value.scheduleSlot,
@@ -680,13 +1172,18 @@ function validateManifestEntry(
     absolutePath: value.absolutePath,
     createdAt,
     retentionUntil,
-  };
-  if (value.status === "creating") {
-    if (value.byteLength !== null || value.sha256 !== null) {
-      throw manifestInvalid("创建中的自动备份不能提前声明大小或校验和。");
-    }
-    return Object.freeze({ ...base, status: "creating", byteLength: null, sha256: null });
+  });
+}
+
+function requireEmptyFileFields(value: Readonly<Record<string, unknown>>): void {
+  if (value.byteLength !== null || value.sha256 !== null) {
+    throw manifestInvalid("未完成的自动备份不能声明大小或校验和。");
   }
+}
+
+function validateCompletedFileFields(
+  value: Readonly<Record<string, unknown>>,
+): Readonly<{ byteLength: number; sha256: string }> {
   if (
     !Number.isSafeInteger(value.byteLength) ||
     (value.byteLength as number) <= 0 ||
@@ -695,31 +1192,171 @@ function validateManifestEntry(
   ) {
     throw manifestInvalid("已完成自动备份缺少有效大小或 SHA-256 校验和。");
   }
+  return Object.freeze({ byteLength: value.byteLength as number, sha256: value.sha256 });
+}
+
+function validateOptionalCompletedFileFields(
+  value: Readonly<Record<string, unknown>>,
+): Readonly<{ byteLength: number; sha256: string }> | null {
+  if (value.byteLength === null && value.sha256 === null) return null;
+  return validateCompletedFileFields(value);
+}
+
+function requireEntryTimestamp(value: unknown, field: string): string {
+  if (typeof value !== "string") {
+    throw manifestInvalid("自动备份清单缺少有效时间信息。");
+  }
+  return validateTimestamp(value, field);
+}
+
+function validateFailureKind(value: unknown): AutomaticBackupFailureKind {
+  if (typeof value !== "string" || !FAILURE_KINDS.has(value as AutomaticBackupFailureKind)) {
+    throw manifestInvalid("自动备份清单包含未知失败分类。");
+  }
+  return value as AutomaticBackupFailureKind;
+}
+
+function ensureTimestampOrder(
+  createdAt: string,
+  writeStartedAt: string | null,
+  finishedAt: string | null,
+): void {
+  if (
+    (writeStartedAt !== null && Date.parse(writeStartedAt) < Date.parse(createdAt)) ||
+    (finishedAt !== null && Date.parse(finishedAt) < Date.parse(writeStartedAt ?? createdAt))
+  ) {
+    throw manifestInvalid("自动备份清单中的状态时间顺序无效。");
+  }
+}
+
+function validateCreationOutcome(
+  value: unknown,
+  root: VerifiedAutomaticBackupRoot,
+  entry: AutomaticBackupManifestWritingEntry,
+): AutomaticBackupCreationOutcome {
+  if (!isRecord(value)) {
+    throw backupError("AUTOMATIC_BACKUP_RESULT_INVALID", "自动备份创建结果无法确认。");
+  }
+  if (value.outcome === "succeeded" && hasExactKeys(value, CREATION_SUCCESS_KEYS)) {
+    return Object.freeze({
+      outcome: "succeeded",
+      file: validatePresentFile(value.file, root, entry, null),
+    });
+  }
+  if (
+    (value.outcome === "not_started" ||
+      value.outcome === "failed" ||
+      value.outcome === "unknown") &&
+    hasExactKeys(value, CREATION_FAILURE_KEYS)
+  ) {
+    const failureKind = validateFailureKind(value.failureKind);
+    if (value.outcome === "unknown" && failureKind !== "result_unconfirmed") {
+      throw backupError("AUTOMATIC_BACKUP_RESULT_INVALID", "自动备份待确认结果分类无效。");
+    }
+    return Object.freeze({ outcome: value.outcome, failureKind });
+  }
+  throw backupError("AUTOMATIC_BACKUP_RESULT_INVALID", "自动备份创建结果无法确认。");
+}
+
+type AutomaticBackupManifestPendingEntry =
+  | AutomaticBackupManifestReservedEntry
+  | AutomaticBackupManifestWritingEntry
+  | AutomaticBackupManifestVerifyingEntry;
+type AutomaticBackupManifestAttentionEntry =
+  | AutomaticBackupManifestNotStartedEntry
+  | AutomaticBackupManifestFailedEntry
+  | AutomaticBackupManifestUnknownEntry;
+
+function isPendingEntry(
+  entry: AutomaticBackupManifestEntry,
+): entry is AutomaticBackupManifestPendingEntry {
+  return entry.status === "reserved" || entry.status === "writing" || entry.status === "verifying";
+}
+
+function unknownEntry(
+  entry: AutomaticBackupManifestPendingEntry | AutomaticBackupManifestSucceededEntry,
+  now: string,
+): AutomaticBackupManifestUnknownEntry {
   return Object.freeze({
-    ...base,
-    status: "ready",
-    byteLength: value.byteLength as number,
-    sha256: value.sha256,
+    ...entry,
+    status: "unknown",
+    byteLength:
+      entry.status === "verifying" || entry.status === "succeeded" ? entry.byteLength : null,
+    sha256: entry.status === "verifying" || entry.status === "succeeded" ? entry.sha256 : null,
+    writeStartedAt: entry.writeStartedAt,
+    finishedAt: now,
+    failureKind: "result_unconfirmed",
   });
+}
+
+interface AutomaticBackupRecordedFileEvidence {
+  readonly byteLength: number;
+  readonly sha256: string;
+}
+
+function recordedFileEvidence(
+  entry: AutomaticBackupManifestEntry,
+): AutomaticBackupRecordedFileEvidence | null {
+  if (entry.status === "verifying" || entry.status === "succeeded") return entry;
+  if (entry.status === "unknown" && entry.byteLength !== null && entry.sha256 !== null) {
+    return Object.freeze({ byteLength: entry.byteLength, sha256: entry.sha256 });
+  }
+  return null;
+}
+
+function notStartedEntry(
+  entry: AutomaticBackupManifestReservedEntry,
+  now: string,
+  failureKind: AutomaticBackupFailureKind,
+): AutomaticBackupManifestNotStartedEntry {
+  return Object.freeze({
+    ...entry,
+    status: "not_started",
+    byteLength: null,
+    sha256: null,
+    writeStartedAt: null,
+    finishedAt: now,
+    failureKind,
+  });
+}
+
+function attentionForSlot(
+  manifest: AutomaticBackupManifest,
+  scheduleSlot: string,
+): AutomaticBackupRunResult["attention"] {
+  const entry = manifest.entries.find(
+    (candidate): candidate is AutomaticBackupManifestAttentionEntry =>
+      candidate.scheduleSlot === scheduleSlot &&
+      (candidate.status === "not_started" ||
+        candidate.status === "failed" ||
+        candidate.status === "unknown"),
+  );
+  return entry === undefined ? null : attentionFromEntry(entry);
+}
+
+function attentionFromEntry(
+  entry: AutomaticBackupManifestAttentionEntry,
+): NonNullable<AutomaticBackupRunResult["attention"]> {
+  return Object.freeze({ status: entry.status, failureKind: entry.failureKind });
 }
 
 function validateFileInspection(
   value: unknown,
   root: VerifiedAutomaticBackupRoot,
   expected: AutomaticBackupManifestEntry,
-  ready: AutomaticBackupManifestReadyEntry | null,
+  recorded: AutomaticBackupRecordedFileEvidence | null,
 ): AutomaticBackupFileInspection {
   if (isRecord(value) && hasExactKeys(value, ["exists"]) && value.exists === false) {
     return Object.freeze({ exists: false });
   }
-  return validatePresentFile(value, root, expected, ready);
+  return validatePresentFile(value, root, expected, recorded);
 }
 
 function validatePresentFile(
   value: unknown,
   root: VerifiedAutomaticBackupRoot,
   expected: AutomaticBackupManifestEntry,
-  ready: AutomaticBackupManifestReadyEntry | null,
+  recorded: AutomaticBackupRecordedFileEvidence | null,
 ): AutomaticBackupFilePresent {
   if (!isRecord(value) || !hasExactKeys(value, FILE_PRESENT_KEYS)) {
     throw backupError(
@@ -766,8 +1403,8 @@ function validatePresentFile(
     !Number.isSafeInteger(inspection.byteLength) ||
     inspection.byteLength <= 0 ||
     !SHA256_PATTERN.test(inspection.sha256) ||
-    (ready !== null &&
-      (inspection.byteLength !== ready.byteLength || inspection.sha256 !== ready.sha256))
+    (recorded !== null &&
+      (inspection.byteLength !== recorded.byteLength || inspection.sha256 !== recorded.sha256))
   ) {
     throw backupError(
       "AUTOMATIC_BACKUP_FILE_SAFETY_CHECK_FAILED",
@@ -787,7 +1424,7 @@ function validatePresentFile(
 
 function normalizeManifest(manifest: AutomaticBackupManifest): AutomaticBackupManifest {
   return Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     rootId: manifest.rootId,
     revision: manifest.revision,
     policy: Object.freeze({ ...manifest.policy }),
@@ -865,6 +1502,19 @@ function validDateKey(value: unknown): value is string {
 
 function maxDateKey(left: string | null, right: string): string {
   return left === null || left < right ? right : left;
+}
+
+function latestSucceededSlotExcept(
+  manifest: AutomaticBackupManifest,
+  excludedBackupId: string,
+): string | null {
+  return manifest.entries.reduce<string | null>(
+    (latest, entry) =>
+      entry.status === "succeeded" && entry.backupId !== excludedBackupId
+        ? maxDateKey(latest, entry.scheduleSlot)
+        : latest,
+    null,
+  );
 }
 
 function automaticBackupFileName(timestamp: string, backupId: string): string {

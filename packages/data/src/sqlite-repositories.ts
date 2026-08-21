@@ -1318,6 +1318,27 @@ function normalizeDatabaseError(operation: string, error: unknown): AppError {
   }
 
   const nativeCode = readNativeSqliteCode(error);
+  if (
+    nativeCode === "SQLITE_WRITE_OUTCOME_UNKNOWN" ||
+    nativeCode === "SQLITE_COMMIT_OUTCOME_UNKNOWN"
+  ) {
+    return new AppError({
+      code: "REPOSITORY_ERROR",
+      message: "本地写入结果暂时无法确认。",
+      retryable: false,
+      actions: ["EXPORT_DRAFT"],
+      details: { databaseCode: nativeCode, operation, outcome: "unknown" },
+    });
+  }
+  if (nativeCode === "SQLITE_OPERATION_TIMEOUT") {
+    return new AppError({
+      code: "REPOSITORY_ERROR",
+      message: "本地数据操作等待超时。",
+      retryable: true,
+      actions: ["RETRY", "EXPORT_DRAFT"],
+      details: { databaseCode: nativeCode, operation, outcome: "not_confirmed" },
+    });
+  }
   if (nativeCode === "PROJECT_REMOTE_DISPATCH_ACTIVE") {
     return new AppError({
       code: "SAVE_FAILED",

@@ -8,6 +8,7 @@ import {
   ModelHubExecutionError,
   type ModelHubTextExecutionDependencies,
 } from "./model-hub-execution-service";
+import { recoverOrphanedCapabilityProbeInvocationsAtStartup } from "./capability-probe-startup-recovery";
 import { ModelCenterError } from "./model-center-store";
 import type { ModelProviderKind, NovelAiTask } from "./model-hub-provider-registry";
 import {
@@ -18,6 +19,7 @@ import {
 } from "./model-hub-store";
 import type { NativeModelGatewayClient } from "./runtime";
 import {
+  SINGLE_ATTEMPT_CAPABILITY_PROBE_POLICY,
   SINGLE_ATTEMPT_PROVIDER_DEFAULT_TEXT_POLICY,
   SINGLE_ATTEMPT_STRICT_JSON_POLICY,
   SINGLE_ATTEMPT_STRICT_JSON_TEXT_TRANSPORT_POLICY,
@@ -207,6 +209,271 @@ describe("Model Hub text execution service", () => {
 
     expect(harness.generate).toHaveBeenCalledOnce();
     expect(harness.generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
+  });
+
+  it("records a fixed continuation evaluation as capability validation while retaining its route target", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "evaluation-capability-ledger",
+      catalogEntryId: "evaluation-capability-ledger-catalog",
+      modelId: "evaluation-writer",
+      retryLimit: 3,
+    });
+    await saveRoute(harness.modelHub, {
+      task: "continuation",
+      primaryCatalogEntryId: target.id,
+    });
+    harness.generate.mockResolvedValue({
+      text: "INKSHADOW_OK",
+      usage: { inputTokens: 7, outputTokens: 2, cachedInputTokens: null },
+      streamed: false,
+    });
+
+    const result = await executeModelHubTextTask(
+      harness.dependencies,
+      request({
+        task: "continuation",
+        invocationLedgerTask: "capability_probe",
+        executionPolicy: SINGLE_ATTEMPT_CAPABILITY_PROBE_POLICY,
+        reasoningPolicy: "capability_probe",
+        messages: [{ role: "user", content: "INKSHADOW_OK" }],
+        maximumOutputTokens: 64,
+      }),
+    );
+
+    expect(result.invocation).toMatchObject({
+      task: "capability_probe",
+      routeTask: "continuation",
+      connectionId: "evaluation-capability-ledger",
+      modelIdSnapshot: "evaluation-writer",
+      status: "succeeded",
+      attempt: 1,
+      inputTokens: 7,
+      outputTokens: 2,
+    });
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(harness.generate.mock.calls[0]?.[0]).toMatchObject({
+      dispatchScope: { kind: "non_project", reason: "connection_probe" },
+      config: { retryLimit: 0 },
+    });
+    expect(JSON.stringify(result.invocation)).not.toMatch(/INKSHADOW_OK|endpoint|credential/iu);
+  });
+
+  it("treats a locally invalid native receipt after durable dispatch as uncertain", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "evaluation-invalid-native-receipt",
+      catalogEntryId: "evaluation-invalid-native-receipt-catalog",
+      modelId: "evaluation-invalid-native-receipt-writer",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "continuation",
+      primaryCatalogEntryId: target.id,
+    });
+    const invocationId = "capability-invalid-native-receipt";
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(async (input) => {
+      const ledger = input.invocationDispatchLedger;
+      if (ledger === undefined) throw new Error("测试没有收到原生调用账本边界。");
+      await harness.modelHub.markInvocationDispatched({
+        id: ledger.invocationId,
+        dispatchedAt: NOW,
+        expectedRevision: ledger.expectedRevision,
+      });
+      throw Object.assign(new Error("simulated invalid native dispatch receipt"), {
+        code: "MODEL_INVOCATION_DISPATCH_RECEIPT_INVALID",
+      });
+    });
+
+    await expect(
+      executeModelHubTextTask(
+        {
+          ...harness.dependencies,
+          modelGateway: {
+            available: true,
+            supportsNativeInvocationDispatchLedger: true,
+            generate,
+          },
+        },
+        request({
+          task: "continuation",
+          invocationId,
+          invocationLedgerTask: "capability_probe",
+          executionPolicy: SINGLE_ATTEMPT_CAPABILITY_PROBE_POLICY,
+          reasoningPolicy: "capability_probe",
+          messages: [{ role: "user", content: "INKSHADOW_OK" }],
+          maximumOutputTokens: 64,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "PROVIDER_RESULT_AMBIGUOUS",
+      dispatched: true,
+      retryable: false,
+    });
+    expect(generate).toHaveBeenCalledOnce();
+    await expect(harness.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      status: "timed_out",
+      errorCode: "PROVIDER_RESULT_AMBIGUOUS",
+      providerDispatchStartedAt: NOW,
+    });
+  });
+
+  it("keeps an explicit HTTP failure definite after recovering a durable native receipt", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "evaluation-explicit-http-failure",
+      catalogEntryId: "evaluation-explicit-http-failure-catalog",
+      modelId: "evaluation-explicit-http-failure-writer",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "continuation",
+      primaryCatalogEntryId: target.id,
+    });
+    const invocationId = "capability-explicit-http-failure";
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(async (input) => {
+      const ledger = input.invocationDispatchLedger;
+      if (ledger === undefined) throw new Error("测试没有收到原生调用账本边界。");
+      await harness.modelHub.markInvocationDispatched({
+        id: ledger.invocationId,
+        dispatchedAt: NOW,
+        expectedRevision: ledger.expectedRevision,
+      });
+      throw Object.assign(new Error("simulated explicit Provider HTTP failure"), {
+        code: "MODEL_HTTP_UNAUTHORIZED",
+        diagnostics: Object.freeze({ httpStatus: 401 }),
+      });
+    });
+
+    await expect(
+      executeModelHubTextTask(
+        {
+          ...harness.dependencies,
+          modelGateway: {
+            available: true,
+            supportsNativeInvocationDispatchLedger: true,
+            generate,
+          },
+        },
+        request({
+          task: "continuation",
+          invocationId,
+          invocationLedgerTask: "capability_probe",
+          executionPolicy: SINGLE_ATTEMPT_CAPABILITY_PROBE_POLICY,
+          reasoningPolicy: "capability_probe",
+          messages: [{ role: "user", content: "INKSHADOW_OK" }],
+          maximumOutputTokens: 64,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "MODEL_HTTP_UNAUTHORIZED",
+      dispatched: true,
+    });
+    expect(generate).toHaveBeenCalledOnce();
+    await expect(harness.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "MODEL_HTTP_UNAUTHORIZED",
+      providerDispatchStartedAt: NOW,
+    });
+  });
+
+  it("leaves a returned capability result for startup recovery when success settlement fails", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "evaluation-settlement-failure",
+      catalogEntryId: "evaluation-settlement-failure-catalog",
+      modelId: "evaluation-settlement-writer",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "continuation",
+      primaryCatalogEntryId: target.id,
+    });
+    harness.generate.mockResolvedValue({
+      text: "INKSHADOW_OK",
+      usage: { inputTokens: 7, outputTokens: 2, cachedInputTokens: null },
+      streamed: false,
+    });
+    const invocationId = "capability-success-settlement-failure";
+    const finishInvocation = vi
+      .spyOn(harness.modelHub, "finishInvocation")
+      .mockRejectedValue(new Error("simulated success ledger settlement failure"));
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          task: "continuation",
+          invocationId,
+          invocationLedgerTask: "capability_probe",
+          executionPolicy: SINGLE_ATTEMPT_CAPABILITY_PROBE_POLICY,
+          reasoningPolicy: "capability_probe",
+          messages: [{ role: "user", content: "INKSHADOW_OK" }],
+          maximumOutputTokens: 64,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(AggregateError);
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(finishInvocation).toHaveBeenCalledOnce();
+    finishInvocation.mockRestore();
+    await expect(harness.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      task: "capability_probe",
+      status: "running",
+      providerDispatchStartedAt: NOW,
+      revision: 2,
+      errorCode: null,
+    });
+
+    await expect(
+      recoverOrphanedCapabilityProbeInvocationsAtStartup(harness.modelHub),
+    ).resolves.toEqual({
+      inspectedInvocationCount: 1,
+      notDispatchedCount: 0,
+      ambiguousCount: 1,
+      failedRecoveryCount: 0,
+    });
+    await expect(harness.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      status: "timed_out",
+      errorCode: "PROVIDER_RESULT_AMBIGUOUS",
+    });
+    expect(harness.generate).toHaveBeenCalledOnce();
+  });
+
+  it("does not relabel a returned writing result as failed when success settlement fails", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "writing-settlement-failure",
+      catalogEntryId: "writing-settlement-failure-catalog",
+      modelId: "writing-settlement-writer",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "continuation",
+      primaryCatalogEntryId: target.id,
+    });
+    harness.generate.mockResolvedValue({ text: PRIVATE_OUTPUT, usage: null, streamed: false });
+    const invocationId = "writing-success-settlement-failure";
+    const finishInvocation = vi
+      .spyOn(harness.modelHub, "finishInvocation")
+      .mockRejectedValue(new Error("simulated writing success settlement failure"));
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          task: "continuation",
+          invocationId,
+          executionPolicy: SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(AggregateError);
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(finishInvocation).toHaveBeenCalledOnce();
+    finishInvocation.mockRestore();
+    await expect(harness.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      task: "continuation",
+      status: "running",
+      providerDispatchStartedAt: NOW,
+      revision: 2,
+      errorCode: null,
+    });
+    expect(harness.generate).toHaveBeenCalledOnce();
   });
 
   it("records an HTTP 200 structured schema rejection as failed before success is committed", async () => {

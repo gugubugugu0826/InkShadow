@@ -45,6 +45,19 @@ function renderShell(
 }
 
 describe("DesktopShell", () => {
+  it("shows the browser-development notice only outside the packaged desktop runtime", () => {
+    const development = createDevelopmentRuntime(window.localStorage);
+    const rendered = renderShell("/start", development);
+
+    expect(
+      screen.getByText("仅开发环境：当前数据只保存在此浏览器中，不代表桌面正式版的持久化能力。"),
+    ).toBeVisible();
+
+    rendered.unmount();
+    renderShell("/start", { ...development, mode: "tauri" });
+    expect(screen.queryByText(/仅开发环境/u)).not.toBeInTheDocument();
+  });
+
   it("shows only the four plain-language project areas on project subpages", () => {
     renderShell(`/projects/${projectId}/chapters/chapter-id`);
 
@@ -90,7 +103,7 @@ describe("DesktopShell", () => {
       "href",
       "/usage",
     );
-    expect(within(toolNavigation).getByRole("link", { name: "Model Hub" })).toHaveAttribute(
+    expect(within(toolNavigation).getByRole("link", { name: "模型中心" })).toHaveAttribute(
       "href",
       "/settings#model-center",
     );
@@ -119,11 +132,11 @@ describe("DesktopShell", () => {
     });
   });
 
-  it("distinguishes Model Hub from general settings when the hash route is active", () => {
+  it("distinguishes the model center from general settings when the hash route is active", () => {
     renderShell("/settings#model-center");
 
-    expect(document.title).toBe("Model Hub · InkShadow 墨影");
-    expect(screen.getByRole("link", { name: "Model Hub" })).toHaveAttribute("aria-current", "page");
+    expect(document.title).toBe("模型中心 · InkShadow 墨影");
+    expect(screen.getByRole("link", { name: "模型中心" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "设置" })).not.toHaveAttribute("aria-current");
   });
 

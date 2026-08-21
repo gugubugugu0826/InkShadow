@@ -6,10 +6,12 @@ import {
   type AutomaticBackupFilePresent,
   type AutomaticBackupIdGenerator,
   type AutomaticBackupLease,
+  type AutomaticBackupFailureKind,
   type AutomaticBackupManifest,
-  type AutomaticBackupManifestCreatingEntry,
   type AutomaticBackupManifestEntry,
-  type AutomaticBackupManifestReadyEntry,
+  type AutomaticBackupManifestSucceededEntry,
+  type AutomaticBackupManifestVerifyingEntry,
+  type AutomaticBackupManifestWritingEntry,
   type AutomaticBackupPort,
   type AutomaticBackupRootInspection,
   type VerifiedAutomaticBackupRoot,
@@ -50,7 +52,7 @@ describe("AutomaticBackupService", () => {
       prunedCount: 0,
     });
     expect(first.createdBackup).toMatchObject({
-      status: "ready",
+      status: "succeeded",
       scheduleSlot: "2026-08-08",
       createdAt: "2026-08-08T04:00:00.000Z",
       retentionUntil: "2026-09-07T04:00:00.000Z",
@@ -132,13 +134,13 @@ describe("AutomaticBackupService", () => {
   });
 
   it("prunes only expired, manifest-owned files and never enumerates a manual backup", async () => {
-    const expired = readyEntry({
+    const expired = succeededEntry({
       backupId: uuid(20),
       createdAt: "2026-07-01T03:00:00.000Z",
       scheduleSlot: "2026-07-01",
       sha256: SHA_A,
     });
-    const retained = readyEntry({
+    const retained = succeededEntry({
       backupId: uuid(21),
       createdAt: "2026-08-01T03:00:00.000Z",
       scheduleSlot: "2026-08-01",
@@ -146,7 +148,7 @@ describe("AutomaticBackupService", () => {
     });
     port.manifest = manifest({
       revision: 4,
-      lastSuccessfulSlot: "2026-08-08",
+      lastSuccessfulSlot: "2026-08-07",
       entries: [expired, retained],
       updatedAt: "2026-08-08T03:00:00.000Z",
     });
@@ -169,16 +171,20 @@ describe("AutomaticBackupService", () => {
       timezoneOffsetMinutes: 0,
     });
 
-    expect(result).toMatchObject({ status: "completed", createdBackup: null, prunedCount: 1 });
+    expect(result).toMatchObject({ status: "completed", prunedCount: 1 });
+    expect(result.createdBackup).not.toBeNull();
     expect(port.deleteRequests).toEqual([expired.backupId]);
     expect(port.files.has(expired.absolutePath)).toBe(false);
     expect(port.files.has(retained.absolutePath)).toBe(true);
     expect(port.files.has(manualPath)).toBe(true);
-    expect(port.manifest.entries.map(({ backupId }) => backupId)).toEqual([retained.backupId]);
+    expect(port.manifest.entries.map(({ backupId }) => backupId)).toEqual([
+      retained.backupId,
+      result.createdBackup?.backupId,
+    ]);
   });
 
   it("recovers a manifest-reserved backup after an interrupted manifest commit", async () => {
-    const pending = creatingEntry({
+    const pending = writingEntry({
       backupId: uuid(22),
       createdAt: "2026-08-08T03:02:00.000Z",
       scheduleSlot: "2026-08-08",
@@ -212,8 +218,369 @@ describe("AutomaticBackupService", () => {
       missedSlotCount: 0,
     });
     expect(port.createRequests).toHaveLength(0);
-    expect(port.manifest.entries[0]).toMatchObject({ status: "ready", sha256: SHA_A });
+    expect(port.manifest.entries[0]).toMatchObject({ status: "succeeded", sha256: SHA_A });
     expect(port.manifest.lastSuccessfulSlot).toBe("2026-08-08");
+  });
+
+  it("converts a missing write interrupted by restart to unknown and never redispatches the slot", async () => {
+    const pending = writingEntry({
+      backupId: uuid(25),
+      createdAt: "2026-08-08T03:02:00.000Z",
+      scheduleSlot: "2026-08-08",
+    });
+    port.manifest = manifest({
+      revision: 2,
+      lastSuccessfulSlot: null,
+      entries: [pending],
+      updatedAt: "2026-08-08T03:02:00.000Z",
+    });
+    const service = new AutomaticBackupService(port, ids);
+
+    const first = await service.runIfDue({
+      now: "2026-08-08T04:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+    const second = await service.runIfDue({
+      now: "2026-08-08T05:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+
+    expect(first).toMatchObject({
+      status: "attention",
+      recoveredPendingCount: 1,
+      attention: { status: "unknown", failureKind: "result_unconfirmed" },
+    });
+    expect(second).toMatchObject({
+      status: "attention",
+      recoveredPendingCount: 0,
+      attention: { status: "unknown", failureKind: "result_unconfirmed" },
+    });
+    expect(port.createRequests).toHaveLength(0);
+    expect(port.manifest.entries[0]?.status).toBe("unknown");
+  });
+
+  it("preserves verifying evidence so a changed target can never be promoted later", async () => {
+    const pending = verifyingEntry({
+      backupId: uuid(29),
+      createdAt: "2026-08-08T03:02:00.000Z",
+      scheduleSlot: "2026-08-08",
+      sha256: SHA_A,
+    });
+    port.manifest = manifest({
+      revision: 2,
+      lastSuccessfulSlot: null,
+      entries: [pending],
+      updatedAt: "2026-08-08T03:02:00.000Z",
+    });
+    port.files.set(pending.absolutePath, { ...presentFile(pending), sha256: SHA_B });
+    const service = new AutomaticBackupService(port, ids);
+
+    const first = await service.runIfDue({
+      now: "2026-08-08T04:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+    const second = await service.runIfDue({
+      now: "2026-08-08T05:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+
+    expect(first.status).toBe("attention");
+    expect(second.status).toBe("attention");
+    expect(port.createRequests).toHaveLength(0);
+    expect(port.manifest.entries[0]).toMatchObject({
+      status: "unknown",
+      byteLength: 4096,
+      sha256: SHA_A,
+      failureKind: "result_unconfirmed",
+    });
+  });
+
+  it("migrates a legacy creating record to unknown without deleting or retrying it", async () => {
+    const backupId = uuid(26);
+    const createdAt = "2026-08-08T03:02:00.000Z";
+    const fileName = fileNameFor(createdAt, backupId);
+    port.manifest = {
+      schemaVersion: 1,
+      rootId: ROOT_ID,
+      revision: 17,
+      policy: { scheduleHourLocal: 3, retentionDays: 30 },
+      lastSuccessfulSlot: null,
+      entries: [
+        {
+          backupId,
+          createdBy: "inkshadow_automatic_backup_service",
+          scheduleSlot: "2026-08-08",
+          fileName,
+          absolutePath: `${ROOT_PATH}/${fileName}`,
+          createdAt,
+          retentionUntil: addDays(createdAt, 30),
+          status: "creating",
+          byteLength: null,
+          sha256: null,
+        },
+      ],
+      updatedAt: createdAt,
+    } as unknown as AutomaticBackupManifest;
+    const service = new AutomaticBackupService(port, ids);
+
+    const result = await service.runIfDue({
+      now: "2026-08-08T04:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+
+    expect(result).toMatchObject({
+      status: "attention",
+      attention: { status: "unknown", failureKind: "result_unconfirmed" },
+    });
+    expect(port.createRequests).toHaveLength(0);
+    expect(port.deleteRequests).toHaveLength(0);
+    expect(port.manifest).toMatchObject({
+      schemaVersion: 2,
+      revision: 18,
+      entries: [{ status: "unknown", failureKind: "result_unconfirmed" }],
+    });
+  });
+
+  it("promotes a legacy creating record only when its final file verifies completely", async () => {
+    const backupId = uuid(28);
+    const createdAt = "2026-08-08T03:02:00.000Z";
+    const fileName = fileNameFor(createdAt, backupId);
+    const absolutePath = `${ROOT_PATH}/${fileName}`;
+    port.manifest = {
+      schemaVersion: 1,
+      rootId: ROOT_ID,
+      revision: 17,
+      policy: { scheduleHourLocal: 3, retentionDays: 30 },
+      lastSuccessfulSlot: null,
+      entries: [
+        {
+          backupId,
+          createdBy: "inkshadow_automatic_backup_service",
+          scheduleSlot: "2026-08-08",
+          fileName,
+          absolutePath,
+          createdAt,
+          retentionUntil: addDays(createdAt, 30),
+          status: "creating",
+          byteLength: null,
+          sha256: null,
+        },
+      ],
+      updatedAt: createdAt,
+    } as unknown as AutomaticBackupManifest;
+    port.files.set(absolutePath, {
+      exists: true,
+      fileName,
+      absolutePath,
+      canonicalAbsolutePath: absolutePath,
+      byteLength: 4096,
+      sha256: SHA_A,
+      integrityVerified: true,
+    });
+    const service = new AutomaticBackupService(port, ids);
+
+    const result = await service.runIfDue({
+      now: "2026-08-08T04:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      recoveredPendingCount: 1,
+      createdBackup: null,
+      attention: null,
+    });
+    expect(port.createRequests).toHaveLength(0);
+    expect(port.manifest).toMatchObject({
+      schemaVersion: 2,
+      revision: 19,
+      lastSuccessfulSlot: "2026-08-08",
+      entries: [{ status: "succeeded", sha256: SHA_A }],
+    });
+  });
+
+  it("stops claiming success when the latest verified backup file disappears", async () => {
+    const older = succeededEntry({
+      backupId: uuid(18),
+      createdAt: "2026-08-07T03:00:00.000Z",
+      scheduleSlot: "2026-08-07",
+      sha256: SHA_A,
+    });
+    const missing = succeededEntry({
+      backupId: uuid(19),
+      createdAt: "2026-08-08T03:00:00.000Z",
+      scheduleSlot: "2026-08-08",
+      sha256: SHA_B,
+    });
+    port.manifest = manifest({
+      revision: 4,
+      lastSuccessfulSlot: "2026-08-08",
+      entries: [older, missing],
+      updatedAt: "2026-08-08T03:00:00.000Z",
+    });
+    port.files.set(older.absolutePath, presentFile(older));
+    const service = new AutomaticBackupService(port, ids);
+
+    const result = await service.runIfDue({
+      now: "2026-08-08T04:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+
+    expect(result).toMatchObject({
+      status: "attention",
+      createdBackup: null,
+      attention: { status: "unknown", failureKind: "result_unconfirmed" },
+      recoveredPendingCount: 1,
+    });
+    expect(port.createRequests).toHaveLength(0);
+    expect(port.manifest).toMatchObject({
+      lastSuccessfulSlot: "2026-08-07",
+      entries: [
+        { backupId: older.backupId, status: "succeeded" },
+        {
+          backupId: missing.backupId,
+          status: "unknown",
+          byteLength: 4096,
+          sha256: SHA_B,
+        },
+      ],
+    });
+  });
+
+  it("rechecks a legacy ready record and reports a missing file as unconfirmed", async () => {
+    const backupId = uuid(17);
+    const createdAt = "2026-08-08T03:02:00.000Z";
+    const fileName = fileNameFor(createdAt, backupId);
+    port.manifest = {
+      schemaVersion: 1,
+      rootId: ROOT_ID,
+      revision: 7,
+      policy: { scheduleHourLocal: 3, retentionDays: 30 },
+      lastSuccessfulSlot: "2026-08-08",
+      entries: [
+        {
+          backupId,
+          createdBy: "inkshadow_automatic_backup_service",
+          scheduleSlot: "2026-08-08",
+          fileName,
+          absolutePath: `${ROOT_PATH}/${fileName}`,
+          createdAt,
+          retentionUntil: addDays(createdAt, 30),
+          status: "ready",
+          byteLength: 4096,
+          sha256: SHA_A,
+        },
+      ],
+      updatedAt: createdAt,
+    } as unknown as AutomaticBackupManifest;
+    const service = new AutomaticBackupService(port, ids);
+
+    const result = await service.runIfDue({
+      now: "2026-08-08T04:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+
+    expect(result).toMatchObject({
+      status: "attention",
+      createdBackup: null,
+      attention: { status: "unknown", failureKind: "result_unconfirmed" },
+      recoveredPendingCount: 1,
+    });
+    expect(port.createRequests).toHaveLength(0);
+    expect(port.manifest).toMatchObject({
+      schemaVersion: 2,
+      lastSuccessfulSlot: null,
+      entries: [
+        {
+          backupId,
+          status: "unknown",
+          byteLength: 4096,
+          sha256: SHA_A,
+        },
+      ],
+    });
+  });
+
+  it("keeps the newest healthy backup when a new write fails and does not retry that slot", async () => {
+    const healthy = succeededEntry({
+      backupId: uuid(27),
+      createdAt: "2026-07-01T03:00:00.000Z",
+      scheduleSlot: "2026-07-01",
+      sha256: SHA_A,
+    });
+    port.manifest = manifest({
+      revision: 4,
+      lastSuccessfulSlot: "2026-08-07",
+      entries: [healthy],
+      updatedAt: "2026-08-07T03:00:00.000Z",
+    });
+    port.files.set(healthy.absolutePath, presentFile(healthy));
+    port.creationOutcome = { outcome: "failed", failureKind: "disk_full" };
+    const service = new AutomaticBackupService(port, ids);
+
+    const first = await service.runIfDue({
+      now: "2026-08-08T04:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+    const second = await service.runIfDue({
+      now: "2026-08-08T05:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+
+    expect(first).toMatchObject({
+      status: "attention",
+      prunedCount: 0,
+      attention: { status: "failed", failureKind: "disk_full" },
+    });
+    expect(second.status).toBe("attention");
+    expect(port.createRequests).toHaveLength(1);
+    expect(port.deleteRequests).toHaveLength(0);
+    expect(port.files.has(healthy.absolutePath)).toBe(true);
+  });
+
+  it("records a lost native response as unknown without claiming a backup exists", async () => {
+    port.creationOutcome = "throw";
+    const service = new AutomaticBackupService(port, ids);
+
+    const result = await service.runIfDue({
+      now: "2026-08-08T04:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+
+    expect(result).toMatchObject({
+      status: "attention",
+      createdBackup: null,
+      attention: { status: "unknown", failureKind: "result_unconfirmed" },
+    });
+    expect(port.manifest?.entries).toEqual([
+      expect.objectContaining({ status: "unknown", byteLength: null, sha256: null }),
+    ]);
+  });
+
+  it("records a permission refusal as not started and does not retry the slot", async () => {
+    port.creationOutcome = { outcome: "not_started", failureKind: "permission_denied" };
+    const service = new AutomaticBackupService(port, ids);
+
+    const first = await service.runIfDue({
+      now: "2026-08-08T04:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+    const second = await service.runIfDue({
+      now: "2026-08-08T05:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+
+    expect(first).toMatchObject({
+      status: "attention",
+      attention: { status: "not_started", failureKind: "permission_denied" },
+    });
+    expect(second.status).toBe("attention");
+    expect(port.createRequests).toHaveLength(1);
+    expect(port.manifest?.entries[0]).toMatchObject({
+      status: "not_started",
+      writeStartedAt: null,
+      failureKind: "permission_denied",
+    });
   });
 
   it("fails closed before locking when the root marker or canonical path is untrusted", async () => {
@@ -238,7 +605,7 @@ describe("AutomaticBackupService", () => {
 
   it("rejects a manual or traversal-shaped manifest entry before file inspection", async () => {
     const unsafe = {
-      ...readyEntry({
+      ...succeededEntry({
         backupId: uuid(23),
         createdAt: "2026-07-01T03:00:00.000Z",
         scheduleSlot: "2026-07-01",
@@ -268,7 +635,7 @@ describe("AutomaticBackupService", () => {
   });
 
   it("refuses deletion when the current file checksum differs from the manifest", async () => {
-    const expired = readyEntry({
+    const expired = succeededEntry({
       backupId: uuid(24),
       createdAt: "2026-07-01T03:00:00.000Z",
       scheduleSlot: "2026-07-01",
@@ -276,24 +643,35 @@ describe("AutomaticBackupService", () => {
     });
     port.manifest = manifest({
       revision: 1,
-      lastSuccessfulSlot: "2026-08-08",
+      lastSuccessfulSlot: "2026-08-07",
       entries: [expired],
       updatedAt: "2026-08-08T03:00:00.000Z",
     });
     port.files.set(expired.absolutePath, { ...presentFile(expired), sha256: SHA_B });
     const service = new AutomaticBackupService(port, ids);
 
-    await expect(
-      service.runIfDue({
-        now: "2026-08-08T12:00:00.000Z",
-        timezoneOffsetMinutes: 0,
-      }),
-    ).rejects.toMatchObject({
-      code: "AUTOMATIC_BACKUP_FILE_SAFETY_CHECK_FAILED",
+    const result = await service.runIfDue({
+      now: "2026-08-08T12:00:00.000Z",
+      timezoneOffsetMinutes: 0,
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      recoveredPendingCount: 1,
+      createdBackup: { status: "succeeded", scheduleSlot: "2026-08-08" },
     });
     expect(port.deleteRequests).toHaveLength(0);
     expect(port.files.has(expired.absolutePath)).toBe(true);
-    expect(port.manifest.entries).toHaveLength(1);
+    expect(port.manifest.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          backupId: expired.backupId,
+          status: "unknown",
+          sha256: SHA_A,
+        }),
+        expect.objectContaining({ status: "succeeded", scheduleSlot: "2026-08-08" }),
+      ]),
+    );
   });
 
   it("returns busy without reading or mutating metadata when another process owns the lease", async () => {
@@ -344,6 +722,13 @@ class MemoryAutomaticBackupPort implements AutomaticBackupPort {
   public leaseAvailable = true;
   public acquireCount = 0;
   public readManifestCount = 0;
+  public creationOutcome:
+    | Readonly<{
+        outcome: "not_started" | "failed" | "unknown";
+        failureKind: AutomaticBackupFailureKind;
+      }>
+    | "succeeded"
+    | "throw" = "succeeded";
 
   public inspectManagedRoot(): Promise<AutomaticBackupRootInspection> {
     return Promise.resolve(structuredClone(this.rootInspection));
@@ -380,9 +765,15 @@ class MemoryAutomaticBackupPort implements AutomaticBackupPort {
   public createConsistentBackup(
     _root: VerifiedAutomaticBackupRoot,
     _lease: AutomaticBackupLease,
-    request: Readonly<{ backupId: string; fileName: string; absolutePath: string }>,
-  ): Promise<AutomaticBackupFilePresent> {
+    request: AutomaticBackupManifestWritingEntry,
+  ): Promise<unknown> {
     this.createRequests.push(request.backupId);
+    if (this.creationOutcome === "throw") {
+      return Promise.reject(new Error("native result lost"));
+    }
+    if (this.creationOutcome !== "succeeded") {
+      return Promise.resolve(structuredClone(this.creationOutcome));
+    }
     const file: AutomaticBackupFilePresent = {
       exists: true,
       fileName: request.fileName,
@@ -393,7 +784,7 @@ class MemoryAutomaticBackupPort implements AutomaticBackupPort {
       integrityVerified: true,
     };
     this.files.set(request.absolutePath, file);
-    return Promise.resolve(structuredClone(file));
+    return Promise.resolve({ outcome: "succeeded", file: structuredClone(file) });
   }
 
   public inspectBackupFile(
@@ -409,7 +800,7 @@ class MemoryAutomaticBackupPort implements AutomaticBackupPort {
   public deleteBackupFile(
     _root: VerifiedAutomaticBackupRoot,
     _lease: AutomaticBackupLease,
-    entry: AutomaticBackupManifestReadyEntry,
+    entry: AutomaticBackupManifestSucceededEntry,
   ): Promise<"deleted" | "already_missing"> {
     this.deleteRequests.push(entry.backupId);
     const existing = this.files.get(entry.absolutePath);
@@ -431,7 +822,7 @@ function manifest(
   }>,
 ): AutomaticBackupManifest {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     rootId: ROOT_ID,
     revision: input.revision,
     policy: { scheduleHourLocal: 3, retentionDays: 30 },
@@ -441,13 +832,13 @@ function manifest(
   };
 }
 
-function creatingEntry(
+function writingEntry(
   input: Readonly<{
     backupId: string;
     createdAt: string;
     scheduleSlot: string;
   }>,
-): AutomaticBackupManifestCreatingEntry {
+): AutomaticBackupManifestWritingEntry {
   const fileName = fileNameFor(input.createdAt, input.backupId);
   return {
     backupId: input.backupId,
@@ -457,29 +848,51 @@ function creatingEntry(
     absolutePath: `${ROOT_PATH}/${fileName}`,
     createdAt: input.createdAt,
     retentionUntil: addDays(input.createdAt, 30),
-    status: "creating",
+    status: "writing",
     byteLength: null,
     sha256: null,
+    writeStartedAt: input.createdAt,
+    finishedAt: null,
+    failureKind: null,
   };
 }
 
-function readyEntry(
+function succeededEntry(
   input: Readonly<{
     backupId: string;
     createdAt: string;
     scheduleSlot: string;
     sha256: string;
   }>,
-): AutomaticBackupManifestReadyEntry {
+): AutomaticBackupManifestSucceededEntry {
   return {
-    ...creatingEntry(input),
-    status: "ready",
+    ...writingEntry(input),
+    status: "succeeded",
+    byteLength: 4096,
+    sha256: input.sha256,
+    finishedAt: input.createdAt,
+  };
+}
+
+function verifyingEntry(
+  input: Readonly<{
+    backupId: string;
+    createdAt: string;
+    scheduleSlot: string;
+    sha256: string;
+  }>,
+): AutomaticBackupManifestVerifyingEntry {
+  return {
+    ...writingEntry(input),
+    status: "verifying" as const,
     byteLength: 4096,
     sha256: input.sha256,
   };
 }
 
-function presentFile(entry: AutomaticBackupManifestReadyEntry): AutomaticBackupFilePresent {
+function presentFile(
+  entry: AutomaticBackupManifestSucceededEntry | AutomaticBackupManifestVerifyingEntry,
+): AutomaticBackupFilePresent {
   return {
     exists: true,
     fileName: entry.fileName,

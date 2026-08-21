@@ -15,7 +15,9 @@ export async function expectDirectModeAuthorizationDisclosure(page: Page): Promi
     dialog.getByText("授权本地整理，不授权联网或修改正文", { exact: true }),
   ).toBeVisible();
   await expect(
-    dialog.getByText("整理过程不会调用模型，不会增加 Provider 次数或费用。", { exact: true }),
+    dialog.getByText("整理过程不会调用模型，不会增加模型服务调用次数或费用。", {
+      exact: true,
+    }),
   ).toBeVisible();
   return dialog;
 }

@@ -359,7 +359,7 @@ function discardLabel(reason: string | null): string {
     token_budget_exhausted: "本次上下文预算不足，未发送给模型。",
     duplicate_source: "内容与更高优先级资料重复；证据已合并，没有重复发送。",
   };
-  return reason === null ? "本次未采用。" : (labels[reason] ?? `未采用：${reason}`);
+  return reason === null ? "本次未采用。" : (labels[reason] ?? "因其他安全规则未采用。");
 }
 
 function uniqueSourceTypes(

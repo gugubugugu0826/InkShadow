@@ -11,11 +11,10 @@ mod secure_updater;
 mod system_capacity;
 
 use automatic_backup::{
-    native_automatic_backup_acquire_lease, native_automatic_backup_cleanup_failed_creation,
+    native_automatic_backup_acquire_lease, native_automatic_backup_create_verified,
     native_automatic_backup_delete_file, native_automatic_backup_inspect_file,
-    native_automatic_backup_inspect_root, native_automatic_backup_prepare_destination,
-    native_automatic_backup_read_manifest, native_automatic_backup_release_lease,
-    native_automatic_backup_write_manifest,
+    native_automatic_backup_inspect_root, native_automatic_backup_read_manifest,
+    native_automatic_backup_release_lease, native_automatic_backup_write_manifest,
 };
 use cloud_session::{
     accept_current_device_team_project_key_envelope_from_cloud, clear_cloud_session,
@@ -51,11 +50,48 @@ use secure_updater::{
     SecureUpdaterState,
 };
 use serde::Serialize;
+use std::sync::OnceLock;
 use system_capacity::inspect_native_model_capacity;
 use tauri::Manager;
 use zeroize::Zeroizing;
 
-const CREDENTIAL_SERVICE: &str = "com.inkshadow.desktop";
+const PRODUCTION_CREDENTIAL_SERVICE: &str = "com.inkshadow.desktop";
+const MAX_CREDENTIAL_SERVICE_BYTES: usize = 128;
+static CREDENTIAL_SERVICE: OnceLock<String> = OnceLock::new();
+
+fn validated_credential_service(identifier: &str) -> Result<String, &'static str> {
+    let valid = !identifier.is_empty()
+        && identifier.len() <= MAX_CREDENTIAL_SERVICE_BYTES
+        && identifier
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character));
+    if valid {
+        Ok(identifier.to_owned())
+    } else {
+        Err("the Tauri application identifier is not a safe credential service")
+    }
+}
+
+fn initialize_credential_service(identifier: &str) -> Result<(), &'static str> {
+    let service = validated_credential_service(identifier)?;
+    if let Some(current) = CREDENTIAL_SERVICE.get() {
+        return if current == &service {
+            Ok(())
+        } else {
+            Err("the credential service was already initialized for another application")
+        };
+    }
+    CREDENTIAL_SERVICE
+        .set(service)
+        .map_err(|_| "the credential service could not be initialized")
+}
+
+pub(crate) fn credential_service() -> &'static str {
+    CREDENTIAL_SERVICE
+        .get()
+        .map(String::as_str)
+        .expect("credential service must be initialized before native commands run")
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,7 +130,7 @@ pub(crate) fn credential_account(provider_id: &str) -> Result<String, CommandErr
 
 pub(crate) fn credential_entry(provider_id: &str) -> Result<keyring::Entry, CommandError> {
     let account = credential_account(provider_id)?;
-    keyring::Entry::new(CREDENTIAL_SERVICE, &account)
+    keyring::Entry::new(credential_service(), &account)
         .map_err(|_| CommandError::credential_store_unavailable())
 }
 
@@ -179,6 +215,14 @@ fn delete_model_secret(provider_id: String) -> Result<SecretSummary, CommandErro
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let context = tauri::generate_context!();
+    initialize_credential_service(context.config().identifier.as_str()).expect(
+        "failed to initialize the credential service from the Tauri application identifier",
+    );
+    debug_assert_eq!(
+        context.config().identifier == PRODUCTION_CREDENTIAL_SERVICE,
+        credential_service() == PRODUCTION_CREDENTIAL_SERVICE,
+    );
     let model_gateway =
         ModelGatewayState::new().expect("failed to initialize the native model gateway");
 
@@ -205,10 +249,9 @@ pub fn run() {
             native_automatic_backup_release_lease,
             native_automatic_backup_read_manifest,
             native_automatic_backup_write_manifest,
-            native_automatic_backup_prepare_destination,
+            native_automatic_backup_create_verified,
             native_automatic_backup_inspect_file,
             native_automatic_backup_delete_file,
-            native_automatic_backup_cleanup_failed_creation,
             get_runtime_info,
             native_choose_backup_destination,
             native_choose_restore_source,
@@ -262,13 +305,30 @@ pub fn run() {
             logout_cloud_session,
             clear_cloud_session
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("failed to run InkShadow");
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validate_model_secret;
+    use super::{
+        validate_model_secret, validated_credential_service, PRODUCTION_CREDENTIAL_SERVICE,
+    };
+
+    #[test]
+    fn credential_service_matches_the_tauri_identifier_and_rejects_unsafe_names() {
+        assert_eq!(
+            validated_credential_service(PRODUCTION_CREDENTIAL_SERVICE),
+            Ok(PRODUCTION_CREDENTIAL_SERVICE.to_owned())
+        );
+        assert_eq!(
+            validated_credential_service("com.inkshadow.desktop.regression.v026.20260821"),
+            Ok("com.inkshadow.desktop.regression.v026.20260821".to_owned())
+        );
+        assert!(validated_credential_service("").is_err());
+        assert!(validated_credential_service(&"a".repeat(129)).is_err());
+        assert!(validated_credential_service("com.inkshadow.desktop/regression").is_err());
+    }
 
     #[test]
     fn model_secret_validation_rejects_control_characters_without_echoing_values() {

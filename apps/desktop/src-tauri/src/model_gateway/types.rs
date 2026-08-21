@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::native_sqlite::NativeModelDispatchScope;
+use crate::native_sqlite::{
+    NativeModelDispatchScope, NativeModelInvocationDispatchLedger,
+    NativeModelInvocationDispatchReceipt,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -122,6 +125,8 @@ pub(crate) struct StartGenerationRequest {
     #[serde(default)]
     pub(crate) response_format: Option<ResponseFormat>,
     pub(crate) dispatch_scope: NativeModelDispatchScope,
+    #[serde(default)]
+    pub(crate) invocation_dispatch_ledger: Option<NativeModelInvocationDispatchLedger>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -188,6 +193,7 @@ pub(crate) struct RerankResponse {
 pub(crate) struct GenerationAccepted {
     pub(crate) generation_id: String,
     pub(crate) accepted: bool,
+    pub(crate) invocation_dispatch_receipt: Option<NativeModelInvocationDispatchReceipt>,
 }
 
 #[derive(Debug, Serialize)]

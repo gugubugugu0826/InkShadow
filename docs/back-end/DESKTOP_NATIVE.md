@@ -1,9 +1,13 @@
 # InkShadow Desktop 原生层逐文件指引
 
-> 基于源码快照：2026-08-20  
+> 基于源码快照：2026-08-21  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 当前版本：`0.2.5`；最新已发布版本：`v0.2.5` Pre-release；设计基线：`DESIGN v0.3.1b`  
+> 当前应用清单版本：`0.2.6`；最新已发布版本：`v0.2.5` 工程预览版；设计基线：`DESIGN v0.3.1b`  
 > 覆盖范围：`apps/desktop/src-tauri`、本地 SQLite 原生桥、自动备份、系统凭据库、原生网络、项目密钥、安全更新与系统容量
+
+当前 `v0.2.6` 修复工作树的应用清单已升至 `0.2.6`；下文已同步工作树中的
+Tauri 迁移 `74`、SQLite 重载恢复、自动备份清单第 2 版和能力验证调用回执。
+干净提交、推送、打包、真机验证和发布结论仍待完成。
 
 ## 1. 它不是传统“后端”
 
@@ -12,7 +16,7 @@
 ```text
 React 页面
   → Desktop runtime / packages/data
-  → Tauri invoke（61 个受控 command）
+  → Tauri invoke（60 个受控 command）
   ├─ SQLite：应用配置目录/inkshadow.db
   ├─ OS Credential Store：模型密钥、设备私钥、Cloud Token、团队密钥回执
   ├─ 原生 HTTP：模型服务、Cloud API、更新源
@@ -33,7 +37,7 @@ React 页面
 | 文件                                                  | 内容                                                                                                           |
 | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `apps/desktop/src-tauri/src/main.rs`                  | 原生进程入口；Release 启用 `windows_subsystem = "windows"` 隐藏控制台，并调用 `inkshadow_desktop_lib::run()`。 |
-| `apps/desktop/src-tauri/src/lib.rs`                   | Tauri Builder、共享状态、插件、单实例逻辑和全部 61 个 command 的注册入口。                                     |
+| `apps/desktop/src-tauri/src/lib.rs`                   | Tauri Builder、共享状态、插件、单实例逻辑和全部 60 个 command 的注册入口。                                     |
 | `apps/desktop/src-tauri/Cargo.toml`                   | Rust/Tauri、SQLx SQLite、Reqwest/Rustls、Keyring、HPKE、AES-GCM、Argon2、Ring 和 Windows API 依赖。            |
 | `apps/desktop/src-tauri/Cargo.lock`                   | Rust 完整依赖锁文件；由 Cargo 维护。                                                                           |
 | `apps/desktop/src-tauri/build.rs`                     | 监听六个 `INKSHADOW_UPDATE_*` 编译期变量并运行 Tauri build。                                                   |
@@ -51,9 +55,9 @@ React 页面
 | 文件                                                   | 内容                                                                                               |
 | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
 | `apps/desktop/src-tauri/src/main.rs`                   | Windows GUI subsystem 入口；Release 隐藏控制台。                                                   |
-| `apps/desktop/src-tauri/src/lib.rs`                    | 模块组合、Tauri 启动、共享状态、插件和 61 个 command 注册。                                        |
-| `apps/desktop/src-tauri/src/local_migrations.rs`       | 把 `packages/data` 与 `packages/story-core` 的 73 个 SQL migration 编译进二进制并交给 SQLx。       |
-| `apps/desktop/src-tauri/src/automatic_backup.rs`       | 应用专属自动备份根、所有权标记、租约、清单 CAS、一次性目标票据、完整性核验和受限清理。             |
+| `apps/desktop/src-tauri/src/lib.rs`                    | 模块组合、Tauri 启动、共享状态、插件和 60 个 command 注册。                                        |
+| `apps/desktop/src-tauri/src/local_migrations.rs`       | 把 `packages/data` 与 `packages/story-core` 的 74 个 SQL migration 编译进二进制并交给 SQLx。       |
+| `apps/desktop/src-tauri/src/automatic_backup.rs`       | 应用专属自动备份根、所有权标记、租约、清单第 2 版、独立快照创建、完整性核验和受限清理。            |
 | `apps/desktop/src-tauri/src/native_export_artifact.rs` | 导出保存对话框、一次性目标票据、目标身份复核、无覆盖竞态写入及落盘后大小/SHA 回读验证。            |
 | `apps/desktop/src-tauri/src/native_sqlite.rs`          | 固定库打开、迁移、查询、写入、事务、备份/恢复受控语句、资源上限和失败关闭。                        |
 | `apps/desktop/src-tauri/src/path_tickets.rs`           | 文件选择后的 5 分钟、会话绑定、不可伪造路径票据及文件身份防替换。                                  |
@@ -71,13 +75,13 @@ React 页面
 | `apps/desktop/src-tauri/src/model_gateway/image.rs`    | OpenAI-compatible base64 PNG 解析、签名/尺寸/体积校验和单次路径票据安全写入。                      |
 | `apps/desktop/src-tauri/src/model_gateway/gateway.rs`  | 模型列表、连接检查、Embedding、Qwen Rerank、流式生成、图片生成、事件、超时、限制和取消。           |
 
-## 4. 61 个 Tauri command
+## 4. 60 个 Tauri command
 
 详细参数和返回值见 [`../front-end/INTERFACE_REFERENCE.md`](../front-end/INTERFACE_REFERENCE.md)。
 
 | 分组             | 数量 | command                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------------- | ---: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 自动备份         |    9 | `native_automatic_backup_inspect_root`、`native_automatic_backup_acquire_lease`、`native_automatic_backup_release_lease`、`native_automatic_backup_read_manifest`、`native_automatic_backup_write_manifest`、`native_automatic_backup_prepare_destination`、`native_automatic_backup_inspect_file`、`native_automatic_backup_delete_file`、`native_automatic_backup_cleanup_failed_creation`                             |
+| 自动备份         |    8 | `native_automatic_backup_inspect_root`、`native_automatic_backup_acquire_lease`、`native_automatic_backup_release_lease`、`native_automatic_backup_read_manifest`、`native_automatic_backup_write_manifest`、`native_automatic_backup_create_verified`、`native_automatic_backup_inspect_file`、`native_automatic_backup_delete_file`                                                                                    |
 | 运行环境         |    1 | `get_runtime_info`                                                                                                                                                                                                                                                                                                                                                                                                       |
 | 原生文件选择     |    3 | `native_choose_backup_destination`、`native_choose_restore_source`、`native_choose_pre_restore_backup_destination`                                                                                                                                                                                                                                                                                                       |
 | SQLite           |    9 | `native_sqlite_open`、`native_sqlite_select`、`native_sqlite_execute`、`native_sqlite_begin`、`native_sqlite_transaction_select`、`native_sqlite_transaction_execute`、`native_sqlite_commit`、`native_sqlite_rollback`、`native_sqlite_close`                                                                                                                                                                           |
@@ -108,14 +112,16 @@ React 页面
 - 打开时强制 `foreign_keys=ON`、WAL、`synchronous=NORMAL`、5 秒 busy timeout。
 - 配置和全部 migration 验证成功后才返回随机会话 token。
 - migration 校验和不一致会报 `SQLITE_MIGRATION_INTEGRITY_FAILED` 并停止，而不是覆盖用户数据。
-- 当前前向上限为 Data `0070_multigranular_search_retrieval.sql` / Tauri `73`；
-  70 个 Data migration 与 3 个 story-core migration 合并为一个原生连续序列，所以目录前缀与
+- 当前工作树前向上限为 Data `0071_model_capability_probe_invocation_ledger.sql` / Tauri `74`；
+  71 个 Data migration 与 3 个 story-core migration 合并为一个原生连续序列，所以目录前缀与
   原生版本不要求相同。`0066`–`0068` / Tauri `69`–`71` 依次追加写作体验偏好与 Provider 披露
   grant、有界一致性调查四表，以及只统计 active grant 的上限修复。`0069` / Tauri `72` 在模型
   step 上预留 content-free invocation UUID；账本 INSERT 会在同一 SQLite 语句中绑定 step 和
   context trace，关闭账本创建与 renderer 回调之间的崩溃窗口。`0070` / Tauri `73` 为可重建
   搜索投影追加章节、场景、事件、段落、对话与 StoryFact 证据等多粒度范围、UTF-16 锚点、
   权威性、隐私与 currentness 字段；旧行保持 `legacy_unknown`，必须重建后才可作为当前范围使用。
+  `0071` / Tauri `74` 为固定能力验证新增独立调用任务，并让能力证据可空、唯一地绑定同一目录项
+  的终态调用记录；迁移前后既有调用行数必须一致。
 - 启动恢复以 `provider_dispatch_started_at` 为网络边界：发送前中断把 running ledger 结清为
   `cancelled`、run 结清为 `not_dispatched`；发送后中断把 ledger 结清为 `timed_out`、run 结清为
   `ambiguous`。两者都会把非终态 task 对账到相应终态，且绝不自动重发。
@@ -133,10 +139,13 @@ React 页面
 
 ### 5.3 事务
 
-- 同时只允许一个事务；读事务使用 `BEGIN DEFERRED + query_only ON`，写事务使用 `BEGIN IMMEDIATE`。
+- 同时只允许一个原生事务；TypeScript 根操作由先进先出执行队列串行，超时且尚未开始的等待者会
+  被取消并永不迟到执行。读事务使用 `BEGIN DEFERRED + query_only ON`，写事务使用 `BEGIN IMMEDIATE`。
 - 空闲 2 分钟或总寿命 15 分钟自动回滚。
 - commit 状态不确定、rollback 失败或 PRAGMA 恢复失败时关闭整个 session。
-- TypeScript 适配器串行原生调用并禁止嵌套事务。
+- 写入或提交后无法确认时返回“结果待核对”语义并使会话失效；普通界面不显示 SQL、路径或内部码。
+- WebView 重载会接管现有会话、回滚孤儿事务并清除旧 `restore_source` 附件；无法安全清理时使连接
+  失效并重新打开。只有同一同步调用栈中的真正嵌套事务会被拒绝，无关异步根操作不会误报嵌套。
 
 ### 5.4 备份与恢复
 
@@ -156,13 +165,22 @@ React 页面
 
 - 自动备份根固定在 Tauri 应用数据目录的 `automatic-backups/v1`，首次使用写入产品所有权标记；页面不能指定其他根目录。
 - TypeScript 运行时按本地 03:00 槽位调度，启动时补最近一次漏跑，存活期间每小时检查，默认保留 30 天。
-- 原生层使用带过期时间的租约和修订号清单，只有清单中 `creating` 条目能取得一次性备份目标票据。
+- 原生层使用带过期时间的租约和修订号清单。清单第 2 版区分 `reserved`、`writing`、
+  `verifying`、`not_started`、`succeeded`、`failed` 和 `unknown`；旧第 1 版 `creating` 因无法证明写入阶段，
+  重启后保守归为 `unknown`，不会盲目覆盖重试。
+- `native_automatic_backup_create_verified` 使用独立 SQLite 连接执行 `VACUUM INTO`，核验临时文件的
+  integrity、foreign key、schema、大小和 SHA-256 后再以不覆盖语义安装。正文编辑器不等待该连接，
+  最终结果无法确认时保留文件并标记 `unknown`。
+- 每次启动检查都会重新核验清单第 2 版的 `succeeded` 文件，从第 1 版 `ready` 记录转入的
+  旧成功项也走同一路径。文件缺失、字节数或 SHA-256 不符、文件检查异常时，该项降级为
+  `unknown`，最近成功时段回退到较旧的已核验健康备份；系统不会对该时段盲目重发。
+- 只有新备份确认成功后才执行保留期清理，上一份健康备份和最新健康备份都不会被失败创建删除。
 - 清理不枚举任意目录。只有直系路径、严格文件名、根标记、租约、清单状态、到期时间、文件身份、SQLite 完整性、大小与 SHA-256 全部匹配时才允许删除。
 - 手动备份不进入自动备份清单；浏览器开发模式没有原生备份能力，会明确返回不可用而不是伪造文件。
 
-## 6. 73 个原生 migration
+## 6. 74 个原生 migration
 
-原生版本号把 70 个 `data` migration 与 3 个 `story-core` migration 合并为一个连续序列，因此不等于单个目录中的文件名前缀。
+原生版本号把 71 个 `data` migration 与 3 个 `story-core` migration 合并为一个连续序列，因此不等于单个目录中的文件名前缀。
 
 | 原生版本 | SQL 来源                                                                             | 内容                                                              |
 | -------: | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
@@ -239,6 +257,7 @@ React 页面
 |       71 | `packages/data/migrations/0068_writing_disclosure_active_grant_limit.sql`            | 披露 grant 上限只统计 active 行，保留 terminal 审计。             |
 |       72 | `packages/data/migrations/0069_consistency_investigation_invocation_reservation.sql` | 调查模型 step 的 content-free invocation 预留与原子绑定。         |
 |       73 | `packages/data/migrations/0070_multigranular_search_retrieval.sql`                   | 可重建搜索投影的多粒度范围、锚点、权威性、隐私与 currentness。    |
+|       74 | `packages/data/migrations/0071_model_capability_probe_invocation_ledger.sql`         | 固定能力验证的独立调用任务、能力证据外键和不可改绑约束。          |
 
 规则：SQL 通过 `include_str!` 编译进二进制；缺失迁移不忽略、迁移加锁且逐条事务执行。已发布 migration 的内容、描述和顺序不能修改，只能新增。
 
@@ -256,6 +275,10 @@ Google Gemini、Anthropic Claude、智谱 GLM、Ollama 和自定义 OpenAI-compa
 - DeepSeek 文本能力探针：Provider Registry 为固定无作品内容探针声明禁用思考，网关映射为
   `thinking: {"type":"disabled"}`；共享探针预算为 64 token。该覆盖不应用于普通正文生成，也不
   依赖具体模型名称。
+- 所有固定能力验证都使用独立 `capability_probe` 调用任务。网络开始前，原生网关必须在同一
+  SQLite 权威库中原子核对调用标识、任务、连接、模型、范围和修订并写入发送时间；核对失败时
+  不启动网络。成功或失败的能力证据只能绑定这条精确终态调用记录，取消和发送前失败不制造
+  真实调用，发送后结果无法确认则结清为“结果待核对”且不自动重发。
 - Ollama：`/api/tags`、`/api/chat` NDJSON、`/api/embed`。
 - Anthropic：官方模型目录和 Messages SSE 文本生成。
 - Gemini：官方模型目录、流式文本生成和批量 Embedding。

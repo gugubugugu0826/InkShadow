@@ -5,6 +5,10 @@
 > 当前结论：`v0.2.5 PUBLISHED_PRE_RELEASE / EXTERNAL_VALIDATION_BLOCKED`  
 > 使用规则：这是持续更新的完成台账，不以 route、表或单测替代生产闭环。来源提交的本地候选链与远端 CI 已通过；仍保留为 `BLOCKED_EXTERNAL` 的真实环境项不得由自动化结果升级。
 
+> 2026-08-21 起的 `v0.2.6` 真机缺陷修复不倒改本文任何 `v0.2.5` 提交、迁移、测试、制品或发布
+> 事实；新工作树的复现与待验证边界单独记录在
+> [`../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)。
+
 ## Current Reality Ledger
 
 | 项目         | 2026-08-20 当前事实                                                                                                                                      | 证据与边界                                                                                                           |

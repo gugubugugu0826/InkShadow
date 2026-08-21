@@ -747,6 +747,7 @@ export function IdeaJourneyPage() {
         lifecycleSuggestion?.providerInvocationId === undefined
           ? null
           : await runtime.modelHub.findInvocation(lifecycleSuggestion.providerInvocationId);
+      const dispatchState = openingDispatchStateFromInvocation(generated, invocation);
       const suggestion = openingSuggestionFromResult(
         generated,
         input.batchId,
@@ -755,7 +756,10 @@ export function IdeaJourneyPage() {
         {
           slotNumber: lifecycleSuggestion?.slotNumber ?? 1,
           providerInvocationId: lifecycleSuggestion?.providerInvocationId ?? null,
-          dispatchState: openingDispatchStateFromInvocation(generated, invocation),
+          dispatchState,
+          ...(dispatchState === "ambiguous" && invocation?.status === "succeeded"
+            ? { noticeCode: "OPENING_RESULT_NOT_PERSISTED" }
+            : {}),
         },
       );
       if (
@@ -937,28 +941,13 @@ export function IdeaJourneyPage() {
                     code: providerResult.noticeCode ?? "MODEL_GENERATION_FAILED",
                   }),
                 );
-          let saved: CreativeJourneyRecord;
-          try {
-            saved = await reconcileOpeningResult(current.id, generated, {
-              batchId: plan.batchId,
-              openingAngle: request.openingAngle,
-              questionKey,
-              generationMode: "provider",
-              batchPlan: plan,
-            });
-          } catch (cause: unknown) {
-            saved = await reconcileOpeningResult(
-              current.id,
-              failedCreativeOpeningResult(runtime, request.requestId, cause),
-              {
-                batchId: plan.batchId,
-                openingAngle: request.openingAngle,
-                questionKey,
-                generationMode: "provider",
-                batchPlan: plan,
-              },
-            );
-          }
+          const saved = await reconcileOpeningResult(current.id, generated, {
+            batchId: plan.batchId,
+            openingAngle: request.openingAngle,
+            questionKey,
+            generationMode: "provider",
+            batchPlan: plan,
+          });
           if (isCurrentOperation(operation)) {
             setJourney((active) =>
               active?.id !== saved.id || active.revision < saved.revision ? saved : active,
@@ -981,6 +970,11 @@ export function IdeaJourneyPage() {
         }
       })();
       reconciliations.set(providerResult.requestId, reconciliation);
+      void reconciliation.catch(() => {
+        if (reconciliations.get(providerResult.requestId) === reconciliation) {
+          reconciliations.delete(providerResult.requestId);
+        }
+      });
       return reconciliation;
     }
     let generatedResults: readonly CreativeOpeningResult[];
@@ -3510,7 +3504,7 @@ export function IdeaJourneyPage() {
                                 : suggestion.status === "partial"
                                   ? "AI 未完整"
                                   : suggestion.source === "provider"
-                                    ? "AI 已生成"
+                                    ? "已完成"
                                     : "本地生成"}
                           </Badge>
                         </header>
@@ -3750,7 +3744,7 @@ export function IdeaJourneyPage() {
               }
               description={
                 directMode && recommendedOpening !== null
-                  ? "使用推荐方案或任一完整方案后，将只在本机完成 ProjectSeed、作品、空白第一章、初始不可变版本和 Candidate；选择后不会产生第 4 次模型调用。"
+                  ? "使用推荐方案或任一完整方案后，将只在本机保存作品起始设定、作品、空白第一章、初始不可变版本和隔离的 AI 建议草稿；选择后不会产生第 4 次模型服务调用。"
                   : usableSuggestionCount > 0
                     ? "选择后才会整理最多 3 个关键问题；系统不会自动替你选择。"
                     : pendingSuggestionCount > 0
@@ -3762,7 +3756,7 @@ export function IdeaJourneyPage() {
             <InlineAlert
               tone="info"
               title="正在整理关键问题"
-              description="只分析已选开头与 ProjectSeed，不会写入正文或自动重写。"
+              description="只分析已选开头与作品起始设定，不会写入正文或自动重写。"
             />
           ) : (
             <Card className="idea-journey__question">
@@ -3782,7 +3776,7 @@ export function IdeaJourneyPage() {
                       已走完 {String(snapshot.expectedQuestionTotal)}/
                       {String(snapshot.expectedQuestionTotal)}{" "}
                       问（100%）；剩余重点：无。回答已更新到
-                      ProjectSeed；没有自动重写开头，也没有写入正式正文。
+                      作品起始设定；没有自动重写开头，也没有写入正式正文。
                     </p>
                   </CardHeader>
                   <CardContent>
@@ -4164,10 +4158,10 @@ async function recoverOpeningInvocation(
     try {
       invocation = await runtime.modelHub.finishInvocation({
         id: invocation.id,
-        status: "failed",
+        status: crossedBoundary ? "timed_out" : "failed",
         errorCode: noticeCode,
         errorSummary: crossedBoundary
-          ? "应用在模型返回前中断；调用结果不明确，系统不会自动重发。"
+          ? "应用在模型返回前中断；调用结果待核对，系统不会自动重发。"
           : "应用在模型发送前中断；没有发生供应商调用。",
         expectedRevision: invocation.revision,
       });
@@ -4190,9 +4184,7 @@ async function recoverInterruptedOpeningGeneration(
   let lastConflict: Error | null = null;
   for (let attempt = 0; attempt < OPENING_RESULT_RECONCILE_ATTEMPTS; attempt += 1) {
     const currentSnapshot = readIdeaSnapshot(current.snapshot, current.id);
-    const pending = currentSnapshot.openingSuggestions.filter(
-      ({ source, status }) => source === "provider" && status === "pending",
-    );
+    const pending = currentSnapshot.openingSuggestions.filter(needsOpeningInvocationRecovery);
     if (pending.length === 0) return current;
     const outcomes = new Map(
       await Promise.all(
@@ -4595,7 +4587,15 @@ function normalizeProvisioningPlan(value: unknown): IdeaJourneyProvisioningPlanV
 function hasPersistedGenerationPending(snapshot: IdeaJourneySnapshotV1): boolean {
   return (
     snapshot.pendingRequestId !== null ||
-    snapshot.openingSuggestions.some(({ status }) => status === "pending")
+    snapshot.openingSuggestions.some(needsOpeningInvocationRecovery)
+  );
+}
+
+function needsOpeningInvocationRecovery(suggestion: IdeaOpeningSuggestionV1): boolean {
+  return (
+    suggestion.status === "pending" ||
+    (suggestion.providerInvocationId !== null &&
+      (suggestion.dispatchState === "planned" || suggestion.dispatchState === "dispatched"))
   );
 }
 
@@ -5001,17 +5001,17 @@ function openingDispatchStateLabel(state: OpeningDispatchState): string {
     case "not_dispatched":
       return "未发送";
     case "ambiguous":
-      return "结果不明确";
+      return "结果待核对";
     case "cancelled":
       return "已取消";
     case "failed":
-      return "生成失败";
+      return "明确失败";
     case "planned":
       return "等待生成";
     case "dispatched":
       return "调用中";
     case "succeeded":
-      return "AI 已生成";
+      return "已完成";
   }
 }
 
@@ -5049,7 +5049,8 @@ function openingDispatchStateFromInvocation(
       ? "succeeded"
       : "not_dispatched";
   }
-  return projectOpeningInvocationDispatchState(invocation);
+  const projected = projectOpeningInvocationDispatchState(invocation);
+  return projected === "succeeded" && generated.text.trim().length === 0 ? "ambiguous" : projected;
 }
 
 function openingInterruptedTerminal(
@@ -5138,6 +5139,7 @@ function openingSuggestionFromResult(
     slotNumber: number;
     providerInvocationId: string | null;
     dispatchState?: OpeningDispatchState;
+    noticeCode?: string;
   }> = Object.freeze({ slotNumber: 1, providerInvocationId: null }),
 ): IdeaOpeningSuggestionV1 {
   const status: IdeaOpeningSuggestionV1["status"] =
@@ -5157,7 +5159,7 @@ function openingSuggestionFromResult(
     openingAngle,
     providerId: generated.providerId,
     modelId: generated.modelId,
-    noticeCode: generated.noticeCode,
+    noticeCode: lifecycle.noticeCode ?? generated.noticeCode,
     contextTraceId: status === "ready" || status === "partial" ? generated.contextTraceId : null,
     providerInvocationId: lifecycle.providerInvocationId,
     dispatchState: lifecycle.dispatchState ?? (status === "ready" ? "succeeded" : "failed"),

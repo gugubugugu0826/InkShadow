@@ -1,22 +1,27 @@
 # InkShadow 下一阶段产品重构基线
 
 > 基线日期：2026-08-01  
-> 最近复核：2026-08-20（DESIGN v0.3.1b 与已发布 v0.2.5 Pre-release）  
+> 最近复核：2026-08-21（DESIGN v0.3.1b、已发布 v0.2.5 与未发布 v0.2.6 修复工作树）  
 > 文档状态：`AUTHORITATIVE_CURRENT`（本目录索引与冲突规则）  
-> 当前应用清单与最新已发布版本：`0.2.5`；设计基线：`DESIGN v0.3.1b`  
+> 当前应用清单版本：`0.2.6`；最新已发布版本：`v0.2.5`；设计基线：`DESIGN v0.3.1b`  
 > 适用范围：桌面端个人创作主链路、Model Hub、后续小说智能内核
 
 本目录是 2026-08-01 起的产品重构执行基线。它不删除旧文档中仍然有效的安全、数据、
 同步和商业约束，但在首页、创作工作区、开书流程、导入改写和模型配置方面取代旧的
 “系统模块驱动”信息架构。
 
-DESIGN v0.3.1b 是 P01–P44 的视觉与交互目标版本，不是安装包版本。当前应用清单为 0.2.5；
+DESIGN v0.3.1b 是 P01–P44 的视觉与交互目标版本，不是安装包版本。当前应用清单为 0.2.6；
 已发布 annotated tag `v0.2.5` 精确指向来源提交
 `5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`。同提交的
 [GitHub CI run 32367317531](https://github.com/gugubugugu0826/InkShadow/actions/runs/32367317531)
 三个作业全部成功，未签名 Pre-release 与 3 个附件已在
 [GitHub Release](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5) 公开；真实 Provider、
 Windows Tauri 人工路径、系统 200% DPI 与外部应用打开仍是 `BLOCKED_EXTERNAL`。
+
+`v0.2.6` 修复工作树正在处理真实 Windows 测试发现的本地数据库、AI 建议草稿接受、开书三方案、
+自动备份和固定能力验证账本问题。当前应用清单已升至 `0.2.6`，最终全量、真机、真实模型、
+干净提交、推送、打包和发布均未完成。不要把它与上面的 `v0.2.5` 冻结证据合并；增量事实见
+[`../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)。
 
 ## 文档状态与阅读顺序
 

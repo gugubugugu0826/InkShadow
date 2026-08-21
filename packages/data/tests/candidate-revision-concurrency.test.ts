@@ -18,14 +18,23 @@ import {
   type Result,
   type UuidV7,
 } from "@inkshadow/domain";
-import { AcceptAiCandidate } from "@inkshadow/application";
+import { AcceptAiCandidate, type AcceptCandidateCommit } from "@inkshadow/application";
+import { parseUuidV7 as parseTaskUuidV7, type CreateTaskInput } from "@inkshadow/task-engine";
 import { describe, expect } from "vitest";
 
+import {
+  type ExecuteResult,
+  type SqlExecutor,
+  type SqlPrimitive,
+  type TransactionExecutor,
+} from "../src/executor.js";
 import { createSqliteRepositories, type SqliteRepositories } from "../src/sqlite-repositories.js";
+import { SqliteTaskRepository } from "../src/task-sqlite-repositories.js";
 import { fileSqliteIt, NodeSqliteExecutor } from "./node-sqlite-executor.js";
 
 const migration = [
   readFileSync(new URL("../migrations/0001_core.sql", import.meta.url), "utf8"),
+  readFileSync(new URL("../migrations/0002_tasks_notifications.sql", import.meta.url), "utf8"),
   `ALTER TABLE chapters ADD COLUMN privacy_mode TEXT NOT NULL DEFAULT 'standard'
      CHECK (privacy_mode IN ('standard', 'local_only'));
    ALTER TABLE chapters ADD COLUMN privacy_revision INTEGER NOT NULL DEFAULT 1
@@ -46,6 +55,9 @@ const INITIAL_VERSION_ID = uuid(3);
 const CANDIDATE_ID = uuid(4);
 const STALE_ACCEPT_VERSION_ID = uuid(5);
 const TAMPER_ACCEPT_VERSION_ID = uuid(6);
+const UNKNOWN_ACCEPT_VERSION_ID = uuid(7);
+const UNKNOWN_ACCEPT_TASK_ID = uuid(8);
+const DUPLICATE_ACCEPT_VERSION_ID = uuid(9);
 const NOW = iso("2026-08-08T00:00:00.000Z");
 const LATER = iso("2026-08-08T00:01:00.000Z");
 
@@ -239,7 +251,177 @@ describe("SQLite Candidate revision authority", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  fileSqliteIt(
+    "reconciles a lost commit receipt from authoritative rows after restart without resubmitting",
+    async () => {
+      const directory = mkdtempSync(join(tmpdir(), "inkshadow-candidate-unknown-commit-"));
+      const databasePath = join(directory, "candidate.sqlite");
+      const first = new NodeSqliteExecutor(migration, databasePath);
+      let firstOpen = true;
+      let restarted: NodeSqliteExecutor | null = null;
+      try {
+        const fixture = await seedFixture(first);
+        const originalVersions = expectOk(
+          await fixture.repositories.chapterVersions.listByChapterId(CHAPTER_ID),
+        );
+        const uncertainExecutor = new LostCommitReceiptExecutor(first);
+        const acceptingRepositories = createSqliteRepositories(uncertainExecutor, {
+          acceptedCandidateTaskFactory: (commit) => acceptedPipelineTask(commit),
+        });
+        const useCase = new AcceptAiCandidate(
+          acceptingRepositories.aiCandidates,
+          acceptingRepositories.chapters,
+          acceptingRepositories.contentCommits,
+          { next: () => UNKNOWN_ACCEPT_VERSION_ID },
+          { now: () => LATER },
+          { sha256: (content: string) => Promise.resolve(ok(checksum(content))) },
+          acceptingRepositories.chapterVersions,
+        );
+
+        const outcome = await useCase.execute({
+          candidateId: CANDIDATE_ID,
+          expectedCandidateRevision: 1,
+        });
+        expect(outcome.ok).toBe(false);
+        if (outcome.ok) throw new Error("Expected an unresolved commit receipt.");
+        expect(outcome.error).toMatchObject({
+          code: "REPOSITORY_ERROR",
+          retryable: false,
+          details: {
+            databaseCode: "SQLITE_COMMIT_OUTCOME_UNKNOWN",
+            outcome: "unknown",
+          },
+        });
+        expect(outcome.error.actions).toEqual(["EXPORT_DRAFT"]);
+
+        await first.close();
+        firstOpen = false;
+        restarted = new NodeSqliteExecutor("", databasePath);
+        const restartedRepositories = createSqliteRepositories(restarted);
+        const chapter = expectPresent(
+          expectOk(await restartedRepositories.chapters.findById(CHAPTER_ID)),
+        );
+        const candidate = expectPresent(
+          expectOk(await restartedRepositories.aiCandidates.findById(CANDIDATE_ID)),
+        );
+        const versions = expectOk(
+          await restartedRepositories.chapterVersions.listByChapterId(CHAPTER_ID),
+        );
+        expect(chapter.toSnapshot()).toMatchObject({
+          content: fixture.candidate.content,
+          currentVersionId: UNKNOWN_ACCEPT_VERSION_ID,
+          revision: 2,
+        });
+        expect(candidate.toSnapshot()).toMatchObject({ status: "accepted", revision: 2 });
+        expect(versions).toHaveLength(2);
+        expect(versions.find((version) => version.id === INITIAL_VERSION_ID)?.toSnapshot()).toEqual(
+          originalVersions[0]?.toSnapshot(),
+        );
+        expect(
+          versions.find((version) => version.id === UNKNOWN_ACCEPT_VERSION_ID)?.toSnapshot(),
+        ).toMatchObject({
+          id: UNKNOWN_ACCEPT_VERSION_ID,
+          reason: "candidate_accept",
+          sourceCandidateId: CANDIDATE_ID,
+        });
+
+        const parsedTaskId = parseTaskUuidV7(UNKNOWN_ACCEPT_TASK_ID);
+        if (!parsedTaskId.ok) throw parsedTaskId.error;
+        const loadedTask = await new SqliteTaskRepository(restarted).findById(parsedTaskId.value);
+        if (!loadedTask.ok) throw loadedTask.error;
+        const task = expectPresent(loadedTask.value);
+        expect(task.toSnapshot()).toMatchObject({
+          status: "queued",
+          idempotencyKey: `story.accepted-version:${UNKNOWN_ACCEPT_VERSION_ID}`,
+          metadata: {
+            chapterId: CHAPTER_ID,
+            versionId: UNKNOWN_ACCEPT_VERSION_ID,
+          },
+        });
+
+        const duplicate = await new AcceptAiCandidate(
+          restartedRepositories.aiCandidates,
+          restartedRepositories.chapters,
+          restartedRepositories.contentCommits,
+          { next: () => DUPLICATE_ACCEPT_VERSION_ID },
+          { now: () => LATER },
+          { sha256: (content: string) => Promise.resolve(ok(checksum(content))) },
+          restartedRepositories.chapterVersions,
+        ).execute({
+          candidateId: CANDIDATE_ID,
+          expectedCandidateRevision: 1,
+        });
+        expectErrorCode(duplicate, "VERSION_CONFLICT");
+        expect(
+          expectOk(await restartedRepositories.chapterVersions.listByChapterId(CHAPTER_ID)),
+        ).toHaveLength(2);
+      } finally {
+        await restarted?.close();
+        if (firstOpen) await first.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
 });
+
+class LostCommitReceiptExecutor implements SqlExecutor {
+  private loseNextTransactionReceipt = true;
+
+  public constructor(private readonly delegate: SqlExecutor) {}
+
+  public select<Row extends object>(
+    query: string,
+    bindValues: readonly SqlPrimitive[] = [],
+  ): Promise<Row[]> {
+    return this.delegate.select<Row>(query, bindValues);
+  }
+
+  public execute(query: string, bindValues: readonly SqlPrimitive[] = []): Promise<ExecuteResult> {
+    return this.delegate.execute(query, bindValues);
+  }
+
+  public async transaction<Value>(
+    operation: (transaction: TransactionExecutor) => Promise<Value>,
+  ): Promise<Value> {
+    const value = await this.delegate.transaction(operation);
+    if (this.loseNextTransactionReceipt) {
+      this.loseNextTransactionReceipt = false;
+      throw {
+        code: "SQLITE_COMMIT_OUTCOME_UNKNOWN",
+        stage: "transaction_commit",
+        outcome: "unknown",
+      };
+    }
+    return value;
+  }
+
+  public close(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
+function acceptedPipelineTask(commit: AcceptCandidateCommit): CreateTaskInput {
+  const version = commit.version.toSnapshot();
+  return {
+    id: UNKNOWN_ACCEPT_TASK_ID,
+    type: "story.accepted-version.process",
+    idempotencyKey: `story.accepted-version:${version.id}`,
+    metadata: {
+      projectId: version.projectId,
+      chapterId: version.chapterId,
+      versionId: version.id,
+      source: "candidate_accept",
+      acceptedCharacterCount: version.content.length,
+      runChapterSummary: false,
+      runStoryState: false,
+      operation: "rebuild-derived-story-state",
+    },
+    priority: 75,
+    maxAttempts: 3,
+    now: version.createdAt,
+  };
+}
 
 async function seedFixture(
   executor: NodeSqliteExecutor,

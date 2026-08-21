@@ -5,6 +5,7 @@ import {
   isUiErrorRetryable,
   normalizeUiError,
   projectOrdinaryUiError,
+  requiresRuntimeDatabaseReopen,
   UiActionError,
 } from "./ui-error";
 
@@ -50,6 +51,75 @@ describe("normalizeUiError SQLite persistence failures", () => {
     ).toBe(
       "本地磁盘空间不足，本次写入未提交。请保持窗口打开，释放空间后重试，或将草稿导出到其他磁盘。",
     );
+  });
+
+  it.each(["SQLITE_WRITE_OUTCOME_UNKNOWN", "SQLITE_COMMIT_OUTCOME_UNKNOWN"])(
+    "reports %s as unresolved and never suggests submitting the write again",
+    (databaseCode) => {
+      const privateDetail = "C:\\Users\\writer\\private.sqlite UPDATE chapters";
+      const error = new AppError({
+        code: "REPOSITORY_ERROR",
+        message: privateDetail,
+        retryable: false,
+        actions: ["EXPORT_DRAFT"],
+        details: { databaseCode, operation: privateDetail, outcome: "unknown" },
+      });
+
+      const ordinary = projectOrdinaryUiError(error);
+      expect(ordinary).toEqual({
+        title: "写入结果需要核对",
+        description:
+          "本机暂时无法确认这次写入是否已经完成。请重新打开当前页面，核对正文、版本和 AI 建议草稿状态；系统不会自动再次提交。",
+      });
+      expect(JSON.stringify(ordinary)).not.toContain(privateDetail);
+      expect(ordinary.description).not.toContain(databaseCode);
+      expect(isUiErrorRetryable(error)).toBe(false);
+    },
+  );
+
+  it("reports a bounded local timeout without claiming success or exposing its stage", () => {
+    const error = new AppError({
+      code: "REPOSITORY_ERROR",
+      message: "private native stage",
+      retryable: true,
+      actions: ["RETRY", "EXPORT_DRAFT"],
+      details: {
+        databaseCode: "SQLITE_OPERATION_TIMEOUT",
+        operation: "private statement",
+        outcome: "not_confirmed",
+      },
+    });
+
+    const ordinary = projectOrdinaryUiError(error);
+    expect(ordinary).toEqual({
+      title: "本地操作等待超时",
+      description:
+        "本地数据操作等待超时，本次操作没有被报告为成功。请重新打开当前页面核对内容；系统不会自动重试。",
+    });
+    expect(JSON.stringify(ordinary)).not.toContain("private");
+    expect(ordinary.description).not.toContain("SQLITE_OPERATION_TIMEOUT");
+  });
+
+  it("distinguishes errors that require a new native database session from safe same-session retries", () => {
+    expect(
+      requiresRuntimeDatabaseReopen(
+        new AppError({
+          code: "REPOSITORY_ERROR",
+          message: "internal",
+          details: { databaseCode: "SQLITE_OPERATION_TIMEOUT" },
+        }),
+      ),
+    ).toBe(true);
+    expect(requiresRuntimeDatabaseReopen({ code: "SQLITE_CONNECTION_INVALIDATED" })).toBe(true);
+    expect(
+      requiresRuntimeDatabaseReopen(
+        new AppError({
+          code: "SAVE_FAILED",
+          message: "internal",
+          details: { databaseCode: "SQLITE_BUSY" },
+        }),
+      ),
+    ).toBe(false);
   });
 
   it.each([

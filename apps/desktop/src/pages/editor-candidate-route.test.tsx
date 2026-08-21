@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import {
   AiCandidate,
+  AppError,
+  err,
   type AiCandidateApplicationIntent,
   type AiCandidateSource,
   type Chapter,
@@ -456,7 +458,10 @@ describe("editor candidate route selection", () => {
 
   it("locks editor input while a manual Candidate acceptance is pending", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
+    const providerGenerate = vi.spyOn(runtime.modelGateway, "generate");
     const { chapter, project } = await seedChapter(runtime);
+    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!versionsBefore.ok) throw versionsBefore.error;
     const candidate = await createReadyCandidate(runtime, project, chapter, "手动接受的追加正文", {
       source: "polish",
       applicationIntent: {
@@ -478,19 +483,24 @@ describe("editor candidate route selection", () => {
     const acceptanceStarted = new Promise<void>((resolve) => {
       markAcceptanceStarted = resolve;
     });
-    vi.spyOn(runtime.useCases.acceptCandidate, "execute").mockImplementation(async (input) => {
-      markAcceptanceStarted();
-      await acceptanceGate;
-      return executeAcceptance(input);
-    });
+    const accept = vi
+      .spyOn(runtime.useCases.acceptCandidate, "execute")
+      .mockImplementation(async (input) => {
+        markAcceptanceStarted();
+        await acceptanceGate;
+        return executeAcceptance(input);
+      });
     const user = userEvent.setup();
     renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
     const editor = await screen.findByRole("textbox", { name: "章节正文" });
 
     await user.click(await screen.findByRole("button", { name: /比较.*建议/u }));
     const review = await screen.findByRole("dialog", { name: /比较.*建议与正文/u });
-    await user.click(within(review).getByRole("button", { name: "使用这版" }));
+    const acceptButton = within(review).getByRole("button", { name: "使用这版" });
+    await user.click(acceptButton);
     await acceptanceStarted;
+    fireEvent.click(acceptButton);
+    expect(accept).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(editor).toHaveAttribute("readonly"));
     expect(review.querySelector(".ink-overlay__footer .ink-button--ai-primary")).toHaveAttribute(
       "aria-busy",
@@ -503,6 +513,139 @@ describe("editor candidate route selection", () => {
     releaseAcceptance();
     await waitFor(() => expect(editor).not.toHaveAttribute("readonly"));
     expect(editor).toHaveValue(`${chapter.content}${candidate.content}`);
+    expect(providerGenerate).not.toHaveBeenCalled();
+    const persistedCandidate = await runtime.repositories.aiCandidates.findById(candidate.id);
+    expect(persistedCandidate.ok && persistedCandidate.value?.status).toBe("accepted");
+    const versionsAfter = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!versionsAfter.ok) throw versionsAfter.error;
+    expect(versionsAfter.value).toHaveLength(versionsBefore.value.length + 1);
+    const originalVersion = versionsBefore.value[0];
+    expect(
+      versionsAfter.value.find((version) => version.id === originalVersion?.id)?.toSnapshot(),
+    ).toEqual(originalVersion?.toSnapshot());
+  });
+
+  it("releases a native acceptance after its atomic commit without waiting for derived work", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    Object.assign(runtime, { mode: "tauri" as const });
+    const providerGenerate = vi.spyOn(runtime.modelGateway, "generate");
+    const { chapter, project } = await seedChapter(runtime);
+    const candidate = await createReadyCandidate(
+      runtime,
+      project,
+      chapter,
+      "提交后的本地派生可稍后继续",
+      {
+        source: "polish",
+        applicationIntent: {
+          task: "continuation",
+          application: "insert_at_cursor",
+          payload: "fragment",
+          startUtf16: chapter.content.length,
+          endUtf16: chapter.content.length,
+        },
+      },
+    );
+    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!versionsBefore.ok) throw versionsBefore.error;
+    const originalFindTask = runtime.taskCenter.findTaskByIdempotencyKey.bind(runtime.taskCenter);
+    let markTaskLookupStarted!: () => void;
+    const taskLookupStarted = new Promise<void>((resolve) => {
+      markTaskLookupStarted = resolve;
+    });
+    let releaseTaskLookup!: () => void;
+    const taskLookupGate = new Promise<void>((resolve) => {
+      releaseTaskLookup = resolve;
+    });
+    vi.spyOn(runtime.taskCenter, "findTaskByIdempotencyKey").mockImplementation(async (key) => {
+      markTaskLookupStarted();
+      await taskLookupGate;
+      return originalFindTask(key);
+    });
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
+    const editor = await screen.findByRole("textbox", { name: "章节正文" });
+
+    await user.click(await screen.findByRole("button", { name: /比较.*建议/u }));
+    const review = await screen.findByRole("dialog", { name: /比较.*建议与正文/u });
+    await user.click(within(review).getByRole("button", { name: "使用这版" }));
+    await taskLookupStarted;
+
+    await waitFor(() => expect(editor).not.toHaveAttribute("readonly"));
+    expect(editor).toHaveValue(`${chapter.content}${candidate.content}`);
+    expect(providerGenerate).not.toHaveBeenCalled();
+    const accepted = await runtime.repositories.aiCandidates.findById(candidate.id);
+    expect(accepted.ok && accepted.value?.status).toBe("accepted");
+    const versionsAfter = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!versionsAfter.ok) throw versionsAfter.error;
+    expect(versionsAfter.value).toHaveLength(versionsBefore.value.length + 1);
+    const originalVersion = versionsBefore.value[0];
+    expect(
+      versionsAfter.value.find((version) => version.id === originalVersion?.id)?.toSnapshot(),
+    ).toEqual(originalVersion?.toSnapshot());
+
+    releaseTaskLookup();
+  });
+
+  it("keeps the suggestion isolated when a commit receipt cannot be confirmed", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const providerGenerate = vi.spyOn(runtime.modelGateway, "generate");
+    const { chapter, project } = await seedChapter(runtime);
+    const candidate = await createReadyCandidate(
+      runtime,
+      project,
+      chapter,
+      "结果未知时不得再次提交",
+      {
+        source: "polish",
+        applicationIntent: {
+          task: "continuation",
+          application: "insert_at_cursor",
+          payload: "fragment",
+          startUtf16: chapter.content.length,
+          endUtf16: chapter.content.length,
+        },
+      },
+    );
+    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!versionsBefore.ok) throw versionsBefore.error;
+    vi.spyOn(runtime.useCases.acceptCandidate, "execute").mockResolvedValue(
+      err(
+        new AppError({
+          code: "REPOSITORY_ERROR",
+          message: "private commit phase",
+          retryable: false,
+          actions: ["EXPORT_DRAFT"],
+          details: {
+            databaseCode: "SQLITE_COMMIT_OUTCOME_UNKNOWN",
+            operation: "private SQL",
+            outcome: "unknown",
+          },
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
+    const editor = await screen.findByRole("textbox", { name: "章节正文" });
+
+    await user.click(await screen.findByRole("button", { name: /比较.*建议/u }));
+    const review = await screen.findByRole("dialog", { name: /比较.*建议与正文/u });
+    await user.click(within(review).getByRole("button", { name: "使用这版" }));
+
+    const unknownOutcomeNotices = await screen.findAllByText(
+      "本机暂时无法确认这次写入是否已经完成。请重新打开当前页面，核对正文、版本和 AI 建议草稿状态；系统不会自动再次提交。",
+    );
+    expect(unknownOutcomeNotices.length).toBeGreaterThan(0);
+    for (const notice of unknownOutcomeNotices) expect(notice).toBeVisible();
+    expect(editor).toHaveValue(chapter.content);
+    expect(editor).not.toHaveAttribute("readonly");
+    expect(providerGenerate).not.toHaveBeenCalled();
+    const persistedCandidate = await runtime.repositories.aiCandidates.findById(candidate.id);
+    expect(persistedCandidate.ok && persistedCandidate.value?.status).toBe("ready");
+    const versionsAfter = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    expect(versionsAfter.ok && versionsAfter.value).toEqual(versionsBefore.value);
+    expect(document.body).not.toHaveTextContent("SQLITE_COMMIT_OUTCOME_UNKNOWN");
+    expect(document.body).not.toHaveTextContent("private SQL");
   });
 
   it("does not dispatch manual Candidate acceptance when the chapter became dirty", async () => {
@@ -532,7 +675,7 @@ describe("editor candidate route selection", () => {
 
     expect(
       await screen.findByText(
-        "正文仍有尚未完成的本地保存；这份 Candidate 继续保持隔离，没有写入正文或创建版本。",
+        "正文仍有尚未完成的本地保存；这份 AI 建议草稿继续保持隔离，没有写入正文或创建版本。",
       ),
     ).toBeVisible();
     expect(accept).not.toHaveBeenCalled();

@@ -612,7 +612,7 @@ function relationKindLabel(kind: string): string {
     gains_information: "获得信息",
     loses_item: "失去物品",
   };
-  return labels[kind] ?? kind;
+  return labels[kind] ?? "其他关联";
 }
 
 function prerequisiteKindLabel(kind: string): string {
@@ -627,7 +627,7 @@ function itemChangeKindLabel(kind: string): string {
     created: "新出现",
     destroyed: "被毁或消失",
   };
-  return labels[kind] ?? kind;
+  return labels[kind] ?? "其他物品变化";
 }
 
 function foreshadowChangeKindLabel(kind: string): string {
@@ -638,7 +638,7 @@ function foreshadowChangeKindLabel(kind: string): string {
     resolved: "回收",
     misdirected: "误导",
   };
-  return labels[kind] ?? kind;
+  return labels[kind] ?? "其他伏笔变化";
 }
 
 function formatCausalState(value: string | number | boolean | null): string {

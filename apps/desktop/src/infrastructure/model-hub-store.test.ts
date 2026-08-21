@@ -820,6 +820,54 @@ describe("TauriModelHubStore", () => {
     );
   });
 
+  it("never binds an uncertain timed-out probe to a definite failed capability scan", async () => {
+    window.localStorage.clear();
+    const store = new BrowserDevelopmentModelHubStore(window.localStorage, clock);
+    const [catalogEntryId] = await seedAvailableCatalog(store, "ambiguous-capability-scan");
+    const started = await store.startInvocation({
+      id: "ambiguous-capability-invocation",
+      task: "capability_probe",
+      connectionId: "ambiguous-capability-scan",
+      catalogEntryId,
+      providerKindSnapshot: "custom_openai_compatible",
+      modelIdSnapshot: catalogEntryId,
+      routeReason: "user_override",
+      attempt: 1,
+      privacyPolicy: "cloud_allowed",
+      dataDestination: "remote",
+    });
+    const dispatched = await store.markInvocationDispatched({
+      id: started.id,
+      dispatchedAt: NOW,
+      expectedRevision: started.revision,
+    });
+    const uncertain = await store.finishInvocation({
+      id: dispatched.id,
+      status: "timed_out",
+      errorCode: "PROVIDER_RESULT_AMBIGUOUS",
+      expectedRevision: dispatched.revision,
+    });
+
+    await expect(
+      store.recordCapabilityScan({
+        scanId: "ambiguous-capability-failed-scan",
+        catalogEntryId,
+        modelInvocationId: uncertain.id,
+        scanKind: "lightweight_probe",
+        status: "failed",
+        evidenceVersion: "ambiguous-capability-v1",
+        errorCode: "PROVIDER_RESULT_AMBIGUOUS",
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_CAPABILITY_INVOCATION_INVALID" });
+    await expect(store.listCapabilityEvidence(catalogEntryId)).resolves.toEqual([]);
+    const recentFailures = await store.listRecentAiFailures();
+    expect(recentFailures).toHaveLength(1);
+    expect(recentFailures[0]).toMatchObject({
+      diagnosticId: `model_invocation:${uncertain.id}`,
+      normalizedErrorCode: "PROVIDER_RESULT_AMBIGUOUS",
+    });
+  });
+
   it("persists cost, privacy, and aggregate evaluation evidence without content", async () => {
     const executor = new NodeSqliteExecutor(migration);
     const store = new TauriModelHubStore(executor, clock);

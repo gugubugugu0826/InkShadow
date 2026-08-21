@@ -141,7 +141,7 @@ describe("ChapterSummaryPanel historical backfill", () => {
     const planRegion = await screen.findByLabelText("现有章节回填只读计划");
     expect(within(planRegion).getByText("3 章")).toBeVisible();
     expect(within(planRegion).getByText("12,345 字符")).toBeVisible();
-    expect(within(planRegion).getByText(/Provider 调用上限：0 次/)).toBeVisible();
+    expect(within(planRegion).getByText(/模型服务调用上限：0 次/)).toBeVisible();
     expect(within(planRegion).getByText(/本次待登记 1 个.*纯本地回填边界/)).toBeVisible();
     expect(historicalBackfill.register).not.toHaveBeenCalled();
 

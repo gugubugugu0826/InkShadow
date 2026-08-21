@@ -19,8 +19,8 @@ import {
 } from "./model-hub-provider-registry";
 import { MODEL_HUB_READINESS_CHANGED_EVENT } from "./model-hub-readiness";
 import {
+  executeAuditedModelHubTextCapabilityProbe,
   modelHubTextCapabilityProbeFailureMetadata,
-  runModelHubTextCapabilityProbe,
 } from "./model-hub-text-capability-probe";
 import {
   isRetiredModelProviderConnection,
@@ -489,6 +489,7 @@ export async function configureQuickBookStartRoute(
   });
 
   const probeScanId = runtime.ids.next();
+  const probeInvocationId = runtime.ids.next();
   try {
     const currentConnection = await runtime.modelHub.findConnection(connection.id);
     const currentCatalogEntry =
@@ -510,16 +511,32 @@ export async function configureQuickBookStartRoute(
         catalogEntry: currentCatalogEntry,
       }),
     );
-    const generated = await runModelHubTextCapabilityProbe({
+    const generated = await executeAuditedModelHubTextCapabilityProbe({
       gateway: runtime.modelGateway,
+      modelHub: runtime.modelHub,
+      clock: runtime.clock,
       providerKind: currentConnection.providerKind,
       generationId: runtime.ids.next(),
+      invocationId: probeInvocationId,
+      connection: currentConnection,
+      catalogEntry: currentCatalogEntry,
       config: Object.freeze({ ...modelHubNativeEndpointConfig(currentConnection), retryLimit: 0 }),
       model: currentCatalogEntry.providerModelId,
+      assertBeforeProviderDispatch: async () => {
+        const finalTarget = await readQuickBookStartTarget(runtime, input);
+        assertModelHubFinalDispatchUnchanged(
+          expectedDispatchIdentity,
+          modelHubFinalDispatchIdentity({
+            connection: finalTarget.connection,
+            catalogEntry: finalTarget.catalogEntry,
+          }),
+        );
+      },
     });
     await runtime.modelHub.recordCapabilityScan({
       scanId: probeScanId,
       catalogEntryId: catalogEntry.id,
+      modelInvocationId: generated.invocation.id,
       scanKind: "lightweight_probe",
       status: generated.acceptedTruncatedOutput ? "partial" : "succeeded",
       evidenceVersion: "quick-text-probe-v1",
@@ -554,10 +571,32 @@ export async function configureQuickBookStartRoute(
     });
   } catch (cause: unknown) {
     const normalized = normalizeQuickError(cause, connection.providerKind);
+    const probeInvocation = await runtime.modelHub
+      .findInvocation(probeInvocationId)
+      .catch(() => null);
+    if (
+      probeInvocation !== null &&
+      (probeInvocation.status === "queued" || probeInvocation.status === "running")
+    ) {
+      throw normalized;
+    }
+    if (
+      normalized.code === "PROVIDER_RESULT_AMBIGUOUS" ||
+      (probeInvocation?.task === "capability_probe" &&
+        probeInvocation.status === "timed_out" &&
+        probeInvocation.providerDispatchStartedAt !== null)
+    ) {
+      // A dispatch receipt proves that the Provider may already have completed
+      // the fixed probe. Keep the invocation as the sole durable fact so the
+      // ordinary capability view can say “结果待核对”; a failed scan would
+      // incorrectly turn this into a definite capability failure.
+      throw normalized;
+    }
     await runtime.modelHub
       .recordCapabilityScan({
         scanId: probeScanId,
         catalogEntryId: catalogEntry.id,
+        ...(probeInvocation === null ? {} : { modelInvocationId: probeInvocation.id }),
         scanKind: "lightweight_probe",
         status: "failed",
         evidenceVersion: "quick-text-probe-v1",
@@ -810,6 +849,13 @@ function normalizeQuickError(
 ): QuickModelConnectionError {
   if (cause instanceof QuickModelConnectionError) return cause;
   const code = safeCauseCode(cause);
+  if (code === "PROVIDER_RESULT_AMBIGUOUS") {
+    return quickError(
+      code,
+      "模型能力验证已经发送，但结果无法确认。为避免重复费用，系统不会自动重发。",
+      false,
+    );
+  }
   if (/AUTH|CREDENTIAL|UNAUTHORIZED|FORBIDDEN|401|403/u.test(code)) {
     return quickError(
       code,

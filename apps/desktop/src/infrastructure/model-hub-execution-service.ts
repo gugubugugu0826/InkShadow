@@ -43,6 +43,7 @@ import {
   SINGLE_ATTEMPT_STOP_CONDITIONS,
   type ModelExecutionPolicy,
 } from "./model-execution-policy";
+import { isRecoveredNativeDispatchHandshakeAmbiguous } from "./model-hub-text-capability-probe";
 import { UiActionError } from "./ui-error";
 
 export interface InspectModelHubTextTaskInput {
@@ -59,6 +60,11 @@ export interface InspectModelHubTextTaskInput {
 export interface ExecuteModelHubTextTaskInput extends InspectModelHubTextTaskInput {
   readonly dispatchScope: NativeModelDispatchScope;
   readonly generationId?: string;
+  /**
+   * Classifies fixed, content-free evaluation calls independently from the
+   * writing task whose route is being evaluated.
+   */
+  readonly invocationLedgerTask?: "capability_probe";
   /** Optional caller-reserved invocation id used to recover an interrupted local workflow. */
   readonly invocationId?: string;
   /**
@@ -136,7 +142,10 @@ export interface ModelHubTextInspectionDependencies {
 }
 
 export interface ModelHubTextExecutionDependencies extends ModelHubTextInspectionDependencies {
-  readonly modelGateway: Pick<NativeModelGatewayClient, "available" | "generate">;
+  readonly modelGateway: Pick<
+    NativeModelGatewayClient,
+    "available" | "generate" | "supportsNativeInvocationDispatchLedger"
+  >;
   readonly ids: Pick<UuidV7Generator, "next">;
 }
 
@@ -273,6 +282,7 @@ export async function executeModelHubTextTask(
   input: ExecuteModelHubTextTaskInput,
 ): Promise<ModelHubTextTaskExecutionResult> {
   const executionPolicy = resolveModelExecutionPolicy(input);
+  assertInvocationLedgerClassification(input, executionPolicy);
   const { route, target, usedFallback } = await resolveTextPlan(dependencies, input);
   assertExecutionPolicyTransportSupported(executionPolicy, target.connection);
   const expectedDispatchIdentity = modelHubFinalDispatchIdentity({
@@ -286,7 +296,7 @@ export async function executeModelHubTextTask(
   const invocationId = input.invocationId ?? dependencies.ids.next();
   let invocation = await dependencies.modelHub.startInvocation({
     id: invocationId,
-    task: input.task,
+    task: input.invocationLedgerTask ?? input.task,
     routeTask: route.task,
     connectionId: target.connection.id,
     catalogEntryId: target.catalogEntry.id,
@@ -303,6 +313,12 @@ export async function executeModelHubTextTask(
   let dispatched = false;
   let generatedObservation: NativeModelGenerationResult | null = null;
   let generatedCostMicros: string | null = null;
+  let successSettlementStarted = false;
+  let recoveredNativeDispatchReceipt = false;
+  const nativeReceiptObservation = { postReceiptLocalFailure: false };
+  const nativeCapabilityDispatchLedger =
+    input.invocationLedgerTask === "capability_probe" &&
+    dependencies.modelGateway.supportsNativeInvocationDispatchLedger === true;
   try {
     await input.onBeforeDispatch?.({
       generationId,
@@ -339,15 +355,7 @@ export async function executeModelHubTextTask(
         isLoopbackModelBaseUrl(current.target.connection.baseUrl),
     });
     input.assertBeforeProviderDispatch?.();
-    invocation = await dependencies.modelHub.markInvocationDispatched({
-      id: invocation.id,
-      dispatchedAt: dependencies.clock.now(),
-      expectedRevision: invocation.revision,
-    });
-    // From this durable point onward an interrupted result is ambiguous.  No
-    // async hook may run between the receipt and the native gateway boundary.
-    dispatched = true;
-    input.onProviderDispatchStarted?.({
+    const dispatchSelection = Object.freeze({
       generationId,
       invocationId: invocation.id,
       connectionId: current.target.connection.id,
@@ -359,6 +367,17 @@ export async function executeModelHubTextTask(
         current.target.costPrivacy.evidenceSource !== "unknown" &&
         isLoopbackModelBaseUrl(current.target.connection.baseUrl),
     });
+    if (!nativeCapabilityDispatchLedger) {
+      invocation = await dependencies.modelHub.markInvocationDispatched({
+        id: invocation.id,
+        dispatchedAt: dependencies.clock.now(),
+        expectedRevision: invocation.revision,
+      });
+      // Legacy/test gateways have no native SQLite boundary. Production
+      // capability probes use the atomic native receipt below.
+      dispatched = true;
+      input.onProviderDispatchStarted?.(dispatchSelection);
+    }
     const reasoningPolicy =
       executionPolicy.reasoningMode === "capability_probe"
         ? modelProviderTextCapabilityProbePolicy(current.target.connection.providerKind)
@@ -384,6 +403,34 @@ export async function executeModelHubTextTask(
         ? {}
         : { responseFormat: executionPolicy.transportResponseFormat }),
       ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
+      ...(nativeCapabilityDispatchLedger
+        ? {
+            invocationDispatchLedger: {
+              invocationId: invocation.id,
+              expectedRevision: invocation.revision,
+              connectionId: current.target.connection.id,
+              connectionRevision: current.target.connection.revision,
+              catalogEntryId: current.target.catalogEntry.id,
+              catalogEntryRevision: current.target.catalogEntry.revision,
+              providerKindSnapshot: current.target.connection.providerKind,
+              modelIdSnapshot: current.target.catalogEntry.providerModelId,
+            },
+            onInvocationDispatchAccepted: (receipt) => {
+              invocation = Object.freeze({
+                ...invocation,
+                providerDispatchStartedAt: receipt.dispatchedAt,
+                revision: receipt.revision,
+              });
+              dispatched = true;
+              try {
+                input.onProviderDispatchStarted?.(dispatchSelection);
+              } catch (cause: unknown) {
+                nativeReceiptObservation.postReceiptLocalFailure = true;
+                throw cause;
+              }
+            },
+          }
+        : {}),
     });
     generatedObservation = generated;
     generatedCostMicros = calculateActualCost(target.costPrivacy, generated.usage);
@@ -405,6 +452,7 @@ export async function executeModelHubTextTask(
       route.maximumCostMicros !== null &&
       cost !== null &&
       BigInt(cost) > BigInt(route.maximumCostMicros);
+    successSettlementStarted = true;
     invocation = await dependencies.modelHub.finishInvocation({
       id: invocation.id,
       status: "succeeded",
@@ -431,6 +479,30 @@ export async function executeModelHubTextTask(
       costCeilingExceededAfterDispatch,
     });
   } catch (cause: unknown) {
+    if (successSettlementStarted) {
+      throw new AggregateError(
+        [cause],
+        "模型服务已经返回，但调用账本未能安全结算；重启后会标记为结果待核对，系统不会自动重发。",
+      );
+    }
+    if (nativeCapabilityDispatchLedger && !dispatched) {
+      // If the invoke response was lost after the native atomic write, recover
+      // the durable truth before classifying the outcome. Never resend here.
+      try {
+        const persisted = await dependencies.modelHub.findInvocation(invocation.id);
+        if (
+          persisted?.status === "running" &&
+          persisted.providerDispatchStartedAt !== null &&
+          persisted.revision === invocation.revision + 1
+        ) {
+          invocation = persisted;
+          dispatched = true;
+          recoveredNativeDispatchReceipt = true;
+        }
+      } catch {
+        // Startup reconciliation owns an unreadable durable receipt.
+      }
+    }
     const normalized = dispatched
       ? normalizeDispatchedError(cause)
       : normalizePreDispatchError(cause);
@@ -441,11 +513,14 @@ export async function executeModelHubTextTask(
       target.maximumOutputTokens,
       dispatched,
     );
-    const ambiguous = isAmbiguousDispatchedTransportFailure(
-      dispatched,
-      normalized,
-      failureMetadata,
-    );
+    const ambiguous =
+      nativeReceiptObservation.postReceiptLocalFailure ||
+      isRecoveredNativeDispatchHandshakeAmbiguous(
+        recoveredNativeDispatchReceipt,
+        normalized.code === "MODEL_GENERATION_CANCELLED",
+        failureMetadata,
+      ) ||
+      isAmbiguousDispatchedTransportFailure(dispatched, normalized, failureMetadata);
     const projected = ambiguous ? ambiguousProviderResult(normalized, failureMetadata) : normalized;
     const status =
       normalized.code === "MODEL_GENERATION_CANCELLED"
@@ -484,6 +559,23 @@ export async function executeModelHubTextTask(
       projected.retryable,
       projected.dispatched,
       failure,
+    );
+  }
+}
+
+function assertInvocationLedgerClassification(
+  input: ExecuteModelHubTextTaskInput,
+  policy: ModelExecutionPolicy,
+): void {
+  if (input.invocationLedgerTask !== "capability_probe") return;
+  if (
+    input.dispatchScope.kind !== "non_project" ||
+    input.dispatchScope.reason !== "connection_probe" ||
+    policy.reasoningMode !== "capability_probe"
+  ) {
+    throw executionError(
+      "MODEL_CAPABILITY_PROBE_POLICY_INVALID",
+      "模型能力验证必须使用固定的非作品范围与零重试策略。",
     );
   }
 }

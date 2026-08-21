@@ -307,6 +307,8 @@ export interface CapabilityEvidenceInput {
 export interface RecordCapabilityScanInput {
   readonly scanId: string;
   readonly catalogEntryId: string;
+  /** Exact ordinary-ledger row for a real probe dispatch; null for metadata-only scans. */
+  readonly modelInvocationId?: string | null;
   readonly scanKind: "provider_metadata" | "official_preset" | "lightweight_probe" | "user_review";
   readonly status: "succeeded" | "partial" | "failed";
   readonly evidenceVersion: string;
@@ -487,7 +489,7 @@ export interface AppliedAutomaticModelHubRoutingPlan {
 
 export interface ModelInvocationFact {
   readonly id: string;
-  readonly task: NovelAiTask;
+  readonly task: ModelInvocationTask;
   readonly routeTask: NovelAiTask | null;
   readonly connectionId: string;
   readonly catalogEntryId: string | null;
@@ -517,9 +519,11 @@ export interface ModelInvocationFact {
   readonly revision: number;
 }
 
+export type ModelInvocationTask = NovelAiTask | "capability_probe";
+
 export interface StartModelInvocationInput {
   readonly id: string;
-  readonly task: NovelAiTask;
+  readonly task: ModelInvocationTask;
   readonly routeTask?: NovelAiTask | null;
   readonly connectionId: string;
   readonly catalogEntryId?: string | null;
@@ -600,6 +604,7 @@ export interface ModelHubStore {
     input: ApplyAutomaticModelHubRoutingPlanInput,
   ): Promise<AppliedAutomaticModelHubRoutingPlan>;
   listRecentAiFailures(limit?: number): Promise<readonly RecentAiFailure[]>;
+  listRunningInvocations(task: ModelInvocationTask): Promise<readonly ModelInvocationFact[]>;
   findInvocation(id: string): Promise<ModelInvocationFact | null>;
   startInvocation(input: StartModelInvocationInput): Promise<ModelInvocationFact>;
   markInvocationDispatched(input: MarkModelInvocationDispatchedInput): Promise<ModelInvocationFact>;
@@ -694,6 +699,7 @@ interface CapabilityEvidenceRow {
 interface ModelCapabilityScanFact {
   readonly id: string;
   readonly catalogEntryId: string;
+  readonly modelInvocationId?: string | null;
   readonly scanKind: RecordCapabilityScanInput["scanKind"];
   readonly status: RecordCapabilityScanInput["status"];
   readonly errorCode: string | null;
@@ -1926,6 +1932,19 @@ export class TauriModelHubStore implements ModelHubStore {
     return rows[0] === undefined ? null : hydrateInvocation(rows[0]);
   }
 
+  public async listRunningInvocations(
+    taskValue: ModelInvocationTask,
+  ): Promise<readonly ModelInvocationFact[]> {
+    const task = validateInvocationTask(taskValue);
+    const rows = await this.executor.select<InvocationRow>(
+      `${INVOCATION_SELECT}
+       WHERE task = ? AND status = 'running'
+       ORDER BY created_at ASC, id ASC`,
+      [task],
+    );
+    return Object.freeze(rows.map(hydrateInvocation));
+  }
+
   public async markInvocationDispatched(
     input: MarkModelInvocationDispatchedInput,
   ): Promise<ModelInvocationFact> {
@@ -2520,6 +2539,7 @@ export class InMemoryModelHubStore implements ModelHubStore {
       if (this.state.catalog[validated.catalogEntryId] === undefined) {
         throw modelHubError("MODEL_HUB_MODEL_NOT_FOUND", "The selected model does not exist.");
       }
+      assertMemoryCapabilityScanInvocation(this.state, validated);
       if (Object.hasOwn(this.state.capabilityScans, validated.scanId)) {
         throw conflict("MODEL_HUB_CAPABILITY_SCAN_CONFLICT");
       }
@@ -2579,6 +2599,7 @@ export class InMemoryModelHubStore implements ModelHubStore {
       ) {
         throw conflict("MODEL_HUB_PROBE_TARGET_CONFLICT");
       }
+      assertMemoryCapabilityScanInvocation(nextState, validated.scan);
       if (Object.hasOwn(nextState.capabilityScans, validated.scan.scanId)) {
         throw conflict("MODEL_HUB_CAPABILITY_SCAN_CONFLICT");
       }
@@ -3176,6 +3197,26 @@ export class InMemoryModelHubStore implements ModelHubStore {
     );
   }
 
+  public listRunningInvocations(
+    taskValue: ModelInvocationTask,
+  ): Promise<readonly ModelInvocationFact[]> {
+    return Promise.resolve().then(() => {
+      const task = validateInvocationTask(taskValue);
+      return Object.freeze(
+        Object.values(this.state.invocations)
+          .filter(
+            (invocation): invocation is ModelInvocationFact =>
+              invocation.task === task && invocation.status === "running",
+          )
+          .sort(
+            (left, right) =>
+              left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+          )
+          .map((invocation) => Object.freeze(structuredClone(invocation))),
+      );
+    });
+  }
+
   public markInvocationDispatched(
     input: MarkModelInvocationDispatchedInput,
   ): Promise<ModelInvocationFact> {
@@ -3545,6 +3586,9 @@ function isStoredCapabilityScanFact(value: unknown): value is ModelCapabilitySca
     isRecord(value) &&
     typeof value.id === "string" &&
     typeof value.catalogEntryId === "string" &&
+    (value.modelInvocationId === undefined ||
+      value.modelInvocationId === null ||
+      typeof value.modelInvocationId === "string") &&
     typeof value.scanKind === "string" &&
     typeof value.status === "string" &&
     (value.errorCode === null || typeof value.errorCode === "string") &&
@@ -3582,6 +3626,7 @@ function normalizeStoredCapabilityScanFact(
   return Object.freeze({
     id: boundedText(value.id, "capability scan id", 128),
     catalogEntryId: boundedText(value.catalogEntryId, "catalog entry id", 128),
+    modelInvocationId: optionalText(value.modelInvocationId, "model invocation id", 128),
     scanKind: value.scanKind,
     status: value.status,
     errorCode,
@@ -3951,6 +3996,7 @@ function validateCapabilityScanInput(input: RecordCapabilityScanInput) {
   return Object.freeze({
     scanId: boundedText(input.scanId, "capability scan id", 128),
     catalogEntryId: boundedText(input.catalogEntryId, "catalog entry id", 128),
+    modelInvocationId: optionalText(input.modelInvocationId, "model invocation id", 128),
     scanKind: input.scanKind,
     status: input.status,
     evidenceVersion: boundedText(input.evidenceVersion, "evidence version", 128),
@@ -4334,7 +4380,7 @@ function validateInvocationStart(input: StartModelInvocationInput) {
   }
   return Object.freeze({
     id: boundedText(input.id, "invocation id", 128),
-    task: validateTask(input.task),
+    task: validateInvocationTask(input.task),
     routeTask:
       input.routeTask === undefined || input.routeTask === null
         ? null
@@ -4942,18 +4988,34 @@ async function persistSqliteCapabilityScan(
   validated: ReturnType<typeof validateCapabilityScanInput>,
   now: string,
 ): Promise<void> {
+  const invocationLinkColumn = (
+    await transaction.select<{ present: number }>(
+      `SELECT COUNT(*) AS present
+       FROM pragma_table_info('model_capability_scans')
+       WHERE name = 'model_invocation_id'`,
+    )
+  )[0]?.present;
+  const supportsInvocationLink = invocationLinkColumn === 1;
+  if (!supportsInvocationLink && validated.modelInvocationId !== null) {
+    throw modelHubError(
+      "MODEL_HUB_CAPABILITY_INVOCATION_UNAVAILABLE",
+      "The local database cannot link this capability probe invocation.",
+    );
+  }
   await transaction.execute(
     `INSERT INTO model_capability_scans (
-       id, catalog_entry_id, scan_kind, status, evidence_version,
+       id, catalog_entry_id${supportsInvocationLink ? ", model_invocation_id" : ""},
+       scan_kind, status, evidence_version,
        supported_count, unsupported_count, unknown_count,
        error_code, error_summary, requested_at, started_at, completed_at,
        diagnostic_request_id, failure_stage, failure_retryable, http_status,
        finish_reason, visible_content_length, reasoning_present, streamed,
        attempt, requested_max_output_tokens
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?${supportsInvocationLink ? ", ?" : ""}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       validated.scanId,
       validated.catalogEntryId,
+      ...(supportsInvocationLink ? [validated.modelInvocationId] : []),
       validated.scanKind,
       validated.status,
       validated.evidenceVersion,
@@ -5263,7 +5325,7 @@ function hydrateInvocation(row: InvocationRow): ModelInvocationFact {
   const succeeded = row.status === "succeeded";
   return Object.freeze({
     id: row.id,
-    task: validateTask(row.task),
+    task: validateInvocationTask(row.task),
     routeTask: row.route_task === null ? null : validateTask(row.route_task),
     connectionId: row.connection_id,
     catalogEntryId: row.catalog_entry_id,
@@ -5354,6 +5416,7 @@ function capabilityScanFact(
   return Object.freeze({
     id: validated.scanId,
     catalogEntryId: validated.catalogEntryId,
+    modelInvocationId: validated.modelInvocationId,
     scanKind: validated.scanKind,
     status: validated.status,
     errorCode: validated.errorCode,
@@ -5361,6 +5424,40 @@ function capabilityScanFact(
     completedAt: now,
     failure: validated.failure,
   });
+}
+
+function assertMemoryCapabilityScanInvocation(
+  state: MemoryModelHubState,
+  scan: ReturnType<typeof validateCapabilityScanInput>,
+): void {
+  if (scan.modelInvocationId === null) return;
+  const invocation = state.invocations[scan.modelInvocationId];
+  if (
+    invocation?.task !== "capability_probe" ||
+    invocation.catalogEntryId !== scan.catalogEntryId ||
+    !capabilityScanMatchesInvocationTerminal(scan.status, invocation.status)
+  ) {
+    throw modelHubError(
+      "MODEL_HUB_CAPABILITY_INVOCATION_INVALID",
+      "The capability scan does not belong to its exact probe invocation.",
+    );
+  }
+  if (
+    Object.values(state.capabilityScans).some(
+      (stored) => stored?.modelInvocationId === scan.modelInvocationId,
+    )
+  ) {
+    throw conflict("MODEL_HUB_CAPABILITY_INVOCATION_CONFLICT");
+  }
+}
+
+function capabilityScanMatchesInvocationTerminal(
+  scanStatus: RecordCapabilityScanInput["status"],
+  invocationStatus: ModelInvocationFact["status"],
+): boolean {
+  return scanStatus === "succeeded" || scanStatus === "partial"
+    ? invocationStatus === "succeeded"
+    : invocationStatus === "failed" || invocationStatus === "cancelled";
 }
 
 function recentAiFailureFromCapabilityScan(
@@ -5415,7 +5512,7 @@ function recentAiFailureFromInvocation(invocation: ModelInvocationFact): RecentA
     providerKind: requireProviderKind(invocation.providerKindSnapshot),
     connectionId: boundedText(invocation.connectionId, "AI failure connection id", 128),
     modelId: boundedText(invocation.modelIdSnapshot, "AI failure model id", 512),
-    taskType: validateTask(invocation.task),
+    taskType: validateInvocationTask(invocation.task),
     stage: validateStoredFailureStage(invocation.failure?.stage ?? null),
     normalizedErrorCode: validateErrorCode(invocation.errorCode),
     retryable: validateNullableBooleanValue(
@@ -5448,6 +5545,10 @@ function validateTask(value: unknown): NovelAiTask {
     throw modelHubError("MODEL_HUB_TASK_INVALID", "The novel AI task is invalid.");
   }
   return value;
+}
+
+function validateInvocationTask(value: unknown): ModelInvocationTask {
+  return value === "capability_probe" ? value : validateTask(value);
 }
 
 function requireProviderKind(value: string): ModelProviderKind {

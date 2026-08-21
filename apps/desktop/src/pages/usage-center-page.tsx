@@ -535,7 +535,7 @@ function UsageDetailsTable({ snapshot }: { readonly snapshot: UsageCenterSnapsho
     <Card className="settings-card--wide">
       <CardHeader>
         <CardTitle>调用明细</CardTitle>
-        <CardDescription>按实际记录时间倒序排列；旧续写与 Model Hub 记录已去重。</CardDescription>
+        <CardDescription>按实际记录时间倒序排列；旧续写与模型中心记录已去重。</CardDescription>
       </CardHeader>
       <CardContent>
         {snapshot.detailsTruncated && (
@@ -682,7 +682,7 @@ function formatInteger(value: number): string {
 }
 
 function taskLabel(task: string): string {
-  return TASK_LABELS[task] ?? task;
+  return TASK_LABELS[task] ?? "其他模型任务";
 }
 
 function statusLabel(status: UsageEventStatus): string {

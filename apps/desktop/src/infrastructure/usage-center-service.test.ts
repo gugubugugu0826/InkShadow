@@ -5,7 +5,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { NodeSqliteExecutor } from "../../../../packages/data/tests/node-sqlite-executor.js";
-import { SqliteUsageCenterService, type UsageCenterQuery } from "./usage-center-service";
+import {
+  SqliteUsageCenterService,
+  TASK_LABELS,
+  type UsageCenterQuery,
+} from "./usage-center-service";
 
 const MIGRATION = [
   "0001_core.sql",
@@ -19,7 +23,16 @@ const MIGRATION = [
   "0056_model_hub_failure_diagnostics.sql",
   "0065_model_invocation_dispatch_boundary.sql",
 ]
-  .map(readMigration)
+  .map((name) => {
+    const migration = readMigration(name);
+    if (name !== "0031_model_hub.sql") return migration;
+    const invocationTable = migration.indexOf("CREATE TABLE IF NOT EXISTS model_invocation_facts");
+    const finalTask = migration.indexOf("        'translation'", invocationTable);
+    if (invocationTable < 0 || finalTask < 0) {
+      throw new Error("普通调用账本测试无法建立能力验证任务约束。");
+    }
+    return `${migration.slice(0, finalTask)}        'translation',\n        'capability_probe'${migration.slice(finalTask + "        'translation'".length)}`;
+  })
   .join("\n");
 
 const PROJECT_ID = uuid(1);
@@ -35,6 +48,66 @@ afterEach(async () => {
 });
 
 describe("SqliteUsageCenterService", () => {
+  it("uses an ordinary Chinese label for capability probe invocations", () => {
+    expect(TASK_LABELS.capability_probe).toBe("模型能力验证");
+  });
+
+  it("shows both fixed basic-evaluation calls as capability validation instead of continuation", async () => {
+    const executor = await createSeededExecutor();
+    for (const [index, tokens] of [
+      [1, { input: 8, output: 2 }],
+      [2, { input: 11, output: 4 }],
+    ] as const) {
+      await seedInvocation(executor, {
+        id: `basic-evaluation-probe-${String(index)}`,
+        task: "capability_probe",
+        connectionId: "openai-connection",
+        providerKind: "openai",
+        modelId: "cloud-model",
+        status: "succeeded",
+        privacyPolicy: "cloud_allowed",
+        destination: "remote",
+        inputTokens: tokens.input,
+        outputTokens: tokens.output,
+        costMicros: null,
+        currency: null,
+        occurredAt: `2026-08-08T12:0${String(index)}:00.000Z`,
+        errorCode: null,
+        providerDispatchStartedAt: `2026-08-08T12:0${String(index)}:00.000Z`,
+      });
+    }
+
+    const snapshot = await new SqliteUsageCenterService(executor).read(query());
+    const probes = snapshot.records.filter(({ id }) =>
+      id.startsWith("hub:basic-evaluation-probe-"),
+    );
+    expect(probes).toHaveLength(2);
+    expect(probes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          task: "capability_probe",
+          providerId: "openai-connection",
+          modelId: "cloud-model",
+          status: "succeeded",
+          inputTokens: 8,
+          outputTokens: 2,
+          costMicros: null,
+          currency: null,
+        }),
+        expect.objectContaining({
+          task: "capability_probe",
+          inputTokens: 11,
+          outputTokens: 4,
+        }),
+      ]),
+    );
+    expect(snapshot.facets.tasks).toContainEqual({
+      value: "capability_probe",
+      label: "模型能力验证",
+    });
+    expect(JSON.stringify(probes)).not.toMatch(/INKSHADOW_OK|api_key|endpoint|credential/u);
+  });
+
   it("projects immediate and recovered opening uncertainty from the durable dispatch boundary", async () => {
     const executor = await createSeededExecutor();
     await seedInvocation(executor, {

@@ -146,10 +146,14 @@ describe("SettingsPage native maintenance tickets", () => {
           absolutePath: "D:\\managed\\automatic-backup.sqlite3",
           createdAt: "2026-08-08T17:00:00.000Z",
           retentionUntil: "2026-09-07T17:00:00.000Z",
-          status: "ready",
+          status: "succeeded",
           byteLength: 4_096,
           sha256: "a".repeat(64),
+          writeStartedAt: "2026-08-08T17:00:00.000Z",
+          finishedAt: "2026-08-08T17:00:00.000Z",
+          failureKind: null,
         },
+        attention: null,
         recoveredPendingCount: 0,
         prunedCount: 1,
         missedSlotCount: 1,
@@ -173,6 +177,36 @@ describe("SettingsPage native maintenance tickets", () => {
 
     await user.click(screen.getByRole("button", { name: "立即检查自动备份" }));
     await waitFor(() => expect(checkNow).toHaveBeenCalledTimes(2));
+  });
+
+  it("explains an unconfirmed automatic backup without exposing internal details", async () => {
+    const checkNow = vi.fn<AutomaticBackupRuntime["checkNow"]>().mockResolvedValue({
+      state: "ready",
+      run: {
+        status: "attention",
+        dueSlot: "2026-08-08",
+        nextDueAt: "2026-08-09T17:00:00.000Z",
+        createdBackup: null,
+        attention: { status: "unknown", failureKind: "result_unconfirmed" },
+        recoveredPendingCount: 1,
+        prunedCount: 0,
+        missedSlotCount: 1,
+      },
+      errorCode: null,
+    });
+    const automaticBackup: AutomaticBackupRuntime = {
+      available: true,
+      start: vi.fn(),
+      checkNow,
+      stop: vi.fn().mockResolvedValue(undefined),
+    };
+
+    renderSettings(healthyMaintenance(), automaticBackup);
+
+    expect(await screen.findByText("自动备份结果待核对")).toBeVisible();
+    expect(screen.getByText(/不会自动覆盖或重试/u)).toBeVisible();
+    expect(document.body.textContent).not.toContain("result_unconfirmed");
+    expect(document.body.textContent).not.toContain("D:\\managed");
   });
 });
 

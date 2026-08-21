@@ -120,6 +120,7 @@ describe("Model Hub translation capability probe", () => {
         evidenceVersion: MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_VERSION,
         streamed: false,
         usage: null,
+        visibleContentLength: Array.from(text).length,
       });
       expect(result).not.toHaveProperty("text");
     },

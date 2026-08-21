@@ -62,13 +62,13 @@ describe("Model Hub structured output capability probe", () => {
     expect(generate).toHaveBeenCalledOnce();
   });
 
-  it("does not retry a truncated response", async () => {
+  it("does not retry or relabel a truncated native response as a JSON schema failure", async () => {
     const generate = vi
       .fn<NativeModelGatewayClient["generate"]>()
       .mockRejectedValue(new ModelCenterError("MODEL_OUTPUT_TRUNCATED", "length", true));
 
     await expect(runModelHubStructuredCapabilityProbe(input(generate))).rejects.toMatchObject({
-      code: "MODEL_STRUCTURED_OUTPUT_PROBE_FAILED",
+      code: "MODEL_OUTPUT_TRUNCATED",
       retryable: true,
     });
     expect(generate).toHaveBeenCalledOnce();

@@ -861,7 +861,7 @@ describe("StoryGovernancePage", () => {
       false,
     );
     expect(screen.getByText("逐章云端识别暂不可用")).toBeVisible();
-    expect(screen.getByText(/完整正文.*最多两次 Provider 调用/u)).toBeVisible();
+    expect(screen.getByText(/完整正文.*最多两次模型服务调用/u)).toBeVisible();
     expect(runtime.story.continuousState.isAutomaticOnManualSaveEnabled(project.value.id)).toBe(
       false,
     );

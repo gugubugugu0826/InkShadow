@@ -54,6 +54,9 @@ describe("SyncConflictResolutionPage", () => {
     expect(
       within(screen.getByRole("region", { name: "远端版本" })).getByText("remote content"),
     ).toBeVisible();
+    expect(screen.getByText(/远端设备/u)).toBeVisible();
+    expect(document.body).not.toHaveTextContent(DEVICE_ID);
+    expect(document.body).not.toHaveTextContent(DEVICE_ID.slice(0, 8));
 
     await user.click(screen.getByRole("button", { name: "采用远端版本" }));
     const submit = screen.getByRole("button", { name: "确认并创建稳定版本" });

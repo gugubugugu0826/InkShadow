@@ -289,9 +289,7 @@ export function SyncConflictResolutionPage({
                   />
                   <VersionPane
                     heading="远端版本"
-                    meta={`${remoteDeviceLabel(review.remote.deviceId)} · ${formatTime(
-                      review.remote.updatedAt,
-                    )}`}
+                    meta={`${remoteDeviceLabel()} · ${formatTime(review.remote.updatedAt)}`}
                     title={review.remote.title}
                     content={review.remote.content}
                   />
@@ -447,8 +445,8 @@ function RemoteDeleteReview({
   );
 }
 
-function remoteDeviceLabel(deviceId: string | null): string {
-  return deviceId === null ? "远端设备" : `远端设备 ${deviceId.slice(0, 8)}`;
+function remoteDeviceLabel(): string {
+  return "远端设备";
 }
 
 function formatTime(value: string): string {

@@ -773,7 +773,7 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
       <section className="story-settings-tools" aria-labelledby="story-settings-tools-title">
         <div>
           <h2 id="story-settings-tools-title">快速维护故事设定</h2>
-          <p>可以用一句话整理成待确认候选，也可以使用规范文件批量导入；确认前不会写入。</p>
+          <p>可以用一句话整理成待确认的设定草稿，也可以使用规范文件批量导入；确认前不会写入。</p>
         </div>
         <div className="story-governance-actions">
           <Button
@@ -847,7 +847,7 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
         title={legacyRelationshipRepair === null ? "用一句话添加设定" : "补全旧版人物关系"}
         description={
           legacyRelationshipRepair === null
-            ? "先在本机整理为结构化候选；只有你确认的字段会成为正式设定。"
+            ? "先在本机整理为待确认的设定草稿；只有你确认的字段会成为正式设定。"
             : "旧来源尚未完成迁移。请明确填写两端人物和关系类型；新关系保存成功后才会整理旧来源。"
         }
         footer={

@@ -21,7 +21,7 @@ use tauri::State;
 use uuid::{Uuid, Version as UuidVersion};
 use zeroize::Zeroizing;
 
-use crate::{model_gateway::CommandError, CREDENTIAL_SERVICE};
+use crate::{credential_service, model_gateway::CommandError};
 
 type DeviceKem = DhP256HkdfSha256;
 type DeviceKdf = HkdfSha256;
@@ -624,13 +624,13 @@ fn lock_vault(state: &ProjectKeyVaultState) -> Result<MutexGuard<'_, ()>, Comman
 }
 
 fn device_identity_entry(device_id: &str) -> Result<keyring::Entry, CommandError> {
-    keyring::Entry::new(CREDENTIAL_SERVICE, &format!("device:{device_id}"))
+    keyring::Entry::new(credential_service(), &format!("device:{device_id}"))
         .map_err(|_| CommandError::credential_store_unavailable())
 }
 
 fn team_project_key_receipt_entry(storage_ref: &str) -> Result<keyring::Entry, CommandError> {
     validate_team_project_key_receipt_storage_ref(storage_ref)?;
-    keyring::Entry::new(CREDENTIAL_SERVICE, storage_ref)
+    keyring::Entry::new(credential_service(), storage_ref)
         .map_err(|_| CommandError::credential_store_unavailable())
 }
 

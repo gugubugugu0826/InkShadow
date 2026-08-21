@@ -103,6 +103,7 @@ function OpenQuickAiConnectionDrawer({
   );
   const [failure, setFailure] = useState<QuickModelConnectionError | null>(null);
   const [failureStage, setFailureStage] = useState<FailureStage>("connection");
+  const probeResultAmbiguous = failure?.code === "PROVIDER_RESULT_AMBIGUOUS";
 
   useEffect(() => {
     let active = true;
@@ -293,7 +294,13 @@ function OpenQuickAiConnectionDrawer({
       side="right"
       className="quick-ai-drawer"
       closeLabel="关闭 AI 连接"
-      title={phase === "failure" ? "连接没成功" : "连接你的 AI"}
+      title={
+        phase === "failure"
+          ? probeResultAmbiguous
+            ? "固定能力验证结果待核对"
+            : "连接没成功"
+          : "连接你的 AI"
+      }
       description="连上后 AI 可以帮你起头、续写、查矛盾。不连也能正常写。"
       footer={
         phase === "catalog" ? (
@@ -323,12 +330,12 @@ function OpenQuickAiConnectionDrawer({
                 返回修改
               </Button>
             )}
-            {failureStage === "route" && (
+            {failureStage === "route" && !probeResultAmbiguous && (
               <Button variant="secondary" disabled={busy} onClick={returnToCatalog}>
                 返回选择
               </Button>
             )}
-            {failureStage === "connection" && (
+            {failureStage === "connection" && !probeResultAmbiguous && (
               <Button loading={busy} onClick={() => void connect()}>
                 重试
               </Button>
@@ -485,7 +492,7 @@ function OpenQuickAiConnectionDrawer({
               hint={
                 currentCredentialHint ??
                 (provider === "custom_openai_compatible"
-                  ? "只在兼容服务要求 Bearer Key 时填写。其他鉴权方式请使用完整 Model Hub。"
+                  ? "只在兼容服务要求访问密钥时填写。其他鉴权方式请使用完整模型中心。"
                   : "只需填写供应商提供的 API Key。")
               }
               required={needsSecret}
@@ -524,7 +531,7 @@ function OpenQuickAiConnectionDrawer({
               onOpenChange(false);
             }}
           >
-            更多供应商与完整 Model Hub 设置
+            更多供应商与完整模型中心设置
           </Link>
         </div>
       )}
@@ -589,8 +596,16 @@ function OpenQuickAiConnectionDrawer({
 
       {phase === "failure" && failure !== null && (
         <div className="quick-ai-drawer__content">
-          <InlineAlert tone="error" title="连接没成功" description={failure.message} />
-          <p>已有项目、正文和 AI 建议版本都没有被修改。你可以重试，也可以先跳过继续写。</p>
+          <InlineAlert
+            tone={probeResultAmbiguous ? "warning" : "error"}
+            title={probeResultAmbiguous ? "固定能力验证结果待核对" : "连接没成功"}
+            description={failure.message}
+          />
+          <p>
+            {probeResultAmbiguous
+              ? "已有项目、正文和 AI 建议版本都没有被修改。系统不会自动重发；你可以先跳过继续写，或打开模型中心核对调用记录。"
+              : "已有项目、正文和 AI 建议版本都没有被修改。你可以重试，也可以先跳过继续写。"}
+          </p>
           <Link
             className="back-link"
             to="/settings#model-center"
@@ -604,7 +619,7 @@ function OpenQuickAiConnectionDrawer({
               onOpenChange(false);
             }}
           >
-            打开完整 Model Hub 排查
+            打开完整模型中心排查
           </Link>
         </div>
       )}

@@ -187,6 +187,33 @@ describe("context history panel", () => {
     expect(screen.queryByText("019a1f9f-4ab3-7000-8000-000000000006")).toBeNull();
   });
 
+  it("uses a safe explanation when an older trace contains an unknown discard reason", async () => {
+    const user = userEvent.setup();
+    const base = makeTrace();
+    const trace: ContextCompilationTrace = {
+      ...base,
+      entries: base.entries.map((entry) =>
+        entry.included ? entry : { ...entry, discardedReason: "raw_internal_discard_reason" },
+      ),
+    };
+    const store = makeStore({
+      listByProjectId: vi.fn(() => Promise.resolve([makeSummary(trace)])),
+      findById: vi.fn(() => Promise.resolve(trace)),
+    });
+
+    render(
+      <ContextHistoryPanel
+        projectId={PROJECT_ID}
+        store={store}
+        novelSkills={makeUnavailableNovelSkills()}
+      />,
+    );
+    await user.click(await screen.findByRole("button", { name: "查看采用与舍弃原因" }));
+
+    expect(await screen.findByText("因其他安全规则未采用。")).toBeTruthy();
+    expect(document.body).not.toHaveTextContent("raw_internal_discard_reason");
+  });
+
   it("gives a useful empty state before the first AI creation", async () => {
     const store: ContextCompilationTraceStore = {
       save: vi.fn(() => Promise.resolve()),

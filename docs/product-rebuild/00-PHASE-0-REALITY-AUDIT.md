@@ -9,6 +9,10 @@
 > [Phase 3–5 真实能力台账](06-PHASE-3-TO-5-CAPABILITY-LEDGER.md)，不得继续引用下表中的旧“待实现”状态
 > 代表当前工作树。
 
+> 2026-08-21 的 `v0.2.6` 真机缺陷修复不倒改本历史快照；SQLite 生命周期、接受边界、开书三槽、
+> 自动备份与能力验证账本的当前记录见
+> [`../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)。
+
 ## 1. 结论摘要
 
 InkShadow 已经拥有一套值得保留的本地可靠性和 AI 安全编辑底座，但当前产品仍然由项目、

@@ -64,7 +64,7 @@ function execution(text: string, catalogEntryId = "catalog-1"): ModelHubTextTask
     usage: null,
     invocation: {
       id: "invocation-1",
-      task: "continuation",
+      task: "capability_probe",
       routeTask: "continuation",
       connectionId: "connection-1",
       catalogEntryId,
@@ -196,6 +196,8 @@ describe("model hub local evaluation service", () => {
     expect(test.executeText).toHaveBeenCalledTimes(2);
     for (const call of test.executeText.mock.calls) {
       expect(call[1]).toMatchObject({
+        task: "continuation",
+        invocationLedgerTask: "capability_probe",
         maximumOutputTokens: 64,
         reasoningPolicy: "capability_probe",
         dispatchScope: { kind: "non_project", reason: "connection_probe" },

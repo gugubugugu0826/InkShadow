@@ -53,6 +53,10 @@ interface TableNameRow {
   readonly name: string;
 }
 
+interface TableColumnRow {
+  readonly name: string;
+}
+
 interface SchemaContractRow {
   readonly type: string;
   readonly name: string;
@@ -78,6 +82,31 @@ interface FineTuningDeploymentRestoreRow {
 }
 
 const BACKUP_INCOMPATIBLE_OPERATION = "DATABASE_RESTORE_BACKUP_INCOMPATIBLE";
+const MODEL_CAPABILITY_SCAN_V73_COLUMNS = [
+  "id",
+  "catalog_entry_id",
+  "scan_kind",
+  "status",
+  "evidence_version",
+  "supported_count",
+  "unsupported_count",
+  "unknown_count",
+  "error_code",
+  "error_summary",
+  "requested_at",
+  "started_at",
+  "completed_at",
+  "diagnostic_request_id",
+  "failure_stage",
+  "failure_retryable",
+  "http_status",
+  "finish_reason",
+  "visible_content_length",
+  "reasoning_present",
+  "streamed",
+  "attempt",
+  "requested_max_output_tokens",
+] as const;
 const RESTORABLE_TABLES = [
   "writing_experience_preferences",
   "writing_provider_disclosure_grants",
@@ -651,13 +680,15 @@ const RESTORE_INSERT_ORDER = [
   "model_provider_connections",
   "model_catalog_syncs",
   "model_catalog_entries",
+  // Capability scan triggers require their exact terminal invocation to exist
+  // at insertion time, even while foreign keys are transaction-deferred.
+  "model_invocation_facts",
   "model_capability_scans",
   "model_capability_evidence",
   "model_cost_privacy_profiles",
   "model_evaluation_results",
   "model_hub_presets",
   "novel_task_routes",
-  "model_invocation_facts",
   "ai_budget_policies",
   "ai_generation_runs",
   "ai_generation_route_selections",
@@ -1070,7 +1101,7 @@ export class DatabaseMaintenanceService {
         throw restoreError("DATABASE_RESTORE_SOURCE_INVALID");
       }
 
-      const [integrityRows, foreignKeyRows, tableRows] = await Promise.all([
+      const [integrityRows, foreignKeyRows, tableRows, capabilityScanColumns] = await Promise.all([
         this.executor.select<IntegrityRow>("PRAGMA restore_source.integrity_check(100)"),
         this.executor.select<ForeignKeyRow>("PRAGMA restore_source.foreign_key_check"),
         this.executor.select<TableNameRow>(
@@ -1079,13 +1110,20 @@ export class DatabaseMaintenanceService {
            WHERE type = 'table' AND name IN (${RESTORABLE_TABLES.map(() => "?").join(", ")})`,
           RESTORABLE_TABLES,
         ),
+        this.executor.select<TableColumnRow>(
+          "PRAGMA restore_source.table_info('model_capability_scans')",
+        ),
       ]);
       const sourceTables = new Set(tableRows.map(({ name }) => name));
+      const sourceCapabilityScanColumns = new Set(capabilityScanColumns.map(({ name }) => name));
       if (
         integrityRows.length !== 1 ||
         integrityRows[0]?.integrity_check !== "ok" ||
         foreignKeyRows.length > 0 ||
-        RESTORABLE_TABLES.some((table) => !sourceTables.has(table))
+        RESTORABLE_TABLES.some((table) => !sourceTables.has(table)) ||
+        !MODEL_CAPABILITY_SCAN_V73_COLUMNS.every((column) =>
+          sourceCapabilityScanColumns.has(column),
+        )
       ) {
         throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
       }
@@ -1205,7 +1243,32 @@ export class DatabaseMaintenanceService {
             await transaction.execute(
               `INSERT INTO main.chapter_validation_snapshots
                SELECT * FROM restore_source.chapter_validation_snapshots
-               ORDER BY project_id, chapter_id, run_sequence`,
+              ORDER BY project_id, chapter_id, run_sequence`,
+            );
+          } else if (table === "model_capability_scans") {
+            // Version 74 adds only the nullable invocation link. Older healthy
+            // backups remain restorable: their scans truthfully have no exact
+            // invocation association, while v74+ sources retain the FK.
+            await transaction.execute(
+              `INSERT INTO main.model_capability_scans (
+                 id, catalog_entry_id, scan_kind, status, evidence_version,
+                 supported_count, unsupported_count, unknown_count,
+                 error_code, error_summary, requested_at, started_at, completed_at,
+                 diagnostic_request_id, failure_stage, failure_retryable,
+                 http_status, finish_reason, visible_content_length,
+                 reasoning_present, streamed, attempt,
+                 requested_max_output_tokens, model_invocation_id
+               )
+               SELECT
+                 id, catalog_entry_id, scan_kind, status, evidence_version,
+                 supported_count, unsupported_count, unknown_count,
+                 error_code, error_summary, requested_at, started_at, completed_at,
+                 diagnostic_request_id, failure_stage, failure_retryable,
+                 http_status, finish_reason, visible_content_length,
+                 reasoning_present, streamed, attempt,
+                 requested_max_output_tokens,
+                 ${sourceCapabilityScanColumns.has("model_invocation_id") ? "model_invocation_id" : "NULL"}
+               FROM restore_source.model_capability_scans`,
             );
           } else {
             await transaction.execute(

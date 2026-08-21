@@ -397,7 +397,7 @@ export function StoryPlanningPanel({
               <Card
                 key={candidate.id}
                 className={candidate.status === "review" ? "candidate-decision-surface" : undefined}
-                aria-label={`${candidate.targetNodeTitle}的规划候选决策`}
+                aria-label={`${candidate.targetNodeTitle}的规划建议草稿决策`}
               >
                 <CardHeader>
                   <div className="card-heading-row">
@@ -421,14 +421,14 @@ export function StoryPlanningPanel({
                 </CardHeader>
                 <CardContent
                   tabIndex={candidate.status === "review" ? 0 : undefined}
-                  aria-label={`${candidate.targetNodeTitle}的规划候选内容`}
+                  aria-label={`${candidate.targetNodeTitle}的规划建议草稿内容`}
                   onKeyDown={handleCandidateDecisionNavigation}
                 >
                   {selectiveAcceptanceApplying && (
                     <InlineAlert
                       tone="info"
                       title="上次逐项采纳尚未完成"
-                      description="系统已锁定同一组规划条目。只能继续恢复这次采纳；在完成前不能编辑、整篇采纳或拒绝，避免正式大纲与候选状态互相冲突。"
+                      description="系统已锁定同一组规划条目。只能继续恢复这次采纳；在完成前不能编辑、整篇采纳或拒绝，避免正式大纲与建议草稿状态互相冲突。"
                     />
                   )}
                   <p>
@@ -439,7 +439,7 @@ export function StoryPlanningPanel({
                       ? "故事关联资料当前不可用，生成时已明确省略。"
                       : ""}
                   </p>
-                  <div className="story-planning-diff" aria-label="当前大纲与候选差异">
+                  <div className="story-planning-diff" aria-label="当前大纲与规划建议草稿差异">
                     <div>
                       <strong>当前正式简介</strong>
                       <p className="story-planning-diff-text">
@@ -449,7 +449,7 @@ export function StoryPlanningPanel({
                       </p>
                     </div>
                     <div>
-                      <strong>候选中的结构化变更</strong>
+                      <strong>规划建议草稿中的结构化变更</strong>
                       <p>
                         逐项采纳只会把你勾选的固定条目追加到生成时的简介；不会让 AI
                         重新解析旧文本，未选内容保持原样。
@@ -510,7 +510,7 @@ export function StoryPlanningPanel({
                     </div>
                   </div>
                   <FormField
-                    label={`整体替换“${candidate.targetNodeTitle}”简介的候选内容`}
+                    label={`整体替换“${candidate.targetNodeTitle}”简介的规划建议草稿内容`}
                     hint="这里的手动编辑只用于整体采纳，不会改变上方可勾选的固定条目。采纳前不会触碰正式大纲。"
                   >
                     {(fieldProps) => (

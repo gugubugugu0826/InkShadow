@@ -39,7 +39,13 @@ export type ModelHubOverallState =
   | "save_failed";
 
 export type ModelHubCapabilityDisplayState =
-  "verified" | "catalog_declared" | "user_confirmed" | "unknown" | "failed" | "unsupported";
+  | "verified"
+  | "catalog_declared"
+  | "user_confirmed"
+  | "unknown"
+  | "failed"
+  | "ambiguous"
+  | "unsupported";
 
 export interface ModelHubTaskDefinition {
   readonly task: NovelAiTask;
@@ -471,7 +477,10 @@ function projectModel(
     if (failedAfterEvidence) {
       return Object.freeze({
         capability,
-        state: "failed" as const,
+        state:
+          latestProbeFailure.normalizedErrorCode === "PROVIDER_RESULT_AMBIGUOUS"
+            ? ("ambiguous" as const)
+            : ("failed" as const),
         source: "lightweight_probe" as const,
         observedAt: latestProbeFailure.timestamp,
         failureCode: latestProbeFailure.normalizedErrorCode,
@@ -522,7 +531,8 @@ function projectModel(
         ? connection.lastTestedAt
         : (observedTimes.sort((left, right) => right.localeCompare(left))[0] ?? null),
     latestProbeFailureCode:
-      capabilities.find(({ capability }) => capability === "text_generation")?.state === "failed"
+      capabilities.find(({ capability }) => capability === "text_generation")?.state === "failed" ||
+      capabilities.find(({ capability }) => capability === "text_generation")?.state === "ambiguous"
         ? (latestProbeFailure?.normalizedErrorCode ?? null)
         : null,
   });

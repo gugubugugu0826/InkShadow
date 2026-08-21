@@ -92,6 +92,11 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
+    // Node 26 exposes an experimental process-wide localStorage object. It is
+    // not the jsdom Window storage and shadows the browser test environment in
+    // workers unless explicitly disabled. Keep the project command stable on
+    // both Node 24 (CI) and Node 26 (supported local development).
+    execArgv: ["--no-experimental-webstorage"],
     // Several browser-level suites intentionally render the complete desktop
     // shell and exercise real file-backed SQLite/ZIP boundaries. GitHub's
     // Windows runner repeatedly timed out unrelated 5s/15s SQLite tests when

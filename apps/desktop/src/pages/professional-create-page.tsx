@@ -381,7 +381,7 @@ export function ProfessionalCreatePage() {
             <details>
               <summary>AI 分工、上下文与自动检查</summary>
               <p>
-                这些能力需要先在 Model Hub
+                这些能力需要先在模型中心
                 连接并测试模型。创建项目不会假装已经配置，也不会阻止你先写正文。
               </p>
             </details>

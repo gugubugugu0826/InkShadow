@@ -1,10 +1,4 @@
-import {
-  DatabaseMaintenanceService,
-  type DatabaseBackupReceipt,
-  type NativePathTicket,
-  type SqlExecutor,
-} from "@inkshadow/data";
-import type { AppError, Clock, Result, UuidV7Generator } from "@inkshadow/domain";
+import type { Clock, UuidV7Generator } from "@inkshadow/domain";
 import { invoke } from "@tauri-apps/api/core";
 
 import {
@@ -14,21 +8,16 @@ import {
   type AutomaticBackupLease,
   type AutomaticBackupManifest,
   type AutomaticBackupManifestEntry,
-  type AutomaticBackupManifestReadyEntry,
+  type AutomaticBackupManifestSucceededEntry,
+  type AutomaticBackupManifestWritingEntry,
   type AutomaticBackupPort,
   type AutomaticBackupRunResult,
   type VerifiedAutomaticBackupRoot,
 } from "./automatic-backup-service";
 
-const NATIVE_TICKET_PATTERN = /^[0-9a-f]{64}$/u;
 const SAFE_ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{2,127}$/u;
 export const AUTOMATIC_BACKUP_RECHECK_INTERVAL_MS = 60 * 60 * 1_000;
-
-interface ConsistentBackupCreator {
-  createConsistentBackup(
-    destinationTicket: NativePathTicket,
-  ): Promise<Result<DatabaseBackupReceipt, AppError>>;
-}
+export const AUTOMATIC_BACKUP_SHUTDOWN_WAIT_MS = 1_500;
 
 export interface AutomaticBackupNativeBridge {
   invoke<Output>(command: string, arguments_: Record<string, unknown>): Promise<Output>;
@@ -82,10 +71,7 @@ const safeLogger: AutomaticBackupRuntimeLogger = {
  * provided because a browser cannot create a verified local SQLite backup.
  */
 export class TauriAutomaticBackupPort implements AutomaticBackupPort {
-  public constructor(
-    private readonly backupCreator: ConsistentBackupCreator,
-    private readonly bridge: AutomaticBackupNativeBridge = tauriBridge,
-  ) {}
+  public constructor(private readonly bridge: AutomaticBackupNativeBridge = tauriBridge) {}
 
   public inspectManagedRoot(): Promise<unknown> {
     return this.bridge.invoke("native_automatic_backup_inspect_root", {});
@@ -141,29 +127,15 @@ export class TauriAutomaticBackupPort implements AutomaticBackupPort {
     });
   }
 
-  public async createConsistentBackup(
+  public createConsistentBackup(
     root: VerifiedAutomaticBackupRoot,
     lease: AutomaticBackupLease,
-    request: Readonly<{ backupId: string; fileName: string; absolutePath: string }>,
+    entry: AutomaticBackupManifestWritingEntry,
   ): Promise<unknown> {
-    const receipt = await this.bridge.invoke<unknown>(
-      "native_automatic_backup_prepare_destination",
-      {
-        rootId: root.rootId,
-        leaseToken: lease.token,
-        request,
-      },
-    );
-    const destinationTicket = readNativeTicket(receipt);
-    const backup = await this.backupCreator.createConsistentBackup(destinationTicket);
-    if (!backup.ok) {
-      await this.cleanupFailedCreation(root, lease, request);
-      throw new AutomaticBackupRuntimeError(backup.error.code);
-    }
-    return this.bridge.invoke("native_automatic_backup_inspect_file", {
+    return this.bridge.invoke("native_automatic_backup_create_verified", {
       rootId: root.rootId,
       leaseToken: lease.token,
-      request,
+      request: nativeFileRequest(entry),
     });
   }
 
@@ -182,34 +154,13 @@ export class TauriAutomaticBackupPort implements AutomaticBackupPort {
   public deleteBackupFile(
     root: VerifiedAutomaticBackupRoot,
     lease: AutomaticBackupLease,
-    entry: AutomaticBackupManifestReadyEntry,
+    entry: AutomaticBackupManifestSucceededEntry,
   ): Promise<unknown> {
     return this.bridge.invoke("native_automatic_backup_delete_file", {
       rootId: root.rootId,
       leaseToken: lease.token,
       request: nativeFileRequest(entry),
     });
-  }
-
-  private async cleanupFailedCreation(
-    root: VerifiedAutomaticBackupRoot,
-    lease: AutomaticBackupLease,
-    request: Readonly<{ backupId: string; fileName: string; absolutePath: string }>,
-  ): Promise<void> {
-    await this.bridge
-      .invoke("native_automatic_backup_cleanup_failed_creation", {
-        rootId: root.rootId,
-        leaseToken: lease.token,
-        request,
-      })
-      .catch(() => undefined);
-  }
-}
-
-export class AutomaticBackupRuntimeError extends Error {
-  public constructor(public readonly code: string) {
-    super("Automatic backup runtime operation failed.");
-    this.name = "AutomaticBackupRuntimeError";
   }
 }
 
@@ -226,6 +177,7 @@ export class ScheduledAutomaticBackupRuntime implements AutomaticBackupRuntime {
     private readonly timer: AutomaticBackupTimer = browserTimer,
     private readonly logger: AutomaticBackupRuntimeLogger = safeLogger,
     private readonly recheckIntervalMilliseconds = AUTOMATIC_BACKUP_RECHECK_INTERVAL_MS,
+    private readonly shutdownWaitMilliseconds = AUTOMATIC_BACKUP_SHUTDOWN_WAIT_MS,
   ) {
     if (
       !Number.isSafeInteger(recheckIntervalMilliseconds) ||
@@ -233,6 +185,13 @@ export class ScheduledAutomaticBackupRuntime implements AutomaticBackupRuntime {
       recheckIntervalMilliseconds > 24 * 60 * 60 * 1_000
     ) {
       throw new Error("AUTOMATIC_BACKUP_RECHECK_INTERVAL_INVALID");
+    }
+    if (
+      !Number.isSafeInteger(shutdownWaitMilliseconds) ||
+      shutdownWaitMilliseconds < 0 ||
+      shutdownWaitMilliseconds > 10_000
+    ) {
+      throw new Error("AUTOMATIC_BACKUP_SHUTDOWN_WAIT_INVALID");
     }
   }
 
@@ -286,7 +245,16 @@ export class ScheduledAutomaticBackupRuntime implements AutomaticBackupRuntime {
       this.timer.clear(this.timerHandle);
       this.timerHandle = undefined;
     }
-    await this.activeCheck;
+    const activeCheck = this.activeCheck;
+    if (activeCheck === null || this.shutdownWaitMilliseconds === 0) return;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      activeCheck,
+      new Promise<void>((resolve) => {
+        timeoutHandle = globalThis.setTimeout(resolve, this.shutdownWaitMilliseconds);
+      }),
+    ]);
+    if (timeoutHandle !== undefined) globalThis.clearTimeout(timeoutHandle);
   }
 
   private scheduleNext(): void {
@@ -299,12 +267,10 @@ export class ScheduledAutomaticBackupRuntime implements AutomaticBackupRuntime {
 }
 
 export function createTauriAutomaticBackupRuntime(options: {
-  readonly executor: SqlExecutor;
   readonly ids: UuidV7Generator;
   readonly clock: Clock;
 }): AutomaticBackupRuntime {
-  const maintenance = new DatabaseMaintenanceService(options.executor);
-  const port = new TauriAutomaticBackupPort(maintenance);
+  const port = new TauriAutomaticBackupPort();
   const ids: AutomaticBackupIdGenerator = { next: () => options.ids.next() };
   const service = new AutomaticBackupService(port, ids);
   const runtimeClock: AutomaticBackupRuntimeClock = {
@@ -319,25 +285,11 @@ export function createTauriAutomaticBackupRuntime(options: {
   return new ScheduledAutomaticBackupRuntime(service, runtimeClock);
 }
 
-function readNativeTicket(value: unknown): NativePathTicket {
-  if (
-    value === null ||
-    typeof value !== "object" ||
-    Object.keys(value).length !== 1 ||
-    !("ticket" in value) ||
-    typeof value.ticket !== "string" ||
-    !NATIVE_TICKET_PATTERN.test(value.ticket)
-  ) {
-    throw new AutomaticBackupRuntimeError("AUTOMATIC_BACKUP_TICKET_INVALID");
-  }
-  return value.ticket as NativePathTicket;
-}
-
 function nativeFileRequest(entry: AutomaticBackupManifestEntry): Readonly<{
   backupId: string;
   fileName: string;
   absolutePath: string;
-  status: "creating" | "ready";
+  status: AutomaticBackupManifestEntry["status"];
   byteLength: number | null;
   sha256: string | null;
   retentionUntil: string;

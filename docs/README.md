@@ -1,10 +1,15 @@
 # 墨影 InkShadow 文档入口
 
-> 当前源码与最新已发布版本（App Version）：`0.2.5`（Pre-release；不可移动或复用）  
+> 当前应用清单版本：`0.2.6`；最新已发布版本：`v0.2.5`（工程预览版；不可移动或复用）  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
-> 最近治理复核：2026-08-20  
+> 最近治理复核：2026-08-21  
 > [`v0.2.5` Pre-release](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5)：来源提交 `5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`，同提交 CI 三个作业全部成功；真实 Provider、Tauri/Wry、Credential Manager、系统 200% DPI 与外部应用打开仍为 `BLOCKED_EXTERNAL`  
 > 注意：设计版本用于界面与交互验收，不会自动改变应用版本。
+
+当前共享工作树正在准备 `v0.2.6` 真机缺陷修复；应用清单已升至 `0.2.6`，
+干净来源提交、推送、打包和发布仍待完成。实现事实、复现证据和待验证边界见
+[`execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)。
+该工作树记录不会移动或重解释上面的 `v0.2.5` 历史标签和来源哈希。
 
 本目录同时保存当前规则、实现说明、执行证据和历史基线。为避免把旧页面说明或一次历史测试
 误当成当前产品事实，阅读时必须先看文档状态，再看日期和适用范围。
@@ -38,6 +43,7 @@
 | `EVIDENCE_CURRENT`      | [`execution/CURRENT_STATUS.md`](execution/CURRENT_STATUS.md)                                                                               | 当前执行状态；必须同时核对其中绑定的提交与运行日期 |
 | `EVIDENCE_CURRENT`      | [`execution/TEST_RESULTS.md`](execution/TEST_RESULTS.md)                                                                                   | 当前和历史测试证据；失败不得省略                   |
 | `EVIDENCE_CURRENT`      | [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md)                                                                         | 当前版本的构建、打包、发布与外部门禁               |
+| `EVIDENCE_CURRENT`      | [`execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)                 | v0.2.6 修复工作树的复现、根因、实现与待验证边界    |
 
 ## 支撑文档
 
@@ -64,7 +70,9 @@
 
 ## 目标与历史文档
 
-- `DESIGN/`：`TARGET_BASELINE`。DESIGN v0.3.1b 规定视觉与交互目标；当前源码与最新已发布工程预览应用版本是 0.2.5。发布页恰有安装包、release manifest 与 `SHA256SUMS` 三个附件，精确大小和 SHA-256 见 v0.2.5 完成台账。
+- `DESIGN/`：`TARGET_BASELINE`。DESIGN v0.3.1b 规定视觉与交互目标；当前源码应用清单为
+  0.2.6，最新已发布工程预览版仍为 0.2.5。发布页恰有安装包、发布清单与
+  `SHA256SUMS` 三个附件，精确大小和 SHA-256 见 v0.2.5 完成台账。
 - [`product-rebuild/00-PHASE-0-REALITY-AUDIT.md`](product-rebuild/00-PHASE-0-REALITY-AUDIT.md)：
   `HISTORICAL` Phase 0 起始审计；当前差异须再读增量现实矩阵。
 - `docs/prototypes/`、`docs/state-matrices/`：目标原型或状态设计；除非文件明确标为当前，否则不是

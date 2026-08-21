@@ -63,7 +63,7 @@ async function captureSurfaceMatrix(browser: Browser, surface: "light" | "dark")
     const authorization = await expectDirectModeAuthorizationDisclosure(page);
     await captureVisualEvidence(page, {
       name: `${surface}-direct-first-authorization-1440x900`,
-      state: "首次直接模式仅授权确定性本地整理；未触发 Provider",
+      state: "首次直接模式仅授权确定性本地整理；未触发模型服务调用",
       surfaceSelector: "html",
       viewportProfile: STANDARD_PROFILE,
       captureSession: cdp,
@@ -72,6 +72,7 @@ async function captureSurfaceMatrix(browser: Browser, surface: "light" | "dark")
     await expect(authorization).toBeHidden();
 
     await captureDirectStartMatrix(page, cdp, surface);
+    await captureScrolledDevelopmentBannerMatrix(page, cdp, surface);
     const editorUrl = await openProfessionalSampleEditor(page, cdp);
     const projectId = projectIdFromEditorUrl(editorUrl);
     await openLongCandidateReview(page);
@@ -81,6 +82,58 @@ async function captureSurfaceMatrix(browser: Browser, surface: "light" | "dark")
   } finally {
     await cdp.detach().catch(() => undefined);
     await context.close();
+  }
+}
+
+async function captureScrolledDevelopmentBannerMatrix(
+  page: Page,
+  cdp: CDPSession,
+  surface: "light" | "dark",
+): Promise<void> {
+  for (const profile of TARGET_PROFILES.filter(({ expectedCssViewport }) =>
+    [800, 1024, 1440].includes(expectedCssViewport.width),
+  )) {
+    await applyViewportProfile(page, cdp, profile);
+    await page.goto(`${BASE_URL}/#/settings`);
+    await expect(page.getByRole("heading", { level: 1, name: "设置" })).toBeVisible();
+
+    const main = page.locator(".ink-app-shell__main");
+    const banner = page.locator(".development-banner");
+    await expect(banner).toBeVisible();
+    await main.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    await expect.poll(() => main.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+
+    const projection = await banner.evaluate((element) => {
+      const bannerRect = element.getBoundingClientRect();
+      const mainRect = element.parentElement?.getBoundingClientRect();
+      const canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 1;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (context === null) throw new Error("无法验证浏览器开发提示的背景透明度。");
+      context.fillStyle = getComputedStyle(element).backgroundColor;
+      context.fillRect(0, 0, 1, 1);
+      return {
+        backgroundColor: getComputedStyle(element).backgroundColor,
+        backgroundAlpha: context.getImageData(0, 0, 1, 1).data[3],
+        bannerTop: bannerRect.top,
+        mainTop: mainRect?.top ?? -1,
+      };
+    });
+    expect(projection.backgroundColor).not.toBe("transparent");
+    expect(projection.backgroundAlpha).toBe(255);
+    expect(Math.abs(projection.bannerTop - projection.mainTop)).toBeLessThanOrEqual(1);
+    await expectNoHorizontalPageOverflow(page);
+
+    await captureVisualEvidence(page, {
+      name: `${surface}-browser-development-banner-scrolled-${profile.id}`,
+      state: "浏览器开发提示在滚动后保持不透明，且正式内容仍可阅读",
+      surfaceSelector: "html",
+      viewportProfile: profile,
+      captureSession: cdp,
+    });
   }
 }
 

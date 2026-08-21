@@ -1,8 +1,8 @@
 # InkShadow 前端接口与数据边界
 
-> 基于源码快照：2026-08-20  
+> 基于源码快照：2026-08-21  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 当前版本：已发布 [`v0.2.5`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5)；设计基线：`DESIGN v0.3.1b`  
+> 当前应用清单版本：`0.2.6`；最新已发布版本：[`v0.2.5`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5)；设计基线：`DESIGN v0.3.1b`  
 > 冻结 source commit：`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`；tag object：`51dfd64ba22e9771131f251cdc778ee06f89192d`  
 > 本文记录当前代码接口；它不代表所有云能力已部署或已开放
 
@@ -24,11 +24,17 @@ manifest 11,717 B，SHA-256 `4dce031a71eaa1664dcc993bd4f68362fb3d97b7843110b5ebc
 `7b8eef0ed8bd544f23e7efabe74ad09ff187013404730cbec43c7c42d84ec1c5`，48 samples / 2/2 PASS；
 Provider/network/key/vector calls 均为 0。
 
+`v0.2.6` 修复工作树另行加入 Data `0071` / Tauri `74`、有界 SQLite 执行队列、WebView 重载
+恢复、自动备份清单第 2 版、开书三槽独立结算，以及固定能力验证的原生发送回执和普通调用账本。
+这些改动尚未完成最终全量、真实 Windows Tauri、真实模型对账或发布，不属于上面的 v0.2.5
+冻结通过数字。完整边界见
+[`../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)。
+
 ## 1. 接口总览
 
 当前代码确认：
 
-- 61 个 Tauri 自定义 command；
+- 60 个 Tauri 自定义 command；
 - 1 个 Tauri 自定义事件；
 - 81 个 Cloud REST operation；
 - Web Guest 使用 1 个 IndexedDB 数据库和 2 个 Object Store；
@@ -165,19 +171,21 @@ interface NativeSqliteError {
 
 正式数据库固定在应用配置目录中的 `inkshadow.db`；WebView 不能指定任意数据库路径。
 
-当前前向迁移上限为 Data `0070_multigranular_search_retrieval.sql` / Tauri `73`。
-Tauri 原生版本把 70 个 Data migration 和 3 个 story-core migration 合并成一个连续序列，所以两个
+当前工作树前向迁移上限为 Data `0071_model_capability_probe_invocation_ledger.sql` / Tauri `74`。
+Tauri 原生版本把 71 个 Data migration 和 3 个 story-core migration 合并成一个连续序列，所以两个
 编号不要求相同。`0060`–`0065` 保留 Novel Skill、付费评测、项目派发围栏与内容无关 Provider
 发送边界；`0066`/Tauri `69` 追加写作体验偏好和披露 grant，`0067`/Tauri `70` 追加有界调查
 run/step/finding/evidence，`0068`/Tauri `71` 让 grant 上限只统计 active 行。`0069`/Tauri `72`
 为模型 step 预留 content-free invocation UUID，并让账本 INSERT 原子绑定 step/context trace；
 `0070`/Tauri `73` 只为可重建搜索投影追加多粒度、父子 UTF-16 定位与 current/branch/POV/
-story-time/authority/privacy 范围，旧行为 `legacy_unknown`。
+story-time/authority/privacy 范围，旧行为 `legacy_unknown`。`0071`/Tauri `74` 新增独立能力验证
+调用任务，并让能力证据可空且唯一绑定同一目录项的精确终态调用记录。
 启动恢复按 Provider 发送边界把 ledger/run 结清为发送前终态或 `ambiguous`，同时对账仍非终态的
 task，且不自动重发。同一变更集继续复用 `0045` lease 与 Candidate/context output 原子版本围栏。
 当前 172 张作者数据表进入备份恢复，另 1 张内容无关的原生项目派发租约表明确不恢复；
-`consistency_investigation_steps.planned_invocation_id` 随整表复制。已登记 migration 只校验和验证、
-不可改写；新结构必须继续追加更高版本。
+`consistency_investigation_steps.planned_invocation_id` 随整表复制。Tauri `74` 备份恢复能力扫描的
+调用关联；旧 Tauri `73` 备份没有该列时显式恢复为 `NULL`，不丢正文、版本、AI 建议草稿、任务、
+旧调用或能力证据。已登记 migration 只校验和验证、不可改写；新结构必须继续追加更高版本。
 
 ### 5.1 连接与查询
 
@@ -214,8 +222,11 @@ type NativeSqlValue =
 - 一个原生连接同时只能有一个活动事务；
 - 只读事务禁止变更；
 - 空闲超时 2 分钟，最大生命周期 15 分钟；
-- 前端禁止嵌套事务，并顺序执行事务内部调用；
-- 提交状态不确定或回滚失败时，前端使整个数据库会话失效。
+- 前端以先进先出队列串行所有根操作；只有同一同步调用栈中的真正嵌套事务被拒绝，无关异步根
+  操作等待前序完成；
+- 队列等待、原生命令、事务和提交均有上限。尚未开始的超时操作会被取消且永不迟到执行；写入或
+  提交后无法确认、回滚失败或连接清理失败时，前端使整个数据库会话失效并报告“结果待核对”；
+- WebView 重载会接管会话、回滚孤儿事务并清除旧恢复附件；无法安全复用时关闭并重新打开连接。
 
 ### 5.3 文件选择与路径票据
 
@@ -505,6 +516,12 @@ Settings 两个固定文本 probe 均披露当前 destination、retry0、cost un
 `gateway.generate` 前复核表单、fingerprint 与 authoritative identity。四类漂移为 0 call，成功
 精确 1 call；固定短句不发送作品正文、灵感或设定。豆包 Endpoint ID 非空时作为同一有效模型贯穿
 披露、授权、保存和派发，双字段不一致不能再确认 A 发送 B。
+
+`v0.2.6` 工作树把上述固定能力验证统一记为独立 `capability_probe` 任务。确认前或取消不创建真实
+调用；确认后只创建一条运行记录，原生网关在网络开始前原子核对精确连接、模型、范围和修订并
+写入发送回执。能力证据只能绑定同一目录项、状态匹配的终态记录；发送后中断归为“结果待核对”，
+启动恢复不自动再次发送。普通调用账本显示模型服务、精确模型、状态、Token、费用或未知和 0 次
+自动重试，不显示 API Key、完整地址或作品数据。
 
 供应商预设与能力资料会变化，Registry 应按官方接口/地域说明更新，而不是把某个模型写成永久
 最佳： [OpenAI models](https://platform.openai.com/docs/api-reference/models/object)、
@@ -1396,13 +1413,18 @@ Tauri capability 位于 `apps/desktop/src-tauri/capabilities/default.json`：
 - 后续使用单实例、不重叠的安全定时器每小时重检；
 - 运行时关闭时先停止定时器并等待正在执行的检查，再关闭 SQLite。
 
-文件操作全部位于原生受限端口。前端只能持有根目录检查回执、租约 token、受验证清单和一次性
-备份目的地 ticket；它不能选择自动备份目录、传入任意删除路径或枚举目录。真实备份仍调用既有
-SQLite 一致性备份服务，浏览器不能用下载文件或内存对象冒充该能力。
+文件操作全部位于原生受限端口。前端只能持有根目录检查回执、租约 token、受验证清单和严格
+备份标识；它不能选择自动备份目录、传入任意删除路径或枚举目录。清单第 2 版区分已预留、写入中、
+核验中、未开始、成功、失败和结果待核对；旧清单的模糊“创建中”在重启后保守归为结果待核对。
+`native_automatic_backup_create_verified` 用独立 SQLite 连接完成 `VACUUM INTO`、完整性/外键/结构/
+大小/摘要核验和无覆盖安装，不等待编辑器共享执行器。浏览器不能用下载文件或内存对象冒充该能力。
+启动检查会复验第 2 版清单的“成功”文件和由第 1 版“就绪”转入的旧成功项。文件缺失、
+字节数或 SHA-256 不符、文件检查异常时，页面改显示“结果待核对”，最近成功时段回退到较旧的
+已核验健康备份；对应时段不会被盲目重发。
 
-接口总数中的 9 个自动备份 command 为：`native_automatic_backup_inspect_root`、
+接口总数中的 8 个自动备份 command 为：`native_automatic_backup_inspect_root`、
 `native_automatic_backup_acquire_lease`、`native_automatic_backup_release_lease`、
 `native_automatic_backup_read_manifest`、`native_automatic_backup_write_manifest`、
-`native_automatic_backup_prepare_destination`、`native_automatic_backup_inspect_file`、
-`native_automatic_backup_delete_file` 和 `native_automatic_backup_cleanup_failed_creation`。
+`native_automatic_backup_create_verified`、`native_automatic_backup_inspect_file` 和
+`native_automatic_backup_delete_file`。
 它们只接受自动备份运行时签发和校验的受限标识，不构成通用文件系统 API。

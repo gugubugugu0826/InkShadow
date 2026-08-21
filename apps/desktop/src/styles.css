@@ -409,9 +409,13 @@ select {
   position: sticky;
   z-index: 3;
   top: 0;
+  box-sizing: border-box;
+  display: grid;
+  min-height: 2.5rem;
+  place-items: center;
   padding: var(--space-2) var(--space-4);
   border-bottom: 0.0625rem solid var(--warning-text);
-  background: var(--warning-soft);
+  background: var(--bg-surface);
   color: var(--warning-text);
   font-size: var(--font-caption-size);
   text-align: center;

@@ -18,6 +18,7 @@ import { AppErrorBoundary } from "./components/app-error-boundary";
 import { DesktopShell } from "./components/desktop-shell";
 import { SettingsRouteBoundary } from "./components/settings-route-boundary";
 import { recoverOrphanedOpeningInvocationsAtStartup } from "./infrastructure/opening-startup-recovery";
+import { recoverOrphanedCapabilityProbeInvocationsAtStartup } from "./infrastructure/capability-probe-startup-recovery";
 import { RuntimeProvider, useRuntime, type RuntimeProviderProps } from "./runtime-context";
 
 const EditorPage = lazy(() =>
@@ -413,10 +414,10 @@ export function StartupOpeningInvocationRecovery() {
   const runtime = useRuntime();
 
   useEffect(() => {
-    void recoverOrphanedOpeningInvocationsAtStartup(runtime).catch(() => {
-      // Keep the Shell usable. The durable facts remain untouched and can be
-      // retried by a later startup/page recovery without redispatch.
-    });
+    void Promise.allSettled([
+      recoverOrphanedOpeningInvocationsAtStartup(runtime),
+      recoverOrphanedCapabilityProbeInvocationsAtStartup(runtime.modelHub),
+    ]);
   }, [runtime]);
 
   return null;

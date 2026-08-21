@@ -24,10 +24,12 @@ import { SELECTABLE_MODEL_CATALOG_REGISTRY_VERSION } from "../infrastructure/sel
 import { NOVEL_AI_TASKS } from "../infrastructure/model-hub-provider-registry";
 import { applyAutomaticModelHubRouting } from "../infrastructure/model-hub-routing-service";
 import { ModelHubStoreError } from "../infrastructure/model-hub-store";
+import { readSafeModelHubSessionDiagnostics } from "../infrastructure/model-hub-ui-diagnostics";
 import {
   createDevelopmentRuntime,
   type DesktopRuntime,
   type NativeModelGatewayClient,
+  type NativeModelGenerationInput,
 } from "../infrastructure/runtime";
 import { RuntimeProvider } from "../runtime-context";
 
@@ -62,11 +64,11 @@ describe("SettingsPage model routing", () => {
     ]) {
       expect(await screen.findByRole("heading", { name, level: 2 })).toBeVisible();
     }
-    expect(screen.queryByRole("heading", { name: "InkShadow Model Hub" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "InkShadow 模型中心" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "AI 分工" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "模型基础评测" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "生成小说配图" })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "打开 Model Hub" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "打开模型中心" })).toHaveAttribute(
       "href",
       "/settings#model-center",
     );
@@ -181,10 +183,10 @@ describe("SettingsPage model routing", () => {
     await user.type(search, "gpt-5.6-sol");
     await user.click(screen.getByRole("button", { name: /选择 GPT-5.6 Sol/u }));
 
-    expect(await screen.findByRole("heading", { name: "Model Hub · 连接与模型" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "模型中心 · 连接与模型" })).toBeVisible();
     expect(screen.getByText(/准备连接 GPT-5.6 Sol.*不会参与 AI 分工/u)).toBeVisible();
     expect(screen.queryByText(/更改已保存.*需要刷新/u)).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "刷新 Model Hub 状态" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "刷新模型中心状态" })).not.toBeInTheDocument();
     await expect(runtime.modelHub.findTaskRoute("prose_generation")).resolves.toBeNull();
     expect(screen.queryByText(/OpenAI model catalog/u)).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /供应商证据/u })).not.toBeInTheDocument();
@@ -285,7 +287,7 @@ describe("SettingsPage model routing", () => {
     renderRoute(prepared.runtime, "/settings#model-center");
 
     expect(
-      await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 }),
+      await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 }),
     ).toBeVisible();
     expect(
       await screen.findByText("所选模型已发现，仍需验证能力", {}, { timeout: 5_000 }),
@@ -371,6 +373,7 @@ describe("SettingsPage model routing", () => {
     const checkConnection = vi.spyOn(prepared.runtime.modelGateway, "checkConnection");
     const listModels = vi.spyOn(prepared.runtime.modelGateway, "listModels");
     const generate = vi.spyOn(prepared.runtime.modelGateway, "generate");
+    const startInvocation = vi.spyOn(prepared.runtime.modelHub, "startInvocation");
     expect(
       saveModelHubConnectionIntent(window.localStorage, {
         task: "prose_generation",
@@ -422,6 +425,10 @@ describe("SettingsPage model routing", () => {
     expect(probedCatalogEntries).toHaveLength(1);
     const probedCatalogEntry = probedCatalogEntries[0];
     if (probedCatalogEntry === undefined) throw new Error("Expected one probed catalog entry.");
+    const probedConnectionId =
+      probedCatalogEntry.catalogEntryId === activeDuplicateCatalogEntry.id
+        ? activeDuplicate.id
+        : "deepseek-verified-return-intent";
     const probedDisplayName =
       probedCatalogEntry.catalogEntryId === activeDuplicateCatalogEntry.id
         ? "Active duplicate deepseek-v4-flash"
@@ -442,6 +449,39 @@ describe("SettingsPage model routing", () => {
     expect(checkConnection).not.toHaveBeenCalled();
     expect(listModels).not.toHaveBeenCalled();
     expect(generate).toHaveBeenCalledTimes(1);
+    expect(generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
+    expect(startInvocation).toHaveBeenCalledOnce();
+    expect(startInvocation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        task: "capability_probe",
+        routeTask: null,
+        connectionId: probedConnectionId,
+        catalogEntryId: probedCatalogEntry.catalogEntryId,
+        providerKindSnapshot: "deepseek",
+        modelIdSnapshot: "deepseek-v4-flash",
+        routeReason: "user_override",
+        attempt: 1,
+        maximumCostMicros: null,
+        currency: null,
+      }),
+    );
+    const probeInvocationId = startInvocation.mock.calls[0]?.[0].id ?? "missing";
+    const probeInvocation = await prepared.runtime.modelHub.findInvocation(probeInvocationId);
+    expect(probeInvocation).toMatchObject({
+      task: "capability_probe",
+      status: "succeeded",
+      connectionId: probedConnectionId,
+      catalogEntryId: probedCatalogEntry.catalogEntryId,
+      modelIdSnapshot: "deepseek-v4-flash",
+      inputTokens: 4,
+      outputTokens: 1,
+      estimatedCostMicros: null,
+    });
+    expect(typeof probeInvocation?.providerDispatchStartedAt).toBe("string");
+    const serializedProbeInvocation = JSON.stringify(probeInvocation);
+    expect(serializedProbeInvocation).not.toContain("只回复：OK");
+    expect(serializedProbeInvocation).not.toContain("https://api.deepseek.com");
+    expect(serializedProbeInvocation).not.toContain("keyring:");
 
     const probedModelRow = probedModelLabel.closest("li");
     if (probedModelRow === null) throw new Error("Expected the probed model row.");
@@ -490,6 +530,7 @@ describe("SettingsPage model routing", () => {
       }),
     ).not.toBeNull();
     const generate = vi.spyOn(prepared.runtime.modelGateway, "generate");
+    const startInvocation = vi.spyOn(prepared.runtime.modelHub, "startInvocation");
 
     renderRoute(prepared.runtime, "/settings#model-center");
 
@@ -523,17 +564,104 @@ describe("SettingsPage model routing", () => {
     expect(within(confirmation).getByText(/DeepSeek/u)).toBeVisible();
     expect(within(confirmation).getByText(/deepseek-v4-flash/u)).toBeVisible();
     expect(within(confirmation).getByText(/固定用户句：雨停了。/u)).toBeVisible();
-    expect(within(confirmation).getByText(/最大输出：\s*64 个 token/u)).toBeVisible();
+    expect(within(confirmation).getByText(/最大输出：\s*64 个令牌/u)).toBeVisible();
     expect(
-      within(confirmation).getByText(/最大 Provider 调用：\s*1 次；自动重试：\s*0 次/u),
+      within(confirmation).getByText(/最大模型服务调用：\s*1 次；自动重试：\s*0 次/u),
     ).toBeVisible();
-    expect(within(confirmation).getByText(/费用上限：unknown/u)).toBeVisible();
+    expect(within(confirmation).getByText(/费用上限：暂无法估算/u)).toBeVisible();
     expect(generate).not.toHaveBeenCalled();
 
     await user.click(within(confirmation).getByRole("button", { name: "取消（不发送）" }));
     await waitFor(() => expect(confirmation).not.toBeInTheDocument());
     expect(generate).not.toHaveBeenCalled();
+    expect(startInvocation).not.toHaveBeenCalled();
   }, 10_000);
+
+  it.each([
+    { task: "what_if_simulation" as const, label: "结构化输出" },
+    { task: "translation" as const, label: "翻译" },
+  ])(
+    "shows an uncertain $label probe as pending review without another dispatch",
+    async ({ task }) => {
+      const prepared = await createReadyDeepSeekProbeRuntime(`deepseek-${task}-ambiguous`);
+      await prepared.runtime.modelHub.recordCapabilityScan({
+        scanId: `deepseek-${task}-ambiguous-text-scan`,
+        catalogEntryId: prepared.catalogEntryId,
+        scanKind: "user_review",
+        status: "succeeded",
+        evidenceVersion: `${task}-ambiguous-text-v1`,
+        evidence: [
+          {
+            id: `deepseek-${task}-ambiguous-text`,
+            capability: "text_generation",
+            verdict: "supported",
+            evidenceSource: "user_confirmed",
+          },
+        ],
+      });
+      expect(
+        saveModelHubConnectionIntent(window.localStorage, {
+          task,
+          providerKind: "deepseek",
+          providerModelId: "deepseek-v4-flash",
+          catalogRegistryVersion: SELECTABLE_MODEL_CATALOG_REGISTRY_VERSION,
+          now: prepared.runtime.clock.now(),
+        }),
+      ).not.toBeNull();
+      const generate = vi.spyOn(prepared.runtime.modelGateway, "generate").mockRejectedValue(
+        Object.assign(new Error("connection ended before a response"), {
+          code: "MODEL_NETWORK_TIMEOUT",
+          retryable: true,
+          diagnostics: { stage: "transport" },
+        }),
+      );
+      const commitCapabilityProbeResult = vi.spyOn(
+        prepared.runtime.modelHub,
+        "commitCapabilityProbeResult",
+      );
+      const user = userEvent.setup();
+      renderRoute(prepared.runtime, "/settings#model-center");
+
+      expect(
+        await screen.findByRole("heading", { name: "AI 分工" }, { timeout: 5_000 }),
+      ).toBeVisible();
+      const taskRow = await waitFor(() => {
+        const row = document.getElementById(`model-routing-task-${task}`);
+        if (row === null) throw new Error("Expected the focused task row.");
+        expect(row).toHaveFocus();
+        return row;
+      });
+      const disclosureButton = await within(taskRow).findByRole(
+        "button",
+        { name: "查看验证说明" },
+        { timeout: 5_000 },
+      );
+      await user.click(disclosureButton);
+      const confirmation = await screen.findByRole("dialog", {
+        name: "确认 1 次固定能力验证？",
+      });
+      await user.click(
+        within(confirmation).getByRole("button", {
+          name: "确认 1 次验证并用于此任务",
+        }),
+      );
+
+      await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+      expect((await screen.findAllByText("固定能力验证结果待核对")).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/系统不会自动重发/u).length).toBeGreaterThan(0);
+      expect(screen.queryByText("AI 分工没有保存")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "重试保存" })).not.toBeInTheDocument();
+      expect(within(taskRow).getByRole("button", { name: "结果待核对" })).toBeDisabled();
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(commitCapabilityProbeResult).not.toHaveBeenCalled();
+      await expect(prepared.runtime.modelHub.findTaskRoute(task)).resolves.toBeNull();
+      const failures = await prepared.runtime.modelHub.listRecentAiFailures();
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.diagnosticId.startsWith("model_invocation:")).toBe(true);
+      expect(failures[0]?.normalizedErrorCode).toBe("PROVIDER_RESULT_AMBIGUOUS");
+    },
+    20_000,
+  );
 
   it("makes zero calls after privacy drift and requires a fresh confirmation before translation probing", async () => {
     const prepared = await createReadyDeepSeekProbeRuntime("deepseek-translation-disclosure");
@@ -787,10 +915,10 @@ describe("SettingsPage model routing", () => {
   }, 15_000);
 
   it.each([
-    ["model-center", "Model Hub · 连接与模型", "连接与模型", "InkShadow Model Hub"],
-    ["model-routing", "Model Hub · AI 分工", "AI 分工", "AI 分工"],
-    ["model-evaluation", "Model Hub · 模型评测", "模型评测", "模型基础评测"],
-    ["image-generation", "Model Hub · 图片生成", "图片生成", "生成小说配图"],
+    ["model-center", "模型中心 · 连接与模型", "连接与模型", "InkShadow 模型中心"],
+    ["model-routing", "模型中心 · AI 分工", "AI 分工", "AI 分工"],
+    ["model-evaluation", "模型中心 · 模型评测", "模型评测", "模型基础评测"],
+    ["image-generation", "模型中心 · 图片生成", "图片生成", "生成小说配图"],
   ] as const)(
     "separates the %s Model Hub view from global settings",
     async (sectionId, pageTitle, navigationLabel, activeSectionHeading) => {
@@ -798,13 +926,13 @@ describe("SettingsPage model routing", () => {
       renderRoute(runtime, `/settings#${sectionId}`);
 
       expect(await screen.findByRole("heading", { name: pageTitle, level: 1 })).toBeVisible();
-      expect(screen.getByRole("navigation", { name: "Model Hub 分区" })).toBeVisible();
+      expect(screen.getByRole("navigation", { name: "模型中心分区" })).toBeVisible();
       expect(screen.getByRole("link", { name: navigationLabel })).toHaveAttribute(
         "aria-current",
         "page",
       );
       for (const sectionHeading of [
-        "InkShadow Model Hub",
+        "InkShadow 模型中心",
         "AI 分工",
         "模型基础评测",
         "生成小说配图",
@@ -839,7 +967,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(observedRuntime, "/settings#model-evaluation");
 
-    expect(await screen.findByRole("heading", { name: "Model Hub · 模型评测" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "模型中心 · 模型评测" })).toBeVisible();
     expect(
       screen.queryByRole("button", { name: "写作方法 A/B 评测（专家）" }),
     ).not.toBeInTheDocument();
@@ -876,7 +1004,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime, "/settings#model-center");
 
-    expect(await screen.findByRole("heading", { name: "InkShadow Model Hub" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "InkShadow 模型中心" })).toBeVisible();
     expect(
       await screen.findByRole("heading", { name: "需要 AI 时，再连接一个模型服务" }),
     ).toBeVisible();
@@ -1237,7 +1365,7 @@ describe("SettingsPage model routing", () => {
     const runtime = createRuntime();
     const view = renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 });
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
@@ -1302,7 +1430,7 @@ describe("SettingsPage model routing", () => {
 
     view.unmount();
     renderRoute(createRuntime());
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 });
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     await waitFor(() => {
       expect(screen.getByLabelText("配置标识")).toHaveValue("custom-safe");
@@ -1543,7 +1671,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    await screen.findByRole("heading", { name: "InkShadow 模型中心" });
     await user.click(await screen.findByRole("button", { name: "连接 AI 服务" }));
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
@@ -1610,7 +1738,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    await screen.findByRole("heading", { name: "InkShadow 模型中心" });
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
     await user.selectOptions(providerSelect, "custom_openai_compatible");
@@ -1677,7 +1805,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 });
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
     await user.selectOptions(
@@ -1740,7 +1868,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+    await screen.findByRole("heading", { name: "InkShadow 模型中心" });
     const storedConnections = await screen.findByRole("combobox", {
       name: /^已连接的供应商/u,
     });
@@ -1824,7 +1952,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 });
     const storedConnections = await screen.findByRole("combobox", {
       name: /^已连接的供应商/u,
     });
@@ -1882,7 +2010,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 });
     const storedConnections = await screen.findByRole(
       "combobox",
       { name: /^已连接的供应商/u },
@@ -1931,7 +2059,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow Model Hub" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 });
     await waitFor(() =>
       expect(screen.getByRole("combobox", { name: /^已连接的供应商/u })).toBeEnabled(),
     );
@@ -2558,7 +2686,7 @@ describe("SettingsPage model routing", () => {
     expect(screen.getByText("配置写入失败")).toBeVisible();
     expect(screen.getAllByText("AI 分工没有保存").length).toBeGreaterThan(0);
     expect(
-      screen.getByText(/Model Hub 的 22 项分工没有被修改，本次任务路由事务已回滚/u),
+      screen.getByText(/模型中心的 22 项分工没有被修改，本次任务路由事务已回滚/u),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "重试保存" })).toBeVisible();
     expect(screen.getByRole("button", { name: "导出脱敏诊断" })).toBeVisible();
@@ -2613,7 +2741,7 @@ describe("SettingsPage model routing", () => {
     await user.click(screen.getByRole("button", { name: "应用 AI 分工" }));
 
     expect(
-      await screen.findByText(/Model Hub 的 22 项分工未修改.*旧版兼容分工可能已被安全停用/u),
+      await screen.findByText(/模型中心的 22 项分工未修改.*旧版兼容分工可能已被安全停用/u),
     ).toBeVisible();
     expect(screen.queryByText(/之前的 AI 分工没有被修改，事务已回滚/u)).not.toBeInTheDocument();
     await expect(prepared.runtime.modelRouting.listRoutes()).resolves.toEqual([]);
@@ -2704,6 +2832,108 @@ describe("SettingsPage model routing", () => {
     expect(screen.getAllByText(/最近一次验证未返回完整可见内容/u).length).toBeGreaterThan(0);
     expect(document.body).not.toHaveTextContent("MODEL_OUTPUT_TRUNCATED");
   });
+
+  it("shows an uncertain capability result as pending review without a failed scan or redispatch", async () => {
+    const connectionId = "deepseek-ambiguous-capability";
+    const prepared = await createReadyDeepSeekProbeRuntime(connectionId);
+    await prepared.runtime.modelHub.recordCapabilityScan({
+      scanId: "deepseek-ambiguous-prior-success",
+      catalogEntryId: prepared.catalogEntryId,
+      scanKind: "lightweight_probe",
+      status: "succeeded",
+      evidenceVersion: "ambiguous-prior-success-v1",
+      evidence: [
+        {
+          id: "deepseek-ambiguous-prior-success-text",
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "lightweight_probe",
+        },
+      ],
+    });
+    const generate = vi.fn(async (input: NativeModelGenerationInput) => {
+      const ledger = input.invocationDispatchLedger;
+      if (ledger === undefined) throw new Error("测试缺少原生调用账本边界。");
+      const invocation = await prepared.runtime.modelHub.markInvocationDispatched({
+        id: ledger.invocationId,
+        dispatchedAt: prepared.runtime.clock.now(),
+        expectedRevision: ledger.expectedRevision,
+      });
+      void invocation;
+      throw Object.assign(new Error("simulated invalid native dispatch receipt"), {
+        code: "MODEL_INVOCATION_DISPATCH_RECEIPT_INVALID",
+      });
+    });
+    const runtime: DesktopRuntime = {
+      ...prepared.runtime,
+      modelGateway: {
+        ...prepared.runtime.modelGateway,
+        supportsNativeInvocationDispatchLedger: true,
+        generate,
+      },
+    };
+    const user = userEvent.setup();
+    const first = renderRoute(runtime);
+    const verifyButton = await screen.findByRole("button", {
+      name: "确认 1 次固定验证",
+    });
+    await waitFor(() => expect(verifyButton).toBeEnabled());
+    await user.click(verifyButton);
+
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("写作能力验证结果待核对")).toBeVisible();
+    expect(screen.getByText(/系统不会自动重发；连接和模型目录会保留/u)).toBeVisible();
+    expect(screen.queryByText("写作能力验证失败")).not.toBeInTheDocument();
+    expect(screen.queryByText(/修正模型或接入点后可以重试/u)).not.toBeInTheDocument();
+    expect(generate).toHaveBeenCalledTimes(1);
+    await expect(runtime.modelHub.findConnection(connectionId)).resolves.toMatchObject({
+      connectionStatus: "ready",
+    });
+    expect(
+      readSafeModelHubSessionDiagnostics(runtime, runtime.clock.now()).recentModelHubActions.find(
+        ({ action }) => action === "verify_capability",
+      ),
+    ).toMatchObject({
+      outcome: "succeeded_with_warning",
+      backendCommitted: true,
+    });
+    await waitFor(async () => {
+      const recentFailures = await runtime.modelHub.listRecentAiFailures();
+      expect(recentFailures).toHaveLength(1);
+      expect(recentFailures[0]).toMatchObject({
+        taskType: "capability_probe",
+        normalizedErrorCode: "PROVIDER_RESULT_AMBIGUOUS",
+      });
+      expect(recentFailures[0]?.diagnosticId.startsWith("model_invocation:")).toBe(true);
+    });
+    await expect(runtime.modelHub.listCapabilityEvidence(prepared.catalogEntryId)).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "deepseek-ambiguous-prior-success-text",
+          verdict: "supported",
+        }),
+      ]),
+    );
+
+    first.unmount();
+    renderRoute(runtime, "/settings#model-routing");
+    expect(
+      await screen.findByRole("heading", { name: "当前模型能做什么" }, { timeout: 5_000 }),
+    ).toBeVisible();
+    const textGeneration = screen
+      .getAllByText("文本生成")
+      .map((label) => label.closest("li"))
+      .find((item) => item !== null);
+    expect(textGeneration).not.toBeNull();
+    expect(within(textGeneration as HTMLElement).getByText(/结果待核对/u)).toBeVisible();
+    expect(
+      within(textGeneration as HTMLElement).getByText(/调用结果无法确认，系统不会自动重发/u),
+    ).toBeVisible();
+    expect(screen.getByText("最近结果待核对")).toBeVisible();
+    expect(screen.queryByText("验证失败")).not.toBeInTheDocument();
+    expect(screen.queryByText("最近一次验证未通过")).not.toBeInTheDocument();
+    expect(generate).toHaveBeenCalledTimes(1);
+  }, 30_000);
 
   it("never replaces an existing disabled custom route after a successful probe", async () => {
     const developmentRuntime = createDevelopmentRuntime(window.localStorage);
@@ -3122,7 +3352,7 @@ describe("SettingsPage model routing", () => {
       const user = userEvent.setup();
       renderRoute(runtime);
 
-      await screen.findByRole("heading", { name: "InkShadow Model Hub" });
+      await screen.findByRole("heading", { name: "InkShadow 模型中心" });
       const modelInput = await screen.findByRole("textbox", { name: "模型标识" });
       await user.type(modelInput, "qwen-final-write-model");
       const verifyButton = screen.getByRole("button", {

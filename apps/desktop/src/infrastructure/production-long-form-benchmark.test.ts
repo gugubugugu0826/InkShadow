@@ -152,7 +152,7 @@ interface ProductionLongFormBenchmarkReport {
   readonly evaluatedAtK: number;
   readonly execution: Readonly<{
     readonly database: "temporary_file_backed_node_sqlite";
-    readonly schemaHead: "0070_multigranular_search_retrieval.sql";
+    readonly schemaHead: "0071_model_capability_probe_invocation_ledger.sql";
     readonly searchPath: "LocalProjectSearchService.searchFtsOnly+TauriProjectSearchSnapshotStore";
     readonly storyMemoryPath: "CompositeStoryMemoryReadModel+SQLite_authority_repositories";
     readonly agentPath: "ConsistencyInvestigationService+ConsistencyInvestigationToolRegistry";
@@ -524,7 +524,7 @@ async function runProductionLongFormBenchmark(
       evaluatedAtK: BENCHMARK_K,
       execution: Object.freeze({
         database: "temporary_file_backed_node_sqlite",
-        schemaHead: "0070_multigranular_search_retrieval.sql",
+        schemaHead: "0071_model_capability_probe_invocation_ledger.sql",
         searchPath: "LocalProjectSearchService.searchFtsOnly+TauriProjectSearchSnapshotStore",
         storyMemoryPath: "CompositeStoryMemoryReadModel+SQLite_authority_repositories",
         agentPath: "ConsistencyInvestigationService+ConsistencyInvestigationToolRegistry",
@@ -1703,14 +1703,14 @@ function writeRawBenchmarkReport(report: ProductionLongFormBenchmarkReport): str
 function readCurrentLocalSchema(workspaceRoot: string): string {
   const dataDirectory = path.join(workspaceRoot, "packages", "data", "migrations");
   const dataMigrations = readdirSync(dataDirectory)
-    .filter((name) => /^(?:00(?:0[1-9]|[1-6][0-9]|70))_.*\.sql$/u.test(name))
+    .filter((name) => /^(?:00(?:0[1-9]|[1-6][0-9]|7[01]))_.*\.sql$/u.test(name))
     .sort();
   if (
-    dataMigrations.length !== 70 ||
+    dataMigrations.length !== 71 ||
     dataMigrations[0] !== "0001_core.sql" ||
-    dataMigrations.at(-1) !== "0070_multigranular_search_retrieval.sql"
+    dataMigrations.at(-1) !== "0071_model_capability_probe_invocation_ledger.sql"
   ) {
-    throw new Error("The production benchmark expected the exact Data 0001-0070 migration chain.");
+    throw new Error("The production benchmark expected the exact Data 0001-0071 migration chain.");
   }
   const sql: string[] = [];
   for (const fileName of dataMigrations) {

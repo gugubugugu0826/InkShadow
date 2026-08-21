@@ -73,6 +73,7 @@ import type { StoryContextCompilationReceipt } from "../infrastructure/story-con
 import {
   normalizeUiError,
   projectOrdinaryUiError,
+  requiresRuntimeDatabaseReopen,
   UiActionError,
 } from "../infrastructure/ui-error";
 import type {
@@ -2551,7 +2552,7 @@ export function EditorPage() {
       if (result.value.candidate?.status === "ready") {
         setEditorNotice(
           result.value.candidate.toSnapshot().incomplete || result.value.incomplete
-            ? "本次结果未完整结束，已保留为隔离 Candidate；正文和版本没有改变。"
+            ? "本次结果未完整结束，已保留为隔离的 AI 建议草稿；正文和版本没有改变。"
             : "建议已生成并保持隔离；正文和版本没有改变，请查看后决定是否使用。",
         );
       }
@@ -2857,7 +2858,7 @@ export function EditorPage() {
     }
     if (!beginEditorReplacement()) {
       setEditorNotice(
-        "正文仍有尚未完成的本地保存；这份 Candidate 继续保持隔离，没有写入正文或创建版本。",
+        "正文仍有尚未完成的本地保存；这份 AI 建议草稿继续保持隔离，没有写入正文或创建版本。",
       );
       return false;
     }
@@ -2900,17 +2901,25 @@ export function EditorPage() {
       },
     );
     let pipelineRegistrationError: string | null = null;
-    try {
-      // In Tauri this confirms the task created atomically with Candidate
-      // acceptance; browser development registers the same idempotent request
-      // before the accept action can return to the author.
-      await ensureAcceptedChapterPipelineTask(runtime, pipelineInput);
-    } catch (cause: unknown) {
-      pipelineRegistrationError = projectOrdinaryUiError(cause).description;
+    if (runtime.mode !== "tauri") {
+      try {
+        // Browser development has no SQLite commit hook, so it registers the
+        // same idempotent task here. Tauri already created this task inside the
+        // acceptance transaction and must not make the foreground wait for a
+        // second database round trip after the正文 commit has returned.
+        await ensureAcceptedChapterPipelineTask(runtime, pipelineInput);
+      } catch (cause: unknown) {
+        pipelineRegistrationError = projectOrdinaryUiError(cause).description;
+      }
     }
     setCandidate(result.value.candidate);
     setChapter(result.value.chapter);
     chapterRef.current = result.value.chapter;
+    setVersions((current) =>
+      current.some((version) => version.id === result.value.version.id)
+        ? current
+        : [...current, result.value.version],
+    );
     const selectionBefore = normalizeEditorSelection(
       selectionRef.current,
       contentRef.current.length,
@@ -2947,7 +2956,7 @@ export function EditorPage() {
       strategy.kind === "apply_changes"
         ? strategy.decisions.filter(({ decision }) => decision === "reject").length
         : null;
-    await recordWritingFeedbackSafely({
+    void recordWritingFeedbackSafely({
       action:
         strategy.kind === "apply_changes" && (rejectedChangeCount ?? 0) > 0
           ? "partially_accepted"
@@ -2962,7 +2971,7 @@ export function EditorPage() {
       setEditorNotice(
         `${candidateSuggestionLabel}已安全写入正文和不可变版本；本地搜索与故事关联任务登记失败：${pipelineRegistrationError}`,
       );
-      await loadVersions();
+      void loadVersions();
       return true;
     }
     setStoryStateUpdate({ state: "idle" });
@@ -3026,7 +3035,7 @@ export function EditorPage() {
           setEditorNotice("正文和版本已保存；本地设定整理暂未完成，可稍后重新整理。");
         });
     }
-    await loadVersions();
+    void loadVersions();
     return true;
   }
 
@@ -3267,6 +3276,7 @@ export function EditorPage() {
   }
 
   const normalizedError = error === null ? null : projectOrdinaryUiError(error);
+  const fatalErrorRequiresRuntimeReopen = requiresRuntimeDatabaseReopen(error);
   const normalizedGenerationError =
     generationError === null ? null : normalizeUiError(generationError);
   const ordinaryGenerationError =
@@ -3388,7 +3398,11 @@ export function EditorPage() {
             <ErrorState
               title={normalizedError.title}
               description={normalizedError.description}
-              primaryAction={{ label: "重新加载", onClick: () => void load() }}
+              primaryAction={
+                fatalErrorRequiresRuntimeReopen
+                  ? { label: "重新打开当前页面", onClick: () => window.location.reload() }
+                  : { label: "重新加载", onClick: () => void load() }
+              }
             />
           ),
         conflict:
@@ -3865,7 +3879,7 @@ export function EditorPage() {
                 title="正文始终由你决定"
                 description={
                   directModeAuthorized
-                    ? "续写会先保存为隔离 Candidate；只有你明确选择使用后，才会接到本章末尾并创建不可变版本。本地整理授权不会代替这次确认。"
+                    ? "续写会先保存为隔离的 AI 建议草稿；只有你明确选择使用后，才会接到本章末尾并创建不可变版本。本地整理授权不会代替这次确认。"
                     : usesNativeModel
                       ? "生成内容会先成为 AI 建议版本；只有你比较并接受后，才会创建新的正文版本。"
                       : "当前使用本机示例帮助检查流程，不会联网；只有你接受后，内容才会进入正文。"
@@ -4209,8 +4223,8 @@ export function EditorPage() {
               {(canGenerateCandidate || candidateIncomplete) && directModeAuthorized && (
                 <section className="candidate-content" aria-label="直接续写">
                   <p>
-                    生成完成后会先保存为隔离
-                    Candidate；正文和版本保持不变，直到你查看并明确选择使用。
+                    生成完成后会先保存为隔离的 AI
+                    建议草稿；正文和版本保持不变，直到你查看并明确选择使用。
                   </p>
                   <Button
                     variant="ai-primary"
@@ -5256,14 +5270,14 @@ export function EditorPage() {
                 <InlineAlert
                   tone="info"
                   title="本次不会发送到外部 AI 服务"
-                  description="这是本机演示流程。完整结果只会保存为隔离 Candidate；只有你稍后明确选择使用，才会改变正文并创建不可变版本。"
+                  description="这是本机演示流程。完整结果只会保存为隔离的 AI 建议草稿；只有你稍后明确选择使用，才会改变正文并创建不可变版本。"
                 />
               ) : null
             ) : (
               <InlineAlert
                 tone="warning"
-                title="确认本次 AI 调用"
-                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 发送内容：${continuationDisclosure.sends.join("；")}。本次最多调用 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。${generationPlan.requestId === directGenerationRequestId && directDisclosure !== null ? "相同 Provider、精确模型、发送范围、调用上限、费用状态和隐私策略不变时，可复用这项本机授权；任一项变化都会再次询问。" : "这次确认只适用于当前正文版本与本次生成计划；任一项变化都会停止发送并要求重新确认。"}完整结果只会保存为隔离 Candidate，正文和版本保持不变，直到你明确选择使用。`}
+                title="确认本次模型服务调用"
+                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 发送内容：${continuationDisclosure.sends.join("；")}。本次最多调用 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。${generationPlan.requestId === directGenerationRequestId && directDisclosure !== null ? "相同模型服务、精确模型、发送范围、调用上限、费用状态和隐私策略不变时，可复用这项本机授权；任一项变化都会再次询问。" : "这次确认只适用于当前正文版本与本次生成计划；任一项变化都会停止发送并要求重新确认。"}完整结果只会保存为隔离的 AI 建议草稿，正文和版本保持不变，直到你明确选择使用。`}
               />
             )}
 
@@ -5779,7 +5793,7 @@ function preflightCheckLabel(code: string): string {
     PREFLIGHT_BLOCKED_HARD_BUDGET: "预计费用超过你主动设置的硬预算",
     READY: "AI 服务、章节、费用与预算均已检查",
   };
-  return labels[code] ?? code;
+  return labels[code] ?? "其他安全检查";
 }
 
 function budgetScopeLabel(scope: "task" | "project" | "month"): string {

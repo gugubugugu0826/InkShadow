@@ -379,6 +379,108 @@ describe("Tauri native model gateway client", () => {
     });
   });
 
+  it("waits for the durable native invocation receipt before exposing a terminal result", async () => {
+    let deliver: ((event: TestGenerationEvent) => void) | null = null;
+    let releaseLedger: (() => void) | null = null;
+    tauriMocks.listen.mockImplementation(
+      (
+        _eventName: string,
+        handler: (event: Readonly<{ payload: TestGenerationEvent }>) => void,
+      ) => {
+        deliver = (event) => handler({ payload: event });
+        return Promise.resolve(vi.fn());
+      },
+    );
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command !== "start_native_generation") {
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      }
+      queueMicrotask(() => {
+        deliver?.(event(0, "", { phase: "started" }));
+        deliver?.(event(1, "OK", { phase: "delta" }));
+        deliver?.(event(2, "", { phase: "completed", usage: null }));
+      });
+      return Promise.resolve({
+        generationId: "generation-1",
+        accepted: true,
+        invocationDispatchReceipt: {
+          invocationId: "capability-probe-invocation-019f9f4a-b3c7-7350-9226-000000000501",
+          dispatchedAt: "2026-08-21T00:00:00.000Z",
+          revision: 2,
+        },
+      });
+    });
+    const onInvocationDispatchAccepted = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseLedger = resolve;
+        }),
+    );
+    const request: NativeModelGenerationInput = {
+      ...input(),
+      invocationDispatchLedger: {
+        invocationId: "capability-probe-invocation-019f9f4a-b3c7-7350-9226-000000000501",
+        expectedRevision: 1,
+        connectionId: "connection-1",
+        connectionRevision: 1,
+        catalogEntryId: "catalog-1",
+        catalogEntryRevision: 1,
+        providerKindSnapshot: "openai",
+        modelIdSnapshot: "model-1",
+      },
+      onInvocationDispatchAccepted,
+    };
+    let completed = false;
+    const pending = new TauriNativeModelGatewayClient().generate(request).then((result) => {
+      completed = true;
+      return result;
+    });
+
+    await vi.waitFor(() => expect(onInvocationDispatchAccepted).toHaveBeenCalledOnce());
+    expect(completed).toBe(false);
+    (releaseLedger as (() => void) | null)?.();
+    await expect(pending).resolves.toMatchObject({ text: "OK" });
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("start_native_generation", {
+      request: {
+        dispatchScope: request.dispatchScope,
+        generationId: request.generationId,
+        config: request.config,
+        model: request.model,
+        messages: request.messages,
+        maxOutputTokens: request.maxOutputTokens,
+        invocationDispatchLedger: request.invocationDispatchLedger,
+      },
+    });
+  });
+
+  it("does not report a dispatch receipt when native preparation rejects the request", async () => {
+    tauriMocks.listen.mockResolvedValue(vi.fn());
+    tauriMocks.invoke.mockRejectedValue({
+      code: "MODEL_CREDENTIAL_MISSING",
+      message: "missing",
+      retryable: false,
+    });
+    const onInvocationDispatchAccepted = vi.fn();
+
+    await expect(
+      new TauriNativeModelGatewayClient().generate({
+        ...input(),
+        invocationDispatchLedger: {
+          invocationId: "019f9f4a-b3c7-7350-9226-000000000502",
+          expectedRevision: 1,
+          connectionId: "connection-1",
+          connectionRevision: 1,
+          catalogEntryId: "catalog-1",
+          catalogEntryRevision: 1,
+          providerKindSnapshot: "openai",
+          modelIdSnapshot: "model-1",
+        },
+        onInvocationDispatchAccepted,
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_CREDENTIAL_MISSING" });
+    expect(onInvocationDispatchAccepted).not.toHaveBeenCalled();
+  });
+
   it("rejects a non-default Anthropic temperature before starting a stream", async () => {
     await expect(
       new TauriNativeModelGatewayClient().generate({

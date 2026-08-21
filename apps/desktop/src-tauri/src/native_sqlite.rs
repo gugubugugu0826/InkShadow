@@ -19,7 +19,7 @@ use sqlx::{
 };
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
 use crate::local_migrations::run_local_migrations;
 use crate::path_tickets::{
@@ -39,14 +39,22 @@ const MAX_DATABASE_FILE_PATH_BYTES: usize = 32_767;
 const MAX_SAFE_JS_INTEGER: i64 = 9_007_199_254_740_991;
 // These clocks measure gaps between completed bridge calls. A long-running SQL
 // statement holds the mutex and cannot be rolled back underneath itself.
-const TRANSACTION_IDLE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-const TRANSACTION_MAX_LIFETIME: Duration = Duration::from_secs(15 * 60);
+const TRANSACTION_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+const TRANSACTION_MAX_LIFETIME: Duration = Duration::from_secs(5 * 60);
+const BRIDGE_LOCK_TIMEOUT: Duration = Duration::from_secs(25);
+const FOREGROUND_OPERATION_TIMEOUT: Duration = Duration::from_secs(25);
+const MAINTENANCE_OPERATION_TIMEOUT: Duration = Duration::from_secs(9 * 60);
+const CLOSE_OPERATION_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone)]
 pub(crate) struct NativeSqliteState {
     inner: Arc<Mutex<NativeSqliteBridge>>,
     transaction_idle_timeout: Duration,
     transaction_max_lifetime: Duration,
+    bridge_lock_timeout: Duration,
+    foreground_operation_timeout: Duration,
+    maintenance_operation_timeout: Duration,
+    close_operation_timeout: Duration,
     runtime_id: Arc<str>,
     startup_reconciled: Arc<AtomicBool>,
 }
@@ -57,6 +65,10 @@ impl Default for NativeSqliteState {
             inner: Arc::new(Mutex::new(NativeSqliteBridge::default())),
             transaction_idle_timeout: TRANSACTION_IDLE_TIMEOUT,
             transaction_max_lifetime: TRANSACTION_MAX_LIFETIME,
+            bridge_lock_timeout: BRIDGE_LOCK_TIMEOUT,
+            foreground_operation_timeout: FOREGROUND_OPERATION_TIMEOUT,
+            maintenance_operation_timeout: MAINTENANCE_OPERATION_TIMEOUT,
+            close_operation_timeout: CLOSE_OPERATION_TIMEOUT,
             runtime_id: Arc::from(random_token()),
             startup_reconciled: Arc::new(AtomicBool::new(false)),
         }
@@ -105,6 +117,83 @@ pub(crate) enum NativeNonProjectDispatchReason {
     NovelSkillEvaluation,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NativeModelInvocationDispatchLedger {
+    pub(crate) invocation_id: String,
+    pub(crate) expected_revision: i64,
+    pub(crate) connection_id: String,
+    pub(crate) connection_revision: i64,
+    pub(crate) catalog_entry_id: String,
+    pub(crate) catalog_entry_revision: i64,
+    pub(crate) provider_kind_snapshot: String,
+    pub(crate) model_id_snapshot: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NativeModelInvocationDispatchTarget {
+    pub(crate) protocol: String,
+    pub(crate) credential_provider_id: String,
+    pub(crate) base_url: String,
+    pub(crate) authentication_mode: String,
+    pub(crate) credential_header_name: Option<String>,
+    pub(crate) model_discovery_path: Option<String>,
+    pub(crate) text_generation_path: Option<String>,
+    pub(crate) embedding_path: Option<String>,
+    pub(crate) request_timeout_ms: i64,
+    pub(crate) model_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NativeModelInvocationDispatchReceipt {
+    pub(crate) invocation_id: String,
+    pub(crate) dispatched_at: String,
+    pub(crate) revision: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModelInvocationDispatchLedgerError {
+    Invalid,
+    Conflict,
+    Busy,
+    OutcomeUnknown,
+    Unavailable,
+}
+
+fn valid_model_invocation_dispatch_target(target: &NativeModelInvocationDispatchTarget) -> bool {
+    matches!(
+        target.protocol.as_str(),
+        "openai_compatible" | "ollama" | "anthropic" | "gemini"
+    ) && matches!(
+        target.authentication_mode.as_str(),
+        "none" | "bearer_keyring" | "custom_header_keyring"
+    ) && !target.credential_provider_id.is_empty()
+        && target.credential_provider_id.len() <= 128
+        && !target.base_url.is_empty()
+        && target.base_url.len() <= 2_048
+        && target.request_timeout_ms >= 1_000
+        && target.request_timeout_ms <= 600_000
+        && !target.model_id.is_empty()
+        && target.model_id.len() <= 512
+        && target
+            .credential_header_name
+            .as_ref()
+            .is_none_or(|value| !value.is_empty() && value.len() <= 128)
+        && target
+            .model_discovery_path
+            .as_ref()
+            .is_none_or(|value| !value.is_empty() && value.len() <= 1_024)
+        && target
+            .text_generation_path
+            .as_ref()
+            .is_none_or(|value| !value.is_empty() && value.len() <= 1_024)
+        && target
+            .embedding_path
+            .as_ref()
+            .is_none_or(|value| !value.is_empty() && value.len() <= 1_024)
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectRemoteDispatchLease {
     pub(crate) lease_id: String,
@@ -120,6 +209,15 @@ pub(crate) enum ProjectRemoteDispatchLeaseError {
 }
 
 impl NativeSqliteState {
+    async fn lock_bridge(
+        &self,
+        stage: &'static str,
+    ) -> Result<MutexGuard<'_, NativeSqliteBridge>, NativeSqliteError> {
+        tokio::time::timeout(self.bridge_lock_timeout, self.inner.lock())
+            .await
+            .map_err(|_| NativeSqliteError::operation_timeout(stage, "not_started"))
+    }
+
     #[cfg(test)]
     pub(crate) async fn test_open_migrated_database(
         &self,
@@ -140,13 +238,155 @@ impl NativeSqliteState {
             .map_err(NativeSqliteError::from_sqlx)
     }
 
-    pub(crate) async fn active_maintenance_session(&self) -> Result<String, NativeSqliteError> {
-        let bridge = self.inner.lock().await;
-        bridge.require_no_transaction()?;
+    #[cfg(test)]
+    pub(crate) fn test_with_foreground_operation_timeout(mut self, timeout: Duration) -> Self {
+        self.foreground_operation_timeout = timeout;
+        self
+    }
+
+    /// Commits the content-free capability-probe dispatch receipt at the
+    /// native network boundary. Validation, credential loading and project
+    /// privacy leasing happen before this write; provider I/O happens only
+    /// after it succeeds.
+    pub(crate) async fn mark_capability_probe_invocation_dispatched(
+        &self,
+        ledger: &NativeModelInvocationDispatchLedger,
+        target: &NativeModelInvocationDispatchTarget,
+    ) -> Result<NativeModelInvocationDispatchReceipt, ModelInvocationDispatchLedgerError> {
+        let canonical_id = ledger
+            .invocation_id
+            .strip_prefix("capability-probe-invocation-")
+            .unwrap_or(&ledger.invocation_id);
+        if uuid::Uuid::parse_str(canonical_id).is_err()
+            || ledger.expected_revision < 1
+            || ledger.connection_revision < 1
+            || ledger.catalog_entry_revision < 1
+            || ledger.connection_id.is_empty()
+            || ledger.connection_id.len() > 128
+            || ledger.catalog_entry_id.is_empty()
+            || ledger.catalog_entry_id.len() > 128
+            || ledger.provider_kind_snapshot.is_empty()
+            || ledger.provider_kind_snapshot.len() > 128
+            || ledger.model_id_snapshot.is_empty()
+            || ledger.model_id_snapshot.len() > 512
+            || !valid_model_invocation_dispatch_target(target)
+        {
+            return Err(ModelInvocationDispatchLedgerError::Invalid);
+        }
+        let mut bridge = self
+            .lock_bridge("model_invocation_dispatch_ledger")
+            .await
+            .map_err(|_| ModelInvocationDispatchLedgerError::Busy)?;
         bridge
-            .session_token
-            .clone()
-            .ok_or_else(NativeSqliteError::unavailable)
+            .require_no_transaction()
+            .map_err(|_| ModelInvocationDispatchLedgerError::Busy)?;
+        let write = tokio::time::timeout(self.foreground_operation_timeout, async {
+            sqlx::query(
+                "UPDATE model_invocation_facts
+                 SET provider_dispatch_started_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                     revision = revision + 1
+                 WHERE id = ? AND task = 'capability_probe' AND status = 'running'
+                   AND connection_id = ? AND catalog_entry_id = ?
+                   AND provider_kind_snapshot = ? AND model_id_snapshot = ?
+                   AND provider_dispatch_started_at IS NULL AND revision = ?
+                   AND EXISTS (
+                     SELECT 1
+                     FROM model_provider_connections AS connection
+                     INNER JOIN model_catalog_entries AS catalog
+                       ON catalog.id = ? AND catalog.connection_id = connection.id
+                     WHERE connection.id = ?
+                       AND connection.revision = ?
+                       AND connection.enabled = 1
+                       AND connection.provider_kind = ?
+                       AND connection.protocol = ?
+                       AND connection.base_url = ?
+                       AND connection.authentication_mode = ?
+                       AND connection.credential_header_name IS ?
+                       AND connection.model_discovery_path IS ?
+                       AND connection.text_generation_path IS ?
+                       AND connection.embedding_path IS ?
+                       AND connection.request_timeout_ms = ?
+                       AND (
+                         (
+                           connection.authentication_mode = 'none'
+                           AND connection.id = ?
+                         )
+                         OR (
+                           connection.authentication_mode <> 'none'
+                           AND connection.credential_state = 'present'
+                           AND connection.credential_ref IN (
+                             'keyring:model-hub:' || ?,
+                             'keyring:legacy-model-profile:' || ?
+                           )
+                         )
+                       )
+                       AND catalog.revision = ?
+                       AND catalog.provider_model_id = ?
+                       AND catalog.availability <> 'unavailable'
+                   )
+                 RETURNING provider_dispatch_started_at, revision",
+            )
+            .bind(&ledger.invocation_id)
+            .bind(&ledger.connection_id)
+            .bind(&ledger.catalog_entry_id)
+            .bind(&ledger.provider_kind_snapshot)
+            .bind(&ledger.model_id_snapshot)
+            .bind(ledger.expected_revision)
+            .bind(&ledger.catalog_entry_id)
+            .bind(&ledger.connection_id)
+            .bind(ledger.connection_revision)
+            .bind(&ledger.provider_kind_snapshot)
+            .bind(&target.protocol)
+            .bind(&target.base_url)
+            .bind(&target.authentication_mode)
+            .bind(&target.credential_header_name)
+            .bind(&target.model_discovery_path)
+            .bind(&target.text_generation_path)
+            .bind(&target.embedding_path)
+            .bind(target.request_timeout_ms)
+            .bind(&target.credential_provider_id)
+            .bind(&target.credential_provider_id)
+            .bind(&target.credential_provider_id)
+            .bind(ledger.catalog_entry_revision)
+            .bind(&target.model_id)
+            .fetch_optional(
+                bridge
+                    .connection_mut()
+                    .map_err(|_| ModelInvocationDispatchLedgerError::Unavailable)?,
+            )
+            .await
+            .map_err(|error| match NativeSqliteError::from_sqlx(error).code {
+                "SQLITE_BUSY" => ModelInvocationDispatchLedgerError::Busy,
+                _ => ModelInvocationDispatchLedgerError::OutcomeUnknown,
+            })
+        })
+        .await;
+        let row = match write {
+            Ok(Ok(row)) => row,
+            Ok(Err(ModelInvocationDispatchLedgerError::Busy)) => {
+                return Err(ModelInvocationDispatchLedgerError::Busy)
+            }
+            Ok(Err(error)) => {
+                bridge.invalidate_connection_hard();
+                return Err(error);
+            }
+            Err(_) => {
+                bridge.invalidate_connection_hard();
+                return Err(ModelInvocationDispatchLedgerError::OutcomeUnknown);
+            }
+        };
+        let Some(row) = row else {
+            return Err(ModelInvocationDispatchLedgerError::Conflict);
+        };
+        Ok(NativeModelInvocationDispatchReceipt {
+            invocation_id: ledger.invocation_id.clone(),
+            dispatched_at: row
+                .try_get("provider_dispatch_started_at")
+                .map_err(|_| ModelInvocationDispatchLedgerError::Unavailable)?,
+            revision: row
+                .try_get("revision")
+                .map_err(|_| ModelInvocationDispatchLedgerError::Unavailable)?,
+        })
     }
 
     pub(crate) async fn acquire_project_remote_dispatch_lease(
@@ -164,7 +404,10 @@ impl NativeSqliteState {
             return Err(ProjectRemoteDispatchLeaseError::AuthorityChanged);
         }
 
-        let mut bridge = self.inner.lock().await;
+        let mut bridge = self
+            .lock_bridge("dispatch_lease_acquire_lock")
+            .await
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseBusy)?;
         bridge
             .require_no_transaction()
             .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseBusy)?;
@@ -212,7 +455,10 @@ impl NativeSqliteState {
         &self,
         lease: &ProjectRemoteDispatchLease,
     ) -> Result<(), ProjectRemoteDispatchLeaseError> {
-        let mut bridge = self.inner.lock().await;
+        let mut bridge = self
+            .lock_bridge("dispatch_lease_release_lock")
+            .await
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseBusy)?;
         bridge
             .require_no_transaction()
             .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseBusy)?;
@@ -240,7 +486,10 @@ impl NativeSqliteState {
         &self,
         active_operation_ids: &HashSet<String>,
     ) -> Result<u64, ProjectRemoteDispatchLeaseError> {
-        let mut bridge = self.inner.lock().await;
+        let mut bridge = self
+            .lock_bridge("dispatch_lease_reconcile_lock")
+            .await
+            .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseBusy)?;
         bridge
             .require_no_transaction()
             .map_err(|_| ProjectRemoteDispatchLeaseError::DatabaseBusy)?;
@@ -508,6 +757,10 @@ pub(crate) struct NativeSqliteError {
     code: &'static str,
     message: &'static str,
     retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<&'static str>,
 }
 
 impl NativeSqliteError {
@@ -516,6 +769,38 @@ impl NativeSqliteError {
             code,
             message,
             retryable,
+            stage: None,
+            outcome: None,
+        }
+    }
+
+    fn operation_timeout(stage: &'static str, outcome: &'static str) -> Self {
+        Self {
+            code: "SQLITE_OPERATION_TIMEOUT",
+            message: "The local database operation exceeded its bounded execution window.",
+            retryable: true,
+            stage: Some(stage),
+            outcome: Some(outcome),
+        }
+    }
+
+    fn write_outcome_unknown(stage: &'static str) -> Self {
+        Self {
+            code: "SQLITE_WRITE_OUTCOME_UNKNOWN",
+            message: "The local database write result could not be confirmed.",
+            retryable: false,
+            stage: Some(stage),
+            outcome: Some("unknown"),
+        }
+    }
+
+    fn commit_outcome_unknown() -> Self {
+        Self {
+            code: "SQLITE_COMMIT_OUTCOME_UNKNOWN",
+            message: "The local database commit result could not be confirmed.",
+            retryable: false,
+            stage: Some("transaction_commit"),
+            outcome: Some("unknown"),
         }
     }
 
@@ -691,6 +976,14 @@ impl NativeSqliteError {
     }
 }
 
+fn fail_bounded_bridge_operation<Value>(
+    bridge: &mut NativeSqliteBridge,
+    error: NativeSqliteError,
+) -> Result<Value, NativeSqliteError> {
+    bridge.invalidate_connection_hard();
+    Err(error)
+}
+
 #[tauri::command]
 pub(crate) async fn native_sqlite_open(
     app: AppHandle,
@@ -704,27 +997,38 @@ pub(crate) async fn native_sqlite_open(
     std::fs::create_dir_all(&directory).map_err(|_| NativeSqliteError::unavailable())?;
     let path = directory.join(DATABASE_FILE_NAME);
 
-    let mut bridge = state.inner.lock().await;
-    let receipt = if bridge.connection.is_some() {
-        // A WebView reload resets the renderer-side module state while the
-        // native process and its single SQLite connection remain alive. Adopt
-        // that connection instead of opening a second handle or forcing the
-        // user into a reload loop. Any renderer-owned transaction is orphaned
-        // at this point and must be rolled back before the new session token is
-        // issued. The token rotation invalidates every stale renderer facade.
-        bridge.adopt_renderer_session().await?
-    } else {
-        bridge.open_file(&path).await?
-    };
-    // A previous process cannot still own a native request: the desktop app is
-    // single-instance and this runs before the WebView receives its database
-    // session. Remove crash-orphaned leases before any privacy mutation is
-    // accepted in the new runtime.
-    state
-        .reconcile_startup_project_remote_dispatch_leases(bridge.connection_mut()?)
-        .await?;
-    path_tickets.inner.lock().await.clear();
-    Ok(receipt)
+    let mut bridge = state.lock_bridge("open_lock").await?;
+    let opened = tokio::time::timeout(state.foreground_operation_timeout, async {
+        let receipt = if bridge.connection.is_some() {
+            // A WebView reload resets renderer state while native remains
+            // alive. Clean orphaned transaction/attachment state and rotate
+            // the token. If cleanup cannot be confirmed, discard that handle
+            // and reopen the fixed database instead of reusing uncertain state.
+            match bridge.adopt_renderer_session().await {
+                Ok(receipt) => receipt,
+                Err(_) => bridge.open_file(&path).await?,
+            }
+        } else {
+            bridge.open_file(&path).await?
+        };
+        // A previous process cannot still own a native request: the desktop app is
+        // single-instance and this runs before the WebView receives its database
+        // session. Remove crash-orphaned leases before any privacy mutation is
+        // accepted in the new runtime.
+        state
+            .reconcile_startup_project_remote_dispatch_leases(bridge.connection_mut()?)
+            .await?;
+        path_tickets.inner.lock().await.clear();
+        Ok(receipt)
+    })
+    .await;
+    match opened {
+        Ok(result) => result,
+        Err(_) => fail_bounded_bridge_operation(
+            &mut bridge,
+            NativeSqliteError::operation_timeout("open", "not_confirmed"),
+        ),
+    }
 }
 
 #[tauri::command]
@@ -734,16 +1038,31 @@ pub(crate) async fn native_sqlite_select(
     query: String,
     values: Vec<NativeSqlValue>,
 ) -> Result<Vec<JsonMap<String, JsonValue>>, NativeSqliteError> {
-    let mut bridge = state.inner.lock().await;
-    bridge
-        .expire_transaction_if_timed_out(
-            state.transaction_idle_timeout,
-            state.transaction_max_lifetime,
-        )
-        .await?;
-    let mut rows = bridge.select(&session_token, &query, values).await?;
-    redact_database_list_paths(&query, &mut rows);
-    Ok(rows)
+    let mut bridge = state.lock_bridge("select_lock").await?;
+    let timeout = if is_maintenance_query(&query) {
+        state.maintenance_operation_timeout
+    } else {
+        state.foreground_operation_timeout
+    };
+    match tokio::time::timeout(timeout, async {
+        bridge
+            .expire_transaction_if_timed_out(
+                state.transaction_idle_timeout,
+                state.transaction_max_lifetime,
+            )
+            .await?;
+        let mut rows = bridge.select(&session_token, &query, values).await?;
+        redact_database_list_paths(&query, &mut rows);
+        Ok(rows)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => fail_bounded_bridge_operation(
+            &mut bridge,
+            NativeSqliteError::operation_timeout("select", "not_confirmed"),
+        ),
+    }
 }
 
 #[tauri::command]
@@ -754,66 +1073,81 @@ pub(crate) async fn native_sqlite_execute(
     query: String,
     mut values: Vec<NativeSqlValue>,
 ) -> Result<NativeExecuteResult, NativeSqliteError> {
-    let mut bridge = state.inner.lock().await;
-    bridge
-        .expire_transaction_if_timed_out(
-            state.transaction_idle_timeout,
-            state.transaction_max_lifetime,
-        )
-        .await?;
-    bridge.require_session(&session_token)?;
-
     let maintenance = MaintenanceStatement::classify(&query);
-    if maintenance == MaintenanceStatement::AttachRestoreSource {
-        bridge.ensure_no_project_remote_dispatch_leases().await?;
-    }
-    let ticket_operation = match maintenance {
-        MaintenanceStatement::VacuumInto => Some(TicketedPathOperation::VacuumInto),
-        MaintenanceStatement::AttachRestoreSource => {
-            Some(TicketedPathOperation::AttachRestoreSource)
-        }
-        _ => None,
-    };
-    if let Some(operation) = ticket_operation {
-        let [NativeSqlValue::Text { value: ticket }] = values.as_slice() else {
-            return Err(NativeSqliteError::invalid_path_ticket());
-        };
-        let ticket = ticket.clone();
-        let mut registry = path_tickets.inner.lock().await;
-        let authorized_path = registry
-            .authorize(&session_token, &ticket, operation)
-            .map_err(|_| NativeSqliteError::invalid_path_ticket())?;
-        values = vec![NativeSqlValue::Text {
-            value: authorized_path.to_string_lossy().into_owned(),
-        }];
-        let result = bridge.execute(&session_token, &query, values).await;
-        match result {
-            Ok(receipt) => {
-                if registry
-                    .record_success(&session_token, &ticket, operation)
-                    .is_err()
-                {
-                    registry.record_failure(&ticket);
-                    bridge.invalidate_connection().await;
-                    return Err(NativeSqliteError::invalidated());
-                }
-                Ok(receipt)
-            }
-            Err(error) => {
-                registry.record_failure(&ticket);
-                Err(error)
-            }
-        }
-    } else if maintenance == MaintenanceStatement::DetachRestoreSource {
-        let mut registry = path_tickets.inner.lock().await;
-        registry
-            .authorize_detach(&session_token)
-            .map_err(|_| NativeSqliteError::invalid_path_ticket())?;
-        let result = bridge.execute(&session_token, &query, values).await;
-        registry.record_detached();
-        result
+    let timeout = if is_maintenance_query(&query) {
+        state.maintenance_operation_timeout
     } else {
-        bridge.execute(&session_token, &query, values).await
+        state.foreground_operation_timeout
+    };
+    let mut bridge = state.lock_bridge("execute_lock").await?;
+    match tokio::time::timeout(timeout, async {
+        bridge
+            .expire_transaction_if_timed_out(
+                state.transaction_idle_timeout,
+                state.transaction_max_lifetime,
+            )
+            .await?;
+        bridge.require_session(&session_token)?;
+
+        if maintenance == MaintenanceStatement::AttachRestoreSource {
+            bridge.ensure_no_project_remote_dispatch_leases().await?;
+        }
+        let ticket_operation = match maintenance {
+            MaintenanceStatement::VacuumInto => Some(TicketedPathOperation::VacuumInto),
+            MaintenanceStatement::AttachRestoreSource => {
+                Some(TicketedPathOperation::AttachRestoreSource)
+            }
+            _ => None,
+        };
+        if let Some(operation) = ticket_operation {
+            let [NativeSqlValue::Text { value: ticket }] = values.as_slice() else {
+                return Err(NativeSqliteError::invalid_path_ticket());
+            };
+            let ticket = ticket.clone();
+            let mut registry = path_tickets.inner.lock().await;
+            let authorized_path = registry
+                .authorize(&session_token, &ticket, operation)
+                .map_err(|_| NativeSqliteError::invalid_path_ticket())?;
+            values = vec![NativeSqlValue::Text {
+                value: authorized_path.to_string_lossy().into_owned(),
+            }];
+            let result = bridge.execute(&session_token, &query, values).await;
+            match result {
+                Ok(receipt) => {
+                    if registry
+                        .record_success(&session_token, &ticket, operation)
+                        .is_err()
+                    {
+                        registry.record_failure(&ticket);
+                        bridge.invalidate_connection().await;
+                        return Err(NativeSqliteError::invalidated());
+                    }
+                    Ok(receipt)
+                }
+                Err(error) => {
+                    registry.record_failure(&ticket);
+                    Err(error)
+                }
+            }
+        } else if maintenance == MaintenanceStatement::DetachRestoreSource {
+            let mut registry = path_tickets.inner.lock().await;
+            registry
+                .authorize_detach(&session_token)
+                .map_err(|_| NativeSqliteError::invalid_path_ticket())?;
+            let result = bridge.execute(&session_token, &query, values).await;
+            registry.record_detached();
+            result
+        } else {
+            bridge.execute(&session_token, &query, values).await
+        }
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => fail_bounded_bridge_operation(
+            &mut bridge,
+            NativeSqliteError::write_outcome_unknown("execute"),
+        ),
     }
 }
 
@@ -823,16 +1157,27 @@ pub(crate) async fn native_sqlite_begin(
     session_token: String,
     read_only: bool,
 ) -> Result<NativeTransactionReceipt, NativeSqliteError> {
-    let transaction_token = {
-        let mut bridge = state.inner.lock().await;
+    let mut bridge = state.lock_bridge("transaction_begin_lock").await?;
+    let transaction_token = match tokio::time::timeout(state.foreground_operation_timeout, async {
         bridge
             .expire_transaction_if_timed_out(
                 state.transaction_idle_timeout,
                 state.transaction_max_lifetime,
             )
             .await?;
-        bridge.begin(&session_token, read_only).await?
+        bridge.begin(&session_token, read_only).await
+    })
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            return fail_bounded_bridge_operation(
+                &mut bridge,
+                NativeSqliteError::operation_timeout("transaction_begin", "not_confirmed"),
+            );
+        }
     };
+    drop(bridge);
 
     schedule_transaction_expiration(
         Arc::clone(&state.inner),
@@ -840,6 +1185,8 @@ pub(crate) async fn native_sqlite_begin(
         transaction_token.clone(),
         state.transaction_idle_timeout,
         state.transaction_max_lifetime,
+        state.bridge_lock_timeout,
+        state.foreground_operation_timeout,
     );
 
     Ok(NativeTransactionReceipt { transaction_token })
@@ -853,18 +1200,28 @@ pub(crate) async fn native_sqlite_transaction_select(
     query: String,
     values: Vec<NativeSqlValue>,
 ) -> Result<Vec<JsonMap<String, JsonValue>>, NativeSqliteError> {
-    let mut bridge = state.inner.lock().await;
-    bridge
-        .expire_transaction_if_timed_out(
-            state.transaction_idle_timeout,
-            state.transaction_max_lifetime,
-        )
-        .await?;
-    let mut rows = bridge
-        .transaction_select(&session_token, &transaction_token, &query, values)
-        .await?;
-    redact_database_list_paths(&query, &mut rows);
-    Ok(rows)
+    let mut bridge = state.lock_bridge("transaction_select_lock").await?;
+    match tokio::time::timeout(state.foreground_operation_timeout, async {
+        bridge
+            .expire_transaction_if_timed_out(
+                state.transaction_idle_timeout,
+                state.transaction_max_lifetime,
+            )
+            .await?;
+        let mut rows = bridge
+            .transaction_select(&session_token, &transaction_token, &query, values)
+            .await?;
+        redact_database_list_paths(&query, &mut rows);
+        Ok(rows)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => fail_bounded_bridge_operation(
+            &mut bridge,
+            NativeSqliteError::operation_timeout("transaction_select", "not_confirmed"),
+        ),
+    }
 }
 
 #[tauri::command]
@@ -875,16 +1232,26 @@ pub(crate) async fn native_sqlite_transaction_execute(
     query: String,
     values: Vec<NativeSqlValue>,
 ) -> Result<NativeExecuteResult, NativeSqliteError> {
-    let mut bridge = state.inner.lock().await;
-    bridge
-        .expire_transaction_if_timed_out(
-            state.transaction_idle_timeout,
-            state.transaction_max_lifetime,
-        )
-        .await?;
-    bridge
-        .transaction_execute(&session_token, &transaction_token, &query, values)
-        .await
+    let mut bridge = state.lock_bridge("transaction_execute_lock").await?;
+    match tokio::time::timeout(state.foreground_operation_timeout, async {
+        bridge
+            .expire_transaction_if_timed_out(
+                state.transaction_idle_timeout,
+                state.transaction_max_lifetime,
+            )
+            .await?;
+        bridge
+            .transaction_execute(&session_token, &transaction_token, &query, values)
+            .await
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => fail_bounded_bridge_operation(
+            &mut bridge,
+            NativeSqliteError::operation_timeout("transaction_execute", "not_confirmed"),
+        ),
+    }
 }
 
 #[tauri::command]
@@ -893,16 +1260,25 @@ pub(crate) async fn native_sqlite_commit(
     session_token: String,
     transaction_token: String,
 ) -> Result<(), NativeSqliteError> {
-    let mut bridge = state.inner.lock().await;
-    bridge
-        .expire_transaction_if_timed_out(
-            state.transaction_idle_timeout,
-            state.transaction_max_lifetime,
-        )
-        .await?;
-    bridge
-        .finish_transaction(&session_token, &transaction_token, true)
-        .await
+    let mut bridge = state.lock_bridge("transaction_commit_lock").await?;
+    match tokio::time::timeout(state.foreground_operation_timeout, async {
+        bridge
+            .expire_transaction_if_timed_out(
+                state.transaction_idle_timeout,
+                state.transaction_max_lifetime,
+            )
+            .await?;
+        bridge
+            .finish_transaction(&session_token, &transaction_token, true)
+            .await
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            fail_bounded_bridge_operation(&mut bridge, NativeSqliteError::commit_outcome_unknown())
+        }
+    }
 }
 
 #[tauri::command]
@@ -911,16 +1287,26 @@ pub(crate) async fn native_sqlite_rollback(
     session_token: String,
     transaction_token: String,
 ) -> Result<(), NativeSqliteError> {
-    let mut bridge = state.inner.lock().await;
-    bridge
-        .expire_transaction_if_timed_out(
-            state.transaction_idle_timeout,
-            state.transaction_max_lifetime,
-        )
-        .await?;
-    bridge
-        .finish_transaction(&session_token, &transaction_token, false)
-        .await
+    let mut bridge = state.lock_bridge("transaction_rollback_lock").await?;
+    match tokio::time::timeout(state.foreground_operation_timeout, async {
+        bridge
+            .expire_transaction_if_timed_out(
+                state.transaction_idle_timeout,
+                state.transaction_max_lifetime,
+            )
+            .await?;
+        bridge
+            .finish_transaction(&session_token, &transaction_token, false)
+            .await
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => fail_bounded_bridge_operation(
+            &mut bridge,
+            NativeSqliteError::write_outcome_unknown("transaction_rollback"),
+        ),
+    }
 }
 
 #[tauri::command]
@@ -929,16 +1315,26 @@ pub(crate) async fn native_sqlite_close(
     path_tickets: State<'_, PathTicketState>,
     session_token: String,
 ) -> Result<(), NativeSqliteError> {
-    let mut bridge = state.inner.lock().await;
-    bridge.require_session(&session_token)?;
-    bridge.ensure_no_project_remote_dispatch_leases().await?;
-    let result = bridge.close().await;
-    path_tickets
-        .inner
-        .lock()
-        .await
-        .revoke_session(&session_token);
-    result
+    let mut bridge = state.lock_bridge("close_lock").await?;
+    match tokio::time::timeout(state.close_operation_timeout, async {
+        bridge.require_session(&session_token)?;
+        bridge.ensure_no_project_remote_dispatch_leases().await?;
+        let result = bridge.close().await;
+        path_tickets
+            .inner
+            .lock()
+            .await
+            .revoke_session(&session_token);
+        result
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => fail_bounded_bridge_operation(
+            &mut bridge,
+            NativeSqliteError::operation_timeout("close", "not_confirmed"),
+        ),
+    }
 }
 
 #[tauri::command]
@@ -1032,7 +1428,7 @@ async fn issue_selected_path(
     purpose: PathTicketPurpose,
     selected: Option<PathBuf>,
 ) -> Result<Option<PathTicketReceipt>, NativeSqliteError> {
-    let bridge = state.inner.lock().await;
+    let bridge = state.lock_bridge("path_ticket_lock").await?;
     let session_token = bridge
         .session_token
         .as_deref()
@@ -1051,11 +1447,15 @@ fn schedule_transaction_expiration(
     transaction_token: String,
     idle_timeout: Duration,
     max_lifetime: Duration,
+    lock_timeout: Duration,
+    operation_timeout: Duration,
 ) {
     tokio::spawn(async move {
         loop {
             let remaining = {
-                let mut bridge = state.lock().await;
+                let Ok(mut bridge) = tokio::time::timeout(lock_timeout, state.lock()).await else {
+                    return;
+                };
 
                 if bridge.session_token.as_deref() != Some(session_token.as_str()) {
                     return;
@@ -1070,7 +1470,15 @@ fn schedule_transaction_expiration(
                 let idle_elapsed = transaction.last_activity.elapsed();
                 let lifetime_elapsed = transaction.created_at.elapsed();
                 if idle_elapsed >= idle_timeout || lifetime_elapsed >= max_lifetime {
-                    let _ = bridge.rollback_expired_transaction().await;
+                    if tokio::time::timeout(
+                        operation_timeout,
+                        bridge.rollback_expired_transaction(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        bridge.invalidate_connection_hard();
+                    }
                     return;
                 }
                 idle_timeout
@@ -1140,11 +1548,12 @@ impl NativeSqliteBridge {
             return Err(NativeSqliteError::invalidated());
         }
         if self.restore_query_only().await.is_err()
+            || self.clear_stale_renderer_attachments().await.is_err()
             || verify_connection_configuration(self.connection_mut()?)
                 .await
                 .is_err()
         {
-            self.invalidate_connection().await;
+            self.invalidate_connection_hard();
             return Err(NativeSqliteError::invalidated());
         }
 
@@ -1352,7 +1761,11 @@ impl NativeSqliteBridge {
             .is_err()
         {
             self.invalidate_connection().await;
-            return Err(NativeSqliteError::invalidated());
+            // The autocommit statement already returned success. Losing the
+            // connection while checking its postconditions cannot prove
+            // whether the caller received the durable write receipt, so the
+            // renderer must reopen and reconcile authority instead of retrying.
+            return Err(NativeSqliteError::write_outcome_unknown("execute"));
         }
         to_execute_result(result)
     }
@@ -1409,6 +1822,53 @@ impl NativeSqliteBridge {
             })
             .filter(|path| !path.as_os_str().is_empty())
             .ok_or_else(NativeSqliteError::internal)
+    }
+
+    async fn clear_stale_renderer_attachments(&mut self) -> Result<(), NativeSqliteError> {
+        let names = self.database_names().await?;
+        if names
+            .iter()
+            .any(|name| !matches!(name.as_str(), "main" | "temp" | "restore_source"))
+        {
+            return Err(NativeSqliteError::invalidated());
+        }
+        if names.iter().any(|name| name == "restore_source") {
+            #[cfg(test)]
+            let force_detach_failure = std::mem::take(&mut self.fail_next_detach);
+            #[cfg(not(test))]
+            let force_detach_failure = false;
+            if force_detach_failure
+                || sqlx::query("DETACH DATABASE restore_source")
+                    .execute(self.connection_mut()?)
+                    .await
+                    .is_err()
+            {
+                return Err(NativeSqliteError::invalidated());
+            }
+        }
+
+        let remaining = self.database_names().await?;
+        if remaining
+            .iter()
+            .all(|name| matches!(name.as_str(), "main" | "temp"))
+        {
+            Ok(())
+        } else {
+            Err(NativeSqliteError::invalidated())
+        }
+    }
+
+    async fn database_names(&mut self) -> Result<Vec<String>, NativeSqliteError> {
+        sqlx::query("PRAGMA database_list")
+            .fetch_all(self.connection_mut()?)
+            .await
+            .map_err(NativeSqliteError::from_sqlx)?
+            .into_iter()
+            .map(|row| {
+                row.try_get::<String, _>("name")
+                    .map_err(|_| NativeSqliteError::internal())
+            })
+            .collect()
     }
 
     async fn begin(
@@ -1576,7 +2036,11 @@ impl NativeSqliteBridge {
             }
             if !recovered {
                 self.invalidate_connection().await;
-                return Err(NativeSqliteError::invalidated());
+                return Err(if commit {
+                    NativeSqliteError::commit_outcome_unknown()
+                } else {
+                    NativeSqliteError::invalidated()
+                });
             }
             return Err(operation_error);
         }
@@ -1584,7 +2048,11 @@ impl NativeSqliteBridge {
         if read_only && self.restore_query_only().await.is_err() {
             self.transaction = None;
             self.invalidate_connection().await;
-            return Err(NativeSqliteError::invalidated());
+            return Err(if commit {
+                NativeSqliteError::commit_outcome_unknown()
+            } else {
+                NativeSqliteError::invalidated()
+            });
         }
         self.transaction = None;
 
@@ -1593,7 +2061,11 @@ impl NativeSqliteBridge {
             .is_err()
         {
             self.invalidate_connection().await;
-            return Err(NativeSqliteError::invalidated());
+            return Err(if commit {
+                NativeSqliteError::commit_outcome_unknown()
+            } else {
+                NativeSqliteError::invalidated()
+            });
         }
         Ok(())
     }
@@ -1652,6 +2124,17 @@ impl NativeSqliteBridge {
         self.session_token = None;
         if let Some(connection) = self.connection.take() {
             let _ = connection.close().await;
+        }
+    }
+
+    fn invalidate_connection_hard(&mut self) {
+        self.transaction = None;
+        self.session_token = None;
+        if let Some(connection) = self.connection.take() {
+            // `SqliteConnection::close_hard` is implemented by dropping the
+            // handle. Do that synchronously so timeout recovery cannot itself
+            // become another unbounded await.
+            drop(connection);
         }
     }
 
@@ -2056,6 +2539,15 @@ fn canonical_statement(sql: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase()
+}
+
+fn is_maintenance_query(query: &str) -> bool {
+    let normalized = canonical_statement(strip_leading_space_and_comments(query));
+    normalized.starts_with("vacuum")
+        || normalized.starts_with("attach database")
+        || normalized.starts_with("detach database")
+        || normalized.starts_with("pragma integrity_check")
+        || normalized.starts_with("pragma foreign_key_check")
 }
 
 fn validate_maintenance_statement_bindings(
@@ -2666,6 +3158,48 @@ mod tests {
 
         let unknown = NativeSqliteError::from_sqlite_extended_code(Some(10));
         assert_eq!(unknown.code, "SQLITE_OPERATION_FAILED");
+    }
+
+    #[tokio::test]
+    async fn bounded_bridge_lock_reports_not_started_without_invalidating_the_owner() {
+        let state = NativeSqliteState {
+            bridge_lock_timeout: Duration::from_millis(5),
+            ..NativeSqliteState::default()
+        };
+        let owner = state.inner.lock().await;
+
+        let error = match state.lock_bridge("execute_lock").await {
+            Ok(_) => panic!("contended bridge lock must time out"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "SQLITE_OPERATION_TIMEOUT");
+        assert_eq!(error.stage, Some("execute_lock"));
+        assert_eq!(error.outcome, Some("not_started"));
+        assert!(owner.connection.is_none());
+    }
+
+    #[tokio::test]
+    async fn timed_out_write_and_commit_drop_the_handle_and_keep_sanitized_outcomes_distinct() {
+        for error in [
+            NativeSqliteError::write_outcome_unknown("execute"),
+            NativeSqliteError::commit_outcome_unknown(),
+        ] {
+            let (mut bridge, _) = open_memory().await;
+            let result = fail_bounded_bridge_operation::<()>(&mut bridge, error);
+            let failure = result.expect_err("timeout must fail closed");
+            assert!(bridge.connection.is_none());
+            assert!(bridge.session_token.is_none());
+            assert!(bridge.transaction.is_none());
+            assert_eq!(failure.outcome, Some("unknown"));
+            assert!(matches!(
+                failure.code,
+                "SQLITE_WRITE_OUTCOME_UNKNOWN" | "SQLITE_COMMIT_OUTCOME_UNKNOWN"
+            ));
+            let diagnostic = serde_json::to_value(&failure).expect("serialize diagnostic");
+            assert!(diagnostic.get("query").is_none());
+            assert!(diagnostic.get("path").is_none());
+            assert!(diagnostic.get("values").is_none());
+        }
     }
 
     #[tokio::test]
@@ -3596,6 +4130,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn webview_reload_detaches_a_stale_restore_source_before_reusing_the_session() {
+        let directory = TestDirectory::create();
+        let main_path = directory.path().join("main.db");
+        let backup_path = directory.path().join("backup.db");
+        let mut bridge = NativeSqliteBridge::default();
+        let session = bridge
+            .open_file(&main_path)
+            .await
+            .expect("open main")
+            .session_token;
+        bridge
+            .execute(
+                &session,
+                "CREATE TABLE records (id INTEGER PRIMARY KEY)",
+                vec![],
+            )
+            .await
+            .expect("create table");
+        bridge
+            .execute(
+                &session,
+                "VACUUM INTO ?",
+                vec![NativeSqlValue::Text {
+                    value: backup_path.to_string_lossy().into_owned(),
+                }],
+            )
+            .await
+            .expect("create backup");
+        bridge
+            .execute(
+                &session,
+                "ATTACH DATABASE ? AS restore_source",
+                vec![NativeSqlValue::Text {
+                    value: backup_path.to_string_lossy().into_owned(),
+                }],
+            )
+            .await
+            .expect("attach restore source");
+
+        let adopted = bridge
+            .adopt_renderer_session()
+            .await
+            .expect("reload must clear stale attachment");
+        assert_ne!(adopted.session_token, session);
+        let names = bridge.database_names().await.expect("database names");
+        assert!(names.iter().any(|name| name == "main"));
+        assert!(names
+            .iter()
+            .all(|name| matches!(name.as_str(), "main" | "temp")));
+        bridge
+            .select(&adopted.session_token, "SELECT id FROM records", vec![])
+            .await
+            .expect("reused session remains readable");
+    }
+
+    #[tokio::test]
+    async fn reload_invalidates_then_reopens_when_a_stale_attachment_cannot_be_detached() {
+        let directory = TestDirectory::create();
+        let main_path = directory.path().join("main.db");
+        let backup_path = directory.path().join("backup.db");
+        let mut bridge = NativeSqliteBridge::default();
+        let session = bridge
+            .open_file(&main_path)
+            .await
+            .expect("open main")
+            .session_token;
+        bridge
+            .execute(
+                &session,
+                "CREATE TABLE records (id INTEGER PRIMARY KEY)",
+                vec![],
+            )
+            .await
+            .expect("create table");
+        bridge
+            .execute(
+                &session,
+                "VACUUM INTO ?",
+                vec![NativeSqlValue::Text {
+                    value: backup_path.to_string_lossy().into_owned(),
+                }],
+            )
+            .await
+            .expect("create backup");
+        bridge
+            .execute(
+                &session,
+                "ATTACH DATABASE ? AS restore_source",
+                vec![NativeSqlValue::Text {
+                    value: backup_path.to_string_lossy().into_owned(),
+                }],
+            )
+            .await
+            .expect("attach restore source");
+        bridge.fail_next_detach = true;
+
+        assert_eq!(
+            bridge
+                .adopt_renderer_session()
+                .await
+                .expect_err("unconfirmed detach must invalidate")
+                .code,
+            "SQLITE_CONNECTION_INVALIDATED"
+        );
+        assert!(bridge.connection.is_none());
+        let reopened = bridge.open_file(&main_path).await.expect("reopen main");
+        assert_ne!(reopened.session_token, session);
+        let names = bridge.database_names().await.expect("database names");
+        assert!(names.iter().any(|name| name == "main"));
+        assert!(names
+            .iter()
+            .all(|name| matches!(name.as_str(), "main" | "temp")));
+    }
+
+    #[tokio::test]
     async fn expires_idle_transactions_before_serving_more_work() {
         let (mut bridge, session) = open_memory().await;
         bridge
@@ -3648,6 +4297,8 @@ mod tests {
             token.clone(),
             idle_timeout,
             Duration::from_secs(60),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
         );
 
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -4027,7 +4678,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalidates_the_connection_when_transaction_state_cannot_be_recovered() {
+    async fn reports_unknown_commit_when_transaction_state_cannot_be_recovered() {
         let (mut bridge, session) = open_memory().await;
         let token = bridge.begin(&session, false).await.expect("begin");
 
@@ -4041,8 +4692,27 @@ mod tests {
                 .await
                 .expect_err("commit state is unknown")
                 .code,
-            "SQLITE_CONNECTION_INVALIDATED"
+            "SQLITE_COMMIT_OUTCOME_UNKNOWN"
         );
+        assert!(bridge.connection.is_none());
+        assert!(bridge.session_token.is_none());
+        assert!(bridge.transaction.is_none());
+    }
+
+    #[tokio::test]
+    async fn reports_unknown_commit_when_post_commit_cleanup_cannot_be_confirmed() {
+        let (mut bridge, session) = open_memory().await;
+        let token = bridge.begin(&session, true).await.expect("begin read");
+        bridge.fail_next_query_only_restore = true;
+
+        let error = bridge
+            .finish_transaction(&session, &token, true)
+            .await
+            .expect_err("successful commit with failed cleanup must be unresolved");
+        assert_eq!(error.code, "SQLITE_COMMIT_OUTCOME_UNKNOWN");
+        assert_eq!(error.stage, Some("transaction_commit"));
+        assert_eq!(error.outcome, Some("unknown"));
+        assert!(!error.retryable);
         assert!(bridge.connection.is_none());
         assert!(bridge.session_token.is_none());
         assert!(bridge.transaction.is_none());
@@ -4101,7 +4771,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalidates_when_post_execute_safety_configuration_is_wrong() {
+    async fn classifies_post_write_configuration_failure_as_unknown_and_invalidates() {
         let (mut bridge, session) = open_memory().await;
         bridge
             .execute(
@@ -4121,7 +4791,7 @@ mod tests {
                 .await
                 .expect_err("post execute safety verification")
                 .code,
-            "SQLITE_CONNECTION_INVALIDATED"
+            "SQLITE_WRITE_OUTCOME_UNKNOWN"
         );
         assert!(bridge.connection.is_none());
         assert!(bridge.session_token.is_none());

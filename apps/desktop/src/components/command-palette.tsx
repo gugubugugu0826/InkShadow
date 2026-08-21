@@ -121,7 +121,7 @@ function OpenCommandPalette({ onOpenChange, projectId }: CommandPaletteProps) {
           type="search"
           value={query}
           autoComplete="off"
-          placeholder="例如：正文、任务、Model Hub"
+          placeholder="例如：正文、任务、模型中心"
           aria-controls="inkshadow-command-results"
           aria-activedescendant={filtered[activeCommandIndex]?.id}
           onChange={(event) => {
@@ -220,7 +220,7 @@ function createCommands(projectId: string | null): readonly CommandDefinition[] 
     ),
     command(
       "command-model-hub",
-      "Model Hub",
+      "模型中心",
       "连接供应商、同步模型并设置 AI 分工",
       ["模型", "供应商", "API", "连接"],
       "/settings#model-center",

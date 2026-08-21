@@ -76,6 +76,69 @@ describe("UsageCenterPage", () => {
     expect(screen.queryByText("¥4.20")).not.toBeInTheDocument();
   });
 
+  it("shows a capability probe as one ordinary Chinese ledger row without private internals", async () => {
+    const record: UsageCenterEvent = Object.freeze({
+      id: "hub:capability-probe-public-row",
+      source: "model_hub_invocation",
+      occurredAt: "2026-08-08T11:00:00.000Z",
+      projectId: null,
+      projectName: null,
+      chapterId: null,
+      chapterName: null,
+      task: "capability_probe",
+      providerId: "private-connection-id",
+      providerLabel: "写作模型服务",
+      modelId: "writer-model-v1",
+      status: "succeeded",
+      inputTokens: 11,
+      outputTokens: 2,
+      cachedInputTokens: 3,
+      costMicros: null,
+      currency: null,
+      costSource: "unknown",
+      privacyPolicy: "cloud_allowed",
+      dataDestination: "remote",
+      errorCode: null,
+    });
+    const reader: UsageCenterReader = {
+      read: vi.fn<UsageCenterReader["read"]>().mockResolvedValue({
+        ...EMPTY_SNAPSHOT,
+        summary: {
+          ...EMPTY_AGGREGATE,
+          invocationCount: 1,
+          successCount: 1,
+          remoteCount: 1,
+          inputTokens: 11,
+          outputTokens: 2,
+          cachedInputTokens: 3,
+          costUnknownCount: 1,
+        },
+        records: [record],
+        totalMatchingRecords: 1,
+        facets: {
+          projects: [],
+          tasks: [{ value: "capability_probe", label: "模型能力验证" }],
+          providers: [{ value: record.providerId, label: record.providerLabel }],
+          models: [{ value: record.modelId, label: record.modelId }],
+        },
+      }),
+    };
+
+    render(<UsageCenterPage reader={reader} now={NOW} />);
+
+    const details = await screen.findByRole("table", { name: "调用明细" });
+    const row = within(details).getByRole("row", { name: /模型能力验证/u });
+    expect(row).toHaveTextContent("写作模型服务");
+    expect(row).toHaveTextContent("writer-model-v1");
+    expect(row).toHaveTextContent("输入 11 · 输出 2 · 缓存 3");
+    expect(row).toHaveTextContent("费用未知");
+    expect(row).toHaveTextContent("成功");
+    expect(document.body).not.toHaveTextContent("private-connection-id");
+    expect(document.body).not.toHaveTextContent("https://api.example.test/v1");
+    expect(document.body).not.toHaveTextContent("只回复：OK");
+    expect(document.body).not.toHaveTextContent("secret-credential-value");
+  });
+
   it("raises unfinished and unknown-cost calls above the neutral summaries", async () => {
     const reader: UsageCenterReader = {
       read: vi.fn<UsageCenterReader["read"]>().mockResolvedValue({

@@ -37,6 +37,7 @@ import { useOnlineStatus } from "../hooks/use-online-status";
 import { useWritingExperience } from "../hooks/use-writing-experience";
 import { collectDesktopDiagnosticArtifact } from "../infrastructure/diagnostics";
 import type { AutomaticBackupRuntimeCheckResult } from "../infrastructure/automatic-backup-runtime";
+import type { AutomaticBackupFailureKind } from "../infrastructure/automatic-backup-service";
 import {
   loadEditorPreferences,
   saveEditorPreferences,
@@ -133,16 +134,16 @@ import {
   MODEL_HUB_TEXT_CAPABILITY_PROBE_DISPATCH_SCOPE,
   MODEL_HUB_TEXT_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
   MODEL_HUB_TEXT_CAPABILITY_PROBE_MESSAGES,
+  executeAuditedModelHubTextCapabilityProbe,
   modelHubTextCapabilityProbeFailureMetadata,
-  runModelHubTextCapabilityProbe,
 } from "../infrastructure/model-hub-text-capability-probe";
 import {
   MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_VERSION,
-  runModelHubStructuredCapabilityProbe,
+  executeAuditedModelHubStructuredCapabilityProbe,
 } from "../infrastructure/model-hub-structured-capability-probe";
 import {
   MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_VERSION,
-  runModelHubTranslationCapabilityProbe,
+  executeAuditedModelHubTranslationCapabilityProbe,
 } from "../infrastructure/model-hub-translation-capability-probe";
 import {
   recommendConnectedModelsForTask,
@@ -178,6 +179,7 @@ import {
   type ModelCostPrivacyProfile,
   type ModelHubPrivacyPolicy,
   type ModelHubStore,
+  type ModelInvocationFact,
   type ModelProviderConnection,
   type NovelTaskRoute,
   type RecentAiFailure,
@@ -277,22 +279,22 @@ const MODEL_HUB_SECTION_META: Readonly<
   >
 > = Object.freeze({
   "model-center": Object.freeze({
-    title: "Model Hub · 连接与模型",
+    title: "模型中心 · 连接与模型",
     navigationLabel: "连接与模型",
     description: "连接供应商、验证凭据、发现模型，并确认模型真正可用的能力。",
   }),
   "model-routing": Object.freeze({
-    title: "Model Hub · AI 分工",
+    title: "模型中心 · AI 分工",
     navigationLabel: "AI 分工",
     description: "为写作、规划、记忆和检查选择主模型、备用模型与隐私边界。",
   }),
   "model-evaluation": Object.freeze({
-    title: "Model Hub · 模型评测",
+    title: "模型中心 · 模型评测",
     navigationLabel: "模型评测",
     description: "用本地评测证据比较模型表现；评测不会替代真实连接状态。",
   }),
   "image-generation": Object.freeze({
-    title: "Model Hub · 图片生成",
+    title: "模型中心 · 图片生成",
     navigationLabel: "图片生成",
     description: "使用经过能力确认的图片模型，并在发送前明确确认提示与费用。",
   }),
@@ -892,7 +894,7 @@ export function SettingsPage() {
         );
         if (options.backendCommitted === true) {
           setModelHubMutationNotice({
-            message: "更改已经保存，但页面状态刷新失败。你可以重新加载 Model Hub，不需要重复保存。",
+            message: "更改已经保存，但页面状态刷新失败。你可以重新加载模型中心，不需要重复保存。",
             reloadRequired: true,
           });
         }
@@ -1635,7 +1637,7 @@ export function SettingsPage() {
       if (backendCommitted) {
         setModelHubMutationNotice({
           message:
-            "连接已经保存，但后续模型资料没有全部更新。请重新加载 Model Hub 后再检查，无需重复填写密钥。",
+            "连接已经保存，但后续模型资料没有全部更新。请重新加载模型中心后再检查，无需重复填写密钥。",
           reloadRequired: true,
         });
       } else {
@@ -1971,9 +1973,9 @@ export function SettingsPage() {
   > {
     const scanId = createModelHubId("probe-scan");
     const evidenceVersion = createModelHubId("lightweight-probe-v1");
+    const invocationId = createModelHubId("capability-probe-invocation");
     const startedAt = Date.parse(runtime.clock.now());
     const expectedDispatchIdentity = settingsProbeDispatchIdentity(savedConnection, catalogEntry);
-    let providerDispatched = false;
     try {
       const current = await readAuthoritativeProbeTarget(savedConnection.id, catalogEntry.id);
       assertModelHubFinalDispatchUnchanged(
@@ -1997,16 +1999,31 @@ export function SettingsPage() {
         settingsProbeDispatchIdentity(dispatchTarget.connection, dispatchTarget.entry),
       );
       assertSettingsTextProbeFormUnchanged(authorization.form);
-      providerDispatched = true;
-      const result = await runModelHubTextCapabilityProbe({
+      const result = await executeAuditedModelHubTextCapabilityProbe({
         gateway: runtime.modelGateway,
+        modelHub: runtime.modelHub,
+        clock: runtime.clock,
         providerKind: dispatchTarget.connection.providerKind,
         generationId: createModelHubId("capability-probe"),
+        invocationId,
+        connection: dispatchTarget.connection,
+        catalogEntry: dispatchTarget.entry,
         config: Object.freeze({
           ...modelHubNativeEndpointConfig(dispatchTarget.connection),
           retryLimit: 0,
         }),
         model: dispatchTarget.entry.providerModelId,
+        assertBeforeProviderDispatch: async () => {
+          const finalTarget = await readAuthoritativeProbeTarget(
+            savedConnection.id,
+            catalogEntry.id,
+          );
+          assertModelHubFinalDispatchUnchanged(
+            expectedDispatchIdentity,
+            settingsProbeDispatchIdentity(finalTarget.connection, finalTarget.entry),
+          );
+          assertSettingsTextProbeFormUnchanged(authorization.form);
+        },
       });
       const verified = await readAuthoritativeProbeTarget(savedConnection.id, catalogEntry.id);
       assertModelHubFinalDispatchUnchanged(
@@ -2023,6 +2040,7 @@ export function SettingsPage() {
         scan: {
           scanId,
           catalogEntryId: verified.entry.id,
+          modelInvocationId: result.invocation.id,
           scanKind: "lightweight_probe",
           status: result.acceptedTruncatedOutput ? "partial" : "succeeded",
           evidenceVersion,
@@ -2065,6 +2083,9 @@ export function SettingsPage() {
         entry: verified.entry,
       });
     } catch (cause: unknown) {
+      const probeInvocation = await runtime.modelHub.findInvocation(invocationId).catch(() => null);
+      const providerDispatched =
+        probeInvocation !== null && probeInvocation.providerDispatchStartedAt !== null;
       if (!providerDispatched && cause instanceof ModelHubFinalDispatchError) {
         throw settingsTextProbeDisclosureChanged();
       }
@@ -2076,6 +2097,18 @@ export function SettingsPage() {
         throw cause;
       }
       const normalized = normalizeUiError(cause);
+      if (
+        probeInvocation !== null &&
+        (probeInvocation.status === "queued" || probeInvocation.status === "running")
+      ) {
+        throw cause;
+      }
+      if (isCapabilityProbeResultAmbiguous(normalized.code, probeInvocation)) {
+        // The invocation is the sole durable fact for an uncertain result.
+        // Do not manufacture a failed scan or downgrade a previously healthy
+        // connection when the Provider may already have completed the call.
+        throw cause;
+      }
       try {
         await runtime.modelHub.commitCapabilityProbeResult({
           connectionId: savedConnection.id,
@@ -2086,6 +2119,7 @@ export function SettingsPage() {
           scan: {
             scanId,
             catalogEntryId: catalogEntry.id,
+            ...(probeInvocation === null ? {} : { modelInvocationId: probeInvocation.id }),
             scanKind: "lightweight_probe",
             status: "failed",
             evidenceVersion,
@@ -2200,12 +2234,18 @@ export function SettingsPage() {
 
       if (recommendation.readiness === "verify_structured_output") {
         const scanId = createModelHubId("structured-probe-scan");
+        const invocationId = createModelHubId("capability-probe-invocation");
         const evidenceVersion = MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_VERSION;
         try {
-          const result = await runModelHubStructuredCapabilityProbe({
+          const result = await executeAuditedModelHubStructuredCapabilityProbe({
             gateway: runtime.modelGateway,
+            modelHub: runtime.modelHub,
+            clock: runtime.clock,
             providerKind: initial.connection.providerKind,
             generationId: createModelHubId("structured-probe"),
+            invocationId,
+            connection: initial.connection,
+            catalogEntry: initial.entry,
             config: modelHubNativeEndpointConfig(initial.connection),
             model: initial.entry.providerModelId,
             assertBeforeProviderDispatch: async () => {
@@ -2239,6 +2279,7 @@ export function SettingsPage() {
             scan: {
               scanId,
               catalogEntryId: verified.entry.id,
+              modelInvocationId: result.invocation.id,
               scanKind: "lightweight_probe",
               status: "succeeded",
               evidenceVersion,
@@ -2261,6 +2302,18 @@ export function SettingsPage() {
             throw cause;
           }
           const normalized = normalizeUiError(cause);
+          const probeInvocation = await runtime.modelHub
+            .findInvocation(invocationId)
+            .catch(() => null);
+          if (
+            probeInvocation !== null &&
+            (probeInvocation.status === "queued" || probeInvocation.status === "running")
+          ) {
+            throw cause;
+          }
+          if (isCapabilityProbeResultAmbiguous(normalized.code, probeInvocation)) {
+            throw cause;
+          }
           const current = await readAuthoritativeProbeTarget(
             initial.connection.id,
             initial.entry.id,
@@ -2278,6 +2331,7 @@ export function SettingsPage() {
             scan: {
               scanId,
               catalogEntryId: current.entry.id,
+              ...(probeInvocation === null ? {} : { modelInvocationId: probeInvocation.id }),
               scanKind: "lightweight_probe",
               status: "failed",
               evidenceVersion,
@@ -2291,11 +2345,17 @@ export function SettingsPage() {
 
       if (recommendation.readiness === "verify_translation") {
         const scanId = createModelHubId("translation-probe-scan");
+        const invocationId = createModelHubId("capability-probe-invocation");
         try {
-          const result = await runModelHubTranslationCapabilityProbe({
+          const result = await executeAuditedModelHubTranslationCapabilityProbe({
             gateway: runtime.modelGateway,
+            modelHub: runtime.modelHub,
+            clock: runtime.clock,
             providerKind: initial.connection.providerKind,
             generationId: createModelHubId("translation-probe"),
+            invocationId,
+            connection: initial.connection,
+            catalogEntry: initial.entry,
             config: modelHubNativeEndpointConfig(initial.connection),
             model: initial.entry.providerModelId,
             assertBeforeProviderDispatch: async () => {
@@ -2329,6 +2389,7 @@ export function SettingsPage() {
             scan: {
               scanId,
               catalogEntryId: verified.entry.id,
+              modelInvocationId: result.invocation.id,
               scanKind: "lightweight_probe",
               status: "succeeded",
               evidenceVersion: MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_VERSION,
@@ -2351,6 +2412,18 @@ export function SettingsPage() {
             throw cause;
           }
           const normalized = normalizeUiError(cause);
+          const probeInvocation = await runtime.modelHub
+            .findInvocation(invocationId)
+            .catch(() => null);
+          if (
+            probeInvocation !== null &&
+            (probeInvocation.status === "queued" || probeInvocation.status === "running")
+          ) {
+            throw cause;
+          }
+          if (isCapabilityProbeResultAmbiguous(normalized.code, probeInvocation)) {
+            throw cause;
+          }
           const current = await readAuthoritativeProbeTarget(
             initial.connection.id,
             initial.entry.id,
@@ -2368,6 +2441,7 @@ export function SettingsPage() {
             scan: {
               scanId,
               catalogEntryId: current.entry.id,
+              ...(probeInvocation === null ? {} : { modelInvocationId: probeInvocation.id }),
               scanKind: "lightweight_probe",
               status: "failed",
               evidenceVersion: MODEL_HUB_TRANSLATION_CAPABILITY_PROBE_VERSION,
@@ -2479,7 +2553,7 @@ export function SettingsPage() {
     setNovelTaskRoutes(applied.routes);
     if (legacyRefreshFailed) {
       setSchemeMessage(
-        "核心 AI 分工已保存；旧版兼容分工暂未同步，不影响当前 Model Hub 任务，可以稍后重试。",
+        "核心 AI 分工已保存；旧版兼容分工暂未同步，不影响当前模型中心任务，可以稍后重试。",
       );
     }
     return applied.savedNovelTaskCount;
@@ -2609,14 +2683,16 @@ export function SettingsPage() {
       }
       const visibleCause =
         cause instanceof ModelHubFinalDispatchError ? settingsTextProbeDisclosureChanged() : cause;
+      const normalizedVisibleCause = normalizeUiError(visibleCause);
+      const resultAmbiguous = normalizedVisibleCause.code === "PROVIDER_RESULT_AMBIGUOUS";
       setCapabilityProbeError(visibleCause);
       if (!refreshAttempted) {
         finishModelHubDiagnosticAction(runtime, token, {
           completedAt: runtime.clock.now(),
-          outcome: "failed",
+          outcome: resultAmbiguous ? "succeeded_with_warning" : "failed",
           backendCommitted,
           storeRefreshed: false,
-          errorCode: normalizeUiError(visibleCause).code,
+          errorCode: normalizedVisibleCause.code,
         });
       }
     } finally {
@@ -2917,7 +2993,7 @@ export function SettingsPage() {
       const normalized = normalizeUiError(reason);
       if (backendCommitted) {
         setModelHubMutationNotice({
-          message: "密钥已经安全保存，但页面状态刷新失败。请重新加载 Model Hub，无需再次输入密钥。",
+          message: "密钥已经安全保存，但页面状态刷新失败。请重新加载模型中心，无需再次输入密钥。",
           reloadRequired: true,
         });
       } else {
@@ -2971,7 +3047,7 @@ export function SettingsPage() {
       setNovelTaskRoutes(applied.routes);
       const missing = NOVEL_AI_TASKS.length - applied.savedNovelTaskCount;
       const legacyWarning = legacyRefreshFailed
-        ? "；旧版兼容分工暂未同步，不影响当前 Model Hub 任务，可以稍后重试"
+        ? "；旧版兼容分工暂未同步，不影响当前模型中心任务，可以稍后重试"
         : "";
       setSchemeMessage(
         modelHubScheme === "local_privacy"
@@ -3040,7 +3116,7 @@ export function SettingsPage() {
       const normalized = normalizeUiError(reason);
       if (backendCommitted) {
         setModelHubMutationNotice({
-          message: "密钥删除已经完成，但页面状态刷新失败。请重新加载 Model Hub，不要重复删除。",
+          message: "密钥删除已经完成，但页面状态刷新失败。请重新加载模型中心，不要重复删除。",
           reloadRequired: true,
         });
       } else {
@@ -3449,6 +3525,7 @@ export function SettingsPage() {
   const normalizedRouteError = routeError === null ? null : normalizeUiError(routeError);
   const taskProbeDisclosureError =
     routeError instanceof ModelHubTaskCapabilityProbeDisclosureError ? routeError : null;
+  const routeProbeResultAmbiguous = normalizedRouteError?.code === "PROVIDER_RESULT_AMBIGUOUS";
   const routingVisibility = useMemo(
     () =>
       buildModelHubRoutingVisibility({
@@ -3460,7 +3537,10 @@ export function SettingsPage() {
         now: runtime.clock.now(),
         validating: modelHubHydrationPending || checkingModel || probingCapability,
         loadFailed: credentialError !== null,
-        saveFailed: normalizedRouteError !== null && taskProbeDisclosureError === null,
+        saveFailed:
+          normalizedRouteError !== null &&
+          taskProbeDisclosureError === null &&
+          !routeProbeResultAmbiguous,
         exactBlockers: matchingAuthoritativeModelHubReadiness?.exactBlockers ?? [],
       }),
     [
@@ -3471,6 +3551,7 @@ export function SettingsPage() {
       modelHubHydrationPending,
       novelTaskRoutes,
       normalizedRouteError,
+      routeProbeResultAmbiguous,
       taskProbeDisclosureError,
       probingCapability,
       routingCapabilityEvidence,
@@ -3909,6 +3990,7 @@ export function SettingsPage() {
                             variant="secondary"
                             loading={recommendedTaskBusy === task}
                             disabled={
+                              routeProbeResultAmbiguous ||
                               recommendedTaskBusy !== null ||
                               routeSaving ||
                               taskProbeConfirmation !== null ||
@@ -3923,9 +4005,11 @@ export function SettingsPage() {
                               }
                             }}
                           >
-                            {connectedRecommendation?.readiness === "ready"
-                              ? "用于此任务"
-                              : "查看验证说明"}
+                            {routeProbeResultAmbiguous
+                              ? "结果待核对"
+                              : connectedRecommendation?.readiness === "ready"
+                                ? "用于此任务"
+                                : "查看验证说明"}
                           </Button>
                         )
                       ) : (
@@ -4045,7 +4129,7 @@ export function SettingsPage() {
       </header>
 
       {isModelHubView ? (
-        <nav className="model-hub-section-nav" aria-label="Model Hub 分区">
+        <nav className="model-hub-section-nav" aria-label="模型中心分区">
           {MODEL_HUB_SECTION_IDS.map((sectionId) => {
             const active = sectionId === activeModelHubSection;
             return (
@@ -4079,7 +4163,7 @@ export function SettingsPage() {
             AI 记忆
           </Link>
           <Link className="button-link button-link--secondary" to="/settings#model-center">
-            打开 Model Hub
+            打开模型中心
           </Link>
           <Link className="button-link button-link--secondary" to="/settings#sync-security">
             同步安全
@@ -4116,7 +4200,7 @@ export function SettingsPage() {
               connectionIntentCatalogEntry === null
                 ? `目标：${connectionIntent.providerModelId}。请保存连接、同步账户目录并验证能力；在你明确分配前，原有 AI 分工不会改变。`
                 : connectionIntentTaskRecommendation === null
-                  ? `${connectionIntentCatalogEntry.displayName} 已出现在账户目录中，但“${novelAiTaskLabel(connectionIntent.task)}”所需能力还没有可信证据。请在 Model Hub 专家设置中补充或验证这项能力；系统不会自动返回或修改路由。`
+                  ? `${connectionIntentCatalogEntry.displayName} 已出现在账户目录中，但“${novelAiTaskLabel(connectionIntent.task)}”所需能力还没有可信证据。请在模型中心专家设置中补充或验证这项能力；系统不会自动返回或修改路由。`
                   : connectionIntentTaskRecommendation.readiness === "ready"
                     ? `${connectionIntentCatalogEntry.displayName} 已具备“${novelAiTaskLabel(connectionIntent.task)}”所需的可信能力证据。返回后仍需明确点击“用于此任务”，系统不会自动覆盖原路由。`
                     : `${connectionIntentCatalogEntry.displayName} 已具备文本生成证据。返回任务后，点击“查看验证说明”，明确确认固定探针的连接、模型、发送范围、隐私与费用信息后再验证和分配；系统不会自动发送或修改路由。`
@@ -4412,7 +4496,7 @@ export function SettingsPage() {
                   title={writingExperience.preference?.mode === "direct" ? "直接写作" : "专业创作"}
                   description={
                     writingExperience.preference?.mode === "direct"
-                      ? "续写会先持久化为隔离 Candidate；只有你明确选择使用后，才会写入正文并创建不可变版本。本地整理授权不允许自动接受正文。"
+                      ? "续写会先持久化为隔离的 AI 建议草稿；只有你明确选择使用后，才会写入正文并创建不可变版本。本地整理授权不允许自动接受正文。"
                       : "所有 AI 建议保持隔离，明确点击“使用这版”后才写入正文并创建不可变版本。"
                   }
                 />
@@ -4560,7 +4644,7 @@ export function SettingsPage() {
                 <CardHeader>
                   <div className="card-heading-row">
                     <div>
-                      <CardTitle headingLevel={2}>InkShadow Model Hub</CardTitle>
+                      <CardTitle headingLevel={2}>InkShadow 模型中心</CardTitle>
                       <CardDescription>
                         连接供应商、测试连接并发现模型。普通模式只显示开始写作真正需要的选项。
                       </CardDescription>
@@ -4736,7 +4820,7 @@ export function SettingsPage() {
                             title={
                               modelHubPageSnapshot.catalogStatus === "cached_warning"
                                 ? "模型目录重新检查未完成"
-                                : "Model Hub 状态没有完整载入"
+                                : "模型中心状态没有完整载入"
                             }
                             description={`${
                               modelHubPageSnapshot.catalogStatus === "cached_warning"
@@ -4764,7 +4848,7 @@ export function SettingsPage() {
                                 disabled={modelHubHydrationPending || saving || checkingModel}
                                 onClick={() => void loadModelCenter({ action: "refresh_snapshot" })}
                               >
-                                刷新 Model Hub 状态
+                                刷新模型中心状态
                               </Button>
                             </div>
                           )}
@@ -5250,7 +5334,7 @@ export function SettingsPage() {
                         ) : modelHubHydrationPending ? (
                           <InlineAlert
                             tone="info"
-                            title="正在恢复 Model Hub"
+                            title="正在恢复模型中心"
                             description={modelHubHydrationPhaseLabel(modelHubPageSnapshot.phase)}
                           />
                         ) : modelHubPageSnapshot.phase === "ERROR" ||
@@ -5258,7 +5342,7 @@ export function SettingsPage() {
                           <InlineAlert
                             tone="error"
                             title="模型目录暂时无法读取"
-                            description="已保存连接和密钥没有被清除。请重新加载 Model Hub；若仍失败，再检查本地数据库或供应商连接。"
+                            description="已保存连接和密钥没有被清除。请重新加载模型中心；若仍失败，再检查本地数据库或供应商连接。"
                           />
                         ) : expertMode ||
                           !getModelProviderPreset(providerPreset).modelDiscovery.automatic ? (
@@ -5472,9 +5556,21 @@ export function SettingsPage() {
 
                       {normalizedCapabilityProbeError !== null && (
                         <InlineAlert
-                          tone="error"
-                          title="写作能力验证失败"
-                          description={`${normalizedCapabilityProbeError.description} 连接和模型目录会保留，修正模型或接入点后可以重试。`}
+                          tone={
+                            normalizedCapabilityProbeError.code === "PROVIDER_RESULT_AMBIGUOUS"
+                              ? "warning"
+                              : "error"
+                          }
+                          title={
+                            normalizedCapabilityProbeError.code === "PROVIDER_RESULT_AMBIGUOUS"
+                              ? "写作能力验证结果待核对"
+                              : "写作能力验证失败"
+                          }
+                          description={
+                            normalizedCapabilityProbeError.code === "PROVIDER_RESULT_AMBIGUOUS"
+                              ? `${normalizedCapabilityProbeError.description} 系统不会自动重发；连接和模型目录会保留。`
+                              : `${normalizedCapabilityProbeError.description} 连接和模型目录会保留，修正模型或接入点后可以重试。`
+                          }
                         />
                       )}
 
@@ -5640,16 +5736,20 @@ export function SettingsPage() {
 
                   {normalizedRouteError !== null && (
                     <InlineAlert
-                      tone="error"
+                      tone={routeProbeResultAmbiguous ? "warning" : "error"}
                       title={
-                        taskProbeDisclosureError === null
-                          ? "AI 分工没有保存"
-                          : "固定能力验证没有发送"
+                        routeProbeResultAmbiguous
+                          ? "固定能力验证结果待核对"
+                          : taskProbeDisclosureError === null
+                            ? "AI 分工没有保存"
+                            : "固定能力验证没有发送"
                       }
                       description={
-                        taskProbeDisclosureError === null
-                          ? "写作能力证据已保留，但自动分工没有完成。请打开“AI 分工”查看回读结果并重试。"
-                          : taskProbeDisclosureError.message
+                        routeProbeResultAmbiguous
+                          ? "模型服务调用已经发送，但结果无法确认；系统不会自动重发，本次 AI 分工也没有保存。请到调用记录核对结果。"
+                          : taskProbeDisclosureError === null
+                            ? "写作能力证据已保留，但自动分工没有完成。请打开“AI 分工”查看回读结果并重试。"
+                            : taskProbeDisclosureError.message
                       }
                     />
                   )}
@@ -5679,54 +5779,63 @@ export function SettingsPage() {
                         description={taskProbeDisclosureError.message}
                       />
                     )}
-                    {normalizedRouteError !== null && taskProbeDisclosureError === null && (
-                      <div className="model-routing-save-failure">
-                        <InlineAlert
-                          tone="error"
-                          title="AI 分工没有保存"
-                          description={`系统在保存模型分配时遇到本地数据问题。${
-                            routeFailureRollbackConfirmed === true
-                              ? routeFailureLegacyProjectionMayHaveChanged
-                                ? "已重新读取并确认：Model Hub 的 22 项分工未修改；为防止云端回退，旧版兼容分工可能已被安全停用。请重试应用本地隐私方案。"
-                                : "已重新读取并确认：Model Hub 的 22 项分工没有被修改，本次任务路由事务已回滚。"
-                              : routeFailureRollbackConfirmed === false
-                                ? "重新读取后发现分工状态发生变化，请先查看下面的 22 项清单再重试。"
-                                : "暂时无法重新读取并确认旧分工状态；请先导出诊断包。"
-                          }`}
-                        />
-                        <div className="settings-actions">
-                          <Button
-                            variant="secondary"
-                            disabled={schemeSaving || routeSaving}
-                            onClick={() => void applyModelHubScheme()}
-                          >
-                            重试保存
-                          </Button>
-                          <Button
-                            variant="secondary"
-                            loading={diagnosticBusy}
-                            onClick={() => void downloadDiagnostics()}
-                          >
-                            导出脱敏诊断
-                          </Button>
-                        </div>
-                        {expertMode && (
-                          <p className="model-routing-technical-detail">
-                            技术详情：{normalizedRouteError.code}；旧状态校验：
-                            {routeFailureRollbackConfirmed === null
-                              ? "未能确认"
-                              : routeFailureRollbackConfirmed
-                                ? routeFailureLegacyProjectionMayHaveChanged
-                                  ? "Model Hub 快照未变化；旧兼容分工可能已安全停用"
-                                  : "Model Hub 快照未变化"
-                                : "检测到变化"}
-                            。原始 SQL 不会在界面中显示。
-                          </p>
-                        )}
-                      </div>
+                    {routeProbeResultAmbiguous && (
+                      <InlineAlert
+                        tone="warning"
+                        title="固定能力验证结果待核对"
+                        description="模型服务调用已经发送，但结果无法确认；系统不会自动重发，本次 AI 分工也没有保存。请到调用记录核对结果。"
+                      />
                     )}
+                    {normalizedRouteError !== null &&
+                      taskProbeDisclosureError === null &&
+                      !routeProbeResultAmbiguous && (
+                        <div className="model-routing-save-failure">
+                          <InlineAlert
+                            tone="error"
+                            title="AI 分工没有保存"
+                            description={`系统在保存模型分配时遇到本地数据问题。${
+                              routeFailureRollbackConfirmed === true
+                                ? routeFailureLegacyProjectionMayHaveChanged
+                                  ? "已重新读取并确认：模型中心的 22 项分工未修改；为防止云端回退，旧版兼容分工可能已被安全停用。请重试应用本地隐私方案。"
+                                  : "已重新读取并确认：模型中心的 22 项分工没有被修改，本次任务路由事务已回滚。"
+                                : routeFailureRollbackConfirmed === false
+                                  ? "重新读取后发现分工状态发生变化，请先查看下面的 22 项清单再重试。"
+                                  : "暂时无法重新读取并确认旧分工状态；请先导出诊断包。"
+                            }`}
+                          />
+                          <div className="settings-actions">
+                            <Button
+                              variant="secondary"
+                              disabled={schemeSaving || routeSaving}
+                              onClick={() => void applyModelHubScheme()}
+                            >
+                              重试保存
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              loading={diagnosticBusy}
+                              onClick={() => void downloadDiagnostics()}
+                            >
+                              导出脱敏诊断
+                            </Button>
+                          </div>
+                          {expertMode && (
+                            <p className="model-routing-technical-detail">
+                              技术详情：{normalizedRouteError.code}；旧状态校验：
+                              {routeFailureRollbackConfirmed === null
+                                ? "未能确认"
+                                : routeFailureRollbackConfirmed
+                                  ? routeFailureLegacyProjectionMayHaveChanged
+                                    ? "模型中心快照未变化；旧兼容分工可能已安全停用"
+                                    : "模型中心快照未变化"
+                                  : "检测到变化"}
+                              。原始 SQL 不会在界面中显示。
+                            </p>
+                          )}
+                        </div>
+                      )}
 
-                    {normalizedRouteError === null && (
+                    {(normalizedRouteError === null || routeProbeResultAmbiguous) && (
                       <InlineAlert
                         tone={modelHubOverallAlertTone(routingVisibility.state)}
                         title={modelHubOverallTitle(routingVisibility.state)}
@@ -5793,7 +5902,13 @@ export function SettingsPage() {
                                     ? "连接异常"
                                     : model.latestProbeFailureCode === null
                                       ? "能力证据已读取"
-                                      : "最近实测失败"}
+                                      : model.capabilities.some(
+                                            ({ capability, state }) =>
+                                              capability === "text_generation" &&
+                                              state === "ambiguous",
+                                          )
+                                        ? "最近结果待核对"
+                                        : "最近实测失败"}
                                 </Badge>
                               </header>
                               <ul className="model-capability-list">
@@ -5975,6 +6090,7 @@ export function SettingsPage() {
                                                   recommendedTaskBusy === task.definition.task
                                                 }
                                                 disabled={
+                                                  routeProbeResultAmbiguous ||
                                                   recommendedTaskBusy !== null ||
                                                   routeSaving ||
                                                   taskProbeConfirmation !== null ||
@@ -5987,9 +6103,11 @@ export function SettingsPage() {
                                                   )
                                                 }
                                               >
-                                                {recommendation.readiness !== "ready"
-                                                  ? "查看验证说明"
-                                                  : "用于此任务"}
+                                                {routeProbeResultAmbiguous
+                                                  ? "结果待核对"
+                                                  : recommendation.readiness !== "ready"
+                                                    ? "查看验证说明"
+                                                    : "用于此任务"}
                                               </Button>
                                             )}
                                           </div>
@@ -6517,7 +6635,7 @@ export function SettingsPage() {
                         <InlineAlert
                           tone="info"
                           title="专家兼容设置：旧 7 角色路由"
-                          description={`${String(NOVEL_AI_TASKS.length)} 类小说任务由 Model Hub 负责；这组旧角色仅桥接尚未迁移的生成链路。应用方案时会完整刷新，无法安全映射的旧角色会被清除。`}
+                          description={`${String(NOVEL_AI_TASKS.length)} 类小说任务由模型中心负责；这组旧角色仅桥接尚未迁移的生成链路。应用方案时会完整刷新，无法安全映射的旧角色会被清除。`}
                         />
                         {profiles.some(({ selectedModel: model }) => model !== null) && (
                           <>
@@ -6960,14 +7078,14 @@ export function SettingsPage() {
               ))}
               <li>
                 最大输出：
-                {String(taskProbeConfirmation.disclosure.maximumOutputTokens)} 个 token。
+                {String(taskProbeConfirmation.disclosure.maximumOutputTokens)} 个令牌。
               </li>
               <li>
-                最大 Provider 调用：
+                最大模型服务调用：
                 {String(taskProbeConfirmation.disclosure.maximumProviderCalls)} 次；自动重试：
                 {String(taskProbeConfirmation.disclosure.automaticRetryCount)} 次。
               </li>
-              <li>费用上限：unknown；远程供应商可能收取少量费用。</li>
+              <li>费用上限：暂无法估算；远程模型服务可能收取少量费用。</li>
             </ul>
           </div>
         )}
@@ -7170,9 +7288,9 @@ function describeAutomaticBackupCheck(
   if (check.state === "degraded" || check.run === null) {
     return {
       tone: "error",
-      title: "自动备份需要处理",
+      title: "自动备份失败",
       description:
-        "没有删除或覆盖现有备份。请先使用下方“创建一致性备份”保存一份副本，再检查应用数据目录权限。",
+        "这次检查没有完成，也没有删除或覆盖现有备份。请先使用下方“创建一致性备份”保存一份副本，再查看脱敏诊断信息。",
     };
   }
 
@@ -7185,6 +7303,21 @@ function describeAutomaticBackupCheck(
       description: `本窗口没有重复写入。稍后可再次检查；下一计划时间为 ${nextDue}。`,
     };
   }
+  if (run.status === "attention" && run.attention !== null) {
+    if (run.attention.status === "unknown") {
+      return {
+        tone: "warning",
+        title: "自动备份结果待核对",
+        description: `这次备份没有被当作成功，也不会自动覆盖或重试；上一份健康备份仍会保留。建议先创建一份手动备份并查看脱敏诊断信息。下一计划时间为 ${nextDue}。`,
+      };
+    }
+    const reason = describeAutomaticBackupFailure(run.attention.failureKind);
+    return {
+      tone: run.attention.status === "failed" ? "error" : "warning",
+      title: run.attention.status === "failed" ? "自动备份失败" : "自动备份未开始",
+      description: `${reason}没有删除、覆盖或自动重试，上一份健康备份仍会保留。下一计划时间为 ${nextDue}。`,
+    };
+  }
   if (run.createdBackup !== null) {
     const cleanup = run.prunedCount > 0 ? `，并清理了 ${String(run.prunedCount)} 份过期备份` : "";
     return {
@@ -7195,9 +7328,30 @@ function describeAutomaticBackupCheck(
   }
   return {
     tone: "info",
-    title: "当前无需补做自动备份",
+    title: "自动备份已完成",
     description: `今天的计划槽位已经处理，受管备份会保留 30 天。下一计划时间为 ${nextDue}。`,
   };
+}
+
+function describeAutomaticBackupFailure(failureKind: AutomaticBackupFailureKind): string {
+  switch (failureKind) {
+    case "database_busy":
+      return "本地数据当时正忙，未能在限定时间内取得一致副本。";
+    case "database_unavailable":
+      return "本地数据当时暂时无法读取。";
+    case "disk_full":
+      return "可用存储空间不足，无法完成写入。";
+    case "permission_denied":
+      return "应用没有获得完成备份所需的本地写入权限。";
+    case "target_conflict":
+      return "目标位置已经存在同名文件，应用没有覆盖它。";
+    case "verification_failed":
+      return "写入结果没有通过完整性校验，因此未被标记为成功。";
+    case "result_unconfirmed":
+      return "写入结果无法确认，因此不会被标记为成功。";
+    case "write_failed":
+      return "本地写入没有完成。";
+  }
 }
 
 function formatAutomaticBackupTime(value: string): string {
@@ -7791,9 +7945,22 @@ function capabilityDisplayStateLabel(state: ModelHubCapabilityDisplayState): str
     user_confirmed: "由用户确认，尚未实测",
     unknown: "未知",
     failed: "验证失败",
+    ambiguous: "结果待核对",
     unsupported: "明确不支持",
   });
   return labels[state];
+}
+
+function isCapabilityProbeResultAmbiguous(
+  normalizedCode: string,
+  invocation: ModelInvocationFact | null,
+): boolean {
+  return (
+    normalizedCode === "PROVIDER_RESULT_AMBIGUOUS" ||
+    (invocation?.task === "capability_probe" &&
+      invocation.status === "timed_out" &&
+      invocation.providerDispatchStartedAt !== null)
+  );
 }
 
 function capabilityEvidenceSourceLabel(
@@ -7813,6 +7980,9 @@ function capabilityEvidenceSourceLabel(
 }
 
 function capabilityFailureLabel(code: string): string {
+  if (code === "PROVIDER_RESULT_AMBIGUOUS") {
+    return "调用结果无法确认，系统不会自动重发";
+  }
   return code === "MODEL_OUTPUT_TRUNCATED"
     ? "最近一次验证未返回完整可见内容"
     : "最近一次验证未通过";

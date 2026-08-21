@@ -117,15 +117,15 @@ function generationPreflightRepair(
     return Object.freeze({
       href: "/settings#model-center",
       guidance:
-        "当前章节保持仅限本地；如需 AI，请在当前章节明确调整隐私，或在 Model Hub 配置并验证本地模型",
-      linkAction: "打开 Model Hub 配置本地模型",
+        "当前章节保持仅限本地；如需 AI，请在当前章节明确调整隐私，或在模型中心配置并验证本地模型",
+      linkAction: "打开模型中心配置本地模型",
     });
   }
   if (code === "MODEL_CONTEXT_WINDOW_EXHAUSTED" || code === "MODEL_HUB_CONTEXT_LIMIT_EXCEEDED") {
     return Object.freeze({
       href: "/settings#model-center",
-      guidance: "请在当前续写设置中缩短输出或上下文，或在 Model Hub 选择更长上下文的模型",
-      linkAction: "打开 Model Hub 检查模型窗口",
+      guidance: "请在当前续写设置中缩短输出或上下文，或在模型中心选择更长上下文的模型",
+      linkAction: "打开模型中心检查模型窗口",
     });
   }
   if (code === "STORY_CONTEXT_COMPILATION_FAILED" && projectId !== null) {
@@ -137,8 +137,8 @@ function generationPreflightRepair(
   }
   return Object.freeze({
     href: "/settings#model-center",
-    guidance: "请在 Model Hub 的“连接与模型”中修复后重试",
-    linkAction: "打开 Model Hub",
+    guidance: "请在模型中心的“连接与模型”中修复后重试",
+    linkAction: "打开模型中心",
   });
 }
 
@@ -164,7 +164,7 @@ export function DesktopShell({ children }: DesktopShellProps) {
   const previousRouteRef = useRef<string | null>(null);
   const modelHubActive = location.pathname === "/settings" && location.hash === "#model-center";
   const settingsActive = location.pathname === "/settings" && !modelHubActive;
-  const currentPageTitle = modelHubActive ? "Model Hub" : pageTitle(location.pathname);
+  const currentPageTitle = modelHubActive ? "模型中心" : pageTitle(location.pathname);
   // Hash navigation is owned by the destination page so that an in-page
   // anchor can keep focus. Only full route changes should refocus the page h1.
   const routeIdentity = `${location.pathname}${location.search}`;
@@ -415,7 +415,7 @@ export function DesktopShell({ children }: DesktopShellProps) {
         <Link
           className="desktop-topbar__ai-status"
           to={scopedBlockerCode === null ? "/settings#model-center" : scopedRepair.href}
-          aria-label={`${aiStatusDescription} ${scopedBlockerCode === null ? "打开 Model Hub" : scopedRepair.linkAction}`}
+          aria-label={`${aiStatusDescription} ${scopedBlockerCode === null ? "打开模型中心" : scopedRepair.linkAction}`}
           title={aiStatusDescription}
         >
           <Badge tone={aiStatusTone}>{aiStatusShortLabel}</Badge>
@@ -542,14 +542,14 @@ export function DesktopShell({ children }: DesktopShellProps) {
           <Link
             className={`desktop-navigation__link${modelHubActive ? " is-active" : ""}`}
             to="/settings#model-center"
-            aria-label="Model Hub"
+            aria-label="模型中心"
             aria-current={modelHubActive ? "page" : undefined}
             onClick={() => setNavigationOpen(false)}
           >
             <span className="desktop-navigation__marker" aria-hidden="true">
               <InkIcon name="sparkles" decorative size={20} />
             </span>
-            <span className="desktop-navigation__label">Model Hub</span>
+            <span className="desktop-navigation__label">模型中心</span>
           </Link>
           <Link
             className={`desktop-navigation__link${settingsActive ? " is-active" : ""}`}

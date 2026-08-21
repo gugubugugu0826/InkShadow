@@ -190,7 +190,7 @@ export function ChapterSummaryPanel({
       setNotice({
         tone: "info",
         title: "现有章节任务已登记",
-        description: `新增 ${receipt.createdTaskCount.toLocaleString("zh-CN")} 个本地任务，已有 ${receipt.alreadyRegisteredTaskCount.toLocaleString("zh-CN")} 个任务无需重复登记。后台只会分批重建本地搜索与故事关联，精确 0 次 Provider 调用，不会阻塞或修改正文。${refreshNote}`,
+        description: `新增 ${receipt.createdTaskCount.toLocaleString("zh-CN")} 个本地任务，已有 ${receipt.alreadyRegisteredTaskCount.toLocaleString("zh-CN")} 个任务无需重复登记。后台只会分批重建本地搜索与故事关联，精确 0 次模型服务调用，不会阻塞或修改正文。${refreshNote}`,
       });
     } catch (cause: unknown) {
       setNotice({
@@ -216,8 +216,8 @@ export function ChapterSummaryPanel({
       </div>
       <InlineAlert
         tone="info"
-        title="保存与恢复精确 0 次 Provider 调用"
-        description="配置模型不代表同意发送正文。故事变化识别只会在独立授权流程能够持久记录发送范围、精确 Provider/模型、费用、调用上限、取消和不确定结果后重新开放。"
+        title="保存与恢复精确 0 次模型服务调用"
+        description="配置模型不代表同意发送正文。故事变化识别只会在独立授权流程能够持久记录发送范围、精确模型服务与模型、费用、调用上限、取消和不确定结果后重新开放。"
       />
       {continuousProviderAssignments(continuousDashboard).length > 0 && (
         <p className="candidate-panel__hint">
@@ -243,7 +243,7 @@ export function ChapterSummaryPanel({
       <InlineAlert
         tone="warning"
         title="逐章云端重建暂不可用"
-        description="一次重建会发送完整已保存章节并可能产生一次费用。当前页面还不能在派发前持久展示精确 Provider、精确模型并把不确定结果锁定为不可重发，因此按钮保持停用；正文和已有摘要不受影响。"
+        description="一次重建会发送完整已保存章节并可能产生一次费用。当前页面还不能在发送前持久展示精确模型服务、精确模型并把不确定结果锁定为不可重发，因此按钮保持停用；正文和已有摘要不受影响。"
       />
 
       <details className="chapter-backfill" data-testid="historical-backfill-advanced">
@@ -254,7 +254,7 @@ export function ChapterSummaryPanel({
           </p>
           <p className="candidate-panel__hint">
             第一步只生成只读计划，不发送正文。确认后只登记本地搜索与故事关联重建，不包含章节摘要或设定识别，精确
-            0 次 Provider 调用。
+            0 次模型服务调用。
           </p>
           <Button
             size="sm"
@@ -297,12 +297,12 @@ export function ChapterSummaryPanel({
                 title={
                   backfillPlan.possibleRemoteProviderCallUpperBound.total > 0
                     ? "旧云阶段计划已停用"
-                    : "Provider 调用上限：0 次"
+                    : "模型服务调用上限：0 次"
                 }
                 description={
                   backfillPlan.possibleRemoteProviderCallUpperBound.total > 0
                     ? "这份计划包含旧的自动云阶段，不能登记。请刷新页面退役旧开关，再重新生成只包含本地搜索与故事关联的计划。"
-                    : "历史章节回填只重建本地搜索与故事关联。不登记章节摘要或设定识别阶段，不发送正文，不产生 Provider 费用。"
+                    : "历史章节回填只重建本地搜索与故事关联。不登记章节摘要或设定识别阶段，不发送正文，不产生模型服务费用。"
                 }
               />
               <p className="candidate-panel__hint">

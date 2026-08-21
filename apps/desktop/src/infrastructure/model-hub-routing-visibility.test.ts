@@ -156,6 +156,39 @@ describe("model hub routing visibility", () => {
       state: "failed",
       failureCode: "MODEL_OUTPUT_TRUNCATED",
     });
+
+    const ambiguousFailure: RecentAiFailure = {
+      ...pastFailure,
+      diagnosticId: "ambiguous-provider-result",
+      timestamp: "2026-08-09T11:00:00.000Z",
+      stage: "transport",
+      normalizedErrorCode: "PROVIDER_RESULT_AMBIGUOUS",
+      retryable: false,
+      httpStatus: null,
+      finishReason: null,
+    };
+    const ambiguousVisibility = buildModelHubRoutingVisibility({
+      connections: [connection()],
+      catalog: [catalog()],
+      routes: [],
+      capabilityEvidence: [
+        evidence("text_generation", "lightweight_probe", "2026-08-09T10:00:00.000Z"),
+      ],
+      recentAiFailures: [ambiguousFailure],
+      now: NOW,
+      validating: false,
+      loadFailed: false,
+      saveFailed: false,
+    });
+    expect(
+      ambiguousVisibility.models[0]?.capabilities.find(
+        ({ capability }) => capability === "text_generation",
+      ),
+    ).toMatchObject({
+      state: "ambiguous",
+      source: "lightweight_probe",
+      failureCode: "PROVIDER_RESULT_AMBIGUOUS",
+    });
   });
 
   it("summarizes missing capability types and route origins without model identifiers", () => {

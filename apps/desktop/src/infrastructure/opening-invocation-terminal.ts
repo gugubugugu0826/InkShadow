@@ -45,6 +45,21 @@ export function projectOpeningInvocationDispatchState(
  * The original provider error code remains untouched for diagnostics.
  */
 export const OPENING_INVOCATION_USAGE_STATUS_SQL = `CASE
+      WHEN invocation.task = 'capability_probe'
+        AND invocation.status IN ('failed', 'cancelled', 'timed_out')
+        AND invocation.provider_dispatch_started_at IS NULL
+      THEN 'not_dispatched'
+      WHEN invocation.task = 'capability_probe'
+        AND invocation.status = 'timed_out'
+      THEN 'ambiguous'
+      WHEN invocation.task = 'capability_probe'
+        AND invocation.status = 'failed'
+        AND (
+          invocation.error_code = 'PROVIDER_RESULT_AMBIGUOUS'
+          OR invocation.failure_stage IS NULL
+          OR invocation.failure_stage IN ('dispatch', 'transport', 'unknown')
+        )
+      THEN 'ambiguous'
       WHEN invocation.task = 'book_start_guidance'
         AND invocation.status = 'cancelled'
         AND invocation.provider_dispatch_started_at IS NULL

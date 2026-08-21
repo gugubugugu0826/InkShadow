@@ -5,8 +5,16 @@ import {
   type ModelProviderKind,
 } from "./model-hub-provider-registry";
 import type {
+  ModelCatalogEntry,
+  ModelHubStore,
+  ModelInvocationFact,
+  ModelProviderConnection,
+} from "./model-hub-store";
+import { executeAuditedModelHubCapabilityProbe } from "./model-hub-text-capability-probe";
+import type {
   NativeModelEndpointConfig,
   NativeModelGatewayClient,
+  NativeModelGenerationInput,
   NativeModelGenerationUsage,
   NativeModelMessage,
 } from "./runtime";
@@ -28,7 +36,10 @@ export const MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_MESSAGES = Object.freeze([
 ]) satisfies readonly NativeModelMessage[];
 
 export interface RunModelHubStructuredCapabilityProbeInput {
-  readonly gateway: Pick<NativeModelGatewayClient, "generate">;
+  readonly gateway: Pick<
+    NativeModelGatewayClient,
+    "generate" | "supportsNativeInvocationDispatchLedger"
+  >;
   readonly providerKind: ModelProviderKind;
   /** One user-triggered probe maps to exactly one Provider request. */
   readonly generationId: string;
@@ -36,6 +47,8 @@ export interface RunModelHubStructuredCapabilityProbeInput {
   readonly model: string;
   /** Revalidates the exact user-disclosed target immediately before dispatch. */
   readonly assertBeforeProviderDispatch?: () => Promise<void>;
+  readonly invocationDispatchLedger?: NativeModelGenerationInput["invocationDispatchLedger"];
+  readonly onInvocationDispatchAccepted?: NativeModelGenerationInput["onInvocationDispatchAccepted"];
 }
 
 export interface ModelHubStructuredCapabilityProbeResult {
@@ -45,6 +58,62 @@ export interface ModelHubStructuredCapabilityProbeResult {
   readonly repaired: false;
   readonly streamed: boolean;
   readonly usage: NativeModelGenerationUsage | null;
+  readonly visibleContentLength: number;
+}
+
+export interface AuditedModelHubStructuredCapabilityProbeResult extends ModelHubStructuredCapabilityProbeResult {
+  readonly invocation: ModelInvocationFact;
+}
+
+export interface ExecuteAuditedModelHubStructuredCapabilityProbeInput extends RunModelHubStructuredCapabilityProbeInput {
+  readonly modelHub: Pick<
+    ModelHubStore,
+    "startInvocation" | "markInvocationDispatched" | "finishInvocation" | "findInvocation"
+  >;
+  readonly clock: Readonly<{ now(): string }>;
+  readonly invocationId: string;
+  readonly connection: Pick<
+    ModelProviderConnection,
+    "id" | "revision" | "providerKind" | "baseUrl"
+  >;
+  readonly catalogEntry: Pick<ModelCatalogEntry, "id" | "revision" | "providerModelId">;
+  readonly onProviderDispatchStarted?: (invocation: ModelInvocationFact) => void;
+}
+
+export async function executeAuditedModelHubStructuredCapabilityProbe(
+  input: ExecuteAuditedModelHubStructuredCapabilityProbeInput,
+): Promise<AuditedModelHubStructuredCapabilityProbeResult> {
+  const audited = await executeAuditedModelHubCapabilityProbe({
+    modelHub: input.modelHub,
+    clock: input.clock,
+    providerKind: input.providerKind,
+    invocationId: input.invocationId,
+    connection: input.connection,
+    catalogEntry: input.catalogEntry,
+    ...(input.assertBeforeProviderDispatch === undefined
+      ? {}
+      : { assertBeforeProviderDispatch: input.assertBeforeProviderDispatch }),
+    ...(input.onProviderDispatchStarted === undefined
+      ? {}
+      : { onProviderDispatchStarted: input.onProviderDispatchStarted }),
+    supportsNativeInvocationDispatchLedger:
+      input.gateway.supportsNativeInvocationDispatchLedger === true,
+    runProbe: (boundary) =>
+      runModelHubStructuredCapabilityProbe({
+        gateway: input.gateway,
+        providerKind: input.providerKind,
+        generationId: input.generationId,
+        config: input.config,
+        model: input.model,
+        ...boundary,
+      }),
+    observeSuccess: (result) => ({
+      usage: result.usage,
+      streamed: result.streamed,
+      visibleContentLength: result.visibleContentLength,
+    }),
+  });
+  return Object.freeze({ ...audited.result, invocation: audited.invocation });
 }
 
 /**
@@ -74,6 +143,12 @@ export async function runModelHubStructuredCapabilityProbe(
       maxOutputTokens: MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,
       responseFormat: "json_object",
       ...(reasoningMode === null ? {} : { reasoningMode }),
+      ...(input.invocationDispatchLedger === undefined
+        ? {}
+        : { invocationDispatchLedger: input.invocationDispatchLedger }),
+      ...(input.onInvocationDispatchAccepted === undefined
+        ? {}
+        : { onInvocationDispatchAccepted: input.onInvocationDispatchAccepted }),
     });
     assertStructuredProbeResponse(generated.text);
     return Object.freeze({
@@ -83,8 +158,12 @@ export async function runModelHubStructuredCapabilityProbe(
       repaired: false,
       streamed: generated.streamed === true,
       usage: generated.usage,
+      visibleContentLength: Array.from(generated.text).length,
     });
   } catch (cause: unknown) {
+    if (!(cause instanceof ModelCenterError) || !cause.code.startsWith("MODEL_STRUCTURED_OUTPUT")) {
+      throw cause;
+    }
     throw new ModelCenterError(
       "MODEL_STRUCTURED_OUTPUT_PROBE_FAILED",
       "模型没有通过 JSON 结构化输出验证；没有写入能力证据或修改 AI 分工。再次验证需要用户重新触发。",

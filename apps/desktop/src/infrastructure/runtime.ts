@@ -577,7 +577,32 @@ export interface NativeModelGenerationInput {
   /** OpenAI-compatible JSON mode. Callers still validate the returned JSON locally. */
   readonly responseFormat?: "json_object";
   readonly dispatchScope: NativeModelDispatchScope;
+  /**
+   * Optional content-free ledger fence written by the native gateway after
+   * request validation/privacy leasing and immediately before network work.
+   * It is accepted only for a running `capability_probe` invocation.
+   */
+  readonly invocationDispatchLedger?: Readonly<{
+    invocationId: string;
+    expectedRevision: number;
+    connectionId: string;
+    connectionRevision: number;
+    catalogEntryId: string;
+    catalogEntryRevision: number;
+    providerKindSnapshot: string;
+    modelIdSnapshot: string;
+  }>;
+  /** Runs only after the native gateway durably wrote the dispatch receipt. */
+  readonly onInvocationDispatchAccepted?: (
+    receipt: NativeModelInvocationDispatchReceipt,
+  ) => void | Promise<void>;
   readonly onDelta?: (accumulatedText: string) => void;
+}
+
+export interface NativeModelInvocationDispatchReceipt {
+  readonly invocationId: string;
+  readonly dispatchedAt: string;
+  readonly revision: number;
 }
 
 export interface NativeModelGenerationUsage {
@@ -595,6 +620,8 @@ export interface NativeModelGenerationResult {
 
 export interface NativeModelGatewayClient extends NativeEmbeddingGatewayClient {
   readonly available: boolean;
+  /** True only when dispatch-ledger writes occur atomically at the native network boundary. */
+  readonly supportsNativeInvocationDispatchLedger?: true;
   listModels(config: NativeModelEndpointConfig): Promise<NativeModelListResponse>;
   checkConnection(config: NativeModelEndpointConfig): Promise<NativeModelConnectionResponse>;
   inspectCapacity?(): Promise<NativeModelCapacityResponse>;
@@ -773,6 +800,7 @@ interface NativeGenerationEvent {
 
 export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
   public readonly available = true;
+  public readonly supportsNativeInvocationDispatchLedger = true as const;
 
   public async listModels(config: NativeModelEndpointConfig): Promise<NativeModelListResponse> {
     try {
@@ -878,6 +906,8 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
       let settled = false;
       let lastSequence = -1;
       let accumulated = "";
+      let dispatchBoundarySettled = input.invocationDispatchLedger === undefined;
+      let pendingTerminal: (() => void) | null = null;
 
       const cleanup = () => {
         if (timeoutId !== null) {
@@ -931,6 +961,13 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
           }),
         );
       };
+      const afterDispatchBoundary = (terminal: () => void) => {
+        if (dispatchBoundarySettled) {
+          terminal();
+          return;
+        }
+        pendingTerminal = terminal;
+      };
 
       void (async () => {
         unlisten = await listen<NativeGenerationEvent>("model-generation-event", ({ payload }) => {
@@ -956,26 +993,35 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
               input.onDelta?.(accumulated);
               return;
             case "completed":
-              complete(payload.status.usage, payload.status.streamed);
+              {
+                const status = payload.status;
+                afterDispatchBoundary(() => complete(status.usage, status.streamed));
+              }
               return;
             case "cancelled":
-              fail(
-                new ModelCenterError(
-                  "MODEL_GENERATION_CANCELLED",
-                  "Model generation was cancelled.",
-                  true,
+              afterDispatchBoundary(() =>
+                fail(
+                  new ModelCenterError(
+                    "MODEL_GENERATION_CANCELLED",
+                    "Model generation was cancelled.",
+                    true,
+                  ),
                 ),
               );
               return;
-            case "failed":
-              fail(
-                new ModelCenterError(
-                  payload.status.code,
-                  "Native model generation failed.",
-                  payload.status.retryable,
-                  nativeFailureDiagnostics(payload.status, accumulated.length),
+            case "failed": {
+              const status = payload.status;
+              afterDispatchBoundary(() =>
+                fail(
+                  new ModelCenterError(
+                    status.code,
+                    "Native model generation failed.",
+                    status.retryable,
+                    nativeFailureDiagnostics(status, accumulated.length),
+                  ),
                 ),
               );
+            }
           }
         });
         timeoutId = setTimeout(() => {
@@ -991,6 +1037,7 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
         const accepted = await invoke<{
           readonly generationId: string;
           readonly accepted: boolean;
+          readonly invocationDispatchReceipt?: NativeModelInvocationDispatchReceipt | null;
         }>("start_native_generation", {
           request: {
             generationId: input.generationId,
@@ -1003,6 +1050,9 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
             ...(input.reasoningMode === undefined ? {} : { reasoningMode: input.reasoningMode }),
             ...(input.responseFormat === undefined ? {} : { responseFormat: input.responseFormat }),
             dispatchScope: input.dispatchScope,
+            ...(input.invocationDispatchLedger === undefined
+              ? {}
+              : { invocationDispatchLedger: input.invocationDispatchLedger }),
           },
         });
         if (accepted.generationId !== input.generationId || !accepted.accepted) {
@@ -1010,6 +1060,25 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
             new ModelCenterError(
               "MODEL_GENERATION_NOT_ACCEPTED",
               "Native model generation was not accepted.",
+            ),
+          );
+          return;
+        }
+        if (input.invocationDispatchLedger !== undefined) {
+          const receipt = validateNativeInvocationDispatchReceipt(
+            accepted.invocationDispatchReceipt,
+            input.invocationDispatchLedger,
+          );
+          await input.onInvocationDispatchAccepted?.(receipt);
+          dispatchBoundarySettled = true;
+          const terminal = pendingTerminal as (() => void) | null;
+          pendingTerminal = null;
+          if (terminal !== null) terminal();
+        } else if (accepted.invocationDispatchReceipt != null) {
+          fail(
+            new ModelCenterError(
+              "MODEL_INVOCATION_DISPATCH_RECEIPT_INVALID",
+              "Native model dispatch returned an unexpected invocation receipt.",
             ),
           );
         }
@@ -2098,7 +2167,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.2.5",
+    appVersion: "0.2.6",
     platform: "browser",
     architecture: "web",
     environment: "development",
@@ -2346,7 +2415,6 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
       }),
     });
     const automaticBackup = createTauriAutomaticBackupRuntime({
-      executor,
       ids: configuredRuntime.ids,
       clock: configuredRuntime.clock,
     });
@@ -4547,6 +4615,32 @@ function validateNativeRerankResult(result: unknown, input: NativeRerankInput): 
 
 function invalidNativeRerankResponse(): ModelCenterError {
   return new ModelCenterError("MODEL_RESPONSE_INVALID", "The native rerank response is invalid.");
+}
+
+function validateNativeInvocationDispatchReceipt(
+  value: unknown,
+  expected: NativeModelGenerationInput["invocationDispatchLedger"],
+): NativeModelInvocationDispatchReceipt {
+  if (
+    expected === undefined ||
+    !isRecord(value) ||
+    value.invocationId !== expected.invocationId ||
+    typeof value.dispatchedAt !== "string" ||
+    !Number.isFinite(Date.parse(value.dispatchedAt)) ||
+    typeof value.revision !== "number" ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision !== expected.expectedRevision + 1
+  ) {
+    throw new ModelCenterError(
+      "MODEL_INVOCATION_DISPATCH_RECEIPT_INVALID",
+      "Native model dispatch returned an invalid invocation receipt.",
+    );
+  }
+  return Object.freeze({
+    invocationId: value.invocationId,
+    dispatchedAt: value.dispatchedAt,
+    revision: value.revision,
+  });
 }
 
 function validateNativeGenerationUsage(

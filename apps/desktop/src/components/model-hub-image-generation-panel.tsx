@@ -152,7 +152,7 @@ export function ModelHubImageGenerationPanel({
           <InlineAlert
             tone="info"
             title="正在检查图片模型"
-            description="只读取本机 Model Hub 配置，不会发送小说内容。"
+            description="只读取本机模型中心配置，不会发送小说内容。"
           />
         )}
 
@@ -170,7 +170,7 @@ export function ModelHubImageGenerationPanel({
             <InlineAlert
               tone="warning"
               title="生成前请确认费用与隐私"
-              description={`${inspection.connectionDisplayName} · ${inspection.modelId}；${destinationLabel(inspection.dataDestination)}。数据保留：${retentionPolicyLabel(inspection.retentionPolicy)}；训练使用：${trainingPolicyLabel(inspection.trainingPolicy)}。本次最多发起 1 次图片模型调用，自动重试 0 次。Model Hub 当前没有可审计的逐张图片价格，供应商可能收费，请以供应商价格页为准。确认只绑定当前这段图片描述；修改后必须重新确认。`}
+              description={`${inspection.connectionDisplayName} · ${inspection.modelId}；${destinationLabel(inspection.dataDestination)}。数据保留：${retentionPolicyLabel(inspection.retentionPolicy)}；训练使用：${trainingPolicyLabel(inspection.trainingPolicy)}。本次最多发起 1 次图片模型调用，自动重试 0 次。模型中心当前没有可审计的逐张图片价格，供应商可能收费，请以供应商价格页为准。确认只绑定当前这段图片描述；修改后必须重新确认。`}
             />
 
             <FormField

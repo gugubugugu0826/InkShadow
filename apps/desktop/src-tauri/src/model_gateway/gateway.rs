@@ -31,7 +31,9 @@ use super::types::{
     RerankProtocol, RerankRequest, RerankResponse, ResponseFormat, StartGenerationRequest,
 };
 use crate::native_sqlite::{
-    NativeModelDispatchScope, NativeSqliteState, ProjectRemoteDispatchLease,
+    ModelInvocationDispatchLedgerError, NativeModelDispatchScope,
+    NativeModelInvocationDispatchLedger, NativeModelInvocationDispatchReceipt,
+    NativeModelInvocationDispatchTarget, NativeSqliteState, ProjectRemoteDispatchLease,
     ProjectRemoteDispatchLeaseError,
 };
 use crate::network_egress::RestrictedDnsResolver;
@@ -608,22 +610,110 @@ pub(crate) async fn start_native_generation(
     request: StartGenerationRequest,
 ) -> Result<GenerationAccepted, CommandError> {
     validate_generation_id(&request.generation_id)?;
+    validate_invocation_dispatch_ledger_request(&request)?;
     let prepared = prepare_generation(&request).await?;
+    let invocation_dispatch_boundary = request
+        .invocation_dispatch_ledger
+        .as_ref()
+        .map(|ledger| {
+            Ok::<_, CommandError>((ledger.clone(), model_invocation_dispatch_target(&request)?))
+        })
+        .transpose()?;
     let generation_id = request.generation_id.clone();
     let emitter = GenerationEmitter::new(app, generation_id.clone());
-    start_prepared_generation_with_dispatch(
+    let invocation_dispatch_receipt = start_prepared_generation_with_dispatch(
         &state,
         &sqlite,
         &request.dispatch_scope,
         prepared,
         generation_id,
         emitter,
+        invocation_dispatch_boundary,
     )
     .await?;
 
     Ok(GenerationAccepted {
         generation_id: request.generation_id,
         accepted: true,
+        invocation_dispatch_receipt,
+    })
+}
+
+fn validate_invocation_dispatch_ledger_request(
+    request: &StartGenerationRequest,
+) -> Result<(), CommandError> {
+    if request.invocation_dispatch_ledger.is_none() {
+        return Ok(());
+    }
+    if !matches!(
+        &request.dispatch_scope,
+        NativeModelDispatchScope::NonProject {
+            reason: crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe
+        }
+    ) || request.config.retry_limit.unwrap_or(0) != 0
+    {
+        return Err(CommandError::request_invalid());
+    }
+    let ledger = request
+        .invocation_dispatch_ledger
+        .as_ref()
+        .ok_or_else(CommandError::request_invalid)?;
+    if ledger.connection_revision < 1
+        || ledger.catalog_entry_revision < 1
+        || ledger.model_id_snapshot != request.model
+        || !provider_snapshot_matches_protocol(
+            ledger.provider_kind_snapshot.as_str(),
+            request.config.provider,
+        )
+    {
+        return Err(CommandError::request_invalid());
+    }
+    Ok(())
+}
+
+fn provider_snapshot_matches_protocol(snapshot: &str, provider: ProviderKind) -> bool {
+    match provider {
+        ProviderKind::OpenAiCompatible => matches!(
+            snapshot,
+            "openai"
+                | "deepseek"
+                | "zhipu_glm"
+                | "alibaba_qwen"
+                | "volcengine_doubao"
+                | "custom_openai_compatible"
+        ),
+        ProviderKind::Ollama => snapshot == "ollama",
+        ProviderKind::Anthropic => snapshot == "anthropic_claude",
+        ProviderKind::Gemini => snapshot == "google_gemini",
+    }
+}
+
+fn model_invocation_dispatch_target(
+    request: &StartGenerationRequest,
+) -> Result<NativeModelInvocationDispatchTarget, CommandError> {
+    Ok(NativeModelInvocationDispatchTarget {
+        protocol: match request.config.provider {
+            ProviderKind::OpenAiCompatible => "openai_compatible",
+            ProviderKind::Ollama => "ollama",
+            ProviderKind::Anthropic => "anthropic",
+            ProviderKind::Gemini => "gemini",
+        }
+        .to_owned(),
+        credential_provider_id: request.config.provider_id.clone(),
+        base_url: request.config.base_url.clone(),
+        authentication_mode: match request.config.authentication {
+            AuthenticationMode::None => "none",
+            AuthenticationMode::BearerKeyring => "bearer_keyring",
+            AuthenticationMode::CustomHeaderKeyring => "custom_header_keyring",
+        }
+        .to_owned(),
+        credential_header_name: request.config.credential_header_name.clone(),
+        model_discovery_path: request.config.model_discovery_path.clone(),
+        text_generation_path: request.config.text_generation_path.clone(),
+        embedding_path: request.config.embedding_path.clone(),
+        request_timeout_ms: i64::try_from(configured_request_timeout(&request.config)?.as_millis())
+            .map_err(|_| CommandError::request_invalid())?,
+        model_id: request.model.clone(),
     })
 }
 
@@ -634,7 +724,11 @@ async fn start_prepared_generation_with_dispatch<Emitter>(
     prepared: PreparedGeneration,
     generation_id: String,
     mut emitter: Emitter,
-) -> Result<(), CommandError>
+    invocation_dispatch_boundary: Option<(
+        NativeModelInvocationDispatchLedger,
+        NativeModelInvocationDispatchTarget,
+    )>,
+) -> Result<Option<NativeModelInvocationDispatchReceipt>, CommandError>
 where
     Emitter: GenerationEventSink + 'static,
 {
@@ -688,10 +782,35 @@ where
             return;
         }
 
+        let invocation_dispatch_receipt = match invocation_dispatch_boundary.as_ref() {
+            Some((ledger, target)) => match sqlite
+                .mark_capability_probe_invocation_dispatched(ledger, target)
+                .await
+            {
+                Ok(receipt) => Some(receipt),
+                Err(error) => {
+                    let cleanup = finish_remote_dispatch(
+                        &state.dispatch_lifecycle,
+                        &state.dispatch_registry,
+                        &sqlite,
+                        lease,
+                        &generation_id,
+                    )
+                    .await;
+                    let _ = state.registry.remove(&generation_id);
+                    let _ = startup_tx.send(Err(cleanup
+                        .err()
+                        .unwrap_or_else(|| map_invocation_dispatch_ledger_error(error))));
+                    return;
+                }
+            },
+            None => None,
+        };
+
         // Failure to deliver the handshake only means the invoke waiter was
         // dropped. It must not cancel a generation whose native lifecycle is
         // already fenced and active.
-        let _ = startup_tx.send(Ok(()));
+        let _ = startup_tx.send(Ok(invocation_dispatch_receipt));
         drive_generation(NativeGenerationLifecycle {
             state,
             sqlite,
@@ -707,6 +826,31 @@ where
     startup_rx
         .await
         .map_err(|_| CommandError::runtime_failed())?
+}
+
+fn map_invocation_dispatch_ledger_error(error: ModelInvocationDispatchLedgerError) -> CommandError {
+    match error {
+        ModelInvocationDispatchLedgerError::Invalid => CommandError::request_invalid(),
+        ModelInvocationDispatchLedgerError::Conflict => CommandError::new(
+            "MODEL_INVOCATION_DISPATCH_CONFLICT",
+            "The capability-probe invocation changed before native dispatch. No provider request was sent.",
+            false,
+            vec!["RETRY"],
+        ),
+        ModelInvocationDispatchLedgerError::Busy
+        | ModelInvocationDispatchLedgerError::Unavailable => CommandError::new(
+            "MODEL_INVOCATION_DISPATCH_LEDGER_UNAVAILABLE",
+            "The native gateway could not persist the provider dispatch boundary. No provider request was sent.",
+            true,
+            vec!["RETRY", "OPEN_DIAGNOSTICS"],
+        ),
+        ModelInvocationDispatchLedgerError::OutcomeUnknown => CommandError::new(
+            "MODEL_INVOCATION_DISPATCH_LEDGER_OUTCOME_UNKNOWN",
+            "The native invocation receipt could not be confirmed. No provider request was started and the operation will not be resent automatically.",
+            false,
+            vec!["OPEN_DIAGNOSTICS"],
+        ),
+    }
 }
 
 #[tauri::command]
@@ -2417,7 +2561,35 @@ mod tests {
             top_p: None,
             reasoning_mode: None,
             response_format: None,
+            invocation_dispatch_ledger: None,
         }
+    }
+
+    fn capability_dispatch_boundary(
+        request: &StartGenerationRequest,
+        invocation_id: &str,
+        connection_id: &str,
+        connection_revision: i64,
+        catalog_entry_id: &str,
+        catalog_entry_revision: i64,
+        provider_kind_snapshot: &str,
+    ) -> (
+        NativeModelInvocationDispatchLedger,
+        NativeModelInvocationDispatchTarget,
+    ) {
+        (
+            NativeModelInvocationDispatchLedger {
+                invocation_id: invocation_id.to_owned(),
+                expected_revision: 1,
+                connection_id: connection_id.to_owned(),
+                connection_revision,
+                catalog_entry_id: catalog_entry_id.to_owned(),
+                catalog_entry_revision,
+                provider_kind_snapshot: provider_kind_snapshot.to_owned(),
+                model_id_snapshot: request.model.clone(),
+            },
+            model_invocation_dispatch_target(request).expect("valid capability dispatch target"),
+        )
     }
 
     fn rerank_request(base_url: String) -> RerankRequest {
@@ -2475,6 +2647,40 @@ mod tests {
                 "top_p={invalid:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn capability_invocation_receipt_accepts_only_connection_probe_zero_retry_scope() {
+        let mut request = generation_request();
+        request.dispatch_scope = NativeModelDispatchScope::NonProject {
+            reason: crate::native_sqlite::NativeNonProjectDispatchReason::CreativeOpening,
+        };
+        request.invocation_dispatch_ledger = Some(NativeModelInvocationDispatchLedger {
+            invocation_id: "019f9f4a-b3c7-7350-9226-000000000503".to_owned(),
+            expected_revision: 1,
+            connection_id: "connection-1".to_owned(),
+            connection_revision: 1,
+            catalog_entry_id: "catalog-1".to_owned(),
+            catalog_entry_revision: 1,
+            provider_kind_snapshot: "openai".to_owned(),
+            model_id_snapshot: "model-1".to_owned(),
+        });
+        assert!(validate_invocation_dispatch_ledger_request(&request).is_err());
+
+        request.dispatch_scope = NativeModelDispatchScope::NonProject {
+            reason: crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe,
+        };
+        request.config.retry_limit = Some(1);
+        assert!(validate_invocation_dispatch_ledger_request(&request).is_err());
+
+        request.config.retry_limit = Some(0);
+        assert!(validate_invocation_dispatch_ledger_request(&request).is_ok());
+        request
+            .invocation_dispatch_ledger
+            .as_mut()
+            .expect("test ledger")
+            .model_id_snapshot = "different-model".to_owned();
+        assert!(validate_invocation_dispatch_ledger_request(&request).is_err());
     }
 
     #[test]
@@ -3671,6 +3877,554 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capability_probe_receipt_is_durable_before_native_provider_io() {
+        const INVOCATION_ID: &str = "019f9f4a-b3c7-7350-9226-000000000501";
+        const GENERATION_ID: &str = "capability-probe-native-boundary";
+        let directory = std::env::temp_dir().join(format!(
+            "inkshadow-capability-probe-boundary-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir(&directory).expect("create capability boundary directory");
+        let database_path = directory.join("inkshadow.db");
+        let sqlite = NativeSqliteState::default();
+        sqlite
+            .test_open_migrated_database(&database_path)
+            .await
+            .expect("open migrated capability boundary database");
+        sqlite
+            .test_execute_internal_sql(
+                "INSERT INTO model_provider_connections (
+                   id, provider_kind, display_name, protocol, base_url, created_at, updated_at
+                 ) VALUES ('native-boundary-connection', 'custom_openai_compatible',
+                           'Native boundary', 'openai_compatible',
+                           'https://example.test/v1',
+                           '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z')",
+            )
+            .await
+            .expect("seed native boundary connection");
+        sqlite
+            .test_execute_internal_sql(
+                "INSERT INTO model_catalog_entries (
+                   id, connection_id, provider_model_id, display_name, catalog_source,
+                   availability, lifecycle, first_discovered_at, last_seen_at
+                 ) VALUES ('native-boundary-catalog', 'native-boundary-connection',
+                           'model-1', 'model-1', 'manual', 'available', 'stable',
+                           '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z')",
+            )
+            .await
+            .expect("seed native boundary catalog");
+        sqlite
+            .test_execute_internal_sql(&format!(
+                "INSERT INTO model_invocation_facts (
+                   id, task, connection_id, catalog_entry_id,
+                   provider_kind_snapshot, model_id_snapshot,
+                   route_reason, status, attempt, privacy_policy, data_destination,
+                   started_at, created_at, revision
+                 ) VALUES ('{INVOCATION_ID}', 'capability_probe',
+                           'native-boundary-connection', 'native-boundary-catalog',
+                           'custom_openai_compatible', 'model-1', 'user_override',
+                           'running', 1, 'cloud_allowed', 'remote',
+                           '2026-08-21T00:00:00.000Z',
+                           '2026-08-21T00:00:00.000Z', 1)"
+            ))
+            .await
+            .expect("seed running capability invocation");
+        let mut stored_request = generation_request();
+        stored_request.config.provider_id = "native-boundary-connection".to_owned();
+        stored_request.config.base_url = "https://example.test/v1".to_owned();
+        stored_request.config.retry_limit = Some(0);
+        stored_request.dispatch_scope = NativeModelDispatchScope::NonProject {
+            reason: crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe,
+        };
+        let (wrong_identity_ledger, stored_target) = capability_dispatch_boundary(
+            &stored_request,
+            INVOCATION_ID,
+            "native-boundary-connection",
+            1,
+            "different-running-probe",
+            1,
+            "custom_openai_compatible",
+        );
+        let wrong_identity = sqlite
+            .mark_capability_probe_invocation_dispatched(&wrong_identity_ledger, &stored_target)
+            .await;
+        assert_eq!(
+            wrong_identity,
+            Err(ModelInvocationDispatchLedgerError::Conflict)
+        );
+        let mut predispatch_inspector = open_dispatch_inspector(&database_path).await;
+        let predispatch: (Option<String>, i64) = sqlx::query_as(
+            "SELECT provider_dispatch_started_at, revision
+             FROM model_invocation_facts WHERE id = ?",
+        )
+        .bind(INVOCATION_ID)
+        .fetch_one(&mut predispatch_inspector)
+        .await
+        .expect("wrong identity leaves ledger untouched");
+        assert_eq!(predispatch, (None, 1));
+        drop(predispatch_inspector);
+        let server = spawn_fake_server(
+            "200 OK",
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n",
+            Duration::ZERO,
+            None,
+        );
+        let mut request = generation_request();
+        request.generation_id = GENERATION_ID.to_owned();
+        request.config.provider_id = "native-boundary-connection".to_owned();
+        request.config.base_url = format!("{}/v1", server.base_url);
+        request.config.retry_limit = Some(0);
+        request.dispatch_scope = NativeModelDispatchScope::NonProject {
+            reason: crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe,
+        };
+        let prepared = prepare_generation(&request)
+            .await
+            .expect("prepare fixed capability probe");
+        let wrong_identity_prepared = prepare_generation(&request)
+            .await
+            .expect("prepare identity-mismatch capability probe");
+
+        #[derive(Default)]
+        struct TestEventSink;
+        impl GenerationDeltaSink for TestEventSink {
+            fn emit_delta(&mut self, _delta: &str) -> Result<(), CommandError> {
+                Ok(())
+            }
+        }
+        impl GenerationEventSink for TestEventSink {
+            fn emit_status(
+                &mut self,
+                _status: GenerationEventStatus,
+                _delta: String,
+            ) -> Result<(), CommandError> {
+                Ok(())
+            }
+        }
+
+        let gateway = ModelGatewayState::new().expect("gateway state");
+        let wrong_identity_error = start_prepared_generation_with_dispatch(
+            &gateway,
+            &sqlite,
+            &request.dispatch_scope,
+            wrong_identity_prepared,
+            format!("{GENERATION_ID}-wrong-identity"),
+            TestEventSink,
+            Some(capability_dispatch_boundary(
+                &request,
+                INVOCATION_ID,
+                "native-boundary-connection",
+                1,
+                "different-running-probe",
+                1,
+                "custom_openai_compatible",
+            )),
+        )
+        .await
+        .expect_err("a different catalog identity must stop before provider I/O");
+        assert_eq!(
+            wrong_identity_error.code(),
+            "MODEL_INVOCATION_DISPATCH_CONFLICT"
+        );
+        assert!(server
+            .request
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+        let endpoint_mismatch_error = start_prepared_generation_with_dispatch(
+            &gateway,
+            &sqlite,
+            &request.dispatch_scope,
+            prepared,
+            format!("{GENERATION_ID}-endpoint-drift"),
+            TestEventSink,
+            Some(capability_dispatch_boundary(
+                &request,
+                INVOCATION_ID,
+                "native-boundary-connection",
+                1,
+                "native-boundary-catalog",
+                1,
+                "custom_openai_compatible",
+            )),
+        )
+        .await
+        .expect_err("endpoint drift must stop before provider I/O");
+        assert_eq!(
+            endpoint_mismatch_error.code(),
+            "MODEL_INVOCATION_DISPATCH_CONFLICT"
+        );
+        assert!(server
+            .request
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        sqlite
+            .test_execute_internal_sql(&format!(
+                "UPDATE model_provider_connections
+                 SET base_url = '{}', revision = 2
+                 WHERE id = 'native-boundary-connection'",
+                request.config.base_url
+            ))
+            .await
+            .expect("align authoritative endpoint");
+        sqlite
+            .test_execute_internal_sql(
+                "UPDATE model_provider_connections
+                 SET enabled = 0, revision = 3
+                 WHERE id = 'native-boundary-connection'",
+            )
+            .await
+            .expect("disable authoritative connection");
+        let disabled_error = start_prepared_generation_with_dispatch(
+            &gateway,
+            &sqlite,
+            &request.dispatch_scope,
+            prepare_generation(&request)
+                .await
+                .expect("prepare disabled-connection drift probe"),
+            format!("{GENERATION_ID}-disabled-drift"),
+            TestEventSink,
+            Some(capability_dispatch_boundary(
+                &request,
+                INVOCATION_ID,
+                "native-boundary-connection",
+                3,
+                "native-boundary-catalog",
+                1,
+                "custom_openai_compatible",
+            )),
+        )
+        .await
+        .expect_err("a disabled connection must stop before provider I/O");
+        assert_eq!(disabled_error.code(), "MODEL_INVOCATION_DISPATCH_CONFLICT");
+        assert!(server
+            .request
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        sqlite
+            .test_execute_internal_sql(
+                "UPDATE model_provider_connections
+                 SET enabled = 1,
+                     authentication_mode = 'bearer_keyring',
+                     credential_ref = 'keyring:model-hub:different-credential-slot',
+                     credential_state = 'present',
+                     revision = 4
+                 WHERE id = 'native-boundary-connection'",
+            )
+            .await
+            .expect("drift authoritative credential slot");
+        let credential_error = start_prepared_generation_with_dispatch(
+            &gateway,
+            &sqlite,
+            &request.dispatch_scope,
+            prepare_generation(&request)
+                .await
+                .expect("prepare credential drift probe"),
+            format!("{GENERATION_ID}-credential-drift"),
+            TestEventSink,
+            Some(capability_dispatch_boundary(
+                &request,
+                INVOCATION_ID,
+                "native-boundary-connection",
+                4,
+                "native-boundary-catalog",
+                1,
+                "custom_openai_compatible",
+            )),
+        )
+        .await
+        .expect_err("credential drift must stop before provider I/O");
+        assert_eq!(
+            credential_error.code(),
+            "MODEL_INVOCATION_DISPATCH_CONFLICT"
+        );
+        assert!(server
+            .request
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        sqlite
+            .test_execute_internal_sql(
+                "UPDATE model_provider_connections
+                 SET authentication_mode = 'none',
+                     credential_ref = NULL,
+                     credential_state = 'missing',
+                     text_generation_path = '/different/chat',
+                     revision = 5
+                 WHERE id = 'native-boundary-connection'",
+            )
+            .await
+            .expect("drift authoritative generation path");
+        let path_error = start_prepared_generation_with_dispatch(
+            &gateway,
+            &sqlite,
+            &request.dispatch_scope,
+            prepare_generation(&request)
+                .await
+                .expect("prepare generation-path drift probe"),
+            format!("{GENERATION_ID}-path-drift"),
+            TestEventSink,
+            Some(capability_dispatch_boundary(
+                &request,
+                INVOCATION_ID,
+                "native-boundary-connection",
+                5,
+                "native-boundary-catalog",
+                1,
+                "custom_openai_compatible",
+            )),
+        )
+        .await
+        .expect_err("generation-path drift must stop before provider I/O");
+        assert_eq!(path_error.code(), "MODEL_INVOCATION_DISPATCH_CONFLICT");
+        assert!(server
+            .request
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        sqlite
+            .test_execute_internal_sql(
+                "UPDATE model_provider_connections
+                 SET text_generation_path = NULL, revision = 6
+                 WHERE id = 'native-boundary-connection'",
+            )
+            .await
+            .expect("restore authoritative generation path");
+        sqlite
+            .test_execute_internal_sql(
+                "UPDATE model_catalog_entries
+                 SET availability = 'unavailable', revision = 2
+                 WHERE id = 'native-boundary-catalog'",
+            )
+            .await
+            .expect("drift authoritative catalog availability");
+        let catalog_error = start_prepared_generation_with_dispatch(
+            &gateway,
+            &sqlite,
+            &request.dispatch_scope,
+            prepare_generation(&request)
+                .await
+                .expect("prepare catalog drift probe"),
+            format!("{GENERATION_ID}-catalog-drift"),
+            TestEventSink,
+            Some(capability_dispatch_boundary(
+                &request,
+                INVOCATION_ID,
+                "native-boundary-connection",
+                6,
+                "native-boundary-catalog",
+                2,
+                "custom_openai_compatible",
+            )),
+        )
+        .await
+        .expect_err("an unavailable catalog entry must stop before provider I/O");
+        assert_eq!(catalog_error.code(), "MODEL_INVOCATION_DISPATCH_CONFLICT");
+        assert!(server
+            .request
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        sqlite
+            .test_execute_internal_sql(
+                "UPDATE model_catalog_entries
+                 SET availability = 'available', revision = 3
+                 WHERE id = 'native-boundary-catalog'",
+            )
+            .await
+            .expect("restore authoritative catalog entry");
+        let prepared = prepare_generation(&request)
+            .await
+            .expect("prepare aligned capability probe");
+        let receipt = start_prepared_generation_with_dispatch(
+            &gateway,
+            &sqlite,
+            &request.dispatch_scope,
+            prepared,
+            GENERATION_ID.to_owned(),
+            TestEventSink,
+            Some(capability_dispatch_boundary(
+                &request,
+                INVOCATION_ID,
+                "native-boundary-connection",
+                6,
+                "native-boundary-catalog",
+                3,
+                "custom_openai_compatible",
+            )),
+        )
+        .await
+        .expect("native accepts only the exact authoritative endpoint")
+        .expect("capability invocation receipt");
+        assert_eq!(receipt.invocation_id, INVOCATION_ID);
+        assert_eq!(receipt.revision, 2);
+
+        let mut inspector = open_dispatch_inspector(&database_path).await;
+        let persisted: (Option<String>, i64) = sqlx::query_as(
+            "SELECT provider_dispatch_started_at, revision
+             FROM model_invocation_facts WHERE id = ?",
+        )
+        .bind(INVOCATION_ID)
+        .fetch_one(&mut inspector)
+        .await
+        .expect("inspect native dispatch receipt");
+        assert_eq!(persisted.0.as_deref(), Some(receipt.dispatched_at.as_str()));
+        assert_eq!(persisted.1, 2);
+        server
+            .request
+            .recv_timeout(Duration::from_secs(2))
+            .expect("provider receives exactly the request fenced by the receipt");
+        wait_for_generation_registry_absence(&gateway, GENERATION_ID).await;
+        server.handle.join().expect("fake server stops");
+        drop(inspector);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn capability_probe_ledger_lock_timeout_starts_zero_provider_io() {
+        const INVOCATION_ID: &str = "019f9f4a-b3c7-7350-9226-000000000504";
+        const GENERATION_ID: &str = "capability-probe-ledger-lock";
+        let directory = std::env::temp_dir().join(format!(
+            "inkshadow-capability-probe-ledger-lock-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir(&directory).expect("create ledger lock directory");
+        let database_path = directory.join("inkshadow.db");
+        let sqlite = NativeSqliteState::default()
+            .test_with_foreground_operation_timeout(Duration::from_millis(20));
+        sqlite
+            .test_open_migrated_database(&database_path)
+            .await
+            .expect("open migrated ledger lock database");
+        sqlite
+            .test_execute_internal_sql(
+                "INSERT INTO model_provider_connections (
+                   id, provider_kind, display_name, protocol, base_url, created_at, updated_at
+                 ) VALUES ('native-ledger-lock-connection', 'custom_openai_compatible',
+                           'Native ledger lock', 'openai_compatible',
+                           'https://example.test/v1',
+                           '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z')",
+            )
+            .await
+            .expect("seed locked boundary connection");
+        sqlite
+            .test_execute_internal_sql(
+                "INSERT INTO model_catalog_entries (
+                   id, connection_id, provider_model_id, display_name, catalog_source,
+                   availability, lifecycle, first_discovered_at, last_seen_at
+                 ) VALUES ('native-ledger-lock-catalog', 'native-ledger-lock-connection',
+                           'model-1', 'model-1', 'manual', 'available', 'stable',
+                           '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z')",
+            )
+            .await
+            .expect("seed locked boundary catalog");
+        sqlite
+            .test_execute_internal_sql(&format!(
+                "INSERT INTO model_invocation_facts (
+                   id, task, connection_id, catalog_entry_id,
+                   provider_kind_snapshot, model_id_snapshot,
+                   route_reason, status, attempt, privacy_policy, data_destination,
+                   started_at, created_at, revision
+                 ) VALUES ('{INVOCATION_ID}', 'capability_probe',
+                           'native-ledger-lock-connection', 'native-ledger-lock-catalog',
+                           'custom_openai_compatible', 'model-1', 'user_override',
+                           'running', 1, 'cloud_allowed', 'remote',
+                           '2026-08-21T00:00:00.000Z',
+                           '2026-08-21T00:00:00.000Z', 1)"
+            ))
+            .await
+            .expect("seed locked capability invocation");
+        let mut writer = open_dispatch_inspector(&database_path).await;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut writer)
+            .await
+            .expect("hold capability ledger writer lock");
+
+        let server = spawn_fake_server("200 OK", b"data: [DONE]\n\n", Duration::ZERO, None);
+        let mut request = generation_request();
+        request.generation_id = GENERATION_ID.to_owned();
+        request.config.provider_id = "native-ledger-lock-connection".to_owned();
+        request.config.base_url = format!("{}/v1", server.base_url);
+        request.config.retry_limit = Some(0);
+        request.dispatch_scope = NativeModelDispatchScope::NonProject {
+            reason: crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe,
+        };
+        let prepared = prepare_generation(&request)
+            .await
+            .expect("prepare locked capability probe");
+
+        #[derive(Default)]
+        struct TestEventSink;
+        impl GenerationDeltaSink for TestEventSink {
+            fn emit_delta(&mut self, _delta: &str) -> Result<(), CommandError> {
+                Ok(())
+            }
+        }
+        impl GenerationEventSink for TestEventSink {
+            fn emit_status(
+                &mut self,
+                _status: GenerationEventStatus,
+                _delta: String,
+            ) -> Result<(), CommandError> {
+                Ok(())
+            }
+        }
+
+        let gateway = ModelGatewayState::new().expect("gateway state");
+        let error = start_prepared_generation_with_dispatch(
+            &gateway,
+            &sqlite,
+            &request.dispatch_scope,
+            prepared,
+            GENERATION_ID.to_owned(),
+            TestEventSink,
+            Some(capability_dispatch_boundary(
+                &request,
+                INVOCATION_ID,
+                "native-ledger-lock-connection",
+                1,
+                "native-ledger-lock-catalog",
+                1,
+                "custom_openai_compatible",
+            )),
+        )
+        .await
+        .expect_err("ledger timeout stops before provider I/O");
+        assert_eq!(
+            error.code(),
+            "MODEL_INVOCATION_DISPATCH_LEDGER_OUTCOME_UNKNOWN"
+        );
+        assert!(server
+            .request
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        let mut unblock = std::net::TcpStream::connect(
+            server
+                .base_url
+                .strip_prefix("http://")
+                .expect("loopback server origin"),
+        )
+        .expect("connect only to release the no-I/O test server");
+        unblock
+            .write_all(
+                b"GET /test-cleanup HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            )
+            .expect("release fake server accept");
+        sqlx::query("ROLLBACK")
+            .execute(&mut writer)
+            .await
+            .expect("release capability ledger writer lock");
+        server.handle.join().expect("fake server stops");
+        drop(writer);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
     async fn dropping_generation_command_while_begin_is_blocked_keeps_native_lifecycle_alive() {
         const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000151";
         const GENERATION_ID: &str = "generation-cancelled-during-begin";
@@ -3718,6 +4472,7 @@ mod tests {
                 prepared,
                 GENERATION_ID.to_owned(),
                 TestEventSink,
+                None,
             )
             .await
         });
@@ -4378,6 +5133,7 @@ mod tests {
             top_p: None,
             reasoning_mode: None,
             response_format: None,
+            invocation_dispatch_ledger: None,
         })
         .await
         .expect("prepare the real local generation request");

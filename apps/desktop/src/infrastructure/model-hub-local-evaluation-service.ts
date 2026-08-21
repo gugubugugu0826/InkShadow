@@ -126,6 +126,7 @@ export class ModelHubLocalEvaluationService {
           dispatchScope: { kind: "non_project", reason: "connection_probe" },
           executionPolicy: SINGLE_ATTEMPT_CAPABILITY_PROBE_POLICY,
           reasoningPolicy: "capability_probe",
+          invocationLedgerTask: "capability_probe",
           task: input.task,
           messages: probe.messages,
           maximumOutputTokens: MODEL_HUB_TEXT_CAPABILITY_PROBE_MAX_OUTPUT_TOKENS,

@@ -672,10 +672,11 @@ function localDateKey(timestamp: string, timezoneOffsetMinutes: number): string 
 }
 
 function taskLabel(task: string): string {
-  return TASK_LABELS[task] ?? task;
+  return TASK_LABELS[task] ?? "其他模型任务";
 }
 
 export const TASK_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  capability_probe: "模型能力验证",
   idea_discussion: "灵感讨论",
   book_start_guidance: "开书引导",
   prose_generation: "正文生成",

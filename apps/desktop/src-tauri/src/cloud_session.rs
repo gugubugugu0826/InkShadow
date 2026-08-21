@@ -18,6 +18,7 @@ use uuid::{Uuid, Variant as UuidVariant, Version as UuidVersion};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
+    credential_service,
     model_gateway::CommandError,
     network_egress::{
         host_is_explicit_loopback, host_is_ip_literal, literal_ip_is_allowed, RestrictedDnsResolver,
@@ -30,7 +31,6 @@ use crate::{
         TeamProjectKeyReceiptBinding, TeamProjectKeyReceiptCommit, TeamProjectKeyReceiptRemoval,
         TeamProjectKeyReceiptStatus,
     },
-    CREDENTIAL_SERVICE,
 };
 
 type DeviceKem = DhP256HkdfSha256;
@@ -1517,7 +1517,7 @@ fn read_stored_session() -> Result<Option<StoredCloudSession>, CommandError> {
 }
 
 fn cloud_session_entry() -> Result<keyring::Entry, CommandError> {
-    keyring::Entry::new(CREDENTIAL_SERVICE, CLOUD_SESSION_ACCOUNT)
+    keyring::Entry::new(credential_service(), CLOUD_SESSION_ACCOUNT)
         .map_err(|_| CommandError::credential_store_unavailable())
 }
 

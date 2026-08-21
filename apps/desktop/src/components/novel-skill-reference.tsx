@@ -98,7 +98,7 @@ function notAppliedDescription(reason: NovelSkillNotAppliedReason | null): strin
     return "浏览器演示不会把实验性方法加入提示词，也不会生成写作方法收据。";
   }
   if (reason === "legacy_route_untraceable") {
-    return "当前调用使用旧兼容链，无法建立精确的模型调用收据，因此写作方法已安全跳过。切换到 Model Hub 任务分工后可使用。";
+    return "当前调用使用旧兼容链，无法建立精确的模型调用收据，因此写作方法已安全跳过。切换到模型中心任务分工后可使用。";
   }
   return "写作方法运行时当前不可用；本次没有把任何实验性方法加入提示词。";
 }

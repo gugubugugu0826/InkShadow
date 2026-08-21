@@ -91,17 +91,20 @@ describe("StoryPlanningPanel", () => {
     expect(document.body).not.toHaveTextContent(generated.providerKind);
     expect(screen.getByText(/本次模型结果已记录，可在调用与费用中核对/u)).toBeVisible();
 
-    const decisionSurface = screen.getByLabelText(`${generated.targetNodeTitle}的规划候选决策`);
+    const decisionSurface = screen.getByLabelText(`${generated.targetNodeTitle}的规划建议草稿决策`);
     expect(decisionSurface).toHaveClass("candidate-decision-surface");
     expect(
-      within(decisionSurface).getByLabelText(`${generated.targetNodeTitle}的规划候选内容`),
+      within(decisionSurface).getByLabelText(`${generated.targetNodeTitle}的规划建议草稿内容`),
     ).toHaveAttribute("tabindex", "0");
     expect(decisionSurface.querySelector(":scope > .ink-card__footer")).toHaveClass(
       "candidate-decision-actions",
     );
 
     const editor = screen.getByRole("textbox", {
-      name: new RegExp(`^整体替换“${generated.targetNodeTitle}”简介的候选内容(?:可选)?$`, "u"),
+      name: new RegExp(
+        `^整体替换“${generated.targetNodeTitle}”简介的规划建议草稿内容(?:可选)?$`,
+        "u",
+      ),
     });
     await user.clear(editor);
     await user.type(editor, "作者修改后的方向");
