@@ -289,6 +289,16 @@ pub(crate) async fn stage_signed_update(
     state: State<'_, SecureUpdaterState>,
     plan_id: String,
 ) -> Result<StagedUpdateReceipt, CommandError> {
+    // Artifact verification has a large async state machine. Heap-pin it so
+    // Tauri's Windows main-thread command dispatcher carries only a pointer.
+    Box::pin(stage_signed_update_inner(app, state, plan_id)).await
+}
+
+async fn stage_signed_update_inner(
+    app: AppHandle,
+    state: State<'_, SecureUpdaterState>,
+    plan_id: String,
+) -> Result<StagedUpdateReceipt, CommandError> {
     let _operation = state
         .operation
         .try_lock()
@@ -323,7 +333,7 @@ pub(crate) async fn stage_signed_update(
         .app_data_dir()
         .map_err(|_| update_stage_failed())?
         .join(UPDATE_DIRECTORY);
-    let staged_path = stage_verified_artifact(&plan, &staging_root).await?;
+    let staged_path = Box::pin(stage_verified_artifact(&plan, &staging_root)).await?;
 
     // Do not expose the local path to the WebView. Keeping a non-executable
     // package also prevents this verification boundary from becoming an

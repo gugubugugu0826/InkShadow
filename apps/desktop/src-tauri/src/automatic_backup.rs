@@ -202,6 +202,23 @@ pub(crate) async fn native_automatic_backup_create_verified(
     lease_token: String,
     request: AutomaticBackupFileRequest,
 ) -> Result<AutomaticBackupCreationOutcome, CommandError> {
+    // Keep the command future small. Tauri constructs it on the Windows main
+    // thread, whose stack is much smaller than this backup state machine.
+    Box::pin(native_automatic_backup_create_verified_inner(
+        app,
+        root_id,
+        lease_token,
+        request,
+    ))
+    .await
+}
+
+async fn native_automatic_backup_create_verified_inner(
+    app: AppHandle,
+    root_id: String,
+    lease_token: String,
+    request: AutomaticBackupFileRequest,
+) -> Result<AutomaticBackupCreationOutcome, CommandError> {
     let root = resolve_checked_root(&app, &root_id)?;
     require_lease(&root, &lease_token, unix_time_millis()?)?;
     validate_file_request(&root, &request)?;
@@ -214,7 +231,7 @@ pub(crate) async fn native_automatic_backup_create_verified(
     let source = config_directory.join(DATABASE_FILE_NAME);
     match tokio::time::timeout(
         BACKUP_OPERATION_TIMEOUT,
-        create_verified_backup(&source, &root, &request),
+        Box::pin(create_verified_backup(&source, &root, &request)),
     )
     .await
     {
@@ -227,6 +244,22 @@ pub(crate) async fn native_automatic_backup_create_verified(
 
 #[tauri::command]
 pub(crate) async fn native_automatic_backup_inspect_file(
+    app: AppHandle,
+    root_id: String,
+    lease_token: String,
+    request: AutomaticBackupFileRequest,
+) -> Result<AutomaticBackupFileInspection, CommandError> {
+    // Inspection shares the same large file-verification future as creation.
+    Box::pin(native_automatic_backup_inspect_file_inner(
+        app,
+        root_id,
+        lease_token,
+        request,
+    ))
+    .await
+}
+
+async fn native_automatic_backup_inspect_file_inner(
     app: AppHandle,
     root_id: String,
     lease_token: String,
@@ -245,9 +278,9 @@ pub(crate) async fn native_automatic_backup_inspect_file(
             .app_config_dir()
             .map_err(|_| file_safety_failed())?
             .join(DATABASE_FILE_NAME);
-        return inspect_recoverable_backup(&source, &root, &request).await;
+        return Box::pin(inspect_recoverable_backup(&source, &root, &request)).await;
     }
-    inspect_backup_file(&root, &request).await
+    Box::pin(inspect_backup_file(&root, &request)).await
 }
 
 #[tauri::command]
@@ -257,10 +290,25 @@ pub(crate) async fn native_automatic_backup_delete_file(
     lease_token: String,
     request: AutomaticBackupFileRequest,
 ) -> Result<&'static str, CommandError> {
+    Box::pin(native_automatic_backup_delete_file_inner(
+        app,
+        root_id,
+        lease_token,
+        request,
+    ))
+    .await
+}
+
+async fn native_automatic_backup_delete_file_inner(
+    app: AppHandle,
+    root_id: String,
+    lease_token: String,
+    request: AutomaticBackupFileRequest,
+) -> Result<&'static str, CommandError> {
     let root = resolve_checked_root(&app, &root_id)?;
     require_lease(&root, &lease_token, unix_time_millis()?)?;
     require_manifest_entry(&root, &request, "succeeded")?;
-    delete_ready_file(&root, &request).await
+    Box::pin(delete_ready_file(&root, &request)).await
 }
 
 fn resolve_checked_root(app: &AppHandle, root_id: &str) -> Result<ManagedRoot, CommandError> {
