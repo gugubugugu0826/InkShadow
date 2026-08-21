@@ -35,6 +35,7 @@ const corruptedBackupPath = path.join(
   `inkshadow-maintenance-corrupted-${process.pid}.db`,
 );
 const historicalV73BackupPath = path.join(tmpdir(), `inkshadow-maintenance-v73-${process.pid}.db`);
+const HISTORICAL_V73_RESTORE_TIMEOUT_MS = 30_000;
 const capabilityProbeInvocationLedgerMigration = readFileSync(
   new URL("../migrations/0071_model_capability_probe_invocation_ledger.sql", import.meta.url),
   "utf8",
@@ -367,7 +368,7 @@ describe("DatabaseMaintenanceService", () => {
     await executor.close();
   });
 
-  fileSqliteIt(
+  it(
     "restores a populated version 73 backup after the capability ledger migration",
     async () => {
       const historical = new NodeSqliteExecutor(inkShadowMigrationV73, historicalV73BackupPath);
@@ -456,6 +457,7 @@ describe("DatabaseMaintenanceService", () => {
       ]);
       await current.close();
     },
+    HISTORICAL_V73_RESTORE_TIMEOUT_MS,
   );
 
   fileSqliteIt("restores a historical story-state receipt after its chapter advances", async () => {
