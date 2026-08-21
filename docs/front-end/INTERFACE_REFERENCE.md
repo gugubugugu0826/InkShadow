@@ -26,8 +26,8 @@ Provider/network/key/vector calls 均为 0。
 
 `v0.2.6` 修复工作树另行加入 Data `0071` / Tauri `74`、有界 SQLite 执行队列、WebView 重载
 恢复、自动备份清单第 2 版、开书三槽独立结算，以及固定能力验证的原生发送回执和普通调用账本。
-这些改动尚未完成最终全量、真实 Windows Tauri、真实模型对账或发布，不属于上面的 v0.2.5
-冻结通过数字。完整边界见
+当前修复源码提交 `722e67e` 的隔离 Windows Tauri 程序已完成 D1–D5 聚焦复测；包含本报告的
+干净候选提交仍待创建，其全量验证、真实外部模型、打包和发布仍待运行，不属于上面的 v0.2.5 冻结通过数字。完整边界见
 [`../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)。
 
 ## 1. 接口总览
@@ -522,6 +522,11 @@ Settings 两个固定文本 probe 均披露当前 destination、retry0、cost un
 写入发送回执。能力证据只能绑定同一目录项、状态匹配的终态记录；发送后中断归为“结果待核对”，
 启动恢复不自动再次发送。普通调用账本显示模型服务、精确模型、状态、Token、费用或未知和 0 次
 自动重试，不显示 API Key、完整地址或作品数据。
+
+隔离 Windows Tauri 的回环路径实测：取消确认产生 0 次发送和 0 条调用记录；确认后恰好发送 1 次，
+生成 1 条成功的“能力验证”调用记录并绑定 1 份能力证据，输入/输出词元为 7/1、费用未知。
+另一次模型目录读取是普通查询，不属于生成调用。真实外部模型没有可用隔离凭据，调用、词元和费用均为 0，
+状态为“外部条件阻塞”。
 
 供应商预设与能力资料会变化，Registry 应按官方接口/地域说明更新，而不是把某个模型写成永久
 最佳： [OpenAI models](https://platform.openai.com/docs/api-reference/models/object)、
@@ -1418,9 +1423,27 @@ Tauri capability 位于 `apps/desktop/src-tauri/capabilities/default.json`：
 核验中、未开始、成功、失败和结果待核对；旧清单的模糊“创建中”在重启后保守归为结果待核对。
 `native_automatic_backup_create_verified` 用独立 SQLite 连接完成 `VACUUM INTO`、完整性/外键/结构/
 大小/摘要核验和无覆盖安装，不等待编辑器共享执行器。浏览器不能用下载文件或内存对象冒充该能力。
+原生文件检查回执使用前端端口约定的驼峰字段：`exists`、`fileName`、`absolutePath`、
+`canonicalAbsolutePath`、`byteLength`、`sha256` 和 `integrityVerified`。`backupId` 属于请求与清单，
+不属于该检查回执。禁止把 Rust 默认蛇形字段直接交给前端；字段缺失会使已完成备份被保守归类为
+“结果待核对”。
 启动检查会复验第 2 版清单的“成功”文件和由第 1 版“就绪”转入的旧成功项。文件缺失、
 字节数或 SHA-256 不符、文件检查异常时，页面改显示“结果待核对”，最近成功时段回退到较旧的
 已核验健康备份；对应时段不会被盲目重发。
+
+`722e67e` 隔离程序首启先把清单推进到修订 4、状态“成功”，生成 3,608,576 字节空作品库备份；
+文件与清单 SHA-256 均为 `7112e8aaee5c555e4af899cb369a8bafd3f7f6417b04067ecc3797cf6e40d227`，
+独立恢复后 172 张可恢复表逐表一致。随后通过正式界面接受 1 份就绪 AI 建议草稿，源库包含
+4 个作品、6 章、7 个不可变版本、1 份 AI 建议草稿、1 个后台任务、4 条模型调用记录、
+2 个开书旅程和 9 轮问答，本用例模型调用增量为 0；今日清单修订 5 成功生成 3,653,632 字节文件，
+SHA-256 为 `c98594980d258d0d11469a2d102f2f42575d073d854d3209719ee5aa02b96f04`。
+
+首次比较因设置页在备份后初始化 1 行可重建 `story_memory_policies` 而按合同失败；冻结备份时点
+源库后复跑，全新恢复目录的 172 张表逐表差异 0，源/恢复完整性正常、外键违规均为 0，上述八类
+作者数据非空且一致。失败证据和最终合同分别为
+`.tmp/v026-tauri-regression/evidence/backup-restores/d4-nonempty-due-restore/verification.json` 与
+`.tmp/v026-tauri-regression/evidence/backup-comparisons/d4-nonempty-final-contract.json`。两份昨日健康文件
+均保留。权限拒绝、磁盘写入失败、目标竞争和写入中强制结束仍只有自动化证据。
 
 接口总数中的 8 个自动备份 command 为：`native_automatic_backup_inspect_root`、
 `native_automatic_backup_acquire_lease`、`native_automatic_backup_release_lease`、
