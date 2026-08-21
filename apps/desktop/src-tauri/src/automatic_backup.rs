@@ -94,7 +94,7 @@ pub(crate) struct AutomaticBackupFileRequest {
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase", untagged)]
+#[serde(rename_all_fields = "camelCase", untagged)]
 pub(crate) enum AutomaticBackupFileInspection {
     Missing {
         exists: bool,
@@ -1454,6 +1454,39 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn file_inspection_json_uses_the_exact_frontend_keys() {
+        let missing =
+            serde_json::to_value(AutomaticBackupFileInspection::Missing { exists: false })
+                .expect("serialize missing inspection");
+        assert_eq!(missing, serde_json::json!({ "exists": false }));
+
+        let present = serde_json::to_value(AutomaticBackupFileInspection::Present {
+            exists: true,
+            file_name: "inkshadow-auto-v1-example.sqlite3".to_owned(),
+            absolute_path: "C:/InkShadow/automatic-backups/v1/inkshadow-auto-v1-example.sqlite3"
+                .to_owned(),
+            canonical_absolute_path:
+                "C:/InkShadow/automatic-backups/v1/inkshadow-auto-v1-example.sqlite3".to_owned(),
+            byte_length: 3_608_576,
+            sha256: "a".repeat(64),
+            integrity_verified: true,
+        })
+        .expect("serialize present inspection");
+        assert_eq!(
+            present,
+            serde_json::json!({
+                "exists": true,
+                "fileName": "inkshadow-auto-v1-example.sqlite3",
+                "absolutePath": "C:/InkShadow/automatic-backups/v1/inkshadow-auto-v1-example.sqlite3",
+                "canonicalAbsolutePath": "C:/InkShadow/automatic-backups/v1/inkshadow-auto-v1-example.sqlite3",
+                "byteLength": 3_608_576,
+                "sha256": "a".repeat(64),
+                "integrityVerified": true
+            })
+        );
     }
 
     #[test]
