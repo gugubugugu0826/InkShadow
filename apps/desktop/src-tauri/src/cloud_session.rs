@@ -3285,7 +3285,7 @@ fn device_identity_mismatch() -> CommandError {
 
 #[cfg(test)]
 mod tests {
-    use hpke::{Kem as _, Serializable};
+    use hpke::Serializable;
     use rand::{rngs::StdRng, SeedableRng};
     use serde_json::{json, Value};
 
