@@ -371,7 +371,9 @@ describe("DatabaseMaintenanceService", () => {
   it(
     "restores a populated version 73 backup after the capability ledger migration",
     async () => {
-      const historical = new NodeSqliteExecutor(inkShadowMigrationV73, historicalV73BackupPath);
+      // Materialize one real legacy file after migration instead of forcing every
+      // historical DDL statement through Windows temporary storage.
+      const historical = new NodeSqliteExecutor(inkShadowMigrationV73);
       await insertHistoricalV73CapabilityRestoreScenario(historical);
       await expect(
         historical.select<{ readonly name: string }>(
@@ -380,6 +382,7 @@ describe("DatabaseMaintenanceService", () => {
            WHERE name = 'model_invocation_id'`,
         ),
       ).resolves.toEqual([]);
+      await historical.execute("VACUUM INTO ?", [historicalV73BackupPath]);
       await historical.close();
 
       const current = new RestoreFailureCapturingExecutor(inkShadowMigration);
