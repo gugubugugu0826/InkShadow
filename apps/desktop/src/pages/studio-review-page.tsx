@@ -498,7 +498,7 @@ export function StudioReviewPage({
     return (
       <ReviewState
         title="没有审阅权限"
-        description={failure?.message ?? "当前成员或项目分配未授权。"}
+        description="当前成员角色或项目分配不允许读取团队审阅。"
         code={failure?.code}
       />
     );
@@ -537,7 +537,7 @@ export function StudioReviewPage({
     return (
       <ReviewState
         title="团队审阅暂不可用"
-        description={failure?.message ?? "发生未预期错误。"}
+        description={failure?.message ?? "团队审阅操作未完成，请稍后重试。"}
         code={failure?.code}
         action={{ label: "重试", onClick: () => void load() }}
       />
@@ -548,7 +548,7 @@ export function StudioReviewPage({
     <div className="desktop-page studio-review-page">
       <header className="page-heading">
         <div>
-          <p className="page-heading__eyebrow">Studio · 端到端加密协作</p>
+          <p className="page-heading__eyebrow">团队空间 · 端到端加密协作</p>
           <h1>团队审阅</h1>
           <p>批注、建议与审阅说明只在当前设备解密；接受建议始终创建作者侧本地版本。</p>
         </div>
@@ -1092,7 +1092,7 @@ function normalizeFailure(error: unknown): PageFailure {
     error instanceof StudioReviewCryptoError ||
     error instanceof StudioReviewServiceError
   ) {
-    return { code: error.code, message: error.message };
+    return { code: error.code, message: studioReviewFailureMessage(error.code) };
   }
   if (
     typeof error === "object" &&
@@ -1100,15 +1100,33 @@ function normalizeFailure(error: unknown): PageFailure {
     "code" in error &&
     typeof error.code === "string"
   ) {
-    return {
-      code: error.code,
-      message:
-        "message" in error && typeof error.message === "string"
-          ? error.message
-          : "团队审阅操作未完成。",
-    };
+    return { code: error.code, message: studioReviewFailureMessage(error.code) };
   }
   return { code: "REVIEW_UNEXPECTED_ERROR", message: "团队审阅操作未完成。" };
+}
+
+function studioReviewFailureMessage(code: string): string {
+  switch (code) {
+    case "REVIEW_OFFLINE":
+    case "CLOUD_NETWORK_UNAVAILABLE":
+      return "当前无法连接团队审阅服务；本地正文和版本不受影响。";
+    case "REVIEW_PERMISSION_DENIED":
+    case "ACCESS_FORBIDDEN":
+      return "当前成员角色或项目分配不允许执行这项团队审阅操作。";
+    case "REVIEW_KEY_MISSING":
+    case "REVIEW_CRYPTO_KEY_INVALID":
+      return "当前设备缺少可核对的项目密钥，系统没有跳过加密验证。";
+    case "REVIEW_CIPHERTEXT_CORRUPT":
+    case "REVIEW_CIPHERTEXT_HASH_MISMATCH":
+    case "REVIEW_PAYLOAD_INVALID":
+    case "REVIEW_CRYPTO_SCOPE_INVALID":
+      return "审阅记录没有通过完整性核对，系统已停止读取该内容。";
+    case "REVIEW_REVISION_CONFLICT":
+    case "REVISION_CONFLICT":
+      return "远端审阅已发生变化，请重新加载后再操作。";
+    default:
+      return "团队审阅操作未完成。请手动重试；系统不会自动重复提交。";
+  }
 }
 
 function reviewStateLabel(state: DecryptedStudioReview["review"]["state"]): string {

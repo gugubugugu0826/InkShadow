@@ -30,6 +30,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import type { CloudAiUsageRuntimePort } from "../infrastructure/cloud-ai-usage-service";
 import { CloudSessionCoordinatorError } from "../infrastructure/cloud-session-coordinator";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
 type PageState =
@@ -138,7 +139,7 @@ export function StudioUsagePage() {
         <PageIntro teamId={teamId} projectId={projectId} />
         <EmptyState
           kind="feature_limited"
-          title="AI 用量云服务未配置"
+          title="智能创作用量云服务未配置"
           description="当前运行环境没有原生云会话与真实用量接口。预算操作保持关闭；本地正文、草稿与离线编辑不受影响。"
         />
       </div>
@@ -179,7 +180,7 @@ export function StudioUsagePage() {
           "团队并发上限",
         ),
       });
-      setNotice("团队 AI 预算已更新。");
+      setNotice("团队智能创作预算已更新。");
       await load(service);
     } catch (error: unknown) {
       setOperationError(toVisibleError(error));
@@ -208,7 +209,7 @@ export function StudioUsagePage() {
             ? null
             : requirePositiveInteger(projectDraft.maximumConcurrentRuns, "项目并发上限"),
       });
-      setNotice("项目 AI 预算覆盖已更新。");
+      setNotice("项目智能创作预算覆盖已更新。");
       await load(service);
     } catch (error: unknown) {
       setOperationError(toVisibleError(error));
@@ -240,7 +241,7 @@ export function StudioUsagePage() {
       )}
 
       {state.status === "loading" && (
-        <PageStateBoundary state="loading" loadingLabel="正在读取 AI 预算与用量">
+        <PageStateBoundary state="loading" loadingLabel="正在读取智能创作预算与用量">
           <span />
         </PageStateBoundary>
       )}
@@ -253,7 +254,7 @@ export function StudioUsagePage() {
       )}
       {state.status === "error" && (
         <ErrorState
-          title="无法读取 AI 用量"
+          title="无法读取智能创作用量"
           description={state.error.description}
           errorCode={state.error.code}
           {...(state.error.requestId === undefined ? {} : { requestId: state.error.requestId })}
@@ -324,10 +325,10 @@ function PageIntro({
   return (
     <header className="studio-usage-page__intro">
       <div>
-        <p className="studio-usage-page__eyebrow">Studio Cloud · InkShadow 内部额度账本</p>
-        <h1>AI 额度、并发与用量</h1>
+        <p className="studio-usage-page__eyebrow">工作室云端 · 墨影内部额度账本</p>
+        <h1>智能创作额度、并发与用量</h1>
         <p>
-          这是 InkShadow 内部的 token
+          这是墨影内部的内容额度
           与价格元数据额度账本，数值来自受控执行回执或客户端上报；服务端不接收正文、提示词、项目密钥或密文。
         </p>
         <p>实际收费以模型供应商账单为准；当前版本尚未实现供应商侧权威账单对账。</p>
@@ -344,7 +345,7 @@ function PageIntro({
 function UsageOverview({ summary }: { readonly summary: CloudAiUsageSummaryResponse }) {
   const concurrencyReached = summary.concurrencyHardCapReached;
   return (
-    <section className="studio-usage-page__overview" aria-label="AI 用量概览">
+    <section className="studio-usage-page__overview" aria-label="智能创作用量概览">
       <UsageCard title="团队月度用量" bucket={summary.team} currency={summary.currency} />
       <UsageCard title="项目月度用量" bucket={summary.project} currency={summary.currency} />
       <Card>
@@ -510,7 +511,7 @@ function TeamBudgetForm(props: {
               />
             )}
           </FormField>
-          <FormField label="每百万输入 token 价格" required>
+          <FormField label="每百万输入内容额度价格" required>
             {(field) => (
               <Input
                 {...field}
@@ -521,7 +522,7 @@ function TeamBudgetForm(props: {
               />
             )}
           </FormField>
-          <FormField label="每百万输出 token 价格" required>
+          <FormField label="每百万输出内容额度价格" required>
             {(field) => (
               <Input
                 {...field}
@@ -602,8 +603,7 @@ function BudgetAccessNotice({ scope }: { readonly scope: "团队" | "项目" }) 
       <CardHeader>
         <CardTitle>{scope}预算为只读</CardTitle>
         <CardDescription>
-          当前服务端角色可以查看此范围的用量，但没有修改预算的
-          capability。页面不会提供无效的保存按钮。
+          当前服务端角色可以查看此范围的用量，但没有修改预算的权限。页面不会提供无效的保存按钮。
         </CardDescription>
       </CardHeader>
     </Card>
@@ -627,14 +627,14 @@ function UsageEvents({
         {events.length === 0 ? (
           <EmptyState title="还没有用量事件" description="首次预约后会在此显示元数据账本。" />
         ) : (
-          <Table scrollLabel="AI 用量账本">
+          <Table scrollLabel="智能创作用量账本">
             <TableHeader>
               <TableRow>
                 <TableHead>时间</TableHead>
                 <TableHead>事件</TableHead>
                 <TableHead>模型</TableHead>
                 <TableHead>用途</TableHead>
-                <TableHead>输入 / 输出</TableHead>
+                <TableHead>输入 / 输出内容额度</TableHead>
                 <TableHead>金额</TableHead>
                 <TableHead>价格版本</TableHead>
               </TableRow>
@@ -801,7 +801,7 @@ function eventTypeLabel(type: CloudAiUsageEvent["eventType"]): string {
 }
 
 function purposeLabel(purpose: CloudAiUsageEvent["purpose"]): string {
-  return purpose === "read_only_review" ? "只读 AI 评审" : "正文生成";
+  return purpose === "read_only_review" ? "只读智能评审" : "正文生成";
 }
 
 function isForbidden(error: unknown): boolean {
@@ -814,22 +814,23 @@ function isForbidden(error: unknown): boolean {
 }
 
 function toVisibleError(error: unknown): VisibleError {
+  const description = projectOrdinaryUiError(error).description;
   if (error instanceof CloudClientError) {
     return {
       code: error.code,
-      description: error.message,
+      description,
       ...(error.requestId === null ? {} : { requestId: error.requestId }),
     };
   }
   if (error instanceof CloudSessionCoordinatorError) {
-    return { code: error.sourceCode, description: error.message };
+    return { code: error.sourceCode, description };
   }
   if (error instanceof Error) {
-    return { code: "AI_USAGE_UI_ERROR", description: error.message };
+    return { code: "AI_USAGE_UI_ERROR", description };
   }
   return {
     code: "AI_USAGE_UI_ERROR",
-    description: "AI 用量请求未完成；未知错误详情不会直接显示。",
+    description,
   };
 }
 

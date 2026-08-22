@@ -188,10 +188,12 @@ export const chapterVersions = sqliteTable(
       enum: ["created", "autosave", "manual", "candidate_accept", "recovery", "import"],
     }).notNull(),
     sourceCandidateId: text("source_candidate_id"),
+    organizeLocalStoryFacts: integer("organize_local_story_facts").notNull().default(0),
     createdAt: text("created_at").notNull(),
   },
   (table) => [
     check("chapter_versions_sequence", sql`${table.sequence} >= 1`),
+    check("chapter_versions_local_story_facts", sql`${table.organizeLocalStoryFacts} IN (0, 1)`),
     check("chapter_versions_checksum", sql`length(${table.contentChecksum}) = 64`),
     uniqueIndex("chapter_versions_chapter_sequence_unique").on(table.chapterId, table.sequence),
     index("chapter_versions_chapter_idx").on(table.chapterId, table.sequence),
@@ -289,6 +291,9 @@ export const aiCandidates = sqliteTable(
     source: text("source", {
       enum: ["generate", "polish", "extract", "whatif", "agent"],
     }).notNull(),
+    purpose: text("purpose", { enum: ["prose", "continuation_directions"] })
+      .notNull()
+      .default("prose"),
     content: text("content").notNull(),
     contentChecksum: text("content_checksum"),
     status: text("status", {
@@ -583,6 +588,14 @@ export const aiGenerationAttemptUsage = sqliteTable(
     pricingVersion: text("pricing_version").notNull(),
     priceUpdatedAt: text("price_updated_at").notNull(),
     reportedAt: text("reported_at").notNull(),
+    privacySnapshotVersion: integer("privacy_snapshot_version"),
+    privacyPolicy: text("privacy_policy", {
+      enum: ["local_only", "local_preferred", "cloud_allowed"],
+    }),
+    dataDestination: text("data_destination", {
+      enum: ["local", "remote"],
+    }),
+    modelInvocationId: text("model_invocation_id"),
   },
   (table) => [
     primaryKey({ columns: [table.runId, table.attempt] }),

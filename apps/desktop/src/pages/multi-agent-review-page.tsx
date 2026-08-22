@@ -367,7 +367,7 @@ export function MultiAgentReviewPage({
       {featureEnabled && (
         <InlineAlert
           title="本地能力，不使用团队云额度"
-          description="本页只调用本机已配置的模型路由。实际 token 与费用必须由提供方回报；缺失用量时会失败关闭。"
+          description="本页只使用本机已配置的模型线路。实际内容额度与费用必须由模型服务回报；缺失用量时会失败关闭。"
         />
       )}
       {failure !== null && (
@@ -453,11 +453,11 @@ export function MultiAgentReviewPage({
                       )}`}
                     />
                     <Metric
-                      label="输入 token"
+                      label="输入内容额度"
                       value={usage.unknown ? "部分未知" : formatNumber(usage.inputTokens)}
                     />
                     <Metric
-                      label="输出 token"
+                      label="输出内容额度"
                       value={usage.unknown ? "部分未知" : formatNumber(usage.outputTokens)}
                     />
                     <Metric

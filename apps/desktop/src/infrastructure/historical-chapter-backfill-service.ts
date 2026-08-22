@@ -137,6 +137,7 @@ interface StableChapterCandidate {
   readonly privacyRevision: number;
   readonly characterCount: number;
   readonly contentChecksum: string;
+  readonly organizeLocalStoryFacts: boolean;
   readonly localOnly: boolean;
   readonly taskAuthority: readonly TaskAuthorityFingerprint[];
   readonly missingStages: readonly AcceptedChapterPipelineStage[];
@@ -154,6 +155,7 @@ interface TaskAuthorityFingerprint {
   readonly failureCode: string | null;
   readonly failureCauseCode: string | null;
   readonly progressStep: string | null;
+  readonly organizeLocalStoryFacts: unknown;
   readonly runSearch: unknown;
   readonly runChapterSummary: unknown;
   readonly runStoryState: unknown;
@@ -182,6 +184,7 @@ interface StableRegistrationChapter {
   readonly chapterRevision: number;
   readonly privacyRevision: number;
   readonly contentChecksum: string;
+  readonly organizeLocalStoryFacts: boolean;
 }
 
 interface InternalPlan {
@@ -348,7 +351,8 @@ export class HistoricalChapterBackfillService {
       version?.projectId !== item.input.projectId ||
       version.chapterId !== item.chapterId ||
       version.content !== chapter.content ||
-      version.contentChecksum !== item.contentChecksum
+      version.contentChecksum !== item.contentChecksum ||
+      version.organizeLocalStoryFacts !== (item.input.organizeLocalStoryFacts === true)
     ) {
       staleRegistrationPlan("不可变章节版本在登记期间无法继续核验，请刷新只读计划。");
     }
@@ -372,6 +376,7 @@ export class HistoricalChapterBackfillService {
       chapterRevision: chapter.revision,
       privacyRevision: chapter.privacyRevision,
       contentChecksum: hashed.value,
+      organizeLocalStoryFacts: version.organizeLocalStoryFacts,
     };
     const replanned = await this.planChapterTasks(
       authority,
@@ -485,6 +490,7 @@ export class HistoricalChapterBackfillService {
           chapterRevision: chapter.revision,
           privacyRevision: chapter.privacyRevision,
           contentChecksum: contentHash.value,
+          organizeLocalStoryFacts: versionSnapshot.organizeLocalStoryFacts,
         },
         requestedStages,
         chapterSummaryEnabled,
@@ -499,6 +505,7 @@ export class HistoricalChapterBackfillService {
           privacyRevision: chapter.privacyRevision,
           characterCount: chapter.content.length,
           contentChecksum: contentHash.value,
+          organizeLocalStoryFacts: versionSnapshot.organizeLocalStoryFacts,
           localOnly: chapter.privacyMode === "local_only",
           taskAuthority: taskPlan.taskAuthority,
           missingStages: taskPlan.missingStages,
@@ -652,6 +659,7 @@ export class HistoricalChapterBackfillService {
         privacyRevision: chapter.privacyRevision,
         characterCount: chapter.characterCount,
         contentChecksum: chapter.contentChecksum,
+        organizeLocalStoryFacts: chapter.organizeLocalStoryFacts,
         localOnly: chapter.localOnly,
         missingStages: chapter.missingStages,
         pending: chapter.pending.map((item) => ({
@@ -695,6 +703,7 @@ function baseRegistrationItem(
     versionId: chapter.versionId,
     source: "historical_backfill",
     acceptedCharacterCount: chapter.characterCount,
+    organizeLocalStoryFacts: chapter.organizeLocalStoryFacts,
     runSearch: true,
     runChapterSummary: chapterSummaryEnabled,
     runStoryState: storyStateEnabled,
@@ -728,6 +737,7 @@ function stageRegistrationItem(
     versionId: chapter.versionId,
     source: "historical_backfill",
     acceptedCharacterCount: chapter.characterCount,
+    organizeLocalStoryFacts: chapter.organizeLocalStoryFacts,
     runSearch: stage === "search",
     runChapterSummary: stage === "chapter_summary",
     runStoryState: stage === "story_state",
@@ -812,6 +822,7 @@ function taskAuthorityFingerprint(task: TaskSnapshot): TaskAuthorityFingerprint 
     failureCode: task.failure?.code ?? null,
     failureCauseCode: task.failure?.causeCode ?? null,
     progressStep: task.progress?.step ?? null,
+    organizeLocalStoryFacts: task.metadata.organizeLocalStoryFacts ?? null,
     runSearch: task.metadata.runSearch ?? null,
     runChapterSummary: task.metadata.runChapterSummary ?? null,
     runStoryState: task.metadata.runStoryState ?? null,
@@ -824,7 +835,12 @@ function taskAuthorityFingerprint(task: TaskSnapshot): TaskAuthorityFingerprint 
 
 function assertTaskChapterAuthority(
   task: TaskSnapshot,
-  chapter: Readonly<{ projectId: UuidV7; chapterId: UuidV7; versionId: UuidV7 }>,
+  chapter: Readonly<{
+    projectId: UuidV7;
+    chapterId: UuidV7;
+    versionId: UuidV7;
+    organizeLocalStoryFacts: boolean;
+  }>,
   idempotencyKey: string,
 ): void {
   if (
@@ -837,7 +853,10 @@ function assertTaskChapterAuthority(
     !isAcceptedPipelineSource(task.metadata.source) ||
     typeof task.metadata.acceptedCharacterCount !== "number" ||
     !Number.isSafeInteger(task.metadata.acceptedCharacterCount) ||
-    task.metadata.acceptedCharacterCount < 0
+    task.metadata.acceptedCharacterCount < 0 ||
+    (task.metadata.organizeLocalStoryFacts !== undefined &&
+      typeof task.metadata.organizeLocalStoryFacts !== "boolean") ||
+    (task.metadata.organizeLocalStoryFacts === true) !== chapter.organizeLocalStoryFacts
   ) {
     throw new HistoricalChapterBackfillError(
       "HISTORICAL_BACKFILL_STORAGE_UNAVAILABLE",
@@ -873,7 +892,12 @@ function assertBaseTaskAuthority(task: TaskSnapshot, versionId: string): void {
 
 function assertSupplementAuthority(
   task: TaskSnapshot,
-  chapter: Readonly<{ projectId: UuidV7; chapterId: UuidV7; versionId: UuidV7 }>,
+  chapter: Readonly<{
+    projectId: UuidV7;
+    chapterId: UuidV7;
+    versionId: UuidV7;
+    organizeLocalStoryFacts: boolean;
+  }>,
   stage: AcceptedChapterPipelineStage,
   generation: number,
   idempotencyKey: string,
@@ -940,7 +964,9 @@ function isAcceptedPipelineSource(value: unknown): boolean {
   return (
     value === "candidate_accept" ||
     value === "chapter_import" ||
+    value === "autosave" ||
     value === "manual_save" ||
+    value === "recovery_save" ||
     value === "version_restore" ||
     value === "historical_backfill"
   );
@@ -948,6 +974,12 @@ function isAcceptedPipelineSource(value: unknown): boolean {
 
 function invalidTaskAuthority(message: string): never {
   throw new HistoricalChapterBackfillError("HISTORICAL_BACKFILL_STORAGE_UNAVAILABLE", message);
+}
+
+function matchesPersistedStoryFactResponsibility(value: unknown, expected: unknown): boolean {
+  return (
+    (value === undefined || typeof value === "boolean") && (value === true) === (expected === true)
+  );
 }
 
 function taskMatchesPlannedItem(task: TaskSnapshot, item: BackfillRegistrationItem): boolean {
@@ -959,7 +991,11 @@ function taskMatchesPlannedItem(task: TaskSnapshot, item: BackfillRegistrationIt
     task.metadata.chapterId !== item.input.chapterId ||
     task.metadata.versionId !== item.input.versionId ||
     task.metadata.source !== item.input.source ||
-    task.metadata.acceptedCharacterCount !== item.input.acceptedCharacterCount
+    task.metadata.acceptedCharacterCount !== item.input.acceptedCharacterCount ||
+    !matchesPersistedStoryFactResponsibility(
+      task.metadata.organizeLocalStoryFacts,
+      item.input.organizeLocalStoryFacts,
+    )
   ) {
     return false;
   }
@@ -989,6 +1025,8 @@ function plannedItemsEqual(
     left.contentChecksum === right.contentChecksum &&
     left.input.projectId === right.input.projectId &&
     left.input.acceptedCharacterCount === right.input.acceptedCharacterCount &&
+    (left.input.organizeLocalStoryFacts === true) ===
+      (right.input.organizeLocalStoryFacts === true) &&
     left.input.runSearch === right.input.runSearch &&
     left.input.runChapterSummary === right.input.runChapterSummary &&
     left.input.runStoryState === right.input.runStoryState &&

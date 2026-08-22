@@ -7,6 +7,7 @@ import type {
   ConsistencyInvestigationDisclosure,
   ConsistencyInvestigationSnapshot,
 } from "../infrastructure/consistency-investigation-service";
+import { ConsistencyInvestigationError } from "../infrastructure/consistency-investigation-service";
 import type { ConsistencyRepairCandidateDisclosure } from "../infrastructure/consistency-repair-candidate-service";
 import { ConsistencyInvestigationPanel } from "./consistency-investigation-panel";
 
@@ -109,6 +110,9 @@ describe("ConsistencyInvestigationPanel", () => {
     expect(screen.queryByText("internal-connection-id")).not.toBeInTheDocument();
     expect(screen.getByText("发送到所选远程 AI 服务")).toBeInTheDocument();
     expect(screen.getByText("最多 1 次；自动重试 0 次")).toBeInTheDocument();
+    expect(screen.getByText("接口密钥或其他凭据")).toBeInTheDocument();
+    expect(screen.getByText("未接受隔离建议")).toBeInTheDocument();
+    expect(screen.queryByText(/API Key|Candidate/u)).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "确认并开始 1 次调查" }));
     await waitFor(() => expect(run).toHaveBeenCalledWith({ runId: RUN_ID, humanConfirmed: true }));
@@ -124,6 +128,9 @@ describe("ConsistencyInvestigationPanel", () => {
     expect(runRepairCandidate).not.toHaveBeenCalled();
     expect(await screen.findByText("精确 1 次；自动重试 0 次")).toBeInTheDocument();
     expect(screen.getByText("我的修复模型 · deepseek-v4-flash")).toBeInTheDocument();
+    expect(screen.getByText("接口密钥、密码或其他凭据")).toBeInTheDocument();
+    expect(screen.getAllByText("未接受隔离建议").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/API Key|Candidate/u)).not.toBeInTheDocument();
     expect(screen.getByText("发送到所选远程 AI 服务")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "确认并生成 1 个隔离修复建议" }));
     await waitFor(() =>
@@ -134,6 +141,39 @@ describe("ConsistencyInvestigationPanel", () => {
     );
     expect(onOpenCandidate).toHaveBeenCalledOnce();
     expect(screen.queryByText("NOT_IMPLEMENTED")).not.toBeInTheDocument();
+  });
+
+  it("shows the exact safe preparation cause instead of misreporting a cloud failure", async () => {
+    const user = userEvent.setup();
+    const prepare = vi.fn(() =>
+      Promise.reject(
+        new ConsistencyInvestigationError(
+          "CONTEXT_TRACE_UNAVAILABLE",
+          "无法确认本次会使用的精确故事资料，因此没有创建服务调用。",
+        ),
+      ),
+    );
+    const notUsed = vi.fn(() => Promise.reject(new Error("not used")));
+    const runtime: ConsistencyInvestigationRuntimePort = {
+      prepare,
+      run: notUsed,
+      cancel: notUsed,
+      get: notUsed,
+      list: vi.fn(() => Promise.resolve([])),
+      decideFinding: notUsed,
+      prepareRepairCandidate: notUsed,
+      runRepairCandidate: notUsed,
+      cancelRepairCandidate: notUsed,
+    };
+
+    render(<ConsistencyInvestigationPanel projectId={PROJECT_ID} runtime={runtime} />);
+    await user.click(screen.getByRole("button", { name: "查看范围与费用" }));
+
+    expect(await screen.findByText("调查准备未完成")).toBeVisible();
+    expect(
+      screen.getByText(/无法确认本次会使用的精确故事资料，因此没有创建服务调用/u),
+    ).toBeVisible();
+    expect(screen.queryByText(/云端操作未完成|登录状态|同步授权/u)).not.toBeInTheDocument();
   });
 
   it("cancels from the disclosure with zero model runs", async () => {

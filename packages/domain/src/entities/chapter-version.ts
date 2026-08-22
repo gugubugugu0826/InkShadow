@@ -24,8 +24,18 @@ export interface ChapterVersionSnapshot {
   readonly contentChecksum: ContentChecksum;
   readonly reason: ChapterVersionReason;
   readonly sourceCandidateId: UuidV7 | null;
+  /**
+   * Immutable responsibility captured when this version was committed.
+   * Historical snapshots that predate the field are normalized to false.
+   */
+  readonly organizeLocalStoryFacts: boolean;
   readonly createdAt: IsoUtcTimestamp;
 }
+
+export type CreateChapterVersionSnapshot = Omit<ChapterVersionSnapshot, "organizeLocalStoryFacts"> &
+  Readonly<{
+    readonly organizeLocalStoryFacts?: boolean;
+  }>;
 
 export class ChapterVersion {
   private constructor(private readonly snapshot: ChapterVersionSnapshot) {
@@ -33,7 +43,7 @@ export class ChapterVersion {
     Object.freeze(this);
   }
 
-  static create(snapshot: ChapterVersionSnapshot): Result<ChapterVersion, AppError> {
+  static create(snapshot: CreateChapterVersionSnapshot): Result<ChapterVersion, AppError> {
     const content = validateChapterContent(snapshot.content);
     if (!content.ok) {
       return content;
@@ -76,7 +86,13 @@ export class ChapterVersion {
       );
     }
 
-    return ok(new ChapterVersion({ ...snapshot, content: content.value }));
+    return ok(
+      new ChapterVersion({
+        ...snapshot,
+        content: content.value,
+        organizeLocalStoryFacts: snapshot.organizeLocalStoryFacts === true,
+      }),
+    );
   }
 
   get id(): UuidV7 {

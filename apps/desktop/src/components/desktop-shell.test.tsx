@@ -11,11 +11,34 @@ import {
 } from "../infrastructure/generation-preflight-diagnostics";
 import { MODEL_HUB_READINESS_REFRESH_INTERVAL_MS } from "../infrastructure/model-hub-readiness";
 import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
+import { DEVELOPMENT_WRITING_EXPERIENCE_KEY } from "../infrastructure/writing-experience-store";
 import { RuntimeProvider } from "../runtime-context";
 import { DesktopShell } from "./desktop-shell";
 
 const projectId = "019f9f4a-b3c7-7350-9226-000000000210";
 const chapterId = "019f9f4a-b3c7-7350-9226-000000000211";
+
+type ShellWritingExperience = "direct" | "professional";
+
+function seedShellWritingExperience(mode: ShellWritingExperience): void {
+  const timestamp = "2026-08-22T00:00:00.000Z";
+  window.localStorage.setItem(
+    DEVELOPMENT_WRITING_EXPERIENCE_KEY,
+    JSON.stringify({
+      schemaVersion: 1,
+      preference: {
+        mode,
+        initializationSource: "user",
+        directLocalOrganizationAuthorizedAt: mode === "direct" ? timestamp : null,
+        revision: 1,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      grants: {},
+      grantAudit: [],
+    }),
+  );
+}
 
 function RouteHeading() {
   const location = useLocation();
@@ -32,7 +55,9 @@ function RouteHeading() {
 function renderShell(
   route: string,
   runtime: DesktopRuntime = createDevelopmentRuntime(window.localStorage),
+  writingExperience: ShellWritingExperience = "professional",
 ) {
+  seedShellWritingExperience(writingExperience);
   return render(
     <MemoryRouter initialEntries={[route]}>
       <RuntimeProvider runtime={runtime}>
@@ -45,6 +70,19 @@ function renderShell(
 }
 
 describe("DesktopShell", () => {
+  it("keeps professional controls hidden until the saved mode has loaded", async () => {
+    renderShell("/start");
+
+    expect(screen.getByRole("link", { name: "墨影开始创作" })).toHaveTextContent(/^墨影$/u);
+    expect(document.title).toBe("创作首页 · 墨影");
+    expect(screen.queryByRole("button", { name: "搜索页面与命令" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("工具导航")).not.toBeInTheDocument();
+
+    expect(await screen.findByRole("button", { name: "搜索页面与命令" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "墨影开始创作" })).toHaveTextContent("墨影");
+    expect(document.title).toBe("创作首页 · 墨影");
+  });
+
   it("shows the browser-development notice only outside the packaged desktop runtime", () => {
     const development = createDevelopmentRuntime(window.localStorage);
     const rendered = renderShell("/start", development);
@@ -58,7 +96,7 @@ describe("DesktopShell", () => {
     expect(screen.queryByText(/仅开发环境/u)).not.toBeInTheDocument();
   });
 
-  it("shows only the four plain-language project areas on project subpages", () => {
+  it("shows only the four plain-language project areas on project subpages", async () => {
     renderShell(`/projects/${projectId}/chapters/chapter-id`);
 
     const projectNavigation = screen.getByRole("group", { name: "当前项目" });
@@ -93,7 +131,7 @@ describe("DesktopShell", () => {
       "href",
       "/projects",
     );
-    const toolNavigation = screen.getByLabelText("工具导航");
+    const toolNavigation = await screen.findByLabelText("工具导航");
     expect(within(toolNavigation).getAllByRole("link")).toHaveLength(4);
     expect(within(toolNavigation).getByRole("link", { name: "任务与通知" })).toHaveAttribute(
       "href",
@@ -119,23 +157,71 @@ describe("DesktopShell", () => {
     );
   });
 
+  it("keeps direct mode Chinese-only while retaining the four project areas", async () => {
+    const user = userEvent.setup();
+    renderShell(
+      `/projects/${projectId}/chapters/${chapterId}`,
+      createDevelopmentRuntime(window.localStorage),
+      "direct",
+    );
+
+    await waitFor(() => {
+      expect(document.title).toBe("正文 · 墨影");
+    });
+    expect(screen.getByRole("link", { name: "墨影开始创作" })).toHaveTextContent(/^墨影$/u);
+    const globalNavigation = screen.getByLabelText("全局导航");
+    expect(within(globalNavigation).getAllByRole("link")).toHaveLength(2);
+    expect(within(globalNavigation).getByRole("link", { name: "创作首页" })).toBeVisible();
+    expect(within(globalNavigation).getByRole("link", { name: "作品库" })).toBeVisible();
+
+    const projectNavigation = screen.getByRole("group", { name: "当前项目" });
+    expect(within(projectNavigation).getAllByRole("link")).toHaveLength(4);
+    for (const label of ["正文", "规划", "设定", "检查"]) {
+      expect(within(projectNavigation).getByRole("link", { name: label })).toBeVisible();
+    }
+
+    expect(screen.queryByLabelText("工具导航")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "搜索页面与命令" })).not.toBeInTheDocument();
+    expect(screen.queryByText("任务与通知")).not.toBeInTheDocument();
+    expect(screen.queryByText("调用与费用")).not.toBeInTheDocument();
+    expect(screen.queryByText("模型中心")).not.toBeInTheDocument();
+    expect(screen.queryByText("网络可用")).not.toBeInTheDocument();
+
+    await user.keyboard("{Control>}k{/Control}");
+    expect(screen.queryByRole("dialog", { name: "快速前往" })).not.toBeInTheDocument();
+
+    const menuTrigger = screen.getByRole("button", { name: "打开更多选项" });
+    await user.click(menuTrigger);
+    expect(screen.getByRole("menu", { name: "更多选项" })).toBeVisible();
+    expect(screen.getByRole("menuitem", { name: "设置" })).toBeVisible();
+    expect(screen.getByRole("menuitem", { name: /外观：切换到/u })).toBeVisible();
+    expect(screen.getByRole("menuitem", { name: "切换专业模式" })).toBeVisible();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu", { name: "更多选项" })).not.toBeInTheDocument();
+    expect(menuTrigger).toHaveFocus();
+  });
+
   it("updates the document title and moves focus to the new route heading", async () => {
     const user = userEvent.setup();
     renderShell(`/projects/${projectId}`);
-    expect(document.title).toBe("正文 · InkShadow 墨影");
+    await waitFor(() => {
+      expect(document.title).toBe("正文 · 墨影");
+    });
 
     await user.click(screen.getByRole("link", { name: "规划" }));
 
     await waitFor(() => {
-      expect(document.title).toBe("规划 · InkShadow 墨影");
+      expect(document.title).toBe("规划 · 墨影");
       expect(screen.getByRole("heading", { name: "规划页面标题" })).toHaveFocus();
     });
   });
 
-  it("distinguishes the model center from general settings when the hash route is active", () => {
+  it("distinguishes the model center from general settings when the hash route is active", async () => {
     renderShell("/settings#model-center");
 
-    expect(document.title).toBe("模型中心 · InkShadow 墨影");
+    await waitFor(() => {
+      expect(document.title).toBe("模型中心 · 墨影");
+    });
     expect(screen.getByRole("link", { name: "模型中心" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "设置" })).not.toHaveAttribute("aria-current");
   });
@@ -184,6 +270,11 @@ describe("DesktopShell", () => {
     }
 
     const rendered = renderShell("/start", runtime);
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".desktop-topbar__ai-status")).toBeInstanceOf(
+        HTMLElement,
+      );
+    });
     const status = rendered.container.querySelector(".desktop-topbar__ai-status");
     if (!(status instanceof HTMLElement)) throw new Error("Expected the AI status link.");
     await waitFor(() => {
@@ -226,6 +317,11 @@ describe("DesktopShell", () => {
     }) as typeof setInterval);
 
     const rendered = renderShell("/start", runtime);
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".desktop-topbar__ai-status")).toBeInstanceOf(
+        HTMLElement,
+      );
+    });
     const status = rendered.container.querySelector(".desktop-topbar__ai-status");
     if (!(status instanceof HTMLElement)) throw new Error("Expected the AI status link.");
     await waitFor(() =>
@@ -266,6 +362,11 @@ describe("DesktopShell", () => {
       },
     };
     const rendered = renderShell(`/projects/${projectId}/chapters/${chapterId}`, runtime);
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".desktop-topbar__ai-status")).toBeInstanceOf(
+        HTMLElement,
+      );
+    });
     const status = rendered.container.querySelector(".desktop-topbar__ai-status");
     if (!(status instanceof HTMLElement)) throw new Error("Expected the AI status link.");
     await waitFor(() => expect(status).toHaveTextContent("AI 基础连接可用"));
@@ -361,11 +462,13 @@ describe("DesktopShell", () => {
     expect(shell).not.toHaveAttribute("data-navigation-collapsed");
   });
 
-  it("maps team review routes and exposes live network status", () => {
+  it("maps team review routes and exposes live network status", async () => {
     renderShell(`/teams/team-id/projects/${projectId}/reviews`);
 
-    expect(document.title).toBe("团队内容审阅 · InkShadow 墨影");
-    const networkStatus = screen.getByText("网络可用");
+    await waitFor(() => {
+      expect(document.title).toBe("团队内容审阅 · 墨影");
+    });
+    const networkStatus = await screen.findByText("网络可用");
     expect(networkStatus).toHaveAttribute("role", "status");
     expect(networkStatus).toHaveAttribute("aria-live", "polite");
     expect(networkStatus).toHaveAttribute("aria-atomic", "true");
@@ -374,7 +477,7 @@ describe("DesktopShell", () => {
   it("opens Ctrl+K, filters commands, navigates and returns focus on Escape", async () => {
     const user = userEvent.setup();
     renderShell(`/projects/${projectId}`);
-    const trigger = screen.getByRole("button", { name: "搜索页面与命令" });
+    const trigger = await screen.findByRole("button", { name: "搜索页面与命令" });
 
     trigger.focus();
     await user.keyboard("{Control>}k{/Control}");
@@ -425,7 +528,7 @@ describe("DesktopShell", () => {
 
     const user = userEvent.setup();
     renderShell(`/projects/${project.id}`, runtime);
-    const trigger = screen.getByRole("button", { name: "搜索页面与命令" });
+    const trigger = await screen.findByRole("button", { name: "搜索页面与命令" });
 
     await user.click(trigger);
     let search = screen.getByRole("searchbox", { name: "搜索命令" });

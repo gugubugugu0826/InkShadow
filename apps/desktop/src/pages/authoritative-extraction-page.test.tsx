@@ -101,6 +101,9 @@ describe("AuthoritativeExtractionPage", () => {
     expect(decisionSurface.querySelector(":scope > .ink-card__footer")).toHaveClass(
       "candidate-decision-actions",
     );
+    await user.click(screen.getByRole("button", { name: "修改后接受" }));
+    expect(screen.getByRole("textbox", { name: "修改后写入的正式结构化数据" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "取消修改" }));
 
     await user.click(screen.getByRole("button", { name: "接受候选" }));
 

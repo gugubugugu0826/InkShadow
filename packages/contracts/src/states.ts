@@ -125,6 +125,10 @@ export const AI_CANDIDATE_SOURCES = ["generate", "polish", "extract", "whatif", 
 
 export type AiCandidateSource = (typeof AI_CANDIDATE_SOURCES)[number];
 
+export const AI_CANDIDATE_PURPOSES = ["prose", "continuation_directions"] as const;
+
+export type AiCandidatePurpose = (typeof AI_CANDIDATE_PURPOSES)[number];
+
 export const NOTIFICATION_TRANSITIONS = {
   created: ["queued"],
   queued: ["visible", "failed_delivery"],

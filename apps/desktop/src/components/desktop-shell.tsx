@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { AppShell, Badge, Button, InkIcon, SaveStatus } from "@inkshadow/ui";
-import { Link, NavLink, useLocation } from "react-router-dom";
+import { AppShell, Badge, Button, DropdownMenu, InkIcon, SaveStatus } from "@inkshadow/ui";
+import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 
 import { useAppearancePreference } from "../appearance-preference";
 import {
@@ -17,6 +17,7 @@ import {
   modelHubReadinessTaskLabel,
   projectModelHubReadiness,
 } from "../infrastructure/model-hub-readiness";
+import { useWritingExperience } from "../hooks/use-writing-experience";
 import { useRuntime } from "../runtime-context";
 import { CommandPalette } from "./command-palette";
 
@@ -146,10 +147,13 @@ export function DesktopShell({ children }: DesktopShellProps) {
   const runtime = useRuntime();
   const { resolvedSurface, setPreference: setAppearance } = useAppearancePreference();
   const location = useLocation();
+  const navigate = useNavigate();
+  const writingExperience = useWritingExperience();
   const [online, setOnline] = useState(navigator.onLine);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [navigationCollapsed, setNavigationCollapsed] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const directMode = writingExperience.preference?.mode !== "professional";
   const [aiReadiness, setAiReadiness] = useState(() =>
     projectModelHubReadiness({
       connections: [],
@@ -274,6 +278,9 @@ export function DesktopShell({ children }: DesktopShellProps) {
   }, [runtime]);
 
   useEffect(() => {
+    if (directMode) {
+      return;
+    }
     const handleCommandShortcut = (event: KeyboardEvent): void => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase("en-US") === "k") {
         event.preventDefault();
@@ -284,11 +291,11 @@ export function DesktopShell({ children }: DesktopShellProps) {
     return () => {
       document.removeEventListener("keydown", handleCommandShortcut);
     };
-  }, []);
+  }, [directMode]);
 
   useEffect(() => {
-    document.title = `${currentPageTitle} · InkShadow 墨影`;
-  }, [currentPageTitle]);
+    document.title = directMode ? `${currentPageTitle} · 墨影` : `${currentPageTitle} · 墨影`;
+  }, [currentPageTitle, directMode]);
 
   useEffect(() => {
     if (previousRouteRef.current === null) {
@@ -392,42 +399,81 @@ export function DesktopShell({ children }: DesktopShellProps) {
           <span className="desktop-brand__mark" aria-hidden="true">
             <InkIcon name="pen" decorative size={18} />
           </span>
-          <span>InkShadow 墨影</span>
+          <span>墨影</span>
         </NavLink>
         <span className="desktop-topbar__context" aria-hidden="true">
           {currentPageTitle}
         </span>
       </div>
-      <button
-        type="button"
-        className="desktop-topbar__command"
-        aria-label="搜索页面与命令"
-        aria-haspopup="dialog"
-        onClick={() => setCommandPaletteOpen(true)}
-      >
-        <span className="desktop-topbar__command-label">
-          <InkIcon name="search" decorative size={18} />
-          <span>搜索页面与命令</span>
-        </span>
-        <kbd>Ctrl K</kbd>
-      </button>
+      {!directMode && (
+        <button
+          type="button"
+          className="desktop-topbar__command"
+          aria-label="搜索页面与命令"
+          aria-haspopup="dialog"
+          onClick={() => setCommandPaletteOpen(true)}
+        >
+          <span className="desktop-topbar__command-label">
+            <InkIcon name="search" decorative size={18} />
+            <span>搜索页面与命令</span>
+          </span>
+          <kbd>Ctrl K</kbd>
+        </button>
+      )}
       <div className="desktop-topbar__meta">
-        <Link
-          className="desktop-topbar__ai-status"
-          to={scopedBlockerCode === null ? "/settings#model-center" : scopedRepair.href}
-          aria-label={`${aiStatusDescription} ${scopedBlockerCode === null ? "打开模型中心" : scopedRepair.linkAction}`}
-          title={aiStatusDescription}
-        >
-          <Badge tone={aiStatusTone}>{aiStatusShortLabel}</Badge>
-        </Link>
-        <Button
-          variant="ghost"
-          size="sm"
-          aria-label={resolvedSurface === "dark" ? "切换到浅色外观" : "切换到深色外观"}
-          onClick={() => setAppearance(resolvedSurface === "dark" ? "light" : "dark")}
-        >
-          {resolvedSurface === "dark" ? "浅色" : "深色"}
-        </Button>
+        {directMode ? (
+          <DropdownMenu
+            align="end"
+            trigger={
+              <span aria-hidden="true">
+                <InkIcon name="more" decorative size={20} />
+              </span>
+            }
+            triggerLabel="打开更多选项"
+            menuLabel="更多选项"
+            items={[
+              {
+                id: "settings",
+                label: "设置",
+                onSelect: () => void navigate("/settings"),
+              },
+              {
+                id: "appearance",
+                label: resolvedSurface === "dark" ? "外观：切换到浅色" : "外观：切换到深色",
+                onSelect: () => setAppearance(resolvedSurface === "dark" ? "light" : "dark"),
+              },
+              {
+                id: "professional-mode",
+                label: "切换专业模式",
+                disabled: writingExperience.preference === null || writingExperience.switching,
+                separatorBefore: true,
+                onSelect: () => {
+                  setCommandPaletteOpen(false);
+                  void writingExperience.switchMode("professional");
+                },
+              },
+            ]}
+          />
+        ) : (
+          <>
+            <Link
+              className="desktop-topbar__ai-status"
+              to={scopedBlockerCode === null ? "/settings#model-center" : scopedRepair.href}
+              aria-label={`${aiStatusDescription} ${scopedBlockerCode === null ? "打开模型中心" : scopedRepair.linkAction}`}
+              title={aiStatusDescription}
+            >
+              <Badge tone={aiStatusTone}>{aiStatusShortLabel}</Badge>
+            </Link>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label={resolvedSurface === "dark" ? "切换到浅色外观" : "切换到深色外观"}
+              onClick={() => setAppearance(resolvedSurface === "dark" ? "light" : "dark")}
+            >
+              {resolvedSurface === "dark" ? "浅色" : "深色"}
+            </Button>
+          </>
+        )}
       </div>
     </div>
   );
@@ -515,56 +561,62 @@ export function DesktopShell({ children }: DesktopShellProps) {
           </div>
         )}
       </div>
-      <div className="desktop-navigation__footer">
-        <div className="desktop-navigation__section" aria-label="工具导航">
-          <NavLink
-            className={({ isActive }) => `desktop-navigation__link${isActive ? " is-active" : ""}`}
-            to="/tasks"
-            aria-label="任务与通知"
-            onClick={() => setNavigationOpen(false)}
-          >
-            <span className="desktop-navigation__marker" aria-hidden="true">
-              <InkIcon name="bell" decorative size={20} />
-            </span>
-            <span className="desktop-navigation__label">任务与通知</span>
-          </NavLink>
-          <NavLink
-            className={({ isActive }) => `desktop-navigation__link${isActive ? " is-active" : ""}`}
-            to="/usage"
-            aria-label="调用与费用"
-            onClick={() => setNavigationOpen(false)}
-          >
-            <span className="desktop-navigation__marker" aria-hidden="true">
-              <InkIcon name="clock" decorative size={20} />
-            </span>
-            <span className="desktop-navigation__label">调用与费用</span>
-          </NavLink>
-          <Link
-            className={`desktop-navigation__link${modelHubActive ? " is-active" : ""}`}
-            to="/settings#model-center"
-            aria-label="模型中心"
-            aria-current={modelHubActive ? "page" : undefined}
-            onClick={() => setNavigationOpen(false)}
-          >
-            <span className="desktop-navigation__marker" aria-hidden="true">
-              <InkIcon name="sparkles" decorative size={20} />
-            </span>
-            <span className="desktop-navigation__label">模型中心</span>
-          </Link>
-          <Link
-            className={`desktop-navigation__link${settingsActive ? " is-active" : ""}`}
-            to="/settings"
-            aria-label="设置"
-            aria-current={settingsActive ? "page" : undefined}
-            onClick={() => setNavigationOpen(false)}
-          >
-            <span className="desktop-navigation__marker" aria-hidden="true">
-              <InkIcon name="settings" decorative size={20} />
-            </span>
-            <span className="desktop-navigation__label">设置</span>
-          </Link>
+      {!directMode && (
+        <div className="desktop-navigation__footer">
+          <div className="desktop-navigation__section" aria-label="工具导航">
+            <NavLink
+              className={({ isActive }) =>
+                `desktop-navigation__link${isActive ? " is-active" : ""}`
+              }
+              to="/tasks"
+              aria-label="任务与通知"
+              onClick={() => setNavigationOpen(false)}
+            >
+              <span className="desktop-navigation__marker" aria-hidden="true">
+                <InkIcon name="bell" decorative size={20} />
+              </span>
+              <span className="desktop-navigation__label">任务与通知</span>
+            </NavLink>
+            <NavLink
+              className={({ isActive }) =>
+                `desktop-navigation__link${isActive ? " is-active" : ""}`
+              }
+              to="/usage"
+              aria-label="调用与费用"
+              onClick={() => setNavigationOpen(false)}
+            >
+              <span className="desktop-navigation__marker" aria-hidden="true">
+                <InkIcon name="clock" decorative size={20} />
+              </span>
+              <span className="desktop-navigation__label">调用与费用</span>
+            </NavLink>
+            <Link
+              className={`desktop-navigation__link${modelHubActive ? " is-active" : ""}`}
+              to="/settings#model-center"
+              aria-label="模型中心"
+              aria-current={modelHubActive ? "page" : undefined}
+              onClick={() => setNavigationOpen(false)}
+            >
+              <span className="desktop-navigation__marker" aria-hidden="true">
+                <InkIcon name="sparkles" decorative size={20} />
+              </span>
+              <span className="desktop-navigation__label">模型中心</span>
+            </Link>
+            <Link
+              className={`desktop-navigation__link${settingsActive ? " is-active" : ""}`}
+              to="/settings"
+              aria-label="设置"
+              aria-current={settingsActive ? "page" : undefined}
+              onClick={() => setNavigationOpen(false)}
+            >
+              <span className="desktop-navigation__marker" aria-hidden="true">
+                <InkIcon name="settings" decorative size={20} />
+              </span>
+              <span className="desktop-navigation__label">设置</span>
+            </Link>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 
@@ -584,7 +636,7 @@ export function DesktopShell({ children }: DesktopShellProps) {
         topBar={topBar}
         navigation={navigation}
         navigationCollapsed={navigationCollapsed}
-        statusBar={statusBar}
+        statusBar={directMode ? undefined : statusBar}
         navigationOpen={navigationOpen}
         navigationId="desktop-primary-navigation"
         navigationLabel="墨影主导航"
@@ -599,11 +651,13 @@ export function DesktopShell({ children }: DesktopShellProps) {
         )}
         {children}
       </AppShell>
-      <CommandPalette
-        open={commandPaletteOpen}
-        onOpenChange={setCommandPaletteOpen}
-        projectId={projectId}
-      />
+      {!directMode && (
+        <CommandPalette
+          open={commandPaletteOpen}
+          onOpenChange={setCommandPaletteOpen}
+          projectId={projectId}
+        />
+      )}
     </>
   );
 }

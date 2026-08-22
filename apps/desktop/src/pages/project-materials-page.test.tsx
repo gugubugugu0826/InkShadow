@@ -153,6 +153,49 @@ describe("ProjectMaterialsPage", () => {
     });
   }, 20_000);
 
+  it("soft-deletes a direct-mode material in one click and exposes a working undo", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.writingExperience.getOrInitialize();
+    const seeded = await seedProject(runtime);
+    await createMaterial(runtime, seeded.projectId, {
+      title: "可撤销的灯塔记录",
+      body: "守塔人把风暴日期刻在铜牌背面。",
+    });
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${seeded.projectId}/materials`);
+
+    const heading = await screen.findByRole("heading", {
+      name: "可撤销的灯塔记录",
+      level: 3,
+    });
+    const card = heading.closest(".ink-card");
+    if (!(card instanceof HTMLElement)) throw new Error("找不到直接模式素材卡片。");
+    await user.click(within(card).getByRole("button", { name: "删除并保留引用" }));
+
+    expect(screen.queryByRole("dialog", { name: "确认软删除素材" })).not.toBeInTheDocument();
+    expect(await screen.findByText("素材已移到可恢复区域")).toBeVisible();
+    await waitFor(() => {
+      const deletedCard = screen
+        .getByRole("heading", { name: "可撤销的灯塔记录", level: 3 })
+        .closest(".ink-card");
+      expect(deletedCard).not.toBeNull();
+      if (deletedCard instanceof HTMLElement) {
+        expect(within(deletedCard).getByText("已删除")).toBeVisible();
+      }
+    });
+
+    await user.click(screen.getByRole("button", { name: "撤销删除" }));
+    await waitFor(() => {
+      const restoredCard = screen
+        .getByRole("heading", { name: "可撤销的灯塔记录", level: 3 })
+        .closest(".ink-card");
+      expect(restoredCard).not.toBeNull();
+      if (restoredCard instanceof HTMLElement) {
+        expect(within(restoredCard).getByText("有效")).toBeVisible();
+      }
+    });
+  });
+
   it("merges a source without rewriting its immutable citation provenance", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const seeded = await seedProject(runtime);

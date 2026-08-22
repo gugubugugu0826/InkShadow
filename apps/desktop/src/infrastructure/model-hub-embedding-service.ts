@@ -592,7 +592,7 @@ async function resolveEmbeddingTarget(
   ) {
     throw executionError(
       "MODEL_HUB_PRIVACY_BLOCKED",
-      "这项任务仅允许本机处理，InkShadow 不会把正文发送到云端模型。",
+      "这项任务仅允许本机处理，墨影不会把正文发送到云端模型。",
     );
   }
 

@@ -2289,7 +2289,7 @@ export function SettingsPage() {
                   capability: "structured_output",
                   verdict: "supported",
                   evidenceSource: "lightweight_probe",
-                  evidenceSummary: `固定 JSON schema 探针通过（${result.evidenceVersion}，${String(result.attempts)} 次尝试）；未发送或保存作品内容与模型响应。`,
+                  evidenceSummary: `固定结构化数据格式探针通过（${result.evidenceVersion}，${String(result.attempts)} 次尝试）；未发送或保存作品内容与模型响应。`,
                 },
               ],
             },
@@ -4093,6 +4093,9 @@ export function SettingsPage() {
     void navigate("/settings#model-center");
   }
 
+  const directSettingsProjection = projectDirectSettingsPage(writingExperience);
+  if (directSettingsProjection !== null) return directSettingsProjection;
+
   return (
     <div
       className={`desktop-page settings-page ${isModelHubView ? "settings-page--model-hub" : "settings-page--global"}`}
@@ -4644,7 +4647,7 @@ export function SettingsPage() {
                 <CardHeader>
                   <div className="card-heading-row">
                     <div>
-                      <CardTitle headingLevel={2}>InkShadow 模型中心</CardTitle>
+                      <CardTitle headingLevel={2}>墨影模型中心</CardTitle>
                       <CardDescription>
                         连接供应商、测试连接并发现模型。普通模式只显示开始写作真正需要的选项。
                       </CardDescription>
@@ -4867,7 +4870,7 @@ export function SettingsPage() {
                         <InlineAlert
                           tone="warning"
                           title="凭据已删除，可重新绑定"
-                          description={`“${credentialDeletedConnection.displayName}”仍保留模型目录和历史调用，但不会参与 AI 分工。输入新的 API Key 并选择“重新绑定原连接”，无需修改配置标识；也可选择“退役连接”后建立一条新连接。`}
+                          description={`“${credentialDeletedConnection.displayName}”仍保留模型目录和历史调用，但不会参与 AI 分工。输入新的接口密钥并选择“重新绑定原连接”，无需修改配置标识；也可选择“退役连接”后建立一条新连接。`}
                         />
                       )}
 
@@ -4875,7 +4878,7 @@ export function SettingsPage() {
                         <InlineAlert
                           tone="warning"
                           title="浏览器开发模式不连接模型"
-                          description="可查看和填写非敏感配置，但需要密钥的连接只能在 Tauri 桌面应用中保存、测试和验证；这里不会接收密钥、访问端点或伪造模型目录。"
+                          description="可查看和填写非敏感配置，但需要密钥的连接只能在墨影桌面应用中保存、测试和验证；这里不会接收密钥、访问端点或伪造模型目录。"
                         />
                       )}
 
@@ -5187,7 +5190,7 @@ export function SettingsPage() {
                                     />
                                   )}
                                 </FormField>
-                                <FormField label="Embedding 路径" hint="留空使用 /embeddings。">
+                                <FormField label="向量检索路径" hint="留空使用 /embeddings。">
                                   {(fieldProps) => (
                                     <Input
                                       {...fieldProps}
@@ -5204,8 +5207,8 @@ export function SettingsPage() {
                                 </FormField>
                                 {authentication === "custom_header_keyring" && (
                                   <FormField
-                                    label="认证 Header 名称"
-                                    hint="这里只保存名称；值使用下方同一份系统凭据。"
+                                    label="认证请求头名称"
+                                    hint="这里只保存名称；内容使用下方同一份系统凭据。"
                                     required
                                   >
                                     {(fieldProps) => (
@@ -5272,7 +5275,7 @@ export function SettingsPage() {
                           <InlineAlert
                             tone="info"
                             title="重试不会重复计费请求"
-                            description="这里只会自动重试读取连接和模型目录。文本生成、Embedding、Rerank 与图片生成一旦发送都不会自动重试，避免重复生成或重复计费。温度、Top P、结构化输出与推理强度仍由任务预设管理。"
+                            description="这里只会自动重试读取连接和模型目录。文本生成、向量检索、结果排序与图片生成一旦发送都不会自动重试，避免重复生成或重复计费。温度、采样概率、结构化输出与推理强度仍由任务预设管理。"
                           />
                           {providerPreset === "custom_openai_compatible" && (
                             <InlineAlert
@@ -5378,7 +5381,7 @@ export function SettingsPage() {
                                   ? "请先启动本机 Ollama，然后点击“测试连接并发现模型”。"
                                   : summary.configured
                                     ? "密钥已保存。点击“测试连接并发现模型”读取当前账号真正可用的模型。"
-                                    : "先把 API Key 保存到系统凭据库，再测试连接；密钥不会写入普通数据库。"
+                                    : "先把接口密钥保存到系统凭据库，再测试连接；密钥不会写入普通数据库。"
                             }
                           />
                         )}
@@ -5390,12 +5393,12 @@ export function SettingsPage() {
                           <InlineAlert
                             tone="info"
                             title="费用预估依据"
-                            description="这些字段只用于整理上下文、费用估算和预算，不是开始写作的必填项。不确定时可以留空；价格单位为每百万 token，供应商仍可能正常计费。"
+                            description="这些字段只用于整理资料、费用估算和预算，不是开始写作的必填项。不确定时可以留空；价格单位为每百万内容额度，供应商仍可能正常计费。"
                           />
                           <div className="model-center-grid">
                             <FormField
-                              label="上下文窗口（token）"
-                              hint="模型一次可读取的最大 token。目录没有提供时可留空，墨影会使用保守默认长度；这里不是小说字数。"
+                              label="单次读取上限（内容额度）"
+                              hint="模型一次可读取的最大内容额度。目录没有提供时可留空，墨影会使用保守默认长度；这里不是小说字数。"
                             >
                               {(fieldProps) => (
                                 <Input
@@ -5430,7 +5433,7 @@ export function SettingsPage() {
                               )}
                             </FormField>
                             <FormField
-                              label="输入价 / 百万 token"
+                              label="输入价 / 百万内容额度"
                               hint="从供应商价格页获取；不确定可留空。"
                             >
                               {(fieldProps) => (
@@ -5448,7 +5451,7 @@ export function SettingsPage() {
                               )}
                             </FormField>
                             <FormField
-                              label="输出价 / 百万 token"
+                              label="输出价 / 百万内容额度"
                               hint="从供应商价格页获取；不确定可留空。"
                             >
                               {(fieldProps) => (
@@ -5466,7 +5469,7 @@ export function SettingsPage() {
                               )}
                             </FormField>
                             <FormField
-                              label="缓存输入价 / 百万 token"
+                              label="缓存输入价 / 百万内容额度"
                               hint="供应商未区分时可留空。"
                             >
                               {(fieldProps) => (
@@ -5485,7 +5488,7 @@ export function SettingsPage() {
                             </FormField>
                             <FormField
                               label="价格版本"
-                              hint="仅在填写价格时使用，例如 provider-2026-07。"
+                              hint="仅在填写价格时使用，例如价格表-2026-07。"
                             >
                               {(fieldProps) => (
                                 <Input
@@ -5550,7 +5553,7 @@ export function SettingsPage() {
                         <InlineAlert
                           tone="warning"
                           title="固定能力验证需要明确确认"
-                          description={`点击“${automaticModelDiscovery ? "确认 1 次固定验证" : "确认 1 次固定验证并检查连接"}”将通过“${hubConnection?.displayName ?? getModelProviderPreset(providerPreset).displayName}”的“${effectiveTextProbeModelId}”发送固定短句“只回复：OK”，最多请求 64 个输出 token；本次最多调用 1 次，自动重试 0 次。${modelProbeDestinationDisclosure(providerPreset, { region, workspaceId, baseUrl })}不发送作品正文、灵感、设定或 API Key；当前费用上限未知，供应商可能收取少量费用。测试输入和输出不会写入能力记录。`}
+                          description={`点击“${automaticModelDiscovery ? "确认 1 次固定验证" : "确认 1 次固定验证并检查连接"}”将通过“${hubConnection?.displayName ?? getModelProviderPreset(providerPreset).displayName}”的“${effectiveTextProbeModelId}”发送固定短句“只回复：OK”，最多请求 64 个输出内容额度；本次最多调用 1 次，自动重试 0 次。${modelProbeDestinationDisclosure(providerPreset, { region, workspaceId, baseUrl })}不发送作品正文、灵感、设定或接口密钥；当前费用上限未知，供应商可能收取少量费用。测试输入和输出不会写入能力记录。`}
                         />
                       )}
 
@@ -5671,8 +5674,8 @@ export function SettingsPage() {
                             <FormField
                               label={
                                 authentication === "custom_header_keyring"
-                                  ? "认证 Header 值"
-                                  : "API Key（接口访问密钥）"
+                                  ? "认证请求头内容"
+                                  : "接口密钥"
                               }
                               hint="保存后仅显示末四位；页面不会再次读取完整密钥，也不会写入配置数据库或日志。"
                               required={authentication !== "none"}
@@ -5691,7 +5694,7 @@ export function SettingsPage() {
                                       ? "正在检查已保存凭据"
                                       : summary.configured
                                         ? "留空继续使用已保存凭据"
-                                        : "输入新的 API Key"
+                                        : "输入新的接口密钥"
                                   }
                                   disabled={
                                     modelHubHydrationPending ||
@@ -6254,7 +6257,7 @@ export function SettingsPage() {
                             <div>
                               <h3 id="model-routing-expert-matrix-title">22 项任务矩阵</h3>
                               <p>
-                                这里复用下方单项编辑器，不会创建第二套路由入口。内部任务和能力代码只在专家模式显示。
+                                这里复用下方单项编辑器，不会创建第二套分工入口；任务能力、证据、费用和隐私均使用可理解的中文说明。
                               </p>
                             </div>
                             <FormField label="矩阵筛选">
@@ -6299,8 +6302,7 @@ export function SettingsPage() {
                                   <article key={task.definition.task} data-state={task.status}>
                                     <header>
                                       <div>
-                                        <strong>{task.definition.displayName}</strong>
-                                        <code>{task.definition.task}</code>
+                                        <strong>{novelAiTaskLabel(task.definition.task)}</strong>
                                       </div>
                                       <Badge
                                         tone={
@@ -6328,7 +6330,9 @@ export function SettingsPage() {
                                         <dd>
                                           {task.definition.requiredCapabilities.map(
                                             (capability) => (
-                                              <code key={capability}>{capability}</code>
+                                              <span key={capability}>
+                                                {capabilityLabel(capability)}
+                                              </span>
                                             ),
                                           )}
                                         </dd>
@@ -6360,9 +6364,15 @@ export function SettingsPage() {
                                                     primaryProjection.capabilities.find(
                                                       (item) => item.capability === capability,
                                                     );
+                                                  const capabilityName =
+                                                    capabilityLabel(capability);
                                                   return evidence === undefined
-                                                    ? `${capability}: unknown`
-                                                    : `${capability}: ${evidence.state} / ${evidence.source ?? "none"}`;
+                                                    ? `${capabilityName}：没有可读证据`
+                                                    : `${capabilityName}：${capabilityDisplayStateLabel(
+                                                        evidence.state,
+                                                      )}，${capabilityEvidenceSourceLabel(
+                                                        evidence.source,
+                                                      )}`;
                                                 })
                                                 .join("；")}
                                         </dd>
@@ -6382,8 +6392,11 @@ export function SettingsPage() {
                                       <div>
                                         <dt>隐私</dt>
                                         <dd>
-                                          {task.route?.privacyPolicy ?? "未配置"}；证据
-                                          {costProfile?.evidenceSource ?? "unknown"}
+                                          {modelHubPrivacyPolicyLabel(task.route?.privacyPolicy)}
+                                          ；证据
+                                          {costPrivacyEvidenceSourceLabel(
+                                            costProfile?.evidenceSource,
+                                          )}
                                         </dd>
                                       </div>
                                       <div>
@@ -6999,7 +7012,7 @@ export function SettingsPage() {
                     <InlineAlert
                       tone="info"
                       title="诊断包已下载"
-                      description={`支持编号：${diagnosticId}。发送前仍可自行打开结构化文件（JSON）检查内容。`}
+                      description={`支持编号：${diagnosticId}。发送前仍可自行打开结构化文件检查内容。`}
                     />
                   )}
                   <ul className="privacy-list">
@@ -7078,7 +7091,7 @@ export function SettingsPage() {
               ))}
               <li>
                 最大输出：
-                {String(taskProbeConfirmation.disclosure.maximumOutputTokens)} 个令牌。
+                {String(taskProbeConfirmation.disclosure.maximumOutputTokens)} 个输出内容额度。
               </li>
               <li>
                 最大模型服务调用：
@@ -7216,6 +7229,359 @@ export function SettingsPage() {
           />
         </Dialog>
       )}
+    </div>
+  );
+}
+
+function projectDirectSettingsPage(writingExperience: ReturnType<typeof useWritingExperience>) {
+  if (writingExperience.preference === null) {
+    return (
+      <div className="desktop-page settings-page" aria-busy={writingExperience.loading}>
+        <header className="page-heading">
+          <div>
+            <h1>设置</h1>
+          </div>
+        </header>
+        {writingExperience.loading ? (
+          <div role="status">正在读取设置…</div>
+        ) : (
+          <InlineAlert
+            tone="error"
+            title="设置暂时无法读取"
+            description={writingExperience.error ?? "请重试。"}
+            action={{ label: "重试", onClick: () => void writingExperience.refresh() }}
+          />
+        )}
+      </div>
+    );
+  }
+  return writingExperience.preference.mode === "direct" ? (
+    <DirectSettingsPage writingExperience={writingExperience} />
+  ) : null;
+}
+
+function DirectSettingsPage({
+  writingExperience,
+}: {
+  readonly writingExperience: ReturnType<typeof useWritingExperience>;
+}) {
+  const runtime = useRuntime();
+  const {
+    preference: appearance,
+    resolvedSurface,
+    setPreference: setAppearance,
+  } = useAppearancePreference();
+  const [integrity, setIntegrity] = useState<DatabaseIntegrityReport | null>(null);
+  const [maintenanceBusy, setMaintenanceBusy] = useState<"inspect" | "backup" | "restore" | null>(
+    null,
+  );
+  const [maintenanceError, setMaintenanceError] = useState<unknown>(null);
+  const [backupComplete, setBackupComplete] = useState(false);
+  const [restoreSourceTicket, setRestoreSourceTicket] = useState<NativePathTicket | null>(null);
+  const [restoreComplete, setRestoreComplete] = useState(false);
+
+  const inspectLocalData = useCallback(async (): Promise<void> => {
+    if (runtime.maintenance === null) return;
+    setMaintenanceBusy("inspect");
+    setMaintenanceError(null);
+    try {
+      const result = await runtime.maintenance.inspect();
+      if (result.ok) {
+        setIntegrity(result.value);
+      } else {
+        setMaintenanceError(result.error);
+      }
+    } catch (cause: unknown) {
+      setMaintenanceError(cause);
+    } finally {
+      setMaintenanceBusy(null);
+    }
+  }, [runtime]);
+
+  useEffect(() => {
+    if (runtime.maintenance !== null) {
+      void Promise.resolve().then(inspectLocalData);
+    }
+  }, [inspectLocalData, runtime]);
+
+  async function createDirectBackup(): Promise<void> {
+    if (runtime.maintenance === null) return;
+    setMaintenanceBusy("backup");
+    setMaintenanceError(null);
+    setBackupComplete(false);
+    try {
+      const destination = await runtime.maintenance.chooseBackupDestination();
+      if (destination === null) return;
+      const result = await runtime.maintenance.createConsistentBackup(destination);
+      if (!result.ok) {
+        setMaintenanceError(result.error);
+        return;
+      }
+      setBackupComplete(true);
+      await inspectLocalData();
+    } catch (cause: unknown) {
+      setMaintenanceError(cause);
+    } finally {
+      setMaintenanceBusy(null);
+    }
+  }
+
+  async function chooseDirectRestore(): Promise<void> {
+    if (runtime.maintenance === null) return;
+    setMaintenanceBusy("restore");
+    setMaintenanceError(null);
+    try {
+      const source = await runtime.maintenance.chooseRestoreSource();
+      if (source !== null) setRestoreSourceTicket(source);
+    } catch (cause: unknown) {
+      setMaintenanceError(cause);
+    } finally {
+      setMaintenanceBusy(null);
+    }
+  }
+
+  async function confirmDirectRestore(): Promise<void> {
+    if (runtime.maintenance === null || restoreSourceTicket === null) return;
+    const source = restoreSourceTicket;
+    setMaintenanceBusy("restore");
+    setMaintenanceError(null);
+    setRestoreComplete(false);
+    try {
+      const rollbackDestination = await runtime.maintenance.choosePreRestoreBackupDestination();
+      if (rollbackDestination === null) return;
+      const rollback = await runtime.maintenance.createConsistentBackup(rollbackDestination);
+      if (!rollback.ok) {
+        setMaintenanceError(rollback.error);
+        return;
+      }
+      const restored = await runtime.maintenance.restoreConsistentBackup(source);
+      if (!restored.ok) {
+        setMaintenanceError(restored.error);
+        return;
+      }
+      setRestoreSourceTicket(null);
+      setRestoreComplete(true);
+      window.setTimeout(() => window.location.reload(), 1_200);
+    } catch (cause: unknown) {
+      setMaintenanceError(cause);
+    } finally {
+      setMaintenanceBusy(null);
+    }
+  }
+
+  const normalizedMaintenanceError =
+    maintenanceError === null ? null : normalizeUiError(maintenanceError);
+
+  return (
+    <div className="desktop-page settings-page settings-page--global">
+      <header className="page-heading">
+        <div>
+          <Link className="back-link" to="/projects">
+            返回作品库
+          </Link>
+          <p className="page-heading__eyebrow">阅读、写作与数据保护</p>
+          <h1>设置</h1>
+          <p>这里只保留日常创作需要的选项，不会改变作品正文。</p>
+        </div>
+      </header>
+
+      <nav className="settings-actions settings-section-nav" aria-label="设置分区">
+        <a className="button-link button-link--secondary" href="#appearance">
+          外观
+        </a>
+        <a className="button-link button-link--secondary" href="#data-protection">
+          备份与恢复
+        </a>
+        <a className="button-link button-link--secondary" href="#writing-mode">
+          写作方式
+        </a>
+      </nav>
+
+      <div className="settings-grid">
+        <Card id="appearance">
+          <CardHeader>
+            <CardTitle headingLevel={2}>外观</CardTitle>
+            <CardDescription>选择舒适的浅色或深色界面。</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <FormField label="外观模式">
+              {(fieldProps) => (
+                <Select
+                  {...fieldProps}
+                  value={appearance}
+                  options={[
+                    { value: "system", label: "跟随系统" },
+                    { value: "light", label: "浅色" },
+                    { value: "dark", label: "深色" },
+                  ]}
+                  onChange={(event) => {
+                    const selected = event.currentTarget.value;
+                    if (selected === "system" || selected === "light" || selected === "dark") {
+                      setAppearance(selected);
+                    }
+                  }}
+                />
+              )}
+            </FormField>
+            <InlineAlert
+              tone="info"
+              title="当前显示"
+              description={
+                appearance === "system"
+                  ? resolvedSurface === "dark"
+                    ? "正在跟随系统，当前为深色。"
+                    : "正在跟随系统，当前为浅色。"
+                  : appearance === "dark"
+                    ? "当前固定为深色。"
+                    : "当前固定为浅色。"
+              }
+            />
+          </CardContent>
+        </Card>
+
+        <Card id="data-protection" className="settings-card--wide">
+          <CardHeader>
+            <div className="card-heading-row">
+              <div>
+                <CardTitle headingLevel={2}>备份与恢复</CardTitle>
+                <CardDescription>
+                  备份不会覆盖已有文件；恢复前会先要求保存当前数据的回滚副本。
+                </CardDescription>
+              </div>
+              {integrity !== null && (
+                <Badge tone={integrity.healthy ? "success" : "danger"}>
+                  {integrity.healthy ? "数据正常" : "需要处理"}
+                </Badge>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {runtime.maintenance === null ? (
+              <InlineAlert
+                tone="warning"
+                title="请在桌面应用中使用"
+                description="文件备份与恢复在桌面应用中可用；当前预览环境不会伪装成功。"
+              />
+            ) : (
+              <div className="maintenance-settings">
+                {runtime.automaticBackup !== null && (
+                  <InlineAlert
+                    tone="info"
+                    title="自动备份保护已启用"
+                    description="墨影会按已有计划检查并保留本机备份；也可以随时手动创建一份。"
+                  />
+                )}
+                {normalizedMaintenanceError !== null && (
+                  <InlineAlert
+                    tone="error"
+                    title={normalizedMaintenanceError.title}
+                    description={normalizedMaintenanceError.description}
+                  />
+                )}
+                {backupComplete && (
+                  <InlineAlert
+                    tone="info"
+                    title="备份已创建"
+                    description="备份文件已完成检查并保存到你选择的位置。"
+                  />
+                )}
+                {restoreComplete && (
+                  <InlineAlert
+                    tone="info"
+                    title="备份已恢复"
+                    description="作品数据已经安全恢复，墨影正在重新载入。"
+                  />
+                )}
+                <div className="settings-actions">
+                  <Button
+                    variant="secondary"
+                    loading={maintenanceBusy === "inspect"}
+                    disabled={maintenanceBusy !== null}
+                    onClick={() => void inspectLocalData()}
+                  >
+                    检查本地数据
+                  </Button>
+                  <Button
+                    loading={maintenanceBusy === "backup"}
+                    disabled={maintenanceBusy !== null || integrity?.healthy === false}
+                    onClick={() => void createDirectBackup()}
+                  >
+                    创建备份
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    loading={maintenanceBusy === "restore"}
+                    disabled={maintenanceBusy !== null || integrity?.healthy === false}
+                    onClick={() => void chooseDirectRestore()}
+                  >
+                    从备份恢复
+                  </Button>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card id="writing-mode" className="settings-card--wide">
+          <CardHeader>
+            <CardTitle headingLevel={2}>写作方式</CardTitle>
+            <CardDescription>当前使用简洁的直接写作界面。</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p>需要比较多个结果或调整高级创作设置时，可以切换到专业模式。</p>
+            <div className="settings-actions">
+              <Button
+                variant="secondary"
+                loading={writingExperience.switching}
+                disabled={writingExperience.switching}
+                onClick={() => void writingExperience.switchMode("professional")}
+              >
+                切换到专业模式
+              </Button>
+            </div>
+            {writingExperience.error !== null && (
+              <InlineAlert
+                tone="error"
+                title="写作方式没有保存"
+                description={writingExperience.error}
+              />
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Dialog
+        open={restoreSourceTicket !== null}
+        onOpenChange={(open) => {
+          if (!open && maintenanceBusy !== "restore") setRestoreSourceTicket(null);
+        }}
+        title="确认恢复本地备份"
+        description="所选备份会替换当前作品数据。下一步会先要求保存当前数据的回滚副本；任一步失败都不会提交替换。"
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              disabled={maintenanceBusy === "restore"}
+              onClick={() => setRestoreSourceTicket(null)}
+            >
+              取消
+            </Button>
+            <Button
+              variant="danger"
+              loading={maintenanceBusy === "restore"}
+              onClick={() => void confirmDirectRestore()}
+            >
+              创建回滚备份并恢复
+            </Button>
+          </>
+        }
+      >
+        <InlineAlert
+          tone="warning"
+          title="恢复后应用会重新载入"
+          description="当前尚未保存的界面输入不会随备份恢复，请先保存正在编辑的内容。"
+        />
+      </Dialog>
     </div>
   );
 }
@@ -7452,7 +7818,7 @@ function validateExpertConnectionDraft(
   const paths = [
     normalizeModelHubApiPath(input.modelDiscoveryPath, "Model discovery path"),
     normalizeModelHubApiPath(input.textGenerationPath, "Text generation path"),
-    normalizeModelHubApiPath(input.embeddingPath, "Embedding path"),
+    normalizeModelHubApiPath(input.embeddingPath, "向量检索路径"),
   ];
   if (
     !custom &&
@@ -7539,7 +7905,7 @@ async function settingsTextProbeFingerprintFromInput(
     credentialHeaderName: normalizeCredentialHeaderName(input.credentialHeaderName),
     modelDiscoveryPath: normalizeModelHubApiPath(input.modelDiscoveryPath, "Model discovery path"),
     textGenerationPath: normalizeModelHubApiPath(input.textGenerationPath, "Text generation path"),
-    embeddingPath: normalizeModelHubApiPath(input.embeddingPath, "Embedding path"),
+    embeddingPath: normalizeModelHubApiPath(input.embeddingPath, "向量检索路径"),
     requestTimeoutMs: normalizeModelHubRequestTimeoutMs(input.requestTimeoutMs),
     persistedRetryLimit: normalizeModelHubRetryLimit(input.retryLimit),
   });
@@ -7805,13 +8171,13 @@ function modelHubCapabilityLabel(capability: ModelHubCapability): string {
     text_generation: "文本生成",
     reasoning: "推理",
     structured_output: "结构化输出",
-    embedding: "语义向量",
-    rerank: "结果重排",
+    embedding: "向量检索",
+    rerank: "结果排序",
     image_generation: "图片生成",
     vision: "图片理解",
     translation: "翻译",
     tool_calling: "工具调用",
-    token_counting: "Token 计数",
+    token_counting: "内容额度计数",
     streaming: "流式输出",
     long_context: "长上下文",
   };
@@ -7938,7 +8304,32 @@ function modelHubOverallDescription(
   return `${String(visibility.enabledRouteCount)} 项任务已配置；基础写作链仍有缺口，请按下方建议验证所需能力。`;
 }
 
-function capabilityDisplayStateLabel(state: ModelHubCapabilityDisplayState): string {
+function modelHubPrivacyPolicyLabel(policy: string | null | undefined): string {
+  if (policy === null || policy === undefined) return "未配置";
+  const labels = Object.freeze({
+    cloud_allowed: "允许使用云端模型",
+    local_preferred: "优先使用本机模型",
+    local_only: "只使用本机模型",
+  }) satisfies Readonly<Record<ModelHubPrivacyPolicy, string>>;
+  return policy in labels ? labels[policy as ModelHubPrivacyPolicy] : "隐私策略未知";
+}
+
+function costPrivacyEvidenceSourceLabel(source: string | null | undefined): string {
+  if (source === null || source === undefined) return "没有证据";
+  const labels = Object.freeze({
+    provider_metadata: "供应商目录",
+    official_preset: "官方预设",
+    provider_policy: "供应商政策",
+    user_confirmed: "用户确认",
+    legacy: "旧版迁移",
+    unknown: "来源未知",
+  }) satisfies Readonly<Record<ModelCostPrivacyProfile["evidenceSource"], string>>;
+  return source in labels
+    ? labels[source as ModelCostPrivacyProfile["evidenceSource"]]
+    : "来源未知";
+}
+
+function capabilityDisplayStateLabel(state: string): string {
   const labels: Readonly<Record<ModelHubCapabilityDisplayState, string>> = Object.freeze({
     verified: "已实测",
     catalog_declared: "目录或官方资料声明",
@@ -7948,7 +8339,7 @@ function capabilityDisplayStateLabel(state: ModelHubCapabilityDisplayState): str
     ambiguous: "结果待核对",
     unsupported: "明确不支持",
   });
-  return labels[state];
+  return state in labels ? labels[state as ModelHubCapabilityDisplayState] : "状态未知";
 }
 
 function isCapabilityProbeResultAmbiguous(
@@ -7963,9 +8354,7 @@ function isCapabilityProbeResultAmbiguous(
   );
 }
 
-function capabilityEvidenceSourceLabel(
-  source: ModelCapabilityEvidence["evidenceSource"] | null,
-): string {
+function capabilityEvidenceSourceLabel(source: string | null): string {
   if (source === null) return "没有证据";
   const labels: Readonly<Record<ModelCapabilityEvidence["evidenceSource"], string>> = Object.freeze(
     {
@@ -7976,7 +8365,9 @@ function capabilityEvidenceSourceLabel(
       legacy: "旧版迁移",
     },
   );
-  return labels[source];
+  return source in labels
+    ? labels[source as ModelCapabilityEvidence["evidenceSource"]]
+    : "证据来源未知";
 }
 
 function capabilityFailureLabel(code: string): string {
@@ -8084,7 +8475,7 @@ function modelRouteRoleLabel(role: ModelRouteRole): string {
     fast: "快速",
     high_quality: "高质量",
     long_context: "长上下文",
-    embedding: "Embedding",
+    embedding: "向量检索",
     validation: "检查",
     translation: "翻译",
     local_private: "本地隐私",

@@ -16,7 +16,9 @@ const migration = [
   readMigration("0004_model_profiles.sql"),
   readMigration("0005_ai_generation_governance.sql"),
   readMigration("0007_model_routing_usage.sql"),
+  readMigration("0031_model_hub.sql"),
   readMigration("0059_generation_preflight_cost_status.sql"),
+  readMigration("0075_generation_attempt_privacy_snapshot.sql"),
 ].join("\n");
 
 const NOW = "2026-07-27T00:00:00.000Z";
@@ -25,6 +27,12 @@ const CHAPTER_ID = uuid(2);
 const VERSION_ID = uuid(3);
 const TASK_ID = uuid(4);
 const RUN_ID = uuid(5);
+const REMOTE_PRIVACY = Object.freeze({
+  privacySnapshotVersion: 1 as const,
+  privacyPolicy: "cloud_allowed" as const,
+  dataDestination: "remote" as const,
+  modelInvocationId: null,
+});
 const CANDIDATE_ID = uuid(7);
 const DEFERRED_TASK_ID = uuid(8);
 const DEFERRED_REQUEST_ID = uuid(9);
@@ -187,6 +195,7 @@ describe("SQLite generation governance stores", () => {
       candidateId: CANDIDATE_ID,
       addIncurredCost: true,
       attemptUsage: {
+        ...REMOTE_PRIVACY,
         source: "provider_reported",
         inputTokens: 3_900,
         outputTokens: 900,
@@ -392,6 +401,7 @@ describe("SQLite generation governance stores", () => {
       failureCode: "PROVIDER_RESPONSE_INVALID",
       addIncurredCost: true,
       attemptUsage: {
+        ...REMOTE_PRIVACY,
         source: "provider_reported_unpriced",
         inputTokens: 2_100,
         outputTokens: 380,

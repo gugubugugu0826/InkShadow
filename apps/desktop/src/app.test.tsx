@@ -121,6 +121,7 @@ describe("desktop vertical slice", () => {
 
   it("registers the AI usage route only when team collaboration is explicitly enabled", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
+    await ensureWritingMode(runtime, "professional");
     const getSummary = vi.fn(() => new Promise(() => undefined));
     const listEvents = vi.fn(() => new Promise(() => undefined));
     Object.assign(runtime, {
@@ -134,7 +135,9 @@ describe("desktop vertical slice", () => {
     const teamId = "019f9f4a-b3c7-7350-9226-000000000202";
     renderRoute(runtime, `/teams/${teamId}/usage`);
 
-    expect(await screen.findByRole("heading", { name: "AI 额度、并发与用量" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "智能创作额度、并发与用量" }),
+    ).toBeInTheDocument();
     await waitFor(() => {
       expect(getSummary).toHaveBeenCalledWith(teamId, null, expect.any(AbortSignal));
       expect(listEvents).toHaveBeenCalled();
@@ -191,6 +194,7 @@ describe("desktop vertical slice", () => {
 
   it("does not create a chapter while Enter is confirming an IME candidate", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
+    await ensureWritingMode(runtime, "direct");
     const project = await runtime.useCases.createProject.execute({ name: "中文项目" });
     if (!project.ok) {
       throw project.error;
@@ -198,27 +202,36 @@ describe("desktop vertical slice", () => {
     const user = userEvent.setup();
     renderRoute(runtime, `/projects/${project.value.id}`);
 
-    await user.click(await screen.findByRole("button", { name: "新建章节" }));
-    const input = screen.getByRole("textbox", { name: "章节标题" });
+    const emptyStateHeading = await screen.findByRole("heading", { name: "还没有章节" });
+    const emptyState = emptyStateHeading.closest(".ink-empty-state");
+    if (!(emptyState instanceof HTMLElement)) throw new Error("找不到章节空状态区域。");
+    await user.click(within(emptyState).getByRole("button", { name: "新建章节" }));
+    const dialog = await screen.findByRole("dialog", { name: "新建章节" });
+    const input = within(dialog).getByRole("textbox", { name: "章节标题" });
     fireEvent.change(input, { target: { value: "中文章节" } });
     fireEvent.keyDown(input, { key: "Enter", code: "Enter", isComposing: true });
 
-    expect(screen.getByRole("dialog", { name: "新建章节" })).toBeInTheDocument();
+    expect(dialog).toBeInTheDocument();
     const chapters = await runtime.repositories.chapters.listByProjectId(project.value.id);
     expect(chapters.ok && chapters.value).toHaveLength(0);
   });
 
   it("creates a private chapter atomically from the new chapter dialog", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
+    await ensureWritingMode(runtime, "direct");
     const project = await runtime.useCases.createProject.execute({ name: "私密手稿" });
     if (!project.ok) throw project.error;
     const user = userEvent.setup();
     renderRoute(runtime, `/projects/${project.value.id}`);
 
-    await user.click(await screen.findByRole("button", { name: "新建章节" }));
-    await user.type(screen.getByRole("textbox", { name: "章节标题" }), "未公开的尾声");
-    await user.click(screen.getByRole("checkbox", { name: /创建为私密章节/u }));
-    await user.click(screen.getByRole("button", { name: "创建章节" }));
+    const emptyStateHeading = await screen.findByRole("heading", { name: "还没有章节" });
+    const emptyState = emptyStateHeading.closest(".ink-empty-state");
+    if (!(emptyState instanceof HTMLElement)) throw new Error("找不到章节空状态区域。");
+    await user.click(within(emptyState).getByRole("button", { name: "新建章节" }));
+    const dialog = await screen.findByRole("dialog", { name: "新建章节" });
+    await user.type(within(dialog).getByRole("textbox", { name: "章节标题" }), "未公开的尾声");
+    await user.click(within(dialog).getByRole("checkbox", { name: /创建为私密章节/u }));
+    await user.click(within(dialog).getByRole("button", { name: "创建章节" }));
 
     expect(await screen.findByText("本地私密")).toBeVisible();
     const chapters = await runtime.repositories.chapters.listByProjectId(project.value.id);
@@ -479,6 +492,7 @@ describe("desktop vertical slice", () => {
 
   it("keeps an edited suggestion isolated until the author explicitly applies it", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
+    await ensureWritingMode(runtime, "professional");
     const { chapter, project } = await seedChapter(runtime, "原始正文。");
     const user = userEvent.setup();
     const firstView = renderRoute(runtime, `/projects/${project.id}/chapters/${chapter.id}`);
@@ -505,10 +519,21 @@ describe("desktop vertical slice", () => {
     await user.click(within(review).getByRole("button", { name: "保存建议修改" }));
     expect(await within(review).findByText("修改已保存为建议")).toBeVisible();
     const savedCandidate = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
-    expect(savedCandidate.ok && savedCandidate.value[0]?.toSnapshot()).toMatchObject({
+    if (!savedCandidate.ok) throw savedCandidate.error;
+    const revisedCandidate = savedCandidate.value[0];
+    if (revisedCandidate === undefined) throw new Error("找不到修改后保存的建议。");
+    expect(revisedCandidate.toSnapshot()).toMatchObject({
       content: "作者修改后的最终建议。",
       status: "ready",
     });
+    const intent = revisedCandidate.applicationIntent;
+    if (intent.application !== "insert_at_cursor") {
+      throw new Error("续写建议没有保留生成时记录的插入位置。");
+    }
+    const baseContent = "原始正文。";
+    const expectedAcceptedContent = `${baseContent.slice(0, intent.startUtf16)}${
+      revisedCandidate.content
+    }${baseContent.slice(intent.endUtf16)}`;
     expect(editor).toHaveValue("原始正文。");
 
     firstView.unmount();
@@ -525,7 +550,7 @@ describe("desktop vertical slice", () => {
       "作者修改后的最终建议。",
     );
     await user.click(within(reopenedReview).getByRole("button", { name: "插入光标并创建版本" }));
-    await waitFor(() => expect(reopenedEditor).toHaveValue("原始正文。作者修改后的最终建议。"));
+    await waitFor(() => expect(reopenedEditor).toHaveValue(expectedAcceptedContent));
 
     const persistedCandidate = await reopenedRuntime.repositories.aiCandidates.listByChapterId(
       chapter.id,
@@ -986,6 +1011,7 @@ describe("desktop vertical slice", () => {
 
   it("commits a validated multi-file import atomically and opens its first chapter", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
+    await ensureWritingMode(runtime, "professional");
     const user = userEvent.setup();
     renderRoute(runtime, "/settings");
 
@@ -1027,6 +1053,7 @@ describe("desktop vertical slice", () => {
 
   it("blocks credential-required model setup without rendering a secret field in browser development mode", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
+    await ensureWritingMode(runtime, "professional");
     const user = userEvent.setup();
     renderRoute(runtime, "/settings#model-center");
 
@@ -1052,6 +1079,7 @@ describe("desktop vertical slice", () => {
 
   it("preflights local files and inspects a portable bundle without writing it", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
+    await ensureWritingMode(runtime, "professional");
     const user = userEvent.setup();
     renderRoute(runtime, "/settings");
 
@@ -1100,4 +1128,14 @@ describe("desktop vertical slice", () => {
     expect(await screen.findByRole("heading", { name: "Bundle 项目" })).toBeInTheDocument();
     expect(screen.getByText("Bundle 章节")).toBeInTheDocument();
   });
+
+  async function ensureWritingMode(
+    runtime: DesktopRuntime,
+    mode: "direct" | "professional",
+  ): Promise<void> {
+    const preference = await runtime.writingExperience.getOrInitialize();
+    if (preference.mode !== mode) {
+      await runtime.writingExperience.switchMode(mode, preference.revision);
+    }
+  }
 });

@@ -1,16 +1,16 @@
 # InkShadow 非前端工程文档
 
 > 文档状态：`SUPPORTING_CURRENT`  
-> 基于源码复核：2026-08-21  
-> Desktop 当前应用清单版本：`0.2.6`；最新已发布版本：`v0.2.5` 工程预览版  
+> 基于源码复核：2026-08-22  
+> 桌面端当前工作树应用清单版本：`0.2.7`；最新公开版本：`v0.2.6` 工程预发布  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
 > 文档性质：当前实现指引，不把计划代码描述成已部署能力
 
-`v0.2.6` 修复工作树已把迁移上限推进到 Data `0071` / Tauri `74`，并重做本地 SQLite
-生命周期、自动备份和能力验证调用审计；应用清单已升至 `0.2.6`，最终门禁、
-真机验证、干净提交、推送、打包和发布仍待完成。
+`v0.2.6` 已冻结发布 Data `0071` / Tauri `74` 的本地数据库、自动备份和能力验证调用审计修复。
+当前 `v0.2.7` 工作树继续只向前追加到 Data `0075` / Tauri `78`，区分正文结果与方向用途，
+并补充用户故事事实修订、版本整理责任和隐私快照规则；当前工作树全量门禁已通过，真机、干净候选、打包和发布仍待完成。
 当前差异与边界见
-[`../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)。
+[`../execution/2026-08-22-V027-DIRECT-MODE-REMEDIATION.md`](../execution/2026-08-22-V027-DIRECT-MODE-REMEDIATION.md)。
 
 InkShadow 不是只有“前端”和“后端”两块。除用户界面外，仓库还包含：
 
@@ -24,17 +24,17 @@ InkShadow 不是只有“前端”和“后端”两块。除用户界面外，�
 称为云后端。
 
 DESIGN v0.3.1b 只约束目标界面与交互验收；它不会改变 Tauri、数据库或 Desktop 应用版本。
-当前源码应用清单为 0.2.6；最新已发布工程预览安装包仍为 0.2.5。
+当前工作树应用清单为 0.2.7；最新公开工程预览安装包为 v0.2.6。
 
 ## 文档导航与状态
 
-| 状态                    | 文档                                                                                                     | 内容与边界                                                                             |
-| ----------------------- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `SUPPORTING_CURRENT`    | [`CLOUD_BACKEND.md`](CLOUD_BACKEND.md)                                                                   | Cloud API、PostgreSQL、HTTP、服务和后台任务；代码存在不表示生产 Cloud 已部署           |
-| `SUPPORTING_CURRENT`    | [`DESKTOP_NATIVE.md`](DESKTOP_NATIVE.md)                                                                 | Tauri/Rust 可信边界、SQLite、凭据、模型网络、项目密钥和备份；工作树迁移上限 Tauri `74` |
-| `SUPPORTING_CURRENT`    | [`SHARED_PACKAGES.md`](SHARED_PACKAGES.md)                                                               | workspace 领域、应用、数据、导入导出和共享 UI 包；工作树 Data 迁移上限 `0071`          |
-| `SUPPORTING_CURRENT`    | [`ANDROID_OPERATIONS_TOOLING.md`](ANDROID_OPERATIONS_TOOLING.md)                                         | Android POC、部署模板、发布/安全脚本、CI 和 E2E；不属于当前默认创作主链路              |
-| `AUTHORITATIVE_CURRENT` | [`../product-rebuild/02-DATA-REUSE-AND-MIGRATION.md`](../product-rebuild/02-DATA-REUSE-AND-MIGRATION.md) | 数据复用、前向迁移与回滚规则                                                           |
+| 状态                    | 文档                                                                                                     | 内容与边界                                                                            |
+| ----------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `SUPPORTING_CURRENT`    | [`CLOUD_BACKEND.md`](CLOUD_BACKEND.md)                                                                   | Cloud API、PostgreSQL、HTTP、服务和后台任务；代码存在不表示生产 Cloud 已部署          |
+| `SUPPORTING_CURRENT`    | [`DESKTOP_NATIVE.md`](DESKTOP_NATIVE.md)                                                                 | 桌面原生可信边界、本地数据库、凭据、模型网络、项目密钥和备份；工作树原生迁移上限 `78` |
+| `SUPPORTING_CURRENT`    | [`SHARED_PACKAGES.md`](SHARED_PACKAGES.md)                                                               | 工作区领域、应用、数据、导入导出和共享界面包；工作树数据迁移上限 `0075`               |
+| `SUPPORTING_CURRENT`    | [`ANDROID_OPERATIONS_TOOLING.md`](ANDROID_OPERATIONS_TOOLING.md)                                         | Android POC、部署模板、发布/安全脚本、CI 和 E2E；不属于当前默认创作主链路             |
+| `AUTHORITATIVE_CURRENT` | [`../product-rebuild/02-DATA-REUSE-AND-MIGRATION.md`](../product-rebuild/02-DATA-REUSE-AND-MIGRATION.md) | 数据复用、前向迁移与回滚规则                                                          |
 
 - [`../front-end/README.md`](../front-end/README.md)：用户页面、路由和前端接口。
 - [`../GITHUB_PUBLISH_RELEASE_GUIDE.md`](../GITHUB_PUBLISH_RELEASE_GUIDE.md)：GitHub 上传与

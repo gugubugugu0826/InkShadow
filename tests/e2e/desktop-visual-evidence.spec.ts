@@ -12,7 +12,11 @@ import {
   startVisualEvidenceRun,
   type VisualViewportProfile,
 } from "./support/visual-evidence";
-import { expectDirectModeAuthorizationDisclosure } from "./support/writing-experience";
+import {
+  expectDirectModeUsesPlainLanguage,
+  expectFreshInstallDirectMode,
+  switchFreshInstallToProfessionalMode,
+} from "./support/writing-experience";
 
 const BASE_URL = "http://127.0.0.1:1420";
 const APPEARANCE_STORAGE_KEY = "inkshadow.appearance.preference.v1";
@@ -60,18 +64,8 @@ async function captureSurfaceMatrix(browser: Browser, surface: "light" | "dark")
 
   try {
     await openFreshDirectStart(page, surface);
-    const authorization = await expectDirectModeAuthorizationDisclosure(page);
-    await captureVisualEvidence(page, {
-      name: `${surface}-direct-first-authorization-1440x900`,
-      state: "首次直接模式仅授权确定性本地整理；未触发模型服务调用",
-      surfaceSelector: "html",
-      viewportProfile: STANDARD_PROFILE,
-      captureSession: cdp,
-    });
-    await authorization.getByRole("button", { name: "同意并启用直接模式" }).click();
-    await expect(authorization).toBeHidden();
-
     await captureDirectStartMatrix(page, cdp, surface);
+    await captureDirectIdeaMatrix(page, cdp, surface);
     await captureScrolledDevelopmentBannerMatrix(page, cdp, surface);
     const editorUrl = await openProfessionalSampleEditor(page, cdp);
     const projectId = projectIdFromEditorUrl(editorUrl);
@@ -96,6 +90,7 @@ async function captureScrolledDevelopmentBannerMatrix(
     await applyViewportProfile(page, cdp, profile);
     await page.goto(`${BASE_URL}/#/settings`);
     await expect(page.getByRole("heading", { level: 1, name: "设置" })).toBeVisible();
+    await expectDirectModeUsesPlainLanguage(page);
 
     const main = page.locator(".ink-app-shell__main");
     const banner = page.locator(".development-banner");
@@ -148,7 +143,7 @@ async function openFreshDirectStart(page: Page, surface: "light" | "dark"): Prom
   );
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-surface", surface);
-  await expect(page.getByText("直接模式", { exact: true })).toBeVisible();
+  await expectFreshInstallDirectMode(page);
 }
 
 async function captureDirectStartMatrix(
@@ -159,14 +154,41 @@ async function captureDirectStartMatrix(
   for (const profile of TARGET_PROFILES) {
     await applyViewportProfile(page, cdp, profile);
     await page.goto(`${BASE_URL}/#/start`);
-    await expect(page.getByText("直接模式", { exact: true })).toBeVisible();
-    const startWriting = page.getByRole("link", { name: "开始写作" });
+    await expect(page.getByRole("heading", { level: 1, name: "开始写你的故事" })).toBeVisible();
+    await expectDirectModeUsesPlainLanguage(page);
+    const startWriting = page.getByRole("link", { name: "开始创作", exact: true });
     await startWriting.scrollIntoViewIfNeeded();
     await expectMinimumTarget(startWriting);
     await expectNoHorizontalPageOverflow(page);
     await captureVisualEvidence(page, {
       name: `${surface}-direct-start-${profile.id}`,
-      state: "已完成一次性本地整理授权的直接模式启动页",
+      state: "新安装默认的小白模式启动页，开始创作入口清楚可达",
+      surfaceSelector: "html",
+      viewportProfile: profile,
+      captureSession: cdp,
+    });
+  }
+}
+
+async function captureDirectIdeaMatrix(
+  page: Page,
+  cdp: CDPSession,
+  surface: "light" | "dark",
+): Promise<void> {
+  for (const profile of TARGET_PROFILES.filter(({ expectedCssViewport }) =>
+    [800, 1440].includes(expectedCssViewport.width),
+  )) {
+    await applyViewportProfile(page, cdp, profile);
+    await page.goto(`${BASE_URL}/#/create/idea`);
+    await expect(page.getByRole("heading", { level: 1, name: "一句话就够了" })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "一句话" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "开始创作" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "直接写空白正文" })).toBeVisible();
+    await expectDirectModeUsesPlainLanguage(page);
+    await expectNoHorizontalPageOverflow(page);
+    await captureVisualEvidence(page, {
+      name: `${surface}-direct-idea-${profile.id}`,
+      state: "直接模式的一句话创作页，仅保留开始创作与空白正文入口",
       surfaceSelector: "html",
       viewportProfile: profile,
       captureSession: cdp,
@@ -177,7 +199,7 @@ async function captureDirectStartMatrix(
 async function openProfessionalSampleEditor(page: Page, cdp: CDPSession): Promise<string> {
   await applyViewportProfile(page, cdp, STANDARD_PROFILE);
   await page.goto(`${BASE_URL}/#/start`);
-  await page.getByRole("button", { name: "使用专业模式" }).click();
+  await switchFreshInstallToProfessionalMode(page);
   await expect(page.getByRole("link", { name: /从一个想法开始/u })).toBeVisible();
   await page.getByRole("button", { name: "体验示例作品" }).click();
   await expect(page.getByRole("textbox", { name: "章节正文" })).toBeVisible();
@@ -269,16 +291,13 @@ async function captureLongCandidateMatrix(
             new Set(buttons.map((button) => Math.round(button.getBoundingClientRect().top))),
           ),
         );
-      expect(
-        actionRows.length,
-        "Compact Candidate decision buttons must wrap into reachable rows",
-      ).toBeGreaterThan(1);
+      expect(actionRows.length, "窄窗口中的建议决定按钮必须换行且保持可达").toBeGreaterThan(1);
     }
     await expectNoHorizontalOverflow(review);
     await expectNoHorizontalPageOverflow(page);
     await captureVisualEvidence(page, {
       name: `${surface}-long-candidate-fixed-actions-${profile.id}`,
-      state: `专业模式 Candidate 比较；临时建议草稿 ${String(LONG_CANDIDATE_DRAFT_LENGTH)} 字符；固定动作区可达`,
+      state: `专业模式建议比较；临时建议草稿 ${String(LONG_CANDIDATE_DRAFT_LENGTH)} 字符；固定动作区可达`,
       surfaceSelector: "html",
       viewportProfile: profile,
       captureSession: cdp,

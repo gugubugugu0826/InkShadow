@@ -27,6 +27,8 @@ const MAX_MODEL_ID_BYTES: usize = 512;
 const MAX_RESPONSE_BYTES: usize = 64 * 1_024 * 1_024;
 const MAX_IMAGE_BYTES: usize = 48 * 1_024 * 1_024;
 const MAX_IMAGE_EDGE: u32 = 8_192;
+const DEFAULT_GENERATED_IMAGE_FILE_NAME: &str = "墨影图片.png";
+const GENERATED_IMAGE_FILTER_LABEL: &str = "PNG 图片";
 const MAX_IMAGE_PIXELS: u64 = 32 * 1_024 * 1_024;
 const TOKEN_HEX_BYTES: usize = 64;
 
@@ -113,9 +115,9 @@ pub(crate) async fn choose_native_image_destination(
     let selected = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
             .file()
-            .set_title("Save InkShadow generated image")
-            .set_file_name("inkshadow-image.png")
-            .add_filter("PNG image", &["png"])
+            .set_title("保存墨影生成的图片")
+            .set_file_name(DEFAULT_GENERATED_IMAGE_FILE_NAME)
+            .add_filter(GENERATED_IMAGE_FILTER_LABEL, &["png"])
             .blocking_save_file()
     })
     .await
@@ -451,6 +453,12 @@ mod tests {
     // A valid one-pixel PNG. Provider bytes are still verified before any file is created.
     const ONE_PIXEL_PNG_BASE64: &str =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    #[test]
+    fn uses_chinese_image_dialog_defaults() {
+        assert_eq!(DEFAULT_GENERATED_IMAGE_FILE_NAME, "墨影图片.png");
+        assert_eq!(GENERATED_IMAGE_FILTER_LABEL, "PNG 图片");
+    }
 
     #[test]
     fn parses_one_base64_png_and_bounded_usage_without_echoing_provider_text() {

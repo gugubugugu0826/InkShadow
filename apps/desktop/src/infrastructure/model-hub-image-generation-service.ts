@@ -397,7 +397,7 @@ async function resolveTarget(
   ) {
     throw executionError(
       "MODEL_HUB_PRIVACY_BLOCKED",
-      "图片任务只允许本机处理，InkShadow 不会把提示发送到云端模型。",
+      "图片任务只允许本机处理，墨影不会把提示发送到云端模型。",
     );
   }
   return Object.freeze({

@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ToastProvider } from "@inkshadow/ui";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
 import { RuntimeProvider } from "../runtime-context";
@@ -36,6 +36,10 @@ function projectCard(name: string): HTMLElement {
 }
 
 describe("ProjectsPage library states", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
   it("shows only the task-led idea and import entrances for a truly empty library", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     renderPage(runtime);
@@ -49,7 +53,13 @@ describe("ProjectsPage library states", () => {
       "href",
       "/create/import",
     );
+    const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
+    expect(projects.ok && projects.value).toHaveLength(0);
+    expect(await runtime.creativeJourneys.listActive("idea")).toHaveLength(0);
     expect(screen.queryByRole("link", { name: "打开恢复工具" })).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(
+      /AI|模型|调用|上下文|路由|令牌|追踪|候选|费用|待确认/u,
+    );
   });
 
   it("does not mistake an all-archived library for first launch", async () => {
@@ -151,6 +161,26 @@ describe("ProjectsPage library states", () => {
     expect(await screen.findByRole("heading", { name: "雨夜邮局", level: 2 })).toBeVisible();
   });
 
+  it("moves a direct-mode project to the recoverable trash in one click and exposes undo", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.writingExperience.getOrInitialize();
+    await createProject(runtime, "纸灯旧梦");
+    const user = userEvent.setup();
+    renderPage(runtime);
+
+    await screen.findByRole("heading", { name: "纸灯旧梦", level: 2 });
+    await user.click(within(projectCard("纸灯旧梦")).getByRole("button", { name: "移到回收站" }));
+
+    expect(screen.queryByRole("dialog", { name: /移到回收站/u })).not.toBeInTheDocument();
+    expect(await screen.findByText("项目已移到回收站")).toBeVisible();
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "纸灯旧梦", level: 2 })).not.toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "撤销" }));
+    expect(await screen.findByRole("heading", { name: "纸灯旧梦", level: 2 })).toBeVisible();
+  });
+
   it("projects only persisted import checkpoints and explicitly avoids a fabricated percentage", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const project = await createProject(runtime, "旧稿合集");
@@ -185,5 +215,188 @@ describe("ProjectsPage library states", () => {
       "href",
       "/create/import",
     );
+  });
+  it("links an unfinished project to its exact active idea journey despite a malformed snapshot", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await createProject(runtime, "未完成的钟楼");
+    const journeyId = runtime.ids.next();
+    const now = runtime.clock.now();
+    await runtime.creativeJourneys.create(
+      {
+        id: journeyId,
+        kind: "idea",
+        status: "active",
+        currentState: "generation_failed",
+        projectId: project.id,
+        chapterId: null,
+        candidateId: null,
+        revision: 1,
+        snapshot: Object.freeze({ openingSuggestions: "损坏的旧快照" }),
+        createdAt: now,
+        updatedAt: now,
+        completedAt: null,
+      },
+      {
+        id: runtime.ids.next(),
+        journeyId,
+        sequence: 1,
+        kind: "idea",
+        questionKey: null,
+        generationSource: null,
+        providerId: null,
+        modelId: null,
+        taskKey: null,
+        requestId: null,
+        snapshot: Object.freeze({}),
+        createdAt: now,
+      },
+    );
+
+    renderPage(runtime);
+
+    await screen.findByRole("heading", { name: "未完成的钟楼", level: 2 });
+    const card = projectCard("未完成的钟楼");
+    expect(await within(card).findByText("未完成创作")).toBeVisible();
+    expect(within(card).getByText(/继续后仍由你决定使用或放弃结果/u)).toBeVisible();
+    expect(within(card).getByRole("link", { name: "继续未完成创作" })).toHaveAttribute(
+      "href",
+      "/create/idea?journey=" + journeyId,
+    );
+    expect(within(card).getByText("完成或结束这次创作后即可重命名作品。")).toBeVisible();
+    expect(within(card).getByRole("button", { name: "重命名" })).toBeDisabled();
+  });
+
+  it("recovers a created project from its persisted plan when the journey scope write failed", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const projectId = runtime.ids.next();
+    const chapterId = runtime.ids.next();
+    const initialVersionId = runtime.ids.next();
+    const projectName = "关联保存失败的作品";
+    const created = await runtime.useCases.createProject.execute({
+      name: projectName,
+      plannedId: projectId,
+    });
+    if (!created.ok) throw created.error;
+
+    const journeyId = runtime.ids.next();
+    const now = runtime.clock.now();
+    await runtime.creativeJourneys.create(
+      {
+        id: journeyId,
+        kind: "idea",
+        status: "active",
+        currentState: "creating_chapter",
+        projectId: null,
+        chapterId: null,
+        candidateId: null,
+        revision: 1,
+        snapshot: Object.freeze({
+          version: 1,
+          provisioningPlan: Object.freeze({
+            projectId,
+            chapterId,
+            initialVersionId,
+            projectName,
+          }),
+        }),
+        createdAt: now,
+        updatedAt: now,
+        completedAt: null,
+      },
+      {
+        id: runtime.ids.next(),
+        journeyId,
+        sequence: 1,
+        kind: "idea",
+        questionKey: null,
+        generationSource: null,
+        providerId: null,
+        modelId: null,
+        taskKey: null,
+        requestId: null,
+        snapshot: Object.freeze({}),
+        createdAt: now,
+      },
+    );
+
+    renderPage(runtime);
+
+    await screen.findByRole("heading", { name: projectName, level: 2 });
+    const card = projectCard(projectName);
+    expect(await within(card).findByText("未完成创作")).toBeVisible();
+    expect(within(card).getByRole("link", { name: "继续未完成创作" })).toHaveAttribute(
+      "href",
+      "/create/idea?journey=" + journeyId,
+    );
+  });
+
+  it("stops automatic recovery when two active journeys point at the same project", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await createProject(runtime, "存在冲突的作品");
+    const now = runtime.clock.now();
+    const journeyIds = [runtime.ids.next(), runtime.ids.next()] as const;
+    for (const journeyId of journeyIds) {
+      await runtime.creativeJourneys.create(
+        {
+          id: journeyId,
+          kind: "idea",
+          status: "active",
+          currentState: "generation_failed",
+          projectId: project.id,
+          chapterId: null,
+          candidateId: null,
+          revision: 1,
+          snapshot: Object.freeze({ openingSuggestions: "损坏的旧快照" }),
+          createdAt: now,
+          updatedAt: now,
+          completedAt: null,
+        },
+        {
+          id: runtime.ids.next(),
+          journeyId,
+          sequence: 1,
+          kind: "idea",
+          questionKey: null,
+          generationSource: null,
+          providerId: null,
+          modelId: null,
+          taskKey: null,
+          requestId: null,
+          snapshot: Object.freeze({}),
+          createdAt: now,
+        },
+      );
+    }
+
+    renderPage(runtime);
+
+    await screen.findByRole("heading", { name: project.name, level: 2 });
+    expect(screen.getByText("未完成创作记录存在冲突")).toBeVisible();
+    expect(screen.getByText(/1 个作品同时关联了多条未完成创作记录/u)).toBeVisible();
+    const card = projectCard(project.name);
+    expect(within(card).queryByText("未完成创作")).not.toBeInTheDocument();
+    expect(within(card).queryByRole("link", { name: "继续未完成创作" })).not.toBeInTheDocument();
+    expect(within(card).getByRole("link", { name: "打开" })).toHaveAttribute(
+      "href",
+      "/projects/" + project.id,
+    );
+  });
+
+  it("keeps the project list usable and offers retry when unfinished journeys cannot be read", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await createProject(runtime, "仍可打开的作品");
+    const listActive = vi
+      .spyOn(runtime.creativeJourneys, "listActive")
+      .mockRejectedValueOnce(new Error("simulated journey read failure"));
+    const user = userEvent.setup();
+
+    renderPage(runtime);
+
+    expect(await screen.findByRole("heading", { name: "仍可打开的作品", level: 2 })).toBeVisible();
+    expect(screen.getByText("未完成创作读取失败")).toBeVisible();
+    expect(screen.getByRole("link", { name: "打开" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(screen.queryByText("未完成创作读取失败")).not.toBeInTheDocument());
+    expect(listActive).toHaveBeenCalledTimes(2);
   });
 });

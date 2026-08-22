@@ -155,7 +155,7 @@ export function UsageCenterPage({ reader, now = currentDate }: UsageCenterPagePr
         <div>
           <p className="page-heading__eyebrow">只读的本地调用账本</p>
           <h1>调用与费用</h1>
-          <p>查看 AI 做了什么、使用了哪个模型、消耗了多少 token，以及可确认的费用估算。</p>
+          <p>查看智能创作做了什么、使用了哪个模型、消耗了多少内容额度，以及可确认的费用估算。</p>
         </div>
         <div className="page-heading__actions">
           <Button
@@ -173,7 +173,7 @@ export function UsageCenterPage({ reader, now = currentDate }: UsageCenterPagePr
 
       <InlineAlert
         title="记录只存本机"
-        description="这里不保存正文、提示词或 API Key。金额是按本地价格元数据计算的估算，不代表供应商最终账单；缺少 token 回执或价格时会明确显示“费用未知”。"
+        description="这里不保存正文、提示词或接口密钥。金额是按本地价格元数据计算的估算，不代表供应商最终账单；缺少内容额度回执或价格时会明确显示“费用未知”。"
       />
 
       <PageStateBoundary
@@ -229,7 +229,7 @@ export function UsageCenterPage({ reader, now = currentDate }: UsageCenterPagePr
                 description={
                   hasDimensionFilters
                     ? "换一个作品、任务、供应商或模型，或者清除筛选。"
-                    : "完成一次真实 AI 调用后，这里会显示供应商、模型、token、费用和隐私去向。"
+                    : "完成一次真实智能创作任务后，这里会显示供应商、模型、内容额度、费用和隐私去向。"
                 }
                 {...(hasDimensionFilters
                   ? {
@@ -373,7 +373,7 @@ function UsageSummaryCards({ summary }: { readonly summary: UsageAggregate }) {
         description={`${formatInteger(summary.successCount)} 成功 · ${formatInteger(summary.failureCount)} 失败 · ${formatInteger(summary.activeCount)} 进行中`}
       />
       <SummaryCard
-        title={`${formatInteger(summary.inputTokens + summary.outputTokens)} tokens`}
+        title={`${formatInteger(summary.inputTokens + summary.outputTokens)} 个内容额度`}
         description={
           summary.tokenUsageUnknownCount > 0
             ? `输入 ${formatInteger(summary.inputTokens)} · 输出 ${formatInteger(summary.outputTokens)} · ${String(summary.tokenUsageUnknownCount)} 次未知`
@@ -500,7 +500,7 @@ function BreakdownPanel({
             <TableRow>
               <TableHead>{breakdownHeading(dimension)}</TableHead>
               <TableHead>调用</TableHead>
-              <TableHead>Token</TableHead>
+              <TableHead>内容额度</TableHead>
               <TableHead>费用估算</TableHead>
               <TableHead>结果</TableHead>
               <TableHead>本地</TableHead>
@@ -552,7 +552,7 @@ function UsageDetailsTable({ snapshot }: { readonly snapshot: UsageCenterSnapsho
               <TableHead>时间</TableHead>
               <TableHead>作品 / 章节 / 任务</TableHead>
               <TableHead>供应商 / 模型</TableHead>
-              <TableHead>Token</TableHead>
+              <TableHead>内容额度</TableHead>
               <TableHead>费用估算</TableHead>
               <TableHead>结果</TableHead>
               <TableHead>隐私去向</TableHead>

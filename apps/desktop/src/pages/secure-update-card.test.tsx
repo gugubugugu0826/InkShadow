@@ -48,6 +48,13 @@ function configuredUpdater(overrides: Partial<SecureUpdaterPort> = {}): SecureUp
 }
 
 describe("SecureUpdateCard", () => {
+  it("uses a Chinese fallback when the current version cannot be read", async () => {
+    render(<SecureUpdateCard updater={undefined} online />);
+
+    expect(await screen.findByText(/当前版本 无法确认/u)).toBeVisible();
+    expect(screen.queryByText(/unknown/u)).not.toBeInTheDocument();
+  });
+
   it("shows a fail-closed disabled state without accepting a runtime source", async () => {
     const updater = configuredUpdater({
       inspectConfiguration: vi.fn().mockResolvedValue({

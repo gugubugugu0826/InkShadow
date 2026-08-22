@@ -39,6 +39,8 @@ describe("ModelHubChapterSummaryModel", () => {
           catalogEntryId: inspection.catalogEntryId,
           modelId: inspection.modelId,
           usedFallback: inspection.usedFallback,
+          privacyPolicy: inspection.privacyPolicy,
+          dataDestination: inspection.dataDestination,
         });
         await request.onFinalBeforeProviderDispatch?.({
           generationId: uuid(20),
@@ -47,6 +49,8 @@ describe("ModelHubChapterSummaryModel", () => {
           catalogEntryId: inspection.catalogEntryId,
           modelId: inspection.modelId,
           usedFallback: inspection.usedFallback,
+          privacyPolicy: inspection.privacyPolicy,
+          dataDestination: inspection.dataDestination,
         });
         return modelExecution();
       },
@@ -117,6 +121,8 @@ describe("ModelHubChapterSummaryModel", () => {
           catalogEntryId: inspection.catalogEntryId,
           modelId: inspection.modelId,
           usedFallback: inspection.usedFallback,
+          privacyPolicy: inspection.privacyPolicy,
+          dataDestination: inspection.dataDestination,
           localOnlyEligible: false,
         });
         await request.onFinalBeforeProviderDispatch?.({
@@ -126,6 +132,8 @@ describe("ModelHubChapterSummaryModel", () => {
           catalogEntryId: inspection.catalogEntryId,
           modelId: inspection.modelId,
           usedFallback: inspection.usedFallback,
+          privacyPolicy: inspection.privacyPolicy,
+          dataDestination: inspection.dataDestination,
           localOnlyEligible: false,
         });
         providerDispatch();
@@ -173,6 +181,8 @@ describe("ModelHubChapterSummaryModel", () => {
           catalogEntryId: inspection.catalogEntryId,
           modelId: inspection.modelId,
           usedFallback: inspection.usedFallback,
+          privacyPolicy: inspection.privacyPolicy,
+          dataDestination: inspection.dataDestination,
           localOnlyEligible: false,
         } as const;
         await request.onBeforeDispatch?.(selection);
@@ -221,6 +231,8 @@ describe("ModelHubChapterSummaryModel", () => {
           catalogEntryId: inspection.catalogEntryId,
           modelId: inspection.modelId,
           usedFallback: inspection.usedFallback,
+          privacyPolicy: inspection.privacyPolicy,
+          dataDestination: inspection.dataDestination,
           localOnlyEligible: true,
         });
         return modelExecution();
@@ -264,6 +276,8 @@ describe("ModelHubChapterSummaryModel", () => {
           catalogEntryId: inspection.catalogEntryId,
           modelId: inspection.modelId,
           usedFallback: inspection.usedFallback,
+          privacyPolicy: inspection.privacyPolicy,
+          dataDestination: inspection.dataDestination,
         });
         return modelExecution("deepseek");
       },

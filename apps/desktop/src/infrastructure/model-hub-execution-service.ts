@@ -116,6 +116,8 @@ export type ModelHubTextDispatchSelection = Readonly<{
   catalogEntryId: string;
   modelId: string;
   usedFallback: boolean;
+  privacyPolicy: NovelTaskRoute["privacyPolicy"];
+  dataDestination: "local" | "remote";
   /** True only for an evidence-backed local model on a loopback endpoint. */
   localOnlyEligible?: boolean;
 }>;
@@ -327,6 +329,8 @@ export async function executeModelHubTextTask(
       catalogEntryId: target.catalogEntry.id,
       modelId: target.catalogEntry.providerModelId,
       usedFallback,
+      privacyPolicy: route.privacyPolicy,
+      dataDestination: target.dataDestination,
       localOnlyEligible:
         target.dataDestination === "local" &&
         target.costPrivacy.evidenceSource !== "unknown" &&
@@ -349,6 +353,8 @@ export async function executeModelHubTextTask(
       catalogEntryId: current.target.catalogEntry.id,
       modelId: current.target.catalogEntry.providerModelId,
       usedFallback: current.usedFallback,
+      privacyPolicy: current.route.privacyPolicy,
+      dataDestination: current.target.dataDestination,
       localOnlyEligible:
         current.target.dataDestination === "local" &&
         current.target.costPrivacy.evidenceSource !== "unknown" &&
@@ -362,6 +368,8 @@ export async function executeModelHubTextTask(
       catalogEntryId: current.target.catalogEntry.id,
       modelId: current.target.catalogEntry.providerModelId,
       usedFallback: current.usedFallback,
+      privacyPolicy: current.route.privacyPolicy,
+      dataDestination: current.target.dataDestination,
       localOnlyEligible:
         current.target.dataDestination === "local" &&
         current.target.costPrivacy.evidenceSource !== "unknown" &&

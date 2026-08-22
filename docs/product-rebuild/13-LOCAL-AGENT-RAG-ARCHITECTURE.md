@@ -1,7 +1,7 @@
 # v0.2.5 已发布：本地 Agent 与 RAG 当前架构
 
 > 现实快照日期：2026-08-20  
-> 当前应用清单：`0.2.6`；最新公开基线：[`v0.2.5`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5) 工程预览，来源提交：`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`  
+> 当前工作树应用清单：`0.2.7`；最新公开版本：[`v0.2.6`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.6) 工程预发布；下方来源提交与制品指纹属于 `v0.2.5` 历史冻结证据  
 > annotated tag object：`51dfd64ba22e9771131f251cdc778ee06f89192d`；自动门禁：`RELEASE_VERIFIED`  
 > 外部环境：`BLOCKED_EXTERNAL`（真人 Windows Tauri/Wry、真实 Provider、系统 200% DPI、外部应用打开）  
 > 图例：实线表示当前代码路径；虚线只表示 `DEFERRED` 或 `NOT_IMPLEMENTED`，不能按已交付理解。

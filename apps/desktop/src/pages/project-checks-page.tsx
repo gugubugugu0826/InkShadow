@@ -47,6 +47,7 @@ import {
   type SupplementalFindingEvidenceIdentity,
 } from "../infrastructure/chapter-supplemental-finding-verifier";
 import { createEvidenceCorrectionCandidate } from "../infrastructure/evidence-correction-candidate";
+import { useWritingExperience } from "../hooks/use-writing-experience";
 import { projectOrdinaryUiError, UiActionError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 import { ConsistencyInvestigationPanel } from "../components/consistency-investigation-panel";
@@ -123,6 +124,8 @@ interface SupplementalFindingActionProps {
 
 export function ProjectChecksPage() {
   const runtime = useRuntime();
+  const writingExperience = useWritingExperience();
+  const directMode = writingExperience.preference?.mode === "direct";
   const navigate = useNavigate();
   const { projectId: projectIdValue = "" } = useParams<{ projectId: string }>();
   const parsedProjectId = useMemo(() => parseUuidV7(projectIdValue), [projectIdValue]);
@@ -480,6 +483,22 @@ export function ProjectChecksPage() {
     validationSnapshot.chapterVersionId === selectedChapter.currentVersionId;
   const advancedTools = advancedProjectTools(runtime, projectRoot);
 
+  if (writingExperience.preference === null) {
+    return (
+      <div className="desktop-page" aria-busy={writingExperience.loading}>
+        {writingExperience.loading ? (
+          <div role="status">正在读取写作方式…</div>
+        ) : (
+          <ErrorState
+            title="暂时无法打开检查"
+            description={writingExperience.error ?? "写作方式没有读取成功，请重试。"}
+            primaryAction={{ label: "重试", onClick: () => void writingExperience.refresh() }}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="desktop-page">
       <header className="page-heading">
@@ -498,7 +517,7 @@ export function ProjectChecksPage() {
         description="结果会同时展示当前原文、冲突设定、双方来源、严重程度和修改建议。检查只读，不会自动修改正文或正式设定。"
       />
 
-      {projectId !== null && runtime.consistencyInvestigation !== null && (
+      {!directMode && projectId !== null && runtime.consistencyInvestigation !== null && (
         <ConsistencyInvestigationPanel
           projectId={projectId}
           runtime={runtime.consistencyInvestigation}
@@ -529,8 +548,9 @@ export function ProjectChecksPage() {
           <CardHeader>
             <CardTitle headingLevel={2}>选择要检查的章节</CardTitle>
             <CardDescription>
-              正文冲突只检查该章节当前已保存版本；叙事分析只读取已确认资料和因果图，不读取未接受的
-              AI 建议版本。
+              {directMode
+                ? "只检查当前已保存的正文和已经确认的设定，不会改动正文。"
+                : "正文冲突只检查该章节当前已保存版本；叙事分析只读取已确认资料和因果图，不读取未接受的 AI 建议版本。"}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -592,8 +612,12 @@ export function ProjectChecksPage() {
       <section aria-labelledby="check-results-heading">
         <div className="section-heading">
           <div>
-            <h2 id="check-results-heading">确定性检查</h2>
-            <p>这里先运行可由明确规则和精确证据判断的检查；处理操作不会改动正文。</p>
+            <h2 id="check-results-heading">{directMode ? "检查结果" : "确定性检查"}</h2>
+            <p>
+              {directMode
+                ? "只显示有明确原文依据的问题。"
+                : "这里先运行可由明确规则和精确证据判断的检查；处理操作不会改动正文。"}
+            </p>
           </div>
           {result !== null && (
             <Badge tone={unresolvedCount === 0 ? "success" : "warning"}>
@@ -601,7 +625,9 @@ export function ProjectChecksPage() {
             </Badge>
           )}
         </div>
-        {result !== null && <DeterministicCoverageSummary coverage={result.coverage} />}
+        {!directMode && result !== null && (
+          <DeterministicCoverageSummary coverage={result.coverage} />
+        )}
         {result === null ? (
           <EmptyState
             title="还没有检查结果"
@@ -622,6 +648,7 @@ export function ProjectChecksPage() {
                 issue={issue}
                 busyIssue={busyIssue}
                 actionsDisabled={!snapshotIsCurrent}
+                showSuggestionAction={!directMode}
                 onCreateCandidate={() => void createCorrectionCandidate(issue)}
                 onResolve={(action) => void resolveIssue(issue, action)}
                 onUndoIgnore={() => void undoIgnore(issue)}
@@ -659,7 +686,7 @@ export function ProjectChecksPage() {
         />
       )}
 
-      {result !== null && (
+      {!directMode && result !== null && (
         <InlineAlert
           tone="info"
           title="普通检查不会调用 AI"
@@ -683,25 +710,27 @@ export function ProjectChecksPage() {
         </ul>
       </details>
 
-      <details>
-        <summary>高级工具</summary>
-        <p>这些入口保留给需要进一步排查的用户，不属于普通项目的一级导航。</p>
-        <div className="settings-grid">
-          {advancedTools.map((tool) => (
-            <Card key={tool.to}>
-              <CardHeader>
-                <CardTitle>{tool.label}</CardTitle>
-                <CardDescription>{tool.description}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Link className="button-link button-link--secondary" to={tool.to}>
-                  打开{tool.label}
-                </Link>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      </details>
+      {!directMode && (
+        <details>
+          <summary>高级工具</summary>
+          <p>这些入口保留给需要进一步排查的用户，不属于普通项目的一级导航。</p>
+          <div className="settings-grid">
+            {advancedTools.map((tool) => (
+              <Card key={tool.to}>
+                <CardHeader>
+                  <CardTitle>{tool.label}</CardTitle>
+                  <CardDescription>{tool.description}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <Link className="button-link button-link--secondary" to={tool.to}>
+                    打开{tool.label}
+                  </Link>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </details>
+      )}
     </div>
   );
 }
@@ -1952,6 +1981,7 @@ function IssueCard({
   actionsDisabled,
   busyIssue,
   issue,
+  showSuggestionAction,
   onCreateCandidate,
   onResolve,
   onUndoIgnore,
@@ -1959,6 +1989,7 @@ function IssueCard({
   readonly actionsDisabled: boolean;
   readonly busyIssue: string | null;
   readonly issue: ChapterValidationUiIssue;
+  readonly showSuggestionAction: boolean;
   readonly onCreateCandidate: () => void;
   readonly onResolve: (action: ChapterValidationUiAction) => void;
   readonly onUndoIgnore: () => void;
@@ -2002,15 +2033,17 @@ function IssueCard({
         <div className="settings-actions" aria-label={`${issueLabels[issue.type]}处理操作`}>
           {issue.resolution.status === "unresolved" ? (
             <>
-              <Button
-                size="sm"
-                variant="ai-primary"
-                loading={busyIssue === `${issue.id}:create_candidate`}
-                disabled={busy || issue.currentEvidence.length === 0}
-                onClick={onCreateCandidate}
-              >
-                按设定生成修改建议
-              </Button>
+              {showSuggestionAction && (
+                <Button
+                  size="sm"
+                  variant="ai-primary"
+                  loading={busyIssue === `${issue.id}:create_candidate`}
+                  disabled={busy || issue.currentEvidence.length === 0}
+                  onClick={onCreateCandidate}
+                >
+                  按设定生成修改建议
+                </Button>
+              )}
               <Button
                 size="sm"
                 variant="ghost"

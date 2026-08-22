@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     sync::Arc,
@@ -27,6 +28,8 @@ use crate::path_tickets::{
 };
 
 const DATABASE_FILE_NAME: &str = "inkshadow.db";
+const PRE_RESTORE_BACKUP_DIRECTORY: &str = "pre-restore-backups";
+const PRE_RESTORE_BACKUP_VERSION_DIRECTORY: &str = "v1";
 const MAX_SQL_BYTES: usize = 1_000_000;
 const MAX_BIND_VALUES: usize = 16_000;
 const MAX_BIND_BYTES: usize = 32 * 1024 * 1024;
@@ -1348,8 +1351,8 @@ pub(crate) async fn native_choose_backup_destination(
         state,
         path_tickets,
         PathTicketPurpose::BackupDestination,
-        "InkShadow backup",
-        "inkshadow-backup.db",
+        "保存墨影备份",
+        "墨影备份.db",
     )
     .await
 }
@@ -1360,15 +1363,40 @@ pub(crate) async fn native_choose_pre_restore_backup_destination(
     state: State<'_, NativeSqliteState>,
     path_tickets: State<'_, PathTicketState>,
 ) -> Result<Option<PathTicketReceipt>, NativeSqliteError> {
-    choose_backup_destination(
-        app,
+    let selected = managed_pre_restore_backup_destination(&app)?;
+    issue_selected_path(
         state,
         path_tickets,
         PathTicketPurpose::PreRestoreRollbackDestination,
-        "InkShadow pre-restore rollback backup",
-        "inkshadow-pre-restore.db",
+        Some(selected),
     )
     .await
+}
+
+fn managed_pre_restore_backup_destination(app: &AppHandle) -> Result<PathBuf, NativeSqliteError> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| NativeSqliteError::invalid_path_ticket())?;
+    managed_pre_restore_backup_destination_at(&base)
+}
+
+fn managed_pre_restore_backup_destination_at(base: &Path) -> Result<PathBuf, NativeSqliteError> {
+    fs::create_dir_all(base).map_err(|_| NativeSqliteError::invalid_path_ticket())?;
+    let canonical_base = base
+        .canonicalize()
+        .map_err(|_| NativeSqliteError::invalid_path_ticket())?;
+    let root = canonical_base
+        .join(PRE_RESTORE_BACKUP_DIRECTORY)
+        .join(PRE_RESTORE_BACKUP_VERSION_DIRECTORY);
+    fs::create_dir_all(&root).map_err(|_| NativeSqliteError::invalid_path_ticket())?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| NativeSqliteError::invalid_path_ticket())?;
+    if canonical_root == canonical_base || !canonical_root.starts_with(&canonical_base) {
+        return Err(NativeSqliteError::invalid_path_ticket());
+    }
+    Ok(canonical_root.join(format!("inkshadow-pre-restore-{}.db", uuid::Uuid::now_v7())))
 }
 
 async fn choose_backup_destination(
@@ -1384,7 +1412,7 @@ async fn choose_backup_destination(
             .file()
             .set_title(title)
             .set_file_name(file_name)
-            .add_filter("SQLite database", &["db", "sqlite", "sqlite3"])
+            .add_filter("数据库备份", &["db", "sqlite", "sqlite3"])
             .blocking_save_file()
     })
     .await
@@ -1404,8 +1432,8 @@ pub(crate) async fn native_choose_restore_source(
     let selected = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
             .file()
-            .set_title("Select an InkShadow backup")
-            .add_filter("SQLite database", &["db", "sqlite", "sqlite3"])
+            .set_title("选择墨影备份")
+            .add_filter("数据库备份", &["db", "sqlite", "sqlite3"])
             .blocking_pick_file()
     })
     .await
@@ -2984,6 +3012,33 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn managed_pre_restore_backup_destination_is_unique_and_app_owned() {
+        let directory = TestDirectory::create();
+        let first = managed_pre_restore_backup_destination_at(directory.path())
+            .expect("first managed pre-restore destination");
+        let second = managed_pre_restore_backup_destination_at(directory.path())
+            .expect("second managed pre-restore destination");
+        let expected_parent = directory
+            .path()
+            .canonicalize()
+            .expect("canonical test directory")
+            .join(PRE_RESTORE_BACKUP_DIRECTORY)
+            .join(PRE_RESTORE_BACKUP_VERSION_DIRECTORY);
+
+        assert_eq!(first.parent(), Some(expected_parent.as_path()));
+        assert_eq!(second.parent(), Some(expected_parent.as_path()));
+        assert_ne!(first, second);
+        assert!(!first.exists());
+        assert!(!second.exists());
+        assert!(first
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(
+                |name| name.starts_with("inkshadow-pre-restore-") && name.ends_with(".db")
+            ));
     }
 
     async fn open_memory() -> (NativeSqliteBridge, String) {

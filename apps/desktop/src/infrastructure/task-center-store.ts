@@ -100,10 +100,90 @@ interface ClockLike {
   now(): string;
 }
 
-interface StoredTaskCenter {
+export interface DevelopmentTaskCenterState {
   readonly schemaVersion: 1;
   tasks: TaskSnapshot[];
   notifications: NotificationSnapshot[];
+}
+
+type StoredTaskCenter = DevelopmentTaskCenterState;
+
+export interface BrowserDevelopmentTaskCenterPersistence {
+  read(): DevelopmentTaskCenterState;
+  write(database: DevelopmentTaskCenterState): void;
+}
+
+export function createDevelopmentTaskIfAbsent(
+  database: DevelopmentTaskCenterState,
+  input: CreateTaskInput,
+): CreateTaskSnapshotResult {
+  const task = unwrap(Task.create(input));
+  const existingSnapshot = database.tasks.find(
+    ({ idempotencyKey }) => idempotencyKey === task.idempotencyKey,
+  );
+  if (existingSnapshot !== undefined) {
+    const existing = rehydrateTask(existingSnapshot);
+    if (!existing.isSameRequestAs(task)) {
+      throw new TaskEngineError({
+        code: "TASK_IDEMPOTENCY_CONFLICT",
+        message: "Idempotency key already belongs to a different task request.",
+      });
+    }
+    return { task: existing.toSnapshot(), created: false };
+  }
+  database.tasks.push(task.toSnapshot());
+  return { task: task.toSnapshot(), created: true };
+}
+
+export function normalizeDevelopmentTaskCenterState(value: unknown): DevelopmentTaskCenterState {
+  try {
+    if (!isStoredTaskCenter(value)) {
+      throw new Error("Invalid development task center shape.");
+    }
+    const database = structuredClone(value);
+    database.tasks.forEach(rehydrateTask);
+    database.notifications.forEach(rehydrateNotification);
+    return database;
+  } catch (error: unknown) {
+    if (error instanceof TaskEngineError) throw error;
+    throw taskCenterRepositoryError(error);
+  }
+}
+
+export function readDevelopmentTaskCenterState(storage: Storage): DevelopmentTaskCenterState {
+  const serialized = storage.getItem(DEVELOPMENT_TASK_CENTER_KEY);
+  if (serialized === null) {
+    return emptyTaskCenter();
+  }
+  try {
+    const parsed: unknown = JSON.parse(serialized);
+    return normalizeDevelopmentTaskCenterState(parsed);
+  } catch (error: unknown) {
+    if (error instanceof TaskEngineError) {
+      throw error;
+    }
+    throw taskCenterRepositoryError(error);
+  }
+}
+
+function browserTaskCenterStoragePersistence(
+  storage: Storage,
+): BrowserDevelopmentTaskCenterPersistence {
+  return {
+    read: () => readDevelopmentTaskCenterState(storage),
+    write: (database) => {
+      storage.setItem(DEVELOPMENT_TASK_CENTER_KEY, JSON.stringify(database));
+    },
+  };
+}
+
+function isStorage(value: Storage | BrowserDevelopmentTaskCenterPersistence): value is Storage {
+  return (
+    "getItem" in value &&
+    typeof value.getItem === "function" &&
+    "setItem" in value &&
+    typeof value.setItem === "function"
+  );
 }
 
 interface IdRow {
@@ -428,10 +508,16 @@ export class TauriTaskCenterStore implements TaskCenterStore {
 }
 
 export class BrowserDevelopmentTaskCenterStore implements TaskCenterStore {
+  private readonly persistence: BrowserDevelopmentTaskCenterPersistence;
+
   public constructor(
-    private readonly storage: Storage,
+    storageOrPersistence: Storage | BrowserDevelopmentTaskCenterPersistence,
     private readonly clock: ClockLike,
-  ) {}
+  ) {
+    this.persistence = isStorage(storageOrPersistence)
+      ? browserTaskCenterStoragePersistence(storageOrPersistence)
+      : storageOrPersistence;
+  }
 
   public async load(): Promise<TaskCenterSnapshot> {
     await this.recoverExpiredTasks();
@@ -483,24 +569,7 @@ export class BrowserDevelopmentTaskCenterStore implements TaskCenterStore {
   }
 
   public enqueueTask(input: CreateTaskInput): Promise<CreateTaskSnapshotResult> {
-    return this.mutate((database) => {
-      const task = unwrap(Task.create(input));
-      const existingSnapshot = database.tasks.find(
-        ({ idempotencyKey }) => idempotencyKey === task.idempotencyKey,
-      );
-      if (existingSnapshot !== undefined) {
-        const existing = rehydrateTask(existingSnapshot);
-        if (!existing.isSameRequestAs(task)) {
-          throw new TaskEngineError({
-            code: "TASK_IDEMPOTENCY_CONFLICT",
-            message: "Idempotency key already belongs to a different task request.",
-          });
-        }
-        return { task: existing.toSnapshot(), created: false };
-      }
-      database.tasks.push(task.toSnapshot());
-      return { task: task.toSnapshot(), created: true };
-    });
+    return this.mutate((database) => createDevelopmentTaskIfAbsent(database, input));
   }
 
   public startTask(
@@ -651,20 +720,9 @@ export class BrowserDevelopmentTaskCenterStore implements TaskCenterStore {
   }
 
   private read(): StoredTaskCenter {
-    const serialized = this.storage.getItem(DEVELOPMENT_TASK_CENTER_KEY);
-    if (serialized === null) {
-      return emptyTaskCenter();
-    }
-
     try {
-      const parsed: unknown = JSON.parse(serialized);
-      if (!isStoredTaskCenter(parsed)) {
-        throw new Error("Invalid development task center shape.");
-      }
-      const database = structuredClone(parsed);
-      database.tasks.forEach(rehydrateTask);
-      database.notifications.forEach(rehydrateNotification);
-      return database;
+      const parsed: unknown = this.persistence.read();
+      return normalizeDevelopmentTaskCenterState(parsed);
     } catch (error: unknown) {
       if (error instanceof TaskEngineError) {
         throw error;
@@ -674,7 +732,7 @@ export class BrowserDevelopmentTaskCenterStore implements TaskCenterStore {
   }
 
   private write(database: StoredTaskCenter): void {
-    this.storage.setItem(DEVELOPMENT_TASK_CENTER_KEY, JSON.stringify(database));
+    this.persistence.write(database);
   }
 
   private transitionTask(

@@ -111,7 +111,7 @@ export async function connectQuickModelProvider(
   if (existing !== null && existing.providerKind !== input.provider) {
     throw quickError(
       "QUICK_MODEL_CONNECTION_CONFLICT",
-      "这条已保存连接属于另一家供应商。请到完整 Model Hub 中检查后再试。",
+      "这条已保存连接属于另一家供应商。请到模型中心检查后再试。",
       false,
     );
   }
@@ -133,7 +133,7 @@ export async function connectQuickModelProvider(
     if (submittedSecret === undefined && !credentialConfigured) {
       throw quickError(
         "QUICK_MODEL_CREDENTIAL_REQUIRED",
-        "请填写 API Key。它只会保存到 Windows 凭据管理器，不会写入墨影数据库。",
+        "请填写接口密钥。它只会保存到 Windows 凭据管理器，不会写入墨影数据库。",
         false,
       );
     }
@@ -335,7 +335,7 @@ async function savePreparedCredential(
     if (!summary.configured) {
       throw quickError(
         "QUICK_MODEL_STAGING_CREDENTIAL_FAILED",
-        "Windows 凭据管理器没有确认待验证凭据已保存。原有 API Key 没有被改动。",
+        "Windows 凭据管理器没有确认待验证凭据已保存。原有接口密钥没有被改动。",
       );
     }
   } catch (cause: unknown) {
@@ -343,7 +343,7 @@ async function savePreparedCredential(
       ? cause
       : quickError(
           "QUICK_MODEL_STAGING_CREDENTIAL_FAILED",
-          "无法准备待验证连接凭据。原有 API Key 没有被改动，请检查 Windows 凭据管理器后重试。",
+          "无法准备待验证连接凭据。原有接口密钥没有被改动，请检查 Windows 凭据管理器后重试。",
         );
   }
 }
@@ -708,7 +708,7 @@ async function quickBookStartProbeDisclosure(
     privacy: local
       ? "固定验证只发给这台电脑上的模型，不发送作品正文或灵感。"
       : "固定验证会发到所选供应商；不包含作品正文、灵感、设定或凭据。供应商留存与训练政策以其当前条款为准。",
-    sends: Object.freeze(["固定短句“只回复：OK”", "最多 64 个输出 token"]),
+    sends: Object.freeze(["固定短句“只回复：OK”", "最多 64 个输出内容额度"]),
     maximumProviderCalls: 1,
     automaticRetryCount: 0,
     estimatedMaximumCostMicros: null,
@@ -750,7 +750,7 @@ async function resolveConnectionId(
   }
   throw quickError(
     "QUICK_MODEL_CONNECTION_ID_EXHAUSTED",
-    "无法为新的供应商连接分配本地标识。请到完整 Model Hub 检查已退役连接。",
+    "无法为新的供应商连接分配本地标识。请到模型中心检查已退役连接。",
     false,
   );
 }
@@ -784,7 +784,7 @@ function assertDesktopGateway(runtime: DesktopRuntime): void {
   if (runtime.mode !== "tauri") {
     throw quickError(
       "QUICK_MODEL_DESKTOP_REQUIRED",
-      "浏览器预览不能保存 API Key 或连接本机模型。你可以先跳过，桌面版中再连接。",
+      "浏览器预览不能保存接口密钥或连接本机模型。你可以先跳过，桌面版中再连接。",
       false,
     );
   }
@@ -804,7 +804,7 @@ function validateSecret(secret: string): void {
   ) {
     throw quickError(
       "QUICK_MODEL_CREDENTIAL_INVALID",
-      "API Key 格式无效。请重新从供应商控制台复制完整 Key。",
+      "接口密钥格式无效。请重新从模型服务控制台复制完整密钥。",
       false,
     );
   }
@@ -859,7 +859,7 @@ function normalizeQuickError(
   if (/AUTH|CREDENTIAL|UNAUTHORIZED|FORBIDDEN|401|403/u.test(code)) {
     return quickError(
       code,
-      "认证没有通过。请检查 API Key 是否完整、有效，并确认账号有模型访问权限。",
+      "认证没有通过。请检查接口密钥是否完整、有效，并确认账号有模型访问权限。",
       false,
     );
   }

@@ -10,6 +10,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
+import { DEVELOPMENT_WRITING_EXPERIENCE_KEY } from "../infrastructure/writing-experience-store";
 import {
   findSupplementalFindingResolution,
   supplementalEvidenceSignature,
@@ -40,9 +41,30 @@ function supplementalResolutionSummary(
   };
 }
 
+function seedWritingExperience(mode: "direct" | "professional"): void {
+  const timestamp = "2026-08-22T00:00:00.000Z";
+  window.localStorage.setItem(
+    DEVELOPMENT_WRITING_EXPERIENCE_KEY,
+    JSON.stringify({
+      schemaVersion: 1,
+      preference: {
+        mode,
+        initializationSource: "user",
+        directLocalOrganizationAuthorizedAt: mode === "direct" ? timestamp : null,
+        revision: 1,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      grants: {},
+      grantAudit: [],
+    }),
+  );
+}
+
 describe("ProjectChecksPage", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    seedWritingExperience("professional");
   });
 
   it("does not display a supplemental disposition from another immutable version", () => {
@@ -129,6 +151,25 @@ describe("ProjectChecksPage", () => {
     expect(screen.getByText("普通检查不会调用 AI")).toBeInTheDocument();
     expect(screen.getByText(/使用页面上方的一致性调查/u)).toBeInTheDocument();
     expect(aiReview).not.toHaveBeenCalled();
+  });
+
+  it("keeps direct checks task-focused and hides professional investigation controls", async () => {
+    window.localStorage.clear();
+    seedWritingExperience("direct");
+    const user = userEvent.setup();
+    const fixture = await seededRuntime(true);
+    renderPage(fixture.runtime, fixture.projectId);
+
+    await user.click(await screen.findByRole("button", { name: "检查本章" }));
+
+    expect(await screen.findByRole("heading", { name: "检查结果" })).toBeVisible();
+    expect(screen.queryByText("普通检查不会调用 AI")).not.toBeInTheDocument();
+    expect(screen.queryByText("一致性调查")).not.toBeInTheDocument();
+    expect(screen.queryByText("高级工具")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "按设定生成修改建议" })).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(
+      /AI|模型|调用|上下文|路由|令牌|追踪|候选|费用|待确认/u,
+    );
   });
 
   it("shows both evidence sources and persists a reversible ignore", async () => {
@@ -304,7 +345,7 @@ describe("ProjectChecksPage", () => {
     const fixture = await seededRuntime(false);
     renderPage(fixture.runtime, fixture.projectId);
 
-    const disclosure = screen.getByText("高级工具").closest("details");
+    const disclosure = (await screen.findByText("高级工具")).closest("details");
     if (!(disclosure instanceof HTMLDetailsElement)) {
       throw new Error("找不到高级工具折叠区域。 ");
     }

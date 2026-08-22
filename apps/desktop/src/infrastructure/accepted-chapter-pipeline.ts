@@ -18,6 +18,8 @@ import type { CreateTaskSnapshotResult, TaskCenterStore } from "./task-center-st
 
 export const ACCEPTED_CHAPTER_PIPELINE_TASK_TYPE = "story.accepted-version.process";
 export const ACCEPTED_CHAPTER_PIPELINE_OPERATION = "rebuild-derived-story-state";
+export const ACCEPTED_CHAPTER_FACT_PREFLIGHT_FAILURE_CAUSE_CODE =
+  "CURRENT_SAVED_VERSION_FACTS_UNAVAILABLE";
 export const ACCEPTED_CHAPTER_PIPELINE_STAGE_RULE_VERSION = 2;
 export const ACCEPTED_CHAPTER_PIPELINE_MAXIMUM_STAGE_GENERATION = 100;
 const PIPELINE_STEPS = 4;
@@ -32,7 +34,13 @@ export const ACCEPTED_CHAPTER_PIPELINE_STAGES = [
 export type AcceptedChapterPipelineStage = (typeof ACCEPTED_CHAPTER_PIPELINE_STAGES)[number];
 
 export type AcceptedChapterPipelineSource =
-  "candidate_accept" | "chapter_import" | "manual_save" | "version_restore" | "historical_backfill";
+  | "candidate_accept"
+  | "chapter_import"
+  | "autosave"
+  | "manual_save"
+  | "recovery_save"
+  | "version_restore"
+  | "historical_backfill";
 
 export interface AcceptedChapterPipelineInput {
   readonly projectId: UuidV7;
@@ -40,6 +48,11 @@ export interface AcceptedChapterPipelineInput {
   readonly versionId: UuidV7;
   readonly source: AcceptedChapterPipelineSource;
   readonly acceptedCharacterCount: number;
+  /**
+   * Acceptance/save-time responsibility for organizing local story facts.
+   * Missing values from older persisted tasks are normalized to false.
+   */
+  readonly organizeLocalStoryFacts?: boolean;
   /**
    * Legacy compatibility fields. Durable accepted-version work is a local-only
    * commit follower for every source, so these values are always normalized to
@@ -65,27 +78,44 @@ export interface AcceptedChapterPipelineInput {
   readonly retryTaskAttempt?: number;
 }
 
-type LocalCandidateAcceptancePipelineIdentity = Pick<
+type LocalAcceptedVersionPipelineIdentity = Pick<
   AcceptedChapterPipelineInput,
-  "projectId" | "chapterId" | "versionId" | "acceptedCharacterCount"
+  "projectId" | "chapterId" | "versionId" | "acceptedCharacterCount" | "organizeLocalStoryFacts"
+> &
+  Readonly<{
+    source: Exclude<AcceptedChapterPipelineSource, "historical_backfill">;
+  }>;
+
+type LocalCandidateAcceptancePipelineIdentity = Omit<
+  LocalAcceptedVersionPipelineIdentity,
+  "source"
 >;
 
 /**
- * Candidate acceptance is a local commit boundary. It may refresh rebuildable
+ * Every accepted正文 commit is a local boundary. It may refresh rebuildable
  * local projections, but it must never inherit a model-backed stage merely
  * because a provider is configured. Cloud enrichment, if offered, needs a
  * separate user-authorized operation and durable identity.
  */
-export function createLocalCandidateAcceptancePipelineInput(
-  input: LocalCandidateAcceptancePipelineIdentity,
+export function createLocalAcceptedVersionPipelineInput(
+  input: LocalAcceptedVersionPipelineIdentity,
 ): AcceptedChapterPipelineInput {
   return Object.freeze({
     ...input,
-    source: "candidate_accept",
+    organizeLocalStoryFacts: input.organizeLocalStoryFacts ?? false,
     runSearch: true,
     runChapterSummary: false,
     runStoryState: false,
     runCausalProjection: true,
+  });
+}
+
+export function createLocalCandidateAcceptancePipelineInput(
+  input: LocalCandidateAcceptancePipelineIdentity,
+): AcceptedChapterPipelineInput {
+  return createLocalAcceptedVersionPipelineInput({
+    ...input,
+    source: "candidate_accept",
   });
 }
 
@@ -176,7 +206,11 @@ export async function runAcceptedChapterPipeline(
 
   const stableTaskId = enqueued.task.id;
   const retryScope = inspectPipelineStageFailureCauseCode(
-    input.retryFailureCauseCode ?? enqueued.task.failure?.causeCode ?? null,
+    input.retryFailureCauseCode ??
+      (enqueued.task.failure?.causeCode === ACCEPTED_CHAPTER_FACT_PREFLIGHT_FAILURE_CAUSE_CODE
+        ? null
+        : enqueued.task.failure?.causeCode) ??
+      null,
   );
   if (retryScope.kind === "malformed") {
     throw new Error("Accepted chapter pipeline task has a malformed failure stage scope.");
@@ -392,6 +426,10 @@ async function loadManualRetryTask(
     task.metadata.versionId !== input.versionId ||
     task.metadata.source !== input.source ||
     task.metadata.acceptedCharacterCount !== input.acceptedCharacterCount ||
+    !matchesOrganizeLocalStoryFacts(
+      task.metadata.organizeLocalStoryFacts,
+      input.organizeLocalStoryFacts,
+    ) ||
     task.metadata.runSearch !== input.runSearch ||
     !isLegacyProviderStageFlag(task.metadata.runChapterSummary) ||
     input.runChapterSummary !== false ||
@@ -424,7 +462,8 @@ function assertManualRetryAuthority(
     enqueued.task.attempt !== input.retryTaskAttempt ||
     retryProgress.kind !== "valid" ||
     retryProgress.attempt !== input.retryTaskAttempt ||
-    retryProgress.failureCauseCode !== (input.retryFailureCauseCode ?? null)
+    normalizeFactPreflightRetryCause(retryProgress.failureCauseCode) !==
+      (input.retryFailureCauseCode ?? null)
   ) {
     throw new Error("Accepted chapter pipeline manual retry authority changed before execution.");
   }
@@ -473,6 +512,10 @@ function matchesLocalAcceptedChapterTask(
     task.metadata.versionId === input.versionId &&
     task.metadata.source === input.source &&
     task.metadata.acceptedCharacterCount === input.acceptedCharacterCount &&
+    matchesOrganizeLocalStoryFacts(
+      task.metadata.organizeLocalStoryFacts,
+      input.organizeLocalStoryFacts,
+    ) &&
     (task.metadata.runSearch !== false) === (input.runSearch !== false) &&
     (task.metadata.runCausalProjection !== false) === (input.runCausalProjection !== false) &&
     isLegacyProviderStageFlag(task.metadata.runChapterSummary) &&
@@ -505,6 +548,7 @@ export function createAcceptedChapterPipelineTaskInput(
       versionId: input.versionId,
       source: input.source,
       acceptedCharacterCount: input.acceptedCharacterCount,
+      organizeLocalStoryFacts: input.organizeLocalStoryFacts === true,
       runChapterSummary: false,
       runStoryState: false,
       ...(input.runSearch === undefined ? {} : { runSearch: input.runSearch }),
@@ -1080,6 +1124,20 @@ function providerStageEnabled(
 
 function isLocalPipelineStage(stage: AcceptedChapterPipelineStage): boolean {
   return stage === "search" || stage === "causal_projection";
+}
+
+function normalizeFactPreflightRetryCause(causeCode: string | null): string | null {
+  return causeCode === ACCEPTED_CHAPTER_FACT_PREFLIGHT_FAILURE_CAUSE_CODE ? null : causeCode;
+}
+
+function matchesOrganizeLocalStoryFacts(
+  persisted: unknown,
+  requested: boolean | undefined,
+): boolean {
+  return (
+    (persisted === true && requested === true) ||
+    ((persisted === false || persisted === undefined) && requested !== true)
+  );
 }
 
 function isLegacyProviderStageFlag(value: unknown): boolean {

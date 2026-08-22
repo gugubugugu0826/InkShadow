@@ -2,6 +2,7 @@ import { parseUuidV7 } from "@inkshadow/domain";
 import type { TaskSnapshot } from "@inkshadow/task-engine";
 
 import {
+  ACCEPTED_CHAPTER_FACT_PREFLIGHT_FAILURE_CAUSE_CODE,
   ACCEPTED_CHAPTER_PIPELINE_MAXIMUM_STAGE_GENERATION,
   ACCEPTED_CHAPTER_PIPELINE_STAGE_RULE_VERSION,
   ACCEPTED_CHAPTER_PIPELINE_STAGES,
@@ -25,11 +26,15 @@ const MAX_DUE_TASKS_SCANNED_PER_RUN = 1_000;
 const MAX_DUE_TASKS_PROCESSED_PER_RUN = 200;
 const MAX_REPORTED_INVALID_TASKS = 500;
 const DEFAULT_MAXIMUM_HISTORICAL_BACKFILL_TASKS_PER_RUN = 5;
+const FACT_PREFLIGHT_LEASE_MILLISECONDS = 15 * 60 * 1_000;
+const FACT_PREFLIGHT_INITIAL_RETRY_MILLISECONDS = 5_000;
+const FACT_PREFLIGHT_MAXIMUM_RETRY_MILLISECONDS = 60_000;
 
 export interface AcceptedChapterPipelineWorkerOptions {
   readonly pollIntervalMilliseconds?: number;
   readonly queuedGraceMilliseconds?: number;
   readonly maximumHistoricalBackfillTasksPerRun?: number;
+  readonly ensureCurrentFacts: (input: AcceptedChapterPipelineInput) => Promise<void>;
   readonly reportError?: (cause: unknown) => void;
 }
 
@@ -43,6 +48,7 @@ export class AcceptedChapterPipelineWorker {
   private readonly queuedGraceMilliseconds: number;
   private readonly reportError: (cause: unknown) => void;
   private readonly maximumHistoricalBackfillTasksPerRun: number;
+  private readonly ensureCurrentFacts: (input: AcceptedChapterPipelineInput) => Promise<void>;
   private timer: ReturnType<typeof globalThis.setInterval> | null = null;
   private activeRun: Promise<number> | null = null;
   private dueTaskCursor: DueTaskCursor | null = null;
@@ -50,7 +56,7 @@ export class AcceptedChapterPipelineWorker {
 
   public constructor(
     private readonly runtime: AcceptedChapterPipelineRuntime,
-    options: AcceptedChapterPipelineWorkerOptions = {},
+    options: AcceptedChapterPipelineWorkerOptions,
   ) {
     this.pollIntervalMilliseconds = positiveInteger(
       options.pollIntervalMilliseconds,
@@ -65,6 +71,7 @@ export class AcceptedChapterPipelineWorker {
       DEFAULT_MAXIMUM_HISTORICAL_BACKFILL_TASKS_PER_RUN,
     );
     this.reportError = options.reportError ?? (() => undefined);
+    this.ensureCurrentFacts = options.ensureCurrentFacts;
   }
 
   public start(): void {
@@ -165,6 +172,13 @@ export class AcceptedChapterPipelineWorker {
           historicalBackfillProcessedCount += 1;
         }
         try {
+          await this.ensureCurrentFacts(input);
+        } catch (cause: unknown) {
+          await this.failFactPreflight(task).catch(this.reportError);
+          this.reportError(cause);
+          continue;
+        }
+        try {
           await runAcceptedChapterPipeline(this.runtime, input);
         } catch (cause: unknown) {
           // A task remains durable and can be retried manually. One corrupt or
@@ -181,6 +195,40 @@ export class AcceptedChapterPipelineWorker {
       }
     }
     return processedCount;
+  }
+
+  private async failFactPreflight(task: TaskSnapshot): Promise<void> {
+    const now = this.runtime.clock.now();
+    const nowMilliseconds = Date.parse(now);
+    if (!Number.isFinite(nowMilliseconds)) {
+      throw new Error("Accepted chapter fact preflight failure time is invalid.");
+    }
+    const leaseToken = this.runtime.ids.next();
+    const leaseExpiresAt = new Date(
+      nowMilliseconds + FACT_PREFLIGHT_LEASE_MILLISECONDS,
+    ).toISOString();
+    await this.runtime.taskCenter.startTask(
+      task.id,
+      "desktop.accepted-version.fact-preflight",
+      leaseToken,
+      leaseExpiresAt,
+    );
+    const retryDelay = Math.min(
+      FACT_PREFLIGHT_INITIAL_RETRY_MILLISECONDS * 2 ** Math.max(0, task.attempt - 1),
+      FACT_PREFLIGHT_MAXIMUM_RETRY_MILLISECONDS,
+    );
+    await this.runtime.taskCenter.failTask(
+      task.id,
+      leaseToken,
+      {
+        code: "ACCEPTED_VERSION_FACT_PREFLIGHT_FAILED",
+        causeCode: ACCEPTED_CHAPTER_FACT_PREFLIGHT_FAILURE_CAUSE_CODE,
+        retryable: true,
+        actions: ["RETRY", "EXPORT_DIAGNOSTICS"],
+        requestId: this.runtime.ids.next(),
+      },
+      task.attempt < task.maxAttempts ? new Date(nowMilliseconds + retryDelay).toISOString() : null,
+    );
   }
 
   private reportInvalidTaskOnce(taskId: string): void {
@@ -217,7 +265,9 @@ export function retryInput(task: TaskSnapshot): AcceptedChapterPipelineInput | n
     versionId === null ||
     (source !== "candidate_accept" &&
       source !== "chapter_import" &&
+      source !== "autosave" &&
       source !== "manual_save" &&
+      source !== "recovery_save" &&
       source !== "version_restore" &&
       source !== "historical_backfill") ||
     typeof acceptedCharacterCount !== "number" ||
@@ -226,6 +276,7 @@ export function retryInput(task: TaskSnapshot): AcceptedChapterPipelineInput | n
   ) {
     return null;
   }
+  const organizeLocalStoryFacts = optionalBoolean(task.metadata.organizeLocalStoryFacts);
   const runChapterSummary = optionalBoolean(task.metadata.runChapterSummary);
   const runStoryState = optionalBoolean(task.metadata.runStoryState);
   const runSearch = optionalBoolean(task.metadata.runSearch);
@@ -240,6 +291,7 @@ export function retryInput(task: TaskSnapshot): AcceptedChapterPipelineInput | n
     pipelineStageRuleVersion !== undefined ||
     pipelineStageGeneration !== undefined;
   if (
+    organizeLocalStoryFacts === null ||
     runChapterSummary === null ||
     runStoryState === null ||
     runSearch === null ||
@@ -278,12 +330,20 @@ export function retryInput(task: TaskSnapshot): AcceptedChapterPipelineInput | n
       stageEnabled(stage, runSearch, runChapterSummary, runStoryState, runCausalProjection),
     ),
   );
-  const failureScope = inspectPipelineStageFailureCauseCode(task.failure?.causeCode ?? null);
+  const failureScope = inspectPipelineStageFailureCauseCode(
+    task.failure?.causeCode === ACCEPTED_CHAPTER_FACT_PREFLIGHT_FAILURE_CAUSE_CODE
+      ? null
+      : (task.failure?.causeCode ?? null),
+  );
   const retryProgress = inspectPipelineRetryProgressStep(task.progress?.step ?? null);
   const outcome = inspectPipelineOutcomeProgressStep(task.progress?.step ?? null);
   const persistedRetryScope =
     retryProgress.kind === "valid"
-      ? inspectPipelineStageFailureCauseCode(retryProgress.failureCauseCode)
+      ? inspectPipelineStageFailureCauseCode(
+          retryProgress.failureCauseCode === ACCEPTED_CHAPTER_FACT_PREFLIGHT_FAILURE_CAUSE_CODE
+            ? null
+            : retryProgress.failureCauseCode,
+        )
       : null;
   if (
     enabledStages.size === 0 ||
@@ -320,6 +380,7 @@ export function retryInput(task: TaskSnapshot): AcceptedChapterPipelineInput | n
     versionId,
     source,
     acceptedCharacterCount,
+    organizeLocalStoryFacts: organizeLocalStoryFacts === true,
     runChapterSummary: false,
     runStoryState: false,
     ...(runSearch === undefined ? {} : { runSearch }),
@@ -333,7 +394,8 @@ export function retryInput(task: TaskSnapshot): AcceptedChapterPipelineInput | n
       : {
           retryTaskSequence: task.sequence,
           retryTaskAttempt: task.attempt,
-          ...(retryProgress.failureCauseCode === null
+          ...(retryProgress.failureCauseCode === null ||
+          retryProgress.failureCauseCode === ACCEPTED_CHAPTER_FACT_PREFLIGHT_FAILURE_CAUSE_CODE
             ? {}
             : { retryFailureCauseCode: retryProgress.failureCauseCode }),
         }),

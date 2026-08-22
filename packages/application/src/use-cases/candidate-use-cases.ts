@@ -42,6 +42,8 @@ export interface AcceptCandidateCommand extends CandidateCommand {
    * atomically accepts the candidate and creates the next stable version.
    */
   readonly editedContent?: string;
+  /** Persisted acceptance-time responsibility for local story-fact organization. */
+  readonly organizeLocalStoryFacts?: boolean;
 }
 
 export interface AcceptCandidateOutcome {
@@ -295,6 +297,7 @@ export class AcceptAiCandidate {
       contentChecksum: checksum.value,
       reason: "candidate_accept",
       sourceCandidateId: candidate.value.id,
+      organizeLocalStoryFacts: command.organizeLocalStoryFacts ?? false,
       createdAt: now,
     });
     if (!version.ok) {
@@ -313,6 +316,7 @@ export class AcceptAiCandidate {
       expectedChapterRevision: chapter.revision,
       expectedCandidateStatus: "ready",
       expectedCandidateRevision: command.expectedCandidateRevision,
+      organizeLocalStoryFacts: command.organizeLocalStoryFacts ?? false,
     });
     return committed.ok
       ? ok({

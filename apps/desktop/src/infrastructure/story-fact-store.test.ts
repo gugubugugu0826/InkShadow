@@ -59,6 +59,180 @@ describe("BrowserDevelopmentStoryFactStore", () => {
     ).toEqual(["created", "confirmed"]);
   });
 
+  it("keeps user edit, restore, and duplicate merge revisions across reopening", async () => {
+    const store = new BrowserDevelopmentStoryFactStore(localStorage);
+    const original = createFormalFact(20, "灯塔每夜只亮一次。");
+    expect((await store.create(original)).ok).toBe(true);
+    const edited = unwrap(
+      original.editAsUser({
+        contentText: "灯塔每夜只亮两次。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: T1,
+      }),
+    );
+    expect((await store.save(edited, 1)).ok).toBe(true);
+    const deleted = unwrap(
+      edited.deprecate({ humanConfirmed: true, expectedRevision: 2, now: T2 }),
+    );
+    expect((await store.save(deleted, 2)).ok).toBe(true);
+    const firstRevision = unwrap(await store.listRevisions(original.id))[0];
+    if (firstRevision === undefined) throw new Error("expected initial story fact revision");
+    const restored = unwrap(
+      deleted.restoreAsUser({
+        priorRevision: firstRevision.fact,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 3,
+        now: "2026-08-01T00:03:00.000Z",
+      }),
+    );
+    expect((await store.save(restored, 3)).ok).toBe(true);
+
+    const duplicate = createFormalFact(21, "灯塔每夜只亮一次。");
+    expect((await store.create(duplicate)).ok).toBe(true);
+    const survivorNext = unwrap(
+      restored.recordDuplicateMergeAsUser({
+        duplicate,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 4,
+        now: "2026-08-01T00:04:00.000Z",
+      }),
+    );
+    const duplicateNext = unwrap(
+      duplicate.deprecate({
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: "2026-08-01T00:04:00.000Z",
+      }),
+    );
+    expect((await store.mergeUserFactRevisions(survivorNext, 4, duplicateNext, 1)).ok).toBe(true);
+
+    const reopened = new BrowserDevelopmentStoryFactStore(localStorage);
+    expect(unwrap(await reopened.findById(original.id))?.toSnapshot()).toMatchObject({
+      contentText: "灯塔每夜只亮一次。",
+      status: "formal",
+      revision: 5,
+    });
+    expect(unwrap(await reopened.findById(duplicate.id))?.toSnapshot()).toMatchObject({
+      status: "deprecated",
+      revision: 2,
+    });
+    expect(unwrap(await reopened.listRevisions(original.id))).toHaveLength(5);
+    expect(unwrap(await reopened.listRevisions(duplicate.id))).toHaveLength(2);
+
+    const third = createFormalFact(22, "潮门在黎明关闭。");
+    const fourth = createFormalFact(23, "潮门在黎明关闭。");
+    expect((await reopened.create(third)).ok).toBe(true);
+    expect((await reopened.create(fourth)).ok).toBe(true);
+    const thirdNext = unwrap(
+      third.recordDuplicateMergeAsUser({
+        duplicate: fourth,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: "2026-08-01T00:05:00.000Z",
+      }),
+    );
+    const fourthNext = unwrap(
+      fourth.deprecate({
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: "2026-08-01T00:05:00.000Z",
+      }),
+    );
+    const conflict = await reopened.mergeUserFactRevisions(thirdNext, 1, fourthNext, 2);
+    expect(conflict.ok).toBe(false);
+    expect(unwrap(await reopened.findById(third.id))?.revision).toBe(1);
+    expect(unwrap(await reopened.findById(fourth.id))?.revision).toBe(1);
+  });
+  it("rejects structured text edits and merges while preserving deletion recovery", async () => {
+    const store = new BrowserDevelopmentStoryFactStore(localStorage);
+    const first = createStructuredFormalFact(24, "event.silver-bell");
+    const second = createStructuredFormalFact(25, "event.moonset");
+    expect((await store.create(first)).ok).toBe(true);
+    expect((await store.create(second)).ok).toBe(true);
+
+    expect(
+      first.editAsUser({
+        contentText: "把因果事件误改成普通文字。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: T1,
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: { code: "STORY_FACT_INVALID_TRANSITION" },
+    });
+    expect(
+      first.recordDuplicateMergeAsUser({
+        duplicate: second,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: T1,
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: { code: "STORY_VALIDATION_FAILED" },
+    });
+
+    const forgedSurvivor = unwrap(
+      first.deprecate({ humanConfirmed: true, expectedRevision: 1, now: T1 }),
+    );
+    const forgedTimestamp = forgedSurvivor.toSnapshot().updatedAt;
+    const forgedTextEdit = unwrap(
+      StoryFact.rehydrate({
+        ...first.toSnapshot(),
+        contentText: "绕过领域层误改结构化事件。",
+        confirmedAt: forgedTimestamp,
+        revision: 2,
+        updatedAt: forgedTimestamp,
+      }),
+    );
+    expect((await store.save(forgedTextEdit, 1)).ok).toBe(false);
+    expect(unwrap(await store.listRevisions(first.id))).toHaveLength(1);
+    const secondDeleted = unwrap(
+      second.deprecate({ humanConfirmed: true, expectedRevision: 1, now: T1 }),
+    );
+    expect((await store.mergeUserFactRevisions(forgedSurvivor, 1, secondDeleted, 1)).ok).toBe(
+      false,
+    );
+    expect(unwrap(await store.listRevisions(first.id))).toHaveLength(1);
+    expect(unwrap(await store.listRevisions(second.id))).toHaveLength(1);
+
+    const firstDeleted = unwrap(
+      first.deprecate({ humanConfirmed: true, expectedRevision: 1, now: T1 }),
+    );
+    expect((await store.save(firstDeleted, 1)).ok).toBe(true);
+    expect(
+      firstDeleted.restoreAsUser({
+        priorRevision: first,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 2,
+        now: T2,
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: { code: "STORY_FACT_INVALID_TRANSITION" },
+    });
+    const restored = unwrap(
+      firstDeleted.restoreDeletedAsUser({
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 2,
+        now: T2,
+      }),
+    );
+    expect((await store.save(restored, 2)).ok).toBe(true);
+    const reopened = new BrowserDevelopmentStoryFactStore(localStorage);
+    expect(unwrap(await reopened.findById(first.id))?.toSnapshot()).toEqual(restored.toSnapshot());
+    expect(unwrap(await reopened.listRevisions(first.id))).toHaveLength(3);
+  });
   it("fails closed when persisted fact data is corrupt", async () => {
     localStorage.setItem(
       DEVELOPMENT_STORY_FACT_STORE_KEY,
@@ -374,6 +548,53 @@ describe("BrowserDevelopmentStoryFactStore", () => {
   });
 });
 
+function createStructuredFormalFact(suffix: number, eventId: string): StoryFact {
+  return unwrap(
+    StoryFact.create({
+      id: "019f9f4a-b3c7-7350-9226-" + String(suffix).padStart(12, "0"),
+      projectId: PROJECT_ID,
+      factType: "timeline_event",
+      contentText: "银铃响起，潮门打开。",
+      structuredValue: {
+        schemaVersion: "inkshadow.causal-event-fact.v2",
+        eventId,
+        causeEventIds: [eventId + ".cause"],
+      },
+      source: {
+        kind: "user_statement",
+        reference: "user-statement:" + ACTOR_ID + ":" + String(suffix),
+      },
+      confidence: 1,
+      status: "formal",
+      origin: "user",
+      needsReview: false,
+      humanConfirmed: true,
+      confirmationActorId: ACTOR_ID,
+      now: T0,
+    }),
+  );
+}
+function createFormalFact(suffix: number, contentText: string): StoryFact {
+  return unwrap(
+    StoryFact.create({
+      id: "019f9f4a-b3c7-7350-9226-" + String(suffix).padStart(12, "0"),
+      projectId: PROJECT_ID,
+      factType: "world_rule",
+      contentText,
+      source: {
+        kind: "user_statement",
+        reference: "user-statement:" + ACTOR_ID + ":" + String(suffix),
+      },
+      confidence: 1,
+      status: "formal",
+      origin: "user",
+      needsReview: false,
+      humanConfirmed: true,
+      confirmationActorId: ACTOR_ID,
+      now: T0,
+    }),
+  );
+}
 function createFact(): StoryFact {
   return unwrap(
     StoryFact.create({

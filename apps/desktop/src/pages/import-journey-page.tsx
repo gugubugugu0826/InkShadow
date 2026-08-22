@@ -17,7 +17,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { DataTransferPanel, type CompletedImport } from "../components/data-transfer-panel";
+import { ensureCurrentSavedVersionStoryFactsForDirectMode } from "../infrastructure/accepted-chapter-fact-preflight";
 import {
+  createLocalAcceptedVersionPipelineInput,
   createLocalCandidateAcceptancePipelineInput,
   ensureAcceptedChapterPipelineTask,
   runAcceptedChapterPipeline,
@@ -241,6 +243,11 @@ export function ImportJourneyPage() {
   );
   const recordedExplicitFeedback = useRef(new Set<string>());
   const derivedStoryRefreshQueue = useRef<Promise<void>>(Promise.resolve());
+
+  async function captureLocalStoryFactOrganizationResponsibility(): Promise<boolean> {
+    const preference = await runtime.writingExperience.getOrInitialize();
+    return preference.mode === "direct";
+  }
 
   useEffect(() => {
     draftRef.current = draft;
@@ -705,11 +712,16 @@ export function ImportJourneyPage() {
     setOperation("trial-decision");
     setOperationError(null);
     try {
+      const organizeLocalStoryFacts =
+        decision === "accept" || decision === "restore"
+          ? await captureLocalStoryFactOrganizationResponsibility()
+          : false;
       if (decision === "accept") {
         const result = await runtime.useCases.acceptCandidate.execute({
           candidateId: trialView.candidate.id,
           expectedCandidateRevision: trialView.candidate.revision,
           strategy: { kind: "overwrite_document" },
+          organizeLocalStoryFacts,
         });
         if (!result.ok) {
           throw result.error;
@@ -729,6 +741,7 @@ export function ImportJourneyPage() {
             chapterId: result.value.chapter.id,
             versionId: result.value.version.id,
             acceptedCharacterCount: result.value.chapter.content.length,
+            organizeLocalStoryFacts,
           }),
         );
         setNotice("试改已作为新的稳定版本写入；接受前的原文仍保留在版本历史中，可随时恢复。");
@@ -751,19 +764,24 @@ export function ImportJourneyPage() {
         });
         setNotice("试改建议已拒绝，原文没有改变。你可以调整目标后重新生成。");
       } else {
-        const restored = await restoreCandidateBaseVersion(runtime, trialView.candidate);
+        const restored = await restoreCandidateBaseVersion(
+          runtime,
+          trialView.candidate,
+          organizeLocalStoryFacts,
+        );
         if (!restored.ok) {
           throw restored.error;
         }
-        scheduleDerivedStoryRefresh({
-          projectId: restored.value.projectId,
-          chapterId: restored.value.chapterId,
-          versionId: restored.value.versionId,
-          source: "version_restore",
-          acceptedCharacterCount: restored.value.chapterContent.length,
-          runChapterSummary: false,
-          runStoryState: false,
-        });
+        scheduleDerivedStoryRefresh(
+          createLocalAcceptedVersionPipelineInput({
+            projectId: restored.value.projectId,
+            chapterId: restored.value.chapterId,
+            versionId: restored.value.versionId,
+            source: "version_restore",
+            acceptedCharacterCount: restored.value.chapterContent.length,
+            organizeLocalStoryFacts,
+          }),
+        );
         updateTrialPointerDurably(trialView.candidate, {
           restoredAt: new Date().toISOString(),
         });
@@ -1096,6 +1114,10 @@ export function ImportJourneyPage() {
     setOperationError(null);
     let preservePendingRequest = false;
     try {
+      const organizeLocalStoryFacts =
+        decision === "accept" || decision === "restore"
+          ? await captureLocalStoryFactOrganizationResponsibility()
+          : false;
       if (decision === "regenerate") {
         const previousAuthority =
           item.candidateId === null
@@ -1185,6 +1207,7 @@ export function ImportJourneyPage() {
           candidateId: found.value.id,
           expectedCandidateRevision: item.candidateRevision,
           strategy: { kind: "overwrite_document" },
+          organizeLocalStoryFacts,
         });
         if (!accepted.ok) {
           throw accepted.error;
@@ -1205,6 +1228,7 @@ export function ImportJourneyPage() {
             chapterId: accepted.value.chapter.id,
             versionId: accepted.value.version.id,
             acceptedCharacterCount: accepted.value.chapter.content.length,
+            organizeLocalStoryFacts,
           }),
         );
       } else if (decision === "reject") {
@@ -1226,19 +1250,24 @@ export function ImportJourneyPage() {
           action: "rejected",
         });
       } else {
-        const restored = await restoreCandidateBaseVersion(runtime, found.value);
+        const restored = await restoreCandidateBaseVersion(
+          runtime,
+          found.value,
+          organizeLocalStoryFacts,
+        );
         if (!restored.ok) {
           throw restored.error;
         }
-        scheduleDerivedStoryRefresh({
-          projectId: restored.value.projectId,
-          chapterId: restored.value.chapterId,
-          versionId: restored.value.versionId,
-          source: "version_restore",
-          acceptedCharacterCount: restored.value.chapterContent.length,
-          runChapterSummary: false,
-          runStoryState: false,
-        });
+        scheduleDerivedStoryRefresh(
+          createLocalAcceptedVersionPipelineInput({
+            projectId: restored.value.projectId,
+            chapterId: restored.value.chapterId,
+            versionId: restored.value.versionId,
+            source: "version_restore",
+            acceptedCharacterCount: restored.value.chapterContent.length,
+            organizeLocalStoryFacts,
+          }),
+        );
         updateBatchItemDurably(item.chapterId, { status: "restored", errorCode: null });
         await recordImportAction({
           chapterId: item.chapterId,
@@ -1278,6 +1307,7 @@ export function ImportJourneyPage() {
     let acceptedCount = 0;
     let stoppedAt: Readonly<{ item: BatchItemDraft; position: number }> | null = null;
     try {
+      const organizeLocalStoryFacts = await captureLocalStoryFactOrganizationResponsibility();
       for (const [index, item] of readyItems.entries()) {
         if (item.candidateId === null) {
           const error = new ImportJourneyError(
@@ -1319,6 +1349,7 @@ export function ImportJourneyPage() {
             candidateId: item.candidateId,
             expectedCandidateRevision: item.candidateRevision,
             strategy: { kind: "overwrite_document" },
+            organizeLocalStoryFacts,
           });
         } catch (cause: unknown) {
           const error = normalizeUiError(cause);
@@ -1370,6 +1401,7 @@ export function ImportJourneyPage() {
             chapterId: accepted.value.chapter.id,
             versionId: accepted.value.version.id,
             acceptedCharacterCount: accepted.value.chapter.content.length,
+            organizeLocalStoryFacts,
           }),
         );
       }
@@ -1390,6 +1422,7 @@ export function ImportJourneyPage() {
       .then(() => {
         const execution = derivedStoryRefreshQueue.current
           .catch(() => undefined)
+          .then(() => ensureCurrentSavedVersionStoryFactsForDirectMode(runtime, input))
           .then(() => runAcceptedChapterPipeline(runtime, input))
           .then(() => undefined);
         derivedStoryRefreshQueue.current = execution.catch(() => undefined);

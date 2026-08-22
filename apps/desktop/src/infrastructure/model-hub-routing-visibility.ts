@@ -430,22 +430,22 @@ export function modelHubTaskGroupLabel(group: ModelHubTaskGroup): string {
   return labels[group];
 }
 
-export function capabilityLabel(capability: ModelHubCapability): string {
+export function capabilityLabel(capability: string): string {
   const labels: Readonly<Record<ModelHubCapability, string>> = Object.freeze({
     text_generation: "文本生成",
     reasoning: "推理",
     structured_output: "结构化输出",
-    embedding: "语义向量",
-    rerank: "结果重排",
+    embedding: "向量检索",
+    rerank: "结果排序",
     image_generation: "图片生成",
     vision: "图片理解",
     translation: "翻译",
     tool_calling: "工具调用",
-    token_counting: "Token 计数",
+    token_counting: "内容额度计数",
     streaming: "流式输出",
     long_context: "长上下文",
   });
-  return labels[capability];
+  return capability in labels ? labels[capability as ModelHubCapability] : "能力未知";
 }
 
 function projectModel(

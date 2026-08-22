@@ -275,6 +275,7 @@ function chapterVersion() {
     contentChecksum: checksum.value,
     reason: "created",
     sourceCandidateId: null,
+    organizeLocalStoryFacts: false,
     createdAt: NOW as ChapterVersionSnapshot["createdAt"],
   };
   const created = ChapterVersion.create(snapshot);

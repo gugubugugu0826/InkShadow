@@ -255,6 +255,7 @@ describe("chapter and candidate use cases", () => {
       chapterId: CHAPTER_ID,
       expectedRevision: 1,
       reason: "autosave",
+      organizeLocalStoryFacts: true,
     });
     expect(saved.ok).toBe(true);
     if (!saved.ok) {
@@ -263,6 +264,7 @@ describe("chapter and candidate use cases", () => {
     expect(saved.value.chapter.content).toBe("Edited draft");
     expect(saved.value.chapter.revision).toBe(2);
     expect(saved.value.version?.sequence).toBe(2);
+    expect(saved.value.version?.toSnapshot().organizeLocalStoryFacts).toBe(true);
     expect(saved.value.saveState).toBe("pending_sync");
 
     const versions = await new ListChapterVersions(contentStore).execute(CHAPTER_ID);

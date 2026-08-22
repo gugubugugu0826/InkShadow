@@ -8,6 +8,7 @@ import {
   LONG_MODEL_HUB_RETIRED_PROVIDER_NAME,
   seedLongModelHubFixture,
 } from "./support/model-hub";
+import { switchFreshInstallToProfessionalMode } from "./support/writing-experience";
 
 const TARGET_VIEWPORTS = [
   { width: 1440, height: 900 },
@@ -23,6 +24,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     await page.goto("/#/start");
     await page.evaluate(() => window.localStorage.clear());
     await seedLongModelHubFixture(page);
+    await switchFreshInstallToProfessionalMode(page);
     await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
 
     for (const viewport of TARGET_VIEWPORTS) {
@@ -76,6 +78,7 @@ test("keeps long Model Hub data usable at DPR2 and equivalent 200%", async ({
     await page.goto("/#/start");
     await page.evaluate(() => window.localStorage.clear());
     await seedLongModelHubFixture(page);
+    await switchFreshInstallToProfessionalMode(page);
     await page.goto("/#/settings#model-center");
     await expect(page.getByRole("heading", { name: "InkShadow 模型中心" })).toBeVisible();
     await selectConnection(page, LONG_MODEL_HUB_CONNECTION_ID);

@@ -46,7 +46,7 @@ describe("StudioTeamPage", () => {
     await user.type(screen.getByLabelText("邀请 ID"), INVITATION_ID);
     await user.clear(screen.getByLabelText("期望修订号"));
     await user.type(screen.getByLabelText("期望修订号"), "3");
-    const tokenInput = screen.getByLabelText("一次性邀请 token");
+    const tokenInput = screen.getByLabelText("一次性邀请凭证");
     expect(tokenInput).toHaveAttribute("type", "password");
     await user.type(tokenInput, "super-secret-invitation-token");
 

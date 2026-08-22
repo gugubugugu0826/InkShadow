@@ -221,7 +221,7 @@ describe("DataTransferPanel import journey", () => {
       );
 
       await screen.findByRole("option", { name: "版本一致性" });
-      await user.click(screen.getByRole("button", { name: "下载 Bundle" }));
+      await user.click(screen.getByRole("button", { name: "下载完整备份" }));
       await screen.findByText(/文件：版本一致性\.inkshadow\.json/u);
 
       const downloaded = createObjectUrl.mock.calls[0]?.[0];
@@ -383,7 +383,7 @@ describe("DataTransferPanel import journey", () => {
       await screen.findByRole("option", { name: "隐私导出" });
       const includePrivate = screen.getByRole("checkbox", { name: /包含私密章节/u });
       expect(includePrivate).not.toBeChecked();
-      await user.click(screen.getByRole("button", { name: "下载 Bundle" }));
+      await user.click(screen.getByRole("button", { name: "下载完整备份" }));
       expect(await screen.findByText(/排除 1 个私密章节/u)).toBeVisible();
 
       const safeBundle = await readPortableBundle(blobs[0]);
@@ -391,7 +391,7 @@ describe("DataTransferPanel import journey", () => {
       expect(JSON.stringify(safeBundle)).not.toContain("PRIVATE_CHAPTER_MUST_REQUIRE_OPT_IN");
 
       await user.click(includePrivate);
-      await user.click(screen.getByRole("button", { name: "下载 Bundle" }));
+      await user.click(screen.getByRole("button", { name: "下载完整备份" }));
       await waitFor(() => expect(blobs).toHaveLength(2));
       const explicitBundle = await readPortableBundle(blobs[1]);
       expect(explicitBundle.content.chapters.map(({ title }) => title)).toEqual([

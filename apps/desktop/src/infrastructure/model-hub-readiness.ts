@@ -84,7 +84,7 @@ export const MODEL_HUB_STATE_EXPLANATIONS: Readonly<
   }),
   connection_failed: Object.freeze({
     label: "连接失败",
-    description: "请检查网络、API Key 或本机模型服务后重试；正文和已保存版本不会丢失。",
+    description: "请检查网络、接口密钥或本机模型服务后重试；正文和已保存版本不会丢失。",
   }),
   quota_insufficient: Object.freeze({
     label: "额度不足",
@@ -110,7 +110,7 @@ const COMPLETE_WRITING_TASKS: readonly NovelAiTask[] = Object.freeze([
 ]);
 
 export function modelHubReadinessBlockerLabel(code: string): string {
-  if (code === "MODEL_HUB_CREDENTIAL_MISSING") return "API Key 已删除或不可用";
+  if (code === "MODEL_HUB_CREDENTIAL_MISSING") return "接口密钥已删除或不可用";
   if (code === "MODEL_HUB_CONNECTION_NOT_READY") return "供应商连接尚未通过测试";
   if (code === "MODEL_HUB_CAPABILITY_NOT_VERIFIED") return "模型能力尚未完成验证";
   if (code === "MODEL_HUB_ROUTE_NOT_CONFIGURED") return "这项 AI 分工尚未配置";

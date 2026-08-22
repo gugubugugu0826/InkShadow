@@ -94,6 +94,11 @@ export interface AcceptCandidateCommit {
   readonly expectedChapterRevision: number;
   readonly expectedCandidateStatus: AiCandidateStatus;
   readonly expectedCandidateRevision: number;
+  /**
+   * Durable decision made at acceptance time. Older callers omit it and are
+   * treated as not owning automatic local story-fact organization.
+   */
+  readonly organizeLocalStoryFacts?: boolean;
 }
 
 export interface RestoreChapterVersionCommit {

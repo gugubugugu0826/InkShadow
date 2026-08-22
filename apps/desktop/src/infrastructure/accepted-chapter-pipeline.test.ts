@@ -448,6 +448,7 @@ describe("runAcceptedChapterPipeline", () => {
       versionId: VERSION_ID as never,
       source: "candidate_accept",
       acceptedCharacterCount: 99,
+      organizeLocalStoryFacts: true,
     });
 
     expect(receipt.status).toBe("partially_completed");
@@ -469,6 +470,7 @@ describe("runAcceptedChapterPipeline", () => {
     const task = (await harness.store.load()).tasks[0];
     expect(task).toMatchObject({
       status: "waiting_retry",
+      metadata: { organizeLocalStoryFacts: true },
       failure: {
         code: "ACCEPTED_VERSION_PIPELINE_PARTIAL",
         causeCode: "PIPELINE_STAGES_SEARCH",

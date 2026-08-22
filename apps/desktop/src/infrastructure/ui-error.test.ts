@@ -202,10 +202,10 @@ describe("normalizeUiError SQLite persistence failures", () => {
     ["MODEL_OUTPUT_EMPTY", ["可用于写作的可见文字", "支持文本生成", "普通文本模型"]],
     [
       "MODEL_HUB_ROUTE_NOT_CONFIGURED",
-      ["验证至少一个模型的写作能力", "应用智能推荐", "缺少 Embedding 不会阻止"],
+      ["验证至少一个模型的写作能力", "应用智能推荐", "缺少向量检索不会阻止"],
     ],
     ["MODEL_HUB_ROUTE_DISABLED", ["已明确停用", "没有调用模型", "不会改用旧配置"]],
-    ["MODEL_PROFILE_NOT_READY", ["没有可用于这次写作", "继续手动编辑", "前往 Model Hub"]],
+    ["MODEL_PROFILE_NOT_READY", ["没有可用于这次写作", "继续手动编辑", "前往模型中心"]],
     ["CREATIVE_INPUT_INVALID_CONTROL_CHARACTER", ["不可见控制字符", "全角标点", "换行仍然支持"]],
     [
       "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED",
@@ -226,6 +226,10 @@ describe("normalizeUiError SQLite persistence failures", () => {
       ["发送前保存请求恢复标记", "没有调用模型", "释放存储空间"],
     ],
     ["EXTENSION_USAGE_UNAVAILABLE", ["没有返回可核对的用量", "正文没有被覆盖", "导出历史"]],
+    [
+      "CREATIVE_OPENING_TIMEOUT_SCOPE_MISMATCH",
+      ["超时编号", "没有结束或取消任何其他调用", "重新读取进度并核对调用记录"],
+    ],
     ["UPDATE_MANIFEST_UNAVAILABLE", ["安全更新未完成", "仍可离线使用", "官方发行说明"]],
   ])("gives an actionable, redacted recovery path for %s", (code, expectedFragments) => {
     const privateDetail = "Authorization: Bearer hidden private provider response";
@@ -259,7 +263,7 @@ describe("normalizeUiError SQLite persistence failures", () => {
     });
 
     expect(normalized.code).toBe("CREATIVE_JOURNEY_STORAGE_ACCESS_DENIED");
-    expect(normalized.description).toContain("允许 InkShadow 使用本地存储");
+    expect(normalized.description).toContain("允许墨影使用本地存储");
     expect(normalized.description).toContain("再次点击原来的创建或保存操作");
     expect(normalized.description).not.toContain("private browser detail");
   });

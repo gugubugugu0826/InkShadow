@@ -443,15 +443,15 @@ export function preserveModelHubPageSnapshotAfterFailure(
 
 export function modelHubHydrationPhaseLabel(phase: ModelHubHydrationPhase): string {
   const labels: Record<ModelHubHydrationPhase, string> = {
-    UNINITIALIZED: "正在准备 Model Hub……",
+    UNINITIALIZED: "正在准备模型中心……",
     BOOTSTRAPPING: "正在读取已保存的 AI 连接……",
     LOADING_CONNECTIONS: "正在读取已保存的 AI 连接……",
     RESTORING_SELECTION: "正在恢复上次使用的 AI 连接……",
     CHECKING_CREDENTIAL: "正在检查系统凭据……",
     LOADING_CATALOG: "正在载入模型目录和 AI 分工……",
-    READY: "Model Hub 已载入",
-    READY_WITH_WARNINGS: "Model Hub 已载入，但有一项需要重试",
-    ERROR: "Model Hub 暂时无法读取",
+    READY: "模型中心已载入",
+    READY_WITH_WARNINGS: "模型中心已载入，但有一项需要重试",
+    ERROR: "模型中心暂时无法读取",
   };
   return labels[phase];
 }

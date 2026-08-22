@@ -189,7 +189,7 @@ export function preflightStorySettingsJson(
         "blocking",
         "INVALID_JSON",
         "$",
-        "文件不是有效的 JSON。",
+        "文件内容无法识别为有效的故事设定。",
         "使用下载的模板重新填写，并检查逗号、引号和括号。",
       ),
     ]);
@@ -231,7 +231,7 @@ export function preflightStorySettings(
         "blocking",
         "SCHEMA_VERSION_UNSUPPORTED",
         "$.schemaVersion",
-        "这不是当前版本支持的 InkShadow Story Settings JSON。",
+        "这不是当前版本支持的墨影故事设定文件。",
         "使用当前应用下载的模板，或先用兼容版本转换。",
       ),
     );
@@ -731,7 +731,7 @@ function stringList(
 ): readonly string[] {
   if (value === undefined) return Object.freeze([]);
   if (!Array.isArray(value) || value.length > 128) {
-    invalidField(issues, path, "该字段必须是最多 128 项的文字数组。", "按模板使用 JSON 数组填写。");
+    invalidField(issues, path, "该字段必须是最多 128 项的文字数组。", "按模板使用列表填写。");
     return Object.freeze([]);
   }
   const parsed = value.flatMap((item, index) => {

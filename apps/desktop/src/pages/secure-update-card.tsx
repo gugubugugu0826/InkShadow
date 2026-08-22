@@ -102,6 +102,10 @@ export function SecureUpdateCard({ updater, online }: SecureUpdateCardProps) {
 
   const normalizedError = error === null ? null : projectOrdinaryUiError(error);
   const enabled = configuration?.enabled === true;
+  const currentVersionLabel =
+    configuration === null || configuration.currentVersion === "unknown"
+      ? "无法确认"
+      : configuration.currentVersion;
 
   return (
     <Card id="secure-updates" className="settings-card--wide">
@@ -132,7 +136,7 @@ export function SecureUpdateCard({ updater, online }: SecureUpdateCardProps) {
             <InlineAlert
               tone="warning"
               title="此构建未启用在线更新"
-              description={`当前版本 ${configuration.currentVersion} 仍可离线使用。只有发行流水线固定清单地址和 Ed25519 公钥后才会开放检查；不会从运行时输入接受更新源。`}
+              description={`当前版本 ${currentVersionLabel}，仍可离线使用。只有发行流水线固定清单地址和签名公钥后才会开放检查；不会从运行时输入接受更新源。`}
             />
           )}
 
@@ -140,7 +144,7 @@ export function SecureUpdateCard({ updater, online }: SecureUpdateCardProps) {
             <>
               <ul className="privacy-list">
                 <li>
-                  当前版本 {configuration.currentVersion}，{channelLabel(configuration.channel)}。
+                  当前版本 {currentVersionLabel}，{channelLabel(configuration.channel)}。
                 </li>
                 <li>更新请求不携带账户、项目、正文、提示词、密钥或设备标识。</li>
                 <li>重定向、跨源下载、私网目标、超限响应和摘要不一致均会失败关闭。</li>

@@ -511,7 +511,7 @@ function safeIdentityError(cause: unknown): string {
     case "AUTH_DEVICE_REVOKED":
       return "这台设备的云访问已被撤销。你仍可继续本地使用。";
     case "AUTH_UPGRADE_REQUIRED":
-      return "当前版本无法使用云服务，请先更新 InkShadow。";
+      return "当前版本无法使用云服务，请先更新墨影。";
     case "AUTH_NETWORK_UNAVAILABLE":
     case "CLOUD_NETWORK_UNAVAILABLE":
     case "CLOUD_REQUEST_TIMEOUT":

@@ -627,6 +627,7 @@ describe("quick Model Hub connection", () => {
       connectionDisplayName: "阿里云百炼 / Qwen",
       modelId: "qwen-account-model",
       maximumProviderCalls: 1,
+      sends: ["固定短句“只回复：OK”", "最多 64 个输出内容额度"],
       automaticRetryCount: 0,
       estimatedMaximumCostMicros: null,
       dataDestination: "remote",

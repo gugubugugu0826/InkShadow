@@ -58,7 +58,7 @@ function NovelSkillReferenceList({
           <strong>本次采用的写作方法</strong>
           <p className="candidate-panel__hint">
             保守估算约 {usedSkillTokens.toLocaleString("zh-CN")}/
-            {maximumSkillTokens.toLocaleString("zh-CN")} 个方法预算单位（不是供应商计费 token）
+            {maximumSkillTokens.toLocaleString("zh-CN")} 个方法预算单位（不是模型服务计费内容额度）
           </p>
         </div>
         <Badge tone={included.length > 0 ? "warning" : "neutral"}>{included.length} 项采用</Badge>

@@ -43,7 +43,7 @@ export function CrashRecoveryDialog({
       dismissible={false}
       onOpenChange={() => undefined}
       title="发现未完成的本地草稿"
-      description="稳定正文和恢复草稿都保持原样；作出明确选择前，InkShadow 不会覆盖或删除任何一份内容。"
+      description="稳定正文和恢复草稿都保持原样；作出明确选择前，墨影不会覆盖或删除任何一份内容。"
       footer={
         <>
           <Button variant="secondary" disabled={busy} onClick={onKeepStable}>

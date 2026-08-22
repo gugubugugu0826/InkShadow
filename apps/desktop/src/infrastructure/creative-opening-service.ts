@@ -71,7 +71,12 @@ export const CREATIVE_OPENING_BATCH_ANGLES = Object.freeze([
 ] as const satisfies readonly CreativeOpeningAngle[]);
 
 export type CreativeOpeningProviderActionKind =
-  "initial_batch" | "replacement_batch" | "complete_partial" | "regenerate_single";
+  | "initial_batch"
+  | "initial_single"
+  | "replacement_batch"
+  | "replacement_single"
+  | "complete_partial"
+  | "regenerate_single";
 
 export interface CreativeOpeningProviderActionInput {
   readonly actionId: string;
@@ -107,6 +112,11 @@ export interface CreativeOpeningProviderActionDisclosure extends ProviderActionD
   readonly calls: readonly CreativeOpeningProviderCallDisclosure[];
 }
 
+export interface CreativeOpeningResultPersistenceFence {
+  readonly assertPending: () => void;
+  readonly isPending: () => boolean;
+}
+
 export interface ExecuteCreativeOpeningProviderActionInput extends CreativeOpeningProviderActionInput {
   readonly humanConfirmed?: boolean;
   readonly disclosureFingerprint?: string;
@@ -122,11 +132,15 @@ export interface ExecuteCreativeOpeningProviderActionInput extends CreativeOpeni
   readonly onProviderDispatchStarted?: (requestId: string, invocationId: string) => void;
   readonly onDelta?: (requestId: string, text: string) => void;
   /** Persists each independently settled slot without waiting for the rest of a batch. */
-  readonly onResult?: (result: CreativeOpeningResult) => void | Promise<void>;
+  readonly onResult?: (
+    result: CreativeOpeningResult,
+    persistenceFence: CreativeOpeningResultPersistenceFence,
+  ) => void | Promise<void>;
 }
 
 /** A truncated proposal below this boundary is not useful enough to offer to the author. */
 export const MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS = 160;
+export const CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS = 180_000;
 
 export type CreativeOpeningDestination =
   | Readonly<{ kind: "local" }>
@@ -185,7 +199,11 @@ export async function prepareCreativeOpeningProviderAction(
   runtime: DesktopRuntime,
   input: CreativeOpeningProviderActionInput,
 ): Promise<CreativeOpeningProviderActionDisclosure> {
-  return (await prepareCreativeOpeningProviderActionCurrent(runtime, input)).disclosure;
+  return (
+    await settleCreativeOpeningPreparation(runtime, () =>
+      prepareCreativeOpeningProviderActionCurrent(runtime, input),
+    )
+  ).disclosure;
 }
 
 /**
@@ -203,69 +221,123 @@ export async function executeCreativeOpeningProviderAction(
       "请先查看并确认这次开头生成的模型、发送范围、隐私和费用状态。",
     );
   }
-  const prepared = await prepareCreativeOpeningProviderActionCurrent(runtime, input);
-  if (prepared.disclosure.fingerprint !== input.disclosureFingerprint) {
-    throw creativeOpeningDisclosureChanged();
-  }
+  const requests = normalizeCreativeOpeningProviderRequests(input);
+  let preparedAction: Promise<PreparedCreativeOpeningProviderAction> | null = null;
+  const loadPreparedAction = (): Promise<PreparedCreativeOpeningProviderAction> => {
+    preparedAction ??= prepareCreativeOpeningProviderActionCurrent(runtime, input);
+    return preparedAction;
+  };
   const settled = await Promise.allSettled(
-    prepared.calls.map(async (call) => {
-      const result = await generateCreativeOpeningInternal(
-        runtime,
-        {
-          idea: input.idea,
-          ...(input.direction === undefined ? {} : { direction: input.direction }),
-          answers: input.answers ?? {},
-          openingAngle: call.request.openingAngle,
-          ...(call.request.partialOpening === null
-            ? {}
-            : { partialOpening: call.request.partialOpening }),
-          requestId: call.request.requestId,
-          projectContext: input.projectContext,
-          ...(input.assertBeforeProviderDispatch === undefined
-            ? {}
-            : {
-                assertBeforeProviderDispatch: () =>
-                  input.assertBeforeProviderDispatch?.(call.request.requestId),
-              }),
-          ...(input.onInvocationPrepared === undefined
-            ? {}
-            : {
-                onInvocationPrepared: (selection) =>
-                  input.onInvocationPrepared?.(call.request.requestId, selection),
-              }),
-          ...(input.onProviderDispatchStarted === undefined
-            ? {}
-            : {
-                onProviderDispatchStarted: (invocationId) =>
-                  input.onProviderDispatchStarted?.(call.request.requestId, invocationId),
-              }),
-          ...(input.onDelta === undefined
-            ? {}
-            : {
-                onDelta: (text) => input.onDelta?.(call.request.requestId, text),
-              }),
-        },
-        Object.freeze({
-          inspection: call.inspection,
-          sourceFingerprint: call.sourceFingerprint,
-        }),
-      );
-      // Await the exact slot checkpoint, but do not let its rejection stop the
-      // other confirmed calls. The aggregate error is surfaced only after
-      // every slot has independently reached a provider/local terminal.
-      await input.onResult?.(result);
-      return result;
-    }),
+    requests.map((request, index) =>
+      settleCreativeOpeningSlot(runtime, request.requestId, async (settlement) => {
+        const prepared = await loadPreparedAction();
+        settlement.assertPending();
+        if (prepared.disclosure.fingerprint !== input.disclosureFingerprint) {
+          throw creativeOpeningDisclosureChanged();
+        }
+        const call = prepared.calls[index];
+        if (call?.request.requestId !== request.requestId) {
+          throw invalidCreativeOpeningAction("开头位置与已确认请求不一致。");
+        }
+        const result = await generateCreativeOpeningInternal(
+          runtime,
+          {
+            idea: input.idea,
+            ...(input.direction === undefined ? {} : { direction: input.direction }),
+            answers: input.answers ?? {},
+            openingAngle: call.request.openingAngle,
+            ...(call.request.partialOpening === null
+              ? {}
+              : { partialOpening: call.request.partialOpening }),
+            requestId: call.request.requestId,
+            projectContext: input.projectContext,
+            assertBeforeProviderDispatch: () => {
+              settlement.assertPending();
+              input.assertBeforeProviderDispatch?.(call.request.requestId);
+            },
+            onInvocationPrepared: async (selection) => {
+              settlement.assertPending();
+              await input.onInvocationPrepared?.(call.request.requestId, selection);
+              settlement.assertPending();
+            },
+            onProviderDispatchStarted: (invocationId) => {
+              if (settlement.isPending()) {
+                input.onProviderDispatchStarted?.(call.request.requestId, invocationId);
+              }
+            },
+            onDelta: (text) => {
+              if (settlement.isPending()) {
+                input.onDelta?.(call.request.requestId, text);
+              }
+            },
+          },
+          Object.freeze({
+            inspection: call.inspection,
+            sourceFingerprint: call.sourceFingerprint,
+          }),
+        );
+        settlement.assertPending();
+        // Await the exact slot checkpoint, but do not let its rejection stop the
+        // other confirmed calls. The aggregate error is surfaced only after
+        // every slot has independently reached a provider/local terminal.
+        await input.onResult?.(result, settlement);
+        settlement.assertPending();
+        return result;
+      }),
+    ),
   );
-  const rejected = settled.filter(
-    (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
-  );
-  const rejectionReasons = rejected.map(({ reason }) => reason as unknown);
+  const rejected = settled.flatMap((outcome, index) => {
+    if (outcome.status === "fulfilled") return [];
+    const request = requests[index];
+    if (request === undefined) {
+      throw new Error("开头位置结算结果与固定请求计划不一致。");
+    }
+    return [
+      Object.freeze({
+        reason: outcome.reason as unknown,
+        requestId: request.requestId,
+      }),
+    ];
+  });
+  const rejectionReasons = rejected.map(({ reason }) => reason);
+  const timedOutRequestIds = Object.freeze([
+    ...new Set(
+      rejected.flatMap(({ reason, requestId }) => {
+        const carriedRequestIds = creativeOpeningTimedOutRequestIds(reason);
+        if (carriedRequestIds.some((carriedRequestId) => carriedRequestId !== requestId)) {
+          throw creativeOpeningTimeoutScopeMismatch();
+        }
+        return safeModelFailureCode(reason) === "MODEL_TIMEOUT" || carriedRequestIds.length > 0
+          ? [requestId]
+          : [];
+      }),
+    ),
+  ]);
+  if (
+    rejectionReasons.length > 0 &&
+    rejectionReasons.every((reason) => safeModelFailureCode(reason) === "MODEL_TIMEOUT")
+  ) {
+    throw creativeOpeningSettlementTimeout(timedOutRequestIds);
+  }
+  const firstRejection = rejectionReasons[0];
+  const firstRejectionError =
+    firstRejection instanceof Error
+      ? firstRejection
+      : new Error("开头位置未能独立完成本地归档。", { cause: firstRejection });
+  if (
+    firstRejection !== undefined &&
+    rejectionReasons.every((reason) => reason === firstRejection)
+  ) {
+    throw firstRejectionError;
+  }
   if (rejected.length === 1) {
-    throw rejectionReasons[0];
+    throw firstRejectionError;
   }
   if (rejected.length > 1) {
-    throw new AggregateError(rejectionReasons, "多个开头位置未能独立完成本地归档。");
+    throw attachCreativeOpeningTimedOutRequestIds(
+      new AggregateError(rejectionReasons, "多个开头位置未能独立完成本地归档。"),
+      timedOutRequestIds,
+    );
   }
   return Object.freeze(
     settled.map((outcome) => {
@@ -274,6 +346,130 @@ export async function executeCreativeOpeningProviderAction(
       }
       return outcome.value;
     }),
+  );
+}
+
+type CreativeOpeningSlotSettlement = CreativeOpeningResultPersistenceFence;
+
+async function settleCreativeOpeningPreparation<Result>(
+  runtime: DesktopRuntime,
+  operation: () => Promise<Result>,
+): Promise<Result> {
+  let pending = true;
+  const timeoutError = creativeOpeningPreparationTimeout();
+  let cancelTimeout = (): void => undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    const timeoutHandle = globalThis.setTimeout(() => {
+      if (!pending) {
+        return;
+      }
+      pending = false;
+      recordSafeGenerationErrorCode(runtime, "MODEL_TIMEOUT");
+      reject(timeoutError);
+    }, CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS);
+    cancelTimeout = () => globalThis.clearTimeout(timeoutHandle);
+  });
+
+  try {
+    return await Promise.race([Promise.resolve().then(operation), timeout]);
+  } finally {
+    pending = false;
+    cancelTimeout();
+  }
+}
+
+async function settleCreativeOpeningSlot<Result>(
+  runtime: DesktopRuntime,
+  requestId: string,
+  operation: (settlement: CreativeOpeningSlotSettlement) => Promise<Result>,
+): Promise<Result> {
+  let pending = true;
+  const timeoutError = creativeOpeningSettlementTimeout([requestId]);
+  let cancelTimeout = (): void => undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    const timeoutHandle = globalThis.setTimeout(() => {
+      if (!pending) {
+        return;
+      }
+      pending = false;
+      recordSafeGenerationErrorCode(runtime, "MODEL_TIMEOUT");
+      reject(timeoutError);
+    }, CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS);
+    cancelTimeout = () => globalThis.clearTimeout(timeoutHandle);
+  });
+  const settlement = Object.freeze({
+    assertPending: () => {
+      if (!pending) {
+        throw timeoutError;
+      }
+    },
+    isPending: () => pending,
+  });
+
+  try {
+    return await Promise.race([Promise.resolve().then(() => operation(settlement)), timeout]);
+  } finally {
+    pending = false;
+    cancelTimeout();
+  }
+}
+
+interface CreativeOpeningTimedOutRequestCarrier {
+  readonly timedOutRequestIds: readonly string[];
+}
+
+export function creativeOpeningTimedOutRequestIds(cause: unknown): readonly string[] {
+  if (cause instanceof AggregateError) {
+    const direct = readCreativeOpeningTimedOutRequestIds(cause);
+    return direct.length > 0
+      ? direct
+      : Object.freeze([...new Set(cause.errors.flatMap(creativeOpeningTimedOutRequestIds))]);
+  }
+  return readCreativeOpeningTimedOutRequestIds(cause);
+}
+
+function readCreativeOpeningTimedOutRequestIds(cause: unknown): readonly string[] {
+  if (typeof cause !== "object" || cause === null || !("timedOutRequestIds" in cause)) {
+    return Object.freeze([]);
+  }
+  const ids = cause.timedOutRequestIds;
+  return Array.isArray(ids) && ids.every((id) => typeof id === "string")
+    ? Object.freeze([...new Set(ids)])
+    : Object.freeze([]);
+}
+
+function attachCreativeOpeningTimedOutRequestIds<ErrorType extends Error>(
+  error: ErrorType,
+  requestIds: readonly string[],
+): ErrorType & CreativeOpeningTimedOutRequestCarrier {
+  return Object.assign(error, {
+    timedOutRequestIds: Object.freeze([...new Set(requestIds)]),
+  });
+}
+
+function creativeOpeningSettlementTimeout(requestIds: readonly string[]): ModelCenterError {
+  return attachCreativeOpeningTimedOutRequestIds(
+    new ModelCenterError(
+      "MODEL_TIMEOUT",
+      "这个开头位置在 180 秒内未完成，已停止本次请求；不会自动重试，请稍后手动重试。",
+      true,
+    ),
+    requestIds,
+  );
+}
+
+function creativeOpeningPreparationTimeout(): ModelCenterError {
+  return new ModelCenterError(
+    "MODEL_TIMEOUT",
+    "本次开头生成在 180 秒内未完成发送前准备，已停止全部请求；不会自动重试，请稍后手动重试。",
+    true,
+  );
+}
+
+function creativeOpeningTimeoutScopeMismatch(): ModelCenterError {
+  return new ModelCenterError(
+    "CREATIVE_OPENING_TIMEOUT_SCOPE_MISMATCH",
+    "开头超时编号与已确认的固定位置不一致；墨影没有结算任何其他位置，请重新读取进度。",
   );
 }
 
@@ -469,7 +665,7 @@ function normalizeCreativeOpeningProviderRequests(
   const maximumProviderCalls = openingActionMaximumProviderCalls(input.kind);
   if (input.requestIds.length !== maximumProviderCalls) {
     throw invalidCreativeOpeningAction(
-      `“${input.kind}”必须绑定 ${String(maximumProviderCalls)} 个稳定请求。`,
+      `本次开头操作必须绑定 ${String(maximumProviderCalls)} 个稳定请求。`,
     );
   }
   const requestIds = input.requestIds.map((requestId) =>

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import {
+  AI_CANDIDATE_PURPOSES,
   AI_CANDIDATE_SOURCES,
   AI_CANDIDATE_STATES,
   GENERATION_EVENT_TYPES,
@@ -31,6 +32,7 @@ export const NotificationLevelSchema = z.enum(NOTIFICATION_LEVELS);
 export const NotificationStateSchema = z.enum(NOTIFICATION_STATES);
 export const AiCandidateStateSchema = z.enum(AI_CANDIDATE_STATES);
 export const AiCandidateSourceSchema = z.enum(AI_CANDIDATE_SOURCES);
+export const AiCandidatePurposeSchema = z.enum(AI_CANDIDATE_PURPOSES);
 
 export const ErrorActionSchema = z.enum([
   "RETRY",
@@ -235,6 +237,7 @@ export const AiCandidateContractSchema = z
     id: UuidV7Schema,
     projectId: UuidV7Schema,
     chapterId: UuidV7Schema.nullable(),
+    purpose: AiCandidatePurposeSchema.default("prose"),
     source: AiCandidateSourceSchema,
     baseVersionId: UuidV7Schema.nullable(),
     content: z.string().max(5_000_000),
@@ -250,6 +253,14 @@ export const AiCandidateContractSchema = z
   })
   .strict()
   .superRefine((candidate, context) => {
+    if (candidate.purpose === "continuation_directions" && candidate.status === "accepted") {
+      context.addIssue({
+        code: "custom",
+        message: "Continuation directions cannot be accepted as chapter prose",
+        path: ["status"],
+      });
+    }
+
     if (candidate.chapterId !== null && candidate.baseVersionId === null) {
       context.addIssue({
         code: "custom",

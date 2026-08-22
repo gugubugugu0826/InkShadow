@@ -99,6 +99,7 @@ interface CandidateRow {
   readonly projectId: string;
   readonly chapterId: string | null;
   readonly source: string;
+  readonly purpose: string;
   readonly baseVersionId: string | null;
   readonly content: string;
   readonly contentChecksum: string | null;
@@ -451,6 +452,7 @@ function selectCandidateRows(
        project_id AS projectId,
        chapter_id AS chapterId,
        source,
+       purpose,
        base_version_id AS baseVersionId,
        content,
        content_checksum AS contentChecksum,
@@ -482,6 +484,7 @@ function insertCandidate(
        project_id,
        chapter_id,
        source,
+       purpose,
        base_version_id,
        content,
        content_checksum,
@@ -496,12 +499,13 @@ function insertCandidate(
        payload_kind,
        anchor_start_utf16,
        anchor_end_utf16
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       snapshot.id,
       snapshot.projectId,
       snapshot.chapterId,
       snapshot.source,
+      snapshot.purpose ?? "prose",
       snapshot.baseVersionId,
       snapshot.content,
       snapshot.contentChecksum,
@@ -526,6 +530,7 @@ function candidateRowMatches(row: CandidateRow, snapshot: AiCandidateSnapshot): 
     row.projectId === snapshot.projectId &&
     row.chapterId === snapshot.chapterId &&
     row.source === snapshot.source &&
+    row.purpose === (snapshot.purpose ?? "prose") &&
     row.baseVersionId === snapshot.baseVersionId &&
     row.content === snapshot.content &&
     row.contentChecksum === snapshot.contentChecksum &&
@@ -549,6 +554,7 @@ function candidateSnapshotsEqual(left: AiCandidateSnapshot, right: AiCandidateSn
     left.projectId === right.projectId &&
     left.chapterId === right.chapterId &&
     left.source === right.source &&
+    (left.purpose ?? "prose") === (right.purpose ?? "prose") &&
     left.baseVersionId === right.baseVersionId &&
     left.content === right.content &&
     left.contentChecksum === right.contentChecksum &&

@@ -47,6 +47,11 @@ const migration = [
     new URL("../migrations/0050_candidate_revision_authority.sql", import.meta.url),
     "utf8",
   ),
+  readFileSync(new URL("../migrations/0072_ai_candidate_purpose.sql", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../migrations/0074_chapter_version_story_fact_responsibility.sql", import.meta.url),
+    "utf8",
+  ),
 ].join("\n");
 
 const PROJECT_ID = uuid(1);

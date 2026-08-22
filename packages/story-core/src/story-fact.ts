@@ -229,6 +229,17 @@ export interface StoryFactStore {
     filter?: StoryFactListFilter,
   ): Promise<Result<readonly StoryFact[], StoryCoreError>>;
   save(fact: StoryFact, expectedRevision: number): Promise<Result<void, StoryCoreError>>;
+  /**
+   * Commits both sides of an explicit duplicate merge in one persistence
+   * transaction. A store must not expose a partially revised survivor or a
+   * partially retired duplicate.
+   */
+  mergeUserFactRevisions?(
+    survivor: StoryFact,
+    survivorExpectedRevision: number,
+    duplicate: StoryFact,
+    duplicateExpectedRevision: number,
+  ): Promise<Result<void, StoryCoreError>>;
   listRevisions(factId: UuidV7): Promise<Result<readonly StoryFactRevision[], StoryCoreError>>;
   /** Implemented by production stores that persist continuous extraction. */
   findContinuousStoryStateRouteReceipt?(
@@ -557,6 +568,169 @@ export class StoryFact {
     });
   }
 
+  /** Rewrites only the author-facing content while preserving identity and evidence. */
+  public editAsUser(input: {
+    readonly contentText: string;
+    readonly actorId: string;
+    readonly humanConfirmed: unknown;
+    readonly expectedRevision: number;
+    readonly now: string;
+  }): Result<StoryFact, StoryCoreError> {
+    if (input.humanConfirmed !== true) {
+      return humanDecisionError();
+    }
+    if (this.snapshot.status === "branch" || this.snapshot.locked) {
+      return invalidTransition(
+        "A branch or locked story fact must be unlocked or handled in its branch before editing.",
+      );
+    }
+    if (this.snapshot.structuredValue !== null) {
+      return invalidTransition(
+        "A structured story fact cannot be edited as plain text until a structured edit transaction is available.",
+      );
+    }
+    const contentText = validateBoundedText(input.contentText, 10_000, "Story fact content");
+    if (!contentText.ok) {
+      return contentText;
+    }
+    const actorId = parseUuidV7(input.actorId);
+    if (!actorId.ok) {
+      return actorId;
+    }
+    const now = validateMutation(input.expectedRevision, input.now, this.snapshot);
+    if (!now.ok) {
+      return now;
+    }
+    return StoryFact.rehydrate({
+      ...this.snapshot,
+      contentText: contentText.value,
+      confidence: 1,
+      status: "formal",
+      origin: "user",
+      userConfirmed: true,
+      locked: false,
+      deprecated: false,
+      needsReview: false,
+      confirmedByActorId: actorId.value,
+      confirmedAt: now.value,
+      branchId: null,
+      revision: this.snapshot.revision + 1,
+      updatedAt: now.value,
+    });
+  }
+
+  /** Restores the visible content of one immutable prior revision as a new revision. */
+  public restoreAsUser(input: {
+    readonly priorRevision: StoryFact;
+    readonly actorId: string;
+    readonly humanConfirmed: unknown;
+    readonly expectedRevision: number;
+    readonly now: string;
+  }): Result<StoryFact, StoryCoreError> {
+    const prior = input.priorRevision.toSnapshot();
+    if (
+      prior.id !== this.snapshot.id ||
+      prior.projectId !== this.snapshot.projectId ||
+      prior.factType !== this.snapshot.factType ||
+      JSON.stringify(prior.source) !== JSON.stringify(this.snapshot.source) ||
+      prior.createdAt !== this.snapshot.createdAt
+    ) {
+      return factValidationError("A story fact can restore only one of its own prior revisions.");
+    }
+    if (prior.revision >= this.snapshot.revision) {
+      return invalidTransition("Only an earlier story fact revision can be restored.");
+    }
+    if (prior.structuredValue !== null || this.snapshot.structuredValue !== null) {
+      return invalidTransition(
+        "A structured story fact revision cannot be restored as plain text until a structured restore transaction is available.",
+      );
+    }
+    if (prior.contentText === null) {
+      return invalidTransition("The selected revision does not contain restorable plain text.");
+    }
+    return this.editAsUser({
+      contentText: prior.contentText,
+      actorId: input.actorId,
+      humanConfirmed: input.humanConfirmed,
+      expectedRevision: input.expectedRevision,
+      now: input.now,
+    });
+  }
+
+  /** Restores a user-confirmed deleted fact without changing text or structured semantics. */
+  public restoreDeletedAsUser(input: {
+    readonly actorId: string;
+    readonly humanConfirmed: unknown;
+    readonly expectedRevision: number;
+    readonly now: string;
+  }): Result<StoryFact, StoryCoreError> {
+    if (input.humanConfirmed !== true) {
+      return humanDecisionError();
+    }
+    if (
+      this.snapshot.status !== "deprecated" ||
+      !this.snapshot.deprecated ||
+      !this.snapshot.userConfirmed
+    ) {
+      return invalidTransition("Only a user-confirmed deleted story fact can be restored.");
+    }
+    const actorId = parseUuidV7(input.actorId);
+    if (!actorId.ok) {
+      return actorId;
+    }
+    const now = validateMutation(input.expectedRevision, input.now, this.snapshot);
+    if (!now.ok) {
+      return now;
+    }
+    return StoryFact.rehydrate({
+      ...this.snapshot,
+      status: "formal",
+      locked: false,
+      deprecated: false,
+      needsReview: false,
+      confirmedByActorId: actorId.value,
+      confirmedAt: now.value,
+      revision: this.snapshot.revision + 1,
+      updatedAt: now.value,
+    });
+  }
+
+  /** Records the kept side of an atomic duplicate merge as a new user revision. */
+  public recordDuplicateMergeAsUser(input: {
+    readonly duplicate: StoryFact;
+    readonly actorId: string;
+    readonly humanConfirmed: unknown;
+    readonly expectedRevision: number;
+    readonly now: string;
+  }): Result<StoryFact, StoryCoreError> {
+    const duplicate = input.duplicate.toSnapshot();
+    if (
+      duplicate.id === this.snapshot.id ||
+      duplicate.projectId !== this.snapshot.projectId ||
+      duplicate.factType !== this.snapshot.factType ||
+      duplicate.structuredValue !== null ||
+      this.snapshot.structuredValue !== null ||
+      duplicate.status === "deprecated" ||
+      duplicate.status === "branch" ||
+      normalizeFactContent(duplicate.contentText) !==
+        normalizeFactContent(this.snapshot.contentText)
+    ) {
+      return factValidationError("Only active facts with the same type and content can be merged.");
+    }
+    const currentContent = this.snapshot.contentText;
+    if (currentContent === null) {
+      return invalidTransition(
+        "A structured-only story fact cannot be merged from the simple view.",
+      );
+    }
+    return this.editAsUser({
+      contentText: currentContent,
+      actorId: input.actorId,
+      humanConfirmed: input.humanConfirmed,
+      expectedRevision: input.expectedRevision,
+      now: input.now,
+    });
+  }
   /**
    * Retires only an unreviewed system projection that can be rebuilt from its
    * source. This deliberately has no `humanConfirmed` argument: it is not a
@@ -620,6 +794,9 @@ export class StoryFact {
   }
 }
 
+function normalizeFactContent(value: string | null): string | null {
+  return value === null ? null : value.trim().replace(/\s+/gu, " ").toLocaleLowerCase();
+}
 export function readAmbiguousStoryFactEntityAlias(
   snapshot: StoryFactSnapshot,
 ): AmbiguousStoryFactEntityAlias | null {

@@ -46,15 +46,21 @@ const historicalContinuousRouteReceiptMigration = readFileSync(
   ),
   "utf8",
 );
+const userRevisionMigration = readFileSync(
+  new URL("../../data/migrations/0073_story_fact_user_revisions.sql", import.meta.url),
+  "utf8",
+);
 const migration = [
   baseMigration,
   aliasResolutionMigration,
   continuousRouteReceiptMigration,
   historicalContinuousRouteReceiptMigration,
+  userRevisionMigration,
 ].join("\n");
 const T0 = "2026-08-01T00:00:00.000Z";
 const T1 = "2026-08-01T00:01:00.000Z";
 const T2 = "2026-08-01T00:02:00.000Z";
+const T3 = "2026-08-01T00:03:00.000Z";
 const PROJECT_ID = uuid(1);
 const ACTOR_ID = uuid(2);
 const executors: NodeStorySqliteExecutor[] = [];
@@ -144,6 +150,348 @@ describe("unified story fact SQLite store", () => {
         .prepare("UPDATE story_fact_revisions SET change_kind = 'deprecated' WHERE fact_id = ?")
         .run(confirmed.id),
     ).toThrow(/immutable/iu);
+  });
+
+  it("persists user edits and deleted-fact restoration as new immutable revisions", async () => {
+    const executor = createExecutor();
+    const clock = new ManualClock(T0);
+    const store = new SqliteStoryFactStore(executor);
+    const service = new StoryFactApplicationService({
+      facts: store,
+      clock,
+      ids: new SequenceUuidV7Generator(300),
+    });
+    const created = unwrap(
+      await service.createFormalUserFact({
+        projectId: PROJECT_ID,
+        factType: "world_rule",
+        contentText: "潮门只在月落前开启。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+      }),
+    );
+    const originalSource = created.toSnapshot().source;
+
+    clock.set(T1);
+    const edited = unwrap(
+      await service.editAsUser({
+        factId: created.id,
+        contentText: "潮门只在月落后开启。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 1,
+      }),
+    );
+    expect(edited.toSnapshot()).toMatchObject({
+      contentText: "潮门只在月落后开启。",
+      status: "formal",
+      origin: "user",
+      confidence: 1,
+      revision: 2,
+    });
+    expect(edited.toSnapshot().source).toEqual(originalSource);
+    expect(() =>
+      executor.database
+        .prepare(
+          "UPDATE story_facts SET content_text = ?, revision = 3, updated_at = ? WHERE id = ?",
+        )
+        .run("绕过用户修订。", T2, created.id),
+    ).toThrow(/user content revision is invalid/iu);
+
+    clock.set(T2);
+    const deleted = unwrap(
+      await service.deprecate({
+        factId: created.id,
+        humanConfirmed: true,
+        expectedRevision: 2,
+      }),
+    );
+    expect(deleted.toSnapshot()).toMatchObject({ status: "deprecated", revision: 3 });
+
+    clock.set(T3);
+    const restored = unwrap(
+      await service.restoreAsUser({
+        factId: created.id,
+        revision: 1,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 3,
+      }),
+    );
+    expect(restored.toSnapshot()).toMatchObject({
+      contentText: "潮门只在月落前开启。",
+      status: "formal",
+      deprecated: false,
+      revision: 4,
+    });
+    expect(restored.toSnapshot().source).toEqual(originalSource);
+
+    const reopened = unwrap(await new SqliteStoryFactStore(executor).findById(created.id));
+    expect(reopened?.toSnapshot()).toEqual(restored.toSnapshot());
+    const revisions = unwrap(await store.listRevisions(created.id));
+    expect(revisions.map((entry) => entry.fact.toSnapshot().contentText)).toEqual([
+      "潮门只在月落前开启。",
+      "潮门只在月落后开启。",
+      "潮门只在月落后开启。",
+      "潮门只在月落前开启。",
+    ]);
+  });
+
+  it("rejects plain-text restoration of structured history but restores deletion without changing semantics", async () => {
+    const executor = createExecutor();
+    const store = new SqliteStoryFactStore(executor);
+    const original = unwrap(
+      StoryFact.create({
+        id: uuid(310),
+        projectId: PROJECT_ID,
+        factType: "world_rule",
+        structuredValue: {
+          schemaVersion: "inkshadow.world-rule-setting.v1",
+          rule: "潮门只响应银铃。",
+        },
+        source: {
+          kind: "user_statement",
+          reference: `story-fact:${uuid(311)}`,
+        },
+        confidence: 1,
+        status: "formal",
+        origin: "user",
+        needsReview: false,
+        humanConfirmed: true,
+        confirmationActorId: ACTOR_ID,
+        now: T0,
+      }),
+    );
+    expect((await store.create(original)).ok).toBe(true);
+    expect(
+      original.editAsUser({
+        contentText: "把结构化规则误改成文字。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: T1,
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: { code: "STORY_FACT_INVALID_TRANSITION" },
+    });
+    expect(unwrap(await store.listRevisions(original.id))).toHaveLength(1);
+
+    expect(() =>
+      executor.database
+        .prepare(
+          "UPDATE story_facts SET content_text = ?, confidence = 1.0, origin = 'user', status = 'formal', user_confirmed = 1, locked = 0, deprecated = 0, needs_review = 0, confirmed_by_actor_id = ?, confirmed_at = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+        )
+        .run("绕过领域层误改结构化规则。", ACTOR_ID, T1, T1, original.id),
+    ).toThrow(/story fact (?:user content revision|governance transition) is invalid/iu);
+    expect(unwrap(await store.findById(original.id))?.toSnapshot().contentText).toBeNull();
+    expect(unwrap(await store.listRevisions(original.id))).toHaveLength(1);
+
+    const deleted = unwrap(
+      original.deprecate({
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: T1,
+      }),
+    );
+    expect((await store.save(deleted, 1)).ok).toBe(true);
+
+    expect(
+      deleted.restoreAsUser({
+        priorRevision: original,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 2,
+        now: T2,
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: { code: "STORY_FACT_INVALID_TRANSITION" },
+    });
+    expect(unwrap(await store.listRevisions(original.id))).toHaveLength(2);
+
+    const restored = unwrap(
+      deleted.restoreDeletedAsUser({
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 2,
+        now: T2,
+      }),
+    );
+    expect((await store.save(restored, 2)).ok).toBe(true);
+    expect(unwrap(await store.findById(original.id))?.toSnapshot()).toMatchObject({
+      contentText: null,
+      structuredValue: {
+        schemaVersion: "inkshadow.world-rule-setting.v1",
+        rule: "潮门只响应银铃。",
+      },
+      status: "formal",
+      origin: "user",
+      confirmedByActorId: ACTOR_ID,
+      revision: 3,
+    });
+    const revisions = unwrap(await store.listRevisions(original.id));
+    expect(revisions.map((entry) => entry.fact.toSnapshot().status)).toEqual([
+      "formal",
+      "deprecated",
+
+      "formal",
+    ]);
+    expect(revisions.every((entry) => entry.fact.toSnapshot().contentText === null)).toBe(true);
+  });
+
+  it("never merges same-text structured events with different causal semantics", async () => {
+    const executor = createExecutor();
+    const clock = new ManualClock(T0);
+    const store = new SqliteStoryFactStore(executor);
+    const service = new StoryFactApplicationService({
+      facts: store,
+      clock,
+      ids: new SequenceUuidV7Generator(312),
+    });
+    const first = unwrap(
+      await service.createFormalUserFact({
+        projectId: PROJECT_ID,
+        factType: "timeline_event",
+        contentText: "银铃响起，潮门打开。",
+        structuredValue: {
+          schemaVersion: "inkshadow.causal-event-fact.v2",
+          eventId: "event.silver-bell",
+          causeEventIds: ["event.pull-rope"],
+        },
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+      }),
+    );
+    const second = unwrap(
+      await service.createFormalUserFact({
+        projectId: PROJECT_ID,
+        factType: "timeline_event",
+        contentText: "银铃响起，潮门打开。",
+        structuredValue: {
+          schemaVersion: "inkshadow.causal-event-fact.v2",
+          eventId: "event.tide-gate",
+          causeEventIds: ["event.moonset"],
+        },
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+      }),
+    );
+    const firstBefore = first.toSnapshot();
+    const secondBefore = second.toSnapshot();
+
+    expect(
+      await service.mergeDuplicates({
+        survivorFactId: first.id,
+        survivorExpectedRevision: 1,
+        duplicateFactId: second.id,
+        duplicateExpectedRevision: 1,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: { code: "STORY_VALIDATION_FAILED" },
+    });
+    expect(unwrap(await store.findById(first.id))?.toSnapshot()).toEqual(firstBefore);
+    expect(unwrap(await store.findById(second.id))?.toSnapshot()).toEqual(secondBefore);
+    expect(unwrap(await store.listRevisions(first.id))).toHaveLength(1);
+    expect(unwrap(await store.listRevisions(second.id))).toHaveLength(1);
+  });
+
+  it("merges whitespace-normalized duplicates atomically and rolls back both facts when the second write fails", async () => {
+    const executor = createExecutor();
+    const clock = new ManualClock(T0);
+    const store = new SqliteStoryFactStore(executor);
+    const service = new StoryFactApplicationService({
+      facts: store,
+      clock,
+      ids: new SequenceUuidV7Generator(320),
+    });
+    const first = unwrap(
+      await service.createFormalUserFact({
+        projectId: PROJECT_ID,
+        factType: "location_setting",
+        contentText: "旧桥下 藏着潮汐钟。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+      }),
+    );
+    const second = unwrap(
+      await service.createFormalUserFact({
+        projectId: PROJECT_ID,
+        factType: "location_setting",
+        contentText: "  旧桥下\n藏着潮汐钟。  ",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+      }),
+    );
+
+    clock.set(T1);
+    const merged = unwrap(
+      await service.mergeDuplicates({
+        survivorFactId: first.id,
+        survivorExpectedRevision: 1,
+        duplicateFactId: second.id,
+        duplicateExpectedRevision: 1,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+      }),
+    );
+    expect(merged.toSnapshot()).toMatchObject({ status: "formal", revision: 2 });
+    expect(unwrap(await store.findById(second.id))?.toSnapshot()).toMatchObject({
+      status: "deprecated",
+      revision: 2,
+    });
+    expect(unwrap(await store.listRevisions(first.id))).toHaveLength(2);
+    expect(unwrap(await store.listRevisions(second.id))).toHaveLength(2);
+
+    const third = unwrap(
+      await service.createFormalUserFact({
+        projectId: PROJECT_ID,
+        factType: "world_rule",
+        contentText: "海雾中不能点燃白灯。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+      }),
+    );
+    const fourth = unwrap(
+      await service.createFormalUserFact({
+        projectId: PROJECT_ID,
+        factType: "world_rule",
+        contentText: "海雾中不能点燃白灯。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+      }),
+    );
+    clock.set(T2);
+    const failingStore = new SqliteStoryFactStore(new FailSecondStoryFactUpdateExecutor(executor));
+    const failingService = new StoryFactApplicationService({
+      facts: failingStore,
+      clock,
+      ids: new SequenceUuidV7Generator(340),
+    });
+    const failed = await failingService.mergeDuplicates({
+      survivorFactId: third.id,
+      survivorExpectedRevision: 1,
+      duplicateFactId: fourth.id,
+      duplicateExpectedRevision: 1,
+      actorId: ACTOR_ID,
+      humanConfirmed: true,
+    });
+    expect(failed.ok).toBe(false);
+
+    const reopened = new SqliteStoryFactStore(executor);
+    expect(unwrap(await reopened.findById(third.id))?.toSnapshot()).toMatchObject({
+      status: "formal",
+      revision: 1,
+    });
+    expect(unwrap(await reopened.findById(fourth.id))?.toSnapshot()).toMatchObject({
+      status: "formal",
+      revision: 1,
+    });
+    expect(unwrap(await reopened.listRevisions(third.id))).toHaveLength(1);
+    expect(unwrap(await reopened.listRevisions(fourth.id))).toHaveLength(1);
   });
 
   it("checks a chapter citation against the exact immutable source version", async () => {
@@ -431,7 +779,9 @@ describe("unified story fact SQLite store", () => {
     );
     expect((await store.create(original)).ok).toBe(true);
 
-    executor.database.exec(aliasResolutionMigration);
+    executor.database.exec(
+      [aliasResolutionMigration, userRevisionMigration].join(String.fromCharCode(10)),
+    );
     const resolved = unwrap(
       original.resolveEntityAlias({
         resolution: { kind: "existing_entity", targetEntityKey: "character.linzhou.a" },
@@ -1496,6 +1846,43 @@ function createExecutor(migrationSql = migration, databasePath?: string): NodeSt
   return executor;
 }
 
+class FailSecondStoryFactUpdateExecutor implements StorySqlExecutor {
+  public constructor(private readonly delegate: NodeStorySqliteExecutor) {}
+
+  public select<Row extends object>(
+    query: string,
+    bindValues?: readonly StorySqlPrimitive[],
+  ): Promise<Row[]> {
+    return this.delegate.select<Row>(query, bindValues);
+  }
+
+  public execute(
+    query: string,
+    bindValues?: readonly StorySqlPrimitive[],
+  ): ReturnType<StorySqlExecutor["execute"]> {
+    return this.delegate.execute(query, bindValues);
+  }
+
+  public transaction<Value>(
+    operation: (transaction: StorySqlTransaction) => Promise<Value>,
+  ): Promise<Value> {
+    return this.delegate.transaction((transaction) => {
+      let storyFactUpdates = 0;
+      return operation({
+        select: (query, bindValues) => transaction.select(query, bindValues),
+        execute: (query, bindValues) => {
+          if (/UPDATE +story_facts/iu.test(query)) {
+            storyFactUpdates += 1;
+            if (storyFactUpdates === 2) {
+              throw new Error("injected second story fact update failure");
+            }
+          }
+          return transaction.execute(query, bindValues);
+        },
+      });
+    });
+  }
+}
 class InterleavingStoryExecutor implements StorySqlExecutor {
   public constructor(
     private readonly delegate: NodeStorySqliteExecutor,

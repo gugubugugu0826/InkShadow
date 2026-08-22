@@ -1,5 +1,5 @@
 import { ToastProvider } from "@inkshadow/ui";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -35,68 +35,47 @@ describe("local-first start page", () => {
     window.localStorage.clear();
   });
 
-  it("presents a new local user with the direct-mode safety promise and one primary action", async () => {
-    const user = userEvent.setup();
+  it("gives a new local user one plain-language creation action", async () => {
     renderStartPage();
 
-    expect(
-      screen.getByRole("heading", { name: "把你的第一个想法，写成一个故事", level: 1 }),
-    ).toBeVisible();
-    expect(await screen.findByText("直接模式")).toBeVisible();
-    expect(screen.getByText(/只有你明确选择使用后，才会写入正文/u)).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "同意并启用直接模式" }));
-    expect(screen.getByRole("link", { name: "开始写作" })).toHaveAttribute("href", "/create/idea");
-    expect(screen.getByRole("button", { name: "使用专业模式" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "开始写你的故事", level: 1 })).toBeVisible();
+    expect(screen.getByRole("link", { name: "开始创作" })).toHaveAttribute("href", "/create/idea");
+    expect(screen.queryByText("直接模式")).not.toBeInTheDocument();
+    expect(screen.queryByText("专业模式")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(document.querySelectorAll(".start-page__entry")).toHaveLength(0);
   });
 
-  it("keeps an empty direct-mode library free of technical creation choices", async () => {
-    const user = userEvent.setup();
+  it("keeps an empty direct-mode home free of technical creation choices", async () => {
     renderStartPage();
 
-    await waitFor(() => {
-      expect(screen.queryByRole("heading", { name: "回到刚才停下的地方" })).not.toBeInTheDocument();
-    });
-    await user.click(screen.getByRole("button", { name: "同意并启用直接模式" }));
-    expect(await screen.findByRole("link", { name: "开始写作" })).toBeVisible();
+    await screen.findByRole("link", { name: "开始创作" });
+    expect(screen.queryByRole("heading", { name: "回到刚才停下的地方" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /导入小说/u })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /专业/u })).not.toBeInTheDocument();
     expect(document.querySelectorAll(".start-page__entry")).toHaveLength(0);
   });
 
-  it("requires and persists one explicit local-organization authorization without Provider calls", async () => {
+  it("does not require a first-use confirmation or call a model from the home page", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const providerGenerate = vi.spyOn(runtime.modelGateway, "generate");
-    const user = userEvent.setup();
-    const rendered = renderStartPage(runtime);
-
-    expect(await screen.findByRole("dialog", { name: "启用直接模式前，请确认一次" })).toBeVisible();
-    expect(screen.getByText("授权本地整理，不授权联网或修改正文")).toBeVisible();
-    expect(screen.getByText(/只有你明确选择使用后，正文和不可变版本才会改变/u)).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "取消" }));
-    await waitFor(async () => {
-      expect(await runtime.writingExperience.getOrInitialize()).toMatchObject({
-        mode: "professional",
-        directLocalOrganizationAuthorizedAt: null,
-      });
-    });
-
-    expect(providerGenerate).not.toHaveBeenCalled();
-
-    rendered.unmount();
-    const cancelled = await runtime.writingExperience.getOrInitialize();
-    await runtime.writingExperience.authorizeDirectMode(cancelled.revision);
     renderStartPage(runtime);
-    await screen.findByRole("link", { name: "开始写作" });
+
+    await screen.findByRole("link", { name: "开始创作" });
     expect(
       screen.queryByRole("dialog", { name: "启用直接模式前，请确认一次" }),
     ).not.toBeInTheDocument();
+    expect(await runtime.writingExperience.getOrInitialize()).toMatchObject({
+      mode: "direct",
+    });
+    expect(providerGenerate).not.toHaveBeenCalled();
   });
 
-  it("reveals the three established creation paths only after an explicit professional switch", async () => {
+  it("keeps the three established creation paths in professional mode", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
-    const user = userEvent.setup();
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
     renderStartPage(runtime);
-
-    await user.click(await screen.findByRole("button", { name: "取消" }));
 
     expect(await screen.findByRole("link", { name: /从一个想法开始/ })).toHaveAttribute(
       "href",
@@ -111,7 +90,6 @@ describe("local-first start page", () => {
       "/create/professional",
     );
     expect(document.querySelectorAll(".start-page__entry")).toHaveLength(3);
-    expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("professional");
   });
 
   it("continues the real most recently edited chapter and reports its saved cursor", async () => {
@@ -145,18 +123,21 @@ describe("local-first start page", () => {
     );
   });
 
-  it("keeps the library and backup recovery available as secondary actions", () => {
+  it("keeps only the library as a secondary action in direct mode", async () => {
     renderStartPage();
 
-    expect(screen.getByRole("link", { name: "浏览作品库" })).toHaveAttribute("href", "/projects");
-    expect(screen.getByRole("link", { name: "恢复备份" })).toHaveAttribute(
+    expect(await screen.findByRole("link", { name: "浏览作品库" })).toHaveAttribute(
       "href",
-      "/settings#data-transfer",
+      "/projects",
     );
+    expect(screen.queryByRole("link", { name: "恢复备份" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "体验示例作品" })).not.toBeInTheDocument();
   });
 
-  it("creates a real local example project and opens its stable chapter", async () => {
+  it("keeps the real example project available in professional mode", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
     const user = userEvent.setup();
     renderStartPage(runtime);
 

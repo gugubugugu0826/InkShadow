@@ -6,6 +6,9 @@ import { MAX_CHAPTER_CONTENT_LENGTH, validateChapterContent } from "./chapter.js
 export const AI_CANDIDATE_SOURCES = ["generate", "polish", "extract", "whatif", "agent"] as const;
 export type AiCandidateSource = (typeof AI_CANDIDATE_SOURCES)[number];
 
+export const AI_CANDIDATE_PURPOSES = ["prose", "continuation_directions"] as const;
+export type AiCandidatePurpose = (typeof AI_CANDIDATE_PURPOSES)[number];
+
 export const AI_CANDIDATE_STATUSES = [
   "streaming",
   "ready",
@@ -59,6 +62,11 @@ export interface AiCandidateSnapshot {
   readonly projectId: UuidV7;
   readonly chapterId: UuidV7 | null;
   readonly source: AiCandidateSource;
+  /**
+   * Why this isolated result exists. Optional only for snapshots created
+   * before purpose authority was introduced; legacy snapshots are prose.
+   */
+  readonly purpose?: AiCandidatePurpose;
   readonly baseVersionId: UuidV7 | null;
   readonly content: string;
   readonly contentChecksum: ContentChecksum | null;
@@ -85,6 +93,7 @@ export interface CreateStreamingCandidateInput {
   readonly projectId: UuidV7;
   readonly chapterId: UuidV7 | null;
   readonly source: AiCandidateSource;
+  readonly purpose?: AiCandidatePurpose;
   readonly baseVersionId: UuidV7 | null;
   readonly now: IsoUtcTimestamp;
   readonly applicationIntent?: AiCandidateApplicationIntent;
@@ -135,6 +144,20 @@ function validateSnapshot(snapshot: AiCandidateSnapshot): Result<AiCandidateSnap
     return applicationIntent;
   }
 
+  const purpose = snapshot.purpose ?? "prose";
+  if (!AI_CANDIDATE_PURPOSES.includes(purpose)) {
+    return err(
+      new AppError({
+        code: "VALIDATION_FAILED",
+        message: "The AI candidate purpose is invalid.",
+        details: { field: "purpose" },
+      }),
+    );
+  }
+  if (purpose === "continuation_directions" && snapshot.status === "accepted") {
+    return err(directionCandidateCannotBeAccepted());
+  }
+
   const revision = snapshot.revision ?? 1;
   if (!Number.isSafeInteger(revision) || revision < 1) {
     return err(
@@ -149,6 +172,7 @@ function validateSnapshot(snapshot: AiCandidateSnapshot): Result<AiCandidateSnap
   return ok({
     ...snapshot,
     content: content.value,
+    purpose,
     applicationIntent: applicationIntent.value,
     revision,
   });
@@ -265,6 +289,7 @@ export class AiCandidate {
         projectId: input.projectId,
         chapterId: input.chapterId,
         source: input.source,
+        purpose: input.purpose ?? "prose",
         baseVersionId: input.baseVersionId,
         content: "",
         contentChecksum: null,
@@ -298,6 +323,10 @@ export class AiCandidate {
 
   get baseVersionId(): UuidV7 | null {
     return this.snapshot.baseVersionId;
+  }
+
+  get purpose(): AiCandidatePurpose {
+    return this.snapshot.purpose ?? "prose";
   }
 
   get content(): string {
@@ -412,6 +441,9 @@ export class AiCandidate {
   }
 
   accept(now: IsoUtcTimestamp): Result<AiCandidate, AppError> {
+    if (this.purpose === "continuation_directions") {
+      return err(directionCandidateCannotBeAccepted());
+    }
     return this.decide("accepted", now);
   }
 
@@ -470,4 +502,12 @@ export class AiCandidate {
           }),
         );
   }
+}
+
+function directionCandidateCannotBeAccepted(): AppError {
+  return new AppError({
+    code: "VALIDATION_FAILED",
+    message: "创作方向只能用于选择后续写法，不能直接写入正文。",
+    details: { field: "purpose", reason: "CONTINUATION_DIRECTIONS_NOT_ACCEPTABLE" },
+  });
 }

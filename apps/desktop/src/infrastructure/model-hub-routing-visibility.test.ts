@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { NOVEL_AI_TASKS, type ModelHubCapability } from "./model-hub-provider-registry";
 import {
   buildModelHubRoutingVisibility,
+  capabilityLabel,
   toAiRoutingDiagnosticSummary,
 } from "./model-hub-routing-visibility";
 import type {
@@ -16,6 +17,27 @@ import type {
 const NOW = "2026-08-09T12:00:00.000Z";
 
 describe("model hub routing visibility", () => {
+  it.each([
+    ["text_generation", "文本生成"],
+    ["reasoning", "推理"],
+    ["structured_output", "结构化输出"],
+    ["embedding", "向量检索"],
+    ["rerank", "结果排序"],
+    ["image_generation", "图片生成"],
+    ["vision", "图片理解"],
+    ["translation", "翻译"],
+    ["tool_calling", "工具调用"],
+    ["token_counting", "内容额度计数"],
+    ["streaming", "流式输出"],
+    ["long_context", "长上下文"],
+    ["unexpected_capability", "能力未知"],
+  ])("shows a safe Chinese label for capability %s", (capability, expected) => {
+    expect(capabilityLabel(capability)).toBe(expected);
+    expect(capabilityLabel(capability)).not.toMatch(
+      /text_generation|reasoning|structured_output|embedding|rerank|image_generation|vision|translation|tool_calling|token_counting|streaming|long_context|unexpected/iu,
+    );
+  });
+
   it.each([
     [0, "partial", false],
     [15, "writing_ready", true],
@@ -271,7 +293,7 @@ describe("model hub routing visibility", () => {
       visibility.tasks.find(({ definition }) => definition.task === "continuation"),
     ).toMatchObject({
       status: "failed",
-      reason: "基础配置检查未通过：API Key 已删除或不可用。",
+      reason: "基础配置检查未通过：接口密钥已删除或不可用。",
     });
   });
 });

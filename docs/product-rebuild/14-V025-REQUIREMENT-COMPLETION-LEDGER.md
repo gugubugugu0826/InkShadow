@@ -2,7 +2,7 @@
 
 > 建立日期：2026-08-20  
 > 来源：用户提供的“v0.2.5 最终继续开发 Prompt”与其继承的融合 Prompt  
-> 当前结论：`v0.2.5 PUBLISHED_PRE_RELEASE / EXTERNAL_VALIDATION_BLOCKED`  
+> 本历史台账冻结结论：`v0.2.5 PUBLISHED_PRE_RELEASE / EXTERNAL_VALIDATION_BLOCKED`  
 > 使用规则：这是持续更新的完成台账，不以 route、表或单测替代生产闭环。来源提交的本地候选链与远端 CI 已通过；仍保留为 `BLOCKED_EXTERNAL` 的真实环境项不得由自动化结果升级。
 
 > 2026-08-21 起的 `v0.2.6` 真机缺陷修复不倒改本文任何 `v0.2.5` 提交、迁移、测试、制品或发布

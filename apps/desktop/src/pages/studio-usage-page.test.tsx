@@ -38,7 +38,7 @@ describe("StudioUsagePage", () => {
     expect(
       screen.getByText("本次读取回收了 1 个过期租约，额度已归还到其创建月份。"),
     ).toBeInTheDocument();
-    expect(screen.getByText(/InkShadow 内部的 token 与价格元数据额度账本/u)).toBeInTheDocument();
+    expect(screen.getByText(/墨影内部的内容额度\s*与价格元数据额度账本/u)).toBeInTheDocument();
     expect(
       screen.getByText("实际收费以模型供应商账单为准；当前版本尚未实现供应商侧权威账单对账。"),
     ).toBeInTheDocument();
@@ -98,6 +98,8 @@ describe("StudioUsagePage", () => {
     expect(screen.queryByRole("button", { name: "保存项目覆盖" })).not.toBeInTheDocument();
     expect(service.updateTeamBudget).not.toHaveBeenCalled();
     expect(service.updateProjectBudget).not.toHaveBeenCalled();
+    expect(screen.getAllByText(/没有修改预算的权限/u)).toHaveLength(2);
+    expect(screen.queryByText(/capability/iu)).not.toBeInTheDocument();
   });
 
   it("fails closed while offline and explicitly keeps local editing available", () => {
@@ -114,7 +116,7 @@ describe("StudioUsagePage", () => {
     setOnline(true);
     renderPage(null, `/teams/${TEAM_ID}/usage`);
 
-    expect(screen.getByText("AI 用量云服务未配置")).toBeInTheDocument();
+    expect(screen.getByText("智能创作用量云服务未配置")).toBeInTheDocument();
     expect(screen.getByText(/预算操作保持关闭/u)).toBeInTheDocument();
   });
 
@@ -135,7 +137,42 @@ describe("StudioUsagePage", () => {
 
     expect(await screen.findByText("无权查看此用量范围")).toBeInTheDocument();
     expect(screen.getByText(/本地正文和离线编辑不受影响/u)).toBeInTheDocument();
+    expect(
+      screen.queryByText("The current role cannot read billing metadata."),
+    ).not.toBeInTheDocument();
   });
+
+  it.each([
+    [
+      new CloudClientError({
+        code: "CLOUD_PROTOCOL_INVALID_RESPONSE",
+        message: "Provider invocation Candidate exceeded the token queue.",
+        status: 502,
+        requestId: REQUEST_ID,
+        retryable: true,
+      }),
+      "Provider invocation Candidate exceeded the token queue.",
+      /云端操作未完成/u,
+    ],
+    [
+      new Error("Agent routing trace failed after invocation."),
+      "Agent routing trace failed after invocation.",
+      /发生了未预期的本地错误/u,
+    ],
+  ])(
+    "does not expose an upstream error message %#",
+    async (error, rawMessage, projectedDescription) => {
+      setOnline(true);
+      const service = createService({
+        getSummary: vi.fn().mockRejectedValue(error),
+      });
+      renderPage(service, `/teams/${TEAM_ID}/usage`);
+
+      expect(await screen.findByText("无法读取智能创作用量")).toBeVisible();
+      expect(screen.queryByText(rawMessage)).not.toBeInTheDocument();
+      expect(screen.getByText(projectedDescription)).toBeVisible();
+    },
+  );
 });
 
 function renderPage(service: CloudAiUsageRuntimePort | null, initialEntry: string) {

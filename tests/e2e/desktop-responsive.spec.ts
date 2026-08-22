@@ -1,8 +1,8 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import {
-  authorizeDirectMode,
-  switchFreshInstallToProfessionalMode,
+  expectDirectModeUsesPlainLanguage,
+  expectFreshInstallDirectMode,
 } from "./support/writing-experience";
 
 const DESKTOP_VIEWPORTS = [
@@ -19,16 +19,16 @@ test("keeps the creative home reachable without horizontal overflow at every des
   await page.goto("/#/start");
   await page.evaluate(() => window.localStorage.clear());
   await page.reload();
-  await switchFreshInstallToProfessionalMode(page);
+  await expectFreshInstallDirectMode(page);
 
   for (const viewport of DESKTOP_VIEWPORTS) {
     await page.setViewportSize(viewport);
     await page.goto("/#/start");
 
-    await expect(
-      page.getByRole("heading", { level: 1, name: "把你的第一个想法，写成一个故事" }),
-    ).toBeVisible();
-    await expect(page.getByRole("link", { name: /从一个想法开始/u })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "开始写你的故事" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "开始创作", exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "浏览作品库", exact: true })).toBeVisible();
+    await expectDirectModeUsesPlainLanguage(page);
     await expectNoHorizontalPageOverflow(page);
     await expectSemanticBasics(page);
     await expect(page.locator("main")).toHaveCSS("overflow-y", "auto");
@@ -40,9 +40,9 @@ test("uses the 680px single-column settings layout at 1024 by 640", async ({ pag
   await page.goto("/#/start");
   await page.evaluate(() => window.localStorage.clear());
   await page.reload();
-  await authorizeDirectMode(page);
+  await expectFreshInstallDirectMode(page);
   await page.goto("/#/settings");
-  await expect(page.getByRole("heading", { level: 1, name: "全局设置" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "设置" })).toBeVisible();
 
   const layout = await page.locator(".settings-page > .settings-grid").evaluate((grid) => {
     const children = [...grid.children].slice(0, 2).map((child) => child.getBoundingClientRect());
@@ -61,7 +61,8 @@ test("uses the 680px single-column settings layout at 1024 by 640", async ({ pag
   expect(layout.columns.trim().split(/\s+/u)).toHaveLength(1);
   expect(layout.firstX).toBe(layout.secondX);
   expect(layout.secondY ?? 0).toBeGreaterThan(layout.firstY ?? 0);
-  await expectMinimumTarget(page.locator(".desktop-topbar__ai-status"));
+  await expectMinimumTarget(page.getByRole("combobox", { name: "外观模式" }));
+  await expectDirectModeUsesPlainLanguage(page);
   await expectNoHorizontalPageOverflow(page);
   await expectSemanticBasics(page);
   await expect(page.locator("main")).toHaveCSS("overflow-y", "auto");
@@ -72,22 +73,31 @@ test("keeps the 800 by 600 writing path visible and pointer targets usable", asy
   await page.goto("/#/start");
   await page.evaluate(() => window.localStorage.clear());
   await page.reload();
-  await authorizeDirectMode(page);
+  await expectFreshInstallDirectMode(page);
 
-  await expectMinimumTarget(page.getByRole("link", { name: "恢复备份" }));
+  await expectMinimumTarget(page.getByRole("link", { name: "开始创作", exact: true }));
   await expectMinimumTarget(page.getByRole("link", { name: "浏览作品库" }));
-  await page.getByRole("button", { name: "体验示例作品" }).click();
+  await page.getByRole("link", { name: "开始创作", exact: true }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "一句话就够了" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "一句话" })).toBeVisible();
+  await expectMinimumTarget(page.getByRole("button", { name: "开始创作", exact: true }));
+  await expectMinimumTarget(page.getByRole("button", { name: "直接写空白正文" }));
+  await expectDirectModeUsesPlainLanguage(page);
+  await expectNoHorizontalPageOverflow(page);
 
+  await page.getByRole("button", { name: "直接写空白正文" }).click();
   await expect(page.getByRole("textbox", { name: "章节正文" })).toBeVisible();
   await expect(page.getByText(/\/ 5000000 字符/u)).toBeVisible();
+  await expectDirectModeUsesPlainLanguage(page);
   await expectNoHorizontalPageOverflow(page);
   await expectSemanticBasics(page);
   await expect(page.locator("main")).toHaveCSS("overflow-y", "auto");
 
-  const assistantTrigger = page.getByRole("button", { name: "AI 助手" });
+  const assistantTrigger = page.getByRole("button", { name: "创作助手", exact: true });
   await assistantTrigger.click();
-  const assistant = page.getByRole("dialog", { name: "AI 创作助手" });
+  const assistant = page.getByRole("dialog", { name: "创作助手" });
   await expect(assistant).toBeVisible();
+  await expectDirectModeUsesPlainLanguage(page);
   await expect(page.locator(".writing-canvas")).toHaveAttribute("aria-hidden", "true");
   await expect
     .poll(() =>
@@ -125,18 +135,18 @@ test("keeps logical sizing stable on a Retina-like DPR2 display", async ({ brows
     await page.goto("http://127.0.0.1:1420/#/start");
     await page.evaluate(() => window.localStorage.clear());
     await page.reload();
-    await authorizeDirectMode(page);
-    await expect(
-      page.getByRole("heading", { level: 1, name: "把你的第一个想法，写成一个故事" }),
-    ).toBeVisible();
+    await expectFreshInstallDirectMode(page);
+    await expect(page.getByRole("heading", { level: 1, name: "开始写你的故事" })).toBeVisible();
     expect(await page.evaluate(() => window.devicePixelRatio)).toBe(2);
     expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(
       true,
     );
-    await expectMinimumTarget(page.getByRole("link", { name: "恢复备份" }));
+    await expectMinimumTarget(page.getByRole("link", { name: "开始创作", exact: true }));
     await expectNoHorizontalPageOverflow(page);
 
-    await page.getByRole("button", { name: "体验示例作品" }).click();
+    await page.getByRole("link", { name: "开始创作", exact: true }).click();
+    await expect(page.getByRole("textbox", { name: "一句话" })).toBeVisible();
+    await page.getByRole("button", { name: "直接写空白正文" }).click();
     const editor = page.getByRole("textbox", { name: "章节正文" });
     const writingCanvas = page.locator(".writing-canvas");
     await expect(editor).toBeVisible();
@@ -195,9 +205,10 @@ test("keeps logical sizing stable on a Retina-like DPR2 display", async ({ brows
       expect(Number.parseFloat(duration)).toBeLessThanOrEqual(0.001);
     }
 
-    await page.getByRole("button", { name: "AI 助手" }).click();
-    const assistant = page.getByRole("dialog", { name: "AI 创作助手" });
+    await page.getByRole("button", { name: "创作助手", exact: true }).click();
+    const assistant = page.getByRole("dialog", { name: "创作助手" });
     await expect(assistant).toBeVisible();
+    await expectDirectModeUsesPlainLanguage(page);
     await expect(assistant).toHaveCSS("background-color", "rgb(22, 27, 34)");
     await expect(assistant).toHaveCSS("border-color", "rgb(35, 42, 51)");
     await page.keyboard.press("Escape");

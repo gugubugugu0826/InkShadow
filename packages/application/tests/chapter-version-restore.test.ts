@@ -125,11 +125,13 @@ describe("chapter version restoration", () => {
     store.syncQueued = true;
     const original = await store.findVersionById(VERSION_ID);
     expect(original.ok && original.value?.toSnapshot().content).toBe("First edition");
+    expect(original.ok && original.value?.toSnapshot().organizeLocalStoryFacts).toBe(false);
 
     const outcome = await restore(store).execute({
       chapterId: CHAPTER_ID,
       versionId: VERSION_ID,
       expectedRevision: 2,
+      organizeLocalStoryFacts: true,
     });
 
     expect(outcome.ok).toBe(true);
@@ -148,6 +150,7 @@ describe("chapter version restoration", () => {
       content: "First edition",
       reason: "recovery",
       sourceCandidateId: null,
+      organizeLocalStoryFacts: true,
     });
     expect(outcome.value.restoredFromVersion.toSnapshot()).toEqual(
       original.ok && original.value !== null ? original.value.toSnapshot() : undefined,

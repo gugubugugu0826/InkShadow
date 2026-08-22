@@ -582,8 +582,8 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
     if (!file.name.toLocaleLowerCase().endsWith(".json")) {
       setNotice({
         tone: "error",
-        title: "只接受 Story Settings JSON",
-        description: "请使用当前应用下载的 JSON 模板；普通小说文件请从“导入小说”入口处理。",
+        title: "只接受墨影设定文件",
+        description: "请使用当前应用下载的设定模板；普通小说文件请从“导入小说”入口处理。",
       });
       return;
     }
@@ -591,7 +591,7 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
       setNotice({
         tone: "error",
         title: "设定文件过大",
-        description: "单个 Story Settings JSON 不得超过 5 MiB。请拆分后重新预检。",
+        description: "单个故事设定文件不得超过 5 MiB。请拆分后重新预检。",
       });
       return;
     }
@@ -931,7 +931,7 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
         open={transferOpen}
         onOpenChange={setTransferOpen}
         title="导入与导出故事设定"
-        description="只接受 InkShadow Story Settings JSON；文件留在本机，先预检再确认。"
+        description="只接受墨影设定文件；文件留在本机，先预检再确认。"
         footer={
           <div className="story-governance-actions">
             <Button variant="secondary" onClick={() => setTransferOpen(false)}>
@@ -1159,12 +1159,12 @@ function ImportStage(props: ImportStageProps) {
     return (
       <div>
         <h3>唯一支持的机器格式</h3>
-        <p>文件必须是 InkShadow Story Settings JSON，包含 format、schemaVersion 和明确分类数组。</p>
+        <p>文件必须是墨影设定文件，包含格式标记、版本标记和明确分类数组。</p>
         <ul>
           <li>人物使用稳定 id；同名与别名会在预检中报告。</li>
           <li>每条关系必须引用两个不同的人物 id。</li>
           <li>未知字段会标出精确路径，不会静默写入。</li>
-          <li>文件不会包含 API Key、模型原始响应或隐藏推理。</li>
+          <li>文件不会包含接口密钥、模型原始响应或隐藏推理。</li>
         </ul>
       </div>
     );
@@ -1175,7 +1175,7 @@ function ImportStage(props: ImportStageProps) {
         <h3>从模板开始最稳妥</h3>
         <p>下载模板后只修改示例值；保留 format 和 schemaVersion。</p>
         <div className="story-governance-actions">
-          <Button onClick={props.onDownloadTemplate}>下载 JSON 模板</Button>
+          <Button onClick={props.onDownloadTemplate}>下载设定模板</Button>
           <Button variant="secondary" onClick={props.onViewExample}>
             查看并预检示例
           </Button>
@@ -1186,9 +1186,9 @@ function ImportStage(props: ImportStageProps) {
   if (props.step === 3) {
     return (
       <div>
-        <h3>选择本地 JSON 文件</h3>
+        <h3>选择本地设定文件</h3>
         <p>单个文件上限 5 MiB；不会上传，也不会把普通小说文件误当成设定。</p>
-        <Button onClick={props.onChooseFile}>选择 Story Settings JSON</Button>
+        <Button onClick={props.onChooseFile}>选择墨影设定文件</Button>
         {props.fileName !== null && <p>已选择：{props.fileName}</p>}
       </div>
     );
@@ -1302,7 +1302,7 @@ function PreflightSummary({
 }) {
   if (report === null) {
     return (
-      <InlineAlert tone="warning" title="尚未预检" description="请先选择 JSON 文件或查看示例。" />
+      <InlineAlert tone="warning" title="尚未预检" description="请先选择设定文件或查看示例。" />
     );
   }
   return (
@@ -1458,7 +1458,7 @@ function readableLegacyField(value: unknown): string | null {
 }
 
 function safeExportName(projectName: string, scope: "all" | "current"): string {
-  const safe = projectName.replaceAll(/[/\\\u0000-\u001f\u007f]/gu, "-").trim() || "InkShadow";
+  const safe = projectName.replaceAll(/[/\\\u0000-\u001f\u007f]/gu, "-").trim() || "墨影";
   return `${safe}-${scope === "all" ? "全部故事设定" : "当前分类"}.story-settings.json`;
 }
 

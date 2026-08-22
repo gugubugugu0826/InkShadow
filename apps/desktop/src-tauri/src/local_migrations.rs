@@ -531,6 +531,34 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0071_model_capability_probe_invocation_ledger.sql"
                 ),
             ),
+            migration(
+                75,
+                "isolate non-prose AI candidate purposes",
+                include_str!(
+                    "../../../../packages/data/migrations/0072_ai_candidate_purpose.sql"
+                ),
+            ),
+            migration(
+                76,
+                "allow audited user revisions of story fact content",
+                include_str!(
+                    "../../../../packages/data/migrations/0073_story_fact_user_revisions.sql"
+                ),
+            ),
+            migration(
+                77,
+                "persist immutable chapter version story-fact responsibility",
+                include_str!(
+                    "../../../../packages/data/migrations/0074_chapter_version_story_fact_responsibility.sql"
+                ),
+            ),
+            migration(
+                78,
+                "persist generation attempt privacy snapshots",
+                include_str!(
+                    "../../../../packages/data/migrations/0075_generation_attempt_privacy_snapshot.sql"
+                ),
+            ),
         ]),
         ignore_missing: false,
         locking: true,
@@ -2065,11 +2093,90 @@ mod tests {
         .await
         .expect("version 74 capability probe invocation link");
         assert_eq!(probe_ledger_columns, 1);
+        let (story_fact_revision_success, story_fact_revision_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 76")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 76 story fact user revision migration receipt");
+        assert_eq!(story_fact_revision_success, 1);
+        assert_eq!(story_fact_revision_checksum.len(), 48);
+        let story_fact_revision_guards: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'trigger'
+               AND name IN (
+                 'story_fact_user_content_revision_guard',
+                 'story_fact_governance_transition_guard'
+               )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 76 story fact user revision guards");
+        assert_eq!(story_fact_revision_guards, 2);
+
+        let (responsibility_success, responsibility_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 77")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 77 chapter responsibility migration receipt");
+        assert_eq!(responsibility_success, 1);
+        assert_eq!(responsibility_checksum.len(), 48);
+        let responsibility_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('chapter_versions')
+             WHERE name = 'organize_local_story_facts'
+               AND type = 'INTEGER'
+               AND \"notnull\" = 1
+               AND dflt_value = '0'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 77 chapter responsibility column");
+        assert_eq!(responsibility_columns, 1);
+        let responsibility_guards: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'trigger'
+               AND name = 'chapter_version_story_fact_responsibility_immutable'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 77 chapter responsibility guard");
+        assert_eq!(responsibility_guards, 1);
+
+        let (privacy_success, privacy_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 78")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 78 generation attempt privacy snapshot migration receipt");
+        assert_eq!(privacy_success, 1);
+        assert_eq!(privacy_checksum.len(), 48);
+        let privacy_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('ai_generation_attempt_usage')
+             WHERE name IN (
+               'privacy_snapshot_version', 'privacy_policy', 'data_destination',
+               'model_invocation_id'
+             )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 78 generation attempt privacy columns");
+        assert_eq!(privacy_columns, 4);
+        let privacy_guards: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'trigger'
+               AND name IN (
+                 'ai_generation_attempt_usage_privacy_insert_guard',
+                 'ai_generation_attempt_usage_privacy_immutable'
+               )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 78 generation attempt privacy guards");
+        assert_eq!(privacy_guards, 2);
+
         let maximum_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
             .fetch_one(&mut connection)
             .await
             .expect("maximum migration version");
-        assert_eq!(maximum_version, 74);
+        assert_eq!(maximum_version, 78);
         let forbidden_columns: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)
              FROM pragma_table_info('novel_skill_evaluation_predispatch_authority_snapshots')

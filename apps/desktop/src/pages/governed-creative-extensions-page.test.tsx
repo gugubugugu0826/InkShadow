@@ -22,6 +22,28 @@ const SOURCE_CHECKSUM = "a".repeat(64);
 const PARAGRAPH_CHECKSUM = "b".repeat(64);
 
 describe("GovernedCreativeExtensionsPage", () => {
+  it("keeps an unknown persisted request status behind a Chinese fallback", async () => {
+    const rawStatus = "legacy_provider_pending";
+    const request = requestFixture({
+      status: rawStatus as GovernedExtensionRequest["status"],
+    });
+    const runtime = runtimeFixture({
+      flags: { translation: false, shortDrama: false },
+      requests: [request],
+    });
+
+    render(
+      <GovernedCreativeExtensionsPage
+        runtime={runtime}
+        projectId={PROJECT_ID}
+        source={sourceFixture()}
+      />,
+    );
+
+    expect((await screen.findAllByText("状态未知")).length).toBeGreaterThan(0);
+    expect(screen.queryByText(rawStatus)).not.toBeInTheDocument();
+  });
+
   it("keeps failed history and export available while the feature flag is off", async () => {
     const exportSpy = vi.fn();
     const request = requestFixture({
@@ -52,7 +74,7 @@ describe("GovernedCreativeExtensionsPage", () => {
     );
 
     expect(await screen.findByText("翻译服务尚未启用")).toBeInTheDocument();
-    expect((await screen.findAllByText("Token 用量未知")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("内容额度用量未知")).length).toBeGreaterThan(0);
     expect(screen.getByText(/供应商没有返回可核对的用量/u)).toBeInTheDocument();
     expect(screen.queryByText(/EXTENSION_USAGE_UNAVAILABLE/u)).not.toBeInTheDocument();
     const generate = await screen.findByRole("button", { name: "生成隔离候选" });

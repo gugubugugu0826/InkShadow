@@ -29,6 +29,7 @@ import {
   parseIsoUtcTimestamp,
   parseUuidV7,
   type AiCandidateApplicationIntent,
+  type AiCandidatePurpose,
   type AiCandidateSource,
   type AiCandidateStatus,
   type ChapterStatus,
@@ -100,6 +101,7 @@ interface ChapterVersionDbRow {
   content_checksum: string;
   reason: string;
   source_candidate_id: string | null;
+  organize_local_story_facts: number;
   created_at: string;
 }
 
@@ -119,6 +121,7 @@ interface AiCandidateDbRow {
   project_id: string;
   chapter_id: string | null;
   source: string;
+  purpose: string;
   base_version_id: string | null;
   content: string;
   content_checksum: string | null;
@@ -183,6 +186,7 @@ const VERSION_COLUMNS = `
   content_checksum,
   reason,
   source_candidate_id,
+  organize_local_story_facts,
   created_at
 `;
 
@@ -202,6 +206,7 @@ const CANDIDATE_COLUMNS = `
   project_id,
   chapter_id,
   source,
+  purpose,
   base_version_id,
   content,
   content_checksum,
@@ -672,6 +677,7 @@ export class SqliteContentCommitRepository implements ContentCommitRepository {
     private readonly executor: SqlExecutor,
     private readonly syncProjectionIds?: UuidV7Generator,
     private readonly acceptedCandidateTaskFactory?: AcceptedCandidateTaskFactory,
+    private readonly acceptedVersionTaskFactory?: AcceptedVersionTaskFactory,
   ) {}
 
   public async createChapter(
@@ -710,6 +716,13 @@ export class SqliteContentCommitRepository implements ContentCommitRepository {
             actions: ["RETRY", "EXPORT_DRAFT"],
           });
         }
+        await registerAcceptedVersionTaskInTransaction(
+          transaction,
+          this.acceptedVersionTaskFactory?.({
+            source: acceptedVersionTaskSourceForChapterSave(commit.version),
+            version: commit.version,
+          }),
+        );
         const syncQueued = await enqueueChapterProjectionIfEnabled(
           transaction,
           this.syncProjectionIds,
@@ -759,20 +772,13 @@ export class SqliteContentCommitRepository implements ContentCommitRepository {
             revision: commit.expectedCandidateRevision,
           });
         }
-        if (this.acceptedCandidateTaskFactory !== undefined) {
-          const taskInput = this.acceptedCandidateTaskFactory(commit);
-          const task = Task.create(taskInput);
-          if (!task.ok) {
-            throw new AppError({
-              code: "SAVE_FAILED",
-              message: "The accepted-version recovery task is invalid.",
-              retryable: true,
-              actions: ["RETRY", "CONTACT_SUPPORT"],
-              details: { taskErrorCode: task.error.code },
-            });
-          }
-          await createTaskIfAbsentInTransaction(transaction, task.value);
-        }
+        await registerAcceptedVersionTaskInTransaction(
+          transaction,
+          this.acceptedVersionTaskFactory?.({
+            source: "candidate_accept",
+            version: commit.version,
+          }) ?? this.acceptedCandidateTaskFactory?.(commit),
+        );
         const syncQueued = await enqueueChapterProjectionIfEnabled(
           transaction,
           this.syncProjectionIds,
@@ -791,6 +797,13 @@ export class SqliteContentCommitRepository implements ContentCommitRepository {
       return this.executor.transaction(async (transaction) => {
         await insertChapterVersion(transaction, commit.version);
         await updateChapter(transaction, commit.chapter, commit.expectedChapterRevision);
+        await registerAcceptedVersionTaskInTransaction(
+          transaction,
+          this.acceptedVersionTaskFactory?.({
+            source: "version_restore",
+            version: commit.version,
+          }),
+        );
         const syncQueued = await enqueueChapterProjectionIfEnabled(
           transaction,
           this.syncProjectionIds,
@@ -804,7 +817,10 @@ export class SqliteContentCommitRepository implements ContentCommitRepository {
 }
 
 export class SqliteProjectImportCommitRepository implements ProjectImportCommitRepository {
-  public constructor(private readonly executor: SqlExecutor) {}
+  public constructor(
+    private readonly executor: SqlExecutor,
+    private readonly acceptedVersionTaskFactory?: AcceptedVersionTaskFactory,
+  ) {}
 
   public async commitImport(commit: ImportProjectCommit): Promise<Result<void, AppError>> {
     return attempt("import project", async () => {
@@ -828,6 +844,13 @@ export class SqliteProjectImportCommitRepository implements ProjectImportCommitR
         for (const imported of commit.chapters) {
           await insertChapter(transaction, imported.chapter);
           await insertChapterVersion(transaction, imported.initialVersion);
+          await registerAcceptedVersionTaskInTransaction(
+            transaction,
+            this.acceptedVersionTaskFactory?.({
+              source: "chapter_import",
+              version: imported.initialVersion,
+            }),
+          );
         }
       });
     });
@@ -851,10 +874,48 @@ export interface CreateSqliteRepositoriesOptions {
    * Production may provide the accepted-version task request here so Candidate
    * acceptance and its recovery work become durable in the same transaction.
    */
+  readonly acceptedVersionTaskFactory?: AcceptedVersionTaskFactory;
   readonly acceptedCandidateTaskFactory?: AcceptedCandidateTaskFactory;
 }
 
+export type AcceptedVersionTaskSource =
+  | "candidate_accept"
+  | "chapter_import"
+  | "autosave"
+  | "manual_save"
+  | "recovery_save"
+  | "version_restore";
+
+export interface AcceptedVersionTaskRegistration {
+  readonly source: AcceptedVersionTaskSource;
+  readonly version: ChapterVersion;
+}
+
+export type AcceptedVersionTaskFactory = (
+  input: AcceptedVersionTaskRegistration,
+) => CreateTaskInput;
 export type AcceptedCandidateTaskFactory = (commit: AcceptCandidateCommit) => CreateTaskInput;
+
+export function acceptedVersionTaskSourceForChapterSave(
+  version: ChapterVersion,
+): Extract<AcceptedVersionTaskSource, "autosave" | "manual_save" | "recovery_save"> {
+  switch (version.toSnapshot().reason) {
+    case "autosave":
+      return "autosave";
+    case "manual":
+      return "manual_save";
+    case "recovery":
+      return "recovery_save";
+    default:
+      throw new AppError({
+        code: "SAVE_FAILED",
+        message: "The chapter-save version reason cannot register accepted-version work.",
+        retryable: false,
+        actions: ["CONTACT_SUPPORT"],
+        details: { reason: version.toSnapshot().reason },
+      });
+  }
+}
 
 export function createSqliteRepositories(
   executor: SqlExecutor,
@@ -871,9 +932,33 @@ export function createSqliteRepositories(
       executor,
       options.syncProjectionIds,
       options.acceptedCandidateTaskFactory,
+      options.acceptedVersionTaskFactory,
     ),
-    projectImports: new SqliteProjectImportCommitRepository(executor),
+    projectImports: new SqliteProjectImportCommitRepository(
+      executor,
+      options.acceptedVersionTaskFactory,
+    ),
   };
+}
+
+async function registerAcceptedVersionTaskInTransaction(
+  transaction: TransactionExecutor,
+  taskInput: CreateTaskInput | undefined,
+): Promise<void> {
+  if (taskInput === undefined) {
+    return;
+  }
+  const task = Task.create(taskInput);
+  if (!task.ok) {
+    throw new AppError({
+      code: "SAVE_FAILED",
+      message: "The accepted-version recovery task is invalid.",
+      retryable: true,
+      actions: ["RETRY", "CONTACT_SUPPORT"],
+      details: { taskErrorCode: task.error.code },
+    });
+  }
+  await createTaskIfAbsentInTransaction(transaction, task.value);
 }
 
 async function enqueueChapterProjectionIfEnabled(
@@ -1097,8 +1182,9 @@ async function insertChapterVersion(
       content_checksum,
       reason,
       source_candidate_id,
+      organize_local_story_facts,
       created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       snapshot.id,
       snapshot.projectId,
@@ -1109,6 +1195,7 @@ async function insertChapterVersion(
       snapshot.contentChecksum,
       snapshot.reason,
       snapshot.sourceCandidateId,
+      snapshot.organizeLocalStoryFacts ? 1 : 0,
       snapshot.createdAt,
     ],
   );
@@ -1125,6 +1212,7 @@ async function insertCandidate(
       project_id,
       chapter_id,
       source,
+      purpose,
       base_version_id,
       content,
       content_checksum,
@@ -1139,12 +1227,13 @@ async function insertCandidate(
       payload_kind,
       anchor_start_utf16,
       anchor_end_utf16
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       snapshot.id,
       snapshot.projectId,
       snapshot.chapterId,
       snapshot.source,
+      snapshot.purpose ?? "prose",
       snapshot.baseVersionId,
       snapshot.content,
       snapshot.contentChecksum,
@@ -1235,6 +1324,10 @@ function rehydrateChapterVersion(row: ChapterVersionDbRow): ChapterVersion {
     contentChecksum: requiredChecksum(row.content_checksum, "chapterVersion.contentChecksum"),
     reason: row.reason as ChapterVersionReason,
     sourceCandidateId: optionalUuid(row.source_candidate_id, "chapterVersion.sourceCandidateId"),
+    organizeLocalStoryFacts: requiredBooleanFlag(
+      row.organize_local_story_facts,
+      "chapterVersion.organizeLocalStoryFacts",
+    ),
     createdAt: requiredTimestamp(row.created_at, "chapterVersion.createdAt"),
   });
   return requireEntity(restored, "chapter version", row.id);
@@ -1260,6 +1353,7 @@ function rehydrateAiCandidate(row: AiCandidateDbRow): AiCandidate {
     projectId: requiredUuid(row.project_id, "aiCandidate.projectId"),
     chapterId: optionalUuid(row.chapter_id, "aiCandidate.chapterId"),
     source: row.source as AiCandidateSource,
+    purpose: row.purpose as AiCandidatePurpose,
     baseVersionId: optionalUuid(row.base_version_id, "aiCandidate.baseVersionId"),
     content: row.content,
     contentChecksum:
@@ -1472,6 +1566,12 @@ function optionalTimestamp(value: string | null, field: string): IsoUtcTimestamp
 
 function requiredChecksum(value: string, field: string) {
   return requireParsed(parseContentChecksum(value), field);
+}
+
+function requiredBooleanFlag(value: number, field: string): boolean {
+  if (value === 0) return false;
+  if (value === 1) return true;
+  throw corruptData(field, "INVALID_BOOLEAN_FLAG");
 }
 
 function requireParsed<Value>(parsed: Result<Value, AppError>, field: string): Value {

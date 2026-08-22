@@ -1,9 +1,9 @@
 # v0.2.5 已发布：写作模式、叙事记忆与一致性调查现实矩阵
 
 > 现实快照日期：2026-08-20  
-> 当前应用清单：`0.2.6`；最新已发布版本：[`v0.2.5`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5) 工程预览  
+> 当前工作树应用清单：`0.2.7`；最新公开版本：[`v0.2.6`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.6) 工程预发布  
 > source commit：`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`；tag object：`51dfd64ba22e9771131f251cdc778ee06f89192d`  
-> 当前门禁：`RELEASE_VERIFIED`  
+> 本文所述 `v0.2.5` 冻结门禁：`RELEASE_VERIFIED`  
 > 外部验证：`BLOCKED_EXTERNAL`（真人 Windows Tauri/Wry、真实 Provider、系统 200% DPI、外部应用打开）
 
 本文记录 `v0.2.5` 冻结发布源的产品与数据事实。它不会把另一个工作区的 R12
@@ -48,7 +48,7 @@ chunk 字节和真实调用结果均为 `HISTORICAL_ONLY`。其中真实 DeepSee
 `REPORT_REAL_PROVIDER`，Tauri/WebDriver 操作属于 `REPORT_TAURI_UI`，截图审查属于
 `REPORT_STATIC_VISUAL`，命令结果属于 `REPORT_AUTOMATED`；它们只用于提出验收要求。
 
-历史 `v0.2.4` 于 2026-08-14 公开为 Pre-release。当前 `v0.2.5` 已由上述唯一 commit、annotated
+历史 `v0.2.4` 于 2026-08-14 公开为 Pre-release。历史 `v0.2.5` 已由上述唯一 commit、annotated
 tag、fingerprint、安装包与 Release 固定；两者的证据不可混用。
 
 ## 状态定义
@@ -223,8 +223,7 @@ Provider/network/key/vector calls 均为 0。实际架构与虚线边界见
 并将这些权威与当前 connection/catalog/model revision 绑定到 fingerprint。确认缺失或任一权威漂移时在派发前
 失败关闭，Provider 调用增量为 0。快速 AI 连接与设置页的固定能力探针也不例外：它们在固定短句生成前显示精确
 目标、1 次调用、0 次重试、最多 64 输出 token、可能少量收费，且明确不发送作品正文、灵感、设定或 API Key。
-专业/直接续写共用 `continuation-generation-disclosure.ts`：prepare 为 0 call，确认和 Provider 边界前都复核完整
-inspection/pricing/privacy/source/version fingerprint。直接模式只能复用同一精确 fingerprint 的持久 grant；价格、路由、隐私或源版本漂移均为 0 dispatch。
+专业/直接续写共用 continuation-generation-disclosure.ts：准备阶段为 0 次调用，确认和 Provider 边界前都复核完整目标、价格、隐私、来源与版本指纹。当前两种模式每次远程发送都逐次披露并取得本次确认；模式偏好和本地整理授权不能复用为远程授权。价格、路由、隐私或源版本漂移均为 0 次派发。
 opening 四类动作的聚焦链已 2 files / 79 tests 通过，覆盖二次确认、取消 0-call 和
 route/cost/source/privacy 最终复核；Settings 固定能力探针 3 files / 69、图片/编辑器 3 files / 46、
 调查/修复 2 files / 36 也已通过。Settings 两个固定文本 probe 最终另以 1 file / 55 tests 通过点击

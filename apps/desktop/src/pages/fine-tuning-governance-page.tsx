@@ -978,7 +978,8 @@ function ArtifactCard(props: ArtifactCardProps) {
             ok: false,
             error: new StoryCoreError({
               code: "FINE_TUNING_VALIDATION_FAILED",
-              message: cause instanceof Error ? cause.message : "评测 JSON 必须是符合格式的数组。",
+              message:
+                cause instanceof Error ? cause.message : "评测结构化数据必须是符合格式的数组。",
             }),
           }),
         "",
@@ -1080,7 +1081,7 @@ function ArtifactCard(props: ArtifactCardProps) {
               </FormField>
             </div>
             <FormField
-              label="基线指标 JSON"
+              label="基线指标结构化数据"
               required
               hint={'格式：[{"name":"quality","score":0.72}]'}
             >
@@ -1095,7 +1096,7 @@ function ArtifactCard(props: ArtifactCardProps) {
               )}
             </FormField>
             <FormField
-              label="候选指标 JSON"
+              label="候选指标结构化数据"
               required
               hint={'格式：[{"name":"quality","score":0.79}]'}
             >
@@ -1110,7 +1111,7 @@ function ArtifactCard(props: ArtifactCardProps) {
               )}
             </FormField>
             <FormField
-              label="门禁规则 JSON"
+              label="门禁规则结构化数据"
               required
               hint={
                 '[{"metric":"quality","direction":"higher_is_better","minimumImprovement":0.03}]'
@@ -1695,11 +1696,11 @@ function canSelectSource(source: FineTuningSourceDescriptor): boolean {
 function parseMetricJson(value: string): FineTuningEvaluationGateInput["baseline"] {
   const parsed = JSON.parse(value) as unknown;
   if (!Array.isArray(parsed)) {
-    throw new Error("指标 JSON 必须是包含 name 与数值 score 的数组。");
+    throw new Error("指标结构化数据必须是包含名称字段（name）与数值评分字段（score）的数组。");
   }
   return (parsed as unknown[]).map((item) => {
     if (!isRecord(item) || typeof item.name !== "string" || typeof item.score !== "number") {
-      throw new Error("指标 JSON 必须是包含 name 与数值 score 的数组。");
+      throw new Error("指标结构化数据必须是包含名称字段（name）与数值评分字段（score）的数组。");
     }
     return { name: item.name, score: item.score };
   });
@@ -1708,7 +1709,9 @@ function parseMetricJson(value: string): FineTuningEvaluationGateInput["baseline
 function parseRuleJson(value: string): FineTuningEvaluationGateInput["rules"] {
   const parsed = JSON.parse(value) as unknown;
   if (!Array.isArray(parsed)) {
-    throw new Error("规则 JSON 必须是包含 metric 与 direction 的数组。");
+    throw new Error(
+      "规则结构化数据必须是包含指标字段（metric）与排序方向字段（direction）的数组。",
+    );
   }
   return (parsed as unknown[]).map((item) => {
     if (
@@ -1716,7 +1719,9 @@ function parseRuleJson(value: string): FineTuningEvaluationGateInput["rules"] {
       typeof item.metric !== "string" ||
       (item.direction !== "higher_is_better" && item.direction !== "lower_is_better")
     ) {
-      throw new Error("规则 JSON 必须是包含 metric 与 direction 的数组。");
+      throw new Error(
+        "规则结构化数据必须是包含指标字段（metric）与排序方向字段（direction）的数组。",
+      );
     }
     const optionalKeys = [
       "minimumCandidate",

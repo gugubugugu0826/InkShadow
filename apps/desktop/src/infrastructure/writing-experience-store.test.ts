@@ -46,7 +46,7 @@ describe("TauriWritingExperienceStore", () => {
     await expect(store.getOrInitialize()).resolves.toEqual({
       mode: "direct",
       initializationSource: "new_install",
-      directLocalOrganizationAuthorizedAt: null,
+      directLocalOrganizationAuthorizedAt: NOW,
       revision: 1,
       createdAt: NOW,
       updatedAt: NOW,
@@ -56,7 +56,7 @@ describe("TauriWritingExperienceStore", () => {
     ).resolves.toEqual({
       mode: "direct",
       initializationSource: "new_install",
-      directLocalOrganizationAuthorizedAt: null,
+      directLocalOrganizationAuthorizedAt: NOW,
       revision: 1,
       createdAt: NOW,
       updatedAt: NOW,
@@ -95,20 +95,20 @@ describe("TauriWritingExperienceStore", () => {
     await executor.close();
   });
 
-  it("requires one-time local authorization before a direct switch and preserves it with CAS", async () => {
+  it("treats switching to direct mode as the authority and preserves it with CAS", async () => {
     const executor = new NodeSqliteExecutor(migration);
+    await executor.execute("INSERT INTO projects (id) VALUES ('existing')");
     const store = new TauriWritingExperienceStore(executor, sequenceClock(NOW, LATER));
-    await store.getOrInitialize();
-
-    await expect(store.switchMode("professional", 1)).resolves.toMatchObject({ revision: 2 });
-    await expect(store.switchMode("direct", 2)).rejects.toMatchObject({
-      code: "WRITING_DIRECT_AUTHORIZATION_REQUIRED",
+    await expect(store.getOrInitialize()).resolves.toMatchObject({
+      mode: "professional",
+      directLocalOrganizationAuthorizedAt: null,
+      revision: 1,
     });
-    await expect(store.authorizeDirectMode(2)).resolves.toEqual({
+    await expect(store.switchMode("direct", 1)).resolves.toEqual({
       mode: "direct",
       initializationSource: "user",
       directLocalOrganizationAuthorizedAt: LATER,
-      revision: 3,
+      revision: 2,
       createdAt: NOW,
       updatedAt: LATER,
     });
@@ -118,23 +118,25 @@ describe("TauriWritingExperienceStore", () => {
     });
     await expect(store.getOrInitialize()).resolves.toMatchObject({
       mode: "direct",
-      revision: 3,
+      revision: 2,
       directLocalOrganizationAuthorizedAt: LATER,
     });
-    await expect(store.revokeDirectModeAuthorization(3)).resolves.toMatchObject({
+    await expect(store.revokeDirectModeAuthorization(2)).resolves.toMatchObject({
       mode: "professional",
-      revision: 4,
+      revision: 3,
       directLocalOrganizationAuthorizedAt: null,
     });
     await expect(
       new TauriWritingExperienceStore(executor, fixedClock(LATER)).getOrInitialize(),
     ).resolves.toMatchObject({
       mode: "professional",
-      revision: 4,
+      revision: 3,
       directLocalOrganizationAuthorizedAt: null,
     });
-    await expect(store.switchMode("direct", 4)).rejects.toMatchObject({
-      code: "WRITING_DIRECT_AUTHORIZATION_REQUIRED",
+    await expect(store.switchMode("direct", 3)).resolves.toMatchObject({
+      mode: "direct",
+      revision: 4,
+      directLocalOrganizationAuthorizedAt: LATER,
     });
     await executor.close();
   });
@@ -309,6 +311,7 @@ describe("BrowserDevelopmentWritingExperienceStore", () => {
     await expect(store.getOrInitialize()).resolves.toMatchObject({
       mode: "direct",
       initializationSource: "new_install",
+      directLocalOrganizationAuthorizedAt: NOW,
     });
 
     const reopened = new BrowserDevelopmentWritingExperienceStore(
@@ -350,9 +353,8 @@ describe("BrowserDevelopmentWritingExperienceStore", () => {
       sequenceClock(NOW, LATER),
     );
     await store.getOrInitialize();
-    await store.authorizeDirectMode(1);
-    await store.switchMode("professional", 2);
-    await store.revokeDirectModeAuthorization(3);
+    await store.switchMode("professional", 1);
+    await store.revokeDirectModeAuthorization(2);
     const recorded = await store.recordDisclosureGrant(disclosureInput());
     await store.revokeDisclosureGrant(recorded.grant.fingerprint, recorded.grant.revision);
 

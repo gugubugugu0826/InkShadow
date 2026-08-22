@@ -1,9 +1,9 @@
 # InkShadow 前端接口与数据边界
 
-> 基于源码快照：2026-08-21  
+> 基于源码快照：2026-08-22  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 当前应用清单版本：`0.2.6`；最新已发布版本：[`v0.2.5`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5)；设计基线：`DESIGN v0.3.1b`  
-> 冻结 source commit：`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`；tag object：`51dfd64ba22e9771131f251cdc778ee06f89192d`  
+> 当前工作树应用清单版本：`0.2.7`；最新公开版本：[`v0.2.6`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.6) 工程预发布；设计基线：`DESIGN v0.3.1b`  
+> 下方 `v0.2.5` 冻结来源提交：`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`；标签对象：`51dfd64ba22e9771131f251cdc778ee06f89192d`  
 > 本文记录当前代码接口；它不代表所有云能力已部署或已开放
 
 `v0.2.5` source fingerprint 为
@@ -24,11 +24,15 @@ manifest 11,717 B，SHA-256 `4dce031a71eaa1664dcc993bd4f68362fb3d97b7843110b5ebc
 `7b8eef0ed8bd544f23e7efabe74ad09ff187013404730cbec43c7c42d84ec1c5`，48 samples / 2/2 PASS；
 Provider/network/key/vector calls 均为 0。
 
-`v0.2.6` 修复工作树另行加入 Data `0071` / Tauri `74`、有界 SQLite 执行队列、WebView 重载
-恢复、自动备份清单第 2 版、开书三槽独立结算，以及固定能力验证的原生发送回执和普通调用账本。
-当前修复源码提交 `722e67e` 的隔离 Windows Tauri 程序已完成 D1–D5 聚焦复测；包含本报告的
-干净候选提交仍待创建，其全量验证、真实外部模型、打包和发布仍待运行，不属于上面的 v0.2.5 冻结通过数字。完整边界见
-[`../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)。
+`v0.2.6` 已冻结 Data `0071` / Tauri `74`、有界 SQLite 队列、自动备份与能力验证账本。
+当前 `v0.2.7` 工作树只向前追加 Data `0072`–`0075` / Tauri `75`–`78`，并重构直接模式、
+方向用途、用户故事事实治理、不可变版本的本地整理责任和生成尝试隐私快照。当前工作树全量门禁已通过；真实模型、系统百分之二百缩放、候选端到端、打包和发布仍待运行；
+历史 `722e67e` 聚焦程序不能外推为当前安装程序验证。完整边界见
+[`../execution/2026-08-22-V027-DIRECT-MODE-REMEDIATION.md`](../execution/2026-08-22-V027-DIRECT-MODE-REMEDIATION.md)。
+
+新增界面合同：直接模式开头只请求一个结果，结果保持隔离并等待“使用这版”或“放弃”；生成准备到返回须在 180 秒内结算，未完成创作可结束、重新读取或重开恢复。失败后只有已执行“开始创作”才可保留带原始灵感、错误和重试入口的空作品；未执行不得创建。根错误边界显示支持编号，并只保存脱敏应用栈、组件栈、白名单路由模板和项目／章节／隔离结果标识。N-NEW3 原现场栈因旧错误边界未记录而不可恢复，不能补造。
+
+附件的自动采用与取消逐次披露和用户最新直接反馈冲突；当前界面继续逐次披露、隔离结果和明确决定。调用中心只有在 `0075` 迁移前旧行确实没有隐私快照时，才显示“旧调用未记录”；新调用必须读取同一次调用标识绑定的隐私去向。
 
 ## 1. 接口总览
 
@@ -171,8 +175,8 @@ interface NativeSqliteError {
 
 正式数据库固定在应用配置目录中的 `inkshadow.db`；WebView 不能指定任意数据库路径。
 
-当前工作树前向迁移上限为 Data `0071_model_capability_probe_invocation_ledger.sql` / Tauri `74`。
-Tauri 原生版本把 71 个 Data migration 和 3 个 story-core migration 合并成一个连续序列，所以两个
+当前工作树前向迁移上限为 Data `0075_generation_attempt_privacy_snapshot.sql` / Tauri `78`。
+Tauri 原生版本把 75 个 Data migration 和 3 个 story-core migration 合并成一个连续序列，所以两个
 编号不要求相同。`0060`–`0065` 保留 Novel Skill、付费评测、项目派发围栏与内容无关 Provider
 发送边界；`0066`/Tauri `69` 追加写作体验偏好和披露 grant，`0067`/Tauri `70` 追加有界调查
 run/step/finding/evidence，`0068`/Tauri `71` 让 grant 上限只统计 active 行。`0069`/Tauri `72`
@@ -180,6 +184,11 @@ run/step/finding/evidence，`0068`/Tauri `71` 让 grant 上限只统计 active �
 `0070`/Tauri `73` 只为可重建搜索投影追加多粒度、父子 UTF-16 定位与 current/branch/POV/
 story-time/authority/privacy 范围，旧行为 `legacy_unknown`。`0071`/Tauri `74` 新增独立能力验证
 调用任务，并让能力证据可空且唯一绑定同一目录项的精确终态调用记录。
+`0072`/Tauri `75` 增加隔离结果用途并禁止方向被接受为正文；`0073`/Tauri `76` 收紧用户故事事实
+内容修订与治理转换，保留事实身份、来源证据和递增修订。
+`0074`/Tauri `77` 在不可变章节版本上保存本地故事资料整理责任，旧行默认关闭且字段不可修改；
+`0075`/Tauri `78` 在生成尝试上保存隐私快照版本、隐私策略、数据去向和同一次模型调用标识，
+迁移前旧行保留空值，新行缺失、部分缺失、与绑定调用不一致或后续改写均失败关闭。
 启动恢复按 Provider 发送边界把 ledger/run 结清为发送前终态或 `ambiguous`，同时对账仍非终态的
 task，且不自动重发。同一变更集继续复用 `0045` lease 与 Candidate/context output 原子版本围栏。
 当前 172 张作者数据表进入备份恢复，另 1 张内容无关的原生项目派发租约表明确不恢复；

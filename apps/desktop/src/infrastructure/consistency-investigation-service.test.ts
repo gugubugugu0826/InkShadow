@@ -70,6 +70,7 @@ const migration = [
   "0067_consistency_investigation_agent.sql",
   "0069_consistency_investigation_invocation_reservation.sql",
   "0070_multigranular_search_retrieval.sql",
+  "0072_ai_candidate_purpose.sql",
 ]
   .map(readMigration)
   .join("\n");

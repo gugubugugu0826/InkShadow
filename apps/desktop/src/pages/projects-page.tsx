@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { Project, ProjectStatus } from "@inkshadow/domain";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { parseUuidV7, type Project, type ProjectStatus } from "@inkshadow/domain";
 import {
   Badge,
   Button,
@@ -24,6 +24,8 @@ import {
 import { Link } from "react-router-dom";
 
 import { useOnlineStatus } from "../hooks/use-online-status";
+import { useWritingExperience } from "../hooks/use-writing-experience";
+import type { CreativeJourneyRecord } from "../infrastructure/creative-journey-store";
 import { normalizeUiError, projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
@@ -61,8 +63,11 @@ function formatDate(value: string): string {
 export function ProjectsPage() {
   const runtime = useRuntime();
   const online = useOnlineStatus();
+  const writingExperience = useWritingExperience();
+  const directMode = writingExperience.preference?.mode === "direct";
   const { toast } = useToast();
   const loadRequestRef = useRef(0);
+  const journeyLoadRequestRef = useRef(0);
   const [status, setStatus] = useState<ProjectStatus>("active");
   const [search, setSearch] = useState("");
   const [projects, setProjects] = useState<readonly Project[]>([]);
@@ -74,6 +79,10 @@ export function ProjectsPage() {
     "loading",
   );
   const [loadError, setLoadError] = useState<unknown>(null);
+  const [activeIdeaJourneys, setActiveIdeaJourneys] = useState<readonly CreativeJourneyRecord[]>(
+    [],
+  );
+  const [journeyLoadError, setJourneyLoadError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
@@ -116,6 +125,23 @@ export function ProjectsPage() {
     setPageState(result.value.length === 0 ? "empty" : "ready");
   }, [runtime, search, status]);
 
+  const loadActiveIdeaJourneys = useCallback(async () => {
+    const requestId = journeyLoadRequestRef.current + 1;
+    journeyLoadRequestRef.current = requestId;
+    try {
+      const records = await runtime.creativeJourneys.listActive("idea");
+      if (requestId !== journeyLoadRequestRef.current) return;
+      setActiveIdeaJourneys(
+        records.filter((record) => record.kind === "idea" && record.status === "active"),
+      );
+      setJourneyLoadError(null);
+    } catch {
+      if (requestId !== journeyLoadRequestRef.current) return;
+      setActiveIdeaJourneys([]);
+      setJourneyLoadError("未完成创作暂时无法读取；项目和正文仍可正常打开。");
+    }
+  }, [runtime]);
+
   useEffect(() => {
     const timeout = window.setTimeout(() => {
       void loadProjects();
@@ -124,6 +150,15 @@ export function ProjectsPage() {
       window.clearTimeout(timeout);
     };
   }, [loadProjects]);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      void loadActiveIdeaJourneys();
+    }, 0);
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [loadActiveIdeaJourneys]);
 
   async function createProject(): Promise<void> {
     setSubmitting(true);
@@ -237,6 +272,26 @@ export function ProjectsPage() {
   const completelyEmpty = allProjects.length === 0;
   const hasArchivedProjects = allProjects.some((project) => project.status === "archived");
   const hasTrashedProjects = allProjects.some((project) => project.status === "trashed");
+  const { activeIdeaJourneyByProjectId, conflictedIdeaJourneyProjectCount } = useMemo(() => {
+    const result = new Map<string, CreativeJourneyRecord>();
+    const conflicts = new Set<string>();
+    for (const journey of activeIdeaJourneys) {
+      const projectId = resolveActiveIdeaJourneyProjectId(journey, allProjects);
+      if (projectId === null || conflicts.has(projectId)) {
+        continue;
+      }
+      if (result.has(projectId)) {
+        result.delete(projectId);
+        conflicts.add(projectId);
+      } else {
+        result.set(projectId, journey);
+      }
+    }
+    return Object.freeze({
+      activeIdeaJourneyByProjectId: result,
+      conflictedIdeaJourneyProjectCount: conflicts.size,
+    });
+  }, [activeIdeaJourneys, allProjects]);
   const resumableImport =
     importJourney === null
       ? null
@@ -245,6 +300,22 @@ export function ProjectsPage() {
           )
         ? importJourney
         : null;
+
+  if (writingExperience.preference === null) {
+    return (
+      <div className="desktop-page" aria-busy={writingExperience.loading}>
+        {writingExperience.loading ? (
+          <div role="status">正在读取写作方式…</div>
+        ) : (
+          <ErrorState
+            title="暂时无法打开作品库"
+            description={writingExperience.error ?? "写作方式没有读取成功，请重试。"}
+            primaryAction={{ label: "重试", onClick: () => void writingExperience.refresh() }}
+          />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="desktop-page project-library-page">
@@ -266,7 +337,31 @@ export function ProjectsPage() {
         <InlineAlert
           tone="warning"
           title="当前处于离线状态"
-          description="项目仍会保存在此设备；需要联网的模型能力暂不可用。"
+          description={
+            directMode
+              ? "项目仍会保存在此设备；需要联网的创作服务暂不可用。"
+              : "项目仍会保存在此设备；需要联网的模型能力暂不可用。"
+          }
+        />
+      )}
+
+      {journeyLoadError !== null && (
+        <InlineAlert
+          tone="warning"
+          title="未完成创作读取失败"
+          description={journeyLoadError}
+          action={{ label: "重试", onClick: () => void loadActiveIdeaJourneys() }}
+        />
+      )}
+
+      {conflictedIdeaJourneyProjectCount > 0 && (
+        <InlineAlert
+          tone="warning"
+          title="未完成创作记录存在冲突"
+          description={
+            String(conflictedIdeaJourneyProjectCount) +
+            " 个作品同时关联了多条未完成创作记录。为保护正文，墨影没有替你选择；现有作品仍可正常打开。"
+          }
         />
       )}
 
@@ -299,7 +394,7 @@ export function ProjectsPage() {
             {tabStatus === status && (
               <>
                 {tabStatus === "active" && !hasSearch && resumableImport !== null && (
-                  <ImportJourneyState projection={resumableImport} />
+                  <ImportJourneyState projection={resumableImport} directMode={directMode} />
                 )}
                 <PageStateBoundary
                   state={pageState}
@@ -310,7 +405,10 @@ export function ProjectsPage() {
                       status === "active" &&
                       !hasSearch &&
                       completelyEmpty ? (
-                        <FirstLaunchState titleId={`first-launch-title-${tabStatus}`} />
+                        <FirstLaunchState
+                          titleId={`first-launch-title-${tabStatus}`}
+                          directMode={directMode}
+                        />
                       ) : (
                         <EmptyState
                           kind={hasSearch ? "no_results" : "no_data"}
@@ -375,6 +473,8 @@ export function ProjectsPage() {
                     {projects.map((project) => {
                       const snapshot = project.toSnapshot();
                       const pending = pendingProjectId === project.id;
+                      const activeIdeaJourney =
+                        activeIdeaJourneyByProjectId.get(project.id) ?? null;
                       return (
                         <Card key={project.id}>
                           <CardHeader>
@@ -408,13 +508,28 @@ export function ProjectsPage() {
                                 </time>
                               </p>
                             )}
+                            {project.status === "active" && activeIdeaJourney !== null && (
+                              <div className="project-library-page__unfinished-creation">
+                                <Badge tone="warning">未完成创作</Badge>
+                                <p>
+                                  已创建空白作品并保留原始创作过程；继续后仍由你决定使用或放弃结果。
+                                </p>
+                                <p>完成或结束这次创作后即可重命名作品。</p>
+                                <Link
+                                  className="button-link"
+                                  to={`/create/idea?journey=${activeIdeaJourney.id}`}
+                                >
+                                  继续未完成创作
+                                </Link>
+                              </div>
+                            )}
                           </CardContent>
                           <CardFooter>
                             {project.status !== "trashed" && (
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                disabled={pending}
+                                disabled={pending || activeIdeaJourney !== null}
                                 onClick={() => openRenameDialog(project)}
                               >
                                 重命名
@@ -425,7 +540,11 @@ export function ProjectsPage() {
                                 variant="ghost"
                                 size="sm"
                                 loading={pending}
-                                onClick={() => setTrashTarget(project)}
+                                onClick={() =>
+                                  directMode
+                                    ? void runLifecycleAction(project, "trash")
+                                    : setTrashTarget(project)
+                                }
                               >
                                 移到回收站
                               </Button>
@@ -519,7 +638,7 @@ export function ProjectsPage() {
       </Dialog>
 
       <Dialog
-        open={trashTarget !== null}
+        open={!directMode && trashTarget !== null}
         onOpenChange={(open) => {
           if (!open && pendingProjectId === null) {
             setTrashTarget(null);
@@ -609,7 +728,13 @@ export function ProjectsPage() {
   );
 }
 
-function FirstLaunchState({ titleId }: { readonly titleId: string }) {
+function FirstLaunchState({
+  directMode,
+  titleId,
+}: {
+  readonly directMode: boolean;
+  readonly titleId: string;
+}) {
   return (
     <section className="first-launch" aria-labelledby={titleId}>
       <div className="first-launch__heading">
@@ -623,7 +748,11 @@ function FirstLaunchState({ titleId }: { readonly titleId: string }) {
             <CardTitle>从一个想法开始</CardTitle>
           </CardHeader>
           <CardContent>
-            <p>只写一句灵感，AI 会先给出一段可以继续修改的开头。</p>
+            <p>
+              {directMode
+                ? "只写一句灵感，就可以开始创作并继续修改。"
+                : "只写一句灵感，AI 会先给出一段可以继续修改的开头。"}
+            </p>
           </CardContent>
           <CardFooter>
             <Link className="button-link" to="/create/idea">
@@ -650,8 +779,10 @@ function FirstLaunchState({ titleId }: { readonly titleId: string }) {
 }
 
 function ImportJourneyState({
+  directMode,
   projection,
 }: {
+  readonly directMode: boolean;
   readonly projection: ImportJourneyLibraryProjection;
 }) {
   const analysisLabel = projection.analysisCompleted
@@ -662,7 +793,9 @@ function ImportJourneyState({
   const finalStepLabel = projection.hasSavedRules
     ? "规则已保存，可继续逐章"
     : projection.hasTrial
-      ? "试改已保存，待确认规则"
+      ? directMode
+        ? "试改已保存，请设置规则"
+        : "试改已保存，待确认规则"
       : projection.hasRewriteTarget
         ? "目标已保存，待试改"
         : "待填写改写目标";
@@ -692,7 +825,7 @@ function ImportJourneyState({
           <strong>{analysisLabel}</strong>
         </li>
         <li data-state={projection.hasSavedRules ? "complete" : "pending"}>
-          <span>3　试改、确认规则并逐章处理</span>
+          <span>3　{directMode ? "试改、设置规则并逐章处理" : "试改、确认规则并逐章处理"}</span>
           <strong>{finalStepLabel}</strong>
         </li>
       </ol>
@@ -701,6 +834,45 @@ function ImportJourneyState({
       </p>
     </section>
   );
+}
+
+function resolveActiveIdeaJourneyProjectId(
+  journey: CreativeJourneyRecord,
+  projects: readonly Project[],
+): string | null {
+  if (journey.projectId !== null) {
+    return parseUuidV7(journey.projectId).ok &&
+      projects.some((project) => project.id === journey.projectId && project.status === "active")
+      ? journey.projectId
+      : null;
+  }
+
+  const snapshot = journey.snapshot;
+  if (snapshot.version !== 1 || !isRecord(snapshot.provisioningPlan)) {
+    return null;
+  }
+  const plan = snapshot.provisioningPlan;
+  if (
+    typeof plan.projectId !== "string" ||
+    !parseUuidV7(plan.projectId).ok ||
+    typeof plan.chapterId !== "string" ||
+    !parseUuidV7(plan.chapterId).ok ||
+    typeof plan.initialVersionId !== "string" ||
+    !parseUuidV7(plan.initialVersionId).ok ||
+    typeof plan.projectName !== "string" ||
+    plan.projectName.length === 0 ||
+    plan.projectName.length > 120
+  ) {
+    return null;
+  }
+
+  const plannedProject = projects.find(
+    (project) => project.id === plan.projectId && project.status === "active",
+  );
+  if (plannedProject?.name !== plan.projectName) {
+    return null;
+  }
+  return plan.projectId;
 }
 
 function readImportJourneyProjection(): ImportJourneyLibraryProjection | null {

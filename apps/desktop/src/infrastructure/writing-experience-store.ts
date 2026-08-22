@@ -24,7 +24,11 @@ export type WritingExperienceInitializationSource = "new_install" | "upgrade_exi
 export interface WritingExperiencePreference {
   readonly mode: WritingExperienceMode;
   readonly initializationSource: WritingExperienceInitializationSource;
-  /** One-time, content-local authorization. It never grants Provider dispatch. */
+  /**
+   * Compatibility timestamp for when direct-mode background organization became
+   * active. Direct mode itself is the product-policy authority; this is not a
+   * second confirmation gate and never grants an unrelated remote call.
+   */
   readonly directLocalOrganizationAuthorizedAt: string | null;
   readonly revision: number;
   readonly createdAt: string;
@@ -167,18 +171,18 @@ export class TauriWritingExperienceStore implements WritingExperienceStore {
       if (current.revision !== expectedRevision) {
         throw revisionConflict("WRITING_EXPERIENCE_REVISION_CONFLICT");
       }
-      if (mode === "direct" && current.directLocalOrganizationAuthorizedAt === null) {
-        throw storeError(
-          "WRITING_DIRECT_AUTHORIZATION_REQUIRED",
-          "Direct mode requires its one-time local organization authorization.",
-        );
-      }
       const updatedAt = this.clock.now();
+      const organizationActivatedAt =
+        mode === "direct"
+          ? (current.directLocalOrganizationAuthorizedAt ?? updatedAt)
+          : current.directLocalOrganizationAuthorizedAt;
       const result = await transaction.execute(
         `UPDATE writing_experience_preferences
-         SET mode = ?, initialization_source = 'user', revision = revision + 1, updated_at = ?
+         SET mode = ?, initialization_source = 'user',
+             direct_local_organization_authorized_at = ?,
+             revision = revision + 1, updated_at = ?
          WHERE scope = ? AND revision = ?`,
-        [mode, updatedAt, GLOBAL_SCOPE, expectedRevision],
+        [mode, organizationActivatedAt, updatedAt, GLOBAL_SCOPE, expectedRevision],
       );
       if (result.rowsAffected !== 1) {
         throw revisionConflict("WRITING_EXPERIENCE_REVISION_CONFLICT");
@@ -186,7 +190,7 @@ export class TauriWritingExperienceStore implements WritingExperienceStore {
       return Object.freeze({
         mode,
         initializationSource: "user" as const,
-        directLocalOrganizationAuthorizedAt: current.directLocalOrganizationAuthorizedAt,
+        directLocalOrganizationAuthorizedAt: organizationActivatedAt,
         revision: expectedRevision + 1,
         createdAt: current.createdAt,
         updatedAt,
@@ -404,7 +408,7 @@ export class BrowserDevelopmentWritingExperienceStore implements WritingExperien
       const preference = freezePreference({
         mode: hasExisting ? "professional" : "direct",
         initializationSource: hasExisting ? "upgrade_existing" : "new_install",
-        directLocalOrganizationAuthorizedAt: null,
+        directLocalOrganizationAuthorizedAt: hasExisting ? null : now,
         revision: 1,
         createdAt: now,
         updatedAt: now,
@@ -427,19 +431,18 @@ export class BrowserDevelopmentWritingExperienceStore implements WritingExperien
     if (current?.revision !== expectedRevision) {
       throw revisionConflict("WRITING_EXPERIENCE_REVISION_CONFLICT");
     }
-    if (mode === "direct" && current.directLocalOrganizationAuthorizedAt === null) {
-      throw storeError(
-        "WRITING_DIRECT_AUTHORIZATION_REQUIRED",
-        "Direct mode requires its one-time local organization authorization.",
-      );
-    }
+    const updatedAt = this.clock.now();
+    const organizationActivatedAt =
+      mode === "direct"
+        ? (current.directLocalOrganizationAuthorizedAt ?? updatedAt)
+        : current.directLocalOrganizationAuthorizedAt;
     const updated = freezePreference({
       mode,
       initializationSource: "user",
-      directLocalOrganizationAuthorizedAt: current.directLocalOrganizationAuthorizedAt,
+      directLocalOrganizationAuthorizedAt: organizationActivatedAt,
       revision: expectedRevision + 1,
       createdAt: current.createdAt,
-      updatedAt: this.clock.now(),
+      updatedAt,
     });
     database.preference = updated;
     this.write(database);
@@ -713,7 +716,7 @@ async function readOrInitializeSqlitePreference(
   const preference = freezePreference({
     mode: hasExisting ? "professional" : "direct",
     initializationSource: hasExisting ? "upgrade_existing" : "new_install",
-    directLocalOrganizationAuthorizedAt: null,
+    directLocalOrganizationAuthorizedAt: hasExisting ? null : now,
     revision: 1,
     createdAt: now,
     updatedAt: now,
@@ -722,11 +725,12 @@ async function readOrInitializeSqlitePreference(
     `INSERT INTO writing_experience_preferences (
        scope, mode, initialization_source, direct_local_organization_authorized_at,
        revision, created_at, updated_at
-     ) VALUES (?, ?, ?, NULL, 1, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, 1, ?, ?)`,
     [
       GLOBAL_SCOPE,
       preference.mode,
       preference.initializationSource,
+      preference.directLocalOrganizationAuthorizedAt,
       preference.createdAt,
       preference.updatedAt,
     ],

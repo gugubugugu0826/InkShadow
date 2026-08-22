@@ -367,6 +367,7 @@ function normalizeProviderError(cause: unknown): ModelCenterError {
 export function restoreCandidateBaseVersion(
   runtime: DesktopRuntime,
   candidate: AiCandidate,
+  organizeLocalStoryFacts: boolean,
 ): Promise<
   Result<
     Readonly<{
@@ -378,12 +379,13 @@ export function restoreCandidateBaseVersion(
     AppError | ModelCenterError
   >
 > {
-  return restoreCandidateBaseVersionInternal(runtime, candidate);
+  return restoreCandidateBaseVersionInternal(runtime, candidate, organizeLocalStoryFacts);
 }
 
 async function restoreCandidateBaseVersionInternal(
   runtime: DesktopRuntime,
   candidate: AiCandidate,
+  organizeLocalStoryFacts: boolean,
 ): Promise<
   Result<
     Readonly<{
@@ -433,6 +435,7 @@ async function restoreCandidateBaseVersionInternal(
     chapterId: candidate.chapterId,
     versionId: candidate.baseVersionId,
     expectedRevision: chapterResult.value.revision,
+    organizeLocalStoryFacts,
   });
   return restored.ok
     ? ok({

@@ -1,9 +1,8 @@
-import { Badge, Button, InkIcon, InlineAlert } from "@inkshadow/ui";
+import { Button, InkIcon, InlineAlert } from "@inkshadow/ui";
 import { parseUuidV7, type Chapter, type Project, type UuidV7 } from "@inkshadow/domain";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import { DirectModeAuthorizationDialog } from "../components/direct-mode-authorization-dialog";
 import { loadEditorView, type EditorViewState } from "../infrastructure/editor-view-state-store";
 import type { DesktopRuntime } from "../infrastructure/runtime";
 import { normalizeUiError } from "../infrastructure/ui-error";
@@ -55,11 +54,7 @@ export function StartPage() {
   const [exampleError, setExampleError] = useState<string | null>(null);
   const [recentWriting, setRecentWriting] = useState<RecentWritingTarget | null>(null);
   const [recentWritingError, setRecentWritingError] = useState<string | null>(null);
-  const [directAuthorizationDismissed, setDirectAuthorizationDismissed] = useState(false);
-  const directAuthorizationOpen =
-    !directAuthorizationDismissed &&
-    writingExperience.preference?.mode === "direct" &&
-    writingExperience.preference.directLocalOrganizationAuthorizedAt === null;
+  const directMode = writingExperience.preference?.mode === "direct";
 
   useEffect(() => {
     let active = true;
@@ -138,50 +133,31 @@ export function StartPage() {
   return (
     <div className="start-page">
       <header className="start-page__header" aria-labelledby="start-heading">
-        <div className="settings-actions">
-          <h1 id="start-heading">把你的第一个想法，写成一个故事</h1>
-          {writingExperience.preference !== null && (
-            <Badge tone="neutral">
-              {writingExperience.preference.mode === "direct" ? "直接模式" : "专业模式"}
-            </Badge>
-          )}
-        </div>
-        <p>无需注册，本地保存。连接你自己的 AI 模型后，续写、改写与检查都由你掌控。</p>
+        <h1 id="start-heading">
+          {directMode ? "开始写你的故事" : "把你的第一个想法，写成一个故事"}
+        </h1>
+        <p>
+          {directMode
+            ? "写下一句话，墨影会先为你准备一个开头，再由你查看并决定是否使用。"
+            : "无需注册，本地保存。连接你自己的 AI 模型后，续写、改写与检查都由你掌控。"}
+        </p>
       </header>
 
       {writingExperience.loading && writingExperience.preference === null ? (
         <p role="status">正在读取本机写作方式……</p>
-      ) : writingExperience.preference?.mode === "direct" ? (
+      ) : directMode ? (
         <section className="start-page__recent" aria-labelledby="direct-writing-title">
           <div className="start-page__recent-copy">
-            <p className="start-page__recent-eyebrow">第一次写作</p>
-            <h2 id="direct-writing-title">直接写下你的想法</h2>
+            <p className="start-page__recent-eyebrow">新作品</p>
+            <h2 id="direct-writing-title">从一句话开始</h2>
             <p className="start-page__entry-description">
-              直接模式会使用安全默认值生成隔离建议；只有你明确选择使用后，才会写入正文并保留上一版本。本地整理不会联网，重大设定仍会停下来请你确认。
+              不用先填写人物、设定或大纲，想到什么就写什么。
             </p>
           </div>
-          <div className="settings-actions">
-            <Link
-              className="start-page__continue-link"
-              to="/create/idea"
-              onClick={(event) => {
-                if (writingExperience.preference?.directLocalOrganizationAuthorizedAt === null) {
-                  event.preventDefault();
-                  setDirectAuthorizationDismissed(false);
-                }
-              }}
-            >
-              开始写作
-              <span aria-hidden="true">→</span>
-            </Link>
-            <Button
-              variant="secondary"
-              loading={writingExperience.switching}
-              onClick={() => void writingExperience.switchMode("professional")}
-            >
-              使用专业模式
-            </Button>
-          </div>
+          <Link className="start-page__continue-link" to="/create/idea">
+            开始创作
+            <span aria-hidden="true">→</span>
+          </Link>
         </section>
       ) : (
         <section className="start-page__entries" aria-label="选择创作方式">
@@ -268,16 +244,18 @@ export function StartPage() {
       )}
 
       <nav className="start-page__secondary" aria-label="已有内容与数据工具">
-        <Link to="/settings#data-transfer">恢复备份</Link>
         <Link to="/projects">浏览作品库</Link>
-        <Button
-          variant="ghost"
-          size="sm"
-          loading={exampleBusy}
-          onClick={() => void openExampleProject()}
-        >
-          体验示例作品
-        </Button>
+        {!directMode && <Link to="/settings#data-transfer">恢复备份</Link>}
+        {!directMode && (
+          <Button
+            variant="ghost"
+            size="sm"
+            loading={exampleBusy}
+            onClick={() => void openExampleProject()}
+          >
+            体验示例作品
+          </Button>
+        )}
       </nav>
 
       {exampleError !== null && (
@@ -287,21 +265,6 @@ export function StartPage() {
           description={`${exampleError} 请重试；已有本地作品不会受到影响。`}
         />
       )}
-
-      <DirectModeAuthorizationDialog
-        open={directAuthorizationOpen}
-        busy={writingExperience.switching}
-        onCancel={() => {
-          void writingExperience.revokeDirectModeAuthorization().then((revoked) => {
-            if (revoked) setDirectAuthorizationDismissed(true);
-          });
-        }}
-        onAuthorize={() => {
-          void writingExperience.authorizeDirectMode().then((authorized) => {
-            if (authorized) setDirectAuthorizationDismissed(true);
-          });
-        }}
-      />
     </div>
   );
 }

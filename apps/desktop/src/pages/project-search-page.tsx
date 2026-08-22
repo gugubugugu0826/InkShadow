@@ -430,7 +430,7 @@ function embeddingDestinationLabel(diagnostics: ProjectEmbeddingDiagnostics): st
 
 function embeddingReasonLabel(reason: NonNullable<ProjectEmbeddingDiagnostics["reason"]>): string {
   const labels: Record<NonNullable<ProjectEmbeddingDiagnostics["reason"]>, string> = {
-    no_embedding_route: "未配置 embedding 主路由",
+    no_embedding_route: "未配置向量检索主线路",
     embedding_profile_missing: "主路由模型配置缺失",
     embedding_route_profile_mismatch: "主路由与精确模型配置不一致",
     native_gateway_unavailable: "浏览器开发模式不提供原生嵌入",

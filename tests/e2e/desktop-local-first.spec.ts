@@ -5,14 +5,18 @@ import { pathToFileURL } from "node:url";
 
 import { expect, test, type Page } from "@playwright/test";
 
+import { switchFreshInstallToProfessionalMode } from "./support/writing-experience";
+
 const DEVELOPMENT_DATABASE_KEY = "inkshadow.development.database.v1";
 
 test.beforeEach(async ({ page }) => {
-  await page.goto("/#/projects");
+  await page.goto("/#/start");
   await page.evaluate(() => {
     window.localStorage.clear();
   });
   await page.reload();
+  await switchFreshInstallToProfessionalMode(page);
+  await page.goto("/#/projects");
   await expect(page.getByRole("heading", { level: 1, name: "项目" })).toBeVisible();
   await expect(
     page.getByText("仅开发环境：当前数据只保存在此浏览器中，不代表桌面正式版的持久化能力。", {

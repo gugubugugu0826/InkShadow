@@ -17,6 +17,7 @@ import type {
   ConsistencyInvestigationDisclosure,
   ConsistencyInvestigationSnapshot,
 } from "../infrastructure/consistency-investigation-service";
+import { ConsistencyInvestigationError } from "../infrastructure/consistency-investigation-service";
 import {
   projectConsistencyInvestigationTaskGraph,
   type InvestigationTaskGraphNode,
@@ -281,7 +282,16 @@ export function ConsistencyInvestigationPanel({
     }
   }
 
-  const normalizedError = error === null ? null : normalizeUiError(error);
+  const normalizedError =
+    error === null
+      ? null
+      : error instanceof ConsistencyInvestigationError
+        ? {
+            title: "调查准备未完成",
+            description: error.message,
+            code: error.code,
+          }
+        : normalizeUiError(error);
   const active =
     snapshot !== null &&
     ["planned", "dispatched", "observing", "verifying"].includes(snapshot.run.status);
@@ -351,7 +361,8 @@ export function ConsistencyInvestigationPanel({
               <div>
                 <dt>范围</dt>
                 <dd>
-                  {disclosure.chapterCount} 章；预计输入约 {disclosure.estimatedInputTokens} tokens
+                  {disclosure.chapterCount} 章；预计输入约 {disclosure.estimatedInputTokens}{" "}
+                  个内容额度
                 </dd>
               </div>
               <div>
@@ -375,7 +386,7 @@ export function ConsistencyInvestigationPanel({
                 <h4>会发送</h4>
                 <ul className="privacy-list">
                   {disclosure.sends.map((item) => (
-                    <li key={item}>{item}</li>
+                    <li key={item}>{plainLanguageDisclosure(item)}</li>
                   ))}
                 </ul>
               </div>
@@ -383,14 +394,16 @@ export function ConsistencyInvestigationPanel({
                 <h4>不会发送</h4>
                 <ul className="privacy-list">
                   {disclosure.doesNotSend.map((item) => (
-                    <li key={item}>{item}</li>
+                    <li key={item}>{plainLanguageDisclosure(item)}</li>
                   ))}
                 </ul>
               </div>
             </div>
             <InlineAlert
               title="隐私与中断规则"
-              description={`${disclosure.privacy} ${disclosure.interruption}`}
+              description={plainLanguageDisclosure(
+                `${disclosure.privacy} ${disclosure.interruption}`,
+              )}
             />
             <div className="settings-actions">
               <Button
@@ -453,8 +466,8 @@ export function ConsistencyInvestigationPanel({
               <div>
                 <dt>范围</dt>
                 <dd>
-                  预计输入约 {repairDisclosure.estimatedInputTokens} tokens；输出上限{" "}
-                  {repairDisclosure.maximumOutputTokens} tokens
+                  预计输入约 {repairDisclosure.estimatedInputTokens} 个内容额度；输出上限{" "}
+                  {repairDisclosure.maximumOutputTokens} 个内容额度
                 </dd>
               </div>
               <div>
@@ -474,7 +487,7 @@ export function ConsistencyInvestigationPanel({
                 <h4>会发送</h4>
                 <ul className="privacy-list">
                   {repairDisclosure.sends.map((item) => (
-                    <li key={item}>{item}</li>
+                    <li key={item}>{plainLanguageDisclosure(item)}</li>
                   ))}
                 </ul>
               </div>
@@ -482,14 +495,16 @@ export function ConsistencyInvestigationPanel({
                 <h4>不会发送</h4>
                 <ul className="privacy-list">
                   {repairDisclosure.doesNotSend.map((item) => (
-                    <li key={item}>{item}</li>
+                    <li key={item}>{plainLanguageDisclosure(item)}</li>
                   ))}
                 </ul>
               </div>
             </div>
             <InlineAlert
               title="隐私与中断规则"
-              description={`${repairDisclosure.privacy} ${repairDisclosure.interruption}`}
+              description={plainLanguageDisclosure(
+                `${repairDisclosure.privacy} ${repairDisclosure.interruption}`,
+              )}
             />
             <div className="settings-actions">
               <Button
@@ -1007,6 +1022,20 @@ function formatCost(
 
 function destinationLabel(destination: "local" | "remote"): string {
   return destination === "local" ? "仅发送到当前已验证的本机模型" : "发送到所选远程 AI 服务";
+}
+
+function plainLanguageDisclosure(value: string): string {
+  return value
+    .replaceAll("API Key 或", "接口密钥或")
+    .replaceAll("API Key、", "接口密钥、")
+    .replaceAll("API Key", "接口密钥")
+    .replaceAll("未接受 Candidate", "未接受隔离建议")
+    .replaceAll("其他 Candidate", "其他隔离建议")
+    .replaceAll("Candidate", "隔离建议")
+    .replaceAll(/tokens?/giu, "内容额度")
+    .replaceAll("Invocation", "调用记录")
+    .replaceAll("Provider", "模型服务")
+    .replaceAll("Agent", "智能流程");
 }
 
 function formatTimestamp(value: string): string {

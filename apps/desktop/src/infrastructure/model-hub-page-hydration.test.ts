@@ -5,11 +5,21 @@ import {
   createInitialModelHubPageSnapshot,
   createProviderDraftModelHubPageSnapshot,
   loadAuthoritativeModelHubHydration,
+  modelHubHydrationPhaseLabel,
   preserveModelHubPageSnapshotAfterFailure,
 } from "./model-hub-page-hydration";
 import { createDevelopmentRuntime } from "./runtime";
 
 describe("Model Hub page hydration", () => {
+  it("uses Chinese labels for every user-visible hydration phase", () => {
+    expect(modelHubHydrationPhaseLabel("UNINITIALIZED")).toBe("正在准备模型中心……");
+    expect(modelHubHydrationPhaseLabel("READY")).toBe("模型中心已载入");
+    expect(modelHubHydrationPhaseLabel("READY_WITH_WARNINGS")).toBe(
+      "模型中心已载入，但有一项需要重试",
+    );
+    expect(modelHubHydrationPhaseLabel("ERROR")).toBe("模型中心暂时无法读取");
+  });
+
   it("hydrates an existing connection, delayed keyring summary and cached catalog as one snapshot", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     let connection = await runtime.modelHub.saveConnection({

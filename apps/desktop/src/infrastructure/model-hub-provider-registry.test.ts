@@ -110,6 +110,28 @@ describe("Model Hub provider registry", () => {
 
     expect(getModelProviderPreset("openai").basicFields.map(({ key }) => key)).toEqual(["apiKey"]);
     expect(getModelProviderPreset("ollama").basicFields).toEqual([]);
+    expect(getModelProviderPreset("openai").basicFields[0]).toMatchObject({
+      label: "接口密钥",
+      placeholder: "输入模型服务提供的接口密钥",
+    });
+    expect(
+      getModelProviderPreset("openai").expertFields.find(({ key }) => key === "retryLimit"),
+    ).toMatchObject({
+      description: "只重试连接测试和模型目录读取；生成、向量检索、结果排序与图片不会自动重试。",
+    });
+    expect(
+      getModelProviderPreset("custom_openai_compatible").expertFields.find(
+        ({ key }) => key === "embeddingPath",
+      ),
+    ).toMatchObject({
+      label: "向量检索路径",
+      description: "默认 /embeddings；只支持绝对接口路径。",
+    });
+    expect(getModelProviderPreset("alibaba_qwen").basicFields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ description: "接口密钥、可用模型和计费会因地域不同而变化。" }),
+      ]),
+    );
   });
 
   it("uses explicit capability and novel-task taxonomies", () => {

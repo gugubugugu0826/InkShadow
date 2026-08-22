@@ -165,6 +165,25 @@ describe("content entities", () => {
     expect(version.ok).toBe(false);
   });
 
+  it("defaults legacy chapter-version responsibility to false", () => {
+    const version = ChapterVersion.create({
+      id: NEXT_VERSION_ID,
+      projectId: PROJECT_ID,
+      chapterId: CHAPTER_ID,
+      parentVersionId: VERSION_ID,
+      sequence: 2,
+      content: "Saved text",
+      contentChecksum: checksum(),
+      reason: "manual",
+      sourceCandidateId: null,
+      createdAt: NOW,
+    });
+
+    expect(version.ok).toBe(true);
+    if (!version.ok) return;
+    expect(version.value.toSnapshot().organizeLocalStoryFacts).toBe(false);
+  });
+
   it("only decides a ready candidate once", () => {
     const accepted = readyCandidate().accept(NOW);
     expect(accepted.ok).toBe(true);
@@ -211,12 +230,14 @@ describe("content entities", () => {
     const legacySnapshot = { ...readyCandidate().toSnapshot() };
     Reflect.deleteProperty(legacySnapshot, "applicationIntent");
     Reflect.deleteProperty(legacySnapshot, "revision");
+    Reflect.deleteProperty(legacySnapshot, "purpose");
 
     const rehydrated = AiCandidate.rehydrate(legacySnapshot);
 
     expect(rehydrated.ok).toBe(true);
     if (!rehydrated.ok) return;
     expect(rehydrated.value.revision).toBe(1);
+    expect(rehydrated.value.purpose).toBe("prose");
     expect(rehydrated.value.applicationIntent).toEqual({
       task: "legacy_full_document",
       application: "replace_document",
@@ -224,6 +245,37 @@ describe("content entities", () => {
       startUtf16: null,
       endUtf16: null,
     });
+  });
+
+  it("keeps continuation directions isolated and impossible to accept", () => {
+    const streaming = AiCandidate.createStreaming({
+      id: CANDIDATE_ID,
+      projectId: PROJECT_ID,
+      chapterId: CHAPTER_ID,
+      source: "generate",
+      purpose: "continuation_directions",
+      baseVersionId: VERSION_ID,
+      now: NOW,
+      applicationIntent: {
+        task: "continuation",
+        application: "insert_at_cursor",
+        payload: "fragment",
+        startUtf16: 0,
+        endUtf16: 0,
+      },
+    });
+    expect(streaming.ok).toBe(true);
+    if (!streaming.ok) return;
+    const ready = streaming.value.markReady("方向一：进入钟楼调查", checksum(), NOW);
+    expect(ready.ok).toBe(true);
+    if (!ready.ok) return;
+
+    const accepted = ready.value.accept(NOW);
+    expect(accepted.ok).toBe(false);
+    if (!accepted.ok) {
+      expect(accepted.error.details.reason).toBe("CONTINUATION_DIRECTIONS_NOT_ACCEPTABLE");
+    }
+    expect(ready.value.reject(NOW).ok).toBe(true);
   });
 
   it("rejects an invalid Candidate revision during rehydration", () => {

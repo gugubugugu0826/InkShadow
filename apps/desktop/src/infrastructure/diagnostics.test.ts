@@ -254,11 +254,11 @@ describe("desktop diagnostics", () => {
 
     const artifact = await collectDesktopDiagnosticArtifact(runtime);
 
-    expect(artifact.fileName).toMatch(/^InkShadow-diagnostics-\d{4}-\d{2}-\d{2}-/u);
+    expect(artifact.fileName).toMatch(/^墨影-诊断-\d{4}-\d{2}-\d{2}-/u);
     expect(artifact.bundle).toMatchObject({
       schemaVersion: 3,
       summary: {
-        appVersion: "0.2.6",
+        appVersion: "0.2.7",
         databaseHealth: "unknown",
         indexHealth: "healthy",
         syncState: "local_only",

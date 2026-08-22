@@ -55,7 +55,7 @@ const issueLabels: Record<ImportExportErrorCode, string> = {
   IMPORT_TOO_MANY_FILES: "一次选择的文件过多。",
   IMPORT_FILE_TOO_LARGE: "有文件超过单文件大小限制。",
   IMPORT_TOTAL_TOO_LARGE: "所选文件的总大小超过限制。",
-  IMPORT_MIXED_FORMATS: "便携 Bundle 必须单独导入，不能与文本文件混选。",
+  IMPORT_MIXED_FORMATS: "墨影完整备份必须单独导入，不能与文本文件混选。",
   IMPORT_DUPLICATE_FILE: "发现重复文件名或重复章节路径。",
   IMPORT_EXTENSION_FORBIDDEN: "文件扩展名不受支持。",
   IMPORT_MACRO_FORMAT_FORBIDDEN: "不接受包含宏的文件格式。",
@@ -82,14 +82,14 @@ const issueLabels: Record<ImportExportErrorCode, string> = {
   PDF_ACTIVE_CONTENT_FORBIDDEN: "PDF 包含附件、表单、XFA 或 JavaScript。",
   IMPORT_CHAPTER_BOUNDARY_REVIEW: "章节边界置信度较低，请在写入前检查标题和正文。",
   IMPORT_CHAPTER_SPLIT: "超大章节已拆成可检查的多个部分。",
-  IMPORT_INVALID_JSON: "Bundle 不是有效的 JSON 文件。",
-  BUNDLE_SCHEMA_INVALID: "Bundle 结构不符合 InkShadow 便携格式。",
-  BUNDLE_VERSION_UNSUPPORTED: "当前版本无法读取此 Bundle 版本。",
-  BUNDLE_CHECKSUM_MISMATCH: "Bundle 内容校验失败，文件可能已损坏或被修改。",
-  BUNDLE_ENTRY_CHECKSUM_MISMATCH: "Bundle 中有章节校验失败。",
-  BUNDLE_MANIFEST_CONTENT_MISMATCH: "Bundle 清单与实际内容不一致。",
-  BUNDLE_DUPLICATE_ENTRY: "Bundle 中存在重复章节。",
-  BUNDLE_LIMIT_EXCEEDED: "Bundle 超过安全大小限制。",
+  IMPORT_INVALID_JSON: "完整备份文件内容无效。",
+  BUNDLE_SCHEMA_INVALID: "完整备份结构不符合墨影便携格式。",
+  BUNDLE_VERSION_UNSUPPORTED: "这个完整备份来自当前版本无法读取的版本。",
+  BUNDLE_CHECKSUM_MISMATCH: "完整备份内容校验失败，文件可能已损坏或被修改。",
+  BUNDLE_ENTRY_CHECKSUM_MISMATCH: "完整备份中有章节校验失败。",
+  BUNDLE_MANIFEST_CONTENT_MISMATCH: "完整备份清单与实际内容不一致。",
+  BUNDLE_DUPLICATE_ENTRY: "完整备份中存在重复章节。",
+  BUNDLE_LIMIT_EXCEEDED: "完整备份超过安全大小限制。",
   MARKDOWN_EMPTY: "文件中没有可导入的有效文本。",
   MARKDOWN_RAW_HTML_ESCAPED: "原始 HTML 已转为普通文本。",
   MARKDOWN_EXTERNAL_REFERENCE_REMOVED: "外部链接或可执行引用已被移除。",
@@ -98,7 +98,7 @@ const issueLabels: Record<ImportExportErrorCode, string> = {
 };
 
 const formatLabels: Record<ImportPreflightReport["format"], string> = {
-  portable_bundle: "InkShadow Bundle",
+  portable_bundle: "墨影完整备份",
   docx: "DOCX",
   epub: "EPUB",
   html: "HTML",
@@ -731,7 +731,7 @@ export function DataTransferPanel({
                 onChange={(event) => void inspectFiles(event)}
               />
               <p className="maintenance-note">
-                InkShadow Bundle（.inkshadow.json）也可单独选择，用于带校验清单的完整恢复。
+                墨影完整备份（.inkshadow.json）也可单独选择，用于带校验清单的完整恢复。
               </p>
             </div>
             {importBusy && (
@@ -831,8 +831,8 @@ export function DataTransferPanel({
                 <h3 id="export-title">导出项目</h3>
                 <p>
                   DOCX 适合继续排版；PDF 会在本机固定中文外观并生成不可选字的图像型文档；Markdown
-                  适合阅读与分享；Bundle
-                  保留项目及章节结构并带校验清单；领域报告只包含所选项目的结构化数据。
+                  适合阅读与分享；完整备份
+                  会保留项目及章节结构并带校验清单；领域报告只包含所选项目的结构化数据。
                   {runtime.mode === "tauri"
                     ? " 每次保存都会先由你选择位置，写入后再从磁盘回读核验。"
                     : " 浏览器下载的最终位置由浏览器决定，墨影会明确标记为无法核验路径。"}
@@ -927,7 +927,7 @@ export function DataTransferPanel({
                       disabled={exportBusy !== null || selectedProjectId.length === 0}
                       onClick={() => void exportProject("bundle")}
                     >
-                      {runtime.mode === "tauri" ? "保存 Bundle" : "下载 Bundle"}
+                      {runtime.mode === "tauri" ? "保存完整备份" : "下载完整备份"}
                     </Button>
                     {(exportBusy === "epub" || exportBusy === "docx" || exportBusy === "pdf") && (
                       <Button
@@ -1017,7 +1017,7 @@ function exportReceiptNotice(
   const labels: Readonly<Record<ExportArtifactFormat, string>> = {
     text: "TXT",
     markdown: "Markdown",
-    bundle: "InkShadow Bundle",
+    bundle: "墨影完整备份",
     epub: "EPUB",
     docx: "DOCX",
     pdf: "PDF",
@@ -1461,7 +1461,7 @@ function ImportPreview({
         <div className="import-document-list">
           <div className="card-heading-row">
             <h4>{candidate.project.project.title}</h4>
-            <Badge tone="success">Bundle 已验证</Badge>
+            <Badge tone="success">完整备份已验证</Badge>
           </div>
           <ol className="bundle-chapter-list">
             {candidate.project.chapters.slice(0, 8).map((chapter) => (

@@ -28,6 +28,7 @@ import {
 } from "@inkshadow/ui";
 import { Link } from "react-router-dom";
 
+import { ensureCurrentSavedVersionStoryFactsForDirectMode } from "../infrastructure/accepted-chapter-fact-preflight";
 import {
   inspectPipelineStageFailureCauseCode,
   pipelineRetryProgressStep,
@@ -208,6 +209,7 @@ export function TaskCenterPage() {
       if (queuedInput === null) {
         throw new Error("The accepted-version retry marker could not be verified after enqueue.");
       }
+      await ensureCurrentSavedVersionStoryFactsForDirectMode(runtime, queuedInput);
       const receipt = await runAcceptedChapterPipeline(runtime, queuedInput);
       await load(true);
       toast({

@@ -1,13 +1,14 @@
 # InkShadow 共享核心包逐文件指引
 
-> 基于源码快照：2026-08-21  
+> 基于源码快照：2026-08-22  
 > 文档状态：`SUPPORTING_CURRENT`  
-> Desktop 当前应用清单版本：`0.2.6`；最新已发布版本：`v0.2.5` 工程预览版；设计基线：`DESIGN v0.3.1b`  
-> 覆盖范围：`packages/*/src` 的 17 个 workspace package，以及 `packages/data/migrations` 的 71 个本地数据库迁移（工作树最新 `0071`）
+> 桌面端当前工作树应用清单版本：`0.2.7`；最新公开版本：`v0.2.6` 工程预发布；设计基线：`DESIGN v0.3.1b`  
+> 覆盖范围：`packages/*/src` 的 17 个工作区包，以及 `packages/data/migrations` 的 75 个本地数据库迁移（工作树最新 `0075`）
 
-`0071` 与本文所述运行时改动属于尚未发布的 `v0.2.6` 修复工作树；应用清单已升至
-`0.2.6`，最终全量门禁、真机验证、干净提交、推送、打包和发布仍待完成，不能借此改写
-`v0.2.5` 的历史证据。
+`0071` 已随 `v0.2.6` 工程预发布冻结。当前 `v0.2.7` 工作树只向前追加 `0072`–`0075`：
+`0074` 冻结不可变章节版本的本地故事资料整理责任，`0075` 保存生成尝试隐私快照及同一次调用标识。
+当前工作树全量门禁已通过；真机验证、干净候选、推送、打包和发布仍待完成，不能借此改写
+`v0.2.6` 及更早标签、迁移校验值和制品证据。
 
 这些包不是“页面”，也不应全部叫作后端。它们承载可被 Desktop、Cloud API、Web 或测试复用的领域规则、用例、契约、数据适配器和 UI 基础件。正常依赖方向是“领域与协议 → 应用用例 → 基础设施适配器 → 应用入口”；`scripts/check-boundaries.mjs` 会检查主要边界。
 
@@ -244,6 +245,10 @@
 | `packages/data/migrations/0069_consistency_investigation_invocation_reservation.sql` | 为调查模型 step 预留 content-free invocation UUID，并原子绑定调用账本与 context trace。                                                                                        |
 | `packages/data/migrations/0070_multigranular_search_retrieval.sql`                   | 为可重建搜索投影追加多粒度范围、父子锚点、权威性、隐私与 currentness；旧行标记为 `legacy_unknown` 等待重建。                                                                   |
 | `packages/data/migrations/0071_model_capability_probe_invocation_ledger.sql`         | 新增独立能力验证调用任务，让能力证据可空且唯一绑定精确终态调用记录，并在重建账本表时守恒既有行数。                                                                             |
+| `packages/data/migrations/0072_ai_candidate_purpose.sql`                             | 为隔离结果增加不可变用途，方向选项不能被接受为正文；历史结果安全回填为正文用途。                                                                                               |
+| `packages/data/migrations/0073_story_fact_user_revisions.sql`                        | 收紧用户故事事实内容修订与治理转换，保留事实身份、来源证据和修订递增约束。                                                                                                     |
+| `packages/data/migrations/0074_chapter_version_story_fact_responsibility.sql`        | 在不可变章节版本上保存本地故事资料整理责任；旧行默认关闭，字段不可修改。                                                                                                       |
+| `packages/data/migrations/0075_generation_attempt_privacy_snapshot.sql`              | 在新生成尝试上保存完整且不可修改的隐私快照和同一次模型调用标识；迁移前旧行保留空值。                                                                                           |
 
 当前六张写作体验/调查权威表全部进入既有备份删除与恢复顺序；`planned_invocation_id` 随
 `consistency_investigation_steps` 整表恢复。当前恢复断言为 172 张表；唯一排除项仍是 1 张不含用户

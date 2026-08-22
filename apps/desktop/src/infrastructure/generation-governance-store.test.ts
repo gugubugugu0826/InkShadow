@@ -13,6 +13,12 @@ const CHAPTER_ID = uuid(2);
 const VERSION_ID = uuid(3);
 const TASK_ID = uuid(4);
 const RUN_ID = uuid(5);
+const REMOTE_PRIVACY = Object.freeze({
+  privacySnapshotVersion: 1 as const,
+  privacyPolicy: "cloud_allowed" as const,
+  dataDestination: "remote" as const,
+  modelInvocationId: null,
+});
 
 describe("BrowserDevelopmentGenerationGovernanceStore", () => {
   it("persists content-free preflight provenance and deduplicates a run", async () => {
@@ -70,6 +76,7 @@ describe("BrowserDevelopmentGenerationGovernanceStore", () => {
       failureCode: "MODEL_TIMEOUT",
       addIncurredCost: true,
       attemptUsage: {
+        ...REMOTE_PRIVACY,
         source: "provider_unavailable",
         inputTokens: null,
         outputTokens: null,
@@ -140,6 +147,7 @@ describe("BrowserDevelopmentGenerationGovernanceStore", () => {
       candidateId: uuid(8),
       addIncurredCost: true,
       attemptUsage: {
+        ...REMOTE_PRIVACY,
         source: "provider_reported",
         inputTokens: 3_900,
         outputTokens: 650,
@@ -209,6 +217,7 @@ describe("BrowserDevelopmentGenerationGovernanceStore", () => {
       failureCode: "PROVIDER_RESPONSE_INVALID",
       addIncurredCost: true,
       attemptUsage: {
+        ...REMOTE_PRIVACY,
         source: "provider_reported_unpriced",
         inputTokens: 2_100,
         outputTokens: 380,

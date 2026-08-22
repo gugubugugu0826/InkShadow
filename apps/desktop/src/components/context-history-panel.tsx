@@ -160,7 +160,7 @@ export function ContextHistoryPanel({ projectId, store, novelSkills }: ContextHi
               </CardHeader>
               <CardContent>
                 <p>
-                  估算输入 token {summary.usedTokens.toLocaleString("zh-CN")}/
+                  估算输入内容额度 {summary.usedTokens.toLocaleString("zh-CN")}/
                   {summary.maximumContextTokens.toLocaleString("zh-CN")}；未发送{" "}
                   {summary.discardedCount}
                   项。
@@ -257,7 +257,7 @@ export function ContextHistoryPanel({ projectId, store, novelSkills }: ContextHi
                     为保护作品内容，历史记录只保存来源类别、选择原因与预算，不保存正文摘录。
                   </p>
                   <p className="candidate-panel__hint">
-                    估算 {entry.estimatedTokens.toLocaleString("zh-CN")} 个输入 token；处理前剩余
+                    估算 {entry.estimatedTokens.toLocaleString("zh-CN")} 个输入内容额度；处理前剩余
                     {entry.budgetRemainingBefore.toLocaleString("zh-CN")}，处理后剩余
                     {entry.budgetRemainingAfter.toLocaleString("zh-CN")}。
                   </p>
@@ -375,7 +375,7 @@ function humanReadableSourceTitle(entry: ContextCompilationTrace["entries"][numb
 }
 
 function tokenSourceLabel(source: ContextCompilationTraceSummary["tokenEstimateSource"]): string {
-  if (source === "provider_tokenizer") return "供应商精确计数";
+  if (source === "provider_tokenizer") return "模型服务精确计数";
   if (source === "custom") return "自定义计数器";
   return "本机保守估算";
 }

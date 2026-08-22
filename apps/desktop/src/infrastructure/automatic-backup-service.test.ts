@@ -295,7 +295,7 @@ describe("AutomaticBackupService", () => {
     });
   });
 
-  it("migrates a legacy creating record to unknown without deleting or retrying it", async () => {
+  it("settles a missing legacy creating record and reschedules the same slot exactly once", async () => {
     const backupId = uuid(26);
     const createdAt = "2026-08-08T03:02:00.000Z";
     const fileName = fileNameFor(createdAt, backupId);
@@ -323,21 +323,41 @@ describe("AutomaticBackupService", () => {
     } as unknown as AutomaticBackupManifest;
     const service = new AutomaticBackupService(port, ids);
 
-    const result = await service.runIfDue({
+    const first = await service.runIfDue({
       now: "2026-08-08T04:00:00.000Z",
       timezoneOffsetMinutes: 0,
     });
-
-    expect(result).toMatchObject({
-      status: "attention",
-      attention: { status: "unknown", failureKind: "result_unconfirmed" },
+    const second = await service.runIfDue({
+      now: "2026-08-08T05:00:00.000Z",
+      timezoneOffsetMinutes: 0,
     });
-    expect(port.createRequests).toHaveLength(0);
+
+    expect(first).toMatchObject({
+      status: "completed",
+      recoveredPendingCount: 1,
+      attention: null,
+      createdBackup: {
+        status: "succeeded",
+        scheduleSlot: "2026-08-08",
+      },
+    });
+    expect(first.createdBackup?.backupId).not.toBe(backupId);
+    expect(second).toMatchObject({
+      status: "not_due",
+      recoveredPendingCount: 0,
+      attention: null,
+      createdBackup: null,
+    });
+    expect(port.createRequests).toHaveLength(1);
     expect(port.deleteRequests).toHaveLength(0);
     expect(port.manifest).toMatchObject({
       schemaVersion: 2,
-      revision: 18,
-      entries: [{ status: "unknown", failureKind: "result_unconfirmed" }],
+      revision: 23,
+      lastSuccessfulSlot: "2026-08-08",
+      entries: [
+        { backupId, status: "not_started", failureKind: "write_failed" },
+        { status: "succeeded", failureKind: null },
+      ],
     });
   });
 

@@ -28,6 +28,7 @@ const TRACE_MIGRATION = readMigration("0034_context_compilation_trace.sql");
 const EXACT_PROVENANCE_MIGRATION = readMigration("0047_context_compilation_exact_provenance.sql");
 const CANDIDATE_INTENT_MIGRATION = readMigration("0048_candidate_application_intents.sql");
 const CANDIDATE_REVISION_MIGRATION = readMigration("0050_candidate_revision_authority.sql");
+const CANDIDATE_PURPOSE_MIGRATION = readMigration("0072_ai_candidate_purpose.sql");
 const NOW = iso("2026-08-08T00:00:00.000Z");
 const PROJECT_ID = uuid(1);
 const SECOND_PROJECT_ID = uuid(2);
@@ -247,7 +248,8 @@ async function sqliteExecutor(): Promise<NodeSqliteExecutor> {
      CREATE TABLE model_invocation_facts (id TEXT PRIMARY KEY);
      ${EXACT_PROVENANCE_MIGRATION}
      ${CANDIDATE_INTENT_MIGRATION}
-     ${CANDIDATE_REVISION_MIGRATION}`,
+     ${CANDIDATE_REVISION_MIGRATION}
+     ${CANDIDATE_PURPOSE_MIGRATION}`,
   );
   executors.push(executor);
   for (const [id, name] of [

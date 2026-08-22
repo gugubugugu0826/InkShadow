@@ -135,9 +135,19 @@ export interface GenerationAttemptUsageInput {
   readonly outputTokens: number | null;
   readonly cachedInputTokens: number | null;
   readonly usagePricedEstimateMicros: string | null;
+  readonly privacySnapshotVersion: 1;
+  readonly privacyPolicy: "local_only" | "local_preferred" | "cloud_allowed";
+  readonly dataDestination: "local" | "remote";
+  readonly modelInvocationId: string | null;
 }
 
-export interface GenerationAttemptUsage extends GenerationAttemptUsageInput {
+export interface GenerationAttemptUsage extends Omit<
+  GenerationAttemptUsageInput,
+  "privacySnapshotVersion" | "privacyPolicy" | "dataDestination"
+> {
+  readonly privacySnapshotVersion: 1 | null;
+  readonly privacyPolicy: "local_only" | "local_preferred" | "cloud_allowed" | null;
+  readonly dataDestination: "local" | "remote" | null;
   readonly runId: string;
   readonly attempt: number;
   readonly costStatus: GenerationCostStatus;
@@ -293,6 +303,10 @@ interface GenerationAttemptUsageRow {
   pricing_version: string;
   price_updated_at: string;
   reported_at: string;
+  privacy_snapshot_version: number | null;
+  privacy_policy: string | null;
+  data_destination: string | null;
+  model_invocation_id: string | null;
 }
 
 interface DeferredGenerationRow {
@@ -571,8 +585,9 @@ export class TauriGenerationGovernanceStore implements GenerationGovernanceStore
           `INSERT INTO ai_generation_attempt_usage (
              run_id, attempt, usage_source, input_tokens, output_tokens,
              cached_input_tokens, usage_priced_estimate_micros, cost_status, currency,
-             pricing_version, price_updated_at, reported_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             pricing_version, price_updated_at, reported_at, privacy_snapshot_version,
+             privacy_policy, data_destination, model_invocation_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             attemptUsage.runId,
             attemptUsage.attempt,
@@ -586,6 +601,10 @@ export class TauriGenerationGovernanceStore implements GenerationGovernanceStore
             attemptUsage.pricingVersion,
             attemptUsage.priceUpdatedAt,
             attemptUsage.reportedAt,
+            attemptUsage.privacySnapshotVersion,
+            attemptUsage.privacyPolicy,
+            attemptUsage.dataDestination,
+            attemptUsage.modelInvocationId,
           ],
         );
       }
@@ -1631,6 +1650,11 @@ function hydrateAttemptUsage(row: GenerationAttemptUsageRow): GenerationAttemptU
     pricingVersion: row.pricing_version,
     priceUpdatedAt: row.price_updated_at,
     reportedAt: row.reported_at,
+    privacySnapshotVersion:
+      row.privacy_snapshot_version === null ? null : (row.privacy_snapshot_version as 1),
+    privacyPolicy: row.privacy_policy as "local_only" | "local_preferred" | "cloud_allowed" | null,
+    dataDestination: row.data_destination as "local" | "remote" | null,
+    modelInvocationId: row.model_invocation_id,
   });
 }
 
@@ -1640,13 +1664,31 @@ function validateAttemptUsage(usage: GenerationAttemptUsage): GenerationAttemptU
     (usage.source === "provider_reported_unpriced" ? "pricing_unavailable" : "estimated");
   const validToken = (value: number | null): boolean =>
     value === null || (Number.isSafeInteger(value) && value >= 0 && value <= 100_000_000);
+  const privacySnapshotVersion = usage.privacySnapshotVersion ?? null;
+  const privacyPolicy = usage.privacyPolicy ?? null;
+  const dataDestination = usage.dataDestination ?? null;
+  const modelInvocationId = usage.modelInvocationId ?? null;
+  const legacyPrivacySnapshot =
+    privacySnapshotVersion === null &&
+    privacyPolicy === null &&
+    dataDestination === null &&
+    modelInvocationId === null;
+  const currentPrivacySnapshot =
+    privacySnapshotVersion === 1 &&
+    (privacyPolicy === "local_only" ||
+      privacyPolicy === "local_preferred" ||
+      privacyPolicy === "cloud_allowed") &&
+    (dataDestination === "local" || dataDestination === "remote") &&
+    !(privacyPolicy === "local_only" && dataDestination !== "local") &&
+    (modelInvocationId === null || modelInvocationId.trim().length > 0);
   if (
     !Number.isSafeInteger(usage.attempt) ||
     usage.attempt < 1 ||
     usage.attempt > 100 ||
     !validToken(usage.inputTokens) ||
     !validToken(usage.outputTokens) ||
-    !validToken(usage.cachedInputTokens)
+    !validToken(usage.cachedInputTokens) ||
+    (!legacyPrivacySnapshot && !currentPrivacySnapshot)
   ) {
     throw governanceError("AI_GENERATION_USAGE_INVALID", "Generation attempt usage is invalid.");
   }
@@ -1690,7 +1732,14 @@ function validateAttemptUsage(usage: GenerationAttemptUsage): GenerationAttemptU
   validateSafeIdentifier(usage.pricingVersion, 128, "pricingVersion");
   validateTimestamp(usage.priceUpdatedAt);
   validateTimestamp(usage.reportedAt);
-  return Object.freeze({ ...usage, costStatus });
+  return Object.freeze({
+    ...usage,
+    costStatus,
+    privacySnapshotVersion,
+    privacyPolicy,
+    dataDestination,
+    modelInvocationId,
+  });
 }
 
 function prepareDeferredRequest(
@@ -2043,7 +2092,8 @@ LEFT JOIN ai_generation_route_selections AS route
 const ATTEMPT_USAGE_SELECT = `SELECT
   run_id, attempt, usage_source, input_tokens, output_tokens,
   cached_input_tokens, usage_priced_estimate_micros, cost_status, currency,
-  pricing_version, price_updated_at, reported_at
+  pricing_version, price_updated_at, reported_at, privacy_snapshot_version,
+  privacy_policy, data_destination, model_invocation_id
 FROM ai_generation_attempt_usage`;
 
 const DEFERRED_GENERATION_SELECT = `SELECT

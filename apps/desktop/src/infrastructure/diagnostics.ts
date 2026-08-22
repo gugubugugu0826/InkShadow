@@ -412,7 +412,7 @@ export async function collectDesktopDiagnosticArtifact(
   };
 
   return {
-    fileName: `InkShadow-diagnostics-${summary.generatedAt.slice(0, 10)}-${summary.diagnosticId}.json`,
+    fileName: `墨影-诊断-${summary.generatedAt.slice(0, 10)}-${summary.diagnosticId}.json`,
     mediaType: "application/json",
     content: JSON.stringify(bundle, null, 2),
     bundle,
@@ -488,6 +488,9 @@ const SAFE_DIAGNOSTIC_ERROR_CODES = new Set([
   "MODEL_HUB_CAPABILITY_NOT_VERIFIED",
   "MODEL_HUB_CATALOG_REFRESH_FAILED",
   "MODEL_HUB_STALE_RESULT_IGNORED",
+  "LEGACY_CANDIDATE_METADATA_INVALID",
+  "LEGACY_VERSION_METADATA_INVALID",
+  "TASK_METADATA_INVALID",
   "PREFLIGHT_BLOCKED_CONTEXT_OVERFLOW",
   "PREFLIGHT_BLOCKED_CREDENTIAL",
   "PREFLIGHT_BLOCKED_HARD_BUDGET",
@@ -498,6 +501,7 @@ const SAFE_DIAGNOSTIC_ERROR_CODES = new Set([
   "PREFLIGHT_WARNING_PRICING_UNKNOWN",
   "PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE",
   "UI_CHUNK_LOAD_FAILED",
+  "UI_LAZY_LOAD_FAILED",
   "UI_RENDER_FAILED",
 ]);
 const SAFE_FINISH_REASONS = new Set(["stop", "length", "content_filter", "tool_calls"]);

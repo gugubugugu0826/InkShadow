@@ -627,7 +627,7 @@ export function StudioTeamPage() {
     ) {
       setOperationError({
         code: "INVITATION_INPUT_INVALID",
-        description: "请输入邀请 ID、正整数修订号和一次性邀请 token。",
+        description: "请输入邀请编号、正整数修订号和一次性邀请凭证。",
       });
       return;
     }
@@ -660,7 +660,7 @@ export function StudioTeamPage() {
           ? acceptance.membership.teamId
           : (response.teams[0]?.teamId ?? null),
       );
-      setNotice("邀请已接受；一次性 token 已从输入框清除。");
+      setNotice("邀请已接受；一次性凭证已从输入框清除。");
     } catch (error: unknown) {
       setOperationError(normalizeError(error));
     } finally {
@@ -693,7 +693,7 @@ export function StudioTeamPage() {
       });
       setInviteeEmail("");
       setNotice(
-        `邀请已创建（ID：${response.invitation.invitationId}）。邀请 token 由服务端带外发送，本页面不会保存或展示。`,
+        `邀请已创建（编号：${response.invitation.invitationId}）。邀请凭证由服务端通过其他安全渠道发送，本页面不会保存或展示。`,
       );
     } catch (error: unknown) {
       setOperationError(normalizeError(error));
@@ -1025,9 +1025,7 @@ export function StudioTeamPage() {
         <Card>
           <CardHeader>
             <CardTitle headingLevel={2}>手动接受邀请</CardTitle>
-            <CardDescription>
-              邀请 token 只存在于此输入框的组件内存中，提交开始后立即清空。
-            </CardDescription>
+            <CardDescription>邀请凭证只暂存在此输入框中，提交开始后立即清空。</CardDescription>
           </CardHeader>
           <CardContent>
             <form className="studio-team-page__form" onSubmit={acceptInvitation}>
@@ -1056,7 +1054,7 @@ export function StudioTeamPage() {
                 )}
               </FormField>
               <FormField
-                label="一次性邀请 token"
+                label="一次性邀请凭证"
                 hint="不会写入 URL、查询参数、本地存储、日志或错误提示。"
                 required
               >

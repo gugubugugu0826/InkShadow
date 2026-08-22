@@ -109,7 +109,7 @@ const TAG_LABELS: Readonly<Record<string, string>> = Object.freeze({
   writing_candidate: "写作候选",
   embedding: "语义向量",
   multimodal_embedding: "多模态向量",
-  rerank: "检索精排",
+  rerank: "结果排序",
   image_generation: "图像生成",
   provider_discovery: "连接后发现",
 });
@@ -183,7 +183,7 @@ export function ModelHubSelectableCatalogBrowser({
                 autoComplete="off"
                 disabled={disabled}
                 aria-describedby={resultsId}
-                placeholder="例如 DeepSeek、embedding、图像生成"
+                placeholder="例如 DeepSeek、向量检索、图像生成"
                 onChange={(event) => setQuery(event.currentTarget.value)}
               />
             </div>

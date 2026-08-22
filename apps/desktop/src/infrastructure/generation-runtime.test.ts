@@ -5,6 +5,7 @@ import type { NovelSkillDefinition, ProjectNovelSkillBinding } from "@inkshadow/
 import { createProjectSeed, ok, parseUuidV7, updateProjectSeedField } from "@inkshadow/domain";
 import type { HybridSearchHit } from "@inkshadow/search-core";
 
+import { parseContinuationDirectionOptions } from "./continuation-direction-options";
 import { ModelCenterError } from "./model-center-store";
 import {
   readSafeGenerationErrorCodes,
@@ -522,6 +523,53 @@ describe("governed generation runtime", () => {
     expect(ready.tokenEstimateSource).toBe("utf8_conservative");
   });
 
+  it("uses one governed model call to persist three isolated continuation directions", async () => {
+    const directionText = [
+      "方向一：让主角循着潮湿脚印进入封闭钟楼",
+      "方向二：让失踪姐姐通过旧收音机留下警告",
+      "方向三：让港口停电迫使两名对手暂时合作",
+    ].join("\n");
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>((request) => {
+      request.onDelta?.(directionText);
+      return Promise.resolve(generationResult(directionText, 120, 48));
+    });
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    const before = await runtime.repositories.chapters.findById(chapterId);
+    if (!before.ok || before.value === null) throw new Error("Expected the stable chapter.");
+
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+      purpose: "continuation_directions",
+    });
+
+    expect(plan).toMatchObject({
+      purpose: "continuation_directions",
+      outputContract: { profile: "custom", targetVisibleCharacters: 600 },
+    });
+    expect(plan.messages.map(({ content }) => content).join("\n")).toContain("只返回三行");
+    expect(plan.contextCompilation?.compiled.entries).toEqual(
+      expect.arrayContaining([expect.objectContaining({ layer: "current_task", included: true })]),
+    );
+
+    const result = await executeGenerationPlan(runtime, plan, undefined, {
+      generationRetryLimit: 0,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.value.candidate === null) return;
+    expect(result.value.candidate.toSnapshot()).toMatchObject({
+      purpose: "continuation_directions",
+      content: directionText,
+      status: "ready",
+      incomplete: false,
+    });
+    expect(parseContinuationDirectionOptions(result.value.candidate.content).ok).toBe(true);
+    expect(result.value.candidate.accept(runtime.clock.now()).ok).toBe(false);
+    expect(generate).toHaveBeenCalledOnce();
+    const after = await runtime.repositories.chapters.findById(chapterId);
+    expect(after.ok && after.value?.content).toBe(before.value.content);
+  });
+
   it("charges and invokes the model once when the same prepared request is replayed", async () => {
     const generate = vi.fn<NativeModelGatewayClient["generate"]>((request) => {
       request.onDelta?.("候选续写。");
@@ -892,6 +940,15 @@ describe("governed generation runtime", () => {
     expect(
       new Set(traces.map(({ execution }) => execution?.modelInvocationId).filter(Boolean)).size,
     ).toBe(1);
+    const linkedInvocationId = traces[0]?.execution?.modelInvocationId ?? null;
+    await expect(runtime.generationGovernance.listAttemptUsage(plan.runId)).resolves.toEqual([
+      expect.objectContaining({
+        privacySnapshotVersion: 1,
+        privacyPolicy: plan.modelHubInspection?.privacyPolicy,
+        dataDestination: plan.modelHubInspection?.dataDestination,
+        modelInvocationId: linkedInvocationId,
+      }),
+    ]);
     expect(experimental.persistence.commits).toHaveLength(1);
     expect(new Set(experimental.persistence.commits.map(({ snapshotId }) => snapshotId)).size).toBe(
       1,

@@ -76,6 +76,8 @@ import {
   requiresRuntimeDatabaseReopen,
   UiActionError,
 } from "../infrastructure/ui-error";
+import { CreativeJourneyStoreError } from "../infrastructure/creative-journey-store";
+import { editorCandidateStatusLabel } from "../infrastructure/editor-candidate-status";
 import type {
   DeferredGenerationRequest,
   GenerationAttemptUsage,
@@ -83,28 +85,35 @@ import type {
   GenerationRun,
 } from "../infrastructure/generation-governance-store";
 import {
+  createLocalAcceptedVersionPipelineInput,
   createLocalCandidateAcceptancePipelineInput,
   ensureAcceptedChapterPipelineTask,
   runAcceptedChapterPipeline,
   type AcceptedChapterPipelineInput,
 } from "../infrastructure/accepted-chapter-pipeline";
+import { ensureCurrentSavedVersionStoryFactsForDirectMode } from "../infrastructure/accepted-chapter-fact-preflight";
 import { useAppearancePreference } from "../appearance-preference";
 import { useOnlineStatus } from "../hooks/use-online-status";
 import { useWritingExperience } from "../hooks/use-writing-experience";
-import {
-  disclosureGrantMatches,
-  projectDirectWritingDisclosure,
-  type DirectWritingDisclosure,
-} from "../infrastructure/direct-writing-disclosure";
 import {
   assertContinuationDisclosureMatches,
   prepareContinuationGenerationDisclosure,
   type ContinuationGenerationDisclosure,
 } from "../infrastructure/continuation-generation-disclosure";
 import {
+  changedStoryFactOrganizationSpan,
   directStoryFactOrganizerNotice,
   organizeDirectStoryFacts,
+  organizeCurrentSavedVersionStoryFacts,
 } from "../infrastructure/direct-story-fact-organizer";
+import {
+  decideEditorGenerationCompletion,
+  type EditorGenerationAction,
+} from "../infrastructure/editor-generation-completion-policy";
+import {
+  parseContinuationDirectionOptions,
+  type ContinuationDirectionOption,
+} from "../infrastructure/continuation-direction-options";
 import {
   EDITOR_FIND_QUERY_LIMIT,
   EDITOR_REPLACEMENT_LIMIT,
@@ -246,6 +255,7 @@ function initialEditorAssistantWidth(): number {
 interface EditorAssistantResizeSeparatorProps {
   readonly width: number;
   readonly maxWidth: number;
+  readonly assistantName: string;
   readonly onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
   readonly onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
   readonly onPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
@@ -261,6 +271,7 @@ interface EditorAssistantResizeSeparatorProps {
 function EditorAssistantResizeSeparator({
   width,
   maxWidth,
+  assistantName,
   onKeyDown,
   onPointerDown,
   onPointerMove,
@@ -270,13 +281,13 @@ function EditorAssistantResizeSeparator({
     <div
       className="editor-assistant-resizer"
       role="separator"
-      aria-label="调整正文与 AI 创作助手宽度"
+      aria-label={`调整正文与${assistantName}宽度`}
       aria-controls="editor-ai-assistant-panel"
       aria-orientation="vertical"
       aria-valuemin={EDITOR_ASSISTANT_MIN_WIDTH_PX}
       aria-valuemax={maxWidth}
       aria-valuenow={width}
-      aria-valuetext={`AI 创作助手宽度 ${String(width)} 像素`}
+      aria-valuetext={`${assistantName}宽度 ${String(width)} 像素`}
       tabIndex={0}
       onKeyDown={onKeyDown}
       onPointerDown={onPointerDown}
@@ -292,6 +303,59 @@ function EditorAssistantResizeSeparator({
 interface CandidateRouteSelection {
   readonly candidate: AiCandidate | null;
   readonly notice: string | null;
+}
+
+interface DirectGenerationUndo {
+  readonly action: EditorGenerationAction;
+  readonly baseVersionId: UuidV7;
+  readonly appliedVersionId: UuidV7;
+  readonly undoLabel: string;
+}
+
+interface PreparedContinuationDirections {
+  readonly plan: PreparedGenerationPlan;
+  readonly disclosure: ContinuationGenerationDisclosure | null;
+  readonly authorityRevision: number;
+}
+
+function directGenerationUndoFromCurrentVersion(
+  chapter: Chapter,
+  versions: readonly ChapterVersion[],
+  candidates: readonly AiCandidate[],
+): DirectGenerationUndo | null {
+  const currentVersion = versions.find((version) => version.id === chapter.currentVersionId);
+  if (currentVersion === undefined) return null;
+  const sourceCandidateId = currentVersion.toSnapshot().sourceCandidateId;
+  if (sourceCandidateId === null) return null;
+  const sourceCandidate = candidates.find(
+    (item) => item.id === sourceCandidateId && item.status === "accepted",
+  );
+  if (sourceCandidate?.baseVersionId === null || sourceCandidate?.baseVersionId === undefined) {
+    return null;
+  }
+  const baseVersion = versions.find((version) => version.id === sourceCandidate.baseVersionId);
+  if (baseVersion === undefined) return null;
+  const intent = sourceCandidate.applicationIntent;
+  let action: EditorGenerationAction;
+  if (intent.task === "continuation") {
+    action = baseVersion.toSnapshot().content.trim().length === 0 ? "opening" : "continuation";
+  } else if (intent.task === "selection_rewrite") {
+    action = "selection_rewrite";
+  } else {
+    return null;
+  }
+  const undoLabel =
+    action === "opening"
+      ? "撤销本次开头"
+      : action === "selection_rewrite"
+        ? "撤销本次改写"
+        : "撤销本次续写";
+  return Object.freeze({
+    action,
+    baseVersionId: sourceCandidate.baseVersionId,
+    appliedVersionId: currentVersion.id,
+    undoLabel,
+  });
 }
 
 function candidateDefaultStrategy(candidate: AiCandidate): CandidateApplicationStrategy {
@@ -383,7 +447,8 @@ function selectEditorCandidate(
 ): CandidateRouteSelection {
   if (requestedCandidateId === null) {
     return Object.freeze({
-      candidate: candidates[0] ?? null,
+      candidate:
+        candidates.find((item) => item.purpose === "prose" && item.status === "ready") ?? null,
       notice: null,
     });
   }
@@ -402,7 +467,8 @@ function selectEditorCandidate(
         item.id === parsedCandidateId.value &&
         item.projectId === projectId &&
         item.chapterId === chapterId &&
-        item.status === "ready",
+        item.purpose === "prose" &&
+        (item.status === "ready" || item.status === "accepted" || item.status === "rejected"),
     ) ?? null;
   return Object.freeze({
     candidate,
@@ -410,6 +476,110 @@ function selectEditorCandidate(
       candidate === null
         ? "链接指定的 AI 建议不存在、已处理，或不属于当前项目与章节；未自动打开其他建议。"
         : null,
+  });
+}
+
+async function settleIdeaJourneyCandidateDecision(
+  runtime: ReturnType<typeof useRuntime>,
+  candidateId: UuidV7,
+  decision: "accepted" | "rejected",
+): Promise<void> {
+  let current = await runtime.creativeJourneys.findById(candidateId);
+  const finalState = decision === "accepted" ? "candidate_accepted" : "candidate_rejected";
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (
+      current?.kind !== "idea" ||
+      current.candidateId !== candidateId ||
+      current.status === "abandoned"
+    ) {
+      return;
+    }
+    if (current.status === "completed" && current.currentState === finalState) {
+      return;
+    }
+    const turns = await runtime.creativeJourneys.listTurns(current.id);
+    const now = runtime.clock.now();
+    const completed = Object.freeze({
+      ...current,
+      status: "completed" as const,
+      currentState: finalState,
+      revision: current.revision + 1,
+      updatedAt: now,
+      completedAt: now,
+    });
+    try {
+      await runtime.creativeJourneys.update(
+        completed,
+        current.revision,
+        Object.freeze({
+          id: runtime.ids.next(),
+          journeyId: current.id,
+          sequence: turns.length + 1,
+          kind: "keep" as const,
+          questionKey: null,
+          generationSource: null,
+          providerId: null,
+          modelId: null,
+          taskKey: null,
+          requestId: null,
+          snapshot: Object.freeze({ candidateId, decision }),
+          createdAt: now,
+        }),
+      );
+      return;
+    } catch (cause: unknown) {
+      if (
+        !(cause instanceof CreativeJourneyStoreError) ||
+        cause.code !== "CREATIVE_JOURNEY_REVISION_CONFLICT" ||
+        attempt > 0
+      ) {
+        throw cause;
+      }
+      current = await runtime.creativeJourneys.findById(candidateId);
+    }
+  }
+}
+
+interface ContinuationDirectionSelection {
+  readonly candidate: AiCandidate | null;
+  readonly options: readonly ContinuationDirectionOption[];
+  readonly candidatesToReject: readonly AiCandidate[];
+}
+
+function selectContinuationDirectionCandidate(
+  candidates: readonly AiCandidate[],
+  chapter: Chapter,
+): ContinuationDirectionSelection {
+  const readyDirections = candidates.filter(
+    (item) => item.purpose === "continuation_directions" && item.status === "ready",
+  );
+  const selected = readyDirections.find((item) => {
+    const snapshot = item.toSnapshot();
+    return (
+      item.baseVersionId === chapter.currentVersionId &&
+      !snapshot.incomplete &&
+      parseContinuationDirectionOptions(item.content).ok
+    );
+  });
+  if (selected === undefined) {
+    return Object.freeze({
+      candidate: null,
+      options: Object.freeze([]),
+      candidatesToReject: Object.freeze(readyDirections),
+    });
+  }
+  const parsed = parseContinuationDirectionOptions(selected.content);
+  if (!parsed.ok) {
+    return Object.freeze({
+      candidate: null,
+      options: Object.freeze([]),
+      candidatesToReject: Object.freeze(readyDirections),
+    });
+  }
+  return Object.freeze({
+    candidate: selected,
+    options: parsed.options,
+    candidatesToReject: Object.freeze(readyDirections.filter((item) => item.id !== selected.id)),
   });
 }
 
@@ -442,36 +612,11 @@ function readBoundedOrganizationCount(value: unknown): number | null {
     : null;
 }
 
-function acceptedTextDelta(
-  before: string,
-  after: string,
-): Readonly<{ text: string; startOffset: number; sourceLength: number }> {
-  let startOffset = 0;
-  const sharedLength = Math.min(before.length, after.length);
-  while (startOffset < sharedLength && before[startOffset] === after[startOffset]) {
-    startOffset += 1;
-  }
-  let sharedSuffixLength = 0;
-  while (
-    sharedSuffixLength < before.length - startOffset &&
-    sharedSuffixLength < after.length - startOffset &&
-    before[before.length - 1 - sharedSuffixLength] === after[after.length - 1 - sharedSuffixLength]
-  ) {
-    sharedSuffixLength += 1;
-  }
-  return Object.freeze({
-    text: after.slice(startOffset, after.length - sharedSuffixLength),
-    startOffset,
-    sourceLength: after.length,
-  });
-}
-
 export function EditorPage() {
   const runtime = useRuntime();
   const writingExperience = useWritingExperience();
-  const directModeAuthorized =
-    writingExperience.preference?.mode === "direct" &&
-    writingExperience.preference.directLocalOrganizationAuthorizedAt !== null;
+  const writingModeReady = !writingExperience.loading && writingExperience.preference !== null;
+  const directMode = writingExperience.preference?.mode === "direct";
   const { resolvedSurface } = useAppearancePreference();
   const online = useOnlineStatus();
   const { compact: compactEditorLayout, revision: editorLayoutRevision } = useCompactEditorLayout();
@@ -489,6 +634,15 @@ export function EditorPage() {
   const routeIdentityRef = useRef(editorRouteKey);
   const loadOperationRevisionRef = useRef(0);
   const generationOperationRevisionRef = useRef(0);
+  const writingModeAuthorityKey =
+    writingExperience.preference === null
+      ? "loading"
+      : `${writingExperience.preference.mode}:${String(writingExperience.preference.revision)}`;
+  const writingModeIdentityRef = useRef(writingModeAuthorityKey);
+  if (writingModeIdentityRef.current !== writingModeAuthorityKey) {
+    writingModeIdentityRef.current = writingModeAuthorityKey;
+    generationOperationRevisionRef.current += 1;
+  }
   if (routeIdentityRef.current !== editorRouteKey) {
     routeIdentityRef.current = editorRouteKey;
     loadOperationRevisionRef.current += 1;
@@ -523,6 +677,17 @@ export function EditorPage() {
   const [candidatePresentation, setCandidatePresentation] = useState<"ai" | "local" | "unknown">(
     "unknown",
   );
+  const [directGenerationUndo, setDirectGenerationUndo] = useState<DirectGenerationUndo | null>(
+    null,
+  );
+  const [directionOptions, setDirectionOptions] = useState<readonly ContinuationDirectionOption[]>(
+    [],
+  );
+  const [directionError, setDirectionError] = useState<string | null>(null);
+  const [customDirection, setCustomDirection] = useState("");
+  const [directionBusy, setDirectionBusy] = useState(false);
+  const [preparedDirections, setPreparedDirections] =
+    useState<PreparedContinuationDirections | null>(null);
   const [candidateBusy, setCandidateBusy] = useState(false);
   const [editorReplacementLocked, setEditorReplacementLocked] = useState(false);
   const [candidateReviewOpen, setCandidateReviewOpen] = useState(false);
@@ -547,8 +712,6 @@ export function EditorPage() {
   const [preflightOpen, setPreflightOpen] = useState(false);
   const [generationPlan, setGenerationPlan] = useState<PreparedGenerationPlan | null>(null);
   const directGenerationRequestIdsRef = useRef(new Set<string>());
-  const [directGenerationRequestId, setDirectGenerationRequestId] = useState<string | null>(null);
-  const [directDisclosure, setDirectDisclosure] = useState<DirectWritingDisclosure | null>(null);
   const [continuationDisclosure, setContinuationDisclosure] =
     useState<ContinuationGenerationDisclosure | null>(null);
   const [directDisclosureSaving, setDirectDisclosureSaving] = useState(false);
@@ -578,9 +741,10 @@ export function EditorPage() {
     useState<StoryContextCompilationReceipt | null>(null);
   const [selectionRewriteDisclosure, setSelectionRewriteDisclosure] =
     useState<SelectionRewriteDisclosure | null>(null);
-  const [lastGenerationAction, setLastGenerationAction] = useState<
-    "continuation" | "selection_rewrite"
-  >("continuation");
+  const [lastGenerationAction, setLastGenerationAction] =
+    useState<EditorGenerationAction>("continuation");
+  const [lastSelectionRewriteInstruction, setLastSelectionRewriteInstruction] =
+    useState("保持原意，让表达更自然。");
   const [isComposing, setIsComposing] = useState(false);
   const [historyAvailability, setHistoryAvailability] = useState({
     canUndo: false,
@@ -662,7 +826,9 @@ export function EditorPage() {
   const operationQueueRef = useRef(new SerializedPersistenceQueue());
   const flushInFlightRef = useRef<Promise<PersistenceFlushHandlerResult> | null>(null);
   const editorReplacementFenceRef = useRef(false);
+  const candidateDecisionFenceRef = useRef(false);
   const activeGenerationPlanRef = useRef<PreparedGenerationPlan | null>(null);
+  const directionCandidateRef = useRef<AiCandidate | null>(null);
   const generationEstimate = generationPlan?.preflight.estimate ?? null;
   const returnedFromAiSettings = searchParams.get("aiSettings") === "returned";
 
@@ -785,9 +951,13 @@ export function EditorPage() {
       setGenerationPreview("");
       setGenerationStage("preparing");
       setCandidateBusy(false);
+      setDirectionBusy(false);
       setCancelBusy(false);
       setSelectionRewriteBusy(false);
       setSelectionRewriteContext(null);
+      setPreparedDirections(null);
+      setSelectionRewriteDisclosure(null);
+      setContinuationDisclosure(null);
     });
     return () => {
       resetCancelled = true;
@@ -800,6 +970,27 @@ export function EditorPage() {
       }
     };
   }, [chapterId, editorRouteKey, projectId, runtime]);
+
+  useEffect(() => {
+    const activePlan = activeGenerationPlanRef.current;
+    activeGenerationPlanRef.current = null;
+    if (activePlan !== null) {
+      void cancelGenerationPlan(runtime, activePlan).catch(() => undefined);
+    }
+    const clearStaleModeState = () => {
+      setGenerationPlan(null);
+      setPreflightOpen(false);
+      setContinuationDisclosure(null);
+      setPreparedDirections(null);
+      setSelectionRewriteDisclosure(null);
+      setDirectionBusy(false);
+      setSelectionRewriteBusy(false);
+    };
+    const clearTimer = window.setTimeout(clearStaleModeState, 0);
+    return () => {
+      window.clearTimeout(clearTimer);
+    };
+  }, [runtime, writingModeAuthorityKey]);
 
   function beginGenerationOperation(): Readonly<{ revision: number; routeKey: string }> {
     const revision = generationOperationRevisionRef.current + 1;
@@ -829,6 +1020,24 @@ export function EditorPage() {
       autosaveTimerRef.current = null;
     }
   }, []);
+
+  const rejectDirectionCandidateSafely = useCallback(
+    async (candidateToReject: AiCandidate | null): Promise<void> => {
+      if (
+        candidateToReject?.purpose !== "continuation_directions" ||
+        candidateToReject.status !== "ready"
+      ) {
+        return;
+      }
+      await runtime.useCases.rejectCandidate
+        .execute({
+          candidateId: candidateToReject.id,
+          expectedCandidateRevision: candidateToReject.revision,
+        })
+        .catch(() => undefined);
+    },
+    [runtime],
+  );
 
   const loadVersions = useCallback(async () => {
     if (chapterId === null) {
@@ -936,6 +1145,7 @@ export function EditorPage() {
     setCandidatePresentation("unknown");
     setSelectionRewriteBusy(false);
     setSelectionRewriteContext(null);
+    setDirectGenerationUndo(null);
     setEditorNotice(null);
     setStoryStateUpdate({ state: "idle" });
     const [
@@ -996,6 +1206,33 @@ export function EditorPage() {
 
     const loadedChapter = chapterResult.value;
     const draft = draftResult.value;
+    if (writingModeReady) {
+      const directionSelection = directMode
+        ? selectContinuationDirectionCandidate(candidatesResult.value, loadedChapter)
+        : Object.freeze({
+            candidate: null,
+            options: Object.freeze([]),
+            candidatesToReject: Object.freeze(
+              candidatesResult.value.filter(
+                (item) => item.purpose === "continuation_directions" && item.status === "ready",
+              ),
+            ),
+          });
+      const previousDirectionCandidate = directionCandidateRef.current;
+      directionCandidateRef.current = directionSelection.candidate;
+      setDirectionOptions(directionSelection.options);
+      setDirectionError(null);
+      setCustomDirection("");
+      const candidatesToReject = [...directionSelection.candidatesToReject];
+      if (
+        previousDirectionCandidate !== null &&
+        previousDirectionCandidate.id !== directionSelection.candidate?.id &&
+        !candidatesToReject.some((item) => item.id === previousDirectionCandidate.id)
+      ) {
+        candidatesToReject.push(previousDirectionCandidate);
+      }
+      void Promise.all(candidatesToReject.map((item) => rejectDirectionCandidateSafely(item)));
+    }
     setProject(projectResult.value);
     setChapter(loadedChapter);
     setChapters(chaptersResult.value);
@@ -1006,6 +1243,15 @@ export function EditorPage() {
       requestedCandidateId,
       projectId,
       chapterId,
+    );
+    setDirectGenerationUndo(
+      directMode
+        ? directGenerationUndoFromCurrentVersion(
+            loadedChapter,
+            versionsResult.value,
+            candidatesResult.value,
+          )
+        : null,
     );
     let presentation: "ai" | "local" | "unknown" =
       candidateSelection.candidate === null
@@ -1020,11 +1266,7 @@ export function EditorPage() {
           runtime.contextTraces.findByOutputCandidateId(candidateSelection.candidate.id),
         ]);
         if (!isCurrentLoad()) return;
-        if (
-          journey?.kind === "idea" &&
-          journey.status === "completed" &&
-          journey.candidateId === candidateSelection.candidate.id
-        ) {
+        if (journey?.kind === "idea" && journey.candidateId === candidateSelection.candidate.id) {
           presentation =
             journey.snapshot.previewSource === "local_fallback"
               ? trace === null
@@ -1039,6 +1281,23 @@ export function EditorPage() {
       } catch {
         presentation = "unknown";
       }
+    }
+    let journeyRepairNotice: string | null = null;
+    if (
+      candidateSelection.candidate?.status === "accepted" ||
+      candidateSelection.candidate?.status === "rejected"
+    ) {
+      try {
+        await settleIdeaJourneyCandidateDecision(
+          runtime,
+          candidateSelection.candidate.id,
+          candidateSelection.candidate.status,
+        );
+      } catch {
+        journeyRepairNotice =
+          "正文和隔离结果状态均已安全保留；未完成创作记录暂时无法结算，下次打开时会继续修复。";
+      }
+      if (!isCurrentLoad()) return;
     }
     setCandidate(candidateSelection.candidate);
     setCandidatePresentation(presentation);
@@ -1076,7 +1335,7 @@ export function EditorPage() {
     setSaveState("saved_local");
     const directOpeningRouteNotice = directOpeningRouteNoticeRef.current;
     directOpeningRouteNoticeRef.current = null;
-    setEditorNotice(candidateSelection.notice ?? directOpeningRouteNotice);
+    setEditorNotice(journeyRepairNotice ?? candidateSelection.notice ?? directOpeningRouteNotice);
     setFindStatus(null);
     setError(null);
     setPageState("ready");
@@ -1103,12 +1362,15 @@ export function EditorPage() {
     }
   }, [
     chapterId,
+    directMode,
     editorRouteKey,
     projectId,
+    rejectDirectionCandidateSafely,
     requestedCandidateId,
     resetEditorHistory,
     runtime,
     scheduleSelection,
+    writingModeReady,
   ]);
 
   useEffect(() => {
@@ -1118,6 +1380,33 @@ export function EditorPage() {
       clearScheduledPersistence();
     };
   }, [clearScheduledPersistence, load]);
+
+  useEffect(() => {
+    const currentDirectionCandidate = directionCandidateRef.current;
+    if (currentDirectionCandidate === null) return;
+    const remainsCurrent =
+      writingModeReady &&
+      directMode &&
+      chapterId !== null &&
+      chapter?.id === chapterId &&
+      currentDirectionCandidate.chapterId === chapterId &&
+      currentDirectionCandidate.baseVersionId === chapter.currentVersionId &&
+      currentDirectionCandidate.status === "ready";
+    if (remainsCurrent) return;
+
+    directionCandidateRef.current = null;
+    setDirectionOptions([]);
+    setDirectionError(null);
+    setCustomDirection("");
+    void rejectDirectionCandidateSafely(currentDirectionCandidate);
+  }, [
+    chapter?.currentVersionId,
+    chapter?.id,
+    chapterId,
+    directMode,
+    rejectDirectionCandidateSafely,
+    writingModeReady,
+  ]);
 
   useEffect(() => {
     if (readDirectOpeningOrganizationNotice(location.state) === null) return;
@@ -1215,6 +1504,8 @@ export function EditorPage() {
       if (stableChapter === null) {
         return;
       }
+      const organizeLocalStoryFacts =
+        (await runtime.writingExperience.getOrInitialize()).mode === "direct";
       if (contentRef.current === snapshot) {
         setSaveState("saving");
       }
@@ -1235,6 +1526,7 @@ export function EditorPage() {
         chapterId: stableChapter.id,
         expectedRevision: stableChapter.revision,
         reason,
+        organizeLocalStoryFacts,
       });
       if (!saved.ok) {
         setError(saved.error);
@@ -1249,45 +1541,78 @@ export function EditorPage() {
       setSaveState(contentRef.current === snapshot ? saved.value.saveState : "dirty");
       await loadVersions();
 
-      if (reason !== "manual" || saved.value.version === null) {
+      if (saved.value.version === null) {
         return;
       }
 
-      // Legacy project preferences are not authorization to send正文. A manual
-      // save always registers only the local accepted-version refresh.
+      // The durable task source follows the immutable trigger reason so a retry
+      // can distinguish automatic and explicit saves without renderer state.
       const savedVersion = saved.value.version.toSnapshot();
-      const pipelineInput: AcceptedChapterPipelineInput = {
+      const savedSpan = changedStoryFactOrganizationSpan(
+        stableChapter.content,
+        savedVersion.content,
+      );
+      const pipelineInput = createLocalAcceptedVersionPipelineInput({
         projectId: savedVersion.projectId,
         chapterId: savedVersion.chapterId,
         versionId: savedVersion.id,
-        source: "manual_save",
-        acceptedCharacterCount: snapshot.length,
-        runChapterSummary: false,
-        runStoryState: false,
-      };
+        source: reason === "autosave" ? "autosave" : "manual_save",
+        acceptedCharacterCount: savedVersion.content.length,
+        organizeLocalStoryFacts: savedVersion.organizeLocalStoryFacts,
+      });
 
       setStoryStateUpdate({ state: "idle" });
 
       try {
-        // Persist the idempotent recovery task before returning from the save.
+        // Persist the idempotent recovery task after the immutable version exists.
         // The accepted text version is already immutable. Any later failure can only
         // affect rebuildable story data, never the author's saved text.
         await ensureAcceptedChapterPipelineTask(runtime, pipelineInput);
       } catch (cause: unknown) {
         const message = projectOrdinaryUiError(cause).description;
         setEditorNotice(`正文已安全保存；${message}`);
-        return;
       }
 
-      void runAcceptedChapterPipeline(runtime, pipelineInput)
+      const organizeSavedFacts =
+        savedSpan === null || !savedVersion.organizeLocalStoryFacts
+          ? Promise.resolve()
+          : organizeDirectStoryFacts(
+              {
+                facts: runtime.story.facts,
+                factService: runtime.story.factService,
+                hasher: runtime.hasher,
+                now: () => runtime.clock.now(),
+              },
+              {
+                projectId: savedVersion.projectId,
+                chapterId: savedVersion.chapterId,
+                versionId: savedVersion.id,
+                versionCreatedAt: savedVersion.createdAt,
+                acceptedText: savedSpan.text,
+                acceptedStartOffset: savedSpan.startOffset,
+                sourceLength: savedSpan.sourceLength,
+                sourceContentHash: savedVersion.contentChecksum,
+                currentVersionId: saved.value.chapter.currentVersionId,
+                localOnly: saved.value.chapter.isLocalOnly,
+              },
+            )
+              .then((receipt) => {
+                setEditorNotice(directStoryFactOrganizerNotice(receipt));
+              })
+              .catch((cause: unknown) => {
+                setEditorNotice("正文和版本已保存；本地设定整理暂未完成，可稍后重新整理。");
+                throw cause;
+              });
+      void organizeSavedFacts
+        .then(() => runAcceptedChapterPipeline(runtime, pipelineInput))
         .then((receipt) => {
           if (receipt.status === "partially_completed") {
-            setEditorNotice("正文已安全保存；部分本地搜索或故事关联暂未更新，可在任务中心重试。");
+            setEditorNotice("正文已安全保存；部分本地整理暂未完成，稍后会自动重试。");
           }
         })
         .catch((cause: unknown) => {
           const message = projectOrdinaryUiError(cause).description;
-          setEditorNotice(`正文已安全保存；本地派生暂未完成：${message}`);
+          setEditorNotice(`正文已安全保存；部分本地整理暂未完成：${message}`);
         });
     },
     [loadVersions, runtime],
@@ -2166,16 +2491,22 @@ export function EditorPage() {
     }
   }
 
-  async function generateCandidate(partialCandidateId: UuidV7 | null = null): Promise<void> {
+  async function generateCandidate(
+    partialCandidateId: UuidV7 | null = null,
+    directDirection: string | null = null,
+  ): Promise<void> {
     if (chapterId === null || saveState === "dirty" || saveState === "saving") {
       return;
     }
-    const directAtStart = directModeAuthorized;
+    const directAtStart = directMode;
+    const normalizedDirectDirection =
+      directDirection === null || directDirection.trim().length === 0
+        ? null
+        : directDirection.normalize("NFC").trim();
     const operation = beginGenerationOperation();
     setLastGenerationAction("continuation");
     setSelectionRewriteContext(null);
     setContinuationDisclosure(null);
-    setDirectDisclosure(null);
     setCandidateBusy(true);
     setGenerationStage("preparing");
     setError(null);
@@ -2193,9 +2524,13 @@ export function EditorPage() {
         customTargetVisibleCharacters: directAtStart
           ? null
           : continuationPreference.customTargetVisibleCharacters,
-        destination: directAtStart ? "complete_scene" : continuationPreference.destination,
+        destination: directAtStart
+          ? normalizedDirectDirection === null
+            ? "complete_scene"
+            : "custom_instruction"
+          : continuationPreference.destination,
         customDestinationInstruction: directAtStart
-          ? null
+          ? normalizedDirectDirection
           : continuationPreference.customDestinationInstruction,
         contextBudgetProfile: directAtStart
           ? "standard"
@@ -2209,30 +2544,19 @@ export function EditorPage() {
       if (!isCurrentGenerationOperation(operation)) return;
       setGenerationPlan(plan);
       if (directAtStart) directGenerationRequestIdsRef.current.add(plan.requestId);
-      setDirectGenerationRequestId(directAtStart ? plan.requestId : null);
       const continuationActionDisclosure = await prepareContinuationGenerationDisclosure(
         runtime,
         plan,
       );
-      const disclosure = directAtStart ? await projectDirectWritingDisclosure(runtime, plan) : null;
       if (!isCurrentGenerationOperation(operation)) return;
       setContinuationDisclosure(continuationActionDisclosure);
-      setDirectDisclosure(disclosure);
       setDeferredGeneration(plan.deferredRequest);
       await loadBudgetForm(plan, () => isCurrentGenerationOperation(operation));
       if (!isCurrentGenerationOperation(operation)) return;
-      const grant =
-        disclosure === null
-          ? null
-          : await runtime.writingExperience.findDisclosureGrant(disclosure.input.fingerprint);
-      if (!isCurrentGenerationOperation(operation)) return;
-      const providerAuthorityReady =
-        continuationActionDisclosure === null ||
-        (directAtStart && disclosure !== null && disclosureGrantMatches(disclosure, grant));
       if (
         plan.preflight.canStart &&
         !plan.preflight.requiresConfirmation &&
-        providerAuthorityReady
+        continuationActionDisclosure === null
       ) {
         await executePreparedGeneration(plan, operation);
       } else {
@@ -2245,7 +2569,188 @@ export function EditorPage() {
     }
   }
 
-  async function rewriteSelectedText(): Promise<void> {
+  async function prepareContinuationDirections(): Promise<void> {
+    const stableChapter = chapterRef.current;
+    const authorityAtStart = writingExperience.preference;
+    if (
+      !writingModeReady ||
+      authorityAtStart?.mode !== "direct" ||
+      stableChapter === null ||
+      chapterId === null ||
+      stableChapter.id !== chapterId ||
+      pageState !== "ready" ||
+      !editorClean ||
+      contentRef.current !== stableChapter.content ||
+      candidateBusy
+    ) {
+      return;
+    }
+
+    const operation = beginGenerationOperation();
+    setDirectionBusy(true);
+    setCandidateBusy(true);
+    setDirectionError(null);
+    setPreparedDirections(null);
+    try {
+      const plan = await prepareGenerationPlan(runtime, chapterId, {
+        chapterSaved: true,
+        networkAvailable: online,
+        cursorUtf16: stableChapter.content.length,
+        purpose: "continuation_directions",
+      });
+      if (!isCurrentGenerationOperation(operation)) return;
+      if (!plan.preflight.canStart) {
+        setDirectionError("当前创作服务未通过生成前检查，请先检查连接、隐私和费用设置。");
+        return;
+      }
+      const disclosure = await prepareContinuationGenerationDisclosure(runtime, plan);
+      if (!isCurrentGenerationOperation(operation)) return;
+      const currentAuthority = await runtime.writingExperience.getOrInitialize();
+      if (
+        !isCurrentGenerationOperation(operation) ||
+        currentAuthority.mode !== "direct" ||
+        currentAuthority.revision !== authorityAtStart.revision
+      ) {
+        setEditorNotice("写作方式已经变化；本次没有调用 AI，请重新查看方向生成信息。");
+        return;
+      }
+      setPreparedDirections(
+        Object.freeze({
+          plan,
+          disclosure,
+          authorityRevision: currentAuthority.revision,
+        }),
+      );
+      setEditorNotice("方向生成信息已准备好；明确确认前不会调用 AI。");
+    } catch {
+      if (isCurrentGenerationOperation(operation)) {
+        setDirectionError("暂时无法准备方向");
+      }
+    } finally {
+      if (isCurrentGenerationOperation(operation)) {
+        setDirectionBusy(false);
+        setCandidateBusy(false);
+      }
+    }
+  }
+
+  async function confirmContinuationDirections(): Promise<void> {
+    const pending = preparedDirections;
+    const stableChapter = chapterRef.current;
+    if (
+      pending === null ||
+      stableChapter === null ||
+      chapterId === null ||
+      stableChapter.id !== chapterId ||
+      !editorClean ||
+      contentRef.current !== stableChapter.content ||
+      candidateBusy
+    ) {
+      return;
+    }
+
+    const operation = beginGenerationOperation();
+    setDirectionBusy(true);
+    setCandidateBusy(true);
+    setDirectionError(null);
+    try {
+      const [authorityBeforeDispatch, currentChapterResult] = await Promise.all([
+        runtime.writingExperience.getOrInitialize(),
+        runtime.repositories.chapters.findById(chapterId),
+      ]);
+      if (!isCurrentGenerationOperation(operation)) return;
+      const currentChapter = currentChapterResult.ok ? currentChapterResult.value : null;
+      if (
+        authorityBeforeDispatch.mode !== "direct" ||
+        authorityBeforeDispatch.revision !== pending.authorityRevision ||
+        currentChapter?.currentVersionId !== pending.plan.baseVersionId
+      ) {
+        setPreparedDirections(null);
+        setEditorNotice("写作方式或正文版本已经变化；本次没有调用 AI，请重新查看方向生成信息。");
+        return;
+      }
+      const currentDisclosure = await prepareContinuationGenerationDisclosure(
+        runtime,
+        pending.plan,
+      );
+      assertContinuationDisclosureMatches(pending.disclosure, currentDisclosure);
+      if (!isCurrentGenerationOperation(operation)) return;
+
+      const result = await executeGenerationPlan(runtime, pending.plan, undefined, {
+        generationRetryLimit: 0,
+      });
+      const generatedCandidate = result.ok ? result.value.candidate : null;
+      if (!isCurrentGenerationOperation(operation)) {
+        await rejectDirectionCandidateSafely(generatedCandidate);
+        return;
+      }
+      if (!result.ok || generatedCandidate === null) {
+        setPreparedDirections(null);
+        setDirectionError("暂时无法准备方向");
+        return;
+      }
+
+      const [authorityAfterGeneration, latestChapterResult] = await Promise.all([
+        runtime.writingExperience.getOrInitialize(),
+        runtime.repositories.chapters.findById(chapterId),
+      ]);
+      if (!isCurrentGenerationOperation(operation)) {
+        await rejectDirectionCandidateSafely(generatedCandidate);
+        return;
+      }
+      const latestChapter = latestChapterResult.ok ? latestChapterResult.value : null;
+      if (
+        authorityAfterGeneration.mode !== "direct" ||
+        authorityAfterGeneration.revision !== pending.authorityRevision ||
+        latestChapter?.currentVersionId !== stableChapter.currentVersionId
+      ) {
+        await rejectDirectionCandidateSafely(generatedCandidate);
+        setPreparedDirections(null);
+        return;
+      }
+
+      const parsed = parseContinuationDirectionOptions(generatedCandidate.content);
+      if (
+        generatedCandidate.purpose !== "continuation_directions" ||
+        generatedCandidate.status !== "ready" ||
+        generatedCandidate.baseVersionId !== stableChapter.currentVersionId ||
+        generatedCandidate.toSnapshot().incomplete ||
+        !parsed.ok
+      ) {
+        await rejectDirectionCandidateSafely(generatedCandidate);
+        setPreparedDirections(null);
+        setDirectionError("暂时无法准备方向");
+        return;
+      }
+
+      const previousDirectionCandidate = directionCandidateRef.current;
+      directionCandidateRef.current = generatedCandidate;
+      setDirectionOptions(parsed.options);
+      setPreparedDirections(null);
+      setDirectionError(null);
+      if (
+        previousDirectionCandidate !== null &&
+        previousDirectionCandidate.id !== generatedCandidate.id
+      ) {
+        await rejectDirectionCandidateSafely(previousDirectionCandidate);
+      }
+    } catch {
+      if (isCurrentGenerationOperation(operation)) {
+        setPreparedDirections(null);
+        setDirectionError("方向生成信息已经变化，请重新查看后再试。");
+      }
+    } finally {
+      if (isCurrentGenerationOperation(operation)) {
+        setDirectionBusy(false);
+        setCandidateBusy(false);
+      }
+    }
+  }
+
+  async function rewriteSelectedText(
+    instructionOverride: string | null = null,
+    directAction: EditorGenerationAction = "selection_rewrite",
+  ): Promise<void> {
     const stableChapter = chapterRef.current;
     if (
       stableChapter === null ||
@@ -2262,15 +2767,20 @@ export function EditorPage() {
       setGenerationError(
         new UiActionError(
           "SELECTION_REWRITE_RANGE_INVALID",
-          "请先在正文中选择要修改的文字，再从 AI 创作助手开始改写。",
+          "请先在正文中选择要修改的文字，再从创作助手开始改写。",
           "尚未选择正文",
         ),
       );
       return;
     }
+    const authorityAtStart = writingExperience.preference;
+    if (authorityAtStart === null) return;
     const operation = beginGenerationOperation();
+    const directAtStart = authorityAtStart.mode === "direct";
+    const rewriteInstruction = instructionOverride ?? selectionRewriteInstruction;
 
-    setLastGenerationAction("selection_rewrite");
+    setLastGenerationAction(directAction);
+    setLastSelectionRewriteInstruction(rewriteInstruction);
     setSelectionRewriteBusy(true);
     setCandidateBusy(true);
     setGenerationPlan(null);
@@ -2288,8 +2798,9 @@ export function EditorPage() {
         throw selectedHash.error;
       }
       if (!isCurrentGenerationOperation(operation)) return;
-      if (selectionRewriteDisclosure === null) {
-        const disclosure = await prepareSelectionRewrite(runtime, {
+      let activeDisclosure = selectionRewriteDisclosure;
+      if (activeDisclosure === null) {
+        activeDisclosure = await prepareSelectionRewrite(runtime, {
           chapterId: stableChapter.id,
           baseVersionId: stableChapter.currentVersionId,
           selection: {
@@ -2297,11 +2808,21 @@ export function EditorPage() {
             endUtf16: selection.end,
             selectedTextSha256: selectedHash.value,
           },
-          instruction: selectionRewriteInstruction,
+          instruction: rewriteInstruction,
         });
         if (!isCurrentGenerationOperation(operation)) return;
-        setSelectionRewriteDisclosure(disclosure);
+        setSelectionRewriteDisclosure(activeDisclosure);
         setEditorNotice("发送信息已准备好；确认前不会调用 AI。请核对后再继续。");
+        return;
+      }
+      const authorityBeforeDispatch = await runtime.writingExperience.getOrInitialize();
+      if (
+        !isCurrentGenerationOperation(operation) ||
+        authorityBeforeDispatch.mode !== authorityAtStart.mode ||
+        authorityBeforeDispatch.revision !== authorityAtStart.revision
+      ) {
+        setSelectionRewriteDisclosure(null);
+        setEditorNotice("写作方式已经变化；本次没有调用 AI，请重新查看发送信息。");
         return;
       }
       const result = await createSelectionRewriteCandidate(runtime, {
@@ -2312,8 +2833,8 @@ export function EditorPage() {
           endUtf16: selection.end,
           selectedTextSha256: selectedHash.value,
         },
-        instruction: selectionRewriteInstruction,
-        disclosureFingerprint: selectionRewriteDisclosure.fingerprint,
+        instruction: rewriteInstruction,
+        disclosureFingerprint: activeDisclosure.fingerprint,
         humanConfirmed: true,
         onDelta: (next) => {
           if (isCurrentGenerationOperation(operation)) setGenerationPreview(next);
@@ -2322,11 +2843,7 @@ export function EditorPage() {
       if (!isCurrentGenerationOperation(operation)) return;
       setSelectionRewriteDisclosure(null);
       const previousCandidate = candidate;
-      setCandidate(result.candidate);
-      setSelectionRewriteContext(result.contextCompilation);
-      setEditorNotice(
-        `已生成 ${String(result.rewrittenSelection.length)} 个字符的选区改写建议。正文尚未改变，请先比较再决定是否创建新版本。`,
-      );
+      setSelectionRewriteContext(directAtStart ? null : result.contextCompilation);
       if (
         previousCandidate !== null &&
         (previousCandidate.status === "accepted" || previousCandidate.status === "rejected")
@@ -2336,6 +2853,12 @@ export function EditorPage() {
           candidateId: previousCandidate.id,
         });
       }
+      await completeGeneratedCandidate({
+        candidate: result.candidate,
+        action: directAction,
+        qualityGateOutcome: null,
+        professionalNotice: `已生成 ${String(result.rewrittenSelection.length)} 个字符的选区改写建议。正文尚未改变，请先比较再决定是否创建新版本。`,
+      });
     } catch (cause: unknown) {
       if (isCurrentGenerationOperation(operation)) {
         setSelectionRewriteDisclosure(null);
@@ -2348,6 +2871,44 @@ export function EditorPage() {
         setGenerationPreview("");
       }
     }
+  }
+
+  async function completeGeneratedCandidate(input: {
+    readonly candidate: AiCandidate | null;
+    readonly action: EditorGenerationAction;
+    readonly qualityGateOutcome: CandidateQualityGateResult["outcome"] | null;
+    readonly professionalNotice: string;
+    readonly incomplete?: boolean;
+  }): Promise<"review" | "kept"> {
+    const candidateSnapshot = input.candidate?.toSnapshot() ?? null;
+    let currentMode: "direct" | "professional";
+    try {
+      currentMode = (await runtime.writingExperience.getOrInitialize()).mode;
+    } catch {
+      if (input.candidate !== null) setCandidate(input.candidate);
+      setEditorNotice(
+        "创作结果已安全保留并与正文隔离。当前无法确认写作方式，请查看结果后再决定是否使用。",
+      );
+      return "review";
+    }
+    const decision = decideEditorGenerationCompletion({
+      mode: currentMode,
+      action: input.action,
+      candidateReady: input.candidate?.status === "ready",
+      incomplete: (candidateSnapshot?.incomplete ?? false) || input.incomplete === true,
+      qualityGateOutcome: input.qualityGateOutcome,
+    });
+    if (decision.kind === "review") {
+      if (input.candidate !== null) setCandidate(input.candidate);
+      if (input.candidate?.status === "ready") {
+        setEditorNotice(currentMode === "direct" ? decision.notice : input.professionalNotice);
+      }
+      return "review";
+    }
+
+    setCandidate(null);
+    setEditorNotice(decision.notice);
+    return "kept";
   }
 
   async function loadBudgetForm(
@@ -2449,7 +3010,6 @@ export function EditorPage() {
       if (directPlan) {
         directGenerationRequestIdsRef.current.delete(plan.requestId);
         directGenerationRequestIdsRef.current.add(refreshed.requestId);
-        setDirectGenerationRequestId(refreshed.requestId);
       }
       const refreshedContinuationDisclosure = await prepareContinuationGenerationDisclosure(
         runtime,
@@ -2457,9 +3017,6 @@ export function EditorPage() {
       );
       if (!isCurrentGenerationOperation(operation)) return;
       setContinuationDisclosure(refreshedContinuationDisclosure);
-      setDirectDisclosure(
-        directPlan ? await projectDirectWritingDisclosure(runtime, refreshed) : null,
-      );
       if (!isCurrentGenerationOperation(operation)) return;
       await loadBudgetForm(refreshed, () => isCurrentGenerationOperation(operation));
     } catch (cause: unknown) {
@@ -2491,12 +3048,11 @@ export function EditorPage() {
     activeGenerationPlanRef.current = plan;
     try {
       const directExecution = directGenerationRequestIdsRef.current.has(plan.requestId);
+      const generationAction: EditorGenerationAction =
+        (chapterRef.current?.content.trim().length ?? 0) === 0 ? "opening" : "continuation";
       if (directExecution) {
         const currentAuthority = await runtime.writingExperience.getOrInitialize();
-        if (
-          currentAuthority.mode !== "direct" ||
-          currentAuthority.directLocalOrganizationAuthorizedAt === null
-        ) {
+        if (currentAuthority.mode !== "direct") {
           setGenerationError(
             new Error("直接模式授权已经撤销；本次没有调用 AI，正文和版本保持不变。"),
           );
@@ -2526,7 +3082,6 @@ export function EditorPage() {
         return;
       }
       const previousCandidate = candidate;
-      if (result.value.candidate !== null) setCandidate(result.value.candidate);
       setCandidateQualityGate(result.value.qualityGate);
       if (
         projectId !== null &&
@@ -2549,13 +3104,16 @@ export function EditorPage() {
       setGenerationAttemptUsage(usage);
       setError(null);
       setGenerationError(null);
-      if (result.value.candidate?.status === "ready") {
-        setEditorNotice(
-          result.value.candidate.toSnapshot().incomplete || result.value.incomplete
+      await completeGeneratedCandidate({
+        candidate: result.value.candidate,
+        action: generationAction,
+        qualityGateOutcome: result.value.qualityGate?.outcome ?? null,
+        incomplete: result.value.incomplete,
+        professionalNotice:
+          result.value.candidate?.toSnapshot().incomplete || result.value.incomplete
             ? "本次结果未完整结束，已保留为隔离的 AI 建议草稿；正文和版本没有改变。"
             : "建议已生成并保持隔离；正文和版本没有改变，请查看后决定是否使用。",
-        );
-      }
+      });
     } catch (cause: unknown) {
       if (isCurrentGenerationOperation(operation)) setGenerationError(cause);
     } finally {
@@ -2564,7 +3122,6 @@ export function EditorPage() {
       }
       if (isCurrentGenerationOperation(operation)) {
         directGenerationRequestIdsRef.current.delete(plan.requestId);
-        setDirectGenerationRequestId((current) => (current === plan.requestId ? null : current));
         setCandidateBusy(false);
         setCancelBusy(false);
         setGenerationPreview("");
@@ -2589,36 +3146,6 @@ export function EditorPage() {
     } finally {
       setDirectDisclosureSaving(false);
     }
-    if (directGenerationRequestIdsRef.current.has(plan.requestId)) {
-      setDirectDisclosureSaving(true);
-      try {
-        const currentAuthority = await runtime.writingExperience.getOrInitialize();
-        if (
-          currentAuthority.mode !== "direct" ||
-          currentAuthority.directLocalOrganizationAuthorizedAt === null
-        ) {
-          setGenerationError(
-            new Error("直接模式授权已经撤销；本次没有调用 AI，正文和版本保持不变。"),
-          );
-          return;
-        }
-        const disclosure = await projectDirectWritingDisclosure(runtime, plan);
-        setDirectDisclosure(disclosure);
-        if (disclosure !== null) {
-          const existing = await runtime.writingExperience.findDisclosureGrant(
-            disclosure.input.fingerprint,
-          );
-          if (!disclosureGrantMatches(disclosure, existing)) {
-            await runtime.writingExperience.recordDisclosureGrant(disclosure.input);
-          }
-        }
-      } catch (cause: unknown) {
-        setGenerationError(cause);
-        return;
-      } finally {
-        setDirectDisclosureSaving(false);
-      }
-    }
     await executePreparedGeneration(plan);
   }
 
@@ -2628,8 +3155,6 @@ export function EditorPage() {
     if (generationPlan !== null) {
       directGenerationRequestIdsRef.current.delete(generationPlan.requestId);
     }
-    setDirectGenerationRequestId(null);
-    setDirectDisclosure(null);
     setContinuationDisclosure(null);
     setPreflightOpen(false);
     window.requestAnimationFrame(() => {
@@ -2852,36 +3377,51 @@ export function EditorPage() {
   async function acceptCandidate(
     strategy: CandidateApplicationStrategy,
     candidateOverride: AiCandidate | null = candidate,
+    completionNotice: string | null = null,
   ): Promise<boolean> {
-    if (candidateOverride?.status !== "ready") {
+    if (candidateOverride?.status !== "ready" || candidateDecisionFenceRef.current) {
       return false;
     }
+    candidateDecisionFenceRef.current = true;
     if (!beginEditorReplacement()) {
+      candidateDecisionFenceRef.current = false;
       setEditorNotice(
-        "正文仍有尚未完成的本地保存；这份 AI 建议草稿继续保持隔离，没有写入正文或创建版本。",
+        completionNotice === null
+          ? "正文仍有尚未完成的本地保存；这份 AI 建议草稿继续保持隔离，没有写入正文或创建版本。"
+          : "生成期间正文已发生变化，本次结果未写入，请重试。",
       );
       return false;
     }
     try {
-      return await acceptCandidateWhileEditorLocked(strategy, candidateOverride);
+      const organizeLocalStoryFacts =
+        (await runtime.writingExperience.getOrInitialize()).mode === "direct";
+      return await acceptCandidateWhileEditorLocked(
+        strategy,
+        candidateOverride,
+        completionNotice,
+        organizeLocalStoryFacts,
+      );
     } finally {
       setCandidateBusy(false);
       finishEditorReplacement();
+      candidateDecisionFenceRef.current = false;
     }
   }
 
   async function acceptCandidateWhileEditorLocked(
     strategy: CandidateApplicationStrategy,
     candidateOverride: AiCandidate,
+    completionNotice: string | null,
+    organizeLocalStoryFacts: boolean,
   ): Promise<boolean> {
     const editedContent =
       candidateOverride.id === candidate?.id ? candidateReviewDraft : candidateOverride.content;
-    const contentBeforeAcceptance = contentRef.current;
     setCandidateBusy(true);
     const result = await runtime.useCases.acceptCandidate.execute({
       candidateId: candidateOverride.id,
       expectedCandidateRevision: candidateOverride.revision,
       strategy,
+      organizeLocalStoryFacts,
       ...(editedContent === candidateOverride.content ? {} : { editedContent }),
     });
     if (!result.ok) {
@@ -2889,15 +3429,25 @@ export function EditorPage() {
       setCandidateReviewError(projectOrdinaryUiError(result.error).description);
       return false;
     }
+    let journeySettlementDeferred = false;
+    try {
+      await settleIdeaJourneyCandidateDecision(runtime, result.value.candidate.id, "accepted");
+    } catch {
+      journeySettlementDeferred = true;
+    }
+    const withJourneySettlementNotice = (message: string): string =>
+      journeySettlementDeferred
+        ? `${message} 未完成创作记录暂时无法结算，下次打开时会继续修复。`
+        : message;
     const acceptedVersion = result.value.version.toSnapshot();
     const nextContent = result.value.chapter.content;
-    const acceptedDelta = acceptedTextDelta(contentBeforeAcceptance, nextContent);
     const pipelineInput: AcceptedChapterPipelineInput = createLocalCandidateAcceptancePipelineInput(
       {
         projectId: acceptedVersion.projectId,
         chapterId: acceptedVersion.chapterId,
         versionId: acceptedVersion.id,
         acceptedCharacterCount: nextContent.length,
+        organizeLocalStoryFacts,
       },
     );
     let pipelineRegistrationError: string | null = null;
@@ -2969,72 +3519,66 @@ export function EditorPage() {
     if (pipelineRegistrationError !== null) {
       setStoryStateUpdate({ state: "idle" });
       setEditorNotice(
-        `${candidateSuggestionLabel}已安全写入正文和不可变版本；本地搜索与故事关联任务登记失败：${pipelineRegistrationError}`,
+        withJourneySettlementNotice(
+          completionNotice === null
+            ? `${candidateSuggestionLabel}已安全写入正文和不可变版本；本地搜索与故事关联任务登记失败：${pipelineRegistrationError}`
+            : `${completionNotice} 后台整理暂未完成，可稍后重试。`,
+        ),
       );
       void loadVersions();
       return true;
     }
     setStoryStateUpdate({ state: "idle" });
-    void runAcceptedChapterPipeline(runtime, pipelineInput)
+    const organizeAcceptedFacts = organizeLocalStoryFacts
+      ? organizeCurrentSavedVersionStoryFacts(
+          {
+            chapters: runtime.repositories.chapters,
+            chapterVersions: runtime.repositories.chapterVersions,
+            facts: runtime.story.facts,
+            factService: runtime.story.factService,
+            hasher: runtime.hasher,
+            now: () => runtime.clock.now(),
+          },
+          pipelineInput,
+        ).then((receipt) => {
+          setEditorNotice(withJourneySettlementNotice(directStoryFactOrganizerNotice(receipt)));
+        })
+      : Promise.resolve();
+    void organizeAcceptedFacts
+      .then(() => runAcceptedChapterPipeline(runtime, pipelineInput))
       .then((receipt) => {
         if (receipt.status === "partially_completed") {
           setEditorNotice(
-            `${candidateSuggestionLabel}已安全写入新版本；部分本地搜索或故事关联暂未更新，可在任务中心重试。`,
+            withJourneySettlementNotice(
+              completionNotice === null
+                ? `${candidateSuggestionLabel}已安全写入新版本；部分本地整理稍后会自动重试。`
+                : `${completionNotice} 后台整理暂未完成，可稍后重试。`,
+            ),
           );
         }
       })
       .catch((cause: unknown) => {
-        const message = projectOrdinaryUiError(cause).description;
-        setEditorNotice(
-          `${candidateSuggestionLabel}已安全写入正文和不可变版本；本地派生暂未完成：${message}`,
-        );
+        if (completionNotice === null) {
+          const message = projectOrdinaryUiError(cause).description;
+          setEditorNotice(
+            withJourneySettlementNotice(
+              `${candidateSuggestionLabel}已安全写入正文和不可变版本；部分本地整理稍后会自动重试：${message}`,
+            ),
+          );
+        } else {
+          setEditorNotice(
+            withJourneySettlementNotice(`${completionNotice} 部分本地整理稍后会自动重试。`),
+          );
+        }
       });
     setEditorNotice(
-      strategy.kind === "apply_changes"
-        ? "已按逐项决定创建新的稳定版本；可在本次会话撤销，原稳定版本仍保留在版本历史。"
-        : `${candidateSuggestionLabel}已按所选方式写入新的稳定版本；原稳定版本仍保留在版本历史。`,
+      withJourneySettlementNotice(
+        completionNotice ??
+          (strategy.kind === "apply_changes"
+            ? "已按逐项决定创建新的稳定版本；可在本次会话撤销，原稳定版本仍保留在版本历史。"
+            : `${candidateSuggestionLabel}已按所选方式写入新的稳定版本；原稳定版本仍保留在版本历史。`),
+      ),
     );
-    if (
-      candidateOverride.toSnapshot().source === "generate" &&
-      !candidateOverride.toSnapshot().incomplete &&
-      acceptedDelta.text.length > 0
-    ) {
-      void runtime.writingExperience
-        .getOrInitialize()
-        .then((preference) => {
-          if (
-            preference.mode !== "direct" ||
-            preference.directLocalOrganizationAuthorizedAt === null
-          ) {
-            return null;
-          }
-          return organizeDirectStoryFacts(
-            {
-              facts: runtime.story.facts,
-              factService: runtime.story.factService,
-              hasher: runtime.hasher,
-              now: () => runtime.clock.now(),
-            },
-            {
-              projectId: acceptedVersion.projectId,
-              chapterId: acceptedVersion.chapterId,
-              versionId: acceptedVersion.id,
-              versionCreatedAt: acceptedVersion.createdAt,
-              acceptedText: acceptedDelta.text,
-              acceptedStartOffset: acceptedDelta.startOffset,
-              sourceLength: acceptedDelta.sourceLength,
-              currentVersionId: result.value.chapter.currentVersionId,
-              localOnly: result.value.chapter.isLocalOnly,
-            },
-          );
-        })
-        .then((receipt) => {
-          if (receipt !== null) setEditorNotice(directStoryFactOrganizerNotice(receipt));
-        })
-        .catch(() => {
-          setEditorNotice("正文和版本已保存；本地设定整理暂未完成，可稍后重新整理。");
-        });
-    }
     void loadVersions();
     return true;
   }
@@ -3090,8 +3634,11 @@ export function EditorPage() {
     );
   }
 
-  async function restoreSelectedVersion(): Promise<void> {
-    const selected = versionToRestore;
+  async function restoreSelectedVersion(
+    selectedOverride: ChapterVersion | null = versionToRestore,
+    completionNotice: string | null = null,
+  ): Promise<void> {
+    const selected = selectedOverride;
     const stableChapter = chapterRef.current;
     if (
       selected === null ||
@@ -3108,10 +3655,13 @@ export function EditorPage() {
     setVersionRestoreBusy(true);
     setError(null);
     try {
+      const organizeLocalStoryFacts =
+        (await runtime.writingExperience.getOrInitialize()).mode === "direct";
       const result = await runtime.useCases.restoreChapterVersion.execute({
         chapterId: stableChapter.id,
         versionId: selected.id,
         expectedRevision: stableChapter.revision,
+        organizeLocalStoryFacts,
       });
       if (!result.ok) {
         setError(result.error);
@@ -3141,20 +3691,29 @@ export function EditorPage() {
       scheduleSelection(selectionAfter, true);
       persistEditorView(selectionAfter);
       setVersionToRestore(null);
+      setDirectGenerationUndo(null);
       setEditorNotice(
-        `已从版本 ${String(selected.toSnapshot().sequence)} 创建新的恢复版本；所有历史版本仍保留。`,
+        completionNotice ??
+          `已从版本 ${String(selected.toSnapshot().sequence)} 创建新的恢复版本；所有历史版本仍保留。`,
       );
-      void runAcceptedChapterPipeline(runtime, {
+      const pipelineInput = createLocalAcceptedVersionPipelineInput({
         projectId: result.value.chapter.projectId,
         chapterId: result.value.chapter.id,
         versionId: result.value.version.id,
         source: "version_restore",
         acceptedCharacterCount: result.value.chapter.content.length,
-        runChapterSummary: false,
-        runStoryState: false,
-      }).catch(() => {
-        setEditorNotice("恢复版本与正文已安全保存；故事资料整理暂未完成，可在任务与通知中重试。");
+        organizeLocalStoryFacts: result.value.version.toSnapshot().organizeLocalStoryFacts,
       });
+      void ensureAcceptedChapterPipelineTask(runtime, pipelineInput)
+        .then(() => ensureCurrentSavedVersionStoryFactsForDirectMode(runtime, pipelineInput))
+        .then(() => runAcceptedChapterPipeline(runtime, pipelineInput))
+        .catch(() => {
+          setEditorNotice(
+            completionNotice === null
+              ? "恢复版本与正文已安全保存；故事资料整理暂未完成，可在任务与通知中重试。"
+              : `${completionNotice} 后台整理暂未完成，可稍后重试。`,
+          );
+        });
       await recordWritingFeedbackSafely({ action: "restored_original", candidateId: null });
       await loadVersions();
     } catch (cause: unknown) {
@@ -3165,31 +3724,77 @@ export function EditorPage() {
     }
   }
 
+  async function undoDirectGeneration(): Promise<void> {
+    const undo = directGenerationUndo;
+    const stableChapter = chapterRef.current;
+    if (undo === null || stableChapter === null) return;
+    if (
+      stableChapter.currentVersionId !== undo.appliedVersionId ||
+      contentRef.current !== stableChapter.content ||
+      !editorClean
+    ) {
+      setEditorNotice("正文已有后续修改，请从版本历史恢复到操作前版本。");
+      return;
+    }
+    const baseVersion = versions.find((version) => version.id === undo.baseVersionId) ?? null;
+    if (baseVersion === null) {
+      setEditorNotice("操作前版本暂时不可用，请重新打开本页后从版本历史恢复。");
+      return;
+    }
+    const actionLabel =
+      undo.action === "opening"
+        ? "开头"
+        : undo.action === "polish"
+          ? "润色"
+          : undo.action === "expand"
+            ? "扩写"
+            : undo.action === "selection_rewrite"
+              ? "改写"
+              : "续写";
+    await restoreSelectedVersion(baseVersion, `已撤销本次${actionLabel}，可在版本历史中恢复。`);
+  }
+
   async function rejectCandidate(): Promise<boolean> {
-    if (candidate?.status !== "ready") {
+    if (candidate?.status !== "ready" || candidateDecisionFenceRef.current) {
       return false;
     }
+    candidateDecisionFenceRef.current = true;
     setCandidateBusy(true);
-    const result = await runtime.useCases.rejectCandidate.execute({
-      candidateId: candidate.id,
-      expectedCandidateRevision: candidate.revision,
-    });
-    setCandidateBusy(false);
-    if (!result.ok) {
-      setError(result.error);
-      if (candidateReviewOpen) {
-        setCandidateReviewError(projectOrdinaryUiError(result.error).description);
+    try {
+      const result = await runtime.useCases.rejectCandidate.execute({
+        candidateId: candidate.id,
+        expectedCandidateRevision: candidate.revision,
+      });
+      if (!result.ok) {
+        setError(result.error);
+        if (candidateReviewOpen) {
+          setCandidateReviewError(projectOrdinaryUiError(result.error).description);
+        }
+        return false;
       }
-      return false;
+      setCandidate(result.value);
+      setCandidateCopySaved(false);
+      setError(null);
+      let journeySettlementDeferred = false;
+      try {
+        await settleIdeaJourneyCandidateDecision(runtime, result.value.id, "rejected");
+      } catch {
+        journeySettlementDeferred = true;
+      }
+      await recordWritingFeedbackSafely({
+        action: "rejected",
+        candidateId: result.value.id,
+      });
+      if (journeySettlementDeferred) {
+        setEditorNotice(
+          "隔离结果已放弃，稳定正文没有变化；未完成创作记录暂时无法结算，下次打开时会继续修复。",
+        );
+      }
+      return true;
+    } finally {
+      setCandidateBusy(false);
+      candidateDecisionFenceRef.current = false;
     }
-    setCandidate(result.value);
-    setCandidateCopySaved(false);
-    setError(null);
-    await recordWritingFeedbackSafely({
-      action: "rejected",
-      candidateId: result.value.id,
-    });
-    return true;
   }
 
   async function confirmChapterPrivacyChange(): Promise<void> {
@@ -3284,14 +3889,15 @@ export function EditorPage() {
   const privateGenerationBlocked = normalizedGenerationError?.code === "PRIVATE_CHAPTER_LOCAL_ONLY";
   const readonly = project?.status !== "active";
   const candidateReady = candidate?.status === "ready";
-  const candidateSuggestionLabel =
-    candidatePresentation === "local"
+  const candidateSuggestionLabel = directMode
+    ? "创作结果"
+    : candidatePresentation === "local"
       ? "本地草案"
       : candidatePresentation === "ai"
         ? "AI 建议"
         : "建议";
   const candidateVersionLabel = `${candidateSuggestionLabel}版本`;
-  const candidateActionGap = candidatePresentation === "ai" ? " " : "";
+  const candidateActionGap = !directMode && candidatePresentation === "ai" ? " " : "";
   const candidateIncomplete = candidate?.toSnapshot().incomplete ?? false;
   const canGenerateCandidate =
     candidate === null || candidate.status === "accepted" || candidate.status === "rejected";
@@ -3329,6 +3935,11 @@ export function EditorPage() {
     candidateSelectedDecisions.some(({ decision }) => decision === "accept");
   const editorClean =
     saveState === "saved_local" || saveState === "clean" || saveState === "pending_sync";
+  const directUndoAvailable =
+    directGenerationUndo !== null &&
+    chapter?.currentVersionId === directGenerationUndo.appliedVersionId &&
+    contentRef.current === chapter.content &&
+    editorClean;
   const displayedContextCompilation =
     selectionRewriteContext ?? generationPlan?.contextCompilation ?? null;
   const displayedNovelSkillPreparation =
@@ -3340,6 +3951,13 @@ export function EditorPage() {
   const editorWorkspaceStyle = {
     "--editor-assistant-width": `${String(assistantPanelWidth)}px`,
   } as CSSProperties;
+  if (!writingModeReady) {
+    return (
+      <div className="editor-page">
+        <p role="status">正在读取本机写作方式……</p>
+      </div>
+    );
+  }
   const primaryAction = (() => {
     if (readonly) {
       return {
@@ -3463,7 +4081,7 @@ export function EditorPage() {
                     setAssistantOpen(true);
                   }}
                 >
-                  AI 助手
+                  {directMode ? "创作助手" : "AI 助手"}
                 </Button>
               </>
             )}
@@ -3831,6 +4449,7 @@ export function EditorPage() {
             <EditorAssistantResizeSeparator
               width={assistantPanelWidth}
               maxWidth={assistantPanelMaxWidth}
+              assistantName={directMode ? "创作助手" : "AI 创作助手"}
               onKeyDown={handleAssistantResizeKeyDown}
               onPointerDown={handleAssistantResizePointerDown}
               onPointerMove={handleAssistantResizePointerMove}
@@ -3861,52 +4480,61 @@ export function EditorPage() {
               <div className="candidate-panel__header">
                 <div>
                   <p className="page-heading__eyebrow">陪伴创作</p>
-                  <h2 id="candidate-title">AI 创作助手</h2>
-                  <Badge tone="neutral">{directModeAuthorized ? "直接模式" : "专业模式"}</Badge>
+                  <h2 id="candidate-title">{directMode ? "创作助手" : "AI 创作助手"}</h2>
+                  <Badge tone="neutral">{directMode ? "直接模式" : "专业模式"}</Badge>
                 </div>
                 <Button
                   variant="ghost"
                   size="lg"
-                  aria-label={compactEditorLayout ? "关闭 AI 创作助手" : "收起 AI 创作助手"}
+                  aria-label={
+                    compactEditorLayout
+                      ? directMode
+                        ? "关闭创作助手"
+                        : "关闭 AI 创作助手"
+                      : directMode
+                        ? "收起创作助手"
+                        : "收起 AI 创作助手"
+                  }
                   aria-expanded={assistantOpen}
                   onClick={() => setAssistantOpen(false)}
                 >
                   {compactEditorLayout ? "关闭" : "收起"}
                 </Button>
               </div>
-              <InlineAlert
-                tone="ai-clarification"
-                title="正文始终由你决定"
-                description={
-                  directModeAuthorized
-                    ? "续写会先保存为隔离的 AI 建议草稿；只有你明确选择使用后，才会接到本章末尾并创建不可变版本。本地整理授权不会代替这次确认。"
-                    : usesNativeModel
+              {!directMode && (
+                <InlineAlert
+                  tone="ai-clarification"
+                  title="正文始终由你决定"
+                  description={
+                    usesNativeModel
                       ? "生成内容会先成为 AI 建议版本；只有你比较并接受后，才会创建新的正文版本。"
                       : "当前使用本机示例帮助检查流程，不会联网；只有你接受后，内容才会进入正文。"
-                }
-              />
-              {(displayedContextCompilation !== null ||
-                displayedNovelSkillPreparation !== null) && (
-                <button
-                  type="button"
-                  className="context-sources-trigger"
-                  onClick={() => setContextSourcesOpen(true)}
-                >
-                  <span>
-                    <strong>本次参考</strong>
-                    <small>查看 AI 为什么选用这些故事资料</small>
-                  </span>
-                  <Badge tone="info">
-                    {(displayedContextCompilation?.compiled.entries.filter(
-                      ({ included }) => included,
-                    ).length ?? 0) +
-                      (displayedNovelSkillPreparation?.methods.filter(({ included }) => included)
-                        .length ?? 0)}{" "}
-                    项
-                  </Badge>
-                </button>
+                  }
+                />
               )}
-              {projectId !== null && (
+              {!directMode &&
+                (displayedContextCompilation !== null ||
+                  displayedNovelSkillPreparation !== null) && (
+                  <button
+                    type="button"
+                    className="context-sources-trigger"
+                    onClick={() => setContextSourcesOpen(true)}
+                  >
+                    <span>
+                      <strong>本次参考</strong>
+                      <small>查看 AI 为什么选用这些故事资料</small>
+                    </span>
+                    <Badge tone="info">
+                      {(displayedContextCompilation?.compiled.entries.filter(
+                        ({ included }) => included,
+                      ).length ?? 0) +
+                        (displayedNovelSkillPreparation?.methods.filter(({ included }) => included)
+                          .length ?? 0)}{" "}
+                      项
+                    </Badge>
+                  </button>
+                )}
+              {!directMode && projectId !== null && (
                 <Link className="back-link" to={`/projects/${projectId}/context`}>
                   查看 AI 参考记录
                 </Link>
@@ -3915,12 +4543,18 @@ export function EditorPage() {
                 <section className="generation-error-card" role="alert" aria-live="assertive">
                   <div>
                     <Badge tone="danger">生成未完成</Badge>
-                    <strong>{normalizedGenerationError.title}</strong>
+                    <strong>
+                      {directMode ? "本次创作未完成" : normalizedGenerationError.title}
+                    </strong>
                   </div>
                   <p>
                     {privateGenerationBlocked
-                      ? "本章处于私密模式，但目前没有可用且已验证的本地模型。本次请求在发送 0 字后停止。"
-                      : ordinaryGenerationError.description}
+                      ? directMode
+                        ? "本章处于私密模式，但目前没有可用且已验证的本地创作服务。本次没有发送正文。"
+                        : "本章处于私密模式，但目前没有可用且已验证的本地模型。本次请求在发送 0 字后停止。"
+                      : directMode
+                        ? "创作服务未能完整返回结果，请检查服务后重试。"
+                        : ordinaryGenerationError.description}
                   </p>
                   <p className="generation-error-card__saved-state">
                     正文和已保存版本没有变化，你可以继续写作。
@@ -3931,12 +4565,23 @@ export function EditorPage() {
                       loading={candidateBusy}
                       disabled={!editorClean}
                       onClick={() =>
-                        void (lastGenerationAction === "selection_rewrite"
-                          ? rewriteSelectedText()
+                        void (lastGenerationAction === "selection_rewrite" ||
+                        lastGenerationAction === "polish" ||
+                        lastGenerationAction === "expand"
+                          ? rewriteSelectedText(
+                              lastSelectionRewriteInstruction,
+                              lastGenerationAction,
+                            )
                           : generateCandidate())
                       }
                     >
-                      {lastGenerationAction === "selection_rewrite" ? "重试选区改写" : "重试生成"}
+                      {lastGenerationAction === "polish"
+                        ? "重试润色"
+                        : lastGenerationAction === "expand"
+                          ? "重试扩写"
+                          : lastGenerationAction === "selection_rewrite"
+                            ? "重试选区改写"
+                            : "重试生成"}
                     </Button>
                     <Button
                       variant="secondary"
@@ -3957,30 +4602,45 @@ export function EditorPage() {
                     )}
                     {usesNativeModel && (
                       <Link className="back-link" to="/settings#model-center">
-                        {privateGenerationBlocked ? "配置本地 AI" : "检查 AI 服务"}
+                        {privateGenerationBlocked
+                          ? directMode
+                            ? "配置本地创作服务"
+                            : "配置本地 AI"
+                          : directMode
+                            ? "检查创作服务"
+                            : "检查 AI 服务"}
                       </Link>
                     )}
                   </div>
                 </section>
               )}
 
-              {storyStateUpdate.state === "ready" && (
+              {!directMode && storyStateUpdate.state === "ready" && (
                 <InlineAlert
                   tone={storyStateUpdate.needsConfirmationCount > 0 ? "warning" : "info"}
                   title={`识别到 ${String(storyStateUpdate.detectedCount)} 项变化，其中 ${String(storyStateUpdate.needsConfirmationCount)} 项需要确认`}
                   description={
                     storyStateUpdate.skippedTaskCount > 0
-                      ? "部分识别因没有可用的 AI 分工而跳过，没有使用假数据。可先继续写作，或连接模型后再次保存新版本。"
+                      ? "部分识别因没有可用的创作服务而跳过，没有使用假数据。可先继续写作，或连接服务后再次保存新版本。"
                       : `另有 ${String(storyStateUpdate.reversibleCount)} 项属于可撤销的普通更新。所有变化都保留原文章节、版本和精确引文。`
                   }
                 />
               )}
-              {storyStateUpdate.state === "ready" && storyStateUpdate.detectedCount > 0 && (
-                <Link className="back-link" to={`/projects/${projectId ?? ""}/story`}>
-                  查看并处理本章变化
-                </Link>
-              )}
-              {candidateBusy && usesNativeModel ? (
+              {!directMode &&
+                storyStateUpdate.state === "ready" &&
+                storyStateUpdate.detectedCount > 0 && (
+                  <Link className="back-link" to={`/projects/${projectId ?? ""}/story`}>
+                    查看并处理本章变化
+                  </Link>
+                )}
+              {candidateBusy && directMode && !directionBusy ? (
+                <div className="candidate-content" aria-live="polite">
+                  <div className="candidate-content__meta">
+                    <Badge tone="ai">创作中</Badge>
+                  </div>
+                  <p>正在完成这次创作。结果会先单独保存，正文不会自动改变。</p>
+                </div>
+              ) : candidateBusy && usesNativeModel ? (
                 selectionRewriteBusy || generationPlan === null ? (
                   <div className="candidate-content" aria-live="polite">
                     <div className="candidate-content__meta">
@@ -4016,12 +4676,20 @@ export function EditorPage() {
                 <div className="candidate-content">
                   <EmptyState
                     title={
-                      candidate?.status === "rejected" ? "这份建议已拒绝" : "还没有 AI 建议版本"
+                      directMode
+                        ? candidate?.status === "rejected"
+                          ? "这份创作结果已放弃"
+                          : "还没有创作结果"
+                        : candidate?.status === "rejected"
+                          ? "这份建议已拒绝"
+                          : "还没有 AI 建议版本"
                     }
                     description={
-                      usesNativeModel
-                        ? "保存正文后即可继续创作。若无法生成，请前往设置连接 AI 服务并完成连接测试。"
-                        : "保存正文后可生成一份明确标注的本机示例建议，用于体验安全比较流程。"
+                      directMode
+                        ? "创作完成后会先在这里显示实际结果；只有你查看并明确使用，才会改变正文并创建新版本。"
+                        : usesNativeModel
+                          ? "保存正文后即可继续创作。若无法生成，请前往设置连接 AI 服务并完成连接测试。"
+                          : "保存正文后可生成一份明确标注的本机示例建议，用于体验安全比较流程。"
                     }
                   />
                   {candidate?.status === "rejected" && projectId !== null && chapterId !== null && (
@@ -4057,11 +4725,7 @@ export function EditorPage() {
                             : "neutral"
                       }
                     >
-                      {candidate.status === "accepted"
-                        ? "已接受"
-                        : candidate.status === "ready"
-                          ? "等待决定"
-                          : candidate.status}
+                      {editorCandidateStatusLabel(candidate.status)}
                     </Badge>
                     <span>{candidate.content.length} 字符</span>
                   </div>
@@ -4122,49 +4786,7 @@ export function EditorPage() {
                       面板仅显示前 4,000 个字符；完整建议仍保留，可在比较界面逐项处理或另存。
                     </p>
                   )}
-                  {candidateReady && directModeAuthorized && (
-                    <div className="candidate-actions">
-                      <Button
-                        variant="ai-primary"
-                        loading={candidateBusy}
-                        disabled={!editorClean}
-                        onClick={openCandidateReview}
-                      >
-                        使用这版
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        loading={candidateBusy}
-                        onClick={() => void rejectCandidate()}
-                      >
-                        放弃
-                      </Button>
-                      {candidateIncomplete && (
-                        <details>
-                          <summary>更多选项</summary>
-                          <div className="candidate-actions">
-                            <Button
-                              variant="secondary"
-                              loading={candidateBusy}
-                              disabled={!editorClean}
-                              onClick={() => void generateCandidate(candidate.id)}
-                            >
-                              继续补全
-                            </Button>
-                            <Button
-                              variant="secondary"
-                              loading={candidateBusy}
-                              disabled={!editorClean}
-                              onClick={() => void generateCandidate()}
-                            >
-                              重新生成
-                            </Button>
-                          </div>
-                        </details>
-                      )}
-                    </div>
-                  )}
-                  {candidateReady && !directModeAuthorized && (
+                  {candidateReady && (
                     <div className="candidate-actions">
                       {candidateIncomplete && (
                         <Button
@@ -4183,8 +4805,12 @@ export function EditorPage() {
                         onClick={openCandidateReview}
                       >
                         {candidateIncomplete
-                          ? "保留当前部分并比较"
-                          : `比较${candidateActionGap}${candidateSuggestionLabel}`}
+                          ? directMode
+                            ? "查看未完成结果"
+                            : "保留当前部分并比较"
+                          : directMode
+                            ? "查看并使用"
+                            : `比较${candidateActionGap}${candidateSuggestionLabel}`}
                       </Button>
                       {candidateIncomplete && (
                         <Button
@@ -4220,28 +4846,229 @@ export function EditorPage() {
                   请先保存当前正文，再处理{candidateVersionLabel}。
                 </p>
               )}
-              {(canGenerateCandidate || candidateIncomplete) && directModeAuthorized && (
+              {(canGenerateCandidate || candidateIncomplete) && directMode && (
                 <section className="candidate-content" aria-label="直接续写">
-                  <p>
-                    生成完成后会先保存为隔离的 AI
-                    建议草稿；正文和版本保持不变，直到你查看并明确选择使用。
-                  </p>
-                  <Button
-                    variant="ai-primary"
-                    loading={candidateBusy}
-                    disabled={!editorClean}
-                    onClick={() => void generateCandidate()}
-                  >
-                    继续写
-                  </Button>
-                  {usesNativeModel && (
-                    <Link className="back-link" to="/settings#model-center">
-                      设置 AI 服务
-                    </Link>
+                  {editorClean && !candidateBusy && (
+                    <>
+                      <p>点击后会先显示创作结果；明确使用前不会改变正文或创建版本。</p>
+                      <div className="candidate-actions">
+                        <Button variant="ai-primary" onClick={() => void generateCandidate()}>
+                          续写
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          disabled={preparedDirections !== null}
+                          onClick={() => void prepareContinuationDirections()}
+                        >
+                          选择方向
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                  <>
+                    <section className="candidate-content" aria-label="选择方向">
+                      <div className="candidate-content__meta">
+                        <strong>选择接下来怎么写</strong>
+                      </div>
+                      {directionError !== null && (
+                        <InlineAlert
+                          tone="warning"
+                          title="暂时无法准备方向"
+                          description="你可以保留自定义方向继续写，或稍后重试。"
+                        />
+                      )}
+                      {preparedDirections !== null && (
+                        <InlineAlert
+                          tone="warning"
+                          title="确认本次方向生成"
+                          description={
+                            preparedDirections.disclosure === null
+                              ? "本次只在本机准备三个方向，不会发送给外部服务。明确确认后才会开始生成。"
+                              : `${preparedDirections.disclosure.connectionDisplayName} · ${preparedDirections.disclosure.modelId}；${preparedDirections.disclosure.privacy} 发送内容：${preparedDirections.disclosure.sends.join("；")}。本次最多调用 ${String(preparedDirections.disclosure.maximumProviderCalls)} 次，自动重试 ${String(preparedDirections.disclosure.automaticRetryCount)} 次；${formatProviderActionCost(preparedDirections.disclosure)}。`
+                          }
+                        />
+                      )}
+                      {directionOptions.length > 0 && (
+                        <div className="candidate-actions" aria-label="三个创作方向">
+                          {directionOptions.map((option) => (
+                            <Button
+                              key={option.id}
+                              variant="secondary"
+                              aria-label={option.accessibleLabel}
+                              disabled={candidateBusy || !editorClean}
+                              onClick={() => void generateCandidate(null, option.text)}
+                            >
+                              {option.label}：{option.displayText}
+                            </Button>
+                          ))}
+                        </div>
+                      )}
+                      {directionBusy && (
+                        <p className="candidate-panel__hint" role="status">
+                          正在准备三个方向，当前选项会保留到新方向准备完成。
+                        </p>
+                      )}
+                      {!directionBusy && preparedDirections === null && (
+                        <Button
+                          disabled={!editorClean}
+                          variant="secondary"
+                          onClick={() => void prepareContinuationDirections()}
+                        >
+                          {directionOptions.length > 0 ? "换一组" : "重试"}
+                        </Button>
+                      )}
+                      {!directionBusy && preparedDirections !== null && (
+                        <div className="candidate-actions">
+                          <Button
+                            variant="ai-primary"
+                            disabled={!editorClean}
+                            onClick={() => void confirmContinuationDirections()}
+                          >
+                            确认并生成三个方向
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            onClick={() => {
+                              setPreparedDirections(null);
+                              setEditorNotice("已取消，本次没有调用 AI。");
+                              window.requestAnimationFrame(() =>
+                                primaryEditorActionRef.current?.focus({ preventScroll: true }),
+                              );
+                            }}
+                          >
+                            取消，不调用
+                          </Button>
+                        </div>
+                      )}
+                      <FormField label="自定义方向">
+                        {(fieldProps) => (
+                          <Textarea
+                            {...fieldProps}
+                            rows={3}
+                            maxLength={500}
+                            value={customDirection}
+                            disabled={candidateBusy || !editorClean}
+                            onChange={(event) => setCustomDirection(event.currentTarget.value)}
+                          />
+                        )}
+                      </FormField>
+                      <Button
+                        variant="ai-primary"
+                        disabled={
+                          candidateBusy || !editorClean || customDirection.trim().length === 0
+                        }
+                        onClick={() =>
+                          void generateCandidate(
+                            null,
+                            customDirection.normalize("NFKC").trim().replace(/\s+/gu, " "),
+                          )
+                        }
+                      >
+                        按这个方向写
+                      </Button>
+                    </section>
+                  </>
+                  {editorClean && !candidateBusy && (
+                    <div className="candidate-actions">
+                      {usesNativeModel &&
+                        selectionLength > 0 &&
+                        selectionRewriteDisclosure === null && (
+                          <>
+                            <Button
+                              variant="secondary"
+                              loading={selectionRewriteBusy}
+                              disabled={selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS}
+                              onClick={() =>
+                                void rewriteSelectedText(
+                                  "保留事实、原意和叙事视角，重写选中内容，使表达更清晰自然。",
+                                  "selection_rewrite",
+                                )
+                              }
+                            >
+                              改写
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              loading={selectionRewriteBusy}
+                              disabled={selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS}
+                              onClick={() =>
+                                void rewriteSelectedText(
+                                  "保持原意、事实和语气，润色选中内容，使文字更自然流畅。",
+                                  "polish",
+                                )
+                              }
+                            >
+                              润色
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              loading={selectionRewriteBusy}
+                              disabled={selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS}
+                              onClick={() =>
+                                void rewriteSelectedText(
+                                  "保持既有事实与叙事视角，扩写选中内容的动作、感受和环境细节。",
+                                  "expand",
+                                )
+                              }
+                            >
+                              扩写
+                            </Button>
+                          </>
+                        )}
+                      {selectionRewriteDisclosure !== null && (
+                        <>
+                          <InlineAlert
+                            tone="warning"
+                            title={`确认本次${lastGenerationAction === "polish" ? "润色" : lastGenerationAction === "expand" ? "扩写" : "改写"}`}
+                            description={`${selectionRewriteDisclosure.connectionDisplayName} · ${selectionRewriteDisclosure.modelId}；${selectionRewriteDisclosure.privacy} 发送内容：${selectionRewriteDisclosure.sends.join("；")}。本次最多调用 1 次，自动重试 0 次；${formatSelectionRewriteCost(selectionRewriteDisclosure)}。`}
+                          />
+                          <Button
+                            variant="ai-primary"
+                            loading={selectionRewriteBusy}
+                            onClick={() =>
+                              void rewriteSelectedText(
+                                lastSelectionRewriteInstruction,
+                                lastGenerationAction,
+                              )
+                            }
+                          >
+                            确认并生成
+                            {lastGenerationAction === "polish"
+                              ? "润色"
+                              : lastGenerationAction === "expand"
+                                ? "扩写"
+                                : "改写"}
+                            结果
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            disabled={selectionRewriteBusy}
+                            onClick={() => {
+                              setSelectionRewriteDisclosure(null);
+                              setEditorNotice("已取消，本次没有调用 AI。");
+                              window.requestAnimationFrame(() =>
+                                primaryEditorActionRef.current?.focus({ preventScroll: true }),
+                              );
+                            }}
+                          >
+                            取消，不调用
+                          </Button>
+                        </>
+                      )}
+                      {directUndoAvailable && (
+                        <Button
+                          variant="secondary"
+                          loading={versionRestoreBusy}
+                          onClick={() => void undoDirectGeneration()}
+                        >
+                          {directGenerationUndo.undoLabel}
+                        </Button>
+                      )}
+                    </div>
                   )}
                 </section>
               )}
-              {(canGenerateCandidate || candidateIncomplete) && !directModeAuthorized && (
+              {(canGenerateCandidate || candidateIncomplete) && !directMode && (
                 <>
                   <section className="candidate-content" aria-label="续写长度">
                     <FormField
@@ -4457,7 +5284,7 @@ export function EditorPage() {
                   </Button>
                 </>
               )}
-              {!directModeAuthorized &&
+              {!directMode &&
                 runtime.featureFlags.multiAgent &&
                 runtime.multiAgentReview !== null &&
                 projectId !== null &&
@@ -4477,15 +5304,15 @@ export function EditorPage() {
             <aside
               className="candidate-panel candidate-panel--collapsed"
               style={collapsedPanelStyle}
-              aria-label="AI 创作助手"
+              aria-label={directMode ? "创作助手" : "AI 创作助手"}
             >
               <Button
                 variant="secondary"
-                aria-label="展开 AI 创作助手"
+                aria-label={directMode ? "展开创作助手" : "展开 AI 创作助手"}
                 aria-expanded={assistantOpen}
                 onClick={() => setAssistantOpen(true)}
               >
-                AI 助手
+                {directMode ? "创作助手" : "AI 助手"}
               </Button>
             </aside>
           ) : null}
@@ -4620,7 +5447,7 @@ export function EditorPage() {
                   {displayedContextCompilation.compiled.trace.maximumContextTokens.toLocaleString(
                     "zh-CN",
                   )}{" "}
-                  个输入 token（本机保守估算，不是计费回执）。
+                  个输入内容额度（本机保守估算，不是计费回执）。
                 </p>
                 <p>{contextBudgetExplanation(displayedContextCompilation.compiled)}</p>
               </div>
@@ -4636,7 +5463,9 @@ export function EditorPage() {
                               <Badge tone={entry.included ? "info" : "neutral"}>
                                 {contextEntryStatusLabel(entry)}
                               </Badge>
-                              <span>约 {entry.estimatedTokens.toLocaleString("zh-CN")} token</span>
+                              <span>
+                                约 {entry.estimatedTokens.toLocaleString("zh-CN")} 个内容额度
+                              </span>
                             </div>
                             <p>{contextSelectionReasonLabel(entry)}</p>
                             <p className="candidate-panel__hint">
@@ -4791,8 +5620,16 @@ export function EditorPage() {
             }
           }
         }}
-        title={`比较${candidateActionGap}${candidateSuggestionLabel}与正文`}
-        description="先把建议改到满意，再逐处决定或选择应用位置；点击创建版本前不会写入正文。"
+        title={
+          directMode
+            ? "查看创作结果与正文"
+            : `比较${candidateActionGap}${candidateSuggestionLabel}与正文`
+        }
+        description={
+          directMode
+            ? "结果仍与正文隔离；明确点击“使用这版”前不会改变正文或创建版本。"
+            : "先把建议改到满意，再逐处决定或选择应用位置；点击创建版本前不会写入正文。"
+        }
         footer={
           <>
             <Button
@@ -4949,7 +5786,7 @@ export function EditorPage() {
               <InlineAlert
                 tone="error"
                 title="正文已在建议生成后变化"
-                description={`已阻止接受。下面同时保留生成时正文、当前正文和${candidateSuggestionLabel}；请先另存或处理冲突，InkShadow 不会静默覆盖。`}
+                description={`已阻止接受。下面同时保留生成时正文、当前正文和${candidateSuggestionLabel}；请先另存或处理冲突，墨影不会静默覆盖。`}
               />
               <div className="candidate-review-dialog__three-way">
                 <section>
@@ -5277,7 +6114,7 @@ export function EditorPage() {
               <InlineAlert
                 tone="warning"
                 title="确认本次模型服务调用"
-                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 发送内容：${continuationDisclosure.sends.join("；")}。本次最多调用 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。${generationPlan.requestId === directGenerationRequestId && directDisclosure !== null ? "相同模型服务、精确模型、发送范围、调用上限、费用状态和隐私策略不变时，可复用这项本机授权；任一项变化都会再次询问。" : "这次确认只适用于当前正文版本与本次生成计划；任一项变化都会停止发送并要求重新确认。"}完整结果只会保存为隔离的 AI 建议草稿，正文和版本保持不变，直到你明确选择使用。`}
+                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 发送内容：${continuationDisclosure.sends.join("；")}。本次最多调用 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。这次确认只适用于当前正文版本与本次生成计划；任一项变化都会停止发送并要求重新确认。完整结果只会保存为隔离的${directMode ? "创作结果" : " AI 建议草稿"}，正文和版本保持不变，直到你明确选择使用。`}
               />
             )}
 
@@ -5332,7 +6169,7 @@ export function EditorPage() {
                     {generationPlan.contextCompilation.compiled.trace.maximumContextTokens.toLocaleString(
                       "zh-CN",
                     )}{" "}
-                    个输入 token（本机保守估算，不是计费回执）；未选资料不会发送给模型。
+                    个输入内容额度（本机保守估算，不是计费回执）；未选资料不会发送给模型。
                   </p>
                   <p>{contextBudgetExplanation(generationPlan.contextCompilation.compiled)}</p>
                   <ul>
@@ -5342,7 +6179,10 @@ export function EditorPage() {
                           {contextEntryStatusLabel(entry)}
                         </Badge>{" "}
                         <strong>{contextLayerLabel(entry.layer)}</strong>
-                        <span> · 约 {entry.estimatedTokens.toLocaleString("zh-CN")} token</span>
+                        <span>
+                          {" "}
+                          · 约 {entry.estimatedTokens.toLocaleString("zh-CN")} 个内容额度
+                        </span>
                         <p>{contextSelectionReasonLabel(entry)}</p>
                         {entry.evidence.length > 0 && (
                           <small>
@@ -5784,7 +6624,7 @@ function preflightCheckLabel(code: string): string {
     BUDGET_EXCEEDED: "预计费用超过硬预算",
     PREFLIGHT_WARNING_PRICING_UNKNOWN: "该模型尚未填写价格，暂时无法估算费用",
     PREFLIGHT_WARNING_CONTEXT_UNKNOWN: "未获取精确上下文上限，将使用保守长度整理参考内容",
-    PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE: "当前 Token 数为估算值，已预留安全余量",
+    PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE: "当前内容额度为估算值，已预留安全余量",
     PREFLIGHT_BLOCKED_NO_ROUTE: "没有可用的正文生成 AI 分工",
     PREFLIGHT_BLOCKED_CREDENTIAL: "AI 服务凭据缺失或不可用",
     PREFLIGHT_BLOCKED_MODEL_UNAVAILABLE: "连接或所选模型确定不可用",

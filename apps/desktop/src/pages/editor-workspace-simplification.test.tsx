@@ -10,6 +10,7 @@ import {
   type DesktopRuntime,
   type NativeModelGatewayClient,
 } from "../infrastructure/runtime";
+import { saveEditorPreferences } from "../infrastructure/editor-preferences-store";
 import { RuntimeProvider } from "../runtime-context";
 import { EditorPage } from "./editor-page";
 
@@ -117,16 +118,17 @@ describe("simplified editor workspace", () => {
 
   it("resizes the desktop assistant with pointer capture and the full keyboard contract", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
+    await ensureWritingMode(runtime, "direct");
     const { chapter, project } = await seedProject(runtime);
     const user = userEvent.setup();
 
     renderEditor(runtime, project, chapter);
 
     const separator = await screen.findByRole("separator", {
-      name: "调整正文与 AI 创作助手宽度",
+      name: "调整正文与创作助手宽度",
     });
     const writingCanvas = screen.getByRole("region", { name: "章节正文" });
-    const assistant = screen.getByRole("complementary", { name: "AI 创作助手" });
+    const assistant = screen.getByRole("complementary", { name: "创作助手" });
     expect(separator).toHaveAttribute("aria-orientation", "vertical");
     expect(separator).toHaveAttribute("aria-controls", "editor-ai-assistant-panel");
     expect(separator.previousElementSibling).toBe(writingCanvas);
@@ -163,11 +165,11 @@ describe("simplified editor workspace", () => {
     expect(releasePointerCapture).toHaveBeenCalledWith(7);
     expect(separator).toHaveAttribute("aria-valuenow", "356");
 
-    await user.click(within(assistant).getByRole("button", { name: "收起 AI 创作助手" }));
+    await user.click(within(assistant).getByRole("button", { name: "收起创作助手" }));
     expect(screen.queryByRole("separator")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "展开 AI 创作助手" }));
+    await user.click(screen.getByRole("button", { name: "展开创作助手" }));
     expect(
-      await screen.findByRole("separator", { name: "调整正文与 AI 创作助手宽度" }),
+      await screen.findByRole("separator", { name: "调整正文与创作助手宽度" }),
     ).toHaveAttribute("aria-valuenow", "356");
   });
 
@@ -225,16 +227,18 @@ describe("simplified editor workspace", () => {
 
   it("offers a focused rewrite instruction for an exact selection in the desktop app", async () => {
     const runtime = createNativeEditorRuntime();
+    await ensureWritingMode(runtime, "professional");
     const { chapter, project } = await seedProject(runtime);
-    const user = userEvent.setup();
 
     renderEditor(runtime, project, chapter);
 
     const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
       name: "章节正文",
     });
+    editor.focus();
     editor.setSelectionRange(0, 3);
     fireEvent.select(editor);
+    expect(editor).toHaveFocus();
 
     const toolbar = document.querySelector(".editor-toolbar");
     if (!(toolbar instanceof HTMLElement)) {
@@ -248,12 +252,29 @@ describe("simplified editor workspace", () => {
     expect(instruction).toHaveValue("保持原意，让表达更自然。");
     expect(screen.getByRole("button", { name: "查看选区改写发送信息" })).toBeEnabled();
 
-    await user.click(rewriteAction);
-    await waitFor(() => expect(instruction).toHaveFocus());
+    let scheduledFocus: FrameRequestCallback | undefined;
+    const animationFrame = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback) => {
+        scheduledFocus = callback;
+        return 1;
+      });
+    fireEvent.click(rewriteAction);
+    expect(animationFrame).toHaveBeenCalledOnce();
+    if (scheduledFocus === undefined) {
+      throw new Error("选区改写操作没有安排指令输入框聚焦");
+    }
+    scheduledFocus(0);
+    expect(instruction).toHaveFocus();
+    animationFrame.mockRestore();
   });
 
   it("records a durable derived-story task after an explicit manual save", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    if (preference.mode !== "direct") {
+      await runtime.writingExperience.switchMode("direct", preference.revision);
+    }
     const { chapter, project } = await seedProject(runtime);
     const user = userEvent.setup();
 
@@ -262,6 +283,8 @@ describe("simplified editor workspace", () => {
     const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
       name: "章节正文",
     });
+    const modeRead = vi.spyOn(runtime.writingExperience, "getOrInitialize");
+    modeRead.mockClear();
     fireEvent.change(editor, {
       target: { value: "第一章正文，手动保存后的新内容。", selectionStart: 16 },
     });
@@ -276,6 +299,7 @@ describe("simplified editor workspace", () => {
         chapterId: chapter.id,
         source: "manual_save",
         acceptedCharacterCount: 16,
+        organizeLocalStoryFacts: true,
       });
     });
 
@@ -283,8 +307,215 @@ describe("simplified editor workspace", () => {
     expect(
       versions.ok && versions.value.some((version) => version.toSnapshot().reason === "manual"),
     ).toBe(true);
+    const manualVersion = versions.ok
+      ? versions.value
+          .map((version) => version.toSnapshot())
+          .find(({ reason }) => reason === "manual")
+      : undefined;
+    expect(manualVersion?.organizeLocalStoryFacts).toBe(true);
+    expect(modeRead).toHaveBeenCalledTimes(1);
   });
+
+  it("organizes a sentence completed across one-second autosaves without rescanning an old sentence", async () => {
+    window.localStorage.clear();
+    saveEditorPreferences(window.localStorage, {
+      autosaveEnabled: true,
+      autosaveDebounceMs: 1_000,
+    });
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    if (preference.mode !== "direct") {
+      await runtime.writingExperience.switchMode("direct", preference.revision);
+    }
+    const { chapter, project } = await seedProject(runtime);
+    const generate = vi.spyOn(runtime.modelGateway, "generate");
+    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!versionsBefore.ok) throw versionsBefore.error;
+
+    renderEditor(runtime, project, chapter);
+    const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "章节正文",
+    });
+    const modeRead = vi.spyOn(runtime.writingExperience, "getOrInitialize");
+    modeRead.mockClear();
+    const timeout = vi.spyOn(window, "setTimeout");
+    const partialContent = "林澈来到钟楼。角色：林";
+    fireEvent.change(editor, { target: { value: partialContent, selectionStart: 11 } });
+    expect(timeout).toHaveBeenCalledWith(expect.any(Function), 1_000);
+    timeout.mockRestore();
+
+    const versionsImmediately = await runtime.repositories.chapterVersions.listByChapterId(
+      chapter.id,
+    );
+    if (!versionsImmediately.ok) throw versionsImmediately.error;
+    expect(versionsImmediately.value).toHaveLength(versionsBefore.value.length);
+
+    let firstVersionId: string | null = null;
+
+    await waitFor(
+      async () => {
+        const versions = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+        if (!versions.ok) throw versions.error;
+        const autosaveVersion = versions.value
+          .map((version) => version.toSnapshot())
+          .find((version) => version.reason === "autosave" && version.content === partialContent);
+        expect(autosaveVersion).toBeDefined();
+        if (autosaveVersion === undefined) throw new Error("找不到自动保存版本");
+        expect(autosaveVersion.organizeLocalStoryFacts).toBe(true);
+
+        firstVersionId = autosaveVersion.id;
+        const facts = await runtime.story.facts.listByProjectId(project.id as never);
+        if (!facts.ok) throw facts.error;
+        const snapshots = facts.value.map((fact) => fact.toSnapshot());
+        const organized = snapshots.find(
+          (fact) =>
+            fact.factType === "scene_tag" &&
+            String(fact.source.versionId) === String(autosaveVersion.id),
+        );
+        expect(organized).toMatchObject({
+          factType: "scene_tag",
+          contentText: "林澈出现在钟楼",
+          origin: "system",
+          status: "temporary",
+          needsReview: false,
+          userConfirmed: false,
+          source: {
+            kind: "chapter_span",
+            chapterId: chapter.id,
+            versionId: autosaveVersion.id,
+            startOffset: 0,
+            endOffset: 7,
+            sourceLength: 11,
+            excerpt: "林澈来到钟楼。",
+          },
+        });
+        expect(organized?.structuredValue).toMatchObject({
+          payload: {
+            evidence: {
+              immutableVersionId: autosaveVersion.id,
+              locator: { kind: "utf16", startOffset: 0, endOffset: 7, sourceLength: 11 },
+            },
+          },
+        });
+
+        const chapterSummary = snapshots.find(
+          (fact) =>
+            fact.factType === "chapter_summary" &&
+            String(fact.source.versionId) === String(autosaveVersion.id),
+        );
+        expect(chapterSummary).toMatchObject({
+          factType: "chapter_summary",
+          contentText: "林澈来到钟楼。",
+          origin: "system",
+          status: "temporary",
+          needsReview: false,
+          userConfirmed: false,
+          source: {
+            chapterId: chapter.id,
+            versionId: autosaveVersion.id,
+            startOffset: 0,
+            endOffset: 7,
+            sourceLength: 11,
+            excerpt: "林澈来到钟楼。",
+          },
+          structuredValue: {
+            payload: {
+              sourceProjectId: project.id,
+              sourceChapterId: chapter.id,
+              sourceVersionId: autosaveVersion.id,
+              authorityMode: "plain_non_authoritative",
+              citations: [{ startOffset: 0, endOffset: 7, sourceLength: 11 }],
+              generation: {
+                providerKind: "本地确定性整理",
+                modelId: "首尾句抽取摘要第一版",
+              },
+            },
+          },
+        });
+
+        const task = (await runtime.taskCenter.load()).tasks.find(
+          (candidate) => candidate.metadata.versionId === autosaveVersion.id,
+        );
+        expect(task).toMatchObject({
+          type: "story.accepted-version.process",
+          status: "succeeded",
+          metadata: {
+            projectId: project.id,
+            chapterId: chapter.id,
+            source: "autosave",
+            organizeLocalStoryFacts: true,
+          },
+        });
+      },
+      { timeout: 4_500 },
+    );
+    expect(generate).not.toHaveBeenCalled();
+
+    const completeContent = "林澈来到钟楼。角色：林澈是守塔人。";
+    const secondTimeout = vi.spyOn(window, "setTimeout");
+    fireEvent.change(editor, { target: { value: completeContent, selectionStart: 17 } });
+    expect(secondTimeout).toHaveBeenCalledWith(expect.any(Function), 1_000);
+    secondTimeout.mockRestore();
+
+    await waitFor(
+      async () => {
+        const versions = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+        if (!versions.ok) throw versions.error;
+        const completedVersion = versions.value
+          .map((version) => version.toSnapshot())
+          .find((version) => version.reason === "autosave" && version.content === completeContent);
+        expect(completedVersion).toBeDefined();
+        if (completedVersion === undefined) throw new Error("找不到分段输入完成后的版本");
+        expect(completedVersion.organizeLocalStoryFacts).toBe(true);
+
+        const facts = await runtime.story.facts.listByProjectId(project.id as never);
+        if (!facts.ok) throw facts.error;
+        const snapshots = facts.value.map((fact) => fact.toSnapshot());
+        expect(
+          snapshots.filter(({ contentText }) => contentText === "林澈出现在钟楼"),
+        ).toHaveLength(1);
+        expect(
+          snapshots.find(({ contentText }) => contentText === "林澈出现在钟楼")?.source.versionId,
+        ).toBe(firstVersionId);
+        const character = snapshots.find(({ factType }) => factType === "character_profile");
+        expect(character?.source).toMatchObject({
+          chapterId: chapter.id,
+          versionId: completedVersion.id,
+          startOffset: 7,
+          endOffset: 17,
+          sourceLength: 17,
+          excerpt: "角色：林澈是守塔人。",
+        });
+        expect(character?.structuredValue).toMatchObject({
+          payload: {
+            evidence: {
+              immutableVersionId: completedVersion.id,
+              locator: { kind: "utf16", startOffset: 7, endOffset: 17, sourceLength: 17 },
+            },
+          },
+        });
+        const task = (await runtime.taskCenter.load()).tasks.find(
+          (candidate) => candidate.metadata.versionId === completedVersion.id,
+        );
+        expect(task?.status).toBe("succeeded");
+        expect(task?.metadata.organizeLocalStoryFacts).toBe(true);
+      },
+      { timeout: 4_500 },
+    );
+    expect(generate).not.toHaveBeenCalled();
+    expect(modeRead).toHaveBeenCalledTimes(2);
+  }, 12_000);
 });
+
+async function ensureWritingMode(
+  runtime: DesktopRuntime,
+  mode: "direct" | "professional",
+): Promise<void> {
+  const preference = await runtime.writingExperience.getOrInitialize();
+  if (preference.mode !== mode) {
+    await runtime.writingExperience.switchMode(mode, preference.revision);
+  }
+}
 
 function createNativeEditorRuntime(): DesktopRuntime {
   const runtime = createDevelopmentRuntime(window.localStorage);

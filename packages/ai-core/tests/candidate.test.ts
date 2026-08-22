@@ -38,6 +38,22 @@ describe("candidate safety", () => {
     expect(candidate.status).toBe("ready");
   });
 
+  it("never applies direction options as chapter prose", () => {
+    expect(() =>
+      buildCandidateApplicationPlan(
+        {
+          ...candidate,
+          purpose: "continuation_directions",
+        },
+        validContext,
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        code: "CANDIDATE_PURPOSE_NOT_APPLICABLE",
+      }),
+    );
+  });
+
   it("rejects stale base versions", () => {
     expect(() =>
       buildCandidateApplicationPlan(candidate, {

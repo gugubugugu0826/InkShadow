@@ -2,7 +2,6 @@ import type { UuidV7 } from "@inkshadow/domain";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  AmbiguousNovelReviewResponseError,
   AmbiguousNovelReviewService,
   parseAmbiguousNovelReviewResponse,
   type AmbiguousNovelReviewEvidence,
@@ -381,7 +380,7 @@ describe("parseAmbiguousNovelReviewResponse", () => {
         [current, confirmed],
         "invocation",
       ),
-    ).toThrow(AmbiguousNovelReviewResponseError);
+    ).toThrow("模型返回了 Markdown 代码块；AI 复核只接受纯结构化数据。");
     expect(() =>
       parseAmbiguousNovelReviewResponse(
         findingResponse([current.id, "outside-evidence"]),

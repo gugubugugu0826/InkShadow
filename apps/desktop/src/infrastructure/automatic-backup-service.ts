@@ -367,8 +367,16 @@ export class AutomaticBackupService {
       const missedSlotCount = countMissedSlots(manifest.lastSuccessfulSlot, schedule.dueSlot);
       let createdBackup: AutomaticBackupManifestSucceededEntry | null = null;
       let attention = attentionForSlot(manifest, schedule.dueSlot);
-      if (missedSlotCount > 0 && attention === null) {
-        const reserved = await this.reserveBackup(root, lease, manifest, schedule.dueSlot, now);
+      const rescheduleRecoveredSlot = recovered.reschedulableSlots.has(schedule.dueSlot);
+      if (missedSlotCount > 0 && (attention === null || rescheduleRecoveredSlot)) {
+        const reserved = await this.reserveBackup(
+          root,
+          lease,
+          manifest,
+          schedule.dueSlot,
+          now,
+          rescheduleRecoveredSlot,
+        );
         manifest = reserved.manifest;
 
         const writing: AutomaticBackupManifestWritingEntry = Object.freeze({
@@ -434,6 +442,7 @@ export class AutomaticBackupService {
             maxDateKey(manifest.lastSuccessfulSlot, createdBackup.scheduleSlot),
             now,
           );
+          attention = null;
         } else if (outcome?.outcome === "not_started") {
           const notStarted: AutomaticBackupManifestNotStartedEntry = Object.freeze({
             ...reserved.entry,
@@ -509,9 +518,14 @@ export class AutomaticBackupService {
     lease: AutomaticBackupLease,
     initialManifest: AutomaticBackupManifest,
     now: string,
-  ): Promise<{ readonly manifest: AutomaticBackupManifest; readonly recoveredCount: number }> {
+  ): Promise<{
+    readonly manifest: AutomaticBackupManifest;
+    readonly recoveredCount: number;
+    readonly reschedulableSlots: ReadonlySet<string>;
+  }> {
     let manifest = initialManifest;
     let recoveredCount = 0;
+    const reschedulableSlots = new Set<string>();
     for (const entry of [...manifest.entries]) {
       if (!isPendingEntry(entry) && entry.status !== "unknown" && entry.status !== "succeeded") {
         continue;
@@ -558,7 +572,22 @@ export class AutomaticBackupService {
       }
 
       if (entry.status === "unknown") {
-        if (!inspection.exists) continue;
+        if (!inspection.exists) {
+          if (entry.writeStartedAt === null && recordedFileEvidence(entry) === null) {
+            const notStarted = notStartedEntry(entry, now, "write_failed");
+            manifest = await this.replaceEntry(
+              root,
+              lease,
+              manifest,
+              notStarted,
+              manifest.lastSuccessfulSlot,
+              now,
+            );
+            reschedulableSlots.add(entry.scheduleSlot);
+            recoveredCount += 1;
+          }
+          continue;
+        }
         const succeeded: AutomaticBackupManifestSucceededEntry = Object.freeze({
           ...entry,
           status: "succeeded",
@@ -626,7 +655,7 @@ export class AutomaticBackupService {
       );
       recoveredCount += 1;
     }
-    return { manifest, recoveredCount };
+    return { manifest, recoveredCount, reschedulableSlots };
   }
 
   private async reserveBackup(
@@ -635,11 +664,19 @@ export class AutomaticBackupService {
     manifest: AutomaticBackupManifest,
     scheduleSlot: string,
     now: string,
+    allowRecoveredTerminalSlot = false,
   ): Promise<{
     readonly manifest: AutomaticBackupManifest;
     readonly entry: AutomaticBackupManifestReservedEntry;
   }> {
-    if (manifest.entries.some((entry) => entry.scheduleSlot === scheduleSlot)) {
+    const existingSlotEntries = manifest.entries.filter(
+      (entry) => entry.scheduleSlot === scheduleSlot,
+    );
+    const mayAppendRecoveredAttempt =
+      allowRecoveredTerminalSlot &&
+      existingSlotEntries.length > 0 &&
+      existingSlotEntries.every(({ status }) => status === "not_started" || status === "failed");
+    if (existingSlotEntries.length > 0 && !mayAppendRecoveredAttempt) {
       throw backupError(
         "AUTOMATIC_BACKUP_SLOT_CONFLICT",
         "当前计划日期已经存在自动备份清单记录，已停止以避免重复覆盖。",
@@ -843,10 +880,7 @@ function verifyManagedRoot(value: unknown): VerifiedAutomaticBackupRoot {
     typeof marker.rootId !== "string" ||
     !ROOT_ID_PATTERN.test(marker.rootId)
   ) {
-    throw backupError(
-      "AUTOMATIC_BACKUP_ROOT_UNTRUSTED",
-      "自动备份目录缺少有效的 InkShadow 所有权标记。",
-    );
+    throw backupError("AUTOMATIC_BACKUP_ROOT_UNTRUSTED", "自动备份目录缺少有效的墨影所有权标记。");
   }
   const absolute = normalizeAbsolutePath(value.absolutePath);
   const canonical = normalizeAbsolutePath(value.canonicalAbsolutePath);
@@ -918,13 +952,19 @@ function readManifest(
       : value.entries.map((entry) => validateManifestEntry(entry, root, policy));
   const ids = new Set(entries.map((entry) => entry.backupId));
   const fileNames = new Set(entries.map((entry) => entry.fileName));
-  const slots = new Set(entries.map((entry) => entry.scheduleSlot));
-  if (
-    ids.size !== entries.length ||
-    fileNames.size !== entries.length ||
-    slots.size !== entries.length
-  ) {
-    throw manifestInvalid("自动备份清单包含重复标识、文件名或计划日期。");
+  if (ids.size !== entries.length || fileNames.size !== entries.length) {
+    throw manifestInvalid("自动备份清单包含重复标识或文件名。");
+  }
+  const liveSlotClaims = entries.filter(
+    ({ status }) =>
+      status === "reserved" ||
+      status === "writing" ||
+      status === "verifying" ||
+      status === "unknown" ||
+      status === "succeeded",
+  );
+  if (new Set(liveSlotClaims.map((entry) => entry.scheduleSlot)).size !== liveSlotClaims.length) {
+    throw manifestInvalid("自动备份清单的同一计划日期包含多个进行中、待核对或成功记录。");
   }
   const latestSucceededSlot = entries
     .filter((entry): entry is AutomaticBackupManifestSucceededEntry => entry.status === "succeeded")
@@ -1305,7 +1345,7 @@ function recordedFileEvidence(
 }
 
 function notStartedEntry(
-  entry: AutomaticBackupManifestReservedEntry,
+  entry: AutomaticBackupManifestReservedEntry | AutomaticBackupManifestUnknownEntry,
   now: string,
   failureKind: AutomaticBackupFailureKind,
 ): AutomaticBackupManifestNotStartedEntry {
@@ -1324,13 +1364,21 @@ function attentionForSlot(
   manifest: AutomaticBackupManifest,
   scheduleSlot: string,
 ): AutomaticBackupRunResult["attention"] {
-  const entry = manifest.entries.find(
-    (candidate): candidate is AutomaticBackupManifestAttentionEntry =>
-      candidate.scheduleSlot === scheduleSlot &&
-      (candidate.status === "not_started" ||
+  const entries = manifest.entries.filter((candidate) => candidate.scheduleSlot === scheduleSlot);
+  if (entries.some(({ status }) => status === "succeeded")) return null;
+  const entry = entries
+    .filter(
+      (candidate): candidate is AutomaticBackupManifestAttentionEntry =>
+        candidate.status === "not_started" ||
         candidate.status === "failed" ||
-        candidate.status === "unknown"),
-  );
+        candidate.status === "unknown",
+    )
+    .sort(
+      (left, right) =>
+        left.createdAt.localeCompare(right.createdAt) ||
+        left.backupId.localeCompare(right.backupId),
+    )
+    .at(-1);
   return entry === undefined ? null : attentionFromEntry(entry);
 }
 

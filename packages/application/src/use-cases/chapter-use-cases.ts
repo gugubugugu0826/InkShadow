@@ -46,6 +46,8 @@ export interface SaveChapterCommand {
   readonly chapterId: UuidV7;
   readonly expectedRevision: number;
   readonly reason?: Extract<ChapterVersionReason, "autosave" | "manual" | "recovery">;
+  /** Persisted save-time responsibility for local story-fact organization. */
+  readonly organizeLocalStoryFacts?: boolean;
 }
 
 export interface ChapterSaveOutcome {
@@ -58,6 +60,8 @@ export interface RestoreChapterVersionCommand {
   readonly chapterId: UuidV7;
   readonly versionId: UuidV7;
   readonly expectedRevision: number;
+  /** Persisted restore-time responsibility for local story-fact organization. */
+  readonly organizeLocalStoryFacts?: boolean;
 }
 
 export interface RestoreChapterVersionOutcome {
@@ -464,6 +468,7 @@ export class SaveChapter {
       content: draft.value.content,
       contentChecksum: checksum.value,
       reason: command.reason ?? "autosave",
+      organizeLocalStoryFacts: command.organizeLocalStoryFacts ?? false,
       sourceCandidateId: null,
       createdAt: now,
     });
@@ -606,6 +611,7 @@ export class RestoreChapterVersion {
       content: selectedSnapshot.content,
       contentChecksum: verifiedChecksum.value,
       reason: "recovery",
+      organizeLocalStoryFacts: command.organizeLocalStoryFacts ?? false,
       sourceCandidateId: null,
       createdAt: now,
     });

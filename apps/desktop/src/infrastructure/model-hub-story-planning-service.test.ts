@@ -694,6 +694,8 @@ function createHarness(
         catalogEntryId: selected.catalogEntryId,
         modelId: selected.modelId,
         usedFallback: selected.usedFallback,
+        privacyPolicy: selected.privacyPolicy,
+        dataDestination: selected.dataDestination,
         localOnlyEligible: false,
       } as const;
       await _input.onBeforeDispatch?.(selection);

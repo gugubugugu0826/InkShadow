@@ -392,14 +392,15 @@ const USAGE_EVENTS_CTE = `WITH usage_events AS (
       ELSE 'unknown'
     END AS cost_source,
     CASE
-      WHEN route.role = 'local_private' THEN 'local_only'
+      WHEN usage.privacy_snapshot_version = 1
+        AND usage.privacy_policy IN ('local_only', 'local_preferred', 'cloud_allowed')
+      THEN usage.privacy_policy
       ELSE 'not_recorded'
     END AS privacy_policy,
     CASE
-      WHEN usage.usage_source = 'local_demo'
-        OR hub_connection.provider_kind = 'ollama'
-        OR legacy_profile.provider = 'ollama'
-      THEN 'local'
+      WHEN usage.privacy_snapshot_version = 1
+        AND usage.data_destination IN ('local', 'remote')
+      THEN usage.data_destination
       ELSE 'not_recorded'
     END AS data_destination,
     CASE

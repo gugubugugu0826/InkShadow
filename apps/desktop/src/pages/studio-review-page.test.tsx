@@ -36,6 +36,25 @@ describe("Studio review standalone page", () => {
     expect(await screen.findByText(label)).toBeVisible();
   });
 
+  it("keeps an unknown technical failure out of the visible review error", async () => {
+    const rawMessage = "Candidate invocation metadata is invalid";
+    const coordinator = fakeCoordinator({
+      listReviews: vi.fn(() =>
+        Promise.reject(
+          Object.assign(new Error(rawMessage), {
+            code: "REVIEW_SOURCE_INVALID",
+          }),
+        ),
+      ),
+    });
+
+    render(<StudioReviewPage coordinator={coordinator} context={AUTHOR} online />);
+
+    expect(await screen.findByText("团队审阅暂不可用")).toBeVisible();
+    expect(screen.getByText(/系统不会自动重复提交/u)).toBeVisible();
+    expect(screen.queryByText(rawMessage)).not.toBeInTheDocument();
+  });
+
   it("shows a no-capability state without issuing a remote review read", async () => {
     const coordinator = fakeCoordinator({
       capabilities: vi.fn(() => ({

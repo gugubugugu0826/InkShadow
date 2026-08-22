@@ -15,6 +15,7 @@ const NOW = "2026-08-08T00:00:00.000Z";
 const PROJECT_ID = uuid(1);
 const CHAPTER_ID = uuid(2);
 const VERSION_ID = uuid(3);
+const ensureCurrentFacts = (): Promise<void> => Promise.resolve();
 
 describe("AcceptedChapterPipelineWorker", () => {
   it("runs a due persisted retry and completes the same scheduled attempt", async () => {
@@ -27,7 +28,7 @@ describe("AcceptedChapterPipelineWorker", () => {
     });
 
     harness.setNow("2026-08-08T00:00:06.000Z");
-    const worker = new AcceptedChapterPipelineWorker(harness.runtime);
+    const worker = new AcceptedChapterPipelineWorker(harness.runtime, { ensureCurrentFacts });
 
     await expect(worker.runDueTasksNow()).resolves.toBe(1);
     expect((await harness.store.load()).tasks[0]).toMatchObject({
@@ -45,6 +46,137 @@ describe("AcceptedChapterPipelineWorker", () => {
     expect(harness.causal).toHaveBeenCalledTimes(1);
   });
 
+  it("persists fact-preflight failure with backoff and supports one safe manual retry", async () => {
+    const harness = createHarness();
+    await harness.store.enqueueTask({
+      id: uuid(19),
+      type: "story.accepted-version.process",
+      idempotencyKey: `story.accepted-version:${VERSION_ID}`,
+      metadata: { ...pipelineMetadata(), organizeLocalStoryFacts: true },
+      priority: 75,
+      maxAttempts: 3,
+      now: NOW,
+    });
+    const ensureRecoveredFacts = vi.fn((): Promise<void> => Promise.resolve());
+    ensureRecoveredFacts.mockRejectedValueOnce(new Error("local fact store is busy"));
+    const reportError = vi.fn();
+    const restartedWorker = new AcceptedChapterPipelineWorker(harness.runtime, {
+      ensureCurrentFacts: ensureRecoveredFacts,
+      queuedGraceMilliseconds: 0,
+      reportError,
+    });
+
+    await expect(restartedWorker.runDueTasksNow()).resolves.toBe(1);
+
+    const waiting = (await harness.store.load()).tasks[0];
+    expect(waiting).toMatchObject({
+      status: "waiting_retry",
+      attempt: 2,
+      runAfter: "2026-08-08T00:00:05.000Z",
+      failure: {
+        code: "ACCEPTED_VERSION_FACT_PREFLIGHT_FAILED",
+        causeCode: "CURRENT_SAVED_VERSION_FACTS_UNAVAILABLE",
+        retryable: true,
+        actions: ["RETRY", "EXPORT_DIAGNOSTICS"],
+      },
+    });
+    if (waiting === undefined) {
+      throw new Error("Expected a retryable fact-preflight task.");
+    }
+    expect(retryInput(waiting)).toMatchObject({ organizeLocalStoryFacts: true });
+    expect(ensureRecoveredFacts).toHaveBeenCalledOnce();
+    expect(harness.search).not.toHaveBeenCalled();
+    expect(harness.causal).not.toHaveBeenCalled();
+    expect(reportError).toHaveBeenCalledOnce();
+
+    await expect(restartedWorker.runDueTasksNow()).resolves.toBe(0);
+    expect(ensureRecoveredFacts).toHaveBeenCalledOnce();
+
+    if (waiting.failure === null) {
+      throw new Error("Expected a retryable fact-preflight failure.");
+    }
+    const queued = await harness.store.retryTaskNow(waiting.id, {
+      expectedSequence: waiting.sequence,
+      expectedAttempt: waiting.attempt,
+      expectedFailureCauseCode: waiting.failure.causeCode,
+      recoveryProgressStep: pipelineRetryProgressStep(waiting.attempt, waiting.failure.causeCode),
+    });
+    expect(retryInput(queued)).toMatchObject({
+      organizeLocalStoryFacts: true,
+      retryTaskSequence: queued.sequence,
+      retryTaskAttempt: queued.attempt,
+    });
+    expect(retryInput(queued)?.retryFailureCauseCode).toBeUndefined();
+
+    await expect(restartedWorker.runDueTasksNow()).resolves.toBe(1);
+    expect((await harness.store.load()).tasks[0]).toMatchObject({
+      status: "succeeded",
+      attempt: 2,
+      progress: { step: "pipeline.outcome.search-causal" },
+    });
+    expect(ensureRecoveredFacts).toHaveBeenCalledTimes(2);
+    expect(harness.search).toHaveBeenCalledOnce();
+    expect(harness.causal).toHaveBeenCalledOnce();
+    await expect(restartedWorker.runDueTasksNow()).resolves.toBe(0);
+  });
+  it("backs off repeated fact-preflight failures and stops after the maximum attempt", async () => {
+    const harness = createHarness();
+    await harness.store.enqueueTask({
+      id: uuid(18),
+      type: "story.accepted-version.process",
+      idempotencyKey: `story.accepted-version:${VERSION_ID}`,
+      metadata: { ...pipelineMetadata(), organizeLocalStoryFacts: true },
+      priority: 75,
+      maxAttempts: 3,
+      now: NOW,
+    });
+    const ensureRecoveredFacts = vi.fn().mockRejectedValue(new Error("fact database unavailable"));
+    const worker = new AcceptedChapterPipelineWorker(harness.runtime, {
+      ensureCurrentFacts: ensureRecoveredFacts,
+      queuedGraceMilliseconds: 0,
+    });
+
+    await expect(worker.runDueTasksNow()).resolves.toBe(1);
+    expect((await harness.store.load()).tasks[0]).toMatchObject({
+      status: "waiting_retry",
+      attempt: 2,
+      runAfter: "2026-08-08T00:00:05.000Z",
+    });
+
+    harness.setNow("2026-08-08T00:00:04.000Z");
+    await expect(worker.runDueTasksNow()).resolves.toBe(0);
+    expect(ensureRecoveredFacts).toHaveBeenCalledOnce();
+
+    harness.setNow("2026-08-08T00:00:05.000Z");
+    await expect(worker.runDueTasksNow()).resolves.toBe(1);
+    expect((await harness.store.load()).tasks[0]).toMatchObject({
+      status: "waiting_retry",
+      attempt: 3,
+      runAfter: "2026-08-08T00:00:15.000Z",
+    });
+
+    harness.setNow("2026-08-08T00:00:14.000Z");
+    await expect(worker.runDueTasksNow()).resolves.toBe(0);
+    expect(ensureRecoveredFacts).toHaveBeenCalledTimes(2);
+
+    harness.setNow("2026-08-08T00:00:15.000Z");
+    await expect(worker.runDueTasksNow()).resolves.toBe(1);
+    expect((await harness.store.load()).tasks[0]).toMatchObject({
+      status: "failed",
+      attempt: 3,
+      runAfter: null,
+      failure: {
+        code: "TASK_RETRY_EXHAUSTED",
+        causeCode: "CURRENT_SAVED_VERSION_FACTS_UNAVAILABLE",
+        retryable: false,
+        actions: ["EXPORT_DIAGNOSTICS"],
+      },
+    });
+    expect(ensureRecoveredFacts).toHaveBeenCalledTimes(3);
+    expect(harness.search).not.toHaveBeenCalled();
+    expect(harness.causal).not.toHaveBeenCalled();
+    await expect(worker.runDueTasksNow()).resolves.toBe(0);
+  });
   it("retires a legacy provider-only queued task without dispatch", async () => {
     const harness = createHarness();
     const supplementalKey = `story.accepted-version:${VERSION_ID}:backfill:v2:summary:1`;
@@ -70,6 +202,7 @@ describe("AcceptedChapterPipelineWorker", () => {
     });
 
     const worker = new AcceptedChapterPipelineWorker(harness.runtime, {
+      ensureCurrentFacts,
       queuedGraceMilliseconds: 0,
     });
     await expect(worker.runDueTasksNow()).resolves.toBe(1);
@@ -109,7 +242,9 @@ describe("AcceptedChapterPipelineWorker", () => {
     });
 
     harness.setNow("2026-08-08T00:00:31.000Z");
-    const restartedWorker = new AcceptedChapterPipelineWorker(harness.runtime);
+    const restartedWorker = new AcceptedChapterPipelineWorker(harness.runtime, {
+      ensureCurrentFacts,
+    });
     await expect(restartedWorker.runDueTasksNow()).resolves.toBe(1);
 
     expect(harness.search).toHaveBeenCalledTimes(1);
@@ -136,7 +271,9 @@ describe("AcceptedChapterPipelineWorker", () => {
     expect(retryInput(legacyQueued)?.retryTaskSequence).toBeUndefined();
 
     harness.setNow("2026-08-08T00:00:31.000Z");
-    const restartedWorker = new AcceptedChapterPipelineWorker(harness.runtime);
+    const restartedWorker = new AcceptedChapterPipelineWorker(harness.runtime, {
+      ensureCurrentFacts,
+    });
     await expect(restartedWorker.runDueTasksNow()).resolves.toBe(1);
 
     expect(harness.search).toHaveBeenCalledTimes(2);
@@ -176,7 +313,10 @@ describe("AcceptedChapterPipelineWorker", () => {
 
     harness.setNow("2026-08-08T00:00:31.000Z");
     const reportError = vi.fn();
-    const restartedWorker = new AcceptedChapterPipelineWorker(harness.runtime, { reportError });
+    const restartedWorker = new AcceptedChapterPipelineWorker(harness.runtime, {
+      ensureCurrentFacts,
+      reportError,
+    });
     await expect(restartedWorker.runDueTasksNow()).resolves.toBe(0);
     expect(reportError).toHaveBeenCalledOnce();
     expect(harness.search).toHaveBeenCalledTimes(callsBeforeRecovery.search);
@@ -201,6 +341,7 @@ describe("AcceptedChapterPipelineWorker", () => {
       now: NOW,
     });
     const worker = new AcceptedChapterPipelineWorker(harness.runtime, {
+      ensureCurrentFacts,
       queuedGraceMilliseconds: 30_000,
     });
 
@@ -254,7 +395,10 @@ describe("AcceptedChapterPipelineWorker", () => {
 
     harness.setNow("2026-08-08T00:00:31.000Z");
     const reportError = vi.fn();
-    const worker = new AcceptedChapterPipelineWorker(harness.runtime, { reportError });
+    const worker = new AcceptedChapterPipelineWorker(harness.runtime, {
+      ensureCurrentFacts,
+      reportError,
+    });
 
     await expect(worker.runDueTasksNow()).resolves.toBe(1);
     await expect(
@@ -286,6 +430,7 @@ describe("AcceptedChapterPipelineWorker", () => {
       return searchReceipt();
     });
     const worker = new AcceptedChapterPipelineWorker(harness.runtime, {
+      ensureCurrentFacts,
       queuedGraceMilliseconds: 0,
     });
 
@@ -334,11 +479,24 @@ describe("AcceptedChapterPipelineWorker", () => {
 
     expect(retryInput(task)).toMatchObject({
       source: "manual_save",
+      organizeLocalStoryFacts: false,
       runChapterSummary: false,
       runStoryState: false,
     });
     expect(
       retryInput({ ...task, metadata: { ...task.metadata, runStoryState: "yes" } }),
+    ).toBeNull();
+    expect(
+      retryInput({
+        ...task,
+        metadata: { ...task.metadata, organizeLocalStoryFacts: true },
+      }),
+    ).toMatchObject({ organizeLocalStoryFacts: true });
+    expect(
+      retryInput({
+        ...task,
+        metadata: { ...task.metadata, organizeLocalStoryFacts: "yes" },
+      }),
     ).toBeNull();
     expect(
       retryInput({
@@ -483,6 +641,7 @@ describe("AcceptedChapterPipelineWorker", () => {
       });
     }
     const worker = new AcceptedChapterPipelineWorker(harness.runtime, {
+      ensureCurrentFacts,
       queuedGraceMilliseconds: 0,
     });
 

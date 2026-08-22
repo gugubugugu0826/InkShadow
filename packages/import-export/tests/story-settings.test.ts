@@ -82,7 +82,34 @@ describe("InkShadow Story Settings JSON", () => {
     const report = preflightStorySettingsJson('{"schemaVersion":1');
 
     expect(report.status).toBe("blocked");
-    expect(report.issues[0]).toMatchObject({ code: "INVALID_JSON", path: "$" });
+    expect(report.issues[0]).toMatchObject({
+      code: "INVALID_JSON",
+      path: "$",
+      message: "文件内容无法识别为有效的故事设定。",
+    });
+  });
+
+  it("uses plain Chinese guidance for unsupported formats and list fields", () => {
+    const template = createStorySettingsTemplate();
+    const [firstCharacter] = template.characters;
+    if (firstCharacter === undefined) {
+      throw new Error("Story Settings template fixture has no character.");
+    }
+    const unsupported = preflightStorySettings({ ...template, schemaVersion: 99 });
+    const invalidList = preflightStorySettings({
+      ...template,
+      characters: [{ ...firstCharacter, aliases: "顾老师" }],
+    });
+
+    expect(unsupported.issues).toContainEqual(
+      expect.objectContaining({
+        code: "SCHEMA_VERSION_UNSUPPORTED",
+        message: "这不是当前版本支持的墨影故事设定文件。",
+      }),
+    );
+    expect(invalidList.issues).toContainEqual(
+      expect.objectContaining({ suggestedAction: "按模板使用列表填写。" }),
+    );
   });
 
   it("blocks ambiguous duplicate people and self relationships before commit", () => {

@@ -636,12 +636,15 @@ export class SqliteStoryFactStore implements StoryFactStore, LegacyStoryFactComp
       const snapshot = fact.toSnapshot();
       const updated = await this.executor.execute(
         `UPDATE story_facts
-         SET value_json = ?, status = ?, user_confirmed = ?, locked = ?, deprecated = ?,
-              needs_review = ?, confirmed_by_actor_id = ?, confirmed_at = ?,
-              revision = ?, updated_at = ?
+         SET content_text = ?, value_json = ?, confidence = ?, origin = ?, status = ?,
+              user_confirmed = ?, locked = ?, deprecated = ?, needs_review = ?,
+              confirmed_by_actor_id = ?, confirmed_at = ?, revision = ?, updated_at = ?
          WHERE id = ? AND project_id = ? AND revision = ?`,
         [
+          snapshot.contentText,
           snapshot.structuredValue === null ? null : JSON.stringify(snapshot.structuredValue),
+          snapshot.confidence,
+          snapshot.origin,
           snapshot.status,
           snapshot.userConfirmed ? 1 : 0,
           snapshot.locked ? 1 : 0,
@@ -668,6 +671,123 @@ export class SqliteStoryFactStore implements StoryFactStore, LegacyStoryFactComp
     });
   }
 
+  public mergeUserFactRevisions(
+    survivor: StoryFact,
+    survivorExpectedRevision: number,
+    duplicate: StoryFact,
+    duplicateExpectedRevision: number,
+  ): Promise<Result<void, StoryCoreError>> {
+    return runPersistence(() =>
+      this.executor.transaction(async (transaction) => {
+        assertNextRevision("Story fact", survivor.revision, survivorExpectedRevision);
+        assertNextRevision("Story fact", duplicate.revision, duplicateExpectedRevision);
+        const survivorNext = survivor.toSnapshot();
+        const duplicateNext = duplicate.toSnapshot();
+        if (
+          survivorNext.id === duplicateNext.id ||
+          survivorNext.projectId !== duplicateNext.projectId ||
+          survivorNext.factType !== duplicateNext.factType
+        ) {
+          abortPersistence(
+            validationFailure("A duplicate merge must keep two distinct facts in one project."),
+          );
+        }
+        const rows = await transaction.select<StoryFactRow>(
+          `${STORY_FACT_SELECT} WHERE fact.id IN (?, ?)`,
+          [survivorNext.id, duplicateNext.id],
+        );
+        const currentById = new Map(rows.map((row) => [row.id, hydrateFact(row)] as const));
+        const survivorCurrent = currentById.get(survivorNext.id);
+        const duplicateCurrent = currentById.get(duplicateNext.id);
+        if (survivorCurrent === undefined || duplicateCurrent === undefined || rows.length !== 2) {
+          abortPersistence(
+            new StoryCoreError({
+              code: "STORY_FACT_NOT_FOUND",
+              message: "One of the duplicate story facts was not found.",
+            }),
+          );
+        }
+        if (survivorCurrent.revision !== survivorExpectedRevision) {
+          abortPersistence(
+            storyFactRevisionConflict(survivorExpectedRevision, survivorCurrent.revision),
+          );
+        }
+        if (duplicateCurrent.revision !== duplicateExpectedRevision) {
+          abortPersistence(
+            storyFactRevisionConflict(duplicateExpectedRevision, duplicateCurrent.revision),
+          );
+        }
+        if (
+          survivorCurrent.toSnapshot().structuredValue !== null ||
+          duplicateCurrent.toSnapshot().structuredValue !== null
+        ) {
+          abortPersistence(
+            validationFailure(
+              "Structured story facts cannot be merged until a structured merge transaction is available.",
+            ),
+          );
+        }
+        const actorId = survivorNext.confirmedByActorId;
+        if (actorId === null) {
+          abortPersistence(validationFailure("A duplicate merge requires a user actor."));
+        }
+        const expectedSurvivor = survivorCurrent.recordDuplicateMergeAsUser({
+          duplicate: duplicateCurrent,
+          actorId,
+          humanConfirmed: true,
+          expectedRevision: survivorExpectedRevision,
+          now: survivorNext.updatedAt,
+        });
+        const expectedDuplicate = duplicateCurrent.deprecate({
+          humanConfirmed: true,
+          expectedRevision: duplicateExpectedRevision,
+          now: duplicateNext.updatedAt,
+        });
+        if (
+          !expectedSurvivor.ok ||
+          !expectedDuplicate.ok ||
+          JSON.stringify(expectedSurvivor.value.toSnapshot()) !== JSON.stringify(survivorNext) ||
+          JSON.stringify(expectedDuplicate.value.toSnapshot()) !== JSON.stringify(duplicateNext)
+        ) {
+          abortPersistence(validationFailure("The duplicate merge revisions are not authorized."));
+        }
+
+        for (const [snapshot, expectedRevision] of [
+          [survivorNext, survivorExpectedRevision],
+          [duplicateNext, duplicateExpectedRevision],
+        ] as const) {
+          const updated = await transaction.execute(
+            `UPDATE story_facts
+             SET content_text = ?, value_json = ?, confidence = ?, origin = ?, status = ?,
+                 user_confirmed = ?, locked = ?, deprecated = ?, needs_review = ?,
+                 confirmed_by_actor_id = ?, confirmed_at = ?, revision = ?, updated_at = ?
+             WHERE id = ? AND project_id = ? AND revision = ?`,
+            [
+              snapshot.contentText,
+              snapshot.structuredValue === null ? null : JSON.stringify(snapshot.structuredValue),
+              snapshot.confidence,
+              snapshot.origin,
+              snapshot.status,
+              snapshot.userConfirmed ? 1 : 0,
+              snapshot.locked ? 1 : 0,
+              snapshot.deprecated ? 1 : 0,
+              snapshot.needsReview ? 1 : 0,
+              snapshot.confirmedByActorId,
+              snapshot.confirmedAt,
+              snapshot.revision,
+              snapshot.updatedAt,
+              snapshot.id,
+              snapshot.projectId,
+              expectedRevision,
+            ],
+          );
+          if (updated.rowsAffected !== 1) {
+            abortPersistence(storyFactRevisionConflict(expectedRevision, expectedRevision + 1));
+          }
+        }
+      }),
+    );
+  }
   public listRevisions(
     factId: UuidV7,
   ): Promise<Result<readonly StoryFactRevision[], StoryCoreError>> {
@@ -1832,6 +1952,18 @@ function notFound(message: string): StoryCoreError {
   });
 }
 
+function storyFactRevisionConflict(
+  expectedRevision: number,
+  actualRevision: number,
+): StoryCoreError {
+  return new StoryCoreError({
+    code: "STORY_REVISION_CONFLICT",
+    message: "Story fact changed before it could be saved.",
+    retryable: true,
+    actions: ["RECOMPARE", "RETRY"],
+    details: { expectedRevision, actualRevision },
+  });
+}
 function validationFailure(message: string): StoryCoreError {
   return new StoryCoreError({
     code: "STORY_VALIDATION_FAILED",

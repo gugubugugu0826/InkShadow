@@ -5,6 +5,7 @@ import {
   AiCandidate,
   AppError,
   err,
+  type AiCandidatePurpose,
   type AiCandidateApplicationIntent,
   type AiCandidateSource,
   type Chapter,
@@ -24,11 +25,26 @@ import {
   EDITOR_PREFERENCES_STORAGE_KEY,
   saveEditorPreferences,
 } from "../infrastructure/editor-preferences-store";
+import { editorCandidateStatusLabel } from "../infrastructure/editor-candidate-status";
 import { RuntimeProvider } from "../runtime-context";
 import { WRITING_EXPERIENCE_CHANGED_EVENT } from "../hooks/use-writing-experience";
 
 describe("editor candidate route selection", () => {
-  it("shows the bounded one-time local organization notice received from direct opening", async () => {
+  it.each([
+    ["streaming", "生成中"],
+    ["ready", "等待决定"],
+    ["accepted", "已接受"],
+    ["rejected", "已放弃"],
+    ["expired", "已失效"],
+    ["unexpected_status", "状态未知"],
+  ])("shows a safe Chinese label for candidate status %s", (status, expected) => {
+    expect(editorCandidateStatusLabel(status)).toBe(expected);
+    expect(editorCandidateStatusLabel(status)).not.toMatch(
+      /streaming|ready|accepted|rejected|expired|unexpected/iu,
+    );
+  });
+
+  it("keeps background organization details out of the direct writing surface", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const { chapter, project } = await seedChapter(runtime);
     renderEditor(runtime, project, chapter, "", {
@@ -40,108 +56,91 @@ describe("editor candidate route selection", () => {
       },
     });
 
-    expect(await screen.findByText("已整理 1 条；有 1 条重要设定需要你确认。")).toBeVisible();
+    expect(await screen.findByRole("textbox", { name: "章节正文" })).toBeVisible();
+    expect(screen.queryByText("已整理 1 条；有 1 条重要设定需要你确认。")).not.toBeInTheDocument();
     expect(screen.queryByText(/direct_opening|LOCAL_|MODEL_/u)).not.toBeInTheDocument();
   });
 
-  it("keeps a direct-mode Candidate isolated until the author explicitly accepts it", async () => {
+  it("keeps a complete direct result isolated until explicit use and preserves undo", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("direct");
-    await runtime.writingExperience.authorizeDirectMode(1);
     const { chapter, project } = await seedChapter(runtime);
     const providerGenerate = vi.spyOn(runtime.modelGateway, "generate");
     const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
     if (!versionsBefore.ok) throw versionsBefore.error;
     const user = userEvent.setup();
-    renderEditor(runtime, project, chapter);
+    const rendered = renderEditor(runtime, project, chapter);
 
-    await user.click(await screen.findByRole("button", { name: "继续写" }));
+    await user.click(await screen.findByRole("button", { name: "续写" }));
 
-    await waitFor(async () => {
-      const savedCandidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
-      expect(savedCandidates.ok && savedCandidates.value.length).toBe(1);
-    });
-    expect(
-      screen.queryByText(
-        "本机安全检查没有完整通过，本次结果已保留为隔离 Candidate，等待你查看后决定。",
-      ),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(/生成期间.*已保留为隔离 Candidate|正文仍有.*隔离 Candidate/u),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(
-        "本次建议不是仅追加到章末的低风险续写，已保留为隔离 Candidate，等待你明确决定。",
-      ),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(
-        "本次结果不完整、已取消或来源不确定，已保留为隔离 Candidate，正文和版本没有改变。",
-      ),
-    ).not.toBeInTheDocument();
     await waitFor(async () => {
       const savedCandidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
       expect(savedCandidates.ok && savedCandidates.value[0]?.status).toBe("ready");
     });
-    const beforeAcceptance = await runtime.repositories.chapters.findById(chapter.id);
-    expect(beforeAcceptance.ok && beforeAcceptance.value?.content).toBe(chapter.content);
-    const versionsWhileReady = await runtime.repositories.chapterVersions.listByChapterId(
+    expect(await screen.findByRole("button", { name: "查看并使用" })).toBeVisible();
+    const stableBeforeUse = await runtime.repositories.chapters.findById(chapter.id);
+    expect(stableBeforeUse.ok && stableBeforeUse.value?.content).toBe(chapter.content);
+    const versionsBeforeUse = await runtime.repositories.chapterVersions.listByChapterId(
       chapter.id,
     );
-    expect(versionsWhileReady.ok && versionsWhileReady.value).toHaveLength(
+    expect(versionsBeforeUse.ok && versionsBeforeUse.value).toHaveLength(
       versionsBefore.value.length,
     );
-    await user.click(screen.getByRole("button", { name: "使用这版" }));
-    const review = await screen.findByRole("dialog", { name: /比较.*建议与正文/u });
+
+    await user.click(screen.getByRole("button", { name: "查看并使用" }));
+    const review = await screen.findByRole("dialog", { name: "查看创作结果与正文" });
     await user.click(within(review).getByRole("button", { name: "使用这版" }));
     await waitFor(async () => {
       const savedCandidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
       expect(savedCandidates.ok && savedCandidates.value[0]?.status).toBe("accepted");
     });
-    const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
-    if (!candidates.ok) throw candidates.error;
-    expect(candidates.value).toHaveLength(1);
-    expect(candidates.value[0]?.status).toBe("accepted");
     const saved = await runtime.repositories.chapters.findById(chapter.id);
     expect(saved.ok && saved.value?.content.length).toBeGreaterThan(chapter.content.length);
     const versionsAfter = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
     if (!versionsAfter.ok) throw versionsAfter.error;
     expect(versionsAfter.value).toHaveLength(versionsBefore.value.length + 1);
-    for (const immutableVersion of versionsBefore.value) {
-      expect(
-        versionsAfter.value.find((version) => version.id === immutableVersion.id)?.toSnapshot(),
-      ).toEqual(immutableVersion.toSnapshot());
-    }
+
+    rendered.unmount();
+    const reopened = renderEditor(runtime, project, chapter);
+    await user.click(await screen.findByRole("button", { name: "撤销本次续写" }));
+    await waitFor(async () => {
+      const restored = await runtime.repositories.chapters.findById(chapter.id);
+      expect(restored.ok && restored.value?.content).toBe(chapter.content);
+    });
+    const versionsAfterUndo = await runtime.repositories.chapterVersions.listByChapterId(
+      chapter.id,
+    );
+    expect(versionsAfterUndo.ok && versionsAfterUndo.value).toHaveLength(
+      versionsBefore.value.length + 2,
+    );
+    reopened.unmount();
+    renderEditor(runtime, project, chapter);
+    expect(await screen.findByRole("textbox", { name: "章节正文" })).toHaveValue(chapter.content);
     expect(providerGenerate).not.toHaveBeenCalled();
   });
 
-  it("keeps an unauthorized new-install direct Candidate isolated after the notice is cancelled", async () => {
+  it("starts a new installation in direct mode with a visible isolated result", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const preference = await runtime.writingExperience.getOrInitialize();
-    expect(preference).toMatchObject({
-      mode: "direct",
-      directLocalOrganizationAuthorizedAt: null,
-    });
+    expect(preference.mode).toBe("direct");
+    expect(preference.directLocalOrganizationAuthorizedAt).not.toBeNull();
     const { chapter, project } = await seedChapter(runtime);
-    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
-    if (!versionsBefore.ok) throw versionsBefore.error;
     const user = userEvent.setup();
     renderEditor(runtime, project, chapter);
 
-    await user.click(await screen.findByRole("button", { name: "生成示例建议" }));
+    await user.click(await screen.findByRole("button", { name: "续写" }));
 
     await waitFor(async () => {
       const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
       expect(candidates.ok && candidates.value[0]?.status).toBe("ready");
     });
+    expect(await screen.findByRole("button", { name: "查看并使用" })).toBeVisible();
+    expect(screen.getByText(/创作结果已保存并与正文隔离/u)).toBeVisible();
     const savedChapter = await runtime.repositories.chapters.findById(chapter.id);
     expect(savedChapter.ok && savedChapter.value?.content).toBe(chapter.content);
-    const versionsAfter = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
-    expect(versionsAfter.ok && versionsAfter.value).toHaveLength(versionsBefore.value.length);
-    expect(screen.getByRole("button", { name: /比较.*建议/u })).toBeVisible();
   });
 
-  it("requires an exact disclosure before one fake remote call and persists the matching grant", async () => {
+  it("requires a fresh exact disclosure before one remote call and explicit use", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("direct");
     await runtime.writingExperience.authorizeDirectMode(1);
@@ -176,7 +175,7 @@ describe("editor candidate route selection", () => {
     const user = userEvent.setup();
     renderEditor(runtime, project, chapter);
 
-    await user.click(await screen.findByRole("button", { name: "继续写" }));
+    await user.click(await screen.findByRole("button", { name: "续写" }));
     const preflight = await screen.findByRole("dialog", { name: "生成前检查" });
     expect(
       await within(preflight).findByText(
@@ -186,8 +185,6 @@ describe("editor candidate route selection", () => {
     expect(generate).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: /确认并开始|使用安全默认值并开始/u }));
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
-    await runtime.writingExperience.revokeDirectModeAuthorization(2);
-    window.dispatchEvent(new Event(WRITING_EXPERIENCE_CHANGED_EVENT));
     resolveGeneration({
       text: generatedText,
       usage: { inputTokens: 120, outputTokens: 80, cachedInputTokens: null },
@@ -198,12 +195,40 @@ describe("editor candidate route selection", () => {
       expect(candidates.ok && candidates.value[0]?.status).toBe("ready");
     });
     expect(generate).toHaveBeenCalledTimes(1);
-    expect(await runtime.writingExperience.listActiveDisclosureGrants()).toHaveLength(1);
+    expect(await runtime.writingExperience.listActiveDisclosureGrants()).toHaveLength(0);
+    const stableBeforeUse = await runtime.repositories.chapters.findById(chapter.id);
+    expect(stableBeforeUse.ok && stableBeforeUse.value?.content).toBe(chapter.content);
+
+    await user.click(await screen.findByRole("button", { name: "查看并使用" }));
+    const review = await screen.findByRole("dialog", { name: "查看创作结果与正文" });
+    await user.click(within(review).getByRole("button", { name: "使用这版" }));
+    const savedChapter = await waitFor(async () => {
+      const current = await runtime.repositories.chapters.findById(chapter.id);
+      if (!current.ok || current.value === null) {
+        throw new Error("明确使用续写后未找到当前正文版本");
+      }
+      expect(current.value.currentVersionId).not.toBe(chapter.currentVersionId);
+      return current.value;
+    });
+    const savedCurrentVersionId = savedChapter.currentVersionId;
     const storyProjectId = parseStoryUuidV7(project.id);
     if (!storyProjectId.ok) throw storyProjectId.error;
     await waitFor(async () => {
       const facts = await runtime.story.facts.listByProjectId(storyProjectId.value);
-      expect(facts.ok && facts.value).toEqual([]);
+      if (!facts.ok) throw facts.error;
+      const snapshots = facts.value.map((fact) => fact.toSnapshot());
+      expect(snapshots.map(({ factType }) => factType)).toEqual(
+        expect.arrayContaining(["chapter_summary", "scene_tag"]),
+      );
+      expect(
+        snapshots.every(
+          ({ source }) =>
+            source.kind === "chapter_span" &&
+            String(source.versionId) === String(savedCurrentVersionId) &&
+            source.excerpt !== null &&
+            source.excerpt.length > 0,
+        ),
+      ).toBe(true);
     });
   });
 
@@ -322,7 +347,7 @@ describe("editor candidate route selection", () => {
     expect(candidates.ok && candidates.value).toEqual([]);
   });
 
-  it("rechecks direct authority before dispatch and makes zero calls after revocation", async () => {
+  it("rechecks the writing mode before dispatch and makes zero calls after switching to professional", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     await runtime.writingExperience.authorizeDirectMode(1);
     await seedRemoteContinuationRoute(runtime);
@@ -348,9 +373,10 @@ describe("editor candidate route selection", () => {
     const user = userEvent.setup();
     renderEditor(runtime, project, chapter);
 
-    await user.click(await screen.findByRole("button", { name: "继续写" }));
+    await user.click(await screen.findByRole("button", { name: "续写" }));
     const preflight = await screen.findByRole("dialog", { name: "生成前检查" });
-    await runtime.writingExperience.revokeDirectModeAuthorization(2);
+    const directPreference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", directPreference.revision);
     window.dispatchEvent(new Event(WRITING_EXPERIENCE_CHANGED_EVENT));
     await user.click(
       within(preflight).getByRole("button", { name: /确认并开始|使用安全默认值并开始/u }),
@@ -404,7 +430,7 @@ describe("editor candidate route selection", () => {
     renderEditor(runtime, project, chapter);
     window.localStorage.removeItem(EDITOR_PREFERENCES_STORAGE_KEY);
 
-    await user.click(await screen.findByRole("button", { name: "继续写" }));
+    await user.click(await screen.findByRole("button", { name: "续写" }));
     const preflight = await screen.findByRole("dialog", { name: "生成前检查" });
     await user.click(
       within(preflight).getByRole("button", { name: /确认并开始|使用安全默认值并开始/u }),
@@ -437,7 +463,7 @@ describe("editor candidate route selection", () => {
     expect(versionsAfter.ok && versionsAfter.value).toHaveLength(versionsBefore.value.length);
   });
 
-  it("does not start a Candidate acceptance transaction after direct generation", async () => {
+  it("runs exactly one atomic acceptance transaction only after explicit use", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     await runtime.writingExperience.authorizeDirectMode(1);
     const { chapter, project } = await seedChapter(runtime);
@@ -445,15 +471,258 @@ describe("editor candidate route selection", () => {
     const user = userEvent.setup();
     renderEditor(runtime, project, chapter);
 
-    await user.click(await screen.findByRole("button", { name: "继续写" }));
+    await user.click(await screen.findByRole("button", { name: "续写" }));
     await waitFor(async () => {
       const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
       expect(candidates.ok && candidates.value[0]?.status).toBe("ready");
     });
     const editor = screen.getByRole("textbox", { name: "章节正文" });
-    expect(editor).not.toHaveAttribute("readonly");
     expect(editor).toHaveValue(chapter.content);
     expect(accept).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "查看并使用" }));
+    const review = await screen.findByRole("dialog", { name: "查看创作结果与正文" });
+    await user.click(within(review).getByRole("button", { name: "使用这版" }));
+    await waitFor(() => {
+      expect(accept).toHaveBeenCalledTimes(1);
+      expect((editor as HTMLTextAreaElement).value.length).toBeGreaterThan(chapter.content.length);
+    });
+  });
+
+  it("prepares exactly three equal directions and replaces them only after an explicit refresh", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.writingExperience.authorizeDirectMode(1);
+    await seedRemoteContinuationRoute(runtime);
+    const firstGroup = [
+      "方向一：林晚追查旧站台的神秘来信，并发现寄信人留下的新线索。",
+      "方向二：突如其来的停电迫使林晚与陌生旅客合作寻找出口。",
+      "方向三：林晚决定暂时离开站台，先回家核对日记中被改写的内容。",
+    ].join("\n");
+    const secondGroup = [
+      "方向一：列车到站后无人下车，林晚登车寻找声音的来源。",
+      "方向二：警方封锁站台，林晚必须在盘问中隐瞒那封来信。",
+      "方向三：多年未见的朋友突然出现，要求林晚立刻销毁日记。",
+    ].join("\n");
+    const generate = installRemoteTextGenerator(runtime, [firstGroup, secondGroup]);
+    const { chapter, project } = await seedChapter(runtime);
+    const accept = vi.spyOn(runtime.useCases.acceptCandidate, "execute");
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+
+    await user.click(await screen.findByRole("button", { name: "选择方向" }));
+    expect(generate).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    const firstOptions = await screen.findByLabelText("三个创作方向");
+    expect(within(firstOptions).getAllByRole("button")).toHaveLength(3);
+    expect(
+      within(firstOptions).getByRole("button", {
+        name: /方向一：林晚追查旧站台的神秘来信/u,
+      }),
+    ).toBeVisible();
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(accept).not.toHaveBeenCalled();
+    const firstCandidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
+    if (!firstCandidates.ok) throw firstCandidates.error;
+    const firstDirection = firstCandidates.value.find(
+      (item) => item.purpose === "continuation_directions",
+    );
+    if (firstDirection === undefined) throw new Error("缺少第一组方向候选");
+
+    await user.click(screen.getByRole("button", { name: "换一组" }));
+    expect(generate).toHaveBeenCalledTimes(1);
+    await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    expect(within(firstOptions).getAllByRole("button")).toHaveLength(3);
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(
+      await screen.findByRole("button", {
+        name: /方向一：列车到站后无人下车/u,
+      }),
+    ).toBeVisible();
+    expect(screen.getByLabelText("三个创作方向")).toBeVisible();
+    expect(within(screen.getByLabelText("三个创作方向")).getAllByRole("button")).toHaveLength(3);
+    await waitFor(async () => {
+      const persisted = await runtime.repositories.aiCandidates.findById(firstDirection.id);
+      expect(persisted.ok && persisted.value?.status).toBe("rejected");
+    });
+    expect(accept).not.toHaveBeenCalled();
+  });
+
+  it("reuses system and custom directions for continuation, retaining the group after failure", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.writingExperience.authorizeDirectMode(1);
+    await seedRemoteContinuationRoute(runtime);
+    const systemDirection = "林晚追上即将离站的列车，在空车厢里寻找寄信人。";
+    const directionGroup = [
+      "方向一：" + systemDirection,
+      "方向二：林晚留在站台调查停电原因，并发现有人一直在监视她。",
+      "方向三：林晚先回到住处核对日记，确认哪些记忆已经被篡改。",
+    ].join("\n");
+    const customDirection = "让林晚先联系旧友，再一起调查站台里的暗门。";
+    const completedProse =
+      "\n林晚拨通旧友的电话，压低声音说出站台编号。十分钟后，两人在关闭的候车室会合，沿着墙面逐寸寻找，终于在广告牌后摸到一道冰冷的门缝。门内传来的脚步声让他们同时停住，却也证明那封信并非恶作剧。";
+    const generate = installRemoteTextGenerator(runtime, [
+      directionGroup,
+      new Error("provider failed"),
+      completedProse,
+    ]);
+    const { chapter, project } = await seedChapter(runtime);
+    const accept = vi.spyOn(runtime.useCases.acceptCandidate, "execute");
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+
+    await user.click(await screen.findByRole("button", { name: "选择方向" }));
+    expect(generate).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    const systemOption = await screen.findByRole("button", {
+      name: /方向一：林晚追上即将离站的列车/u,
+    });
+    const customInput = screen.getByRole("textbox", { name: /自定义方向/u });
+    await user.type(customInput, customDirection);
+    await user.click(systemOption);
+    const systemPreflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    await user.click(
+      within(systemPreflight).getByRole("button", {
+        name: /确认并开始|使用安全默认值并开始/u,
+      }),
+    );
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(
+      generate.mock.calls[1]?.[0].messages.some(({ content }) =>
+        content.includes(systemDirection.normalize("NFKC")),
+      ),
+    ).toBe(true);
+    expect(await screen.findByText("本次创作未完成")).toBeVisible();
+    expect(systemOption).toBeVisible();
+    expect(customInput).toHaveValue(customDirection);
+    expect(accept).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "按这个方向写" }));
+    const customPreflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    await user.click(
+      within(customPreflight).getByRole("button", {
+        name: /确认并开始|使用安全默认值并开始/u,
+      }),
+    );
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(3));
+    expect(
+      generate.mock.calls[2]?.[0].messages.some(({ content }) =>
+        content.includes(customDirection.normalize("NFKC")),
+      ),
+    ).toBe(true);
+    expect(accept).not.toHaveBeenCalled();
+    const stableBeforeUse = await runtime.repositories.chapters.findById(chapter.id);
+    expect(stableBeforeUse.ok && stableBeforeUse.value?.content).toBe(chapter.content);
+    await user.click(await screen.findByRole("button", { name: "查看并使用" }));
+    const review = await screen.findByRole("dialog", {
+      name: "查看创作结果与正文",
+    });
+    expect(within(review).getByRole("textbox", { name: "可编辑的创作结果" })).toHaveValue(
+      "\n" + completedProse,
+    );
+    await user.click(within(review).getByRole("button", { name: "使用这版" }));
+    await waitFor(() => expect(accept).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByLabelText("三个创作方向")).not.toBeInTheDocument());
+    await waitFor(async () => {
+      const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
+      if (!candidates.ok) throw candidates.error;
+      const direction = candidates.value.find((item) => item.purpose === "continuation_directions");
+      expect(direction?.status).toBe("rejected");
+    });
+  });
+
+  it("keeps custom input and exposes retry when a direction response cannot be parsed", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.writingExperience.authorizeDirectMode(1);
+    await seedRemoteContinuationRoute(runtime);
+    const generate = installRemoteTextGenerator(runtime, [
+      "只返回了一个模糊方向",
+      "方向一：三个方向缺失",
+    ]);
+    const { chapter, project } = await seedChapter(runtime);
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+
+    await user.click(await screen.findByRole("button", { name: "选择方向" }));
+    expect(generate).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    expect(await screen.findByText("暂时无法准备方向")).toBeVisible();
+    expect(generate).toHaveBeenCalledTimes(1);
+    const customInput = screen.getByRole("textbox", { name: /自定义方向/u });
+    await user.type(customInput, "保留我输入的方向");
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    expect(generate).toHaveBeenCalledTimes(1);
+    await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    expect(customInput).toHaveValue("保留我输入的方向");
+    expect(await screen.findByText("暂时无法准备方向")).toBeVisible();
+    expect(screen.queryByLabelText("三个创作方向")).not.toBeInTheDocument();
+  });
+
+  it("invalidates saved directions after a正文 version change", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.writingExperience.authorizeDirectMode(1);
+    await seedRemoteContinuationRoute(runtime);
+    installRemoteTextGenerator(runtime, [
+      [
+        "方向一：林晚继续调查站台来信的来源。",
+        "方向二：林晚转而寻找日记被改写的原因。",
+        "方向三：林晚联系旧友共同检查隐藏暗门。",
+      ].join("\n"),
+    ]);
+    const { chapter, project } = await seedChapter(runtime);
+    saveEditorPreferences(window.localStorage, {
+      autosaveEnabled: false,
+      autosaveDebounceMs: 1_000,
+    });
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+
+    await user.click(await screen.findByRole("button", { name: "选择方向" }));
+    await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    expect(await screen.findByLabelText("三个创作方向")).toBeVisible();
+    const directions = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
+    if (!directions.ok) throw directions.error;
+    const direction = directions.value.find((item) => item.purpose === "continuation_directions");
+    if (direction === undefined) throw new Error("缺少待失效的方向候选");
+    const editor = screen.getByRole("textbox", { name: "章节正文" });
+    await user.click(editor);
+    await user.keyboard("{End}新的正文");
+    await user.click(await screen.findByRole("button", { name: "保存正文" }));
+    await waitFor(async () => {
+      const persisted = await runtime.repositories.aiCandidates.findById(direction.id);
+      expect(persisted.ok && persisted.value?.status).toBe("rejected");
+    });
+    expect(screen.queryByLabelText("三个创作方向")).not.toBeInTheDocument();
+  });
+
+  it("never surfaces or regenerates a direction candidate in professional mode", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
+    const { chapter, project } = await seedChapter(runtime);
+    const direction = await createReadyCandidate(
+      runtime,
+      project,
+      chapter,
+      [
+        "方向一：林晚继续调查站台来信的来源。",
+        "方向二：林晚转而寻找日记被改写的原因。",
+        "方向三：林晚联系旧友共同检查隐藏暗门。",
+      ].join("\n"),
+      { purpose: "continuation_directions" },
+    );
+    const generate = vi.spyOn(runtime.modelGateway, "generate");
+    renderEditor(runtime, project, chapter, "?candidate=" + direction.id);
+
+    expect(await screen.findByRole("heading", { name: "AI 创作助手" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "选择方向" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("三个创作方向")).not.toBeInTheDocument();
+    await waitFor(async () => {
+      const persisted = await runtime.repositories.aiCandidates.findById(direction.id);
+      expect(persisted.ok && persisted.value?.status).toBe("rejected");
+    });
+    expect(generate).not.toHaveBeenCalled();
   });
 
   it("locks editor input while a manual Candidate acceptance is pending", async () => {
@@ -688,6 +957,7 @@ describe("editor candidate route selection", () => {
 
   it("locks editor input while a version restore transaction is pending", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
+    const directPreference = await runtime.writingExperience.getOrInitialize();
     const seeded = await seedChapter(runtime);
     const edited = await runtime.useCases.editChapter.execute({
       chapterId: seeded.chapter.id,
@@ -734,9 +1004,103 @@ describe("editor candidate route selection", () => {
     fireEvent.change(editor, { target: { value: "恢复期间不应进入的输入" } });
     expect(editor).toHaveValue(saved.value.chapter.content);
 
+    await runtime.writingExperience.switchMode("professional", directPreference.revision);
+
     releaseRestore();
     await waitFor(() => expect(editor).not.toHaveAttribute("readonly"));
     expect(editor).toHaveValue(seeded.chapter.content);
+    const restoredChapter = await runtime.repositories.chapters.findById(seeded.chapter.id);
+    if (!restoredChapter.ok || restoredChapter.value === null) {
+      throw new Error("Expected the restored chapter.");
+    }
+    const restoredVersions = await runtime.repositories.chapterVersions.listByChapterId(
+      seeded.chapter.id,
+    );
+    if (!restoredVersions.ok) throw restoredVersions.error;
+    const restoredVersion = restoredVersions.value.find(
+      (version) => version.id === restoredChapter.value?.currentVersionId,
+    );
+    const previousVersion = restoredVersions.value.find(
+      (version) => version.id === saved.value.chapter.currentVersionId,
+    );
+    expect(previousVersion?.toSnapshot().organizeLocalStoryFacts).toBe(false);
+    expect(restoredVersion?.toSnapshot().organizeLocalStoryFacts).toBe(true);
+    expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("professional");
+  });
+
+  it("keeps a restored正文 version safe when direct fact preflight fails", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.writingExperience.getOrInitialize();
+    const seeded = await seedChapter(runtime);
+    const edited = await runtime.useCases.editChapter.execute({
+      chapterId: seeded.chapter.id,
+      expectedRevision: seeded.chapter.revision,
+      content: "当前第二版正文。",
+      cursorOffset: 8,
+    });
+    if (!edited.ok) throw edited.error;
+    const saved = await runtime.useCases.saveChapter.execute({
+      chapterId: seeded.chapter.id,
+      expectedRevision: seeded.chapter.revision,
+      reason: "manual",
+    });
+    if (!saved.ok) throw saved.error;
+    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(
+      seeded.chapter.id,
+    );
+    if (!versionsBefore.ok) throw versionsBefore.error;
+
+    const user = userEvent.setup();
+    renderEditor(runtime, seeded.project, saved.value.chapter);
+    const editor = await screen.findByRole("textbox", { name: "章节正文" });
+    vi.spyOn(runtime.story.facts, "listByProjectId").mockRejectedValue(
+      new Error("CURRENT_VERSION_FACTS_UNAVAILABLE"),
+    );
+    const startTask = vi.spyOn(runtime.taskCenter, "startTask");
+    const search = vi.spyOn(runtime.search, "rebuildProject");
+    const summary = vi.spyOn(runtime.story.chapterSummaries, "summarizeSavedVersion");
+    const storyState = vi.spyOn(runtime.story.continuousState, "extractSavedVersion");
+    const causal = vi.spyOn(runtime.story.causalProjector, "rebuildProject");
+
+    await user.click(screen.getByRole("button", { name: "版本历史" }));
+    const history = await screen.findByRole("dialog", { name: "版本历史" });
+    await user.click(within(history).getByRole("button", { name: "恢复此版本" }));
+    const restore = await screen.findByRole("dialog", { name: /恢复版本/u });
+    await user.click(within(restore).getByRole("button", { name: "创建恢复版本" }));
+
+    expect(
+      await screen.findByText(
+        "恢复版本与正文已安全保存；故事资料整理暂未完成，可在任务与通知中重试。",
+        undefined,
+        { timeout: 5_000 },
+      ),
+    ).toBeVisible();
+    expect(editor).toHaveValue(seeded.chapter.content);
+    const restoredChapter = await runtime.repositories.chapters.findById(seeded.chapter.id);
+    if (!restoredChapter.ok || restoredChapter.value === null) {
+      throw new Error("恢复后的章节不存在。");
+    }
+    expect(restoredChapter.value.content).toBe(seeded.chapter.content);
+    expect(restoredChapter.value.currentVersionId).not.toBe(saved.value.chapter.currentVersionId);
+    const versionsAfter = await runtime.repositories.chapterVersions.listByChapterId(
+      seeded.chapter.id,
+    );
+    if (!versionsAfter.ok) throw versionsAfter.error;
+    expect(versionsAfter.value).toHaveLength(versionsBefore.value.length + 1);
+    for (const stableVersion of versionsBefore.value) {
+      expect(versionsAfter.value.find(({ id }) => id === stableVersion.id)?.toSnapshot()).toEqual(
+        stableVersion.toSnapshot(),
+      );
+    }
+    const queuedTask = (await runtime.taskCenter.load()).tasks.find(
+      (task) => task.status === "queued",
+    );
+    expect(queuedTask?.metadata).toMatchObject({ organizeLocalStoryFacts: true });
+    expect(startTask).not.toHaveBeenCalled();
+    expect(search).not.toHaveBeenCalled();
+    expect(summary).not.toHaveBeenCalled();
+    expect(storyState).not.toHaveBeenCalled();
+    expect(causal).not.toHaveBeenCalled();
   });
 
   it("opens the exact ready UUIDv7 candidate requested by the query", async () => {
@@ -797,7 +1161,7 @@ describe("editor candidate route selection", () => {
       {
         id: candidate.id,
         kind: "idea",
-        status: "completed",
+        status: "active",
         currentState: "candidate_ready",
         projectId: project.id,
         chapterId: chapter.id,
@@ -806,7 +1170,7 @@ describe("editor candidate route selection", () => {
         snapshot: { previewSource: "local_fallback" },
         createdAt: now,
         updatedAt: now,
-        completedAt: now,
+        completedAt: null,
       },
       1,
       {
@@ -833,6 +1197,148 @@ describe("editor candidate route selection", () => {
     expect(await screen.findByRole("dialog", { name: "比较本地草案与正文" })).toBeVisible();
   });
 
+  it.each([
+    { action: "使用这版", decision: "accepted", finalState: "candidate_accepted" },
+    { action: "放弃", decision: "rejected", finalState: "candidate_rejected" },
+  ] as const)(
+    "settles an active idea journey after the author chooses $action on a blank chapter",
+    async ({ action, decision, finalState }) => {
+      window.localStorage.clear();
+      const runtime = createDevelopmentRuntime(window.localStorage);
+      expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("direct");
+      const { chapter, project } = await seedChapter(runtime, "");
+      const candidate = await createReadyCandidate(runtime, project, chapter, "明确决定的开头", {
+        source: "generate",
+      });
+      await seedActiveIdeaCandidateJourney(runtime, project, chapter, candidate);
+      const rejectCandidate = vi.spyOn(runtime.useCases.rejectCandidate, "execute");
+      const user = userEvent.setup();
+
+      renderEditor(runtime, project, chapter, "?candidate=" + candidate.id);
+
+      await user.click(await screen.findByRole("button", { name: /查看.*版本/u }));
+      const review = await screen.findByRole("dialog");
+      const decisionButton = within(review).getByRole("button", { name: action });
+      if (action === "放弃") {
+        fireEvent.click(decisionButton);
+        fireEvent.click(decisionButton);
+      } else {
+        await user.click(decisionButton);
+      }
+
+      await waitFor(async () => {
+        const persistedCandidate = await runtime.repositories.aiCandidates.findById(candidate.id);
+        expect(persistedCandidate.ok && persistedCandidate.value?.status).toBe(decision);
+        const journey = await runtime.creativeJourneys.findById(candidate.id);
+        expect(journey).toMatchObject({
+          status: "completed",
+          currentState: finalState,
+        });
+      });
+      const stable = await runtime.repositories.chapters.findById(chapter.id);
+      expect(stable.ok && stable.value?.content).toBe(
+        decision === "accepted" ? candidate.content : "",
+      );
+      const versions = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+      expect(versions.ok && versions.value).toHaveLength(decision === "accepted" ? 2 : 1);
+      expect(await runtime.creativeJourneys.listActive("idea")).toHaveLength(0);
+      if (action === "放弃") {
+        expect(rejectCandidate).toHaveBeenCalledOnce();
+        expect(screen.queryByText(/冲突/u)).not.toBeInTheDocument();
+      }
+    },
+  );
+
+  it("allows only one winner when accept and reject are activated in the same commit cycle", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime, "");
+    const candidate = await createReadyCandidate(runtime, project, chapter, "同周期决定的开头", {
+      source: "generate",
+    });
+    await seedActiveIdeaCandidateJourney(runtime, project, chapter, candidate);
+    const acceptCandidate = vi.spyOn(runtime.useCases.acceptCandidate, "execute");
+    const rejectCandidate = vi.spyOn(runtime.useCases.rejectCandidate, "execute");
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter, "?candidate=" + candidate.id);
+
+    await user.click(await screen.findByRole("button", { name: /查看.*版本/u }));
+    const review = await screen.findByRole("dialog");
+    fireEvent.click(within(review).getByRole("button", { name: "使用这版" }));
+    fireEvent.click(within(review).getByRole("button", { name: "放弃" }));
+
+    await waitFor(async () => {
+      const persistedCandidate = await runtime.repositories.aiCandidates.findById(candidate.id);
+      expect(persistedCandidate.ok && persistedCandidate.value?.status).toBe("accepted");
+    });
+    expect(acceptCandidate).toHaveBeenCalledOnce();
+    expect(rejectCandidate).not.toHaveBeenCalled();
+    const stableChapter = await runtime.repositories.chapters.findById(chapter.id);
+    expect(stableChapter.ok && stableChapter.value?.content).toBe(candidate.content);
+    const versions = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    expect(versions.ok && versions.value).toHaveLength(2);
+    expect(await runtime.creativeJourneys.findById(candidate.id)).toMatchObject({
+      status: "completed",
+      currentState: "candidate_accepted",
+    });
+    expect(screen.queryByText(/冲突/u)).not.toBeInTheDocument();
+  });
+
+  it("repairs the journey on reopen when acceptance succeeded but its first settlement write failed", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("direct");
+    const { chapter, project } = await seedChapter(runtime, "");
+    const candidate = await createReadyCandidate(runtime, project, chapter, "重开后结算的开头", {
+      source: "generate",
+    });
+    await seedActiveIdeaCandidateJourney(runtime, project, chapter, candidate);
+    const originalUpdate = runtime.creativeJourneys.update.bind(runtime.creativeJourneys);
+    let failSettlementOnce = true;
+    vi.spyOn(runtime.creativeJourneys, "update").mockImplementation(
+      (record, expectedRevision, turn) => {
+        if (
+          failSettlementOnce &&
+          record.status === "completed" &&
+          record.currentState === "candidate_accepted"
+        ) {
+          failSettlementOnce = false;
+          return Promise.reject(new Error("simulated journey settlement failure"));
+        }
+        return originalUpdate(record, expectedRevision, turn);
+      },
+    );
+    const user = userEvent.setup();
+    const first = renderEditor(runtime, project, chapter, "?candidate=" + candidate.id);
+
+    await user.click(await screen.findByRole("button", { name: /查看.*版本/u }));
+    const review = await screen.findByRole("dialog");
+    await user.click(within(review).getByRole("button", { name: "使用这版" }));
+    await waitFor(async () => {
+      const persistedCandidate = await runtime.repositories.aiCandidates.findById(candidate.id);
+      expect(persistedCandidate.ok && persistedCandidate.value?.status).toBe("accepted");
+    });
+    expect(await runtime.creativeJourneys.findById(candidate.id)).toMatchObject({
+      status: "active",
+      currentState: "candidate_ready",
+    });
+    const stableAfterAcceptance = await runtime.repositories.chapters.findById(chapter.id);
+    expect(stableAfterAcceptance.ok && stableAfterAcceptance.value?.content).toBe(
+      candidate.content,
+    );
+    first.unmount();
+
+    renderEditor(runtime, project, chapter, "?candidate=" + candidate.id);
+
+    await waitFor(async () => {
+      expect(await runtime.creativeJourneys.findById(candidate.id)).toMatchObject({
+        status: "completed",
+        currentState: "candidate_accepted",
+      });
+    });
+    const versions = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    expect(versions.ok && versions.value).toHaveLength(2);
+  });
   it("uses a neutral label when a generate candidate has no trustworthy origin receipt", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const { chapter, project } = await seedChapter(runtime);
@@ -1311,7 +1817,10 @@ function renderEditor(
   );
 }
 
-async function seedChapter(runtime: DesktopRuntime): Promise<{
+async function seedChapter(
+  runtime: DesktopRuntime,
+  content = "稳定正文",
+): Promise<{
   readonly project: Project;
   readonly chapter: Chapter;
 }> {
@@ -1322,7 +1831,7 @@ async function seedChapter(runtime: DesktopRuntime): Promise<{
   const chapter = await runtime.useCases.createChapter.execute({
     projectId: project.value.id,
     title: "第一章",
-    content: "稳定正文",
+    content,
   });
   if (!chapter.ok) {
     throw chapter.error;
@@ -1401,6 +1910,39 @@ async function seedRemoteContinuationRoute(runtime: DesktopRuntime): Promise<voi
   });
 }
 
+function installRemoteTextGenerator(
+  runtime: DesktopRuntime,
+  responses: readonly (string | Error)[],
+) {
+  let responseIndex = 0;
+  const generate = vi.fn<NativeModelGatewayClient["generate"]>(() => {
+    const response = responses[responseIndex];
+    responseIndex += 1;
+    if (response instanceof Error) return Promise.reject(response);
+    if (response === undefined) return Promise.reject(new Error("没有为本次测试准备返回内容"));
+    return Promise.resolve({
+      text: response,
+      usage: { inputTokens: 120, outputTokens: 80, cachedInputTokens: null },
+    });
+  });
+  Object.assign(runtime, {
+    mode: "tauri" as const,
+    modelGateway: {
+      available: true,
+      listModels: () =>
+        Promise.resolve({
+          provider: "open_ai_compatible" as const,
+          models: [{ id: "direct-writer", displayName: "Direct writer" }],
+        }),
+      checkConnection: () => Promise.reject(new Error("not used")),
+      embed: () => Promise.reject(new Error("not used")),
+      generate,
+      cancelGeneration: () => Promise.resolve(true),
+    } satisfies NativeModelGatewayClient,
+  });
+  return generate;
+}
+
 async function createReadyCandidate(
   runtime: DesktopRuntime,
   project: Project,
@@ -1408,6 +1950,7 @@ async function createReadyCandidate(
   content: string,
   options: Readonly<{
     source?: AiCandidateSource;
+    purpose?: AiCandidatePurpose;
     applicationIntent?: AiCandidateApplicationIntent;
   }> = {},
 ): Promise<AiCandidate> {
@@ -1418,6 +1961,7 @@ async function createReadyCandidate(
     source: options.source ?? "agent",
     baseVersionId: chapter.currentVersionId,
     now: runtime.clock.now(),
+    ...(options.purpose === undefined ? {} : { purpose: options.purpose }),
     ...(options.applicationIntent === undefined
       ? {}
       : { applicationIntent: options.applicationIntent }),
@@ -1438,4 +1982,47 @@ async function createReadyCandidate(
     throw created.error;
   }
   return ready.value;
+}
+
+async function seedActiveIdeaCandidateJourney(
+  runtime: DesktopRuntime,
+  project: Project,
+  chapter: Chapter,
+  candidate: AiCandidate,
+): Promise<void> {
+  const now = runtime.clock.now();
+  await runtime.creativeJourneys.create(
+    {
+      id: candidate.id,
+      kind: "idea",
+      status: "active",
+      currentState: "candidate_ready",
+      projectId: project.id,
+      chapterId: chapter.id,
+      candidateId: candidate.id,
+      revision: 1,
+      snapshot: Object.freeze({ previewSource: "provider" }),
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+    },
+    {
+      id: runtime.ids.next(),
+      journeyId: candidate.id,
+      sequence: 1,
+      kind: "keep",
+      questionKey: null,
+      generationSource: "provider",
+      providerId: null,
+      modelId: null,
+      taskKey: "opening_guidance",
+      requestId: candidate.id,
+      snapshot: Object.freeze({
+        candidateId: candidate.id,
+        decision: "ready",
+        previewSource: "provider",
+      }),
+      createdAt: now,
+    },
+  );
 }

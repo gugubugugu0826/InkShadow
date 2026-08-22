@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-import { authorizeDirectMode } from "./support/writing-experience";
+import { switchFreshInstallToProfessionalMode } from "./support/writing-experience";
 
 const TARGET_VIEWPORTS = [
   { width: 1440, height: 900 },
@@ -16,7 +16,7 @@ test("keeps every primary writing region reachable at 1440, 1280, 1024, and 800"
   page,
 }) => {
   await page.setViewportSize(TARGET_VIEWPORTS[0]);
-  const editorUrl = await openFreshSampleEditor(page);
+  const editorUrl = await openFreshProfessionalSampleEditor(page);
 
   for (const viewport of TARGET_VIEWPORTS) {
     await page.setViewportSize(viewport);
@@ -47,7 +47,7 @@ test("keeps every primary writing region reachable at 1440, 1280, 1024, and 800"
 
 test("keeps ordinary project cards inside their responsive columns", async ({ page }) => {
   await page.setViewportSize(TARGET_VIEWPORTS[0]);
-  const editorUrl = await openFreshSampleEditor(page);
+  const editorUrl = await openFreshProfessionalSampleEditor(page);
   const projectId = projectIdFromEditorUrl(editorUrl);
   const ordinaryAreas = ["outline", "story", "checks"] as const;
 
@@ -87,7 +87,7 @@ test("keeps writing, Story Settings import, and all 22 Model Hub tasks reachable
       mobile: false,
     });
 
-    const editorUrl = await openFreshSampleEditor(page);
+    const editorUrl = await openFreshProfessionalSampleEditor(page);
     const zoomEvidence = await page.evaluate(() => ({
       innerWidth: window.innerWidth,
       innerHeight: window.innerHeight,
@@ -184,7 +184,7 @@ test("keeps the 200% writing path usable in light appearance", async ({ browser,
       mobile: false,
     });
 
-    await openFreshSampleEditor(page);
+    await openFreshProfessionalSampleEditor(page);
     const editor = page.getByRole("textbox", { name: "章节正文" });
     await expect(page.locator(".writing-canvas")).toHaveAttribute("data-surface", "light");
     await expectMinimumWidth(editor);
@@ -201,11 +201,11 @@ test("keeps the 200% writing path usable in light appearance", async ({ browser,
   }
 });
 
-async function openFreshSampleEditor(page: Page): Promise<string> {
+async function openFreshProfessionalSampleEditor(page: Page): Promise<string> {
   await page.goto("/#/start");
   await page.evaluate(() => window.localStorage.clear());
   await page.reload();
-  await authorizeDirectMode(page);
+  await switchFreshInstallToProfessionalMode(page);
   await page.getByRole("button", { name: "体验示例作品" }).click();
   await expect(page.getByRole("textbox", { name: "章节正文" })).toBeVisible();
   return page.url();

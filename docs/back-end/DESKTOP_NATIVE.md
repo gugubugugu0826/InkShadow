@@ -1,14 +1,14 @@
 # InkShadow Desktop 原生层逐文件指引
 
-> 基于源码快照：2026-08-21  
+> 基于源码快照：2026-08-22  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 当前应用清单版本：`0.2.6`；最新已发布版本：`v0.2.5` 工程预览版；设计基线：`DESIGN v0.3.1b`  
+> 当前工作树应用清单版本：`0.2.7`；最新公开版本：`v0.2.6` 工程预发布；设计基线：`DESIGN v0.3.1b`  
 > 覆盖范围：`apps/desktop/src-tauri`、本地 SQLite 原生桥、自动备份、系统凭据库、原生网络、项目密钥、安全更新与系统容量
 
-当前 `v0.2.6` 修复工作树的应用清单已升至 `0.2.6`；下文已同步工作树中的
-Tauri 迁移 `74`、SQLite 重载恢复、自动备份清单第 2 版和能力验证调用回执。
-当前修复源码提交 `722e67e` 的隔离 Windows Tauri 程序已完成 D1–D5 聚焦验证；包含本报告的
-干净候选提交仍待创建，其全量验证、推送、打包和发布结论仍待完成。
+`v0.2.6` 已冻结 Tauri `74`、SQLite 重载恢复、自动备份清单第 2 版和能力验证调用回执。
+当前 `v0.2.7` 工作树把应用清单升至 `0.2.7`，只向前追加 Data `0072`–`0075` / Tauri
+`75`–`78`；当前工作树原生层和全量门禁已通过，真实模型、系统百分之二百缩放、干净候选、打包和发布仍待完成。
+历史隔离 Windows 聚焦结果继续只绑定 `722e67e`，不能外推为当前安装程序验证。
 
 ## 1. 它不是传统“后端”
 
@@ -57,7 +57,7 @@ React 页面
 | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
 | `apps/desktop/src-tauri/src/main.rs`                   | Windows GUI subsystem 入口；Release 隐藏控制台。                                                   |
 | `apps/desktop/src-tauri/src/lib.rs`                    | 模块组合、Tauri 启动、共享状态、插件和 60 个 command 注册。                                        |
-| `apps/desktop/src-tauri/src/local_migrations.rs`       | 把 `packages/data` 与 `packages/story-core` 的 74 个 SQL migration 编译进二进制并交给 SQLx。       |
+| `apps/desktop/src-tauri/src/local_migrations.rs`       | 把 `packages/data` 与 `packages/story-core` 的 78 个 SQL migration 编译进二进制并交给 SQLx。       |
 | `apps/desktop/src-tauri/src/automatic_backup.rs`       | 应用专属自动备份根、所有权标记、租约、清单第 2 版、独立快照创建、完整性核验和受限清理。            |
 | `apps/desktop/src-tauri/src/native_export_artifact.rs` | 导出保存对话框、一次性目标票据、目标身份复核、无覆盖竞态写入及落盘后大小/SHA 回读验证。            |
 | `apps/desktop/src-tauri/src/native_sqlite.rs`          | 固定库打开、迁移、查询、写入、事务、备份/恢复受控语句、资源上限和失败关闭。                        |
@@ -113,8 +113,8 @@ React 页面
 - 打开时强制 `foreign_keys=ON`、WAL、`synchronous=NORMAL`、5 秒 busy timeout。
 - 配置和全部 migration 验证成功后才返回随机会话 token。
 - migration 校验和不一致会报 `SQLITE_MIGRATION_INTEGRITY_FAILED` 并停止，而不是覆盖用户数据。
-- 当前工作树前向上限为 Data `0071_model_capability_probe_invocation_ledger.sql` / Tauri `74`；
-  71 个 Data migration 与 3 个 story-core migration 合并为一个原生连续序列，所以目录前缀与
+- 当前工作树前向上限为 Data `0075_generation_attempt_privacy_snapshot.sql` / Tauri `78`；
+  75 个 Data migration 与 3 个 story-core migration 合并为一个原生连续序列，所以目录前缀与
   原生版本不要求相同。`0066`–`0068` / Tauri `69`–`71` 依次追加写作体验偏好与 Provider 披露
   grant、有界一致性调查四表，以及只统计 active grant 的上限修复。`0069` / Tauri `72` 在模型
   step 上预留 content-free invocation UUID；账本 INSERT 会在同一 SQLite 语句中绑定 step 和
@@ -123,6 +123,11 @@ React 页面
   权威性、隐私与 currentness 字段；旧行保持 `legacy_unknown`，必须重建后才可作为当前范围使用。
   `0071` / Tauri `74` 为固定能力验证新增独立调用任务，并让能力证据可空、唯一地绑定同一目录项
   的终态调用记录；迁移前后既有调用行数必须一致。
+  `0072` / Tauri `75` 为隔离结果增加不可变用途并禁止方向选项被接受为正文；`0073` / Tauri
+  `76` 收紧用户故事事实内容修订和治理转换，同时保留事实身份、来源证据和递增修订。
+  `0074` / Tauri `77` 在不可变章节版本上保存本地故事资料整理责任，旧行默认关闭且不可改写；
+  `0075` / Tauri `78` 在生成尝试上保存隐私快照版本、隐私策略、数据去向和同一次模型调用标识，
+  迁移前旧行保留空值，新行缺失、部分缺失、关联不一致或后续改写均失败关闭。
 - 启动恢复以 `provider_dispatch_started_at` 为网络边界：发送前中断把 running ledger 结清为
   `cancelled`、run 结清为 `not_dispatched`；发送后中断把 ledger 结清为 `timed_out`、run 结清为
   `ambiguous`。两者都会把非终态 task 对账到相应终态，且绝不自动重发。
@@ -280,6 +285,10 @@ React 页面
 |       72 | `packages/data/migrations/0069_consistency_investigation_invocation_reservation.sql` | 调查模型 step 的 content-free invocation 预留与原子绑定。         |
 |       73 | `packages/data/migrations/0070_multigranular_search_retrieval.sql`                   | 可重建搜索投影的多粒度范围、锚点、权威性、隐私与 currentness。    |
 |       74 | `packages/data/migrations/0071_model_capability_probe_invocation_ledger.sql`         | 固定能力验证的独立调用任务、能力证据外键和不可改绑约束。          |
+|       75 | `packages/data/migrations/0072_ai_candidate_purpose.sql`                             | 隔离结果用途、历史安全默认值和方向不得接受为正文的约束。          |
+|       76 | `packages/data/migrations/0073_story_fact_user_revisions.sql`                        | 用户故事事实内容修订、治理转换与身份证据不可变约束。              |
+|       77 | `packages/data/migrations/0074_chapter_version_story_fact_responsibility.sql`        | 不可变版本的本地故事资料整理责任与不可修改约束。                  |
+|       78 | `packages/data/migrations/0075_generation_attempt_privacy_snapshot.sql`              | 生成尝试隐私快照、同一调用标识与新行完整性约束。                  |
 
 规则：SQL 通过 `include_str!` 编译进二进制；缺失迁移不忽略、迁移加锁且逐条事务执行。已发布 migration 的内容、描述和顺序不能修改，只能新增。
 

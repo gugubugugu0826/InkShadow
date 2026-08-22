@@ -40,6 +40,8 @@ const CHAPTER_ID = uuid(2);
 const VERSION_ID = uuid(3);
 const TASK_ID = uuid(4);
 const RUN_ID = uuid(5);
+const CURRENT_TASK_ID = uuid(6);
+const CURRENT_RUN_ID = uuid(7);
 const NOW = "2026-08-08T08:00:00.000Z";
 const executors: NodeSqliteExecutor[] = [];
 
@@ -48,6 +50,26 @@ afterEach(async () => {
 });
 
 describe("SqliteUsageCenterService", () => {
+  it("shows current continuation privacy from the exact invocation and reserves old hints for legacy rows", async () => {
+    const executor = await createSeededExecutor();
+    await seedCurrentGenerationAttempt(executor);
+
+    const snapshot = await new SqliteUsageCenterService(executor).read(query());
+    expect(snapshot.records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: `generation:${CURRENT_RUN_ID}:1`,
+          privacyPolicy: "local_preferred",
+          dataDestination: "remote",
+        }),
+        expect.objectContaining({
+          id: `generation:${RUN_ID}:1`,
+          privacyPolicy: "not_recorded",
+          dataDestination: "not_recorded",
+        }),
+      ]),
+    );
+  });
   it("uses an ordinary Chinese label for capability probe invocations", () => {
     expect(TASK_LABELS.capability_probe).toBe("模型能力验证");
   });
@@ -531,6 +553,7 @@ async function createSeededExecutor(): Promise<NodeSqliteExecutor> {
     occurredAt: "2026-08-08T10:00:00.000Z",
     errorCode: null,
   });
+  executor.database.exec(readMigration("0075_generation_attempt_privacy_snapshot.sql"));
   await executor.execute(
     `INSERT INTO ai_budget_policies (
        scope_key, scope, project_id, month_key, currency, limit_micros,
@@ -578,6 +601,66 @@ async function seedInvocationContext(
   );
 }
 
+async function seedCurrentGenerationAttempt(executor: NodeSqliteExecutor): Promise<void> {
+  await executor.execute(
+    `INSERT INTO background_tasks (
+       id, task_type, idempotency_key, metadata_json, priority, status,
+       attempt, max_attempts, sequence, run_after, created_at, updated_at,
+       finished_at
+     ) VALUES (?, 'ai.generate', 'current-usage-test-generation', '{}', 80, 'succeeded',
+       1, 1, 2, NULL, ?, ?, ?)`,
+    [CURRENT_TASK_ID, NOW, NOW, NOW],
+  );
+  await seedInvocation(executor, {
+    id: "current-continuation",
+    task: "continuation",
+    connectionId: "openai-connection",
+    providerKind: "openai",
+    modelId: "cloud-model",
+    status: "succeeded",
+    privacyPolicy: "local_preferred",
+    destination: "remote",
+    inputTokens: 45,
+    outputTokens: 12,
+    costMicros: "3400",
+    currency: "CNY",
+    occurredAt: "2026-08-08T13:00:00.000Z",
+    errorCode: null,
+  });
+  await executor.execute(
+    `INSERT INTO ai_generation_runs (
+       id, task_id, idempotency_key, project_id, chapter_id, base_version_id,
+       provider_id, model_id, state, revision, attempt, input_tokens,
+       maximum_output_tokens, estimated_cost_micros, incurred_cost_micros,
+       currency, pricing_version, price_updated_at, preflight_json,
+       completed_at, created_at, updated_at
+     ) VALUES (?, ?, 'current-usage-run-idempotency', ?, ?, ?, 'openai-connection',
+       'cloud-model', 'completed', 2, 1, 45, 100, '3400', '3400',
+       'CNY', 'price-2026-08', ?, '{}', ?, ?, ?)`,
+    [
+      CURRENT_RUN_ID,
+      CURRENT_TASK_ID,
+      PROJECT_ID,
+      CHAPTER_ID,
+      VERSION_ID,
+      NOW,
+      "2026-08-08T13:00:00.000Z",
+      "2026-08-08T12:59:00.000Z",
+      "2026-08-08T13:00:00.000Z",
+    ],
+  );
+  await executor.execute(
+    `INSERT INTO ai_generation_attempt_usage (
+       run_id, attempt, usage_source, input_tokens, output_tokens,
+       cached_input_tokens, usage_priced_estimate_micros, currency,
+       pricing_version, price_updated_at, reported_at, privacy_snapshot_version,
+       privacy_policy, data_destination, model_invocation_id
+     ) VALUES (?, 1, 'provider_reported', 45, 12, NULL, '3400', 'CNY',
+       'price-2026-08', ?, '2026-08-08T13:00:00.000Z', 1,
+       'local_preferred', 'remote', 'current-continuation')`,
+    [CURRENT_RUN_ID, NOW],
+  );
+}
 async function seedConnection(
   executor: NodeSqliteExecutor,
   id: string,
@@ -605,7 +688,7 @@ async function seedInvocation(
     providerKind: string;
     modelId: string;
     status: "succeeded" | "failed" | "cancelled" | "timed_out";
-    privacyPolicy: "cloud_allowed" | "local_only";
+    privacyPolicy: "cloud_allowed" | "local_preferred" | "local_only";
     destination: "local" | "remote";
     inputTokens: number | null;
     outputTokens: number | null;

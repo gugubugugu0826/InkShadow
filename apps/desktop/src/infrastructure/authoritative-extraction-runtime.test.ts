@@ -42,6 +42,12 @@ const migration = [
    ALTER TABLE chapters
      ADD COLUMN privacy_revision INTEGER NOT NULL DEFAULT 1
        CHECK (privacy_revision BETWEEN 1 AND 9007199254740991);`,
+  readWorkspaceFile(
+    "packages",
+    "data",
+    "migrations",
+    "0074_chapter_version_story_fact_responsibility.sql",
+  ),
 ].join("\n");
 
 const PROJECT_ID = uuid(1);

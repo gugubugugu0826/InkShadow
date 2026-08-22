@@ -1,45 +1,27 @@
-import { expect, type Locator, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 
-const AUTHORIZATION_DIALOG_NAME = "启用直接模式前，请确认一次";
+const DIRECT_MODE_TECHNICAL_LANGUAGE =
+  /AI\s*助手|候选|调用|上下文|路由|追踪|令牌|模型服务|Candidate|invocation|context|route|trace|token/iu;
 
-/**
- * Pins the one-time direct-mode disclosure to the user-visible contract. The
- * authorization covers deterministic local organization after an explicit
- * Candidate acceptance; it must not be interpreted as body-write or Provider
- * dispatch authority.
- */
-export async function expectDirectModeAuthorizationDisclosure(page: Page): Promise<Locator> {
-  const dialog = page.getByRole("dialog", { name: AUTHORIZATION_DIALOG_NAME });
-  await expect(dialog).toBeVisible();
-  await expect(
-    dialog.getByText("授权本地整理，不授权联网或修改正文", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    dialog.getByText("整理过程不会调用模型，不会增加模型服务调用次数或费用。", {
-      exact: true,
-    }),
-  ).toBeVisible();
-  return dialog;
+/** Verifies the safe, plain-language state used by a brand-new local install. */
+export async function expectFreshInstallDirectMode(page: Page): Promise<void> {
+  await expect(page.getByRole("heading", { level: 1, name: "开始写你的故事" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "开始创作", exact: true })).toBeVisible();
+  await expect(page.getByRole("main")).not.toContainText(DIRECT_MODE_TECHNICAL_LANGUAGE);
 }
 
-export async function authorizeDirectMode(page: Page): Promise<void> {
-  const dialog = await expectDirectModeAuthorizationDisclosure(page);
-  await dialog.getByRole("button", { name: "同意并启用直接模式" }).click();
-  await expect(dialog).toBeHidden();
-  await expect(page.getByText("直接模式", { exact: true })).toBeVisible();
-}
-
-export async function dismissDirectModeAuthorization(page: Page): Promise<void> {
-  const dialog = await expectDirectModeAuthorizationDisclosure(page);
-  await dialog.getByRole("button", { name: "取消", exact: true }).click();
-  await expect(dialog).toBeHidden();
+/** Keeps direct-mode pages pinned to ordinary author-facing language. */
+export async function expectDirectModeUsesPlainLanguage(page: Page): Promise<void> {
+  await expect(page.getByRole("main")).not.toContainText(DIRECT_MODE_TECHNICAL_LANGUAGE);
 }
 
 export async function switchFreshInstallToProfessionalMode(page: Page): Promise<void> {
-  await dismissDirectModeAuthorization(page);
-  // Cancelling the first-use disclosure now revokes the direct-mode authority
-  // and atomically selects professional mode. There is no second transition
-  // button to click.
+  await expectFreshInstallDirectMode(page);
+  await page.getByRole("button", { name: "打开更多选项" }).click();
+  const menu = page.getByRole("menu", { name: "更多选项" });
+  await expect(menu).toBeVisible();
+  await menu.getByRole("menuitem", { name: "切换专业模式" }).click();
+  await expect(menu).toBeHidden();
   await expect(page.getByRole("region", { name: "选择创作方式" })).toBeVisible();
-  await expect(page.getByText("专业模式", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "搜索页面与命令" })).toBeVisible();
 }

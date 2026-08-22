@@ -82,11 +82,11 @@ impl ExportFormat {
         match self {
             Self::Text => "纯文本文档",
             Self::Markdown => "Markdown 文档",
-            Self::Bundle => "InkShadow Bundle",
+            Self::Bundle => "墨影完整备份",
             Self::Epub => "EPUB 电子书",
             Self::Docx => "Word 文档",
             Self::Pdf => "PDF 文档",
-            Self::Report => "JSON 报告",
+            Self::Report => "结构化数据报告",
         }
     }
 }
@@ -139,7 +139,7 @@ pub(crate) async fn native_choose_export_destination(
     let selected = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
             .file()
-            .set_title("保存 InkShadow 导出文件")
+            .set_title("保存墨影导出文件")
             .set_file_name(default_file_name)
             .add_filter(format.filter_label(), format.extensions())
             .blocking_save_file()
@@ -622,6 +622,11 @@ mod tests {
         write_and_verify_with_hooks, ChooseExportDestinationRequest, ExportDestinationRegistry,
         ExportFormat, TOKEN_HEX_BYTES,
     };
+
+    #[test]
+    fn uses_a_chinese_report_filter_label() {
+        assert_eq!(ExportFormat::Report.filter_label(), "结构化数据报告");
+    }
 
     struct TestDirectory(PathBuf);
 

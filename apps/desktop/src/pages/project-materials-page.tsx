@@ -27,9 +27,11 @@ import {
   PageStateBoundary,
   Select,
   Textarea,
+  useToast,
 } from "@inkshadow/ui";
 import { Link, useParams } from "react-router-dom";
 
+import { useWritingExperience } from "../hooks/use-writing-experience";
 import { normalizeUiError, projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
@@ -70,6 +72,9 @@ const EMPTY_FORM: MaterialFormState = {
 
 export function ProjectMaterialsPage() {
   const runtime = useRuntime();
+  const writingExperience = useWritingExperience();
+  const directMode = writingExperience.preference?.mode === "direct";
+  const { toast } = useToast();
   const params = useParams<{ projectId: string }>();
   const projectIdParameter = params.projectId ?? "";
   const domainProjectId = useMemo(() => parseDomainUuid(projectIdParameter), [projectIdParameter]);
@@ -272,16 +277,16 @@ export function ProjectMaterialsPage() {
     await load();
   }
 
-  async function confirmDelete(): Promise<void> {
-    if (deleteMaterial === null || busy) {
+  async function deleteNow(material: Material): Promise<void> {
+    if (busy) {
       return;
     }
     setBusy(true);
     setActionError(null);
     const result = await runtime.story.materialService.softDelete({
-      materialId: deleteMaterial.id,
-      expectedRevision: deleteMaterial.revision,
-      expectedReferenceCount: references[deleteMaterial.id]?.length ?? 0,
+      materialId: material.id,
+      expectedRevision: material.revision,
+      expectedReferenceCount: references[material.id]?.length ?? 0,
       humanConfirmed: true,
     });
     setBusy(false);
@@ -291,6 +296,24 @@ export function ProjectMaterialsPage() {
     }
     setDeleteMaterial(null);
     await load();
+    if (directMode) {
+      toast({
+        title: "素材已移到可恢复区域",
+        description: `素材正文会保留 ${String(MATERIAL_RETENTION_DAYS)} 天，原有引用没有删除。`,
+        tone: "success",
+        action: {
+          label: "撤销删除",
+          onClick: () => void restore(result.value),
+        },
+      });
+    }
+  }
+
+  async function confirmDelete(): Promise<void> {
+    if (deleteMaterial === null) {
+      return;
+    }
+    await deleteNow(deleteMaterial);
   }
 
   async function restore(material: Material): Promise<void> {
@@ -441,8 +464,12 @@ export function ProjectMaterialsPage() {
                       canMerge={activeMaterials.length > 1}
                       onReference={() => openReference(material)}
                       onDelete={() => {
-                        setActionError(null);
-                        setDeleteMaterial(material);
+                        if (directMode) {
+                          void deleteNow(material);
+                        } else {
+                          setActionError(null);
+                          setDeleteMaterial(material);
+                        }
                       }}
                       onMerge={() => openMerge(material)}
                     />
@@ -696,7 +723,7 @@ export function ProjectMaterialsPage() {
       </Dialog>
 
       <Dialog
-        open={deleteMaterial !== null}
+        open={!directMode && deleteMaterial !== null}
         dismissible={!busy}
         onOpenChange={(open) => {
           if (!open && !busy) {

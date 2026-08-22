@@ -484,7 +484,7 @@ export class AmbiguousNovelReviewService {
         findings: Object.freeze([]),
         explanation: safeFailureMessage(
           cause,
-          "模型返回内容未通过严格 JSON 与证据白名单校验，本次结果没有展示。",
+          "模型返回内容未通过严格结构化数据格式与证据白名单校验，本次结果没有展示。",
         ),
         code:
           cause instanceof AmbiguousNovelReviewResponseError
@@ -779,15 +779,15 @@ export function parseAmbiguousNovelReviewResponse(
   }
   const trimmed = response.trim();
   if (trimmed.includes("```")) {
-    throw invalidResponse("模型返回了 Markdown 代码块；AI 复核只接受纯 JSON。");
+    throw invalidResponse("模型返回了 Markdown 代码块；AI 复核只接受纯结构化数据。");
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    throw invalidResponse("模型没有返回有效的纯 JSON。");
+    throw invalidResponse("模型没有返回有效的纯结构化数据。");
   }
-  const root = requireRecord(parsed, "AI 复核结果必须是 JSON 对象。");
+  const root = requireRecord(parsed, "AI 复核结果必须是结构化数据对象。");
   requireExactKeys(root, ["schemaVersion", "findings"], "AI 复核结果");
   if (root.schemaVersion !== RESPONSE_SCHEMA_VERSION) {
     throw invalidResponse("模型返回了不受支持的 AI 复核协议版本。");

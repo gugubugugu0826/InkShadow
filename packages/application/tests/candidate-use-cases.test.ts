@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   AiCandidate,
@@ -285,6 +285,24 @@ describe("candidate application persistence", () => {
     await expectStableState(store, candidates, baseline);
   });
 
+  it.each([
+    ["persists explicit responsibility", true, true],
+    ["defaults missing responsibility safely", undefined, false],
+  ] as const)("%s in the atomic acceptance commit", async (_name, requested, expected) => {
+    const { candidates, store } = await stableContentStore("原正文");
+    candidates.seed(readyCandidate("新正文", VERSION_ID));
+    const commit = vi.spyOn(store, "acceptCandidate");
+
+    const outcome = await acceptCandidate(candidates, store).execute({
+      candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
+      ...(requested === undefined ? {} : { organizeLocalStoryFacts: requested }),
+    });
+
+    expect(outcome.ok).toBe(true);
+    expect(commit).toHaveBeenCalledOnce();
+    expect(commit.mock.calls[0]?.[0].organizeLocalStoryFacts).toBe(expected);
+  });
   it.each([
     {
       name: "continuation",

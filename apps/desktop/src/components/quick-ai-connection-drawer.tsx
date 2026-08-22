@@ -32,17 +32,17 @@ const PROVIDER_COPY: Readonly<
   Record<QuickModelProvider, Readonly<{ label: string; description: string }>>
 > = Object.freeze({
   openai: Object.freeze({ label: "OpenAI", description: "官方云端 API" }),
-  deepseek: Object.freeze({ label: "DeepSeek", description: "官方云端 API" }),
+  deepseek: Object.freeze({ label: "DeepSeek", description: "官方云端接口" }),
   alibaba_qwen: Object.freeze({ label: "阿里云百炼 / Qwen", description: "选择地域和模型" }),
   volcengine_doubao: Object.freeze({
     label: "火山方舟 / 豆包",
-    description: "使用模型或 Endpoint ID",
+    description: "使用模型或接入点编号",
   }),
-  zhipu_glm: Object.freeze({ label: "智谱 GLM", description: "填写账号可用模型 ID" }),
-  ollama: Object.freeze({ label: "Ollama", description: "本机运行，无需 API Key" }),
+  zhipu_glm: Object.freeze({ label: "智谱 GLM", description: "填写账号可用模型编号" }),
+  ollama: Object.freeze({ label: "Ollama", description: "本机运行，无需接口密钥" }),
   custom_openai_compatible: Object.freeze({
     label: "自定义兼容接口",
-    description: "OpenAI-compatible 根地址",
+    description: "兼容接口根地址",
   }),
 });
 
@@ -370,12 +370,12 @@ function OpenQuickAiConnectionDrawer({
             <InlineAlert
               tone="info"
               title="浏览器预览不能保存凭据"
-              description="为保护 API Key，连接供应商和本机模型只在桌面版开放。你可以先跳过，作品仍会保存在本机。"
+              description="为保护接口密钥，连接模型服务和本机模型只在桌面版开放。你可以先跳过，作品仍会保存在本机。"
             />
           )}
 
           <fieldset className="quick-ai-drawer__providers" disabled={busy || browserOnly}>
-            <legend>选择供应商</legend>
+            <legend>选择模型服务</legend>
             {QUICK_MODEL_PROVIDERS.map((candidate) => (
               <label key={candidate} className="quick-ai-drawer__provider">
                 <input
@@ -419,7 +419,7 @@ function OpenQuickAiConnectionDrawer({
               </FormField>
               {(region === "singapore" || workspaceRequired) && (
                 <FormField
-                  label="Workspace ID"
+                  label="服务工作区编号"
                   hint={workspaceRequired ? "该地域必须填写。" : "新加坡地域可选。"}
                   required={workspaceRequired}
                 >
@@ -439,8 +439,8 @@ function OpenQuickAiConnectionDrawer({
 
           {provider === "custom_openai_compatible" && (
             <FormField
-              label="Base URL"
-              hint="填写兼容服务的根地址，不要粘贴完整 chat/completions 地址。"
+              label="服务根地址"
+              hint="填写兼容服务的根地址，不要粘贴完整的 /chat/completions 路径。"
               required
             >
               {(fieldProps) => (
@@ -459,11 +459,11 @@ function OpenQuickAiConnectionDrawer({
 
           {(needsManualModel || provider === "custom_openai_compatible") && (
             <FormField
-              label={provider === "volcengine_doubao" ? "模型或 Endpoint ID" : "模型 ID"}
+              label={provider === "volcengine_doubao" ? "模型或接入点编号" : "模型编号"}
               hint={
                 provider === "custom_openai_compatible"
-                  ? "可选；接口没有 /models 时填写，墨影会用固定短句验证。"
-                  : "从供应商控制台复制；墨影不会把某个模型名称永久写死。"
+                  ? "可选；接口没有提供模型目录时填写，墨影会用固定短句验证。"
+                  : "从模型服务控制台复制；墨影不会把某个模型名称永久写死。"
               }
               required={needsManualModel}
             >
@@ -488,12 +488,12 @@ function OpenQuickAiConnectionDrawer({
             />
           ) : (
             <FormField
-              label={provider === "custom_openai_compatible" ? "API Key（可选）" : "API Key"}
+              label={provider === "custom_openai_compatible" ? "接口密钥（可选）" : "接口密钥"}
               hint={
                 currentCredentialHint ??
                 (provider === "custom_openai_compatible"
                   ? "只在兼容服务要求访问密钥时填写。其他鉴权方式请使用完整模型中心。"
-                  : "只需填写供应商提供的 API Key。")
+                  : "只需填写模型服务提供的接口密钥。")
               }
               required={needsSecret}
             >
@@ -506,7 +506,7 @@ function OpenQuickAiConnectionDrawer({
                   disabled={busy || browserOnly}
                   value={secret}
                   placeholder={
-                    currentCredentialHint === null ? "粘贴 API Key" : "留空可继续使用已保存 Key"
+                    currentCredentialHint === null ? "粘贴接口密钥" : "留空可继续使用已保存密钥"
                   }
                   onChange={(event) => setSecret(event.currentTarget.value)}
                 />
@@ -515,8 +515,9 @@ function OpenQuickAiConnectionDrawer({
           )}
 
           <p className="quick-ai-drawer__privacy-note">
-            API Key 保存在 Windows 凭据管理器中，仅在调用你选择的服务商时直接用于鉴权。墨影不会将
-            Key 发送到自己的服务器。
+            接口密钥保存在 Windows
+            凭据管理器中，仅在连接你选择的模型服务时直接用于身份验证。墨影不会将
+            密钥发送到自己的服务器。
           </p>
           <Link
             className="back-link"
@@ -531,7 +532,7 @@ function OpenQuickAiConnectionDrawer({
               onOpenChange(false);
             }}
           >
-            更多供应商与完整模型中心设置
+            更多模型服务与完整模型中心设置
           </Link>
         </div>
       )}
@@ -588,7 +589,7 @@ function OpenQuickAiConnectionDrawer({
             <InlineAlert
               tone="warning"
               title="发送固定验证前确认"
-              description={`将通过“${probeDisclosure.connectionDisplayName}”的“${probeDisclosure.modelId}”发送固定短句“只回复：OK”，最多 ${String(probeDisclosure.maximumOutputTokens)} 个输出 token；最多调用 ${String(probeDisclosure.maximumProviderCalls)} 次，自动重试 ${String(probeDisclosure.automaticRetryCount)} 次。${probeDisclosure.dataDestination === "local" ? "验证只在本机运行。" : "验证会发送到所选远程供应商。"} 不发送作品正文、灵感、设定或 API Key；当前没有可核验的费用上限，供应商仍可能收取少量费用。`}
+              description={`将通过“${probeDisclosure.connectionDisplayName}”的“${probeDisclosure.modelId}”发送固定短句“只回复：OK”，最多 ${String(probeDisclosure.maximumOutputTokens)} 个输出内容额度；最多调用 ${String(probeDisclosure.maximumProviderCalls)} 次，自动重试 ${String(probeDisclosure.automaticRetryCount)} 次。${probeDisclosure.dataDestination === "local" ? "验证只在本机运行。" : "验证会发送到所选远程模型服务。"} 不发送作品正文、灵感、设定或接口密钥；当前没有可核验的费用上限，模型服务仍可能收取少量费用。`}
             />
           )}
         </div>

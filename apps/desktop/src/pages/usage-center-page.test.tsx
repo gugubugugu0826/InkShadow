@@ -38,7 +38,7 @@ describe("UsageCenterPage", () => {
     expect(screen.queryByText("LOCAL_MODEL_UNAVAILABLE_INTERNAL_SENTINEL")).not.toBeInTheDocument();
     expect(
       screen.getByText(
-        "这里不保存正文、提示词或 API Key。金额是按本地价格元数据计算的估算，不代表供应商最终账单；缺少 token 回执或价格时会明确显示“费用未知”。",
+        "这里不保存正文、提示词或接口密钥。金额是按本地价格元数据计算的估算，不代表供应商最终账单；缺少内容额度回执或价格时会明确显示“费用未知”。",
       ),
     ).toBeInTheDocument();
 
@@ -72,7 +72,7 @@ describe("UsageCenterPage", () => {
     render(<UsageCenterPage reader={reader} now={NOW} />);
 
     expect(await screen.findByText("还没有调用记录")).toBeInTheDocument();
-    expect(screen.getByText(/完成一次真实 AI 调用后/u)).toBeInTheDocument();
+    expect(screen.getByText(/完成一次真实智能创作任务后/u)).toBeInTheDocument();
     expect(screen.queryByText("¥4.20")).not.toBeInTheDocument();
   });
 

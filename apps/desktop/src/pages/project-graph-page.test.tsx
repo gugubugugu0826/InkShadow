@@ -107,13 +107,83 @@ describe("ProjectGraphPage feature boundary", () => {
       `/projects/${project.value.id}/graph?legacy=1`,
     );
   });
+
+  it("keeps legacy graph kinds behind understandable Chinese labels", async () => {
+    const base = createDevelopmentRuntime(window.localStorage);
+    const project = await base.useCases.createProject.execute({ name: "旧图谱兼容" });
+    if (!project.ok) {
+      throw project.error;
+    }
+    const rawKnownKind = "character_identity";
+    const rawUnknownKind = "legacy_story_node";
+    const rawRelationKind = "legacy_story_edge";
+    const identityId = "identity-entity";
+    const legacyId = "legacy-entity";
+    const source = {
+      sourceId: "legacy-source",
+      sourceVersionId: "legacy-version",
+      contentHash: "a".repeat(64),
+    };
+    const graph = graphRuntime(project.value.id, {
+      projectId: project.value.id,
+      sourceVersions: [],
+      entities: [
+        {
+          id: identityId,
+          projectId: project.value.id,
+          kind: rawKnownKind,
+          label: "旧角色",
+          source,
+          updatedAt: REBUILT_AT,
+        },
+        {
+          id: legacyId,
+          projectId: project.value.id,
+          kind: rawUnknownKind,
+          label: "旧节点",
+          source,
+          updatedAt: REBUILT_AT,
+        },
+      ],
+      relations: [
+        {
+          id: "legacy-relation",
+          projectId: project.value.id,
+          fromEntityId: identityId,
+          toEntityId: legacyId,
+          kind: rawRelationKind,
+          polarity: "affirmed",
+          confidence: 1,
+          evidence: [],
+          updatedAt: REBUILT_AT,
+        },
+      ],
+      revision: 1,
+      status: "ready",
+      updatedAt: REBUILT_AT,
+    });
+    const runtime: DesktopRuntime = {
+      ...base,
+      storyGraph: graph.port,
+      featureFlags: { ...base.featureFlags, graphRag: true },
+    };
+
+    renderRoute(runtime, `/projects/${project.value.id}/graph?legacy=1`);
+
+    expect((await screen.findAllByText("角色身份")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("其他故事资料").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("其他关联").length).toBeGreaterThan(0);
+    expect(screen.queryByText(rawKnownKind)).not.toBeInTheDocument();
+    expect(screen.queryByText(rawUnknownKind)).not.toBeInTheDocument();
+    expect(screen.queryByText(rawRelationKind)).not.toBeInTheDocument();
+  });
 });
 
-function graphRuntime(projectId: string) {
+function graphRuntime(projectId: string, projection: StoryGraphInspection["projection"] = null) {
   const inspection: StoryGraphInspection = {
     projectId,
-    freshness: "missing",
-    projection: null,
+    freshness: projection === null ? "missing" : "fresh",
+    projection,
     authoritative: EMPTY_DIAGNOSTICS,
   };
   const inspectProject = vi.fn(() => Promise.resolve(ok(inspection)));

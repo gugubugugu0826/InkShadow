@@ -117,6 +117,50 @@ describe("Model Hub text execution service", () => {
     expect(serialized).not.toMatch(/credential|secret|prompt|messages|content/iu);
   });
 
+  it("carries one invocation id and the actual privacy snapshot through both dispatch boundaries", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "privacy-snapshot-connection",
+      catalogEntryId: "privacy-snapshot-catalog",
+      modelId: "privacy-snapshot-model",
+    });
+    await saveRoute(harness.modelHub, {
+      primaryCatalogEntryId: target.id,
+      privacyPolicy: "local_preferred",
+    });
+    harness.generate.mockResolvedValue({ text: PRIVATE_OUTPUT, usage: null });
+    const observations: unknown[] = [];
+
+    const result = await executeModelHubTextTask(
+      harness.dependencies,
+      request({
+        onBeforeDispatch: (selection) => {
+          observations.push(selection);
+        },
+        onFinalBeforeProviderDispatch: (selection) => {
+          observations.push(selection);
+        },
+      }),
+    );
+
+    expect(observations).toHaveLength(2);
+    expect(observations).toEqual([
+      expect.objectContaining({
+        invocationId: result.invocation.id,
+        privacyPolicy: "local_preferred",
+        dataDestination: "remote",
+      }),
+      expect.objectContaining({
+        invocationId: result.invocation.id,
+        privacyPolicy: "local_preferred",
+        dataDestination: "remote",
+      }),
+    ]);
+    expect(result.invocation).toMatchObject({
+      privacyPolicy: "local_preferred",
+      dataDestination: "remote",
+    });
+  });
   it("reports the configured fallback as the actual side-effect-free selection", async () => {
     const harness = createHarness();
     const primary = await seedTarget(harness.modelHub, {

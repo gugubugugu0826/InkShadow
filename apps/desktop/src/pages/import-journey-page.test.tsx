@@ -89,7 +89,7 @@ describe("ImportJourneyPage safe Provider boundary", () => {
     expect(generate).not.toHaveBeenCalled();
   });
 
-  it("keeps an already saved isolated Candidate available for explicit zero-call acceptance", async () => {
+  it("keeps accepted正文 safe and skips derived work when the direct fact preflight fails", async () => {
     const fixture = await seededRuntime();
     const generate = vi.spyOn(fixture.runtime.modelGateway, "generate");
     const chapter = await fixture.runtime.repositories.chapters.findById(fixture.chapterId);
@@ -133,13 +133,26 @@ describe("ImportJourneyPage safe Provider boundary", () => {
       restoredAt: null,
     });
     renderPage(fixture.runtime);
-
     expect(await screen.findByRole("region", { name: "代表段落试改结果" })).toHaveTextContent(
       created.value.content,
     );
+    vi.spyOn(fixture.runtime.story.facts, "listByProjectId").mockRejectedValue(
+      new Error("CURRENT_VERSION_FACTS_UNAVAILABLE"),
+    );
+    const startTask = vi.spyOn(fixture.runtime.taskCenter, "startTask");
+    const search = vi.spyOn(fixture.runtime.search, "rebuildProject");
+    const summary = vi.spyOn(fixture.runtime.story.chapterSummaries, "summarizeSavedVersion");
+    const storyState = vi.spyOn(fixture.runtime.story.continuousState, "extractSavedVersion");
+    const causal = vi.spyOn(fixture.runtime.story.causalProjector, "rebuildProject");
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "接受试改到正文" }));
-    expect(await screen.findByText(/试改已作为新的稳定版本写入/u)).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "正文和版本已安全保存；故事资料整理暂未完成，可在任务与通知中重试。",
+        undefined,
+        { timeout: 5_000 },
+      ),
+    ).toBeInTheDocument();
 
     const acceptedChapter = await fixture.runtime.repositories.chapters.findById(fixture.chapterId);
     expect(acceptedChapter.ok && acceptedChapter.value?.content).toBe(created.value.content);
@@ -150,6 +163,15 @@ describe("ImportJourneyPage safe Provider boundary", () => {
     );
     expect(storedCandidate.ok && storedCandidate.value?.status).toBe("accepted");
     expect(generate).not.toHaveBeenCalled();
+    const queuedTask = (await fixture.runtime.taskCenter.load()).tasks.find(
+      (task) => task.status === "queued",
+    );
+    expect(queuedTask?.metadata).toMatchObject({ organizeLocalStoryFacts: true });
+    expect(startTask).not.toHaveBeenCalled();
+    expect(search).not.toHaveBeenCalled();
+    expect(summary).not.toHaveBeenCalled();
+    expect(storyState).not.toHaveBeenCalled();
+    expect(causal).not.toHaveBeenCalled();
   });
 });
 
@@ -161,6 +183,7 @@ async function seededRuntime(): Promise<
   }>
 > {
   const base = createDevelopmentRuntime(window.localStorage);
+  await base.writingExperience.getOrInitialize();
   const gateway = {
     ...base.modelGateway,
     available: true as const,

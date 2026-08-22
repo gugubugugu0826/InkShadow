@@ -2,10 +2,13 @@ export type AiCandidateSource = "generate" | "polish" | "extract" | "whatif" | "
 
 export type AiCandidateStatus = "streaming" | "ready" | "accepted" | "rejected" | "expired";
 
+export type AiCandidatePurpose = "prose" | "continuation_directions";
+
 export interface AiCandidate {
   readonly id: string;
   readonly projectId: string;
   readonly chapterId?: string;
+  readonly purpose?: AiCandidatePurpose;
   readonly source: AiCandidateSource;
   readonly baseVersionId?: string;
   readonly content: string;
@@ -55,6 +58,7 @@ export type CandidateSafetyErrorCode =
   | "CANDIDATE_CHAPTER_REQUIRED"
   | "CANDIDATE_CHAPTER_MISMATCH"
   | "CANDIDATE_SOURCE_NOT_APPLICABLE"
+  | "CANDIDATE_PURPOSE_NOT_APPLICABLE"
   | "CANDIDATE_BASE_VERSION_REQUIRED"
   | "BASE_VERSION_CHANGED"
   | "CANDIDATE_EDIT_FORBIDDEN"
@@ -85,6 +89,12 @@ export function buildCandidateApplicationPlan(
 ): CandidateApplicationPlan {
   if (candidate.status !== "ready") {
     fail("CANDIDATE_NOT_READY", "Only ready candidates can be applied.");
+  }
+  if (candidate.purpose === "continuation_directions") {
+    fail(
+      "CANDIDATE_PURPOSE_NOT_APPLICABLE",
+      "Continuation directions must be selected before prose is generated.",
+    );
   }
   if (candidate.content.trim().length === 0) {
     fail("CANDIDATE_EMPTY", "Empty candidates cannot be applied.");

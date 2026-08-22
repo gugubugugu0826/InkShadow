@@ -58,12 +58,15 @@ describe("NovelSkillPaidEvaluationPanel", () => {
   });
 
   it("isolates a local recovery failure without starting any paid operation", async () => {
-    const initialize = vi.fn(() => Promise.reject(new Error("本地评测记录暂时不可读")));
+    const rawMessage = "Candidate invocation recovery record is unreadable";
+    const initialize = vi.fn(() => Promise.reject(new Error(rawMessage)));
     const port = createPort({ initialize });
 
     render(<NovelSkillPaidEvaluationPanel expertMode targets={TARGETS} port={port} />);
 
-    expect(await screen.findByText(/本地评测记录暂时不可读/u)).toBeVisible();
+    expect(await screen.findByText(/本地恢复检查没有完成/u)).toBeVisible();
+    expect(screen.getByText(/发生了未预期的本地错误/u)).toBeVisible();
+    expect(screen.queryByText(rawMessage)).not.toBeInTheDocument();
     expect(port.prepareAndQuote).not.toHaveBeenCalled();
     expect(port.authorizeCommercialRun).not.toHaveBeenCalled();
     expect(port.startAuthorizedRun).not.toHaveBeenCalled();
@@ -318,8 +321,9 @@ describe("NovelSkillPaidEvaluationPanel", () => {
 
   it("keeps failures visible and never turns a failed preflight into an automatic start", async () => {
     const user = userEvent.setup();
+    const rawMessage = "Model B Candidate invocation price is missing";
     const port = createPort({
-      prepareAndQuote: vi.fn(() => Promise.reject(new Error("模型 B 缺少可核对的价格"))),
+      prepareAndQuote: vi.fn(() => Promise.reject(new Error(rawMessage))),
     });
 
     render(<NovelSkillPaidEvaluationPanel expertMode targets={TARGETS} port={port} />);
@@ -328,7 +332,8 @@ describe("NovelSkillPaidEvaluationPanel", () => {
     await user.click(screen.getByRole("button", { name: "生成本地预检报价" }));
 
     expect(await screen.findByText("这一步没有完成")).toBeVisible();
-    expect(screen.getByText(/模型 B 缺少可核对的价格/u)).toBeVisible();
+    expect(screen.getByText(/发生了未预期的本地错误/u)).toBeVisible();
+    expect(screen.queryByText(rawMessage)).not.toBeInTheDocument();
     expect(screen.getByText(/系统不会自动调用或重发/u)).toBeVisible();
     expect(port.authorizeCommercialRun).not.toHaveBeenCalled();
     expect(port.startAuthorizedRun).not.toHaveBeenCalled();

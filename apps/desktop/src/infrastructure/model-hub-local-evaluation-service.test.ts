@@ -229,6 +229,8 @@ describe("model hub local evaluation service", () => {
           catalogEntryId: "catalog-1",
           modelId: "model-1",
           usedFallback: false,
+          privacyPolicy: inspection().privacyPolicy,
+          dataDestination: inspection().dataDestination,
         } as const;
         await input.onBeforeDispatch?.(selected);
         await input.onFinalBeforeProviderDispatch?.(selected);

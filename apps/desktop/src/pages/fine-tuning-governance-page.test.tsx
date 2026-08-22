@@ -155,8 +155,9 @@ describe("FineTuningGovernancePage", () => {
 
     expect(await screen.findByText("待评测候选")).toBeVisible();
     expect(screen.getByText(/页面只解析并提交，不生成默认分数/)).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "基线指标 JSON" })).toHaveValue("");
-    expect(screen.getByRole("textbox", { name: "候选指标 JSON" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "基线指标结构化数据" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "候选指标结构化数据" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "门禁规则结构化数据" })).toHaveValue("");
     expect(screen.getByRole("button", { name: "重新计算并记录评测" })).toBeDisabled();
     expect(fixture.recordEvaluation).not.toHaveBeenCalled();
   });

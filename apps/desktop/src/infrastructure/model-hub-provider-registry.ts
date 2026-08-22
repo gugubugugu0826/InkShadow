@@ -164,13 +164,13 @@ export interface ProviderEndpointMetadata {
 
 const API_KEY_FIELD: ProviderFieldDefinition = Object.freeze({
   key: "apiKey",
-  label: "API Key",
-  description: "只保存在系统凭据库，不写入 InkShadow 数据库或日志。",
+  label: "接口密钥",
+  description: "只保存在系统凭据库，不写入墨影数据库或日志。",
   input: "secret",
   required: true,
   visibility: "basic",
   storage: "credential_vault",
-  placeholder: "输入供应商提供的 API Key",
+  placeholder: "输入模型服务提供的接口密钥",
 });
 
 const BASE_URL_OVERRIDE_FIELD: ProviderFieldDefinition = Object.freeze({
@@ -197,7 +197,7 @@ const REQUEST_TIMEOUT_FIELD: ProviderFieldDefinition = Object.freeze({
 const RETRY_LIMIT_FIELD: ProviderFieldDefinition = Object.freeze({
   key: "retryLimit",
   label: "重试次数",
-  description: "只重试连接测试和模型目录读取；生成、Embedding、Rerank 与图片不会自动重试。",
+  description: "只重试连接测试和模型目录读取；生成、向量检索、结果排序与图片不会自动重试。",
   input: "number",
   required: false,
   visibility: "expert",
@@ -349,7 +349,7 @@ const PROVIDER_PRESETS: readonly ModelProviderPreset[] = Object.freeze([
       {
         key: "region",
         label: "地域",
-        description: "API Key、可用模型和计费会因地域不同而变化。",
+        description: "接口密钥、可用模型和计费会因地域不同而变化。",
         input: "select",
         required: true,
         visibility: "basic",
@@ -517,8 +517,8 @@ const PROVIDER_PRESETS: readonly ModelProviderPreset[] = Object.freeze([
       },
       {
         key: "embeddingPath",
-        label: "Embedding 路径",
-        description: "默认 /embeddings；只支持绝对 API 路径。",
+        label: "向量检索路径",
+        description: "默认 /embeddings；只支持绝对接口路径。",
         input: "text",
         required: false,
         visibility: "expert",

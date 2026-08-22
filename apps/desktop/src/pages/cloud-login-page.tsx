@@ -91,11 +91,11 @@ export function CloudLoginPage() {
         >
           返回本地开始
         </Link>
-        <div className="start-page__brand" aria-label="InkShadow 墨影">
+        <div className="start-page__brand" aria-label="墨影">
           <span className="start-page__mark" aria-hidden="true">
             墨
           </span>
-          <span>InkShadow 墨影</span>
+          <span>墨影</span>
         </div>
         <h1 id="cloud-login-heading">登录云账户</h1>
         <p>登录只用于启用你选择的云服务。本地项目和导出不会因账户、订阅或网络状态而被锁定。</p>

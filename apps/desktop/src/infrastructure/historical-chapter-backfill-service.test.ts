@@ -131,7 +131,7 @@ describe("HistoricalChapterBackfillService", () => {
     ).resolves.toMatchObject({ createdTaskCount: 0, alreadyRegisteredTaskCount: 0 });
   });
 
-  it("invalidates a stale plan and backfills only the latest stable version, not prior history", async () => {
+  it("invalidates a stale plan and keeps only the latest stable version task, not prior history", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const project = await createProject(runtime, "只补当前版本");
     const initial = await createChapter(
@@ -173,14 +173,6 @@ describe("HistoricalChapterBackfillService", () => {
         acceptedChapterPipelineIdempotencyKey(initialVersionId),
       ),
     ).resolves.toBeNull();
-
-    const currentPlan = await service.plan(project.id);
-    const receipt = await service.register({
-      projectId: project.id,
-      expectedPlanFingerprint: currentPlan.fingerprint,
-      humanConfirmed: true,
-    });
-    expect(receipt.createdTaskCount).toBe(1);
     await expect(
       runtime.taskCenter.findTaskByIdempotencyKey(
         acceptedChapterPipelineIdempotencyKey(saved.value.version.id),
@@ -188,7 +180,26 @@ describe("HistoricalChapterBackfillService", () => {
     ).resolves.toMatchObject({
       metadata: {
         versionId: saved.value.version.id,
-        source: "historical_backfill",
+        source: "manual_save",
+      },
+    });
+
+    const currentPlan = await service.plan(project.id);
+    expect(currentPlan).toMatchObject({ willRegisterChapterCount: 0, willRegisterTaskCount: 0 });
+    const receipt = await service.register({
+      projectId: project.id,
+      expectedPlanFingerprint: currentPlan.fingerprint,
+      humanConfirmed: true,
+    });
+    expect(receipt.createdTaskCount).toBe(0);
+    await expect(
+      runtime.taskCenter.findTaskByIdempotencyKey(
+        acceptedChapterPipelineIdempotencyKey(saved.value.version.id),
+      ),
+    ).resolves.toMatchObject({
+      metadata: {
+        versionId: saved.value.version.id,
+        source: "manual_save",
       },
     });
     await expect(
@@ -196,6 +207,58 @@ describe("HistoricalChapterBackfillService", () => {
         acceptedChapterPipelineIdempotencyKey(initialVersionId),
       ),
     ).resolves.toBeNull();
+  });
+  it("rebuilds saved-version responsibility after restart without consulting the current mode", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await createProject(runtime, "历史保存责任回填");
+    const chapter = await createChapter(runtime, project.id, "第一章", "保存前的正文。");
+    const edited = await runtime.useCases.editChapter.execute({
+      chapterId: chapter.id,
+      expectedRevision: chapter.revision,
+      content: "直接写作保存后的正文。",
+      cursorOffset: 11,
+    });
+    if (!edited.ok) throw edited.error;
+    const saved = await runtime.useCases.saveChapter.execute({
+      chapterId: chapter.id,
+      expectedRevision: chapter.revision,
+      reason: "manual",
+      organizeLocalStoryFacts: true,
+    });
+    if (!saved.ok || saved.value.version === null) {
+      throw new Error("Expected a saved immutable version.");
+    }
+    expect(saved.value.version.toSnapshot().organizeLocalStoryFacts).toBe(true);
+
+    const baseKey = acceptedChapterPipelineIdempotencyKey(saved.value.version.id);
+    await failTaskPermanently(runtime, baseKey, ["search"], 1_650);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    if (preference.mode !== "professional") {
+      await runtime.writingExperience.switchMode("professional", preference.revision);
+    }
+
+    const restarted = createDevelopmentRuntime(window.localStorage);
+    const modeRead = vi.spyOn(restarted.writingExperience, "getOrInitialize");
+    const plan = await restarted.story.historicalBackfill.plan(project.id);
+    expect(plan).toMatchObject({ willRegisterChapterCount: 1, willRegisterTaskCount: 1 });
+    await restarted.story.historicalBackfill.register({
+      projectId: project.id,
+      expectedPlanFingerprint: plan.fingerprint,
+      humanConfirmed: true,
+    });
+
+    await expect(
+      restarted.taskCenter.findTaskByIdempotencyKey(
+        acceptedChapterPipelineStageIdempotencyKey(saved.value.version.id, "search", 1),
+      ),
+    ).resolves.toMatchObject({
+      metadata: {
+        versionId: saved.value.version.id,
+        source: "historical_backfill",
+        organizeLocalStoryFacts: true,
+      },
+    });
+    expect(modeRead).not.toHaveBeenCalled();
   });
 
   it("treats legacy ordinary local success as covering the local backfill", async () => {

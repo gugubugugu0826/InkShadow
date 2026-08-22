@@ -196,7 +196,7 @@ export function ProjectGraphPage({ graph, projectId: projectIdValue }: ProjectGr
           <p>只读派生视图：正式故事记录仍是唯一真相，关系不会反向写入正文。</p>
         </div>
         <div className="settings-actions">
-          <Badge tone="info">GraphRAG 派生投影</Badge>
+          <Badge tone="info">故事关联索引派生投影</Badge>
           {projection !== null && (
             <Button loading={rebuilding} onClick={() => void rebuild()}>
               重建关系图
@@ -225,7 +225,7 @@ export function ProjectGraphPage({ graph, projectId: projectIdValue }: ProjectGr
           title="部分章节证据未进入投影"
           description={`有 ${String(
             inspection.authoritative.projectionOmissionCount,
-          )} 条人审证据因图谱内容策略被安全省略；省略项不会提供给 GraphRAG 查询。`}
+          )} 条人审证据因图谱内容策略被安全省略；省略项不会提供给故事关联索引查询。`}
         />
       )}
 
@@ -233,7 +233,7 @@ export function ProjectGraphPage({ graph, projectId: projectIdValue }: ProjectGr
         <InlineAlert
           tone="warning"
           title="投影已暂停"
-          description="当前图可供检查，但暂停状态下不会提供 GraphRAG 上下文。重建可恢复派生投影。"
+          description="当前图可供检查，但暂停状态下不会提供故事关联索引资料。重建可恢复派生投影。"
         />
       )}
 
@@ -893,17 +893,42 @@ function compareGraphKinds(left: string, right: string): number {
 function graphKindLabel(kind: string): string {
   return (
     {
+      analysis_tag: "分析标签",
       chapter: "章节",
+      chapter_summary: "章节摘要",
       character: "角色",
+      character_death: "角色死亡",
+      character_identity: "角色身份",
+      character_profile: "角色档案",
+      character_state: "角色状态",
+      core_relationship: "核心关系",
+      event_category: "事件分类",
       foreshadow: "伏笔",
+      foreshadow_status: "伏笔状态",
+      key_item: "关键物品",
+      key_item_ownership: "关键物品归属",
+      location_setting: "地点设定",
+      major_ability_change: "重大能力变化",
+      major_timeline_change: "重大时间线变化",
+      organization_faction: "组织与阵营",
+      pacing_metric: "节奏指标",
+      relationship_change: "关系变化",
+      scene_tag: "场景标签",
+      search_index_marker: "检索索引标记",
+      story_conflict: "故事冲突",
+      story_goal: "故事目标",
       timeline_event: "时间线事件",
+      timeline_marker: "时间线标记",
+      unresolved_question: "未解决问题",
+      weak_inference: "待核实推断",
+      writing_style: "写作风格",
       world_rule: "世界规则",
-    }[kind] ?? kind
+    }[kind] ?? "其他故事资料"
   );
 }
 
 function graphRelationLabel(kind: string): string {
-  return kind === "extraction_supports" ? "抽取证据支持" : kind;
+  return kind === "extraction_supports" ? "抽取证据支持" : "其他关联";
 }
 
 function graphEntitySourceLink(

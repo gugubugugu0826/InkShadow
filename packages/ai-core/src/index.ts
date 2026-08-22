@@ -15,6 +15,7 @@ export {
   CandidateSafetyError,
   buildCandidateApplicationPlan,
   type AiCandidate,
+  type AiCandidatePurpose,
   type AiCandidateSource,
   type AiCandidateStatus,
   type CandidateApplicationContext,

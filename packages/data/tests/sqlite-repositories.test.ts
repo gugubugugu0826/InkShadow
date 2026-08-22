@@ -25,7 +25,11 @@ import {
 } from "@inkshadow/task-engine";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { createSqliteRepositories, type SqliteRepositories } from "../src/sqlite-repositories.js";
+import {
+  createSqliteRepositories,
+  type AcceptedVersionTaskRegistration,
+  type SqliteRepositories,
+} from "../src/sqlite-repositories.js";
 import { SqliteTaskRepository } from "../src/task-sqlite-repositories.js";
 import { NodeSqliteExecutor } from "./node-sqlite-executor.js";
 
@@ -40,6 +44,12 @@ const migration = [
     new URL("../migrations/0050_candidate_revision_authority.sql", import.meta.url),
     "utf8",
   ),
+  readFileSync(new URL("../migrations/0072_ai_candidate_purpose.sql", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../migrations/0074_chapter_version_story_fact_responsibility.sql", import.meta.url),
+    "utf8",
+  ),
+
   `ALTER TABLE chapters ADD COLUMN privacy_mode TEXT NOT NULL DEFAULT 'standard'
      CHECK (privacy_mode IN ('standard', 'local_only'));
    ALTER TABLE chapters ADD COLUMN privacy_revision INTEGER NOT NULL DEFAULT 1
@@ -398,6 +408,82 @@ describe("SQLite repositories with node:sqlite", () => {
     expect(persistedDraft.toSnapshot()).toEqual(draft.toSnapshot());
   });
 
+  it.each(["manual", "autosave"] as const)(
+    "rolls back a %s save when its durable task cannot be registered",
+    async (reason) => {
+      const registeredSources: string[] = [];
+      repositories = createSqliteRepositories(executor, {
+        acceptedVersionTaskFactory: (registration) => {
+          registeredSources.push(registration.source);
+          return {
+            ...acceptedVersionPipelineTask(uuid(140), registration),
+            maxAttempts: 0,
+          };
+        },
+      });
+      const fixture = await createChapterFixture();
+      const draft = expectOk(
+        RecoveryDraft.create({
+          id: uuid(141),
+          projectId: fixture.project.id,
+          chapterId: fixture.chapter.id,
+          baseRevision: fixture.chapter.revision,
+          content: `${reason} registration failure`,
+          cursorOffset: reason.length,
+          now: atMinute(2),
+        }),
+      );
+      expectOk(await repositories.recoveryDrafts.upsert(draft));
+      const versionId = uuid(142);
+      const savedChapter = expectOk(
+        fixture.chapter.saveContent({
+          content: draft.content,
+          expectedRevision: fixture.chapter.revision,
+          newVersionId: versionId,
+          now: atMinute(3),
+        }),
+      );
+      const version = makeVersion({
+        id: versionId,
+        projectId: fixture.project.id,
+        chapterId: fixture.chapter.id,
+        parentVersionId: fixture.initialVersion.id,
+        sequence: savedChapter.revision,
+        content: draft.content,
+        reason,
+        sourceCandidateId: null,
+        organizeLocalStoryFacts: true,
+        createdAt: atMinute(3),
+      });
+
+      expectErrorCode(
+        await repositories.contentCommits.saveChapter({
+          chapter: savedChapter,
+          version,
+          recoveryDraftId: draft.id,
+          expectedChapterRevision: fixture.chapter.revision,
+        }),
+        "SAVE_FAILED",
+      );
+      expect(registeredSources).toEqual([reason === "autosave" ? "autosave" : "manual_save"]);
+
+      expect(
+        expectPresent(
+          expectOk(await repositories.chapters.findById(fixture.chapter.id)),
+        ).toSnapshot(),
+      ).toEqual(fixture.chapter.toSnapshot());
+      expect(expectOk(await repositories.chapterVersions.findVersionById(version.id))).toBeNull();
+      expect(
+        expectPresent(
+          expectOk(await repositories.recoveryDrafts.findByChapterId(fixture.chapter.id)),
+        ).toSnapshot(),
+      ).toEqual(draft.toSnapshot());
+      expect(
+        executor.database.prepare("SELECT count(*) AS count FROM background_tasks").get(),
+      ).toEqual({ count: 0 });
+    },
+  );
+
   it("restores by appending a recovery version and keeps all older versions readable", async () => {
     const fixture = await createChapterFixture();
     const second = makeRecoveryTransition(
@@ -529,6 +615,43 @@ describe("SQLite repositories with node:sqlite", () => {
     ).toBeNull();
   });
 
+  it("rolls back a recovery version when its durable task cannot be registered", async () => {
+    repositories = createSqliteRepositories(executor, {
+      acceptedVersionTaskFactory: (registration) => ({
+        ...acceptedVersionPipelineTask(uuid(150), registration),
+        maxAttempts: 0,
+      }),
+    });
+    const fixture = await createChapterFixture();
+    const restored = makeRecoveryTransition(
+      fixture.chapter,
+      uuid(151),
+      "restored content",
+      atMinute(3),
+      true,
+    );
+
+    expectErrorCode(
+      await repositories.contentCommits.restoreChapterVersion({
+        ...restored,
+        expectedChapterRevision: fixture.chapter.revision,
+      }),
+      "SAVE_FAILED",
+    );
+
+    expect(
+      expectPresent(
+        expectOk(await repositories.chapters.findById(fixture.chapter.id)),
+      ).toSnapshot(),
+    ).toEqual(fixture.chapter.toSnapshot());
+    expect(
+      expectOk(await repositories.chapterVersions.findVersionById(restored.version.id)),
+    ).toBeNull();
+    expect(
+      executor.database.prepare("SELECT count(*) AS count FROM background_tasks").get(),
+    ).toEqual({ count: 0 });
+  });
+
   it("keeps a ready AI candidate isolated until acceptance, then commits all state", async () => {
     const fixture = await createChapterFixture();
     const candidate = makeReadyCandidate(fixture, 30, "候选正文");
@@ -607,6 +730,7 @@ describe("SQLite repositories with node:sqlite", () => {
         projectId: fixture.project.id,
         chapterId: fixture.chapter.id,
         source: "generate",
+        purpose: "continuation_directions",
         baseVersionId: fixture.initialVersion.id,
         now: atMinute(2),
         applicationIntent: {
@@ -635,6 +759,7 @@ describe("SQLite repositories with node:sqlite", () => {
       expectOk(await reopenedRepositories.aiCandidates.findById(revised.id)),
     );
     expect(reloaded.toSnapshot()).toMatchObject({
+      purpose: "continuation_directions",
       content: "作者保存的片段",
       status: "ready",
       applicationIntent: {
@@ -917,6 +1042,38 @@ describe("SQLite repositories with node:sqlite", () => {
     });
   });
 
+  it("rolls back an entire project import when a later version task is invalid", async () => {
+    let registrationCount = 0;
+    repositories = createSqliteRepositories(executor, {
+      acceptedVersionTaskFactory: (registration) => {
+        registrationCount += 1;
+        const task = acceptedVersionPipelineTask(uuid(170 + registrationCount), registration);
+        return registrationCount === 2 ? { ...task, maxAttempts: 0 } : task;
+      },
+    });
+    const project = makeProject(160, "任务回滚导入", 0);
+    const first = makeImportedChapter(project, 161, 162, "第一章", "开篇");
+    const second = makeImportedChapter(project, 163, 164, "第二章", "后续");
+
+    expectErrorCode(
+      await repositories.projectImports.commitImport({
+        project,
+        chapters: [first, second],
+      }),
+      "SAVE_FAILED",
+    );
+
+    expect(registrationCount).toBe(2);
+    expect(expectOk(await repositories.projects.findById(project.id))).toBeNull();
+    expect(expectOk(await repositories.chapters.listByProjectId(project.id))).toEqual([]);
+    expect(
+      executor.database.prepare("SELECT count(*) AS count FROM chapter_versions").get(),
+    ).toEqual({ count: 0 });
+    expect(
+      executor.database.prepare("SELECT count(*) AS count FROM background_tasks").get(),
+    ).toEqual({ count: 0 });
+  });
+
   it("rolls back every import row when a later chapter insert fails", async () => {
     const project = makeProject(200, "回滚导入", 0);
     const first = makeImportedChapter(project, 201, 202, "第一章", "开篇");
@@ -1019,7 +1176,17 @@ function acceptedCandidateCommit(
 }
 
 function acceptedPipelineTask(taskId: UuidV7, commit: AcceptCandidateCommit): CreateTaskInput {
-  const version = commit.version.toSnapshot();
+  return acceptedVersionPipelineTask(taskId, {
+    source: "candidate_accept",
+    version: commit.version,
+  });
+}
+
+function acceptedVersionPipelineTask(
+  taskId: UuidV7,
+  registration: AcceptedVersionTaskRegistration,
+): CreateTaskInput {
+  const version = registration.version.toSnapshot();
   return {
     id: taskId,
     type: "story.accepted-version.process",
@@ -1028,10 +1195,13 @@ function acceptedPipelineTask(taskId: UuidV7, commit: AcceptCandidateCommit): Cr
       projectId: version.projectId,
       chapterId: version.chapterId,
       versionId: version.id,
-      source: "candidate_accept",
+      source: registration.source,
       acceptedCharacterCount: version.content.length,
+      organizeLocalStoryFacts: version.organizeLocalStoryFacts,
+      runSearch: true,
       runChapterSummary: false,
       runStoryState: false,
+      runCausalProjection: true,
       operation: "rebuild-derived-story-state",
     },
     priority: 75,
@@ -1059,6 +1229,7 @@ function makeVersion(input: {
   content: string;
   reason: "created" | "autosave" | "manual" | "candidate_accept" | "recovery" | "import";
   sourceCandidateId: UuidV7 | null;
+  organizeLocalStoryFacts?: boolean;
   createdAt: IsoUtcTimestamp;
 }): ChapterVersion {
   return expectOk(
@@ -1131,6 +1302,7 @@ function makeRecoveryTransition(
   versionId: UuidV7,
   content: string,
   now: IsoUtcTimestamp,
+  organizeLocalStoryFacts = false,
 ): Readonly<{ chapter: Chapter; version: ChapterVersion }> {
   const restoredChapter = expectOk(
     chapter.saveContent({
@@ -1151,6 +1323,7 @@ function makeRecoveryTransition(
       content,
       reason: "recovery",
       sourceCandidateId: null,
+      organizeLocalStoryFacts,
       createdAt: now,
     }),
   };

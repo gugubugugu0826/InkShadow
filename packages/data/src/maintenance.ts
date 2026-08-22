@@ -467,7 +467,8 @@ const RESTORE_DELETE_ORDER = [
   "novel_skill_definitions",
 ] as const;
 
-const NOVEL_SKILL_EVALUATION_RESTORE_GUARDS = [
+const AUTHORIZED_RESTORE_GUARDS = [
+  "ai_generation_attempt_usage_privacy_insert_guard",
   "novel_skill_evaluation_review_receipt_delete_guard",
   "novel_skill_evaluation_review_item_delete_guard",
   "novel_skill_evaluation_review_batch_delete_guard",
@@ -1101,7 +1102,15 @@ export class DatabaseMaintenanceService {
         throw restoreError("DATABASE_RESTORE_SOURCE_INVALID");
       }
 
-      const [integrityRows, foreignKeyRows, tableRows, capabilityScanColumns] = await Promise.all([
+      const [
+        integrityRows,
+        foreignKeyRows,
+        tableRows,
+        capabilityScanColumns,
+        candidateColumns,
+        chapterVersionColumns,
+        generationAttemptUsageColumns,
+      ] = await Promise.all([
         this.executor.select<IntegrityRow>("PRAGMA restore_source.integrity_check(100)"),
         this.executor.select<ForeignKeyRow>("PRAGMA restore_source.foreign_key_check"),
         this.executor.select<TableNameRow>(
@@ -1113,9 +1122,30 @@ export class DatabaseMaintenanceService {
         this.executor.select<TableColumnRow>(
           "PRAGMA restore_source.table_info('model_capability_scans')",
         ),
+        this.executor.select<TableColumnRow>("PRAGMA restore_source.table_info('ai_candidates')"),
+        this.executor.select<TableColumnRow>(
+          "PRAGMA restore_source.table_info('chapter_versions')",
+        ),
+        this.executor.select<TableColumnRow>(
+          "PRAGMA restore_source.table_info('ai_generation_attempt_usage')",
+        ),
       ]);
       const sourceTables = new Set(tableRows.map(({ name }) => name));
       const sourceCapabilityScanColumns = new Set(capabilityScanColumns.map(({ name }) => name));
+      const sourceCandidateColumns = new Set(candidateColumns.map(({ name }) => name));
+      const sourceChapterVersionColumns = new Set(chapterVersionColumns.map(({ name }) => name));
+      const sourceGenerationAttemptUsageColumns = new Set(
+        generationAttemptUsageColumns.map(({ name }) => name),
+      );
+      const generationAttemptPrivacyColumns = [
+        "privacy_snapshot_version",
+        "privacy_policy",
+        "data_destination",
+        "model_invocation_id",
+      ] as const;
+      const sourceGenerationAttemptPrivacyColumnCount = generationAttemptPrivacyColumns.filter(
+        (column) => sourceGenerationAttemptUsageColumns.has(column),
+      ).length;
       if (
         integrityRows.length !== 1 ||
         integrityRows[0]?.integrity_check !== "ok" ||
@@ -1123,7 +1153,9 @@ export class DatabaseMaintenanceService {
         RESTORABLE_TABLES.some((table) => !sourceTables.has(table)) ||
         !MODEL_CAPABILITY_SCAN_V73_COLUMNS.every((column) =>
           sourceCapabilityScanColumns.has(column),
-        )
+        ) ||
+        (sourceGenerationAttemptPrivacyColumnCount !== 0 &&
+          sourceGenerationAttemptPrivacyColumnCount !== generationAttemptPrivacyColumns.length)
       ) {
         throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
       }
@@ -1140,16 +1172,16 @@ export class DatabaseMaintenanceService {
         // failure rolls the schema changes back together with restored rows.
         const evaluationDeleteGuards = await transaction.select<TriggerDefinitionRow>(
           `SELECT name, sql FROM main.sqlite_schema
-           WHERE type = 'trigger' AND name IN (${NOVEL_SKILL_EVALUATION_RESTORE_GUARDS.map(() => "?").join(", ")})
+           WHERE type = 'trigger' AND name IN (${AUTHORIZED_RESTORE_GUARDS.map(() => "?").join(", ")})
            ORDER BY name`,
-          NOVEL_SKILL_EVALUATION_RESTORE_GUARDS,
+          AUTHORIZED_RESTORE_GUARDS,
         );
         if (
-          evaluationDeleteGuards.length !== NOVEL_SKILL_EVALUATION_RESTORE_GUARDS.length ||
+          evaluationDeleteGuards.length !== AUTHORIZED_RESTORE_GUARDS.length ||
           evaluationDeleteGuards.some(
             ({ name, sql }) =>
-              !NOVEL_SKILL_EVALUATION_RESTORE_GUARDS.includes(
-                name as (typeof NOVEL_SKILL_EVALUATION_RESTORE_GUARDS)[number],
+              !AUTHORIZED_RESTORE_GUARDS.includes(
+                name as (typeof AUTHORIZED_RESTORE_GUARDS)[number],
               ) ||
               sql === null ||
               !/^CREATE TRIGGER\b/iu.test(sql),
@@ -1157,7 +1189,7 @@ export class DatabaseMaintenanceService {
         ) {
           throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
         }
-        for (const trigger of NOVEL_SKILL_EVALUATION_RESTORE_GUARDS) {
+        for (const trigger of AUTHORIZED_RESTORE_GUARDS) {
           await transaction.execute(`DROP TRIGGER main.${trigger}`);
         }
         for (const table of DERIVED_TABLES_TO_CLEAR) {
@@ -1237,6 +1269,25 @@ export class DatabaseMaintenanceService {
               await transaction.execute(FINE_TUNING_DEPLOYMENT_INSERT, [deployment.id]);
             }
             await transaction.execute(FINE_TUNING_ARTIFACT_FINALIZE);
+          } else if (table === "chapter_versions") {
+            // Save-time responsibility was added after the released backup contract.
+            // Older immutable versions cannot prove direct-mode ownership and restore as false.
+            await transaction.execute(
+              `INSERT INTO main.chapter_versions (
+                 id, project_id, chapter_id, parent_version_id, sequence,
+                 content, content_checksum, reason, source_candidate_id, created_at,
+                 organize_local_story_facts
+               )
+               SELECT
+                 id, project_id, chapter_id, parent_version_id, sequence,
+                 content, content_checksum, reason, source_candidate_id, created_at,
+                 ${
+                   sourceChapterVersionColumns.has("organize_local_story_facts")
+                     ? "organize_local_story_facts"
+                     : "0"
+                 }
+               FROM restore_source.chapter_versions`,
+            );
           } else if (table === "chapter_validation_snapshots") {
             // Rerun snapshots are immutable and must be restored only after the
             // immediately preceding snapshot in their evidence chain.
@@ -1244,6 +1295,51 @@ export class DatabaseMaintenanceService {
               `INSERT INTO main.chapter_validation_snapshots
                SELECT * FROM restore_source.chapter_validation_snapshots
               ORDER BY project_id, chapter_id, run_sequence`,
+            );
+          } else if (table === "ai_candidates") {
+            // Purpose was added after the version 73 backup contract. Historic
+            // rows are prose by definition; newer backups preserve the exact
+            // purpose and remain protected by the current insert trigger.
+            await transaction.execute(
+              `INSERT INTO main.ai_candidates (
+                 id, project_id, chapter_id, source, base_version_id,
+                 content, content_checksum, status, incomplete,
+                 created_at, updated_at, decided_at,
+                 task_intent, application_mode, payload_kind,
+                 anchor_start_utf16, anchor_end_utf16, revision, purpose
+               )
+               SELECT
+                 id, project_id, chapter_id, source, base_version_id,
+                 content, content_checksum, status, incomplete,
+                 created_at, updated_at, decided_at,
+                 task_intent, application_mode, payload_kind,
+                 anchor_start_utf16, anchor_end_utf16, revision,
+                 ${sourceCandidateColumns.has("purpose") ? "purpose" : "'prose'"}
+               FROM restore_source.ai_candidates`,
+            );
+          } else if (table === "ai_generation_attempt_usage") {
+            // Privacy snapshots were added after the released backup contract.
+            // Historical rows remain explicitly unrecorded; current backups
+            // preserve the complete versioned snapshot and exact invocation id.
+            const hasPrivacySnapshot =
+              sourceGenerationAttemptPrivacyColumnCount === generationAttemptPrivacyColumns.length;
+            await transaction.execute(
+              `INSERT INTO main.ai_generation_attempt_usage (
+                 run_id, attempt, usage_source, input_tokens, output_tokens,
+                 cached_input_tokens, usage_priced_estimate_micros, cost_status,
+                 currency, pricing_version, price_updated_at, reported_at,
+                 privacy_snapshot_version, privacy_policy, data_destination,
+                 model_invocation_id
+               )
+               SELECT
+                 run_id, attempt, usage_source, input_tokens, output_tokens,
+                 cached_input_tokens, usage_priced_estimate_micros, cost_status,
+                 currency, pricing_version, price_updated_at, reported_at,
+                 ${hasPrivacySnapshot ? "privacy_snapshot_version" : "NULL"},
+                 ${hasPrivacySnapshot ? "privacy_policy" : "NULL"},
+                 ${hasPrivacySnapshot ? "data_destination" : "NULL"},
+                 ${hasPrivacySnapshot ? "model_invocation_id" : "NULL"}
+               FROM restore_source.ai_generation_attempt_usage`,
             );
           } else if (table === "model_capability_scans") {
             // Version 74 adds only the nullable invocation link. Older healthy

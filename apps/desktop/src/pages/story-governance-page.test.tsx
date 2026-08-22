@@ -8,15 +8,259 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DesktopRoutes } from "../app";
 import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
+import { DEVELOPMENT_WRITING_EXPERIENCE_KEY } from "../infrastructure/writing-experience-store";
 import type {
   StorySettingsImportCommand,
   StorySettingsImportReceipt,
 } from "../infrastructure/story-settings-import-service";
 import { RuntimeProvider } from "../runtime-context";
 
+function seedWritingExperience(mode: "direct" | "professional"): void {
+  const timestamp = "2026-08-22T00:00:00.000Z";
+  window.localStorage.setItem(
+    DEVELOPMENT_WRITING_EXPERIENCE_KEY,
+    JSON.stringify({
+      schemaVersion: 1,
+      preference: {
+        mode,
+        initializationSource: "user",
+        directLocalOrganizationAuthorizedAt: mode === "direct" ? timestamp : null,
+        revision: 1,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      grants: {},
+      grantAudit: [],
+    }),
+  );
+}
+
 describe("StoryGovernancePage", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    seedWritingExperience("professional");
+  });
+
+  it("shows only ordinary fact evidence and safe fact actions in direct mode", async () => {
+    window.localStorage.clear();
+    seedWritingExperience("direct");
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "灯塔手记" });
+    if (!project.ok) throw project.error;
+    const parsedProjectId = parseUuidV7(project.value.id);
+    if (!parsedProjectId.ok) throw parsedProjectId.error;
+    const created = await runtime.story.factService.createFormalUserFact({
+      projectId: parsedProjectId.value,
+      factType: "world_rule",
+      contentText: "灯塔 每晚只能亮一次。",
+      actorId: runtime.story.actorId,
+      lock: false,
+      humanConfirmed: true,
+    });
+    if (!created.ok) throw created.error;
+    const unconfirmed = await runtime.story.factService.stageAutomaticFact({
+      projectId: parsedProjectId.value,
+      factType: "world_rule",
+      contentText: "这条待确认内容不能出现在直接模式。",
+      source: {
+        kind: "system_derivation",
+        reference: "direct-mode-test:unconfirmed",
+      },
+      confidence: 0.7,
+      origin: "ai_extraction",
+    });
+    if (!unconfirmed.ok) throw unconfirmed.error;
+    const temporary = await runtime.story.factService.stageAutomaticFact({
+      projectId: parsedProjectId.value,
+      factType: "character_state",
+      contentText: "这条试写资料不能出现在直接模式。",
+      source: {
+        kind: "system_derivation",
+        reference: "direct-mode-test:temporary",
+      },
+      confidence: 1,
+      origin: "system",
+    });
+    if (!temporary.ok) throw temporary.error;
+    const user = userEvent.setup();
+    const view = renderRoute(runtime, "/projects/" + project.value.id + "/story");
+
+    expect(await screen.findByRole("heading", { name: "当前设定", level: 2 })).toBeVisible();
+    expect(screen.getByText("灯塔 每晚只能亮一次。")).toBeVisible();
+    expect(screen.getByText("查看证据")).toBeVisible();
+    expect(document.body).not.toHaveTextContent(
+      /AI|模型|调用|上下文|路由|令牌|追踪|候选|费用|待确认/u,
+    );
+    expect(screen.queryByText("这条待确认内容不能出现在直接模式。")).toBeNull();
+    expect(screen.queryByText("这条试写资料不能出现在直接模式。")).toBeNull();
+    expect(screen.getByText("1 条设定")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "固定" }));
+    expect(await screen.findByRole("button", { name: "取消固定" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "修改" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "取消固定" }));
+
+    await user.click(screen.getByRole("button", { name: "修改" }));
+    const editDialog = screen.getByRole("dialog", { name: "修改设定" });
+    const editInput = within(editDialog).getByRole("textbox", { name: "设定内容" });
+    await user.clear(editInput);
+    await user.type(editInput, "灯塔 每晚最多亮两次。");
+    await user.click(within(editDialog).getByRole("button", { name: "保存修改" }));
+    expect(await screen.findByText("灯塔 每晚最多亮两次。")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "历史版本" }));
+    const historyDialog = screen.getByRole("dialog", { name: "历史版本" });
+    const firstRevisionCard = within(historyDialog)
+      .getByRole("heading", { name: "第 1 版" })
+      .closest(".ink-card");
+    if (!(firstRevisionCard instanceof HTMLElement)) throw new Error("找不到第一版设定。");
+    await user.click(within(firstRevisionCard).getByRole("button", { name: "恢复这个版本" }));
+    expect(await screen.findByText("灯塔 每晚只能亮一次。")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "删除（保留记录）" }));
+    const deletedSection = (
+      await screen.findByRole("heading", {
+        name: "已删除的设定",
+        level: 2,
+      })
+    ).closest("section");
+    if (!(deletedSection instanceof HTMLElement)) throw new Error("找不到已删除设定区域。");
+    await user.click(within(deletedSection).getByRole("button", { name: "恢复" }));
+    const currentSection = screen
+      .getByRole("heading", { name: "当前设定", level: 2 })
+      .closest("section");
+    if (!(currentSection instanceof HTMLElement)) throw new Error("找不到当前设定区域。");
+    expect(await within(currentSection).findByText("灯塔 每晚只能亮一次。")).toBeVisible();
+
+    await user.click(within(currentSection).getByRole("button", { name: "添加设定" }));
+    const createDialog = screen.getByRole("dialog", { name: "添加设定" });
+    await user.selectOptions(
+      within(createDialog).getByRole("combobox", { name: "设定类型" }),
+      "world_rule",
+    );
+    await user.type(
+      within(createDialog).getByRole("textbox", { name: "内容" }),
+      "灯塔   每晚只能亮一次。",
+    );
+    await user.click(within(createDialog).getByRole("button", { name: "保存设定" }));
+
+    const mergeButton = (await screen.findAllByRole("button", { name: "合并重复项" }))[0];
+    if (mergeButton === undefined) throw new Error("找不到合并重复项入口。");
+    await user.click(mergeButton);
+    const mergeDialog = screen.getByRole("dialog", { name: "合并重复项" });
+    await user.click(within(mergeDialog).getByRole("button", { name: "确认合并" }));
+    await waitFor(() =>
+      expect(within(currentSection).getAllByText("灯塔 每晚只能亮一次。")).toHaveLength(1),
+    );
+
+    view.unmount();
+    renderRoute(runtime, "/projects/" + project.value.id + "/story");
+    const reopenedCurrentSection = (
+      await screen.findByRole("heading", {
+        name: "当前设定",
+        level: 2,
+      })
+    ).closest("section");
+    if (!(reopenedCurrentSection instanceof HTMLElement)) {
+      throw new Error("重开后找不到当前设定区域。");
+    }
+    expect(within(reopenedCurrentSection).getAllByText("灯塔 每晚只能亮一次。")).toHaveLength(1);
+  });
+
+  it("keeps structured facts out of plain-text edits and duplicate merging in direct mode", async () => {
+    window.localStorage.clear();
+    seedWritingExperience("direct");
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "潮门因果录" });
+    if (!project.ok) throw project.error;
+    const parsedProjectId = parseUuidV7(project.value.id);
+    if (!parsedProjectId.ok) throw parsedProjectId.error;
+    const first = await runtime.story.factService.createFormalUserFact({
+      projectId: parsedProjectId.value,
+      factType: "timeline_event",
+      contentText: "银铃响起，潮门打开。",
+      structuredValue: {
+        schemaVersion: "inkshadow.causal-event-fact.v2",
+        eventId: "event.silver-bell",
+        causeEventIds: ["event.pull-rope"],
+      },
+      actorId: runtime.story.actorId,
+      humanConfirmed: true,
+    });
+    if (!first.ok) throw first.error;
+    const second = await runtime.story.factService.createFormalUserFact({
+      projectId: parsedProjectId.value,
+      factType: "timeline_event",
+      contentText: "银铃响起，潮门打开。",
+      structuredValue: {
+        schemaVersion: "inkshadow.causal-event-fact.v2",
+        eventId: "event.tide-gate",
+        causeEventIds: ["event.moonset"],
+      },
+      actorId: runtime.story.actorId,
+      humanConfirmed: true,
+    });
+    if (!second.ok) throw second.error;
+
+    const user = userEvent.setup();
+    renderRoute(runtime, "/projects/" + project.value.id + "/story");
+    const factTexts = await screen.findAllByText("银铃响起，潮门打开。");
+    expect(factTexts).toHaveLength(2);
+    const factCards = factTexts.map((text) => text.closest(".ink-card"));
+    if (factCards.some((card) => !(card instanceof HTMLElement))) {
+      throw new Error("找不到结构化设定卡片。");
+    }
+    for (const card of factCards as HTMLElement[]) {
+      expect(
+        within(card).getByText(
+          "结构化设定暂不支持直接改文字。你仍可查看证据、固定，或删除后恢复。",
+        ),
+      ).toBeVisible();
+      expect(within(card).getByRole("button", { name: "修改" })).toBeDisabled();
+      expect(within(card).queryByRole("button", { name: "合并重复项" })).toBeNull();
+      expect(within(card).getByText("查看证据")).toBeVisible();
+    }
+    expect(screen.queryByRole("button", { name: "合并重复项" })).toBeNull();
+
+    const firstCard = factCards[0];
+    if (!(firstCard instanceof HTMLElement)) throw new Error("找不到第一条结构化设定。");
+    await user.click(within(firstCard).getByRole("button", { name: "固定" }));
+    expect(await within(firstCard).findByRole("button", { name: "取消固定" })).toBeVisible();
+    await user.click(within(firstCard).getByRole("button", { name: "删除（保留记录）" }));
+    const deletedSection = (
+      await screen.findByRole("heading", { name: "已删除的设定", level: 2 })
+    ).closest("section");
+    if (!(deletedSection instanceof HTMLElement)) throw new Error("找不到已删除设定区域。");
+    await user.click(within(deletedSection).getByRole("button", { name: "恢复" }));
+
+    const [restoredFirst, restoredSecond] = await Promise.all([
+      runtime.story.facts.findById(first.value.id),
+      runtime.story.facts.findById(second.value.id),
+    ]);
+    if (
+      !restoredFirst.ok ||
+      restoredFirst.value === null ||
+      !restoredSecond.ok ||
+      restoredSecond.value === null
+    ) {
+      throw new Error("结构化设定没有完整恢复。");
+    }
+    const restoredSnapshots = [restoredFirst.value.toSnapshot(), restoredSecond.value.toSnapshot()];
+    expect(restoredSnapshots[0]?.structuredValue).toEqual(first.value.toSnapshot().structuredValue);
+    expect(restoredSnapshots[0]?.source).toEqual(first.value.toSnapshot().source);
+    expect(restoredSnapshots[1]?.structuredValue).toEqual(
+      second.value.toSnapshot().structuredValue,
+    );
+    expect(restoredSnapshots[1]?.source).toEqual(second.value.toSnapshot().source);
+    expect(restoredSnapshots.map(({ revision }) => revision).sort()).toEqual([1, 4]);
+    expect(restoredSnapshots.find(({ revision }) => revision === 4)).toMatchObject({
+      status: "formal",
+      deprecated: false,
+      locked: false,
+      userConfirmed: true,
+    });
+    expect(await screen.findAllByText("银铃响起，潮门打开。")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "合并重复项" })).toBeNull();
   });
 
   it("creates a visible unified story fact and keeps lock governance reversible", async () => {
@@ -995,11 +1239,11 @@ describe("StoryGovernancePage", () => {
     await user.click(screen.getByRole("button", { name: "导入或导出" }));
     const dialog = screen.getByRole("dialog", { name: "导入与导出故事设定" });
     expect(within(dialog).getByRole("heading", { name: "选择要处理的内容" })).toBeVisible();
-    expect(within(dialog).queryByRole("button", { name: "选择 Story Settings JSON" })).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "选择墨影设定文件" })).toBeNull();
     expect(within(dialog).getByText(/文件先做 dry run.*正式写入使用单一事务/u)).toBeVisible();
 
     await user.click(within(dialog).getByRole("button", { name: "4选择文件" }));
-    expect(within(dialog).getByRole("button", { name: "选择 Story Settings JSON" })).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "选择墨影设定文件" })).toBeVisible();
     await user.click(within(dialog).getByRole("button", { name: "7确认导入" }));
     expect(within(dialog).getByText("尚未预检")).toBeVisible();
     expect(within(dialog).getByRole("button", { name: "确认并原子导入" })).toBeDisabled();
@@ -1065,7 +1309,7 @@ describe("StoryGovernancePage", () => {
     expect(await within(dialog).findByText("可导入 5 项")).toBeVisible();
 
     await user.upload(fileInput, readableFile("not-settings.txt", "not settings"));
-    expect(await screen.findByText("只接受 Story Settings JSON")).toBeVisible();
+    expect(await screen.findByText("只接受墨影设定文件")).toBeVisible();
     await user.click(within(dialog).getByRole("button", { name: "7确认导入" }));
     expect(within(dialog).getByText("尚未预检")).toBeVisible();
     expect(within(dialog).queryByText("可导入 5 项")).toBeNull();

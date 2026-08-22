@@ -8,9 +8,10 @@ export interface OpeningStartupRecoveryReceipt {
 }
 
 /**
- * Terminalizes only already-persisted opening invocations during desktop
- * startup. The journey page later projects these same authoritative facts into
- * its stable slots. This never creates an invocation or calls the gateway.
+ * Inspects only already-persisted opening invocations during desktop startup.
+ * The journey page later projects missing or terminal facts into its stable
+ * slots while preserving queued/running facts. This never creates, finishes,
+ * or dispatches an invocation and never calls the gateway.
  */
 export async function recoverOrphanedOpeningInvocationsAtStartup(
   runtime: DesktopRuntime,
@@ -25,38 +26,11 @@ export async function recoverOrphanedOpeningInvocationsAtStartup(
     ids.forEach((id) => invocationIds.add(id));
   }
 
-  let terminalizedInvocationCount = 0;
+  const terminalizedInvocationCount = 0;
   let failedInvocationCount = 0;
   for (const invocationId of invocationIds) {
     try {
-      let invocation = await runtime.modelHub.findInvocation(invocationId);
-      if (
-        invocation === null ||
-        (invocation.status !== "queued" && invocation.status !== "running")
-      ) {
-        continue;
-      }
-      const crossedBoundary = invocation.providerDispatchStartedAt !== null;
-      try {
-        invocation = await runtime.modelHub.finishInvocation({
-          id: invocation.id,
-          status: crossedBoundary ? "timed_out" : "failed",
-          errorCode: crossedBoundary ? "OPENING_DISPATCH_AMBIGUOUS" : "OPENING_NOT_DISPATCHED",
-          errorSummary: crossedBoundary
-            ? "应用在模型返回前中断；调用结果待核对，系统不会自动重发。"
-            : "应用在模型发送前中断；没有发生供应商调用。",
-          expectedRevision: invocation.revision,
-        });
-      } catch (cause: unknown) {
-        const current = await runtime.modelHub.findInvocation(invocationId);
-        if (current === null || current.status === "queued" || current.status === "running") {
-          throw cause;
-        }
-        invocation = current;
-      }
-      if (invocation.status !== "queued" && invocation.status !== "running") {
-        terminalizedInvocationCount += 1;
-      }
+      await runtime.modelHub.findInvocation(invocationId);
     } catch {
       failedInvocationCount += 1;
     }

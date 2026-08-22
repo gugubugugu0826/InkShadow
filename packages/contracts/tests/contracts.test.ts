@@ -131,6 +131,34 @@ describe("stable state contracts", () => {
     expect(valid.success).toBe(true);
   });
 
+  it("defaults historic candidates to prose and rejects accepted direction options", () => {
+    const base = {
+      schemaVersion: CONTRACT_SCHEMA_VERSION,
+      id: ID,
+      projectId: ID,
+      chapterId: CHAPTER_ID,
+      source: "generate",
+      baseVersionId: VERSION_ID,
+      content: "推进冲突",
+      contentChecksum: CHECKSUM,
+      incomplete: false,
+      createdAt: NOW,
+      updatedAt: NOW,
+    } as const;
+
+    expect(
+      AiCandidateContractSchema.parse({ ...base, status: "ready", decidedAt: null }).purpose,
+    ).toBe("prose");
+    expect(
+      AiCandidateContractSchema.safeParse({
+        ...base,
+        purpose: "continuation_directions",
+        status: "accepted",
+        decidedAt: NOW,
+      }).success,
+    ).toBe(false);
+  });
+
   it("keeps generation stream sequences inside the portable integer range", () => {
     const generation = {
       schemaVersion: CONTRACT_SCHEMA_VERSION,

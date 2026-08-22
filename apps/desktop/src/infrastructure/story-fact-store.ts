@@ -868,7 +868,11 @@ export class BrowserDevelopmentStoryFactStore
       if (current.revision !== expectedRevision || next.revision !== expectedRevision + 1) {
         return err(revisionConflict(expectedRevision, current.revision));
       }
-      if (!sameImmutableFact(current, next) && !isEntityAliasResolutionMutation(current, next)) {
+      if (
+        !sameImmutableFact(current, next) &&
+        !isEntityAliasResolutionMutation(current, next) &&
+        !isUserContentRevisionMutation(current, next)
+      ) {
         return err(
           storeFailure("Story fact identity, content, and evidence cannot change in place."),
         );
@@ -887,6 +891,82 @@ export class BrowserDevelopmentStoryFactStore
     });
   }
 
+  public mergeUserFactRevisions(
+    survivor: StoryFact,
+    survivorExpectedRevision: number,
+    duplicate: StoryFact,
+    duplicateExpectedRevision: number,
+  ): Promise<Result<void, StoryCoreError>> {
+    return this.mutate((database) => {
+      const survivorNext = survivor.toSnapshot();
+      const duplicateNext = duplicate.toSnapshot();
+      if (
+        survivorNext.id === duplicateNext.id ||
+        survivorNext.projectId !== duplicateNext.projectId ||
+        survivorNext.factType !== duplicateNext.factType
+      ) {
+        return err(storeFailure("A duplicate merge must keep two distinct facts in one project."));
+      }
+      const survivorCurrent = database.facts[survivorNext.id];
+      const duplicateCurrent = database.facts[duplicateNext.id];
+      if (survivorCurrent === undefined || duplicateCurrent === undefined) {
+        return err(
+          new StoryCoreError({
+            code: "STORY_FACT_NOT_FOUND",
+            message: "One of the duplicate story facts was not found.",
+          }),
+        );
+      }
+      if (
+        survivorCurrent.revision !== survivorExpectedRevision ||
+        survivorNext.revision !== survivorExpectedRevision + 1
+      ) {
+        return err(revisionConflict(survivorExpectedRevision, survivorCurrent.revision));
+      }
+      if (
+        duplicateCurrent.revision !== duplicateExpectedRevision ||
+        duplicateNext.revision !== duplicateExpectedRevision + 1
+      ) {
+        return err(revisionConflict(duplicateExpectedRevision, duplicateCurrent.revision));
+      }
+      if (
+        survivorCurrent.structuredValue !== null ||
+        duplicateCurrent.structuredValue !== null ||
+        !isUserContentRevisionMutation(survivorCurrent, survivorNext) ||
+        !isExplicitDeprecationMutation(duplicateCurrent, duplicateNext)
+      ) {
+        return err(storeFailure("The duplicate merge revisions are not authorized."));
+      }
+      const survivorRevisions = database.revisions[survivorNext.id] ?? [];
+      const duplicateRevisions = database.revisions[duplicateNext.id] ?? [];
+      if (
+        survivorRevisions.length !== survivorExpectedRevision ||
+        duplicateRevisions.length !== duplicateExpectedRevision
+      ) {
+        return err(storeFailure("Story fact revision history is incomplete."));
+      }
+
+      database.facts[survivorNext.id] = survivorNext;
+      database.facts[duplicateNext.id] = duplicateNext;
+      database.revisions[survivorNext.id] = Object.freeze([
+        ...survivorRevisions,
+        Object.freeze({
+          changeKind: classifyChange(survivorCurrent, survivorNext),
+          recordedAt: survivorNext.updatedAt,
+          snapshot: survivorNext,
+        }),
+      ]);
+      database.revisions[duplicateNext.id] = Object.freeze([
+        ...duplicateRevisions,
+        Object.freeze({
+          changeKind: classifyChange(duplicateCurrent, duplicateNext),
+          recordedAt: duplicateNext.updatedAt,
+          snapshot: duplicateNext,
+        }),
+      ]);
+      return ok(undefined);
+    });
+  }
   public listRevisions(
     factId: UuidV7,
   ): Promise<Result<readonly StoryFactRevision[], StoryCoreError>> {
@@ -1474,6 +1554,59 @@ function sameImmutableFact(left: StoryFactSnapshot, right: StoryFactSnapshot): b
   );
 }
 
+function isUserContentRevisionMutation(
+  current: StoryFactSnapshot,
+  next: StoryFactSnapshot,
+): boolean {
+  if (
+    current.locked ||
+    current.status === "branch" ||
+    current.structuredValue !== null ||
+    next.structuredValue !== null ||
+    next.contentText === null ||
+    next.confirmedByActorId === null ||
+    next.confirmedAt !== next.updatedAt
+  ) {
+    return false;
+  }
+  const expected: StoryFactSnapshot = {
+    ...current,
+    contentText: next.contentText,
+    confidence: 1,
+    status: "formal",
+    origin: "user",
+    userConfirmed: true,
+    locked: false,
+    deprecated: false,
+    needsReview: false,
+    confirmedByActorId: next.confirmedByActorId,
+    confirmedAt: next.updatedAt,
+    branchId: null,
+    revision: current.revision + 1,
+    updatedAt: next.updatedAt,
+  };
+  return JSON.stringify(next) === JSON.stringify(expected);
+}
+
+function isExplicitDeprecationMutation(
+  current: StoryFactSnapshot,
+  next: StoryFactSnapshot,
+): boolean {
+  if (current.status === "deprecated" || current.status === "branch") {
+    return false;
+  }
+  const expected: StoryFactSnapshot = {
+    ...current,
+    status: "deprecated",
+    locked: false,
+    deprecated: true,
+    needsReview: false,
+    branchId: null,
+    revision: current.revision + 1,
+    updatedAt: next.updatedAt,
+  };
+  return JSON.stringify(next) === JSON.stringify(expected);
+}
 function isEntityAliasResolutionMutation(
   current: StoryFactSnapshot,
   next: StoryFactSnapshot,

@@ -65,10 +65,10 @@ describe("SettingsPage native maintenance tickets", () => {
       createConsistentBackup,
       restoreConsistentBackup,
     };
-    renderSettings(maintenance);
+    await renderSettings(maintenance);
 
     const backupButton = await screen.findByRole("button", {
-      name: "创建一致性备份",
+      name: "创建备份",
     });
     await waitFor(() => expect(backupButton).toBeEnabled());
     await user.click(backupButton);
@@ -114,10 +114,10 @@ describe("SettingsPage native maintenance tickets", () => {
       ...healthyMaintenance(),
       chooseBackupDestination,
     };
-    renderSettings(maintenance);
+    await renderSettings(maintenance);
 
     const backupButton = await screen.findByRole("button", {
-      name: "创建一致性备份",
+      name: "创建备份",
     });
     await waitFor(() => expect(backupButton).toBeEnabled());
     await user.click(backupButton);
@@ -167,7 +167,7 @@ describe("SettingsPage native maintenance tickets", () => {
       stop: vi.fn().mockResolvedValue(undefined),
     };
 
-    renderSettings(healthyMaintenance(), automaticBackup);
+    await renderSettings(healthyMaintenance(), automaticBackup, "professional");
 
     expect(await screen.findByRole("heading", { name: "自动备份" })).toBeVisible();
     expect(screen.getByText(/每天本地时间 03:00/u)).toBeVisible();
@@ -201,7 +201,7 @@ describe("SettingsPage native maintenance tickets", () => {
       stop: vi.fn().mockResolvedValue(undefined),
     };
 
-    renderSettings(healthyMaintenance(), automaticBackup);
+    await renderSettings(healthyMaintenance(), automaticBackup, "professional");
 
     expect(await screen.findByText("自动备份结果待核对")).toBeVisible();
     expect(screen.getByText(/不会自动覆盖或重试/u)).toBeVisible();
@@ -228,11 +228,16 @@ function healthyMaintenance(): RuntimeMaintenance {
   };
 }
 
-function renderSettings(
+async function renderSettings(
   maintenance: RuntimeMaintenance,
   automaticBackup: AutomaticBackupRuntime | null = null,
-): void {
+  mode: "direct" | "professional" = "direct",
+): Promise<void> {
   const runtime = createDevelopmentRuntime(window.localStorage);
+  const preference = await runtime.writingExperience.getOrInitialize();
+  if (preference.mode !== mode) {
+    await runtime.writingExperience.switchMode(mode, preference.revision);
+  }
   Object.assign(runtime, { automaticBackup, maintenance });
   render(
     <MemoryRouter initialEntries={["/settings"]}>

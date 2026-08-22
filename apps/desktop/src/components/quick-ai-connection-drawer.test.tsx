@@ -33,10 +33,10 @@ describe("quick AI connection drawer", () => {
 
     await user.click(screen.getByRole("radio", { name: /阿里云百炼 \/ Qwen/u }));
     expect(screen.getByLabelText("地域")).toHaveValue("china_beijing");
-    expect(screen.getByLabelText(/^模型 ID/u)).toBeRequired();
+    expect(screen.getByLabelText(/^模型编号/u)).toBeRequired();
     expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeDisabled();
-    await user.type(screen.getByLabelText(/^API Key/u), "test-qwen-key");
-    await user.type(screen.getByLabelText(/^模型 ID/u), "qwen-account-model");
+    await user.type(screen.getByLabelText(/^接口密钥/u), "test-qwen-key");
+    await user.type(screen.getByLabelText(/^模型编号/u), "qwen-account-model");
     expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeEnabled();
   });
 
@@ -46,11 +46,11 @@ describe("quick AI connection drawer", () => {
     renderDrawer(harness.runtime);
 
     await user.click(screen.getByRole("radio", { name: /自定义兼容接口/u }));
-    expect(screen.getByLabelText("Base URL")).toBeRequired();
-    expect(screen.getByLabelText(/API Key（可选）/u)).not.toBeRequired();
-    expect(screen.getByLabelText(/^模型 ID/u)).not.toBeRequired();
+    expect(screen.getByLabelText("服务根地址")).toBeRequired();
+    expect(screen.getByLabelText(/接口密钥（可选）/u)).not.toBeRequired();
+    expect(screen.getByLabelText(/^模型编号/u)).not.toBeRequired();
     expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeDisabled();
-    await user.type(screen.getByLabelText("Base URL"), "https://models.example.test/v1");
+    await user.type(screen.getByLabelText("服务根地址"), "https://models.example.test/v1");
     expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeEnabled();
   });
 
@@ -75,7 +75,7 @@ describe("quick AI connection drawer", () => {
     await user.click(screen.getByRole("radio", { name: /DeepSeek/u }));
 
     expect(screen.queryByText("已保存 Key（末四位 1234）")).not.toBeInTheDocument();
-    expect(screen.getByLabelText(/^API Key/u)).toHaveAttribute("placeholder", "粘贴 API Key");
+    expect(screen.getByLabelText(/^接口密钥/u)).toHaveAttribute("placeholder", "粘贴接口密钥");
     expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeDisabled();
   }, 30_000);
 
@@ -119,8 +119,8 @@ describe("quick AI connection drawer", () => {
     await user.click(screen.getByRole("radio", { name: /阿里云百炼 \/ Qwen/u }));
 
     await waitFor(() => expect(screen.getByLabelText("地域")).toHaveValue("singapore"));
-    expect(await screen.findByLabelText(/^Workspace ID/u)).toHaveValue("workspace-saved");
-    expect(screen.getByLabelText(/^模型 ID/u)).toHaveValue("qwen-saved-model");
+    expect(await screen.findByLabelText(/^服务工作区编号/u)).toHaveValue("workspace-saved");
+    expect(screen.getByLabelText(/^模型编号/u)).toHaveValue("qwen-saved-model");
     expect(await screen.findByText("已保存 Key（末四位 4321）")).toBeVisible();
     expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeEnabled();
   });
@@ -130,7 +130,7 @@ describe("quick AI connection drawer", () => {
     const user = userEvent.setup();
     renderDrawer(harness.runtime);
 
-    const keyInput = screen.getByLabelText(/^API Key/u);
+    const keyInput = screen.getByLabelText(/^接口密钥/u);
     fireEvent.change(keyInput, { target: { value: "bad-key" } });
     expect(keyInput).toHaveValue("bad-key");
     const firstConnectButton = screen.getByRole("button", { name: "测试连接并查找模型" });
@@ -142,9 +142,9 @@ describe("quick AI connection drawer", () => {
     ).toBeVisible();
     expect(screen.queryByText(/MODEL_HTTP_UNAUTHORIZED/u)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回修改" }));
-    expect(screen.getByLabelText(/^API Key/u)).toHaveValue("");
+    expect(screen.getByLabelText(/^接口密钥/u)).toHaveValue("");
 
-    const replacementKeyInput = screen.getByLabelText(/^API Key/u);
+    const replacementKeyInput = screen.getByLabelText(/^接口密钥/u);
     fireEvent.change(replacementKeyInput, { target: { value: "good-key" } });
     expect(replacementKeyInput).toHaveValue("good-key");
     const secondConnectButton = screen.getByRole("button", { name: "测试连接并查找模型" });
@@ -162,7 +162,7 @@ describe("quick AI connection drawer", () => {
     const harness = createTauriHarness({}, { probeFails: true, twoModels: true });
     const user = userEvent.setup();
     renderDrawer(harness.runtime);
-    const keyInput = screen.getByLabelText(/^API Key/u);
+    const keyInput = screen.getByLabelText(/^接口密钥/u);
     fireEvent.change(keyInput, { target: { value: "good-key" } });
     expect(keyInput).toHaveValue("good-key");
     const connectButton = screen.getByRole("button", { name: "测试连接并查找模型" });
@@ -174,7 +174,7 @@ describe("quick AI connection drawer", () => {
     await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
     expect(await screen.findByText("发送固定验证前确认")).toBeVisible();
     expect(screen.getByText(/最多调用 1 次，自动重试 0 次/u)).toBeVisible();
-    expect(screen.getByText(/不发送作品正文、灵感、设定或 API Key/u)).toBeVisible();
+    expect(screen.getByText(/不发送作品正文、灵感、设定或接口密钥/u)).toBeVisible();
     expect(harness.generate).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "确认 1 次固定验证并继续" }));
     expect(await screen.findByRole("button", { name: "返回选择" }, ASYNC_UI_TIMEOUT)).toBeEnabled();
@@ -196,7 +196,7 @@ describe("quick AI connection drawer", () => {
     const harness = createTauriHarness({}, { probeAmbiguous: true });
     const user = userEvent.setup();
     renderDrawer(harness.runtime);
-    fireEvent.change(screen.getByLabelText(/^API Key/u), {
+    fireEvent.change(screen.getByLabelText(/^接口密钥/u), {
       target: { value: "good-key" },
     });
     const connectButton = screen.getByRole("button", { name: "测试连接并查找模型" });
@@ -244,7 +244,7 @@ describe("quick AI connection drawer", () => {
     const user = userEvent.setup();
     renderDrawer(harness.runtime, onOpenChange);
 
-    fireEvent.change(screen.getByLabelText(/^API Key/u), {
+    fireEvent.change(screen.getByLabelText(/^接口密钥/u), {
       target: { value: "slow-good-key" },
     });
     await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
@@ -256,7 +256,7 @@ describe("quick AI connection drawer", () => {
     if (backdrop === null) throw new Error("应显示 AI 连接抽屉遮罩");
     fireEvent.mouseDown(backdrop);
     expect(onOpenChange).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("link", { name: "更多供应商与完整模型中心设置" }));
+    await user.click(screen.getByRole("link", { name: "更多模型服务与完整模型中心设置" }));
     expect(onOpenChange).not.toHaveBeenCalled();
 
     if (finishConnection === undefined) throw new Error("连接检查尚未开始");

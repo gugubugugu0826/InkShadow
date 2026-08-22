@@ -842,8 +842,8 @@ export function GovernedCreativeExtensionsPage({
             >
               <div className="governed-extensions-review__metrics">
                 <Metric label="状态" value={requestStatusLabel(selectedRequest.status)} />
-                <Metric label="输入 token" value={tokenValue(selectedRequest, "input")} />
-                <Metric label="输出 token" value={tokenValue(selectedRequest, "output")} />
+                <Metric label="输入内容额度" value={tokenValue(selectedRequest, "input")} />
+                <Metric label="输出内容额度" value={tokenValue(selectedRequest, "output")} />
                 <Metric
                   label="内部费用"
                   value={
@@ -864,8 +864,8 @@ export function GovernedCreativeExtensionsPage({
               {selectedRequest.usage?.source !== "provider_reported" && (
                 <InlineAlert
                   tone="warning"
-                  title="Token 用量未知"
-                  description="服务方没有提供可用 token 报告；系统没有把未知值显示为 0。预算按本次最大预留内部估算保守结算，这不代表服务方账单或已知实际费用，且不会发布候选。"
+                  title="内容额度用量未知"
+                  description="模型服务没有提供可用内容额度报告；系统没有把未知值显示为 0。预算按本次最大预留内部估算保守结算，这不代表模型服务账单或已知实际费用，且不会发布隔离建议。"
                 />
               )}
               {preview === null ? (
@@ -994,7 +994,7 @@ function PreflightPanel({
                 <dt>内部估算</dt>
                 <dd>
                   约 {preflight.estimate.estimatedInputTokens.toLocaleString()} 输入 /{" "}
-                  {preflight.estimate.estimatedOutputTokens.toLocaleString()} 输出 token；最多{" "}
+                  {preflight.estimate.estimatedOutputTokens.toLocaleString()} 个输出内容额度；最多{" "}
                   {formatMicros(preflight.estimate.maximumCostMicros, preflight.estimate.currency)}
                 </dd>
               </div>
@@ -1207,7 +1207,7 @@ function readNumber(event: ChangeEvent<HTMLInputElement>, fallback: number): num
 
 function usageLabel(request: GovernedExtensionRequest): string {
   if (request.usage?.source !== "provider_reported") {
-    return "Token 用量未知";
+    return "内容额度用量未知";
   }
   return `${request.usage.inputTokens.toLocaleString()} 输入 / ${request.usage.outputTokens.toLocaleString()} 输出`;
 }
@@ -1252,7 +1252,7 @@ function statusMeta(status: string): {
     case "failed_final":
       return { label: "失败", tone: "danger" };
     default:
-      return { label: status, tone: "neutral" };
+      return { label: "状态未知", tone: "neutral" };
   }
 }
 

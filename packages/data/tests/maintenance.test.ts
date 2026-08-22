@@ -40,6 +40,22 @@ const capabilityProbeInvocationLedgerMigration = readFileSync(
   new URL("../migrations/0071_model_capability_probe_invocation_ledger.sql", import.meta.url),
   "utf8",
 );
+const candidatePurposeMigration = readFileSync(
+  new URL("../migrations/0072_ai_candidate_purpose.sql", import.meta.url),
+  "utf8",
+);
+const storyFactUserRevisionMigration = readFileSync(
+  new URL("../migrations/0073_story_fact_user_revisions.sql", import.meta.url),
+  "utf8",
+);
+const chapterVersionResponsibilityMigration = readFileSync(
+  new URL("../migrations/0074_chapter_version_story_fact_responsibility.sql", import.meta.url),
+  "utf8",
+);
+const generationAttemptPrivacyMigration = readFileSync(
+  new URL("../migrations/0075_generation_attempt_privacy_snapshot.sql", import.meta.url),
+  "utf8",
+);
 const inkShadowMigration = [
   readFileSync(new URL("../migrations/0001_core.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../migrations/0002_tasks_notifications.sql", import.meta.url), "utf8"),
@@ -250,11 +266,17 @@ const inkShadowMigration = [
     "utf8",
   ),
   capabilityProbeInvocationLedgerMigration,
+  candidatePurposeMigration,
+  storyFactUserRevisionMigration,
+  chapterVersionResponsibilityMigration,
+  generationAttemptPrivacyMigration,
 ].join("\n");
-const inkShadowMigrationV73 = inkShadowMigration.replace(
-  capabilityProbeInvocationLedgerMigration,
-  "",
-);
+const inkShadowMigrationV73 = inkShadowMigration
+  .replace(capabilityProbeInvocationLedgerMigration, "")
+  .replace(candidatePurposeMigration, "")
+  .replace(storyFactUserRevisionMigration, "")
+  .replace(chapterVersionResponsibilityMigration, "")
+  .replace(generationAttemptPrivacyMigration, "");
 const BACKUP_PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const BACKUP_ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
 const BACKUP_OBJECT_ID = "019f9f4a-b3c7-7350-9226-000000000102";
@@ -405,12 +427,36 @@ describe("DatabaseMaintenanceService", () => {
       ).resolves.toEqual([{ count: 0 }]);
       await expect(
         current.select<{
+          readonly privacySnapshotVersion: number | null;
+          readonly privacyPolicy: string | null;
+          readonly dataDestination: string | null;
+          readonly modelInvocationId: string | null;
+        }>(
+          `SELECT privacy_snapshot_version AS privacySnapshotVersion,
+                  privacy_policy AS privacyPolicy,
+                  data_destination AS dataDestination,
+                  model_invocation_id AS modelInvocationId
+           FROM ai_generation_attempt_usage
+           WHERE run_id = '019f9f4a-b3c7-7350-9226-000000000078'`,
+        ),
+      ).resolves.toEqual([
+        {
+          privacySnapshotVersion: null,
+          privacyPolicy: null,
+          dataDestination: null,
+          modelInvocationId: null,
+        },
+      ]);
+      await expect(
+        current.select<{
           readonly projectName: string;
           readonly chapterContent: string;
           readonly currentVersionId: string;
           readonly versionContent: string;
+          readonly organizeLocalStoryFacts: number;
           readonly candidateContent: string;
           readonly candidateStatus: string;
+          readonly candidatePurpose: string;
           readonly taskStatus: string;
           readonly invocationStatus: string;
           readonly inputTokens: number;
@@ -422,8 +468,10 @@ describe("DatabaseMaintenanceService", () => {
                   chapter.content AS chapterContent,
                   chapter.current_version_id AS currentVersionId,
                   version.content AS versionContent,
+                  version.organize_local_story_facts AS organizeLocalStoryFacts,
                   candidate.content AS candidateContent,
                   candidate.status AS candidateStatus,
+                  candidate.purpose AS candidatePurpose,
                   task.status AS taskStatus,
                   invocation.status AS invocationStatus,
                   invocation.input_tokens AS inputTokens,
@@ -448,8 +496,10 @@ describe("DatabaseMaintenanceService", () => {
           chapterContent: "七十三版正文必须原样恢复。",
           currentVersionId: "019f9f4a-b3c7-7350-9226-000000000073",
           versionContent: "七十三版正文必须原样恢复。",
+          organizeLocalStoryFacts: 0,
           candidateContent: "隔离中的 AI 建议草稿",
           candidateStatus: "ready",
+          candidatePurpose: "prose",
           taskStatus: "succeeded",
           invocationStatus: "succeeded",
           inputTokens: 17,
@@ -518,6 +568,20 @@ describe("DatabaseMaintenanceService", () => {
     await insertCloudDeletionJournal(executor);
     await insertTeamTemplateApplication(executor);
     await insertGovernedExtensionMetadata(executor);
+    await executor.execute(
+      `INSERT INTO chapter_versions (
+         id, project_id, chapter_id, parent_version_id, sequence, content,
+         content_checksum, reason, source_candidate_id, organize_local_story_facts, created_at
+       ) VALUES (?, ?, ?, ?, 2, 'responsibility backup', ?, 'manual', NULL, 1, ?)`,
+      [
+        BACKUP_CURRENT_CHAPTER_VERSION_ID,
+        BACKUP_PROJECT_ID,
+        BACKUP_CHAPTER_ID,
+        BACKUP_CHAPTER_VERSION_ID,
+        "2".repeat(64),
+        "2026-07-27T00:00:01.000Z",
+      ],
+    );
     await insertContinuousStoryStateRouteReceipt(executor);
     await insertChapterValidationSnapshots(executor);
     await executor.execute(
@@ -533,6 +597,7 @@ describe("DatabaseMaintenanceService", () => {
     await insertProjectKeyMetadata(executor);
     await insertModelProfile(executor);
     await insertModelHubExpertConnection(executor);
+    await insertGenerationAttemptPrivacyBackup(executor);
     await insertConsistencyInvestigationBackup(executor);
     await insertRetiredModelHubConnection(executor);
     await insertNovelSkillBackupScenario(executor);
@@ -727,7 +792,12 @@ describe("DatabaseMaintenanceService", () => {
     );
     await executor.execute(
       `UPDATE story_facts
-       SET locked = 1, revision = 3, updated_at = '2026-07-27T00:01:00.000Z'
+       SET content_text = '恢复前被修改', confidence = 1, origin = 'user',
+           status = 'formal', user_confirmed = 1, locked = 0, deprecated = 0,
+           needs_review = 0,
+           confirmed_by_actor_id = '019f9f4a-b3c7-7350-9226-000000000170',
+           confirmed_at = '2026-07-27T00:01:00.000Z',
+           revision = 3, updated_at = '2026-07-27T00:01:00.000Z'
       WHERE id = 'maintenance-story-fact' AND revision = 2`,
     );
     await executor.execute(
@@ -762,6 +832,35 @@ describe("DatabaseMaintenanceService", () => {
     await expect(
       executor.select<{ count: number }>("SELECT COUNT(*) AS count FROM pragma_foreign_key_check"),
     ).resolves.toEqual([{ count: 0 }]);
+    await expect(
+      executor.select<{ organizeLocalStoryFacts: number }>(
+        `SELECT organize_local_story_facts AS organizeLocalStoryFacts
+         FROM chapter_versions WHERE id = ?`,
+        [BACKUP_CURRENT_CHAPTER_VERSION_ID],
+      ),
+    ).resolves.toEqual([{ organizeLocalStoryFacts: 1 }]);
+    await expect(
+      executor.select<{
+        privacySnapshotVersion: number;
+        privacyPolicy: string;
+        dataDestination: string;
+        modelInvocationId: string;
+      }>(
+        `SELECT privacy_snapshot_version AS privacySnapshotVersion,
+                privacy_policy AS privacyPolicy,
+                data_destination AS dataDestination,
+                model_invocation_id AS modelInvocationId
+         FROM ai_generation_attempt_usage
+         WHERE run_id = '019f9f4a-b3c7-7350-9226-000000000079'`,
+      ),
+    ).resolves.toEqual([
+      {
+        privacySnapshotVersion: 1,
+        privacyPolicy: "local_preferred",
+        dataDestination: "remote",
+        modelInvocationId: "maintenance-generation-privacy-invocation",
+      },
+    ]);
     await expect(
       executor.select<{
         invocationId: string;
@@ -1350,12 +1449,14 @@ describe("DatabaseMaintenanceService", () => {
       label: "backed-up",
     });
     await expect(
-      executor.select<{ revision: number; locked: number }>(
-        `SELECT revision, locked
+      executor.select<{ revision: number; locked: number; contentText: string; origin: string }>(
+        `SELECT revision, locked, content_text AS contentText, origin
          FROM story_facts
          WHERE id = 'maintenance-story-fact'`,
       ),
-    ).resolves.toEqual([{ revision: 2, locked: 0 }]);
+    ).resolves.toEqual([
+      { revision: 2, locked: 0, contentText: "施法会遗忘一个名字。", origin: "legacy" },
+    ]);
     await expect(
       executor.select<{ revisionCount: number; linkCount: number }>(
         `SELECT
@@ -2532,6 +2633,33 @@ async function insertHistoricalV73CapabilityRestoreScenario(
        1, 1, 1, NULL, ?, ?, ?, ?
      )`,
     [JSON.stringify({ projectId, chapterId }), now, now, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO ai_generation_runs (
+       id, task_id, idempotency_key, project_id, chapter_id, base_version_id,
+       provider_id, model_id, state, revision, attempt, input_tokens,
+       maximum_output_tokens, estimated_cost_micros, incurred_cost_micros,
+       cost_status, currency, pricing_version, price_updated_at, preflight_json,
+       completed_at, created_at, updated_at
+     ) VALUES (
+       '019f9f4a-b3c7-7350-9226-000000000078',
+       'maintenance-v73-background-task', 'maintenance.v73.generation-run', ?, ?, ?,
+       'maintenance-v73-connection', 'maintenance-v73-model', 'completed', 2, 1,
+       17, 64, '100', '100', 'estimated', 'USD', 'maintenance-v73-price', ?, '{}',
+       ?, ?, ?
+     )`,
+    [projectId, chapterId, versionId, now, now, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO ai_generation_attempt_usage (
+       run_id, attempt, usage_source, input_tokens, output_tokens,
+       cached_input_tokens, usage_priced_estimate_micros, cost_status,
+       currency, pricing_version, price_updated_at, reported_at
+     ) VALUES (
+       '019f9f4a-b3c7-7350-9226-000000000078', 1, 'provider_reported',
+       17, 4, NULL, '100', 'estimated', 'USD', 'maintenance-v73-price', ?, ?
+     )`,
+    [now, now],
   );
   await executor.execute(
     `INSERT INTO model_provider_connections (
@@ -3714,6 +3842,72 @@ async function insertModelProfile(executor: NodeSqliteExecutor): Promise<void> {
   );
 }
 
+async function insertGenerationAttemptPrivacyBackup(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  const runId = "019f9f4a-b3c7-7350-9226-000000000079";
+  await executor.execute(
+    `INSERT INTO background_tasks (
+       id, task_type, idempotency_key, metadata_json, priority, status,
+       attempt, max_attempts, sequence, run_after, created_at, updated_at,
+       started_at, finished_at
+     ) VALUES (
+       'maintenance-generation-privacy-task', 'ai.generate',
+       'maintenance.generation.privacy', '{}', 80, 'succeeded',
+       1, 1, 80, NULL, ?, ?, ?, ?
+     )`,
+    [now, now, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO model_invocation_facts (
+       id, task, connection_id, catalog_entry_id, provider_kind_snapshot,
+       model_id_snapshot, route_reason, status, attempt, privacy_policy,
+       data_destination, input_tokens, output_tokens, cached_input_tokens,
+       estimated_cost_micros, currency, started_at, completed_at, created_at,
+       provider_dispatch_started_at
+     ) VALUES (
+       'maintenance-generation-privacy-invocation', 'continuation',
+       'maintenance-custom-model', 'maintenance-model-catalog',
+       'custom_openai_compatible', 'maintenance-writer', 'task_primary',
+       'succeeded', 1, 'local_preferred', 'remote', 17, 4, NULL, '100', 'USD',
+       ?, ?, ?, ?
+     )`,
+    [now, now, now, now],
+  );
+  await executor.execute(
+    `INSERT INTO ai_generation_runs (
+       id, task_id, idempotency_key, project_id, chapter_id, base_version_id,
+       provider_id, model_id, state, revision, attempt, input_tokens,
+       maximum_output_tokens, estimated_cost_micros, incurred_cost_micros,
+       cost_status, currency, pricing_version, price_updated_at, preflight_json,
+       completed_at, created_at, updated_at
+     ) VALUES (?, 'maintenance-generation-privacy-task',
+       'maintenance.generation.privacy.run', ?, ?, ?, 'maintenance-custom-model',
+       'maintenance-writer', 'completed', 2, 1, 17, 64, '100', '100',
+       'estimated', 'USD', 'maintenance-current-price', ?, '{}', ?, ?, ?)`,
+    [
+      runId,
+      BACKUP_PROJECT_ID,
+      BACKUP_CHAPTER_ID,
+      BACKUP_CURRENT_CHAPTER_VERSION_ID,
+      now,
+      now,
+      now,
+      now,
+    ],
+  );
+  await executor.execute(
+    `INSERT INTO ai_generation_attempt_usage (
+       run_id, attempt, usage_source, input_tokens, output_tokens,
+       cached_input_tokens, usage_priced_estimate_micros, cost_status,
+       currency, pricing_version, price_updated_at, reported_at,
+       privacy_snapshot_version, privacy_policy, data_destination,
+       model_invocation_id
+     ) VALUES (?, 1, 'provider_reported', 17, 4, NULL, '100', 'estimated',
+       'USD', 'maintenance-current-price', ?, ?, 1, 'local_preferred', 'remote',
+       'maintenance-generation-privacy-invocation')`,
+    [runId, now, now],
+  );
+}
 async function insertModelHubExpertConnection(executor: NodeSqliteExecutor): Promise<void> {
   const now = "2026-07-27T00:00:00.000Z";
   await executor.execute(

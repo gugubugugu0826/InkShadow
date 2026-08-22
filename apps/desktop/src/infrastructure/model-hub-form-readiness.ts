@@ -80,7 +80,7 @@ export function resolveModelHubFormReadiness(
       blocker(
         "CREDENTIAL_REQUIRED",
         "provider-api-key",
-        "需要已有系统凭据，或在 API Key 输入框中填写一个新密钥。",
+        "需要已有系统凭据，或在接口密钥输入框中填写一个新密钥。",
       ),
     );
   }

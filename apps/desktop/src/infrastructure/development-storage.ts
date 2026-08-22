@@ -14,6 +14,11 @@ import type {
   ImportProjectCommit,
 } from "@inkshadow/application";
 import {
+  acceptedVersionTaskSourceForChapterSave,
+  type AcceptedCandidateTaskFactory,
+  type AcceptedVersionTaskFactory,
+} from "@inkshadow/data";
+import {
   AiCandidate,
   AppError,
   Chapter,
@@ -37,6 +42,13 @@ import {
   DEVELOPMENT_DATABASE_KEY,
   recoverPreparedIdeationCommit,
 } from "./development-atomic-journal";
+import {
+  createDevelopmentTaskIfAbsent,
+  normalizeDevelopmentTaskCenterState,
+  readDevelopmentTaskCenterState,
+  type BrowserDevelopmentTaskCenterPersistence,
+  type DevelopmentTaskCenterState,
+} from "./task-center-store";
 
 export { DEVELOPMENT_DATABASE_KEY };
 
@@ -71,9 +83,14 @@ export interface DevelopmentStoredDatabase {
   drafts: RecoveryDraftSnapshot[];
   candidates: AiCandidateSnapshot[];
   auditEvents: DevelopmentLocalAuditEventSnapshot[];
+  taskCenter?: DevelopmentTaskCenterState;
 }
 
-type StoredDatabase = DevelopmentStoredDatabase;
+export interface NormalizedDevelopmentStoredDatabase extends DevelopmentStoredDatabase {
+  taskCenter: DevelopmentTaskCenterState;
+}
+
+type StoredDatabase = NormalizedDevelopmentStoredDatabase;
 
 export interface DevelopmentAiCandidateRepository extends AiCandidateRepository {
   create(candidate: AiCandidate): Promise<Result<void, AppError>>;
@@ -89,9 +106,14 @@ export interface DevelopmentRepositories {
   readonly aiCandidates: DevelopmentAiCandidateRepository;
   readonly contentCommits: ContentCommitRepository;
   readonly projectImports: ProjectImportCommitRepository;
+  readonly taskCenterPersistence: BrowserDevelopmentTaskCenterPersistence;
+}
+export interface CreateDevelopmentRepositoriesOptions {
+  readonly acceptedVersionTaskFactory?: AcceptedVersionTaskFactory;
+  readonly acceptedCandidateTaskFactory?: AcceptedCandidateTaskFactory;
 }
 
-function emptyDatabase(): StoredDatabase {
+function emptyDatabase(taskCenter: DevelopmentTaskCenterState): StoredDatabase {
   return {
     schemaVersion: 2,
     projects: [],
@@ -100,6 +122,7 @@ function emptyDatabase(): StoredDatabase {
     drafts: [],
     candidates: [],
     auditEvents: [],
+    taskCenter,
   };
 }
 
@@ -119,7 +142,7 @@ function isStoredDatabaseV1(value: unknown): value is StoredDatabaseV1 {
   );
 }
 
-function isStoredDatabase(value: unknown): value is StoredDatabase {
+function isStoredDatabase(value: unknown): value is DevelopmentStoredDatabase {
   return (
     isRecord(value) &&
     value.schemaVersion === 2 &&
@@ -132,11 +155,15 @@ function isStoredDatabase(value: unknown): value is StoredDatabase {
   );
 }
 
-function migrateStoredDatabaseV1(database: StoredDatabaseV1): StoredDatabase {
+function migrateStoredDatabaseV1(
+  database: StoredDatabaseV1,
+  taskCenter: DevelopmentTaskCenterState,
+): StoredDatabase {
   return {
     ...structuredClone(database),
     schemaVersion: 2,
     auditEvents: [],
+    taskCenter,
   };
 }
 
@@ -156,23 +183,42 @@ class DevelopmentDatabase {
     operation(database);
     this.write(database);
   }
+
+  taskCenterPersistence(): BrowserDevelopmentTaskCenterPersistence {
+    return {
+      read: () => this.read().taskCenter,
+      write: (taskCenter) => {
+        const normalized = normalizeDevelopmentTaskCenterState(taskCenter);
+        this.update((database) => {
+          database.taskCenter = normalized;
+        });
+      },
+    };
+  }
 }
 
-export function readDevelopmentDatabase(storage: Storage): DevelopmentStoredDatabase {
+export function readDevelopmentDatabase(storage: Storage): NormalizedDevelopmentStoredDatabase {
   recoverPreparedIdeationCommit(storage);
+
   const serialized = storage.getItem(DEVELOPMENT_DATABASE_KEY);
   if (serialized === null) {
-    return emptyDatabase();
+    return emptyDatabase(readDevelopmentTaskCenterState(storage));
   }
 
   const parsed: unknown = JSON.parse(serialized);
   if (isStoredDatabaseV1(parsed)) {
-    return migrateStoredDatabaseV1(parsed);
+    return migrateStoredDatabaseV1(parsed, readDevelopmentTaskCenterState(storage));
   }
   if (!isStoredDatabase(parsed)) {
     throw repositoryError("读取浏览器开发数据", "DevelopmentDataShapeError");
   }
-  return structuredClone(parsed);
+  const database = structuredClone(parsed);
+  return {
+    ...database,
+    taskCenter: normalizeDevelopmentTaskCenterState(
+      database.taskCenter ?? readDevelopmentTaskCenterState(storage),
+    ),
+  };
 }
 
 class DevelopmentProjectRepository implements ProjectRepository {
@@ -429,7 +475,11 @@ class DevelopmentCandidateRepository implements DevelopmentAiCandidateRepository
 }
 
 class DevelopmentContentCommitRepository implements ContentCommitRepository {
-  constructor(private readonly database: DevelopmentDatabase) {}
+  constructor(
+    private readonly database: DevelopmentDatabase,
+    private readonly acceptedCandidateTaskFactory?: AcceptedCandidateTaskFactory,
+    private readonly acceptedVersionTaskFactory?: AcceptedVersionTaskFactory,
+  ) {}
 
   createChapter(
     commit: Parameters<ContentCommitRepository["createChapter"]>[0],
@@ -464,6 +514,13 @@ class DevelopmentContentCommitRepository implements ContentCommitRepository {
         database.versions.push(version);
         database.chapters[chapterIndex] = chapter;
         database.drafts.splice(draftIndex, 1);
+        const taskInput = this.acceptedVersionTaskFactory?.({
+          source: acceptedVersionTaskSourceForChapterSave(commit.version),
+          version: commit.version,
+        });
+        if (taskInput !== undefined) {
+          createDevelopmentTaskIfAbsent(database.taskCenter, taskInput);
+        }
       });
       return { syncQueued: false };
     });
@@ -498,6 +555,14 @@ class DevelopmentContentCommitRepository implements ContentCommitRepository {
         database.versions.push(version);
         database.chapters[chapterIndex] = chapter;
         database.candidates[candidateIndex] = candidate;
+        const taskInput =
+          this.acceptedVersionTaskFactory?.({
+            source: "candidate_accept",
+            version: commit.version,
+          }) ?? this.acceptedCandidateTaskFactory?.(commit);
+        if (taskInput !== undefined) {
+          createDevelopmentTaskIfAbsent(database.taskCenter, taskInput);
+        }
       });
       return { syncQueued: false };
     });
@@ -530,6 +595,13 @@ class DevelopmentContentCommitRepository implements ContentCommitRepository {
         }
         database.versions.push(version);
         database.chapters[chapterIndex] = chapter;
+        const taskInput = this.acceptedVersionTaskFactory?.({
+          source: "version_restore",
+          version: commit.version,
+        });
+        if (taskInput !== undefined) {
+          createDevelopmentTaskIfAbsent(database.taskCenter, taskInput);
+        }
       });
       return { syncQueued: false };
     });
@@ -537,7 +609,10 @@ class DevelopmentContentCommitRepository implements ContentCommitRepository {
 }
 
 class DevelopmentProjectImportCommitRepository implements ProjectImportCommitRepository {
-  constructor(private readonly database: DevelopmentDatabase) {}
+  constructor(
+    private readonly database: DevelopmentDatabase,
+    private readonly acceptedVersionTaskFactory?: AcceptedVersionTaskFactory,
+  ) {}
 
   commitImport(commit: ImportProjectCommit): Promise<Result<void, AppError>> {
     return attempt("导入项目", () => {
@@ -570,13 +645,23 @@ class DevelopmentProjectImportCommitRepository implements ProjectImportCommitRep
         for (const imported of commit.chapters) {
           database.chapters.push(imported.chapter.toSnapshot());
           database.versions.push(imported.initialVersion.toSnapshot());
+          const taskInput = this.acceptedVersionTaskFactory?.({
+            source: "chapter_import",
+            version: imported.initialVersion,
+          });
+          if (taskInput !== undefined) {
+            createDevelopmentTaskIfAbsent(database.taskCenter, taskInput);
+          }
         }
       });
     });
   }
 }
 
-export function createDevelopmentRepositories(storage: Storage): DevelopmentRepositories {
+export function createDevelopmentRepositories(
+  storage: Storage,
+  options: CreateDevelopmentRepositoriesOptions = {},
+): DevelopmentRepositories {
   const database = new DevelopmentDatabase(storage);
   return {
     projects: new DevelopmentProjectRepository(database),
@@ -585,8 +670,16 @@ export function createDevelopmentRepositories(storage: Storage): DevelopmentRepo
     chapterVersions: new DevelopmentVersionRepository(database),
     recoveryDrafts: new DevelopmentDraftRepository(database),
     aiCandidates: new DevelopmentCandidateRepository(database),
-    contentCommits: new DevelopmentContentCommitRepository(database),
-    projectImports: new DevelopmentProjectImportCommitRepository(database),
+    contentCommits: new DevelopmentContentCommitRepository(
+      database,
+      options.acceptedCandidateTaskFactory,
+      options.acceptedVersionTaskFactory,
+    ),
+    projectImports: new DevelopmentProjectImportCommitRepository(
+      database,
+      options.acceptedVersionTaskFactory,
+    ),
+    taskCenterPersistence: database.taskCenterPersistence(),
   };
 }
 

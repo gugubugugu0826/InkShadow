@@ -15,6 +15,8 @@ import {
   Select,
 } from "@inkshadow/ui";
 
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
+
 const TOTAL_PROVIDER_CALLS = 192;
 const TOTAL_MANUAL_SCORES = 2_496;
 
@@ -183,10 +185,9 @@ export function NovelSkillPaidEvaluationPanel({
       },
       (cause: unknown) => {
         if (!active) return;
+        const projected = projectOrdinaryUiError(cause);
         setError(
-          cause instanceof Error
-            ? cause.message
-            : "付费评测的本地恢复检查没有完成。基础写作仍可使用，且没有发送模型请求。",
+          `付费评测的本地恢复检查没有完成。${projected.description}基础写作仍可使用，且没有发送模型请求。`,
         );
       },
     );
@@ -217,11 +218,8 @@ export function NovelSkillPaidEvaluationPanel({
     try {
       setSnapshot(await operation());
     } catch (cause: unknown) {
-      setError(
-        cause instanceof Error
-          ? cause.message
-          : "操作没有完成。系统没有自动开始、重试或重发任何模型调用。",
-      );
+      const projected = projectOrdinaryUiError(cause);
+      setError(`${projected.description}系统没有自动开始、重试或重发任何模型调用。`);
     } finally {
       setBusyAction((current) => (current === action ? null : current));
     }

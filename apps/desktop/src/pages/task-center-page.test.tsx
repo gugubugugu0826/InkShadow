@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import type { UuidV7 } from "@inkshadow/domain";
 import userEvent from "@testing-library/user-event";
 import {
   Notification,
@@ -56,8 +57,14 @@ describe("TaskCenterPage", () => {
   });
 
   it("retries the accepted正文 pipeline from its persisted metadata", async () => {
-    seedRetryingAcceptedVersionTask();
     const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    expect(preference.mode).toBe("direct");
+    const seeded = await seedRetryingAcceptedVersionTask(runtime);
+    const currentChapter = await runtime.repositories.chapters.findById(seeded.chapterId);
+    expect(currentChapter.ok && currentChapter.value?.currentVersionId).toBe(seeded.versionId);
+    const findChapter = vi.spyOn(runtime.repositories.chapters, "findById");
+    const findVersion = vi.spyOn(runtime.repositories.chapterVersions, "findVersionById");
     const startTask = vi.spyOn(runtime.taskCenter, "startTask");
     const summary = vi.spyOn(runtime.story.chapterSummaries, "summarizeSavedVersion");
     const storyState = vi.spyOn(runtime.story.continuousState, "extractSavedVersion");
@@ -68,18 +75,24 @@ describe("TaskCenterPage", () => {
     expect(await screen.findByText("等待重试")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "立即重试后台整理" }));
 
-    await waitFor(() => {
-      expect(startTask).toHaveBeenCalledTimes(1);
-    });
+    await waitFor(() => expect(startTask).toHaveBeenCalledTimes(1));
+    expect(findChapter).toHaveBeenCalledWith(seeded.chapterId);
+    expect(findVersion).toHaveBeenCalledWith(seeded.versionId);
     expect(startTask).toHaveBeenCalledWith(
-      uuid(10),
+      seeded.taskId,
       "desktop.accepted-version",
       expect.any(String),
       expect.any(String),
     );
+    const factVerificationOrder = findVersion.mock.invocationCallOrder[0];
+    const taskStartOrder = startTask.mock.invocationCallOrder[0];
+    if (factVerificationOrder === undefined || taskStartOrder === undefined) {
+      throw new Error("缺少事实预检或任务启动调用记录。");
+    }
+    expect(factVerificationOrder).toBeLessThan(taskStartOrder);
     await waitFor(async () => {
       const persisted = await runtime.taskCenter.load();
-      expect(persisted.tasks[0]?.status).not.toBe("queued");
+      expect(persisted.tasks.find(({ id }) => id === seeded.taskId)?.status).not.toBe("queued");
     });
     expect(summary).not.toHaveBeenCalled();
     expect(storyState).not.toHaveBeenCalled();
@@ -177,58 +190,62 @@ function seedTaskCenter(): void {
   );
 }
 
-function seedRetryingAcceptedVersionTask(): void {
-  const queued = expectOk(
-    Task.create({
-      id: uuid(10),
-      type: "story.accepted-version.process",
-      idempotencyKey: `story.accepted-version:${uuid(13)}`,
-      metadata: {
-        projectId: uuid(11),
-        chapterId: uuid(12),
-        versionId: uuid(13),
-        source: "candidate_accept",
-        acceptedCharacterCount: 128,
-        operation: "rebuild-derived-story-state",
-      },
-      priority: 75,
-      maxAttempts: 3,
-      now: INITIAL_TIME,
-    }),
+async function seedRetryingAcceptedVersionTask(
+  runtime: DesktopRuntime,
+): Promise<Readonly<{ taskId: string; chapterId: UuidV7; versionId: UuidV7 }>> {
+  const project = await runtime.useCases.createProject.execute({ name: "任务重试测试作品" });
+  if (!project.ok) throw project.error;
+  const chapter = await runtime.useCases.createChapter.execute({
+    projectId: project.value.id,
+    title: "第一章",
+    content: "林晚来到旧站台。",
+  });
+  if (!chapter.ok) throw chapter.error;
+  const updatedContent = "林晚来到旧站台，远处钟声响起。";
+  const edited = await runtime.useCases.editChapter.execute({
+    chapterId: chapter.value.chapter.id,
+    expectedRevision: chapter.value.chapter.revision,
+    content: updatedContent,
+    cursorOffset: updatedContent.length,
+  });
+  if (!edited.ok) throw edited.error;
+  const saved = await runtime.useCases.saveChapter.execute({
+    chapterId: chapter.value.chapter.id,
+    expectedRevision: chapter.value.chapter.revision,
+    reason: "manual",
+    organizeLocalStoryFacts: true,
+  });
+  if (!saved.ok) throw saved.error;
+  if (saved.value.version === null) throw new Error("没有生成用于重试的不可变版本。");
+  const savedVersion = saved.value.version;
+  const queued = (await runtime.taskCenter.load()).tasks.find(
+    ({ metadata }) => metadata.versionId === savedVersion.id,
   );
-  const running = expectOk(
-    queued.claim({
-      ownerId: "desktop.test",
-      leaseToken: uuid(14),
-      now: "2026-07-26T00:00:01.000Z",
-      leaseExpiresAt: "2026-07-26T00:15:00.000Z",
-    }),
+  if (queued === undefined) throw new Error("没有生成用于重试的后台任务。");
+  const leaseToken = uuid(14);
+  await runtime.taskCenter.startTask(
+    queued.id,
+    "desktop.test",
+    leaseToken,
+    "2099-12-01T00:15:00.000Z",
   );
-  const failure = expectOk(
-    createTaskFailure({
+  await runtime.taskCenter.failTask(
+    queued.id,
+    leaseToken,
+    {
       code: "ACCEPTED_VERSION_PIPELINE_PARTIAL",
       causeCode: "PIPELINE_STAGES_SEARCH",
       retryable: true,
       actions: ["RETRY", "OPEN_SETTINGS", "EXPORT_DIAGNOSTICS"],
       requestId: "req-task-center-page-retry",
-    }),
+    },
+    "2099-12-01T00:00:00.000Z",
   );
-  const waiting = expectOk(
-    running.recordFailure({
-      leaseToken: uuid(14),
-      failure,
-      now: "2026-07-26T00:00:02.000Z",
-      retryAt: "2026-12-01T00:00:00.000Z",
-    }),
-  );
-  window.localStorage.setItem(
-    DEVELOPMENT_TASK_CENTER_KEY,
-    JSON.stringify({
-      schemaVersion: 1,
-      tasks: [waiting.toSnapshot()],
-      notifications: [],
-    }),
-  );
+  return Object.freeze({
+    taskId: queued.id,
+    chapterId: chapter.value.chapter.id,
+    versionId: savedVersion.id,
+  });
 }
 
 function seedAcceptedVersionNotification(): void {

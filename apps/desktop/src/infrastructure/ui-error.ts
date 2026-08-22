@@ -157,8 +157,17 @@ function recordErrorDescription(code: string): string {
   if (code === "EXTENSION_USAGE_UNAVAILABLE") {
     return "这次扩展请求已经结束，但供应商没有返回可核对的用量。正文没有被覆盖；可先导出历史，确认供应商记录后再决定是否重试。";
   }
+  if (code === "CREATIVE_OPENING_TIMEOUT_SCOPE_MISMATCH") {
+    return "开头超时编号与已确认的固定位置不一致。为避免误操作，墨影没有结束或取消任何其他调用，也没有改写创作进度；请重新读取进度并核对调用记录。";
+  }
   if (code.startsWith("UPDATE_")) {
     return "安全更新未完成。当前版本仍可离线使用；请检查网络并只按已验证的官方发行说明重试。";
+  }
+  if (code === "MODEL_TIMEOUT") {
+    return "模型在 180 秒内没有返回，本次操作已停止且不会自动重试。正文和已有建议没有改变，可稍后明确重试。";
+  }
+  if (code === "MODEL_NOT_CONNECTED") {
+    return "当前没有可用的 AI 连接，本次请求没有发送。请先连接并验证一个创作服务后再试。";
   }
   if (code === "MODEL_OUTPUT_TRUNCATED") {
     return "模型在返回可见文字前或返回过程中达到输出上限。能力验证会使用更充足的固定预算并为 DeepSeek 关闭推理；若仍失败，请重新同步模型后重试，或改选另一个文本模型。";
@@ -167,13 +176,13 @@ function recordErrorDescription(code: string): string {
     return "连接已建立，但模型没有返回可用于写作的可见文字。请确认所选模型支持文本生成；若它只返回推理内容，请改选普通文本模型后重试。";
   }
   if (code === "MODEL_HUB_ROUTE_NOT_CONFIGURED") {
-    return "这项写作任务还没有可用的 AI 分工。请先验证至少一个模型的写作能力，再在 Model Hub 中应用智能推荐；缺少 Embedding 不会阻止基础文本写作。";
+    return "这项写作任务还没有可用的 AI 分工。请先验证至少一个模型的写作能力，再在模型中心应用智能推荐；缺少向量检索不会阻止基础文本写作。";
   }
   if (code === "MODEL_HUB_ROUTE_DISABLED") {
-    return "这项写作任务的 AI 分工已明确停用。本次请求没有调用模型，也不会改用旧配置；请在 Model Hub 重新启用或明确分配模型后再试。";
+    return "这项写作任务的 AI 分工已明确停用。本次请求没有调用模型，也不会改用旧配置；请在模型中心重新启用或明确分配模型后再试。";
   }
   if (code === "MODEL_PROFILE_NOT_READY") {
-    return "当前没有可用于这次写作的兼容模型。你仍可继续手动编辑和保存正文；如需 AI，请选择一个已连接模型，或前往 Model Hub 完成任务分工。";
+    return "当前没有可用于这次写作的兼容模型。你仍可继续手动编辑和保存正文；如需 AI，请选择一个已连接模型，或前往模型中心完成任务分工。";
   }
   if (code === "CREATIVE_INPUT_INVALID_EMPTY") {
     return "请先写下一句话灵感；当前页面不会创建空项目，也不会调用 AI。";
@@ -200,7 +209,7 @@ function recordErrorDescription(code: string): string {
     return "本地存储空间不足，本次更改没有保存。请保持当前页面打开，释放设备或浏览器存储空间后，再次点击原来的创建或保存操作；当前输入仍保留在页面中。";
   }
   if (code === "CREATIVE_JOURNEY_STORAGE_ACCESS_DENIED") {
-    return "浏览器阻止了本地存储，本次更改没有保存。请允许 InkShadow 使用本地存储，或退出隐私/受限模式后，再次点击原来的创建或保存操作；当前输入仍保留在页面中。";
+    return "浏览器阻止了本地存储，本次更改没有保存。请允许墨影使用本地存储，或退出隐私/受限模式后，再次点击原来的创建或保存操作；当前输入仍保留在页面中。";
   }
   if (
     code === "CREATIVE_JOURNEY_STORAGE_READ_FAILED" ||

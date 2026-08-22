@@ -7,6 +7,7 @@ import {
   type MarketplaceRuntime,
   type MarketplaceRuntimeSnapshot,
 } from "../infrastructure/marketplace-runtime.js";
+import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 
 import "./marketplace-page.css";
 
@@ -349,7 +350,9 @@ function RemoteStatus({ snapshot }: { readonly snapshot: MarketplaceRuntimeSnaps
     case "error":
       return (
         <aside className="marketplace-page__notice marketplace-page__notice--error" role="alert">
-          {snapshot.remoteError ?? "社区目录暂时不可用。已安装模板不受影响。"}
+          {snapshot.remoteError === null
+            ? "社区目录暂时不可用。已安装模板不受影响。"
+            : readableError(snapshot.remoteError)}
         </aside>
       );
     case "idle":
@@ -384,7 +387,5 @@ function licenseLabel(license: CloudMarketplaceArtifactSummary["license"]): stri
 }
 
 function readableError(error: unknown): string {
-  return error instanceof Error && error.message.trim() !== ""
-    ? error.message
-    : "操作未完成，请稍后重试。";
+  return projectOrdinaryUiError(error).description;
 }

@@ -175,7 +175,7 @@ export function AuthoritativeExtractionPage({
       <header className="page-heading">
         <div>
           <h1>权威事实抽取</h1>
-          <p>自动发现章节候选，逐条人工确认后才写入正式事实并重建 GraphRAG。</p>
+          <p>自动发现章节候选，逐条人工确认后才写入正式事实并重建故事关联索引。</p>
         </div>
         <div className="authoritative-extraction-actions">
           <Badge tone={online ? "success" : "neutral"}>{online ? "在线" : "离线"}</Badge>
@@ -267,7 +267,7 @@ export function AuthoritativeExtractionPage({
           tone="ai"
         />
         <SummaryCard
-          label="GraphRAG 投影"
+          label="故事关联索引投影"
           value={graphFreshnessLabel(dashboard?.graphFreshness)}
           tone={
             dashboard?.graphFreshness === "fresh"
@@ -282,7 +282,7 @@ export function AuthoritativeExtractionPage({
       {projectionNeedsAttention && (
         <InlineAlert
           tone="warning"
-          title="GraphRAG 投影需要重建"
+          title="故事关联索引需要重建"
           description="正式事实仍然安全；重建成功前，不应把旧投影当作当前权威上下文。"
           action={{
             label: "立即重建",
@@ -290,7 +290,7 @@ export function AuthoritativeExtractionPage({
               void perform(
                 "projection",
                 () => runtime.rebuildProjection(projectId),
-                "GraphRAG 投影已从正式事实重建。",
+                "故事关联索引已从正式事实重建。",
               ),
           }}
         />
@@ -436,7 +436,7 @@ function CandidateCard(props: CandidateCardProps) {
             ok: false,
             error: new StoryCoreError({
               code: "STORY_VALIDATION_FAILED",
-              message: "修改后的正式值必须是有效 JSON。",
+              message: "修改后的正式值必须是有效的结构化数据。",
             }),
           }),
         "",
@@ -454,7 +454,7 @@ function CandidateCard(props: CandidateCardProps) {
           humanConfirmed: true,
           modifiedValue: parsed,
         }),
-      "修改后的候选已由人工确认，正式事实与 GraphRAG 已同步处理。",
+      "修改后的候选已由人工确认，正式事实与故事关联索引已同步处理。",
     );
   }
 
@@ -548,7 +548,7 @@ function CandidateCard(props: CandidateCardProps) {
 
         {props.editing && (
           <div className="authoritative-extraction-modify">
-            <label htmlFor={`modify-${identity}`}>修改后写入的正式结构化值（JSON）</label>
+            <label htmlFor={`modify-${identity}`}>修改后写入的正式结构化数据</label>
             <Textarea
               id={`modify-${identity}`}
               ref={fitCandidateDecisionTextarea}
@@ -580,7 +580,7 @@ function CandidateCard(props: CandidateCardProps) {
                       actorId: props.actorId,
                       humanConfirmed: true,
                     }),
-                  "候选已由人工接受，正式事实与 GraphRAG 已同步处理。",
+                  "候选已由人工接受，正式事实与故事关联索引已同步处理。",
                 )
               }
             >
@@ -697,7 +697,7 @@ function CandidateCard(props: CandidateCardProps) {
                     actorId: props.actorId,
                     humanConfirmed: true,
                   }),
-                "本候选写入的当前正式版本已撤销，GraphRAG 已同步处理。",
+                "本候选写入的当前正式版本已撤销，故事关联索引已同步处理。",
               )
             }
           >

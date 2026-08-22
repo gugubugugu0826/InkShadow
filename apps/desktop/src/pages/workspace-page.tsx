@@ -19,6 +19,7 @@ import { Link, useParams } from "react-router-dom";
 import { parseUuidV7 } from "@inkshadow/domain";
 
 import { useOnlineStatus } from "../hooks/use-online-status";
+import { useWritingExperience } from "../hooks/use-writing-experience";
 import { normalizeUiError, projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 import {
@@ -30,6 +31,8 @@ import {
 export function WorkspacePage() {
   const runtime = useRuntime();
   const online = useOnlineStatus();
+  const writingExperience = useWritingExperience();
+  const professionalMode = writingExperience.preference?.mode === "professional";
   const params = useParams<{ projectId: string }>();
   const parsedProjectId = parseUuidV7(params.projectId ?? "");
   const projectId = parsedProjectId.ok ? parsedProjectId.value : null;
@@ -172,6 +175,22 @@ export function WorkspacePage() {
     0,
   );
 
+  if (writingExperience.preference === null) {
+    return (
+      <div className="desktop-page" aria-busy={writingExperience.loading}>
+        {writingExperience.loading ? (
+          <div role="status">正在读取写作方式…</div>
+        ) : (
+          <ErrorState
+            title="暂时无法打开作品"
+            description={writingExperience.error ?? "写作方式没有读取成功，请重试。"}
+            primaryAction={{ label: "重试", onClick: () => void writingExperience.refresh() }}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="desktop-page">
       <header className="page-heading">
@@ -193,7 +212,11 @@ export function WorkspacePage() {
         <InlineAlert
           tone="warning"
           title="当前处于离线状态"
-          description="章节和本地草稿仍可编辑；需要联网的模型能力暂不可用。"
+          description={
+            professionalMode
+              ? "章节和本地草稿仍可编辑；需要联网的模型能力暂不可用。"
+              : "章节和本地草稿仍可编辑；需要联网的创作服务暂不可用。"
+          }
         />
       )}
 
@@ -289,14 +312,16 @@ export function WorkspacePage() {
                 : `${String(insights.currentStreakDays)} 天`}
             </strong>
           </article>
-          <article>
-            <span>待处理 AI 建议</span>
-            <strong>
-              {insightsLoading || insights === null
-                ? "—"
-                : `${String(insights.readyCandidateCount)} 份`}
-            </strong>
-          </article>
+          {professionalMode && (
+            <article>
+              <span>待处理 AI 建议</span>
+              <strong>
+                {insightsLoading || insights === null
+                  ? "—"
+                  : `${String(insights.readyCandidateCount)} 份`}
+              </strong>
+            </article>
+          )}
         </section>
 
         <section aria-labelledby="chapters-title">
@@ -348,7 +373,11 @@ export function WorkspacePage() {
           }
         }}
         title="新建章节"
-        description="创建时会同时生成首个稳定版本；私密章节会从第一笔事务起阻止云端投影。"
+        description={
+          professionalMode
+            ? "创建时会同时生成首个稳定版本；私密章节会从第一笔事务起阻止云端投影。"
+            : "创建时会同时保存第一个稳定版本；私密章节只会在当前设备处理。"
+        }
         footer={
           <>
             <Button
@@ -402,7 +431,9 @@ export function WorkspacePage() {
           <span>
             创建为私密章节
             <small>
-              正文、摘要、检索、审稿和续写只允许使用已验证的本地模型；未配置本地模型时会安全停止。
+              {professionalMode
+                ? "正文、摘要、检索、审稿和续写只允许使用已验证的本地模型；未配置本地模型时会安全停止。"
+                : "正文和相关资料只允许在当前设备处理；条件不足时会安全停止。"}
             </small>
           </span>
         </label>

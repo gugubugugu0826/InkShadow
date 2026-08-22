@@ -22,9 +22,17 @@ export const STORY_FACT_UPDATE_POLICIES = [
 export type StoryFactUpdatePolicy = (typeof STORY_FACT_UPDATE_POLICIES)[number];
 
 const REVERSIBLE_FACT_TYPES = new Set([
+  "character_profile",
   "character_state",
+  "location_setting",
   "scene_tag",
   "relationship_change",
+  "organization_faction",
+  "timeline_marker",
+  "unresolved_question",
+  "writing_style",
+  "story_goal",
+  "story_conflict",
   "event_category",
   "weak_inference",
 ]);
@@ -36,8 +44,10 @@ const CRITICAL_FACT_TYPES = new Set([
   "world_rule",
   "major_ability_change",
   "key_item_ownership",
+  "key_item",
   "major_timeline_change",
   "foreshadow_status",
+  "foreshadow",
 ]);
 
 /** Unknown and extensible fact types default to explicit confirmation. */
@@ -320,6 +330,158 @@ export class StoryFactApplicationService {
     );
   }
 
+  public editAsUser(command: {
+    readonly factId: string;
+    readonly contentText: string;
+    readonly actorId: string;
+    readonly humanConfirmed: boolean;
+    readonly expectedRevision: number;
+  }): Promise<Result<StoryFact, StoryCoreError>> {
+    return this.mutate(command.factId, (fact) =>
+      fact.editAsUser({
+        contentText: command.contentText,
+        actorId: command.actorId,
+        humanConfirmed: command.humanConfirmed,
+        expectedRevision: command.expectedRevision,
+        now: this.options.clock.now(),
+      }),
+    );
+  }
+
+  public async restoreAsUser(command: {
+    readonly factId: string;
+    readonly revision: number;
+    readonly actorId: string;
+    readonly humanConfirmed: boolean;
+    readonly expectedRevision: number;
+  }): Promise<Result<StoryFact, StoryCoreError>> {
+    const factId = parseUuidV7(command.factId);
+    if (!factId.ok) {
+      return factId;
+    }
+    if (!Number.isSafeInteger(command.revision) || command.revision < 1) {
+      return err(
+        new StoryCoreError({
+          code: "STORY_VALIDATION_FAILED",
+          message: "A valid prior story fact revision is required.",
+        }),
+      );
+    }
+    const revisions = await this.options.facts.listRevisions(factId.value);
+    if (!revisions.ok) {
+      return revisions;
+    }
+    const prior = revisions.value.find(
+      (revision) => revision.fact.revision === command.revision,
+    )?.fact;
+    if (prior === undefined) {
+      return err(
+        new StoryCoreError({
+          code: "STORY_FACT_NOT_FOUND",
+          message: "The selected story fact revision was not found.",
+        }),
+      );
+    }
+    return this.mutate(command.factId, (fact) =>
+      fact.restoreAsUser({
+        priorRevision: prior,
+        actorId: command.actorId,
+        humanConfirmed: command.humanConfirmed,
+        expectedRevision: command.expectedRevision,
+        now: this.options.clock.now(),
+      }),
+    );
+  }
+
+  public restoreDeletedAsUser(command: {
+    readonly factId: string;
+    readonly actorId: string;
+    readonly humanConfirmed: boolean;
+    readonly expectedRevision: number;
+  }): Promise<Result<StoryFact, StoryCoreError>> {
+    return this.mutate(command.factId, (fact) =>
+      fact.restoreDeletedAsUser({
+        actorId: command.actorId,
+        humanConfirmed: command.humanConfirmed,
+        expectedRevision: command.expectedRevision,
+        now: this.options.clock.now(),
+      }),
+    );
+  }
+
+  public async mergeDuplicates(command: {
+    readonly survivorFactId: string;
+    readonly survivorExpectedRevision: number;
+    readonly duplicateFactId: string;
+    readonly duplicateExpectedRevision: number;
+    readonly actorId: string;
+    readonly humanConfirmed: boolean;
+  }): Promise<Result<StoryFact, StoryCoreError>> {
+    if (!command.humanConfirmed) {
+      return err(
+        new StoryCoreError({
+          code: "HUMAN_DECISION_REQUIRED",
+          message: "Merging story facts requires an explicit user decision.",
+        }),
+      );
+    }
+    const survivorId = parseUuidV7(command.survivorFactId);
+    if (!survivorId.ok) return survivorId;
+    const duplicateId = parseUuidV7(command.duplicateFactId);
+    if (!duplicateId.ok) return duplicateId;
+    if (survivorId.value === duplicateId.value) {
+      return err(
+        new StoryCoreError({
+          code: "STORY_VALIDATION_FAILED",
+          message: "A story fact cannot be merged with itself.",
+        }),
+      );
+    }
+    if (this.options.facts.mergeUserFactRevisions === undefined) {
+      return err(
+        new StoryCoreError({
+          code: "STORY_REPOSITORY_ERROR",
+          message: "The story fact store does not support an atomic duplicate merge.",
+        }),
+      );
+    }
+    const [survivorResult, duplicateResult] = await Promise.all([
+      this.options.facts.findById(survivorId.value),
+      this.options.facts.findById(duplicateId.value),
+    ]);
+    if (!survivorResult.ok) return survivorResult;
+    if (!duplicateResult.ok) return duplicateResult;
+    if (survivorResult.value === null || duplicateResult.value === null) {
+      return err(
+        new StoryCoreError({
+          code: "STORY_FACT_NOT_FOUND",
+          message: "One of the duplicate story facts was not found.",
+        }),
+      );
+    }
+    const now = this.options.clock.now();
+    const survivor = survivorResult.value.recordDuplicateMergeAsUser({
+      duplicate: duplicateResult.value,
+      actorId: command.actorId,
+      humanConfirmed: command.humanConfirmed,
+      expectedRevision: command.survivorExpectedRevision,
+      now,
+    });
+    if (!survivor.ok) return survivor;
+    const duplicate = duplicateResult.value.deprecate({
+      humanConfirmed: command.humanConfirmed,
+      expectedRevision: command.duplicateExpectedRevision,
+      now,
+    });
+    if (!duplicate.ok) return duplicate;
+    const saved = await this.options.facts.mergeUserFactRevisions(
+      survivor.value,
+      command.survivorExpectedRevision,
+      duplicate.value,
+      command.duplicateExpectedRevision,
+    );
+    return saved.ok ? survivor : saved;
+  }
   /**
    * Replaces a disposable system projection without pretending that a human
    * approved the retirement. Matching old projections are retired before the

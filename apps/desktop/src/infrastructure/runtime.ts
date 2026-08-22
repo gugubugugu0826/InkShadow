@@ -50,11 +50,13 @@ import {
 import { CloudMarketplaceClient, InkShadowCloudApiClient } from "@inkshadow/cloud-client";
 import { DEFAULT_FEATURE_FLAGS, resolveFeatureFlags, type FeatureFlags } from "@inkshadow/config";
 import {
+  AI_CANDIDATE_PURPOSES,
   AiCandidate,
   AppError,
   err,
   ok,
   parseUuidV7 as parseDomainUuid,
+  type AiCandidatePurpose,
   type Clock,
   type Chapter,
   type Result,
@@ -71,6 +73,7 @@ import {
   SearchVectorSqliteStore,
   TauriSqliteExecutor,
   createSqliteRepositories,
+  type AcceptedVersionTaskFactory,
   type DatabaseBackupReceipt,
   type DatabaseIntegrityReport,
   type DatabaseRestoreReceipt,
@@ -149,6 +152,7 @@ import { TaskEngineError } from "@inkshadow/task-engine";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { CONTINUATION_DIRECTIONS_FORMAT_INSTRUCTION } from "./continuation-direction-options";
 import { createDevelopmentRepositories } from "./development-storage";
 import {
   BrowserCreativeJourneyStore,
@@ -179,10 +183,11 @@ import {
   createTauriAutomaticBackupRuntime,
   type AutomaticBackupRuntime,
 } from "./automatic-backup-runtime";
+import { ensureCurrentSavedVersionStoryFactsForDirectMode } from "./accepted-chapter-fact-preflight";
 import { AcceptedChapterPipelineWorker } from "./accepted-chapter-pipeline-worker";
 import {
   createAcceptedChapterPipelineTaskInput,
-  createLocalCandidateAcceptancePipelineInput,
+  createLocalAcceptedVersionPipelineInput,
 } from "./accepted-chapter-pipeline";
 import { HistoricalChapterBackfillService } from "./historical-chapter-backfill-service";
 import { StorySettingsImportService } from "./story-settings-import-service";
@@ -2167,7 +2172,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.2.6",
+    appVersion: "0.2.7",
     platform: "browser",
     architecture: "web",
     environment: "development",
@@ -2326,25 +2331,33 @@ function unavailableExtractionProvenance(): AuthoritativeExtractionProvenance {
   return parsed.value;
 }
 
+function createAcceptedVersionTaskFactory(
+  ids: Pick<UuidV7Generator, "next">,
+): AcceptedVersionTaskFactory {
+  return ({ source, version }) => {
+    const snapshot = version.toSnapshot();
+    return createAcceptedChapterPipelineTaskInput(
+      ids.next(),
+      snapshot.createdAt,
+      createLocalAcceptedVersionPipelineInput({
+        source,
+        projectId: snapshot.projectId,
+        chapterId: snapshot.chapterId,
+        versionId: snapshot.id,
+        acceptedCharacterCount: snapshot.content.length,
+        organizeLocalStoryFacts: snapshot.organizeLocalStoryFacts,
+      }),
+    );
+  };
+}
+
 export async function createDesktopRuntime(): Promise<DesktopRuntime> {
   if (isTauri()) {
     const executor = await TauriSqliteExecutor.open();
-    const acceptedCandidateTaskIds = new CryptoUuidV7Generator();
+    const acceptedVersionTaskIds = new CryptoUuidV7Generator();
     const repositories = createSqliteRepositories(executor, {
       syncProjectionIds: new CryptoUuidV7Generator(),
-      acceptedCandidateTaskFactory: (commit) => {
-        const version = commit.version.toSnapshot();
-        return createAcceptedChapterPipelineTaskInput(
-          acceptedCandidateTaskIds.next(),
-          version.createdAt,
-          createLocalCandidateAcceptancePipelineInput({
-            projectId: version.projectId,
-            chapterId: version.chapterId,
-            versionId: version.id,
-            acceptedCharacterCount: version.content.length,
-          }),
-        );
-      },
+      acceptedVersionTaskFactory: createAcceptedVersionTaskFactory(acceptedVersionTaskIds),
     });
     const [{ AccessSqliteStore }, { ProjectKeySqliteStore }, { SyncSqliteStore }] =
       await Promise.all([
@@ -2420,6 +2433,8 @@ export async function createDesktopRuntime(): Promise<DesktopRuntime> {
     });
     const backupRuntime = attachAutomaticBackupRuntime(configuredRuntime, automaticBackup);
     const acceptedChapterPipelineWorker = new AcceptedChapterPipelineWorker(backupRuntime, {
+      ensureCurrentFacts: (input) =>
+        ensureCurrentSavedVersionStoryFactsForDirectMode(backupRuntime, input),
       reportError: () => {
         globalThis.console.error(
           "[ACCEPTED_VERSION_PIPELINE_WORKER_FAILED] Accepted正文 remains safe; derived story data can be retried from the task center.",
@@ -2600,7 +2615,10 @@ export async function recoverOptionalGovernedCreativeExtensionsAtStartup(
 }
 
 export function createDevelopmentRuntime(storage: Storage): DesktopRuntime {
-  const repositories = createDevelopmentRepositories(storage);
+  const acceptedVersionTaskIds = new CryptoUuidV7Generator();
+  const repositories = createDevelopmentRepositories(storage, {
+    acceptedVersionTaskFactory: createAcceptedVersionTaskFactory(acceptedVersionTaskIds),
+  });
   return buildRuntime(
     "browser-development",
     repositories,
@@ -2608,7 +2626,7 @@ export function createDevelopmentRuntime(storage: Storage): DesktopRuntime {
     new BrowserProjectSeedStore(storage),
     () => Promise.resolve(),
     null,
-    (clock) => new BrowserDevelopmentTaskCenterStore(storage, clock),
+    (clock) => new BrowserDevelopmentTaskCenterStore(repositories.taskCenterPersistence, clock),
     (clock) => new BrowserDevelopmentGenerationGovernanceStore(storage, clock),
     (clock) => new BrowserDevelopmentWritingExperienceStore(storage, clock),
     (clock) => new BrowserDevelopmentModelCenterStore(storage, clock),
@@ -2675,6 +2693,7 @@ export interface ChapterStoryContextCompilationReceipt extends StoryContextCompi
 
 export interface PreparedGenerationPlan {
   readonly requestId: string;
+  readonly purpose: AiCandidatePurpose;
   readonly taskId: string;
   readonly runId: string;
   readonly generationId: string;
@@ -2742,6 +2761,21 @@ export interface GenerationExecutionPolicy {
   readonly generationRetryLimit: 0;
 }
 
+export interface PrepareGenerationPlanInput {
+  readonly chapterSaved: boolean;
+  readonly networkAvailable: boolean;
+  readonly purpose?: AiCandidatePurpose;
+  readonly cursorUtf16?: number;
+  readonly outputProfile?: ContinuationOutputProfileId;
+  readonly customTargetVisibleCharacters?: number | null;
+  readonly destination?: ContinuationOutputContract["destination"];
+  readonly customDestinationInstruction?: string | null;
+  readonly contextBudgetProfile?: ContextBudgetProfileId;
+  readonly customContextBudget?: number | null;
+  /** Resume an incomplete, still-isolated prose Candidate without changing正文. */
+  readonly partialCandidateId?: UuidV7 | null;
+}
+
 export type GovernedGenerationError =
   AppError | ModelCenterError | GenerationGovernanceError | TaskEngineError;
 
@@ -2751,21 +2785,13 @@ const cancelledGenerationTasksByRuntime = new WeakMap<object, Set<string>>();
 export async function prepareGenerationPlan(
   runtime: DesktopRuntime,
   chapterId: UuidV7,
-  input: {
-    readonly chapterSaved: boolean;
-    readonly networkAvailable: boolean;
-    readonly cursorUtf16?: number;
-    readonly outputProfile?: ContinuationOutputProfileId;
-    readonly customTargetVisibleCharacters?: number | null;
-    readonly destination?: ContinuationOutputContract["destination"];
-    readonly customDestinationInstruction?: string | null;
-    readonly contextBudgetProfile?: ContextBudgetProfileId;
-    readonly customContextBudget?: number | null;
-    /** Resume an incomplete, still-isolated Candidate without changing正文. */
-    readonly partialCandidateId?: UuidV7 | null;
-  },
+  input: PrepareGenerationPlanInput,
 ): Promise<PreparedGenerationPlan> {
   await runtime.taskCenter.recoverExpiredTasks();
+  const purpose = input.purpose ?? "prose";
+  if (!AI_CANDIDATE_PURPOSES.includes(purpose)) {
+    throw new AppError({ code: "VALIDATION_FAILED", message: "创作请求用途无效。" });
+  }
   const requestId = runtime.ids.next();
   const modelRole: ModelRouteRole = "high_quality";
   const [chapterResult, waitingDeferred] = await Promise.all([
@@ -2777,6 +2803,13 @@ export async function prepareGenerationPlan(
   }
   const chapter = chapterResult.value;
   let partialCandidate: AiCandidate | null = null;
+  if (purpose === "continuation_directions" && input.partialCandidateId != null) {
+    throw new AppError({
+      code: "VALIDATION_FAILED",
+      message: "创作方向不能补全为正文，请重新生成三个方向。",
+      details: { field: "partialCandidateId" },
+    });
+  }
   if (input.partialCandidateId !== undefined && input.partialCandidateId !== null) {
     const partialResult = await runtime.repositories.aiCandidates.findById(
       input.partialCandidateId,
@@ -2787,6 +2820,7 @@ export async function prepareGenerationPlan(
       candidate?.chapterId !== chapterId ||
       candidate.status !== "ready" ||
       !candidate.toSnapshot().incomplete ||
+      candidate.purpose !== "prose" ||
       candidate.applicationIntent.task !== "continuation"
     ) {
       throw new AppError({
@@ -2820,16 +2854,14 @@ export async function prepareGenerationPlan(
     });
   }
   const demo = runtime.mode === "browser-development";
-  let outputContract = resolveContinuationOutputContract({
-    ...(input.outputProfile === undefined ? {} : { profile: input.outputProfile }),
-    ...(input.customTargetVisibleCharacters === undefined
-      ? {}
-      : { customTargetVisibleCharacters: input.customTargetVisibleCharacters }),
-    ...(input.destination === undefined ? {} : { destination: input.destination }),
-    ...(input.customDestinationInstruction === undefined
-      ? {}
-      : { customDestinationInstruction: input.customDestinationInstruction }),
-  });
+  if (demo && purpose === "continuation_directions") {
+    throw new ModelCenterError(
+      "CONTINUATION_DIRECTIONS_PROVIDER_REQUIRED",
+      "选择方向需要已连接的创作服务；本地演示不会生成虚假方向。",
+      true,
+    );
+  }
+  let outputContract = resolvePreparedGenerationOutputContract(input, purpose);
   let maximumOutputTokens = outputContract.requestedMaxOutputTokens;
   let metadataInspection: ModelHubTextTaskInspection | null = null;
   let privacyPreview: ProjectContextPrivacyReceipt | null = null;
@@ -3071,17 +3103,11 @@ export async function prepareGenerationPlan(
       executionMode = "model_hub";
       providerId = metadataInspection.connectionId;
       modelId = metadataInspection.modelId;
-      outputContract = resolveContinuationOutputContract({
-        ...(input.outputProfile === undefined ? {} : { profile: input.outputProfile }),
-        ...(input.customTargetVisibleCharacters === undefined
-          ? {}
-          : { customTargetVisibleCharacters: input.customTargetVisibleCharacters }),
-        ...(input.destination === undefined ? {} : { destination: input.destination }),
-        ...(input.customDestinationInstruction === undefined
-          ? {}
-          : { customDestinationInstruction: input.customDestinationInstruction }),
-        providerOutputLimit: metadataInspection.maximumOutputTokens,
-      });
+      outputContract = resolvePreparedGenerationOutputContract(
+        input,
+        purpose,
+        metadataInspection.maximumOutputTokens,
+      );
       maximumOutputTokens = outputContract.requestedMaxOutputTokens;
       contextBudget = resolveDynamicContextBudget({
         ...(input.contextBudgetProfile === undefined
@@ -3114,9 +3140,12 @@ export async function prepareGenerationPlan(
         contextBudget.effectiveInputBudget,
         partialCandidate?.content ?? null,
         outputContract,
-        metadataInspection !== null,
+        metadataInspection !== null && purpose === "prose",
       );
-      messages = preparedContext.messages;
+      messages =
+        purpose === "continuation_directions"
+          ? buildContinuationDirectionMessages(preparedContext.messages)
+          : preparedContext.messages;
       contextCompilation = preparedContext.contextCompilation;
       novelSkillPreparation = preparedContext.novelSkillPreparation;
     } catch (cause: unknown) {
@@ -3339,6 +3368,7 @@ export async function prepareGenerationPlan(
     runId: retryableRun?.id ?? deferredResumeRun?.id ?? runtime.ids.next(),
     generationId,
     contextTraceId,
+    purpose,
     leaseToken: runtime.ids.next(),
     idempotencyKey,
     projectId: chapter?.projectId ?? null,
@@ -3374,6 +3404,49 @@ export async function prepareGenerationPlan(
     modelHubInspection,
     approvedPricing: pricing,
   });
+}
+
+function resolvePreparedGenerationOutputContract(
+  input: PrepareGenerationPlanInput,
+  purpose: AiCandidatePurpose,
+  providerOutputLimit?: number,
+): ContinuationOutputContract {
+  if (purpose === "continuation_directions") {
+    return resolveContinuationOutputContract({
+      profile: "custom",
+      customTargetVisibleCharacters: 600,
+      destination: "next_segment",
+      ...(providerOutputLimit === undefined ? {} : { providerOutputLimit }),
+    });
+  }
+  return resolveContinuationOutputContract({
+    ...(input.outputProfile === undefined ? {} : { profile: input.outputProfile }),
+    ...(input.customTargetVisibleCharacters === undefined
+      ? {}
+      : { customTargetVisibleCharacters: input.customTargetVisibleCharacters }),
+    ...(input.destination === undefined ? {} : { destination: input.destination }),
+    ...(input.customDestinationInstruction === undefined
+      ? {}
+      : { customDestinationInstruction: input.customDestinationInstruction }),
+    ...(providerOutputLimit === undefined ? {} : { providerOutputLimit }),
+  });
+}
+
+function buildContinuationDirectionMessages(
+  contextualMessages: readonly NativeModelMessage[],
+): readonly NativeModelMessage[] {
+  const contextMessages = contextualMessages.slice(1, -1);
+  return Object.freeze([
+    Object.freeze({
+      role: "system" as const,
+      content: `你是长篇小说创作方向助手。方向只用于让作者选择下一步写法，绝不是正文，也不能直接写入正文。必须依据当前已保存正文和已确认资料，不得虚构资料中没有依据的既成事实。\n\n${CONTINUATION_DIRECTIONS_FORMAT_INSTRUCTION}`,
+    }),
+    ...contextMessages,
+    Object.freeze({
+      role: "user" as const,
+      content: `请严格依据以上资料生成三个与当前正文紧密相关且彼此不同的后续走向。\n\n${CONTINUATION_DIRECTIONS_FORMAT_INSTRUCTION}`,
+    }),
+  ]);
 }
 
 function safeContextSelectionSummary(
@@ -3801,12 +3874,14 @@ export async function executeGenerationPlan(
     let accumulated = "";
     let candidate!: AiCandidate;
     const activeExecutionPlan = plan;
+    let attemptPrivacySnapshot = generationAttemptPrivacySnapshot(plan);
     let attemptUsage: GenerationAttemptUsageInput = {
       source: "provider_unavailable",
       inputTokens: null,
       outputTokens: null,
       cachedInputTokens: null,
       usagePricedEstimateMicros: null,
+      ...attemptPrivacySnapshot,
     };
     try {
       if (runtime.mode === "browser-development") {
@@ -3826,6 +3901,7 @@ export async function executeGenerationPlan(
           outputTokens: 0,
           cachedInputTokens: 0,
           usagePricedEstimateMicros: "0",
+          ...attemptPrivacySnapshot,
         };
       } else {
         const privacyReceipt = plan.contextCompilation?.projectPrivacy ?? null;
@@ -3865,7 +3941,15 @@ export async function executeGenerationPlan(
                     connectionId,
                     modelId,
                     localOnlyEligible,
+                    privacyPolicy,
+                    dataDestination,
                   }) => {
+                    attemptPrivacySnapshot = Object.freeze({
+                      privacySnapshotVersion: 1 as const,
+                      privacyPolicy,
+                      dataDestination,
+                      modelInvocationId: invocationId,
+                    });
                     if (
                       connectionId !== attemptPlan.providerId ||
                       modelId !== attemptPlan.modelId
@@ -3968,7 +4052,15 @@ export async function executeGenerationPlan(
           accumulated = "";
           throw cause;
         }
-        attemptUsage = priceProviderReportedUsage(plan, generated.usage);
+        if ("invocation" in generated) {
+          attemptPrivacySnapshot = Object.freeze({
+            privacySnapshotVersion: 1 as const,
+            privacyPolicy: generated.invocation.privacyPolicy,
+            dataDestination: generated.invocation.dataDestination,
+            modelInvocationId: generated.invocation.id,
+          });
+        }
+        attemptUsage = priceProviderReportedUsage(plan, generated.usage, attemptPrivacySnapshot);
         accumulated = generated.text;
         const completeVisibleText = combineContinuationFragments(
           plan.partialCandidateContent ?? "",
@@ -3980,6 +4072,7 @@ export async function executeGenerationPlan(
           completeVisibleText,
           false,
           plan.applicationCursorUtf16,
+          plan.purpose,
         );
         if (!built.ok) {
           throw built.error;
@@ -3988,6 +4081,7 @@ export async function executeGenerationPlan(
       }
       await commitPreparedContextOutputCandidate(runtime, activeExecutionPlan, candidate);
     } catch (cause: unknown) {
+      attemptUsage = Object.freeze({ ...attemptUsage, ...attemptPrivacySnapshot });
       const normalized = normalizeGovernedGenerationError(cause);
       recordSafeGenerationErrorCode(runtime, normalized.code);
       let recoveredTruncation = false;
@@ -4000,6 +4094,7 @@ export async function executeGenerationPlan(
             combineContinuationFragments(plan.partialCandidateContent ?? "", visible.text),
             true,
             plan.applicationCursorUtf16,
+            plan.purpose,
           );
           if (built.ok) {
             await commitPreparedContextOutputCandidate(runtime, activeExecutionPlan, built.value);
@@ -4018,6 +4113,7 @@ export async function executeGenerationPlan(
             combineContinuationFragments(plan.partialCandidateContent ?? "", visible.text),
             true,
             plan.applicationCursorUtf16,
+            plan.purpose,
           );
           if (built.ok) {
             try {
@@ -4662,9 +4758,35 @@ function validateNativeGenerationUsage(
   return Object.freeze({ ...usage });
 }
 
+type GenerationAttemptPrivacySnapshot = Pick<
+  GenerationAttemptUsageInput,
+  "privacySnapshotVersion" | "privacyPolicy" | "dataDestination" | "modelInvocationId"
+>;
+
+function generationAttemptPrivacySnapshot(
+  plan: PreparedGenerationPlan,
+): GenerationAttemptPrivacySnapshot {
+  if (plan.executionMode === "model_hub" && plan.modelHubInspection !== null) {
+    return Object.freeze({
+      privacySnapshotVersion: 1 as const,
+      privacyPolicy: plan.modelHubInspection.privacyPolicy,
+      dataDestination: plan.modelHubInspection.dataDestination,
+      modelInvocationId: null,
+    });
+  }
+  const local = isPreparedGenerationTargetLocal(plan);
+  return Object.freeze({
+    privacySnapshotVersion: 1 as const,
+    privacyPolicy: local ? "local_only" : "cloud_allowed",
+    dataDestination: local ? "local" : "remote",
+    modelInvocationId: null,
+  });
+}
+
 function priceProviderReportedUsage(
   plan: PreparedGenerationPlan,
   usage: NativeModelGenerationUsage | null,
+  privacySnapshot: GenerationAttemptPrivacySnapshot,
 ): GenerationAttemptUsageInput {
   if (usage === null) {
     return Object.freeze({
@@ -4673,6 +4795,7 @@ function priceProviderReportedUsage(
       outputTokens: null,
       cachedInputTokens: null,
       usagePricedEstimateMicros: null,
+      ...privacySnapshot,
     });
   }
   const pricing = plan.approvedPricing;
@@ -4683,6 +4806,7 @@ function priceProviderReportedUsage(
       outputTokens: usage.outputTokens,
       cachedInputTokens: usage.cachedInputTokens,
       usagePricedEstimateMicros: null,
+      ...privacySnapshot,
     });
   }
   const estimate = estimateGenerationCost(
@@ -4701,6 +4825,7 @@ function priceProviderReportedUsage(
     outputTokens: usage.outputTokens,
     cachedInputTokens: usage.cachedInputTokens,
     usagePricedEstimateMicros: estimate.micros.toString(),
+    ...privacySnapshot,
   });
 }
 
@@ -6001,12 +6126,14 @@ async function buildGeneratedCandidate(
   generatedText: string,
   incomplete: boolean,
   cursorUtf16: number,
+  purpose: AiCandidatePurpose,
 ): Promise<Result<AiCandidate, AppError>> {
   const created = AiCandidate.createStreaming({
     id: runtime.ids.next(),
     projectId: chapter.projectId,
     chapterId: chapter.id,
     source: "generate",
+    purpose,
     baseVersionId: chapter.currentVersionId,
     now: runtime.clock.now(),
     applicationIntent: {
@@ -6022,9 +6149,11 @@ async function buildGeneratedCandidate(
   }
   const generated = generatedText.trim();
   const content =
-    chapter.content.length > 0 && cursorUtf16 === chapter.content.length
-      ? `\n\n${generated}`
-      : generated;
+    purpose === "continuation_directions"
+      ? generated
+      : chapter.content.length > 0 && cursorUtf16 === chapter.content.length
+        ? `\n\n${generated}`
+        : generated;
   const checksum = await runtime.hasher.sha256(content);
   if (!checksum.ok) {
     return checksum;

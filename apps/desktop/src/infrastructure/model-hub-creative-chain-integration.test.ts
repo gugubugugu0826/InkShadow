@@ -2,12 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import { createProjectSeed } from "@inkshadow/domain";
 
 import {
+  creativeOpeningTimedOutRequestIds,
   executeCreativeOpeningProviderAction,
   generateCreativeOpening,
+  CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS,
   MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS,
   persistCreativeOpeningCandidate,
   prepareCreativeOpeningProviderAction,
   type CreativeOpeningResult,
+  type CreativeOpeningResultPersistenceFence,
   type CreativeOpeningProviderActionInput,
 } from "./creative-opening-service";
 import { createImportRewriteCandidate } from "./import-rewrite-service";
@@ -155,6 +158,48 @@ describe("real creative chains use Model Hub routes", () => {
     expect(disclosures.map(({ calls }) => calls.length)).toEqual([3, 3, 1, 1]);
     expect(new Set(disclosures.map(({ fingerprint }) => fingerprint)).size).toBe(4);
     expect(disclosures.every(({ fingerprint }) => /^[a-f0-9]{64}$/u.test(fingerprint))).toBe(true);
+  });
+
+  it("prepares and executes one direct opening with the same request and exactly one call", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-direct-single",
+      catalogEntryId: "opening-direct-single-catalog",
+      modelId: "opening-direct-single-model",
+    });
+    const requestId = nextOpeningRequestIds(harness.runtime, 1)[0];
+    if (requestId === undefined) throw new Error("expected one direct opening request");
+    harness.generate.mockResolvedValue({ text: "只生成一次的开头。", usage: null });
+    const action: CreativeOpeningProviderActionInput = {
+      actionId: requestId,
+      kind: "initial_single",
+      idea: "一座城市每天都会遗失同一分钟。",
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      requestIds: [requestId],
+      openingAngle: "immediate_action",
+    };
+
+    const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+    expect(disclosure).toMatchObject({
+      requestCount: 1,
+      maximumProviderCalls: 1,
+      automaticRetryCount: 0,
+    });
+    expect(harness.generate).not.toHaveBeenCalled();
+
+    const results = await executeCreativeOpeningProviderAction(harness.runtime, {
+      ...action,
+      humanConfirmed: true,
+      disclosureFingerprint: disclosure.fingerprint,
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.requestId).toBe(requestId);
+    expect(harness.generate).toHaveBeenCalledTimes(1);
+    expect(harness.generate.mock.calls[0]?.[0].generationId).toBe(requestId);
   });
 
   it("labels the total action cost unknown when exact pricing is unavailable", async () => {
@@ -325,6 +370,407 @@ describe("real creative chains use Model Hub routes", () => {
         status: "succeeded",
         attempt: 1,
       });
+    }
+  });
+  it("settles a slot within 180 seconds when preparation hangs before invocation creation", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-preparation-timeout",
+      catalogEntryId: "opening-preparation-timeout-catalog",
+      modelId: "opening-preparation-timeout-model",
+    });
+    const requestId = nextOpeningRequestIds(harness.runtime, 1)[0];
+    if (requestId === undefined) throw new Error("expected one opening request");
+    const action: CreativeOpeningProviderActionInput = {
+      actionId: "opening-preparation-timeout-action",
+      kind: "regenerate_single",
+      idea: "一名修表匠发现整座城市停在同一分钟。",
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      requestIds: [requestId],
+      openingAngle: "mystery_clue",
+    };
+    const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+    const preparation = vi
+      .spyOn(harness.runtime.projectSeeds, "findByProjectId")
+      .mockImplementation(() => new Promise<never>(() => undefined));
+    const cancelGeneration = vi
+      .spyOn(harness.runtime.modelGateway, "cancelGeneration")
+      .mockResolvedValue(false);
+    const onInvocationPrepared = vi.fn();
+    const onResult = vi.fn();
+
+    vi.useFakeTimers();
+    try {
+      const execution = executeCreativeOpeningProviderAction(harness.runtime, {
+        ...action,
+        humanConfirmed: true,
+        disclosureFingerprint: disclosure.fingerprint,
+        onInvocationPrepared,
+        onResult,
+      });
+      const rejection = expect(execution).rejects.toMatchObject({
+        code: "MODEL_TIMEOUT",
+      });
+      await Promise.resolve();
+      expect(preparation).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS);
+      await rejection;
+      await expect(execution).rejects.toThrow("不会自动重试");
+
+      expect(cancelGeneration).not.toHaveBeenCalled();
+      expect(harness.generate).not.toHaveBeenCalled();
+      expect(onInvocationPrepared).not.toHaveBeenCalled();
+      expect(onResult).not.toHaveBeenCalled();
+      await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes the result persistence fence at 180 seconds and reports the exact timed-out request", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-result-persistence-timeout",
+      catalogEntryId: "opening-result-persistence-timeout-catalog",
+      modelId: "opening-result-persistence-timeout-model",
+    });
+    const requestId = nextOpeningRequestIds(harness.runtime, 1)[0];
+    if (requestId === undefined) throw new Error("expected one opening request");
+    const action: CreativeOpeningProviderActionInput = {
+      actionId: "opening-result-persistence-timeout-action",
+      kind: "regenerate_single",
+      idea: "一张旧底片显影出尚未发生的告别。",
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      requestIds: [requestId],
+      openingAngle: "mystery_clue",
+    };
+    const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+    harness.generate.mockResolvedValue({ text: "暗房门缝下漫进雨水。", usage: null });
+    const cancelGeneration = vi
+      .spyOn(harness.runtime.modelGateway, "cancelGeneration")
+      .mockResolvedValue(false);
+    let releasePersistence!: () => void;
+    const persistenceGate = new Promise<void>((resolve) => {
+      releasePersistence = resolve;
+    });
+    const onResult = vi.fn(
+      async (result: CreativeOpeningResult, fence: CreativeOpeningResultPersistenceFence) => {
+        expect(result.requestId).toBe(requestId);
+        expect(fence.isPending()).toBe(true);
+        await persistenceGate;
+      },
+    );
+
+    vi.useFakeTimers();
+    try {
+      const execution = executeCreativeOpeningProviderAction(harness.runtime, {
+        ...action,
+        humanConfirmed: true,
+        disclosureFingerprint: disclosure.fingerprint,
+        onResult,
+      });
+      const terminal = execution.then(
+        () => null,
+        (cause: unknown) => cause,
+      );
+      await vi.waitFor(() => expect(onResult).toHaveBeenCalledOnce());
+      const persistenceFence = onResult.mock.calls[0]?.[1];
+      if (persistenceFence === undefined) {
+        throw new Error("result persistence callback did not receive its fence");
+      }
+      expect(persistenceFence.isPending()).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS);
+      const cause = await terminal;
+
+      expect(cause).toMatchObject({ code: "MODEL_TIMEOUT" });
+      expect(creativeOpeningTimedOutRequestIds(cause)).toEqual([requestId]);
+      expect(persistenceFence.isPending()).toBe(false);
+      expect(() => persistenceFence.assertPending()).toThrow(
+        expect.objectContaining({ code: "MODEL_TIMEOUT" }),
+      );
+      expect(cancelGeneration).not.toHaveBeenCalled();
+      await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toMatchObject({
+        status: "succeeded",
+      });
+
+      releasePersistence();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(cancelGeneration).not.toHaveBeenCalled();
+    } finally {
+      releasePersistence();
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports only the two persistence slots that cross 180 seconds while one slot settles", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-mixed-result-timeout",
+      catalogEntryId: "opening-mixed-result-timeout-catalog",
+      modelId: "opening-mixed-result-timeout-model",
+    });
+    const requestIds = nextOpeningRequestIds(harness.runtime, 3);
+    const action: CreativeOpeningProviderActionInput = {
+      actionId: "opening-mixed-result-timeout-action",
+      kind: "initial_batch",
+      idea: "三封信分别预告同一座城市的三种结局。",
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      requestIds,
+    };
+    const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+    harness.generate.mockImplementation((input) =>
+      Promise.resolve({ text: `独立结果 ${input.generationId}`, usage: null }),
+    );
+    const cancelGeneration = vi
+      .spyOn(harness.runtime.modelGateway, "cancelGeneration")
+      .mockResolvedValue(false);
+    let releasePersistence!: () => void;
+    const persistenceGate = new Promise<void>((resolve) => {
+      releasePersistence = resolve;
+    });
+    const fences = new Map<string, CreativeOpeningResultPersistenceFence>();
+    const onResult = vi.fn(
+      async (result: CreativeOpeningResult, fence: CreativeOpeningResultPersistenceFence) => {
+        fences.set(result.requestId, fence);
+        if (result.requestId !== requestIds[0]) {
+          await persistenceGate;
+        }
+      },
+    );
+
+    vi.useFakeTimers();
+    try {
+      const execution = executeCreativeOpeningProviderAction(harness.runtime, {
+        ...action,
+        humanConfirmed: true,
+        disclosureFingerprint: disclosure.fingerprint,
+        onResult,
+      });
+      const terminal = execution.then(
+        () => null,
+        (cause: unknown) => cause,
+      );
+      await vi.waitFor(() => expect(onResult).toHaveBeenCalledTimes(3));
+
+      await vi.advanceTimersByTimeAsync(CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS);
+      const cause = await terminal;
+
+      expect(creativeOpeningTimedOutRequestIds(cause)).toEqual(requestIds.slice(1));
+      expect(fences.get(requestIds[0] ?? "")?.isPending()).toBe(false);
+      expect(fences.get(requestIds[1] ?? "")?.isPending()).toBe(false);
+      expect(fences.get(requestIds[2] ?? "")?.isPending()).toBe(false);
+      expect(cancelGeneration).not.toHaveBeenCalled();
+      for (const requestId of requestIds) {
+        await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toMatchObject({
+          status: "succeeded",
+        });
+      }
+    } finally {
+      releasePersistence();
+      vi.useRealTimers();
+    }
+  });
+
+  it("fills the exact slot id for a MODEL_TIMEOUT without a carrier and preserves a carried timeout id", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-mixed-timeout-carrier",
+      catalogEntryId: "opening-mixed-timeout-carrier-catalog",
+      modelId: "opening-mixed-timeout-carrier-model",
+    });
+    const requestIds = nextOpeningRequestIds(harness.runtime, 3);
+    const missingCarrierId = requestIds[1];
+    const carriedId = requestIds[2];
+    if (missingCarrierId === undefined || carriedId === undefined) {
+      throw new Error("expected three fixed opening request ids");
+    }
+    const action: CreativeOpeningProviderActionInput = {
+      actionId: "opening-mixed-timeout-carrier-action",
+      kind: "initial_batch",
+      idea: "三盏灯分别照见同一条街的过去、现在和未来。",
+      requestIds,
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+    };
+    const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+    harness.generate.mockImplementation((input) =>
+      Promise.resolve({ text: `独立结果 ${input.generationId}`, usage: null }),
+    );
+    const cancelGeneration = vi
+      .spyOn(harness.runtime.modelGateway, "cancelGeneration")
+      .mockResolvedValue(false);
+    const onResult = vi.fn((result: CreativeOpeningResult) => {
+      if (result.requestId === requestIds[0]) return;
+      if (result.requestId === missingCarrierId) {
+        throw Object.assign(new Error("simulated timeout without request carrier"), {
+          code: "MODEL_TIMEOUT",
+        });
+      }
+      throw Object.assign(new Error("simulated timeout with request carrier"), {
+        code: "MODEL_TIMEOUT",
+        timedOutRequestIds: Object.freeze([carriedId]),
+      });
+    });
+
+    const cause = await executeCreativeOpeningProviderAction(harness.runtime, {
+      ...action,
+      humanConfirmed: true,
+      disclosureFingerprint: disclosure.fingerprint,
+      onResult,
+    }).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+
+    expect(cause).toMatchObject({ code: "MODEL_TIMEOUT" });
+    expect(creativeOpeningTimedOutRequestIds(cause)).toEqual([missingCarrierId, carriedId]);
+    expect(onResult).toHaveBeenCalledTimes(3);
+    expect(cancelGeneration).not.toHaveBeenCalled();
+    for (const requestId of requestIds) {
+      await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toMatchObject({
+        status: "succeeded",
+      });
+    }
+  });
+  it("fails closed when one timed-out slot carries another settled slot id", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-cross-bound-timeout-carrier",
+      catalogEntryId: "opening-cross-bound-timeout-carrier-catalog",
+      modelId: "opening-cross-bound-timeout-carrier-model",
+    });
+    const requestIds = nextOpeningRequestIds(harness.runtime, 3);
+    const timedOutId = requestIds[1];
+    const settledId = requestIds[2];
+    if (timedOutId === undefined || settledId === undefined) {
+      throw new Error("expected three fixed opening request ids");
+    }
+    const action: CreativeOpeningProviderActionInput = {
+      actionId: "opening-cross-bound-timeout-carrier-action",
+      kind: "initial_batch",
+      idea: "三座车站分别保存同一趟列车的三份到站记录。",
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      requestIds,
+    };
+    const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+    harness.generate.mockImplementation((input) =>
+      Promise.resolve({ text: `独立结果 ${input.generationId}`, usage: null }),
+    );
+    const cancelGeneration = vi
+      .spyOn(harness.runtime.modelGateway, "cancelGeneration")
+      .mockResolvedValue(false);
+    const onResult = vi.fn((result: CreativeOpeningResult) => {
+      if (result.requestId !== timedOutId) return;
+      throw Object.assign(new Error("simulated cross-bound timeout carrier"), {
+        code: "MODEL_TIMEOUT",
+        timedOutRequestIds: Object.freeze([settledId]),
+      });
+    });
+
+    const cause = await executeCreativeOpeningProviderAction(harness.runtime, {
+      ...action,
+      humanConfirmed: true,
+      disclosureFingerprint: disclosure.fingerprint,
+      onResult,
+    }).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+
+    expect(cause).toMatchObject({
+      code: "CREATIVE_OPENING_TIMEOUT_SCOPE_MISMATCH",
+    });
+    expect(creativeOpeningTimedOutRequestIds(cause)).toEqual([]);
+    expect(onResult).toHaveBeenCalledTimes(3);
+    expect(cancelGeneration).not.toHaveBeenCalled();
+    for (const requestId of requestIds) {
+      await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toMatchObject({
+        status: "succeeded",
+      });
+    }
+  });
+
+  it("bounds the public preparation at 180 seconds without creating invocation facts or retrying", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-public-preparation-timeout",
+      catalogEntryId: "opening-public-preparation-timeout-catalog",
+      modelId: "opening-public-preparation-timeout-model",
+    });
+    const requestIds = nextOpeningRequestIds(harness.runtime, 3);
+    const action: CreativeOpeningProviderActionInput = {
+      actionId: "opening-public-preparation-timeout-action",
+      kind: "initial_batch",
+      idea: "三扇门在同一场雨里通往不同年份。",
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      requestIds,
+    };
+    const originalFind = harness.runtime.projectSeeds.findByProjectId.bind(
+      harness.runtime.projectSeeds,
+    );
+    let releasePreparation!: () => void;
+    const preparationGate = new Promise<void>((resolve) => {
+      releasePreparation = resolve;
+    });
+    const preparation = vi
+      .spyOn(harness.runtime.projectSeeds, "findByProjectId")
+      .mockImplementation(async (projectId) => {
+        await preparationGate;
+        return originalFind(projectId);
+      });
+    const cancelGeneration = vi
+      .spyOn(harness.runtime.modelGateway, "cancelGeneration")
+      .mockResolvedValue(false);
+
+    vi.useFakeTimers();
+    try {
+      const pending = prepareCreativeOpeningProviderAction(harness.runtime, action);
+      const rejection = expect(pending).rejects.toMatchObject({
+        code: "MODEL_TIMEOUT",
+      });
+      await Promise.resolve();
+      expect(preparation).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS);
+      await rejection;
+      await expect(pending).rejects.toThrow("不会自动重试");
+
+      expect(cancelGeneration).not.toHaveBeenCalled();
+      expect(harness.generate).not.toHaveBeenCalled();
+      for (const requestId of requestIds) {
+        await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toBeNull();
+      }
+
+      releasePreparation();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(harness.generate).not.toHaveBeenCalled();
+      for (const requestId of requestIds) {
+        await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toBeNull();
+      }
+    } finally {
+      releasePreparation();
+      vi.useRealTimers();
     }
   });
 

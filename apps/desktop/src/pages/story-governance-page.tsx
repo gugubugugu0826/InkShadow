@@ -22,6 +22,7 @@ import {
   type ReviewSeverity,
   type StoryFact,
   type StoryFactSnapshot,
+  type StoryFactRevision,
   type StoryValue,
   type StructuredReviewItem,
   type WhatIfBranch,
@@ -53,6 +54,7 @@ import {
 } from "@inkshadow/ui";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
+import { useWritingExperience } from "../hooks/use-writing-experience";
 import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 import { WritingPreferencesPanel } from "../components/writing-preferences-panel";
@@ -108,6 +110,8 @@ interface StoryEntityGroup {
 
 export function StoryGovernancePage() {
   const runtime = useRuntime();
+  const writingExperience = useWritingExperience();
+  const directMode = writingExperience.preference?.mode === "direct";
   const navigate = useNavigate();
   const params = useParams<{ projectId: string }>();
   const projectIdParameter = params.projectId ?? "";
@@ -161,6 +165,15 @@ export function StoryGovernancePage() {
   const [factType, setFactType] = useState("character_identity");
   const [factContent, setFactContent] = useState("");
   const [factLocked, setFactLocked] = useState(false);
+  const [editingFact, setEditingFact] = useState<StoryFact | null>(null);
+  const [editingFactContent, setEditingFactContent] = useState("");
+  const [historyFact, setHistoryFact] = useState<StoryFact | null>(null);
+  const [factRevisions, setFactRevisions] = useState<readonly StoryFactRevision[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [mergeFacts, setMergeFacts] = useState<Readonly<{
+    survivor: StoryFact;
+    duplicate: StoryFact;
+  }> | null>(null);
   const factContentInputRef = useRef<HTMLTextAreaElement>(null);
   const factReturnFocusRef = useRef<Readonly<{
     element: HTMLElement | null;
@@ -293,6 +306,39 @@ export function StoryGovernancePage() {
     () => facts.filter((fact) => fact.toSnapshot().status !== "deprecated"),
     [facts],
   );
+  const directFormalFacts = useMemo(
+    () => facts.filter((fact) => fact.toSnapshot().status === "formal"),
+    [facts],
+  );
+  const directDeprecatedFacts = useMemo(
+    () =>
+      facts.filter(
+        (fact) => fact.toSnapshot().status === "deprecated" && fact.toSnapshot().userConfirmed,
+      ),
+    [facts],
+  );
+  const directDuplicateByFactId = useMemo(() => {
+    const groups = new Map<string, StoryFact[]>();
+    for (const fact of directFormalFacts) {
+      const snapshot = fact.toSnapshot();
+      const key = simpleFactDuplicateKey(snapshot);
+      if (key === null || snapshot.locked) {
+        continue;
+      }
+      const group = groups.get(key) ?? [];
+      group.push(fact);
+      groups.set(key, group);
+    }
+    const pairs = new Map<string, StoryFact>();
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      for (const fact of group) {
+        const duplicate = group.find((candidate) => candidate.id !== fact.id);
+        if (duplicate !== undefined) pairs.set(fact.id, duplicate);
+      }
+    }
+    return pairs;
+  }, [directFormalFacts]);
   const pendingFactCount = useMemo(
     () =>
       activeFacts.filter(({ status }) => status === "unconfirmed" || status === "temporary").length,
@@ -677,6 +723,136 @@ export function StoryGovernancePage() {
     await load();
   }
 
+  function openEditFact(fact: StoryFact): void {
+    setEditingFact(fact);
+    setEditingFactContent(fact.toSnapshot().contentText ?? "");
+  }
+
+  async function submitFactEdit(): Promise<void> {
+    if (editingFact === null || editingFactContent.trim().length === 0 || busy) {
+      return;
+    }
+    setBusy(true);
+    const result = await runtime.story.factService.editAsUser({
+      factId: editingFact.id,
+      contentText: editingFactContent.trim(),
+      actorId: runtime.story.actorId,
+      humanConfirmed: true,
+      expectedRevision: editingFact.revision,
+    });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    await refreshCausalStoryLinks(editingFact);
+    setEditingFact(null);
+    setEditingFactContent("");
+    setError(null);
+    await load();
+  }
+
+  async function openFactHistory(fact: StoryFact): Promise<void> {
+    setHistoryFact(fact);
+    setFactRevisions([]);
+    setHistoryLoading(true);
+    const revisions = await runtime.story.facts.listRevisions(fact.id);
+    setHistoryLoading(false);
+    if (!revisions.ok) {
+      setError(revisions.error);
+      setHistoryFact(null);
+      return;
+    }
+    setFactRevisions(revisions.value);
+  }
+
+  async function restoreFact(fact: StoryFact, selectedRevision?: number): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    if (selectedRevision === undefined && fact.toSnapshot().status === "deprecated") {
+      const restored = await runtime.story.factService.restoreDeletedAsUser({
+        factId: fact.id,
+        actorId: runtime.story.actorId,
+        humanConfirmed: true,
+        expectedRevision: fact.revision,
+      });
+      setBusy(false);
+      if (!restored.ok) {
+        setError(restored.error);
+        return;
+      }
+      await refreshCausalStoryLinks(fact);
+      setError(null);
+      await load();
+      return;
+    }
+    let revision = selectedRevision;
+    if (revision === undefined) {
+      const revisions = await runtime.story.facts.listRevisions(fact.id);
+      if (!revisions.ok) {
+        setBusy(false);
+        setError(revisions.error);
+        return;
+      }
+      revision = [...revisions.value].reverse().find((entry) => {
+        const snapshot = entry.fact.toSnapshot();
+        return (
+          snapshot.revision < fact.revision &&
+          snapshot.contentText !== null &&
+          snapshot.structuredValue === null
+        );
+      })?.fact.revision;
+    }
+    if (revision === undefined) {
+      setBusy(false);
+      setError(
+        new StoryCoreError({
+          code: "STORY_FACT_INVALID_TRANSITION",
+          message: "没有找到可以恢复的旧内容。",
+        }),
+      );
+      return;
+    }
+    const result = await runtime.story.factService.restoreAsUser({
+      factId: fact.id,
+      revision,
+      actorId: runtime.story.actorId,
+      humanConfirmed: true,
+      expectedRevision: fact.revision,
+    });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    await refreshCausalStoryLinks(fact);
+    setHistoryFact(null);
+    setFactRevisions([]);
+    setError(null);
+    await load();
+  }
+
+  async function submitFactMerge(): Promise<void> {
+    if (mergeFacts === null || busy) return;
+    setBusy(true);
+    const result = await runtime.story.factService.mergeDuplicates({
+      survivorFactId: mergeFacts.survivor.id,
+      survivorExpectedRevision: mergeFacts.survivor.revision,
+      duplicateFactId: mergeFacts.duplicate.id,
+      duplicateExpectedRevision: mergeFacts.duplicate.revision,
+      actorId: runtime.story.actorId,
+      humanConfirmed: true,
+    });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    await refreshCausalStoryLinks(mergeFacts.survivor);
+    setMergeFacts(null);
+    setError(null);
+    await load();
+  }
   function openCreateFormalRecord(): void {
     setFormalKind("character");
     setFormalTitle("");
@@ -1175,6 +1351,483 @@ export function StoryGovernancePage() {
     );
   }
 
+  if (writingExperience.preference === null) {
+    return (
+      <div className="desktop-page" aria-busy={writingExperience.loading}>
+        {writingExperience.loading ? (
+          <div role="status">正在读取写作方式…</div>
+        ) : (
+          <ErrorState
+            title="暂时无法打开设定"
+            description={writingExperience.error ?? "写作方式没有读取成功，请重试。"}
+            primaryAction={{ label: "重试", onClick: () => void writingExperience.refresh() }}
+          />
+        )}
+      </div>
+    );
+  }
+
+  if (directMode) {
+    return (
+      <div className="desktop-page story-governance-page">
+        <header className="page-heading">
+          <div>
+            <Link className="back-link" to={"/projects/" + projectIdParameter}>
+              返回正文
+            </Link>
+            <p className="page-heading__eyebrow">人物、地点、关系与规则</p>
+            <h1>{project?.name ?? "设定"}</h1>
+            <p>查看已经整理的设定和原文依据，也可以添加、固定或移除设定。</p>
+          </div>
+          <div className="story-governance-summary">
+            <Badge>{String(directFormalFacts.length)} 条设定</Badge>
+          </div>
+        </header>
+
+        {readonly && project !== null && (
+          <InlineAlert
+            tone="info"
+            title={project.status === "archived" ? "项目已归档" : "项目位于回收站"}
+            description="设定保持可读，恢复项目后才能修改。"
+          />
+        )}
+
+        {normalizedError !== null && pageState !== "fatal_error" && (
+          <InlineAlert
+            tone="error"
+            title={normalizedError.title}
+            description={normalizedError.description}
+            onDismiss={() => setError(null)}
+          />
+        )}
+
+        {causalNotice !== null && (
+          <InlineAlert
+            tone={causalNotice.tone}
+            title={causalNotice.title}
+            description={causalNotice.description}
+            onDismiss={() => setCausalNotice(null)}
+          />
+        )}
+
+        <PageStateBoundary
+          state={pageState}
+          preserveContent={false}
+          fallbacks={{
+            fatal_error:
+              normalizedError === null ? undefined : (
+                <ErrorState
+                  title={normalizedError.title}
+                  description={normalizedError.description}
+                  primaryAction={{ label: "重试", onClick: () => void load() }}
+                />
+              ),
+          }}
+        >
+          <section aria-labelledby="direct-story-facts-title">
+            <div className="section-heading">
+              <div>
+                <h2 id="direct-story-facts-title">当前设定</h2>
+                <p>每条设定都保留来源；从正文整理的内容可以展开查看原文依据。</p>
+              </div>
+              <Button disabled={readonly || busy} onClick={openCreateFact}>
+                添加设定
+              </Button>
+            </div>
+
+            {directFormalFacts.length === 0 ? (
+              <EmptyState
+                title="还没有设定"
+                description="可以直接开始写，也可以先添加人物、地点、关系或规则。"
+                {...(readonly
+                  ? {}
+                  : {
+                      primaryAction: {
+                        label: "添加第一条设定",
+                        onClick: openCreateFact,
+                      },
+                    })}
+              />
+            ) : (
+              <div className="story-governance-grid">
+                {directFormalFacts.map((fact) => {
+                  const snapshot = fact.toSnapshot();
+                  const needsCheck =
+                    snapshot.status !== "formal" ||
+                    storyFactNeedsEntityAliasResolution(snapshot) ||
+                    snapshot.needsReview;
+                  const statusLabel =
+                    snapshot.status === "formal"
+                      ? snapshot.locked
+                        ? "已固定"
+                        : "已保存"
+                      : snapshot.status === "branch"
+                        ? "试写资料"
+                        : "需要核对";
+                  return (
+                    <Card key={fact.id}>
+                      <CardHeader>
+                        <div className="card-heading-row">
+                          <div>
+                            <CardTitle>{factTypeLabel(snapshot.factType)}</CardTitle>
+                            <CardDescription>{factSourceLabel(snapshot)}</CardDescription>
+                          </div>
+                          <Badge
+                            tone={snapshot.locked ? "accent" : needsCheck ? "warning" : "success"}
+                          >
+                            {statusLabel}
+                          </Badge>
+                        </div>
+                      </CardHeader>
+                      <CardContent>
+                        <p className="story-governance-copy">{storyFactContent(snapshot)}</p>
+                        {snapshot.structuredValue !== null && (
+                          <p className="story-governance-meta">
+                            结构化设定暂不支持直接改文字。你仍可查看证据、固定，或删除后恢复。
+                          </p>
+                        )}
+                        <details>
+                          <summary>查看证据</summary>
+                          <blockquote className="story-source-quote">
+                            {snapshot.source.excerpt ?? "这条设定没有可显示的原文片段。"}
+                          </blockquote>
+                        </details>
+                      </CardContent>
+                      <CardFooter>
+                        {needsCheck ? (
+                          <Link
+                            className="button-link button-link--secondary"
+                            to={"/projects/" + projectIdParameter + "/checks"}
+                          >
+                            去检查
+                          </Link>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            disabled={readonly || busy}
+                            onClick={() => void toggleFactLock(fact)}
+                          >
+                            {snapshot.locked ? "取消固定" : "固定"}
+                          </Button>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={
+                            readonly ||
+                            busy ||
+                            snapshot.status === "branch" ||
+                            snapshot.locked ||
+                            snapshot.structuredValue !== null
+                          }
+                          onClick={() => openEditFact(fact)}
+                        >
+                          {"修改"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={busy}
+                          onClick={() => void openFactHistory(fact)}
+                        >
+                          {"历史版本"}
+                        </Button>
+                        {directDuplicateByFactId.has(fact.id) && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={readonly || busy}
+                            onClick={() => {
+                              const duplicate = directDuplicateByFactId.get(fact.id);
+                              if (duplicate !== undefined) {
+                                setMergeFacts({ survivor: fact, duplicate });
+                              }
+                            }}
+                          >
+                            {"合并重复项"}
+                          </Button>
+                        )}
+                        {snapshot.status !== "branch" && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={readonly || busy}
+                            onClick={() => void deprecateFact(fact)}
+                          >
+                            删除（保留记录）
+                          </Button>
+                        )}
+                      </CardFooter>
+                    </Card>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
+          {directDeprecatedFacts.length > 0 && (
+            <section aria-labelledby="direct-deleted-facts-title">
+              <div className="section-heading">
+                <div>
+                  <h2 id="direct-deleted-facts-title">已删除的设定</h2>
+                  <p>删除不会抹掉记录；需要时可恢复为新的版本。</p>
+                </div>
+                <Badge>{String(directDeprecatedFacts.length)} 条</Badge>
+              </div>
+              <div className="story-governance-grid">
+                {directDeprecatedFacts.map((fact) => {
+                  const snapshot = fact.toSnapshot();
+                  return (
+                    <Card key={fact.id}>
+                      <CardHeader>
+                        <CardTitle>{factTypeLabel(snapshot.factType)}</CardTitle>
+                        <CardDescription>{factSourceLabel(snapshot)}</CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        <p className="story-governance-copy">{storyFactContent(snapshot)}</p>
+                      </CardContent>
+                      <CardFooter>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={readonly || busy}
+                          onClick={() => void restoreFact(fact)}
+                        >
+                          恢复
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={busy}
+                          onClick={() => void openFactHistory(fact)}
+                        >
+                          历史版本
+                        </Button>
+                      </CardFooter>
+                    </Card>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+        </PageStateBoundary>
+
+        <Dialog
+          open={factDialogOpen}
+          onOpenChange={(open) => {
+            if (!open && !busy) closeFactDialog();
+          }}
+          title="添加设定"
+          description="保存后仍可查看来源、取消固定或移除。"
+          footer={
+            <>
+              <Button variant="secondary" disabled={busy} onClick={closeFactDialog}>
+                取消
+              </Button>
+              <Button
+                loading={busy}
+                disabled={factContent.trim().length === 0}
+                onClick={() => void submitFact()}
+              >
+                保存设定
+              </Button>
+            </>
+          }
+        >
+          <div className="story-governance-form">
+            <FormField label="设定类型" required>
+              {(fieldProps) => (
+                <Select
+                  {...fieldProps}
+                  value={factType}
+                  options={FACT_TYPE_OPTIONS}
+                  onChange={(event) => setFactType(event.currentTarget.value)}
+                />
+              )}
+            </FormField>
+            <FormField label="内容" hint="只写已经确定的内容。" required>
+              {(fieldProps) => (
+                <Textarea
+                  {...fieldProps}
+                  ref={factContentInputRef}
+                  value={factContent}
+                  maxLength={10_000}
+                  currentLength={factContent.length}
+                  rows={7}
+                  onChange={(event) => setFactContent(event.currentTarget.value)}
+                />
+              )}
+            </FormField>
+            <FormField label="重要程度">
+              {(fieldProps) => (
+                <Select
+                  {...fieldProps}
+                  value={factLocked ? "locked" : "normal"}
+                  options={[
+                    { value: "normal", label: "普通设定" },
+                    { value: "locked", label: "固定为不可违反的规则" },
+                  ]}
+                  onChange={(event) => setFactLocked(event.currentTarget.value === "locked")}
+                />
+              )}
+            </FormField>
+          </div>
+        </Dialog>
+
+        <Dialog
+          open={editingFact !== null}
+          onOpenChange={(open) => {
+            if (!open && !busy) {
+              setEditingFact(null);
+              setEditingFactContent("");
+            }
+          }}
+          title="修改设定"
+          description="只修改设定内容；原始来源和每个旧版本都会保留。固定的设定需先取消固定。"
+          footer={
+            <>
+              <Button
+                variant="secondary"
+                disabled={busy}
+                onClick={() => {
+                  setEditingFact(null);
+                  setEditingFactContent("");
+                }}
+              >
+                取消
+              </Button>
+              <Button
+                loading={busy}
+                disabled={editingFactContent.trim().length === 0}
+                onClick={() => void submitFactEdit()}
+              >
+                保存修改
+              </Button>
+            </>
+          }
+        >
+          <FormField label="设定内容" required>
+            {(fieldProps) => (
+              <Textarea
+                {...fieldProps}
+                value={editingFactContent}
+                maxLength={10_000}
+                currentLength={editingFactContent.length}
+                rows={7}
+                onChange={(event) => setEditingFactContent(event.currentTarget.value)}
+              />
+            )}
+          </FormField>
+        </Dialog>
+
+        <Dialog
+          open={historyFact !== null}
+          onOpenChange={(open) => {
+            if (!open && !busy && !historyLoading) {
+              setHistoryFact(null);
+              setFactRevisions([]);
+            }
+          }}
+          title="历史版本"
+          description="恢复不会覆盖旧记录，而是把所选内容保存成一个新版本。"
+          footer={
+            <Button
+              variant="secondary"
+              disabled={busy || historyLoading}
+              onClick={() => {
+                setHistoryFact(null);
+                setFactRevisions([]);
+              }}
+            >
+              关闭
+            </Button>
+          }
+        >
+          {historyLoading ? (
+            <div role="status">正在读取历史版本…</div>
+          ) : (
+            <div className="story-governance-grid">
+              {[...factRevisions].reverse().map((entry) => {
+                const snapshot = entry.fact.toSnapshot();
+                const visibleContent =
+                  snapshot.contentText ??
+                  (typeof snapshot.structuredValue === "string"
+                    ? snapshot.structuredValue
+                    : "这个版本没有可直接显示的文字内容。");
+                const isCurrent = snapshot.revision === historyFact?.revision;
+                return (
+                  <Card key={String(snapshot.revision)}>
+                    <CardHeader>
+                      <CardTitle>第 {String(snapshot.revision)} 版</CardTitle>
+                      <CardDescription>{isCurrent ? "当前版本" : "已保留的旧版本"}</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <p className="story-governance-copy">{visibleContent}</p>
+                    </CardContent>
+                    {!isCurrent && historyFact !== null && (
+                      <CardFooter>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={
+                            readonly ||
+                            busy ||
+                            historyFact.toSnapshot().locked ||
+                            historyFact.toSnapshot().structuredValue !== null ||
+                            snapshot.structuredValue !== null ||
+                            snapshot.contentText === null
+                          }
+                          onClick={() => void restoreFact(historyFact, snapshot.revision)}
+                        >
+                          恢复这个版本
+                        </Button>
+                      </CardFooter>
+                    )}
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+        </Dialog>
+
+        <Dialog
+          open={mergeFacts !== null}
+          onOpenChange={(open) => {
+            if (!open && !busy) setMergeFacts(null);
+          }}
+          title="合并重复项"
+          description="两条设定类型一致且表达相同；空格或换行差异会忽略。确认后保留第一条，并把另一条移入可恢复的删除记录；两步会一起完成。"
+          footer={
+            <>
+              <Button variant="secondary" disabled={busy} onClick={() => setMergeFacts(null)}>
+                取消
+              </Button>
+              <Button loading={busy} onClick={() => void submitFactMerge()}>
+                确认合并
+              </Button>
+            </>
+          }
+        >
+          {mergeFacts !== null && (
+            <div className="story-governance-form">
+              <InlineAlert
+                tone="info"
+                title="将保留"
+                description={storyFactContent(mergeFacts.survivor.toSnapshot())}
+              />
+              <InlineAlert
+                tone="warning"
+                title="将移入删除记录"
+                description={storyFactContent(mergeFacts.duplicate.toSnapshot())}
+              />
+            </div>
+          )}
+        </Dialog>
+      </div>
+    );
+  }
+
   return (
     <div className="desktop-page story-governance-page">
       <header className="page-heading">
@@ -1253,7 +1906,7 @@ export function StoryGovernancePage() {
           <StorySettingsTools
             runtime={runtime}
             projectId={projectIdParameter}
-            projectName={project?.name ?? "InkShadow"}
+            projectName={project?.name ?? "墨影"}
             records={records}
             facts={facts}
             memories={memories}
@@ -3284,6 +3937,11 @@ function factSourceLabel(snapshot: StoryFactSnapshot): string {
   return labels[snapshot.source.kind];
 }
 
+function simpleFactDuplicateKey(snapshot: StoryFactSnapshot): string | null {
+  if (snapshot.contentText === null || snapshot.structuredValue !== null) return null;
+  const normalized = snapshot.contentText.trim().replace(/\s+/gu, " ").toLocaleLowerCase();
+  return normalized.length === 0 ? null : snapshot.factType + String.fromCharCode(0) + normalized;
+}
 function storyFactContent(snapshot: StoryFactSnapshot): string {
   if (snapshot.contentText !== null && snapshot.contentText.trim().length > 0) {
     return snapshot.contentText;

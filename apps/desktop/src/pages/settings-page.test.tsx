@@ -31,6 +31,7 @@ import {
   type NativeModelGatewayClient,
   type NativeModelGenerationInput,
 } from "../infrastructure/runtime";
+import { DEVELOPMENT_WRITING_EXPERIENCE_KEY } from "../infrastructure/writing-experience-store";
 import { RuntimeProvider } from "../runtime-context";
 
 function parseStoryProjectId(value: string): UuidV7 {
@@ -39,9 +40,30 @@ function parseStoryProjectId(value: string): UuidV7 {
   return parsed.value;
 }
 
+function seedWritingExperience(mode: "direct" | "professional"): void {
+  const timestamp = "2026-08-22T00:00:00.000Z";
+  window.localStorage.setItem(
+    DEVELOPMENT_WRITING_EXPERIENCE_KEY,
+    JSON.stringify({
+      schemaVersion: 1,
+      preference: {
+        mode,
+        initializationSource: "user",
+        directLocalOrganizationAuthorizedAt: mode === "direct" ? timestamp : null,
+        revision: 1,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      grants: {},
+      grantAudit: [],
+    }),
+  );
+}
+
 describe("SettingsPage model routing", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    seedWritingExperience("professional");
   });
 
   it("uses a page heading and level-two headings for primary setting sections", async () => {
@@ -64,7 +86,7 @@ describe("SettingsPage model routing", () => {
     ]) {
       expect(await screen.findByRole("heading", { name, level: 2 })).toBeVisible();
     }
-    expect(screen.queryByRole("heading", { name: "InkShadow 模型中心" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "墨影模型中心" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "AI 分工" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "模型基础评测" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "生成小说配图" })).not.toBeInTheDocument();
@@ -75,25 +97,29 @@ describe("SettingsPage model routing", () => {
   });
 
   it("switches the authoritative writing experience without invoking a provider", async () => {
+    window.localStorage.clear();
     const runtime = createDevelopmentRuntime(window.localStorage);
     expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("direct");
     const providerGenerate = vi.spyOn(runtime.modelGateway, "generate");
     const user = userEvent.setup();
     renderRoute(runtime, "/settings#writing-experience");
 
-    const mode = await screen.findByRole(
-      "combobox",
-      { name: /^默认写作方式/u },
-      { timeout: 5_000 },
+    expect(
+      await screen.findByRole("heading", { name: "设置", level: 1 }, { timeout: 15_000 }),
+    ).toBeVisible();
+    for (const name of ["外观", "备份与恢复", "写作方式"]) {
+      expect(await screen.findByRole("heading", { name, level: 2 })).toBeVisible();
+    }
+    expect(document.body).not.toHaveTextContent(
+      /AI|模型|调用|上下文|路由|令牌|追踪|候选|费用|待确认/u,
     );
-    await waitFor(() => expect(mode).toHaveValue("direct"));
-    await user.selectOptions(mode, "professional");
+    await user.click(screen.getByRole("button", { name: "切换到专业模式" }));
 
     await waitFor(async () => {
       expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("professional");
     });
     expect(providerGenerate).not.toHaveBeenCalled();
-    expect(await screen.findByText("专业模式")).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "全局设置", level: 1 })).toBeVisible();
   });
 
   it("does not switch an existing professional user to direct mode until the one-time authorization is confirmed", async () => {
@@ -123,7 +149,11 @@ describe("SettingsPage model routing", () => {
       expect(preference.mode).toBe("direct");
       expect(preference.directLocalOrganizationAuthorizedAt).not.toBeNull();
     });
-    await user.click(screen.getByRole("button", { name: "撤销本地整理授权" }));
+    await user.click(await screen.findByRole("button", { name: "切换到专业模式" }));
+    await waitFor(async () => {
+      expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("professional");
+    });
+    await user.click(await screen.findByRole("button", { name: "撤销本地整理授权" }));
     await waitFor(async () => {
       const preference = await runtime.writingExperience.getOrInitialize();
       expect(preference).toMatchObject({
@@ -287,7 +317,7 @@ describe("SettingsPage model routing", () => {
     renderRoute(prepared.runtime, "/settings#model-center");
 
     expect(
-      await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 }),
+      await screen.findByRole("heading", { name: "墨影模型中心" }, { timeout: 5_000 }),
     ).toBeVisible();
     expect(
       await screen.findByText("所选模型已发现，仍需验证能力", {}, { timeout: 5_000 }),
@@ -564,7 +594,7 @@ describe("SettingsPage model routing", () => {
     expect(within(confirmation).getByText(/DeepSeek/u)).toBeVisible();
     expect(within(confirmation).getByText(/deepseek-v4-flash/u)).toBeVisible();
     expect(within(confirmation).getByText(/固定用户句：雨停了。/u)).toBeVisible();
-    expect(within(confirmation).getByText(/最大输出：\s*64 个令牌/u)).toBeVisible();
+    expect(within(confirmation).getByText(/最大输出：\s*64 个输出内容额度/u)).toBeVisible();
     expect(
       within(confirmation).getByText(/最大模型服务调用：\s*1 次；自动重试：\s*0 次/u),
     ).toBeVisible();
@@ -915,7 +945,7 @@ describe("SettingsPage model routing", () => {
   }, 15_000);
 
   it.each([
-    ["model-center", "模型中心 · 连接与模型", "连接与模型", "InkShadow 模型中心"],
+    ["model-center", "模型中心 · 连接与模型", "连接与模型", "墨影模型中心"],
     ["model-routing", "模型中心 · AI 分工", "AI 分工", "AI 分工"],
     ["model-evaluation", "模型中心 · 模型评测", "模型评测", "模型基础评测"],
     ["image-generation", "模型中心 · 图片生成", "图片生成", "生成小说配图"],
@@ -931,12 +961,7 @@ describe("SettingsPage model routing", () => {
         "aria-current",
         "page",
       );
-      for (const sectionHeading of [
-        "InkShadow 模型中心",
-        "AI 分工",
-        "模型基础评测",
-        "生成小说配图",
-      ]) {
+      for (const sectionHeading of ["墨影模型中心", "AI 分工", "模型基础评测", "生成小说配图"]) {
         if (sectionHeading === activeSectionHeading) {
           expect(await screen.findByRole("heading", { name: sectionHeading })).toBeVisible();
         } else {
@@ -1004,13 +1029,13 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime, "/settings#model-center");
 
-    expect(await screen.findByRole("heading", { name: "InkShadow 模型中心" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "墨影模型中心" })).toBeVisible();
     expect(
       await screen.findByRole("heading", { name: "需要 AI 时，再连接一个模型服务" }),
     ).toBeVisible();
     expect(screen.queryByLabelText("基础地址")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("认证方式")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/^上下文窗口（token）/u)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^单次读取上限（内容额度）/u)).not.toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Google Gemini" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "专家设置" }));
@@ -1019,11 +1044,20 @@ describe("SettingsPage model routing", () => {
     expect(screen.getByRole("option", { name: "Anthropic Claude" })).toBeInTheDocument();
     expect(screen.getByLabelText("基础地址")).toBeVisible();
     expect(screen.getByLabelText("认证方式")).toBeVisible();
-    expect(screen.getByLabelText(/^上下文窗口（token）/u)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^单次读取上限（内容额度）/u)).toBeInTheDocument();
     expect(screen.getByText("重试不会重复计费请求")).toBeVisible();
     expect(screen.queryByText("专家兼容设置：旧 7 角色路由")).not.toBeInTheDocument();
     await user.click(screen.getByRole("link", { name: "AI 分工" }));
     expect(screen.getByText("专家兼容设置：旧 7 角色路由")).toBeVisible();
+
+    const matrixHeading = screen.getByRole("heading", { name: "22 项任务矩阵" });
+    const matrix = matrixHeading.closest("section");
+    if (!(matrix instanceof HTMLElement)) throw new Error("找不到任务矩阵区域");
+    expect(within(matrix).getAllByText("文本生成").length).toBeGreaterThan(0);
+    expect(matrix).toHaveTextContent("没有可读证据");
+    expect(matrix).not.toHaveTextContent(
+      /text_generation|structured_output|token_counting|provider_metadata|cloud_allowed|local_preferred|local_only|unknown|none/iu,
+    );
   });
 
   it("shows one current AI readiness state and explains all seven user-facing states", async () => {
@@ -1365,7 +1399,7 @@ describe("SettingsPage model routing", () => {
     const runtime = createRuntime();
     const view = renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "墨影模型中心" }, { timeout: 5_000 });
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
@@ -1388,11 +1422,11 @@ describe("SettingsPage model routing", () => {
     expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
     const modelDiscoveryPath = await screen.findByLabelText(/^模型目录路径/u);
     const textGenerationPath = screen.getByLabelText(/^文本生成路径/u);
-    const embeddingPath = screen.getByLabelText(/^Embedding 路径/u);
-    const credentialHeaderName = screen.getByLabelText("认证 Header 名称");
+    const embeddingPath = screen.getByLabelText(/^向量检索路径/u);
+    const credentialHeaderName = screen.getByLabelText("认证请求头名称");
     const requestTimeout = screen.getByLabelText("请求超时（毫秒）");
     const retryLimit = screen.getByLabelText("安全重试次数");
-    const credentialHeaderValue = screen.getByLabelText("认证 Header 值");
+    const credentialHeaderValue = screen.getByLabelText("认证请求头内容");
     act(() => {
       fireEvent.change(modelDiscoveryPath, { target: { value: "/catalog/models" } });
       fireEvent.change(textGenerationPath, { target: { value: "/text/chat" } });
@@ -1430,17 +1464,17 @@ describe("SettingsPage model routing", () => {
 
     view.unmount();
     renderRoute(createRuntime());
-    await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "墨影模型中心" }, { timeout: 5_000 });
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     await waitFor(() => {
       expect(screen.getByLabelText("配置标识")).toHaveValue("custom-safe");
       expect(screen.getByRole("combobox", { name: "认证方式" })).toHaveValue(
         "custom_header_keyring",
       );
-      expect(screen.getByLabelText("认证 Header 名称")).toHaveValue("x-api-key");
+      expect(screen.getByLabelText("认证请求头名称")).toHaveValue("x-api-key");
       expect(screen.getByLabelText(/^模型目录路径/u)).toHaveValue("/catalog/models");
       expect(screen.getByLabelText(/^文本生成路径/u)).toHaveValue("/text/chat");
-      expect(screen.getByLabelText(/^Embedding 路径/u)).toHaveValue("/vectors/embed");
+      expect(screen.getByLabelText(/^向量检索路径/u)).toHaveValue("/vectors/embed");
       expect(screen.getByLabelText("请求超时（毫秒）")).toHaveValue(47_000);
       expect(screen.getByLabelText("安全重试次数")).toHaveValue(2);
     });
@@ -1641,7 +1675,7 @@ describe("SettingsPage model routing", () => {
     expect(await screen.findByText("凭据已删除，可重新绑定")).toBeVisible();
     expect(await screen.findByRole("heading", { name: "未连接", level: 3 })).toBeVisible();
     expect(screen.queryByText("AI 写作已就绪")).not.toBeInTheDocument();
-    const keyInput = screen.getByLabelText("API Key（接口访问密钥）");
+    const keyInput = screen.getByLabelText("接口密钥");
     await user.type(keyInput, "test-rebound-key");
     await user.click(screen.getByRole("button", { name: "重新绑定原连接" }));
     await waitFor(() =>
@@ -1671,7 +1705,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow 模型中心" });
+    await screen.findByRole("heading", { name: "墨影模型中心" });
     await user.click(await screen.findByRole("button", { name: "连接 AI 服务" }));
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
@@ -1689,10 +1723,10 @@ describe("SettingsPage model routing", () => {
     );
     expect(providerSelect).toHaveValue("custom_openai_compatible");
     expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
-    fireEvent.change(screen.getByLabelText("认证 Header 名称"), {
+    fireEvent.change(screen.getByLabelText("认证请求头名称"), {
       target: { value: "Host" },
     });
-    fireEvent.change(screen.getByLabelText("认证 Header 值"), {
+    fireEvent.change(screen.getByLabelText("认证请求头内容"), {
       target: { value: "super-secret-header-value" },
     });
     await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
@@ -1702,7 +1736,7 @@ describe("SettingsPage model routing", () => {
     ).not.toBeInTheDocument();
     expect(saveCredential).not.toHaveBeenCalled();
 
-    fireEvent.change(screen.getByLabelText("认证 Header 名称"), {
+    fireEvent.change(screen.getByLabelText("认证请求头名称"), {
       target: { value: "x-api-key" },
     });
     fireEvent.change(await screen.findByLabelText(/^模型目录路径/u), {
@@ -1738,7 +1772,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow 模型中心" });
+    await screen.findByRole("heading", { name: "墨影模型中心" });
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
     await user.selectOptions(providerSelect, "custom_openai_compatible");
@@ -1752,10 +1786,10 @@ describe("SettingsPage model routing", () => {
       screen.getByRole("combobox", { name: "认证方式" }),
       "custom_header_keyring",
     );
-    fireEvent.change(await screen.findByLabelText("认证 Header 名称"), {
+    fireEvent.change(await screen.findByLabelText("认证请求头名称"), {
       target: { value: "x-api-key" },
     });
-    fireEvent.change(screen.getByLabelText("认证 Header 值"), {
+    fireEvent.change(screen.getByLabelText("认证请求头内容"), {
       target: { value: "never-written-secret" },
     });
     await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
@@ -1805,7 +1839,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "墨影模型中心" }, { timeout: 5_000 });
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
     await user.selectOptions(
@@ -1868,7 +1902,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow 模型中心" });
+    await screen.findByRole("heading", { name: "墨影模型中心" });
     const storedConnections = await screen.findByRole("combobox", {
       name: /^已连接的供应商/u,
     });
@@ -1882,7 +1916,7 @@ describe("SettingsPage model routing", () => {
     await user.click(screen.getByRole("button", { name: "专家设置" }));
     const providerId = screen.getByLabelText("配置标识");
     fireEvent.change(providerId, { target: { value: "same-provider-target" } });
-    fireEvent.change(screen.getByLabelText("认证 Header 值"), {
+    fireEvent.change(screen.getByLabelText("认证请求头内容"), {
       target: { value: "never-overwrite-target" },
     });
     await user.click(screen.getByRole("button", { name: "保存到系统凭据库" }));
@@ -1952,7 +1986,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "墨影模型中心" }, { timeout: 5_000 });
     const storedConnections = await screen.findByRole("combobox", {
       name: /^已连接的供应商/u,
     });
@@ -2010,7 +2044,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "墨影模型中心" }, { timeout: 5_000 });
     const storedConnections = await screen.findByRole(
       "combobox",
       { name: /^已连接的供应商/u },
@@ -2059,7 +2093,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    await screen.findByRole("heading", { name: "InkShadow 模型中心" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "墨影模型中心" }, { timeout: 5_000 });
     await waitFor(() =>
       expect(screen.getByRole("combobox", { name: /^已连接的供应商/u })).toBeEnabled(),
     );
@@ -2569,8 +2603,8 @@ describe("SettingsPage model routing", () => {
     const verifyButton = await screen.findByRole("button", {
       name: "确认 1 次固定验证",
     });
-    expect(await screen.findByText(/最多请求 64 个输出 token/u)).toBeVisible();
-    expect(screen.queryByText(/最多请求 8 个输出 token/u)).not.toBeInTheDocument();
+    expect(await screen.findByText(/最多请求 64 个输出内容额度/u)).toBeVisible();
+    expect(screen.queryByText(/最多请求 8 个输出内容额度/u)).not.toBeInTheDocument();
     await waitFor(() => expect(verifyButton).toBeEnabled());
     await user.click(verifyButton);
 
@@ -3352,7 +3386,7 @@ describe("SettingsPage model routing", () => {
       const user = userEvent.setup();
       renderRoute(runtime);
 
-      await screen.findByRole("heading", { name: "InkShadow 模型中心" });
+      await screen.findByRole("heading", { name: "墨影模型中心" });
       const modelInput = await screen.findByRole("textbox", { name: "模型标识" });
       await user.type(modelInput, "qwen-final-write-model");
       const verifyButton = screen.getByRole("button", {

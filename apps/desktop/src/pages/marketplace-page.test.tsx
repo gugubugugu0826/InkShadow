@@ -79,6 +79,36 @@ describe("MarketplacePage", () => {
     expect(screen.getByText("The Vanished City")).toBeInTheDocument();
   });
 
+  it("keeps remote and install technical failures out of the visible page", async () => {
+    const rawMessage = "Candidate invocation marketplace request failed";
+    const failedRemote = fakeRuntime({
+      catalog: [],
+      installed: [],
+      remoteState: "error",
+      remoteError: rawMessage,
+    });
+    const remoteView = render(<MarketplacePage runtime={failedRemote.runtime} />);
+
+    expect(await screen.findByText(/发生了未预期的本地错误/u)).toBeVisible();
+    expect(screen.queryByText(rawMessage)).not.toBeInTheDocument();
+    remoteView.unmount();
+
+    const artifact = installedFixture().artifact;
+    const failedInstall = fakeRuntime({
+      catalog: [artifact],
+      installed: [],
+      remoteState: "ready",
+      remoteError: null,
+    });
+    failedInstall.install.mockRejectedValue(new Error(rawMessage));
+    render(<MarketplacePage runtime={failedInstall.runtime} />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "安装" }));
+    expect(await screen.findByText(/发生了未预期的本地错误/u)).toBeVisible();
+    expect(screen.queryByText(rawMessage)).not.toBeInTheDocument();
+  });
+
   it("requires confirmation before uninstalling a local copy and reports success", async () => {
     const installed = installedFixture();
     const initial: MarketplaceRuntimeSnapshot = {
