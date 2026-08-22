@@ -3593,7 +3593,7 @@ export function IdeaJourneyPage() {
         : `/projects/${journey.projectId}/chapters/${journey.chapterId}`;
 
     return (
-      <div className="desktop-page idea-journey idea-journey--landing">
+      <div className="desktop-page idea-journey idea-journey--landing" role="main">
         {quickAiDrawer}
         {openingProviderConfirmationDialog}
         <header className="page-heading idea-journey__heading">
@@ -3699,7 +3699,7 @@ export function IdeaJourneyPage() {
         ? `已确认的模型 · ${snapshot.modelId ?? "已选模型"}`
         : "本地草案（未调用云端 AI）";
     return (
-      <div className="desktop-page idea-journey idea-journey--summary">
+      <div className="desktop-page idea-journey idea-journey--summary" role="main">
         {openingProviderConfirmationDialog}
         <header className="page-heading idea-journey__heading">
           <div>
@@ -3853,7 +3853,7 @@ export function IdeaJourneyPage() {
           (suggestion.source === "local_fallback" || suggestion.dispatchState === "succeeded"),
       ) ?? null;
     return (
-      <div className="desktop-page idea-journey">
+      <div className="desktop-page idea-journey" role="main">
         {quickAiDrawer}
         {openingProviderConfirmationDialog}
         <header className="page-heading idea-journey__heading">
@@ -4428,7 +4428,7 @@ export function IdeaJourneyPage() {
   }
 
   return (
-    <div className="desktop-page idea-journey idea-journey--landing">
+    <div className="desktop-page idea-journey idea-journey--landing" role="main">
       {quickAiDrawer}
       {openingProviderConfirmationDialog}
       <header className="page-heading idea-journey__heading">

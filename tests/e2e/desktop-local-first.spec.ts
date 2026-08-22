@@ -331,7 +331,7 @@ test("imports into the first chapter and exports validated artifacts and diagnos
   await expect(pdfIssue).not.toContainText("PDF_TEXT_UNAVAILABLE");
 
   const bundleDownloadPromise = page.waitForEvent("download");
-  await page.getByRole("button", { name: "下载 Bundle" }).click();
+  await page.getByRole("button", { name: "下载完整备份" }).click();
   const bundleDownload = await bundleDownloadPromise;
   expect(bundleDownload.suggestedFilename()).toBe(`${projectTitle}.inkshadow.json`);
   const bundlePath = await bundleDownload.path();
@@ -364,7 +364,7 @@ test("imports into the first chapter and exports validated artifacts and diagnos
   const diagnosticsDownloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "下载脱敏诊断包" }).click();
   const diagnosticsDownload = await diagnosticsDownloadPromise;
-  expect(diagnosticsDownload.suggestedFilename()).toMatch(/^InkShadow-diagnostics-/u);
+  expect(diagnosticsDownload.suggestedFilename()).toMatch(/^墨影-诊断-\d{4}-\d{2}-\d{2}-/u);
   const diagnosticsPath = await diagnosticsDownload.path();
   if (diagnosticsPath === null) {
     throw new Error("Playwright did not expose the diagnostic download.");

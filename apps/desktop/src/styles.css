@@ -2741,6 +2741,10 @@ select {
     margin-inline: auto;
   }
 
+  .settings-page .ink-select {
+    min-height: var(--target-min);
+  }
+
   .settings-grid,
   .settings-inline-grid--four,
   .settings-preference-row,
@@ -5179,6 +5183,12 @@ select {
 
 .idea-journey__idea-card .ink-button {
   min-width: 10rem;
+}
+
+@media (max-width: 50rem) {
+  .idea-journey__idea-card .ink-button--md {
+    min-height: var(--target-min);
+  }
 }
 
 .idea-journey__resume {

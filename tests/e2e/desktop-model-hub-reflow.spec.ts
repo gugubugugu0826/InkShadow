@@ -23,14 +23,15 @@ for (const colorScheme of ["light", "dark"] as const) {
   }) => {
     await page.goto("/#/start");
     await page.evaluate(() => window.localStorage.clear());
-    await seedLongModelHubFixture(page);
+    await page.reload();
     await switchFreshInstallToProfessionalMode(page);
+    await seedLongModelHubFixture(page);
     await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
 
     for (const viewport of TARGET_VIEWPORTS) {
       await page.setViewportSize(viewport);
       await page.goto("/#/settings#model-center");
-      await expect(page.getByRole("heading", { name: "InkShadow 模型中心" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "模型中心 · 连接与模型" })).toBeVisible();
       await selectConnection(page, LONG_MODEL_HUB_CONNECTION_ID);
       await expect(
         page.getByRole("combobox", { name: /^已连接的供应商/u }).locator("option:checked"),
@@ -77,10 +78,11 @@ test("keeps long Model Hub data usable at DPR2 and equivalent 200%", async ({
   try {
     await page.goto("/#/start");
     await page.evaluate(() => window.localStorage.clear());
-    await seedLongModelHubFixture(page);
+    await page.reload();
     await switchFreshInstallToProfessionalMode(page);
+    await seedLongModelHubFixture(page);
     await page.goto("/#/settings#model-center");
-    await expect(page.getByRole("heading", { name: "InkShadow 模型中心" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "模型中心 · 连接与模型" })).toBeVisible();
     await selectConnection(page, LONG_MODEL_HUB_CONNECTION_ID);
     await expectNoPageOrCardOverflow(page);
     expect(await page.evaluate(() => window.devicePixelRatio)).toBe(2);
@@ -96,7 +98,7 @@ test("keeps long Model Hub data usable at DPR2 and equivalent 200%", async ({
         mobile: false,
       });
       await page.reload();
-      await expect(page.getByRole("heading", { name: "InkShadow 模型中心" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "模型中心 · 连接与模型" })).toBeVisible();
       await selectConnection(page, LONG_MODEL_HUB_CONNECTION_ID);
       await openExpertSettings(page);
       await expect(page.getByLabel("Base URL")).toHaveValue(LONG_MODEL_HUB_BASE_URL);
