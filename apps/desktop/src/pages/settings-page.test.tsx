@@ -104,16 +104,20 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime, "/settings#writing-experience");
 
-    expect(
-      await screen.findByRole("heading", { name: "设置", level: 1 }, { timeout: 15_000 }),
-    ).toBeVisible();
+    const switchToProfessional = await screen.findByRole(
+      "button",
+      { name: "切换到专业模式" },
+      { timeout: 15_000 },
+    );
+    expect(switchToProfessional).toBeVisible();
+    expect(screen.getByRole("heading", { name: "设置", level: 1 })).toBeVisible();
     for (const name of ["外观", "备份与恢复", "写作方式"]) {
       expect(await screen.findByRole("heading", { name, level: 2 })).toBeVisible();
     }
     expect(document.body).not.toHaveTextContent(
       /AI|模型|调用|上下文|路由|令牌|追踪|候选|费用|待确认/u,
     );
-    await user.click(screen.getByRole("button", { name: "切换到专业模式" }));
+    await user.click(switchToProfessional);
 
     await waitFor(async () => {
       expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("professional");
