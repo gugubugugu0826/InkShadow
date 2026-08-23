@@ -1,7 +1,7 @@
 # v0.2.7 两轮复测缺陷修复报告
 
 > 日期：2026-08-23；最近更新：2026-08-24  
-> 状态：2026-08-24 后续增量已通过聚焦回归、完整源码门禁和原生层门禁；正式网页旅程必须在干净提交上运行。尚未发布，现有 v0.2.7 标签、安装包和附件保持不变。  
+> 状态：2026-08-24 后续增量已通过聚焦回归、完整源码门禁、原生层门禁和正式网页旅程。尚未发布，现有 v0.2.7 标签、安装包和附件保持不变。  
 > 发布判断：不建议现在发布。目标现场数据库、现场诊断和真实安装复测未取得或未执行；以后如发布修复版，必须使用新版本号并等待单独指令。
 
 ## 一、基线与证据边界
@@ -175,7 +175,7 @@ SQLite 创建、导入、开书和内容同步在同一事务内写入项目、�
 | 浏览器、直接创建与页面   | `pnpm --filter @inkshadow/desktop test -- src/infrastructure/development-project-display-identity.test.ts src/infrastructure/development-ideation-project-commit.test.ts src/infrastructure/ideation-project-commit.test.ts src/infrastructure/content-sync-materializer.test.ts src/pages/start-page.test.tsx src/pages/projects-page.test.tsx` | 6 个文件，69／69 通过 |
 | 桌面端类型检查           | `pnpm --filter @inkshadow/desktop typecheck`                                                                                                                                                                                                                                                                                                     | 通过                  |
 
-### 2026-08-24 当前完整源码与原生层门禁
+### 2026-08-24 当前完整源码、原生层与正式网页门禁
 
 `pnpm release:check`
 
@@ -193,7 +193,10 @@ SQLite 创建、导入、开书和内容同步在同一事务内写入项目、�
 `pnpm test:e2e:release`
 
 - 未提交工作树上的首次尝试被干净提交前置检查按设计拦下，退出码 1，业务旅程 0 项开始；没有把该环境前置失败记作业务通过或失败。
-- 清理并形成干净本地提交后必须从头运行一次；当前尚未执行。
+- 干净提交：`8efd32176136e0a583d2e8dcff6ca5b2fd487ee4`。
+- 来源：1297 个文件、22346527 字节，SHA-256 `31896fab6b4d4bb3bf846da2141a2e6dc5e11bdc4dff016f2b89a5edc668d6b6`。
+- 正式网页产物：59 个文件、7281944 字节，SHA-256 `a9961bdc9402193849bf54366464e44994d9c12496d1b44fcc2e7da1b5910791`；正式配置、提交来源、文件清单与哈希核对通过。
+- 端到端旅程：17／17 通过、0 失败，耗时 33.0 秒；使用本地受控测试服务，不构成真实服务商或真实安装验证。
 
 ### 2026-08-23 历史总门禁
 
@@ -277,7 +280,7 @@ SQLite 创建、导入、开书和内容同步在同一事务内写入项目、�
 
 ## 九、工作区清理清单
 
-- 临时解压目录、验证日志、测试结果、覆盖率、网页构建、原生编译目录和其他缓存均不纳入 Git。
-- 正文证据、源码、迁移、测试和文档保留。
-- 最终验证后清理 `.tmp`、各 `dist`／`dist-release`、`coverage`、`test-results`、`playwright-report`、原生 `target` 及工作区依赖目录。
-- 清理只针对可重新生成且已确认位于 `D:/InkShadow` 内的目录；不删除作品、数据库、安装包、发布附件或用户提供材料。
+- 本轮清理对象均先解析并确认位于 `D:/InkShadow` 内，且为 Git 忽略的可再生目录：根目录和桌面端的 `.tmp`、桌面端 `.vite-cache`、应用及共享包的 `dist`／`dist-release`、`test-results`、原生 `target`、根目录和各工作区的 `node_modules`。
+- 正文证据、源码、前向迁移、回归测试、验证脚本和文档保留；`AGENTS.md`、`DESIGN`、`archive`、`installer` 以及被忽略的历史文档不属于清理范围。
+- 上述可再生目录在最终旅程和指纹提取完成后、证据提交前清理；不存在的 `coverage` 和 `playwright-report` 不伪报为已删除。
+- 不删除作品、数据库、安装包、发布附件、用户提供材料或任何未确认来源的目录。
