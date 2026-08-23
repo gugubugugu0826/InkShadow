@@ -21,7 +21,7 @@
 
 > 文档状态：`SUPPORTING_CURRENT`  
 > 源码复核：2026-08-23  
-> 应用清单版本：`0.2.7`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)（未签名工程预发行）；候选与标签解析提交均为 `cb97876894d6f02c4c901745c95533da7b0260fe`  
+> 应用清单版本：`0.2.8`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)（未签名工程预发行）；候选与标签解析提交均为 `cb97876894d6f02c4c901745c95533da7b0260fe`  
 > 本轮边界：真实供应商、最终安装程序真机、系统百分之二百缩放与商业门禁仍未完成
 
 本文说明直接模式、专业模式、本地设定整理、StoryMemory 投影和长篇一致性调查在普通界面中的
