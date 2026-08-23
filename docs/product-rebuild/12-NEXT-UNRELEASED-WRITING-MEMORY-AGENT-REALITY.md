@@ -1,7 +1,7 @@
 # v0.2.5 已发布：写作模式、叙事记忆与一致性调查现实矩阵
 
 > 现实快照日期：2026-08-20  
-> 当前工作树应用清单：`0.2.7`；最新公开版本：[`v0.2.6`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.6) 工程预发布  
+> 当前公开状态（2026-08-23）：应用清单为 `0.2.7`；最新公开版本为 [`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7) 未签名工程预发布  
 > source commit：`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`；tag object：`51dfd64ba22e9771131f251cdc778ee06f89192d`  
 > 本文所述 `v0.2.5` 冻结门禁：`RELEASE_VERIFIED`  
 > 外部验证：`BLOCKED_EXTERNAL`（真人 Windows Tauri/Wry、真实 Provider、系统 200% DPI、外部应用打开）
@@ -14,7 +14,7 @@
 2026-08-21 开始的 `v0.2.6` 真机缺陷修复不倒改本文的 `v0.2.5` 冻结数字、哈希或发布结论。
 本地数据库生命周期、AI 建议草稿接受、开书三槽、自动备份和能力验证调用账本的工作树增量见
 [`../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](../execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)；
-其最终全量、真机、真实模型、打包与发布均仍为待验证。
+截至该历史快照，其最终全量、真机、真实模型、打包与发布均仍为待验证；这不是当前 `v0.2.7` 状态。
 
 ## v0.2.5 冻结发布证据
 
