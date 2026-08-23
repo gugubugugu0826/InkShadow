@@ -24,6 +24,7 @@ import { normalizeUiError, projectOrdinaryUiError } from "../infrastructure/ui-e
 import { useRuntime } from "../runtime-context";
 import {
   calculateWorkspaceInsights,
+  countReadyProseCandidates,
   type WorkspaceInsights,
   type WorkspaceVersionMetric,
 } from "./workspace-insights";
@@ -52,6 +53,7 @@ export function WorkspacePage() {
   const [insights, setInsights] = useState<WorkspaceInsights | null>(null);
   const [insightsLoading, setInsightsLoading] = useState(false);
   const [insightsError, setInsightsError] = useState<unknown>(null);
+  const [pendingCandidateChapterId, setPendingCandidateChapterId] = useState<string | null>(null);
 
   const loadInsights = useCallback(
     async (chapterList: readonly Chapter[]): Promise<void> => {
@@ -76,12 +78,14 @@ export function WorkspacePage() {
               : new Error("工作区统计读取失败"),
         );
         setInsights(null);
+        setPendingCandidateChapterId(null);
         setInsightsLoading(false);
         return;
       }
 
       const versionMetrics: WorkspaceVersionMetric[] = [];
       let readyCandidateCount = 0;
+      let firstPendingChapterId: string | null = null;
       for (const row of rows) {
         if (!row.versions.ok || !row.candidates.ok) continue;
         versionMetrics.push(
@@ -94,11 +98,14 @@ export function WorkspacePage() {
             };
           }),
         );
-        readyCandidateCount += row.candidates.value.filter(
-          (candidate) => candidate.status === "ready",
-        ).length;
+        const chapterReadyCount = countReadyProseCandidates(row.candidates.value);
+        readyCandidateCount += chapterReadyCount;
+        if (firstPendingChapterId === null && chapterReadyCount > 0) {
+          firstPendingChapterId = row.chapter.id;
+        }
       }
       setInsights(calculateWorkspaceInsights(versionMetrics, readyCandidateCount));
+      setPendingCandidateChapterId(firstPendingChapterId);
       setInsightsLoading(false);
     },
     [runtime],
@@ -312,16 +319,22 @@ export function WorkspacePage() {
                 : `${String(insights.currentStreakDays)} 天`}
             </strong>
           </article>
-          {professionalMode && (
-            <article>
-              <span>待处理 AI 建议</span>
-              <strong>
-                {insightsLoading || insights === null
-                  ? "—"
-                  : `${String(insights.readyCandidateCount)} 份`}
-              </strong>
-            </article>
-          )}
+          <article>
+            <span>待处理生成结果</span>
+            <strong>
+              {insightsLoading || insights === null
+                ? "—"
+                : `${String(insights.readyCandidateCount)} 份`}
+            </strong>
+            {pendingCandidateChapterId !== null && (
+              <Link
+                className="back-link"
+                to={`/projects/${projectId ?? ""}/chapters/${pendingCandidateChapterId}`}
+              >
+                查看
+              </Link>
+            )}
+          </article>
         </section>
 
         <section aria-labelledby="chapters-title">

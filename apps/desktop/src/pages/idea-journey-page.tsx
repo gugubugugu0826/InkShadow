@@ -4304,7 +4304,8 @@ export function IdeaJourneyPage() {
     if (!existing.ok) throw existing.error;
     const projectName =
       existing.value === null
-        ? await resolvePlannedProjectName(runtime, savedSnapshot.projectName, basePlan.projectId)
+        ? (basePlan.projectName ??
+          (await resolvePlannedProjectName(runtime, savedSnapshot.projectName)))
         : basePlan.projectName;
     assertCurrentOperation(operation);
     if (projectName === null) {
@@ -7374,18 +7375,17 @@ function createJourneyProvisioningPlan(
 async function resolvePlannedProjectName(
   runtime: ReturnType<typeof useRuntime>,
   projectName: string,
-  plannedProjectId: string,
 ): Promise<string> {
   const baseName = normalizeSummaryField(projectName, 120, "书名");
+  const maximumSequence = 10_000;
   const baseExists = await runtime.repositories.projects.nameExists(baseName, null);
   if (!baseExists.ok) throw baseExists.error;
   if (!baseExists.value) {
     return baseName;
   }
-  const compactId = plannedProjectId.replaceAll("-", "");
-  for (const suffixLength of [8, 12, 16, 24, 32]) {
-    const suffix = compactId.slice(-suffixLength);
-    const candidate = `${baseName.slice(0, 119 - suffix.length)}-${suffix}`;
+  for (let sequence = 2; sequence <= maximumSequence; sequence += 1) {
+    const suffix = `（${String(sequence)}）`;
+    const candidate = `${baseName.slice(0, 120 - suffix.length)}${suffix}`;
     const duplicate = await runtime.repositories.projects.nameExists(candidate, null);
     if (!duplicate.ok) throw duplicate.error;
     if (!duplicate.value) {

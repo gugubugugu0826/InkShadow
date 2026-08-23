@@ -10,6 +10,7 @@ import type {
   ImportProjectCommit,
   ProjectImportCommitRepository,
   ProjectListQuery,
+  ProjectDisplayKind,
   ProjectRepository,
   RecoveryDraftRepository,
   SaveChapterCommit,
@@ -45,6 +46,8 @@ import {
 import { Task, type CreateTaskInput } from "@inkshadow/task-engine";
 
 import type { SqlExecutor, SqlPrimitive, TransactionExecutor } from "./executor.js";
+import { SqliteProjectDisplayIdentityRepository } from "./project-display-identity-sqlite-repository.js";
+export { SqliteProjectDisplayIdentityRepository } from "./project-display-identity-sqlite-repository.js";
 import { createTaskIfAbsentInTransaction } from "./task-sqlite-repositories.js";
 import {
   enqueueSyncProjectionJobInTransaction,
@@ -229,37 +232,21 @@ export class SqliteProjectRepository implements ProjectRepository {
     private readonly syncProjectionIds?: UuidV7Generator,
   ) {}
 
-  public async create(project: Project): Promise<Result<void, AppError>> {
+  public async create(
+    project: Project,
+    displayKind: Exclude<ProjectDisplayKind, "system_evaluation"> = "author_work",
+  ): Promise<Result<void, AppError>> {
     const snapshot = project.toSnapshot();
     return attempt("create project", async () => {
-      await this.executor.execute(
-        `INSERT INTO projects (
-          id,
-          name,
-          status,
-          revision,
-          deletion_generation,
-          created_at,
-          updated_at,
-          archived_at,
-          trashed_at,
-          retention_until,
-          status_before_trash
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
+      await this.executor.transaction(async (transaction) => {
+        await insertProject(transaction, project);
+        await insertProjectDisplayIdentityIfAvailable(
+          transaction,
           snapshot.id,
-          snapshot.name,
-          snapshot.status,
-          snapshot.revision,
-          snapshot.deletionGeneration,
+          displayKind,
           snapshot.createdAt,
-          snapshot.updatedAt,
-          snapshot.archivedAt,
-          snapshot.trashedAt,
-          snapshot.retentionUntil,
-          snapshot.statusBeforeTrash,
-        ],
-      );
+        );
+      });
     });
   }
 
@@ -898,6 +885,13 @@ export class SqliteProjectImportCommitRepository implements ProjectImportCommitR
         }
 
         await insertProject(transaction, commit.project);
+        const projectSnapshot = commit.project.toSnapshot();
+        await insertProjectDisplayIdentityIfAvailable(
+          transaction,
+          projectSnapshot.id,
+          "author_work",
+          projectSnapshot.createdAt,
+        );
         for (const imported of commit.chapters) {
           await insertChapter(transaction, imported.chapter);
           await insertChapterVersion(transaction, imported.initialVersion);
@@ -916,6 +910,7 @@ export class SqliteProjectImportCommitRepository implements ProjectImportCommitR
 
 export interface SqliteRepositories {
   readonly projects: SqliteProjectRepository;
+  readonly projectDisplayIdentities: SqliteProjectDisplayIdentityRepository;
   readonly chapters: SqliteChapterRepository;
   readonly chapterPrivacy: SqliteChapterPrivacyRepository;
   readonly chapterVersions: SqliteChapterVersionRepository;
@@ -980,6 +975,7 @@ export function createSqliteRepositories(
 ): SqliteRepositories {
   return {
     projects: new SqliteProjectRepository(executor, options.syncProjectionIds),
+    projectDisplayIdentities: new SqliteProjectDisplayIdentityRepository(executor),
     chapters: new SqliteChapterRepository(executor),
     chapterPrivacy: new SqliteChapterPrivacyRepository(executor),
     chapterVersions: new SqliteChapterVersionRepository(executor),
@@ -1151,6 +1147,56 @@ async function insertProject(executor: TransactionExecutor, project: Project): P
       snapshot.retentionUntil,
       snapshot.statusBeforeTrash,
     ],
+  );
+}
+
+async function insertProjectDisplayIdentityIfAvailable(
+  executor: TransactionExecutor,
+  projectId: UuidV7,
+  displayKind: Exclude<ProjectDisplayKind, "system_evaluation">,
+  recordedAt: IsoUtcTimestamp,
+): Promise<void> {
+  const schemaComponents = await executor.select<{ readonly name: string }>(
+    `SELECT name
+     FROM sqlite_schema
+     WHERE (
+       type = 'table'
+       AND name IN (
+         'project_display_identities',
+         'project_display_identity_revisions'
+       )
+     ) OR (
+       type = 'trigger'
+       AND name = 'project_display_identity_revision_insert'
+     )
+     ORDER BY name`,
+  );
+  if (schemaComponents.length === 0) return;
+  if (schemaComponents.length !== 3) {
+    throw new AppError({
+      code: "REPOSITORY_ERROR",
+      message: "本地作品分类结构不完整，已停止创建以保护作品数据。",
+      retryable: false,
+      actions: ["CONTACT_SUPPORT"],
+      details: {
+        operation: "PROJECT_DISPLAY_IDENTITY_SCHEMA_INCOMPLETE",
+        foundComponentCount: schemaComponents.length,
+        requiredComponentCount: 3,
+        foundComponents: schemaComponents.map(({ name }) => name),
+      },
+    });
+  }
+  const provenance =
+    displayKind === "author_work"
+      ? "explicit_creation"
+      : displayKind === "test_work"
+        ? "explicit_test"
+        : "builtin_example";
+  await executor.execute(
+    `INSERT INTO project_display_identities (
+       project_id, display_kind, provenance, revision, created_at, updated_at
+     ) VALUES (?, ?, ?, 1, ?, ?)`,
+    [projectId, displayKind, provenance, recordedAt, recordedAt],
   );
 }
 
@@ -1797,7 +1843,7 @@ function requireEntity<Value>(
 function corruptData(field: string, validationCode: string, cause?: unknown): AppError {
   const error = new AppError({
     code: "REPOSITORY_ERROR",
-    message: "Stored local data did not pass integrity validation.",
+    message: "本地数据未通过完整性检查。",
     actions: ["EXPORT_DRAFT", "CONTACT_SUPPORT"],
     details: { field, validationCode },
   });

@@ -92,6 +92,21 @@ describe("project use cases", () => {
     }
   });
 
+  it("passes an explicit display identity into the atomic project create", async () => {
+    const repository = new InMemoryProjectRepository();
+    const created = await new CreateProject(
+      repository,
+      new SequenceIds([PROJECT_ID]),
+      new FixedClock(),
+    ).execute({
+      name: "测试作品",
+      displayKind: "test_work",
+    });
+
+    expect(created.ok).toBe(true);
+    expect(repository.createdDisplayKinds).toEqual(["test_work"]);
+  });
+
   it("recovers an exact planned project id without allocating or guessing another project", async () => {
     const repository = new InMemoryProjectRepository();
     const clock = new FixedClock();

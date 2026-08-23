@@ -4,6 +4,7 @@ import { ToastProvider } from "@inkshadow/ui";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEVELOPMENT_DATABASE_KEY } from "../infrastructure/development-storage";
 import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
 import { RuntimeProvider } from "../runtime-context";
 import { ProjectsPage } from "./projects-page";
@@ -22,8 +23,14 @@ function renderPage(runtime: DesktopRuntime) {
   );
 }
 
-async function createProject(runtime: DesktopRuntime, name: string) {
-  const result = await runtime.useCases.createProject.execute({ name });
+async function createProject(
+  runtime: DesktopRuntime,
+  name: string,
+  displayKind?: "author_work" | "test_work" | "builtin_example",
+) {
+  const result = await runtime.useCases.createProject.execute(
+    displayKind === undefined ? { name } : { name, displayKind },
+  );
   if (!result.ok) throw result.error;
   return result.value;
 }
@@ -399,4 +406,252 @@ describe("ProjectsPage library states", () => {
     await waitFor(() => expect(screen.queryByText("未完成创作读取失败")).not.toBeInTheDocument());
     expect(listActive).toHaveBeenCalledTimes(2);
   });
+
+  it("keeps an ordinarily created unnamed story in the author library without inferring from its name", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await createProject(runtime, "未命名新故事");
+
+    renderPage(runtime);
+
+    const authorSection = await screen.findByRole("region", { name: "作者作品" });
+    expect(
+      within(authorSection).getByRole("heading", { name: "未命名新故事", level: 2 }),
+    ).toBeVisible();
+    expect(screen.queryByRole("region", { name: "测试与示例" })).not.toBeInTheDocument();
+  });
+
+  it("separates explicit test work and persists reversible author classification", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await createProject(runtime, "作者手稿");
+    await createProject(runtime, "回归验证作品", "test_work");
+    const user = userEvent.setup();
+    const view = renderPage(runtime);
+
+    let authorSection = await screen.findByRole("region", { name: "作者作品" });
+    let specialSection = screen.getByRole("region", { name: "测试与示例" });
+    expect(
+      within(authorSection).getByRole("heading", { name: "作者手稿", level: 2 }),
+    ).toBeVisible();
+    expect(
+      within(specialSection).getByRole("heading", { name: "回归验证作品", level: 2 }),
+    ).toBeVisible();
+
+    await user.click(
+      within(projectCard("作者手稿")).getByRole("button", { name: "标记为测试作品" }),
+    );
+    specialSection = await screen.findByRole("region", { name: "测试与示例" });
+    expect(
+      within(specialSection).getByRole("heading", { name: "作者手稿", level: 2 }),
+    ).toBeVisible();
+
+    await user.click(
+      within(projectCard("回归验证作品")).getByRole("button", { name: "移回作者作品" }),
+    );
+    authorSection = await screen.findByRole("region", { name: "作者作品" });
+    expect(
+      within(authorSection).getByRole("heading", { name: "回归验证作品", level: 2 }),
+    ).toBeVisible();
+
+    view.unmount();
+    renderPage(createDevelopmentRuntime(window.localStorage));
+    expect(
+      within(await screen.findByRole("region", { name: "作者作品" })).getByRole("heading", {
+        name: "回归验证作品",
+        level: 2,
+      }),
+    ).toBeVisible();
+    expect(
+      within(screen.getByRole("region", { name: "测试与示例" })).getByRole("heading", {
+        name: "作者手稿",
+        level: 2,
+      }),
+    ).toBeVisible();
+  });
+
+  it("shows protected examples separately and hides system evaluation projects", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await createProject(runtime, "阅读示例", "builtin_example");
+    const systemProject = await createProject(runtime, "系统校验样本");
+    rewriteStoredIdentity(systemProject.id, "system_evaluation", "evaluation_project_id");
+
+    renderPage(createDevelopmentRuntime(window.localStorage));
+
+    expect(await screen.findByRole("heading", { name: "还没有作品", level: 2 })).toBeVisible();
+    const specialSection = screen.getByRole("region", { name: "测试与示例" });
+    const exampleCard = within(specialSection)
+      .getByRole("heading", { name: "阅读示例", level: 2 })
+      .closest<HTMLElement>(".ink-card");
+    if (exampleCard === null) throw new Error("找不到示例作品卡片。");
+    expect(within(exampleCard).getByText("示例作品")).toBeVisible();
+    expect(
+      within(exampleCard).queryByRole("button", { name: /作者作品|测试作品/u }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "系统校验样本" })).not.toBeInTheDocument();
+  });
+
+  it("isolates one identity read failure, keeps the project openable, and retries classification", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await createProject(runtime, "仍可阅读的正文");
+    const resolveIdentity = vi
+      .spyOn(runtime.repositories.projectDisplayIdentities, "resolveByProjectId")
+      .mockRejectedValueOnce(new Error("simulated identity read failure"));
+    const user = userEvent.setup();
+
+    renderPage(runtime);
+
+    expect(await screen.findByText("部分作品分类暂时无法读取")).toBeVisible();
+    const card = projectCard(project.name);
+    expect(within(card).getByRole("link", { name: "打开" })).toHaveAttribute(
+      "href",
+      `/projects/${project.id}`,
+    );
+    await user.click(screen.getByRole("button", { name: "重新读取分类" }));
+    await waitFor(() => {
+      expect(screen.queryByText("部分作品分类暂时无法读取")).not.toBeInTheDocument();
+    });
+    expect(resolveIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a legacy unknown identity as author work and lets the author confirm it", async () => {
+    const initialRuntime = createDevelopmentRuntime(window.localStorage);
+    const project = await createProject(initialRuntime, "旧版迁入作品");
+    removeStoredIdentity(project.id);
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+
+    renderPage(runtime);
+
+    const authorSection = await screen.findByRole("region", { name: "作者作品" });
+    expect(
+      within(authorSection).getByRole("heading", { name: project.name, level: 2 }),
+    ).toBeVisible();
+    const card = projectCard(project.name);
+    await user.click(within(card).getByRole("button", { name: "确认是作者作品" }));
+    await waitFor(async () => {
+      const identity = await runtime.repositories.projectDisplayIdentities.resolveByProjectId(
+        project.id,
+      );
+      expect(identity.ok && identity.value?.provenance).toBe("explicit_creation");
+    });
+  });
+
+  it("keeps the author project usable when a classification write fails", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await createProject(runtime, "写入失败仍安全");
+    const writeIdentity = vi
+      .spyOn(runtime.repositories.projectDisplayIdentities, "recordTestWork")
+      .mockRejectedValueOnce(new Error("simulated identity write failure"));
+    const user = userEvent.setup();
+
+    renderPage(runtime);
+
+    await screen.findByRole("heading", { name: project.name, level: 2 });
+    const card = projectCard(project.name);
+    await user.click(within(card).getByRole("button", { name: "标记为测试作品" }));
+    expect(await screen.findByText("作品分类尚未更改")).toBeVisible();
+    expect(within(projectCard(project.name)).getByRole("link", { name: "打开" })).toHaveAttribute(
+      "href",
+      `/projects/${project.id}`,
+    );
+    expect(screen.getByRole("region", { name: "作者作品" })).toContainElement(
+      screen.getByRole("heading", { name: project.name, level: 2 }),
+    );
+    expect(writeIdentity).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["archived", "归档", "查看归档"],
+    ["trashed", "回收", "查看回收站"],
+  ] as const)(
+    "keeps explicit classification in the selected %s status",
+    async (targetStatus, label, navigationLabel) => {
+      const runtime = createDevelopmentRuntime(window.localStorage);
+      const author = await createProject(runtime, `${label}作者作品`);
+      const testWork = await createProject(runtime, `${label}测试作品`, "test_work");
+      const example = await createProject(runtime, `${label}示例作品`, "builtin_example");
+      const system = await createProject(runtime, `${label}系统样本`);
+      for (const project of [author, testWork, example, system]) {
+        const result =
+          targetStatus === "archived"
+            ? await runtime.useCases.archiveProject.execute({ projectId: project.id })
+            : await runtime.useCases.trashProject.execute({ projectId: project.id });
+        if (!result.ok) throw result.error;
+      }
+      rewriteStoredIdentity(system.id, "system_evaluation", "evaluation_project_id");
+      const user = userEvent.setup();
+
+      renderPage(createDevelopmentRuntime(window.localStorage));
+      await user.click(await screen.findByRole("button", { name: navigationLabel }));
+
+      const authorSection = await screen.findByRole("region", { name: "作者作品" });
+      const specialSection = screen.getByRole("region", { name: "测试与示例" });
+      expect(within(authorSection).getByText(author.name)).toBeVisible();
+      expect(within(specialSection).getByText(testWork.name)).toBeVisible();
+      expect(within(specialSection).getByText(example.name)).toBeVisible();
+      expect(screen.queryByText(system.name)).not.toBeInTheDocument();
+    },
+  );
 });
+
+interface MutableIdentityDatabase {
+  projectDisplayIdentities?: {
+    projectId: string;
+    displayKind: string;
+    provenance: string;
+    recordedAt: string;
+    revision: number;
+  }[];
+  projectDisplayIdentityRevisions?: {
+    projectId: string;
+    displayKind: string;
+    provenance: string;
+    recordedAt: string;
+    revision: number;
+    previousDisplayKind: string | null;
+  }[];
+}
+
+function readMutableDatabase(): MutableIdentityDatabase {
+  const serialized = window.localStorage.getItem(DEVELOPMENT_DATABASE_KEY);
+  if (serialized === null) throw new Error("开发数据库不存在。");
+  return JSON.parse(serialized) as MutableIdentityDatabase;
+}
+
+function writeMutableDatabase(database: MutableIdentityDatabase): void {
+  window.localStorage.setItem(DEVELOPMENT_DATABASE_KEY, JSON.stringify(database));
+}
+
+function removeStoredIdentity(projectId: string): void {
+  const database = readMutableDatabase();
+  if (database.projectDisplayIdentities !== undefined) {
+    database.projectDisplayIdentities = database.projectDisplayIdentities.filter(
+      (identity) => identity.projectId !== projectId,
+    );
+  }
+  if (database.projectDisplayIdentityRevisions !== undefined) {
+    database.projectDisplayIdentityRevisions = database.projectDisplayIdentityRevisions.filter(
+      (identity) => identity.projectId !== projectId,
+    );
+  }
+  writeMutableDatabase(database);
+}
+
+function rewriteStoredIdentity(
+  projectId: string,
+  displayKind: "system_evaluation",
+  provenance: "evaluation_project_id",
+): void {
+  const database = readMutableDatabase();
+  const identity = database.projectDisplayIdentities?.find((item) => item.projectId === projectId);
+  if (identity === undefined) throw new Error("项目分类记录不存在。");
+  identity.displayKind = displayKind;
+  identity.provenance = provenance;
+  const revision = database.projectDisplayIdentityRevisions?.find(
+    (item) => item.projectId === projectId,
+  );
+  if (revision !== undefined) {
+    revision.displayKind = displayKind;
+    revision.provenance = provenance;
+  }
+  writeMutableDatabase(database);
+}

@@ -87,15 +87,13 @@ if (!options.configOnly) {
 
 if (failures.length > 0) {
   process.stderr.write(
-    `Desktop release gate failed:\n${failures.map((failure) => `- ${failure}`).join("\n")}\n`,
+    `桌面发布门禁未通过：\n${failures.map((failure) => `- ${failure}`).join("\n")}\n`,
   );
   process.exitCode = 1;
 } else {
   const artifactMessage =
-    options.configOnly || options.dist === null ? "" : ` and ${relative(options.dist)}`;
-  process.stdout.write(
-    `Desktop release gate passed for production configuration${artifactMessage}.\n`,
-  );
+    options.configOnly || options.dist === null ? "" : `，并已核对 ${relative(options.dist)}`;
+  process.stdout.write(`桌面发布门禁已通过：正式配置${artifactMessage}。\n`);
 }
 
 function parseArguments(arguments_) {
@@ -281,8 +279,18 @@ async function checkConfiguration() {
     "post-package release provenance gate",
   );
   expectEqual(
+    rootManifest?.scripts?.["test:scripts"],
+    "node scripts/script-test-runner.mjs",
+    "script test gate",
+  );
+  expectEqual(
+    rootManifest?.scripts?.["check:desktop-release"],
+    "node scripts/check-desktop-release.mjs --config-only",
+    "desktop release configuration gate",
+  );
+  expectEqual(
     rootManifest?.scripts?.["release:check"],
-    "pnpm build && pnpm format:check && pnpm check:secrets && pnpm check:licenses && pnpm check:boundaries && pnpm check:desktop-release && pnpm typecheck && pnpm lint && pnpm test",
+    "pnpm build && pnpm format:check && pnpm check:secrets && pnpm check:licenses && pnpm check:boundaries && pnpm check:desktop-release && pnpm typecheck && pnpm lint && pnpm test:scripts && pnpm test",
     "clean-checkout release gate",
   );
   if (!/run:\s+pnpm test:e2e:release/u.test(ci)) {

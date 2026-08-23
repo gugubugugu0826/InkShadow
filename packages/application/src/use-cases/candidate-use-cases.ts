@@ -460,6 +460,39 @@ function validateStrategyAgainstIntent(
       });
 }
 
+export class RetainAiCandidate {
+  constructor(
+    private readonly candidates: AiCandidateRepository,
+    private readonly clock: Clock,
+  ) {}
+
+  async execute(command: CandidateCommand): Promise<Result<AiCandidate, AppError>> {
+    const candidate = await findCandidate(this.candidates, command.candidateId);
+    if (!candidate.ok) {
+      return candidate;
+    }
+
+    const authorityError = validateDisplayedCandidateRevision(
+      candidate.value,
+      command.expectedCandidateRevision,
+    );
+    if (authorityError !== null) {
+      return err(authorityError);
+    }
+
+    const retained = candidate.value.retain(this.clock.now());
+    if (!retained.ok) {
+      return retained;
+    }
+
+    const persisted = await this.candidates.save(retained.value, {
+      status: "ready",
+      revision: command.expectedCandidateRevision,
+    });
+    return persisted.ok ? retained : persisted;
+  }
+}
+
 export class RejectAiCandidate {
   constructor(
     private readonly candidates: AiCandidateRepository,

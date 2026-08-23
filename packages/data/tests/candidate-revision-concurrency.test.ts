@@ -18,7 +18,11 @@ import {
   type Result,
   type UuidV7,
 } from "@inkshadow/domain";
-import { AcceptAiCandidate, type AcceptCandidateCommit } from "@inkshadow/application";
+import {
+  AcceptAiCandidate,
+  RetainAiCandidate,
+  type AcceptCandidateCommit,
+} from "@inkshadow/application";
 import { parseUuidV7 as parseTaskUuidV7, type CreateTaskInput } from "@inkshadow/task-engine";
 import { describe, expect } from "vitest";
 
@@ -205,6 +209,72 @@ describe("SQLite Candidate revision authority", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  fileSqliteIt(
+    "persists an explicit keep across restart and rejects a stale competing decision",
+    async () => {
+      const directory = mkdtempSync(join(tmpdir(), "inkshadow-candidate-retain-"));
+      const databasePath = join(directory, "candidate.sqlite");
+      const first = new NodeSqliteExecutor(migration, databasePath);
+      let second: NodeSqliteExecutor | null = null;
+      let restarted: NodeSqliteExecutor | null = null;
+      let firstOpen = true;
+      try {
+        const fixture = await seedFixture(first);
+        second = new NodeSqliteExecutor("", databasePath);
+        const secondRepositories = createSqliteRepositories(second);
+        const staleView = expectPresent(
+          expectOk(await secondRepositories.aiCandidates.findById(CANDIDATE_ID)),
+        );
+
+        const retained = await new RetainAiCandidate(fixture.repositories.aiCandidates, {
+          now: () => LATER,
+        }).execute({
+          candidateId: CANDIDATE_ID,
+          expectedCandidateRevision: 1,
+        });
+
+        expect(retained.ok).toBe(true);
+        if (!retained.ok) throw retained.error;
+        expect(retained.value.toSnapshot()).toMatchObject({
+          status: "ready",
+          revision: 2,
+          content: fixture.candidate.content,
+          updatedAt: LATER,
+          decidedAt: null,
+        });
+
+        const staleRejected = expectOk(staleView.reject(LATER));
+        expectErrorCode(
+          await secondRepositories.aiCandidates.save(staleRejected, {
+            status: "ready",
+            revision: 1,
+          }),
+          "VERSION_CONFLICT",
+        );
+
+        await second.close();
+        second = null;
+        await first.close();
+        firstOpen = false;
+        restarted = new NodeSqliteExecutor("", databasePath);
+        const repositories = createSqliteRepositories(restarted);
+        const persisted = expectPresent(
+          expectOk(await repositories.aiCandidates.findById(CANDIDATE_ID)),
+        );
+        const chapter = expectPresent(expectOk(await repositories.chapters.findById(CHAPTER_ID)));
+        const versions = expectOk(await repositories.chapterVersions.listByChapterId(CHAPTER_ID));
+        expect(persisted.toSnapshot()).toEqual(retained.value.toSnapshot());
+        expect(chapter.toSnapshot()).toMatchObject({ content: "stable", revision: 1 });
+        expect(versions.map((version) => version.sequence)).toEqual([1]);
+      } finally {
+        await restarted?.close();
+        await second?.close();
+        if (firstOpen) await first.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   fileSqliteIt("rejects persisted Candidate content with a mismatched checksum", async () => {
     const directory = mkdtempSync(join(tmpdir(), "inkshadow-candidate-checksum-"));

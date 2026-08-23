@@ -12,7 +12,11 @@ import {
   type UuidV7Generator,
 } from "@inkshadow/domain";
 
-import type { ProjectListQuery, ProjectRepository } from "../ports/project-repository.js";
+import type {
+  ProjectDisplayKind,
+  ProjectListQuery,
+  ProjectRepository,
+} from "../ports/project-repository.js";
 import { findProject } from "./shared.js";
 
 const PROJECT_RETENTION_DAYS = 30;
@@ -20,6 +24,7 @@ const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1_000;
 
 export interface CreateProjectCommand {
   readonly name: string;
+  readonly displayKind?: Exclude<ProjectDisplayKind, "system_evaluation">;
   /**
    * A caller-owned idempotency key for crash-safe provisioning. When supplied,
    * retrying the same command recovers the exact project instead of allocating
@@ -81,7 +86,7 @@ export class CreateProject {
       return project;
     }
 
-    const persisted = await this.projects.create(project.value);
+    const persisted = await this.projects.create(project.value, command.displayKind);
     if (persisted.ok) {
       return ok(project.value);
     }

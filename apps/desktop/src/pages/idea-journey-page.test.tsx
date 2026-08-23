@@ -770,6 +770,29 @@ describe("one-sentence idea journey", () => {
     expect(seed?.seed.premise.values).toEqual([]);
   });
 
+  it("uses natural sequence names for repeated blank author works", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    const firstView = renderJourney(runtime);
+
+    await user.click(await screen.findByRole("button", { name: "不输入灵感，直接空白写作" }));
+    expect(await screen.findByText("已进入 AI 建议版本比较")).toBeVisible();
+    firstView.unmount();
+
+    renderJourney(runtime);
+    await user.click(await screen.findByRole("button", { name: "不输入灵感，直接空白写作" }));
+    expect(await screen.findByText("已进入 AI 建议版本比较")).toBeVisible();
+
+    const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
+    if (!projects.ok) throw projects.error;
+    expect(projects.value).toHaveLength(2);
+    expect(projects.value.map((project) => project.name).sort()).toEqual([
+      "未命名新故事",
+      "未命名新故事（2）",
+    ]);
+    expect(projects.value.every((project) => project.status === "active")).toBe(true);
+  });
+
   it("takes a synchronous lock so one commit-cycle double activation creates one blank workspace", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const createJourney = vi.spyOn(runtime.creativeJourneys, "create");

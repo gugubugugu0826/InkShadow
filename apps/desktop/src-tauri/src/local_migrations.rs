@@ -566,6 +566,13 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0076_direct_local_story_fact_author_revision.sql"
                 ),
             ),
+            migration(
+                80,
+                "persist content-free project display identities",
+                include_str!(
+                    "../../../../packages/data/migrations/0077_project_display_identities.sql"
+                ),
+            ),
         ]),
         ignore_missing: false,
         locking: true,
@@ -2202,11 +2209,31 @@ mod tests {
         .expect("version 79 direct-local author revision guards");
         assert_eq!(direct_revision_guards, 2);
 
+        let (display_identity_success, display_identity_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 80")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 80 project display identity migration receipt");
+        assert_eq!(display_identity_success, 1);
+        assert_eq!(display_identity_checksum.len(), 48);
+        let display_identity_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table'
+               AND name IN (
+                 'project_display_identities',
+                 'project_display_identity_revisions'
+               )",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 80 project display identity tables");
+        assert_eq!(display_identity_tables, 2);
+
         let maximum_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
             .fetch_one(&mut connection)
             .await
             .expect("maximum migration version");
-        assert_eq!(maximum_version, 79);
+        assert_eq!(maximum_version, 80);
         let forbidden_columns: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)
              FROM pragma_table_info('novel_skill_evaluation_predispatch_authority_snapshots')

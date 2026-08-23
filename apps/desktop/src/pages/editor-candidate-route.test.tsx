@@ -1685,6 +1685,125 @@ describe("editor candidate route selection", () => {
     expect(screen.queryByText("不应替代指定候选的其他正文")).not.toBeInTheDocument();
   });
 
+  it("keeps every prose result reachable from chapter history without touching正文 or versions", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime);
+    const older = await createReadyCandidate(runtime, project, chapter, "较早的隔离结果");
+    const newest = await createReadyCandidate(runtime, project, chapter, "较新的隔离结果");
+    await createReadyCandidate(runtime, project, chapter, "只用于选择方向，不进入正文历史", {
+      purpose: "continuation_directions",
+    });
+    const chapterBefore = await runtime.repositories.chapters.findById(chapter.id);
+    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!chapterBefore.ok || !versionsBefore.ok) throw new Error("failed to read stable baseline");
+    const user = userEvent.setup();
+
+    renderEditor(runtime, project, chapter, `?candidate=${older.id}`);
+
+    expect(await screen.findByText("历史生成结果（2）")).toBeVisible();
+    await user.click(screen.getByText("历史生成结果（2）"));
+    expect(screen.queryByText("只用于选择方向，不进入正文历史")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看第 1 条生成结果" }));
+    expect(
+      await screen.findByText("已打开这份隔离结果；只有你明确使用，才会写入正文。"),
+    ).toBeVisible();
+    expect(screen.getAllByText(newest.content).length).toBeGreaterThan(0);
+
+    const chapterAfterView = await runtime.repositories.chapters.findById(chapter.id);
+    const versionsAfterView = await runtime.repositories.chapterVersions.listByChapterId(
+      chapter.id,
+    );
+    expect(chapterAfterView).toEqual(chapterBefore);
+    expect(versionsAfterView).toEqual(versionsBefore);
+
+    await user.click(screen.getByRole("button", { name: "放弃第 2 条生成结果" }));
+    await waitFor(async () => {
+      const persisted = await runtime.repositories.aiCandidates.findById(older.id);
+      expect(persisted.ok && persisted.value?.status).toBe("rejected");
+    });
+    const chapterAfterReject = await runtime.repositories.chapters.findById(chapter.id);
+    const versionsAfterReject = await runtime.repositories.chapterVersions.listByChapterId(
+      chapter.id,
+    );
+    expect(chapterAfterReject).toEqual(chapterBefore);
+    expect(versionsAfterReject).toEqual(versionsBefore);
+  });
+
+  it.each([
+    ["accepted", "已接受"],
+    ["rejected", "已放弃"],
+    ["expired", "已失效"],
+  ] as const)("opens a complete %s historical result as read-only", async (status, statusLabel) => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime);
+    const completeEnding = `【${statusLabel}结果的完整结尾】`;
+    const completeContent = `${"终态历史正文".repeat(700)}${completeEnding}`;
+    const ready = await createReadyCandidate(runtime, project, chapter, completeContent);
+    const terminal =
+      status === "accepted"
+        ? ready.accept(runtime.clock.now())
+        : status === "rejected"
+          ? ready.reject(runtime.clock.now())
+          : ready.expire(runtime.clock.now());
+    if (!terminal.ok) throw terminal.error;
+    const saved = await runtime.repositories.aiCandidates.save(terminal.value, {
+      status: "ready",
+      revision: ready.revision,
+    });
+    if (!saved.ok) throw saved.error;
+    const chapterBefore = await runtime.repositories.chapters.findById(chapter.id);
+    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!chapterBefore.ok || !versionsBefore.ok) throw new Error("failed to read stable baseline");
+    const user = userEvent.setup();
+
+    renderEditor(runtime, project, chapter);
+
+    await user.click(await screen.findByText("历史生成结果（1）"));
+    await user.click(screen.getByRole("button", { name: "查看第 1 条生成结果" }));
+
+    expect((await screen.findAllByText(statusLabel)).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("完整历史生成结果")).toHaveTextContent(completeEnding);
+    expect(screen.queryByText(/面板仅显示前 4,000 个字符/u)).not.toBeInTheDocument();
+    expect(screen.queryByText(/不存在或不属于当前项目/u)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "使用这版" })).not.toBeInTheDocument();
+
+    const chapterAfter = await runtime.repositories.chapters.findById(chapter.id);
+    const versionsAfter = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    expect(chapterAfter).toEqual(chapterBefore);
+    expect(versionsAfter).toEqual(versionsBefore);
+  });
+
+  it("keeps a long ready result bounded behind the existing author decision flow", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime);
+    const completeEnding = "【等待决定结果的完整结尾】";
+    const ready = await createReadyCandidate(
+      runtime,
+      project,
+      chapter,
+      `${"等待决定正文".repeat(700)}${completeEnding}`,
+    );
+    const chapterBefore = await runtime.repositories.chapters.findById(chapter.id);
+    const versionsBefore = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    if (!chapterBefore.ok || !versionsBefore.ok) throw new Error("failed to read stable baseline");
+
+    renderEditor(runtime, project, chapter, `?candidate=${ready.id}`);
+
+    const preview = await screen.findByLabelText("当前生成结果预览");
+    expect(preview).toHaveTextContent(/预览已截断，完整内容仍保留/u);
+    expect(preview).not.toHaveTextContent(completeEnding);
+    expect(screen.getByText(/面板仅显示前 4,000 个字符/u)).toBeVisible();
+    expect(screen.getByRole("button", { name: /查看并使用|比较.*建议/u })).toBeVisible();
+    expect(screen.getByRole("button", { name: "放弃" })).toBeVisible();
+
+    const chapterAfter = await runtime.repositories.chapters.findById(chapter.id);
+    const versionsAfter = await runtime.repositories.chapterVersions.listByChapterId(chapter.id);
+    expect(chapterAfter).toEqual(chapterBefore);
+    expect(versionsAfter).toEqual(versionsBefore);
+  });
   it("keeps a locally generated opening labeled as a local draft after entering the editor", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const { chapter, project } = await seedChapter(runtime);
@@ -1979,7 +2098,7 @@ describe("editor candidate route selection", () => {
 
     expect(
       await screen.findByText(
-        "链接指定的 AI 建议不存在、已处理，或不属于当前项目与章节；未自动打开其他建议。",
+        "链接指定的生成结果不存在或不属于当前项目与章节；未自动打开其他结果。",
       ),
     ).toBeVisible();
     expect(screen.queryByText("当前章节默认候选")).not.toBeInTheDocument();
@@ -2013,7 +2132,7 @@ describe("editor candidate route selection", () => {
 
     expect(
       await screen.findByText(
-        "链接指定的 AI 建议不存在、已处理，或不属于当前项目与章节；未自动打开其他建议。",
+        "链接指定的生成结果不存在或不属于当前项目与章节；未自动打开其他结果。",
       ),
     ).toBeVisible();
     await userEvent.setup().click(screen.getByText("高级工具"));

@@ -247,6 +247,25 @@ describe("content entities", () => {
     });
   });
 
+  it("lets the author explicitly keep an older ready Candidate without deciding or deleting it", () => {
+    const original = readyCandidate();
+    const retainedAt = timestamp("2026-08-26T00:00:00.000Z");
+
+    const retained = original.retain(retainedAt);
+
+    expect(retained.ok).toBe(true);
+    if (!retained.ok) return;
+    expect(retained.value.toSnapshot()).toMatchObject({
+      status: "ready",
+      revision: 2,
+      content: original.content,
+      contentChecksum: original.contentChecksum,
+      updatedAt: retainedAt,
+      decidedAt: null,
+    });
+    expect(original.revision).toBe(1);
+  });
+
   it("keeps continuation directions isolated and impossible to accept", () => {
     const streaming = AiCandidate.createStreaming({
       id: CANDIDATE_ID,

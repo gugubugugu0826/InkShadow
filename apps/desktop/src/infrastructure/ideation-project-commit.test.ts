@@ -27,11 +27,40 @@ import { afterEach, describe, expect, it } from "vitest";
 import { NodeSqliteExecutor } from "../../../../packages/data/tests/node-sqlite-executor.js";
 import { SqliteIdeationProjectCommitUnitOfWork } from "./ideation-project-commit";
 
-const migration = [
+const projectDisplayIdentityTestSchema = `
+CREATE TABLE project_display_identities (
+  project_id TEXT PRIMARY KEY NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  display_kind TEXT NOT NULL,
+  provenance TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE project_display_identity_revisions (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL,
+  previous_display_kind TEXT,
+  display_kind TEXT NOT NULL,
+  provenance TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, revision)
+);
+CREATE TRIGGER project_display_identity_revision_insert
+AFTER INSERT ON project_display_identities
+BEGIN
+  INSERT INTO project_display_identity_revisions (
+    project_id, revision, previous_display_kind, display_kind, provenance, recorded_at
+  ) VALUES (
+    NEW.project_id, NEW.revision, NULL, NEW.display_kind, NEW.provenance, NEW.updated_at
+  );
+END;`;
+
+const legacyMigration = [
   readWorkspaceFile("packages", "data", "migrations", "0001_core.sql"),
   readWorkspaceFile("packages", "story-core", "migrations", "0001_story_core.sql"),
   readWorkspaceFile("packages", "story-core", "migrations", "0003_ideation.sql"),
 ].join("\n");
+const migration = [legacyMigration, projectDisplayIdentityTestSchema].join("\n");
 
 const NOW = (() => {
   const parsed = parseIsoUtcTimestamp("2026-07-27T00:00:00.000Z");
@@ -68,6 +97,44 @@ describe("SqliteIdeationProjectCommitUnitOfWork", () => {
     expect(result).toEqual({ ok: true, value: undefined });
     await expect(executor.select<{ name: string }>("SELECT name FROM projects")).resolves.toEqual([
       { name: "雾港来信" },
+    ]);
+    await expect(
+      executor.select<{
+        projectId: string;
+        displayKind: string;
+        provenance: string;
+        revision: number;
+      }>(
+        `SELECT project_id AS projectId, display_kind AS displayKind,
+                provenance, revision
+         FROM project_display_identities`,
+      ),
+    ).resolves.toEqual([
+      {
+        projectId: prepared.input.projectId,
+        displayKind: "author_work",
+        provenance: "explicit_creation",
+        revision: 1,
+      },
+    ]);
+    await expect(
+      executor.select<{
+        projectId: string;
+        previousDisplayKind: string | null;
+        displayKind: string;
+        revision: number;
+      }>(
+        `SELECT project_id AS projectId, previous_display_kind AS previousDisplayKind,
+                display_kind AS displayKind, revision
+         FROM project_display_identity_revisions`,
+      ),
+    ).resolves.toEqual([
+      {
+        projectId: prepared.input.projectId,
+        previousDisplayKind: null,
+        displayKind: "author_work",
+        revision: 1,
+      },
     ]);
     await expect(
       executor.select<{ title: string; content: string }>("SELECT title, content FROM chapters"),
@@ -168,10 +235,43 @@ describe("SqliteIdeationProjectCommitUnitOfWork", () => {
       executor.select<{ count: number }>("SELECT count(*) AS count FROM projects"),
     ).resolves.toEqual([{ count: 0 }]);
   });
+
+  it("fails closed and rolls the project back when only part of the identity schema exists", async () => {
+    const executor = createExecutor();
+    await executor.execute("DROP TRIGGER project_display_identity_revision_insert");
+    await executor.execute("DROP TABLE project_display_identity_revisions");
+    const prepared = await prepareDraft(executor, 40, 700);
+
+    await expect(createCommitter(executor, 800).commit(prepared.input)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "STORY_REPOSITORY_ERROR" },
+    });
+    await expect(
+      executor.select<{ count: number }>("SELECT count(*) AS count FROM projects"),
+    ).resolves.toEqual([{ count: 0 }]);
+    await expect(
+      executor.select<{ count: number }>(
+        "SELECT count(*) AS count FROM project_display_identities",
+      ),
+    ).resolves.toEqual([{ count: 0 }]);
+  });
+
+  it("keeps pre-identity simplified schemas usable when both identity tables are absent", async () => {
+    const executor = createExecutor(legacyMigration);
+    const prepared = await prepareDraft(executor, 50, 900);
+
+    await expect(createCommitter(executor, 1_000).commit(prepared.input)).resolves.toEqual({
+      ok: true,
+      value: undefined,
+    });
+    await expect(
+      executor.select<{ count: number }>("SELECT count(*) AS count FROM projects"),
+    ).resolves.toEqual([{ count: 1 }]);
+  });
 });
 
-function createExecutor(): NodeSqliteExecutor {
-  const executor = new NodeSqliteExecutor(migration);
+function createExecutor(schema = migration): NodeSqliteExecutor {
+  const executor = new NodeSqliteExecutor(schema);
   executors.push(executor);
   return executor;
 }

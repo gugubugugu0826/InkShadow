@@ -18,6 +18,7 @@ import {
   CreateChapter,
   EditChapter,
   RejectAiCandidate,
+  RetainAiCandidate,
   ReviseAiCandidate,
   SaveChapter,
   diffCandidateContent,
@@ -474,6 +475,32 @@ describe("candidate application persistence", () => {
       status: "rejected",
       content: "被拒绝的建议",
       contentChecksum: original.toSnapshot().contentChecksum,
+    });
+    const chapter = await store.findById(CHAPTER_ID);
+    expect(chapter.ok && chapter.value?.content).toBe(baseline);
+    const versions = await store.listByChapterId(CHAPTER_ID);
+    expect(versions.ok && versions.value).toHaveLength(1);
+  });
+
+  it("persists an explicit keep decision without changing正文 or making the Candidate terminal", async () => {
+    const baseline = "正式正文";
+    const { candidates, store } = await stableContentStore(baseline);
+    const original = readyCandidate("继续保留的建议");
+    candidates.seed(original);
+
+    const retained = await new RetainAiCandidate(candidates, new FixedClock()).execute({
+      candidateId: CANDIDATE_ID,
+      expectedCandidateRevision: 1,
+    });
+
+    expect(retained.ok).toBe(true);
+    const persisted = await candidates.findById(CANDIDATE_ID);
+    expect(persisted.ok && persisted.value?.toSnapshot()).toMatchObject({
+      status: "ready",
+      revision: 2,
+      content: "继续保留的建议",
+      contentChecksum: original.contentChecksum,
+      decidedAt: null,
     });
     const chapter = await store.findById(CHAPTER_ID);
     expect(chapter.ok && chapter.value?.content).toBe(baseline);

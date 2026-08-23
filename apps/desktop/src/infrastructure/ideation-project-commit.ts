@@ -21,6 +21,8 @@ import {
   type Result as StoryResult,
 } from "@inkshadow/story-core";
 
+import { insertExplicitAuthorIdentityIfAvailable } from "./direct-project-display-identity";
+
 interface IdeationDraftRow {
   readonly revision: number;
   readonly status: string;
@@ -71,6 +73,12 @@ export class SqliteIdeationProjectCommitUnitOfWork implements IdeationProjectCom
         }
         await assertProjectNameAvailable(transaction, artifacts.value.project.name);
         await insertProject(transaction, artifacts.value.project);
+        const projectSnapshot = artifacts.value.project.toSnapshot();
+        await insertExplicitAuthorIdentityIfAvailable(
+          transaction,
+          projectSnapshot.id,
+          projectSnapshot.createdAt,
+        );
         await insertChapter(transaction, artifacts.value.chapter);
         await insertChapterVersion(transaction, artifacts.value.version);
         await insertOutline(transaction, artifacts.value.outline);

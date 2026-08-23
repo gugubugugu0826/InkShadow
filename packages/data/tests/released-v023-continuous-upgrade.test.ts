@@ -9,7 +9,7 @@ const STORY_MIGRATION_DIRECTORY = new URL("../../story-core/migrations/", import
 const V023_SCHEMA_HEAD = "0064_novel_skill_evaluation_predispatch_authority.sql";
 
 describe("released v0.2.3 continuous database upgrade", () => {
-  it("applies every forward migration through 0076 without changing authoritative content", () => {
+  it("applies every forward migration through 0077 without changing authoritative content", () => {
     const dataMigrationNames = readdirSync(MIGRATION_DIRECTORY)
       .filter((name) => /^\d{4}_.+\.sql$/u.test(name))
       .sort();
@@ -24,7 +24,7 @@ describe("released v0.2.3 continuous database upgrade", () => {
     ];
     const v023HeadIndex = migrations.findIndex(({ name }) => name === V023_SCHEMA_HEAD);
     expect(v023HeadIndex).toBeGreaterThanOrEqual(0);
-    expect(migrations.at(-1)?.name).toBe("0076_direct_local_story_fact_author_revision.sql");
+    expect(migrations.at(-1)?.name).toBe("0077_project_display_identities.sql");
 
     const database = new DatabaseSync(":memory:");
     for (const migration of migrations.slice(0, v023HeadIndex + 1)) {

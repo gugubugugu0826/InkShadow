@@ -23,6 +23,7 @@ import {
   type DevelopmentLocalAuditEventSnapshot,
   readDevelopmentDatabase,
 } from "./development-storage";
+import { appendExplicitAuthorIdentityToDevelopmentDatabase } from "./direct-project-display-identity";
 import {
   buildIdeationProjectArtifacts,
   projectSeedsEqual,
@@ -76,7 +77,9 @@ export class BrowserDevelopmentIdeationProjectCommitUnitOfWork implements Ideati
       assertProjectNameAvailable(development.projects, artifacts.value.project.name);
       assertArtifactIdsAvailable(development, story, artifacts.value);
 
-      development.projects.push(artifacts.value.project.toSnapshot());
+      const project = artifacts.value.project.toSnapshot();
+      development.projects.push(project);
+      appendExplicitAuthorIdentityToDevelopmentDatabase(development, project.id, project.createdAt);
       development.chapters.push(artifacts.value.chapter.toSnapshot());
       development.versions.push(artifacts.value.version.toSnapshot());
       development.auditEvents.push(createAuditEvent(artifacts.value.audit));

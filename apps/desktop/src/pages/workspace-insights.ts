@@ -1,3 +1,5 @@
+import type { AiCandidate } from "@inkshadow/domain";
+
 export interface WorkspaceInsights {
   readonly todayNetCharacters: number;
   readonly currentStreakDays: number;
@@ -8,6 +10,14 @@ export interface WorkspaceVersionMetric {
   readonly chapterId: string;
   readonly contentLength: number;
   readonly createdAt: string;
+}
+
+export function countReadyProseCandidates(
+  candidates: readonly Pick<AiCandidate, "purpose" | "status">[],
+): number {
+  return candidates.filter(
+    (candidate) => candidate.purpose === "prose" && candidate.status === "ready",
+  ).length;
 }
 
 export function calculateWorkspaceInsights(

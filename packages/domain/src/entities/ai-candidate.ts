@@ -451,6 +451,36 @@ export class AiCandidate {
     return this.decide("rejected", now);
   }
 
+  retain(now: IsoUtcTimestamp): Result<AiCandidate, AppError> {
+    if (this.snapshot.status !== "ready") {
+      const code =
+        this.snapshot.status === "accepted" ||
+        this.snapshot.status === "rejected" ||
+        this.snapshot.status === "expired"
+          ? "CANDIDATE_ALREADY_DECIDED"
+          : "CANDIDATE_NOT_READY";
+      return err(
+        new AppError({
+          code,
+          message: "Only a ready, undecided candidate can be retained.",
+          details: { status: this.snapshot.status },
+        }),
+      );
+    }
+    const nextRevision = this.nextRevision();
+    if (!nextRevision.ok) {
+      return nextRevision;
+    }
+
+    return ok(
+      new AiCandidate({
+        ...this.snapshot,
+        revision: nextRevision.value,
+        updatedAt: now,
+      }),
+    );
+  }
+
   expire(now: IsoUtcTimestamp): Result<AiCandidate, AppError> {
     return this.decide("expired", now);
   }

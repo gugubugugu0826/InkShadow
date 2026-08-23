@@ -24,6 +24,7 @@ import {
   type PreparedIncomingContentMutation,
   type PreparedProjectManifestUpsert,
 } from "./incoming-content-decryptor.js";
+import { insertExplicitAuthorIdentityIfAvailable } from "./direct-project-display-identity.js";
 
 export type ContentSyncMaterializationSkipReason =
   | "duplicate"
@@ -205,6 +206,11 @@ export class ContentSyncMaterializer {
     if (current === null) {
       if (local === null) {
         await insertProject(transaction, prepared.payload.project);
+        await insertExplicitAuthorIdentityIfAvailable(
+          transaction,
+          prepared.projectId,
+          prepared.payload.project.createdAt,
+        );
         return appliedOutcome(prepared, await this.writeMarker(transaction, prepared, exact, now));
       }
       if (businessMatches) {

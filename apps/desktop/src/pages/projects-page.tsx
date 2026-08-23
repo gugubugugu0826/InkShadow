@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ProjectDisplayIdentity } from "@inkshadow/application";
 import { parseUuidV7, type Project, type ProjectStatus } from "@inkshadow/domain";
 import {
   Badge,
@@ -79,6 +80,11 @@ export function ProjectsPage() {
     "loading",
   );
   const [loadError, setLoadError] = useState<unknown>(null);
+  const [identityByProjectId, setIdentityByProjectId] = useState<
+    ReadonlyMap<string, ProjectDisplayIdentity>
+  >(new Map());
+  const [identityReadFailureCount, setIdentityReadFailureCount] = useState(0);
+  const [identityWriteWarning, setIdentityWriteWarning] = useState<string | null>(null);
   const [activeIdeaJourneys, setActiveIdeaJourneys] = useState<readonly CreativeJourneyRecord[]>(
     [],
   );
@@ -118,11 +124,49 @@ export function ProjectsPage() {
       setPageState("fatal_error");
       return;
     }
-    setProjects(result.value);
-    setAllProjects(libraryResult.value);
+    const identityEntries = await Promise.all(
+      libraryResult.value.map(async (project) => {
+        try {
+          const identityResult =
+            await runtime.repositories.projectDisplayIdentities.resolveByProjectId(project.id);
+          if (identityResult.ok && identityResult.value !== null) {
+            return { project, identity: identityResult.value, failed: false } as const;
+          }
+        } catch {
+          // A damaged optional classification must not block authoritative project content.
+        }
+        return {
+          project,
+          identity: legacyAuthorIdentity(project),
+          failed: true,
+        } as const;
+      }),
+    );
+    if (requestId !== loadRequestRef.current) {
+      return;
+    }
+    const identities = new Map<string, ProjectDisplayIdentity>();
+    let failedIdentityReads = 0;
+    for (const entry of identityEntries) {
+      identities.set(entry.project.id, entry.identity);
+      if (entry.failed) failedIdentityReads += 1;
+    }
+    const visibleProjectIds = new Set(
+      identityEntries
+        .filter(({ identity }) => identity.displayKind !== "system_evaluation")
+        .map(({ project }) => project.id),
+    );
+    const visibleProjects = result.value.filter((project) => visibleProjectIds.has(project.id));
+    const visibleLibrary = libraryResult.value.filter((project) =>
+      visibleProjectIds.has(project.id),
+    );
+    setIdentityByProjectId(identities);
+    setIdentityReadFailureCount(failedIdentityReads);
+    setProjects(visibleProjects);
+    setAllProjects(visibleLibrary);
     setImportJourney(readImportJourneyProjection());
     setLoadError(null);
-    setPageState(result.value.length === 0 ? "empty" : "ready");
+    setPageState(visibleProjects.length === 0 ? "empty" : "ready");
   }, [runtime, search, status]);
 
   const loadActiveIdeaJourneys = useCallback(async () => {
@@ -266,10 +310,60 @@ export function ProjectsPage() {
     await loadProjects();
   }
 
+  async function changeProjectClassification(
+    project: Project,
+    displayKind: "author_work" | "test_work",
+  ): Promise<void> {
+    setPendingProjectId(project.id);
+    setIdentityWriteWarning(null);
+    try {
+      const result =
+        displayKind === "author_work"
+          ? await runtime.repositories.projectDisplayIdentities.recordAuthorWork(
+              project.id,
+              runtime.clock.now(),
+            )
+          : await runtime.repositories.projectDisplayIdentities.recordTestWork(
+              project.id,
+              runtime.clock.now(),
+            );
+      if (!result.ok || result.value.displayKind !== displayKind) {
+        setIdentityWriteWarning(
+          `《${project.name}》的分类没有更改。项目和正文未受影响，你可以稍后再试。`,
+        );
+        return;
+      }
+      toast({
+        title: displayKind === "author_work" ? "已移回作者作品" : "已标记为测试作品",
+        description:
+          displayKind === "author_work"
+            ? "作品已回到普通作品列表。"
+            : "作品已移到“测试与示例”区域，正文没有改变。",
+        tone: "success",
+      });
+      await loadProjects();
+    } catch {
+      setIdentityWriteWarning(
+        `《${project.name}》的分类没有更改。项目和正文未受影响，你可以稍后再试。`,
+      );
+    } finally {
+      setPendingProjectId(null);
+    }
+  }
+
   const normalizedLoadError = loadError === null ? null : projectOrdinaryUiError(loadError);
   const normalizedSearch = search.trim();
   const hasSearch = normalizedSearch.length > 0;
-  const completelyEmpty = allProjects.length === 0;
+  const authorProjects = projects.filter(
+    (project) => identityByProjectId.get(project.id)?.displayKind === "author_work",
+  );
+  const specialProjects = projects.filter((project) => {
+    const displayKind = identityByProjectId.get(project.id)?.displayKind;
+    return displayKind === "test_work" || displayKind === "builtin_example";
+  });
+  const completelyEmpty = !allProjects.some(
+    (project) => identityByProjectId.get(project.id)?.displayKind === "author_work",
+  );
   const hasArchivedProjects = allProjects.some((project) => project.status === "archived");
   const hasTrashedProjects = allProjects.some((project) => project.status === "trashed");
   const { activeIdeaJourneyByProjectId, conflictedIdeaJourneyProjectCount } = useMemo(() => {
@@ -351,6 +445,27 @@ export function ProjectsPage() {
           title="未完成创作读取失败"
           description={journeyLoadError}
           action={{ label: "重试", onClick: () => void loadActiveIdeaJourneys() }}
+        />
+      )}
+
+      {identityReadFailureCount > 0 && (
+        <InlineAlert
+          tone="warning"
+          title="部分作品分类暂时无法读取"
+          description={
+            String(identityReadFailureCount) +
+            " 个作品暂按作者作品显示；项目和正文仍可正常打开。墨影不会根据名称或正文猜测分类。"
+          }
+          action={{ label: "重新读取分类", onClick: () => void loadProjects() }}
+        />
+      )}
+
+      {identityWriteWarning !== null && (
+        <InlineAlert
+          tone="warning"
+          title="作品分类尚未更改"
+          description={identityWriteWarning}
+          action={{ label: "知道了", onClick: () => setIdentityWriteWarning(null) }}
         />
       )}
 
@@ -469,123 +584,97 @@ export function ProjectsPage() {
                       ),
                   }}
                 >
-                  <div className="project-grid">
-                    {projects.map((project) => {
-                      const snapshot = project.toSnapshot();
-                      const pending = pendingProjectId === project.id;
-                      const activeIdeaJourney =
-                        activeIdeaJourneyByProjectId.get(project.id) ?? null;
-                      return (
-                        <Card key={project.id}>
-                          <CardHeader>
-                            <div className="card-heading-row">
-                              <CardTitle headingLevel={2}>{project.name}</CardTitle>
-                              <Badge
-                                tone={
-                                  project.status === "active"
-                                    ? "success"
-                                    : project.status === "trashed"
-                                      ? "danger"
-                                      : "neutral"
-                                }
-                              >
-                                {statusLabels[project.status]}
-                              </Badge>
-                            </div>
-                          </CardHeader>
-                          <CardContent>
-                            <p className="project-meta">
-                              更新于{" "}
-                              <time dateTime={snapshot.updatedAt}>
-                                {formatDate(snapshot.updatedAt)}
-                              </time>
-                            </p>
-                            {project.retentionUntil !== null && (
-                              <p className="project-retention">
-                                可恢复至{" "}
-                                <time dateTime={project.retentionUntil}>
-                                  {formatDate(project.retentionUntil)}
-                                </time>
-                              </p>
-                            )}
-                            {project.status === "active" && activeIdeaJourney !== null && (
-                              <div className="project-library-page__unfinished-creation">
-                                <Badge tone="warning">未完成创作</Badge>
-                                <p>
-                                  已创建空白作品并保留原始创作过程；继续后仍由你决定使用或放弃结果。
-                                </p>
-                                <p>完成或结束这次创作后即可重命名作品。</p>
-                                <Link
-                                  className="button-link"
-                                  to={`/create/idea?journey=${activeIdeaJourney.id}`}
-                                >
-                                  继续未完成创作
-                                </Link>
-                              </div>
-                            )}
-                          </CardContent>
-                          <CardFooter>
-                            {project.status !== "trashed" && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                disabled={pending || activeIdeaJourney !== null}
-                                onClick={() => openRenameDialog(project)}
-                              >
-                                重命名
-                              </Button>
-                            )}
-                            {project.status !== "trashed" && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                loading={pending}
-                                onClick={() =>
-                                  directMode
-                                    ? void runLifecycleAction(project, "trash")
-                                    : setTrashTarget(project)
-                                }
-                              >
-                                移到回收站
-                              </Button>
-                            )}
-                            {project.status === "active" && (
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                loading={pending}
-                                onClick={() => void runLifecycleAction(project, "archive")}
-                              >
-                                归档
-                              </Button>
-                            )}
-                            {project.status === "archived" && (
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                loading={pending}
-                                onClick={() => void runLifecycleAction(project, "unarchive")}
-                              >
-                                恢复编辑
-                              </Button>
-                            )}
-                            {project.status === "trashed" ? (
-                              <Button
-                                size="sm"
-                                loading={pending}
-                                onClick={() => void runLifecycleAction(project, "restore")}
-                              >
-                                恢复
-                              </Button>
-                            ) : (
-                              <Link className="button-link" to={`/projects/${project.id}`}>
-                                打开
-                              </Link>
-                            )}
-                          </CardFooter>
-                        </Card>
-                      );
-                    })}
+                  <div className="project-library-page__collections">
+                    {authorProjects.length > 0 ? (
+                      <section
+                        className="project-library-page__collection"
+                        aria-labelledby={`author-projects-heading-${tabStatus}`}
+                      >
+                        <div className="project-library-page__collection-heading">
+                          <div>
+                            <h2 id={`author-projects-heading-${tabStatus}`}>作者作品</h2>
+                            <p>这里是你的普通创作，不会按作品名称或正文自动改成测试作品。</p>
+                          </div>
+                        </div>
+                        <div className="project-grid">
+                          {authorProjects.map((project) => (
+                            <ProjectLibraryCard
+                              key={project.id}
+                              project={project}
+                              identity={
+                                identityByProjectId.get(project.id) ?? legacyAuthorIdentity(project)
+                              }
+                              activeIdeaJourney={
+                                activeIdeaJourneyByProjectId.get(project.id) ?? null
+                              }
+                              pending={pendingProjectId === project.id}
+                              onRename={openRenameDialog}
+                              onTrash={(target) =>
+                                directMode
+                                  ? void runLifecycleAction(target, "trash")
+                                  : setTrashTarget(target)
+                              }
+                              onLifecycle={(target, action) =>
+                                void runLifecycleAction(target, action)
+                              }
+                              onClassification={(target, kind) =>
+                                void changeProjectClassification(target, kind)
+                              }
+                            />
+                          ))}
+                        </div>
+                      </section>
+                    ) : specialProjects.length > 0 &&
+                      tabStatus === "active" &&
+                      !hasSearch &&
+                      completelyEmpty ? (
+                      <FirstLaunchState
+                        titleId={`first-launch-with-special-title-${tabStatus}`}
+                        directMode={directMode}
+                      />
+                    ) : null}
+
+                    {specialProjects.length > 0 && (
+                      <section
+                        className="project-library-page__collection project-library-page__collection--special"
+                        aria-labelledby={`special-projects-heading-${tabStatus}`}
+                      >
+                        <div className="project-library-page__collection-heading">
+                          <div>
+                            <p className="project-library-page__section-label">单独收纳</p>
+                            <h2 id={`special-projects-heading-${tabStatus}`}>测试与示例</h2>
+                            <p>测试作品和内置示例不会混入你的普通创作。</p>
+                          </div>
+                        </div>
+                        <div className="project-grid">
+                          {specialProjects.map((project) => (
+                            <ProjectLibraryCard
+                              key={project.id}
+                              project={project}
+                              identity={
+                                identityByProjectId.get(project.id) ?? legacyAuthorIdentity(project)
+                              }
+                              activeIdeaJourney={
+                                activeIdeaJourneyByProjectId.get(project.id) ?? null
+                              }
+                              pending={pendingProjectId === project.id}
+                              onRename={openRenameDialog}
+                              onTrash={(target) =>
+                                directMode
+                                  ? void runLifecycleAction(target, "trash")
+                                  : setTrashTarget(target)
+                              }
+                              onLifecycle={(target, action) =>
+                                void runLifecycleAction(target, action)
+                              }
+                              onClassification={(target, kind) =>
+                                void changeProjectClassification(target, kind)
+                              }
+                            />
+                          ))}
+                        </div>
+                      </section>
+                    )}
                   </div>
                 </PageStateBoundary>
               </>
@@ -726,6 +815,177 @@ export function ProjectsPage() {
       </Dialog>
     </div>
   );
+}
+
+interface ProjectLibraryCardProps {
+  readonly project: Project;
+  readonly identity: ProjectDisplayIdentity;
+  readonly activeIdeaJourney: CreativeJourneyRecord | null;
+  readonly pending: boolean;
+  readonly onRename: (project: Project) => void;
+  readonly onTrash: (project: Project) => void;
+  readonly onLifecycle: (project: Project, action: "archive" | "unarchive" | "restore") => void;
+  readonly onClassification: (project: Project, displayKind: "author_work" | "test_work") => void;
+}
+
+function ProjectLibraryCard({
+  project,
+  identity,
+  activeIdeaJourney,
+  pending,
+  onRename,
+  onTrash,
+  onLifecycle,
+  onClassification,
+}: ProjectLibraryCardProps) {
+  if (identity.displayKind === "system_evaluation") return null;
+  const snapshot = project.toSnapshot();
+  const classificationLabel =
+    identity.displayKind === "test_work"
+      ? "测试作品"
+      : identity.displayKind === "builtin_example"
+        ? "示例作品"
+        : identity.provenance === "legacy_unknown"
+          ? "分类待确认"
+          : null;
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="card-heading-row">
+          <CardTitle headingLevel={2}>{project.name}</CardTitle>
+          <div className="project-library-page__card-badges">
+            {classificationLabel !== null && (
+              <Badge
+                tone={
+                  identity.displayKind === "test_work"
+                    ? "warning"
+                    : identity.provenance === "legacy_unknown"
+                      ? "warning"
+                      : "neutral"
+                }
+              >
+                {classificationLabel}
+              </Badge>
+            )}
+            <Badge
+              tone={
+                project.status === "active"
+                  ? "success"
+                  : project.status === "trashed"
+                    ? "danger"
+                    : "neutral"
+              }
+            >
+              {statusLabels[project.status]}
+            </Badge>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <p className="project-meta">
+          更新于 <time dateTime={snapshot.updatedAt}>{formatDate(snapshot.updatedAt)}</time>
+        </p>
+        {project.retentionUntil !== null && (
+          <p className="project-retention">
+            可恢复至{" "}
+            <time dateTime={project.retentionUntil}>{formatDate(project.retentionUntil)}</time>
+          </p>
+        )}
+        {project.status === "active" && activeIdeaJourney !== null && (
+          <div className="project-library-page__unfinished-creation">
+            <Badge tone="warning">未完成创作</Badge>
+            <p>已创建空白作品并保留原始创作过程；继续后仍由你决定使用或放弃结果。</p>
+            <p>完成或结束这次创作后即可重命名作品。</p>
+            <Link className="button-link" to={`/create/idea?journey=${activeIdeaJourney.id}`}>
+              继续未完成创作
+            </Link>
+          </div>
+        )}
+      </CardContent>
+      <CardFooter>
+        {identity.displayKind === "author_work" && (
+          <Button
+            variant="ghost"
+            size="sm"
+            loading={pending}
+            onClick={() =>
+              onClassification(
+                project,
+                identity.provenance === "legacy_unknown" ? "author_work" : "test_work",
+              )
+            }
+          >
+            {identity.provenance === "legacy_unknown" ? "确认是作者作品" : "标记为测试作品"}
+          </Button>
+        )}
+        {identity.displayKind === "test_work" && (
+          <Button
+            variant="ghost"
+            size="sm"
+            loading={pending}
+            onClick={() => onClassification(project, "author_work")}
+          >
+            移回作者作品
+          </Button>
+        )}
+        {project.status !== "trashed" && (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={pending || activeIdeaJourney !== null}
+            onClick={() => onRename(project)}
+          >
+            重命名
+          </Button>
+        )}
+        {project.status !== "trashed" && (
+          <Button variant="ghost" size="sm" loading={pending} onClick={() => onTrash(project)}>
+            移到回收站
+          </Button>
+        )}
+        {project.status === "active" && (
+          <Button
+            variant="secondary"
+            size="sm"
+            loading={pending}
+            onClick={() => onLifecycle(project, "archive")}
+          >
+            归档
+          </Button>
+        )}
+        {project.status === "archived" && (
+          <Button
+            variant="secondary"
+            size="sm"
+            loading={pending}
+            onClick={() => onLifecycle(project, "unarchive")}
+          >
+            恢复编辑
+          </Button>
+        )}
+        {project.status === "trashed" ? (
+          <Button size="sm" loading={pending} onClick={() => onLifecycle(project, "restore")}>
+            恢复
+          </Button>
+        ) : (
+          <Link className="button-link" to={`/projects/${project.id}`}>
+            打开
+          </Link>
+        )}
+      </CardFooter>
+    </Card>
+  );
+}
+
+function legacyAuthorIdentity(project: Project): ProjectDisplayIdentity {
+  return Object.freeze({
+    projectId: project.id,
+    displayKind: "author_work",
+    provenance: "legacy_unknown",
+    recordedAt: null,
+    revision: null,
+  });
 }
 
 function FirstLaunchState({

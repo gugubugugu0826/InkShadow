@@ -38,9 +38,38 @@ const textEncoderRealm = vi.hoisted(() => {
   return { originalTextEncoder };
 });
 
+const projectDisplayIdentityTestSchema = `
+CREATE TABLE project_display_identities (
+  project_id TEXT PRIMARY KEY NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  display_kind TEXT NOT NULL,
+  provenance TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE project_display_identity_revisions (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL,
+  previous_display_kind TEXT,
+  display_kind TEXT NOT NULL,
+  provenance TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, revision)
+);
+CREATE TRIGGER project_display_identity_revision_insert
+AFTER INSERT ON project_display_identities
+BEGIN
+  INSERT INTO project_display_identity_revisions (
+    project_id, revision, previous_display_kind, display_kind, provenance, recorded_at
+  ) VALUES (
+    NEW.project_id, NEW.revision, NULL, NEW.display_kind, NEW.provenance, NEW.updated_at
+  );
+END;`;
+
 const migration = [
   readMigration("0001_core.sql"),
   readMigration("0015_sync_materialization_authority.sql"),
+  projectDisplayIdentityTestSchema,
   `ALTER TABLE chapters ADD COLUMN privacy_mode TEXT NOT NULL DEFAULT 'standard'
      CHECK (privacy_mode IN ('standard', 'local_only'));
    ALTER TABLE chapters ADD COLUMN privacy_revision INTEGER NOT NULL DEFAULT 1
@@ -124,6 +153,44 @@ describe("ContentSyncMaterializer", () => {
     ).toEqual([{ name: "InkShadow Sync", status: "active" }]);
     expect(
       await executor.select<{
+        projectId: string;
+        displayKind: string;
+        provenance: string;
+        revision: number;
+      }>(
+        `SELECT project_id AS projectId, display_kind AS displayKind,
+                provenance, revision
+         FROM project_display_identities`,
+      ),
+    ).toEqual([
+      {
+        projectId: PROJECT_ID,
+        displayKind: "author_work",
+        provenance: "explicit_creation",
+        revision: 1,
+      },
+    ]);
+    expect(
+      await executor.select<{
+        projectId: string;
+        previousDisplayKind: string | null;
+        displayKind: string;
+        revision: number;
+      }>(
+        `SELECT project_id AS projectId, previous_display_kind AS previousDisplayKind,
+                display_kind AS displayKind, revision
+         FROM project_display_identity_revisions`,
+      ),
+    ).toEqual([
+      {
+        projectId: PROJECT_ID,
+        previousDisplayKind: null,
+        displayKind: "author_work",
+        revision: 1,
+      },
+    ]);
+    expect(
+      await executor.select<{
         content: string;
         revision: number;
         current_version_id: string;
@@ -144,6 +211,15 @@ describe("ContentSyncMaterializer", () => {
       { id: VERSION_ONE_ID, sequence: 1 },
       { id: VERSION_TWO_ID, sequence: 2 },
     ]);
+  });
+
+  it("fails closed and rolls the project back when the identity history trigger is missing", async () => {
+    await executor.execute("DROP TRIGGER project_display_identity_revision_insert");
+    const project = await buildUpsertWork(projectPayload(), DEVICE_ID, 1);
+
+    await expect(apply(project)).rejects.toThrow();
+    expect(await count("projects")).toBe(0);
+    expect(await count("project_display_identities")).toBe(0);
   });
 
   it("does not overwrite a local-only chapter with an incoming cloud version", async () => {

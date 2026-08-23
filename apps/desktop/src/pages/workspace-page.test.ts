@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { calculateWorkspaceInsights } from "./workspace-insights";
+import { calculateWorkspaceInsights, countReadyProseCandidates } from "./workspace-insights";
 
 describe("calculateWorkspaceInsights", () => {
   it("derives today's net change, current writing streak, and pending suggestions from real records", () => {
@@ -36,6 +36,19 @@ describe("calculateWorkspaceInsights", () => {
 
     expect(result.todayNetCharacters).toBe(-40);
     expect(result.currentStreakDays).toBe(1);
+  });
+
+  it("counts only prose results that still wait for an author decision", () => {
+    expect(
+      countReadyProseCandidates([
+        { status: "ready", purpose: "prose" },
+        { status: "ready", purpose: "continuation_directions" },
+        { status: "accepted", purpose: "prose" },
+        { status: "rejected", purpose: "prose" },
+        { status: "expired", purpose: "prose" },
+        { status: "streaming", purpose: "prose" },
+      ]),
+    ).toBe(1);
   });
 });
 

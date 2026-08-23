@@ -32,7 +32,11 @@ import type {
   RestoreChapterVersionCommit,
 } from "../src/ports/chapter-repositories.js";
 import type { ContentHasher } from "../src/ports/content-hasher.js";
-import type { ProjectListQuery, ProjectRepository } from "../src/ports/project-repository.js";
+import type {
+  ProjectDisplayKind,
+  ProjectListQuery,
+  ProjectRepository,
+} from "../src/ports/project-repository.js";
 
 export function uuid(value: string): UuidV7 {
   const result = parseUuidV7(value);
@@ -99,12 +103,17 @@ export class FixedHasher implements ContentHasher {
 
 export class InMemoryProjectRepository implements ProjectRepository {
   private readonly projects = new Map<UuidV7, Project>();
+  readonly createdDisplayKinds: (Exclude<ProjectDisplayKind, "system_evaluation"> | undefined)[] =
+    [];
 
   seed(project: Project): void {
     this.projects.set(project.id, project);
   }
 
-  create(project: Project): Promise<Result<void, AppError>> {
+  create(
+    project: Project,
+    displayKind?: Exclude<ProjectDisplayKind, "system_evaluation">,
+  ): Promise<Result<void, AppError>> {
     if (this.projects.has(project.id)) {
       return Promise.resolve(
         err(
@@ -116,6 +125,7 @@ export class InMemoryProjectRepository implements ProjectRepository {
       );
     }
     this.projects.set(project.id, project);
+    this.createdDisplayKinds.push(displayKind);
     return Promise.resolve(ok(undefined));
   }
 

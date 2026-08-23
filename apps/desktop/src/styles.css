@@ -738,10 +738,62 @@ select {
   }
 }
 
+.project-library-page__collections,
+.project-library-page__collection {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.project-library-page__collections {
+  gap: var(--space-6);
+}
+
+.project-library-page__collection-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.project-library-page__collection-heading > div {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.project-library-page__collection-heading h2,
+.project-library-page__collection-heading p {
+  margin: 0;
+}
+
+.project-library-page__collection-heading p:last-child {
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.project-library-page__collection--special {
+  padding: var(--space-5);
+  border: 0.0625rem solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-sunken);
+}
+
+.project-library-page__card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
 .project-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(17rem, 100%), 1fr));
   gap: var(--space-4);
+}
+
+@media (max-width: 47.9375rem) {
+  .project-library-page__collection--special {
+    padding: var(--space-4);
+  }
 }
 
 .first-launch {
@@ -2399,6 +2451,45 @@ select {
 .candidate-actions {
   flex-wrap: wrap;
   justify-content: flex-start;
+}
+
+.candidate-history {
+  border-top: 0.0625rem solid var(--border-subtle);
+  padding-top: var(--space-3);
+}
+
+.candidate-history > summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.candidate-history > ol {
+  display: grid;
+  gap: var(--space-3);
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+}
+
+.candidate-history__item {
+  background: var(--bg-subtle);
+  border: 0.0625rem solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+}
+
+.candidate-history__item p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.candidate-history__meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 .candidate-panel__hint {

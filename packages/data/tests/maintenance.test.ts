@@ -60,6 +60,10 @@ const directLocalAuthorRevisionMigration = readFileSync(
   new URL("../migrations/0076_direct_local_story_fact_author_revision.sql", import.meta.url),
   "utf8",
 );
+const projectDisplayIdentityMigration = readFileSync(
+  new URL("../migrations/0077_project_display_identities.sql", import.meta.url),
+  "utf8",
+);
 const inkShadowMigration = [
   readFileSync(new URL("../migrations/0001_core.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../migrations/0002_tasks_notifications.sql", import.meta.url), "utf8"),
@@ -275,6 +279,7 @@ const inkShadowMigration = [
   chapterVersionResponsibilityMigration,
   generationAttemptPrivacyMigration,
   directLocalAuthorRevisionMigration,
+  projectDisplayIdentityMigration,
 ].join("\n");
 const inkShadowMigrationV73 = inkShadowMigration
   .replace(capabilityProbeInvocationLedgerMigration, "")
@@ -282,7 +287,8 @@ const inkShadowMigrationV73 = inkShadowMigration
   .replace(storyFactUserRevisionMigration, "")
   .replace(chapterVersionResponsibilityMigration, "")
   .replace(generationAttemptPrivacyMigration, "")
-  .replace(directLocalAuthorRevisionMigration, "");
+  .replace(directLocalAuthorRevisionMigration, "")
+  .replace(projectDisplayIdentityMigration, "");
 const BACKUP_PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const BACKUP_ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
 const BACKUP_OBJECT_ID = "019f9f4a-b3c7-7350-9226-000000000102";
@@ -424,7 +430,7 @@ describe("DatabaseMaintenanceService", () => {
         value: {
           sourceKind: "user_selected_file",
           integrityVerified: true,
-          restoredTableCount: 172,
+          restoredTableCount: 174,
         },
       });
       await expect(
@@ -554,6 +560,26 @@ describe("DatabaseMaintenanceService", () => {
     const service = new DatabaseMaintenanceService(executor);
     await insertProject(executor, BACKUP_PROJECT_ID, "备份中的项目");
     await executor.execute(
+      `INSERT INTO project_display_identities (
+         project_id, display_kind, provenance, created_at, updated_at
+       ) VALUES (?, 'author_work', 'explicit_creation', ?, ?)`,
+      [BACKUP_PROJECT_ID, "2026-07-27T00:00:00.000Z", "2026-07-27T00:00:00.000Z"],
+    );
+    await executor.execute(
+      `UPDATE project_display_identities
+       SET display_kind = 'test_work', provenance = 'explicit_test',
+           revision = 2, updated_at = '2026-07-27T00:00:01.000Z'
+       WHERE project_id = ?`,
+      [BACKUP_PROJECT_ID],
+    );
+    await executor.execute(
+      `UPDATE project_display_identities
+       SET display_kind = 'author_work', provenance = 'explicit_creation',
+           revision = 3, updated_at = '2026-07-27T00:00:02.000Z'
+       WHERE project_id = ?`,
+      [BACKUP_PROJECT_ID],
+    );
+    await executor.execute(
       `INSERT INTO writing_experience_preferences (
          scope, mode, initialization_source, direct_local_organization_authorized_at,
          revision, created_at, updated_at
@@ -656,6 +682,14 @@ describe("DatabaseMaintenanceService", () => {
     );
     await executor.execute("DELETE FROM continuous_story_state_route_receipts");
     await executor.execute("DELETE FROM story_settings_import_receipts");
+    await executor.execute(
+      `UPDATE project_display_identities
+       SET display_kind = 'test_work', provenance = 'explicit_test',
+           revision = 4, updated_at = '2026-07-27T00:01:00.000Z'
+       WHERE project_id = ?`,
+      [BACKUP_PROJECT_ID],
+    );
+    await executor.execute("DELETE FROM project_display_identities");
     await executor.execute("DELETE FROM story_memory_governance_events");
     await executor.execute(
       "UPDATE chapters SET privacy_mode = 'standard', privacy_revision = 3 WHERE id = ?",
@@ -845,9 +879,66 @@ describe("DatabaseMaintenanceService", () => {
       value: {
         sourceKind: "user_selected_file",
         integrityVerified: true,
-        restoredTableCount: 172,
+        restoredTableCount: 174,
       },
     });
+    await expect(
+      executor.select<{
+        displayKind: string;
+        provenance: string;
+        revision: number;
+        updatedAt: string;
+      }>(
+        `SELECT display_kind AS displayKind, provenance, revision, updated_at AS updatedAt
+         FROM project_display_identities WHERE project_id = ?`,
+        [BACKUP_PROJECT_ID],
+      ),
+    ).resolves.toEqual([
+      {
+        displayKind: "author_work",
+        provenance: "explicit_creation",
+        revision: 3,
+        updatedAt: "2026-07-27T00:00:02.000Z",
+      },
+    ]);
+    await expect(
+      executor.select<{
+        revision: number;
+        previousDisplayKind: string | null;
+        displayKind: string;
+        provenance: string;
+        recordedAt: string;
+      }>(
+        `SELECT revision, previous_display_kind AS previousDisplayKind,
+                display_kind AS displayKind, provenance, recorded_at AS recordedAt
+         FROM project_display_identity_revisions
+         WHERE project_id = ?
+         ORDER BY revision`,
+        [BACKUP_PROJECT_ID],
+      ),
+    ).resolves.toEqual([
+      {
+        revision: 1,
+        previousDisplayKind: null,
+        displayKind: "author_work",
+        provenance: "explicit_creation",
+        recordedAt: "2026-07-27T00:00:00.000Z",
+      },
+      {
+        revision: 2,
+        previousDisplayKind: "author_work",
+        displayKind: "test_work",
+        provenance: "explicit_test",
+        recordedAt: "2026-07-27T00:00:01.000Z",
+      },
+      {
+        revision: 3,
+        previousDisplayKind: "test_work",
+        displayKind: "author_work",
+        provenance: "explicit_creation",
+        recordedAt: "2026-07-27T00:00:02.000Z",
+      },
+    ]);
     await expect(
       executor.select<{ count: number }>("SELECT COUNT(*) AS count FROM pragma_foreign_key_check"),
     ).resolves.toEqual([{ count: 0 }]);

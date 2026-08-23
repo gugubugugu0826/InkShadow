@@ -115,6 +115,25 @@ describe("BrowserDevelopmentIdeationProjectCommitUnitOfWork", () => {
     const developmentRaw = parseObject(window.localStorage.getItem(DEVELOPMENT_DATABASE_KEY));
     expect(developmentRaw).toMatchObject({
       schemaVersion: 2,
+      projectDisplayIdentities: [
+        {
+          projectId: prepared.input.projectId,
+          displayKind: "author_work",
+          provenance: "explicit_creation",
+          recordedAt: FINALIZED_AT,
+          revision: 1,
+        },
+      ],
+      projectDisplayIdentityRevisions: [
+        {
+          projectId: prepared.input.projectId,
+          previousDisplayKind: null,
+          displayKind: "author_work",
+          provenance: "explicit_creation",
+          recordedAt: FINALIZED_AT,
+          revision: 1,
+        },
+      ],
       auditEvents: [
         {
           projectId: prepared.input.projectId,

@@ -1,7 +1,7 @@
 # v0.2.7 两轮复测缺陷修复报告
 
-> 日期：2026-08-23  
-> 状态：源码、全工作区、原生层和正式网页端自动化门禁通过；尚未发布，现有 v0.2.7 标签、安装包和附件保持不变。  
+> 日期：2026-08-23；最近更新：2026-08-24  
+> 状态：2026-08-24 后续增量已通过聚焦回归、完整源码门禁和原生层门禁；正式网页旅程必须在干净提交上运行。尚未发布，现有 v0.2.7 标签、安装包和附件保持不变。  
 > 发布判断：不建议现在发布。目标现场数据库、现场诊断和真实安装复测未取得或未执行；以后如发布修复版，必须使用新版本号并等待单独指令。
 
 ## 一、基线与证据边界
@@ -57,6 +57,8 @@
 | P2 普通中文     | 普通页面暴露内部术语或状态值               | 使用“本次挑选的故事资料”“服务商未提供费用信息”等自然中文                       |
 | P2 一句话设定   | 身份、任职、年龄句式可能落入空白技术表单   | 支持所需句式，解析后仍待作者确认；失败保留原句并说明缺项                       |
 | P3 编辑动作     | 缩写等入口不完整                           | 扩写、改写、润色、缩写使用真实发送披露和隔离候选，接受前不写正文               |
+| P3 历史结果治理 | 长期“等待决定”的结果缺少集中查看和保留动作 | 章节内保留全部正文生成结果；30 天只显示提醒，可查看、继续保留或明确放弃        |
+| P3 作品归类     | 测试作品、示例和作者作品混在普通作品库     | 只按显式身份分区；名称和正文不参与判断，系统评测不进入普通作品库               |
 
 ## 四、关键修改文件与迁移
 
@@ -97,12 +99,35 @@
 - `apps/desktop/src/pages/import-journey-page.tsx`
 - `apps/desktop/src/components/story-settings-tools.tsx`
 
+### P3 历史生成结果治理
+
+- `apps/desktop/src/components/candidate-history-panel.tsx`
+- `apps/desktop/src/infrastructure/candidate-retention-policy.ts`
+- `apps/desktop/src/pages/editor-page.tsx`
+- `apps/desktop/src/pages/workspace-page.tsx`
+- `packages/domain/src/entities/ai-candidate.ts`
+- `packages/application/src/use-cases/candidate-use-cases.ts`
+- `packages/data/src/sqlite-repositories.ts`
+
+本项没有新增数据库字段。超过 30 天是根据正文生成结果的 `updatedAt` 派生出的提醒，不会自动把结果改成“已失效”，也不会自动接受、放弃或删除。作者选择“继续保留”时，结果仍处于等待决定状态，只刷新 `updatedAt` 并递增 `revision`；SQLite 保存继续使用状态与修订号的 CAS，旧窗口不能覆盖新决定。已放弃和已失效结果只读可见；这些治理动作不修改正文或不可变版本。
+
+### P3 作品显示身份与测试资料隔离
+
+- 数据层：`packages/data/migrations/0077_project_display_identities.sql`、`packages/data/src/project-display-identity-sqlite-repository.ts`、`packages/data/src/sqlite-repositories.ts`、`packages/data/src/maintenance.ts`。
+- 桌面端：`apps/desktop/src/infrastructure/development-storage.ts`、`apps/desktop/src/infrastructure/direct-project-display-identity.ts`、`apps/desktop/src/pages/start-page.tsx`、`apps/desktop/src/pages/projects-page.tsx`、`apps/desktop/src/qa/webview-stress-controller.tsx`。
+- 应用边界：`packages/application/src/ports/project-repository.ts`、`packages/application/src/use-cases/project-use-cases.ts`。
+
+项目显示身份只保存“作者作品、测试作品、内置示例、系统评测”及内容无关来源，不读取作品名、章节名或正文作判断。旧项目没有身份记录时安全读取为“作者作品／旧数据未记录”；作者作品与测试作品可逆、幂等切换并保留修订历史，内置示例和系统评测受保护。开始页最近创作只列作者作品，示例入口只认精确内置身份，同名作者作品不会被接管。作品库分开“作者作品”和“测试与示例”，系统评测完全隐藏；单条身份附属记录损坏时，作品与正文仍可打开并显示重读提示。
+
+SQLite 创建、导入、开书和内容同步在同一事务内写入项目、初始身份及首条历史；浏览器开发存储在同一次可恢复写入中完成同等提交。任一身份结构只存在一部分时失败关闭并回滚，不留下半个项目。备份恢复合同同时覆盖当前身份和完整修订历史；旧备份只允许两张表同时缺失，只缺一张时拒绝恢复。
+
 ### 数据库迁移
 
 - 新增向前迁移：`packages/data/migrations/0076_direct_local_story_fact_author_revision.sql`。
-- 原生迁移登记：`apps/desktop/src-tauri/src/local_migrations.rs` 中新增迁移序号 79。
+- 新增向前迁移：`packages/data/migrations/0077_project_display_identities.sql`。
+- 原生迁移登记：`apps/desktop/src-tauri/src/local_migrations.rs` 中新增迁移序号 79 和 80。
 - 没有修改任何已发布迁移或校验值。
-- 本迁移不新增表或字段，只收窄调整触发器，使带证据、待确认的本地直接提取事实能够由作者确认、修改或放弃；正式事实仍须作者动作。
+- `0076` 不新增表或字段，只收窄本地直接提取事实的作者修订触发器；`0077` 新增内容无关的项目显示身份当前表、不可变修订历史和严格保护触发器，不改动正文、章节或不可变版本。
 
 新增的专项回归还包括：
 
@@ -122,7 +147,57 @@
 | B6 规划披露     | `pnpm --filter @inkshadow/desktop test -- src/components/story-planning-panel.test.tsx`                                                                                                                                                                                            | 4 项新增断言失败               | 32 项通过                               |
 | 发送后作者结束  | `pnpm --filter @inkshadow/desktop test -- src/pages/idea-journey-page.test.tsx`                                                                                                                                                                                                    | 旧逻辑把本机取消误当服务商取消 | 68 项通过；本机取消成功、失败、抛错 3/3 |
 
-### 总门禁
+### 后续 P3 聚焦验证
+
+以下结果属于“历史生成结果治理”后续工作树的聚焦验证，不包含在下方既有完整发布门禁中，也不代表真实安装程序或真实服务商通过：
+
+| 范围                 | 精确命令                                                                                                                             | 结果        |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ----------- |
+| 领域状态与继续保留   | `pnpm --filter @inkshadow/domain test -- tests/content-entities.test.ts`                                                             | 15／15 通过 |
+| 应用用例与修订围栏   | `pnpm --filter @inkshadow/application test -- tests/candidate-use-cases.test.ts`                                                     | 29／29 通过 |
+| 历史面板与编辑器路由 | `pnpm --filter @inkshadow/desktop test -- src/components/candidate-history-panel.test.tsx src/pages/editor-candidate-route.test.tsx` | 63／63 通过 |
+| 工作台待处理结果投影 | `pnpm --filter @inkshadow/desktop test -- src/pages/workspace-page.test.ts`                                                          | 3／3 通过   |
+| SQLite 候选并发保存  | `pnpm --filter @inkshadow/data test -- tests/candidate-revision-concurrency.test.ts`                                                 | 4／4 通过   |
+| 桌面端类型检查       | `pnpm --filter @inkshadow/desktop typecheck`                                                                                         | 通过        |
+
+普通模式和专业模式均可从作品工作台看到“待处理生成结果”并进入对应章节；工作台只统计用途为正文且仍等待作者决定的结果，不把方向选项或其他用途混入待办。
+
+### 2026-08-24 作品归类与数据安全聚焦验证
+
+以下结果绑定 2026-08-24 当前增量；它们不是下方 2026-08-23 历史完整门禁，也不代表真实安装或真实服务通过：
+
+| 范围                     | 精确命令                                                                                                                                                                                                                                                                                                                                         | 结果                  |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------- |
+| 身份迁移、仓储与安全约束 | `pnpm --filter @inkshadow/data test -- tests/project-display-identity-migration.test.ts tests/project-display-identity-repository.test.ts tests/project-display-identity-classification.test.ts tests/project-display-identity-content-safety.test.ts tests/project-display-identity-creation-schema.test.ts`                                    | 5 个文件，14／14 通过 |
+| v0.2.3 连续升级          | `pnpm --filter @inkshadow/data test -- tests/released-v023-continuous-upgrade.test.ts`                                                                                                                                                                                                                                                           | 1 个文件，1／1 通过   |
+| 174 表备份恢复           | `pnpm --filter @inkshadow/data test -- tests/maintenance.test.ts -t "restores all supported tables from a healthy backup atomically"`                                                                                                                                                                                                            | 1／1 通过，49 项跳过  |
+| 应用层创建身份传递       | `pnpm --filter @inkshadow/application test -- tests/project-use-cases.test.ts`                                                                                                                                                                                                                                                                   | 1 个文件，5／5 通过   |
+| 浏览器、直接创建与页面   | `pnpm --filter @inkshadow/desktop test -- src/infrastructure/development-project-display-identity.test.ts src/infrastructure/development-ideation-project-commit.test.ts src/infrastructure/ideation-project-commit.test.ts src/infrastructure/content-sync-materializer.test.ts src/pages/start-page.test.tsx src/pages/projects-page.test.tsx` | 6 个文件，69／69 通过 |
+| 桌面端类型检查           | `pnpm --filter @inkshadow/desktop typecheck`                                                                                                                                                                                                                                                                                                     | 通过                  |
+
+### 2026-08-24 当前完整源码与原生层门禁
+
+`pnpm release:check`
+
+- 首次运行在代码规范阶段准确报告 4 个问题，修复后从头重跑；最终退出码为 0。
+- 构建：网页端 1616 个模块、桌面端 2300 个模块，均成功。
+- 格式检查、凭据扫描、137 项依赖许可、20 个包的架构边界、正式配置、全工作区类型检查和代码规范检查均通过。
+- 脚本门禁：39／39 通过。
+- 工作区测试：497 个文件通过、16 个外部条件文件跳过；3732 项通过、65 项跳过、0 项失败。
+
+`pnpm check:rust`
+
+- 原生格式检查和严格静态检查通过。
+- 原生测试：194 项通过、1 项因需要显式本地模型而忽略、0 项失败；入口测试和文档测试均为 0 项失败。
+
+`pnpm test:e2e:release`
+
+- 未提交工作树上的首次尝试被干净提交前置检查按设计拦下，退出码 1，业务旅程 0 项开始；没有把该环境前置失败记作业务通过或失败。
+- 清理并形成干净本地提交后必须从头运行一次；当前尚未执行。
+
+### 2026-08-23 历史总门禁
+
+以下结果只绑定当时的工作树；2026-08-24 增量已经在上方重新运行，当前结论不借用这些历史数字：
 
 `pnpm release:check`
 
@@ -169,8 +244,8 @@
 | P1     | B6 空/已有规划披露与准确失败                                  | 自动化验收通过                             |
 | P2     | 当前会话精确确认、普通中文、一句话设定、等待阶段与支持编号    | 自动化验收通过                             |
 | P3     | 扩写、改写、润色、缩写真实入口                                | 已实现，真实服务质量未执行                 |
-| P3     | 历史“等待决定”候选的过期/保留策略                             | 明确延期；没有自动删除历史候选             |
-| P3     | 测试作品与普通“未命名新故事”区分                              | 明确延期                                   |
+| P3     | 历史“等待决定”结果的提醒、查看、放弃和保留策略                | 已实现并通过完整源码门禁；真机未执行       |
+| P3     | 测试作品与普通“未命名新故事”区分                              | 已实现并通过完整源码与原生层门禁           |
 
 ## 七、未取得与未执行
 

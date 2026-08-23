@@ -42,6 +42,76 @@ export const projects = sqliteTable(
   ],
 );
 
+export const projectDisplayIdentities = sqliteTable(
+  "project_display_identities",
+  {
+    projectId: text("project_id")
+      .primaryKey()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    displayKind: text("display_kind", {
+      enum: ["author_work", "test_work", "builtin_example", "system_evaluation"],
+    }).notNull(),
+    provenance: text("provenance", {
+      enum: ["explicit_creation", "explicit_test", "builtin_example", "evaluation_project_id"],
+    }).notNull(),
+    revision: integer("revision").notNull().default(1),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    check(
+      "project_display_identities_pair",
+      sql`(
+        (${table.displayKind} = 'author_work' AND ${table.provenance} = 'explicit_creation')
+        OR
+        (${table.displayKind} = 'test_work' AND ${table.provenance} = 'explicit_test')
+        OR
+        (${table.displayKind} = 'builtin_example' AND ${table.provenance} = 'builtin_example')
+        OR
+        (${table.displayKind} = 'system_evaluation' AND ${table.provenance} = 'evaluation_project_id')
+      )`,
+    ),
+    check("project_display_identities_revision", sql`${table.revision} >= 1`),
+    index("project_display_identities_kind_idx").on(table.displayKind, table.projectId),
+  ],
+);
+
+export const projectDisplayIdentityRevisions = sqliteTable(
+  "project_display_identity_revisions",
+  {
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    revision: integer("revision").notNull(),
+    previousDisplayKind: text("previous_display_kind", {
+      enum: ["author_work", "test_work", "builtin_example", "system_evaluation"],
+    }),
+    displayKind: text("display_kind", {
+      enum: ["author_work", "test_work", "builtin_example", "system_evaluation"],
+    }).notNull(),
+    provenance: text("provenance", {
+      enum: ["explicit_creation", "explicit_test", "builtin_example", "evaluation_project_id"],
+    }).notNull(),
+    recordedAt: text("recorded_at").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.projectId, table.revision] }),
+    check("project_display_identity_revisions_revision", sql`${table.revision} >= 1`),
+    check(
+      "project_display_identity_revisions_pair",
+      sql`(
+        (${table.displayKind} = 'author_work' AND ${table.provenance} = 'explicit_creation')
+        OR
+        (${table.displayKind} = 'test_work' AND ${table.provenance} = 'explicit_test')
+        OR
+        (${table.displayKind} = 'builtin_example' AND ${table.provenance} = 'builtin_example')
+        OR
+        (${table.displayKind} = 'system_evaluation' AND ${table.provenance} = 'evaluation_project_id')
+      )`,
+    ),
+    index("project_display_identity_revisions_project_idx").on(table.projectId, table.revision),
+  ],
+);
 export const projectSeeds = sqliteTable(
   "project_seeds",
   {
@@ -1695,6 +1765,11 @@ export const shortDramaScripts = sqliteTable(
 
 export type ProjectRow = typeof projects.$inferSelect;
 export type NewProjectRow = typeof projects.$inferInsert;
+export type ProjectDisplayIdentityRow = typeof projectDisplayIdentities.$inferSelect;
+export type NewProjectDisplayIdentityRow = typeof projectDisplayIdentities.$inferInsert;
+export type ProjectDisplayIdentityRevisionRow = typeof projectDisplayIdentityRevisions.$inferSelect;
+export type NewProjectDisplayIdentityRevisionRow =
+  typeof projectDisplayIdentityRevisions.$inferInsert;
 export type ProjectSeedRow = typeof projectSeeds.$inferSelect;
 export type NewProjectSeedRow = typeof projectSeeds.$inferInsert;
 export type StorySettingsImportReceiptRow = typeof storySettingsImportReceipts.$inferSelect;

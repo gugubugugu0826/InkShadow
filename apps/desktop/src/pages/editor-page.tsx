@@ -55,6 +55,7 @@ import { Link, useLocation, useNavigate, useParams, useSearchParams } from "reac
 
 import "../components/candidate-decision.css";
 
+import { CandidateHistoryPanel } from "../components/candidate-history-panel";
 import {
   captureMountedComponentPath,
   useComponentOwnershipPath,
@@ -487,13 +488,16 @@ function selectEditorCandidate(
         item.projectId === projectId &&
         item.chapterId === chapterId &&
         item.purpose === "prose" &&
-        (item.status === "ready" || item.status === "accepted" || item.status === "rejected"),
+        (item.status === "ready" ||
+          item.status === "accepted" ||
+          item.status === "rejected" ||
+          item.status === "expired"),
     ) ?? null;
   return Object.freeze({
     candidate,
     notice:
       candidate === null
-        ? "链接指定的 AI 建议不存在、已处理，或不属于当前项目与章节；未自动打开其他建议。"
+        ? "链接指定的生成结果不存在或不属于当前项目与章节；未自动打开其他结果。"
         : null,
   });
 }
@@ -831,6 +835,7 @@ export function EditorPage() {
   const [versionToRestore, setVersionToRestore] = useState<ChapterVersion | null>(null);
   const [versionRestoreBusy, setVersionRestoreBusy] = useState(false);
   const [candidate, setCandidate] = useState<AiCandidate | null>(null);
+  const [candidateHistory, setCandidateHistory] = useState<readonly AiCandidate[]>([]);
   const [candidatePresentation, setCandidatePresentation] = useState<"ai" | "local" | "unknown">(
     "unknown",
   );
@@ -1337,6 +1342,7 @@ export function EditorPage() {
       setRecoveryDraft(null);
       setVersions([]);
       setCandidate(null);
+      setCandidateHistory([]);
       setDirectionOptions([]);
       setDirectGenerationUndo(null);
       const incident = recordEditorReadFailure(stage, cause);
@@ -1375,6 +1381,7 @@ export function EditorPage() {
     setCandidateReviewConflict(null);
     setCandidateCopySaved(false);
     setCandidate(null);
+    setCandidateHistory([]);
     setCandidatePresentation("unknown");
     setSelectionRewriteBusy(false);
     setSelectionRewriteContext(null);
@@ -1647,6 +1654,7 @@ export function EditorPage() {
       }
       if (!isCurrentLoad()) return;
     }
+    setCandidateHistory(loadedCandidates);
     setCandidate(candidateSelection.candidate);
     setCandidatePresentation(presentation);
 
@@ -1762,6 +1770,7 @@ export function EditorPage() {
         projectId,
         chapterId,
       );
+      setCandidateHistory(safeCandidates);
       setCandidate(candidateSelection.candidate);
       setCandidatePresentation(
         candidateSelection.candidate === null ||
@@ -4266,16 +4275,73 @@ export function EditorPage() {
     await restoreSelectedVersion(baseVersion, `已撤销本次${actionLabel}，可在版本历史中恢复。`);
   }
 
-  async function rejectCandidate(): Promise<boolean> {
-    if (candidate?.status !== "ready" || candidateDecisionFenceRef.current) {
+  function updateCandidateHistory(nextCandidate: AiCandidate): void {
+    setCandidateHistory((current) => [
+      nextCandidate,
+      ...current.filter((item) => item.id !== nextCandidate.id),
+    ]);
+  }
+
+  function viewHistoricalCandidate(nextCandidate: AiCandidate): void {
+    if (nextCandidate.projectId !== projectId || nextCandidate.chapterId !== chapterId) {
+      setEditorNotice("这份生成结果不属于当前章节，未打开。");
+      return;
+    }
+    setCandidate(nextCandidate);
+    setCandidatePresentation(nextCandidate.toSnapshot().source === "generate" ? "unknown" : "ai");
+    setCandidateReviewOpen(false);
+    setCandidateReviewError(null);
+    setCandidateRevisionSaved(false);
+    setCandidateCopySaved(false);
+    setGenerationReceipt(null);
+    setGenerationAttemptUsage([]);
+    setCandidateQualityGate(null);
+    setEditorNotice(
+      nextCandidate.status === "ready"
+        ? "已打开这份隔离结果；只有你明确使用，才会写入正文。"
+        : "已打开只读历史结果；它不会再次写入正文。",
+    );
+  }
+
+  async function retainCandidate(nextCandidate: AiCandidate): Promise<void> {
+    if (nextCandidate.status !== "ready" || candidateDecisionFenceRef.current) {
+      return;
+    }
+    candidateDecisionFenceRef.current = true;
+    setCandidateBusy(true);
+    try {
+      const result = await runtime.useCases.retainCandidate.execute({
+        candidateId: nextCandidate.id,
+        expectedCandidateRevision: nextCandidate.revision,
+      });
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+      updateCandidateHistory(result.value);
+      if (candidate?.id === result.value.id) {
+        setCandidate(result.value);
+      }
+      setError(null);
+      setEditorNotice("已继续保留这份结果；它仍在本机等待决定，正文没有变化。");
+    } finally {
+      setCandidateBusy(false);
+      candidateDecisionFenceRef.current = false;
+    }
+  }
+
+  async function rejectCandidate(
+    candidateOverride: AiCandidate | null = candidate,
+  ): Promise<boolean> {
+    if (candidateOverride?.status !== "ready" || candidateDecisionFenceRef.current) {
       return false;
     }
     candidateDecisionFenceRef.current = true;
     setCandidateBusy(true);
     try {
       const result = await runtime.useCases.rejectCandidate.execute({
-        candidateId: candidate.id,
-        expectedCandidateRevision: candidate.revision,
+        candidateId: candidateOverride.id,
+        expectedCandidateRevision: candidateOverride.revision,
       });
       if (!result.ok) {
         setError(result.error);
@@ -4284,7 +4350,10 @@ export function EditorPage() {
         }
         return false;
       }
-      setCandidate(result.value);
+      updateCandidateHistory(result.value);
+      if (candidate?.id === result.value.id) {
+        setCandidate(result.value);
+      }
       setCandidateCopySaved(false);
       setError(null);
       let journeySettlementDeferred = false;
@@ -4412,7 +4481,10 @@ export function EditorPage() {
   const candidateActionGap = !directMode && candidatePresentation === "ai" ? " " : "";
   const candidateIncomplete = candidate?.toSnapshot().incomplete ?? false;
   const canGenerateCandidate =
-    candidate === null || candidate.status === "accepted" || candidate.status === "rejected";
+    candidate === null ||
+    candidate.status === "accepted" ||
+    candidate.status === "rejected" ||
+    candidate.status === "expired";
   const usesNativeModel = runtime.mode === "tauri";
   const recoveryDraftSnapshot = recoveryDraft?.toSnapshot() ?? null;
   const candidateSelectedDecisions =
@@ -4456,6 +4528,10 @@ export function EditorPage() {
     selectionRewriteContext ?? generationPlan?.contextCompilation ?? null;
   const displayedNovelSkillPreparation =
     selectionRewriteContext === null ? (generationPlan?.novelSkillPreparation ?? null) : null;
+  const displayedCandidateHistory =
+    candidate?.purpose === "prose" && candidate.status !== "streaming"
+      ? [candidate, ...candidateHistory.filter((item) => item.id !== candidate.id)]
+      : candidateHistory;
   const writingCanvasStyle = {
     "--editor-font-size": `${String(typography.fontSize)}px`,
     "--editor-line-height": String(typography.lineHeight),
@@ -5209,18 +5285,10 @@ export function EditorPage() {
                     onStop={() => void cancelActiveGeneration()}
                   />
                 )
-              ) : candidate === null || candidate.status === "rejected" ? (
+              ) : candidate === null ? (
                 <div className="candidate-content">
                   <EmptyState
-                    title={
-                      directMode
-                        ? candidate?.status === "rejected"
-                          ? "这份创作结果已放弃"
-                          : "还没有创作结果"
-                        : candidate?.status === "rejected"
-                          ? "这份建议已拒绝"
-                          : "还没有 AI 建议版本"
-                    }
+                    title={directMode ? "还没有创作结果" : "还没有 AI 建议版本"}
                     description={
                       directMode
                         ? "创作完成后会先在这里显示实际结果；只有你查看并明确使用，才会改变正文并创建新版本。"
@@ -5229,26 +5297,6 @@ export function EditorPage() {
                           : "保存正文后可生成一份明确标注的本机示例建议，用于体验安全比较流程。"
                     }
                   />
-                  {candidate?.status === "rejected" && projectId !== null && chapterId !== null && (
-                    <CandidateFeedbackControls
-                      busy={candidateBusy}
-                      onSubmit={async ({ feedbackCode, customFeedback }) => {
-                        const outcome = await runtime.story.writingFeedback.recordExplicitFeedback({
-                          idempotencyKey: `editor-candidate:${candidate.id}:${feedbackCode ?? "none"}:${customFeedback?.normalize("NFKC").trim().replace(/\s+/gu, " ") ?? "none"}`,
-                          projectId,
-                          chapterId,
-                          candidateId: candidate.id,
-                          feedbackCode,
-                          customFeedback,
-                        });
-                        if (outcome.learnedPreference !== null) {
-                          setEditorNotice(
-                            "同类意见已形成一条可见的写作偏好；可在“设定 → 写作偏好”中修改或删除。",
-                          );
-                        }
-                      }}
-                    />
-                  )}
                 </div>
               ) : (
                 <div className="candidate-content">
@@ -5317,8 +5365,10 @@ export function EditorPage() {
                       </div>
                     </details>
                   )}
-                  <pre>{boundedEditorPreview(candidate.content)}</pre>
-                  {candidate.content.length > 4_000 && (
+                  <pre aria-label={candidateReady ? "当前生成结果预览" : "完整历史生成结果"}>
+                    {candidateReady ? boundedEditorPreview(candidate.content) : candidate.content}
+                  </pre>
+                  {candidateReady && candidate.content.length > 4_000 && (
                     <p className="candidate-panel__hint">
                       面板仅显示前 4,000 个字符；完整建议仍保留，可在比较界面逐项处理或另存。
                     </p>
@@ -5376,8 +5426,46 @@ export function EditorPage() {
                       </Button>
                     </div>
                   )}
+                  {candidate.status === "rejected" && (
+                    <InlineAlert
+                      tone="info"
+                      title={directMode ? "这份创作结果已放弃" : "这份建议已放弃"}
+                      description="结果内容仍保留在本机历史中，只读查看不会改变正文或创建版本。"
+                    />
+                  )}
+                  {candidate.status === "rejected" && projectId !== null && chapterId !== null && (
+                    <CandidateFeedbackControls
+                      busy={candidateBusy}
+                      onSubmit={async ({ feedbackCode, customFeedback }) => {
+                        const outcome = await runtime.story.writingFeedback.recordExplicitFeedback({
+                          idempotencyKey: `editor-candidate:${candidate.id}:${feedbackCode ?? "none"}:${customFeedback?.normalize("NFKC").trim().replace(/\s+/gu, " ") ?? "none"}`,
+                          projectId,
+                          chapterId,
+                          candidateId: candidate.id,
+                          feedbackCode,
+                          customFeedback,
+                        });
+                        if (outcome.learnedPreference !== null) {
+                          setEditorNotice(
+                            "同类意见已形成一条可见的写作偏好；可在“设定 → 写作偏好”中修改或删除。",
+                          );
+                        }
+                      }}
+                    />
+                  )}
                 </div>
               )}
+              <CandidateHistoryPanel
+                candidates={displayedCandidateHistory}
+                now={runtime.clock.now()}
+                selectedCandidateId={candidate?.id ?? null}
+                busy={candidateBusy}
+                onView={viewHistoricalCandidate}
+                onReject={(historyCandidate) =>
+                  rejectCandidate(historyCandidate).then(() => undefined)
+                }
+                onRetain={retainCandidate}
+              />
               {!editorClean && (
                 <p className="candidate-panel__hint" role="status">
                   请先保存当前正文，再处理{candidateVersionLabel}。

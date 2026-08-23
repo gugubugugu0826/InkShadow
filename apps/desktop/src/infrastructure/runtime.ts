@@ -8,6 +8,7 @@ import {
   ListChapterVersions,
   ListProjects,
   RejectAiCandidate,
+  RetainAiCandidate,
   ReviseAiCandidate,
   RenameProject,
   RestoreChapterVersion,
@@ -22,6 +23,7 @@ import {
   type ChapterVersionRepository,
   type ContentCommitRepository,
   type ContentHasher,
+  type ProjectDisplayIdentityRepository,
   type ProjectRepository,
   type ProjectImportCommitRepository,
   type RecoveryDraftRepository,
@@ -469,6 +471,7 @@ export interface CandidateStore extends AiCandidateRepository {
 
 export interface RuntimeRepositories {
   readonly projects: ProjectRepository;
+  readonly projectDisplayIdentities: ProjectDisplayIdentityRepository;
   readonly chapters: ChapterRepository;
   readonly chapterPrivacy: ChapterPrivacyRepository;
   readonly chapterVersions: ChapterVersionRepository;
@@ -496,6 +499,7 @@ export interface RuntimeUseCases {
   readonly acceptCandidate: AcceptAiCandidate;
   readonly reviseCandidate: ReviseAiCandidate;
   readonly rejectCandidate: RejectAiCandidate;
+  readonly retainCandidate: RetainAiCandidate;
 }
 
 export interface SecretSummary {
@@ -2057,6 +2061,7 @@ function buildRuntime(
       acceptCandidate,
       reviseCandidate: new ReviseAiCandidate(repositories.aiCandidates, clock, hasher),
       rejectCandidate: new RejectAiCandidate(repositories.aiCandidates, clock),
+      retainCandidate: new RetainAiCandidate(repositories.aiCandidates, clock),
     },
     close: closeRuntime,
   };

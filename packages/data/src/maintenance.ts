@@ -111,6 +111,8 @@ const RESTORABLE_TABLES = [
   "writing_experience_preferences",
   "writing_provider_disclosure_grants",
   "projects",
+  "project_display_identities",
+  "project_display_identity_revisions",
   "project_seeds",
   "story_settings_import_receipts",
   "team_template_application_receipts",
@@ -281,6 +283,13 @@ const RESTORABLE_TABLES = [
   "fine_tuning_audit_events",
   "community_marketplace_installs",
 ] as const;
+
+// The display-identity table was introduced after the released backup
+// contract. Its absence is meaningful legacy state, not backup corruption.
+const LEGACY_OPTIONAL_RESTORABLE_TABLES = new Set<string>([
+  "project_display_identities",
+  "project_display_identity_revisions",
+]);
 
 // Search snapshots are derived projections, not backup authority. Clearing
 // them in the same restore transaction prevents restored source data from
@@ -463,6 +472,8 @@ const RESTORE_DELETE_ORDER = [
   "authoritative_story_graph_state",
   "project_novel_skill_bindings",
   "project_seeds",
+  "project_display_identity_revisions",
+  "project_display_identities",
   "projects",
   "novel_skill_definitions",
 ] as const;
@@ -705,6 +716,8 @@ const RESTORE_INSERT_ORDER = [
   "novel_skill_invocation_snapshots",
   "novel_skill_invocation_items",
   "novel_skill_evaluation_suites",
+  "project_display_identities",
+  "project_display_identity_revisions",
   "novel_skill_evaluation_fixtures",
   "novel_skill_evaluation_manifest_items",
   "novel_skill_evaluation_protocols",
@@ -1131,6 +1144,10 @@ export class DatabaseMaintenanceService {
         ),
       ]);
       const sourceTables = new Set(tableRows.map(({ name }) => name));
+      const sourceProjectDisplayIdentityTableCount = [
+        "project_display_identities",
+        "project_display_identity_revisions",
+      ].filter((table) => sourceTables.has(table)).length;
       const sourceCapabilityScanColumns = new Set(capabilityScanColumns.map(({ name }) => name));
       const sourceCandidateColumns = new Set(candidateColumns.map(({ name }) => name));
       const sourceChapterVersionColumns = new Set(chapterVersionColumns.map(({ name }) => name));
@@ -1150,7 +1167,10 @@ export class DatabaseMaintenanceService {
         integrityRows.length !== 1 ||
         integrityRows[0]?.integrity_check !== "ok" ||
         foreignKeyRows.length > 0 ||
-        RESTORABLE_TABLES.some((table) => !sourceTables.has(table)) ||
+        RESTORABLE_TABLES.some(
+          (table) => !sourceTables.has(table) && !LEGACY_OPTIONAL_RESTORABLE_TABLES.has(table),
+        ) ||
+        sourceProjectDisplayIdentityTableCount === 1 ||
         !MODEL_CAPABILITY_SCAN_V73_COLUMNS.every((column) =>
           sourceCapabilityScanColumns.has(column),
         ) ||
@@ -1216,6 +1236,41 @@ export class DatabaseMaintenanceService {
                SELECT project_id, schema_version, authority_epoch,
                       NULL, NULL, NULL, NULL
                FROM restore_source.authoritative_story_graph_state`,
+            );
+          } else if (table === "project_display_identities") {
+            if (!sourceTables.has(table)) {
+              // Old backups intentionally have neither display-identity table.
+              // Restored evaluation suites already recreate exact system
+              // identities and their first revision through migration triggers.
+              continue;
+            }
+            // Evaluation-suite insertion has already produced transient exact
+            // system identities. New backups are authoritative for both the
+            // current revision and its audit trail, so discard those transients.
+            await transaction.execute("DELETE FROM main.project_display_identity_revisions");
+            await transaction.execute("DELETE FROM main.project_display_identities");
+            await transaction.execute(
+              `INSERT INTO main.project_display_identities (
+                 project_id, display_kind, provenance, revision, created_at, updated_at
+               )
+               SELECT project_id, display_kind, provenance, revision, created_at, updated_at
+               FROM restore_source.project_display_identities`,
+            );
+          } else if (table === "project_display_identity_revisions") {
+            if (!sourceTables.has(table)) {
+              continue;
+            }
+            // Current-row inserts create provisional audit events. Replace them
+            // with the source's exact content-free revision history.
+            await transaction.execute("DELETE FROM main.project_display_identity_revisions");
+            await transaction.execute(
+              `INSERT INTO main.project_display_identity_revisions (
+                 project_id, revision, previous_display_kind,
+                 display_kind, provenance, recorded_at
+               )
+               SELECT project_id, revision, previous_display_kind,
+                      display_kind, provenance, recorded_at
+               FROM restore_source.project_display_identity_revisions`,
             );
           } else if (table === "fine_tuning_jobs") {
             // A completed source job points at its artifact, while the artifact

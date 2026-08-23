@@ -87,6 +87,7 @@ async function runEvidence(
   const memoryBefore = readPerformanceMemory();
   const projectResult = await runtime.useCases.createProject.execute({
     name: `WebView stress ${new Date().toISOString()}`,
+    displayKind: "test_work",
   });
   if (!projectResult.ok) {
     throw projectResult.error;
