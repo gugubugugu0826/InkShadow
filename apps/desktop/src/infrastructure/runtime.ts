@@ -2181,7 +2181,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.2.7",
+    appVersion: "0.2.8",
     platform: "browser",
     architecture: "web",
     environment: "development",
