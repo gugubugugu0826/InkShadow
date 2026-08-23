@@ -324,11 +324,11 @@ async function prepareSelectionRewriteCurrent(
       privacy:
         inspection.dataDestination === "local"
           ? "选区与相关故事资料只发送给当前已验证的本机模型。"
-          : "选区、改写要求和本次编译的相关故事资料会发送到所选 AI 服务。",
+          : "选区、改写要求和本次挑选的故事资料会发送到所选 AI 服务。",
       sends: Object.freeze([
         `当前选中的 ${String(anchored.selectedText.length)} 个字符`,
         "你填写的改写要求",
-        "本次上下文编译明确选中的大纲、已确认设定与相关正文片段",
+        "本次挑选的故事资料：大纲、已确认设定与相关正文片段",
       ]),
       maximumProviderCalls: 1 as const,
       automaticRetryCount: 0 as const,

@@ -28,6 +28,11 @@ import type { DesktopRuntime } from "../infrastructure/runtime";
 import { downloadBrowserExportArtifact } from "../infrastructure/export-artifact-download";
 import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import {
+  ordinaryStorySettingsIssueAction,
+  ordinaryStorySettingsIssueLocation,
+  ordinaryStorySettingsIssueMessage,
+} from "../infrastructure/story-settings-ordinary-language";
+import {
   inspectLegacyGuidedOpeningRecords,
   parseNaturalLanguageSetting,
   projectStorySettingsForExport,
@@ -373,7 +378,11 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
         const existing = existingCharacterByName.get(normalizeName(character.name));
         if (existing !== undefined) {
           characterResolutions[character.id] = {
-            action: plainCandidate.kind === "character_voice" ? "merge" : "keep_current",
+            action:
+              plainCandidate.kind === "character_voice" ||
+              plainCandidate.kind === "character_profile"
+                ? "merge"
+                : "keep_current",
             existingRecordId: existing.id,
             expectedRevision: existing.revision,
             expectedCurrentVersion: existing.toSnapshot().currentVersion,
@@ -437,7 +446,7 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
         setNotice({
           tone: "info",
           title: "旧关系已补全并完成迁移",
-          description: "新关系已保存为正式事实，旧来源已按原修订号安全整理；AI 补充建议没有写入。",
+          description: "新关系已保存为正式事实，旧来源已按原修订号安全整理；本地整理建议没有写入。",
         });
         return;
       }
@@ -447,7 +456,7 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
       setNotice({
         tone: "info",
         title: "设定已保存",
-        description: "只写入了你刚才确认的字段；AI 补充建议没有被当成事实。",
+        description: "只写入了你刚才确认的字段；本地整理建议没有被当成事实。",
       });
     } catch (cause: unknown) {
       setNotice(errorNotice(cause));
@@ -591,7 +600,7 @@ export function StorySettingsTools(props: StorySettingsToolsProps) {
       setNotice({
         tone: "error",
         title: "设定文件过大",
-        description: "单个故事设定文件不得超过 5 MiB。请拆分后重新预检。",
+        description: "单个故事设定文件不得超过 5 兆字节。请拆分后重新预检。",
       });
       return;
     }
@@ -1063,7 +1072,7 @@ function PlainCandidatePreview({
       <InlineAlert
         tone="info"
         title="需要你选择设定类型"
-        description="这句话没有足够稳定的结构，应用不会猜测写入；可以继续使用结构化手动表单。"
+        description={candidate.missingInformation + " 原句已保留，可以继续使用结构化手动表单。"}
       />
     );
   }
@@ -1080,10 +1089,17 @@ function PlainCandidatePreview({
             ["规则名称", candidate.title],
             ["规则内容", candidate.rule],
           ]
-        : [
-            ["人物", candidate.characterName],
-            ["说话方式", candidate.voice],
-          ];
+        : candidate.kind === "character_profile"
+          ? [
+              ["人物", candidate.characterName],
+              ["身份或任职", candidate.role ?? "待补充"],
+              ["年龄", candidate.age ?? "待补充"],
+              ["补充说明", candidate.details ?? "待补充"],
+            ]
+          : [
+              ["人物", candidate.characterName],
+              ["说话方式", candidate.voice],
+            ];
   return (
     <Card>
       <CardHeader>
@@ -1100,7 +1116,7 @@ function PlainCandidatePreview({
           ))}
         </dl>
         <div className="story-settings-ai-suggestions">
-          <strong>AI 补充建议（不会自动写入）</strong>
+          <strong>本地整理建议（不会自动写入）</strong>
           <ul>
             {candidate.suggestions.map((suggestion) => (
               <li key={suggestion}>{suggestion}</li>
@@ -1142,7 +1158,7 @@ function ImportStage(props: ImportStageProps) {
         <InlineAlert
           tone="info"
           title="原项目不会被覆盖"
-          description="文件先做 dry run；冲突逐项决定，正式写入使用单一事务并保留撤销收据。"
+          description="文件先做完整预检；冲突逐项决定，正式写入使用单一事务并保留撤销记录。"
         />
         <div className="story-governance-actions">
           <Button variant="secondary" onClick={props.onExportCurrent}>
@@ -1161,8 +1177,8 @@ function ImportStage(props: ImportStageProps) {
         <h3>唯一支持的机器格式</h3>
         <p>文件必须是墨影设定文件，包含格式标记、版本标记和明确分类数组。</p>
         <ul>
-          <li>人物使用稳定 id；同名与别名会在预检中报告。</li>
-          <li>每条关系必须引用两个不同的人物 id。</li>
+          <li>人物使用稳定编号；同名与别名会在预检中报告。</li>
+          <li>每条关系必须引用两个不同的人物编号。</li>
           <li>未知字段会标出精确路径，不会静默写入。</li>
           <li>文件不会包含接口密钥、模型原始响应或隐藏推理。</li>
         </ul>
@@ -1173,7 +1189,7 @@ function ImportStage(props: ImportStageProps) {
     return (
       <div>
         <h3>从模板开始最稳妥</h3>
-        <p>下载模板后只修改示例值；保留 format 和 schemaVersion。</p>
+        <p>下载模板后只修改示例内容；不要删除模板中的文件格式和版本信息。</p>
         <div className="story-governance-actions">
           <Button onClick={props.onDownloadTemplate}>下载设定模板</Button>
           <Button variant="secondary" onClick={props.onViewExample}>
@@ -1187,7 +1203,7 @@ function ImportStage(props: ImportStageProps) {
     return (
       <div>
         <h3>选择本地设定文件</h3>
-        <p>单个文件上限 5 MiB；不会上传，也不会把普通小说文件误当成设定。</p>
+        <p>单个文件上限 5 兆字节；不会上传，也不会把普通小说文件误当成设定。</p>
         <Button onClick={props.onChooseFile}>选择墨影设定文件</Button>
         {props.fileName !== null && <p>已选择：{props.fileName}</p>}
       </div>
@@ -1325,7 +1341,9 @@ function PreflightSummary({
         <ul className="story-settings-issue-list">
           {report.issues.map((issue, index) => (
             <li key={`${issue.path}:${issue.code}:${String(index)}`}>
-              <strong>{issue.path}</strong>：{issue.message} <span>{issue.suggestedAction}</span>
+              <strong>{ordinaryStorySettingsIssueLocation(issue)}</strong>：
+              {ordinaryStorySettingsIssueMessage(issue)}{" "}
+              <span>{ordinaryStorySettingsIssueAction(issue)}</span>
             </li>
           ))}
         </ul>
@@ -1374,6 +1392,24 @@ function plainCandidateBundle(
           rule: candidate.rule,
           exceptions: [],
           locked: false,
+        },
+      ],
+    };
+  }
+  if (candidate.kind === "character_profile") {
+    const shortDescription = [
+      candidate.age === null ? null : "年龄：" + candidate.age,
+      candidate.details,
+    ]
+      .filter((value): value is string => value !== null)
+      .join("；");
+    return {
+      ...base,
+      characters: [
+        {
+          ...portableCharacter("character.statement.profile", candidate.characterName),
+          ...(candidate.role === null ? {} : { role: candidate.role }),
+          ...(shortDescription.length === 0 ? {} : { shortDescription }),
         },
       ],
     };

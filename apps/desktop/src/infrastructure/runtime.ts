@@ -73,6 +73,7 @@ import {
   SearchVectorSqliteStore,
   TauriSqliteExecutor,
   createSqliteRepositories,
+  type AiCandidateListWithIsolation,
   type AcceptedVersionTaskFactory,
   type DatabaseBackupReceipt,
   type DatabaseIntegrityReport,
@@ -461,6 +462,9 @@ export type RuntimeMode = "tauri" | "browser-development";
 export interface CandidateStore extends AiCandidateRepository {
   create(candidate: AiCandidate): Promise<Result<void, AppError>>;
   listByChapterId(chapterId: UuidV7): Promise<Result<readonly AiCandidate[], AppError>>;
+  listByChapterIdWithIsolation?(
+    chapterId: UuidV7,
+  ): Promise<Result<AiCandidateListWithIsolation, AppError>>;
 }
 
 export interface RuntimeRepositories {

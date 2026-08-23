@@ -93,6 +93,8 @@ export interface StageAutomaticFactCommand {
   readonly invalidatedAt?: string | null;
   readonly confidence: number;
   readonly origin: Exclude<StoryFactOrigin, "user" | "legacy">;
+  /** Deterministic local extraction may still require an author's explicit decision. */
+  readonly requireHumanReview?: boolean;
 }
 
 export interface StagedStoryFact {
@@ -238,9 +240,40 @@ export class StoryFactApplicationService {
   public async stageAutomaticFact(
     command: StageAutomaticFactCommand,
   ): Promise<Result<StagedStoryFact, StoryCoreError>> {
+    const staged = this.buildAutomaticFact(command);
+    if (!staged.ok) return staged;
+    const saved = await this.options.facts.create(staged.value.fact);
+    return saved.ok ? staged : saved;
+  }
+
+  public async stageAutomaticFactWithAuthorityFence(
+    command: StageAutomaticFactCommand,
+    fence: StoryFactAuthorityFence,
+  ): Promise<Result<StagedStoryFact, StoryCoreError>> {
+    const staged = this.buildAutomaticFact(command);
+    if (!staged.ok) return staged;
+    if (this.options.facts.createWithAuthorityFence === undefined) {
+      return err(
+        new StoryCoreError({
+          code: "STORY_REPOSITORY_ERROR",
+          message: "The story fact store does not support an atomic authority fence.",
+        }),
+      );
+    }
+    const saved = await this.options.facts.createWithAuthorityFence(staged.value.fact, fence);
+    return saved.ok
+      ? ok(Object.freeze({ fact: saved.value.fact, updatePolicy: staged.value.updatePolicy }))
+      : saved;
+  }
+
+  private buildAutomaticFact(
+    command: StageAutomaticFactCommand,
+  ): Result<StagedStoryFact, StoryCoreError> {
     const updatePolicy = storyFactUpdatePolicy(command.factType);
     const canBeTemporary =
-      command.origin === "system" && updatePolicy !== "human_confirmation_required";
+      command.origin === "system" &&
+      updatePolicy !== "human_confirmation_required" &&
+      command.requireHumanReview !== true;
     const created = StoryFact.create({
       id: this.options.ids.next(),
       projectId: command.projectId,
@@ -259,11 +292,7 @@ export class StoryFactApplicationService {
       humanConfirmed: false,
       now: this.options.clock.now(),
     });
-    if (!created.ok) {
-      return created;
-    }
-    const saved = await this.options.facts.create(created.value);
-    return saved.ok ? ok(Object.freeze({ fact: created.value, updatePolicy })) : saved;
+    return created.ok ? ok(Object.freeze({ fact: created.value, updatePolicy })) : created;
   }
 
   public confirm(command: {
@@ -323,6 +352,24 @@ export class StoryFactApplicationService {
   }): Promise<Result<StoryFact, StoryCoreError>> {
     return this.mutate(command.factId, (fact) =>
       fact.deprecate({
+        humanConfirmed: command.humanConfirmed,
+        expectedRevision: command.expectedRevision,
+        now: this.options.clock.now(),
+      }),
+    );
+  }
+
+  public editStagedAsUser(command: {
+    readonly factId: string;
+    readonly contentText: string;
+    readonly actorId: string;
+    readonly humanConfirmed: boolean;
+    readonly expectedRevision: number;
+  }): Promise<Result<StoryFact, StoryCoreError>> {
+    return this.mutate(command.factId, (fact) =>
+      fact.editStagedAsUser({
+        contentText: command.contentText,
+        actorId: command.actorId,
         humanConfirmed: command.humanConfirmed,
         expectedRevision: command.expectedRevision,
         now: this.options.clock.now(),
@@ -526,6 +573,50 @@ export class StoryFactApplicationService {
             replacedFactIds: Object.freeze([...retired.value]),
           }),
         );
+      },
+    );
+  }
+
+  public replaceRebuildableSystemFactWithAuthorityFence(
+    command: ReplaceRebuildableSystemFactCommand,
+    fence: StoryFactAuthorityFence,
+  ): Promise<Result<ReplacedRebuildableSystemFact, StoryCoreError>> {
+    const validation = validateRebuildableReplacement(command.factType, command.replacementKey);
+    if (!validation.ok) {
+      return Promise.resolve(validation);
+    }
+    const replaceWithFence =
+      this.options.facts.replaceRebuildableSystemFactWithAuthorityFence?.bind(this.options.facts);
+    if (replaceWithFence === undefined) {
+      return Promise.resolve(
+        err(
+          new StoryCoreError({
+            code: "STORY_REPOSITORY_ERROR",
+            message: "The story fact store does not support an atomic rebuildable replacement.",
+          }),
+        ),
+      );
+    }
+    return this.withReplacementLock(
+      `${command.projectId}:${command.factType}:${command.replacementKey}`,
+      async () => {
+        const staged = this.buildAutomaticFact({
+          projectId: command.projectId,
+          factType: command.factType,
+          ...(command.contentText === undefined ? {} : { contentText: command.contentText }),
+          structuredValue: {
+            schemaVersion: REBUILDABLE_SYSTEM_FACT_SCHEMA_VERSION,
+            replacementKey: command.replacementKey,
+            payload: command.payload,
+          },
+          source: command.source,
+          ...(command.effectiveAt === undefined ? {} : { effectiveAt: command.effectiveAt }),
+          ...(command.invalidatedAt === undefined ? {} : { invalidatedAt: command.invalidatedAt }),
+          confidence: command.confidence,
+          origin: "system",
+        });
+        if (!staged.ok) return staged;
+        return replaceWithFence(staged.value.fact, command.replacementKey, fence);
       },
     );
   }

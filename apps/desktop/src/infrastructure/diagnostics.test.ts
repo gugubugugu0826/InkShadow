@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { runGenerationPreflight } from "@inkshadow/ai-core";
 
 import { collectDesktopDiagnosticArtifact, partitionDiagnosticErrorCodes } from "./diagnostics";
@@ -10,6 +10,10 @@ import {
   recordSafeInvocationRouteDiagnostic,
 } from "./generation-preflight-diagnostics";
 import { recordSafeGuidedOpeningStatus } from "./guided-opening-diagnostics";
+import {
+  recordSafeOperationIncident,
+  resetSafeOperationDiagnosticsForTests,
+} from "./safe-operation-diagnostics";
 import {
   ModelHubOperationCoordinator,
   createInitialModelHubPageSnapshot,
@@ -22,6 +26,49 @@ import {
 import { createDevelopmentRuntime } from "./runtime";
 
 describe("desktop diagnostics", () => {
+  afterEach(() => resetSafeOperationDiagnosticsForTests());
+
+  it("exports support-number operation failures without messages, content, or credentials", async () => {
+    window.localStorage.clear();
+    resetSafeOperationDiagnosticsForTests();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const nested = Object.assign(new Error("sk-secret 正文 C:/private/book.txt"), {
+      code: "MODEL_HUB_ROUTE_NOT_CONFIGURED",
+    });
+    const incident = recordSafeOperationIncident({
+      operation: "story_planning",
+      stage: "prepare_disclosure",
+      cause: Object.assign(new Error("private provider message"), {
+        code: "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED",
+        cause: nested,
+      }),
+      projectId: "019f9f4a-b3c7-7350-9226-000000000001",
+      chapterId: "019f9f4a-b3c7-7350-9226-000000000002",
+      requestId: "not-a-safe-request-secret",
+      dispatched: false,
+      occurredAt: "2026-08-23T04:00:00.000Z",
+    });
+
+    const artifact = await collectDesktopDiagnosticArtifact(runtime);
+
+    expect(artifact.bundle.schemaVersion).toBe(4);
+    expect(artifact.bundle.recentOperationFailures[0]).toMatchObject({
+      supportId: incident.supportId,
+      operation: "story_planning",
+      stage: "prepare_disclosure",
+      projectId: "019f9f4a-b3c7-7350-9226-000000000001",
+      chapterId: "019f9f4a-b3c7-7350-9226-000000000002",
+      requestId: null,
+      normalizedErrorCode: "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED",
+      dispatched: false,
+      automaticRetryCount: 0,
+    });
+    expect(artifact.content).not.toContain("sk-secret");
+    expect(artifact.content).not.toContain("private provider message");
+    expect(artifact.content).not.toContain("C:/private/book.txt");
+    expect(artifact.content).not.toContain("not-a-safe-request-secret");
+  });
+
   it("partitions current and historical errors at the session boundary and deduplicates codes", () => {
     expect(
       partitionDiagnosticErrorCodes(
@@ -256,7 +303,7 @@ describe("desktop diagnostics", () => {
 
     expect(artifact.fileName).toMatch(/^墨影-诊断-\d{4}-\d{2}-\d{2}-/u);
     expect(artifact.bundle).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       summary: {
         appVersion: "0.2.7",
         databaseHealth: "unknown",
@@ -397,7 +444,7 @@ describe("desktop diagnostics", () => {
       cloudSyncEnabled: false,
       encryptedSyncStore: "unavailable",
       entitlementCacheTrust: "unverified_only",
-      diagnosticSchemaVersion: 3,
+      diagnosticSchemaVersion: 4,
     });
     expect(typeof artifact.bundle.currentSessionStartedAt).toBe("string");
     expect(Array.isArray(artifact.bundle.historicalErrorCodes)).toBe(true);

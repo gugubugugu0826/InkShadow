@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { AiCandidate, type UuidV7 } from "@inkshadow/domain";
+import { parseUuidV7 as parseStoryUuidV7 } from "@inkshadow/story-core";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -89,8 +90,10 @@ describe("ImportJourneyPage safe Provider boundary", () => {
     expect(generate).not.toHaveBeenCalled();
   });
 
-  it("keeps accepted正文 safe and skips derived work when the direct fact preflight fails", async () => {
+  it("keeps accepted正文 safe in professional mode when local fact organization fails", async () => {
     const fixture = await seededRuntime();
+    const preference = await fixture.runtime.writingExperience.getOrInitialize();
+    await fixture.runtime.writingExperience.switchMode("professional", preference.revision);
     const generate = vi.spyOn(fixture.runtime.modelGateway, "generate");
     const chapter = await fixture.runtime.repositories.chapters.findById(fixture.chapterId);
     if (!chapter.ok || chapter.value === null) throw new Error("Expected the imported chapter.");
@@ -147,11 +150,7 @@ describe("ImportJourneyPage safe Provider boundary", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "接受试改到正文" }));
     expect(
-      await screen.findByText(
-        "正文和版本已安全保存；故事资料整理暂未完成，可在任务与通知中重试。",
-        undefined,
-        { timeout: 5_000 },
-      ),
+      await screen.findByText("正文和版本已安全保存；故事资料整理暂未完成，可在任务与通知中重试。"),
     ).toBeInTheDocument();
 
     const acceptedChapter = await fixture.runtime.repositories.chapters.findById(fixture.chapterId);
@@ -172,6 +171,73 @@ describe("ImportJourneyPage safe Provider boundary", () => {
     expect(summary).not.toHaveBeenCalled();
     expect(storyState).not.toHaveBeenCalled();
     expect(causal).not.toHaveBeenCalled();
+  });
+
+  it("still organizes the accepted direct-mode version when background task registration fails", async () => {
+    const fixture = await seededRuntime();
+    const chapter = await fixture.runtime.repositories.chapters.findById(fixture.chapterId);
+    if (!chapter.ok || chapter.value === null) throw new Error("Expected the imported chapter.");
+    const streaming = AiCandidate.createStreaming({
+      id: fixture.runtime.ids.next(),
+      projectId: chapter.value.projectId,
+      chapterId: chapter.value.id,
+      source: "polish",
+      baseVersionId: chapter.value.currentVersionId,
+      now: fixture.runtime.clock.now(),
+      applicationIntent: {
+        task: "whole_chapter_rewrite",
+        application: "replace_document",
+        payload: "full_document",
+        startUtf16: null,
+        endUtf16: null,
+      },
+    });
+    if (!streaming.ok) throw streaming.error;
+    const rewritten = "周望是钟楼的管理员。钟楼在旧城。";
+    const checksum = await fixture.runtime.hasher.sha256(rewritten);
+    if (!checksum.ok) throw checksum.error;
+    const ready = streaming.value.markReady(rewritten, checksum.value, fixture.runtime.clock.now());
+    if (!ready.ok) throw ready.error;
+    const stored = await fixture.runtime.repositories.aiCandidates.create(ready.value);
+    if (!stored.ok) throw stored.error;
+    writeDraft(fixture.completed, fixture.chapterId, {
+      candidateId: ready.value.id,
+      candidateRevision: ready.value.revision,
+      chapterId: fixture.chapterId,
+      excerptStart: 0,
+      excerptEnd: chapter.value.content.length,
+      providerId: "historical-provider",
+      modelId: "historical-model",
+      requestId: "historical-request",
+      restoredAt: null,
+    });
+    vi.spyOn(fixture.runtime.taskCenter, "findTaskByIdempotencyKey").mockRejectedValue(
+      new Error("TASK_REGISTRATION_UNAVAILABLE"),
+    );
+    const stageAutomaticFactWithAuthorityFence = vi.spyOn(
+      fixture.runtime.story.factService,
+      "stageAutomaticFactWithAuthorityFence",
+    );
+
+    renderPage(fixture.runtime);
+    expect(await screen.findByRole("region", { name: "代表段落试改结果" })).toHaveTextContent(
+      rewritten,
+    );
+    await userEvent.setup().click(screen.getByRole("button", { name: "接受试改到正文" }));
+
+    expect(
+      await screen.findByText(
+        "正文和版本已安全保存；本地设定已整理；后台任务登记失败，可在任务与通知中重试。",
+      ),
+    ).toBeVisible();
+    expect(stageAutomaticFactWithAuthorityFence).toHaveBeenCalled();
+    const projectId = parseStoryUuidV7(chapter.value.projectId);
+    if (!projectId.ok) throw projectId.error;
+    const facts = await fixture.runtime.story.facts.listByProjectId(projectId.value);
+    if (!facts.ok) throw facts.error;
+    expect(facts.value.map((fact) => fact.toSnapshot().contentText)).toContain(
+      "周望是钟楼的管理员。",
+    );
   });
 });
 

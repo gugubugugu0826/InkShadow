@@ -281,7 +281,7 @@ export function FineTuningGovernancePage({
         <InlineAlert
           tone="error"
           title={normalizedFailure.title}
-          description={`${normalizedFailure.description}（${normalizedFailure.code}）`}
+          description={normalizedFailure.description}
           action={{ label: "重新加载", onClick: () => void load() }}
         />
       )}
@@ -1766,9 +1766,9 @@ function formatMicros(value: number): string {
 }
 
 function formatBytes(value: number): string {
-  if (value < 1_024) return `${String(value)} B`;
-  if (value < 1_024 * 1_024) return `${(value / 1_024).toFixed(1)} KB`;
-  return `${(value / (1_024 * 1_024)).toFixed(1)} MB`;
+  if (value < 1_024) return `${String(value)} 字节`;
+  if (value < 1_024 * 1_024) return `${(value / 1_024).toFixed(1)} 千字节`;
+  return `${(value / (1_024 * 1_024)).toFixed(1)} 兆字节`;
 }
 
 function formatTimestamp(value: string): string {

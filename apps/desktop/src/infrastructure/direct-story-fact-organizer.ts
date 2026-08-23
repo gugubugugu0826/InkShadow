@@ -56,10 +56,12 @@ export interface DirectStoryFactOrganizerDependencies {
   readonly facts: Pick<StoryFactStore, "listByProjectId">;
   readonly factService: Pick<
     StoryFactApplicationService,
-    "replaceRebuildableSystemFact" | "stageAutomaticFact"
+    "replaceRebuildableSystemFactWithAuthorityFence" | "stageAutomaticFactWithAuthorityFence"
   >;
   readonly hasher: ContentHasher;
   readonly now: () => string;
+  /** Re-reads mutable chapter authority immediately before a derived write. */
+  readonly sourceIsCurrent?: () => Promise<boolean>;
 }
 
 export interface CurrentSavedVersionOrganizerDependencies extends DirectStoryFactOrganizerDependencies {
@@ -162,18 +164,31 @@ export async function organizeCurrentSavedVersionStoryFacts(
   if (version.projectId !== input.projectId || version.chapterId !== input.chapterId) {
     throw new Error("Current immutable version does not belong to the accepted chapter.");
   }
-  return organizeDirectStoryFacts(dependencies, {
-    projectId: input.projectId,
-    chapterId: input.chapterId,
-    versionId: input.versionId,
-    versionCreatedAt: version.createdAt,
-    acceptedText: version.content,
-    acceptedStartOffset: 0,
-    sourceLength: version.content.length,
-    sourceContentHash: version.contentChecksum,
-    currentVersionId: chapter.currentVersionId,
-    localOnly: chapter.isLocalOnly,
-  });
+  return organizeDirectStoryFacts(
+    {
+      ...dependencies,
+      sourceIsCurrent: async () => {
+        const latestResult = await dependencies.chapters.findById(input.chapterId as DomainUuidV7);
+        if (!latestResult.ok) throw latestResult.error;
+        return (
+          latestResult.value?.projectId === input.projectId &&
+          latestResult.value.currentVersionId === input.versionId
+        );
+      },
+    },
+    {
+      projectId: input.projectId,
+      chapterId: input.chapterId,
+      versionId: input.versionId,
+      versionCreatedAt: version.createdAt,
+      acceptedText: version.content,
+      acceptedStartOffset: 0,
+      sourceLength: version.content.length,
+      sourceContentHash: version.contentChecksum,
+      currentVersionId: chapter.currentVersionId,
+      localOnly: chapter.isLocalOnly,
+    },
+  );
 }
 
 /**
@@ -185,7 +200,7 @@ export async function organizeDirectStoryFacts(
   dependencies: DirectStoryFactOrganizerDependencies,
   input: DirectStoryFactOrganizerInput,
 ): Promise<DirectStoryFactOrganizerReceipt> {
-  if (input.versionId !== input.currentVersionId) {
+  if (!(await directStoryFactSourceIsCurrent(dependencies, input))) {
     return Object.freeze({
       organizedCount: 0,
       importantReviewCount: 0,
@@ -234,6 +249,9 @@ export async function organizeDirectStoryFacts(
     input.acceptedStartOffset,
     confirmedFactTexts,
   ).slice(0, MAXIMUM_FACTS_PER_VERSION);
+  if (!(await directStoryFactSourceIsCurrent(dependencies, input))) {
+    return staleDirectStoryFactReceipt();
+  }
   let organizedCount = 0;
   let importantReviewCount = 0;
   let alreadyOrganizedCount = 0;
@@ -272,6 +290,13 @@ export async function organizeDirectStoryFacts(
       alreadyOrganizedCount += 1;
       continue;
     }
+    if (!(await directStoryFactSourceIsCurrent(dependencies, input))) {
+      return staleDirectStoryFactReceipt(
+        organizedCount,
+        importantReviewCount,
+        alreadyOrganizedCount,
+      );
+    }
     const observedAt = dependencies.now();
     const evidence = createEvidenceRef({
       projectId: input.projectId,
@@ -291,45 +316,68 @@ export async function organizeDirectStoryFacts(
       branchId: null,
       privacy: input.localOnly ? "local_only" : "standard",
     });
-    const staged = await dependencies.factService.stageAutomaticFact({
-      projectId: input.projectId,
-      factType: candidate.factType,
-      contentText: candidate.contentText,
-      structuredValue: {
-        schemaVersion: REBUILDABLE_SYSTEM_FACT_SCHEMA_VERSION,
-        replacementKey,
-        payload: {
-          schemaVersion: ORGANIZER_SCHEMA,
-          classification: candidate.kind,
-          ...candidate.payload,
-          evidence,
+    const staged = await dependencies.factService.stageAutomaticFactWithAuthorityFence(
+      {
+        projectId: input.projectId,
+        factType: candidate.factType,
+        contentText: candidate.contentText,
+        structuredValue: {
+          schemaVersion: REBUILDABLE_SYSTEM_FACT_SCHEMA_VERSION,
+          replacementKey,
+          payload: {
+            schemaVersion: ORGANIZER_SCHEMA,
+            classification: candidate.kind,
+            ...candidate.payload,
+            evidence,
+          },
         },
+        source: {
+          kind: "chapter_span",
+          reference,
+          chapterId: input.chapterId,
+          versionId: input.versionId,
+          startOffset: candidate.startOffset,
+          endOffset: candidate.endOffset,
+          sourceLength: input.sourceLength,
+          excerpt: candidate.excerpt,
+        },
+        confidence: candidate.kind === "ordinary" ? 0.98 : 0.9,
+        origin: "system",
+        requireHumanReview: true,
       },
-      source: {
-        kind: "chapter_span",
-        reference,
+      {
         chapterId: input.chapterId,
-        versionId: input.versionId,
-        startOffset: candidate.startOffset,
-        endOffset: candidate.endOffset,
-        sourceLength: input.sourceLength,
-        excerpt: candidate.excerpt,
+        expectedCurrentVersionId: input.versionId,
       },
-      confidence: candidate.kind === "ordinary" ? 0.98 : 0.9,
-      origin: "system",
-    });
-    if (!staged.ok) throw staged.error;
+    );
+    if (!staged.ok) {
+      if (staged.error.code === "STORY_FACT_SOURCE_FENCE_FAILED") {
+        return staleDirectStoryFactReceipt(
+          organizedCount,
+          importantReviewCount,
+          alreadyOrganizedCount,
+        );
+      }
+      throw staged.error;
+    }
     existingEvidence.add(referenceIdentity);
     activeDirectEvidence.add(currentEvidenceIdentity);
     if (candidate.kind === "ordinary") organizedCount += 1;
     else importantReviewCount += 1;
   }
 
-  await organizeExtractiveChapterSummary(dependencies, input, {
+  if (!(await directStoryFactSourceIsCurrent(dependencies, input))) {
+    return staleDirectStoryFactReceipt(organizedCount, importantReviewCount, alreadyOrganizedCount);
+  }
+
+  const summarySourceWasCurrent = await organizeExtractiveChapterSummary(dependencies, input, {
     existingEvidence,
     activeDirectEvidence,
     deletedEvidence,
   });
+  if (!summarySourceWasCurrent) {
+    return staleDirectStoryFactReceipt(organizedCount, importantReviewCount, alreadyOrganizedCount);
+  }
 
   return Object.freeze({
     organizedCount,
@@ -339,6 +387,26 @@ export async function organizeDirectStoryFacts(
   });
 }
 
+async function directStoryFactSourceIsCurrent(
+  dependencies: DirectStoryFactOrganizerDependencies,
+  input: DirectStoryFactOrganizerInput,
+): Promise<boolean> {
+  if (input.versionId !== input.currentVersionId) return false;
+  return dependencies.sourceIsCurrent === undefined || (await dependencies.sourceIsCurrent());
+}
+
+function staleDirectStoryFactReceipt(
+  organizedCount = 0,
+  importantReviewCount = 0,
+  alreadyOrganizedCount = 0,
+): DirectStoryFactOrganizerReceipt {
+  return Object.freeze({
+    organizedCount,
+    importantReviewCount,
+    alreadyOrganizedCount,
+    sourceWasCurrent: false,
+  });
+}
 function evidenceIdentity(fact: StoryFact): string {
   const snapshot = fact.toSnapshot();
   return `${snapshot.factType}\u0000${snapshot.source.reference}`;
@@ -369,13 +437,12 @@ function currentDirectEvidenceIdentity(versionId: string, evidenceIdentity: stri
 function directOrganizerEvidenceIdentity(
   snapshot: ReturnType<StoryFact["toSnapshot"]>,
 ): string | null {
-  if (
-    snapshot.origin !== "system" ||
-    snapshot.source.kind !== "chapter_span" ||
-    snapshot.source.chapterId === null
-  ) {
+  if (snapshot.source.kind !== "chapter_span" || snapshot.source.chapterId === null) {
     return null;
   }
+  const isDirectOrganizer =
+    snapshot.source.reference.startsWith(ORGANIZER_REFERENCE_PREFIX) &&
+    (snapshot.origin === "system" || snapshot.origin === "user");
   const structured = storyValueRecord(snapshot.structuredValue);
   const rebuildablePayload = storyValueRecord(structured?.payload);
   const generation = storyValueRecord(rebuildablePayload?.generation);
@@ -384,17 +451,26 @@ function directOrganizerEvidenceIdentity(
     rebuildablePayload?.schemaVersion === CHAPTER_SUMMARY_PAYLOAD_SCHEMA_VERSION &&
     generation?.providerKind === LOCAL_SUMMARY_PROVIDER &&
     generation.modelId === LOCAL_SUMMARY_MODEL &&
+    snapshot.origin === "system" &&
     snapshot.source.reference.startsWith("chapter-summary:");
-  if (!snapshot.source.reference.startsWith(ORGANIZER_REFERENCE_PREFIX) && !isLocalSummary) {
+  if (!isDirectOrganizer && !isLocalSummary) {
     return null;
   }
   const evidence = storyValueRecord(rebuildablePayload?.evidence ?? structured?.evidence);
   const excerptDigest = isLocalSummary
     ? rebuildablePayload.sourceContentHash
-    : evidence?.excerptDigest;
+    : (evidence?.excerptDigest ?? directOrganizerReferenceDigest(snapshot.source.reference));
   return typeof excerptDigest === "string" && /^[a-f0-9]{64}$/u.test(excerptDigest)
     ? directEvidenceIdentity(snapshot.source.chapterId, snapshot.factType, excerptDigest)
     : null;
+}
+
+function directOrganizerReferenceDigest(reference: string): string | null {
+  return (
+    /^direct-local:inkshadow\.direct-local-story-fact\.v1:[^:]+:utf16:\d+-\d+:(?<digest>[a-f0-9]{64}):/u.exec(
+      reference,
+    )?.groups?.digest ?? null
+  );
 }
 
 async function resolveSourceContentHash(
@@ -428,21 +504,22 @@ async function organizeExtractiveChapterSummary(
     activeDirectEvidence: Set<string>;
     deletedEvidence: Set<string>;
   }>,
-): Promise<void> {
+): Promise<boolean> {
   if (
     input.acceptedStartOffset !== 0 ||
     input.acceptedText.length !== input.sourceLength ||
     input.sourceLength === 0 ||
     input.sourceLength > CHAPTER_SUMMARY_MAXIMUM_SOURCE_CHARACTERS
   ) {
-    return;
+    return true;
   }
   const selected = extractiveSummarySentenceRanges(input.acceptedText);
   const primary = selected[0];
-  if (primary === undefined) return;
+  if (primary === undefined) return true;
 
   const sourceHashResult = await dependencies.hasher.sha256(input.acceptedText);
   if (!sourceHashResult.ok) throw sourceHashResult.error;
+  if (!(await directStoryFactSourceIsCurrent(dependencies, input))) return false;
   const sourceHash = sourceHashResult.value;
   const directIdentity = directEvidenceIdentity(input.chapterId, "chapter_summary", sourceHash);
   const currentEvidenceIdentity = currentDirectEvidenceIdentity(input.versionId, directIdentity);
@@ -453,7 +530,7 @@ async function organizeExtractiveChapterSummary(
     evidenceState.activeDirectEvidence.has(currentEvidenceIdentity) ||
     evidenceState.deletedEvidence.has(directIdentity)
   ) {
-    return;
+    return true;
   }
 
   const citations = Object.freeze(
@@ -466,51 +543,61 @@ async function organizeExtractiveChapterSummary(
       }),
     ),
   );
-  const replaced = await dependencies.factService.replaceRebuildableSystemFact({
-    projectId: input.projectId,
-    factType: "chapter_summary",
-    replacementKey: `chapter:${input.chapterId}`,
-    contentText: selected.map(({ excerpt }) => excerpt).join(" "),
-    payload: {
-      schemaVersion: CHAPTER_SUMMARY_PAYLOAD_SCHEMA_VERSION,
-      sourceProjectId: input.projectId,
-      sourceChapterId: input.chapterId,
-      sourceVersionId: input.versionId,
-      sourceContentHash: sourceHash,
-      authorityMode: "plain_non_authoritative",
-      citations,
-      keyEvents: [],
-      continuityNotes: [],
-      generation: {
-        task: CHAPTER_SUMMARY_TASK,
-        providerKind: LOCAL_SUMMARY_PROVIDER,
-        modelId: LOCAL_SUMMARY_MODEL,
-        invocationId: input.versionId,
+  const replaced = await dependencies.factService.replaceRebuildableSystemFactWithAuthorityFence(
+    {
+      projectId: input.projectId,
+      factType: "chapter_summary",
+      replacementKey: `chapter:${input.chapterId}`,
+      contentText: selected.map(({ excerpt }) => excerpt).join(" "),
+      payload: {
+        schemaVersion: CHAPTER_SUMMARY_PAYLOAD_SCHEMA_VERSION,
+        sourceProjectId: input.projectId,
+        sourceChapterId: input.chapterId,
+        sourceVersionId: input.versionId,
+        sourceContentHash: sourceHash,
+        authorityMode: "plain_non_authoritative",
+        citations,
+        keyEvents: [],
+        continuityNotes: [],
+        generation: {
+          task: CHAPTER_SUMMARY_TASK,
+          providerKind: LOCAL_SUMMARY_PROVIDER,
+          modelId: LOCAL_SUMMARY_MODEL,
+          invocationId: input.versionId,
+        },
+        budget: {
+          strategy: "bounded_utf16_segments",
+          segmentCharacters: CHAPTER_SUMMARY_SEGMENT_CHARACTERS,
+          maximumSegments: CHAPTER_SUMMARY_MAXIMUM_SEGMENTS,
+          sourceCharacters: input.sourceLength,
+          estimatedInputTokens: Math.max(1, Math.ceil(input.sourceLength / 4)),
+          tokenEstimate: "model_hub_estimate_not_provider_tokenizer",
+        },
       },
-      budget: {
-        strategy: "bounded_utf16_segments",
-        segmentCharacters: CHAPTER_SUMMARY_SEGMENT_CHARACTERS,
-        maximumSegments: CHAPTER_SUMMARY_MAXIMUM_SEGMENTS,
-        sourceCharacters: input.sourceLength,
-        estimatedInputTokens: Math.max(1, Math.ceil(input.sourceLength / 4)),
-        tokenEstimate: "model_hub_estimate_not_provider_tokenizer",
+      source: {
+        kind: "chapter_span",
+        reference,
+        chapterId: input.chapterId,
+        versionId: input.versionId,
+        startOffset: primary.startOffset,
+        endOffset: primary.endOffset,
+        sourceLength: input.sourceLength,
+        excerpt: primary.excerpt,
       },
+      confidence: 1,
     },
-    source: {
-      kind: "chapter_span",
-      reference,
+    {
       chapterId: input.chapterId,
-      versionId: input.versionId,
-      startOffset: primary.startOffset,
-      endOffset: primary.endOffset,
-      sourceLength: input.sourceLength,
-      excerpt: primary.excerpt,
+      expectedCurrentVersionId: input.versionId,
     },
-    confidence: 1,
-  });
-  if (!replaced.ok) throw replaced.error;
+  );
+  if (!replaced.ok) {
+    if (replaced.error.code === "STORY_FACT_SOURCE_FENCE_FAILED") return false;
+    throw replaced.error;
+  }
   evidenceState.existingEvidence.add(referenceIdentity);
   evidenceState.activeDirectEvidence.add(currentEvidenceIdentity);
+  return true;
 }
 
 function authoredFactIdentity(factType: string, contentText: string): string {
@@ -768,8 +855,23 @@ function extractHighConfidenceNarrativeFacts(sentence: string): readonly Natural
     /^(?<character>[\p{Script=Han}A-Za-z·]{2,12})(?:(?:今年(?<age>[一二三四五六七八九十百0-9]{1,3})岁)|(?:担任(?<role>[^，。！？]{2,24}))|(?:是一名(?<occupation>[^，。！？]{2,24})))[，。！？]?/u.exec(
       narrativeBody,
     );
-  const characterName = character?.groups?.character;
-  if (characterName !== undefined) {
+  const expandedCharacter =
+    /^(?<character>[\p{Script=Han}A-Za-z·]{2,12}?)(?:(?:今年)?(?<age>[一二三四五六七八九十百0-9]{1,3}岁)|担任(?<role>[^，。！？]{2,24})|是(?:一名)?(?<identity>[^，。！？]{2,24}))[。！？]?$/u.exec(
+      narrativeBody,
+    );
+  const resolvedCharacter = expandedCharacter ?? character;
+  const characterName = resolvedCharacter?.groups?.character;
+  const characterDetail =
+    resolvedCharacter?.groups?.age ??
+    resolvedCharacter?.groups?.role ??
+    resolvedCharacter?.groups?.occupation ??
+    resolvedCharacter?.groups?.identity;
+  if (
+    characterName !== undefined &&
+    isExplicitCharacterName(characterName) &&
+    characterDetail !== undefined &&
+    !isRelationshipDescription(characterDetail)
+  ) {
     add({
       factType: "character_profile",
       contentText: narrativeBody,
@@ -777,8 +879,7 @@ function extractHighConfidenceNarrativeFacts(sentence: string): readonly Natural
       payload: {
         kind: "explicit_narrative_character_profile",
         character: characterName,
-        detail:
-          character?.groups?.age ?? character?.groups?.role ?? character?.groups?.occupation ?? "",
+        detail: characterDetail,
       },
     });
   }
@@ -803,6 +904,42 @@ function extractHighConfidenceNarrativeFacts(sentence: string): readonly Natural
     });
   }
 
+  const tenure =
+    /^(?<character>[\p{Script=Han}A-Za-z·]{2,12})在(?<location>[\p{Script=Han}A-Za-z0-9·的这座]{1,24}?)(?<activity>守了|生活了|居住了|工作了|任职了)(?<duration>[一二三四五六七八九十百千万0-9]{1,6}(?:年|个月|月|天))[。！？]?$/u.exec(
+      narrativeBody,
+    );
+  const tenureCharacter = tenure?.groups?.character;
+  const tenureLocation = tenure?.groups?.location;
+  const tenureActivity = tenure?.groups?.activity;
+  const tenureDuration = tenure?.groups?.duration;
+  if (
+    tenureCharacter !== undefined &&
+    tenureLocation !== undefined &&
+    tenureActivity !== undefined &&
+    tenureDuration !== undefined
+  ) {
+    add({
+      factType: "character_profile",
+      contentText: narrativeBody,
+      kind: "ordinary",
+      payload: {
+        kind: "explicit_narrative_character_tenure",
+        character: tenureCharacter,
+        detail: "在" + tenureLocation + tenureActivity + tenureDuration,
+      },
+    });
+    add({
+      factType: "location_setting",
+      contentText: narrativeBody,
+      kind: "ordinary",
+      payload: {
+        kind: "explicit_narrative_tenure_location",
+        location: tenureLocation,
+        detail: tenureCharacter + tenureActivity + tenureDuration,
+      },
+    });
+  }
+
   const organization =
     /^(?<member>[\p{Script=Han}A-Za-z·]{2,12})(?:已经|正式|现已)?(?<relation>加入了?|隶属于|效力于|归属于)(?<organization>[^，。！？]{2,32})[，。！？]?$/u.exec(
       narrativeBody,
@@ -819,6 +956,31 @@ function extractHighConfidenceNarrativeFacts(sentence: string): readonly Natural
         member,
         organization: organizationName,
         relation: organization?.groups?.relation ?? "隶属于",
+      },
+    });
+  }
+
+  const relationship =
+    /^(?<from>[\p{Script=Han}A-Za-z·]{2,12})(?:和|与)(?<to>[\p{Script=Han}A-Za-z·]{2,12})是(?<relationship>(?:多年的?)?(?:老邻居|邻居|老朋友|朋友|同事|战友|搭档|师徒|同学|恋人|夫妻))[。！？]?$/u.exec(
+      narrativeBody,
+    );
+  const relationshipFrom = relationship?.groups?.from;
+  const relationshipTo = relationship?.groups?.to;
+  const relationshipType = relationship?.groups?.relationship;
+  if (
+    relationshipFrom !== undefined &&
+    relationshipTo !== undefined &&
+    relationshipType !== undefined
+  ) {
+    add({
+      factType: "core_relationship",
+      contentText: narrativeBody,
+      kind: "important",
+      payload: {
+        kind: "explicit_narrative_relationship",
+        from: relationshipFrom,
+        to: relationshipTo,
+        relationship: relationshipType,
       },
     });
   }
@@ -889,7 +1051,37 @@ function extractHighConfidenceNarrativeFacts(sentence: string): readonly Natural
     });
   }
 
+  const stateEvent =
+    /^(?<subject>[\p{Script=Han}A-Za-z0-9·的]{1,24}?)(?<action>倒转|逆转|停摆|停止|碎裂|坍塌|崩塌|熄灭|亮起|苏醒|消失|出现)(?:了)?[。！？]?$/u.exec(
+      narrativeBody,
+    );
+  const stateSubject = stateEvent?.groups?.subject;
+  const stateAction = stateEvent?.groups?.action;
+  if (stateSubject !== undefined && stateAction !== undefined) {
+    add({
+      factType: "event_category",
+      contentText: narrativeBody,
+      kind: "ordinary",
+      payload: {
+        kind: "explicit_narrative_state_event",
+        actor: stateSubject,
+        action: stateAction,
+        object: "",
+      },
+    });
+  }
+
   return Object.freeze(facts);
+}
+
+function isRelationshipDescription(value: string): boolean {
+  return /(?:的)?(?:父亲|母亲|亲生父母|兄弟|姐妹|哥哥|姐姐|弟弟|妹妹|兄长|长姐|丈夫|妻子|恋人|夫妻|邻居|老邻居|朋友|老朋友|同事|战友|搭档|师徒|同学)$/u.test(
+    value,
+  );
+}
+
+function isExplicitCharacterName(value: string): boolean {
+  return !/(?:的|是|为|在|已|不|事实|秘密|身份|众人|所有人)/u.test(value);
 }
 
 interface SentenceRange {

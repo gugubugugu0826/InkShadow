@@ -1014,10 +1014,7 @@ async function encodeCanvasAsJpeg(
   });
   throwIfCancelled(context.signal);
   if (blob.size > PDF_EXPORT_LIMITS.maximumPageJpegBytes) {
-    throw new PdfExportError(
-      "EXPORT_OUTPUT_TOO_LARGE",
-      "A rasterized PDF page exceeds the 8 MiB page limit.",
-    );
+    throw new PdfExportError("EXPORT_OUTPUT_TOO_LARGE", "转换后的单页 PDF 图像超过 8 兆字节上限。");
   }
   const bytes = new Uint8Array(await blob.arrayBuffer());
   throwIfCancelled(context.signal);

@@ -113,6 +113,23 @@ describe("TaskCenterPage", () => {
     expect(screen.getByRole("link", { name: "调整模型或上下文" })).toBeVisible();
   });
 
+  it("shows an opening journey task in natural Chinese with its support number and no retry promise", async () => {
+    seedFailedOpeningJourneyTask();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    renderRoute(runtime);
+
+    expect(await screen.findByRole("heading", { name: "生成开书建议" })).toBeVisible();
+    expect(screen.getByText(/不会自动重试/u)).toBeVisible();
+    expect(screen.getByText("等待模型返回")).toBeVisible();
+    expect(screen.getByText(`支持编号：${uuid(42)}`)).toBeVisible();
+    expect(screen.queryByText("ai.opening.generate")).not.toBeInTheDocument();
+    expect(screen.queryByText("OPENING_RESULT_PENDING_REVIEW")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "返回开书页面处理" })).toHaveAttribute(
+      "href",
+      "/create/idea",
+    );
+  });
+
   it("explains accepted正文 changes in user language and links to confirmation", async () => {
     seedAcceptedVersionNotification();
     const runtime = createDevelopmentRuntime(window.localStorage);
@@ -338,6 +355,62 @@ function seedRetryExhaustedTask(): void {
       tasks: [exhausted.toSnapshot()],
       notifications: [],
     }),
+  );
+}
+
+function seedFailedOpeningJourneyTask(): void {
+  const queued = expectOk(
+    Task.create({
+      id: uuid(40),
+      type: "ai.opening.generate",
+      idempotencyKey: `idea.opening:${uuid(41)}:${uuid(42)}`,
+      metadata: {
+        operation: "creative_opening",
+        journeyId: uuid(41),
+        batchId: uuid(42),
+        supportId: uuid(42),
+        autoRetryCount: 0,
+      },
+      priority: 85,
+      maxAttempts: 1,
+      now: INITIAL_TIME,
+    }),
+  );
+  const running = expectOk(
+    queued.claim({
+      ownerId: "opening-journey-ui",
+      leaseToken: uuid(40),
+      now: "2026-07-26T00:00:01.000Z",
+      leaseExpiresAt: "2026-07-26T00:15:00.000Z",
+    }),
+  );
+  const progressing = expectOk(
+    running.reportProgress({
+      leaseToken: uuid(40),
+      step: "opening.provider_waiting",
+      completedUnits: 0,
+      totalUnits: null,
+      now: "2026-07-26T00:00:02.000Z",
+    }),
+  );
+  const failed = expectOk(
+    progressing.recordFailure({
+      leaseToken: uuid(40),
+      failure: expectOk(
+        createTaskFailure({
+          code: "OPENING_RESULT_PENDING_REVIEW",
+          retryable: false,
+          actions: ["EXPORT_DIAGNOSTICS", "CONTACT_SUPPORT"],
+          requestId: uuid(42),
+        }),
+      ),
+      now: "2026-07-26T00:03:00.000Z",
+      retryAt: null,
+    }),
+  );
+  window.localStorage.setItem(
+    DEVELOPMENT_TASK_CENTER_KEY,
+    JSON.stringify({ schemaVersion: 1, tasks: [failed.toSnapshot()], notifications: [] }),
   );
 }
 

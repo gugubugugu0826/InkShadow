@@ -34,6 +34,15 @@ export type NaturalLanguageSettingCandidate =
       suggestions: readonly string[];
     }>
   | Readonly<{
+      kind: "character_profile";
+      sourceText: string;
+      characterName: string;
+      role: string | null;
+      age: string | null;
+      details: string | null;
+      suggestions: readonly string[];
+    }>
+  | Readonly<{
       kind: "character_voice";
       sourceText: string;
       characterName: string;
@@ -43,6 +52,7 @@ export type NaturalLanguageSettingCandidate =
   | Readonly<{
       kind: "manual";
       sourceText: string;
+      missingInformation: string;
       suggestions: readonly string[];
     }>;
 
@@ -91,6 +101,51 @@ export function parseNaturalLanguageSetting(value: string): NaturalLanguageSetti
     }
   }
 
+  const roleProfile =
+    /^(?<character>[\p{Script=Han}A-Za-z·]{1,20})(?:是(?:一名)?|担任)(?<role>[^，,。！？]{1,80})(?:[，,]\s*(?<tail>[^。！？]{1,500}))?[。！？]?$/u.exec(
+      sourceText,
+    );
+  const roleCharacter = cleanEntityName(roleProfile?.groups?.character);
+  const role = roleProfile?.groups?.role?.trim() ?? "";
+  if (roleCharacter.length > 0 && role.length > 0) {
+    const tail = roleProfile?.groups?.tail?.trim() ?? null;
+    const ageAndDetails =
+      tail === null
+        ? null
+        : /^(?<age>[一二三四五六七八九十百0-9]{1,3}岁)(?:[，,]\s*(?<details>.+))?$/u.exec(tail);
+    const details = ageAndDetails === null ? tail : (ageAndDetails.groups?.details?.trim() ?? null);
+    return Object.freeze({
+      kind: "character_profile",
+      sourceText,
+      characterName: roleCharacter,
+      role,
+      age: ageAndDetails?.groups?.age ?? null,
+      details,
+      suggestions: Object.freeze([
+        "可以补充这个身份从何时开始。",
+        "可以补充这一身份是否对其他人物公开。",
+      ]),
+    });
+  }
+
+  const ageProfile =
+    /^(?<character>[\p{Script=Han}A-Za-z·]{1,20}?)(?<age>[一二三四五六七八九十百0-9]{1,3}岁)(?:[，,]\s*(?<details>[^。！？]{1,500}))?[。！？]?$/u.exec(
+      sourceText,
+    );
+  const ageCharacter = cleanEntityName(ageProfile?.groups?.character);
+  const age = ageProfile?.groups?.age;
+  if (ageCharacter.length > 0 && age !== undefined) {
+    return Object.freeze({
+      kind: "character_profile",
+      sourceText,
+      characterName: ageCharacter,
+      role: null,
+      age,
+      details: ageProfile?.groups?.details?.trim() ?? null,
+      suggestions: Object.freeze(["可以补充年龄对应的故事时间点。"]),
+    });
+  }
+
   const voice = /^(.{1,40}?)(?:说话|讲话)(.{1,500})$/u.exec(sourceText);
   if (voice !== null) {
     const characterName = cleanEntityName(voice[1]);
@@ -106,7 +161,7 @@ export function parseNaturalLanguageSetting(value: string): NaturalLanguageSetti
     }
   }
 
-  if (/[每当每次都会必须不能禁止]/u.test(sourceText)) {
+  if (/(?:每当|每次|都会|必须|不能|禁止)/u.test(sourceText)) {
     return Object.freeze({
       kind: "world_rule",
       sourceText,
@@ -122,6 +177,7 @@ export function parseNaturalLanguageSetting(value: string): NaturalLanguageSetti
   return Object.freeze({
     kind: "manual",
     sourceText,
+    missingInformation: "缺少明确的人物、身份、年龄、关系两端或规则约束。",
     suggestions: Object.freeze(["请选择人物、关系、世界规则或写作偏好，再用结构化表单确认。"]),
   });
 }
@@ -150,7 +206,7 @@ export function inspectLegacyGuidedOpeningRecords(
           expectedRevision: record.revision,
           relationshipType: null,
           title: "整理开书人物卡",
-          beforeSummary: `内部记录 ${key} 包含混合人物字段。`,
+          beforeSummary: "旧版开书人物资料混合了多个字段。",
           afterSummary:
             protagonist === null
               ? "转为“未命名主角”待补全卡片，并保留原始来源。"
@@ -192,7 +248,7 @@ export function inspectLegacyGuidedOpeningRecords(
           expectedRevision: record.revision,
           relationshipType: null,
           title: "整理开书写作约定",
-          beforeSummary: `内部记录 ${key} 直接展示原始字段。`,
+          beforeSummary: "旧版开书写作约定仍使用早期保存格式。",
           afterSummary: "转为可读的“开书写作约定”版本记录，原值仍保留在历史版本。",
           needsUserInput: false,
         }),
@@ -250,7 +306,7 @@ export function projectStorySettingsForExport(
     const resolvedName =
       name ?? (String(snapshot.recordKey) === "guided_opening.characters" ? "未命名主角" : null);
     if (resolvedName === null) {
-      warnings.push(`人物记录 ${String(snapshot.recordKey)} 没有可导出的名称，已跳过。`);
+      warnings.push("有一条人物记录没有可导出的名称，已跳过。");
       continue;
     }
     const portableId = `character.${record.id}`;
@@ -288,13 +344,13 @@ export function projectStorySettingsForExport(
     if (isRelationshipFact(snapshot)) {
       const relation = readRelationship(snapshot);
       if (relation === null) {
-        warnings.push(`关系 ${fact.id} 缺少两端人物，保留在项目待补全区但不写入导出包。`);
+        warnings.push("有一条人物关系缺少两端人物，保留在项目待补全区但不写入导出包。");
         continue;
       }
       const from = characterRefs.get(normalizeReference(relation.from));
       const to = characterRefs.get(normalizeReference(relation.to));
       if (from === undefined || to === undefined) {
-        warnings.push(`关系 ${fact.id} 的人物引用无法稳定映射，已跳过。`);
+        warnings.push("有一条人物关系无法稳定对应到两端人物，已跳过。");
         continue;
       }
       const evidence = relation.evidence ?? snapshot.source.excerpt;
@@ -326,12 +382,11 @@ export function projectStorySettingsForExport(
 
   const worldRules: StorySettingsWorldRule[] = [];
   for (const record of input.records.filter(({ kind }) => kind === "world_rule")) {
-    const snapshot = record.toSnapshot();
     const value = storyObject(record.currentValue);
     const title = firstString(value, ["title"]);
     const rule = firstString(value, ["rule", "description"]);
     if (title === null || rule === null) {
-      warnings.push(`规则记录 ${String(snapshot.recordKey)} 还不是结构化规则，已跳过。`);
+      warnings.push("有一条规则记录缺少可导出的标题或内容，已跳过。");
       continue;
     }
     const scope = firstString(value, ["scope"]);

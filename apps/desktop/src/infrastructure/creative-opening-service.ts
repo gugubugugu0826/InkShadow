@@ -129,7 +129,10 @@ export interface ExecuteCreativeOpeningProviderActionInput extends CreativeOpeni
       modelId: string;
     }>,
   ) => void | Promise<void>;
-  readonly onProviderDispatchStarted?: (requestId: string, invocationId: string) => void;
+  readonly onProviderDispatchStarted?: (
+    requestId: string,
+    invocationId: string,
+  ) => void | Promise<void>;
   readonly onDelta?: (requestId: string, text: string) => void;
   /** Persists each independently settled slot without waiting for the rest of a batch. */
   readonly onResult?: (
@@ -260,9 +263,10 @@ export async function executeCreativeOpeningProviderAction(
               await input.onInvocationPrepared?.(call.request.requestId, selection);
               settlement.assertPending();
             },
-            onProviderDispatchStarted: (invocationId) => {
+            onProviderDispatchStarted: async (invocationId) => {
               if (settlement.isPending()) {
-                input.onProviderDispatchStarted?.(call.request.requestId, invocationId);
+                await input.onProviderDispatchStarted?.(call.request.requestId, invocationId);
+                settlement.assertPending();
               }
             },
             onDelta: (text) => {
@@ -799,8 +803,8 @@ export async function generateCreativeOpening(
         modelId: string;
       }>,
     ) => void | Promise<void>;
-    /** Synchronous UI notification backed by the durable invocation receipt. */
-    onProviderDispatchStarted?: (invocationId: string) => void;
+    /** Durable-receipt notification; callers may persist a journey checkpoint before dispatch continues. */
+    onProviderDispatchStarted?: (invocationId: string) => void | Promise<void>;
     /** Existing empty workspace that owns this traceable opening attempt. */
     projectContext?: CreativeOpeningProjectContext;
   }>,
@@ -1004,7 +1008,7 @@ async function generateCreativeOpeningInternal(
         ...(input.onProviderDispatchStarted === undefined
           ? {}
           : {
-              onProviderDispatchStarted: ({ invocationId }) =>
+              onProviderDispatchStarted: async ({ invocationId }) =>
                 input.onProviderDispatchStarted?.(invocationId),
             }),
         onDelta: receiveVisibleText,

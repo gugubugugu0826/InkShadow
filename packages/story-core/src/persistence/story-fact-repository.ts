@@ -5,6 +5,7 @@ import type { Result } from "../result.js";
 import {
   StoryFact,
   CONTINUOUS_STORY_STATE_ROUTE_TASKS,
+  isRebuildableStoryFactType,
   MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES,
   type ContinuousStoryStateRouteCommit,
   type ContinuousStoryStateRouteCommitReceipt,
@@ -15,6 +16,7 @@ import {
   type StoryFactAuthorityFence,
   type StoryFactConditionalCreateReceipt,
   type StoryFactConditionalDeprecateReceipt,
+  type StoryFactConditionalReplacementReceipt,
   type StoryFactSupplementalResolutionUndoFence,
   type StoryFactRevision,
   type StoryFactRevisionChangeKind,
@@ -303,11 +305,7 @@ export class SqliteStoryFactStore implements StoryFactStore, LegacyStoryFactComp
     return runPersistence(() =>
       this.executor.transaction(async (transaction) => {
         const snapshot = fact.toSnapshot();
-        if (snapshot.revision !== 1 || snapshot.status !== "formal" || snapshot.origin !== "user") {
-          abortPersistence(
-            validationFailure("An authority-fenced story fact must be new and formal."),
-          );
-        }
+        assertAuthorityFencedCreateGovernance(snapshot);
         assertAuthorityFenceMatchesFact(snapshot, fence);
         const chapters = await transaction.select<{
           readonly project_id: string;
@@ -451,6 +449,79 @@ export class SqliteStoryFactStore implements StoryFactStore, LegacyStoryFactComp
     );
   }
 
+  public replaceRebuildableSystemFactWithAuthorityFence(
+    fact: StoryFact,
+    replacementKey: string,
+    fence: StoryFactAuthorityFence,
+  ): Promise<Result<StoryFactConditionalReplacementReceipt, StoryCoreError>> {
+    return runPersistence(() =>
+      this.executor.transaction(async (transaction) => {
+        const snapshot = fact.toSnapshot();
+        assertAuthorityFencedRebuildableReplacement(snapshot, replacementKey, fence);
+        await assertCurrentChapterVersion(transaction, snapshot.projectId, fence);
+        await assertChapterEvidence(transaction, snapshot);
+
+        const rows = await transaction.select<StoryFactRow>(
+          `${STORY_FACT_SELECT}
+           WHERE fact.project_id = ? AND fact.fact_type = ?`,
+          [snapshot.projectId, snapshot.factType],
+        );
+        const matching = rows
+          .map(hydrateFact)
+          .filter((candidate) =>
+            matchesStoredRebuildableReplacement(candidate, snapshot.factType, replacementKey),
+          );
+        const replacedFactIds: string[] = [];
+        for (const current of matching) {
+          const currentSnapshot = current.toSnapshot();
+          const retired = current.deprecateRebuildableSystemFact({
+            expectedRevision: currentSnapshot.revision,
+            now: snapshot.updatedAt,
+          });
+          if (!retired.ok) abortPersistence(retired.error);
+          const retiredSnapshot = retired.value.toSnapshot();
+          const updated = await transaction.execute(
+            `UPDATE story_facts
+             SET status = ?, user_confirmed = ?, locked = ?, deprecated = ?,
+                 needs_review = ?, confirmed_by_actor_id = ?, confirmed_at = ?,
+                 revision = ?, updated_at = ?
+             WHERE id = ? AND project_id = ? AND revision = ?`,
+            [
+              retiredSnapshot.status,
+              retiredSnapshot.userConfirmed ? 1 : 0,
+              retiredSnapshot.locked ? 1 : 0,
+              retiredSnapshot.deprecated ? 1 : 0,
+              retiredSnapshot.needsReview ? 1 : 0,
+              retiredSnapshot.confirmedByActorId,
+              retiredSnapshot.confirmedAt,
+              retiredSnapshot.revision,
+              retiredSnapshot.updatedAt,
+              retiredSnapshot.id,
+              retiredSnapshot.projectId,
+              currentSnapshot.revision,
+            ],
+          );
+          if (updated.rowsAffected !== 1) {
+            abortPersistence(
+              new StoryCoreError({
+                code: "STORY_REVISION_CONFLICT",
+                message: "A rebuildable story fact changed before atomic replacement.",
+                retryable: true,
+              }),
+            );
+          }
+          replacedFactIds.push(current.id);
+        }
+
+        await insertFact(transaction, snapshot);
+        await insertInitialRevision(transaction, snapshot, "created");
+        return Object.freeze({
+          fact,
+          replacedFactIds: Object.freeze(replacedFactIds),
+        });
+      }),
+    );
+  }
   public deprecateSupplementalResolutionWithAuthorityFence(
     factId: UuidV7,
     fence: StoryFactSupplementalResolutionUndoFence,
@@ -1171,6 +1242,103 @@ const CAUSAL_RELATION_FACT_SCHEMA = "inkshadow.causal-relation-fact.v1";
  * future adapter cannot validate one chapter/entity set while committing a
  * fact that cites another.
  */
+
+function assertAuthorityFencedCreateGovernance(snapshot: StoryFactSnapshot): void {
+  const isFormalUserFact =
+    snapshot.status === "formal" && snapshot.origin === "user" && snapshot.userConfirmed;
+  const isAutomaticChapterFact =
+    snapshot.source.kind === "chapter_span" &&
+    (snapshot.status === "temporary" || snapshot.status === "unconfirmed") &&
+    (snapshot.origin === "system" || snapshot.origin === "ai_extraction") &&
+    !snapshot.userConfirmed &&
+    !snapshot.locked &&
+    !snapshot.deprecated &&
+    snapshot.branchId === null;
+  if (snapshot.revision !== 1 || (!isFormalUserFact && !isAutomaticChapterFact)) {
+    abortPersistence(
+      validationFailure(
+        "An authority-fenced story fact must be a new formal user fact or governed chapter projection.",
+      ),
+    );
+  }
+}
+
+function assertAuthorityFencedRebuildableReplacement(
+  snapshot: StoryFactSnapshot,
+  replacementKey: string,
+  fence: StoryFactAuthorityFence,
+): void {
+  const structured = storyRecord(snapshot.structuredValue);
+  if (
+    snapshot.revision !== 1 ||
+    !isRebuildableStoryFactType(snapshot.factType) ||
+    snapshot.status !== "temporary" ||
+    snapshot.origin !== "system" ||
+    snapshot.userConfirmed ||
+    snapshot.locked ||
+    snapshot.deprecated ||
+    snapshot.needsReview ||
+    snapshot.branchId !== null ||
+    structured === null ||
+    Object.keys(structured).length !== 3 ||
+    structured.schemaVersion !== "inkshadow.rebuildable-system-fact.v1" ||
+    structured.replacementKey !== replacementKey ||
+    !Object.prototype.hasOwnProperty.call(structured, "payload")
+  ) {
+    abortPersistence(validationFailure("The authority-fenced rebuildable replacement is invalid."));
+  }
+  assertAuthorityFenceMatchesFact(snapshot, fence);
+}
+
+async function assertCurrentChapterVersion(
+  transaction: StorySqlTransaction,
+  projectId: string,
+  fence: StoryFactAuthorityFence,
+): Promise<void> {
+  const chapters = await transaction.select<{
+    readonly project_id: string;
+    readonly current_version_id: string;
+  }>(
+    `SELECT project_id, current_version_id
+     FROM chapters
+     WHERE id = ? AND project_id = ? AND status = 'active'
+     LIMIT 2`,
+    [fence.chapterId, projectId],
+  );
+  if (chapters.length !== 1 || chapters[0]?.current_version_id !== fence.expectedCurrentVersionId) {
+    abortPersistence(
+      new StoryCoreError({
+        code: "STORY_FACT_SOURCE_FENCE_FAILED",
+        message: "The chapter current version changed before the story fact was committed.",
+        retryable: true,
+      }),
+    );
+  }
+}
+
+function matchesStoredRebuildableReplacement(
+  fact: StoryFact,
+  factType: string,
+  replacementKey: string,
+): boolean {
+  const snapshot = fact.toSnapshot();
+  const structured = storyRecord(snapshot.structuredValue);
+  return (
+    snapshot.factType === factType &&
+    snapshot.status === "temporary" &&
+    snapshot.origin === "system" &&
+    !snapshot.userConfirmed &&
+    !snapshot.locked &&
+    !snapshot.deprecated &&
+    !snapshot.needsReview &&
+    snapshot.branchId === null &&
+    structured !== null &&
+    Object.keys(structured).length === 3 &&
+    structured.schemaVersion === "inkshadow.rebuildable-system-fact.v1" &&
+    structured.replacementKey === replacementKey &&
+    Object.prototype.hasOwnProperty.call(structured, "payload")
+  );
+}
 function assertAuthorityFenceMatchesFact(
   snapshot: StoryFactSnapshot,
   fence: StoryFactAuthorityFence,

@@ -7644,7 +7644,7 @@ function formatBytes(value: number | null): string {
     return "未知";
   }
   const gibibytes = value / 1024 ** 3;
-  return `${gibibytes >= 10 ? gibibytes.toFixed(0) : gibibytes.toFixed(1)} GiB`;
+  return `${gibibytes >= 10 ? gibibytes.toFixed(0) : gibibytes.toFixed(1)} 吉字节`;
 }
 
 function describeAutomaticBackupCheck(
@@ -7732,10 +7732,10 @@ function formatAutomaticBackupTime(value: string): string {
 
 function formatBackupBytes(value: number): string {
   if (!Number.isFinite(value) || value < 0) return "大小待确认";
-  if (value < 1024) return `${String(value)} B`;
-  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KiB`;
-  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
-  return `${(value / 1024 ** 3).toFixed(1)} GiB`;
+  if (value < 1024) return `${String(value)} 字节`;
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} 千字节`;
+  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} 兆字节`;
+  return `${(value / 1024 ** 3).toFixed(1)} 吉字节`;
 }
 
 function legacyProviderKind(provider: ModelProviderKind): NativeProviderKind {

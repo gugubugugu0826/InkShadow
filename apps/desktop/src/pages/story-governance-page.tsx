@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Chapter, Project } from "@inkshadow/domain";
+import type { Chapter, ChapterVersion, Project } from "@inkshadow/domain";
 import { parseUuidV7 as parseDomainUuid } from "@inkshadow/domain";
 import {
   FORMAL_RECORD_KINDS,
@@ -133,6 +133,7 @@ export function StoryGovernancePage() {
   const [whatIfBranches, setWhatIfBranches] = useState<readonly WhatIfBranch[]>([]);
   const [outlineDrafts, setOutlineDrafts] = useState<readonly OutlineDraftCandidate[]>([]);
   const [chapters, setChapters] = useState<readonly Chapter[]>([]);
+  const [sourceVersions, setSourceVersions] = useState<readonly ChapterVersion[]>([]);
   const [extractionItems, setExtractionItems] = useState<
     readonly StructuredReviewItem<"extraction">[]
   >([]);
@@ -203,6 +204,7 @@ export function StoryGovernancePage() {
       return;
     }
     setPageState("loading");
+    setSourceVersions([]);
     const [
       projectResult,
       factResult,
@@ -265,6 +267,25 @@ export function StoryGovernancePage() {
     ) {
       return;
     }
+    const sourceVersionIds = Array.from(
+      new Set(
+        factResult.value
+          .filter((fact) => isDirectLocalReviewDraft(fact.toSnapshot()))
+          .map((fact) => fact.toSnapshot().source.versionId)
+          .filter((versionId): versionId is NonNullable<typeof versionId> => versionId !== null)
+          .map(String),
+      ),
+    );
+    const loadedSourceVersions = (
+      await Promise.all(
+        sourceVersionIds.map(async (versionId) => {
+          const parsed = parseDomainUuid(versionId);
+          if (!parsed.ok) return null;
+          const found = await runtime.repositories.chapterVersions.findVersionById(parsed.value);
+          return found.ok ? found.value : null;
+        }),
+      )
+    ).filter((version): version is ChapterVersion => version !== null);
     setProject(projectResult.value);
     setFacts(factResult.value);
     setRecords(recordResult.value);
@@ -274,6 +295,7 @@ export function StoryGovernancePage() {
     setWhatIfBranches(branchResult.value);
     setOutlineDrafts(draftResult.value);
     setChapters(chapterResult.value);
+    setSourceVersions(loadedSourceVersions);
     setExtractionItems(extractionResult.value);
     setConsistencyItems(consistencyResult.value);
     try {
@@ -308,6 +330,10 @@ export function StoryGovernancePage() {
   );
   const directFormalFacts = useMemo(
     () => facts.filter((fact) => fact.toSnapshot().status === "formal"),
+    [facts],
+  );
+  const directPendingLocalFacts = useMemo(
+    () => facts.filter((fact) => isDirectLocalReviewDraft(fact.toSnapshot())),
     [facts],
   );
   const directDeprecatedFacts = useMemo(
@@ -733,19 +759,22 @@ export function StoryGovernancePage() {
       return;
     }
     setBusy(true);
-    const result = await runtime.story.factService.editAsUser({
+    const command = {
       factId: editingFact.id,
       contentText: editingFactContent.trim(),
       actorId: runtime.story.actorId,
       humanConfirmed: true,
       expectedRevision: editingFact.revision,
-    });
+    } as const;
+    const result = isDirectLocalReviewDraft(editingFact.toSnapshot())
+      ? await runtime.story.factService.editStagedAsUser(command)
+      : await runtime.story.factService.editAsUser(command);
     setBusy(false);
     if (!result.ok) {
       setError(result.error);
       return;
     }
-    await refreshCausalStoryLinks(editingFact);
+    await refreshCausalStoryLinks(result.value);
     setEditingFact(null);
     setEditingFactContent("");
     setError(null);
@@ -1380,7 +1409,10 @@ export function StoryGovernancePage() {
             <p>查看已经整理的设定和原文依据，也可以添加、固定或移除设定。</p>
           </div>
           <div className="story-governance-summary">
-            <Badge>{String(directFormalFacts.length)} 条设定</Badge>
+            <Badge>{String(directFormalFacts.length)} 条已保存</Badge>
+            {directPendingLocalFacts.length > 0 && (
+              <Badge>{String(directPendingLocalFacts.length)} 条待确认</Badge>
+            )}
           </div>
         </header>
 
@@ -1424,6 +1456,102 @@ export function StoryGovernancePage() {
               ),
           }}
         >
+          {directPendingLocalFacts.length > 0 && (
+            <section aria-labelledby="direct-pending-story-facts-title">
+              <div className="section-heading">
+                <div>
+                  <h2 id="direct-pending-story-facts-title">待确认设定</h2>
+                  <p>这些内容只在本机从已保存正文中整理；确认前不会成为正式设定。</p>
+                </div>
+                <Badge>{String(directPendingLocalFacts.length)} 条</Badge>
+              </div>
+              <div className="story-governance-grid">
+                {directPendingLocalFacts.map((fact) => {
+                  const snapshot = fact.toSnapshot();
+                  const sourceChapter = chapters.find(
+                    (chapter) => String(chapter.id) === String(snapshot.source.chapterId),
+                  );
+                  const sourceVersion = sourceVersions.find(
+                    (version) => String(version.id) === String(snapshot.source.versionId),
+                  );
+                  const sourceStart = snapshot.source.startOffset;
+                  const sourceEnd = snapshot.source.endOffset;
+                  const sourceChapterLabel =
+                    sourceChapter === undefined
+                      ? "已保存章节（名称暂不可用）"
+                      : "《" + sourceChapter.title + "》";
+                  const sourceVersionLabel =
+                    sourceVersion === undefined
+                      ? "不可变版本详情暂不可用"
+                      : "第 " + String(sourceVersion.sequence) + " 个不可变版本";
+                  const readableSourceRange =
+                    sourceStart === null || sourceEnd === null
+                      ? "字符范围暂不可用"
+                      : "第 " + String(sourceStart + 1) + " 至 " + String(sourceEnd) + " 个字符";
+                  return (
+                    <Card key={fact.id}>
+                      <CardHeader>
+                        <div className="card-heading-row">
+                          <div>
+                            <CardTitle>{factTypeLabel(snapshot.factType)}</CardTitle>
+                            <CardDescription>从正文原文整理，等待你的决定。</CardDescription>
+                          </div>
+                          <Badge tone="warning">待确认</Badge>
+                        </div>
+                      </CardHeader>
+                      <CardContent>
+                        <p className="story-governance-copy">{storyFactContent(snapshot)}</p>
+                        <details className="story-governance-evidence">
+                          <summary>查看原文依据</summary>
+                          <dl>
+                            <div>
+                              <dt>来源章节</dt>
+                              <dd>{sourceChapterLabel}</dd>
+                            </div>
+                            <div>
+                              <dt>保存版本</dt>
+                              <dd>{sourceVersionLabel}</dd>
+                            </div>
+                            <div>
+                              <dt>字符范围</dt>
+                              <dd>{readableSourceRange}</dd>
+                            </div>
+                          </dl>
+                          <blockquote>{snapshot.source.excerpt ?? "原文片段暂不可用"}</blockquote>
+                        </details>
+                      </CardContent>
+                      <CardFooter>
+                        <Button
+                          size="sm"
+                          disabled={readonly || busy}
+                          onClick={() => void confirmFact(fact)}
+                        >
+                          确认并保留
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={readonly || busy}
+                          onClick={() => openEditFact(fact)}
+                        >
+                          修改
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={readonly || busy}
+                          onClick={() => void deprecateFact(fact)}
+                        >
+                          放弃
+                        </Button>
+                      </CardFooter>
+                    </Card>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
           <section aria-labelledby="direct-story-facts-title">
             <div className="section-heading">
               <div>
@@ -1684,7 +1812,11 @@ export function StoryGovernancePage() {
             }
           }}
           title="修改设定"
-          description="只修改设定内容；原始来源和每个旧版本都会保留。固定的设定需先取消固定。"
+          description={
+            editingFact !== null && isDirectLocalReviewDraft(editingFact.toSnapshot())
+              ? "保存修改会同时确认这条内容，并把它加入正式设定；原始来源和每个旧版本都会保留。"
+              : "只修改设定内容；原始来源和每个旧版本都会保留。固定的设定需先取消固定。"
+          }
           footer={
             <>
               <Button
@@ -1702,7 +1834,9 @@ export function StoryGovernancePage() {
                 disabled={editingFactContent.trim().length === 0}
                 onClick={() => void submitFactEdit()}
               >
-                保存修改
+                {editingFact !== null && isDirectLocalReviewDraft(editingFact.toSnapshot())
+                  ? "保存修改并确认"
+                  : "保存修改"}
               </Button>
             </>
           }
@@ -3844,6 +3978,34 @@ function isStoryObject(
   value: StoryValue | undefined,
 ): value is Readonly<Record<string, StoryValue>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isDirectLocalReviewDraft(snapshot: StoryFactSnapshot): boolean {
+  const structuredValue = snapshot.structuredValue;
+  if (
+    (snapshot.status !== "temporary" && snapshot.status !== "unconfirmed") ||
+    snapshot.origin !== "system" ||
+    !snapshot.needsReview ||
+    snapshot.locked ||
+    snapshot.source.kind !== "chapter_span" ||
+    !snapshot.source.reference.startsWith("direct-local:inkshadow.direct-local-story-fact.v1:") ||
+    snapshot.source.chapterId === null ||
+    snapshot.source.versionId === null ||
+    snapshot.source.startOffset === null ||
+    snapshot.source.endOffset === null ||
+    snapshot.source.sourceLength === null ||
+    snapshot.source.excerpt === null ||
+    structuredValue === null ||
+    !isStoryObject(structuredValue)
+  ) {
+    return false;
+  }
+  const payload = structuredValue.payload;
+  return (
+    structuredValue.schemaVersion === "inkshadow.rebuildable-system-fact.v1" &&
+    isStoryObject(payload) &&
+    payload.schemaVersion === "inkshadow.direct-local-story-fact.v1"
+  );
 }
 
 function factTypeLabel(factType: string): string {

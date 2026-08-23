@@ -516,7 +516,7 @@ export class SqliteChapterVersionRepository implements ChapterVersionRepository 
          LIMIT 1`,
         [id],
       );
-      return rows[0] === undefined ? null : rehydrateChapterVersion(rows[0]);
+      return rows[0] === undefined ? null : rehydrateChapterVersionRow(rows[0]);
     });
   }
 
@@ -531,7 +531,7 @@ export class SqliteChapterVersionRepository implements ChapterVersionRepository 
          ORDER BY sequence DESC`,
         [chapterId],
       );
-      return rows.map(rehydrateChapterVersion);
+      return rows.map(rehydrateChapterVersionRow);
     });
   }
 }
@@ -598,6 +598,23 @@ export class SqliteRecoveryDraftRepository implements RecoveryDraftRepository {
   }
 }
 
+export interface AiCandidateRowReference {
+  readonly table: "ai_candidates";
+  readonly candidateId: UuidV7 | null;
+  readonly rowFingerprint: string;
+}
+
+export interface AiCandidateIsolationIncident {
+  readonly rowReference: AiCandidateRowReference;
+  readonly reasonCodeChain: readonly string[];
+  readonly applicationStack: readonly string[];
+}
+
+export interface AiCandidateListWithIsolation {
+  readonly candidates: readonly AiCandidate[];
+  readonly isolatedRows: readonly AiCandidateIsolationIncident[];
+}
+
 export class SqliteAiCandidateRepository implements AiCandidateRepository {
   public constructor(private readonly executor: SqlExecutor) {}
 
@@ -623,6 +640,31 @@ export class SqliteAiCandidateRepository implements AiCandidateRepository {
   public async listByChapterId(
     chapterId: UuidV7,
   ): Promise<Result<readonly AiCandidate[], AppError>> {
+    const read = await this.listByChapterIdWithIsolation(chapterId);
+    if (!read.ok) {
+      return err(read.error);
+    }
+    if (read.value.isolatedRows.length > 0) {
+      return err(
+        new AppError({
+          code: "REPOSITORY_ERROR",
+          message: "部分可选生成记录暂时无法读取。",
+          retryable: true,
+          actions: ["RETRY", "CONTACT_SUPPORT"],
+          details: {
+            operation: "list AI candidates",
+            isolatedRowCount: read.value.isolatedRows.length,
+            isolatedRows: read.value.isolatedRows,
+          },
+        }),
+      );
+    }
+    return ok(read.value.candidates);
+  }
+
+  public async listByChapterIdWithIsolation(
+    chapterId: UuidV7,
+  ): Promise<Result<AiCandidateListWithIsolation, AppError>> {
     return attempt("list AI candidates", async () => {
       const rows = await this.executor.select<AiCandidateDbRow>(
         `SELECT ${CANDIDATE_COLUMNS}
@@ -631,7 +673,22 @@ export class SqliteAiCandidateRepository implements AiCandidateRepository {
          ORDER BY created_at DESC`,
         [chapterId],
       );
-      return rows.map(rehydrateAiCandidate);
+      const candidates: AiCandidate[] = [];
+      const isolatedRows: AiCandidateIsolationIncident[] = [];
+      for (const row of rows) {
+        try {
+          candidates.push(rehydrateAiCandidate(row));
+        } catch (cause: unknown) {
+          if (!isIsolatableAiCandidateRowError(cause)) {
+            throw cause;
+          }
+          isolatedRows.push(isolateAiCandidateRow(row, cause));
+        }
+      }
+      return Object.freeze({
+        candidates: Object.freeze(candidates),
+        isolatedRows: Object.freeze(isolatedRows),
+      });
     });
   }
 
@@ -1313,6 +1370,41 @@ function rehydrateChapterPrivacyAuthority(
   });
 }
 
+function rehydrateChapterVersionRow(row: ChapterVersionDbRow): ChapterVersion {
+  try {
+    return rehydrateChapterVersion(row);
+  } catch (cause: unknown) {
+    if (!(cause instanceof AppError)) {
+      throw cause;
+    }
+    const parsedVersionId = parseUuidV7(row.id);
+    const sequence = Number.isSafeInteger(row.sequence) && row.sequence > 0 ? row.sequence : null;
+    const wrapped = new AppError({
+      code: cause.code,
+      message: cause.message,
+      retryable: cause.retryable,
+      actions: cause.actions,
+      details: {
+        ...cause.details,
+        rowReference: Object.freeze({
+          table: "chapter_versions",
+          versionId: parsedVersionId.ok ? parsedVersionId.value : null,
+          sequence,
+          rowFingerprint: `version-row-${safeMetadataFingerprint([
+            row.id,
+            row.project_id,
+            row.chapter_id,
+            row.parent_version_id ?? "none",
+            String(row.sequence),
+            row.created_at,
+          ])}`,
+        }),
+      },
+    });
+    throw attachErrorCause(wrapped, cause);
+  }
+}
+
 function rehydrateChapterVersion(row: ChapterVersionDbRow): ChapterVersion {
   const restored = ChapterVersion.create({
     id: requiredUuid(row.id, "chapterVersion.id"),
@@ -1381,6 +1473,116 @@ function rehydrateCandidateApplicationIntent(row: AiCandidateDbRow): AiCandidate
   } as AiCandidateApplicationIntent;
 }
 
+function isolateAiCandidateRow(
+  row: AiCandidateDbRow,
+  cause: unknown,
+): AiCandidateIsolationIncident {
+  const parsedCandidateId = parseUuidV7(row.id);
+  return Object.freeze({
+    rowReference: Object.freeze({
+      table: "ai_candidates" as const,
+      candidateId: parsedCandidateId.ok ? parsedCandidateId.value : null,
+      rowFingerprint: `candidate-${safeMetadataFingerprint([
+        row.id,
+        row.project_id,
+        row.chapter_id ?? "none",
+        row.created_at,
+      ])}`,
+    }),
+    reasonCodeChain: candidateReasonCodeChain(cause),
+    applicationStack: safeRepositoryStack(cause),
+  });
+}
+function isIsolatableAiCandidateRowError(cause: unknown): cause is AppError {
+  if (!(cause instanceof AppError) || cause.code !== "REPOSITORY_ERROR") {
+    return false;
+  }
+  const field = cause.details.field;
+  const validationCode = cause.details.validationCode;
+  return (
+    typeof validationCode === "string" &&
+    typeof field === "string" &&
+    (field.startsWith("aiCandidate.") || field.startsWith("AI candidate:"))
+  );
+}
+
+function candidateReasonCodeChain(cause: unknown): readonly string[] {
+  const reasonCodes = ["LEGACY_CANDIDATE_METADATA_INVALID"];
+  if (cause instanceof AppError) {
+    reasonCodes.push(cause.code);
+    reasonCodes.push(candidateFieldReasonCode(cause.details.field));
+    const validationCode = safeReasonCode(cause.details.validationCode);
+    if (validationCode !== null) reasonCodes.push(validationCode);
+  } else {
+    reasonCodes.push("UNKNOWN_CANDIDATE_VALIDATION_FAILURE");
+  }
+  return Object.freeze([...new Set(reasonCodes)]);
+}
+
+function candidateFieldReasonCode(field: unknown): string {
+  switch (field) {
+    case "aiCandidate.id":
+      return "AI_CANDIDATE_ID_INVALID";
+    case "aiCandidate.projectId":
+      return "AI_CANDIDATE_PROJECT_ID_INVALID";
+    case "aiCandidate.chapterId":
+      return "AI_CANDIDATE_CHAPTER_ID_INVALID";
+    case "aiCandidate.baseVersionId":
+      return "AI_CANDIDATE_BASE_VERSION_ID_INVALID";
+    case "aiCandidate.contentChecksum":
+      return "AI_CANDIDATE_CONTENT_CHECKSUM_INVALID";
+    case "aiCandidate.createdAt":
+      return "AI_CANDIDATE_CREATED_AT_INVALID";
+    case "aiCandidate.updatedAt":
+      return "AI_CANDIDATE_UPDATED_AT_INVALID";
+    case "aiCandidate.decidedAt":
+      return "AI_CANDIDATE_DECIDED_AT_INVALID";
+    default:
+      return typeof field === "string" && field.startsWith("AI candidate:")
+        ? "AI_CANDIDATE_ENTITY_INVALID"
+        : "AI_CANDIDATE_METADATA_INVALID";
+  }
+}
+
+function safeReasonCode(value: unknown): string | null {
+  return typeof value === "string" && /^[A-Z][A-Z0-9_]{0,79}$/u.test(value) ? value : null;
+}
+
+function safeRepositoryStack(cause: unknown): readonly string[] {
+  const frames: string[] = [];
+  const visited = new Set<unknown>();
+  let current: unknown = cause;
+  while (current instanceof Error && !visited.has(current) && visited.size < 8) {
+    visited.add(current);
+    if (typeof current.stack === "string") {
+      for (const rawLine of current.stack.split(/\r?\n/gu).slice(1)) {
+        const line = rawLine.trim().replaceAll("\\", "/");
+        const functionName = /^at\s+([A-Za-z_$<>][A-Za-z0-9_$<>.]*)/u.exec(line)?.[1] ?? null;
+        const path =
+          /((?:(?:apps\/desktop\/src|packages\/[A-Za-z0-9_-]+\/src|src)\/[A-Za-z0-9_./-]+|assets\/[A-Za-z0-9_.-]+\.js):\d+:\d+)/u.exec(
+            line,
+          )?.[1];
+        if (path !== undefined) {
+          frames.push(`at ${functionName ?? "anonymous"} (${path})`);
+        }
+        if (frames.length >= 12) break;
+      }
+    }
+    if (frames.length >= 12) break;
+    current = errorCause(current);
+  }
+  return Object.freeze([...new Set(frames)]);
+}
+
+function safeMetadataFingerprint(parts: readonly string[]): string {
+  let hash = 0x811c9dc5;
+  for (const codePoint of Array.from(parts.join("\u001f"))) {
+    hash ^= codePoint.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
 async function attempt<Value>(
   operation: string,
   action: () => Promise<Value>,
@@ -1392,8 +1594,7 @@ async function attempt<Value>(
       return err(error);
     }
 
-    const normalized = normalizeDatabaseError(operation, error);
-    return err(normalized);
+    return err(attachErrorCause(normalizeDatabaseError(operation, error), error));
   }
 }
 
@@ -1469,6 +1670,7 @@ function normalizeDatabaseError(operation: string, error: unknown): AppError {
     actions: ["RETRY", "EXPORT_DRAFT"],
     details: {
       cause: error instanceof Error ? error.name : "UnknownDatabaseError",
+      operation,
     },
   });
 }
@@ -1578,7 +1780,7 @@ function requireParsed<Value>(parsed: Result<Value, AppError>, field: string): V
   if (parsed.ok) {
     return parsed.value;
   }
-  throw corruptData(field, parsed.error.code);
+  throw corruptData(field, parsed.error.code, parsed.error);
 }
 
 function requireEntity<Value>(
@@ -1589,14 +1791,31 @@ function requireEntity<Value>(
   if (restored.ok) {
     return restored.value;
   }
-  throw corruptData(`${entityType}:${entityId}`, restored.error.code);
+  throw corruptData(`${entityType}:${entityId}`, restored.error.code, restored.error);
 }
 
-function corruptData(field: string, validationCode: string): AppError {
-  return new AppError({
+function corruptData(field: string, validationCode: string, cause?: unknown): AppError {
+  const error = new AppError({
     code: "REPOSITORY_ERROR",
     message: "Stored local data did not pass integrity validation.",
     actions: ["EXPORT_DRAFT", "CONTACT_SUPPORT"],
     details: { field, validationCode },
   });
+  return cause === undefined ? error : attachErrorCause(error, cause);
+}
+
+function attachErrorCause<ErrorType extends Error>(error: ErrorType, cause: unknown): ErrorType {
+  if (cause === error || "cause" in error) {
+    return error;
+  }
+  Object.defineProperty(error, "cause", {
+    value: cause,
+    enumerable: false,
+    configurable: true,
+  });
+  return error;
+}
+
+function errorCause(error: Error): unknown {
+  return "cause" in error ? (error as Error & { readonly cause?: unknown }).cause : undefined;
 }

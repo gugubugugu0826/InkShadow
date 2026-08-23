@@ -71,6 +71,10 @@ import {
   projectOrdinaryUiError,
   UiActionError,
 } from "../infrastructure/ui-error";
+import {
+  readSafeOperationIncidents,
+  recordSafeOperationIncident,
+} from "../infrastructure/safe-operation-diagnostics";
 import type { ModelInvocationFact } from "../infrastructure/model-hub-store";
 import {
   createLocalCandidateAcceptancePipelineInput,
@@ -85,6 +89,26 @@ import {
   projectOpeningInvocationDispatchState,
   type OpeningInvocationDispatchState,
 } from "../infrastructure/opening-invocation-terminal";
+import {
+  advanceOpeningJourneyRun,
+  checkpointOpeningJourneyRun,
+  createOpeningJourneyRun,
+  ensureOpeningJourneyTask,
+  isOpeningJourneyRunTerminal,
+  openingJourneyRunElapsedMs,
+  openingJourneyRunRecoveryDecision,
+  projectOpeningJourneyTaskStage,
+  readOpeningJourneyRun,
+  settleOpeningJourneyTask,
+  type OpeningJourneyRunStage,
+  type OpeningJourneyRunV1,
+} from "../infrastructure/opening-journey-run";
+import {
+  armOpeningJourneyDeadline,
+  disarmOpeningJourneyDeadline,
+  settleOpeningJourneyDeadlineOnce,
+  type OpeningJourneyDeadlineScope,
+} from "../infrastructure/opening-journey-deadline-coordinator";
 import type { DesktopRuntime } from "../infrastructure/runtime";
 import { useWritingExperience } from "../hooks/use-writing-experience";
 import { useRuntime } from "../runtime-context";
@@ -105,6 +129,7 @@ interface IdeaJourneySnapshotV1 extends Readonly<Record<string, unknown>> {
   readonly selectedOpeningId: string | null;
   readonly openingBatchId: string | null;
   readonly openingBatchFailureCount: number;
+  readonly openingRun: OpeningJourneyRunV1 | null;
   readonly provisioningPlan: IdeaJourneyProvisioningPlanV1 | null;
   /** Explicit author opt-in; experimental writing methods remain off by default. */
   readonly experimentalNovelSkillsOptIn: boolean;
@@ -156,6 +181,12 @@ interface DirectOpeningOrganizationNavigationState {
   readonly importantReviewCount: number;
 }
 
+interface UnreadableIdeaJourneyRecovery {
+  readonly journeyId: string;
+  readonly updatedAt: string;
+  readonly supportId: string;
+}
+
 interface PersistedIdeaOpeningSuggestionV1 extends Readonly<Record<string, unknown>> {
   readonly id: string;
   readonly batchId: string;
@@ -188,6 +219,11 @@ interface ProviderOpeningBatchPlan {
     openingAngle: CreativeOpeningAngle;
     replacesOpeningId?: string;
   }>[];
+}
+
+interface OpeningProviderFailureSettlementOutcome {
+  readonly record: CreativeJourneyRecord | null;
+  readonly presentationError: unknown;
 }
 
 interface AbandonedOpeningGeneration {
@@ -294,6 +330,9 @@ export function IdeaJourneyPage() {
   const [listState, setListState] = useState<"loading" | "ready" | "empty" | "error">("loading");
   const [activeJourneys, setActiveJourneys] = useState<readonly CreativeJourneyRecord[]>([]);
   const [unreadableJourneyCount, setUnreadableJourneyCount] = useState(0);
+  const [unreadableJourneys, setUnreadableJourneys] = useState<
+    readonly UnreadableIdeaJourneyRecovery[]
+  >([]);
   const [journey, setJourney] = useState<CreativeJourneyRecord | null>(null);
   const [turnCount, setTurnCount] = useState(0);
   const [idea, setIdea] = useState("");
@@ -302,6 +341,7 @@ export function IdeaJourneyPage() {
   const [storySummaryDraft, setStorySummaryDraft] = useState("");
   const [busy, setBusy] = useState<"create" | "answer" | "regenerate" | "keep" | null>(null);
   const [streamingPreviews, setStreamingPreviews] = useState<Readonly<Record<string, string>>>({});
+  const [clockNow, setClockNow] = useState(runtime.clock.now());
   const [requestTimings, setRequestTimings] = useState<
     Readonly<Record<string, Readonly<{ startedAt: number; elapsedMs: number | null }>>>
   >({});
@@ -323,17 +363,26 @@ export function IdeaJourneyPage() {
   const [openingProviderConfirmation, setOpeningProviderConfirmation] =
     useState<OpeningProviderConfirmationState | null>(null);
   const [resumeFailureTargetId, setResumeFailureTargetId] = useState<string | null>(null);
+  const [unpersistedOpeningSupportId, setUnpersistedOpeningSupportId] = useState<string | null>(
+    null,
+  );
   const operationSequence = useRef(0);
   const activeOperation = useRef<JourneyOperation | null>(null);
   const resumeLock = useRef<JourneyOperation | null>(null);
   const automaticResumeAttempts = useRef(new Set<string>());
+  const deadlineRecoveryAttempts = useRef(new Set<string>());
+  const deadlineTerminalizationBatchIds = useRef(new Set<string>());
   const automaticResumeTarget = useRef<Readonly<{ routeKey: string; journeyId: string }> | null>(
     null,
   );
   const requestedJourneyRouteRef = useRef(requestedJourneyParameter);
   const blankWorkspaceLock = useRef<JourneyOperation | null>(null);
+  const providerBeginLock = useRef(false);
   const listRequestSequence = useRef(0);
   const openingProviderConfirmationResolver = useRef<((confirmed: boolean) => void) | null>(null);
+  const pageExitOpeningCoordinator = useRef<(journeyId: string) => Promise<void>>(() =>
+    Promise.resolve(),
+  );
 
   function requestOpeningProviderConfirmation(
     disclosure: CreativeOpeningProviderActionDisclosure,
@@ -476,16 +525,53 @@ export function IdeaJourneyPage() {
     }
   }
 
+  function assertOpeningProviderDispatchBeforeDeadline(
+    operation: JourneyOperation,
+    record: CreativeJourneyRecord,
+  ): void {
+    assertCurrentOperation(operation);
+    const run = readIdeaSnapshot(record.snapshot, record.id).openingRun;
+    if (run !== null && Date.parse(runtime.clock.now()) >= Date.parse(run.deadlineAt)) {
+      throw new UiActionError(
+        "OPENING_GENERATION_TIMEOUT_BEFORE_SEND",
+        "本次等待已超过 3 分钟，模型调用没有发送。请重新读取后由你明确重试，系统不会自动重发。",
+      );
+    }
+  }
+
+  function openingResultArrivedAfterDeadline(requestId: string): Error {
+    return Object.assign(
+      new UiActionError(
+        "MODEL_TIMEOUT",
+        "模型结果在本次总等待截止后返回，未写入可用方案；发送状态需要核对，系统不会自动重发。",
+      ),
+      {
+        timedOutRequestIds: Object.freeze([requestId]),
+      },
+    );
+  }
+
   useEffect(
     () => () => {
+      const exitJourneyId = activeOperation.current?.journeyId ?? null;
+      const hadPendingConfirmation = openingProviderConfirmationResolver.current !== null;
       openingProviderConfirmationResolver.current?.(false);
       openingProviderConfirmationResolver.current = null;
       activeOperation.current = null;
       resumeLock.current = null;
       automaticResumeAttempts.current.clear();
+      deadlineRecoveryAttempts.current.clear();
+      deadlineTerminalizationBatchIds.current.clear();
       automaticResumeTarget.current = null;
       blankWorkspaceLock.current = null;
+      providerBeginLock.current = false;
       listRequestSequence.current += 1;
+      if (exitJourneyId !== null && !hadPendingConfirmation) {
+        void pageExitOpeningCoordinator.current(exitJourneyId).catch(() => {
+          // The persisted journey remains discoverable; startup recovery will
+          // retry this local-only terminalization without provider dispatch.
+        });
+      }
     },
     [],
   );
@@ -498,23 +584,56 @@ export function IdeaJourneyPage() {
       if (listRequestSequence.current !== request) {
         return;
       }
-      const readable = records.filter((record) => {
+      const readable: CreativeJourneyRecord[] = [];
+      const unreadable: UnreadableIdeaJourneyRecovery[] = [];
+      for (const record of records) {
         try {
           readIdeaSnapshot(record.snapshot, record.id);
-          return true;
-        } catch {
-          return false;
+          readable.push(record);
+        } catch (cause: unknown) {
+          const existing = readSafeOperationIncidents().find(
+            (incident) =>
+              incident.operation === "opening_creation" &&
+              incident.stage === "read_local_state" &&
+              incident.requestId === record.id &&
+              incident.normalizedErrorCode === "OPENING_JOURNEY_SNAPSHOT_INVALID",
+          );
+          const diagnosticCause = Object.assign(
+            new UiActionError("OPENING_JOURNEY_SNAPSHOT_INVALID", "本地开书进度暂时无法安全读取。"),
+            { cause },
+          );
+          const incident =
+            existing ??
+            recordSafeOperationIncident({
+              operation: "opening_creation",
+              stage: "read_local_state",
+              cause: diagnosticCause,
+              projectId: record.projectId,
+              chapterId: record.chapterId,
+              requestId: record.id,
+              dispatched: "unknown",
+              occurredAt: runtime.clock.now(),
+            });
+          unreadable.push(
+            Object.freeze({
+              journeyId: record.id,
+              updatedAt: record.updatedAt,
+              supportId: incident.supportId,
+            }),
+          );
         }
-      });
-      setActiveJourneys(readable);
-      setUnreadableJourneyCount(records.length - readable.length);
-      setListState(readable.length === 0 ? "empty" : "ready");
+      }
+      setActiveJourneys(Object.freeze(readable));
+      setUnreadableJourneys(Object.freeze(unreadable));
+      setUnreadableJourneyCount(unreadable.length);
+      setListState(records.length === 0 ? "empty" : "ready");
       setListError(null);
     } catch (cause: unknown) {
       if (listRequestSequence.current !== request) {
         return;
       }
       setListError(cause);
+      setUnreadableJourneys([]);
       setUnreadableJourneyCount(0);
       setListState("error");
     }
@@ -561,6 +680,7 @@ export function IdeaJourneyPage() {
     openingProviderConfirmationResolver.current = null;
     setOpeningProviderConfirmation(null);
     setJourney(null);
+    setUnpersistedOpeningSupportId(null);
     setTurnCount(0);
     setCustomAnswer("");
     setProjectNameDraft("");
@@ -802,6 +922,63 @@ export function IdeaJourneyPage() {
     );
   }
 
+  async function persistOpeningDispatchBoundary(
+    journeyId: string,
+    requestId: string,
+    invocationId: string,
+  ): Promise<void> {
+    const invocation = await runtime.modelHub.findInvocation(invocationId);
+    if (invocation?.id !== requestId || invocation.providerDispatchStartedAt === null) {
+      throw new UiActionError(
+        "OPENING_DISPATCH_RECEIPT_MISSING",
+        "\u8c03\u7528\u8bb0\u5f55\u5c1a\u672a\u786e\u8ba4\u5df2\u7ecf\u8fdb\u5165\u53d1\u9001\u8fb9\u754c\uff0c\u56e0\u6b64\u6ca1\u6709\u628a\u8fd9\u6b21\u5f00\u5934\u6807\u8bb0\u4e3a\u7b49\u5f85\u6a21\u578b\u8fd4\u56de\u3002",
+      );
+    }
+    projectOpeningDispatchInMemory(requestId, invocationId);
+    const current = await runtime.creativeJourneys.findById(journeyId);
+    if (current === null) {
+      throw new UiActionError(
+        "IDEA_JOURNEY_NOT_FOUND",
+        "\u8fd9\u6b21\u6784\u601d\u5df2\u4e0d\u5728\u5f53\u524d\u8bbe\u5907\u4e0a\uff1b\u8c03\u7528\u5df2\u7ecf\u8fdb\u5165\u53d1\u9001\u8fb9\u754c\uff0c\u7ed3\u679c\u9700\u8981\u4eba\u5de5\u6838\u5bf9\u3002",
+      );
+    }
+    const currentRun = readIdeaSnapshot(current.snapshot, current.id).openingRun;
+    if (!currentRun?.requestIds.includes(requestId)) {
+      throw new UiActionError(
+        "OPENING_JOURNEY_SCOPE_MISMATCH",
+        "\u8c03\u7528\u8bb0\u5f55\u4e0e\u5f53\u524d\u5f00\u4e66\u65c5\u7a0b\u4e0d\u4e00\u81f4\uff1b\u8c03\u7528\u5df2\u7ecf\u8fdb\u5165\u53d1\u9001\u8fb9\u754c\uff0c\u7ed3\u679c\u9700\u8981\u4eba\u5de5\u6838\u5bf9\u3002",
+      );
+    }
+    const batchInvocations = await Promise.all(
+      currentRun.requestIds.map((currentRequestId) =>
+        runtime.modelHub.findInvocation(currentRequestId),
+      ),
+    );
+    if (batchInvocations.some((candidate) => candidate?.providerDispatchStartedAt == null)) {
+      return;
+    }
+    const providerWaitingRecord = await checkpointOpeningJourneyRun(
+      runtime.creativeJourneys,
+      journeyId,
+      {
+        stage: "provider_waiting",
+        now: runtime.clock.now(),
+      },
+    );
+    const providerWaitingRun = readIdeaSnapshot(
+      providerWaitingRecord.snapshot,
+      providerWaitingRecord.id,
+    ).openingRun;
+    if (providerWaitingRun?.stage === "provider_waiting") {
+      await projectOpeningJourneyTaskStage(
+        runtime.taskCenter,
+        providerWaitingRun,
+        "opening.provider_waiting",
+        runtime.clock.now(),
+      );
+    }
+  }
+
   async function reconcileOpeningResult(
     journeyId: string,
     generated: CreativeOpeningResult,
@@ -829,6 +1006,18 @@ export function IdeaJourneyPage() {
         );
       }
       const latestSnapshot = readIdeaSnapshot(latest.snapshot, latest.id);
+      const persistedRun = latestSnapshot.openingRun;
+      const assertResultBeforeDeadline = (): void => {
+        if (
+          generated.source === "provider" &&
+          persistedRun !== null &&
+          persistedRun.batchId === input.batchId &&
+          Date.parse(runtime.clock.now()) >= Date.parse(persistedRun.deadlineAt)
+        ) {
+          throw openingResultArrivedAfterDeadline(generated.requestId);
+        }
+      };
+      assertResultBeforeDeadline();
       const currentSuggestion = latestSnapshot.openingSuggestions.find(
         ({ id, batchId }) => id === generated.requestId && batchId === input.batchId,
       );
@@ -852,9 +1041,13 @@ export function IdeaJourneyPage() {
           slotNumber: lifecycleSuggestion?.slotNumber ?? 1,
           providerInvocationId: lifecycleSuggestion?.providerInvocationId ?? null,
           dispatchState,
-          ...(dispatchState === "ambiguous" && invocation?.status === "succeeded"
-            ? { noticeCode: "OPENING_RESULT_NOT_PERSISTED" }
-            : {}),
+          ...(dispatchState === "ambiguous" && invocation === null
+            ? { noticeCode: "OPENING_INVOCATION_RECORD_MISSING" }
+            : dispatchState === "ambiguous" && invocation?.status !== "succeeded"
+              ? { noticeCode: "OPENING_INVOCATION_STATE_MISMATCH" }
+              : dispatchState === "ambiguous" && invocation?.status === "succeeded"
+                ? { noticeCode: "OPENING_RESULT_NOT_PERSISTED" }
+                : {}),
         },
       );
       const repairsUnpersistedResult = canRepairUnpersistedOpeningResult(
@@ -965,6 +1158,7 @@ export function IdeaJourneyPage() {
       });
       try {
         input.assertPersistenceAllowed?.();
+        assertResultBeforeDeadline();
         await runtime.creativeJourneys.update(
           updated,
           latest.revision,
@@ -1001,7 +1195,7 @@ export function IdeaJourneyPage() {
   }
 
   async function settleUnsentOpeningProviderFailure(
-    operation: JourneyOperation,
+    operation: JourneyOperation | null,
     journeyId: string,
     plan: ProviderOpeningBatchPlan,
     cause: unknown,
@@ -1009,15 +1203,15 @@ export function IdeaJourneyPage() {
   ): Promise<CreativeJourneyRecord | null> {
     const unsentRequests: ProviderOpeningBatchPlan["requests"][number][] = [];
     for (const request of plan.requests) {
-      assertCurrentOperation(operation);
+      if (operation !== null) assertCurrentOperation(operation);
       const invocation = await runtime.modelHub.findInvocation(request.requestId);
-      assertCurrentOperation(operation);
+      if (operation !== null) assertCurrentOperation(operation);
       if (invocation === null) {
         unsentRequests.push(request);
       }
     }
     let latest = await runtime.creativeJourneys.findById(journeyId);
-    assertCurrentOperation(operation);
+    if (operation !== null) assertCurrentOperation(operation);
     if (latest === null) {
       return null;
     }
@@ -1033,9 +1227,9 @@ export function IdeaJourneyPage() {
           batchPlan: plan,
         },
       );
-      assertCurrentOperation(operation);
+      if (operation !== null) assertCurrentOperation(operation);
     }
-    if (unsentRequests.length > 0) {
+    if (unsentRequests.length > 0 && operation !== null && isCurrentOperation(operation)) {
       const turns = await runtime.creativeJourneys.listTurns(journeyId);
       assertCurrentOperation(operation);
       setJourney(latest);
@@ -1046,20 +1240,20 @@ export function IdeaJourneyPage() {
     return latest;
   }
   async function settleTimedOutOpeningProviderBatch(
-    operation: JourneyOperation,
+    operation: JourneyOperation | null,
     journeyId: string,
     plan: ProviderOpeningBatchPlan,
     timedOutRequestIds: readonly string[],
   ): Promise<CreativeJourneyRecord> {
-    assertCurrentOperation(operation);
-    if (operation.journeyId !== journeyId) {
+    if (operation !== null) assertCurrentOperation(operation);
+    if (operation !== null && operation.journeyId !== journeyId) {
       throw new UiActionError(
         "IDEA_OPENING_TIMEOUT_SCOPE_MISMATCH",
         "超时请求不属于当前构思；墨影没有结束其他调用，请重新读取进度。",
       );
     }
     const current = await runtime.creativeJourneys.findById(journeyId);
-    assertCurrentOperation(operation);
+    if (operation !== null) assertCurrentOperation(operation);
     if (current === null) {
       throw new UiActionError(
         "IDEA_JOURNEY_NOT_FOUND",
@@ -1076,7 +1270,7 @@ export function IdeaJourneyPage() {
       timedOutRequestIds,
       recoveryReceipt,
     );
-    assertCurrentOperation(operation);
+    if (operation !== null) assertCurrentOperation(operation);
     const verified = await verifyTimedOutOpeningProviderBatchSettlement(
       runtime,
       journeyId,
@@ -1084,24 +1278,25 @@ export function IdeaJourneyPage() {
       timedOutRequestIds,
       recoveryReceipt,
     );
-    assertCurrentOperation(operation);
+    if (operation !== null) assertCurrentOperation(operation);
     await Promise.allSettled(
       verified.providerCancellationRequestIds.map(async (requestId) => {
         await runtime.modelGateway.cancelGeneration(requestId);
       }),
     );
-    assertCurrentOperation(operation);
-    const turns = await runtime.creativeJourneys.listTurns(journeyId);
-    assertCurrentOperation(operation);
-    setJourney(verified.journey);
-    setTurnCount(turns.length);
-    clearStreamingPreviews(timedOutRequestIds);
-    setBatchProgress(null);
+    if (operation !== null && isCurrentOperation(operation)) {
+      const turns = await runtime.creativeJourneys.listTurns(journeyId);
+      assertCurrentOperation(operation);
+      setJourney(verified.journey);
+      setTurnCount(turns.length);
+      clearStreamingPreviews(timedOutRequestIds);
+      setBatchProgress(null);
+    }
     return verified.journey;
   }
 
   async function settleOpeningProviderFailure(
-    operation: JourneyOperation,
+    operation: JourneyOperation | null,
     journeyId: string,
     plan: ProviderOpeningBatchPlan,
     cause: unknown,
@@ -1124,6 +1319,187 @@ export function IdeaJourneyPage() {
         )
       : settleUnsentOpeningProviderFailure(operation, journeyId, plan, cause, questionKey);
   }
+  async function finalizeOpeningJourneyRun(
+    record: CreativeJourneyRecord,
+    causeCode: string | null = null,
+  ): Promise<CreativeJourneyRecord> {
+    const snapshot = readIdeaSnapshot(record.snapshot, record.id);
+    const run = snapshot.openingRun;
+    if (run === null) {
+      return record;
+    }
+    const runRequestIds = new Set(run.requestIds);
+    const runSuggestions = [
+      ...snapshot.openingSuggestions,
+      ...snapshot.openingResultHistory,
+    ].filter(({ id, batchId }) => batchId === run.batchId && runRequestIds.has(id));
+    if (runSuggestions.some(({ status }) => status === "pending")) {
+      return record;
+    }
+    const hasUncertainResult = runSuggestions.some(
+      ({ dispatchState }) => dispatchState === "ambiguous",
+    );
+    const hasUsableResult = runSuggestions.some(isUsableOpeningSuggestion);
+    const stage: OpeningJourneyRunStage = hasUncertainResult
+      ? "result_pending"
+      : hasUsableResult
+        ? "completed"
+        : "failed";
+    const failureCode =
+      stage === "result_pending"
+        ? "OPENING_RESULT_PENDING_REVIEW"
+        : stage === "failed"
+          ? (causeCode ?? snapshot.noticeCode ?? "OPENING_GENERATION_FAILED")
+          : null;
+    const checkpointed = await checkpointOpeningJourneyRun(runtime.creativeJourneys, record.id, {
+      stage,
+      now: runtime.clock.now(),
+      failureCode,
+    });
+    const terminalRun = readIdeaSnapshot(checkpointed.snapshot, checkpointed.id).openingRun;
+    if (terminalRun === null) return checkpointed;
+    if (terminalRun.stage === "completed") {
+      await settleOpeningJourneyTask(runtime.taskCenter, terminalRun, {
+        status: "succeeded",
+        now: runtime.clock.now(),
+      });
+    } else if (terminalRun.stage === "cancelled_before_confirmation") {
+      await settleOpeningJourneyTask(runtime.taskCenter, terminalRun, {
+        status: "cancelled",
+        now: runtime.clock.now(),
+      });
+    } else if (terminalRun.stage === "failed" || terminalRun.stage === "result_pending") {
+      await settleOpeningJourneyTask(runtime.taskCenter, terminalRun, {
+        status: "failed",
+        now: runtime.clock.now(),
+        failureCode: terminalRun.failureCode ?? "OPENING_GENERATION_FAILED",
+      });
+    }
+    return checkpointed;
+  }
+
+  function localTerminalSettlementPresentation(
+    originalCause: unknown,
+    settlementCause: unknown,
+  ): UiActionError {
+    const originalDiagnostic = Object.assign(new Error("Opening provider action failed."), {
+      code: normalizeUiError(originalCause).code,
+    });
+    const settlementDiagnostic = Object.assign(
+      new Error("Opening terminal settlement failed.", { cause: originalDiagnostic }),
+      { code: normalizeUiError(settlementCause).code },
+    );
+    return Object.assign(
+      new UiActionError(
+        "OPENING_LOCAL_TERMINAL_SETTLEMENT_FAILED",
+        "本机在结束这次开书任务时没有一次完成全部记录。墨影已停止继续发送，并进行了有限的本地重读；请点击“重新读取”核对任务和生成结果。系统不会自动重发。",
+        "本地收口失败",
+      ),
+      { cause: settlementDiagnostic },
+    );
+  }
+
+  async function openingBatchDispatchFact(
+    plan: ProviderOpeningBatchPlan,
+  ): Promise<boolean | "unknown"> {
+    try {
+      const invocations = await Promise.all(
+        plan.requests.map(({ requestId }) => runtime.modelHub.findInvocation(requestId)),
+      );
+      return invocations.some((invocation) => invocation?.providerDispatchStartedAt !== null);
+    } catch {
+      return "unknown";
+    }
+  }
+
+  async function settleOpeningProviderFailureOrReport(
+    operation: JourneyOperation | null,
+    journeyId: string,
+    plan: ProviderOpeningBatchPlan,
+    originalCause: unknown,
+    questionKey: string,
+  ): Promise<OpeningProviderFailureSettlementOutcome> {
+    let firstSettlementCause: unknown = null;
+    let record: CreativeJourneyRecord | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const settled = await settleOpeningProviderFailure(
+          operation,
+          journeyId,
+          plan,
+          originalCause,
+          questionKey,
+        );
+        if (settled === null) {
+          throw new UiActionError(
+            "IDEA_JOURNEY_NOT_FOUND",
+            "这次开书进度暂时无法重新读取；墨影没有继续发送。",
+          );
+        }
+        record = await finalizeOpeningJourneyRun(settled, normalizeUiError(originalCause).code);
+        if (firstSettlementCause === null) {
+          return Object.freeze({ record, presentationError: originalCause });
+        }
+        break;
+      } catch (settlementCause: unknown) {
+        const settlementCode = normalizeUiError(settlementCause).code;
+        if (
+          settlementCode === "IDEA_OPENING_TIMEOUT_SCOPE_MISMATCH" ||
+          settlementCode === "CREATIVE_OPENING_TIMEOUT_SCOPE_MISMATCH"
+        ) {
+          try {
+            record = await runtime.creativeJourneys.findById(journeyId);
+          } catch {
+            record = null;
+          }
+          recordSafeOperationIncident({
+            operation: "opening_creation",
+            stage: "settle_terminal_state",
+            cause: settlementCause,
+            projectId: record?.projectId ?? null,
+            chapterId: record?.chapterId ?? null,
+            requestId:
+              readOpeningJourneyRun(record?.snapshot.openingRun)?.supportId ?? plan.batchId,
+            dispatched: await openingBatchDispatchFact(plan),
+            occurredAt: runtime.clock.now(),
+          });
+          return Object.freeze({ record, presentationError: originalCause });
+        }
+        firstSettlementCause ??= settlementCause;
+        const originalFailure = normalizeUiError(originalCause);
+        const mayRetryIdempotentLocalWrite =
+          attempt === 0 &&
+          settlementCode === "CREATIVE_JOURNEY_STORAGE_WRITE_FAILED" &&
+          originalFailure.code !== "MODEL_TIMEOUT" &&
+          creativeOpeningTimedOutRequestIds(originalCause).length === 0;
+        if (!mayRetryIdempotentLocalWrite) break;
+      }
+    }
+
+    const presentationError = localTerminalSettlementPresentation(
+      originalCause,
+      firstSettlementCause,
+    );
+    if (record === null) {
+      try {
+        record = await runtime.creativeJourneys.findById(journeyId);
+      } catch {
+        record = null;
+      }
+    }
+    recordSafeOperationIncident({
+      operation: "opening_creation",
+      stage: "settle_terminal_state",
+      cause: presentationError,
+      projectId: record?.projectId ?? null,
+      chapterId: record?.chapterId ?? null,
+      requestId: readOpeningJourneyRun(record?.snapshot.openingRun)?.supportId ?? plan.batchId,
+      dispatched: await openingBatchDispatchFact(plan),
+      occurredAt: runtime.clock.now(),
+    });
+    return Object.freeze({ record, presentationError });
+  }
+
   async function runProviderOpeningBatch(
     operation: JourneyOperation,
     current: CreativeJourneyRecord,
@@ -1158,7 +1534,6 @@ export function IdeaJourneyPage() {
     ): Promise<CreativeJourneyRecord> {
       const assertPersistenceAllowed = (): void => {
         persistenceFence?.assertPending();
-        assertCurrentOperation(operation);
       };
       assertPersistenceAllowed();
       const existing = reconciliations.get(providerResult.requestId);
@@ -1234,7 +1609,8 @@ export function IdeaJourneyPage() {
         ...(singleOpeningAngle === undefined ? {} : { openingAngle: singleOpeningAngle }),
         humanConfirmed: true,
         disclosureFingerprint: authority.disclosureFingerprint,
-        assertBeforeProviderDispatch: () => assertCurrentOperation(operation),
+        assertBeforeProviderDispatch: () =>
+          assertOpeningProviderDispatchBeforeDeadline(operation, current),
         onInvocationPrepared: (requestId, selection) => {
           const request = plan.requests.find((candidate) => candidate.requestId === requestId);
           if (request === undefined) {
@@ -1246,7 +1622,7 @@ export function IdeaJourneyPage() {
           return persistOpeningInvocation(operation, current.id, plan, request, selection);
         },
         onProviderDispatchStarted: (requestId, invocationId) =>
-          projectOpeningDispatchInMemory(requestId, invocationId),
+          persistOpeningDispatchBoundary(current.id, requestId, invocationId),
         onDelta: (requestId, text) => {
           if (isCurrentOperation(operation)) {
             updateStreamingPreview(requestId, text);
@@ -1259,6 +1635,7 @@ export function IdeaJourneyPage() {
     } catch (cause: unknown) {
       const failure = normalizeUiError(cause);
       if (
+        failure.code === "IDEA_OPERATION_SUPERSEDED" ||
         creativeOpeningTimedOutRequestIds(cause).length > 0 ||
         failure.code === "MODEL_TIMEOUT" ||
         failure.code === "CREATIVE_OPENING_TIMEOUT_SCOPE_MISMATCH"
@@ -1292,27 +1669,79 @@ export function IdeaJourneyPage() {
 
   async function discloseAndConfirmOpeningProviderAction(
     operation: JourneyOperation,
+    journeyId: string,
     actionLabel: string,
     input: Parameters<typeof prepareCreativeOpeningProviderAction>[1],
   ): Promise<CreativeOpeningProviderActionDisclosure | null> {
     assertCurrentOperation(operation);
+    await checkpointOpeningJourneyRun(runtime.creativeJourneys, journeyId, {
+      stage: "preflight",
+      now: runtime.clock.now(),
+    });
+    if (!isCurrentOperation(operation)) {
+      await abandonPreparedOpeningProviderAction(null, journeyId);
+      return null;
+    }
     const disclosure = await prepareCreativeOpeningProviderAction(runtime, input);
-    assertCurrentOperation(operation);
+    if (!isCurrentOperation(operation)) {
+      await abandonPreparedOpeningProviderAction(null, journeyId);
+      return null;
+    }
+    await checkpointOpeningJourneyRun(runtime.creativeJourneys, journeyId, {
+      stage: "awaiting_confirmation",
+      now: runtime.clock.now(),
+    });
+    if (!isCurrentOperation(operation)) {
+      await abandonPreparedOpeningProviderAction(null, journeyId);
+      return null;
+    }
     const confirmed = await requestOpeningProviderConfirmation(disclosure, actionLabel);
-    assertCurrentOperation(operation);
-    return confirmed ? disclosure : null;
+    if (!confirmed) {
+      if (deadlineTerminalizationBatchIds.current.has(input.actionId)) {
+        return null;
+      }
+      await abandonPreparedOpeningProviderAction(
+        isCurrentOperation(operation) ? operation : null,
+        journeyId,
+      );
+      return null;
+    }
+    await checkpointOpeningJourneyRun(runtime.creativeJourneys, journeyId, {
+      stage: "confirmed",
+      now: runtime.clock.now(),
+    });
+    if (!isCurrentOperation(operation)) {
+      return null;
+    }
+    const reservingRecord = await checkpointOpeningJourneyRun(runtime.creativeJourneys, journeyId, {
+      stage: "invocation_reserving",
+      now: runtime.clock.now(),
+    });
+    const reservingRun = readIdeaSnapshot(reservingRecord.snapshot, journeyId).openingRun;
+    if (reservingRun?.stage === "invocation_reserving") {
+      await projectOpeningJourneyTaskStage(
+        runtime.taskCenter,
+        reservingRun,
+        "opening.invocation",
+        runtime.clock.now(),
+      );
+    }
+    if (!isCurrentOperation(operation)) {
+      return null;
+    }
+    return disclosure;
   }
 
   async function abandonPreparedOpeningProviderAction(
-    operation: JourneyOperation,
+    operation: JourneyOperation | null,
     journeyId: string,
   ): Promise<CreativeJourneyRecord> {
-    assertCurrentOperation(operation);
+    if (operation !== null) assertCurrentOperation(operation);
     const [latest, turns] = await Promise.all([
       runtime.creativeJourneys.findById(journeyId),
       runtime.creativeJourneys.listTurns(journeyId),
     ]);
-    assertCurrentOperation(operation);
+    if (operation !== null) assertCurrentOperation(operation);
     if (latest === null) {
       throw new UiActionError(
         "IDEA_JOURNEY_NOT_FOUND",
@@ -1320,42 +1749,115 @@ export function IdeaJourneyPage() {
       );
     }
     const latestSnapshot = readIdeaSnapshot(latest.snapshot, latest.id);
+    const now = runtime.clock.now();
+    const currentRun = latestSnapshot.openingRun;
+    if (
+      currentRun !== null &&
+      !isOpeningJourneyRunTerminal(currentRun) &&
+      (currentRun.stage === "confirmed" ||
+        currentRun.stage === "invocation_reserving" ||
+        currentRun.stage === "provider_waiting")
+    ) {
+      const recovered = await recoverInterruptedOpeningGeneration(runtime, latest, "author_ended");
+      const terminal = await finalizeOpeningJourneyRun(
+        recovered,
+        currentRun.stage === "provider_waiting"
+          ? "OPENING_RESULT_PENDING_REVIEW"
+          : GENERATION_ABANDONED_BY_AUTHOR,
+      );
+      if (operation !== null && isCurrentOperation(operation)) {
+        setJourney(terminal);
+        clearStreamingPreviews(currentRun.requestIds);
+        setBatchProgress(null);
+      }
+      return terminal;
+    }
     const abandonment = abandonPersistedOpeningGeneration(latestSnapshot);
-    if (abandonment === null) {
+    const cancelledRun =
+      currentRun === null || isOpeningJourneyRunTerminal(currentRun)
+        ? currentRun
+        : advanceOpeningJourneyRun(currentRun, {
+            stage: "cancelled_before_confirmation",
+            now,
+            failureCode: GENERATION_ABANDONED_BY_AUTHOR,
+          });
+    if (abandonment === null && cancelledRun === currentRun) {
       return latest;
     }
+    const cancelledSnapshot: IdeaJourneySnapshotV1 = Object.freeze({
+      ...(abandonment?.snapshot ?? latestSnapshot),
+      openingRun: cancelledRun,
+    });
+    const requestIds = abandonment?.requestIds ?? currentRun?.requestIds ?? Object.freeze([]);
+    const batchId = abandonment?.batchId ?? currentRun?.batchId ?? null;
     const updated = Object.freeze({
       ...latest,
-      currentState: guidanceStateForSnapshot(abandonment.snapshot),
+      currentState: guidanceStateForSnapshot(cancelledSnapshot),
       revision: latest.revision + 1,
-      snapshot: abandonment.snapshot,
-      updatedAt: runtime.clock.now(),
+      snapshot: cancelledSnapshot,
+      updatedAt: now,
     });
     await runtime.creativeJourneys.update(
       updated,
       latest.revision,
       createTurn(runtime, updated, turns.length + 1, "regenerate", null, {
-        requestId: abandonment.requestIds[0] ?? null,
+        requestId: requestIds[0] ?? null,
         taskKey: "opening_guidance",
         snapshot: {
           status: "cancelled_before_confirmation",
-          requestIds: abandonment.requestIds,
-          batchId: abandonment.batchId,
+          requestIds,
+          batchId,
         },
       }),
     );
-    assertCurrentOperation(operation);
-    setJourney(updated);
-    setTurnCount(turns.length + 1);
-    clearStreamingPreviews(abandonment.requestIds);
-    setBatchProgress(null);
+    const terminalRun = readIdeaSnapshot(updated.snapshot, updated.id).openingRun;
+    if (terminalRun !== null) {
+      await settleOpeningJourneyTask(runtime.taskCenter, terminalRun, {
+        status: "cancelled",
+        now: runtime.clock.now(),
+      });
+    }
+    if (operation !== null && isCurrentOperation(operation)) {
+      setJourney(updated);
+      setTurnCount(turns.length + 1);
+      clearStreamingPreviews(requestIds);
+      setBatchProgress(null);
+    }
     return updated;
   }
+
+  pageExitOpeningCoordinator.current = async (journeyId) => {
+    const record = await runtime.creativeJourneys.findById(journeyId);
+    if (record === null) return;
+    const run = readIdeaSnapshot(record.snapshot, record.id).openingRun;
+    if (
+      run === null ||
+      isOpeningJourneyRunTerminal(run) ||
+      run.stage === "confirmed" ||
+      run.stage === "invocation_reserving" ||
+      run.stage === "provider_waiting"
+    ) {
+      return;
+    }
+    await abandonPreparedOpeningProviderAction(null, journeyId);
+  };
 
   const snapshot = useMemo(
     () => (journey === null ? null : readIdeaSnapshot(journey.snapshot, journey.id)),
     [journey],
   );
+  useEffect(() => {
+    const run = snapshot?.openingRun ?? null;
+    if (run === null || isOpeningJourneyRunTerminal(run)) return;
+    setClockNow(runtime.clock.now());
+    const timer = window.setInterval(() => {
+      setClockNow(runtime.clock.now());
+    }, 1_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [runtime, snapshot?.openingRun]);
+
   const currentQuestion = snapshot === null ? null : currentJourneyQuestion(snapshot);
   const renderQuestion = currentQuestion ?? DEFAULT_QUESTION;
   useEffect(() => {
@@ -1394,7 +1896,7 @@ export function IdeaJourneyPage() {
   }, [error, runtime, snapshot]);
 
   async function begin(): Promise<void> {
-    if (busy !== null) {
+    if (busy !== null || providerBeginLock.current) {
       return;
     }
     let normalizedIdea: string;
@@ -1411,21 +1913,50 @@ export function IdeaJourneyPage() {
       await createBlankAuthorWorkspace(normalizedIdea);
       return;
     }
+    providerBeginLock.current = true;
     const operation = startOperation(null);
     setBusy("create");
+    setUnpersistedOpeningSupportId(null);
     setError(null);
-    const generationMode =
-      directMode || openingPreference === "ai" ? "provider" : await resolveOpeningGenerationMode();
+    let generationMode: "provider" | "local";
+    try {
+      generationMode =
+        directMode || openingPreference === "ai"
+          ? "provider"
+          : await resolveOpeningGenerationMode();
+    } catch (cause: unknown) {
+      setError(cause);
+      setBusy(null);
+      providerBeginLock.current = false;
+      finishOperation(operation);
+      return;
+    }
     if (!isCurrentOperation(operation)) {
+      providerBeginLock.current = false;
       return;
     }
     const providerBatchPlan =
       generationMode === "provider" ? createProviderOpeningBatchPlan() : null;
     const now = runtime.clock.now();
     const id = runtime.ids.next();
+    const openingRun =
+      providerBatchPlan === null
+        ? null
+        : createOpeningJourneyRun({
+            journeyId: id,
+            batchId: providerBatchPlan.batchId,
+            taskId: runtime.ids.next(),
+            requestIds: providerBatchPlan.requests.map(({ requestId }) => requestId),
+            now,
+            timeoutMs: 180_000,
+          });
     const boundOperation = bindOperation(operation, id);
     if (boundOperation === null) {
+      providerBeginLock.current = false;
       return;
+    }
+    if (openingRun !== null) {
+      setUnpersistedOpeningSupportId(openingRun.supportId);
     }
     const requestId = providerBatchPlan?.requests[0]?.requestId ?? runtime.ids.next();
     const initialSnapshot: IdeaJourneySnapshotV1 = Object.freeze({
@@ -1447,6 +1978,7 @@ export function IdeaJourneyPage() {
       selectedOpeningId: null,
       openingBatchId: providerBatchPlan?.batchId ?? requestId,
       openingBatchFailureCount: 0,
+      openingRun,
       provisioningPlan: createJourneyProvisioningPlan(runtime),
       experimentalNovelSkillsOptIn,
       answers: Object.freeze({}),
@@ -1505,19 +2037,33 @@ export function IdeaJourneyPage() {
     try {
       await runtime.creativeJourneys.create(record, initialTurn);
       if (isCurrentOperation(boundOperation)) {
+        setUnpersistedOpeningSupportId(null);
+      }
+      if (openingRun !== null) {
+        await ensureOpeningJourneyTask(runtime.taskCenter, openingRun, now);
+      }
+      if (isCurrentOperation(boundOperation)) {
         setJourney(record);
         setTurnCount(1);
       }
       if (providerBatchPlan === null) {
         startRequestTimings([requestId]);
       }
+      let preparedRecord = record;
+      if (openingRun !== null) {
+        preparedRecord = await checkpointOpeningJourneyRun(runtime.creativeJourneys, id, {
+          stage: "workspace_provisioning",
+          now: runtime.clock.now(),
+        });
+      }
+      const preparedSnapshot = readIdeaSnapshot(preparedRecord.snapshot, preparedRecord.id);
       const providerPreparation =
         providerBatchPlan === null
           ? null
-          : await prepareJourneyProviderDispatch(record, initialSnapshot, boundOperation);
+          : await prepareJourneyProviderDispatch(preparedRecord, preparedSnapshot, boundOperation);
       const generationRecord =
         providerPreparation?.current ??
-        (await provisionJourneyWorkspace(record, initialSnapshot, boundOperation)).current;
+        (await provisionJourneyWorkspace(preparedRecord, preparedSnapshot, boundOperation)).current;
       const generationSnapshot = readIdeaSnapshot(generationRecord.snapshot, generationRecord.id);
       const initialActionKind: CreativeOpeningProviderActionKind = directMode
         ? "initial_single"
@@ -1531,6 +2077,7 @@ export function IdeaJourneyPage() {
           ? null
           : await discloseAndConfirmOpeningProviderAction(
               boundOperation,
+              generationRecord.id,
               directMode ? "生成开头" : "生成首批三个开头",
               {
                 actionId: providerBatchPlan.batchId,
@@ -1544,7 +2091,6 @@ export function IdeaJourneyPage() {
               },
             );
       if (providerBatchPlan !== null && providerDisclosure === null) {
-        await abandonPreparedOpeningProviderAction(boundOperation, generationRecord.id);
         return;
       }
       let updated: CreativeJourneyRecord;
@@ -1587,6 +2133,7 @@ export function IdeaJourneyPage() {
             idea: normalizedIdea,
           },
         );
+        updated = await finalizeOpeningJourneyRun(updated);
       }
       if (
         directMode &&
@@ -1610,16 +2157,22 @@ export function IdeaJourneyPage() {
         finishRequestTiming(requestId);
       }
     } catch (cause: unknown) {
-      if (isCurrentOperation(boundOperation) && providerBatchPlan !== null) {
-        await settleOpeningProviderFailure(
+      if (!isCurrentOperation(boundOperation)) return;
+      if (providerBatchPlan !== null) {
+        const outcome = await settleOpeningProviderFailureOrReport(
           boundOperation,
           id,
           providerBatchPlan,
           cause,
           "opening_direction",
-        ).catch(() => null);
-      }
-      if (isCurrentOperation(boundOperation)) {
+        );
+        if (isCurrentOperation(boundOperation)) {
+          if (outcome.record !== null) {
+            setJourney(outcome.record);
+          }
+          setError(outcome.presentationError);
+        }
+      } else if (isCurrentOperation(boundOperation)) {
         setError(cause);
       }
     } finally {
@@ -1631,6 +2184,7 @@ export function IdeaJourneyPage() {
         setBatchProgress(null);
         setBusy(null);
       }
+      providerBeginLock.current = false;
       finishOperation(boundOperation);
     }
   }
@@ -1654,6 +2208,7 @@ export function IdeaJourneyPage() {
       selectedOpeningId: null,
       openingBatchId: null,
       openingBatchFailureCount: 0,
+      openingRun: null,
       provisioningPlan: createJourneyProvisioningPlan(runtime),
       experimentalNovelSkillsOptIn: false,
       answers: Object.freeze({}),
@@ -1865,6 +2420,96 @@ export function IdeaJourneyPage() {
     }
   }
 
+  async function installLegacyOpeningRun(
+    record: CreativeJourneyRecord,
+  ): Promise<CreativeJourneyRecord> {
+    const snapshot = readIdeaSnapshot(record.snapshot, record.id);
+    if (
+      snapshot.openingRun !== null ||
+      snapshot.openingGenerationMode !== "provider" ||
+      !hasPersistedGenerationPending(snapshot)
+    ) {
+      return record;
+    }
+    const batchId = snapshot.openingBatchId;
+    const pendingAcrossBatches = snapshot.openingSuggestions.filter(needsOpeningInvocationRecovery);
+    if (
+      batchId !== null &&
+      pendingAcrossBatches.some(({ batchId: suggestionBatchId }) => suggestionBatchId !== batchId)
+    ) {
+      throw new UiActionError(
+        "OPENING_LEGACY_RECOVERY_SCOPE_INVALID",
+        "旧版开书进度混入了其他批次的未完成请求。墨影已停止恢复，不会删除、改写或重新发送。",
+      );
+    }
+    const pending = pendingAcrossBatches.filter(
+      ({ batchId: suggestionBatchId }) => suggestionBatchId === batchId,
+    );
+    const currentBatchRequestIds = Object.freeze([
+      ...new Set(
+        [...snapshot.openingSuggestions, ...snapshot.openingResultHistory]
+          .filter(({ batchId: suggestionBatchId }) => suggestionBatchId === batchId)
+          .map(({ id }) => id),
+      ),
+    ]);
+    if (
+      batchId === null ||
+      !parseUuidV7(batchId).ok ||
+      pending.length === 0 ||
+      currentBatchRequestIds.length === 0 ||
+      currentBatchRequestIds.some((requestId) => !parseUuidV7(requestId).ok)
+    ) {
+      throw new UiActionError(
+        "OPENING_LEGACY_RECOVERY_SCOPE_INVALID",
+        "旧版开书进度缺少可核对的批次或请求编号。墨影已停止恢复，不会删除、改写或重新发送。",
+      );
+    }
+    const invocations = await Promise.all(
+      pending.map(({ id }) => runtime.modelHub.findInvocation(id)),
+    );
+    const startedAt = record.updatedAt;
+    let run = createOpeningJourneyRun({
+      journeyId: record.id,
+      batchId,
+      taskId: runtime.ids.next(),
+      requestIds: currentBatchRequestIds,
+      now: startedAt,
+      timeoutMs: 180_000,
+    });
+    for (const stage of [
+      "workspace_provisioning",
+      "preflight",
+      "awaiting_confirmation",
+      "confirmed",
+      "invocation_reserving",
+    ] as const) {
+      run = advanceOpeningJourneyRun(run, { stage, now: startedAt });
+    }
+    if (invocations.some((invocation) => invocation?.providerDispatchStartedAt !== null)) {
+      run = advanceOpeningJourneyRun(run, { stage: "provider_waiting", now: startedAt });
+    }
+    const updated = Object.freeze({
+      ...record,
+      revision: record.revision + 1,
+      snapshot: Object.freeze({
+        ...snapshot,
+        openingRun: run,
+      }),
+      updatedAt: runtime.clock.now(),
+    });
+    try {
+      await runtime.creativeJourneys.update(updated, record.revision);
+      return updated;
+    } catch (cause: unknown) {
+      if (!isCreativeJourneyRevisionConflict(cause)) throw cause;
+      const latest = await runtime.creativeJourneys.findById(record.id);
+      if (latest === null) throw cause;
+      const latestSnapshot = readIdeaSnapshot(latest.snapshot, latest.id);
+      if (latestSnapshot.openingRun === null) throw cause;
+      return latest;
+    }
+  }
+
   async function resume(record: CreativeJourneyRecord): Promise<void> {
     if (busy !== null || resumeLock.current !== null) {
       return;
@@ -1872,6 +2517,7 @@ export function IdeaJourneyPage() {
     const operation = startOperation(record.id);
     resumeLock.current = operation;
     setBusy("create");
+    setUnpersistedOpeningSupportId(null);
     setResumeFailureTargetId(null);
     setError(null);
     try {
@@ -1885,12 +2531,48 @@ export function IdeaJourneyPage() {
           "这次构思已经不在当前设备上，请返回创作首页重新开始。",
         );
       }
-      const beforeRecovery = readIdeaSnapshot(latest.snapshot, latest.id);
+      let beforeRecovery = readIdeaSnapshot(latest.snapshot, latest.id);
+      if (beforeRecovery.openingRun === null && hasPersistedGenerationPending(beforeRecovery)) {
+        latest = await installLegacyOpeningRun(latest);
+        beforeRecovery = readIdeaSnapshot(latest.snapshot, latest.id);
+      }
+      if (beforeRecovery.openingRun !== null) {
+        await ensureOpeningJourneyTask(
+          runtime.taskCenter,
+          beforeRecovery.openingRun,
+          runtime.clock.now(),
+        );
+      }
+      const recoveryDecision =
+        beforeRecovery.openingRun === null
+          ? null
+          : openingJourneyRunRecoveryDecision({
+              run: beforeRecovery.openingRun,
+              now: runtime.clock.now(),
+              pageExited: true,
+              invocations: Object.freeze([]),
+            });
       if (
+        beforeRecovery.openingGenerationMode === "provider" &&
+        recoveryDecision === "cancel_before_confirmation"
+      ) {
+        latest = await abandonPreparedOpeningProviderAction(operation, latest.id);
+      } else if (
         beforeRecovery.openingGenerationMode === "provider" &&
         hasPersistedGenerationPending(beforeRecovery)
       ) {
-        latest = await recoverInterruptedOpeningGeneration(runtime, latest);
+        const recoveryReason =
+          beforeRecovery.openingRun !== null &&
+          Date.parse(runtime.clock.now()) >= Date.parse(beforeRecovery.openingRun.deadlineAt)
+            ? "slot_timeout"
+            : "startup_interrupted";
+        latest = await recoverInterruptedOpeningGeneration(runtime, latest, recoveryReason);
+        latest = await finalizeOpeningJourneyRun(latest);
+      }
+      const afterRecovery = readIdeaSnapshot(latest.snapshot, latest.id);
+      if (afterRecovery.openingRun !== null) {
+        // Idempotently closes the crash window between journey terminalization and task settlement.
+        latest = await finalizeOpeningJourneyRun(latest);
       }
       const turns = await runtime.creativeJourneys.listTurns(latest.id);
       if (!isCurrentOperation(operation)) {
@@ -1990,6 +2672,147 @@ export function IdeaJourneyPage() {
     }
   }
 
+  function persistedOpeningPlanForDeadline(
+    persistedSnapshot: IdeaJourneySnapshotV1,
+    run: OpeningJourneyRunV1,
+  ): ProviderOpeningBatchPlan | null {
+    const requestIds = new Set(run.requestIds);
+    const pending = persistedSnapshot.openingSuggestions.filter(
+      ({ id, batchId, status }) =>
+        requestIds.has(id) && batchId === run.batchId && status === "pending",
+    );
+    if (pending.length === 0) return null;
+    const requests = pending.map((suggestion) => {
+      if (
+        suggestion.openingAngle === null ||
+        (suggestion.providerInvocationId !== null &&
+          !requestIds.has(suggestion.providerInvocationId))
+      ) {
+        throw new UiActionError(
+          "IDEA_OPENING_TIMEOUT_SCOPE_MISMATCH",
+          "超时开头位置与持久运行范围不一致；墨影已停止收口，不会重发或改写其他结果。",
+        );
+      }
+      return Object.freeze({
+        requestId: suggestion.id,
+        slotNumber: suggestion.slotNumber,
+        openingAngle: suggestion.openingAngle,
+      });
+    });
+    return Object.freeze({
+      batchId: run.batchId,
+      requests: Object.freeze(requests),
+    });
+  }
+
+  async function settlePersistedOpeningDeadline(scope: OpeningJourneyDeadlineScope): Promise<void> {
+    await settleOpeningJourneyDeadlineOnce(runtime, scope, async (settlementScope) => {
+      const record = await runtime.creativeJourneys.findById(settlementScope.journeyId);
+      if (record === null) return;
+      const persistedSnapshot = readIdeaSnapshot(record.snapshot, record.id);
+      const run = persistedSnapshot.openingRun;
+      if (
+        run?.batchId !== settlementScope.batchId ||
+        run.taskId !== settlementScope.taskId ||
+        run.supportId !== settlementScope.supportId ||
+        isOpeningJourneyRunTerminal(run)
+      ) {
+        return;
+      }
+      const plan = persistedOpeningPlanForDeadline(persistedSnapshot, run);
+      const settled =
+        plan === null
+          ? record
+          : await settleTimedOutOpeningProviderBatch(
+              null,
+              record.id,
+              plan,
+              plan.requests.map(({ requestId }) => requestId),
+            );
+      await finalizeOpeningJourneyRun(settled, "MODEL_TIMEOUT");
+    });
+  }
+
+  async function reportPersistedOpeningDeadlineFailure(
+    scope: OpeningJourneyDeadlineScope,
+    cause: unknown,
+  ): Promise<void> {
+    const record = await runtime.creativeJourneys.findById(scope.journeyId).catch(() => null);
+    recordSafeOperationIncident({
+      operation: "opening_creation",
+      stage: "settle_terminal_state",
+      cause,
+      projectId: record?.projectId ?? null,
+      chapterId: record?.chapterId ?? null,
+      requestId: scope.supportId,
+      dispatched: "unknown",
+      occurredAt: runtime.clock.now(),
+    });
+  }
+
+  const settlePersistedOpeningDeadlineFromEffect = useEffectEvent(
+    async (scope: OpeningJourneyDeadlineScope) => {
+      await settlePersistedOpeningDeadline(scope);
+    },
+  );
+  const reportPersistedOpeningDeadlineFailureFromEffect = useEffectEvent(
+    async (scope: OpeningJourneyDeadlineScope, cause: unknown) => {
+      await reportPersistedOpeningDeadlineFailure(scope, cause);
+    },
+  );
+  useEffect(() => {
+    const run = snapshot?.openingRun ?? null;
+    if (run === null) return;
+    if (isOpeningJourneyRunTerminal(run)) {
+      disarmOpeningJourneyDeadline(runtime, {
+        journeyId: run.journeyId,
+        batchId: run.batchId,
+        supportId: run.supportId,
+      });
+      return;
+    }
+    armOpeningJourneyDeadline(
+      runtime,
+      {
+        journeyId: run.journeyId,
+        batchId: run.batchId,
+        taskId: run.taskId,
+        supportId: run.supportId,
+        startedAt: run.startedAt,
+        deadlineAt: run.deadlineAt,
+      },
+      {
+        onDeadline: settlePersistedOpeningDeadlineFromEffect,
+        onFailure: reportPersistedOpeningDeadlineFailureFromEffect,
+      },
+    );
+  }, [runtime, snapshot?.openingRun]);
+
+  const terminalizeOpeningJourneyAtDeadline = useEffectEvent((run: OpeningJourneyRunV1) => {
+    deadlineTerminalizationBatchIds.current.add(run.batchId);
+    if (openingProviderConfirmationResolver.current !== null) {
+      settleOpeningProviderConfirmation(false);
+    }
+    void endPendingGeneration("slot_timeout");
+  });
+  useEffect(() => {
+    const run = snapshot?.openingRun ?? null;
+    if (
+      journey === null ||
+      snapshot === null ||
+      run === null ||
+      isOpeningJourneyRunTerminal(run) ||
+      !hasPersistedGenerationPending(snapshot) ||
+      Date.parse(clockNow) < Date.parse(run.deadlineAt)
+    ) {
+      return;
+    }
+    const recoveryKey = `${run.journeyId}:${run.batchId}:${run.deadlineAt}`;
+    if (deadlineRecoveryAttempts.current.has(recoveryKey)) return;
+    deadlineRecoveryAttempts.current.add(recoveryKey);
+    terminalizeOpeningJourneyAtDeadline(run);
+  }, [clockNow, journey, snapshot]);
+
   async function persistGeneratedPreview(
     current: CreativeJourneyRecord,
     currentSnapshot: IdeaJourneySnapshotV1,
@@ -2043,7 +2866,9 @@ export function IdeaJourneyPage() {
     }
   }
 
-  async function endPendingGeneration(): Promise<void> {
+  async function endPendingGeneration(
+    reason: "author_ended" | "slot_timeout" = "author_ended",
+  ): Promise<void> {
     if (
       journey === null ||
       snapshot === null ||
@@ -2053,8 +2878,54 @@ export function IdeaJourneyPage() {
       return;
     }
     const operation = startOperation(journey.id);
+    providerBeginLock.current = false;
+    if (reason === "slot_timeout" && snapshot.openingRun !== null) {
+      deadlineTerminalizationBatchIds.current.add(snapshot.openingRun.batchId);
+      settleOpeningProviderConfirmation(false);
+    }
     setBusy("regenerate");
     setError(null);
+    if (reason === "slot_timeout" && snapshot.openingRun !== null) {
+      const run = snapshot.openingRun;
+      const scope: OpeningJourneyDeadlineScope = Object.freeze({
+        journeyId: run.journeyId,
+        batchId: run.batchId,
+        taskId: run.taskId,
+        supportId: run.supportId,
+        startedAt: run.startedAt,
+        deadlineAt: run.deadlineAt,
+      });
+      try {
+        await settlePersistedOpeningDeadline(scope);
+        const [latest, latestTurns] = await Promise.all([
+          runtime.creativeJourneys.findById(run.journeyId),
+          runtime.creativeJourneys.listTurns(run.journeyId),
+        ]);
+        if (latest !== null && isCurrentOperation(operation)) {
+          const latestRun = readIdeaSnapshot(latest.snapshot, latest.id).openingRun;
+          if (
+            latestRun !== null &&
+            latestRun.batchId === run.batchId &&
+            isOpeningJourneyRunTerminal(latestRun)
+          ) {
+            setJourney(latest);
+            setTurnCount(latestTurns.length);
+            clearStreamingPreviews(run.requestIds);
+            for (const requestId of run.requestIds) finishRequestTiming(requestId);
+            setBatchProgress(null);
+          }
+        }
+      } catch (cause: unknown) {
+        await reportPersistedOpeningDeadlineFailure(scope, cause);
+        if (isCurrentOperation(operation)) setError(cause);
+      } finally {
+        if (isCurrentOperation(operation)) {
+          activeOperation.current = null;
+          setBusy(null);
+        }
+      }
+      return;
+    }
     let lastConflict: Error | null = null;
     try {
       for (let attempt = 0; attempt < OPENING_RESULT_RECONCILE_ATTEMPTS; attempt += 1) {
@@ -2080,10 +2951,10 @@ export function IdeaJourneyPage() {
               .filter(({ status }) => status === "pending")
               .map(({ id }) => id),
           );
-          const recovered = await recoverInterruptedOpeningGeneration(
-            runtime,
-            latest,
-            "author_ended",
+          let recovered = await recoverInterruptedOpeningGeneration(runtime, latest, reason);
+          recovered = await finalizeOpeningJourneyRun(
+            recovered,
+            reason === "slot_timeout" ? "MODEL_TIMEOUT" : GENERATION_ABANDONED_BY_AUTHOR,
           );
           const recoveredTurns = await runtime.creativeJourneys.listTurns(recovered.id);
           if (isCurrentOperation(operation)) {
@@ -2326,6 +3197,17 @@ export function IdeaJourneyPage() {
       const generationMode = await resolveOpeningGenerationMode(snapshot);
       providerBatchPlan = generationMode === "provider" ? createProviderOpeningBatchPlan() : null;
       const requestId = providerBatchPlan?.requests[0]?.requestId ?? runtime.ids.next();
+      const replacementRun =
+        providerBatchPlan === null
+          ? snapshot.openingRun
+          : createOpeningJourneyRun({
+              journeyId: journey.id,
+              batchId: providerBatchPlan.batchId,
+              taskId: runtime.ids.next(),
+              requestIds: providerBatchPlan.requests.map(({ requestId: id }) => id),
+              now: runtime.clock.now(),
+              timeoutMs: 180_000,
+            });
       const plannedSnapshot: IdeaJourneySnapshotV1 =
         providerBatchPlan === null
           ? Object.freeze({
@@ -2337,6 +3219,7 @@ export function IdeaJourneyPage() {
           : planProviderOpeningBatch(snapshot, providerBatchPlan);
       const pendingSnapshot: IdeaJourneySnapshotV1 = Object.freeze({
         ...plannedSnapshot,
+        openingRun: replacementRun,
         guidanceRewriteUsed: snapshot.guidanceRewriteUsed || consumesGuidanceRewrite,
       });
       const pending = Object.freeze({
@@ -2365,8 +3248,16 @@ export function IdeaJourneyPage() {
                 },
         }),
       );
+      let providerPending: CreativeJourneyRecord = pending;
+      if (replacementRun !== null && providerBatchPlan !== null) {
+        await ensureOpeningJourneyTask(runtime.taskCenter, replacementRun, runtime.clock.now());
+        providerPending = await checkpointOpeningJourneyRun(runtime.creativeJourneys, pending.id, {
+          stage: "workspace_provisioning",
+          now: runtime.clock.now(),
+        });
+      }
       if (isCurrentOperation(operation)) {
-        setJourney(pending);
+        setJourney(providerPending);
         setTurnCount(persistedTurnCount + 1);
       }
       if (providerBatchPlan === null) {
@@ -2376,8 +3267,12 @@ export function IdeaJourneyPage() {
       const providerPreparation =
         providerBatchPlan === null
           ? null
-          : await prepareJourneyProviderDispatch(pending, pendingSnapshot, operation);
-      const providerPending = providerPreparation?.current ?? pending;
+          : await prepareJourneyProviderDispatch(
+              providerPending,
+              readIdeaSnapshot(providerPending.snapshot, providerPending.id),
+              operation,
+            );
+      providerPending = providerPreparation?.current ?? providerPending;
       const replacementActionKind: CreativeOpeningProviderActionKind = directMode
         ? "replacement_single"
         : "replacement_batch";
@@ -2390,6 +3285,7 @@ export function IdeaJourneyPage() {
           ? null
           : await discloseAndConfirmOpeningProviderAction(
               operation,
+              providerPending.id,
               directMode ? "重新生成开头" : "换一批三个开头",
               {
                 actionId: providerBatchPlan.batchId,
@@ -2405,7 +3301,6 @@ export function IdeaJourneyPage() {
               },
             );
       if (providerBatchPlan !== null && providerDisclosure === null) {
-        await abandonPreparedOpeningProviderAction(operation, providerPending.id);
         return;
       }
       let updated: CreativeJourneyRecord;
@@ -2452,6 +3347,7 @@ export function IdeaJourneyPage() {
             answers: snapshot.answers,
           },
         );
+        updated = await finalizeOpeningJourneyRun(updated);
       }
       if (isCurrentOperation(operation)) {
         const persistedTurns = await runtime.creativeJourneys.listTurns(updated.id);
@@ -2463,25 +3359,23 @@ export function IdeaJourneyPage() {
         await loadActive();
       }
     } catch (cause: unknown) {
-      if (isCurrentOperation(operation)) {
-        if (providerBatchPlan !== null) {
-          await settleOpeningProviderFailure(
-            operation,
-            journey.id,
-            providerBatchPlan,
-            cause,
-            "opening_direction",
-          ).catch(() => null);
-        }
-        setError(cause);
-        const latest = await runtime.creativeJourneys.findById(journey.id).catch(() => null);
-        if (latest !== null && isCurrentOperation(operation)) {
-          setJourney(latest);
-          const turns = await runtime.creativeJourneys.listTurns(latest.id).catch(() => []);
-          if (isCurrentOperation(operation)) {
-            setTurnCount(turns.length);
+      if (!isCurrentOperation(operation)) return;
+      if (providerBatchPlan !== null) {
+        const outcome = await settleOpeningProviderFailureOrReport(
+          operation,
+          journey.id,
+          providerBatchPlan,
+          cause,
+          "opening_direction",
+        );
+        if (isCurrentOperation(operation)) {
+          if (outcome.record !== null) {
+            setJourney(outcome.record);
           }
+          setError(outcome.presentationError);
         }
+      } else if (isCurrentOperation(operation)) {
+        setError(cause);
       }
     } finally {
       if (individuallyTrackedRequestId !== null) {
@@ -2534,6 +3428,14 @@ export function IdeaJourneyPage() {
       batchId: runtime.ids.next(),
       requests: Object.freeze([plannedRequest]),
     });
+    const retryRun = createOpeningJourneyRun({
+      journeyId: journey.id,
+      batchId: plan.batchId,
+      taskId: runtime.ids.next(),
+      requestIds: [requestId],
+      now: runtime.clock.now(),
+      timeoutMs: 180_000,
+    });
     try {
       const persistedTurnCount = (await runtime.creativeJourneys.listTurns(journey.id)).length;
       assertCurrentOperation(operation);
@@ -2556,6 +3458,7 @@ export function IdeaJourneyPage() {
         openingSuggestions: Object.freeze(suggestions),
         openingResultHistory: mergeOpeningHistory(snapshot.openingResultHistory, [target]),
         openingBatchId: plan.batchId,
+        openingRun: retryRun,
       });
       const pending = Object.freeze({
         ...journey,
@@ -2579,19 +3482,29 @@ export function IdeaJourneyPage() {
           },
         }),
       );
+      await ensureOpeningJourneyTask(runtime.taskCenter, retryRun, runtime.clock.now());
+      const workspacePending = await checkpointOpeningJourneyRun(
+        runtime.creativeJourneys,
+        pending.id,
+        {
+          stage: "workspace_provisioning",
+          now: runtime.clock.now(),
+        },
+      );
       if (isCurrentOperation(operation)) {
-        setJourney(pending);
+        setJourney(workspacePending);
         setTurnCount(persistedTurnCount + 1);
       }
       const preparedDispatch = await prepareJourneyProviderDispatch(
-        pending,
-        pendingSnapshot,
+        workspacePending,
+        readIdeaSnapshot(workspacePending.snapshot, workspacePending.id),
         operation,
       );
       const actionKind: CreativeOpeningProviderActionKind =
         mode === "continue" ? "complete_partial" : "regenerate_single";
       const disclosure = await discloseAndConfirmOpeningProviderAction(
         operation,
+        preparedDispatch.current.id,
         mode === "continue" ? "补全这个开头" : "重新生成这个方案",
         {
           actionId: plan.batchId,
@@ -2608,7 +3521,6 @@ export function IdeaJourneyPage() {
         },
       );
       if (disclosure === null) {
-        await abandonPreparedOpeningProviderAction(operation, preparedDispatch.current.id);
         return;
       }
       startRequestTimings([requestId]);
@@ -2626,7 +3538,8 @@ export function IdeaJourneyPage() {
         ...(mode === "continue" ? { partialOpening: target.text } : {}),
         humanConfirmed: true,
         disclosureFingerprint: disclosure.fingerprint,
-        assertBeforeProviderDispatch: () => assertCurrentOperation(operation),
+        assertBeforeProviderDispatch: () =>
+          assertOpeningProviderDispatchBeforeDeadline(operation, preparedDispatch.current),
         onInvocationPrepared: (_requestId, selection) =>
           persistOpeningInvocation(
             operation,
@@ -2636,7 +3549,7 @@ export function IdeaJourneyPage() {
             selection,
           ),
         onProviderDispatchStarted: (_requestId, invocationId) =>
-          projectOpeningDispatchInMemory(requestId, invocationId),
+          persistOpeningDispatchBoundary(preparedDispatch.current.id, requestId, invocationId),
         onDelta: (_requestId, text) => {
           if (isCurrentOperation(operation)) {
             updateStreamingPreview(requestId, text);
@@ -2650,13 +3563,14 @@ export function IdeaJourneyPage() {
           "已确认的开头请求没有返回可核对结果，当前方案保持不变。",
         );
       }
-      const updated = await reconcileOpeningResult(journey.id, generated, {
+      let updated = await reconcileOpeningResult(journey.id, generated, {
         batchId: plan.batchId,
         openingAngle: target.openingAngle,
         questionKey: "opening_choice",
         generationMode: "provider",
         batchPlan: plan,
       });
+      updated = await finalizeOpeningJourneyRun(updated);
       if (
         directMode &&
         !readIdeaSnapshot(updated.snapshot, updated.id).openingSuggestions.some(
@@ -2674,19 +3588,19 @@ export function IdeaJourneyPage() {
         }
       }
     } catch (cause: unknown) {
+      if (!isCurrentOperation(operation)) return;
+      const outcome = await settleOpeningProviderFailureOrReport(
+        operation,
+        journey.id,
+        plan,
+        cause,
+        "opening_choice",
+      );
       if (isCurrentOperation(operation)) {
-        await settleOpeningProviderFailure(
-          operation,
-          journey.id,
-          plan,
-          cause,
-          "opening_choice",
-        ).catch(() => null);
-        setError(cause);
-        const latest = await runtime.creativeJourneys.findById(journey.id).catch(() => null);
-        if (latest !== null && isCurrentOperation(operation)) {
-          setJourney(latest);
+        if (outcome.record !== null) {
+          setJourney(outcome.record);
         }
+        setError(outcome.presentationError);
       }
     } finally {
       finishRequestTiming(requestId);
@@ -3458,6 +4372,7 @@ export function IdeaJourneyPage() {
     operationSequence.current += 1;
     activeOperation.current = null;
     setJourney(null);
+    setUnpersistedOpeningSupportId(null);
     setTurnCount(0);
     setCustomAnswer("");
     setProjectNameDraft("");
@@ -3476,6 +4391,10 @@ export function IdeaJourneyPage() {
     resumeFailureTargetId === null
       ? null
       : (activeJourneys.find(({ id }) => id === resumeFailureTargetId) ?? null);
+  const resumeFailureSupportId =
+    resumeFailureTarget === null
+      ? null
+      : (readOpeningJourneyRun(resumeFailureTarget.snapshot.openingRun)?.supportId ?? null);
   const quickAiDrawer = (
     <QuickAiConnectionDrawer
       open={quickAiOpen}
@@ -3578,6 +4497,11 @@ export function IdeaJourneyPage() {
       !generationPending &&
       readyOpening === null &&
       (normalizedError !== null || retryableOpening !== null);
+    const openingRun = snapshot.openingRun;
+    const persistedOpeningElapsedMs =
+      openingRun === null ? null : openingJourneyRunElapsedMs(openingRun, clockNow);
+    const openingSupportDescription =
+      openingRun === null ? "" : ` 支持编号：${openingRun.supportId}`;
     const directFailure = normalizeUiError(error ?? directCreativeOpeningFailure(snapshot));
     const directFailureTitle =
       directFailure.code === "MODEL_TIMEOUT"
@@ -3622,7 +4546,14 @@ export function IdeaJourneyPage() {
             {generationFailed && (
               <ErrorState
                 title={directFailureTitle}
-                description={directFailure.description}
+                description={
+                  <>
+                    <span>{directFailure.description}</span>
+                    {snapshot.openingRun !== null && (
+                      <span>{` 支持编号：${snapshot.openingRun.supportId}`}</span>
+                    )}
+                  </>
+                }
                 primaryAction={
                   retryableOpening === null
                     ? { label: "去连接", onClick: () => setQuickAiOpen(true) }
@@ -3652,7 +4583,7 @@ export function IdeaJourneyPage() {
                       ? `创作仍在进行，${String(pendingSuggestionCount)} 个结果尚未返回`
                       : "这次创作仍在等待结果"
                   }
-                  description="当前空白正文和已返回内容都保存在本机。你可以结束仍未完成的请求，或重新读取这次创作的最新进度。"
+                  description={`当前阶段：${openingRun === null ? "等待生成" : openingJourneyStageLabel(openingRun.stage)}；已等待 ${persistedOpeningElapsedMs === null ? "时间待读取" : formatOpeningElapsed(persistedOpeningElapsedMs)}。总等待超过 3 分钟会停止并要求你明确核对或重试，系统不会自动重发。${openingSupportDescription} 当前空白正文和已返回内容都保存在本机。你可以结束仍未完成的请求，或重新读取这次创作的最新进度。`}
                   action={{
                     label: "结束未完成请求",
                     onClick: () => void endPendingGeneration(),
@@ -3721,7 +4652,14 @@ export function IdeaJourneyPage() {
         {normalizedError !== null && (
           <ErrorState
             title={normalizedError.title}
-            description={normalizedError.description}
+            description={
+              <>
+                <span>{normalizedError.description}</span>
+                {snapshot.openingRun !== null && (
+                  <span>{` 支持编号：${snapshot.openingRun.supportId}`}</span>
+                )}
+              </>
+            }
             savedState="此前已保存的开头、回答和摘要仍在本机"
             primaryAction={{ label: "重试创建", onClick: () => void keepAndContinue() }}
             secondaryAction={{ label: "返回修改", onClick: () => void returnToQuestions() }}
@@ -3834,6 +4772,11 @@ export function IdeaJourneyPage() {
       ({ status }) => status === "pending",
     ).length;
     const persistedGenerationPending = hasPersistedGenerationPending(snapshot);
+    const openingRun = snapshot.openingRun;
+    const persistedOpeningElapsedMs =
+      openingRun === null ? null : openingJourneyRunElapsedMs(openingRun, clockNow);
+    const openingSupportDescription =
+      openingRun === null ? "" : ` 支持编号：${openingRun.supportId}`;
     const hasExplicitOpening = snapshot.selectedOpeningId !== null;
     const hasQuestionPlan = hasExplicitOpening && snapshot.questionPlanner !== null;
     const guidanceComplete =
@@ -3888,8 +4831,26 @@ export function IdeaJourneyPage() {
         {normalizedError !== null && (
           <ErrorState
             title={normalizedError.title}
-            description={normalizedError.description}
+            description={
+              <>
+                <span>{normalizedError.description}</span>
+                {openingRun !== null && <span>{` 支持编号：${openingRun.supportId}`}</span>}
+              </>
+            }
             primaryAction={{ label: "重新读取", onClick: () => void resume(journey) }}
+          />
+        )}
+
+        {openingRun?.stage === "cancelled_before_confirmation" && (
+          <InlineAlert
+            tone="info"
+            title="未确认的生成批次已安全终止"
+            description={
+              <>
+                <span>确认前离开，未确认的生成批次已安全终止</span>
+                <span>{` 支持编号：${openingRun.supportId}`}</span>
+              </>
+            }
           />
         )}
 
@@ -3913,7 +4874,7 @@ export function IdeaJourneyPage() {
           <InlineAlert
             tone="warning"
             title={`${String(snapshot.openingBatchFailureCount)} 个 AI 建议没有生成`}
-            description={`已成功的建议和上一批可用建议都已保留，没有用本地草案冒充 AI 结果。${providerBatchFailureDescription(snapshot.noticeCode)}`}
+            description={`已成功的建议和上一批可用建议都已保留，没有用本地草案冒充 AI 结果。${providerBatchFailureDescription(snapshot.noticeCode)}${openingSupportDescription}`}
             action={{
               label: "检查 AI 连接",
               onClick: () => setQuickAiOpen(true),
@@ -3930,7 +4891,7 @@ export function IdeaJourneyPage() {
                   ? `生成仍在进行，${String(pendingSuggestionCount)} 个方案尚未返回`
                   : "这次 AI 修改仍在等待结果"
               }
-              description="各方案会独立返回并立即保存在本机。可以结束等待并取消仍在运行的请求；取消后的晚到内容只会进入历史记录，不会覆盖当前选择。"
+              description={`当前阶段：${openingRun === null ? "等待生成" : openingJourneyStageLabel(openingRun.stage)}；已等待 ${persistedOpeningElapsedMs === null ? "时间待读取" : formatOpeningElapsed(persistedOpeningElapsedMs)}。总等待超过 3 分钟会停止并要求你明确核对或重试，系统不会自动重发。${openingSupportDescription}`}
               action={{
                 label: "结束未完成请求",
                 onClick: () => void endPendingGeneration(),
@@ -3975,7 +4936,7 @@ export function IdeaJourneyPage() {
                     const recommended = recommendedOpening?.id === suggestion.id;
                     const streamingText = streamingPreviews[suggestion.id] ?? "";
                     const timing = requestTimings[suggestion.id];
-                    const elapsedMs = timing === undefined ? null : timing.elapsedMs;
+                    const elapsedMs = timing?.elapsedMs ?? persistedOpeningElapsedMs;
                     return (
                       <article
                         className={`idea-journey__suggestion${selected || (recommended && directMode) ? " idea-journey__suggestion--selected" : ""}${recommended && directMode ? " idea-journey__suggestion--recommended" : ""}${suggestion.status === "failed" ? " idea-journey__suggestion--failed" : ""}${suggestion.status === "partial" ? " idea-journey__suggestion--partial" : ""}${suggestion.status === "pending" ? " idea-journey__suggestion--pending" : ""}`}
@@ -4030,7 +4991,11 @@ export function IdeaJourneyPage() {
                               {elapsedMs === null
                                 ? ""
                                 : ` · 已用 ${formatOpeningElapsed(elapsedMs)}`}
-                              。这个请求已安全登记，恢复时不会自动重复调用。
+                              。当前阶段：
+                              {openingRun === null
+                                ? "等待生成"
+                                : openingJourneyStageLabel(openingRun.stage)}
+                              。确认前不会发送；进入发送边界后也不会自动重复调用。
                             </p>
                           </div>
                         ) : (
@@ -4141,9 +5106,10 @@ export function IdeaJourneyPage() {
                               ? "已安全归档"
                               : suggestion.status === "partial"
                                 ? "未完整草稿已归档"
-                                : suggestion.noticeCode === GENERATION_ABANDONED_BY_AUTHOR
-                                  ? "已结束等待"
-                                  : "未生成正文"}
+                                : suggestion.dispatchState === "not_dispatched" &&
+                                    suggestion.noticeCode === GENERATION_ABANDONED_BY_AUTHOR
+                                  ? "确认前安全终止"
+                                  : openingDispatchStateLabel(suggestion.dispatchState)}
                           </Badge>
                         </header>
                         {isUsableOpeningSuggestion(suggestion) ? (
@@ -4151,9 +5117,10 @@ export function IdeaJourneyPage() {
                         ) : (
                           <div className="idea-journey__suggestion-failure">
                             <p>
-                              {suggestion.noticeCode === GENERATION_ABANDONED_BY_AUTHOR
-                                ? "你已结束这次未完成请求；恢复流程不会自动重新调用 AI。"
-                                : "这次历史请求没有可用正文。"}
+                              {suggestion.dispatchState === "not_dispatched" &&
+                              suggestion.noticeCode === GENERATION_ABANDONED_BY_AUTHOR
+                                ? "这个方案在确认发送前已安全终止。"
+                                : openingDispatchStateDescription(suggestion.dispatchState)}
                             </p>
                           </div>
                         )}
@@ -4448,7 +5415,27 @@ export function IdeaJourneyPage() {
       {normalizedError !== null && (
         <ErrorState
           title={normalizedError.title}
-          description={normalizedError.description}
+          description={
+            unpersistedOpeningSupportId === null && resumeFailureSupportId === null ? (
+              normalizedError.description
+            ) : unpersistedOpeningSupportId === null ? (
+              <>
+                <span>{normalizedError.description}</span>
+                <br />
+                <span>支持编号：{resumeFailureSupportId}</span>
+                <br />
+                <span>你可以重新读取本机进度；系统不会自动重新发送模型请求。</span>
+              </>
+            ) : (
+              <>
+                <span>本地旅程未能保存，本次没有发送</span>
+                <br />
+                <span>支持编号：{unpersistedOpeningSupportId}</span>
+                <br />
+                <span>{normalizedError.description}</span>
+              </>
+            )
+          }
           {...(blankWorkspaceAttempt !== null
             ? {
                 primaryAction: {
@@ -4583,8 +5570,8 @@ export function IdeaJourneyPage() {
           {unreadableJourneyCount > 0 && (
             <InlineAlert
               tone="warning"
-              title="有一条旧构思暂时无法读取"
-              description={`${String(unreadableJourneyCount)} 条旧流程数据格式不完整，已单独跳过；现有项目和正文没有受到影响。`}
+              title="有未完成构思需要恢复"
+              description={`${String(unreadableJourneyCount)} 条记录仍原样保存在本机。墨影已停止读取，不会删除或改写；请按支持编号重新读取，或导出脱敏诊断。`}
             />
           )}
           <PageStateBoundary
@@ -4608,8 +5595,38 @@ export function IdeaJourneyPage() {
             }}
           >
             <div className="idea-journey__resume-list">
+              {unreadableJourneys.map((item) => (
+                <Card key={item.journeyId}>
+                  <CardHeader>
+                    <CardTitle headingLevel={3}>需要恢复的未完成构思</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p>
+                      读取阶段：<span>读取本地开书进度</span>
+                    </p>
+                    <p>支持编号：{item.supportId}</p>
+                    <p>记录仍保留在本机，未删除、未发送。</p>
+                    <p>上次保存：{new Date(item.updatedAt).toLocaleString("zh-CN")}</p>
+                    <div className="idea-journey__actions">
+                      <Button
+                        variant="secondary"
+                        disabled={busy !== null}
+                        onClick={() => void loadActive()}
+                      >
+                        重新读取这条构思
+                      </Button>
+                      <Link
+                        className="button-link button-link--secondary"
+                        to="/settings#diagnostics"
+                      >
+                        导出脱敏诊断
+                      </Link>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
               {activeJourneys.map((record) => {
-                const saved = readIdeaSnapshot(record.snapshot);
+                const saved = readIdeaSnapshot(record.snapshot, record.id);
                 return (
                   <Card key={record.id}>
                     <CardHeader>
@@ -4679,15 +5696,26 @@ async function recoverOpeningInvocation(
     }
     const crossedBoundary = invocation.providerDispatchStartedAt !== null;
     const authorEnded = reason === "author_ended";
+    const authorEndedAfterDispatch = authorEnded && crossedBoundary;
     const noticeCode = authorEnded ? GENERATION_ABANDONED_BY_AUTHOR : "MODEL_TIMEOUT";
     try {
       invocation = await runtime.modelHub.finishInvocation({
         id: invocation.id,
-        status: authorEnded ? "cancelled" : crossedBoundary ? "timed_out" : "failed",
-        errorCode: authorEnded ? null : noticeCode,
+        status: authorEndedAfterDispatch
+          ? "failed"
+          : authorEnded
+            ? "cancelled"
+            : crossedBoundary
+              ? "timed_out"
+              : "failed",
+        errorCode: authorEndedAfterDispatch
+          ? "OPENING_DISPATCH_AMBIGUOUS"
+          : authorEnded
+            ? null
+            : noticeCode,
         errorSummary: authorEnded
           ? crossedBoundary
-            ? "用户主动结束等待；已发送的调用已标记为取消，系统不会自动重发。"
+            ? "用户主动结束等待；已请求本机停止接收，但无法证明服务商已取消或不会计费。迟到结果不会自动采用。"
             : "用户在发送前主动结束；没有发生供应商调用。"
           : crossedBoundary
             ? "模型在 180 秒内没有返回；调用已按超时结束，系统不会自动重试。"
@@ -4709,12 +5737,20 @@ async function recoverOpeningInvocation(
   const terminal =
     reason === "slot_timeout"
       ? Object.freeze({ ...interruptedTerminal, noticeCode: "MODEL_TIMEOUT" })
-      : reason === "author_ended" && invocation.providerDispatchStartedAt === null
-        ? Object.freeze({
-            ...interruptedTerminal,
-            dispatchState: "not_dispatched" as const,
-            noticeCode: GENERATION_ABANDONED_BY_AUTHOR,
-          })
+      : reason === "author_ended"
+        ? invocation.providerDispatchStartedAt === null
+          ? Object.freeze({
+              ...interruptedTerminal,
+              dispatchState: "not_dispatched" as const,
+              noticeCode: GENERATION_ABANDONED_BY_AUTHOR,
+            })
+          : invocation.status === "cancelled"
+            ? Object.freeze({
+                ...interruptedTerminal,
+                dispatchState: "ambiguous" as const,
+                noticeCode: "OPENING_DISPATCH_AMBIGUOUS",
+              })
+            : interruptedTerminal
         : interruptedTerminal;
   return Object.freeze({
     ...terminal,
@@ -5259,6 +6295,9 @@ function readIdeaSnapshot(
     (value.openingBatchFailureCount !== undefined &&
       (!Number.isSafeInteger(value.openingBatchFailureCount) ||
         Number(value.openingBatchFailureCount) < 0)) ||
+    (value.openingRun !== undefined &&
+      value.openingRun !== null &&
+      readOpeningJourneyRun(value.openingRun) === null) ||
     (value.provisioningPlan !== undefined &&
       value.provisioningPlan !== null &&
       !isProvisioningPlan(value.provisioningPlan)) ||
@@ -5367,6 +6406,41 @@ function readIdeaSnapshot(
           openingSuggestions.some(({ source }) => source === "provider")
         ? "provider"
         : "local";
+  const openingBatchId =
+    typeof value.openingBatchId === "string"
+      ? value.openingBatchId
+      : (selectedOpening?.batchId ?? openingSuggestions[0]?.batchId ?? null);
+  const openingRun =
+    value.openingRun === undefined || value.openingRun === null
+      ? null
+      : readOpeningJourneyRun(value.openingRun);
+  if (openingRun !== null) {
+    const currentBatchRequestIds = new Set(
+      [...openingSuggestions, ...openingResultHistory]
+        .filter(({ batchId }) => batchId === openingBatchId)
+        .map(({ id }) => id),
+    );
+    const runRequestIds = new Set(openingRun.requestIds);
+    const scopeMatches =
+      openingRun.journeyId === journeyId &&
+      openingBatchId !== null &&
+      openingRun.batchId === openingBatchId &&
+      currentBatchRequestIds.size === runRequestIds.size &&
+      [...currentBatchRequestIds].every((requestId) => runRequestIds.has(requestId));
+    const terminalHasPendingSlot =
+      isOpeningJourneyRunTerminal(openingRun) &&
+      [...openingSuggestions, ...openingResultHistory].some(({ status }) => status === "pending");
+    const pendingOutsideRun = [...openingSuggestions, ...openingResultHistory].some(
+      ({ id, batchId, status }) =>
+        status === "pending" && (batchId !== openingRun.batchId || !runRequestIds.has(id)),
+    );
+    if (!scopeMatches || terminalHasPendingSlot || pendingOutsideRun) {
+      throw new UiActionError(
+        "IDEA_OPENING_RUN_SCOPE_INVALID",
+        "保存的开书运行记录与当前构思批次不一致。墨影已停止读取，不会删除、改写或发送内容。",
+      );
+    }
+  }
   return {
     ...(value as unknown as IdeaJourneySnapshotV1),
     openingMode,
@@ -5375,14 +6449,12 @@ function readIdeaSnapshot(
     openingSuggestions,
     openingResultHistory,
     selectedOpeningId: selectedOpening?.id ?? null,
-    openingBatchId:
-      typeof value.openingBatchId === "string"
-        ? value.openingBatchId
-        : (selectedOpening?.batchId ?? openingSuggestions[0]?.batchId ?? null),
+    openingBatchId,
     openingBatchFailureCount:
       typeof value.openingBatchFailureCount === "number"
         ? value.openingBatchFailureCount
         : openingSuggestions.filter(({ status }) => status === "failed").length,
+    openingRun,
     provisioningPlan:
       value.provisioningPlan !== undefined && value.provisioningPlan !== null
         ? normalizeProvisioningPlan(value.provisioningPlan)
@@ -6021,11 +7093,15 @@ function openingDispatchStateFromInvocation(
 ): OpeningDispatchState {
   if (invocation === null) {
     return generated.source === "provider" && generated.text.trim().length > 0
-      ? "succeeded"
+      ? "ambiguous"
       : "not_dispatched";
   }
   const projected = projectOpeningInvocationDispatchState(invocation);
-  return projected === "succeeded" && generated.text.trim().length === 0 ? "ambiguous" : projected;
+  if (generated.source === "provider" && generated.text.trim().length > 0) {
+    if (generated.completion === "partial" && projected === "failed") return "failed";
+    return projected === "succeeded" ? "succeeded" : "ambiguous";
+  }
+  return projected === "succeeded" ? "ambiguous" : projected;
 }
 
 function openingInterruptedTerminal(
@@ -6078,6 +7154,23 @@ function guidanceStateForSnapshot(snapshot: IdeaJourneySnapshotV1): string {
     : "asking_one_question";
 }
 
+function openingJourneyStageLabel(stage: OpeningJourneyRunStage): string {
+  const labels: Readonly<Record<OpeningJourneyRunStage, string>> = Object.freeze({
+    journey_saved: "灵感已保存",
+    workspace_provisioning: "正在准备可恢复作品",
+    preflight: "正在检查模型、路线和发送范围",
+    awaiting_confirmation: "等待你确认发送信息",
+    confirmed: "已确认，正在登记调用",
+    invocation_reserving: "正在登记调用",
+    provider_waiting: "等待模型返回",
+    result_pending: "结果待核对",
+    completed: "生成已完成",
+    failed: "生成未完成",
+    cancelled_before_confirmation: "确认前已安全终止",
+  });
+  return labels[stage];
+}
+
 function formatOpeningElapsed(milliseconds: number): string {
   if (milliseconds < 1_000) {
     return "不足 1 秒";
@@ -6118,9 +7211,17 @@ function openingSuggestionFromResult(
     noticeCode?: string;
   }> = Object.freeze({ slotNumber: 1, providerInvocationId: null }),
 ): IdeaOpeningSuggestionV1 {
+  const dispatchState =
+    lifecycle.dispatchState ?? (generated.text.trim().length > 0 ? "succeeded" : "failed");
+  const hasAuditableProviderResult =
+    generated.source === "provider" &&
+    (dispatchState === "succeeded" ||
+      (generated.completion === "partial" &&
+        dispatchState === "failed" &&
+        lifecycle.providerInvocationId !== null));
   const status: IdeaOpeningSuggestionV1["status"] =
     generated.text.trim().length === 0 ||
-    (generationMode === "provider" && generated.source !== "provider")
+    (generationMode === "provider" && !hasAuditableProviderResult)
       ? "failed"
       : generated.completion === "partial"
         ? "partial"
@@ -6138,7 +7239,7 @@ function openingSuggestionFromResult(
     noticeCode: lifecycle.noticeCode ?? generated.noticeCode,
     contextTraceId: status === "ready" || status === "partial" ? generated.contextTraceId : null,
     providerInvocationId: lifecycle.providerInvocationId,
-    dispatchState: lifecycle.dispatchState ?? (status === "ready" ? "succeeded" : "failed"),
+    dispatchState,
   });
 }
 

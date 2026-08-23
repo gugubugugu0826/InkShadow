@@ -25,6 +25,10 @@ import type {
 import { listStoryPlanningSelectableItems } from "../infrastructure/story-planning-selective-acceptance";
 import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import {
+  recordSafeOperationIncident,
+  type SafeOperationStage,
+} from "../infrastructure/safe-operation-diagnostics";
+import {
   fitCandidateDecisionTextarea,
   handleCandidateDecisionNavigation,
 } from "./candidate-decision-navigation";
@@ -46,6 +50,12 @@ export interface StoryPlanningPanelProps {
   readonly onOutlineChanged: () => void | Promise<void>;
 }
 
+interface PlanningPanelMessage {
+  readonly title: string;
+  readonly message: string;
+  readonly supportId?: string;
+}
+
 export function StoryPlanningPanel({
   disabled = false,
   onOutlineChanged,
@@ -65,8 +75,8 @@ export function StoryPlanningPanel({
   const [editable, setEditable] = useState<Record<string, string>>({});
   const [selectedItems, setSelectedItems] = useState<Record<string, readonly string[]>>({});
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<Readonly<{ title: string; message: string }> | null>(null);
+  const [error, setError] = useState<PlanningPanelMessage | null>(null);
+  const [notice, setNotice] = useState<PlanningPanelMessage | null>(null);
   const [disclosure, setDisclosure] = useState<StoryPlanningDisclosure | null>(null);
   const resolvedTargetNodeId = chapters.some(({ id }) => id === targetNodeId)
     ? targetNodeId
@@ -94,7 +104,15 @@ export function StoryPlanningPanel({
         return next;
       });
     } catch (cause: unknown) {
-      setError(errorMessage(cause, "无法读取以前的规划建议。"));
+      setError(
+        planningFailureMessage(cause, {
+          projectId,
+          task: "outline_planning",
+          stage: "read_local_state",
+          fallback: "无法读取以前的规划建议。",
+          dispatched: false,
+        }),
+      );
     }
   }, [projectId, service]);
 
@@ -107,10 +125,11 @@ export function StoryPlanningPanel({
       return;
     }
     if (task === "scene_breakdown" && resolvedTargetNodeId.length === 0) {
-      setError("请先在大纲中添加并选择一个章节，再拆解场景。");
+      setError({ title: "还不能拆解场景", message: "请先在大纲中添加并选择一个章节。" });
       return;
     }
     setBusyAction("generate");
+    const preparingDisclosure = disclosure === null;
     setError(null);
     setNotice(null);
     try {
@@ -132,7 +151,20 @@ export function StoryPlanningPanel({
       });
       setDisclosure(null);
       if (outcome.status === "skipped") {
-        setNotice({ title: "本次没有调用 AI", message: outcome.message });
+        const incident = recordSafeOperationIncident({
+          operation: "story_planning",
+          stage: "pre_dispatch_check",
+          cause: Object.assign(new Error("story planning skipped before dispatch"), {
+            code: outcome.code,
+          }),
+          projectId,
+          dispatched: false,
+        });
+        setNotice({
+          title: "本次没有调用 AI",
+          message: outcome.message,
+          supportId: incident.supportId,
+        });
         return;
       }
       setCandidates((current) => Object.freeze([outcome.candidate, ...current]));
@@ -146,7 +178,19 @@ export function StoryPlanningPanel({
       });
     } catch (cause: unknown) {
       setDisclosure(null);
-      setError(errorMessage(cause, "规划建议生成失败；正式大纲和正文没有改变。"));
+      const dispatched = preparingDisclosure ? false : planningDispatchState(cause);
+      const failureStage = preparingDisclosure
+        ? "prepare_disclosure"
+        : planningFailureStage(cause, dispatched);
+      setError(
+        planningFailureMessage(cause, {
+          projectId,
+          task,
+          stage: failureStage,
+          fallback: "规划建议生成失败；正式大纲和正文没有改变。",
+          dispatched,
+        }),
+      );
     } finally {
       setBusyAction(null);
     }
@@ -165,7 +209,15 @@ export function StoryPlanningPanel({
       replaceCandidate(updated);
       setNotice({ title: "修改已保存", message: "这里只更新建议版本，正式大纲尚未改变。" });
     } catch (cause: unknown) {
-      setError(errorMessage(cause, "无法保存这份规划建议。"));
+      setError(
+        planningFailureMessage(cause, {
+          projectId,
+          task: candidate.task,
+          stage: "persist_result",
+          fallback: "无法保存这份规划建议。",
+          dispatched: false,
+        }),
+      );
     } finally {
       setBusyAction(null);
     }
@@ -188,7 +240,15 @@ export function StoryPlanningPanel({
           : "仅更新了目标节点的简介；正文、人物设定和世界规则都没有被修改。",
       });
     } catch (cause: unknown) {
-      setError(errorMessage(cause, "无法安全采纳这份建议。"));
+      setError(
+        planningFailureMessage(cause, {
+          projectId,
+          task: candidate.task,
+          stage: "persist_result",
+          fallback: "无法安全采纳这份建议。",
+          dispatched: false,
+        }),
+      );
     } finally {
       setBusyAction(null);
     }
@@ -197,7 +257,7 @@ export function StoryPlanningPanel({
   async function acceptSelected(candidate: StoryPlanningCandidate): Promise<void> {
     const selectedItemIds = selectedItems[candidate.id] ?? [];
     if (selectedItemIds.length === 0) {
-      setError("请至少勾选一项要采纳的规划内容。");
+      setError({ title: "还不能采纳", message: "请至少勾选一项要采纳的规划内容。" });
       return;
     }
     setBusyAction(`partial:${candidate.id}`);
@@ -217,7 +277,15 @@ export function StoryPlanningPanel({
           : `已保留原有简介，并追加 ${String(receipt.acceptedItemIds.length)} 项结构化规划内容；未选内容、正文和故事设定均未修改。`,
       });
     } catch (cause: unknown) {
-      setError(errorMessage(cause, "无法安全采纳所选规划条目。"));
+      setError(
+        planningFailureMessage(cause, {
+          projectId,
+          task: candidate.task,
+          stage: "persist_result",
+          fallback: "无法安全采纳所选规划条目。",
+          dispatched: false,
+        }),
+      );
     } finally {
       setBusyAction(null);
     }
@@ -235,7 +303,15 @@ export function StoryPlanningPanel({
       );
       setNotice({ title: "建议已拒绝", message: "正式大纲和正文没有改变。" });
     } catch (cause: unknown) {
-      setError(errorMessage(cause, "无法记录拒绝结果。"));
+      setError(
+        planningFailureMessage(cause, {
+          projectId,
+          task: candidate.task,
+          stage: "persist_result",
+          fallback: "无法记录拒绝结果。",
+          dispatched: false,
+        }),
+      );
     } finally {
       setBusyAction(null);
     }
@@ -360,15 +436,25 @@ export function StoryPlanningPanel({
             <InlineAlert
               tone="info"
               title={notice.title}
-              description={notice.message}
+              description={
+                <>
+                  <span>{notice.message}</span>
+                  {notice.supportId !== undefined && <span> 支持编号：{notice.supportId}</span>}
+                </>
+              }
               onDismiss={() => setNotice(null)}
             />
           )}
           {error !== null && (
             <InlineAlert
               tone="error"
-              title="AI 剧情规划未完成"
-              description={error}
+              title={error.title}
+              description={
+                <>
+                  <span>{error.message}</span>
+                  {error.supportId !== undefined && <span> 支持编号：{error.supportId}</span>}
+                </>
+              }
               onDismiss={() => setError(null)}
             />
           )}
@@ -631,4 +717,105 @@ function errorMessage(cause: unknown, fallback: string): string {
     return projectOrdinaryUiError(cause).description;
   }
   return fallback;
+}
+
+function planningFailureMessage(
+  cause: unknown,
+  input: Readonly<{
+    projectId: string;
+    task: StoryPlanningTask;
+    stage: SafeOperationStage;
+    fallback: string;
+    dispatched: boolean | "unknown";
+  }>,
+): PlanningPanelMessage {
+  const incident = recordSafeOperationIncident({
+    operation: "story_planning",
+    stage: input.stage,
+    cause,
+    projectId: input.projectId,
+    dispatched: input.dispatched,
+  });
+  const actionName = input.task === "outline_planning" ? "故事方向" : "场景拆解";
+  const code = safeCauseCode(cause);
+  if (input.stage === "persist_result" && code === "STORY_PLANNING_RESULT_PERSIST_FAILED") {
+    return {
+      title: `${actionName}结果尚未保存`,
+      message:
+        "模型结果已经返回，但待审阅建议没有安全保存。正式大纲和正文没有改变；请先核对调用记录，避免重复提交。",
+      supportId: incident.supportId,
+    };
+  }
+  if (input.stage === "prepare_disclosure" && code === "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED") {
+    return {
+      title: `${actionName}发送信息尚未准备好`,
+      message:
+        "准备发送信息时发现所选模型尚未通过规划格式检查。本次调用 0 次；请在 AI 模型中完成能力验证后重试。",
+      supportId: incident.supportId,
+    };
+  }
+  if (
+    input.stage === "prepare_disclosure" &&
+    (code === "MODEL_HUB_ROUTE_NOT_CONFIGURED" || code === "MODEL_HUB_ROUTE_NOT_FOUND")
+  ) {
+    return {
+      title: `${actionName}发送信息尚未准备好`,
+      message: "准备发送信息时没有找到可用的剧情规划分工。本次调用 0 次；请先选择模型后重试。",
+      supportId: incident.supportId,
+    };
+  }
+  if (input.stage === "read_local_state") {
+    return {
+      title: "以前的规划建议暂时无法读取",
+      message: `${errorMessage(cause, input.fallback)} 当前大纲和正文没有改变，请重新读取。`,
+      supportId: incident.supportId,
+    };
+  }
+  return {
+    title:
+      input.stage === "prepare_disclosure"
+        ? `${actionName}发送信息尚未准备好`
+        : `${actionName}操作尚未完成`,
+    message: `${errorMessage(cause, input.fallback)} ${dispatchStateMessage(input.dispatched)}`,
+    supportId: incident.supportId,
+  };
+}
+
+function planningDispatchState(cause: unknown): boolean | "unknown" {
+  if (typeof cause !== "object" || cause === null || !("dispatched" in cause)) {
+    return "unknown";
+  }
+  return cause.dispatched === true || cause.dispatched === false ? cause.dispatched : "unknown";
+}
+
+function planningFailureStage(cause: unknown, dispatched: boolean | "unknown"): SafeOperationStage {
+  if (typeof cause === "object" && cause !== null && "planningStage" in cause) {
+    const stage = cause.planningStage;
+    if (
+      stage === "pre_dispatch_check" ||
+      stage === "provider_dispatch" ||
+      stage === "persist_result"
+    ) {
+      return stage;
+    }
+  }
+  return dispatched === false ? "pre_dispatch_check" : "provider_dispatch";
+}
+
+function dispatchStateMessage(dispatched: boolean | "unknown"): string {
+  if (dispatched === false) return "本次调用 0 次。";
+  if (dispatched === true) return "调用已经开始，请先核对调用记录，避免重复提交。";
+  return "是否已经发送暂时无法确认，请先核对调用记录，避免重复提交。";
+}
+
+function safeCauseCode(cause: unknown): string {
+  if (
+    typeof cause === "object" &&
+    cause !== null &&
+    "code" in cause &&
+    typeof cause.code === "string"
+  ) {
+    return cause.code;
+  }
+  return "UNEXPECTED_OPERATION_FAILURE";
 }

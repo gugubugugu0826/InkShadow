@@ -1,6 +1,8 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { ErrorState } from "@inkshadow/ui";
 
+import { ComponentOwnershipBoundary } from "./component-ownership-path";
+
 import {
   recordUiRouteIncident,
   recoverUiRouteIncident,
@@ -39,7 +41,11 @@ export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorB
 
   public override render(): ReactNode {
     if (!this.state.failed) {
-      return this.props.children;
+      return (
+        <ComponentOwnershipBoundary name="AppErrorBoundary">
+          {this.props.children}
+        </ComponentOwnershipBoundary>
+      );
     }
 
     return (

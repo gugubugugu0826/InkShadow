@@ -25,7 +25,9 @@ import {
 } from "@inkshadow/task-engine";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import type { SqlExecutor } from "../src/executor.js";
 import {
+  SqliteAiCandidateRepository,
   createSqliteRepositories,
   type AcceptedVersionTaskRegistration,
   type SqliteRepositories,
@@ -779,6 +781,195 @@ describe("SQLite repositories with node:sqlite", () => {
     ).toHaveLength(1);
   });
 
+  it("isolates one malformed optional candidate without changing a forty-thousand-character authority", async () => {
+    const authorityContent = "长".repeat(40_936);
+    const project = makeProject(220, "长篇候选隔离", 0);
+    expectOk(await repositories.projects.create(project));
+    const chapterId = uuid(221);
+    const versionId = uuid(222);
+    const chapter = expectOk(
+      Chapter.create({
+        id: chapterId,
+        projectId: project.id,
+        title: "长篇正文",
+        content: authorityContent,
+        initialVersionId: versionId,
+        now: atMinute(1),
+      }),
+    );
+    const initialVersion = makeVersion({
+      id: versionId,
+      projectId: project.id,
+      chapterId,
+      parentVersionId: null,
+      sequence: 1,
+      content: authorityContent,
+      reason: "created",
+      sourceCandidateId: null,
+      createdAt: atMinute(1),
+    });
+    expectOk(await repositories.contentCommits.createChapter({ chapter, initialVersion }));
+
+    const readableCandidate = makeReadyCandidate(
+      { project, chapter, initialVersion },
+      223,
+      "可读取的隔离建议",
+    );
+    const malformedCandidate = makeReadyCandidate(
+      { project, chapter, initialVersion },
+      224,
+      "不得进入诊断的候选原文",
+    );
+    expectOk(await repositories.aiCandidates.create(readableCandidate));
+    expectOk(await repositories.aiCandidates.create(malformedCandidate));
+    executor.database
+      .prepare("UPDATE ai_candidates SET content_checksum = ? WHERE id = ?")
+      .run("g".repeat(64), malformedCandidate.id);
+
+    const authorityBefore = authoritativeChapterDigest(executor, project.id, chapter.id);
+    const rowCountBefore = executor.database
+      .prepare("SELECT count(*) AS count FROM ai_candidates WHERE chapter_id = ?")
+      .get(chapter.id);
+
+    const visibleCandidates = await repositories.aiCandidates.listByChapterId(chapter.id);
+    const isolatedRead = expectOk(
+      await repositories.aiCandidates.listByChapterIdWithIsolation(chapter.id),
+    );
+
+    expect(isolatedRead.candidates.map(({ id }) => id)).toEqual([readableCandidate.id]);
+    expect(isolatedRead.isolatedRows).toEqual([
+      expect.objectContaining({
+        rowReference: {
+          table: "ai_candidates",
+          candidateId: malformedCandidate.id,
+          rowFingerprint: expect.stringMatching(/^candidate-[0-9a-f]{8}$/u),
+        },
+        reasonCodeChain: expect.arrayContaining([
+          "LEGACY_CANDIDATE_METADATA_INVALID",
+          "REPOSITORY_ERROR",
+          "AI_CANDIDATE_CONTENT_CHECKSUM_INVALID",
+          "INVALID_CHECKSUM",
+        ]),
+        applicationStack: expect.arrayContaining([expect.stringMatching(/rehydrateAiCandidate/u)]),
+      }),
+    ]);
+    const isolatedDiagnostic = JSON.stringify(isolatedRead.isolatedRows);
+    expect(isolatedDiagnostic).not.toContain("不得进入诊断的候选原文");
+    expect(isolatedDiagnostic).not.toContain("长".repeat(32));
+
+    expectErrorCode(visibleCandidates, "REPOSITORY_ERROR");
+    if (!visibleCandidates.ok) {
+      expect(visibleCandidates.error.details).toEqual(
+        expect.objectContaining({
+          isolatedRowCount: 1,
+          isolatedRows: [
+            expect.objectContaining({
+              rowReference: expect.objectContaining({ candidateId: malformedCandidate.id }),
+            }),
+          ],
+        }),
+      );
+      expect(JSON.stringify(visibleCandidates.error.details)).not.toContain(
+        "不得进入诊断的候选原文",
+      );
+    }
+    expect(
+      executor.database
+        .prepare("SELECT content_checksum FROM ai_candidates WHERE id = ?")
+        .get(malformedCandidate.id),
+    ).toEqual({ content_checksum: "g".repeat(64) });
+    expect(
+      executor.database
+        .prepare("SELECT count(*) AS count FROM ai_candidates WHERE chapter_id = ?")
+        .get(chapter.id),
+    ).toEqual(rowCountBefore);
+    expect(authoritativeChapterDigest(executor, project.id, chapter.id)).toBe(authorityBefore);
+
+    const reopenedRepositories = createSqliteRepositories(executor);
+    const reopenedCandidates = await reopenedRepositories.aiCandidates.listByChapterId(chapter.id);
+    const reopenedIsolation = expectOk(
+      await reopenedRepositories.aiCandidates.listByChapterIdWithIsolation(chapter.id),
+    );
+    expect(reopenedIsolation.isolatedRows).toEqual(isolatedRead.isolatedRows);
+
+    expectErrorCode(reopenedCandidates, "REPOSITORY_ERROR");
+    expect(authoritativeChapterDigest(executor, project.id, chapter.id)).toBe(authorityBefore);
+  });
+
+  it("does not quarantine an unexpected programming error as a malformed candidate row", async () => {
+    const unexpected = new RangeError("synthetic repository implementation defect");
+    const row = new Proxy(
+      {
+        id: uuid(225),
+        project_id: uuid(220),
+        chapter_id: uuid(221),
+        created_at: atMinute(1),
+      },
+      {
+        get(target, property, receiver) {
+          if (property === "source") {
+            throw unexpected;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+    const faultingExecutor: SqlExecutor = {
+      async select<Row extends object>(): Promise<Row[]> {
+        return [row as unknown as Row];
+      },
+      async execute() {
+        return { rowsAffected: 0 };
+      },
+      async transaction<Value>(): Promise<Value> {
+        throw unexpected;
+      },
+      close(): Promise<void> {
+        return Promise.resolve();
+      },
+    };
+    const repository = new SqliteAiCandidateRepository(faultingExecutor);
+
+    const read = await repository.listByChapterIdWithIsolation(uuid(221));
+
+    expectErrorCode(read, "REPOSITORY_ERROR");
+    if (!read.ok) {
+      expect(read.error.details).toEqual(
+        expect.objectContaining({ operation: "list AI candidates" }),
+      );
+      expect((read.error as Error & { cause?: unknown }).cause).toBe(unexpected);
+    }
+  });
+
+  it("identifies a malformed immutable version row without recording authority text", async () => {
+    const fixture = await createChapterFixture();
+    executor.database
+      .prepare("UPDATE chapter_versions SET content_checksum = ? WHERE id = ?")
+      .run("g".repeat(64), fixture.initialVersion.id);
+
+    const read = await repositories.chapterVersions.listByChapterId(fixture.chapter.id);
+
+    expectErrorCode(read, "REPOSITORY_ERROR");
+    if (!read.ok) {
+      expect(read.error.details).toEqual(
+        expect.objectContaining({
+          rowReference: {
+            table: "chapter_versions",
+            versionId: fixture.initialVersion.id,
+            sequence: 1,
+            rowFingerprint: expect.stringMatching(/^version-row-[0-9a-f]{8}$/u),
+          },
+        }),
+      );
+      expect((read.error as Error & { cause?: unknown }).cause).toMatchObject({
+        code: "REPOSITORY_ERROR",
+        details: expect.objectContaining({ validationCode: "INVALID_CHECKSUM" }),
+      });
+      expect(JSON.stringify(read.error.details)).not.toContain(fixture.chapter.content);
+      expect(JSON.stringify(read.error.details)).not.toContain("g".repeat(32));
+    }
+  });
+
   it("commits the accepted version and its recovery task atomically before returning", async () => {
     const taskId = uuid(90);
     repositories = createSqliteRepositories(executor, {
@@ -1340,6 +1531,38 @@ function atMinute(minute: number): IsoUtcTimestamp {
 
 function checksum(content: string): ContentChecksum {
   return expectOk(parseContentChecksum(createHash("sha256").update(content, "utf8").digest("hex")));
+}
+
+function authoritativeChapterDigest(
+  executor: NodeSqliteExecutor,
+  projectId: UuidV7,
+  chapterId: UuidV7,
+): string {
+  const project = executor.database
+    .prepare(
+      `SELECT id, name, status, revision, deletion_generation, created_at, updated_at,
+              archived_at, trashed_at, retention_until, status_before_trash
+       FROM projects WHERE id = ?`,
+    )
+    .get(projectId);
+  const chapter = executor.database
+    .prepare(
+      `SELECT id, project_id, title, content, status, revision, privacy_mode,
+              privacy_revision, current_version_id, created_at, updated_at, trashed_at
+       FROM chapters WHERE id = ?`,
+    )
+    .get(chapterId);
+  const versions = executor.database
+    .prepare(
+      `SELECT id, project_id, chapter_id, parent_version_id, sequence, content,
+              content_checksum, reason, source_candidate_id,
+              organize_local_story_facts, created_at
+       FROM chapter_versions WHERE chapter_id = ? ORDER BY sequence`,
+    )
+    .all(chapterId);
+  return createHash("sha256")
+    .update(JSON.stringify({ project, chapter, versions }), "utf8")
+    .digest("hex");
 }
 
 function expectOk<Value>(result: Result<Value, AppError>): Value {

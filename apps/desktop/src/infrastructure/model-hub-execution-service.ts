@@ -104,8 +104,10 @@ export interface ExecuteModelHubTextTaskInput extends InspectModelHubTextTaskInp
    * cancellation raised while onBeforeDispatch is awaiting cannot be lost.
    */
   readonly assertBeforeProviderDispatch?: () => void;
-  /** Synchronous notification after the durable receipt and immediately before native dispatch. */
-  readonly onProviderDispatchStarted?: (selection: ModelHubTextDispatchSelection) => void;
+  /** Notification after the durable receipt. It may persist a local journey checkpoint before dispatch continues. */
+  readonly onProviderDispatchStarted?: (
+    selection: ModelHubTextDispatchSelection,
+  ) => void | Promise<void>;
   readonly onDelta?: (accumulatedText: string) => void;
 }
 
@@ -384,7 +386,7 @@ export async function executeModelHubTextTask(
       // Legacy/test gateways have no native SQLite boundary. Production
       // capability probes use the atomic native receipt below.
       dispatched = true;
-      input.onProviderDispatchStarted?.(dispatchSelection);
+      await input.onProviderDispatchStarted?.(dispatchSelection);
     }
     const reasoningPolicy =
       executionPolicy.reasoningMode === "capability_probe"
@@ -423,7 +425,7 @@ export async function executeModelHubTextTask(
               providerKindSnapshot: current.target.connection.providerKind,
               modelIdSnapshot: current.target.catalogEntry.providerModelId,
             },
-            onInvocationDispatchAccepted: (receipt) => {
+            onInvocationDispatchAccepted: async (receipt) => {
               invocation = Object.freeze({
                 ...invocation,
                 providerDispatchStartedAt: receipt.dispatchedAt,
@@ -431,7 +433,7 @@ export async function executeModelHubTextTask(
               });
               dispatched = true;
               try {
-                input.onProviderDispatchStarted?.(dispatchSelection);
+                await input.onProviderDispatchStarted?.(dispatchSelection);
               } catch (cause: unknown) {
                 nativeReceiptObservation.postReceiptLocalFailure = true;
                 throw cause;

@@ -99,7 +99,7 @@ export async function saveExportArtifact(
   validateArtifact(artifact);
   const byteLength = artifactByteLength(artifact);
   if (byteLength > MAX_EXPORT_BYTES) {
-    throw failedSaveError(artifact, options.format, "导出文件超过 64 MiB 安全上限，未写入文件。");
+    throw failedSaveError(artifact, options.format, "导出文件超过 64 兆字节安全上限，未写入文件。");
   }
   if (options.mode === "browser-development") {
     try {

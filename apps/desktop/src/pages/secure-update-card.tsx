@@ -274,10 +274,10 @@ function formatBytes(value: number): string {
     return "大小未知";
   }
   if (value < 1024) {
-    return `${String(value)} B`;
+    return `${String(value)} 字节`;
   }
   if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
+    return `${(value / 1024).toFixed(1)} 千字节`;
   }
-  return `${(value / 1024 / 1024).toFixed(1)} MiB`;
+  return `${(value / 1024 / 1024).toFixed(1)} 兆字节`;
 }

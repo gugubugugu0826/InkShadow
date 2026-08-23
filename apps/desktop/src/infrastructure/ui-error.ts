@@ -160,6 +160,12 @@ function recordErrorDescription(code: string): string {
   if (code === "CREATIVE_OPENING_TIMEOUT_SCOPE_MISMATCH") {
     return "开头超时编号与已确认的固定位置不一致。为避免误操作，墨影没有结束或取消任何其他调用，也没有改写创作进度；请重新读取进度并核对调用记录。";
   }
+  if (code === "GENERATION_ABANDONED_BY_AUTHOR") {
+    return "确认前离开，未确认的生成批次已安全终止";
+  }
+  if (code === "OPENING_JOURNEY_TASK_SCOPE_MISMATCH") {
+    return "已有开书任务与当前构思批次不一致。墨影已停止继续处理，不会复用、改写或自动重发。";
+  }
   if (code.startsWith("UPDATE_")) {
     return "安全更新未完成。当前版本仍可离线使用；请检查网络并只按已验证的官方发行说明重试。";
   }

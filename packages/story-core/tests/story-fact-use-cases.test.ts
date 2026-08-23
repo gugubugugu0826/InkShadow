@@ -117,6 +117,150 @@ describe("StoryFactApplicationService", () => {
     expect(deprecated.toSnapshot()).toMatchObject({ status: "deprecated", revision: 2 });
   });
 
+  it("lets deterministic local extraction require review without pretending to be AI", async () => {
+    const { service } = harness();
+    const staged = unwrap(
+      await service.stageAutomaticFact({
+        projectId: PROJECT_ID,
+        factType: "character_profile",
+        contentText: "周望五十七岁。",
+        source: chapterEvidence("周望五十七岁。"),
+        confidence: 1,
+        origin: "system",
+        requireHumanReview: true,
+      }),
+    );
+
+    expect(staged.updatePolicy).toBe("automatic_reversible");
+    expect(staged.fact.toSnapshot()).toMatchObject({
+      status: "unconfirmed",
+      origin: "system",
+      needsReview: true,
+      userConfirmed: false,
+    });
+  });
+
+  it("lets an author revise only a staged structured fact while preserving evidence and revision fences", async () => {
+    const { service } = harness();
+    const staged = unwrap(
+      await service.stageAutomaticFact({
+        projectId: PROJECT_ID,
+        factType: "character_profile",
+        contentText: "周望是钟楼的管理员。",
+        structuredValue: {
+          schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+          payload: { schemaVersion: "inkshadow.direct-local-story-fact.v1" },
+        },
+        source: directLocalChapterEvidence("周望是钟楼的管理员。"),
+        confidence: 1,
+        origin: "system",
+        requireHumanReview: true,
+      }),
+    );
+    const originalSource = staged.fact.toSnapshot().source;
+
+    const edited = unwrap(
+      await service.editStagedAsUser({
+        factId: staged.fact.id,
+        contentText: "周望担任钟楼管理员。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: staged.fact.revision,
+      }),
+    );
+
+    expect(edited.toSnapshot()).toMatchObject({
+      contentText: "周望担任钟楼管理员。",
+      structuredValue: null,
+      status: "formal",
+      origin: "user",
+      userConfirmed: true,
+      needsReview: false,
+      revision: 2,
+      source: originalSource,
+    });
+    expect(
+      await service.editStagedAsUser({
+        factId: staged.fact.id,
+        contentText: "过期重复修改。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: staged.fact.revision,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "STORY_REVISION_CONFLICT" } });
+    expect(
+      await service.editStagedAsUser({
+        factId: edited.id,
+        contentText: "不得再次按待确认草稿修改。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: edited.revision,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "STORY_FACT_INVALID_TRANSITION" } });
+  });
+
+  it("rejects staged author edits outside the direct-local v1 review boundary", async () => {
+    const { service } = harness();
+    const nonLocal = unwrap(
+      await service.stageAutomaticFact({
+        projectId: PROJECT_ID,
+        factType: "character_profile",
+        contentText: "周望五十七岁。",
+        structuredValue: {
+          schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+          payload: { schemaVersion: "inkshadow.direct-local-story-fact.v1" },
+        },
+        source: chapterEvidence("周望五十七岁。"),
+        confidence: 1,
+        origin: "system",
+        requireHumanReview: true,
+      }),
+    );
+    expect(
+      await service.editStagedAsUser({
+        factId: nonLocal.fact.id,
+        contentText: "周望五十八岁。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: nonLocal.fact.revision,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "STORY_FACT_INVALID_TRANSITION" } });
+
+    const direct = unwrap(
+      await service.stageAutomaticFact({
+        projectId: PROJECT_ID,
+        factType: "character_profile",
+        contentText: "周望担任钟楼管理员。",
+        structuredValue: {
+          schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+          payload: { schemaVersion: "inkshadow.direct-local-story-fact.v1" },
+        },
+        source: directLocalChapterEvidence("周望担任钟楼管理员。"),
+        confidence: 1,
+        origin: "system",
+        requireHumanReview: true,
+      }),
+    );
+    const locked = unwrap(
+      await service.confirm({
+        factId: direct.fact.id,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: direct.fact.revision,
+        lock: true,
+      }),
+    );
+    expect(
+      await service.editStagedAsUser({
+        factId: locked.id,
+        contentText: "不得修改已固定设定。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: locked.revision,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "STORY_FACT_INVALID_TRANSITION" } });
+  });
+
   it("fails closed for unknown automatic fact types", async () => {
     const { service } = harness();
     const staged = unwrap(
@@ -276,6 +420,13 @@ function chapterEvidence(excerpt: string) {
     endOffset: excerpt.length,
     sourceLength: excerpt.length + 1,
     excerpt,
+  };
+}
+
+function directLocalChapterEvidence(excerpt: string) {
+  return {
+    ...chapterEvidence(excerpt),
+    reference: "direct-local:inkshadow.direct-local-story-fact.v1:test",
   };
 }
 

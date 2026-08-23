@@ -559,6 +559,13 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0075_generation_attempt_privacy_snapshot.sql"
                 ),
             ),
+            migration(
+                79,
+                "allow audited direct-local story fact author revisions",
+                include_str!(
+                    "../../../../packages/data/migrations/0076_direct_local_story_fact_author_revision.sql"
+                ),
+            ),
         ]),
         ignore_missing: false,
         locking: true,
@@ -2171,12 +2178,35 @@ mod tests {
         .await
         .expect("version 78 generation attempt privacy guards");
         assert_eq!(privacy_guards, 2);
+        let (direct_revision_success, direct_revision_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 79")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 79 direct-local author revision migration receipt");
+        assert_eq!(direct_revision_success, 1);
+        assert_eq!(direct_revision_checksum.len(), 48);
+        let direct_revision_guards: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'trigger'
+               AND name IN (
+                 'story_fact_entity_alias_resolution_guard',
+                 'story_fact_user_content_revision_guard'
+               )
+               AND instr(
+                 sql,
+                 'direct-local:inkshadow.direct-local-story-fact.v1:'
+               ) > 0",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 79 direct-local author revision guards");
+        assert_eq!(direct_revision_guards, 2);
 
         let maximum_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
             .fetch_one(&mut connection)
             .await
             .expect("maximum migration version");
-        assert_eq!(maximum_version, 78);
+        assert_eq!(maximum_version, 79);
         let forbidden_columns: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)
              FROM pragma_table_info('novel_skill_evaluation_predispatch_authority_snapshots')

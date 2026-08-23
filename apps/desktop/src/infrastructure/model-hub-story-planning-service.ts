@@ -112,6 +112,25 @@ export class StoryPlanningServiceError extends Error {
   }
 }
 
+export type StoryPlanningGenerationFailureStage =
+  "pre_dispatch_check" | "provider_dispatch" | "persist_result";
+
+export class StoryPlanningGenerationFailure extends Error {
+  public override readonly cause: unknown;
+
+  public constructor(
+    readonly code: "STORY_PLANNING_PRE_DISPATCH_FAILED" | "STORY_PLANNING_RESULT_PERSIST_FAILED",
+    message: string,
+    readonly dispatched: boolean | "unknown",
+    readonly planningStage: StoryPlanningGenerationFailureStage,
+    cause: unknown,
+  ) {
+    super(message);
+    this.name = "StoryPlanningGenerationFailure";
+    this.cause = cause;
+  }
+}
+
 type InspectText = (
   dependencies: ModelHubTextInspectionDependencies,
   input: InspectModelHubTextTaskInput,
@@ -200,9 +219,26 @@ export class ModelHubStoryPlanningService {
       });
     }
     try {
-      const prepared = await this.prepareProviderAction(input);
-      if (prepared.disclosure.fingerprint !== input.disclosureFingerprint) {
-        throw planningDisclosureChanged();
+      let prepared: PreparedStoryPlanningAction;
+      try {
+        prepared = await this.prepareProviderAction(input);
+        if (prepared.disclosure.fingerprint !== input.disclosureFingerprint) {
+          throw planningDisclosureChanged();
+        }
+      } catch (cause: unknown) {
+        if (
+          cause instanceof ModelHubExecutionError ||
+          cause instanceof ProjectContextPrivacyError
+        ) {
+          throw cause;
+        }
+        throw new StoryPlanningGenerationFailure(
+          "STORY_PLANNING_PRE_DISPATCH_FAILED",
+          "发送前重新核对规划资料时失败；本次没有调用 AI。",
+          false,
+          "pre_dispatch_check",
+          cause,
+        );
       }
       const { context, request, inspection, evidence, executionPolicy } = prepared;
       const executed = await this.executeText(this.dependencies, {
@@ -289,7 +325,17 @@ export class ModelHubStoryPlanningService {
         updatedAt: now,
         decidedAt: null,
       });
-      await this.dependencies.candidates.create(candidate);
+      try {
+        await this.dependencies.candidates.create(candidate);
+      } catch (cause: unknown) {
+        throw new StoryPlanningGenerationFailure(
+          "STORY_PLANNING_RESULT_PERSIST_FAILED",
+          "模型结果已返回，但待审阅规划建议没有安全保存。",
+          true,
+          "persist_result",
+          cause,
+        );
+      }
       return Object.freeze({ status: "completed", candidate });
     } catch (cause: unknown) {
       if (cause instanceof ProjectContextPrivacyError) {

@@ -172,7 +172,7 @@ describe("SettingsPage native maintenance tickets", () => {
     expect(await screen.findByRole("heading", { name: "自动备份" })).toBeVisible();
     expect(screen.getByText(/每天本地时间 03:00/u)).toBeVisible();
     expect(await screen.findByText("今天的自动备份已完成")).toBeVisible();
-    expect(screen.getByText(/4\.0 KiB/u)).toBeVisible();
+    expect(screen.getByText(/4\.0 千字节/u)).toBeVisible();
     expect(screen.getByText(/清理了 1 份过期备份/u)).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "立即检查自动备份" }));

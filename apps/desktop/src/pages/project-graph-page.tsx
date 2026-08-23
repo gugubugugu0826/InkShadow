@@ -241,7 +241,7 @@ export function ProjectGraphPage({ graph, projectId: projectIdValue }: ProjectGr
         <InlineAlert
           tone="error"
           title="关系图重建失败"
-          description={`${normalizedRebuildError.description}（${normalizedRebuildError.code}）`}
+          description={normalizedRebuildError.description}
         />
       )}
 
@@ -255,7 +255,7 @@ export function ProjectGraphPage({ graph, projectId: projectIdValue }: ProjectGr
               <ErrorState
                 title={normalizedLoadError.title}
                 description={normalizedLoadError.description}
-                errorCode={normalizedLoadError.code}
+
                 primaryAction={{ label: "重试", onClick: () => void load() }}
               />
             ),

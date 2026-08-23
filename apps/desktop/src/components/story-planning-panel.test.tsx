@@ -1,8 +1,12 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Outline } from "@inkshadow/story-core";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import {
+  readSafeOperationIncidents,
+  resetSafeOperationDiagnosticsForTests,
+} from "../infrastructure/safe-operation-diagnostics";
 import type { StoryPlanningCandidate } from "../infrastructure/story-planning-candidate-store";
 import { StoryPlanningPanel, type StoryPlanningPanelProps } from "./story-planning-panel";
 
@@ -13,6 +17,11 @@ const BOOK_ID = "019f9f4a-b3c7-7350-9226-000000000002";
 const CANDIDATE_ID = "019f9f4a-b3c7-7350-9226-000000000003";
 
 describe("StoryPlanningPanel", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    resetSafeOperationDiagnosticsForTests();
+  });
+
   it("cancels a prepared planning action without generating", async () => {
     const user = userEvent.setup();
     const generate = vi.fn();
@@ -25,6 +34,60 @@ describe("StoryPlanningPanel", () => {
 
     expect(generate).not.toHaveBeenCalled();
     expect(screen.queryByText("确认后会调用 1 次")).not.toBeInTheDocument();
+  });
+
+  it("shows normal sending information when the current plan is empty", async () => {
+    const emptyOutline = Outline.create({
+      projectId: PROJECT_ID,
+      bookId: BOOK_ID,
+      title: "雨夜车站",
+      synopsis: "",
+      now: NOW,
+    });
+    if (!emptyOutline.ok) throw emptyOutline.error;
+    const user = userEvent.setup();
+    const generate = vi.fn();
+    const service = planningService({ generate });
+    render(
+      <StoryPlanningPanel
+        projectId={PROJECT_ID}
+        outline={emptyOutline.value}
+        service={service}
+        onOutlineChanged={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: "查看故事方向发送信息" }));
+
+    expect(screen.getByText(/我的写作服务 · planning-model/u)).toBeVisible();
+    expect(screen.queryByText("AI 剧情规划未完成")).not.toBeInTheDocument();
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it("shows an exact unsent preparation failure with a stable support number", async () => {
+    const user = userEvent.setup();
+    const generate = vi.fn();
+    const preparationFailure = Object.assign(new Error("private provider detail"), {
+      code: "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED",
+    });
+    const service = planningService({
+      prepareGeneration: vi.fn(() => Promise.reject(preparationFailure)),
+      generate,
+    });
+    renderPanel(service);
+    await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: "查看故事方向发送信息" }));
+
+    expect(await screen.findByText("故事方向发送信息尚未准备好")).toBeVisible();
+    expect(screen.getByText(/准备发送信息时发现所选模型尚未通过规划格式检查/u)).toBeVisible();
+    expect(screen.getByText(/本次调用 0 次/u)).toBeVisible();
+    expect(screen.getByText(/支持编号：墨影-/u)).toBeVisible();
+    expect(screen.queryByText("AI 剧情规划未完成")).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED");
+    expect(document.body).not.toHaveTextContent("private provider detail");
+    expect(generate).not.toHaveBeenCalled();
   });
 
   it("states explicitly that no AI ran when the route is missing", async () => {
@@ -46,6 +109,35 @@ describe("StoryPlanningPanel", () => {
     expect(screen.getByText("请先为大纲规划配置 AI 分工。")).toBeInTheDocument();
     expect(screen.queryByText(/MODEL_HUB_ROUTE_NOT_CONFIGURED/u)).not.toBeInTheDocument();
     expect(screen.queryByLabelText("AI 剧情规划建议版本")).not.toBeInTheDocument();
+    expect(readSafeOperationIncidents()[0]).toMatchObject({
+      stage: "pre_dispatch_check",
+      dispatched: false,
+    });
+  });
+
+  it("records a post-dispatch candidate save failure at the result persistence stage", async () => {
+    const user = userEvent.setup();
+    const failure = Object.assign(new Error("candidate storage failed"), {
+      code: "STORY_PLANNING_RESULT_PERSIST_FAILED",
+      dispatched: true,
+      planningStage: "persist_result",
+    });
+    const service = planningService({
+      generate: vi.fn(() => Promise.reject(failure)),
+    });
+    renderPanel(service);
+    await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
+
+    await confirmStoryPlanning(user);
+
+    expect(await screen.findByText("故事方向结果尚未保存")).toBeVisible();
+    expect(screen.getByText(/模型结果已经返回，但待审阅建议没有安全保存/u)).toBeVisible();
+    expect(screen.getByText(/支持编号：墨影-/u)).toBeVisible();
+    expect(readSafeOperationIncidents()[0]).toMatchObject({
+      stage: "persist_result",
+      dispatched: true,
+      normalizedErrorCode: "STORY_PLANNING_RESULT_PERSIST_FAILED",
+    });
   });
 
   it("creates a review candidate, requires edits to be saved, then explicitly replaces only the target synopsis", async () => {

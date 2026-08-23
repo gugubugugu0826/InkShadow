@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { decideEditorGenerationCompletion } from "./editor-generation-completion-policy";
 
 describe("editor generation completion policy", () => {
-  it.each(["opening", "continuation", "selection_rewrite", "polish", "expand"] as const)(
+  it.each(["opening", "continuation", "selection_rewrite", "polish", "expand", "shorten"] as const)(
     "keeps a complete direct %s result visible and isolated",
     (action) => {
       const decision = decideEditorGenerationCompletion({
@@ -17,6 +17,19 @@ describe("editor generation completion policy", () => {
       expect(decision.notice).toMatch(/创作结果已保存并与正文隔离.*明确选择/u);
     },
   );
+
+  it("names a shortened result while keeping it isolated", () => {
+    const decision = decideEditorGenerationCompletion({
+      mode: "direct",
+      action: "shorten",
+      candidateReady: true,
+      incomplete: false,
+      qualityGateOutcome: "pass",
+    });
+
+    expect(decision).toMatchObject({ kind: "review" });
+    expect(decision.notice).toContain("这次缩写");
+  });
 
   it("does not invent a result when generation produced no Candidate", () => {
     expect(

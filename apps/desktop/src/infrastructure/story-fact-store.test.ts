@@ -1,4 +1,4 @@
-import { StoryFact, parseUuidV7 } from "@inkshadow/story-core";
+import { StoryFact, parseIsoUtcTimestamp, parseUuidV7 } from "@inkshadow/story-core";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -57,6 +57,86 @@ describe("BrowserDevelopmentStoryFactStore", () => {
     expect(
       unwrap(await store.listRevisions(confirmed.id)).map(({ changeKind }) => changeKind),
     ).toEqual(["created", "confirmed"]);
+  });
+
+  it("allows only a direct-local review draft to become an author revision", async () => {
+    const store = new BrowserDevelopmentStoryFactStore(localStorage);
+    const direct = createDirectLocalStagedFact(40);
+    expect((await store.create(direct)).ok).toBe(true);
+    const edited = unwrap(
+      direct.editStagedAsUser({
+        contentText: "周望担任钟楼管理员。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: direct.revision,
+        now: T1,
+      }),
+    );
+
+    expect((await store.save(edited, direct.revision)).ok).toBe(true);
+    const revisions = unwrap(await store.listRevisions(direct.id));
+    expect(revisions).toHaveLength(2);
+    expect(revisions[0]?.fact.toSnapshot()).toMatchObject({
+      structuredValue: direct.toSnapshot().structuredValue,
+      source: direct.toSnapshot().source,
+      status: "unconfirmed",
+    });
+    expect(revisions[1]?.fact.toSnapshot()).toMatchObject({
+      contentText: "周望担任钟楼管理员。",
+      structuredValue: null,
+      source: direct.toSnapshot().source,
+      status: "formal",
+      origin: "user",
+    });
+
+    const nonLocal = createDirectLocalStagedFact(41, "chapter:ordinary-local-parser");
+    expect((await store.create(nonLocal)).ok).toBe(true);
+    const nonLocalSnapshot = nonLocal.toSnapshot();
+    const confirmedAt = unwrap(parseIsoUtcTimestamp(T1));
+    const forgedNonLocal = unwrap(
+      StoryFact.rehydrate({
+        ...nonLocalSnapshot,
+        contentText: "绕过来源白名单。",
+        structuredValue: null,
+        confidence: 1,
+        status: "formal",
+        origin: "user",
+        userConfirmed: true,
+        needsReview: false,
+        confirmedByActorId: unwrap(parseUuidV7(ACTOR_ID)),
+        confirmedAt,
+        revision: nonLocalSnapshot.revision + 1,
+        updatedAt: confirmedAt,
+      }),
+    );
+    expect((await store.save(forgedNonLocal, nonLocal.revision)).ok).toBe(false);
+
+    const evidenceTarget = createDirectLocalStagedFact(42);
+    expect((await store.create(evidenceTarget)).ok).toBe(true);
+    const evidenceSnapshot = evidenceTarget.toSnapshot();
+    const forgedEvidence = unwrap(
+      StoryFact.rehydrate({
+        ...evidenceSnapshot,
+        contentText: "绕过证据不可变边界。",
+        structuredValue: null,
+        source: {
+          ...evidenceSnapshot.source,
+          reference: "direct-local:inkshadow.direct-local-story-fact.v1:forged-evidence",
+        },
+        confidence: 1,
+        status: "formal",
+        origin: "user",
+        userConfirmed: true,
+        needsReview: false,
+        confirmedByActorId: unwrap(parseUuidV7(ACTOR_ID)),
+        confirmedAt,
+        revision: evidenceSnapshot.revision + 1,
+        updatedAt: confirmedAt,
+      }),
+    );
+    expect((await store.save(forgedEvidence, evidenceTarget.revision)).ok).toBe(false);
+    expect(unwrap(await store.listRevisions(nonLocal.id))).toHaveLength(1);
+    expect(unwrap(await store.listRevisions(evidenceTarget.id))).toHaveLength(1);
   });
 
   it("keeps user edit, restore, and duplicate merge revisions across reopening", async () => {
@@ -547,6 +627,41 @@ describe("BrowserDevelopmentStoryFactStore", () => {
     expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
   });
 });
+
+function createDirectLocalStagedFact(
+  suffix: number,
+  reference = "direct-local:inkshadow.direct-local-story-fact.v1:test",
+): StoryFact {
+  const contentText = "周望是钟楼的管理员。";
+  return unwrap(
+    StoryFact.create({
+      id: "019f9f4a-b3c7-7350-9226-" + String(suffix).padStart(12, "0"),
+      projectId: PROJECT_ID,
+      factType: "character_profile",
+      contentText,
+      structuredValue: {
+        schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+        payload: { schemaVersion: "inkshadow.direct-local-story-fact.v1" },
+      },
+      source: {
+        kind: "chapter_span",
+        reference,
+        chapterId: CHAPTER_ID,
+        versionId: VERSION_ID,
+        startOffset: 0,
+        endOffset: contentText.length,
+        sourceLength: contentText.length,
+        excerpt: contentText,
+      },
+      confidence: 1,
+      status: "unconfirmed",
+      origin: "system",
+      needsReview: true,
+      humanConfirmed: false,
+      now: T0,
+    }),
+  );
+}
 
 function createStructuredFormalFact(suffix: number, eventId: string): StoryFact {
   return unwrap(

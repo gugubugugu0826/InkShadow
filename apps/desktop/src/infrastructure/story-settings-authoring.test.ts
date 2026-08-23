@@ -33,6 +33,40 @@ describe("story settings authoring", () => {
     expect(result.suggestions.length).toBeGreaterThan(0);
   });
 
+  it.each([
+    ["周望是钟楼的管理员。", { characterName: "周望", role: "钟楼的管理员", age: null }],
+    ["周望担任钟楼管理员。", { characterName: "周望", role: "钟楼管理员", age: null }],
+    ["周望五十七岁。", { characterName: "周望", role: null, age: "五十七岁" }],
+  ])("parses an explicit character profile sentence: %s", (source, expected) => {
+    expect(parseNaturalLanguageSetting(source)).toMatchObject({
+      kind: "character_profile",
+      sourceText: source,
+      ...expected,
+    });
+  });
+
+  it("does not misclassify an identity sentence as a world rule and preserves compound details", () => {
+    expect(
+      parseNaturalLanguageSetting("周望是钟楼的管理员，五十七岁，在这座旧城守了三十一年。"),
+    ).toMatchObject({
+      kind: "character_profile",
+      characterName: "周望",
+      role: "钟楼的管理员",
+      age: "五十七岁",
+      details: "在这座旧城守了三十一年",
+    });
+  });
+
+  it("keeps an unparsed original sentence and explains what explicit structure is missing", () => {
+    const candidate = parseNaturalLanguageSetting("雾里的钟声令人不安。");
+    expect(candidate).toMatchObject({
+      kind: "manual",
+      sourceText: "雾里的钟声令人不安。",
+    });
+    if (candidate.kind !== "manual") throw new Error("测试句不应被猜测为结构化设定。");
+    expect(candidate.missingInformation).toContain("明确");
+  });
+
   it("detects legacy guided-opening cards and incomplete relationship facts", () => {
     const character = unwrap(
       FormalStoryRecord.create({
@@ -71,6 +105,10 @@ describe("story settings authoring", () => {
       "incomplete_relationship",
     ]);
     expect(repairs.filter(({ needsUserInput }) => needsUserInput)).toHaveLength(2);
+    expect(repairs.map(({ beforeSummary }) => beforeSummary).join(" ")).not.toMatch(
+      /guided_opening|characters/u,
+    );
+    expect(repairs[0]?.beforeSummary).toBe("旧版开书人物资料混合了多个字段。");
     expect(repairs.filter(({ kind }) => kind === "incomplete_relationship")).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -158,6 +196,32 @@ describe("story settings authoring", () => {
     );
 
     expect(inspectLegacyGuidedOpeningRecords([], [deprecated])).toEqual([]);
+  });
+
+  it("keeps user-facing export warnings free of old record keys and full identifiers", () => {
+    const unnamedCharacter = formalRecord(
+      "019f9f4a-b3c7-7350-9226-000000000211",
+      "character",
+      "guided_opening.unknown_card",
+      {},
+    );
+    const incompleteRelationship = relationshipFact(
+      "019f9f4a-b3c7-7350-9226-000000000212",
+      undefined,
+    );
+
+    const projection = projectStorySettingsForExport({
+      projectName: "测试作品",
+      exportedAt: NOW,
+      records: [unnamedCharacter],
+      facts: [incompleteRelationship],
+      memories: [],
+    });
+    const warnings = projection.warnings.join(" ");
+
+    expect(warnings).toContain("有一条人物记录没有可导出的名称，已跳过。");
+    expect(warnings).toContain("有一条人物关系缺少两端人物");
+    expect(warnings).not.toMatch(/guided_opening|019f9f4a|unknown_card/u);
   });
 
   it("exports only relationships with two stable character endpoints", () => {

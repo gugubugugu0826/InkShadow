@@ -25,6 +25,134 @@ describe("direct local story-fact organization", () => {
     ).toEqual({ text: "角色：林澈是守塔人。", startOffset: 7, sourceLength: 17 });
   });
 
+  it("extracts the required explicit character, place, relationship and event sentences as local pending facts", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const generate = vi.spyOn(runtime.modelGateway, "generate");
+    const project = expectOk(await runtime.useCases.createProject.execute({ name: "钟楼旧城" }));
+    const content = [
+      "周望是钟楼的管理员。",
+      "周望五十七岁。",
+      "周望担任钟楼管理员。",
+      "周望在旧城守了三十一年。",
+      "周望和赵伯是多年的老邻居。",
+      "钟摆倒转。",
+    ].join("");
+    const created = expectOk(
+      await runtime.useCases.createChapter.execute({
+        projectId: project.id,
+        title: "第一章",
+        content,
+      }),
+    );
+    const version = created.version.toSnapshot();
+    const dependencies = {
+      facts: runtime.story.facts,
+      factService: runtime.story.factService,
+      hasher: runtime.hasher,
+      now: () => runtime.clock.now(),
+    } as const;
+    const input = {
+      projectId: project.id,
+      chapterId: created.chapter.id,
+      versionId: version.id,
+      versionCreatedAt: version.createdAt,
+      acceptedText: content,
+      acceptedStartOffset: 0,
+      sourceLength: content.length,
+      sourceContentHash: version.contentChecksum,
+      currentVersionId: version.id,
+      localOnly: false,
+    } as const;
+
+    const receipt = await organizeDirectStoryFacts(dependencies, input);
+
+    expect(receipt).toEqual({
+      organizedCount: 6,
+      importantReviewCount: 1,
+      alreadyOrganizedCount: 0,
+      sourceWasCurrent: true,
+    });
+    const settings = expectStoryOk(
+      await runtime.story.facts.listByProjectId(expectStoryUuid(project.id)),
+    )
+      .map((fact) => fact.toSnapshot())
+      .filter(({ factType }) => factType !== "chapter_summary");
+    expect(settings).toHaveLength(7);
+    expect(settings.map(({ factType }) => factType)).toEqual(
+      expect.arrayContaining([
+        "character_profile",
+        "location_setting",
+        "core_relationship",
+        "event_category",
+      ]),
+    );
+    expect(
+      settings.every(
+        ({ status, origin, needsReview, userConfirmed }) =>
+          status === "unconfirmed" && origin === "system" && needsReview && !userConfirmed,
+      ),
+    ).toBe(true);
+    expect(settings.map(({ source }) => source.excerpt)).toEqual(
+      expect.arrayContaining([
+        "周望是钟楼的管理员。",
+        "周望五十七岁。",
+        "周望担任钟楼管理员。",
+        "周望在旧城守了三十一年。",
+        "周望和赵伯是多年的老邻居。",
+        "钟摆倒转。",
+      ]),
+    );
+    for (const setting of settings) {
+      expect(setting.source).toMatchObject({
+        chapterId: created.chapter.id,
+        versionId: version.id,
+        sourceLength: content.length,
+      });
+      expect(content.slice(setting.source.startOffset ?? -1, setting.source.endOffset ?? -1)).toBe(
+        setting.source.excerpt,
+      );
+      expect(setting.structuredValue).toMatchObject({
+        payload: {
+          evidence: {
+            projectId: project.id,
+            chapterId: created.chapter.id,
+            immutableVersionId: version.id,
+            locator: {
+              kind: "utf16",
+              startOffset: setting.source.startOffset,
+              endOffset: setting.source.endOffset,
+              sourceLength: content.length,
+            },
+          },
+        },
+      });
+    }
+    const stagedIdentity = settings.find(({ source }) => source.excerpt === "周望是钟楼的管理员。");
+    if (stagedIdentity === undefined) throw new Error("找不到待确认的人物身份。");
+    const editedIdentity = expectStoryOk(
+      await runtime.story.factService.editStagedAsUser({
+        factId: stagedIdentity.id,
+        contentText: "周望担任钟楼管理员。",
+        actorId: runtime.story.actorId,
+        humanConfirmed: true,
+        expectedRevision: stagedIdentity.revision,
+      }),
+    ).toSnapshot();
+    expect(editedIdentity).toMatchObject({
+      status: "formal",
+      origin: "user",
+      structuredValue: null,
+      source: stagedIdentity.source,
+    });
+    expect(await organizeDirectStoryFacts(dependencies, input)).toEqual({
+      organizedCount: 0,
+      importantReviewCount: 0,
+      alreadyOrganizedCount: 7,
+      sourceWasCurrent: true,
+    });
+    expect(generate).not.toHaveBeenCalled();
+  });
+
   it("organizes only explicit ordinary evidence, queues important settings, and is restart-idempotent", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const generate = vi.spyOn(runtime.modelGateway, "generate");
@@ -84,7 +212,7 @@ describe("direct local story-fact organization", () => {
         })),
     ).toEqual(
       expect.arrayContaining([
-        { type: "scene_tag", status: "temporary", origin: "system", needsReview: false },
+        { type: "scene_tag", status: "unconfirmed", origin: "system", needsReview: true },
         {
           type: "character_identity",
           status: "unconfirmed",
@@ -214,21 +342,38 @@ describe("direct local story-fact organization", () => {
           [created.chapter.id]: { versionId: version.id, contentHash: version.contentChecksum },
         },
       }),
-    ).toMatchObject({ included: true });
+    ).toMatchObject({ included: false });
 
-    expectStoryOk(
-      await runtime.story.factService.deprecate({
+    const confirmed = expectStoryOk(
+      await runtime.story.factService.confirm({
         factId: first.id,
+        actorId: runtime.story.actorId,
         humanConfirmed: true,
         expectedRevision: first.revision,
       }),
     );
-    const replayVersionId = runtime.ids.next();
+    expect(
+      adaptStoryFactContextSource(confirmed, {
+        projectId: project.id,
+        currentBranchId: null,
+        currentChapterVersions: {
+          [created.chapter.id]: { versionId: version.id, contentHash: version.contentChecksum },
+        },
+      }),
+    ).toMatchObject({ included: true });
+    expectStoryOk(
+      await runtime.story.factService.deprecate({
+        factId: confirmed.id,
+        humanConfirmed: true,
+        expectedRevision: confirmed.revision,
+      }),
+    );
+    const replayVersionId = version.id;
     const replay = await organizeDirectStoryFacts(dependencies, {
       projectId: project.id,
       chapterId: created.chapter.id,
       versionId: replayVersionId,
-      versionCreatedAt: runtime.clock.now(),
+      versionCreatedAt: version.createdAt,
       acceptedText: content,
       acceptedStartOffset: 0,
       sourceLength: content.length,
@@ -244,13 +389,31 @@ describe("direct local story-fact organization", () => {
     ).toHaveLength(1);
 
     const changedContent = "林澈来到塔顶。";
-    const changedHash = expectOk(await runtime.hasher.sha256(changedContent));
-    const changedVersionId = runtime.ids.next();
+    expectOk(
+      await runtime.useCases.editChapter.execute({
+        chapterId: created.chapter.id,
+        expectedRevision: created.chapter.revision,
+        content: changedContent,
+        cursorOffset: changedContent.length,
+      }),
+    );
+    const changedSaved = expectOk(
+      await runtime.useCases.saveChapter.execute({
+        chapterId: created.chapter.id,
+        expectedRevision: created.chapter.revision,
+        reason: "manual",
+        organizeLocalStoryFacts: false,
+      }),
+    );
+    if (changedSaved.version === null) throw new Error("Expected the changed immutable version.");
+    const changedVersion = changedSaved.version.toSnapshot();
+    const changedVersionId = changedVersion.id;
+    const changedHash = changedVersion.contentChecksum;
     await organizeDirectStoryFacts(dependencies, {
       projectId: project.id,
       chapterId: created.chapter.id,
       versionId: changedVersionId,
-      versionCreatedAt: runtime.clock.now(),
+      versionCreatedAt: changedVersion.createdAt,
       acceptedText: changedContent,
       acceptedStartOffset: 0,
       sourceLength: changedContent.length,
@@ -268,6 +431,23 @@ describe("direct local story-fact organization", () => {
     if (current === undefined) throw new Error("Expected genuinely new reversible evidence.");
     expect(
       adaptStoryFactContextSource(current, {
+        projectId: project.id,
+        currentBranchId: null,
+        currentChapterVersions: {
+          [created.chapter.id]: { versionId: changedVersionId, contentHash: changedHash },
+        },
+      }),
+    ).toMatchObject({ included: false });
+    const confirmedCurrent = expectStoryOk(
+      await runtime.story.factService.confirm({
+        factId: current.id,
+        actorId: runtime.story.actorId,
+        humanConfirmed: true,
+        expectedRevision: current.revision,
+      }),
+    );
+    expect(
+      adaptStoryFactContextSource(confirmedCurrent, {
         projectId: project.id,
         currentBranchId: null,
         currentChapterVersions: {
@@ -367,7 +547,7 @@ describe("direct local story-fact organization", () => {
             "event_category",
           ].includes(factType),
         )
-        .every(({ status, needsReview }) => status === "temporary" && !needsReview),
+        .every(({ status, needsReview }) => status === "unconfirmed" && needsReview),
     ).toBe(true);
     expect(
       snapshots
@@ -664,8 +844,8 @@ describe("direct local story-fact organization", () => {
       importantFacts.every(({ status, needsReview }) => status === "unconfirmed" && needsReview),
     ).toBe(true);
     expect(facts.find(({ factType }) => factType === "story_goal")).toMatchObject({
-      status: "temporary",
-      needsReview: false,
+      status: "unconfirmed",
+      needsReview: true,
     });
     expect(generate).not.toHaveBeenCalled();
   });
@@ -703,18 +883,34 @@ describe("direct local story-fact organization", () => {
 
     const acceptedDelta = "林澈回到塔顶。林澈来到钟楼。";
     const appendedContent = `${CONTENT}${acceptedDelta}`;
-    const appendedVersionId = runtime.ids.next();
-    const appendedContentHash = expectOk(await runtime.hasher.sha256(appendedContent));
+    expectOk(
+      await runtime.useCases.editChapter.execute({
+        chapterId: created.chapter.id,
+        expectedRevision: created.chapter.revision,
+        content: appendedContent,
+        cursorOffset: appendedContent.length,
+      }),
+    );
+    const saved = expectOk(
+      await runtime.useCases.saveChapter.execute({
+        chapterId: created.chapter.id,
+        expectedRevision: created.chapter.revision,
+        reason: "manual",
+        organizeLocalStoryFacts: false,
+      }),
+    );
+    if (saved.version === null) throw new Error("Expected the appended immutable version.");
+    const appendedVersion = saved.version.toSnapshot();
     const receipt = await organizeDirectStoryFacts(dependencies, {
       projectId: project.id,
       chapterId: created.chapter.id,
-      versionId: appendedVersionId,
-      versionCreatedAt: runtime.clock.now(),
+      versionId: appendedVersion.id,
+      versionCreatedAt: appendedVersion.createdAt,
       acceptedText: acceptedDelta,
       acceptedStartOffset: CONTENT.length,
       sourceLength: appendedContent.length,
-      sourceContentHash: appendedContentHash,
-      currentVersionId: appendedVersionId,
+      sourceContentHash: appendedVersion.contentChecksum,
+      currentVersionId: appendedVersion.id,
       localOnly: false,
     });
 
@@ -734,7 +930,7 @@ describe("direct local story-fact organization", () => {
     );
     expect(
       settings.find((snapshot) => snapshot.contentText === "林澈出现在塔顶")?.source.versionId,
-    ).toBe(appendedVersionId);
+    ).toBe(appendedVersion.id);
     expect(generate).not.toHaveBeenCalled();
   });
 
@@ -1003,18 +1199,35 @@ describe("direct local story-fact organization", () => {
     );
 
     const prefix = "夜色沉沉。";
-    const movedVersionId = runtime.ids.next();
-    const movedContentHash = expectOk(await runtime.hasher.sha256(`${prefix}${content}`));
+    const movedContent = `${prefix}${content}`;
+    expectOk(
+      await runtime.useCases.editChapter.execute({
+        chapterId: created.chapter.id,
+        expectedRevision: created.chapter.revision,
+        content: movedContent,
+        cursorOffset: movedContent.length,
+      }),
+    );
+    const movedSaved = expectOk(
+      await runtime.useCases.saveChapter.execute({
+        chapterId: created.chapter.id,
+        expectedRevision: created.chapter.revision,
+        reason: "manual",
+        organizeLocalStoryFacts: false,
+      }),
+    );
+    if (movedSaved.version === null) throw new Error("Expected the moved immutable version.");
+    const movedVersion = movedSaved.version.toSnapshot();
     const replay = await organizeDirectStoryFacts(dependencies, {
       projectId: project.id,
       chapterId: created.chapter.id,
-      versionId: movedVersionId,
-      versionCreatedAt: runtime.clock.now(),
+      versionId: movedVersion.id,
+      versionCreatedAt: movedVersion.createdAt,
       acceptedText: content,
       acceptedStartOffset: prefix.length,
-      sourceLength: prefix.length + content.length,
-      sourceContentHash: movedContentHash,
-      currentVersionId: movedVersionId,
+      sourceLength: movedContent.length,
+      sourceContentHash: movedVersion.contentChecksum,
+      currentVersionId: movedVersion.id,
       localOnly: false,
     });
     expect(replay).toMatchObject({
@@ -1029,20 +1242,35 @@ describe("direct local story-fact organization", () => {
     expect(afterReplay.filter(({ factType }) => factType === "scene_tag")).toHaveLength(1);
 
     const newEvidence = "林澈回到塔顶。";
-    const newVersionId = runtime.ids.next();
-    const newContentHash = expectOk(
-      await runtime.hasher.sha256(`${prefix}${content}${newEvidence}`),
+    const newContent = `${movedContent}${newEvidence}`;
+    expectOk(
+      await runtime.useCases.editChapter.execute({
+        chapterId: created.chapter.id,
+        expectedRevision: movedSaved.chapter.revision,
+        content: newContent,
+        cursorOffset: newContent.length,
+      }),
     );
+    const newSaved = expectOk(
+      await runtime.useCases.saveChapter.execute({
+        chapterId: created.chapter.id,
+        expectedRevision: movedSaved.chapter.revision,
+        reason: "manual",
+        organizeLocalStoryFacts: false,
+      }),
+    );
+    if (newSaved.version === null) throw new Error("Expected the new evidence immutable version.");
+    const newVersion = newSaved.version.toSnapshot();
     const changed = await organizeDirectStoryFacts(dependencies, {
       projectId: project.id,
       chapterId: created.chapter.id,
-      versionId: newVersionId,
-      versionCreatedAt: runtime.clock.now(),
+      versionId: newVersion.id,
+      versionCreatedAt: newVersion.createdAt,
       acceptedText: newEvidence,
-      acceptedStartOffset: prefix.length + content.length,
-      sourceLength: prefix.length + content.length + newEvidence.length,
-      sourceContentHash: newContentHash,
-      currentVersionId: newVersionId,
+      acceptedStartOffset: movedContent.length,
+      sourceLength: newContent.length,
+      sourceContentHash: newVersion.contentChecksum,
+      currentVersionId: newVersion.id,
       localOnly: false,
     });
     expect(changed).toMatchObject({ organizedCount: 1, alreadyOrganizedCount: 0 });
@@ -1054,10 +1282,301 @@ describe("direct local story-fact organization", () => {
     expect(settings).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ status: "deprecated", contentText: "林澈出现在钟楼" }),
-        expect.objectContaining({ status: "temporary", contentText: "林澈出现在塔顶" }),
+        expect.objectContaining({ status: "unconfirmed", contentText: "林澈出现在塔顶" }),
       ]),
     );
     expect(generate).not.toHaveBeenCalled();
+  });
+
+  it("stops before staging when a newer accepted version appears during asynchronous hashing", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = expectOk(
+      await runtime.useCases.createProject.execute({ name: "并发版本保护" }),
+    );
+    const created = expectOk(
+      await runtime.useCases.createChapter.execute({
+        projectId: project.id,
+        title: "第一章",
+        content: CONTENT,
+      }),
+    );
+    const originalVersion = created.version.toSnapshot();
+    const stageAutomaticFactWithAuthorityFence = vi.spyOn(
+      runtime.story.factService,
+      "stageAutomaticFactWithAuthorityFence",
+    );
+    let advanced = false;
+
+    const receipt = await organizeCurrentSavedVersionStoryFacts(
+      {
+        chapters: runtime.repositories.chapters,
+        chapterVersions: runtime.repositories.chapterVersions,
+        facts: runtime.story.facts,
+        factService: runtime.story.factService,
+        hasher: {
+          sha256: async (text: string) => {
+            if (!advanced) {
+              advanced = true;
+              expectOk(
+                await runtime.useCases.editChapter.execute({
+                  chapterId: created.chapter.id,
+                  expectedRevision: created.chapter.revision,
+                  content: `${CONTENT}新版本已经接受。`,
+                  cursorOffset: CONTENT.length + 8,
+                }),
+              );
+              expectOk(
+                await runtime.useCases.saveChapter.execute({
+                  chapterId: created.chapter.id,
+                  expectedRevision: created.chapter.revision,
+                  reason: "manual",
+                  organizeLocalStoryFacts: false,
+                }),
+              );
+            }
+            return runtime.hasher.sha256(text);
+          },
+        },
+        now: () => runtime.clock.now(),
+      },
+      {
+        projectId: project.id,
+        chapterId: created.chapter.id,
+        versionId: originalVersion.id,
+      },
+    );
+
+    expect(receipt).toEqual({
+      organizedCount: 0,
+      importantReviewCount: 0,
+      alreadyOrganizedCount: 0,
+      sourceWasCurrent: false,
+    });
+    expect(stageAutomaticFactWithAuthorityFence).not.toHaveBeenCalled();
+    expect(
+      expectStoryOk(await runtime.story.facts.listByProjectId(expectStoryUuid(project.id))),
+    ).toHaveLength(0);
+  });
+  it("stops before replacing the local summary when a newer version appears during summary hashing", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = expectOk(
+      await runtime.useCases.createProject.execute({ name: "摘要并发保护" }),
+    );
+    const content = "风吹过空荡长街。远处钟声渐渐停下。";
+    const created = expectOk(
+      await runtime.useCases.createChapter.execute({
+        projectId: project.id,
+        title: "第一章",
+        content,
+      }),
+    );
+    const originalVersion = created.version.toSnapshot();
+    const replaceSummary = vi.spyOn(
+      runtime.story.factService,
+      "replaceRebuildableSystemFactWithAuthorityFence",
+    );
+    let fullContentHashCount = 0;
+
+    const receipt = await organizeCurrentSavedVersionStoryFacts(
+      {
+        chapters: runtime.repositories.chapters,
+        chapterVersions: runtime.repositories.chapterVersions,
+        facts: runtime.story.facts,
+        factService: runtime.story.factService,
+        hasher: {
+          sha256: async (text: string) => {
+            if (text === content) {
+              fullContentHashCount += 1;
+              if (fullContentHashCount === 2) {
+                expectOk(
+                  await runtime.useCases.editChapter.execute({
+                    chapterId: created.chapter.id,
+                    expectedRevision: created.chapter.revision,
+                    content: `${content}新版本已经接受。`,
+                    cursorOffset: content.length + 8,
+                  }),
+                );
+                expectOk(
+                  await runtime.useCases.saveChapter.execute({
+                    chapterId: created.chapter.id,
+                    expectedRevision: created.chapter.revision,
+                    reason: "manual",
+                    organizeLocalStoryFacts: false,
+                  }),
+                );
+              }
+            }
+            return runtime.hasher.sha256(text);
+          },
+        },
+        now: () => runtime.clock.now(),
+      },
+      {
+        projectId: project.id,
+        chapterId: created.chapter.id,
+        versionId: originalVersion.id,
+      },
+    );
+
+    expect(fullContentHashCount).toBe(2);
+    expect(receipt).toEqual({
+      organizedCount: 0,
+      importantReviewCount: 0,
+      alreadyOrganizedCount: 0,
+      sourceWasCurrent: false,
+    });
+    expect(replaceSummary).not.toHaveBeenCalled();
+    expect(
+      expectStoryOk(await runtime.story.facts.listByProjectId(expectStoryUuid(project.id))),
+    ).toHaveLength(0);
+  });
+
+  it("does not persist a pending local fact when the chapter advances after the last application check", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = expectOk(
+      await runtime.useCases.createProject.execute({ name: "事实提交原子围栏" }),
+    );
+    const content = "周望是钟楼的管理员。";
+    const created = expectOk(
+      await runtime.useCases.createChapter.execute({
+        projectId: project.id,
+        title: "第一章",
+        content,
+      }),
+    );
+    const originalVersion = created.version.toSnapshot();
+    const originalStage = runtime.story.factService.stageAutomaticFactWithAuthorityFence.bind(
+      runtime.story.factService,
+    );
+    let advanced = false;
+    const factService = {
+      replaceRebuildableSystemFactWithAuthorityFence:
+        runtime.story.factService.replaceRebuildableSystemFactWithAuthorityFence.bind(
+          runtime.story.factService,
+        ),
+      stageAutomaticFactWithAuthorityFence: async (
+        ...args: Parameters<typeof runtime.story.factService.stageAutomaticFactWithAuthorityFence>
+      ) => {
+        if (!advanced) {
+          advanced = true;
+          expectOk(
+            await runtime.useCases.editChapter.execute({
+              chapterId: created.chapter.id,
+              expectedRevision: created.chapter.revision,
+              content: `${content}钟声在黎明前停下。`,
+              cursorOffset: content.length,
+            }),
+          );
+          expectOk(
+            await runtime.useCases.saveChapter.execute({
+              chapterId: created.chapter.id,
+              expectedRevision: created.chapter.revision,
+              reason: "manual",
+              organizeLocalStoryFacts: false,
+            }),
+          );
+        }
+        return originalStage(...args);
+      },
+    };
+
+    const receipt = await organizeCurrentSavedVersionStoryFacts(
+      {
+        chapters: runtime.repositories.chapters,
+        chapterVersions: runtime.repositories.chapterVersions,
+        facts: runtime.story.facts,
+        factService,
+        hasher: runtime.hasher,
+        now: () => runtime.clock.now(),
+      },
+      {
+        projectId: project.id,
+        chapterId: created.chapter.id,
+        versionId: originalVersion.id,
+      },
+    );
+
+    expect(advanced).toBe(true);
+    expect(receipt.sourceWasCurrent).toBe(false);
+    expect(
+      expectStoryOk(await runtime.story.facts.listByProjectId(expectStoryUuid(project.id))),
+    ).toHaveLength(0);
+  });
+
+  it("does not persist an extractive summary when the chapter advances inside its final write", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = expectOk(
+      await runtime.useCases.createProject.execute({ name: "摘要提交原子围栏" }),
+    );
+    const content = "雾从长街升起。远处的灯逐一熄灭。";
+    const created = expectOk(
+      await runtime.useCases.createChapter.execute({
+        projectId: project.id,
+        title: "第一章",
+        content,
+      }),
+    );
+    const originalVersion = created.version.toSnapshot();
+    const originalReplace =
+      runtime.story.factService.replaceRebuildableSystemFactWithAuthorityFence.bind(
+        runtime.story.factService,
+      );
+    let advanced = false;
+    const factService = {
+      stageAutomaticFactWithAuthorityFence:
+        runtime.story.factService.stageAutomaticFactWithAuthorityFence.bind(
+          runtime.story.factService,
+        ),
+      replaceRebuildableSystemFactWithAuthorityFence: async (
+        ...args: Parameters<
+          typeof runtime.story.factService.replaceRebuildableSystemFactWithAuthorityFence
+        >
+      ) => {
+        if (!advanced) {
+          advanced = true;
+          expectOk(
+            await runtime.useCases.editChapter.execute({
+              chapterId: created.chapter.id,
+              expectedRevision: created.chapter.revision,
+              content: `${content}钟声响起。`,
+              cursorOffset: content.length,
+            }),
+          );
+          expectOk(
+            await runtime.useCases.saveChapter.execute({
+              chapterId: created.chapter.id,
+              expectedRevision: created.chapter.revision,
+              reason: "manual",
+              organizeLocalStoryFacts: false,
+            }),
+          );
+        }
+        return originalReplace(...args);
+      },
+    };
+
+    const receipt = await organizeCurrentSavedVersionStoryFacts(
+      {
+        chapters: runtime.repositories.chapters,
+        chapterVersions: runtime.repositories.chapterVersions,
+        facts: runtime.story.facts,
+        factService,
+        hasher: runtime.hasher,
+        now: () => runtime.clock.now(),
+      },
+      {
+        projectId: project.id,
+        chapterId: created.chapter.id,
+        versionId: originalVersion.id,
+      },
+    );
+
+    expect(advanced).toBe(true);
+    expect(receipt.sourceWasCurrent).toBe(false);
+    const snapshots = expectStoryOk(
+      await runtime.story.facts.listByProjectId(expectStoryUuid(project.id)),
+    ).map((fact) => fact.toSnapshot());
+    expect(snapshots.filter(({ factType }) => factType === "chapter_summary")).toHaveLength(0);
   });
 
   it("retries a partially failed organization idempotently without touching the saved version", async () => {
@@ -1089,12 +1608,12 @@ describe("direct local story-fact organization", () => {
         {
           facts: runtime.story.facts,
           factService: {
-            replaceRebuildableSystemFact: (command) =>
-              runtime.story.factService.replaceRebuildableSystemFact(command),
-            stageAutomaticFact: async (command) => {
+            replaceRebuildableSystemFactWithAuthorityFence: (...args) =>
+              runtime.story.factService.replaceRebuildableSystemFactWithAuthorityFence(...args),
+            stageAutomaticFactWithAuthorityFence: async (...args) => {
               writes += 1;
               if (writes === 2) throw new Error("interrupted local organization");
-              return runtime.story.factService.stageAutomaticFact(command);
+              return runtime.story.factService.stageAutomaticFactWithAuthorityFence(...args);
             },
           },
           hasher: runtime.hasher,
@@ -1151,9 +1670,11 @@ describe("direct local story-fact organization", () => {
         {
           facts: runtime.story.facts,
           factService: {
-            replaceRebuildableSystemFact: (command) =>
-              runtime.story.factService.replaceRebuildableSystemFact(command),
-            stageAutomaticFact: vi.fn(() => Promise.reject(new Error("local fact write failed"))),
+            replaceRebuildableSystemFactWithAuthorityFence: (...args) =>
+              runtime.story.factService.replaceRebuildableSystemFactWithAuthorityFence(...args),
+            stageAutomaticFactWithAuthorityFence: vi.fn(() =>
+              Promise.reject(new Error("local fact write failed")),
+            ),
           },
           hasher: runtime.hasher,
           now: () => runtime.clock.now(),

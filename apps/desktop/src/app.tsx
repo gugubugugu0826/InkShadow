@@ -15,6 +15,7 @@ import {
   PersistenceRouteBoundary,
 } from "./components/desktop-persistence-boundary";
 import { AppErrorBoundary } from "./components/app-error-boundary";
+import { ComponentOwnershipBoundary } from "./components/component-ownership-path";
 import { DesktopShell } from "./components/desktop-shell";
 import { SettingsRouteBoundary } from "./components/settings-route-boundary";
 import { recoverOrphanedOpeningInvocationsAtStartup } from "./infrastructure/opening-startup-recovery";
@@ -312,83 +313,85 @@ function SettingsRouteElement() {
 
 export function DesktopRoutes() {
   return (
-    <Suspense
-      fallback={
-        <div className="desktop-route-loading" role="status">
-          正在打开本地页面
-        </div>
-      }
-    >
-      {WebViewStressController !== null && <WebViewStressController />}
-      <Routes>
-        <Route path="/" element={<Navigate to="/start" replace />} />
-        <Route path="/create/idea" element={<IdeaJourneyPage />} />
-        <Route path="/create/import" element={<ImportJourneyPage />} />
-        <Route path="/create/professional" element={<ProfessionalCreatePage />} />
-        <Route path="/auth/login" element={<CloudIdentityRoute />} />
-        <Route
-          element={
-            <DesktopShell>
-              <Outlet />
-            </DesktopShell>
-          }
-        >
-          <Route path="/start" element={<StartPage />} />
-          <Route path="/projects" element={<ProjectsPage />} />
-          <Route path="/ideation" element={<IdeationPage />} />
-          <Route path="/marketplace" element={<MarketplaceRoutePage />} />
-          <Route path="/projects/:projectId" element={<WorkspacePage />} />
-          <Route path="/projects/:projectId/search" element={<ProjectSearchPage />} />
-          <Route path="/projects/:projectId/graph" element={<ProjectGraphRoutePage />} />
+    <ComponentOwnershipBoundary name="DesktopRoutes">
+      <Suspense
+        fallback={
+          <div className="desktop-route-loading" role="status">
+            正在打开本地页面
+          </div>
+        }
+      >
+        {WebViewStressController !== null && <WebViewStressController />}
+        <Routes>
+          <Route path="/" element={<Navigate to="/start" replace />} />
+          <Route path="/create/idea" element={<IdeaJourneyPage />} />
+          <Route path="/create/import" element={<ImportJourneyPage />} />
+          <Route path="/create/professional" element={<ProfessionalCreatePage />} />
+          <Route path="/auth/login" element={<CloudIdentityRoute />} />
           <Route
-            path="/projects/:projectId/extraction"
-            element={<AuthoritativeExtractionRoutePage />}
-          />
-          <Route path="/projects/:projectId/materials" element={<ProjectMaterialsPage />} />
-          <Route path="/projects/:projectId/outline" element={<StoryOutlinePage />} />
-          <Route path="/projects/:projectId/story" element={<StoryGovernancePage />} />
-          <Route path="/projects/:projectId/checks" element={<ProjectChecksPage />} />
-          <Route path="/projects/:projectId/context" element={<ContextSourcesPage />} />
-          <Route path="/projects/:projectId/sync" element={<ProjectSyncRoutePage />} />
-          <Route
-            path="/projects/:projectId/sync/conflicts"
-            element={<SyncConflictResolutionRoutePage />}
-          />
-          <Route
-            path="/projects/:projectId/multi-agent-review"
-            element={<MultiAgentReviewRoutePage />}
-          />
-          <Route
-            path="/projects/:projectId/fine-tuning"
-            element={<FineTuningGovernanceRoutePage />}
-          />
-          <Route path="/projects/:projectId/chapters/:chapterId" element={<EditorPage />} />
-          <Route
-            path="/projects/:projectId/chapters/:chapterId/extensions"
-            element={<GovernedCreativeExtensionsRoutePage />}
-          />
-          <Route
-            path="/projects/:projectId/chapters/:chapterId/multi-agent-review"
-            element={<MultiAgentReviewRoutePage />}
-          />
-          <Route path="/settings" element={<SettingsRouteElement />} />
-          <Route path="/settings/sync" element={<SyncSecurityPage />} />
-          <Route path="/teams" element={<StudioTeamRoute />} />
-          <Route path="/teams/:teamId/usage" element={<StudioUsageRoute />} />
-          <Route
-            path="/teams/:teamId/projects/:projectId/reviews"
-            element={<StudioReviewFeatureRoute />}
-          />
-          <Route
-            path="/teams/:teamId/projects/:projectId/templates"
-            element={<StudioTeamTemplatesFeatureRoute />}
-          />
-          <Route path="/tasks" element={<TaskCenterPage />} />
-          <Route path="/usage" element={<PersonalUsageRoute />} />
-          <Route path="*" element={<NotFoundState />} />
-        </Route>
-      </Routes>
-    </Suspense>
+            element={
+              <DesktopShell>
+                <Outlet />
+              </DesktopShell>
+            }
+          >
+            <Route path="/start" element={<StartPage />} />
+            <Route path="/projects" element={<ProjectsPage />} />
+            <Route path="/ideation" element={<IdeationPage />} />
+            <Route path="/marketplace" element={<MarketplaceRoutePage />} />
+            <Route path="/projects/:projectId" element={<WorkspacePage />} />
+            <Route path="/projects/:projectId/search" element={<ProjectSearchPage />} />
+            <Route path="/projects/:projectId/graph" element={<ProjectGraphRoutePage />} />
+            <Route
+              path="/projects/:projectId/extraction"
+              element={<AuthoritativeExtractionRoutePage />}
+            />
+            <Route path="/projects/:projectId/materials" element={<ProjectMaterialsPage />} />
+            <Route path="/projects/:projectId/outline" element={<StoryOutlinePage />} />
+            <Route path="/projects/:projectId/story" element={<StoryGovernancePage />} />
+            <Route path="/projects/:projectId/checks" element={<ProjectChecksPage />} />
+            <Route path="/projects/:projectId/context" element={<ContextSourcesPage />} />
+            <Route path="/projects/:projectId/sync" element={<ProjectSyncRoutePage />} />
+            <Route
+              path="/projects/:projectId/sync/conflicts"
+              element={<SyncConflictResolutionRoutePage />}
+            />
+            <Route
+              path="/projects/:projectId/multi-agent-review"
+              element={<MultiAgentReviewRoutePage />}
+            />
+            <Route
+              path="/projects/:projectId/fine-tuning"
+              element={<FineTuningGovernanceRoutePage />}
+            />
+            <Route path="/projects/:projectId/chapters/:chapterId" element={<EditorPage />} />
+            <Route
+              path="/projects/:projectId/chapters/:chapterId/extensions"
+              element={<GovernedCreativeExtensionsRoutePage />}
+            />
+            <Route
+              path="/projects/:projectId/chapters/:chapterId/multi-agent-review"
+              element={<MultiAgentReviewRoutePage />}
+            />
+            <Route path="/settings" element={<SettingsRouteElement />} />
+            <Route path="/settings/sync" element={<SyncSecurityPage />} />
+            <Route path="/teams" element={<StudioTeamRoute />} />
+            <Route path="/teams/:teamId/usage" element={<StudioUsageRoute />} />
+            <Route
+              path="/teams/:teamId/projects/:projectId/reviews"
+              element={<StudioReviewFeatureRoute />}
+            />
+            <Route
+              path="/teams/:teamId/projects/:projectId/templates"
+              element={<StudioTeamTemplatesFeatureRoute />}
+            />
+            <Route path="/tasks" element={<TaskCenterPage />} />
+            <Route path="/usage" element={<PersonalUsageRoute />} />
+            <Route path="*" element={<NotFoundState />} />
+          </Route>
+        </Routes>
+      </Suspense>
+    </ComponentOwnershipBoundary>
   );
 }
 

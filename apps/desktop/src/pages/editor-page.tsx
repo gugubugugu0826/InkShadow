@@ -33,6 +33,7 @@ import type {
   RecoveryDraft,
   UuidV7,
 } from "@inkshadow/domain";
+import type { AiCandidateListWithIsolation, AiCandidateIsolationIncident } from "@inkshadow/data";
 import { parseUuidV7 } from "@inkshadow/domain";
 import type { SaveState } from "@inkshadow/contracts/states";
 import {
@@ -55,11 +56,17 @@ import { Link, useLocation, useNavigate, useParams, useSearchParams } from "reac
 import "../components/candidate-decision.css";
 
 import {
+  captureMountedComponentPath,
+  useComponentOwnershipPath,
+} from "../components/component-ownership-context";
+
+import {
   canDeferGenerationPlan,
   cancelGenerationPlan,
   executeGenerationPlan,
   prepareGenerationPlan,
   saveDeferredGenerationPlan,
+  type CandidateStore,
   type PreparedGenerationPlan,
   type RuntimeStory,
 } from "../infrastructure/runtime";
@@ -69,6 +76,7 @@ import {
   prepareSelectionRewrite,
   type SelectionRewriteDisclosure,
 } from "../infrastructure/selection-rewrite-service";
+import { recordSafeOperationIncident } from "../infrastructure/safe-operation-diagnostics";
 import type { StoryContextCompilationReceipt } from "../infrastructure/story-context-runtime";
 import {
   normalizeUiError,
@@ -78,6 +86,12 @@ import {
 } from "../infrastructure/ui-error";
 import { CreativeJourneyStoreError } from "../infrastructure/creative-journey-store";
 import { editorCandidateStatusLabel } from "../infrastructure/editor-candidate-status";
+import {
+  recordEditorReadIncident,
+  recoverEditorReadIncidents,
+  type EditorReadStage,
+  type SafeUiRouteRowReference,
+} from "../infrastructure/ui-route-diagnostics";
 import type {
   DeferredGenerationRequest,
   GenerationAttemptUsage,
@@ -100,6 +114,11 @@ import {
   prepareContinuationGenerationDisclosure,
   type ContinuationGenerationDisclosure,
 } from "../infrastructure/continuation-generation-disclosure";
+import {
+  continuationConfirmationRemembered,
+  rememberContinuationConfirmation,
+  type ContinuationConfirmationScope,
+} from "../infrastructure/continuation-confirmation-session";
 import {
   changedStoryFactOrganizationSpan,
   directStoryFactOrganizerNotice,
@@ -612,8 +631,140 @@ function readBoundedOrganizationCount(value: unknown): number | null {
     : null;
 }
 
+type EditorRepositoryResult<Value> =
+  Readonly<{ ok: true; value: Value }> | Readonly<{ ok: false; error: unknown }>;
+
+type EditorReadOutcome<Value> =
+  Readonly<{ ok: true; value: Value }> | Readonly<{ ok: false; error: unknown }>;
+
+interface CandidateReadWarning {
+  readonly diagnosticId: string;
+  readonly isolatedCount: number | null;
+}
+
+const EDITOR_AUTHORITY_READ_STAGES: readonly EditorReadStage[] = Object.freeze([
+  "project",
+  "chapter",
+  "chapter_list",
+  "recovery_draft",
+  "chapter_versions",
+]);
+
+async function settleEditorRead<Value>(
+  action: () => Promise<EditorRepositoryResult<Value>>,
+): Promise<EditorReadOutcome<Value>> {
+  try {
+    const result = await action();
+    return result.ok
+      ? Object.freeze({ ok: true as const, value: result.value })
+      : Object.freeze({ ok: false as const, error: result.error });
+  } catch (cause: unknown) {
+    return Object.freeze({ ok: false as const, error: cause });
+  }
+}
+
+async function readEditorCandidates(
+  store: CandidateStore,
+  chapterId: UuidV7,
+): Promise<EditorRepositoryResult<AiCandidateListWithIsolation>> {
+  if (store.listByChapterIdWithIsolation !== undefined) {
+    return store.listByChapterIdWithIsolation(chapterId);
+  }
+  const result = await store.listByChapterId(chapterId);
+  return result.ok
+    ? Object.freeze({
+        ok: true as const,
+        value: Object.freeze({
+          candidates: result.value,
+          isolatedRows: Object.freeze([]),
+        }),
+      })
+    : result;
+}
+
+function editorReadDiagnosticCode(stage: EditorReadStage): string {
+  if (stage === "ai_candidates") return "LEGACY_CANDIDATE_METADATA_INVALID";
+  if (stage === "chapter_versions") return "LEGACY_VERSION_METADATA_INVALID";
+  return "EDITOR_AUTHORITY_READ_FAILED";
+}
+function chapterVersionDiagnosticReference(
+  version: Readonly<{ id: string; sequence: number; contentChecksum: string }>,
+): SafeUiRouteRowReference {
+  return Object.freeze({
+    table: "chapter_versions",
+    versionId: version.id,
+    sequence: version.sequence,
+    rowFingerprint: `version-${version.contentChecksum.slice(0, 8).toLowerCase()}`,
+  });
+}
+
+function editorReadComponentStack(ownershipPath: readonly string[]): string {
+  return captureMountedComponentPath(ownershipPath);
+}
+
+function withEditorReadRowReference(
+  error: UiActionError,
+  rowReference: SafeUiRouteRowReference,
+): UiActionError {
+  Object.defineProperty(error, "details", {
+    value: Object.freeze({ rowReference }),
+  });
+  return error;
+}
+
+function validateChapterVersionChain(
+  versions: readonly Readonly<{
+    id: string;
+    parentVersionId: string | null;
+    sequence: number;
+    contentChecksum: string;
+  }>[],
+  currentVersionId: string,
+): UiActionError | null {
+  const ordered = [...versions].sort((left, right) => left.sequence - right.sequence);
+  for (let index = 0; index < ordered.length; index += 1) {
+    const version = ordered[index];
+    if (version === undefined) continue;
+    const expectedSequence = index + 1;
+    if (version.sequence !== expectedSequence) {
+      return withEditorReadRowReference(
+        new UiActionError(
+          "VERSION_SEQUENCE_CHAIN_INVALID",
+          "不可变版本的顺序不连续。为保护正文，已停止写入。",
+        ),
+        chapterVersionDiagnosticReference(version),
+      );
+    }
+    const previous = index === 0 ? null : (ordered[index - 1] ?? null);
+    const expectedParentVersionId = previous?.id ?? null;
+    if (version.parentVersionId !== expectedParentVersionId) {
+      return withEditorReadRowReference(
+        new UiActionError(
+          "VERSION_PARENT_CHAIN_INVALID",
+          "不可变版本的前后关系不一致。为保护正文，已停止写入。",
+        ),
+        chapterVersionDiagnosticReference(version),
+      );
+    }
+  }
+
+  const currentVersion = ordered.find((version) => version.id === currentVersionId);
+  const chainTip = ordered[ordered.length - 1];
+  if (currentVersion !== undefined && chainTip !== undefined && chainTip.id !== currentVersionId) {
+    return withEditorReadRowReference(
+      new UiActionError(
+        "CURRENT_VERSION_NOT_CHAIN_TIP",
+        "当前正文没有指向不可变版本链的最新一版。为保护正文，已停止写入。",
+      ),
+      chapterVersionDiagnosticReference(currentVersion),
+    );
+  }
+  return null;
+}
+
 export function EditorPage() {
   const runtime = useRuntime();
+  const editorComponentPath = useComponentOwnershipPath("EditorPage");
   const writingExperience = useWritingExperience();
   const writingModeReady = !writingExperience.loading && writingExperience.preference !== null;
   const directMode = writingExperience.preference?.mode === "direct";
@@ -630,6 +781,7 @@ export function EditorPage() {
   const projectId = parsedProjectId.ok ? parsedProjectId.value : null;
   const chapterId = parsedChapterId.ok ? parsedChapterId.value : null;
   const editorRouteKey = `${params.projectId ?? ""}/${params.chapterId ?? ""}`;
+  const editorDiagnosticRoute = `${location.pathname}${location.search}`;
   const directOpeningRouteNoticeRef = useRef(readDirectOpeningOrganizationNotice(location.state));
   const routeIdentityRef = useRef(editorRouteKey);
   const loadOperationRevisionRef = useRef(0);
@@ -663,6 +815,11 @@ export function EditorPage() {
         ? parsedChapterId.error
         : null,
   );
+  const [loadDiagnosticId, setLoadDiagnosticId] = useState<string | null>(null);
+  const [candidateReadWarning, setCandidateReadWarning] = useState<CandidateReadWarning | null>(
+    null,
+  );
+  const [candidateRowsRetrying, setCandidateRowsRetrying] = useState(false);
   const [recovered, setRecovered] = useState(false);
   const [recoveryDraft, setRecoveryDraft] = useState<RecoveryDraft | null>(null);
   const [recoveryDecisionOpen, setRecoveryDecisionOpen] = useState(false);
@@ -714,6 +871,12 @@ export function EditorPage() {
   const directGenerationRequestIdsRef = useRef(new Set<string>());
   const [continuationDisclosure, setContinuationDisclosure] =
     useState<ContinuationGenerationDisclosure | null>(null);
+  const [continuationConfirmationIsRemembered, setContinuationConfirmationIsRemembered] =
+    useState(false);
+  const [
+    rememberContinuationConfirmationForSession,
+    setRememberContinuationConfirmationForSession,
+  ] = useState(false);
   const [directDisclosureSaving, setDirectDisclosureSaving] = useState(false);
   const [generationError, setGenerationError] = useState<unknown>(null);
   const [generationReceipt, setGenerationReceipt] = useState<GenerationRun | null>(null);
@@ -1020,6 +1183,44 @@ export function EditorPage() {
       autosaveTimerRef.current = null;
     }
   }, []);
+  const recordEditorReadFailure = useCallback(
+    function EditorPage(
+      readStage: EditorReadStage,
+      cause: unknown,
+      details: Readonly<{
+        rowReferences?: readonly SafeUiRouteRowReference[];
+        reasonCodeChain?: readonly string[];
+        applicationStack?: readonly string[];
+      }> = {},
+    ) {
+      return recordEditorReadIncident(runtime, {
+        route: editorDiagnosticRoute,
+        readStage,
+        cause,
+        timestamp: runtime.clock.now(),
+        normalizedErrorCode: editorReadDiagnosticCode(readStage),
+        componentStack: editorReadComponentStack(editorComponentPath),
+        ...details,
+      });
+    },
+    [editorComponentPath, editorDiagnosticRoute, runtime],
+  );
+
+  const reportCandidateReadFailure = useCallback(
+    (cause: unknown, isolatedRows: readonly AiCandidateIsolationIncident[] = []) => {
+      const incident = recordEditorReadFailure("ai_candidates", cause, {
+        rowReferences: isolatedRows.map(({ rowReference }) => rowReference),
+        reasonCodeChain: isolatedRows.flatMap(({ reasonCodeChain }) => reasonCodeChain),
+        applicationStack: isolatedRows.flatMap(({ applicationStack }) => applicationStack),
+      });
+      setCandidateReadWarning({
+        diagnosticId: incident.diagnosticId,
+        isolatedCount: isolatedRows.length === 0 ? null : isolatedRows.length,
+      });
+      return incident;
+    },
+    [recordEditorReadFailure],
+  );
 
   const rejectDirectionCandidateSafely = useCallback(
     async (candidateToReject: AiCandidate | null): Promise<void> => {
@@ -1116,17 +1317,49 @@ export function EditorPage() {
   );
 
   const load = useCallback(async () => {
+    if (!writingModeReady) {
+      return;
+    }
     const loadRevision = loadOperationRevisionRef.current + 1;
     loadOperationRevisionRef.current = loadRevision;
     const expectedRouteKey = editorRouteKey;
     const isCurrentLoad = (): boolean =>
       loadOperationRevisionRef.current === loadRevision &&
       routeIdentityRef.current === expectedRouteKey;
+    const failAuthorityRead = (stage: EditorReadStage, cause: unknown): void => {
+      if (!isCurrentLoad()) return;
+      clearScheduledPersistence();
+      chapterRef.current = null;
+      directionCandidateRef.current = null;
+      setProject(null);
+      setChapter(null);
+      setChapters([]);
+      setRecoveryDraft(null);
+      setVersions([]);
+      setCandidate(null);
+      setDirectionOptions([]);
+      setDirectGenerationUndo(null);
+      const incident = recordEditorReadFailure(stage, cause);
+      setLoadDiagnosticId(incident.diagnosticId);
+      setError(cause);
+      setPageState("fatal_error");
+    };
     if (chapterId === null || projectId === null) {
-      if (isCurrentLoad()) setPageState("fatal_error");
+      failAuthorityRead(
+        "route_identity",
+        new UiActionError(
+          "EDITOR_ROUTE_IDENTITY_INVALID",
+          "页面地址中的项目或章节标识无效。请返回项目列表后重新打开。",
+        ),
+      );
       return;
     }
 
+    clearScheduledPersistence();
+    chapterRef.current = null;
+    setLoadDiagnosticId(null);
+    setCandidateReadWarning(null);
+    setError(null);
     setContinuationPreference(loadEditorContinuationPreference(window.localStorage, projectId));
     setPageState("loading");
     setRecoveryDecisionOpen(false);
@@ -1156,12 +1389,12 @@ export function EditorPage() {
       versionsResult,
       candidatesResult,
     ] = await Promise.all([
-      runtime.repositories.projects.findById(projectId),
-      runtime.repositories.chapters.findById(chapterId),
-      runtime.repositories.chapters.listByProjectId(projectId),
-      runtime.repositories.recoveryDrafts.findByChapterId(chapterId),
-      runtime.useCases.listChapterVersions.execute(chapterId),
-      runtime.repositories.aiCandidates.listByChapterId(chapterId),
+      settleEditorRead(() => runtime.repositories.projects.findById(projectId)),
+      settleEditorRead(() => runtime.repositories.chapters.findById(chapterId)),
+      settleEditorRead(() => runtime.repositories.chapters.listByProjectId(projectId)),
+      settleEditorRead(() => runtime.repositories.recoveryDrafts.findByChapterId(chapterId)),
+      settleEditorRead(() => runtime.useCases.listChapterVersions.execute(chapterId)),
+      settleEditorRead(() => readEditorCandidates(runtime.repositories.aiCandidates, chapterId)),
     ]);
 
     if (!isCurrentLoad()) {
@@ -1169,88 +1402,203 @@ export function EditorPage() {
     }
 
     if (!projectResult.ok) {
-      setError(projectResult.error);
-      setPageState("fatal_error");
+      failAuthorityRead("project", projectResult.error);
       return;
     }
     if (!chapterResult.ok) {
-      setError(chapterResult.error);
-      setPageState("fatal_error");
+      failAuthorityRead("chapter", chapterResult.error);
       return;
     }
     if (!chaptersResult.ok) {
-      setError(chaptersResult.error);
-      setPageState("fatal_error");
+      failAuthorityRead("chapter_list", chaptersResult.error);
       return;
     }
     if (!draftResult.ok) {
-      setError(draftResult.error);
-      setPageState("fatal_error");
+      failAuthorityRead("recovery_draft", draftResult.error);
       return;
     }
     if (!versionsResult.ok) {
-      setError(versionsResult.error);
-      setPageState("fatal_error");
+      failAuthorityRead("chapter_versions", versionsResult.error);
       return;
     }
-    if (!candidatesResult.ok) {
-      setError(candidatesResult.error);
-      setPageState("fatal_error");
+    if (projectResult.value === null) {
+      failAuthorityRead(
+        "project",
+        new UiActionError("PROJECT_NOT_FOUND", "没有找到这个项目。请返回项目列表后重新打开。"),
+      );
       return;
     }
-    if (projectResult.value === null || chapterResult.value?.projectId !== projectId) {
-      setError(new Error("章节或项目不存在"));
-      setPageState("fatal_error");
+    if (chapterResult.value?.projectId !== projectId) {
+      failAuthorityRead(
+        "chapter",
+        new UiActionError("CHAPTER_NOT_FOUND", "没有找到这个章节。请返回章节列表后重新打开。"),
+      );
       return;
     }
 
+    const loadedProject = projectResult.value;
     const loadedChapter = chapterResult.value;
-    const draft = draftResult.value;
-    if (writingModeReady) {
-      const directionSelection = directMode
-        ? selectContinuationDirectionCandidate(candidatesResult.value, loadedChapter)
-        : Object.freeze({
-            candidate: null,
-            options: Object.freeze([]),
-            candidatesToReject: Object.freeze(
-              candidatesResult.value.filter(
-                (item) => item.purpose === "continuation_directions" && item.status === "ready",
-              ),
-            ),
-          });
-      const previousDirectionCandidate = directionCandidateRef.current;
-      directionCandidateRef.current = directionSelection.candidate;
-      setDirectionOptions(directionSelection.options);
-      setDirectionError(null);
-      setCustomDirection("");
-      const candidatesToReject = [...directionSelection.candidatesToReject];
-      if (
-        previousDirectionCandidate !== null &&
-        previousDirectionCandidate.id !== directionSelection.candidate?.id &&
-        !candidatesToReject.some((item) => item.id === previousDirectionCandidate.id)
-      ) {
-        candidatesToReject.push(previousDirectionCandidate);
-      }
-      void Promise.all(candidatesToReject.map((item) => rejectDirectionCandidateSafely(item)));
+    if (!chaptersResult.value.some((item) => item.id === loadedChapter.id)) {
+      failAuthorityRead(
+        "chapter_list",
+        new UiActionError(
+          "CHAPTER_NOT_FOUND",
+          "章节列表与当前章节不一致。为保护正文，已停止写入。",
+        ),
+      );
+      return;
     }
-    setProject(projectResult.value);
+
+    const loadedVersions = versionsResult.value;
+    const currentVersion = loadedVersions.find(
+      (version) => version.id === loadedChapter.currentVersionId,
+    );
+    if (currentVersion === undefined) {
+      failAuthorityRead(
+        "chapter_versions",
+        new UiActionError(
+          "CURRENT_VERSION_MISSING",
+          "当前正文对应的不可变版本暂时无法安全读取。为保护正文，已停止写入。",
+        ),
+      );
+      return;
+    }
+    const versionSnapshots = loadedVersions.map((version) => version.toSnapshot());
+    const currentVersionSnapshot = currentVersion.toSnapshot();
+    if (
+      versionSnapshots.some(
+        (version) => version.projectId !== projectId || version.chapterId !== chapterId,
+      )
+    ) {
+      failAuthorityRead(
+        "chapter_versions",
+        new UiActionError(
+          "CURRENT_VERSION_SCOPE_MISMATCH",
+          "当前正文版本与项目或章节不一致。为保护正文，已停止写入。",
+        ),
+      );
+      return;
+    }
+    const versionChainFailure = validateChapterVersionChain(
+      versionSnapshots,
+      loadedChapter.currentVersionId,
+    );
+    if (versionChainFailure !== null) {
+      failAuthorityRead("chapter_versions", versionChainFailure);
+      return;
+    }
+    if (currentVersionSnapshot.content !== loadedChapter.content) {
+      failAuthorityRead(
+        "chapter_versions",
+        new UiActionError(
+          "CURRENT_VERSION_CONTENT_MISMATCH",
+          "当前正文与不可变版本不一致。为保护正文，已停止写入。",
+        ),
+      );
+      return;
+    }
+
+    for (const version of versionSnapshots) {
+      const checksum = await runtime.hasher.sha256(version.content);
+      if (!isCurrentLoad()) {
+        return;
+      }
+      if (!checksum.ok) {
+        const failure = withEditorReadRowReference(
+          new UiActionError(
+            "CURRENT_VERSION_CHECKSUM_UNAVAILABLE",
+            "暂时无法核对不可变版本的内容校验值。为保护正文，已停止写入。",
+          ),
+          chapterVersionDiagnosticReference(version),
+        );
+        Object.defineProperty(failure, "cause", { value: checksum.error });
+        failAuthorityRead("chapter_versions", failure);
+        return;
+      }
+      if (checksum.value !== version.contentChecksum) {
+        failAuthorityRead(
+          "chapter_versions",
+          withEditorReadRowReference(
+            new UiActionError(
+              "CURRENT_VERSION_CHECKSUM_MISMATCH",
+              "不可变版本的内容校验值不一致。为保护正文，已停止写入。",
+            ),
+            chapterVersionDiagnosticReference(version),
+          ),
+        );
+        return;
+      }
+    }
+
+    recoverEditorReadIncidents(runtime, {
+      projectId,
+      chapterId,
+      timestamp: runtime.clock.now(),
+      readStages: EDITOR_AUTHORITY_READ_STAGES,
+    });
+    setLoadDiagnosticId(null);
+
+    let loadedCandidates: readonly AiCandidate[] = [];
+    if (!candidatesResult.ok) {
+      reportCandidateReadFailure(candidatesResult.error);
+    } else {
+      loadedCandidates = candidatesResult.value.candidates;
+      if (candidatesResult.value.isolatedRows.length > 0) {
+        reportCandidateReadFailure(
+          new UiActionError("LEGACY_CANDIDATE_METADATA_INVALID", "部分生成记录暂时无法安全读取。"),
+          candidatesResult.value.isolatedRows,
+        );
+      } else {
+        recoverEditorReadIncidents(runtime, {
+          projectId,
+          chapterId,
+          timestamp: runtime.clock.now(),
+          readStages: ["ai_candidates"],
+        });
+        setCandidateReadWarning(null);
+      }
+    }
+
+    const draft = draftResult.value;
+    const directionSelection = directMode
+      ? selectContinuationDirectionCandidate(loadedCandidates, loadedChapter)
+      : Object.freeze({
+          candidate: null,
+          options: Object.freeze([]),
+          candidatesToReject: Object.freeze(
+            loadedCandidates.filter(
+              (item) => item.purpose === "continuation_directions" && item.status === "ready",
+            ),
+          ),
+        });
+    const previousDirectionCandidate = directionCandidateRef.current;
+    directionCandidateRef.current = directionSelection.candidate;
+    setDirectionOptions(directionSelection.options);
+    setDirectionError(null);
+    setCustomDirection("");
+    const candidatesToReject = [...directionSelection.candidatesToReject];
+    if (
+      previousDirectionCandidate !== null &&
+      previousDirectionCandidate.id !== directionSelection.candidate?.id &&
+      !candidatesToReject.some((item) => item.id === previousDirectionCandidate.id)
+    ) {
+      candidatesToReject.push(previousDirectionCandidate);
+    }
+    void Promise.all(candidatesToReject.map((item) => rejectDirectionCandidateSafely(item)));
+    setProject(loadedProject);
     setChapter(loadedChapter);
     setChapters(chaptersResult.value);
     chapterRef.current = loadedChapter;
-    setVersions(versionsResult.value);
+    setVersions(loadedVersions);
     const candidateSelection = selectEditorCandidate(
-      candidatesResult.value,
+      loadedCandidates,
       requestedCandidateId,
       projectId,
       chapterId,
     );
     setDirectGenerationUndo(
       directMode
-        ? directGenerationUndoFromCurrentVersion(
-            loadedChapter,
-            versionsResult.value,
-            candidatesResult.value,
-          )
+        ? directGenerationUndoFromCurrentVersion(loadedChapter, loadedVersions, loadedCandidates)
         : null,
     );
     let presentation: "ai" | "local" | "unknown" =
@@ -1362,14 +1710,111 @@ export function EditorPage() {
     }
   }, [
     chapterId,
+    clearScheduledPersistence,
     directMode,
     editorRouteKey,
     projectId,
+    recordEditorReadFailure,
     rejectDirectionCandidateSafely,
+    reportCandidateReadFailure,
     requestedCandidateId,
     resetEditorHistory,
     runtime,
     scheduleSelection,
+    writingModeReady,
+  ]);
+
+  const retryCandidateRows = useCallback(async (): Promise<void> => {
+    if (candidateRowsRetrying || projectId === null || chapterId === null) return;
+    const expectedRouteKey = editorRouteKey;
+    setCandidateRowsRetrying(true);
+    try {
+      const result = await settleEditorRead(() =>
+        readEditorCandidates(runtime.repositories.aiCandidates, chapterId),
+      );
+      if (routeIdentityRef.current !== expectedRouteKey) return;
+      if (!result.ok) {
+        reportCandidateReadFailure(result.error);
+        return;
+      }
+      if (result.value.isolatedRows.length > 0) {
+        reportCandidateReadFailure(
+          new UiActionError("LEGACY_CANDIDATE_METADATA_INVALID", "部分生成记录暂时无法安全读取。"),
+          result.value.isolatedRows,
+        );
+        return;
+      }
+
+      recoverEditorReadIncidents(runtime, {
+        projectId,
+        chapterId,
+        timestamp: runtime.clock.now(),
+        readStages: ["ai_candidates"],
+      });
+      setCandidateReadWarning(null);
+
+      const stableChapter = chapterRef.current;
+      if (stableChapter?.id !== chapterId) return;
+      const safeCandidates = result.value.candidates;
+      const candidateSelection = selectEditorCandidate(
+        safeCandidates,
+        requestedCandidateId,
+        projectId,
+        chapterId,
+      );
+      setCandidate(candidateSelection.candidate);
+      setCandidatePresentation(
+        candidateSelection.candidate === null ||
+          candidateSelection.candidate.toSnapshot().source === "generate"
+          ? "unknown"
+          : "ai",
+      );
+      setDirectGenerationUndo(
+        directMode
+          ? directGenerationUndoFromCurrentVersion(stableChapter, versions, safeCandidates)
+          : null,
+      );
+      if (candidateSelection.notice !== null) setEditorNotice(candidateSelection.notice);
+
+      if (writingModeReady) {
+        const directionSelection = directMode
+          ? selectContinuationDirectionCandidate(safeCandidates, stableChapter)
+          : Object.freeze({
+              candidate: null,
+              options: Object.freeze([]),
+              candidatesToReject: Object.freeze(
+                safeCandidates.filter(
+                  (item) => item.purpose === "continuation_directions" && item.status === "ready",
+                ),
+              ),
+            });
+        const previousDirectionCandidate = directionCandidateRef.current;
+        directionCandidateRef.current = directionSelection.candidate;
+        setDirectionOptions(directionSelection.options);
+        const candidatesToReject = [...directionSelection.candidatesToReject];
+        if (
+          previousDirectionCandidate !== null &&
+          previousDirectionCandidate.id !== directionSelection.candidate?.id &&
+          !candidatesToReject.some((item) => item.id === previousDirectionCandidate.id)
+        ) {
+          candidatesToReject.push(previousDirectionCandidate);
+        }
+        void Promise.all(candidatesToReject.map((item) => rejectDirectionCandidateSafely(item)));
+      }
+    } finally {
+      if (routeIdentityRef.current === expectedRouteKey) setCandidateRowsRetrying(false);
+    }
+  }, [
+    candidateRowsRetrying,
+    chapterId,
+    directMode,
+    editorRouteKey,
+    projectId,
+    rejectDirectionCandidateSafely,
+    reportCandidateReadFailure,
+    requestedCandidateId,
+    runtime,
+    versions,
     writingModeReady,
   ]);
 
@@ -1582,6 +2027,16 @@ export function EditorPage() {
                 factService: runtime.story.factService,
                 hasher: runtime.hasher,
                 now: () => runtime.clock.now(),
+                sourceIsCurrent: async () => {
+                  const latest = await runtime.repositories.chapters.findById(
+                    savedVersion.chapterId,
+                  );
+                  if (!latest.ok) throw latest.error;
+                  return (
+                    latest.value?.projectId === savedVersion.projectId &&
+                    latest.value.currentVersionId === savedVersion.id
+                  );
+                },
               },
               {
                 projectId: savedVersion.projectId,
@@ -2507,6 +2962,8 @@ export function EditorPage() {
     setLastGenerationAction("continuation");
     setSelectionRewriteContext(null);
     setContinuationDisclosure(null);
+    setContinuationConfirmationIsRemembered(false);
+    setRememberContinuationConfirmationForSession(false);
     setCandidateBusy(true);
     setGenerationStage("preparing");
     setError(null);
@@ -2550,6 +3007,12 @@ export function EditorPage() {
       );
       if (!isCurrentGenerationOperation(operation)) return;
       setContinuationDisclosure(continuationActionDisclosure);
+      const confirmationScope = continuationConfirmationScope(plan, continuationActionDisclosure);
+      setContinuationConfirmationIsRemembered(
+        confirmationScope !== null &&
+          continuationConfirmationRemembered(window.sessionStorage, confirmationScope),
+      );
+      setRememberContinuationConfirmationForSession(false);
       setDeferredGeneration(plan.deferredRequest);
       await loadBudgetForm(plan, () => isCurrentGenerationOperation(operation));
       if (!isCurrentGenerationOperation(operation)) return;
@@ -3140,6 +3603,10 @@ export function EditorPage() {
       const currentDisclosure = await prepareContinuationGenerationDisclosure(runtime, plan);
       assertContinuationDisclosureMatches(continuationDisclosure, currentDisclosure);
       setContinuationDisclosure(currentDisclosure);
+      const confirmedScope = continuationConfirmationScope(plan, currentDisclosure);
+      if (rememberContinuationConfirmationForSession && confirmedScope !== null) {
+        rememberContinuationConfirmation(window.sessionStorage, confirmedScope);
+      }
     } catch (cause: unknown) {
       setGenerationError(cause);
       return;
@@ -3156,17 +3623,24 @@ export function EditorPage() {
       directGenerationRequestIdsRef.current.delete(generationPlan.requestId);
     }
     setContinuationDisclosure(null);
+    setContinuationConfirmationIsRemembered(false);
+    setRememberContinuationConfirmationForSession(false);
     setPreflightOpen(false);
     window.requestAnimationFrame(() => {
       scheduleSelection(selection, true, scrollTopRef.current);
     });
   }
 
+  function cancelPreflightAndFocusEditor(): void {
+    closePreflightAndFocusEditor();
+    recordCancelledProviderAction();
+  }
+
   async function saveAndClosePreflight(): Promise<void> {
     if (!editorClean) {
       await manualSave();
     }
-    closePreflightAndFocusEditor();
+    cancelPreflightAndFocusEditor();
   }
 
   function preflightModelHubLink(
@@ -3345,6 +3819,25 @@ export function EditorPage() {
     setCandidateDiff(diff.diff);
   }
 
+  function recordCancelledProviderAction(): void {
+    const incident = recordSafeOperationIncident({
+      operation: "continuation",
+      stage: "await_confirmation",
+      cause: Object.assign(new Error("provider action cancelled before dispatch"), {
+        code: "USER_CANCELLED_BEFORE_DISPATCH",
+      }),
+      projectId,
+      chapterId,
+      dispatched: false,
+    });
+    setEditorNotice(`已取消，本次没有调用 AI。支持编号：${incident.supportId}`);
+  }
+
+  function cancelSelectionRewriteDisclosure(): void {
+    setSelectionRewriteDisclosure(null);
+    recordCancelledProviderAction();
+  }
+
   async function saveCandidateRevision(): Promise<void> {
     if (
       candidate?.status !== "ready" ||
@@ -3393,8 +3886,7 @@ export function EditorPage() {
       return false;
     }
     try {
-      const organizeLocalStoryFacts =
-        (await runtime.writingExperience.getOrInitialize()).mode === "direct";
+      const organizeLocalStoryFacts = true;
       return await acceptCandidateWhileEditorLocked(
         strategy,
         candidateOverride,
@@ -3521,12 +4013,11 @@ export function EditorPage() {
       setEditorNotice(
         withJourneySettlementNotice(
           completionNotice === null
-            ? `${candidateSuggestionLabel}已安全写入正文和不可变版本；本地搜索与故事关联任务登记失败：${pipelineRegistrationError}`
-            : `${completionNotice} 后台整理暂未完成，可稍后重试。`,
+            ? `${candidateSuggestionLabel}已安全写入正文和不可变版本；后台重建任务暂未登记，正在直接执行本地设定整理：${pipelineRegistrationError}`
+            : `${completionNotice} 后台重建任务暂未登记，正在直接执行本地设定整理。`,
         ),
       );
       void loadVersions();
-      return true;
     }
     setStoryStateUpdate({ state: "idle" });
     const organizeAcceptedFacts = organizeLocalStoryFacts
@@ -3541,7 +4032,14 @@ export function EditorPage() {
           },
           pipelineInput,
         ).then((receipt) => {
-          setEditorNotice(withJourneySettlementNotice(directStoryFactOrganizerNotice(receipt)));
+          const organizationNotice = directStoryFactOrganizerNotice(receipt);
+          setEditorNotice(
+            withJourneySettlementNotice(
+              pipelineRegistrationError === null
+                ? organizationNotice
+                : `${organizationNotice}；后台重建任务仍可稍后重新登记。`,
+            ),
+          );
         })
       : Promise.resolve();
     void organizeAcceptedFacts
@@ -3704,14 +4202,26 @@ export function EditorPage() {
         acceptedCharacterCount: result.value.chapter.content.length,
         organizeLocalStoryFacts: result.value.version.toSnapshot().organizeLocalStoryFacts,
       });
-      void ensureAcceptedChapterPipelineTask(runtime, pipelineInput)
-        .then(() => ensureCurrentSavedVersionStoryFactsForDirectMode(runtime, pipelineInput))
-        .then(() => runAcceptedChapterPipeline(runtime, pipelineInput))
+      let backgroundStage: "local_organization" | "task_registration" | "derived_refresh" =
+        "local_organization";
+      void ensureCurrentSavedVersionStoryFactsForDirectMode(runtime, pipelineInput)
+        .then(() => {
+          backgroundStage = "task_registration";
+          return ensureAcceptedChapterPipelineTask(runtime, pipelineInput);
+        })
+        .then(() => {
+          backgroundStage = "derived_refresh";
+          return runAcceptedChapterPipeline(runtime, pipelineInput);
+        })
         .catch(() => {
           setEditorNotice(
-            completionNotice === null
-              ? "恢复版本与正文已安全保存；故事资料整理暂未完成，可在任务与通知中重试。"
-              : `${completionNotice} 后台整理暂未完成，可稍后重试。`,
+            backgroundStage === "task_registration"
+              ? completionNotice === null
+                ? "恢复版本与正文已安全保存；本地设定已整理；后台任务登记失败，可在任务与通知中重试。"
+                : `${completionNotice} 本地设定已整理；后台任务登记失败，可在任务与通知中重试。`
+              : completionNotice === null
+                ? "恢复版本与正文已安全保存；故事资料整理暂未完成，可在任务与通知中重试。"
+                : `${completionNotice} 后台整理暂未完成，可稍后重试。`,
           );
         });
       await recordWritingFeedbackSafely({ action: "restored_original", candidateId: null });
@@ -3748,9 +4258,11 @@ export function EditorPage() {
           ? "润色"
           : undo.action === "expand"
             ? "扩写"
-            : undo.action === "selection_rewrite"
-              ? "改写"
-              : "续写";
+            : undo.action === "shorten"
+              ? "缩写"
+              : undo.action === "selection_rewrite"
+                ? "改写"
+                : "续写";
     await restoreSelectedVersion(baseVersion, `已撤销本次${actionLabel}，可在版本历史中恢复。`);
   }
 
@@ -4015,12 +4527,19 @@ export function EditorPage() {
           normalizedError === null ? undefined : (
             <ErrorState
               title={normalizedError.title}
-              description={normalizedError.description}
+              description={`${normalizedError.description} 支持编号：${
+                loadDiagnosticId ?? "正在生成"
+              }。`}
+              savedState="已停止正文写入；本地正文、版本和恢复草稿保持原样。"
               primaryAction={
                 fatalErrorRequiresRuntimeReopen
-                  ? { label: "重新打开当前页面", onClick: () => window.location.reload() }
-                  : { label: "重新加载", onClick: () => void load() }
+                  ? { label: "重新打开并读取正文", onClick: () => window.location.reload() }
+                  : { label: "重新读取正文", onClick: () => void load() }
               }
+              secondaryAction={{
+                label: "前往诊断与备份",
+                onClick: () => void navigate("/settings#diagnostics"),
+              }}
             />
           ),
         conflict:
@@ -4145,6 +4664,21 @@ export function EditorPage() {
             tone="warning"
             title="已恢复未提交草稿"
             description="草稿来自真实本地恢复记录；自动保存完成后会生成稳定版本。"
+          />
+        )}
+        {candidateReadWarning !== null && (
+          <InlineAlert
+            tone="warning"
+            title="部分生成记录暂不可用"
+            description={`${
+              candidateReadWarning.isolatedCount === null
+                ? "有生成记录暂时无法安全读取"
+                : `${String(candidateReadWarning.isolatedCount)} 条生成记录暂时无法安全读取`
+            }；正文和不可变版本仍可正常使用。支持编号：${candidateReadWarning.diagnosticId}。`}
+            action={{
+              label: candidateRowsRetrying ? "正在重新读取" : "重新读取附属资料",
+              onClick: () => void retryCandidateRows(),
+            }}
           />
         )}
         {normalizedError !== null && pageState === "ready" && (
@@ -4567,7 +5101,8 @@ export function EditorPage() {
                       onClick={() =>
                         void (lastGenerationAction === "selection_rewrite" ||
                         lastGenerationAction === "polish" ||
-                        lastGenerationAction === "expand"
+                        lastGenerationAction === "expand" ||
+                        lastGenerationAction === "shorten"
                           ? rewriteSelectedText(
                               lastSelectionRewriteInstruction,
                               lastGenerationAction,
@@ -4579,9 +5114,11 @@ export function EditorPage() {
                         ? "重试润色"
                         : lastGenerationAction === "expand"
                           ? "重试扩写"
-                          : lastGenerationAction === "selection_rewrite"
-                            ? "重试选区改写"
-                            : "重试生成"}
+                          : lastGenerationAction === "shorten"
+                            ? "重试缩写"
+                            : lastGenerationAction === "selection_rewrite"
+                              ? "重试选区改写"
+                              : "重试生成"}
                     </Button>
                     <Button
                       variant="secondary"
@@ -4930,7 +5467,7 @@ export function EditorPage() {
                             variant="ghost"
                             onClick={() => {
                               setPreparedDirections(null);
-                              setEditorNotice("已取消，本次没有调用 AI。");
+                              recordCancelledProviderAction();
                               window.requestAnimationFrame(() =>
                                 primaryEditorActionRef.current?.focus({ preventScroll: true }),
                               );
@@ -5013,13 +5550,26 @@ export function EditorPage() {
                             >
                               扩写
                             </Button>
+                            <Button
+                              variant="secondary"
+                              loading={selectionRewriteBusy}
+                              disabled={selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS}
+                              onClick={() =>
+                                void rewriteSelectedText(
+                                  "在不改变事实、原意和叙事视角的前提下，缩写选中内容，删除重复和次要表达，保留关键情节与语气。",
+                                  "shorten",
+                                )
+                              }
+                            >
+                              缩写
+                            </Button>
                           </>
                         )}
                       {selectionRewriteDisclosure !== null && (
                         <>
                           <InlineAlert
                             tone="warning"
-                            title={`确认本次${lastGenerationAction === "polish" ? "润色" : lastGenerationAction === "expand" ? "扩写" : "改写"}`}
+                            title={`确认本次${selectionRewriteActionLabel(lastGenerationAction)}`}
                             description={`${selectionRewriteDisclosure.connectionDisplayName} · ${selectionRewriteDisclosure.modelId}；${selectionRewriteDisclosure.privacy} 发送内容：${selectionRewriteDisclosure.sends.join("；")}。本次最多调用 1 次，自动重试 0 次；${formatSelectionRewriteCost(selectionRewriteDisclosure)}。`}
                           />
                           <Button
@@ -5033,11 +5583,7 @@ export function EditorPage() {
                             }
                           >
                             确认并生成
-                            {lastGenerationAction === "polish"
-                              ? "润色"
-                              : lastGenerationAction === "expand"
-                                ? "扩写"
-                                : "改写"}
+                            {selectionRewriteActionLabel(lastGenerationAction)}
                             结果
                           </Button>
                           <Button
@@ -5045,7 +5591,7 @@ export function EditorPage() {
                             disabled={selectionRewriteBusy}
                             onClick={() => {
                               setSelectionRewriteDisclosure(null);
-                              setEditorNotice("已取消，本次没有调用 AI。");
+                              recordCancelledProviderAction();
                               window.requestAnimationFrame(() =>
                                 primaryEditorActionRef.current?.focus({ preventScroll: true }),
                               );
@@ -5227,7 +5773,7 @@ export function EditorPage() {
                           tone="warning"
                           title="确认后会调用 1 次"
                           description={`${selectionRewriteDisclosure.connectionDisplayName} · ${selectionRewriteDisclosure.modelId}；${selectionRewriteDisclosure.privacy} 发送内容：${selectionRewriteDisclosure.sends.join("；")}。自动重试 0 次；${formatSelectionRewriteCost(selectionRewriteDisclosure)}。`}
-                          onDismiss={() => setSelectionRewriteDisclosure(null)}
+                          onDismiss={cancelSelectionRewriteDisclosure}
                         />
                       )}
                       <Button
@@ -5249,7 +5795,7 @@ export function EditorPage() {
                         <Button
                           variant="ghost"
                           disabled={selectionRewriteBusy}
-                          onClick={() => setSelectionRewriteDisclosure(null)}
+                          onClick={cancelSelectionRewriteDisclosure}
                         >
                           取消，不调用
                         </Button>
@@ -6000,7 +6546,11 @@ export function EditorPage() {
         open={preflightOpen}
         onOpenChange={(open) => {
           if (!budgetSaving && !directDisclosureSaving) {
-            setPreflightOpen(open);
+            if (open) {
+              setPreflightOpen(true);
+            } else {
+              cancelPreflightAndFocusEditor();
+            }
           }
         }}
         title="生成前检查"
@@ -6011,7 +6561,7 @@ export function EditorPage() {
               <Button
                 variant="secondary"
                 disabled={budgetSaving}
-                onClick={closePreflightAndFocusEditor}
+                onClick={cancelPreflightAndFocusEditor}
               >
                 先自己写
               </Button>
@@ -6045,7 +6595,7 @@ export function EditorPage() {
               <Button
                 variant="secondary"
                 disabled={budgetSaving}
-                onClick={closePreflightAndFocusEditor}
+                onClick={cancelPreflightAndFocusEditor}
               >
                 暂不生成
               </Button>
@@ -6066,9 +6616,11 @@ export function EditorPage() {
                 }
                 onClick={() => void confirmGeneration()}
               >
-                {generationPlan?.preflight.readiness === "READY_WITH_WARNINGS"
-                  ? "使用安全默认值并开始"
-                  : "确认并开始"}
+                {continuationConfirmationIsRemembered
+                  ? "按本次摘要开始"
+                  : generationPlan?.preflight.readiness === "READY_WITH_WARNINGS"
+                    ? "使用安全默认值并开始"
+                    : "确认并开始"}
               </Button>
             </>
           )
@@ -6110,12 +6662,39 @@ export function EditorPage() {
                   description="这是本机演示流程。完整结果只会保存为隔离的 AI 建议草稿；只有你稍后明确选择使用，才会改变正文并创建不可变版本。"
                 />
               ) : null
+            ) : continuationConfirmationIsRemembered ? (
+              <InlineAlert
+                tone="info"
+                title="已记住本次会话的相同确认"
+                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 资料范围：${continuationDisclosure.sentScopeLabel}。本次最多调用 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。系统不会静默发送，请核对后点击“按本次摘要开始”。`}
+              />
             ) : (
               <InlineAlert
                 tone="warning"
                 title="确认本次模型服务调用"
                 description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 发送内容：${continuationDisclosure.sends.join("；")}。本次最多调用 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。这次确认只适用于当前正文版本与本次生成计划；任一项变化都会停止发送并要求重新确认。完整结果只会保存为隔离的${directMode ? "创作结果" : " AI 建议草稿"}，正文和版本保持不变，直到你明确选择使用。`}
               />
+            )}
+            {continuationDisclosure !== null && !continuationConfirmationIsRemembered && (
+              <section
+                className="generation-preflight__confirmation-memory"
+                aria-label="本次确认方式"
+              >
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    aria-label="在当前会话记住本次确认"
+                    checked={rememberContinuationConfirmationForSession}
+                    onChange={(event) =>
+                      setRememberContinuationConfirmationForSession(event.currentTarget.checked)
+                    }
+                  />
+                  <span>在当前会话记住本次确认</span>
+                </label>
+                <p>
+                  仅限同一作品、章节、正文版本、模型、服务、任务、资料范围和隐私去向；任一项变化都会重新确认。
+                </p>
+              </section>
             )}
 
             <details>
@@ -6237,7 +6816,7 @@ export function EditorPage() {
                       设置 AI 服务
                     </Link>
                   ) : check.action === "REDUCE_CONTEXT" ? (
-                    <Button variant="secondary" onClick={closePreflightAndFocusEditor}>
+                    <Button variant="secondary" onClick={cancelPreflightAndFocusEditor}>
                       返回正文精简内容
                     </Button>
                   ) : null}
@@ -6252,8 +6831,7 @@ export function EditorPage() {
                   <strong>暂时无法计算</strong>
                 </div>
                 <p>
-                  当前模型价格未配置；这不会阻止本次生成，但供应商仍可能正常计费。生成后会保留供应商返回的用量，金额标记为
-                  pricing_unavailable，不伪造零费用。
+                  当前模型价格未配置；这不会阻止本次生成，但服务商仍可能正常计费。生成后会保留服务商返回的用量，并显示“服务商未提供费用信息”，不会伪造零费用。
                 </p>
               </section>
             )}
@@ -6425,11 +7003,36 @@ function formatSelectionRewriteCost(disclosure: SelectionRewriteDisclosure): str
   return `本次费用上限 ${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
 }
 
+function selectionRewriteActionLabel(action: EditorGenerationAction): string {
+  if (action === "polish") return "润色";
+  if (action === "expand") return "扩写";
+  if (action === "shorten") return "缩写";
+  return "改写";
+}
+
 function formatProviderActionCost(disclosure: ContinuationGenerationDisclosure): string {
   if (disclosure.estimatedMaximumCostMicros === null || disclosure.currency === null) {
     return "当前无法核定费用上限，AI 服务仍可能收费";
   }
   return `本次费用上限 ${disclosure.estimatedMaximumCostMicros} 微单位 ${disclosure.currency}`;
+}
+
+function continuationConfirmationScope(
+  plan: PreparedGenerationPlan,
+  disclosure: ContinuationGenerationDisclosure | null,
+): ContinuationConfirmationScope | null {
+  if (disclosure === null || plan.projectId === null || plan.baseVersionId === null) return null;
+  return Object.freeze({
+    projectId: plan.projectId,
+    chapterId: plan.chapterId,
+    bodyVersionId: plan.baseVersionId,
+    modelId: disclosure.modelId,
+    providerDisplayName: disclosure.connectionDisplayName,
+    taskType: "continuation",
+    storyDataScope: disclosure.sentScopeLabel,
+    privacyDestination: disclosure.dataDestination,
+    disclosureFingerprint: disclosure.fingerprint,
+  });
 }
 
 function boundedEditorPreview(content: string): string {
@@ -6696,7 +7299,7 @@ function formatAttemptUsage(usage: GenerationAttemptUsage): string {
       "zh-CN",
     )}${cached}，输出 ${usage.outputTokens.toLocaleString(
       "zh-CN",
-    )} 个用量单位；价格未配置，因此金额标记为 pricing_unavailable。`;
+    )} 个用量单位；服务商未提供费用信息。`;
   }
   return `第 ${String(usage.attempt)} 次：外部服务未返回可验证用量回执，保留生成前上界估算。`;
 }

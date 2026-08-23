@@ -11,6 +11,7 @@ import {
   type PersistenceFlushOutcome,
 } from "../infrastructure/persistence-lifecycle";
 import { useRuntime } from "../runtime-context";
+import { ComponentOwnershipBoundary } from "./component-ownership-path";
 
 const ROUTE_FLUSH_TIMEOUT_MS = 8_000;
 
@@ -77,7 +78,11 @@ export function DesktopPersistenceBoundary({ children }: { readonly children: Re
     };
   }, [runtime, toast]);
 
-  return children;
+  return (
+    <ComponentOwnershipBoundary name="DesktopPersistenceBoundary">
+      {children}
+    </ComponentOwnershipBoundary>
+  );
 }
 
 function isListenerInactive(activeRef: Readonly<{ current: boolean }>): boolean {

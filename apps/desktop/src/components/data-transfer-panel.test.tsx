@@ -32,7 +32,7 @@ describe("DataTransferPanel import journey", () => {
     for (const format of ["MD", "DOCX", "EPUB", "HTML", "PDF", "TXT"]) {
       expect(screen.getByText(format)).toBeInTheDocument();
     }
-    expect(screen.getByText(/单文件与单次选择均不超过 50 MiB/)).toBeInTheDocument();
+    expect(screen.getByText(/单文件与单次选择均不超过 50 兆字节/)).toBeInTheDocument();
 
     const fileInput = view.container.querySelector<HTMLInputElement>('input[type="file"]');
     if (fileInput === null) {

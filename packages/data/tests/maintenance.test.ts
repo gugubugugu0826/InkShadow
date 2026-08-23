@@ -56,6 +56,10 @@ const generationAttemptPrivacyMigration = readFileSync(
   new URL("../migrations/0075_generation_attempt_privacy_snapshot.sql", import.meta.url),
   "utf8",
 );
+const directLocalAuthorRevisionMigration = readFileSync(
+  new URL("../migrations/0076_direct_local_story_fact_author_revision.sql", import.meta.url),
+  "utf8",
+);
 const inkShadowMigration = [
   readFileSync(new URL("../migrations/0001_core.sql", import.meta.url), "utf8"),
   readFileSync(new URL("../migrations/0002_tasks_notifications.sql", import.meta.url), "utf8"),
@@ -270,13 +274,15 @@ const inkShadowMigration = [
   storyFactUserRevisionMigration,
   chapterVersionResponsibilityMigration,
   generationAttemptPrivacyMigration,
+  directLocalAuthorRevisionMigration,
 ].join("\n");
 const inkShadowMigrationV73 = inkShadowMigration
   .replace(capabilityProbeInvocationLedgerMigration, "")
   .replace(candidatePurposeMigration, "")
   .replace(storyFactUserRevisionMigration, "")
   .replace(chapterVersionResponsibilityMigration, "")
-  .replace(generationAttemptPrivacyMigration, "");
+  .replace(generationAttemptPrivacyMigration, "")
+  .replace(directLocalAuthorRevisionMigration, "");
 const BACKUP_PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const BACKUP_ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
 const BACKUP_OBJECT_ID = "019f9f4a-b3c7-7350-9226-000000000102";
@@ -289,6 +295,7 @@ const BACKUP_RETIRED_MODEL_CONNECTION_ID = "maintenance-retired-model";
 const BACKUP_CHAPTER_ID = "019f9f4a-b3c7-7350-9226-000000000201";
 const BACKUP_CHAPTER_VERSION_ID = "019f9f4a-b3c7-7350-9226-000000000202";
 const BACKUP_CURRENT_CHAPTER_VERSION_ID = "019f9f4a-b3c7-7350-9226-000000000203";
+const BACKUP_DIRECT_LOCAL_STORY_FACT_ID = "maintenance-direct-local-story-fact";
 const BACKUP_VALIDATION_SNAPSHOT_IDS = [
   "019f9f4a-b3c7-7350-9226-000000000211",
   "019f9f4a-b3c7-7350-9226-000000000212",
@@ -608,6 +615,7 @@ describe("DatabaseMaintenanceService", () => {
     await insertFineTuningGovernance(executor);
     await insertMarketplaceInstall(executor);
     await insertUnifiedStoryFact(executor);
+    await insertDirectLocalReviewStoryFact(executor);
     await insertWritingFeedbackLearning(executor);
     await executor.execute(
       `INSERT INTO project_remote_dispatch_leases (
@@ -799,6 +807,17 @@ describe("DatabaseMaintenanceService", () => {
            confirmed_at = '2026-07-27T00:01:00.000Z',
            revision = 3, updated_at = '2026-07-27T00:01:00.000Z'
       WHERE id = 'maintenance-story-fact' AND revision = 2`,
+    );
+    await executor.execute(
+      `UPDATE story_facts
+       SET content_text = '恢复前被修改', value_json = NULL, confidence = 1.0,
+           status = 'formal', origin = 'user', user_confirmed = 1,
+           needs_review = 0,
+           confirmed_by_actor_id = '019f9f4a-b3c7-7350-9226-000000000170',
+           confirmed_at = '2026-07-27T00:01:00.000Z',
+           revision = 2, updated_at = '2026-07-27T00:01:00.000Z'
+       WHERE id = ? AND revision = 1`,
+      [BACKUP_DIRECT_LOCAL_STORY_FACT_ID],
     );
     await executor.execute(
       `UPDATE writing_preferences
@@ -1466,6 +1485,84 @@ describe("DatabaseMaintenanceService", () => {
             WHERE fact_id = 'maintenance-story-fact') AS linkCount`,
       ),
     ).resolves.toEqual([{ revisionCount: 2, linkCount: 1 }]);
+    const restoredDirectLocalFacts = await executor.select<{
+      revision: number;
+      status: string;
+      origin: string;
+      valueJson: string | null;
+      chapterId: string | null;
+      versionId: string | null;
+      startOffset: number | null;
+      endOffset: number | null;
+      sourceLength: number | null;
+      excerpt: string | null;
+    }>(
+      `SELECT revision, status, origin, value_json AS valueJson,
+              source_chapter_id AS chapterId, source_version_id AS versionId,
+              source_start_offset AS startOffset, source_end_offset AS endOffset,
+              source_length AS sourceLength, source_excerpt AS excerpt
+       FROM story_facts WHERE id = ?`,
+      [BACKUP_DIRECT_LOCAL_STORY_FACT_ID],
+    );
+    expect(restoredDirectLocalFacts).toEqual([
+      {
+        revision: 1,
+        status: "temporary",
+        origin: "system",
+        valueJson: expect.any(String),
+        chapterId: BACKUP_CHAPTER_ID,
+        versionId: BACKUP_CHAPTER_VERSION_ID,
+        startOffset: 0,
+        endOffset: 2,
+        sourceLength: 5,
+        excerpt: "备份",
+      },
+    ]);
+    expect(JSON.parse(restoredDirectLocalFacts[0]?.valueJson ?? "{}")).toMatchObject({
+      schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+      payload: { schemaVersion: "inkshadow.direct-local-story-fact.v1" },
+    });
+    await expect(
+      executor.select<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM story_fact_revisions WHERE fact_id = ?`,
+        [BACKUP_DIRECT_LOCAL_STORY_FACT_ID],
+      ),
+    ).resolves.toEqual([{ count: 1 }]);
+    await expect(
+      executor.select<{ count: number }>(
+        `SELECT COUNT(*) AS count
+         FROM sqlite_schema
+         WHERE type = 'trigger'
+           AND name IN (
+             'story_fact_entity_alias_resolution_guard',
+             'story_fact_user_content_revision_guard'
+           )
+           AND instr(sql, 'inkshadow.direct-local-story-fact.v1') > 0`,
+      ),
+    ).resolves.toEqual([{ count: 2 }]);
+    await executor.execute(
+      `UPDATE story_facts
+       SET content_text = '周望担任钟楼管理员。', value_json = NULL, confidence = 1.0,
+           status = 'formal', origin = 'user', user_confirmed = 1,
+           needs_review = 0,
+           confirmed_by_actor_id = '019f9f4a-b3c7-7350-9226-000000000170',
+           confirmed_at = '2026-07-27T00:02:00.000Z',
+           revision = 2, updated_at = '2026-07-27T00:02:00.000Z'
+       WHERE id = ? AND revision = 1`,
+      [BACKUP_DIRECT_LOCAL_STORY_FACT_ID],
+    );
+    await expect(
+      executor.select<{
+        revision: number;
+        status: string;
+        origin: string;
+        valueJson: string | null;
+      }>(
+        `SELECT revision, status, origin, value_json AS valueJson
+         FROM story_facts WHERE id = ?`,
+        [BACKUP_DIRECT_LOCAL_STORY_FACT_ID],
+      ),
+    ).resolves.toEqual([{ revision: 2, status: "formal", origin: "user", valueJson: null }]);
     await expect(
       executor.select<{ task: string; sourceContentHash: string }>(
         `SELECT task, source_content_hash AS sourceContentHash
@@ -3244,6 +3341,55 @@ async function insertUnifiedStoryFact(executor: NodeSqliteExecutor): Promise<voi
        1, 'backfill', ?
      )`,
     [BACKUP_PROJECT_ID, now],
+  );
+}
+
+async function insertDirectLocalReviewStoryFact(executor: NodeSqliteExecutor): Promise<void> {
+  const now = "2026-07-27T00:00:00.000Z";
+  const valueJson = JSON.stringify({
+    schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+    payload: {
+      schemaVersion: "inkshadow.direct-local-story-fact.v1",
+      kind: "character",
+      characterName: "周望",
+      role: "钟楼管理员",
+    },
+  });
+  await executor.execute(
+    `INSERT INTO story_facts (
+       id, project_id, fact_type, content_text, value_json,
+       source_kind, evidence_reference, source_chapter_id, source_version_id,
+       source_start_offset, source_end_offset, source_length, source_excerpt,
+       effective_at, invalidated_at, branch_id, confidence, status, origin,
+       user_confirmed, locked, deprecated, needs_review,
+       confirmed_by_actor_id, confirmed_at, revision, created_at, updated_at
+     ) VALUES (
+       ?, ?, 'character', '周望是钟楼管理员。', ?,
+       'chapter_span', ?, ?, ?, 0, 2, 5, '备份',
+       NULL, NULL, NULL, 0.9, 'temporary', 'system',
+       0, 0, 0, 1, NULL, NULL, 1, ?, ?
+     )`,
+    [
+      BACKUP_DIRECT_LOCAL_STORY_FACT_ID,
+      BACKUP_PROJECT_ID,
+      valueJson,
+      "direct-local:inkshadow.direct-local-story-fact.v1:" + BACKUP_CHAPTER_VERSION_ID + ":0:2",
+      BACKUP_CHAPTER_ID,
+      BACKUP_CHAPTER_VERSION_ID,
+      now,
+      now,
+    ],
+  );
+  await executor.execute(
+    `INSERT INTO story_fact_revisions (
+       fact_id, project_id, revision, change_kind, recorded_at, snapshot_json
+     ) VALUES (?, ?, 1, 'created', ?, ?)`,
+    [
+      BACKUP_DIRECT_LOCAL_STORY_FACT_ID,
+      BACKUP_PROJECT_ID,
+      now,
+      JSON.stringify({ revision: 1, status: "temporary", origin: "system" }),
+    ],
   );
 }
 

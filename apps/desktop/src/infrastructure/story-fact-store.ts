@@ -5,6 +5,7 @@ import {
   MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES,
   StoryCoreError,
   StoryFact,
+  isRebuildableStoryFactType,
   FormalStoryRecord,
   MemoryRecord,
   err,
@@ -26,6 +27,7 @@ import {
   type StoryFactAuthorityFence,
   type StoryFactConditionalCreateReceipt,
   type StoryFactConditionalDeprecateReceipt,
+  type StoryFactConditionalReplacementReceipt,
   type StoryFactRevision,
   type StoryFactRevisionChangeKind,
   type StoryFactSnapshot,
@@ -296,6 +298,65 @@ const CAUSAL_EVENT_FACT_SCHEMAS = new Set([
 ]);
 const CAUSAL_RELATION_FACT_SCHEMA = "inkshadow.causal-relation-fact.v1";
 
+function isAuthorityFencedCreateGoverned(snapshot: StoryFactSnapshot): boolean {
+  const isFormalUserFact =
+    snapshot.status === "formal" && snapshot.origin === "user" && snapshot.userConfirmed;
+  const isAutomaticChapterFact =
+    snapshot.source.kind === "chapter_span" &&
+    (snapshot.status === "temporary" || snapshot.status === "unconfirmed") &&
+    (snapshot.origin === "system" || snapshot.origin === "ai_extraction") &&
+    !snapshot.userConfirmed &&
+    !snapshot.locked &&
+    !snapshot.deprecated &&
+    snapshot.branchId === null;
+  return snapshot.revision === 1 && (isFormalUserFact || isAutomaticChapterFact);
+}
+
+function isAuthorityFencedRebuildableReplacement(
+  snapshot: StoryFactSnapshot,
+  replacementKey: string,
+): boolean {
+  const structured = isPlainObject(snapshot.structuredValue) ? snapshot.structuredValue : null;
+  return (
+    snapshot.revision === 1 &&
+    isRebuildableStoryFactType(snapshot.factType) &&
+    snapshot.status === "temporary" &&
+    snapshot.origin === "system" &&
+    !snapshot.userConfirmed &&
+    !snapshot.locked &&
+    !snapshot.deprecated &&
+    !snapshot.needsReview &&
+    snapshot.branchId === null &&
+    structured !== null &&
+    Object.keys(structured).length === 3 &&
+    structured.schemaVersion === "inkshadow.rebuildable-system-fact.v1" &&
+    structured.replacementKey === replacementKey &&
+    Object.prototype.hasOwnProperty.call(structured, "payload")
+  );
+}
+
+function matchesDevelopmentRebuildableReplacement(
+  snapshot: StoryFactSnapshot,
+  factType: string,
+  replacementKey: string,
+): boolean {
+  const structured = isPlainObject(snapshot.structuredValue) ? snapshot.structuredValue : null;
+  return (
+    snapshot.factType === factType &&
+    snapshot.status === "temporary" &&
+    snapshot.origin === "system" &&
+    !snapshot.userConfirmed &&
+    !snapshot.locked &&
+    !snapshot.deprecated &&
+    !snapshot.needsReview &&
+    snapshot.branchId === null &&
+    structured !== null &&
+    Object.keys(structured).length === 3 &&
+    structured.schemaVersion === "inkshadow.rebuildable-system-fact.v1" &&
+    structured.replacementKey === replacementKey &&
+    Object.prototype.hasOwnProperty.call(structured, "payload")
+  );
+}
 function authorityFenceBindingFailure(
   snapshot: StoryFactSnapshot,
   fence: StoryFactAuthorityFence,
@@ -618,6 +679,9 @@ export class BrowserDevelopmentStoryFactStore
   ): Promise<Result<StoryFactConditionalCreateReceipt, StoryCoreError>> {
     return this.mutate<StoryFactConditionalCreateReceipt>((database) => {
       const snapshot = fact.toSnapshot();
+      if (!isAuthorityFencedCreateGoverned(snapshot)) {
+        return err(validationFailure("The authority-fenced story fact governance is invalid."));
+      }
       const bindingFailure = authorityFenceBindingFailure(snapshot, fence);
       if (bindingFailure !== null) {
         return err(bindingFailure);
@@ -714,8 +778,6 @@ export class BrowserDevelopmentStoryFactStore
       if (
         database.facts[snapshot.id] !== undefined ||
         snapshot.revision !== 1 ||
-        snapshot.status !== "formal" ||
-        snapshot.origin !== "user" ||
         !hasSafeEntityAliasPayload(snapshot)
       ) {
         return err(storeFailure("Story fact already exists or has an invalid initial revision."));
@@ -732,6 +794,103 @@ export class BrowserDevelopmentStoryFactStore
     });
   }
 
+  public replaceRebuildableSystemFactWithAuthorityFence(
+    fact: StoryFact,
+    replacementKey: string,
+    fence: StoryFactAuthorityFence,
+  ): Promise<Result<StoryFactConditionalReplacementReceipt, StoryCoreError>> {
+    return this.mutate<StoryFactConditionalReplacementReceipt>((database) => {
+      const snapshot = fact.toSnapshot();
+      if (!isAuthorityFencedRebuildableReplacement(snapshot, replacementKey)) {
+        return err(validationFailure("The authority-fenced rebuildable replacement is invalid."));
+      }
+      const bindingFailure = authorityFenceBindingFailure(snapshot, fence);
+      if (bindingFailure !== null) return err(bindingFailure);
+      const chapter = readDevelopmentChapterAuthority(
+        this.storage,
+        fence.chapterId,
+        snapshot.projectId,
+        fence.expectedCurrentVersionId,
+      );
+      if (
+        chapter?.status !== "active" ||
+        chapter.currentVersionId !== fence.expectedCurrentVersionId
+      ) {
+        return err(
+          new StoryCoreError({
+            code: "STORY_FACT_SOURCE_FENCE_FAILED",
+            message: "The chapter current version changed before the story fact was committed.",
+            retryable: true,
+          }),
+        );
+      }
+      const source = snapshot.source;
+      if (
+        source.kind !== "chapter_span" ||
+        source.startOffset === null ||
+        source.endOffset === null ||
+        source.sourceLength === null ||
+        source.excerpt === null ||
+        chapter.versionContent.length !== source.sourceLength ||
+        chapter.versionContent.slice(source.startOffset, source.endOffset) !== source.excerpt
+      ) {
+        return err(
+          new StoryCoreError({
+            code: "REVIEW_SOURCE_CHANGED",
+            message: "The cited chapter evidence no longer matches its version.",
+            retryable: true,
+            actions: ["OPEN_SOURCE", "RECOMPARE"],
+          }),
+        );
+      }
+
+      const matching = Object.values(database.facts).filter((candidate) =>
+        matchesDevelopmentRebuildableReplacement(candidate, snapshot.factType, replacementKey),
+      );
+      const replacedFactIds: string[] = [];
+      for (const currentSnapshot of matching) {
+        const current = requireFact(currentSnapshot);
+        const retired = current.deprecateRebuildableSystemFact({
+          expectedRevision: currentSnapshot.revision,
+          now: snapshot.updatedAt,
+        });
+        if (!retired.ok) return retired;
+        const next = retired.value.toSnapshot();
+        const revisions = database.revisions[current.id] ?? [];
+        if (revisions.length !== currentSnapshot.revision) {
+          return err(storeFailure("Story fact revision history is incomplete."));
+        }
+        database.facts[current.id] = next;
+        database.revisions[current.id] = Object.freeze([
+          ...revisions,
+          Object.freeze({
+            changeKind: "deprecated" as const,
+            recordedAt: next.updatedAt,
+            snapshot: next,
+          }),
+        ]);
+        replacedFactIds.push(current.id);
+      }
+
+      if (database.facts[snapshot.id] !== undefined || !hasSafeEntityAliasPayload(snapshot)) {
+        return err(storeFailure("Story fact already exists or has an invalid initial revision."));
+      }
+      database.facts[snapshot.id] = snapshot;
+      database.revisions[snapshot.id] = Object.freeze([
+        Object.freeze({
+          changeKind: "created" as const,
+          recordedAt: snapshot.updatedAt,
+          snapshot,
+        }),
+      ]);
+      return ok(
+        Object.freeze({
+          fact,
+          replacedFactIds: Object.freeze(replacedFactIds),
+        }),
+      );
+    });
+  }
   public deprecateSupplementalResolutionWithAuthorityFence(
     factId: UuidV7,
     fence: StoryFactSupplementalResolutionUndoFence,
@@ -1558,10 +1717,11 @@ function isUserContentRevisionMutation(
   current: StoryFactSnapshot,
   next: StoryFactSnapshot,
 ): boolean {
+  const clearsDirectLocalDraft = isDirectLocalStagedContentRevision(current, next);
   if (
     current.locked ||
     current.status === "branch" ||
-    current.structuredValue !== null ||
+    (current.structuredValue !== null && !clearsDirectLocalDraft) ||
     next.structuredValue !== null ||
     next.contentText === null ||
     next.confirmedByActorId === null ||
@@ -1572,6 +1732,7 @@ function isUserContentRevisionMutation(
   const expected: StoryFactSnapshot = {
     ...current,
     contentText: next.contentText,
+    structuredValue: clearsDirectLocalDraft ? null : current.structuredValue,
     confidence: 1,
     status: "formal",
     origin: "user",
@@ -1586,6 +1747,32 @@ function isUserContentRevisionMutation(
     updatedAt: next.updatedAt,
   };
   return JSON.stringify(next) === JSON.stringify(expected);
+}
+
+function isDirectLocalStagedContentRevision(
+  current: StoryFactSnapshot,
+  next: StoryFactSnapshot,
+): boolean {
+  if (
+    current.origin !== "system" ||
+    (current.status !== "temporary" && current.status !== "unconfirmed") ||
+    current.userConfirmed ||
+    current.locked ||
+    current.deprecated ||
+    !current.needsReview ||
+    current.source.kind !== "chapter_span" ||
+    !current.source.reference.startsWith("direct-local:inkshadow.direct-local-story-fact.v1:") ||
+    next.structuredValue !== null ||
+    !isPlainObject(current.structuredValue)
+  ) {
+    return false;
+  }
+  const payload = current.structuredValue.payload;
+  return (
+    current.structuredValue.schemaVersion === "inkshadow.rebuildable-system-fact.v1" &&
+    isPlainObject(payload) &&
+    payload.schemaVersion === "inkshadow.direct-local-story-fact.v1"
+  );
 }
 
 function isExplicitDeprecationMutation(

@@ -244,9 +244,8 @@ export function ImportJourneyPage() {
   const recordedExplicitFeedback = useRef(new Set<string>());
   const derivedStoryRefreshQueue = useRef<Promise<void>>(Promise.resolve());
 
-  async function captureLocalStoryFactOrganizationResponsibility(): Promise<boolean> {
-    const preference = await runtime.writingExperience.getOrInitialize();
-    return preference.mode === "direct";
+  function captureLocalStoryFactOrganizationResponsibility(): Promise<true> {
+    return Promise.resolve(true);
   }
 
   useEffect(() => {
@@ -1418,21 +1417,28 @@ export function ImportJourneyPage() {
   function scheduleDerivedStoryRefresh(
     input: Parameters<typeof runAcceptedChapterPipeline>[1],
   ): void {
-    void ensureAcceptedChapterPipelineTask(runtime, input)
+    let backgroundStage: "local_organization" | "task_registration" | "derived_refresh" =
+      "local_organization";
+    const execution = derivedStoryRefreshQueue.current
+      .catch(() => undefined)
+      .then(() => ensureCurrentSavedVersionStoryFactsForDirectMode(runtime, input))
       .then(() => {
-        const execution = derivedStoryRefreshQueue.current
-          .catch(() => undefined)
-          .then(() => ensureCurrentSavedVersionStoryFactsForDirectMode(runtime, input))
-          .then(() => runAcceptedChapterPipeline(runtime, input))
-          .then(() => undefined);
-        derivedStoryRefreshQueue.current = execution.catch(() => undefined);
-        void execution.catch(() => {
-          setNotice("正文和版本已安全保存；故事资料整理暂未完成，可在任务与通知中重试。");
-        });
+        backgroundStage = "task_registration";
+        return ensureAcceptedChapterPipelineTask(runtime, input);
       })
-      .catch(() => {
-        setNotice("正文和版本已安全保存；后台任务登记失败，可稍后重新打开本章手动整理。");
-      });
+      .then(() => {
+        backgroundStage = "derived_refresh";
+        return runAcceptedChapterPipeline(runtime, input);
+      })
+      .then(() => undefined);
+    derivedStoryRefreshQueue.current = execution.catch(() => undefined);
+    void execution.catch(() => {
+      setNotice(
+        backgroundStage === "task_registration"
+          ? "正文和版本已安全保存；本地设定已整理；后台任务登记失败，可在任务与通知中重试。"
+          : "正文和版本已安全保存；故事资料整理暂未完成，可在任务与通知中重试。",
+      );
+    });
   }
 
   return (

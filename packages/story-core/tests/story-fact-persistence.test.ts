@@ -50,12 +50,20 @@ const userRevisionMigration = readFileSync(
   new URL("../../data/migrations/0073_story_fact_user_revisions.sql", import.meta.url),
   "utf8",
 );
+const directLocalAuthorRevisionMigration = readFileSync(
+  new URL(
+    "../../data/migrations/0076_direct_local_story_fact_author_revision.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const migration = [
   baseMigration,
   aliasResolutionMigration,
   continuousRouteReceiptMigration,
   historicalContinuousRouteReceiptMigration,
   userRevisionMigration,
+  directLocalAuthorRevisionMigration,
 ].join("\n");
 const T0 = "2026-08-01T00:00:00.000Z";
 const T1 = "2026-08-01T00:01:00.000Z";
@@ -150,6 +158,83 @@ describe("unified story fact SQLite store", () => {
         .prepare("UPDATE story_fact_revisions SET change_kind = 'deprecated' WHERE fact_id = ?")
         .run(confirmed.id),
     ).toThrow(/immutable/iu);
+  });
+
+  it("persists a direct-local review draft as an author revision without changing evidence", async () => {
+    const executor = createExecutor();
+    const store = new SqliteStoryFactStore(executor);
+    const chapterId = uuid(290);
+    const versionId = uuid(291);
+    const chapterContent = "周望五十七岁。他守着钟楼。";
+    const evidence = "周望五十七岁。";
+    seedChapter(executor, chapterId, versionId, chapterContent);
+    const startOffset = chapterContent.indexOf(evidence);
+    const original = unwrap(
+      StoryFact.create({
+        id: uuid(292),
+        projectId: PROJECT_ID,
+        factType: "character_profile",
+        contentText: evidence,
+        structuredValue: {
+          schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+          payload: {
+            schemaVersion: "inkshadow.direct-local-story-fact.v1",
+            kind: "character_profile",
+            age: 57,
+          },
+        },
+        source: {
+          kind: "chapter_span",
+          reference: "direct-local:inkshadow.direct-local-story-fact.v1:" + "b".repeat(64),
+          chapterId,
+          versionId,
+          startOffset,
+          endOffset: startOffset + evidence.length,
+          sourceLength: chapterContent.length,
+          excerpt: evidence,
+        },
+        confidence: 1,
+        status: "unconfirmed",
+        origin: "system",
+        needsReview: true,
+        humanConfirmed: false,
+        now: T0,
+      }),
+    );
+    expect((await store.create(original)).ok).toBe(true);
+
+    const edited = unwrap(
+      original.editStagedAsUser({
+        contentText: "周望五十八岁。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: T1,
+      }),
+    );
+    expect((await store.save(edited, 1)).ok).toBe(true);
+
+    const restored = unwrap(await new SqliteStoryFactStore(executor).findById(original.id));
+    expect(restored?.toSnapshot()).toMatchObject({
+      contentText: "周望五十八岁。",
+      structuredValue: null,
+      source: original.toSnapshot().source,
+      status: "formal",
+      origin: "user",
+      revision: 2,
+    });
+    const revisions = unwrap(await store.listRevisions(original.id));
+    expect(revisions).toHaveLength(2);
+    expect(revisions[0]?.fact.toSnapshot()).toMatchObject({
+      structuredValue: original.toSnapshot().structuredValue,
+      source: original.toSnapshot().source,
+      revision: 1,
+    });
+    expect(revisions[1]?.fact.toSnapshot()).toMatchObject({
+      structuredValue: null,
+      source: original.toSnapshot().source,
+      revision: 2,
+    });
   });
 
   it("persists user edits and deleted-fact restoration as new immutable revisions", async () => {
@@ -1533,6 +1618,113 @@ describe("unified story fact SQLite store", () => {
     });
   });
 
+  it("atomically fences rebuildable summary retirement and insertion to the current version", async () => {
+    const executor = createExecutor();
+    const store = new SqliteStoryFactStore(executor);
+    const chapterId = uuid(4600);
+    const firstVersionId = uuid(4601);
+    const secondVersionId = uuid(4602);
+    const firstContent = "旧城在雾中沉睡。";
+    const secondContent = "旧城在晨光中醒来。";
+    const replacementKey = `chapter:${chapterId}`;
+    seedChapter(executor, chapterId, firstVersionId, firstContent);
+    const summary = (id: string, versionId: string, content: string, now: string) =>
+      unwrap(
+        StoryFact.create({
+          id,
+          projectId: PROJECT_ID,
+          factType: "chapter_summary",
+          contentText: content,
+          structuredValue: {
+            schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+            replacementKey,
+            payload: { sourceVersionId: versionId },
+          },
+          source: {
+            kind: "chapter_span",
+            reference: `chapter-summary:${chapterId}:${versionId}`,
+            chapterId,
+            versionId,
+            startOffset: 0,
+            endOffset: content.length,
+            sourceLength: content.length,
+            excerpt: content,
+          },
+          confidence: 1,
+          status: "temporary",
+          origin: "system",
+          needsReview: false,
+          humanConfirmed: false,
+          now,
+        }),
+      );
+
+    const first = summary(uuid(4603), firstVersionId, firstContent, T0);
+    expect(
+      unwrap(
+        await store.replaceRebuildableSystemFactWithAuthorityFence(first, replacementKey, {
+          chapterId,
+          expectedCurrentVersionId: firstVersionId,
+        }),
+      ).replacedFactIds,
+    ).toEqual([]);
+
+    executor.database
+      .prepare(
+        `INSERT INTO chapter_versions (
+           id, project_id, chapter_id, parent_version_id, sequence,
+           content, content_checksum, reason, source_candidate_id, created_at
+         ) VALUES (?, ?, ?, ?, 2, ?, ?, 'manual', NULL, ?)`,
+      )
+      .run(
+        secondVersionId,
+        PROJECT_ID,
+        chapterId,
+        firstVersionId,
+        secondContent,
+        "b".repeat(64),
+        T1,
+      );
+    executor.database
+      .prepare(
+        "UPDATE chapters SET content = ?, current_version_id = ?, revision = 2, updated_at = ? WHERE id = ?",
+      )
+      .run(secondContent, secondVersionId, T1, chapterId);
+
+    const stale = summary(uuid(4604), firstVersionId, firstContent, T1);
+    const rejected = await store.replaceRebuildableSystemFactWithAuthorityFence(
+      stale,
+      replacementKey,
+      { chapterId, expectedCurrentVersionId: firstVersionId },
+    );
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok) expect(rejected.error.code).toBe("STORY_FACT_SOURCE_FENCE_FAILED");
+    expect(unwrap(await store.findById(first.id))?.toSnapshot()).toMatchObject({
+      status: "temporary",
+      deprecated: false,
+      revision: 1,
+    });
+    expect(unwrap(await store.findById(stale.id))).toBeNull();
+
+    const current = summary(uuid(4605), secondVersionId, secondContent, T2);
+    const replaced = unwrap(
+      await store.replaceRebuildableSystemFactWithAuthorityFence(current, replacementKey, {
+        chapterId,
+        expectedCurrentVersionId: secondVersionId,
+      }),
+    );
+    expect(replaced.replacedFactIds).toEqual([first.id]);
+    expect(unwrap(await store.findById(first.id))?.toSnapshot()).toMatchObject({
+      status: "deprecated",
+      deprecated: true,
+      revision: 2,
+    });
+    expect(unwrap(await store.findById(current.id))?.toSnapshot()).toMatchObject({
+      status: "temporary",
+      deprecated: false,
+      revision: 1,
+    });
+  });
   it("holds the BEGIN IMMEDIATE writer lock from authority checks through fact insertion", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "inkshadow-story-fence-"));
     temporaryDirectories.push(directory);

@@ -45,11 +45,15 @@ import {
   type SafeModelHubUiSnapshotDiagnostic,
 } from "./model-hub-ui-diagnostics";
 import { readSafeUiRouteIncidents, type SafeUiRouteIncident } from "./ui-route-diagnostics";
+import {
+  readSafeOperationIncidents,
+  type SafeOperationIncident,
+} from "./safe-operation-diagnostics";
 import type { DesktopRuntime } from "./runtime";
 import type { PersistedGenerationPreflight } from "./generation-governance-store";
 
 export interface DesktopDiagnosticBundle {
-  readonly schemaVersion: 3;
+  readonly schemaVersion: 4;
   readonly summary: DiagnosticSummary;
   readonly database: {
     readonly integrityMessageCount: number | null;
@@ -63,6 +67,7 @@ export interface DesktopDiagnosticBundle {
   readonly recentAiRoutingFailures: readonly [];
   readonly recentAiFailures: readonly SafeRecentAiFailureDiagnostic[];
   readonly recentUiFailures: readonly SafeUiRouteIncident[];
+  readonly recentOperationFailures: readonly SafeOperationIncident[];
   readonly modelHubUiSnapshot: SafeModelHubUiSnapshotDiagnostic | null;
   readonly recentModelHubActions: readonly SafeModelHubActionDiagnostic[];
   readonly currentSessionStartedAt: string;
@@ -289,6 +294,10 @@ export async function collectDesktopDiagnosticArtifact(
     ),
   );
   errorCodes.push(...recentUiFailures.map(({ normalizedErrorCode }) => normalizedErrorCode));
+  const recentOperationFailures = Object.freeze(
+    readSafeOperationIncidents().map(projectSafeOperationIncident),
+  );
+  errorCodes.push(...recentOperationFailures.map(({ normalizedErrorCode }) => normalizedErrorCode));
   const { currentSessionErrorCodes, historicalErrorCodes } = partitionDiagnosticErrorCodes(
     modelHubSession.currentSessionStartedAt,
     [
@@ -297,6 +306,7 @@ export async function collectDesktopDiagnosticArtifact(
     ],
     recentAiFailures,
     recentUiFailures,
+    recentOperationFailures,
   );
 
   const searchHealth = runtime.search.health();
@@ -321,7 +331,7 @@ export async function collectDesktopDiagnosticArtifact(
     taskStateCounts,
     requestIds,
     configuration: {
-      diagnosticSchemaVersion: 3,
+      diagnosticSchemaVersion: 4,
       runtimeMode: runtime.mode,
       storageBackend: runtime.mode === "tauri" ? "sqlite" : "development_local_storage",
       telemetryEnabled: false,
@@ -375,7 +385,7 @@ export async function collectDesktopDiagnosticArtifact(
     "A bounded global chapter-summary status reader is not available; chapterSummaryStatus is null rather than inferred from routes or tasks.",
   ];
   const bundle: DesktopDiagnosticBundle = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     summary,
     database: {
       integrityMessageCount,
@@ -386,6 +396,7 @@ export async function collectDesktopDiagnosticArtifact(
     recentAiRoutingFailures: [],
     recentAiFailures,
     recentUiFailures,
+    recentOperationFailures,
     modelHubUiSnapshot: safeModelHubSnapshot,
     recentModelHubActions: safeModelHubActions,
     currentSessionStartedAt: modelHubSession.currentSessionStartedAt,
@@ -424,6 +435,10 @@ export function partitionDiagnosticErrorCodes(
   modelHubActionErrorCodes: readonly string[],
   recentAiFailures: readonly Pick<RecentAiFailure, "timestamp" | "normalizedErrorCode">[],
   recentUiFailures: readonly Pick<SafeUiRouteIncident, "timestamp" | "normalizedErrorCode">[] = [],
+  recentOperationFailures: readonly Pick<
+    SafeOperationIncident,
+    "occurredAt" | "normalizedErrorCode"
+  >[] = [],
 ): Readonly<{
   currentSessionErrorCodes: readonly string[];
   historicalErrorCodes: readonly string[];
@@ -442,6 +457,11 @@ export function partitionDiagnosticErrorCodes(
             ? [safeDiagnosticErrorCode(normalizedErrorCode)]
             : [],
         ),
+        ...recentOperationFailures.flatMap(({ occurredAt, normalizedErrorCode }) =>
+          occurredAt >= currentSessionStartedAt
+            ? [safeDiagnosticErrorCode(normalizedErrorCode)]
+            : [],
+        ),
       ]),
     ]),
     historicalErrorCodes: Object.freeze([
@@ -451,6 +471,11 @@ export function partitionDiagnosticErrorCodes(
         ),
         ...recentUiFailures.flatMap(({ timestamp, normalizedErrorCode }) =>
           timestamp < currentSessionStartedAt ? [safeDiagnosticErrorCode(normalizedErrorCode)] : [],
+        ),
+        ...recentOperationFailures.flatMap(({ occurredAt, normalizedErrorCode }) =>
+          occurredAt < currentSessionStartedAt
+            ? [safeDiagnosticErrorCode(normalizedErrorCode)]
+            : [],
         ),
       ]),
     ]),
@@ -486,6 +511,8 @@ const SAFE_DIAGNOSTIC_ERROR_CODES = new Set([
   "HISTORICAL_FAILURE",
   "MODEL_HUB_ACTION_FAILED",
   "MODEL_HUB_CAPABILITY_NOT_VERIFIED",
+  "MODEL_HUB_ROUTE_NOT_CONFIGURED",
+  "MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED",
   "MODEL_HUB_CATALOG_REFRESH_FAILED",
   "MODEL_HUB_STALE_RESULT_IGNORED",
   "LEGACY_CANDIDATE_METADATA_INVALID",
@@ -530,6 +557,22 @@ function projectRecentAiFailure(input: RecentAiFailure): SafeRecentAiFailureDiag
     stream: typeof input.stream === "boolean" ? input.stream : null,
     attempt: safeInteger(input.attempt, 1, 100) ?? 1,
     requestedMaxOutputTokens: safeInteger(input.requestedMaxOutputTokens, 1, 1_000_000),
+  });
+}
+
+function projectSafeOperationIncident(input: SafeOperationIncident): SafeOperationIncident {
+  return Object.freeze({
+    ...input,
+    occurredAt: safeTimestamp(input.occurredAt),
+    normalizedErrorCode: safeDiagnosticErrorCode(input.normalizedErrorCode),
+    causeChain: Object.freeze(
+      input.causeChain.map(({ errorType, errorCode }) =>
+        Object.freeze({
+          errorType,
+          errorCode: safeDiagnosticErrorCode(errorCode),
+        }),
+      ),
+    ),
   });
 }
 

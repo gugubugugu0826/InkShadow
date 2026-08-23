@@ -72,6 +72,49 @@ describe("Model Hub story planning service", () => {
     expect(harness.executeText).not.toHaveBeenCalled();
   });
 
+  it("marks a second preparation failure as unsent before provider execution", async () => {
+    const harness = createHarness(outlineResponse());
+    const disclosure = await harness.service.prepareGeneration({
+      projectId: PROJECT_ID,
+      task: "outline_planning",
+    });
+    harness.inspectText.mockRejectedValueOnce(new Error("second preparation failed"));
+
+    await expect(
+      harness.service.generate({
+        projectId: PROJECT_ID,
+        task: "outline_planning",
+        humanConfirmed: true,
+        disclosureFingerprint: disclosure.fingerprint,
+      }),
+    ).rejects.toMatchObject({
+      code: "STORY_PLANNING_PRE_DISPATCH_FAILED",
+      dispatched: false,
+      planningStage: "pre_dispatch_check",
+    });
+    expect(harness.executeText).not.toHaveBeenCalled();
+  });
+
+  it("marks candidate persistence failure as a post-dispatch result-save failure", async () => {
+    const harness = createHarness(outlineResponse());
+    vi.spyOn(harness.candidates, "create").mockRejectedValueOnce(
+      new Error("candidate storage failed"),
+    );
+
+    await expect(
+      generateConfirmed(harness.service, {
+        projectId: PROJECT_ID,
+        task: "outline_planning",
+      }),
+    ).rejects.toMatchObject({
+      code: "STORY_PLANNING_RESULT_PERSIST_FAILED",
+      dispatched: true,
+      planningStage: "persist_result",
+    });
+    expect(harness.executeText).toHaveBeenCalledOnce();
+    expect(await harness.candidates.listByProjectId(PROJECT_ID)).toEqual([]);
+  });
+
   it("creates an outline review candidate from only authoritative context, then applies one explicit synopsis update", async () => {
     const harness = createHarness(outlineResponse());
     const before = harness.repository.current?.toSnapshot();

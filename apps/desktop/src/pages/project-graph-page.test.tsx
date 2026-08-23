@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { ok } from "@inkshadow/domain";
+import { AppError, err, ok } from "@inkshadow/domain";
 import { ToastProvider } from "@inkshadow/ui";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -177,6 +177,58 @@ describe("ProjectGraphPage feature boundary", () => {
     expect(screen.queryByText(rawUnknownKind)).not.toBeInTheDocument();
     expect(screen.queryByText(rawRelationKind)).not.toBeInTheDocument();
   });
+
+  it("keeps load failure codes out of the ordinary graph page", async () => {
+    const base = createDevelopmentRuntime(window.localStorage);
+    const project = await base.useCases.createProject.execute({ name: "关系页读取失败" });
+    if (!project.ok) throw project.error;
+    const graph = graphRuntime(project.value.id);
+    graph.inspectProject.mockResolvedValue(
+      err(
+        new AppError({
+          code: "REPOSITORY_ERROR",
+          message: "internal graph load failure",
+        }),
+      ),
+    );
+    const runtime: DesktopRuntime = {
+      ...base,
+      storyGraph: graph.port,
+      featureFlags: { ...base.featureFlags, graphRag: true },
+    };
+
+    renderRoute(runtime, `/projects/${project.value.id}/graph?legacy=1`);
+
+    expect(await screen.findByRole("button", { name: "重试" })).toBeVisible();
+    expect(screen.queryByText(/REPOSITORY_ERROR|错误码/u)).not.toBeInTheDocument();
+  });
+
+  it("keeps rebuild failure codes out of the ordinary graph page", async () => {
+    const base = createDevelopmentRuntime(window.localStorage);
+    const project = await base.useCases.createProject.execute({ name: "关系页重建失败" });
+    if (!project.ok) throw project.error;
+    const graph = graphRuntime(project.value.id);
+    graph.rebuildProject.mockResolvedValue(
+      err(
+        new AppError({
+          code: "REPOSITORY_ERROR",
+          message: "internal graph rebuild failure",
+        }),
+      ),
+    );
+    const runtime: DesktopRuntime = {
+      ...base,
+      storyGraph: graph.port,
+      featureFlags: { ...base.featureFlags, graphRag: true },
+    };
+    const user = userEvent.setup();
+
+    renderRoute(runtime, `/projects/${project.value.id}/graph?legacy=1`);
+    await user.click(await screen.findByRole("button", { name: "构建关系图" }));
+
+    expect(await screen.findByText("关系图重建失败")).toBeVisible();
+    expect(screen.queryByText(/REPOSITORY_ERROR|错误码/u)).not.toBeInTheDocument();
+  });
 });
 
 function graphRuntime(projectId: string, projection: StoryGraphInspection["projection"] = null) {
@@ -186,8 +238,10 @@ function graphRuntime(projectId: string, projection: StoryGraphInspection["proje
     projection,
     authoritative: EMPTY_DIAGNOSTICS,
   };
-  const inspectProject = vi.fn(() => Promise.resolve(ok(inspection)));
-  const rebuildProject = vi.fn(() =>
+  const inspectProject = vi.fn<StoryGraphRuntimePort["inspectProject"]>(() =>
+    Promise.resolve(ok(inspection)),
+  );
+  const rebuildProject = vi.fn<StoryGraphRuntimePort["rebuildProject"]>(() =>
     Promise.resolve(
       ok({
         ...EMPTY_DIAGNOSTICS,

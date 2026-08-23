@@ -1,5 +1,26 @@
-export type UiRouteIncidentPhase = "lazy_load" | "render";
-export type UiRouteBoundaryName = "SettingsRouteBoundary" | "AppErrorBoundary";
+export type UiRouteIncidentPhase = "lazy_load" | "render" | "data_read";
+export type UiRouteBoundaryName = "SettingsRouteBoundary" | "AppErrorBoundary" | "EditorPage";
+export type EditorReadStage =
+  | "route_identity"
+  | "project"
+  | "chapter"
+  | "chapter_list"
+  | "recovery_draft"
+  | "chapter_versions"
+  | "ai_candidates";
+
+export type SafeUiRouteRowReference =
+  | Readonly<{
+      table: "ai_candidates";
+      candidateId: string | null;
+      rowFingerprint: string;
+    }>
+  | Readonly<{
+      table: "chapter_versions";
+      versionId: string | null;
+      sequence: number | null;
+      rowFingerprint: string;
+    }>;
 
 export interface SafeUiRouteTriggerIds {
   readonly projectId: string | null;
@@ -16,13 +37,16 @@ export interface SafeUiRouteIncident {
   readonly route: string;
   readonly triggerIds: SafeUiRouteTriggerIds;
   readonly phase: UiRouteIncidentPhase;
-  readonly errorBoundaryTriggered: true;
+  readonly errorBoundaryTriggered: boolean;
   readonly componentName: UiRouteBoundaryName;
   readonly webviewReloadDetected: "unknown";
   readonly normalizedErrorCode: string;
   readonly errorType: string;
   readonly applicationStack: readonly string[];
   readonly reactComponentStack: readonly string[];
+  readonly readStage: EditorReadStage | null;
+  readonly rowReferences: readonly SafeUiRouteRowReference[];
+  readonly reasonCodeChain: readonly string[];
   readonly fingerprint: string;
   readonly recovered: boolean;
   readonly recoveredAt: string | null;
@@ -58,12 +82,54 @@ const SAFE_ERROR_TYPES = new Set([
   "UiActionError",
 ]);
 const SAFE_UI_ERROR_CODES = new Set([
+  "EDITOR_AUTHORITY_READ_FAILED",
   "LEGACY_CANDIDATE_METADATA_INVALID",
   "LEGACY_VERSION_METADATA_INVALID",
   "TASK_METADATA_INVALID",
   "UI_CHUNK_LOAD_FAILED",
   "UI_LAZY_LOAD_FAILED",
   "UI_RENDER_FAILED",
+]);
+const SAFE_EDITOR_READ_STAGES = new Set<EditorReadStage>([
+  "route_identity",
+  "project",
+  "chapter",
+  "chapter_list",
+  "recovery_draft",
+  "chapter_versions",
+  "ai_candidates",
+]);
+const SAFE_EDITOR_REASON_CODES = new Set([
+  "AI_CANDIDATE_BASE_VERSION_ID_INVALID",
+  "AI_CANDIDATE_CHAPTER_ID_INVALID",
+  "AI_CANDIDATE_CONTENT_CHECKSUM_INVALID",
+  "AI_CANDIDATE_CREATED_AT_INVALID",
+  "AI_CANDIDATE_DECIDED_AT_INVALID",
+  "AI_CANDIDATE_ENTITY_INVALID",
+  "AI_CANDIDATE_ID_INVALID",
+  "AI_CANDIDATE_METADATA_INVALID",
+  "AI_CANDIDATE_PROJECT_ID_INVALID",
+  "AI_CANDIDATE_UPDATED_AT_INVALID",
+  "CHAPTER_NOT_FOUND",
+  "CURRENT_VERSION_SCOPE_MISMATCH",
+  "CURRENT_VERSION_CONTENT_MISMATCH",
+  "CURRENT_VERSION_CHECKSUM_MISMATCH",
+  "CURRENT_VERSION_CHECKSUM_UNAVAILABLE",
+  "CURRENT_VERSION_MISSING",
+  "CURRENT_VERSION_NOT_CHAIN_TIP",
+  "EDITOR_AUTHORITY_READ_FAILED",
+  "EDITOR_ROUTE_IDENTITY_INVALID",
+  "INVALID_CHECKSUM",
+  "INVALID_STATE_TRANSITION",
+  "INVALID_TIMESTAMP",
+  "INVALID_UUID",
+  "LEGACY_CANDIDATE_METADATA_INVALID",
+  "LEGACY_VERSION_METADATA_INVALID",
+  "PROJECT_NOT_FOUND",
+  "REPOSITORY_ERROR",
+  "UNKNOWN_CANDIDATE_VALIDATION_FAILURE",
+  "VERSION_PARENT_CHAIN_INVALID",
+  "VERSION_SEQUENCE_CHAIN_INVALID",
 ]);
 const SAFE_SETTINGS_ROUTE_PATTERN = /^\/(?:settings(?:\/sync)?)?$/u;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -147,6 +213,9 @@ export function recordUiRouteIncident(
     errorType,
     applicationStack,
     reactComponentStack,
+    readStage: null,
+    rowReferences: Object.freeze([]),
+    reasonCodeChain: Object.freeze([normalizedErrorCode]),
     fingerprint: fingerprint([
       normalizedErrorCode,
       errorType,
@@ -161,6 +230,126 @@ export function recordUiRouteIncident(
   state.incidents = [incident, ...state.incidents].slice(0, MAX_UI_ROUTE_INCIDENTS);
   persistState(state);
   return incident;
+}
+
+export function recordEditorReadIncident(
+  owner: object,
+  input: Readonly<{
+    route: string;
+    readStage: EditorReadStage;
+    cause: unknown;
+    timestamp: string;
+    normalizedErrorCode: string;
+    rowReferences?: readonly SafeUiRouteRowReference[];
+    reasonCodeChain?: readonly string[];
+    applicationStack?: readonly string[];
+    componentStack?: string | null;
+  }>,
+): SafeUiRouteIncident {
+  const state = ensureState(owner);
+  const timestamp = safeTimestamp(input.timestamp);
+  const route = safeUiRoute(input.route);
+  const readStage = safeEditorReadStage(input.readStage);
+  const normalizedErrorCode = safeEditorErrorCode(input.normalizedErrorCode);
+  const errorType = safeErrorType(input.cause);
+  const rowReferences = safeUiRouteRowReferences([
+    ...(input.rowReferences ?? []),
+    ...rowReferencesFromCause(input.cause),
+  ]);
+  const reasonCodeChain = safeEditorReasonCodeChain(
+    normalizedErrorCode,
+    input.cause,
+    input.reasonCodeChain ?? [],
+  );
+  const applicationStack = mergeApplicationStacks(
+    safeApplicationStack(input.cause, normalizedErrorCode, errorType),
+    input.applicationStack ?? [],
+  );
+  const reactComponentStack = safeReactComponentStack(input.componentStack ?? null);
+  const incidentFingerprint = editorReadFingerprint({
+    normalizedErrorCode,
+    errorType,
+    route: route.route,
+    triggerIds: route.triggerIds,
+    readStage,
+    rowReferences,
+    reasonCodeChain,
+  });
+  const existing = state.incidents.find(
+    (incident) =>
+      incident.componentName === "EditorPage" &&
+      !incident.recovered &&
+      incident.fingerprint === incidentFingerprint,
+  );
+  if (existing !== undefined) return existing;
+
+  state.nextSequence += 1;
+  const incident = Object.freeze({
+    diagnosticId: `UI-${timestamp.replace(/[^0-9]/gu, "").slice(-14)}-${String(
+      state.nextSequence,
+    ).padStart(3, "0")}`,
+    routeTransitionId: `UI-ROUTE-${String(state.nextSequence).padStart(6, "0")}`,
+    timestamp,
+    fromRoute: null,
+    toRoute: route.route,
+    route: route.route,
+    triggerIds: route.triggerIds,
+    phase: "data_read" as const,
+    errorBoundaryTriggered: false,
+    componentName: "EditorPage" as const,
+    webviewReloadDetected: "unknown" as const,
+    normalizedErrorCode,
+    errorType,
+    applicationStack,
+    reactComponentStack,
+    readStage,
+    rowReferences,
+    reasonCodeChain,
+    fingerprint: incidentFingerprint,
+    recovered: false,
+    recoveredAt: null,
+    recoveryAction: null,
+  } satisfies SafeUiRouteIncident);
+  state.incidents = [incident, ...state.incidents].slice(0, MAX_UI_ROUTE_INCIDENTS);
+  persistState(state);
+  return incident;
+}
+
+export function recoverEditorReadIncidents(
+  owner: object,
+  input: Readonly<{
+    projectId: string;
+    chapterId: string;
+    timestamp: string;
+    readStages?: readonly EditorReadStage[];
+  }>,
+): void {
+  const projectId = safePersistedUuid(input.projectId);
+  const chapterId = safePersistedUuid(input.chapterId);
+  if (projectId === null || chapterId === null) return;
+  const readStages =
+    input.readStages === undefined
+      ? null
+      : new Set(input.readStages.filter((stage) => SAFE_EDITOR_READ_STAGES.has(stage)));
+  const state = ensureState(owner);
+  state.incidents = state.incidents.map((incident) => {
+    if (
+      incident.componentName !== "EditorPage" ||
+      incident.recovered ||
+      incident.triggerIds.projectId !== projectId ||
+      incident.triggerIds.chapterId !== chapterId ||
+      (readStages !== null && (incident.readStage === null || !readStages.has(incident.readStage)))
+    ) {
+      return incident;
+    }
+    return Object.freeze({
+      ...incident,
+      recovered: true,
+      recoveredAt: safeTimestamp(input.timestamp),
+      recoveryAction: "retry" as const,
+    });
+  });
+  persistState(state);
 }
 
 export function recoverUiRouteIncident(
@@ -312,6 +501,193 @@ function safeErrorCode(cause: unknown): string {
   return "UI_RENDER_FAILED";
 }
 
+function safeEditorReadStage(value: EditorReadStage): EditorReadStage {
+  return SAFE_EDITOR_READ_STAGES.has(value) ? value : "route_identity";
+}
+
+function parseEditorReadStage(value: unknown): EditorReadStage | null {
+  return typeof value === "string" && SAFE_EDITOR_READ_STAGES.has(value as EditorReadStage)
+    ? (value as EditorReadStage)
+    : null;
+}
+
+function safeEditorErrorCode(value: string): string {
+  return SAFE_UI_ERROR_CODES.has(value) ? value : "EDITOR_AUTHORITY_READ_FAILED";
+}
+
+function safeUiRouteRowReferences(values: readonly unknown[]): readonly SafeUiRouteRowReference[] {
+  const references = new Map<string, SafeUiRouteRowReference>();
+  for (const value of values) {
+    if (!isRecord(value)) continue;
+    if (value.table === "chapter_versions") {
+      const versionId = value.versionId === null ? null : safePersistedUuid(value.versionId);
+      const sequence =
+        value.sequence === null
+          ? null
+          : Number.isSafeInteger(value.sequence) && Number(value.sequence) > 0
+            ? Number(value.sequence)
+            : null;
+      if (
+        (value.versionId !== null && versionId === null) ||
+        (value.sequence !== null && sequence === null) ||
+        typeof value.rowFingerprint !== "string" ||
+        !/^version(?:-row)?-[0-9a-f]{8}$/u.test(value.rowFingerprint)
+      ) {
+        continue;
+      }
+      const reference = Object.freeze({
+        table: "chapter_versions" as const,
+        versionId,
+        sequence,
+        rowFingerprint: value.rowFingerprint,
+      });
+      references.set(
+        `${reference.table}:${reference.versionId ?? "none"}:${String(reference.sequence)}:${reference.rowFingerprint}`,
+        reference,
+      );
+      if (references.size >= 20) break;
+      continue;
+    }
+    if (value.table !== "ai_candidates") continue;
+    const candidateId =
+      value.candidateId === null
+        ? null
+        : typeof value.candidateId === "string" && isUuid(value.candidateId)
+          ? value.candidateId.toLowerCase()
+          : null;
+    if (
+      typeof value.rowFingerprint !== "string" ||
+      !/^candidate-[0-9a-f]{8}$/u.test(value.rowFingerprint)
+    ) {
+      continue;
+    }
+    const reference = Object.freeze({
+      table: "ai_candidates" as const,
+      candidateId,
+      rowFingerprint: value.rowFingerprint,
+    });
+    references.set(`${reference.rowFingerprint}:${reference.candidateId ?? "none"}`, reference);
+    if (references.size >= 20) break;
+  }
+  return Object.freeze([...references.values()]);
+}
+
+function rowReferencesFromCause(cause: unknown): readonly unknown[] {
+  const references: unknown[] = [];
+  for (const current of causeChain(cause)) {
+    if (!isRecord(current) || !isRecord(current.details)) continue;
+    if (Array.isArray(current.details.rowReferences)) {
+      references.push(...(current.details.rowReferences as readonly unknown[]));
+    } else if (current.details.rowReference !== undefined) {
+      references.push(current.details.rowReference);
+    }
+  }
+  return Object.freeze(references.slice(0, 20));
+}
+
+function safeEditorReasonCodeChain(
+  normalizedErrorCode: string,
+  cause: unknown,
+  inputReasonCodes: readonly string[],
+): readonly string[] {
+  const reasonCodes = [
+    normalizedErrorCode,
+    ...inputReasonCodes,
+    ...reasonCodesFromCause(cause),
+  ].flatMap((value) => {
+    const safe = safeEditorReasonCode(value);
+    return safe === null ? [] : [safe];
+  });
+  return Object.freeze([...new Set(reasonCodes)].slice(0, 16));
+}
+
+function reasonCodesFromCause(cause: unknown): string[] {
+  const reasonCodes: string[] = [];
+  for (const current of causeChain(cause)) {
+    if (!isRecord(current)) continue;
+    if (typeof current.code === "string") reasonCodes.push(current.code);
+    if (!isRecord(current.details)) continue;
+    if (typeof current.details.validationCode === "string") {
+      reasonCodes.push(current.details.validationCode);
+    }
+    const fieldReason = safeEditorFieldReasonCode(current.details.field);
+    if (fieldReason !== null) reasonCodes.push(fieldReason);
+  }
+  return reasonCodes;
+}
+
+function safeEditorFieldReasonCode(field: unknown): string | null {
+  switch (field) {
+    case "aiCandidate.id":
+      return "AI_CANDIDATE_ID_INVALID";
+    case "aiCandidate.projectId":
+      return "AI_CANDIDATE_PROJECT_ID_INVALID";
+    case "aiCandidate.chapterId":
+      return "AI_CANDIDATE_CHAPTER_ID_INVALID";
+    case "aiCandidate.baseVersionId":
+      return "AI_CANDIDATE_BASE_VERSION_ID_INVALID";
+    case "aiCandidate.contentChecksum":
+      return "AI_CANDIDATE_CONTENT_CHECKSUM_INVALID";
+    case "aiCandidate.createdAt":
+      return "AI_CANDIDATE_CREATED_AT_INVALID";
+    case "aiCandidate.updatedAt":
+      return "AI_CANDIDATE_UPDATED_AT_INVALID";
+    case "aiCandidate.decidedAt":
+      return "AI_CANDIDATE_DECIDED_AT_INVALID";
+    default:
+      return null;
+  }
+}
+
+function safeEditorReasonCode(value: unknown): string | null {
+  return typeof value === "string" &&
+    SAFE_ERROR_CODE_PATTERN.test(value) &&
+    SAFE_EDITOR_REASON_CODES.has(value)
+    ? value
+    : null;
+}
+
+function mergeApplicationStacks(
+  primary: readonly string[],
+  supplemental: readonly string[],
+): readonly string[] {
+  const identity = primary[0] ?? "Error: EDITOR_AUTHORITY_READ_FAILED";
+  const frames = [
+    ...primary.slice(1),
+    ...supplemental.flatMap((frame) =>
+      typeof frame === "string" ? safeStackFrames(`header\n${frame}`, false) : [],
+    ),
+  ];
+  return Object.freeze([identity, ...new Set(frames)].slice(0, MAX_STACK_FRAMES));
+}
+
+function editorReadFingerprint(
+  input: Readonly<{
+    normalizedErrorCode: string;
+    errorType: string;
+    route: string;
+    triggerIds: SafeUiRouteTriggerIds;
+    readStage: EditorReadStage;
+    rowReferences: readonly SafeUiRouteRowReference[];
+    reasonCodeChain: readonly string[];
+  }>,
+): string {
+  return fingerprint([
+    input.normalizedErrorCode,
+    input.errorType,
+    input.route,
+    input.triggerIds.projectId ?? "none",
+    input.triggerIds.chapterId ?? "none",
+    input.readStage,
+    ...input.rowReferences.map((reference) =>
+      reference.table === "ai_candidates"
+        ? `${reference.table}:${reference.candidateId ?? "none"}:${reference.rowFingerprint}`
+        : `${reference.table}:${reference.versionId ?? "none"}:${String(reference.sequence)}:${reference.rowFingerprint}`,
+    ),
+    ...input.reasonCodeChain,
+  ]);
+}
+
 function safeErrorType(cause: unknown): string {
   if (cause instanceof Error) {
     const name = cause.name;
@@ -330,16 +706,33 @@ function safeApplicationStack(
   errorType: string,
 ): readonly string[] {
   const identity = `${errorType}: ${normalizedErrorCode}`;
-  if (!(cause instanceof Error) || typeof cause.stack !== "string") {
-    return Object.freeze([identity]);
+  const frames = causeChain(cause).flatMap((current) =>
+    current instanceof Error && typeof current.stack === "string"
+      ? safeStackFrames(current.stack, false)
+      : [],
+  );
+  return Object.freeze([identity, ...new Set(frames)].slice(0, MAX_STACK_FRAMES));
+}
+
+function causeChain(cause: unknown): readonly unknown[] {
+  const chain: unknown[] = [];
+  const seen = new Set<object>();
+  let current = cause;
+  while (isRecord(current) && chain.length < 8 && !seen.has(current)) {
+    chain.push(current);
+    seen.add(current);
+    current = "cause" in current ? current.cause : undefined;
   }
-  const frames = safeStackFrames(cause.stack, false);
-  return Object.freeze([identity, ...frames].slice(0, MAX_STACK_FRAMES));
+  return Object.freeze(chain);
 }
 
 function safeReactComponentStack(componentStack: string | null): readonly string[] {
   if (componentStack === null) return Object.freeze([]);
-  return Object.freeze(safeStackFrames(componentStack, true).slice(0, MAX_STACK_FRAMES));
+  return Object.freeze(
+    safeStackFrames(componentStack, true)
+      .filter((frame) => frame.includes("(") || /^at [A-Z][A-Za-z0-9_$<>]{1,63}$/u.test(frame))
+      .slice(0, MAX_STACK_FRAMES),
+  );
 }
 
 function safeStackFrames(stack: string, allowComponentOnly: boolean): string[] {
@@ -348,7 +741,7 @@ function safeStackFrames(stack: string, allowComponentOnly: boolean): string[] {
     const line = rawLine.trim().replaceAll("\\", "/");
     const functionName = /^at\s+([A-Za-z_$<>][A-Za-z0-9_$<>.]*)/u.exec(line)?.[1] ?? null;
     const path =
-      /((?:apps\/desktop\/src|packages\/[A-Za-z0-9_-]+\/src|src)\/[A-Za-z0-9_./-]+:\d+:\d+)/u.exec(
+      /((?:(?:apps\/desktop\/src|packages\/[A-Za-z0-9_-]+\/src|src)\/[A-Za-z0-9_./-]+|assets\/[A-Za-z0-9_.-]+\.js):\d+:\d+)/u.exec(
         line,
       )?.[1];
     if (path !== undefined) {
@@ -499,6 +892,55 @@ function parsePersistedIncident(value: unknown): SafeUiRouteIncident | null {
       .flatMap((frame) => safeStackFrames(`header\n${frame}`, true))
       .slice(0, MAX_STACK_FRAMES),
   );
+  const componentName: UiRouteBoundaryName =
+    value.componentName === "EditorPage"
+      ? "EditorPage"
+      : value.componentName === "AppErrorBoundary"
+        ? "AppErrorBoundary"
+        : "SettingsRouteBoundary";
+  const persistedReadStage = parseEditorReadStage(value.readStage);
+  if (
+    componentName === "EditorPage" &&
+    (value.phase !== "data_read" || persistedReadStage === null)
+  ) {
+    return null;
+  }
+  const readStage = componentName === "EditorPage" ? persistedReadStage : null;
+  const rowReferences =
+    componentName === "EditorPage" && Array.isArray(value.rowReferences)
+      ? safeUiRouteRowReferences(value.rowReferences)
+      : Object.freeze([]);
+  const reasonCodeChain =
+    componentName === "EditorPage"
+      ? safeEditorReasonCodeChain(
+          value.normalizedErrorCode,
+          null,
+          Array.isArray(value.reasonCodeChain)
+            ? value.reasonCodeChain.filter(
+                (reasonCode): reasonCode is string => typeof reasonCode === "string",
+              )
+            : [],
+        )
+      : Object.freeze([value.normalizedErrorCode]);
+  const incidentFingerprint =
+    componentName === "EditorPage" && readStage !== null
+      ? editorReadFingerprint({
+          normalizedErrorCode: value.normalizedErrorCode,
+          errorType: value.errorType,
+          route: sanitizedRoute.route,
+          triggerIds,
+          readStage,
+          rowReferences,
+          reasonCodeChain,
+        })
+      : fingerprint([
+          value.normalizedErrorCode,
+          value.errorType,
+          sanitizedRoute.route,
+          applicationStack.join("\n"),
+          reactComponentStack.join("\n"),
+        ]);
+
   return Object.freeze({
     diagnosticId: value.diagnosticId,
     routeTransitionId: value.routeTransitionId,
@@ -507,22 +949,23 @@ function parsePersistedIncident(value: unknown): SafeUiRouteIncident | null {
     toRoute: sanitizedRoute.route,
     route: sanitizedRoute.route,
     triggerIds,
-    phase: value.phase === "lazy_load" ? "lazy_load" : "render",
-    errorBoundaryTriggered: true,
-    componentName:
-      value.componentName === "AppErrorBoundary" ? "AppErrorBoundary" : "SettingsRouteBoundary",
+    phase:
+      componentName === "EditorPage"
+        ? "data_read"
+        : value.phase === "lazy_load"
+          ? "lazy_load"
+          : "render",
+    errorBoundaryTriggered: componentName !== "EditorPage",
+    componentName,
     webviewReloadDetected: "unknown",
     normalizedErrorCode: value.normalizedErrorCode,
     errorType: value.errorType,
     applicationStack,
     reactComponentStack,
-    fingerprint: fingerprint([
-      value.normalizedErrorCode,
-      value.errorType,
-      sanitizedRoute.route,
-      applicationStack.join("\n"),
-      reactComponentStack.join("\n"),
-    ]),
+    readStage,
+    rowReferences,
+    reasonCodeChain,
+    fingerprint: incidentFingerprint,
     recovered: value.recovered === true,
     recoveredAt:
       typeof value.recoveredAt === "string" && ISO_TIMESTAMP_PATTERN.test(value.recoveredAt)

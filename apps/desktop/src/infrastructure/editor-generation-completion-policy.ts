@@ -1,7 +1,7 @@
 import type { CandidateQualityGateResult } from "@inkshadow/ai-core";
 
 export type EditorGenerationAction =
-  "opening" | "continuation" | "selection_rewrite" | "polish" | "expand";
+  "opening" | "continuation" | "selection_rewrite" | "polish" | "expand" | "shorten";
 
 export type EditorGenerationCompletionDecision =
   | Readonly<{ kind: "review"; notice: string }>
@@ -39,9 +39,11 @@ export function decideEditorGenerationCompletion(input: {
         ? "润色"
         : input.action === "expand"
           ? "扩写"
-          : input.action === "selection_rewrite"
-            ? "改写"
-            : "续写";
+          : input.action === "shorten"
+            ? "缩写"
+            : input.action === "selection_rewrite"
+              ? "改写"
+              : "续写";
   const safetyNote = input.incomplete
     ? "本次结果尚未完整，"
     : input.qualityGateOutcome === "block"

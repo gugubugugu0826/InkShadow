@@ -41,8 +41,35 @@ describe("FineTuningGovernancePage", () => {
     expect(inspect).not.toHaveBeenCalled();
   });
 
+  it("keeps internal failure codes out of the ordinary error notice", async () => {
+    const fixture = readyRuntime();
+    const internalCode = "FINE_TUNING_PROVIDER_UNAVAILABLE";
+    const runtime = {
+      ...fixture.port,
+      inspect: vi.fn(() =>
+        Promise.resolve(
+          err(
+            new StoryCoreError({
+              code: internalCode,
+              message: "Fine-tuning provider unavailable.",
+            }),
+          ),
+        ),
+      ),
+    } as FineTuningDesktopPort;
+
+    render(
+      <FineTuningGovernancePage runtime={runtime} projectId={PROJECT_ID} actorId={ACTOR_ID} />,
+    );
+
+    expect(await screen.findByText("无法读取微调治理记录")).toBeVisible();
+    expect(document.body).not.toHaveTextContent(internalCode);
+    expect(screen.getAllByRole("button", { name: /重新加载|重试/u }).length).toBeGreaterThan(0);
+  });
+
   it("requires an explicit rights declaration before freezing chapter sources", async () => {
     const user = userEvent.setup();
+
     const fixture = readyRuntime({
       sources: [
         {

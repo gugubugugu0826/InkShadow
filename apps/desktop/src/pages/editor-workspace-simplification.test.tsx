@@ -376,8 +376,8 @@ describe("simplified editor workspace", () => {
           factType: "scene_tag",
           contentText: "林澈出现在钟楼",
           origin: "system",
-          status: "temporary",
-          needsReview: false,
+          status: "unconfirmed",
+          needsReview: true,
           userConfirmed: false,
           source: {
             kind: "chapter_span",

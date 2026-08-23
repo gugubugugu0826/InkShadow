@@ -265,6 +265,10 @@ export default defineConfig({
     minify: "terser",
     terserOptions: {
       ecma: 2022,
+      // Runtime diagnostics capture real component call stacks. Keep only the
+      // route-boundary names needed to identify those frames in minified builds.
+      keep_fnames:
+        /^(?:AppErrorBoundary|DesktopPersistenceBoundary|DesktopRoutes|EditorPage|SettingsRouteBoundary)$/u,
       // Rollup's production chunks are ECMAScript modules. Declaring that fact lets
       // Terser safely optimize module-scoped bindings without property mangling.
       module: true,

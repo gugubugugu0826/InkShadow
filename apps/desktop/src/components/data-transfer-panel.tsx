@@ -127,12 +127,12 @@ interface ExportNotice {
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) {
-    return `${String(bytes)} B`;
+    return `${String(bytes)} 字节`;
   }
   if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024).toFixed(1)} 千字节`;
   }
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} 兆字节`;
 }
 
 function errorDescription(error: unknown): string {
@@ -147,7 +147,7 @@ function errorDescription(error: unknown): string {
     const labels: Record<EpubExportErrorCode, string> = {
       EPUB_RENDER_FAILED: "EPUB 生成失败，项目内容没有写入不完整文件。",
       EXPORT_CANCELLED: "EPUB 导出已取消。",
-      EXPORT_OUTPUT_TOO_LARGE: "EPUB 超过 64 MiB 安全上限，未生成截断文件。",
+      EXPORT_OUTPUT_TOO_LARGE: "EPUB 超过 64 兆字节安全上限，未生成截断文件。",
     };
     return labels[epubCode];
   }
@@ -157,7 +157,7 @@ function errorDescription(error: unknown): string {
       PDF_RENDER_FAILED: "PDF 生成失败，没有下载不完整文件。",
       PDF_COMPLEXITY_LIMIT_EXCEEDED: "PDF 的章节、正文、区块或页数超过本地安全上限。",
       EXPORT_CANCELLED: "PDF 导出已取消。",
-      EXPORT_OUTPUT_TOO_LARGE: "PDF 超过 64 MiB 安全上限，未生成截断文件。",
+      EXPORT_OUTPUT_TOO_LARGE: "PDF 超过 64 兆字节安全上限，未生成截断文件。",
     };
     return labels[pdfCode];
   }
@@ -166,7 +166,7 @@ function errorDescription(error: unknown): string {
     const labels: Record<DocxExportErrorCode, string> = {
       DOCX_RENDER_FAILED: "DOCX 生成失败，项目内容没有写入不完整文件。",
       EXPORT_CANCELLED: "DOCX 导出已取消。",
-      EXPORT_OUTPUT_TOO_LARGE: "DOCX 超过 64 MiB 安全上限，未生成截断文件。",
+      EXPORT_OUTPUT_TOO_LARGE: "DOCX 超过 64 兆字节安全上限，未生成截断文件。",
     };
     return labels[docxCode];
   }
@@ -691,7 +691,7 @@ export function DataTransferPanel({
             >
               <div>
                 <strong>{importDragActive ? "松开即可开始安全预检" : "把作品文件拖到这里"}</strong>
-                <p>单文件与单次选择均不超过 50 MiB，最多 200 个文件。</p>
+                <p>单文件与单次选择均不超过 50 兆字节，最多 200 个文件。</p>
               </div>
               <div className="import-format-badges" aria-label="支持的作品格式">
                 {["MD", "DOCX", "EPUB", "HTML", "PDF", "TXT"].map((format) => (

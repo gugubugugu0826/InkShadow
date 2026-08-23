@@ -49,6 +49,13 @@ describe("StoryGovernancePage", () => {
     if (!project.ok) throw project.error;
     const parsedProjectId = parseUuidV7(project.value.id);
     if (!parsedProjectId.ok) throw parsedProjectId.error;
+    const localEvidence = "周望五十七岁。";
+    const sourceChapter = await runtime.useCases.createChapter.execute({
+      projectId: project.value.id,
+      title: "钟楼旧事",
+      content: localEvidence,
+    });
+    if (!sourceChapter.ok) throw sourceChapter.error;
     const created = await runtime.story.factService.createFormalUserFact({
       projectId: parsedProjectId.value,
       factType: "world_rule",
@@ -82,25 +89,107 @@ describe("StoryGovernancePage", () => {
       origin: "system",
     });
     if (!temporary.ok) throw temporary.error;
+    const localDraft = await runtime.story.factService.stageAutomaticFact({
+      projectId: parsedProjectId.value,
+      factType: "character_profile",
+      contentText: localEvidence,
+      structuredValue: {
+        schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+        payload: { schemaVersion: "inkshadow.direct-local-story-fact.v1" },
+      },
+      source: {
+        kind: "chapter_span",
+        reference: "direct-local:inkshadow.direct-local-story-fact.v1:test",
+        chapterId: sourceChapter.value.chapter.id,
+        versionId: sourceChapter.value.chapter.currentVersionId,
+        startOffset: 0,
+        endOffset: localEvidence.length,
+        sourceLength: localEvidence.length,
+        excerpt: localEvidence,
+      },
+      confidence: 1,
+      origin: "system",
+      requireHumanReview: true,
+    });
+    if (!localDraft.ok) throw localDraft.error;
     const user = userEvent.setup();
     const view = renderRoute(runtime, "/projects/" + project.value.id + "/story");
 
-    expect(await screen.findByRole("heading", { name: "当前设定", level: 2 })).toBeVisible();
-    expect(screen.getByText("灯塔 每晚只能亮一次。")).toBeVisible();
-    expect(screen.getByText("查看证据")).toBeVisible();
-    expect(document.body).not.toHaveTextContent(
-      /AI|模型|调用|上下文|路由|令牌|追踪|候选|费用|待确认/u,
-    );
+    const currentSectionBefore = (
+      await screen.findByRole("heading", { name: "当前设定", level: 2 })
+    ).closest("section");
+    if (!(currentSectionBefore instanceof HTMLElement)) {
+      throw new Error("找不到当前设定区域。");
+    }
+    expect(within(currentSectionBefore).getByText("灯塔 每晚只能亮一次。")).toBeVisible();
+    expect(within(currentSectionBefore).getByText("查看证据")).toBeVisible();
+    expect(document.body).not.toHaveTextContent(/AI|模型|调用|上下文|路由|令牌|追踪|候选|费用/u);
     expect(screen.queryByText("这条待确认内容不能出现在直接模式。")).toBeNull();
     expect(screen.queryByText("这条试写资料不能出现在直接模式。")).toBeNull();
-    expect(screen.getByText("1 条设定")).toBeVisible();
+    const pendingSection = screen
+      .getByRole("heading", { name: "待确认设定", level: 2 })
+      .closest("section");
+    if (!(pendingSection instanceof HTMLElement)) throw new Error("找不到待确认设定区域。");
+    expect(within(pendingSection).getAllByText(localEvidence)).toHaveLength(2);
+    expect(within(pendingSection).getByText("查看原文依据")).toBeVisible();
+    await user.click(within(pendingSection).getByText("查看原文依据"));
+    expect(within(pendingSection).getByText("来源章节")).toBeVisible();
+    expect(within(pendingSection).getByText("《钟楼旧事》")).toBeVisible();
+    expect(within(pendingSection).getByText("保存版本")).toBeVisible();
+    expect(within(pendingSection).getByText("第 1 个不可变版本")).toBeVisible();
+    expect(pendingSection).not.toHaveTextContent(
+      String(sourceChapter.value.chapter.currentVersionId),
+    );
+    expect(within(pendingSection).getByText("字符范围")).toBeVisible();
+    expect(within(pendingSection).getByText("第 1 至 7 个字符")).toBeVisible();
+    expect(within(pendingSection).getByRole("button", { name: "确认并保留" })).toBeEnabled();
+    expect(within(pendingSection).getByRole("button", { name: "修改" })).toBeEnabled();
+    expect(within(pendingSection).getByRole("button", { name: "放弃" })).toBeEnabled();
 
-    await user.click(screen.getByRole("button", { name: "固定" }));
-    expect(await screen.findByRole("button", { name: "取消固定" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "修改" })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "取消固定" }));
+    await user.click(within(pendingSection).getByRole("button", { name: "修改" }));
+    const pendingEditDialog = screen.getByRole("dialog", { name: "修改设定" });
+    const pendingEditInput = within(pendingEditDialog).getByRole("textbox", {
+      name: "设定内容",
+    });
+    expect(
+      within(pendingEditDialog).getByText(
+        "保存修改会同时确认这条内容，并把它加入正式设定；原始来源和每个旧版本都会保留。",
+      ),
+    ).toBeVisible();
+    await user.clear(pendingEditInput);
+    await user.type(pendingEditInput, "周望五十八岁。");
+    await user.click(within(pendingEditDialog).getByRole("button", { name: "保存修改并确认" }));
+    expect(await within(currentSectionBefore).findByText("周望五十八岁。")).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "待确认设定", level: 2 })).toBeNull();
+    const editedLocalDraft = await runtime.story.facts.findById(localDraft.value.fact.id);
+    if (!editedLocalDraft.ok || editedLocalDraft.value === null) {
+      throw new Error("找不到人工修改后的本地设定。");
+    }
+    expect(editedLocalDraft.value.toSnapshot()).toMatchObject({
+      contentText: "周望五十八岁。",
+      structuredValue: null,
+      status: "formal",
+      origin: "user",
+      source: localDraft.value.fact.toSnapshot().source,
+      revision: 2,
+    });
+    expect(await runtime.story.facts.listRevisions(localDraft.value.fact.id)).toMatchObject({
+      ok: true,
+      value: [{ fact: { revision: 1 } }, { fact: { revision: 2 } }],
+    });
+    const originalFactCard = within(currentSectionBefore)
+      .getByText("灯塔 每晚只能亮一次。")
+      .closest(".ink-card");
+    if (!(originalFactCard instanceof HTMLElement)) {
+      throw new Error("找不到原有设定卡片。");
+    }
 
-    await user.click(screen.getByRole("button", { name: "修改" }));
+    await user.click(within(originalFactCard).getByRole("button", { name: "固定" }));
+    expect(await within(originalFactCard).findByRole("button", { name: "取消固定" })).toBeVisible();
+    expect(within(originalFactCard).getByRole("button", { name: "修改" })).toBeDisabled();
+    await user.click(within(originalFactCard).getByRole("button", { name: "取消固定" }));
+
+    await user.click(within(originalFactCard).getByRole("button", { name: "修改" }));
     const editDialog = screen.getByRole("dialog", { name: "修改设定" });
     const editInput = within(editDialog).getByRole("textbox", { name: "设定内容" });
     await user.clear(editInput);
@@ -108,7 +197,7 @@ describe("StoryGovernancePage", () => {
     await user.click(within(editDialog).getByRole("button", { name: "保存修改" }));
     expect(await screen.findByText("灯塔 每晚最多亮两次。")).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "历史版本" }));
+    await user.click(within(originalFactCard).getByRole("button", { name: "历史版本" }));
     const historyDialog = screen.getByRole("dialog", { name: "历史版本" });
     const firstRevisionCard = within(historyDialog)
       .getByRole("heading", { name: "第 1 版" })
@@ -117,7 +206,7 @@ describe("StoryGovernancePage", () => {
     await user.click(within(firstRevisionCard).getByRole("button", { name: "恢复这个版本" }));
     expect(await screen.findByText("灯塔 每晚只能亮一次。")).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "删除（保留记录）" }));
+    await user.click(within(originalFactCard).getByRole("button", { name: "删除（保留记录）" }));
     const deletedSection = (
       await screen.findByRole("heading", {
         name: "已删除的设定",
@@ -1135,7 +1224,7 @@ describe("StoryGovernancePage", () => {
     expect(within(dialog).getByText("丹丹")).toBeVisible();
     expect(within(dialog).getByText("情侣")).toBeVisible();
     expect(within(dialog).getByText("初中")).toBeVisible();
-    expect(within(dialog).getByText("AI 补充建议（不会自动写入）")).toBeVisible();
+    expect(within(dialog).getByText("本地整理建议（不会自动写入）")).toBeVisible();
     expect(
       within(dialog).queryByText(/guided_opening|fromCharacterRef|toCharacterRef/u),
     ).toBeNull();
@@ -1240,7 +1329,7 @@ describe("StoryGovernancePage", () => {
     const dialog = screen.getByRole("dialog", { name: "导入与导出故事设定" });
     expect(within(dialog).getByRole("heading", { name: "选择要处理的内容" })).toBeVisible();
     expect(within(dialog).queryByRole("button", { name: "选择墨影设定文件" })).toBeNull();
-    expect(within(dialog).getByText(/文件先做 dry run.*正式写入使用单一事务/u)).toBeVisible();
+    expect(within(dialog).getByText(/文件先做完整预检.*正式写入使用单一事务/u)).toBeVisible();
 
     await user.click(within(dialog).getByRole("button", { name: "4选择文件" }));
     expect(within(dialog).getByRole("button", { name: "选择墨影设定文件" })).toBeVisible();
@@ -1307,6 +1396,21 @@ describe("StoryGovernancePage", () => {
     );
     await user.click(within(dialog).getByRole("button", { name: "5校验与预览" }));
     expect(await within(dialog).findByText("可导入 5 项")).toBeVisible();
+
+    await user.upload(
+      fileInput,
+      readableFile(
+        "unknown-content.json",
+        JSON.stringify({
+          ...createStorySettingsTemplate(),
+          hidden_internal_field: "不应显示内部字段名",
+        }),
+      ),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "5校验与预览" }));
+    expect(await within(dialog).findByText("未识别内容")).toBeVisible();
+    expect(within(dialog).getByText(/发现当前版本不认识的内容/u)).toBeVisible();
+    expect(dialog).not.toHaveTextContent(/hidden_internal_field|UNKNOWN_FIELD|\$\./u);
 
     await user.upload(fileInput, readableFile("not-settings.txt", "not settings"));
     expect(await screen.findByText("只接受墨影设定文件")).toBeVisible();
@@ -1503,6 +1607,8 @@ describe("StoryGovernancePage", () => {
     await screen.findByRole("heading", { name: "旧规则整理测试", level: 1 });
     await user.click(screen.getByRole("button", { name: "整理 1 条旧记录" }));
     const dialog = screen.getByRole("dialog", { name: "整理旧版开书设定" });
+    expect(within(dialog).getByText("旧版开书写作约定仍使用早期保存格式。")).toBeVisible();
+    expect(dialog).not.toHaveTextContent(/guided_opening|schemaVersion|world_rule/u);
     await user.click(within(dialog).getByRole("button", { name: "确认整理" }));
     expect(await screen.findByText("旧记录已整理为可读设定")).toBeVisible();
 

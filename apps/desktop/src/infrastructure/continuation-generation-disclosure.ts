@@ -97,7 +97,7 @@ export async function prepareContinuationGenerationDisclosure(
     sends: Object.freeze([
       sentScopeLabel,
       "本次续写长度与收束要求",
-      "上下文编译明确列出的必要故事资料",
+      "本次挑选的故事资料：必要的大纲、已确认设定与相关正文片段",
     ]),
     maximumProviderCalls: 1 as const,
     automaticRetryCount: 0 as const,

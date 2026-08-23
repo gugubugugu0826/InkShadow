@@ -219,6 +219,15 @@ export interface StoryFactStore {
    * supplemental-finding identity before deprecating its disposition. A retry
    * of the same successful command must return the already-deprecated fact.
    */
+  /**
+   * Atomically checks the cited chapter's current immutable version, retires
+   * only matching disposable projections, and inserts the replacement.
+   */
+  replaceRebuildableSystemFactWithAuthorityFence?(
+    fact: StoryFact,
+    replacementKey: string,
+    fence: StoryFactAuthorityFence,
+  ): Promise<Result<StoryFactConditionalReplacementReceipt, StoryCoreError>>;
   deprecateSupplementalResolutionWithAuthorityFence?(
     factId: UuidV7,
     fence: StoryFactSupplementalResolutionUndoFence,
@@ -267,6 +276,11 @@ export const MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES = 512;
 export interface StoryFactConditionalCreateReceipt {
   readonly fact: StoryFact;
   readonly created: boolean;
+}
+
+export interface StoryFactConditionalReplacementReceipt {
+  readonly fact: StoryFact;
+  readonly replacedFactIds: readonly string[];
 }
 
 export interface StoryFactSupplementalResolutionUndoFence {
@@ -568,6 +582,61 @@ export class StoryFact {
     });
   }
 
+  /**
+   * Turns one explicitly reviewed staged observation into an author fact.
+   * The original source locator stays intact, while derived structured fields
+   * are cleared because they no longer describe the author's revised wording.
+   */
+  public editStagedAsUser(input: {
+    readonly contentText: string;
+    readonly actorId: string;
+    readonly humanConfirmed: unknown;
+    readonly expectedRevision: number;
+    readonly now: string;
+  }): Result<StoryFact, StoryCoreError> {
+    if (input.humanConfirmed !== true) {
+      return humanDecisionError();
+    }
+    const now = validateMutation(input.expectedRevision, input.now, this.snapshot);
+    if (!now.ok) {
+      return now;
+    }
+    if (
+      (this.snapshot.status !== "temporary" && this.snapshot.status !== "unconfirmed") ||
+      this.snapshot.locked ||
+      !isDirectLocalReviewDraft(this.snapshot)
+    ) {
+      return invalidTransition(
+        "Only an unlocked direct-local review draft can be revised as a staged fact.",
+      );
+    }
+    const contentText = validateBoundedText(input.contentText, 10_000, "Story fact content");
+    if (!contentText.ok) {
+      return contentText;
+    }
+    const actorId = parseUuidV7(input.actorId);
+    if (!actorId.ok) {
+      return actorId;
+    }
+    return StoryFact.rehydrate({
+      ...this.snapshot,
+      contentText: contentText.value,
+      structuredValue: null,
+      confidence: 1,
+      status: "formal",
+      origin: "user",
+      userConfirmed: true,
+      locked: false,
+      deprecated: false,
+      needsReview: false,
+      confirmedByActorId: actorId.value,
+      confirmedAt: now.value,
+      branchId: null,
+      revision: this.snapshot.revision + 1,
+      updatedAt: now.value,
+    });
+  }
+
   /** Rewrites only the author-facing content while preserving identity and evidence. */
   public editAsUser(input: {
     readonly contentText: string;
@@ -834,6 +903,28 @@ export function storyFactNeedsEntityAliasResolution(snapshot: StoryFactSnapshot)
   }
   const subject = structuredValue.subject;
   return isStoryValueRecord(subject) && subject.mergeStatus === "ambiguous_confirmed_alias";
+}
+
+function isDirectLocalReviewDraft(snapshot: StoryFactSnapshot): boolean {
+  if (
+    snapshot.source.kind !== "chapter_span" ||
+    !snapshot.source.reference.startsWith("direct-local:inkshadow.direct-local-story-fact.v1:") ||
+    snapshot.source.chapterId === null ||
+    snapshot.source.versionId === null ||
+    snapshot.source.startOffset === null ||
+    snapshot.source.endOffset === null ||
+    snapshot.source.sourceLength === null ||
+    snapshot.source.excerpt === null ||
+    !isStoryValueRecord(snapshot.structuredValue)
+  ) {
+    return false;
+  }
+  const payload = snapshot.structuredValue.payload;
+  return (
+    snapshot.structuredValue.schemaVersion === "inkshadow.rebuildable-system-fact.v1" &&
+    isStoryValueRecord(payload) &&
+    payload.schemaVersion === "inkshadow.direct-local-story-fact.v1"
+  );
 }
 
 function isStoryValueRecord(

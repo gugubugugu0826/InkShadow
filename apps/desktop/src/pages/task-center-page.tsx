@@ -207,7 +207,7 @@ export function TaskCenterPage() {
       });
       const queuedInput = persistedAcceptedChapterPipelineInput(queued);
       if (queuedInput === null) {
-        throw new Error("The accepted-version retry marker could not be verified after enqueue.");
+        throw new Error("任务恢复标记未能安全核对。正文没有受到影响，请导出诊断后再试。");
       }
       await ensureCurrentSavedVersionStoryFactsForDirectMode(runtime, queuedInput);
       const receipt = await runAcceptedChapterPipeline(runtime, queuedInput);
@@ -430,8 +430,10 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
                 <div>
                   <CardTitle>{taskTypeLabel(task.type)}</CardTitle>
                   <CardDescription>
-                    更新于 {formatTimestamp(task.updatedAt)} · 第 {String(task.attempt)}/
-                    {String(task.maxAttempts)} 次尝试
+                    更新于 {formatTimestamp(task.updatedAt)}
+                    {task.type === "ai.opening.generate"
+                      ? " · 本次只执行一次，不会自动重试"
+                      : ` · 第 ${String(task.attempt)}/${String(task.maxAttempts)} 次尝试`}
                   </CardDescription>
                 </div>
                 <Badge tone={TASK_STATUS_TONES[task.status]}>
@@ -446,9 +448,11 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
                 {task.progress === null ? (
                   <p className="task-card__muted">
                     {task.status === "queued"
-                      ? task.type === "ai.generate.deferred"
-                        ? "等待网络恢复；返回原章节重新检查并确认后执行。"
-                        : "等待本地执行器接手。"
+                      ? task.type === "ai.opening.generate"
+                        ? "等待你在开书页面确认发送；系统不会自行发送或重试。"
+                        : task.type === "ai.generate.deferred"
+                          ? "等待网络恢复；返回原章节重新检查并确认后执行。"
+                          : "等待本地执行器接手。"
                       : "尚未报告进度。"}
                   </p>
                 ) : (
@@ -485,8 +489,15 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
                   <>
                     <InlineAlert
                       tone="error"
-                      title="任务失败"
-                      description={taskFailureDescription(task.failure)}
+                      title={task.type === "ai.opening.generate" ? "开书生成未完成" : "任务失败"}
+                      description={
+                        <>
+                          <span>{taskFailureDescription(task.failure)}</span>{" "}
+                          {task.type === "ai.opening.generate" && (
+                            <span>{`支持编号：${task.failure.requestId}`}</span>
+                          )}
+                        </>
+                      }
                     />
                     <div className="task-failure-actions">
                       {canRetryAcceptedVersion && (
@@ -522,7 +533,11 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
                 )}
 
                 <div className="task-card__footer">
-                  {!isTerminalTask(task.status) && (
+                  {task.type === "ai.opening.generate" && task.status !== "succeeded" ? (
+                    <Link className="button-link" to="/create/idea">
+                      返回开书页面处理
+                    </Link>
+                  ) : !isTerminalTask(task.status) ? (
                     <Button
                       size="sm"
                       variant="danger"
@@ -532,7 +547,7 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
                     >
                       {task.cancelRequestedAt !== null ? "已请求取消" : "取消任务"}
                     </Button>
-                  )}
+                  ) : null}
                 </div>
               </div>
             </CardContent>
@@ -691,6 +706,7 @@ function taskTypeLabel(type: string): string {
   const labels: Record<string, string> = {
     "ai.generate": "AI 章节生成",
     "ai.generate.deferred": "等待联网的 AI 生成",
+    "ai.opening.generate": "生成开书建议",
     "ai.refine": "AI 精修",
     "import.scan": "导入扫描",
     "import.commit": "导入作品",
@@ -712,6 +728,8 @@ function progressStepLabel(step: string): string {
     "candidate.validating": "检查 AI 建议草稿是否完整",
     "candidate.persisted": "保存隔离的 AI 建议草稿",
     "candidate.finalized": "AI 建议草稿已就绪",
+    "opening.invocation": "登记本次模型调用",
+    "opening.provider_waiting": "等待模型返回",
     "stream.receive": "接收模型输出",
     "candidate.persist": "保存 AI 建议草稿",
     "import.scan": "扫描文件",
@@ -741,6 +759,8 @@ function taskFailureLabel(code: string): string {
     ACCEPTED_VERSION_PIPELINE_PARTIAL: "正文已安全保留，但部分故事资料尚未更新",
     CONSISTENCY_REPAIR_FAILED: "一致性修复建议未能完成",
     CONSISTENCY_REPAIR_RESULT_AMBIGUOUS: "模型结果不确定，未自动重发",
+    OPENING_GENERATION_FAILED: "开书建议未能完成",
+    OPENING_RESULT_PENDING_REVIEW: "调用结果需要人工核对，系统没有自动重发",
   };
   return labels[code] ?? "后台任务未能完成";
 }
