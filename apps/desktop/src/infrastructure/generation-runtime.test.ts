@@ -1537,6 +1537,53 @@ describe("governed generation runtime", () => {
     expect(cancelGeneration).toHaveBeenCalledWith(plan.generationId);
   });
 
+  it("settles a retryable provider failure after one dispatch and requires a fresh author plan", async () => {
+    const generate = vi
+      .fn<NativeModelGatewayClient["generate"]>()
+      .mockRejectedValue(new Error("temporary upstream failure"));
+    const { runtime, chapterId } = await createRemoteRuntime({ generate });
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const first = await executeGenerationPlan(runtime, plan);
+
+    expect(first).toMatchObject({
+      ok: false,
+      error: { code: "MODEL_HUB_GENERATION_FAILED", retryable: true },
+    });
+    expect(generate).toHaveBeenCalledOnce();
+    await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
+      state: "failed_final",
+      attempt: 1,
+    });
+    await expect(
+      runtime.taskCenter.findTaskByIdempotencyKey(plan.idempotencyKey),
+    ).resolves.toMatchObject({
+      status: "failed",
+      attempt: 1,
+      maxAttempts: 1,
+      runAfter: null,
+      failure: {
+        code: "MODEL_HUB_GENERATION_FAILED",
+        causeCode: null,
+        retryable: false,
+      },
+    });
+
+    const samePlan = await executeGenerationPlan(runtime, plan);
+    expect(samePlan.ok).toBe(false);
+    expect(generate).toHaveBeenCalledOnce();
+    const freshPlan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+    expect(freshPlan.taskId).not.toBe(plan.taskId);
+    expect(freshPlan.runId).not.toBe(plan.runId);
+    expect(freshPlan.idempotencyKey).not.toBe(plan.idempotencyKey);
+  });
+
   it("does not reuse an ambiguously failed Provider action as an automatic retry", async () => {
     const generate = vi
       .fn<NativeModelGatewayClient["generate"]>()

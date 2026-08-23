@@ -16,6 +16,17 @@ const CONTENT = "林澈来到钟楼。周野的真实身份是守门人。陈舟
 describe("direct local story-fact organization", () => {
   beforeEach(() => window.localStorage.clear());
 
+  it("does not present zero extracted facts as a completed organization result", () => {
+    expect(
+      directStoryFactOrganizerNotice({
+        organizedCount: 0,
+        importantReviewCount: 0,
+        alreadyOrganizedCount: 0,
+        sourceWasCurrent: true,
+      }),
+    ).toBe("正文已保存；未发现有明确原文证据的新设定。你可以用一句话添加设定。");
+  });
+
   it("expands only the changed range to its complete sentence with absolute UTF-16 offset", () => {
     expect(
       changedStoryFactOrganizationSpan(

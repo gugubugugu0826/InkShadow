@@ -995,6 +995,9 @@ export function EditorPage() {
   const flushInFlightRef = useRef<Promise<PersistenceFlushHandlerResult> | null>(null);
   const editorReplacementFenceRef = useRef(false);
   const candidateDecisionFenceRef = useRef(false);
+  const candidateGenerationFlightRef = useRef<
+    "idle" | "preparing" | "awaiting_decision" | "executing" | "deferring"
+  >("idle");
   const activeGenerationPlanRef = useRef<PreparedGenerationPlan | null>(null);
   const directionCandidateRef = useRef<AiCandidate | null>(null);
   const generationEstimate = generationPlan?.preflight.estimate ?? null;
@@ -1098,6 +1101,7 @@ export function EditorPage() {
 
   useEffect(() => {
     let resetCancelled = false;
+    candidateGenerationFlightRef.current = "idle";
     const activePlan = activeGenerationPlanRef.current;
     activeGenerationPlanRef.current = null;
     if (
@@ -1129,6 +1133,7 @@ export function EditorPage() {
     });
     return () => {
       resetCancelled = true;
+      candidateGenerationFlightRef.current = "idle";
       loadOperationRevisionRef.current += 1;
       generationOperationRevisionRef.current += 1;
       const pendingPlan = activeGenerationPlanRef.current;
@@ -1140,6 +1145,7 @@ export function EditorPage() {
   }, [chapterId, editorRouteKey, projectId, runtime]);
 
   useEffect(() => {
+    candidateGenerationFlightRef.current = "idle";
     const activePlan = activeGenerationPlanRef.current;
     activeGenerationPlanRef.current = null;
     if (activePlan !== null) {
@@ -2959,9 +2965,15 @@ export function EditorPage() {
     partialCandidateId: UuidV7 | null = null,
     directDirection: string | null = null,
   ): Promise<void> {
-    if (chapterId === null || saveState === "dirty" || saveState === "saving") {
+    if (
+      candidateGenerationFlightRef.current !== "idle" ||
+      chapterId === null ||
+      saveState === "dirty" ||
+      saveState === "saving"
+    ) {
       return;
     }
+    candidateGenerationFlightRef.current = "preparing";
     const directAtStart = directMode;
     const normalizedDirectDirection =
       directDirection === null || directDirection.trim().length === 0
@@ -3030,14 +3042,22 @@ export function EditorPage() {
         !plan.preflight.requiresConfirmation &&
         continuationActionDisclosure === null
       ) {
+        candidateGenerationFlightRef.current = "executing";
         await executePreparedGeneration(plan, operation);
       } else {
+        candidateGenerationFlightRef.current = "awaiting_decision";
         setPreflightOpen(true);
       }
     } catch (cause: unknown) {
       if (isCurrentGenerationOperation(operation)) setGenerationError(cause);
     } finally {
       if (isCurrentGenerationOperation(operation)) setCandidateBusy(false);
+      if (
+        isCurrentGenerationOperation(operation) &&
+        candidateGenerationFlightRef.current === "preparing"
+      ) {
+        candidateGenerationFlightRef.current = "idle";
+      }
     }
   }
 
@@ -3598,18 +3618,24 @@ export function EditorPage() {
         setCancelBusy(false);
         setGenerationPreview("");
         setGenerationStage("preparing");
+        candidateGenerationFlightRef.current = "idle";
       }
     }
   }
 
   async function confirmGeneration(): Promise<void> {
-    if (generationPlan === null) {
+    if (generationPlan === null || candidateGenerationFlightRef.current !== "awaiting_decision") {
       return;
     }
     const plan = generationPlan;
+    const operation = beginGenerationOperation();
+    candidateGenerationFlightRef.current = "executing";
     setDirectDisclosureSaving(true);
     try {
       const currentDisclosure = await prepareContinuationGenerationDisclosure(runtime, plan);
+      if (!isCurrentGenerationOperation(operation)) {
+        return;
+      }
       assertContinuationDisclosureMatches(continuationDisclosure, currentDisclosure);
       setContinuationDisclosure(currentDisclosure);
       const confirmedScope = continuationConfirmationScope(plan, currentDisclosure);
@@ -3617,15 +3643,24 @@ export function EditorPage() {
         rememberContinuationConfirmation(window.sessionStorage, confirmedScope);
       }
     } catch (cause: unknown) {
-      setGenerationError(cause);
+      if (isCurrentGenerationOperation(operation)) {
+        setGenerationError(cause);
+        candidateGenerationFlightRef.current = "awaiting_decision";
+      }
       return;
     } finally {
-      setDirectDisclosureSaving(false);
+      if (isCurrentGenerationOperation(operation)) {
+        setDirectDisclosureSaving(false);
+      }
     }
-    await executePreparedGeneration(plan);
+    await executePreparedGeneration(plan, operation);
   }
 
-  function closePreflightAndFocusEditor(): void {
+  function closePreflightAndFocusEditor(): boolean {
+    if (candidateGenerationFlightRef.current === "deferring") {
+      return false;
+    }
+    void beginGenerationOperation();
     const selection = normalizeEditorSelection(selectionRef.current, contentRef.current.length);
     persistEditorView(selection);
     if (generationPlan !== null) {
@@ -3634,15 +3669,19 @@ export function EditorPage() {
     setContinuationDisclosure(null);
     setContinuationConfirmationIsRemembered(false);
     setRememberContinuationConfirmationForSession(false);
+    setDirectDisclosureSaving(false);
     setPreflightOpen(false);
+    candidateGenerationFlightRef.current = "idle";
     window.requestAnimationFrame(() => {
       scheduleSelection(selection, true, scrollTopRef.current);
     });
+    return true;
   }
 
   function cancelPreflightAndFocusEditor(): void {
-    closePreflightAndFocusEditor();
-    recordCancelledProviderAction();
+    if (closePreflightAndFocusEditor()) {
+      recordCancelledProviderAction();
+    }
   }
 
   async function saveAndClosePreflight(): Promise<void> {
@@ -3669,11 +3708,16 @@ export function EditorPage() {
   }
 
   async function deferGenerationUntilOnline(): Promise<void> {
-    if (generationPlan === null || !canDeferGenerationPlan(generationPlan)) {
+    if (
+      generationPlan === null ||
+      candidateGenerationFlightRef.current !== "awaiting_decision" ||
+      !canDeferGenerationPlan(generationPlan)
+    ) {
       return;
     }
     const operation = beginGenerationOperation();
     const plan = generationPlan;
+    candidateGenerationFlightRef.current = "deferring";
     setCandidateBusy(true);
     setError(null);
     try {
@@ -3682,8 +3726,12 @@ export function EditorPage() {
       setDeferredGeneration(deferred);
       setGenerationPlan(Object.freeze({ ...plan, deferredRequest: deferred }));
       setPreflightOpen(false);
+      candidateGenerationFlightRef.current = "idle";
     } catch (cause: unknown) {
-      if (isCurrentGenerationOperation(operation)) setError(cause);
+      if (isCurrentGenerationOperation(operation)) {
+        setError(cause);
+        candidateGenerationFlightRef.current = "awaiting_decision";
+      }
     } finally {
       if (isCurrentGenerationOperation(operation)) setCandidateBusy(false);
     }
@@ -5900,6 +5948,8 @@ export function EditorPage() {
                     loading={candidateBusy}
                     disabled={
                       !editorClean ||
+                      candidateBusy ||
+                      preflightOpen ||
                       (continuationPreference.destination === "custom_instruction" &&
                         (continuationPreference.customDestinationInstruction?.trim().length ??
                           0) === 0)
@@ -6633,7 +6683,7 @@ export function EditorPage() {
       <Dialog
         open={preflightOpen}
         onOpenChange={(open) => {
-          if (!budgetSaving && !directDisclosureSaving) {
+          if (!budgetSaving && !directDisclosureSaving && !candidateBusy) {
             if (open) {
               setPreflightOpen(true);
             } else {
@@ -6648,14 +6698,14 @@ export function EditorPage() {
             <>
               <Button
                 variant="secondary"
-                disabled={budgetSaving}
+                disabled={budgetSaving || directDisclosureSaving || candidateBusy}
                 onClick={cancelPreflightAndFocusEditor}
               >
                 先自己写
               </Button>
               <Button
                 variant="secondary"
-                disabled={budgetSaving}
+                disabled={budgetSaving || directDisclosureSaving || candidateBusy}
                 onClick={() => void saveAndClosePreflight()}
               >
                 保存并关闭
@@ -6664,7 +6714,7 @@ export function EditorPage() {
                 <Button
                   variant="secondary"
                   loading={candidateBusy}
-                  disabled={budgetSaving}
+                  disabled={budgetSaving || directDisclosureSaving || candidateBusy}
                   onClick={() => void deferGenerationUntilOnline()}
                 >
                   保存待执行
@@ -6682,7 +6732,7 @@ export function EditorPage() {
             <>
               <Button
                 variant="secondary"
-                disabled={budgetSaving}
+                disabled={budgetSaving || directDisclosureSaving || candidateBusy}
                 onClick={cancelPreflightAndFocusEditor}
               >
                 暂不生成
@@ -6700,7 +6750,10 @@ export function EditorPage() {
                 variant="ai-primary"
                 loading={directDisclosureSaving}
                 disabled={
-                  !generationPlan?.preflight.canStart || budgetSaving || directDisclosureSaving
+                  !generationPlan?.preflight.canStart ||
+                  budgetSaving ||
+                  directDisclosureSaving ||
+                  candidateBusy
                 }
                 onClick={() => void confirmGeneration()}
               >

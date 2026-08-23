@@ -204,7 +204,54 @@ describe("Model Hub evidence router", () => {
     ).toBe("supported");
   });
 
-  it("routes all 16 core text tasks with only text evidence and no evaluations or embeddings", () => {
+  it("requires verified structured output before routing automatic planning tasks", () => {
+    expect(requiredCapabilitiesForNovelTask("outline_planning")).toEqual([
+      "text_generation",
+      "structured_output",
+    ]);
+    expect(requiredCapabilitiesForNovelTask("scene_breakdown")).toEqual([
+      "text_generation",
+      "structured_output",
+    ]);
+
+    const declaredOnly = candidate("declared-planning", "remote", 9000, "1000000", 400, [
+      capability("declared-planning-text", "text_generation", "supported", "user_confirmed"),
+      capability(
+        "declared-planning-structured",
+        "structured_output",
+        "supported",
+        "provider_metadata",
+      ),
+    ]);
+    const unverifiedPlan = buildModelHubRoutingPlan({
+      scheme: "smart",
+      candidates: [declaredOnly],
+      now: NOW,
+      tasks: ["outline_planning", "scene_breakdown"],
+    });
+
+    expect(unverifiedPlan.routes).toEqual([]);
+    expect(unverifiedPlan.unroutableTasks).toEqual(["outline_planning", "scene_breakdown"]);
+
+    const verified = candidate("verified-planning", "remote", 9000, "1000000", 400, [
+      capability(
+        "verified-planning-structured",
+        "structured_output",
+        "supported",
+        "lightweight_probe",
+      ),
+    ]);
+    expect(
+      buildModelHubRoutingPlan({
+        scheme: "smart",
+        candidates: [verified],
+        now: NOW,
+        tasks: ["outline_planning", "scene_breakdown"],
+      }).routes.map(({ task }) => task),
+    ).toEqual(["outline_planning", "scene_breakdown"]);
+  });
+
+  it("routes 14 ordinary text tasks without treating planning as plain text generation", () => {
     const seeded = candidate("text-only", "remote", 9000, "1000000");
     const textOnly: ModelHubRoutingCandidate = {
       ...seeded,
@@ -233,8 +280,6 @@ describe("Model Hub evidence router", () => {
       "continuation",
       "rewrite",
       "polish",
-      "outline_planning",
-      "scene_breakdown",
       "chapter_summary",
       "long_memory_compression",
       "character_extraction",
@@ -245,6 +290,8 @@ describe("Model Hub evidence router", () => {
       "content_quality_check",
     ]);
     expect(plan.unroutableTasks).toEqual([
+      "outline_planning",
+      "scene_breakdown",
       "what_if_simulation",
       "embedding",
       "rerank",

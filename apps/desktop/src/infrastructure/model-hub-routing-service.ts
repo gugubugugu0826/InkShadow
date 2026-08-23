@@ -6,12 +6,18 @@ import {
   type ModelHubRoutingCandidate,
   type ModelHubRoutingPlan,
 } from "./model-hub-router";
-import type { ModelHubStore, NovelTaskRoute } from "./model-hub-store";
+import type { ModelHubPreset, ModelHubStore, NovelTaskRoute } from "./model-hub-store";
 import {
   ModelRoutingStoreError,
   type ModelRoleRoute,
   type ModelRoutingStore,
 } from "./model-routing-store";
+
+export const MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION = "model-hub-evidence-router-v2";
+const RECALCULABLE_AUTOMATIC_ROUTE_GENERATION_VERSIONS = Object.freeze([
+  "model-hub-evidence-router-v1",
+  MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION,
+]);
 
 export interface ApplyAutomaticModelHubRoutingInput {
   readonly modelHub: ModelHubStore;
@@ -34,6 +40,28 @@ export interface AppliedModelHubRouting {
   readonly changed: boolean;
   readonly legacySyncStatus: "succeeded" | "failed";
   readonly legacySyncErrorCode: string | null;
+}
+
+export function canSafelyRecalculateAutomaticModelHubRouting(
+  input: Readonly<{
+    scheme: AutomaticModelHubScheme;
+    preset: ModelHubPreset | null;
+    routes: readonly NovelTaskRoute[];
+  }>,
+): boolean {
+  const presetId = "automatic-" + input.scheme;
+  return (
+    input.preset?.id === presetId &&
+    input.preset.scheme === input.scheme &&
+    RECALCULABLE_AUTOMATIC_ROUTE_GENERATION_VERSIONS.includes(
+      input.preset.routeGenerationVersion,
+    ) &&
+    input.routes.every(
+      ({ enabled, presetId: routePresetId, routeOrigin }) =>
+        routeOrigin === "user" ||
+        (enabled && routeOrigin === "automatic" && routePresetId === presetId),
+    )
+  );
 }
 
 export async function loadModelHubRoutingCandidates(
@@ -117,7 +145,7 @@ export async function applyAutomaticModelHubRouting(
           : input.scheme === "economy"
             ? "cost_first"
             : "balanced",
-      routeGenerationVersion: "model-hub-evidence-router-v1",
+      routeGenerationVersion: MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION,
     },
     routes: plan.routes,
   });

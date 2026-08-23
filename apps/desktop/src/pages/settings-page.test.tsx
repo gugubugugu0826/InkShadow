@@ -135,18 +135,17 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime, "/settings#writing-experience");
 
-    const mode = await screen.findByRole(
-      "combobox",
-      { name: /^默认写作方式/u },
-      { timeout: 5_000 },
+    const directMode = await screen.findByRole("button", { name: "直接写作" }, { timeout: 5_000 });
+    expect(screen.getByRole("button", { name: "专业创作" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
     );
-    await waitFor(() => expect(mode).toHaveValue("professional"));
-    await user.selectOptions(mode, "direct");
+    await user.click(directMode);
     expect(await screen.findByRole("dialog", { name: "启用直接模式前，请确认一次" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "取消" }));
     expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("professional");
 
-    await user.selectOptions(mode, "direct");
+    await user.click(directMode);
     await user.click(screen.getByRole("button", { name: "同意并启用直接模式" }));
     await waitFor(async () => {
       const preference = await runtime.writingExperience.getOrInitialize();
@@ -165,6 +164,32 @@ describe("SettingsPage model routing", () => {
         directLocalOrganizationAuthorizedAt: null,
       });
     });
+    expect(providerGenerate).not.toHaveBeenCalled();
+  });
+
+  it("finishes loading an existing professional preference and exposes both writing modes as actions", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("professional");
+    const providerGenerate = vi.spyOn(runtime.modelGateway, "generate");
+    renderRoute(runtime, "/settings#writing-experience");
+
+    const professional = await screen.findByRole(
+      "button",
+      { name: "专业创作" },
+      { timeout: 5_000 },
+    );
+    expect(professional).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "直接写作" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    const modeGroup = screen.getByRole("group", { name: "默认写作方式" });
+    const hintId = modeGroup.getAttribute("aria-describedby");
+    expect(hintId).not.toBeNull();
+    expect(document.getElementById(hintId ?? "")).toHaveTextContent(
+      "生成中切换只影响下一次操作；备份恢复后仍保留这个选择。",
+    );
+    expect(document.body).not.toHaveTextContent("正在读取本机设置");
     expect(providerGenerate).not.toHaveBeenCalled();
   });
 
@@ -2628,15 +2653,17 @@ describe("SettingsPage model routing", () => {
     const enabledRoutes = (
       await Promise.all(NOVEL_AI_TASKS.map((task) => runtime.modelHub.findTaskRoute(task)))
     ).flatMap((route) => (route?.enabled === true ? [route] : []));
-    expect(enabledRoutes).toHaveLength(16);
+    expect(enabledRoutes).toHaveLength(14);
     expect(
       enabledRoutes.every(({ primaryCatalogEntryId }) => primaryCatalogEntryId === catalog[0]?.id),
     ).toBe(true);
     await expect(runtime.modelHub.findTaskRoute("embedding")).resolves.toBeNull();
     await expect(runtime.modelHub.findTaskRoute("image_generation")).resolves.toBeNull();
+    await expect(runtime.modelHub.findTaskRoute("outline_planning")).resolves.toBeNull();
+    await expect(runtime.modelHub.findTaskRoute("scene_breakdown")).resolves.toBeNull();
   });
 
-  it("repairs the exact legacy 15-route automatic smart prefix without revising matching routes", async () => {
+  it("repairs an interrupted current automatic smart plan without revising matching routes", async () => {
     const prepared = await createReadyDeepSeekProbeRuntime("deepseek-routing-recovery");
     await prepared.runtime.modelHub.recordCapabilityScan({
       scanId: "deepseek-routing-recovery-seed-scan",
@@ -2660,7 +2687,7 @@ describe("SettingsPage model routing", () => {
       scheme: "smart",
       now: "2026-08-09T20:00:00.000Z",
     });
-    expect(seeded.savedNovelTaskCount).toBe(16);
+    expect(seeded.savedNovelTaskCount).toBe(14);
     const missingRoute = await prepared.runtime.modelHub.findTaskRoute("content_quality_check");
     const unchangedRoute = await prepared.runtime.modelHub.findTaskRoute("idea_discussion");
     if (missingRoute === null || unchangedRoute === null) {
@@ -2670,7 +2697,7 @@ describe("SettingsPage model routing", () => {
     const interruptedRoutes = (
       await Promise.all(NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)))
     ).filter((route) => route !== null);
-    expect(interruptedRoutes).toHaveLength(15);
+    expect(interruptedRoutes).toHaveLength(13);
 
     const user = userEvent.setup();
     renderRoute(prepared.runtime);
@@ -2682,11 +2709,11 @@ describe("SettingsPage model routing", () => {
 
     expect(await screen.findByText("写作能力已验证")).toBeVisible();
     await user.click(screen.getByRole("link", { name: "AI 分工" }));
-    expect(await screen.findByText("16 / 22 类已配置 · 6 类缺能力")).toBeVisible();
+    expect(await screen.findByText("14 / 22 类已配置 · 8 类缺能力")).toBeVisible();
     const recovered = (
       await Promise.all(NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)))
     ).flatMap((route) => (route?.enabled === true ? [route] : []));
-    expect(recovered).toHaveLength(16);
+    expect(recovered).toHaveLength(14);
     await expect(
       prepared.runtime.modelHub.findTaskRoute("content_quality_check"),
     ).resolves.toMatchObject({
@@ -2697,6 +2724,106 @@ describe("SettingsPage model routing", () => {
     await expect(prepared.runtime.modelHub.findTaskRoute("idea_discussion")).resolves.toEqual(
       unchangedRoute,
     );
+  });
+
+  it("recalculates a v1 automatic plan while preserving an exact manual route", async () => {
+    const prepared = await createReadyDeepSeekProbeRuntime("deepseek-routing-v1-recalculation");
+    await prepared.runtime.modelHub.recordCapabilityScan({
+      scanId: "deepseek-routing-v1-recalculation-seed-scan",
+      catalogEntryId: prepared.catalogEntryId,
+      scanKind: "user_review",
+      status: "succeeded",
+      evidenceVersion: "routing-v1-recalculation",
+      evidence: [
+        {
+          id: "deepseek-routing-v1-recalculation-text",
+          capability: "text_generation",
+          verdict: "supported",
+          evidenceSource: "user_confirmed",
+        },
+      ],
+    });
+    const seeded = await applyAutomaticModelHubRouting({
+      modelHub: prepared.runtime.modelHub,
+      legacyRouting: prepared.runtime.modelRouting,
+      legacyReadyModels: [],
+      scheme: "smart",
+      now: "2026-08-09T20:00:00.000Z",
+    });
+    expect(seeded.savedNovelTaskCount).toBe(14);
+    for (const task of ["outline_planning", "scene_breakdown"] as const) {
+      await prepared.runtime.modelHub.saveTaskRoute({
+        task,
+        primaryCatalogEntryId: prepared.catalogEntryId,
+        presetId: "automatic-smart",
+        privacyPolicy: "cloud_allowed",
+        failurePolicy: "ask_user",
+        routeOrigin: "automatic",
+        expectedRevision: null,
+      });
+    }
+    const existingManualTarget = await prepared.runtime.modelHub.findTaskRoute("prose_generation");
+    if (existingManualTarget === null) {
+      throw new Error("Expected the seeded prose route.");
+    }
+    const manual = await prepared.runtime.modelHub.saveTaskRoute({
+      task: existingManualTarget.task,
+      primaryCatalogEntryId: existingManualTarget.primaryCatalogEntryId,
+      fallbackCatalogEntryId: existingManualTarget.fallbackCatalogEntryId,
+      presetId: null,
+      parameterPolicy: existingManualTarget.parameterPolicy,
+      maximumCostMicros: existingManualTarget.maximumCostMicros,
+      currency: existingManualTarget.currency,
+      privacyPolicy: existingManualTarget.privacyPolicy,
+      failurePolicy: "stop",
+      routeOrigin: "user",
+      enabled: true,
+      expectedRevision: existingManualTarget.revision,
+    });
+    const activePreset = await prepared.runtime.modelHub.findActivePreset();
+    if (activePreset === null) {
+      throw new Error("Expected the seeded automatic preset.");
+    }
+    await prepared.runtime.modelHub.savePreset({
+      id: activePreset.id,
+      scheme: activePreset.scheme,
+      displayName: activePreset.displayName,
+      status: activePreset.status,
+      privacyPolicy: activePreset.privacyPolicy,
+      costPriority: activePreset.costPriority,
+      routeGenerationVersion: "model-hub-evidence-router-v1",
+      expectedRevision: activePreset.revision,
+    });
+
+    const before = (
+      await Promise.all(NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)))
+    ).filter((route) => route !== null);
+    expect(before).toHaveLength(16);
+
+    const user = userEvent.setup();
+    renderRoute(prepared.runtime);
+    const verifyButton = await screen.findByRole("button", {
+      name: "确认 1 次固定验证",
+    });
+    await waitFor(() => expect(verifyButton).toBeEnabled());
+    await user.click(verifyButton);
+
+    expect(await screen.findByText("写作能力已验证")).toBeVisible();
+    await waitFor(async () => {
+      await expect(prepared.runtime.modelHub.findActivePreset()).resolves.toMatchObject({
+        id: "automatic-smart",
+        routeGenerationVersion: "model-hub-evidence-router-v2",
+      });
+    });
+    await expect(prepared.runtime.modelHub.findTaskRoute("outline_planning")).resolves.toBeNull();
+    await expect(prepared.runtime.modelHub.findTaskRoute("scene_breakdown")).resolves.toBeNull();
+    await expect(prepared.runtime.modelHub.findTaskRoute("prose_generation")).resolves.toEqual(
+      manual,
+    );
+    const recalculated = (
+      await Promise.all(NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)))
+    ).filter((route) => route !== null);
+    expect(recalculated).toHaveLength(14);
   });
 
   it("keeps a successful writing probe visible when the initial routing transaction fails", async () => {
@@ -2815,15 +2942,15 @@ describe("SettingsPage model routing", () => {
 
     await user.click(screen.getByRole("button", { name: "应用 AI 分工" }));
 
-    expect(await screen.findByText("16 / 22 类已配置 · 6 类缺能力")).toBeVisible();
+    expect(await screen.findByText("14 / 22 类已配置 · 8 类缺能力")).toBeVisible();
     expect(await screen.findByText("AI 连接或分工需要修复")).toBeVisible();
     expect(screen.queryByText("AI 基础配置已可用")).not.toBeInTheDocument();
     expect(screen.getAllByText(/基础配置检查未通过.*数据去向与隐私信息尚未确认/u)).toHaveLength(10);
     expect(screen.getByRole("heading", { name: "当前模型能做什么" })).toBeVisible();
     expect(screen.getByText(/由用户确认，尚未实测 · 用户确认/u)).toBeVisible();
-    await user.click(screen.getByText("查看已配置的 16 项"));
+    await user.click(screen.getByText("查看已配置的 14 项"));
     expect(screen.getAllByText("正文生成").length).toBeGreaterThan(0);
-    await user.click(screen.getByText("查看尚未配置的 6 项"));
+    await user.click(screen.getByText("查看尚未配置的 8 项"));
     expect(screen.getAllByText("语义记忆").length).toBeGreaterThan(0);
     expect(screen.getAllByText("其他基础配置不受影响").length).toBeGreaterThan(0);
     expect(screen.getByRole("heading", { name: "完善全部功能还需要" })).toBeVisible();
@@ -2833,7 +2960,7 @@ describe("SettingsPage model routing", () => {
     const routes = (
       await Promise.all(NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)))
     ).flatMap((route) => (route?.enabled === true ? [route] : []));
-    expect(routes).toHaveLength(16);
+    expect(routes).toHaveLength(14);
   });
 
   it("keeps capability failure codes out of the ordinary Model Hub view", async () => {

@@ -444,6 +444,9 @@ export async function executeModelHubTextTask(
     });
     generatedObservation = generated;
     generatedCostMicros = calculateActualCost(target.costPrivacy, generated.usage);
+    if (executionPolicy.outputContract === "visible_text" && generated.text.trim().length === 0) {
+      throw visibleTextOutputEmptyFailure(generated);
+    }
     if (input.validateGeneratedText !== undefined) {
       try {
         const validator = input.validateGeneratedText as (text: string) => unknown;
@@ -707,10 +710,16 @@ class ModelHubResponseValidationFailure extends Error {
   public constructor(
     public readonly code: string,
     generated: NativeModelGenerationResult,
+    options: Readonly<{
+      message?: string;
+      visibleContentLength?: number;
+    }> = {},
   ) {
-    super("模型已返回，但结果不符合这项任务要求的完整结构；本次结果不会进入作品。");
+    super(
+      options.message ?? "模型已返回，但结果不符合这项任务要求的完整结构；本次结果不会进入作品。",
+    );
     this.name = "ModelHubResponseValidationFailure";
-    const visibleContentLength = Array.from(generated.text).length;
+    const visibleContentLength = options.visibleContentLength ?? Array.from(generated.text).length;
     this.diagnostics = Object.freeze({
       visibleContentLength,
       reasoningPresent:
@@ -718,6 +727,15 @@ class ModelHubResponseValidationFailure extends Error {
       stream: generated.streamed ?? null,
     });
   }
+}
+
+function visibleTextOutputEmptyFailure(
+  generated: NativeModelGenerationResult,
+): ModelHubResponseValidationFailure {
+  return new ModelHubResponseValidationFailure("MODEL_OUTPUT_EMPTY", generated, {
+    message: "模型没有返回可用于写作的可见文字；本次结果不会进入作品，也不会自动重试。",
+    visibleContentLength: 0,
+  });
 }
 
 function responseValidationFailure(

@@ -2181,7 +2181,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.2.8",
+    appVersion: "0.2.9",
     platform: "browser",
     architecture: "web",
     environment: "development",
@@ -3740,7 +3740,7 @@ export async function executeGenerationPlan(
         operation: "generate",
       },
       priority: 80,
-      maxAttempts: 3,
+      maxAttempts: 1,
       now: runtime.clock.now(),
     });
     const runResult = await runtime.generationGovernance.createRun({
@@ -4163,7 +4163,7 @@ export async function executeGenerationPlan(
         run = await runtime.generationGovernance.transitionRun({
           runId: run.id,
           expectedRevision: run.revision,
-          state: retryable ? "failed_retryable" : "failed_final",
+          state: "failed_final",
           failureCode: safeFailureCode(normalized.code),
           addIncurredCost: true,
           attemptUsage,
@@ -4174,13 +4174,11 @@ export async function executeGenerationPlan(
             plan.leaseToken,
             {
               code: safeFailureCode(normalized.code),
-              retryable,
-              actions: retryable
-                ? ["RETRY", "SWITCH_MODEL", "REDUCE_CONTEXT", "EXPORT_DIAGNOSTICS"]
-                : ["SWITCH_MODEL", "REDUCE_CONTEXT", "EXPORT_DIAGNOSTICS"],
+              retryable: false,
+              actions: ["SWITCH_MODEL", "REDUCE_CONTEXT", "EXPORT_DIAGNOSTICS"],
               requestId: plan.requestId,
             },
-            retryable ? new Date(Date.parse(runtime.clock.now()) + 1_000).toISOString() : null,
+            null,
           )
           .catch(() => undefined);
         await publishGenerationNotification(

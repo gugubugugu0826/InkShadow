@@ -1,7 +1,7 @@
 # Phase 5：图片生成最小真实闭环
 
 > 文档状态：`SUPPORTING_CURRENT`  
-> 当前应用清单：`0.2.7`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7) 未签名工程预发布；页面与模拟协议测试不代表真实图片供应商已验收。
+> 当前应用清单：`0.2.9`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7) 未签名工程预发布；页面与模拟协议测试不代表真实图片供应商已验收。
 
 更新时间：2026-08-23
 

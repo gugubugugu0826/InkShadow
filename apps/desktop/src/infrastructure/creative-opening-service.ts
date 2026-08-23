@@ -330,7 +330,9 @@ export async function executeCreativeOpeningProviderAction(
       : new Error("开头位置未能独立完成本地归档。", { cause: firstRejection });
   if (
     firstRejection !== undefined &&
-    rejectionReasons.every((reason) => reason === firstRejection)
+    rejectionReasons.every(
+      (reason) => safeModelFailureCode(reason) === safeModelFailureCode(firstRejection),
+    )
   ) {
     throw firstRejectionError;
   }
@@ -848,7 +850,8 @@ async function generateCreativeOpeningInternal(
         requestId,
       });
     } catch (cause: unknown) {
-      return localOpening(runtime, requestId, idea, direction, safeModelFailureCode(cause));
+      recordSafeGenerationErrorCode(runtime, safeModelFailureCode(cause));
+      throw cause;
     }
   }
   const messages = buildOpeningMessages(
@@ -1018,7 +1021,9 @@ async function generateCreativeOpeningInternal(
       }
       const text = combineOpeningText(partialOpening, generated.text).trim();
       if (text.length === 0) {
-        return localOpening(runtime, requestId, idea, direction, "MODEL_OUTPUT_EMPTY");
+        const failure = creativeOpeningEmptyOutputFailure(true, null);
+        recordSafeGenerationErrorCode(runtime, failure.code);
+        throw failure;
       }
       return Object.freeze({
         requestId,
@@ -1047,30 +1052,25 @@ async function generateCreativeOpeningInternal(
           try {
             await assertCreativeOpeningProjectCurrent(runtime, preparedProjectContext);
           } catch (workspaceCause: unknown) {
-            return localOpening(
-              runtime,
-              requestId,
-              idea,
-              direction,
-              safeModelFailureCode(workspaceCause),
-            );
+            recordSafeGenerationErrorCode(runtime, safeModelFailureCode(workspaceCause));
+            throw workspaceCause;
           }
         }
         return partial;
       }
-      if (
-        !(cause instanceof ModelHubExecutionError) ||
-        cause.code !== "MODEL_HUB_ROUTE_NOT_CONFIGURED"
-      ) {
-        return localOpening(runtime, requestId, idea, direction, safeModelFailureCode(cause));
-      }
+      const failure = cause;
+      recordSafeGenerationErrorCode(runtime, safeModelFailureCode(failure));
+      throw failure;
     }
   }
 
-  // Every real opening request must be traceable through Model Hub. A legacy
-  // profile cannot provide the invocation, cost, privacy and recovery receipt,
-  // so a missing route fails closed to the labelled local example.
-  return localOpening(runtime, requestId, idea, direction, "MODEL_HUB_ROUTE_NOT_CONFIGURED");
+  const failure = new ModelHubExecutionError(
+    "MODEL_HUB_GATEWAY_UNAVAILABLE",
+    "当前环境不能调用已连接的创作服务，本次请求在发送 0 字后停止。请使用桌面版或稍后重试。",
+    true,
+  );
+  recordSafeGenerationErrorCode(runtime, failure.code);
+  throw failure;
 }
 
 /** Returns the deterministic, clearly labelled local example without contacting a provider. */
@@ -1589,6 +1589,19 @@ function openingAngleInstruction(angle: CreativeOpeningAngle): string {
     case "mystery_clue":
       return "从一个异常细节或未解线索切入，但不要提前解释真相";
   }
+}
+
+function creativeOpeningEmptyOutputFailure(
+  dispatched: boolean,
+  failure: ModelHubExecutionError["failure"],
+): ModelHubExecutionError {
+  return new ModelHubExecutionError(
+    "MODEL_OUTPUT_EMPTY",
+    "模型没有返回可用于开头的可见文字。本次已明确失败且不会自动重试，可由作者稍后重新确认后再试。",
+    false,
+    dispatched,
+    failure,
+  );
 }
 
 function localOpening(

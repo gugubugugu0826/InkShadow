@@ -1,7 +1,7 @@
 # 新旧信息架构与核心用户流程
 
 > 文档状态：`AUTHORITATIVE_CURRENT`  
-> 应用清单版本：`0.2.8`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)（未签名工程预发行）；候选与标签解析提交均为 `cb97876894d6f02c4c901745c95533da7b0260fe`；设计基线：`DESIGN v0.3.1b`  
+> 应用清单版本：`0.2.9`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)（未签名工程预发行）；候选与标签解析提交均为 `cb97876894d6f02c4c901745c95533da7b0260fe`；设计基线：`DESIGN v0.3.1b`  
 > 本文定义普通用户信息架构和目标流程；实现与验证状态另见 `06`、`08` 和 `docs/execution/`。
 
 ## 1. 新旧信息架构对比

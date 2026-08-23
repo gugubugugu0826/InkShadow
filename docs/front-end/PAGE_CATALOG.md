@@ -4,7 +4,7 @@
 
 > 基于源码快照：2026-08-24  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 应用清单版本：`0.2.8`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)（未签名工程预发行）；候选与标签解析提交均为 `cb97876894d6f02c4c901745c95533da7b0260fe`；设计基线：`DESIGN v0.3.1b`  
+> 应用清单版本：`0.2.9`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)（未签名工程预发行）；候选与标签解析提交均为 `cb97876894d6f02c4c901745c95533da7b0260fe`；设计基线：`DESIGN v0.3.1b`  
 > 路由权威来源：`apps/desktop/src/app.tsx`  
 > 本文只描述当前实现；它不证明 P01–P44、真实供应商或 Windows 目标矩阵已经验收
 

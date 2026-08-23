@@ -1373,6 +1373,65 @@ describe("editor candidate route selection", () => {
     releaseTaskLookup();
   });
 
+  it("turns accepted explicit evidence into local pending settings on the production acceptance path", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const providerGenerate = vi.spyOn(runtime.modelGateway, "generate");
+    const { chapter, project } = await seedChapter(runtime, "");
+    const acceptedText = [
+      "周望是钟楼的管理员。",
+      "周望五十七岁。",
+      "周望担任钟楼管理员。",
+      "周望在旧城守了三十一年。",
+      "周望和赵伯是多年的老邻居。",
+      "钟摆倒转。",
+    ].join("");
+    const candidate = await createReadyCandidate(runtime, project, chapter, acceptedText);
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter, `?candidate=${candidate.id}`);
+
+    await user.click(await screen.findByRole("button", { name: /比较.*建议/u }));
+    const review = await screen.findByRole("dialog", { name: /比较.*建议与正文/u });
+    await user.click(within(review).getByRole("button", { name: "使用这版" }));
+
+    const storyProjectId = parseStoryUuidV7(project.id);
+    if (!storyProjectId.ok) throw storyProjectId.error;
+    await waitFor(async () => {
+      const listed = await runtime.story.facts.listByProjectId(storyProjectId.value);
+      if (!listed.ok) throw listed.error;
+      const pending = listed.value
+        .map((fact) => fact.toSnapshot())
+        .filter(({ factType }) => factType !== "chapter_summary");
+      expect(pending.length).toBeGreaterThanOrEqual(6);
+      expect(pending.map(({ factType }) => factType)).toEqual(
+        expect.arrayContaining([
+          "character_profile",
+          "location_setting",
+          "core_relationship",
+          "event_category",
+        ]),
+      );
+      expect(
+        pending.every(
+          ({ status, origin, needsReview, userConfirmed, source }) =>
+            status === "unconfirmed" &&
+            origin === "system" &&
+            needsReview &&
+            !userConfirmed &&
+            String(source.chapterId) === String(chapter.id) &&
+            source.versionId !== null &&
+            typeof source.startOffset === "number" &&
+            typeof source.endOffset === "number" &&
+            source.excerpt !== null &&
+            acceptedText.slice(source.startOffset, source.endOffset) === source.excerpt,
+        ),
+      ).toBe(true);
+    });
+    const saved = await runtime.repositories.chapters.findById(chapter.id);
+    expect(saved.ok && saved.value?.content).toBe(acceptedText);
+    expect(providerGenerate).not.toHaveBeenCalled();
+  });
+
   it("keeps the suggestion isolated when a commit receipt cannot be confirmed", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const providerGenerate = vi.spyOn(runtime.modelGateway, "generate");
@@ -2197,7 +2256,7 @@ describe("editor candidate route selection", () => {
     expect(within(review).getByRole("button", { name: "保存为新草稿" })).toBeEnabled();
   });
 
-  it.each([5_000, 10_681, 20_000, 50_000])(
+  it.each([5_000, 10_681, 20_000, 50_000, 96_088])(
     "keeps a %i-character continuation complete and reachable through the fixed decision footer",
     async (characterCount) => {
       const runtime = createDevelopmentRuntime(window.localStorage);
@@ -2241,6 +2300,18 @@ describe("editor candidate route selection", () => {
         throw versionsAfter.error;
       }
       expect(versionsAfter.value).toHaveLength(immutableVersionsBefore.length + 1);
+      const savedChapter = await runtime.repositories.chapters.findById(chapter.id);
+      if (!savedChapter.ok || savedChapter.value === null) {
+        throw new Error("接受长正文后未找到当前章节");
+      }
+      const acceptedVersion = versionsAfter.value.find(
+        (version) => version.id === savedChapter.value?.currentVersionId,
+      );
+      expect(acceptedVersion?.toSnapshot()).toMatchObject({
+        content: chapter.content + generatedContent,
+        reason: "candidate_accept",
+        sourceCandidateId: candidate.id,
+      });
       for (const immutableVersion of immutableVersionsBefore) {
         expect(
           versionsAfter.value.find((version) => version.id === immutableVersion.id)?.toSnapshot(),

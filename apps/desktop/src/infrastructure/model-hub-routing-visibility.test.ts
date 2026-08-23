@@ -57,7 +57,9 @@ describe("model hub routing visibility", () => {
               "vision",
               "translation",
             ]
-          : ["text_generation"];
+          : routeCount >= 15
+            ? ["text_generation", "structured_output"]
+            : ["text_generation"];
       const visibility = buildModelHubRoutingVisibility({
         connections: [connection()],
         catalog: [catalog()],

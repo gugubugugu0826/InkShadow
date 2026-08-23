@@ -520,12 +520,68 @@ describe("Model Hub text execution service", () => {
     expect(harness.generate).toHaveBeenCalledOnce();
   });
 
+  it("records a whitespace-only visible prose response as MODEL_OUTPUT_EMPTY before success", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "visible-prose-empty",
+      catalogEntryId: "visible-prose-empty-catalog",
+      modelId: "visible-prose-empty-model",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "continuation",
+      primaryCatalogEntryId: target.id,
+    });
+    harness.generate.mockResolvedValue({
+      text: " \n\t ",
+      usage: { inputTokens: 9, outputTokens: 4, cachedInputTokens: null },
+      streamed: true,
+    });
+    const invocationId = "019c2000-0000-7000-8000-000000000101";
+
+    await expect(
+      executeModelHubTextTask(
+        harness.dependencies,
+        request({
+          task: "continuation",
+          invocationId,
+          executionPolicy: SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "MODEL_OUTPUT_EMPTY",
+      dispatched: true,
+      retryable: false,
+      failure: {
+        stage: "response_normalization",
+        visibleContentLength: 0,
+        reasoningPresent: true,
+        stream: true,
+      },
+    });
+
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(harness.generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
+    await expect(harness.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      status: "failed",
+      attempt: 1,
+      errorCode: "MODEL_OUTPUT_EMPTY",
+      inputTokens: 9,
+      outputTokens: 4,
+      failure: {
+        stage: "response_normalization",
+        visibleContentLength: 0,
+        reasoningPresent: true,
+        stream: true,
+      },
+    });
+  });
   it("records an HTTP 200 structured schema rejection as failed before success is committed", async () => {
     const harness = createHarness();
     const target = await seedTarget(harness.modelHub, {
       connectionId: "structured-response-validation",
       catalogEntryId: "structured-response-validation-catalog",
       modelId: "structured-writer",
+      includeStructuredCapability: true,
     });
     await saveRoute(harness.modelHub, {
       task: "outline_planning",
@@ -592,6 +648,7 @@ describe("Model Hub text execution service", () => {
       connectionId: `structured-invalid-${String(response.length)}`,
       catalogEntryId: `structured-invalid-${String(response.length)}-catalog`,
       modelId: "structured-invalid-model",
+      includeStructuredCapability: true,
     });
     await saveRoute(harness.modelHub, {
       task: "outline_planning",
@@ -644,6 +701,7 @@ describe("Model Hub text execution service", () => {
       connectionId: "structured-reasoning-only",
       catalogEntryId: "structured-reasoning-only-catalog",
       modelId: "reasoning-model",
+      includeStructuredCapability: true,
     });
     await saveRoute(harness.modelHub, {
       task: "outline_planning",
@@ -1523,6 +1581,7 @@ describe("Model Hub text execution service", () => {
       connectionId: "structured-complete",
       catalogEntryId: "structured-complete-catalog",
       modelId: "structured-complete-model",
+      includeStructuredCapability: true,
     });
     await saveRoute(harness.modelHub, {
       task: "outline_planning",
@@ -1560,6 +1619,7 @@ describe("Model Hub text execution service", () => {
       connectionId: "structured-stream-interrupted",
       catalogEntryId: "structured-stream-interrupted-catalog",
       modelId: "structured-stream-interrupted-model",
+      includeStructuredCapability: true,
     });
     await saveRoute(harness.modelHub, {
       task: "outline_planning",
@@ -1609,6 +1669,7 @@ describe("Model Hub text execution service", () => {
       connectionId: "structured-length-finish",
       catalogEntryId: "structured-length-finish-catalog",
       modelId: "structured-length-finish-model",
+      includeStructuredCapability: true,
     });
     await saveRoute(harness.modelHub, {
       task: "outline_planning",
@@ -1663,6 +1724,7 @@ describe("Model Hub text execution service", () => {
       connectionId: "structured-manual-retry",
       catalogEntryId: "structured-manual-retry-catalog",
       modelId: "structured-manual-retry-model",
+      includeStructuredCapability: true,
     });
     await saveRoute(harness.modelHub, {
       task: "outline_planning",
@@ -1784,6 +1846,7 @@ async function seedTarget(
     providerKind?: ModelProviderKind;
     connectionReady?: boolean;
     includeTextCapability?: boolean;
+    includeStructuredCapability?: boolean;
     destination?: "local" | "remote";
     lifecycle?: ModelCatalogEntry["lifecycle"];
     staleAfter?: string | null;
@@ -1854,6 +1917,16 @@ async function seedTarget(
           verdict: "supported",
           evidenceSource: "lightweight_probe",
         },
+        ...(input.includeStructuredCapability === true
+          ? [
+              {
+                id: input.connectionId + "-structured-evidence",
+                capability: "structured_output" as const,
+                verdict: "supported" as const,
+                evidenceSource: "lightweight_probe" as const,
+              },
+            ]
+          : []),
       ],
     });
   }

@@ -13,7 +13,7 @@
 
 > 文档状态：`AUTHORITATIVE_CURRENT`  
 > `v0.2.7` 发布迁移上限：Data `0075` / Tauri `78`  
-> 规则：只向前追加；应用清单为 `0.2.7`，最新公开版本为 [`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7) 未签名工程预发行；候选与标签解析提交均为 `cb97876894d6f02c4c901745c95533da7b0260fe`。
+> 规则：只向前追加；应用清单为 `0.2.9`，最新公开版本为 [`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7) 未签名工程预发行；候选与标签解析提交均为 `cb97876894d6f02c4c901745c95533da7b0260fe`。
 
 `0072`–`0075` / Tauri `75`–`78` 已随 `v0.2.7` 最终候选冻结公开。
 最终候选、远端门禁、未签名打包和公开预发行已经完成；真实旧库升级与 Windows 安装程序备份恢复仍未执行；

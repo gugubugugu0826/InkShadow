@@ -26,7 +26,7 @@ if (!parsedNow.ok) {
 const clock = { now: () => parsedNow.value };
 
 describe("automatic Model Hub routing application", () => {
-  it("persists the 16 compatible core routes for text-only evidence without evaluations", async () => {
+  it("persists the 14 safely routable text tasks without unverified planning routes", async () => {
     const storage = new MemoryStorage();
     const modelCenter = new BrowserDevelopmentModelCenterStore(storage, clock);
     const legacyRouting = new BrowserDevelopmentModelRoutingStore(storage, clock, modelCenter);
@@ -50,8 +50,8 @@ describe("automatic Model Hub routing application", () => {
       await Promise.all(NOVEL_AI_TASKS.map((task) => modelHub.findTaskRoute(task)))
     ).filter((route) => route !== null);
 
-    expect(applied.savedNovelTaskCount).toBe(16);
-    expect(savedRoutes).toHaveLength(16);
+    expect(applied.savedNovelTaskCount).toBe(14);
+    expect(savedRoutes).toHaveLength(14);
     expect(savedRoutes.map(({ task }) => task)).toEqual(
       expect.arrayContaining([
         "book_start_guidance",
@@ -68,7 +68,9 @@ describe("automatic Model Hub routing application", () => {
     const reopenedRoutes = (
       await Promise.all(NOVEL_AI_TASKS.map((task) => reopened.findTaskRoute(task)))
     ).filter((route) => route !== null);
-    expect(reopenedRoutes).toHaveLength(16);
+    expect(reopenedRoutes).toHaveLength(14);
+    await expect(reopened.findTaskRoute("outline_planning")).resolves.toBeNull();
+    await expect(reopened.findTaskRoute("scene_breakdown")).resolves.toBeNull();
     await expect(reopened.listCapabilityEvidence("text-only-catalog")).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -79,7 +81,7 @@ describe("automatic Model Hub routing application", () => {
     );
   });
 
-  it("persists all text routes in production SQLite without price or evaluation metadata", async () => {
+  it("persists only safely routable text tasks in production SQLite", async () => {
     const executor = new NodeSqliteExecutor(modelHubMigration());
     const modelHub = new TauriModelHubStore(executor, clock);
     const storage = new MemoryStorage();
@@ -102,7 +104,7 @@ describe("automatic Model Hub routing application", () => {
       now: NOW,
     });
 
-    expect(applied.savedNovelTaskCount).toBe(16);
+    expect(applied.savedNovelTaskCount).toBe(14);
     await expect(modelHub.findTaskRoute("content_quality_check")).resolves.toMatchObject({
       routeOrigin: "automatic",
       primaryCatalogEntryId: "sqlite-text-catalog",
@@ -111,7 +113,9 @@ describe("automatic Model Hub routing application", () => {
     const reopenedRoutes = (
       await Promise.all(NOVEL_AI_TASKS.map((task) => reopened.findTaskRoute(task)))
     ).filter((route) => route !== null);
-    expect(reopenedRoutes).toHaveLength(16);
+    expect(reopenedRoutes).toHaveLength(14);
+    await expect(reopened.findTaskRoute("outline_planning")).resolves.toBeNull();
+    await expect(reopened.findTaskRoute("scene_breakdown")).resolves.toBeNull();
     await executor.close();
   });
 
@@ -143,8 +147,83 @@ describe("automatic Model Hub routing application", () => {
       now: NOW,
     });
 
-    expect(applied.savedNovelTaskCount).toBe(16);
+    expect(applied.savedNovelTaskCount).toBe(14);
     expect(applied.plan.unroutableTasks).toContain("embedding");
+    expect(applied.plan.unroutableTasks).toEqual(
+      expect.arrayContaining(["outline_planning", "scene_breakdown"]),
+    );
+  });
+
+  it("recomputes legacy automatic planning routes without changing a manual route", async () => {
+    const storage = new MemoryStorage();
+    const modelCenter = new BrowserDevelopmentModelCenterStore(storage, clock);
+    const legacyRouting = new BrowserDevelopmentModelRoutingStore(storage, clock, modelCenter);
+    const modelHub = new BrowserDevelopmentModelHubStore(storage, clock);
+    await seedCandidate(modelHub, {
+      connectionId: "legacy-routing-provider",
+      catalogEntryId: "legacy-routing-catalog",
+      modelId: "legacy-routing-model",
+      destination: "remote",
+      textOnly: true,
+    });
+    await modelHub.savePreset({
+      id: "automatic-smart",
+      scheme: "smart",
+      displayName: "智能推荐",
+      status: "active",
+      privacyPolicy: "cloud_allowed",
+      costPriority: "balanced",
+      routeGenerationVersion: "model-hub-evidence-router-v1",
+      expectedRevision: null,
+    });
+    for (const task of ["outline_planning", "scene_breakdown"] as const) {
+      await modelHub.saveTaskRoute({
+        task,
+        primaryCatalogEntryId: "legacy-routing-catalog",
+        presetId: "automatic-smart",
+        privacyPolicy: "cloud_allowed",
+        failurePolicy: "ask_user",
+        routeOrigin: "automatic",
+        expectedRevision: null,
+      });
+    }
+    const manual = await modelHub.saveTaskRoute({
+      task: "prose_generation",
+      primaryCatalogEntryId: "legacy-routing-catalog",
+      privacyPolicy: "cloud_allowed",
+      failurePolicy: "stop",
+      routeOrigin: "user",
+      expectedRevision: null,
+    });
+
+    const applied = await applyAutomaticModelHubRouting({
+      modelHub,
+      legacyRouting,
+      legacyReadyModels: [],
+      scheme: "smart",
+      now: NOW,
+    });
+
+    expect(applied).toMatchObject({
+      savedNovelTaskCount: 14,
+      preservedUserRouteCount: 1,
+      changed: true,
+    });
+    expect(applied.plan.unroutableTasks).toEqual(
+      expect.arrayContaining(["outline_planning", "scene_breakdown"]),
+    );
+    await expect(modelHub.findActivePreset()).resolves.toMatchObject({
+      id: "automatic-smart",
+      routeGenerationVersion: "model-hub-evidence-router-v2",
+    });
+    await expect(modelHub.findTaskRoute("outline_planning")).resolves.toBeNull();
+    await expect(modelHub.findTaskRoute("scene_breakdown")).resolves.toBeNull();
+    await expect(modelHub.findTaskRoute("prose_generation")).resolves.toEqual(manual);
+
+    const reopened = new BrowserDevelopmentModelHubStore(storage, clock);
+    await expect(reopened.findTaskRoute("outline_planning")).resolves.toBeNull();
+    await expect(reopened.findTaskRoute("scene_breakdown")).resolves.toBeNull();
+    await expect(reopened.findTaskRoute("prose_generation")).resolves.toEqual(manual);
   });
 
   it("keeps the committed Model Hub plan when the rebuildable legacy projection is unavailable", async () => {
@@ -172,7 +251,7 @@ describe("automatic Model Hub routing application", () => {
     });
 
     expect(applied).toMatchObject({
-      savedNovelTaskCount: 16,
+      savedNovelTaskCount: 14,
       savedLegacyRoleCount: 0,
       legacySyncStatus: "failed",
       legacySyncErrorCode: "MODEL_HUB_LEGACY_SYNC_FAILED",

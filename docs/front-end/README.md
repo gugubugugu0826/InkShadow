@@ -4,7 +4,7 @@
 
 > 文档状态：`SUPPORTING_CURRENT`  
 > 基于源码复核：2026-08-23  
-> 应用清单版本：`0.2.8`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)（未签名工程预发行）；候选与标签解析提交均为 `cb97876894d6f02c4c901745c95533da7b0260fe`  
+> 应用清单版本：`0.2.9`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)（未签名工程预发行）；候选与标签解析提交均为 `cb97876894d6f02c4c901745c95533da7b0260fe`  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
 > 文档性质：实现现状说明；页面存在不等于 P01–P44 已验证
 

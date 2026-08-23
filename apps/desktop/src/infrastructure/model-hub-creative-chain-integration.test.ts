@@ -846,28 +846,24 @@ describe("real creative chains use Model Hub routes", () => {
     };
     const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
 
-    const results = await executeCreativeOpeningProviderAction(harness.runtime, {
-      ...action,
-      humanConfirmed: true,
-      disclosureFingerprint: disclosure.fingerprint,
-      onInvocationPrepared: async () => {
-        await harness.runtime.projectSeeds.saveForProject(
-          chapter.projectId,
-          createProjectSeed({
-            seedId: harness.runtime.ids.next(),
-            journeyKind: "idea",
-            premise: "这是确认后才出现的新来源，不能沿用旧披露发送。",
-            now: harness.runtime.clock.now(),
-          }),
-        );
-      },
-    });
-
-    expect(results).toHaveLength(1);
-    expect(results[0]).toMatchObject({
-      source: "local_fallback",
-      noticeCode: "CREATIVE_OPENING_DISCLOSURE_CHANGED",
-    });
+    await expect(
+      executeCreativeOpeningProviderAction(harness.runtime, {
+        ...action,
+        humanConfirmed: true,
+        disclosureFingerprint: disclosure.fingerprint,
+        onInvocationPrepared: async () => {
+          await harness.runtime.projectSeeds.saveForProject(
+            chapter.projectId,
+            createProjectSeed({
+              seedId: harness.runtime.ids.next(),
+              journeyKind: "idea",
+              premise: "这是确认后才出现的新来源，不能沿用旧披露发送。",
+              now: harness.runtime.clock.now(),
+            }),
+          );
+        },
+      }),
+    ).rejects.toMatchObject({ code: "CREATIVE_OPENING_DISCLOSURE_CHANGED" });
     expect(harness.generate).not.toHaveBeenCalled();
   });
 
@@ -892,22 +888,21 @@ describe("real creative chains use Model Hub routes", () => {
     };
     const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
 
-    const results = await executeCreativeOpeningProviderAction(harness.runtime, {
-      ...action,
-      humanConfirmed: true,
-      disclosureFingerprint: disclosure.fingerprint,
-      onInvocationPrepared: async () => {
-        const changed = await harness.runtime.useCases.setChapterPrivacy.execute({
-          chapterId: chapter.id,
-          privacyMode: "local_only",
-          expectedPrivacyRevision: chapter.privacyRevision,
-        });
-        if (!changed.ok) throw changed.error;
-      },
-    });
-
-    expect(results).toHaveLength(1);
-    expect(results[0]).toMatchObject({ source: "local_fallback" });
+    await expect(
+      executeCreativeOpeningProviderAction(harness.runtime, {
+        ...action,
+        humanConfirmed: true,
+        disclosureFingerprint: disclosure.fingerprint,
+        onInvocationPrepared: async () => {
+          const changed = await harness.runtime.useCases.setChapterPrivacy.execute({
+            chapterId: chapter.id,
+            privacyMode: "local_only",
+            expectedPrivacyRevision: chapter.privacyRevision,
+          });
+          if (!changed.ok) throw changed.error;
+        },
+      }),
+    ).rejects.toMatchObject({ code: "PROJECT_CONTEXT_PRIVACY_CHANGED" });
     expect(harness.generate).not.toHaveBeenCalled();
   });
 
@@ -1022,6 +1017,102 @@ describe("real creative chains use Model Hub routes", () => {
     );
   });
 
+  it("fails before invocation when opening project context preparation fails", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-context-failure",
+      catalogEntryId: "opening-context-failure-catalog",
+      modelId: "opening-context-failure-model",
+    });
+    const requestId = "opening-context-failure-request";
+    const preparationFailure = vi
+      .spyOn(harness.runtime.projectSeeds, "findByProjectId")
+      .mockRejectedValue(
+        Object.assign(new Error("simulated project context read failure"), {
+          code: "PROJECT_SEED_READ_FAILED",
+        }),
+      );
+
+    await expect(
+      generateCreativeOpening(harness.runtime, {
+        idea: "旧钟楼的影子在午夜指向了不存在的街道。",
+        requestId,
+        projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      }),
+    ).rejects.toMatchObject({ code: "PROJECT_SEED_READ_FAILED" });
+
+    expect(preparationFailure).toHaveBeenCalledOnce();
+    expect(harness.generate).not.toHaveBeenCalled();
+    await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toBeNull();
+  });
+
+  it("records an empty provider response as a failed invocation without a local story", async () => {
+    const harness = createNativeHarness();
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-empty-output",
+      catalogEntryId: "opening-empty-output-catalog",
+      modelId: "opening-empty-output-model",
+    });
+    const requestId = "opening-empty-output-request";
+    harness.generate.mockResolvedValue({ text: "", usage: null });
+
+    await expect(
+      generateCreativeOpening(harness.runtime, {
+        idea: "一张没有收件人的明信片每天都会换一句话。",
+        requestId,
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_OUTPUT_EMPTY", dispatched: true });
+
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(harness.generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
+    await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toMatchObject({
+      status: "failed",
+      attempt: 1,
+      errorCode: "MODEL_OUTPUT_EMPTY",
+    });
+  });
+
+  it("keeps a dispatched network interruption pending for review and never retries", async () => {
+    const harness = createNativeHarness();
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-ambiguous-provider",
+      catalogEntryId: "opening-ambiguous-provider-catalog",
+      modelId: "opening-ambiguous-provider-model",
+    });
+    const requestId = "opening-ambiguous-provider-request";
+    harness.generate.mockRejectedValue(
+      Object.assign(new Error("simulated connection loss after dispatch"), {
+        code: "MODEL_NETWORK_INTERRUPTED",
+        retryable: true,
+      }),
+    );
+
+    await expect(
+      generateCreativeOpening(harness.runtime, {
+        idea: "最后一班列车驶入了地图上不存在的站台。",
+        requestId,
+      }),
+    ).rejects.toMatchObject({
+      code: "PROVIDER_RESULT_AMBIGUOUS",
+      dispatched: true,
+      retryable: false,
+    });
+
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(harness.generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
+    await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toMatchObject({
+      status: "timed_out",
+      attempt: 1,
+      errorCode: "PROVIDER_RESULT_AMBIGUOUS",
+    });
+  });
   it("exposes only a sufficiently visible DeepSeek truncation as an explicit partial opening", async () => {
     const harness = createNativeHarness();
     await seedModelHubTextRoute(harness.runtime.modelHub, {
@@ -1061,7 +1152,7 @@ describe("real creative chains use Model Hub routes", () => {
     });
   });
 
-  it("does not present a short truncated opening as provider content", async () => {
+  it("rejects a short truncated opening without substituting a local story", async () => {
     const harness = createNativeHarness();
     await seedModelHubTextRoute(harness.runtime.modelHub, {
       task: "book_start_guidance",
@@ -1077,20 +1168,14 @@ describe("real creative chains use Model Hub routes", () => {
       );
     });
 
-    const result = await generateCreativeOpening(harness.runtime, {
-      idea: "停电后，只有影子仍在移动。",
-      requestId: "deepseek-short-opening",
-    });
-
-    expect(result).toMatchObject({
-      requestId: "deepseek-short-opening",
-      source: "local_fallback",
-      completion: "complete",
-      providerId: null,
-      modelId: null,
-      noticeCode: "MODEL_OUTPUT_TRUNCATED",
-    });
-    expect(result.text).not.toContain("太短");
+    await expect(
+      generateCreativeOpening(harness.runtime, {
+        idea: "停电后，只有影子仍在移动。",
+        requestId: "deepseek-short-opening",
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_OUTPUT_TRUNCATED", dispatched: true });
+    expect(harness.generate).toHaveBeenCalledOnce();
+    expect(harness.generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
   });
 
   it("fails closed before a remote provider receives a private opening workspace", async () => {
@@ -1110,19 +1195,13 @@ describe("real creative chains use Model Hub routes", () => {
       modelId: "remote-private-opening-model",
     });
 
-    const result = await generateCreativeOpening(harness.runtime, {
-      idea: "这段灵感只能在本地处理。",
-      requestId: "private-opening-request",
-      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
-    });
-
-    expect(result).toMatchObject({
-      requestId: "private-opening-request",
-      source: "local_fallback",
-      providerId: null,
-      modelId: null,
-      contextTraceId: null,
-    });
+    await expect(
+      generateCreativeOpening(harness.runtime, {
+        idea: "这段灵感只能在本地处理。",
+        requestId: "private-opening-request",
+        projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      }),
+    ).rejects.toMatchObject({ code: "PRIVATE_CHAPTER_LOCAL_ONLY", dispatched: false });
     expect(harness.generate).not.toHaveBeenCalled();
     await expectStableChapter(harness.runtime, chapter.id, "");
     await expectCandidateCount(harness.runtime, chapter.id, 0);
@@ -1158,18 +1237,14 @@ describe("real creative chains use Model Hub routes", () => {
       return { text: "This stale opening must be discarded.", usage: null };
     });
 
-    const result = await generateCreativeOpening(harness.runtime, {
-      idea: "A station appears only after midnight.",
-      requestId: harness.runtime.ids.next(),
-      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
-    });
-
-    expect(result).toMatchObject({
-      source: "local_fallback",
-      noticeCode: "CREATIVE_OPENING_WORKSPACE_CHANGED",
-      contextTraceId: null,
-    });
-    expect(result.text).not.toContain("stale opening");
+    await expect(
+      generateCreativeOpening(harness.runtime, {
+        idea: "A station appears only after midnight.",
+        requestId: harness.runtime.ids.next(),
+        projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      }),
+    ).rejects.toMatchObject({ code: "CREATIVE_OPENING_WORKSPACE_CHANGED" });
+    expect(harness.generate).toHaveBeenCalledOnce();
     await expectCandidateCount(harness.runtime, chapter.id, 0);
     const versions = await harness.runtime.repositories.chapterVersions.listByChapterId(chapter.id);
     expect(versions.ok && versions.value).toHaveLength(2);
@@ -1223,7 +1298,7 @@ describe("real creative chains use Model Hub routes", () => {
     await expectCandidateCount(harness.runtime, chapter.id, 0);
   });
 
-  it("keeps opening generation local when only a legacy profile exists", async () => {
+  it("fails when only a legacy profile exists instead of inventing a local story", async () => {
     const harness = createNativeHarness();
     await seedLegacyProfile(harness.runtime, "legacy-opening", "legacy-opening-model");
     harness.listModels.mockResolvedValue({
@@ -1232,18 +1307,17 @@ describe("real creative chains use Model Hub routes", () => {
     });
     harness.generate.mockResolvedValue({ text: "旧配置生成的开头。", usage: null });
 
-    const result = await generateCreativeOpening(harness.runtime, {
-      idea: "一名学徒发现导师留下的密室",
-      requestId: "legacy-opening-request",
-    });
-
-    expect(result).toMatchObject({ source: "local_fallback", providerId: null, modelId: null });
-    expect(result.text).not.toBe("旧配置生成的开头。");
+    await expect(
+      generateCreativeOpening(harness.runtime, {
+        idea: "一名学徒发现导师留下的密室",
+        requestId: "legacy-opening-request",
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_ROUTE_NOT_CONFIGURED", dispatched: false });
     expect(harness.listModels).not.toHaveBeenCalled();
     expect(harness.generate).not.toHaveBeenCalled();
   });
 
-  it("keeps all three opening slots local when no governed route exists", async () => {
+  it("fails all three slots when no governed route exists without legacy calls", async () => {
     const harness = createNativeHarness();
     await seedVersionedModelHubBackedLegacyProfile(harness.runtime, {
       providerId: "versioned-opening",
@@ -1270,7 +1344,7 @@ describe("real creative chains use Model Hub routes", () => {
       "versioned-opening-slot-2",
       "versioned-opening-slot-3",
     ];
-    const results = await Promise.all(
+    const results = await Promise.allSettled(
       requestIds.map((requestId) =>
         generateCreativeOpening(harness.runtime, {
           idea: "A letter arrives from a forgotten future.",
@@ -1281,10 +1355,11 @@ describe("real creative chains use Model Hub routes", () => {
 
     expect(results).toHaveLength(3);
     for (const result of results) {
-      expect(result).toMatchObject({
-        source: "local_fallback",
-        providerId: null,
-        modelId: null,
+      expect(result.status).toBe("rejected");
+      if (result.status === "fulfilled") throw new Error("缺少任务分工时不得返回本地故事。");
+      expect(result.reason).toMatchObject({
+        code: "MODEL_HUB_ROUTE_NOT_CONFIGURED",
+        dispatched: false,
       });
     }
     expect(harness.credentialSummary).not.toHaveBeenCalled();
@@ -1305,17 +1380,12 @@ describe("real creative chains use Model Hub routes", () => {
       includeCapability: false,
     });
 
-    const result = await generateCreativeOpening(harness.runtime, {
-      idea: "被时间遗忘的小镇重新出现",
-      requestId: "blocked-opening-request",
-    });
-
-    expect(result).toMatchObject({
-      source: "local_fallback",
-      providerId: null,
-      modelId: null,
-      noticeCode: "MODEL_HUB_CAPABILITY_NOT_VERIFIED",
-    });
+    await expect(
+      generateCreativeOpening(harness.runtime, {
+        idea: "被时间遗忘的小镇重新出现",
+        requestId: "blocked-opening-request",
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_HUB_CAPABILITY_NOT_VERIFIED", dispatched: false });
     expect(harness.listModels).not.toHaveBeenCalled();
     expect(harness.generate).not.toHaveBeenCalled();
   });

@@ -100,7 +100,10 @@ import {
   projectModelHubReadiness,
   type ModelHubReadinessProjection,
 } from "../infrastructure/model-hub-readiness";
-import { applyAutomaticModelHubRouting } from "../infrastructure/model-hub-routing-service";
+import {
+  applyAutomaticModelHubRouting,
+  canSafelyRecalculateAutomaticModelHubRouting,
+} from "../infrastructure/model-hub-routing-service";
 import {
   MODEL_HUB_TASK_GROUPS,
   buildModelHubRoutingVisibility,
@@ -2512,15 +2515,15 @@ export function SettingsPage() {
     );
     if (persistedRoutes.length > 0) {
       const activePreset = await runtime.modelHub.findActivePreset();
-      const canRecoverInterruptedSmartPlan =
-        persistedRoutes.length === 15 &&
-        activePreset?.id === "automatic-smart" &&
-        activePreset.scheme === "smart" &&
-        persistedRoutes.every(
-          ({ enabled, presetId, routeOrigin }) =>
-            enabled && presetId === "automatic-smart" && routeOrigin === "automatic",
-        );
-      if (!canRecoverInterruptedSmartPlan) return null;
+      if (
+        !canSafelyRecalculateAutomaticModelHubRouting({
+          scheme: "smart",
+          preset: activePreset,
+          routes: persistedRoutes,
+        })
+      ) {
+        return null;
+      }
     }
     const currentProfiles = await runtime.modelCenter.listProfiles();
     if (!modelHubOperationCoordinatorRef.current.isCurrent(token)) return null;
@@ -4467,31 +4470,55 @@ export function SettingsPage() {
                   hint="生成中切换只影响下一次操作；备份恢复后仍保留这个选择。"
                 >
                   {(fieldProps) => (
-                    <Select
+                    <div
                       {...fieldProps}
-                      value={writingExperience.preference?.mode ?? ""}
-                      placeholder="正在读取本机设置"
-                      disabled={
-                        writingExperience.loading ||
-                        writingExperience.switching ||
-                        writingExperience.preference === null
-                      }
-                      options={[
-                        { value: "direct", label: "直接写作" },
-                        { value: "professional", label: "专业创作" },
-                      ]}
-                      onChange={(event) => {
-                        const mode = event.currentTarget.value;
-                        if (
-                          mode === "direct" &&
-                          writingExperience.preference?.directLocalOrganizationAuthorizedAt === null
-                        ) {
-                          setDirectAuthorizationOpen(true);
-                        } else if (mode === "direct" || mode === "professional") {
-                          void writingExperience.switchMode(mode);
+                      className="settings-actions"
+                      role="group"
+                      aria-label="默认写作方式"
+                    >
+                      <Button
+                        type="button"
+                        variant={
+                          writingExperience.preference?.mode === "direct" ? "primary" : "secondary"
                         }
-                      }}
-                    />
+                        aria-pressed={writingExperience.preference?.mode === "direct"}
+                        disabled={
+                          writingExperience.loading ||
+                          writingExperience.switching ||
+                          writingExperience.preference === null
+                        }
+                        onClick={() => {
+                          if (
+                            writingExperience.preference?.mode !== "direct" &&
+                            writingExperience.preference?.directLocalOrganizationAuthorizedAt ===
+                              null
+                          ) {
+                            setDirectAuthorizationOpen(true);
+                          } else {
+                            void writingExperience.switchMode("direct");
+                          }
+                        }}
+                      >
+                        直接写作
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={
+                          writingExperience.preference?.mode === "professional"
+                            ? "primary"
+                            : "secondary"
+                        }
+                        aria-pressed={writingExperience.preference?.mode === "professional"}
+                        disabled={
+                          writingExperience.loading ||
+                          writingExperience.switching ||
+                          writingExperience.preference === null
+                        }
+                        onClick={() => void writingExperience.switchMode("professional")}
+                      >
+                        专业创作
+                      </Button>
+                    </div>
                   )}
                 </FormField>
                 <InlineAlert

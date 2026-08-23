@@ -1221,5 +1221,8 @@ function explicitCharacterLocationOccurrence(
 export function directStoryFactOrganizerNotice(receipt: DirectStoryFactOrganizerReceipt): string {
   if (!receipt.sourceWasCurrent) return "正文已保存；本地整理已跳过过期版本。";
   const total = receipt.organizedCount + receipt.importantReviewCount;
+  if (total === 0) {
+    return "正文已保存；未发现有明确原文证据的新设定。你可以用一句话添加设定。";
+  }
   return `已整理 ${String(total)} 条设定`;
 }
