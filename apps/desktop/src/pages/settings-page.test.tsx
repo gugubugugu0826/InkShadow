@@ -625,7 +625,7 @@ describe("SettingsPage model routing", () => {
     expect(within(confirmation).getByText(/固定用户句：雨停了。/u)).toBeVisible();
     expect(within(confirmation).getByText(/最大输出：\s*64 个输出内容额度/u)).toBeVisible();
     expect(
-      within(confirmation).getByText(/最大模型服务调用：\s*1 次；自动重试：\s*0 次/u),
+      within(confirmation).getByText(/最多向模型服务发送：\s*1 次；自动重试：\s*0 次/u),
     ).toBeVisible();
     expect(within(confirmation).getByText(/费用上限：暂无法估算/u)).toBeVisible();
     expect(generate).not.toHaveBeenCalled();
@@ -1548,7 +1548,7 @@ describe("SettingsPage model routing", () => {
     expect(within(dialog).getByText(/永久停止这条连接参与选择、推荐和 AI 分工/u)).toBeVisible();
     expect(within(dialog).getByText("退役不同于删除凭据或暂时停用")).toBeVisible();
     expect(
-      within(dialog).getByText(/正文、AI 建议版本、模型调用记录和费用凭据不会删除/u),
+      within(dialog).getByText(/正文、AI 建议版本、模型使用记录和费用凭据不会删除/u),
     ).toBeVisible();
 
     await user.click(within(dialog).getByRole("button", { name: "确认退役连接" }));
@@ -2812,7 +2812,7 @@ describe("SettingsPage model routing", () => {
     await waitFor(async () => {
       await expect(prepared.runtime.modelHub.findActivePreset()).resolves.toMatchObject({
         id: "automatic-smart",
-        routeGenerationVersion: "model-hub-evidence-router-v2",
+        routeGenerationVersion: "model-hub-evidence-router-v3",
       });
     });
     await expect(prepared.runtime.modelHub.findTaskRoute("outline_planning")).resolves.toBeNull();
@@ -3092,7 +3092,7 @@ describe("SettingsPage model routing", () => {
     expect(textGeneration).not.toBeNull();
     expect(within(textGeneration as HTMLElement).getByText(/结果待核对/u)).toBeVisible();
     expect(
-      within(textGeneration as HTMLElement).getByText(/调用结果无法确认，系统不会自动重发/u),
+      within(textGeneration as HTMLElement).getByText(/这次发送的结果需要核对，系统不会自动重发/u),
     ).toBeVisible();
     expect(screen.getByText("最近结果待核对")).toBeVisible();
     expect(screen.queryByText("验证失败")).not.toBeInTheDocument();

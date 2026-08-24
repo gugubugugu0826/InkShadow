@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Chapter, Project } from "@inkshadow/domain";
 import {
   Badge,
@@ -18,8 +18,17 @@ import {
 import { Link, useParams } from "react-router-dom";
 import { parseUuidV7 } from "@inkshadow/domain";
 
+import {
+  captureMountedComponentPath,
+  useComponentOwnershipPath,
+} from "../components/component-ownership-context";
 import { useOnlineStatus } from "../hooks/use-online-status";
 import { useWritingExperience } from "../hooks/use-writing-experience";
+import {
+  recordProjectAreaReadIncident,
+  recoverUiRouteIncident,
+  type ProjectAreaReadStage,
+} from "../infrastructure/ui-route-diagnostics";
 import { normalizeUiError, projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 import {
@@ -35,7 +44,9 @@ export function WorkspacePage() {
   const writingExperience = useWritingExperience();
   const professionalMode = writingExperience.preference?.mode === "professional";
   const params = useParams<{ projectId: string }>();
-  const parsedProjectId = parseUuidV7(params.projectId ?? "");
+  const diagnosticRoute = `/projects/${params.projectId ?? ""}`;
+  const componentOwnershipPath = useComponentOwnershipPath("WorkspacePage");
+  const parsedProjectId = useMemo(() => parseUuidV7(params.projectId ?? ""), [params.projectId]);
   const projectId = parsedProjectId.ok ? parsedProjectId.value : null;
   const [project, setProject] = useState<Project | null>(null);
   const [chapters, setChapters] = useState<readonly Chapter[]>([]);
@@ -54,9 +65,42 @@ export function WorkspacePage() {
   const [insightsLoading, setInsightsLoading] = useState(false);
   const [insightsError, setInsightsError] = useState<unknown>(null);
   const [pendingCandidateChapterId, setPendingCandidateChapterId] = useState<string | null>(null);
+  const loadSequence = useRef(0);
+  const routeIdentityRef = useRef(diagnosticRoute);
+  const operationSequence = useRef(0);
+  useLayoutEffect(() => {
+    routeIdentityRef.current = diagnosticRoute;
+    operationSequence.current += 1;
+    return () => {
+      routeIdentityRef.current = "";
+      operationSequence.current += 1;
+    };
+  }, [diagnosticRoute]);
+  const insightsLoadSequence = useRef(0);
+  const activeLoadIncident = useRef<Readonly<{ id: string; route: string }> | null>(null);
+  const [loadSupportId, setLoadSupportId] = useState<string | null>(null);
+
+  const recordLoadFailure = useCallback(
+    (readStage: ProjectAreaReadStage, cause: unknown, reasonCodeChain: readonly string[]) => {
+      const incident = recordProjectAreaReadIncident(runtime, {
+        route: diagnosticRoute,
+        readStage,
+        cause,
+        timestamp: runtime.clock.now(),
+        componentName: "WorkspacePage",
+        reasonCodeChain,
+        componentStack: captureMountedComponentPath(componentOwnershipPath),
+      });
+      activeLoadIncident.current = { id: incident.diagnosticId, route: diagnosticRoute };
+      setLoadSupportId(incident.diagnosticId);
+    },
+    [componentOwnershipPath, diagnosticRoute, runtime],
+  );
 
   const loadInsights = useCallback(
     async (chapterList: readonly Chapter[]): Promise<void> => {
+      const requestSequence = insightsLoadSequence.current + 1;
+      insightsLoadSequence.current = requestSequence;
       setInsightsLoading(true);
       setInsightsError(null);
       const rows = await Promise.all(
@@ -68,6 +112,7 @@ export function WorkspacePage() {
           return { chapter, versions, candidates } as const;
         }),
       );
+      if (insightsLoadSequence.current !== requestSequence) return;
       const failedRow = rows.find(({ versions, candidates }) => !versions.ok || !candidates.ok);
       if (failedRow !== undefined) {
         setInsightsError(
@@ -112,7 +157,18 @@ export function WorkspacePage() {
   );
 
   const load = useCallback(async () => {
+    const expectedRoute = diagnosticRoute;
+    if (routeIdentityRef.current !== expectedRoute) return;
+    const requestSequence = loadSequence.current + 1;
+    loadSequence.current = requestSequence;
+    insightsLoadSequence.current += 1;
+    setLoadSupportId(null);
     if (projectId === null) {
+      const cause = parsedProjectId.ok ? new Error("项目编号不可用") : parsedProjectId.error;
+      recordLoadFailure("route_identity", cause, ["INVALID_UUID"]);
+      setProject(null);
+      setChapters([]);
+      setLoadError(cause);
       setPageState("fatal_error");
       return;
     }
@@ -121,32 +177,53 @@ export function WorkspacePage() {
       runtime.repositories.projects.findById(projectId),
       runtime.repositories.chapters.listByProjectId(projectId),
     ]);
-    if (!projectResult.ok || !chapterResult.ok || projectResult.value === null) {
-      setLoadError(
-        !projectResult.ok
-          ? projectResult.error
-          : !chapterResult.ok
-            ? chapterResult.error
-            : new Error("项目不存在"),
-      );
+    if (loadSequence.current !== requestSequence || routeIdentityRef.current !== expectedRoute)
+      return;
+    if (!projectResult.ok) {
+      recordLoadFailure("project", projectResult.error, ["REPOSITORY_ERROR"]);
+      setLoadError(projectResult.error);
+      setPageState("fatal_error");
+      return;
+    }
+    if (projectResult.value === null) {
+      const cause = Object.assign(new Error("项目不存在"), { code: "PROJECT_NOT_FOUND" });
+      recordLoadFailure("project", cause, ["PROJECT_NOT_FOUND"]);
+      setLoadError(cause);
+      setPageState("fatal_error");
+      return;
+    }
+    if (!chapterResult.ok) {
+      recordLoadFailure("chapter_list", chapterResult.error, ["REPOSITORY_ERROR"]);
+      setLoadError(chapterResult.error);
       setPageState("fatal_error");
       return;
     }
     setProject(projectResult.value);
     setChapters(chapterResult.value);
+    if (activeLoadIncident.current?.route === diagnosticRoute) {
+      recoverUiRouteIncident(runtime, activeLoadIncident.current.id, runtime.clock.now());
+      activeLoadIncident.current = null;
+    }
     setLoadError(null);
     setPageState(chapterResult.value.length === 0 ? "empty" : "ready");
     void loadInsights(chapterResult.value);
-  }, [loadInsights, projectId, runtime]);
+  }, [diagnosticRoute, loadInsights, parsedProjectId, projectId, recordLoadFailure, runtime]);
 
   useEffect(() => {
     void Promise.resolve().then(load);
+    return () => {
+      loadSequence.current += 1;
+      insightsLoadSequence.current += 1;
+      operationSequence.current += 1;
+    };
   }, [load]);
 
   async function createChapter(): Promise<void> {
     if (projectId === null) {
       return;
     }
+    const operationRoute = diagnosticRoute;
+    const operationRevision = ++operationSequence.current;
     setSubmitting(true);
     setFormError(null);
     const result = await runtime.useCases.createChapter.execute({
@@ -154,6 +231,11 @@ export function WorkspacePage() {
       title,
       privacyMode: createLocalOnly ? "local_only" : "standard",
     });
+    if (
+      routeIdentityRef.current !== operationRoute ||
+      operationSequence.current !== operationRevision
+    )
+      return;
     setSubmitting(false);
     if (!result.ok) {
       setFormError(normalizeUiError(result.error).description);
@@ -270,7 +352,9 @@ export function WorkspacePage() {
             normalizedError === null ? undefined : (
               <ErrorState
                 title={normalizedError.title}
-                description={normalizedError.description}
+                description={`${normalizedError.description}${
+                  loadSupportId === null ? "" : ` 支持编号：${loadSupportId}。`
+                }`}
                 primaryAction={{ label: "重试", onClick: () => void load() }}
               />
             ),

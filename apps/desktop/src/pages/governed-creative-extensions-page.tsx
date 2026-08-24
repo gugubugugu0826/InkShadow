@@ -406,7 +406,7 @@ export function GovernedCreativeExtensionsPage({
       setPreparedRetry(next);
       setPreflight(next);
       setAnnouncement(
-        `已准备第 ${String(next.retry?.attempt ?? 1)} 次尝试；这会产生新的预算预留和费用记录。`,
+        `已准备第 ${String(next.retry?.attempt ?? 1)} 次尝试；这会产生新的预算占用和费用记录。`,
       );
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (error: unknown) {
@@ -735,7 +735,7 @@ export function GovernedCreativeExtensionsPage({
                     <span>
                       {preflight === null
                         ? "等待预检"
-                        : `${formatMicros(preflight.estimate.maximumCostMicros, preflight.estimate.currency)} 最大内部预留`}
+                        : `${formatMicros(preflight.estimate.maximumCostMicros, preflight.estimate.currency)} 本次最高费用估算`}
                     </span>
                   </div>
                   <div className="governed-extensions-actions">
@@ -856,7 +856,7 @@ export function GovernedCreativeExtensionsPage({
                         ? `${formatMicros(
                             selectedRequest.usage.calculatedCostMicros,
                             selectedRequest.pricing.currency,
-                          )}（最大预留估算）`
+                          )}（本次最高费用估算）`
                         : "未知"
                   }
                 />

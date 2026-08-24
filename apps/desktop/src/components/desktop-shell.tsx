@@ -63,7 +63,7 @@ function pageTitle(pathname: string): string {
     return "任务与通知";
   }
   if (pathname === "/usage") {
-    return "调用与费用";
+    return "模型使用与费用";
   }
   if (pathname.endsWith("/multi-agent-review")) {
     return "深度审稿";
@@ -582,13 +582,13 @@ export function DesktopShell({ children }: DesktopShellProps) {
                 `desktop-navigation__link${isActive ? " is-active" : ""}`
               }
               to="/usage"
-              aria-label="调用与费用"
+              aria-label="模型使用与费用"
               onClick={() => setNavigationOpen(false)}
             >
               <span className="desktop-navigation__marker" aria-hidden="true">
                 <InkIcon name="clock" decorative size={20} />
               </span>
-              <span className="desktop-navigation__label">调用与费用</span>
+              <span className="desktop-navigation__label">模型使用与费用</span>
             </NavLink>
             <Link
               className={`desktop-navigation__link${modelHubActive ? " is-active" : ""}`}

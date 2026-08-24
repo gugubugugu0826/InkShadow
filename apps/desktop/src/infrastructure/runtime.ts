@@ -593,10 +593,11 @@ export interface NativeModelGenerationInput {
   /**
    * Optional content-free ledger fence written by the native gateway after
    * request validation/privacy leasing and immediately before network work.
-   * It is accepted only for a running `capability_probe` invocation.
+   * It is accepted only for the exact running text invocation and task.
    */
   readonly invocationDispatchLedger?: Readonly<{
     invocationId: string;
+    taskSnapshot: string;
     expectedRevision: number;
     connectionId: string;
     connectionRevision: number;
@@ -605,7 +606,11 @@ export interface NativeModelGenerationInput {
     providerKindSnapshot: string;
     modelIdSnapshot: string;
   }>;
-  /** Runs only after the native gateway durably wrote the dispatch receipt. */
+  /**
+   * Runs only after the native gateway durably wrote the dispatch receipt.
+   * Observer failures are isolated from the already-started native transport;
+   * they must not remove its listener or trigger another send.
+   */
   readonly onInvocationDispatchAccepted?: (
     receipt: NativeModelInvocationDispatchReceipt,
   ) => void | Promise<void>;
@@ -629,6 +634,8 @@ export interface NativeModelGenerationResult {
   readonly usage: NativeModelGenerationUsage | null;
   /** Authoritative native transport observation; absent only in legacy test doubles. */
   readonly streamed?: boolean;
+  /** Content-free advanced diagnostic: a post-receipt local observer failed. */
+  readonly localDispatchObservationFailed?: true;
 }
 
 export interface NativeModelGatewayClient extends NativeEmbeddingGatewayClient {
@@ -921,6 +928,7 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
       let accumulated = "";
       let dispatchBoundarySettled = input.invocationDispatchLedger === undefined;
       let pendingTerminal: (() => void) | null = null;
+      let localDispatchObservationFailed = false;
 
       const cleanup = () => {
         if (timeoutId !== null) {
@@ -971,6 +979,7 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
             text: accumulated,
             usage: validatedUsage,
             ...(streamed === undefined ? {} : { streamed }),
+            ...(localDispatchObservationFailed ? { localDispatchObservationFailed: true } : {}),
           }),
         );
       };
@@ -1082,7 +1091,15 @@ export class TauriNativeModelGatewayClient implements NativeModelGatewayClient {
             accepted.invocationDispatchReceipt,
             input.invocationDispatchLedger,
           );
-          await input.onInvocationDispatchAccepted?.(receipt);
+          try {
+            await input.onInvocationDispatchAccepted?.(receipt);
+          } catch {
+            localDispatchObservationFailed = true;
+            // The native ledger already proves that Provider dispatch started.
+            // A stale page/local projection may fail after navigation, but it
+            // cannot cancel the native request, remove its event listener, or
+            // manufacture a second send. The observer owns local diagnostics.
+          }
           dispatchBoundarySettled = true;
           const terminal = pendingTerminal as (() => void) | null;
           pendingTerminal = null;
@@ -2181,7 +2198,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.2.9",
+    appVersion: "0.2.10",
     platform: "browser",
     architecture: "web",
     environment: "development",

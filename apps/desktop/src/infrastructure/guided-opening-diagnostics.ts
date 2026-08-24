@@ -4,7 +4,7 @@ export interface SafeGuidedOpeningStatus {
   readonly inputValidation: GuidedOpeningInputValidation;
   readonly batchId: string | null;
   readonly batchState: "idle" | "pending" | "settled";
-  readonly slotStates: readonly ("pending" | "ready" | "partial" | "failed")[];
+  readonly slotStates: readonly ("pending" | "ready" | "partial" | "review" | "failed")[];
   readonly selectedSlot: string | null;
   readonly plannerMode: "not_started" | "planning" | "ai" | "deterministic_fallback";
   readonly questionCount: number;

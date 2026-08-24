@@ -366,7 +366,7 @@ export function StudioTeamTemplatesPage({
         <InlineAlert
           tone="error"
           title="团队模板操作未完成"
-          description={`${failure.message}（${failure.code}）`}
+          description={failure.message}
           {...(partial === null
             ? {}
             : {
@@ -517,7 +517,7 @@ function TemplateCard(props: {
           <>
             <CardTitle headingLevel={2}>无法解密此模板</CardTitle>
             <CardDescription>
-              <code>{item.errorCode}</code>
+              此模板未通过解密或完整性校验，已隔离；其他模板不受影响。
             </CardDescription>
           </>
         )}

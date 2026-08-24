@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Chapter, Project } from "@inkshadow/domain";
 import { parseUuidV7 as parseDomainUuid } from "@inkshadow/domain";
 import {
@@ -24,8 +24,17 @@ import {
 } from "@inkshadow/ui";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
+import {
+  captureMountedComponentPath,
+  useComponentOwnershipPath,
+} from "../components/component-ownership-context";
 import { StoryPlanningPanel } from "../components/story-planning-panel";
 import type { ChapterSummaryDashboardEntry } from "../infrastructure/chapter-summary-service";
+import {
+  recordProjectAreaReadIncident,
+  recoverUiRouteIncident,
+  type ProjectAreaReadStage,
+} from "../infrastructure/ui-route-diagnostics";
 import { projectOrdinaryUiError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 
@@ -65,6 +74,8 @@ export function StoryOutlinePage() {
   const navigate = useNavigate();
   const params = useParams<{ projectId: string }>();
   const projectIdParameter = params.projectId ?? "";
+  const diagnosticRoute = `/projects/${projectIdParameter}/outline`;
+  const componentOwnershipPath = useComponentOwnershipPath("StoryOutlinePage");
   const domainProjectId = useMemo(() => parseDomainUuid(projectIdParameter), [projectIdParameter]);
   const storyProjectId = useMemo(() => parseStoryUuid(projectIdParameter), [projectIdParameter]);
   const identifierError = !domainProjectId.ok
@@ -86,9 +97,56 @@ export function StoryOutlinePage() {
   const [addTarget, setAddTarget] = useState<AddTarget | null>(null);
   const [editingNode, setEditingNode] = useState<OutlineNodeSnapshot | null>(null);
   const [title, setTitle] = useState("");
+  const loadSequence = useRef(0);
+  const routeIdentityRef = useRef(diagnosticRoute);
+  const operationSequence = useRef(0);
+  useLayoutEffect(() => {
+    routeIdentityRef.current = diagnosticRoute;
+    operationSequence.current += 1;
+    return () => {
+      routeIdentityRef.current = "";
+      operationSequence.current += 1;
+    };
+  }, [diagnosticRoute]);
+  const activeLoadIncident = useRef<Readonly<{ id: string; route: string }> | null>(null);
+  const [loadSupportId, setLoadSupportId] = useState<string | null>(null);
+  const [derivedReadWarning, setDerivedReadWarning] = useState<Readonly<{
+    section: string;
+    supportId: string;
+  }> | null>(null);
+
+  const recordLoadFailure = useCallback(
+    (readStage: ProjectAreaReadStage, cause: unknown, reasonCodeChain: readonly string[]) => {
+      const incident = recordProjectAreaReadIncident(runtime, {
+        route: diagnosticRoute,
+        readStage,
+        cause,
+        timestamp: runtime.clock.now(),
+        componentName: "StoryOutlinePage",
+        reasonCodeChain,
+        componentStack: captureMountedComponentPath(componentOwnershipPath),
+      });
+      activeLoadIncident.current = { id: incident.diagnosticId, route: diagnosticRoute };
+      setLoadSupportId(incident.diagnosticId);
+      return incident.diagnosticId;
+    },
+    [componentOwnershipPath, diagnosticRoute, runtime],
+  );
 
   const load = useCallback(async () => {
+    const expectedRoute = diagnosticRoute;
+    if (routeIdentityRef.current !== expectedRoute) return;
+    const requestSequence = loadSequence.current + 1;
+    loadSequence.current = requestSequence;
+    setLoadSupportId(null);
     if (!domainProjectId.ok || !storyProjectId.ok) {
+      const cause = identifierError ?? new Error("项目编号不可用");
+      recordLoadFailure("route_identity", cause, ["INVALID_UUID"]);
+      setProject(null);
+      setWrittenChapters([]);
+      setChapterSummaries([]);
+      setOutline(null);
+      setError(cause);
       setPageState("fatal_error");
       return;
     }
@@ -97,38 +155,75 @@ export function StoryOutlinePage() {
       runtime.repositories.projects.findById(domainProjectId.value),
       runtime.story.outlines.findByProjectId(storyProjectId.value),
       runtime.repositories.chapters.listByProjectId(domainProjectId.value),
-      runtime.story.chapterSummaries.inspectProject(projectIdParameter).catch(() => null),
+      runtime.story.chapterSummaries.inspectProject(projectIdParameter).then(
+        (dashboard) => Object.freeze({ ok: true as const, dashboard }),
+        (cause: unknown) => Object.freeze({ ok: false as const, cause }),
+      ),
     ]);
+    if (loadSequence.current !== requestSequence || routeIdentityRef.current !== expectedRoute)
+      return;
     if (!projectResult.ok) {
+      recordLoadFailure("project", projectResult.error, ["REPOSITORY_ERROR"]);
       setError(projectResult.error);
       setPageState("fatal_error");
       return;
     }
     if (projectResult.value === null) {
-      setError(new Error("项目不存在"));
+      const cause = Object.assign(new Error("项目不存在"), { code: "PROJECT_NOT_FOUND" });
+      recordLoadFailure("project", cause, ["PROJECT_NOT_FOUND"]);
+      setError(cause);
       setPageState("fatal_error");
       return;
     }
     if (!outlineResult.ok) {
+      recordLoadFailure("outline", outlineResult.error, ["REPOSITORY_ERROR"]);
       setError(outlineResult.error);
       setPageState("fatal_error");
       return;
     }
     if (!chapterResult.ok) {
+      recordLoadFailure("chapter_list", chapterResult.error, ["REPOSITORY_ERROR"]);
       setError(chapterResult.error);
       setPageState("fatal_error");
       return;
     }
     setProject(projectResult.value);
     setWrittenChapters(chapterResult.value.filter(({ status }) => status === "active"));
-    setChapterSummaries(summaryDashboard?.entries ?? []);
+    setChapterSummaries(
+      summaryDashboard.ok ? summaryDashboard.dashboard.entries : Object.freeze([]),
+    );
     setOutline(outlineResult.value);
+    if (activeLoadIncident.current?.route === diagnosticRoute) {
+      recoverUiRouteIncident(runtime, activeLoadIncident.current.id, runtime.clock.now());
+      activeLoadIncident.current = null;
+    }
     setError(null);
+    if (summaryDashboard.ok) {
+      setDerivedReadWarning(null);
+    } else {
+      const supportId = recordLoadFailure("outline", summaryDashboard.cause, ["REPOSITORY_ERROR"]);
+      setDerivedReadWarning({
+        section: "章节摘要",
+        supportId,
+      });
+    }
     setPageState(outlineResult.value === null ? "empty" : "ready");
-  }, [domainProjectId, projectIdParameter, runtime, storyProjectId]);
+  }, [
+    diagnosticRoute,
+    domainProjectId,
+    identifierError,
+    projectIdParameter,
+    recordLoadFailure,
+    runtime,
+    storyProjectId,
+  ]);
 
   useEffect(() => {
     void Promise.resolve().then(load);
+    return () => {
+      loadSequence.current += 1;
+      operationSequence.current += 1;
+    };
   }, [load]);
 
   const snapshot = outline?.toSnapshot() ?? null;
@@ -140,17 +235,31 @@ export function StoryOutlinePage() {
   const readonly = project?.status !== "active";
   const normalizedError = error === null ? null : projectOrdinaryUiError(error);
   const currentOutline = outline;
+  function beginOperation(): Readonly<{ route: string; sequence: number }> {
+    const sequence = operationSequence.current + 1;
+    operationSequence.current = sequence;
+    return Object.freeze({ route: diagnosticRoute, sequence });
+  }
+
+  function isCurrentOperation(operation: Readonly<{ route: string; sequence: number }>): boolean {
+    return (
+      routeIdentityRef.current === operation.route &&
+      operationSequence.current === operation.sequence
+    );
+  }
 
   async function createOutline(): Promise<void> {
     if (project === null || busy) {
       return;
     }
     setBusy(true);
+    const operation = beginOperation();
     const result = await runtime.story.outlineService.create({
       projectId: project.id,
       title: project.name,
       synopsis: "在这里把长篇拆分为卷与章节；不使用 AI 也可完整编辑。",
     });
+    if (!isCurrentOperation(operation)) return;
     setBusy(false);
     if (!result.ok) {
       setError(result.error);
@@ -167,11 +276,13 @@ export function StoryOutlinePage() {
       return false;
     }
     setBusy(true);
+    const operation = beginOperation();
     const result = await runtime.story.outlineService.apply({
       projectId: project.id,
       expectedRevision: outline.revision,
       change,
     });
+    if (!isCurrentOperation(operation)) return false;
     setBusy(false);
     if (!result.ok) {
       setError(result.error);
@@ -256,6 +367,14 @@ export function StoryOutlinePage() {
           tone="warning"
           title="浏览器开发模式"
           description="此处仅使用浏览器调试存储验证交互；桌面发行版使用同一领域规则和本地数据库事务。"
+        />
+      )}
+
+      {derivedReadWarning !== null && (
+        <InlineAlert
+          tone="warning"
+          title="章节摘要暂不可用"
+          description={`${derivedReadWarning.section}没有读取成功；正文和大纲仍可使用，也没有删除任何记录。支持编号：${derivedReadWarning.supportId}。`}
         />
       )}
 
@@ -356,7 +475,9 @@ export function StoryOutlinePage() {
             normalizedError === null ? undefined : (
               <ErrorState
                 title={normalizedError.title}
-                description={normalizedError.description}
+                description={`${normalizedError.description}${
+                  loadSupportId === null ? "" : ` 支持编号：${loadSupportId}。`
+                }`}
                 primaryAction={{ label: "重试", onClick: () => void load() }}
               />
             ),

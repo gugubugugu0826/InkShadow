@@ -141,7 +141,10 @@ export function StoryPlanningPanel({
       } as const;
       if (disclosure === null) {
         setDisclosure(await service.prepareGeneration(request));
-        setNotice({ title: "发送信息已准备好", message: "确认前不会调用 AI。请核对后再继续。" });
+        setNotice({
+          title: "发送信息已准备好",
+          message: "确认前不会向 AI 发送内容。请核对后再继续。",
+        });
         return;
       }
       const outcome = await service.generate({
@@ -400,7 +403,7 @@ export function StoryPlanningPanel({
           {disclosure !== null && (
             <InlineAlert
               tone="warning"
-              title="确认后会调用 1 次"
+              title="确认后会发送 1 次"
               description={`${disclosure.connectionDisplayName} · ${disclosure.modelId}；${disclosure.privacy} 发送内容：${disclosure.sends.join("；")}。自动重试 0 次；${formatPlanningCost(disclosure)}。`}
               onDismiss={() => setDisclosure(null)}
             />
@@ -428,7 +431,7 @@ export function StoryPlanningPanel({
               disabled={busyAction !== null}
               onClick={() => setDisclosure(null)}
             >
-              取消，不调用
+              取消，不发送
             </Button>
           )}
 
@@ -495,7 +498,7 @@ export function StoryPlanningPanel({
                       <p>
                         使用模型 {candidate.modelId}
                         {candidate.usedFallback ? "（备用模型）" : ""} ·
-                        本次模型结果已记录，可在调用与费用中核对
+                        本次模型结果已记录，可在模型使用与费用中核对
                       </p>
                     </div>
                     <Badge tone={candidateStatusTone(candidate.status)}>
@@ -742,7 +745,7 @@ function planningFailureMessage(
     return {
       title: `${actionName}结果尚未保存`,
       message:
-        "模型结果已经返回，但待审阅建议没有安全保存。正式大纲和正文没有改变；请先核对调用记录，避免重复提交。",
+        "模型结果已经返回，但待审阅建议没有安全保存。正式大纲和正文没有改变；请先查看模型使用记录，避免重复发送。",
       supportId: incident.supportId,
     };
   }
@@ -750,7 +753,7 @@ function planningFailureMessage(
     return {
       title: `${actionName}发送信息尚未准备好`,
       message:
-        "准备发送信息时发现所选模型尚未通过规划格式检查。本次调用 0 次；请在 AI 模型中完成能力验证后重试。",
+        "准备发送信息时发现所选模型尚未通过规划格式检查。本次没有向模型服务发送内容；请在 AI 模型中完成能力验证后重试。",
       supportId: incident.supportId,
     };
   }
@@ -760,7 +763,8 @@ function planningFailureMessage(
   ) {
     return {
       title: `${actionName}发送信息尚未准备好`,
-      message: "准备发送信息时没有找到可用的剧情规划分工。本次调用 0 次；请先选择模型后重试。",
+      message:
+        "准备发送信息时没有找到可用的剧情规划分工。本次没有向模型服务发送内容；请先选择模型后重试。",
       supportId: incident.supportId,
     };
   }
@@ -803,9 +807,9 @@ function planningFailureStage(cause: unknown, dispatched: boolean | "unknown"): 
 }
 
 function dispatchStateMessage(dispatched: boolean | "unknown"): string {
-  if (dispatched === false) return "本次调用 0 次。";
-  if (dispatched === true) return "调用已经开始，请先核对调用记录，避免重复提交。";
-  return "是否已经发送暂时无法确认，请先核对调用记录，避免重复提交。";
+  if (dispatched === false) return "本次没有向模型服务发送内容。";
+  if (dispatched === true) return "内容已经发送，请先查看模型使用记录，避免重复发送。";
+  return "是否已经发送暂时无法确认，请先查看模型使用记录，避免重复发送。";
 }
 
 function safeCauseCode(cause: unknown): string {

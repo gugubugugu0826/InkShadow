@@ -18,7 +18,15 @@ import {
   InlineAlert,
   Select,
 } from "@inkshadow/ui";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import {
@@ -51,6 +59,15 @@ import { useWritingExperience } from "../hooks/use-writing-experience";
 import { projectOrdinaryUiError, UiActionError } from "../infrastructure/ui-error";
 import { useRuntime } from "../runtime-context";
 import { ConsistencyInvestigationPanel } from "../components/consistency-investigation-panel";
+import {
+  captureMountedComponentPath,
+  useComponentOwnershipPath,
+} from "../components/component-ownership-context";
+import {
+  recordProjectAreaReadIncident,
+  recoverUiRouteIncident,
+  type ProjectAreaReadStage,
+} from "../infrastructure/ui-route-diagnostics";
 
 const checkCategories = [
   ["人物与事实", "人物身份、生死、年龄、关系、能力和物品归属是否前后一致。"],
@@ -131,9 +148,25 @@ export function ProjectChecksPage() {
   const parsedProjectId = useMemo(() => parseUuidV7(projectIdValue), [projectIdValue]);
   const projectId = parsedProjectId.ok ? parsedProjectId.value : null;
   const projectRoot = `/projects/${projectIdValue}`;
+  const diagnosticRoute = `${projectRoot}/checks`;
+  const componentOwnershipPath = useComponentOwnershipPath("ProjectChecksPage");
   const [chapters, setChapters] = useState<readonly Chapter[]>([]);
   const [selectedChapterId, setSelectedChapterId] = useState("");
   const [loading, setLoading] = useState(true);
+  const chapterListLoadSequence = useRef(0);
+  const routeIdentityRef = useRef(diagnosticRoute);
+  const checkOperationSequence = useRef(0);
+  useLayoutEffect(() => {
+    routeIdentityRef.current = diagnosticRoute;
+    checkOperationSequence.current += 1;
+    return () => {
+      routeIdentityRef.current = "";
+      checkOperationSequence.current += 1;
+    };
+  }, [diagnosticRoute]);
+
+  const activeLoadIncident = useRef<Readonly<{ id: string; route: string }> | null>(null);
+  const [loadSupportId, setLoadSupportId] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   const snapshotLoadSequence = useRef(0);
@@ -156,33 +189,92 @@ export function ProjectChecksPage() {
   >([]);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
 
+  const recordLoadFailure = useCallback(
+    (readStage: ProjectAreaReadStage, cause: unknown, reasonCodeChain: readonly string[]) => {
+      const incident = recordProjectAreaReadIncident(runtime, {
+        route: diagnosticRoute,
+        readStage,
+        cause,
+        timestamp: runtime.clock.now(),
+        componentName: "ProjectChecksPage",
+        reasonCodeChain,
+        componentStack: captureMountedComponentPath(componentOwnershipPath),
+      });
+      activeLoadIncident.current = { id: incident.diagnosticId, route: diagnosticRoute };
+      setLoadSupportId(incident.diagnosticId);
+    },
+    [componentOwnershipPath, diagnosticRoute, runtime],
+  );
+
   const loadChapters = useCallback(async (): Promise<void> => {
+    const requestSequence = chapterListLoadSequence.current + 1;
+    const expectedRoute = diagnosticRoute;
+    if (routeIdentityRef.current !== expectedRoute) return;
+    chapterListLoadSequence.current = requestSequence;
+    setLoadSupportId(null);
     if (projectId === null) {
+      const cause = parsedProjectId.ok ? new Error("项目编号不可用") : parsedProjectId.error;
+      recordLoadFailure("route_identity", cause, ["INVALID_UUID"]);
+      setChapters([]);
+      setSelectedChapterId("");
+      setLoadError(cause);
       setLoading(false);
       return;
     }
     setLoading(true);
-    const loaded = await runtime.repositories.chapters.listByProjectId(projectId);
-    if (!loaded.ok) {
-      setLoadError(loaded.error);
+    const [projectResult, chapterResult] = await Promise.all([
+      runtime.repositories.projects.findById(projectId),
+      runtime.repositories.chapters.listByProjectId(projectId),
+    ]);
+    if (
+      chapterListLoadSequence.current !== requestSequence ||
+      routeIdentityRef.current !== expectedRoute
+    )
+      return;
+    if (!projectResult.ok) {
+      recordLoadFailure("project", projectResult.error, ["REPOSITORY_ERROR"]);
+      setLoadError(projectResult.error);
       setLoading(false);
       return;
     }
-    const active = loaded.value.filter((chapter) => chapter.status === "active");
+    if (projectResult.value === null) {
+      const cause = Object.assign(new Error("项目不存在"), { code: "PROJECT_NOT_FOUND" });
+      recordLoadFailure("project", cause, ["PROJECT_NOT_FOUND"]);
+      setLoadError(cause);
+      setLoading(false);
+      return;
+    }
+    if (!chapterResult.ok) {
+      recordLoadFailure("chapter_list", chapterResult.error, ["REPOSITORY_ERROR"]);
+      setLoadError(chapterResult.error);
+      setLoading(false);
+      return;
+    }
+    const active = chapterResult.value.filter((chapter) => chapter.status === "active");
     setChapters(active);
     setSelectedChapterId((current) =>
       active.some(({ id }) => id === current) ? current : (active[0]?.id ?? ""),
     );
+    if (activeLoadIncident.current?.route === diagnosticRoute) {
+      recoverUiRouteIncident(runtime, activeLoadIncident.current.id, runtime.clock.now());
+      activeLoadIncident.current = null;
+    }
     setLoadError(null);
+    setLoadSupportId(null);
     setLoading(false);
-  }, [projectId, runtime]);
+  }, [diagnosticRoute, parsedProjectId, projectId, recordLoadFailure, runtime]);
 
   useEffect(() => {
     void Promise.resolve().then(loadChapters);
+    return () => {
+      chapterListLoadSequence.current += 1;
+      checkOperationSequence.current += 1;
+    };
   }, [loadChapters]);
 
   useEffect(() => {
     const requestSequence = snapshotLoadSequence.current + 1;
+    checkOperationSequence.current += 1;
     snapshotLoadSequence.current = requestSequence;
     void Promise.resolve().then(async () => {
       if (snapshotLoadSequence.current !== requestSequence) return;
@@ -233,6 +325,8 @@ export function ProjectChecksPage() {
         setOperationError(chapterId.error);
         return null;
       }
+      const operationRoute = diagnosticRoute;
+      const operationRevision = ++checkOperationSequence.current;
       setChecking(true);
       setOperationError(null);
       try {
@@ -253,31 +347,53 @@ export function ProjectChecksPage() {
             chapterId: chapterId.value,
           }),
         ]);
+        if (
+          routeIdentityRef.current !== operationRoute ||
+          checkOperationSequence.current !== operationRevision
+        ) {
+          return null;
+        }
         const checked = snapshot.result;
         setValidationSnapshot(snapshot);
         setResult(checked);
         setNarrativeResult(narrative);
         setVoicePovResult(voicePov);
         if (checked.chapterVersionId !== null) {
-          setSupplementalResolutions(
+          const resolutions =
             await runtime.story.chapterValidation.listSupplementalFindingResolutions({
               projectId,
               chapterId: chapterId.value,
               expectedChapterVersionId: checked.chapterVersionId,
-            }),
-          );
+            });
+          if (
+            routeIdentityRef.current !== operationRoute ||
+            checkOperationSequence.current !== operationRevision
+          ) {
+            return null;
+          }
+          setSupplementalResolutions(resolutions);
         } else {
           setSupplementalResolutions([]);
         }
         return checked;
       } catch (cause) {
-        setOperationError(cause);
+        if (
+          routeIdentityRef.current === operationRoute &&
+          checkOperationSequence.current === operationRevision
+        ) {
+          setOperationError(cause);
+        }
         return null;
       } finally {
-        setChecking(false);
+        if (
+          routeIdentityRef.current === operationRoute &&
+          checkOperationSequence.current === operationRevision
+        ) {
+          setChecking(false);
+        }
       }
     },
-    [projectId, runtime],
+    [diagnosticRoute, projectId, runtime],
   );
 
   async function resolveIssue(
@@ -532,7 +648,9 @@ export function ProjectChecksPage() {
       {normalizedLoadError !== null ? (
         <ErrorState
           title={normalizedLoadError.title}
-          description={normalizedLoadError.description}
+          description={`${normalizedLoadError.description}${
+            loadSupportId === null ? "" : ` 支持编号：${loadSupportId}。`
+          }`}
           primaryAction={{ label: "重新读取章节", onClick: () => void loadChapters() }}
         />
       ) : loading ? (
@@ -689,8 +807,8 @@ export function ProjectChecksPage() {
       {!directMode && result !== null && (
         <InlineAlert
           tone="info"
-          title="普通检查不会调用 AI"
-          description="旧版批量 AI 模糊复核已安全关闭。需要模型参与时，请使用页面上方的一致性调查，并在发送前核对该次调查展示的模型、调用与费用信息。"
+          title="普通检查不会向 AI 发送内容"
+          description="旧版批量 AI 模糊复核已安全关闭。需要模型参与时，请使用页面上方的一致性调查，并在发送前核对该次调查展示的模型、发送次数与费用信息。"
         />
       )}
 

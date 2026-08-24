@@ -327,7 +327,7 @@ export async function executeModelHubEmbeddingTask(
   } catch {
     throw new ModelHubExecutionError(
       "MODEL_HUB_INVOCATION_LEDGER_FAILED",
-      "Embedding 已执行，但调用记录未能完成。为避免重复费用，本次不会自动重试。",
+      "语义向量处理已经执行，但模型使用记录未能完成。为避免重复费用，本次不会自动重试。",
       true,
       true,
     );
@@ -354,7 +354,7 @@ async function resolveEmbeddingPlan(
   if (!dependencies.modelGateway.available) {
     throw executionError(
       "MODEL_HUB_GATEWAY_UNAVAILABLE",
-      "当前环境不能调用已连接的模型。请使用桌面版，或稍后重试。",
+      "当前环境不能使用已连接的模型。请使用桌面版，或稍后重试。",
     );
   }
 
@@ -752,7 +752,7 @@ function normalizePreDispatchError(cause: unknown): ModelHubExecutionError {
       ? executionError(cause.code, cause.message, cause.retryable)
       : executionError(
           "MODEL_HUB_PREFLIGHT_FAILED",
-          "Embedding 调用前检查没有通过。请检查 AI 分工、模型能力、隐私和费用设置。",
+          "语义向量处理发送前检查没有通过。请检查 AI 分工、模型能力、隐私和费用设置。",
           true,
         );
 }
@@ -770,14 +770,14 @@ function normalizeDispatchedError(cause: unknown): ModelHubExecutionError {
   ) {
     return new ModelHubExecutionError(
       cause.code,
-      "Embedding 模型调用失败。正文和已保存向量都没有改变，请检查连接后重试。",
+      "语义向量处理请求失败。正文和已保存向量都没有改变，请检查连接后重试。",
       "retryable" in cause && cause.retryable === true,
       true,
     );
   }
   return new ModelHubExecutionError(
     "MODEL_HUB_EMBEDDING_FAILED",
-    "Embedding 模型调用失败。正文和已保存向量都没有改变，请检查连接后重试。",
+    "语义向量处理请求失败。正文和已保存向量都没有改变，请检查连接后重试。",
     true,
     true,
   );

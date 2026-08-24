@@ -1,5 +1,12 @@
 export type UiRouteIncidentPhase = "lazy_load" | "render" | "data_read";
-export type UiRouteBoundaryName = "SettingsRouteBoundary" | "AppErrorBoundary" | "EditorPage";
+export type UiRouteBoundaryName =
+  | "SettingsRouteBoundary"
+  | "AppErrorBoundary"
+  | "EditorPage"
+  | "ProjectChecksPage"
+  | "StoryGovernancePage"
+  | "StoryOutlinePage"
+  | "WorkspacePage";
 export type EditorReadStage =
   | "route_identity"
   | "project"
@@ -7,7 +14,13 @@ export type EditorReadStage =
   | "chapter_list"
   | "recovery_draft"
   | "chapter_versions"
-  | "ai_candidates";
+  | "ai_candidates"
+  | "outline"
+  | "story_governance";
+export type ProjectAreaReadStage =
+  "route_identity" | "project" | "chapter_list" | "outline" | "story_governance";
+export type ProjectAreaReadComponentName =
+  "ProjectChecksPage" | "StoryGovernancePage" | "StoryOutlinePage" | "WorkspacePage";
 
 export type SafeUiRouteRowReference =
   | Readonly<{
@@ -85,6 +98,7 @@ const SAFE_UI_ERROR_CODES = new Set([
   "EDITOR_AUTHORITY_READ_FAILED",
   "LEGACY_CANDIDATE_METADATA_INVALID",
   "LEGACY_VERSION_METADATA_INVALID",
+  "PROJECT_AREA_READ_FAILED",
   "TASK_METADATA_INVALID",
   "UI_CHUNK_LOAD_FAILED",
   "UI_LAZY_LOAD_FAILED",
@@ -98,6 +112,8 @@ const SAFE_EDITOR_READ_STAGES = new Set<EditorReadStage>([
   "recovery_draft",
   "chapter_versions",
   "ai_candidates",
+  "outline",
+  "story_governance",
 ]);
 const SAFE_EDITOR_REASON_CODES = new Set([
   "AI_CANDIDATE_BASE_VERSION_ID_INVALID",
@@ -126,6 +142,7 @@ const SAFE_EDITOR_REASON_CODES = new Set([
   "LEGACY_CANDIDATE_METADATA_INVALID",
   "LEGACY_VERSION_METADATA_INVALID",
   "PROJECT_NOT_FOUND",
+  "PROJECT_AREA_READ_FAILED",
   "REPOSITORY_ERROR",
   "UNKNOWN_CANDIDATE_VALIDATION_FAILURE",
   "VERSION_PARENT_CHAIN_INVALID",
@@ -297,6 +314,85 @@ export function recordEditorReadIncident(
     phase: "data_read" as const,
     errorBoundaryTriggered: false,
     componentName: "EditorPage" as const,
+    webviewReloadDetected: "unknown" as const,
+    normalizedErrorCode,
+    errorType,
+    applicationStack,
+    reactComponentStack,
+    readStage,
+    rowReferences,
+    reasonCodeChain,
+    fingerprint: incidentFingerprint,
+    recovered: false,
+    recoveredAt: null,
+    recoveryAction: null,
+  } satisfies SafeUiRouteIncident);
+  state.incidents = [incident, ...state.incidents].slice(0, MAX_UI_ROUTE_INCIDENTS);
+  persistState(state);
+  return incident;
+}
+
+export function recordProjectAreaReadIncident(
+  owner: object,
+  input: Readonly<{
+    route: string;
+    readStage: ProjectAreaReadStage;
+    cause: unknown;
+    timestamp: string;
+    componentName: ProjectAreaReadComponentName;
+    reasonCodeChain?: readonly string[];
+    applicationStack?: readonly string[];
+    componentStack?: string | null;
+  }>,
+): SafeUiRouteIncident {
+  const state = ensureState(owner);
+  const timestamp = safeTimestamp(input.timestamp);
+  const route = safeUiRoute(input.route);
+  const readStage = safeEditorReadStage(input.readStage);
+  const normalizedErrorCode = "PROJECT_AREA_READ_FAILED";
+  const errorType = safeErrorType(input.cause);
+  const reasonCodeChain = safeEditorReasonCodeChain(
+    normalizedErrorCode,
+    input.cause,
+    input.reasonCodeChain ?? [],
+  );
+  const applicationStack = mergeApplicationStacks(
+    safeApplicationStack(input.cause, normalizedErrorCode, errorType),
+    input.applicationStack ?? [],
+  );
+  const reactComponentStack = safeReactComponentStack(input.componentStack ?? null);
+  const rowReferences = Object.freeze([]) as readonly SafeUiRouteRowReference[];
+  const incidentFingerprint = editorReadFingerprint({
+    normalizedErrorCode,
+    errorType,
+    route: route.route,
+    triggerIds: route.triggerIds,
+    readStage,
+    rowReferences,
+    reasonCodeChain,
+  });
+  const existing = state.incidents.find(
+    (incident) =>
+      incident.componentName === input.componentName &&
+      !incident.recovered &&
+      incident.fingerprint === incidentFingerprint,
+  );
+  if (existing !== undefined) return existing;
+
+  state.nextSequence += 1;
+  const incident = Object.freeze({
+    diagnosticId: `UI-${timestamp.replace(/[^0-9]/gu, "").slice(-14)}-${String(
+      state.nextSequence,
+    ).padStart(3, "0")}`,
+    routeTransitionId: `UI-ROUTE-${String(state.nextSequence).padStart(6, "0")}`,
+    timestamp,
+    fromRoute: null,
+    toRoute: route.route,
+    route: route.route,
+    triggerIds: route.triggerIds,
+    phase: "data_read" as const,
+    errorBoundaryTriggered: false,
+    componentName: input.componentName,
     webviewReloadDetected: "unknown" as const,
     normalizedErrorCode,
     errorType,
@@ -895,35 +991,45 @@ function parsePersistedIncident(value: unknown): SafeUiRouteIncident | null {
   const componentName: UiRouteBoundaryName =
     value.componentName === "EditorPage"
       ? "EditorPage"
-      : value.componentName === "AppErrorBoundary"
-        ? "AppErrorBoundary"
-        : "SettingsRouteBoundary";
+      : value.componentName === "ProjectChecksPage"
+        ? "ProjectChecksPage"
+        : value.componentName === "StoryGovernancePage"
+          ? "StoryGovernancePage"
+          : value.componentName === "StoryOutlinePage"
+            ? "StoryOutlinePage"
+            : value.componentName === "WorkspacePage"
+              ? "WorkspacePage"
+              : value.componentName === "AppErrorBoundary"
+                ? "AppErrorBoundary"
+                : "SettingsRouteBoundary";
+  const dataReadComponent =
+    componentName === "EditorPage" ||
+    componentName === "ProjectChecksPage" ||
+    componentName === "StoryGovernancePage" ||
+    componentName === "StoryOutlinePage" ||
+    componentName === "WorkspacePage";
   const persistedReadStage = parseEditorReadStage(value.readStage);
-  if (
-    componentName === "EditorPage" &&
-    (value.phase !== "data_read" || persistedReadStage === null)
-  ) {
+  if (dataReadComponent && (value.phase !== "data_read" || persistedReadStage === null)) {
     return null;
   }
-  const readStage = componentName === "EditorPage" ? persistedReadStage : null;
+  const readStage = dataReadComponent ? persistedReadStage : null;
   const rowReferences =
     componentName === "EditorPage" && Array.isArray(value.rowReferences)
       ? safeUiRouteRowReferences(value.rowReferences)
       : Object.freeze([]);
-  const reasonCodeChain =
-    componentName === "EditorPage"
-      ? safeEditorReasonCodeChain(
-          value.normalizedErrorCode,
-          null,
-          Array.isArray(value.reasonCodeChain)
-            ? value.reasonCodeChain.filter(
-                (reasonCode): reasonCode is string => typeof reasonCode === "string",
-              )
-            : [],
-        )
-      : Object.freeze([value.normalizedErrorCode]);
+  const reasonCodeChain = dataReadComponent
+    ? safeEditorReasonCodeChain(
+        value.normalizedErrorCode,
+        null,
+        Array.isArray(value.reasonCodeChain)
+          ? value.reasonCodeChain.filter(
+              (reasonCode): reasonCode is string => typeof reasonCode === "string",
+            )
+          : [],
+      )
+    : Object.freeze([value.normalizedErrorCode]);
   const incidentFingerprint =
-    componentName === "EditorPage" && readStage !== null
+    dataReadComponent && readStage !== null
       ? editorReadFingerprint({
           normalizedErrorCode: value.normalizedErrorCode,
           errorType: value.errorType,
@@ -949,13 +1055,8 @@ function parsePersistedIncident(value: unknown): SafeUiRouteIncident | null {
     toRoute: sanitizedRoute.route,
     route: sanitizedRoute.route,
     triggerIds,
-    phase:
-      componentName === "EditorPage"
-        ? "data_read"
-        : value.phase === "lazy_load"
-          ? "lazy_load"
-          : "render",
-    errorBoundaryTriggered: componentName !== "EditorPage",
+    phase: dataReadComponent ? "data_read" : value.phase === "lazy_load" ? "lazy_load" : "render",
+    errorBoundaryTriggered: !dataReadComponent,
     componentName,
     webviewReloadDetected: "unknown",
     normalizedErrorCode: value.normalizedErrorCode,

@@ -211,6 +211,7 @@ export async function executeAuditedModelHubCapabilityProbe<Result>(
         ? {
             invocationDispatchLedger: {
               invocationId: invocation.id,
+              taskSnapshot: "capability_probe",
               expectedRevision: invocation.revision,
               connectionId: input.connection.id,
               connectionRevision: input.connection.revision,
@@ -257,7 +258,7 @@ export async function executeAuditedModelHubCapabilityProbe<Result>(
     if (providerCompleted) {
       throw new AggregateError(
         [cause],
-        "模型能力验证已经返回，但调用账本未能安全结算；重启后会标记为结果待核对，系统不会自动重发。",
+        "模型能力验证已经返回，但本机未能安全保存这次完成状态；重启后会标记为结果待核对，系统不会自动再次发送。",
       );
     }
     if (nativeDispatchLedger && !dispatched) {
@@ -320,7 +321,7 @@ export async function executeAuditedModelHubCapabilityProbe<Result>(
                 ? "模型能力验证已发送，但连接在收到明确结果前中断；结果未知且不会自动重发。"
                 : dispatched
                   ? "模型能力验证没有成功；不会自动重试。"
-                  : "模型能力验证在发送前停止；没有发生模型服务调用。",
+                  : "模型能力验证在发送前停止；没有向模型服务发送内容。",
               failure,
             }),
         expectedRevision: invocation.revision,
@@ -328,7 +329,7 @@ export async function executeAuditedModelHubCapabilityProbe<Result>(
     } catch (ledgerCause: unknown) {
       throw new AggregateError(
         [cause, ledgerCause],
-        "模型能力验证未能安全结算调用账本；系统不会自动重发。",
+        "模型能力验证未能安全保存这次完成状态；系统不会自动再次发送。",
       );
     }
     void invocation;

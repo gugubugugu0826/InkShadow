@@ -95,6 +95,136 @@ describe("Model Hub evidence router", () => {
     );
   });
 
+  it("keeps preview vision models out of automatic pure-text opening routes", () => {
+    const stableTextBase = candidate("stable-text", "remote", 9000, "1000000", 400, [
+      capability("stable-no-vision", "vision", "unsupported", "user_confirmed"),
+    ]);
+    const previewVisionBase = candidate(
+      "deepseek-v4-flash-vision-exp",
+      "remote",
+      9900,
+      "1000000",
+      300,
+    );
+    const stableText: ModelHubRoutingCandidate = {
+      ...stableTextBase,
+      catalogEntry: { ...stableTextBase.catalogEntry, lifecycle: "stable" },
+    };
+    const previewVision: ModelHubRoutingCandidate = {
+      ...previewVisionBase,
+      catalogEntry: { ...previewVisionBase.catalogEntry, lifecycle: "preview" },
+    };
+
+    const opening = buildModelHubRoutingPlan({
+      scheme: "quality",
+      candidates: [previewVision, stableText],
+      now: NOW,
+      tasks: ["book_start_guidance"],
+    });
+    const vision = buildModelHubRoutingPlan({
+      scheme: "quality",
+      candidates: [stableText, previewVision],
+      now: NOW,
+      tasks: ["vision_understanding"],
+    });
+
+    expect(opening.routes[0]?.primaryCatalogEntryId).toBe("catalog-stable-text");
+    expect(vision.routes[0]?.primaryCatalogEntryId).toBe("catalog-deepseek-v4-flash-vision-exp");
+  });
+
+  it("prefers an explicitly text-only peer over a higher-scored vision peer in the same lifecycle", () => {
+    const textBase = candidate("same-life-text", "remote", 8_600, "1000000", 500, [
+      capability("same-life-text-no-vision", "vision", "unsupported", "lightweight_probe"),
+    ]);
+    const visionBase = candidate("same-life-vision", "remote", 9_900, "1000000", 200, [
+      capability("same-life-vision-supported", "vision", "supported", "lightweight_probe"),
+    ]);
+    const text: ModelHubRoutingCandidate = {
+      ...textBase,
+      catalogEntry: { ...textBase.catalogEntry, lifecycle: "stable" },
+    };
+    const vision: ModelHubRoutingCandidate = {
+      ...visionBase,
+      catalogEntry: { ...visionBase.catalogEntry, lifecycle: "stable" },
+    };
+
+    const opening = buildModelHubRoutingPlan({
+      scheme: "quality",
+      candidates: [vision, text],
+      now: NOW,
+      tasks: ["book_start_guidance"],
+    });
+    const visualUnderstanding = buildModelHubRoutingPlan({
+      scheme: "quality",
+      candidates: [text, vision],
+      now: NOW,
+      tasks: ["vision_understanding"],
+    });
+
+    expect(opening.routes[0]?.primaryCatalogEntryId).toBe("catalog-same-life-text");
+    expect(visualUnderstanding.routes[0]?.primaryCatalogEntryId).toBe("catalog-same-life-vision");
+  });
+
+  it("does not auto-route pure-text opening to an obvious experimental vision model when evidence is unknown", () => {
+    const unknownVision = candidate(
+      "deepseek-v4-flash-vision-exp",
+      "remote",
+      9_900,
+      "1000000",
+      200,
+      [capability("unknown-vision-evidence", "vision", "unknown", "lightweight_probe")],
+    );
+    const unknownText = candidate("deepseek-chat", "remote", 8_500, "1000000", 500, [
+      capability("unknown-text-vision-evidence", "vision", "unknown", "lightweight_probe"),
+    ]);
+
+    const opening = buildModelHubRoutingPlan({
+      scheme: "quality",
+      candidates: [unknownVision, unknownText],
+      now: NOW,
+      tasks: ["book_start_guidance"],
+    });
+    const continuation = buildModelHubRoutingPlan({
+      scheme: "quality",
+      candidates: [unknownText, unknownVision],
+      now: NOW,
+      tasks: ["continuation"],
+    });
+
+    expect(opening.routes[0]?.primaryCatalogEntryId).toBe("catalog-deepseek-chat");
+    expect(continuation.routes[0]?.primaryCatalogEntryId).toBe(
+      "catalog-deepseek-v4-flash-vision-exp",
+    );
+  });
+
+  it("leaves a pure-text opening unroutable when the only candidate is an experimental vision model", () => {
+    const experimentalVision = candidate(
+      "deepseek-v4-flash-vision-exp",
+      "remote",
+      9_900,
+      "1000000",
+      200,
+      [capability("only-vision-evidence", "vision", "unknown", "lightweight_probe")],
+    );
+
+    const opening = buildModelHubRoutingPlan({
+      scheme: "quality",
+      candidates: [experimentalVision],
+      now: NOW,
+      tasks: ["book_start_guidance"],
+    });
+    const image = buildModelHubRoutingPlan({
+      scheme: "quality",
+      candidates: [experimentalVision],
+      now: NOW,
+      tasks: ["image_generation"],
+    });
+
+    expect(opening.routes).toEqual([]);
+    expect(opening.unroutableTasks).toEqual(["book_start_guidance"]);
+    expect(image.routes.map(({ task }) => task)).toEqual(["image_generation"]);
+  });
+
   it("keeps local privacy primary, fallback, and all compatible legacy roles local", () => {
     const cloud = candidate("cloud", "remote", 9900, "1");
     const localA = candidate("local-a", "local", 8500, "0");

@@ -1,13 +1,14 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createStorySettingsTemplate, serializeStorySettings } from "@inkshadow/import-export/core";
-import { parseUuidV7 } from "@inkshadow/story-core";
+import { parseUuidV7, StoryCoreError } from "@inkshadow/story-core";
 import { ToastProvider } from "@inkshadow/ui";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DesktopRoutes } from "../app";
 import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
+import { readSafeUiRouteIncidents } from "../infrastructure/ui-route-diagnostics";
 import { DEVELOPMENT_WRITING_EXPERIENCE_KEY } from "../infrastructure/writing-experience-store";
 import type {
   StorySettingsImportCommand,
@@ -39,6 +40,138 @@ describe("StoryGovernancePage", () => {
   beforeEach(() => {
     window.localStorage.clear();
     seedWritingExperience("professional");
+  });
+
+  it("keeps the newest project visible when an earlier project read finishes last", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const firstProject = await runtime.useCases.createProject.execute({ name: "先前设定" });
+    const currentProject = await runtime.useCases.createProject.execute({ name: "当前设定" });
+    if (!firstProject.ok) throw firstProject.error;
+    if (!currentProject.ok) throw currentProject.error;
+    const originalFindById = runtime.repositories.projects.findById.bind(
+      runtime.repositories.projects,
+    );
+    const delayedRead = deferred<Awaited<ReturnType<typeof originalFindById>>>();
+    let heldFirstRead = false;
+    const findById = vi
+      .spyOn(runtime.repositories.projects, "findById")
+      .mockImplementation((projectId) => {
+        if (projectId === firstProject.value.id && !heldFirstRead) {
+          heldFirstRead = true;
+          return delayedRead.promise;
+        }
+        return originalFindById(projectId);
+      });
+    const user = userEvent.setup();
+    renderNavigableRoute(
+      runtime,
+      `/projects/${firstProject.value.id}/story`,
+      `/projects/${currentProject.value.id}/story`,
+    );
+
+    await waitFor(() => expect(findById).toHaveBeenCalledWith(firstProject.value.id));
+    await user.click(screen.getByRole("button", { name: "切换到当前项目" }));
+    expect(await screen.findByRole("heading", { name: "当前设定", level: 1 })).toBeInTheDocument();
+
+    delayedRead.resolve(await originalFindById(firstProject.value.id));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: "当前设定", level: 1 })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("heading", { name: "先前设定", level: 1 })).not.toBeInTheDocument();
+  });
+
+  it("shows a redacted support number when story settings authority cannot be read", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "诊断设定" });
+    if (!project.ok) throw project.error;
+    const sensitive = "sk-private 正文 C:/Users/writer/story-settings.txt";
+    vi.spyOn(runtime.story.facts, "listByProjectId").mockResolvedValue({
+      ok: false,
+      error: new StoryCoreError({
+        code: "STORY_REPOSITORY_ERROR",
+        message: sensitive,
+        retryable: true,
+        actions: ["RETRY"],
+      }),
+    });
+
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+
+    const notice = await screen.findByText(/支持编号：UI-/u);
+    const supportId = /UI-[0-9]{14}-[0-9]{3,}/u.exec(notice.textContent)?.[0];
+    if (supportId === undefined) throw new Error("设定页没有支持编号。");
+    const incident = readSafeUiRouteIncidents(runtime).find(
+      ({ diagnosticId }) => diagnosticId === supportId,
+    );
+    expect(incident).toMatchObject({
+      diagnosticId: supportId,
+      componentName: "StoryGovernancePage",
+      readStage: "story_governance",
+    });
+    expect(incident?.reasonCodeChain).toContain("REPOSITORY_ERROR");
+    expect(JSON.stringify(window.localStorage)).not.toContain(sensitive);
+  });
+
+  it("keeps authoritative settings readable when an optional derived record cannot be read", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "附属资料隔离项目" });
+    if (!project.ok) throw project.error;
+    vi.spyOn(runtime.story.legacyMemoryPromotion, "previewProject").mockResolvedValue({
+      ok: false,
+      error: new StoryCoreError({
+        code: "STORY_REPOSITORY_ERROR",
+        message: "一条旧记忆整理记录无法读取",
+        retryable: true,
+        actions: ["RETRY"],
+      }),
+    });
+    vi.spyOn(runtime.story.whatIfBranches, "listByProjectId").mockResolvedValue({
+      ok: false,
+      error: new StoryCoreError({
+        code: "STORY_REPOSITORY_ERROR",
+        message: "一条旧版试演记录无法读取",
+        retryable: true,
+        actions: ["RETRY"],
+      }),
+    });
+    vi.spyOn(runtime.story.extractionItems, "listByProjectId").mockResolvedValue({
+      ok: false,
+      error: new StoryCoreError({
+        code: "STORY_REPOSITORY_ERROR",
+        message: "一条待确认设定无法读取",
+        retryable: true,
+        actions: ["RETRY"],
+      }),
+    });
+    vi.spyOn(runtime.story.continuousState, "inspectProject").mockRejectedValue(
+      new Error("连续故事状态记录无法读取"),
+    );
+
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+
+    expect(
+      await screen.findByRole("heading", { name: "附属资料隔离项目", level: 1 }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("部分附属资料暂不可用", { exact: true })).toBeVisible();
+    expect(
+      screen.getByText(
+        /以下附属资料没有读取成功：旧记忆整理、旧版试演记录、待确认设定、连续故事状态/u,
+      ),
+    ).toBeVisible();
+    expect(document.body).not.toHaveTextContent(/假设分支|待确认提取/u);
+    const supportNotice = screen.getByText(/支持编号：UI-/u);
+    const supportId = /UI-[0-9]{14}-[0-9]{3,}/u.exec(supportNotice.textContent)?.[0];
+    if (supportId === undefined) throw new Error("附属资料隔离没有生成支持编号。");
+    expect(readSafeUiRouteIncidents(runtime)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          diagnosticId: supportId,
+          componentName: "StoryGovernancePage",
+          readStage: "story_governance",
+          recovered: false,
+        }),
+      ]),
+    );
   });
 
   it("shows only ordinary fact evidence and safe fact actions in direct mode", async () => {
@@ -130,9 +263,26 @@ describe("StoryGovernancePage", () => {
       .getByRole("heading", { name: "待确认设定", level: 2 })
       .closest("section");
     if (!(pendingSection instanceof HTMLElement)) throw new Error("找不到待确认设定区域。");
+    expect(within(pendingSection).getAllByText(localEvidence)).toHaveLength(1);
+    const pendingEvidenceButton = within(pendingSection).getByRole("button", {
+      name: "查看原文依据",
+    });
+    expect(pendingEvidenceButton.tagName).toBe("BUTTON");
+    expect(pendingEvidenceButton).toHaveAttribute("aria-expanded", "false");
+    const pendingEvidenceRegionId = pendingEvidenceButton.getAttribute("aria-controls");
+    expect(pendingEvidenceRegionId).toBeTruthy();
+    expect(document.getElementById(pendingEvidenceRegionId ?? "")).toBeNull();
+
+    await user.click(pendingEvidenceButton);
+    expect(pendingEvidenceButton).toHaveAttribute("aria-expanded", "true");
+    expect(pendingEvidenceButton).toHaveAccessibleName("收起原文依据");
+    expect(pendingEvidenceButton).toHaveFocus();
+    const pendingEvidenceRegion = within(pendingSection).getByRole("region", {
+      name: "原文依据",
+    });
+    expect(pendingEvidenceRegion).toHaveAttribute("id", pendingEvidenceRegionId);
+    expect(pendingEvidenceRegion).toHaveAttribute("aria-label", "原文依据");
     expect(within(pendingSection).getAllByText(localEvidence)).toHaveLength(2);
-    expect(within(pendingSection).getByText("查看原文依据")).toBeVisible();
-    await user.click(within(pendingSection).getByText("查看原文依据"));
     expect(within(pendingSection).getByText("来源章节")).toBeVisible();
     expect(within(pendingSection).getByText("《钟楼旧事》")).toBeVisible();
     expect(within(pendingSection).getByText("保存版本")).toBeVisible();
@@ -142,6 +292,19 @@ describe("StoryGovernancePage", () => {
     );
     expect(within(pendingSection).getByText("字符范围")).toBeVisible();
     expect(within(pendingSection).getByText("第 1 至 7 个字符")).toBeVisible();
+
+    await user.keyboard("{Enter}");
+    expect(pendingEvidenceButton).toHaveAttribute("aria-expanded", "false");
+    expect(pendingEvidenceButton).toHaveAccessibleName("查看原文依据");
+    expect(pendingEvidenceButton).toHaveFocus();
+    expect(document.getElementById(pendingEvidenceRegionId ?? "")).toBeNull();
+    await user.pointer([
+      { keys: "[TouchA>]", target: pendingEvidenceButton },
+      { keys: "[/TouchA]", target: pendingEvidenceButton },
+    ]);
+    expect(pendingEvidenceButton).toHaveAttribute("aria-expanded", "true");
+    expect(pendingEvidenceButton).toHaveAccessibleName("收起原文依据");
+    expect(pendingEvidenceButton).toHaveFocus();
     expect(within(pendingSection).getByRole("button", { name: "确认并保留" })).toBeEnabled();
     expect(within(pendingSection).getByRole("button", { name: "修改" })).toBeEnabled();
     expect(within(pendingSection).getByRole("button", { name: "放弃" })).toBeEnabled();
@@ -183,6 +346,25 @@ describe("StoryGovernancePage", () => {
     if (!(originalFactCard instanceof HTMLElement)) {
       throw new Error("找不到原有设定卡片。");
     }
+
+    const formalEvidenceButton = within(originalFactCard).getByRole("button", {
+      name: "查看证据",
+    });
+    expect(formalEvidenceButton.tagName).toBe("BUTTON");
+    expect(formalEvidenceButton).toHaveAttribute("aria-expanded", "false");
+    formalEvidenceButton.focus();
+    await user.keyboard(" ");
+    expect(formalEvidenceButton).toHaveAttribute("aria-expanded", "true");
+    expect(formalEvidenceButton).toHaveAccessibleName("收起证据");
+    expect(formalEvidenceButton).toHaveFocus();
+    expect(within(originalFactCard).getByRole("region", { name: "证据" })).toBeVisible();
+    await user.pointer([
+      { keys: "[TouchA>]", target: formalEvidenceButton },
+      { keys: "[/TouchA]", target: formalEvidenceButton },
+    ]);
+    expect(formalEvidenceButton).toHaveAttribute("aria-expanded", "false");
+    expect(formalEvidenceButton).toHaveAccessibleName("查看证据");
+    expect(formalEvidenceButton).toHaveFocus();
 
     await user.click(within(originalFactCard).getByRole("button", { name: "固定" }));
     expect(await within(originalFactCard).findByRole("button", { name: "取消固定" })).toBeVisible();
@@ -1903,6 +2085,36 @@ function renderRoute(runtime: DesktopRuntime, route: string) {
       </RuntimeProvider>
     </MemoryRouter>,
   );
+}
+
+function renderNavigableRoute(runtime: DesktopRuntime, route: string, target: string) {
+  return render(
+    <MemoryRouter initialEntries={[route]}>
+      <RuntimeProvider runtime={runtime}>
+        <ToastProvider>
+          <RouteSwitch target={target} />
+          <DesktopRoutes />
+        </ToastProvider>
+      </RuntimeProvider>
+    </MemoryRouter>,
+  );
+}
+
+function RouteSwitch({ target }: Readonly<{ target: string }>) {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => void navigate(target)}>
+      切换到当前项目
+    </button>
+  );
+}
+
+function deferred<Value>() {
+  let resolve: (value: Value | PromiseLike<Value>) => void = () => undefined;
+  const promise = new Promise<Value>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve } as const;
 }
 
 function parseStoryProjectId(value: string) {

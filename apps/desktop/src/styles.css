@@ -3684,6 +3684,31 @@ select {
   white-space: pre-wrap;
 }
 
+.story-evidence-disclosure {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.story-evidence-disclosure__trigger {
+  justify-self: start;
+}
+
+.story-evidence-disclosure__region {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+}
+
+.story-evidence-disclosure__region > :first-child {
+  margin-top: 0;
+}
+
+.story-evidence-disclosure__region > :last-child {
+  margin-bottom: 0;
+}
+
 .story-governance-meta {
   justify-content: space-between;
   margin-top: var(--space-4);

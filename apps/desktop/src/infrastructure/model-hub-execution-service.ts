@@ -68,6 +68,11 @@ export interface ExecuteModelHubTextTaskInput extends InspectModelHubTextTaskInp
   /** Optional caller-reserved invocation id used to recover an interrupted local workflow. */
   readonly invocationId?: string;
   /**
+   * A durable pre-dispatch record created after author confirmation. Execution
+   * re-reads and verifies every routing/privacy field before it may be used.
+   */
+  readonly reservedInvocation?: ModelInvocationFact;
+  /**
    * Unified one-attempt execution authority. Callers should pass a named
    * policy; legacy fields below are accepted only when they describe the same
    * policy and are never allowed to widen it.
@@ -104,9 +109,21 @@ export interface ExecuteModelHubTextTaskInput extends InspectModelHubTextTaskInp
    * cancellation raised while onBeforeDispatch is awaiting cannot be lost.
    */
   readonly assertBeforeProviderDispatch?: () => void;
-  /** Notification after the durable receipt. It may persist a local journey checkpoint before dispatch continues. */
+  /**
+   * Notification after the durable receipt. It may persist a local journey
+   * checkpoint. A local observer failure is diagnosed separately and cannot
+   * interrupt Provider result collection after that durable boundary.
+   */
   readonly onProviderDispatchStarted?: (
     selection: ModelHubTextDispatchSelection,
+  ) => void | Promise<void>;
+  /**
+   * Receives a validated Provider result only when the durable success update
+   * cannot be committed. The callback may preserve an isolated review result;
+   * it must never promote正文 or trigger another send.
+   */
+  readonly onReturnedResultPendingLedgerSettlement?: (
+    result: ModelHubReturnedTextResult,
   ) => void | Promise<void>;
   readonly onDelta?: (accumulatedText: string) => void;
 }
@@ -134,7 +151,11 @@ export interface ModelHubTextTaskExecutionResult {
   readonly modelId: string;
   readonly usedFallback: boolean;
   readonly costCeilingExceededAfterDispatch: boolean;
+  /** Content-free advanced diagnostic; never a reason to discard returned text. */
+  readonly localDispatchObservationFailed?: true;
 }
+
+export type ModelHubReturnedTextResult = Omit<ModelHubTextTaskExecutionResult, "invocation">;
 
 export interface ModelHubTextInspectionDependencies {
   readonly modelHub: ModelHubStore;
@@ -298,21 +319,30 @@ export async function executeModelHubTextTask(
 
   const generationId = input.generationId ?? dependencies.ids.next();
   const invocationId = input.invocationId ?? dependencies.ids.next();
-  let invocation = await dependencies.modelHub.startInvocation({
-    id: invocationId,
-    task: input.invocationLedgerTask ?? input.task,
-    routeTask: route.task,
-    connectionId: target.connection.id,
-    catalogEntryId: target.catalogEntry.id,
-    providerKindSnapshot: target.connection.providerKind,
-    modelIdSnapshot: target.catalogEntry.providerModelId,
-    routeReason: usedFallback ? "task_fallback" : "task_primary",
-    attempt: usedFallback ? 2 : 1,
-    privacyPolicy: route.privacyPolicy,
-    dataDestination: target.dataDestination,
-    maximumCostMicros: route.maximumCostMicros,
-    currency: route.currency,
-  });
+  let invocation =
+    input.reservedInvocation === undefined
+      ? await dependencies.modelHub.startInvocation({
+          id: invocationId,
+          task: input.invocationLedgerTask ?? input.task,
+          routeTask: route.task,
+          connectionId: target.connection.id,
+          catalogEntryId: target.catalogEntry.id,
+          providerKindSnapshot: target.connection.providerKind,
+          modelIdSnapshot: target.catalogEntry.providerModelId,
+          routeReason: usedFallback ? "task_fallback" : "task_primary",
+          attempt: usedFallback ? 2 : 1,
+          privacyPolicy: route.privacyPolicy,
+          dataDestination: target.dataDestination,
+          maximumCostMicros: route.maximumCostMicros,
+          currency: route.currency,
+        })
+      : await requireCurrentReservedInvocation(
+          dependencies.modelHub,
+          input,
+          input.reservedInvocation,
+          invocationId,
+          { route, target, usedFallback },
+        );
 
   let dispatched = false;
   let generatedObservation: NativeModelGenerationResult | null = null;
@@ -320,8 +350,7 @@ export async function executeModelHubTextTask(
   let successSettlementStarted = false;
   let recoveredNativeDispatchReceipt = false;
   const nativeReceiptObservation = { postReceiptLocalFailure: false };
-  const nativeCapabilityDispatchLedger =
-    input.invocationLedgerTask === "capability_probe" &&
+  const nativeInvocationDispatchLedger =
     dependencies.modelGateway.supportsNativeInvocationDispatchLedger === true;
   try {
     await input.onBeforeDispatch?.({
@@ -377,14 +406,14 @@ export async function executeModelHubTextTask(
         current.target.costPrivacy.evidenceSource !== "unknown" &&
         isLoopbackModelBaseUrl(current.target.connection.baseUrl),
     });
-    if (!nativeCapabilityDispatchLedger) {
+    if (!nativeInvocationDispatchLedger) {
       invocation = await dependencies.modelHub.markInvocationDispatched({
         id: invocation.id,
         dispatchedAt: dependencies.clock.now(),
         expectedRevision: invocation.revision,
       });
       // Legacy/test gateways have no native SQLite boundary. Production
-      // capability probes use the atomic native receipt below.
+      // gateways use the atomic native receipt below for every text task.
       dispatched = true;
       await input.onProviderDispatchStarted?.(dispatchSelection);
     }
@@ -413,10 +442,11 @@ export async function executeModelHubTextTask(
         ? {}
         : { responseFormat: executionPolicy.transportResponseFormat }),
       ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
-      ...(nativeCapabilityDispatchLedger
+      ...(nativeInvocationDispatchLedger
         ? {
             invocationDispatchLedger: {
               invocationId: invocation.id,
+              taskSnapshot: invocation.task,
               expectedRevision: invocation.revision,
               connectionId: current.target.connection.id,
               connectionRevision: current.target.connection.revision,
@@ -434,9 +464,8 @@ export async function executeModelHubTextTask(
               dispatched = true;
               try {
                 await input.onProviderDispatchStarted?.(dispatchSelection);
-              } catch (cause: unknown) {
+              } catch {
                 nativeReceiptObservation.postReceiptLocalFailure = true;
-                throw cause;
               }
             },
           }
@@ -465,40 +494,69 @@ export async function executeModelHubTextTask(
       route.maximumCostMicros !== null &&
       cost !== null &&
       BigInt(cost) > BigInt(route.maximumCostMicros);
-    successSettlementStarted = true;
-    invocation = await dependencies.modelHub.finishInvocation({
-      id: invocation.id,
-      status: "succeeded",
-      inputTokens: generated.usage?.inputTokens ?? null,
-      outputTokens: generated.usage?.outputTokens ?? null,
-      cachedInputTokens: generated.usage?.cachedInputTokens ?? null,
-      estimatedCostMicros: cost,
-      currency: cost === null ? null : target.costCurrency,
-      completion: {
-        visibleContentLength: Array.from(generated.text).length,
-        stream: generated.streamed ?? null,
-      },
-      expectedRevision: invocation.revision,
-    });
-    return Object.freeze({
+    const returnedResult: ModelHubReturnedTextResult = Object.freeze({
       text: generated.text,
       usage: generated.usage,
-      invocation,
       connectionId: target.connection.id,
       catalogEntryId: target.catalogEntry.id,
       providerKind: target.connection.providerKind,
       modelId: target.catalogEntry.providerModelId,
       usedFallback,
       costCeilingExceededAfterDispatch,
+      ...(nativeReceiptObservation.postReceiptLocalFailure ||
+      generated.localDispatchObservationFailed === true
+        ? { localDispatchObservationFailed: true as const }
+        : {}),
+    });
+    successSettlementStarted = true;
+    try {
+      invocation = await dependencies.modelHub.finishInvocation({
+        id: invocation.id,
+        status: "succeeded",
+        inputTokens: generated.usage?.inputTokens ?? null,
+        outputTokens: generated.usage?.outputTokens ?? null,
+        cachedInputTokens: generated.usage?.cachedInputTokens ?? null,
+        estimatedCostMicros: cost,
+        currency: cost === null ? null : target.costCurrency,
+        completion: {
+          visibleContentLength: Array.from(generated.text).length,
+          stream: generated.streamed ?? null,
+        },
+        expectedRevision: invocation.revision,
+      });
+    } catch (cause: unknown) {
+      const causes: unknown[] = [cause];
+      const onReturnedResultPendingLedgerSettlement = input.onReturnedResultPendingLedgerSettlement;
+      try {
+        const pendingReviewInvocation =
+          input.task === "book_start_guidance" &&
+          onReturnedResultPendingLedgerSettlement !== undefined
+            ? await settleReturnedOpeningInvocationPendingReview(dependencies.modelHub, invocation)
+            : null;
+        if (pendingReviewInvocation !== null) {
+          invocation = pendingReviewInvocation;
+          await onReturnedResultPendingLedgerSettlement?.(returnedResult);
+        }
+      } catch (callbackCause: unknown) {
+        causes.push(callbackCause);
+      }
+      throw new AggregateError(
+        causes,
+        "模型服务已经返回，但本机未能安全保存这次完成状态；结果只能隔离保存并等待核对，系统不会自动再次发送。",
+      );
+    }
+    return Object.freeze({
+      ...returnedResult,
+      invocation,
     });
   } catch (cause: unknown) {
     if (successSettlementStarted) {
       throw new AggregateError(
         [cause],
-        "模型服务已经返回，但调用账本未能安全结算；重启后会标记为结果待核对，系统不会自动重发。",
+        "模型服务已经返回，但本机未能安全保存这次完成状态；重启后会标记为结果待核对，系统不会自动再次发送。",
       );
     }
-    if (nativeCapabilityDispatchLedger && !dispatched) {
+    if (nativeInvocationDispatchLedger && !dispatched) {
       // If the invoke response was lost after the native atomic write, recover
       // the durable truth before classifying the outcome. Never resend here.
       try {
@@ -527,13 +585,11 @@ export async function executeModelHubTextTask(
       dispatched,
     );
     const ambiguous =
-      nativeReceiptObservation.postReceiptLocalFailure ||
       isRecoveredNativeDispatchHandshakeAmbiguous(
         recoveredNativeDispatchReceipt,
         normalized.code === "MODEL_GENERATION_CANCELLED",
         failureMetadata,
-      ) ||
-      isAmbiguousDispatchedTransportFailure(dispatched, normalized, failureMetadata);
+      ) || isAmbiguousDispatchedTransportFailure(dispatched, normalized, failureMetadata);
     const projected = ambiguous ? ambiguousProviderResult(normalized, failureMetadata) : normalized;
     const status =
       normalized.code === "MODEL_GENERATION_CANCELLED"
@@ -559,7 +615,7 @@ export async function executeModelHubTextTask(
             errorCode: projected.code,
             errorSummary: ambiguous
               ? "模型请求已发送，但连接在收到明确结果前中断；结果未知且不会自动重发。"
-              : "模型调用失败；作品正文和已有 AI 建议版本均未改变。",
+              : "向模型服务发送失败；作品正文和已有 AI 建议版本均未改变。",
             failure,
           }
         : {}),
@@ -574,6 +630,74 @@ export async function executeModelHubTextTask(
       failure,
     );
   }
+}
+
+async function settleReturnedOpeningInvocationPendingReview(
+  modelHub: ModelHubStore,
+  observed: ModelInvocationFact,
+): Promise<ModelInvocationFact | null> {
+  let current = await modelHub.findInvocation(observed.id);
+  if (
+    current?.id !== observed.id ||
+    current.task !== "book_start_guidance" ||
+    current.providerDispatchStartedAt === null
+  ) {
+    return null;
+  }
+  if (current.status === "running") {
+    current = await modelHub.finishInvocation({
+      id: current.id,
+      status: "failed",
+      errorCode: "OPENING_DISPATCH_AMBIGUOUS",
+      errorSummary:
+        "模型服务已经返回文字，但本机未能确认成功结算；结果只允许隔离保存并等待核对，系统不会自动重发。",
+      expectedRevision: current.revision,
+    });
+  }
+  return current.status === "succeeded" ||
+    current.status === "timed_out" ||
+    (current.status === "failed" && current.errorCode === "OPENING_DISPATCH_AMBIGUOUS")
+    ? current
+    : null;
+}
+
+async function requireCurrentReservedInvocation(
+  modelHub: ModelHubStore,
+  input: ExecuteModelHubTextTaskInput,
+  reservation: ModelInvocationFact,
+  invocationId: string,
+  plan: Pick<ResolvedTextPlan, "route" | "target" | "usedFallback">,
+): Promise<ModelInvocationFact> {
+  const expectedTask = input.invocationLedgerTask ?? input.task;
+  const expectedRouteReason = plan.usedFallback ? "task_fallback" : "task_primary";
+  const expectedAttempt = plan.usedFallback ? 2 : 1;
+  const current =
+    reservation.id === invocationId ? await modelHub.findInvocation(invocationId) : null;
+  if (
+    current?.id !== reservation.id ||
+    current.revision !== reservation.revision ||
+    current.status !== "running" ||
+    current.providerDispatchStartedAt !== null ||
+    current.task !== expectedTask ||
+    current.routeTask !== plan.route.task ||
+    current.connectionId !== plan.target.connection.id ||
+    current.catalogEntryId !== plan.target.catalogEntry.id ||
+    current.providerKindSnapshot !== plan.target.connection.providerKind ||
+    current.modelIdSnapshot !== plan.target.catalogEntry.providerModelId ||
+    current.routeReason !== expectedRouteReason ||
+    current.attempt !== expectedAttempt ||
+    current.privacyPolicy !== plan.route.privacyPolicy ||
+    current.dataDestination !== plan.target.dataDestination ||
+    current.maximumCostMicros !== plan.route.maximumCostMicros ||
+    current.currency !== plan.route.currency
+  ) {
+    throw executionError(
+      "MODEL_HUB_RESERVED_INVOCATION_CHANGED",
+      "本次生成记录与当前模型、服务商或隐私去向不一致；已在发送 0 字后停止，请重新确认。",
+      true,
+    );
+  }
+  return current;
 }
 
 function assertInvocationLedgerClassification(
@@ -642,7 +766,7 @@ function assertModelExecutionPolicy(
   ) {
     throw executionError(
       "MODEL_EXECUTION_POLICY_UNSAFE",
-      "这项 AI 操作的调用边界不安全；本次请求在发送前停止。",
+      "这项 AI 操作的发送条件不安全；本次请求在发送前停止。",
     );
   }
   if (policy.transportResponseFormat === "json_object" && policy.outputContract !== "strict_json") {
@@ -763,7 +887,7 @@ async function resolveTextPlan(
   if (!dependencies.modelGateway.available) {
     throw executionError(
       "MODEL_HUB_GATEWAY_UNAVAILABLE",
-      "当前环境不能调用已连接的模型。请使用桌面版，或稍后重试。",
+      "当前环境不能使用已连接的模型。请使用桌面版，或稍后重试。",
     );
   }
 
@@ -1036,7 +1160,7 @@ async function resolveTextTarget(
     if (BigInt(estimatedMaximumCostMicros) > BigInt(route.maximumCostMicros)) {
       throw executionError(
         "MODEL_HUB_COST_CEILING_EXCEEDED",
-        "预计最高费用超过这项任务的上限，调用尚未发送。请降低输出长度或更换模型。",
+        "预计最高费用超过这项任务的上限，请求尚未发送。请降低输出长度或更换模型。",
       );
     }
   }
@@ -1223,20 +1347,20 @@ function normalizePreDispatchError(cause: unknown): ModelHubExecutionError {
   if (code === "CONTEXT_TRACE_UNAVAILABLE") {
     return executionError(
       "CONTEXT_TRACE_UNAVAILABLE",
-      "无法保存本次上下文来源记录，因此没有调用模型。请检查本机存储空间或数据库状态后重试。",
+      "无法保存本次挑选的故事资料记录，因此没有向模型发送内容。请检查本机存储空间或数据库状态后重试。",
       true,
     );
   }
   if (code === "IMPORT_PENDING_REQUEST_PERSIST_FAILED") {
     return executionError(
       "IMPORT_PENDING_REQUEST_PERSIST_FAILED",
-      "模型调用前的本地请求凭据没有保存成功，本次调用已在发送 0 字时停止。",
+      "向模型发送前的本地请求信息没有保存成功，本次在发送 0 字时停止。",
       true,
     );
   }
   return executionError(
     "MODEL_HUB_PREFLIGHT_FAILED",
-    "模型调用前检查没有通过。请检查 AI 分工、模型能力、隐私和费用设置。",
+    "向模型发送前的检查没有通过。请检查 AI 分工、模型能力、隐私和费用设置。",
     true,
   );
 }
@@ -1270,14 +1394,14 @@ function normalizeDispatchedError(cause: unknown): ModelHubExecutionError {
   ) {
     return new ModelHubExecutionError(
       cause.code,
-      "模型调用失败。原文和已有 AI 建议版本都没有改变，请检查连接后重试。",
+      "向模型服务发送失败。原文和已有 AI 建议版本都没有改变，请检查连接后重试。",
       "retryable" in cause && cause.retryable === true,
       true,
     );
   }
   return new ModelHubExecutionError(
     "MODEL_HUB_GENERATION_FAILED",
-    "模型调用失败。原文和已有 AI 建议版本都没有改变，请检查连接后重试。",
+    "向模型服务发送失败。原文和已有 AI 建议版本都没有改变，请检查连接后重试。",
     true,
     true,
   );

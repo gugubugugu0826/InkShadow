@@ -9,7 +9,9 @@ import { BrowserDevelopmentModelCenterStore } from "./model-center-store";
 import { MODEL_HUB_CAPABILITIES, NOVEL_AI_TASKS } from "./model-hub-provider-registry";
 import {
   applyAutomaticModelHubRouting,
+  canSafelyRecalculateAutomaticModelHubRouting,
   loadModelHubRoutingCandidates,
+  MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION,
 } from "./model-hub-routing-service";
 import {
   BrowserDevelopmentModelHubStore,
@@ -214,7 +216,7 @@ describe("automatic Model Hub routing application", () => {
     );
     await expect(modelHub.findActivePreset()).resolves.toMatchObject({
       id: "automatic-smart",
-      routeGenerationVersion: "model-hub-evidence-router-v2",
+      routeGenerationVersion: MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION,
     });
     await expect(modelHub.findTaskRoute("outline_planning")).resolves.toBeNull();
     await expect(modelHub.findTaskRoute("scene_breakdown")).resolves.toBeNull();
@@ -224,6 +226,82 @@ describe("automatic Model Hub routing application", () => {
     await expect(reopened.findTaskRoute("outline_planning")).resolves.toBeNull();
     await expect(reopened.findTaskRoute("scene_breakdown")).resolves.toBeNull();
     await expect(reopened.findTaskRoute("prose_generation")).resolves.toEqual(manual);
+  });
+
+  it("recalculates a v2 automatic visual opening route and preserves an explicit manual choice", async () => {
+    const storage = new MemoryStorage();
+    const modelCenter = new BrowserDevelopmentModelCenterStore(storage, clock);
+    const legacyRouting = new BrowserDevelopmentModelRoutingStore(storage, clock, modelCenter);
+    const modelHub = new BrowserDevelopmentModelHubStore(storage, clock);
+    await seedCandidate(modelHub, {
+      connectionId: "old-visual-opening-provider",
+      catalogEntryId: "old-visual-opening-catalog",
+      modelId: "deepseek-v4-flash-vision-exp",
+      destination: "remote",
+      textOnly: true,
+    });
+    await modelHub.savePreset({
+      id: "automatic-smart",
+      scheme: "smart",
+      displayName: "智能推荐",
+      status: "active",
+      privacyPolicy: "cloud_allowed",
+      costPriority: "balanced",
+      routeGenerationVersion: "model-hub-evidence-router-v2",
+      expectedRevision: null,
+    });
+    const obsoleteAutomaticRoute = await modelHub.saveTaskRoute({
+      task: "book_start_guidance",
+      primaryCatalogEntryId: "old-visual-opening-catalog",
+      presetId: "automatic-smart",
+      privacyPolicy: "cloud_allowed",
+      failurePolicy: "stop",
+      routeOrigin: "automatic",
+      expectedRevision: null,
+    });
+    const obsoletePreset = await modelHub.findActivePreset();
+
+    expect(
+      canSafelyRecalculateAutomaticModelHubRouting({
+        scheme: "smart",
+        preset: obsoletePreset,
+        routes: [obsoleteAutomaticRoute],
+      }),
+    ).toBe(true);
+
+    const recalculated = await applyAutomaticModelHubRouting({
+      modelHub,
+      legacyRouting,
+      legacyReadyModels: [],
+      scheme: "smart",
+      now: NOW,
+    });
+
+    expect(recalculated.savedNovelTaskCount).toBe(13);
+    expect(recalculated.plan.unroutableTasks).toContain("book_start_guidance");
+    await expect(modelHub.findActivePreset()).resolves.toMatchObject({
+      routeGenerationVersion: MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION,
+    });
+    await expect(modelHub.findTaskRoute("book_start_guidance")).resolves.toBeNull();
+
+    const manual = await modelHub.saveTaskRoute({
+      task: "book_start_guidance",
+      primaryCatalogEntryId: "old-visual-opening-catalog",
+      privacyPolicy: "cloud_allowed",
+      failurePolicy: "stop",
+      routeOrigin: "user",
+      expectedRevision: null,
+    });
+    const afterManualChoice = await applyAutomaticModelHubRouting({
+      modelHub,
+      legacyRouting,
+      legacyReadyModels: [],
+      scheme: "smart",
+      now: NOW,
+    });
+
+    expect(afterManualChoice.preservedUserRouteCount).toBe(1);
+    await expect(modelHub.findTaskRoute("book_start_guidance")).resolves.toEqual(manual);
   });
 
   it("keeps the committed Model Hub plan when the rebuildable legacy projection is unavailable", async () => {

@@ -124,11 +124,11 @@ export function modelHubReadinessBlockerLabel(code: string): string {
   if (code === "MODEL_HUB_DATA_DESTINATION_UNKNOWN") {
     return "模型的数据去向与隐私信息尚未确认";
   }
-  if (code.startsWith("MODEL_HUB_COST_")) return "费用证据或费用上限阻止本次调用";
+  if (code.startsWith("MODEL_HUB_COST_")) return "费用信息或费用上限阻止本次发送";
   if (code === "MODEL_HUB_PRIVACY_BLOCKED" || code === "PRIVATE_CHAPTER_LOCAL_ONLY") {
     return "当前隐私规则不允许使用这个模型";
   }
-  if (code === "MODEL_HUB_GATEWAY_UNAVAILABLE") return "当前环境不能调用已连接的模型";
+  if (code === "MODEL_HUB_GATEWAY_UNAVAILABLE") return "当前环境不能使用已连接的模型";
   if (code === "STORY_CONTEXT_COMPILATION_FAILED") return "当前作品的上下文未能安全整理";
   return "基础配置检查尚未通过";
 }

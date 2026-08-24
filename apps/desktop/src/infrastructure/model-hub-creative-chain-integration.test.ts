@@ -15,6 +15,7 @@ import {
 } from "./creative-opening-service";
 import { createImportRewriteCandidate } from "./import-rewrite-service";
 import type { ModelProviderKind, NovelAiTask } from "./model-hub-provider-registry";
+import { MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION } from "./model-hub-routing-service";
 import type { ModelHubStore } from "./model-hub-store";
 import type { PreparedNovelSkillInvocation } from "./novel-skill-runtime";
 import {
@@ -83,6 +84,83 @@ describe("real creative chains use Model Hub routes", () => {
       expect(harness.listModels).not.toHaveBeenCalled();
     });
   }
+
+  it("stops an obsolete automatic opening route before Provider dispatch", async () => {
+    const harness = createNativeHarness();
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "obsolete-auto-opening",
+      catalogEntryId: "obsolete-auto-opening-catalog",
+      modelId: "deepseek-v4-flash-vision-exp",
+      routeOrigin: "automatic",
+      routeGenerationVersion: "model-hub-evidence-router-v2",
+      lifecycle: "unknown",
+    });
+
+    await expect(
+      generateCreativeOpening(harness.runtime, {
+        idea: "一座只在雾里出现的城市。",
+        requestId: "obsolete-auto-opening-request",
+      }),
+    ).rejects.toMatchObject({ code: "CREATIVE_OPENING_AUTOMATIC_ROUTE_OUTDATED" });
+    expect(harness.generate).not.toHaveBeenCalled();
+  });
+
+  it("blocks a current automatic experimental vision route but keeps an explicit manual route authoritative", async () => {
+    const harness = createNativeHarness();
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "current-auto-visual-opening",
+      catalogEntryId: "current-auto-visual-opening-catalog",
+      modelId: "deepseek-v4-flash-vision-exp",
+      routeOrigin: "automatic",
+      routeGenerationVersion: MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION,
+      lifecycle: "unknown",
+    });
+
+    await expect(
+      generateCreativeOpening(harness.runtime, {
+        idea: "一封来自二十年后的旧信。",
+        requestId: "current-auto-visual-opening-request",
+      }),
+    ).rejects.toMatchObject({ code: "CREATIVE_OPENING_AUTOMATIC_VISUAL_ROUTE_UNSUITABLE" });
+    expect(harness.generate).not.toHaveBeenCalled();
+
+    const automatic = await harness.runtime.modelHub.findTaskRoute("book_start_guidance");
+    if (automatic === null) throw new Error("expected the automatic opening route");
+    const manual = await harness.runtime.modelHub.saveTaskRoute({
+      task: automatic.task,
+      primaryCatalogEntryId: automatic.primaryCatalogEntryId,
+      fallbackCatalogEntryId: automatic.fallbackCatalogEntryId,
+      presetId: null,
+      parameterPolicy: automatic.parameterPolicy,
+      maximumCostMicros: automatic.maximumCostMicros,
+      currency: automatic.currency,
+      privacyPolicy: automatic.privacyPolicy,
+      failurePolicy: automatic.failurePolicy,
+      routeOrigin: "user",
+      enabled: automatic.enabled,
+      expectedRevision: automatic.revision,
+    });
+    harness.generate.mockResolvedValue({ text: "作者明确选择后的开头。", usage: null });
+
+    await expect(
+      generateCreativeOpening(harness.runtime, {
+        idea: "一封来自二十年后的旧信。",
+        requestId: "manual-visual-opening-request",
+      }),
+    ).resolves.toMatchObject({
+      text: "作者明确选择后的开头。",
+      providerId: "current-auto-visual-opening",
+      modelId: "deepseek-v4-flash-vision-exp",
+    });
+    expect(harness.generate).toHaveBeenCalledOnce();
+    await expect(harness.runtime.modelHub.findTaskRoute("book_start_guidance")).resolves.toEqual(
+      manual,
+    );
+  });
 
   it("prepares all four bounded opening actions with zero Provider calls and exact disclosures", async () => {
     const harness = createNativeHarness();
@@ -372,7 +450,7 @@ describe("real creative chains use Model Hub routes", () => {
       });
     }
   });
-  it("settles a slot within 180 seconds when preparation hangs before invocation creation", async () => {
+  it("keeps an exact pre-dispatch ledger when confirmed source preparation fails", async () => {
     const harness = createNativeHarness();
     const chapter = await createChapter(harness.runtime, "");
     await seedModelHubTextRoute(harness.runtime.modelHub, {
@@ -393,42 +471,42 @@ describe("real creative chains use Model Hub routes", () => {
       openingAngle: "mystery_clue",
     };
     const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+    const preparationFailure = new Error("simulated confirmed source preparation failure");
     const preparation = vi
       .spyOn(harness.runtime.projectSeeds, "findByProjectId")
-      .mockImplementation(() => new Promise<never>(() => undefined));
-    const cancelGeneration = vi
-      .spyOn(harness.runtime.modelGateway, "cancelGeneration")
-      .mockResolvedValue(false);
+      .mockRejectedValue(preparationFailure);
     const onInvocationPrepared = vi.fn();
     const onResult = vi.fn();
 
-    vi.useFakeTimers();
-    try {
-      const execution = executeCreativeOpeningProviderAction(harness.runtime, {
+    await expect(
+      executeCreativeOpeningProviderAction(harness.runtime, {
         ...action,
         humanConfirmed: true,
         disclosureFingerprint: disclosure.fingerprint,
         onInvocationPrepared,
         onResult,
-      });
-      const rejection = expect(execution).rejects.toMatchObject({
-        code: "MODEL_TIMEOUT",
-      });
-      await Promise.resolve();
-      expect(preparation).toHaveBeenCalledOnce();
+      }),
+    ).rejects.toMatchObject({
+      code: "CREATIVE_OPENING_DISCLOSURE_CHANGED",
+      dispatched: false,
+    });
 
-      await vi.advanceTimersByTimeAsync(CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS);
-      await rejection;
-      await expect(execution).rejects.toThrow("不会自动重试");
-
-      expect(cancelGeneration).not.toHaveBeenCalled();
-      expect(harness.generate).not.toHaveBeenCalled();
-      expect(onInvocationPrepared).not.toHaveBeenCalled();
-      expect(onResult).not.toHaveBeenCalled();
-      await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(preparation).toHaveBeenCalledOnce();
+    expect(harness.generate).not.toHaveBeenCalled();
+    expect(onInvocationPrepared).toHaveBeenCalledOnce();
+    expect(onInvocationPrepared).toHaveBeenCalledWith(requestId, {
+      invocationId: requestId,
+      connectionId: "opening-preparation-timeout",
+      modelId: "opening-preparation-timeout-model",
+    });
+    expect(onResult).not.toHaveBeenCalled();
+    await expect(harness.runtime.modelHub.findInvocation(requestId)).resolves.toMatchObject({
+      id: requestId,
+      task: "book_start_guidance",
+      status: "failed",
+      attempt: 1,
+      providerDispatchStartedAt: null,
+    });
   });
 
   it("closes the result persistence fence at 180 seconds and reports the exact timed-out request", async () => {
@@ -772,6 +850,89 @@ describe("real creative chains use Model Hub routes", () => {
       releasePreparation();
       vi.useRealTimers();
     }
+  });
+
+  it("bounds a hanging second invocation reservation and settles a late local row without sending", async () => {
+    const harness = createNativeHarness();
+    const chapter = await createChapter(harness.runtime, "");
+    await seedModelHubTextRoute(harness.runtime.modelHub, {
+      task: "book_start_guidance",
+      providerKind: "openai",
+      connectionId: "opening-reservation-timeout",
+      catalogEntryId: "opening-reservation-timeout-catalog",
+      modelId: "opening-reservation-timeout-model",
+    });
+    const requestIds = nextOpeningRequestIds(harness.runtime, 3);
+    const action: CreativeOpeningProviderActionInput = {
+      actionId: "opening-reservation-timeout-action",
+      kind: "initial_batch",
+      idea: "一座剧院每晚都为尚未出生的观众谢幕。",
+      projectContext: { projectId: chapter.projectId, chapterId: chapter.id },
+      requestIds,
+    };
+    const disclosure = await prepareCreativeOpeningProviderAction(harness.runtime, action);
+    const originalStartInvocation = harness.runtime.modelHub.startInvocation.bind(
+      harness.runtime.modelHub,
+    );
+    let reservationCount = 0;
+    let releaseSecondReservation!: () => void;
+    const lateReservation: { value: Promise<unknown> | null } = { value: null };
+    vi.spyOn(harness.runtime.modelHub, "startInvocation").mockImplementation((input) => {
+      reservationCount += 1;
+      if (reservationCount !== 2) return originalStartInvocation(input);
+      lateReservation.value = new Promise((resolve, reject) => {
+        releaseSecondReservation = () => {
+          originalStartInvocation(input).then(resolve, reject);
+        };
+      });
+      return lateReservation.value as ReturnType<ModelHubStore["startInvocation"]>;
+    });
+    const onInvocationPrepared = vi.fn();
+
+    vi.useFakeTimers();
+    const pending = executeCreativeOpeningProviderAction(harness.runtime, {
+      ...action,
+      humanConfirmed: true,
+      disclosureFingerprint: disclosure.fingerprint,
+      onInvocationPrepared,
+    });
+    const rejection = expect(pending).rejects.toMatchObject({ code: "MODEL_TIMEOUT" });
+    try {
+      await vi.waitFor(() => expect(reservationCount).toBe(2));
+      await vi.advanceTimersByTimeAsync(CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(harness.generate).not.toHaveBeenCalled();
+    expect(onInvocationPrepared).toHaveBeenCalledTimes(1);
+    await expect(
+      harness.runtime.modelHub.findInvocation(requestIds[0] ?? "missing"),
+    ).resolves.toMatchObject({
+      status: "failed",
+      providerDispatchStartedAt: null,
+    });
+    await expect(
+      harness.runtime.modelHub.findInvocation(requestIds[1] ?? "missing"),
+    ).resolves.toBeNull();
+    await expect(
+      harness.runtime.modelHub.findInvocation(requestIds[2] ?? "missing"),
+    ).resolves.toBeNull();
+
+    releaseSecondReservation();
+    const settledLateReservation = lateReservation.value;
+    if (settledLateReservation === null) {
+      throw new Error("预留超时测试没有取得较晚完成的本地记录。");
+    }
+    await settledLateReservation;
+    await vi.waitFor(async () => {
+      await expect(
+        harness.runtime.modelHub.findInvocation(requestIds[1] ?? "missing"),
+      ).resolves.toMatchObject({ status: "failed", providerDispatchStartedAt: null });
+    });
+    expect(onInvocationPrepared).toHaveBeenCalledTimes(1);
+    expect(harness.generate).not.toHaveBeenCalled();
   });
 
   it("rejects route, cost and request-source drift against the confirmed fingerprint before dispatch", async () => {
@@ -2168,6 +2329,9 @@ async function seedModelHubTextRoute(
     includeCapability?: boolean;
     dataDestination?: "local" | "remote";
     pricing?: "known_zero" | "unknown";
+    routeOrigin?: "automatic" | "user";
+    routeGenerationVersion?: string;
+    lifecycle?: "stable" | "preview" | "deprecated" | "unknown";
   }>,
 ): Promise<void> {
   const connection = await modelHub.saveConnection({
@@ -2192,7 +2356,7 @@ async function seedModelHubTextRoute(
       {
         id: input.catalogEntryId,
         providerModelId: input.modelId,
-        lifecycle: "stable",
+        lifecycle: input.lifecycle ?? "stable",
         inputTokenLimit: 200_000,
         outputTokenLimit: 20_000,
         staleAfter: "2027-08-02T00:00:00.000Z",
@@ -2231,12 +2395,27 @@ async function seedModelHubTextRoute(
     evidenceVersion: "creative-chain-test-v1",
     expectedRevision: null,
   });
+  const routeOrigin = input.routeOrigin ?? "user";
+  if (routeOrigin === "automatic") {
+    await modelHub.savePreset({
+      id: "automatic-smart",
+      scheme: "smart",
+      displayName: "智能推荐",
+      status: "active",
+      privacyPolicy: "cloud_allowed",
+      costPriority: "balanced",
+      routeGenerationVersion:
+        input.routeGenerationVersion ?? MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION,
+      expectedRevision: null,
+    });
+  }
   await modelHub.saveTaskRoute({
     task: input.task,
     primaryCatalogEntryId: input.catalogEntryId,
+    presetId: routeOrigin === "automatic" ? "automatic-smart" : null,
     privacyPolicy: "cloud_allowed",
     failurePolicy: "stop",
-    routeOrigin: "user",
+    routeOrigin,
     expectedRevision: null,
   });
 }

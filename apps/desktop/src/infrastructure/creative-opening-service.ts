@@ -23,6 +23,9 @@ import {
   type InspectModelHubTextTaskInput,
   type ModelHubTextTaskInspection,
 } from "./model-hub-execution-service";
+import { isAutomaticPureTextOpeningCandidateEligible } from "./model-hub-router";
+import { MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION } from "./model-hub-routing-service";
+import type { ModelCatalogEntry, ModelInvocationFact } from "./model-hub-store";
 import { SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY } from "./model-execution-policy";
 import { createContextCompilationTrace } from "./context-compilation-trace-store";
 import {
@@ -133,6 +136,8 @@ export interface ExecuteCreativeOpeningProviderActionInput extends CreativeOpeni
     requestId: string,
     invocationId: string,
   ) => void | Promise<void>;
+  /** Persists a returned Provider result after this slot's 180-second fence closed. */
+  readonly onLateResult?: (result: CreativeOpeningResult) => void | Promise<void>;
   readonly onDelta?: (requestId: string, text: string) => void;
   /** Persists each independently settled slot without waiting for the rest of a batch. */
   readonly onResult?: (
@@ -178,6 +183,9 @@ interface NormalizedCreativeOpeningProviderRequest {
 interface CreativeOpeningDispatchBinding {
   readonly inspection: ModelHubTextTaskInspection;
   readonly sourceFingerprint: string;
+  readonly messages: readonly NativeModelMessage[];
+  readonly preparedProjectContext: PreparedCreativeOpeningProjectContext;
+  readonly reservedInvocation: ModelInvocationFact;
 }
 
 interface PreparedCreativeOpeningProviderCall {
@@ -186,12 +194,20 @@ interface PreparedCreativeOpeningProviderCall {
   readonly inspection: ModelHubTextTaskInspection;
   readonly connectionDisplayName: string;
   readonly sourceFingerprint: string;
+  readonly messages: readonly NativeModelMessage[];
+  readonly preparedProjectContext: PreparedCreativeOpeningProjectContext;
 }
 
 interface PreparedCreativeOpeningProviderAction {
   readonly calls: readonly PreparedCreativeOpeningProviderCall[];
   readonly disclosure: CreativeOpeningProviderActionDisclosure;
 }
+
+const MAXIMUM_REMEMBERED_OPENING_ACTIONS = 24;
+const rememberedOpeningActions = new WeakMap<
+  DesktopRuntime,
+  Map<string, PreparedCreativeOpeningProviderAction>
+>();
 
 /**
  * Resolves the complete bounded opening action without creating an invocation
@@ -202,11 +218,133 @@ export async function prepareCreativeOpeningProviderAction(
   runtime: DesktopRuntime,
   input: CreativeOpeningProviderActionInput,
 ): Promise<CreativeOpeningProviderActionDisclosure> {
-  return (
-    await settleCreativeOpeningPreparation(runtime, () =>
-      prepareCreativeOpeningProviderActionCurrent(runtime, input),
-    )
-  ).disclosure;
+  const prepared = await settleCreativeOpeningPreparation(runtime, () =>
+    prepareCreativeOpeningProviderActionCurrent(runtime, input),
+  );
+  rememberCreativeOpeningProviderAction(runtime, prepared);
+  return prepared.disclosure;
+}
+
+function rememberCreativeOpeningProviderAction(
+  runtime: DesktopRuntime,
+  prepared: PreparedCreativeOpeningProviderAction,
+): void {
+  let remembered = rememberedOpeningActions.get(runtime);
+  if (remembered === undefined) {
+    remembered = new Map();
+    rememberedOpeningActions.set(runtime, remembered);
+  }
+  remembered.delete(prepared.disclosure.fingerprint);
+  remembered.set(prepared.disclosure.fingerprint, prepared);
+  while (remembered.size > MAXIMUM_REMEMBERED_OPENING_ACTIONS) {
+    const oldestFingerprint = remembered.keys().next().value;
+    if (oldestFingerprint === undefined) break;
+    remembered.delete(oldestFingerprint);
+  }
+}
+
+function takeRememberedCreativeOpeningProviderAction(
+  runtime: DesktopRuntime,
+  fingerprint: string,
+): PreparedCreativeOpeningProviderAction | null {
+  const remembered = rememberedOpeningActions.get(runtime);
+  const prepared = remembered?.get(fingerprint) ?? null;
+  if (prepared !== null) {
+    remembered?.delete(fingerprint);
+  }
+  return prepared;
+}
+
+async function reserveCreativeOpeningInvocations(
+  runtime: DesktopRuntime,
+  input: ExecuteCreativeOpeningProviderActionInput,
+  prepared: PreparedCreativeOpeningProviderAction,
+): Promise<readonly ModelInvocationFact[]> {
+  const reservations: ModelInvocationFact[] = [];
+  try {
+    for (const call of prepared.calls) {
+      const inspection = call.inspection;
+      const reservationFence: { accepting: boolean } = { accepting: true };
+      const reservationIsStillAccepted = (): boolean => reservationFence.accepting;
+      const observedInvocation: { value: ModelInvocationFact | null } = { value: null };
+      const timeoutFailure = creativeOpeningPreparationTimeout();
+      const reservationWork = (async () => {
+        const invocation = await runtime.modelHub.startInvocation({
+          id: call.request.requestId,
+          task: "book_start_guidance",
+          routeTask: "book_start_guidance",
+          connectionId: inspection.connectionId,
+          catalogEntryId: inspection.catalogEntryId,
+          providerKindSnapshot: inspection.providerKind,
+          modelIdSnapshot: inspection.modelId,
+          routeReason: inspection.selectionKind,
+          attempt: inspection.attempt,
+          privacyPolicy: inspection.privacyPolicy,
+          dataDestination: inspection.dataDestination,
+          maximumCostMicros: inspection.pricing.maximumCostMicros,
+          currency: inspection.pricing.maximumCostCurrency,
+        });
+        observedInvocation.value = invocation;
+        if (!reservationIsStillAccepted()) {
+          await settleCreativeOpeningReservationFailure(runtime, invocation, timeoutFailure);
+          throw timeoutFailure;
+        }
+        await input.onInvocationPrepared?.(call.request.requestId, {
+          invocationId: invocation.id,
+          connectionId: invocation.connectionId,
+          modelId: invocation.modelIdSnapshot,
+        });
+        if (!reservationIsStillAccepted()) {
+          await settleCreativeOpeningReservationFailure(runtime, invocation, timeoutFailure);
+          throw timeoutFailure;
+        }
+        return invocation;
+      })();
+      try {
+        const invocation = await settleCreativeOpeningPreparation(runtime, () => reservationWork);
+        reservationFence.accepting = false;
+        reservations.push(invocation);
+      } catch (cause: unknown) {
+        reservationFence.accepting = false;
+        if (
+          observedInvocation.value !== null &&
+          !reservations.some(({ id }) => id === observedInvocation.value?.id)
+        ) {
+          reservations.push(observedInvocation.value);
+        }
+        void reservationWork.catch(() => undefined);
+        throw cause;
+      }
+    }
+    return Object.freeze(reservations);
+  } catch (cause: unknown) {
+    await Promise.allSettled(
+      reservations.map((invocation) =>
+        settleCreativeOpeningReservationFailure(runtime, invocation, cause),
+      ),
+    );
+    throw cause;
+  }
+}
+
+async function settleCreativeOpeningReservationFailure(
+  runtime: DesktopRuntime,
+  reservation: ModelInvocationFact,
+  cause: unknown,
+): Promise<void> {
+  const current = await runtime.modelHub.findInvocation(reservation.id).catch(() => null);
+  if (current?.status !== "running" || current.providerDispatchStartedAt !== null) {
+    return;
+  }
+  await runtime.modelHub
+    .finishInvocation({
+      id: current.id,
+      status: "failed",
+      errorCode: safeModelFailureCode(cause),
+      errorSummary: "这次开头生成在发送前停止；没有向服务商发送正文或故事资料。",
+      expectedRevision: current.revision,
+    })
+    .catch(() => undefined);
 }
 
 /**
@@ -225,68 +363,78 @@ export async function executeCreativeOpeningProviderAction(
     );
   }
   const requests = normalizeCreativeOpeningProviderRequests(input);
-  let preparedAction: Promise<PreparedCreativeOpeningProviderAction> | null = null;
-  const loadPreparedAction = (): Promise<PreparedCreativeOpeningProviderAction> => {
-    preparedAction ??= prepareCreativeOpeningProviderActionCurrent(runtime, input);
-    return preparedAction;
-  };
+  const prepared =
+    takeRememberedCreativeOpeningProviderAction(runtime, input.disclosureFingerprint) ??
+    (await settleCreativeOpeningPreparation(runtime, () =>
+      prepareCreativeOpeningProviderActionCurrent(runtime, input),
+    ));
+  if (prepared.disclosure.fingerprint !== input.disclosureFingerprint) {
+    throw creativeOpeningDisclosureChanged();
+  }
+  const reservations = await reserveCreativeOpeningInvocations(runtime, input, prepared);
   const settled = await Promise.allSettled(
     requests.map((request, index) =>
       settleCreativeOpeningSlot(runtime, request.requestId, async (settlement) => {
-        const prepared = await loadPreparedAction();
         settlement.assertPending();
-        if (prepared.disclosure.fingerprint !== input.disclosureFingerprint) {
-          throw creativeOpeningDisclosureChanged();
-        }
         const call = prepared.calls[index];
         if (call?.request.requestId !== request.requestId) {
           throw invalidCreativeOpeningAction("开头位置与已确认请求不一致。");
         }
-        const result = await generateCreativeOpeningInternal(
-          runtime,
-          {
-            idea: input.idea,
-            ...(input.direction === undefined ? {} : { direction: input.direction }),
-            answers: input.answers ?? {},
-            openingAngle: call.request.openingAngle,
-            ...(call.request.partialOpening === null
-              ? {}
-              : { partialOpening: call.request.partialOpening }),
-            requestId: call.request.requestId,
-            projectContext: input.projectContext,
-            assertBeforeProviderDispatch: () => {
-              settlement.assertPending();
-              input.assertBeforeProviderDispatch?.(call.request.requestId);
-            },
-            onInvocationPrepared: async (selection) => {
-              settlement.assertPending();
-              await input.onInvocationPrepared?.(call.request.requestId, selection);
-              settlement.assertPending();
-            },
-            onProviderDispatchStarted: async (invocationId) => {
-              if (settlement.isPending()) {
-                await input.onProviderDispatchStarted?.(call.request.requestId, invocationId);
+        const reservedInvocation = reservations[index];
+        if (reservedInvocation?.id !== request.requestId) {
+          throw new Error("这个开头位置与已保存的发送信息不一致。");
+        }
+        try {
+          const result = await generateCreativeOpeningInternal(
+            runtime,
+            {
+              idea: input.idea,
+              ...(input.direction === undefined ? {} : { direction: input.direction }),
+              answers: input.answers ?? {},
+              openingAngle: call.request.openingAngle,
+              ...(call.request.partialOpening === null
+                ? {}
+                : { partialOpening: call.request.partialOpening }),
+              requestId: call.request.requestId,
+              projectContext: input.projectContext,
+              assertBeforeProviderDispatch: () => {
                 settlement.assertPending();
-              }
+                input.assertBeforeProviderDispatch?.(call.request.requestId);
+              },
+              onProviderDispatchStarted: async (invocationId) => {
+                if (settlement.isPending()) {
+                  await input.onProviderDispatchStarted?.(call.request.requestId, invocationId);
+                  settlement.assertPending();
+                }
+              },
+              onDelta: (text) => {
+                if (settlement.isPending()) {
+                  input.onDelta?.(call.request.requestId, text);
+                }
+              },
             },
-            onDelta: (text) => {
-              if (settlement.isPending()) {
-                input.onDelta?.(call.request.requestId, text);
-              }
-            },
-          },
-          Object.freeze({
-            inspection: call.inspection,
-            sourceFingerprint: call.sourceFingerprint,
-          }),
-        );
-        settlement.assertPending();
-        // Await the exact slot checkpoint, but do not let its rejection stop the
-        // other confirmed calls. The aggregate error is surfaced only after
-        // every slot has independently reached a provider/local terminal.
-        await input.onResult?.(result, settlement);
-        settlement.assertPending();
-        return result;
+            Object.freeze({
+              inspection: call.inspection,
+              sourceFingerprint: call.sourceFingerprint,
+              messages: call.messages,
+              preparedProjectContext: call.preparedProjectContext,
+              reservedInvocation,
+            }),
+          );
+          if (!settlement.isPending()) {
+            await input.onLateResult?.(result);
+          }
+          settlement.assertPending();
+          // Await the exact slot checkpoint, but do not let its rejection stop the
+          // other confirmed calls. The aggregate error is surfaced only after
+          // every slot has independently reached a provider/local terminal.
+          await input.onResult?.(result, settlement);
+          settlement.assertPending();
+          return result;
+        } catch (cause: unknown) {
+          await settleCreativeOpeningReservationFailure(runtime, reservedInvocation, cause);
+          throw cause;
+        }
       }),
     ),
   );
@@ -559,6 +707,7 @@ async function prepareCreativeOpeningProviderActionCurrent(
       preparedProjectContext.privacyReceipt,
     );
     const inspection = await inspectModelHubTextTask(runtime, inspectionRequest);
+    await assertCreativeOpeningAutomaticRouteEligible(runtime, inspection);
     try {
       runtime.projectContextPrivacy.assertRouteEligible(
         preparedProjectContext.privacyReceipt,
@@ -582,6 +731,8 @@ async function prepareCreativeOpeningProviderActionCurrent(
         inspectionRequest,
         inspection,
         connectionDisplayName,
+        messages,
+        preparedProjectContext,
         sourceFingerprint: await creativeOpeningSourceFingerprint({
           requestId: request.requestId,
           idea,
@@ -837,8 +988,9 @@ async function generateCreativeOpeningInternal(
     throw cause;
   }
   const requestId = input.requestId ?? runtime.ids.next();
-  let preparedProjectContext: PreparedCreativeOpeningProjectContext | null = null;
-  if (input.projectContext !== undefined) {
+  let preparedProjectContext: PreparedCreativeOpeningProjectContext | null =
+    dispatchBinding?.preparedProjectContext ?? null;
+  if (input.projectContext !== undefined && preparedProjectContext === null) {
     try {
       preparedProjectContext = await prepareCreativeOpeningProjectContext(runtime, {
         ...input.projectContext,
@@ -854,20 +1006,25 @@ async function generateCreativeOpeningInternal(
       throw cause;
     }
   }
-  const messages = buildOpeningMessages(
-    idea,
-    direction,
-    input.answers ?? {},
-    input.openingAngle ?? null,
-    partialOpening,
-    preparedProjectContext?.compiled ?? null,
-    preparedProjectContext?.novelSkillPromptSection ?? null,
-  );
+  const messages =
+    dispatchBinding?.messages ??
+    buildOpeningMessages(
+      idea,
+      direction,
+      input.answers ?? {},
+      input.openingAngle ?? null,
+      partialOpening,
+      preparedProjectContext?.compiled ?? null,
+      preparedProjectContext?.novelSkillPromptSection ?? null,
+    );
   const inspectionRequest = creativeOpeningInspectionRequest(
     messages,
     preparedProjectContext?.privacyReceipt ?? null,
   );
   let visibleText = partialOpening ?? "";
+  const returnedProviderResultPendingReview: { value: CreativeOpeningResult | null } = {
+    value: null,
+  };
   const receiveVisibleText = (text: string) => {
     visibleText = combineOpeningText(partialOpening, text);
     input.onDelta?.(visibleText);
@@ -880,6 +1037,7 @@ async function generateCreativeOpeningInternal(
     };
     try {
       const currentInspection = await inspectModelHubTextTask(runtime, inspectionRequest);
+      await assertCreativeOpeningAutomaticRouteEligible(runtime, currentInspection);
       const expectedInspection = dispatchBinding?.inspection ?? currentInspection;
       assertCreativeOpeningInspection(expectedInspection, currentInspection);
       if (dispatchBinding !== null) {
@@ -905,6 +1063,9 @@ async function generateCreativeOpeningInternal(
         ...inspectionRequest,
         generationId: requestId,
         invocationId: requestId,
+        ...(dispatchBinding === null
+          ? {}
+          : { reservedInvocation: dispatchBinding.reservedInvocation }),
         executionPolicy: SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
         generationRetryLimitOverride: 0,
         reasoningPolicy: "visible_prose",
@@ -1014,6 +1175,18 @@ async function generateCreativeOpeningInternal(
               onProviderDispatchStarted: async ({ invocationId }) =>
                 input.onProviderDispatchStarted?.(invocationId),
             }),
+        onReturnedResultPendingLedgerSettlement: (returned) => {
+          returnedProviderResultPendingReview.value = Object.freeze({
+            requestId,
+            text: combineOpeningText(partialOpening, returned.text).trim(),
+            source: "provider" as const,
+            completion: "complete" as const,
+            providerId: returned.connectionId,
+            modelId: returned.modelId,
+            noticeCode: "OPENING_RESULT_PENDING_REVIEW",
+            contextTraceId: preparedProjectContext?.contextTraceId ?? null,
+          });
+        },
         onDelta: receiveVisibleText,
       });
       if (preparedProjectContext !== null) {
@@ -1038,6 +1211,10 @@ async function generateCreativeOpeningInternal(
         contextTraceId: preparedProjectContext?.contextTraceId ?? null,
       });
     } catch (cause: unknown) {
+      if (returnedProviderResultPendingReview.value !== null) {
+        recordSafeGenerationErrorCode(runtime, "OPENING_RESULT_PENDING_REVIEW");
+        return returnedProviderResultPendingReview.value;
+      }
       const partial = usableTruncatedOpening(
         requestId,
         visibleText,
@@ -1462,10 +1639,77 @@ async function assertCreativeOpeningInspectionCurrent(
   expected: ModelHubTextTaskInspection,
 ): Promise<void> {
   try {
-    assertModelHubInspectionAuthority(expected, await inspectModelHubTextTask(runtime, request));
+    const current = await inspectModelHubTextTask(runtime, request);
+    await assertCreativeOpeningAutomaticRouteEligible(runtime, current);
+    assertModelHubInspectionAuthority(expected, current);
   } catch {
     throw creativeOpeningDispatchDisclosureChanged();
   }
+}
+
+async function assertCreativeOpeningAutomaticRouteEligible(
+  runtime: DesktopRuntime,
+  inspection: ModelHubTextTaskInspection,
+): Promise<void> {
+  let route: Awaited<ReturnType<DesktopRuntime["modelHub"]["findTaskRoute"]>>;
+  try {
+    route = await runtime.modelHub.findTaskRoute("book_start_guidance");
+  } catch {
+    throw creativeOpeningAutomaticRouteCheckFailed();
+  }
+  if (route?.routeOrigin !== "automatic") {
+    return;
+  }
+
+  let preset: Awaited<ReturnType<DesktopRuntime["modelHub"]["findActivePreset"]>>;
+  try {
+    preset = await runtime.modelHub.findActivePreset();
+  } catch {
+    throw creativeOpeningAutomaticRouteCheckFailed();
+  }
+  if (
+    route.presetId !== preset?.id ||
+    preset.routeGenerationVersion !== MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION
+  ) {
+    throw new ModelCenterError(
+      "CREATIVE_OPENING_AUTOMATIC_ROUTE_OUTDATED",
+      "开书使用的自动模型分工来自旧版本，需要先重新整理。本次没有发送。请在模型设置中重新应用智能推荐后再试。",
+      true,
+    );
+  }
+
+  let catalogEntry: ModelCatalogEntry | undefined;
+  let capabilities: Awaited<ReturnType<DesktopRuntime["modelHub"]["listCapabilityEvidence"]>>;
+  try {
+    const catalog = await runtime.modelHub.listCatalog(inspection.connectionId);
+    catalogEntry = catalog.find(({ id }) => id === inspection.catalogEntryId);
+    capabilities = await runtime.modelHub.listCapabilityEvidence(inspection.catalogEntryId);
+  } catch {
+    throw creativeOpeningAutomaticRouteCheckFailed();
+  }
+  if (catalogEntry === undefined) {
+    throw creativeOpeningAutomaticRouteCheckFailed();
+  }
+  if (
+    !isAutomaticPureTextOpeningCandidateEligible(
+      { catalogEntry, capabilities },
+      runtime.clock.now(),
+    )
+  ) {
+    throw new ModelCenterError(
+      "CREATIVE_OPENING_AUTOMATIC_VISUAL_ROUTE_UNSUITABLE",
+      "自动分工选中了更适合图片理解的实验模型，不能用于纯文字开书。本次没有发送。请重新应用智能推荐，或由你手动确认要使用的模型。",
+      true,
+    );
+  }
+}
+
+function creativeOpeningAutomaticRouteCheckFailed(): ModelCenterError {
+  return new ModelCenterError(
+    "CREATIVE_OPENING_AUTOMATIC_ROUTE_CHECK_FAILED",
+    "暂时无法核对开书的自动模型分工，本次没有发送。请重新读取模型设置后再试。",
+    true,
+  );
 }
 
 function assertCreativeOpeningInspection(

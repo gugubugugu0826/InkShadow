@@ -496,11 +496,7 @@ export function StudioReviewPage({
   }
   if (state === "permission_denied") {
     return (
-      <ReviewState
-        title="没有审阅权限"
-        description="当前成员角色或项目分配不允许读取团队审阅。"
-        code={failure?.code}
-      />
+      <ReviewState title="没有审阅权限" description="当前成员角色或项目分配不允许读取团队审阅。" />
     );
   }
   if (state === "key_missing") {
@@ -508,7 +504,6 @@ export function StudioReviewPage({
       <ReviewState
         title="缺少项目密钥"
         description="当前设备没有该审阅所需的精确项目密钥版本，密文不会被跳过验证。"
-        code={failure?.code}
         action={{ label: "重试", onClick: () => void load() }}
       />
     );
@@ -518,7 +513,6 @@ export function StudioReviewPage({
       <ReviewState
         title="审阅密文损坏"
         description="审阅正文未通过完整性或加密认证，已停止显示该记录。"
-        code={failure?.code}
         action={{ label: "重新加载", onClick: () => void load() }}
       />
     );
@@ -528,7 +522,6 @@ export function StudioReviewPage({
       <ReviewState
         title="审阅版本冲突"
         description="远端修订已经变化。请重新加载后比较，不会静默覆盖。"
-        code={failure?.code}
         action={{ label: "重新加载", onClick: () => void load() }}
       />
     );
@@ -538,7 +531,6 @@ export function StudioReviewPage({
       <ReviewState
         title="团队审阅暂不可用"
         description={failure?.message ?? "团队审阅操作未完成，请稍后重试。"}
-        code={failure?.code}
         action={{ label: "重试", onClick: () => void load() }}
       />
     );
@@ -1031,12 +1023,10 @@ function ReplyComposer({
 function ReviewState({
   title,
   description,
-  code,
   action,
 }: {
   readonly title: string;
   readonly description: string;
-  readonly code?: string | undefined;
   readonly action?: Readonly<{ label: string; onClick: () => void }> | undefined;
 }) {
   return (
@@ -1044,7 +1034,6 @@ function ReviewState({
       <ErrorState
         title={title}
         description={description}
-        {...(code === undefined ? {} : { errorCode: code })}
         {...(action === undefined ? {} : { primaryAction: action })}
       />
     </div>

@@ -78,7 +78,9 @@ describe("StudioTeamPage", () => {
         retryable: false,
       }),
     );
-    await screen.findByText(/REVISION_CONFLICT · HTTP 409/u);
+    await screen.findByText("团队操作未完成");
+    expect(document.body).not.toHaveTextContent("REVISION_CONFLICT");
+    expect(document.body).not.toHaveTextContent("HTTP 409");
     expect(document.body.textContent).not.toContain("super-secret-invitation-token");
   });
 
@@ -96,6 +98,27 @@ describe("StudioTeamPage", () => {
     expect(await screen.findByText("需要登录云账户")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "前往登录" })).toBeEnabled();
     expect(service.listTeams).not.toHaveBeenCalled();
+  });
+
+  it("keeps cloud codes and HTTP status out of the workspace error card", async () => {
+    const service = createService();
+    const requestId = "019f9f4a-b3c7-7350-9226-000000000226";
+    vi.mocked(service.getCurrentAccountId).mockRejectedValue(
+      new CloudClientError({
+        code: "CLOUD_PROTOCOL_INVALID_RESPONSE",
+        message: "Provider invocation metadata is invalid.",
+        status: 502,
+        requestId,
+        retryable: true,
+      }),
+    );
+    renderPage(service);
+
+    expect(await screen.findByText("无法读取团队列表")).toBeVisible();
+    expect(screen.getByText(requestId)).toBeVisible();
+    expect(document.body).not.toHaveTextContent("CLOUD_PROTOCOL_INVALID_RESPONSE");
+    expect(document.body).not.toHaveTextContent("Provider invocation metadata is invalid.");
+    expect(document.body).not.toHaveTextContent("HTTP 502");
   });
 
   it("renders a visible revision conflict and keeps retry/error states actionable", async () => {
@@ -116,7 +139,9 @@ describe("StudioTeamPage", () => {
     await user.type(screen.getByLabelText("团队名称"), "New Studio");
     await user.click(screen.getByRole("button", { name: "创建团队" }));
 
-    expect(await screen.findByText(/REVISION_CONFLICT · HTTP 412/u)).toBeInTheDocument();
+    expect(await screen.findByText("团队操作未完成")).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("REVISION_CONFLICT");
+    expect(document.body).not.toHaveTextContent("HTTP 412");
     expect(screen.getByText(/最后一位所有者保护/u)).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("untrusted server detail");
   });

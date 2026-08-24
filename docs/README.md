@@ -1,15 +1,15 @@
 # 墨影 InkShadow 文档入口
 
-> 当前工作树应用清单版本：`0.2.9`；最新公开版本：`v0.2.7`（未签名工程预发行；不可移动或复用）  
+> 当前工作树应用清单版本：`0.2.10`（未签名人工复测候选；未打标签、未发布）  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
 > 最近治理复核：2026-08-24  
-> [`v0.2.7` 工程预发行](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)：来源提交 `cb97876894d6f02c4c901745c95533da7b0260fe`；标签和恰好三个公开附件保持不可变。`v0.2.6` 及更早发布继续作为不可移动历史。  
+> 最新公开版本为 [`v0.2.9` 工程预发行](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.9)：来源提交 `54d9647031bb97b4fc9f021d3b1acca7f6d25c47`；该版本和更早版本的标签、Release 与公开附件保持不可变。  
 > 注意：设计版本用于界面与交互验收，不会自动改变应用版本。
 
-`v0.2.7` 直接模式与数据保护修复已从唯一干净提交完成候选、远端持续集成、未签名打包、带说明标签、公开预发行和三个附件回下载复核。
-真实模型、最终安装程序人工流程、另一台机器与真实 Windows 百分之二百缩放仍未执行。当前事实和待验证边界见
-[`execution/2026-08-22-V027-DIRECT-MODE-REMEDIATION.md`](execution/2026-08-22-V027-DIRECT-MODE-REMEDIATION.md)。
-发布后的文档提交不会移动或重解释 `v0.2.7`、`v0.2.6` 及更早标签、来源哈希和公开附件。
+`v0.2.9` 已从唯一干净提交完成候选、远端持续集成、未签名打包、带说明标签、公开预发行和附件回下载复核。
+`0.2.10` 仅用于本轮真实安装人工复测，完整门禁和安装包尚未完成，不得提前写成通过或发布。
+当前缺陷矩阵、证据边界和待执行门禁见
+[`execution/2026-08-24-V0210-ROUND2-REMEDIATION.md`](execution/2026-08-24-V0210-ROUND2-REMEDIATION.md)。
 
 `0.2.8` 仅生成了未签名人工复测安装包，未推送、未打标签、未发布；来源与保留边界见 [`product-rebuild/08-DESIGN-V031B-REALITY-MATRIX.md`](product-rebuild/08-DESIGN-V031B-REALITY-MATRIX.md#2026-08-24-v028-人工复测安装包)。
 
@@ -45,7 +45,7 @@
 | `EVIDENCE_CURRENT`      | [`execution/CURRENT_STATUS.md`](execution/CURRENT_STATUS.md)                                                                               | 当前执行状态；必须同时核对其中绑定的提交与运行日期 |
 | `EVIDENCE_CURRENT`      | [`execution/TEST_RESULTS.md`](execution/TEST_RESULTS.md)                                                                                   | 当前和历史测试证据；失败不得省略                   |
 | `EVIDENCE_CURRENT`      | [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md)                                                                         | 当前版本的构建、打包、发布与外部门禁               |
-| `EVIDENCE_CURRENT`      | [`execution/2026-08-22-V027-DIRECT-MODE-REMEDIATION.md`](execution/2026-08-22-V027-DIRECT-MODE-REMEDIATION.md)                             | v0.2.7 直接模式、数据保护、缺陷矩阵与待验证边界    |
+| `EVIDENCE_CURRENT`      | [`execution/2026-08-24-V0210-ROUND2-REMEDIATION.md`](execution/2026-08-24-V0210-ROUND2-REMEDIATION.md)                                   | 0.2.10 两轮复测缺陷矩阵、证据边界与候选门禁       |
 | `HISTORICAL`            | [`execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)                 | v0.2.6 发布前修复与真机聚焦历史证据                |
 
 ## 支撑文档
@@ -74,8 +74,8 @@
 ## 目标与历史文档
 
 - `DESIGN/`：`TARGET_BASELINE`。DESIGN v0.3.1b 规定视觉与交互目标；当前工作树应用清单为
-  0.2.8，最新公开工程预发行为 v0.2.7。其发布页恰有安装包、发布清单与
-  `SHA256SUMS` 三个上传附件，精确大小和 SHA-256 见 v0.2.7 发布门禁。
+  0.2.10 未签名人工复测候选，最新公开工程预发行为 v0.2.9。设计版本不会自动改变应用版本，
+  公开附件的精确大小和 SHA-256 以对应版本发布门禁为准。
 - [`product-rebuild/00-PHASE-0-REALITY-AUDIT.md`](product-rebuild/00-PHASE-0-REALITY-AUDIT.md)：
   `HISTORICAL` Phase 0 起始审计；当前差异须再读增量现实矩阵。
 - `docs/prototypes/`、`docs/state-matrices/`：目标原型或状态设计；除非文件明确标为当前，否则不是

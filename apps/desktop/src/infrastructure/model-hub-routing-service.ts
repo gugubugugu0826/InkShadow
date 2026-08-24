@@ -13,9 +13,10 @@ import {
   type ModelRoutingStore,
 } from "./model-routing-store";
 
-export const MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION = "model-hub-evidence-router-v2";
+export const MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION = "model-hub-evidence-router-v3";
 const RECALCULABLE_AUTOMATIC_ROUTE_GENERATION_VERSIONS = Object.freeze([
   "model-hub-evidence-router-v1",
+  "model-hub-evidence-router-v2",
   MODEL_HUB_AUTOMATIC_ROUTE_GENERATION_VERSION,
 ]);
 

@@ -162,7 +162,7 @@ interface IdeaOpeningSuggestionV1 extends Readonly<Record<string, unknown>> {
   readonly slotNumber: number;
   readonly text: string;
   readonly source: "provider" | "local_fallback";
-  readonly status: "pending" | "ready" | "partial" | "failed";
+  readonly status: "pending" | "ready" | "partial" | "review" | "failed";
   readonly openingAngle: CreativeOpeningAngle | null;
   readonly providerId: string | null;
   readonly modelId: string | null;
@@ -193,7 +193,7 @@ interface PersistedIdeaOpeningSuggestionV1 extends Readonly<Record<string, unkno
   readonly slotNumber?: number;
   readonly text: string;
   readonly source: "provider" | "local_fallback";
-  readonly status: "pending" | "ready" | "partial" | "failed";
+  readonly status: "pending" | "ready" | "partial" | "review" | "failed";
   readonly openingAngle?: CreativeOpeningAngle | null;
   readonly providerId: string | null;
   readonly modelId: string | null;
@@ -534,21 +534,9 @@ export function IdeaJourneyPage() {
     if (run !== null && Date.parse(runtime.clock.now()) >= Date.parse(run.deadlineAt)) {
       throw new UiActionError(
         "OPENING_GENERATION_TIMEOUT_BEFORE_SEND",
-        "本次等待已超过 3 分钟，模型调用没有发送。请重新读取后由你明确重试，系统不会自动重发。",
+        "本次等待已超过 3 分钟，还没有向所选服务发送任何内容。请重新读取后由你明确重试，系统不会自动再次发送。",
       );
     }
-  }
-
-  function openingResultArrivedAfterDeadline(requestId: string): Error {
-    return Object.assign(
-      new UiActionError(
-        "MODEL_TIMEOUT",
-        "模型结果在本次总等待截止后返回，未写入可用方案；发送状态需要核对，系统不会自动重发。",
-      ),
-      {
-        timedOutRequestIds: Object.freeze([requestId]),
-      },
-    );
   }
 
   useEffect(
@@ -844,7 +832,7 @@ export function IdeaJourneyPage() {
       if (latest === null) {
         throw new UiActionError(
           "IDEA_JOURNEY_NOT_FOUND",
-          "这次构思已不在当前设备上，本次 AI 调用没有继续发送。",
+          "这次构思已不在当前设备上，没有继续向 AI 服务发送任何内容。",
         );
       }
       const latestSnapshot = readIdeaSnapshot(latest.snapshot, latest.id);
@@ -855,7 +843,7 @@ export function IdeaJourneyPage() {
       if (existing?.status !== "pending") {
         throw new UiActionError(
           "IDEA_OPENING_REQUEST_NOT_PLANNED",
-          "这个 AI 方案已经结束或不再属于当前批次，本次调用没有继续发送。",
+          "这个 AI 方案已经结束或不再属于当前批次，没有继续向所选服务发送任何内容。",
         );
       }
       if (
@@ -871,7 +859,7 @@ export function IdeaJourneyPage() {
       ) {
         throw new UiActionError(
           "IDEA_OPENING_INVOCATION_CONFLICT",
-          "同一个开头位置已经绑定另一条调用记录，本次调用没有继续发送。",
+          "同一个开头位置已经关联另一条发送记录，没有继续向所选服务发送任何内容。",
         );
       }
       const suggestions = [...latestSnapshot.openingSuggestions];
@@ -917,21 +905,24 @@ export function IdeaJourneyPage() {
       lastConflict ??
       new UiActionError(
         "IDEA_OPENING_INVOCATION_RECONCILE_FAILED",
-        "调用记录暂时无法绑定到开头位置；正文未改变，也没有继续发送。",
+        "发送记录暂时无法与这个开头对应；正文未改变，也没有继续发送。",
       )
     );
   }
 
   async function persistOpeningDispatchBoundary(
+    operation: JourneyOperation,
     journeyId: string,
     requestId: string,
     invocationId: string,
   ): Promise<void> {
+    assertCurrentOperation(operation);
     const invocation = await runtime.modelHub.findInvocation(invocationId);
+    assertCurrentOperation(operation);
     if (invocation?.id !== requestId || invocation.providerDispatchStartedAt === null) {
       throw new UiActionError(
         "OPENING_DISPATCH_RECEIPT_MISSING",
-        "\u8c03\u7528\u8bb0\u5f55\u5c1a\u672a\u786e\u8ba4\u5df2\u7ecf\u8fdb\u5165\u53d1\u9001\u8fb9\u754c\uff0c\u56e0\u6b64\u6ca1\u6709\u628a\u8fd9\u6b21\u5f00\u5934\u6807\u8bb0\u4e3a\u7b49\u5f85\u6a21\u578b\u8fd4\u56de\u3002",
+        "本机尚未确认这次请求已经发出，因此没有把这个开头标记为等待服务返回。",
       );
     }
     projectOpeningDispatchInMemory(requestId, invocationId);
@@ -939,14 +930,14 @@ export function IdeaJourneyPage() {
     if (current === null) {
       throw new UiActionError(
         "IDEA_JOURNEY_NOT_FOUND",
-        "\u8fd9\u6b21\u6784\u601d\u5df2\u4e0d\u5728\u5f53\u524d\u8bbe\u5907\u4e0a\uff1b\u8c03\u7528\u5df2\u7ecf\u8fdb\u5165\u53d1\u9001\u8fb9\u754c\uff0c\u7ed3\u679c\u9700\u8981\u4eba\u5de5\u6838\u5bf9\u3002",
+        "这次构思已不在当前设备上；请求已经确认发出，返回结果需要人工核对。",
       );
     }
     const currentRun = readIdeaSnapshot(current.snapshot, current.id).openingRun;
     if (!currentRun?.requestIds.includes(requestId)) {
       throw new UiActionError(
         "OPENING_JOURNEY_SCOPE_MISMATCH",
-        "\u8c03\u7528\u8bb0\u5f55\u4e0e\u5f53\u524d\u5f00\u4e66\u65c5\u7a0b\u4e0d\u4e00\u81f4\uff1b\u8c03\u7528\u5df2\u7ecf\u8fdb\u5165\u53d1\u9001\u8fb9\u754c\uff0c\u7ed3\u679c\u9700\u8981\u4eba\u5de5\u6838\u5bf9\u3002",
+        "本次发送信息与当前构思不一致；请求已经确认发出，返回结果需要人工核对。",
       );
     }
     const batchInvocations = await Promise.all(
@@ -969,6 +960,13 @@ export function IdeaJourneyPage() {
       providerWaitingRecord.snapshot,
       providerWaitingRecord.id,
     ).openingRun;
+    if (isCurrentOperation(operation)) {
+      setJourney((active) =>
+        active?.id !== providerWaitingRecord.id || active.revision < providerWaitingRecord.revision
+          ? providerWaitingRecord
+          : active,
+      );
+    }
     if (providerWaitingRun?.stage === "provider_waiting") {
       await projectOpeningJourneyTaskStage(
         runtime.taskCenter,
@@ -989,6 +987,7 @@ export function IdeaJourneyPage() {
       generationMode: "provider" | "local";
       batchPlan: ProviderOpeningBatchPlan | null;
       assertPersistenceAllowed?: () => void;
+      forcePendingReview?: boolean;
     }>,
   ): Promise<CreativeJourneyRecord> {
     let lastConflict: Error | null = null;
@@ -1007,17 +1006,6 @@ export function IdeaJourneyPage() {
       }
       const latestSnapshot = readIdeaSnapshot(latest.snapshot, latest.id);
       const persistedRun = latestSnapshot.openingRun;
-      const assertResultBeforeDeadline = (): void => {
-        if (
-          generated.source === "provider" &&
-          persistedRun !== null &&
-          persistedRun.batchId === input.batchId &&
-          Date.parse(runtime.clock.now()) >= Date.parse(persistedRun.deadlineAt)
-        ) {
-          throw openingResultArrivedAfterDeadline(generated.requestId);
-        }
-      };
-      assertResultBeforeDeadline();
       const currentSuggestion = latestSnapshot.openingSuggestions.find(
         ({ id, batchId }) => id === generated.requestId && batchId === input.batchId,
       );
@@ -1031,6 +1019,31 @@ export function IdeaJourneyPage() {
           ? null
           : await runtime.modelHub.findInvocation(lifecycleSuggestion.providerInvocationId);
       input.assertPersistenceAllowed?.();
+      const arrivedAfterDeadline =
+        generated.source === "provider" &&
+        persistedRun !== null &&
+        persistedRun.batchId === input.batchId &&
+        Date.parse(runtime.clock.now()) >= Date.parse(persistedRun.deadlineAt);
+      const resultPendingReviewRequested =
+        generated.source === "provider" &&
+        generated.text.trim().length > 0 &&
+        (input.forcePendingReview === true ||
+          generated.noticeCode === "OPENING_RESULT_PENDING_REVIEW" ||
+          arrivedAfterDeadline ||
+          (lifecycleSuggestion?.status === "failed" &&
+            lifecycleSuggestion.dispatchState === "ambiguous" &&
+            (invocation?.status === "timed_out" ||
+              (invocation?.status === "failed" &&
+                invocation.errorCode === "OPENING_DISPATCH_AMBIGUOUS"))));
+      const resultPendingReview = resultPendingReviewRequested
+        ? await assertOpeningResultPendingReviewScope(
+            runtime,
+            latest,
+            latestSnapshot,
+            generated,
+            invocation,
+          )
+        : false;
       const dispatchState = openingDispatchStateFromInvocation(generated, invocation);
       const suggestion = openingSuggestionFromResult(
         generated,
@@ -1041,13 +1054,16 @@ export function IdeaJourneyPage() {
           slotNumber: lifecycleSuggestion?.slotNumber ?? 1,
           providerInvocationId: lifecycleSuggestion?.providerInvocationId ?? null,
           dispatchState,
-          ...(dispatchState === "ambiguous" && invocation === null
-            ? { noticeCode: "OPENING_INVOCATION_RECORD_MISSING" }
-            : dispatchState === "ambiguous" && invocation?.status !== "succeeded"
-              ? { noticeCode: "OPENING_INVOCATION_STATE_MISMATCH" }
-              : dispatchState === "ambiguous" && invocation?.status === "succeeded"
-                ? { noticeCode: "OPENING_RESULT_NOT_PERSISTED" }
-                : {}),
+          resultPendingReview,
+          ...(resultPendingReview
+            ? { noticeCode: "OPENING_RESULT_PENDING_REVIEW" }
+            : dispatchState === "ambiguous" && invocation === null
+              ? { noticeCode: "OPENING_INVOCATION_RECORD_MISSING" }
+              : dispatchState === "ambiguous" && invocation?.status !== "succeeded"
+                ? { noticeCode: "OPENING_INVOCATION_STATE_MISMATCH" }
+                : dispatchState === "ambiguous" && invocation?.status === "succeeded"
+                  ? { noticeCode: "OPENING_RESULT_NOT_PERSISTED" }
+                  : {}),
         },
       );
       const repairsUnpersistedResult = canRepairUnpersistedOpeningResult(
@@ -1055,10 +1071,16 @@ export function IdeaJourneyPage() {
         suggestion,
         invocation,
       );
+      const archivesPendingReview = canArchiveOpeningResultPendingReview(
+        lifecycleSuggestion,
+        suggestion,
+        invocation,
+      );
       if (
         currentSuggestion !== undefined &&
         currentSuggestion.status !== "pending" &&
-        !repairsUnpersistedResult
+        !repairsUnpersistedResult &&
+        !archivesPendingReview
       ) {
         if (sameOpeningSuggestion(currentSuggestion, suggestion)) {
           input.assertPersistenceAllowed?.();
@@ -1071,14 +1093,17 @@ export function IdeaJourneyPage() {
       }
 
       const activeBatchRequest =
+        !resultPendingReview &&
         input.batchPlan !== null &&
         currentSuggestion !== undefined &&
         (currentSuggestion.status === "pending" || repairsUnpersistedResult);
       const activeSingleRequest =
-        input.batchPlan === null && latestSnapshot.pendingRequestId === generated.requestId;
+        !resultPendingReview &&
+        input.batchPlan === null &&
+        latestSnapshot.pendingRequestId === generated.requestId;
       let nextSnapshot: IdeaJourneySnapshotV1;
       let nextState = latest.currentState;
-      let resultStatus: "ready" | "partial" | "failed";
+      let resultStatus: "ready" | "partial" | "review" | "failed";
       let historicalResult = false;
 
       if (activeBatchRequest && input.openingAngle !== null) {
@@ -1117,7 +1142,16 @@ export function IdeaJourneyPage() {
           suggestion,
           invocation,
         );
-        if (existingHistorical !== undefined && !repairsHistoricalResult) {
+        const archivesHistoricalPendingReview = canArchiveOpeningResultPendingReview(
+          existingHistorical,
+          suggestion,
+          invocation,
+        );
+        if (
+          existingHistorical !== undefined &&
+          !repairsHistoricalResult &&
+          !archivesHistoricalPendingReview
+        ) {
           if (
             existingHistorical.noticeCode === GENERATION_ABANDONED_BY_AUTHOR &&
             suggestion.status === "failed"
@@ -1142,10 +1176,31 @@ export function IdeaJourneyPage() {
         } else {
           history[historicalIndex] = suggestion;
         }
+        const openingSuggestions =
+          resultPendingReview && currentSuggestion !== undefined
+            ? Object.freeze(
+                latestSnapshot.openingSuggestions.filter(
+                  ({ id, batchId }) =>
+                    id !== currentSuggestion.id || batchId !== currentSuggestion.batchId,
+                ),
+              )
+            : latestSnapshot.openingSuggestions;
+        const nextPending = openingSuggestions.find(({ status }) => status === "pending") ?? null;
         nextSnapshot = Object.freeze({
           ...latestSnapshot,
+          pendingRequestId: nextPending?.id ?? null,
+          openingSuggestions,
           openingResultHistory: Object.freeze(history),
+          openingBatchFailureCount: openingSuggestions.filter(({ status }) => status === "failed")
+            .length,
+          noticeCode: resultPendingReview
+            ? "OPENING_RESULT_PENDING_REVIEW"
+            : latestSnapshot.noticeCode,
         });
+        if (resultPendingReview) {
+          nextState =
+            nextPending === null ? guidanceStateForSnapshot(nextSnapshot) : "generation_pending";
+        }
         resultStatus = settledOpeningStatus(suggestion);
       }
 
@@ -1158,7 +1213,6 @@ export function IdeaJourneyPage() {
       });
       try {
         input.assertPersistenceAllowed?.();
-        assertResultBeforeDeadline();
         await runtime.creativeJourneys.update(
           updated,
           latest.revision,
@@ -1179,10 +1233,18 @@ export function IdeaJourneyPage() {
         return updated;
       } catch (cause: unknown) {
         input.assertPersistenceAllowed?.();
-        if (!isCreativeJourneyRevisionConflict(cause)) {
+        const failure = normalizeUiError(cause);
+        const canRetryReturnedProviderWrite =
+          generated.source === "provider" &&
+          generated.text.trim().length > 0 &&
+          !(cause instanceof UiActionError) &&
+          failure.code !== "MODEL_TIMEOUT" &&
+          creativeOpeningTimedOutRequestIds(cause).length === 0;
+        if (!isCreativeJourneyRevisionConflict(cause) && !canRetryReturnedProviderWrite) {
           throw cause;
         }
-        lastConflict = cause;
+        lastConflict =
+          cause instanceof Error ? cause : new Error("AI 返回结果的本地保存尚未完成。");
       }
     }
     throw (
@@ -1249,7 +1311,7 @@ export function IdeaJourneyPage() {
     if (operation !== null && operation.journeyId !== journeyId) {
       throw new UiActionError(
         "IDEA_OPENING_TIMEOUT_SCOPE_MISMATCH",
-        "超时请求不属于当前构思；墨影没有结束其他调用，请重新读取进度。",
+        "这个超时请求不属于当前构思；墨影没有结束其他仍在进行的服务请求，请重新读取进度。",
       );
     }
     const current = await runtime.creativeJourneys.findById(journeyId);
@@ -1257,7 +1319,7 @@ export function IdeaJourneyPage() {
     if (current === null) {
       throw new UiActionError(
         "IDEA_JOURNEY_NOT_FOUND",
-        "这次构思已经不在当前设备上，墨影没有结束其他调用。",
+        "这次构思已经不在当前设备上，墨影没有结束其他仍在进行的服务请求。",
       );
     }
     const recoveryReceipt: TimedOutOpeningRecoveryReceipt = Object.freeze({
@@ -1279,11 +1341,6 @@ export function IdeaJourneyPage() {
       recoveryReceipt,
     );
     if (operation !== null) assertCurrentOperation(operation);
-    await Promise.allSettled(
-      verified.providerCancellationRequestIds.map(async (requestId) => {
-        await runtime.modelGateway.cancelGeneration(requestId);
-      }),
-    );
     if (operation !== null && isCurrentOperation(operation)) {
       const turns = await runtime.creativeJourneys.listTurns(journeyId);
       assertCurrentOperation(operation);
@@ -1337,7 +1394,7 @@ export function IdeaJourneyPage() {
       return record;
     }
     const hasUncertainResult = runSuggestions.some(
-      ({ dispatchState }) => dispatchState === "ambiguous",
+      ({ status, dispatchState }) => status === "review" || dispatchState === "ambiguous",
     );
     const hasUsableResult = runSuggestions.some(isUsableOpeningSuggestion);
     const stage: OpeningJourneyRunStage = hasUncertainResult
@@ -1518,7 +1575,7 @@ export function IdeaJourneyPage() {
     if (current.projectId === null || current.chapterId === null) {
       throw new UiActionError(
         "IDEA_OPENING_WORKSPACE_NOT_READY",
-        "空白作品和第一章尚未安全创建，因此本次没有调用 AI。请重试，已有构思仍保存在本机。",
+        "空白作品和第一章尚未安全创建，因此没有向 AI 服务发送任何内容。请重试，已有构思仍保存在本机。",
       );
     }
     const projectContext = Object.freeze({
@@ -1531,6 +1588,7 @@ export function IdeaJourneyPage() {
     function reconcileProviderResult(
       providerResult: CreativeOpeningResult,
       persistenceFence: CreativeOpeningResultPersistenceFence | null = null,
+      forcePendingReview = false,
     ): Promise<CreativeJourneyRecord> {
       const assertPersistenceAllowed = (): void => {
         persistenceFence?.assertPending();
@@ -1559,14 +1617,35 @@ export function IdeaJourneyPage() {
                     code: providerResult.noticeCode ?? "MODEL_GENERATION_FAILED",
                   }),
                 );
-          const saved = await reconcileOpeningResult(current.id, generated, {
-            batchId: plan.batchId,
-            openingAngle: request.openingAngle,
-            questionKey,
-            generationMode: "provider",
-            assertPersistenceAllowed,
-            batchPlan: plan,
-          });
+          let saved: CreativeJourneyRecord;
+          try {
+            saved = await reconcileOpeningResult(current.id, generated, {
+              batchId: plan.batchId,
+              openingAngle: request.openingAngle,
+              questionKey,
+              generationMode: "provider",
+              assertPersistenceAllowed,
+              batchPlan: plan,
+              forcePendingReview,
+            });
+          } catch (cause: unknown) {
+            if (
+              generated.source !== "provider" ||
+              generated.text.trim().length === 0 ||
+              persistenceFence === null ||
+              persistenceFence.isPending()
+            ) {
+              throw cause;
+            }
+            saved = await reconcileOpeningResult(current.id, generated, {
+              batchId: plan.batchId,
+              openingAngle: request.openingAngle,
+              questionKey,
+              generationMode: "provider",
+              batchPlan: plan,
+              forcePendingReview: true,
+            });
+          }
           if (isCurrentOperation(operation) && (persistenceFence?.isPending() ?? true)) {
             setJourney((active) =>
               active?.id !== saved.id || active.revision < saved.revision ? saved : active,
@@ -1622,7 +1701,7 @@ export function IdeaJourneyPage() {
           return persistOpeningInvocation(operation, current.id, plan, request, selection);
         },
         onProviderDispatchStarted: (requestId, invocationId) =>
-          persistOpeningDispatchBoundary(current.id, requestId, invocationId),
+          persistOpeningDispatchBoundary(operation, current.id, requestId, invocationId),
         onDelta: (requestId, text) => {
           if (isCurrentOperation(operation)) {
             updateStreamingPreview(requestId, text);
@@ -1630,6 +1709,9 @@ export function IdeaJourneyPage() {
         },
         onResult: async (result, persistenceFence) => {
           await reconcileProviderResult(result, persistenceFence);
+        },
+        onLateResult: async (result) => {
+          await reconcileProviderResult(result, null, true);
         },
       });
     } catch (cause: unknown) {
@@ -1674,10 +1756,17 @@ export function IdeaJourneyPage() {
     input: Parameters<typeof prepareCreativeOpeningProviderAction>[1],
   ): Promise<CreativeOpeningProviderActionDisclosure | null> {
     assertCurrentOperation(operation);
-    await checkpointOpeningJourneyRun(runtime.creativeJourneys, journeyId, {
+    const preflightRecord = await checkpointOpeningJourneyRun(runtime.creativeJourneys, journeyId, {
       stage: "preflight",
       now: runtime.clock.now(),
     });
+    if (isCurrentOperation(operation)) {
+      setJourney((active) =>
+        active?.id !== preflightRecord.id || active.revision < preflightRecord.revision
+          ? preflightRecord
+          : active,
+      );
+    }
     if (!isCurrentOperation(operation)) {
       await abandonPreparedOpeningProviderAction(null, journeyId);
       return null;
@@ -1687,10 +1776,21 @@ export function IdeaJourneyPage() {
       await abandonPreparedOpeningProviderAction(null, journeyId);
       return null;
     }
-    await checkpointOpeningJourneyRun(runtime.creativeJourneys, journeyId, {
-      stage: "awaiting_confirmation",
-      now: runtime.clock.now(),
-    });
+    const confirmationRecord = await checkpointOpeningJourneyRun(
+      runtime.creativeJourneys,
+      journeyId,
+      {
+        stage: "awaiting_confirmation",
+        now: runtime.clock.now(),
+      },
+    );
+    if (isCurrentOperation(operation)) {
+      setJourney((active) =>
+        active?.id !== confirmationRecord.id || active.revision < confirmationRecord.revision
+          ? confirmationRecord
+          : active,
+      );
+    }
     if (!isCurrentOperation(operation)) {
       await abandonPreparedOpeningProviderAction(null, journeyId);
       return null;
@@ -1706,10 +1806,17 @@ export function IdeaJourneyPage() {
       );
       return null;
     }
-    await checkpointOpeningJourneyRun(runtime.creativeJourneys, journeyId, {
+    const confirmedRecord = await checkpointOpeningJourneyRun(runtime.creativeJourneys, journeyId, {
       stage: "confirmed",
       now: runtime.clock.now(),
     });
+    if (isCurrentOperation(operation)) {
+      setJourney((active) =>
+        active?.id !== confirmedRecord.id || active.revision < confirmedRecord.revision
+          ? confirmedRecord
+          : active,
+      );
+    }
     if (!isCurrentOperation(operation)) {
       return null;
     }
@@ -1718,6 +1825,13 @@ export function IdeaJourneyPage() {
       now: runtime.clock.now(),
     });
     const reservingRun = readIdeaSnapshot(reservingRecord.snapshot, journeyId).openingRun;
+    if (isCurrentOperation(operation)) {
+      setJourney((active) =>
+        active?.id !== reservingRecord.id || active.revision < reservingRecord.revision
+          ? reservingRecord
+          : active,
+      );
+    }
     if (reservingRun?.stage === "invocation_reserving") {
       await projectOpeningJourneyTaskStage(
         runtime.taskCenter,
@@ -2055,6 +2169,13 @@ export function IdeaJourneyPage() {
           stage: "workspace_provisioning",
           now: runtime.clock.now(),
         });
+        if (isCurrentOperation(boundOperation)) {
+          setJourney((active) =>
+            active?.id !== preparedRecord.id || active.revision < preparedRecord.revision
+              ? preparedRecord
+              : active,
+          );
+        }
       }
       const preparedSnapshot = readIdeaSnapshot(preparedRecord.snapshot, preparedRecord.id);
       const providerPreparation =
@@ -3524,6 +3645,64 @@ export function IdeaJourneyPage() {
         return;
       }
       startRequestTimings([requestId]);
+      const singleResultReconciliations = new Map<string, Promise<CreativeJourneyRecord>>();
+      function reconcileSingleProviderResult(
+        providerResult: CreativeOpeningResult,
+        persistenceFence: CreativeOpeningResultPersistenceFence | null = null,
+        forcePendingReview = false,
+      ): Promise<CreativeJourneyRecord> {
+        if (providerResult.requestId !== requestId) {
+          return Promise.reject(
+            new UiActionError(
+              "IDEA_OPENING_REQUEST_NOT_PLANNED",
+              "AI 返回结果与已确认的单个开头请求不一致，结果没有写入当前方案。",
+            ),
+          );
+        }
+        const existing = singleResultReconciliations.get(providerResult.requestId);
+        if (existing !== undefined) return existing;
+        const assertPersistenceAllowed = (): void => {
+          persistenceFence?.assertPending();
+        };
+        const reconciliation = (async () => {
+          assertPersistenceAllowed();
+          try {
+            return await reconcileOpeningResult(preparedDispatch.current.id, providerResult, {
+              batchId: plan.batchId,
+              openingAngle: plannedRequest.openingAngle,
+              questionKey: "opening_choice",
+              generationMode: "provider",
+              batchPlan: plan,
+              assertPersistenceAllowed,
+              forcePendingReview,
+            });
+          } catch (cause: unknown) {
+            if (
+              providerResult.source !== "provider" ||
+              providerResult.text.trim().length === 0 ||
+              persistenceFence === null ||
+              persistenceFence.isPending()
+            ) {
+              throw cause;
+            }
+            return reconcileOpeningResult(preparedDispatch.current.id, providerResult, {
+              batchId: plan.batchId,
+              openingAngle: plannedRequest.openingAngle,
+              questionKey: "opening_choice",
+              generationMode: "provider",
+              batchPlan: plan,
+              forcePendingReview: true,
+            });
+          }
+        })();
+        singleResultReconciliations.set(providerResult.requestId, reconciliation);
+        void reconciliation.catch(() => {
+          if (singleResultReconciliations.get(providerResult.requestId) === reconciliation) {
+            singleResultReconciliations.delete(providerResult.requestId);
+          }
+        });
+        return reconciliation;
+      }
       const generatedResults = await executeCreativeOpeningProviderAction(runtime, {
         actionId: plan.batchId,
         kind: actionKind,
@@ -3549,11 +3728,22 @@ export function IdeaJourneyPage() {
             selection,
           ),
         onProviderDispatchStarted: (_requestId, invocationId) =>
-          persistOpeningDispatchBoundary(preparedDispatch.current.id, requestId, invocationId),
+          persistOpeningDispatchBoundary(
+            operation,
+            preparedDispatch.current.id,
+            requestId,
+            invocationId,
+          ),
         onDelta: (_requestId, text) => {
           if (isCurrentOperation(operation)) {
             updateStreamingPreview(requestId, text);
           }
+        },
+        onResult: async (result, persistenceFence) => {
+          await reconcileSingleProviderResult(result, persistenceFence);
+        },
+        onLateResult: async (result) => {
+          await reconcileSingleProviderResult(result, null, true);
         },
       });
       const generated = generatedResults[0];
@@ -3563,13 +3753,7 @@ export function IdeaJourneyPage() {
           "已确认的开头请求没有返回可核对结果，当前方案保持不变。",
         );
       }
-      let updated = await reconcileOpeningResult(journey.id, generated, {
-        batchId: plan.batchId,
-        openingAngle: target.openingAngle,
-        questionKey: "opening_choice",
-        generationMode: "provider",
-        batchPlan: plan,
-      });
+      let updated = await reconcileSingleProviderResult(generated);
       updated = await finalizeOpeningJourneyRun(updated);
       if (
         directMode &&
@@ -4411,18 +4595,18 @@ export function IdeaJourneyPage() {
         if (!open) settleOpeningProviderConfirmation(false);
       }}
       title={openingProviderConfirmation?.actionLabel ?? "确认 AI 开头操作"}
-      description="这是本次动作单独的模型调用授权。关闭或取消不会调用 AI，也不会产生新的模型费用。"
+      description="这是本次生成单独的发送确认。关闭或取消不会向 AI 服务发送任何内容，也不会产生新的模型费用。"
       footer={
         <>
           <Button variant="secondary" onClick={() => settleOpeningProviderConfirmation(false)}>
-            取消，不调用 AI
+            取消，不发送
           </Button>
           <Button onClick={() => settleOpeningProviderConfirmation(true)}>
             {openingProviderConfirmation === null
               ? "确认"
-              : `确认并发起最多 ${String(
+              : `确认并发送最多 ${String(
                   openingProviderConfirmation.disclosure.maximumProviderCalls,
-                )} 次调用`}
+                )} 个生成请求`}
           </Button>
         </>
       }
@@ -4432,7 +4616,7 @@ export function IdeaJourneyPage() {
           <InlineAlert
             tone="ai-clarification"
             title="生成结果仍是隔离建议"
-            description="本次调用不会自动写入正式正文；你仍需在比较界面明确选择并接受。"
+            description="本次生成不会自动写入正式正文；你仍需在比较界面明确选择并接受。"
           />
           <dl className="idea-journey__summary-list">
             <div>
@@ -4452,7 +4636,7 @@ export function IdeaJourneyPage() {
               </dd>
             </div>
             <div>
-              <dt>本动作调用上限</dt>
+              <dt>本次最多发送次数</dt>
               <dd>
                 最多 {String(openingProviderConfirmation.disclosure.maximumProviderCalls)} 次；
                 每个请求最多{" "}
@@ -4629,7 +4813,7 @@ export function IdeaJourneyPage() {
     const sourceLabel =
       snapshot.previewSource === "provider"
         ? `已确认的模型 · ${snapshot.modelId ?? "已选模型"}`
-        : "本地草案（未调用云端 AI）";
+        : "本地草案（未向云端 AI 发送内容）";
     return (
       <div className="desktop-page idea-journey idea-journey--summary" role="main">
         {openingProviderConfirmationDialog}
@@ -4814,7 +4998,7 @@ export function IdeaJourneyPage() {
             <h1>先把一个想法写成可以继续的开头</h1>
             <p>
               {directMode
-                ? "选定完整方案后会直接建立本地作品和待确认开头，不会再调用 AI，也不会先追问设定。"
+                ? "选定完整方案后会直接建立本地作品和待确认开头，不会再次向 AI 服务发送内容，也不会先追问设定。"
                 : `这次问题计划预计 ${String(snapshot.expectedQuestionTotal)}问，一次只解决一件事；可跳过、返回或随时创建。`}
             </p>
           </div>
@@ -4996,7 +5180,7 @@ export function IdeaJourneyPage() {
                               {openingRun === null
                                 ? "等待生成"
                                 : openingJourneyStageLabel(openingRun.stage)}
-                              。确认前不会发送；进入发送边界后也不会自动重复调用。
+                              。确认前不会发送；向服务商发出请求后也不会自动再次发送。
                             </p>
                           </div>
                         ) : (
@@ -5096,7 +5280,7 @@ export function IdeaJourneyPage() {
                   <div className="idea-journey__suggestions" role="list">
                     {snapshot.openingResultHistory.map((suggestion, index) => (
                       <article
-                        className={`idea-journey__suggestion${suggestion.status === "failed" ? " idea-journey__suggestion--failed" : ""}`}
+                        className={`idea-journey__suggestion${suggestion.status === "failed" || suggestion.status === "review" ? " idea-journey__suggestion--failed" : ""}`}
                         key={suggestion.id}
                         role="listitem"
                       >
@@ -5107,14 +5291,23 @@ export function IdeaJourneyPage() {
                               ? "已安全归档"
                               : suggestion.status === "partial"
                                 ? "未完整草稿已归档"
-                                : suggestion.dispatchState === "not_dispatched" &&
-                                    suggestion.noticeCode === GENERATION_ABANDONED_BY_AUTHOR
-                                  ? "确认前安全终止"
-                                  : openingDispatchStateLabel(suggestion.dispatchState)}
+                                : suggestion.status === "review"
+                                  ? "结果需要核对"
+                                  : suggestion.dispatchState === "not_dispatched" &&
+                                      suggestion.noticeCode === GENERATION_ABANDONED_BY_AUTHOR
+                                    ? "确认前安全终止"
+                                    : openingDispatchStateLabel(suggestion.dispatchState)}
                           </Badge>
                         </header>
-                        {isUsableOpeningSuggestion(suggestion) ? (
-                          <div className="idea-journey__manuscript">{suggestion.text}</div>
+                        {isUsableOpeningSuggestion(suggestion) || suggestion.status === "review" ? (
+                          <>
+                            <div className="idea-journey__manuscript">{suggestion.text}</div>
+                            {suggestion.status === "review" && (
+                              <p>
+                                这份文字在等待结束后才返回，只保存在历史记录中，不能直接选择或写入正文。
+                              </p>
+                            )}
+                          </>
                         ) : (
                           <div className="idea-journey__suggestion-failure">
                             <p>
@@ -5217,7 +5410,7 @@ export function IdeaJourneyPage() {
               }
               description={
                 directMode && recommendedOpening !== null
-                  ? "使用推荐方案或任一完整方案后，将只在本机保存作品起始设定、作品、空白第一章、初始不可变版本和隔离的 AI 建议草稿；选择后不会产生第 4 次模型服务调用。"
+                  ? "使用推荐方案或任一完整方案后，将只在本机保存作品起始设定、作品、空白第一章、初始不可变版本和单独保存的 AI 建议草稿；选择后不会再发送第 4 个生成请求。"
                   : usableSuggestionCount > 0
                     ? "选择后才会整理最多 3 个关键问题；系统不会自动替你选择。"
                     : pendingSuggestionCount > 0
@@ -5461,7 +5654,7 @@ export function IdeaJourneyPage() {
           tone="info"
           title={
             openingPreference === "self"
-              ? "自己写：不会调用 AI"
+              ? "自己写：不会向 AI 服务发送内容"
               : destination.kind === "provider"
                 ? "已选择一个 AI 模型"
                 : "AI 还没连接，也可以开始"
@@ -5470,7 +5663,7 @@ export function IdeaJourneyPage() {
             openingPreference === "self"
               ? "一句话可以留空；墨影会直接创建本地项目和空白第一章，不会生成 AI 建议版本，也不会向正文填入占位内容。"
               : destination.kind === "provider"
-                ? `点击“生成第一段”会并行发起 3 次独立模型调用，供应商可能分别计费；本操作不自动重试。每个方案都保留稳定身份和真实来源，只有你明确选择的方案才能进入后续确认。选择、推荐、问题规划和创建均在本机完成，不会产生第 4 次调用。当前模型：${destination.connectionDisplayName} · ${destination.modelId}。`
+                ? `点击“生成第一段”会并行发送 3 个独立生成请求，服务商可能分别计费；本操作不自动重试。每个方案都保留稳定身份和真实来源，只有你明确选择的方案才能进入后续确认。选择、推荐、问题规划和创建均在本机完成，不会再发送第 4 个请求。当前模型：${destination.connectionDisplayName} · ${destination.modelId}。`
                 : "这句话不会发送到网络，墨影会先准备一份明确标注的本地草案；你仍能完成构思并安全创建作品。"
           }
           {...(destination.kind === "local" && openingPreference !== "self"
@@ -5717,10 +5910,10 @@ async function recoverOpeningInvocation(
         errorSummary: authorEnded
           ? crossedBoundary
             ? "用户主动结束等待；已请求本机停止接收，但无法证明服务商已取消或不会计费。迟到结果不会自动采用。"
-            : "用户在发送前主动结束；没有发生供应商调用。"
+            : "用户在发送前主动结束；没有向所选服务发送任何内容。"
           : crossedBoundary
-            ? "模型在 180 秒内没有返回；调用已按超时结束，系统不会自动重试。"
-            : "发送前准备在 180 秒内没有完成；调用未发送，系统不会自动重试。",
+            ? "模型在 180 秒内没有返回；这次生成已按超时结束，系统不会自动再次发送。"
+            : "发送前准备在 180 秒内没有完成；没有向所选服务发送任何内容，系统不会自动再次发送。",
         expectedRevision: invocation.revision,
       });
       if (reason === "slot_timeout" && crossedBoundary && invocation.status === "timed_out") {
@@ -5780,7 +5973,7 @@ async function recoverTimedOutOpeningProviderBatch(
     const verifiedInvocations = await inspectScopedOpeningInvocations(runtime, scopedSuggestions);
     const outcomes = new Map<string, Readonly<OpeningInvocationRecoveryOutcome>>();
     for (const suggestion of scopedSuggestions) {
-      if (!timedOutIds.has(suggestion.id)) continue;
+      if (!timedOutIds.has(suggestion.id) || !needsOpeningInvocationRecovery(suggestion)) continue;
       const outcome = await recoverOpeningInvocation(
         runtime,
         suggestion,
@@ -5790,7 +5983,7 @@ async function recoverTimedOutOpeningProviderBatch(
       if (outcome === null) {
         throw new UiActionError(
           "IDEA_OPENING_TIMEOUT_RECOVERY_INCOMPLETE",
-          "超时开头位置未能形成明确终态；墨影没有取消任何供应商调用。",
+          "这个超时开头没有安全保存明确结果；墨影没有结束任何仍在进行的服务请求。",
         );
       }
       outcomes.set(suggestion.id, outcome);
@@ -5802,7 +5995,7 @@ async function recoverTimedOutOpeningProviderBatch(
     const suggestions = Object.freeze(
       currentSnapshot.openingSuggestions.map((suggestion) => {
         const outcome = outcomes.get(suggestion.id);
-        return outcome === undefined
+        return outcome === undefined || !needsOpeningInvocationRecovery(suggestion)
           ? suggestion
           : openingSuggestionFromRecoveryOutcome(suggestion, outcome);
       }),
@@ -5811,7 +6004,7 @@ async function recoverTimedOutOpeningProviderBatch(
       currentSnapshot.openingResultHistory.map((suggestion) => {
         const outcome =
           suggestion.batchId === scope.batchId ? outcomes.get(suggestion.id) : undefined;
-        return outcome === undefined
+        return outcome === undefined || !needsOpeningInvocationRecovery(suggestion)
           ? suggestion
           : openingSuggestionFromRecoveryOutcome(suggestion, outcome);
       }),
@@ -5887,7 +6080,7 @@ async function recoverTimedOutOpeningProviderBatch(
     lastConflict ??
     new UiActionError(
       "IDEA_OPENING_RECOVERY_CONFLICT",
-      "超时开头位置暂时无法安全收口；系统没有取消任何供应商调用。",
+      "这个超时开头暂时无法安全结束；墨影没有结束任何仍在进行的服务请求。",
     )
   );
 }
@@ -5905,7 +6098,7 @@ function validateTimedOutOpeningRequestIds(
   ) {
     throw new UiActionError(
       "IDEA_OPENING_TIMEOUT_SCOPE_MISMATCH",
-      "超时请求清单与已确认批次不一致；墨影没有结束任何调用，请重新读取进度。",
+      "超时请求清单与已确认的一批开头不一致；墨影没有结束任何仍在进行的服务请求，请重新读取进度。",
     );
   }
   return uniqueIds;
@@ -5975,7 +6168,7 @@ async function verifyTimedOutOpeningProviderBatchSettlement(
   if (journey === null) {
     throw new UiActionError(
       "IDEA_JOURNEY_NOT_FOUND",
-      "这次构思已经不在当前设备上，墨影没有取消任何供应商调用。",
+      "这次构思已经不在当前设备上，墨影没有结束任何仍在进行的服务请求。",
     );
   }
   const snapshot = readIdeaSnapshot(journey.snapshot, journey.id);
@@ -5986,7 +6179,7 @@ async function verifyTimedOutOpeningProviderBatchSettlement(
     if (invocation === undefined) {
       throw new UiActionError(
         "IDEA_OPENING_TIMEOUT_SCOPE_MISMATCH",
-        "超时调用事实不完整；墨影没有取消任何供应商调用，请重新读取进度。",
+        "这个超时开头的发送记录不完整；墨影没有结束任何仍在进行的服务请求，请重新读取进度。",
       );
     }
     if (
@@ -5995,10 +6188,55 @@ async function verifyTimedOutOpeningProviderBatchSettlement(
     ) {
       throw new UiActionError(
         "IDEA_OPENING_TIMEOUT_TERMINAL_MISMATCH",
-        "仍有开头调用没有形成持久终态；墨影没有取消任何供应商调用。",
+        "仍有开头生成没有保存明确结果；墨影没有结束任何仍在进行的服务请求。",
       );
     }
     if (timedOutIds.has(suggestion.id)) {
+      if (isAtomicallyPersistedOpeningSuccessBound(suggestion, invocation)) {
+        await assertAtomicallyPersistedOpeningSuccessScope(
+          runtime,
+          journey,
+          snapshot,
+          Object.freeze({
+            requestId: suggestion.id,
+            text: suggestion.text,
+            source: "provider" as const,
+            completion:
+              suggestion.status === "partial" ? ("partial" as const) : ("complete" as const),
+            providerId: suggestion.providerId,
+            modelId: suggestion.modelId,
+            noticeCode: suggestion.noticeCode,
+            contextTraceId: suggestion.contextTraceId,
+          }),
+          invocation,
+        );
+        continue;
+      }
+      if (suggestion.status === "review") {
+        if (!isOpeningResultPendingReviewHistoryBound(suggestion, invocation)) {
+          throw new UiActionError(
+            "IDEA_OPENING_TIMEOUT_TERMINAL_MISMATCH",
+            "待核对结果与原来的生成任务不一致；墨影没有结束任何仍在进行的请求。",
+          );
+        }
+        await assertOpeningResultPendingReviewScope(
+          runtime,
+          journey,
+          snapshot,
+          Object.freeze({
+            requestId: suggestion.id,
+            text: suggestion.text,
+            source: "provider" as const,
+            completion: "complete" as const,
+            providerId: suggestion.providerId,
+            modelId: suggestion.modelId,
+            noticeCode: suggestion.noticeCode,
+            contextTraceId: suggestion.contextTraceId,
+          }),
+          invocation,
+        );
+        continue;
+      }
       const expected =
         invocation === null
           ? Object.freeze({
@@ -6018,7 +6256,7 @@ async function verifyTimedOutOpeningProviderBatchSettlement(
       ) {
         throw new UiActionError(
           "IDEA_OPENING_TIMEOUT_TERMINAL_MISMATCH",
-          "超时开头位置尚未形成一致的不可用终态；墨影没有取消任何供应商调用。",
+          "这个超时开头仍未保存一致的结束状态；墨影没有结束任何仍在进行的服务请求。",
         );
       }
       continue;
@@ -6028,18 +6266,47 @@ async function verifyTimedOutOpeningProviderBatchSettlement(
     if (suggestion.status === "pending" || suggestion.dispatchState !== expectedDispatchState) {
       throw new UiActionError(
         "IDEA_OPENING_TIMEOUT_TERMINAL_MISMATCH",
-        "同批次仍有开头位置与调用事实不一致；墨影没有取消任何供应商调用。",
+        "同一批次中仍有开头方案的状态不一致；墨影没有结束任何仍在进行的请求。",
       );
     }
   }
   const timedOutHistory = snapshot.openingResultHistory.filter(
     ({ id, batchId }) => batchId === scope.batchId && timedOutIds.has(id),
   );
+  const verifiedPendingReviewIds = new Set<string>();
+  for (const suggestion of timedOutHistory) {
+    if (suggestion.status !== "review") continue;
+    const invocation = invocations.get(suggestion.id);
+    if (!isOpeningResultPendingReviewHistoryBound(suggestion, invocation)) {
+      throw new UiActionError(
+        "IDEA_OPENING_TIMEOUT_TERMINAL_MISMATCH",
+        "待核对结果与原来的生成任务不一致；墨影没有结束任何仍在进行的请求。",
+      );
+    }
+    await assertOpeningResultPendingReviewScope(
+      runtime,
+      journey,
+      snapshot,
+      Object.freeze({
+        requestId: suggestion.id,
+        text: suggestion.text,
+        source: "provider" as const,
+        completion: "complete" as const,
+        providerId: suggestion.providerId,
+        modelId: suggestion.modelId,
+        noticeCode: suggestion.noticeCode,
+        contextTraceId: suggestion.contextTraceId,
+      }),
+      invocation,
+    );
+    verifiedPendingReviewIds.add(suggestion.id);
+  }
   const scopedSuggestionsById = new Map(
     scopedSuggestions.map((suggestion) => [suggestion.id, suggestion] as const),
   );
   if (
     timedOutHistory.some((suggestion) => {
+      if (verifiedPendingReviewIds.has(suggestion.id)) return false;
       const scopedSuggestion = scopedSuggestionsById.get(suggestion.id);
       const invocation = invocations.get(suggestion.id);
       const expected =
@@ -6069,7 +6336,7 @@ async function verifyTimedOutOpeningProviderBatchSettlement(
   ) {
     throw new UiActionError(
       "IDEA_OPENING_TIMEOUT_TERMINAL_MISMATCH",
-      "超时结果仍被可用历史或当前选择引用；墨影没有取消任何供应商调用。",
+      "超时结果仍被当前选择或可用历史引用；墨影没有结束任何仍在进行的服务请求。",
     );
   }
   const cancellationIds: string[] = [];
@@ -6077,14 +6344,14 @@ async function verifyTimedOutOpeningProviderBatchSettlement(
     if (!timedOutIds.has(requestId)) {
       throw new UiActionError(
         "IDEA_OPENING_TIMEOUT_SCOPE_MISMATCH",
-        "取消回执包含其他请求；墨影没有取消任何供应商调用。",
+        "取消结果包含不属于本次生成的请求；墨影没有结束任何仍在进行的服务请求。",
       );
     }
     const invocation = invocations.get(requestId);
     if (invocation?.status !== "timed_out" || invocation.providerDispatchStartedAt === null) {
       throw new UiActionError(
         "IDEA_OPENING_TIMEOUT_TERMINAL_MISMATCH",
-        "取消回执与持久调用终态不一致；墨影没有取消任何供应商调用。",
+        "取消结果与已保存的发送状态不一致；墨影没有结束任何仍在进行的服务请求。",
       );
     }
     cancellationIds.push(requestId);
@@ -6180,7 +6447,7 @@ async function recoverInterruptedOpeningGeneration(
     lastConflict ??
     new UiActionError(
       "IDEA_OPENING_RECOVERY_CONFLICT",
-      "开头调用状态暂时无法收口；系统没有自动重发。",
+      "开头生成状态暂时无法安全结束；系统不会自动再次发送。",
     )
   );
 }
@@ -6197,12 +6464,30 @@ function selectScopedOpeningRecovery(
   if (new Set(scope.requests.map(({ requestId }) => requestId)).size !== scope.requests.length) {
     throw new UiActionError(
       "IDEA_OPENING_TIMEOUT_SCOPE_MISMATCH",
-      "超时批次包含重复请求；墨影没有结束任何调用，请重新读取进度。",
+      "同一批开头包含重复请求；墨影没有结束任何仍在进行的服务请求，请重新读取进度。",
     );
   }
   const selected = scope.requests.map((request) => {
-    const matches = snapshot.openingSuggestions.filter(({ id }) => id === request.requestId);
-    const suggestion = matches.length === 1 ? matches[0] : undefined;
+    const currentMatches = snapshot.openingSuggestions.filter(({ id }) => id === request.requestId);
+    const historyMatches = snapshot.openingResultHistory.filter(
+      ({ id }) => id === request.requestId,
+    );
+    const historyReview = historyMatches.length === 1 ? historyMatches[0] : undefined;
+    const suggestion =
+      currentMatches.length === 1 && historyMatches.length === 0
+        ? currentMatches[0]
+        : currentMatches.length === 0 &&
+            historyMatches.length === 1 &&
+            historyReview?.status === "review" &&
+            historyReview.source === "provider" &&
+            historyReview.text.trim().length > 0 &&
+            historyReview.noticeCode === "OPENING_RESULT_PENDING_REVIEW" &&
+            historyReview.contextTraceId !== null &&
+            historyReview.providerInvocationId === request.requestId &&
+            (historyReview.dispatchState === "ambiguous" ||
+              historyReview.dispatchState === "succeeded")
+          ? historyReview
+          : undefined;
     if (
       suggestion?.batchId !== scope.batchId ||
       suggestion.slotNumber !== request.slotNumber ||
@@ -6212,7 +6497,7 @@ function selectScopedOpeningRecovery(
     ) {
       throw new UiActionError(
         "IDEA_OPENING_TIMEOUT_SCOPE_MISMATCH",
-        "超时请求与当前开头位置不一致；墨影没有结束其他调用，请重新读取进度。",
+        "这个超时请求与当前开头不一致；墨影没有结束其他仍在进行的服务请求，请重新读取进度。",
       );
     }
     return suggestion;
@@ -6236,7 +6521,7 @@ async function inspectScopedOpeningInvocations(
       ) {
         throw new UiActionError(
           "IDEA_OPENING_TIMEOUT_SCOPE_MISMATCH",
-          "超时调用事实与当前开头位置不一致；墨影没有结束任何调用，请重新读取进度。",
+          "这个超时开头的发送记录与当前方案不一致；墨影没有结束任何仍在进行的服务请求，请重新读取进度。",
         );
       }
       return [suggestion.id, invocation] as const;
@@ -6525,6 +6810,7 @@ function isOpeningSuggestionArray(
       (suggestion.status !== "pending" &&
         suggestion.status !== "ready" &&
         suggestion.status !== "partial" &&
+        suggestion.status !== "review" &&
         suggestion.status !== "failed") ||
       (suggestion.openingAngle !== undefined &&
         suggestion.openingAngle !== null &&
@@ -6542,7 +6828,9 @@ function isOpeningSuggestionArray(
           suggestion.providerInvocationId.length === 0)) ||
       (suggestion.dispatchState !== undefined &&
         !isOpeningDispatchState(suggestion.dispatchState)) ||
-      ((suggestion.status === "ready" || suggestion.status === "partial") &&
+      ((suggestion.status === "ready" ||
+        suggestion.status === "partial" ||
+        suggestion.status === "review") &&
         suggestion.text.trim().length === 0) ||
       ((suggestion.status === "pending" || suggestion.status === "failed") &&
         suggestion.text.length > 0) ||
@@ -6550,6 +6838,13 @@ function isOpeningSuggestionArray(
         (suggestion.source !== "provider" ||
           suggestion.noticeCode !== "MODEL_OUTPUT_TRUNCATED" ||
           suggestion.text.trim().length < MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS)) ||
+      (suggestion.status === "review" &&
+        (suggestion.source !== "provider" ||
+          suggestion.noticeCode !== "OPENING_RESULT_PENDING_REVIEW" ||
+          typeof suggestion.providerInvocationId !== "string" ||
+          suggestion.providerInvocationId.length === 0 ||
+          (suggestion.dispatchState !== "ambiguous" &&
+            suggestion.dispatchState !== "succeeded"))) ||
       (suggestion.status === "pending" &&
         (suggestion.source !== "provider" ||
           suggestion.noticeCode !== null ||
@@ -7040,7 +7335,7 @@ function openingDispatchStateLabel(state: OpeningDispatchState): string {
     case "planned":
       return "等待生成";
     case "dispatched":
-      return "调用中";
+      return "等待服务返回";
     case "succeeded":
       return "已完成";
   }
@@ -7048,10 +7343,10 @@ function openingDispatchStateLabel(state: OpeningDispatchState): string {
 
 function openingDispatchStateDescription(state: OpeningDispatchState): string {
   if (state === "not_dispatched") {
-    return "这个方案在发送前已终止，没有发生供应商调用。";
+    return "这个方案在发送前已终止，没有向服务商发送任何内容。";
   }
   if (state === "ambiguous") {
-    return "调用已经越过网络边界，但结果无法确认；系统不会自动重发。";
+    return "已向所选服务发送，但结果无法确认；系统不会自动再次发送。";
   }
   if (state === "cancelled") {
     return "这个方案已取消，其他成功方案不受影响。";
@@ -7085,6 +7380,225 @@ function canRepairUnpersistedOpeningResult(
     replacement.providerId === invocation.connectionId &&
     replacement.modelId === invocation.modelIdSnapshot &&
     replacement.dispatchState === "succeeded"
+  );
+}
+
+function canArchiveOpeningResultPendingReview(
+  existing: IdeaOpeningSuggestionV1 | undefined,
+  replacement: IdeaOpeningSuggestionV1,
+  invocation: ModelInvocationFact | null,
+): boolean {
+  return (
+    existing !== undefined &&
+    replacement.status === "review" &&
+    replacement.source === "provider" &&
+    replacement.text.trim().length > 0 &&
+    replacement.noticeCode === "OPENING_RESULT_PENDING_REVIEW" &&
+    replacement.id === existing.id &&
+    replacement.batchId === existing.batchId &&
+    replacement.providerInvocationId !== null &&
+    replacement.providerInvocationId === existing.providerInvocationId &&
+    invocation?.id === replacement.providerInvocationId &&
+    invocation.providerDispatchStartedAt !== null &&
+    (invocation.status === "succeeded" ||
+      invocation.status === "timed_out" ||
+      (invocation.status === "failed" && invocation.errorCode === "OPENING_DISPATCH_AMBIGUOUS")) &&
+    replacement.providerId === invocation.connectionId &&
+    replacement.modelId === invocation.modelIdSnapshot &&
+    !isUsableOpeningSuggestion(existing)
+  );
+}
+
+function isAtomicallyPersistedOpeningSuccessBound(
+  suggestion: IdeaOpeningSuggestionV1,
+  invocation: ModelInvocationFact | null | undefined,
+): boolean {
+  const statusMatches =
+    suggestion.status === "ready"
+      ? suggestion.noticeCode === null ||
+        suggestion.noticeCode === "MODEL_HUB_COST_CEILING_EXCEEDED_AFTER_DISPATCH"
+      : suggestion.status === "partial" &&
+        suggestion.noticeCode === "MODEL_OUTPUT_TRUNCATED" &&
+        suggestion.text.trim().length >= MINIMUM_USABLE_PARTIAL_OPENING_CHARACTERS;
+  const invocationStatusMatches =
+    suggestion.status === "ready"
+      ? invocation?.status === "succeeded" && suggestion.dispatchState === "succeeded"
+      : suggestion.status === "partial" &&
+        invocation?.status === "failed" &&
+        invocation.errorCode === "MODEL_OUTPUT_TRUNCATED" &&
+        suggestion.dispatchState === "failed";
+  return (
+    statusMatches &&
+    suggestion.source === "provider" &&
+    suggestion.text.trim().length > 0 &&
+    suggestion.contextTraceId !== null &&
+    suggestion.providerInvocationId === suggestion.id &&
+    invocation?.id === suggestion.id &&
+    invocation.providerDispatchStartedAt !== null &&
+    invocationStatusMatches &&
+    suggestion.providerId === invocation.connectionId &&
+    suggestion.modelId === invocation.modelIdSnapshot
+  );
+}
+
+function isOpeningResultPendingReviewHistoryBound(
+  suggestion: IdeaOpeningSuggestionV1,
+  invocation: ModelInvocationFact | null | undefined,
+): invocation is ModelInvocationFact {
+  if (
+    suggestion.status !== "review" ||
+    suggestion.source !== "provider" ||
+    suggestion.text.trim().length === 0 ||
+    suggestion.noticeCode !== "OPENING_RESULT_PENDING_REVIEW" ||
+    suggestion.contextTraceId === null ||
+    suggestion.providerInvocationId !== suggestion.id ||
+    invocation?.id !== suggestion.id ||
+    invocation.providerDispatchStartedAt === null ||
+    suggestion.providerId !== invocation.connectionId ||
+    suggestion.modelId !== invocation.modelIdSnapshot
+  ) {
+    return false;
+  }
+  return invocation.status === "succeeded"
+    ? suggestion.dispatchState === "succeeded"
+    : (invocation.status === "timed_out" ||
+        (invocation.status === "failed" &&
+          invocation.errorCode === "OPENING_DISPATCH_AMBIGUOUS")) &&
+        suggestion.dispatchState === "ambiguous";
+}
+
+async function assertOpeningResultPendingReviewScope(
+  runtime: DesktopRuntime,
+  journey: CreativeJourneyRecord,
+  snapshot: IdeaJourneySnapshotV1,
+  generated: CreativeOpeningResult,
+  invocation: ModelInvocationFact | null,
+): Promise<true> {
+  return assertOpeningProviderResultScope(
+    runtime,
+    journey,
+    snapshot,
+    generated,
+    invocation,
+    "pending_review",
+  );
+}
+
+async function assertAtomicallyPersistedOpeningSuccessScope(
+  runtime: DesktopRuntime,
+  journey: CreativeJourneyRecord,
+  snapshot: IdeaJourneySnapshotV1,
+  generated: CreativeOpeningResult,
+  invocation: ModelInvocationFact | null,
+): Promise<true> {
+  return assertOpeningProviderResultScope(
+    runtime,
+    journey,
+    snapshot,
+    generated,
+    invocation,
+    "persisted_success",
+  );
+}
+
+async function assertOpeningProviderResultScope(
+  runtime: DesktopRuntime,
+  journey: CreativeJourneyRecord,
+  snapshot: IdeaJourneySnapshotV1,
+  generated: CreativeOpeningResult,
+  invocation: ModelInvocationFact | null,
+  scopeKind: "pending_review" | "persisted_success",
+): Promise<true> {
+  const plan = snapshot.provisioningPlan;
+  const projectId = journey.projectId === null ? null : parseUuidV7(journey.projectId);
+  const chapterId = journey.chapterId === null ? null : parseUuidV7(journey.chapterId);
+  if (
+    generated.source !== "provider" ||
+    generated.text.trim().length === 0 ||
+    generated.contextTraceId === null ||
+    plan === null ||
+    projectId === null ||
+    !projectId.ok ||
+    chapterId === null ||
+    !chapterId.ok ||
+    plan.projectId !== projectId.value ||
+    plan.chapterId !== chapterId.value ||
+    invocation?.id !== generated.requestId ||
+    invocation.task !== "book_start_guidance" ||
+    invocation.routeTask !== "book_start_guidance" ||
+    invocation.providerDispatchStartedAt === null ||
+    !isOpeningProviderResultInvocationStatusBound(invocation, scopeKind, generated.completion) ||
+    invocation.connectionId !== generated.providerId ||
+    invocation.modelIdSnapshot !== generated.modelId
+  ) {
+    throw openingProviderResultScopeMismatch(scopeKind);
+  }
+  const [projectResult, chapterResult, trace] = await Promise.all([
+    runtime.repositories.projects.findById(projectId.value),
+    runtime.repositories.chapters.findById(chapterId.value),
+    runtime.contextTraces.findById(generated.contextTraceId),
+  ]);
+  const project = projectResult.ok ? projectResult.value : null;
+  const chapter = chapterResult.ok ? chapterResult.value : null;
+  const taskSource = trace?.entries
+    .flatMap(({ sources }) => sources)
+    .find(
+      ({ sourceType, sourceId, sourceVersionId, locator }) =>
+        sourceType === "generation_task" &&
+        sourceId === generated.requestId &&
+        sourceVersionId === plan.initialVersionId &&
+        locator === "idea-journey:opening-request",
+    );
+  if (
+    project?.status !== "active" ||
+    chapter?.status !== "active" ||
+    chapter.projectId !== projectId.value ||
+    chapter.currentVersionId !== plan.initialVersionId ||
+    chapter.content.length !== 0 ||
+    trace?.taskType !== "book_start_guidance" ||
+    trace.projectId !== projectId.value ||
+    trace.chapterId !== chapterId.value ||
+    trace.execution?.generationId !== generated.requestId ||
+    trace.execution.modelInvocationId !== invocation.id ||
+    taskSource === undefined
+  ) {
+    throw openingProviderResultScopeMismatch(scopeKind);
+  }
+  return true;
+}
+function isOpeningProviderResultInvocationStatusBound(
+  invocation: ModelInvocationFact,
+  scopeKind: "pending_review" | "persisted_success",
+  completion: CreativeOpeningResult["completion"],
+): boolean {
+  if (scopeKind === "persisted_success") {
+    return completion === "complete"
+      ? invocation.status === "succeeded"
+      : invocation.status === "failed" && invocation.errorCode === "MODEL_OUTPUT_TRUNCATED";
+  }
+  return (
+    invocation.status === "succeeded" ||
+    invocation.status === "timed_out" ||
+    (invocation.status === "failed" && invocation.errorCode === "OPENING_DISPATCH_AMBIGUOUS")
+  );
+}
+
+function openingProviderResultScopeMismatch(
+  scopeKind: "pending_review" | "persisted_success",
+): UiActionError {
+  if (scopeKind === "pending_review") {
+    return openingResultPendingReviewScopeMismatch();
+  }
+  return new UiActionError(
+    "IDEA_OPENING_PERSISTED_RESULT_SCOPE_MISMATCH",
+    "这份已保存的生成结果与当前作品和第一章的原始空白版本不再完全一致；正文没有改变，请重新读取进度。",
+  );
+}
+
+function openingResultPendingReviewScopeMismatch(): UiActionError {
+  return new UiActionError(
+    "IDEA_OPENING_LATE_RESULT_SCOPE_MISMATCH",
+    "这份较晚返回的文字与当前作品和第一章的原始空白版本不再完全一致；正文没有改变，结果仍保留在历史记录中等待核对。",
   );
 }
 
@@ -7143,7 +7657,9 @@ function openingInterruptedTerminal(
   });
 }
 
-function settledOpeningStatus(suggestion: IdeaOpeningSuggestionV1): "ready" | "partial" | "failed" {
+function settledOpeningStatus(
+  suggestion: IdeaOpeningSuggestionV1,
+): "ready" | "partial" | "review" | "failed" {
   return suggestion.status === "pending" ? "failed" : suggestion.status;
 }
 
@@ -7159,11 +7675,11 @@ function openingJourneyStageLabel(stage: OpeningJourneyRunStage): string {
   const labels: Readonly<Record<OpeningJourneyRunStage, string>> = Object.freeze({
     journey_saved: "灵感已保存",
     workspace_provisioning: "正在准备可恢复作品",
-    preflight: "正在检查模型、路线和发送范围",
+    preflight: "正在检查所选模型、服务和发送内容",
     awaiting_confirmation: "等待你确认发送信息",
-    confirmed: "已确认，正在登记调用",
-    invocation_reserving: "正在登记调用",
-    provider_waiting: "等待模型返回",
+    confirmed: "已确认，正在保存本次生成信息",
+    invocation_reserving: "正在保存本次生成信息",
+    provider_waiting: "已向所选服务发送，正在等待结果",
     result_pending: "结果待核对",
     completed: "生成已完成",
     failed: "生成未完成",
@@ -7210,6 +7726,7 @@ function openingSuggestionFromResult(
     providerInvocationId: string | null;
     dispatchState?: OpeningDispatchState;
     noticeCode?: string;
+    resultPendingReview?: boolean;
   }> = Object.freeze({ slotNumber: 1, providerInvocationId: null }),
 ): IdeaOpeningSuggestionV1 {
   const dispatchState =
@@ -7220,9 +7737,15 @@ function openingSuggestionFromResult(
       (generated.completion === "partial" &&
         dispatchState === "failed" &&
         lifecycle.providerInvocationId !== null));
-  const status: IdeaOpeningSuggestionV1["status"] =
-    generated.text.trim().length === 0 ||
-    (generationMode === "provider" && !hasAuditableProviderResult)
+  const resultPendingReview =
+    lifecycle.resultPendingReview === true &&
+    generated.source === "provider" &&
+    generated.text.trim().length > 0 &&
+    lifecycle.providerInvocationId !== null;
+  const status: IdeaOpeningSuggestionV1["status"] = resultPendingReview
+    ? "review"
+    : generated.text.trim().length === 0 ||
+        (generationMode === "provider" && !hasAuditableProviderResult)
       ? "failed"
       : generated.completion === "partial"
         ? "partial"
@@ -7231,14 +7754,17 @@ function openingSuggestionFromResult(
     id: generated.requestId,
     batchId,
     slotNumber: lifecycle.slotNumber,
-    text: status === "ready" || status === "partial" ? generated.text : "",
+    text: status === "ready" || status === "partial" || status === "review" ? generated.text : "",
     source: generated.source,
     status,
     openingAngle,
     providerId: generated.providerId,
     modelId: generated.modelId,
     noticeCode: lifecycle.noticeCode ?? generated.noticeCode,
-    contextTraceId: status === "ready" || status === "partial" ? generated.contextTraceId : null,
+    contextTraceId:
+      status === "ready" || status === "partial" || status === "review"
+        ? generated.contextTraceId
+        : null,
     providerInvocationId: lifecycle.providerInvocationId,
     dispatchState,
   });

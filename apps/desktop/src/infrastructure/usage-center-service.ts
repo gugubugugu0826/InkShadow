@@ -174,7 +174,7 @@ export class SqliteUsageCenterService implements UsageCenterReader {
     if (rows.length > MAXIMUM_USAGE_EVENTS_PER_READ) {
       throw new UsageCenterError(
         "USAGE_CENTER_RANGE_TOO_LARGE",
-        "所选时间范围内的调用记录过多。请缩短时间范围后重试，以免显示不完整的汇总。",
+        "所选时间范围内的模型使用记录过多。请缩短时间范围后重试，以免显示不完整的汇总。",
       );
     }
 
@@ -460,22 +460,22 @@ function hydrateUsageEvent(row: UsageEventRow): UsageCenterEvent {
         ? "model_hub_invocation"
         : null;
   if (source === null) {
-    throw corruptLedger("调用记录来源无效。");
+    throw corruptLedger("模型使用记录来源无效。");
   }
   const status = parseStatus(row.status);
   const privacyPolicy = parsePrivacyPolicy(row.privacy_policy);
   const dataDestination = parseDataDestination(row.data_destination);
   const costSource = parseCostSource(row.cost_source);
-  const costMicros = validateNullableMicros(row.cost_micros, "调用费用");
+  const costMicros = validateNullableMicros(row.cost_micros, "模型使用费用");
   const currency = validateNullableCurrency(row.currency);
   if ((costMicros === null) !== (currency === null) && costSource !== "unknown") {
-    throw corruptLedger("调用费用与币种记录不完整。");
+    throw corruptLedger("模型使用费用与币种记录不完整。");
   }
   if (costSource === "unknown" && costMicros !== null) {
     throw corruptLedger("未知费用来源不能包含金额。");
   }
   if (costSource !== "unknown" && costMicros === null) {
-    throw corruptLedger("已计价调用缺少金额。");
+    throw corruptLedger("已计价记录缺少金额。");
   }
   return Object.freeze({
     id: row.event_id,
@@ -716,21 +716,21 @@ function parseStatus(value: string): UsageEventStatus {
   ) {
     return value as UsageEventStatus;
   }
-  throw corruptLedger("调用状态无效。");
+  throw corruptLedger("模型使用状态无效。");
 }
 
 function parsePrivacyPolicy(value: string): UsagePrivacyPolicy {
   if (["cloud_allowed", "local_preferred", "local_only", "not_recorded"].includes(value)) {
     return value as UsagePrivacyPolicy;
   }
-  throw corruptLedger("调用隐私策略无效。");
+  throw corruptLedger("模型使用记录的隐私设置无效。");
 }
 
 function parseDataDestination(value: string): UsageDataDestination {
   if (["local", "remote", "not_recorded"].includes(value)) {
     return value as UsageDataDestination;
   }
-  throw corruptLedger("调用去向无效。");
+  throw corruptLedger("模型使用记录的发送位置无效。");
 }
 
 function parseCostSource(value: string): UsageCostSource {
@@ -746,7 +746,7 @@ function parseCostSource(value: string): UsageCostSource {
 
 function validateTimestamp(value: string): string {
   if (!ISO_TIMESTAMP_PATTERN.test(value) || !Number.isFinite(Date.parse(value))) {
-    throw corruptLedger("调用时间无效。");
+    throw corruptLedger("模型使用记录的时间无效。");
   }
   return value;
 }

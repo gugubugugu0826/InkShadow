@@ -822,7 +822,7 @@ export class GovernedCreativeExtensionsRuntime {
         code: "EXTENSION_RETRY_NEW_CHARGE",
         level: "notice",
         title: "重试是新的计费尝试",
-        detail: `这是第 ${String(retry.attempt)} 次尝试，将使用新的幂等键、预算预留和（远程时）一次性确认。`,
+        detail: `这是第 ${String(retry.attempt)} 次尝试，将建立新的防重复标识、预算占用和（远程时）一次性确认。`,
       });
     }
 

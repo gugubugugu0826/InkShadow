@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useNavigate } from "react-router-dom";
 import {
   AiCandidate,
   AppError,
@@ -54,6 +54,72 @@ describe("editor candidate route selection", () => {
     expect(editorCandidateStatusLabel(status)).not.toMatch(
       /streaming|ready|accepted|rejected|expired|unexpected/iu,
     );
+  });
+
+  it("keeps the newest project chapter visible when an earlier authority read finishes last", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const first = await seedChapter(runtime, "先前项目正文", "先前编辑项目");
+    const current = await seedChapter(runtime, "当前项目正文", "当前编辑项目");
+    const originalFindById = runtime.repositories.projects.findById.bind(
+      runtime.repositories.projects,
+    );
+    const delayedRead = deferred<Awaited<ReturnType<typeof originalFindById>>>();
+    let heldFirstRead = false;
+    const findById = vi
+      .spyOn(runtime.repositories.projects, "findById")
+      .mockImplementation((projectId) => {
+        if (projectId === first.project.id && !heldFirstRead) {
+          heldFirstRead = true;
+          return delayedRead.promise;
+        }
+        return originalFindById(projectId);
+      });
+    const user = userEvent.setup();
+
+    renderNavigableEditor(runtime, first, current);
+
+    await waitFor(() => expect(findById).toHaveBeenCalledWith(first.project.id));
+    await user.click(screen.getByRole("button", { name: "切换到当前章节" }));
+    expect(await screen.findByRole("textbox", { name: "章节正文" })).toHaveValue("当前项目正文");
+
+    delayedRead.resolve(await originalFindById(first.project.id));
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "章节正文" })).toHaveValue("当前项目正文"),
+    );
+    expect(screen.getByRole("textbox", { name: "章节正文" })).not.toHaveValue("先前项目正文");
+  });
+
+  it("keeps正文 open and records a redacted support id when continuous story state is unavailable", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedChapter(runtime, "不会进入诊断的权威正文");
+    const sensitive = "sk-private 正文 C:/Users/writer/continuous-state.txt";
+    vi.spyOn(runtime.story.continuousState, "inspectProject").mockRejectedValue(
+      new Error(sensitive),
+    );
+
+    renderEditor(runtime, project, chapter);
+
+    expect(await screen.findByRole("textbox", { name: "章节正文" })).toHaveValue(chapter.content);
+    expect(await screen.findByText("连续故事状态暂不可用")).toBeVisible();
+    const supportNotice = await screen.findByText(/支持编号：UI-/u);
+    const supportId = /UI-[0-9]{14}-[0-9]{3,}/u.exec(supportNotice.textContent)?.[0];
+    if (supportId === undefined) throw new Error("连续故事状态没有生成支持编号。");
+    const incident = readSafeUiRouteIncidents(runtime).find(
+      ({ diagnosticId }) => diagnosticId === supportId,
+    );
+    expect(incident).toMatchObject({
+      diagnosticId: supportId,
+      componentName: "EditorPage",
+      readStage: "story_governance",
+      normalizedErrorCode: "PROJECT_AREA_READ_FAILED",
+      recovered: false,
+    });
+    expect(incident?.reasonCodeChain).toContain("REPOSITORY_ERROR");
+    expect(JSON.stringify(incident)).not.toContain(sensitive);
+    expect(JSON.stringify(incident)).not.toContain(chapter.content);
+    expect(JSON.stringify(window.localStorage)).not.toContain(sensitive);
   });
 
   it("keeps正文 open, records a stable support id, and rereads after optional candidate failure", async () => {
@@ -541,7 +607,7 @@ describe("editor candidate route selection", () => {
     const preflight = await screen.findByRole("dialog", { name: "生成前检查" });
     expect(
       await within(preflight).findByText(
-        /Direct writing remote.*direct-writer.*本次最多调用 1 次，自动重试 0 次/u,
+        /Direct writing remote.*direct-writer.*本次最多向模型服务发送 1 次，自动重试 0 次/u,
       ),
     ).toBeVisible();
     expect(generate).not.toHaveBeenCalled();
@@ -631,7 +697,7 @@ describe("editor candidate route selection", () => {
     const preflight = await screen.findByRole("dialog", { name: "生成前检查" });
     expect(
       await within(preflight).findByText(
-        /Direct writing remote.*direct-writer.*本次最多调用 1 次，自动重试 0 次/u,
+        /Direct writing remote.*direct-writer.*本次最多向模型服务发送 1 次，自动重试 0 次/u,
       ),
     ).toBeVisible();
     expect(within(preflight).getByText(/当前章节.*故事资料/u)).toBeVisible();
@@ -711,7 +777,7 @@ describe("editor candidate route selection", () => {
     ).length;
 
     await user.click(screen.getByRole("button", { name: "查看选区改写发送信息" }));
-    const disclosureTitle = await screen.findByText("确认后会调用 1 次", undefined, {
+    const disclosureTitle = await screen.findByText("确认后会发送 1 次", undefined, {
       timeout: 5_000,
     });
     expect(disclosureTitle).toBeVisible();
@@ -731,9 +797,9 @@ describe("editor candidate route selection", () => {
 
     await user.click(screen.getByRole("button", { name: "查看选区改写发送信息" }));
     expect(
-      await screen.findByText("确认后会调用 1 次", undefined, { timeout: 5_000 }),
+      await screen.findByText("确认后会发送 1 次", undefined, { timeout: 5_000 }),
     ).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "取消，不调用" }));
+    await user.click(screen.getByRole("button", { name: "取消，不发送" }));
     expect(generate).not.toHaveBeenCalled();
     expect(
       readSafeOperationIncidents().filter(
@@ -1160,7 +1226,7 @@ describe("editor candidate route selection", () => {
     await user.click(await screen.findByRole("button", { name: "选择方向" }));
     expect(generate).not.toHaveBeenCalled();
     await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
-    expect(await screen.findByText("暂时无法准备方向")).toBeVisible();
+    expect(await screen.findByText("收到的方向暂时无法使用")).toBeVisible();
     expect(generate).toHaveBeenCalledTimes(1);
     const customInput = screen.getByRole("textbox", { name: /自定义方向/u });
     await user.type(customInput, "保留我输入的方向");
@@ -1169,8 +1235,50 @@ describe("editor candidate route selection", () => {
     await user.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
     expect(customInput).toHaveValue("保留我输入的方向");
-    expect(await screen.findByText("暂时无法准备方向")).toBeVisible();
+    expect(await screen.findByText("收到的方向暂时无法使用")).toBeVisible();
     expect(screen.queryByLabelText("三个创作方向")).not.toBeInTheDocument();
+  });
+
+  it("records the exact zero-send preparation stage and keeps custom direction input", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.writingExperience.authorizeDirectMode(1);
+    await seedRemoteContinuationRoute(runtime);
+    const generate = installRemoteTextGenerator(runtime, ["不应发送的方向内容"]);
+    const { chapter, project } = await seedChapter(runtime);
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+
+    const customInput = await screen.findByRole("textbox", { name: /自定义方向/u });
+    await user.type(customInput, "保留这条用户输入的方向");
+    const invocationStart = vi.spyOn(runtime.modelHub, "startInvocation");
+    const tasksBefore = await runtime.taskCenter.load();
+    vi.spyOn(runtime.projectContextPrivacy, "inspect").mockRejectedValueOnce(
+      Object.assign(new Error("controlled local context preparation failure"), {
+        code: "DIRECTION_CONTEXT_PREPARATION_FAILED",
+      }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "选择方向" }));
+
+    const supportNotice = await screen.findByText(/支持编号：墨影-[0-9]{14}-[0-9]{3,}/u);
+    expect(supportNotice).toHaveTextContent("准备发送信息");
+    expect(supportNotice).toHaveTextContent("本次没有发送");
+    expect(customInput).toHaveValue("保留这条用户输入的方向");
+    expect(generate).not.toHaveBeenCalled();
+    expect(invocationStart).not.toHaveBeenCalled();
+    expect(await runtime.taskCenter.load()).toEqual(tasksBefore);
+    const supportId = /墨影-[0-9]{14}-[0-9]{3,}/u.exec(supportNotice.textContent)?.[0];
+    expect(
+      readSafeOperationIncidents().find((incident) => incident.supportId === supportId),
+    ).toMatchObject({
+      operation: "continuation",
+      stage: "prepare_disclosure",
+      projectId: project.id,
+      chapterId: chapter.id,
+      dispatched: false,
+      automaticRetryCount: 0,
+    });
   });
 
   it("invalidates saved directions after a正文 version change", async () => {
@@ -2580,6 +2688,48 @@ function renderEditor(
   );
 }
 
+function renderNavigableEditor(
+  runtime: DesktopRuntime,
+  first: Readonly<{ project: Project; chapter: Chapter }>,
+  current: Readonly<{ project: Project; chapter: Chapter }>,
+): ReturnType<typeof render> {
+  const firstPath = `/projects/${first.project.id}/chapters/${first.chapter.id}`;
+  const currentPath = `/projects/${current.project.id}/chapters/${current.chapter.id}`;
+  return render(
+    <MemoryRouter initialEntries={[firstPath]}>
+      <EditorRouteSwitch target={currentPath} />
+      <RuntimeProvider runtime={runtime}>
+        <ToastProvider>
+          <ComponentOwnershipBoundary name="EditorDiagnosticTestHost">
+            <AppErrorBoundary>
+              <DesktopPersistenceBoundary>
+                <DesktopRoutes />
+              </DesktopPersistenceBoundary>
+            </AppErrorBoundary>
+          </ComponentOwnershipBoundary>
+        </ToastProvider>
+      </RuntimeProvider>
+    </MemoryRouter>,
+  );
+}
+
+function EditorRouteSwitch({ target }: Readonly<{ target: string }>) {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => void navigate(target)}>
+      切换到当前章节
+    </button>
+  );
+}
+
+function deferred<Value>() {
+  let resolve: (value: Value | PromiseLike<Value>) => void = () => undefined;
+  const promise = new Promise<Value>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve } as const;
+}
+
 function repeatedContentChecksum(character: string) {
   const parsed = parseContentChecksum(character.repeat(64));
   if (!parsed.ok) throw parsed.error;
@@ -2589,11 +2739,12 @@ function repeatedContentChecksum(character: string) {
 async function seedChapter(
   runtime: DesktopRuntime,
   content = "稳定正文",
+  projectName = "候选路由测试项目",
 ): Promise<{
   readonly project: Project;
   readonly chapter: Chapter;
 }> {
-  const project = await runtime.useCases.createProject.execute({ name: "候选路由测试项目" });
+  const project = await runtime.useCases.createProject.execute({ name: projectName });
   if (!project.ok) {
     throw project.error;
   }

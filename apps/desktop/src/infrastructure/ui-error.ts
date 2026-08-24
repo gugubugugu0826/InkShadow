@@ -149,16 +149,16 @@ function recordErrorDescription(code: string): string {
     return "本地导入进度没有安全保存。请保持当前页面打开，释放存储空间后重试；已有正文和建议版本不会被静默覆盖。";
   }
   if (code === "IMPORT_PENDING_REQUEST_CLEAR_FAILED") {
-    return "模型结果已经处理，但本机未能清除请求恢复标记。墨影不会自动重复调用；请释放存储空间后重新打开页面。";
+    return "模型结果已经处理，但本机未能清除请求恢复标记。墨影不会自动再次发送；请释放存储空间后重新打开页面。";
   }
   if (code === "IMPORT_PENDING_REQUEST_PERSIST_FAILED") {
-    return "本机未能在发送前保存请求恢复标记，因此没有调用模型。请保持页面打开，释放存储空间后重试。";
+    return "本机未能在发送前保存请求恢复标记，因此没有向模型发送内容。请保持页面打开，释放存储空间后重试。";
   }
   if (code === "EXTENSION_USAGE_UNAVAILABLE") {
     return "这次扩展请求已经结束，但供应商没有返回可核对的用量。正文没有被覆盖；可先导出历史，确认供应商记录后再决定是否重试。";
   }
   if (code === "CREATIVE_OPENING_TIMEOUT_SCOPE_MISMATCH") {
-    return "开头超时编号与已确认的固定位置不一致。为避免误操作，墨影没有结束或取消任何其他调用，也没有改写创作进度；请重新读取进度并核对调用记录。";
+    return "开头超时编号与已确认的固定位置不一致。为避免误操作，墨影没有结束其他仍在进行的请求，也没有改写创作进度；请重新读取进度并核对本次发送信息。";
   }
   if (code === "GENERATION_ABANDONED_BY_AUTHOR") {
     return "确认前离开，未确认的生成批次已安全终止";
@@ -185,13 +185,13 @@ function recordErrorDescription(code: string): string {
     return "这项写作任务还没有可用的 AI 分工。请先验证至少一个模型的写作能力，再在模型中心应用智能推荐；缺少向量检索不会阻止基础文本写作。";
   }
   if (code === "MODEL_HUB_ROUTE_DISABLED") {
-    return "这项写作任务的 AI 分工已明确停用。本次请求没有调用模型，也不会改用旧配置；请在模型中心重新启用或明确分配模型后再试。";
+    return "这项写作任务的 AI 分工已明确停用。本次请求没有向模型发送内容，也不会改用旧配置；请在模型中心重新启用或明确分配模型后再试。";
   }
   if (code === "MODEL_PROFILE_NOT_READY") {
     return "当前没有可用于这次写作的兼容模型。你仍可继续手动编辑和保存正文；如需 AI，请选择一个已连接模型，或前往模型中心完成任务分工。";
   }
   if (code === "CREATIVE_INPUT_INVALID_EMPTY") {
-    return "请先写下一句话灵感；当前页面不会创建空项目，也不会调用 AI。";
+    return "请先写下一句话灵感；当前页面不会创建空项目，也不会向 AI 发送内容。";
   }
   if (code === "CREATIVE_INPUT_INVALID_WHITESPACE_ONLY") {
     return "输入中只有空白字符。请写下一句可读的故事想法，或返回选择空白写作。";
@@ -230,7 +230,7 @@ function recordErrorDescription(code: string): string {
     return "AI 服务暂未完成本次操作。请到设置中的 AI 模型检查连接、能力确认和任务分工后重试；正文与已有版本不会因此被覆盖。";
   }
   if (/NETWORK|TIMEOUT|HTTP|DNS|TLS/u.test(code)) {
-    return "网络请求未完成。请检查网络和供应商服务状态后重试；若已产生费用，请先查看供应商调用记录，避免重复提交。";
+    return "网络请求未完成。请检查网络和服务商状态后重试；若已产生费用，请先查看服务商后台记录，避免重复发送。";
   }
   if (/SQLITE|DATABASE|REPOSITORY|STORAGE/u.test(code)) {
     return "本地数据访问失败。请保留当前窗口中的内容并重试；若问题持续，请先创建备份或导出草稿，再下载脱敏诊断包。";

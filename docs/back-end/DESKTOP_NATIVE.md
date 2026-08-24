@@ -2,7 +2,7 @@
 
 > 基于源码快照：2026-08-23  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 应用清单版本：`0.2.9`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)（未签名工程预发行）；候选与标签解析提交均为 `cb97876894d6f02c4c901745c95533da7b0260fe`；设计基线：`DESIGN v0.3.1b`  
+> 应用清单版本：`0.2.10`（未签名人工复测候选；未打标签、未发布）；最新公开版本：[`v0.2.9`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.9)（未签名工程预发行），发布来源提交 `54d9647031bb97b4fc9f021d3b1acca7f6d25c47`；设计基线：`DESIGN v0.3.1b`  
 > 覆盖范围：`apps/desktop/src-tauri`、本地 SQLite 原生桥、自动备份、系统凭据库、原生网络、项目密钥、安全更新与系统容量
 
 `v0.2.6` 已冻结 Tauri `74`、SQLite 重载恢复、自动备份清单第 2 版和能力验证调用回执。
@@ -113,8 +113,8 @@ React 页面
 - 打开时强制 `foreign_keys=ON`、WAL、`synchronous=NORMAL`、5 秒 busy timeout。
 - 配置和全部 migration 验证成功后才返回随机会话 token。
 - migration 校验和不一致会报 `SQLITE_MIGRATION_INTEGRITY_FAILED` 并停止，而不是覆盖用户数据。
-- 当前工作树前向上限为 Data `0075_generation_attempt_privacy_snapshot.sql` / Tauri `78`；
-  75 个 Data migration 与 3 个 story-core migration 合并为一个原生连续序列，所以目录前缀与
+- 当前工作树前向上限为 Data `0077_project_display_identities.sql` / Tauri `80`；
+  77 个 Data migration 与 3 个 story-core migration 合并为一个原生连续序列，所以目录前缀与
   原生版本不要求相同。`0066`–`0068` / Tauri `69`–`71` 依次追加写作体验偏好与 Provider 披露
   grant、有界一致性调查四表，以及只统计 active grant 的上限修复。`0069` / Tauri `72` 在模型
   step 上预留 content-free invocation UUID；账本 INSERT 会在同一 SQLite 语句中绑定 step 和
@@ -128,6 +128,8 @@ React 页面
   `0074` / Tauri `77` 在不可变章节版本上保存本地故事资料整理责任，旧行默认关闭且不可改写；
   `0075` / Tauri `78` 在生成尝试上保存隐私快照版本、隐私策略、数据去向和同一次模型调用标识，
   迁移前旧行保留空值，新行缺失、部分缺失、关联不一致或后续改写均失败关闭。
+  `0076` / Tauri `79` 为直接模式本地故事事实增加带审计的作者修订；`0077` / Tauri `80` 增加
+  不含作品正文的项目显示标识与修订历史。两项均已随 v0.2.9 冻结，0.2.10 当前没有新增迁移。
 - 启动恢复以 `provider_dispatch_started_at` 为网络边界：发送前中断把 running ledger 结清为
   `cancelled`、run 结清为 `not_dispatched`；发送后中断把 ledger 结清为 `timed_out`、run 结清为
   `ambiguous`。两者都会把非终态 task 对账到相应终态，且绝不自动重发。

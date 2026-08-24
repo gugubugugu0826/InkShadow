@@ -1423,7 +1423,9 @@ function DatasetCard(props: DatasetCardProps) {
         {dataset.readinessIssues.length > 0 && (
           <ul className="fine-tuning-governance-page__issue-list">
             {dataset.readinessIssues.map((issue, index) => (
-              <li key={`${issue.code}:${issue.sampleId ?? String(index)}`}>{issue.detail}</li>
+              <li key={`${issue.code}:${issue.sampleId ?? String(index)}`}>
+                {datasetReadinessIssueLabel(issue)}
+              </li>
             ))}
           </ul>
         )}
@@ -1488,7 +1490,7 @@ function JobCard({ job, busyKey, onCancel, onRetry }: JobCardProps) {
             <dd>r{String(job.datasetRevision)}</dd>
           </div>
           <div>
-            <dt>预留费用</dt>
+            <dt>预计费用上限</dt>
             <dd>
               {formatMicros(job.reservedCostMicros)} {job.currency}
             </dd>
@@ -1803,6 +1805,24 @@ function rightsKindLabel(kind: FineTuningRightsKind): string {
   }[kind];
 }
 
+function datasetReadinessIssueLabel(
+  issue: FineTuningDatasetSnapshot["readinessIssues"][number],
+): string {
+  switch (issue.code) {
+    case "FINE_TUNING_SAMPLE_COUNT_TOO_LOW":
+      return "至少需要三条互不重复且可用的样本。";
+    case "FINE_TUNING_RIGHTS_UNCONFIRMED":
+      return "这条样本尚未确认版权或许可依据。";
+    case "FINE_TUNING_TRAINING_NOT_ALLOWED":
+      return "来源声明未授权用于训练。";
+    case "FINE_TUNING_PRIVACY_BLOCKED":
+      return "请先在来源处移除个人信息或敏感内容。";
+    case "FINE_TUNING_SPLIT_INCOMPLETE":
+      return "训练集、验证集和测试集都至少需要一条互不重复的样本。";
+    default:
+      return "数据集尚未满足训练准备条件。";
+  }
+}
 function datasetStateLabel(state: FineTuningDatasetSnapshot["state"]): string {
   return {
     draft: "草稿",

@@ -135,6 +135,15 @@ describe("StudioTeamTemplatesRoutePage", () => {
     expect(await screen.findByText("加密团队模板不可用")).toBeVisible();
     expect(screen.getByText(/浏览器开发模式不会伪造远端成功/u)).toBeVisible();
   });
+
+  it("keeps an invalid route code out of the ordinary error card", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+
+    renderRoute(runtime, `/teams/${TEAM_ID}/projects/not-a-project/templates`);
+
+    expect(await screen.findByText("无法打开团队模板")).toBeVisible();
+    expect(screen.queryByText("TEAM_TEMPLATE_ROUTE_SCOPE_INVALID")).not.toBeInTheDocument();
+  });
 });
 
 function renderRoute(runtime: DesktopRuntime, route: string) {

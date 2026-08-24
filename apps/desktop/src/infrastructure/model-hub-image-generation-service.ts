@@ -233,7 +233,7 @@ export class ModelHubImageGenerationService {
     } catch {
       throw new ModelHubExecutionError(
         "MODEL_HUB_INVOCATION_LEDGER_FAILED",
-        `图片已保存为 ${generated.fileName}，但调用记录未能完成。为避免重复费用，本次不会自动重试。`,
+        `图片已保存为 ${generated.fileName}，但模型使用记录未能完成。为避免重复费用，本次不会自动重试。`,
         true,
         true,
       );

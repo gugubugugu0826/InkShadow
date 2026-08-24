@@ -1,15 +1,19 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { UuidV7 } from "@inkshadow/domain";
+import { AppError, type UuidV7 } from "@inkshadow/domain";
 import {
   NARRATIVE_ANALYSIS_COVERAGE_AREAS,
   parseUuidV7 as parseStoryUuid,
   type StoryFact,
 } from "@inkshadow/story-core";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createDevelopmentRuntime, type DesktopRuntime } from "../infrastructure/runtime";
+import {
+  forgetUiRouteDiagnosticsMemoryForTests,
+  readSafeUiRouteIncidents,
+} from "../infrastructure/ui-route-diagnostics";
 import { DEVELOPMENT_WRITING_EXPERIENCE_KEY } from "../infrastructure/writing-experience-store";
 import {
   findSupplementalFindingResolution,
@@ -65,6 +69,182 @@ describe("ProjectChecksPage", () => {
   beforeEach(() => {
     window.localStorage.clear();
     seedWritingExperience("professional");
+  });
+
+  it("does not describe a missing project as an empty project", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const missingProjectId = "019f9f4a-b3c7-7350-9226-999999999999";
+    const findById = vi.spyOn(runtime.repositories.projects, "findById");
+
+    renderPage(runtime, missingProjectId);
+
+    await waitFor(() => expect(findById).toHaveBeenCalledWith(missingProjectId));
+    expect(screen.queryByText("还没有可检查的章节")).not.toBeInTheDocument();
+    expect(await screen.findByText(/支持编号：UI-/u)).toBeVisible();
+  });
+
+  it("records a redacted support incident when project authority cannot be read", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const projectId = "019f9f4a-b3c7-7350-9226-999999999998";
+    const sensitive = "sk-private 正文 C:/Users/writer/private.txt";
+    const failure = new AppError({
+      code: "REPOSITORY_ERROR",
+      message: sensitive,
+      retryable: true,
+      actions: ["RETRY"],
+      details: { stage: "project" },
+    });
+    vi.spyOn(runtime.repositories.projects, "findById").mockResolvedValue({
+      ok: false,
+      error: failure,
+    });
+
+    renderPage(runtime, projectId);
+
+    const supportNotice = await screen.findByText(/支持编号：UI-/u);
+    const supportId = /UI-[0-9]{14}-[0-9]{3,}/u.exec(supportNotice.textContent)?.[0];
+    if (supportId === undefined) throw new Error("检查页没有生成支持编号。");
+    const incident = readSafeUiRouteIncidents(runtime).find(
+      ({ diagnosticId }) => diagnosticId === supportId,
+    );
+    expect(incident).toMatchObject({
+      componentName: "ProjectChecksPage",
+      phase: "data_read",
+      errorBoundaryTriggered: false,
+      readStage: "project",
+      triggerIds: { projectId, chapterId: null, candidateId: null },
+    });
+    expect(incident?.applicationStack.length).toBeGreaterThan(0);
+    expect(incident?.reactComponentStack).toContain("at ProjectChecksPage");
+    expect(incident?.reasonCodeChain).toEqual(
+      expect.arrayContaining(["PROJECT_AREA_READ_FAILED", "REPOSITORY_ERROR"]),
+    );
+    expect(JSON.stringify(incident)).not.toContain(sensitive);
+    expect(JSON.stringify(window.localStorage)).not.toContain(sensitive);
+    forgetUiRouteDiagnosticsMemoryForTests(runtime);
+    expect(readSafeUiRouteIncidents(runtime)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          diagnosticId: supportId,
+          componentName: "ProjectChecksPage",
+          readStage: "project",
+        }),
+      ]),
+    );
+  });
+
+  it("keeps chapters from the newest project when an earlier chapter read finishes last", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const firstProject = unwrap(
+      await runtime.useCases.createProject.execute({ name: "先前检查项目" }),
+    );
+    const currentProject = unwrap(
+      await runtime.useCases.createProject.execute({ name: "当前检查项目" }),
+    );
+    const firstChapter = unwrap(
+      await runtime.useCases.createChapter.execute({
+        projectId: firstProject.id,
+        title: "先前章节",
+        content: "先前正文。",
+      }),
+    );
+    const currentChapter = unwrap(
+      await runtime.useCases.createChapter.execute({
+        projectId: currentProject.id,
+        title: "当前章节",
+        content: "当前正文。",
+      }),
+    );
+    const originalListByProjectId = runtime.repositories.chapters.listByProjectId.bind(
+      runtime.repositories.chapters,
+    );
+    const delayedRead = deferred<Awaited<ReturnType<typeof originalListByProjectId>>>();
+    let heldFirstRead = false;
+    const listByProjectId = vi
+      .spyOn(runtime.repositories.chapters, "listByProjectId")
+      .mockImplementation((projectId) => {
+        if (projectId === firstProject.id && !heldFirstRead) {
+          heldFirstRead = true;
+          return delayedRead.promise;
+        }
+        return originalListByProjectId(projectId);
+      });
+    const user = userEvent.setup();
+    renderNavigablePage(runtime, firstProject.id, currentProject.id);
+
+    await waitFor(() => expect(listByProjectId).toHaveBeenCalledWith(firstProject.id));
+    await user.click(screen.getByRole("button", { name: "切换到当前项目" }));
+    expect(await screen.findByRole("combobox", { name: "章节" })).toHaveValue(
+      currentChapter.chapter.id,
+    );
+
+    delayedRead.resolve(await originalListByProjectId(firstProject.id));
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "章节" })).toHaveValue(currentChapter.chapter.id),
+    );
+    expect(screen.getByRole("combobox", { name: "章节" })).not.toHaveValue(firstChapter.chapter.id);
+  });
+
+  it("does not apply a late check result after switching projects", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const firstProject = unwrap(
+      await runtime.useCases.createProject.execute({ name: "迟到检查项目" }),
+    );
+    const currentProject = unwrap(
+      await runtime.useCases.createProject.execute({ name: "当前检查项目" }),
+    );
+    const firstChapter = unwrap(
+      await runtime.useCases.createChapter.execute({
+        projectId: firstProject.id,
+        title: "迟到检查章节",
+        content: "旧项目的检查内容。",
+      }),
+    );
+    const currentChapter = unwrap(
+      await runtime.useCases.createChapter.execute({
+        projectId: currentProject.id,
+        title: "当前检查章节",
+        content: "当前项目的检查内容。",
+      }),
+    );
+    const originalRun = runtime.story.chapterValidationSnapshots.run.bind(
+      runtime.story.chapterValidationSnapshots,
+    );
+    const delayedRun = deferred<Awaited<ReturnType<typeof originalRun>>>();
+    const run = vi
+      .spyOn(runtime.story.chapterValidationSnapshots, "run")
+      .mockImplementation((input, options) =>
+        input.projectId === firstProject.id ? delayedRun.promise : originalRun(input, options),
+      );
+    const user = userEvent.setup();
+    renderNavigablePage(runtime, firstProject.id, currentProject.id);
+
+    expect(await screen.findByRole("combobox", { name: "章节" })).toHaveValue(
+      firstChapter.chapter.id,
+    );
+    const checkButton = await screen.findByRole("button", { name: "检查本章" });
+    await waitFor(() => expect(checkButton).toBeEnabled());
+    await user.click(checkButton);
+    await waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole("button", { name: "切换到当前项目" }));
+    expect(await screen.findByRole("combobox", { name: "章节" })).toHaveValue(
+      currentChapter.chapter.id,
+    );
+
+    delayedRun.resolve(
+      await originalRun(
+        {
+          projectId: firstProject.id,
+          chapterId: firstChapter.chapter.id,
+        },
+        { mode: "rerun" },
+      ),
+    );
+
+    await waitFor(() => expect(screen.getByText("还没有检查结果")).toBeVisible());
+    expect(screen.getByRole("combobox", { name: "章节" })).toHaveValue(currentChapter.chapter.id);
+    expect(screen.queryByText("迟到检查章节")).not.toBeInTheDocument();
   });
 
   it("does not display a supplemental disposition from another immutable version", () => {
@@ -148,7 +328,7 @@ describe("ProjectChecksPage", () => {
     expect(screen.getByRole("heading", { name: "确定性检查" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "本次实际检查范围" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "因证据不足未检查（10）" })).toBeInTheDocument();
-    expect(screen.getByText("普通检查不会调用 AI")).toBeInTheDocument();
+    expect(screen.getByText("普通检查不会向 AI 发送内容")).toBeInTheDocument();
     expect(screen.getByText(/使用页面上方的一致性调查/u)).toBeInTheDocument();
     expect(aiReview).not.toHaveBeenCalled();
   });
@@ -599,6 +779,40 @@ function renderPage(runtime: DesktopRuntime, projectId: string) {
       </MemoryRouter>
     </RuntimeProvider>,
   );
+}
+
+function renderNavigablePage(
+  runtime: DesktopRuntime,
+  firstProjectId: string,
+  currentProjectId: string,
+) {
+  return render(
+    <RuntimeProvider runtime={runtime}>
+      <MemoryRouter initialEntries={[`/projects/${firstProjectId}/checks`]}>
+        <RouteSwitch target={`/projects/${currentProjectId}/checks`} />
+        <Routes>
+          <Route path="/projects/:projectId/checks" element={<ProjectChecksPage />} />
+        </Routes>
+      </MemoryRouter>
+    </RuntimeProvider>,
+  );
+}
+
+function RouteSwitch({ target }: Readonly<{ target: string }>) {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => void navigate(target)}>
+      切换到当前项目
+    </button>
+  );
+}
+
+function deferred<Value>() {
+  let resolve: (value: Value | PromiseLike<Value>) => void = () => undefined;
+  const promise = new Promise<Value>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve } as const;
 }
 
 async function listFacts(

@@ -24,12 +24,12 @@ describe("UsageCenterPage", () => {
     render(<UsageCenterPage reader={reader} now={NOW} />);
 
     expect(
-      await screen.findByRole("heading", { name: "调用与费用", level: 1 }),
+      await screen.findByRole("heading", { name: "模型使用与费用", level: 1 }),
     ).toBeInTheDocument();
     expect(screen.getAllByText("¥0.12").length).toBeGreaterThan(0);
     expect(screen.getByText("1 次费用未知 · 已知金额均为估算")).toBeInTheDocument();
     expect(screen.getByText("供应商未返回")).toBeInTheDocument();
-    expect(screen.getByText("调用账本有 1 次失败或结果不明确、1 次费用未知")).toBeVisible();
+    expect(screen.getByText("AI 服务记录有 1 次失败或结果不明确、1 次费用未知")).toBeVisible();
     expect(screen.getByText("第一章 雨停以前")).toBeVisible();
     expect(screen.getAllByText("本地运算").length).toBeGreaterThan(0);
     expect(document.body).not.toHaveTextContent("deepseek-connection");
@@ -61,7 +61,7 @@ describe("UsageCenterPage", () => {
     });
 
     await user.selectOptions(screen.getByLabelText("汇总方式"), "provider");
-    const breakdown = screen.getByRole("table", { name: "分类调用汇总" });
+    const breakdown = screen.getByRole("table", { name: "分类使用汇总" });
     expect(within(breakdown).getByRole("columnheader", { name: "供应商" })).toBeInTheDocument();
   });
 
@@ -71,7 +71,7 @@ describe("UsageCenterPage", () => {
     };
     render(<UsageCenterPage reader={reader} now={NOW} />);
 
-    expect(await screen.findByText("还没有调用记录")).toBeInTheDocument();
+    expect(await screen.findByText("还没有模型使用记录")).toBeInTheDocument();
     expect(screen.getByText(/完成一次真实智能创作任务后/u)).toBeInTheDocument();
     expect(screen.queryByText("¥4.20")).not.toBeInTheDocument();
   });
@@ -126,7 +126,7 @@ describe("UsageCenterPage", () => {
 
     render(<UsageCenterPage reader={reader} now={NOW} />);
 
-    const details = await screen.findByRole("table", { name: "调用明细" });
+    const details = await screen.findByRole("table", { name: "使用明细" });
     const row = within(details).getByRole("row", { name: /模型能力验证/u });
     expect(row).toHaveTextContent("写作模型服务");
     expect(row).toHaveTextContent("writer-model-v1");
@@ -153,7 +153,7 @@ describe("UsageCenterPage", () => {
     };
     render(<UsageCenterPage reader={reader} now={NOW} />);
 
-    const title = await screen.findByText("调用账本有 2 次尚未终结、2 次费用未知");
+    const title = await screen.findByText("AI 服务记录有 2 次尚未终结、2 次费用未知");
     expect(title.closest(".ink-inline-alert")).toHaveClass("ink-inline-alert--warning");
   });
 
@@ -169,13 +169,13 @@ describe("UsageCenterPage", () => {
     const user = userEvent.setup();
     render(<UsageCenterPage reader={reader} now={NOW} />);
 
-    expect(await screen.findByText("暂时无法读取调用账本")).toBeInTheDocument();
+    expect(await screen.findByText("暂时无法读取 AI 服务记录")).toBeInTheDocument();
     expect(screen.getByText(/发生了未预期的本地错误。请先重试/u)).toBeInTheDocument();
     expect(screen.queryByText("USAGE_CENTER_LEDGER_INVALID")).not.toBeInTheDocument();
     expect(screen.queryByText(privateCause)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重新读取" }));
 
-    expect(await screen.findByText("还没有调用记录")).toBeInTheDocument();
+    expect(await screen.findByText("还没有模型使用记录")).toBeInTheDocument();
     expect(read).toHaveBeenCalledTimes(2);
   });
 });

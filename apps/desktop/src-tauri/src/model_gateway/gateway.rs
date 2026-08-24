@@ -31,10 +31,10 @@ use super::types::{
     RerankProtocol, RerankRequest, RerankResponse, ResponseFormat, StartGenerationRequest,
 };
 use crate::native_sqlite::{
-    ModelInvocationDispatchLedgerError, NativeModelDispatchScope,
-    NativeModelInvocationDispatchLedger, NativeModelInvocationDispatchReceipt,
-    NativeModelInvocationDispatchTarget, NativeSqliteState, ProjectRemoteDispatchLease,
-    ProjectRemoteDispatchLeaseError,
+    valid_model_invocation_dispatch_task, ModelInvocationDispatchLedgerError,
+    NativeModelDispatchScope, NativeModelInvocationDispatchLedger,
+    NativeModelInvocationDispatchReceipt, NativeModelInvocationDispatchTarget, NativeSqliteState,
+    ProjectRemoteDispatchLease, ProjectRemoteDispatchLeaseError,
 };
 use crate::network_egress::RestrictedDnsResolver;
 
@@ -645,21 +645,21 @@ fn validate_invocation_dispatch_ledger_request(
     if request.invocation_dispatch_ledger.is_none() {
         return Ok(());
     }
-    if !matches!(
-        &request.dispatch_scope,
-        NativeModelDispatchScope::NonProject {
-            reason: crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe
-        }
-    ) || request.config.retry_limit.unwrap_or(0) != 0
-    {
-        return Err(CommandError::request_invalid());
-    }
     let ledger = request
         .invocation_dispatch_ledger
         .as_ref()
         .ok_or_else(CommandError::request_invalid)?;
+    if request.config.retry_limit.unwrap_or(0) != 0
+        || !invocation_task_matches_dispatch_scope(
+            ledger.task_snapshot.as_str(),
+            &request.dispatch_scope,
+        )
+    {
+        return Err(CommandError::request_invalid());
+    }
     if ledger.connection_revision < 1
         || ledger.catalog_entry_revision < 1
+        || ledger.connection_id != request.config.provider_id
         || ledger.model_id_snapshot != request.model
         || !provider_snapshot_matches_protocol(
             ledger.provider_kind_snapshot.as_str(),
@@ -669,6 +669,26 @@ fn validate_invocation_dispatch_ledger_request(
         return Err(CommandError::request_invalid());
     }
     Ok(())
+}
+
+fn invocation_task_matches_dispatch_scope(task: &str, scope: &NativeModelDispatchScope) -> bool {
+    if !valid_model_invocation_dispatch_task(task) {
+        return false;
+    }
+    match scope {
+        NativeModelDispatchScope::NonProject { reason } => match reason {
+            crate::native_sqlite::NativeNonProjectDispatchReason::CreativeOpening => {
+                task == "book_start_guidance"
+            }
+            crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe => {
+                task == "capability_probe"
+            }
+            crate::native_sqlite::NativeNonProjectDispatchReason::NovelSkillEvaluation => {
+                task != "capability_probe"
+            }
+        },
+        NativeModelDispatchScope::ProjectContext { .. } => task != "capability_probe",
+    }
 }
 
 fn provider_snapshot_matches_protocol(snapshot: &str, provider: ProviderKind) -> bool {
@@ -784,7 +804,7 @@ where
 
         let invocation_dispatch_receipt = match invocation_dispatch_boundary.as_ref() {
             Some((ledger, target)) => match sqlite
-                .mark_capability_probe_invocation_dispatched(ledger, target)
+                .mark_model_invocation_dispatched(ledger, target)
                 .await
             {
                 Ok(receipt) => Some(receipt),
@@ -833,7 +853,7 @@ fn map_invocation_dispatch_ledger_error(error: ModelInvocationDispatchLedgerErro
         ModelInvocationDispatchLedgerError::Invalid => CommandError::request_invalid(),
         ModelInvocationDispatchLedgerError::Conflict => CommandError::new(
             "MODEL_INVOCATION_DISPATCH_CONFLICT",
-            "The capability-probe invocation changed before native dispatch. No provider request was sent.",
+            "The model invocation changed before native dispatch. No provider request was sent.",
             false,
             vec!["RETRY"],
         ),
@@ -2228,7 +2248,8 @@ mod tests {
         RerankProtocol, RerankRequest, ResponseFormat, StartGenerationRequest,
     };
     use crate::native_sqlite::{
-        canonical_project_context_fingerprint, NativeProjectContextPrivacyReceipt,
+        canonical_project_context_fingerprint, NativeProjectContextChapterAuthority,
+        NativeProjectContextPrivacyReceipt,
     };
     use sqlx::{
         sqlite::{SqliteConnectOptions, SqliteJournalMode},
@@ -2565,7 +2586,7 @@ mod tests {
         }
     }
 
-    fn capability_dispatch_boundary(
+    fn invocation_dispatch_boundary(
         request: &StartGenerationRequest,
         invocation_id: &str,
         connection_id: &str,
@@ -2580,6 +2601,21 @@ mod tests {
         (
             NativeModelInvocationDispatchLedger {
                 invocation_id: invocation_id.to_owned(),
+                task_snapshot: match &request.dispatch_scope {
+                    NativeModelDispatchScope::NonProject { reason } => match reason {
+                        crate::native_sqlite::NativeNonProjectDispatchReason::CreativeOpening => {
+                            "book_start_guidance"
+                        }
+                        crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe => {
+                            "capability_probe"
+                        }
+                        crate::native_sqlite::NativeNonProjectDispatchReason::NovelSkillEvaluation => {
+                            "continuation"
+                        }
+                    },
+                    NativeModelDispatchScope::ProjectContext { .. } => "continuation",
+                }
+                .to_owned(),
                 expected_revision: 1,
                 connection_id: connection_id.to_owned(),
                 connection_revision,
@@ -2650,13 +2686,15 @@ mod tests {
     }
 
     #[test]
-    fn capability_invocation_receipt_accepts_only_connection_probe_zero_retry_scope() {
+    fn invocation_receipt_accepts_capability_probe_and_creative_opening_zero_retry_scopes() {
         let mut request = generation_request();
+        request.config.provider_id = "connection-1".to_owned();
         request.dispatch_scope = NativeModelDispatchScope::NonProject {
             reason: crate::native_sqlite::NativeNonProjectDispatchReason::CreativeOpening,
         };
         request.invocation_dispatch_ledger = Some(NativeModelInvocationDispatchLedger {
             invocation_id: "019f9f4a-b3c7-7350-9226-000000000503".to_owned(),
+            task_snapshot: "capability_probe".to_owned(),
             expected_revision: 1,
             connection_id: "connection-1".to_owned(),
             connection_revision: 1,
@@ -2674,6 +2712,15 @@ mod tests {
         assert!(validate_invocation_dispatch_ledger_request(&request).is_err());
 
         request.config.retry_limit = Some(0);
+        assert!(validate_invocation_dispatch_ledger_request(&request).is_ok());
+        request.dispatch_scope = NativeModelDispatchScope::NonProject {
+            reason: crate::native_sqlite::NativeNonProjectDispatchReason::CreativeOpening,
+        };
+        request
+            .invocation_dispatch_ledger
+            .as_mut()
+            .expect("test ledger")
+            .task_snapshot = "book_start_guidance".to_owned();
         assert!(validate_invocation_dispatch_ledger_request(&request).is_ok());
         request
             .invocation_dispatch_ledger
@@ -3877,7 +3924,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_probe_receipt_is_durable_before_native_provider_io() {
+    async fn book_start_guidance_receipt_is_durable_before_native_provider_io() {
         const INVOCATION_ID: &str = "019f9f4a-b3c7-7350-9226-000000000501";
         const GENERATION_ID: &str = "capability-probe-native-boundary";
         let directory = std::env::temp_dir().join(format!(
@@ -3921,7 +3968,7 @@ mod tests {
                    provider_kind_snapshot, model_id_snapshot,
                    route_reason, status, attempt, privacy_policy, data_destination,
                    started_at, created_at, revision
-                 ) VALUES ('{INVOCATION_ID}', 'capability_probe',
+                  ) VALUES ('{INVOCATION_ID}', 'book_start_guidance',
                            'native-boundary-connection', 'native-boundary-catalog',
                            'custom_openai_compatible', 'model-1', 'user_override',
                            'running', 1, 'cloud_allowed', 'remote',
@@ -3929,15 +3976,15 @@ mod tests {
                            '2026-08-21T00:00:00.000Z', 1)"
             ))
             .await
-            .expect("seed running capability invocation");
+            .expect("seed running book-start invocation");
         let mut stored_request = generation_request();
         stored_request.config.provider_id = "native-boundary-connection".to_owned();
         stored_request.config.base_url = "https://example.test/v1".to_owned();
         stored_request.config.retry_limit = Some(0);
         stored_request.dispatch_scope = NativeModelDispatchScope::NonProject {
-            reason: crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe,
+            reason: crate::native_sqlite::NativeNonProjectDispatchReason::CreativeOpening,
         };
-        let (wrong_identity_ledger, stored_target) = capability_dispatch_boundary(
+        let (wrong_identity_ledger, stored_target) = invocation_dispatch_boundary(
             &stored_request,
             INVOCATION_ID,
             "native-boundary-connection",
@@ -3947,10 +3994,26 @@ mod tests {
             "custom_openai_compatible",
         );
         let wrong_identity = sqlite
-            .mark_capability_probe_invocation_dispatched(&wrong_identity_ledger, &stored_target)
+            .mark_model_invocation_dispatched(&wrong_identity_ledger, &stored_target)
             .await;
         assert_eq!(
             wrong_identity,
+            Err(ModelInvocationDispatchLedgerError::Conflict)
+        );
+        let (mut wrong_task_ledger, wrong_task_target) = invocation_dispatch_boundary(
+            &stored_request,
+            INVOCATION_ID,
+            "native-boundary-connection",
+            1,
+            "native-boundary-catalog",
+            1,
+            "custom_openai_compatible",
+        );
+        wrong_task_ledger.task_snapshot = "continuation".to_owned();
+        assert_eq!(
+            sqlite
+                .mark_model_invocation_dispatched(&wrong_task_ledger, &wrong_task_target)
+                .await,
             Err(ModelInvocationDispatchLedgerError::Conflict)
         );
         let mut predispatch_inspector = open_dispatch_inspector(&database_path).await;
@@ -3976,7 +4039,7 @@ mod tests {
         request.config.base_url = format!("{}/v1", server.base_url);
         request.config.retry_limit = Some(0);
         request.dispatch_scope = NativeModelDispatchScope::NonProject {
-            reason: crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe,
+            reason: crate::native_sqlite::NativeNonProjectDispatchReason::CreativeOpening,
         };
         let prepared = prepare_generation(&request)
             .await
@@ -4010,7 +4073,7 @@ mod tests {
             wrong_identity_prepared,
             format!("{GENERATION_ID}-wrong-identity"),
             TestEventSink,
-            Some(capability_dispatch_boundary(
+            Some(invocation_dispatch_boundary(
                 &request,
                 INVOCATION_ID,
                 "native-boundary-connection",
@@ -4037,7 +4100,7 @@ mod tests {
             prepared,
             format!("{GENERATION_ID}-endpoint-drift"),
             TestEventSink,
-            Some(capability_dispatch_boundary(
+            Some(invocation_dispatch_boundary(
                 &request,
                 INVOCATION_ID,
                 "native-boundary-connection",
@@ -4084,7 +4147,7 @@ mod tests {
                 .expect("prepare disabled-connection drift probe"),
             format!("{GENERATION_ID}-disabled-drift"),
             TestEventSink,
-            Some(capability_dispatch_boundary(
+            Some(invocation_dispatch_boundary(
                 &request,
                 INVOCATION_ID,
                 "native-boundary-connection",
@@ -4123,7 +4186,7 @@ mod tests {
                 .expect("prepare credential drift probe"),
             format!("{GENERATION_ID}-credential-drift"),
             TestEventSink,
-            Some(capability_dispatch_boundary(
+            Some(invocation_dispatch_boundary(
                 &request,
                 INVOCATION_ID,
                 "native-boundary-connection",
@@ -4165,7 +4228,7 @@ mod tests {
                 .expect("prepare generation-path drift probe"),
             format!("{GENERATION_ID}-path-drift"),
             TestEventSink,
-            Some(capability_dispatch_boundary(
+            Some(invocation_dispatch_boundary(
                 &request,
                 INVOCATION_ID,
                 "native-boundary-connection",
@@ -4208,7 +4271,7 @@ mod tests {
                 .expect("prepare catalog drift probe"),
             format!("{GENERATION_ID}-catalog-drift"),
             TestEventSink,
-            Some(capability_dispatch_boundary(
+            Some(invocation_dispatch_boundary(
                 &request,
                 INVOCATION_ID,
                 "native-boundary-connection",
@@ -4244,7 +4307,7 @@ mod tests {
             prepared,
             GENERATION_ID.to_owned(),
             TestEventSink,
-            Some(capability_dispatch_boundary(
+            Some(invocation_dispatch_boundary(
                 &request,
                 INVOCATION_ID,
                 "native-boundary-connection",
@@ -4283,7 +4346,363 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_probe_ledger_lock_timeout_starts_zero_provider_io() {
+    async fn project_context_book_start_requires_privacy_task_and_connection_receipts_before_io() {
+        const PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000511";
+        const PRIVATE_PROJECT_ID: &str = "019f9f4a-b3c7-7350-9226-000000000512";
+        const PRIVATE_CHAPTER_ID: &str = "019f9f4a-b3c7-7350-9226-000000000513";
+        const PRIVATE_VERSION_ID: &str = "019f9f4a-b3c7-7350-9226-000000000514";
+        const INVOCATION_ID: &str = "019f9f4a-b3c7-7350-9226-000000000515";
+        const GENERATION_ID: &str = "project-context-book-start-boundary";
+        let (directory, sqlite, scope) =
+            seeded_empty_remote_project("project-book-start-boundary", PROJECT_ID).await;
+        let database_path = directory.join("inkshadow.db");
+        let server = spawn_fake_server(
+            "200 OK",
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n",
+            Duration::ZERO,
+            None,
+        );
+        sqlite
+            .test_execute_internal_sql(&format!(
+                "INSERT INTO model_provider_connections (
+                   id, provider_kind, display_name, protocol, base_url, created_at, updated_at
+                 ) VALUES ('project-book-start-connection', 'custom_openai_compatible',
+                           'Project book start', 'openai_compatible', '{}/v1',
+                           '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z')",
+                server.base_url
+            ))
+            .await
+            .expect("seed project book-start connection");
+        sqlite
+            .test_execute_internal_sql(
+                "INSERT INTO model_catalog_entries (
+                   id, connection_id, provider_model_id, display_name, catalog_source,
+                   availability, lifecycle, first_discovered_at, last_seen_at
+                 ) VALUES ('project-book-start-catalog', 'project-book-start-connection',
+                           'model-1', 'model-1', 'manual', 'available', 'stable',
+                           '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z')",
+            )
+            .await
+            .expect("seed project book-start catalog");
+        sqlite
+            .test_execute_internal_sql(&format!(
+                "INSERT INTO model_invocation_facts (
+                   id, task, connection_id, catalog_entry_id,
+                   provider_kind_snapshot, model_id_snapshot,
+                   route_reason, status, attempt, privacy_policy, data_destination,
+                   started_at, created_at, revision
+                 ) VALUES ('{INVOCATION_ID}', 'book_start_guidance',
+                           'project-book-start-connection', 'project-book-start-catalog',
+                           'custom_openai_compatible', 'model-1', 'user_override',
+                           'running', 1, 'cloud_allowed', 'remote',
+                           '2026-08-21T00:00:00.000Z',
+                           '2026-08-21T00:00:00.000Z', 1)"
+            ))
+            .await
+            .expect("seed project book-start invocation");
+
+        let mut private_seeder = open_dispatch_inspector(&database_path).await;
+        sqlx::query("BEGIN")
+            .execute(&mut private_seeder)
+            .await
+            .expect("begin private project seed");
+        sqlx::query(
+            "INSERT INTO projects (id, name, created_at, updated_at)
+             VALUES (?, 'Private opening', '2026-08-21T00:00:00.000Z',
+                     '2026-08-21T00:00:00.000Z')",
+        )
+        .bind(PRIVATE_PROJECT_ID)
+        .execute(&mut private_seeder)
+        .await
+        .expect("seed private project");
+        sqlx::query(
+            "INSERT INTO chapters (
+               id, project_id, title, content, current_version_id,
+               created_at, updated_at, privacy_mode, privacy_revision
+             ) VALUES (?, ?, 'Private chapter', '', ?,
+                       '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:00.000Z',
+                       'local_only', 1)",
+        )
+        .bind(PRIVATE_CHAPTER_ID)
+        .bind(PRIVATE_PROJECT_ID)
+        .bind(PRIVATE_VERSION_ID)
+        .execute(&mut private_seeder)
+        .await
+        .expect("seed private chapter");
+        sqlx::query(
+            "INSERT INTO chapter_versions (
+               id, project_id, chapter_id, sequence, reason, content,
+               content_checksum, created_at
+             ) VALUES (?, ?, ?, 1, 'created', '', ?, '2026-08-21T00:00:00.000Z')",
+        )
+        .bind(PRIVATE_VERSION_ID)
+        .bind(PRIVATE_PROJECT_ID)
+        .bind(PRIVATE_CHAPTER_ID)
+        .bind("a".repeat(64))
+        .execute(&mut private_seeder)
+        .await
+        .expect("seed private version");
+        sqlx::query("COMMIT")
+            .execute(&mut private_seeder)
+            .await
+            .expect("commit private project seed");
+        drop(private_seeder);
+        let private_chapter = NativeProjectContextChapterAuthority {
+            chapter_id: PRIVATE_CHAPTER_ID.to_owned(),
+            current_version_id: PRIVATE_VERSION_ID.to_owned(),
+            revision: 1,
+            privacy_revision: 1,
+            privacy_mode: "local_only".to_owned(),
+            status: "active".to_owned(),
+        };
+        let mut private_receipt = NativeProjectContextPrivacyReceipt {
+            schema_version: 1,
+            project_id: PRIVATE_PROJECT_ID.to_owned(),
+            fingerprint: String::new(),
+            active_chapter_count: 1,
+            retained_chapter_count: 1,
+            requires_verified_local: true,
+            chapters: vec![private_chapter],
+        };
+        private_receipt.fingerprint = canonical_project_context_fingerprint(&private_receipt)
+            .expect("canonical private project receipt");
+        let private_scope = NativeModelDispatchScope::ProjectContext {
+            receipt: private_receipt,
+        };
+
+        #[derive(Default)]
+        struct TestEventSink;
+        impl GenerationDeltaSink for TestEventSink {
+            fn emit_delta(&mut self, _delta: &str) -> Result<(), CommandError> {
+                Ok(())
+            }
+        }
+        impl GenerationEventSink for TestEventSink {
+            fn emit_status(
+                &mut self,
+                _status: GenerationEventStatus,
+                _delta: String,
+            ) -> Result<(), CommandError> {
+                Ok(())
+            }
+        }
+
+        let gateway = ModelGatewayState::new().expect("project book-start gateway state");
+        let mut request = generation_request();
+        request.generation_id = GENERATION_ID.to_owned();
+        request.config.provider_id = "project-book-start-connection".to_owned();
+        request.config.base_url = format!("{}/v1", server.base_url);
+        request.config.retry_limit = Some(0);
+
+        let mut changed_scope = scope.clone();
+        let NativeModelDispatchScope::ProjectContext { receipt } = &mut changed_scope else {
+            unreachable!("project fixture")
+        };
+        receipt.fingerprint = "0".repeat(64);
+        request.dispatch_scope = changed_scope;
+        let mut changed_prepared = prepare_generation(&request)
+            .await
+            .expect("prepare changed-privacy project opening");
+        changed_prepared.endpoint_is_loopback = false;
+        let (mut changed_ledger, changed_target) = invocation_dispatch_boundary(
+            &request,
+            INVOCATION_ID,
+            "project-book-start-connection",
+            1,
+            "project-book-start-catalog",
+            1,
+            "custom_openai_compatible",
+        );
+        changed_ledger.task_snapshot = "book_start_guidance".to_owned();
+        let changed_error = start_prepared_generation_with_dispatch(
+            &gateway,
+            &sqlite,
+            &request.dispatch_scope,
+            changed_prepared,
+            format!("{GENERATION_ID}-privacy-changed"),
+            TestEventSink,
+            Some((changed_ledger, changed_target)),
+        )
+        .await
+        .expect_err("changed project privacy receipt must stop before provider I/O");
+        assert_eq!(changed_error.code(), "PROJECT_CONTEXT_PRIVACY_CHANGED");
+        assert!(server
+            .request
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        request.dispatch_scope = private_scope;
+        let mut private_prepared = prepare_generation(&request)
+            .await
+            .expect("prepare private project opening");
+        private_prepared.endpoint_is_loopback = false;
+        let (mut private_ledger, private_target) = invocation_dispatch_boundary(
+            &request,
+            INVOCATION_ID,
+            "project-book-start-connection",
+            1,
+            "project-book-start-catalog",
+            1,
+            "custom_openai_compatible",
+        );
+        private_ledger.task_snapshot = "book_start_guidance".to_owned();
+        let private_error = start_prepared_generation_with_dispatch(
+            &gateway,
+            &sqlite,
+            &request.dispatch_scope,
+            private_prepared,
+            format!("{GENERATION_ID}-private"),
+            TestEventSink,
+            Some((private_ledger, private_target)),
+        )
+        .await
+        .expect_err("private project opening must stop before provider I/O");
+        assert_eq!(private_error.code(), "PRIVATE_CHAPTER_LOCAL_ONLY");
+        assert!(server
+            .request
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        request.dispatch_scope = scope.clone();
+        let mut wrong_task_prepared = prepare_generation(&request)
+            .await
+            .expect("prepare wrong-task project opening");
+        wrong_task_prepared.endpoint_is_loopback = false;
+        let (wrong_task_ledger, wrong_task_target) = invocation_dispatch_boundary(
+            &request,
+            INVOCATION_ID,
+            "project-book-start-connection",
+            1,
+            "project-book-start-catalog",
+            1,
+            "custom_openai_compatible",
+        );
+        let wrong_task_error = start_prepared_generation_with_dispatch(
+            &gateway,
+            &sqlite,
+            &request.dispatch_scope,
+            wrong_task_prepared,
+            format!("{GENERATION_ID}-wrong-task"),
+            TestEventSink,
+            Some((wrong_task_ledger, wrong_task_target)),
+        )
+        .await
+        .expect_err("wrong project opening task must stop before provider I/O");
+        assert_eq!(
+            wrong_task_error.code(),
+            "MODEL_INVOCATION_DISPATCH_CONFLICT"
+        );
+        assert!(server
+            .request
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        let mut connection_drift_prepared = prepare_generation(&request)
+            .await
+            .expect("prepare connection-drift project opening");
+        connection_drift_prepared.endpoint_is_loopback = false;
+        let (mut connection_drift_ledger, connection_drift_target) = invocation_dispatch_boundary(
+            &request,
+            INVOCATION_ID,
+            "project-book-start-connection",
+            2,
+            "project-book-start-catalog",
+            1,
+            "custom_openai_compatible",
+        );
+        connection_drift_ledger.task_snapshot = "book_start_guidance".to_owned();
+        let connection_drift_error = start_prepared_generation_with_dispatch(
+            &gateway,
+            &sqlite,
+            &request.dispatch_scope,
+            connection_drift_prepared,
+            format!("{GENERATION_ID}-connection-drift"),
+            TestEventSink,
+            Some((connection_drift_ledger, connection_drift_target)),
+        )
+        .await
+        .expect_err("connection drift must stop project opening before provider I/O");
+        assert_eq!(
+            connection_drift_error.code(),
+            "MODEL_INVOCATION_DISPATCH_CONFLICT"
+        );
+        assert!(server
+            .request
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+
+        let mut before_success = open_dispatch_inspector(&database_path).await;
+        let predispatch: (Option<String>, i64) = sqlx::query_as(
+            "SELECT provider_dispatch_started_at, revision
+             FROM model_invocation_facts WHERE id = ?",
+        )
+        .bind(INVOCATION_ID)
+        .fetch_one(&mut before_success)
+        .await
+        .expect("inspect project opening before successful dispatch");
+        assert_eq!(predispatch, (None, 1));
+        assert_eq!(dispatch_lease_count(&mut before_success).await, 0);
+        drop(before_success);
+
+        let mut prepared = prepare_generation(&request)
+            .await
+            .expect("prepare aligned project opening");
+        prepared.endpoint_is_loopback = false;
+        let (mut ledger, target) = invocation_dispatch_boundary(
+            &request,
+            INVOCATION_ID,
+            "project-book-start-connection",
+            1,
+            "project-book-start-catalog",
+            1,
+            "custom_openai_compatible",
+        );
+        ledger.task_snapshot = "book_start_guidance".to_owned();
+        let receipt = start_prepared_generation_with_dispatch(
+            &gateway,
+            &sqlite,
+            &request.dispatch_scope,
+            prepared,
+            GENERATION_ID.to_owned(),
+            TestEventSink,
+            Some((ledger, target)),
+        )
+        .await
+        .expect("aligned project opening starts")
+        .expect("project opening receives durable invocation receipt");
+        assert_eq!(receipt.invocation_id, INVOCATION_ID);
+        assert_eq!(receipt.revision, 2);
+        // The startup receipt intentionally returns before the background HTTP
+        // future. Yield through the registry lifecycle before using the
+        // blocking test receiver so a current-thread Tokio test cannot starve it.
+        wait_for_generation_registry_absence(&gateway, GENERATION_ID).await;
+        server
+            .request
+            .recv_timeout(Duration::from_secs(2))
+            .expect("provider receives exactly one request after both durable receipts");
+        let mut inspector = open_dispatch_inspector(&database_path).await;
+        let persisted: (Option<String>, i64) = sqlx::query_as(
+            "SELECT provider_dispatch_started_at, revision
+             FROM model_invocation_facts WHERE id = ?",
+        )
+        .bind(INVOCATION_ID)
+        .fetch_one(&mut inspector)
+        .await
+        .expect("inspect durable project opening receipt");
+        assert_eq!(persisted.0.as_deref(), Some(receipt.dispatched_at.as_str()));
+        assert_eq!(persisted.1, 2);
+        assert_eq!(dispatch_lease_count(&mut inspector).await, 0);
+        server
+            .handle
+            .join()
+            .expect("project opening fake server stops");
+        drop(inspector);
+        drop(sqlite);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn book_start_guidance_ledger_lock_timeout_starts_zero_provider_io() {
         const INVOCATION_ID: &str = "019f9f4a-b3c7-7350-9226-000000000504";
         const GENERATION_ID: &str = "capability-probe-ledger-lock";
         let directory = std::env::temp_dir().join(format!(
@@ -4328,7 +4747,7 @@ mod tests {
                    provider_kind_snapshot, model_id_snapshot,
                    route_reason, status, attempt, privacy_policy, data_destination,
                    started_at, created_at, revision
-                 ) VALUES ('{INVOCATION_ID}', 'capability_probe',
+                  ) VALUES ('{INVOCATION_ID}', 'book_start_guidance',
                            'native-ledger-lock-connection', 'native-ledger-lock-catalog',
                            'custom_openai_compatible', 'model-1', 'user_override',
                            'running', 1, 'cloud_allowed', 'remote',
@@ -4336,7 +4755,7 @@ mod tests {
                            '2026-08-21T00:00:00.000Z', 1)"
             ))
             .await
-            .expect("seed locked capability invocation");
+            .expect("seed locked book-start invocation");
         let mut writer = open_dispatch_inspector(&database_path).await;
         sqlx::query("BEGIN IMMEDIATE")
             .execute(&mut writer)
@@ -4350,7 +4769,7 @@ mod tests {
         request.config.base_url = format!("{}/v1", server.base_url);
         request.config.retry_limit = Some(0);
         request.dispatch_scope = NativeModelDispatchScope::NonProject {
-            reason: crate::native_sqlite::NativeNonProjectDispatchReason::ConnectionProbe,
+            reason: crate::native_sqlite::NativeNonProjectDispatchReason::CreativeOpening,
         };
         let prepared = prepare_generation(&request)
             .await
@@ -4381,7 +4800,7 @@ mod tests {
             prepared,
             GENERATION_ID.to_owned(),
             TestEventSink,
-            Some(capability_dispatch_boundary(
+            Some(invocation_dispatch_boundary(
                 &request,
                 INVOCATION_ID,
                 "native-ledger-lock-connection",

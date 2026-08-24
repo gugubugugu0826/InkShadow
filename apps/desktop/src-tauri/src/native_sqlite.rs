@@ -124,6 +124,7 @@ pub(crate) enum NativeNonProjectDispatchReason {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct NativeModelInvocationDispatchLedger {
     pub(crate) invocation_id: String,
+    pub(crate) task_snapshot: String,
     pub(crate) expected_revision: i64,
     pub(crate) connection_id: String,
     pub(crate) connection_revision: i64,
@@ -197,6 +198,31 @@ fn valid_model_invocation_dispatch_target(target: &NativeModelInvocationDispatch
             .is_none_or(|value| !value.is_empty() && value.len() <= 1_024)
 }
 
+pub(crate) fn valid_model_invocation_dispatch_task(task: &str) -> bool {
+    matches!(
+        task,
+        "idea_discussion"
+            | "book_start_guidance"
+            | "prose_generation"
+            | "continuation"
+            | "rewrite"
+            | "polish"
+            | "outline_planning"
+            | "scene_breakdown"
+            | "chapter_summary"
+            | "long_memory_compression"
+            | "character_extraction"
+            | "world_extraction"
+            | "contradiction_check"
+            | "pov_check"
+            | "character_voice_check"
+            | "content_quality_check"
+            | "what_if_simulation"
+            | "translation"
+            | "capability_probe"
+    )
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectRemoteDispatchLease {
     pub(crate) lease_id: String,
@@ -247,20 +273,25 @@ impl NativeSqliteState {
         self
     }
 
-    /// Commits the content-free capability-probe dispatch receipt at the
-    /// native network boundary. Validation, credential loading and project
-    /// privacy leasing happen before this write; provider I/O happens only
-    /// after it succeeds.
-    pub(crate) async fn mark_capability_probe_invocation_dispatched(
+    /// Commits a content-free text-invocation dispatch receipt at the native
+    /// network boundary. Validation, credential loading and project privacy
+    /// leasing happen before this write; provider I/O happens only after it
+    /// succeeds.
+    pub(crate) async fn mark_model_invocation_dispatched(
         &self,
         ledger: &NativeModelInvocationDispatchLedger,
         target: &NativeModelInvocationDispatchTarget,
     ) -> Result<NativeModelInvocationDispatchReceipt, ModelInvocationDispatchLedgerError> {
-        let canonical_id = ledger
-            .invocation_id
-            .strip_prefix("capability-probe-invocation-")
-            .unwrap_or(&ledger.invocation_id);
+        let canonical_id = if ledger.task_snapshot == "capability_probe" {
+            ledger
+                .invocation_id
+                .strip_prefix("capability-probe-invocation-")
+                .unwrap_or(&ledger.invocation_id)
+        } else {
+            &ledger.invocation_id
+        };
         if uuid::Uuid::parse_str(canonical_id).is_err()
+            || !valid_model_invocation_dispatch_task(&ledger.task_snapshot)
             || ledger.expected_revision < 1
             || ledger.connection_revision < 1
             || ledger.catalog_entry_revision < 1
@@ -288,7 +319,7 @@ impl NativeSqliteState {
                 "UPDATE model_invocation_facts
                  SET provider_dispatch_started_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                      revision = revision + 1
-                 WHERE id = ? AND task = 'capability_probe' AND status = 'running'
+                 WHERE id = ? AND task = ? AND status = 'running'
                    AND connection_id = ? AND catalog_entry_id = ?
                    AND provider_kind_snapshot = ? AND model_id_snapshot = ?
                    AND provider_dispatch_started_at IS NULL AND revision = ?
@@ -330,6 +361,7 @@ impl NativeSqliteState {
                  RETURNING provider_dispatch_started_at, revision",
             )
             .bind(&ledger.invocation_id)
+            .bind(&ledger.task_snapshot)
             .bind(&ledger.connection_id)
             .bind(&ledger.catalog_entry_id)
             .bind(&ledger.provider_kind_snapshot)

@@ -97,7 +97,6 @@ export function StudioReviewRoutePage() {
           headingLevel={1}
           title="团队加密审阅不可用"
           description="当前运行环境没有完整的原生云会话、已落盘密文投影和项目密钥能力。浏览器开发模式不会模拟远端成功。"
-          errorCode="REVIEW_RUNTIME_UNAVAILABLE"
           primaryAction={{
             label: "返回团队工作区",
             onClick: () => void navigate("/teams"),
@@ -114,7 +113,6 @@ export function StudioReviewRoutePage() {
           headingLevel={1}
           title="团队审阅需要联网"
           description="离线时不会伪造审阅列表或提交成功。恢复网络后，本页会重新验证团队与项目权限。"
-          errorCode="REVIEW_OFFLINE"
           primaryAction={{
             label: "返回团队工作区",
             onClick: () => void navigate("/teams"),
@@ -133,7 +131,6 @@ export function StudioReviewRoutePage() {
           headingLevel={1}
           title="无法打开团队审阅"
           description="审阅入口缺少团队或项目范围，请从团队工作区重新打开。"
-          errorCode="REVIEW_ROUTE_SCOPE_INVALID"
           primaryAction={{
             label: "返回团队工作区",
             onClick: () => void navigate("/teams"),
@@ -165,7 +162,6 @@ export function StudioReviewRoutePage() {
           headingLevel={1}
           title="无法打开团队审阅"
           description={visibleAuthority.description}
-          errorCode={visibleAuthority.code}
           primaryAction={{
             label: "返回团队工作区",
             onClick: () => void navigate("/teams"),

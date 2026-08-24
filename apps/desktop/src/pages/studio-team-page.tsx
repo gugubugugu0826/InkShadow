@@ -932,7 +932,7 @@ export function StudioTeamPage() {
       {operationError !== null && (
         <InlineAlert
           tone="error"
-          title={visibleErrorTitle(operationError)}
+          title="团队操作未完成"
           description={operationError.description}
           onDismiss={() => setOperationError(null)}
           dismissLabel="关闭错误"
@@ -1771,11 +1771,7 @@ function TeamProjectKeyEnvelopePanel(props: {
         </p>
       )}
       {props.error !== null && (
-        <InlineAlert
-          tone="error"
-          title={visibleErrorTitle(props.error)}
-          description={props.error.description}
-        />
+        <InlineAlert tone="error" title="密钥发放未完成" description={props.error.description} />
       )}
       {!props.verificationDecision.allowed && (
         <p className="studio-team-page__permission-reason" role="note">
@@ -1798,7 +1794,7 @@ function TeamProjectKeyEnvelopePanel(props: {
       {props.verificationError !== null && (
         <InlineAlert
           tone="error"
-          title={visibleErrorTitle(props.verificationError)}
+          title="密钥验证未完成"
           description={props.verificationError.description}
         />
       )}
@@ -1839,7 +1835,6 @@ function VisibleErrorState(props: {
     <ErrorState
       title={props.title}
       description={props.error.description}
-      errorCode={visibleErrorTitle(props.error)}
       {...(props.error.requestId === undefined ? {} : { requestId: props.error.requestId })}
       primaryAction={{ label: "重试", onClick: props.retry }}
     />
@@ -1994,10 +1989,6 @@ function isSignedOutError(error: unknown): boolean {
       "AUTH_REFRESH_REPLAYED",
     ].includes(error.code)
   );
-}
-
-function visibleErrorTitle(error: VisibleError): string {
-  return error.status === undefined ? error.code : `${error.code} · HTTP ${String(error.status)}`;
 }
 
 function roleLabel(role: StudioTeamRole | CloudTeamInvitationRole): string {

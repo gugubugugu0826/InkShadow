@@ -361,7 +361,7 @@ export function MultiAgentReviewPage({
         <InlineAlert
           tone="warning"
           title="多智能体创建功能当前关闭"
-          description="你仍可只读查看并导出既有本地历史。团队云执行尚未接入权威配额与预留，因此不会在此页面启用。"
+          description="你仍可只读查看并导出既有本地历史。团队云执行尚未接入明确的额度上限与占用记录，因此不会在此页面启用。"
         />
       )}
       {featureEnabled && (

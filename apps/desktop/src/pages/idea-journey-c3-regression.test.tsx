@@ -1,9 +1,11 @@
+import { parseUuidV7 } from "@inkshadow/domain";
 import { ToastProvider } from "@inkshadow/ui";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS } from "../infrastructure/creative-opening-service";
 import { readOpeningJourneyRun } from "../infrastructure/opening-journey-run";
 import {
   readSafeOperationIncidents,
@@ -343,6 +345,8 @@ describe("C3 opening journey durability regressions", () => {
     );
     const observedStages: string[] = [];
     const waitingDispatchReceipts: (readonly (string | null)[])[] = [];
+    let reservationCount = 0;
+    let releaseFinalReservation!: () => void;
     vi.spyOn(harness.runtime.creativeJourneys, "update").mockImplementation(
       async (record, expectedRevision, turn) => {
         const run = readOpeningJourneyRun(record.snapshot.openingRun);
@@ -367,6 +371,18 @@ describe("C3 opening journey durability regressions", () => {
     const user = userEvent.setup();
     renderJourney(harness.runtime);
     await connectOllama(user);
+    const originalStartInvocation = harness.runtime.modelHub.startInvocation.bind(
+      harness.runtime.modelHub,
+    );
+    vi.spyOn(harness.runtime.modelHub, "startInvocation").mockImplementation(async (input) => {
+      reservationCount += 1;
+      if (reservationCount === 3) {
+        await new Promise<void>((resolve) => {
+          releaseFinalReservation = resolve;
+        });
+      }
+      return originalStartInvocation(input);
+    });
     const releases: (() => void)[] = [];
     harness.generate.mockImplementation(
       (input) =>
@@ -383,11 +399,15 @@ describe("C3 opening journey durability regressions", () => {
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     const dialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
-    await user.click(within(dialog).getByRole("button", { name: "确认并发起最多 3 次调用" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
+    await waitFor(() => expect(document.body).toHaveTextContent("正在保存本次生成信息"));
+    expect(harness.generate).not.toHaveBeenCalled();
+    releaseFinalReservation();
 
     await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3), {
       timeout: 15_000,
     });
+    await waitFor(() => expect(document.body).toHaveTextContent("已向所选服务发送，正在等待结果"));
     const confirmedIndex = observedStages.indexOf("confirmed");
     const reservingIndex = observedStages.indexOf("invocation_reserving");
     const waitingIndex = observedStages.indexOf("provider_waiting");
@@ -419,6 +439,62 @@ describe("C3 opening journey durability regressions", () => {
     });
   }, 30_000);
 
+  it("settles all three slots with zero sends when the second invocation reservation fails", async () => {
+    const harness = createProviderRuntime();
+    let reservationCount = 0;
+    const user = userEvent.setup();
+    renderJourney(harness.runtime);
+    await connectOllama(user);
+    const originalStartInvocation = harness.runtime.modelHub.startInvocation.bind(
+      harness.runtime.modelHub,
+    );
+    vi.spyOn(harness.runtime.modelHub, "startInvocation").mockImplementation((input) => {
+      reservationCount += 1;
+      return reservationCount === 2
+        ? Promise.reject(
+            Object.assign(new Error("simulated second reservation failure"), {
+              code: "MODEL_INVOCATION_RESERVATION_FAILED",
+            }),
+          )
+        : originalStartInvocation(input);
+    });
+    harness.generate.mockClear();
+    await user.type(
+      screen.getByRole("textbox", { name: "一句话灵感" }),
+      "一列没有终点的夜车只在旧照片里停靠。",
+    );
+    await user.click(screen.getByRole("button", { name: "生成第一段" }));
+    const dialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
+    await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
+
+    let terminalRun: ReturnType<typeof readOpeningJourneyRun> = null;
+    let terminalSuggestions: readonly Readonly<{ status: string }>[] = [];
+    await waitFor(async () => {
+      const [record] = await harness.runtime.creativeJourneys.listActive("idea");
+      terminalRun = readOpeningJourneyRun(record?.snapshot.openingRun);
+      terminalSuggestions = (record?.snapshot.openingSuggestions ?? []) as readonly Readonly<{
+        status: string;
+      }>[];
+      expect(terminalRun?.stage).toBe("failed");
+      expect(terminalSuggestions).toHaveLength(3);
+      expect(terminalSuggestions.every(({ status }) => status === "failed")).toBe(true);
+    });
+    expect(harness.generate).not.toHaveBeenCalled();
+    const [terminalRecord] = await harness.runtime.creativeJourneys.listActive("idea");
+    const persistedTerminalRun = readOpeningJourneyRun(terminalRecord?.snapshot.openingRun);
+    const invocations = await Promise.all(
+      (persistedTerminalRun?.requestIds ?? []).map((requestId: string) =>
+        harness.runtime.modelHub.findInvocation(requestId),
+      ),
+    );
+    expect(invocations[0]).toMatchObject({
+      status: "failed",
+      providerDispatchStartedAt: null,
+    });
+    expect(invocations[1]).toBeNull();
+    expect(invocations[2]).toBeNull();
+  }, 30_000);
+
   it("keeps the run in invocation reservation when the durable dispatch receipt cannot be written", async () => {
     const harness = createProviderRuntime();
     const originalUpdate = harness.runtime.creativeJourneys.update.bind(
@@ -447,7 +523,7 @@ describe("C3 opening journey durability regressions", () => {
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     const dialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
-    await user.click(within(dialog).getByRole("button", { name: "确认并发起最多 3 次调用" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
 
     await waitFor(async () => {
       const [settled] = await harness.runtime.creativeJourneys.listActive("idea");
@@ -486,7 +562,7 @@ describe("C3 opening journey durability regressions", () => {
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     const dialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
-    await user.click(within(dialog).getByRole("button", { name: "确认并发起最多 3 次调用" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
     await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3), {
       timeout: 15_000,
     });
@@ -556,7 +632,7 @@ describe("C3 opening journey durability regressions", () => {
       throw new Error("没有保存发送前开书旅程。");
     }
     clockMs = Date.parse(pendingRun.deadlineAt) + 1;
-    await user.click(within(dialog).getByRole("button", { name: "确认并发起最多 3 次调用" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
 
     await waitFor(
       async () => {
@@ -611,7 +687,7 @@ describe("C3 opening journey durability regressions", () => {
       throw new Error("没有保存带绝对截止时间的开书运行。 ");
     }
     clockMs = Date.parse(pendingRun.deadlineAt) - 1_000;
-    await user.click(within(dialog).getByRole("button", { name: "确认并发起最多 3 次调用" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
     await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3), { timeout: 15_000 });
 
     const originalFindInvocation = runtime.modelHub.findInvocation.bind(runtime.modelHub);
@@ -663,6 +739,22 @@ describe("C3 opening journey durability regressions", () => {
     expect(afterLateResults?.snapshot.openingSuggestions).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ status: "ready" })]),
     );
+    const lateHistory = afterLateResults?.snapshot.openingResultHistory as
+      | readonly Readonly<{
+          id: string;
+          status: string;
+          text: string;
+          noticeCode: string | null;
+        }>[]
+      | undefined;
+    expect(lateHistory).toHaveLength(3);
+    for (const requestId of pendingRun.requestIds) {
+      expect(lateHistory?.find(({ id }) => id === requestId)).toMatchObject({
+        status: "review",
+        text: `截止后返回 ${requestId}`,
+        noticeCode: "OPENING_RESULT_PENDING_REVIEW",
+      });
+    }
     expect(harness.generate).toHaveBeenCalledTimes(3);
   }, 30_000);
 
@@ -803,7 +895,7 @@ describe("C3 opening journey durability regressions", () => {
     await user.type(screen.getByRole("textbox", { name: "一句话灵感" }), idea);
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     const dialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
-    await user.click(within(dialog).getByRole("button", { name: "确认并发起最多 3 次调用" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
     await reservationReached;
 
     const [confirmed] = await harness.runtime.creativeJourneys.listActive("idea");
@@ -944,7 +1036,7 @@ describe("C3 opening journey durability regressions", () => {
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     const initialDialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
     await user.click(
-      within(initialDialog).getByRole("button", { name: "确认并发起最多 3 次调用" }),
+      within(initialDialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }),
     );
     await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3), { timeout: 15_000 });
     await waitFor(() => expect(screen.getByRole("button", { name: "换一批" })).toBeEnabled(), {
@@ -993,7 +1085,7 @@ describe("C3 opening journey durability regressions", () => {
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     const initialDialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
     await user.click(
-      within(initialDialog).getByRole("button", { name: "确认并发起最多 3 次调用" }),
+      within(initialDialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }),
     );
     await waitFor(() => expect(screen.getByRole("button", { name: "换一批" })).toBeEnabled(), {
       timeout: 15_000,
@@ -1045,7 +1137,7 @@ describe("C3 opening journey durability regressions", () => {
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     const initialDialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
     await user.click(
-      within(initialDialog).getByRole("button", { name: "确认并发起最多 3 次调用" }),
+      within(initialDialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }),
     );
     await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3), { timeout: 15_000 });
     await waitFor(
@@ -1081,6 +1173,146 @@ describe("C3 opening journey durability regressions", () => {
     expect(await screen.findByText("确认前离开，未确认的生成批次已安全终止")).toBeVisible();
     expect(screen.getByText(new RegExp(pendingRun.supportId, "u"))).toBeVisible();
   }, 30_000);
+  it("archives a single-slot retry that returns after its persisted deadline without another send", async () => {
+    const harness = createProviderRuntime();
+    const user = userEvent.setup();
+    renderJourney(harness.runtime);
+    await connectOllama(user);
+    harness.generate.mockClear();
+    let initialCall = 0;
+    harness.generate.mockImplementation((input) => {
+      initialCall += 1;
+      return initialCall === 1
+        ? Promise.reject(
+            Object.assign(new Error("simulated first-slot failure"), {
+              code: "MODEL_PROVIDER_UNAVAILABLE",
+            }),
+          )
+        : Promise.resolve({ text: `初始可用开头 ${input.generationId}`, usage: null });
+    });
+    await user.type(
+      screen.getByRole("textbox", { name: "一句话灵感" }),
+      "一座旧天文台会在雨夜收到来自未来的观测记录。",
+    );
+    await user.click(screen.getByRole("button", { name: "生成第一段" }));
+    const initialDialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
+    await user.click(
+      within(initialDialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }),
+    );
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3), { timeout: 15_000 });
+    await waitFor(
+      () => expect(screen.getByRole("button", { name: "重新生成此方案" })).toBeEnabled(),
+      { timeout: 15_000 },
+    );
+
+    const [beforeRetry] = await harness.runtime.creativeJourneys.listActive("idea");
+    if (beforeRetry?.chapterId === null || beforeRetry?.chapterId === undefined) {
+      throw new Error("单槽迟到结果测试没有取得第一章编号。");
+    }
+    const chapterId = parseUuidV7(beforeRetry.chapterId);
+    if (!chapterId.ok) throw chapterId.error;
+    const chapterBefore = await harness.runtime.repositories.chapters.findById(chapterId.value);
+    if (!chapterBefore.ok || chapterBefore.value === null) {
+      throw new Error("单槽迟到结果测试无法读取第一章权威状态。");
+    }
+    const chapterAuthority = Object.freeze({
+      content: chapterBefore.value.content,
+      currentVersionId: chapterBefore.value.currentVersionId,
+      revision: chapterBefore.value.revision,
+    });
+
+    harness.generate.mockClear();
+    const lateResult = {
+      resolve: null as null | ((value: { text: string; usage: null }) => void),
+    };
+    harness.generate.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          lateResult.resolve = resolve;
+        }),
+    );
+    const cancelGeneration = vi.spyOn(harness.runtime.modelGateway, "cancelGeneration");
+    await user.click(screen.getByRole("button", { name: "重新生成此方案" }));
+    expect(await screen.findByRole("dialog", { name: "重新生成这个方案" })).toBeVisible();
+    const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+    const slotTimeoutCallbacks: (() => void)[] = [];
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      handler: TimerHandler,
+      timeout?: number,
+    ) => {
+      if (
+        timeout === CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS &&
+        typeof handler === "function"
+      ) {
+        slotTimeoutCallbacks.push(handler as () => void);
+        return realSetTimeout(() => undefined, timeout);
+      }
+      return realSetTimeout(handler, timeout);
+    }) as typeof globalThis.setTimeout);
+
+    try {
+      await user.click(
+        within(screen.getByRole("dialog", { name: "重新生成这个方案" })).getByRole("button", {
+          name: "确认并发送最多 1 个生成请求",
+        }),
+      );
+      await waitFor(() => expect(harness.generate).toHaveBeenCalledOnce(), { timeout: 15_000 });
+      expect(slotTimeoutCallbacks.length).toBeGreaterThanOrEqual(2);
+      const requestId = harness.generate.mock.calls[0]?.[0].generationId;
+      if (requestId === undefined) throw new Error("单槽迟到结果测试没有取得请求编号。");
+      expect(harness.generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
+
+      await act(async () => {
+        slotTimeoutCallbacks.at(-1)?.();
+        await Promise.resolve();
+      });
+      await waitFor(async () => {
+        const record = await harness.runtime.creativeJourneys.findById(beforeRetry.id);
+        expect(readOpeningJourneyRun(record?.snapshot.openingRun)).toMatchObject({
+          stage: "result_pending",
+          autoRetryCount: 0,
+        });
+      });
+      expect(cancelGeneration).not.toHaveBeenCalled();
+
+      if (lateResult.resolve === null) {
+        throw new Error("迟到结果解析器未准备好。");
+      }
+      lateResult.resolve({ text: "迟到的天文记录在桌面上自行翻到了最后一页。", usage: null });
+      await waitFor(async () => {
+        const record = await harness.runtime.creativeJourneys.findById(beforeRetry.id);
+        const history = record?.snapshot.openingResultHistory as
+          | readonly Readonly<{
+              id: string;
+              status: string;
+              text: string;
+              providerInvocationId: string | null;
+            }>[]
+          | undefined;
+        expect(history?.find(({ id }) => id === requestId)).toMatchObject({
+          status: "review",
+          text: "迟到的天文记录在桌面上自行翻到了最后一页。",
+          providerInvocationId: requestId,
+        });
+        const run = readOpeningJourneyRun(record?.snapshot.openingRun);
+        if (run === null) throw new Error("单槽迟到结果没有保留开书运行记录。");
+        expect(
+          (await harness.runtime.taskCenter.load()).tasks.find(({ id }) => id === run.taskId),
+        ).toMatchObject({ status: "failed", maxAttempts: 1 });
+      });
+      expect(harness.generate).toHaveBeenCalledOnce();
+      expect(cancelGeneration).not.toHaveBeenCalled();
+      const invocation = await harness.runtime.modelHub.findInvocation(requestId);
+      expect(invocation).toMatchObject({
+        status: "timed_out",
+      });
+      expect(typeof invocation?.providerDispatchStartedAt).toBe("string");
+      const chapterAfter = await harness.runtime.repositories.chapters.findById(chapterId.value);
+      expect(chapterAfter.ok && chapterAfter.value).toMatchObject(chapterAuthority);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  }, 30_000);
 
   it("uses the same local terminal-settlement failure path for a single-slot retry", async () => {
     const harness = createProviderRuntime();
@@ -1106,7 +1338,7 @@ describe("C3 opening journey durability regressions", () => {
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     const initialDialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
     await user.click(
-      within(initialDialog).getByRole("button", { name: "确认并发起最多 3 次调用" }),
+      within(initialDialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }),
     );
     await waitFor(
       () => expect(screen.getByRole("button", { name: "重新生成此方案" })).toBeEnabled(),
@@ -1474,7 +1706,7 @@ describe("C3 opening journey durability regressions", () => {
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     const dialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
-    await user.click(within(dialog).getByRole("button", { name: "确认并发起最多 3 次调用" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
     await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3), { timeout: 15_000 });
     const [pending] = await harness.runtime.creativeJourneys.listActive("idea");
     const pendingRun = readOpeningJourneyRun(pending?.snapshot.openingRun);
@@ -1515,7 +1747,7 @@ describe("C3 opening journey durability regressions", () => {
     );
     await user.click(screen.getByRole("button", { name: "生成第一段" }));
     const dialog = await screen.findByRole("dialog", { name: "生成首批三个开头" });
-    await user.click(within(dialog).getByRole("button", { name: "确认并发起最多 3 次调用" }));
+    await user.click(within(dialog).getByRole("button", { name: "确认并发送最多 3 个生成请求" }));
     await waitFor(() => expect(harness.generate).toHaveBeenCalledTimes(3), { timeout: 15_000 });
     const [pending] = await harness.runtime.creativeJourneys.listActive("idea");
     const pendingRun = readOpeningJourneyRun(pending?.snapshot.openingRun);

@@ -2,7 +2,7 @@
 
 > 基于源码快照：2026-07-30  
 > 文档状态：`SUPPORTING_CURRENT`（工程索引）；Android 仍是 POC  
-> Desktop 应用清单版本：`0.2.9`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)（未签名工程预发行）；Android 仍为 POC，设计基线 `DESIGN v0.3.1b` 不代表 Android 客户端已实现  
+> Desktop 应用清单版本：`0.2.10`（未签名人工复测候选；未打标签、未发布）；最新公开版本：[`v0.2.9`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.9)（未签名工程预发行），发布来源提交 `54d9647031bb97b4fc9f021d3b1acca7f6d25c47`；Android 仍为 POC，设计基线 `DESIGN v0.3.1b` 不代表 Android 客户端已实现  
 > 本文覆盖 `apps/android`、`deploy/`、`scripts/`、`.github/`、`tests/` 和根工程配置
 
 ## 1. Android 当前不是产品客户端

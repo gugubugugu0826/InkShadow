@@ -190,7 +190,7 @@ export function ChapterSummaryPanel({
       setNotice({
         tone: "info",
         title: "现有章节任务已登记",
-        description: `新增 ${receipt.createdTaskCount.toLocaleString("zh-CN")} 个本地任务，已有 ${receipt.alreadyRegisteredTaskCount.toLocaleString("zh-CN")} 个任务无需重复登记。后台只会分批重建本地搜索与故事关联，精确 0 次模型服务调用，不会阻塞或修改正文。${refreshNote}`,
+        description: `新增 ${receipt.createdTaskCount.toLocaleString("zh-CN")} 个本地任务，已有 ${receipt.alreadyRegisteredTaskCount.toLocaleString("zh-CN")} 个任务无需重复登记。后台只会分批重建本地搜索与故事关联，不会向模型服务发送内容，也不会阻塞或修改正文。${refreshNote}`,
       });
     } catch (cause: unknown) {
       setNotice({
@@ -216,8 +216,8 @@ export function ChapterSummaryPanel({
       </div>
       <InlineAlert
         tone="info"
-        title="保存与恢复精确 0 次模型服务调用"
-        description="配置模型不代表同意发送正文。故事变化识别只会在独立授权流程能够持久记录发送范围、精确模型服务与模型、费用、调用上限、取消和不确定结果后重新开放。"
+        title="保存与恢复不会向模型服务发送内容"
+        description="配置模型不代表同意发送正文。故事变化识别只会在独立授权流程能够持久记录发送范围、精确模型服务与模型、费用、发送次数上限、取消和结果待核对状态后重新开放。"
       />
       {continuousProviderAssignments(continuousDashboard).length > 0 && (
         <p className="candidate-panel__hint">
@@ -254,7 +254,7 @@ export function ChapterSummaryPanel({
           </p>
           <p className="candidate-panel__hint">
             第一步只生成只读计划，不发送正文。确认后只登记本地搜索与故事关联重建，不包含章节摘要或设定识别，精确
-            0 次模型服务调用。
+            不会向模型服务发送内容。
           </p>
           <Button
             size="sm"
@@ -297,7 +297,7 @@ export function ChapterSummaryPanel({
                 title={
                   backfillPlan.possibleRemoteProviderCallUpperBound.total > 0
                     ? "旧云阶段计划已停用"
-                    : "模型服务调用上限：0 次"
+                    : "向模型服务发送次数上限：0 次"
                 }
                 description={
                   backfillPlan.possibleRemoteProviderCallUpperBound.total > 0
@@ -379,7 +379,7 @@ export function ChapterSummaryPanel({
                 {entry.modelId !== null && (
                   <p className="candidate-panel__hint">
                     模型：{providerDisplayName(entry.providerKind)} · {entry.modelId} ·
-                    本次模型结果已记录，可在调用与费用中核对
+                    本次模型结果已记录，可在模型使用与费用中核对
                   </p>
                 )}
               </CardContent>

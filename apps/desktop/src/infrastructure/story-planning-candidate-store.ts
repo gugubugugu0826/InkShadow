@@ -899,7 +899,7 @@ function normalizeCandidate(value: unknown): StoryPlanningCandidate {
     payload,
     editableSynopsis: validateText(compatibleValue.editableSynopsis, 1, 20_000, "可采纳内容"),
     context,
-    invocationId: validateIdentifier(compatibleValue.invocationId, "调用记录编号", 128),
+    invocationId: validateIdentifier(compatibleValue.invocationId, "模型使用记录编号", 128),
     connectionId: validateIdentifier(compatibleValue.connectionId, "供应商连接编号", 128),
     catalogEntryId: validateIdentifier(compatibleValue.catalogEntryId, "模型目录编号", 128),
     providerKind,

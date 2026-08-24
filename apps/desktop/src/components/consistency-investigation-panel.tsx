@@ -302,7 +302,7 @@ export function ConsistencyInvestigationPanel({
         <div>
           <h2 id="consistency-investigation-heading">长篇一致性调查</h2>
           <p>
-            按需通读当前已接受正文与已确认设定，输出带精确来源的跨章问题。进入此页不会调用模型。
+            按需通读当前已接受正文与已确认设定，输出带精确来源的跨章问题。进入此页不会向模型发送内容。
           </p>
         </div>
         {snapshot !== null && <RunStatusBadge run={snapshot.run} />}
@@ -312,7 +312,7 @@ export function ConsistencyInvestigationPanel({
         <CardHeader>
           <CardTitle headingLevel={3}>只读深入调查</CardTitle>
           <CardDescription>
-            本地检索和核验固定使用 5 个只读步骤；模型最多调用 1 次、自动重试 0
+            本地检索和核验固定使用 5 个只读步骤；最多向模型服务发送 1 次、自动重试 0
             次。结果不会改写正文或不可变版本。
           </CardDescription>
         </CardHeader>
@@ -344,7 +344,7 @@ export function ConsistencyInvestigationPanel({
         <Card>
           <CardHeader>
             <CardTitle headingLevel={3}>发送前确认</CardTitle>
-            <CardDescription>只有点击下方确认按钮才会进入模型调用边界。</CardDescription>
+            <CardDescription>只有点击下方确认按钮才会向所选模型服务发送内容。</CardDescription>
           </CardHeader>
           <CardContent>
             <dl className="settings-definition-list">
@@ -366,7 +366,7 @@ export function ConsistencyInvestigationPanel({
                 </dd>
               </div>
               <div>
-                <dt>调用与重试</dt>
+                <dt>发送与重试</dt>
                 <dd>
                   最多 {disclosure.maximumModelCalls} 次；自动重试 {disclosure.automaticRetryCount}{" "}
                   次
@@ -442,7 +442,7 @@ export function ConsistencyInvestigationPanel({
           <CardHeader>
             <CardTitle headingLevel={3}>修复建议发送前确认</CardTitle>
             <CardDescription>
-              这是调查之外的一次独立模型动作。确认前不会调用模型，也不会创建 AI 建议草稿。
+              这是调查之外的一次独立模型动作。确认前不会向模型发送内容，也不会创建 AI 建议草稿。
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -471,7 +471,7 @@ export function ConsistencyInvestigationPanel({
                 </dd>
               </div>
               <div>
-                <dt>调用与重试</dt>
+                <dt>发送与重试</dt>
                 <dd>
                   精确 {repairDisclosure.maximumModelCalls} 次；自动重试{" "}
                   {repairDisclosure.automaticRetryCount} 次
@@ -759,7 +759,7 @@ function taskGraphSafeSummary(node: InvestigationTaskGraphNode): string {
     return `核对 ${safeCount(summary.chapterCount)} 章当前已接受正文与已确认设定的一致性。`;
   }
   if (node.kind === "plan") {
-    return `最多 ${safeCount(summary.maximumToolSteps)} 个只读本地步骤，模型调用 ${safeCount(summary.maximumModelCalls)} 次，自动重试 ${safeCount(summary.automaticRetryCount)} 次。`;
+    return `最多 ${safeCount(summary.maximumToolSteps)} 个只读本地步骤，最多向模型服务发送 ${safeCount(summary.maximumModelCalls)} 次，自动重试 ${safeCount(summary.automaticRetryCount)} 次。`;
   }
   if (node.kind === "action") {
     const ordinal = safeCount(summary.ordinal);
@@ -793,7 +793,8 @@ function taskGraphObservationSummary(node: InvestigationTaskGraphNode): string {
 
 function taskGraphResultSummary(node: InvestigationTaskGraphNode): string {
   const summary = node.safeSummary;
-  if (node.status === "ambiguous") return "调用结果不确定，未自动重发；正文和不可变版本没有改变。";
+  if (node.status === "ambiguous")
+    return "这次发送的结果需要核对，未自动重发；正文和不可变版本没有改变。";
   if (node.status === "failed") return "结果未通过格式或本地证据核验；正文和不可变版本没有改变。";
   if (node.status === "cancelled") return "调查已取消，未完成步骤不会在重启后自动续跑。";
   if (node.status === "not_dispatched") return "调查在发送前终止，本次没有发送正文。";
@@ -809,7 +810,7 @@ function taskGraphToolLabel(value: unknown): string {
 }
 
 function taskGraphPermissionLabel(value: unknown): string {
-  if (value === "model_dispatch") return "仅限已确认的单次模型调用";
+  if (value === "model_dispatch") return "仅限一次已确认发送";
   if (value === "local_verify") return "仅在本地核验";
   return "仅在本地只读访问";
 }
@@ -965,9 +966,9 @@ function statusMessage(run: ConsistencyInvestigationRun): Readonly<{
   if (run.status === "ambiguous")
     return {
       tone: "error",
-      title: "调用结果不确定，未自动重发",
+      title: "这次发送的结果需要核对，未自动重发",
       description:
-        "模型调用已经越过网络边界，但应用无法确认结果。请先核对调用记录；正文和版本未改变。",
+        "内容已经发送给所选模型服务，但应用无法确认结果。请先查看模型使用记录；正文和版本未改变。",
     };
   if (run.status === "not_dispatched")
     return {
@@ -985,7 +986,7 @@ function statusMessage(run: ConsistencyInvestigationRun): Readonly<{
     return {
       tone: "error",
       title: "模型返回无法形成可信结果",
-      description: "真实调用证据仍保留，但格式或本地核验失败；正文和版本未改变。",
+      description: "已发送请求的记录仍保留，但格式或本地核验失败；正文和版本未改变。",
     };
   if (run.status === "partial")
     return {
@@ -1029,13 +1030,13 @@ function plainLanguageDisclosure(value: string): string {
     .replaceAll("API Key 或", "接口密钥或")
     .replaceAll("API Key、", "接口密钥、")
     .replaceAll("API Key", "接口密钥")
-    .replaceAll("未接受 Candidate", "未接受隔离建议")
-    .replaceAll("其他 Candidate", "其他隔离建议")
-    .replaceAll("Candidate", "隔离建议")
+    .replaceAll(/未接受\s+candidates?/giu, "未接受隔离建议")
+    .replaceAll(/其他\s+candidates?/giu, "其他隔离建议")
+    .replaceAll(/candidates?/giu, "隔离建议")
     .replaceAll(/tokens?/giu, "内容额度")
-    .replaceAll("Invocation", "调用记录")
-    .replaceAll("Provider", "模型服务")
-    .replaceAll("Agent", "智能流程");
+    .replaceAll(/invocations?/giu, "模型使用记录")
+    .replaceAll(/providers?/giu, "模型服务")
+    .replaceAll(/agents?/giu, "智能流程");
 }
 
 function formatTimestamp(value: string): string {

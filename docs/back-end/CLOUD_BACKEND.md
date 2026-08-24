@@ -3,7 +3,7 @@
 > 基于源码快照：2026-07-30  
 > 覆盖范围：`apps/cloud-api/src` 的 84 个非测试源码文件、16 个 PostgreSQL 迁移及其共享契约  
 > 文档状态：`SUPPORTING_CURRENT`（代码边界）；不表示生产 Cloud 已部署  
-> Desktop 应用清单版本：`0.2.9`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)（未签名工程预发行）；Cloud 仍未部署，设计基线 `DESIGN v0.3.1b` 不改变 Cloud API 版本  
+> Desktop 应用清单版本：`0.2.10`（未签名人工复测候选；未打标签、未发布）；最新公开版本：[`v0.2.9`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.9)（未签名工程预发行），发布来源提交 `54d9647031bb97b4fc9f021d3b1acca7f6d25c47`；Cloud 仍未部署，设计基线 `DESIGN v0.3.1b` 不改变 Cloud API 版本  
 > 状态口径：代码已实现不等于已经部署或通过真实生产环境验证
 
 ## 1. 定位与规模

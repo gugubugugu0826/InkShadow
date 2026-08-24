@@ -52,6 +52,7 @@ describe("Studio review standalone page", () => {
 
     expect(await screen.findByText("团队审阅暂不可用")).toBeVisible();
     expect(screen.getByText(/系统不会自动重复提交/u)).toBeVisible();
+    expect(screen.queryByText("REVIEW_SOURCE_INVALID")).not.toBeInTheDocument();
     expect(screen.queryByText(rawMessage)).not.toBeInTheDocument();
   });
 

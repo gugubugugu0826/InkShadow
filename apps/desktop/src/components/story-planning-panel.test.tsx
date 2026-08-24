@@ -30,10 +30,10 @@ describe("StoryPlanningPanel", () => {
     await waitFor(() => expect(service.listCandidates).toHaveBeenCalled());
 
     await user.click(screen.getByRole("button", { name: "查看故事方向发送信息" }));
-    await user.click(screen.getByRole("button", { name: "取消，不调用" }));
+    await user.click(screen.getByRole("button", { name: "取消，不发送" }));
 
     expect(generate).not.toHaveBeenCalled();
-    expect(screen.queryByText("确认后会调用 1 次")).not.toBeInTheDocument();
+    expect(screen.queryByText("确认后会发送 1 次")).not.toBeInTheDocument();
   });
 
   it("shows normal sending information when the current plan is empty", async () => {
@@ -82,7 +82,7 @@ describe("StoryPlanningPanel", () => {
 
     expect(await screen.findByText("故事方向发送信息尚未准备好")).toBeVisible();
     expect(screen.getByText(/准备发送信息时发现所选模型尚未通过规划格式检查/u)).toBeVisible();
-    expect(screen.getByText(/本次调用 0 次/u)).toBeVisible();
+    expect(screen.getByText(/本次没有向模型服务发送内容/u)).toBeVisible();
     expect(screen.getByText(/支持编号：墨影-/u)).toBeVisible();
     expect(screen.queryByText("AI 剧情规划未完成")).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("MODEL_HUB_STRUCTURED_OUTPUT_NOT_VERIFIED");
@@ -181,7 +181,7 @@ describe("StoryPlanningPanel", () => {
     expect(screen.getByText(/正式大纲和正文都没有改变/u)).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent(generated.invocationId);
     expect(document.body).not.toHaveTextContent(generated.providerKind);
-    expect(screen.getByText(/本次模型结果已记录，可在调用与费用中核对/u)).toBeVisible();
+    expect(screen.getByText(/本次模型结果已记录，可在模型使用与费用中核对/u)).toBeVisible();
 
     const decisionSurface = screen.getByLabelText(`${generated.targetNodeTitle}的规划建议草稿决策`);
     expect(decisionSurface).toHaveClass("candidate-decision-surface");

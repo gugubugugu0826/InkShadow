@@ -276,7 +276,7 @@ export class ModelHubRerankService {
     } catch {
       throw new ModelHubExecutionError(
         "MODEL_HUB_INVOCATION_LEDGER_FAILED",
-        "重排已经执行，但调用记录未能完成。为避免重复费用，本次不会自动重试。",
+        "检索排序已经执行，但模型使用记录未能完成。为避免重复费用，本次不会自动重试。",
         true,
         true,
       );
@@ -617,7 +617,7 @@ function requireSameFingerprint(
   if (JSON.stringify(expected.fingerprintMaterial) !== JSON.stringify(actual.fingerprintMaterial)) {
     throw executionError(
       "MODEL_HUB_RERANK_CONFIGURATION_CHANGED",
-      "检索重排配置或能力证据在调用期间发生变化，本次结果不会进入写作上下文。",
+      "检索排序配置或能力信息在发送期间发生变化，本次结果不会进入写作资料。",
       true,
     );
   }
@@ -641,14 +641,14 @@ function normalizeRerankError(cause: unknown, dispatched: boolean): ModelHubExec
   ) {
     return new ModelHubExecutionError(
       cause.code,
-      dispatched ? "远程重排调用失败，已保留本地排序。" : "远程重排预检未通过。",
+      dispatched ? "远程检索排序请求失败，已保留本地排序。" : "远程检索排序发送前检查未通过。",
       "retryable" in cause && cause.retryable === true,
       dispatched,
     );
   }
   return executionError(
     dispatched ? "MODEL_HUB_RERANK_PROVIDER_FAILED" : "MODEL_HUB_RERANK_PREFLIGHT_FAILED",
-    dispatched ? "远程重排调用失败，已保留本地排序。" : "远程重排预检未通过。",
+    dispatched ? "远程检索排序请求失败，已保留本地排序。" : "远程检索排序发送前检查未通过。",
     dispatched,
     dispatched,
   );

@@ -51,7 +51,7 @@ describe("ImportJourneyPage safe Provider boundary", () => {
 
     expect(generate).not.toHaveBeenCalled();
     expect(screen.queryByText(/预计.*次调用/u)).not.toBeInTheDocument();
-    expect(screen.getByText(/无法提供完整的调用与费用确认/u)).toBeInTheDocument();
+    expect(screen.getByText(/无法提供完整的发送次数与费用确认/u)).toBeInTheDocument();
   });
 
   it("hides raw connection and request identifiers from the ordinary recovery notice", async () => {
@@ -70,7 +70,7 @@ describe("ImportJourneyPage safe Provider boundary", () => {
     );
     renderPage(fixture.runtime);
 
-    expect(await screen.findByText("上次模型调用可能在中断前已发送")).toBeInTheDocument();
+    expect(await screen.findByText("上次请求可能在中断前已经发出")).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("request-secret-123");
     expect(document.body).not.toHaveTextContent("connection-secret-456");
     expect(document.body).not.toHaveTextContent("model-secret-789");

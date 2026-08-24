@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import type { Chapter, ChapterVersion, Project } from "@inkshadow/domain";
 import { parseUuidV7 as parseDomainUuid } from "@inkshadow/domain";
 import {
@@ -54,8 +63,17 @@ import {
 } from "@inkshadow/ui";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
+import {
+  captureMountedComponentPath,
+  useComponentOwnershipPath,
+} from "../components/component-ownership-context";
 import { useWritingExperience } from "../hooks/use-writing-experience";
 import { projectOrdinaryUiError } from "../infrastructure/ui-error";
+import {
+  recordProjectAreaReadIncident,
+  recoverUiRouteIncident,
+  type ProjectAreaReadStage,
+} from "../infrastructure/ui-route-diagnostics";
 import { useRuntime } from "../runtime-context";
 import { WritingPreferencesPanel } from "../components/writing-preferences-panel";
 import { NovelSkillPanel } from "../components/novel-skill-panel";
@@ -76,6 +94,53 @@ const MEMORY_LEVEL_OPTIONS = MEMORY_LEVELS.map((level) => ({
 
 const PRIMARY_GOVERNANCE_TABS = ["characters", "world", "memory", "preferences"] as const;
 const WORLD_SECTION_ORDER = ["location", "rule", "organization", "other"] as const;
+
+function EvidenceDisclosure({
+  label,
+  children,
+  className = "",
+}: Readonly<{
+  label: string;
+  children: ReactNode;
+  className?: string;
+}>) {
+  const [open, setOpen] = useState(false);
+  const disclosureId = useId();
+  const triggerId = `${disclosureId}-trigger`;
+  const regionId = `${disclosureId}-region`;
+  const currentLabel = open
+    ? label.startsWith("查看")
+      ? `收起${label.slice("查看".length)}`
+      : `收起${label}`
+    : label;
+  const regionLabel = label.startsWith("查看") ? label.slice("查看".length) : label;
+
+  return (
+    <div className={["story-evidence-disclosure", className].filter(Boolean).join(" ")}>
+      <Button
+        id={triggerId}
+        className="story-evidence-disclosure__trigger"
+        size="sm"
+        variant="ghost"
+        aria-expanded={open}
+        aria-controls={regionId}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {currentLabel}
+      </Button>
+      {open && (
+        <div
+          id={regionId}
+          className="story-evidence-disclosure__region"
+          role="region"
+          aria-label={regionLabel}
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const FACT_TYPE_OPTIONS = [
   { value: "character_identity", label: "人物身份" },
@@ -115,6 +180,8 @@ export function StoryGovernancePage() {
   const navigate = useNavigate();
   const params = useParams<{ projectId: string }>();
   const projectIdParameter = params.projectId ?? "";
+  const diagnosticRoute = `/projects/${projectIdParameter}/story`;
+  const componentOwnershipPath = useComponentOwnershipPath("StoryGovernancePage");
   const domainProjectId = useMemo(() => parseDomainUuid(projectIdParameter), [projectIdParameter]);
   const storyProjectId = useMemo(() => parseStoryUuid(projectIdParameter), [projectIdParameter]);
   const identifierError = !domainProjectId.ok
@@ -197,9 +264,79 @@ export function StoryGovernancePage() {
   const [mergeOperationId, setMergeOperationId] = useState<string | null>(null);
   const [aliasResolutionFactId, setAliasResolutionFactId] = useState<string | null>(null);
   const [aliasResolutionChoice, setAliasResolutionChoice] = useState("");
+  const loadSequence = useRef(0);
+  const routeIdentityRef = useRef(diagnosticRoute);
+  useLayoutEffect(() => {
+    routeIdentityRef.current = diagnosticRoute;
+    loadSequence.current += 1;
+    return () => {
+      routeIdentityRef.current = "";
+      loadSequence.current += 1;
+    };
+  }, [diagnosticRoute]);
+
+  const activeLoadIncident = useRef<Readonly<{ id: string; route: string }> | null>(null);
+  const [loadSupportId, setLoadSupportId] = useState<string | null>(null);
+  const activeDerivedIncident = useRef<Readonly<{ id: string; route: string }> | null>(null);
+  const [derivedSupportId, setDerivedSupportId] = useState<string | null>(null);
+  const [unavailableDerivedSections, setUnavailableDerivedSections] = useState<readonly string[]>(
+    [],
+  );
+
+  const recordLoadFailure = useCallback(
+    (readStage: ProjectAreaReadStage, cause: unknown, reasonCodeChain: readonly string[]) => {
+      const incident = recordProjectAreaReadIncident(runtime, {
+        route: diagnosticRoute,
+        readStage,
+        cause,
+        timestamp: runtime.clock.now(),
+        componentName: "StoryGovernancePage",
+        reasonCodeChain,
+        componentStack: captureMountedComponentPath(componentOwnershipPath),
+      });
+      activeLoadIncident.current = { id: incident.diagnosticId, route: diagnosticRoute };
+      setLoadSupportId(incident.diagnosticId);
+    },
+    [componentOwnershipPath, diagnosticRoute, runtime],
+  );
+  const recordDerivedFailure = useCallback(
+    (cause: unknown) => {
+      const incident = recordProjectAreaReadIncident(runtime, {
+        route: diagnosticRoute,
+        readStage: "story_governance",
+        cause,
+        timestamp: runtime.clock.now(),
+        componentName: "StoryGovernancePage",
+        reasonCodeChain: ["REPOSITORY_ERROR"],
+        componentStack: captureMountedComponentPath(componentOwnershipPath),
+      });
+      activeDerivedIncident.current = {
+        id: incident.diagnosticId,
+        route: diagnosticRoute,
+      };
+      setDerivedSupportId(incident.diagnosticId);
+    },
+    [componentOwnershipPath, diagnosticRoute, runtime],
+  );
 
   const load = useCallback(async () => {
+    const expectedRoute = diagnosticRoute;
+    if (routeIdentityRef.current !== expectedRoute) return;
+    const requestSequence = loadSequence.current + 1;
+    loadSequence.current = requestSequence;
+    const isCurrentLoad = (): boolean =>
+      loadSequence.current === requestSequence && routeIdentityRef.current === expectedRoute;
+    setLoadSupportId(null);
+    setUnavailableDerivedSections([]);
     if (!domainProjectId.ok || !storyProjectId.ok) {
+      const cause = identifierError ?? new Error("项目编号不可用");
+      recordLoadFailure("route_identity", cause, ["INVALID_UUID"]);
+      setProject(null);
+      setRecords([]);
+      setFacts([]);
+      setMemories([]);
+      setChapters([]);
+      setError(cause);
       setPageState("fatal_error");
       return;
     }
@@ -230,26 +367,26 @@ export function StoryGovernancePage() {
       runtime.story.extractionItems.listByProjectId(storyProjectId.value),
       runtime.story.consistencyItems.listByProjectId(storyProjectId.value),
     ]);
+    if (!isCurrentLoad()) return;
     const failed = [
-      projectResult,
-      factResult,
-      recordResult,
-      policyResult,
-      memoryResult,
-      memoryPromotionResult,
-      branchResult,
-      draftResult,
-      chapterResult,
-      extractionResult,
-      consistencyResult,
-    ].find((result) => !result.ok);
+      { result: projectResult, readStage: "project" as const },
+      { result: factResult, readStage: "story_governance" as const },
+      { result: recordResult, readStage: "story_governance" as const },
+      { result: policyResult, readStage: "story_governance" as const },
+      { result: memoryResult, readStage: "story_governance" as const },
+      { result: chapterResult, readStage: "chapter_list" as const },
+    ].find(({ result }) => !result.ok);
     if (failed !== undefined) {
-      setError(failed.error);
+      if (failed.result.ok) return;
+      recordLoadFailure(failed.readStage, failed.result.error, ["REPOSITORY_ERROR"]);
+      setError(failed.result.error);
       setPageState("fatal_error");
       return;
     }
     if (!projectResult.ok || projectResult.value === null) {
-      setError(new Error("项目不存在"));
+      const cause = Object.assign(new Error("项目不存在"), { code: "PROJECT_NOT_FOUND" });
+      recordLoadFailure("project", cause, ["PROJECT_NOT_FOUND"]);
+      setError(cause);
       setPageState("fatal_error");
       return;
     }
@@ -258,14 +395,25 @@ export function StoryGovernancePage() {
       !factResult.ok ||
       !policyResult.ok ||
       !memoryResult.ok ||
-      !memoryPromotionResult.ok ||
-      !branchResult.ok ||
-      !draftResult.ok ||
-      !chapterResult.ok ||
-      !extractionResult.ok ||
-      !consistencyResult.ok
+      !chapterResult.ok
     ) {
       return;
+    }
+    const derivedFailures: Readonly<{ section: string; cause: unknown }>[] = [];
+    if (!memoryPromotionResult.ok) {
+      derivedFailures.push({ section: "旧记忆整理", cause: memoryPromotionResult.error });
+    }
+    if (!branchResult.ok) {
+      derivedFailures.push({ section: "旧版试演记录", cause: branchResult.error });
+    }
+    if (!draftResult.ok) {
+      derivedFailures.push({ section: "规划草稿", cause: draftResult.error });
+    }
+    if (!extractionResult.ok) {
+      derivedFailures.push({ section: "待确认设定", cause: extractionResult.error });
+    }
+    if (!consistencyResult.ok) {
+      derivedFailures.push({ section: "一致性审查", cause: consistencyResult.error });
     }
     const sourceVersionIds = Array.from(
       new Set(
@@ -276,41 +424,85 @@ export function StoryGovernancePage() {
           .map(String),
       ),
     );
+    let sourceVersionFailure: unknown = null;
     const loadedSourceVersions = (
       await Promise.all(
         sourceVersionIds.map(async (versionId) => {
           const parsed = parseDomainUuid(versionId);
-          if (!parsed.ok) return null;
+          if (!parsed.ok) {
+            sourceVersionFailure ??= parsed.error;
+            return null;
+          }
           const found = await runtime.repositories.chapterVersions.findVersionById(parsed.value);
-          return found.ok ? found.value : null;
+          if (!found.ok) {
+            sourceVersionFailure ??= found.error;
+            return null;
+          }
+          if (found.value === null) {
+            sourceVersionFailure ??= new Error("设定原文对应的不可变版本不存在");
+          }
+          return found.value;
         }),
       )
     ).filter((version): version is ChapterVersion => version !== null);
+    if (sourceVersionFailure !== null) {
+      derivedFailures.push({ section: "设定原文版本", cause: sourceVersionFailure });
+    }
+    if (!isCurrentLoad()) return;
     setProject(projectResult.value);
     setFacts(factResult.value);
     setRecords(recordResult.value);
     setPolicy(policyResult.value);
     setMemories(memoryResult.value);
-    setMemoryPromotionPreviews(memoryPromotionResult.value);
-    setWhatIfBranches(branchResult.value);
-    setOutlineDrafts(draftResult.value);
+    setMemoryPromotionPreviews(memoryPromotionResult.ok ? memoryPromotionResult.value : []);
+    setWhatIfBranches(branchResult.ok ? branchResult.value : []);
+    setOutlineDrafts(draftResult.ok ? draftResult.value : []);
     setChapters(chapterResult.value);
     setSourceVersions(loadedSourceVersions);
-    setExtractionItems(extractionResult.value);
-    setConsistencyItems(consistencyResult.value);
+    setExtractionItems(extractionResult.ok ? extractionResult.value : []);
+    setConsistencyItems(consistencyResult.ok ? consistencyResult.value : []);
     try {
-      setContinuousStateDashboard(
-        await runtime.story.continuousState.inspectProject(projectIdParameter),
-      );
-    } catch {
+      const dashboard = await runtime.story.continuousState.inspectProject(projectIdParameter);
+      if (!isCurrentLoad()) return;
+      setContinuousStateDashboard(dashboard);
+    } catch (cause: unknown) {
+      if (!isCurrentLoad()) return;
       setContinuousStateDashboard(null);
+      derivedFailures.push({ section: "连续故事状态", cause });
+    }
+    const unavailableSections = derivedFailures.map(({ section }) => section);
+    setUnavailableDerivedSections(unavailableSections);
+    if (derivedFailures.length > 0) {
+      recordDerivedFailure(derivedFailures[0]?.cause);
+    } else {
+      if (activeDerivedIncident.current?.route === diagnosticRoute) {
+        recoverUiRouteIncident(runtime, activeDerivedIncident.current.id, runtime.clock.now());
+        activeDerivedIncident.current = null;
+      }
+      setDerivedSupportId(null);
+    }
+    if (activeLoadIncident.current?.route === diagnosticRoute) {
+      recoverUiRouteIncident(runtime, activeLoadIncident.current.id, runtime.clock.now());
+      activeLoadIncident.current = null;
     }
     setError(null);
     setPageState("ready");
-  }, [domainProjectId, projectIdParameter, runtime, storyProjectId]);
+  }, [
+    diagnosticRoute,
+    domainProjectId,
+    identifierError,
+    projectIdParameter,
+    recordLoadFailure,
+    recordDerivedFailure,
+    runtime,
+    storyProjectId,
+  ]);
 
   useEffect(() => {
     void Promise.resolve().then(load);
+    return () => {
+      loadSequence.current += 1;
+    };
   }, [load]);
 
   const readonly = project?.status !== "active";
@@ -1424,6 +1616,18 @@ export function StoryGovernancePage() {
           />
         )}
 
+        {unavailableDerivedSections.length > 0 && (
+          <InlineAlert
+            tone="warning"
+            title="部分附属资料暂不可用"
+            description={`以下附属资料没有读取成功：${unavailableDerivedSections.join(
+              "、",
+            )}。已有正式设定仍可查看；这些记录没有被删除。请稍后重试。${
+              derivedSupportId === null ? "" : ` 支持编号：${derivedSupportId}。`
+            }`}
+          />
+        )}
+
         {normalizedError !== null && pageState !== "fatal_error" && (
           <InlineAlert
             tone="error"
@@ -1450,7 +1654,9 @@ export function StoryGovernancePage() {
               normalizedError === null ? undefined : (
                 <ErrorState
                   title={normalizedError.title}
-                  description={normalizedError.description}
+                  description={`${normalizedError.description}${
+                    loadSupportId === null ? "" : ` 支持编号：${loadSupportId}。`
+                  }`}
                   primaryAction={{ label: "重试", onClick: () => void load() }}
                 />
               ),
@@ -1501,8 +1707,10 @@ export function StoryGovernancePage() {
                       </CardHeader>
                       <CardContent>
                         <p className="story-governance-copy">{storyFactContent(snapshot)}</p>
-                        <details className="story-governance-evidence">
-                          <summary>查看原文依据</summary>
+                        <EvidenceDisclosure
+                          className="story-governance-evidence"
+                          label="查看原文依据"
+                        >
                           <dl>
                             <div>
                               <dt>来源章节</dt>
@@ -1518,7 +1726,7 @@ export function StoryGovernancePage() {
                             </div>
                           </dl>
                           <blockquote>{snapshot.source.excerpt ?? "原文片段暂不可用"}</blockquote>
-                        </details>
+                        </EvidenceDisclosure>
                       </CardContent>
                       <CardFooter>
                         <Button
@@ -1614,12 +1822,11 @@ export function StoryGovernancePage() {
                             结构化设定暂不支持直接改文字。你仍可查看证据、固定，或删除后恢复。
                           </p>
                         )}
-                        <details>
-                          <summary>查看证据</summary>
+                        <EvidenceDisclosure label="查看证据">
                           <blockquote className="story-source-quote">
                             {snapshot.source.excerpt ?? "这条设定没有可显示的原文片段。"}
                           </blockquote>
-                        </details>
+                        </EvidenceDisclosure>
                       </CardContent>
                       <CardFooter>
                         {needsCheck ? (
@@ -2004,6 +2211,18 @@ export function StoryGovernancePage() {
         description="一次识别会把最新一章完整正文分别发送给人物提取和世界设定提取，最多两次模型服务调用并可能产生两次费用。当前页面还不能在发送前持久展示精确模型服务、精确模型并把不确定结果锁定为不可重发，因此入口保持停用；正文和已有设定不受影响。"
       />
 
+      {unavailableDerivedSections.length > 0 && (
+        <InlineAlert
+          tone="warning"
+          title="部分附属资料暂不可用"
+          description={`以下附属资料没有读取成功：${unavailableDerivedSections.join(
+            "、",
+          )}。已有正式设定仍可查看；这些记录没有被删除。请稍后重试。${
+            derivedSupportId === null ? "" : ` 支持编号：${derivedSupportId}。`
+          }`}
+        />
+      )}
+
       {normalizedError !== null && pageState !== "fatal_error" && (
         <InlineAlert
           tone="error"
@@ -2030,7 +2249,9 @@ export function StoryGovernancePage() {
             normalizedError === null ? undefined : (
               <ErrorState
                 title={normalizedError.title}
-                description={normalizedError.description}
+                description={`${normalizedError.description}${
+                  loadSupportId === null ? "" : ` 支持编号：${loadSupportId}。`
+                }`}
                 primaryAction={{ label: "重试", onClick: () => void load() }}
               />
             ),

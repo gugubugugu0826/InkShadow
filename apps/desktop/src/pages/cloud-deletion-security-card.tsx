@@ -278,7 +278,7 @@ export function CloudDeletionSecurityCard({
         <CardHeader>
           <div className="card-heading-row">
             <div>
-              <CardTitle>永久删除云端数据（L3）</CardTitle>
+              <CardTitle>永久删除云端数据</CardTitle>
               <CardDescription>
                 这是独立于“关闭云同步”和“删除本地项目”的高风险流程，所有提交都有持久化回执和可审计宽限期。
               </CardDescription>
@@ -329,7 +329,7 @@ export function CloudDeletionSecurityCard({
                 <InlineAlert
                   tone="warning"
                   title="发现未完成的项目删除提交"
-                  description="重新输入密码后会复用原 confirmation ID、请求摘要和幂等键，不会创建第二个删除计划。"
+                  description="重新输入密码后会继续核对并恢复同一次删除申请，不会创建第二份申请。"
                 />
               )}
               {projectJournal !== null && projectReceipt !== null && (
@@ -388,7 +388,7 @@ export function CloudDeletionSecurityCard({
                 <InlineAlert
                   tone="warning"
                   title="发现未完成的账户删除提交"
-                  description="本机已保存原 confirmation ID、请求摘要和幂等键；若云会话已失效，可直接用邮箱和密码恢复服务端回执。密码不会从本机恢复或持久化。"
+                  description="本机已保存恢复同一次删除申请所需的安全记录；若云会话已失效，可直接用邮箱和密码恢复服务端回执。密码不会从本机恢复或持久化。"
                 />
               )}
               {accountJournal !== null && accountReceipt !== null && (
@@ -715,7 +715,7 @@ function DeletionReceiptFacts({ journal }: { readonly journal: CloudDeletionJour
         </div>
         <div>
           <dt>当前阶段</dt>
-          <dd>{receipt.phase}</dd>
+          <dd>{deletionPhaseLabel(receipt.phase)}</dd>
         </div>
         <div>
           <dt>宽限期截止</dt>
@@ -780,6 +780,30 @@ function deletionStateLabel(state: string | undefined): string {
   }
 }
 
+function deletionPhaseLabel(phase: string | undefined): string {
+  switch (phase) {
+    case "freeze":
+      return "冻结云端变更";
+    case "derived":
+      return "清理可再生资料";
+    case "ciphertext":
+      return "清理加密内容";
+    case "keys":
+      return "清理密钥";
+    case "access":
+      return "撤销访问";
+    case "marker":
+      return "写入删除标记";
+    case "verify":
+      return "核验清理结果";
+    case "backup_wait":
+      return "等待备份保留期";
+    case "complete":
+      return "清理完成";
+    default:
+      return "正在处理";
+  }
+}
 function deletionTone(state: string | undefined): "danger" | "neutral" | "success" | "warning" {
   switch (state) {
     case "grace_period":

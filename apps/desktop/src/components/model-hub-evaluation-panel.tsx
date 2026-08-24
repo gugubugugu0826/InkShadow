@@ -120,7 +120,7 @@ export function ModelHubEvaluationPanel({
                 确认并运行 2 次固定测试
               </Button>
               <Button variant="ghost" disabled={busy} onClick={() => setDisclosure(null)}>
-                取消，不调用
+                取消，不发送
               </Button>
             </div>
           </section>

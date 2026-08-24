@@ -34,11 +34,11 @@ describe("StudioUsagePage", () => {
     expect((await screen.findAllByText("已达到 80% 预警线")).length).toBeGreaterThan(0);
     expect(screen.getByText("已回收过期并发占位")).toBeInTheDocument();
     expect(screen.getAllByText("aud-2026-07").length).toBeGreaterThan(0);
-    expect(screen.getByText("最近用量账本")).toBeInTheDocument();
+    expect(screen.getByText("最近用量记录")).toBeInTheDocument();
     expect(
       screen.getByText("本次读取回收了 1 个过期租约，额度已归还到其创建月份。"),
     ).toBeInTheDocument();
-    expect(screen.getByText(/墨影内部的内容额度\s*与价格元数据额度账本/u)).toBeInTheDocument();
+    expect(screen.getByText(/记录墨影内部的内容用量和费用估算信息/u)).toBeInTheDocument();
     expect(
       screen.getByText("实际收费以模型供应商账单为准；当前版本尚未实现供应商侧权威账单对账。"),
     ).toBeInTheDocument();
@@ -171,6 +171,9 @@ describe("StudioUsagePage", () => {
       expect(await screen.findByText("无法读取智能创作用量")).toBeVisible();
       expect(screen.queryByText(rawMessage)).not.toBeInTheDocument();
       expect(screen.getByText(projectedDescription)).toBeVisible();
+      expect(document.body).not.toHaveTextContent("CLOUD_PROTOCOL_INVALID_RESPONSE");
+      expect(document.body).not.toHaveTextContent("AI_USAGE_UI_ERROR");
+      expect(document.body).not.toHaveTextContent("HTTP 502");
     },
   );
 });

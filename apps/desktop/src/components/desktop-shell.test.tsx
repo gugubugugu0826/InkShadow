@@ -137,7 +137,7 @@ describe("DesktopShell", () => {
       "href",
       "/tasks",
     );
-    expect(within(toolNavigation).getByRole("link", { name: "调用与费用" })).toHaveAttribute(
+    expect(within(toolNavigation).getByRole("link", { name: "模型使用与费用" })).toHaveAttribute(
       "href",
       "/usage",
     );
@@ -183,7 +183,7 @@ describe("DesktopShell", () => {
     expect(screen.queryByLabelText("工具导航")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "搜索页面与命令" })).not.toBeInTheDocument();
     expect(screen.queryByText("任务与通知")).not.toBeInTheDocument();
-    expect(screen.queryByText("调用与费用")).not.toBeInTheDocument();
+    expect(screen.queryByText("模型使用与费用")).not.toBeInTheDocument();
     expect(screen.queryByText("模型中心")).not.toBeInTheDocument();
     expect(screen.queryByText("网络可用")).not.toBeInTheDocument();
 

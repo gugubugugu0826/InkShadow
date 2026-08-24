@@ -2,7 +2,7 @@
 
 > 基于源码快照：2026-08-23  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 应用清单版本：`0.2.9`；最新公开版本：[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)（未签名工程预发行）；候选与标签解析提交均为 `cb97876894d6f02c4c901745c95533da7b0260fe`；设计基线：`DESIGN v0.3.1b`  
+> 应用清单版本：`0.2.10`（未签名人工复测候选；未打标签、未发布）；最新公开版本：[`v0.2.9`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.9)（未签名工程预发行），发布来源提交 `54d9647031bb97b4fc9f021d3b1acca7f6d25c47`；设计基线：`DESIGN v0.3.1b`  
 > 下方 `v0.2.5` 冻结来源提交：`5b3e212cafde10cd75fa87b7b74bfdfff9347a3d`；标签对象：`51dfd64ba22e9771131f251cdc778ee06f89192d`  
 > 本文记录当前代码接口；它不代表所有云能力已部署或已开放
 

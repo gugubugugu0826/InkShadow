@@ -7,6 +7,7 @@ import {
   Route,
   RouterProvider,
   Routes,
+  useParams,
 } from "react-router-dom";
 import { EmptyState, ToastProvider } from "@inkshadow/ui";
 
@@ -110,6 +111,26 @@ const UsageCenterPage = lazy(() =>
 const WorkspacePage = lazy(() =>
   import("./pages/workspace-page").then(({ WorkspacePage: Page }) => ({ default: Page })),
 );
+
+function WorkspaceRouteElement() {
+  const { projectId = "" } = useParams<{ projectId: string }>();
+  return <WorkspacePage key={projectId} />;
+}
+
+function StoryOutlineRouteElement() {
+  const { projectId = "" } = useParams<{ projectId: string }>();
+  return <StoryOutlinePage key={projectId} />;
+}
+
+function StoryGovernanceRouteElement() {
+  const { projectId = "" } = useParams<{ projectId: string }>();
+  return <StoryGovernancePage key={projectId} />;
+}
+
+function ProjectChecksRouteElement() {
+  const { projectId = "" } = useParams<{ projectId: string }>();
+  return <ProjectChecksPage key={projectId} />;
+}
 const StartPage = lazy(() =>
   import("./pages/start-page").then(({ StartPage: Page }) => ({ default: Page })),
 );
@@ -261,8 +282,8 @@ function PersonalUsageRoute() {
       <div className="desktop-page">
         <EmptyState
           kind="feature_limited"
-          title="调用账本只在桌面版读取"
-          description="浏览器开发模式不会伪造调用记录、内容额度或费用数据。请在墨影桌面版中打开此页面；正文与本地创作不受影响。"
+          title="费用记录只在桌面版读取"
+          description="浏览器开发模式不会伪造服务请求、内容额度或费用数据。请在墨影桌面版中打开此页面；正文与本地创作不受影响。"
           primaryAction={{
             label: "返回创作首页",
             onClick: () => {
@@ -339,7 +360,7 @@ export function DesktopRoutes() {
             <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/ideation" element={<IdeationPage />} />
             <Route path="/marketplace" element={<MarketplaceRoutePage />} />
-            <Route path="/projects/:projectId" element={<WorkspacePage />} />
+            <Route path="/projects/:projectId" element={<WorkspaceRouteElement />} />
             <Route path="/projects/:projectId/search" element={<ProjectSearchPage />} />
             <Route path="/projects/:projectId/graph" element={<ProjectGraphRoutePage />} />
             <Route
@@ -347,9 +368,9 @@ export function DesktopRoutes() {
               element={<AuthoritativeExtractionRoutePage />}
             />
             <Route path="/projects/:projectId/materials" element={<ProjectMaterialsPage />} />
-            <Route path="/projects/:projectId/outline" element={<StoryOutlinePage />} />
-            <Route path="/projects/:projectId/story" element={<StoryGovernancePage />} />
-            <Route path="/projects/:projectId/checks" element={<ProjectChecksPage />} />
+            <Route path="/projects/:projectId/outline" element={<StoryOutlineRouteElement />} />
+            <Route path="/projects/:projectId/story" element={<StoryGovernanceRouteElement />} />
+            <Route path="/projects/:projectId/checks" element={<ProjectChecksRouteElement />} />
             <Route path="/projects/:projectId/context" element={<ContextSourcesPage />} />
             <Route path="/projects/:projectId/sync" element={<ProjectSyncRoutePage />} />
             <Route

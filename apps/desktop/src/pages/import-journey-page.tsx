@@ -492,7 +492,7 @@ export function ImportJourneyPage() {
     } catch {
       throw new PendingRequestPersistenceError(
         "IMPORT_PENDING_REQUEST_PERSIST_FAILED",
-        "无法在模型调用前保存本机请求凭据，本次调用已在发送 0 字时停止。请检查本机存储空间或权限后重试。",
+        "无法在向模型发送前保存本机请求信息，本次在发送 0 字时停止。请检查本机存储空间或权限后重试。",
       );
     }
     setPendingRequest(pending);
@@ -511,7 +511,7 @@ export function ImportJourneyPage() {
         normalizeUiError(
           new PendingRequestPersistenceError(
             "IMPORT_PENDING_REQUEST_CLEAR_FAILED",
-            "模型结果已经处理，但本机未能清除请求恢复标记。墨影不会自动重复调用；请释放存储空间后重新打开页面。",
+            "模型结果已经处理，但本机未能清除请求恢复标记。墨影不会自动再次发送；请释放存储空间后重新打开页面。",
           ),
         ),
       );
@@ -575,7 +575,7 @@ export function ImportJourneyPage() {
         trial: restoredPointer,
         updatedAt: new Date().toISOString(),
       }),
-      "旧试改建议发生并发变化，且恢复指针无法写入本机存储。已保留当前页面和请求恢复标记，请不要再次调用模型。",
+      "旧试改建议发生并发变化，且恢复指针无法写入本机存储。已保留当前页面和请求恢复标记，请不要再次向模型发送。",
     );
     const restoredView = await loadTrialView(runtime, restoredPointer);
     setTrialView(restoredView);
@@ -1006,7 +1006,7 @@ export function ImportJourneyPage() {
     setOperation("idle");
     setNotice(
       persistenceFailed
-        ? "批次状态无法写入本机存储，已停止继续调用模型；当前页面仍保留已生成建议，请先处理后再关闭。"
+        ? "批次状态无法写入本机存储，已停止继续向模型发送；当前页面仍保留已生成建议，请先处理后再关闭。"
         : "逐章处理已结束。成功的章节都有各自的 AI 建议版本；失败章节的原文没有改变，可单独重试。",
     );
   }
@@ -1076,7 +1076,7 @@ export function ImportJourneyPage() {
   ): void {
     commitJourneyDraftDurably(
       update,
-      "无法把逐章建议的修订号写入本机存储。已停止继续调用模型，请先处理当前建议后再关闭页面。",
+      "无法把逐章建议的修订号写入本机存储。已停止继续向模型发送，请先处理当前建议后再关闭页面。",
     );
   }
 
@@ -1548,8 +1548,8 @@ export function ImportJourneyPage() {
       {pendingRequest !== null && operation === "idle" && (
         <InlineAlert
           tone="warning"
-          title="上次模型调用可能在中断前已发送"
-          description="上次请求可能已经到达已配置的供应商。墨影不会自动重复调用或重复计费；请先查看供应商记录，再决定是否继续处理已有建议。"
+          title="上次请求可能在中断前已经发出"
+          description="上次请求可能已经到达已配置的服务商。墨影不会自动再次发送或重复计费；请先查看服务商后台记录，再决定是否继续处理已有建议。"
         />
       )}
 
@@ -1605,7 +1605,7 @@ export function ImportJourneyPage() {
               <InlineAlert
                 tone="warning"
                 title="批量 AI 作品分析已安全关闭"
-                description="当前入口无法在发送前一次性准确展示整批任务的模型、分块调用上限、总费用与隐私去向，因此不会发送任何正文。章节结构分析和本地导入仍可正常使用；你可以跳过这一步继续。"
+                description="当前入口无法在发送前一次性准确展示整批任务的模型、分块发送次数上限、总费用与隐私去向，因此不会发送任何正文。章节结构分析和本地导入仍可正常使用；你可以跳过这一步继续。"
               />
               <div className="settings-actions">
                 <Button disabled>批量 AI 分析暂不可用</Button>
@@ -1956,7 +1956,7 @@ export function ImportJourneyPage() {
               <InlineAlert
                 tone="warning"
                 title="新的逐章改写已安全关闭"
-                description="当前旧入口不能在发送前准确锁定并展示整批模型、总调用上限、总费用和隐私去向，因此不会发送。已有建议仍可逐章接受、拒绝或恢复原文。"
+                description="当前旧入口不能在发送前准确锁定并展示整批模型、总发送次数上限、总费用和隐私去向，因此不会发送。已有建议仍可逐章接受、拒绝或恢复原文。"
               />
               <div className="settings-actions">
                 <Button disabled={!canStartBatch} onClick={() => void generateBatch()}>
@@ -2095,7 +2095,7 @@ function trialBlockedReason(
     return "导入作品没有含正文的章节，无法选择代表段落。";
   if (buildTargetInstructions(draft).length === 0) return "请先写一句处理目标或选择一个常用方向。";
   if (operation !== "idle") return "当前操作完成后即可继续。";
-  return "当前旧入口无法提供完整的调用与费用确认，因此不会发送新的模型请求。";
+  return "当前旧入口无法提供完整的发送次数与费用确认，因此不会发送新的模型请求。";
 }
 
 function isLegacyImportProviderGenerationAvailable(): boolean {
@@ -2303,7 +2303,7 @@ function requireBatchCandidateRevision(item: BatchItemDraft): number {
   if (item.candidateRevision === null) {
     throw new ImportJourneyError(
       "CANDIDATE_REVISION_MISSING",
-      "这份旧建议没有可验证的修订号，请先在差异页处理或移除它；墨影不会先调用模型。",
+      "这份旧建议没有可验证的修订号，请先在差异页处理或移除它；墨影不会先向模型发送内容。",
     );
   }
   return item.candidateRevision;

@@ -338,6 +338,11 @@ interface PreparedContinuationDirections {
   readonly authorityRevision: number;
 }
 
+interface DirectionFailureNotice {
+  readonly title: string;
+  readonly description: string;
+}
+
 function directGenerationUndoFromCurrentVersion(
   chapter: Chapter,
   versions: readonly ChapterVersion[],
@@ -451,6 +456,7 @@ function useCompactEditorLayout(): CompactEditorLayout {
 
 type StoryStateUpdateNotice =
   | Readonly<{ state: "idle" }>
+  | Readonly<{ state: "unavailable"; diagnosticId: string }>
   | Readonly<{
       state: "ready";
       detectedCount: number;
@@ -689,6 +695,7 @@ async function readEditorCandidates(
 function editorReadDiagnosticCode(stage: EditorReadStage): string {
   if (stage === "ai_candidates") return "LEGACY_CANDIDATE_METADATA_INVALID";
   if (stage === "chapter_versions") return "LEGACY_VERSION_METADATA_INVALID";
+  if (stage === "story_governance") return "PROJECT_AREA_READ_FAILED";
   return "EDITOR_AUTHORITY_READ_FAILED";
 }
 function chapterVersionDiagnosticReference(
@@ -845,7 +852,7 @@ export function EditorPage() {
   const [directionOptions, setDirectionOptions] = useState<readonly ContinuationDirectionOption[]>(
     [],
   );
-  const [directionError, setDirectionError] = useState<string | null>(null);
+  const [directionError, setDirectionError] = useState<DirectionFailureNotice | null>(null);
   const [customDirection, setCustomDirection] = useState("");
   const [directionBusy, setDirectionBusy] = useState(false);
   const [preparedDirections, setPreparedDirections] =
@@ -1706,20 +1713,31 @@ export function EditorPage() {
       void continuousState
         .inspectProject(projectId)
         .then((dashboard) => {
-          if (isCurrentLoad() && dashboard.detectedCount > 0) {
-            setStoryStateUpdate({
-              state: "ready",
-              detectedCount: dashboard.detectedCount,
-              needsConfirmationCount: dashboard.needsConfirmationCount,
-              reversibleCount: dashboard.reversibleCount,
-              skippedTaskCount: 0,
-            });
-          }
-        })
-        .catch(() => {
           if (!isCurrentLoad()) return;
-          // Story-state review is additive and must never block opening正文.
-          globalThis.console.error("[CONTINUOUS_STORY_STATE_DASHBOARD_FAILED]");
+          recoverEditorReadIncidents(runtime, {
+            projectId,
+            chapterId,
+            timestamp: runtime.clock.now(),
+            readStages: ["story_governance"],
+          });
+          setStoryStateUpdate(
+            dashboard.detectedCount > 0
+              ? {
+                  state: "ready",
+                  detectedCount: dashboard.detectedCount,
+                  needsConfirmationCount: dashboard.needsConfirmationCount,
+                  reversibleCount: dashboard.reversibleCount,
+                  skippedTaskCount: 0,
+                }
+              : { state: "idle" },
+          );
+        })
+        .catch((cause: unknown) => {
+          if (!isCurrentLoad()) return;
+          const incident = recordEditorReadFailure("story_governance", cause, {
+            reasonCodeChain: ["REPOSITORY_ERROR"],
+          });
+          setStoryStateUpdate({ state: "unavailable", diagnosticId: incident.diagnosticId });
         });
     }
   }, [
@@ -3061,6 +3079,52 @@ export function EditorPage() {
     }
   }
 
+  function reportDirectionFailure(
+    input: Readonly<{
+      stage: "prepare_disclosure" | "pre_dispatch_check" | "provider_dispatch" | "persist_result";
+      cause: unknown;
+      dispatched: boolean | "unknown";
+      description: string;
+    }>,
+  ): void {
+    const currentChapter = chapterRef.current;
+    const incident = recordSafeOperationIncident({
+      operation: "continuation",
+      stage: input.stage,
+      cause: input.cause,
+      projectId: currentChapter?.projectId ?? projectId,
+      chapterId: currentChapter?.id ?? chapterId,
+      requestId: preparedDirections?.plan.requestId ?? null,
+      dispatched: input.dispatched,
+    });
+    const stageLabel =
+      input.stage === "prepare_disclosure"
+        ? "准备发送信息"
+        : input.stage === "pre_dispatch_check"
+          ? "确认发送前的最后核对"
+          : input.stage === "provider_dispatch"
+            ? "等待创作服务返回"
+            : "整理已经收到的方向";
+    const sendSummary =
+      input.dispatched === false
+        ? "本次没有发送，自动重试为 0 次。"
+        : input.dispatched === true
+          ? "本次已经发送 1 次，自动重试为 0 次；请在服务使用记录中核对。"
+          : "目前无法确认本次是否已发送，系统不会自动重试；请查看服务使用记录。";
+    const title =
+      input.stage === "prepare_disclosure" || input.stage === "pre_dispatch_check"
+        ? "暂时无法准备方向"
+        : input.stage === "provider_dispatch"
+          ? "方向生成未完成"
+          : "收到的方向暂时无法使用";
+    setDirectionError(
+      Object.freeze({
+        title,
+        description: `${input.description} 当前阶段：${stageLabel}。${sendSummary}支持编号：${incident.supportId}。`,
+      }),
+    );
+  }
+
   async function prepareContinuationDirections(): Promise<void> {
     const stableChapter = chapterRef.current;
     const authorityAtStart = writingExperience.preference;
@@ -3092,7 +3156,15 @@ export function EditorPage() {
       });
       if (!isCurrentGenerationOperation(operation)) return;
       if (!plan.preflight.canStart) {
-        setDirectionError("当前创作服务未通过生成前检查，请先检查连接、隐私和费用设置。");
+        reportDirectionFailure({
+          stage: "prepare_disclosure",
+          cause:
+            plan.preflight.blockers[0] ??
+            new UiActionError("DIRECTION_PREFLIGHT_BLOCKED", "方向生成前检查未通过。"),
+          dispatched: false,
+          description:
+            "当前创作服务未通过生成前检查，请按页面提示检查模型分工、资料范围或隐私设置。",
+        });
         return;
       }
       const disclosure = await prepareContinuationGenerationDisclosure(runtime, plan);
@@ -3114,9 +3186,14 @@ export function EditorPage() {
         }),
       );
       setEditorNotice("方向生成信息已准备好；明确确认前不会调用 AI。");
-    } catch {
+    } catch (cause: unknown) {
       if (isCurrentGenerationOperation(operation)) {
-        setDirectionError("暂时无法准备方向");
+        reportDirectionFailure({
+          stage: "prepare_disclosure",
+          cause,
+          dispatched: false,
+          description: "本地资料或发送信息没有准备完成。你的自定义方向仍保留，可以重试。",
+        });
       }
     } finally {
       if (isCurrentGenerationOperation(operation)) {
@@ -3145,6 +3222,7 @@ export function EditorPage() {
     setDirectionBusy(true);
     setCandidateBusy(true);
     setDirectionError(null);
+    let executionRequested = false;
     try {
       const [authorityBeforeDispatch, currentChapterResult] = await Promise.all([
         runtime.writingExperience.getOrInitialize(),
@@ -3168,6 +3246,7 @@ export function EditorPage() {
       assertContinuationDisclosureMatches(pending.disclosure, currentDisclosure);
       if (!isCurrentGenerationOperation(operation)) return;
 
+      executionRequested = true;
       const result = await executeGenerationPlan(runtime, pending.plan, undefined, {
         generationRetryLimit: 0,
       });
@@ -3178,7 +3257,15 @@ export function EditorPage() {
       }
       if (!result.ok || generatedCandidate === null) {
         setPreparedDirections(null);
-        setDirectionError("暂时无法准备方向");
+        reportDirectionFailure({
+          stage: "provider_dispatch",
+          cause: result.ok
+            ? new UiActionError("DIRECTION_RESULT_MISSING", "创作服务没有返回可用的方向结果。")
+            : result.error,
+          dispatched: "unknown",
+          description:
+            "创作服务没有完成这组方向。你的自定义方向仍保留，可以先查看服务使用记录，再决定是否重试。",
+        });
         return;
       }
 
@@ -3211,7 +3298,17 @@ export function EditorPage() {
       ) {
         await rejectDirectionCandidateSafely(generatedCandidate);
         setPreparedDirections(null);
-        setDirectionError("暂时无法准备方向");
+        reportDirectionFailure({
+          stage: "persist_result",
+          cause: new UiActionError(
+            parsed.ok
+              ? "DIRECTION_RESULT_SCOPE_MISMATCH"
+              : `DIRECTION_RESPONSE_${parsed.reason.toUpperCase()}`,
+            "已经收到的内容无法安全整理为三个创作方向。",
+          ),
+          dispatched: true,
+          description: "已经收到的内容无法安全整理为三个创作方向；这份内容不会写入正文。",
+        });
         return;
       }
 
@@ -3226,10 +3323,17 @@ export function EditorPage() {
       ) {
         await rejectDirectionCandidateSafely(previousDirectionCandidate);
       }
-    } catch {
+    } catch (cause: unknown) {
       if (isCurrentGenerationOperation(operation)) {
         setPreparedDirections(null);
-        setDirectionError("方向生成信息已经变化，请重新查看后再试。");
+        reportDirectionFailure({
+          stage: executionRequested ? "provider_dispatch" : "pre_dispatch_check",
+          cause,
+          dispatched: executionRequested ? "unknown" : false,
+          description: executionRequested
+            ? "方向生成没有完成。请先查看服务使用记录，再决定是否重试。"
+            : "正文、写作方式或发送信息在确认前发生变化，请重新查看后再试。",
+        });
       }
     } finally {
       if (isCurrentGenerationOperation(operation)) {
@@ -5276,6 +5380,13 @@ export function EditorPage() {
                 </section>
               )}
 
+              {storyStateUpdate.state === "unavailable" && (
+                <InlineAlert
+                  tone="warning"
+                  title="连续故事状态暂不可用"
+                  description={`这项附属资料没有读取成功；正文和不可变版本仍可使用，也没有删除任何记录。请稍后重试。支持编号：${storyStateUpdate.diagnosticId}。`}
+                />
+              )}
               {!directMode && storyStateUpdate.state === "ready" && (
                 <InlineAlert
                   tone={storyStateUpdate.needsConfirmationCount > 0 ? "warning" : "info"}
@@ -5546,8 +5657,8 @@ export function EditorPage() {
                       {directionError !== null && (
                         <InlineAlert
                           tone="warning"
-                          title="暂时无法准备方向"
-                          description="你可以保留自定义方向继续写，或稍后重试。"
+                          title={directionError.title}
+                          description={directionError.description}
                         />
                       )}
                       {preparedDirections !== null && (
@@ -5557,7 +5668,7 @@ export function EditorPage() {
                           description={
                             preparedDirections.disclosure === null
                               ? "本次只在本机准备三个方向，不会发送给外部服务。明确确认后才会开始生成。"
-                              : `${preparedDirections.disclosure.connectionDisplayName} · ${preparedDirections.disclosure.modelId}；${preparedDirections.disclosure.privacy} 发送内容：${preparedDirections.disclosure.sends.join("；")}。本次最多调用 ${String(preparedDirections.disclosure.maximumProviderCalls)} 次，自动重试 ${String(preparedDirections.disclosure.automaticRetryCount)} 次；${formatProviderActionCost(preparedDirections.disclosure)}。`
+                              : `${preparedDirections.disclosure.connectionDisplayName} · ${preparedDirections.disclosure.modelId}；${preparedDirections.disclosure.privacy} 发送内容：${preparedDirections.disclosure.sends.join("；")}。本次最多向模型服务发送 ${String(preparedDirections.disclosure.maximumProviderCalls)} 次，自动重试 ${String(preparedDirections.disclosure.automaticRetryCount)} 次；${formatProviderActionCost(preparedDirections.disclosure)}。`
                           }
                         />
                       )}
@@ -5609,7 +5720,7 @@ export function EditorPage() {
                               );
                             }}
                           >
-                            取消，不调用
+                            取消，不发送
                           </Button>
                         </div>
                       )}
@@ -5706,7 +5817,7 @@ export function EditorPage() {
                           <InlineAlert
                             tone="warning"
                             title={`确认本次${selectionRewriteActionLabel(lastGenerationAction)}`}
-                            description={`${selectionRewriteDisclosure.connectionDisplayName} · ${selectionRewriteDisclosure.modelId}；${selectionRewriteDisclosure.privacy} 发送内容：${selectionRewriteDisclosure.sends.join("；")}。本次最多调用 1 次，自动重试 0 次；${formatSelectionRewriteCost(selectionRewriteDisclosure)}。`}
+                            description={`${selectionRewriteDisclosure.connectionDisplayName} · ${selectionRewriteDisclosure.modelId}；${selectionRewriteDisclosure.privacy} 发送内容：${selectionRewriteDisclosure.sends.join("；")}。本次最多向模型服务发送 1 次，自动重试 0 次；${formatSelectionRewriteCost(selectionRewriteDisclosure)}。`}
                           />
                           <Button
                             variant="ai-primary"
@@ -5733,7 +5844,7 @@ export function EditorPage() {
                               );
                             }}
                           >
-                            取消，不调用
+                            取消，不发送
                           </Button>
                         </>
                       )}
@@ -5907,7 +6018,7 @@ export function EditorPage() {
                       {selectionRewriteDisclosure !== null && (
                         <InlineAlert
                           tone="warning"
-                          title="确认后会调用 1 次"
+                          title="确认后会发送 1 次"
                           description={`${selectionRewriteDisclosure.connectionDisplayName} · ${selectionRewriteDisclosure.modelId}；${selectionRewriteDisclosure.privacy} 发送内容：${selectionRewriteDisclosure.sends.join("；")}。自动重试 0 次；${formatSelectionRewriteCost(selectionRewriteDisclosure)}。`}
                           onDismiss={cancelSelectionRewriteDisclosure}
                         />
@@ -5933,7 +6044,7 @@ export function EditorPage() {
                           disabled={selectionRewriteBusy}
                           onClick={cancelSelectionRewriteDisclosure}
                         >
-                          取消，不调用
+                          取消，不发送
                         </Button>
                       )}
                     </section>
@@ -6807,13 +6918,13 @@ export function EditorPage() {
               <InlineAlert
                 tone="info"
                 title="已记住本次会话的相同确认"
-                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 资料范围：${continuationDisclosure.sentScopeLabel}。本次最多调用 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。系统不会静默发送，请核对后点击“按本次摘要开始”。`}
+                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 资料范围：${continuationDisclosure.sentScopeLabel}。本次最多向模型服务发送 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。系统不会静默发送，请核对后点击“按本次摘要开始”。`}
               />
             ) : (
               <InlineAlert
                 tone="warning"
                 title="确认本次模型服务调用"
-                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 发送内容：${continuationDisclosure.sends.join("；")}。本次最多调用 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。这次确认只适用于当前正文版本与本次生成计划；任一项变化都会停止发送并要求重新确认。完整结果只会保存为隔离的${directMode ? "创作结果" : " AI 建议草稿"}，正文和版本保持不变，直到你明确选择使用。`}
+                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 发送内容：${continuationDisclosure.sends.join("；")}。本次最多向模型服务发送 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。这次确认只适用于当前正文版本与本次生成计划；任一项变化都会停止发送并要求重新确认。完整结果只会保存为隔离的${directMode ? "创作结果" : " AI 建议草稿"}，正文和版本保持不变，直到你明确选择使用。`}
               />
             )}
             {continuationDisclosure !== null && !continuationConfirmationIsRemembered && (

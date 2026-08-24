@@ -542,7 +542,7 @@ function OpenQuickAiConnectionDrawer({
           <InlineAlert
             tone="info"
             title="连接成功 · 已找到模型"
-            description={`连接和模型目录检查已完成，共找到 ${String(result.catalog.length)} 个可用模型；这一步没有发送作品内容，也没有调用模型生成。选择“让 AI 起个头”后，墨影会先展示固定验证的精确范围。`}
+            description={`连接和模型目录检查已完成，共找到 ${String(result.catalog.length)} 个可用模型；这一步没有发送作品内容，也没有向模型发送生成请求。选择“让 AI 起个头”后，墨影会先展示固定验证的精确范围。`}
           />
           <FormField label="开书使用的模型" required>
             {(fieldProps) => (
@@ -562,7 +562,7 @@ function OpenQuickAiConnectionDrawer({
             {(
               [
                 ["ai", "让 AI 起个头", "验证所选模型并用于这次开书"],
-                ["self", "我自己写", "不调用模型，进入空白创建"],
+                ["self", "我自己写", "不向模型发送内容，进入空白创建"],
                 ["sample", "先看看示例", "使用明确标注的本地示例，不发送灵感"],
               ] as const
             ).map(([value, label, description]) => (
@@ -589,7 +589,7 @@ function OpenQuickAiConnectionDrawer({
             <InlineAlert
               tone="warning"
               title="发送固定验证前确认"
-              description={`将通过“${probeDisclosure.connectionDisplayName}”的“${probeDisclosure.modelId}”发送固定短句“只回复：OK”，最多 ${String(probeDisclosure.maximumOutputTokens)} 个输出内容额度；最多调用 ${String(probeDisclosure.maximumProviderCalls)} 次，自动重试 ${String(probeDisclosure.automaticRetryCount)} 次。${probeDisclosure.dataDestination === "local" ? "验证只在本机运行。" : "验证会发送到所选远程模型服务。"} 不发送作品正文、灵感、设定或接口密钥；当前没有可核验的费用上限，模型服务仍可能收取少量费用。`}
+              description={`将通过“${probeDisclosure.connectionDisplayName}”的“${probeDisclosure.modelId}”发送固定短句“只回复：OK”，最多 ${String(probeDisclosure.maximumOutputTokens)} 个输出内容额度；最多向模型服务发送 ${String(probeDisclosure.maximumProviderCalls)} 次，自动重试 ${String(probeDisclosure.automaticRetryCount)} 次。${probeDisclosure.dataDestination === "local" ? "验证只在本机运行。" : "验证会发送到所选远程模型服务。"} 不发送作品正文、灵感、设定或接口密钥；当前没有可核验的费用上限，模型服务仍可能收取少量费用。`}
             />
           )}
         </div>
@@ -604,7 +604,7 @@ function OpenQuickAiConnectionDrawer({
           />
           <p>
             {probeResultAmbiguous
-              ? "已有项目、正文和 AI 建议版本都没有被修改。系统不会自动重发；你可以先跳过继续写，或打开模型中心核对调用记录。"
+              ? "已有项目、正文和 AI 建议版本都没有被修改。系统不会自动重发；你可以先跳过继续写，或打开模型使用与费用查看这次生成记录。"
               : "已有项目、正文和 AI 建议版本都没有被修改。你可以重试，也可以先跳过继续写。"}
           </p>
           <Link

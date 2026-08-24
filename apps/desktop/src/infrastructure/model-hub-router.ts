@@ -196,6 +196,7 @@ export function buildModelHubRoutingPlan(
               now,
             }) === "supported",
         ) &&
+        isAutomaticNovelTaskCandidateEligible(task, candidate, now) &&
         (input.scheme !== "local_privacy" ||
           (candidate.costPrivacy?.dataDestination === "local" &&
             candidate.costPrivacy.evidenceSource !== "unknown" &&
@@ -317,6 +318,7 @@ function compareQuality(
   const leftEvaluation = resolveEvaluation(left, task, now);
   const rightEvaluation = resolveEvaluation(right, task, now);
   return (
+    compareAutomaticTaskFit(left, right, task, now) ||
     compareKnown(leftEvaluation, rightEvaluation) ||
     (rightEvaluation?.scoreBasisPoints ?? 0) - (leftEvaluation?.scoreBasisPoints ?? 0) ||
     (rightEvaluation?.sampleCount ?? 0) - (leftEvaluation?.sampleCount ?? 0) ||
@@ -345,6 +347,7 @@ function compareEconomy(
   const leftEvaluation = resolveEvaluation(left, task, now);
   const rightEvaluation = resolveEvaluation(right, task, now);
   return (
+    compareAutomaticTaskFit(left, right, task, now) ||
     compareKnown(leftCost, rightCost) ||
     compareBigInt(leftCost, rightCost) ||
     compareKnown(leftEvaluation, rightEvaluation) ||
@@ -356,6 +359,97 @@ function compareEconomy(
     preferredCapabilityCount(right, task, now) - preferredCapabilityCount(left, task, now) ||
     left.catalogEntry.id.localeCompare(right.catalogEntry.id)
   );
+}
+
+function isAutomaticNovelTaskCandidateEligible(
+  task: NovelAiTask,
+  candidate: ModelHubRoutingCandidate,
+  now: string,
+): boolean {
+  return (
+    task !== "book_start_guidance" || isAutomaticPureTextOpeningCandidateEligible(candidate, now)
+  );
+}
+
+/**
+ * Automatic pure-text opening routes must not infer suitability from text
+ * generation support alone when the catalog target is visibly an experimental
+ * visual model. Authors can still select such a model explicitly, and visual
+ * tasks continue to use the normal evidence-backed capability rules.
+ */
+export function isAutomaticPureTextOpeningCandidateEligible(
+  candidate: Pick<ModelHubRoutingCandidate, "catalogEntry" | "capabilities">,
+  now: string,
+): boolean {
+  const modelTokens =
+    `${candidate.catalogEntry.providerModelId} ${candidate.catalogEntry.displayName}`
+      .toLocaleLowerCase("en-US")
+      .split(/[^a-z0-9]+/u)
+      .filter((token) => token.length > 0);
+  const visiblyVisual =
+    resolveModelCapabilityVerdict({
+      catalogEntryId: candidate.catalogEntry.id,
+      capability: "vision",
+      evidence: candidate.capabilities,
+      now,
+    }) === "supported" ||
+    modelTokens.some(
+      (token) => token === "vision" || token === "visual" || token === "image" || token === "vl",
+    );
+  const visiblyExperimental =
+    candidate.catalogEntry.lifecycle === "preview" ||
+    modelTokens.some(
+      (token) =>
+        token === "exp" || token === "experimental" || token === "preview" || token === "beta",
+    );
+  return !(visiblyVisual && visiblyExperimental);
+}
+
+function compareAutomaticTaskFit(
+  left: ModelHubRoutingCandidate,
+  right: ModelHubRoutingCandidate,
+  task: NovelAiTask,
+  now: string,
+): number {
+  if (task !== "book_start_guidance") return 0;
+  const lifecycle =
+    automaticLifecycleRank(left.catalogEntry.lifecycle) -
+    automaticLifecycleRank(right.catalogEntry.lifecycle);
+  if (lifecycle !== 0) return lifecycle;
+  return automaticOpeningVisualRank(left, now) - automaticOpeningVisualRank(right, now);
+}
+
+function automaticOpeningVisualRank(candidate: ModelHubRoutingCandidate, now: string): number {
+  const verdict = resolveModelCapabilityVerdict({
+    catalogEntryId: candidate.catalogEntry.id,
+    capability: "vision",
+    evidence: candidate.capabilities,
+    now,
+  });
+  if (verdict === "supported") return 2;
+  if (verdict === "unsupported") return 0;
+  const modelTokens =
+    `${candidate.catalogEntry.providerModelId} ${candidate.catalogEntry.displayName}`
+      .toLocaleLowerCase("en-US")
+      .split(/[^a-z0-9]+/u);
+  return modelTokens.some(
+    (token) => token === "vision" || token === "visual" || token === "image" || token === "vl",
+  )
+    ? 1
+    : 0;
+}
+
+function automaticLifecycleRank(lifecycle: ModelCatalogEntry["lifecycle"]): number {
+  switch (lifecycle) {
+    case "stable":
+      return 0;
+    case "unknown":
+      return 1;
+    case "preview":
+      return 2;
+    case "deprecated":
+      return 3;
+  }
 }
 
 export function requiredCapabilitiesForNovelTask(task: NovelAiTask): readonly ModelHubCapability[] {

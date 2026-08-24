@@ -20,11 +20,12 @@ InkShadow 是一个本地优先、隐私优先、面向长篇小说创作的 AI 
 > Tauri/Wry、Credential Manager、系统 200% DPI 与外部应用打开仍为 **`BLOCKED_EXTERNAL`**，
 > 不得把源码或 Chromium 测试写成真实安装版复测。
 
-当前桌面应用清单版本为 `0.2.9`。指定的 `v0.2.8` 人工复测安装包及其来源清单继续保留在
-本地，不覆盖任何公开附件。截至 `0.2.9` 候选准备时，最新不可变公开工程预览版仍为
-[`v0.2.7`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.7)；`0.2.9` 是否已经发布
-以 [GitHub Releases](https://github.com/gugubugugu0826/InkShadow/releases) 的实际页面为准，
-候选准备本身不等于发布完成。所有已经发布的标签和附件均不得移动或静默替换。
+当前桌面应用清单版本为 `0.2.10`，用于未签名人工复测；它尚未打标签或发布，也不构成稳定版发布建议。
+最新不可变公开工程预览版为 [`v0.2.9`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.9)，
+发布来源提交为 `54d9647031bb97b4fc9f021d3b1acca7f6d25c47`。指定的 `v0.2.8` 人工复测安装包、
+`v0.2.9` 标签、Release 和公开附件继续保留，不会被本轮候选覆盖。`0.2.10` 必须先完成真实安装
+人工复测并等待单独发布指令；候选准备本身不等于发布完成。所有已经发布的标签和附件均不得移动
+或静默替换。
 代码已完成新手三入口、导入试改、四区写作工作台、Model Hub、
 统一故事事实、因果关系、分层上下文和证据化检查的阶段性重构。它仍是工程预览：只有真正
 接通、具备能力证据且通过本地检查的模型功能才会显示为可用；缺少模型、证据或配置时会明确
@@ -199,6 +200,11 @@ tests/         端到端测试
 ## 下载
 
 内部预览安装包发布在 [GitHub Releases](https://github.com/gugubugugu0826/InkShadow/releases)，并标记为 Pre-release。
+
+当前最新公开工程预览版为
+[`v0.2.9`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.9)，来源提交为
+`54d9647031bb97b4fc9f021d3b1acca7f6d25c47`。该版本尚未进行商业代码签名；安装前请在同一 Release
+核对来源清单和 `SHA256SUMS`。以下 `v0.2.3` 至 `v0.2.5` 条目保留为历史发布记录。
 [`v0.2.3`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.3) 已作为未签名工程预览发布，安装前请核对同一 Release 中的 `SHA256SUMS`。
 [`v0.2.4`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.4) 已于 2026-08-14 公开为未签名 Pre-release；
 [`v0.2.5`](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.5) 已于 2026-08-20 公开为未签名 Pre-release，包含以下 3 个附件：

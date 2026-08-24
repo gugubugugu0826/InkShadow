@@ -256,7 +256,6 @@ export function StudioUsagePage() {
         <ErrorState
           title="无法读取智能创作用量"
           description={state.error.description}
-          errorCode={state.error.code}
           {...(state.error.requestId === undefined ? {} : { requestId: state.error.requestId })}
           primaryAction={{ label: "重试", onClick: () => void load(service) }}
         />
@@ -325,11 +324,10 @@ function PageIntro({
   return (
     <header className="studio-usage-page__intro">
       <div>
-        <p className="studio-usage-page__eyebrow">工作室云端 · 墨影内部额度账本</p>
+        <p className="studio-usage-page__eyebrow">工作室云端 · 智能创作用量</p>
         <h1>智能创作额度、并发与用量</h1>
         <p>
-          这是墨影内部的内容额度
-          与价格元数据额度账本，数值来自受控执行回执或客户端上报；服务端不接收正文、提示词、项目密钥或密文。
+          这里记录墨影内部的内容用量和费用估算信息，数值来自受控执行结果或客户端上报；服务端不接收正文、提示词、项目密钥或密文。
         </p>
         <p>实际收费以模型供应商账单为准；当前版本尚未实现供应商侧权威账单对账。</p>
       </div>
@@ -620,14 +618,14 @@ function UsageEvents({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>最近用量账本</CardTitle>
+        <CardTitle>最近用量记录</CardTitle>
         <CardDescription>仅包含计费元数据；历史事件只追加、不覆写。</CardDescription>
       </CardHeader>
       <CardContent>
         {events.length === 0 ? (
-          <EmptyState title="还没有用量事件" description="首次预约后会在此显示元数据账本。" />
+          <EmptyState title="还没有用量记录" description="首次使用智能创作额度后会在此显示。" />
         ) : (
-          <Table scrollLabel="智能创作用量账本">
+          <Table scrollLabel="智能创作用量记录">
             <TableHeader>
               <TableRow>
                 <TableHead>时间</TableHead>

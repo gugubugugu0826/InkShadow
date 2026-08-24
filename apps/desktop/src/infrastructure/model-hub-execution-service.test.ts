@@ -161,6 +161,142 @@ describe("Model Hub text execution service", () => {
       dataDestination: "remote",
     });
   });
+
+  it("uses the native atomic dispatch receipt for an ordinary writing invocation", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "ordinary-native-ledger",
+      catalogEntryId: "ordinary-native-ledger-catalog",
+      modelId: "ordinary-native-ledger-model",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "book_start_guidance",
+      primaryCatalogEntryId: target.id,
+    });
+    const invocationId = "ordinary-native-ledger-invocation";
+    const onProviderDispatchStarted = vi.fn();
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(async (input) => {
+      const ledger = input.invocationDispatchLedger;
+      if (ledger === undefined) {
+        throw new Error("普通写作调用没有进入原生调用账本边界。");
+      }
+      const dispatched = await harness.modelHub.markInvocationDispatched({
+        id: ledger.invocationId,
+        dispatchedAt: NOW,
+        expectedRevision: ledger.expectedRevision,
+      });
+      await input.onInvocationDispatchAccepted?.({
+        invocationId: dispatched.id,
+        dispatchedAt: dispatched.providerDispatchStartedAt ?? NOW,
+        revision: dispatched.revision,
+      });
+      return { text: PRIVATE_OUTPUT, usage: null };
+    });
+
+    const result = await executeModelHubTextTask(
+      {
+        ...harness.dependencies,
+        modelGateway: {
+          available: true,
+          supportsNativeInvocationDispatchLedger: true,
+          generate,
+        },
+      },
+      request({
+        task: "book_start_guidance",
+        invocationId,
+        onProviderDispatchStarted,
+      }),
+    );
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(generate.mock.calls[0]?.[0].invocationDispatchLedger).toMatchObject({
+      invocationId,
+      expectedRevision: 1,
+    });
+    expect(onProviderDispatchStarted).toHaveBeenCalledOnce();
+    expect(result.invocation).toMatchObject({
+      id: invocationId,
+      task: "book_start_guidance",
+      status: "succeeded",
+      providerDispatchStartedAt: NOW,
+    });
+  });
+
+  it("does not expose a local dispatch projection failure back to the native transport", async () => {
+    const harness = createHarness();
+    const target = await seedTarget(harness.modelHub, {
+      connectionId: "ordinary-native-projection-failure",
+      catalogEntryId: "ordinary-native-projection-failure-catalog",
+      modelId: "ordinary-native-projection-failure-model",
+    });
+    await saveRoute(harness.modelHub, {
+      task: "book_start_guidance",
+      primaryCatalogEntryId: target.id,
+    });
+    const invocationId = "ordinary-native-projection-failure-invocation";
+    let receiptObserverRejected = false;
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(async (input) => {
+      const ledger = input.invocationDispatchLedger;
+      if (ledger === undefined) {
+        throw new Error("普通写作调用没有进入原生调用账本边界。");
+      }
+      const dispatched = await harness.modelHub.markInvocationDispatched({
+        id: ledger.invocationId,
+        dispatchedAt: NOW,
+        expectedRevision: ledger.expectedRevision,
+      });
+      try {
+        await input.onInvocationDispatchAccepted?.({
+          invocationId: dispatched.id,
+          dispatchedAt: dispatched.providerDispatchStartedAt ?? NOW,
+          revision: dispatched.revision,
+        });
+      } catch {
+        receiptObserverRejected = true;
+      }
+      return {
+        text: PRIVATE_OUTPUT,
+        usage: { inputTokens: 8, outputTokens: 5, cachedInputTokens: null },
+        streamed: true,
+      };
+    });
+    const onProviderDispatchStarted = vi.fn(() => {
+      throw new Error("本地旅程投影已经离开当前页面。");
+    });
+
+    const result = await executeModelHubTextTask(
+      {
+        ...harness.dependencies,
+        modelGateway: {
+          available: true,
+          supportsNativeInvocationDispatchLedger: true,
+          generate,
+        },
+      },
+      request({
+        task: "book_start_guidance",
+        invocationId,
+        onProviderDispatchStarted,
+      }),
+    );
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(onProviderDispatchStarted).toHaveBeenCalledOnce();
+    expect(receiptObserverRejected).toBe(false);
+    expect(result).toMatchObject({
+      text: PRIVATE_OUTPUT,
+      localDispatchObservationFailed: true,
+      usage: { inputTokens: 8, outputTokens: 5, cachedInputTokens: null },
+      invocation: {
+        id: invocationId,
+        task: "book_start_guidance",
+        status: "succeeded",
+        providerDispatchStartedAt: NOW,
+      },
+    });
+  });
+
   it("reports the configured fallback as the actual side-effect-free selection", async () => {
     const harness = createHarness();
     const primary = await seedTarget(harness.modelHub, {

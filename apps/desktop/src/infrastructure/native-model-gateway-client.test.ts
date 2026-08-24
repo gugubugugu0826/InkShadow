@@ -420,6 +420,7 @@ describe("Tauri native model gateway client", () => {
       ...input(),
       invocationDispatchLedger: {
         invocationId: "capability-probe-invocation-019f9f4a-b3c7-7350-9226-000000000501",
+        taskSnapshot: "capability_probe",
         expectedRevision: 1,
         connectionId: "connection-1",
         connectionRevision: 1,
@@ -453,6 +454,118 @@ describe("Tauri native model gateway client", () => {
     });
   });
 
+  it("keeps collecting native events when the durable receipt observer fails locally", async () => {
+    let deliver: ((event: TestGenerationEvent) => void) | null = null;
+    const unlisten = vi.fn();
+    tauriMocks.listen.mockImplementation(
+      (
+        _eventName: string,
+        handler: (event: Readonly<{ payload: TestGenerationEvent }>) => void,
+      ) => {
+        deliver = (event) => handler({ payload: event });
+        return Promise.resolve(unlisten);
+      },
+    );
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command !== "start_native_generation") {
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      }
+      return Promise.resolve({
+        generationId: "generation-1",
+        accepted: true,
+        invocationDispatchReceipt: {
+          invocationId: "opening-invocation-019f9f4a-b3c7-7350-9226-000000000503",
+          dispatchedAt: "2026-08-21T00:00:00.000Z",
+          revision: 2,
+        },
+      });
+    });
+    const onDelta = vi.fn();
+    const onInvocationDispatchAccepted = vi.fn(() =>
+      Promise.reject(new Error("本地旅程投影已经离开当前页面。")),
+    );
+    const request: NativeModelGenerationInput = {
+      ...input(onDelta),
+      config: { ...input().config, retryLimit: 0 },
+      invocationDispatchLedger: {
+        invocationId: "opening-invocation-019f9f4a-b3c7-7350-9226-000000000503",
+        taskSnapshot: "book_start_guidance",
+        expectedRevision: 1,
+        connectionId: "connection-1",
+        connectionRevision: 1,
+        catalogEntryId: "catalog-1",
+        catalogEntryRevision: 1,
+        providerKindSnapshot: "open_ai_compatible",
+        modelIdSnapshot: "model-1",
+      },
+      onInvocationDispatchAccepted,
+    };
+    const pending = new TauriNativeModelGatewayClient().generate(request);
+
+    await vi.waitFor(() => expect(onInvocationDispatchAccepted).toHaveBeenCalledOnce());
+    expect(unlisten).not.toHaveBeenCalled();
+    const emit = deliver as ((event: TestGenerationEvent) => void) | null;
+    emit?.(event(0, "", { phase: "started" }));
+    emit?.(event(1, "迟到但有效", { phase: "delta" }));
+    emit?.(event(2, "", { phase: "completed", usage: null, streamed: true }));
+
+    await expect(pending).resolves.toEqual({
+      text: "迟到但有效",
+      usage: null,
+      streamed: true,
+      localDispatchObservationFailed: true,
+    });
+    expect(onDelta).toHaveBeenCalledOnce();
+    expect(onDelta).toHaveBeenCalledWith("迟到但有效");
+    expect(unlisten).toHaveBeenCalledOnce();
+    expect(
+      tauriMocks.invoke.mock.calls.filter(([command]) => command === "start_native_generation"),
+    ).toHaveLength(1);
+    expect(
+      tauriMocks.invoke.mock.calls.filter(([command]) => command === "cancel_native_generation"),
+    ).toHaveLength(0);
+  });
+
+  it("still rejects an invalid durable receipt before notifying local observers", async () => {
+    const unlisten = vi.fn();
+    tauriMocks.listen.mockResolvedValue(unlisten);
+    tauriMocks.invoke.mockResolvedValue({
+      generationId: "generation-1",
+      accepted: true,
+      invocationDispatchReceipt: {
+        invocationId: "different-invocation",
+        dispatchedAt: "2026-08-21T00:00:00.000Z",
+        revision: 2,
+      },
+    });
+    const onInvocationDispatchAccepted = vi.fn();
+
+    await expect(
+      new TauriNativeModelGatewayClient().generate({
+        ...input(),
+        invocationDispatchLedger: {
+          invocationId: "opening-invocation-019f9f4a-b3c7-7350-9226-000000000504",
+          taskSnapshot: "book_start_guidance",
+          expectedRevision: 1,
+          connectionId: "connection-1",
+          connectionRevision: 1,
+          catalogEntryId: "catalog-1",
+          catalogEntryRevision: 1,
+          providerKindSnapshot: "open_ai_compatible",
+          modelIdSnapshot: "model-1",
+        },
+        onInvocationDispatchAccepted,
+      }),
+    ).rejects.toMatchObject({
+      code: "MODEL_INVOCATION_DISPATCH_RECEIPT_INVALID",
+    });
+    expect(onInvocationDispatchAccepted).not.toHaveBeenCalled();
+    expect(unlisten).toHaveBeenCalledOnce();
+    expect(
+      tauriMocks.invoke.mock.calls.filter(([command]) => command === "start_native_generation"),
+    ).toHaveLength(1);
+  });
+
   it("does not report a dispatch receipt when native preparation rejects the request", async () => {
     tauriMocks.listen.mockResolvedValue(vi.fn());
     tauriMocks.invoke.mockRejectedValue({
@@ -467,6 +580,7 @@ describe("Tauri native model gateway client", () => {
         ...input(),
         invocationDispatchLedger: {
           invocationId: "019f9f4a-b3c7-7350-9226-000000000502",
+          taskSnapshot: "capability_probe",
           expectedRevision: 1,
           connectionId: "connection-1",
           connectionRevision: 1,

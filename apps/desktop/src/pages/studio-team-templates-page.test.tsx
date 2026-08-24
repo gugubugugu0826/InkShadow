@@ -109,7 +109,8 @@ describe("encrypted team-template injected page", () => {
     );
 
     expect(await screen.findByText("无法解密此模板")).toBeVisible();
-    expect(screen.getByText("TEAM_TEMPLATE_CIPHERTEXT_CORRUPT")).toBeVisible();
+    expect(screen.getByText(/未通过解密或完整性校验/u)).toBeVisible();
+    expect(screen.queryByText("TEAM_TEMPLATE_CIPHERTEXT_CORRUPT")).not.toBeInTheDocument();
     expect(screen.queryByText("Fallback template title")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "应用一次到项目" })).toBeDisabled();
   });
@@ -175,6 +176,7 @@ describe("encrypted team-template injected page", () => {
 
     await user.click(await screen.findByRole("button", { name: "应用一次到项目" }));
     expect(await screen.findByText(/模板已安全提交到本地/u)).toBeVisible();
+    expect(document.body).not.toHaveTextContent("NETWORK_TIMEOUT");
     await user.click(screen.getByRole("button", { name: "仅重试云端回执" }));
 
     await waitFor(() => expect(coordinator.retryApplicationRecord).toHaveBeenCalledTimes(1));

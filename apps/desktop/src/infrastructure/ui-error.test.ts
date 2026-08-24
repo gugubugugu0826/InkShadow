@@ -204,7 +204,7 @@ describe("normalizeUiError SQLite persistence failures", () => {
       "MODEL_HUB_ROUTE_NOT_CONFIGURED",
       ["验证至少一个模型的写作能力", "应用智能推荐", "缺少向量检索不会阻止"],
     ],
-    ["MODEL_HUB_ROUTE_DISABLED", ["已明确停用", "没有调用模型", "不会改用旧配置"]],
+    ["MODEL_HUB_ROUTE_DISABLED", ["已明确停用", "没有向模型发送内容", "不会改用旧配置"]],
     ["MODEL_PROFILE_NOT_READY", ["没有可用于这次写作", "继续手动编辑", "前往模型中心"]],
     ["CREATIVE_INPUT_INVALID_CONTROL_CHARACTER", ["不可见控制字符", "全角标点", "换行仍然支持"]],
     [
@@ -219,16 +219,16 @@ describe("normalizeUiError SQLite persistence failures", () => {
     ["IMPORT_JOURNEY_PERSIST_FAILED", ["本地导入进度", "保持当前页面打开", "不会被静默覆盖"]],
     [
       "IMPORT_PENDING_REQUEST_CLEAR_FAILED",
-      ["未能清除请求恢复标记", "不会自动重复调用", "重新打开页面"],
+      ["未能清除请求恢复标记", "不会自动再次发送", "重新打开页面"],
     ],
     [
       "IMPORT_PENDING_REQUEST_PERSIST_FAILED",
-      ["发送前保存请求恢复标记", "没有调用模型", "释放存储空间"],
+      ["发送前保存请求恢复标记", "没有向模型发送内容", "释放存储空间"],
     ],
     ["EXTENSION_USAGE_UNAVAILABLE", ["没有返回可核对的用量", "正文没有被覆盖", "导出历史"]],
     [
       "CREATIVE_OPENING_TIMEOUT_SCOPE_MISMATCH",
-      ["超时编号", "没有结束或取消任何其他调用", "重新读取进度并核对调用记录"],
+      ["超时编号", "没有结束其他仍在进行的请求", "重新读取进度并核对本次发送信息"],
     ],
     ["UPDATE_MANIFEST_UNAVAILABLE", ["安全更新未完成", "仍可离线使用", "官方发行说明"]],
   ])("gives an actionable, redacted recovery path for %s", (code, expectedFragments) => {

@@ -153,8 +153,8 @@ export function UsageCenterPage({ reader, now = currentDate }: UsageCenterPagePr
     <div className="desktop-page usage-center-page">
       <header className="page-heading">
         <div>
-          <p className="page-heading__eyebrow">只读的本地调用账本</p>
-          <h1>调用与费用</h1>
+          <p className="page-heading__eyebrow">只读的本地 AI 服务记录</p>
+          <h1>模型使用与费用</h1>
           <p>查看智能创作做了什么、使用了哪个模型、消耗了多少内容额度，以及可确认的费用估算。</p>
         </div>
         <div className="page-heading__actions">
@@ -166,7 +166,7 @@ export function UsageCenterPage({ reader, now = currentDate }: UsageCenterPagePr
               void load(snapshot !== null);
             }}
           >
-            刷新账本
+            刷新记录
           </Button>
         </div>
       </header>
@@ -178,12 +178,12 @@ export function UsageCenterPage({ reader, now = currentDate }: UsageCenterPagePr
 
       <PageStateBoundary
         state={loading && snapshot === null ? "loading" : initialError ? "fatal_error" : "ready"}
-        loadingLabel="正在读取本地调用账本"
+        loadingLabel="正在读取本地 AI 服务记录"
         preserveContent={false}
         fallbacks={{
           fatal_error: (
             <ErrorState
-              title="暂时无法读取调用账本"
+              title="暂时无法读取 AI 服务记录"
               description={errorDescription(error)}
               savedState="正文与已有版本不受影响"
               primaryAction={{
@@ -225,7 +225,7 @@ export function UsageCenterPage({ reader, now = currentDate }: UsageCenterPagePr
             {snapshot.totalMatchingRecords === 0 ? (
               <EmptyState
                 kind={hasDimensionFilters ? "no_results" : "no_data"}
-                title={hasDimensionFilters ? "没有符合筛选条件的调用" : "还没有调用记录"}
+                title={hasDimensionFilters ? "没有符合筛选条件的记录" : "还没有模型使用记录"}
                 description={
                   hasDimensionFilters
                     ? "换一个作品、任务、供应商或模型，或者清除筛选。"
@@ -273,7 +273,7 @@ function UsageFilterPanel({
   return (
     <Card className="settings-card--wide">
       <CardHeader>
-        <CardTitle>筛选调用</CardTitle>
+        <CardTitle>筛选记录</CardTitle>
         <CardDescription>筛选会同时更新汇总、分组和明细，不会修改任何本地记录。</CardDescription>
       </CardHeader>
       <CardContent>
@@ -299,7 +299,7 @@ function UsageFilterPanel({
                 aria-label="作品"
                 value={filters.projectId}
                 disabled={disabled}
-                placeholder="全部作品（含未关联调用）"
+                placeholder="全部作品（含未关联记录）"
                 options={snapshot.facets.projects}
                 onChange={(event) => onChange({ ...filters, projectId: event.currentTarget.value })}
               />
@@ -359,7 +359,7 @@ function UsageFilterPanel({
 
 function UsageSummaryCards({ summary }: { readonly summary: UsageAggregate }) {
   return (
-    <section aria-label="调用汇总" className="settings-grid">
+    <section aria-label="使用汇总" className="settings-grid">
       <SummaryCard
         title={formatCostTotals(summary.costTotals, summary.invocationCount)}
         description={
@@ -400,8 +400,8 @@ function UsageAttentionSummary({ summary }: { readonly summary: UsageAggregate }
   return (
     <InlineAlert
       tone={summary.failureCount > 0 ? "error" : "warning"}
-      title={`调用账本有 ${facts.join("、")}`}
-      description="请在下方明细按作品、章节和任务核对。结果不明确的调用不会自动重发；费用未知也不会按 0 计算。"
+      title={`AI 服务记录有 ${facts.join("、")}`}
+      description="请在下方明细按作品、章节和任务核对。结果需要核对的记录不会自动重发；费用未知也不会按 0 计算。"
     />
   );
 }
@@ -429,7 +429,7 @@ function BudgetPanel({ budgets }: { readonly budgets: readonly UsageBudgetPolicy
       <CardHeader>
         <CardTitle>当前预算规则</CardTitle>
         <CardDescription>
-          这里只显示已保存的预算上限。预算占用使用调用前估算，不能替代供应商账单对账。
+          这里只显示已保存的预算上限。预算占用使用发送前估算，不能替代服务商账单对账。
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -453,7 +453,7 @@ function BudgetPanel({ budgets }: { readonly budgets: readonly UsageBudgetPolicy
                 <TableCell>{formatMoney(budget.currency, budget.limitMicros)}</TableCell>
                 <TableCell>
                   <Badge tone={budget.enforcement === "hard" ? "danger" : "warning"}>
-                    {budget.enforcement === "hard" ? "达到上限后阻止调用" : "达到上限时提醒"}
+                    {budget.enforcement === "hard" ? "达到上限后停止发送" : "达到上限时提醒"}
                   </Badge>
                 </TableCell>
                 <TableCell>{formatDateTime(budget.updatedAt)}</TableCell>
@@ -495,11 +495,11 @@ function BreakdownPanel({
             />
           )}
         </FormField>
-        <Table aria-label="分类调用汇总">
+        <Table aria-label="分类使用汇总">
           <TableHeader>
             <TableRow>
               <TableHead>{breakdownHeading(dimension)}</TableHead>
-              <TableHead>调用</TableHead>
+              <TableHead>次数</TableHead>
               <TableHead>内容额度</TableHead>
               <TableHead>费用估算</TableHead>
               <TableHead>结果</TableHead>
@@ -534,7 +534,7 @@ function UsageDetailsTable({ snapshot }: { readonly snapshot: UsageCenterSnapsho
   return (
     <Card className="settings-card--wide">
       <CardHeader>
-        <CardTitle>调用明细</CardTitle>
+        <CardTitle>使用明细</CardTitle>
         <CardDescription>按实际记录时间倒序排列；旧续写与模型中心记录已去重。</CardDescription>
       </CardHeader>
       <CardContent>
@@ -545,7 +545,7 @@ function UsageDetailsTable({ snapshot }: { readonly snapshot: UsageCenterSnapsho
             description="上方汇总仍覆盖全部匹配记录。缩短时间范围可以查看更精确的明细列表。"
           />
         )}
-        <Table aria-label="调用明细">
+        <Table aria-label="使用明细">
           <TableCaption>不包含正文、提示词、模型输出或凭据。</TableCaption>
           <TableHeader>
             <TableRow>
@@ -567,7 +567,7 @@ function UsageDetailsTable({ snapshot }: { readonly snapshot: UsageCenterSnapsho
                   <br />
                   <span>
                     {record.chapterName ??
-                      (record.projectId === null ? "未关联章节" : "作品级调用")}
+                      (record.projectId === null ? "未关联章节" : "作品级生成")}
                   </span>
                   <br />
                   {taskLabel(record.task)}
@@ -653,7 +653,7 @@ function formatRecordCost(record: UsageCenterEvent): string {
     return "费用未知";
   }
   const formatted = formatMoney(record.currency, record.costMicros);
-  return record.costMicros === "0" ? `${formatted}（账本记录为 0）` : formatted;
+  return record.costMicros === "0" ? `${formatted}（费用记录为 0）` : formatted;
 }
 
 function formatRecordTokens(record: UsageCenterEvent): string {
@@ -687,8 +687,8 @@ function taskLabel(task: string): string {
 
 function statusLabel(status: UsageEventStatus): string {
   return {
-    queued: "等待调用",
-    running: "调用中",
+    queued: "等待发送",
+    running: "服务处理中",
     succeeded: "成功",
     failed: "失败",
     cancelled: "已取消",
@@ -726,7 +726,7 @@ function privacyLabel(policy: UsagePrivacyPolicy): string {
     cloud_allowed: "允许云端任务",
     local_preferred: "优先本地",
     local_only: "仅限本地",
-    not_recorded: "旧调用未记录隐私策略",
+    not_recorded: "这条旧记录未保存隐私设置",
   }[policy];
 }
 

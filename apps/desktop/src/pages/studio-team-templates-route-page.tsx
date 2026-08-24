@@ -144,7 +144,6 @@ export function StudioTeamTemplatesRoutePage() {
           headingLevel={1}
           title="无法打开团队模板"
           description="模板入口缺少有效的团队或项目范围，请从团队工作区重新打开。"
-          errorCode="TEAM_TEMPLATE_ROUTE_SCOPE_INVALID"
           primaryAction={{
             label: "返回团队工作区",
             onClick: () => void navigate("/teams"),
@@ -206,7 +205,6 @@ export function StudioTeamTemplatesRoutePage() {
           headingLevel={1}
           title="无法打开团队模板"
           description={visibleRoute.description}
-          errorCode={visibleRoute.code}
           primaryAction={{
             label: "返回团队工作区",
             onClick: () => void navigate("/teams"),
@@ -236,7 +234,7 @@ export function StudioTeamTemplatesRoutePage() {
         <InlineAlert
           tone="warning"
           title="待确认回执暂未恢复"
-          description={`本地项目提交保持有效，下次进入时会安全重试。（${visibleRoute.recoveryFailure.code}）`}
+          description="本地项目提交保持有效；下次进入时会安全重试，不会重复应用项目内容。"
         />
       )}
       <StudioTeamTemplatesPage

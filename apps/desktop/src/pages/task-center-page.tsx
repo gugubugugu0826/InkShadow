@@ -728,7 +728,7 @@ function progressStepLabel(step: string): string {
     "candidate.validating": "检查 AI 建议草稿是否完整",
     "candidate.persisted": "保存隔离的 AI 建议草稿",
     "candidate.finalized": "AI 建议草稿已就绪",
-    "opening.invocation": "登记本次模型调用",
+    "opening.invocation": "正在保存本次生成信息",
     "opening.provider_waiting": "等待模型返回",
     "stream.receive": "接收模型输出",
     "candidate.persist": "保存 AI 建议草稿",
@@ -760,7 +760,7 @@ function taskFailureLabel(code: string): string {
     CONSISTENCY_REPAIR_FAILED: "一致性修复建议未能完成",
     CONSISTENCY_REPAIR_RESULT_AMBIGUOUS: "模型结果不确定，未自动重发",
     OPENING_GENERATION_FAILED: "开书建议未能完成",
-    OPENING_RESULT_PENDING_REVIEW: "调用结果需要人工核对，系统没有自动重发",
+    OPENING_RESULT_PENDING_REVIEW: "这次生成的结果需要人工核对，系统没有自动重发",
   };
   return labels[code] ?? "后台任务未能完成";
 }

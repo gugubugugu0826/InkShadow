@@ -150,7 +150,7 @@ describe("CloudDeletionSecurityCard", () => {
 
     expect(
       await screen.findByText(
-        "本机已保存原 confirmation ID、请求摘要和幂等键；若云会话已失效，可直接用邮箱和密码恢复服务端回执。密码不会从本机恢复或持久化。",
+        "本机已保存恢复同一次删除申请所需的安全记录；若云会话已失效，可直接用邮箱和密码恢复服务端回执。密码不会从本机恢复或持久化。",
       ),
     ).toBeVisible();
     await user.click(screen.getByRole("button", { name: "使用邮箱和密码恢复删除回执" }));
@@ -167,6 +167,16 @@ describe("CloudDeletionSecurityCard", () => {
         password: PASSWORD,
       }),
     );
+  });
+
+  it("maps a durable deletion phase to ordinary Chinese instead of exposing the internal value", async () => {
+    const service = createService();
+    service.findProject.mockResolvedValue(projectJournal());
+
+    render(<CloudDeletionSecurityCard selectedProject={project()} service={asService(service)} />);
+
+    expect(await screen.findByText("冻结云端变更")).toBeVisible();
+    expect(screen.queryByText("freeze")).not.toBeInTheDocument();
   });
 
   it("keeps cloud deletion diagnostics out of the ordinary error alert", async () => {

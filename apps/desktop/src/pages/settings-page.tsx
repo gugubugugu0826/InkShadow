@@ -3179,11 +3179,11 @@ export function SettingsPage() {
       setModels([]);
       setHubCatalog([]);
       setRetirementMessage(
-        `“${target.displayName}”已退役：不会再参与选择、推荐或 AI 分工，系统凭据已清理；已有正文、模型目录和调用记录仍会保留。`,
+        `“${target.displayName}”已退役：不会再参与选择、推荐或 AI 分工，系统凭据已清理；已有正文、模型目录和历史模型使用记录仍会保留。`,
       );
       if (result.credentialCleanup === "skipped_unowned_reference") {
         setRetirementMessage(
-          `“${target.displayName}”已退役；检测到来源不明的旧凭据引用，因此没有猜测或删除任何系统凭据槽。正文、模型目录和调用记录仍然保留。`,
+          `“${target.displayName}”已退役；检测到来源不明的旧凭据引用，因此没有猜测或删除任何系统凭据槽。正文、模型目录和历史模型使用记录仍然保留。`,
         );
       }
       setRetireConnectionTarget(null);
@@ -4072,7 +4072,7 @@ export function SettingsPage() {
     const candidate = selection.model;
     if (candidate.appSupport === "protocol_not_implemented") {
       setModelHubMutationNotice({
-        message: `${candidate.displayName} 可在目录中浏览，但墨影当前尚未实现它所需的调用协议，因此不会把它标记为可用。`,
+        message: `${candidate.displayName} 可在目录中浏览，但墨影当前尚未实现它所需的连接方式，因此不会把它标记为可用。`,
         reloadRequired: false,
       });
       return;
@@ -4452,7 +4452,8 @@ export function SettingsPage() {
                   <div>
                     <CardTitle headingLevel={2}>写作体验</CardTitle>
                     <CardDescription>
-                      只改变下一次写作操作的交互方式；不会调用模型，也不会修改正文、候选、版本、路由或任务。
+                      只改变下一次写作操作的交互方式；不会向模型发送内容，也不会修改正文、AI
+                      建议版本、历史版本、路由或任务。
                     </CardDescription>
                   </div>
                   <Badge tone="neutral">
@@ -4801,7 +4802,7 @@ export function SettingsPage() {
                             <summary>
                               已退役连接历史（{String(retiredHubConnections.length)}）
                             </summary>
-                            <p>这些记录只用于调用审计，不再参与选择、推荐或 AI 分工。</p>
+                            <p>这些记录只用于核对模型使用历史，不再参与选择、推荐或 AI 分工。</p>
                             <ul
                               className="model-hub-connection-summary"
                               aria-label="已退役连接历史"
@@ -4897,7 +4898,7 @@ export function SettingsPage() {
                         <InlineAlert
                           tone="warning"
                           title="凭据已删除，可重新绑定"
-                          description={`“${credentialDeletedConnection.displayName}”仍保留模型目录和历史调用，但不会参与 AI 分工。输入新的接口密钥并选择“重新绑定原连接”，无需修改配置标识；也可选择“退役连接”后建立一条新连接。`}
+                          description={`“${credentialDeletedConnection.displayName}”仍保留模型目录和历史模型使用记录，但不会参与 AI 分工。输入新的接口密钥并选择“重新绑定原连接”，无需修改配置标识；也可选择“退役连接”后建立一条新连接。`}
                         />
                       )}
 
@@ -5580,7 +5581,7 @@ export function SettingsPage() {
                         <InlineAlert
                           tone="warning"
                           title="固定能力验证需要明确确认"
-                          description={`点击“${automaticModelDiscovery ? "确认 1 次固定验证" : "确认 1 次固定验证并检查连接"}”将通过“${hubConnection?.displayName ?? getModelProviderPreset(providerPreset).displayName}”的“${effectiveTextProbeModelId}”发送固定短句“只回复：OK”，最多请求 64 个输出内容额度；本次最多调用 1 次，自动重试 0 次。${modelProbeDestinationDisclosure(providerPreset, { region, workspaceId, baseUrl })}不发送作品正文、灵感、设定或接口密钥；当前费用上限未知，供应商可能收取少量费用。测试输入和输出不会写入能力记录。`}
+                          description={`点击“${automaticModelDiscovery ? "确认 1 次固定验证" : "确认 1 次固定验证并检查连接"}”将通过“${hubConnection?.displayName ?? getModelProviderPreset(providerPreset).displayName}”的“${effectiveTextProbeModelId}”发送固定短句“只回复：OK”，最多请求 64 个输出内容额度；本次最多向模型服务发送 1 次，自动重试 0 次。${modelProbeDestinationDisclosure(providerPreset, { region, workspaceId, baseUrl })}不发送作品正文、灵感、设定或接口密钥；当前费用上限未知，供应商可能收取少量费用。测试输入和输出不会写入能力记录。`}
                         />
                       )}
 
@@ -5776,7 +5777,7 @@ export function SettingsPage() {
                       }
                       description={
                         routeProbeResultAmbiguous
-                          ? "模型服务调用已经发送，但结果无法确认；系统不会自动重发，本次 AI 分工也没有保存。请到调用记录核对结果。"
+                          ? "内容已向模型服务发送，但结果无法确认；系统不会自动重发，本次 AI 分工也没有保存。请到模型使用与费用查看结果。"
                           : taskProbeDisclosureError === null
                             ? "写作能力证据已保留，但自动分工没有完成。请打开“AI 分工”查看回读结果并重试。"
                             : taskProbeDisclosureError.message
@@ -5813,7 +5814,7 @@ export function SettingsPage() {
                       <InlineAlert
                         tone="warning"
                         title="固定能力验证结果待核对"
-                        description="模型服务调用已经发送，但结果无法确认；系统不会自动重发，本次 AI 分工也没有保存。请到调用记录核对结果。"
+                        description="内容已向模型服务发送，但结果无法确认；系统不会自动重发，本次 AI 分工也没有保存。请到模型使用与费用查看结果。"
                       />
                     )}
                     {normalizedRouteError !== null &&
@@ -7121,7 +7122,7 @@ export function SettingsPage() {
                 {String(taskProbeConfirmation.disclosure.maximumOutputTokens)} 个输出内容额度。
               </li>
               <li>
-                最大模型服务调用：
+                最多向模型服务发送：
                 {String(taskProbeConfirmation.disclosure.maximumProviderCalls)} 次；自动重试：
                 {String(taskProbeConfirmation.disclosure.automaticRetryCount)} 次。
               </li>
@@ -7193,7 +7194,7 @@ export function SettingsPage() {
             ? "退役模型连接？"
             : `退役“${retireConnectionTarget.displayName}”连接？`
         }
-        description="退役会永久停止这条连接参与选择、推荐和 AI 分工，并删除仍存在的系统凭据。模型目录与不可变调用记录只作为历史审计保留。"
+        description="退役会永久停止这条连接参与选择、推荐和 AI 分工，并删除仍存在的系统凭据。模型目录与只读历史记录只作为核对依据保留。"
         footer={
           <>
             <Button
@@ -7216,7 +7217,7 @@ export function SettingsPage() {
         <InlineAlert
           tone="warning"
           title="退役不同于删除凭据或暂时停用"
-          description="正文、AI 建议版本、模型调用记录和费用凭据不会删除；这条连接本身将只读保留。以后连接同一供应商时，墨影会自动建立新连接，无需手工修改内部标识。"
+          description="正文、AI 建议版本、模型使用记录和费用凭据不会删除；这条连接本身将只读保留。以后连接同一供应商时，墨影会自动建立新连接，无需手工修改内部标识。"
         />
       </Dialog>
 
@@ -8399,7 +8400,7 @@ function capabilityEvidenceSourceLabel(source: string | null): string {
 
 function capabilityFailureLabel(code: string): string {
   if (code === "PROVIDER_RESULT_AMBIGUOUS") {
-    return "调用结果无法确认，系统不会自动重发";
+    return "这次发送的结果需要核对，系统不会自动重发";
   }
   return code === "MODEL_OUTPUT_TRUNCATED"
     ? "最近一次验证未返回完整可见内容"

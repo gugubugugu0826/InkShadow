@@ -67,6 +67,28 @@ describe("FineTuningGovernancePage", () => {
     expect(screen.getAllByRole("button", { name: /重新加载|重试/u }).length).toBeGreaterThan(0);
   });
 
+  it("projects dataset readiness issues to Chinese without exposing provider details", async () => {
+    const rawDetail = "Personally identifiable information was detected in sample content.";
+    const dataset = {
+      ...datasetFixture(),
+      readinessIssues: [
+        {
+          code: "FINE_TUNING_PRIVACY_BLOCKED",
+          detail: rawDetail,
+          sampleId: SOURCE_ID,
+        },
+      ],
+    } as unknown as FineTuningDatasetSnapshot;
+    const fixture = readyRuntime({ datasets: [dataset] });
+
+    render(
+      <FineTuningGovernancePage runtime={fixture.port} projectId={PROJECT_ID} actorId={ACTOR_ID} />,
+    );
+
+    expect(await screen.findByText("请先在来源处移除个人信息或敏感内容。")).toBeVisible();
+    expect(screen.queryByText(rawDetail)).not.toBeInTheDocument();
+    expect(screen.queryByText("FINE_TUNING_PRIVACY_BLOCKED")).not.toBeInTheDocument();
+  });
   it("requires an explicit rights declaration before freezing chapter sources", async () => {
     const user = userEvent.setup();
 

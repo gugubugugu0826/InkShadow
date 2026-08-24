@@ -173,7 +173,7 @@ describe("quick AI connection drawer", () => {
 
     await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
     expect(await screen.findByText("发送固定验证前确认")).toBeVisible();
-    expect(screen.getByText(/最多调用 1 次，自动重试 0 次/u)).toBeVisible();
+    expect(screen.getByText(/最多向模型服务发送 1 次，自动重试 0 次/u)).toBeVisible();
     expect(screen.getByText(/不发送作品正文、灵感、设定或接口密钥/u)).toBeVisible();
     expect(harness.generate).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "确认 1 次固定验证并继续" }));

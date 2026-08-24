@@ -86,7 +86,7 @@ describe("model hub evaluation panel", () => {
     render(<ModelHubEvaluationPanel service={{ prepare, evaluate }} />);
 
     await user.click(screen.getByRole("button", { name: "查看两项测试的发送信息" }));
-    await user.click(screen.getByRole("button", { name: "取消，不调用" }));
+    await user.click(screen.getByRole("button", { name: "取消，不发送" }));
 
     expect(evaluate).not.toHaveBeenCalled();
     expect(screen.queryByLabelText("两项基础测试发送确认")).not.toBeInTheDocument();
