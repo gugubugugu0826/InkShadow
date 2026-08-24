@@ -173,7 +173,8 @@ export class ModelHubRerankService {
         status: "applied" as const,
         source: "alibaba_qwen_remote" as const,
         result,
-        message: "已按你在 AI 分工中确认的远程发送设置，使用阿里云百炼 Qwen 对本地召回结果重排。",
+        message:
+          "已按你在创作任务安排中确认的远程发送设置，使用阿里云百炼 Qwen 对本地召回结果重排。",
       });
     } catch (cause: unknown) {
       const error = normalizeRerankError(cause, false);

@@ -14,6 +14,7 @@ import "./model-hub-selectable-catalog-browser.css";
 
 export type ModelHubSelectableCatalogConnectedAppSupport =
   SelectableModelAppSupport | "verified_in_app" | "verification_required";
+type CatalogBrowserRegionGroup = SelectableModelRegionGroup | "UNKNOWN";
 
 export type ModelHubSelectableCatalogConnectedLifecycle = SelectableModelLifecycle | "not_provided";
 
@@ -65,7 +66,7 @@ type CatalogBrowserItem =
       modelId: string;
       displayName: string;
       providerLabel: string;
-      regionGroup: SelectableModelRegionGroup;
+      regionGroup: CatalogBrowserRegionGroup;
       tags: readonly string[];
       aliases: readonly string[];
       lifecycle: ModelHubSelectableCatalogConnectedLifecycle;
@@ -79,7 +80,7 @@ type CatalogBrowserItem =
       modelId: string | null;
       displayName: string;
       providerLabel: string;
-      regionGroup: SelectableModelRegionGroup;
+      regionGroup: CatalogBrowserRegionGroup;
       tags: readonly string[];
       aliases: readonly string[];
       lifecycle: SelectableModelLifecycle;
@@ -89,6 +90,7 @@ type CatalogBrowserItem =
 const REGION_GROUPS = Object.freeze([
   Object.freeze({ id: "DOMESTIC" as const, label: "国内" }),
   Object.freeze({ id: "INTERNATIONAL" as const, label: "海外" }),
+  Object.freeze({ id: "UNKNOWN" as const, label: "地区未提供" }),
   Object.freeze({ id: "LOCAL" as const, label: "本地" }),
 ]);
 
@@ -106,12 +108,12 @@ const PROVIDER_LABELS: Readonly<Record<ModelProviderKind, string>> = Object.free
 
 const TAG_LABELS: Readonly<Record<string, string>> = Object.freeze({
   text_generation: "文本生成",
-  writing_candidate: "写作候选",
-  embedding: "语义向量",
-  multimodal_embedding: "多模态向量",
-  rerank: "结果排序",
+  writing_candidate: "适合正文创作",
+  embedding: "查找相关故事资料",
+  multimodal_embedding: "查找图文资料",
+  rerank: "优化资料排序",
   image_generation: "图像生成",
-  provider_discovery: "连接后发现",
+  provider_discovery: "连接后可查找",
 });
 
 export function ModelHubSelectableCatalogBrowser({
@@ -183,7 +185,7 @@ export function ModelHubSelectableCatalogBrowser({
                 autoComplete="off"
                 disabled={disabled}
                 aria-describedby={resultsId}
-                placeholder="例如 DeepSeek、向量检索、图像生成"
+                placeholder="例如 DeepSeek、查找相关故事资料、图像生成"
                 onChange={(event) => setQuery(event.currentTarget.value)}
               />
             </div>
@@ -311,7 +313,7 @@ function buildCatalogBrowserItems(
     modelId: model.providerModelId,
     displayName: model.displayName || model.providerModelId,
     providerLabel: model.providerLabel ?? PROVIDER_LABELS[model.providerKind],
-    regionGroup: model.regionGroup,
+    regionGroup: normalizeRegionGroup(model.regionGroup),
     tags: model.tags ?? [],
     aliases: [],
     lifecycle: model.lifecycle ?? "not_provided",
@@ -333,7 +335,7 @@ function buildCatalogBrowserItems(
         modelId: model.modelId,
         displayName: model.displayName,
         providerLabel: PROVIDER_LABELS[model.providerKind],
-        regionGroup: model.regionGroup,
+        regionGroup: normalizeRegionGroup(model.regionGroup),
         tags: model.tags,
         aliases: model.aliases,
         lifecycle: model.lifecycle,
@@ -381,12 +383,18 @@ function modelIdentity(providerKind: ModelProviderKind, modelId: string): string
   return `${providerKind}\u0000${modelId.trim().toLocaleLowerCase("en-US")}`;
 }
 
-function regionOrder(region: SelectableModelRegionGroup): number {
+function normalizeRegionGroup(region: unknown): CatalogBrowserRegionGroup {
+  return region === "DOMESTIC" || region === "INTERNATIONAL" || region === "LOCAL"
+    ? region
+    : "UNKNOWN";
+}
+
+function regionOrder(region: CatalogBrowserRegionGroup): number {
   return REGION_GROUPS.findIndex(({ id }) => id === region);
 }
 
-function regionLabel(region: SelectableModelRegionGroup): string {
-  return REGION_GROUPS.find(({ id }) => id === region)?.label ?? region;
+function regionLabel(region: CatalogBrowserRegionGroup): string {
+  return REGION_GROUPS.find(({ id }) => id === region)?.label ?? "地区未提供";
 }
 
 function lifecycleLabel(lifecycle: ModelHubSelectableCatalogConnectedLifecycle): string {
@@ -404,7 +412,7 @@ function appSupportLabel(appSupport: ModelHubSelectableCatalogConnectedAppSuppor
     routable_after_verification: "应用可接入，需验证",
     protocol_not_implemented: "应用暂不支持此协议",
     special_connection_required: "需要专用连接",
-    discovery_only: "连接后发现",
+    discovery_only: "连接后可查找",
     verified_in_app: "已通过应用验证",
     verification_required: "待应用验证",
   };

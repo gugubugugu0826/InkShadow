@@ -221,7 +221,7 @@ function createCommands(projectId: string | null): readonly CommandDefinition[] 
     command(
       "command-model-hub",
       "模型中心",
-      "连接供应商、同步模型并设置 AI 分工",
+      "连接供应商、同步模型并设置创作任务安排",
       ["模型", "供应商", "API", "连接"],
       "/settings#model-center",
       "AI",

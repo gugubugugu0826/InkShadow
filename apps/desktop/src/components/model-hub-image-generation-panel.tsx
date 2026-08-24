@@ -160,7 +160,7 @@ export function ModelHubImageGenerationPanel({
           <InlineAlert
             tone="warning"
             title="图片生成暂不可用"
-            description={`${error ?? "没有可用图片模型。"} 请在设置的 AI 分工中，为“图片生成”选择一个已确认支持该能力的模型。`}
+            description={`${error ?? "没有可用图片模型。"} 请在设置的创作任务安排中，为“图片生成”选择一个已确认支持该能力的模型。`}
             action={{ label: "重新检查", onClick: () => void inspect() }}
           />
         )}

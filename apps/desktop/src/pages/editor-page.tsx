@@ -3163,7 +3163,7 @@ export function EditorPage() {
             new UiActionError("DIRECTION_PREFLIGHT_BLOCKED", "方向生成前检查未通过。"),
           dispatched: false,
           description:
-            "当前创作服务未通过生成前检查，请按页面提示检查模型分工、资料范围或隐私设置。",
+            "当前创作服务未通过生成前检查，请按页面提示检查负责创作的模型安排、资料范围或隐私设置。",
         });
         return;
       }
@@ -4873,7 +4873,7 @@ export function EditorPage() {
           <InlineAlert
             tone={online ? "info" : "warning"}
             title="联网 AI 任务已保存待执行"
-            description={`仅保存章节、版本、AI 分工和费用上界，不保存正文或创作指令。${
+            description={`仅保存章节、版本、创作任务安排和费用上界，不保存正文或创作指令。${
               online
                 ? "网络已恢复；再次打开生成前检查并确认后才会执行。"
                 : "可继续本地编辑，任务会留在任务中心。"
@@ -5928,7 +5928,7 @@ export function EditorPage() {
                     )}
                     {continuationPreference.profile === "long" && (
                       <p className="candidate-panel__hint" role="status">
-                        长篇续写通常需要更长等待时间，并可能产生更高的模型费用；正式发送前仍会按模型上限、预算和隐私策略预检。
+                        长篇续写通常需要更长等待时间，并可能产生更高的模型费用；发送前仍会检查模型上限、预算和隐私设置。
                       </p>
                     )}
                     <FormField
@@ -6950,13 +6950,13 @@ export function EditorPage() {
             )}
 
             <details>
-              <summary>AI 分工与隐私详情（高级）</summary>
+              <summary>创作任务安排与隐私详情（高级）</summary>
               <InlineAlert
                 tone={generationPlan.routeReason === "role_fallback" ? "warning" : "info"}
                 title={
                   generationPlan.routeReason === "role_fallback"
                     ? "将使用已配置的备用服务"
-                    : "本次 AI 分工"
+                    : "本次创作任务安排"
                 }
                 description={`${generationRouteRoleLabel(generationPlan.modelRole)} · ${
                   continuationDisclosure?.connectionDisplayName ??
@@ -7378,7 +7378,7 @@ function contextSelectionReasonLabel(entry: ContextCompilationEntry): string {
     return "本地检索发现它与当前情节相关。";
   }
   if (normalized.includes("alibaba qwen") || normalized.includes("qwen remote reranker")) {
-    return "你已在 AI 分工中明确允许远程重排；阿里云百炼 Qwen 将这项资料排到了更相关的位置。";
+    return "你已在创作任务安排中明确允许远程重排；阿里云百炼 Qwen 将这项资料排到了更相关的位置。";
   }
   if (normalized.includes("deterministic evidence reranker")) {
     return "本地证据复核后，它比原始排序中的其他资料更相关。";
@@ -7478,13 +7478,13 @@ function preflightCheckLabel(code: string): string {
     BUDGET_WARNING: "预计费用接近或超过预算提醒阈值",
     BUDGET_EXCEEDED: "预计费用超过硬预算",
     PREFLIGHT_WARNING_PRICING_UNKNOWN: "该模型尚未填写价格，暂时无法估算费用",
-    PREFLIGHT_WARNING_CONTEXT_UNKNOWN: "未获取精确上下文上限，将使用保守长度整理参考内容",
+    PREFLIGHT_WARNING_CONTEXT_UNKNOWN: "未获取精确的资料处理上限，将使用保守长度整理参考内容",
     PREFLIGHT_WARNING_TOKEN_ESTIMATE_APPROXIMATE: "当前内容额度为估算值，已预留安全余量",
-    PREFLIGHT_BLOCKED_NO_ROUTE: "没有可用的正文生成 AI 分工",
+    PREFLIGHT_BLOCKED_NO_ROUTE: "没有可用的正文生成创作任务安排",
     PREFLIGHT_BLOCKED_CREDENTIAL: "AI 服务凭据缺失或不可用",
     PREFLIGHT_BLOCKED_MODEL_UNAVAILABLE: "连接或所选模型确定不可用",
     PREFLIGHT_BLOCKED_PRIVACY: "当前隐私规则不允许使用这项 AI 服务",
-    PREFLIGHT_BLOCKED_CONTEXT_OVERFLOW: "精简后仍超过当前可处理的上下文长度",
+    PREFLIGHT_BLOCKED_CONTEXT_OVERFLOW: "精简后仍超过当前可处理的资料长度",
     PREFLIGHT_BLOCKED_HARD_BUDGET: "预计费用超过你主动设置的硬预算",
     READY: "AI 服务、章节、费用与预算均已检查",
   };
@@ -7506,7 +7506,7 @@ function generationRouteRoleLabel(role: PreparedGenerationPlan["modelRole"]): st
   const labels: Record<PreparedGenerationPlan["modelRole"], string> = {
     fast: "快速",
     high_quality: "高质量",
-    long_context: "长上下文",
+    long_context: "长篇资料容量",
     embedding: "语义记忆",
     validation: "检查",
     translation: "翻译",

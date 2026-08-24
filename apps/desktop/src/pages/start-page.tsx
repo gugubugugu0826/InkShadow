@@ -2,8 +2,10 @@ import { Button, InkIcon, InlineAlert } from "@inkshadow/ui";
 import { parseUuidV7, type Chapter, type Project, type UuidV7 } from "@inkshadow/domain";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import "./start-page.css";
 
 import { loadEditorView, type EditorViewState } from "../infrastructure/editor-view-state-store";
+import { formatNaturalLocalTime } from "../infrastructure/natural-local-time";
 import type { DesktopRuntime } from "../infrastructure/runtime";
 import { normalizeUiError } from "../infrastructure/ui-error";
 import { useWritingExperience } from "../hooks/use-writing-experience";
@@ -173,7 +175,9 @@ export function StartPage() {
             <dl className="start-page__recent-details">
               <div>
                 <dt>最近作品</dt>
-                <dd>{recentWriting.project.name}</dd>
+                <dd className="start-page__recent-title" title={recentWriting.project.name}>
+                  {summarizeRecentWritingTitle(recentWriting.project.name)}
+                </dd>
               </div>
               <div>
                 <dt>最近章节</dt>
@@ -181,7 +185,11 @@ export function StartPage() {
               </div>
               <div>
                 <dt>保存时间</dt>
-                <dd>{new Date(recentWriting.activityAt).toLocaleString("zh-CN")}</dd>
+                <dd>
+                  <time dateTime={new Date(recentWriting.activityAt).toISOString()}>
+                    {formatNaturalLocalTime(recentWriting.activityAt)}
+                  </time>
+                </dd>
               </div>
               {recentWriting.editorView !== null && (
                 <div>
@@ -244,6 +252,16 @@ export function StartPage() {
       )}
     </div>
   );
+}
+
+const RECENT_WRITING_TITLE_LIMIT = 32;
+
+function summarizeRecentWritingTitle(value: string): string {
+  const normalized = value.normalize("NFC").replace(/\s+/gu, " ").trim();
+  const characters = Array.from(normalized);
+  return characters.length <= RECENT_WRITING_TITLE_LIMIT
+    ? normalized
+    : `${characters.slice(0, RECENT_WRITING_TITLE_LIMIT).join("")}…`;
 }
 
 const EXAMPLE_PROJECT_NAME = "墨影示例：雨夜来信";

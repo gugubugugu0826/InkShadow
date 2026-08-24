@@ -2,10 +2,12 @@ import type { AcceptedChapterPipelineInput } from "./accepted-chapter-pipeline";
 import { organizeCurrentSavedVersionStoryFacts } from "./direct-story-fact-organizer";
 import type { DesktopRuntime } from "./runtime";
 
-type DirectFactPreflightRuntime = Pick<
-  DesktopRuntime,
-  "clock" | "hasher" | "repositories" | "story"
->;
+type DirectFactPreflightRuntime = Readonly<{
+  clock: DesktopRuntime["clock"];
+  hasher: DesktopRuntime["hasher"];
+  repositories: Pick<DesktopRuntime["repositories"], "chapters" | "chapterVersions">;
+  story: Pick<DesktopRuntime["story"], "facts" | "factService">;
+}>;
 
 /**
  * Keeps every accepted-version execution path on the same local fact boundary.

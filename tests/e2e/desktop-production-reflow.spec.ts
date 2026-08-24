@@ -142,7 +142,9 @@ test("keeps writing, Story Settings import, and all 22 Model Hub tasks reachable
     await expect(transferTrigger).toBeFocused();
 
     await page.goto("/#/settings#model-routing");
-    await expect(page.getByRole("heading", { level: 1, name: "模型中心 · AI 分工" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { level: 1, name: "模型中心 · 创作任务安排" }),
+    ).toBeVisible();
     const expertSettings = page.getByRole("button", { name: /专家设置/u });
     await expertSettings.scrollIntoViewIfNeeded();
     await expectFocusable(expertSettings);

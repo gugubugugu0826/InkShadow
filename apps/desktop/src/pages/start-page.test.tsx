@@ -124,6 +124,28 @@ describe("local-first start page", () => {
     );
   });
 
+  it("uses a safe project title and a natural local time in the continue card", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const longName =
+      "一个关于旧钟楼管理员在午夜发现钟摆倒转并决定寻找三十一年前失踪邻居的非常非常长的灵感句子";
+    const work = await createWork(runtime, longName, "第一章", "正文", "author_work");
+    saveRecentEditorView(work, Date.UTC(2040, 7, 24, 9, 5, 37));
+
+    renderStartPage(runtime);
+
+    await screen.findByRole("heading", { name: "回到刚才停下的地方" });
+    const displayedTitle = screen.getByTitle(longName);
+    expect(displayedTitle).toHaveClass("start-page__recent-title");
+    expect(displayedTitle.textContent).not.toBe(longName);
+    expect(displayedTitle.textContent).toMatch(/^一个关于旧钟楼/u);
+    expect(displayedTitle.textContent).toMatch(/…$/u);
+
+    const time = screen.getByText(/2040年.*8月.*24日/u);
+    expect(time.tagName).toBe("TIME");
+    expect(time).toHaveAttribute("dateTime", "2040-08-24T09:05:37.000Z");
+    expect(time.textContent).not.toMatch(/\d{2}:\d{2}:\d{2}/u);
+  });
+
   it("keeps only the library as a secondary action in direct mode", async () => {
     renderStartPage();
 

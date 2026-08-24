@@ -41,8 +41,8 @@ describe("AuthoritativeExtractionRoutePage", () => {
 
     renderRoute(runtime, `/projects/${PROJECT_ID}/extraction`);
 
-    expect(await screen.findByRole("heading", { name: "权威事实抽取" })).toBeVisible();
-    expect(screen.getByText("尚未配置真实抽取提供方")).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "从正文更新设定" })).toBeVisible();
+    expect(screen.getByText("尚未配置可用的设定整理模型")).toBeVisible();
     expect(inspect).not.toHaveBeenCalled();
   });
 

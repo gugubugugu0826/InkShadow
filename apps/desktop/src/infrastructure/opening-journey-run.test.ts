@@ -25,6 +25,7 @@ import {
   ensureOpeningJourneyTask,
   openingJourneyRunElapsedMs,
   openingJourneyRunRecoveryDecision,
+  openingJourneySupportNumber,
   openingJourneyTaskInput,
   projectOpeningJourneyTaskStage,
   readOpeningJourneyRun,
@@ -49,6 +50,28 @@ const TASK_SQLITE_MIGRATION = [
 ].join("\n");
 
 describe("opening journey run", () => {
+  it("projects a stable spoken support number without exposing the durable UUID after restart", () => {
+    const run = createOpeningJourneyRun({
+      journeyId: JOURNEY_ID,
+      batchId: BATCH_ID,
+      taskId: TASK_ID,
+      requestIds: REQUEST_IDS,
+      now: STARTED_AT,
+      timeoutMs: 180_000,
+    });
+    const restored = readOpeningJourneyRun(JSON.parse(JSON.stringify(run)));
+    if (restored === null) throw new Error("开书旅程重启后没有恢复。");
+
+    const beforeRestart = openingJourneySupportNumber(run);
+    const afterRestart = openingJourneySupportNumber(restored);
+
+    expect(beforeRestart).toBe("墨影-20260823100000-000002");
+    expect(afterRestart).toBe(beforeRestart);
+    expect(beforeRestart).not.toContain(BATCH_ID);
+    expect(restored.supportId).toBe(BATCH_ID);
+    expect(restored.batchId).toBe(BATCH_ID);
+  });
+
   it("persists one stable support number, exact request identifiers, deadline, and zero automatic retries", () => {
     const run = createOpeningJourneyRun({
       journeyId: JOURNEY_ID,
@@ -84,6 +107,7 @@ describe("opening journey run", () => {
         operation: "creative_opening",
         journeyId: JOURNEY_ID,
         batchId: BATCH_ID,
+        startedAt: STARTED_AT,
         supportId: BATCH_ID,
       },
     });

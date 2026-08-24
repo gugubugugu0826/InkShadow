@@ -38,7 +38,7 @@ describe("professional project creation", () => {
       "故事方向与大纲",
       "人物与世界",
       "视角、风格与禁止项",
-      "AI 分工、上下文与自动检查",
+      "创作任务安排、上下文与自动检查",
     ]) {
       expect(screen.getByText(label).closest("details")).not.toHaveAttribute("open");
     }
@@ -177,7 +177,7 @@ describe("professional project creation", () => {
       "href",
       `/projects/${project.id}/story`,
     );
-    expect(within(destinations).getByRole("link", { name: "配置 AI 分工" })).toHaveAttribute(
+    expect(within(destinations).getByRole("link", { name: "配置创作任务安排" })).toHaveAttribute(
       "href",
       "/settings#model-routing",
     );

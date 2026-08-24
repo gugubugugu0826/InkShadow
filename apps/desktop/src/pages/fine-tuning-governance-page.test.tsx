@@ -37,7 +37,7 @@ describe("FineTuningGovernancePage", () => {
 
     expect(screen.getByRole("heading", { name: "微调治理（实验）" })).toBeVisible();
     expect(screen.getByText("微调治理默认关闭")).toBeVisible();
-    expect(screen.getByText(/没有启动训练，也没有发送任何内容/)).toBeVisible();
+    expect(screen.getByText(/不会读写治理记录、启动训练或发送内容/)).toBeVisible();
     expect(inspect).not.toHaveBeenCalled();
   });
 
@@ -85,7 +85,7 @@ describe("FineTuningGovernancePage", () => {
       <FineTuningGovernancePage runtime={fixture.port} projectId={PROJECT_ID} actorId={ACTOR_ID} />,
     );
 
-    expect(await screen.findByText("请先在来源处移除个人信息或敏感内容。")).toBeVisible();
+    expect(await screen.findByText("请先移除个人或敏感信息。")).toBeVisible();
     expect(screen.queryByText(rawDetail)).not.toBeInTheDocument();
     expect(screen.queryByText("FINE_TUNING_PRIVACY_BLOCKED")).not.toBeInTheDocument();
   });
@@ -130,7 +130,7 @@ describe("FineTuningGovernancePage", () => {
     );
     await user.click(
       screen.getByRole("checkbox", {
-        name: "我已人工核对上述版权依据，且它适用于当前精确来源版本。",
+        name: "我确认许可适用于当前来源版本。",
       }),
     );
     await user.click(create);
@@ -169,14 +169,16 @@ describe("FineTuningGovernancePage", () => {
     );
 
     expect(await screen.findByText("待人工审批")).toBeVisible();
+    expect(screen.queryByText(HASH)).not.toBeInTheDocument();
+    expect(screen.getByText("内容已校验")).toBeVisible();
     const approve = screen.getByRole("button", { name: "批准当前清单版本" });
     expect(approve).toBeDisabled();
 
-    await user.click(screen.getByRole("checkbox", { name: "我已核对隐私扫描与必要的源头脱敏。" }));
-    await user.click(screen.getByRole("checkbox", { name: "我已核对每条来源的版权或许可依据。" }));
+    await user.click(screen.getByRole("checkbox", { name: "我已核对隐私扫描和必要脱敏。" }));
+    await user.click(screen.getByRole("checkbox", { name: "我已核对每条来源的许可。" }));
     await user.click(
       screen.getByRole("checkbox", {
-        name: "我确认此数据集只用于已说明的本地训练目的。",
+        name: "我确认数据集只用于上述本地训练。",
       }),
     );
     await user.click(approve);
@@ -195,6 +197,34 @@ describe("FineTuningGovernancePage", () => {
     });
   });
 
+  it("keeps audit codes and identifiers out of the ordinary interface", async () => {
+    const rawAction = "job_queued";
+    const rawEntityId = "019f9f4a-b3c7-7350-9226-000000000006";
+    const rawRequestId = "019f9f4a-b3c7-7350-9226-000000000007";
+    const fixture = readyRuntime({
+      audit: [
+        {
+          id: "019f9f4a-b3c7-7350-9226-000000000008",
+          entityType: "job",
+          entityId: rawEntityId,
+          action: rawAction,
+          actorId: ACTOR_ID,
+          requestId: rawRequestId,
+          createdAt: NOW,
+        },
+      ],
+    });
+
+    render(
+      <FineTuningGovernancePage runtime={fixture.port} projectId={PROJECT_ID} actorId={ACTOR_ID} />,
+    );
+
+    expect(await screen.findByText("治理记录已更新")).toBeVisible();
+    expect(screen.queryByText(rawAction)).not.toBeInTheDocument();
+    expect(screen.queryByText(rawEntityId)).not.toBeInTheDocument();
+    expect(screen.queryByText(rawRequestId)).not.toBeInTheDocument();
+  });
+
   it("never invents candidate evaluation scores when no evaluator output was imported", async () => {
     const fixture = readyRuntime({ artifacts: [artifactFixture()] });
 
@@ -202,11 +232,13 @@ describe("FineTuningGovernancePage", () => {
       <FineTuningGovernancePage runtime={fixture.port} projectId={PROJECT_ID} actorId={ACTOR_ID} />,
     );
 
-    expect(await screen.findByText("待评测候选")).toBeVisible();
-    expect(screen.getByText(/页面只解析并提交，不生成默认分数/)).toBeVisible();
-    expect(screen.getByRole("textbox", { name: "基线指标结构化数据" })).toHaveValue("");
-    expect(screen.getByRole("textbox", { name: "候选指标结构化数据" })).toHaveValue("");
-    expect(screen.getByRole("textbox", { name: "门禁规则结构化数据" })).toHaveValue("");
+    expect(await screen.findByText("待评测模型")).toBeVisible();
+    expect(screen.getAllByText(/页面不会生成分数/)).toHaveLength(2);
+
+    await userEvent.click(screen.getByText("高级诊断与评测数据导入"));
+    expect(screen.getByRole("textbox", { name: "对照模型评测数据" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "本次训练结果评测数据" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "评测通过条件" })).toHaveValue("");
     expect(screen.getByRole("button", { name: "重新计算并记录评测" })).toBeDisabled();
     expect(fixture.recordEvaluation).not.toHaveBeenCalled();
   });

@@ -68,7 +68,7 @@ export function recommendConnectedModelsForTask(
             model,
             readiness: "verify_structured_output" as const,
             missingVerificationCapabilities: Object.freeze(["structured_output"] as const),
-            reason: "这台已连接模型已验证文字生成；还需通过一次不含作品内容的 JSON 探针。",
+            reason: "这台已连接模型已验证文字生成；还需完成一次不含作品内容的结构化格式能力检查。",
           }),
         ];
       }
@@ -85,7 +85,7 @@ export function recommendConnectedModelsForTask(
             model,
             readiness: "verify_translation" as const,
             missingVerificationCapabilities: Object.freeze(["translation"] as const),
-            reason: "这台已连接模型已验证文字生成；还需通过一次不含作品内容的固定中英翻译探针。",
+            reason: "这台已连接模型已验证文字生成；还需完成一次不含作品内容的中英翻译能力检查。",
           }),
         ];
       }

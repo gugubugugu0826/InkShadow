@@ -291,7 +291,7 @@ export function WritingPreferencesPanel({
             {actionSummary.regenerated}次 · 明确意见 {actionSummary.feedback} 次
           </p>
           <p className="candidate-panel__hint">
-            这里仅记录操作类型、关联编号和反馈选项，不保存候选正文、章节正文或提示词副本。
+            这里仅记录操作类型、关联编号和反馈选项，不保存 AI 生成内容、章节正文或提示词副本。
           </p>
         </CardContent>
         {dashboard.preferences.length > 0 && (

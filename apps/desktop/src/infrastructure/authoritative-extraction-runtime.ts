@@ -488,7 +488,7 @@ export class AuthoritativeExtractionReviewCoordinator {
       return loaded;
     }
     if (loaded.value === null) {
-      return candidateNotFound("The accepted extraction target was not found.");
+      return candidateNotFound("没有找到已接受设定的目标记录。");
     }
     const snapshot = loaded.value.toSnapshot();
     const current = snapshot.versions.at(-1);
@@ -874,7 +874,7 @@ function unavailableError(availability: AuthoritativeExtractionAvailability): St
 function graphError(code: string): StoryCoreError {
   return new StoryCoreError({
     code: "STORY_REPOSITORY_ERROR",
-    message: "The accepted extraction is safe, but GraphRAG projection rebuilding failed.",
+    message: "已接受的设定仍然安全，但故事关系资料重建失败。",
     retryable: true,
     actions: ["RETRY", "CONTACT_SUPPORT"],
     details: { graphErrorCode: code },

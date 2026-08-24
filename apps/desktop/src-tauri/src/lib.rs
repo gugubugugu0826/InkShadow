@@ -50,14 +50,24 @@ use secure_updater::{
     SecureUpdaterState,
 };
 use serde::Serialize;
-use std::sync::OnceLock;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Mutex, OnceLock},
+};
 use system_capacity::inspect_native_model_capacity;
 use tauri::Manager;
 use zeroize::Zeroizing;
 
 const PRODUCTION_CREDENTIAL_SERVICE: &str = "com.inkshadow.desktop";
 const MAX_CREDENTIAL_SERVICE_BYTES: usize = 128;
+const MAX_DISCOVERED_MODEL_CREDENTIALS: usize = 100;
+const MAX_DISCOVERY_EXCLUDED_CREDENTIALS: usize = 10_000;
 static CREDENTIAL_SERVICE: OnceLock<String> = OnceLock::new();
+
+#[derive(Default)]
+struct CredentialDiscoveryState {
+    providers_by_discovery_id: Mutex<HashMap<String, String>>,
+}
 
 fn validated_credential_service(identifier: &str) -> Result<String, &'static str> {
     let valid = !identifier.is_empty()
@@ -102,6 +112,17 @@ struct SecretSummary {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct DiscoveredModelCredentialSummary {
+    discovery_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_connection_id: Option<String>,
+    last_four: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RuntimeInfo {
     app_version: &'static str,
     os: &'static str,
@@ -134,10 +155,55 @@ pub(crate) fn credential_entry(provider_id: &str) -> Result<keyring::Entry, Comm
         .map_err(|_| CommandError::credential_store_unavailable())
 }
 
+fn credential_discovery_pattern(service: &str) -> String {
+    let mut escaped = String::with_capacity(service.len() * 2);
+    for character in service.chars() {
+        if "\\.^$|?*+()[]{}".contains(character) {
+            escaped.push(char::from(92));
+        }
+        escaped.push(character);
+    }
+    format!("^model:[A-Za-z0-9._-]{{1,128}}[.]{}$", escaped)
+}
+
+fn model_provider_id_from_credential_target(target: &str, service: &str) -> Option<String> {
+    let provider_id = target
+        .strip_prefix("model:")?
+        .strip_suffix(&format!(".{service}"))?;
+    credential_account(provider_id).ok()?;
+    Some(provider_id.to_owned())
+}
+
 fn last_four(secret: &str) -> String {
     let mut characters = secret.chars().rev().take(4).collect::<Vec<_>>();
     characters.reverse();
     characters.into_iter().collect()
+}
+
+fn canonical_model_provider_kind(provider_id: &str) -> Option<&str> {
+    matches!(
+        provider_id,
+        "openai"
+            | "deepseek"
+            | "zhipu_glm"
+            | "alibaba_qwen"
+            | "volcengine_doubao"
+            | "google_gemini"
+            | "anthropic_claude"
+            | "ollama"
+            | "custom_openai_compatible"
+    )
+    .then_some(provider_id)
+}
+
+fn trusted_discovered_credential_source(
+    provider_id: &str,
+    provider_occurrences: usize,
+) -> Option<(&str, &str)> {
+    (provider_occurrences == 1)
+        .then(|| canonical_model_provider_kind(provider_id))
+        .flatten()
+        .map(|provider_kind| (provider_kind, provider_id))
 }
 
 #[tauri::command]
@@ -213,6 +279,160 @@ fn delete_model_secret(provider_id: String) -> Result<SecretSummary, CommandErro
     }
 }
 
+fn credential_discovery_expired() -> CommandError {
+    CommandError::new(
+        "MODEL_CREDENTIAL_DISCOVERY_EXPIRED",
+        "The discovered credential selection is no longer available.",
+        true,
+        vec!["RETRY"],
+    )
+}
+
+fn discovered_provider_id(
+    state: &CredentialDiscoveryState,
+    discovery_id: &str,
+) -> Result<String, CommandError> {
+    state
+        .providers_by_discovery_id
+        .lock()
+        .map_err(|_| CommandError::credential_store_unavailable())?
+        .get(discovery_id)
+        .cloned()
+        .ok_or_else(credential_discovery_expired)
+}
+
+#[tauri::command]
+fn discover_model_credentials(
+    excluded_provider_ids: Vec<String>,
+    state: tauri::State<'_, CredentialDiscoveryState>,
+) -> Result<Vec<DiscoveredModelCredentialSummary>, CommandError> {
+    if excluded_provider_ids.len() > MAX_DISCOVERY_EXCLUDED_CREDENTIALS {
+        return Err(CommandError::new(
+            "MODEL_CREDENTIAL_DISCOVERY_INVALID",
+            "The credential discovery exclusion list is invalid.",
+            false,
+            vec!["RETRY"],
+        ));
+    }
+    let excluded_provider_ids = excluded_provider_ids
+        .into_iter()
+        .map(|provider_id| {
+            credential_account(&provider_id)?;
+            Ok(provider_id)
+        })
+        .collect::<Result<HashSet<_>, CommandError>>()?;
+    let service = credential_service();
+    let pattern = credential_discovery_pattern(service);
+    let _store_initializer = credential_entry("credential-discovery")?;
+    let entries = keyring_core::Entry::search(&HashMap::from([("pattern", pattern.as_str())]))
+        .map_err(|_| CommandError::credential_store_unavailable())?;
+    let mut discovered = Vec::new();
+
+    for entry in entries {
+        let attributes = match entry.get_attributes() {
+            Ok(attributes) => attributes,
+            Err(keyring::Error::NoEntry) => continue,
+            Err(_) => return Err(CommandError::credential_store_unavailable()),
+        };
+        let Some(provider_id) = attributes
+            .get("target_name")
+            .and_then(|target| model_provider_id_from_credential_target(target, service))
+        else {
+            continue;
+        };
+        if excluded_provider_ids.contains(&provider_id) {
+            continue;
+        }
+        let secret = match entry.get_password() {
+            Ok(secret) => Zeroizing::new(secret),
+            Err(keyring::Error::NoEntry) => continue,
+            Err(_) => return Err(CommandError::credential_store_unavailable()),
+        };
+        validate_model_secret(secret.as_str())?;
+        discovered.push((provider_id, last_four(secret.as_str())));
+    }
+
+    discovered.sort_by(|left, right| left.0.cmp(&right.0));
+    let provider_occurrences = discovered.iter().fold(HashMap::new(), |mut counts, item| {
+        *counts.entry(item.0.clone()).or_insert(0_usize) += 1;
+        counts
+    });
+    discovered.truncate(MAX_DISCOVERED_MODEL_CREDENTIALS);
+
+    let mut providers = state
+        .providers_by_discovery_id
+        .lock()
+        .map_err(|_| CommandError::credential_store_unavailable())?;
+    providers.clear();
+    Ok(discovered
+        .into_iter()
+        .map(|(provider_id, last_four)| {
+            let discovery_id = uuid::Uuid::now_v7().to_string();
+            let trusted_source = trusted_discovered_credential_source(
+                &provider_id,
+                provider_occurrences.get(&provider_id).copied().unwrap_or(0),
+            );
+            if trusted_source.is_some() {
+                providers.insert(discovery_id.clone(), provider_id.clone());
+            }
+            DiscoveredModelCredentialSummary {
+                discovery_id,
+                last_four,
+                provider_kind: trusted_source.map(|(provider_kind, _)| provider_kind.to_owned()),
+                source_connection_id: trusted_source
+                    .map(|(_, source_connection_id)| source_connection_id.to_owned()),
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn reuse_discovered_model_secret(
+    discovery_id: String,
+    provider_id: String,
+    state: tauri::State<'_, CredentialDiscoveryState>,
+) -> Result<SecretSummary, CommandError> {
+    let discovered_provider_id = discovered_provider_id(&state, &discovery_id)?;
+    let source = credential_entry(&discovered_provider_id)?;
+    let secret = match source.get_password() {
+        Ok(secret) => Zeroizing::new(secret),
+        Err(keyring::Error::NoEntry) => return Err(credential_discovery_expired()),
+        Err(_) => return Err(CommandError::credential_store_unavailable()),
+    };
+    validate_model_secret(secret.as_str())?;
+    let destination = credential_entry(&provider_id)?;
+    destination
+        .set_password(secret.as_str())
+        .map_err(|_| CommandError::credential_store_unavailable())?;
+    Ok(SecretSummary {
+        configured: true,
+        last_four: Some(last_four(secret.as_str())),
+    })
+}
+
+#[tauri::command]
+fn delete_discovered_model_secret(
+    discovery_id: String,
+    state: tauri::State<'_, CredentialDiscoveryState>,
+) -> Result<SecretSummary, CommandError> {
+    let provider_id = discovered_provider_id(&state, &discovery_id)?;
+    let entry = credential_entry(&provider_id)?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => {
+            state
+                .providers_by_discovery_id
+                .lock()
+                .map_err(|_| CommandError::credential_store_unavailable())?
+                .remove(&discovery_id);
+            Ok(SecretSummary {
+                configured: false,
+                last_four: None,
+            })
+        }
+        Err(_) => Err(CommandError::credential_store_unavailable()),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let context = tauri::generate_context!();
@@ -228,6 +448,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(model_gateway)
+        .manage(CredentialDiscoveryState::default())
         .manage(NativeImageDestinationState::default())
         .manage(NativeExportDestinationState::default())
         .manage(CloudSessionVaultState::default())
@@ -268,6 +489,9 @@ pub fn run() {
             save_model_secret,
             get_model_secret_summary,
             delete_model_secret,
+            discover_model_credentials,
+            reuse_discovered_model_secret,
+            delete_discovered_model_secret,
             list_native_models,
             check_native_model_connection,
             inspect_native_model_capacity,
@@ -312,7 +536,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_model_secret, validated_credential_service, PRODUCTION_CREDENTIAL_SERVICE,
+        credential_discovery_pattern, model_provider_id_from_credential_target,
+        trusted_discovered_credential_source, validate_model_secret, validated_credential_service,
+        DiscoveredModelCredentialSummary, PRODUCTION_CREDENTIAL_SERVICE,
     };
 
     #[test]
@@ -331,6 +557,61 @@ mod tests {
     }
 
     #[test]
+    fn credential_discovery_is_anchored_to_safe_model_slots_for_this_application() {
+        let service = PRODUCTION_CREDENTIAL_SERVICE;
+        assert_eq!(
+            credential_discovery_pattern(service),
+            r"^model:[A-Za-z0-9._-]{1,128}[.]com\.inkshadow\.desktop$"
+        );
+        assert_eq!(
+            model_provider_id_from_credential_target(
+                "model:quick-key-019f.com.inkshadow.desktop",
+                service,
+            ),
+            Some("quick-key-019f".to_owned())
+        );
+        for target in [
+            "model:quick-key-019f.com.other.app",
+            "other:quick-key-019f.com.inkshadow.desktop",
+            "model:unsafe/provider.com.inkshadow.desktop",
+            "model:.com.inkshadow.desktop",
+            "model:quick-key-019f.com.inkshadow.desktop.evil",
+        ] {
+            assert_eq!(
+                model_provider_id_from_credential_target(target, service),
+                None,
+                "target outside the exact app-owned model slot must be ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_discovered_credential_summary_includes_only_trusted_source_metadata() {
+        let value = serde_json::to_value(DiscoveredModelCredentialSummary {
+            discovery_id: "019f0000-0000-7000-8000-000000000001".to_owned(),
+            last_four: "3172".to_owned(),
+            provider_kind: Some("deepseek".to_owned()),
+            source_connection_id: Some("deepseek".to_owned()),
+        })
+        .expect("serialize masked discovery summary");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "discoveryId": "019f0000-0000-7000-8000-000000000001",
+                "lastFour": "3172",
+                "providerKind": "deepseek",
+                "sourceConnectionId": "deepseek"
+            })
+        );
+        let serialized = value.to_string();
+        assert!(serialized.contains("providerKind"));
+        assert!(!serialized.contains("target"));
+        assert!(!serialized.contains("service"));
+        assert!(!serialized.contains("account"));
+        assert!(!serialized.contains("secret"));
+    }
+
+    #[test]
     fn model_secret_validation_rejects_control_characters_without_echoing_values() {
         assert!(validate_model_secret("printable-secret-value").is_ok());
         for secret in [
@@ -346,5 +627,56 @@ mod tests {
             assert_eq!(error.code(), "MODEL_SECRET_INVALID");
             assert!(!serialized.contains(secret));
         }
+    }
+
+    #[test]
+    fn unknown_or_ambiguous_discovered_credentials_do_not_claim_a_source() {
+        for (provider_id, occurrence_count) in [
+            ("quick-key-019f", 1),
+            ("unknown-provider", 1),
+            ("deepseek", 2),
+        ] {
+            assert_eq!(
+                trusted_discovered_credential_source(provider_id, occurrence_count),
+                None,
+                "unknown or ambiguous targets must not be bound to a source"
+            );
+        }
+        for provider_id in [
+            "openai",
+            "deepseek",
+            "zhipu_glm",
+            "alibaba_qwen",
+            "volcengine_doubao",
+            "google_gemini",
+            "anthropic_claude",
+            "ollama",
+            "custom_openai_compatible",
+        ] {
+            assert_eq!(
+                trusted_discovered_credential_source(provider_id, 1),
+                Some((provider_id, provider_id)),
+                "every registered canonical provider has one exact source"
+            );
+        }
+
+        let value = serde_json::to_value(DiscoveredModelCredentialSummary {
+            discovery_id: "019f0000-0000-7000-8000-000000000002".to_owned(),
+            last_four: "8421".to_owned(),
+            provider_kind: None,
+            source_connection_id: None,
+        })
+        .expect("serialize unknown-source summary");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "discoveryId": "019f0000-0000-7000-8000-000000000002",
+                "lastFour": "8421"
+            })
+        );
+        let serialized = value.to_string();
+        assert!(!serialized.contains("providerKind"));
+        assert!(!serialized.contains("sourceConnectionId"));
+        assert!(!serialized.contains("secret"));
     }
 }

@@ -441,7 +441,7 @@ export class AmbiguousNovelReviewService {
       ) {
         throw new ModelHubExecutionError(
           "MODEL_HUB_PLAN_CHANGED_AFTER_RESPONSE",
-          "模型返回后发现 AI 分工、隐私策略或实际模型已变化，本次结果不会展示，请重新运行检查。",
+          "模型返回后发现创作任务安排、隐私策略或实际模型已变化，本次结果不会展示，请重新运行检查。",
           true,
           true,
         );
@@ -1233,7 +1233,7 @@ function preflightFailure(
   return failedTask(
     task,
     "AMBIGUOUS_REVIEW_PREFLIGHT_FAILED",
-    safeFailureMessage(cause, "无法检查 AI 分工，AI 复核未运行。"),
+    safeFailureMessage(cause, "无法检查创作任务安排，AI 复核未运行。"),
   );
 }
 

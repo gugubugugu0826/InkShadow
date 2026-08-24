@@ -23,7 +23,9 @@ describe("quick AI connection drawer", () => {
     const user = userEvent.setup();
     renderDrawer(harness.runtime);
 
-    expect(screen.getByRole("radio", { name: /DeepSeek/u })).toBeVisible();
+    const commonProvider = screen.getByRole("radio", { name: /DeepSeek.*常用/u });
+    expect(commonProvider).toBeVisible();
+    expect(commonProvider).toBeChecked();
     expect(screen.getByRole("radio", { name: /^OpenAI官方云端 API$/u })).toBeVisible();
     expect(screen.getByRole("radio", { name: /阿里云百炼 \/ Qwen/u })).toBeVisible();
     expect(screen.getByRole("radio", { name: /火山方舟 \/ 豆包/u })).toBeVisible();
@@ -54,6 +56,34 @@ describe("quick AI connection drawer", () => {
     expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeEnabled();
   });
 
+  it("explains every blocked connection and catalog continuation action", async () => {
+    const harness = createTauriHarness();
+    const user = userEvent.setup();
+    renderDrawer(harness.runtime);
+
+    const connect = screen.getByRole("button", { name: "测试连接并查找模型" });
+    expect(connect).toBeDisabled();
+    expect(connect).toHaveAccessibleDescription(
+      "暂时不能测试连接：请填写接口密钥，或选择一条本机已保存的密钥。也可以先不连接，继续开书。",
+    );
+    expect(screen.getByText(/暂时不能测试连接.*继续开书/u)).toBeVisible();
+
+    await user.type(screen.getByLabelText(/^接口密钥/u), "test-deepseek-key");
+    await user.click(connect);
+    expect(await screen.findByText("连接成功 · 已找到模型", {}, ASYNC_UI_TIMEOUT)).toBeVisible();
+    fireEvent.change(screen.getByLabelText("开书使用的模型"), {
+      target: { value: "" },
+    });
+
+    const continueButton = screen.getByRole("button", { name: "查看固定验证说明" });
+    expect(continueButton).toBeDisabled();
+    expect(continueButton).toHaveAccessibleDescription(
+      "暂时不能继续：请先选择一个开书模型；如果不想使用 AI，可以选择“我自己写”或“先看看示例”。",
+    );
+    expect(screen.getByText(/暂时不能继续.*我自己写.*先看看示例/u)).toBeVisible();
+    expect(harness.generate).not.toHaveBeenCalled();
+  }, 30_000);
+
   it("does not reuse an OpenAI credential hint after switching to DeepSeek", async () => {
     const harness = createTauriHarness({ openai: "saved-1234" });
     await harness.runtime.modelHub.saveConnection({
@@ -68,16 +98,118 @@ describe("quick AI connection drawer", () => {
     });
     const user = userEvent.setup();
     renderDrawer(harness.runtime);
+    await user.click(screen.getByRole("radio", { name: /^OpenAI官方云端 API$/u }));
 
     expect(
-      await screen.findByText("已保存 Key（末四位 1234）", {}, ASYNC_UI_TIMEOUT),
+      await screen.findByText("已保存接口密钥（末四位 1234）", {}, ASYNC_UI_TIMEOUT),
     ).toBeVisible();
     await user.click(screen.getByRole("radio", { name: /DeepSeek/u }));
 
-    expect(screen.queryByText("已保存 Key（末四位 1234）")).not.toBeInTheDocument();
+    expect(screen.queryByText("已保存接口密钥（末四位 1234）")).not.toBeInTheDocument();
     expect(screen.getByLabelText(/^接口密钥/u)).toHaveAttribute("placeholder", "粘贴接口密钥");
     expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeDisabled();
   }, 30_000);
+
+  it("discovers only masked InkShadow credentials and waits for explicit reuse confirmation", async () => {
+    const harness = createTauriHarness(
+      {},
+      { discoveredSecrets: ["saved-orphan-3172"], trustedDiscovery: true },
+    );
+    const user = userEvent.setup();
+    renderDrawer(harness.runtime);
+
+    expect(await screen.findByText(/找到 1 个墨影曾保存的接口密钥/u)).toBeVisible();
+    expect(screen.getByText(/末四位 3172/u)).toBeVisible();
+    expect(document.body).not.toHaveTextContent("saved-orphan-3172");
+    expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeDisabled();
+    expect(harness.reuseDiscovered).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: /使用末四位 3172 的已保存密钥/u }));
+    expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeEnabled();
+    expect(harness.reuseDiscovered).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
+    expect(await screen.findByText("连接成功 · 已找到模型", {}, ASYNC_UI_TIMEOUT)).toBeVisible();
+    expect(harness.reuseDiscovered).toHaveBeenCalledOnce();
+    expect(harness.saveCredential).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it("uses a newly entered replacement without touching a discovered credential", async () => {
+    const harness = createTauriHarness(
+      {},
+      { discoveredSecrets: ["saved-orphan-3172"], trustedDiscovery: true },
+    );
+    const user = userEvent.setup();
+    renderDrawer(harness.runtime);
+    await screen.findByText(/找到 1 个墨影曾保存的接口密钥/u);
+
+    fireEvent.change(screen.getByLabelText(/^接口密钥/u), {
+      target: { value: "replacement-key" },
+    });
+    await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
+    expect(await screen.findByText("连接成功 · 已找到模型", {}, ASYNC_UI_TIMEOUT)).toBeVisible();
+    expect(harness.reuseDiscovered).not.toHaveBeenCalled();
+    expect(harness.saveCredential).toHaveBeenCalledOnce();
+    expect(harness.deleteDiscovered).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it("requires a second action to delete a discovered credential and leaves it untouched on cancel", async () => {
+    const harness = createTauriHarness(
+      {},
+      { discoveredSecrets: ["saved-orphan-3172"], trustedDiscovery: true },
+    );
+    const onOpenChange = vi.fn();
+    const user = userEvent.setup();
+    renderDrawer(harness.runtime, onOpenChange);
+    await screen.findByText(/找到 1 个墨影曾保存的接口密钥/u);
+
+    await user.click(screen.getByRole("button", { name: /删除末四位 3172 的已保存密钥/u }));
+    expect(harness.deleteDiscovered).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: /取消删除末四位 3172 的本机密钥/u }));
+    expect(harness.deleteDiscovered).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "先不连接，继续开书" }));
+    expect(harness.reuseDiscovered).not.toHaveBeenCalled();
+    expect(harness.deleteDiscovered).not.toHaveBeenCalled();
+    expect(harness.saveCredential).not.toHaveBeenCalled();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  }, 30_000);
+
+  it("deletes a discovered credential only after explicit confirmation", async () => {
+    const harness = createTauriHarness(
+      {},
+      { discoveredSecrets: ["saved-orphan-3172"], trustedDiscovery: true },
+    );
+    const user = userEvent.setup();
+    renderDrawer(harness.runtime);
+    await screen.findByText(/找到 1 个墨影曾保存的接口密钥/u);
+
+    await user.click(screen.getByRole("button", { name: /删除末四位 3172 的已保存密钥/u }));
+    await user.click(screen.getByRole("button", { name: /确认删除末四位 3172 的本机密钥/u }));
+    expect(harness.deleteDiscovered).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/末四位 3172/u)).not.toBeInTheDocument();
+  }, 30_000);
+
+  it("does not offer reuse or deletion when the original provider and account cannot be verified", async () => {
+    const harness = createTauriHarness({}, { discoveredSecrets: ["unknown-origin-3172"] });
+    renderDrawer(harness.runtime);
+
+    expect(await screen.findByText(/无法确认原服务商或账号/u)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /使用末四位 3172/u })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /删除末四位 3172/u })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeDisabled();
+    expect(harness.reuseDiscovered).not.toHaveBeenCalled();
+    expect(harness.deleteDiscovered).not.toHaveBeenCalled();
+    expect(harness.saveCredential).not.toHaveBeenCalled();
+  });
+
+  it("shows a stable support number when safe credential discovery fails", async () => {
+    const harness = createTauriHarness({}, { discoveryFails: true });
+    renderDrawer(harness.runtime);
+
+    expect(await screen.findByText(/暂时无法检查本机已保存的接口密钥/u)).toBeVisible();
+    expect(screen.getByText(/支持编号：墨影-[0-9]{14}-[A-Z0-9]{6}/u)).toBeVisible();
+    expect(document.body).not.toHaveTextContent("CREDENTIAL_STORE_UNAVAILABLE");
+  });
 
   it("restores saved Qwen region, workspace and manual model into quick setup", async () => {
     const harness = createTauriHarness({ alibaba_qwen: "saved-qwen-4321" });
@@ -121,7 +253,7 @@ describe("quick AI connection drawer", () => {
     await waitFor(() => expect(screen.getByLabelText("地域")).toHaveValue("singapore"));
     expect(await screen.findByLabelText(/^服务工作区编号/u)).toHaveValue("workspace-saved");
     expect(screen.getByLabelText(/^模型编号/u)).toHaveValue("qwen-saved-model");
-    expect(await screen.findByText("已保存 Key（末四位 4321）")).toBeVisible();
+    expect(await screen.findByText("已保存接口密钥（末四位 4321）")).toBeVisible();
     expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeEnabled();
   });
 
@@ -138,7 +270,7 @@ describe("quick AI connection drawer", () => {
     await user.click(firstConnectButton);
 
     expect(
-      await screen.findByRole("heading", { name: "连接没成功" }, ASYNC_UI_TIMEOUT),
+      await screen.findByRole("heading", { name: "连接没有完成" }, ASYNC_UI_TIMEOUT),
     ).toBeVisible();
     expect(screen.queryByText(/MODEL_HTTP_UNAUTHORIZED/u)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回修改" }));
@@ -184,12 +316,113 @@ describe("quick AI connection drawer", () => {
     const modelSelect = screen.getByLabelText("开书使用的模型");
     const alternateOption = screen
       .getAllByRole("option")
-      .find((option) => !option.matches(":checked"));
+      .find((option) => option.getAttribute("value") !== "" && !option.matches(":checked"));
     if (alternateOption === undefined) throw new Error("应保留至少两个可选模型");
     const alternateValue = alternateOption.getAttribute("value") ?? "";
     expect(alternateValue).not.toBe("");
     await user.selectOptions(modelSelect, alternateOption);
     expect(modelSelect).toHaveValue(alternateValue);
+  }, 30_000);
+
+  it("uses the same pure-text bootstrap choice across entry points and never defaults to an experimental vision model", async () => {
+    const harness = createTauriHarness(
+      {},
+      {
+        models: [
+          { id: "deepseek-v4-flash-vision-exp", displayName: "deepseek-v4-flash-vision-exp" },
+          { id: "deepseek-v4-flash", displayName: "deepseek-v4-flash" },
+          { id: "deepseek-v4-pro", displayName: "deepseek-v4-pro" },
+        ],
+      },
+    );
+    const user = userEvent.setup();
+    renderDrawer(harness.runtime);
+    await user.click(screen.getByRole("radio", { name: /DeepSeek/u }));
+    fireEvent.change(screen.getByLabelText(/^接口密钥/u), { target: { value: "good-key" } });
+    await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
+
+    expect(await screen.findByLabelText("开书使用的模型")).toHaveDisplayValue("deepseek-v4-flash");
+    await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
+    expect(screen.getByText(/“deepseek-v4-flash”发送固定短句/u)).toBeVisible();
+    expect(screen.queryByText(/“deepseek-v4-flash-vision-exp”发送固定短句/u)).toBeNull();
+  }, 30_000);
+
+  it("keeps an experimental vision-only catalog unselected and explains the pure-text requirement", async () => {
+    const harness = createTauriHarness(
+      {},
+      {
+        models: [
+          {
+            id: "deepseek-v4-flash-vision-exp",
+            displayName: "deepseek-v4-flash-vision-exp",
+          },
+        ],
+      },
+    );
+    const user = userEvent.setup();
+    renderDrawer(harness.runtime);
+    fireEvent.change(screen.getByLabelText(/^接口密钥/u), { target: { value: "good-key" } });
+    await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
+
+    expect(await screen.findByLabelText("开书使用的模型")).toHaveValue("");
+    expect(screen.getByText(/实验性视觉模型不会被自动选作纯文字开书模型/u)).toBeVisible();
+    expect(screen.getByRole("button", { name: "查看固定验证说明" })).toBeDisabled();
+    expect(harness.generate).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it("labels a pre-dispatch probe failure as local preparation with a stable support number", async () => {
+    const harness = createTauriHarness({}, { probePreparationFails: true });
+    const user = userEvent.setup();
+    renderDrawer(harness.runtime);
+    fireEvent.change(screen.getByLabelText(/^接口密钥/u), { target: { value: "good-key" } });
+    await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
+    await screen.findByText("连接成功 · 已找到模型", {}, ASYNC_UI_TIMEOUT);
+    await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
+    await user.click(screen.getByRole("button", { name: "确认 1 次固定验证并继续" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "模型能力检查未发送" }, ASYNC_UI_TIMEOUT),
+    ).toBeVisible();
+    expect(screen.getByText(/没有向模型服务发送内容/u)).toBeVisible();
+    expect(screen.getByText(/支持编号：墨影-[0-9]{14}-[A-Z0-9]{4,8}/u)).toBeVisible();
+    expect(screen.queryByText(/检查网络、Key 和账号权限/u)).toBeNull();
+    expect(screen.queryByText("连接没成功")).toBeNull();
+    expect(screen.getByRole("link", { name: "打开完整模型中心排查" })).toHaveAttribute(
+      "href",
+      "/settings?targetSection=model-capabilities#model-center",
+    );
+    const invocationId =
+      harness.generate.mock.calls[0]?.[0].invocationDispatchLedger?.invocationId ?? "missing";
+    const invocation = await harness.runtime.modelHub.findInvocation(invocationId);
+    expect(invocation).toMatchObject({ attempt: 1 });
+    expect(invocation?.providerDispatchStartedAt).toBeNull();
+    expect(harness.generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
+  }, 30_000);
+
+  it("deduplicates a double confirmation into one fixed probe invocation", async () => {
+    const harness = createTauriHarness();
+    const user = userEvent.setup();
+    const startInvocation = vi.spyOn(harness.runtime.modelHub, "startInvocation");
+    renderDrawer(harness.runtime);
+    fireEvent.change(screen.getByLabelText(/^接口密钥/u), { target: { value: "good-key" } });
+    await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
+    await screen.findByText("连接成功 · 已找到模型", {}, ASYNC_UI_TIMEOUT);
+    await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
+
+    const confirm = screen.getByRole("button", { name: "确认 1 次固定验证并继续" });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+
+    await waitFor(() => expect(harness.generate).toHaveBeenCalledOnce(), ASYNC_UI_TIMEOUT);
+    const probeStarts = startInvocation.mock.calls.filter(
+      ([input]) => input.task === "capability_probe",
+    );
+    expect(probeStarts).toHaveLength(1);
+    const invocationId = probeStarts[0]?.[0].id ?? "missing";
+    await expect(harness.runtime.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      attempt: 1,
+    });
+    expect(harness.generate.mock.calls[0]?.[0].config.retryLimit).toBe(0);
   }, 30_000);
 
   it("shows an uncertain fixed probe as pending review without offering another dispatch", async () => {
@@ -208,7 +441,7 @@ describe("quick AI connection drawer", () => {
     await user.click(screen.getByRole("button", { name: "确认 1 次固定验证并继续" }));
 
     expect(
-      await screen.findByRole("heading", { name: "固定能力验证结果待核对" }, ASYNC_UI_TIMEOUT),
+      await screen.findByRole("heading", { name: "模型能力检查结果待核对" }, ASYNC_UI_TIMEOUT),
     ).toBeVisible();
     expect(screen.getAllByText(/不会自动重发/u).length).toBeGreaterThan(0);
     expect(screen.queryByText("连接没成功")).not.toBeInTheDocument();
@@ -292,12 +525,37 @@ function createTauriHarness(
   options: Readonly<{
     probeFails?: boolean;
     probeAmbiguous?: boolean;
+    probePreparationFails?: boolean;
     twoModels?: boolean;
+    models?: readonly { readonly id: string; readonly displayName: string }[];
+    discoveredSecrets?: readonly string[];
+    trustedDiscovery?: boolean;
+    discoveryFails?: boolean;
   }> = {},
 ) {
   const base = createDevelopmentRuntime(window.localStorage);
   const secrets = new Map(Object.entries(initialSecrets));
-  const credentials: CredentialStore = {
+  const discoveredSecrets = new Map(
+    (options.discoveredSecrets ?? []).map((secret, index) => [
+      "discovery-" + String(index + 1),
+      secret,
+    ]),
+  );
+  const reuseDiscovered = vi.fn((discoveryId: string, providerId: string) => {
+    const secret = discoveredSecrets.get(discoveryId);
+    if (secret === undefined) return Promise.reject(new Error("discovery expired"));
+    secrets.set(providerId, secret);
+    return Promise.resolve({ configured: true, lastFour: secret.slice(-4) });
+  });
+  const deleteDiscovered = vi.fn((discoveryId: string) => {
+    discoveredSecrets.delete(discoveryId);
+    return Promise.resolve({ configured: false, lastFour: null });
+  });
+  const saveCredential = vi.fn((providerId: string, secret: string) => {
+    secrets.set(providerId, secret);
+    return Promise.resolve({ configured: true, lastFour: secret.slice(-4) });
+  });
+  const credentials = {
     getSummary: vi.fn((providerId: string) => {
       const secret = secrets.get(providerId);
       return Promise.resolve({
@@ -305,14 +563,44 @@ function createTauriHarness(
         lastFour: secret?.slice(-4) ?? null,
       });
     }),
-    save: vi.fn((providerId: string, secret: string) => {
-      secrets.set(providerId, secret);
-      return Promise.resolve({ configured: true, lastFour: secret.slice(-4) });
-    }),
+    save: saveCredential,
     delete: vi.fn((providerId: string) => {
       secrets.delete(providerId);
       return Promise.resolve({ configured: false, lastFour: null });
     }),
+    discoverModelCredentials: vi.fn(() =>
+      options.discoveryFails === true
+        ? Promise.reject(
+            Object.assign(new Error("credential discovery unavailable"), {
+              code: "CREDENTIAL_STORE_UNAVAILABLE",
+              requestId: "01a033ab-1234-7890-abcd-1234567890ab",
+            }),
+          )
+        : Promise.resolve(
+            [...discoveredSecrets.entries()].map(([discoveryId, secret]) => ({
+              discoveryId,
+              lastFour: secret.slice(-4),
+              ...(options.trustedDiscovery === true
+                ? { providerKind: "deepseek", sourceConnectionId: "deepseek" }
+                : {}),
+            })),
+          ),
+    ),
+    reuseDiscovered,
+    deleteDiscovered,
+  } as CredentialStore & {
+    discoverModelCredentials(): Promise<readonly { discoveryId: string; lastFour: string }[]>;
+    reuseDiscovered(
+      discoveryId: string,
+      providerId: string,
+    ): Promise<{
+      configured: boolean;
+      lastFour: string | null;
+    }>;
+    deleteDiscovered(discoveryId: string): Promise<{
+      configured: boolean;
+      lastFour: string | null;
+    }>;
   };
   const checkConnection = vi.fn(
     (config: Parameters<NativeModelGatewayClient["checkConnection"]>[0]) => {
@@ -329,30 +617,40 @@ function createTauriHarness(
       });
     },
   );
-  const generate = vi.fn(() =>
-    options.probeAmbiguous === true
+  const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+    options.probePreparationFails === true
       ? Promise.reject(
-          Object.assign(new Error("connection ended before a response"), {
-            code: "MODEL_NETWORK_TIMEOUT",
-            retryable: true,
-            diagnostics: { stage: "transport" },
+          Object.assign(new Error("native preparation stopped before dispatch"), {
+            code: "MODEL_CREDENTIAL_MISSING",
+            diagnostics: { stage: "request_preparation" },
           }),
         )
-      : options.probeFails === true
+      : options.probeAmbiguous === true
         ? Promise.reject(
-            Object.assign(new Error("model does not support text"), {
-              code: "MODEL_TEXT_UNSUPPORTED",
+            Object.assign(new Error("connection ended before a response"), {
+              code: "MODEL_NETWORK_TIMEOUT",
+              retryable: true,
+              diagnostics: { stage: "transport" },
             }),
           )
-        : Promise.resolve({ text: "OK", usage: null }),
+        : options.probeFails === true
+          ? Promise.reject(
+              Object.assign(new Error("model does not support text"), {
+                code: "MODEL_TEXT_UNSUPPORTED",
+              }),
+            )
+          : Promise.resolve({ text: "OK", usage: null }),
   );
   const modelGateway: NativeModelGatewayClient = {
     available: true,
+    ...(options.probePreparationFails === true
+      ? { supportsNativeInvocationDispatchLedger: true as const }
+      : {}),
     checkConnection,
     listModels: (config) =>
       Promise.resolve({
         provider: config.provider,
-        models: [
+        models: options.models ?? [
           { id: "novel-model", displayName: "Novel Model" },
           ...(options.twoModels === true
             ? [{ id: "backup-novel", displayName: "Backup Novel" }]
@@ -372,5 +670,14 @@ function createTauriHarness(
     credentials,
     modelGateway,
   });
-  return { runtime, secrets, checkConnection, generate };
+  return {
+    runtime,
+    secrets,
+    credentials,
+    saveCredential,
+    reuseDiscovered,
+    deleteDiscovered,
+    checkConnection,
+    generate,
+  };
 }

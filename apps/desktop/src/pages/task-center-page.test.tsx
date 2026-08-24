@@ -41,6 +41,9 @@ describe("TaskCenterPage", () => {
 
     await user.click(screen.getByRole("tab", { name: "通知 1" }));
     expect(await screen.findByRole("heading", { name: "后台任务执行失败" })).toBeInTheDocument();
+    expect(screen.getByText("信息不完整")).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("true");
+    expect(document.body).not.toHaveTextContent("false");
     expect(document.body).not.toHaveTextContent(uuid(2));
     await user.click(screen.getByRole("button", { name: "全部标为已读" }));
 
@@ -110,7 +113,7 @@ describe("TaskCenterPage", () => {
     ).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("provider.internal.secret_step");
     expect(screen.getByText("正在处理后台步骤")).toBeVisible();
-    expect(screen.getByRole("link", { name: "调整模型或上下文" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "调整模型或参考资料" })).toBeVisible();
   });
 
   it("shows an opening journey task in natural Chinese with its support number and no retry promise", async () => {
@@ -121,7 +124,9 @@ describe("TaskCenterPage", () => {
     expect(await screen.findByRole("heading", { name: "生成开书建议" })).toBeVisible();
     expect(screen.getByText(/不会自动重试/u)).toBeVisible();
     expect(screen.getByText("等待模型返回")).toBeVisible();
-    expect(screen.getByText(`支持编号：${uuid(42)}`)).toBeVisible();
+    expect(screen.getByText("支持编号：墨影-20260726000000-00002A")).toBeVisible();
+    expect(document.body).not.toHaveTextContent(uuid(42));
+    expect(document.body).not.toHaveTextContent(uuid(41));
     expect(screen.queryByText("ai.opening.generate")).not.toBeInTheDocument();
     expect(screen.queryByText("OPENING_RESULT_PENDING_REVIEW")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "返回开书页面处理" })).toHaveAttribute(
@@ -188,7 +193,7 @@ function seedTaskCenter(): void {
       level: "inbox",
       severity: "error",
       route: { entityType: "task", entityId: task.id },
-      metadata: { taskType: "ai.generate", attempt: 1, reasonCode: "UPSTREAM_TEMPORARY" },
+      metadata: { taskType: "ai.generate", attempt: true, reasonCode: "UPSTREAM_TEMPORARY" },
       requiresResolution: false,
       expiresAt: null,
       now: INITIAL_TIME,
@@ -367,6 +372,7 @@ function seedFailedOpeningJourneyTask(): void {
       metadata: {
         operation: "creative_opening",
         journeyId: uuid(41),
+        startedAt: INITIAL_TIME,
         batchId: uuid(42),
         supportId: uuid(42),
         autoRetryCount: 0,

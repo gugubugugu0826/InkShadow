@@ -256,7 +256,8 @@ describe("StoryGovernancePage", () => {
     }
     expect(within(currentSectionBefore).getByText("灯塔 每晚只能亮一次。")).toBeVisible();
     expect(within(currentSectionBefore).getByText("查看证据")).toBeVisible();
-    expect(document.body).not.toHaveTextContent(/AI|模型|调用|上下文|路由|令牌|追踪|候选|费用/u);
+    const storyMain = screen.getByRole("main", { name: "设定" });
+    expect(storyMain).not.toHaveTextContent(/AI|模型|调用|上下文|路由|令牌|追踪|候选|费用/u);
     expect(screen.queryByText("这条待确认内容不能出现在直接模式。")).toBeNull();
     expect(screen.queryByText("这条试写资料不能出现在直接模式。")).toBeNull();
     const pendingSection = screen

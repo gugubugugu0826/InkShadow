@@ -21,7 +21,7 @@ describe("model hub routing visibility", () => {
     ["text_generation", "文本生成"],
     ["reasoning", "推理"],
     ["structured_output", "结构化输出"],
-    ["embedding", "向量检索"],
+    ["embedding", "查找相关故事资料"],
     ["rerank", "结果排序"],
     ["image_generation", "图片生成"],
     ["vision", "图片理解"],

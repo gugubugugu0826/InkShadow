@@ -269,7 +269,7 @@ async function assertRequiredCapabilities(
   }
   if (!textGenerationSupported) {
     const message =
-      "当前 AI 分工缺少已验证的文本生成能力；本次章节摘要已跳过，正文和已保存版本不受影响。";
+      "当前创作任务安排缺少已验证的文本生成能力；本次章节摘要已跳过，正文和已保存版本不受影响。";
     if (duringDispatch) {
       throw new ModelHubExecutionError(
         "MODEL_HUB_CHAPTER_SUMMARY_CAPABILITY_UNAVAILABLE",
@@ -385,7 +385,7 @@ function assertSelectionMatches(
   ) {
     throw new ModelHubExecutionError(
       "MODEL_HUB_PLAN_CHANGED",
-      "章节摘要发送前后 AI 分工发生变化，本次结果未保存，请重试。",
+      "章节摘要发送前后创作任务安排发生变化，本次结果未保存，请重试。",
       true,
     );
   }
@@ -424,7 +424,7 @@ function normalizePreDispatchUnavailable(cause: unknown): ChapterSummaryModelUna
   }
   return new ChapterSummaryModelUnavailableError(
     "MODEL_HUB_CHAPTER_SUMMARY_UNAVAILABLE",
-    "当前没有可用于长程记忆压缩的模型；请先在模型中心配置这项 AI 分工。",
+    "当前没有可用于长程记忆压缩的模型；请先在模型中心配置这项创作任务安排。",
   );
 }
 

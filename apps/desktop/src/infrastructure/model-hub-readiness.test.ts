@@ -53,7 +53,7 @@ describe("projectModelHubReadiness", () => {
       runnableCoreTaskCount: 4,
       shortLabel: "AI 基础连接可用",
     });
-    expect(basic.description).toContain("当前作品仍会在发送前单独检查隐私、上下文和请求长度");
+    expect(basic.description).toContain("当前作品仍会在发送前单独检查隐私、参考资料和请求长度");
 
     const complete = projectModelHubReadiness({
       connections,
@@ -67,7 +67,7 @@ describe("projectModelHubReadiness", () => {
       missingCoreTasks: [],
       shortLabel: "AI 基础连接可用",
     });
-    expect(complete.description).toContain("不代表任意章节都能跳过发送前预检");
+    expect(complete.description).toContain("每个章节在发送前仍会单独检查");
   });
 
   it("reports partial availability when a configured fallback is actually required", () => {

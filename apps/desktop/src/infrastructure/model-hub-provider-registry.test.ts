@@ -117,14 +117,15 @@ describe("Model Hub provider registry", () => {
     expect(
       getModelProviderPreset("openai").expertFields.find(({ key }) => key === "retryLimit"),
     ).toMatchObject({
-      description: "只重试连接测试和模型目录读取；生成、向量检索、结果排序与图片不会自动重试。",
+      description:
+        "只重试连接测试和模型目录读取；生成、查找相关故事资料、结果排序与图片不会自动重试。",
     });
     expect(
       getModelProviderPreset("custom_openai_compatible").expertFields.find(
         ({ key }) => key === "embeddingPath",
       ),
     ).toMatchObject({
-      label: "向量检索路径",
+      label: "查找相关故事资料路径",
       description: "默认 /embeddings；只支持绝对接口路径。",
     });
     expect(getModelProviderPreset("alibaba_qwen").basicFields).toEqual(

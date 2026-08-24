@@ -1,6 +1,6 @@
 [package]
 name = "inkshadow-desktop"
-version = "0.2.10"
+version = "0.2.11"
 description = "InkShadow desktop application"
 authors = ["InkShadow"]
 edition = "2021"
@@ -23,6 +23,7 @@ futures-util = "0.3"
 hmac = "0.12"
 hpke = { version = "0.13", default-features = false, features = ["alloc", "p256"] }
 keyring = "4"
+keyring-core = "1"
 log = "0.4"
 rand = "0.9"
 reqwest = { version = "0.13", default-features = false, features = [

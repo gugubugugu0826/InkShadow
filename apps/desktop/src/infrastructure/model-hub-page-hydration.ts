@@ -6,6 +6,7 @@ import {
   type ModelProviderKind,
   type NovelAiTask,
 } from "./model-hub-provider-registry";
+import { isAutomaticPureTextOpeningCandidateEligible } from "./model-hub-router";
 import {
   isRetiredModelProviderConnection,
   type ModelCapabilityEvidence,
@@ -232,11 +233,15 @@ export async function loadAuthoritativeModelHubHydration(
     !isRetiredModelProviderConnection(requestedConnection)
       ? requestedConnection
       : undefined;
+  const bookStartRoute = routeGroups.find(
+    (route) => route?.task === "book_start_guidance" && route.enabled,
+  );
   const proseRoute = routeGroups.find(
     (route) => route?.task === "prose_generation" && route.enabled,
   );
+  const authoritativeOpeningRoute = bookStartRoute ?? proseRoute;
   const routedCatalogEntry = allCatalogEntries.find(
-    ({ id }) => id === proseRoute?.primaryCatalogEntryId,
+    ({ id }) => id === authoritativeOpeningRoute?.primaryCatalogEntryId,
   );
   const selectedConnection =
     selectableConnections.find(({ id }) => id === input.requestedConnectionId) ??
@@ -264,9 +269,20 @@ export async function loadAuthoritativeModelHubHydration(
   const routes = Object.freeze(
     routeGroups.filter((route): route is NovelTaskRoute => route !== null),
   );
+  const selectionNow = input.clock.now();
   const selectedCatalogEntry =
     selectedCatalog.find(({ providerModelId }) => providerModelId === input.requestedModelId) ??
+    selectedCatalog.find(({ id }) => id === bookStartRoute?.primaryCatalogEntryId) ??
     selectedCatalog.find(({ id }) => id === proseRoute?.primaryCatalogEntryId) ??
+    selectedCatalog.find(
+      (catalogEntry) =>
+        catalogEntry.availability === "available" &&
+        catalogEntry.lifecycle !== "deprecated" &&
+        isAutomaticPureTextOpeningCandidateEligible(
+          { catalogEntry, capabilities: Object.freeze([]) },
+          selectionNow,
+        ),
+    ) ??
     selectedCatalog.find(({ availability }) => availability === "available") ??
     null;
 
@@ -448,7 +464,7 @@ export function modelHubHydrationPhaseLabel(phase: ModelHubHydrationPhase): stri
     LOADING_CONNECTIONS: "正在读取已保存的 AI 连接……",
     RESTORING_SELECTION: "正在恢复上次使用的 AI 连接……",
     CHECKING_CREDENTIAL: "正在检查系统凭据……",
-    LOADING_CATALOG: "正在载入模型目录和 AI 分工……",
+    LOADING_CATALOG: "正在载入模型目录和创作任务安排……",
     READY: "模型中心已载入",
     READY_WITH_WARNINGS: "模型中心已载入，但有一项需要重试",
     ERROR: "模型中心暂时无法读取",

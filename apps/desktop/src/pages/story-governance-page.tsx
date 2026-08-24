@@ -3713,7 +3713,7 @@ export function StoryGovernancePage() {
           }
         }}
         title={memoryDialog === "create" ? "添加用户记忆" : "编辑记忆"}
-        description="保存即表示你确认这条内容可参与后续上下文选择。"
+        description="保存即表示你确认这条内容可参与后续故事资料选择。"
         footer={
           <>
             <Button variant="secondary" onClick={() => setMemoryDialog(null)}>
@@ -4268,13 +4268,13 @@ function storyFactMergeNotice(snapshot: StoryFactSnapshot): string | null {
   }
   if (subject.mergeStatus === "ambiguous_confirmed_alias") {
     if (readAmbiguousStoryFactEntityAlias(snapshot) === null) {
-      return "这个候选的对象匹配结构已损坏，因此不能确认或辨认。请将它标记为不再生效，再重新识别正文或手动添加正确事实。";
+      return "这条待确认结果的对象匹配资料已损坏，因此不能确认或辨认。请将它标记为不再生效，再重新识别正文或手动添加正确事实。";
     }
     const count = Array.isArray(subject.matchedEntityKeys) ? subject.matchedEntityKeys.length : 0;
     return `原文中的名称同时对应 ${String(count)} 个已确认对象。墨影没有按姓名猜测或自动合并；请先明确它指向哪个对象，或保留为新的独立对象。`;
   }
   if (subject.mergeStatus === "untrusted_key_ignored") {
-    return "模型给出的对象编号没有已确认依据，已被忽略并隔离为新候选；请核对后决定。";
+    return "模型给出的对象编号没有已确认依据，已被忽略并作为新的待确认结果单独保留；请核对后决定。";
   }
   return null;
 }

@@ -29,6 +29,7 @@ import {
 import { Link } from "react-router-dom";
 
 import { ensureCurrentSavedVersionStoryFactsForDirectMode } from "../infrastructure/accepted-chapter-fact-preflight";
+import { openingJourneySupportNumber } from "../infrastructure/opening-journey-run";
 import {
   inspectPipelineStageFailureCauseCode,
   pipelineRetryProgressStep,
@@ -494,7 +495,15 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
                         <>
                           <span>{taskFailureDescription(task.failure)}</span>{" "}
                           {task.type === "ai.opening.generate" && (
-                            <span>{`支持编号：${task.failure.requestId}`}</span>
+                            <span>
+                              {`支持编号：${openingJourneySupportNumber({
+                                supportId: task.failure.requestId,
+                                startedAt:
+                                  typeof task.metadata.startedAt === "string"
+                                    ? task.metadata.startedAt
+                                    : task.createdAt,
+                              })}`}
+                            </span>
                           )}
                         </>
                       }
@@ -520,7 +529,7 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
                       {(task.failure.actions.includes("SWITCH_MODEL") ||
                         task.failure.actions.includes("REDUCE_CONTEXT")) && (
                         <Link className="button-link" to="/settings#model-center">
-                          调整模型或上下文
+                          调整模型或参考资料
                         </Link>
                       )}
                       {task.failure.actions.includes("EXPORT_DIAGNOSTICS") && (
@@ -573,6 +582,15 @@ const ORDINARY_NOTIFICATION_METADATA_KEYS = new Set([
   "needsConfirmationCount",
 ]);
 
+const ORDINARY_NOTIFICATION_METADATA_TYPES: Readonly<Record<string, "string" | "number">> =
+  Object.freeze({
+    taskType: "string",
+    attempt: "number",
+    reasonCode: "string",
+    pipelineStatus: "string",
+    detectedCount: "number",
+    needsConfirmationCount: "number",
+  });
 function NotificationList({ busyId, notifications, onMarkRead }: NotificationListProps) {
   if (notifications.length === 0) {
     return (
@@ -722,8 +740,8 @@ function taskTypeLabel(type: string): string {
 
 function progressStepLabel(step: string): string {
   const labels: Record<string, string> = {
-    "context.build": "整理上下文",
-    "context.retrieving": "检索并整理上下文",
+    "context.build": "挑选本次参考资料",
+    "context.retrieving": "查找并挑选故事资料",
     "model.generating": "接收模型输出",
     "candidate.validating": "检查 AI 建议草稿是否完整",
     "candidate.persisted": "保存隔离的 AI 建议草稿",
@@ -735,7 +753,7 @@ function progressStepLabel(step: string): string {
     "import.scan": "扫描文件",
     "import.commit": "写入项目",
     "index.keyword": "构建关键词索引",
-    "index.embedding": "构建向量索引",
+    "index.embedding": "整理相关故事资料",
     "search.rebuilt": "更新本地搜索",
     "summary.updated": "更新章节摘要",
     "story-state.updated": "更新故事设定",
@@ -866,7 +884,7 @@ function metadataLabel(key: string): string {
   const labels: Record<string, string> = {
     taskType: "任务",
     attempt: "尝试次数",
-    reasonCode: "原因码",
+    reasonCode: "未完成原因",
     pipelineStatus: "整理状态",
     detectedCount: "识别变化",
     needsConfirmationCount: "需要确认",
@@ -875,6 +893,10 @@ function metadataLabel(key: string): string {
 }
 
 function metadataValue(key: string, value: unknown): string {
+  const expectedType = ORDINARY_NOTIFICATION_METADATA_TYPES[key];
+  if (expectedType === undefined || typeof value !== expectedType) {
+    return "信息不完整";
+  }
   if (key === "taskType" && typeof value === "string") {
     return taskTypeLabel(value);
   }

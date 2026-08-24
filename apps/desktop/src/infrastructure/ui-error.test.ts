@@ -202,20 +202,20 @@ describe("normalizeUiError SQLite persistence failures", () => {
     ["MODEL_OUTPUT_EMPTY", ["可用于写作的可见文字", "支持文本生成", "普通文本模型"]],
     [
       "MODEL_HUB_ROUTE_NOT_CONFIGURED",
-      ["验证至少一个模型的写作能力", "应用智能推荐", "缺少向量检索不会阻止"],
+      ["尚未选择负责这项写作的模型", "验证模型能力", "配置创作任务"],
     ],
-    ["MODEL_HUB_ROUTE_DISABLED", ["已明确停用", "没有向模型发送内容", "不会改用旧配置"]],
-    ["MODEL_PROFILE_NOT_READY", ["没有可用于这次写作", "继续手动编辑", "前往模型中心"]],
+    ["MODEL_HUB_ROUTE_DISABLED", ["创作任务已停用", "没有向模型发送内容", "不会改用旧设置"]],
+    ["MODEL_PROFILE_NOT_READY", ["没有可用于这次写作", "继续手动编辑", "连接并验证一个文本模型"]],
     ["CREATIVE_INPUT_INVALID_CONTROL_CHARACTER", ["不可见控制字符", "全角标点", "换行仍然支持"]],
     [
       "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED",
-      ["没有完整写入", "之前可用的分工仍保持不变", "重试“应用 AI 分工”"],
+      ["没有完整保存", "之前可用的选择仍保持不变", "重试“保存创作任务”"],
     ],
     [
       "MODEL_HUB_MANUAL_ROUTE_PRIVACY_CONFLICT",
-      ["手动设置的云端任务", "没有覆盖", "本机模型或先停用"],
+      ["手动选择的云端模型", "没有覆盖", "本机模型或先停用"],
     ],
-    ["IMPORT_ANALYSIS_ROUTE_NOT_CONFIGURED", ["作品分析", "模型设置", "已导入原文不会因此改变"]],
+    ["IMPORT_ANALYSIS_ROUTE_NOT_CONFIGURED", ["作品分析", "模型中心", "已导入原文不会因此改变"]],
     ["IMPORT_JOURNEY_PERSIST_FAILED", ["本地导入进度", "保持当前页面打开", "不会被静默覆盖"]],
     [
       "IMPORT_PENDING_REQUEST_CLEAR_FAILED",
@@ -239,6 +239,32 @@ describe("normalizeUiError SQLite persistence failures", () => {
       expect(normalized.description).toContain(fragment);
     }
     expect(normalized.description).not.toContain(privateDetail);
+  });
+
+  it.each([
+    "MODEL_HUB_ROUTE_NOT_CONFIGURED",
+    "MODEL_HUB_ROUTE_DISABLED",
+    "MODEL_PROFILE_NOT_READY",
+    "IMPORT_ANALYSIS_ROUTE_NOT_CONFIGURED",
+  ])(
+    "keeps ordinary recovery copy task-led and free of internal model-hub terms for %s",
+    (code) => {
+      const ordinary = projectOrdinaryUiError({
+        code,
+        message: "private route detail",
+        retryable: true,
+      });
+
+      expect(ordinary.description).not.toMatch(/AI 分工|向量检索|路由|MODEL_|UUID|项目标识/u);
+      expect(ordinary.description).not.toContain("private route detail");
+    },
+  );
+
+  it("describes a model timeout without blaming credentials, accounts, or the network", () => {
+    const ordinary = projectOrdinaryUiError({ code: "MODEL_TIMEOUT", message: "private" });
+    expect(ordinary.description).toContain("模型");
+    expect(ordinary.description).toContain("不会自动重试");
+    expect(ordinary.description).not.toMatch(/网络|密钥|账号|权限/u);
   });
 
   it("explains how to recover from browser storage quota exhaustion", () => {

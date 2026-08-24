@@ -166,7 +166,7 @@ export async function runModelHubStructuredCapabilityProbe(
     }
     throw new ModelCenterError(
       "MODEL_STRUCTURED_OUTPUT_PROBE_FAILED",
-      "模型没有通过 JSON 结构化输出验证；没有写入能力证据或修改 AI 分工。再次验证需要用户重新触发。",
+      "模型没有通过 JSON 结构化输出验证；没有写入能力证据或修改创作任务安排。再次验证需要用户重新触发。",
       isRetryable(cause),
       cause instanceof ModelCenterError ? cause.diagnostics : null,
     );

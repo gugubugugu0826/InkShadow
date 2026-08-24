@@ -136,7 +136,7 @@ export async function runModelHubTranslationCapabilityProbe(input: {
   if (!isAcceptedTranslation(generated.text)) {
     throw new ModelCenterError(
       "MODEL_TRANSLATION_PROBE_FAILED",
-      "模型没有通过固定中英翻译验证；没有写入翻译能力证据或修改 AI 分工。",
+      "模型没有通过固定中英翻译验证；没有写入翻译能力证据或修改创作任务安排。",
       true,
     );
   }

@@ -94,14 +94,14 @@ export async function retireModelHubConnection(
   if (legacyResult.status === "rejected" || credentialResult.status === "rejected") {
     throw new ModelHubStoreError(
       "MODEL_HUB_CONNECTION_RETIREMENT_INCOMPLETE",
-      "连接已停止参与 AI 分工，但旧模型选择或系统凭据尚未完全清理。请重试“移除连接”；已生成内容和历史模型使用记录不会受影响。",
+      "连接已停止参与创作任务安排，但旧模型选择或系统凭据尚未完全清理。请重试“移除连接”；已生成内容和历史模型使用记录不会受影响。",
       true,
     );
   }
   if (credentialResult.value.configured) {
     throw new ModelHubStoreError(
       "MODEL_HUB_CREDENTIAL_DELETE_FAILED",
-      "连接已停止参与 AI 分工，但系统凭据库仍报告密钥存在。请重试“移除连接”。",
+      "连接已停止参与创作任务安排，但系统凭据库仍报告密钥存在。请重试“移除连接”。",
       true,
     );
   }

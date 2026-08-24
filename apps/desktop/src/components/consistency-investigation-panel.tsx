@@ -73,7 +73,7 @@ const TASK_GRAPH_TOOL_LABELS: Readonly<Record<string, string>> = {
   search_fts: "检索当前已接受正文",
   inspect_causal: "检查已确认剧情因果",
   validate_evidence: "校验证据当前性",
-  model_synthesis: "生成候选调查结论",
+  model_synthesis: "生成待确认的调查结论",
   verify_findings: "逐项核验调查结论",
 };
 

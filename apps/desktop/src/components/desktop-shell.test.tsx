@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { runGenerationPreflight } from "@inkshadow/ai-core";
 import { parseIsoUtcTimestamp } from "@inkshadow/domain";
 
+import { APPEARANCE_PREFERENCE_STORAGE_KEY } from "../appearance-preference";
 import {
   recordSafeGenerationPreflightDiagnostic,
   recordSafeGenerationPreflightFailureDiagnostic,
@@ -180,11 +181,25 @@ describe("DesktopShell", () => {
       expect(within(projectNavigation).getByRole("link", { name: label })).toBeVisible();
     }
 
-    expect(screen.queryByLabelText("工具导航")).not.toBeInTheDocument();
+    const toolNavigation = screen.getByLabelText("工具导航");
+    expect(within(toolNavigation).getAllByRole("link")).toHaveLength(3);
+    expect(
+      within(toolNavigation).queryByRole("link", { name: "任务与通知" }),
+    ).not.toBeInTheDocument();
+    expect(within(toolNavigation).getByRole("link", { name: "模型使用与费用" })).toHaveAttribute(
+      "href",
+      "/usage",
+    );
+    expect(within(toolNavigation).getByRole("link", { name: "模型中心" })).toHaveAttribute(
+      "href",
+      "/settings#model-center",
+    );
+    expect(within(toolNavigation).getByRole("link", { name: "设置" })).toHaveAttribute(
+      "href",
+      "/settings",
+    );
     expect(screen.queryByRole("button", { name: "搜索页面与命令" })).not.toBeInTheDocument();
     expect(screen.queryByText("任务与通知")).not.toBeInTheDocument();
-    expect(screen.queryByText("模型使用与费用")).not.toBeInTheDocument();
-    expect(screen.queryByText("模型中心")).not.toBeInTheDocument();
     expect(screen.queryByText("网络可用")).not.toBeInTheDocument();
 
     await user.keyboard("{Control>}k{/Control}");
@@ -194,11 +209,27 @@ describe("DesktopShell", () => {
     await user.click(menuTrigger);
     expect(screen.getByRole("menu", { name: "更多选项" })).toBeVisible();
     expect(screen.getByRole("menuitem", { name: "设置" })).toBeVisible();
-    expect(screen.getByRole("menuitem", { name: /外观：切换到/u })).toBeVisible();
+    expect(screen.getByRole("menuitem", { name: /外观：当前.+，切换到/u })).toBeVisible();
     expect(screen.getByRole("menuitem", { name: "切换专业模式" })).toBeVisible();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu", { name: "更多选项" })).not.toBeInTheDocument();
     expect(menuTrigger).toHaveFocus();
+  });
+
+  it("labels the appearance switch with both the current and next state", async () => {
+    window.localStorage.setItem(APPEARANCE_PREFERENCE_STORAGE_KEY, "light");
+    const user = userEvent.setup();
+    renderShell("/start");
+
+    const switcher = await screen.findByRole("button", {
+      name: "当前浅色外观，切换到深色外观",
+    });
+    expect(switcher).toHaveTextContent("浅色");
+
+    await user.click(switcher);
+    expect(screen.getByRole("button", { name: "当前深色外观，切换到浅色外观" })).toHaveTextContent(
+      "深色",
+    );
   });
 
   it("updates the document title and moves focus to the new route heading", async () => {

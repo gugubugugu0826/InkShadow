@@ -379,7 +379,7 @@ export function ProfessionalCreatePage() {
             </details>
 
             <details>
-              <summary>AI 分工、上下文与自动检查</summary>
+              <summary>创作任务安排、上下文与自动检查</summary>
               <p>
                 这些能力需要先在模型中心
                 连接并测试模型。创建项目不会假装已经配置，也不会阻止你先写正文。
@@ -430,7 +430,7 @@ export function ProfessionalCreatePage() {
               查看设定
             </Link>
             <Link className="button-link button-link--secondary" to="/settings#model-routing">
-              配置 AI 分工
+              配置创作任务安排
             </Link>
           </nav>
         </section>

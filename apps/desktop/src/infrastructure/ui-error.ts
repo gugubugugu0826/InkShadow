@@ -109,9 +109,9 @@ function chineseErrorDescription(code: AppError["code"]): string {
     CHAPTER_NOT_FOUND: "找不到这个章节。请返回章节列表后重新选择。",
     CHAPTER_DELETED: "章节已删除，请先从回收站恢复后再编辑。",
     VERSION_CONFLICT: "内容已在其他操作中变化，请重新加载并比较版本。",
-    BASE_VERSION_CHANGED: "恢复草稿或候选基于旧版本，请先解决冲突。",
+    BASE_VERSION_CHANGED: "恢复草稿或 AI 建议基于旧版本，请先解决冲突。",
     RECOVERY_DRAFT_NOT_FOUND: "没有找到可保存的恢复草稿。请返回当前章节检查最新保存版本。",
-    CANDIDATE_NOT_FOUND: "找不到这个 AI 建议版本。请刷新候选列表后重试。",
+    CANDIDATE_NOT_FOUND: "找不到这个 AI 建议版本。请刷新 AI 建议列表后重试。",
     CANDIDATE_NOT_READY: "AI 建议版本尚未准备完成。请稍后刷新，或重新生成。",
     CANDIDATE_ALREADY_DECIDED: "AI 建议版本已经处理。请刷新页面查看当前正文与版本历史。",
     CANDIDATE_TARGET_MISSING: "AI 建议版本没有关联章节。请返回章节后重新生成。",
@@ -137,7 +137,7 @@ function recordErrorDescription(code: string): string {
     return "这次改动较长，无法安全逐句比较；你仍可查看完整建议并整段采用、另存或放弃。";
   }
   if (code === "IMPORT_ANALYSIS_ROUTE_NOT_CONFIGURED") {
-    return "作品分析还没有可用的 AI 分工。请前往模型设置验证写作能力并完成任务分工；已导入原文不会因此改变。";
+    return "作品分析尚未选择可用模型。请前往模型中心验证模型能力，再为“作品分析”选择模型；已导入原文不会因此改变。";
   }
   if (code === "IMPORT_ANALYSIS_STRUCTURED_OUTPUT_UNVERIFIED") {
     return "当前模型尚未通过作品分析所需的结构化输出验证。请在模型设置中重新验证或改选模型。";
@@ -170,7 +170,7 @@ function recordErrorDescription(code: string): string {
     return "安全更新未完成。当前版本仍可离线使用；请检查网络并只按已验证的官方发行说明重试。";
   }
   if (code === "MODEL_TIMEOUT") {
-    return "模型在 180 秒内没有返回，本次操作已停止且不会自动重试。正文和已有建议没有改变，可稍后明确重试。";
+    return "模型未在约定等待时间内返回。墨影已停止等待，不会自动重试，也不会改动正文；请先核对这次发送结果，再由你决定是否重试。";
   }
   if (code === "MODEL_NOT_CONNECTED") {
     return "当前没有可用的 AI 连接，本次请求没有发送。请先连接并验证一个创作服务后再试。";
@@ -182,13 +182,13 @@ function recordErrorDescription(code: string): string {
     return "连接已建立，但模型没有返回可用于写作的可见文字。请确认所选模型支持文本生成；若它只返回推理内容，请改选普通文本模型后重试。";
   }
   if (code === "MODEL_HUB_ROUTE_NOT_CONFIGURED") {
-    return "这项写作任务还没有可用的 AI 分工。请先验证至少一个模型的写作能力，再在模型中心应用智能推荐；缺少向量检索不会阻止基础文本写作。";
+    return "尚未选择负责这项写作的模型，本次请求没有发送。请先验证模型能力，再到模型中心配置创作任务并选择模型。";
   }
   if (code === "MODEL_HUB_ROUTE_DISABLED") {
-    return "这项写作任务的 AI 分工已明确停用。本次请求没有向模型发送内容，也不会改用旧配置；请在模型中心重新启用或明确分配模型后再试。";
+    return "这项创作任务已停用，本次请求没有向模型发送内容，也不会改用旧设置；请在模型中心重新启用并选择模型后再试。";
   }
   if (code === "MODEL_PROFILE_NOT_READY") {
-    return "当前没有可用于这次写作的兼容模型。你仍可继续手动编辑和保存正文；如需 AI，请选择一个已连接模型，或前往模型中心完成任务分工。";
+    return "当前没有可用于这次写作的兼容模型。你仍可继续手动编辑和保存正文；如需使用模型，请先连接并验证一个文本模型，再为这项创作任务选择它。";
   }
   if (code === "CREATIVE_INPUT_INVALID_EMPTY") {
     return "请先写下一句话灵感；当前页面不会创建空项目，也不会向 AI 发送内容。";
@@ -206,10 +206,10 @@ function recordErrorDescription(code: string): string {
     return "输入中包含不可见控制字符。请删除异常字符后重试；普通中文、全角标点和换行仍然支持。";
   }
   if (code === "MODEL_HUB_ROUTING_PLAN_WRITE_FAILED") {
-    return "AI 分工没有完整写入，之前可用的分工仍保持不变。请直接重试“应用 AI 分工”；若问题持续，请下载脱敏诊断包后联系支持。";
+    return "创作任务的模型选择没有完整保存，之前可用的选择仍保持不变。请重试“保存创作任务”；若问题持续，请下载脱敏诊断包后联系支持。";
   }
   if (code === "MODEL_HUB_MANUAL_ROUTE_PRIVACY_CONFLICT") {
-    return "已有手动设置的云端任务与“本地隐私”冲突。系统没有覆盖这条手动设置；请在专家设置中将它改为本机模型或先停用，再重新应用本地隐私方案。";
+    return "已有手动选择的云端模型与“本地隐私”冲突。系统没有覆盖原设置；请在高级设置中改用本机模型或先停用，再重新应用本地隐私方案。";
   }
   if (code === "CREATIVE_JOURNEY_STORAGE_QUOTA_EXCEEDED") {
     return "本地存储空间不足，本次更改没有保存。请保持当前页面打开，释放设备或浏览器存储空间后，再次点击原来的创建或保存操作；当前输入仍保留在页面中。";
@@ -227,7 +227,7 @@ function recordErrorDescription(code: string): string {
     return "已存在正文内容相同的有效素材。请取消本次录入并使用已有素材，或修改正文后再保存。";
   }
   if (/MODEL|PROVIDER|EMBEDDING|RERANK|IMAGE_GENERATION/u.test(code)) {
-    return "AI 服务暂未完成本次操作。请到设置中的 AI 模型检查连接、能力确认和任务分工后重试；正文与已有版本不会因此被覆盖。";
+    return "AI 服务暂未完成本次操作。请到模型中心检查连接、能力验证和创作任务安排后重试；正文与已有版本不会因此被覆盖。";
   }
   if (/NETWORK|TIMEOUT|HTTP|DNS|TLS/u.test(code)) {
     return "网络请求未完成。请检查网络和服务商状态后重试；若已产生费用，请先查看服务商后台记录，避免重复发送。";

@@ -288,7 +288,7 @@ export async function planGuidedOpeningQuestions(
         ) {
           throw new ModelHubExecutionError(
             "MODEL_HUB_PLAN_CHANGED",
-            "问题规划发送前 AI 分工发生了变化，请重新整理问题。",
+            "问题规划发送前创作任务安排发生了变化，请重新整理问题。",
             true,
           );
         }

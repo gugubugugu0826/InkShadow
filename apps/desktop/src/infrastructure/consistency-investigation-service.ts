@@ -893,7 +893,7 @@ export class ConsistencyInvestigationService {
           errorCode,
           errorSummary:
             errorCode === "PROVIDER_RESULT_AMBIGUOUS"
-              ? "取消时模型调用已越过发送边界，结果不确定且不会自动重发；正文和版本未改变。"
+              ? "取消时内容已经发给模型服务，结果无法确认且不会自动重试；正文和版本未改变。"
               : "长篇一致性调查超过本次等待上限；正文和版本未改变。",
           expectedRevision: invocation.revision,
         });

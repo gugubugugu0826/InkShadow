@@ -659,7 +659,6 @@ fn validate_invocation_dispatch_ledger_request(
     }
     if ledger.connection_revision < 1
         || ledger.catalog_entry_revision < 1
-        || ledger.connection_id != request.config.provider_id
         || ledger.model_id_snapshot != request.model
         || !provider_snapshot_matches_protocol(
             ledger.provider_kind_snapshot.as_str(),
@@ -668,6 +667,11 @@ fn validate_invocation_dispatch_ledger_request(
     {
         return Err(CommandError::request_invalid());
     }
+    // The Model Hub connection and the InkShadow-owned credential vault slot
+    // deliberately have independent identities. The authoritative SQLite
+    // dispatch receipt validates the connection revision and its credential
+    // reference before any Provider request starts; equating the two here
+    // rejects every remote quick probe while loopback connections pass by chance.
     Ok(())
 }
 
@@ -2688,7 +2692,7 @@ mod tests {
     #[test]
     fn invocation_receipt_accepts_capability_probe_and_creative_opening_zero_retry_scopes() {
         let mut request = generation_request();
-        request.config.provider_id = "connection-1".to_owned();
+        request.config.provider_id = "owned-credential-slot-1".to_owned();
         request.dispatch_scope = NativeModelDispatchScope::NonProject {
             reason: crate::native_sqlite::NativeNonProjectDispatchReason::CreativeOpening,
         };
@@ -2712,7 +2716,10 @@ mod tests {
         assert!(validate_invocation_dispatch_ledger_request(&request).is_err());
 
         request.config.retry_limit = Some(0);
-        assert!(validate_invocation_dispatch_ledger_request(&request).is_ok());
+        assert!(
+            validate_invocation_dispatch_ledger_request(&request).is_ok(),
+            "an InkShadow-owned credential slot is intentionally independent from the Model Hub connection id"
+        );
         request.dispatch_scope = NativeModelDispatchScope::NonProject {
             reason: crate::native_sqlite::NativeNonProjectDispatchReason::CreativeOpening,
         };

@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "inkshadow-desktop"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2235,6 +2235,7 @@ dependencies = [
  "hmac",
  "hpke",
  "keyring",
+ "keyring-core",
  "log",
  "rand 0.9.5",
  "reqwest",

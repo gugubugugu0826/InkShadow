@@ -16,7 +16,7 @@ export interface GenerationProgressPanelProps {
 }
 
 const STAGE_LABELS: Readonly<Record<GenerationProgressStage, string>> = Object.freeze({
-  preparing: "正在整理上下文与安全预检",
+  preparing: "正在挑选故事资料并完成发送前检查",
   generating: "正在接收可见正文",
   finalizing: "正在保存隔离的 AI 建议版本",
 });

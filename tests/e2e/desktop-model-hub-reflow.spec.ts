@@ -37,7 +37,12 @@ for (const colorScheme of ["light", "dark"] as const) {
         page.getByRole("combobox", { name: /^已连接的供应商/u }).locator("option:checked"),
       ).toContainText(LONG_MODEL_HUB_PROVIDER_NAME);
       await openExpertSettings(page);
-      await expect(page.getByLabel("Base URL")).toHaveValue(LONG_MODEL_HUB_BASE_URL);
+      await expect(page.getByLabel("服务根地址", { exact: true })).toHaveValue(
+        LONG_MODEL_HUB_BASE_URL,
+      );
+      await expect(page.getByLabel("基础地址", { exact: true })).toHaveValue(
+        LONG_MODEL_HUB_BASE_URL,
+      );
       await expect(page.getByRole("combobox", { name: "模型", exact: true })).toHaveValue(
         LONG_MODEL_HUB_MODEL_ID,
       );
@@ -53,7 +58,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expectNoPageOrCardOverflow(page);
 
       await page.goto("/#/settings#model-routing");
-      await expect(page.getByRole("heading", { name: "模型中心 · AI 分工" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "模型中心 · 创作任务安排" })).toBeVisible();
       await openExpertSettings(page);
       await expect(page.getByText(LONG_MODEL_HUB_MODEL_ID, { exact: false }).first()).toBeVisible();
       await expect(page.getByText(/123\.456789|123456789|USD/u).first()).toBeVisible();
@@ -101,7 +106,12 @@ test("keeps long Model Hub data usable at DPR2 and equivalent 200%", async ({
       await expect(page.getByRole("heading", { name: "模型中心 · 连接与模型" })).toBeVisible();
       await selectConnection(page, LONG_MODEL_HUB_CONNECTION_ID);
       await openExpertSettings(page);
-      await expect(page.getByLabel("Base URL")).toHaveValue(LONG_MODEL_HUB_BASE_URL);
+      await expect(page.getByLabel("服务根地址", { exact: true })).toHaveValue(
+        LONG_MODEL_HUB_BASE_URL,
+      );
+      await expect(page.getByLabel("基础地址", { exact: true })).toHaveValue(
+        LONG_MODEL_HUB_BASE_URL,
+      );
       await expectNoPageOrCardOverflow(page);
     } finally {
       await cdp.detach().catch(() => undefined);

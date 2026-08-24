@@ -6,6 +6,7 @@ import {
   inspectQuickBookStartRouteProbe,
   QUICK_MODEL_PROVIDERS,
   QuickModelConnectionError,
+  selectQuickBookStartCatalogEntry,
 } from "./quick-model-connection-service";
 import { ModelCenterError } from "./model-center-store";
 import { modelHubCredentialProviderId } from "./model-hub-native-config";
@@ -77,6 +78,7 @@ describe("quick Model Hub connection", () => {
     });
     expect(serializedMetadata).not.toContain("test-verified-secret-value");
     expect(JSON.stringify(window.localStorage)).not.toContain("test-verified-secret-value");
+    await expect(harness.runtime.modelHub.findTaskRoute("book_start_guidance")).resolves.toBeNull();
 
     const ready = await configureConfirmedQuickBookStartRoute(harness.runtime, {
       connectionId: connected.connection.id,
@@ -155,11 +157,21 @@ describe("quick Model Hub connection", () => {
       secret: "test-disclosure-secret",
     });
     harness.generate.mockClear();
+    const catalogEntry = connected.catalog[0];
+    expect(catalogEntry).toBeDefined();
+    if (catalogEntry === undefined) {
+      throw new Error("测试目录缺少首个模型");
+    }
 
     await expect(
       configureQuickBookStartRoute(harness.runtime, {
         connectionId: connected.connection.id,
-        catalogEntryId: connected.catalog[0]?.id ?? "missing",
+        catalogEntryId: catalogEntry.id,
+        targetSnapshot: {
+          connection: connected.connection,
+          catalogEntry,
+        },
+        invocationId: harness.runtime.ids.next(),
         humanConfirmed: true,
         disclosureFingerprint: "",
       }),
@@ -302,6 +314,211 @@ describe("quick Model Hub connection", () => {
       normalizedErrorCode: "PROVIDER_RESULT_AMBIGUOUS",
     });
     expect(recentFailures[0]?.diagnosticId.startsWith("model_invocation:")).toBe(true);
+  });
+  it("keeps a returned probe pending review when the completion ledger write fails", async () => {
+    const harness = createHarness();
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "openai",
+      secret: "test-settlement-failure-secret",
+    });
+    const disclosure = await inspectQuickBookStartRouteProbe(harness.runtime, {
+      connectionId: connected.connection.id,
+      catalogEntryId: connected.catalog[0]?.id ?? "missing",
+    });
+    vi.spyOn(harness.runtime.modelHub, "finishInvocation").mockRejectedValue(
+      new Error("simulated invocation settlement failure"),
+    );
+
+    await expect(
+      configureQuickBookStartRoute(harness.runtime, {
+        connectionId: connected.connection.id,
+        catalogEntryId: connected.catalog[0]?.id ?? "missing",
+        targetSnapshot: disclosure.targetSnapshot,
+        invocationId: disclosure.invocationId,
+        humanConfirmed: true,
+        disclosureFingerprint: disclosure.fingerprint,
+      }),
+    ).rejects.toMatchObject({
+      code: "PROVIDER_RESULT_AMBIGUOUS",
+      retryable: false,
+      failureStage: "probe_result",
+      providerDispatchCount: 1,
+    });
+
+    expect(harness.generate).toHaveBeenCalledOnce();
+    const pendingInvocation = await harness.runtime.modelHub.findInvocation(
+      disclosure.invocationId,
+    );
+    expect(pendingInvocation?.status).toBe("running");
+    expect(typeof pendingInvocation?.providerDispatchStartedAt).toBe("string");
+  });
+
+  it("creates and settles the confirmed invocation before a capability metadata write fails", async () => {
+    const harness = createHarness();
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "openai",
+      secret: "test-metadata-failure-secret",
+    });
+    const disclosure = await inspectQuickBookStartRouteProbe(harness.runtime, {
+      connectionId: connected.connection.id,
+      catalogEntryId: connected.catalog[0]?.id ?? "missing",
+    });
+    vi.spyOn(harness.runtime.modelHub, "recordCapabilityScan").mockRejectedValueOnce(
+      new Error("simulated metadata scan failure"),
+    );
+
+    await expect(
+      configureQuickBookStartRoute(harness.runtime, {
+        connectionId: connected.connection.id,
+        catalogEntryId: connected.catalog[0]?.id ?? "missing",
+        targetSnapshot: disclosure.targetSnapshot,
+        invocationId: disclosure.invocationId,
+        humanConfirmed: true,
+        disclosureFingerprint: disclosure.fingerprint,
+      }),
+    ).rejects.toMatchObject({
+      failureStage: "probe_preparation",
+      providerDispatchCount: 0,
+    });
+
+    expect(harness.generate).not.toHaveBeenCalled();
+    await expect(
+      harness.runtime.modelHub.findInvocation(disclosure.invocationId),
+    ).resolves.toMatchObject({
+      id: disclosure.invocationId,
+      status: "failed",
+      providerDispatchStartedAt: null,
+      errorCode: "CAPABILITY_PROBE_NOT_DISPATCHED",
+    });
+  });
+  it("creates the confirmed invocation before the authoritative target reread fails", async () => {
+    const harness = createHarness();
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "openai",
+      secret: "test-target-reread-failure-secret",
+    });
+    const disclosure = await inspectQuickBookStartRouteProbe(harness.runtime, {
+      connectionId: connected.connection.id,
+      catalogEntryId: connected.catalog[0]?.id ?? "missing",
+    });
+    vi.spyOn(harness.runtime.modelHub, "findConnection").mockRejectedValueOnce(
+      new Error("simulated authoritative target reread failure"),
+    );
+
+    await expect(
+      configureQuickBookStartRoute(harness.runtime, {
+        connectionId: connected.connection.id,
+        catalogEntryId: connected.catalog[0]?.id ?? "missing",
+        targetSnapshot: disclosure.targetSnapshot,
+        invocationId: disclosure.invocationId,
+        humanConfirmed: true,
+        disclosureFingerprint: disclosure.fingerprint,
+      }),
+    ).rejects.toMatchObject({
+      failureStage: "probe_preparation",
+      providerDispatchCount: 0,
+    });
+
+    expect(harness.generate).not.toHaveBeenCalled();
+    await expect(
+      harness.runtime.modelHub.findInvocation(disclosure.invocationId),
+    ).resolves.toMatchObject({
+      id: disclosure.invocationId,
+      status: "failed",
+      providerDispatchStartedAt: null,
+      errorCode: "CAPABILITY_PROBE_NOT_DISPATCHED",
+    });
+  });
+
+  it("stops when multiple same-provider connections have no explicit stable choice", async () => {
+    const harness = createHarness();
+    for (const id of ["deepseek-work", "deepseek-personal"]) {
+      await harness.runtime.modelHub.saveConnection({
+        id,
+        providerKind: "deepseek",
+        displayName: id,
+        credentialRef: `keyring:model-hub:${id}`,
+        credentialState: "present",
+        authenticationMode: "bearer_keyring",
+        enabled: true,
+        expectedRevision: null,
+      });
+    }
+
+    await expect(
+      connectQuickModelProvider(harness.runtime, {
+        provider: "deepseek",
+        secret: "test-ambiguous-connection-secret",
+      }),
+    ).rejects.toMatchObject({
+      code: "QUICK_MODEL_CONNECTION_SELECTION_REQUIRED",
+      retryable: false,
+    });
+    expect(harness.saveCredential).not.toHaveBeenCalled();
+    expect(harness.deleteCredential).not.toHaveBeenCalled();
+  });
+
+  it("leaves pure-text opening unselected when only an experimental vision model is available", async () => {
+    const harness = createHarness({
+      models: [
+        {
+          id: "deepseek-v4-flash-vision-exp",
+          displayName: "deepseek-v4-flash-vision-exp",
+        },
+      ],
+    });
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "deepseek",
+      secret: "test-vision-only-secret",
+    });
+
+    await expect(selectQuickBookStartCatalogEntry(harness.runtime, connected)).resolves.toBeNull();
+  });
+
+  it("reports the authoritative route for review when post-save validation and rollback both fail", async () => {
+    const harness = createHarness();
+    const connected = await connectQuickModelProvider(harness.runtime, {
+      provider: "openai",
+      secret: "test-route-review-secret",
+    });
+    const disclosure = await inspectQuickBookStartRouteProbe(harness.runtime, {
+      connectionId: connected.connection.id,
+      catalogEntryId: connected.catalog[0]?.id ?? "missing",
+    });
+    const findTaskRoute = harness.runtime.modelHub.findTaskRoute.bind(harness.runtime.modelHub);
+    let routeReadCount = 0;
+    vi.spyOn(harness.runtime.modelHub, "findTaskRoute").mockImplementation(async (task) => {
+      routeReadCount += 1;
+      if (routeReadCount === 2) {
+        throw new Error("simulated post-save route validation failure");
+      }
+      return findTaskRoute(task);
+    });
+    vi.spyOn(harness.runtime.modelHub, "deleteTaskRoute").mockRejectedValueOnce(
+      new Error("simulated route rollback failure"),
+    );
+
+    await expect(
+      configureQuickBookStartRoute(harness.runtime, {
+        connectionId: connected.connection.id,
+        catalogEntryId: connected.catalog[0]?.id ?? "missing",
+        targetSnapshot: disclosure.targetSnapshot,
+        invocationId: disclosure.invocationId,
+        humanConfirmed: true,
+        disclosureFingerprint: disclosure.fingerprint,
+      }),
+    ).rejects.toMatchObject({
+      code: "QUICK_MODEL_ROUTE_STATE_REQUIRES_REVIEW",
+      retryable: false,
+    });
+
+    expect(harness.generate).toHaveBeenCalledOnce();
+    await expect(
+      harness.runtime.modelHub.findTaskRoute("book_start_guidance"),
+    ).resolves.toMatchObject({
+      primaryCatalogEntryId: connected.catalog[0]?.id,
+      enabled: true,
+    });
   });
 
   it("records a truthful partial scan when a truncated probe already emitted visible text", async () => {
@@ -635,6 +852,8 @@ describe("quick Model Hub connection", () => {
     await configureQuickBookStartRoute(harness.runtime, {
       connectionId: connected.connection.id,
       catalogEntryId: connected.catalog[0]?.id ?? "missing",
+      targetSnapshot: disclosure.targetSnapshot,
+      invocationId: disclosure.invocationId,
       humanConfirmed: true,
       disclosureFingerprint: disclosure.fingerprint,
     });
@@ -833,6 +1052,8 @@ async function configureConfirmedQuickBookStartRoute(
   const disclosure = await inspectQuickBookStartRouteProbe(runtime, input);
   return configureQuickBookStartRoute(runtime, {
     ...input,
+    targetSnapshot: disclosure.targetSnapshot,
+    invocationId: disclosure.invocationId,
     humanConfirmed: true,
     disclosureFingerprint: disclosure.fingerprint,
   });
@@ -846,6 +1067,7 @@ function createHarness(
     failDeleteOnceFor?: string;
     nativeInvocationLedger?: boolean;
     rejectBeforeNativeInvocationReceipt?: boolean;
+    models?: readonly { readonly id: string; readonly displayName: string }[];
   }> = {},
 ) {
   const base = createDevelopmentRuntime(window.localStorage);
@@ -897,7 +1119,7 @@ function createHarness(
   const listModels = vi.fn((config: Parameters<NativeModelGatewayClient["listModels"]>[0]) =>
     Promise.resolve({
       provider: config.provider,
-      models: [{ id: "novel-text-model", displayName: "Novel Text Model" }],
+      models: input.models ?? [{ id: "novel-text-model", displayName: "Novel Text Model" }],
     }),
   );
   const generate = vi.fn<NativeModelGatewayClient["generate"]>(async (request) => {

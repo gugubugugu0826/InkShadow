@@ -260,6 +260,22 @@ export function openingJourneyRunElapsedMs(run: OpeningJourneyRunV1, nowValue: s
   const ended = run.terminalAt === null ? now : Date.parse(run.terminalAt);
   return Math.max(0, ended - Date.parse(run.startedAt));
 }
+/**
+ * Projects the durable opening correlation UUID into a stable ordinary-user
+ * support number. The UUID remains authoritative for persistence and diagnostics.
+ */
+export function openingJourneySupportNumber(
+  input: Readonly<Pick<OpeningJourneyRunV1, "supportId" | "startedAt">>,
+): string {
+  const stamp = input.startedAt
+    .replace(/[^0-9]/gu, "")
+    .slice(0, 14)
+    .padEnd(14, "0");
+  const trace = input.supportId.replace(/[^a-z0-9]/giu, "").toUpperCase();
+  const suffix = trace.slice(-6).padStart(6, "0");
+  return `墨影-${stamp}-${suffix}`;
+}
+
 export function isOpeningJourneyRunTerminal(run: OpeningJourneyRunV1): boolean {
   return TERMINAL_STAGES.has(run.stage);
 }
@@ -341,6 +357,7 @@ export function openingJourneyTaskInput(run: OpeningJourneyRunV1, now: string): 
       operation: OPENING_JOURNEY_TASK_OPERATION,
       journeyId: run.journeyId,
       batchId: run.batchId,
+      startedAt: run.startedAt,
       supportId: run.supportId,
       requestCount: run.requestIds.length,
       autoRetryCount: 0,
@@ -390,6 +407,7 @@ function openingJourneyTaskMatchesRun(
     metadata.batchId === run.batchId &&
     metadata.supportId === run.supportId &&
     metadata.requestCount === run.requestIds.length &&
+    (metadata.startedAt === undefined || metadata.startedAt === run.startedAt) &&
     metadata.autoRetryCount === 0 &&
     (task.progress === null || task.progress.step in OPENING_TASK_PROGRESS_ORDER) &&
     openingJourneyTaskStatusMatchesRun(task, run.stage)

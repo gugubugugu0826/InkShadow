@@ -764,7 +764,7 @@ function planningFailureMessage(
     return {
       title: `${actionName}发送信息尚未准备好`,
       message:
-        "准备发送信息时没有找到可用的剧情规划分工。本次没有向模型服务发送内容；请先选择模型后重试。",
+        "准备发送信息时没有找到可用的剧情规划模型安排。本次没有向模型服务发送内容；请先选择模型后重试。",
       supportId: incident.supportId,
     };
   }

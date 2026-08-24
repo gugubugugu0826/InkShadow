@@ -96,7 +96,7 @@ describe("StoryPlanningPanel", () => {
       Promise.resolve({
         status: "skipped" as const,
         code: "MODEL_HUB_ROUTE_NOT_CONFIGURED",
-        message: "请先为大纲规划配置 AI 分工。",
+        message: "请先为大纲规划配置创作任务安排。",
       }),
     );
     const service = planningService({ generate });
@@ -106,7 +106,7 @@ describe("StoryPlanningPanel", () => {
     await confirmStoryPlanning(user);
 
     expect(await screen.findByText("本次没有调用 AI")).toBeInTheDocument();
-    expect(screen.getByText("请先为大纲规划配置 AI 分工。")).toBeInTheDocument();
+    expect(screen.getByText("请先为大纲规划配置创作任务安排。")).toBeInTheDocument();
     expect(screen.queryByText(/MODEL_HUB_ROUTE_NOT_CONFIGURED/u)).not.toBeInTheDocument();
     expect(screen.queryByLabelText("AI 剧情规划建议版本")).not.toBeInTheDocument();
     expect(readSafeOperationIncidents()[0]).toMatchObject({

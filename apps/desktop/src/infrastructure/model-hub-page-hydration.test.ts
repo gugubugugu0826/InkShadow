@@ -13,6 +13,7 @@ import { createDevelopmentRuntime } from "./runtime";
 describe("Model Hub page hydration", () => {
   it("uses Chinese labels for every user-visible hydration phase", () => {
     expect(modelHubHydrationPhaseLabel("UNINITIALIZED")).toBe("正在准备模型中心……");
+    expect(modelHubHydrationPhaseLabel("LOADING_CATALOG")).toBe("正在载入模型目录和创作任务安排……");
     expect(modelHubHydrationPhaseLabel("READY")).toBe("模型中心已载入");
     expect(modelHubHydrationPhaseLabel("READY_WITH_WARNINGS")).toBe(
       "模型中心已载入，但有一项需要重试",
@@ -165,9 +166,13 @@ describe("Model Hub page hydration", () => {
     expect(hydrated.page.credentialStatus).toBe("not_required");
   });
 
-  it("restores the connection used by the persisted prose route before falling back to the first connection", async () => {
+  it("uses the authoritative book-start route across entry points while preserving a requested manual choice", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
-    for (const connectionId of ["first-connection", "routed-connection"] as const) {
+    for (const connectionId of [
+      "first-connection",
+      "routed-connection",
+      "opening-connection",
+    ] as const) {
       await runtime.modelHub.saveConnection({
         id: connectionId,
         providerKind: connectionId === "routed-connection" ? "deepseek" : "openai",
@@ -199,6 +204,14 @@ describe("Model Hub page hydration", () => {
       routeOrigin: "user",
       expectedRevision: null,
     });
+    await runtime.modelHub.saveTaskRoute({
+      task: "book_start_guidance",
+      primaryCatalogEntryId: "opening-connection-catalog",
+      privacyPolicy: "cloud_allowed",
+      failurePolicy: "stop",
+      routeOrigin: "user",
+      expectedRevision: null,
+    });
     const getSummary = vi.fn(() => Promise.resolve({ configured: true, lastFour: "3172" }));
 
     const hydrated = await loadAuthoritativeModelHubHydration({
@@ -210,9 +223,22 @@ describe("Model Hub page hydration", () => {
       lastAction: "bootstrap",
     });
 
-    expect(hydrated.page.selectedConnectionId).toBe("routed-connection");
-    expect(hydrated.page.selectedModelId).toBe("routed-connection-model");
-    expect(getSummary).toHaveBeenCalledWith("routed-connection");
+    expect(hydrated.page.selectedConnectionId).toBe("opening-connection");
+    expect(hydrated.page.selectedModelId).toBe("opening-connection-model");
+    expect(getSummary).toHaveBeenCalledWith("opening-connection");
+
+    const manuallyRequested = await loadAuthoritativeModelHubHydration({
+      modelHub: runtime.modelHub,
+      credentials: { getSummary },
+      mode: "tauri",
+      clock: runtime.clock,
+      requestedConnectionId: "first-connection",
+      requestedModelId: "first-connection-model",
+      snapshotRevision: 2,
+      lastAction: "restore_selection",
+    });
+    expect(manuallyRequested.page.selectedConnectionId).toBe("first-connection");
+    expect(manuallyRequested.page.selectedModelId).toBe("first-connection-model");
   });
 
   it("does not let a disabled prose route drive the restored connection", async () => {

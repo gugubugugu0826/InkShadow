@@ -14,7 +14,10 @@ import {
 } from "../infrastructure/runtime";
 import { readSafeGuidedOpeningStatus } from "../infrastructure/guided-opening-diagnostics";
 import { CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS } from "../infrastructure/creative-opening-service";
-import { readOpeningJourneyRun } from "../infrastructure/opening-journey-run";
+import {
+  openingJourneySupportNumber,
+  readOpeningJourneyRun,
+} from "../infrastructure/opening-journey-run";
 import { recoverOrphanedOpeningInvocationsAtStartup } from "../infrastructure/opening-startup-recovery";
 import { deriveIdeaProjectSeed, parseProjectSeed } from "../infrastructure/project-seed";
 import type {
@@ -22,7 +25,7 @@ import type {
   CreativeJourneyTurnRecord,
 } from "../infrastructure/creative-journey-store";
 import { RuntimeProvider } from "../runtime-context";
-import { IdeaJourneyPage } from "./idea-journey-page";
+import { creativeFallbackDescription, IdeaJourneyPage } from "./idea-journey-page";
 
 const DIRECT_OPENING_WITH_LOCAL_FACTS =
   "林澈来到钟楼。周野的真实身份是守门人。暮色顺着旧城的屋脊缓慢落下，坏掉多年的铜钟忽然响了一声。林澈没有回头，只把口袋里的怀表握得更紧，沿着旋梯继续向上。";
@@ -34,6 +37,15 @@ describe("one-sentence idea journey", () => {
     // The established suite exercises the professional flow. Direct-mode
     // cases below explicitly remove this upgrade signal before creating the runtime.
     window.localStorage.setItem("inkshadow.professional-create-recovery.v1", "{}");
+  });
+
+  it("keeps an unclassified generation failure neutral and preserves the safety boundary", () => {
+    const description = creativeFallbackDescription("MODEL_GENERATION_FAILED");
+
+    expect(description).toContain("请查看这次生成所处阶段");
+    expect(description).toContain("系统不会自动重试");
+    expect(description).toContain("正文不会改变");
+    expect(description).not.toMatch(/检查网络、密钥和模型状态/u);
   });
 
   it("creates a resumable local opening and asks only bounded gap-driven questions", async () => {
@@ -698,7 +710,7 @@ describe("one-sentence idea journey", () => {
     renderJourney(runtime);
 
     expect(await screen.findByText("AI 还没连接，也可以开始")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "去连接 AI" }));
+    await user.click(screen.getByRole("button", { name: "去连接模型" }));
     expect(screen.getByRole("heading", { name: "连接你的 AI" })).toBeVisible();
     expect(screen.getByText("浏览器预览不能保存凭据")).toBeVisible();
     expect(screen.getByRole("button", { name: "测试连接并查找模型" })).toBeDisabled();
@@ -707,12 +719,46 @@ describe("one-sentence idea journey", () => {
     expect(screen.getByRole("textbox", { name: "一句话灵感" })).toBeEnabled();
   });
 
+  it("keeps landing errors inside the idea card after the input and beside recovery actions", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    renderJourney(runtime, "/create/idea?journey=not-a-valid-journey");
+
+    const description = await screen.findByText(
+      "这个未完成创作入口无效；墨影没有打开其他作品。请从作品库重新选择。",
+    );
+    const alert = description.closest('[role="alert"]');
+    const card = description.closest(".idea-journey__idea-card");
+    const input = screen.getByRole("textbox", { name: "一句话灵感" });
+
+    expect(alert).not.toBeNull();
+    expect(card).not.toBeNull();
+    expect(card).toContainElement(input);
+    expect(input.compareDocumentPosition(alert as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(card?.querySelector(".idea-journey__primary-actions")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "直接写空白正文" })).toBeVisible();
+  });
+
+  it("explains why the primary opening action is unavailable and how to continue", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    renderJourney(runtime);
+
+    const create = await screen.findByRole("button", { name: "生成第一段" });
+    expect(create).toBeDisabled();
+    const descriptionId = create.getAttribute("aria-describedby");
+    expect(descriptionId).not.toBeNull();
+    expect(document.getElementById(descriptionId ?? "")).toHaveTextContent(
+      "先写至少两个字的灵感，就能生成开头。",
+    );
+  });
+
   it("keeps the explicit local sample and its question plan off the configured provider", async () => {
     const harness = createTauriIdeaRuntime(false);
     const user = userEvent.setup();
     renderJourney(harness.runtime);
     await screen.findByText("AI 还没连接，也可以开始");
-    await user.click(screen.getByRole("button", { name: "去连接 AI" }));
+    await user.click(screen.getByRole("button", { name: "去连接模型" }));
     await user.click(screen.getByRole("radio", { name: /Ollama/u }));
     await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
     await screen.findByText("连接成功 · 已找到模型");
@@ -751,7 +797,7 @@ describe("one-sentence idea journey", () => {
     const user = userEvent.setup();
     renderJourney(runtime);
 
-    await user.click(await screen.findByRole("button", { name: "不输入灵感，直接空白写作" }));
+    await user.click(await screen.findByRole("button", { name: "直接写空白正文" }));
     expect(await screen.findByText("已进入 AI 建议版本比较")).toBeVisible();
 
     const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
@@ -775,12 +821,12 @@ describe("one-sentence idea journey", () => {
     const user = userEvent.setup();
     const firstView = renderJourney(runtime);
 
-    await user.click(await screen.findByRole("button", { name: "不输入灵感，直接空白写作" }));
+    await user.click(await screen.findByRole("button", { name: "直接写空白正文" }));
     expect(await screen.findByText("已进入 AI 建议版本比较")).toBeVisible();
     firstView.unmount();
 
     renderJourney(runtime);
-    await user.click(await screen.findByRole("button", { name: "不输入灵感，直接空白写作" }));
+    await user.click(await screen.findByRole("button", { name: "直接写空白正文" }));
     expect(await screen.findByText("已进入 AI 建议版本比较")).toBeVisible();
 
     const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
@@ -798,7 +844,7 @@ describe("one-sentence idea journey", () => {
     const createJourney = vi.spyOn(runtime.creativeJourneys, "create");
     renderJourney(runtime);
     const startButton = await screen.findByRole("button", {
-      name: "不输入灵感，直接空白写作",
+      name: "直接写空白正文",
     });
 
     await act(async () => {
@@ -839,7 +885,7 @@ describe("one-sentence idea journey", () => {
     await user.type(ideaInput, idea);
     storage.failNextWrite(new DOMException("quota reached", "QuotaExceededError"));
 
-    await user.click(screen.getByRole("button", { name: "不输入灵感，直接空白写作" }));
+    await user.click(screen.getByRole("button", { name: "直接写空白正文" }));
 
     expect(await screen.findByText(/本地存储空间不足/u)).toBeVisible();
     expect(screen.getByText(/释放设备或浏览器存储空间/u)).toBeVisible();
@@ -888,7 +934,7 @@ describe("one-sentence idea journey", () => {
     await user.type(screen.getByRole("textbox", { name: "一句话灵感" }), idea);
     storage.failNextWrite(new DOMException("quota reached", "QuotaExceededError"));
 
-    await user.click(screen.getByRole("button", { name: "不输入灵感，直接空白写作" }));
+    await user.click(screen.getByRole("button", { name: "直接写空白正文" }));
     expect(await screen.findByText(/本地存储空间不足/u)).toBeVisible();
     expect(screen.queryByText("CREATIVE_JOURNEY_STORAGE_QUOTA_EXCEEDED")).not.toBeInTheDocument();
 
@@ -1089,7 +1135,7 @@ describe("one-sentence idea journey", () => {
     expect(harness.generate).not.toHaveBeenCalled();
     first.unmount();
     renderJourney(harness.runtime);
-    expect(await screen.findByText(/这项写作任务还没有可用的 AI 分工/u)).toBeVisible();
+    expect(await screen.findByText(/尚未选择负责这项写作的模型/u)).toBeVisible();
     expect(screen.getByRole("button", { name: "稍后重试" })).toBeEnabled();
     expect(harness.generate).not.toHaveBeenCalled();
 
@@ -1189,7 +1235,8 @@ describe("one-sentence idea journey", () => {
     const run = readOpeningJourneyRun(active?.snapshot.openingRun);
     if (run === null) throw new Error("直接模式等待没有保存运行支持编号。");
     const waitingDescription = screen.getByText(/当前阶段：.+；已等待 .+总等待超过 3 分钟/u);
-    expect(waitingDescription).toHaveTextContent(`支持编号：${run.supportId}`);
+    expect(waitingDescription).toHaveTextContent(`支持编号：${openingJourneySupportNumber(run)}`);
+    expect(waitingDescription).not.toHaveTextContent(run.supportId);
     view.unmount();
   }, 30_000);
 
@@ -1225,7 +1272,9 @@ describe("one-sentence idea journey", () => {
 
     await user.click(screen.getByRole("button", { name: "创建作品，查看 AI 建议" }));
 
-    const supportNotice = await screen.findByText(`支持编号：${run.supportId}`);
+    const supportNotice = await screen.findByText(
+      new RegExp(openingJourneySupportNumber(run), "u"),
+    );
     expect(supportNotice).toBeVisible();
     expect(screen.queryByText(/private create failure/u)).not.toBeInTheDocument();
   }, 30_000);
@@ -2108,7 +2157,7 @@ describe("one-sentence idea journey", () => {
       }, ASYNC_UI_TIMEOUT);
       expect(
         await screen.findByText(
-          "模型在 180 秒内没有返回，本次操作已停止且不会自动重试。正文和已有建议没有改变，可稍后明确重试。",
+          "本机模型仍在处理或未及时返回。墨影已停止等待，并把这次发送标记为“结果需要核对”；不会自动重试，也不会改动正文。",
           undefined,
           ASYNC_UI_TIMEOUT,
         ),
@@ -2853,7 +2902,7 @@ describe("one-sentence idea journey", () => {
           });
           expect(
             await screen.findByText(
-              "模型在 180 秒内没有返回，本次操作已停止且不会自动重试。正文和已有建议没有改变，可稍后明确重试。",
+              "模型未在约定时间内返回。墨影已停止等待，并把这次发送标记为“结果需要核对”；不会自动重试，也不会改动正文。",
               undefined,
               ASYNC_UI_TIMEOUT,
             ),
@@ -3436,7 +3485,11 @@ describe("one-sentence idea journey", () => {
         autoRetryCount: 0,
       });
       expect(endedRun.supportId).toBe(endedRun.batchId);
-      expect(screen.getAllByText(new RegExp(endedRun.supportId, "u")).length).toBeGreaterThan(0);
+      expect(
+        screen.getAllByText(new RegExp(openingJourneySupportNumber(endedRun), "u")).length,
+      ).toBeGreaterThan(0);
+      expect(screen.getByRole("button", { name: "重新读取并核对结果" })).toBeEnabled();
+      expect(screen.queryByRole("button", { name: "检查 AI 连接" })).not.toBeInTheDocument();
       const endedTask = (await harness.runtime.taskCenter.load()).tasks.find(
         ({ id }) => id === endedRun.taskId,
       );
@@ -4129,7 +4182,7 @@ describe("one-sentence idea journey", () => {
       const user = userEvent.setup();
       renderJourney(runtime);
 
-      await user.click(await screen.findByRole("button", { name: "不输入灵感，直接空白写作" }));
+      await user.click(await screen.findByRole("button", { name: "直接写空白正文" }));
       await waitFor(async () => {
         const projects = await runtime.useCases.listProjects.execute({ statuses: ["active"] });
         expect(projects.ok && projects.value).toHaveLength(1);
@@ -4353,7 +4406,7 @@ describe("one-sentence idea journey", () => {
     const user = userEvent.setup();
     const first = renderJourney(firstHarness.runtime);
     await screen.findByText("AI 还没连接，也可以开始");
-    await user.click(screen.getByRole("button", { name: "去连接 AI" }));
+    await user.click(screen.getByRole("button", { name: "去连接模型" }));
     await user.click(screen.getByRole("radio", { name: /Ollama/u }));
     await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
     await screen.findByText("连接成功 · 已找到模型");
@@ -4461,14 +4514,14 @@ async function startDirectOpeningWithoutConnection(
   expect(await screen.findByRole("button", { name: "开始创作" })).toBeVisible();
   await user.type(screen.getByRole("textbox", { name: "一句话" }), idea);
   await user.click(screen.getByRole("button", { name: "开始创作" }));
-  expect(await screen.findByText(/这项写作任务还没有可用的 AI 分工/u)).toBeVisible();
-  expect(screen.getByRole("button", { name: "去连接" })).toBeEnabled();
+  expect(await screen.findByText(/尚未选择负责这项写作的模型/u)).toBeVisible();
+  expect(screen.getByRole("button", { name: "去连接模型" })).toBeEnabled();
 }
 
 async function connectOllamaAfterDirectOpeningFailure(
   user: ReturnType<typeof userEvent.setup>,
 ): Promise<void> {
-  await user.click(screen.getByRole("button", { name: "去连接" }));
+  await user.click(screen.getByRole("button", { name: "去连接模型" }));
   expect(await screen.findByRole("heading", { name: "连接你的 AI" })).toBeVisible();
   await user.click(screen.getByRole("radio", { name: /Ollama/u }));
   await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
@@ -4488,7 +4541,7 @@ async function retryDirectOpening(user: ReturnType<typeof userEvent.setup>): Pro
 
 async function connectOllamaForAiOpening(user: ReturnType<typeof userEvent.setup>): Promise<void> {
   await screen.findByText("AI 还没连接，也可以开始");
-  await user.click(screen.getByRole("button", { name: "去连接 AI" }));
+  await user.click(screen.getByRole("button", { name: "去连接模型" }));
   await user.click(screen.getByRole("radio", { name: /Ollama/u }));
   await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
   await screen.findByText("连接成功 · 已找到模型");

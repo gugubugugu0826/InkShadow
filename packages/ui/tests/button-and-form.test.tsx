@@ -48,24 +48,24 @@ describe("Button", () => {
     expect(onClick).not.toHaveBeenCalled();
   });
 
-  it("keeps both normal and loading labels in the same layout slot", () => {
+  it("renders exactly one clear label in normal and loading states", () => {
     const { rerender } = render(<Button loadingLabel="保存中">保存这一章</Button>);
 
     const button = screen.getByRole("button", { name: "保存这一章" });
     const labels = button.querySelectorAll(".ink-button__label-copy");
-    expect(labels).toHaveLength(2);
-    expect(labels[0]).toHaveAttribute("data-visible");
-    expect(labels[1]).not.toHaveAttribute("data-visible");
+    expect(labels).toHaveLength(1);
+    expect(labels[0]).toHaveTextContent("保存这一章");
 
     rerender(
       <Button loading loadingLabel="保存中">
         保存这一章
       </Button>,
     );
-    expect(screen.getByRole("button", { name: "保存中" })).toBeInTheDocument();
-    const loadingLabels = button.querySelectorAll(".ink-button__label-copy");
-    expect(loadingLabels[0]).not.toHaveAttribute("data-visible");
-    expect(loadingLabels[1]).toHaveAttribute("data-visible");
+    const loadingButton = screen.getByRole("button", { name: "保存中" });
+    const loadingLabels = loadingButton.querySelectorAll(".ink-button__label-copy");
+    expect(loadingLabels).toHaveLength(1);
+    expect(loadingLabels[0]).toHaveTextContent("保存中");
+    expect(screen.queryByText("保存这一章")).not.toBeInTheDocument();
   });
 });
 

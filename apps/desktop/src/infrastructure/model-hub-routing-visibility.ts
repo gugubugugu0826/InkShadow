@@ -317,7 +317,7 @@ export function buildModelHubRoutingVisibility(
             : `当前没有模型提供所需的${missingCapabilities.map(capabilityLabel).join("、")}能力。`,
         nextStep:
           missingCapabilities.length === 0
-            ? "重新应用 AI 分工，或在专家模式中为这一项选择模型。"
+            ? "重新应用创作任务安排，或在专家模式中为这一项选择模型。"
             : `连接并验证支持${missingCapabilities.map(capabilityLabel).join("、")}的模型。`,
         lastVerifiedAt: null,
       });
@@ -435,7 +435,7 @@ export function capabilityLabel(capability: string): string {
     text_generation: "文本生成",
     reasoning: "推理",
     structured_output: "结构化输出",
-    embedding: "向量检索",
+    embedding: "查找相关故事资料",
     rerank: "结果排序",
     image_generation: "图片生成",
     vision: "图片理解",

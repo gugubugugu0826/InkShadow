@@ -150,8 +150,8 @@ export function AuthoritativeExtractionPage({
       <div className="desktop-page authoritative-extraction-page">
         <header className="page-heading">
           <div>
-            <h1>权威事实抽取</h1>
-            <p>模型结果只会进入候选审核，不会自动写入正式故事事实。</p>
+            <h1>从正文更新设定</h1>
+            <p>整理出的设定需要你确认后才会写入正式故事设定。</p>
           </div>
           <Badge tone="neutral">默认关闭</Badge>
         </header>
@@ -174,8 +174,8 @@ export function AuthoritativeExtractionPage({
     <div className="desktop-page authoritative-extraction-page">
       <header className="page-heading">
         <div>
-          <h1>权威事实抽取</h1>
-          <p>自动发现章节候选，逐条人工确认后才写入正式事实并重建故事关联索引。</p>
+          <h1>从正文更新设定</h1>
+          <p>从当前章节找出人物、地点和事件等设定；每条结果都需要你确认。</p>
         </div>
         <div className="authoritative-extraction-actions">
           <Badge tone={online ? "success" : "neutral"}>{online ? "在线" : "离线"}</Badge>
@@ -187,7 +187,7 @@ export function AuthoritativeExtractionPage({
               void perform(
                 "scan",
                 () => runtime.runCycle(projectId, { online }),
-                online ? "章节扫描与候选队列已刷新。" : "已安全记录离线等待状态。",
+                online ? "章节扫描与待确认设定已刷新。" : "已安全记录离线等待状态。",
               )
             }
           >
@@ -202,11 +202,11 @@ export function AuthoritativeExtractionPage({
                 void perform(
                   "evaluation",
                   () => runtime.runEvaluation(goldenSuite),
-                  "黄金样本精确率与召回率门禁已刷新。",
+                  "整理能力检查已刷新。",
                 )
               }
             >
-              运行评测门禁
+              检查整理能力
             </Button>
           )}
         </div>
@@ -214,22 +214,22 @@ export function AuthoritativeExtractionPage({
 
       <InlineAlert
         tone="ai-clarification"
-        title="AI 输出始终只是待审核候选"
-        description="接受、修改、拒绝、暂缓都必须由人明确操作。来源章节、版本、校验和、范围、证据，以及提示词、模型和评测版本都会随候选保留。"
+        title="AI 整理结果始终需要你确认"
+        description="使用、修改、放弃或稍后处理都必须由你明确操作。来源与处理记录会完整保留，技术标识可在每条记录的“高级诊断详情”中查看。"
       />
 
       {!online && (
         <InlineAlert
           tone="warning"
           title="当前离线"
-          description="远程抽取不会携带正文重试；任务仅保存元数据并等待恢复联网。"
+          description="离线时不会发送正文或自动重试；系统只保存任务进度并等待恢复联网。"
         />
       )}
       {waitingForNetwork && online && (
         <InlineAlert
           tone="info"
           title="离线任务可以恢复"
-          description="再次扫描会从持久化队列继续，不会重复创建同一来源任务。"
+          description="再次扫描会继续原来的任务，不会为同一来源重复创建工作。"
         />
       )}
       {normalizedError !== null && (
@@ -249,15 +249,15 @@ export function AuthoritativeExtractionPage({
         />
       )}
 
-      <section className="authoritative-extraction-summary" aria-label="抽取状态摘要">
+      <section className="authoritative-extraction-summary" aria-label="设定整理状态摘要">
         <SummaryCard
-          label="评测门禁"
+          label="整理能力检查"
           value={dashboard?.evaluationPassed === true ? "通过" : "未通过"}
           tone={dashboard?.evaluationPassed === true ? "success" : "warning"}
         />
-        <SummaryCard label="持久化任务" value={String(dashboard?.jobs.length ?? 0)} tone="info" />
+        <SummaryCard label="可恢复任务" value={String(dashboard?.jobs.length ?? 0)} tone="info" />
         <SummaryCard
-          label="待审核候选"
+          label="待确认设定"
           value={String(
             dashboard?.candidates.filter(
               ({ review }) =>
@@ -267,7 +267,7 @@ export function AuthoritativeExtractionPage({
           tone="ai"
         />
         <SummaryCard
-          label="故事关联索引投影"
+          label="故事关联资料"
           value={graphFreshnessLabel(dashboard?.graphFreshness)}
           tone={
             dashboard?.graphFreshness === "fresh"
@@ -282,15 +282,15 @@ export function AuthoritativeExtractionPage({
       {projectionNeedsAttention && (
         <InlineAlert
           tone="warning"
-          title="故事关联索引需要重建"
-          description="正式事实仍然安全；重建成功前，不应把旧投影当作当前权威上下文。"
+          title="故事关联资料需要更新"
+          description="正式设定仍然安全；更新完成前，不应把旧的关联资料当作当前设定。"
           action={{
-            label: "立即重建",
+            label: "立即更新",
             onClick: () =>
               void perform(
                 "projection",
                 () => runtime.rebuildProjection(projectId),
-                "故事关联索引已从正式事实重建。",
+                "故事关联资料已从正式设定更新。",
               ),
           }}
         />
@@ -299,14 +299,14 @@ export function AuthoritativeExtractionPage({
       <section className="authoritative-extraction-jobs" aria-labelledby="extraction-jobs-title">
         <div className="authoritative-extraction-section-heading">
           <div>
-            <h2 id="extraction-jobs-title">可恢复任务队列</h2>
-            <p>进度、取消请求和失败分类均持久化；崩溃后按租约恢复。</p>
+            <h2 id="extraction-jobs-title">可恢复任务</h2>
+            <p>进度、取消请求和失败原因都会保存在本机；应用意外关闭后仍可继续。</p>
           </div>
         </div>
         {dashboard?.jobs.length === 0 ? (
           <EmptyState
-            title="还没有抽取任务"
-            description="扫描当前章节后，稳定版本会进入幂等任务队列。"
+            title="还没有整理任务"
+            description="整理当前章节后，会为已保存版本创建一项可恢复工作；重复操作不会重复创建。"
           />
         ) : (
           <div className="authoritative-extraction-job-list">
@@ -320,7 +320,7 @@ export function AuthoritativeExtractionPage({
                   void perform(
                     `cancel:${job.id}`,
                     () => runtime.cancel(job.id),
-                    "取消请求已持久化；迟到的模型输出不会进入候选库。",
+                    "取消请求已保存；迟到的模型输出不会进入待确认列表。",
                   )
                 }
               />
@@ -336,24 +336,24 @@ export function AuthoritativeExtractionPage({
       >
         <div className="authoritative-extraction-section-heading">
           <div>
-            <h2 id="extraction-candidates-title">人工审核候选</h2>
-            <p>所有正式写入都使用现有审核事务；按钮点击才构成人工确认。</p>
+            <h2 id="extraction-candidates-title">待确认设定</h2>
+            <p>只有你点击使用或修改后使用，内容才会写入正式设定。</p>
           </div>
           {phase === "loading" && <Badge tone="neutral">加载中</Badge>}
         </div>
         {phase === "error" && dashboard === null ? (
           <EmptyState
-            title="候选暂时无法读取"
+            title="待确认设定暂时无法读取"
             description="本页没有报告任何写入成功。请恢复本地数据库后重试。"
             primaryAction={{ label: "重试", onClick: () => void load(false) }}
           />
         ) : dashboard?.candidates.length === 0 ? (
           <EmptyState
-            title="没有可审核候选"
+            title="没有待确认设定"
             description={
               dashboard.evaluationPassed
-                ? "当前章节尚未产出候选。"
-                : "先让当前提示词、模型与评测版本通过黄金样本门禁。"
+                ? "当前章节尚未整理出需要确认的设定。"
+                : "请先完成当前整理方式的能力检查。"
             }
           />
         ) : (
@@ -423,6 +423,7 @@ function CandidateCard(props: CandidateCardProps) {
     target?.versions.at(-2)?.sourceReviewItemId === extraction.reviewItemId;
   const pending = review?.status === "pending";
   const deferred = review?.status === "deferred";
+  const categoryLabel = candidateCategoryLabel(candidate.category);
 
   function runModify(): void {
     let parsed: unknown;
@@ -436,7 +437,7 @@ function CandidateCard(props: CandidateCardProps) {
             ok: false,
             error: new StoryCoreError({
               code: "STORY_VALIDATION_FAILED",
-              message: "修改后的正式值必须是有效的结构化数据。",
+              message: "修改后的设定内容格式无法识别。",
             }),
           }),
         "",
@@ -454,7 +455,7 @@ function CandidateCard(props: CandidateCardProps) {
           humanConfirmed: true,
           modifiedValue: parsed,
         }),
-      "修改后的候选已由人工确认，正式事实与故事关联索引已同步处理。",
+      "修改后的设定已由你确认，正式设定与故事关联资料已同步更新。",
     );
   }
 
@@ -463,16 +464,13 @@ function CandidateCard(props: CandidateCardProps) {
       className={`authoritative-extraction-candidate${
         pending || deferred ? " candidate-decision-surface" : ""
       }`}
-      aria-label={`${candidate.key}的正式设定候选决策`}
+      aria-label={`${categoryLabel}设定的审核决定`}
     >
       <CardHeader>
         <div className="authoritative-extraction-card-heading">
           <div>
-            <CardTitle>{candidate.key}</CardTitle>
-            <CardDescription>
-              类别 {candidateCategoryLabel(candidate.category)} · 置信度{" "}
-              {(candidate.confidence * 100).toFixed(0)}%
-            </CardDescription>
+            <CardTitle>{categoryLabel}设定待确认</CardTitle>
+            <CardDescription>内容可信度 {(candidate.confidence * 100).toFixed(0)}%</CardDescription>
           </div>
           <div className="authoritative-extraction-badges">
             <Badge tone={candidate.severity === "error" ? "danger" : "info"}>
@@ -486,69 +484,71 @@ function CandidateCard(props: CandidateCardProps) {
       </CardHeader>
       <CardContent
         tabIndex={pending || deferred ? 0 : undefined}
-        aria-label={`${candidate.key}的正式设定候选内容`}
+        aria-label={`${categoryLabel}设定的待确认内容`}
         onKeyDown={handleCandidateDecisionNavigation}
       >
         <dl className="authoritative-extraction-provenance">
           <div>
-            <dt>来源章节 / 版本</dt>
-            <dd title={`${source.chapterId} / ${source.versionId}`}>
-              {shortId(source.chapterId)} / {shortId(source.versionId)}
-            </dd>
+            <dt>来源章节</dt>
+            <dd>当前章节</dd>
           </div>
           <div>
-            <dt>校验和</dt>
-            <dd title={source.checksumSha256}>{shortChecksum(source.checksumSha256)}</dd>
+            <dt>正文版本</dt>
+            <dd>本次整理所用的已保存版本</dd>
           </div>
           <div>
-            <dt>范围</dt>
+            <dt>原文位置</dt>
             <dd>
-              {source.scope.start}–{source.scope.end} / {source.scope.sourceLength}
+              第 {source.scope.start + 1}–{source.scope.end} 个字（共 {source.scope.sourceLength}{" "}
+              个字）
             </dd>
-          </div>
-          <div>
-            <dt>提示词版本</dt>
-            <dd>
-              {extraction.provenance.prompt.registryId} v{extraction.provenance.prompt.version} ·{" "}
-              <span title={extraction.provenance.prompt.checksumSha256}>
-                {shortChecksum(extraction.provenance.prompt.checksumSha256)}
-              </span>
-            </dd>
-          </div>
-          <div>
-            <dt>模型版本</dt>
-            <dd>
-              {extraction.provenance.model.provider}/{extraction.provenance.model.id}@
-              {extraction.provenance.model.revision}
-            </dd>
-          </div>
-          <div>
-            <dt>评测版本</dt>
-            <dd>{extraction.provenance.evaluationVersion}</dd>
           </div>
         </dl>
 
+        <AdvancedDiagnostics
+          className="authoritative-extraction-provenance"
+          rows={[
+            ["结果键", candidate.key],
+            ["任务编号", extraction.jobId],
+            ["审核记录编号", extraction.reviewItemId],
+            ["项目编号", source.projectId],
+            ["章节编号", source.chapterId],
+            ["版本编号", source.versionId],
+            ["正文 SHA-256", source.checksumSha256],
+            [
+              "整理规则版本",
+              `${extraction.provenance.prompt.registryId} v${String(extraction.provenance.prompt.version)}`,
+            ],
+            ["整理规则 SHA-256", extraction.provenance.prompt.checksumSha256],
+            [
+              "模型版本",
+              `${extraction.provenance.model.provider}/${extraction.provenance.model.id}@${extraction.provenance.model.revision}`,
+            ],
+            ["能力检查版本", extraction.provenance.evaluationVersion],
+          ]}
+        />
+
         <blockquote className="authoritative-extraction-evidence">
           <strong>
-            章节证据 {candidate.evidence.range.start}–{candidate.evidence.range.end}
+            原文依据 · 第 {candidate.evidence.range.start + 1}–{candidate.evidence.range.end} 个字
           </strong>
           <p>{candidate.evidence.excerpt}</p>
         </blockquote>
 
         <div className="authoritative-extraction-diff">
           <div>
-            <strong>原正式值</strong>
+            <strong>当前正式设定</strong>
             <pre>{formatJson(candidate.originalValue)}</pre>
           </div>
           <div>
-            <strong>候选值</strong>
+            <strong>建议设定</strong>
             <pre>{formatJson(candidate.suggestedValue)}</pre>
           </div>
         </div>
 
         {props.editing && (
           <div className="authoritative-extraction-modify">
-            <label htmlFor={`modify-${identity}`}>修改后写入的正式结构化数据</label>
+            <label htmlFor={`modify-${identity}`}>修改后保存的设定内容</label>
             <Textarea
               id={`modify-${identity}`}
               ref={fitCandidateDecisionTextarea}
@@ -558,7 +558,7 @@ function CandidateCard(props: CandidateCardProps) {
               rows={7}
               spellCheck={false}
             />
-            <p>只有点击“确认修改并接受”才会进入正式事实。</p>
+            <p>只有点击“确认修改并使用”才会写入正式设定。</p>
           </div>
         )}
       </CardContent>
@@ -580,11 +580,11 @@ function CandidateCard(props: CandidateCardProps) {
                       actorId: props.actorId,
                       humanConfirmed: true,
                     }),
-                  "候选已由人工接受，正式事实与故事关联索引已同步处理。",
+                  "这条设定已由你确认，正式设定与故事关联资料已同步更新。",
                 )
               }
             >
-              接受候选
+              使用这条设定
             </Button>
             <Button
               size="lg"
@@ -592,7 +592,7 @@ function CandidateCard(props: CandidateCardProps) {
               disabled={props.busyKey !== null}
               onClick={props.onStartModify}
             >
-              修改后接受
+              修改后使用
             </Button>
             <Button
               size="lg"
@@ -610,7 +610,7 @@ function CandidateCard(props: CandidateCardProps) {
                       humanConfirmed: true,
                       remindAt: tomorrowUtc(),
                     }),
-                  "候选已暂缓，可稍后恢复审核。",
+                  "这条设定已暂缓，你可以稍后继续确认。",
                 )
               }
             >
@@ -631,11 +631,11 @@ function CandidateCard(props: CandidateCardProps) {
                       actorId: props.actorId,
                       humanConfirmed: true,
                     }),
-                  "候选已拒绝，未修改正式事实。",
+                  "这条设定已放弃，没有修改正式设定。",
                 )
               }
             >
-              拒绝
+              放弃
             </Button>
           </>
         )}
@@ -647,7 +647,7 @@ function CandidateCard(props: CandidateCardProps) {
               disabled={props.busyKey !== null}
               onClick={runModify}
             >
-              确认修改并接受
+              确认修改并使用
             </Button>
             <Button
               size="lg"
@@ -674,7 +674,7 @@ function CandidateCard(props: CandidateCardProps) {
                     actorId: props.actorId,
                     humanConfirmed: true,
                   }),
-                "候选已恢复为待审核。",
+                "这条设定已恢复为待确认。",
               )
             }
           >
@@ -697,11 +697,11 @@ function CandidateCard(props: CandidateCardProps) {
                     actorId: props.actorId,
                     humanConfirmed: true,
                   }),
-                "本候选写入的当前正式版本已撤销，故事关联索引已同步处理。",
+                "这条设定写入的当前正式版本已撤销，故事关联资料已同步更新。",
               )
             }
           >
-            撤销本次接受
+            撤销本次使用
           </Button>
         )}
       </CardFooter>
@@ -728,17 +728,27 @@ function JobCard({
     "cancelled",
   ].includes(job.state);
   return (
-    <Card className="authoritative-extraction-job">
+    <Card className="authoritative-extraction-job" aria-label="章节设定整理任务">
       <CardContent>
         <div>
-          <strong title={job.id}>{shortId(job.id)}</strong>
-          <span title={job.source.versionId}>版本 {shortId(job.source.versionId)}</span>
+          <strong>章节设定整理任务</strong>
+          <span>来源：当前章节 · 本次整理所用的已保存版本</span>
         </div>
         <Badge tone={jobStateTone(job.state)}>{jobStateLabel(job.state)}</Badge>
-        <span>尝试 {job.attemptCount}</span>
+        <span>已尝试 {job.attemptCount} 次</span>
         {job.failure !== null && (
           <span>原因：{projectOrdinaryUiError({ code: job.failure.code }).description}</span>
         )}
+        <AdvancedDiagnostics
+          className="authoritative-extraction-provenance"
+          rows={[
+            ["任务编号", job.id],
+            ["项目编号", job.source.projectId],
+            ["章节编号", job.source.chapterId],
+            ["版本编号", job.source.versionId],
+            ["正文 SHA-256", job.source.checksumSha256],
+          ]}
+        />
         {cancellable && (
           <Button size="sm" variant="ghost" loading={busy} disabled={disabled} onClick={onCancel}>
             取消
@@ -768,25 +778,46 @@ function SummaryCard({
   );
 }
 
+function AdvancedDiagnostics({
+  className,
+  rows,
+}: Readonly<{
+  className: string;
+  rows: readonly (readonly [label: string, value: string | number])[];
+}>) {
+  return (
+    <details>
+      <summary>高级诊断详情</summary>
+      <dl className={className}>
+        {rows.map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  );
+}
 function availabilityCopy(
   reason: "feature_disabled" | "native_sqlite_required" | "provider_not_configured",
 ) {
   switch (reason) {
     case "feature_disabled":
       return {
-        title: "权威抽取默认关闭",
-        description: "启用前不会读取章节、调用模型或创建任务。请由产品配置显式开启。",
+        title: "自动整理设定默认关闭",
+        description: "启用前不会读取章节、联系模型服务或创建任务。请在产品设置中明确开启。",
       };
     case "native_sqlite_required":
       return {
-        title: "需要桌面原生持久化",
+        title: "需要桌面本地存储",
         description:
-          "浏览器开发模式不会伪装生产级队列与评测存储。请在已连接桌面本地数据库的运行环境中使用。",
+          "浏览器开发模式不会伪装可恢复任务和能力检查记录。请在已连接桌面本地数据库的应用中使用。",
       };
     case "provider_not_configured":
       return {
-        title: "尚未配置真实抽取提供方",
-        description: "本页不会用演示生成器冒充端到端抽取。配置真实提供方后才能启用。",
+        title: "尚未配置可用的设定整理模型",
+        description: "本页不会用演示内容冒充真实整理结果。配置可用的模型服务后才能启用。",
       };
   }
 }
@@ -797,14 +828,6 @@ function candidateIdentity(candidate: AuthoritativeExtractionDashboardCandidate)
 
 function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
-}
-
-function shortId(value: string): string {
-  return `${value.slice(0, 8)}…${value.slice(-4)}`;
-}
-
-function shortChecksum(value: string): string {
-  return `${value.slice(0, 10)}…${value.slice(-8)}`;
 }
 
 function graphFreshnessLabel(
@@ -827,17 +850,17 @@ function graphFreshnessLabel(
 function reviewStatusLabel(value: ReviewItemStatus | undefined): string {
   switch (value) {
     case "pending":
-      return "待审核";
+      return "待确认";
     case "accepted":
-      return "已接受";
+      return "已使用";
     case "modified":
-      return "修改后接受";
+      return "修改后使用";
     case "rejected":
-      return "已拒绝";
+      return "已放弃";
     case "deferred":
       return "已暂缓";
     default:
-      return "待物化";
+      return "等待保存";
   }
 }
 
@@ -882,15 +905,15 @@ function reviewStatusTone(value: ReviewItemStatus | undefined) {
 function jobStateLabel(state: AuthoritativeExtractionJob["state"]): string {
   const labels: Record<AuthoritativeExtractionJob["state"], string> = {
     queued: "排队中",
-    running: "抽取中",
+    running: "整理中",
     waiting_for_network: "等待联网",
-    blocked_evaluation: "评测未通过",
-    materialization_pending: "待物化",
-    materializing: "物化中",
-    awaiting_review: "等待审核",
+    blocked_evaluation: "整理能力检查未通过",
+    materialization_pending: "等待保存",
+    materializing: "保存中",
+    awaiting_review: "等待确认",
     completed: "已完成",
-    failed_retryable: "可重试失败",
-    failed_final: "最终失败",
+    failed_retryable: "可以重试",
+    failed_final: "未能完成",
     blocked_stale: "来源已变化",
     cancelled: "已取消",
   };

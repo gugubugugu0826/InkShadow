@@ -58,7 +58,7 @@ describe("ModelHubImageGenerationPanel", () => {
     render(<ModelHubImageGenerationPanel service={service} />);
 
     expect(await screen.findByText("图片生成暂不可用")).toBeInTheDocument();
-    expect(screen.getByText(/AI 分工/u)).toBeInTheDocument();
+    expect(screen.getByText(/创作任务安排/u)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "选择保存位置并生成" })).not.toBeInTheDocument();
   });
 

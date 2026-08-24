@@ -18,6 +18,7 @@ import {
   Select,
 } from "@inkshadow/ui";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import "./settings-page.css";
 
 import { useAppearancePreference } from "../appearance-preference";
 import { DataTransferPanel } from "../components/data-transfer-panel";
@@ -139,6 +140,7 @@ import {
   MODEL_HUB_TEXT_CAPABILITY_PROBE_MESSAGES,
   executeAuditedModelHubTextCapabilityProbe,
   modelHubTextCapabilityProbeFailureMetadata,
+  modelHubCapabilityProbeSupportId,
 } from "../infrastructure/model-hub-text-capability-probe";
 import {
   MODEL_HUB_STRUCTURED_CAPABILITY_PROBE_VERSION,
@@ -251,6 +253,13 @@ interface PreparedSettingsTextProbeAuthorization {
   readonly submittedSecret: string | null;
   readonly modelId: string;
   readonly disclosureFingerprint: string;
+  readonly invocationId: string;
+}
+
+interface SettingsCapabilityProbeFailureProjection {
+  readonly supportId: string;
+  readonly stage: "preparation" | "dispatch" | "result";
+  readonly providerDispatchCount: 0 | 1;
 }
 
 class SettingsTextProbePostDispatchConflictError extends Error {
@@ -287,8 +296,8 @@ const MODEL_HUB_SECTION_META: Readonly<
     description: "连接供应商、验证凭据、发现模型，并确认模型真正可用的能力。",
   }),
   "model-routing": Object.freeze({
-    title: "模型中心 · AI 分工",
-    navigationLabel: "AI 分工",
+    title: "模型中心 · 创作任务安排",
+    navigationLabel: "创作任务安排",
     description: "为写作、规划、记忆和检查选择主模型、备用模型与隐私边界。",
   }),
   "model-evaluation": Object.freeze({
@@ -327,7 +336,7 @@ const MODEL_HUB_SCHEME_OPTIONS = [
   {
     value: "custom",
     label: "完全自定义",
-    description: "在专家设置中逐项调整兼容路由。",
+    description: "在专家设置中逐项调整兼容任务安排。",
   },
 ] as const satisfies readonly {
   readonly value: ModelHubScheme;
@@ -433,6 +442,7 @@ export function SettingsPage() {
   });
   const modelHubOperationCoordinatorRef = useRef(new ModelHubOperationCoordinator());
   const modelHubSnapshotRevisionRef = useRef(0);
+  const capabilityProbeInFlightRef = useRef(false);
   const [modelHubPageSnapshot, setModelHubPageSnapshot] = useState(
     createInitialModelHubPageSnapshot,
   );
@@ -548,6 +558,8 @@ export function SettingsPage() {
   const [capabilityProbeMessage, setCapabilityProbeMessage] = useState<string | null>(null);
   const [capabilityProbeError, setCapabilityProbeError] = useState<unknown>(null);
   const credentialEditRevisionRef = useRef(0);
+  const [capabilityProbeFailure, setCapabilityProbeFailure] =
+    useState<SettingsCapabilityProbeFailureProjection | null>(null);
   const settingsTextProbeFormRef = useRef<SettingsTextProbeFormSnapshot | null>(null);
   useLayoutEffect(() => {
     settingsTextProbeFormRef.current = Object.freeze({
@@ -1205,14 +1217,14 @@ export function SettingsPage() {
       now: runtime.clock.now(),
     });
     if (intent === null) {
-      setRouteError(new Error("无法保存本次连接返回位置；当前 AI 分工没有修改。"));
+      setRouteError(new Error("无法保存本次连接返回位置；当前创作任务安排没有修改。"));
       return;
     }
     setConnectionIntent(intent);
     applyProviderPreset(candidate.providerKind);
     setSelectedModel(candidate.modelId);
     setModelHubMutationNotice({
-      message: `准备连接 ${candidate.displayName}；连接并同步账户目录后会返回“${novelAiTaskLabel(task)}”。当前分工尚未修改。`,
+      message: `准备连接 ${candidate.displayName}；连接并同步账户目录后会返回“${novelAiTaskLabel(task)}”。当前安排尚未修改。`,
       reloadRequired: false,
     });
     void navigate("/settings#model-center");
@@ -1222,7 +1234,7 @@ export function SettingsPage() {
     clearModelHubConnectionIntent(window.localStorage);
     setConnectionIntent(null);
     setModelHubMutationNotice({
-      message: "已取消本次模型选择；原有 AI 分工没有修改。",
+      message: "已取消本次模型选择；原有创作任务安排没有修改。",
       reloadRequired: false,
     });
   }
@@ -1243,7 +1255,7 @@ export function SettingsPage() {
     setRetryLimit("0");
     setConnection(null);
     setConnectionChecked(false);
-    setSchemeMessage("已恢复供应商默认连接参数；系统凭据、已保存连接和 AI 分工均未删除。");
+    setSchemeMessage("已恢复供应商默认连接参数；系统凭据、已保存连接和创作任务安排均未删除。");
   }
 
   function captureSettingsTextProbeForm(): SettingsTextProbeFormSnapshot {
@@ -1326,10 +1338,11 @@ export function SettingsPage() {
     form: SettingsTextProbeFormSnapshot,
     submittedSecretValue: string,
     requestedModelId: string,
+    invocationId: string,
   ): Promise<PreparedSettingsTextProbeAuthorization> {
     const modelId = requestedModelId.normalize("NFKC").trim();
     if (modelId.length === 0) {
-      throw new Error("请先填写模型标识；豆包也可以填写 Endpoint ID。");
+      throw new Error("请先填写模型名称或编号；豆包也可以填写接入点编号。");
     }
     validateExpertConnectionDraft({
       provider: form.providerKind,
@@ -1356,6 +1369,7 @@ export function SettingsPage() {
     const disclosureFingerprint = await settingsTextProbeFingerprintFromInput(
       connectionInput,
       modelId,
+      invocationId,
     );
     assertSettingsTextProbeFormUnchanged(form);
     return Object.freeze({
@@ -1363,6 +1377,7 @@ export function SettingsPage() {
       connectionInput,
       submittedSecret,
       modelId,
+      invocationId,
       disclosureFingerprint,
     });
   }
@@ -1785,7 +1800,7 @@ export function SettingsPage() {
       setNovelRoutePrimaryCatalogId(saved.primaryCatalogEntryId);
       setNovelRouteFallbackCatalogId(saved.fallbackCatalogEntryId ?? "");
       setNovelRouteFailure(saved.failurePolicy);
-      setSchemeMessage(`已保存“${novelAiTaskLabel(saved.task)}”的自定义分工。`);
+      setSchemeMessage(`已保存“${novelAiTaskLabel(saved.task)}”的自定义创作任务安排。`);
     } catch (cause: unknown) {
       setRouteError(cause);
       await confirmNovelRoutingUnchanged(routesBeforeSave);
@@ -1831,7 +1846,7 @@ export function SettingsPage() {
       priceUpdatedDate.length === 0
     ) {
       throw new Error(
-        "如需费用估算，请同时填写输入价、输出价、价格版本和更新时间；上下文窗口可单独留空。",
+        "如需费用估算，请同时填写输入价、输出价、价格版本和更新时间；可处理内容长度可单独留空。",
       );
     }
     return {
@@ -1871,7 +1886,7 @@ export function SettingsPage() {
   > {
     const modelId = modelIdValue.normalize("NFKC").trim();
     if (modelId.length === 0) {
-      throw new Error("请先填写模型标识；豆包也可以填写 Endpoint ID。");
+      throw new Error("请先填写模型名称或编号；豆包也可以填写接入点编号。");
     }
     let catalogWasWritten = false;
     let catalog = await runtime.modelHub.listCatalog(savedConnection.id);
@@ -1944,7 +1959,7 @@ export function SettingsPage() {
         evidenceSource: "provider_metadata",
         evidenceVersion: "text-capability-probe-endpoint-v1",
         evidenceSummary: local
-          ? "连接目标是本机回环地址；探针未发送作品内容。"
+          ? "连接目标是本机回环地址；能力检查未发送作品内容。"
           : "连接目标是供应商远程端点；留存与训练政策仍以供应商当前政策为准。",
         expectedRevision: null,
       });
@@ -1976,46 +1991,24 @@ export function SettingsPage() {
   > {
     const scanId = createModelHubId("probe-scan");
     const evidenceVersion = createModelHubId("lightweight-probe-v1");
-    const invocationId = createModelHubId("capability-probe-invocation");
+    const invocationId = authorization.invocationId;
     const startedAt = Date.parse(runtime.clock.now());
     const expectedDispatchIdentity = settingsProbeDispatchIdentity(savedConnection, catalogEntry);
     try {
-      const current = await readAuthoritativeProbeTarget(savedConnection.id, catalogEntry.id);
-      assertModelHubFinalDispatchUnchanged(
-        expectedDispatchIdentity,
-        settingsProbeDispatchIdentity(current.connection, current.entry),
-      );
-      assertSettingsTextProbeFormUnchanged(authorization.form);
-      const currentDisclosureFingerprint = await settingsTextProbeFingerprintFromConnection(
-        current.connection,
-        current.entry.providerModelId,
-      );
-      if (currentDisclosureFingerprint !== authorization.disclosureFingerprint) {
-        throw settingsTextProbeDisclosureChanged();
-      }
-      const dispatchTarget = await readAuthoritativeProbeTarget(
-        savedConnection.id,
-        catalogEntry.id,
-      );
-      assertModelHubFinalDispatchUnchanged(
-        expectedDispatchIdentity,
-        settingsProbeDispatchIdentity(dispatchTarget.connection, dispatchTarget.entry),
-      );
-      assertSettingsTextProbeFormUnchanged(authorization.form);
       const result = await executeAuditedModelHubTextCapabilityProbe({
         gateway: runtime.modelGateway,
         modelHub: runtime.modelHub,
         clock: runtime.clock,
-        providerKind: dispatchTarget.connection.providerKind,
+        providerKind: savedConnection.providerKind,
         generationId: createModelHubId("capability-probe"),
         invocationId,
-        connection: dispatchTarget.connection,
-        catalogEntry: dispatchTarget.entry,
+        connection: savedConnection,
+        catalogEntry,
         config: Object.freeze({
-          ...modelHubNativeEndpointConfig(dispatchTarget.connection),
+          ...modelHubNativeEndpointConfig(savedConnection),
           retryLimit: 0,
         }),
-        model: dispatchTarget.entry.providerModelId,
+        model: catalogEntry.providerModelId,
         assertBeforeProviderDispatch: async () => {
           const finalTarget = await readAuthoritativeProbeTarget(
             savedConnection.id,
@@ -2025,6 +2018,14 @@ export function SettingsPage() {
             expectedDispatchIdentity,
             settingsProbeDispatchIdentity(finalTarget.connection, finalTarget.entry),
           );
+          const currentDisclosureFingerprint = await settingsTextProbeFingerprintFromConnection(
+            finalTarget.connection,
+            finalTarget.entry.providerModelId,
+            authorization.invocationId,
+          );
+          if (currentDisclosureFingerprint !== authorization.disclosureFingerprint) {
+            throw settingsTextProbeDisclosureChanged();
+          }
           assertSettingsTextProbeFormUnchanged(authorization.form);
         },
       });
@@ -2072,7 +2073,7 @@ export function SettingsPage() {
             : {
                 errorCode: "MODEL_OUTPUT_TRUNCATED",
                 errorSummary:
-                  "固定能力探针已返回可见文字，但响应以输出上限结束；文本生成能力已确认，未保存探针输出。",
+                  "模型能力检查已返回可见文字，但响应以输出上限结束；文本生成能力已确认，未保存检查输出。",
                 failure: result.partialFailure,
               }),
         },
@@ -2292,7 +2293,7 @@ export function SettingsPage() {
                   capability: "structured_output",
                   verdict: "supported",
                   evidenceSource: "lightweight_probe",
-                  evidenceSummary: `固定结构化数据格式探针通过（${result.evidenceVersion}，${String(result.attempts)} 次尝试）；未发送或保存作品内容与模型响应。`,
+                  evidenceSummary: `结构化格式能力检查通过（${result.evidenceVersion}，${String(result.attempts)} 次尝试）；未发送或保存作品内容与模型响应。`,
                 },
               ],
             },
@@ -2402,7 +2403,7 @@ export function SettingsPage() {
                   capability: "translation",
                   verdict: "supported",
                   evidenceSource: "lightweight_probe",
-                  evidenceSummary: `固定中英翻译探针通过（${result.evidenceVersion}）；未发送或保存作品内容与模型响应。`,
+                  evidenceSummary: `中英翻译能力检查通过（${result.evidenceVersion}）；未发送或保存作品内容与模型响应。`,
                 },
               ],
             },
@@ -2556,14 +2557,18 @@ export function SettingsPage() {
     setNovelTaskRoutes(applied.routes);
     if (legacyRefreshFailed) {
       setSchemeMessage(
-        "核心 AI 分工已保存；旧版兼容分工暂未同步，不影响当前模型中心任务，可以稍后重试。",
+        "核心创作任务安排已保存；旧版兼容设置暂未同步，不影响当前模型中心任务，可以稍后重试。",
       );
     }
     return applied.savedNovelTaskCount;
   }
 
   async function probeSelectedModelCapability(): Promise<void> {
-    if (!runtime.modelGateway.available || selectedModel.trim().length === 0) {
+    if (
+      capabilityProbeInFlightRef.current ||
+      !runtime.modelGateway.available ||
+      selectedModel.trim().length === 0
+    ) {
       return;
     }
     const probeForm = captureSettingsTextProbeForm();
@@ -2579,20 +2584,27 @@ export function SettingsPage() {
     });
     startModelHubDiagnosticAction(runtime, token, runtime.clock.now());
     let backendCommitted = false;
+    const invocationId = createModelHubId("capability-probe-invocation");
+    const invocationStartedAt = runtime.clock.now();
+    let authorization: PreparedSettingsTextProbeAuthorization | null = null;
     let refreshAttempted = false;
     setProbingCapability(true);
     setCapabilityProbeError(null);
     setCapabilityProbeMessage(null);
+    setCapabilityProbeFailure(null);
+    capabilityProbeInFlightRef.current = true;
     try {
-      const authorization = await prepareSettingsTextProbeAuthorization(
+      authorization = await prepareSettingsTextProbeAuthorization(
         probeForm,
         secret,
         requestedModelId,
+        invocationId,
       );
       const savedConnection = await persistPreparedSettingsTextProbeConnection(
         authorization,
         token,
       );
+      assertSettingsTextProbeFormUnchanged(authorization.form);
       backendCommitted = true;
       if (
         !modelHubOperationCoordinatorRef.current.isCurrent(token, {
@@ -2662,8 +2674,8 @@ export function SettingsPage() {
       }${
         automaticallyConfigured === null
           ? ""
-          : ` 已自动完成 ${String(automaticallyConfigured)} 类 AI 任务的基础分工。`
-      }${automaticRoutingFailed ? " 写作能力证据已保留；自动分工未完成，请重试应用 AI 分工。" : ""}`;
+          : ` 已自动完成 ${String(automaticallyConfigured)} 类 创作任务的基础安排。`
+      }${automaticRoutingFailed ? " 写作能力证据已保留；自动安排未完成，请重试应用创作任务安排。" : ""}`;
       setCapabilityProbeMessage(successMessage);
       refreshAttempted = true;
       const refreshed = await loadModelCenter({
@@ -2687,7 +2699,22 @@ export function SettingsPage() {
       const visibleCause =
         cause instanceof ModelHubFinalDispatchError ? settingsTextProbeDisclosureChanged() : cause;
       const normalizedVisibleCause = normalizeUiError(visibleCause);
-      const resultAmbiguous = normalizedVisibleCause.code === "PROVIDER_RESULT_AMBIGUOUS";
+      const probeInvocation = await runtime.modelHub.findInvocation(invocationId).catch(() => null);
+      const resultAmbiguous = isCapabilityProbeResultAmbiguous(
+        normalizedVisibleCause.code,
+        probeInvocation,
+      );
+      const providerDispatched =
+        probeInvocation !== null && probeInvocation.providerDispatchStartedAt !== null;
+      const supportId = modelHubCapabilityProbeSupportId({
+        id: invocationId,
+        startedAt: probeInvocation?.startedAt ?? invocationStartedAt,
+      });
+      setCapabilityProbeFailure({
+        supportId,
+        stage: resultAmbiguous ? "result" : providerDispatched ? "dispatch" : "preparation",
+        providerDispatchCount: providerDispatched ? 1 : 0,
+      });
       setCapabilityProbeError(visibleCause);
       if (!refreshAttempted) {
         finishModelHubDiagnosticAction(runtime, token, {
@@ -2699,6 +2726,7 @@ export function SettingsPage() {
         });
       }
     } finally {
+      capabilityProbeInFlightRef.current = false;
       setProbingCapability(false);
     }
   }
@@ -2726,6 +2754,7 @@ export function SettingsPage() {
     setModelCapacity(null);
     setCapabilityProbeError(null);
     setCapabilityProbeMessage(null);
+    setCapabilityProbeFailure(null);
     let savedConnection: ModelProviderConnection | null = null;
     let probeAuthorization: PreparedSettingsTextProbeAuthorization | null = null;
     let lightweightProbeOwnsConnectionOutcome = false;
@@ -2738,6 +2767,7 @@ export function SettingsPage() {
               probeForm,
               secret,
               requestedOperationModelId,
+              createModelHubId("capability-probe-invocation"),
             );
       savedConnection =
         probeAuthorization === null
@@ -3022,7 +3052,7 @@ export function SettingsPage() {
     setRouteFailureLegacyProjectionMayHaveChanged(false);
     if (modelHubScheme === "custom") {
       setExpertMode(true);
-      setSchemeMessage("已打开专家设置，可逐项调整模型能力和兼容路由。");
+      setSchemeMessage("已打开专家设置，可逐项调整模型能力和兼容任务安排。");
       return;
     }
     setSchemeSaving(true);
@@ -3050,7 +3080,7 @@ export function SettingsPage() {
       setNovelTaskRoutes(applied.routes);
       const missing = NOVEL_AI_TASKS.length - applied.savedNovelTaskCount;
       const legacyWarning = legacyRefreshFailed
-        ? "；旧版兼容分工暂未同步，不影响当前模型中心任务，可以稍后重试"
+        ? "；旧版兼容设置暂未同步，不影响当前模型中心任务，可以稍后重试"
         : "";
       setSchemeMessage(
         modelHubScheme === "local_privacy"
@@ -3179,7 +3209,7 @@ export function SettingsPage() {
       setModels([]);
       setHubCatalog([]);
       setRetirementMessage(
-        `“${target.displayName}”已退役：不会再参与选择、推荐或 AI 分工，系统凭据已清理；已有正文、模型目录和历史模型使用记录仍会保留。`,
+        `“${target.displayName}”已退役：不会再参与选择、推荐或创作任务安排，系统凭据已清理；已有正文、模型目录和历史模型使用记录仍会保留。`,
       );
       if (result.credentialCleanup === "skipped_unowned_reference") {
         setRetirementMessage(
@@ -3525,6 +3555,8 @@ export function SettingsPage() {
       : projectOrdinaryUiError({ code: modelHubPageSnapshot.errorCode });
   const normalizedCapabilityProbeError =
     capabilityProbeError === null ? null : normalizeUiError(capabilityProbeError);
+  const capabilityProbeSupportSuffix =
+    capabilityProbeFailure === null ? "" : ` 支持编号：${capabilityProbeFailure.supportId}。`;
   const normalizedRouteError = routeError === null ? null : normalizeUiError(routeError);
   const taskProbeDisclosureError =
     routeError instanceof ModelHubTaskCapabilityProbeDisclosureError ? routeError : null;
@@ -3900,6 +3932,51 @@ export function SettingsPage() {
         (hubConnection.connectionStatus === "ready" ||
           hubConnection.connectionStatus === "degraded")),
   });
+  const describeBlockedModelHubAction = (
+    actionLabel: string,
+    state: (typeof modelHubFormReadiness)["save"],
+    noActionOutcome: string,
+  ): string | null => {
+    if (state.enabled) return null;
+    const recoverySteps = [
+      ...(runtime.mode === "browser-development" ? ["请改用墨影桌面应用。"] : []),
+      ...state.blockers.map(({ message }) => message),
+    ].filter((message, index, messages) => messages.indexOf(message) === index);
+    return `暂时不能${actionLabel}：${recoverySteps.join("")}完成上述项目后可以重试；${noActionOutcome}`;
+  };
+  const modelHubSaveHelp = describeBlockedModelHubAction(
+    "保存",
+    modelHubFormReadiness.save,
+    "本次不会保存设置，也不会发送请求。",
+  );
+  const modelHubDiscoverHelp = describeBlockedModelHubAction(
+    "测试连接并发现模型",
+    modelHubFormReadiness.discover,
+    "本次不会发送请求。",
+  );
+  const modelHubVerifyHelp = describeBlockedModelHubAction(
+    "验证模型能力",
+    modelHubFormReadiness.verify,
+    "本次不会发送请求。",
+  );
+  const modelHubRefreshBlocked =
+    modelHubHydrationPending || saving || checkingModel || probingCapability;
+  const modelHubRefreshHelp = modelHubRefreshBlocked
+    ? `暂时不能刷新：${
+        modelHubHydrationPending
+          ? "正在读取模型中心状态。"
+          : saving
+            ? "正在保存连接设置。"
+            : checkingModel
+              ? "正在检查连接和模型目录。"
+              : "正在验证模型能力。"
+      }完成后即可刷新；已经保存的设置不会丢失，也不需要重复保存。`
+    : null;
+  const modelHubManagementBlocked =
+    loading || saving || checkingModel || probingCapability || retiringConnection;
+  const modelHubManagementHelp = modelHubManagementBlocked
+    ? "暂时不能更改连接：正在完成另一项模型操作。完成后即可重试；不会重复保存、验证或删除连接。"
+    : null;
   const showModelHubOnboarding =
     activeModelHubSection === "model-center" &&
     !connectionSetupExpanded &&
@@ -4016,7 +4093,7 @@ export function SettingsPage() {
                           </Button>
                         )
                       ) : (
-                        <Badge tone="success">账户目录 · 保留当前分工</Badge>
+                        <Badge tone="success">账户目录 · 保留当前安排</Badge>
                       )
                     ) : support === "routable_after_verification" && modelId !== null ? (
                       <Button
@@ -4061,7 +4138,7 @@ export function SettingsPage() {
         return;
       }
       setModelHubMutationNotice({
-        message: `已选择 ${catalogEntry.displayName}。请在任务清单中明确选择“用于此任务”；当前 AI 分工没有修改。`,
+        message: `已选择 ${catalogEntry.displayName}。请在任务清单中明确选择“用于此任务”；当前创作任务安排没有修改。`,
         reloadRequired: false,
       });
       void navigate("/settings#model-center");
@@ -4090,13 +4167,15 @@ export function SettingsPage() {
       message:
         candidate.modelId === null
           ? `请先连接 ${candidate.displayName} 对应的供应商，再从账户真实目录发现模型标识。`
-          : `准备连接 ${candidate.displayName}；连接、目录同步和能力验证完成前，它不会参与 AI 分工。`,
+          : `准备连接 ${candidate.displayName}；连接、目录同步和能力验证完成前，它不会参与创作任务安排。`,
       reloadRequired: false,
     });
     void navigate("/settings#model-center");
   }
 
-  const directSettingsProjection = projectDirectSettingsPage(writingExperience);
+  const directSettingsProjection = isModelHubView
+    ? null
+    : projectDirectSettingsPage(writingExperience);
   if (directSettingsProjection !== null) return directSettingsProjection;
 
   return (
@@ -4106,7 +4185,7 @@ export function SettingsPage() {
       <header className="page-heading">
         <div>
           <p className="page-heading__eyebrow">
-            {isModelHubView ? "AI 连接与分工" : "写作、数据与隐私"}
+            {isModelHubView ? "模型连接与创作任务安排" : "写作、数据与隐私"}
           </p>
           <h1>{modelHubPageMeta?.title ?? "全局设置"}</h1>
           <p>
@@ -4152,7 +4231,8 @@ export function SettingsPage() {
           })}
         </nav>
       ) : (
-        <nav className="settings-actions settings-section-nav" aria-label="全局设置分区">
+        <nav className="settings-actions settings-section-nav" aria-label="全局设置快速跳转">
+          <span className="settings-section-nav__label">快速跳转</span>
           <Link className="button-link button-link--secondary" to="/settings#appearance">
             外观
           </Link>
@@ -4204,12 +4284,12 @@ export function SettingsPage() {
             }
             description={
               connectionIntentCatalogEntry === null
-                ? `目标：${connectionIntent.providerModelId}。请保存连接、同步账户目录并验证能力；在你明确分配前，原有 AI 分工不会改变。`
+                ? `目标：${connectionIntent.providerModelId}。请保存连接、同步账户目录并验证能力；在你明确分配前，原有创作任务安排不会改变。`
                 : connectionIntentTaskRecommendation === null
-                  ? `${connectionIntentCatalogEntry.displayName} 已出现在账户目录中，但“${novelAiTaskLabel(connectionIntent.task)}”所需能力还没有可信证据。请在模型中心专家设置中补充或验证这项能力；系统不会自动返回或修改路由。`
+                  ? `${connectionIntentCatalogEntry.displayName} 已出现在账户目录中，但“${novelAiTaskLabel(connectionIntent.task)}”所需能力还没有可信证据。请在模型中心专家设置中补充或验证这项能力；系统不会自动返回或修改任务安排。`
                   : connectionIntentTaskRecommendation.readiness === "ready"
-                    ? `${connectionIntentCatalogEntry.displayName} 已具备“${novelAiTaskLabel(connectionIntent.task)}”所需的可信能力证据。返回后仍需明确点击“用于此任务”，系统不会自动覆盖原路由。`
-                    : `${connectionIntentCatalogEntry.displayName} 已具备文本生成证据。返回任务后，点击“查看验证说明”，明确确认固定探针的连接、模型、发送范围、隐私与费用信息后再验证和分配；系统不会自动发送或修改路由。`
+                    ? `${connectionIntentCatalogEntry.displayName} 已具备“${novelAiTaskLabel(connectionIntent.task)}”所需的可信能力证据。返回后仍需明确点击“用于此任务”，系统不会自动更改原有创作任务安排。`
+                    : `${connectionIntentCatalogEntry.displayName} 已具备文本生成证据。返回任务后，点击“查看验证说明”，明确确认固定能力检查的连接、模型、发送范围、隐私与费用信息后再验证和分配；系统不会自动发送或修改任务安排。`
             }
           />
           <div className="settings-actions">
@@ -4253,7 +4333,16 @@ export function SettingsPage() {
                 <CardDescription>选择舒适的阅读与写作界面，不会改变作品内容。</CardDescription>
               </CardHeader>
               <CardContent>
-                <FormField label="外观模式" hint="跟随系统时，电脑的浅色或深色外观变化会立即同步。">
+                <FormField
+                  label="外观模式"
+                  hint={
+                    appearance === "system"
+                      ? `当前跟随系统；电脑此刻为${resolvedSurface === "dark" ? "深色" : "浅色"}。`
+                      : appearance === "dark"
+                        ? "当前使用深色。"
+                        : "当前使用浅色。"
+                  }
+                >
                   {(fieldProps) => (
                     <Select
                       {...fieldProps}
@@ -4272,17 +4361,6 @@ export function SettingsPage() {
                     />
                   )}
                 </FormField>
-                <InlineAlert
-                  tone="info"
-                  title="当前显示"
-                  description={
-                    appearance === "system"
-                      ? `正在跟随系统，当前为${resolvedSurface === "dark" ? "深色" : "浅色"}。`
-                      : appearance === "dark"
-                        ? "当前固定为深色。"
-                        : "当前固定为浅色。"
-                  }
-                />
               </CardContent>
             </Card>
 
@@ -4453,7 +4531,7 @@ export function SettingsPage() {
                     <CardTitle headingLevel={2}>写作体验</CardTitle>
                     <CardDescription>
                       只改变下一次写作操作的交互方式；不会向模型发送内容，也不会修改正文、AI
-                      建议版本、历史版本、路由或任务。
+                      建议版本、历史版本、任务安排或任务。
                     </CardDescription>
                   </div>
                   <Badge tone="neutral">
@@ -4561,7 +4639,7 @@ export function SettingsPage() {
               <CardContent>
                 <ul className="privacy-list">
                   <li>项目、章节、恢复草稿与版本默认存储在当前设备。</li>
-                  <li>候选内容在明确接受前不会写入正式正文。</li>
+                  <li>AI 生成内容在你明确使用前不会写入正式正文。</li>
                   <li>浏览器开发模式仅用于本地调试，不代表桌面生产数据层。</li>
                   <li>模型密钥不写入项目数据库、浏览器调试存储、日志或通知。</li>
                 </ul>
@@ -4621,7 +4699,7 @@ export function SettingsPage() {
                         description={
                           selectedMemoryPolicy?.automaticLearningEnabled === true
                             ? "自动学习当前已开启。清空时会在同一事务中关闭自动学习，并排除该项目的全部记忆。"
-                            : "自动学习当前已关闭。已经忘掉的记录仍作为审计证据保留，不会参与后续上下文。"
+                            : "自动学习当前已关闭。已经忘掉的记录仍作为审计证据保留，不会参与后续参考资料。"
                         }
                       />
                     </>
@@ -4769,7 +4847,7 @@ export function SettingsPage() {
                           <InlineAlert
                             tone="warning"
                             title={`${novelAiTaskLabel(modelHubReadiness.exactBlockers[0]?.task ?? "continuation")}尚未通过基础配置检查`}
-                            description={`${modelHubReadinessBlockerLabel(modelHubReadiness.exactBlockers[0]?.code ?? "MODEL_HUB_PREFLIGHT_FAILED")}。这里没有读取或发送作品内容；请在“连接与模型”中修复后重新验证。当前章节仍会在真正发送前单独检查隐私、上下文与请求长度；作品正文、不可变版本和隔离建议均未改变。`}
+                            description={`${modelHubReadinessBlockerLabel(modelHubReadiness.exactBlockers[0]?.code ?? "MODEL_HUB_PREFLIGHT_FAILED")}。这里没有读取或发送作品内容；请在“连接与模型”中修复后重新验证。当前章节仍会在真正发送前单独检查隐私、参考资料和请求长度；作品正文、不可变版本和隔离建议均未改变。`}
                           />
                         )}
                         {manageableHubConnections.length > 0 && (
@@ -4802,7 +4880,9 @@ export function SettingsPage() {
                             <summary>
                               已退役连接历史（{String(retiredHubConnections.length)}）
                             </summary>
-                            <p>这些记录只用于核对模型使用历史，不再参与选择、推荐或 AI 分工。</p>
+                            <p>
+                              这些记录只用于核对模型使用历史，不再参与选择、推荐或创作任务安排。
+                            </p>
                             <ul
                               className="model-hub-connection-summary"
                               aria-label="已退役连接历史"
@@ -4856,7 +4936,7 @@ export function SettingsPage() {
                             description={`${
                               modelHubPageSnapshot.catalogStatus === "cached_warning"
                                 ? `重新检查失败，已保留 ${String(modelHubPageSnapshot.catalogEntries.length)} 个缓存模型。`
-                                : "连接、模型目录或 AI 分工暂时无法读取。"
+                                : "连接、模型目录或创作任务安排暂时无法读取。"
                             } ${normalizedModelHubPageError.description}`}
                           />
                         )}
@@ -4876,11 +4956,19 @@ export function SettingsPage() {
                             <div className="settings-actions">
                               <Button
                                 variant="secondary"
-                                disabled={modelHubHydrationPending || saving || checkingModel}
+                                disabled={modelHubRefreshBlocked}
+                                aria-describedby={
+                                  modelHubRefreshBlocked
+                                    ? "model-hub-refresh-disabled-help"
+                                    : undefined
+                                }
                                 onClick={() => void loadModelCenter({ action: "refresh_snapshot" })}
                               >
                                 刷新模型中心状态
                               </Button>
+                              {modelHubRefreshHelp !== null && (
+                                <p id="model-hub-refresh-disabled-help">{modelHubRefreshHelp}</p>
+                              )}
                             </div>
                           )}
                         </>
@@ -4898,7 +4986,7 @@ export function SettingsPage() {
                         <InlineAlert
                           tone="warning"
                           title="凭据已删除，可重新绑定"
-                          description={`“${credentialDeletedConnection.displayName}”仍保留模型目录和历史模型使用记录，但不会参与 AI 分工。输入新的接口密钥并选择“重新绑定原连接”，无需修改配置标识；也可选择“退役连接”后建立一条新连接。`}
+                          description={`“${credentialDeletedConnection.displayName}”仍保留模型目录和历史模型使用记录，但不会参与创作任务安排。输入新的接口密钥并选择“重新绑定原连接”，无需修改配置标识；也可选择“退役连接”后建立一条新连接。`}
                         />
                       )}
 
@@ -4914,7 +5002,12 @@ export function SettingsPage() {
                         {providerPreset !== "custom_openai_compatible" && (
                           <Button
                             variant="secondary"
-                            disabled={loading || saving || checkingModel || probingCapability}
+                            disabled={modelHubManagementBlocked}
+                            aria-describedby={
+                              modelHubManagementBlocked
+                                ? "model-hub-management-disabled-help"
+                                : undefined
+                            }
                             onClick={restoreProviderConnectionDefaults}
                           >
                             恢复供应商默认配置
@@ -4927,18 +5020,20 @@ export function SettingsPage() {
                             summary.configured) && (
                             <Button
                               variant="danger"
-                              disabled={
-                                loading ||
-                                saving ||
-                                checkingModel ||
-                                probingCapability ||
-                                retiringConnection
+                              disabled={modelHubManagementBlocked}
+                              aria-describedby={
+                                modelHubManagementBlocked
+                                  ? "model-hub-management-disabled-help"
+                                  : undefined
                               }
                               onClick={() => setRetireConnectionTarget(hubConnection)}
                             >
                               退役连接
                             </Button>
                           )}
+                        {modelHubManagementHelp !== null && (
+                          <p id="model-hub-management-disabled-help">{modelHubManagementHelp}</p>
+                        )}
                       </div>
 
                       <section aria-labelledby="provider-choice-title">
@@ -4989,7 +5084,7 @@ export function SettingsPage() {
                           )}
                           {providerPreset === "custom_openai_compatible" && (
                             <FormField
-                              label="Base URL"
+                              label="服务根地址"
                               hint="自定义兼容接口必须提供地址；远程地址必须使用 HTTPS。"
                               required
                             >
@@ -5030,12 +5125,12 @@ export function SettingsPage() {
                               </FormField>
                               {qwenRegionShowsWorkspace(region) && (
                                 <FormField
-                                  label="Workspace ID"
+                                  label="服务工作区编号"
                                   hint={
                                     qwenRegionNeedsWorkspace(region)
                                       ? "日本和德国地域必须填写。"
                                       : region === "china_beijing"
-                                        ? "北京地域可留空使用普通文本接口；如需使用已验证的官方文本重排协议，请填写 Workspace ID。"
+                                        ? "北京地域可留空使用普通文本接口；如需使用已验证的官方文本重排协议，请填写 服务工作区编号。"
                                         : "新加坡可留空使用共享端点；填写后使用专属 Workspace 端点。"
                                   }
                                   required={qwenRegionNeedsWorkspace(region)}
@@ -5060,7 +5155,7 @@ export function SettingsPage() {
                             </>
                           )}
                           {providerPreset === "volcengine_doubao" && (
-                            <FormField label="Endpoint ID" hint="仅专属推理接入点需要填写。">
+                            <FormField label="接入点编号" hint="仅专属推理接入点需要填写。">
                               {(fieldProps) => (
                                 <Input
                                   {...fieldProps}
@@ -5218,7 +5313,10 @@ export function SettingsPage() {
                                     />
                                   )}
                                 </FormField>
-                                <FormField label="向量检索路径" hint="留空使用 /embeddings。">
+                                <FormField
+                                  label="查找相关故事资料路径"
+                                  hint="留空使用 /embeddings。"
+                                >
                                   {(fieldProps) => (
                                     <Input
                                       {...fieldProps}
@@ -5303,13 +5401,13 @@ export function SettingsPage() {
                           <InlineAlert
                             tone="info"
                             title="重试不会重复计费请求"
-                            description="这里只会自动重试读取连接和模型目录。文本生成、向量检索、结果排序与图片生成一旦发送都不会自动重试，避免重复生成或重复计费。温度、采样概率、结构化输出与推理强度仍由任务预设管理。"
+                            description="这里只会自动重试读取连接和模型目录。文本生成、查找相关故事资料、结果排序与图片生成一旦发送都不会自动重试，避免重复生成或重复计费。温度、采样概率、结构化输出与推理强度仍由任务预设管理。"
                           />
                           {providerPreset === "custom_openai_compatible" && (
                             <InlineAlert
                               tone="info"
-                              title="当前只支持一个认证 Header"
-                              description="Header 值只保存到系统凭据库。图片生成路径暂不支持自定义；图片任务仍使用经过验证的固定 /images/generations 路径。"
+                              title="当前只支持一个认证请求头"
+                              description="请求头的值只保存到系统凭据库。图片生成路径暂不支持自定义；图片任务仍使用经过验证的固定 /images/generations 路径。"
                             />
                           )}
                         </section>
@@ -5380,7 +5478,7 @@ export function SettingsPage() {
                           <FormField
                             label={
                               providerPreset === "volcengine_doubao"
-                                ? "模型或 Endpoint ID"
+                                ? "模型名称或接入点编号"
                                 : "模型标识"
                             }
                             hint="该供应商不保证提供模型列表，请填写控制台显示的真实模型或接入点标识。"
@@ -5551,7 +5649,7 @@ export function SettingsPage() {
                           <InlineAlert
                             tone="info"
                             title="只确认实际验证过的能力"
-                            description="普通用户不需要勾选；能力由目录和真实探针验证。专家手动确认只影响路由选择，不代表墨影已经实际验证；语义向量、图片和工具调用都不是基础写作的前提。"
+                            description="普通用户不需要勾选；能力由目录和真实能力检查验证。专家手动确认只影响任务选择，不代表墨影已经实际验证；语义向量、图片和工具调用都不是基础写作的前提。"
                           />
                           <div className="model-center-grid" role="group" aria-label="模型能力">
                             {MODEL_HUB_CAPABILITIES.map((capability) => (
@@ -5580,7 +5678,7 @@ export function SettingsPage() {
                       {effectiveTextProbeModelId.length > 0 && runtime.modelGateway.available && (
                         <InlineAlert
                           tone="warning"
-                          title="固定能力验证需要明确确认"
+                          title="模型能力检查需要明确确认"
                           description={`点击“${automaticModelDiscovery ? "确认 1 次固定验证" : "确认 1 次固定验证并检查连接"}”将通过“${hubConnection?.displayName ?? getModelProviderPreset(providerPreset).displayName}”的“${effectiveTextProbeModelId}”发送固定短句“只回复：OK”，最多请求 64 个输出内容额度；本次最多向模型服务发送 1 次，自动重试 0 次。${modelProbeDestinationDisclosure(providerPreset, { region, workspaceId, baseUrl })}不发送作品正文、灵感、设定或接口密钥；当前费用上限未知，供应商可能收取少量费用。测试输入和输出不会写入能力记录。`}
                         />
                       )}
@@ -5588,19 +5686,28 @@ export function SettingsPage() {
                       {normalizedCapabilityProbeError !== null && (
                         <InlineAlert
                           tone={
+                            capabilityProbeFailure?.stage === "result" ||
                             normalizedCapabilityProbeError.code === "PROVIDER_RESULT_AMBIGUOUS"
                               ? "warning"
                               : "error"
                           }
                           title={
-                            normalizedCapabilityProbeError.code === "PROVIDER_RESULT_AMBIGUOUS"
-                              ? "写作能力验证结果待核对"
-                              : "写作能力验证失败"
+                            capabilityProbeFailure?.stage === "preparation"
+                              ? "模型能力检查未发送"
+                              : capabilityProbeFailure?.stage === "result" ||
+                                  normalizedCapabilityProbeError.code ===
+                                    "PROVIDER_RESULT_AMBIGUOUS"
+                                ? "模型能力检查结果待核对"
+                                : "模型能力检查失败"
                           }
                           description={
-                            normalizedCapabilityProbeError.code === "PROVIDER_RESULT_AMBIGUOUS"
-                              ? `${normalizedCapabilityProbeError.description} 系统不会自动重发；连接和模型目录会保留。`
-                              : `${normalizedCapabilityProbeError.description} 连接和模型目录会保留，修正模型或接入点后可以重试。`
+                            capabilityProbeFailure?.stage === "preparation"
+                              ? `${normalizedCapabilityProbeError.description} 本次发送次数为零，自动重试为零；连接和模型目录仍然保留。${capabilityProbeSupportSuffix}`
+                              : capabilityProbeFailure?.stage === "result" ||
+                                  normalizedCapabilityProbeError.code ===
+                                    "PROVIDER_RESULT_AMBIGUOUS"
+                                ? `${normalizedCapabilityProbeError.description} 系统不会自动重发；连接和模型目录会保留。${capabilityProbeSupportSuffix}`
+                                : `${normalizedCapabilityProbeError.description} 本次发送一次，自动重试为零；连接和模型目录会保留，修正模型或接入点后可以重试。${capabilityProbeSupportSuffix}`
                           }
                         />
                       )}
@@ -5617,29 +5724,53 @@ export function SettingsPage() {
                         <Button
                           loading={saving}
                           disabled={!modelHubFormReadiness.save.enabled}
+                          aria-describedby={
+                            modelHubSaveHelp === null ? undefined : "model-hub-save-disabled-help"
+                          }
                           onClick={() => void saveModelProfile()}
                         >
                           保存供应商与模型
                         </Button>
+                        {modelHubSaveHelp !== null && (
+                          <p id="model-hub-save-disabled-help">{modelHubSaveHelp}</p>
+                        )}
                         <Button
                           variant="secondary"
                           loading={checkingModel}
                           disabled={!modelHubFormReadiness.discover.enabled}
+                          aria-describedby={
+                            modelHubDiscoverHelp === null
+                              ? undefined
+                              : "model-hub-discover-disabled-help"
+                          }
                           onClick={() => void checkModelConnection()}
                         >
                           {automaticModelDiscovery
                             ? "测试连接并发现模型"
                             : "确认 1 次固定验证并检查连接"}
                         </Button>
+                        {modelHubDiscoverHelp !== null && (
+                          <p id="model-hub-discover-disabled-help">{modelHubDiscoverHelp}</p>
+                        )}
                         {automaticModelDiscovery && (
-                          <Button
-                            variant="secondary"
-                            loading={probingCapability}
-                            disabled={!modelHubFormReadiness.verify.enabled}
-                            onClick={() => void probeSelectedModelCapability()}
-                          >
-                            确认 1 次固定验证
-                          </Button>
+                          <>
+                            <Button
+                              variant="secondary"
+                              loading={probingCapability}
+                              disabled={!modelHubFormReadiness.verify.enabled}
+                              aria-describedby={
+                                modelHubVerifyHelp === null
+                                  ? undefined
+                                  : "model-hub-verify-disabled-help"
+                              }
+                              onClick={() => void probeSelectedModelCapability()}
+                            >
+                              确认 1 次固定验证
+                            </Button>
+                            {modelHubVerifyHelp !== null && (
+                              <p id="model-hub-verify-disabled-help">{modelHubVerifyHelp}</p>
+                            )}
+                          </>
                         )}
                       </div>
 
@@ -5770,16 +5901,16 @@ export function SettingsPage() {
                       tone={routeProbeResultAmbiguous ? "warning" : "error"}
                       title={
                         routeProbeResultAmbiguous
-                          ? "固定能力验证结果待核对"
+                          ? "模型能力检查结果待核对"
                           : taskProbeDisclosureError === null
-                            ? "AI 分工没有保存"
-                            : "固定能力验证没有发送"
+                            ? "创作任务安排没有保存"
+                            : "模型能力检查没有发送"
                       }
                       description={
                         routeProbeResultAmbiguous
-                          ? "内容已向模型服务发送，但结果无法确认；系统不会自动重发，本次 AI 分工也没有保存。请到模型使用与费用查看结果。"
+                          ? "内容已向模型服务发送，但结果无法确认；系统不会自动重发，本次创作任务安排也没有保存。请到模型使用与费用查看结果。"
                           : taskProbeDisclosureError === null
-                            ? "写作能力证据已保留，但自动分工没有完成。请打开“AI 分工”查看回读结果并重试。"
+                            ? "写作能力证据已保留，但自动安排没有完成。请打开“创作任务安排”查看回读结果并重试。"
                             : taskProbeDisclosureError.message
                       }
                     />
@@ -5793,7 +5924,7 @@ export function SettingsPage() {
                 <CardHeader>
                   <div className="card-heading-row">
                     <div>
-                      <CardTitle headingLevel={2}>AI 分工</CardTitle>
+                      <CardTitle headingLevel={2}>创作任务安排</CardTitle>
                       <CardDescription>
                         选择一种使用方案，让写作、规划和检查使用合适的已连接模型。
                       </CardDescription>
@@ -5806,15 +5937,15 @@ export function SettingsPage() {
                     {taskProbeDisclosureError !== null && (
                       <InlineAlert
                         tone="warning"
-                        title="固定能力验证没有发送"
+                        title="模型能力检查没有发送"
                         description={taskProbeDisclosureError.message}
                       />
                     )}
                     {routeProbeResultAmbiguous && (
                       <InlineAlert
                         tone="warning"
-                        title="固定能力验证结果待核对"
-                        description="内容已向模型服务发送，但结果无法确认；系统不会自动重发，本次 AI 分工也没有保存。请到模型使用与费用查看结果。"
+                        title="模型能力检查结果待核对"
+                        description="内容已向模型服务发送，但结果无法确认；系统不会自动重发，本次创作任务安排也没有保存。请到模型使用与费用查看结果。"
                       />
                     )}
                     {normalizedRouteError !== null &&
@@ -5823,15 +5954,15 @@ export function SettingsPage() {
                         <div className="model-routing-save-failure">
                           <InlineAlert
                             tone="error"
-                            title="AI 分工没有保存"
+                            title="创作任务安排没有保存"
                             description={`系统在保存模型分配时遇到本地数据问题。${
                               routeFailureRollbackConfirmed === true
                                 ? routeFailureLegacyProjectionMayHaveChanged
-                                  ? "已重新读取并确认：模型中心的 22 项分工未修改；为防止云端回退，旧版兼容分工可能已被安全停用。请重试应用本地隐私方案。"
-                                  : "已重新读取并确认：模型中心的 22 项分工没有被修改，本次任务路由事务已回滚。"
+                                  ? "已重新读取并确认：模型中心的 22 项创作任务安排未修改；为防止云端回退，旧版兼容设置可能已被安全停用。请重试应用本地隐私方案。"
+                                  : "已重新读取并确认：模型中心的 22 项创作任务安排没有被修改，本次保存已完整撤销。"
                                 : routeFailureRollbackConfirmed === false
-                                  ? "重新读取后发现分工状态发生变化，请先查看下面的 22 项清单再重试。"
-                                  : "暂时无法重新读取并确认旧分工状态；请先导出诊断包。"
+                                  ? "重新读取后发现创作任务安排状态发生变化，请先查看下面的 22 项清单再重试。"
+                                  : "暂时无法重新读取并确认旧创作任务安排状态；请先导出诊断包。"
                             }`}
                           />
                           <div className="settings-actions">
@@ -5857,7 +5988,7 @@ export function SettingsPage() {
                                 ? "未能确认"
                                 : routeFailureRollbackConfirmed
                                   ? routeFailureLegacyProjectionMayHaveChanged
-                                    ? "模型中心快照未变化；旧兼容分工可能已安全停用"
+                                    ? "模型中心快照未变化；旧版兼容设置可能已安全停用"
                                     : "模型中心快照未变化"
                                   : "检测到变化"}
                               。原始 SQL 不会在界面中显示。
@@ -5873,7 +6004,7 @@ export function SettingsPage() {
                         description={modelHubOverallDescription(routingVisibility)}
                       />
                     )}
-                    <div className="model-routing-summary" aria-label="AI 分工总体状态">
+                    <div className="model-routing-summary" aria-label="创作任务安排总体状态">
                       <strong>
                         {`${String(routingVisibility.enabledRouteCount)} / ${String(
                           NOVEL_AI_TASKS.length,
@@ -6147,7 +6278,7 @@ export function SettingsPage() {
                                           providerRecommendation !== null && (
                                             <div className="settings-actions">
                                               <span>
-                                                专用能力候选：
+                                                可选的专用模型服务：
                                                 {providerRecommendation.providerLabel} ·
                                                 {providerRecommendation.modelFamilies.join(" / ")}
                                               </span>
@@ -6245,7 +6376,7 @@ export function SettingsPage() {
                       {MODEL_HUB_SCHEME_OPTIONS.find(({ value }) => value === modelHubScheme)
                         ?.description ?? ""}
                     </p>
-                    <ul className="privacy-list" aria-label="小说任务分工示例">
+                    <ul className="privacy-list" aria-label="创作任务安排示例">
                       <li>正文：开书引导、正文生成、续写、改写与润色。</li>
                       <li>规划：大纲、场景拆解、章节摘要与长期记忆压缩。</li>
                       <li>检查：矛盾、视角边界、人物说话一致性与深度复核。</li>
@@ -6256,13 +6387,15 @@ export function SettingsPage() {
                         disabled={routeSaving}
                         onClick={() => void applyModelHubScheme()}
                       >
-                        应用 AI 分工
+                        应用创作任务安排
                       </Button>
                     </div>
                     {schemeMessage !== null && (
                       <InlineAlert
                         tone={schemeMessageIsWarning ? "warning" : "info"}
-                        title={schemeMessageIsWarning ? "AI 分工部分配置完成" : "AI 分工已更新"}
+                        title={
+                          schemeMessageIsWarning ? "创作任务安排部分配置完成" : "创作任务安排已更新"
+                        }
                         description={schemeMessage}
                       />
                     )}
@@ -6285,7 +6418,7 @@ export function SettingsPage() {
                             <div>
                               <h3 id="model-routing-expert-matrix-title">22 项任务矩阵</h3>
                               <p>
-                                这里复用下方单项编辑器，不会创建第二套分工入口；任务能力、证据、费用和隐私均使用可理解的中文说明。
+                                这里复用下方单项编辑器，不会创建第二套创作任务安排入口；任务能力、证据、费用和隐私均使用可理解的中文说明。
                               </p>
                             </div>
                             <FormField label="矩阵筛选">
@@ -6463,7 +6596,7 @@ export function SettingsPage() {
                         </section>
                         <InlineAlert
                           tone="info"
-                          title="小说任务路由"
+                          title="小说任务任务安排"
                           description={`逐项覆盖 ${String(NOVEL_AI_TASKS.length)} 类小说任务的主模型、备用模型、费用上限、隐私与失败处理。未明确保存的任务继续使用当前自动方案。`}
                         />
                         {routingCatalog.some(
@@ -6668,14 +6801,14 @@ export function SettingsPage() {
                                 disabled={novelRoutePrimaryCatalogId.length === 0}
                                 onClick={() => void saveNovelTaskRoute()}
                               >
-                                保存小说任务分工
+                                保存创作任务安排
                               </Button>
                             </div>
                           </>
                         )}
                         <InlineAlert
                           tone="info"
-                          title="专家兼容设置：旧 7 角色路由"
+                          title="专家兼容设置：旧 7 角色任务安排"
                           description={`${String(NOVEL_AI_TASKS.length)} 类小说任务由模型中心负责；这组旧角色仅桥接尚未迁移的生成链路。应用方案时会完整刷新，无法安全映射的旧角色会被清除。`}
                         />
                         {profiles.some(({ selectedModel: model }) => model !== null) && (
@@ -6726,7 +6859,10 @@ export function SettingsPage() {
                                   />
                                 )}
                               </FormField>
-                              <FormField label="兼容备用模型" hint="可选；切换前仍需在预检中确认。">
+                              <FormField
+                                label="兼容备用模型"
+                                hint="可选；切换前仍需在发送前检查中确认。"
+                              >
                                 {(fieldProps) => (
                                   <Select
                                     {...fieldProps}
@@ -6762,7 +6898,7 @@ export function SettingsPage() {
                                 disabled={routePrimaryProviderId.length === 0}
                                 onClick={() => void saveModelRoleRoute()}
                               >
-                                保存角色路由
+                                保存角色任务安排
                               </Button>
                             </div>
                           </>
@@ -6816,7 +6952,7 @@ export function SettingsPage() {
                       <InlineAlert
                         tone="warning"
                         title="需要两个已验证且价格完整的文本模型"
-                        description="这里不会自动补模型或回退路由。请先完成两个不同模型的连接、文本能力验证、上下文上限和价格资料。"
+                        description="这里不会自动补模型或改用备用模型。请先完成两个不同模型的连接、文本能力验证、可处理内容上限和价格资料。"
                       />
                     )}
                     <NovelSkillPaidEvaluationPanel
@@ -7069,10 +7205,10 @@ export function SettingsPage() {
             setTaskProbeConfirmation(null);
           }
         }}
-        title="确认 1 次固定能力验证？"
+        title="确认 1 次模型能力检查？"
         description={
           taskProbeConfirmation === null
-            ? "请先查看固定能力验证的发送说明。"
+            ? "请先查看模型能力检查的发送说明。"
             : `将通过“${taskProbeConfirmation.disclosure.connectionDisplayName}”使用模型“${taskProbeConfirmation.disclosure.modelId}”，验证“${novelAiTaskLabel(taskProbeConfirmation.task)}”所需能力。只有点击下方明确确认按钮后才会发送。`
         }
         footer={
@@ -7194,7 +7330,7 @@ export function SettingsPage() {
             ? "退役模型连接？"
             : `退役“${retireConnectionTarget.displayName}”连接？`
         }
-        description="退役会永久停止这条连接参与选择、推荐和 AI 分工，并删除仍存在的系统凭据。模型目录与只读历史记录只作为核对依据保留。"
+        description="退役会永久停止这条连接参与选择、推荐和创作任务安排，并删除仍存在的系统凭据。模型目录与只读历史记录只作为核对依据保留。"
         footer={
           <>
             <Button
@@ -7413,7 +7549,8 @@ function DirectSettingsPage({
         </div>
       </header>
 
-      <nav className="settings-actions settings-section-nav" aria-label="设置分区">
+      <nav className="settings-actions settings-section-nav" aria-label="设置快速跳转">
+        <span className="settings-section-nav__label">快速跳转</span>
         <a className="button-link button-link--secondary" href="#appearance">
           外观
         </a>
@@ -7432,7 +7569,16 @@ function DirectSettingsPage({
             <CardDescription>选择舒适的浅色或深色界面。</CardDescription>
           </CardHeader>
           <CardContent>
-            <FormField label="外观模式">
+            <FormField
+              label="外观模式"
+              hint={
+                appearance === "system"
+                  ? `当前跟随系统；电脑此刻为${resolvedSurface === "dark" ? "深色" : "浅色"}。`
+                  : appearance === "dark"
+                    ? "当前使用深色。"
+                    : "当前使用浅色。"
+              }
+            >
               {(fieldProps) => (
                 <Select
                   {...fieldProps}
@@ -7451,19 +7597,6 @@ function DirectSettingsPage({
                 />
               )}
             </FormField>
-            <InlineAlert
-              tone="info"
-              title="当前显示"
-              description={
-                appearance === "system"
-                  ? resolvedSurface === "dark"
-                    ? "正在跟随系统，当前为深色。"
-                    : "正在跟随系统，当前为浅色。"
-                  : appearance === "dark"
-                    ? "当前固定为深色。"
-                    : "当前固定为浅色。"
-              }
-            />
           </CardContent>
         </Card>
 
@@ -7790,7 +7923,7 @@ function authenticationOptions(
     return [
       { value: "none", label: "无认证" },
       { value: "bearer_keyring", label: "Bearer（系统凭据库）" },
-      { value: "custom_header_keyring", label: "单一自定义认证 Header（系统凭据库）" },
+      { value: "custom_header_keyring", label: "单一自定义认证请求头（系统凭据库）" },
     ];
   }
   if (getModelProviderPreset(provider).credentialRequired) {
@@ -7846,7 +7979,7 @@ function validateExpertConnectionDraft(
   const paths = [
     normalizeModelHubApiPath(input.modelDiscoveryPath, "Model discovery path"),
     normalizeModelHubApiPath(input.textGenerationPath, "Text generation path"),
-    normalizeModelHubApiPath(input.embeddingPath, "向量检索路径"),
+    normalizeModelHubApiPath(input.embeddingPath, "查找相关故事资料路径"),
   ];
   if (
     !custom &&
@@ -7854,10 +7987,10 @@ function validateExpertConnectionDraft(
       headerName !== null ||
       paths.some((path) => path !== null))
   ) {
-    throw new Error("只有自定义 OpenAI-compatible 连接可以覆盖 API 路径或认证 Header。");
+    throw new Error("只有自定义 OpenAI-compatible 连接可以覆盖 API 路径或认证请求头。");
   }
   if ((input.authentication === "custom_header_keyring") !== (headerName !== null)) {
-    throw new Error("自定义 Header 认证必须填写且只能填写一个安全的 Header 名称。");
+    throw new Error("自定义请求头 认证必须填写且只能填写一个安全的 Header 名称。");
   }
   if (
     getModelProviderPreset(input.provider).credentialRequired &&
@@ -7918,6 +8051,7 @@ function settingsTextProbeDisclosureChanged(): UiActionError {
 async function settingsTextProbeFingerprintFromInput(
   input: SaveModelProviderConnectionInput,
   modelId: string,
+  invocationId: string,
 ): Promise<string> {
   const authentication =
     input.authenticationMode ?? (input.credentialState === "present" ? "bearer_keyring" : "none");
@@ -7933,7 +8067,7 @@ async function settingsTextProbeFingerprintFromInput(
     credentialHeaderName: normalizeCredentialHeaderName(input.credentialHeaderName),
     modelDiscoveryPath: normalizeModelHubApiPath(input.modelDiscoveryPath, "Model discovery path"),
     textGenerationPath: normalizeModelHubApiPath(input.textGenerationPath, "Text generation path"),
-    embeddingPath: normalizeModelHubApiPath(input.embeddingPath, "向量检索路径"),
+    embeddingPath: normalizeModelHubApiPath(input.embeddingPath, "查找相关故事资料路径"),
     requestTimeoutMs: normalizeModelHubRequestTimeoutMs(input.requestTimeoutMs),
     persistedRetryLimit: normalizeModelHubRetryLimit(input.retryLimit),
   });
@@ -7949,6 +8083,7 @@ async function settingsTextProbeFingerprintFromInput(
     credentialState: input.credentialState,
     enabled: input.enabled ?? true,
     modelId,
+    invocationId,
     dataDestination: isLoopbackModelBaseUrl(endpoint.baseUrl) ? "local" : "remote",
   });
 }
@@ -7956,6 +8091,7 @@ async function settingsTextProbeFingerprintFromInput(
 async function settingsTextProbeFingerprintFromConnection(
   connection: ModelProviderConnection,
   modelId: string,
+  invocationId: string,
 ): Promise<string> {
   const endpoint = Object.freeze({
     providerKind: connection.providerKind,
@@ -7981,6 +8117,7 @@ async function settingsTextProbeFingerprintFromConnection(
     credentialState: connection.credentialState,
     enabled: connection.enabled,
     modelId,
+    invocationId,
     dataDestination: isLoopbackModelBaseUrl(connection.baseUrl) ? "local" : "remote",
   });
 }
@@ -7998,11 +8135,13 @@ function settingsTextProbeFingerprint(
     credentialState: ModelProviderConnection["credentialState"];
     enabled: boolean;
     modelId: string;
+    invocationId: string;
     dataDestination: "local" | "remote";
   }>,
 ): Promise<string> {
   return providerActionFingerprint({
-    schemaVersion: "settings-text-capability-probe-disclosure-v1",
+    schemaVersion: "settings-text-capability-probe-disclosure-v2",
+    invocationId: target.invocationId,
     task: "settings_text_generation_capability_probe",
     probeKind: "fixed_content_free_text_capability",
     connectionId: target.connectionId,
@@ -8199,7 +8338,7 @@ function modelHubCapabilityLabel(capability: ModelHubCapability): string {
     text_generation: "文本生成",
     reasoning: "推理",
     structured_output: "结构化输出",
-    embedding: "向量检索",
+    embedding: "查找相关故事资料",
     rerank: "结果排序",
     image_generation: "图片生成",
     vision: "图片理解",
@@ -8207,7 +8346,7 @@ function modelHubCapabilityLabel(capability: ModelHubCapability): string {
     tool_calling: "工具调用",
     token_counting: "内容额度计数",
     streaming: "流式输出",
-    long_context: "长上下文",
+    long_context: "长篇资料容量",
   };
   return labels[capability];
 }
@@ -8267,7 +8406,7 @@ function modelHubOverallBadgeLabel(
     writing_ready: "基础配置可用",
     partial: "部分基础配置需完善",
     complete: "基础配置完整",
-    anomaly: "连接或分工异常",
+    anomaly: "连接或创作任务安排异常",
     save_failed: "配置写入失败",
   } as const;
   return labels[state];
@@ -8300,8 +8439,8 @@ function modelHubOverallTitle(
     writing_ready: "AI 基础配置已可用",
     partial: "部分 AI 基础配置可用",
     complete: "AI 基础配置已完整",
-    anomaly: "AI 连接或分工需要修复",
-    save_failed: "AI 分工没有保存",
+    anomaly: "模型连接或创作任务安排需要修复",
+    save_failed: "创作任务安排没有保存",
   } as const;
   return titles[state];
 }
@@ -8316,18 +8455,18 @@ function modelHubOverallDescription(
     return "正在读取连接、模型目录和能力证据；完成前不会把未知能力当作可用。";
   }
   if (visibility.state === "save_failed") {
-    return "新的分工没有确认保存。请查看上方回读结果后重试或导出脱敏诊断。";
+    return "新的创作任务安排没有确认保存。请查看上方回读结果后重试或导出脱敏诊断。";
   }
   if (visibility.state === "anomaly") {
-    return "连接、模型目录、能力证据或已保存分工存在失效项；手动写作和已有正文不会受影响。";
+    return "连接、模型目录、能力证据或已保存的创作任务安排存在失效项；手动写作和已有正文不会受影响。";
   }
   if (visibility.state === "complete") {
-    return "22 项小说任务均已通过无正文的基础配置检查；当前章节仍会在发送前检查隐私、上下文与请求长度。";
+    return "22 项小说任务均已通过无正文的基础配置检查；当前章节仍会在发送前检查隐私、参考资料和请求长度。";
   }
   if (visibility.coreWritingReady) {
     return `开书、正文生成、续写、改写和润色的基础配置已通过；${String(
       visibility.missingRouteCount,
-    )} 项高级能力尚未配置。实际请求仍需通过当前作品预检。`;
+    )} 项高级能力尚未配置。实际请求仍需通过当前作品的发送前检查。`;
   }
   return `${String(visibility.enabledRouteCount)} 项任务已配置；基础写作链仍有缺口，请按下方建议验证所需能力。`;
 }
@@ -8377,8 +8516,11 @@ function isCapabilityProbeResultAmbiguous(
   return (
     normalizedCode === "PROVIDER_RESULT_AMBIGUOUS" ||
     (invocation?.task === "capability_probe" &&
-      invocation.status === "timed_out" &&
-      invocation.providerDispatchStartedAt !== null)
+      invocation.providerDispatchStartedAt !== null &&
+      (invocation.status === "timed_out" ||
+        invocation.status === "running" ||
+        invocation.status === "queued" ||
+        invocation.status === "succeeded"))
   );
 }
 
@@ -8502,8 +8644,8 @@ function modelRouteRoleLabel(role: ModelRouteRole): string {
   const labels: Record<ModelRouteRole, string> = {
     fast: "快速",
     high_quality: "高质量",
-    long_context: "长上下文",
-    embedding: "向量检索",
+    long_context: "长篇资料容量",
+    embedding: "查找相关故事资料",
     validation: "检查",
     translation: "翻译",
     local_private: "本地隐私",

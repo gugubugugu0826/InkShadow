@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use sha2::{Digest, Sha384};
 use sqlx::{
     migrate::{MigrateError, Migration, MigrationType, Migrator},
     SqliteConnection,
@@ -9,6 +10,104 @@ const ZHIPU_GLM_MIGRATION_VERSION: i64 = 49;
 const MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION: i64 = 60;
 const MODEL_CAPABILITY_PROBE_LEDGER_MIGRATION_VERSION: i64 = 74;
 
+const PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION: i64 = 80;
+const PUBLISHED_V029_MIGRATION_MANIFEST_SHA384: [u8; 48] = [
+    0x3f, 0xd9, 0x7b, 0xe5, 0xe9, 0x36, 0xed, 0xdc, 0xb4, 0xa5, 0x88, 0x23, 0x5c, 0xcc, 0xc0, 0xde,
+    0xaf, 0x22, 0x2e, 0xba, 0xda, 0xc4, 0xaa, 0xd3, 0xca, 0xbb, 0x30, 0xb9, 0x62, 0x03, 0x75, 0xdd,
+    0xfe, 0x9b, 0x78, 0x4a, 0xf2, 0x0a, 0x79, 0x1d, 0x3b, 0x50, 0x6d, 0xfd, 0xa4, 0xf9, 0x48, 0xd9,
+];
+
+#[derive(Debug)]
+pub(crate) struct LocalMigrationError {
+    pub(crate) source: Box<MigrateError>,
+    pub(crate) stage: &'static str,
+    pub(crate) reason_code: &'static str,
+    pub(crate) expected_version: i64,
+    pub(crate) actual_version: i64,
+    pub(crate) migration_version: Option<i64>,
+    pub(crate) whitelist_reason_code: &'static str,
+}
+#[derive(Debug)]
+struct AppliedMigrationHistory {
+    actual_version: i64,
+    accepted_checksums: Vec<(i64, Vec<u8>)>,
+}
+
+impl LocalMigrationError {
+    fn integrity(
+        source: MigrateError,
+        reason_code: &'static str,
+        expected_version: i64,
+        actual_version: i64,
+        migration_version: Option<i64>,
+        whitelist_reason_code: &'static str,
+    ) -> Self {
+        Self {
+            source: Box::new(source),
+            stage: "migration_history_validation",
+            reason_code,
+            expected_version,
+            actual_version,
+            migration_version,
+            whitelist_reason_code,
+        }
+    }
+
+    fn execution(source: MigrateError, expected_version: i64, actual_version: i64) -> Self {
+        let migration_version = migration_error_version(&source);
+        let (stage, reason_code, whitelist_reason_code) = match source {
+            MigrateError::VersionMissing(_)
+            | MigrateError::VersionMismatch(_)
+            | MigrateError::VersionNotPresent(_)
+            | MigrateError::VersionTooOld(_, _)
+            | MigrateError::VersionTooNew(_, _)
+            | MigrateError::Dirty(_) => (
+                "migration_history_validation",
+                migration_error_reason_code(&source),
+                "NO_PUBLISHED_MIGRATION_MATCH",
+            ),
+            _ => (
+                "migration_apply",
+                "MIGRATION_FORWARD_APPLY_FAILED",
+                "PUBLISHED_HISTORY_ACCEPTED",
+            ),
+        };
+        Self {
+            source: Box::new(source),
+            stage,
+            reason_code,
+            expected_version,
+            actual_version,
+            migration_version,
+            whitelist_reason_code,
+        }
+    }
+}
+
+fn migration_error_reason_code(error: &MigrateError) -> &'static str {
+    match error {
+        MigrateError::VersionMissing(_) => "MIGRATION_VERSION_UNKNOWN",
+        MigrateError::VersionMismatch(_) => "MIGRATION_CHECKSUM_UNKNOWN",
+        MigrateError::VersionNotPresent(_) => "MIGRATION_HISTORY_MISSING_VERSION",
+        MigrateError::VersionTooOld(_, _) => "MIGRATION_VERSION_ORDER_INVALID",
+        MigrateError::VersionTooNew(_, _) => "MIGRATION_VERSION_AHEAD_OF_BUILD",
+        MigrateError::Dirty(_) => "MIGRATION_HISTORY_DIRTY",
+        _ => "MIGRATION_FORWARD_APPLY_FAILED",
+    }
+}
+
+fn migration_error_version(error: &MigrateError) -> Option<i64> {
+    match error {
+        MigrateError::VersionMissing(version)
+        | MigrateError::VersionMismatch(version)
+        | MigrateError::VersionNotPresent(version)
+        | MigrateError::Dirty(version) => Some(*version),
+        MigrateError::VersionTooOld(version, _) | MigrateError::VersionTooNew(version, _) => {
+            Some(*version)
+        }
+        _ => None,
+    }
+}
 fn migration(version: i64, description: &'static str, sql: &'static str) -> Migration {
     // tauri-plugin-sql represented every prior `MigrationKind::Up` as a
     // SQLx `ReversibleUp` migration. Keeping that exact representation
@@ -580,14 +679,225 @@ pub(crate) fn local_migrator() -> Migrator {
     }
 }
 
+fn latest_local_migration_version(migrator: &Migrator) -> i64 {
+    migrator
+        .iter()
+        .filter(|migration| !migration.migration_type.is_down_migration())
+        .map(|migration| migration.version)
+        .max()
+        .unwrap_or(0)
+}
+
+fn published_v029_manifest_digest(migrator: &Migrator) -> [u8; 48] {
+    let mut digest = Sha384::new();
+    for migration in migrator
+        .iter()
+        .filter(|migration| migration.version <= PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION)
+    {
+        digest.update(migration.version.to_be_bytes());
+        digest.update((migration.description.len() as u64).to_be_bytes());
+        digest.update(migration.description.as_bytes());
+        digest.update((migration.sql.len() as u64).to_be_bytes());
+        digest.update(migration.sql.as_bytes());
+    }
+    digest.finalize().into()
+}
+fn published_v029_legacy_windows_checksum(migration: &Migration) -> Vec<u8> {
+    let windows_sql = migration.sql.replace('\n', "\r\n");
+    Sha384::digest(windows_sql.as_bytes()).to_vec()
+}
+
+fn is_approved_published_checksum(migration: &Migration, checksum: &[u8]) -> bool {
+    checksum == migration.checksum.as_ref()
+        || (migration.version <= PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION
+            && checksum == published_v029_legacy_windows_checksum(migration))
+}
+
+fn bind_accepted_receipt_checksums(migrator: &mut Migrator, history: &AppliedMigrationHistory) {
+    for migration in migrator.migrations.to_mut() {
+        let Some((_, checksum)) = history
+            .accepted_checksums
+            .iter()
+            .find(|(version, _)| *version == migration.version)
+        else {
+            continue;
+        };
+        if migration.checksum.as_ref() != checksum.as_slice() {
+            migration.checksum = Cow::Owned(checksum.clone());
+        }
+    }
+}
+
+fn verify_published_v029_manifest(migrator: &Migrator) -> Result<(), LocalMigrationError> {
+    let expected_version = latest_local_migration_version(migrator);
+    let published: Vec<_> = migrator
+        .iter()
+        .filter(|migration| migration.version <= PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION)
+        .collect();
+    let versions_are_exact = published.len() == PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION as usize
+        && published
+            .iter()
+            .enumerate()
+            .all(|(index, migration)| migration.version == index as i64 + 1);
+    if !versions_are_exact
+        || published_v029_manifest_digest(migrator) != PUBLISHED_V029_MIGRATION_MANIFEST_SHA384
+    {
+        return Err(LocalMigrationError::integrity(
+            MigrateError::VersionNotPresent(PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION),
+            "PUBLISHED_MIGRATION_BASELINE_INVALID",
+            expected_version,
+            0,
+            None,
+            "PUBLISHED_BASELINE_FINGERPRINT_MISMATCH",
+        ));
+    }
+    Ok(())
+}
+
+async fn audit_applied_migration_history(
+    connection: &mut SqliteConnection,
+    migrator: &Migrator,
+) -> Result<AppliedMigrationHistory, LocalMigrationError> {
+    let expected_version = latest_local_migration_version(migrator);
+    let table_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema
+         WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|error| {
+        LocalMigrationError::integrity(
+            MigrateError::Execute(error),
+            "MIGRATION_HISTORY_UNREADABLE",
+            expected_version,
+            0,
+            None,
+            "MIGRATION_HISTORY_NOT_AUDITED",
+        )
+    })?;
+    if table_exists == 0 {
+        return Ok(AppliedMigrationHistory {
+            actual_version: 0,
+            accepted_checksums: Vec::new(),
+        });
+    }
+
+    let records: Vec<(i64, String, i64, Vec<u8>)> = sqlx::query_as(
+        "SELECT version, description, success, checksum
+         FROM _sqlx_migrations ORDER BY version ASC",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|error| {
+        LocalMigrationError::integrity(
+            MigrateError::Execute(error),
+            "MIGRATION_HISTORY_UNREADABLE",
+            expected_version,
+            0,
+            None,
+            "MIGRATION_HISTORY_NOT_AUDITED",
+        )
+    })?;
+    let actual_version = records.last().map_or(0, |record| record.0);
+
+    for (index, (version, description, success, checksum)) in records.iter().enumerate() {
+        if index > 0 && records[index - 1].0 == *version {
+            return Err(LocalMigrationError::integrity(
+                MigrateError::VersionNotPresent(*version),
+                "MIGRATION_VERSION_DUPLICATE",
+                expected_version,
+                actual_version,
+                Some(*version),
+                "PUBLISHED_HISTORY_INCOMPLETE",
+            ));
+        }
+        let required_version = index as i64 + 1;
+        if *version != required_version {
+            let reason_code = if *version > required_version {
+                "MIGRATION_HISTORY_MISSING_VERSION"
+            } else {
+                "MIGRATION_VERSION_ORDER_INVALID"
+            };
+            return Err(LocalMigrationError::integrity(
+                MigrateError::VersionNotPresent(required_version),
+                reason_code,
+                expected_version,
+                actual_version,
+                Some(required_version),
+                "PUBLISHED_HISTORY_INCOMPLETE",
+            ));
+        }
+        let Some(expected) = migrator
+            .iter()
+            .find(|migration| migration.version == *version)
+        else {
+            return Err(LocalMigrationError::integrity(
+                MigrateError::VersionMissing(*version),
+                "MIGRATION_VERSION_UNKNOWN",
+                expected_version,
+                actual_version,
+                Some(*version),
+                "NO_PUBLISHED_MIGRATION_MATCH",
+            ));
+        };
+        if *success != 1 {
+            return Err(LocalMigrationError::integrity(
+                MigrateError::Dirty(*version),
+                "MIGRATION_HISTORY_DIRTY",
+                expected_version,
+                actual_version,
+                Some(*version),
+                "PUBLISHED_HISTORY_NOT_COMPLETED",
+            ));
+        }
+        if description != expected.description.as_ref() {
+            return Err(LocalMigrationError::integrity(
+                MigrateError::VersionMismatch(*version),
+                "MIGRATION_DESCRIPTION_UNKNOWN",
+                expected_version,
+                actual_version,
+                Some(*version),
+                "NO_PUBLISHED_MIGRATION_MATCH",
+            ));
+        }
+        if !is_approved_published_checksum(expected, checksum) {
+            return Err(LocalMigrationError::integrity(
+                MigrateError::VersionMismatch(*version),
+                "MIGRATION_CHECKSUM_UNKNOWN",
+                expected_version,
+                actual_version,
+                Some(*version),
+                "NO_PUBLISHED_MIGRATION_MATCH",
+            ));
+        }
+    }
+    Ok(AppliedMigrationHistory {
+        actual_version,
+        accepted_checksums: records
+            .into_iter()
+            .map(|(version, _, _, checksum)| (version, checksum))
+            .collect(),
+    })
+}
+
 pub(crate) async fn run_local_migrations(
     connection: &mut SqliteConnection,
-) -> Result<(), MigrateError> {
-    let full = local_migrator();
+) -> Result<(), LocalMigrationError> {
+    let mut full = local_migrator();
+    verify_published_v029_manifest(&full)?;
+    let expected_version = latest_local_migration_version(&full);
+    let history = audit_applied_migration_history(connection, &full).await?;
+    let actual_version = history.actual_version;
+    bind_accepted_receipt_checksums(&mut full, &history);
+    let wrap = |error| LocalMigrationError::execution(error, expected_version, actual_version);
+
     let before_zhipu = migration_subset(&full, |migration| {
         migration.version < ZHIPU_GLM_MIGRATION_VERSION
     });
-    before_zhipu.run_direct(&mut *connection).await?;
+    before_zhipu
+        .run_direct(&mut *connection)
+        .await
+        .map_err(&wrap)?;
 
     run_foreign_key_disabled_migration(
         connection,
@@ -595,13 +905,17 @@ pub(crate) async fn run_local_migrations(
         ZHIPU_GLM_MIGRATION_VERSION,
         "foreign-key violations remained after Model Hub provider migration",
     )
-    .await?;
+    .await
+    .map_err(&wrap)?;
 
     let before_content_quality = migration_subset(&full, |migration| {
         migration.version > ZHIPU_GLM_MIGRATION_VERSION
             && migration.version < MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
     });
-    before_content_quality.run_direct(&mut *connection).await?;
+    before_content_quality
+        .run_direct(&mut *connection)
+        .await
+        .map_err(&wrap)?;
 
     run_foreign_key_disabled_migration(
         connection,
@@ -609,7 +923,8 @@ pub(crate) async fn run_local_migrations(
         MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION,
         "foreign-key violations remained after Model Hub task migration",
     )
-    .await?;
+    .await
+    .map_err(&wrap)?;
 
     let before_capability_probe_ledger = migration_subset(&full, |migration| {
         migration.version > MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
@@ -617,7 +932,8 @@ pub(crate) async fn run_local_migrations(
     });
     before_capability_probe_ledger
         .run_direct(&mut *connection)
-        .await?;
+        .await
+        .map_err(&wrap)?;
 
     run_foreign_key_disabled_migration(
         connection,
@@ -625,12 +941,13 @@ pub(crate) async fn run_local_migrations(
         MODEL_CAPABILITY_PROBE_LEDGER_MIGRATION_VERSION,
         "foreign-key violations remained after capability probe ledger migration",
     )
-    .await?;
+    .await
+    .map_err(&wrap)?;
 
     let future = migration_subset(&full, |migration| {
         migration.version > MODEL_CAPABILITY_PROBE_LEDGER_MIGRATION_VERSION
     });
-    future.run_direct(connection).await
+    future.run_direct(connection).await.map_err(&wrap)
 }
 
 async fn run_foreign_key_disabled_migration(
@@ -678,17 +995,28 @@ fn migration_subset(migrator: &Migrator, include: impl Fn(&Migration) -> bool) -
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
+    use std::{
+        borrow::Cow,
+        collections::BTreeMap,
+        fmt::Write as _,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use sha2::{Digest, Sha256, Sha384};
 
     use sqlx::{
         migrate::{MigrateError, Migration, MigrationType, Migrator},
+        sqlite::SqliteConnectOptions,
         Connection, Row, SqliteConnection,
     };
 
     use super::{
-        local_migrator, migration_subset, run_foreign_key_disabled_migration, run_local_migrations,
+        local_migrator, migration_subset, published_v029_manifest_digest,
+        run_foreign_key_disabled_migration, run_local_migrations,
         MODEL_CAPABILITY_PROBE_LEDGER_MIGRATION_VERSION,
-        MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION, ZHIPU_GLM_MIGRATION_VERSION,
+        MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION, PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION,
+        PUBLISHED_V029_MIGRATION_MANIFEST_SHA384, ZHIPU_GLM_MIGRATION_VERSION,
     };
 
     fn test_migrator(migrations: Vec<Migration>) -> Migrator {
@@ -710,6 +1038,937 @@ mod tests {
         )
     }
 
+    const PUBLISHED_V023_MAXIMUM_MIGRATION_VERSION: i64 = 67;
+    const SYNTHETIC_V029_PROJECT_COUNT: i64 = 14;
+    const SYNTHETIC_V029_CHAPTER_COUNT: i64 = 19;
+    const SYNTHETIC_V029_VERSION_COUNT: i64 = 36;
+    const SYNTHETIC_V029_CANDIDATE_COUNT: i64 = 18;
+    const SYNTHETIC_V029_CHAPTER_CHARACTER_COUNT: i64 = 115_000;
+    const SYNTHETIC_V029_APPLICATION_TABLE_COUNT: usize = 190;
+    const REQUIRED_V029_CREATIVE_AND_TRACE_TABLES: &[&str] = &[
+        "projects",
+        "project_display_identities",
+        "project_display_identity_revisions",
+        "project_seeds",
+        "story_ideation_drafts",
+        "story_outlines",
+        "story_outline_drafts",
+        "story_formal_records",
+        "story_review_items",
+        "story_memory_policies",
+        "story_memory_records",
+        "story_timeline_state",
+        "story_what_if_branches",
+        "story_materials",
+        "story_material_references",
+        "chapters",
+        "chapter_versions",
+        "recovery_drafts",
+        "ai_candidates",
+        "story_planning_candidates",
+        "story_facts",
+        "story_fact_revisions",
+        "story_fact_legacy_links",
+        "creative_journeys",
+        "creative_journey_turns",
+        "background_tasks",
+        "notifications",
+        "ai_generation_runs",
+        "ai_generation_route_selections",
+        "ai_generation_attempt_usage",
+        "ai_deferred_generation_requests",
+        "model_invocation_facts",
+        "context_compilation_runs",
+        "context_compilation_entries",
+        "context_compilation_entry_sources",
+        "local_audit_events",
+        "story_settings_import_receipts",
+        "writing_experience_preferences",
+        "writing_provider_disclosure_grants",
+        "writing_preferences",
+        "writing_preference_revisions",
+    ];
+
+    struct PublishedLibraryDatabase {
+        path: PathBuf,
+    }
+
+    impl PublishedLibraryDatabase {
+        fn create() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock after the Unix epoch")
+                .as_nanos();
+            Self {
+                path: std::env::temp_dir().join(format!(
+                    "inkshadow-v029-scale-{}-{nonce}.db",
+                    std::process::id()
+                )),
+            }
+        }
+
+        async fn open(&self) -> SqliteConnection {
+            let options = SqliteConnectOptions::new()
+                .filename(&self.path)
+                .create_if_missing(true)
+                .foreign_keys(true);
+            SqliteConnection::connect_with(&options)
+                .await
+                .expect("open test-owned published database")
+        }
+
+        fn sidecar_path(&self, suffix: &str) -> PathBuf {
+            let mut path = self.path.as_os_str().to_os_string();
+            path.push(suffix);
+            path.into()
+        }
+    }
+
+    impl Drop for PublishedLibraryDatabase {
+        fn drop(&mut self) {
+            for path in [
+                self.path.clone(),
+                self.sidecar_path("-wal"),
+                self.sidecar_path("-shm"),
+            ] {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct TableSnapshot {
+        row_count: i64,
+        sha256: String,
+    }
+
+    type MigrationReceipt = (i64, String, String, i64, Vec<u8>, i64);
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct PublishedLibrarySnapshot {
+        projects: TableSnapshot,
+        chapters: TableSnapshot,
+        chapter_versions: TableSnapshot,
+        candidates: TableSnapshot,
+        chapter_character_count: i64,
+        chapter_body_sha256: String,
+        protected_tables: BTreeMap<String, TableSnapshot>,
+        migration_receipts: Vec<MigrationReceipt>,
+    }
+
+    fn bytes_to_hex(bytes: &[u8]) -> String {
+        let mut encoded = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            write!(&mut encoded, "{byte:02x}").expect("write hexadecimal digest");
+        }
+        encoded
+    }
+
+    fn sha256_hex(value: &str) -> String {
+        bytes_to_hex(&Sha256::digest(value.as_bytes()))
+    }
+
+    fn digest_ordered_rows(rows: &[String]) -> String {
+        let mut digest = Sha256::new();
+        for row in rows {
+            digest.update((row.len() as u64).to_be_bytes());
+            digest.update(row.as_bytes());
+        }
+        bytes_to_hex(&digest.finalize())
+    }
+
+    async fn table_snapshot(connection: &mut SqliteConnection, query: &str) -> TableSnapshot {
+        let rows: Vec<String> = sqlx::query_scalar(query)
+            .fetch_all(connection)
+            .await
+            .expect("read ordered table summary rows");
+        TableSnapshot {
+            row_count: rows.len() as i64,
+            sha256: digest_ordered_rows(&rows),
+        }
+    }
+
+    fn quoted_identifier(value: &str) -> String {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    }
+
+    async fn complete_table_snapshot(
+        connection: &mut SqliteConnection,
+        table_name: &str,
+    ) -> TableSnapshot {
+        let table = quoted_identifier(table_name);
+        let columns: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as(&format!("PRAGMA table_info({table})"))
+                .fetch_all(&mut *connection)
+                .await
+                .expect("read protected table columns");
+        assert!(
+            !columns.is_empty(),
+            "protected table {table_name} must exist"
+        );
+
+        let encoded_row = columns
+            .iter()
+            .map(|(_, name, _, _, _, _)| format!("quote({})", quoted_identifier(name)))
+            .collect::<Vec<_>>()
+            .join(" || char(31) || ");
+        let mut primary_key = columns
+            .iter()
+            .filter(|(_, _, _, _, _, primary_key_order)| *primary_key_order > 0)
+            .map(|(_, name, _, _, _, primary_key_order)| {
+                (*primary_key_order, quoted_identifier(name))
+            })
+            .collect::<Vec<_>>();
+        if primary_key.is_empty() {
+            primary_key = columns
+                .iter()
+                .map(|(ordinal, name, _, _, _, _)| (*ordinal + 1, quoted_identifier(name)))
+                .collect();
+        }
+        primary_key.sort_by_key(|(order, _)| *order);
+        let order_by = primary_key
+            .into_iter()
+            .map(|(_, column)| column)
+            .collect::<Vec<_>>()
+            .join(", ");
+        table_snapshot(
+            connection,
+            &format!("SELECT {encoded_row} FROM {table} ORDER BY {order_by}"),
+        )
+        .await
+    }
+
+    async fn protected_table_snapshots(
+        connection: &mut SqliteConnection,
+    ) -> BTreeMap<String, TableSnapshot> {
+        let table_names: Vec<String> = sqlx::query_scalar(
+            "SELECT name
+             FROM sqlite_schema
+             WHERE type = 'table'
+               AND name NOT LIKE 'sqlite_%'
+               AND name <> '_sqlx_migrations'
+             ORDER BY name",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .expect("list every application-owned table");
+        let mut snapshots = BTreeMap::new();
+        for table_name in table_names {
+            let snapshot = complete_table_snapshot(connection, &table_name).await;
+            snapshots.insert(table_name, snapshot);
+        }
+        snapshots
+    }
+
+    async fn replace_published_v029_receipts_with_legacy_windows_checksums(
+        connection: &mut SqliteConnection,
+    ) {
+        let migrator = local_migrator();
+        for migration in migrator
+            .iter()
+            .filter(|migration| migration.version <= PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION)
+        {
+            let legacy_sql = migration.sql.replace('\n', "\r\n");
+            let legacy_checksum = Sha384::digest(legacy_sql.as_bytes()).to_vec();
+            sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+                .bind(legacy_checksum)
+                .bind(migration.version)
+                .execute(&mut *connection)
+                .await
+                .expect("replace receipt with the released Windows text checksum");
+        }
+    }
+
+    async fn published_library_snapshot(
+        connection: &mut SqliteConnection,
+    ) -> PublishedLibrarySnapshot {
+        let projects = table_snapshot(
+            connection,
+            "SELECT json_object(
+               'id', id, 'name', name, 'status', status, 'revision', revision,
+               'deletion_generation', deletion_generation, 'created_at', created_at,
+               'updated_at', updated_at, 'archived_at', archived_at,
+               'trashed_at', trashed_at, 'retention_until', retention_until,
+               'status_before_trash', status_before_trash
+             ) FROM projects ORDER BY id",
+        )
+        .await;
+        let chapters = table_snapshot(
+            connection,
+            "SELECT json_object(
+               'id', id, 'project_id', project_id, 'title', title, 'content', content,
+               'status', status, 'revision', revision, 'current_version_id', current_version_id,
+               'created_at', created_at, 'updated_at', updated_at, 'trashed_at', trashed_at,
+               'privacy_mode', privacy_mode, 'privacy_revision', privacy_revision
+             ) FROM chapters ORDER BY id",
+        )
+        .await;
+        let chapter_versions = table_snapshot(
+            connection,
+            "SELECT json_object(
+               'id', id, 'project_id', project_id, 'chapter_id', chapter_id,
+               'parent_version_id', parent_version_id, 'sequence', sequence,
+               'content', content, 'content_checksum', content_checksum, 'reason', reason,
+               'source_candidate_id', source_candidate_id, 'created_at', created_at,
+               'organize_local_story_facts', organize_local_story_facts
+             ) FROM chapter_versions ORDER BY id",
+        )
+        .await;
+        let candidates = table_snapshot(
+            connection,
+            "SELECT json_object(
+               'id', id, 'project_id', project_id, 'chapter_id', chapter_id,
+               'source', source, 'base_version_id', base_version_id, 'content', content,
+               'content_checksum', content_checksum, 'status', status, 'incomplete', incomplete,
+               'created_at', created_at, 'updated_at', updated_at, 'decided_at', decided_at,
+               'task_intent', task_intent, 'application_mode', application_mode,
+               'payload_kind', payload_kind, 'anchor_start_utf16', anchor_start_utf16,
+               'anchor_end_utf16', anchor_end_utf16, 'revision', revision, 'purpose', purpose
+             ) FROM ai_candidates ORDER BY id",
+        )
+        .await;
+
+        let bodies: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, content FROM chapters ORDER BY id")
+                .fetch_all(&mut *connection)
+                .await
+                .expect("read authoritative chapter bodies");
+        let mut body_digest = Sha256::new();
+        for (id, content) in &bodies {
+            body_digest.update((id.len() as u64).to_be_bytes());
+            body_digest.update(id.as_bytes());
+            body_digest.update((content.len() as u64).to_be_bytes());
+            body_digest.update(content.as_bytes());
+        }
+        let chapter_character_count: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(length(content)), 0) FROM chapters")
+                .fetch_one(&mut *connection)
+                .await
+                .expect("count authoritative chapter characters");
+        let protected_tables = protected_table_snapshots(&mut *connection).await;
+        let migration_receipts: Vec<MigrationReceipt> = sqlx::query_as(
+            "SELECT version, description, CAST(installed_on AS TEXT), success, checksum,
+                    execution_time
+             FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .expect("read complete migration receipts");
+
+        PublishedLibrarySnapshot {
+            projects,
+            chapters,
+            chapter_versions,
+            candidates,
+            chapter_character_count,
+            chapter_body_sha256: bytes_to_hex(&body_digest.finalize()),
+            migration_receipts,
+            protected_tables,
+        }
+    }
+
+    fn synthetic_project_id(project_index: usize) -> String {
+        format!("synthetic-v029-project-{project_index:02}")
+    }
+
+    fn synthetic_chapter_project_id(chapter_index: usize) -> String {
+        let project_index = if chapter_index < 10 {
+            chapter_index / 2
+        } else {
+            chapter_index - 5
+        };
+        synthetic_project_id(project_index)
+    }
+
+    fn synthetic_current_version_id(chapter_index: usize) -> String {
+        let sequence = if chapter_index < 17 { 2 } else { 1 };
+        format!("synthetic-v029-version-{chapter_index:02}-{sequence}")
+    }
+
+    async fn seed_v029_scale_library(connection: &mut SqliteConnection) {
+        const NOW: &str = "2026-08-24T00:00:00.000Z";
+
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .expect("begin synthetic library transaction");
+
+        for project_index in 0..SYNTHETIC_V029_PROJECT_COUNT as usize {
+            sqlx::query(
+                "INSERT INTO projects (
+                   id, name, status, revision, deletion_generation, created_at, updated_at
+                 ) VALUES (?, ?, 'active', 1, 0, ?, ?)",
+            )
+            .bind(synthetic_project_id(project_index))
+            .bind(format!("合成作品 {:02}", project_index + 1))
+            .bind(NOW)
+            .bind(NOW)
+            .execute(&mut *connection)
+            .await
+            .expect("insert synthetic project");
+        }
+
+        for chapter_index in 0..SYNTHETIC_V029_CHAPTER_COUNT as usize {
+            let chapter_id = format!("synthetic-v029-chapter-{chapter_index:02}");
+            let project_id = synthetic_chapter_project_id(chapter_index);
+            let current_version_id = synthetic_current_version_id(chapter_index);
+            let character_count = 6_052 + usize::from(chapter_index < 12);
+            let content = "墨".repeat(character_count);
+
+            sqlx::query(
+                "INSERT INTO chapters (
+                   id, project_id, title, content, status, revision, current_version_id,
+                   created_at, updated_at, trashed_at
+                 ) VALUES (?, ?, ?, ?, 'active', 1, ?, ?, ?, NULL)",
+            )
+            .bind(&chapter_id)
+            .bind(&project_id)
+            .bind(format!("第 {} 章", chapter_index + 1))
+            .bind(&content)
+            .bind(&current_version_id)
+            .bind(NOW)
+            .bind(NOW)
+            .execute(&mut *connection)
+            .await
+            .expect("insert synthetic chapter");
+
+            let has_second_version = chapter_index < 17;
+            let first_content = if has_second_version {
+                "旧".repeat(128 + chapter_index)
+            } else {
+                content.clone()
+            };
+            let first_version_id = format!("synthetic-v029-version-{chapter_index:02}-1");
+            sqlx::query(
+                "INSERT INTO chapter_versions (
+                   id, project_id, chapter_id, parent_version_id, sequence, content,
+                   content_checksum, reason, source_candidate_id, created_at
+                 ) VALUES (?, ?, ?, NULL, 1, ?, ?, 'created', NULL, ?)",
+            )
+            .bind(&first_version_id)
+            .bind(&project_id)
+            .bind(&chapter_id)
+            .bind(&first_content)
+            .bind(sha256_hex(&first_content))
+            .bind(NOW)
+            .execute(&mut *connection)
+            .await
+            .expect("insert first immutable version");
+
+            if has_second_version {
+                sqlx::query(
+                    "INSERT INTO chapter_versions (
+                       id, project_id, chapter_id, parent_version_id, sequence, content,
+                       content_checksum, reason, source_candidate_id, created_at
+                     ) VALUES (?, ?, ?, ?, 2, ?, ?, 'manual', NULL, ?)",
+                )
+                .bind(&current_version_id)
+                .bind(&project_id)
+                .bind(&chapter_id)
+                .bind(&first_version_id)
+                .bind(&content)
+                .bind(sha256_hex(&content))
+                .bind(NOW)
+                .execute(&mut *connection)
+                .await
+                .expect("insert current immutable version");
+            }
+        }
+
+        for candidate_index in 0..SYNTHETIC_V029_CANDIDATE_COUNT as usize {
+            let chapter_id = format!("synthetic-v029-chapter-{candidate_index:02}");
+            let project_id = synthetic_chapter_project_id(candidate_index);
+            let content = format!(
+                "隔离候选 {} {}",
+                candidate_index + 1,
+                "候".repeat(96 + candidate_index)
+            );
+            let (status, decided_at) = match candidate_index {
+                0..=13 => ("ready", None),
+                14..=15 => ("rejected", Some(NOW)),
+                _ => ("expired", Some(NOW)),
+            };
+            sqlx::query(
+                "INSERT INTO ai_candidates (
+                   id, project_id, chapter_id, source, base_version_id, content,
+                   content_checksum, status, incomplete, created_at, updated_at, decided_at
+                 ) VALUES (?, ?, ?, 'generate', ?, ?, ?, ?, 0, ?, ?, ?)",
+            )
+            .bind(format!("synthetic-v029-candidate-{candidate_index:02}"))
+            .bind(project_id)
+            .bind(chapter_id)
+            .bind(synthetic_current_version_id(candidate_index))
+            .bind(&content)
+            .bind(sha256_hex(&content))
+            .bind(status)
+            .bind(NOW)
+            .bind(NOW)
+            .bind(decided_at)
+            .execute(&mut *connection)
+            .await
+            .expect("insert isolated synthetic candidate");
+        }
+
+        seed_v029_creative_and_trace_chain(&mut *connection, NOW).await;
+
+        sqlx::query("COMMIT")
+            .execute(&mut *connection)
+            .await
+            .expect("commit synthetic library transaction");
+        let foreign_key_violations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+                .fetch_one(connection)
+                .await
+                .expect("verify synthetic library foreign keys");
+        assert_eq!(foreign_key_violations, 0);
+    }
+
+    async fn seed_v029_creative_and_trace_chain(connection: &mut SqliteConnection, now: &str) {
+        let first_project = synthetic_project_id(0);
+        let first_chapter = "synthetic-v029-chapter-00";
+        let first_version = synthetic_current_version_id(0);
+        let first_candidate = "synthetic-v029-candidate-00";
+
+        for project_index in 0..SYNTHETIC_V029_PROJECT_COUNT as usize {
+            let project_id = synthetic_project_id(project_index);
+            let seed_id = format!("synthetic-v029-seed-{project_index:02}");
+            let seed_payload = format!(
+                "{{\"seedId\":\"{seed_id}\",\"journeyKind\":\"idea\",\"version\":1,\"premise\":{{\"text\":\"合成灵感 {}\"}}}}",
+                project_index + 1
+            );
+            sqlx::query(
+                "INSERT INTO project_display_identities (
+                   project_id, display_kind, provenance, revision, created_at, updated_at
+                 ) VALUES (?, 'author_work', 'explicit_creation', 1, ?, ?)",
+            )
+            .bind(&project_id)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *connection)
+            .await
+            .expect("insert project display identity");
+            sqlx::query(
+                "INSERT INTO project_seeds (
+                   project_id, seed_id, journey_kind, schema_version, payload_json,
+                   revision, created_at, updated_at
+                 ) VALUES (?, ?, 'idea', 1, ?, 1, ?, ?)",
+            )
+            .bind(project_id)
+            .bind(seed_id)
+            .bind(seed_payload)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *connection)
+            .await
+            .expect("insert project seed");
+        }
+
+        sqlx::query(
+            "INSERT INTO story_ideation_drafts (
+               id, mode, status, project_id, revision, updated_at, snapshot_json
+             ) VALUES
+               ('synthetic-v029-idea-active', 'quick', 'active', NULL, 2, ?,
+                '{\"idea\":\"尚未创建的本地灵感\"}'),
+               ('synthetic-v029-idea-finalized', 'guided', 'finalized', ?, 3, ?,
+                '{\"idea\":\"已绑定项目的灵感\"}')",
+        )
+        .bind(now)
+        .bind(&first_project)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert active and finalized ideation drafts");
+
+        sqlx::query(
+            "INSERT INTO story_outlines (project_id, revision, snapshot_json)
+             VALUES (?, 2, '{\"title\":\"合成规划\",\"nodes\":[]}')",
+        )
+        .bind(&first_project)
+        .execute(&mut *connection)
+        .await
+        .expect("insert authoritative outline");
+        sqlx::query(
+            "INSERT INTO story_formal_records (
+               id, project_id, kind, record_key, revision, current_version,
+               created_at, updated_at, snapshot_json
+             ) VALUES ('synthetic-v029-formal-record', ?, 'character', 'zhou-wang', 1, 1,
+                       ?, ?, '{\"name\":\"周望\"}')",
+        )
+        .bind(&first_project)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert legacy formal setting");
+        sqlx::query(
+            "INSERT INTO story_review_items (
+               id, project_id, item_type, status, revision, target_record_id,
+               source_chapter_id, source_version_id, deferred_until,
+               created_at, updated_at, snapshot_json
+             ) VALUES ('synthetic-v029-review-setting', ?, 'extraction', 'pending', 1,
+                       'synthetic-v029-formal-record', ?, ?, NULL, ?, ?,
+                       '{\"claim\":\"钟楼位于旧城\"}')",
+        )
+        .bind(&first_project)
+        .bind(first_chapter)
+        .bind(&first_version)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert pending legacy setting");
+        sqlx::query(
+            "INSERT INTO story_memory_policies (
+               project_id, automatic_learning_enabled, revision, created_at, updated_at,
+               snapshot_json
+             ) VALUES (?, 0, 1, ?, ?, '{\"automaticLearningEnabled\":false}')",
+        )
+        .bind(&first_project)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert story memory policy");
+        sqlx::query(
+            "INSERT INTO story_memory_records (
+               id, project_id, level, origin, status, revision, source_kind, source_id,
+               source_version_id, automatic_learning_policy_revision,
+               created_at, updated_at, snapshot_json
+             ) VALUES ('synthetic-v029-memory', ?, 'L1', 'user', 'enabled', 1,
+                       'user_rule', 'synthetic-v029-user-rule', NULL, NULL, ?, ?,
+                       '{\"rule\":\"钟摆只能在午夜倒转\"}')",
+        )
+        .bind(&first_project)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert user memory record");
+
+        sqlx::query(
+            "INSERT INTO recovery_drafts (
+               id, project_id, chapter_id, base_revision, content, cursor_offset,
+               created_at, updated_at
+             ) VALUES ('synthetic-v029-recovery', ?, ?, 1, 'recoverable draft', 17, ?, ?)",
+        )
+        .bind(&first_project)
+        .bind(first_chapter)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert recovery draft");
+
+        sqlx::query(
+            "INSERT INTO story_facts (
+               id, project_id, fact_type, content_text, value_json, source_kind,
+               evidence_reference, confidence, status, origin, user_confirmed, locked,
+               deprecated, needs_review, confirmed_by_actor_id, confirmed_at,
+               revision, created_at, updated_at
+             ) VALUES (
+               'synthetic-v029-formal-fact', ?, 'person.identity',
+               '周望是钟楼管理员', NULL, 'user_statement', '用户明确添加的设定',
+               1.0, 'formal', 'user', 1, 0, 0, 0, 'local-author', ?, 1, ?, ?
+             )",
+        )
+        .bind(&first_project)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert confirmed user story fact");
+        sqlx::query(
+            "INSERT INTO story_facts (
+               id, project_id, fact_type, content_text, value_json, source_kind,
+               evidence_reference, confidence, status, origin, user_confirmed, locked,
+               deprecated, needs_review, confirmed_by_actor_id, confirmed_at,
+               revision, created_at, updated_at
+             ) VALUES (
+               'synthetic-v029-pending-fact', ?, 'place.location',
+               '钟楼位于旧城', NULL, 'system_derivation', '本地整理后等待作者确认',
+               0.8, 'unconfirmed', 'ai_extraction', 0, 0, 0, 1, NULL, NULL, 1, ?, ?
+             )",
+        )
+        .bind(&first_project)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert pending story fact");
+        sqlx::query(
+            "INSERT INTO story_fact_revisions (
+               fact_id, project_id, revision, change_kind, recorded_at, snapshot_json
+             ) VALUES
+               ('synthetic-v029-formal-fact', ?, 1, 'created', ?,
+                '{\"status\":\"formal\",\"contentText\":\"周望是钟楼管理员\"}'),
+               ('synthetic-v029-pending-fact', ?, 1, 'created', ?,
+                '{\"status\":\"unconfirmed\",\"contentText\":\"钟楼位于旧城\"}')",
+        )
+        .bind(&first_project)
+        .bind(now)
+        .bind(&first_project)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert immutable story fact revisions");
+
+        sqlx::query(
+            "INSERT INTO writing_preferences (
+               id, project_id, preference_text, source, source_feedback_code,
+               evidence_count, enabled, revision, created_at, updated_at, deleted_at
+             ) VALUES ('synthetic-v029-writing-preference', ?, '保留克制的叙述语气',
+                       'manual', NULL, 0, 1, 1, ?, ?, NULL)",
+        )
+        .bind(&first_project)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert user writing preference");
+        sqlx::query(
+            "INSERT INTO writing_experience_preferences (
+               scope, mode, initialization_source, direct_local_organization_authorized_at,
+               revision, created_at, updated_at
+             ) VALUES ('global', 'direct', 'user', ?, 2, ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert writing experience preference");
+
+        sqlx::query(
+            "INSERT INTO creative_journeys (
+               id, kind, status, current_state, project_id, chapter_id, candidate_id,
+               revision, snapshot_json, created_at, updated_at, completed_at
+             ) VALUES ('synthetic-v029-journey', 'idea', 'completed', 'candidate_ready',
+                       ?, ?, ?, 4, '{\"recoverable\":true}', ?, ?, ?)",
+        )
+        .bind(&first_project)
+        .bind(first_chapter)
+        .bind(first_candidate)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert recoverable creation journey");
+        sqlx::query(
+            "INSERT INTO creative_journey_turns (
+               id, journey_id, sequence, turn_kind, question_key, generation_source,
+               provider_id, model_id, task_key, request_id, snapshot_json, created_at
+             ) VALUES ('synthetic-v029-journey-turn', 'synthetic-v029-journey', 1,
+                       'idea', NULL, 'provider', 'synthetic-provider', 'synthetic-model',
+                       'book_start_guidance', 'synthetic-request',
+                       '{\"state\":\"completed\"}', ?)",
+        )
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert creation journey turn");
+
+        sqlx::query(
+            "INSERT INTO model_provider_connections (
+               id, provider_kind, display_name, protocol, base_url, created_at, updated_at
+             ) VALUES ('synthetic-provider', 'deepseek', '合成服务商', 'openai_compatible',
+                       'https://example.invalid/v1', ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert content-free provider connection");
+        sqlx::query(
+            "INSERT INTO model_invocation_facts (
+               id, task, route_task, connection_id, catalog_entry_id,
+               provider_kind_snapshot, model_id_snapshot, route_reason, status, attempt,
+               fallback_from_invocation_id, privacy_policy, data_destination,
+               input_tokens, output_tokens, cached_input_tokens, error_code, error_summary,
+               started_at, completed_at, created_at, revision, diagnostic_request_id,
+               failure_stage, failure_retryable, http_status, finish_reason,
+               visible_content_length, reasoning_present, streamed,
+               requested_max_output_tokens, provider_dispatch_started_at
+             ) VALUES (
+               'synthetic-v029-invocation', 'continuation', NULL, 'synthetic-provider', NULL,
+               'deepseek', 'synthetic-model', 'user_override', 'succeeded', 1, NULL,
+               'cloud_allowed', 'remote', 10, 20, 0, NULL, NULL, ?, ?, ?, 1,
+               'synthetic-request', NULL, NULL, 200, 'stop', 128, 0, 1, 256, ?
+             )",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert universal invocation ledger row");
+
+        sqlx::query(
+            "INSERT INTO background_tasks (
+               id, task_type, idempotency_key, metadata_json, priority, status,
+               attempt, max_attempts, sequence, run_after,
+               created_at, updated_at, started_at, finished_at
+             ) VALUES ('synthetic-v029-task', 'ai.generate', 'synthetic-v029-task-key',
+                       '{\"projectId\":\"synthetic-v029-project-00\"}', 50, 'succeeded',
+                       1, 1, 1, NULL, ?, ?, ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert completed background task");
+        sqlx::query(
+            "INSERT INTO ai_generation_runs (
+               id, task_id, idempotency_key, project_id, chapter_id, base_version_id,
+               provider_id, model_id, state, revision, attempt, input_tokens,
+               maximum_output_tokens, estimated_cost_micros, incurred_cost_micros,
+               currency, pricing_version, price_updated_at, preflight_json,
+               candidate_id, failure_code, cancelled_at, completed_at, created_at, updated_at
+             ) VALUES ('synthetic-v029-generation', 'synthetic-v029-task',
+                       'synthetic-v029-generation-key', ?, ?, ?, 'synthetic-provider',
+                       'synthetic-model', 'completed', 1, 1, 10, 256, '0', '0', 'CNY',
+                       'synthetic-pricing-v1', ?, '{}', ?, NULL, NULL, ?, ?, ?)",
+        )
+        .bind(&first_project)
+        .bind(first_chapter)
+        .bind(&first_version)
+        .bind(now)
+        .bind(first_candidate)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert generation run");
+        sqlx::query(
+            "INSERT INTO ai_generation_route_selections (
+               run_id, role, reason, fallback_provider_id, fallback_model_id, created_at
+             ) VALUES ('synthetic-v029-generation', 'fast', 'role_primary', NULL, NULL, ?)",
+        )
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert generation route selection");
+        sqlx::query(
+            "INSERT INTO ai_generation_attempt_usage (
+               run_id, attempt, usage_source, input_tokens, output_tokens,
+               cached_input_tokens, usage_priced_estimate_micros, cost_status,
+               currency, pricing_version, price_updated_at, reported_at,
+               privacy_snapshot_version, privacy_policy, data_destination,
+               model_invocation_id
+             ) VALUES ('synthetic-v029-generation', 1, 'provider_reported', 10, 20, 0,
+                       '0', 'estimated', 'CNY', 'synthetic-pricing-v1', ?, ?, 1,
+                       'cloud_allowed', 'remote', 'synthetic-v029-invocation')",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert privacy-bound generation usage");
+
+        sqlx::query(
+            "INSERT INTO story_planning_candidates (
+               id, project_id, task, target_node_id, target_node_title,
+               baseline_outline_revision, status, payload_json, editable_synopsis,
+               context_json, invocation_id, connection_id, catalog_entry_id,
+               provider_kind, model_id, used_fallback, accepted_outline_revision,
+               revision, created_at, updated_at, decided_at
+             ) VALUES ('synthetic-v029-planning-candidate', ?, 'outline_planning',
+                       'root', '故事根节点', 2, 'review', '{\"nodes\":[]}',
+                       '等待作者决定的故事方向', '{}', 'synthetic-v029-invocation',
+                       'synthetic-provider', 'synthetic-catalog', 'deepseek',
+                       'synthetic-model', 0, NULL, 1, ?, ?, NULL)",
+        )
+        .bind(&first_project)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert historical planning candidate");
+        sqlx::query(
+            "INSERT INTO local_audit_events (
+               id, project_id, entity_type, entity_id, action, request_id,
+               metadata_json, created_at
+             ) VALUES ('synthetic-v029-audit', ?, 'ai_candidate', ?, 'generated',
+                       'synthetic-request', '{\"isolated\":true}', ?)",
+        )
+        .bind(&first_project)
+        .bind(first_candidate)
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert local audit event");
+        sqlx::query(
+            "INSERT INTO story_settings_import_receipts (
+               id, project_id, source_sha256, request_sha256, status,
+               created_record_ids_json, updated_record_fences_json,
+               created_fact_ids_json, created_memory_ids_json,
+               imported_count, skipped_count, created_at, undone_at
+             ) VALUES ('synthetic-v029-settings-receipt', ?, ?, ?, 'committed',
+                       '[\"synthetic-v029-formal-record\"]', '[]',
+                       '[\"synthetic-v029-formal-fact\"]', '[\"synthetic-v029-memory\"]',
+                       3, 0, ?, NULL)",
+        )
+        .bind(first_project)
+        .bind("1".repeat(64))
+        .bind("2".repeat(64))
+        .bind(now)
+        .execute(&mut *connection)
+        .await
+        .expect("insert story settings import receipt");
+    }
+
+    async fn apply_published_v023_history(connection: &mut SqliteConnection) {
+        let full = local_migrator();
+        let through_v023 = test_migrator(
+            full.iter()
+                .filter(|migration| migration.version <= PUBLISHED_V023_MAXIMUM_MIGRATION_VERSION)
+                .cloned()
+                .collect(),
+        );
+        assert_eq!(through_v023.iter().count(), 67);
+
+        migration_subset(&through_v023, |migration| {
+            migration.version < ZHIPU_GLM_MIGRATION_VERSION
+        })
+        .run_direct(&mut *connection)
+        .await
+        .expect("apply v0.2.3 history before Zhipu migration");
+        run_foreign_key_disabled_migration(
+            connection,
+            &through_v023,
+            ZHIPU_GLM_MIGRATION_VERSION,
+            "foreign-key violations remained after v0.2.3 Zhipu migration",
+        )
+        .await
+        .expect("apply v0.2.3 Zhipu migration");
+        migration_subset(&through_v023, |migration| {
+            migration.version > ZHIPU_GLM_MIGRATION_VERSION
+                && migration.version < MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+        })
+        .run_direct(&mut *connection)
+        .await
+        .expect("apply v0.2.3 history before content-quality migration");
+        run_foreign_key_disabled_migration(
+            connection,
+            &through_v023,
+            MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION,
+            "foreign-key violations remained after v0.2.3 content-quality migration",
+        )
+        .await
+        .expect("apply v0.2.3 content-quality migration");
+        migration_subset(&through_v023, |migration| {
+            migration.version > MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION
+        })
+        .run_direct(connection)
+        .await
+        .expect("apply remaining v0.2.3 history");
+    }
+
     #[test]
     fn preserves_the_published_sync_access_migration_checksum() {
         let migrator = local_migrator();
@@ -727,6 +1986,387 @@ mod tests {
                 0x09, 0x60, 0x6f, 0x8e, 0xd5, 0x74,
             ],
         );
+    }
+
+    #[test]
+    fn pins_every_published_v029_migration_name_order_and_sql_byte() {
+        let migrator = local_migrator();
+        let published: Vec<_> = migrator
+            .iter()
+            .filter(|migration| migration.version <= PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION)
+            .collect();
+        assert_eq!(published.len(), 80);
+        assert!(published
+            .iter()
+            .enumerate()
+            .all(|(index, migration)| migration.version == index as i64 + 1));
+        assert_eq!(
+            published_v029_manifest_digest(&migrator),
+            PUBLISHED_V029_MIGRATION_MANIFEST_SHA384
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_the_exact_published_v029_history_without_rewriting_its_receipts() {
+        let mut connection = SqliteConnection::connect("sqlite::memory:")
+            .await
+            .expect("open sqlite");
+        run_local_migrations(&mut connection)
+            .await
+            .expect("apply published history");
+        let before: Vec<(i64, String, i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT version, description, success, checksum
+             FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .expect("read published receipts");
+
+        run_local_migrations(&mut connection)
+            .await
+            .expect("accept exact published history");
+        let after: Vec<(i64, String, i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT version, description, success, checksum
+             FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .expect("read accepted receipts");
+        assert_eq!(before, after);
+        assert_eq!(before.len(), 80);
+    }
+
+    #[tokio::test]
+    async fn accepts_legacy_windows_published_receipts_without_rewriting_them() {
+        let mut connection = SqliteConnection::connect("sqlite::memory:")
+            .await
+            .expect("open legacy receipt fixture");
+        run_local_migrations(&mut connection)
+            .await
+            .expect("create canonical published history");
+        replace_published_v029_receipts_with_legacy_windows_checksums(&mut connection).await;
+        let before: Vec<(i64, String, i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT version, description, success, checksum
+             FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .expect("read legacy Windows receipts");
+
+        run_local_migrations(&mut connection)
+            .await
+            .expect("accept the exact released Windows receipt whitelist");
+        let after: Vec<(i64, String, i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT version, description, success, checksum
+             FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .expect("read accepted legacy receipts");
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn preserves_a_v029_scale_library_across_upgrade_and_restart() {
+        let database = PublishedLibraryDatabase::create();
+        let mut published = database.open().await;
+        run_local_migrations(&mut published)
+            .await
+            .expect("create the exact published v0.2.9 migration history");
+        seed_v029_scale_library(&mut published).await;
+        replace_published_v029_receipts_with_legacy_windows_checksums(&mut published).await;
+
+        let before = published_library_snapshot(&mut published).await;
+
+        assert_eq!(before.projects.row_count, SYNTHETIC_V029_PROJECT_COUNT);
+        assert_eq!(before.chapters.row_count, SYNTHETIC_V029_CHAPTER_COUNT);
+        assert_eq!(
+            before.chapter_versions.row_count,
+            SYNTHETIC_V029_VERSION_COUNT
+        );
+        assert_eq!(before.candidates.row_count, SYNTHETIC_V029_CANDIDATE_COUNT);
+        assert_eq!(
+            before.chapter_character_count,
+            SYNTHETIC_V029_CHAPTER_CHARACTER_COUNT
+        );
+        assert_eq!(before.chapter_body_sha256.len(), 64);
+        assert_eq!(before.migration_receipts.len(), 80);
+        published.close().await.expect("close published database");
+
+        let mut upgraded = database.open().await;
+        run_local_migrations(&mut upgraded)
+            .await
+            .expect("accept and upgrade the published v0.2.9 database");
+        let after_upgrade = published_library_snapshot(&mut upgraded).await;
+        assert_eq!(after_upgrade, before);
+        upgraded.close().await.expect("close upgraded database");
+
+        let mut restarted = database.open().await;
+        run_local_migrations(&mut restarted)
+            .await
+            .expect("reopen the upgraded database without rewriting it");
+        let after_restart = published_library_snapshot(&mut restarted).await;
+        assert_eq!(after_restart, before);
+        restarted.close().await.expect("close restarted database");
+    }
+
+    #[tokio::test]
+    async fn preserves_the_complete_v029_creative_and_trace_chain() {
+        let database = PublishedLibraryDatabase::create();
+        let mut connection = database.open().await;
+        run_local_migrations(&mut connection)
+            .await
+            .expect("create the published v0.2.9 history");
+        seed_v029_scale_library(&mut connection).await;
+        let snapshot = published_library_snapshot(&mut connection).await;
+
+        assert_eq!(
+            snapshot.protected_tables.len(),
+            SYNTHETIC_V029_APPLICATION_TABLE_COUNT
+        );
+        assert!(
+            snapshot.protected_tables.len() >= REQUIRED_V029_CREATIVE_AND_TRACE_TABLES.len(),
+            "the full application schema must include every required creative and trace table"
+        );
+        println!(
+            "snapshotted {} application-owned tables",
+            snapshot.protected_tables.len()
+        );
+        for table_name in REQUIRED_V029_CREATIVE_AND_TRACE_TABLES {
+            let table = snapshot
+                .protected_tables
+                .get(*table_name)
+                .unwrap_or_else(|| panic!("missing protected snapshot for {table_name}"));
+            assert_eq!(table.sha256.len(), 64, "invalid digest for {table_name}");
+        }
+        for (table_name, expected_count) in [
+            ("projects", 14),
+            ("project_display_identities", 14),
+            ("project_display_identity_revisions", 14),
+            ("project_seeds", 14),
+            ("story_ideation_drafts", 2),
+            ("story_formal_records", 1),
+            ("story_review_items", 1),
+            ("story_memory_records", 1),
+            ("chapters", 19),
+            ("chapter_versions", 36),
+            ("recovery_drafts", 1),
+            ("ai_candidates", 18),
+            ("story_planning_candidates", 1),
+            ("story_facts", 2),
+            ("story_fact_revisions", 2),
+            ("creative_journeys", 1),
+            ("creative_journey_turns", 1),
+            ("background_tasks", 1),
+            ("ai_generation_runs", 1),
+            ("ai_generation_route_selections", 1),
+            ("ai_generation_attempt_usage", 1),
+            ("model_invocation_facts", 1),
+            ("local_audit_events", 1),
+            ("story_settings_import_receipts", 1),
+            ("writing_experience_preferences", 1),
+            ("writing_preferences", 1),
+            ("writing_preference_revisions", 1),
+        ] {
+            assert_eq!(
+                snapshot.protected_tables[table_name].row_count, expected_count,
+                "unexpected protected row count for {table_name}"
+            );
+        }
+        let historical_candidates: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ai_candidates WHERE status IN ('rejected', 'expired')",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("count retained historical candidates");
+        assert_eq!(historical_candidates, 4);
+        connection.close().await.expect("close protected fixture");
+    }
+
+    #[tokio::test]
+    async fn upgrades_the_exact_v023_history_contiguously_and_restarts() {
+        const PROJECT_ID: &str = "synthetic-v023-upgrade-project";
+        const NOW: &str = "2026-08-20T00:00:00.000Z";
+
+        let database = PublishedLibraryDatabase::create();
+        let mut published = database.open().await;
+        apply_published_v023_history(&mut published).await;
+        sqlx::query(
+            "INSERT INTO projects (
+               id, name, status, revision, deletion_generation, created_at, updated_at
+             ) VALUES (?, 'v0.2.3 连续升级保护', 'active', 1, 0, ?, ?)",
+        )
+        .bind(PROJECT_ID)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut published)
+        .await
+        .expect("seed v0.2.3 authority sentinel");
+        let published_receipts: Vec<MigrationReceipt> = sqlx::query_as(
+            "SELECT version, description, CAST(installed_on AS TEXT), success, checksum,
+                    execution_time
+             FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&mut published)
+        .await
+        .expect("read v0.2.3 migration receipts");
+        assert_eq!(published_receipts.len(), 67);
+        assert!(published_receipts
+            .iter()
+            .enumerate()
+            .all(|(index, receipt)| receipt.0 == index as i64 + 1));
+        published.close().await.expect("close v0.2.3 database");
+
+        let mut upgraded = database.open().await;
+        run_local_migrations(&mut upgraded)
+            .await
+            .expect("upgrade v0.2.3 history to the current schema");
+        let upgraded_receipts: Vec<MigrationReceipt> = sqlx::query_as(
+            "SELECT version, description, CAST(installed_on AS TEXT), success, checksum,
+                    execution_time
+             FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&mut upgraded)
+        .await
+        .expect("read upgraded receipts");
+        assert_eq!(upgraded_receipts.len(), 80);
+        assert_eq!(
+            &upgraded_receipts[..published_receipts.len()],
+            published_receipts.as_slice()
+        );
+        let project_name: String = sqlx::query_scalar("SELECT name FROM projects WHERE id = ?")
+            .bind(PROJECT_ID)
+            .fetch_one(&mut upgraded)
+            .await
+            .expect("read upgraded v0.2.3 authority sentinel");
+        assert_eq!(project_name, "v0.2.3 连续升级保护");
+        upgraded.close().await.expect("close upgraded database");
+
+        let mut restarted = database.open().await;
+        run_local_migrations(&mut restarted)
+            .await
+            .expect("restart the continuously upgraded database");
+        let restarted_receipts: Vec<MigrationReceipt> = sqlx::query_as(
+            "SELECT version, description, CAST(installed_on AS TEXT), success, checksum,
+                    execution_time
+             FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&mut restarted)
+        .await
+        .expect("read restarted receipts");
+        assert_eq!(restarted_receipts, upgraded_receipts);
+        let foreign_key_violations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+                .fetch_one(&mut restarted)
+                .await
+                .expect("verify continuously upgraded foreign keys");
+        assert_eq!(foreign_key_violations, 0);
+        restarted.close().await.expect("close restarted database");
+    }
+
+    #[tokio::test]
+    async fn rejects_non_whitelisted_history_before_any_forward_write() {
+        for case in ["missing", "duplicate", "unknown", "renamed", "dirty"] {
+            let mut connection = SqliteConnection::connect("sqlite::memory:")
+                .await
+                .expect("open sqlite");
+            run_local_migrations(&mut connection)
+                .await
+                .expect("apply published history");
+            sqlx::query("CREATE TABLE migration_audit_sentinel (value TEXT NOT NULL)")
+                .execute(&mut connection)
+                .await
+                .expect("create sentinel");
+            sqlx::query("INSERT INTO migration_audit_sentinel (value) VALUES ('preserved')")
+                .execute(&mut connection)
+                .await
+                .expect("seed sentinel");
+
+            match case {
+                "missing" => {
+                    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 40")
+                        .execute(&mut connection)
+                        .await
+                        .expect("remove one receipt");
+                }
+                "duplicate" => {
+                    sqlx::query(
+                        "CREATE TABLE duplicated_migration_history AS
+                         SELECT version, description, installed_on, success, checksum, execution_time
+                         FROM _sqlx_migrations",
+                    )
+                    .execute(&mut connection)
+                    .await
+                    .expect("copy migration history without its unique constraint");
+                    sqlx::query(
+                        "INSERT INTO duplicated_migration_history
+                         SELECT version, description, installed_on, success, checksum, execution_time
+                         FROM _sqlx_migrations WHERE version = 40",
+                    )
+                    .execute(&mut connection)
+                    .await
+                    .expect("duplicate one migration receipt");
+                    sqlx::query("DROP TABLE _sqlx_migrations")
+                        .execute(&mut connection)
+                        .await
+                        .expect("replace constrained migration history");
+                    sqlx::query(
+                        "ALTER TABLE duplicated_migration_history RENAME TO _sqlx_migrations",
+                    )
+                    .execute(&mut connection)
+                    .await
+                    .expect("install duplicated history fixture");
+                }
+                "unknown" => {
+                    sqlx::query(
+                        "INSERT INTO _sqlx_migrations (
+                           version, description, installed_on, success, checksum, execution_time
+                         ) VALUES ((SELECT MAX(version) + 1 FROM _sqlx_migrations),
+                                   'unknown', CURRENT_TIMESTAMP, 1, x'00', 0)",
+                    )
+                    .execute(&mut connection)
+                    .await
+                    .expect("insert unknown receipt");
+                }
+                "renamed" => {
+                    sqlx::query(
+                        "UPDATE _sqlx_migrations SET description = 'renamed' WHERE version = 37",
+                    )
+                    .execute(&mut connection)
+                    .await
+                    .expect("rename one migration receipt");
+                }
+                "dirty" => {
+                    sqlx::query(
+                        "UPDATE _sqlx_migrations SET success = 0
+                         WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)",
+                    )
+                    .execute(&mut connection)
+                    .await
+                    .expect("mark dirty receipt");
+                }
+                _ => unreachable!(),
+            }
+
+            let error = run_local_migrations(&mut connection)
+                .await
+                .expect_err("unsafe history must stop before migration execution");
+            assert_eq!(error.stage, "migration_history_validation");
+            assert!(matches!(
+                error.reason_code,
+                "MIGRATION_HISTORY_MISSING_VERSION"
+                    | "MIGRATION_VERSION_UNKNOWN"
+                    | "MIGRATION_VERSION_ORDER_INVALID"
+                    | "MIGRATION_VERSION_DUPLICATE"
+                    | "MIGRATION_DESCRIPTION_UNKNOWN"
+                    | "MIGRATION_HISTORY_DIRTY"
+            ));
+            let sentinel: String = sqlx::query_scalar("SELECT value FROM migration_audit_sentinel")
+                .fetch_one(&mut connection)
+                .await
+                .expect("read preserved sentinel");
+            assert_eq!(sentinel, "preserved");
+        }
     }
 
     #[tokio::test]

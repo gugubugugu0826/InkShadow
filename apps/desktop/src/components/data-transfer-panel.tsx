@@ -654,7 +654,7 @@ export function DataTransferPanel({
               {mode === "import-only" ? "安全导入原作" : "导入与导出"}
             </CardTitle>
             <CardDescription>
-              文件先经过安全预检与净化，再显示可编辑候选；确认前不会写入任何项目。
+              文件先经过安全检查和净化，再显示可编辑的待导入内容；确认前不会写入任何项目。
             </CardDescription>
           </div>
           <Badge tone="info">本地文件</Badge>
@@ -690,7 +690,7 @@ export function DataTransferPanel({
               onDrop={(event) => void inspectDroppedFiles(event)}
             >
               <div>
-                <strong>{importDragActive ? "松开即可开始安全预检" : "把作品文件拖到这里"}</strong>
+                <strong>{importDragActive ? "松开即可开始安全检查" : "把作品文件拖到这里"}</strong>
                 <p>单文件与单次选择均不超过 50 兆字节，最多 200 个文件。</p>
               </div>
               <div className="import-format-badges" aria-label="支持的作品格式">
@@ -1409,7 +1409,7 @@ function ImportPreview({
                   </FormField>
                   <FormField
                     label="章节正文预览"
-                    hint="这里只编辑待导入候选；确认前不会写入正式项目。提交时会再次移除外链与活动标记。"
+                    hint="这里只编辑待导入内容；确认前不会写入正式项目。提交时会再次移除外链与活动标记。"
                     required
                   >
                     {(fieldProps) => (

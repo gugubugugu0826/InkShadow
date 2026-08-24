@@ -18,6 +18,7 @@ import { parseUuidV7, type ChapterVersion } from "@inkshadow/domain";
 import { parseUuidV7 as parseStoryUuidV7, type StoryFact } from "@inkshadow/story-core";
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import "./idea-journey-page.css";
 
 import {
   creativeOpeningTimedOutRequestIds,
@@ -75,6 +76,7 @@ import {
   readSafeOperationIncidents,
   recordSafeOperationIncident,
 } from "../infrastructure/safe-operation-diagnostics";
+import { formatNaturalLocalTime } from "../infrastructure/natural-local-time";
 import type { ModelInvocationFact } from "../infrastructure/model-hub-store";
 import {
   createLocalCandidateAcceptancePipelineInput,
@@ -97,6 +99,7 @@ import {
   isOpeningJourneyRunTerminal,
   openingJourneyRunElapsedMs,
   openingJourneyRunRecoveryDecision,
+  openingJourneySupportNumber,
   projectOpeningJourneyTaskStage,
   readOpeningJourneyRun,
   settleOpeningJourneyTask,
@@ -355,6 +358,9 @@ export function IdeaJourneyPage() {
     null,
   );
   const [destination, setDestination] = useState<CreativeOpeningDestination | null>(null);
+  const [openingFailureDestination, setOpeningFailureDestination] = useState<
+    "local" | "remote" | null
+  >(null);
   const [quickAiOpen, setQuickAiOpen] = useState(false);
   const [openingPreference, setOpeningPreference] = useState<
     "ai" | "self" | "sample" | "local" | null
@@ -1960,6 +1966,34 @@ export function IdeaJourneyPage() {
     () => (journey === null ? null : readIdeaSnapshot(journey.snapshot, journey.id)),
     [journey],
   );
+  const openingFailureInvocationId = useMemo(() => {
+    if (snapshot === null) return null;
+    const failed = [...snapshot.openingSuggestions, ...snapshot.openingResultHistory].find(
+      ({ status, noticeCode }) =>
+        (status === "failed" || status === "review") && noticeCode === "MODEL_TIMEOUT",
+    );
+    return failed?.providerInvocationId ?? failed?.id ?? null;
+  }, [snapshot]);
+  useEffect(() => {
+    let active = true;
+    if (openingFailureInvocationId === null) {
+      setOpeningFailureDestination(null);
+      return () => {
+        active = false;
+      };
+    }
+    void runtime.modelHub
+      .findInvocation(openingFailureInvocationId)
+      .then((invocation) => {
+        if (active) setOpeningFailureDestination(invocation?.dataDestination ?? null);
+      })
+      .catch(() => {
+        if (active) setOpeningFailureDestination(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [openingFailureInvocationId, runtime]);
   useEffect(() => {
     const run = snapshot?.openingRun ?? null;
     if (run === null || isOpeningJourneyRunTerminal(run)) return;
@@ -2070,7 +2104,7 @@ export function IdeaJourneyPage() {
       return;
     }
     if (openingRun !== null) {
-      setUnpersistedOpeningSupportId(openingRun.supportId);
+      setUnpersistedOpeningSupportId(openingJourneySupportNumber(openingRun));
     }
     const requestId = providerBatchPlan?.requests[0]?.requestId ?? runtime.ids.next();
     const initialSnapshot: IdeaJourneySnapshotV1 = Object.freeze({
@@ -4571,15 +4605,22 @@ export function IdeaJourneyPage() {
   }
 
   const normalizedError = error === null ? null : projectOrdinaryUiError(error);
+  const normalizedErrorCode = error === null ? null : normalizeUiError(error).code;
+  const ordinaryErrorDescription =
+    normalizedError !== null && normalizedErrorCode === "MODEL_TIMEOUT"
+      ? openingTimeoutDescription(openingFailureDestination)
+      : normalizedError?.description;
   const normalizedListError = listError === null ? null : projectOrdinaryUiError(listError);
   const resumeFailureTarget =
     resumeFailureTargetId === null
       ? null
       : (activeJourneys.find(({ id }) => id === resumeFailureTargetId) ?? null);
-  const resumeFailureSupportId =
+  const resumeFailureRun =
     resumeFailureTarget === null
       ? null
-      : (readOpeningJourneyRun(resumeFailureTarget.snapshot.openingRun)?.supportId ?? null);
+      : readOpeningJourneyRun(resumeFailureTarget.snapshot.openingRun);
+  const resumeFailureSupportId =
+    resumeFailureRun === null ? null : openingJourneySupportNumber(resumeFailureRun);
   const quickAiDrawer = (
     <QuickAiConnectionDrawer
       open={quickAiOpen}
@@ -4686,8 +4727,12 @@ export function IdeaJourneyPage() {
     const persistedOpeningElapsedMs =
       openingRun === null ? null : openingJourneyRunElapsedMs(openingRun, clockNow);
     const openingSupportDescription =
-      openingRun === null ? "" : ` 支持编号：${openingRun.supportId}`;
+      openingRun === null ? "" : ` 支持编号：${openingJourneySupportNumber(openingRun)}`;
     const directFailure = normalizeUiError(error ?? directCreativeOpeningFailure(snapshot));
+    const directFailureDescription =
+      directFailure.code === "MODEL_TIMEOUT"
+        ? openingTimeoutDescription(openingFailureDestination)
+        : directFailure.description;
     const directFailureTitle =
       directFailure.code === "MODEL_TIMEOUT"
         ? "模型等待超时"
@@ -4733,15 +4778,15 @@ export function IdeaJourneyPage() {
                 title={directFailureTitle}
                 description={
                   <>
-                    <span>{directFailure.description}</span>
+                    <span>{directFailureDescription}</span>
                     {snapshot.openingRun !== null && (
-                      <span>{` 支持编号：${snapshot.openingRun.supportId}`}</span>
+                      <span>{` 支持编号：${openingJourneySupportNumber(snapshot.openingRun)}`}</span>
                     )}
                   </>
                 }
                 primaryAction={
                   retryableOpening === null
-                    ? { label: "去连接", onClick: () => setQuickAiOpen(true) }
+                    ? { label: "去连接模型", onClick: () => setQuickAiOpen(true) }
                     : {
                         label: "稍后重试",
                         onClick: () =>
@@ -4752,7 +4797,7 @@ export function IdeaJourneyPage() {
                   ? {}
                   : {
                       secondaryAction: {
-                        label: "去连接",
+                        label: "去连接模型",
                         onClick: () => setQuickAiOpen(true),
                       },
                     })}
@@ -4841,7 +4886,7 @@ export function IdeaJourneyPage() {
               <>
                 <span>{normalizedError.description}</span>
                 {snapshot.openingRun !== null && (
-                  <span>{` 支持编号：${snapshot.openingRun.supportId}`}</span>
+                  <span>{` 支持编号：${openingJourneySupportNumber(snapshot.openingRun)}`}</span>
                 )}
               </>
             }
@@ -4958,10 +5003,13 @@ export function IdeaJourneyPage() {
     ).length;
     const persistedGenerationPending = hasPersistedGenerationPending(snapshot);
     const openingRun = snapshot.openingRun;
+    const openingResultNeedsReview =
+      openingRun?.stage === "result_pending" ||
+      snapshot.noticeCode === "OPENING_RESULT_PENDING_REVIEW";
     const persistedOpeningElapsedMs =
       openingRun === null ? null : openingJourneyRunElapsedMs(openingRun, clockNow);
     const openingSupportDescription =
-      openingRun === null ? "" : ` 支持编号：${openingRun.supportId}`;
+      openingRun === null ? "" : ` 支持编号：${openingJourneySupportNumber(openingRun)}`;
     const hasExplicitOpening = snapshot.selectedOpeningId !== null;
     const hasQuestionPlan = hasExplicitOpening && snapshot.questionPlanner !== null;
     const guidanceComplete =
@@ -5018,8 +5066,10 @@ export function IdeaJourneyPage() {
             title={normalizedError.title}
             description={
               <>
-                <span>{normalizedError.description}</span>
-                {openingRun !== null && <span>{` 支持编号：${openingRun.supportId}`}</span>}
+                <span>{ordinaryErrorDescription}</span>
+                {openingRun !== null && (
+                  <span>{` 支持编号：${openingJourneySupportNumber(openingRun)}`}</span>
+                )}
               </>
             }
             primaryAction={{ label: "重新读取", onClick: () => void resume(journey) }}
@@ -5033,7 +5083,7 @@ export function IdeaJourneyPage() {
             description={
               <>
                 <span>确认前离开，未确认的生成批次已安全终止</span>
-                <span>{` 支持编号：${openingRun.supportId}`}</span>
+                <span>{` 支持编号：${openingJourneySupportNumber(openingRun)}`}</span>
               </>
             }
           />
@@ -5059,11 +5109,21 @@ export function IdeaJourneyPage() {
           <InlineAlert
             tone="warning"
             title={`${String(snapshot.openingBatchFailureCount)} 个 AI 建议没有生成`}
-            description={`已成功的建议和上一批可用建议都已保留，没有用本地草案冒充 AI 结果。${providerBatchFailureDescription(snapshot.noticeCode)}${openingSupportDescription}`}
-            action={{
-              label: "检查 AI 连接",
-              onClick: () => setQuickAiOpen(true),
-            }}
+            description={`已成功的建议和上一批可用建议都已保留，没有用本地草案冒充 AI 结果。${providerBatchFailureDescription(
+              snapshot.noticeCode,
+              openingFailureDestination,
+            )}${openingSupportDescription}`}
+            action={
+              openingResultNeedsReview
+                ? {
+                    label: "重新读取并核对结果",
+                    onClick: () => void resume(journey),
+                  }
+                : {
+                    label: "检查 AI 连接",
+                    onClick: () => setQuickAiOpen(true),
+                  }
+            }
           />
         )}
 
@@ -5587,6 +5647,14 @@ export function IdeaJourneyPage() {
       </div>
     );
   }
+  const createActionDisabledReason = writingExperience.loading
+    ? "正在读取本机写作方式，读取完成后即可继续。"
+    : busy !== null
+      ? "正在处理当前操作，请等待完成；墨影不会重复执行。"
+      : openingPreference !== "self" && idea.trim().length < 2
+        ? "先写至少两个字的灵感，就能生成开头。"
+        : null;
+  const createActionDisabledReasonId = "idea-journey-create-disabled-reason";
 
   return (
     <div className="desktop-page idea-journey idea-journey--landing" role="main">
@@ -5605,77 +5673,6 @@ export function IdeaJourneyPage() {
         </div>
         {!directMode && <Badge tone="success">无需先填设定</Badge>}
       </header>
-
-      {normalizedError !== null && (
-        <ErrorState
-          title={normalizedError.title}
-          description={
-            unpersistedOpeningSupportId === null && resumeFailureSupportId === null ? (
-              normalizedError.description
-            ) : unpersistedOpeningSupportId === null ? (
-              <>
-                <span>{normalizedError.description}</span>
-                <br />
-                <span>支持编号：{resumeFailureSupportId}</span>
-                <br />
-                <span>你可以重新读取本机进度；系统不会自动重新发送模型请求。</span>
-              </>
-            ) : (
-              <>
-                <span>本地旅程未能保存，本次没有发送</span>
-                <br />
-                <span>支持编号：{unpersistedOpeningSupportId}</span>
-                <br />
-                <span>{normalizedError.description}</span>
-              </>
-            )
-          }
-          {...(blankWorkspaceAttempt !== null
-            ? {
-                primaryAction: {
-                  label: "重试创建",
-                  onClick: () =>
-                    void createBlankAuthorWorkspace(blankWorkspaceAttempt.snapshot.idea),
-                },
-              }
-            : resumeFailureTarget === null
-              ? {}
-              : {
-                  primaryAction: {
-                    label: "重试读取",
-                    onClick: () => void resume(resumeFailureTarget),
-                  },
-                })}
-        />
-      )}
-
-      {!directMode && destination !== null && (
-        <InlineAlert
-          tone="info"
-          title={
-            openingPreference === "self"
-              ? "自己写：不会向 AI 服务发送内容"
-              : destination.kind === "provider"
-                ? "已选择一个 AI 模型"
-                : "AI 还没连接，也可以开始"
-          }
-          description={
-            openingPreference === "self"
-              ? "一句话可以留空；墨影会直接创建本地项目和空白第一章，不会生成 AI 建议版本，也不会向正文填入占位内容。"
-              : destination.kind === "provider"
-                ? `点击“生成第一段”会并行发送 3 个独立生成请求，服务商可能分别计费；本操作不自动重试。每个方案都保留稳定身份和真实来源，只有你明确选择的方案才能进入后续确认。选择、推荐、问题规划和创建均在本机完成，不会再发送第 4 个请求。当前模型：${destination.connectionDisplayName} · ${destination.modelId}。`
-                : "这句话不会发送到网络，墨影会先准备一份明确标注的本地草案；你仍能完成构思并安全创建作品。"
-          }
-          {...(destination.kind === "local" && openingPreference !== "self"
-            ? {
-                action: {
-                  label: "去连接 AI",
-                  onClick: () => setQuickAiOpen(true),
-                },
-              }
-            : {})}
-        />
-      )}
 
       <Card className="idea-journey__idea-card">
         {!directMode && (
@@ -5706,6 +5703,76 @@ export function IdeaJourneyPage() {
               />
             )}
           </FormField>
+          {!directMode && destination !== null && (
+            <InlineAlert
+              tone="info"
+              title={
+                openingPreference === "self"
+                  ? "自己写：不会向 AI 服务发送内容"
+                  : destination.kind === "provider"
+                    ? "已选择一个 AI 模型"
+                    : "AI 还没连接，也可以开始"
+              }
+              description={
+                openingPreference === "self"
+                  ? "一句话可以留空；墨影会直接创建本地项目和空白第一章，不会生成 AI 建议版本，也不会向正文填入占位内容。"
+                  : destination.kind === "provider"
+                    ? `点击“生成第一段”会并行发送 3 个独立生成请求，服务商可能分别计费；本操作不自动重试。每个方案都保留稳定身份和真实来源，只有你明确选择的方案才能进入后续确认。选择、推荐、问题规划和创建均在本机完成，不会再发送第 4 个请求。当前模型：${destination.connectionDisplayName} · ${destination.modelId}。`
+                    : "这句话不会发送到网络，墨影会先准备一份明确标注的本地草案；你仍能完成构思并安全创建作品。"
+              }
+              {...(destination.kind === "local" && openingPreference !== "self"
+                ? {
+                    action: {
+                      label: "去连接模型",
+                      onClick: () => setQuickAiOpen(true),
+                    },
+                  }
+                : {})}
+            />
+          )}
+          {normalizedError !== null && (
+            <ErrorState
+              className="idea-journey__inline-error"
+              title={normalizedError.title}
+              description={
+                unpersistedOpeningSupportId === null && resumeFailureSupportId === null ? (
+                  ordinaryErrorDescription
+                ) : unpersistedOpeningSupportId === null ? (
+                  <>
+                    <span>{ordinaryErrorDescription}</span>
+                    <br />
+                    <span>支持编号：{resumeFailureSupportId}</span>
+                    <br />
+                    <span>你可以重新读取本机进度；系统不会自动重新发送模型请求。</span>
+                  </>
+                ) : (
+                  <>
+                    <span>本地旅程未能保存，本次没有发送</span>
+                    <br />
+                    <span>支持编号：{unpersistedOpeningSupportId}</span>
+                    <br />
+                    <span>{ordinaryErrorDescription}</span>
+                  </>
+                )
+              }
+              {...(blankWorkspaceAttempt !== null
+                ? {
+                    primaryAction: {
+                      label: "重试创建",
+                      onClick: () =>
+                        void createBlankAuthorWorkspace(blankWorkspaceAttempt.snapshot.idea),
+                    },
+                  }
+                : resumeFailureTarget === null
+                  ? {}
+                  : {
+                      primaryAction: {
+                        label: "重试读取",
+                        onClick: () => void resume(resumeFailureTarget),
+                      },
+                    })}
+            />
+          )}
           {!directMode &&
             runtime.mode === "tauri" &&
             openingPreference === "ai" &&
@@ -5726,34 +5793,45 @@ export function IdeaJourneyPage() {
                 </span>
               </label>
             )}
-          <Button
-            loading={busy === "create"}
-            disabled={
-              writingExperience.loading ||
-              busy !== null ||
-              (openingPreference !== "self" && idea.trim().length < 2)
-            }
-            onClick={() => void begin()}
-          >
-            {directMode
-              ? "开始创作"
-              : openingPreference === "self"
-                ? "创建空白作品"
-                : openingPreference === "sample"
-                  ? "先看看示例"
-                  : "生成第一段"}
-          </Button>
-          {openingPreference !== "self" && (
+          <div className="idea-journey__primary-actions">
             <Button
-              variant="ghost"
-              disabled={busy !== null}
-              onClick={() => {
-                setOpeningPreference("self");
-                void createBlankAuthorWorkspace(idea.normalize("NFC").trim());
-              }}
+              loading={busy === "create"}
+              aria-describedby={
+                createActionDisabledReason === null ? undefined : createActionDisabledReasonId
+              }
+              disabled={
+                writingExperience.loading ||
+                busy !== null ||
+                (openingPreference !== "self" && idea.trim().length < 2)
+              }
+              onClick={() => void begin()}
             >
-              {directMode ? "直接写空白正文" : "不输入灵感，直接空白写作"}
+              {directMode
+                ? "开始创作"
+                : openingPreference === "self"
+                  ? "创建空白作品"
+                  : openingPreference === "sample"
+                    ? "先看看示例"
+                    : "生成第一段"}
             </Button>
+            {openingPreference !== "self" && (
+              <Button
+                variant="ghost"
+                aria-describedby={busy === null ? undefined : createActionDisabledReasonId}
+                disabled={busy !== null}
+                onClick={() => {
+                  setOpeningPreference("self");
+                  void createBlankAuthorWorkspace(idea.normalize("NFC").trim());
+                }}
+              >
+                直接写空白正文
+              </Button>
+            )}
+          </div>
+          {createActionDisabledReason !== null && (
+            <p id={createActionDisabledReasonId} className="idea-journey__disabled-reason">
+              {createActionDisabledReason}
+            </p>
           )}
         </CardContent>
       </Card>
@@ -5800,7 +5878,12 @@ export function IdeaJourneyPage() {
                     </p>
                     <p>支持编号：{item.supportId}</p>
                     <p>记录仍保留在本机，未删除、未发送。</p>
-                    <p>上次保存：{new Date(item.updatedAt).toLocaleString("zh-CN")}</p>
+                    <p>
+                      上次保存：
+                      <time dateTime={item.updatedAt}>
+                        {formatNaturalLocalTime(item.updatedAt)}
+                      </time>
+                    </p>
                     <div className="idea-journey__actions">
                       <Button
                         variant="secondary"
@@ -5829,7 +5912,12 @@ export function IdeaJourneyPage() {
                       </CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <p>上次保存：{new Date(record.updatedAt).toLocaleString("zh-CN")}</p>
+                      <p>
+                        上次保存：
+                        <time dateTime={record.updatedAt}>
+                          {formatNaturalLocalTime(record.updatedAt)}
+                        </time>
+                      </p>
                       <Button
                         variant="secondary"
                         disabled={busy !== null}
@@ -8198,7 +8286,8 @@ function labeledAnswer(label: string, value: string | undefined): string | null 
   return normalized === undefined || normalized.length === 0 ? null : `${label}：${normalized}`;
 }
 
-function creativeFallbackDescription(code: string | null): string {
+// eslint-disable-next-line react-refresh/only-export-components -- exported for focused copy regression tests.
+export function creativeFallbackDescription(code: string | null): string {
   switch (code) {
     case "MODEL_CREDENTIAL_MISSING":
       return "已连接的供应商缺少密钥。当前先保留本地草案；前往设置补充密钥并测试连接后，可重新生成。";
@@ -8207,14 +8296,29 @@ function creativeFallbackDescription(code: string | null): string {
     case "MODEL_INPUT_TOO_LARGE":
       return "本次输入超过模型连接允许的大小。当前先保留本地草案；缩短灵感或已有回答后再试。";
     case "MODEL_GENERATION_FAILED":
-      return "模型请求没有成功。当前先保留本地草案；请检查网络、密钥和模型状态后重新生成。";
+      return "模型请求没有完成。当前先保留本地草案；请查看这次生成所处阶段，再选择重新读取、检查连接或重新生成。系统不会自动重试，正文不会改变。";
     default:
       return "你可以立即继续构思。连接并测试 AI 后点击“重新生成开头”，系统会使用已选模型；当前草案不会冒充模型输出。";
   }
 }
 
-function providerBatchFailureDescription(code: string | null): string {
+function openingTimeoutDescription(destination: "local" | "remote" | null): string {
+  if (destination === "local") {
+    return "本机模型仍在处理或未及时返回。墨影已停止等待，并把这次发送标记为“结果需要核对”；不会自动重试，也不会改动正文。";
+  }
+  if (destination === "remote") {
+    return "远程模型未在约定时间内返回。墨影已停止等待，并把这次发送标记为“结果需要核对”；不会自动重试，也不会改动正文。";
+  }
+  return "模型未在约定时间内返回。墨影已停止等待，并把这次发送标记为“结果需要核对”；不会自动重试，也不会改动正文。";
+}
+
+function providerBatchFailureDescription(
+  code: string | null,
+  destination: "local" | "remote" | null,
+): string {
   switch (code) {
+    case "MODEL_TIMEOUT":
+      return openingTimeoutDescription(destination);
     case "MODEL_CREDENTIAL_MISSING":
       return "已连接的供应商缺少密钥；请补充密钥并重新测试连接后再换一批。";
     case "SELECTED_MODEL_UNAVAILABLE":
@@ -8224,7 +8328,7 @@ function providerBatchFailureDescription(code: string | null): string {
     case "MODEL_OUTPUT_EMPTY":
       return "模型返回了空内容；请换用可生成正文的模型，或稍后再试。";
     default:
-      return "请检查网络、密钥、模型状态和任务分工后再换一批。";
+      return "这次生成没有返回可用结果。请查看支持编号和调用记录，按准确失败阶段选择恢复操作后再试。";
   }
 }
 

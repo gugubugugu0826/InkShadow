@@ -54,16 +54,14 @@ export function resolveModelHubFormReadiness(
     input.newlyEnteredCredentialValid;
   const common: ModelHubFormActionBlocker[] = [];
   if (input.busy) {
-    common.push(blocker("ACTION_BUSY", null, "请等待当前连接操作完成。"));
+    common.push(blocker("ACTION_BUSY", null, "请等待当前操作完成。"));
   }
   if (input.providerId.trim().length === 0) {
-    common.push(
-      blocker("CONNECTION_ID_REQUIRED", "provider-connection-id", "需要填写连接名称或标识。"),
-    );
+    common.push(blocker("CONNECTION_ID_REQUIRED", "provider-connection-id", "请填写连接名称。"));
   }
   if (input.baseUrl.trim().length === 0) {
     common.push(
-      blocker("BASE_URL_REQUIRED", "provider-base-url", "需要使用供应商默认地址或填写 Base URL。"),
+      blocker("BASE_URL_REQUIRED", "provider-base-url", "请使用供应商默认地址，或填写服务根地址。"),
     );
   }
   if (!input.connectionFieldsValid) {
@@ -71,7 +69,7 @@ export function resolveModelHubFormReadiness(
       blocker(
         "CONNECTION_FIELDS_INVALID",
         "provider-connection-fields",
-        "连接字段格式不完整；请检查认证 Header、超时和重试次数。",
+        "请检查认证名称、等待时间和重试次数。",
       ),
     );
   }
@@ -80,49 +78,35 @@ export function resolveModelHubFormReadiness(
       blocker(
         "CREDENTIAL_REQUIRED",
         "provider-api-key",
-        "需要已有系统凭据，或在接口密钥输入框中填写一个新密钥。",
+        "请填写接口密钥，或使用已经安全保存的接口密钥。",
       ),
     );
   }
 
   const discover = [...common];
   if (!input.nativeGatewayAvailable) {
-    discover.push(
-      blocker("NATIVE_GATEWAY_UNAVAILABLE", null, "当前运行环境不能连接外部模型服务。"),
-    );
+    discover.push(blocker("NATIVE_GATEWAY_UNAVAILABLE", null, "请改用墨影桌面应用。"));
   }
   if (!input.online && !input.endpointCanRunOffline) {
-    discover.push(blocker("NETWORK_OFFLINE", null, "远程供应商需要网络连接。"));
+    discover.push(blocker("NETWORK_OFFLINE", null, "请恢复网络连接。"));
   }
   if (
     !input.automaticDiscovery &&
     input.selectedModelId.trim().length === 0 &&
     input.endpointModelId.trim().length === 0
   ) {
-    discover.push(
-      blocker(
-        "MANUAL_MODEL_ID_REQUIRED",
-        "provider-model-id",
-        "该供应商不提供自动目录，需要填写模型或 Endpoint ID。",
-      ),
-    );
+    discover.push(blocker("MANUAL_MODEL_ID_REQUIRED", "provider-model-id", "请填写模型编号。"));
   }
 
   const verify = [...common];
   if (!input.nativeGatewayAvailable) {
-    verify.push(blocker("NATIVE_GATEWAY_UNAVAILABLE", null, "当前运行环境不能验证写作能力。"));
+    verify.push(blocker("NATIVE_GATEWAY_UNAVAILABLE", null, "请改用墨影桌面应用。"));
   }
   if (!input.online && !input.endpointCanRunOffline) {
-    verify.push(blocker("NETWORK_OFFLINE", null, "远程模型验证需要网络连接。"));
+    verify.push(blocker("NETWORK_OFFLINE", null, "请恢复网络连接。"));
   }
   if (!input.connectionReady) {
-    verify.push(
-      blocker(
-        "CONNECTION_NOT_READY",
-        "model-connection-test",
-        "请先完成连接测试；价格、上下文和 AI 分工不是验证写作能力的前提。",
-      ),
-    );
+    verify.push(blocker("CONNECTION_NOT_READY", "model-connection-test", "请先完成连接测试。"));
   }
   if (input.selectedModelId.trim().length === 0) {
     verify.push(

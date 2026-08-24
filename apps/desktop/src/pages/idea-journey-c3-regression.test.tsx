@@ -6,7 +6,10 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CREATIVE_OPENING_SLOT_SETTLEMENT_TIMEOUT_MS } from "../infrastructure/creative-opening-service";
-import { readOpeningJourneyRun } from "../infrastructure/opening-journey-run";
+import {
+  openingJourneySupportNumber,
+  readOpeningJourneyRun,
+} from "../infrastructure/opening-journey-run";
 import {
   readSafeOperationIncidents,
   resetSafeOperationDiagnosticsForTests,
@@ -195,7 +198,10 @@ describe("C3 opening journey durability regressions", () => {
         "已有开书任务与当前构思批次不一致。墨影已停止继续处理，不会复用、改写或自动重发。",
       ),
     ).toBeVisible();
-    expect(screen.getByText(new RegExp(waitingRun.supportId, "u"))).toBeVisible();
+    expect(
+      screen.getByText(new RegExp(openingJourneySupportNumber(waitingRun), "u")),
+    ).toBeVisible();
+    expect(document.body).not.toHaveTextContent(waitingRun.supportId);
     expect(screen.getByRole("button", { name: "重试读取" })).toBeEnabled();
     expect(screen.queryByText(new RegExp(wrongSupportId, "u"))).not.toBeInTheDocument();
     expect(firstHarness.generate).not.toHaveBeenCalled();
@@ -845,6 +851,9 @@ describe("C3 opening journey durability regressions", () => {
       stage: "cancelled_before_confirmation",
       autoRetryCount: 0,
     });
+    if (openingRun === null) {
+      throw new Error("测试构思旅程缺少开书状态");
+    }
     const openingTasks = (await harness.runtime.taskCenter.load()).tasks.filter(
       ({ type }) => type === "ai.opening.generate",
     );
@@ -857,7 +866,9 @@ describe("C3 opening journey durability regressions", () => {
     renderJourney(harness.runtime);
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
     expect(await screen.findByText("确认前离开，未确认的生成批次已安全终止")).toBeVisible();
-    expect(screen.getByText(new RegExp(String(openingRun?.supportId), "u"))).toBeVisible();
+    expect(
+      screen.getByText(new RegExp(openingJourneySupportNumber(openingRun), "u")),
+    ).toBeVisible();
   }, 30_000);
 
   it("keeps a confirmed pre-send run recoverable when its page leaves", async () => {
@@ -1003,7 +1014,9 @@ describe("C3 opening journey durability regressions", () => {
     if (settled === undefined || run === null) throw new Error("没有保存开书终态。 ");
     expect(settlementFailure.didFail()).toBe(true);
     expect(run).toMatchObject({ stage: "failed", autoRetryCount: 0 });
-    expect(screen.getAllByText(new RegExp(run.supportId, "u")).length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(new RegExp(openingJourneySupportNumber(run), "u")).length,
+    ).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "重新读取" })).toBeEnabled();
     const task = (await harness.runtime.taskCenter.load()).tasks.find(
       ({ id }) => id === run.taskId,
@@ -1069,7 +1082,9 @@ describe("C3 opening journey durability regressions", () => {
     renderJourney(harness.runtime);
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
     expect(await screen.findByText("确认前离开，未确认的生成批次已安全终止")).toBeVisible();
-    expect(screen.getByText(new RegExp(pendingRun.supportId, "u"))).toBeVisible();
+    expect(
+      screen.getByText(new RegExp(openingJourneySupportNumber(pendingRun), "u")),
+    ).toBeVisible();
   }, 30_000);
 
   it("uses the same local terminal-settlement failure path for replacement batches", async () => {
@@ -1106,7 +1121,9 @@ describe("C3 opening journey durability regressions", () => {
     if (run === null) throw new Error("换批失败后没有开书终态。 ");
     expect(settlementFailure.didFail()).toBe(true);
     expect(run).toMatchObject({ stage: "failed", autoRetryCount: 0 });
-    expect(screen.getAllByText(new RegExp(run.supportId, "u")).length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(new RegExp(openingJourneySupportNumber(run), "u")).length,
+    ).toBeGreaterThan(0);
     expect(
       (await harness.runtime.taskCenter.load()).tasks.find(({ id }) => id === run.taskId),
     ).toMatchObject({ status: "failed", maxAttempts: 1 });
@@ -1171,7 +1188,9 @@ describe("C3 opening journey durability regressions", () => {
     renderJourney(harness.runtime);
     await user.click(await screen.findByRole("button", { name: "继续这次构思" }));
     expect(await screen.findByText("确认前离开，未确认的生成批次已安全终止")).toBeVisible();
-    expect(screen.getByText(new RegExp(pendingRun.supportId, "u"))).toBeVisible();
+    expect(
+      screen.getByText(new RegExp(openingJourneySupportNumber(pendingRun), "u")),
+    ).toBeVisible();
   }, 30_000);
   it("archives a single-slot retry that returns after its persisted deadline without another send", async () => {
     const harness = createProviderRuntime();
@@ -1360,7 +1379,9 @@ describe("C3 opening journey durability regressions", () => {
     if (run === null) throw new Error("单槽失败后没有开书终态。 ");
     expect(settlementFailure.didFail()).toBe(true);
     expect(run).toMatchObject({ stage: "failed", autoRetryCount: 0 });
-    expect(screen.getAllByText(new RegExp(run.supportId, "u")).length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(new RegExp(openingJourneySupportNumber(run), "u")).length,
+    ).toBeGreaterThan(0);
     expect(
       (await harness.runtime.taskCenter.load()).tasks.find(({ id }) => id === run.taskId),
     ).toMatchObject({ status: "failed", maxAttempts: 1 });
@@ -1392,7 +1413,7 @@ describe("C3 opening journey durability regressions", () => {
     const run = readOpeningJourneyRun(attempted?.snapshot.openingRun);
     if (run === null) throw new Error("创建尝试没有形成内存开书运行编号。");
     expect(await screen.findByText("本地旅程未能保存，本次没有发送")).toBeVisible();
-    expect(screen.getByText(new RegExp(run.supportId, "u"))).toBeVisible();
+    expect(screen.getByText(new RegExp(openingJourneySupportNumber(run), "u"))).toBeVisible();
     expect(harness.generate).not.toHaveBeenCalled();
     expect(await harness.runtime.creativeJourneys.listActive("idea")).toHaveLength(0);
     expect(
@@ -2067,7 +2088,7 @@ function failNextOpeningSettlementWrite(runtime: DesktopRuntime) {
 
 async function connectOllama(user: ReturnType<typeof userEvent.setup>): Promise<void> {
   await screen.findByText("AI 还没连接，也可以开始");
-  await user.click(screen.getByRole("button", { name: "去连接 AI" }));
+  await user.click(screen.getByRole("button", { name: "去连接模型" }));
   await user.click(screen.getByRole("radio", { name: /Ollama/u }));
   await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
   await screen.findByText("连接成功 · 已找到模型");

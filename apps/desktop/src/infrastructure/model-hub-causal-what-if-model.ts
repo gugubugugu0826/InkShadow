@@ -138,7 +138,7 @@ export class ModelHubCausalWhatIfModelPort implements CausalWhatIfModelPort {
           ) {
             throw new ModelHubExecutionError(
               "MODEL_HUB_PLAN_CHANGED",
-              "剧情试演发送前 AI 分工发生了变化。请重新检查模型设置后再试。",
+              "剧情试演发送前创作任务安排发生了变化。请重新检查模型设置后再试。",
               true,
             );
           }
@@ -463,7 +463,7 @@ function normalizeModelHubFailure(cause: unknown): CausalWhatIfModelHubError {
   if (cause.code === "MODEL_HUB_ROUTE_NOT_CONFIGURED") {
     return new CausalWhatIfModelHubError(
       "CAUSAL_WHAT_IF_ROUTE_NOT_CONFIGURED",
-      "剧情试演尚未配置 AI 分工。请在模型中心为“剧情试演”选择主模型和备用模型。",
+      "剧情试演尚未配置创作任务安排。请在模型中心为“剧情试演”选择主模型和备用模型。",
       false,
       cause.code,
       cause.dispatched,

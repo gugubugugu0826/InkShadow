@@ -1,0 +1,74 @@
+.idea-journey__idea-card {
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.idea-journey__inline-error {
+  max-width: 100%;
+  margin: 0;
+}
+
+.idea-journey__primary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.idea-journey__primary-actions .ink-button {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.idea-journey__disabled-reason {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-caption-size);
+  line-height: var(--line-sm);
+}
+
+.quick-ai-drawer {
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+.quick-ai-drawer__content {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.quick-ai-drawer__provider,
+.quick-ai-drawer__choice {
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+.quick-ai-drawer__provider > .ink-badge {
+  width: fit-content;
+  flex: 0 0 auto;
+  align-self: center;
+  display: inline-flex;
+}
+
+.quick-ai-drawer__footer {
+  width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.quick-ai-drawer__footer .ink-button {
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 11rem;
+}
+
+@media (max-width: 50rem) {
+  .idea-journey__primary-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .idea-journey__primary-actions .ink-button {
+    width: 100%;
+  }
+}

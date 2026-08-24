@@ -362,7 +362,7 @@ async function resolveEmbeddingPlan(
   if (!route?.enabled) {
     throw executionError(
       "MODEL_HUB_ROUTE_NOT_CONFIGURED",
-      "语义记忆尚未配置可用的模型。请在 AI 分工中选择支持 Embedding 的模型。",
+      "语义记忆尚未配置可用的模型。请在创作任务安排中选择支持“查找相关故事资料”的模型。",
     );
   }
 
@@ -510,7 +510,7 @@ async function resolveEmbeddingTarget(
   if (connection === null || catalogEntry?.connectionId !== connection.id) {
     throw executionError(
       "MODEL_HUB_ROUTE_TARGET_MISSING",
-      "语义记忆任务引用的模型已不存在。请重新同步模型并更新 AI 分工。",
+      "语义记忆任务引用的模型已不存在。请重新同步模型并更新创作任务安排。",
       true,
     );
   }
@@ -549,7 +549,7 @@ async function resolveEmbeddingTarget(
   if (missingCapability !== undefined) {
     throw executionError(
       "MODEL_HUB_CAPABILITY_NOT_VERIFIED",
-      "所选模型还没有足够证据证明支持 Embedding。请验证能力或选择其他模型。",
+      "所选模型还没有足够证据证明能够查找相关故事资料。请验证能力或选择其他模型。",
       true,
     );
   }
@@ -723,7 +723,7 @@ function optionalPositivePolicyInteger(value: unknown, maximum: number): number 
   if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > maximum) {
     throw executionError(
       "MODEL_HUB_PARAMETER_POLICY_INVALID",
-      "语义记忆任务保存的输入限制无效。请重新保存 AI 分工。",
+      "语义记忆任务保存的输入限制无效。请重新保存创作任务安排。",
     );
   }
   return value as number;
@@ -752,7 +752,7 @@ function normalizePreDispatchError(cause: unknown): ModelHubExecutionError {
       ? executionError(cause.code, cause.message, cause.retryable)
       : executionError(
           "MODEL_HUB_PREFLIGHT_FAILED",
-          "语义向量处理发送前检查没有通过。请检查 AI 分工、模型能力、隐私和费用设置。",
+          "语义向量处理发送前检查没有通过。请检查创作任务安排、模型能力、隐私和费用设置。",
           true,
         );
 }

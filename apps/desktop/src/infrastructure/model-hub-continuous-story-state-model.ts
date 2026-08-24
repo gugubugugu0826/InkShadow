@@ -104,7 +104,7 @@ export class ModelHubContinuousStoryStateModel implements ContinuousStoryStateMo
           ) {
             throw new ModelHubExecutionError(
               "MODEL_HUB_PLAN_CHANGED",
-              "故事状态识别发送前 AI 分工发生变化，请稍后重试。",
+              "故事状态识别发送前创作任务安排发生变化，请稍后重试。",
               true,
             );
           }

@@ -1698,7 +1698,7 @@ async function assertCreativeOpeningAutomaticRouteEligible(
   ) {
     throw new ModelCenterError(
       "CREATIVE_OPENING_AUTOMATIC_VISUAL_ROUTE_UNSUITABLE",
-      "自动分工选中了更适合图片理解的实验模型，不能用于纯文字开书。本次没有发送。请重新应用智能推荐，或由你手动确认要使用的模型。",
+      "自动安排选中了偏重图片理解的实验模型，不能用于纯文字开书。本次没有发送。请重新应用智能推荐，或由你手动选择文本模型。",
       true,
     );
   }

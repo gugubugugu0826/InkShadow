@@ -287,7 +287,7 @@ export async function analyzeImportedChapter(
         ) {
           throw analysisError(
             "IMPORT_ANALYSIS_MODEL_SELECTION_CHANGED",
-            "分析开始前 AI 分工发生了变化。请求尚未发送，请重新确认模型设置后重试。",
+            "分析开始前创作任务安排发生了变化。请求尚未发送，请重新确认模型设置后重试。",
             true,
           );
         }
@@ -823,7 +823,7 @@ function normalizeAnalysisFailure(cause: unknown): Error {
     if (cause.code === "MODEL_HUB_ROUTE_NOT_CONFIGURED") {
       return analysisError(
         "IMPORT_ANALYSIS_ROUTE_NOT_CONFIGURED",
-        "作品分析还没有可用的 AI 分工。请在模型中心为人物提取和世界设定提取配置模型，或跳过本项继续改写。",
+        "作品分析还没有可用的创作任务安排。请在模型中心为人物提取和世界设定提取配置模型，或跳过本项继续改写。",
       );
     }
     return analysisError(cause.code, cause.message, cause.retryable);

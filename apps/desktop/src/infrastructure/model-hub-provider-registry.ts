@@ -175,7 +175,7 @@ const API_KEY_FIELD: ProviderFieldDefinition = Object.freeze({
 
 const BASE_URL_OVERRIDE_FIELD: ProviderFieldDefinition = Object.freeze({
   key: "baseUrlOverride",
-  label: "Base URL",
+  label: "服务根地址",
   description: "仅在代理、私有网关或供应商端点发生变化时覆盖默认值。",
   input: "url",
   required: false,
@@ -197,7 +197,7 @@ const REQUEST_TIMEOUT_FIELD: ProviderFieldDefinition = Object.freeze({
 const RETRY_LIMIT_FIELD: ProviderFieldDefinition = Object.freeze({
   key: "retryLimit",
   label: "重试次数",
-  description: "只重试连接测试和模型目录读取；生成、向量检索、结果排序与图片不会自动重试。",
+  description: "只重试连接测试和模型目录读取；生成、查找相关故事资料、结果排序与图片不会自动重试。",
   input: "number",
   required: false,
   visibility: "expert",
@@ -208,7 +208,7 @@ const RETRY_LIMIT_FIELD: ProviderFieldDefinition = Object.freeze({
 const CUSTOM_AUTHENTICATION_FIELD: ProviderFieldDefinition = Object.freeze({
   key: "authenticationMode",
   label: "认证方式",
-  description: "可选择无认证、Bearer，或一个自定义认证 Header；凭据值始终只保存在系统凭据库。",
+  description: "可选择无认证、Bearer，或一个自定义认证请求头；凭据值始终只保存在系统凭据库。",
   input: "select",
   required: false,
   visibility: "expert",
@@ -216,14 +216,14 @@ const CUSTOM_AUTHENTICATION_FIELD: ProviderFieldDefinition = Object.freeze({
   options: [
     { value: "none", label: "无认证" },
     { value: "bearer_keyring", label: "Bearer（系统凭据库）" },
-    { value: "custom_header_keyring", label: "单一自定义认证 Header（系统凭据库）" },
+    { value: "custom_header_keyring", label: "单一自定义认证请求头（系统凭据库）" },
   ],
 });
 
 const CUSTOM_CREDENTIAL_HEADER_NAME_FIELD: ProviderFieldDefinition = Object.freeze({
   key: "credentialHeaderName",
-  label: "认证 Header 名称",
-  description: "只保存 Header 名称；Header 值使用上方同一份系统凭据，不会写入数据库或日志。",
+  label: "认证请求头名称",
+  description: "只保存请求头名称；请求头的值使用上方同一份系统凭据，不会写入数据库或日志。",
   input: "text",
   required: false,
   visibility: "expert",
@@ -258,7 +258,7 @@ const PROVIDER_PRESETS: readonly ModelProviderPreset[] = Object.freeze([
     expertFields: [
       {
         key: "organizationId",
-        label: "Organization ID",
+        label: "组织编号",
         description: "只有账号明确要求指定组织时才填写。",
         input: "text",
         required: false,
@@ -267,7 +267,7 @@ const PROVIDER_PRESETS: readonly ModelProviderPreset[] = Object.freeze([
       },
       {
         key: "projectId",
-        label: "Project ID",
+        label: "项目编号",
         description: "只有需要固定到某个 OpenAI 项目时才填写。",
         input: "text",
         required: false,
@@ -358,7 +358,7 @@ const PROVIDER_PRESETS: readonly ModelProviderPreset[] = Object.freeze([
       },
       {
         key: "workspaceId",
-        label: "Workspace ID",
+        label: "服务工作区编号",
         description: "新加坡可选；日本和德国地域必须填写。填写后使用对应 Workspace 的专属端点。",
         input: "text",
         required: false,
@@ -388,7 +388,7 @@ const PROVIDER_PRESETS: readonly ModelProviderPreset[] = Object.freeze([
       API_KEY_FIELD,
       {
         key: "endpointId",
-        label: "Endpoint ID",
+        label: "接入点编号",
         description: "只有已创建专属推理接入点时才填写。",
         input: "text",
         required: false,
@@ -481,7 +481,7 @@ const PROVIDER_PRESETS: readonly ModelProviderPreset[] = Object.freeze([
     basicFields: [
       {
         key: "baseUrlOverride",
-        label: "Base URL",
+        label: "服务根地址",
         description: "兼容服务公开的 HTTPS 根地址；本机地址可以使用 HTTP。",
         input: "url",
         required: true,
@@ -517,7 +517,7 @@ const PROVIDER_PRESETS: readonly ModelProviderPreset[] = Object.freeze([
       },
       {
         key: "embeddingPath",
-        label: "向量检索路径",
+        label: "查找相关故事资料路径",
         description: "默认 /embeddings；只支持绝对接口路径。",
         input: "text",
         required: false,
@@ -839,7 +839,7 @@ function workspaceEndpoint(workspaceId: string | null, regionCode: string): stri
   if (workspaceId === null || !/^[A-Za-z0-9][A-Za-z0-9-]{0,254}$/.test(workspaceId)) {
     throw new ModelProviderRegistryError(
       "MODEL_PROVIDER_WORKSPACE_REQUIRED",
-      "A valid Workspace ID is required for the selected Alibaba Cloud Model Studio region.",
+      "所选阿里云百炼地域需要填写有效的服务工作区编号。",
     );
   }
   return `https://${workspaceId}.${regionCode}.maas.aliyuncs.com/compatible-mode/v1`;

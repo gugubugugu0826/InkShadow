@@ -507,10 +507,27 @@ export interface SecretSummary {
   readonly lastFour: string | null;
 }
 
+export interface DiscoveredModelCredentialSummary {
+  readonly discoveryId: string;
+  readonly lastFour: string;
+  /**
+   * Present only when the native store can prove the original provider and
+   * owning connection from app-owned metadata. Missing provenance must never
+   * be inferred from the last four characters.
+   */
+  readonly providerKind?: string;
+  readonly sourceConnectionId?: string;
+}
+
 export interface CredentialStore {
   getSummary(providerId: string): Promise<SecretSummary>;
   save(providerId: string, secret: string): Promise<SecretSummary>;
   delete(providerId: string): Promise<SecretSummary>;
+  discoverModelCredentials?(
+    excludedProviderIds?: readonly string[],
+  ): Promise<readonly DiscoveredModelCredentialSummary[]>;
+  reuseDiscovered?(discoveryId: string, providerId: string): Promise<SecretSummary>;
+  deleteDiscovered?(discoveryId: string): Promise<SecretSummary>;
 }
 
 export interface RuntimeMaintenance {
@@ -773,6 +790,22 @@ class TauriCredentialStore implements CredentialStore {
 
   delete(providerId: string): Promise<SecretSummary> {
     return invoke<SecretSummary>("delete_model_secret", { providerId });
+  }
+
+  discoverModelCredentials(
+    excludedProviderIds: readonly string[] = [],
+  ): Promise<readonly DiscoveredModelCredentialSummary[]> {
+    return invoke<readonly DiscoveredModelCredentialSummary[]>("discover_model_credentials", {
+      excludedProviderIds,
+    });
+  }
+
+  reuseDiscovered(discoveryId: string, providerId: string): Promise<SecretSummary> {
+    return invoke<SecretSummary>("reuse_discovered_model_secret", { discoveryId, providerId });
+  }
+
+  deleteDiscovered(discoveryId: string): Promise<SecretSummary> {
+    return invoke<SecretSummary>("delete_discovered_model_secret", { discoveryId });
   }
 }
 
@@ -2198,7 +2231,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.2.10",
+    appVersion: "0.2.11",
     platform: "browser",
     architecture: "web",
     environment: "development",
@@ -2357,7 +2390,7 @@ function unavailableExtractionProvenance(): AuthoritativeExtractionProvenance {
   return parsed.value;
 }
 
-function createAcceptedVersionTaskFactory(
+export function createAcceptedVersionTaskFactory(
   ids: Pick<UuidV7Generator, "next">,
 ): AcceptedVersionTaskFactory {
   return ({ source, version }) => {
@@ -2951,7 +2984,9 @@ export async function prepareGenerationPlan(
         });
         throw new ModelCenterError(
           code,
-          cause instanceof Error ? cause.message : "AI 分工检查失败，请检查模型、隐私和费用设置。",
+          cause instanceof Error
+            ? cause.message
+            : "创作任务安排检查失败，请检查模型、隐私和费用设置。",
           cause instanceof ModelHubExecutionError ? cause.retryable : true,
         );
       }
@@ -3218,7 +3253,9 @@ export async function prepareGenerationPlan(
         });
         throw new ModelCenterError(
           code,
-          cause instanceof Error ? cause.message : "AI 分工检查失败，请检查模型、隐私和费用设置。",
+          cause instanceof Error
+            ? cause.message
+            : "创作任务安排检查失败，请检查模型、隐私和费用设置。",
           cause instanceof ModelHubExecutionError ? cause.retryable : true,
         );
       }
@@ -3982,7 +4019,7 @@ export async function executeGenerationPlan(
                     ) {
                       throw new ModelHubExecutionError(
                         "MODEL_HUB_PLAN_CHANGED",
-                        "AI 分工在生成前发生变化。为避免使用未经本次检查的模型，请重新执行生成前检查。",
+                        "创作任务安排在生成前发生变化。为避免使用未经本次检查的模型，请重新执行生成前检查。",
                         true,
                       );
                     }

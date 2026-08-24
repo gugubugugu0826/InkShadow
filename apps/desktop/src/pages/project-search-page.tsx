@@ -127,7 +127,7 @@ export function ProjectSearchPage() {
     }
     if (
       !window.confirm(
-        "确认停用并清除当前项目的持久向量？本地关键词索引会保留，之后的搜索词不会再发送到嵌入端点。",
+        "确认停用并清除当前项目额外整理的相关资料？本地文字搜索仍会保留，之后的搜索词不会再发送给相关资料模型服务。",
       )
     ) {
       return;
@@ -157,9 +157,9 @@ export function ProjectSearchPage() {
           >
             返回项目
           </Link>
-          <p className="page-heading__eyebrow">本地可解释检索</p>
+          <p className="page-heading__eyebrow">查找相关正文</p>
           <h1>{project?.name === undefined ? "项目搜索" : `搜索 · ${project.name}`}</h1>
-          <p>关键词索引来自本地稳定内容；向量只有在你明确重建后才会生成并持久保存。</p>
+          <p>搜索会读取本地已保存的正文和大纲；模型辅助整理只有在你明确开启后才会进行。</p>
         </div>
         <div className="settings-actions">
           <Button
@@ -168,14 +168,14 @@ export function ProjectSearchPage() {
             disabled={busy !== null || projectId === null}
             onClick={() => void rebuildAndRepeat()}
           >
-            重建本地索引
+            重新整理本地资料
           </Button>
           <Button
             variant="secondary"
             disabled
-            title="远程或本机模型向量重建尚未开放；当前搜索固定使用本地关键词索引。"
+            title="使用模型辅助整理相关资料尚未开放；当前搜索只读取本地文字资料。"
           >
-            向量重建尚未开放
+            模型辅助整理尚未开放
           </Button>
           <Button
             variant="secondary"
@@ -183,7 +183,7 @@ export function ProjectSearchPage() {
             disabled={busy !== null || projectId === null || embedding.embeddingCount === 0}
             onClick={() => void disableVectors()}
           >
-            停用并清除向量
+            停用并清除额外资料
           </Button>
         </div>
       </header>
@@ -203,27 +203,41 @@ export function ProjectSearchPage() {
         }}
       >
         <section className="search-console" aria-labelledby="project-search-form-title">
-          <div className="search-health" aria-label="索引状态">
+          <div className="search-health" aria-label="搜索资料状态">
             <Badge tone={health.mutationStatus === "ready" ? "success" : "warning"}>
-              {health.mutationStatus === "ready" ? "索引可用" : "索引已暂停"}
+              {health.mutationStatus === "ready" ? "本地资料可搜索" : "本地资料已暂停"}
             </Badge>
-            <span>{health.documentCount} 个索引片段</span>
-            <span>关键词：就绪</span>
-            <span>关系：就绪</span>
-            <span>向量：{vectorStatusLabel(health.vectorStatus)}</span>
-            <span>模型：{embedding.model ?? "未配置"}</span>
-            <span>维度：{embedding.dimension ?? "—"}</span>
-            <span>数量：{embedding.embeddingCount}</span>
+            <span>{health.documentCount} 段可搜索资料</span>
+            <span>文字匹配：可用</span>
+            <span>故事关系：可用</span>
+            <span>相关资料：{vectorStatusLabel(health.vectorStatus)}</span>
           </div>
 
           <InlineAlert
             tone={embedding.embeddingCount > 0 ? "warning" : "info"}
-            title={`向量数据去向：${embeddingDestinationLabel(embedding)}`}
-            description={`${embedding.endpointUrl ?? "浏览器开发模式不提供真实嵌入能力。"} ${
+            title={`相关资料整理位置：${embeddingDestinationLabel(embedding)}`}
+            description={`${
               embedding.reason === null
-                ? "持久向量与当前来源版本、内容哈希完全匹配。"
-                : `当前状态：${embeddingReasonLabel(embedding.reason)}。`
-            } 当前版本不会从普通搜索页发起向量重建或查询嵌入；搜索固定使用本地关键词索引。已有向量可使用“停用并清除向量”移除。`}
+                ? "额外整理的相关资料与当前正文和大纲保持一致。"
+                : `当前情况：${embeddingReasonLabel(embedding.reason)}。`
+            } 普通搜索页不会自动联系模型服务；当前搜索只读取本地文字和故事关系资料。${
+              embedding.embeddingCount > 0
+                ? " 如需移除额外整理的资料，可使用“停用并清除额外资料”。"
+                : ""
+            }`}
+          />
+
+          <AdvancedDiagnostics
+            className="search-score-breakdown"
+            rows={[
+              ["模型标识", embedding.model ?? "未配置"],
+              ["服务配置标识", embedding.providerId ?? "未配置"],
+              ["内容维度", embedding.dimension ?? "—"],
+              ["资料数量", embedding.embeddingCount],
+              ["服务地址", embedding.endpointUrl ?? "不可用"],
+              ["确认记录标识", embedding.confirmationId ?? "无"],
+              ["内部状态", embedding.reason ?? "无"],
+            ]}
           />
 
           <form
@@ -233,10 +247,10 @@ export function ProjectSearchPage() {
               void runSearch();
             }}
           >
-            <h2 id="project-search-form-title">检索项目内容</h2>
+            <h2 id="project-search-form-title">搜索项目内容</h2>
             <FormField
               label="搜索词"
-              hint="支持中文连续文本与标题；当前未配置嵌入模型时会明确使用关键词/关系回退。"
+              hint="支持中文连续文字和标题；即使没有额外的相关资料模型，也会使用本地文字和故事关系完成搜索。"
               required
             >
               {(fieldProps) => (
@@ -279,8 +293,8 @@ export function ProjectSearchPage() {
           true && (
           <InlineAlert
             tone="info"
-            title="当前使用关键词与关系检索"
-            description={`没有为本次查询提供兼容向量；结果不会伪装成语义检索。${embedding.queryFailureCode === null ? "" : " 向量查询未完成，已安全回退到本地关键词与关系检索。"}`}
+            title="当前使用本地文字与故事关系搜索"
+            description={`本次没有可用的模型辅助资料，结果来自本地文字和故事关系。${embedding.queryFailureCode === null ? "" : " 模型辅助查找未完成，已安全改用本地搜索。"}`}
           />
         )}
 
@@ -301,13 +315,13 @@ export function ProjectSearchPage() {
             </p>
           ) : response === null ? (
             <EmptyState
-              title="输入线索开始检索"
-              description="索引会从当前稳定章节和故事大纲重建，不读取恢复草稿或未接受候选。"
+              title="输入线索开始搜索"
+              description="搜索资料会从当前已保存章节和故事大纲重新整理，不读取恢复草稿或尚未使用的 AI 生成内容。"
             />
           ) : response.hits.length === 0 ? (
             <EmptyState
               title="没有找到匹配内容"
-              description="可以换用更短的关键词，或在内容更新后重建索引。"
+              description="可以换用更短的词语，或在内容更新后重新整理搜索资料。"
             />
           ) : (
             <div className="search-results">
@@ -354,28 +368,28 @@ function SearchResultCard({
         <p className="search-excerpt">{excerpt}</p>
         <dl className="search-score-breakdown">
           <div>
-            <dt>关键词</dt>
+            <dt>文字匹配</dt>
             <dd>{formatScore(hit.scores.keyword)}</dd>
           </div>
           <div>
-            <dt>向量</dt>
+            <dt>内容关联</dt>
             <dd>{formatScore(hit.scores.vector)}</dd>
           </div>
           <div>
-            <dt>关系</dt>
+            <dt>故事关系</dt>
             <dd>{formatScore(hit.scores.relation)}</dd>
           </div>
           <div>
-            <dt>规则</dt>
+            <dt>排序规则</dt>
             <dd>{formatScore(hit.scores.rule)}</dd>
           </div>
         </dl>
         <div className="search-result-footer">
-          <span>来源版本：已绑定</span>
+          <span>已对应保存版本</span>
           <span>
-            命中词：
+            找到的词语：
             {hit.evidence.matchedTerms.length === 0
-              ? "关系/规则"
+              ? "故事关系或排序规则"
               : hit.evidence.matchedTerms.join("、")}
           </span>
           <Link className="button-link" to={route}>
@@ -410,36 +424,57 @@ function sourceTypeLabel(sourceType: HybridSearchHit["document"]["sourceType"]):
 
 function vectorStatusLabel(status: SearchHealth["vectorStatus"]): string {
   const labels: Record<SearchHealth["vectorStatus"], string> = {
-    ready: "就绪",
+    ready: "可用",
     disabled: "未配置",
-    rebuild_required: "需要重建",
-    degraded: "降级",
+    rebuild_required: "需要重新整理",
+    degraded: "暂时受限",
   };
   return labels[status];
 }
 
+function AdvancedDiagnostics({
+  className,
+  rows,
+}: Readonly<{
+  className: string;
+  rows: readonly (readonly [label: string, value: string | number])[];
+}>) {
+  return (
+    <details>
+      <summary>高级诊断详情</summary>
+      <dl className={className}>
+        {rows.map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  );
+}
 function embeddingDestinationLabel(diagnostics: ProjectEmbeddingDiagnostics): string {
   if (diagnostics.destination === "local_ollama") {
-    return "本机 Ollama";
+    return "本机模型服务";
   }
   if (diagnostics.destination === "remote") {
-    return "远程服务（发送前二次确认）";
+    return "远程模型服务（发送前需再次确认）";
   }
   return "不可用";
 }
 
 function embeddingReasonLabel(reason: NonNullable<ProjectEmbeddingDiagnostics["reason"]>): string {
   const labels: Record<NonNullable<ProjectEmbeddingDiagnostics["reason"]>, string> = {
-    no_embedding_route: "未配置向量检索主线路",
-    embedding_profile_missing: "主路由模型配置缺失",
-    embedding_route_profile_mismatch: "主路由与精确模型配置不一致",
-    native_gateway_unavailable: "浏览器开发模式不提供原生嵌入",
-    vector_store_unavailable: "持久向量存储不可用",
-    vector_index_not_built: "尚未明确重建向量",
-    embedding_configuration_changed: "模型或端点配置已变化，需要重建",
-    authoritative_source_changed: "权威内容版本已变化，需要重建",
-    vector_index_corrupt: "持久向量校验失败",
-    query_embedding_failed: "查询嵌入失败，已回退",
+    no_embedding_route: "尚未安排用于查找相关资料的模型服务",
+    embedding_profile_missing: "负责查找相关资料的模型设置不完整",
+    embedding_route_profile_mismatch: "当前模型安排与已确认的设置不一致",
+    native_gateway_unavailable: "浏览器开发模式无法使用本机模型服务",
+    vector_store_unavailable: "额外的相关资料暂时不可用",
+    vector_index_not_built: "尚未明确整理相关资料",
+    embedding_configuration_changed: "模型或服务设置已变化，需要重新整理",
+    authoritative_source_changed: "正文或大纲已变化，需要重新整理",
+    vector_index_corrupt: "相关资料校验未通过",
+    query_embedding_failed: "模型辅助查找未完成，已改用本地搜索",
   };
   return labels[reason];
 }

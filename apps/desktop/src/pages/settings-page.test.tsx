@@ -73,6 +73,11 @@ describe("SettingsPage model routing", () => {
     expect(
       await screen.findByRole("heading", { name: "全局设置", level: 1 }, { timeout: 5_000 }),
     ).toBeVisible();
+    const quickJump = screen.getByRole("navigation", { name: "全局设置快速跳转" });
+    expect(within(quickJump).getByText("快速跳转")).toBeVisible();
+    expect(within(quickJump).queryByRole("tab")).not.toBeInTheDocument();
+    expect(within(quickJump).getAllByRole("link").length).toBeGreaterThan(1);
+
     for (const name of [
       "外观",
       "正文阅读与自动保存",
@@ -87,12 +92,32 @@ describe("SettingsPage model routing", () => {
       expect(await screen.findByRole("heading", { name, level: 2 })).toBeVisible();
     }
     expect(screen.queryByRole("heading", { name: "墨影模型中心" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "AI 分工" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "创作任务安排" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "模型基础评测" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "生成小说配图" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "打开模型中心" })).toHaveAttribute(
       "href",
       "/settings#model-center",
+    );
+  });
+  it("opens and focuses a model capability deep link without changing direct writing mode", async () => {
+    window.localStorage.clear();
+    seedWritingExperience("direct");
+    const runtime = createDevelopmentRuntime(window.localStorage);
+
+    renderRoute(runtime, "/settings?targetSection=model-capabilities#model-center");
+
+    expect(
+      await screen.findByRole("heading", { name: "墨影模型中心", level: 2 }, { timeout: 5_000 }),
+    ).toBeVisible();
+    const target = await screen.findByRole("heading", { name: "模型能力确认", level: 3 });
+    await waitFor(() => expect(target.closest("section")).toHaveFocus());
+    await expect(runtime.writingExperience.getOrInitialize()).resolves.toMatchObject({
+      mode: "direct",
+    });
+    expect(screen.getByRole("button", { name: "收起专家设置" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
     );
   });
 
@@ -114,7 +139,7 @@ describe("SettingsPage model routing", () => {
     for (const name of ["外观", "备份与恢复", "写作方式"]) {
       expect(await screen.findByRole("heading", { name, level: 2 })).toBeVisible();
     }
-    expect(document.body).not.toHaveTextContent(
+    expect(screen.getByRole("main")).not.toHaveTextContent(
       /AI|模型|调用|上下文|路由|令牌|追踪|候选|费用|待确认/u,
     );
     await user.click(switchToProfessional);
@@ -198,7 +223,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime, "/settings#model-routing");
 
-    await screen.findByRole("heading", { name: "AI 分工" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "创作任务安排" }, { timeout: 5_000 });
     await user.click(screen.getByText("查看尚未配置的 22 项"));
     const taskRow = screen
       .getAllByText("正文生成")
@@ -215,7 +240,7 @@ describe("SettingsPage model routing", () => {
     expect(
       await screen.findByText(/正在为“正文生成”连接模型/u, {}, { timeout: 5_000 }),
     ).toBeVisible();
-    expect(screen.getByText(/deepseek-v4-flash.*原有 AI 分工不会改变/u)).toBeVisible();
+    expect(screen.getByText(/deepseek-v4-flash.*原有创作任务安排不会改变/u)).toBeVisible();
     expect(
       JSON.parse(window.localStorage.getItem(MODEL_HUB_CONNECTION_INTENT_STORAGE_KEY) ?? "null"),
     ).toMatchObject({
@@ -235,7 +260,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime, "/settings#model-routing");
 
-    await screen.findByRole("heading", { name: "AI 分工" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "创作任务安排" }, { timeout: 5_000 });
     expect(screen.queryByRole("searchbox", { name: "搜索模型、供应商或用途" })).toBeNull();
     await user.click(screen.getByText("浏览全部可选模型"));
     const search = screen.getByRole("searchbox", { name: "搜索模型、供应商或用途" });
@@ -243,7 +268,7 @@ describe("SettingsPage model routing", () => {
     await user.click(screen.getByRole("button", { name: /选择 GPT-5.6 Sol/u }));
 
     expect(await screen.findByRole("heading", { name: "模型中心 · 连接与模型" })).toBeVisible();
-    expect(screen.getByText(/准备连接 GPT-5.6 Sol.*不会参与 AI 分工/u)).toBeVisible();
+    expect(screen.getByText(/准备连接 GPT-5.6 Sol.*不会参与创作任务安排/u)).toBeVisible();
     expect(screen.queryByText(/更改已保存.*需要刷新/u)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "刷新模型中心状态" })).not.toBeInTheDocument();
     await expect(runtime.modelHub.findTaskRoute("prose_generation")).resolves.toBeNull();
@@ -308,7 +333,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime, "/settings#model-routing");
 
-    await screen.findByRole("heading", { name: "AI 分工" }, { timeout: 5_000 });
+    await screen.findByRole("heading", { name: "创作任务安排" }, { timeout: 5_000 });
     await user.click(screen.getByText("浏览全部可选模型"));
     const search = screen.getByRole("searchbox", { name: "搜索模型、供应商或用途" });
     await user.type(search, "declaration-only-model");
@@ -454,7 +479,7 @@ describe("SettingsPage model routing", () => {
     await user.click(verify);
 
     expect(
-      await screen.findByRole("heading", { name: "AI 分工" }, { timeout: 5_000 }),
+      await screen.findByRole("heading", { name: "创作任务安排" }, { timeout: 5_000 }),
     ).toBeVisible();
     await waitFor(() =>
       expect(document.getElementById("model-routing-task-prose_generation")).toHaveFocus(),
@@ -594,7 +619,7 @@ describe("SettingsPage model routing", () => {
     renderRoute(prepared.runtime, "/settings#model-center");
 
     expect(
-      await screen.findByRole("heading", { name: "AI 分工" }, { timeout: 5_000 }),
+      await screen.findByRole("heading", { name: "创作任务安排" }, { timeout: 5_000 }),
     ).toBeVisible();
     await waitFor(() =>
       expect(document.getElementById("model-routing-task-translation")).toHaveFocus(),
@@ -618,7 +643,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     await user.click(disclosureButton);
     const confirmation = await screen.findByRole("dialog", {
-      name: "确认 1 次固定能力验证？",
+      name: "确认 1 次模型能力检查？",
     });
     expect(within(confirmation).getByText(/DeepSeek/u)).toBeVisible();
     expect(within(confirmation).getByText(/deepseek-v4-flash/u)).toBeVisible();
@@ -682,7 +707,7 @@ describe("SettingsPage model routing", () => {
       renderRoute(prepared.runtime, "/settings#model-center");
 
       expect(
-        await screen.findByRole("heading", { name: "AI 分工" }, { timeout: 5_000 }),
+        await screen.findByRole("heading", { name: "创作任务安排" }, { timeout: 5_000 }),
       ).toBeVisible();
       const taskRow = await waitFor(() => {
         const row = document.getElementById(`model-routing-task-${task}`);
@@ -697,7 +722,7 @@ describe("SettingsPage model routing", () => {
       );
       await user.click(disclosureButton);
       const confirmation = await screen.findByRole("dialog", {
-        name: "确认 1 次固定能力验证？",
+        name: "确认 1 次模型能力检查？",
       });
       await user.click(
         within(confirmation).getByRole("button", {
@@ -706,9 +731,9 @@ describe("SettingsPage model routing", () => {
       );
 
       await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
-      expect((await screen.findAllByText("固定能力验证结果待核对")).length).toBeGreaterThan(0);
+      expect((await screen.findAllByText("模型能力检查结果待核对")).length).toBeGreaterThan(0);
       expect(screen.getAllByText(/系统不会自动重发/u).length).toBeGreaterThan(0);
-      expect(screen.queryByText("AI 分工没有保存")).not.toBeInTheDocument();
+      expect(screen.queryByText("创作任务安排没有保存")).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "重试保存" })).not.toBeInTheDocument();
       expect(within(taskRow).getByRole("button", { name: "结果待核对" })).toBeDisabled();
       expect(generate).toHaveBeenCalledTimes(1);
@@ -757,7 +782,7 @@ describe("SettingsPage model routing", () => {
     renderRoute(prepared.runtime, "/settings#model-center");
 
     expect(
-      await screen.findByRole("heading", { name: "AI 分工" }, { timeout: 5_000 }),
+      await screen.findByRole("heading", { name: "创作任务安排" }, { timeout: 5_000 }),
     ).toBeVisible();
     const taskRow = await waitFor(() => {
       const row = document.getElementById("model-routing-task-translation");
@@ -772,7 +797,7 @@ describe("SettingsPage model routing", () => {
     );
     await user.click(disclosureButton);
     let confirmation = await screen.findByRole("dialog", {
-      name: "确认 1 次固定能力验证？",
+      name: "确认 1 次模型能力检查？",
     });
     expect(generate).not.toHaveBeenCalled();
 
@@ -799,14 +824,14 @@ describe("SettingsPage model routing", () => {
     expect(generate).not.toHaveBeenCalled();
     expect(
       screen.getByText(
-        "连接、模型、分工、费用或隐私设置已经变化；本次没有发送，请重新查看说明后确认。",
+        "连接、模型、创作任务安排、费用或隐私设置已经变化；本次没有发送，请重新查看说明后确认。",
       ),
     ).toBeVisible();
     await expect(prepared.runtime.modelHub.findTaskRoute("translation")).resolves.toBeNull();
 
     await user.click(within(taskRow).getByRole("button", { name: "查看验证说明" }));
     confirmation = await screen.findByRole("dialog", {
-      name: "确认 1 次固定能力验证？",
+      name: "确认 1 次模型能力检查？",
     });
     expect(within(confirmation).getByText(/遵循供应商默认政策/u)).toBeVisible();
     await user.click(
@@ -845,17 +870,17 @@ describe("SettingsPage model routing", () => {
     const appearance = await screen.findByRole("combobox", { name: /^外观模式/u });
     expect(appearance).toHaveValue("system");
     expect(document.documentElement).not.toHaveAttribute("data-surface");
-    expect(screen.getByText(/正在跟随系统，当前为(?:浅色|深色)/u)).toBeVisible();
+    expect(appearance).toHaveAccessibleDescription(/当前跟随系统；电脑此刻为(?:浅色|深色)。/u);
 
     await user.selectOptions(appearance, "light");
     expect(document.documentElement).toHaveAttribute("data-surface", "light");
     expect(window.localStorage.getItem(APPEARANCE_PREFERENCE_STORAGE_KEY)).toBe("light");
-    expect(screen.getByText("当前固定为浅色。")).toBeVisible();
+    expect(appearance).toHaveAccessibleDescription("当前使用浅色。");
 
     await user.selectOptions(appearance, "dark");
     expect(document.documentElement).toHaveAttribute("data-surface", "dark");
     expect(window.localStorage.getItem(APPEARANCE_PREFERENCE_STORAGE_KEY)).toBe("dark");
-    expect(screen.getByText("当前固定为深色。")).toBeVisible();
+    expect(appearance).toHaveAccessibleDescription("当前使用深色。");
 
     await user.selectOptions(appearance, "system");
     expect(document.documentElement).not.toHaveAttribute("data-surface");
@@ -975,7 +1000,7 @@ describe("SettingsPage model routing", () => {
 
   it.each([
     ["model-center", "模型中心 · 连接与模型", "连接与模型", "墨影模型中心"],
-    ["model-routing", "模型中心 · AI 分工", "AI 分工", "AI 分工"],
+    ["model-routing", "模型中心 · 创作任务安排", "创作任务安排", "创作任务安排"],
     ["model-evaluation", "模型中心 · 模型评测", "模型评测", "模型基础评测"],
     ["image-generation", "模型中心 · 图片生成", "图片生成", "生成小说配图"],
   ] as const)(
@@ -990,7 +1015,12 @@ describe("SettingsPage model routing", () => {
         "aria-current",
         "page",
       );
-      for (const sectionHeading of ["墨影模型中心", "AI 分工", "模型基础评测", "生成小说配图"]) {
+      for (const sectionHeading of [
+        "墨影模型中心",
+        "创作任务安排",
+        "模型基础评测",
+        "生成小说配图",
+      ]) {
         if (sectionHeading === activeSectionHeading) {
           expect(await screen.findByRole("heading", { name: sectionHeading })).toBeVisible();
         } else {
@@ -1075,9 +1105,9 @@ describe("SettingsPage model routing", () => {
     expect(screen.getByLabelText("认证方式")).toBeVisible();
     expect(screen.getByLabelText(/^单次读取上限（内容额度）/u)).toBeInTheDocument();
     expect(screen.getByText("重试不会重复计费请求")).toBeVisible();
-    expect(screen.queryByText("专家兼容设置：旧 7 角色路由")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("link", { name: "AI 分工" }));
-    expect(screen.getByText("专家兼容设置：旧 7 角色路由")).toBeVisible();
+    expect(screen.queryByText("专家兼容设置：旧 7 角色任务安排")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "创作任务安排" }));
+    expect(screen.getByText("专家兼容设置：旧 7 角色任务安排")).toBeVisible();
 
     const matrixHeading = screen.getByRole("heading", { name: "22 项任务矩阵" });
     const matrix = matrixHeading.closest("section");
@@ -1123,6 +1153,36 @@ describe("SettingsPage model routing", () => {
     ]) {
       expect(within(legend).getByText(label)).toBeInTheDocument();
     }
+  });
+
+  it("explains disabled model-center save, discovery and capability actions", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const generate = vi.spyOn(runtime.modelGateway, "generate");
+    const user = userEvent.setup();
+    renderRoute(runtime, "/settings#model-center");
+
+    await user.click(
+      await screen.findByRole("button", { name: "连接 AI 服务" }, { timeout: 5_000 }),
+    );
+
+    const save = screen.getByRole("button", { name: "保存供应商与模型" });
+    const discover = screen.getByRole("button", { name: "测试连接并发现模型" });
+    const verify = screen.getByRole("button", { name: "确认 1 次固定验证" });
+    for (const action of [save, discover, verify]) {
+      expect(action).toBeDisabled();
+      expect(action).toHaveAttribute("aria-describedby");
+      const helpId = action.getAttribute("aria-describedby");
+      expect(helpId).not.toBeNull();
+      expect(document.getElementById(helpId ?? "")).toBeVisible();
+    }
+    expect(save).toHaveAccessibleDescription(/暂时不能保存.*填写.*接口密钥.*完成.*后/u);
+    expect(discover).toHaveAccessibleDescription(
+      /暂时不能测试连接并发现模型.*桌面应用.*接口密钥.*本次不会发送/u,
+    );
+    expect(verify).toHaveAccessibleDescription(
+      /暂时不能验证模型能力.*桌面应用.*先完成连接测试.*选择.*文本模型.*本次不会发送/u,
+    );
+    expect(generate).not.toHaveBeenCalled();
   });
 
   it("keeps cold-start credential and catalog loading non-terminal until the authoritative snapshot is ready", async () => {
@@ -1437,7 +1497,7 @@ describe("SettingsPage model routing", () => {
     expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
     expect(screen.getByLabelText(/^模型目录路径/u)).toBeVisible();
     act(() => {
-      fireEvent.change(screen.getByLabelText("Base URL"), {
+      fireEvent.change(screen.getByLabelText("服务根地址"), {
         target: { value: "https://custom-models.example/v1" },
       });
       fireEvent.change(screen.getByLabelText("配置标识"), {
@@ -1451,7 +1511,7 @@ describe("SettingsPage model routing", () => {
     expect(screen.getByRole("button", { name: "收起专家设置" })).toBeVisible();
     const modelDiscoveryPath = await screen.findByLabelText(/^模型目录路径/u);
     const textGenerationPath = screen.getByLabelText(/^文本生成路径/u);
-    const embeddingPath = screen.getByLabelText(/^向量检索路径/u);
+    const embeddingPath = screen.getByLabelText(/^查找相关故事资料路径/u);
     const credentialHeaderName = screen.getByLabelText("认证请求头名称");
     const requestTimeout = screen.getByLabelText("请求超时（毫秒）");
     const retryLimit = screen.getByLabelText("安全重试次数");
@@ -1503,7 +1563,7 @@ describe("SettingsPage model routing", () => {
       expect(screen.getByLabelText("认证请求头名称")).toHaveValue("x-api-key");
       expect(screen.getByLabelText(/^模型目录路径/u)).toHaveValue("/catalog/models");
       expect(screen.getByLabelText(/^文本生成路径/u)).toHaveValue("/text/chat");
-      expect(screen.getByLabelText(/^向量检索路径/u)).toHaveValue("/vectors/embed");
+      expect(screen.getByLabelText(/^查找相关故事资料路径/u)).toHaveValue("/vectors/embed");
       expect(screen.getByLabelText("请求超时（毫秒）")).toHaveValue(47_000);
       expect(screen.getByLabelText("安全重试次数")).toHaveValue(2);
     });
@@ -1545,14 +1605,14 @@ describe("SettingsPage model routing", () => {
     const remove = await screen.findByRole("button", { name: "退役连接" });
     await user.click(remove);
     const dialog = screen.getByRole("dialog", { name: "退役“可移除写作连接”连接？" });
-    expect(within(dialog).getByText(/永久停止这条连接参与选择、推荐和 AI 分工/u)).toBeVisible();
+    expect(within(dialog).getByText(/永久停止这条连接参与选择、推荐和创作任务安排/u)).toBeVisible();
     expect(within(dialog).getByText("退役不同于删除凭据或暂时停用")).toBeVisible();
     expect(
       within(dialog).getByText(/正文、AI 建议版本、模型使用记录和费用凭据不会删除/u),
     ).toBeVisible();
 
     await user.click(within(dialog).getByRole("button", { name: "确认退役连接" }));
-    expect(await screen.findByText(/已退役：不会再参与选择、推荐或 AI 分工/u)).toBeVisible();
+    expect(await screen.findByText(/已退役：不会再参与选择、推荐或创作任务安排/u)).toBeVisible();
     expect(deleteCredential).toHaveBeenCalledWith(connection.id);
     await expect(runtime.modelHub.findConnection(connection.id)).resolves.toMatchObject({
       enabled: false,
@@ -1739,7 +1799,7 @@ describe("SettingsPage model routing", () => {
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
     await user.selectOptions(providerSelect, "custom_openai_compatible");
-    fireEvent.change(screen.getByLabelText("Base URL"), {
+    fireEvent.change(screen.getByLabelText("服务根地址"), {
       target: { value: "https://custom-models.example/v1" },
     });
     await user.click(screen.getByRole("button", { name: "专家设置" }));
@@ -1805,7 +1865,7 @@ describe("SettingsPage model routing", () => {
     const providerSelect = screen.getByRole("combobox", { name: "供应商" });
     await waitFor(() => expect(providerSelect).toBeEnabled());
     await user.selectOptions(providerSelect, "custom_openai_compatible");
-    fireEvent.change(screen.getByLabelText("Base URL"), {
+    fireEvent.change(screen.getByLabelText("服务根地址"), {
       target: { value: "https://custom-models.example/v1" },
     });
     await user.click(screen.getByRole("button", { name: "专家设置" }));
@@ -2200,7 +2260,7 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime, "/settings#model-routing");
 
-    const heading = await screen.findByRole("heading", { name: "AI 分工" });
+    const heading = await screen.findByRole("heading", { name: "创作任务安排" });
     const routingCard = heading.closest<HTMLElement>(".ink-card");
     if (routingCard === null) {
       throw new Error("Expected the model routing card.");
@@ -2212,7 +2272,7 @@ describe("SettingsPage model routing", () => {
     });
     await user.selectOptions(primaryControl, "remote-writer");
     await user.selectOptions(fallbackControl, "local-writer");
-    await user.click(within(routingCard).getByRole("button", { name: "保存角色路由" }));
+    await user.click(within(routingCard).getByRole("button", { name: "保存角色任务安排" }));
 
     await waitFor(async () => {
       await expect(runtime.modelRouting.findRoute("high_quality")).resolves.toMatchObject({
@@ -2504,7 +2564,7 @@ describe("SettingsPage model routing", () => {
     });
   }, 30_000);
 
-  it("discloses and sends the same effective Volcengine Endpoint ID when both model fields differ", async () => {
+  it("discloses and sends the same effective Volcengine 接入点编号 when both model fields differ", async () => {
     const developmentRuntime = createDevelopmentRuntime(window.localStorage);
     await developmentRuntime.modelHub.saveConnection({
       id: "doubao-effective-model",
@@ -2543,9 +2603,9 @@ describe("SettingsPage model routing", () => {
     const user = userEvent.setup();
     renderRoute(runtime);
 
-    const endpointInput = await screen.findByRole("textbox", { name: /^Endpoint ID/u });
+    const endpointInput = await screen.findByRole("textbox", { name: /^接入点编号/u });
     expect(endpointInput).toHaveValue("doubao-endpoint-actual");
-    const modelInput = screen.getByRole("textbox", { name: "模型或 Endpoint ID" });
+    const modelInput = screen.getByRole("textbox", { name: "模型名称或接入点编号" });
     await user.type(modelInput, "doubao-model-only-visible-field");
 
     expect(
@@ -2708,7 +2768,7 @@ describe("SettingsPage model routing", () => {
     await user.click(verifyButton);
 
     expect(await screen.findByText("写作能力已验证")).toBeVisible();
-    await user.click(screen.getByRole("link", { name: "AI 分工" }));
+    await user.click(screen.getByRole("link", { name: "创作任务安排" }));
     expect(await screen.findByText("14 / 22 类已配置 · 8 类缺能力")).toBeVisible();
     const recovered = (
       await Promise.all(NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)))
@@ -2845,13 +2905,13 @@ describe("SettingsPage model routing", () => {
     await user.click(verifyButton);
 
     expect(await screen.findByText("写作能力已验证")).toBeVisible();
-    expect(screen.getByText(/写作能力证据已保留；自动分工未完成/u)).toBeVisible();
-    expect(screen.getByText("AI 分工没有保存")).toBeVisible();
-    await user.click(screen.getByRole("link", { name: "AI 分工" }));
+    expect(screen.getByText(/写作能力证据已保留；自动安排未完成/u)).toBeVisible();
+    expect(screen.getByText("创作任务安排没有保存")).toBeVisible();
+    await user.click(screen.getByRole("link", { name: "创作任务安排" }));
     expect(screen.getByText("配置写入失败")).toBeVisible();
-    expect(screen.getAllByText("AI 分工没有保存").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("创作任务安排没有保存").length).toBeGreaterThan(0);
     expect(
-      screen.getByText(/模型中心的 22 项分工没有被修改，本次任务路由事务已回滚/u),
+      screen.getByText(/模型中心的 22 项创作任务安排没有被修改，本次保存已完整撤销/u),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "重试保存" })).toBeVisible();
     expect(screen.getByRole("button", { name: "导出脱敏诊断" })).toBeVisible();
@@ -2903,12 +2963,12 @@ describe("SettingsPage model routing", () => {
 
     const scheme = await screen.findByRole("combobox", { name: "使用方案" });
     await user.selectOptions(scheme, "local_privacy");
-    await user.click(screen.getByRole("button", { name: "应用 AI 分工" }));
+    await user.click(screen.getByRole("button", { name: "应用创作任务安排" }));
 
     expect(
-      await screen.findByText(/模型中心的 22 项分工未修改.*旧版兼容分工可能已被安全停用/u),
+      await screen.findByText(/模型中心的 22 项创作任务安排未修改.*旧版兼容设置可能已被安全停用/u),
     ).toBeVisible();
-    expect(screen.queryByText(/之前的 AI 分工没有被修改，事务已回滚/u)).not.toBeInTheDocument();
+    expect(screen.queryByText(/之前的创作任务安排没有被修改，事务已回滚/u)).not.toBeInTheDocument();
     await expect(prepared.runtime.modelRouting.listRoutes()).resolves.toEqual([]);
     const routes = await Promise.all(
       NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)),
@@ -2935,15 +2995,15 @@ describe("SettingsPage model routing", () => {
     });
     const user = userEvent.setup();
     renderRoute(prepared.runtime, "/settings#model-routing");
-    await screen.findByRole("heading", { name: "AI 分工" });
+    await screen.findByRole("heading", { name: "创作任务安排" });
     vi.spyOn(prepared.runtime.modelRouting, "listRoutes").mockRejectedValue(
       new Error("injected legacy projection failure"),
     );
 
-    await user.click(screen.getByRole("button", { name: "应用 AI 分工" }));
+    await user.click(screen.getByRole("button", { name: "应用创作任务安排" }));
 
     expect(await screen.findByText("14 / 22 类已配置 · 8 类缺能力")).toBeVisible();
-    expect(await screen.findByText("AI 连接或分工需要修复")).toBeVisible();
+    expect(await screen.findByText("模型连接或创作任务安排需要修复")).toBeVisible();
     expect(screen.queryByText("AI 基础配置已可用")).not.toBeInTheDocument();
     expect(screen.getAllByText(/基础配置检查未通过.*数据去向与隐私信息尚未确认/u)).toHaveLength(10);
     expect(screen.getByRole("heading", { name: "当前模型能做什么" })).toBeVisible();
@@ -2954,8 +3014,8 @@ describe("SettingsPage model routing", () => {
     expect(screen.getAllByText("语义记忆").length).toBeGreaterThan(0);
     expect(screen.getAllByText("其他基础配置不受影响").length).toBeGreaterThan(0);
     expect(screen.getByRole("heading", { name: "完善全部功能还需要" })).toBeVisible();
-    expect(await screen.findByText(/旧版兼容分工暂未同步/u)).toBeVisible();
-    expect(screen.getByText("AI 分工部分配置完成")).toBeVisible();
+    expect(await screen.findByText(/旧版兼容设置暂未同步/u)).toBeVisible();
+    expect(screen.getByText("创作任务安排部分配置完成")).toBeVisible();
     expect(screen.queryByText(/MODEL_HUB_LEGACY_SYNC_FAILED/u)).not.toBeInTheDocument();
     const routes = (
       await Promise.all(NOVEL_AI_TASKS.map((task) => prepared.runtime.modelHub.findTaskRoute(task)))
@@ -3046,7 +3106,7 @@ describe("SettingsPage model routing", () => {
     await user.click(verifyButton);
 
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText("写作能力验证结果待核对")).toBeVisible();
+    expect(await screen.findByText("模型能力检查结果待核对")).toBeVisible();
     expect(screen.getByText(/系统不会自动重发；连接和模型目录会保留/u)).toBeVisible();
     expect(screen.queryByText("写作能力验证失败")).not.toBeInTheDocument();
     expect(screen.queryByText(/修正模型或接入点后可以重试/u)).not.toBeInTheDocument();

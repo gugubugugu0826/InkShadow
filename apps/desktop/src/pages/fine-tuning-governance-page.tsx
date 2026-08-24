@@ -148,12 +148,11 @@ export function FineTuningGovernancePage({
       runtime.availability.reason === "feature_disabled"
         ? {
             title: "微调治理默认关闭",
-            description:
-              "只有显式启用实验功能后才能读取或写入治理记录；本页没有启动训练，也没有发送任何内容。",
+            description: "启用实验功能前不会读写治理记录、启动训练或发送内容。",
           }
         : {
             title: "需要桌面原生持久化",
-            description: "浏览器开发模式不会伪装生产级数据集、配额、训练队列、评测或部署记录。",
+            description: "浏览器开发模式不会伪造训练或治理记录。",
           };
     return (
       <div className="desktop-page fine-tuning-governance-page">
@@ -230,7 +229,7 @@ export function FineTuningGovernancePage({
           name: datasetName.trim(),
           sources: selected,
         }),
-      "数据集清单已按当前来源版本创建；正文仍只保留在本地数据库。",
+      "数据集已绑定当前来源版本；正文仍仅保存在本机。",
     );
   }
 
@@ -240,14 +239,12 @@ export function FineTuningGovernancePage({
         <div>
           <p className="fine-tuning-governance-page__eyebrow">实验性 · 本地优先</p>
           <h1>微调治理（实验）</h1>
-          <p>先冻结来源与许可，再审批数据集、控制配额、评测候选，最后人工登记与部署。</p>
+          <p>先核对来源和许可，再审批、训练、评测并人工启用。</p>
         </div>
         <div className="fine-tuning-governance-page__header-actions">
           <Badge tone="success">桌面本地数据库</Badge>
           <Badge tone={trainerAvailable ? "ai" : "warning"}>
-            {trainerAvailable
-              ? `本地训练器：${runtime.availability.localTrainer.providerId}`
-              : "未配置本地训练器"}
+            {trainerAvailable ? "本地训练工具已连接" : "未配置本地训练工具"}
           </Badge>
           <Button
             variant="secondary"
@@ -262,20 +259,20 @@ export function FineTuningGovernancePage({
 
       <InlineAlert
         tone="ai-clarification"
-        title="微调产物始终先是候选"
-        description="训练完成不等于可用。候选必须通过基线评测，并分别取得人工登记审批和绑定目标角色的部署审批。"
+        title="训练结果始终先等待确认"
+        description="训练结果须通过对照评测，并经人工批准后才能启用。"
       />
       {!trainerAvailable && (
         <InlineAlert
           tone="warning"
           title="仅治理模式"
-          description="你仍可盘点来源、创建与审批数据集、配置硬上限；排队、执行、登记、部署、回滚和撤销都会保持阻止状态。"
+          description="仍可管理来源、数据集和上限；训练与启用保持关闭。"
         />
       )}
       <InlineAlert
         tone="info"
         title="远端训练固定关闭"
-        description="此工作台不会上传训练正文，也不会自动使用云端凭据或商业授权。"
+        description="不会上传训练正文或使用云端凭据。"
       />
       {normalizedFailure !== null && (
         <InlineAlert
@@ -301,7 +298,7 @@ export function FineTuningGovernancePage({
       >
         <SummaryCard label="数据集" value={String(dashboard?.datasets.length ?? 0)} />
         <SummaryCard label="训练作业" value={String(dashboard?.jobs.length ?? 0)} />
-        <SummaryCard label="模型候选" value={String(dashboard?.artifacts.length ?? 0)} />
+        <SummaryCard label="待确认模型" value={String(dashboard?.artifacts.length ?? 0)} />
         <SummaryCard
           label="本月预留 / 上限"
           value={
@@ -317,7 +314,7 @@ export function FineTuningGovernancePage({
       {phase === "error" && dashboard === null ? (
         <EmptyState
           title="无法读取微调治理记录"
-          description="本页没有报告任何训练或治理操作成功。请恢复本地数据库后重试。"
+          description="未取得可靠记录，请恢复本地数据库后重试。"
           primaryAction={{ label: "重试", onClick: () => void load() }}
         />
       ) : (
@@ -326,19 +323,19 @@ export function FineTuningGovernancePage({
             <SectionHeading
               id="sources-title"
               title="1. 冻结本地训练来源"
-              description="只展示来源元数据；素材许可来自权威素材快照，不能被此页面覆盖。"
+              description="只显示来源记录；本页不能修改许可。"
             />
             <div className="fine-tuning-governance-page__two-column">
               <Card>
                 <CardHeader>
                   <CardTitle>可选来源</CardTitle>
-                  <CardDescription>选择时绑定当前版本、字节数与 SHA-256。</CardDescription>
+                  <CardDescription>选择时会锁定当前版本、内容大小和校验记录。</CardDescription>
                 </CardHeader>
                 <CardContent>
                   {dashboard?.sources.length === 0 ? (
                     <EmptyState
                       title="没有可用来源"
-                      description="先创建稳定章节版本或带明确训练许可的素材。"
+                      description="先创建稳定版本或有训练许可的素材。"
                     />
                   ) : (
                     <div className="fine-tuning-governance-page__source-list">
@@ -391,7 +388,7 @@ export function FineTuningGovernancePage({
                       <FormField
                         label="授权依据"
                         required
-                        hint="填写合同、本人创作或公版依据；不要粘贴密钥或私密正文。"
+                        hint="说明授权依据；不要粘贴密钥或私密正文。"
                       >
                         {(field) => (
                           <Textarea
@@ -411,7 +408,7 @@ export function FineTuningGovernancePage({
                       <Confirmation
                         checked={rightsConfirmed}
                         onChange={setRightsConfirmed}
-                        label="我已人工核对上述版权依据，且它适用于当前精确来源版本。"
+                        label="我确认许可适用于当前来源版本。"
                       />
                     </>
                   )}
@@ -439,7 +436,7 @@ export function FineTuningGovernancePage({
             <SectionHeading
               id="datasets-title"
               title="2. 数据集人工审批"
-              description="隐私、版权和训练目的必须逐项确认，审批绑定清单哈希与版本。"
+              description="审批会锁定隐私、版权、用途、清单和版本。"
             />
             {dashboard?.datasets.length === 0 ? (
               <EmptyState title="还没有数据集" description="从上方冻结至少三条合规来源。" />
@@ -469,7 +466,7 @@ export function FineTuningGovernancePage({
                               trainingPurposeConfirmed: review.purpose,
                               humanConfirmed: true,
                             }),
-                          "数据集已由人工审批并绑定当前清单哈希。",
+                          "数据集已由人工审批并绑定当前清单内容与版本。",
                         )
                       }
                     />
@@ -493,7 +490,7 @@ export function FineTuningGovernancePage({
             <SectionHeading
               id="jobs-title"
               title="4. 可恢复训练队列"
-              description="执行只调用已注入的本地训练器；租约、取消、失败和费用结算都持久化。"
+              description="训练仅调用本机工具；状态和费用都会保存。"
               actions={
                 <div className="fine-tuning-governance-page__section-actions">
                   {(dashboard?.recoverableJobs.length ?? 0) > 0 && (
@@ -505,7 +502,7 @@ export function FineTuningGovernancePage({
                         void perform(
                           "jobs:recover",
                           () => runtime.recoverExpiredJobs(projectId, actorId),
-                          "过期租约已按持久化状态恢复。",
+                          "中断的训练任务已按保存状态恢复。",
                         )
                       }
                     >
@@ -519,7 +516,7 @@ export function FineTuningGovernancePage({
                       void perform(
                         "jobs:run",
                         () => runtime.runNextLocalJob(projectId, actorId),
-                        "本地队列已执行一次；没有待处理作业时不会创建新记录。",
+                        "本地队列已执行；空队列不会新增记录。",
                       )
                     }
                   >
@@ -529,7 +526,7 @@ export function FineTuningGovernancePage({
               }
             />
             {dashboard?.jobs.length === 0 ? (
-              <EmptyState title="队列为空" description="通过预检后，训练计划才会进入此处。" />
+              <EmptyState title="队列为空" description="通过开始前检查后，训练计划才会进入此处。" />
             ) : (
               <div className="fine-tuning-governance-page__card-grid">
                 {dashboard?.jobs.map((job) => (
@@ -546,7 +543,7 @@ export function FineTuningGovernancePage({
                             actorId,
                             expectedRevision: job.revision,
                           }),
-                        "取消请求已持久化；迟到的训练结果不会越过状态机。",
+                        "取消请求已保存；迟到结果不会越过当前状态。",
                       )
                     }
                     onRetry={() =>
@@ -558,7 +555,7 @@ export function FineTuningGovernancePage({
                             actorId,
                             expectedRevision: job.revision,
                           }),
-                        "可重试失败已重新排队，并重新预留受限额度。",
+                        "这次失败已重新排队，并重新预留受限用量。",
                       )
                     }
                   />
@@ -574,12 +571,12 @@ export function FineTuningGovernancePage({
             <SectionHeading
               id="artifacts-title"
               title="5. 评测、登记与部署"
-              description="评测数据必须来自经过验证的本地评测器；本页不会生成或伪造分数。"
+              description="评测须来自本机工具；页面不会生成分数。"
             />
             {dashboard?.artifacts.length === 0 ? (
               <EmptyState
-                title="还没有模型候选"
-                description="只有本地训练器成功返回可验证回执后，候选才会出现在这里。"
+                title="还没有待确认模型"
+                description="本机训练返回可核对结果后才会显示。"
               />
             ) : (
               <div className="fine-tuning-governance-page__artifact-list">
@@ -619,7 +616,7 @@ export function FineTuningGovernancePage({
             <SectionHeading
               id="audit-title"
               title="6. 审计轨迹"
-              description="仅显示治理动作、对象、操作者与请求标识；不显示训练正文。"
+              description="只显示治理摘要和时间；精确值见高级诊断。"
             />
             {dashboard?.audit.length === 0 ? (
               <EmptyState title="暂无审计事件" description="治理操作完成后会在此留下记录。" />
@@ -627,15 +624,9 @@ export function FineTuningGovernancePage({
               <ol className="fine-tuning-governance-page__audit-list">
                 {dashboard?.audit.map((event) => (
                   <li key={event.id}>
-                    <div>
-                      <strong>{event.action}</strong>
-                      <span>
-                        {event.entityType} · {shortId(event.entityId)}
-                      </span>
-                    </div>
+                    <strong>治理记录已更新</strong>
                     <div>
                       <span>{formatTimestamp(event.createdAt)}</span>
-                      <span title={event.requestId}>请求 {shortId(event.requestId)}</span>
                     </div>
                   </li>
                 ))}
@@ -717,8 +708,8 @@ function PolicyAndQueue(props: PolicyAndQueueProps) {
     <section className="fine-tuning-governance-page__section" aria-labelledby="policy-title">
       <SectionHeading
         id="policy-title"
-        title="3. 配额策略与本地训练预检"
-        description="所有费用数字都是内部微单位硬上限或本地资源估算，不会冒充供应商账单。"
+        title="3. 用量限制与本地训练检查"
+        description="费用均为内部上限或本机估算，不代表服务方账单。"
       />
       <div className="fine-tuning-governance-page__two-column">
         <Card>
@@ -738,12 +729,12 @@ function PolicyAndQueue(props: PolicyAndQueueProps) {
               onChange={setMaximumConcurrentJobs}
             />
             <NumberField
-              label="单作业费用上限（微单位）"
+              label="单次训练费用上限（内部计价）"
               value={maximumSingleJobCostMicros}
               onChange={setMaximumSingleJobCostMicros}
             />
             <NumberField
-              label="月度费用上限（微单位）"
+              label="月度费用上限（内部计价）"
               value={monthlyCostLimitMicros}
               onChange={setMonthlyCostLimitMicros}
             />
@@ -806,7 +797,7 @@ function PolicyAndQueue(props: PolicyAndQueueProps) {
         <Card>
           <CardHeader>
             <CardTitle>训练计划</CardTitle>
-            <CardDescription>仅可选择已审批数据集；基础模型许可证需由人明确确认。</CardDescription>
+            <CardDescription>仅可使用已批准数据集和已确认许可。</CardDescription>
           </CardHeader>
           <CardContent className="fine-tuning-governance-page__form-grid">
             <FormField label="已审批数据集" required>
@@ -817,64 +808,41 @@ function PolicyAndQueue(props: PolicyAndQueueProps) {
                   placeholder="选择数据集"
                   options={approvedDatasets.map((dataset) => ({
                     value: dataset.id,
-                    label: `${dataset.name} · r${String(dataset.revision)}`,
+                    label: `${dataset.name} · 第 ${String(dataset.revision)} 版`,
                   }))}
                   onChange={(event) => setDatasetId(event.currentTarget.value)}
                 />
               )}
             </FormField>
-            <FormField label="基础模型提供方标识" required>
-              {(field) => (
-                <Input
-                  {...field}
+            <details className="fine-tuning-governance-page__wide-field">
+              <summary>高级模型与许可证设置</summary>
+              <div className="fine-tuning-governance-page__form-grid">
+                <TextValueField
+                  label="模型服务内部标识"
                   value={providerId}
-                  onChange={(event) => setProviderId(event.currentTarget.value)}
+                  onChange={setProviderId}
                 />
-              )}
-            </FormField>
-            <FormField label="基础模型 ID" required>
-              {(field) => (
-                <Input
-                  {...field}
-                  value={modelId}
-                  onChange={(event) => setModelId(event.currentTarget.value)}
-                />
-              )}
-            </FormField>
-            <FormField label="基础模型版本" required>
-              {(field) => (
-                <Input
-                  {...field}
+                <TextValueField label="基础模型内部标识" value={modelId} onChange={setModelId} />
+                <TextValueField
+                  label="基础模型版本原始值"
                   value={modelRevision}
-                  onChange={(event) => setModelRevision(event.currentTarget.value)}
+                  onChange={setModelRevision}
                 />
-              )}
-            </FormField>
-            <FormField label="许可证标识" required>
-              {(field) => (
-                <Input
-                  {...field}
-                  value={licenseId}
-                  onChange={(event) => setLicenseId(event.currentTarget.value)}
-                />
-              )}
-            </FormField>
-            <FormField label="许可证版本" required>
-              {(field) => (
-                <Input
-                  {...field}
+                <TextValueField label="许可证内部标识" value={licenseId} onChange={setLicenseId} />
+                <TextValueField
+                  label="许可证版本原始值"
                   value={licenseVersion}
-                  onChange={(event) => setLicenseVersion(event.currentTarget.value)}
+                  onChange={setLicenseVersion}
                 />
-              )}
-            </FormField>
-            <div className="fine-tuning-governance-page__wide-field">
-              <Confirmation
-                checked={licenseConfirmed}
-                onChange={setLicenseConfirmed}
-                label="我已人工确认该许可证允许微调与商业使用；再分发权限按许可证原文记录。"
-              />
-            </div>
+                <div className="fine-tuning-governance-page__wide-field">
+                  <Confirmation
+                    checked={licenseConfirmed}
+                    onChange={setLicenseConfirmed}
+                    label="我确认许可证允许微调和商业使用，并已记录再分发权限。"
+                  />
+                </div>
+              </div>
+            </details>
           </CardContent>
           <CardFooter>
             <Button
@@ -922,11 +890,11 @@ function PolicyAndQueue(props: PolicyAndQueueProps) {
                         currency: policy?.currency ?? currency,
                       },
                     }),
-                  "本地训练计划已通过许可证、数据集、配额和训练器预检并进入队列。",
+                  "训练计划已通过本地检查并进入队列。",
                 )
               }
             >
-              预检并加入本地队列
+              检查并加入本地队列
             </Button>
           </CardFooter>
         </Card>
@@ -998,7 +966,7 @@ function ArtifactCard(props: ArtifactCardProps) {
           evaluatorVersion: evaluatorVersion.trim(),
           gate,
         }),
-      "经验证的本地评测结果已重新计算并绑定候选版本。",
+      "评测已记录并绑定当前训练结果。",
     );
   }
 
@@ -1016,124 +984,78 @@ function ArtifactCard(props: ArtifactCardProps) {
       <CardHeader>
         <div className="fine-tuning-governance-page__card-heading">
           <div>
-            <CardTitle>{artifact.registrationName ?? shortId(artifact.id)}</CardTitle>
-            <CardDescription>
-              {artifact.baseModelProviderId}/{artifact.baseModelId}@{artifact.baseModelRevision}
-            </CardDescription>
+            <CardTitle>{artifact.registrationName ?? "待确认模型"}</CardTitle>
+            <CardDescription>基于已确认的本地基础模型</CardDescription>
           </div>
           <Badge tone={artifactTone(artifact.state)}>{artifactStateLabel(artifact.state)}</Badge>
         </div>
       </CardHeader>
       <CardContent className="fine-tuning-governance-page__form-stack">
-        <dl className="fine-tuning-governance-page__kv">
-          <div>
-            <dt>候选版本</dt>
-            <dd>r{String(artifact.revision)}</dd>
-          </div>
-          <div>
-            <dt>产物摘要</dt>
-            <dd title={artifact.artifactDigest}>{shortHash(artifact.artifactDigest)}</dd>
-          </div>
-          <div>
-            <dt>评测记录</dt>
-            <dd>
-              {artifact.latestEvaluationId === null
-                ? "尚未绑定"
-                : shortId(artifact.latestEvaluationId)}
-            </dd>
-          </div>
-        </dl>
+        <KeyValues
+          items={[
+            ["结果版本", `第 ${String(artifact.revision)} 版`],
+            ["产物校验", "内容已校验"],
+            ["评测记录", artifact.latestEvaluationId === null ? "尚未记录" : "已记录"],
+          ]}
+        />
 
         {evaluating && (
           <div className="fine-tuning-governance-page__evaluation">
             <InlineAlert
               tone="warning"
               title="只接受真实评测输出"
-              description="请从经过验证的本地评测器导入基线、候选分数与门禁规则。页面只解析并提交，不生成默认分数。"
+              description="导入真实的对照结果、本次结果和通过条件；页面不会生成分数。"
             />
-            <div className="fine-tuning-governance-page__form-grid">
-              <FormField label="评测器标识" required>
-                {(field) => (
-                  <Input
-                    {...field}
-                    value={evaluatorId}
-                    onChange={(event) => setEvaluatorId(event.currentTarget.value)}
-                  />
-                )}
-              </FormField>
-              <FormField label="评测器版本" required>
-                {(field) => (
-                  <Input
-                    {...field}
-                    value={evaluatorVersion}
-                    onChange={(event) => setEvaluatorVersion(event.currentTarget.value)}
-                  />
-                )}
-              </FormField>
-              <FormField label="基线模型 ID" required>
-                {(field) => (
-                  <Input
-                    {...field}
-                    value={baselineModelId}
-                    onChange={(event) => setBaselineModelId(event.currentTarget.value)}
-                  />
-                )}
-              </FormField>
-            </div>
-            <FormField
-              label="基线指标结构化数据"
-              required
-              hint={'格式：[{"name":"quality","score":0.72}]'}
-            >
-              {(field) => (
-                <Textarea
-                  {...field}
-                  rows={3}
-                  spellCheck={false}
-                  value={baselineJson}
-                  onChange={(event) => setBaselineJson(event.currentTarget.value)}
+            <details className="fine-tuning-governance-page__diagnostics">
+              <summary>高级诊断与评测数据导入</summary>
+              <div className="fine-tuning-governance-page__form-grid">
+                <TextValueField
+                  label="评测工具内部标识"
+                  value={evaluatorId}
+                  onChange={setEvaluatorId}
                 />
-              )}
-            </FormField>
-            <FormField
-              label="候选指标结构化数据"
-              required
-              hint={'格式：[{"name":"quality","score":0.79}]'}
-            >
-              {(field) => (
-                <Textarea
-                  {...field}
-                  rows={3}
-                  spellCheck={false}
-                  value={candidateJson}
-                  onChange={(event) => setCandidateJson(event.currentTarget.value)}
+                <TextValueField
+                  label="评测工具版本原始值"
+                  value={evaluatorVersion}
+                  onChange={setEvaluatorVersion}
                 />
-              )}
-            </FormField>
-            <FormField
-              label="门禁规则结构化数据"
-              required
-              hint={
-                '[{"metric":"quality","direction":"higher_is_better","minimumImprovement":0.03}]'
-              }
-            >
-              {(field) => (
-                <Textarea
-                  {...field}
-                  rows={4}
-                  spellCheck={false}
-                  value={rulesJson}
-                  onChange={(event) => setRulesJson(event.currentTarget.value)}
+                <TextValueField
+                  label="对照模型内部标识"
+                  value={baselineModelId}
+                  onChange={setBaselineModelId}
                 />
-              )}
-            </FormField>
-            <Button
-              loading={props.busyKey === `artifact:evaluate:${artifact.id}`}
-              disabled={!canEvaluate || props.busyKey !== null}
-              onClick={recordEvaluation}
-            >
-              重新计算并记录评测
-            </Button>
+              </div>
+              <StructuredValueField
+                label="对照模型评测数据"
+                hint={'格式：[{"name":"quality","score":0.72}]'}
+                rows={3}
+                value={baselineJson}
+                onChange={setBaselineJson}
+              />
+              <StructuredValueField
+                label="本次训练结果评测数据"
+                hint={'格式：[{"name":"quality","score":0.79}]'}
+                rows={3}
+                value={candidateJson}
+                onChange={setCandidateJson}
+              />
+              <StructuredValueField
+                label="评测通过条件"
+                hint={
+                  '[{"metric":"quality","direction":"higher_is_better","minimumImprovement":0.03}]'
+                }
+                rows={4}
+                value={rulesJson}
+                onChange={setRulesJson}
+              />
+              <Button
+                loading={props.busyKey === `artifact:evaluate:${artifact.id}`}
+                disabled={!canEvaluate || props.busyKey !== null}
+                onClick={recordEvaluation}
+              >
+                重新计算并记录评测
+              </Button>
+            </details>
           </div>
         )}
 
@@ -1141,7 +1063,7 @@ function ArtifactCard(props: ArtifactCardProps) {
           <ApprovalAction
             checked={registrationConfirmed}
             onCheckedChange={setRegistrationConfirmed}
-            label="我已核对评测结果、许可证与数据集血缘，同意登记此候选。"
+            label="我已核对评测、许可与来源，同意登记。"
             buttonLabel="批准模型登记"
             loading={props.busyKey === `artifact:approve-registration:${artifact.id}`}
             disabled={props.busyKey !== null}
@@ -1155,7 +1077,7 @@ function ArtifactCard(props: ArtifactCardProps) {
                     expectedRevision: artifact.revision,
                     humanConfirmed: registrationConfirmed,
                   }),
-                "模型登记已获人工批准，并绑定当前候选版本。",
+                "登记已批准并绑定当前结果。",
               )
             }
           />
@@ -1187,7 +1109,7 @@ function ArtifactCard(props: ArtifactCardProps) {
                       expectedRevision: artifact.revision,
                       registrationName: registrationName.trim(),
                     }),
-                  "候选已由本地训练器登记；登记回执摘要已持久化。",
+                  "训练结果已登记到本地模型库。",
                 )
               }
             >
@@ -1198,11 +1120,7 @@ function ArtifactCard(props: ArtifactCardProps) {
 
         {artifact.state === "registered" && (
           <div className="fine-tuning-governance-page__form-stack">
-            <FormField
-              label="部署目标角色"
-              required
-              hint="审批会与此角色绑定，之后不能换角色复用。"
-            >
+            <FormField label="部署目标角色" required hint="批准后不能更换用途。">
               {(field) => (
                 <Select
                   {...field}
@@ -1217,7 +1135,7 @@ function ArtifactCard(props: ArtifactCardProps) {
             <ApprovalAction
               checked={deploymentConfirmed}
               onCheckedChange={setDeploymentConfirmed}
-              label={`我已人工确认将此模型批准用于“${roleLabel(deploymentRole)}”角色。`}
+              label={`我确认此模型用于“${roleLabel(deploymentRole)}”。`}
               buttonLabel="批准此目标角色"
               loading={props.busyKey === `artifact:approve-deployment:${artifact.id}`}
               disabled={props.busyKey !== null}
@@ -1232,7 +1150,7 @@ function ArtifactCard(props: ArtifactCardProps) {
                       targetRole: deploymentRole,
                       humanConfirmed: deploymentConfirmed,
                     }),
-                  "部署审批已绑定当前模型版本与目标角色。",
+                  "启用批准已绑定当前模型和用途。",
                 )
               }
             />
@@ -1243,8 +1161,8 @@ function ArtifactCard(props: ArtifactCardProps) {
           <div className="fine-tuning-governance-page__form-stack">
             <InlineAlert
               tone="warning"
-              title="目标角色必须与审批一致"
-              description="重新加载后请再次选择获批角色；运行时会拒绝任何不匹配的角色。"
+              title="用途必须一致"
+              description="请重新选择获批用途；不匹配时会拒绝启用。"
             />
             <FormField label="已获批目标角色" required>
               {(field) => (
@@ -1271,7 +1189,7 @@ function ArtifactCard(props: ArtifactCardProps) {
                       expectedRevision: artifact.revision,
                       targetRole: deploymentRole,
                     }),
-                  "模型已部署到与人工审批一致的本地角色。",
+                  "模型已按批准用途在本机启用。",
                 )
               }
             >
@@ -1285,7 +1203,7 @@ function ArtifactCard(props: ArtifactCardProps) {
             <Confirmation
               checked={revocationConfirmed}
               onChange={setRevocationConfirmed}
-              label="我确认撤销此模型候选或已登记模型；该动作会留下审计记录。"
+              label="我确认撤销并保留审计记录。"
             />
             <Button
               variant="danger"
@@ -1301,7 +1219,7 @@ function ArtifactCard(props: ArtifactCardProps) {
                       expectedRevision: artifact.revision,
                       humanConfirmed: revocationConfirmed,
                     }),
-                  "模型已由本地适配器撤销并记录治理审计。",
+                  "模型已撤销并留存审计。",
                 )
               }
             >
@@ -1332,7 +1250,7 @@ function DeploymentCard(props: DeploymentCardProps) {
         <div className="fine-tuning-governance-page__card-heading">
           <div>
             <CardTitle>{roleLabel(deployment.targetRole)}</CardTitle>
-            <CardDescription>模型 {shortId(deployment.artifactId)}</CardDescription>
+            <CardDescription>已登记模型</CardDescription>
           </div>
           <Badge tone={deployment.status === "active" ? "success" : "neutral"}>
             {deploymentStatusLabel(deployment.status)}
@@ -1341,11 +1259,12 @@ function DeploymentCard(props: DeploymentCardProps) {
       </CardHeader>
       <CardContent className="fine-tuning-governance-page__form-stack">
         <p>激活于 {formatTimestamp(deployment.activatedAt)}</p>
+
         {deployment.status === "active" && (
           <ApprovalAction
             checked={confirmed}
             onCheckedChange={setConfirmed}
-            label="我确认回滚此部署；当前角色将不再使用该模型。"
+            label="我确认回滚；此用途将停止使用模型。"
             buttonLabel="回滚部署"
             variant="danger"
             loading={props.busyKey === `deployment:rollback:${deployment.id}`}
@@ -1359,7 +1278,7 @@ function DeploymentCard(props: DeploymentCardProps) {
                     actorId: props.actorId,
                     humanConfirmed: confirmed,
                   }),
-                "本地部署已回滚，回执摘要与人工审批已记录。",
+                "本机启用已回滚并留存审计。",
               )
             }
           />
@@ -1403,23 +1322,17 @@ function DatasetCard(props: DatasetCardProps) {
         </div>
       </CardHeader>
       <CardContent className="fine-tuning-governance-page__form-stack">
-        <dl className="fine-tuning-governance-page__kv">
-          <div>
-            <dt>清单版本</dt>
-            <dd>r{String(dataset.revision)}</dd>
-          </div>
-          <div>
-            <dt>清单哈希</dt>
-            <dd title={dataset.manifestHash}>{shortHash(dataset.manifestHash)}</dd>
-          </div>
-          <div>
-            <dt>训练 / 验证 / 测试</dt>
-            <dd>
-              {String(dataset.splitCounts.train)} / {String(dataset.splitCounts.validation)} /{" "}
-              {String(dataset.splitCounts.test)}
-            </dd>
-          </div>
-        </dl>
+        <KeyValues
+          items={[
+            ["清单版本", `第 ${String(dataset.revision)} 版`],
+            ["清单校验", "内容已校验"],
+            [
+              "训练 / 验证 / 测试",
+              `${String(dataset.splitCounts.train)} / ${String(dataset.splitCounts.validation)} / ${String(dataset.splitCounts.test)}`,
+            ],
+          ]}
+        />
+
         {dataset.readinessIssues.length > 0 && (
           <ul className="fine-tuning-governance-page__issue-list">
             {dataset.readinessIssues.map((issue, index) => (
@@ -1434,17 +1347,17 @@ function DatasetCard(props: DatasetCardProps) {
             <Confirmation
               checked={review.privacy}
               onChange={(checked) => props.onReview("privacy", checked)}
-              label="我已核对隐私扫描与必要的源头脱敏。"
+              label="我已核对隐私扫描和必要脱敏。"
             />
             <Confirmation
               checked={review.copyright}
               onChange={(checked) => props.onReview("copyright", checked)}
-              label="我已核对每条来源的版权或许可依据。"
+              label="我已核对每条来源的许可。"
             />
             <Confirmation
               checked={review.purpose}
               onChange={(checked) => props.onReview("purpose", checked)}
-              label="我确认此数据集只用于已说明的本地训练目的。"
+              label="我确认数据集只用于上述本地训练。"
             />
             <Button
               loading={props.busy}
@@ -1474,40 +1387,35 @@ function JobCard({ job, busyKey, onCancel, onRetry }: JobCardProps) {
       <CardHeader>
         <div className="fine-tuning-governance-page__card-heading">
           <div>
-            <CardTitle>{shortId(job.id)}</CardTitle>
+            <CardTitle>本地训练任务</CardTitle>
             <CardDescription>
-              {trainingMethodLabel(job.plan.method)} · 尝试 {String(job.attemptCount)}/
-              {String(job.maximumAttempts)}
+              {trainingMethodLabel(job.plan.method)} · 已尝试 {String(job.attemptCount)} 次，最多{" "}
+              {String(job.maximumAttempts)} 次
             </CardDescription>
           </div>
           <Badge tone={jobTone(job.status)}>{jobStateLabel(job.status)}</Badge>
         </div>
       </CardHeader>
       <CardContent>
-        <dl className="fine-tuning-governance-page__kv">
-          <div>
-            <dt>数据集版本</dt>
-            <dd>r{String(job.datasetRevision)}</dd>
-          </div>
-          <div>
-            <dt>预计费用上限</dt>
-            <dd>
-              {formatMicros(job.reservedCostMicros)} {job.currency}
-            </dd>
-          </div>
-          <div>
-            <dt>结算费用</dt>
-            <dd>
-              {job.settledCostMicros === null
+        <KeyValues
+          items={[
+            ["数据集版本", `第 ${String(job.datasetRevision)} 版`],
+            [
+              "预计费用上限",
+              `${formatMicros(job.reservedCostMicros)} ${currencyLabel(job.currency)}`,
+            ],
+            [
+              "结算费用",
+              job.settledCostMicros === null
                 ? "尚未结算"
-                : `${formatMicros(job.settledCostMicros)} ${job.currency}`}
-            </dd>
-          </div>
-          <div>
-            <dt>失败代码</dt>
-            <dd>{job.failureCode ?? "无"}</dd>
-          </div>
-        </dl>
+                : `${formatMicros(job.settledCostMicros)} ${currencyLabel(job.currency)}`,
+            ],
+            [
+              "任务情况",
+              job.failureCode === null ? "未发现失败" : "训练未完成，请按当前状态处理。",
+            ],
+          ]}
+        />
       </CardContent>
       {(canCancel || job.status === "failed_retryable") && (
         <CardFooter className="fine-tuning-governance-page__section-actions">
@@ -1553,10 +1461,10 @@ function SourceOption({
       <span>
         <strong>{source.label}</strong>
         <span>
-          {sourceKindLabel(source.kind)} · r{String(source.revision)} ·{" "}
+          {sourceKindLabel(source.kind)} · 第 {String(source.revision)} 版 ·{" "}
           {formatBytes(source.contentBytes)}
         </span>
-        <span title={source.contentHash}>SHA-256 {shortHash(source.contentHash)}</span>
+        <span>来源内容已校验</span>
         <span>
           {source.rights === null
             ? "需要本次人工声明版权与训练许可"
@@ -1602,6 +1510,65 @@ function SummaryCard({ label, value }: { readonly label: string; readonly value:
         <strong>{value}</strong>
       </CardContent>
     </Card>
+  );
+}
+
+function KeyValues({ items }: { readonly items: readonly (readonly [string, React.ReactNode])[] }) {
+  return (
+    <dl className="fine-tuning-governance-page__kv">
+      {items.map(([label, value]) => (
+        <div key={label}>
+          <dt>{label}</dt>
+          <dd>{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function TextValueField({
+  label,
+  onChange,
+  value,
+}: {
+  readonly label: string;
+  readonly onChange: (value: string) => void;
+  readonly value: string;
+}) {
+  return (
+    <FormField label={label} required>
+      {(field) => (
+        <Input {...field} value={value} onChange={(event) => onChange(event.currentTarget.value)} />
+      )}
+    </FormField>
+  );
+}
+
+function StructuredValueField({
+  hint,
+  label,
+  onChange,
+  rows,
+  value,
+}: {
+  readonly hint: string;
+  readonly label: string;
+  readonly onChange: (value: string) => void;
+  readonly rows: number;
+  readonly value: string;
+}) {
+  return (
+    <FormField label={label} required hint={hint}>
+      {(field) => (
+        <Textarea
+          {...field}
+          rows={rows}
+          spellCheck={false}
+          value={value}
+          onChange={(event) => onChange(event.currentTarget.value)}
+        />
+      )}
+    </FormField>
   );
 }
 
@@ -1698,11 +1665,11 @@ function canSelectSource(source: FineTuningSourceDescriptor): boolean {
 function parseMetricJson(value: string): FineTuningEvaluationGateInput["baseline"] {
   const parsed = JSON.parse(value) as unknown;
   if (!Array.isArray(parsed)) {
-    throw new Error("指标结构化数据必须是包含名称字段（name）与数值评分字段（score）的数组。");
+    throw new Error("评测数据格式不正确。");
   }
   return (parsed as unknown[]).map((item) => {
     if (!isRecord(item) || typeof item.name !== "string" || typeof item.score !== "number") {
-      throw new Error("指标结构化数据必须是包含名称字段（name）与数值评分字段（score）的数组。");
+      throw new Error("评测数据格式不正确。");
     }
     return { name: item.name, score: item.score };
   });
@@ -1711,9 +1678,7 @@ function parseMetricJson(value: string): FineTuningEvaluationGateInput["baseline
 function parseRuleJson(value: string): FineTuningEvaluationGateInput["rules"] {
   const parsed = JSON.parse(value) as unknown;
   if (!Array.isArray(parsed)) {
-    throw new Error(
-      "规则结构化数据必须是包含指标字段（metric）与排序方向字段（direction）的数组。",
-    );
+    throw new Error("通过条件格式不正确。");
   }
   return (parsed as unknown[]).map((item) => {
     if (
@@ -1721,9 +1686,7 @@ function parseRuleJson(value: string): FineTuningEvaluationGateInput["rules"] {
       typeof item.metric !== "string" ||
       (item.direction !== "higher_is_better" && item.direction !== "lower_is_better")
     ) {
-      throw new Error(
-        "规则结构化数据必须是包含指标字段（metric）与排序方向字段（direction）的数组。",
-      );
+      throw new Error("通过条件格式不正确。");
     }
     const optionalKeys = [
       "minimumCandidate",
@@ -1732,7 +1695,7 @@ function parseRuleJson(value: string): FineTuningEvaluationGateInput["rules"] {
       "maximumRegression",
     ] as const;
     if (optionalKeys.some((key) => item[key] !== undefined && typeof item[key] !== "number")) {
-      throw new Error("评测门禁阈值必须是数值。");
+      throw new Error("评测阈值必须是数值。");
     }
     return {
       metric: item.metric,
@@ -1780,14 +1743,9 @@ function formatTimestamp(value: string): string {
   }).format(new Date(value));
 }
 
-function shortId(value: string): string {
-  return value.length <= 12 ? value : `${value.slice(0, 8)}…${value.slice(-4)}`;
+function currencyLabel(currency: string): string {
+  return currency === "CNY" ? "人民币" : currency === "USD" ? "美元" : "其他费用单位";
 }
-
-function shortHash(value: string): string {
-  return value.length <= 16 ? value : `${value.slice(0, 12)}…${value.slice(-4)}`;
-}
-
 function sourceKindLabel(kind: FineTuningSourceDescriptor["kind"]): string {
   return {
     chapter_version: "章节版本",
@@ -1810,17 +1768,17 @@ function datasetReadinessIssueLabel(
 ): string {
   switch (issue.code) {
     case "FINE_TUNING_SAMPLE_COUNT_TOO_LOW":
-      return "至少需要三条互不重复且可用的样本。";
+      return "至少需要三条不同样本。";
     case "FINE_TUNING_RIGHTS_UNCONFIRMED":
-      return "这条样本尚未确认版权或许可依据。";
+      return "尚未确认样本许可。";
     case "FINE_TUNING_TRAINING_NOT_ALLOWED":
-      return "来源声明未授权用于训练。";
+      return "来源未授权训练。";
     case "FINE_TUNING_PRIVACY_BLOCKED":
-      return "请先在来源处移除个人信息或敏感内容。";
+      return "请先移除个人或敏感信息。";
     case "FINE_TUNING_SPLIT_INCOMPLETE":
-      return "训练集、验证集和测试集都至少需要一条互不重复的样本。";
+      return "训练、验证和测试集均须有不同样本。";
     default:
-      return "数据集尚未满足训练准备条件。";
+      return "数据集尚未准备好。";
   }
 }
 function datasetStateLabel(state: FineTuningDatasetSnapshot["state"]): string {
@@ -1833,7 +1791,7 @@ function datasetStateLabel(state: FineTuningDatasetSnapshot["state"]): string {
 }
 
 function trainingMethodLabel(method: FineTuningJobRecord["plan"]["method"]): string {
-  return method === "lora" ? "低秩适配（LoRA）" : "量化低秩适配（QLoRA）";
+  return method === "lora" ? "低秩适配" : "量化低秩适配";
 }
 
 function jobStateLabel(state: FineTuningJobRecord["status"]): string {
@@ -1844,13 +1802,13 @@ function jobStateLabel(state: FineTuningJobRecord["status"]): string {
     cancelled: "已取消",
     failed_retryable: "失败，可重试",
     failed_final: "最终失败",
-    artifact_ready: "候选已就绪",
+    artifact_ready: "训练结果待确认",
   }[state];
 }
 
 function artifactStateLabel(state: FineTuningModelArtifactRecord["state"]): string {
   return {
-    candidate: "待评测候选",
+    candidate: "待评测模型",
     evaluation_failed: "评测未通过",
     evaluation_passed: "评测通过",
     registration_approved: "登记已批准",

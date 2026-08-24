@@ -70,17 +70,17 @@ export const MODEL_HUB_STATE_EXPLANATIONS: Readonly<
   basic_ready: Object.freeze({
     label: "基础配置可用",
     description:
-      "正文生成、续写、改写和润色的连接、模型与分工基础检查已通过；当前作品仍会在发送前单独检查隐私、上下文和请求长度。",
+      "正文生成、续写、改写和润色所需的连接、模型与创作任务安排已通过基础检查；当前作品仍会在发送前单独检查隐私、参考资料和请求长度。",
   }),
   fully_ready: Object.freeze({
     label: "基础配置完整",
     description:
-      "写作、续写、润色、长程记忆和核心检查的基础配置均已通过；这不代表任意章节都能跳过发送前预检。",
+      "写作、续写、润色、长程记忆和核心检查的基础配置均已通过；每个章节在发送前仍会单独检查。",
   }),
   partially_unavailable: Object.freeze({
     label: "部分能力不可用",
     description:
-      "部分任务的基础配置已通过；缺失任务会明确停止或使用已配置的备用模型，当前请求仍需单独预检。",
+      "部分任务的基础配置已通过；缺失任务会明确停止或使用已配置的备用模型，当前请求仍需单独检查。",
   }),
   connection_failed: Object.freeze({
     label: "连接失败",
@@ -113,9 +113,9 @@ export function modelHubReadinessBlockerLabel(code: string): string {
   if (code === "MODEL_HUB_CREDENTIAL_MISSING") return "接口密钥已删除或不可用";
   if (code === "MODEL_HUB_CONNECTION_NOT_READY") return "供应商连接尚未通过测试";
   if (code === "MODEL_HUB_CAPABILITY_NOT_VERIFIED") return "模型能力尚未完成验证";
-  if (code === "MODEL_HUB_ROUTE_NOT_CONFIGURED") return "这项 AI 分工尚未配置";
-  if (code === "MODEL_HUB_ROUTE_DISABLED") return "这项 AI 分工已停用";
-  if (code === "MODEL_HUB_ROUTE_TARGET_MISSING") return "AI 分工引用的模型已经不存在";
+  if (code === "MODEL_HUB_ROUTE_NOT_CONFIGURED") return "这项创作任务安排尚未配置";
+  if (code === "MODEL_HUB_ROUTE_DISABLED") return "这项创作任务安排已停用";
+  if (code === "MODEL_HUB_ROUTE_TARGET_MISSING") return "创作任务安排引用的模型已经不存在";
   if (code === "MODEL_HUB_CATALOG_ENTRY_UNAVAILABLE") return "模型目录信息已失效或过期";
   if (code === "MODEL_HUB_CONTEXT_LIMIT_EXCEEDED") return "所选模型的上下文上限不足";
   if (code === "MODEL_CONTEXT_WINDOW_EXHAUSTED") {

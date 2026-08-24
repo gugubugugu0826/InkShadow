@@ -34,6 +34,7 @@ import {
   useState,
   type ChangeEvent,
   type SyntheticEvent,
+  type ReactNode,
 } from "react";
 
 import { handleCandidateDecisionNavigation } from "../components/candidate-decision-navigation";
@@ -80,12 +81,12 @@ const EMPTY_HISTORY: GovernedExtensionHistory = Object.freeze({
 });
 
 const LANGUAGE_OPTIONS = [
-  { value: "en-US", label: "English (US)" },
-  { value: "en-GB", label: "English (UK)" },
-  { value: "ja-JP", label: "日本語" },
-  { value: "ko-KR", label: "한국어" },
-  { value: "fr-FR", label: "Français" },
-  { value: "de-DE", label: "Deutsch" },
+  { value: "en-US", label: "美国英语" },
+  { value: "en-GB", label: "英国英语" },
+  { value: "ja-JP", label: "日语" },
+  { value: "ko-KR", label: "韩语" },
+  { value: "fr-FR", label: "法语" },
+  { value: "de-DE", label: "德语" },
 ] as const;
 
 const FORMAT_OPTIONS = [
@@ -321,7 +322,7 @@ export function GovernedCreativeExtensionsPage({
     }
     setBusy("run");
     setFailure(null);
-    setAnnouncement("正在执行模型请求。候选结果不会直接覆盖章节或大纲。");
+    setAnnouncement("正在生成；结果不会直接覆盖正文或大纲。");
     try {
       const result = await runtime.run(preflight, {
         ...(consentToken === null ? {} : { consentToken }),
@@ -344,7 +345,7 @@ export function GovernedCreativeExtensionsPage({
       setAnnouncement(
         result.candidate === null
           ? `请求已结束：${requestStatusLabel(result.request.status)}。`
-          : "隔离候选已就绪；请审阅后再明确采纳或拒绝。",
+          : "结果已就绪；请审阅后采纳或放弃。",
       );
     } catch (error: unknown) {
       setActiveRequestId(null);
@@ -430,12 +431,12 @@ export function GovernedCreativeExtensionsPage({
         );
         setAnnouncement(
           result.outcome === "accepted"
-            ? "候选已作为独立衍生成果采纳，原章节与大纲保持不变。"
-            : "来源版本已经变化，候选已自动过期且没有写入正式成果。",
+            ? "已采纳为独立成果；正文和大纲未变。"
+            : "来源已变化；结果过期且未写入。",
         );
       } else {
         await runtime.rejectCandidate(selectedCandidate.id, selectedCandidate.revision);
-        setAnnouncement("候选已拒绝；原章节与大纲保持不变。");
+        setAnnouncement("已放弃；正文和大纲未变。");
       }
       await loadHistory();
     } catch (error: unknown) {
@@ -454,7 +455,7 @@ export function GovernedCreativeExtensionsPage({
     try {
       const artifact = await runtime.exportHistory(projectId);
       onExportHistory?.(artifact.filename, artifact.content);
-      setAnnouncement("历史记录已准备导出；其中不包含一次性明文同意凭据。");
+      setAnnouncement("历史已准备导出，不含一次性确认凭据。");
     } catch (error: unknown) {
       setFailure(publicError(error));
     } finally {
@@ -473,9 +474,7 @@ export function GovernedCreativeExtensionsPage({
         <div>
           <p className="governed-extensions-page__eyebrow">受治理的创作扩展</p>
           <h1>翻译与短剧工作台</h1>
-          <p>
-            固定来源版本、目的地和费用边界。所有模型输出先进入隔离候选区，永不直接覆盖正文或大纲。
-          </p>
+          <p>固定来源、发送位置和费用；结果须确认后使用。</p>
         </div>
         <div className="governed-extensions-page__header-actions">
           {capabilities.environment.readOnly && <Badge tone="warning">只读</Badge>}
@@ -503,7 +502,7 @@ export function GovernedCreativeExtensionsPage({
         <InlineAlert
           tone="warning"
           title={`${kind === "translation" ? "翻译" : "短剧"}服务尚未启用`}
-          description="历史记录与导出仍可使用，但预检会阻止模型调用、重试和候选决策。"
+          description="仍可查看和导出历史，但不能生成、重试或处理结果。"
         />
       )}
       <div className="governed-extensions-page__announcer" aria-live="polite" role="status">
@@ -527,34 +526,25 @@ export function GovernedCreativeExtensionsPage({
               <EmptyState
                 kind="feature_limited"
                 title="请选择一个章节"
-                description="服务必须绑定当前章节的精确版本与校验值。"
+                description="服务须绑定当前章节版本。"
               />
             ) : (
               <form onSubmit={(event) => void run(event)}>
                 <Card className="governed-extensions-source">
                   <CardHeader>
                     <CardTitle>来源权威</CardTitle>
-                    <CardDescription>只读取当前绑定版本，不会直接修改它。</CardDescription>
+                    <CardDescription>只读取当前版本，不会修改正文。</CardDescription>
                   </CardHeader>
                   <CardContent>
-                    <dl className="governed-extensions-kv">
-                      <div>
-                        <dt>章节</dt>
-                        <dd>{source.chapterTitle}</dd>
-                      </div>
-                      <div>
-                        <dt>版本</dt>
-                        <dd>当前已接受版本</dd>
-                      </div>
-                      <div>
-                        <dt>项目</dt>
-                        <dd>当前作品</dd>
-                      </div>
-                      <div>
-                        <dt>SHA-256</dt>
-                        <dd>来源已校验</dd>
-                      </div>
-                    </dl>
+                    <KeyValues
+                      className="governed-extensions-kv"
+                      items={[
+                        ["章节", source.chapterTitle],
+                        ["版本", "当前已接受版本"],
+                        ["项目", "当前作品"],
+                        ["来源校验", "来源已校验"],
+                      ]}
+                    />
                   </CardContent>
                 </Card>
 
@@ -562,9 +552,7 @@ export function GovernedCreativeExtensionsPage({
                   <Card>
                     <CardHeader>
                       <CardTitle>翻译设置</CardTitle>
-                      <CardDescription>
-                        逐段引用来源，并绑定语言、语气和术语表版本。
-                      </CardDescription>
+                      <CardDescription>逐段翻译并绑定语言、语气和术语表。</CardDescription>
                     </CardHeader>
                     <CardContent className="governed-extensions-form-grid">
                       <FormField label="目标语言" required>
@@ -595,11 +583,7 @@ export function GovernedCreativeExtensionsPage({
                           />
                         )}
                       </FormField>
-                      <FormField
-                        label="术语表版本"
-                        required
-                        hint="版本会进入请求指纹，变更后必须重新确认远程发送。"
-                      >
+                      <FormField label="术语表版本" required hint="版本变化后须重新确认发送。">
                         {(field) => (
                           <Input
                             {...field}
@@ -642,7 +626,7 @@ export function GovernedCreativeExtensionsPage({
                     <CardHeader>
                       <CardTitle>短剧设置</CardTitle>
                       <CardDescription>
-                        输出必须提供集、场、镜头、对白、时长汇总和可校验的来源段落引用。
+                        输出包含集、场、镜头、对白、时长和来源引用。
                       </CardDescription>
                     </CardHeader>
                     <CardContent className="governed-extensions-form-grid">
@@ -729,12 +713,12 @@ export function GovernedCreativeExtensionsPage({
                   <div>
                     <strong>
                       {preflight?.retry === null
-                        ? "创建新的隔离候选"
+                        ? "生成新的待确认结果"
                         : `执行第 ${String(preflight?.retry?.attempt ?? 1)} 次尝试`}
                     </strong>
                     <span>
                       {preflight === null
-                        ? "等待预检"
+                        ? "等待发送前检查"
                         : `${formatMicros(preflight.estimate.maximumCostMicros, preflight.estimate.currency)} 本次最高费用估算`}
                     </span>
                   </div>
@@ -756,7 +740,7 @@ export function GovernedCreativeExtensionsPage({
                     >
                       {preflight?.requiresRemoteConsent === true && consentToken === null
                         ? "先确认远程发送"
-                        : "生成隔离候选"}
+                        : "生成待确认结果"}
                     </Button>
                   </div>
                 </div>
@@ -767,7 +751,7 @@ export function GovernedCreativeExtensionsPage({
           <aside className="governed-extensions-history" aria-label="请求历史">
             <div className="governed-extensions-section-heading">
               <div>
-                <h2>历史与候选</h2>
+                <h2>历史与待确认结果</h2>
                 <span>功能关闭时仍可只读查看与导出</span>
               </div>
               <Badge tone="neutral">{history.requests.length}</Badge>
@@ -779,7 +763,7 @@ export function GovernedCreativeExtensionsPage({
             ) : history.requests.length === 0 ? (
               <EmptyState
                 title="还没有运行记录"
-                description="完成预检后，新的请求与候选会显示在这里。"
+                description="完成发送前检查后，记录会显示在这里。"
               />
             ) : (
               <ol className="governed-extensions-history__list">
@@ -812,38 +796,38 @@ export function GovernedCreativeExtensionsPage({
         </div>
       </Tabs>
 
-      <section className="governed-extensions-review" aria-label="候选审阅">
+      <section className="governed-extensions-review" aria-label="待确认结果审阅">
         <div className="governed-extensions-section-heading">
           <div>
-            <h2>隔离候选审阅</h2>
+            <h2>待确认结果审阅</h2>
             <span>只有明确采纳后才写入独立的翻译成果或短剧脚本。</span>
           </div>
           {selectedCandidate !== null && <StatusBadge status={selectedCandidate.status} />}
         </div>
         {selectedRequest === null ? (
-          <EmptyState title="选择一条历史记录" description="可查看费用、用量与候选内容。" />
+          <EmptyState title="选择一条历史记录" description="可查看费用、用量与待确认内容。" />
         ) : (
           <Card
             className={
               selectedCandidate?.status === "ready" ? "candidate-decision-surface" : undefined
             }
-            aria-label="受治理创意成果候选决策"
+            aria-label="受治理创意成果待确认结果处理"
           >
             <CardHeader>
               <CardTitle>
-                {selectedRequest.kind === "translation" ? "翻译候选" : "短剧脚本候选"}
+                {selectedRequest.kind === "translation" ? "待确认翻译" : "待确认短剧脚本"}
               </CardTitle>
-              <CardDescription>已绑定当前来源版本；只会在明确采纳后写入独立成果。</CardDescription>
+              <CardDescription>已绑定来源版本；采纳后才写入独立成果。</CardDescription>
             </CardHeader>
             <CardContent
               tabIndex={selectedCandidate?.status === "ready" ? 0 : undefined}
-              aria-label="受治理创意成果候选内容"
+              aria-label="受治理创意成果待确认内容"
               onKeyDown={handleCandidateDecisionNavigation}
             >
               <div className="governed-extensions-review__metrics">
                 <Metric label="状态" value={requestStatusLabel(selectedRequest.status)} />
-                <Metric label="输入内容额度" value={tokenValue(selectedRequest, "input")} />
-                <Metric label="输出内容额度" value={tokenValue(selectedRequest, "output")} />
+                <Metric label="发送计量" value={tokenValue(selectedRequest, "input")} />
+                <Metric label="返回计量" value={tokenValue(selectedRequest, "output")} />
                 <Metric
                   label="内部费用"
                   value={
@@ -864,13 +848,13 @@ export function GovernedCreativeExtensionsPage({
               {selectedRequest.usage?.source !== "provider_reported" && (
                 <InlineAlert
                   tone="warning"
-                  title="内容额度用量未知"
-                  description="模型服务没有提供可用内容额度报告；系统没有把未知值显示为 0。预算按本次最大预留内部估算保守结算，这不代表模型服务账单或已知实际费用，且不会发布隔离建议。"
+                  title="本次服务计量未知"
+                  description="服务未提供可核对用量，系统不会显示为 0；费用按最高估算记录，不代表服务方账单。"
                 />
               )}
               {preview === null ? (
                 <EmptyState
-                  title="没有可审阅的候选"
+                  title="没有可审阅的待确认结果"
                   description={
                     selectedRequest.errorCode === null
                       ? "此请求尚未完成。"
@@ -906,7 +890,7 @@ export function GovernedCreativeExtensionsPage({
                       disabled={!featureEnabled || capabilities.environment.readOnly}
                       onClick={() => void decideCandidate("reject")}
                     >
-                      拒绝候选
+                      放弃这版
                     </Button>
                     <Button
                       size="lg"
@@ -950,68 +934,61 @@ function PreflightPanel({
   return (
     <Card className="governed-extensions-preflight">
       <CardHeader>
-        <CardTitle>发送前预检</CardTitle>
-        <CardDescription>目的地、数据类别、价格快照和来源版本均在开始时锁定。</CardDescription>
+        <CardTitle>发送前检查</CardTitle>
+        <CardDescription>开始时锁定发送位置、资料、费用和来源版本。</CardDescription>
       </CardHeader>
       <CardContent>
         {loading || preflight === null ? (
           <p className="governed-extensions-muted" role="status">
-            正在计算预检…
+            正在检查…
           </p>
         ) : (
           <>
-            <dl className="governed-extensions-destination">
-              <div>
-                <dt>位置</dt>
-                <dd>
-                  <Badge tone={preflight.destination.location === "remote" ? "warning" : "info"}>
-                    {preflight.destination.location === "remote" ? "远程" : "本机回环"}
-                  </Badge>
-                </dd>
-              </div>
-              <div>
-                <dt>服务地址</dt>
-                <dd className="governed-extensions-monospace">{preflight.destination.baseUrl}</dd>
-              </div>
-              <div>
-                <dt>服务方 / 模型</dt>
-                <dd>
-                  {preflight.destination.providerId} / {preflight.destination.modelId}
-                </dd>
-              </div>
-              <div>
-                <dt>发送类别</dt>
-                <dd>{preflight.destination.dataCategories.join("、")}</dd>
-              </div>
-              <div>
-                <dt>价格快照</dt>
-                <dd>
-                  {preflight.snapshot.pricing.priceVersion} ·{" "}
-                  {formatTimestamp(preflight.snapshot.pricing.priceUpdatedAt)}
-                </dd>
-              </div>
-              <div>
-                <dt>内部估算</dt>
-                <dd>
-                  约 {preflight.estimate.estimatedInputTokens.toLocaleString()} 输入 /{" "}
-                  {preflight.estimate.estimatedOutputTokens.toLocaleString()} 个输出内容额度；最多{" "}
-                  {formatMicros(preflight.estimate.maximumCostMicros, preflight.estimate.currency)}
-                </dd>
-              </div>
-            </dl>
+            <KeyValues
+              className="governed-extensions-destination"
+              items={[
+                [
+                  "处理位置",
+                  preflight.destination.location === "remote" ? "远程模型服务" : "本机模型服务",
+                ],
+                [
+                  "模型服务",
+                  `${preflight.destination.location === "remote" ? "已锁定远程服务" : "已锁定本机服务"}（精确信息见高级诊断）`,
+                ],
+                [
+                  "发送资料",
+                  preflight.destination.dataCategories.map(dataCategoryLabel).join("、"),
+                ],
+                [
+                  "费用依据",
+                  `已锁定 · ${formatTimestamp(preflight.snapshot.pricing.priceUpdatedAt)}`,
+                ],
+                [
+                  "预计用量",
+                  `发送约 ${preflight.estimate.estimatedInputTokens.toLocaleString()}，返回约 ${preflight.estimate.estimatedOutputTokens.toLocaleString()}；最高 ${formatMicros(preflight.estimate.maximumCostMicros, preflight.estimate.currency)}`,
+                ],
+              ]}
+            />
             <ul className="governed-extensions-preflight__checks">
-              {preflight.checks.map((check) => (
-                <li key={check.code} data-level={check.level}>
-                  <span aria-hidden="true">
-                    {check.level === "blocking" ? "!" : check.level === "action" ? "→" : "i"}
-                  </span>
-                  <div>
-                    <strong>{check.title}</strong>
-                    <p>{check.detail}</p>
-                  </div>
-                </li>
-              ))}
+              {preflight.checks.map((check) => {
+                const copy = ordinaryPreflightCheck(check);
+                return (
+                  <li key={check.code} data-level={check.level}>
+                    <span aria-hidden="true">
+                      {check.level === "blocking" ? "!" : check.level === "action" ? "→" : "i"}
+                    </span>
+                    <div>
+                      <strong>{copy[0]}</strong>
+                      <p>{copy[1]}</p>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
+            <details className="governed-extensions-diagnostics">
+              <summary>高级诊断详情</summary>
+              <pre>{JSON.stringify(preflight.destination, null, 2)}</pre>
+            </details>
             {preflight.requiresRemoteConsent && preflight.ready && (
               <div className="governed-extensions-consent">
                 <label>
@@ -1022,7 +999,7 @@ function PreflightPanel({
                     onChange={(event) => onAcknowledged(event.target.checked)}
                   />
                   <span>
-                    我确认将所列数据发送到上述精确地址、服务方和模型；确认同时绑定当前项目、来源版本、数据类别、价格快照与请求指纹，并且仅可使用一次。
+                    我确认向高级诊断中的服务发送所列资料；确认绑定作品、来源版本、资料和费用，仅使用一次。
                   </span>
                 </label>
                 <Button
@@ -1044,6 +1021,25 @@ function PreflightPanel({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function KeyValues({
+  className,
+  items,
+}: {
+  readonly className: string;
+  readonly items: readonly (readonly [string, ReactNode])[];
+}) {
+  return (
+    <dl className={className}>
+      {items.map(([label, value]) => (
+        <div key={label}>
+          <dt>{label}</dt>
+          <dd>{value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
@@ -1207,9 +1203,9 @@ function readNumber(event: ChangeEvent<HTMLInputElement>, fallback: number): num
 
 function usageLabel(request: GovernedExtensionRequest): string {
   if (request.usage?.source !== "provider_reported") {
-    return "内容额度用量未知";
+    return "本次服务计量未知";
   }
-  return `${request.usage.inputTokens.toLocaleString()} 输入 / ${request.usage.outputTokens.toLocaleString()} 输出`;
+  return `发送 ${request.usage.inputTokens.toLocaleString()} / 返回 ${request.usage.outputTokens.toLocaleString()}`;
 }
 
 function tokenValue(request: GovernedExtensionRequest, kind: "input" | "output"): string {
@@ -1238,7 +1234,7 @@ function statusMeta(status: string): {
       return { label: "运行中", tone: "ai" };
     case "candidate_ready":
     case "ready":
-      return { label: "候选就绪", tone: "success" };
+      return { label: "结果待确认", tone: "success" };
     case "accepted":
       return { label: "已采纳", tone: "success" };
     case "rejected":
@@ -1256,11 +1252,46 @@ function statusMeta(status: string): {
   }
 }
 
+function dataCategoryLabel(category: string): string {
+  return (
+    {
+      chapter_text: "当前章节正文",
+      glossary: "本次术语表",
+      translation_settings: "本次翻译设置",
+      short_drama_settings: "本次短剧设置",
+    }[category] ?? "其他已锁定资料"
+  );
+}
+
+function ordinaryPreflightCheck(
+  check: GovernedCreativeExtensionPreflight["checks"][number],
+): readonly [string, string] {
+  return check.level === "blocking"
+    ? ["发送前检查未通过", "请修正设置后重试；原因见高级诊断。"]
+    : check.level === "action"
+      ? ["需要你确认", "请核对发送资料；精确信息见高级诊断。"]
+      : ["检查已完成", "本次生成遵守已锁定的安全和费用边界。"];
+}
 function formatMicros(micros: number, currency: string): string {
-  return `${currency} ${(micros / 1_000_000).toLocaleString(undefined, {
+  return `${currencyLabel(currency)} ${(micros / 1_000_000).toLocaleString(undefined, {
     minimumFractionDigits: 0,
     maximumFractionDigits: 6,
   })}`;
+}
+
+function currencyLabel(currency: string): string {
+  return (
+    {
+      AUD: "澳元",
+      CAD: "加元",
+      CNY: "人民币",
+      EUR: "欧元",
+      GBP: "英镑",
+      HKD: "港元",
+      JPY: "日元",
+      USD: "美元",
+    }[currency] ?? "未识别费用单位"
+  );
 }
 
 function formatTimestamp(value: string): string {

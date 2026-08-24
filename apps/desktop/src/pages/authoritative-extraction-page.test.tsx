@@ -43,9 +43,9 @@ describe("AuthoritativeExtractionPage", () => {
       <AuthoritativeExtractionPage runtime={runtime} projectId={PROJECT_ID} actorId={ACTOR_ID} />,
     );
 
-    expect(screen.getByRole("heading", { name: "权威事实抽取" })).toBeVisible();
-    expect(screen.getByText("需要桌面原生持久化")).toBeVisible();
-    expect(screen.getByText(/浏览器开发模式不会伪装生产级队列与评测存储/)).toBeVisible();
+    expect(screen.getByRole("heading", { name: "从正文更新设定" })).toBeVisible();
+    expect(screen.getByText("需要桌面本地存储")).toBeVisible();
+    expect(screen.getByText(/浏览器开发模式不会伪装可恢复任务和能力检查记录/)).toBeVisible();
     expect(inspect).not.toHaveBeenCalled();
     expect(runCycle).not.toHaveBeenCalled();
   });
@@ -65,27 +65,9 @@ describe("AuthoritativeExtractionPage", () => {
 
     expect(await screen.findByText(EXCERPT)).toBeVisible();
     expect(screen.getAllByText("离线").length).toBeGreaterThan(0);
-    expect(
-      screen.getByText(
-        (_content, element) =>
-          element?.tagName === "DD" &&
-          element.textContent.includes("story.authoritative.extract v5"),
-      ),
-    ).toBeVisible();
-    expect(
-      screen.getByText(
-        (_content, element) =>
-          element?.tagName === "DD" && element.textContent === "fixture/strict-extractor@r1",
-      ),
-    ).toBeVisible();
-    expect(screen.getByText("golden.v1")).toBeVisible();
-    expect(
-      screen.getByText(
-        (_content, element) => element?.tagName === "DD" && element.textContent === "0–63 / 63",
-      ),
-    ).toBeVisible();
-    expect(screen.getByTitle(`${CHAPTER_ID} / ${VERSION_ID}`)).toBeVisible();
-    expect(screen.getByTitle(CHECKSUM)).toBeVisible();
+    expect(screen.getByText("第 1–63 个字（共 63 个字）")).toBeVisible();
+    expect(screen.getAllByText("当前章节").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("本次整理所用的已保存版本").length).toBeGreaterThan(0);
     expect(fixture.runCycle).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "扫描当前章节" }));
@@ -93,19 +75,49 @@ describe("AuthoritativeExtractionPage", () => {
       expect(fixture.runCycle).toHaveBeenCalledWith(PROJECT_ID, { online: false });
     });
 
-    const decisionSurface = screen.getByLabelText("linzhou.location的正式设定候选决策");
+    const decisionSurface = screen.getByLabelText("地点设定的审核决定");
     expect(decisionSurface).toHaveClass("candidate-decision-surface");
-    expect(
-      within(decisionSurface).getByLabelText("linzhou.location的正式设定候选内容"),
-    ).toHaveAttribute("tabindex", "0");
+    expect(within(decisionSurface).getByLabelText("地点设定的待确认内容")).toHaveAttribute(
+      "tabindex",
+      "0",
+    );
+    expect(within(decisionSurface).getByRole("heading", { name: "地点设定待确认" })).toBeVisible();
+    const advancedDetails = within(decisionSurface).getByText("高级诊断详情");
+    const diagnosticValues = [
+      "linzhou.location",
+      JOB_ID,
+      REVIEW_ID,
+      PROJECT_ID,
+      CHAPTER_ID,
+      VERSION_ID,
+      CHECKSUM,
+      PROMPT_CHECKSUM,
+      "fixture/strict-extractor@r1",
+      "golden.v1",
+    ].map((value) => within(decisionSurface).getByText(value));
+    const extractionRule = within(decisionSurface).getByText(/story\.authoritative\.extract v5/u);
+    for (const value of [...diagnosticValues, extractionRule]) {
+      expect(value).not.toBeVisible();
+    }
+    await user.click(advancedDetails);
+    for (const value of [...diagnosticValues, extractionRule]) {
+      expect(value).toBeVisible();
+    }
+
+    const jobCard = screen.getByLabelText("章节设定整理任务");
+    const jobDetails = within(jobCard).getByText("高级诊断详情");
+    const jobChecksum = within(jobCard).getByText(CHECKSUM);
+    expect(jobChecksum).not.toBeVisible();
+    await user.click(jobDetails);
+    expect(jobChecksum).toBeVisible();
     expect(decisionSurface.querySelector(":scope > .ink-card__footer")).toHaveClass(
       "candidate-decision-actions",
     );
-    await user.click(screen.getByRole("button", { name: "修改后接受" }));
-    expect(screen.getByRole("textbox", { name: "修改后写入的正式结构化数据" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "修改后使用" }));
+    expect(screen.getByRole("textbox", { name: "修改后保存的设定内容" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "取消修改" }));
 
-    await user.click(screen.getByRole("button", { name: "接受候选" }));
+    await user.click(screen.getByRole("button", { name: "使用这条设定" }));
 
     await waitFor(() => {
       expect(fixture.decideFormal).toHaveBeenCalledWith({

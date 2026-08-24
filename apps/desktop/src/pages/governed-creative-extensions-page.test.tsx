@@ -74,10 +74,10 @@ describe("GovernedCreativeExtensionsPage", () => {
     );
 
     expect(await screen.findByText("翻译服务尚未启用")).toBeInTheDocument();
-    expect((await screen.findAllByText("内容额度用量未知")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("本次服务计量未知")).length).toBeGreaterThan(0);
     expect(screen.getByText(/供应商没有返回可核对的用量/u)).toBeInTheDocument();
     expect(screen.queryByText(/EXTENSION_USAGE_UNAVAILABLE/u)).not.toBeInTheDocument();
-    const generate = await screen.findByRole("button", { name: "生成隔离候选" });
+    const generate = await screen.findByRole("button", { name: "生成待确认结果" });
     expect(generate).toBeDisabled();
 
     await userEvent.click(screen.getByRole("button", { name: "导出历史" }));
@@ -124,30 +124,41 @@ describe("GovernedCreativeExtensionsPage", () => {
       />,
     );
 
-    expect(await screen.findByText("https://provider.example/v1")).toBeInTheDocument();
-    expect(screen.getByText("remote-provider / translation-v1")).toBeInTheDocument();
+    expect(await screen.findByText(/已锁定远程服务/u)).toBeVisible();
+    expect(screen.getByText("当前章节正文、本次术语表、本次翻译设置")).toBeVisible();
+    const advancedDiagnostics = screen.getByText("高级诊断详情");
+    const diagnosticDetails = advancedDiagnostics.closest("details");
+    const diagnosticBody = diagnosticDetails?.querySelector("pre");
+    expect(diagnosticDetails).not.toHaveAttribute("open");
+    expect(diagnosticBody).not.toBeVisible();
+    expect(diagnosticBody).toHaveTextContent("https://provider.example/v1");
+    expect(diagnosticBody).toHaveTextContent("remote-provider");
+    expect(diagnosticBody).toHaveTextContent("translation-v1");
+    expect(diagnosticBody).toHaveTextContent("chapter_text");
     expect(screen.queryByText(PROJECT_ID)).not.toBeInTheDocument();
     expect(screen.queryByText(VERSION_ID)).not.toBeInTheDocument();
     expect(screen.queryByText(SOURCE_CHECKSUM)).not.toBeInTheDocument();
-    expect(screen.queryByText(remote.requestFingerprint)).not.toBeInTheDocument();
+
+    await userEvent.click(advancedDiagnostics);
+    expect(diagnosticBody).toBeVisible();
     const blockedRun = screen.getByRole("button", { name: "先确认远程发送" });
     expect(blockedRun).toBeDisabled();
     expect(runtime.run).not.toHaveBeenCalled();
 
     await userEvent.click(
       screen.getByRole("checkbox", {
-        name: /我确认将所列数据发送到上述精确地址、服务方和模型/u,
+        name: /我确认向高级诊断中的服务发送所列资料/u,
       }),
     );
     await userEvent.click(screen.getByRole("button", { name: "创建一次性确认" }));
     await waitFor(() => expect(runtime.confirmRemoteEgress).toHaveBeenCalledWith(remote));
-    const enabledRun = await screen.findByRole("button", { name: "生成隔离候选" });
+    const enabledRun = await screen.findByRole("button", { name: "生成待确认结果" });
     expect(enabledRun).toBeEnabled();
 
     await userEvent.click(enabledRun);
     await waitFor(() => expect(didRun).toBe(true));
     expect(await screen.findByText("Rain fell on the bluestone road.")).toBeInTheDocument();
-    expect(screen.getByText(/隔离候选已就绪/u)).toBeInTheDocument();
+    expect(screen.getByText(/结果已就绪/u)).toBeInTheDocument();
   });
 
   it("runs an explicit loopback route without creating remote consent", async () => {
@@ -164,9 +175,15 @@ describe("GovernedCreativeExtensionsPage", () => {
       />,
     );
 
-    expect(await screen.findByText("http://127.0.0.1:11434/v1")).toBeInTheDocument();
+    expect(await screen.findByText(/已锁定本机服务/u)).toBeVisible();
+    const diagnostics = screen.getByText("高级诊断详情").closest("details");
+    const diagnosticBody = diagnostics?.querySelector("pre");
+    expect(diagnosticBody).not.toBeVisible();
+    expect(diagnosticBody).toHaveTextContent("http://127.0.0.1:11434/v1");
+    await userEvent.click(screen.getByText("高级诊断详情"));
+    expect(diagnosticBody).toBeVisible();
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "生成隔离候选" }));
+    await userEvent.click(screen.getByRole("button", { name: "生成待确认结果" }));
     await waitFor(() => expect(runtime.run).toHaveBeenCalled());
     expect(runtime.confirmRemoteEgress).not.toHaveBeenCalled();
     const runCall = vi.mocked(runtime.run).mock.calls[0];
@@ -200,9 +217,9 @@ describe("GovernedCreativeExtensionsPage", () => {
     expect(screen.getByText("450")).toBeInTheDocument();
     expect(runtime.acceptCandidate).not.toHaveBeenCalled();
 
-    const decisionSurface = screen.getByLabelText("受治理创意成果候选决策");
+    const decisionSurface = screen.getByLabelText("受治理创意成果待确认结果处理");
     expect(decisionSurface).toHaveClass("candidate-decision-surface");
-    expect(screen.getByLabelText("受治理创意成果候选内容")).toHaveAttribute("tabindex", "0");
+    expect(screen.getByLabelText("受治理创意成果待确认内容")).toHaveAttribute("tabindex", "0");
     expect(decisionSurface.querySelector(":scope > .ink-card__footer")).toHaveClass(
       "candidate-decision-actions",
     );
@@ -211,7 +228,7 @@ describe("GovernedCreativeExtensionsPage", () => {
     await waitFor(() =>
       expect(runtime.acceptCandidate).toHaveBeenCalledWith(candidate.id, candidate.revision),
     );
-    expect(await screen.findByText(/原章节与大纲保持不变/u)).toBeInTheDocument();
+    expect(await screen.findByText(/正文和大纲未变/u)).toBeInTheDocument();
   });
 
   it("exposes the structured short-drama settings as a separate service tab", async () => {

@@ -1,0 +1,56 @@
+.settings-page--global > .page-heading,
+.settings-page--global > .settings-section-nav,
+.settings-page--global > .settings-grid {
+  width: 100%;
+  max-width: 70rem;
+  margin-inline: auto;
+}
+
+.settings-page--global .settings-grid {
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+}
+
+.settings-page--global .settings-card--wide {
+  grid-column: auto;
+}
+
+.settings-section-nav {
+  box-sizing: border-box;
+  padding: var(--space-3) var(--space-4);
+  border: 0.0625rem solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+}
+
+.settings-section-nav__label {
+  flex: 0 0 100%;
+  color: var(--text-secondary);
+  font-size: var(--font-caption-size);
+  font-weight: 600;
+}
+
+.settings-section-nav .button-link {
+  min-height: auto;
+  justify-content: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-accent);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.settings-section-nav .button-link:hover {
+  filter: none;
+  color: var(--text-primary);
+}
+
+@media (max-width: 64rem) {
+  .settings-page--global > .page-heading,
+  .settings-page--global > .settings-section-nav,
+  .settings-page--global > .settings-grid {
+    max-width: 42.5rem;
+  }
+}

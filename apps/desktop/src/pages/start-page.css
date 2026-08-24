@@ -1,0 +1,9 @@
+.start-page h1[tabindex="-1"] {
+  outline: none;
+}
+
+.start-page__recent-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

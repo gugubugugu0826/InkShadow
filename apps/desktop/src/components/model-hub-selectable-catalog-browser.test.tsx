@@ -61,6 +61,27 @@ describe("ModelHubSelectableCatalogBrowser", () => {
     expect(screen.getByText("OpenAI · 海外")).toBeInTheDocument();
     expect(screen.getByText("共 4 个结果，其中 2 个已连接")).toBeInTheDocument();
   });
+  it("groups an unknown legacy region under a natural Chinese fallback", () => {
+    render(
+      <ModelHubSelectableCatalogBrowser
+        defaultExpanded
+        connectedModels={[
+          connectedModel({
+            catalogEntryId: "legacy-region",
+            displayName: "旧目录模型",
+            regionGroup: "LEGACY_UNKNOWN" as never,
+          }),
+        ]}
+        officialCandidates={[]}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    const unknownRegion = screen.getByRole("region", { name: "地区未提供" });
+    expect(within(unknownRegion).getByText("旧目录模型")).toBeInTheDocument();
+    expect(within(unknownRegion).getByText("Ollama · 地区未提供")).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("LEGACY_UNKNOWN");
+  });
 
   it("searches model names, providers, raw tags, and ordinary tag labels", async () => {
     const user = userEvent.setup();

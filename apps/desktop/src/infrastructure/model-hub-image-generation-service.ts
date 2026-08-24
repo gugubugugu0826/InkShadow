@@ -261,7 +261,7 @@ async function resolvePlan(
   if (!route?.enabled) {
     throw executionError(
       "MODEL_HUB_ROUTE_NOT_CONFIGURED",
-      "还没有为图片生成分配模型。请先在 AI 分工中选择经过能力确认的图片模型。",
+      "还没有为图片生成分配模型。请先在创作任务安排中选择经过能力确认的图片模型。",
     );
   }
   if (route.maximumCostMicros !== null || route.currency !== null) {
@@ -319,7 +319,7 @@ async function resolveTarget(
   if (connection === null || catalogEntry === null) {
     throw executionError(
       "MODEL_HUB_ROUTE_TARGET_MISSING",
-      "图片任务引用的模型已不存在。请重新同步模型并更新 AI 分工。",
+      "图片任务引用的模型已不存在。请重新同步模型并更新创作任务安排。",
       true,
     );
   }
@@ -567,7 +567,7 @@ function normalizePreDispatchError(cause: unknown): ModelHubExecutionError {
       ? executionError(cause.code, cause.message, cause.retryable)
       : executionError(
           "MODEL_HUB_PREFLIGHT_FAILED",
-          "图片生成前检查没有通过。请检查 AI 分工、能力、连接和隐私信息。",
+          "图片生成前检查没有通过。请检查创作任务安排、能力、连接和隐私信息。",
           true,
         );
 }

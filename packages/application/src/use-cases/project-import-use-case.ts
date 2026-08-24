@@ -110,6 +110,7 @@ export class ImportProject {
         reason: "import",
         sourceCandidateId: null,
         createdAt: now,
+        organizeLocalStoryFacts: true,
       });
       if (!version.ok) {
         return version;

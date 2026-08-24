@@ -34,7 +34,11 @@ describe("UsageCenterPage", () => {
     expect(screen.getAllByText("本地运算").length).toBeGreaterThan(0);
     expect(document.body).not.toHaveTextContent("deepseek-connection");
     expect(document.body).not.toHaveTextContent("ollama-connection");
-    expect(screen.getByText(/AI 服务暂未完成本次操作。请到设置中的 AI 模型检查/u)).toBeVisible();
+    expect(
+      screen.getByText(
+        /AI 服务暂未完成本次操作。请到模型中心检查连接、能力验证和创作任务安排后重试/u,
+      ),
+    ).toBeVisible();
     expect(screen.queryByText("LOCAL_MODEL_UNAVAILABLE_INTERNAL_SENTINEL")).not.toBeInTheDocument();
     expect(
       screen.getByText(

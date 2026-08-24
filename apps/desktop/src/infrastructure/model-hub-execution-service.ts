@@ -895,13 +895,13 @@ async function resolveTextPlan(
   if (route === null) {
     throw executionError(
       "MODEL_HUB_ROUTE_NOT_CONFIGURED",
-      "这项写作任务还没有可用的 AI 分工。请在设置中应用一个方案或手动选择模型。",
+      "这项写作任务还没有可用的创作任务安排。请在设置中应用一个方案或手动选择模型。",
     );
   }
   if (!route.enabled) {
     throw executionError(
       "MODEL_HUB_ROUTE_DISABLED",
-      "这项写作任务的 AI 分工已被停用。本次请求不会改用旧配置；如需使用 AI，请先重新启用该分工。",
+      "这项写作任务的创作任务安排已被停用。本次请求不会改用旧配置；如需使用 AI，请先重新启用该分工。",
     );
   }
 
@@ -995,7 +995,7 @@ async function resolveTextTarget(
   if (connection === null || catalogEntry?.connectionId !== connection.id) {
     throw executionError(
       "MODEL_HUB_ROUTE_TARGET_MISSING",
-      "任务引用的模型已不存在。请重新同步模型并更新 AI 分工。",
+      "任务引用的模型已不存在。请重新同步模型并更新创作任务安排。",
       true,
     );
   }
@@ -1202,7 +1202,7 @@ function resolveTextParameterPolicy(
   ) {
     throw executionError(
       "MODEL_HUB_PARAMETER_POLICY_INVALID",
-      "这项任务保存的输出长度设置无效。请重新保存 AI 分工。",
+      "这项任务保存的输出长度设置无效。请重新保存创作任务安排。",
     );
   }
   const configuredTemperature = route.parameterPolicy.temperature;
@@ -1217,7 +1217,7 @@ function resolveTextParameterPolicy(
   ) {
     throw executionError(
       "MODEL_HUB_PARAMETER_POLICY_INVALID",
-      "这项任务保存的生成参数无效。请重新保存 AI 分工。",
+      "这项任务保存的生成参数无效。请重新保存创作任务安排。",
     );
   }
   const temperature =
@@ -1360,7 +1360,7 @@ function normalizePreDispatchError(cause: unknown): ModelHubExecutionError {
   }
   return executionError(
     "MODEL_HUB_PREFLIGHT_FAILED",
-    "向模型发送前的检查没有通过。请检查 AI 分工、模型能力、隐私和费用设置。",
+    "向模型发送前的检查没有通过。请检查创作任务安排、模型能力、隐私和费用设置。",
     true,
   );
 }

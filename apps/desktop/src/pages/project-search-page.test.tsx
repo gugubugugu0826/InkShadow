@@ -32,8 +32,8 @@ describe("ProjectSearchPage", () => {
     expect(
       await screen.findByRole("heading", { name: "搜索 · 星港档案", level: 1 }),
     ).toBeInTheDocument();
-    expect(await screen.findByText(/^\d+ 个索引片段$/u)).toBeInTheDocument();
-    expect(screen.getByText("向量：未配置")).toBeInTheDocument();
+    expect(await screen.findByText(/^\d+ 段可搜索资料$/u)).toBeInTheDocument();
+    expect(screen.getByText("相关资料：未配置")).toBeInTheDocument();
 
     await user.type(screen.getByRole("searchbox", { name: /搜索词/u }), "星图核心");
     await user.click(screen.getByRole("button", { name: "搜索" }));
@@ -44,19 +44,19 @@ describe("ProjectSearchPage", () => {
       throw new Error("找不到搜索结果卡片。");
     }
     expect(within(resultCard).getByText(/领航员在第七航道/u)).toBeInTheDocument();
-    expect(within(resultCard).getByText("关键词")).toBeInTheDocument();
+    expect(within(resultCard).getByText("文字匹配")).toBeInTheDocument();
     expect(within(resultCard).getByRole("link", { name: "打开来源" })).toHaveAttribute(
       "href",
       `/projects/${project.value.id}/chapters/${chapter.value.chapter.id}`,
     );
-    expect(within(resultCard).getByText("来源版本：已绑定")).toBeVisible();
+    expect(within(resultCard).getByText("已对应保存版本")).toBeVisible();
     expect(resultCard).not.toHaveTextContent(chapter.value.chapter.currentVersionId);
-    expect(screen.getByText(/浏览器开发模式不提供真实嵌入能力/u)).toBeInTheDocument();
+    expect(screen.getByText(/浏览器开发模式无法使用本机模型服务/u)).toBeInTheDocument();
   });
 
-  it("keeps remote vector rebuild closed and searches without Provider dispatch", async () => {
+  it("keeps remote related-material preparation closed and hides technical details by default", async () => {
     const development = createDevelopmentRuntime(window.localStorage);
-    const project = await development.useCases.createProject.execute({ name: "远程向量披露" });
+    const project = await development.useCases.createProject.execute({ name: "远程资料披露" });
     if (!project.ok) {
       throw project.error;
     }
@@ -92,15 +92,30 @@ describe("ProjectSearchPage", () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     renderRoute(runtime, `/projects/${project.value.id}/search`);
 
-    expect(
-      await screen.findByText(/当前版本不会从普通搜索页发起向量重建或查询嵌入/u),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/https:\/\/models\.example\/tenant\/v1\/embeddings/u),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "向量重建尚未开放" })).toBeDisabled();
+    expect(await screen.findByText(/普通搜索页不会自动联系模型服务/u)).toBeInTheDocument();
+    const advancedSummary = screen.getByText("高级诊断详情");
+    const advancedDetails = advancedSummary.closest("details");
+    if (!(advancedDetails instanceof HTMLDetailsElement)) {
+      throw new Error("找不到高级诊断详情。");
+    }
+    const diagnosticValues = [
+      "embed-primary",
+      "remote-embedding",
+      "https://models.example/tenant/v1/embeddings",
+      "embedding-profile:confirmed-endpoint",
+      "vector_index_not_built",
+    ].map((value) => within(advancedDetails).getByText(value));
+    for (const value of diagnosticValues) {
+      expect(value).not.toBeVisible();
+    }
+    expect(screen.getByRole("button", { name: "模型辅助整理尚未开放" })).toBeDisabled();
     expect(rebuildVectorProject).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
+
+    await userEvent.setup().click(advancedSummary);
+    for (const value of diagnosticValues) {
+      expect(value).toBeVisible();
+    }
     confirm.mockRestore();
   });
 });

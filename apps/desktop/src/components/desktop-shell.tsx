@@ -360,6 +360,9 @@ export function DesktopShell({ children }: DesktopShellProps) {
       ? aiReadiness.description
       : `${scopedTaskLabel}受影响：${modelHubReadinessBlockerLabel(scopedBlockerCode)}。${scopedRepair.guidance}；正文、不可变版本和隔离建议均未改变。`;
   const aiStatusTone = scopedBlockerCode === null ? aiReadiness.tone : "warning";
+  const currentAppearanceLabel = resolvedSurface === "dark" ? "深色" : "浅色";
+  const nextAppearanceLabel = resolvedSurface === "dark" ? "浅色" : "深色";
+  const appearanceSwitchLabel = `当前${currentAppearanceLabel}外观，切换到${nextAppearanceLabel}外观`;
 
   const topBar = (
     <div className="desktop-topbar">
@@ -439,7 +442,7 @@ export function DesktopShell({ children }: DesktopShellProps) {
               },
               {
                 id: "appearance",
-                label: resolvedSurface === "dark" ? "外观：切换到浅色" : "外观：切换到深色",
+                label: `外观：当前${currentAppearanceLabel}，切换到${nextAppearanceLabel}`,
                 onSelect: () => setAppearance(resolvedSurface === "dark" ? "light" : "dark"),
               },
               {
@@ -467,10 +470,11 @@ export function DesktopShell({ children }: DesktopShellProps) {
             <Button
               variant="ghost"
               size="sm"
-              aria-label={resolvedSurface === "dark" ? "切换到浅色外观" : "切换到深色外观"}
+              aria-label={appearanceSwitchLabel}
+              title={appearanceSwitchLabel}
               onClick={() => setAppearance(resolvedSurface === "dark" ? "light" : "dark")}
             >
-              {resolvedSurface === "dark" ? "浅色" : "深色"}
+              {currentAppearanceLabel}
             </Button>
           </>
         )}
@@ -561,22 +565,24 @@ export function DesktopShell({ children }: DesktopShellProps) {
           </div>
         )}
       </div>
-      {!directMode && (
+      {writingExperience.preference !== null && (
         <div className="desktop-navigation__footer">
           <div className="desktop-navigation__section" aria-label="工具导航">
-            <NavLink
-              className={({ isActive }) =>
-                `desktop-navigation__link${isActive ? " is-active" : ""}`
-              }
-              to="/tasks"
-              aria-label="任务与通知"
-              onClick={() => setNavigationOpen(false)}
-            >
-              <span className="desktop-navigation__marker" aria-hidden="true">
-                <InkIcon name="bell" decorative size={20} />
-              </span>
-              <span className="desktop-navigation__label">任务与通知</span>
-            </NavLink>
+            {!directMode && (
+              <NavLink
+                className={({ isActive }) =>
+                  `desktop-navigation__link${isActive ? " is-active" : ""}`
+                }
+                to="/tasks"
+                aria-label="任务与通知"
+                onClick={() => setNavigationOpen(false)}
+              >
+                <span className="desktop-navigation__marker" aria-hidden="true">
+                  <InkIcon name="bell" decorative size={20} />
+                </span>
+                <span className="desktop-navigation__label">任务与通知</span>
+              </NavLink>
+            )}
             <NavLink
               className={({ isActive }) =>
                 `desktop-navigation__link${isActive ? " is-active" : ""}`

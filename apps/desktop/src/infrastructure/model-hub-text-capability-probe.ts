@@ -34,6 +34,22 @@ export const MODEL_HUB_TEXT_CAPABILITY_PROBE_DISPATCH_SCOPE = Object.freeze({
   reason: "connection_probe",
 }) satisfies NativeModelDispatchScope;
 
+/**
+ * Builds a stable ordinary-user support number from the durable probe
+ * invocation. It never exposes the complete invocation identifier.
+ */
+export function modelHubCapabilityProbeSupportId(
+  input: Readonly<{ id: string; startedAt: string | null }>,
+): string {
+  const stamp = (input.startedAt ?? "")
+    .replace(/[^0-9]/gu, "")
+    .slice(0, 14)
+    .padEnd(14, "0");
+  const trace = input.id.replace(/[^a-z0-9]/giu, "").toUpperCase();
+  const suffix = trace.slice(-6).padStart(6, "0");
+  return "墨影-" + stamp + "-" + suffix;
+}
+
 export interface ModelHubTextCapabilityProbeResult extends NativeModelGenerationResult {
   /** True only when a probe accepted already-visible text from a truncated native response. */
   readonly acceptedTruncatedOutput: boolean;

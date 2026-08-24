@@ -141,6 +141,82 @@ describe("DataTransferPanel import journey", () => {
     }
   });
 
+  it("keeps zero projects when import preflight rejects a file", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const executeImport = vi.spyOn(runtime.useCases.importProject, "execute");
+    const user = userEvent.setup({ applyAccept: false });
+    const view = render(
+      <MemoryRouter>
+        <RuntimeProvider runtime={runtime}>
+          <DataTransferPanel />
+        </RuntimeProvider>
+      </MemoryRouter>,
+    );
+    const fileInput = view.container.querySelector<HTMLInputElement>('input[type="file"]');
+    if (fileInput === null) throw new Error("Expected the import file input.");
+
+    await user.upload(
+      fileInput,
+      new File([new Uint8Array([0, 1, 2, 3])], "unsafe.exe", {
+        type: "application/octet-stream",
+      }),
+    );
+
+    expect(await screen.findByRole("list", { name: "预检提示" })).toHaveTextContent(
+      "文件扩展名不受支持。",
+    );
+    expect(executeImport).not.toHaveBeenCalled();
+    await expect(
+      runtime.useCases.listProjects.execute({
+        statuses: ["active", "archived", "trashed"],
+      }),
+    ).resolves.toMatchObject({ ok: true, value: [] });
+  });
+
+  it("cancels an in-progress preflight without calling the atomic import", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const executeImport = vi.spyOn(runtime.useCases.importProject, "execute");
+    const user = userEvent.setup();
+    const view = render(
+      <MemoryRouter>
+        <RuntimeProvider runtime={runtime}>
+          <DataTransferPanel />
+        </RuntimeProvider>
+      </MemoryRouter>,
+    );
+    const fileInput = view.container.querySelector<HTMLInputElement>('input[type="file"]');
+    if (fileInput === null) throw new Error("Expected the import file input.");
+    let streamCancelled = false;
+    const file = new File([new Uint8Array([65])], "pending.txt", {
+      type: "text/plain",
+    });
+    Object.defineProperty(file, "stream", {
+      configurable: true,
+      value: () =>
+        new ReadableStream<Uint8Array>({
+          pull: () => new Promise<void>(() => undefined),
+          cancel: () => {
+            streamCancelled = true;
+          },
+        }),
+    });
+
+    await user.upload(fileInput, file);
+    await user.click(await screen.findByRole("button", { name: "取消预检" }));
+
+    await waitFor(() => expect(streamCancelled).toBe(true));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "取消预检" })).not.toBeInTheDocument(),
+    );
+    expect(executeImport).not.toHaveBeenCalled();
+    expect(screen.queryByText("预检通过，尚未写入项目")).not.toBeInTheDocument();
+    await expect(
+      runtime.useCases.listProjects.execute({
+        statuses: ["active", "archived", "trashed"],
+      }),
+    ).resolves.toMatchObject({ ok: true, value: [] });
+  });
+
   it("downloads a selected project-scoped domain report", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const created = await runtime.useCases.createProject.execute({ name: "可导出项目" });

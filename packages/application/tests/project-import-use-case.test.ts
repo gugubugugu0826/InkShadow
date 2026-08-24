@@ -44,10 +44,21 @@ describe("ImportProject", () => {
         title: chapter.title,
         content: chapter.content,
         reason: initialVersion.toSnapshot().reason,
+        organizeLocalStoryFacts: initialVersion.toSnapshot().organizeLocalStoryFacts,
       })),
     ).toEqual([
-      { title: "第一章", content: "开篇正文", reason: "import" },
-      { title: "第二章", content: "后续正文", reason: "import" },
+      {
+        title: "第一章",
+        content: "开篇正文",
+        reason: "import",
+        organizeLocalStoryFacts: true,
+      },
+      {
+        title: "第二章",
+        content: "后续正文",
+        reason: "import",
+        organizeLocalStoryFacts: true,
+      },
     ]);
   });
 

@@ -22,7 +22,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::{Mutex, MutexGuard};
 
-use crate::local_migrations::run_local_migrations;
+use crate::local_migrations::{run_local_migrations, LocalMigrationError};
 use crate::path_tickets::{
     PathTicketError, PathTicketPurpose, PathTicketReceipt, PathTicketState, TicketedPathOperation,
 };
@@ -788,6 +788,22 @@ pub(crate) struct NativeExecuteResult {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct NativeSqliteMigrationDiagnostic {
+    reason_code: &'static str,
+    expected_version: i64,
+    actual_version: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    migration_version: Option<i64>,
+    whitelist_reason_code: &'static str,
+    native_error_class: &'static str,
+    sqlite_primary_code: Option<u32>,
+    sqlite_extended_code: Option<u32>,
+    cause_chain: Vec<&'static str>,
+    component_stack: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct NativeSqliteError {
     code: &'static str,
     message: &'static str,
@@ -796,6 +812,155 @@ pub(crate) struct NativeSqliteError {
     stage: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     outcome: Option<&'static str>,
+    #[serde(flatten)]
+    migration_diagnostic: Option<Box<NativeSqliteMigrationDiagnostic>>,
+}
+
+struct SafeMigrationSourceDiagnostic {
+    native_error_class: &'static str,
+    sqlite_primary_code: Option<u32>,
+    sqlite_extended_code: Option<u32>,
+    cause_chain: Vec<&'static str>,
+}
+
+fn sqlite_numeric_codes(error: &sqlx::Error) -> (Option<u32>, Option<u32>) {
+    let extended = match error {
+        sqlx::Error::Database(database_error) => database_error
+            .code()
+            .and_then(|code| code.parse::<u32>().ok()),
+        _ => None,
+    };
+    (extended.map(|code| code & 0xff), extended)
+}
+
+fn safe_sqlx_error_variant(error: &sqlx::Error) -> &'static str {
+    match error {
+        sqlx::Error::Database(_) => "SqlxError::Database",
+        sqlx::Error::Configuration(_) => "SqlxError::Configuration",
+        sqlx::Error::InvalidArgument(_) => "SqlxError::InvalidArgument",
+        sqlx::Error::Io(_) => "SqlxError::Io",
+        sqlx::Error::Protocol(_) => "SqlxError::Protocol",
+        sqlx::Error::RowNotFound => "SqlxError::RowNotFound",
+        sqlx::Error::Encode(_) => "SqlxError::Encode",
+        sqlx::Error::Decode(_) | sqlx::Error::ColumnDecode { .. } => "SqlxError::Decode",
+        _ => "SqlxError::Other",
+    }
+}
+
+fn safe_sqlx_error_class(error: &sqlx::Error) -> &'static str {
+    let (primary, _) = sqlite_numeric_codes(error);
+    match error {
+        sqlx::Error::Database(_) => match primary {
+            Some(5) => "SQLITE_BUSY",
+            Some(8) => "SQLITE_READ_ONLY",
+            Some(10) => "SQLITE_IO_ERROR",
+            Some(11) => "SQLITE_CORRUPT",
+            Some(13) => "SQLITE_FULL",
+            Some(19) => "SQLITE_CONSTRAINT",
+            Some(26) => "SQLITE_NOT_A_DATABASE",
+            _ => "SQLITE_DATABASE_ERROR",
+        },
+        sqlx::Error::Configuration(_) => "SQLX_CONFIGURATION",
+        sqlx::Error::InvalidArgument(_) => "SQLX_INVALID_ARGUMENT",
+        sqlx::Error::Io(_) => "SQLX_IO",
+        sqlx::Error::Protocol(_) => "SQLX_PROTOCOL",
+        sqlx::Error::RowNotFound => "SQLX_ROW_NOT_FOUND",
+        sqlx::Error::Encode(_) => "SQLX_ENCODE",
+        sqlx::Error::Decode(_) | sqlx::Error::ColumnDecode { .. } => "SQLX_DECODE",
+        _ => "SQLX_OTHER",
+    }
+}
+
+fn safe_migration_source_diagnostic(
+    error: &sqlx::migrate::MigrateError,
+    reason_code: &'static str,
+) -> SafeMigrationSourceDiagnostic {
+    use sqlx::migrate::MigrateError;
+
+    let mut cause_chain = vec!["LocalMigrationError"];
+    let (native_error_class, sqlite_primary_code, sqlite_extended_code) = match error {
+        MigrateError::Execute(error) => {
+            cause_chain.push("MigrateError::Execute");
+            cause_chain.push(safe_sqlx_error_variant(error));
+            let class = safe_sqlx_error_class(error);
+            cause_chain.push(class);
+            let (primary, extended) = sqlite_numeric_codes(error);
+            (class, primary, extended)
+        }
+        MigrateError::ExecuteMigration(error, _) => {
+            cause_chain.push("MigrateError::ExecuteMigration");
+            cause_chain.push(safe_sqlx_error_variant(error));
+            let class = safe_sqlx_error_class(error);
+            cause_chain.push(class);
+            let (primary, extended) = sqlite_numeric_codes(error);
+            (class, primary, extended)
+        }
+        MigrateError::Source(_) => {
+            cause_chain.push("MigrateError::Source");
+            cause_chain.push("MigrationSourceError");
+            ("MIGRATE_SOURCE", None, None)
+        }
+        MigrateError::VersionMissing(_) => {
+            cause_chain.push("MigrateError::VersionMissing");
+            ("MIGRATE_VERSION_MISSING", None, None)
+        }
+        MigrateError::VersionMismatch(_) => {
+            cause_chain.push("MigrateError::VersionMismatch");
+            ("MIGRATE_VERSION_MISMATCH", None, None)
+        }
+        MigrateError::VersionNotPresent(_) => {
+            cause_chain.push("MigrateError::VersionNotPresent");
+            ("MIGRATE_VERSION_NOT_PRESENT", None, None)
+        }
+        MigrateError::VersionTooOld(_, _) => {
+            cause_chain.push("MigrateError::VersionTooOld");
+            ("MIGRATE_VERSION_TOO_OLD", None, None)
+        }
+        MigrateError::VersionTooNew(_, _) => {
+            cause_chain.push("MigrateError::VersionTooNew");
+            ("MIGRATE_VERSION_TOO_NEW", None, None)
+        }
+        MigrateError::Dirty(_) => {
+            cause_chain.push("MigrateError::Dirty");
+            ("MIGRATE_DIRTY", None, None)
+        }
+        _ => {
+            cause_chain.push("MigrateError::Other");
+            ("MIGRATE_OTHER", None, None)
+        }
+    };
+    if cause_chain.last().copied() != Some(reason_code) {
+        cause_chain.push(reason_code);
+    }
+    cause_chain.truncate(6);
+    SafeMigrationSourceDiagnostic {
+        native_error_class,
+        sqlite_primary_code,
+        sqlite_extended_code,
+        cause_chain,
+    }
+}
+
+fn safe_migration_component_stack(
+    stage: &'static str,
+    reason_code: &'static str,
+) -> Vec<&'static str> {
+    let mut components = vec![
+        "native_sqlite_open",
+        "NativeSqliteBridge::open_file",
+        "NativeSqliteBridge::open_options_and_migrate",
+        "run_local_migrations",
+    ];
+    if stage == "migration_history_validation" {
+        components.push(if reason_code == "PUBLISHED_MIGRATION_BASELINE_INVALID" {
+            "verify_published_v029_manifest"
+        } else {
+            "audit_applied_migration_history"
+        });
+    } else {
+        components.push("Migrator::run_direct");
+    }
+    components
 }
 
 impl NativeSqliteError {
@@ -806,36 +971,43 @@ impl NativeSqliteError {
             retryable,
             stage: None,
             outcome: None,
+            migration_diagnostic: None,
         }
     }
 
     fn operation_timeout(stage: &'static str, outcome: &'static str) -> Self {
         Self {
-            code: "SQLITE_OPERATION_TIMEOUT",
-            message: "The local database operation exceeded its bounded execution window.",
-            retryable: true,
             stage: Some(stage),
             outcome: Some(outcome),
+            ..Self::new(
+                "SQLITE_OPERATION_TIMEOUT",
+                "The local database operation exceeded its bounded execution window.",
+                true,
+            )
         }
     }
 
     fn write_outcome_unknown(stage: &'static str) -> Self {
         Self {
-            code: "SQLITE_WRITE_OUTCOME_UNKNOWN",
-            message: "The local database write result could not be confirmed.",
-            retryable: false,
             stage: Some(stage),
             outcome: Some("unknown"),
+            ..Self::new(
+                "SQLITE_WRITE_OUTCOME_UNKNOWN",
+                "The local database write result could not be confirmed.",
+                false,
+            )
         }
     }
 
     fn commit_outcome_unknown() -> Self {
         Self {
-            code: "SQLITE_COMMIT_OUTCOME_UNKNOWN",
-            message: "The local database commit result could not be confirmed.",
-            retryable: false,
             stage: Some("transaction_commit"),
             outcome: Some("unknown"),
+            ..Self::new(
+                "SQLITE_COMMIT_OUTCOME_UNKNOWN",
+                "The local database commit result could not be confirmed.",
+                false,
+            )
         }
     }
 
@@ -867,6 +1039,13 @@ impl NativeSqliteError {
         Self::new(
             "SQLITE_DISK_FULL",
             "The local database cannot write because the disk is full.",
+            false,
+        )
+    }
+    fn database_read_only() -> Self {
+        Self::new(
+            "SQLITE_READ_ONLY",
+            "The local database is read-only. Preserve it and restore write access before retrying.",
             false,
         )
     }
@@ -924,6 +1103,8 @@ impl NativeSqliteError {
         match extended_code.map(|code| code & 0xff) {
             // SQLITE_BUSY and every SQLITE_BUSY_* extended result.
             Some(5) => Self::busy(),
+            // SQLITE_READONLY and every SQLITE_READONLY_* extended result.
+            Some(8) => Self::database_read_only(),
             // SQLITE_FULL has no extended result today, but masking keeps the
             // mapping stable if SQLite introduces one later.
             Some(13) => Self::disk_full(),
@@ -933,25 +1114,51 @@ impl NativeSqliteError {
         }
     }
 
-    fn from_migrate(error: sqlx::migrate::MigrateError) -> Self {
+    fn from_migrate(error: LocalMigrationError) -> Self {
         use sqlx::migrate::MigrateError;
 
-        match error {
-            MigrateError::VersionMissing(_)
-            | MigrateError::VersionMismatch(_)
-            | MigrateError::VersionNotPresent(_)
-            | MigrateError::VersionTooOld(_, _)
-            | MigrateError::VersionTooNew(_, _)
-            | MigrateError::Dirty(_) => Self::migration_integrity_failed(),
-            MigrateError::Execute(error) | MigrateError::ExecuteMigration(error, _) => {
-                let mapped = Self::from_sqlx(error);
-                match mapped.code {
-                    "SQLITE_BUSY" | "SQLITE_DISK_FULL" | "SQLITE_DATABASE_CORRUPT" => mapped,
-                    _ => Self::migration_failed(),
+        let LocalMigrationError {
+            source,
+            stage,
+            reason_code,
+            expected_version,
+            actual_version,
+            migration_version,
+            whitelist_reason_code,
+        } = error;
+        let source_diagnostic = safe_migration_source_diagnostic(&source, reason_code);
+        let component_stack = safe_migration_component_stack(stage, reason_code);
+        let mut mapped = if stage == "migration_history_validation" {
+            Self::migration_integrity_failed()
+        } else {
+            match *source {
+                MigrateError::Execute(error) | MigrateError::ExecuteMigration(error, _) => {
+                    let mapped = Self::from_sqlx(error);
+                    match mapped.code {
+                        "SQLITE_BUSY"
+                        | "SQLITE_READ_ONLY"
+                        | "SQLITE_DISK_FULL"
+                        | "SQLITE_DATABASE_CORRUPT" => mapped,
+                        _ => Self::migration_failed(),
+                    }
                 }
+                _ => Self::migration_failed(),
             }
-            _ => Self::migration_failed(),
-        }
+        };
+        mapped.stage = Some(stage);
+        mapped.migration_diagnostic = Some(Box::new(NativeSqliteMigrationDiagnostic {
+            reason_code,
+            expected_version,
+            actual_version,
+            migration_version,
+            whitelist_reason_code,
+            native_error_class: source_diagnostic.native_error_class,
+            sqlite_primary_code: source_diagnostic.sqlite_primary_code,
+            sqlite_extended_code: source_diagnostic.sqlite_extended_code,
+            cause_chain: source_diagnostic.cause_chain,
+            component_stack,
+        }));
+        mapped
     }
 
     fn invalidated() -> Self {
@@ -3809,6 +4016,60 @@ mod tests {
             .expect_err("checksum mismatch must be terminal");
         assert_eq!(error.code, "SQLITE_MIGRATION_INTEGRITY_FAILED");
         assert!(!error.retryable);
+        let diagnostic = serde_json::to_value(&error).expect("serialize migration diagnostic");
+        assert_eq!(
+            diagnostic.get("stage").and_then(JsonValue::as_str),
+            Some("migration_history_validation")
+        );
+        assert_eq!(
+            diagnostic.get("reasonCode").and_then(JsonValue::as_str),
+            Some("MIGRATION_CHECKSUM_UNKNOWN")
+        );
+        assert_eq!(
+            diagnostic
+                .get("expectedVersion")
+                .and_then(JsonValue::as_i64),
+            Some(80)
+        );
+        assert_eq!(
+            diagnostic
+                .get("nativeErrorClass")
+                .and_then(JsonValue::as_str),
+            Some("MIGRATE_VERSION_MISMATCH")
+        );
+        assert!(diagnostic
+            .get("sqlitePrimaryCode")
+            .is_some_and(JsonValue::is_null));
+        assert!(diagnostic
+            .get("sqliteExtendedCode")
+            .is_some_and(JsonValue::is_null));
+        assert_eq!(
+            diagnostic
+                .get("causeChain")
+                .and_then(JsonValue::as_array)
+                .expect("safe cause chain")
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .collect::<Vec<_>>(),
+            vec![
+                "LocalMigrationError",
+                "MigrateError::VersionMismatch",
+                "MIGRATION_CHECKSUM_UNKNOWN"
+            ]
+        );
+        assert_eq!(
+            diagnostic.get("actualVersion").and_then(JsonValue::as_i64),
+            Some(80)
+        );
+        assert_eq!(
+            diagnostic
+                .get("migrationVersion")
+                .and_then(JsonValue::as_i64),
+            Some(1)
+        );
+        assert!(diagnostic.get("path").is_none());
+        assert!(diagnostic.get("sql").is_none());
+        assert!(diagnostic.get("content").is_none());
         assert!(bridge.connection.is_none());
         assert!(bridge.session_token.is_none());
         assert!(database_path.is_file());
@@ -3832,6 +4093,194 @@ mod tests {
         assert_eq!(sentinel, "preserved");
         assert_eq!(checksum, vec![0]);
         inspection.close().await.expect("close inspection");
+    }
+
+    #[tokio::test]
+    async fn classifies_read_only_migration_failure_and_preserves_the_database() {
+        let directory = TestDirectory::create();
+        let database_path = directory.path().join("read-only-migration.db");
+        let mut writable = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&database_path)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("create read-only migration fixture");
+        sqlx::query(
+            "CREATE TABLE startup_sentinel (
+               id INTEGER PRIMARY KEY,
+               value TEXT NOT NULL
+             )",
+        )
+        .execute(&mut writable)
+        .await
+        .expect("create preserved sentinel table");
+        sqlx::query("INSERT INTO startup_sentinel (id, value) VALUES (1, ?)")
+            .bind("PRIVATE_PROSE_MARKER")
+            .execute(&mut writable)
+            .await
+            .expect("insert preserved sentinel row");
+        writable.close().await.expect("close writable fixture");
+        let original_bytes = std::fs::read(&database_path).expect("read original fixture bytes");
+
+        let mut read_only = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&database_path)
+                .create_if_missing(false)
+                .read_only(true),
+        )
+        .await
+        .expect("open fixture in SQLite read-only mode");
+        let migration_error = run_local_migrations(&mut read_only)
+            .await
+            .expect_err("forward migration must fail on a read-only database");
+        let error = NativeSqliteError::from_migrate(migration_error);
+        assert_eq!(error.code, "SQLITE_READ_ONLY");
+        assert!(!error.retryable);
+        assert_eq!(error.stage, Some("migration_apply"));
+
+        let diagnostic = serde_json::to_value(&error).expect("serialize read-only diagnostic");
+        assert_eq!(
+            diagnostic
+                .get("nativeErrorClass")
+                .and_then(JsonValue::as_str),
+            Some("SQLITE_READ_ONLY")
+        );
+        assert_eq!(
+            diagnostic
+                .get("sqlitePrimaryCode")
+                .and_then(JsonValue::as_u64),
+            Some(8)
+        );
+        assert_eq!(
+            diagnostic
+                .get("sqliteExtendedCode")
+                .and_then(JsonValue::as_u64)
+                .map(|code| code & 0xff),
+            Some(8)
+        );
+        let causes = diagnostic
+            .get("causeChain")
+            .and_then(JsonValue::as_array)
+            .expect("read-only cause chain")
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(causes.first().copied(), Some("LocalMigrationError"));
+        assert!(causes.iter().any(|cause| matches!(
+            *cause,
+            "MigrateError::Execute" | "MigrateError::ExecuteMigration"
+        )));
+        assert!(causes.contains(&"SqlxError::Database"));
+        assert!(causes.contains(&"SQLITE_READ_ONLY"));
+        let serialized = serde_json::to_string(&error).expect("serialize safe diagnostic text");
+        assert!(!serialized.contains("PRIVATE_PROSE_MARKER"));
+        assert!(!serialized.contains("read-only-migration.db"));
+        assert!(!serialized.contains("startup_sentinel"));
+        assert!(diagnostic.get("path").is_none());
+        assert!(diagnostic.get("sql").is_none());
+        assert!(diagnostic.get("content").is_none());
+
+        let sentinel: String =
+            sqlx::query_scalar("SELECT value FROM startup_sentinel WHERE id = 1")
+                .fetch_one(&mut read_only)
+                .await
+                .expect("read preserved sentinel through read-only connection");
+        assert_eq!(sentinel, "PRIVATE_PROSE_MARKER");
+        read_only.close().await.expect("close read-only fixture");
+        assert_eq!(
+            std::fs::read(&database_path).expect("read preserved fixture bytes"),
+            original_bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn classifies_controlled_sqlite_page_exhaustion_without_losing_existing_rows() {
+        let directory = TestDirectory::create();
+        let database_path = directory.path().join("page-limit-migration.db");
+        let mut connection = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&database_path)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("create controlled page-limit fixture");
+        sqlx::query("PRAGMA page_size = 512")
+            .execute(&mut connection)
+            .await
+            .expect("set small deterministic page size");
+        sqlx::query(
+            "CREATE TABLE startup_sentinel (
+               id INTEGER PRIMARY KEY,
+               value TEXT NOT NULL
+             )",
+        )
+        .execute(&mut connection)
+        .await
+        .expect("create sentinel before exhausting pages");
+        sqlx::query("INSERT INTO startup_sentinel (id, value) VALUES (1, 'preserved')")
+            .execute(&mut connection)
+            .await
+            .expect("insert sentinel before exhausting pages");
+        let initial_pages: i64 = sqlx::query_scalar("PRAGMA page_count")
+            .fetch_one(&mut connection)
+            .await
+            .expect("read initial page count");
+        let maximum_pages: i64 =
+            sqlx::query_scalar(&format!("PRAGMA max_page_count = {}", initial_pages + 2))
+                .fetch_one(&mut connection)
+                .await
+                .expect("set controlled SQLite page limit");
+        assert_eq!(maximum_pages, initial_pages + 2);
+
+        let migration_error = run_local_migrations(&mut connection)
+            .await
+            .expect_err("published migrations must exceed the controlled page limit");
+        let error = NativeSqliteError::from_migrate(migration_error);
+        assert_eq!(error.code, "SQLITE_DISK_FULL");
+        assert!(!error.retryable);
+        assert_eq!(error.stage, Some("migration_apply"));
+
+        let diagnostic = serde_json::to_value(&error).expect("serialize page-limit diagnostic");
+        assert_eq!(
+            diagnostic
+                .get("nativeErrorClass")
+                .and_then(JsonValue::as_str),
+            Some("SQLITE_FULL")
+        );
+        assert_eq!(
+            diagnostic
+                .get("sqlitePrimaryCode")
+                .and_then(JsonValue::as_u64),
+            Some(13)
+        );
+        assert_eq!(
+            diagnostic
+                .get("sqliteExtendedCode")
+                .and_then(JsonValue::as_u64)
+                .map(|code| code & 0xff),
+            Some(13)
+        );
+        let causes = diagnostic
+            .get("causeChain")
+            .and_then(JsonValue::as_array)
+            .expect("page-limit cause chain")
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .collect::<Vec<_>>();
+        assert!(causes.iter().any(|cause| matches!(
+            *cause,
+            "MigrateError::Execute" | "MigrateError::ExecuteMigration"
+        )));
+        assert!(causes.contains(&"SqlxError::Database"));
+        assert!(causes.contains(&"SQLITE_FULL"));
+        let sentinel: String =
+            sqlx::query_scalar("SELECT value FROM startup_sentinel WHERE id = 1")
+                .fetch_one(&mut connection)
+                .await
+                .expect("existing user row remains readable after page exhaustion");
+        assert_eq!(sentinel, "preserved");
+        connection.close().await.expect("close page-limit fixture");
     }
 
     #[tokio::test]

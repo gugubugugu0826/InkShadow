@@ -60,19 +60,8 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         )
       )}
       <span className="ink-button__label">
-        <span
-          className="ink-button__label-copy"
-          data-visible={loading ? undefined : true}
-          aria-hidden={loading || undefined}
-        >
-          {children}
-        </span>
-        <span
-          className="ink-button__label-copy"
-          data-visible={loading || undefined}
-          aria-hidden={loading ? undefined : true}
-        >
-          {loadingLabel}
+        <span className="ink-button__label-copy" data-visible>
+          {loading ? loadingLabel : children}
         </span>
       </span>
       {!loading && trailingIcon && (

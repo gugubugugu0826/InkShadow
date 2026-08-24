@@ -128,7 +128,7 @@ export async function prepareModelHubTaskCapabilityProbeDisclosure(
     ),
     ...(connection.authenticationMode === "none"
       ? []
-      : ["请求鉴权：使用当前连接凭据；凭据不会写入探针消息正文。"]),
+      : ["身份验证：使用当前连接凭据；凭据不会写入能力检查内容。"]),
   ]);
   const privacy = privacyDisclosure(local, connection.authenticationMode !== "none", costPrivacy);
   const authority = Object.freeze({
@@ -194,7 +194,7 @@ export async function assertConfirmedModelHubTaskCapabilityProbeDisclosure(
   if (!input.humanConfirmed || input.disclosedFingerprint.trim().length === 0) {
     throw new ModelHubTaskCapabilityProbeDisclosureError(
       "MODEL_HUB_TASK_PROBE_CONFIRMATION_REQUIRED",
-      "发送固定能力验证前，需要先查看说明并明确确认。",
+      "进行模型能力检查前，需要先查看发送说明并明确确认。",
     );
   }
   const current = await prepareModelHubTaskCapabilityProbeDisclosure(dependencies, input);
@@ -242,6 +242,6 @@ function trainingLabel(value: ModelCostPrivacyProfile["trainingPolicy"]): string
 function disclosureChanged(): ModelHubTaskCapabilityProbeDisclosureError {
   return new ModelHubTaskCapabilityProbeDisclosureError(
     "MODEL_HUB_TASK_PROBE_DISCLOSURE_CHANGED",
-    "连接、模型、分工、费用或隐私设置已经变化；本次没有发送，请重新查看说明后确认。",
+    "连接、模型、创作任务安排、费用或隐私设置已经变化；本次没有发送，请重新查看说明后确认。",
   );
 }
