@@ -1,6 +1,7 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { backup } from "node:sqlite";
 
 import { ImportProject } from "@inkshadow/application";
 import { createSqliteRepositories } from "@inkshadow/data";
@@ -18,7 +19,7 @@ import {
   StoryFactApplicationService,
   parseUuidV7 as parseStoryUuidV7,
 } from "@inkshadow/story-core";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { NodeSqliteExecutor } from "../../../../packages/data/tests/node-sqlite-executor.js";
 import { ensureCurrentSavedVersionStoryFactsForDirectMode } from "./accepted-chapter-fact-preflight";
@@ -41,6 +42,26 @@ const IMPORTED_CONTENT = [
   "钟摆倒转。",
 ].join("");
 
+let schemaTemplateDirectory: string | undefined;
+let schemaTemplatePath: string | undefined;
+
+beforeAll(async () => {
+  schemaTemplateDirectory = mkdtempSync(path.join(tmpdir(), "inkshadow-schema-template-"));
+  schemaTemplatePath = path.join(schemaTemplateDirectory, "inkshadow.sqlite");
+  const templateExecutor = new NodeSqliteExecutor(readCurrentLocalSchema());
+  try {
+    await backup(templateExecutor.database, schemaTemplatePath);
+  } finally {
+    await templateExecutor.close();
+  }
+});
+
+afterAll(() => {
+  if (schemaTemplateDirectory !== undefined) {
+    rmSync(schemaTemplateDirectory, { recursive: true, force: true });
+  }
+});
+
 const temporaryDirectories: string[] = [];
 const openExecutors: NodeSqliteExecutor[] = [];
 
@@ -60,7 +81,7 @@ describe("imported story facts through the production SQLite boundary", () => {
     const databasePath = path.join(directory, "inkshadow.sqlite");
     const clock = fixedClock();
     const hasher = new CryptoContentHasher();
-    const firstExecutor = new NodeSqliteExecutor(readCurrentLocalSchema(), databasePath);
+    const firstExecutor = createCurrentSchemaExecutor(databasePath);
     openExecutors.push(firstExecutor);
     const firstRepositories = createSqliteRepositories(firstExecutor, {
       acceptedVersionTaskFactory: createAcceptedVersionTaskFactory(new SequentialIds(500)),
@@ -259,7 +280,7 @@ describe("imported story facts through the production SQLite boundary", () => {
     const databasePath = path.join(directory, "inkshadow.sqlite");
     const clock = fixedClock();
     const hasher = new CryptoContentHasher();
-    const firstExecutor = new NodeSqliteExecutor(readCurrentLocalSchema(), databasePath);
+    const firstExecutor = createCurrentSchemaExecutor(databasePath);
     openExecutors.push(firstExecutor);
     const firstRepositories = createSqliteRepositories(firstExecutor, {
       acceptedVersionTaskFactory: createAcceptedVersionTaskFactory(new SequentialIds(900)),
@@ -390,6 +411,18 @@ function readCurrentLocalSchema(): string {
     }
   }
   return sql.join("\n");
+}
+
+function createCurrentSchemaExecutor(databasePath: string): NodeSqliteExecutor {
+  if (schemaTemplatePath === undefined) {
+    throw new Error("The current SQLite schema template has not been initialized.");
+  }
+  copyFileSync(schemaTemplatePath, databasePath);
+  const executor = new NodeSqliteExecutor("PRAGMA foreign_keys = ON;", databasePath);
+  expect(executor.database.prepare("PRAGMA foreign_keys").get()).toMatchObject({
+    foreign_keys: 1,
+  });
+  return executor;
 }
 
 function findWorkspaceRoot(): string {
