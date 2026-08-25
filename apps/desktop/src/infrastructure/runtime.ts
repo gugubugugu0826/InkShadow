@@ -226,6 +226,7 @@ import {
   TauriGenerationGovernanceStore,
   type DeferredGenerationRequest,
   type GenerationAttemptUsageInput,
+  type GenerationRun,
   type GenerationGovernanceStore,
 } from "./generation-governance-store";
 import {
@@ -2231,7 +2232,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.2.11",
+    appVersion: "0.2.12",
     platform: "browser",
     architecture: "web",
     environment: "development",
@@ -2750,9 +2751,14 @@ export interface ChapterStoryContextCompilationReceipt extends StoryContextCompi
   readonly retrievalTrace: StoryContextRetrievalTrace;
 }
 
+export type PreparedGenerationModelTask = "prose_generation" | "continuation";
+export type PreparedGenerationActionLabel = "生成开头" | "生成续写建议";
+
 export interface PreparedGenerationPlan {
   readonly requestId: string;
   readonly purpose: AiCandidatePurpose;
+  readonly modelTask: PreparedGenerationModelTask;
+  readonly actionLabel: PreparedGenerationActionLabel;
   readonly taskId: string;
   readonly runId: string;
   readonly generationId: string;
@@ -2841,6 +2847,117 @@ export type GovernedGenerationError =
 const activeGenerationIdsByRuntime = new WeakMap<object, Map<string, string>>();
 const cancelledGenerationTasksByRuntime = new WeakMap<object, Set<string>>();
 
+async function resolveAuthoritativeGenerationIdentity(
+  runtime: DesktopRuntime,
+  chapter: Chapter,
+  purpose: AiCandidatePurpose,
+): Promise<
+  Readonly<{
+    modelTask: PreparedGenerationModelTask;
+    actionLabel: PreparedGenerationActionLabel;
+  }>
+> {
+  if (purpose === "continuation_directions") {
+    return Object.freeze({
+      modelTask: "continuation",
+      actionLabel: "生成续写建议",
+    });
+  }
+  const versionResult = await runtime.repositories.chapterVersions.findVersionById(
+    chapter.currentVersionId,
+  );
+  if (!versionResult.ok) throw versionResult.error;
+  const snapshot = versionResult.value?.toSnapshot() ?? null;
+  if (
+    snapshot?.id !== chapter.currentVersionId ||
+    snapshot.projectId !== chapter.projectId ||
+    snapshot.chapterId !== chapter.id ||
+    snapshot.sequence !== chapter.revision ||
+    snapshot.content !== chapter.content
+  ) {
+    throw generationSourceChanged();
+  }
+  const checksum = await runtime.hasher.sha256(snapshot.content);
+  if (!checksum.ok) throw checksum.error;
+  if (checksum.value !== snapshot.contentChecksum) {
+    throw generationSourceChanged();
+  }
+  return snapshot.content.trim().length === 0
+    ? Object.freeze({ modelTask: "prose_generation", actionLabel: "生成开头" })
+    : Object.freeze({ modelTask: "continuation", actionLabel: "生成续写建议" });
+}
+
+function generationSourceChanged(): AppError {
+  return new AppError({
+    code: "BASE_VERSION_CHANGED",
+    message: "当前章节与不可变版本不一致，请重新读取正文后再生成。",
+    retryable: true,
+    actions: ["RETRY", "EXPORT_DRAFT"],
+  });
+}
+
+async function generationTaskHasModelIdentity(
+  runtime: DesktopRuntime,
+  input: Readonly<{
+    taskId: string;
+    idempotencyKey: string;
+    taskType: "ai.generate" | "ai.generate.deferred";
+    modelTask: PreparedGenerationModelTask;
+  }>,
+): Promise<boolean> {
+  const task = await runtime.taskCenter.findTaskByIdempotencyKey(input.idempotencyKey);
+  return (
+    task?.id === input.taskId &&
+    task.type === input.taskType &&
+    task.metadata.modelTask === input.modelTask
+  );
+}
+
+async function cancelStaleGenerationTask(
+  runtime: DesktopRuntime,
+  input: Readonly<{ taskId: string; idempotencyKey: string }>,
+): Promise<void> {
+  const task = await runtime.taskCenter.findTaskByIdempotencyKey(input.idempotencyKey);
+  if (
+    task?.id !== input.taskId ||
+    task.status === "succeeded" ||
+    task.status === "failed" ||
+    task.status === "cancelled"
+  ) {
+    return;
+  }
+  await runtime.taskCenter.cancelTask(task.id);
+}
+
+async function blockStaleDeferredGenerationRequest(
+  runtime: DesktopRuntime,
+  request: DeferredGenerationRequest,
+): Promise<void> {
+  await runtime.generationGovernance.transitionDeferredRequest({
+    id: request.id,
+    expectedRevision: request.revision,
+    status: "blocked_stale",
+  });
+  await cancelStaleGenerationTask(runtime, request);
+}
+
+async function settleStaleGenerationRun(
+  runtime: DesktopRuntime,
+  run: GenerationRun,
+): Promise<void> {
+  if (run.state !== "failed_final" && run.state !== "cancelled" && run.state !== "completed") {
+    const terminalState: "failed_final" | "cancelled" =
+      run.state === "blocked" || run.state === "candidate_ready" ? "cancelled" : "failed_final";
+    await runtime.generationGovernance.transitionRun({
+      runId: run.id,
+      expectedRevision: run.revision,
+      state: terminalState,
+      failureCode: "AI_GENERATION_IDENTITY_STALE",
+    });
+  }
+  await cancelStaleGenerationTask(runtime, run);
+}
+
 export async function prepareGenerationPlan(
   runtime: DesktopRuntime,
   chapterId: UuidV7,
@@ -2861,6 +2978,13 @@ export async function prepareGenerationPlan(
     throw chapterResult.error;
   }
   const chapter = chapterResult.value;
+  const generationIdentity =
+    chapter === null
+      ? Object.freeze({
+          modelTask: "continuation" as const,
+          actionLabel: "生成续写建议" as const,
+        })
+      : await resolveAuthoritativeGenerationIdentity(runtime, chapter, purpose);
   let partialCandidate: AiCandidate | null = null;
   if (purpose === "continuation_directions" && input.partialCandidateId != null) {
     throw new AppError({
@@ -2930,11 +3054,11 @@ export async function prepareGenerationPlan(
     const requiredDataDestination = projectContextRequiredDataDestination(privacyPreview);
     try {
       metadataInspection = await inspectModelHubTextTask(runtime, {
-        task: "continuation",
+        task: generationIdentity.modelTask,
         messages: Object.freeze([
           Object.freeze({
             role: "system" as const,
-            content: "Inspect the configured continuation route without project content.",
+            content: `Inspect the configured ${generationIdentity.modelTask} route without project content.`,
           }),
         ]),
         maximumOutputTokens,
@@ -2942,7 +3066,7 @@ export async function prepareGenerationPlan(
         ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
       });
       recordSafeInvocationRouteDiagnostic(runtime, {
-        taskType: "continuation",
+        taskType: generationIdentity.modelTask,
         modelHubRouteFound: true,
         legacyProfileChecked: false,
         legacyProfileSelected: false,
@@ -2960,7 +3084,7 @@ export async function prepareGenerationPlan(
         const code =
           cause instanceof ModelHubExecutionError ? cause.code : "MODEL_HUB_PREFLIGHT_FAILED";
         recordSafeInvocationRouteDiagnostic(runtime, {
-          taskType: "continuation",
+          taskType: generationIdentity.modelTask,
           modelHubRouteFound:
             cause instanceof ModelHubExecutionError &&
             cause.code !== "MODEL_HUB_GATEWAY_UNAVAILABLE"
@@ -2976,7 +3100,7 @@ export async function prepareGenerationPlan(
           checkedAt: runtime.clock.now(),
         });
         recordSafeGenerationPreflightFailureDiagnostic(runtime, {
-          taskType: "continuation",
+          taskType: generationIdentity.modelTask,
           routeFound: code !== "MODEL_HUB_ROUTE_NOT_CONFIGURED",
           blockerCode: code,
           checkedAt: runtime.clock.now(),
@@ -2991,7 +3115,7 @@ export async function prepareGenerationPlan(
         );
       }
       recordSafeInvocationRouteDiagnostic(runtime, {
-        taskType: "continuation",
+        taskType: generationIdentity.modelTask,
         modelHubRouteFound: false,
         legacyProfileChecked: false,
         legacyProfileSelected: false,
@@ -3003,7 +3127,7 @@ export async function prepareGenerationPlan(
         checkedAt: runtime.clock.now(),
       });
       recordSafeGenerationPreflightFailureDiagnostic(runtime, {
-        taskType: "continuation",
+        taskType: generationIdentity.modelTask,
         routeFound: false,
         blockerCode: "MODEL_HUB_ROUTE_NOT_CONFIGURED",
         checkedAt: runtime.clock.now(),
@@ -3011,7 +3135,7 @@ export async function prepareGenerationPlan(
       });
       throw new ModelCenterError(
         "MODEL_HUB_ROUTE_NOT_CONFIGURED",
-        "续写必须通过 Model Hub 的可审计分工执行；当前没有可用分工，因此没有调用旧连接或发送正文。",
+        `${generationIdentity.actionLabel}必须通过 Model Hub 的可审计分工执行；当前没有可用分工，因此没有调用旧连接或发送正文。`,
         true,
       );
     }
@@ -3120,7 +3244,7 @@ export async function prepareGenerationPlan(
     const legacyReady = legacySelection !== null;
     const blockerCode = legacyReady ? null : "MODEL_PROFILE_NOT_READY";
     recordSafeInvocationRouteDiagnostic(runtime, {
-      taskType: "continuation",
+      taskType: generationIdentity.modelTask,
       modelHubRouteFound: false,
       legacyProfileChecked: true,
       legacyProfileSelected: profile?.selectedModel !== null && profile !== null,
@@ -3155,7 +3279,7 @@ export async function prepareGenerationPlan(
       ? "legacy_profile"
       : "model_hub";
   if (demo && chapter !== null) {
-    messages = buildContinuationMessages(chapter);
+    messages = buildGenerationMessages(chapter, generationIdentity);
   } else if (chapter !== null) {
     privacyPreview ??= await runtime.projectContextPrivacy.inspect(chapter.projectId);
     runtime.projectContextPrivacy.assertChapterMatches(privacyPreview, chapter);
@@ -3183,7 +3307,7 @@ export async function prepareGenerationPlan(
     }
     if (contextBudget.budgetStatus === "model_window_exhausted") {
       recordSafeGenerationPreflightFailureDiagnostic(runtime, {
-        taskType: "continuation",
+        taskType: generationIdentity.modelTask,
         routeFound: metadataInspection !== null || routeResolved,
         blockerCode: "MODEL_CONTEXT_WINDOW_EXHAUSTED",
         checkedAt: runtime.clock.now(),
@@ -3191,7 +3315,7 @@ export async function prepareGenerationPlan(
       });
       throw new ModelCenterError(
         "MODEL_CONTEXT_WINDOW_EXHAUSTED",
-        "当前模型的上下文窗口不足以同时容纳本次续写输出和必要指令。请缩短输出长度或更换模型。",
+        `当前模型的上下文窗口不足以同时容纳本次${generationIdentity.actionLabel}输出和必要指令。请缩短输出长度或更换模型。`,
       );
     }
     try {
@@ -3202,6 +3326,7 @@ export async function prepareGenerationPlan(
         partialCandidate?.content ?? null,
         outputContract,
         metadataInspection !== null && purpose === "prose",
+        generationIdentity,
       );
       messages =
         purpose === "continuation_directions"
@@ -3210,9 +3335,9 @@ export async function prepareGenerationPlan(
       contextCompilation = preparedContext.contextCompilation;
       novelSkillPreparation = preparedContext.novelSkillPreparation;
     } catch (cause: unknown) {
-      const normalized = normalizeStoryContextFailure(cause);
+      const normalized = normalizeStoryContextFailure(cause, generationIdentity.modelTask);
       recordSafeGenerationPreflightFailureDiagnostic(runtime, {
-        taskType: "continuation",
+        taskType: generationIdentity.modelTask,
         routeFound: metadataInspection !== null || routeResolved,
         blockerCode: normalized.code,
         checkedAt: runtime.clock.now(),
@@ -3223,7 +3348,7 @@ export async function prepareGenerationPlan(
     if (metadataInspection !== null) {
       try {
         modelHubInspection = await inspectModelHubTextTask(runtime, {
-          task: "continuation",
+          task: generationIdentity.modelTask,
           messages,
           maximumOutputTokens,
           temperature: 0.8,
@@ -3233,7 +3358,7 @@ export async function prepareGenerationPlan(
         const code =
           cause instanceof ModelHubExecutionError ? cause.code : "MODEL_HUB_PREFLIGHT_FAILED";
         recordSafeInvocationRouteDiagnostic(runtime, {
-          taskType: "continuation",
+          taskType: generationIdentity.modelTask,
           modelHubRouteFound: true,
           legacyProfileChecked: false,
           legacyProfileSelected: false,
@@ -3245,7 +3370,7 @@ export async function prepareGenerationPlan(
           checkedAt: runtime.clock.now(),
         });
         recordSafeGenerationPreflightFailureDiagnostic(runtime, {
-          taskType: "continuation",
+          taskType: generationIdentity.modelTask,
           routeFound: true,
           blockerCode: code,
           checkedAt: runtime.clock.now(),
@@ -3273,7 +3398,7 @@ export async function prepareGenerationPlan(
       legacyGatewayConfig = null;
       legacyGatewayResolution = null;
       recordSafeInvocationRouteDiagnostic(runtime, {
-        taskType: "continuation",
+        taskType: generationIdentity.modelTask,
         modelHubRouteFound: true,
         legacyProfileChecked: false,
         legacyProfileSelected: false,
@@ -3293,7 +3418,7 @@ export async function prepareGenerationPlan(
     !isVerifiedLocalGatewayConfig(legacyGatewayConfig)
   ) {
     recordSafeGenerationPreflightFailureDiagnostic(runtime, {
-      taskType: "continuation",
+      taskType: generationIdentity.modelTask,
       routeFound: metadataInspection !== null || routeResolved,
       blockerCode: "PRIVATE_CHAPTER_LOCAL_ONLY",
       checkedAt: runtime.clock.now(),
@@ -3370,7 +3495,7 @@ export async function prepareGenerationPlan(
     ),
   });
   recordSafeGenerationPreflightDiagnostic(runtime, {
-    taskType: "continuation",
+    taskType: generationIdentity.modelTask,
     routeFound: routeResolved,
     connectionUsable:
       credentialConfigured && connectionStatus !== "failed" && selectedModelAvailable,
@@ -3390,15 +3515,22 @@ export async function prepareGenerationPlan(
     baseVersionId !== null &&
     deferredRequest.baseVersionId !== baseVersionId
   ) {
-    await runtime.generationGovernance.transitionDeferredRequest({
-      id: deferredRequest.id,
-      expectedRevision: deferredRequest.revision,
-      status: "blocked_stale",
-    });
-    await runtime.taskCenter.cancelTask(deferredRequest.taskId).catch(() => undefined);
+    await blockStaleDeferredGenerationRequest(runtime, deferredRequest);
     deferredRequest = null;
   }
-  const retryableRun =
+  if (deferredRequest !== null) {
+    const identityMatches = await generationTaskHasModelIdentity(runtime, {
+      taskId: deferredRequest.taskId,
+      idempotencyKey: deferredRequest.idempotencyKey,
+      taskType: "ai.generate.deferred",
+      modelTask: generationIdentity.modelTask,
+    });
+    if (!identityMatches) {
+      await blockStaleDeferredGenerationRequest(runtime, deferredRequest);
+      deferredRequest = null;
+    }
+  }
+  const retryableRunCandidate =
     baseVersionId === null || preflight.estimate === null || !preflight.canStart
       ? null
       : await runtime.generationGovernance.findLatestRetryableRun({
@@ -3409,12 +3541,46 @@ export async function prepareGenerationPlan(
           pricingVersion: preflight.estimate.pricingVersion,
           estimatedCostMicros: preflight.estimate.micros.toString(),
         });
-  const deferredResumeIdempotencyKey =
+  let retryableRun: GenerationRun | null = null;
+  if (retryableRunCandidate !== null) {
+    const identityMatches = await generationTaskHasModelIdentity(runtime, {
+      taskId: retryableRunCandidate.taskId,
+      idempotencyKey: retryableRunCandidate.idempotencyKey,
+      taskType: "ai.generate",
+      modelTask: generationIdentity.modelTask,
+    });
+    if (identityMatches) {
+      retryableRun = retryableRunCandidate;
+    } else {
+      await settleStaleGenerationRun(runtime, retryableRunCandidate);
+    }
+  }
+  let deferredResumeIdempotencyKey =
     deferredRequest === null ? null : `ai.generate.resume:${deferredRequest.id}`;
-  const deferredResumeRun =
-    retryableRun === null && deferredResumeIdempotencyKey !== null
-      ? await runtime.generationGovernance.findRunByIdempotencyKey(deferredResumeIdempotencyKey)
-      : null;
+  let deferredResumeRun: GenerationRun | null = null;
+  if (retryableRun === null && deferredResumeIdempotencyKey !== null) {
+    const deferredResumeRunCandidate = await runtime.generationGovernance.findRunByIdempotencyKey(
+      deferredResumeIdempotencyKey,
+    );
+    if (deferredResumeRunCandidate !== null) {
+      const identityMatches = await generationTaskHasModelIdentity(runtime, {
+        taskId: deferredResumeRunCandidate.taskId,
+        idempotencyKey: deferredResumeRunCandidate.idempotencyKey,
+        taskType: "ai.generate",
+        modelTask: generationIdentity.modelTask,
+      });
+      if (identityMatches) {
+        deferredResumeRun = deferredResumeRunCandidate;
+      } else {
+        await settleStaleGenerationRun(runtime, deferredResumeRunCandidate);
+        if (deferredRequest !== null) {
+          await blockStaleDeferredGenerationRequest(runtime, deferredRequest);
+          deferredRequest = null;
+        }
+        deferredResumeIdempotencyKey = null;
+      }
+    }
+  }
   const idempotencyKey =
     retryableRun?.idempotencyKey ??
     deferredResumeRun?.idempotencyKey ??
@@ -3432,6 +3598,8 @@ export async function prepareGenerationPlan(
     generationId,
     contextTraceId,
     purpose,
+    modelTask: generationIdentity.modelTask,
+    actionLabel: generationIdentity.actionLabel,
     leaseToken: runtime.ids.next(),
     idempotencyKey,
     projectId: chapter?.projectId ?? null,
@@ -3689,7 +3857,7 @@ export async function saveDeferredGenerationPlan(
   }
   const requestId = runtime.ids.next();
   const taskId = runtime.ids.next();
-  const idempotencyKey = `ai.generate.deferred:${plan.chapterId}:${plan.baseVersionId}:${plan.modelRole}`;
+  const idempotencyKey = `ai.generate.deferred:${plan.modelTask}:${plan.chapterId}:${plan.baseVersionId}:${plan.modelRole}`;
   const enqueued = await runtime.taskCenter.enqueueTask({
     id: taskId,
     type: "ai.generate.deferred",
@@ -3700,6 +3868,7 @@ export async function saveDeferredGenerationPlan(
       baseVersionId: plan.baseVersionId,
       providerId: plan.providerId,
       modelRole: plan.modelRole,
+      modelTask: plan.modelTask,
       operation: "wait_for_network",
     },
     priority: 70,
@@ -3791,6 +3960,7 @@ export async function executeGenerationPlan(
         chapterId: plan.chapterId,
         baseVersionId: plan.baseVersionId,
         providerId: plan.providerId,
+        modelTask: plan.modelTask,
         operation: "generate",
       },
       priority: 80,
@@ -3986,7 +4156,7 @@ export async function executeGenerationPlan(
             attemptPlan.executionMode === "model_hub"
               ? executeModelHubTextTask(runtime, {
                   dispatchScope: projectContextDispatchScope(privacyReceipt),
-                  task: "continuation",
+                  task: attemptPlan.modelTask,
                   messages: attemptPlan.messages,
                   maximumOutputTokens: attemptPlan.maximumOutputTokens,
                   temperature: 0.8,
@@ -4031,7 +4201,7 @@ export async function executeGenerationPlan(
                       );
                     }
                     const currentInspection = await inspectModelHubTextTask(runtime, {
-                      task: "continuation",
+                      task: attemptPlan.modelTask,
                       messages: attemptPlan.messages,
                       maximumOutputTokens: attemptPlan.maximumOutputTokens,
                       temperature: 0.8,
@@ -4422,7 +4592,7 @@ async function persistPreparedContextTrace(
       id: plan.contextTraceId,
       projectId: plan.projectId,
       chapterId: plan.chapterId,
-      taskType: "continuation",
+      taskType: plan.modelTask,
       compiled: plan.contextCompilation.compiled,
       createdAt: runtime.clock.now(),
       execution: {
@@ -4480,7 +4650,7 @@ async function commitPreparedNovelSkillSnapshot(
     projectId: plan.projectId,
     contextTraceId: plan.contextTraceId,
     modelInvocationId,
-    taskType: "continuation",
+    taskType: plan.modelTask,
     invocationMode: "draft",
     preparation: plan.novelSkillPreparation,
     createdAt: runtime.clock.now(),
@@ -4512,40 +4682,6 @@ async function commitPreparedContextOutputCandidate(
     throw new ModelCenterError(
       "CONTEXT_TRACE_UNAVAILABLE",
       "无法同时保存 AI 建议版本及其上下文来源记录，因此本次建议版本未保存。正文和已有 AI 建议版本均未改变。",
-      true,
-    );
-  }
-}
-
-async function saveDirectContinuationContextTrace(
-  runtime: DesktopRuntime,
-  chapter: Chapter,
-  receipt: StoryContextCompilationReceipt,
-  execution: Readonly<{
-    traceId: string;
-    generationId: string;
-    modelInvocationId: string | null;
-  }>,
-): Promise<void> {
-  try {
-    await runtime.contextTraces.save(
-      createContextCompilationTrace({
-        id: execution.traceId,
-        projectId: chapter.projectId,
-        chapterId: chapter.id,
-        taskType: "continuation",
-        compiled: receipt.compiled,
-        createdAt: runtime.clock.now(),
-        execution: {
-          generationId: execution.generationId,
-          modelInvocationId: execution.modelInvocationId,
-        },
-      }),
-    );
-  } catch {
-    throw new ModelCenterError(
-      "CONTEXT_TRACE_UNAVAILABLE",
-      "无法保存本次上下文来源记录，因此没有调用模型。正文和已有 AI 建议版本均未改变。",
       true,
     );
   }
@@ -5153,16 +5289,24 @@ async function inspectModelRouteProfile(
   });
 }
 
-function buildContinuationMessages(chapter: Chapter): readonly NativeModelMessage[] {
+function buildGenerationMessages(
+  chapter: Chapter,
+  generationIdentity: Readonly<{ modelTask: PreparedGenerationModelTask }>,
+): readonly NativeModelMessage[] {
   return [
     {
       role: "system",
       content:
-        "你是长篇小说续写助手。只输出可直接追加到章节末尾的新正文，不要解释、标题、Markdown 代码围栏或元评论。保持既有人称、时态、语气和事实连续性；不要把建议直接当成正式设定。",
+        generationIdentity.modelTask === "prose_generation"
+          ? "你是长篇小说开头创作助手。只输出可直接写入空白章节的开头正文，不要解释、标题、Markdown 代码围栏或元评论。建立明确场景、人物动作或悬念，不得假装承接不存在的前文，也不得把建议直接当成正式设定。"
+          : "你是长篇小说续写助手。只输出可直接追加到章节末尾的新正文，不要解释、标题、Markdown 代码围栏或元评论。保持既有人称、时态、语气和事实连续性；不要把建议直接当成正式设定。",
     },
     {
       role: "user",
-      content: `章节标题：${chapter.title}\n\n当前正文：\n${chapter.content}\n\n请续写下一段情节。`,
+      content:
+        generationIdentity.modelTask === "prose_generation"
+          ? `章节标题：${chapter.title}\n\n当前章节为空白，请依据已有故事资料创作本章开头。只输出开头正文。`
+          : `章节标题：${chapter.title}\n\n当前正文：\n${chapter.content}\n\n请续写下一段情节。`,
     },
   ];
 }
@@ -5175,6 +5319,7 @@ interface ContextualContinuationMessages {
 
 export interface ChapterStoryContextCompilationInput {
   readonly currentTask: ContextCandidateDraft;
+  readonly taskType?: PreparedGenerationModelTask;
   readonly retrievalQuery?: string;
   readonly maximumContextTokens?: number;
   /** Null is the accepted main story line; chapter/outline sources are shared canon. */
@@ -5233,6 +5378,7 @@ export async function compileChapterStoryContext(
       currentPovCharacterId,
       currentNarrativeOrder,
       input.currentTask.id,
+      input.taskType ?? "continuation",
     ),
     retrieveCausalContinuationCandidates(runtime, chapter, input.retrievalQuery, currentBranchId),
     runtime.story.writingFeedback
@@ -5305,25 +5451,33 @@ async function buildContextualContinuationMessages(
   partialCandidateContent: string | null = null,
   outputContract = resolveContinuationOutputContract(),
   applyNovelSkills = false,
+  generationIdentity: Readonly<{ modelTask: PreparedGenerationModelTask }> = {
+    modelTask: "continuation",
+  },
 ): Promise<ContextualContinuationMessages> {
   const reservedSkillTokens = applyNovelSkills
     ? await runtime.novelSkills.getReservedTokens({
         projectId: chapter.projectId,
-        taskType: "continuation",
+        taskType: generationIdentity.modelTask,
       })
     : 0;
   const contextCompilation = await compileChapterStoryContext(runtime, chapter, {
     currentTask: {
-      id: `continuation-task:${chapter.id}:${chapter.currentVersionId}`,
+      id: `${generationIdentity.modelTask}-task:${chapter.id}:${chapter.currentVersionId}`,
       content:
-        partialCandidateContent === null
-          ? `续写《${chapter.title}》，${continuationDestinationTaskLabel(outputContract)}，保持已保存正文、正式设定与锁定规则连续。`
-          : `继续补全《${chapter.title}》中尚未完成的 AI 建议版本，不重复已有片段。`,
-      selectionReason: "The author explicitly requested a continuation of the current chapter.",
+        partialCandidateContent !== null
+          ? `继续补全《${chapter.title}》中尚未完成的 AI 建议版本，不重复已有片段。`
+          : generationIdentity.modelTask === "prose_generation"
+            ? `为《${chapter.title}》的空白章节生成开头，建立明确场景、人物动作或悬念，并遵守正式设定与锁定规则。`
+            : `续写《${chapter.title}》，${continuationDestinationTaskLabel(outputContract)}，保持已保存正文、正式设定与锁定规则连续。`,
+      selectionReason:
+        generationIdentity.modelTask === "prose_generation"
+          ? "The author explicitly requested an opening for the empty chapter."
+          : "The author explicitly requested a continuation of the current chapter.",
       evidence: [
         {
           sourceType: "generation_task",
-          sourceId: `continuation:${chapter.id}`,
+          sourceId: `${generationIdentity.modelTask}:${chapter.id}`,
           sourceVersionId: chapter.currentVersionId,
           locator: null,
           contentHash: null,
@@ -5333,8 +5487,9 @@ async function buildContextualContinuationMessages(
       priority: 1_000,
     },
     maximumContextTokens: Math.max(1, maximumContextTokens - reservedSkillTokens),
-    // A continuation authorization covers exactly the selected generation
-    // request. Remote reranking would be a second Provider dispatch, so the
+    taskType: generationIdentity.modelTask,
+    // One disclosed generation action authorizes exactly the selected request.
+    // Remote reranking would be a second Provider dispatch, so the
     // normal creative path keeps retrieval local unless a future, separately
     // disclosed action opts in explicitly.
     allowRemoteRerank: false,
@@ -5342,7 +5497,7 @@ async function buildContextualContinuationMessages(
   const novelSkillPreparation = applyNovelSkills
     ? await runtime.novelSkills.prepareInvocation({
         projectId: chapter.projectId,
-        taskType: "continuation",
+        taskType: generationIdentity.modelTask,
         invocationMode: "draft",
         maximumSkillTokens: Math.min(
           reservedSkillTokens === 0 ? DEFAULT_NOVEL_SKILL_TOKEN_BUDGET : reservedSkillTokens,
@@ -5358,7 +5513,9 @@ async function buildContextualContinuationMessages(
       })
     : runtime.novelSkills.describeNotApplied("legacy_route_untraceable");
   const baseSystemMessage =
-    "你是长篇小说续写助手。只输出可直接追加到章节中的新正文，不输出思考过程、解释、标题、Markdown 代码围栏或元评论。保持既有人称、时态、语气和事实连续性；不得把推测或 AI 建议直接写成正式设定。";
+    generationIdentity.modelTask === "prose_generation"
+      ? "你是长篇小说开头创作助手。只输出可直接写入空白章节的开头正文，不输出思考过程、解释、标题、Markdown 代码围栏或元评论。建立明确场景、人物动作或悬念，不得假装承接不存在的前文；不得把推测或 AI 建议直接写成正式设定。"
+      : "你是长篇小说续写助手。只输出可直接追加到章节中的新正文，不输出思考过程、解释、标题、Markdown 代码围栏或元评论。保持既有人称、时态、语气和事实连续性；不得把推测或 AI 建议直接写成正式设定。";
   const systemMessage =
     novelSkillPreparation.promptSection === null
       ? baseSystemMessage
@@ -5376,9 +5533,11 @@ async function buildContextualContinuationMessages(
   messages.push({
     role: "user",
     content:
-      partialCandidateContent === null
-        ? `请依据以上资料续写下一段情节，${continuationDestinationPrompt(outputContract)}目标约 ${String(outputContract.targetVisibleCharacters)} 字（可在 ${String(outputContract.minimumVisibleCharacters)}–${String(outputContract.maximumVisibleCharacters)} 字内自然收束）。若资料存在未确认或无法消解的冲突，优先遵守已确认并锁定的规则。只输出新增正文。`
-        : `从上次可见正文的结尾自然继续，完成当前场景；本次新补全部分目标约 ${String(outputContract.targetVisibleCharacters)} 字。不要复述、解释或重复已有片段，只输出新补全部分。`,
+      partialCandidateContent !== null
+        ? `从上次可见正文的结尾自然继续，完成当前场景；本次新补全部分目标约 ${String(outputContract.targetVisibleCharacters)} 字。不要复述、解释或重复已有片段，只输出新补全部分。`
+        : generationIdentity.modelTask === "prose_generation"
+          ? `请依据以上资料创作本章开头，目标约 ${String(outputContract.targetVisibleCharacters)} 字（可在 ${String(outputContract.minimumVisibleCharacters)}–${String(outputContract.maximumVisibleCharacters)} 字内自然收束）。从明确场景、人物动作或悬念开始，不得假装承接不存在的前文。若资料存在未确认或无法消解的冲突，优先遵守已确认并锁定的规则。只输出开头正文。`
+          : `请依据以上资料续写下一段情节，${continuationDestinationPrompt(outputContract)}目标约 ${String(outputContract.targetVisibleCharacters)} 字（可在 ${String(outputContract.minimumVisibleCharacters)}–${String(outputContract.maximumVisibleCharacters)} 字内自然收束）。若资料存在未确认或无法消解的冲突，优先遵守已确认并锁定的规则。只输出新增正文。`,
   });
   return Object.freeze({
     contextCompilation,
@@ -5600,6 +5759,7 @@ async function retrieveSemanticContinuationCandidates(
   currentPovCharacterId: string | null = null,
   maximumStoryOrder = 0,
   currentTaskSourceId: string = chapter.id,
+  taskType: PreparedGenerationModelTask = "continuation",
 ): Promise<SemanticContinuationCandidates> {
   const querySource = chapter.content.trim();
   const requestedQuery = retrievalQuery?.trim() ?? "";
@@ -5623,7 +5783,7 @@ async function retrieveSemanticContinuationCandidates(
     : ("standard_only" as const);
   const retrievalScope = Object.freeze({
     projectId: chapter.projectId,
-    taskType: "continuation" as const,
+    taskType,
     privacy: privacyScope,
     currentness: "current" as const,
     branchId: currentBranchId,
@@ -6163,7 +6323,10 @@ function searchContextSourceType(
   return sourceType === "material" ? "other" : sourceType;
 }
 
-function normalizeStoryContextFailure(cause: unknown): ModelCenterError {
+function normalizeStoryContextFailure(
+  cause: unknown,
+  modelTask: PreparedGenerationModelTask = "continuation",
+): ModelCenterError {
   if (cause instanceof ProjectContextPrivacyError) {
     return normalizeProjectContextPrivacyFailure(cause);
   }
@@ -6172,7 +6335,7 @@ function normalizeStoryContextFailure(cause: unknown): ModelCenterError {
   }
   return new ModelCenterError(
     "STORY_CONTEXT_COMPILATION_FAILED",
-    "无法安全整理本次续写所需的故事资料。请检查正式设定和上下文预算后重试；正文没有改变。",
+    `无法安全整理本次${modelTask === "prose_generation" ? "生成开头" : "续写"}所需的故事资料。请检查正式设定和上下文预算后重试；正文没有改变。`,
     false,
   );
 }
@@ -6332,273 +6495,42 @@ export async function createConfiguredModelCandidate(
       ),
     );
   }
-  // Compatibility API: keep one production contract by delegating to the same
-  // governed plan used by the editor. The legacy implementation below remains
-  // unreachable only until downstream callers finish migrating their return type.
-  if (usesGovernedConfiguredCandidateCompatibility()) {
-    try {
-      const plan = await prepareGenerationPlan(runtime, chapterId, {
-        chapterSaved: true,
-        networkAvailable: typeof navigator === "undefined" ? true : navigator.onLine,
-        outputProfile: "standard",
-        contextBudgetProfile: "standard",
-      });
-      if (!plan.preflight.canStart) {
-        const blocker = plan.preflight.blockers[0];
-        return err(
-          new ModelCenterError(
-            blocker?.code ?? "AI_GENERATION_PREFLIGHT_BLOCKED",
-            "AI 续写预检未通过，请按提示检查模型连接、隐私范围、上下文或预算后重试。",
-            true,
-          ),
-        );
-      }
-      const executed = await executeGenerationPlan(runtime, plan, onDelta);
-      if (!executed.ok) {
-        return err(configuredCandidateCompatibilityError(executed.error));
-      }
-      if (executed.value.candidate === null) {
-        return err(
-          new ModelCenterError(
-            executed.value.cancelled ? "MODEL_GENERATION_CANCELLED" : "MODEL_OUTPUT_EMPTY",
-            executed.value.cancelled
-              ? "AI 续写已取消；正文和已有 AI 建议版本均未改变。"
-              : "AI 没有返回可保存的正文；正文和已有 AI 建议版本均未改变。",
-            true,
-          ),
-        );
-      }
-      return ok(executed.value.candidate);
-    } catch (cause: unknown) {
-      return err(configuredCandidateCompatibilityError(cause));
-    }
-  }
-
-  /* c8 ignore start -- unreachable runtime fallback retained for binary API transition */
-  const chapterResult = await runtime.repositories.chapters.findById(chapterId);
-  if (!chapterResult.ok) {
-    return chapterResult;
-  }
-  if (chapterResult.value === null) {
-    return err(
-      new AppError({
-        code: "CHAPTER_NOT_FOUND",
-        message: "章节不存在。",
-      }),
-    );
-  }
-  const chapter = chapterResult.value;
-  let messages: readonly NativeModelMessage[];
-  let preparedContext: ContextualContinuationMessages;
   try {
-    preparedContext = await buildContextualContinuationMessages(runtime, chapter);
-    messages = preparedContext.messages;
-  } catch (cause: unknown) {
-    return err(normalizeStoryContextFailure(cause));
-  }
-  const inputBytes = new TextEncoder().encode(
-    messages.map(({ content }) => content).join(""),
-  ).length;
-  if (inputBytes > 1_000_000) {
-    return err(
-      new ModelCenterError(
-        "MODEL_INPUT_TOO_LARGE",
-        "The saved chapter is too large for the native model request limit.",
-      ),
-    );
-  }
-  let generatedText: string | null = null;
-  const privacyReceipt = preparedContext.contextCompilation.projectPrivacy;
-  const requiredDataDestination = projectContextRequiredDataDestination(privacyReceipt);
-  const contextTraceId = runtime.ids.next();
-  const generationId = runtime.ids.next();
-  try {
-    const generated = await executeModelHubTextTask(runtime, {
-      dispatchScope: projectContextDispatchScope(privacyReceipt),
-      task: "continuation",
-      messages,
-      maximumOutputTokens: 2_048,
-      temperature: 0.8,
-      executionPolicy: SINGLE_ATTEMPT_VISIBLE_PROSE_POLICY,
-      generationId,
-      ...(requiredDataDestination === undefined ? {} : { requiredDataDestination }),
-      onBeforeDispatch: async ({
-        generationId: selectedGenerationId,
-        invocationId,
-        localOnlyEligible,
-      }) => {
-        await saveDirectContinuationContextTrace(
-          runtime,
-          chapter,
-          preparedContext.contextCompilation,
-          {
-            traceId: contextTraceId,
-            generationId: selectedGenerationId,
-            modelInvocationId: invocationId,
-          },
-        );
-        await assertProjectContextBeforeModelHubDispatch(
-          runtime,
-          privacyReceipt,
-          localOnlyEligible === true,
-        );
-      },
-      onFinalBeforeProviderDispatch: async ({ localOnlyEligible }) => {
-        await assertProjectContextBeforeModelHubDispatch(
-          runtime,
-          privacyReceipt,
-          localOnlyEligible === true,
-        );
-      },
-      ...(onDelta === undefined ? {} : { onDelta }),
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: typeof navigator === "undefined" ? true : navigator.onLine,
+      outputProfile: "standard",
+      contextBudgetProfile: "standard",
     });
-    generatedText = generated.text;
-  } catch (cause: unknown) {
-    if (
-      !(cause instanceof ModelHubExecutionError) ||
-      cause.code !== "MODEL_HUB_ROUTE_NOT_CONFIGURED"
-    ) {
+    if (!plan.preflight.canStart) {
+      const blocker = plan.preflight.blockers[0];
       return err(
         new ModelCenterError(
-          cause instanceof ModelHubExecutionError ? cause.code : "MODEL_GENERATION_FAILED",
-          cause instanceof Error
-            ? cause.message
-            : "模型调用失败。原文和已有 AI 建议版本都没有改变。",
-          cause instanceof ModelHubExecutionError ? cause.retryable : true,
-        ),
-      );
-    }
-  }
-
-  if (generatedText === null) {
-    let profiles;
-    try {
-      profiles = await runtime.modelCenter.listProfiles();
-    } catch (cause: unknown) {
-      return err(
-        cause instanceof ModelCenterError
-          ? cause
-          : new ModelCenterError(
-              "MODEL_PROFILE_STORE_UNAVAILABLE",
-              "Unable to read model profiles.",
-              true,
-            ),
-      );
-    }
-    const profile = profiles.find((candidate) => candidate.selectedModel !== null);
-    if (!profile?.selectedModel) {
-      return err(
-        new ModelCenterError(
-          "MODEL_PROFILE_NOT_READY",
-          "请先在设置中连接供应商并为“续写”选择模型。",
-        ),
-      );
-    }
-    const resolvedEndpoint = await resolveModelProfileGatewayConfig(
-      { modelHub: runtime.modelHub, credentials: runtime.credentials },
-      profile,
-    ).catch(() => null);
-    if (resolvedEndpoint === null) {
-      return err(
-        new ModelCenterError(
-          "MODEL_CREDENTIAL_MISSING",
-          "供应商连接没有可用凭据。请在设置中重新保存并测试连接。",
+          blocker?.code ?? "AI_GENERATION_PREFLIGHT_BLOCKED",
+          "AI 续写预检未通过，请按提示检查模型连接、隐私范围、上下文或预算后重试。",
           true,
         ),
       );
     }
-    try {
-      await saveDirectContinuationContextTrace(
-        runtime,
-        chapter,
-        preparedContext.contextCompilation,
-        { traceId: contextTraceId, generationId, modelInvocationId: null },
-      );
-      await runtime.projectContextPrivacy.assertCurrentBeforeDispatch(privacyReceipt);
-      runtime.projectContextPrivacy.assertRouteEligible(
-        privacyReceipt,
-        isVerifiedLocalGatewayConfig(resolvedEndpoint.config),
-      );
-      const current = await resolveFinalModelProfileGatewayConfig(
-        {
-          modelCenter: runtime.modelCenter,
-          modelHub: runtime.modelHub,
-          credentials: runtime.credentials,
-        },
-        profile,
-        resolvedEndpoint,
-      );
-      const generated = await runtime.modelGateway.generate({
-        dispatchScope: projectContextDispatchScope(privacyReceipt),
-        generationId,
-        config: current.resolution.config,
-        model: current.profile.selectedModel ?? profile.selectedModel,
-        messages,
-        maxOutputTokens: 2_048,
-        temperature: 0.8,
-        ...(onDelta === undefined ? {} : { onDelta }),
-      });
-      generatedText = generated.text;
-    } catch (cause: unknown) {
+    const executed = await executeGenerationPlan(runtime, plan, onDelta);
+    if (!executed.ok) {
+      return err(configuredCandidateCompatibilityError(executed.error));
+    }
+    if (executed.value.candidate === null) {
       return err(
-        cause instanceof ModelCenterError
-          ? cause
-          : cause instanceof ProjectContextPrivacyError
-            ? normalizeProjectContextPrivacyFailure(cause)
-            : new ModelCenterError(
-                "MODEL_GENERATION_FAILED",
-                "模型调用失败。原文和已有 AI 建议版本都没有改变。",
-                true,
-              ),
+        new ModelCenterError(
+          executed.value.cancelled ? "MODEL_GENERATION_CANCELLED" : "MODEL_OUTPUT_EMPTY",
+          executed.value.cancelled
+            ? "AI 续写已取消；正文和已有 AI 建议版本均未改变。"
+            : "AI 没有返回可保存的正文；正文和已有 AI 建议版本均未改变。",
+          true,
+        ),
       );
     }
+    return ok(executed.value.candidate);
+  } catch (cause: unknown) {
+    return err(configuredCandidateCompatibilityError(cause));
   }
-
-  const created = AiCandidate.createStreaming({
-    id: runtime.ids.next(),
-    projectId: chapter.projectId,
-    chapterId: chapter.id,
-    source: "generate",
-    baseVersionId: chapter.currentVersionId,
-    now: runtime.clock.now(),
-    applicationIntent: {
-      task: "continuation",
-      application: "insert_at_cursor",
-      payload: "fragment",
-      startUtf16: chapter.content.length,
-      endUtf16: chapter.content.length,
-    },
-  });
-  if (!created.ok) {
-    return created;
-  }
-  const generated = generatedText.trim();
-  const content = chapter.content.length === 0 ? generated : `\n\n${generated}`;
-  const checksum = await runtime.hasher.sha256(content);
-  if (!checksum.ok) {
-    return checksum;
-  }
-  const ready = created.value.markReady(content, checksum.value, runtime.clock.now());
-  if (!ready.ok) {
-    return ready;
-  }
-  try {
-    await runtime.contextTraceOutputs.commit({
-      traceId: contextTraceId,
-      candidate: ready.value,
-      linkedAt: runtime.clock.now(),
-    });
-  } catch {
-    return err(
-      new ModelCenterError(
-        "CONTEXT_TRACE_UNAVAILABLE",
-        "无法同时保存 AI 建议版本及其上下文来源记录，因此本次建议版本未保存。正文和已有 AI 建议版本均未改变。",
-        true,
-      ),
-    );
-  }
-  return ok(ready.value);
-  /* c8 ignore stop */
 }
 
 function configuredCandidateCompatibilityError(cause: unknown): AppError | ModelCenterError {
@@ -6607,10 +6539,6 @@ function configuredCandidateCompatibilityError(cause: unknown): AppError | Model
     return normalized;
   }
   return new ModelCenterError(normalized.code, normalized.message, normalized.retryable);
-}
-
-function usesGovernedConfiguredCandidateCompatibility(): boolean {
-  return true;
 }
 
 export async function createLocalDemoCandidate(

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createStorySettingsTemplate, serializeStorySettings } from "@inkshadow/import-export/core";
 import { parseUuidV7, StoryCoreError } from "@inkshadow/story-core";
@@ -306,6 +306,15 @@ describe("StoryGovernancePage", () => {
     expect(pendingEvidenceButton).toHaveAttribute("aria-expanded", "true");
     expect(pendingEvidenceButton).toHaveAccessibleName("收起原文依据");
     expect(pendingEvidenceButton).toHaveFocus();
+    pendingEvidenceButton.blur();
+    expect(pendingEvidenceButton).not.toHaveFocus();
+    act(() => pendingEvidenceButton.click());
+    expect(pendingEvidenceButton).toHaveAttribute("aria-expanded", "false");
+    expect(pendingEvidenceButton).toHaveAccessibleName("查看原文依据");
+    expect(pendingEvidenceButton).toHaveFocus();
+    act(() => pendingEvidenceButton.click());
+    expect(pendingEvidenceButton).toHaveAttribute("aria-expanded", "true");
+    expect(pendingEvidenceButton).toHaveFocus();
     expect(within(pendingSection).getByRole("button", { name: "确认并保留" })).toBeEnabled();
     expect(within(pendingSection).getByRole("button", { name: "修改" })).toBeEnabled();
     expect(within(pendingSection).getByRole("button", { name: "放弃" })).toBeEnabled();
@@ -365,6 +374,10 @@ describe("StoryGovernancePage", () => {
     ]);
     expect(formalEvidenceButton).toHaveAttribute("aria-expanded", "false");
     expect(formalEvidenceButton).toHaveAccessibleName("查看证据");
+    expect(formalEvidenceButton).toHaveFocus();
+    formalEvidenceButton.blur();
+    act(() => formalEvidenceButton.click());
+    expect(formalEvidenceButton).toHaveAttribute("aria-expanded", "true");
     expect(formalEvidenceButton).toHaveFocus();
 
     await user.click(within(originalFactCard).getByRole("button", { name: "固定" }));
@@ -945,12 +958,52 @@ describe("StoryGovernancePage", () => {
     expect(within(characterCard).getByText("1 项事实")).toBeVisible();
     expect(within(characterCard).getByText("1 条正式记录")).toBeVisible();
     expect(within(characterCard).getByText("别名：小舟")).toBeVisible();
-    await user.click(within(characterCard).getByRole("button", { name: "查看人物详情" }));
+    const characterDetailButton = within(characterCard).getByRole("button", {
+      name: "查看人物详情",
+    });
+    expect(characterDetailButton.tagName).toBe("BUTTON");
+    expect(characterDetailButton).toHaveAttribute("aria-expanded", "false");
+    const characterDetailId = characterDetailButton.getAttribute("aria-controls");
+    expect(characterDetailId).toBeTruthy();
 
-    const detail = screen.getByRole("dialog", { name: "林舟" });
+    await user.click(characterDetailButton);
+
+    let detail = screen.getByRole("dialog", { name: "林舟" });
+    expect(characterDetailButton).toHaveAttribute("aria-expanded", "true");
+    expect(document.getElementById(characterDetailId ?? "")).toBeInTheDocument();
     expect(within(detail).getByText("雨夜相认")).toBeVisible();
     expect(within(detail).getByText(evidence)).toBeVisible();
     expect(within(detail).getAllByText("需要确认").length).toBeGreaterThan(0);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(detail).not.toBeInTheDocument());
+    expect(characterDetailButton).toHaveAttribute("aria-expanded", "false");
+    expect(characterDetailButton).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    detail = screen.getByRole("dialog", { name: "林舟" });
+    const closeButton = within(detail).getAllByRole("button", { name: "关闭" }).at(-1);
+    expect(closeButton).toBeDefined();
+    if (closeButton === undefined) throw new Error("expected the detail close button");
+    await user.click(closeButton);
+    await waitFor(() => expect(detail).not.toBeInTheDocument());
+    expect(characterDetailButton).toHaveFocus();
+
+    await user.keyboard(" ");
+    detail = screen.getByRole("dialog", { name: "林舟" });
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(detail).not.toBeInTheDocument());
+    await user.pointer([
+      { keys: "[TouchA>]", target: characterDetailButton },
+      { keys: "[/TouchA]", target: characterDetailButton },
+    ]);
+    detail = screen.getByRole("dialog", { name: "林舟" });
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(detail).not.toBeInTheDocument());
+
+    characterDetailButton.blur();
+    act(() => characterDetailButton.click());
+    detail = screen.getByRole("dialog", { name: "林舟" });
+    expect(characterDetailButton).toHaveFocus();
     await user.click(within(detail).getByRole("button", { name: "确认并保留" }));
     await waitFor(() => expect(within(detail).getAllByText("已确认").length).toBeGreaterThan(0));
 

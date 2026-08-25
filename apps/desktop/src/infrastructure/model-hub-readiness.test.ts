@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { NovelAiTask } from "./model-hub-provider-registry";
 import type { ModelCatalogEntry, ModelProviderConnection, NovelTaskRoute } from "./model-hub-store";
-import { projectModelHubReadiness } from "./model-hub-readiness";
+import { modelHubCredentialStatusLabel, projectModelHubReadiness } from "./model-hub-readiness";
 
 const NOW = "2026-08-08T00:00:00.000Z";
 const CORE_TASKS: readonly NovelAiTask[] = [
@@ -19,6 +19,16 @@ const CORE_TASKS: readonly NovelAiTask[] = [
 ];
 
 describe("projectModelHubReadiness", () => {
+  it("uses explicit natural Chinese labels for every credential evidence state", () => {
+    expect(modelHubCredentialStatusLabel("not_required")).toBe("无需接口密钥");
+    expect(modelHubCredentialStatusLabel("recorded")).toBe("已保存，等待本机核对");
+    expect(modelHubCredentialStatusLabel("trusted")).toBe("本机凭据已确认");
+    expect(modelHubCredentialStatusLabel("missing")).toBe("未找到已保存凭据");
+    expect(modelHubCredentialStatusLabel("unavailable")).toBe("暂时无法读取");
+    expect(modelHubCredentialStatusLabel("untrusted")).toBe("凭据来源需要重新保存");
+    expect(modelHubCredentialStatusLabel("mixed")).toBe("部分连接需要核对");
+  });
+
   it.each([
     ["unconnected", [], [], []],
     ["checking", [connection({ connectionStatus: "checking" })], [], []],
@@ -82,9 +92,36 @@ describe("projectModelHubReadiness", () => {
         failurePolicy: "use_fallback",
       }),
     );
-    expect(projectModelHubReadiness({ connections, catalog, routes, now: NOW })).toMatchObject({
+    expect(
+      projectModelHubReadiness({
+        connections,
+        catalog,
+        routes,
+        credentialStatus: "trusted",
+        now: NOW,
+      }),
+    ).toMatchObject({
       state: "partially_unavailable",
       runnableCoreTaskCount: 10,
+      routeStatus: "partially_sendable",
+      needsRecheck: true,
+    });
+  });
+
+  it("keeps a degraded connection out of the fully sendable state even when every route exists", () => {
+    const readiness = projectModelHubReadiness({
+      connections: [connection({ connectionStatus: "degraded" })],
+      catalog: [catalogEntry()],
+      routes: CORE_TASKS.map((task) => route(task)),
+      credentialStatus: "trusted",
+      now: NOW,
+    });
+
+    expect(readiness).toMatchObject({
+      state: "partially_unavailable",
+      runnableCoreTaskCount: 10,
+      routeStatus: "partially_sendable",
+      needsRecheck: true,
     });
   });
 
@@ -120,6 +157,35 @@ describe("projectModelHubReadiness", () => {
     expect(readiness.exactBlockers).toEqual([
       { task: "continuation", code: "MODEL_HUB_CREDENTIAL_MISSING" },
     ]);
+  });
+
+  it("keeps saved-connection truth separate from credential, verification, catalog and route readiness", () => {
+    const readiness = projectModelHubReadiness({
+      connections: [
+        connection({
+          credentialState: "present",
+          lastTestedAt: NOW,
+          connectionStatus: "ready",
+        }),
+      ],
+      catalog: [],
+      routes: [],
+      catalogLoadStatus: "temporarily_unavailable",
+      routeLoadStatus: "loaded",
+      credentialStatus: "trusted",
+      now: NOW,
+    });
+
+    expect(readiness).toMatchObject({
+      savedConnectionCount: 1,
+      enabledConnectionCount: 1,
+      credentialStatus: "trusted",
+      lastVerifiedAt: NOW,
+      catalogStatus: "temporarily_unavailable",
+      routeStatus: "not_sendable",
+      needsRecheck: true,
+    });
+    expect(readiness.state).not.toBe("connection_failed");
   });
 });
 

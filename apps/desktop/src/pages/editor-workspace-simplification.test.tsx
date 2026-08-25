@@ -100,7 +100,7 @@ describe("simplified editor workspace", () => {
     if (!(toolbar instanceof HTMLElement)) {
       throw new Error("找不到编辑器顶部操作区");
     }
-    expect(within(toolbar).getByRole("button", { name: "继续创作" })).toBeVisible();
+    expect(within(toolbar).getByRole("button", { name: "生成续写建议" })).toBeVisible();
     expect(within(toolbar).queryByRole("button", { name: "撤销" })).not.toBeInTheDocument();
     expect(within(toolbar).queryByRole("button", { name: "查找替换" })).not.toBeInTheDocument();
 
@@ -114,6 +114,86 @@ describe("simplified editor workspace", () => {
     expect(screen.queryByRole("heading", { name: "AI 创作助手" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "展开 AI 创作助手" }));
     expect(await screen.findByRole("heading", { name: "AI 创作助手" })).toBeVisible();
+  });
+
+  it("derives the opening action only from the authoritative saved chapter body", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const { chapter, project } = await seedProject(runtime, "   ");
+    const ready = await createReadySuggestion(runtime, project, chapter, "历史建议");
+    const rejected = await runtime.useCases.rejectCandidate.execute({
+      candidateId: ready.id,
+      expectedCandidateRevision: ready.revision,
+    });
+    if (!rejected.ok) {
+      throw rejected.error;
+    }
+
+    renderEditor(runtime, project, chapter);
+    await screen.findByRole("textbox", { name: "章节正文" });
+
+    const toolbar = document.querySelector(".editor-toolbar");
+    if (!(toolbar instanceof HTMLElement)) {
+      throw new Error("找不到编辑器顶部操作区");
+    }
+    expect(await within(toolbar).findByRole("button", { name: "生成开头" })).toBeVisible();
+    const assistant = screen.getByRole("complementary", { name: "AI 创作助手" });
+    expect(within(assistant).queryByRole("button", { name: "生成开头" })).not.toBeInTheDocument();
+    expect(within(assistant).queryByRole("button", { name: "重新生成" })).not.toBeInTheDocument();
+    expect(
+      within(assistant).queryByRole("button", { name: "生成续写建议" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each(["direct", "professional"] as const)(
+    "keeps all four selection writing actions discoverable in %s mode before text is selected",
+    async (mode) => {
+      const runtime = createNativeEditorRuntime();
+      await ensureWritingMode(runtime, mode);
+      const { chapter, project } = await seedProject(runtime);
+
+      renderEditor(runtime, project, chapter);
+
+      const actions = await screen.findByRole("region", { name: "选中文本写作操作" });
+      expect(
+        within(actions).getByText("请先在正文中选择作用范围，再选择改写、润色、扩写或缩写。"),
+      ).toBeVisible();
+      for (const name of ["改写", "润色", "扩写", "缩写"]) {
+        expect(within(actions).getByRole("button", { name })).toBeDisabled();
+      }
+    },
+  );
+
+  it("shows local-only limits and direct recovery entries before private generation", async () => {
+    const runtime = createNativeEditorRuntime();
+    await ensureWritingMode(runtime, "professional");
+    const { chapter, project } = await seedProject(runtime);
+    const privacy = await runtime.useCases.setChapterPrivacy.execute({
+      chapterId: chapter.id,
+      privacyMode: "local_only",
+      expectedPrivacyRevision: chapter.privacyRevision,
+    });
+    if (!privacy.ok) {
+      throw privacy.error;
+    }
+
+    renderEditor(runtime, project, privacy.value.chapter);
+    const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "章节正文",
+    });
+    editor.focus();
+    editor.setSelectionRange(0, 3);
+    fireEvent.select(editor);
+    const selectionActions = screen.getByRole("region", { name: "选中文本写作操作" });
+    expect(within(selectionActions).getByText("私密章节仅限本机")).toBeVisible();
+    for (const name of ["改写", "润色", "扩写", "缩写"]) {
+      expect(within(selectionActions).getByRole("button", { name })).toBeDisabled();
+    }
+
+    const assistant = await screen.findByRole("complementary", { name: "AI 创作助手" });
+    expect(within(assistant).getByText("私密章节仅限本地处理")).toBeVisible();
+    expect(within(assistant).getByRole("link", { name: "设置本地模型" })).toBeVisible();
+    expect(within(assistant).getByRole("button", { name: "恢复普通章节" })).toBeVisible();
+    expect(within(assistant).queryByRole("link", { name: "设置 AI 服务" })).not.toBeInTheDocument();
   });
 
   it("resizes the desktop assistant with pointer capture and the full keyboard contract", async () => {
@@ -247,10 +327,10 @@ describe("simplified editor workspace", () => {
     const rewriteAction = within(toolbar).getByRole("button", { name: "修改选中内容" });
     expect(rewriteAction).toBeVisible();
     const instruction = screen.getByRole<HTMLTextAreaElement>("textbox", {
-      name: "改写选中的 3 个字符",
+      name: "自定义改写选中的 3 个字符",
     });
     expect(instruction).toHaveValue("保持原意，让表达更自然。");
-    expect(screen.getByRole("button", { name: "查看选区改写发送信息" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "查看自定义改写发送信息" })).toBeEnabled();
 
     let scheduledFocus: FrameRequestCallback | undefined;
     const animationFrame = vi
@@ -557,7 +637,10 @@ function createMediaQueryList(query: string, matches: boolean): MediaQueryList {
   };
 }
 
-async function seedProject(runtime: DesktopRuntime): Promise<{
+async function seedProject(
+  runtime: DesktopRuntime,
+  content = "第一章正文",
+): Promise<{
   readonly project: Project;
   readonly chapter: Chapter;
 }> {
@@ -568,7 +651,7 @@ async function seedProject(runtime: DesktopRuntime): Promise<{
   const chapter = await runtime.useCases.createChapter.execute({
     projectId: project.value.id,
     title: "第一章",
-    content: "第一章正文",
+    content,
   });
   if (!chapter.ok) {
     throw chapter.error;
@@ -581,7 +664,7 @@ async function createReadySuggestion(
   project: Project,
   chapter: Chapter,
   content: string,
-): Promise<void> {
+): Promise<AiCandidate> {
   const streaming = AiCandidate.createStreaming({
     id: runtime.ids.next(),
     projectId: project.id,
@@ -605,4 +688,5 @@ async function createReadySuggestion(
   if (!stored.ok) {
     throw stored.error;
   }
+  return ready.value;
 }

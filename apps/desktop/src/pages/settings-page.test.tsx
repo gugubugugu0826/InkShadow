@@ -111,7 +111,7 @@ describe("SettingsPage model routing", () => {
       await screen.findByRole("heading", { name: "墨影模型中心", level: 2 }, { timeout: 5_000 }),
     ).toBeVisible();
     const target = await screen.findByRole("heading", { name: "模型能力确认", level: 3 });
-    await waitFor(() => expect(target.closest("section")).toHaveFocus());
+    await waitFor(() => expect(target).toHaveFocus());
     await expect(runtime.writingExperience.getOrInitialize()).resolves.toMatchObject({
       mode: "direct",
     });
@@ -2220,14 +2220,53 @@ describe("SettingsPage model routing", () => {
 
       const target = document.getElementById("data-transfer");
       expect(target).not.toBeNull();
+      const targetHeading = screen.getByRole("heading", { name: "导入与导出", level: 2 });
       await waitFor(() => {
         expect(scrollIntoView).toHaveBeenCalledWith({
           behavior: "smooth",
           block: "start",
         });
-        expect(target).toHaveFocus();
+        expect(targetHeading).toHaveFocus();
+        expect(screen.getByRole("link", { name: "导入与导出" })).toHaveAttribute(
+          "aria-current",
+          "location",
+        );
         expect(pageHeading).not.toHaveFocus();
       });
+    } finally {
+      if (originalDescriptor === undefined) {
+        Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+      } else {
+        Object.defineProperty(Element.prototype, "scrollIntoView", originalDescriptor);
+      }
+    }
+  });
+
+  it("restores the import and export section from a direct deep link", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const originalDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      renderRoute(runtime, "/settings#data-transfer");
+
+      const targetHeading = await screen.findByRole("heading", {
+        name: "导入与导出",
+        level: 2,
+      });
+      await waitFor(() => {
+        expect(targetHeading).toHaveFocus();
+        expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+      });
+      expect(screen.getByRole("link", { name: "导入与导出" })).toHaveAttribute(
+        "aria-current",
+        "location",
+      );
+      expect(screen.getByRole("heading", { name: "导出项目", level: 3 })).toBeVisible();
     } finally {
       if (originalDescriptor === undefined) {
         Reflect.deleteProperty(Element.prototype, "scrollIntoView");

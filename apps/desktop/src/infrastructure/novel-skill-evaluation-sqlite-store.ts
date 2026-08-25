@@ -394,13 +394,7 @@ export class NovelSkillEvaluationSqliteStore {
       });
       if (replayed) return;
       await transaction.execute(
-        `INSERT INTO novel_skill_evaluation_suites (
-           id, schema_version, evaluator_version, compiler_version,
-           evaluation_project_id, plan_hash, fixture_set_hash,
-           target_manifest_hash, core_manifest_hash, core_genre_manifest_hash,
-           core_genre_preferences_manifest_hash, preference_configuration_hash,
-           model_slots_json, minimum_repetitions, created_at
-         ) VALUES (?, 1, 'novel-skill-ab@1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, ?)`,
+        `INSERT INTO novel_skill_evaluation_suites(id,schema_version,evaluator_version,compiler_version,evaluation_project_id,plan_hash,fixture_set_hash,target_manifest_hash,core_manifest_hash,core_genre_manifest_hash,core_genre_preferences_manifest_hash,preference_configuration_hash,model_slots_json,minimum_repetitions,created_at) VALUES(?,1,'novel-skill-ab@1',?,?,?,?,?,?,?,?,?,?,2,?)`,
         [
           input.suiteId,
           input.plan.compilerVersion,
@@ -419,9 +413,7 @@ export class NovelSkillEvaluationSqliteStore {
       for (const [arm, items] of manifestItems) {
         for (const [index, item] of items.entries()) {
           await transaction.execute(
-            `INSERT INTO novel_skill_evaluation_manifest_items (
-               suite_id, arm, item_order, skill_id, skill_version, definition_hash, kind
-             ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO novel_skill_evaluation_manifest_items(suite_id,arm,item_order,skill_id,skill_version,definition_hash,kind) VALUES(?,?,?,?,?,?,?)`,
             [
               input.suiteId,
               arm,
@@ -436,10 +428,7 @@ export class NovelSkillEvaluationSqliteStore {
       }
       for (const { fixture, hash, inputHash } of fixtureContracts) {
         await transaction.execute(
-          `INSERT INTO novel_skill_evaluation_fixtures (
-             suite_id, fixture_id, language, origin, task_type, invocation_mode,
-             genre_tags_json, coverage_dimensions_json, contract_hash, input_content_hash
-           ) VALUES (?, ?, 'zh-CN', 'inkshadow_original_short_contract', ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO novel_skill_evaluation_fixtures(suite_id,fixture_id,language,origin,task_type,invocation_mode,genre_tags_json,coverage_dimensions_json,contract_hash,input_content_hash) VALUES(?,?,'zh-CN','inkshadow_original_short_contract',?,?,?,?,?,?)`,
           [
             input.suiteId,
             fixture.fixtureId,
@@ -467,9 +456,7 @@ export class NovelSkillEvaluationSqliteStore {
     const assignments = orderedAssignments(input.modelAssignments);
     await this.executor.transaction(async (transaction) => {
       const suites = await transaction.select<SuiteRow>(
-        `SELECT model_slots_json, core_manifest_hash, core_genre_manifest_hash,
-                core_genre_preferences_manifest_hash
-         FROM novel_skill_evaluation_suites WHERE id = ?`,
+        `SELECT model_slots_json,core_manifest_hash,core_genre_manifest_hash,core_genre_preferences_manifest_hash FROM novel_skill_evaluation_suites WHERE id = ?`,
         [input.suiteId],
       );
       const suite = suites[0];
@@ -491,15 +478,11 @@ export class NovelSkillEvaluationSqliteStore {
       });
       if (replayed) return;
       await transaction.execute(
-        `INSERT INTO novel_skill_evaluation_runs (
-            id, suite_id, status, evaluation_status, evaluation_result_hash, model_assignments_json,
-            revision, started_at, completed_at, created_at
-          ) VALUES (?, ?, 'planned', 'NOT_EVALUATED', NULL, ?, 1, NULL, NULL, ?)`,
+        `INSERT INTO novel_skill_evaluation_runs(id,suite_id,status,evaluation_status,evaluation_result_hash,model_assignments_json,revision,started_at,completed_at,created_at) VALUES(?,?,'planned','NOT_EVALUATED',NULL,?,1,NULL,NULL,?)`,
         [input.runId, input.suiteId, JSON.stringify(assignments), input.createdAt],
       );
       const fixtures = await transaction.select<{ readonly fixture_id: string }>(
-        `SELECT fixture_id FROM novel_skill_evaluation_fixtures
-         WHERE suite_id = ? ORDER BY fixture_id`,
+        `SELECT fixture_id FROM novel_skill_evaluation_fixtures WHERE suite_id = ? ORDER BY fixture_id`,
         [input.suiteId],
       );
       if (fixtures.length !== 12) {
@@ -513,10 +496,7 @@ export class NovelSkillEvaluationSqliteStore {
           for (const slot of slots) {
             for (const repetition of [1, 2] as const) {
               await transaction.execute(
-                `INSERT INTO novel_skill_evaluation_cells (
-                   id, run_id, suite_id, fixture_id, arm, arm_configuration_hash,
-                   model_slot_id, model_tier, repetition, state, created_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?)`,
+                `INSERT INTO novel_skill_evaluation_cells(id,run_id,suite_id,fixture_id,arm,arm_configuration_hash,model_slot_id,model_tier,repetition,state,created_at) VALUES(?,?,?,?,?,?,?,?,?,'planned',?)`,
                 [
                   await deterministicCellId(input.runId, fixtureId, arm, slot.slotId, repetition),
                   input.runId,
@@ -541,9 +521,7 @@ export class NovelSkillEvaluationSqliteStore {
     assertUuidV7(runId, "runId");
     assertIsoUtc(startedAt, "startedAt");
     const result = await this.executor.execute(
-      `UPDATE novel_skill_evaluation_runs
-       SET status = 'running', started_at = ?, revision = revision + 1
-       WHERE id = ? AND status = 'planned' AND evaluation_status = 'NOT_EVALUATED'`,
+      `UPDATE novel_skill_evaluation_runs SET status = 'running',started_at = ?,revision = revision+1 WHERE id = ? AND status = 'planned' AND evaluation_status = 'NOT_EVALUATED'`,
       [startedAt, runId],
     );
     if (result.rowsAffected !== 1) {
@@ -559,24 +537,18 @@ export class NovelSkillEvaluationSqliteStore {
     assertIsoUtc(invalidatedAt, "invalidatedAt");
     await this.executor.transaction(async (transaction) => {
       await transaction.execute(
-        `UPDATE novel_skill_evaluation_attempts
-         SET status = 'cancelled', error_code = 'RUN_INVALIDATED', completed_at = ?
-         WHERE run_id = ? AND status = 'started'`,
+        `UPDATE novel_skill_evaluation_attempts SET status = 'cancelled',error_code = 'RUN_INVALIDATED',completed_at = ? WHERE run_id = ? AND status = 'started'`,
         [invalidatedAt, runId],
       );
       const result = await transaction.execute(
-        `UPDATE novel_skill_evaluation_runs
-         SET status = 'invalidated', evaluation_status = 'EVIDENCE_INCOMPLETE',
-             completed_at = ?, revision = revision + 1
-         WHERE id = ? AND status IN ('planned','running')`,
+        `UPDATE novel_skill_evaluation_runs SET status = 'invalidated',evaluation_status = 'EVIDENCE_INCOMPLETE',completed_at = ?,revision = revision+1 WHERE id = ? AND status IN ('planned','running')`,
         [invalidatedAt, runId],
       );
       if (result.rowsAffected !== 1) {
         throw storeError(EVALUATION_CONFLICT_CODE, "Evaluation run is already terminal.");
       }
       await transaction.execute(
-        `UPDATE novel_skill_evaluation_cells SET state = 'invalidated'
-         WHERE run_id = ? AND state = 'planned'`,
+        `UPDATE novel_skill_evaluation_cells SET state = 'invalidated' WHERE run_id = ? AND state = 'planned'`,
         [runId],
       );
     });
@@ -597,10 +569,7 @@ export class NovelSkillEvaluationSqliteStore {
       readonly context_trace_id: string | null;
       readonly model_invocation_id: string | null;
     }>(
-      `SELECT id, run_id, cell_id, attempt_number, started_at,
-              context_trace_id, model_invocation_id
-       FROM novel_skill_evaluation_attempts
-       WHERE run_id = ? AND cell_id = ? AND status = 'started'`,
+      `SELECT id,run_id,cell_id,attempt_number,started_at,context_trace_id,model_invocation_id FROM novel_skill_evaluation_attempts WHERE run_id = ? AND cell_id = ? AND status = 'started'`,
       [runId, cellId],
     );
     const row = rows[0];
@@ -641,17 +610,7 @@ export class NovelSkillEvaluationSqliteStore {
         readonly provider_kind_snapshot: string;
         readonly model_id_snapshot: string;
       }>(
-        `SELECT attempt.run_id, cell.model_slot_id, run.model_assignments_json,
-                invocation.connection_id, invocation.catalog_entry_id,
-                invocation.provider_kind_snapshot, invocation.model_id_snapshot
-         FROM novel_skill_evaluation_attempts AS attempt
-         INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = attempt.cell_id
-         INNER JOIN novel_skill_evaluation_runs AS run ON run.id = attempt.run_id
-         INNER JOIN model_invocation_facts AS invocation ON invocation.id = ?
-         INNER JOIN context_compilation_model_invocation_links AS link
-           ON link.model_invocation_id = invocation.id AND link.trace_id = ?
-         WHERE attempt.id = ? AND attempt.status = 'started'
-           AND attempt.context_trace_id IS NULL AND attempt.model_invocation_id IS NULL`,
+        `SELECT attempt.run_id,cell.model_slot_id,run.model_assignments_json,invocation.connection_id,invocation.catalog_entry_id,invocation.provider_kind_snapshot,invocation.model_id_snapshot FROM novel_skill_evaluation_attempts AS attempt INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = attempt.cell_id INNER JOIN novel_skill_evaluation_runs AS run ON run.id = attempt.run_id INNER JOIN model_invocation_facts AS invocation ON invocation.id = ? INNER JOIN context_compilation_model_invocation_links AS link ON link.model_invocation_id = invocation.id AND link.trace_id = ? WHERE attempt.id = ? AND attempt.status = 'started' AND attempt.context_trace_id IS NULL AND attempt.model_invocation_id IS NULL`,
         [input.modelInvocationId, input.contextTraceId, input.attemptId],
       );
       const row = rows[0];
@@ -685,10 +644,7 @@ export class NovelSkillEvaluationSqliteStore {
         );
       }
       const changed = await transaction.execute(
-        `UPDATE novel_skill_evaluation_attempts
-         SET context_trace_id = ?, model_invocation_id = ?
-         WHERE id = ? AND status = 'started'
-           AND context_trace_id IS NULL AND model_invocation_id IS NULL`,
+        `UPDATE novel_skill_evaluation_attempts SET context_trace_id = ?,model_invocation_id = ? WHERE id = ? AND status = 'started' AND context_trace_id IS NULL AND model_invocation_id IS NULL`,
         [input.contextTraceId, input.modelInvocationId, input.attemptId],
       );
       if (changed.rowsAffected !== 1) {
@@ -708,8 +664,7 @@ export class NovelSkillEvaluationSqliteStore {
     assertIsoUtc(input.startedAt, "startedAt");
     return this.executor.transaction(async (transaction) => {
       const rows = await transaction.select<{ readonly next_attempt_number: number }>(
-        `SELECT 1 + COALESCE(max(attempt_number), 0) AS next_attempt_number
-         FROM novel_skill_evaluation_attempts WHERE cell_id = ?`,
+        `SELECT 1+COALESCE(max(attempt_number),0) AS next_attempt_number FROM novel_skill_evaluation_attempts WHERE cell_id = ?`,
         [input.cellId],
       );
       const attemptNumber = rows[0]?.next_attempt_number;
@@ -725,10 +680,7 @@ export class NovelSkillEvaluationSqliteStore {
         );
       }
       await transaction.execute(
-        `INSERT INTO novel_skill_evaluation_attempts (
-           id, run_id, cell_id, attempt_number, status, context_trace_id,
-           model_invocation_id, error_code, started_at, completed_at
-         ) VALUES (?, ?, ?, ?, 'started', NULL, NULL, NULL, ?, NULL)`,
+        `INSERT INTO novel_skill_evaluation_attempts(id,run_id,cell_id,attempt_number,status,context_trace_id,model_invocation_id,error_code,started_at,completed_at) VALUES(?,?,?,?,'started',NULL,NULL,NULL,?,NULL)`,
         [input.attemptId, input.runId, input.cellId, attemptNumber, input.startedAt],
       );
       return attemptNumber;
@@ -764,9 +716,7 @@ export class NovelSkillEvaluationSqliteStore {
       );
     }
     const changed = await this.executor.execute(
-      `UPDATE novel_skill_evaluation_attempts
-       SET status = ?, context_trace_id = ?, model_invocation_id = ?, error_code = ?, completed_at = ?
-       WHERE id = ? AND status = 'started'`,
+      `UPDATE novel_skill_evaluation_attempts SET status = ?,context_trace_id = ?,model_invocation_id = ?,error_code = ?,completed_at = ? WHERE id = ? AND status = 'started'`,
       [
         input.status,
         input.contextTraceId,
@@ -809,13 +759,7 @@ export class NovelSkillEvaluationSqliteStore {
     await this.executor.transaction(async (transaction) => {
       await assertEvaluationProjectClean(transaction, input.runId);
       const rows = await transaction.select<CellEvidenceRow>(
-        `SELECT cell.fixture_id, cell.arm, cell.arm_configuration_hash, cell.model_slot_id,
-                cell.model_tier, cell.repetition, cell.state, run.status AS run_status,
-                run.model_assignments_json, suite.preference_configuration_hash
-         FROM novel_skill_evaluation_cells AS cell
-         INNER JOIN novel_skill_evaluation_runs AS run ON run.id = cell.run_id
-         INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = cell.suite_id
-         WHERE cell.id = ? AND run.id = ?`,
+        `SELECT cell.fixture_id,cell.arm,cell.arm_configuration_hash,cell.model_slot_id,cell.model_tier,cell.repetition,cell.state,run.status AS run_status,run.model_assignments_json,suite.preference_configuration_hash FROM novel_skill_evaluation_cells AS cell INNER JOIN novel_skill_evaluation_runs AS run ON run.id = cell.run_id INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = cell.suite_id WHERE cell.id = ? AND run.id = ?`,
         [input.cellId, input.runId],
       );
       const cell = rows[0];
@@ -827,15 +771,7 @@ export class NovelSkillEvaluationSqliteStore {
       }
       assertObservationMatchesCell(input.observation, input.modelInvocationId, cell);
       const invocations = await transaction.select<InvocationEvidenceRow>(
-        `SELECT invocation.task, invocation.status, invocation.connection_id,
-                invocation.catalog_entry_id, invocation.provider_kind_snapshot,
-                invocation.model_id_snapshot, invocation.started_at, invocation.completed_at,
-                invocation.error_code, invocation.finish_reason, invocation.visible_content_length,
-                invocation.input_tokens, invocation.output_tokens, invocation.estimated_cost_micros
-         FROM model_invocation_facts AS invocation
-         INNER JOIN context_compilation_model_invocation_links AS link
-           ON link.model_invocation_id = invocation.id AND link.trace_id = ?
-         WHERE invocation.id = ?`,
+        `SELECT invocation.task,invocation.status,invocation.connection_id,invocation.catalog_entry_id,invocation.provider_kind_snapshot,invocation.model_id_snapshot,invocation.started_at,invocation.completed_at,invocation.error_code,invocation.finish_reason,invocation.visible_content_length,invocation.input_tokens,invocation.output_tokens,invocation.estimated_cost_micros FROM model_invocation_facts AS invocation INNER JOIN context_compilation_model_invocation_links AS link ON link.model_invocation_id = invocation.id AND link.trace_id = ? WHERE invocation.id = ?`,
         [input.contextTraceId, input.modelInvocationId],
       );
       const invocation = invocations[0];
@@ -929,13 +865,7 @@ export class NovelSkillEvaluationSqliteStore {
       }
 
       await transaction.execute(
-        `INSERT INTO novel_skill_evaluation_observations (
-           id, run_id, cell_id, attempt_id, context_trace_id, model_invocation_id, output_candidate_id,
-           novel_skill_snapshot_id, model_identity_hash, model_artifact_hash,
-           arm_configuration_hash,
-           preference_configuration_hash, evaluator_version, result_hash,
-           latency_milliseconds, input_tokens, output_tokens, estimated_cost_micros, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'novel-skill-ab@1', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO novel_skill_evaluation_observations(id,run_id,cell_id,attempt_id,context_trace_id,model_invocation_id,output_candidate_id,novel_skill_snapshot_id,model_identity_hash,model_artifact_hash,arm_configuration_hash,preference_configuration_hash,evaluator_version,result_hash,latency_milliseconds,input_tokens,output_tokens,estimated_cost_micros,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'novel-skill-ab@1',?,?,?,?,?,?)`,
         [
           input.observationId,
           input.runId,
@@ -980,38 +910,7 @@ export class NovelSkillEvaluationSqliteStore {
 
     const evidence = await this.executor.transaction(async (transaction) => {
       const rows = await transaction.select<SettledObservationRepairRow>(
-        `SELECT reservation.attempt_id, reservation.planned_context_trace_id,
-                reservation.planned_model_invocation_id, reservation.output_candidate_id,
-                reservation.provider_visible_output_hash, reservation.terminal_at,
-                cell.fixture_id, cell.arm, cell.model_slot_id, cell.model_tier, cell.repetition,
-                invocation.finish_reason, invocation.visible_content_length,
-                invocation.input_tokens, invocation.output_tokens,
-                invocation.estimated_cost_micros, invocation.started_at, invocation.completed_at,
-                candidate.content, candidate.content_checksum,
-                observation.id AS existing_observation_id,
-                observation.attempt_id AS observed_attempt_id,
-                observation.context_trace_id AS observed_trace_id,
-                observation.model_invocation_id AS observed_invocation_id,
-                observation.output_candidate_id AS observed_candidate_id,
-                observation.result_hash AS observed_result_hash
-         FROM novel_skill_evaluation_dispatch_reservations AS reservation
-         INNER JOIN novel_skill_evaluation_cells AS cell
-           ON cell.id = reservation.cell_id AND cell.run_id = reservation.run_id
-         INNER JOIN novel_skill_evaluation_attempts AS attempt
-           ON attempt.id = reservation.attempt_id AND attempt.run_id = reservation.run_id
-          AND attempt.cell_id = reservation.cell_id
-         INNER JOIN model_invocation_facts AS invocation
-           ON invocation.id = reservation.planned_model_invocation_id
-         INNER JOIN ai_candidates AS candidate
-           ON candidate.id = reservation.output_candidate_id
-         LEFT JOIN novel_skill_evaluation_observations AS observation
-           ON observation.run_id = reservation.run_id AND observation.cell_id = reservation.cell_id
-         WHERE reservation.run_id = ? AND reservation.cell_id = ?
-           AND reservation.state = 'settled'
-           AND reservation.settlement_outcome = 'succeeded'
-           AND attempt.status = 'succeeded'
-           AND attempt.context_trace_id = reservation.planned_context_trace_id
-           AND attempt.model_invocation_id = reservation.planned_model_invocation_id`,
+        `SELECT reservation.attempt_id,reservation.planned_context_trace_id,reservation.planned_model_invocation_id,reservation.output_candidate_id,reservation.provider_visible_output_hash,reservation.terminal_at,cell.fixture_id,cell.arm,cell.model_slot_id,cell.model_tier,cell.repetition,invocation.finish_reason,invocation.visible_content_length,invocation.input_tokens,invocation.output_tokens,invocation.estimated_cost_micros,invocation.started_at,invocation.completed_at,candidate.content,candidate.content_checksum,observation.id AS existing_observation_id,observation.attempt_id AS observed_attempt_id,observation.context_trace_id AS observed_trace_id,observation.model_invocation_id AS observed_invocation_id,observation.output_candidate_id AS observed_candidate_id,observation.result_hash AS observed_result_hash FROM novel_skill_evaluation_dispatch_reservations AS reservation INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = reservation.cell_id AND cell.run_id = reservation.run_id INNER JOIN novel_skill_evaluation_attempts AS attempt ON attempt.id = reservation.attempt_id AND attempt.run_id = reservation.run_id AND attempt.cell_id = reservation.cell_id INNER JOIN model_invocation_facts AS invocation ON invocation.id = reservation.planned_model_invocation_id INNER JOIN ai_candidates AS candidate ON candidate.id = reservation.output_candidate_id LEFT JOIN novel_skill_evaluation_observations AS observation ON observation.run_id = reservation.run_id AND observation.cell_id = reservation.cell_id WHERE reservation.run_id = ? AND reservation.cell_id = ? AND reservation.state = 'settled' AND reservation.settlement_outcome = 'succeeded' AND attempt.status = 'succeeded' AND attempt.context_trace_id = reservation.planned_context_trace_id AND attempt.model_invocation_id = reservation.planned_model_invocation_id`,
         [input.runId, input.cellId],
       );
       const row = rows[0];
@@ -1059,8 +958,7 @@ export class NovelSkillEvaluationSqliteStore {
       }
 
       const snapshotRows = await transaction.select<{ readonly id: string }>(
-        `SELECT id FROM novel_skill_invocation_snapshots
-         WHERE context_trace_id = ? AND model_invocation_id = ? ORDER BY id`,
+        `SELECT id FROM novel_skill_invocation_snapshots WHERE context_trace_id = ? AND model_invocation_id = ? ORDER BY id`,
         [row.planned_context_trace_id, row.planned_model_invocation_id],
       );
       const novelSkillSnapshotId = snapshotRows[0]?.id ?? null;
@@ -1145,9 +1043,7 @@ export class NovelSkillEvaluationSqliteStore {
         readonly output_candidate_id: string;
         readonly result_hash: string;
       }>(
-        `SELECT id, attempt_id, context_trace_id, model_invocation_id,
-                output_candidate_id, result_hash
-         FROM novel_skill_evaluation_observations WHERE run_id = ? AND cell_id = ?`,
+        `SELECT id,attempt_id,context_trace_id,model_invocation_id,output_candidate_id,result_hash FROM novel_skill_evaluation_observations WHERE run_id = ? AND cell_id = ?`,
         [input.runId, input.cellId],
       );
       const row = existing[0];
@@ -1193,12 +1089,7 @@ export class NovelSkillEvaluationSqliteStore {
     assertScores(input.scores);
     await this.executor.transaction(async (transaction) => {
       const observations = await transaction.select<{ readonly id: string }>(
-        `SELECT observation.id
-         FROM novel_skill_evaluation_observations AS observation
-         INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = observation.cell_id
-         INNER JOIN novel_skill_evaluation_runs AS run ON run.id = observation.run_id
-         WHERE observation.id = ? AND observation.run_id = ? AND observation.cell_id = ?
-           AND cell.state = 'planned' AND run.status = 'running'`,
+        `SELECT observation.id FROM novel_skill_evaluation_observations AS observation INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = observation.cell_id INNER JOIN novel_skill_evaluation_runs AS run ON run.id = observation.run_id WHERE observation.id = ? AND observation.run_id = ? AND observation.cell_id = ? AND cell.state = 'planned' AND run.status = 'running'`,
         [input.observationId, input.runId, input.cellId],
       );
       if (observations.length !== 1) {
@@ -1210,9 +1101,7 @@ export class NovelSkillEvaluationSqliteStore {
       for (const metric of NOVEL_SKILL_EVALUATION_METRICS) {
         const score = input.scores[metric];
         await transaction.execute(
-          `INSERT INTO novel_skill_evaluation_scores (
-             observation_id, metric, score_basis_points, reviewer_id, rubric_version, scored_at
-           ) VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO novel_skill_evaluation_scores(observation_id,metric,score_basis_points,reviewer_id,rubric_version,scored_at) VALUES(?,?,?,?,?,?)`,
           [
             input.observationId,
             metric,
@@ -1224,8 +1113,7 @@ export class NovelSkillEvaluationSqliteStore {
         );
       }
       const marked = await transaction.execute(
-        `UPDATE novel_skill_evaluation_cells SET state = 'observed'
-         WHERE id = ? AND run_id = ? AND state = 'planned'`,
+        `UPDATE novel_skill_evaluation_cells SET state = 'observed' WHERE id = ? AND run_id = ? AND state = 'planned'`,
         [input.cellId, input.runId],
       );
       if (marked.rowsAffected !== 1) {
@@ -1256,36 +1144,7 @@ export class NovelSkillEvaluationSqliteStore {
   public async listRunCells(runId: string): Promise<readonly NovelSkillEvaluationCellRecord[]> {
     assertUuidV7(runId, "runId");
     const rows = await this.executor.select<RunCellRow>(
-      `SELECT cell.id, cell.fixture_id, fixture.task_type, fixture.invocation_mode,
-              fixture.genre_tags_json, fixture.input_content_hash, cell.arm,
-              cell.model_slot_id, cell.model_tier, cell.repetition, cell.state,
-              CASE WHEN observation.id IS NULL THEN 0 ELSE 1 END AS evidence_collected,
-              count(attempt.id) AS attempt_count,
-              (SELECT latest.id FROM novel_skill_evaluation_attempts AS latest
-               WHERE latest.cell_id = cell.id ORDER BY latest.attempt_number DESC LIMIT 1)
-                AS latest_attempt_id,
-              (SELECT latest.status FROM novel_skill_evaluation_attempts AS latest
-               WHERE latest.cell_id = cell.id ORDER BY latest.attempt_number DESC LIMIT 1)
-                AS latest_attempt_status,
-              (SELECT latest.started_at FROM novel_skill_evaluation_attempts AS latest
-               WHERE latest.cell_id = cell.id ORDER BY latest.attempt_number DESC LIMIT 1)
-                AS latest_attempt_started_at,
-              (SELECT latest.context_trace_id FROM novel_skill_evaluation_attempts AS latest
-               WHERE latest.cell_id = cell.id ORDER BY latest.attempt_number DESC LIMIT 1)
-                AS latest_attempt_context_trace_id,
-              (SELECT latest.model_invocation_id FROM novel_skill_evaluation_attempts AS latest
-               WHERE latest.cell_id = cell.id ORDER BY latest.attempt_number DESC LIMIT 1)
-                AS latest_attempt_model_invocation_id
-       FROM novel_skill_evaluation_cells AS cell
-       INNER JOIN novel_skill_evaluation_fixtures AS fixture
-         ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id
-       LEFT JOIN novel_skill_evaluation_observations AS observation ON observation.cell_id = cell.id
-       LEFT JOIN novel_skill_evaluation_attempts AS attempt ON attempt.cell_id = cell.id
-       WHERE cell.run_id = ?
-       GROUP BY cell.id, cell.fixture_id, fixture.task_type, fixture.invocation_mode,
-                fixture.genre_tags_json, fixture.input_content_hash, cell.arm,
-                cell.model_slot_id, cell.model_tier, cell.repetition, cell.state, observation.id
-       ORDER BY cell.fixture_id, cell.arm, cell.model_slot_id, cell.repetition`,
+      `SELECT cell.id,cell.fixture_id,fixture.task_type,fixture.invocation_mode,fixture.genre_tags_json,fixture.input_content_hash,cell.arm,cell.model_slot_id,cell.model_tier,cell.repetition,cell.state,CASE WHEN observation.id IS NULL THEN 0 ELSE 1 END AS evidence_collected,count(attempt.id) AS attempt_count,(SELECT latest.id FROM novel_skill_evaluation_attempts AS latest WHERE latest.cell_id = cell.id ORDER BY latest.attempt_number DESC LIMIT 1) AS latest_attempt_id,(SELECT latest.status FROM novel_skill_evaluation_attempts AS latest WHERE latest.cell_id = cell.id ORDER BY latest.attempt_number DESC LIMIT 1) AS latest_attempt_status,(SELECT latest.started_at FROM novel_skill_evaluation_attempts AS latest WHERE latest.cell_id = cell.id ORDER BY latest.attempt_number DESC LIMIT 1) AS latest_attempt_started_at,(SELECT latest.context_trace_id FROM novel_skill_evaluation_attempts AS latest WHERE latest.cell_id = cell.id ORDER BY latest.attempt_number DESC LIMIT 1) AS latest_attempt_context_trace_id,(SELECT latest.model_invocation_id FROM novel_skill_evaluation_attempts AS latest WHERE latest.cell_id = cell.id ORDER BY latest.attempt_number DESC LIMIT 1) AS latest_attempt_model_invocation_id FROM novel_skill_evaluation_cells AS cell INNER JOIN novel_skill_evaluation_fixtures AS fixture ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id LEFT JOIN novel_skill_evaluation_observations AS observation ON observation.cell_id = cell.id LEFT JOIN novel_skill_evaluation_attempts AS attempt ON attempt.cell_id = cell.id WHERE cell.run_id = ? GROUP BY cell.id,cell.fixture_id,fixture.task_type,fixture.invocation_mode,fixture.genre_tags_json,fixture.input_content_hash,cell.arm,cell.model_slot_id,cell.model_tier,cell.repetition,cell.state,observation.id ORDER BY cell.fixture_id,cell.arm,cell.model_slot_id,cell.repetition`,
       [runId],
     );
     return Object.freeze(rows.map(normalizeRunCell));
@@ -1296,19 +1155,7 @@ export class NovelSkillEvaluationSqliteStore {
     await assertStoredSuitePlan(this.executor, runId);
     await assertEvaluationProjectClean(this.executor, runId);
     const rows = await this.executor.select<RunProgressRow>(
-      `SELECT run.id, run.suite_id, run.status, run.evaluation_status,
-              run.evaluation_result_hash, run.revision, suite.evaluation_project_id,
-              suite.model_slots_json,
-              count(cell.id) AS total_cells,
-              count(observation.id) AS evidence_collected_cells,
-              sum(CASE WHEN cell.state = 'observed' THEN 1 ELSE 0 END) AS scored_cells
-       FROM novel_skill_evaluation_runs AS run
-       INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = run.suite_id
-       INNER JOIN novel_skill_evaluation_cells AS cell ON cell.run_id = run.id
-       LEFT JOIN novel_skill_evaluation_observations AS observation ON observation.cell_id = cell.id
-       WHERE run.id = ? GROUP BY run.id, run.suite_id, run.status, run.evaluation_status,
-                                  run.evaluation_result_hash, run.revision,
-                                  suite.evaluation_project_id, suite.model_slots_json`,
+      `SELECT run.id,run.suite_id,run.status,run.evaluation_status,run.evaluation_result_hash,run.revision,suite.evaluation_project_id,suite.model_slots_json,count(cell.id) AS total_cells,count(observation.id) AS evidence_collected_cells,sum(CASE WHEN cell.state = 'observed' THEN 1 ELSE 0 END) AS scored_cells FROM novel_skill_evaluation_runs AS run INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = run.suite_id INNER JOIN novel_skill_evaluation_cells AS cell ON cell.run_id = run.id LEFT JOIN novel_skill_evaluation_observations AS observation ON observation.cell_id = cell.id WHERE run.id = ? GROUP BY run.id,run.suite_id,run.status,run.evaluation_status,run.evaluation_result_hash,run.revision,suite.evaluation_project_id,suite.model_slots_json`,
       [runId],
     );
     const row = rows[0];
@@ -1355,9 +1202,7 @@ export class NovelSkillEvaluationSqliteStore {
       await assertStoredSuitePlan(transaction, runId);
       await assertEvaluationProjectClean(transaction, runId);
       const rows = await transaction.select<{ readonly model_slots_json: string }>(
-        `SELECT suite.model_slots_json FROM novel_skill_evaluation_runs AS run
-         INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = run.suite_id
-         WHERE run.id = ? AND run.status = 'running'`,
+        `SELECT suite.model_slots_json FROM novel_skill_evaluation_runs AS run INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = run.suite_id WHERE run.id = ? AND run.status = 'running'`,
         [runId],
       );
       const row = rows[0];
@@ -1379,10 +1224,7 @@ export class NovelSkillEvaluationSqliteStore {
       }
       const persistedResultHash = await evaluationResultHash(result, evidenceDigest);
       const changed = await transaction.execute(
-        `UPDATE novel_skill_evaluation_runs
-         SET status = 'completed', evaluation_status = ?, evaluation_result_hash = ?,
-             completed_at = ?, revision = revision + 1
-         WHERE id = ? AND status = 'running'`,
+        `UPDATE novel_skill_evaluation_runs SET status = 'completed',evaluation_status = ?,evaluation_result_hash = ?,completed_at = ?,revision = revision+1 WHERE id = ? AND status = 'running'`,
         [result.status, persistedResultHash, completedAt, runId],
       );
       if (changed.rowsAffected !== 1) {
@@ -1410,14 +1252,7 @@ export class NovelSkillEvaluationSqliteStore {
       await assertStoredSuitePlan(transaction, runId);
       await assertEvaluationProjectClean(transaction, runId);
       const rows = await transaction.select<DecisionRunRow>(
-        `SELECT run.status, run.evaluation_status, run.evaluation_result_hash,
-                suite.target_manifest_hash, suite.model_slots_json
-         FROM novel_skill_evaluation_runs AS run
-         INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = run.suite_id
-         INNER JOIN projects AS project ON project.id = suite.evaluation_project_id
-         WHERE run.id = ? AND run.status IN ('completed','invalidated')
-           AND project.status = 'archived' AND project.archived_at IS NOT NULL
-           AND project.trashed_at IS NULL`,
+        `SELECT run.status,run.evaluation_status,run.evaluation_result_hash,suite.target_manifest_hash,suite.model_slots_json FROM novel_skill_evaluation_runs AS run INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = run.suite_id INNER JOIN projects AS project ON project.id = suite.evaluation_project_id WHERE run.id = ? AND run.status IN ('completed','invalidated') AND project.status = 'archived' AND project.archived_at IS NOT NULL AND project.trashed_at IS NULL`,
         [runId],
       );
       const run = rows[0];
@@ -1451,9 +1286,7 @@ export class NovelSkillEvaluationSqliteStore {
         );
       }
       await transaction.execute(
-        `INSERT INTO novel_skill_evaluation_manual_decisions (
-           id, run_id, target_manifest_hash, decision, rationale_hash, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO novel_skill_evaluation_manual_decisions(id,run_id,target_manifest_hash,decision,rationale_hash,created_at) VALUES(?,?,?,?,?,?)`,
         [decisionId, runId, run.target_manifest_hash, decision, rationaleHash, createdAt],
       );
     });
@@ -1546,25 +1379,17 @@ async function assertExactSuiteReplayOrMissing(
   }>,
 ): Promise<boolean> {
   const [suite] = await transaction.select<SuiteReplayRow>(
-    `SELECT schema_version, evaluator_version, compiler_version, evaluation_project_id,
-            plan_hash, fixture_set_hash, target_manifest_hash, core_manifest_hash,
-            core_genre_manifest_hash, core_genre_preferences_manifest_hash,
-            preference_configuration_hash, model_slots_json, minimum_repetitions, created_at
-     FROM novel_skill_evaluation_suites WHERE id = ?`,
+    `SELECT schema_version,evaluator_version,compiler_version,evaluation_project_id,plan_hash,fixture_set_hash,target_manifest_hash,core_manifest_hash,core_genre_manifest_hash,core_genre_preferences_manifest_hash,preference_configuration_hash,model_slots_json,minimum_repetitions,created_at FROM novel_skill_evaluation_suites WHERE id = ?`,
     [authority.input.suiteId],
   );
   if (suite === undefined) return false;
   const [manifestRows, fixtureRows] = await Promise.all([
     transaction.select<ManifestReplayRow>(
-      `SELECT arm, item_order, skill_id, skill_version, definition_hash, kind
-       FROM novel_skill_evaluation_manifest_items
-       WHERE suite_id = ? ORDER BY arm, item_order`,
+      `SELECT arm,item_order,skill_id,skill_version,definition_hash,kind FROM novel_skill_evaluation_manifest_items WHERE suite_id = ? ORDER BY arm,item_order`,
       [authority.input.suiteId],
     ),
     transaction.select<FixtureReplayRow>(
-      `SELECT fixture_id, language, origin, task_type, invocation_mode, genre_tags_json,
-              coverage_dimensions_json, contract_hash, input_content_hash
-       FROM novel_skill_evaluation_fixtures WHERE suite_id = ? ORDER BY fixture_id`,
+      `SELECT fixture_id,language,origin,task_type,invocation_mode,genre_tags_json,coverage_dimensions_json,contract_hash,input_content_hash FROM novel_skill_evaluation_fixtures WHERE suite_id = ? ORDER BY fixture_id`,
       [authority.input.suiteId],
     ),
   ]);
@@ -1627,22 +1452,16 @@ async function assertExactRunReplayOrMissing(
   }>,
 ): Promise<boolean> {
   const [run] = await transaction.select<RunReplayRow>(
-    `SELECT suite_id, status, evaluation_status, evaluation_result_hash,
-            model_assignments_json, revision, started_at, completed_at, created_at
-     FROM novel_skill_evaluation_runs WHERE id = ?`,
+    `SELECT suite_id,status,evaluation_status,evaluation_result_hash,model_assignments_json,revision,started_at,completed_at,created_at FROM novel_skill_evaluation_runs WHERE id = ?`,
     [authority.input.runId],
   );
   if (run === undefined) return false;
   const fixtures = await transaction.select<{ readonly fixture_id: string }>(
-    `SELECT fixture_id FROM novel_skill_evaluation_fixtures
-     WHERE suite_id = ? ORDER BY fixture_id`,
+    `SELECT fixture_id FROM novel_skill_evaluation_fixtures WHERE suite_id = ? ORDER BY fixture_id`,
     [authority.input.suiteId],
   );
   const cells = await transaction.select<CellReplayRow>(
-    `SELECT id, suite_id, fixture_id, arm, arm_configuration_hash,
-            model_slot_id, model_tier, repetition, state, created_at
-     FROM novel_skill_evaluation_cells WHERE run_id = ?
-     ORDER BY fixture_id, arm, model_slot_id, repetition`,
+    `SELECT id,suite_id,fixture_id,arm,arm_configuration_hash,model_slot_id,model_tier,repetition,state,created_at FROM novel_skill_evaluation_cells WHERE run_id = ? ORDER BY fixture_id,arm,model_slot_id,repetition`,
     [authority.input.runId],
   );
   const expectedCells: CellReplayRow[] = [];
@@ -1910,14 +1729,7 @@ async function assertStoredSuitePlan(
     readonly model_slots_json: string;
     readonly minimum_repetitions: number;
   }>(
-    `SELECT suite.evaluator_version, suite.compiler_version, suite.plan_hash,
-            suite.fixture_set_hash, suite.target_manifest_hash, suite.core_manifest_hash,
-            suite.core_genre_manifest_hash, suite.core_genre_preferences_manifest_hash,
-            suite.preference_configuration_hash, suite.model_slots_json,
-            suite.minimum_repetitions
-     FROM novel_skill_evaluation_runs AS run
-     INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = run.suite_id
-     WHERE run.id = ?`,
+    `SELECT suite.evaluator_version,suite.compiler_version,suite.plan_hash,suite.fixture_set_hash,suite.target_manifest_hash,suite.core_manifest_hash,suite.core_genre_manifest_hash,suite.core_genre_preferences_manifest_hash,suite.preference_configuration_hash,suite.model_slots_json,suite.minimum_repetitions FROM novel_skill_evaluation_runs AS run INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = run.suite_id WHERE run.id = ?`,
     [runId],
   );
   const suite = suites[0];
@@ -1935,13 +1747,7 @@ async function assertStoredSuitePlan(
     readonly contract_hash: string;
     readonly input_content_hash: string;
   }>(
-    `SELECT fixture.fixture_id, fixture.language, fixture.origin, fixture.task_type,
-            fixture.invocation_mode, fixture.genre_tags_json,
-            fixture.coverage_dimensions_json, fixture.contract_hash,
-            fixture.input_content_hash
-     FROM novel_skill_evaluation_runs AS run
-     INNER JOIN novel_skill_evaluation_fixtures AS fixture ON fixture.suite_id = run.suite_id
-     WHERE run.id = ?`,
+    `SELECT fixture.fixture_id,fixture.language,fixture.origin,fixture.task_type,fixture.invocation_mode,fixture.genre_tags_json,fixture.coverage_dimensions_json,fixture.contract_hash,fixture.input_content_hash FROM novel_skill_evaluation_runs AS run INNER JOIN novel_skill_evaluation_fixtures AS fixture ON fixture.suite_id = run.suite_id WHERE run.id = ?`,
     [runId],
   );
   const fixturesById = new Map(fixtures.map((fixture) => [fixture.fixture_id, fixture] as const));
@@ -1965,12 +1771,7 @@ async function assertStoredSuitePlan(
     readonly definition_hash: string;
     readonly kind: "core" | "genre";
   }>(
-    `SELECT manifest.arm, manifest.skill_id, manifest.skill_version,
-            manifest.definition_hash, manifest.kind
-     FROM novel_skill_evaluation_runs AS run
-     INNER JOIN novel_skill_evaluation_manifest_items AS manifest
-       ON manifest.suite_id = run.suite_id
-     WHERE run.id = ? ORDER BY manifest.arm, manifest.item_order`,
+    `SELECT manifest.arm,manifest.skill_id,manifest.skill_version,manifest.definition_hash,manifest.kind FROM novel_skill_evaluation_runs AS run INNER JOIN novel_skill_evaluation_manifest_items AS manifest ON manifest.suite_id = run.suite_id WHERE run.id = ? ORDER BY manifest.arm,manifest.item_order`,
     [runId],
   );
   const hashArm = (arm: Exclude<NovelSkillEvaluationArm, "no_skill">) =>
@@ -2040,22 +1841,7 @@ async function assertEvaluationProjectClean(
     readonly settings_receipts: number;
     readonly skill_bindings: number;
   }>(
-    `SELECT project.status, project.archived_at, project.trashed_at,
-            (SELECT count(*) FROM chapters WHERE project_id = project.id) AS chapters,
-            (SELECT count(*) FROM story_facts WHERE project_id = project.id) AS story_facts,
-            (SELECT count(*) FROM project_seeds WHERE project_id = project.id) AS project_seeds,
-            (SELECT count(*) FROM story_planning_candidates WHERE project_id = project.id)
-              AS planning_candidates,
-            (SELECT count(*) FROM writing_preferences WHERE project_id = project.id)
-              AS writing_preferences,
-            (SELECT count(*) FROM story_settings_import_receipts WHERE project_id = project.id)
-              AS settings_receipts,
-            (SELECT count(*) FROM project_novel_skill_bindings WHERE project_id = project.id)
-              AS skill_bindings
-     FROM novel_skill_evaluation_runs AS run
-     INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = run.suite_id
-     INNER JOIN projects AS project ON project.id = suite.evaluation_project_id
-     WHERE run.id = ?`,
+    `SELECT project.status,project.archived_at,project.trashed_at,(SELECT count(*) FROM chapters WHERE project_id = project.id) AS chapters,(SELECT count(*) FROM story_facts WHERE project_id = project.id) AS story_facts,(SELECT count(*) FROM project_seeds WHERE project_id = project.id) AS project_seeds,(SELECT count(*) FROM story_planning_candidates WHERE project_id = project.id) AS planning_candidates,(SELECT count(*) FROM writing_preferences WHERE project_id = project.id) AS writing_preferences,(SELECT count(*) FROM story_settings_import_receipts WHERE project_id = project.id) AS settings_receipts,(SELECT count(*) FROM project_novel_skill_bindings WHERE project_id = project.id) AS skill_bindings FROM novel_skill_evaluation_runs AS run INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = run.suite_id INNER JOIN projects AS project ON project.id = suite.evaluation_project_id WHERE run.id = ?`,
     [runId],
   );
   const row = rows[0];
@@ -2123,17 +1909,7 @@ async function readObservations(
   runId: string,
 ): Promise<readonly NovelSkillEvaluationObservation[]> {
   const rows = await transaction.select<EvaluationObservationRow>(
-    `SELECT observation.id, cell.fixture_id, cell.arm, cell.model_slot_id, cell.model_tier,
-            cell.repetition, observation.model_invocation_id, observation.evaluator_version,
-            observation.latency_milliseconds, observation.input_tokens, observation.output_tokens,
-            observation.estimated_cost_micros, invocation.visible_content_length,
-            invocation.finish_reason, observation.novel_skill_snapshot_id,
-            score.metric, score.score_basis_points
-     FROM novel_skill_evaluation_observations AS observation
-     INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = observation.cell_id
-     INNER JOIN model_invocation_facts AS invocation ON invocation.id = observation.model_invocation_id
-     INNER JOIN novel_skill_evaluation_scores AS score ON score.observation_id = observation.id
-     WHERE observation.run_id = ? ORDER BY observation.id, score.metric`,
+    `SELECT observation.id,cell.fixture_id,cell.arm,cell.model_slot_id,cell.model_tier,cell.repetition,observation.model_invocation_id,observation.evaluator_version,observation.latency_milliseconds,observation.input_tokens,observation.output_tokens,observation.estimated_cost_micros,invocation.visible_content_length,invocation.finish_reason,observation.novel_skill_snapshot_id,score.metric,score.score_basis_points FROM novel_skill_evaluation_observations AS observation INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = observation.cell_id INNER JOIN model_invocation_facts AS invocation ON invocation.id = observation.model_invocation_id INNER JOIN novel_skill_evaluation_scores AS score ON score.observation_id = observation.id WHERE observation.run_id = ? ORDER BY observation.id,score.metric`,
     [runId],
   );
   const grouped = new Map<string, EvaluationObservationRow[]>();
@@ -2189,84 +1965,7 @@ async function readVerifiedEvidenceDigest(
     [runId],
   );
   const rows = await transaction.select<EvidenceChainRow>(
-    `SELECT
-       observation.id AS observation_id, observation.cell_id, observation.attempt_id,
-       observation.context_trace_id, observation.model_invocation_id,
-       observation.output_candidate_id, observation.novel_skill_snapshot_id,
-       observation.model_identity_hash, observation.model_artifact_hash,
-       observation.arm_configuration_hash AS observed_arm_hash,
-       observation.preference_configuration_hash, observation.result_hash,
-       observation.latency_milliseconds, observation.input_tokens,
-       observation.output_tokens, observation.estimated_cost_micros,
-       cell.fixture_id, fixture.task_type AS fixture_task_type,
-       fixture.invocation_mode AS fixture_invocation_mode,
-       fixture.genre_tags_json AS fixture_genre_tags_json,
-       fixture.input_content_hash AS fixture_input_hash,
-       fixture.contract_hash AS fixture_contract_hash,
-       cell.arm, cell.arm_configuration_hash AS cell_arm_hash,
-       cell.model_slot_id, cell.repetition, run.model_assignments_json,
-       suite.compiler_version AS suite_compiler_version,
-       suite.evaluation_project_id, attempt.status AS attempt_status,
-       attempt.context_trace_id AS attempt_trace_id,
-       attempt.model_invocation_id AS attempt_invocation_id,
-       invocation.task AS invocation_task, invocation.status AS invocation_status,
-       invocation.connection_id, invocation.catalog_entry_id,
-       invocation.provider_kind_snapshot, invocation.model_id_snapshot,
-       invocation.started_at, invocation.completed_at, invocation.error_code,
-       invocation.finish_reason, invocation.visible_content_length,
-       invocation.input_tokens AS invocation_input_tokens,
-       invocation.output_tokens AS invocation_output_tokens,
-       invocation.estimated_cost_micros AS invocation_estimated_cost_micros,
-       trace.project_id AS trace_project_id, trace.chapter_id AS trace_chapter_id,
-       trace.task_type AS trace_task_type,
-       trace.maximum_context_tokens AS trace_maximum_context_tokens,
-       trace.required_tokens AS trace_required_tokens,
-       trace.used_tokens AS trace_used_tokens,
-       trace.remaining_tokens AS trace_remaining_tokens,
-       trace.discarded_tokens AS trace_discarded_tokens,
-       trace.token_estimate_source AS trace_token_estimate_source,
-       trace.candidate_count AS trace_candidate_count,
-       trace.included_count AS trace_included_count,
-       trace.discarded_count AS trace_discarded_count,
-       execution_link.generation_id, execution_link.generation_run_id,
-       execution_link.created_at AS execution_created_at,
-       candidate.project_id AS candidate_project_id,
-       candidate.chapter_id AS candidate_chapter_id,
-       candidate.base_version_id AS candidate_base_version_id,
-       candidate.content AS candidate_content,
-       candidate.content_checksum AS candidate_checksum,
-       candidate.status AS candidate_status,
-       candidate.incomplete AS candidate_incomplete,
-       snapshot.compiler_version AS snapshot_compiler_version,
-       snapshot.configuration_snapshot_json AS snapshot_configuration_json
-     FROM novel_skill_evaluation_observations AS observation
-     INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = observation.cell_id
-     INNER JOIN novel_skill_evaluation_runs AS run ON run.id = observation.run_id
-     INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = run.suite_id
-     INNER JOIN novel_skill_evaluation_fixtures AS fixture
-       ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id
-     INNER JOIN novel_skill_evaluation_attempts AS attempt
-       ON attempt.id = observation.attempt_id AND attempt.run_id = run.id
-      AND attempt.cell_id = cell.id
-     INNER JOIN model_invocation_facts AS invocation
-       ON invocation.id = observation.model_invocation_id
-     INNER JOIN context_compilation_runs AS trace
-       ON trace.id = observation.context_trace_id
-     INNER JOIN context_compilation_execution_links AS execution_link
-       ON execution_link.trace_id = trace.id
-     INNER JOIN context_compilation_model_invocation_links AS model_link
-       ON model_link.trace_id = trace.id
-      AND model_link.model_invocation_id = invocation.id
-     INNER JOIN context_compilation_output_candidate_links AS output_link
-       ON output_link.trace_id = trace.id
-      AND output_link.ai_candidate_id = observation.output_candidate_id
-     INNER JOIN ai_candidates AS candidate ON candidate.id = output_link.ai_candidate_id
-     LEFT JOIN novel_skill_invocation_snapshots AS snapshot
-       ON snapshot.id = observation.novel_skill_snapshot_id
-      AND snapshot.context_trace_id = trace.id
-      AND snapshot.model_invocation_id = invocation.id
-     WHERE observation.run_id = ?
-     ORDER BY cell.fixture_id, cell.arm, cell.model_slot_id, cell.repetition`,
+    `SELECT observation.id AS observation_id,observation.cell_id,observation.attempt_id,observation.context_trace_id,observation.model_invocation_id,observation.output_candidate_id,observation.novel_skill_snapshot_id,observation.model_identity_hash,observation.model_artifact_hash,observation.arm_configuration_hash AS observed_arm_hash,observation.preference_configuration_hash,observation.result_hash,observation.latency_milliseconds,observation.input_tokens,observation.output_tokens,observation.estimated_cost_micros,cell.fixture_id,fixture.task_type AS fixture_task_type,fixture.invocation_mode AS fixture_invocation_mode,fixture.genre_tags_json AS fixture_genre_tags_json,fixture.input_content_hash AS fixture_input_hash,fixture.contract_hash AS fixture_contract_hash,cell.arm,cell.arm_configuration_hash AS cell_arm_hash,cell.model_slot_id,cell.repetition,run.model_assignments_json,suite.compiler_version AS suite_compiler_version,suite.evaluation_project_id,attempt.status AS attempt_status,attempt.context_trace_id AS attempt_trace_id,attempt.model_invocation_id AS attempt_invocation_id,invocation.task AS invocation_task,invocation.status AS invocation_status,invocation.connection_id,invocation.catalog_entry_id,invocation.provider_kind_snapshot,invocation.model_id_snapshot,invocation.started_at,invocation.completed_at,invocation.error_code,invocation.finish_reason,invocation.visible_content_length,invocation.input_tokens AS invocation_input_tokens,invocation.output_tokens AS invocation_output_tokens,invocation.estimated_cost_micros AS invocation_estimated_cost_micros,trace.project_id AS trace_project_id,trace.chapter_id AS trace_chapter_id,trace.task_type AS trace_task_type,trace.maximum_context_tokens AS trace_maximum_context_tokens,trace.required_tokens AS trace_required_tokens,trace.used_tokens AS trace_used_tokens,trace.remaining_tokens AS trace_remaining_tokens,trace.discarded_tokens AS trace_discarded_tokens,trace.token_estimate_source AS trace_token_estimate_source,trace.candidate_count AS trace_candidate_count,trace.included_count AS trace_included_count,trace.discarded_count AS trace_discarded_count,execution_link.generation_id,execution_link.generation_run_id,execution_link.created_at AS execution_created_at,candidate.project_id AS candidate_project_id,candidate.chapter_id AS candidate_chapter_id,candidate.base_version_id AS candidate_base_version_id,candidate.content AS candidate_content,candidate.content_checksum AS candidate_checksum,candidate.status AS candidate_status,candidate.incomplete AS candidate_incomplete,snapshot.compiler_version AS snapshot_compiler_version,snapshot.configuration_snapshot_json AS snapshot_configuration_json FROM novel_skill_evaluation_observations AS observation INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = observation.cell_id INNER JOIN novel_skill_evaluation_runs AS run ON run.id = observation.run_id INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = run.suite_id INNER JOIN novel_skill_evaluation_fixtures AS fixture ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id INNER JOIN novel_skill_evaluation_attempts AS attempt ON attempt.id = observation.attempt_id AND attempt.run_id = run.id AND attempt.cell_id = cell.id INNER JOIN model_invocation_facts AS invocation ON invocation.id = observation.model_invocation_id INNER JOIN context_compilation_runs AS trace ON trace.id = observation.context_trace_id INNER JOIN context_compilation_execution_links AS execution_link ON execution_link.trace_id = trace.id INNER JOIN context_compilation_model_invocation_links AS model_link ON model_link.trace_id = trace.id AND model_link.model_invocation_id = invocation.id INNER JOIN context_compilation_output_candidate_links AS output_link ON output_link.trace_id = trace.id AND output_link.ai_candidate_id = observation.output_candidate_id INNER JOIN ai_candidates AS candidate ON candidate.id = output_link.ai_candidate_id LEFT JOIN novel_skill_invocation_snapshots AS snapshot ON snapshot.id = observation.novel_skill_snapshot_id AND snapshot.context_trace_id = trace.id AND snapshot.model_invocation_id = invocation.id WHERE observation.run_id = ? ORDER BY cell.fixture_id,cell.arm,cell.model_slot_id,cell.repetition`,
     [runId],
   );
   if (rows.length !== (expectedRows[0]?.count ?? -1)) {
@@ -2405,13 +2104,7 @@ async function readVerifiedEvidenceDigest(
     readonly rubric_version: string;
     readonly scored_at: string;
   }>(
-    `SELECT score.observation_id, score.metric, score.score_basis_points,
-            score.reviewer_id, score.rubric_version, score.scored_at
-     FROM novel_skill_evaluation_scores AS score
-     INNER JOIN novel_skill_evaluation_observations AS observation
-       ON observation.id = score.observation_id
-     WHERE observation.run_id = ?
-     ORDER BY score.observation_id, score.metric`,
+    `SELECT score.observation_id,score.metric,score.score_basis_points,score.reviewer_id,score.rubric_version,score.scored_at FROM novel_skill_evaluation_scores AS score INNER JOIN novel_skill_evaluation_observations AS observation ON observation.id = score.observation_id WHERE observation.run_id = ? ORDER BY score.observation_id,score.metric`,
     [runId],
   );
   const attempts = await transaction.select<{
@@ -2425,10 +2118,7 @@ async function readVerifiedEvidenceDigest(
     readonly started_at: string;
     readonly completed_at: string | null;
   }>(
-    `SELECT id, cell_id, attempt_number, status, context_trace_id,
-            model_invocation_id, error_code, started_at, completed_at
-     FROM novel_skill_evaluation_attempts
-     WHERE run_id = ? ORDER BY cell_id, attempt_number`,
+    `SELECT id,cell_id,attempt_number,status,context_trace_id,model_invocation_id,error_code,started_at,completed_at FROM novel_skill_evaluation_attempts WHERE run_id = ? ORDER BY cell_id,attempt_number`,
     [runId],
   );
   const runState = await transaction.select<{ readonly status: string }>(
@@ -2517,17 +2207,7 @@ async function readAndValidateTraceSources(
     readonly locator: string | null;
     readonly content_hash: string | null;
   }>(
-    `SELECT entry.candidate_id, entry.layer, entry.selection_reason, entry.included,
-            entry.discarded_reason, entry.estimated_tokens, entry.evaluation_order,
-            entry.layer_order, entry.priority, entry.relevance_score, entry.required,
-            entry.budget_remaining_before, entry.budget_remaining_after,
-            source.source_order, source.source_type,
-            source.source_id, source.source_version_id, source.locator, source.content_hash
-     FROM context_compilation_entries AS entry
-     LEFT JOIN context_compilation_entry_sources AS source
-       ON source.run_id = entry.run_id AND source.candidate_id = entry.candidate_id
-     WHERE entry.run_id = ?
-     ORDER BY entry.layer_order, entry.evaluation_order, source.source_order`,
+    `SELECT entry.candidate_id,entry.layer,entry.selection_reason,entry.included,entry.discarded_reason,entry.estimated_tokens,entry.evaluation_order,entry.layer_order,entry.priority,entry.relevance_score,entry.required,entry.budget_remaining_before,entry.budget_remaining_after,source.source_order,source.source_type,source.source_id,source.source_version_id,source.locator,source.content_hash FROM context_compilation_entries AS entry LEFT JOIN context_compilation_entry_sources AS source ON source.run_id = entry.run_id AND source.candidate_id = entry.candidate_id WHERE entry.run_id = ? ORDER BY entry.layer_order,entry.evaluation_order,source.source_order`,
     [evidence.context_trace_id],
   );
   if (rows.length === 0) {
@@ -2686,9 +2366,7 @@ async function readNovelSkillItemDigest(
     readonly discarded_reason: string | null;
     readonly estimated_tokens: number;
   }>(
-    `SELECT item_order, skill_id, skill_version, definition_hash, activation_source,
-            selection_reason, precedence, included, discarded_reason, estimated_tokens
-     FROM novel_skill_invocation_items WHERE snapshot_id = ? ORDER BY item_order`,
+    `SELECT item_order,skill_id,skill_version,definition_hash,activation_source,selection_reason,precedence,included,discarded_reason,estimated_tokens FROM novel_skill_invocation_items WHERE snapshot_id = ? ORDER BY item_order`,
     [snapshotId],
   );
   if (rows.length === 0) {
@@ -2724,14 +2402,7 @@ async function readActualArmHash(
     throw storeError(EVALUATION_EVIDENCE_CODE, "Skill arm lacks its exact snapshot.");
   }
   const items = await transaction.select<ManifestItemRow>(
-    `SELECT item.skill_id, item.skill_version, item.definition_hash, definition.kind
-     FROM novel_skill_invocation_snapshots AS snapshot
-     INNER JOIN novel_skill_invocation_items AS item
-       ON item.snapshot_id = snapshot.id
-     INNER JOIN novel_skill_definitions AS definition
-       ON definition.skill_id = item.skill_id AND definition.version = item.skill_version
-     WHERE snapshot.id = ? AND snapshot.model_invocation_id = ? AND snapshot.context_trace_id = ?
-     ORDER BY item.skill_id, item.skill_version`,
+    `SELECT item.skill_id,item.skill_version,item.definition_hash,definition.kind FROM novel_skill_invocation_snapshots AS snapshot INNER JOIN novel_skill_invocation_items AS item ON item.snapshot_id = snapshot.id INNER JOIN novel_skill_definitions AS definition ON definition.skill_id = item.skill_id AND definition.version = item.skill_version WHERE snapshot.id = ? AND snapshot.model_invocation_id = ? AND snapshot.context_trace_id = ? ORDER BY item.skill_id,item.skill_version`,
     [snapshotId, invocationId, contextTraceId],
   );
   if (
@@ -2770,11 +2441,7 @@ async function readMethodApplicability(
     readonly kind: "core" | "genre" | "custom";
     readonly included: number;
   }>(
-    `SELECT definition.kind, item.included
-     FROM novel_skill_invocation_items AS item
-     INNER JOIN novel_skill_definitions AS definition
-       ON definition.skill_id = item.skill_id AND definition.version = item.skill_version
-     WHERE item.snapshot_id = ?`,
+    `SELECT definition.kind,item.included FROM novel_skill_invocation_items AS item INNER JOIN novel_skill_definitions AS definition ON definition.skill_id = item.skill_id AND definition.version = item.skill_version WHERE item.snapshot_id = ?`,
     [snapshotId],
   );
   return Object.freeze({
@@ -2792,14 +2459,7 @@ async function readPreferenceConfigurationHash(
     readonly source_version_id: string | null;
     readonly content_hash: string | null;
   }>(
-    `SELECT source.source_id, source.source_version_id, source.content_hash
-     FROM context_compilation_entries AS entry
-     INNER JOIN context_compilation_entry_sources AS source
-       ON source.run_id = entry.run_id AND source.candidate_id = entry.candidate_id
-     WHERE entry.run_id = ? AND entry.included = 1
-       AND entry.candidate_id GLOB 'writing-preference:*'
-       AND source.source_type = 'user_input' AND source.locator = 'writing_preference'
-     ORDER BY source.source_id, source.source_version_id`,
+    `SELECT source.source_id,source.source_version_id,source.content_hash FROM context_compilation_entries AS entry INNER JOIN context_compilation_entry_sources AS source ON source.run_id = entry.run_id AND source.candidate_id = entry.candidate_id WHERE entry.run_id = ? AND entry.included = 1 AND entry.candidate_id GLOB 'writing-preference:*' AND source.source_type = 'user_input' AND source.locator = 'writing_preference' ORDER BY source.source_id,source.source_version_id`,
     [contextTraceId],
   );
   if (rows.length === 0) return null;

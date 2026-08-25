@@ -2,6 +2,7 @@ import { Badge, Button, Drawer, FormField, InlineAlert, Input, Select } from "@i
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 
+import { MODEL_HUB_READINESS_CHANGED_EVENT } from "../infrastructure/model-hub-readiness";
 import { modelHubCapabilityProbeSupportId } from "../infrastructure/model-hub-text-capability-probe";
 import { modelHubCredentialProviderId } from "../infrastructure/model-hub-native-config";
 import { getModelProviderPreset } from "../infrastructure/model-hub-provider-registry";
@@ -17,6 +18,7 @@ import {
   type QuickModelProvider,
 } from "../infrastructure/quick-model-connection-service";
 import type { DiscoveredModelCredentialSummary } from "../infrastructure/runtime";
+import { useModelHubReadiness } from "../hooks/use-model-hub-readiness";
 import { useRuntime } from "../runtime-context";
 
 export type QuickAiContinueChoice = "ai" | "self" | "sample";
@@ -90,6 +92,8 @@ function OpenQuickAiConnectionDrawer({
   onSkip,
 }: QuickAiConnectionDrawerProps): ReactNode {
   const runtime = useRuntime();
+  const sharedReadinessSnapshot = useModelHubReadiness(runtime);
+  const sharedReadiness = sharedReadinessSnapshot.readiness;
   const [provider, setProvider] = useState<QuickModelProvider>("deepseek");
   const customConnectionIdRef = useRef(`quick-custom-${runtime.ids.next()}`);
   const [secret, setSecret] = useState("");
@@ -560,6 +564,23 @@ function OpenQuickAiConnectionDrawer({
         </div>
       }
     >
+      <InlineAlert
+        tone={sharedReadinessSnapshot.failure !== null ? "warning" : "info"}
+        title={`当前 AI 状态：${sharedReadiness.label}`}
+        description={
+          sharedReadinessSnapshot.failure === null
+            ? `${sharedReadiness.description} 已保存连接：${String(sharedReadiness.savedConnectionCount)}；${sharedReadiness.needsRecheck ? "需要重新核对" : "当前证据已核对"}。`
+            : `${sharedReadinessSnapshot.failure.description} 支持编号：${sharedReadinessSnapshot.failure.supportId}。${sharedReadinessSnapshot.failure.recovery}`
+        }
+      />
+      {sharedReadinessSnapshot.failure !== null && (
+        <Button
+          variant="secondary"
+          onClick={() => window.dispatchEvent(new Event(MODEL_HUB_READINESS_CHANGED_EVENT))}
+        >
+          重新读取模型中心状态
+        </Button>
+      )}
       {busy && (
         <InlineAlert
           id="quick-ai-drawer-busy-help"

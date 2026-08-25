@@ -484,31 +484,17 @@ async function assertExactProtocolReplayOrMissing(
   }>,
 ): Promise<boolean> {
   const [protocol] = await transaction.select<ProtocolReplayRow>(
-    `SELECT schema_version, execution_protocol_version, protocol_hash,
-            request_profile_manifest_hash, context_baseline_manifest_hash,
-            prompt_template_version, prompt_template_hash, rubric_version,
-            rubric_content_hash, evaluator_contract_hash, blinding_protocol_version,
-            blinding_protocol_hash, randomization_protocol_version,
-            randomization_protocol_hash, created_at
-     FROM novel_skill_evaluation_protocols WHERE suite_id = ?`,
+    `SELECT schema_version,execution_protocol_version,protocol_hash,request_profile_manifest_hash,context_baseline_manifest_hash,prompt_template_version,prompt_template_hash,rubric_version,rubric_content_hash,evaluator_contract_hash,blinding_protocol_version,blinding_protocol_hash,randomization_protocol_version,randomization_protocol_hash,created_at FROM novel_skill_evaluation_protocols WHERE suite_id = ?`,
     [authority.input.suiteId],
   );
   if (protocol === undefined) return false;
   const [profileRows, baselineRows] = await Promise.all([
     transaction.select<RequestProfileReplayRow>(
-      `SELECT task_type, profile_version, request_profile_hash, maximum_input_tokens,
-              maximum_output_tokens, temperature_basis_points, top_p_basis_points,
-              reasoning_policy, response_format, streaming, stop_policy_hash, created_at
-       FROM novel_skill_evaluation_request_profiles
-       WHERE suite_id = ? ORDER BY task_type`,
+      `SELECT task_type,profile_version,request_profile_hash,maximum_input_tokens,maximum_output_tokens,temperature_basis_points,top_p_basis_points,reasoning_policy,response_format,streaming,stop_policy_hash,created_at FROM novel_skill_evaluation_request_profiles WHERE suite_id = ? ORDER BY task_type`,
       [authority.input.suiteId],
     ),
     transaction.select<ContextBaselineReplayRow>(
-      `SELECT fixture_id, baseline_contract_hash, included_source_manifest_hash,
-              omitted_source_manifest_hash, compiled_baseline_hash, baseline_token_budget,
-              created_at
-       FROM novel_skill_evaluation_context_baselines
-       WHERE suite_id = ? ORDER BY fixture_id`,
+      `SELECT fixture_id,baseline_contract_hash,included_source_manifest_hash,omitted_source_manifest_hash,compiled_baseline_hash,baseline_token_budget,created_at FROM novel_skill_evaluation_context_baselines WHERE suite_id = ? ORDER BY fixture_id`,
       [authority.input.suiteId],
     ),
   ]);
@@ -592,8 +578,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
 
     return this.executor.transaction(async (transaction) => {
       const fixtures = await transaction.select<FixtureRow>(
-        `SELECT fixture_id, task_type FROM novel_skill_evaluation_fixtures
-         WHERE suite_id = ? ORDER BY fixture_id`,
+        `SELECT fixture_id,task_type FROM novel_skill_evaluation_fixtures WHERE suite_id = ? ORDER BY fixture_id`,
         [input.suiteId],
       );
       if (fixtures.length !== 12) {
@@ -666,14 +651,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
         });
       }
       await transaction.execute(
-        `INSERT INTO novel_skill_evaluation_protocols (
-           suite_id, schema_version, execution_protocol_version, protocol_hash,
-           request_profile_manifest_hash, context_baseline_manifest_hash,
-           prompt_template_version, prompt_template_hash, rubric_version,
-           rubric_content_hash, evaluator_contract_hash, blinding_protocol_version,
-           blinding_protocol_hash, randomization_protocol_version,
-           randomization_protocol_hash, created_at
-         ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO novel_skill_evaluation_protocols(suite_id,schema_version,execution_protocol_version,protocol_hash,request_profile_manifest_hash,context_baseline_manifest_hash,prompt_template_version,prompt_template_hash,rubric_version,rubric_content_hash,evaluator_contract_hash,blinding_protocol_version,blinding_protocol_hash,randomization_protocol_version,randomization_protocol_hash,created_at) VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           input.suiteId,
           NOVEL_SKILL_PAID_EVALUATION_PROTOCOL_VERSION,
@@ -694,12 +672,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
       );
       for (const profile of profiles) {
         await transaction.execute(
-          `INSERT INTO novel_skill_evaluation_request_profiles (
-             suite_id, task_type, profile_version, request_profile_hash,
-             maximum_input_tokens, maximum_output_tokens, temperature_basis_points,
-             top_p_basis_points, reasoning_policy, response_format, streaming,
-             stop_policy_hash, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'disabled', 'text', 1, ?, ?)`,
+          `INSERT INTO novel_skill_evaluation_request_profiles(suite_id,task_type,profile_version,request_profile_hash,maximum_input_tokens,maximum_output_tokens,temperature_basis_points,top_p_basis_points,reasoning_policy,response_format,streaming,stop_policy_hash,created_at) VALUES(?,?,?,?,?,?,?,?,'disabled','text',1,?,?)`,
           [
             input.suiteId,
             profile.taskType,
@@ -716,11 +689,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
       }
       for (const baseline of baselines) {
         await transaction.execute(
-          `INSERT INTO novel_skill_evaluation_context_baselines (
-             suite_id, fixture_id, baseline_contract_hash, included_source_manifest_hash,
-             omitted_source_manifest_hash, compiled_baseline_hash,
-             baseline_token_budget, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO novel_skill_evaluation_context_baselines(suite_id,fixture_id,baseline_contract_hash,included_source_manifest_hash,omitted_source_manifest_hash,compiled_baseline_hash,baseline_token_budget,created_at) VALUES(?,?,?,?,?,?,?,?)`,
           [
             input.suiteId,
             baseline.fixtureId,
@@ -756,8 +725,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
     }
     return this.executor.transaction(async (transaction) => {
       const [run] = await transaction.select<RunRow>(
-        `SELECT id, suite_id, status, model_assignments_json
-         FROM novel_skill_evaluation_runs WHERE id = ?`,
+        `SELECT id,suite_id,status,model_assignments_json FROM novel_skill_evaluation_runs WHERE id = ?`,
         [runId],
       );
       if (run?.status !== "planned") {
@@ -864,16 +832,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
         throw invalid("The two evaluation slots must refer to different model artifacts.");
       }
       const existingTargets = await transaction.select<PersistedTargetAuthority>(
-        `SELECT run_id, model_slot_id, connection_id, catalog_entry_id,
-                provider_kind_snapshot, connection_protocol_snapshot, connection_revision,
-                connection_configuration_hash, catalog_revision, provider_model_id_snapshot,
-                catalog_identity_hash, model_identity_hash, model_artifact_hash,
-                artifact_identity_source, cost_profile_revision, currency,
-                input_micros_per_million_tokens, output_micros_per_million_tokens,
-                cached_input_micros_per_million_tokens, pricing_version, price_updated_at,
-                pricing_snapshot_hash, target_hash, created_at
-         FROM novel_skill_evaluation_run_model_targets
-         WHERE run_id = ? ORDER BY model_slot_id`,
+        `SELECT run_id,model_slot_id,connection_id,catalog_entry_id,provider_kind_snapshot,connection_protocol_snapshot,connection_revision,connection_configuration_hash,catalog_revision,provider_model_id_snapshot,catalog_identity_hash,model_identity_hash,model_artifact_hash,artifact_identity_source,cost_profile_revision,currency,input_micros_per_million_tokens,output_micros_per_million_tokens,cached_input_micros_per_million_tokens,pricing_version,price_updated_at,pricing_snapshot_hash,target_hash,created_at FROM novel_skill_evaluation_run_model_targets WHERE run_id = ? ORDER BY model_slot_id`,
         [runId],
       );
       if (existingTargets.length > 0) {
@@ -886,16 +845,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
       }
       for (const target of persistedTargets) {
         await transaction.execute(
-          `INSERT INTO novel_skill_evaluation_run_model_targets (
-             run_id, model_slot_id, connection_id, catalog_entry_id,
-             provider_kind_snapshot, connection_protocol_snapshot, connection_revision,
-             connection_configuration_hash, catalog_revision, provider_model_id_snapshot,
-             catalog_identity_hash, model_identity_hash, model_artifact_hash,
-             artifact_identity_source, cost_profile_revision, currency,
-             input_micros_per_million_tokens, output_micros_per_million_tokens,
-             cached_input_micros_per_million_tokens, pricing_version, price_updated_at,
-             pricing_snapshot_hash, target_hash, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO novel_skill_evaluation_run_model_targets(run_id,model_slot_id,connection_id,catalog_entry_id,provider_kind_snapshot,connection_protocol_snapshot,connection_revision,connection_configuration_hash,catalog_revision,provider_model_id_snapshot,catalog_identity_hash,model_identity_hash,model_artifact_hash,artifact_identity_source,cost_profile_revision,currency,input_micros_per_million_tokens,output_micros_per_million_tokens,cached_input_micros_per_million_tokens,pricing_version,price_updated_at,pricing_snapshot_hash,target_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [
             target.run_id,
             target.model_slot_id,
@@ -980,11 +930,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
         );
       }
       await transaction.execute(
-        `INSERT INTO novel_skill_evaluation_dispatch_authorizations (
-           id, run_id, protocol_hash, target_manifest_hash, pricing_manifest_hash,
-           quote_hash, confirmation_hash, authorized_call_count, authorized_by,
-           commercial_use_acknowledged, authorized_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 192, 'local_user', 1, ?)`,
+        `INSERT INTO novel_skill_evaluation_dispatch_authorizations(id,run_id,protocol_hash,target_manifest_hash,pricing_manifest_hash,quote_hash,confirmation_hash,authorized_call_count,authorized_by,commercial_use_acknowledged,authorized_at) VALUES(?,?,?,?,?,?,?,192,'local_user',1,?)`,
         [
           input.authorizationId,
           input.runId,
@@ -1000,10 +946,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
         const ceiling = ceilings.find(({ currency }) => currency === quoteCurrency.currency);
         if (ceiling === undefined) throw invalid("Missing quote currency ceiling.");
         await transaction.execute(
-          `INSERT INTO novel_skill_evaluation_authorization_limits (
-             authorization_id, currency, estimated_max_cost_micros,
-             hard_ceiling_micros, created_at
-           ) VALUES (?, ?, ?, ?, ?)`,
+          `INSERT INTO novel_skill_evaluation_authorization_limits(authorization_id,currency,estimated_max_cost_micros,hard_ceiling_micros,created_at) VALUES(?,?,?,?,?)`,
           [
             input.authorizationId,
             quoteCurrency.currency,
@@ -1021,9 +964,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
     assertUuidV7(runId, "runId");
     assertIsoUtc(startedAt, "startedAt");
     const result = await this.executor.execute(
-      `UPDATE novel_skill_evaluation_runs
-       SET status = 'running', started_at = ?, revision = revision + 1
-       WHERE id = ? AND status = 'planned' AND evaluation_status = 'NOT_EVALUATED'`,
+      `UPDATE novel_skill_evaluation_runs SET status = 'running',started_at = ?,revision = revision+1 WHERE id = ? AND status = 'planned' AND evaluation_status = 'NOT_EVALUATED'`,
       [startedAt, runId],
     );
     if (result.rowsAffected !== 1) {
@@ -1083,16 +1024,11 @@ export class NovelSkillPaidEvaluationSqliteStore {
       await insertEvaluationTrace(transaction, input.reservation.reservationId, input.trace);
       await insertEvaluationInvocation(transaction, input);
       await transaction.execute(
-        `INSERT INTO context_compilation_model_invocation_links (
-           trace_id, model_invocation_id, linked_at
-         ) VALUES (?, ?, ?)`,
+        `INSERT INTO context_compilation_model_invocation_links(trace_id,model_invocation_id,linked_at) VALUES(?,?,?)`,
         [input.trace.id, input.reservation.plannedModelInvocationId, input.boundAt],
       );
       const attempt = await transaction.execute(
-        `UPDATE novel_skill_evaluation_attempts
-         SET context_trace_id = ?, model_invocation_id = ?
-         WHERE id = ? AND run_id = ? AND cell_id = ? AND status = 'started'
-           AND context_trace_id IS NULL AND model_invocation_id IS NULL`,
+        `UPDATE novel_skill_evaluation_attempts SET context_trace_id = ?,model_invocation_id = ? WHERE id = ? AND run_id = ? AND cell_id = ? AND status = 'started' AND context_trace_id IS NULL AND model_invocation_id IS NULL`,
         [
           input.trace.id,
           input.reservation.plannedModelInvocationId,
@@ -1105,9 +1041,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
         throw conflict("The exact evaluation attempt could not be bound atomically.");
       }
       const bound = await transaction.execute(
-        `UPDATE novel_skill_evaluation_dispatch_reservations
-         SET state = 'bound', bound_at = ?, revision = revision + 1
-         WHERE id = ? AND revision = 1 AND state = 'reserved'`,
+        `UPDATE novel_skill_evaluation_dispatch_reservations SET state = 'bound',bound_at = ?,revision = revision+1 WHERE id = ? AND revision = 1 AND state = 'reserved'`,
         [input.boundAt, input.reservation.reservationId],
       );
       if (bound.rowsAffected !== 1) {
@@ -1150,30 +1084,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
         readonly maximum_input_tokens: number;
         readonly maximum_output_tokens: number;
       }>(
-        `SELECT reservation.attempt_id, reservation.planned_context_trace_id,
-                reservation.planned_model_invocation_id,
-                reservation.planned_candidate_id,
-                reservation.target_hash AS target_hash,
-                reservation.pricing_snapshot_hash AS pricing_snapshot_hash,
-                reservation.request_profile_hash, reservation.message_payload_hash,
-                reservation.request_payload_hash,
-                reservation.execution_lock_hash, reservation.data_destination,
-                reservation.currency AS currency, reservation.reserved_max_cost_micros,
-                target.input_micros_per_million_tokens AS input_rate,
-                target.output_micros_per_million_tokens AS output_rate,
-                target.cached_input_micros_per_million_tokens AS cached_input_rate,
-                profile.maximum_input_tokens, profile.maximum_output_tokens
-         FROM novel_skill_evaluation_dispatch_reservations AS reservation
-         INNER JOIN novel_skill_evaluation_run_model_targets AS target
-           ON target.run_id = reservation.run_id
-          AND target.model_slot_id = reservation.model_slot_id
-         INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = reservation.cell_id
-         INNER JOIN novel_skill_evaluation_fixtures AS fixture
-           ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id
-         INNER JOIN novel_skill_evaluation_request_profiles AS profile
-           ON profile.suite_id = cell.suite_id AND profile.task_type = fixture.task_type
-         WHERE reservation.id = ? AND reservation.revision = ?
-           AND reservation.state = 'dispatched'`,
+        `SELECT reservation.attempt_id,reservation.planned_context_trace_id,reservation.planned_model_invocation_id,reservation.planned_candidate_id,reservation.target_hash AS target_hash,reservation.pricing_snapshot_hash AS pricing_snapshot_hash,reservation.request_profile_hash,reservation.message_payload_hash,reservation.request_payload_hash,reservation.execution_lock_hash,reservation.data_destination,reservation.currency AS currency,reservation.reserved_max_cost_micros,target.input_micros_per_million_tokens AS input_rate,target.output_micros_per_million_tokens AS output_rate,target.cached_input_micros_per_million_tokens AS cached_input_rate,profile.maximum_input_tokens,profile.maximum_output_tokens FROM novel_skill_evaluation_dispatch_reservations AS reservation INNER JOIN novel_skill_evaluation_run_model_targets AS target ON target.run_id = reservation.run_id AND target.model_slot_id = reservation.model_slot_id INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = reservation.cell_id INNER JOIN novel_skill_evaluation_fixtures AS fixture ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id INNER JOIN novel_skill_evaluation_request_profiles AS profile ON profile.suite_id = cell.suite_id AND profile.task_type = fixture.task_type WHERE reservation.id = ? AND reservation.revision = ? AND reservation.state = 'dispatched'`,
         [input.reservationId, input.expectedRevision],
       );
       if (
@@ -1213,13 +1124,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
         input.completedAt,
       );
       const invocation = await transaction.execute(
-        `UPDATE model_invocation_facts
-         SET status = 'succeeded', input_tokens = ?, output_tokens = ?,
-             cached_input_tokens = ?, estimated_cost_micros = ?, currency = ?,
-             error_code = NULL, error_summary = NULL, finish_reason = NULL,
-             visible_content_length = ?, reasoning_present = NULL, streamed = 1,
-             requested_max_output_tokens = ?, completed_at = ?, revision = revision + 1
-         WHERE id = ? AND status = 'running' AND revision = 2`,
+        `UPDATE model_invocation_facts SET status = 'succeeded',input_tokens = ?,output_tokens = ?,cached_input_tokens = ?,estimated_cost_micros = ?,currency = ?,error_code = NULL,error_summary = NULL,finish_reason = NULL,visible_content_length = ?,reasoning_present = NULL,streamed = 1,requested_max_output_tokens = ?,completed_at = ?,revision = revision+1 WHERE id = ? AND status = 'running' AND revision = 2`,
         [
           input.result.usage?.inputTokens ?? null,
           input.result.usage?.outputTokens ?? null,
@@ -1237,16 +1142,11 @@ export class NovelSkillPaidEvaluationSqliteStore {
       }
       await insertEvaluationCandidate(transaction, input.reservationId, candidate);
       await transaction.execute(
-        `INSERT INTO context_compilation_output_candidate_links (
-           trace_id, ai_candidate_id, linked_at
-         ) VALUES (?, ?, ?)`,
+        `INSERT INTO context_compilation_output_candidate_links(trace_id,ai_candidate_id,linked_at) VALUES(?,?,?)`,
         [reservation.planned_context_trace_id, candidate.id, input.completedAt],
       );
       const attempt = await transaction.execute(
-        `UPDATE novel_skill_evaluation_attempts
-         SET status = 'succeeded', error_code = NULL, completed_at = ?
-         WHERE id = ? AND status = 'started'
-           AND context_trace_id = ? AND model_invocation_id = ?`,
+        `UPDATE novel_skill_evaluation_attempts SET status = 'succeeded',error_code = NULL,completed_at = ? WHERE id = ? AND status = 'started' AND context_trace_id = ? AND model_invocation_id = ?`,
         [
           input.completedAt,
           reservation.attempt_id,
@@ -1258,12 +1158,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
         throw conflict("The exact evaluation attempt could not be completed atomically.");
       }
       const settled = await transaction.execute(
-        `UPDATE novel_skill_evaluation_dispatch_reservations
-         SET state = 'settled', settlement_outcome = 'succeeded',
-             provider_receipt_hash = ?, provider_visible_output_hash = ?,
-             output_candidate_id = ?, actual_cost_micros = ?, terminal_at = ?,
-             revision = revision + 1
-         WHERE id = ? AND revision = ? AND state = 'dispatched'`,
+        `UPDATE novel_skill_evaluation_dispatch_reservations SET state = 'settled',settlement_outcome = 'succeeded',provider_receipt_hash = ?,provider_visible_output_hash = ?,output_candidate_id = ?,actual_cost_micros = ?,terminal_at = ?,revision = revision+1 WHERE id = ? AND revision = ? AND state = 'dispatched'`,
         [
           providerReceiptHash,
           input.result.visibleOutputHash,
@@ -1306,27 +1201,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
         readonly maximum_input_tokens: number;
         readonly maximum_output_tokens: number;
       }>(
-        `SELECT reservation.run_id, reservation.attempt_id,
-                reservation.planned_model_invocation_id,
-                reservation.target_hash AS target_hash,
-                reservation.pricing_snapshot_hash AS pricing_snapshot_hash,
-                reservation.request_profile_hash, reservation.request_payload_hash,
-                reservation.currency, reserved_max_cost_micros,
-                target.input_micros_per_million_tokens AS input_rate,
-                target.output_micros_per_million_tokens AS output_rate,
-                target.cached_input_micros_per_million_tokens AS cached_input_rate,
-                profile.maximum_input_tokens, profile.maximum_output_tokens
-         FROM novel_skill_evaluation_dispatch_reservations AS reservation
-         INNER JOIN novel_skill_evaluation_run_model_targets AS target
-           ON target.run_id = reservation.run_id
-          AND target.model_slot_id = reservation.model_slot_id
-         INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = reservation.cell_id
-         INNER JOIN novel_skill_evaluation_fixtures AS fixture
-           ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id
-         INNER JOIN novel_skill_evaluation_request_profiles AS profile
-           ON profile.suite_id = cell.suite_id AND profile.task_type = fixture.task_type
-         WHERE reservation.id = ? AND reservation.revision = ?
-           AND reservation.state = 'dispatched'`,
+        `SELECT reservation.run_id,reservation.attempt_id,reservation.planned_model_invocation_id,reservation.target_hash AS target_hash,reservation.pricing_snapshot_hash AS pricing_snapshot_hash,reservation.request_profile_hash,reservation.request_payload_hash,reservation.currency,reserved_max_cost_micros,target.input_micros_per_million_tokens AS input_rate,target.output_micros_per_million_tokens AS output_rate,target.cached_input_micros_per_million_tokens AS cached_input_rate,profile.maximum_input_tokens,profile.maximum_output_tokens FROM novel_skill_evaluation_dispatch_reservations AS reservation INNER JOIN novel_skill_evaluation_run_model_targets AS target ON target.run_id = reservation.run_id AND target.model_slot_id = reservation.model_slot_id INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = reservation.cell_id INNER JOIN novel_skill_evaluation_fixtures AS fixture ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id INNER JOIN novel_skill_evaluation_request_profiles AS profile ON profile.suite_id = cell.suite_id AND profile.task_type = fixture.task_type WHERE reservation.id = ? AND reservation.revision = ? AND reservation.state = 'dispatched'`,
         [input.reservationId, input.expectedRevision],
       );
       if (reservation === undefined) {
@@ -1350,11 +1225,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
       const invocationErrorCode =
         invocationStatus === "cancelled" ? null : invocationFailureErrorCode(input.errorCode);
       const invocation = await transaction.execute(
-        `UPDATE model_invocation_facts
-         SET status = ?, estimated_cost_micros = ?, currency = ?, error_code = ?,
-             error_summary = NULL, input_tokens = ?, output_tokens = ?,
-             cached_input_tokens = ?, completed_at = ?, revision = revision + 1
-         WHERE id = ? AND status = 'running' AND revision = 2`,
+        `UPDATE model_invocation_facts SET status = ?,estimated_cost_micros = ?,currency = ?,error_code = ?,error_summary = NULL,input_tokens = ?,output_tokens = ?,cached_input_tokens = ?,completed_at = ?,revision = revision+1 WHERE id = ? AND status = 'running' AND revision = 2`,
         [
           invocationStatus,
           actualCostMicros,
@@ -1372,9 +1243,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
       }
       const attemptStatus = input.outcome === "cancelled" ? "cancelled" : "failed";
       const attempt = await transaction.execute(
-        `UPDATE novel_skill_evaluation_attempts
-         SET status = ?, error_code = ?, completed_at = ?
-         WHERE id = ? AND status = 'started'`,
+        `UPDATE novel_skill_evaluation_attempts SET status = ?,error_code = ?,completed_at = ? WHERE id = ? AND status = 'started'`,
         [attemptStatus, input.errorCode, input.completedAt, reservation.attempt_id],
       );
       if (attempt.rowsAffected !== 1) {
@@ -1390,10 +1259,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
         currency: reservation.currency,
       });
       const settled = await transaction.execute(
-        `UPDATE novel_skill_evaluation_dispatch_reservations
-         SET state = 'settled', settlement_outcome = ?, provider_receipt_hash = ?,
-             actual_cost_micros = ?, terminal_at = ?, revision = revision + 1
-         WHERE id = ? AND revision = ? AND state = 'dispatched'`,
+        `UPDATE novel_skill_evaluation_dispatch_reservations SET state = 'settled',settlement_outcome = ?,provider_receipt_hash = ?,actual_cost_micros = ?,terminal_at = ?,revision = revision+1 WHERE id = ? AND revision = ? AND state = 'dispatched'`,
         [
           input.outcome,
           providerReceiptHash,
@@ -1424,27 +1290,21 @@ export class NovelSkillPaidEvaluationSqliteStore {
       const [reservation] = await transaction.select<{
         readonly planned_model_invocation_id: string;
       }>(
-        `SELECT planned_model_invocation_id
-         FROM novel_skill_evaluation_dispatch_reservations
-         WHERE id = ? AND revision = ? AND state = 'bound'`,
+        `SELECT planned_model_invocation_id FROM novel_skill_evaluation_dispatch_reservations WHERE id = ? AND revision = ? AND state = 'bound'`,
         [reservationId, expectedRevision],
       );
       if (reservation === undefined) {
         throw conflict("The bound dispatch reservation changed before provider dispatch.");
       }
       const invocation = await transaction.execute(
-        `UPDATE model_invocation_facts
-         SET status = 'running', started_at = ?, revision = revision + 1
-         WHERE id = ? AND status = 'queued' AND revision = 1`,
+        `UPDATE model_invocation_facts SET status = 'running',started_at = ?,revision = revision+1 WHERE id = ? AND status = 'queued' AND revision = 1`,
         [dispatchedAt, reservation.planned_model_invocation_id],
       );
       if (invocation.rowsAffected !== 1) {
         throw conflict("The exact model invocation is not dispatchable.");
       }
       const dispatched = await transaction.execute(
-        `UPDATE novel_skill_evaluation_dispatch_reservations
-         SET state = 'dispatched', dispatched_at = ?, revision = revision + 1
-         WHERE id = ? AND revision = ? AND state = 'bound'`,
+        `UPDATE novel_skill_evaluation_dispatch_reservations SET state = 'dispatched',dispatched_at = ?,revision = revision+1 WHERE id = ? AND revision = ? AND state = 'bound'`,
         [dispatchedAt, reservationId, expectedRevision],
       );
       if (dispatched.rowsAffected !== 1) {
@@ -1468,9 +1328,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
         readonly planned_model_invocation_id: string;
         readonly state: "reserved" | "bound";
       }>(
-        `SELECT attempt_id, planned_model_invocation_id, state
-         FROM novel_skill_evaluation_dispatch_reservations
-         WHERE id = ? AND revision = ? AND state IN ('reserved','bound')`,
+        `SELECT attempt_id,planned_model_invocation_id,state FROM novel_skill_evaluation_dispatch_reservations WHERE id = ? AND revision = ? AND state IN ('reserved','bound')`,
         [reservationId, expectedRevision],
       );
       if (reservation === undefined) throw conflict("The reservation cannot be released safely.");
@@ -1483,9 +1341,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
       }
       await cancelPreDispatchAttempt(transaction, reservation.attempt_id, terminalAt);
       const released = await transaction.execute(
-        `UPDATE novel_skill_evaluation_dispatch_reservations
-         SET state = 'not_dispatched', terminal_at = ?, revision = revision + 1
-         WHERE id = ? AND revision = ? AND state IN ('reserved','bound')`,
+        `UPDATE novel_skill_evaluation_dispatch_reservations SET state = 'not_dispatched',terminal_at = ?,revision = revision+1 WHERE id = ? AND revision = ? AND state IN ('reserved','bound')`,
         [terminalAt, reservationId, expectedRevision],
       );
       if (released.rowsAffected !== 1) {
@@ -1509,9 +1365,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
         readonly attempt_id: string;
         readonly planned_model_invocation_id: string;
       }>(
-        `SELECT run_id, attempt_id, planned_model_invocation_id
-         FROM novel_skill_evaluation_dispatch_reservations
-         WHERE id = ? AND revision = ? AND state = 'dispatched'`,
+        `SELECT run_id,attempt_id,planned_model_invocation_id FROM novel_skill_evaluation_dispatch_reservations WHERE id = ? AND revision = ? AND state = 'dispatched'`,
         [reservationId, expectedRevision],
       );
       if (reservation === undefined) throw conflict("The dispatch is not ambiguously recoverable.");
@@ -1522,9 +1376,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
       );
       await cancelDispatchedAttempt(transaction, reservation.attempt_id, terminalAt);
       const ambiguous = await transaction.execute(
-        `UPDATE novel_skill_evaluation_dispatch_reservations
-         SET state = 'ambiguous', terminal_at = ?, revision = revision + 1
-         WHERE id = ? AND revision = ? AND state = 'dispatched'`,
+        `UPDATE novel_skill_evaluation_dispatch_reservations SET state = 'ambiguous',terminal_at = ?,revision = revision+1 WHERE id = ? AND revision = ? AND state = 'dispatched'`,
         [terminalAt, reservationId, expectedRevision],
       );
       if (ambiguous.rowsAffected !== 1) {
@@ -1557,9 +1409,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
           );
           await cancelDispatchedAttempt(transaction, row.attempt_id, recoveredAt);
           const changed = await transaction.execute(
-            `UPDATE novel_skill_evaluation_dispatch_reservations
-             SET state = 'ambiguous', terminal_at = ?, revision = revision + 1
-             WHERE id = ? AND revision = ? AND state = 'dispatched'`,
+            `UPDATE novel_skill_evaluation_dispatch_reservations SET state = 'ambiguous',terminal_at = ?,revision = revision+1 WHERE id = ? AND revision = ? AND state = 'dispatched'`,
             [recoveredAt, row.id, row.revision],
           );
           if (changed.rowsAffected !== 1) {
@@ -1576,9 +1426,7 @@ export class NovelSkillPaidEvaluationSqliteStore {
           }
           await cancelPreDispatchAttempt(transaction, row.attempt_id, recoveredAt);
           const changed = await transaction.execute(
-            `UPDATE novel_skill_evaluation_dispatch_reservations
-             SET state = 'not_dispatched', terminal_at = ?, revision = revision + 1
-             WHERE id = ? AND revision = ? AND state IN ('reserved','bound')`,
+            `UPDATE novel_skill_evaluation_dispatch_reservations SET state = 'not_dispatched',terminal_at = ?,revision = revision+1 WHERE id = ? AND revision = ? AND state IN ('reserved','bound')`,
             [recoveredAt, row.id, row.revision],
           );
           if (changed.rowsAffected !== 1) {
@@ -1783,36 +1631,7 @@ async function reserveAttemptDispatch(
     readonly context_baseline_hash: string;
     readonly prompt_template_hash: string;
   }>(
-    `SELECT target.target_hash, target.pricing_snapshot_hash,
-            target.connection_id, target.catalog_entry_id,
-            target.provider_kind_snapshot, target.provider_model_id_snapshot,
-            target.connection_revision, target.catalog_revision, target.cost_profile_revision,
-            target.currency,
-            target.input_micros_per_million_tokens AS input_rate,
-            target.output_micros_per_million_tokens AS output_rate,
-            cost.data_destination,
-            profile.maximum_input_tokens, profile.maximum_output_tokens,
-            cell.suite_id, cell.fixture_id, fixture.task_type, fixture.invocation_mode,
-            fixture.contract_hash AS fixture_contract_hash,
-            fixture.input_content_hash AS fixture_input_content_hash,
-            cell.arm, cell.arm_configuration_hash, cell.repetition,
-            protocol.protocol_hash, profile.request_profile_hash,
-            baseline.compiled_baseline_hash AS context_baseline_hash,
-            protocol.prompt_template_hash
-     FROM novel_skill_evaluation_run_model_targets AS target
-     INNER JOIN novel_skill_evaluation_cells AS cell
-       ON cell.run_id = target.run_id AND cell.model_slot_id = target.model_slot_id
-     INNER JOIN novel_skill_evaluation_fixtures AS fixture
-       ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id
-     INNER JOIN novel_skill_evaluation_request_profiles AS profile
-       ON profile.suite_id = cell.suite_id AND profile.task_type = fixture.task_type
-     INNER JOIN novel_skill_evaluation_protocols AS protocol
-       ON protocol.suite_id = cell.suite_id
-     INNER JOIN novel_skill_evaluation_context_baselines AS baseline
-       ON baseline.suite_id = cell.suite_id AND baseline.fixture_id = cell.fixture_id
-     INNER JOIN model_cost_privacy_profiles AS cost
-       ON cost.catalog_entry_id = target.catalog_entry_id
-     WHERE target.run_id = ? AND target.model_slot_id = ? AND cell.id = ?`,
+    `SELECT target.target_hash,target.pricing_snapshot_hash,target.connection_id,target.catalog_entry_id,target.provider_kind_snapshot,target.provider_model_id_snapshot,target.connection_revision,target.catalog_revision,target.cost_profile_revision,target.currency,target.input_micros_per_million_tokens AS input_rate,target.output_micros_per_million_tokens AS output_rate,cost.data_destination,profile.maximum_input_tokens,profile.maximum_output_tokens,cell.suite_id,cell.fixture_id,fixture.task_type,fixture.invocation_mode,fixture.contract_hash AS fixture_contract_hash,fixture.input_content_hash AS fixture_input_content_hash,cell.arm,cell.arm_configuration_hash,cell.repetition,protocol.protocol_hash,profile.request_profile_hash,baseline.compiled_baseline_hash AS context_baseline_hash,protocol.prompt_template_hash FROM novel_skill_evaluation_run_model_targets AS target INNER JOIN novel_skill_evaluation_cells AS cell ON cell.run_id = target.run_id AND cell.model_slot_id = target.model_slot_id INNER JOIN novel_skill_evaluation_fixtures AS fixture ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id INNER JOIN novel_skill_evaluation_request_profiles AS profile ON profile.suite_id = cell.suite_id AND profile.task_type = fixture.task_type INNER JOIN novel_skill_evaluation_protocols AS protocol ON protocol.suite_id = cell.suite_id INNER JOIN novel_skill_evaluation_context_baselines AS baseline ON baseline.suite_id = cell.suite_id AND baseline.fixture_id = cell.fixture_id INNER JOIN model_cost_privacy_profiles AS cost ON cost.catalog_entry_id = target.catalog_entry_id WHERE target.run_id = ? AND target.model_slot_id = ? AND cell.id = ?`,
     [input.runId, input.modelSlotId, input.cellId],
   );
   const liveTarget =
@@ -1941,21 +1760,7 @@ async function reserveAttemptDispatch(
     throw conflict("The attempt already has a different immutable dispatch reservation.");
   }
   await transaction.execute(
-    `INSERT INTO novel_skill_evaluation_dispatch_reservations (
-       id, authorization_id, run_id, cell_id, attempt_id, model_slot_id,
-       dispatch_generation, planned_context_trace_id, planned_model_invocation_id,
-       planned_candidate_id, state, target_hash, pricing_snapshot_hash,
-       request_profile_hash, context_baseline_hash, prompt_template_hash,
-       invariant_request_hash, request_payload_hash, execution_lock_hash,
-       message_payload_hash, payload_authority_version,
-       payload_authority_manifest_hash, data_destination, skill_configuration_hash,
-       preference_configuration_hash,
-       idempotency_key_hash, currency,
-       reserved_max_cost_micros, settlement_outcome, provider_receipt_hash,
-       provider_visible_output_hash, output_candidate_id, actual_cost_micros,
-       reserved_at, bound_at, dispatched_at, terminal_at, revision
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-               NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, 1)`,
+    `INSERT INTO novel_skill_evaluation_dispatch_reservations(id,authorization_id,run_id,cell_id,attempt_id,model_slot_id,dispatch_generation,planned_context_trace_id,planned_model_invocation_id,planned_candidate_id,state,target_hash,pricing_snapshot_hash,request_profile_hash,context_baseline_hash,prompt_template_hash,invariant_request_hash,request_payload_hash,execution_lock_hash,message_payload_hash,payload_authority_version,payload_authority_manifest_hash,data_destination,skill_configuration_hash,preference_configuration_hash,idempotency_key_hash,currency,reserved_max_cost_micros,settlement_outcome,provider_receipt_hash,provider_visible_output_hash,output_candidate_id,actual_cost_micros,reserved_at,bound_at,dispatched_at,terminal_at,revision) VALUES(?,?,?,?,?,?,?,?,?,?,'reserved',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,NULL,NULL,?,NULL,NULL,NULL,1)`,
     [
       input.reservationId,
       input.authorizationId,
@@ -2038,20 +1843,7 @@ async function assertExistingReservationMatchesInput(
   payloadManifestHash: string,
 ): Promise<void> {
   const [row] = await transaction.select<{ readonly valid: number }>(
-    `SELECT count(*) AS valid
-     FROM novel_skill_evaluation_dispatch_reservations
-     WHERE id = ? AND authorization_id = ? AND run_id = ? AND cell_id = ? AND attempt_id = ?
-       AND model_slot_id = ? AND dispatch_generation = ?
-       AND planned_context_trace_id = ? AND planned_model_invocation_id = ?
-       AND planned_candidate_id = ? AND target_hash = ? AND pricing_snapshot_hash = ?
-       AND request_profile_hash = ? AND context_baseline_hash = ?
-       AND prompt_template_hash = ? AND invariant_request_hash = ?
-        AND request_payload_hash = ? AND execution_lock_hash = ?
-        AND message_payload_hash = ? AND payload_authority_version = ?
-        AND payload_authority_manifest_hash = ? AND data_destination = ?
-       AND skill_configuration_hash IS ?
-       AND preference_configuration_hash IS ? AND idempotency_key_hash = ?
-       AND currency = ? AND reserved_max_cost_micros = ? AND reserved_at = ?`,
+    `SELECT count(*) AS valid FROM novel_skill_evaluation_dispatch_reservations WHERE id = ? AND authorization_id = ? AND run_id = ? AND cell_id = ? AND attempt_id = ? AND model_slot_id = ? AND dispatch_generation = ? AND planned_context_trace_id = ? AND planned_model_invocation_id = ? AND planned_candidate_id = ? AND target_hash = ? AND pricing_snapshot_hash = ? AND request_profile_hash = ? AND context_baseline_hash = ? AND prompt_template_hash = ? AND invariant_request_hash = ? AND request_payload_hash = ? AND execution_lock_hash = ? AND message_payload_hash = ? AND payload_authority_version = ? AND payload_authority_manifest_hash = ? AND data_destination = ? AND skill_configuration_hash IS ? AND preference_configuration_hash IS ? AND idempotency_key_hash = ? AND currency = ? AND reserved_max_cost_micros = ? AND reserved_at = ?`,
     [
       input.reservationId,
       input.authorizationId,
@@ -2469,9 +2261,7 @@ async function persistPredispatchAuthoritySnapshot(
     reservation.reservedAt,
   ];
   const inserted = await transaction.execute(
-    `INSERT INTO novel_skill_evaluation_predispatch_authority_snapshots
-       (${PREDISPATCH_AUTHORITY_COLUMNS.join(", ")})
-     VALUES (${PREDISPATCH_AUTHORITY_COLUMNS.map(() => "?").join(", ")})`,
+    `INSERT INTO novel_skill_evaluation_predispatch_authority_snapshots(${PREDISPATCH_AUTHORITY_COLUMNS.join(", ")}) VALUES(${PREDISPATCH_AUTHORITY_COLUMNS.map(() => "?").join(", ")})`,
     values,
   );
   if (inserted.rowsAffected !== 1) {
@@ -2558,21 +2348,7 @@ async function insertEvaluationTrace(
   const includedCount = trace.entries.filter(({ included }) => included).length;
   const discardedCount = trace.entries.length - includedCount;
   const run = await transaction.execute(
-    `INSERT INTO context_compilation_runs (
-       id, project_id, chapter_id, task_type, maximum_context_tokens,
-       required_tokens, used_tokens, remaining_tokens, discarded_tokens,
-       token_estimate_source, candidate_count, included_count, discarded_count,
-       created_at
-     )
-     SELECT ?, suite.evaluation_project_id, NULL, fixture.task_type, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-     FROM novel_skill_evaluation_dispatch_reservations AS reservation
-     INNER JOIN novel_skill_evaluation_runs AS evaluation_run ON evaluation_run.id = reservation.run_id
-     INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = evaluation_run.suite_id
-     INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = reservation.cell_id
-     INNER JOIN novel_skill_evaluation_fixtures AS fixture
-       ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id
-     WHERE reservation.id = ? AND reservation.state = 'reserved'
-       AND suite.evaluation_project_id = ? AND fixture.task_type = ?`,
+    `INSERT INTO context_compilation_runs(id,project_id,chapter_id,task_type,maximum_context_tokens,required_tokens,used_tokens,remaining_tokens,discarded_tokens,token_estimate_source,candidate_count,included_count,discarded_count,created_at) SELECT ?,suite.evaluation_project_id,NULL,fixture.task_type,?,?,?,?,?,?,?,?,?,? FROM novel_skill_evaluation_dispatch_reservations AS reservation INNER JOIN novel_skill_evaluation_runs AS evaluation_run ON evaluation_run.id = reservation.run_id INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = evaluation_run.suite_id INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = reservation.cell_id INNER JOIN novel_skill_evaluation_fixtures AS fixture ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id WHERE reservation.id = ? AND reservation.state = 'reserved' AND suite.evaluation_project_id = ? AND fixture.task_type = ?`,
     [
       trace.id,
       trace.maximumContextTokens,
@@ -2593,11 +2369,7 @@ async function insertEvaluationTrace(
   if (run.rowsAffected !== 1) throw conflict("The evaluation context trace was not created.");
   for (const entry of trace.entries) {
     await transaction.execute(
-      `INSERT INTO context_compilation_entries (
-         run_id, candidate_id, layer, selection_reason, included, discarded_reason,
-         estimated_tokens, evaluation_order, layer_order, priority, relevance_score,
-         required, budget_remaining_before, budget_remaining_after
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO context_compilation_entries(run_id,candidate_id,layer,selection_reason,included,discarded_reason,estimated_tokens,evaluation_order,layer_order,priority,relevance_score,required,budget_remaining_before,budget_remaining_after) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         trace.id,
         entry.contextCandidateId,
@@ -2617,10 +2389,7 @@ async function insertEvaluationTrace(
     );
     for (const [sourceIndex, source] of entry.sources.entries()) {
       await transaction.execute(
-        `INSERT INTO context_compilation_entry_sources (
-           run_id, candidate_id, source_order, source_type, source_id,
-           source_version_id, locator, content_hash
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO context_compilation_entry_sources(run_id,candidate_id,source_order,source_type,source_id,source_version_id,locator,content_hash) VALUES(?,?,?,?,?,?,?,?)`,
         [
           trace.id,
           entry.contextCandidateId,
@@ -2637,9 +2406,7 @@ async function insertEvaluationTrace(
   const execution = trace.execution;
   if (execution === null) throw invalid("The evaluation trace has no exact execution binding.");
   await transaction.execute(
-    `INSERT INTO context_compilation_execution_links (
-       trace_id, generation_id, generation_run_id, created_at
-     ) VALUES (?, ?, NULL, ?)`,
+    `INSERT INTO context_compilation_execution_links(trace_id,generation_id,generation_run_id,created_at) VALUES(?,?,NULL,?)`,
     [trace.id, execution.generationId, trace.createdAt],
   );
 }
@@ -2649,36 +2416,7 @@ async function insertEvaluationInvocation(
   input: ReserveAndBindNovelSkillPaidEvaluationDispatchInput,
 ): Promise<void> {
   const result = await transaction.execute(
-    `INSERT INTO model_invocation_facts (
-       id, task, route_task, connection_id, catalog_entry_id,
-       provider_kind_snapshot, model_id_snapshot, route_reason, status, attempt,
-       fallback_from_invocation_id, privacy_policy, data_destination,
-       maximum_cost_micros, currency, started_at, created_at, revision
-     )
-     SELECT reservation.planned_model_invocation_id, fixture.task_type, NULL,
-            target.connection_id, target.catalog_entry_id,
-            target.provider_kind_snapshot, target.provider_model_id_snapshot,
-            'user_override', 'queued', reservation.dispatch_generation, NULL,
-            CASE cost.data_destination WHEN 'local' THEN 'local_only' ELSE 'cloud_allowed' END,
-            cost.data_destination, reservation.reserved_max_cost_micros,
-            reservation.currency, NULL, ?, 1
-     FROM novel_skill_evaluation_dispatch_reservations AS reservation
-     INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = reservation.cell_id
-     INNER JOIN novel_skill_evaluation_fixtures AS fixture
-       ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id
-     INNER JOIN novel_skill_evaluation_run_model_targets AS target
-       ON target.run_id = reservation.run_id AND target.model_slot_id = reservation.model_slot_id
-     INNER JOIN model_provider_connections AS connection ON connection.id = target.connection_id
-     INNER JOIN model_catalog_entries AS catalog ON catalog.id = target.catalog_entry_id
-     INNER JOIN model_cost_privacy_profiles AS cost ON cost.catalog_entry_id = catalog.id
-     WHERE reservation.id = ? AND reservation.state = 'reserved'
-       AND connection.enabled = 1 AND connection.connection_status = 'ready'
-       AND connection.credential_state = 'present'
-       AND connection.revision = target.connection_revision
-       AND catalog.connection_id = connection.id AND catalog.availability = 'available'
-       AND catalog.revision = target.catalog_revision
-       AND cost.revision = target.cost_profile_revision
-       AND cost.data_destination = reservation.data_destination`,
+    `INSERT INTO model_invocation_facts(id,task,route_task,connection_id,catalog_entry_id,provider_kind_snapshot,model_id_snapshot,route_reason,status,attempt,fallback_from_invocation_id,privacy_policy,data_destination,maximum_cost_micros,currency,started_at,created_at,revision) SELECT reservation.planned_model_invocation_id,fixture.task_type,NULL,target.connection_id,target.catalog_entry_id,target.provider_kind_snapshot,target.provider_model_id_snapshot,'user_override','queued',reservation.dispatch_generation,NULL,CASE cost.data_destination WHEN 'local' THEN 'local_only' ELSE 'cloud_allowed' END,cost.data_destination,reservation.reserved_max_cost_micros,reservation.currency,NULL,?,1 FROM novel_skill_evaluation_dispatch_reservations AS reservation INNER JOIN novel_skill_evaluation_cells AS cell ON cell.id = reservation.cell_id INNER JOIN novel_skill_evaluation_fixtures AS fixture ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id INNER JOIN novel_skill_evaluation_run_model_targets AS target ON target.run_id = reservation.run_id AND target.model_slot_id = reservation.model_slot_id INNER JOIN model_provider_connections AS connection ON connection.id = target.connection_id INNER JOIN model_catalog_entries AS catalog ON catalog.id = target.catalog_entry_id INNER JOIN model_cost_privacy_profiles AS cost ON cost.catalog_entry_id = catalog.id WHERE reservation.id = ? AND reservation.state = 'reserved' AND connection.enabled = 1 AND connection.connection_status = 'ready' AND connection.credential_state = 'present' AND connection.revision = target.connection_revision AND catalog.connection_id = connection.id AND catalog.availability = 'available' AND catalog.revision = target.catalog_revision AND cost.revision = target.cost_profile_revision AND cost.data_destination = reservation.data_destination`,
     [input.boundAt, input.reservation.reservationId],
   );
   if (result.rowsAffected !== 1) {
@@ -2691,22 +2429,7 @@ async function assertExistingBoundDispatch(
   input: ReserveAndBindNovelSkillPaidEvaluationDispatchInput,
 ): Promise<void> {
   const [row] = await transaction.select<{ readonly valid: number }>(
-    `SELECT count(*) AS valid
-     FROM novel_skill_evaluation_dispatch_reservations AS reservation
-     INNER JOIN novel_skill_evaluation_attempts AS attempt ON attempt.id = reservation.attempt_id
-     INNER JOIN context_compilation_runs AS trace
-       ON trace.id = reservation.planned_context_trace_id
-     INNER JOIN context_compilation_execution_links AS execution
-       ON execution.trace_id = trace.id
-     INNER JOIN context_compilation_model_invocation_links AS model_link
-       ON model_link.trace_id = trace.id
-     INNER JOIN model_invocation_facts AS invocation
-       ON invocation.id = reservation.planned_model_invocation_id
-     WHERE reservation.id = ? AND reservation.state = 'bound'
-       AND attempt.context_trace_id = trace.id
-       AND attempt.model_invocation_id = invocation.id
-       AND execution.generation_id = ?
-       AND model_link.model_invocation_id = invocation.id`,
+    `SELECT count(*) AS valid FROM novel_skill_evaluation_dispatch_reservations AS reservation INNER JOIN novel_skill_evaluation_attempts AS attempt ON attempt.id = reservation.attempt_id INNER JOIN context_compilation_runs AS trace ON trace.id = reservation.planned_context_trace_id INNER JOIN context_compilation_execution_links AS execution ON execution.trace_id = trace.id INNER JOIN context_compilation_model_invocation_links AS model_link ON model_link.trace_id = trace.id INNER JOIN model_invocation_facts AS invocation ON invocation.id = reservation.planned_model_invocation_id WHERE reservation.id = ? AND reservation.state = 'bound' AND attempt.context_trace_id = trace.id AND attempt.model_invocation_id = invocation.id AND execution.generation_id = ? AND model_link.model_invocation_id = invocation.id`,
     [input.reservation.reservationId, input.reservation.receipt.generationId],
   );
   if (row?.valid !== 1) {
@@ -2907,19 +2630,7 @@ async function insertEvaluationCandidate(
   snapshot: AiCandidateSnapshot,
 ): Promise<void> {
   const result = await transaction.execute(
-    `INSERT INTO ai_candidates (
-       id, project_id, chapter_id, source, base_version_id, content,
-       content_checksum, status, incomplete, created_at, updated_at,
-       decided_at, task_intent, application_mode, payload_kind,
-       anchor_start_utf16, anchor_end_utf16
-     )
-     SELECT ?, suite.evaluation_project_id, NULL, ?, NULL, ?, ?, 'ready', 0, ?, ?, NULL,
-            'legacy_full_document', 'replace_document', 'full_document', NULL, NULL
-     FROM novel_skill_evaluation_dispatch_reservations AS reservation
-     INNER JOIN novel_skill_evaluation_runs AS evaluation_run ON evaluation_run.id = reservation.run_id
-     INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = evaluation_run.suite_id
-     WHERE reservation.id = ? AND reservation.state = 'dispatched'
-       AND reservation.planned_candidate_id = ? AND suite.evaluation_project_id = ?`,
+    `INSERT INTO ai_candidates(id,project_id,chapter_id,source,base_version_id,content,content_checksum,status,incomplete,created_at,updated_at,decided_at,task_intent,application_mode,payload_kind,anchor_start_utf16,anchor_end_utf16) SELECT ?,suite.evaluation_project_id,NULL,?,NULL,?,?,'ready',0,?,?,NULL,'legacy_full_document','replace_document','full_document',NULL,NULL FROM novel_skill_evaluation_dispatch_reservations AS reservation INNER JOIN novel_skill_evaluation_runs AS evaluation_run ON evaluation_run.id = reservation.run_id INNER JOIN novel_skill_evaluation_suites AS suite ON suite.id = evaluation_run.suite_id WHERE reservation.id = ? AND reservation.state = 'dispatched' AND reservation.planned_candidate_id = ? AND suite.evaluation_project_id = ?`,
     [
       snapshot.id,
       snapshot.source,
@@ -2942,21 +2653,12 @@ async function quoteCommercialRun(
   runId: string,
 ): Promise<NovelSkillPaidEvaluationQuote> {
   const [protocol] = await executor.select<{ readonly protocol_hash: string }>(
-    `SELECT protocol.protocol_hash
-     FROM novel_skill_evaluation_runs AS run
-     INNER JOIN novel_skill_evaluation_protocols AS protocol ON protocol.suite_id = run.suite_id
-     WHERE run.id = ? AND run.status = 'planned'`,
+    `SELECT protocol.protocol_hash FROM novel_skill_evaluation_runs AS run INNER JOIN novel_skill_evaluation_protocols AS protocol ON protocol.suite_id = run.suite_id WHERE run.id = ? AND run.status = 'planned'`,
     [runId],
   );
   if (protocol === undefined) throw conflict("The run has no immutable paid evaluation protocol.");
   const targets = await executor.select<TargetQuoteRow>(
-    `SELECT model_slot_id, currency,
-            input_micros_per_million_tokens AS input_rate,
-            output_micros_per_million_tokens AS output_rate,
-            target_hash, pricing_snapshot_hash, connection_id, catalog_entry_id,
-            model_identity_hash, model_artifact_hash
-     FROM novel_skill_evaluation_run_model_targets
-     WHERE run_id = ? ORDER BY model_slot_id`,
+    `SELECT model_slot_id,currency,input_micros_per_million_tokens AS input_rate,output_micros_per_million_tokens AS output_rate,target_hash,pricing_snapshot_hash,connection_id,catalog_entry_id,model_identity_hash,model_artifact_hash FROM novel_skill_evaluation_run_model_targets WHERE run_id = ? ORDER BY model_slot_id`,
     [runId],
   );
   if (
@@ -2966,28 +2668,7 @@ async function quoteCommercialRun(
     throw conflict("The run does not have two distinct exact model targets.");
   }
   const work = await executor.select<QuoteWorkRow>(
-    `SELECT target.model_slot_id, target.currency,
-            target.input_micros_per_million_tokens AS input_rate,
-            target.output_micros_per_million_tokens AS output_rate,
-            target.target_hash, target.pricing_snapshot_hash,
-            target.connection_id, target.catalog_entry_id,
-            target.model_identity_hash, target.model_artifact_hash,
-            fixture.task_type, profile.maximum_input_tokens, profile.maximum_output_tokens,
-            count(*) AS cell_count
-     FROM novel_skill_evaluation_cells AS cell
-     INNER JOIN novel_skill_evaluation_fixtures AS fixture
-       ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id
-     INNER JOIN novel_skill_evaluation_request_profiles AS profile
-       ON profile.suite_id = cell.suite_id AND profile.task_type = fixture.task_type
-     INNER JOIN novel_skill_evaluation_run_model_targets AS target
-       ON target.run_id = cell.run_id AND target.model_slot_id = cell.model_slot_id
-     WHERE cell.run_id = ?
-     GROUP BY target.model_slot_id, target.currency, target.input_micros_per_million_tokens,
-              target.output_micros_per_million_tokens, target.target_hash,
-              target.pricing_snapshot_hash, target.connection_id, target.catalog_entry_id,
-              target.model_identity_hash, target.model_artifact_hash,
-              fixture.task_type, profile.maximum_input_tokens, profile.maximum_output_tokens
-     ORDER BY target.model_slot_id, fixture.task_type`,
+    `SELECT target.model_slot_id,target.currency,target.input_micros_per_million_tokens AS input_rate,target.output_micros_per_million_tokens AS output_rate,target.target_hash,target.pricing_snapshot_hash,target.connection_id,target.catalog_entry_id,target.model_identity_hash,target.model_artifact_hash,fixture.task_type,profile.maximum_input_tokens,profile.maximum_output_tokens,count(*) AS cell_count FROM novel_skill_evaluation_cells AS cell INNER JOIN novel_skill_evaluation_fixtures AS fixture ON fixture.suite_id = cell.suite_id AND fixture.fixture_id = cell.fixture_id INNER JOIN novel_skill_evaluation_request_profiles AS profile ON profile.suite_id = cell.suite_id AND profile.task_type = fixture.task_type INNER JOIN novel_skill_evaluation_run_model_targets AS target ON target.run_id = cell.run_id AND target.model_slot_id = cell.model_slot_id WHERE cell.run_id = ? GROUP BY target.model_slot_id,target.currency,target.input_micros_per_million_tokens,target.output_micros_per_million_tokens,target.target_hash,target.pricing_snapshot_hash,target.connection_id,target.catalog_entry_id,target.model_identity_hash,target.model_artifact_hash,fixture.task_type,profile.maximum_input_tokens,profile.maximum_output_tokens ORDER BY target.model_slot_id,fixture.task_type`,
     [runId],
   );
   const cellCount = work.reduce((total, row) => total + row.cell_count, 0);
@@ -3046,30 +2727,7 @@ async function readLiveTarget(
   target: ModelHubExactEvaluationInspection["target"],
 ): Promise<ConnectionCatalogCostRow> {
   const [row] = await executor.select<ConnectionCatalogCostRow>(
-    `SELECT connection.id AS connection_id, connection.provider_kind, connection.protocol,
-            connection.region, connection.workspace_id, connection.endpoint_id,
-            connection.base_url, connection.credential_ref, connection.credential_state,
-            connection.authentication_mode, connection.credential_header_name,
-            connection.model_discovery_path, connection.text_generation_path,
-            connection.embedding_path, connection.request_timeout_ms, connection.retry_limit,
-            connection.connection_status, connection.enabled AS connection_enabled,
-            connection.revision AS connection_revision,
-            catalog.id AS catalog_id, catalog.connection_id AS catalog_connection_id,
-            catalog.provider_model_id, catalog.catalog_source, catalog.availability,
-            catalog.lifecycle, catalog.input_token_limit, catalog.output_token_limit,
-            catalog.stale_after, catalog.revision AS catalog_revision,
-            cost.currency, cost.input_micros_per_million_tokens AS input_rate,
-            cost.output_micros_per_million_tokens AS output_rate,
-            cost.cached_input_micros_per_million_tokens AS cached_input_rate,
-            cost.pricing_version, cost.price_updated_at, cost.data_destination,
-            cost.retention_policy, cost.training_policy, cost.evidence_source,
-            cost.evidence_version, cost.evidence_summary, cost.evidence_updated_at,
-            cost.revision AS cost_revision, cost.created_at AS cost_created_at,
-            cost.updated_at AS cost_updated_at
-     FROM model_provider_connections AS connection
-     INNER JOIN model_catalog_entries AS catalog ON catalog.connection_id = connection.id
-     INNER JOIN model_cost_privacy_profiles AS cost ON cost.catalog_entry_id = catalog.id
-     WHERE connection.id = ? AND catalog.id = ?`,
+    `SELECT connection.id AS connection_id,connection.provider_kind,connection.protocol,connection.region,connection.workspace_id,connection.endpoint_id,connection.base_url,connection.credential_ref,connection.credential_state,connection.authentication_mode,connection.credential_header_name,connection.model_discovery_path,connection.text_generation_path,connection.embedding_path,connection.request_timeout_ms,connection.retry_limit,connection.connection_status,connection.enabled AS connection_enabled,connection.revision AS connection_revision,catalog.id AS catalog_id,catalog.connection_id AS catalog_connection_id,catalog.provider_model_id,catalog.catalog_source,catalog.availability,catalog.lifecycle,catalog.input_token_limit,catalog.output_token_limit,catalog.stale_after,catalog.revision AS catalog_revision,cost.currency,cost.input_micros_per_million_tokens AS input_rate,cost.output_micros_per_million_tokens AS output_rate,cost.cached_input_micros_per_million_tokens AS cached_input_rate,cost.pricing_version,cost.price_updated_at,cost.data_destination,cost.retention_policy,cost.training_policy,cost.evidence_source,cost.evidence_version,cost.evidence_summary,cost.evidence_updated_at,cost.revision AS cost_revision,cost.created_at AS cost_created_at,cost.updated_at AS cost_updated_at FROM model_provider_connections AS connection INNER JOIN model_catalog_entries AS catalog ON catalog.connection_id = connection.id INNER JOIN model_cost_privacy_profiles AS cost ON cost.catalog_entry_id = catalog.id WHERE connection.id = ? AND catalog.id = ?`,
     [target.connectionId, target.catalogEntryId],
   );
   if (row === undefined) {
@@ -3103,9 +2761,7 @@ async function cancelPreDispatchAttempt(
   completedAt: string,
 ): Promise<void> {
   const result = await executor.execute(
-    `UPDATE novel_skill_evaluation_attempts
-     SET status = 'cancelled', error_code = 'PRE_DISPATCH_CANCELLED', completed_at = ?
-     WHERE id = ? AND status = 'started'`,
+    `UPDATE novel_skill_evaluation_attempts SET status = 'cancelled',error_code = 'PRE_DISPATCH_CANCELLED',completed_at = ? WHERE id = ? AND status = 'started'`,
     [completedAt, attemptId],
   );
   if (result.rowsAffected !== 1) {
@@ -3119,9 +2775,7 @@ async function cancelDispatchedAttempt(
   completedAt: string,
 ): Promise<void> {
   const result = await executor.execute(
-    `UPDATE novel_skill_evaluation_attempts
-     SET status = 'cancelled', error_code = 'DISPATCH_INTERRUPTED', completed_at = ?
-     WHERE id = ? AND status = 'started'`,
+    `UPDATE novel_skill_evaluation_attempts SET status = 'cancelled',error_code = 'DISPATCH_INTERRUPTED',completed_at = ? WHERE id = ? AND status = 'started'`,
     [completedAt, attemptId],
   );
   if (result.rowsAffected !== 1) {
@@ -3135,9 +2789,7 @@ async function cancelPreDispatchInvocation(
   completedAt: string,
 ): Promise<void> {
   const result = await executor.execute(
-    `UPDATE model_invocation_facts
-     SET status = 'cancelled', started_at = ?, completed_at = ?, revision = revision + 1
-     WHERE id = ? AND status = 'queued'`,
+    `UPDATE model_invocation_facts SET status = 'cancelled',started_at = ?,completed_at = ?,revision = revision+1 WHERE id = ? AND status = 'queued'`,
     [completedAt, completedAt, invocationId],
   );
   if (result.rowsAffected !== 1) {
@@ -3151,10 +2803,7 @@ async function interruptDispatchedInvocation(
   completedAt: string,
 ): Promise<void> {
   const result = await executor.execute(
-    `UPDATE model_invocation_facts
-     SET status = 'failed', error_code = 'DISPATCH_INTERRUPTED', error_summary = NULL,
-         completed_at = ?, revision = revision + 1
-     WHERE id = ? AND status = 'running' AND revision = 2`,
+    `UPDATE model_invocation_facts SET status = 'failed',error_code = 'DISPATCH_INTERRUPTED',error_summary = NULL,completed_at = ?,revision = revision+1 WHERE id = ? AND status = 'running' AND revision = 2`,
     [completedAt, invocationId],
   );
   if (result.rowsAffected !== 1) {
@@ -3525,9 +3174,7 @@ async function invalidateRun(
       );
       await cancelDispatchedAttempt(transaction, reservation.attempt_id, invalidatedAt);
       const changed = await transaction.execute(
-        `UPDATE novel_skill_evaluation_dispatch_reservations
-         SET state = 'ambiguous', terminal_at = ?, revision = revision + 1
-         WHERE id = ? AND revision = ? AND state = 'dispatched'`,
+        `UPDATE novel_skill_evaluation_dispatch_reservations SET state = 'ambiguous',terminal_at = ?,revision = revision+1 WHERE id = ? AND revision = ? AND state = 'dispatched'`,
         [invalidatedAt, reservation.id, reservation.revision],
       );
       if (changed.rowsAffected !== 1) {
@@ -3544,9 +3191,7 @@ async function invalidateRun(
     }
     await cancelPreDispatchAttempt(transaction, reservation.attempt_id, invalidatedAt);
     const changed = await transaction.execute(
-      `UPDATE novel_skill_evaluation_dispatch_reservations
-       SET state = 'not_dispatched', terminal_at = ?, revision = revision + 1
-       WHERE id = ? AND revision = ? AND state IN ('reserved','bound')`,
+      `UPDATE novel_skill_evaluation_dispatch_reservations SET state = 'not_dispatched',terminal_at = ?,revision = revision+1 WHERE id = ? AND revision = ? AND state IN ('reserved','bound')`,
       [invalidatedAt, reservation.id, reservation.revision],
     );
     if (changed.rowsAffected !== 1) {
@@ -3554,22 +3199,16 @@ async function invalidateRun(
     }
   }
   await transaction.execute(
-    `UPDATE novel_skill_evaluation_attempts
-     SET status = 'cancelled', error_code = 'DISPATCH_INTERRUPTED', completed_at = ?
-     WHERE run_id = ? AND status = 'started'`,
+    `UPDATE novel_skill_evaluation_attempts SET status = 'cancelled',error_code = 'DISPATCH_INTERRUPTED',completed_at = ? WHERE run_id = ? AND status = 'started'`,
     [invalidatedAt, runId],
   );
   const result = await transaction.execute(
-    `UPDATE novel_skill_evaluation_runs
-     SET status = 'invalidated', evaluation_status = 'EVIDENCE_INCOMPLETE',
-         completed_at = ?, revision = revision + 1
-     WHERE id = ? AND status = 'running'`,
+    `UPDATE novel_skill_evaluation_runs SET status = 'invalidated',evaluation_status = 'EVIDENCE_INCOMPLETE',completed_at = ?,revision = revision+1 WHERE id = ? AND status = 'running'`,
     [invalidatedAt, runId],
   );
   if (result.rowsAffected !== 1) throw conflict("The interrupted run is already terminal.");
   await transaction.execute(
-    `UPDATE novel_skill_evaluation_cells SET state = 'invalidated'
-     WHERE run_id = ? AND state = 'planned'`,
+    `UPDATE novel_skill_evaluation_cells SET state = 'invalidated' WHERE run_id = ? AND state = 'planned'`,
     [runId],
   );
 }
@@ -3698,9 +3337,7 @@ function conflict(message: string): NovelSkillEvaluationStoreError {
   return new NovelSkillEvaluationStoreError("NOVEL_SKILL_EVALUATION_CONFLICT", message);
 }
 
-const RESERVATION_SELECT = `SELECT id, run_id, cell_id, attempt_id, state,
-  planned_context_trace_id, planned_model_invocation_id, planned_candidate_id, revision
-  FROM novel_skill_evaluation_dispatch_reservations`;
+const RESERVATION_SELECT = `SELECT id,run_id,cell_id,attempt_id,state,planned_context_trace_id,planned_model_invocation_id,planned_candidate_id,revision FROM novel_skill_evaluation_dispatch_reservations`;
 
 const PREDISPATCH_AUTHORITY_COLUMNS = [
   "reservation_id",
@@ -3762,27 +3399,4 @@ const PREDISPATCH_AUTHORITY_COLUMNS = [
   "captured_at",
 ] as const;
 
-const PREDISPATCH_AUTHORITY_SELECT = `
-  SELECT snapshot.*,
-         reservation.authorization_id, reservation.attempt_id,
-         reservation.dispatch_generation, reservation.planned_context_trace_id,
-         reservation.planned_model_invocation_id, reservation.planned_candidate_id,
-         reservation.idempotency_key_hash,
-         reservation.run_id AS reservation_run_id,
-         reservation.cell_id AS reservation_cell_id,
-         reservation.model_slot_id AS reservation_model_slot_id,
-         reservation.target_hash AS reservation_target_hash,
-         reservation.pricing_snapshot_hash AS reservation_pricing_snapshot_hash,
-         reservation.request_profile_hash AS reservation_request_profile_hash,
-         reservation.message_payload_hash AS reservation_message_payload_hash,
-         reservation.request_payload_hash AS reservation_request_payload_hash,
-         reservation.execution_lock_hash AS reservation_execution_lock_hash,
-         reservation.payload_authority_manifest_hash
-           AS reservation_payload_authority_manifest_hash,
-         reservation.currency AS reservation_currency,
-         reservation.data_destination AS reservation_data_destination,
-         reservation.reserved_max_cost_micros AS reservation_reserved_max_cost_micros,
-         reservation.reserved_at AS reservation_reserved_at
-  FROM novel_skill_evaluation_predispatch_authority_snapshots AS snapshot
-  INNER JOIN novel_skill_evaluation_dispatch_reservations AS reservation
-    ON reservation.id = snapshot.reservation_id`;
+const PREDISPATCH_AUTHORITY_SELECT = `SELECT snapshot.*,reservation.authorization_id,reservation.attempt_id,reservation.dispatch_generation,reservation.planned_context_trace_id,reservation.planned_model_invocation_id,reservation.planned_candidate_id,reservation.idempotency_key_hash,reservation.run_id AS reservation_run_id,reservation.cell_id AS reservation_cell_id,reservation.model_slot_id AS reservation_model_slot_id,reservation.target_hash AS reservation_target_hash,reservation.pricing_snapshot_hash AS reservation_pricing_snapshot_hash,reservation.request_profile_hash AS reservation_request_profile_hash,reservation.message_payload_hash AS reservation_message_payload_hash,reservation.request_payload_hash AS reservation_request_payload_hash,reservation.execution_lock_hash AS reservation_execution_lock_hash,reservation.payload_authority_manifest_hash AS reservation_payload_authority_manifest_hash,reservation.currency AS reservation_currency,reservation.data_destination AS reservation_data_destination,reservation.reserved_max_cost_micros AS reservation_reserved_max_cost_micros,reservation.reserved_at AS reservation_reserved_at FROM novel_skill_evaluation_predispatch_authority_snapshots AS snapshot INNER JOIN novel_skill_evaluation_dispatch_reservations AS reservation ON reservation.id = snapshot.reservation_id`;

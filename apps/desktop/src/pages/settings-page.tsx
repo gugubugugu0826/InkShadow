@@ -36,6 +36,7 @@ import {
 } from "../components/novel-skill-paid-evaluation-panel";
 import { useOnlineStatus } from "../hooks/use-online-status";
 import { useWritingExperience } from "../hooks/use-writing-experience";
+import { useModelHubReadiness } from "../hooks/use-model-hub-readiness";
 import { collectDesktopDiagnosticArtifact } from "../infrastructure/diagnostics";
 import type { AutomaticBackupRuntimeCheckResult } from "../infrastructure/automatic-backup-runtime";
 import type { AutomaticBackupFailureKind } from "../infrastructure/automatic-backup-service";
@@ -93,13 +94,11 @@ import {
   saveModelHubCredential,
 } from "../infrastructure/model-hub-credential-mutation-service";
 import {
+  modelHubCredentialStatusLabel,
   modelHubReadinessBlockerLabel,
   MODEL_HUB_READINESS_CHANGED_EVENT,
-  MODEL_HUB_READINESS_REFRESH_INTERVAL_MS,
   MODEL_HUB_STATE_EXPLANATIONS,
   USER_FACING_MODEL_HUB_STATES,
-  projectModelHubReadiness,
-  type ModelHubReadinessProjection,
 } from "../infrastructure/model-hub-readiness";
 import {
   applyAutomaticModelHubRouting,
@@ -312,6 +311,20 @@ const MODEL_HUB_SECTION_META: Readonly<
   }),
 });
 
+const GLOBAL_SETTINGS_SECTION_LINKS = Object.freeze([
+  { id: "appearance", label: "外观" },
+  { id: "writing-preferences", label: "正文与自动保存" },
+  { id: "writing-experience", label: "写作体验" },
+  { id: "data-privacy", label: "数据与隐私" },
+  { id: "ai-memory", label: "AI 记忆" },
+  { id: "model-center", label: "打开模型中心" },
+  { id: "sync-security", label: "同步安全" },
+  { id: "local-maintenance", label: "本地维护" },
+  { id: "secure-updates", label: "安全更新" },
+  { id: "diagnostics", label: "诊断" },
+  { id: "data-transfer", label: "导入与导出" },
+] as const);
+
 const MODEL_HUB_SCHEME_OPTIONS = [
   {
     value: "smart",
@@ -409,6 +422,8 @@ function isCompletePaidEvaluationCostProfile(
 
 export function SettingsPage() {
   const runtime = useRuntime();
+  const modelHubReadinessSnapshot = useModelHubReadiness(runtime);
+  const modelHubReadiness = modelHubReadinessSnapshot.readiness;
   const writingExperience = useWritingExperience();
   const {
     preference: appearance,
@@ -446,10 +461,6 @@ export function SettingsPage() {
   const [modelHubPageSnapshot, setModelHubPageSnapshot] = useState(
     createInitialModelHubPageSnapshot,
   );
-  const [authoritativeModelHubReadiness, setAuthoritativeModelHubReadiness] = useState<Readonly<{
-    fingerprint: string;
-    readiness: ModelHubReadinessProjection;
-  }> | null>(null);
   const [modelHubMutationNotice, setModelHubMutationNotice] = useState<Readonly<{
     message: string;
     reloadRequired: boolean;
@@ -1080,13 +1091,17 @@ export function SettingsPage() {
       if (typeof target.scrollIntoView === "function") {
         target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
       }
-      if (!target.hasAttribute("tabindex")) {
-        target.setAttribute("tabindex", "-1");
+      const focusTarget =
+        target.querySelector<HTMLElement>(
+          "[data-settings-anchor-focus], h1, h2, h3, h4, h5, h6, button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])",
+        ) ?? target;
+      if (!focusTarget.hasAttribute("tabindex")) {
+        focusTarget.setAttribute("tabindex", "-1");
       }
-      target.focus({ preventScroll: true });
+      focusTarget.focus({ preventScroll: true });
     }, 0);
     return () => window.clearTimeout(timeout);
-  }, [expertMode, location.hash, modelHubTargetSection]);
+  }, [expertMode, location.hash, modelHubTargetSection, writingExperience.preference?.mode]);
 
   async function selectStoredProfile(
     providerIdValue: string,
@@ -3400,25 +3415,7 @@ export function SettingsPage() {
   }
 
   const modelHubHydrationPending = isModelHubHydrationPending(modelHubPageSnapshot.phase);
-  const shallowModelHubReadiness = useMemo(
-    () =>
-      projectModelHubReadiness({
-        connections: hubConnections,
-        catalog: routingCatalog,
-        routes: novelTaskRoutes,
-        transientChecking: modelHubHydrationPending || checkingModel,
-        loadFailed: credentialError !== null,
-      }),
-    [
-      checkingModel,
-      credentialError,
-      hubConnections,
-      modelHubHydrationPending,
-      novelTaskRoutes,
-      routingCatalog,
-    ],
-  );
-  const authoritativeModelHubReadinessFingerprint = useMemo(
+  const modelHubHydrationEventFingerprint = useMemo(
     () =>
       JSON.stringify({
         connections: hubConnections.map(
@@ -3468,85 +3465,11 @@ export function SettingsPage() {
       summary.configured,
     ],
   );
-  const matchingAuthoritativeModelHubReadiness =
-    authoritativeModelHubReadiness?.fingerprint === authoritativeModelHubReadinessFingerprint
-      ? authoritativeModelHubReadiness.readiness
-      : null;
-  const authoritativeModelHubReadinessPending =
-    isModelHubView && !modelHubHydrationPending && matchingAuthoritativeModelHubReadiness === null;
 
   useEffect(() => {
-    if (!isModelHubView || modelHubHydrationPending) return;
-    let active = true;
-    let refreshSequence = 0;
-    const refresh = (): void => {
-      const sequence = refreshSequence + 1;
-      refreshSequence = sequence;
-      void import("../infrastructure/model-hub-authoritative-readiness")
-        .then(({ loadAuthoritativeModelHubReadiness }) =>
-          loadAuthoritativeModelHubReadiness(runtime),
-        )
-        .then((readiness) => {
-          if (!active || sequence !== refreshSequence) return;
-          setAuthoritativeModelHubReadiness({
-            fingerprint: authoritativeModelHubReadinessFingerprint,
-            readiness,
-          });
-        })
-        .catch(() => {
-          if (!active || sequence !== refreshSequence) return;
-          setAuthoritativeModelHubReadiness({
-            fingerprint: authoritativeModelHubReadinessFingerprint,
-            readiness: projectModelHubReadiness({
-              connections: [],
-              catalog: [],
-              routes: [],
-              loadFailed: true,
-            }),
-          });
-        });
-    };
-    const refreshTimer = window.setInterval(refresh, MODEL_HUB_READINESS_REFRESH_INTERVAL_MS);
-    refresh();
-    return () => {
-      active = false;
-      window.clearInterval(refreshTimer);
-    };
-  }, [
-    authoritativeModelHubReadinessFingerprint,
-    isModelHubView,
-    modelHubHydrationPending,
-    runtime,
-  ]);
-  const modelHubReadiness =
-    matchingAuthoritativeModelHubReadiness ??
-    (authoritativeModelHubReadinessPending
-      ? projectModelHubReadiness({
-          connections: hubConnections,
-          catalog: routingCatalog,
-          routes: novelTaskRoutes,
-          transientChecking: true,
-        })
-      : shallowModelHubReadiness);
-  const modelHubReadinessEventFingerprint = JSON.stringify({
-    state: modelHubReadiness.state,
-    enabledConnectionCount: modelHubReadiness.enabledConnectionCount,
-    usableConnectionCount: modelHubReadiness.usableConnectionCount,
-    runnableCoreTaskCount: modelHubReadiness.runnableCoreTaskCount,
-    totalCoreTaskCount: modelHubReadiness.totalCoreTaskCount,
-    missingCoreTasks: modelHubReadiness.missingCoreTasks,
-    exactBlockers: modelHubReadiness.exactBlockers,
-  });
-
-  useEffect(() => {
-    if (modelHubHydrationPending || authoritativeModelHubReadinessPending) return;
+    if (modelHubHydrationPending) return;
     window.dispatchEvent(new Event(MODEL_HUB_READINESS_CHANGED_EVENT));
-  }, [
-    authoritativeModelHubReadinessPending,
-    modelHubHydrationPending,
-    modelHubReadinessEventFingerprint,
-  ]);
-
+  }, [modelHubHydrationEventFingerprint, modelHubHydrationPending]);
   const normalizedCredentialError =
     credentialError === null ? null : projectOrdinaryUiError(credentialError);
   const normalizedModelHubPageError =
@@ -3570,19 +3493,24 @@ export function SettingsPage() {
         capabilityEvidence: routingCapabilityEvidence,
         recentAiFailures: routingRecentAiFailures,
         now: runtime.clock.now(),
-        validating: modelHubHydrationPending || checkingModel || probingCapability,
+        validating:
+          modelHubHydrationPending ||
+          modelHubReadinessSnapshot.checking ||
+          checkingModel ||
+          probingCapability,
         loadFailed: credentialError !== null,
         saveFailed:
           normalizedRouteError !== null &&
           taskProbeDisclosureError === null &&
           !routeProbeResultAmbiguous,
-        exactBlockers: matchingAuthoritativeModelHubReadiness?.exactBlockers ?? [],
+        exactBlockers: modelHubReadiness.exactBlockers,
       }),
     [
       checkingModel,
       credentialError,
       hubConnections,
-      matchingAuthoritativeModelHubReadiness,
+      modelHubReadiness,
+      modelHubReadinessSnapshot.checking,
       modelHubHydrationPending,
       novelTaskRoutes,
       normalizedRouteError,
@@ -4233,39 +4161,20 @@ export function SettingsPage() {
       ) : (
         <nav className="settings-actions settings-section-nav" aria-label="全局设置快速跳转">
           <span className="settings-section-nav__label">快速跳转</span>
-          <Link className="button-link button-link--secondary" to="/settings#appearance">
-            外观
-          </Link>
-          <Link className="button-link button-link--secondary" to="/settings#writing-preferences">
-            正文与自动保存
-          </Link>
-          <Link className="button-link button-link--secondary" to="/settings#writing-experience">
-            写作体验
-          </Link>
-          <Link className="button-link button-link--secondary" to="/settings#data-privacy">
-            数据与隐私
-          </Link>
-          <Link className="button-link button-link--secondary" to="/settings#ai-memory">
-            AI 记忆
-          </Link>
-          <Link className="button-link button-link--secondary" to="/settings#model-center">
-            打开模型中心
-          </Link>
-          <Link className="button-link button-link--secondary" to="/settings#sync-security">
-            同步安全
-          </Link>
-          <Link className="button-link button-link--secondary" to="/settings#local-maintenance">
-            本地维护
-          </Link>
-          <Link className="button-link button-link--secondary" to="/settings#secure-updates">
-            安全更新
-          </Link>
-          <Link className="button-link button-link--secondary" to="/settings#diagnostics">
-            诊断
-          </Link>
-          <Link className="button-link button-link--secondary" to="/settings#data-transfer">
-            导入与导出
-          </Link>
+          {GLOBAL_SETTINGS_SECTION_LINKS.map(({ id, label }) => {
+            const active = location.hash === `#${id}`;
+            return (
+              <Link
+                key={id}
+                className="button-link button-link--secondary"
+                data-active={active}
+                aria-current={active ? "location" : undefined}
+                to={`/settings#${id}`}
+              >
+                {label}
+              </Link>
+            );
+          })}
         </nav>
       )}
 
@@ -4820,12 +4729,47 @@ export function SettingsPage() {
                             <p className="page-heading__eyebrow">当前 AI 状态</p>
                             <h3 id="model-hub-status-title">{modelHubReadiness.label}</h3>
                           </div>
-                          <Badge tone={modelHubReadiness.tone}>当前</Badge>
+                          <Badge tone={modelHubReadiness.tone}>
+                            {modelHubReadinessSnapshot.checking ? "正在核对" : "当前"}
+                          </Badge>
                         </div>
                         <p>{modelHubReadiness.description}</p>
+                        {modelHubReadinessSnapshot.failure !== null && (
+                          <div>
+                            <InlineAlert
+                              tone="warning"
+                              title={modelHubReadinessSnapshot.failure.title}
+                              description={`${modelHubReadinessSnapshot.failure.description} 支持编号：${modelHubReadinessSnapshot.failure.supportId}。${modelHubReadinessSnapshot.failure.recovery}`}
+                            />
+                            <Button
+                              variant="secondary"
+                              onClick={() =>
+                                window.dispatchEvent(new Event(MODEL_HUB_READINESS_CHANGED_EVENT))
+                              }
+                            >
+                              重新读取模型中心状态
+                            </Button>
+                          </div>
+                        )}
                         <div className="model-hub-readiness__metrics" aria-label="AI 基础配置情况">
                           <span>
-                            可用连接 <strong>{modelHubReadiness.usableConnectionCount}</strong>
+                            已保存连接 <strong>{modelHubReadiness.savedConnectionCount}</strong>
+                          </span>
+                          <span>
+                            凭据：
+                            {modelHubCredentialStatusLabel(modelHubReadiness.credentialStatus)}
+                          </span>
+                          <span>
+                            最近验证：{modelHubLastVerifiedLabel(modelHubReadiness.lastVerifiedAt)}
+                          </span>
+                          <span>
+                            模型目录：{modelHubCatalogStatusLabel(modelHubReadiness.catalogStatus)}
+                          </span>
+                          <span>
+                            创作安排：{modelHubRouteStatusLabel(modelHubReadiness.routeStatus)}
+                          </span>
+                          <span>
+                            {modelHubReadiness.needsRecheck ? "需要重新核对" : "当前证据已核对"}
                           </span>
                           <span>
                             基础配置检查 <strong>{modelHubReadiness.runnableCoreTaskCount}</strong>{" "}
@@ -8651,4 +8595,23 @@ function modelRouteRoleLabel(role: ModelRouteRole): string {
     local_private: "本地隐私",
   };
   return labels[role];
+}
+
+function modelHubCatalogStatusLabel(status: string): string {
+  if (status === "loaded") return "已读取";
+  if (status === "partially_loaded") return "部分已读取";
+  if (status === "temporarily_unavailable") return "暂时无法读取";
+  return "尚未读取";
+}
+
+function modelHubRouteStatusLabel(status: string): string {
+  if (status === "sendable") return "核心任务可用";
+  if (status === "partially_sendable") return "部分任务可用";
+  if (status === "temporarily_unavailable") return "暂时无法核对";
+  return "尚无可用安排";
+}
+
+function modelHubLastVerifiedLabel(value: string | null): string {
+  if (value === null || !Number.isFinite(Date.parse(value))) return "尚未验证";
+  return new Date(value).toLocaleString("zh-CN", { hour12: false });
 }

@@ -42,9 +42,13 @@ export interface SelectionRewriteAnchor {
   readonly selectedTextSha256: string;
 }
 
+export type SelectionWritingAction = "selection_rewrite" | "polish" | "expand" | "shorten";
+export type SelectionWritingModelTask = "rewrite" | "polish";
+
 export interface SelectionRewriteCandidateInput {
   readonly chapterId: UuidV7;
   readonly baseVersionId: UuidV7;
+  readonly action?: SelectionWritingAction;
   readonly selection: SelectionRewriteAnchor;
   readonly instruction: string;
   readonly disclosureFingerprint?: string;
@@ -63,6 +67,9 @@ export interface SelectionRewriteDisclosure extends ProviderActionDisclosure {
   readonly maximumProviderCalls: 1;
   readonly automaticRetryCount: 0;
   readonly selectedCharacterCount: number;
+  readonly action: SelectionWritingAction;
+  readonly actionLabel: "改写" | "润色" | "扩写" | "缩写";
+  readonly modelTask: SelectionWritingModelTask;
 }
 
 export interface SelectionRewriteCandidateResult {
@@ -87,6 +94,25 @@ const MAXIMUM_INSTRUCTION_CHARACTERS = 2_000;
 const MAXIMUM_INPUT_BYTES = 320_000;
 const SHA_256_PATTERN = /^[a-f0-9]{64}$/u;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u;
+
+export function selectionWritingActionLabel(
+  action: SelectionWritingAction,
+): SelectionRewriteDisclosure["actionLabel"] {
+  if (action === "polish") return "润色";
+  if (action === "expand") return "扩写";
+  if (action === "shorten") return "缩写";
+  return "改写";
+}
+
+export function selectionWritingModelTask(
+  action: SelectionWritingAction,
+): SelectionWritingModelTask {
+  return action === "polish" ? "polish" : "rewrite";
+}
+
+function selectionWritingAction(input: SelectionRewriteCandidateInput): SelectionWritingAction {
+  return input.action ?? "selection_rewrite";
+}
 
 /**
  * Rewrites one author-selected range and persists only that fragment as an
@@ -148,6 +174,7 @@ export async function createSelectionRewriteCandidate(
           traceId: contextTraceId,
           generationId,
           modelInvocationId: invocationId,
+          taskType: request.task,
         });
         await input.onBeforeDispatch?.({
           requestId,
@@ -260,6 +287,9 @@ async function prepareSelectionRewriteCurrent(
   runtime: DesktopRuntime,
   input: SelectionRewriteCandidateInput,
 ): Promise<PreparedSelectionRewrite> {
+  const action = selectionWritingAction(input);
+  const actionLabel = selectionWritingActionLabel(action);
+  const modelTask = selectionWritingModelTask(action);
   const instruction = normalizeInstruction(input.instruction);
   const anchored = await loadAnchoredSelection(runtime, input);
   const contextCompilation = await compileRewriteContext(runtime, anchored, input, instruction);
@@ -274,7 +304,7 @@ async function prepareSelectionRewriteCurrent(
     contextCompilation.projectPrivacy,
   );
   const request: InspectModelHubTextTaskInput = Object.freeze({
-    task: "rewrite",
+    task: modelTask,
     messages,
     maximumOutputTokens: 4_096,
     temperature: 0.65,
@@ -299,6 +329,7 @@ async function prepareSelectionRewriteCurrent(
     throw selectionRewriteDisclosureChanged();
   }
   const fingerprint = await providerActionFingerprint({
+    action,
     anchor: input.selection,
     baseVersionId: input.baseVersionId,
     instruction,
@@ -317,6 +348,9 @@ async function prepareSelectionRewriteCurrent(
     request,
     inspection,
     disclosure: Object.freeze({
+      action,
+      actionLabel,
+      modelTask,
       fingerprint,
       connectionDisplayName,
       modelId: inspection.modelId,
@@ -324,10 +358,10 @@ async function prepareSelectionRewriteCurrent(
       privacy:
         inspection.dataDestination === "local"
           ? "选区与相关故事资料只发送给当前已验证的本机模型。"
-          : "选区、改写要求和本次挑选的故事资料会发送到所选 AI 服务。",
+          : `选区、${actionLabel}要求和本次挑选的故事资料会发送到所选 AI 服务。`,
       sends: Object.freeze([
         `当前选中的 ${String(anchored.selectedText.length)} 个字符`,
-        "你填写的改写要求",
+        `你填写的${actionLabel}要求`,
         "本次挑选的故事资料：大纲、已确认设定与相关正文片段",
       ]),
       maximumProviderCalls: 1 as const,
@@ -578,6 +612,7 @@ async function saveRewriteContextTrace(
     traceId: string;
     generationId: string;
     modelInvocationId: string;
+    taskType: string;
   }>,
 ): Promise<void> {
   try {
@@ -586,7 +621,7 @@ async function saveRewriteContextTrace(
         id: execution.traceId,
         projectId: chapter.projectId,
         chapterId: chapter.id,
-        taskType: "rewrite",
+        taskType: execution.taskType,
         compiled: receipt.compiled,
         createdAt: runtime.clock.now(),
         execution: {

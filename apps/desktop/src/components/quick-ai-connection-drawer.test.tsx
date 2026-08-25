@@ -18,6 +18,30 @@ const ASYNC_UI_TIMEOUT = Object.freeze({ timeout: 15_000 });
 describe("quick AI connection drawer", () => {
   beforeEach(() => window.localStorage.clear());
 
+  it("shows one shared read failure with a stable support number and an explicit reload action", async () => {
+    const harness = createTauriHarness();
+    vi.spyOn(harness.runtime.modelHub, "listConnections").mockRejectedValue(
+      Object.assign(new Error("read failed"), { code: "MODEL_HUB_READ_FAILED" }),
+    );
+    const runtime: DesktopRuntime = harness.runtime;
+    const user = userEvent.setup();
+    renderDrawer(runtime);
+
+    expect(await screen.findByText("当前 AI 状态：连接失败")).toBeVisible();
+    const failureCopy = await screen.findByText(
+      /支持编号：墨影-[0-9]{14}-[A-Z0-9]{6}.*请重新读取模型中心状态/u,
+    );
+    const supportId = /支持编号：(墨影-[0-9]{14}-[A-Z0-9]{6})/u.exec(failureCopy.textContent)?.[1];
+    expect(supportId).toBeDefined();
+
+    await user.click(screen.getByRole("button", { name: "重新读取模型中心状态" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(new RegExp(`支持编号：${supportId ?? ""}`, "u"))).toBeVisible();
+    });
+    expect(harness.generate).not.toHaveBeenCalled();
+  });
+
   it("offers common Chinese providers, GLM, Ollama and an independent compatible option", async () => {
     const harness = createTauriHarness();
     const user = userEvent.setup();

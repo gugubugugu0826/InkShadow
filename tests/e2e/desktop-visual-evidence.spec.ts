@@ -209,7 +209,13 @@ async function openProfessionalSampleEditor(page: Page, cdp: CDPSession): Promis
 async function openLongCandidateReview(page: Page): Promise<void> {
   const assistant = page.getByRole("complementary", { name: "AI 创作助手" });
   await expect(assistant).toBeVisible();
-  await assistant.getByRole("button", { name: "生成示例建议" }).click();
+  const generateContinuation = page.getByRole("button", {
+    name: "生成续写建议",
+    exact: true,
+  });
+  await expect(generateContinuation).toBeVisible();
+  await expect(generateContinuation).toBeEnabled();
+  await generateContinuation.click();
   await expect(assistant.getByText("等待决定", { exact: true })).toBeVisible();
   await assistant.getByRole("button", { name: "比较建议" }).click();
 

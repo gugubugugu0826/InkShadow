@@ -34,6 +34,7 @@ describe("multigranular retrieval contracts", () => {
       "dialogue",
       "story_fact_evidence",
     ]);
+    expect(SEARCH_RETRIEVAL_TASK_TYPES).toContain("prose_generation");
   });
 
   it("preserves exact parent, span, authority, privacy, and currentness evidence in hits", () => {

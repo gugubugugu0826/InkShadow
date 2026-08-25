@@ -16,6 +16,10 @@
   grid-column: auto;
 }
 
+.settings-page :is(.ink-card[id], section[id]) {
+  scroll-margin-top: calc(var(--topbar-height) + var(--space-4));
+}
+
 .settings-section-nav {
   box-sizing: border-box;
   padding: var(--space-3) var(--space-4);
@@ -40,6 +44,11 @@
   color: var(--text-accent);
   text-decoration: underline;
   text-underline-offset: 0.2em;
+}
+
+.settings-section-nav .button-link[data-active="true"] {
+  color: var(--text-primary);
+  font-weight: 700;
 }
 
 .settings-section-nav .button-link:hover {

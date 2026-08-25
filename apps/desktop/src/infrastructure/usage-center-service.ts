@@ -230,15 +230,7 @@ export class SqliteUsageCenterService implements UsageCenterReader {
     query: ValidatedUsageCenterQuery,
   ): Promise<readonly UsageBudgetPolicy[]> {
     const rows = await this.executor.select<BudgetPolicyRow>(
-      `SELECT
-         policy.scope_key, policy.scope, policy.project_id,
-         project.name AS project_name, policy.month_key, policy.currency,
-         policy.limit_micros, policy.enforcement, policy.updated_at
-       FROM ai_budget_policies AS policy
-       LEFT JOIN projects AS project ON project.id = policy.project_id
-       WHERE (policy.scope = 'month' AND policy.month_key = ?)
-          OR (policy.scope = 'project' AND policy.project_id = ?)
-       ORDER BY policy.scope ASC, policy.currency ASC, policy.scope_key ASC`,
+      `SELECT policy.scope_key,policy.scope,policy.project_id,project.name AS project_name,policy.month_key,policy.currency,policy.limit_micros,policy.enforcement,policy.updated_at FROM ai_budget_policies AS policy LEFT JOIN projects AS project ON project.id=policy.project_id WHERE(policy.scope='month' AND policy.month_key=?) OR(policy.scope='project' AND policy.project_id=?) ORDER BY policy.scope ASC,policy.currency ASC,policy.scope_key ASC`,
       [query.monthKey, query.projectId],
     );
     return Object.freeze(rows.map(hydrateBudgetPolicy));
@@ -343,114 +335,22 @@ function buildTimeBoundUsageQuery(query: ValidatedUsageCenterQuery): {
   const where = clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`;
   values.push(MAXIMUM_USAGE_EVENTS_PER_READ + 1);
   return {
-    sql: `${USAGE_EVENTS_CTE}
-      SELECT
-        event.event_id, event.source, event.occurred_at,
-        event.project_id, event.project_name, event.chapter_id, event.chapter_name, event.task,
-        event.provider_id, event.provider_label, event.model_id,
-        event.status, event.input_tokens, event.output_tokens,
-        event.cached_input_tokens, event.cost_micros, event.currency,
-        event.cost_source, event.privacy_policy, event.data_destination,
-        event.error_code
-      FROM usage_events AS event
-      ${where}
-      ORDER BY event.occurred_at DESC, event.event_id ASC
-      LIMIT ?`,
+    sql: `${USAGE_EVENTS_CTE} SELECT event.event_id,event.source,event.occurred_at,event.project_id,event.project_name,event.chapter_id,event.chapter_name,event.task,event.provider_id,event.provider_label,event.model_id,event.status,event.input_tokens,event.output_tokens,event.cached_input_tokens,event.cost_micros,event.currency,event.cost_source,event.privacy_policy,event.data_destination,event.error_code FROM usage_events AS event ${where} ORDER BY event.occurred_at DESC,event.event_id ASC LIMIT ?`,
     values,
   };
 }
 
-const USAGE_EVENTS_CTE = `WITH usage_events AS (
-  SELECT
-    'generation:' || usage.run_id || ':' || CAST(usage.attempt AS TEXT) AS event_id,
-    'generation_attempt' AS source,
-    usage.reported_at AS occurred_at,
-    run.project_id AS project_id,
-    project.name AS project_name,
-    run.chapter_id AS chapter_id,
-    chapter.title AS chapter_name,
-    'continuation' AS task,
-    run.provider_id AS provider_id,
-    COALESCE(hub_connection.display_name, '历史 AI 服务') AS provider_label,
-    run.model_id AS model_id,
-    CASE
-      WHEN usage.attempt < run.attempt THEN 'failed'
-      WHEN run.state IN ('candidate_ready', 'completed') THEN 'succeeded'
-      WHEN run.state IN ('failed_retryable', 'failed_final', 'blocked') THEN 'failed'
-      WHEN run.state = 'cancelled' THEN 'cancelled'
-      WHEN run.state IN ('retrieving', 'generating', 'validating') THEN 'running'
-      ELSE 'queued'
-    END AS status,
-    usage.input_tokens AS input_tokens,
-    usage.output_tokens AS output_tokens,
-    usage.cached_input_tokens AS cached_input_tokens,
-    usage.usage_priced_estimate_micros AS cost_micros,
-    usage.currency AS currency,
-    CASE
-      WHEN usage.usage_source = 'provider_reported' THEN 'provider_usage_estimate'
-      WHEN usage.usage_source = 'local_demo' THEN 'local_demo_zero'
-      ELSE 'unknown'
-    END AS cost_source,
-    CASE
-      WHEN usage.privacy_snapshot_version = 1
-        AND usage.privacy_policy IN ('local_only', 'local_preferred', 'cloud_allowed')
-      THEN usage.privacy_policy
-      ELSE 'not_recorded'
-    END AS privacy_policy,
-    CASE
-      WHEN usage.privacy_snapshot_version = 1
-        AND usage.data_destination IN ('local', 'remote')
-      THEN usage.data_destination
-      ELSE 'not_recorded'
-    END AS data_destination,
-    CASE
-      WHEN usage.attempt = run.attempt THEN run.failure_code
-      ELSE 'AI_GENERATION_RETRY_ATTEMPT_FAILED'
-    END AS error_code
-  FROM ai_generation_attempt_usage AS usage
-  JOIN ai_generation_runs AS run ON run.id = usage.run_id
-  JOIN projects AS project ON project.id = run.project_id
-  JOIN chapters AS chapter ON chapter.id = run.chapter_id
-  LEFT JOIN ai_generation_route_selections AS route ON route.run_id = run.id
-  LEFT JOIN model_provider_connections AS hub_connection ON hub_connection.id = run.provider_id
-  LEFT JOIN model_profiles AS legacy_profile ON legacy_profile.provider_id = run.provider_id
-
-  UNION ALL
-
-  SELECT
-    'hub:' || invocation.id AS event_id,
-    'model_hub_invocation' AS source,
-    COALESCE(invocation.completed_at, invocation.started_at, invocation.created_at) AS occurred_at,
-    trace.project_id AS project_id,
-    project.name AS project_name,
-    trace.chapter_id AS chapter_id,
-    chapter.title AS chapter_name,
-    invocation.task AS task,
-    invocation.connection_id AS provider_id,
-    COALESCE(connection.display_name, '历史 AI 服务') AS provider_label,
-    invocation.model_id_snapshot AS model_id,
-    ${OPENING_INVOCATION_USAGE_STATUS_SQL} AS status,
-    invocation.input_tokens AS input_tokens,
-    invocation.output_tokens AS output_tokens,
-    invocation.cached_input_tokens AS cached_input_tokens,
-    invocation.estimated_cost_micros AS cost_micros,
-    invocation.currency AS currency,
-    CASE
-      WHEN invocation.estimated_cost_micros IS NOT NULL THEN 'model_hub_usage_estimate'
-      ELSE 'unknown'
-    END AS cost_source,
-    invocation.privacy_policy AS privacy_policy,
-    invocation.data_destination AS data_destination,
-    invocation.error_code AS error_code
-  FROM model_invocation_facts AS invocation
-  LEFT JOIN model_provider_connections AS connection ON connection.id = invocation.connection_id
-  LEFT JOIN context_compilation_model_invocation_links AS invocation_link
-    ON invocation_link.model_invocation_id = invocation.id
-  LEFT JOIN context_compilation_runs AS trace ON trace.id = invocation_link.trace_id
-  LEFT JOIN projects AS project ON project.id = trace.project_id
-  LEFT JOIN chapters AS chapter ON chapter.id = trace.chapter_id
-  WHERE invocation.task <> 'continuation'
-)`;
+const USAGE_EVENTS_CTE =
+  // 生成尝试字段投影；字段顺序是 UNION 账本的权威列契约。
+  "WITH usage_events AS(SELECT 'generation:'||usage.run_id||':'||CAST(usage.attempt AS TEXT) AS event_id,'generation_attempt' AS source,usage.reported_at AS occurred_at,run.project_id AS project_id,project.name AS project_name,run.chapter_id AS chapter_id,chapter.title AS chapter_name,COALESCE(exact_invocation.task,CASE WHEN json_extract(background_task.metadata_json,'$.modelTask') IN('prose_generation','continuation') THEN json_extract(background_task.metadata_json,'$.modelTask') ELSE 'continuation' END) AS task,run.provider_id AS provider_id,COALESCE(hub_connection.display_name,'历史 AI 服务') AS provider_label,run.model_id AS model_id,CASE WHEN usage.attempt<run.attempt THEN 'failed' WHEN run.state IN('candidate_ready','completed') THEN 'succeeded' WHEN run.state IN('failed_retryable','failed_final','blocked') THEN 'failed' WHEN run.state='cancelled' THEN 'cancelled' WHEN run.state IN('retrieving','generating','validating') THEN 'running' ELSE 'queued' END AS status,usage.input_tokens AS input_tokens,usage.output_tokens AS output_tokens,usage.cached_input_tokens AS cached_input_tokens,usage.usage_priced_estimate_micros AS cost_micros,usage.currency AS currency,CASE WHEN usage.usage_source='provider_reported' THEN 'provider_usage_estimate' WHEN usage.usage_source='local_demo' THEN 'local_demo_zero' ELSE 'unknown' END AS cost_source,CASE WHEN usage.privacy_snapshot_version=1 AND usage.privacy_policy IN('local_only','local_preferred','cloud_allowed') THEN usage.privacy_policy ELSE 'not_recorded' END AS privacy_policy,CASE WHEN usage.privacy_snapshot_version=1 AND usage.data_destination IN('local','remote') THEN usage.data_destination ELSE 'not_recorded' END AS data_destination,CASE WHEN usage.attempt=run.attempt THEN run.failure_code ELSE 'AI_GENERATION_RETRY_ATTEMPT_FAILED' END AS error_code " +
+  // 生成链关联；优先恢复同一调用标识，再兼容旧任务元数据。
+  "FROM ai_generation_attempt_usage AS usage JOIN ai_generation_runs AS run ON run.id=usage.run_id JOIN projects AS project ON project.id=run.project_id JOIN chapters AS chapter ON chapter.id=run.chapter_id LEFT JOIN background_tasks AS background_task ON background_task.id=run.task_id LEFT JOIN model_invocation_facts AS exact_invocation ON exact_invocation.id=COALESCE(usage.model_invocation_id,(SELECT generation_model_link.model_invocation_id FROM context_compilation_execution_links AS generation_execution JOIN context_compilation_model_invocation_links AS generation_model_link ON generation_model_link.trace_id=generation_execution.trace_id WHERE generation_execution.generation_run_id=run.id ORDER BY generation_model_link.linked_at DESC,generation_model_link.model_invocation_id ASC LIMIT 1)) LEFT JOIN ai_generation_route_selections AS route ON route.run_id=run.id LEFT JOIN model_provider_connections AS hub_connection ON hub_connection.id=run.provider_id LEFT JOIN model_profiles AS legacy_profile ON legacy_profile.provider_id=run.provider_id " +
+  // 独立 Model Hub 调用字段投影；状态表达式与调用事实保持一致。
+  "UNION ALL SELECT 'hub:'||invocation.id AS event_id,'model_hub_invocation' AS source,COALESCE(invocation.completed_at,invocation.started_at,invocation.created_at) AS occurred_at,trace.project_id AS project_id,project.name AS project_name,trace.chapter_id AS chapter_id,chapter.title AS chapter_name,invocation.task AS task,invocation.connection_id AS provider_id,COALESCE(connection.display_name,'历史 AI 服务') AS provider_label,invocation.model_id_snapshot AS model_id, " +
+  OPENING_INVOCATION_USAGE_STATUS_SQL +
+  " AS status,invocation.input_tokens AS input_tokens,invocation.output_tokens AS output_tokens,invocation.cached_input_tokens AS cached_input_tokens,invocation.estimated_cost_micros AS cost_micros,invocation.currency AS currency,CASE WHEN invocation.estimated_cost_micros IS NOT NULL THEN 'model_hub_usage_estimate' ELSE 'unknown' END AS cost_source,invocation.privacy_policy AS privacy_policy,invocation.data_destination AS data_destination,invocation.error_code AS error_code " +
+  // 独立调用关联与精确去重；生成链已计入时不得再次计费。
+  "FROM model_invocation_facts AS invocation LEFT JOIN model_provider_connections AS connection ON connection.id=invocation.connection_id LEFT JOIN context_compilation_model_invocation_links AS invocation_link ON invocation_link.model_invocation_id=invocation.id LEFT JOIN context_compilation_runs AS trace ON trace.id=invocation_link.trace_id LEFT JOIN projects AS project ON project.id=trace.project_id LEFT JOIN chapters AS chapter ON chapter.id=trace.chapter_id WHERE invocation.task<>'continuation' AND NOT EXISTS(SELECT 1 FROM ai_generation_attempt_usage AS generation_usage WHERE generation_usage.model_invocation_id=invocation.id) AND NOT EXISTS(SELECT 1 FROM context_compilation_model_invocation_links AS generation_model_link JOIN context_compilation_execution_links AS generation_execution ON generation_execution.trace_id=generation_model_link.trace_id WHERE generation_model_link.model_invocation_id=invocation.id AND generation_execution.generation_run_id IS NOT NULL))";
 
 function hydrateUsageEvent(row: UsageEventRow): UsageCenterEvent {
   const source =
@@ -680,8 +580,8 @@ export const TASK_LABELS: Readonly<Record<string, string>> = Object.freeze({
   capability_probe: "模型能力验证",
   idea_discussion: "灵感讨论",
   book_start_guidance: "开书引导",
-  prose_generation: "正文生成",
-  continuation: "续写",
+  prose_generation: "生成开头",
+  continuation: "生成续写建议",
   rewrite: "改写",
   polish: "润色",
   outline_planning: "大纲规划",

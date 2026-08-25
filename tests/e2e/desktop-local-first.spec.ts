@@ -89,7 +89,7 @@ test("autosaves, recovers a crash draft, and isolates AI candidates", async ({ b
   await page.reload();
   await expect(page.getByRole("textbox", { name: "章节正文" })).toHaveValue(stableBody);
 
-  await page.getByRole("button", { name: "生成示例建议" }).click();
+  await page.getByRole("button", { name: "生成续写建议", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "章节正文" })).toHaveValue(stableBody);
   await expect(
     page.getByText(/当前使用本机示例帮助检查流程，不会联网；只有你接受后/u),
@@ -104,7 +104,8 @@ test("autosaves, recovers a crash draft, and isolates AI candidates", async ({ b
     `${stableBody}\n\n【本地演示候选】暮色沿着窗棂缓慢下沉，人物在未说出口的决定前停了一瞬。`,
   );
   const assistant = page.getByRole("complementary", { name: "AI 创作助手" });
-  await expect(assistant.getByRole("button", { name: "生成续写建议" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "生成续写建议", exact: true })).toHaveCount(1);
+  await expect(assistant.getByRole("button", { name: "生成续写建议", exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: "版本历史" }).click();
   const versionDialog = page.getByRole("dialog", { name: "版本历史" });

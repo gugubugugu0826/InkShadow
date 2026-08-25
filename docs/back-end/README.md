@@ -2,16 +2,17 @@
 
 > 文档状态：`SUPPORTING_CURRENT`  
 > 基于源码复核：2026-08-25  
-> 桌面端应用清单版本：`0.2.11`（未签名人工复测候选；未打标签、未发布）；现有 `v0.2.10` 及更早发布证据保持不可变  
+> 桌面端源码快照应用清单版本：`0.2.12`；最终本地门禁已完成，精确候选与发布状态以当次验证报告和 GitHub Releases 为准；0.2.11 及更早候选和发布证据保持不可变  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
 > 文档性质：当前实现指引，不把计划代码描述成已部署能力
 
 `v0.2.6` 已冻结发布 Data `0071` / Tauri `74` 的本地数据库、自动备份和能力验证调用审计修复。
 `v0.2.7` 只向前追加到 Data `0075` / Tauri `78`，区分正文结果与方向用途，
 并补充用户故事事实修订、版本整理责任和隐私快照规则；最终候选、远端门禁、未签名打包和公开预发行已完成，真实供应商、最终安装程序真机与商业门禁仍未完成。
-`v0.2.9` 继续向前追加 Data `0076`–`0077` / Tauri `79`–`80`。0.2.10 与当前 0.2.11 均未修改已发布迁移，0.2.11 只作为人工复测候选。
+`v0.2.9` 继续向前追加 Data `0076`–`0077` / Tauri `79`–`80`。0.2.10 与 0.2.11 均未修改已发布迁移，0.2.11 只作为人工复测候选。
+当前 0.2.12 只向前追加 Data `0078_generation_attempt_prose_invocation.sql` / Tauri `81`：不新增字段或表，仅扩展 `0075` 建立的不可变生成尝试隐私守卫，使 `continuation` 和 `prose_generation` 均可保存精确 Model Hub 调用标识；不修改 `0075` 或任何已发布迁移及校验。
 当前差异与边界见
-[`../execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md`](../execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md)。
+[`../execution/2026-08-25-V0212-RETEST-RELEASE.md`](../execution/2026-08-25-V0212-RETEST-RELEASE.md)；0.2.11 记录继续作为历史证据保留。
 
 InkShadow 不是只有“前端”和“后端”两块。除用户界面外，仓库还包含：
 
@@ -25,15 +26,15 @@ InkShadow 不是只有“前端”和“后端”两块。除用户界面外，�
 称为云后端。
 
 DESIGN v0.3.1b 只约束目标界面与交互验收；它不会改变 Tauri、数据库或 Desktop 应用版本。
-当前应用清单为 0.2.11 未签名人工复测候选；现有 0.2.10 及更早安装包和来源证据保持不变。
+当前源码快照应用清单为 0.2.12，最终本地源码、原生与正式网页端到端门禁已完成；候选、安装包、标签和 Release 的精确状态由当次发布证据确认。0.2.11 及更早候选、安装包和来源证据保持不变。
 
 ## 文档导航与状态
 
 | 状态                    | 文档                                                                                                     | 内容与边界                                                                            |
 | ----------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | `SUPPORTING_CURRENT`    | [`CLOUD_BACKEND.md`](CLOUD_BACKEND.md)                                                                   | Cloud API、PostgreSQL、HTTP、服务和后台任务；代码存在不表示生产 Cloud 已部署          |
-| `SUPPORTING_CURRENT`    | [`DESKTOP_NATIVE.md`](DESKTOP_NATIVE.md)                                                                 | 桌面原生可信边界、本地数据库、凭据、模型网络、项目密钥和备份；工作树原生迁移上限 `80` |
-| `SUPPORTING_CURRENT`    | [`SHARED_PACKAGES.md`](SHARED_PACKAGES.md)                                                               | 工作区领域、应用、数据、导入导出和共享界面包；工作树数据迁移上限 `0077`               |
+| `SUPPORTING_CURRENT`    | [`DESKTOP_NATIVE.md`](DESKTOP_NATIVE.md)                                                                 | 桌面原生可信边界、本地数据库、凭据、模型网络、项目密钥和备份；工作树原生迁移上限 `81` |
+| `SUPPORTING_CURRENT`    | [`SHARED_PACKAGES.md`](SHARED_PACKAGES.md)                                                               | 工作区领域、应用、数据、导入导出和共享界面包；工作树数据迁移上限 `0078`               |
 | `SUPPORTING_CURRENT`    | [`ANDROID_OPERATIONS_TOOLING.md`](ANDROID_OPERATIONS_TOOLING.md)                                         | Android POC、部署模板、发布/安全脚本、CI 和 E2E；不属于当前默认创作主链路             |
 | `AUTHORITATIVE_CURRENT` | [`../product-rebuild/02-DATA-REUSE-AND-MIGRATION.md`](../product-rebuild/02-DATA-REUSE-AND-MIGRATION.md) | 数据复用、前向迁移与回滚规则                                                          |
 

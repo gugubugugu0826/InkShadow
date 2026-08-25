@@ -40,6 +40,7 @@ export type SearchDocumentCurrentness = (typeof SEARCH_DOCUMENT_CURRENTNESS)[num
 export const SEARCH_RETRIEVAL_TASK_TYPES = [
   "project_search",
   "continuation",
+  "prose_generation",
   "consistency",
   "agent_fts",
 ] as const;

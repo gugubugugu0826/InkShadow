@@ -7,6 +7,8 @@ import type { HybridSearchHit } from "@inkshadow/search-core";
 
 import { parseContinuationDirectionOptions } from "./continuation-direction-options";
 import { ModelCenterError } from "./model-center-store";
+import { DEVELOPMENT_DATABASE_KEY } from "./development-storage";
+import { DEVELOPMENT_GENERATION_GOVERNANCE_KEY } from "./generation-governance-store";
 import {
   readSafeGenerationErrorCodes,
   readSafeGenerationPreflightForScope,
@@ -116,6 +118,65 @@ describe("governed generation runtime", () => {
       versionMode: "per_source_current",
       vectorStatus: "optional_not_needed",
       remoteRerankStatus: "optional_skipped",
+    });
+  });
+
+  it("keeps an empty chapter on the opening route through messages, retrieval, Skill, trace, task and invocation", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult("雨夜里，钟楼第一次倒着响起。", 45, 12)),
+    );
+    const { runtime, chapterId } = await createRemoteRuntime({
+      content: "",
+      generate,
+    });
+    const ftsOnly = vi.spyOn(runtime.search, "searchFtsOnly");
+    const reserved = vi.spyOn(runtime.novelSkills, "getReservedTokens");
+    const prepared = vi.spyOn(runtime.novelSkills, "prepareInvocation");
+
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    expect(plan).toMatchObject({ modelTask: "prose_generation", actionLabel: "生成开头" });
+    const prompt = plan.messages.map(({ content }) => content).join("\n");
+    expect(prompt).toContain("创作本章开头");
+    expect(prompt).not.toContain("请依据以上资料续写下一段情节");
+    expect(ftsOnly).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ taskType: "prose_generation" }),
+      expect.any(Number),
+    );
+    expect(reserved).toHaveBeenCalledWith(
+      expect.objectContaining({ taskType: "prose_generation" }),
+    );
+    expect(prepared).toHaveBeenCalledWith(
+      expect.objectContaining({ taskType: "prose_generation" }),
+    );
+
+    const executed = await executeGenerationPlan(runtime, plan);
+    expect(executed.ok).toBe(true);
+    expect(generate).toHaveBeenCalledOnce();
+    await expect(
+      runtime.taskCenter.findTaskByIdempotencyKey(plan.idempotencyKey),
+    ).resolves.toMatchObject({
+      metadata: { modelTask: "prose_generation" },
+    });
+    if (plan.contextTraceId === null) throw new Error("Expected an opening context trace.");
+    const openingTrace = await runtime.contextTraces.findById(plan.contextTraceId);
+    expect(openingTrace).toMatchObject({
+      taskType: "prose_generation",
+      execution: {
+        generationRunId: plan.runId,
+      },
+    });
+    const invocationId = openingTrace?.execution?.modelInvocationId;
+    if (invocationId === null || invocationId === undefined) {
+      throw new Error("Expected the opening trace to retain its exact model invocation.");
+    }
+    await expect(runtime.modelHub.findInvocation(invocationId)).resolves.toMatchObject({
+      task: "prose_generation",
     });
   });
 
@@ -1730,6 +1791,12 @@ describe("governed generation runtime", () => {
       "inkshadow.development.generation-governance.v1",
     );
     expect(serialized).not.toMatch(/不能写入待执行记录|章节标题|当前正文|prompt|messages/iu);
+    const deferredTask = await runtime.taskCenter.findTaskByIdempotencyKey(deferred.idempotencyKey);
+    expect(deferredTask).toMatchObject({
+      id: deferred.taskId,
+      type: "ai.generate.deferred",
+      metadata: { modelTask: "continuation" },
+    });
 
     const onlinePlan = await prepareGenerationPlan(runtime, chapter.value.chapter.id, {
       chapterSaved: true,
@@ -1756,6 +1823,151 @@ describe("governed generation runtime", () => {
       ]),
     );
   });
+
+  it.each([
+    ["missing", null],
+    ["mismatched", "prose_generation"],
+  ] as const)(
+    "blocks a persisted deferred request with %s model identity after restart without dispatch",
+    async (_identityCase, storedModelTask) => {
+      const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+        Promise.resolve(generationResult("不应发送的旧延迟请求。", 100, 20)),
+      );
+      const { runtime, chapterId } = await createRemoteRuntime({ generate });
+      const offlinePlan = await prepareGenerationPlan(runtime, chapterId, {
+        chapterSaved: true,
+        networkAvailable: false,
+      });
+      const deferred = await saveDeferredGenerationPlan(runtime, offlinePlan);
+      const authorityBefore = await generationAuthoritySummary(runtime, chapterId);
+
+      rewritePersistedTaskModelIdentity(deferred.taskId, storedModelTask);
+      const restarted = restartGenerationRuntime(runtime);
+      const freshPlan = await prepareGenerationPlan(restarted, chapterId, {
+        chapterSaved: true,
+        networkAvailable: true,
+      });
+
+      expect(freshPlan.deferredRequest).toBeNull();
+      expect(freshPlan.taskId).not.toBe(deferred.taskId);
+      expect(freshPlan.runId).not.toBe(deferred.id);
+      expect(freshPlan.idempotencyKey).not.toBe("ai.generate.resume:" + deferred.id);
+      expect(generate).not.toHaveBeenCalled();
+      await expect(
+        restarted.generationGovernance.findWaitingDeferredRequest(chapterId, "high_quality"),
+      ).resolves.toBeNull();
+      await expect(
+        restarted.taskCenter.findTaskByIdempotencyKey(deferred.idempotencyKey),
+      ).resolves.toMatchObject({ id: deferred.taskId, status: "cancelled" });
+      expect(readPersistedDeferredRequest(deferred.id)).toMatchObject({
+        id: deferred.id,
+        status: "blocked_stale",
+      });
+      await expect(generationAuthoritySummary(restarted, chapterId)).resolves.toEqual(
+        authorityBefore,
+      );
+    },
+  );
+
+  it.each([
+    ["missing", null],
+    ["mismatched", "prose_generation"],
+  ] as const)(
+    "settles a persisted waiting_retry run with %s model identity after restart without dispatch",
+    async (_identityCase, storedModelTask) => {
+      const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+        Promise.resolve(generationResult("不应复用的旧重试请求。", 100, 20)),
+      );
+      const { runtime, chapterId } = await createRemoteRuntime({ generate });
+      const legacyPlan = await prepareGenerationPlan(runtime, chapterId, {
+        chapterSaved: true,
+        networkAvailable: true,
+      });
+      if (legacyPlan.projectId === null || legacyPlan.baseVersionId === null) {
+        throw new Error("Expected a persisted chapter generation plan.");
+      }
+      const enqueued = await runtime.taskCenter.enqueueTask({
+        id: legacyPlan.taskId,
+        type: "ai.generate",
+        idempotencyKey: legacyPlan.idempotencyKey,
+        metadata: {
+          projectId: legacyPlan.projectId,
+          chapterId: legacyPlan.chapterId,
+          baseVersionId: legacyPlan.baseVersionId,
+          providerId: legacyPlan.providerId,
+          modelTask: legacyPlan.modelTask,
+          operation: "generate",
+        },
+        priority: 80,
+        maxAttempts: 3,
+        now: runtime.clock.now(),
+      });
+      const createdRun = await runtime.generationGovernance.createRun({
+        id: legacyPlan.runId,
+        taskId: enqueued.task.id,
+        idempotencyKey: legacyPlan.idempotencyKey,
+        projectId: legacyPlan.projectId,
+        chapterId: legacyPlan.chapterId,
+        baseVersionId: legacyPlan.baseVersionId,
+        providerId: legacyPlan.providerId,
+        modelId: legacyPlan.modelId,
+        preflight: legacyPlan.preflight,
+      });
+      const leaseToken = runtime.ids.next();
+      const nowMillis = Date.parse(runtime.clock.now());
+      await runtime.taskCenter.startTask(
+        legacyPlan.taskId,
+        "desktop.legacy-test",
+        leaseToken,
+        new Date(nowMillis + 60_000).toISOString(),
+      );
+      await runtime.taskCenter.failTask(
+        legacyPlan.taskId,
+        leaseToken,
+        {
+          code: "LEGACY_GENERATION_RETRYABLE",
+          retryable: true,
+          actions: ["RETRY"],
+          requestId: "legacy-generation-retry-request",
+        },
+        new Date(nowMillis + 30_000).toISOString(),
+      );
+      await runtime.generationGovernance.transitionRun({
+        runId: createdRun.run.id,
+        expectedRevision: createdRun.run.revision,
+        state: "failed_retryable",
+        failureCode: "LEGACY_GENERATION_RETRYABLE",
+      });
+      await expect(
+        runtime.taskCenter.findTaskByIdempotencyKey(legacyPlan.idempotencyKey),
+      ).resolves.toMatchObject({ status: "waiting_retry" });
+      const authorityBefore = await generationAuthoritySummary(runtime, chapterId);
+
+      rewritePersistedTaskModelIdentity(legacyPlan.taskId, storedModelTask);
+      const restarted = restartGenerationRuntime(runtime);
+      const freshPlan = await prepareGenerationPlan(restarted, chapterId, {
+        chapterSaved: true,
+        networkAvailable: true,
+      });
+
+      expect(freshPlan.taskId).not.toBe(legacyPlan.taskId);
+      expect(freshPlan.runId).not.toBe(legacyPlan.runId);
+      expect(freshPlan.idempotencyKey).not.toBe(legacyPlan.idempotencyKey);
+      expect(generate).not.toHaveBeenCalled();
+      await expect(
+        restarted.generationGovernance.findRunById(legacyPlan.runId),
+      ).resolves.toMatchObject({
+        state: "failed_final",
+        failureCode: "AI_GENERATION_IDENTITY_STALE",
+      });
+      await expect(
+        restarted.taskCenter.findTaskByIdempotencyKey(legacyPlan.idempotencyKey),
+      ).resolves.toMatchObject({ status: "cancelled" });
+      await expect(generationAuthoritySummary(restarted, chapterId)).resolves.toEqual(
+        authorityBefore,
+      );
+    },
+  );
 
   it("does not bypass the frozen Model Hub target through a legacy role fallback", async () => {
     const { runtime, chapterId } = await createNativeRuntime();
@@ -1850,6 +2062,74 @@ describe("governed generation runtime", () => {
   });
 });
 
+interface MutablePersistedGenerationTask {
+  id: string;
+  metadata: Record<string, unknown>;
+}
+
+interface MutableDevelopmentGenerationDatabase {
+  taskCenter?: {
+    tasks: MutablePersistedGenerationTask[];
+  };
+}
+
+function rewritePersistedTaskModelIdentity(
+  taskId: string,
+  modelTask: "prose_generation" | null,
+): void {
+  const serialized = window.localStorage.getItem(DEVELOPMENT_DATABASE_KEY);
+  if (serialized === null) throw new Error("Expected the development database.");
+  const database = JSON.parse(serialized) as MutableDevelopmentGenerationDatabase;
+  const task = database.taskCenter?.tasks.find(({ id }) => id === taskId);
+  if (task === undefined) throw new Error("Expected the persisted generation task.");
+  const metadata = { ...task.metadata };
+  if (modelTask === null) {
+    delete metadata.modelTask;
+  } else {
+    metadata.modelTask = modelTask;
+  }
+  task.metadata = metadata;
+  window.localStorage.setItem(DEVELOPMENT_DATABASE_KEY, JSON.stringify(database));
+}
+
+function readPersistedDeferredRequest(
+  requestId: string,
+): Readonly<{ id: string; status: string }> | null {
+  const serialized = window.localStorage.getItem(DEVELOPMENT_GENERATION_GOVERNANCE_KEY);
+  if (serialized === null) throw new Error("Expected the generation governance database.");
+  const database = JSON.parse(serialized) as {
+    deferredRequests: { id: string; status: string }[];
+  };
+  return database.deferredRequests.find(({ id }) => id === requestId) ?? null;
+}
+
+function restartGenerationRuntime(source: DesktopRuntime): DesktopRuntime {
+  return {
+    ...createDevelopmentRuntime(window.localStorage),
+    mode: "tauri",
+    modelGateway: source.modelGateway,
+  };
+}
+
+async function generationAuthoritySummary(
+  runtime: DesktopRuntime,
+  chapterId: Parameters<typeof prepareGenerationPlan>[1],
+) {
+  const [chapter, versions, candidates] = await Promise.all([
+    runtime.repositories.chapters.findById(chapterId),
+    runtime.repositories.chapterVersions.listByChapterId(chapterId),
+    runtime.repositories.aiCandidates.listByChapterId(chapterId),
+  ]);
+  if (!chapter.ok || chapter.value === null || !versions.ok || !candidates.ok) {
+    throw new Error("Expected authoritative generation source records.");
+  }
+  return {
+    chapter: chapter.value.toSnapshot(),
+    versions: versions.value.map((version) => version.toSnapshot()),
+    candidates: candidates.value.map((candidate) => candidate.toSnapshot()),
+  };
+}
+
 async function createNativeRuntime(
   generate: NativeModelGatewayClient["generate"] = () =>
     Promise.resolve(generationResult("候选续写。", 100, 20)),
@@ -1925,6 +2205,7 @@ async function createRemoteRuntime(
     cancelGeneration?: NativeModelGatewayClient["cancelGeneration"];
     baseUrl?: string;
     seedModelHubRoute?: boolean;
+    content?: string;
   }> = {},
 ): Promise<{
   runtime: DesktopRuntime;
@@ -1941,7 +2222,7 @@ async function createRemoteRuntime(
   const chapter = await developmentRuntime.useCases.createChapter.execute({
     projectId: project.value.id,
     title: "Chapter one",
-    content: "Initial stable content.",
+    content: options.content ?? "Initial stable content.",
   });
   if (!chapter.ok) {
     throw chapter.error;
@@ -2150,16 +2431,18 @@ async function seedModelHubContinuationRoute(
       expectedRevision: null,
     });
   }
-  await runtime.modelHub.saveTaskRoute({
-    task: "continuation",
-    primaryCatalogEntryId: "reasoning-retry-model-hub-catalog",
-    fallbackCatalogEntryId:
-      options.includeFallback === true ? "reasoning-retry-fallback-model-hub-catalog" : null,
-    privacyPolicy: "cloud_allowed",
-    failurePolicy: options.includeFallback === true ? "use_fallback" : "stop",
-    routeOrigin: "user",
-    expectedRevision: null,
-  });
+  for (const task of ["continuation", "prose_generation"] as const) {
+    await runtime.modelHub.saveTaskRoute({
+      task,
+      primaryCatalogEntryId: "reasoning-retry-model-hub-catalog",
+      fallbackCatalogEntryId:
+        options.includeFallback === true ? "reasoning-retry-fallback-model-hub-catalog" : null,
+      privacyPolicy: "cloud_allowed",
+      failurePolicy: options.includeFallback === true ? "use_fallback" : "stop",
+      routeOrigin: "user",
+      expectedRevision: null,
+    });
+  }
 }
 
 async function attachEnabledNovelSkills(

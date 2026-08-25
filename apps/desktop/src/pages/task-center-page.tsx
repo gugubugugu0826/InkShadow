@@ -362,8 +362,8 @@ export function TaskCenterPage() {
           cancelTarget === null
             ? undefined
             : cancelTarget.status === "running"
-              ? `“${taskTypeLabel(cancelTarget.type)}”正在执行。取消请求会在下一个安全边界停止，已经安全提交的结果不会回滚。`
-              : `“${taskTypeLabel(cancelTarget.type)}”尚未完成。确认后它不会继续执行或自动重试。`
+              ? `“${taskDisplayLabel(cancelTarget)}”正在执行。取消请求会在下一个安全边界停止，已经安全提交的结果不会回滚。`
+              : `“${taskDisplayLabel(cancelTarget)}”尚未完成。确认后它不会继续执行或自动重试。`
         }
         footer={
           <>
@@ -429,7 +429,7 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
             <CardHeader>
               <div className="card-heading-row">
                 <div>
-                  <CardTitle>{taskTypeLabel(task.type)}</CardTitle>
+                  <CardTitle>{taskDisplayLabel(task)}</CardTitle>
                   <CardDescription>
                     更新于 {formatTimestamp(task.updatedAt)}
                     {task.type === "ai.opening.generate"
@@ -472,12 +472,12 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
                       <div
                         className="task-progress__indeterminate"
                         role="progressbar"
-                        aria-label={`${taskTypeLabel(task.type)}进度`}
+                        aria-label={`${taskDisplayLabel(task)}进度`}
                         aria-valuetext={`${progressStepLabel(task.progress.step)}，正在执行，尚未提供完成比例`}
                       />
                     ) : (
                       <progress
-                        aria-label={`${taskTypeLabel(task.type)}进度`}
+                        aria-label={`${taskDisplayLabel(task)}进度`}
                         aria-valuetext={`${progressStepLabel(task.progress.step)}，已完成 ${String(progress)}%`}
                         max={100}
                         value={progress}
@@ -490,7 +490,7 @@ function TaskList({ busyId, onCancel, onRetry, tasks }: TaskListProps) {
                   <>
                     <InlineAlert
                       tone="error"
-                      title={task.type === "ai.opening.generate" ? "开书生成未完成" : "任务失败"}
+                      title={taskDisplayLabel(task) + "未完成"}
                       description={
                         <>
                           <span>{taskFailureDescription(task.failure)}</span>{" "}
@@ -718,6 +718,16 @@ function canMarkRead(notification: NotificationSnapshot): boolean {
     notification.status === "queued" ||
     notification.status === "visible"
   );
+}
+
+function taskDisplayLabel(task: TaskSnapshot): string {
+  if (task.metadata.modelTask === "prose_generation") {
+    return "生成开头";
+  }
+  if (task.metadata.modelTask === "continuation") {
+    return "生成续写建议";
+  }
+  return taskTypeLabel(task.type);
 }
 
 function taskTypeLabel(type: string): string {

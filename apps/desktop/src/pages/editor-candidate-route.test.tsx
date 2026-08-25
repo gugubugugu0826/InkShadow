@@ -499,7 +499,7 @@ describe("editor candidate route selection", () => {
     const user = userEvent.setup();
     const rendered = renderEditor(runtime, project, chapter);
 
-    await user.click(await screen.findByRole("button", { name: "续写" }));
+    await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
 
     await waitFor(async () => {
       const savedCandidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
@@ -556,7 +556,7 @@ describe("editor candidate route selection", () => {
     const user = userEvent.setup();
     renderEditor(runtime, project, chapter);
 
-    await user.click(await screen.findByRole("button", { name: "续写" }));
+    await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
 
     await waitFor(async () => {
       const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
@@ -603,15 +603,17 @@ describe("editor candidate route selection", () => {
     const user = userEvent.setup();
     renderEditor(runtime, project, chapter);
 
-    await user.click(await screen.findByRole("button", { name: "续写" }));
-    const preflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     expect(
       await within(preflight).findByText(
         /Direct writing remote.*direct-writer.*本次最多向模型服务发送 1 次，自动重试 0 次/u,
       ),
     ).toBeVisible();
     expect(generate).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: /确认并开始|使用安全默认值并开始/u }));
+    await user.click(
+      screen.getByRole("button", { name: /确认并生成续写建议|使用安全默认值并生成续写建议/u }),
+    );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
     resolveGeneration({
       text: generatedText,
@@ -694,7 +696,7 @@ describe("editor candidate route selection", () => {
     renderEditor(runtime, project, chapter);
 
     await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
-    const preflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     expect(
       await within(preflight).findByText(
         /Direct writing remote.*direct-writer.*本次最多向模型服务发送 1 次，自动重试 0 次/u,
@@ -717,10 +719,10 @@ describe("editor candidate route selection", () => {
     ).toHaveLength(cancellationCountBefore + 1);
 
     await user.click(screen.getByRole("button", { name: "生成续写建议" }));
-    const dismissedPreflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    const dismissedPreflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     await user.click(within(dismissedPreflight).getByRole("button", { name: "关闭" }));
     await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "生成前检查" })).not.toBeInTheDocument(),
+      expect(screen.queryByRole("dialog", { name: "生成续写建议前检查" })).not.toBeInTheDocument(),
     );
     expect(generate).not.toHaveBeenCalled();
     expect(
@@ -730,16 +732,16 @@ describe("editor candidate route selection", () => {
     ).toHaveLength(cancellationCountBefore + 2);
 
     await user.click(screen.getByRole("button", { name: "生成续写建议" }));
-    const confirmedPreflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    const confirmedPreflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     await user.click(
       within(confirmedPreflight).getByRole("button", {
-        name: /确认并开始|使用安全默认值并开始/u,
+        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
       }),
     );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
   });
 
-  it("records selection rewrite disclosure close and cancel with zero provider calls", async () => {
+  it("records selection rewrite disclosure close with zero provider calls", async () => {
     window.localStorage.clear();
     const runtime = createDevelopmentRuntime(window.localStorage);
     const preference = await runtime.writingExperience.getOrInitialize();
@@ -776,8 +778,8 @@ describe("editor candidate route selection", () => {
       ({ normalizedErrorCode }) => normalizedErrorCode === "USER_CANCELLED_BEFORE_DISPATCH",
     ).length;
 
-    await user.click(screen.getByRole("button", { name: "查看选区改写发送信息" }));
-    const disclosureTitle = await screen.findByText("确认后会发送 1 次", undefined, {
+    await user.click(screen.getByRole("button", { name: "改写" }));
+    const disclosureTitle = await screen.findByText("确认本次改写", undefined, {
       timeout: 5_000,
     });
     expect(disclosureTitle).toBeVisible();
@@ -794,18 +796,55 @@ describe("editor candidate route selection", () => {
         ({ normalizedErrorCode }) => normalizedErrorCode === "USER_CANCELLED_BEFORE_DISPATCH",
       ),
     ).toHaveLength(cancellationCountBefore + 1);
+  });
 
-    await user.click(screen.getByRole("button", { name: "查看选区改写发送信息" }));
-    expect(
-      await screen.findByText("确认后会发送 1 次", undefined, { timeout: 5_000 }),
-    ).toBeVisible();
+  it("records selection rewrite disclosure cancel with zero provider calls", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
+    await seedRemoteContinuationRoute(runtime, "rewrite");
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.reject(new Error("选区改写在确认前不得发送")),
+    );
+    Object.assign(runtime, {
+      mode: "tauri" as const,
+      modelGateway: {
+        available: true,
+        listModels: () =>
+          Promise.resolve({
+            provider: "open_ai_compatible" as const,
+            models: [{ id: "direct-writer", displayName: "Direct writer" }],
+          }),
+        checkConnection: () => Promise.reject(new Error("not used")),
+        embed: () => Promise.reject(new Error("not used")),
+        generate,
+        cancelGeneration: () => Promise.resolve(true),
+      } satisfies NativeModelGatewayClient,
+    });
+    const { chapter, project } = await seedChapter(runtime, "稳定正文等待局部改写");
+    const user = userEvent.setup();
+    renderEditor(runtime, project, chapter);
+    const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "章节正文",
+    });
+    editor.focus();
+    editor.setSelectionRange(0, 4);
+    fireEvent.select(editor);
+    const cancellationCountBefore = readSafeOperationIncidents().filter(
+      ({ normalizedErrorCode }) => normalizedErrorCode === "USER_CANCELLED_BEFORE_DISPATCH",
+    ).length;
+
+    await user.click(screen.getByRole("button", { name: "改写" }));
+    expect(await screen.findByText("确认本次改写", undefined, { timeout: 5_000 })).toBeVisible();
+    expect(generate).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "取消，不发送" }));
     expect(generate).not.toHaveBeenCalled();
     expect(
       readSafeOperationIncidents().filter(
         ({ normalizedErrorCode }) => normalizedErrorCode === "USER_CANCELLED_BEFORE_DISPATCH",
       ),
-    ).toHaveLength(cancellationCountBefore + 2);
+    ).toHaveLength(cancellationCountBefore + 1);
   });
   it("reuses only an explicit exact continuation confirmation and still requires a summary click", async () => {
     window.localStorage.clear();
@@ -840,7 +879,7 @@ describe("editor candidate route selection", () => {
     renderEditor(runtime, project, chapter);
 
     await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
-    const firstPreflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    const firstPreflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     await user.click(
       within(firstPreflight).getByRole("checkbox", {
         name: "在当前会话记住本次确认",
@@ -848,14 +887,14 @@ describe("editor candidate route selection", () => {
     );
     await user.click(
       within(firstPreflight).getByRole("button", {
-        name: /确认并开始|使用安全默认值并开始/u,
+        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
       }),
     );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
 
     await user.click(await screen.findByRole("button", { name: "放弃" }));
-    await user.click(await screen.findByRole("button", { name: "重新生成" }));
-    const rememberedPreflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
+    const rememberedPreflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     expect(within(rememberedPreflight).getByText("已记住本次会话的相同确认")).toBeVisible();
     expect(
       within(rememberedPreflight).queryByRole("checkbox", {
@@ -864,7 +903,9 @@ describe("editor candidate route selection", () => {
     ).not.toBeInTheDocument();
     expect(generate).toHaveBeenCalledTimes(1);
 
-    await user.click(within(rememberedPreflight).getByRole("button", { name: "按本次摘要开始" }));
+    await user.click(
+      within(rememberedPreflight).getByRole("button", { name: "按本次摘要生成续写建议" }),
+    );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
   });
 
@@ -896,7 +937,7 @@ describe("editor candidate route selection", () => {
     renderEditor(runtime, project, chapter);
 
     await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
-    const preflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     const pricing = await runtime.modelHub.findCostPrivacyProfile("direct-writing-remote-catalog");
     if (pricing === null) throw new Error("Expected the disclosed pricing profile.");
     await runtime.modelHub.saveCostPrivacyProfile({
@@ -918,7 +959,7 @@ describe("editor candidate route selection", () => {
 
     await user.click(
       within(preflight).getByRole("button", {
-        name: /确认并开始|使用安全默认值并开始/u,
+        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
       }),
     );
     expect(await screen.findByText("正文和已保存版本没有变化，你可以继续写作。")).toBeVisible();
@@ -953,13 +994,15 @@ describe("editor candidate route selection", () => {
     const user = userEvent.setup();
     renderEditor(runtime, project, chapter);
 
-    await user.click(await screen.findByRole("button", { name: "续写" }));
-    const preflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     const directPreference = await runtime.writingExperience.getOrInitialize();
     await runtime.writingExperience.switchMode("professional", directPreference.revision);
     window.dispatchEvent(new Event(WRITING_EXPERIENCE_CHANGED_EVENT));
     await user.click(
-      within(preflight).getByRole("button", { name: /确认并开始|使用安全默认值并开始/u }),
+      within(preflight).getByRole("button", {
+        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+      }),
     );
 
     await waitFor(() => expect(generate).not.toHaveBeenCalled());
@@ -1010,10 +1053,12 @@ describe("editor candidate route selection", () => {
     renderEditor(runtime, project, chapter);
     window.localStorage.removeItem(EDITOR_PREFERENCES_STORAGE_KEY);
 
-    await user.click(await screen.findByRole("button", { name: "续写" }));
-    const preflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     await user.click(
-      within(preflight).getByRole("button", { name: /确认并开始|使用安全默认值并开始/u }),
+      within(preflight).getByRole("button", {
+        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+      }),
     );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
     const editor = screen.getByRole("textbox", { name: "章节正文" });
@@ -1051,7 +1096,7 @@ describe("editor candidate route selection", () => {
     const user = userEvent.setup();
     renderEditor(runtime, project, chapter);
 
-    await user.click(await screen.findByRole("button", { name: "续写" }));
+    await user.click(await screen.findByRole("button", { name: "生成续写建议" }));
     await waitFor(async () => {
       const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
       expect(candidates.ok && candidates.value[0]?.status).toBe("ready");
@@ -1160,10 +1205,10 @@ describe("editor candidate route selection", () => {
     const customInput = screen.getByRole("textbox", { name: /自定义方向/u });
     await user.type(customInput, customDirection);
     await user.click(systemOption);
-    const systemPreflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    const systemPreflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     await user.click(
       within(systemPreflight).getByRole("button", {
-        name: /确认并开始|使用安全默认值并开始/u,
+        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
       }),
     );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
@@ -1178,10 +1223,10 @@ describe("editor candidate route selection", () => {
     expect(accept).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "按这个方向写" }));
-    const customPreflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    const customPreflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     await user.click(
       within(customPreflight).getByRole("button", {
-        name: /确认并开始|使用安全默认值并开始/u,
+        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
       }),
     );
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(3));

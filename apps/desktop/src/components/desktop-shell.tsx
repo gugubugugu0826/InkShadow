@@ -12,12 +12,11 @@ import {
 } from "../infrastructure/generation-preflight-diagnostics";
 import {
   MODEL_HUB_READINESS_CHANGED_EVENT,
-  MODEL_HUB_READINESS_REFRESH_INTERVAL_MS,
   modelHubReadinessBlockerLabel,
   modelHubReadinessTaskLabel,
-  projectModelHubReadiness,
 } from "../infrastructure/model-hub-readiness";
 import { useWritingExperience } from "../hooks/use-writing-experience";
+import { useModelHubReadiness } from "../hooks/use-model-hub-readiness";
 import { useRuntime } from "../runtime-context";
 import { CommandPalette } from "./command-palette";
 
@@ -154,14 +153,8 @@ export function DesktopShell({ children }: DesktopShellProps) {
   const [navigationCollapsed, setNavigationCollapsed] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const directMode = writingExperience.preference?.mode !== "professional";
-  const [aiReadiness, setAiReadiness] = useState(() =>
-    projectModelHubReadiness({
-      connections: [],
-      catalog: [],
-      routes: [],
-      transientChecking: true,
-    }),
-  );
+  const aiReadinessSnapshot = useModelHubReadiness(runtime);
+  const aiReadiness = aiReadinessSnapshot.readiness;
   const [scopedGenerationPreflight, setScopedGenerationPreflight] =
     useState<SafeGenerationPreflightDiagnostic | null>(null);
   const mainRef = useRef<HTMLElement>(null);
@@ -224,55 +217,12 @@ export function DesktopShell({ children }: DesktopShellProps) {
   }, []);
 
   useEffect(() => {
-    let active = true;
-    let refreshSequence = 0;
-    const isActive = (): boolean => active;
-    const refresh = async (showChecking: boolean): Promise<void> => {
-      const sequence = refreshSequence + 1;
-      refreshSequence = sequence;
-      if (showChecking) {
-        setAiReadiness((current) =>
-          projectModelHubReadiness({
-            connections: [],
-            catalog: [],
-            routes: [],
-            transientChecking: true,
-            loadFailed: current.state === "connection_failed",
-          }),
-        );
-      }
-      try {
-        const { loadAuthoritativeModelHubReadiness } =
-          await import("../infrastructure/model-hub-authoritative-readiness");
-        const readiness = await loadAuthoritativeModelHubReadiness(runtime);
-        if (!isActive() || sequence !== refreshSequence) return;
-        setAiReadiness(readiness);
-      } catch {
-        if (active && sequence === refreshSequence) {
-          setAiReadiness(
-            projectModelHubReadiness({
-              connections: [],
-              catalog: [],
-              routes: [],
-              loadFailed: true,
-            }),
-          );
-        }
-      }
-    };
     const handleChanged = (): void => {
       clearSafeGenerationPreflightScope(runtime);
       setScopedGenerationPreflight(null);
-      void refresh(true);
     };
     window.addEventListener(MODEL_HUB_READINESS_CHANGED_EVENT, handleChanged);
-    const refreshTimer = window.setInterval(() => {
-      void refresh(false);
-    }, MODEL_HUB_READINESS_REFRESH_INTERVAL_MS);
-    void refresh(true);
     return () => {
-      active = false;
-      window.clearInterval(refreshTimer);
       window.removeEventListener(MODEL_HUB_READINESS_CHANGED_EVENT, handleChanged);
     };
   }, [runtime]);
@@ -355,9 +305,13 @@ export function DesktopShell({ children }: DesktopShellProps) {
   );
   const aiStatusShortLabel =
     scopedBlockerCode === null ? aiReadiness.shortLabel : `当前${scopedTaskLabel}需修复`;
+  const sharedAiDescription =
+    aiReadinessSnapshot.failure === null
+      ? aiReadiness.description
+      : `${aiReadiness.description} 支持编号：${aiReadinessSnapshot.failure.supportId}。${aiReadinessSnapshot.failure.recovery}`;
   const aiStatusDescription =
     scopedBlockerCode === null
-      ? aiReadiness.description
+      ? sharedAiDescription
       : `${scopedTaskLabel}受影响：${modelHubReadinessBlockerLabel(scopedBlockerCode)}。${scopedRepair.guidance}；正文、不可变版本和隔离建议均未改变。`;
   const aiStatusTone = scopedBlockerCode === null ? aiReadiness.tone : "warning";
   const currentAppearanceLabel = resolvedSurface === "dark" ? "深色" : "浅色";

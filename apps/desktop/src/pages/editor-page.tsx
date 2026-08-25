@@ -343,6 +343,29 @@ interface DirectionFailureNotice {
   readonly description: string;
 }
 
+function generationActionFromCandidate(
+  candidate: AiCandidate,
+  versions: readonly ChapterVersion[],
+): EditorGenerationAction | null {
+  const intent = candidate.applicationIntent;
+  if (intent.task === "selection_rewrite") return "selection_rewrite";
+  if (intent.task !== "continuation") return null;
+  const baseVersion =
+    candidate.baseVersionId === null
+      ? undefined
+      : versions.find((version) => version.id === candidate.baseVersionId);
+  return (baseVersion?.toSnapshot().content.trim().length ?? 0) === 0 ? "opening" : "continuation";
+}
+
+function directGenerationUndoLabel(action: EditorGenerationAction): string {
+  if (action === "opening") return "撤销本次开头";
+  if (action === "polish") return "撤销本次润色";
+  if (action === "expand") return "撤销本次扩写";
+  if (action === "shorten") return "撤销本次缩写";
+  if (action === "selection_rewrite") return "撤销本次改写";
+  return "撤销本次续写";
+}
+
 function directGenerationUndoFromCurrentVersion(
   chapter: Chapter,
   versions: readonly ChapterVersion[],
@@ -360,26 +383,13 @@ function directGenerationUndoFromCurrentVersion(
   }
   const baseVersion = versions.find((version) => version.id === sourceCandidate.baseVersionId);
   if (baseVersion === undefined) return null;
-  const intent = sourceCandidate.applicationIntent;
-  let action: EditorGenerationAction;
-  if (intent.task === "continuation") {
-    action = baseVersion.toSnapshot().content.trim().length === 0 ? "opening" : "continuation";
-  } else if (intent.task === "selection_rewrite") {
-    action = "selection_rewrite";
-  } else {
-    return null;
-  }
-  const undoLabel =
-    action === "opening"
-      ? "撤销本次开头"
-      : action === "selection_rewrite"
-        ? "撤销本次改写"
-        : "撤销本次续写";
+  const action = generationActionFromCandidate(sourceCandidate, versions);
+  if (action === null) return null;
   return Object.freeze({
     action,
     baseVersionId: sourceCandidate.baseVersionId,
     appliedVersionId: currentVersion.id,
-    undoLabel,
+    undoLabel: directGenerationUndoLabel(action),
   });
 }
 
@@ -1669,6 +1679,11 @@ export function EditorPage() {
     }
     setCandidateHistory(loadedCandidates);
     setCandidate(candidateSelection.candidate);
+    const restoredGenerationAction =
+      candidateSelection.candidate === null
+        ? null
+        : generationActionFromCandidate(candidateSelection.candidate, loadedVersions);
+    if (restoredGenerationAction !== null) setLastGenerationAction(restoredGenerationAction);
     setCandidatePresentation(presentation);
 
     if (draft !== null && draft.baseRevision !== loadedChapter.revision) {
@@ -1796,6 +1811,11 @@ export function EditorPage() {
       );
       setCandidateHistory(safeCandidates);
       setCandidate(candidateSelection.candidate);
+      const restoredGenerationAction =
+        candidateSelection.candidate === null
+          ? null
+          : generationActionFromCandidate(candidateSelection.candidate, versions);
+      if (restoredGenerationAction !== null) setLastGenerationAction(restoredGenerationAction);
       setCandidatePresentation(
         candidateSelection.candidate === null ||
           candidateSelection.candidate.toSnapshot().source === "generate"
@@ -2998,7 +3018,9 @@ export function EditorPage() {
         ? null
         : directDirection.normalize("NFC").trim();
     const operation = beginGenerationOperation();
-    setLastGenerationAction("continuation");
+    setLastGenerationAction(
+      (chapterRef.current?.content.trim().length ?? 0) === 0 ? "opening" : "continuation",
+    );
     setSelectionRewriteContext(null);
     setContinuationDisclosure(null);
     setContinuationConfirmationIsRemembered(false);
@@ -3374,8 +3396,12 @@ export function EditorPage() {
     const operation = beginGenerationOperation();
     const directAtStart = authorityAtStart.mode === "direct";
     const rewriteInstruction = instructionOverride ?? selectionRewriteInstruction;
+    const selectionAction: EditorGenerationAction =
+      directAction === "polish" || directAction === "expand" || directAction === "shorten"
+        ? directAction
+        : "selection_rewrite";
 
-    setLastGenerationAction(directAction);
+    setLastGenerationAction(selectionAction);
     setLastSelectionRewriteInstruction(rewriteInstruction);
     setSelectionRewriteBusy(true);
     setCandidateBusy(true);
@@ -3399,6 +3425,7 @@ export function EditorPage() {
         activeDisclosure = await prepareSelectionRewrite(runtime, {
           chapterId: stableChapter.id,
           baseVersionId: stableChapter.currentVersionId,
+          action: selectionAction,
           selection: {
             startUtf16: selection.start,
             endUtf16: selection.end,
@@ -3424,6 +3451,7 @@ export function EditorPage() {
       const result = await createSelectionRewriteCandidate(runtime, {
         chapterId: stableChapter.id,
         baseVersionId: stableChapter.currentVersionId,
+        action: selectionAction,
         selection: {
           startUtf16: selection.start,
           endUtf16: selection.end,
@@ -3451,9 +3479,9 @@ export function EditorPage() {
       }
       await completeGeneratedCandidate({
         candidate: result.candidate,
-        action: directAction,
+        action: selectionAction,
         qualityGateOutcome: null,
-        professionalNotice: `已生成 ${String(result.rewrittenSelection.length)} 个字符的选区改写建议。正文尚未改变，请先比较再决定是否创建新版本。`,
+        professionalNotice: `已生成 ${String(result.rewrittenSelection.length)} 个字符的${selectionRewriteActionLabel(selectionAction)}建议。正文尚未改变，请先比较再决定是否创建新版本。`,
       });
     } catch (cause: unknown) {
       if (isCurrentGenerationOperation(operation)) {
@@ -3645,7 +3673,7 @@ export function EditorPage() {
     try {
       const directExecution = directGenerationRequestIdsRef.current.has(plan.requestId);
       const generationAction: EditorGenerationAction =
-        (chapterRef.current?.content.trim().length ?? 0) === 0 ? "opening" : "continuation";
+        plan.modelTask === "prose_generation" ? "opening" : "continuation";
       if (directExecution) {
         const currentAuthority = await runtime.writingExperience.getOrInitialize();
         if (currentAuthority.mode !== "direct") {
@@ -3997,6 +4025,9 @@ export function EditorPage() {
   function cancelSelectionRewriteDisclosure(): void {
     setSelectionRewriteDisclosure(null);
     recordCancelledProviderAction();
+    window.requestAnimationFrame(() =>
+      primaryEditorActionRef.current?.focus({ preventScroll: true }),
+    );
   }
 
   async function saveCandidateRevision(): Promise<void> {
@@ -4067,6 +4098,11 @@ export function EditorPage() {
     completionNotice: string | null,
     organizeLocalStoryFacts: boolean,
   ): Promise<boolean> {
+    const inferredAcceptedAction = generationActionFromCandidate(candidateOverride, versions);
+    const acceptedAction =
+      candidateOverride.id === candidate?.id && inferredAcceptedAction === "selection_rewrite"
+        ? lastGenerationAction
+        : inferredAcceptedAction;
     const editedContent =
       candidateOverride.id === candidate?.id ? candidateReviewDraft : candidateOverride.content;
     setCandidateBusy(true);
@@ -4123,6 +4159,16 @@ export function EditorPage() {
         ? current
         : [...current, result.value.version],
     );
+    if (directMode && acceptedAction !== null && candidateOverride.baseVersionId !== null) {
+      setDirectGenerationUndo(
+        Object.freeze({
+          action: acceptedAction,
+          baseVersionId: candidateOverride.baseVersionId,
+          appliedVersionId: result.value.version.id,
+          undoLabel: directGenerationUndoLabel(acceptedAction),
+        }),
+      );
+    }
     const selectionBefore = normalizeEditorSelection(
       selectionRef.current,
       contentRef.current.length,
@@ -4440,6 +4486,8 @@ export function EditorPage() {
       return;
     }
     setCandidate(nextCandidate);
+    const action = generationActionFromCandidate(nextCandidate, versions);
+    if (action !== null) setLastGenerationAction(action);
     setCandidatePresentation(nextCandidate.toSnapshot().source === "generate" ? "unknown" : "ai");
     setCandidateReviewOpen(false);
     setCandidateReviewError(null);
@@ -4684,6 +4732,24 @@ export function EditorPage() {
     candidate?.purpose === "prose" && candidate.status !== "streaming"
       ? [candidate, ...candidateHistory.filter((item) => item.id !== candidate.id)]
       : candidateHistory;
+  const savedGenerationAction: EditorGenerationAction =
+    (chapter?.content.trim().length ?? 0) === 0 ? "opening" : "continuation";
+  const savedGenerationActionLabel =
+    savedGenerationAction === "opening" ? "生成开头" : "生成续写建议";
+  const inferredCandidateAction =
+    candidate === null ? null : generationActionFromCandidate(candidate, versions);
+  const displayedCandidateAction =
+    inferredCandidateAction === "selection_rewrite"
+      ? lastGenerationAction
+      : inferredCandidateAction;
+  const displayedCandidateActionLabel =
+    displayedCandidateAction === "opening"
+      ? "开头结果"
+      : displayedCandidateAction === "continuation"
+        ? "续写建议"
+        : displayedCandidateAction === null
+          ? null
+          : `${selectionRewriteActionLabel(displayedCandidateAction)}结果`;
   const writingCanvasStyle = {
     "--editor-font-size": `${String(typography.fontSize)}px`,
     "--editor-line-height": String(typography.lineHeight),
@@ -4736,7 +4802,7 @@ export function EditorPage() {
       };
     }
     return {
-      label: content.trim().length === 0 ? "生成开头" : "继续创作",
+      label: savedGenerationActionLabel,
       disabled: candidateBusy || !canGenerateCandidate,
       run: () => {
         setAssistantOpen(true);
@@ -4745,6 +4811,136 @@ export function EditorPage() {
     };
   })();
 
+  const selectionWritingActions = [
+    {
+      action: "selection_rewrite" as const,
+      label: "改写",
+      instruction: "保留事实、原意和叙事视角，重写选中内容，使表达更清晰自然。",
+    },
+    {
+      action: "polish" as const,
+      label: "润色",
+      instruction: "保持原意、事实和语气，润色选中内容，使文字更自然流畅。",
+    },
+    {
+      action: "expand" as const,
+      label: "扩写",
+      instruction: "保持既有事实与叙事视角，扩写选中内容的动作、感受和环境细节。",
+    },
+    {
+      action: "shorten" as const,
+      label: "缩写",
+      instruction:
+        "在不改变事实、原意和叙事视角的前提下，缩写选中内容，删除重复和次要表达，保留关键情节与语气。",
+    },
+  ];
+  const selectionExceedsLimit = selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS;
+  const selectionWritingControls =
+    usesNativeModel && canGenerateCandidate ? (
+      <section className="candidate-content" aria-label="选中文本写作操作">
+        <div className="candidate-content__meta">
+          <strong>修改选中内容</strong>
+          <span>{selectionLength.toLocaleString("zh-CN")} 个字符</span>
+        </div>
+        {selectionLength === 0 && (
+          <p role="status">请先在正文中选择作用范围，再选择改写、润色、扩写或缩写。</p>
+        )}
+        {selectionExceedsLimit && (
+          <InlineAlert
+            tone="warning"
+            title="选中内容过长"
+            description={
+              "每次最多处理 " +
+              MAXIMUM_SELECTION_REWRITE_CHARACTERS.toLocaleString("zh-CN") +
+              " 个字符，请缩小选区。"
+            }
+          />
+        )}
+        {chapter?.isLocalOnly === true && (
+          <InlineAlert
+            tone="warning"
+            title="私密章节仅限本机"
+            description="远程改写、润色、扩写和缩写已关闭。你可以继续手写、使用本地编辑工具，或在确认隐私边界后另建非私密章节。"
+          />
+        )}
+        {selectionRewriteDisclosure === null ? (
+          <div className="candidate-actions">
+            {selectionWritingActions.map((action) => (
+              <Button
+                key={action.action}
+                variant="secondary"
+                loading={selectionRewriteBusy && lastGenerationAction === action.action}
+                disabled={
+                  !editorClean ||
+                  candidateBusy ||
+                  selectionLength === 0 ||
+                  selectionExceedsLimit ||
+                  chapter?.isLocalOnly === true
+                }
+                onClick={() => void rewriteSelectedText(action.instruction, action.action)}
+              >
+                {action.label}
+              </Button>
+            ))}
+          </div>
+        ) : (
+          <>
+            <InlineAlert
+              tone="warning"
+              title={"确认本次" + selectionRewriteActionLabel(lastGenerationAction)}
+              onDismiss={cancelSelectionRewriteDisclosure}
+              description={
+                selectionRewriteDisclosure.connectionDisplayName +
+                " · " +
+                selectionRewriteDisclosure.modelId +
+                "；" +
+                selectionRewriteDisclosure.privacy +
+                " 发送内容：" +
+                selectionRewriteDisclosure.sends.join("；") +
+                "。本次最多向模型服务发送 1 次，自动重试 0 次；" +
+                formatSelectionRewriteCost(selectionRewriteDisclosure) +
+                "。"
+              }
+            />
+            <div className="candidate-actions">
+              <Button
+                variant="ai-primary"
+                loading={selectionRewriteBusy}
+                onClick={() =>
+                  void rewriteSelectedText(lastSelectionRewriteInstruction, lastGenerationAction)
+                }
+              >
+                确认并生成{selectionRewriteActionLabel(lastGenerationAction)}结果
+              </Button>
+              <Button
+                variant="ghost"
+                disabled={selectionRewriteBusy}
+                onClick={cancelSelectionRewriteDisclosure}
+              >
+                取消，不发送
+              </Button>
+            </div>
+          </>
+        )}
+        {directUndoAvailable && (
+          <Button
+            variant="secondary"
+            loading={versionRestoreBusy}
+            onClick={() => void undoDirectGeneration()}
+          >
+            {directGenerationUndo.undoLabel}
+          </Button>
+        )}
+      </section>
+    ) : directUndoAvailable ? (
+      <Button
+        variant="secondary"
+        loading={versionRestoreBusy}
+        onClick={() => void undoDirectGeneration()}
+      >
+        {directGenerationUndo.undoLabel}
+      </Button>
+    ) : null;
   return (
     <PageStateBoundary
       className="editor-page-boundary"
@@ -5274,6 +5470,32 @@ export function EditorPage() {
                   }
                 />
               )}
+              {chapter?.isLocalOnly === true && (
+                <section className="candidate-content" aria-label="私密章节本地限制">
+                  <InlineAlert
+                    tone="warning"
+                    title="私密章节仅限本地处理"
+                    description="本章正文与相关故事资料只允许交给已验证的本机模型；没有可用本地模型时会在发送前停止，远程发送次数为 0。"
+                  />
+                  <div className="candidate-actions">
+                    <Link
+                      className="button-link button-link--secondary"
+                      to={preflightModelHubLink("model-selection")}
+                    >
+                      设置本地模型
+                    </Link>
+                    {!readonly && (
+                      <Button
+                        variant="secondary"
+                        disabled={privacyChangeBusy}
+                        onClick={() => setPrivacyChangeTarget("standard")}
+                      >
+                        恢复普通章节
+                      </Button>
+                    )}
+                  </div>
+                </section>
+              )}
               {!directMode &&
                 (displayedContextCompilation !== null ||
                   displayedNovelSkillPreparation !== null) && (
@@ -5416,16 +5638,20 @@ export function EditorPage() {
                 selectionRewriteBusy || generationPlan === null ? (
                   <div className="candidate-content" aria-live="polite">
                     <div className="candidate-content__meta">
-                      <Badge tone="ai">改写中</Badge>
+                      <Badge tone="ai">{selectionRewriteActionLabel(lastGenerationAction)}中</Badge>
                       <span>{generationPreview.length} 字符</span>
                     </div>
-                    <pre>{generationPreview || "正在准备选区改写建议……"}</pre>
+                    <pre>
+                      {generationPreview ||
+                        "正在准备" + selectionRewriteActionLabel(lastGenerationAction) + "建议……"}
+                    </pre>
                     <p className="candidate-panel__hint">
                       当前内容尚未写入正式正文，也不会在完成前保存为 AI 建议版本。
                     </p>
                   </div>
                 ) : (
                   <GenerationProgressPanel
+                    actionLabel={savedGenerationActionLabel}
                     providerLabel={
                       continuationDisclosure?.connectionDisplayName ?? "已确认的 AI 服务"
                     }
@@ -5471,6 +5697,9 @@ export function EditorPage() {
                     >
                       {editorCandidateStatusLabel(candidate.status)}
                     </Badge>
+                    {displayedCandidateActionLabel !== null && (
+                      <span>{displayedCandidateActionLabel}</span>
+                    )}
                     <span>{candidate.content.length} 字符</span>
                   </div>
                   {candidate.toSnapshot().incomplete && (
@@ -5631,14 +5860,13 @@ export function EditorPage() {
                 </p>
               )}
               {(canGenerateCandidate || candidateIncomplete) && directMode && (
-                <section className="candidate-content" aria-label="直接续写">
+                <section className="candidate-content" aria-label={savedGenerationActionLabel}>
                   {editorClean && !candidateBusy && (
                     <>
-                      <p>点击后会先显示创作结果；明确使用前不会改变正文或创建版本。</p>
+                      <p>
+                        使用正文上方的“{savedGenerationActionLabel}”开始生成，或先选择创作方向。
+                      </p>
                       <div className="candidate-actions">
-                        <Button variant="ai-primary" onClick={() => void generateCandidate()}>
-                          续写
-                        </Button>
                         <Button
                           variant="secondary"
                           disabled={preparedDirections !== null}
@@ -5752,113 +5980,7 @@ export function EditorPage() {
                       </Button>
                     </section>
                   </>
-                  {editorClean && !candidateBusy && (
-                    <div className="candidate-actions">
-                      {usesNativeModel &&
-                        selectionLength > 0 &&
-                        selectionRewriteDisclosure === null && (
-                          <>
-                            <Button
-                              variant="secondary"
-                              loading={selectionRewriteBusy}
-                              disabled={selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS}
-                              onClick={() =>
-                                void rewriteSelectedText(
-                                  "保留事实、原意和叙事视角，重写选中内容，使表达更清晰自然。",
-                                  "selection_rewrite",
-                                )
-                              }
-                            >
-                              改写
-                            </Button>
-                            <Button
-                              variant="secondary"
-                              loading={selectionRewriteBusy}
-                              disabled={selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS}
-                              onClick={() =>
-                                void rewriteSelectedText(
-                                  "保持原意、事实和语气，润色选中内容，使文字更自然流畅。",
-                                  "polish",
-                                )
-                              }
-                            >
-                              润色
-                            </Button>
-                            <Button
-                              variant="secondary"
-                              loading={selectionRewriteBusy}
-                              disabled={selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS}
-                              onClick={() =>
-                                void rewriteSelectedText(
-                                  "保持既有事实与叙事视角，扩写选中内容的动作、感受和环境细节。",
-                                  "expand",
-                                )
-                              }
-                            >
-                              扩写
-                            </Button>
-                            <Button
-                              variant="secondary"
-                              loading={selectionRewriteBusy}
-                              disabled={selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS}
-                              onClick={() =>
-                                void rewriteSelectedText(
-                                  "在不改变事实、原意和叙事视角的前提下，缩写选中内容，删除重复和次要表达，保留关键情节与语气。",
-                                  "shorten",
-                                )
-                              }
-                            >
-                              缩写
-                            </Button>
-                          </>
-                        )}
-                      {selectionRewriteDisclosure !== null && (
-                        <>
-                          <InlineAlert
-                            tone="warning"
-                            title={`确认本次${selectionRewriteActionLabel(lastGenerationAction)}`}
-                            description={`${selectionRewriteDisclosure.connectionDisplayName} · ${selectionRewriteDisclosure.modelId}；${selectionRewriteDisclosure.privacy} 发送内容：${selectionRewriteDisclosure.sends.join("；")}。本次最多向模型服务发送 1 次，自动重试 0 次；${formatSelectionRewriteCost(selectionRewriteDisclosure)}。`}
-                          />
-                          <Button
-                            variant="ai-primary"
-                            loading={selectionRewriteBusy}
-                            onClick={() =>
-                              void rewriteSelectedText(
-                                lastSelectionRewriteInstruction,
-                                lastGenerationAction,
-                              )
-                            }
-                          >
-                            确认并生成
-                            {selectionRewriteActionLabel(lastGenerationAction)}
-                            结果
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            disabled={selectionRewriteBusy}
-                            onClick={() => {
-                              setSelectionRewriteDisclosure(null);
-                              recordCancelledProviderAction();
-                              window.requestAnimationFrame(() =>
-                                primaryEditorActionRef.current?.focus({ preventScroll: true }),
-                              );
-                            }}
-                          >
-                            取消，不发送
-                          </Button>
-                        </>
-                      )}
-                      {directUndoAvailable && (
-                        <Button
-                          variant="secondary"
-                          loading={versionRestoreBusy}
-                          onClick={() => void undoDirectGeneration()}
-                        >
-                          {directGenerationUndo.undoLabel}
-                        </Button>
-                      )}
-                    </div>
-                  )}
+                  {selectionWritingControls}
                 </section>
               )}
               {(canGenerateCandidate || candidateIncomplete) && !directMode && (
@@ -5987,96 +6109,58 @@ export function EditorPage() {
                       </FormField>
                     )}
                   </section>
-                  {usesNativeModel && selectionLength > 0 && (
-                    <section className="candidate-content" aria-label="修改选中内容">
-                      <FormField
-                        label={`改写选中的 ${selectionLength.toLocaleString("zh-CN")} 个字符`}
-                        hint={
-                          selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS
-                            ? `选区最多支持 ${MAXIMUM_SELECTION_REWRITE_CHARACTERS.toLocaleString("zh-CN")} 个字符，请缩小选区。`
-                            : "只改写当前选区；前后正文会原样保留。结果先进入 AI 建议版本。"
-                        }
-                        required
-                      >
-                        {(fieldProps) => (
-                          <Textarea
-                            {...fieldProps}
-                            ref={selectionRewriteInstructionRef}
-                            value={selectionRewriteInstruction}
-                            rows={3}
-                            maxLength={2_000}
-                            currentLength={selectionRewriteInstruction.length}
-                            disabled={candidateBusy}
-                            placeholder="例如：保留原意，让对话更自然"
-                            onChange={(event) => {
-                              setSelectionRewriteInstruction(event.currentTarget.value);
-                              setSelectionRewriteDisclosure(null);
-                            }}
-                          />
-                        )}
-                      </FormField>
-                      {selectionRewriteDisclosure !== null && (
-                        <InlineAlert
-                          tone="warning"
-                          title="确认后会发送 1 次"
-                          description={`${selectionRewriteDisclosure.connectionDisplayName} · ${selectionRewriteDisclosure.modelId}；${selectionRewriteDisclosure.privacy} 发送内容：${selectionRewriteDisclosure.sends.join("；")}。自动重试 0 次；${formatSelectionRewriteCost(selectionRewriteDisclosure)}。`}
-                          onDismiss={cancelSelectionRewriteDisclosure}
-                        />
-                      )}
-                      <Button
-                        variant="ai-primary"
-                        loading={selectionRewriteBusy}
-                        disabled={
-                          !editorClean ||
-                          candidateBusy ||
-                          selectionRewriteInstruction.trim().length === 0 ||
-                          selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS
-                        }
-                        onClick={() => void rewriteSelectedText()}
-                      >
-                        {selectionRewriteDisclosure === null
-                          ? "查看选区改写发送信息"
-                          : "确认并生成选区改写建议"}
-                      </Button>
-                      {selectionRewriteDisclosure !== null && (
-                        <Button
-                          variant="ghost"
-                          disabled={selectionRewriteBusy}
-                          onClick={cancelSelectionRewriteDisclosure}
+                  {selectionWritingControls}
+                  {usesNativeModel &&
+                    selectionLength > 0 &&
+                    selectionRewriteDisclosure === null &&
+                    chapter?.isLocalOnly !== true && (
+                      <section className="candidate-content" aria-label="自定义改写选中内容">
+                        <FormField
+                          label={`自定义改写选中的 ${selectionLength.toLocaleString("zh-CN")} 个字符`}
+                          hint={
+                            selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS
+                              ? `选区最多支持 ${MAXIMUM_SELECTION_REWRITE_CHARACTERS.toLocaleString("zh-CN")} 个字符，请缩小选区。`
+                              : "补充自己的要求；前后正文会原样保留，结果仍先进入隔离候选。"
+                          }
+                          required
                         >
-                          取消，不发送
+                          {(fieldProps) => (
+                            <Textarea
+                              {...fieldProps}
+                              ref={selectionRewriteInstructionRef}
+                              value={selectionRewriteInstruction}
+                              rows={3}
+                              maxLength={2_000}
+                              currentLength={selectionRewriteInstruction.length}
+                              disabled={candidateBusy}
+                              placeholder="例如：保留原意，让对话更自然"
+                              onChange={(event) => {
+                                setSelectionRewriteInstruction(event.currentTarget.value);
+                                setSelectionRewriteDisclosure(null);
+                              }}
+                            />
+                          )}
+                        </FormField>
+                        <Button
+                          variant="secondary"
+                          loading={selectionRewriteBusy}
+                          disabled={
+                            !editorClean ||
+                            candidateBusy ||
+                            selectionRewriteInstruction.trim().length === 0 ||
+                            selectionLength > MAXIMUM_SELECTION_REWRITE_CHARACTERS
+                          }
+                          onClick={() => void rewriteSelectedText()}
+                        >
+                          查看自定义改写发送信息
                         </Button>
-                      )}
-                    </section>
-                  )}
-                  {usesNativeModel && (
+                      </section>
+                    )}
+                  {usesNativeModel && chapter?.isLocalOnly !== true && (
                     <Link className="back-link" to="/settings#model-center">
                       设置 AI 服务
                     </Link>
                   )}
-                  <Button
-                    variant="ghost"
-                    loading={candidateBusy}
-                    disabled={
-                      !editorClean ||
-                      candidateBusy ||
-                      preflightOpen ||
-                      (continuationPreference.destination === "custom_instruction" &&
-                        (continuationPreference.customDestinationInstruction?.trim().length ??
-                          0) === 0)
-                    }
-                    onClick={() => void generateCandidate()}
-                  >
-                    {candidate?.status === "accepted"
-                      ? "生成续写建议"
-                      : candidate?.status === "rejected"
-                        ? "重新生成"
-                        : usesNativeModel
-                          ? content.trim().length === 0
-                            ? "生成开头"
-                            : "生成续写建议"
-                          : "生成示例建议"}
-                  </Button>
                 </>
               )}
               {!directMode &&
@@ -6802,8 +6886,12 @@ export function EditorPage() {
             }
           }
         }}
-        title="生成前检查"
-        description="开始前会检查正文是否已保存、AI 服务是否可用以及预算是否允许；有问题时会告诉你如何解决。"
+        title={(generationPlan?.actionLabel ?? savedGenerationActionLabel) + "前检查"}
+        description={
+          "开始" +
+          (generationPlan?.actionLabel ?? savedGenerationActionLabel) +
+          "前会检查正文是否已保存、AI 服务是否可用以及预算是否允许；有问题时会告诉你如何解决。"
+        }
         footer={
           generationPlan?.preflight.readiness === "BLOCKED" ? (
             <>
@@ -6869,10 +6957,10 @@ export function EditorPage() {
                 onClick={() => void confirmGeneration()}
               >
                 {continuationConfirmationIsRemembered
-                  ? "按本次摘要开始"
+                  ? "按本次摘要" + (generationPlan?.actionLabel ?? savedGenerationActionLabel)
                   : generationPlan?.preflight.readiness === "READY_WITH_WARNINGS"
-                    ? "使用安全默认值并开始"
-                    : "确认并开始"}
+                    ? "使用安全默认值并" + generationPlan.actionLabel
+                    : "确认并" + (generationPlan?.actionLabel ?? savedGenerationActionLabel)}
               </Button>
             </>
           )
@@ -6918,7 +7006,7 @@ export function EditorPage() {
               <InlineAlert
                 tone="info"
                 title="已记住本次会话的相同确认"
-                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 资料范围：${continuationDisclosure.sentScopeLabel}。本次最多向模型服务发送 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。系统不会静默发送，请核对后点击“按本次摘要开始”。`}
+                description={`${continuationDisclosure.connectionDisplayName} · ${continuationDisclosure.modelId}；${continuationDisclosure.privacy} 资料范围：${continuationDisclosure.sentScopeLabel}。本次最多向模型服务发送 ${String(continuationDisclosure.maximumProviderCalls)} 次，自动重试 ${String(continuationDisclosure.automaticRetryCount)} 次；${formatProviderActionCost(continuationDisclosure)}。系统不会静默发送，请核对后点击“按本次摘要${generationPlan.actionLabel}”。`}
               />
             ) : (
               <InlineAlert

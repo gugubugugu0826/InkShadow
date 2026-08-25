@@ -59,6 +59,22 @@ describe("TaskCenterPage", () => {
     expect(persisted.notifications[0]?.status).toBe("read");
   });
 
+  it.each([
+    ["prose_generation", "生成开头"],
+    ["continuation", "生成续写建议"],
+  ] as const)(
+    "uses the authoritative %s identity in every task-center surface",
+    async (modelTask, label) => {
+      seedGenerationIdentityTask(modelTask);
+      const runtime = createDevelopmentRuntime(window.localStorage);
+      const user = userEvent.setup();
+      renderRoute(runtime);
+
+      expect(await screen.findByRole("heading", { name: label })).toBeVisible();
+      await user.click(screen.getByRole("button", { name: "取消任务" }));
+      expect(await screen.findByRole("dialog", { name: "确认取消任务" })).toHaveTextContent(label);
+    },
+  );
   it("retries the accepted正文 pipeline from its persisted metadata", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const preference = await runtime.writingExperience.getOrInitialize();
@@ -173,6 +189,23 @@ function renderRoute(runtime: DesktopRuntime) {
   );
 }
 
+function seedGenerationIdentityTask(modelTask: "prose_generation" | "continuation"): void {
+  const task = expectOk(
+    Task.create({
+      id: uuid(70),
+      type: "ai.generate",
+      idempotencyKey: "generation:identity:0001",
+      metadata: { projectId: uuid(71), chapterId: uuid(72), modelTask },
+      priority: 80,
+      maxAttempts: 1,
+      now: INITIAL_TIME,
+    }),
+  );
+  window.localStorage.setItem(
+    DEVELOPMENT_TASK_CENTER_KEY,
+    JSON.stringify({ schemaVersion: 1, tasks: [task.toSnapshot()], notifications: [] }),
+  );
+}
 function seedTaskCenter(): void {
   const task = expectOk(
     Task.create({

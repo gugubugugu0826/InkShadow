@@ -50,27 +50,27 @@ describe("editor generation reentry", () => {
     recoverExpiredTasks.mockClear();
 
     fireEvent.click(generateButton);
-    const preflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     await new Promise<void>((resolve) => window.setTimeout(resolve, 300));
     fireEvent.click(generateButton);
 
     expect(preflight).toBeVisible();
-    expect(screen.getAllByRole("dialog", { name: "生成前检查" })).toHaveLength(1);
+    expect(screen.getAllByRole("dialog", { name: "生成续写建议前检查" })).toHaveLength(1);
     expect(recoverExpiredTasks).toHaveBeenCalledTimes(1);
     expect(generate).not.toHaveBeenCalled();
 
     fireEvent.click(within(preflight).getByRole("button", { name: "暂不生成" }));
     await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "生成前检查" })).not.toBeInTheDocument(),
+      expect(screen.queryByRole("dialog", { name: "生成续写建议前检查" })).not.toBeInTheDocument(),
     );
     const availableGenerateButton = screen.getByRole("button", { name: "生成续写建议" });
     expect(availableGenerateButton).toBeEnabled();
     fireEvent.click(availableGenerateButton);
-    const reopenedPreflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    const reopenedPreflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     expect(recoverExpiredTasks).toHaveBeenCalledTimes(2);
 
     const confirm = within(reopenedPreflight).getByRole("button", {
-      name: /确认并开始|使用安全默认值并开始/u,
+      name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
     });
     fireEvent.click(confirm);
     fireEvent.click(confirm);
@@ -107,7 +107,7 @@ describe("editor generation reentry", () => {
     const { chapter, project } = await seedChapter(runtime);
     renderEditor(runtime, project, chapter);
     fireEvent.click(await screen.findByRole("button", { name: "生成续写建议" }));
-    const preflight = await screen.findByRole("dialog", { name: "生成前检查" });
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
 
     const originalFindTaskRoute = runtime.modelHub.findTaskRoute.bind(runtime.modelHub);
     let releaseDisclosure!: () => void;
@@ -127,7 +127,7 @@ describe("editor generation reentry", () => {
       });
 
     const confirm = within(preflight).getByRole("button", {
-      name: /确认并开始|使用安全默认值并开始/u,
+      name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
     });
     const cancel = within(preflight).getByRole("button", { name: "暂不生成" });
     act(() => {
@@ -136,14 +136,14 @@ describe("editor generation reentry", () => {
     });
     await disclosureStart;
     await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "生成前检查" })).not.toBeInTheDocument(),
+      expect(screen.queryByRole("dialog", { name: "生成续写建议前检查" })).not.toBeInTheDocument(),
     );
 
     const availableGenerateButton = screen.getByRole("button", {
       name: "生成续写建议",
     });
     fireEvent.click(availableGenerateButton);
-    const reopened = await screen.findByRole("dialog", { name: "生成前检查" });
+    const reopened = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
     let releaseSecondDisclosure!: () => void;
     const secondDisclosureGate = new Promise<void>((resolve) => {
       releaseSecondDisclosure = resolve;
@@ -158,7 +158,7 @@ describe("editor generation reentry", () => {
       return originalFindTaskRoute(task);
     });
     const secondConfirm = within(reopened).getByRole("button", {
-      name: /确认并开始|使用安全默认值并开始/u,
+      name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
     });
     expect(secondConfirm).toBeEnabled();
     fireEvent.click(secondConfirm);
@@ -212,7 +212,7 @@ describe("editor generation reentry", () => {
       const { chapter, project } = await seedChapter(runtime);
       renderEditor(runtime, project, chapter);
       fireEvent.click(await screen.findByRole("button", { name: "生成续写建议" }));
-      const preflight = await screen.findByRole("dialog", { name: "生成前检查" });
+      const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
       const saveDeferred = within(preflight).getByRole("button", { name: "保存待执行" });
       const cancel = within(preflight).getByRole("button", { name: "先自己写" });
 
@@ -258,7 +258,9 @@ describe("editor generation reentry", () => {
         await deferredSaveGate;
       });
       await waitFor(() =>
-        expect(screen.queryByRole("dialog", { name: "生成前检查" })).not.toBeInTheDocument(),
+        expect(
+          screen.queryByRole("dialog", { name: "生成续写建议前检查" }),
+        ).not.toBeInTheDocument(),
       );
       expect(generate).not.toHaveBeenCalled();
       expect(savedDeferred).toMatchObject({ status: "waiting_network" });

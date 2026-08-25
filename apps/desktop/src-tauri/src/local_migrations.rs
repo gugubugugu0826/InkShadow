@@ -672,6 +672,13 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0077_project_display_identities.sql"
                 ),
             ),
+            migration(
+                81,
+                "bind governed prose openings to their exact model invocation",
+                include_str!(
+                    "../../../../packages/data/migrations/0078_generation_attempt_prose_invocation.sql"
+                ),
+            ),
         ]),
         ignore_missing: false,
         locking: true,
@@ -2033,7 +2040,7 @@ mod tests {
         .await
         .expect("read accepted receipts");
         assert_eq!(before, after);
-        assert_eq!(before.len(), 80);
+        assert_eq!(before.len(), 81);
     }
 
     #[tokio::test]
@@ -2090,7 +2097,7 @@ mod tests {
             SYNTHETIC_V029_CHAPTER_CHARACTER_COUNT
         );
         assert_eq!(before.chapter_body_sha256.len(), 64);
-        assert_eq!(before.migration_receipts.len(), 80);
+        assert_eq!(before.migration_receipts.len(), 81);
         published.close().await.expect("close published database");
 
         let mut upgraded = database.open().await;
@@ -2229,7 +2236,7 @@ mod tests {
         .fetch_all(&mut upgraded)
         .await
         .expect("read upgraded receipts");
-        assert_eq!(upgraded_receipts.len(), 80);
+        assert_eq!(upgraded_receipts.len(), 81);
         assert_eq!(
             &upgraded_receipts[..published_receipts.len()],
             published_receipts.as_slice()
@@ -3868,12 +3875,29 @@ mod tests {
         .await
         .expect("version 80 project display identity tables");
         assert_eq!(display_identity_tables, 2);
+        let (prose_invocation_success, prose_invocation_checksum): (i64, Vec<u8>) =
+            sqlx::query_as("SELECT success, checksum FROM _sqlx_migrations WHERE version = 81")
+                .fetch_one(&mut connection)
+                .await
+                .expect("version 81 prose invocation privacy migration receipt");
+        assert_eq!(prose_invocation_success, 1);
+        assert_eq!(prose_invocation_checksum.len(), 48);
+        let prose_invocation_guard: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'trigger'
+               AND name = 'ai_generation_attempt_usage_privacy_insert_guard'
+               AND instr(sql, '''prose_generation''') > 0",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .expect("version 81 prose invocation privacy guard");
+        assert_eq!(prose_invocation_guard, 1);
 
         let maximum_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
             .fetch_one(&mut connection)
             .await
             .expect("maximum migration version");
-        assert_eq!(maximum_version, 80);
+        assert_eq!(maximum_version, 81);
         let forbidden_columns: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)
              FROM pragma_table_info('novel_skill_evaluation_predispatch_authority_snapshots')

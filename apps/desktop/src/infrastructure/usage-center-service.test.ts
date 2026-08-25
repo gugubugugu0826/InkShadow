@@ -70,6 +70,34 @@ describe("SqliteUsageCenterService", () => {
       ]),
     );
   });
+  it("counts one generated opening once and keeps its exact task and token totals", async () => {
+    const executor = await createSeededExecutor();
+    await seedCurrentGenerationAttempt(executor, "prose_generation");
+
+    const snapshot = await new SqliteUsageCenterService(executor).read({
+      ...query(),
+      task: "prose_generation",
+    });
+    expect(snapshot.records).toHaveLength(1);
+    expect(snapshot.records[0]).toMatchObject({
+      id: `generation:${CURRENT_RUN_ID}:1`,
+      source: "generation_attempt",
+      task: "prose_generation",
+      inputTokens: 45,
+      outputTokens: 12,
+      costMicros: "3400",
+      currency: "CNY",
+    });
+    expect(snapshot.summary).toMatchObject({
+      invocationCount: 1,
+      inputTokens: 45,
+      outputTokens: 12,
+    });
+    expect(snapshot.summary.costTotals).toEqual([
+      { currency: "CNY", micros: "3400", invocationCount: 1 },
+    ]);
+    expect(snapshot.records.map(({ id }) => id)).not.toContain("hub:current-opening");
+  });
   it("uses an ordinary Chinese label for capability probe invocations", () => {
     expect(TASK_LABELS.capability_probe).toBe("模型能力验证");
   });
@@ -301,7 +329,7 @@ describe("SqliteUsageCenterService", () => {
     );
     expect(snapshot.breakdowns.task).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ key: "continuation", label: "续写" }),
+        expect.objectContaining({ key: "continuation", label: "生成续写建议" }),
         expect.objectContaining({ key: "embedding", label: "语义记忆" }),
         expect.objectContaining({ key: "image_generation", label: "生成配图" }),
       ]),
@@ -554,6 +582,7 @@ async function createSeededExecutor(): Promise<NodeSqliteExecutor> {
     errorCode: null,
   });
   executor.database.exec(readMigration("0075_generation_attempt_privacy_snapshot.sql"));
+  executor.database.exec(readMigration("0078_generation_attempt_prose_invocation.sql"));
   await executor.execute(
     `INSERT INTO ai_budget_policies (
        scope_key, scope, project_id, month_key, currency, limit_micros,
@@ -576,22 +605,24 @@ async function createSeededExecutor(): Promise<NodeSqliteExecutor> {
 async function seedInvocationContext(
   executor: NodeSqliteExecutor,
   invocationId: string,
+  generationRunId: string | null = null,
+  task: "embedding" | "prose_generation" = "embedding",
 ): Promise<void> {
-  const traceId = uuid(30);
+  const traceId = generationRunId === null ? uuid(30) : uuid(32);
   await executor.execute(
     `INSERT INTO context_compilation_runs (
        id, project_id, chapter_id, task_type, maximum_context_tokens,
        required_tokens, used_tokens, remaining_tokens, discarded_tokens,
        token_estimate_source, candidate_count, included_count, discarded_count, created_at
-     ) VALUES (?, ?, ?, 'embedding', 100, 10, 10, 90, 0,
+     ) VALUES (?, ?, ?, ?, 100, 10, 10, 90, 0,
        'utf8_conservative', 1, 1, 0, ?)`,
-    [traceId, PROJECT_ID, CHAPTER_ID, NOW],
+    [traceId, PROJECT_ID, CHAPTER_ID, task, NOW],
   );
   await executor.execute(
     `INSERT INTO context_compilation_execution_links (
        trace_id, generation_id, generation_run_id, created_at
-     ) VALUES (?, ?, NULL, ?)`,
-    [traceId, uuid(31), NOW],
+     ) VALUES (?, ?, ?, ?)`,
+    [traceId, generationRunId === null ? uuid(31) : uuid(33), generationRunId, NOW],
   );
   await executor.execute(
     `INSERT INTO context_compilation_model_invocation_links (
@@ -601,19 +632,24 @@ async function seedInvocationContext(
   );
 }
 
-async function seedCurrentGenerationAttempt(executor: NodeSqliteExecutor): Promise<void> {
+async function seedCurrentGenerationAttempt(
+  executor: NodeSqliteExecutor,
+  modelTask: "continuation" | "prose_generation" = "continuation",
+): Promise<void> {
+  const invocationId =
+    modelTask === "prose_generation" ? "current-opening" : "current-continuation";
   await executor.execute(
     `INSERT INTO background_tasks (
        id, task_type, idempotency_key, metadata_json, priority, status,
        attempt, max_attempts, sequence, run_after, created_at, updated_at,
        finished_at
-     ) VALUES (?, 'ai.generate', 'current-usage-test-generation', '{}', 80, 'succeeded',
+     ) VALUES (?, 'ai.generate', 'current-usage-test-generation', ?, 80, 'succeeded',
        1, 1, 2, NULL, ?, ?, ?)`,
-    [CURRENT_TASK_ID, NOW, NOW, NOW],
+    [CURRENT_TASK_ID, JSON.stringify({ modelTask }), NOW, NOW, NOW],
   );
   await seedInvocation(executor, {
-    id: "current-continuation",
-    task: "continuation",
+    id: invocationId,
+    task: modelTask,
     connectionId: "openai-connection",
     providerKind: "openai",
     modelId: "cloud-model",
@@ -657,9 +693,12 @@ async function seedCurrentGenerationAttempt(executor: NodeSqliteExecutor): Promi
        privacy_policy, data_destination, model_invocation_id
      ) VALUES (?, 1, 'provider_reported', 45, 12, NULL, '3400', 'CNY',
        'price-2026-08', ?, '2026-08-08T13:00:00.000Z', 1,
-       'local_preferred', 'remote', 'current-continuation')`,
-    [CURRENT_RUN_ID, NOW],
+       'local_preferred', 'remote', ?)`,
+    [CURRENT_RUN_ID, NOW, invocationId],
   );
+  if (modelTask === "prose_generation") {
+    await seedInvocationContext(executor, invocationId, CURRENT_RUN_ID, modelTask);
+  }
 }
 async function seedConnection(
   executor: NodeSqliteExecutor,

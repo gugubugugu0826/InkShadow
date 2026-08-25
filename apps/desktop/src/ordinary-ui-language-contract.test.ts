@@ -22,8 +22,12 @@ describe("ordinary UI language contract", () => {
     expect(editor).toContain("服务商未提供费用信息");
     expect(editor).not.toContain("金额标记为 pricing_unavailable");
     expect(editor).not.toContain("金额标记为\n                  pricing_unavailable");
-    expect(editor).toMatch(/>\s*缩写\s*<\/Button>/u);
-    expect(editor).toContain("在不改变事实、原意和叙事视角的前提下，缩写选中内容");
+    expect(editor).toMatch(
+      /action: "shorten" as const,\s*label: "缩写",\s*instruction:\s*"在不改变事实、原意和叙事视角的前提下，缩写选中内容/u,
+    );
+    expect(editor).toMatch(
+      /selectionWritingActions\.map\(\(action\) => \([\s\S]*?<Button[\s\S]*?>\s*\{action\.label\}\s*<\/Button>/u,
+    );
   });
   it("uses natural Chinese capacity units in ordinary pages", () => {
     const ordinarySources = [

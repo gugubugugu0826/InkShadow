@@ -1,14 +1,17 @@
 # 墨影 InkShadow 文档入口
 
-> 当前工作树应用清单版本：`0.2.11`（未签名人工复测候选；未打标签、未发布）  
+> 当前源码快照应用清单版本：`0.2.12`；最终本地门禁已完成，精确候选与发布状态以当次验证报告和 GitHub Releases 为准  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
 > 最近治理复核：2026-08-25  
-> 最新公开版本为 [`v0.2.9` 工程预发行](https://github.com/gugubugugu0826/InkShadow/releases/tag/v0.2.9)：来源提交 `54d9647031bb97b4fc9f021d3b1acca7f6d25c47`；该版本和更早版本的标签、Release 与公开附件保持不可变。  
+> 公开版本的精确状态以 [GitHub Releases](https://github.com/gugubugugu0826/InkShadow/releases) 为准；既有 `v0.2.9` 及更早标签、Release 与附件保持不可变。  
 > 注意：设计版本用于界面与交互验收，不会自动改变应用版本。
 
 `v0.2.9` 已从唯一干净提交完成候选、远端持续集成、未签名打包、带说明标签、公开预发行和附件回下载复核。
-`0.2.11` 仅用于本轮真实安装人工复测，完整门禁和安装包尚未完成，不得提前写成通过或发布。
-当前缺陷矩阵、证据边界和待执行门禁见
+`0.2.12` 源码快照的全仓、原生和正式网页端到端本地门禁已经完成；唯一候选提交、安装包、标签和 Release 由后续发布证据确认，本文不预填未来结果。
+本轮只向前追加 Data `0078_generation_attempt_prose_invocation.sql` / Tauri `81`：不新增字段或表，只扩展生成尝试的不可变隐私守卫，使 `continuation` 与 `prose_generation` 都能保存精确 Model Hub 调用标识；`0075` 及所有已发布迁移和校验保持不变。
+当前缺陷矩阵、最终本地门禁、失败修复链和未执行边界见
+[`execution/2026-08-25-V0212-RETEST-RELEASE.md`](execution/2026-08-25-V0212-RETEST-RELEASE.md)。
+`0.2.11` 人工复测候选的缺陷矩阵与证据边界继续作为历史记录保留，见
 [`execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md`](execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md)。
 
 `0.2.8` 仅生成了未签名人工复测安装包，未推送、未打标签、未发布；来源与保留边界见 [`product-rebuild/08-DESIGN-V031B-REALITY-MATRIX.md`](product-rebuild/08-DESIGN-V031B-REALITY-MATRIX.md#2026-08-24-v028-人工复测安装包)。
@@ -46,6 +49,7 @@
 | `EVIDENCE_CURRENT`      | [`execution/TEST_RESULTS.md`](execution/TEST_RESULTS.md)                                                                                   | 当前和历史测试证据；失败不得省略                   |
 | `EVIDENCE_CURRENT`      | [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md)                                                                         | 当前版本的构建、打包、发布与外部门禁               |
 | `EVIDENCE_CURRENT`      | [`execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md`](execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md)                         | 0.2.11 阻断缺陷、数据兼容与界面修复门禁           |
+| `EVIDENCE_CURRENT`      | [`execution/2026-08-25-V0212-RETEST-RELEASE.md`](execution/2026-08-25-V0212-RETEST-RELEASE.md)                               | 0.2.12 缺陷、最终本地门禁与发布边界               |
 | `HISTORICAL`            | [`execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)                 | v0.2.6 发布前修复与真机聚焦历史证据                |
 
 ## 支撑文档
@@ -74,7 +78,7 @@
 ## 目标与历史文档
 
 - `DESIGN/`：`TARGET_BASELINE`。DESIGN v0.3.1b 规定视觉与交互目标；当前工作树应用清单为
-  0.2.11 未签名人工复测候选；现有 0.2.10 及更早版本证据保持不可变。设计版本不会自动改变应用版本，
+  0.2.12 未签名候选；0.2.11 及更早候选和发布证据保持不可变。设计版本不会自动改变应用版本，
   公开附件的精确大小和 SHA-256 以对应版本发布门禁为准。
 - [`product-rebuild/00-PHASE-0-REALITY-AUDIT.md`](product-rebuild/00-PHASE-0-REALITY-AUDIT.md)：
   `HISTORICAL` Phase 0 起始审计；当前差异须再读增量现实矩阵。

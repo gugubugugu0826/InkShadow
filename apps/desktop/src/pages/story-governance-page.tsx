@@ -124,7 +124,10 @@ function EvidenceDisclosure({
         variant="ghost"
         aria-expanded={open}
         aria-controls={regionId}
-        onClick={() => setOpen((current) => !current)}
+        onClick={(event) => {
+          event.currentTarget.focus();
+          setOpen((current) => !current);
+        }}
       >
         {currentLabel}
       </Button>
@@ -2366,7 +2369,13 @@ export function StoryGovernancePage() {
                           <Button
                             size="sm"
                             variant="secondary"
-                            onClick={() => setSelectedCharacterKey(group.key)}
+                            aria-haspopup="dialog"
+                            aria-expanded={selectedCharacterKey === group.key}
+                            aria-controls="story-character-detail"
+                            onClick={(event) => {
+                              event.currentTarget.focus();
+                              setSelectedCharacterKey(group.key);
+                            }}
                           >
                             查看人物详情
                           </Button>
@@ -3239,7 +3248,9 @@ export function StoryGovernancePage() {
           </Button>
         }
       >
-        {selectedCharacter !== null && renderEntityGroupDetails(selectedCharacter)}
+        {selectedCharacter !== null && (
+          <div id="story-character-detail">{renderEntityGroupDetails(selectedCharacter)}</div>
+        )}
       </Drawer>
 
       <Drawer

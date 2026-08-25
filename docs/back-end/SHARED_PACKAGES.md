@@ -2,12 +2,13 @@
 
 > 基于源码快照：2026-08-25  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 桌面端应用清单版本：`0.2.11`（未签名人工复测候选；未打标签、未发布）；现有 `v0.2.10` 及更早版本的安装包和来源证据保持不可变；设计基线：`DESIGN v0.3.1b`  
-> 覆盖范围：`packages/*/src` 的 17 个工作区包，以及 `packages/data/migrations` 的 77 个本地数据库迁移（发布最新 `0077`）
+> 桌面端应用清单版本：`0.2.12`（未签名候选；未打标签、未发布）；0.2.11 及更早候选、安装包和来源证据保持不可变；设计基线：`DESIGN v0.3.1b`  
+> 覆盖范围：`packages/*/src` 的 17 个工作区包，以及 `packages/data/migrations` 的 78 个本地数据库迁移（当前前向上限 `0078`；已发布上限仍为 `0077`）
 
 `0071` 已随 `v0.2.6` 工程预发布冻结；`0072`–`0075` 已随 `v0.2.7` 最终候选冻结：
 `0074` 冻结不可变章节版本的本地故事资料整理责任，`0075` 保存生成尝试隐私快照及同一次调用标识。
-`0076`–`0077` / Tauri `79`–`80` 已随 `v0.2.9` 来源提交 `54d9647031bb97b4fc9f021d3b1acca7f6d25c47` 冻结；0.2.10 与当前 0.2.11 均没有新增迁移。
+`0076`–`0077` / Tauri `79`–`80` 已随 `v0.2.9` 来源提交 `54d9647031bb97b4fc9f021d3b1acca7f6d25c47` 冻结；0.2.10 与 0.2.11 均没有新增迁移。
+当前 0.2.12 新增 `0078_generation_attempt_prose_invocation.sql` / Tauri `81`。它不新增字段或表，只重建不可变生成尝试隐私守卫，使 `continuation` 和 `prose_generation` 都能保存精确 Model Hub 调用标识；`0075` 和所有已发布迁移及校验保持不变。0.2.12 尚未打标签或发布。
 既有版本的最终候选、远端门禁、未签名打包和公开预发行事实保持不变；真实供应商和最终安装程序真机仍未完成，且不能借此改写
 `v0.2.9`、`v0.2.7`、`v0.2.6` 及更早标签、迁移校验值和制品证据。
 
@@ -250,6 +251,9 @@
 | `packages/data/migrations/0073_story_fact_user_revisions.sql`                        | 收紧用户故事事实内容修订与治理转换，保留事实身份、来源证据和修订递增约束。                                                                                                     |
 | `packages/data/migrations/0074_chapter_version_story_fact_responsibility.sql`        | 在不可变章节版本上保存本地故事资料整理责任；旧行默认关闭，字段不可修改。                                                                                                       |
 | `packages/data/migrations/0075_generation_attempt_privacy_snapshot.sql`              | 在新生成尝试上保存完整且不可修改的隐私快照和同一次模型调用标识；迁移前旧行保留空值。                                                                                           |
+| `packages/data/migrations/0076_direct_local_story_fact_author_revision.sql`          | 为直接模式本地故事事实增加带审计的作者修订，不改变权威正文和不可变版本。                                                                                                       |
+| `packages/data/migrations/0077_project_display_identities.sql`                       | 保存不含作品内容、可撤销且带修订历史的项目显示身份。                                                                                                                           |
+| `packages/data/migrations/0078_generation_attempt_prose_invocation.sql`              | 不新增字段或表，只扩展不可变生成尝试隐私守卫，使续写与开头生成均可绑定精确 Model Hub 调用标识。                                                                                |
 
 当前六张写作体验/调查权威表全部进入既有备份删除与恢复顺序；`planned_invocation_id` 随
 `consistency_investigation_steps` 整表恢复。当前恢复断言为 172 张表；唯一排除项仍是 1 张不含用户

@@ -24,12 +24,26 @@ export type UserFacingModelHubState = (typeof USER_FACING_MODEL_HUB_STATES)[numb
 
 export type ModelHubReadinessTone = "neutral" | "info" | "success" | "warning" | "danger";
 
+export type ModelHubCredentialStatus =
+  "not_required" | "recorded" | "trusted" | "missing" | "unavailable" | "untrusted" | "mixed";
+export type ModelHubCatalogStatus =
+  "not_loaded" | "loaded" | "partially_loaded" | "temporarily_unavailable";
+export type ModelHubRouteLoadStatus = "loaded" | "partially_loaded" | "temporarily_unavailable";
+export type ModelHubRouteStatus =
+  "sendable" | "partially_sendable" | "not_sendable" | "temporarily_unavailable";
+
 export interface ModelHubReadinessProjection {
   readonly state: UserFacingModelHubState;
   readonly label: string;
   readonly shortLabel: string;
   readonly description: string;
   readonly tone: ModelHubReadinessTone;
+  readonly savedConnectionCount: number;
+  readonly credentialStatus: ModelHubCredentialStatus;
+  readonly lastVerifiedAt: string | null;
+  readonly catalogStatus: ModelHubCatalogStatus;
+  readonly routeStatus: ModelHubRouteStatus;
+  readonly needsRecheck: boolean;
   readonly enabledConnectionCount: number;
   readonly usableConnectionCount: number;
   readonly runnableCoreTaskCount: number;
@@ -47,6 +61,9 @@ export interface ProjectModelHubReadinessInput {
   readonly connections: readonly ModelProviderConnection[];
   readonly catalog: readonly ModelCatalogEntry[];
   readonly routes: readonly NovelTaskRoute[];
+  readonly catalogLoadStatus?: ModelHubCatalogStatus;
+  readonly routeLoadStatus?: ModelHubRouteLoadStatus;
+  readonly credentialStatus?: ModelHubCredentialStatus;
   readonly transientChecking?: boolean;
   readonly loadFailed?: boolean;
   /** Tasks rejected by the exact, no-dispatch resolver after the shallow store projection. */
@@ -108,6 +125,20 @@ const COMPLETE_WRITING_TASKS: readonly NovelAiTask[] = Object.freeze([
   "character_voice_check",
   "content_quality_check",
 ]);
+const MODEL_HUB_CREDENTIAL_STATUS_LABELS: Readonly<Record<ModelHubCredentialStatus, string>> =
+  Object.freeze({
+    not_required: "无需接口密钥",
+    recorded: "已保存，等待本机核对",
+    trusted: "本机凭据已确认",
+    missing: "未找到已保存凭据",
+    unavailable: "暂时无法读取",
+    untrusted: "凭据来源需要重新保存",
+    mixed: "部分连接需要核对",
+  });
+
+export function modelHubCredentialStatusLabel(status: ModelHubCredentialStatus): string {
+  return MODEL_HUB_CREDENTIAL_STATUS_LABELS[status];
+}
 
 export function modelHubReadinessBlockerLabel(code: string): string {
   if (code === "MODEL_HUB_CREDENTIAL_MISSING") return "接口密钥已删除或不可用";
@@ -152,7 +183,15 @@ export function modelHubReadinessTaskLabel(task: string): string {
 export function projectModelHubReadiness(
   input: ProjectModelHubReadinessInput,
 ): ModelHubReadinessProjection {
+  const savedConnections = input.connections.filter(
+    (connection) => !isRetiredConnection(connection),
+  );
   const enabledConnections = input.connections.filter(({ enabled }) => enabled);
+  const catalogStatus =
+    input.catalogLoadStatus ?? (savedConnections.length === 0 ? "not_loaded" : "loaded");
+  const routeLoadStatus = input.routeLoadStatus ?? "loaded";
+  const credentialStatus = input.credentialStatus ?? inferCredentialStatus(enabledConnections);
+  const lastVerifiedAt = mostRecentVerification(savedConnections);
   const now = normalizeNow(input.now);
   const exactBlockers = Object.freeze([
     ...(input.exactBlockers ?? []),
@@ -164,6 +203,11 @@ export function projectModelHubReadiness(
     enabledConnectionCount: enabledConnections.length,
     totalCoreTaskCount: COMPLETE_WRITING_TASKS.length,
     exactBlockers,
+    savedConnectionCount: savedConnections.length,
+    credentialStatus,
+    lastVerifiedAt,
+    catalogStatus,
+    routeLoadStatus,
   } as const;
 
   if (
@@ -299,6 +343,11 @@ function projection(
     enabledConnectionCount: number;
     totalCoreTaskCount: number;
     exactBlockers: readonly ModelHubReadinessBlocker[];
+    savedConnectionCount: number;
+    credentialStatus: ModelHubCredentialStatus;
+    lastVerifiedAt: string | null;
+    catalogStatus: ModelHubCatalogStatus;
+    routeLoadStatus: ModelHubRouteLoadStatus;
   }>,
   usableConnectionCount: number,
   runnableCoreTaskCount: number,
@@ -309,6 +358,30 @@ function projection(
     state === "basic_ready" || state === "fully_ready" || state === "partially_unavailable"
       ? ` 当前 ${String(runnableCoreTaskCount)} / ${String(base.totalCoreTaskCount)} 类任务通过基础配置检查。`
       : "";
+  const routeStatus: ModelHubRouteStatus =
+    base.routeLoadStatus !== "loaded"
+      ? "temporarily_unavailable"
+      : runnableCoreTaskCount === 0
+        ? "not_sendable"
+        : state === "fully_ready"
+          ? "sendable"
+          : "partially_sendable";
+  const needsRecheck =
+    state === "checking" ||
+    state === "partially_unavailable" ||
+    state === "connection_failed" ||
+    state === "quota_insufficient" ||
+    (base.savedConnectionCount > 0 &&
+      (base.credentialStatus === "recorded" ||
+        base.credentialStatus === "missing" ||
+        base.credentialStatus === "unavailable" ||
+        base.credentialStatus === "untrusted" ||
+        base.credentialStatus === "mixed" ||
+        base.lastVerifiedAt === null ||
+        base.catalogStatus !== "loaded" ||
+        base.routeLoadStatus !== "loaded" ||
+        base.exactBlockers.length > 0 ||
+        runnableCoreTaskCount === 0));
   return Object.freeze({
     state,
     label: copy.label,
@@ -316,6 +389,12 @@ function projection(
       state === "fully_ready" || state === "basic_ready" ? "AI 基础连接可用" : `AI ${copy.label}`,
     description: `${copy.description}${taskSummary}`,
     tone: readinessTone(state),
+    savedConnectionCount: base.savedConnectionCount,
+    credentialStatus: base.credentialStatus,
+    lastVerifiedAt: base.lastVerifiedAt,
+    catalogStatus: base.catalogStatus,
+    routeStatus,
+    needsRecheck,
     enabledConnectionCount: base.enabledConnectionCount,
     usableConnectionCount,
     runnableCoreTaskCount,
@@ -345,4 +424,37 @@ function normalizeNow(value: string | undefined): string {
     return new Date(value).toISOString();
   }
   return new Date().toISOString();
+}
+
+function inferCredentialStatus(
+  connections: readonly ModelProviderConnection[],
+): ModelHubCredentialStatus {
+  const credentialConnections = connections.filter(
+    ({ authenticationMode }) => authenticationMode !== "none",
+  );
+  if (credentialConnections.length === 0) return "not_required";
+  const states = new Set(credentialConnections.map(({ credentialState }) => credentialState));
+  if (states.size > 1) return "mixed";
+  const state = credentialConnections[0]?.credentialState;
+  if (state === "present") return "recorded";
+  if (state === "missing") return "missing";
+  return "unavailable";
+}
+
+function mostRecentVerification(connections: readonly ModelProviderConnection[]): string | null {
+  const timestamps = connections
+    .map(({ lastTestedAt }) => lastTestedAt)
+    .filter((value): value is string => value !== null && Number.isFinite(Date.parse(value)))
+    .sort((left, right) => Date.parse(right) - Date.parse(left));
+  return timestamps[0] ?? null;
+}
+
+function isRetiredConnection(connection: ModelProviderConnection): boolean {
+  return (
+    !connection.enabled &&
+    connection.connectionStatus === "disabled" &&
+    connection.credentialRef === null &&
+    connection.credentialState === "missing" &&
+    connection.lastErrorCode === "MODEL_HUB_CONNECTION_RETIRED"
+  );
 }

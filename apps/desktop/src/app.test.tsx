@@ -309,7 +309,7 @@ describe("desktop vertical slice", () => {
       { timeout: 3_000 },
     );
 
-    await user.click(screen.getByRole("button", { name: "生成示例建议" }));
+    await user.click(screen.getByRole("button", { name: "生成续写建议" }));
     expect(await screen.findByText(/本地演示候选/u)).toBeInTheDocument();
     expect(screen.getByText("尝试上界累计估算")).toBeInTheDocument();
     expect(screen.getByText(/不是供应商实扣金额/u)).toBeInTheDocument();
@@ -376,8 +376,8 @@ describe("desktop vertical slice", () => {
     expect(
       privateChapterAfterAcceptance.ok && privateChapterAfterAcceptance.value?.toSnapshot(),
     ).toMatchObject({ privacyMode: "local_only" });
-    const assistant = screen.getByRole("complementary", { name: "AI 创作助手" });
-    expect(within(assistant).getByRole("button", { name: "生成续写建议" })).toBeEnabled();
+    expect(screen.getByRole("complementary", { name: "AI 创作助手" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "生成续写建议" })).toBeEnabled();
   });
 
   it("keeps the writing canvas primary and opens chapters or the AI assistant on compact screens", async () => {
@@ -502,7 +502,7 @@ describe("desktop vertical slice", () => {
     });
     editor.setSelectionRange(editor.value.length, editor.value.length);
     fireEvent.select(editor);
-    await user.click(screen.getByRole("button", { name: "生成示例建议" }));
+    await user.click(screen.getByRole("button", { name: "生成续写建议" }));
     await user.click(await screen.findByRole("button", { name: "比较建议" }));
 
     const review = await screen.findByRole("dialog", { name: "比较建议与正文" });
@@ -573,7 +573,7 @@ describe("desktop vertical slice", () => {
     const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
       name: "章节正文",
     });
-    await user.click(screen.getByRole("button", { name: "生成示例建议" }));
+    await user.click(screen.getByRole("button", { name: "生成续写建议" }));
     expect(await screen.findByText(/本地演示候选/u)).toBeInTheDocument();
 
     const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);

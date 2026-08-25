@@ -579,6 +579,7 @@ const TASK_AUTHORITIES: Readonly<
 > = Object.freeze({
   project_search: Object.freeze(["accepted_text", "confirmed_fact", "rebuildable"] as const),
   continuation: Object.freeze(["accepted_text", "confirmed_fact"] as const),
+  prose_generation: Object.freeze(["accepted_text", "confirmed_fact"] as const),
   consistency: Object.freeze(["accepted_text", "confirmed_fact", "rebuildable"] as const),
   agent_fts: Object.freeze(["accepted_text", "confirmed_fact"] as const),
 });
@@ -587,6 +588,13 @@ const TASK_CHUNK_KINDS: Readonly<Record<SearchRetrievalTaskType, readonly Search
   Object.freeze({
     project_search: Object.freeze(["chapter", "scene", "event", "story_fact_evidence"] as const),
     continuation: Object.freeze([
+      "chapter",
+      "event",
+      "paragraph",
+      "dialogue",
+      "story_fact_evidence",
+    ] as const),
+    prose_generation: Object.freeze([
       "chapter",
       "event",
       "paragraph",

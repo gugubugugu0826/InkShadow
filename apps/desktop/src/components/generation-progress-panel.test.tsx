@@ -11,6 +11,7 @@ describe("GenerationProgressPanel", () => {
     const onStop = vi.fn();
     render(
       <GenerationProgressPanel
+        actionLabel="生成开头"
         providerLabel="DeepSeek"
         modelLabel="deepseek-chat"
         reasoningMode="disabled"
@@ -24,6 +25,8 @@ describe("GenerationProgressPanel", () => {
       />,
     );
 
+    expect(screen.getByLabelText("生成开头进度")).toBeTruthy();
+    expect(screen.getByText("开头生成中")).toBeTruthy();
     expect(screen.getByText("DeepSeek · deepseek-chat")).toBeTruthy();
     expect(screen.getByText("已关闭，只请求可见正文")).toBeTruthy();
     expect(screen.getByText("1,800–2,500 字")).toBeTruthy();

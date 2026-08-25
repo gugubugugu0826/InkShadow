@@ -258,6 +258,7 @@ export default defineConfig({
     },
   },
   build: {
+    modulePreload: false,
     target: "es2022",
     // Do not ship readable application source alongside commercial desktop bundles.
     sourcemap: false,

@@ -6,9 +6,18 @@ import {
   type ModelHubTextInspectionDependencies,
   type ModelHubTextTask,
 } from "./model-hub-execution-service";
-import { projectModelHubReadiness, type ModelHubReadinessProjection } from "./model-hub-readiness";
+import {
+  projectModelHubReadiness,
+  type ModelHubCredentialStatus,
+  type ModelHubReadinessProjection,
+  type ModelHubRouteLoadStatus,
+} from "./model-hub-readiness";
+import {
+  ModelHubCredentialReferenceError,
+  modelHubCredentialProviderId,
+} from "./model-hub-native-config";
 import type { NovelAiTask } from "./model-hub-provider-registry";
-import type { NovelTaskRoute } from "./model-hub-store";
+import type { ModelProviderConnection, NovelTaskRoute } from "./model-hub-store";
 
 const COMPLETE_WRITING_TASKS: readonly NovelAiTask[] = Object.freeze([
   "prose_generation",
@@ -59,21 +68,43 @@ export async function loadAuthoritativeModelHubReadiness(
     clock: Object.freeze({ now: () => checkedAt }),
   });
   const connections = await dependencies.modelHub.listConnections();
-  const [catalog, routes] = await Promise.all([
-    Promise.all(connections.map(({ id }) => dependencies.modelHub.listCatalog(id))).then((rows) =>
-      rows.flat(),
-    ),
-    Promise.all(
+  const [catalogResults, routeResults, credentialStatus] = await Promise.all([
+    Promise.allSettled(connections.map(({ id }) => dependencies.modelHub.listCatalog(id))),
+    Promise.allSettled(
       COMPLETE_WRITING_TASKS.map((task) => dependencies.modelHub.findTaskRoute(task)),
-    ).then((rows) => rows.filter((route): route is NovelTaskRoute => route !== null)),
+    ),
+    inspectCredentialStatus(dependencies, connections),
   ]);
-  const shallow = projectModelHubReadiness({ connections, catalog, routes, now: checkedAt });
-  if (shallow.state !== "basic_ready" && shallow.state !== "fully_ready") {
+  const catalog = Object.freeze(
+    catalogResults.flatMap((result) => (result.status === "fulfilled" ? result.value : [])),
+  );
+  const routes = Object.freeze(
+    routeResults.flatMap((result) =>
+      result.status === "fulfilled" && result.value !== null ? [result.value] : [],
+    ),
+  ) satisfies readonly NovelTaskRoute[];
+  const catalogLoadStatus =
+    connections.length === 0 ? "not_loaded" : settledLoadStatus(catalogResults);
+  const routeLoadStatus = settledLoadStatus(routeResults);
+  const projectionInput = Object.freeze({
+    connections,
+    catalog,
+    routes,
+    catalogLoadStatus,
+    routeLoadStatus,
+    credentialStatus,
+    now: checkedAt,
+  });
+  const shallow = projectModelHubReadiness(projectionInput);
+  const potentiallySendableContracts = EXACT_READINESS_CONTRACTS.filter(
+    ({ task }) => !shallow.missingCoreTasks.includes(task),
+  );
+  if (potentiallySendableContracts.length === 0) {
     return shallow;
   }
 
   const exactResults = await Promise.allSettled(
-    EXACT_READINESS_CONTRACTS.map(({ task, maximumOutputTokens }) =>
+    potentiallySendableContracts.map(({ task, maximumOutputTokens }) =>
       inspectModelHubTextTask(consistentDependencies, {
         task,
         messages: Object.freeze([
@@ -88,7 +119,7 @@ export async function loadAuthoritativeModelHubReadiness(
   );
   const exactBlockers = exactResults.flatMap((result, index) => {
     if (result.status === "fulfilled") return [];
-    const contract = EXACT_READINESS_CONTRACTS[index];
+    const contract = potentiallySendableContracts[index];
     if (contract === undefined) return [];
     return [
       Object.freeze({
@@ -100,5 +131,43 @@ export async function loadAuthoritativeModelHubReadiness(
       }),
     ];
   });
-  return projectModelHubReadiness({ connections, catalog, routes, exactBlockers });
+  return projectModelHubReadiness({ ...projectionInput, exactBlockers });
+}
+
+function settledLoadStatus(
+  results: readonly PromiseSettledResult<unknown>[],
+): ModelHubRouteLoadStatus {
+  if (results.length === 0) return "loaded";
+  const fulfilledCount = results.filter(({ status }) => status === "fulfilled").length;
+  if (fulfilledCount === results.length) return "loaded";
+  return fulfilledCount === 0 ? "temporarily_unavailable" : "partially_loaded";
+}
+
+async function inspectCredentialStatus(
+  dependencies: ModelHubTextInspectionDependencies,
+  connections: readonly ModelProviderConnection[],
+): Promise<ModelHubCredentialStatus> {
+  const protectedConnections = connections.filter(
+    ({ authenticationMode, enabled }) => enabled && authenticationMode !== "none",
+  );
+  if (protectedConnections.length === 0) return "not_required";
+  const credentialStates = await Promise.all(
+    protectedConnections.map(async (connection): Promise<ModelHubCredentialStatus> => {
+      let providerId: string;
+      try {
+        providerId = modelHubCredentialProviderId(connection);
+      } catch (cause: unknown) {
+        return cause instanceof ModelHubCredentialReferenceError ? "untrusted" : "unavailable";
+      }
+      try {
+        const summary = await dependencies.credentials.getSummary(providerId);
+        return summary.configured ? "trusted" : "missing";
+      } catch {
+        return "unavailable";
+      }
+    }),
+  );
+  const states = new Set<ModelHubCredentialStatus>(credentialStates);
+  if (states.size > 1) return "mixed";
+  return states.values().next().value ?? "unavailable";
 }

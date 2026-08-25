@@ -3,6 +3,7 @@ import { Badge, Button } from "@inkshadow/ui";
 export type GenerationProgressStage = "preparing" | "generating" | "finalizing";
 
 export interface GenerationProgressPanelProps {
+  readonly actionLabel: "生成开头" | "生成续写建议";
   readonly providerLabel: string;
   readonly modelLabel: string;
   readonly reasoningMode: "disabled" | "provider_default";
@@ -23,9 +24,9 @@ const STAGE_LABELS: Readonly<Record<GenerationProgressStage, string>> = Object.f
 
 export function GenerationProgressPanel(props: GenerationProgressPanelProps) {
   return (
-    <div className="candidate-content" aria-live="polite" aria-label="续写生成进度">
+    <div className="candidate-content" aria-live="polite" aria-label={props.actionLabel + "进度"}>
       <div className="candidate-content__meta">
-        <Badge tone="ai">生成中</Badge>
+        <Badge tone="ai">{props.actionLabel === "生成开头" ? "开头生成中" : "续写生成中"}</Badge>
         <span>{props.receivedVisibleCharacters.toLocaleString("zh-CN")} 字符</span>
       </div>
       <dl className="generation-receipt">

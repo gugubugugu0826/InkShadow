@@ -552,6 +552,7 @@ async function seedInternalFakeRoutes(modelHub: ModelHubStore): Promise<void> {
   });
   for (const task of [
     "continuation",
+    "prose_generation",
     "long_memory_compression",
     "character_extraction",
     "world_extraction",

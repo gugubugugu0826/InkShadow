@@ -646,11 +646,11 @@ export function DataTransferPanel({
   }
 
   return (
-    <Card id="data-transfer" className="settings-card--wide">
+    <Card id="data-transfer" className="settings-card--wide" aria-labelledby="data-transfer-title">
       <CardHeader>
         <div className="card-heading-row">
           <div>
-            <CardTitle headingLevel={2}>
+            <CardTitle id="data-transfer-title" data-settings-anchor-focus headingLevel={2}>
               {mode === "import-only" ? "安全导入原作" : "导入与导出"}
             </CardTitle>
             <CardDescription>

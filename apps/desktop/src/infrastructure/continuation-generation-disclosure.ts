@@ -68,7 +68,7 @@ export async function prepareContinuationGenerationDisclosure(
   const sentScopeLabel =
     selectedSourceKinds.length === 0 ? "当前章节" : "当前章节和本次明确选中的故事资料";
   const fingerprint = await providerActionFingerprint({
-    action: "continuation",
+    action: plan.modelTask,
     projectId: plan.projectId,
     chapterId: plan.chapterId,
     baseVersionId: plan.baseVersionId,
@@ -93,10 +93,10 @@ export async function prepareContinuationGenerationDisclosure(
     privacy:
       inspection.dataDestination === "local"
         ? "正文和本次选中的故事资料只发送给当前已验证的本机模型。"
-        : "正文、续写要求和本次选中的故事资料会发送到所选 AI 服务。",
+        : `正文、${plan.actionLabel}要求和本次选中的故事资料会发送到所选 AI 服务。`,
     sends: Object.freeze([
       sentScopeLabel,
-      "本次续写长度与收束要求",
+      `本次${plan.actionLabel}的长度与收束要求`,
       "本次挑选的故事资料：必要的大纲、已确认设定与相关正文片段",
     ]),
     maximumProviderCalls: 1 as const,
@@ -122,7 +122,7 @@ export function continuationInspectionRequest(
     plan.contextCompilation.projectPrivacy,
   );
   return Object.freeze({
-    task: "continuation",
+    task: plan.modelTask,
     messages: plan.messages,
     maximumOutputTokens: plan.maximumOutputTokens,
     temperature: 0.8,
