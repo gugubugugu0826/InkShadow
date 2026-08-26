@@ -1498,6 +1498,144 @@ describe("unified story fact SQLite store", () => {
     if (!stale.ok) expect(stale.error.code).toBe("STORY_FACT_SOURCE_FENCE_FAILED");
   });
 
+  it("reuses one pending local fact across retries and restart without replacing author revisions", async () => {
+    const executor = createExecutor();
+    const chapterId = uuid(120);
+    const versionId = uuid(121);
+    const content = "周望五十七岁。";
+    const reference = `direct-local:inkshadow.direct-local-story-fact.v1:${chapterId}:utf16:0-${String(content.length)}:${"d".repeat(64)}:character_profile:${versionId}:sha256:${"a".repeat(64)}`;
+    seedChapter(executor, chapterId, versionId, content);
+    const pendingFact = (
+      id: string,
+      factType: string,
+      observedAt: string,
+      evidenceReference = reference,
+      factContent = content,
+    ) =>
+      unwrap(
+        StoryFact.create({
+          id,
+          projectId: PROJECT_ID,
+          factType,
+          contentText: factContent,
+          structuredValue: {
+            schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+            replacementKey: `direct-local:${chapterId}:${factType}:${"d".repeat(64)}`,
+            payload: {
+              schemaVersion: "inkshadow.direct-local-story-fact.v1",
+              classification: "ordinary",
+              evidence: { excerptDigest: "d".repeat(64), observedAt },
+            },
+          },
+          source: {
+            kind: "chapter_span",
+            reference: evidenceReference,
+            chapterId,
+            versionId,
+            startOffset: 0,
+            endOffset: content.length,
+            sourceLength: content.length,
+            excerpt: content,
+          },
+          confidence: 0.98,
+          status: "unconfirmed",
+          origin: "system",
+          needsReview: true,
+          humanConfirmed: false,
+          now: observedAt,
+        }),
+      );
+    const fence = { chapterId, expectedCurrentVersionId: versionId } as const;
+    const first = pendingFact(uuid(122), "character_profile", T0);
+    expect(
+      unwrap(await new SqliteStoryFactStore(executor).createWithAuthorityFence(first, fence)),
+    ).toMatchObject({ created: true, fact: { id: first.id } });
+
+    const replay = unwrap(
+      await new SqliteStoryFactStore(executor).createWithAuthorityFence(
+        pendingFact(uuid(123), "character_profile", T1, `${reference}:retry`, `  ${content}  `),
+        fence,
+      ),
+    );
+    expect(replay).toMatchObject({ created: false, fact: { id: first.id } });
+    expect(
+      unwrap(
+        await new SqliteStoryFactStore(executor).listByProjectId(unwrap(parseUuidV7(PROJECT_ID))),
+      ),
+    ).toHaveLength(1);
+
+    const distinctContent = pendingFact(
+      uuid(128),
+      "character_profile",
+      T1,
+      reference,
+      "周望负责钟楼的日常维护。",
+    );
+    expect(
+      unwrap(
+        await new SqliteStoryFactStore(executor).createWithAuthorityFence(distinctContent, fence),
+      ),
+    ).toMatchObject({ created: true, fact: { id: distinctContent.id } });
+
+    const authorRevision = unwrap(
+      replay.fact.editStagedAsUser({
+        contentText: "周望五十八岁。",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: T2,
+      }),
+    );
+    expect((await new SqliteStoryFactStore(executor).save(authorRevision, 1)).ok).toBe(true);
+    const afterAuthorEdit = unwrap(
+      await new SqliteStoryFactStore(executor).createWithAuthorityFence(
+        pendingFact(uuid(124), "character_profile", T3),
+        fence,
+      ),
+    );
+    expect(afterAuthorEdit.created).toBe(false);
+    expect(afterAuthorEdit.fact.toSnapshot()).toMatchObject({
+      id: first.id,
+      contentText: "周望五十八岁。",
+      origin: "user",
+      revision: 2,
+    });
+
+    const historicalDuplicate = pendingFact(uuid(126), "character_profile", T3);
+    expect((await new SqliteStoryFactStore(executor).create(historicalDuplicate)).ok).toBe(true);
+    const afterHistoricalDuplicate = unwrap(
+      await new SqliteStoryFactStore(executor).createWithAuthorityFence(
+        pendingFact(uuid(127), "character_profile", T3),
+        fence,
+      ),
+    );
+    expect(afterHistoricalDuplicate.created).toBe(false);
+    expect(afterHistoricalDuplicate.fact.id).toBe(first.id);
+    expect(
+      unwrap(
+        await new SqliteStoryFactStore(executor).listByProjectId(unwrap(parseUuidV7(PROJECT_ID))),
+      ).filter((fact) => fact.toSnapshot().factType === "character_profile"),
+    ).toHaveLength(3);
+
+    const sharedEvidenceDifferentType = pendingFact(uuid(125), "location_setting", T3, reference);
+    expect(
+      unwrap(
+        await new SqliteStoryFactStore(executor).createWithAuthorityFence(
+          sharedEvidenceDifferentType,
+          fence,
+        ),
+      ).created,
+    ).toBe(true);
+    expect(
+      unwrap(
+        await new SqliteStoryFactStore(executor).listByProjectId(unwrap(parseUuidV7(PROJECT_ID))),
+      ),
+    ).toHaveLength(4);
+    expect(unwrap(await new SqliteStoryFactStore(executor).listRevisions(first.id))).toHaveLength(
+      2,
+    );
+  });
+
   it("atomically undoes supplemental dispositions, recovers retries, and fails closed on stale authority", async () => {
     const executor = createExecutor();
     const store = new SqliteStoryFactStore(executor);

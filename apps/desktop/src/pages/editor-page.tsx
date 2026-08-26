@@ -662,6 +662,11 @@ interface CandidateReadWarning {
   readonly isolatedCount: number | null;
 }
 
+interface VersionReadWarning {
+  readonly diagnosticId: string;
+  readonly isolatedCount: number;
+}
+
 const EDITOR_AUTHORITY_READ_STAGES: readonly EditorReadStage[] = Object.freeze([
   "project",
   "chapter",
@@ -733,54 +738,96 @@ function withEditorReadRowReference(
   return error;
 }
 
-function validateChapterVersionChain(
-  versions: readonly Readonly<{
-    id: string;
-    parentVersionId: string | null;
-    sequence: number;
-    contentChecksum: string;
-  }>[],
-  currentVersionId: string,
-): UiActionError | null {
-  const ordered = [...versions].sort((left, right) => left.sequence - right.sequence);
-  for (let index = 0; index < ordered.length; index += 1) {
-    const version = ordered[index];
-    if (version === undefined) continue;
-    const expectedSequence = index + 1;
-    if (version.sequence !== expectedSequence) {
-      return withEditorReadRowReference(
-        new UiActionError(
-          "VERSION_SEQUENCE_CHAIN_INVALID",
-          "不可变版本的顺序不连续。为保护正文，已停止写入。",
-        ),
-        chapterVersionDiagnosticReference(version),
-      );
-    }
-    const previous = index === 0 ? null : (ordered[index - 1] ?? null);
-    const expectedParentVersionId = previous?.id ?? null;
-    if (version.parentVersionId !== expectedParentVersionId) {
-      return withEditorReadRowReference(
-        new UiActionError(
-          "VERSION_PARENT_CHAIN_INVALID",
-          "不可变版本的前后关系不一致。为保护正文，已停止写入。",
-        ),
-        chapterVersionDiagnosticReference(version),
-      );
-    }
-  }
+type ChapterVersionChainEntry = Readonly<{
+  id: string;
+  parentVersionId: string | null;
+  sequence: number;
+  contentChecksum: string;
+}>;
 
-  const currentVersion = ordered.find((version) => version.id === currentVersionId);
-  const chainTip = ordered[ordered.length - 1];
-  if (currentVersion !== undefined && chainTip !== undefined && chainTip.id !== currentVersionId) {
-    return withEditorReadRowReference(
-      new UiActionError(
-        "CURRENT_VERSION_NOT_CHAIN_TIP",
-        "当前正文没有指向不可变版本链的最新一版。为保护正文，已停止写入。",
-      ),
-      chapterVersionDiagnosticReference(currentVersion),
-    );
+type ChapterVersionChainAnalysis =
+  | Readonly<{
+      ok: true;
+      isolated: readonly ChapterVersionChainEntry[];
+    }>
+  | Readonly<{ ok: false; error: UiActionError }>;
+const VERSION_CHAIN_WRITE_STOP = "已停止写入。";
+const CURRENT_VERSION_READ_FAILURE = `当前版本无法安全读取。${VERSION_CHAIN_WRITE_STOP}`;
+
+function invalidChapterVersionChain(
+  code: string,
+  message: string,
+  entry?: ChapterVersionChainEntry,
+): ChapterVersionChainAnalysis {
+  const error = new UiActionError(code, message);
+  return Object.freeze({
+    ok: false as const,
+    error:
+      entry === undefined
+        ? error
+        : withEditorReadRowReference(error, chapterVersionDiagnosticReference(entry)),
+  });
+}
+
+function analyzeChapterVersionChain(
+  versions: readonly ChapterVersionChainEntry[],
+  current: ChapterVersionChainEntry,
+  chapterRevision: number,
+): ChapterVersionChainAnalysis {
+  const byId = new Map<string, ChapterVersionChainEntry>();
+  for (const version of versions) {
+    if (byId.has(version.id)) {
+      return invalidChapterVersionChain(
+        "VERSION_ID_DUPLICATED",
+        `版本标识重复。${VERSION_CHAIN_WRITE_STOP}`,
+        version,
+      );
+    }
+    byId.set(version.id, version);
   }
-  return null;
+  const authorityIds = new Set<string>();
+  let expectedSequence = chapterRevision;
+  let cursor: ChapterVersionChainEntry = current;
+  for (;;) {
+    if (authorityIds.has(cursor.id)) {
+      return invalidChapterVersionChain(
+        "VERSION_PARENT_CHAIN_CYCLE",
+        `版本链循环。${VERSION_CHAIN_WRITE_STOP}`,
+        cursor,
+      );
+    }
+    authorityIds.add(cursor.id);
+    if (cursor.sequence !== expectedSequence) {
+      return invalidChapterVersionChain(
+        "VERSION_SEQUENCE_CHAIN_INVALID",
+        `版本序号不连续。${VERSION_CHAIN_WRITE_STOP}`,
+        cursor,
+      );
+    }
+    const parentId = cursor.parentVersionId;
+    if ((expectedSequence === 1) !== (parentId === null)) {
+      return invalidChapterVersionChain(
+        "VERSION_PARENT_CHAIN_INVALID",
+        `版本父链不完整。${VERSION_CHAIN_WRITE_STOP}`,
+        cursor,
+      );
+    }
+    if (parentId === null) break;
+    const parent = byId.get(parentId);
+    if (parent === undefined) {
+      return invalidChapterVersionChain(
+        "VERSION_PARENT_MISSING",
+        `父版本缺失。${VERSION_CHAIN_WRITE_STOP}`,
+        cursor,
+      );
+    }
+    expectedSequence -= 1;
+    cursor = parent;
+  }
+  return Object.freeze({
+    ok: true as const,
+    isolated: Object.freeze(versions.filter((version) => !authorityIds.has(version.id))),
+  });
 }
 
 export function EditorPage() {
@@ -840,6 +887,7 @@ export function EditorPage() {
   const [candidateReadWarning, setCandidateReadWarning] = useState<CandidateReadWarning | null>(
     null,
   );
+  const [versionReadWarning, setVersionReadWarning] = useState<VersionReadWarning | null>(null);
   const [candidateRowsRetrying, setCandidateRowsRetrying] = useState(false);
   const [recovered, setRecovered] = useState(false);
   const [recoveryDraft, setRecoveryDraft] = useState<RecoveryDraft | null>(null);
@@ -981,6 +1029,7 @@ export function EditorPage() {
   const [privacyChangeTarget, setPrivacyChangeTarget] = useState<ChapterPrivacyMode | null>(null);
   const [privacyChangeBusy, setPrivacyChangeBusy] = useState(false);
   const chapterRef = useRef<Chapter | null>(null);
+  const authorityWriteBlockedRef = useRef(false);
   const contentRef = useRef("");
   const cursorRef = useRef(0);
   const selectionRef = useRef<EditorSelection>({ start: 0, end: 0 });
@@ -1250,6 +1299,24 @@ export function EditorPage() {
     [recordEditorReadFailure],
   );
 
+  const reportVersionReadIsolation = useCallback(
+    (isolatedVersions: readonly ChapterVersionChainEntry[]) => {
+      const cause = new UiActionError(
+        "NON_CURRENT_VERSION_HISTORY_WRITE_BLOCKED",
+        "版本历史存在分叉，已停止写入。",
+      );
+      const incident = recordEditorReadFailure("chapter_versions", cause, {
+        rowReferences: isolatedVersions.map(chapterVersionDiagnosticReference),
+        reasonCodeChain: ["NON_CURRENT_VERSION_HISTORY_WRITE_BLOCKED"],
+      });
+      setVersionReadWarning({
+        diagnosticId: incident.diagnosticId,
+        isolatedCount: isolatedVersions.length,
+      });
+    },
+    [recordEditorReadFailure],
+  );
+
   const rejectDirectionCandidateSafely = useCallback(
     async (candidateToReject: AiCandidate | null): Promise<void> => {
       if (
@@ -1357,6 +1424,7 @@ export function EditorPage() {
     const failAuthorityRead = (stage: EditorReadStage, cause: unknown): void => {
       if (!isCurrentLoad()) return;
       clearScheduledPersistence();
+      authorityWriteBlockedRef.current = true;
       chapterRef.current = null;
       directionCandidateRef.current = null;
       setProject(null);
@@ -1368,6 +1436,7 @@ export function EditorPage() {
       setCandidateHistory([]);
       setDirectionOptions([]);
       setDirectGenerationUndo(null);
+      setVersionReadWarning(null);
       const incident = recordEditorReadFailure(stage, cause);
       setLoadDiagnosticId(incident.diagnosticId);
       setError(cause);
@@ -1388,6 +1457,8 @@ export function EditorPage() {
     chapterRef.current = null;
     setLoadDiagnosticId(null);
     setCandidateReadWarning(null);
+    setVersionReadWarning(null);
+    authorityWriteBlockedRef.current = false;
     setError(null);
     setContinuationPreference(loadEditorContinuationPreference(window.localStorage, projectId));
     setPageState("loading");
@@ -1486,15 +1557,21 @@ export function EditorPage() {
     if (currentVersion === undefined) {
       failAuthorityRead(
         "chapter_versions",
-        new UiActionError(
-          "CURRENT_VERSION_MISSING",
-          "当前正文对应的不可变版本暂时无法安全读取。为保护正文，已停止写入。",
-        ),
+        new UiActionError("CURRENT_VERSION_MISSING", CURRENT_VERSION_READ_FAILURE),
       );
       return;
     }
     const versionSnapshots = loadedVersions.map((version) => version.toSnapshot());
     const currentVersionSnapshot = currentVersion.toSnapshot();
+    const versionChain = analyzeChapterVersionChain(
+      versionSnapshots,
+      currentVersionSnapshot,
+      loadedChapter.revision,
+    );
+    if (!versionChain.ok) {
+      failAuthorityRead("chapter_versions", versionChain.error);
+      return;
+    }
     if (
       versionSnapshots.some(
         (version) => version.projectId !== projectId || version.chapterId !== chapterId,
@@ -1507,14 +1584,6 @@ export function EditorPage() {
           "当前正文版本与项目或章节不一致。为保护正文，已停止写入。",
         ),
       );
-      return;
-    }
-    const versionChainFailure = validateChapterVersionChain(
-      versionSnapshots,
-      loadedChapter.currentVersionId,
-    );
-    if (versionChainFailure !== null) {
-      failAuthorityRead("chapter_versions", versionChainFailure);
       return;
     }
     if (currentVersionSnapshot.content !== loadedChapter.content) {
@@ -1567,6 +1636,13 @@ export function EditorPage() {
       readStages: EDITOR_AUTHORITY_READ_STAGES,
     });
     setLoadDiagnosticId(null);
+    if (versionChain.isolated.length > 0) {
+      authorityWriteBlockedRef.current = true;
+      reportVersionReadIsolation(versionChain.isolated);
+    } else {
+      authorityWriteBlockedRef.current = false;
+      setVersionReadWarning(null);
+    }
 
     let loadedCandidates: readonly AiCandidate[] = [];
     if (!candidatesResult.ok) {
@@ -1686,15 +1762,10 @@ export function EditorPage() {
     if (restoredGenerationAction !== null) setLastGenerationAction(restoredGenerationAction);
     setCandidatePresentation(presentation);
 
-    if (draft !== null && draft.baseRevision !== loadedChapter.revision) {
-      setContent(loadedChapter.content);
-      contentRef.current = loadedChapter.content;
-      resetEditorHistory();
-      setSaveState("conflict");
-      setError(new Error("恢复草稿基于旧版本，已保留稳定正文；请先导出草稿再解决冲突。"));
-      setPageState("conflict");
-      return;
-    }
+    const olderRecoveryDraftNotice =
+      draft !== null && draft.baseRevision !== loadedChapter.revision
+        ? "旧草稿已保留，请选择如何处理。"
+        : null;
 
     const initialContent = loadedChapter.content;
     const loadedView = loadEditorView(
@@ -1715,11 +1786,16 @@ export function EditorPage() {
     resetEditorHistory();
     setRecovered(false);
     setRecoveryDraft(draft);
-    setRecoveryDecisionOpen(draft !== null);
+    setRecoveryDecisionOpen(draft !== null && versionChain.isolated.length === 0);
     setSaveState("saved_local");
     const directOpeningRouteNotice = directOpeningRouteNoticeRef.current;
     directOpeningRouteNoticeRef.current = null;
-    setEditorNotice(journeyRepairNotice ?? candidateSelection.notice ?? directOpeningRouteNotice);
+    setEditorNotice(
+      olderRecoveryDraftNotice ??
+        journeyRepairNotice ??
+        candidateSelection.notice ??
+        directOpeningRouteNotice,
+    );
     setFindStatus(null);
     setError(null);
     setPageState("ready");
@@ -1764,6 +1840,7 @@ export function EditorPage() {
     recordEditorReadFailure,
     rejectDirectionCandidateSafely,
     reportCandidateReadFailure,
+    reportVersionReadIsolation,
     requestedCandidateId,
     resetEditorHistory,
     runtime,
@@ -1971,7 +2048,11 @@ export function EditorPage() {
   const persistDraft = useCallback(
     async (snapshot: string, cursorOffset: number): Promise<void> => {
       const stableChapter = chapterRef.current;
-      if (stableChapter === null || snapshot === stableChapter.content) {
+      if (
+        authorityWriteBlockedRef.current ||
+        stableChapter === null ||
+        snapshot === stableChapter.content
+      ) {
         return;
       }
       const result = await runtime.useCases.editChapter.execute({
@@ -1999,7 +2080,7 @@ export function EditorPage() {
       reason: "autosave" | "manual",
     ): Promise<void> => {
       const stableChapter = chapterRef.current;
-      if (stableChapter === null) {
+      if (authorityWriteBlockedRef.current || stableChapter === null) {
         return;
       }
       const organizeLocalStoryFacts =
@@ -2443,7 +2524,7 @@ export function EditorPage() {
   ]);
 
   const manualSave = useCallback(async (): Promise<void> => {
-    if (project?.status !== "active" || composingRef.current) {
+    if (authorityWriteBlockedRef.current || project?.status !== "active" || composingRef.current) {
       return;
     }
     clearScheduledPersistence();
@@ -2559,7 +2640,7 @@ export function EditorPage() {
 
   const recoverPendingDraft = useCallback((): void => {
     const draft = recoveryDraft;
-    if (draft === null) {
+    if (authorityWriteBlockedRef.current || draft === null) {
       return;
     }
     const snapshot = draft.toSnapshot();
@@ -2583,7 +2664,7 @@ export function EditorPage() {
   const keepStableChapter = useCallback(async (): Promise<void> => {
     const draft = recoveryDraft;
     const stableChapter = chapterRef.current;
-    if (draft === null || stableChapter === null) {
+    if (authorityWriteBlockedRef.current || draft === null || stableChapter === null) {
       return;
     }
     setRecoveryDecisionBusy(true);
@@ -2607,6 +2688,7 @@ export function EditorPage() {
     const draft = recoveryDraft;
     const stableChapter = chapterRef.current;
     if (
+      authorityWriteBlockedRef.current ||
       draft === null ||
       stableChapter === null ||
       projectId === null ||
@@ -3004,6 +3086,7 @@ export function EditorPage() {
     directDirection: string | null = null,
   ): Promise<void> {
     if (
+      authorityWriteBlockedRef.current ||
       candidateGenerationFlightRef.current !== "idle" ||
       chapterId === null ||
       saveState === "dirty" ||
@@ -3371,6 +3454,7 @@ export function EditorPage() {
   ): Promise<void> {
     const stableChapter = chapterRef.current;
     if (
+      authorityWriteBlockedRef.current ||
       stableChapter === null ||
       runtime.mode !== "tauri" ||
       !editorClean ||
@@ -4031,6 +4115,9 @@ export function EditorPage() {
   }
 
   async function saveCandidateRevision(): Promise<void> {
+    if (authorityWriteBlockedRef.current) {
+      return;
+    }
     if (
       candidate?.status !== "ready" ||
       !candidateReviewDraftValid ||
@@ -4064,7 +4151,11 @@ export function EditorPage() {
     candidateOverride: AiCandidate | null = candidate,
     completionNotice: string | null = null,
   ): Promise<boolean> {
-    if (candidateOverride?.status !== "ready" || candidateDecisionFenceRef.current) {
+    if (
+      authorityWriteBlockedRef.current ||
+      candidateOverride?.status !== "ready" ||
+      candidateDecisionFenceRef.current
+    ) {
       return false;
     }
     candidateDecisionFenceRef.current = true;
@@ -4346,6 +4437,7 @@ export function EditorPage() {
     const selected = selectedOverride;
     const stableChapter = chapterRef.current;
     if (
+      authorityWriteBlockedRef.current ||
       selected === null ||
       stableChapter === null ||
       project?.status !== "active" ||
@@ -4504,6 +4596,9 @@ export function EditorPage() {
   }
 
   async function retainCandidate(nextCandidate: AiCandidate): Promise<void> {
+    if (authorityWriteBlockedRef.current) {
+      return;
+    }
     if (nextCandidate.status !== "ready" || candidateDecisionFenceRef.current) {
       return;
     }
@@ -4533,7 +4628,11 @@ export function EditorPage() {
   async function rejectCandidate(
     candidateOverride: AiCandidate | null = candidate,
   ): Promise<boolean> {
-    if (candidateOverride?.status !== "ready" || candidateDecisionFenceRef.current) {
+    if (
+      authorityWriteBlockedRef.current ||
+      candidateOverride?.status !== "ready" ||
+      candidateDecisionFenceRef.current
+    ) {
       return false;
     }
     candidateDecisionFenceRef.current = true;
@@ -4581,6 +4680,7 @@ export function EditorPage() {
   async function confirmChapterPrivacyChange(): Promise<void> {
     const stableChapter = chapterRef.current;
     if (
+      authorityWriteBlockedRef.current ||
       stableChapter === null ||
       privacyChangeTarget === null ||
       stableChapter.privacyMode === privacyChangeTarget ||
@@ -4668,7 +4768,7 @@ export function EditorPage() {
   const ordinaryGenerationError =
     generationError === null ? null : projectOrdinaryUiError(generationError);
   const privateGenerationBlocked = normalizedGenerationError?.code === "PRIVATE_CHAPTER_LOCAL_ONLY";
-  const readonly = project?.status !== "active";
+  const readonly = project?.status !== "active" || versionReadWarning !== null;
   const candidateReady = candidate?.status === "ready";
   const candidateSuggestionLabel = directMode
     ? "创作结果"
@@ -4681,10 +4781,11 @@ export function EditorPage() {
   const candidateActionGap = !directMode && candidatePresentation === "ai" ? " " : "";
   const candidateIncomplete = candidate?.toSnapshot().incomplete ?? false;
   const canGenerateCandidate =
-    candidate === null ||
-    candidate.status === "accepted" ||
-    candidate.status === "rejected" ||
-    candidate.status === "expired";
+    !readonly &&
+    (candidate === null ||
+      candidate.status === "accepted" ||
+      candidate.status === "rejected" ||
+      candidate.status === "expired");
   const usesNativeModel = runtime.mode === "tauri";
   const recoveryDraftSnapshot = recoveryDraft?.toSnapshot() ?? null;
   const candidateSelectedDecisions =
@@ -4704,13 +4805,14 @@ export function EditorPage() {
       ? undefined
       : versions.find((version) => version.id === candidate.baseVersionId);
   const candidateApplicationBlocked =
-    candidate !== null &&
-    (candidateBaseVersion === undefined ||
-      materializeCandidateDraft(
-        candidate,
-        candidateBaseVersion.toSnapshot(),
-        candidateReviewDraft,
-      ) === null);
+    readonly ||
+    (candidate !== null &&
+      (candidateBaseVersion === undefined ||
+        materializeCandidateDraft(
+          candidate,
+          candidateBaseVersion.toSnapshot(),
+          candidateReviewDraft,
+        ) === null));
   const candidatePartialDecisionComplete =
     candidateReviewDiffCurrent &&
     candidateDiff !== null &&
@@ -5079,8 +5181,12 @@ export function EditorPage() {
         {readonly && (
           <InlineAlert
             tone="info"
-            title="只读模式"
-            description="项目已归档或位于回收站，正文保持可读但不会写入。"
+            title={versionReadWarning === null ? "只读模式" : "正文已以只读方式打开"}
+            description={
+              versionReadWarning === null
+                ? "项目已归档或位于回收站，正文保持可读但不会写入。"
+                : "版本历史待恢复；正文可读，写入均停止。"
+            }
           />
         )}
         {recovered && (
@@ -5088,6 +5194,19 @@ export function EditorPage() {
             tone="warning"
             title="已恢复未提交草稿"
             description="草稿来自真实本地恢复记录；自动保存完成后会生成稳定版本。"
+          />
+        )}
+        {versionReadWarning !== null && (
+          <InlineAlert
+            tone="warning"
+            title="部分历史版本暂不可用"
+            description={`${String(
+              versionReadWarning.isolatedCount,
+            )} 条分叉版本已保留，正文只读。支持编号：${versionReadWarning.diagnosticId}。`}
+            action={{
+              label: "查看诊断与恢复",
+              onClick: () => void navigate("/settings#diagnostics"),
+            }}
           />
         )}
         {candidateReadWarning !== null && (
@@ -5823,8 +5942,11 @@ export function EditorPage() {
                   )}
                   {candidate.status === "rejected" && projectId !== null && chapterId !== null && (
                     <CandidateFeedbackControls
-                      busy={candidateBusy}
+                      busy={candidateBusy || readonly}
                       onSubmit={async ({ feedbackCode, customFeedback }) => {
+                        if (authorityWriteBlockedRef.current) {
+                          return;
+                        }
                         const outcome = await runtime.story.writingFeedback.recordExplicitFeedback({
                           idempotencyKey: `editor-candidate:${candidate.id}:${feedbackCode ?? "none"}:${customFeedback?.normalize("NFKC").trim().replace(/\s+/gu, " ") ?? "none"}`,
                           projectId,
@@ -5847,7 +5969,7 @@ export function EditorPage() {
                 candidates={displayedCandidateHistory}
                 now={runtime.clock.now()}
                 selectedCandidateId={candidate?.id ?? null}
-                busy={candidateBusy}
+                busy={candidateBusy || readonly}
                 onView={viewHistoricalCandidate}
                 onReject={(historyCandidate) =>
                   rejectCandidate(historyCandidate).then(() => undefined)
@@ -6272,7 +6394,7 @@ export function EditorPage() {
                     disabled={
                       versionRestoreBusy ||
                       !editorClean ||
-                      project?.status !== "active" ||
+                      readonly ||
                       chapter?.content === snapshot.content
                     }
                     onClick={() => setVersionToRestore(version)}
@@ -6394,7 +6516,7 @@ export function EditorPage() {
               </Button>
               <Button
                 loading={versionRestoreBusy}
-                disabled={!editorClean || project?.status !== "active"}
+                disabled={!editorClean || readonly}
                 onClick={() => void restoreSelectedVersion()}
               >
                 创建恢复版本
@@ -6476,7 +6598,7 @@ export function EditorPage() {
       {recoveryDraftSnapshot !== null && chapter !== null && (
         <CrashRecoveryDialog
           busy={recoveryDecisionBusy}
-          canSaveAsCopy={project?.status === "active" && !recoveryCopySaved}
+          canSaveAsCopy={!readonly && !recoveryCopySaved}
           draftContent={recoveryDraftSnapshot.content}
           draftUpdatedAt={recoveryDraftSnapshot.updatedAt}
           open={recoveryDecisionOpen}
@@ -6620,7 +6742,7 @@ export function EditorPage() {
                 value={candidateReviewDraft}
                 maxLength={5_000_000}
                 rows={10}
-                disabled={candidateBusy}
+                disabled={candidateBusy || readonly}
                 onChange={(event) => {
                   setCandidateReviewDraft(event.currentTarget.value);
                   setCandidateDiffDecisions({});
@@ -6634,6 +6756,7 @@ export function EditorPage() {
                   loading={candidateBusy}
                   disabled={
                     candidateBusy ||
+                    readonly ||
                     !candidateReviewDraftValid ||
                     candidateReviewDraft === candidate.content
                   }

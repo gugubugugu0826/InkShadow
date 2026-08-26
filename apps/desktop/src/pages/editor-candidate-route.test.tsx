@@ -8,6 +8,7 @@ import {
   err,
   ok,
   parseContentChecksum,
+  parseIsoUtcTimestamp,
   parseUuidV7,
   type AiCandidatePurpose,
   type AiCandidateApplicationIntent,
@@ -349,33 +350,85 @@ describe("editor candidate route selection", () => {
     expect(JSON.stringify(incident)).not.toContain(authorityContent);
   });
 
+  it("fails closed when the current immutable version reference cannot be resolved", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const authorityContent = "当前版本引用缺失时必须保持的正文。";
+    const { chapter, project } = await seedChapter(runtime, authorityContent);
+    vi.spyOn(runtime.useCases.listChapterVersions, "execute").mockResolvedValue(ok([]));
+
+    renderEditor(runtime, project, chapter);
+
+    expect(await screen.findByText(/支持编号：UI-/u)).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "章节正文" })).not.toBeInTheDocument();
+    const incident = readSafeUiRouteIncidents(runtime).find(
+      ({ readStage, recovered }) => readStage === "chapter_versions" && !recovered,
+    );
+    expect(incident?.reasonCodeChain).toContain("CURRENT_VERSION_MISSING");
+    expect(JSON.stringify(incident)).not.toContain(authorityContent);
+  });
+
+  it("fails closed when the current immutable version belongs to another chapter", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const authorityContent = "跨章节版本引用不得打开或写入正文。";
+    const { chapter, project } = await seedChapter(runtime, authorityContent);
+    const listed = await runtime.useCases.listChapterVersions.execute(chapter.id);
+    if (!listed.ok || listed.value[0] === undefined) throw new Error("missing current version");
+    const foreignVersion = ChapterVersion.create({
+      ...listed.value[0].toSnapshot(),
+      chapterId: runtime.ids.next(),
+    });
+    if (!foreignVersion.ok) throw foreignVersion.error;
+    vi.spyOn(runtime.useCases.listChapterVersions, "execute").mockResolvedValue(
+      ok([foreignVersion.value]),
+    );
+
+    renderEditor(runtime, project, chapter);
+
+    expect(await screen.findByText(/支持编号：UI-/u)).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "章节正文" })).not.toBeInTheDocument();
+    const incident = readSafeUiRouteIncidents(runtime).find(
+      ({ readStage, recovered }) => readStage === "chapter_versions" && !recovered,
+    );
+    expect(incident?.reasonCodeChain).toContain("CURRENT_VERSION_SCOPE_MISMATCH");
+    expect(JSON.stringify(incident)).not.toContain(authorityContent);
+  });
+
   it("identifies the exact corrupted historical immutable version without recording正文", async () => {
     window.localStorage.clear();
     const runtime = createDevelopmentRuntime(window.localStorage);
     const authorityContent = "当前权威正文保持不变。";
+    const originalHistoricalContent = "第一版原始正文。";
     const historicalContent = "不得进入诊断的旧版本正文。";
-    const { chapter, project } = await seedChapter(runtime, authorityContent);
+    const { chapter, project } = await seedChapter(runtime, originalHistoricalContent);
+    const edited = await runtime.useCases.editChapter.execute({
+      chapterId: chapter.id,
+      expectedRevision: chapter.revision,
+      content: authorityContent,
+      cursorOffset: authorityContent.length,
+    });
+    if (!edited.ok) throw edited.error;
+    const saved = await runtime.useCases.saveChapter.execute({
+      chapterId: chapter.id,
+      expectedRevision: chapter.revision,
+      reason: "manual",
+    });
+    if (!saved.ok) throw saved.error;
     const listed = await runtime.useCases.listChapterVersions.execute(chapter.id);
-    if (!listed.ok || listed.value[0] === undefined) throw new Error("missing current version");
-    const currentVersion = listed.value[0];
-    const oldVersionId = parseUuidV7("018f0000-0000-7000-8000-000000000099");
-    if (!oldVersionId.ok) throw oldVersionId.error;
+    if (!listed.ok) throw listed.error;
+    const currentVersion = listed.value.find((version) => version.sequence === 2);
+    const originalHistoricalVersion = listed.value.find((version) => version.sequence === 1);
+    if (currentVersion === undefined || originalHistoricalVersion === undefined) {
+      throw new Error("missing current or historical version");
+    }
     const oldVersion = ChapterVersion.create({
-      ...currentVersion.toSnapshot(),
-      id: oldVersionId.value,
-      parentVersionId: null,
-      sequence: 1,
+      ...originalHistoricalVersion.toSnapshot(),
       content: historicalContent,
     });
     if (!oldVersion.ok) throw oldVersion.error;
-    const chainedCurrentVersion = ChapterVersion.create({
-      ...currentVersion.toSnapshot(),
-      parentVersionId: oldVersion.value.id,
-      sequence: 2,
-    });
-    if (!chainedCurrentVersion.ok) throw chainedCurrentVersion.error;
     vi.spyOn(runtime.useCases.listChapterVersions, "execute").mockResolvedValue(
-      ok([chainedCurrentVersion.value, oldVersion.value]),
+      ok([currentVersion, oldVersion.value]),
     );
     const originalHash = runtime.hasher.sha256.bind(runtime.hasher);
     vi.spyOn(runtime.hasher, "sha256").mockImplementation((content) =>
@@ -384,7 +437,7 @@ describe("editor candidate route selection", () => {
         : originalHash(content),
     );
 
-    renderEditor(runtime, project, chapter);
+    renderEditor(runtime, project, saved.value.chapter);
 
     expect(await screen.findByText(/支持编号：UI-/u)).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "章节正文" })).not.toBeInTheDocument();
@@ -396,7 +449,9 @@ describe("editor candidate route selection", () => {
         table: "chapter_versions",
         versionId: oldVersion.value.id,
         sequence: 1,
-        rowFingerprint: `version-${currentVersion.toSnapshot().contentChecksum.slice(0, 8)}`,
+        rowFingerprint: `version-${originalHistoricalVersion
+          .toSnapshot()
+          .contentChecksum.slice(0, 8)}`,
       },
     ]);
     const serialized = JSON.stringify(incident);
@@ -1755,6 +1810,159 @@ describe("editor candidate route selection", () => {
     expect(previousVersion?.toSnapshot().organizeLocalStoryFacts).toBe(false);
     expect(restoredVersion?.toSnapshot().organizeLocalStoryFacts).toBe(true);
     expect((await runtime.writingExperience.getOrInitialize()).mode).toBe("professional");
+  });
+
+  it("reopens the stable正文 and keeps an older recovery draft available for an explicit decision", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const seeded = await seedChapter(runtime, "第一版稳定正文");
+    const edited = await runtime.useCases.editChapter.execute({
+      chapterId: seeded.chapter.id,
+      expectedRevision: seeded.chapter.revision,
+      content: "第二版稳定正文",
+      cursorOffset: 7,
+    });
+    if (!edited.ok) throw edited.error;
+    const saved = await runtime.useCases.saveChapter.execute({
+      chapterId: seeded.chapter.id,
+      expectedRevision: seeded.chapter.revision,
+      reason: "manual",
+    });
+    if (!saved.ok) throw saved.error;
+    const olderDraft = edited.value.draft.update("第一版稳定正文", 7, runtime.clock.now());
+    if (!olderDraft.ok) throw olderDraft.error;
+    const restoredOldDraft = await runtime.repositories.recoveryDrafts.upsert(olderDraft.value);
+    if (!restoredOldDraft.ok) throw restoredOldDraft.error;
+
+    renderEditor(runtime, seeded.project, saved.value.chapter);
+
+    expect(await screen.findByRole("textbox", { name: "章节正文" })).toHaveValue("第二版稳定正文");
+    const recovery = await screen.findByRole("dialog", { name: "发现未完成的本地草稿" });
+    expect(within(recovery).getByText("第一版稳定正文")).toBeVisible();
+    expect(within(recovery).getByText("第二版稳定正文")).toBeVisible();
+    const persisted = await runtime.repositories.recoveryDrafts.findByChapterId(seeded.chapter.id);
+    expect(persisted.ok && persisted.value?.toSnapshot()).toEqual(olderDraft.value.toSnapshot());
+  });
+
+  it("opens the safe current chain read-only when a non-current immutable branch is present", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const seeded = await seedChapter(runtime, "第一版稳定正文");
+    const edited = await runtime.useCases.editChapter.execute({
+      chapterId: seeded.chapter.id,
+      expectedRevision: seeded.chapter.revision,
+      content: "第二版稳定正文",
+      cursorOffset: 7,
+    });
+    if (!edited.ok) throw edited.error;
+    const saved = await runtime.useCases.saveChapter.execute({
+      chapterId: seeded.chapter.id,
+      expectedRevision: seeded.chapter.revision,
+      reason: "manual",
+    });
+    if (!saved.ok) throw saved.error;
+    const listed = await runtime.useCases.listChapterVersions.execute(seeded.chapter.id);
+    if (!listed.ok) throw listed.error;
+    const firstVersion = listed.value.find((version) => version.sequence === 1);
+    if (firstVersion === undefined) throw new Error("没有找到第一版正文。");
+    const branchContent = "不属于当前权威链的旧分叉";
+    const branchChecksum = await runtime.hasher.sha256(branchContent);
+    if (!branchChecksum.ok) throw branchChecksum.error;
+    const branch = ChapterVersion.create({
+      id: runtime.ids.next(),
+      projectId: seeded.project.id,
+      chapterId: seeded.chapter.id,
+      parentVersionId: firstVersion.id,
+      sequence: saved.value.chapter.revision + 1,
+      content: branchContent,
+      contentChecksum: branchChecksum.value,
+      reason: "recovery",
+      organizeLocalStoryFacts: false,
+      sourceCandidateId: null,
+      createdAt: runtime.clock.now(),
+    });
+    if (!branch.ok) throw branch.error;
+    const oldTimestamp = parseIsoUtcTimestamp("2026-06-01T00:00:00.000Z");
+    if (!oldTimestamp.ok) throw oldTimestamp.error;
+    const historicalCandidate = AiCandidate.createStreaming({
+      id: runtime.ids.next(),
+      projectId: seeded.project.id,
+      chapterId: seeded.chapter.id,
+      source: "agent",
+      baseVersionId: saved.value.chapter.currentVersionId,
+      now: oldTimestamp.value,
+    });
+    if (!historicalCandidate.ok) throw historicalCandidate.error;
+    const candidateContent = "分叉存在时只能查看的隔离生成结果";
+    const candidateChecksum = await runtime.hasher.sha256(candidateContent);
+    if (!candidateChecksum.ok) throw candidateChecksum.error;
+    const readyCandidate = historicalCandidate.value.markReady(
+      candidateContent,
+      candidateChecksum.value,
+      oldTimestamp.value,
+    );
+    if (!readyCandidate.ok) throw readyCandidate.error;
+    const candidateCreated = await runtime.repositories.aiCandidates.create(readyCandidate.value);
+    if (!candidateCreated.ok) throw candidateCreated.error;
+    const branchSnapshot = branch.value.toSnapshot();
+    vi.spyOn(runtime.useCases.listChapterVersions, "execute").mockResolvedValue(
+      ok(Object.freeze([branch.value, ...listed.value])),
+    );
+    const reviseCandidate = vi.spyOn(runtime.useCases.reviseCandidate, "execute");
+    const retainCandidate = vi.spyOn(runtime.useCases.retainCandidate, "execute");
+    const user = userEvent.setup();
+
+    renderEditor(
+      runtime,
+      seeded.project,
+      saved.value.chapter,
+      `?candidate=${readyCandidate.value.id}`,
+    );
+
+    const editor = await screen.findByRole("textbox", { name: "章节正文" });
+    expect(editor).toHaveValue(saved.value.chapter.content);
+    expect(editor).toHaveAttribute("readonly");
+    expect(await screen.findByText("部分历史版本暂不可用")).toBeVisible();
+    expect(screen.getByText(/1 条分叉版本已保留，正文只读/u)).toBeVisible();
+    expect(screen.getByRole("button", { name: "查看版本历史" })).toBeEnabled();
+    const incident = readSafeUiRouteIncidents(runtime).find(
+      ({ reasonCodeChain, recovered }) =>
+        reasonCodeChain.includes("NON_CURRENT_VERSION_HISTORY_WRITE_BLOCKED") && !recovered,
+    );
+    expect(incident?.rowReferences).toEqual([
+      {
+        table: "chapter_versions",
+        versionId: branch.value.id,
+        sequence: branch.value.sequence,
+        rowFingerprint: `version-${branchSnapshot.contentChecksum.slice(0, 8)}`,
+      },
+    ]);
+    const serializedIncident = JSON.stringify(incident);
+    expect(serializedIncident).not.toContain(branchSnapshot.content);
+    expect(serializedIncident).not.toContain(saved.value.chapter.content);
+
+    await user.click(screen.getByRole("button", { name: /查看并使用|比较.*建议/u }));
+    const review = await screen.findByRole("dialog", {
+      name: /查看创作结果与正文|比较.*建议与正文/u,
+    });
+    const candidateEditor = within(review).getByRole("textbox", { name: /可编辑的/u });
+    const saveCandidateRevision = within(review).getByRole("button", {
+      name: "保存建议修改",
+    });
+    expect(candidateEditor).toBeDisabled();
+    expect(saveCandidateRevision).toBeDisabled();
+    fireEvent.click(saveCandidateRevision);
+    expect(reviseCandidate).not.toHaveBeenCalled();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(review).not.toBeInTheDocument());
+    await user.click(screen.getByText("历史生成结果（1）"));
+    const retainHistoricalCandidate = screen.getByRole("button", {
+      name: "继续保留第 1 条生成结果",
+    });
+    expect(retainHistoricalCandidate).toBeDisabled();
+    fireEvent.click(retainHistoricalCandidate);
+    expect(retainCandidate).not.toHaveBeenCalled();
   });
 
   it("still organizes a restored direct-mode version when background task registration fails", async () => {

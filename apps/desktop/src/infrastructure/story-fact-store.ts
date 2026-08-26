@@ -5,9 +5,11 @@ import {
   MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES,
   StoryCoreError,
   StoryFact,
+  directLocalPendingEvidenceIdentity,
   isRebuildableStoryFactType,
   FormalStoryRecord,
   MemoryRecord,
+  matchesDirectLocalPendingEvidence,
   err,
   ok,
   parseIsoUtcTimestamp,
@@ -564,6 +566,19 @@ function sameSubmission(left: StoryFactSnapshot, right: StoryFactSnapshot): bool
   );
 }
 
+function compareDirectLocalEvidenceSurvivor(
+  left: StoryFactSnapshot,
+  right: StoryFactSnapshot,
+): number {
+  const preference = (snapshot: StoryFactSnapshot): number =>
+    snapshot.userConfirmed || snapshot.origin === "user" ? 0 : snapshot.deprecated ? 2 : 1;
+  return (
+    preference(left) - preference(right) ||
+    left.createdAt.localeCompare(right.createdAt) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
 function supplementalResolutionIdentity(snapshot: StoryFactSnapshot): Readonly<{
   readonly key: string;
   readonly action: "ignore" | "allow";
@@ -749,6 +764,24 @@ export class BrowserDevelopmentStoryFactStore
                 "A referenced character is missing, duplicated, or no longer an active confirmed formal fact.",
             }),
           );
+        }
+      }
+      const directLocalEvidence = directLocalPendingEvidenceIdentity(snapshot);
+      if (directLocalEvidence !== null) {
+        const existingEvidence = Object.values(database.facts)
+          .filter((candidate) => {
+            if (matchesDirectLocalPendingEvidence(candidate, directLocalEvidence)) return true;
+            const initial = database.revisions[candidate.id]?.find(
+              ({ snapshot: revisionSnapshot }) => revisionSnapshot.revision === 1,
+            )?.snapshot;
+            return (
+              initial !== undefined &&
+              matchesDirectLocalPendingEvidence(initial, directLocalEvidence)
+            );
+          })
+          .sort(compareDirectLocalEvidenceSurvivor)[0];
+        if (existingEvidence !== undefined) {
+          return ok(Object.freeze({ fact: requireFact(existingEvidence), created: false }));
         }
       }
       if (supplementalIdentity !== null) {

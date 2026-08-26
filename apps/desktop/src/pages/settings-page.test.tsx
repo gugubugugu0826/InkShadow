@@ -2276,6 +2276,85 @@ describe("SettingsPage model routing", () => {
     }
   });
 
+  it("restores the import and export section from a direct deep link in direct writing mode", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("direct", preference.revision);
+    const originalDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      renderRoute(runtime, "/settings#data-transfer");
+
+      const targetHeading = await screen.findByRole("heading", {
+        name: "导入与导出",
+        level: 2,
+      });
+      await waitFor(() => {
+        expect(targetHeading).toHaveFocus();
+        expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+      });
+      expect(screen.getByRole("link", { name: "导入与导出" })).toHaveAttribute(
+        "aria-current",
+        "location",
+      );
+      expect(screen.getByRole("heading", { name: "导出项目", level: 3 })).toBeVisible();
+    } finally {
+      if (originalDescriptor === undefined) {
+        Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+      } else {
+        Object.defineProperty(Element.prototype, "scrollIntoView", originalDescriptor);
+      }
+    }
+  });
+
+  it("opens the real diagnostics section from a direct writing mode deep link", async () => {
+    window.localStorage.clear();
+    seedWritingExperience("direct");
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const originalDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      renderRoute(runtime, "/settings#diagnostics");
+
+      expect(
+        await screen.findByRole("heading", { name: "全局设置", level: 1 }, { timeout: 5_000 }),
+      ).toBeVisible();
+      const targetHeading = await screen.findByRole("heading", {
+        name: "脱敏诊断包",
+        level: 2,
+      });
+      await waitFor(() => {
+        expect(targetHeading).toHaveFocus();
+        expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+      });
+      expect(screen.getByRole("link", { name: "诊断" })).toHaveAttribute(
+        "aria-current",
+        "location",
+      );
+      expect(screen.getByRole("button", { name: "下载脱敏诊断包" })).toBeVisible();
+      expect(screen.getByText("不含正文与密钥")).toBeVisible();
+      await expect(runtime.writingExperience.getOrInitialize()).resolves.toMatchObject({
+        mode: "direct",
+      });
+    } finally {
+      if (originalDescriptor === undefined) {
+        Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+      } else {
+        Object.defineProperty(Element.prototype, "scrollIntoView", originalDescriptor);
+      }
+    }
+  });
+
   it("persists an exact primary and fallback model snapshot for a role", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     await runtime.modelCenter.save({

@@ -325,6 +325,43 @@ const GLOBAL_SETTINGS_SECTION_LINKS = Object.freeze([
   { id: "data-transfer", label: "导入与导出" },
 ] as const);
 
+const DIRECT_SETTINGS_SECTION_LINKS = Object.freeze([
+  { id: "appearance", label: "外观" },
+  { id: "data-protection", label: "备份与恢复" },
+  { id: "writing-mode", label: "写作方式" },
+  { id: "data-transfer", label: "导入与导出" },
+] as const);
+
+function SettingsSectionNavigation({
+  links,
+  hash,
+  label,
+}: Readonly<{
+  links: readonly Readonly<{ id: string; label: string }>[];
+  hash: string;
+  label: string;
+}>) {
+  return (
+    <nav className="settings-actions settings-section-nav" aria-label={label}>
+      <span className="settings-section-nav__label">快速跳转</span>
+      {links.map(({ id, label: linkLabel }) => {
+        const active = hash === `#${id}`;
+        return (
+          <Link
+            key={id}
+            className="button-link button-link--secondary"
+            data-active={active}
+            aria-current={active ? "location" : undefined}
+            to={`/settings#${id}`}
+          >
+            {linkLabel}
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
 const MODEL_HUB_SCHEME_OPTIONS = [
   {
     value: "smart",
@@ -1080,9 +1117,18 @@ export function SettingsPage() {
     if (resolvedTargetId.length === 0) {
       return;
     }
-    const timeout = window.setTimeout(() => {
+    let cancelled = false;
+    let timeout = 0;
+    let attempt = 0;
+    const focusRequestedSection = (): void => {
+      if (cancelled) return;
       const target = document.getElementById(resolvedTargetId);
       if (target === null) {
+        if (attempt < 4) {
+          const retryDelay = 50 * 2 ** attempt;
+          attempt += 1;
+          timeout = window.setTimeout(focusRequestedSection, retryDelay);
+        }
         return;
       }
       const reduceMotion =
@@ -1099,8 +1145,12 @@ export function SettingsPage() {
         focusTarget.setAttribute("tabindex", "-1");
       }
       focusTarget.focus({ preventScroll: true });
-    }, 0);
-    return () => window.clearTimeout(timeout);
+    };
+    timeout = window.setTimeout(focusRequestedSection, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
   }, [expertMode, location.hash, modelHubTargetSection, writingExperience.preference?.mode]);
 
   async function selectStoredProfile(
@@ -4101,9 +4151,10 @@ export function SettingsPage() {
     void navigate("/settings#model-center");
   }
 
-  const directSettingsProjection = isModelHubView
-    ? null
-    : projectDirectSettingsPage(writingExperience);
+  const directSettingsProjection =
+    isModelHubView || location.hash === "#diagnostics"
+      ? null
+      : projectDirectSettingsPage(writingExperience);
   if (directSettingsProjection !== null) return directSettingsProjection;
 
   return (
@@ -4159,23 +4210,11 @@ export function SettingsPage() {
           })}
         </nav>
       ) : (
-        <nav className="settings-actions settings-section-nav" aria-label="全局设置快速跳转">
-          <span className="settings-section-nav__label">快速跳转</span>
-          {GLOBAL_SETTINGS_SECTION_LINKS.map(({ id, label }) => {
-            const active = location.hash === `#${id}`;
-            return (
-              <Link
-                key={id}
-                className="button-link button-link--secondary"
-                data-active={active}
-                aria-current={active ? "location" : undefined}
-                to={`/settings#${id}`}
-              >
-                {label}
-              </Link>
-            );
-          })}
-        </nav>
+        <SettingsSectionNavigation
+          links={GLOBAL_SETTINGS_SECTION_LINKS}
+          hash={location.hash}
+          label="全局设置快速跳转"
+        />
       )}
 
       {isModelHubView && connectionIntent !== null && (
@@ -7374,6 +7413,7 @@ function DirectSettingsPage({
   readonly writingExperience: ReturnType<typeof useWritingExperience>;
 }) {
   const runtime = useRuntime();
+  const location = useLocation();
   const {
     preference: appearance,
     resolvedSurface,
@@ -7493,18 +7533,11 @@ function DirectSettingsPage({
         </div>
       </header>
 
-      <nav className="settings-actions settings-section-nav" aria-label="设置快速跳转">
-        <span className="settings-section-nav__label">快速跳转</span>
-        <a className="button-link button-link--secondary" href="#appearance">
-          外观
-        </a>
-        <a className="button-link button-link--secondary" href="#data-protection">
-          备份与恢复
-        </a>
-        <a className="button-link button-link--secondary" href="#writing-mode">
-          写作方式
-        </a>
-      </nav>
+      <SettingsSectionNavigation
+        links={DIRECT_SETTINGS_SECTION_LINKS}
+        hash={location.hash}
+        label="设置快速跳转"
+      />
 
       <div className="settings-grid">
         <Card id="appearance">
@@ -7653,6 +7686,8 @@ function DirectSettingsPage({
             )}
           </CardContent>
         </Card>
+
+        <DataTransferPanel />
       </div>
 
       <Dialog

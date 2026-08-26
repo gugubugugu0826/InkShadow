@@ -36,7 +36,7 @@ test("opens character details and story evidence with every standard activation 
   await createChapter(page, "原文证据");
   const sourceText = "周望是钟楼的管理员。";
   await page.getByRole("textbox", { name: "章节正文" }).fill(sourceText);
-  await expect(page.getByRole("button", { name: "已保存到本地" })).toBeVisible({ timeout: 5_000 });
+  await waitForAuthoritativeChapterVersion(page, projectId, sourceText);
 
   await page.goto(`/#/projects/${projectId}/story`);
   await expect(page.getByRole("heading", { level: 2, name: "人物", exact: true })).toBeVisible();
@@ -104,39 +104,39 @@ test("opens character details and story evidence with every standard activation 
   await createDialog.getByRole("button", { name: "保存设定" }).click();
 
   const evidenceItem = page.getByText("旧城钟楼每天午夜倒转一次。", { exact: true }).locator("..");
-  const evidenceButton = evidenceItem.getByRole("button", { name: "查看证据" });
+  const evidenceButton = evidenceItem.getByRole("button", { name: "查看原文依据" });
   await expect(evidenceButton).toHaveAttribute("aria-expanded", "false");
   const regionId = await evidenceButton.getAttribute("aria-controls");
   expect(regionId).not.toBeNull();
 
   await evidenceButton.click();
-  const collapseEvidenceButton = evidenceItem.getByRole("button", { name: "收起证据" });
+  const collapseEvidenceButton = evidenceItem.getByRole("button", { name: "收起原文依据" });
   await expect(collapseEvidenceButton).toHaveAttribute("aria-expanded", "true");
   await expect(collapseEvidenceButton).toBeFocused();
-  const evidenceRegion = evidenceItem.getByRole("region", { name: "证据" });
+  const evidenceRegion = evidenceItem.getByRole("region", { name: "原文依据" });
   await expect(evidenceRegion).toHaveAttribute("id", regionId ?? "");
   await expect(evidenceRegion).toBeVisible();
 
   await collapseEvidenceButton.press("Enter");
-  const reopenedEvidenceButton = evidenceItem.getByRole("button", { name: "查看证据" });
+  const reopenedEvidenceButton = evidenceItem.getByRole("button", { name: "查看原文依据" });
   await expect(reopenedEvidenceButton).toHaveAttribute("aria-expanded", "false");
   await expect(reopenedEvidenceButton).toBeFocused();
   await expect(evidenceRegion).toHaveCount(0);
 
   await reopenedEvidenceButton.tap();
-  await expect(evidenceItem.getByRole("button", { name: "收起证据" })).toHaveAttribute(
+  await expect(evidenceItem.getByRole("button", { name: "收起原文依据" })).toHaveAttribute(
     "aria-expanded",
     "true",
   );
-  await expect(evidenceItem.getByRole("region", { name: "证据" })).toBeVisible();
+  await expect(evidenceItem.getByRole("region", { name: "原文依据" })).toBeVisible();
 
-  await evidenceItem.getByRole("button", { name: "收起证据" }).tap();
+  await evidenceItem.getByRole("button", { name: "收起原文依据" }).tap();
   await expect(reopenedEvidenceButton).toHaveAttribute("aria-expanded", "false");
   await expect(reopenedEvidenceButton).toBeFocused();
 
   await reopenedEvidenceButton.press("Space");
-  await expect(evidenceItem.getByRole("region", { name: "证据" })).toBeVisible();
-  await evidenceItem.getByRole("button", { name: "收起证据" }).press("Space");
+  await expect(evidenceItem.getByRole("region", { name: "原文依据" })).toBeVisible();
+  await evidenceItem.getByRole("button", { name: "收起原文依据" }).press("Space");
   await expect(reopenedEvidenceButton).toHaveAttribute("aria-expanded", "false");
   await expect(reopenedEvidenceButton).toBeFocused();
 
@@ -145,9 +145,9 @@ test("opens character details and story evidence with every standard activation 
     button.blur();
     button.click();
   });
-  await expect(evidenceItem.getByRole("region", { name: "证据" })).toBeVisible();
-  await expect(evidenceItem.getByRole("button", { name: "收起证据" })).toBeFocused();
-  await evidenceItem.getByRole("button", { name: "收起证据" }).evaluate((button) => {
+  await expect(evidenceItem.getByRole("region", { name: "原文依据" })).toBeVisible();
+  await expect(evidenceItem.getByRole("button", { name: "收起原文依据" })).toBeFocused();
+  await evidenceItem.getByRole("button", { name: "收起原文依据" }).evaluate((button) => {
     if (!(button instanceof HTMLButtonElement)) throw new Error("证据入口不是按钮。");
     button.click();
   });
@@ -214,6 +214,37 @@ async function createChapter(page: Page, title: string): Promise<void> {
   await dialog.getByRole("button", { name: "创建章节" }).click();
   await page.getByLabel(title).getByRole("link", { name: "继续写作", exact: true }).click();
   await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+}
+
+async function waitForAuthoritativeChapterVersion(
+  page: Page,
+  projectId: string,
+  expectedContent: string,
+): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          ({ expectedProjectId, expectedChapterContent }) => {
+            const database = JSON.parse(
+              window.localStorage.getItem("inkshadow.development.database.v1") ?? "null",
+            ) as {
+              chapters?: { id: string; projectId: string; currentVersionId: string }[];
+              versions?: { id: string; chapterId: string; content: string }[];
+            } | null;
+            const chapter = database?.chapters?.find(
+              (candidate) => candidate.projectId === expectedProjectId,
+            );
+            const version = database?.versions?.find(
+              (candidate) => candidate.id === chapter?.currentVersionId,
+            );
+            return version?.content === expectedChapterContent;
+          },
+          { expectedProjectId: projectId, expectedChapterContent: expectedContent },
+        ),
+      { timeout: 5_000 },
+    )
+    .toBe(true);
 }
 
 async function stageLatestFormalFactAsDirectLocalDraft(

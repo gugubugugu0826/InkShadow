@@ -76,7 +76,10 @@ export function exportChapterToMarkdown(
   }
 
   const title = sanitizePlainText(parsed.data.title);
-  const body = sanitizeMarkdown(parsed.data.markdown, parsed.data.path, options);
+  const body = sanitizeMarkdown(parsed.data.markdown, parsed.data.path, {
+    ...options,
+    allowEmpty: true,
+  });
   return finishArtifact(
     sanitizeFilename(parsed.data.title, ".md"),
     [`# ${title.markdown}`, body.markdown],
@@ -107,7 +110,10 @@ export function exportProjectToMarkdown(
 
   for (const chapter of [...parsed.data.chapters].sort((left, right) => left.order - right.order)) {
     const title = sanitizePlainText(chapter.title);
-    const body = sanitizeMarkdown(chapter.markdown, chapter.path, options);
+    const body = sanitizeMarkdown(chapter.markdown, chapter.path, {
+      ...options,
+      allowEmpty: true,
+    });
     sections.push(`## ${title.markdown}\n\n${body.markdown}`);
     issues.push(...title.issues, ...body.issues);
   }

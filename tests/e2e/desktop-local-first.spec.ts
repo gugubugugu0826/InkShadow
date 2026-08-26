@@ -332,7 +332,10 @@ test("imports into the first chapter and exports validated artifacts and diagnos
   await expect(pdfIssue).not.toContainText("PDF_TEXT_UNAVAILABLE");
 
   const bundleDownloadPromise = page.waitForEvent("download");
-  await page.getByRole("button", { name: "下载完整备份" }).click();
+  await expect(
+    page.getByRole("region", { name: "导出项目" }).getByText(/项目包.*不是本地数据库完整备份/u),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "下载项目包" }).click();
   const bundleDownload = await bundleDownloadPromise;
   expect(bundleDownload.suggestedFilename()).toBe(`${projectTitle}.inkshadow.json`);
   const bundlePath = await bundleDownload.path();

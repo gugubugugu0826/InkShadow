@@ -310,6 +310,55 @@ describe("direct local story-fact organization", () => {
     expect(generate).not.toHaveBeenCalled();
   });
 
+  it("keeps one pending fact when the same immutable evidence is organized concurrently", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = expectOk(await runtime.useCases.createProject.execute({ name: "并发整理" }));
+    const content = "周望五十七岁。";
+    const created = expectOk(
+      await runtime.useCases.createChapter.execute({
+        projectId: project.id,
+        title: "第一章",
+        content,
+      }),
+    );
+    const version = created.version.toSnapshot();
+    const dependencies = {
+      facts: runtime.story.facts,
+      factService: runtime.story.factService,
+      hasher: runtime.hasher,
+      now: () => runtime.clock.now(),
+    } as const;
+    const input = {
+      projectId: project.id,
+      chapterId: created.chapter.id,
+      versionId: version.id,
+      versionCreatedAt: version.createdAt,
+      acceptedText: content,
+      acceptedStartOffset: 0,
+      sourceLength: content.length,
+      sourceContentHash: version.contentChecksum,
+      currentVersionId: version.id,
+      localOnly: false,
+    } as const;
+
+    await Promise.all([
+      organizeDirectStoryFacts(dependencies, input),
+      organizeDirectStoryFacts(dependencies, input),
+    ]);
+
+    const facts = expectStoryOk(
+      await runtime.story.facts.listByProjectId(expectStoryUuid(project.id)),
+    )
+      .map((fact) => fact.toSnapshot())
+      .filter(({ factType }) => factType === "character_profile");
+    expect(facts).toHaveLength(1);
+    expect(facts[0]).toMatchObject({
+      source: { excerpt: content, versionId: version.id },
+      status: "unconfirmed",
+      origin: "system",
+    });
+  });
+
   it("feeds reversible current-version facts into context and preserves deletion tombstones", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const project = expectOk(await runtime.useCases.createProject.execute({ name: "上下文事实" }));

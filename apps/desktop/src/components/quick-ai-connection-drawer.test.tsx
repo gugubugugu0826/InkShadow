@@ -47,6 +47,9 @@ describe("quick AI connection drawer", () => {
     const user = userEvent.setup();
     renderDrawer(harness.runtime);
 
+    expect(screen.getByText("模型连接不会跟随新数据目录")).toBeVisible();
+    expect(screen.getByText(/不自动使用系统密钥.*恢复备份.*重新连接/u)).toBeVisible();
+
     const commonProvider = screen.getByRole("radio", { name: /DeepSeek.*常用/u });
     expect(commonProvider).toBeVisible();
     expect(commonProvider).toBeChecked();

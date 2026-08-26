@@ -121,6 +121,26 @@ describe("image-based PDF export", () => {
     );
   });
 
+  it("passes an empty titled chapter through the PDF publication path", async () => {
+    const seen: PortablePublication[] = [];
+    const sourceChapter = project.chapters[0];
+    if (sourceChapter === undefined) throw new Error("Expected a PDF source chapter.");
+    const emptyProject = {
+      ...project,
+      chapters: [{ ...sourceChapter, order: 0, markdown: "" }],
+    } satisfies PortableProjectV1;
+
+    await exportProjectToPdf(emptyProject, {
+      generatedAt: GENERATED_AT,
+      rasterize(normalized) {
+        seen.push(normalized);
+        return [rasterPage()];
+      },
+    });
+
+    expect(seen[0]?.chapters).toMatchObject([{ title: "第二章 来客", blocks: [] }]);
+  });
+
   it("passes a validated source image into the real image-based PDF rasterization contract", async () => {
     const seen: PortablePublication[] = [];
     const longEndToken = "PDF长正文终点令牌";

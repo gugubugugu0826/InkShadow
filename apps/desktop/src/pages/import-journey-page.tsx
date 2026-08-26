@@ -1676,7 +1676,7 @@ export function ImportJourneyPage() {
                           <Link to={`/projects/${draft.importedWork.projectId}/story`}>
                             故事设定
                           </Link>{" "}
-                          查看证据、确认、锁定或废弃。
+                          查看原文依据、确认、锁定或废弃。
                         </span>
                       }
                     />

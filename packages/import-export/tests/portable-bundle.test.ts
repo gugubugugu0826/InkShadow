@@ -65,6 +65,27 @@ describe("Portable Bundle v1", () => {
     expect(imported).toEqual(first.content);
   });
 
+  it("round-trips an intentionally empty chapter without inventing正文", async () => {
+    const emptyProject = {
+      ...projectInput,
+      chapters: [
+        {
+          id: "chapter-empty",
+          title: "待写章节",
+          order: 0,
+          markdown: "",
+        },
+      ],
+    } satisfies PortableProjectInput;
+
+    const bundle = await createPortableBundle(emptyProject, metadata);
+    expect(bundle.content.chapters[0]?.markdown).toBe("");
+    expect(bundle.manifest.entries[0]?.byteLength).toBe(0);
+
+    const imported = await importPortableBundle(await serializePortableBundle(bundle));
+    expect(imported.chapters[0]?.markdown).toBe("");
+  });
+
   it("rejects an unsupported bundle version before schema parsing", async () => {
     const bundle = await createPortableBundle(projectInput, metadata);
     const futureBundle = {

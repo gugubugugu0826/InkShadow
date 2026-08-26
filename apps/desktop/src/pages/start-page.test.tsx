@@ -153,7 +153,7 @@ describe("local-first start page", () => {
       "href",
       "/projects",
     );
-    expect(screen.queryByRole("link", { name: "恢复备份" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "导入项目包" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "体验示例作品" })).not.toBeInTheDocument();
   });
 
@@ -164,6 +164,10 @@ describe("local-first start page", () => {
     const user = userEvent.setup();
     renderStartPage(runtime);
 
+    expect(await screen.findByRole("link", { name: "导入项目包" })).toHaveAttribute(
+      "href",
+      "/settings#data-transfer",
+    );
     await user.click(screen.getByRole("button", { name: "体验示例作品" }));
 
     expect(await screen.findByText("示例正文已打开")).toBeVisible();

@@ -29,7 +29,7 @@ function rule(selector: string): string {
   return declarations.join("\n");
 }
 
-describe("0.2.12 ordinary UI layout contracts", () => {
+describe("ordinary UI layout contracts", () => {
   it("keeps the quick connection drawer and every footer action inside equal padding", () => {
     const drawer = rule(".quick-ai-drawer");
     const content = rule(".quick-ai-drawer__content");

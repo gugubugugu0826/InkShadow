@@ -82,7 +82,7 @@ impl ExportFormat {
         match self {
             Self::Text => "纯文本文档",
             Self::Markdown => "Markdown 文档",
-            Self::Bundle => "墨影完整备份",
+            Self::Bundle => "墨影项目包",
             Self::Epub => "EPUB 电子书",
             Self::Docx => "Word 文档",
             Self::Pdf => "PDF 文档",
@@ -624,8 +624,9 @@ mod tests {
     };
 
     #[test]
-    fn uses_a_chinese_report_filter_label() {
+    fn uses_accurate_chinese_filter_labels() {
         assert_eq!(ExportFormat::Report.filter_label(), "结构化数据报告");
+        assert_eq!(ExportFormat::Bundle.filter_label(), "墨影项目包");
     }
 
     struct TestDirectory(PathBuf);

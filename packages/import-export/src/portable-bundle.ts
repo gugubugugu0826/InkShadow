@@ -136,7 +136,7 @@ function normalizeProject(input: PortableProjectInput): PortableProjectV1 {
   const chapters = sorted.map<PortableChapterV1>((chapter) => {
     const path = chapter.path ?? defaultChapterPath(chapter);
     assertSafeBundlePath(path);
-    const sanitized = sanitizeMarkdown(chapter.markdown, path);
+    const sanitized = sanitizeMarkdown(chapter.markdown, path, { allowEmpty: true });
 
     return {
       id: chapter.id,
@@ -231,7 +231,7 @@ async function assertChapterEntriesMatch(bundle: PortableBundleV1): Promise<void
       );
     }
 
-    const sanitized = sanitizeMarkdown(chapter.markdown, chapter.path);
+    const sanitized = sanitizeMarkdown(chapter.markdown, chapter.path, { allowEmpty: true });
     if (sanitized.markdown !== chapter.markdown || sanitized.issues.length > 0) {
       throw new ImportExportError(
         "IMPORT_UNSAFE_CONTENT",

@@ -14,12 +14,14 @@ import {
   FORMAL_RECORD_KINDS,
   MEMORY_LEVELS,
   StoryCoreError,
+  directLocalPendingEvidenceIdentity,
   parseUuidV7 as parseStoryUuid,
   readAmbiguousStoryFactEntityAlias,
   storyFactNeedsEntityAliasResolution,
   type FormalRecordKind,
   type FormalStoryRecord,
   type DecideReviewItemCommand,
+  type DirectLocalPendingEvidenceIdentity,
   type MemoryLevel,
   type LegacyMemoryPromotionPreview,
   type MemoryPolicy,
@@ -195,6 +197,9 @@ export function StoryGovernancePage() {
   const [project, setProject] = useState<Project | null>(null);
   const [records, setRecords] = useState<readonly FormalStoryRecord[]>([]);
   const [facts, setFacts] = useState<readonly StoryFact[]>([]);
+  const [directInitialEvidenceByFactId, setDirectInitialEvidenceByFactId] = useState<
+    ReadonlyMap<string, DirectLocalPendingEvidenceIdentity>
+  >(new Map());
   const [policy, setPolicy] = useState<MemoryPolicy | null>(null);
   const [memories, setMemories] = useState<readonly MemoryRecord[]>([]);
   const [memoryPromotionPreviews, setMemoryPromotionPreviews] = useState<
@@ -345,6 +350,7 @@ export function StoryGovernancePage() {
     }
     setPageState("loading");
     setSourceVersions([]);
+    setDirectInitialEvidenceByFactId(new Map());
     const [
       projectResult,
       factResult,
@@ -403,6 +409,42 @@ export function StoryGovernancePage() {
       return;
     }
     const derivedFailures: Readonly<{ section: string; cause: unknown }>[] = [];
+    const directInitialEvidenceEntries = await Promise.all(
+      factResult.value
+        .filter((fact) => isDirectLocalStoryFact(fact.toSnapshot()))
+        .map(async (fact) => {
+          const currentIdentity = directLocalPendingEvidenceIdentity(fact.toSnapshot());
+          const revisions = await runtime.story.facts.listRevisions(fact.id);
+          if (!revisions.ok) {
+            return { factId: fact.id, identity: currentIdentity, error: revisions.error } as const;
+          }
+          const initial = revisions.value.find((entry) => entry.fact.revision === 1)?.fact;
+          if (initial === undefined) {
+            return {
+              factId: fact.id,
+              identity: currentIdentity,
+              error: new Error("设定缺少最初的不可变修订"),
+            } as const;
+          }
+          const identity = directLocalPendingEvidenceIdentity(initial.toSnapshot());
+          return {
+            factId: fact.id,
+            identity,
+            error: identity === null ? new Error("设定最初修订的原文身份不可用") : null,
+          } as const;
+        }),
+    );
+    if (!isCurrentLoad()) return;
+    const initialEvidenceFailure = directInitialEvidenceEntries.find(
+      ({ error: revisionError }) => revisionError !== null,
+    )?.error;
+    if (initialEvidenceFailure !== undefined && initialEvidenceFailure !== null) {
+      derivedFailures.push({ section: "待确认设定历史", cause: initialEvidenceFailure });
+    }
+    const initialEvidenceByFactId = new Map<string, DirectLocalPendingEvidenceIdentity>();
+    for (const { factId, identity } of directInitialEvidenceEntries) {
+      if (identity !== null) initialEvidenceByFactId.set(factId, identity);
+    }
     if (!memoryPromotionResult.ok) {
       derivedFailures.push({ section: "旧记忆整理", cause: memoryPromotionResult.error });
     }
@@ -421,7 +463,7 @@ export function StoryGovernancePage() {
     const sourceVersionIds = Array.from(
       new Set(
         factResult.value
-          .filter((fact) => isDirectLocalReviewDraft(fact.toSnapshot()))
+          .filter((fact) => directLocalPendingEvidenceIdentity(fact.toSnapshot()) !== null)
           .map((fact) => fact.toSnapshot().source.versionId)
           .filter((versionId): versionId is NonNullable<typeof versionId> => versionId !== null)
           .map(String),
@@ -454,6 +496,7 @@ export function StoryGovernancePage() {
     if (!isCurrentLoad()) return;
     setProject(projectResult.value);
     setFacts(factResult.value);
+    setDirectInitialEvidenceByFactId(initialEvidenceByFactId);
     setRecords(recordResult.value);
     setPolicy(policyResult.value);
     setMemories(memoryResult.value);
@@ -527,10 +570,13 @@ export function StoryGovernancePage() {
     () => facts.filter((fact) => fact.toSnapshot().status === "formal"),
     [facts],
   );
-  const directPendingLocalFacts = useMemo(
-    () => facts.filter((fact) => isDirectLocalReviewDraft(fact.toSnapshot())),
-    [facts],
+  const directPendingLocalFactPresentation = useMemo(
+    () => isolateHistoricalDirectPendingDuplicates(facts, directInitialEvidenceByFactId),
+    [directInitialEvidenceByFactId, facts],
   );
+  const directPendingLocalFacts = directPendingLocalFactPresentation.visibleFacts;
+  const isolatedDirectPendingDuplicateCount =
+    directPendingLocalFactPresentation.isolatedDuplicateCount;
   const directDeprecatedFacts = useMemo(
     () =>
       facts.filter(
@@ -961,9 +1007,10 @@ export function StoryGovernancePage() {
       humanConfirmed: true,
       expectedRevision: editingFact.revision,
     } as const;
-    const result = isDirectLocalReviewDraft(editingFact.toSnapshot())
-      ? await runtime.story.factService.editStagedAsUser(command)
-      : await runtime.story.factService.editAsUser(command);
+    const result =
+      directLocalPendingEvidenceIdentity(editingFact.toSnapshot()) !== null
+        ? await runtime.story.factService.editStagedAsUser(command)
+        : await runtime.story.factService.editAsUser(command);
     setBusy(false);
     if (!result.ok) {
       setError(result.error);
@@ -1649,6 +1696,16 @@ export function StoryGovernancePage() {
           />
         )}
 
+        {isolatedDirectPendingDuplicateCount > 0 && (
+          <InlineAlert
+            tone="warning"
+            title="已隔离重复的待确认设定"
+            description={`${String(
+              isolatedDirectPendingDuplicateCount,
+            )} 条历史重复记录及审计关系，每组仅显示一条。`}
+          />
+        )}
+
         <PageStateBoundary
           state={pageState}
           preserveContent={false}
@@ -1822,10 +1879,10 @@ export function StoryGovernancePage() {
                         <p className="story-governance-copy">{storyFactContent(snapshot)}</p>
                         {snapshot.structuredValue !== null && (
                           <p className="story-governance-meta">
-                            结构化设定暂不支持直接改文字。你仍可查看证据、固定，或删除后恢复。
+                            结构化设定暂不支持直接改文字。你仍可查看原文依据、固定，或删除后恢复。
                           </p>
                         )}
-                        <EvidenceDisclosure label="查看证据">
+                        <EvidenceDisclosure label="查看原文依据">
                           <blockquote className="story-source-quote">
                             {snapshot.source.excerpt ?? "这条设定没有可显示的原文片段。"}
                           </blockquote>
@@ -2023,7 +2080,8 @@ export function StoryGovernancePage() {
           }}
           title="修改设定"
           description={
-            editingFact !== null && isDirectLocalReviewDraft(editingFact.toSnapshot())
+            editingFact !== null &&
+            directLocalPendingEvidenceIdentity(editingFact.toSnapshot()) !== null
               ? "保存修改会同时确认这条内容，并把它加入正式设定；原始来源和每个旧版本都会保留。"
               : "只修改设定内容；原始来源和每个旧版本都会保留。固定的设定需先取消固定。"
           }
@@ -2044,7 +2102,8 @@ export function StoryGovernancePage() {
                 disabled={editingFactContent.trim().length === 0}
                 onClick={() => void submitFactEdit()}
               >
-                {editingFact !== null && isDirectLocalReviewDraft(editingFact.toSnapshot())
+                {editingFact !== null &&
+                directLocalPendingEvidenceIdentity(editingFact.toSnapshot()) !== null
                   ? "保存修改并确认"
                   : "保存修改"}
               </Button>
@@ -4212,32 +4271,54 @@ function isStoryObject(
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isDirectLocalReviewDraft(snapshot: StoryFactSnapshot): boolean {
-  const structuredValue = snapshot.structuredValue;
-  if (
-    (snapshot.status !== "temporary" && snapshot.status !== "unconfirmed") ||
-    snapshot.origin !== "system" ||
-    !snapshot.needsReview ||
-    snapshot.locked ||
-    snapshot.source.kind !== "chapter_span" ||
-    !snapshot.source.reference.startsWith("direct-local:inkshadow.direct-local-story-fact.v1:") ||
-    snapshot.source.chapterId === null ||
-    snapshot.source.versionId === null ||
-    snapshot.source.startOffset === null ||
-    snapshot.source.endOffset === null ||
-    snapshot.source.sourceLength === null ||
-    snapshot.source.excerpt === null ||
-    structuredValue === null ||
-    !isStoryObject(structuredValue)
-  ) {
-    return false;
-  }
-  const payload = structuredValue.payload;
+function isDirectLocalStoryFact(snapshot: StoryFactSnapshot): boolean {
   return (
-    structuredValue.schemaVersion === "inkshadow.rebuildable-system-fact.v1" &&
-    isStoryObject(payload) &&
-    payload.schemaVersion === "inkshadow.direct-local-story-fact.v1"
+    snapshot.source.kind === "chapter_span" &&
+    snapshot.source.reference.startsWith("direct-local:inkshadow.direct-local-story-fact.v1:")
   );
+}
+
+function isolateHistoricalDirectPendingDuplicates(
+  facts: readonly StoryFact[],
+  initialIdentityByFactId: ReadonlyMap<string, DirectLocalPendingEvidenceIdentity>,
+): Readonly<{
+  visibleFacts: readonly StoryFact[];
+  isolatedDuplicateCount: number;
+}> {
+  const groups = new Map<string, { readonly pending: StoryFact[]; hasAuthorDecision: boolean }>();
+  let isolatedDuplicateCount = 0;
+  for (const fact of facts) {
+    const snapshot = fact.toSnapshot();
+    const currentIdentity = directLocalPendingEvidenceIdentity(snapshot);
+    const identity = initialIdentityByFactId.get(fact.id) ?? currentIdentity;
+    if (identity === null) continue;
+    const group = groups.get(identity.key) ?? { pending: [], hasAuthorDecision: false };
+    if (currentIdentity === null) group.hasAuthorDecision = true;
+    else group.pending.push(fact);
+    groups.set(identity.key, group);
+  }
+  const visibleFacts: StoryFact[] = [];
+  for (const group of groups.values()) {
+    group.pending.sort((left, right) => {
+      const leftSnapshot = left.toSnapshot();
+      const rightSnapshot = right.toSnapshot();
+      return (
+        leftSnapshot.createdAt.localeCompare(rightSnapshot.createdAt) ||
+        left.id.localeCompare(right.id)
+      );
+    });
+    if (group.hasAuthorDecision) {
+      isolatedDuplicateCount += group.pending.length;
+    } else {
+      const survivor = group.pending[0];
+      if (survivor !== undefined) visibleFacts.push(survivor);
+      isolatedDuplicateCount += Math.max(0, group.pending.length - 1);
+    }
+  }
+  return Object.freeze({
+    visibleFacts: Object.freeze(visibleFacts),
+    isolatedDuplicateCount,
+  });
 }
 
 function factTypeLabel(factType: string): string {

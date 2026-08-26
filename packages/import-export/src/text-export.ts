@@ -32,7 +32,7 @@ export function exportProjectToPlainText(input: PortableProjectV1): PlainTextExp
 
   for (const chapter of [...parsed.data.chapters].sort((left, right) => left.order - right.order)) {
     const title = sanitizePlainText(chapter.title);
-    const body = sanitizeMarkdown(chapter.markdown, chapter.path);
+    const body = sanitizeMarkdown(chapter.markdown, chapter.path, { allowEmpty: true });
     issues.push(...title.issues, ...body.issues);
     sections.push(
       `${markdownToPlainText(title.markdown)}\n\n${markdownToPlainText(body.markdown)}`.trim(),

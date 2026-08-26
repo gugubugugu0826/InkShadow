@@ -119,6 +119,22 @@ describe("ConsistencyInvestigationPanel", () => {
     expect(await screen.findByRole("combobox", { name: "证据权限" })).toBeInTheDocument();
     expect(screen.getAllByText(/已接受正文/u).length).toBeGreaterThan(0);
     expect(screen.queryByText("019f9f4a-b3c7-7350-9226-000000000008")).not.toBeInTheDocument();
+
+    const evidenceSummary = screen.getByText("查看证据（1）", { exact: true });
+    expect(evidenceSummary.tagName).toBe("SUMMARY");
+    const evidenceDetails = evidenceSummary.closest("details");
+    expect(evidenceDetails).not.toBeNull();
+    expect(evidenceDetails).not.toHaveAttribute("open");
+    const keyboardEvents: string[] = [];
+    evidenceSummary.addEventListener("keydown", (event) => keyboardEvents.push(event.key));
+    evidenceSummary.focus();
+    expect(evidenceSummary).toHaveFocus();
+    await user.keyboard("{Enter}");
+    await user.keyboard(" ");
+    expect(keyboardEvents).toEqual(["Enter", " "]);
+    await user.click(evidenceSummary);
+    expect(evidenceDetails).toHaveAttribute("open");
+
     await user.click(screen.getByRole("button", { name: "查看《第一章》修复范围与费用" }));
     expect(prepareRepairCandidate).toHaveBeenCalledWith({
       runId: RUN_ID,

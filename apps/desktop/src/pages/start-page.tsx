@@ -230,7 +230,7 @@ export function StartPage() {
 
       <nav className="start-page__secondary" aria-label="已有内容与数据工具">
         <Link to="/projects">浏览作品库</Link>
-        {!directMode && <Link to="/settings#data-transfer">恢复备份</Link>}
+        {!directMode && <Link to="/settings#data-transfer">导入项目包</Link>}
         {!directMode && (
           <Button
             variant="ghost"

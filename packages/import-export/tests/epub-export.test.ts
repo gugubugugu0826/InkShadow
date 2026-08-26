@@ -112,6 +112,19 @@ describe("EPUB export", () => {
     expect(second).toContain("夜色没有回答。");
   });
 
+  it("exports an empty chapter as a titled EPUB section", async () => {
+    const sourceChapter = project.chapters[0];
+    if (sourceChapter === undefined) throw new Error("Expected an EPUB source chapter.");
+    const emptyProject = {
+      ...project,
+      chapters: [{ ...sourceChapter, order: 0, markdown: "" }],
+    } satisfies PortableProjectV1;
+
+    const artifact = await exportProjectToEpub(emptyProject, { generatedAt: GENERATED_AT });
+    const archive = await JSZip.loadAsync(artifact.bytes);
+    expect(await requiredText(archive, "EPUB/chapter-00001.xhtml")).toContain("第二章 来客");
+  });
+
   it("renders semantic blocks as inert XHTML without scripts or remote resources", async () => {
     const artifact = await exportPublicationToEpub(publication, { generatedAt: GENERATED_AT });
     const archive = await JSZip.loadAsync(artifact.bytes);

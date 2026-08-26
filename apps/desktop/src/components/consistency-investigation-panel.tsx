@@ -860,7 +860,7 @@ function FindingCard({
       <CardContent>
         <p>{finding.explanation}</p>
         <details>
-          <summary>查看证据来源（{finding.evidence.length}）</summary>
+          <summary>查看证据（{finding.evidence.length}）</summary>
           <ul className="privacy-list">
             {finding.evidence.map((evidence, index) => (
               <li key={`${evidence.excerptDigest}:${String(index)}`}>

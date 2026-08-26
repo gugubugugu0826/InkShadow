@@ -327,6 +327,35 @@ describe("BrowserDevelopmentStoryFactStore", () => {
     }
   });
 
+  it("reuses normalized pending local evidence even when an internal reference changes", async () => {
+    const evidence = "周望是钟楼的管理员。";
+    seedDevelopmentChapter(evidence);
+    const store = new BrowserDevelopmentStoryFactStore(localStorage);
+    const original = createDirectLocalStagedFact(43);
+    const retry = createDirectLocalStagedFact(
+      44,
+      "direct-local:inkshadow.direct-local-story-fact.v1:test:retry",
+      `  ${evidence}  `,
+    );
+    const fence = { chapterId: CHAPTER_ID, expectedCurrentVersionId: VERSION_ID } as const;
+
+    expect(unwrap(await store.createWithAuthorityFence(original, fence)).created).toBe(true);
+    const reused = unwrap(await store.createWithAuthorityFence(retry, fence));
+    expect(reused).toMatchObject({ created: false, fact: { id: original.id } });
+    expect(unwrap(await store.listByProjectId(unwrap(parseUuidV7(PROJECT_ID))))).toHaveLength(1);
+
+    const distinctContent = createDirectLocalStagedFact(
+      45,
+      "direct-local:inkshadow.direct-local-story-fact.v1:test:distinct",
+      "周望负责钟楼的日常维护。",
+    );
+    expect(unwrap(await store.createWithAuthorityFence(distinctContent, fence))).toMatchObject({
+      created: true,
+      fact: { id: distinctContent.id },
+    });
+    expect(unwrap(await store.listByProjectId(unwrap(parseUuidV7(PROJECT_ID))))).toHaveLength(2);
+  });
+
   it("binds the browser authority fence to the exact source and recovers an identical retry", async () => {
     seedDevelopmentChapter();
     const store = new BrowserDevelopmentStoryFactStore(localStorage);
@@ -631,8 +660,9 @@ describe("BrowserDevelopmentStoryFactStore", () => {
 function createDirectLocalStagedFact(
   suffix: number,
   reference = "direct-local:inkshadow.direct-local-story-fact.v1:test",
+  contentText = "周望是钟楼的管理员。",
 ): StoryFact {
-  const contentText = "周望是钟楼的管理员。";
+  const excerpt = "周望是钟楼的管理员。";
   return unwrap(
     StoryFact.create({
       id: "019f9f4a-b3c7-7350-9226-" + String(suffix).padStart(12, "0"),
@@ -649,9 +679,9 @@ function createDirectLocalStagedFact(
         chapterId: CHAPTER_ID,
         versionId: VERSION_ID,
         startOffset: 0,
-        endOffset: contentText.length,
-        sourceLength: contentText.length,
-        excerpt: contentText,
+        endOffset: excerpt.length,
+        sourceLength: excerpt.length,
+        excerpt,
       },
       confidence: 1,
       status: "unconfirmed",
@@ -815,7 +845,7 @@ function createSupplementalResolutionFact(suffix: number): StoryFact {
   );
 }
 
-function seedDevelopmentChapter(): void {
+function seedDevelopmentChapter(content = CHAPTER_CONTENT): void {
   localStorage.setItem(
     DEVELOPMENT_DATABASE_KEY,
     JSON.stringify({
@@ -834,7 +864,7 @@ function seedDevelopmentChapter(): void {
           id: VERSION_ID,
           projectId: PROJECT_ID,
           chapterId: CHAPTER_ID,
-          content: CHAPTER_CONTENT,
+          content,
         },
       ],
       drafts: [],

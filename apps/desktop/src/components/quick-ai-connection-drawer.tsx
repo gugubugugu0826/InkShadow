@@ -599,6 +599,14 @@ function OpenQuickAiConnectionDrawer({
             />
           )}
 
+          {sharedReadiness.savedConnectionCount === 0 && (
+            <InlineAlert
+              tone="info"
+              title="模型连接不会跟随新数据目录"
+              description="新目录不自动使用系统密钥。请恢复备份或重新连接；密钥须由你选择并验证。"
+            />
+          )}
+
           {credentialDiscoveryFailure !== null && (
             <InlineAlert
               tone="error"

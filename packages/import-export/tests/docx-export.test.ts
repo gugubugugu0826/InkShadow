@@ -125,6 +125,18 @@ describe("DOCX export", () => {
     expect(rawText.indexOf("第一章 雨巷")).toBeLessThan(rawText.indexOf("第二章 来客"));
   });
 
+  it("exports an empty chapter as a titled DOCX section", async () => {
+    const sourceChapter = project.chapters[0];
+    if (sourceChapter === undefined) throw new Error("Expected a DOCX source chapter.");
+    const emptyProject = {
+      ...project,
+      chapters: [{ ...sourceChapter, order: 0, markdown: "" }],
+    } satisfies PortableProjectV1;
+
+    const artifact = await exportProjectToDocx(emptyProject, { generatedAt: GENERATED_AT });
+    expect(await extractRawText(artifact.bytes)).toContain("第二章 来客");
+  });
+
   it("renders every semantic block through native Word styles and numbering", async () => {
     const artifact = await exportPublicationToDocx(publication, { generatedAt: GENERATED_AT });
     const archive = await JSZip.loadAsync(artifact.bytes);

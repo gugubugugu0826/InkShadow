@@ -55,7 +55,7 @@ const issueLabels: Record<ImportExportErrorCode, string> = {
   IMPORT_TOO_MANY_FILES: "一次选择的文件过多。",
   IMPORT_FILE_TOO_LARGE: "有文件超过单文件大小限制。",
   IMPORT_TOTAL_TOO_LARGE: "所选文件的总大小超过限制。",
-  IMPORT_MIXED_FORMATS: "墨影完整备份必须单独导入，不能与文本文件混选。",
+  IMPORT_MIXED_FORMATS: "墨影项目包必须单独导入，不能与文本文件混选。",
   IMPORT_DUPLICATE_FILE: "发现重复文件名或重复章节路径。",
   IMPORT_EXTENSION_FORBIDDEN: "文件扩展名不受支持。",
   IMPORT_MACRO_FORMAT_FORBIDDEN: "不接受包含宏的文件格式。",
@@ -82,14 +82,14 @@ const issueLabels: Record<ImportExportErrorCode, string> = {
   PDF_ACTIVE_CONTENT_FORBIDDEN: "PDF 包含附件、表单、XFA 或 JavaScript。",
   IMPORT_CHAPTER_BOUNDARY_REVIEW: "章节边界置信度较低，请在写入前检查标题和正文。",
   IMPORT_CHAPTER_SPLIT: "超大章节已拆成可检查的多个部分。",
-  IMPORT_INVALID_JSON: "完整备份文件内容无效。",
-  BUNDLE_SCHEMA_INVALID: "完整备份结构不符合墨影便携格式。",
-  BUNDLE_VERSION_UNSUPPORTED: "这个完整备份来自当前版本无法读取的版本。",
-  BUNDLE_CHECKSUM_MISMATCH: "完整备份内容校验失败，文件可能已损坏或被修改。",
-  BUNDLE_ENTRY_CHECKSUM_MISMATCH: "完整备份中有章节校验失败。",
-  BUNDLE_MANIFEST_CONTENT_MISMATCH: "完整备份清单与实际内容不一致。",
-  BUNDLE_DUPLICATE_ENTRY: "完整备份中存在重复章节。",
-  BUNDLE_LIMIT_EXCEEDED: "完整备份超过安全大小限制。",
+  IMPORT_INVALID_JSON: "项目包文件内容无效。",
+  BUNDLE_SCHEMA_INVALID: "项目包结构不符合墨影便携格式。",
+  BUNDLE_VERSION_UNSUPPORTED: "这个项目包来自当前版本无法读取的版本。",
+  BUNDLE_CHECKSUM_MISMATCH: "项目包内容校验失败，文件可能已损坏或被修改。",
+  BUNDLE_ENTRY_CHECKSUM_MISMATCH: "项目包中有章节校验失败。",
+  BUNDLE_MANIFEST_CONTENT_MISMATCH: "项目包清单与实际内容不一致。",
+  BUNDLE_DUPLICATE_ENTRY: "项目包中存在重复章节。",
+  BUNDLE_LIMIT_EXCEEDED: "项目包超过安全大小限制。",
   MARKDOWN_EMPTY: "文件中没有可导入的有效文本。",
   MARKDOWN_RAW_HTML_ESCAPED: "原始 HTML 已转为普通文本。",
   MARKDOWN_EXTERNAL_REFERENCE_REMOVED: "外部链接或可执行引用已被移除。",
@@ -98,7 +98,7 @@ const issueLabels: Record<ImportExportErrorCode, string> = {
 };
 
 const formatLabels: Record<ImportPreflightReport["format"], string> = {
-  portable_bundle: "墨影完整备份",
+  portable_bundle: "墨影项目包",
   docx: "DOCX",
   epub: "EPUB",
   html: "HTML",
@@ -118,6 +118,9 @@ const projectReportOptions: readonly Readonly<{ value: ProjectReportKind; label:
   { value: "review", label: "审阅报告" },
   { value: "ai_usage", label: "AI 用量报告" },
 ];
+
+const portableProjectPackageScope =
+  "项目包包含项目、章节标识、名称、语言、时间、顺序、正文、生成器信息及校验清单；不是本地数据库完整备份，不含设置、任务、生成结果、连接信息或私密标记。";
 
 interface ExportNotice {
   readonly tone: "info" | "warning";
@@ -440,6 +443,16 @@ export function DataTransferPanel({
       }
       const projectSnapshot = project.toSnapshot();
       const activeChapters = chaptersResult.value.filter(({ status }) => status === "active");
+      const hasLocalOnlyChapters = activeChapters.some(
+        ({ privacyMode }) => privacyMode === "local_only",
+      );
+      if (format === "bundle" && includeLocalOnlyChapters && hasLocalOnlyChapters) {
+        throw new UiActionError(
+          "PRIVATE_CHAPTER_PORTABLE_BUNDLE_UNSUPPORTED",
+          "项目包不能保存私密标记；重导入会变成普通章节，本次未导出。请用数据库备份或只读格式。",
+          "私密章节尚未导出",
+        );
+      }
       omittedLocalOnlyChapterCount = includeLocalOnlyChapters
         ? 0
         : activeChapters.filter(({ privacyMode }) => privacyMode === "local_only").length;
@@ -730,9 +743,7 @@ export function DataTransferPanel({
                 aria-hidden="true"
                 onChange={(event) => void inspectFiles(event)}
               />
-              <p className="maintenance-note">
-                墨影完整备份（.inkshadow.json）也可单独选择，用于带校验清单的完整恢复。
-              </p>
+              <p className="maintenance-note">{portableProjectPackageScope}</p>
             </div>
             {importBusy && (
               <div className="import-progress" aria-live="polite">
@@ -831,8 +842,7 @@ export function DataTransferPanel({
                 <h3 id="export-title">导出项目</h3>
                 <p>
                   DOCX 适合继续排版；PDF 会在本机固定中文外观并生成不可选字的图像型文档；Markdown
-                  适合阅读与分享；完整备份
-                  会保留项目及章节结构并带校验清单；领域报告只包含所选项目的结构化数据。
+                  适合分享；{portableProjectPackageScope}领域报告只含所选项目结构化数据。
                   {runtime.mode === "tauri"
                     ? " 每次保存都会先由你选择位置，写入后再从磁盘回读核验。"
                     : " 浏览器下载的最终位置由浏览器决定，墨影会明确标记为无法核验路径。"}
@@ -877,7 +887,7 @@ export function DataTransferPanel({
                     <span>
                       <strong>包含私密章节</strong>
                       <small>
-                        默认不包含。勾选后，私密正文及其直接分析记录会写入导出文件并离开墨影的本地保护。
+                        默认排除私密章节。勾选后，私密内容会离开本地保护；项目包不支持。
                       </small>
                     </span>
                   </label>
@@ -927,7 +937,7 @@ export function DataTransferPanel({
                       disabled={exportBusy !== null || selectedProjectId.length === 0}
                       onClick={() => void exportProject("bundle")}
                     >
-                      {runtime.mode === "tauri" ? "保存完整备份" : "下载完整备份"}
+                      {runtime.mode === "tauri" ? "保存项目包" : "下载项目包"}
                     </Button>
                     {(exportBusy === "epub" || exportBusy === "docx" || exportBusy === "pdf") && (
                       <Button
@@ -1017,7 +1027,7 @@ function exportReceiptNotice(
   const labels: Readonly<Record<ExportArtifactFormat, string>> = {
     text: "TXT",
     markdown: "Markdown",
-    bundle: "墨影完整备份",
+    bundle: "墨影项目包",
     epub: "EPUB",
     docx: "DOCX",
     pdf: "PDF",
@@ -1053,7 +1063,7 @@ function exportReceiptNotice(
     title,
     description: `${restored ? "上次回执；" : ""}格式：${labels[receipt.format]}；文件：${receipt.fileName}；位置：${receipt.path}；${byteLengthLabel}：${formatBytes(receipt.byteLength)}；状态：${state}${detailText}。文件内容已在交付前通过格式校验。${
       omittedLocalOnlyChapterCount > 0
-        ? ` 已按默认保护排除 ${String(omittedLocalOnlyChapterCount)} 个私密章节及其可定位的直接分析记录。`
+        ? ` 已按默认保护排除 ${String(omittedLocalOnlyChapterCount)} 个私密章节。`
         : ""
     }`,
   };
@@ -1461,7 +1471,7 @@ function ImportPreview({
         <div className="import-document-list">
           <div className="card-heading-row">
             <h4>{candidate.project.project.title}</h4>
-            <Badge tone="success">完整备份已验证</Badge>
+            <Badge tone="success">项目包已验证</Badge>
           </div>
           <ol className="bundle-chapter-list">
             {candidate.project.chapters.slice(0, 8).map((chapter) => (

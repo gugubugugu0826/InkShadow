@@ -297,8 +297,15 @@ describe("DataTransferPanel import journey", () => {
       );
 
       await screen.findByRole("option", { name: "版本一致性" });
-      await user.click(screen.getByRole("button", { name: "下载完整备份" }));
-      await screen.findByText(/文件：版本一致性\.inkshadow\.json/u);
+      expect(
+        screen.getAllByText(/项目包.*项目、章节标识.*生成器信息.*不是本地数据库完整备份/u),
+      ).toHaveLength(2);
+      expect(screen.getByText(/私密内容会离开本地保护/u)).toBeVisible();
+      expect(screen.queryByText(/私密正文及其直接分析记录会写入导出文件/u)).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "下载项目包" }));
+      expect(await screen.findByText(/格式：墨影项目包/u)).toHaveTextContent(
+        "文件：版本一致性.inkshadow.json",
+      );
 
       const downloaded = createObjectUrl.mock.calls[0]?.[0];
       expect(downloaded).toBeInstanceOf(Blob);
@@ -406,7 +413,7 @@ describe("DataTransferPanel import journey", () => {
     expect(anchorClick).not.toHaveBeenCalled();
   });
 
-  it("excludes private chapters by default and includes them only after explicit opt-in", async () => {
+  it("excludes private chapters by default and refuses a project package that would lose privacy", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const created = await runtime.useCases.createProject.execute({ name: "隐私导出" });
     if (!created.ok) throw created.error;
@@ -459,7 +466,7 @@ describe("DataTransferPanel import journey", () => {
       await screen.findByRole("option", { name: "隐私导出" });
       const includePrivate = screen.getByRole("checkbox", { name: /包含私密章节/u });
       expect(includePrivate).not.toBeChecked();
-      await user.click(screen.getByRole("button", { name: "下载完整备份" }));
+      await user.click(screen.getByRole("button", { name: "下载项目包" }));
       expect(await screen.findByText(/排除 1 个私密章节/u)).toBeVisible();
 
       const safeBundle = await readPortableBundle(blobs[0]);
@@ -467,14 +474,14 @@ describe("DataTransferPanel import journey", () => {
       expect(JSON.stringify(safeBundle)).not.toContain("PRIVATE_CHAPTER_MUST_REQUIRE_OPT_IN");
 
       await user.click(includePrivate);
-      await user.click(screen.getByRole("button", { name: "下载完整备份" }));
+      await user.click(screen.getByRole("button", { name: "下载项目包" }));
+      expect(await screen.findByText(/项目包不能保存私密标记.*本次未导出/u)).toBeVisible();
+      expect(blobs).toHaveLength(1);
+      expect(click).toHaveBeenCalledOnce();
+
+      await user.click(screen.getByRole("button", { name: "下载 Markdown" }));
       await waitFor(() => expect(blobs).toHaveLength(2));
-      const explicitBundle = await readPortableBundle(blobs[1]);
-      expect(explicitBundle.content.chapters.map(({ title }) => title)).toEqual([
-        "公开章",
-        "私密章",
-      ]);
-      expect(JSON.stringify(explicitBundle)).toContain("PRIVATE_CHAPTER_MUST_REQUIRE_OPT_IN");
+      expect(await blobs[1]?.text()).toContain("PRIVATE_CHAPTER_MUST_REQUIRE_OPT_IN");
       expect(click).toHaveBeenCalledTimes(2);
     } finally {
       restoreProperty(URL, "createObjectURL", originalCreate);

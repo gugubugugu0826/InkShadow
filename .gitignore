@@ -123,6 +123,7 @@ installer/
 !/docs/execution/2026-08-24-V0210-ROUND2-REMEDIATION.md
 !/docs/execution/NEXT-UNRELEASED-WINDOWS-TAURI-PHASE-2-PROMPT.md
 !/docs/execution/2026-08-25-V0212-RETEST-RELEASE.md
+!/docs/execution/2026-08-26-V0213-BLOCKERS-REMEDIATION.md
 *.mdx
 *.doc
 *.docx

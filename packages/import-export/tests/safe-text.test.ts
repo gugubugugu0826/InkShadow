@@ -184,6 +184,41 @@ describe("safe text conversion", () => {
     expect(artifact.content).not.toMatch(/\bhttps?:/iu);
     expect(artifact.content).not.toContain("**");
   });
+
+  it("exports an empty chapter to Markdown and TXT while preserving its title", async () => {
+    expect(() => importMarkdownDocument("empty.md", "")).toThrow(
+      expect.objectContaining({ code: "MARKDOWN_EMPTY" }),
+    );
+    const bundle = await createPortableBundle(
+      {
+        project: {
+          id: "project-empty-text-export",
+          title: "空白章节项目",
+          language: "zh-CN",
+          createdAt: "2026-07-27T00:00:00.000Z",
+          updatedAt: "2026-07-27T00:01:00.000Z",
+        },
+        chapters: [
+          {
+            id: "chapter-empty-text-export",
+            title: "待写章节",
+            order: 0,
+            markdown: "",
+          },
+        ],
+      },
+      {
+        bundleId: "bundle-empty-text-export",
+        exportedAt: "2026-07-27T00:02:00.000Z",
+        generatorVersion: "0.1.0",
+      },
+    );
+
+    const markdown = exportProjectToMarkdown(bundle.content);
+    const text = exportProjectToPlainText(bundle.content);
+    expect(markdown.content).toContain("## 待写章节");
+    expect(text.content).toContain("待写章节");
+  });
 });
 
 describe("file and path boundaries", () => {

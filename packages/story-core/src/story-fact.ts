@@ -905,7 +905,35 @@ export function storyFactNeedsEntityAliasResolution(snapshot: StoryFactSnapshot)
   return isStoryValueRecord(subject) && subject.mergeStatus === "ambiguous_confirmed_alias";
 }
 
-function isDirectLocalReviewDraft(snapshot: StoryFactSnapshot): boolean {
+export interface DirectLocalPendingEvidenceIdentity {
+  readonly projectId: string;
+  readonly factType: string;
+  readonly chapterId: string;
+  readonly versionId: string;
+  readonly startOffset: number;
+  readonly endOffset: number;
+  readonly sourceLength: number;
+  readonly key: string;
+}
+
+type DirectLocalReviewDraftSnapshot = StoryFactSnapshot &
+  Readonly<{
+    contentText: string;
+    source: StoryFactSourceSnapshot &
+      Readonly<{
+        kind: "chapter_span";
+        chapterId: UuidV7;
+        versionId: UuidV7;
+        startOffset: number;
+        endOffset: number;
+        sourceLength: number;
+        excerpt: string;
+      }>;
+  }>;
+
+function isDirectLocalReviewDraft(
+  snapshot: StoryFactSnapshot,
+): snapshot is DirectLocalReviewDraftSnapshot {
   if (
     snapshot.source.kind !== "chapter_span" ||
     !snapshot.source.reference.startsWith("direct-local:inkshadow.direct-local-story-fact.v1:") ||
@@ -925,6 +953,55 @@ function isDirectLocalReviewDraft(snapshot: StoryFactSnapshot): boolean {
     isStoryValueRecord(payload) &&
     payload.schemaVersion === "inkshadow.direct-local-story-fact.v1"
   );
+}
+
+export function directLocalPendingEvidenceIdentity(
+  snapshot: StoryFactSnapshot,
+): DirectLocalPendingEvidenceIdentity | null {
+  if (
+    (snapshot.status !== "temporary" && snapshot.status !== "unconfirmed") ||
+    snapshot.origin !== "system" ||
+    snapshot.locked ||
+    !snapshot.needsReview ||
+    snapshot.contentText === null ||
+    !isDirectLocalReviewDraft(snapshot)
+  ) {
+    return null;
+  }
+  const source = snapshot.source;
+  const key = JSON.stringify([
+    snapshot.projectId,
+    snapshot.factType,
+    source.chapterId,
+    source.versionId,
+    source.startOffset,
+    source.endOffset,
+    source.sourceLength,
+    normalizeDirectLocalEvidenceText(snapshot.contentText),
+    normalizeDirectLocalEvidenceText(source.excerpt),
+  ]);
+  return Object.freeze({
+    projectId: snapshot.projectId,
+    factType: snapshot.factType,
+    chapterId: source.chapterId,
+    versionId: source.versionId,
+    startOffset: source.startOffset,
+    endOffset: source.endOffset,
+    sourceLength: source.sourceLength,
+    key,
+  });
+}
+
+export function matchesDirectLocalPendingEvidence(
+  snapshot: StoryFactSnapshot,
+  identity: DirectLocalPendingEvidenceIdentity,
+): boolean {
+  const candidate = directLocalPendingEvidenceIdentity(snapshot);
+  return candidate?.key === identity.key;
+}
+
+function normalizeDirectLocalEvidenceText(value: string): string {
+  return value.normalize("NFC").trim().replace(/\s+/gu, " ");
 }
 
 function isStoryValueRecord(

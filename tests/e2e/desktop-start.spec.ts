@@ -48,7 +48,7 @@ test("starts locally through the three creation paths without requiring cloud lo
     "href",
     "#/projects",
   );
-  await expect(page.getByRole("link", { name: "恢复备份" })).toHaveAttribute(
+  await expect(page.getByRole("link", { name: "导入项目包" })).toHaveAttribute(
     "href",
     "#/settings#data-transfer",
   );

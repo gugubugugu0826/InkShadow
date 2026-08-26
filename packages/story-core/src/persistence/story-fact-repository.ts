@@ -5,8 +5,10 @@ import type { Result } from "../result.js";
 import {
   StoryFact,
   CONTINUOUS_STORY_STATE_ROUTE_TASKS,
+  directLocalPendingEvidenceIdentity,
   isRebuildableStoryFactType,
   MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES,
+  matchesDirectLocalPendingEvidence,
   type ContinuousStoryStateRouteCommit,
   type ContinuousStoryStateRouteCommitReceipt,
   type ContinuousStoryStateRouteIdentity,
@@ -403,6 +405,58 @@ export class SqliteStoryFactStore implements StoryFactStore, LegacyStoryFactComp
           }
         }
         await assertChapterEvidence(transaction, snapshot);
+        const directLocalEvidence = directLocalPendingEvidenceIdentity(snapshot);
+        if (directLocalEvidence !== null) {
+          const existingRows = await transaction.select<StoryFactRow>(
+            `${STORY_FACT_SELECT}
+             WHERE fact.project_id = ?
+               AND fact.fact_type = ?
+               AND fact.source_kind = 'chapter_span'
+               AND fact.source_chapter_id = ?
+               AND fact.source_version_id = ?
+               AND fact.source_start_offset = ?
+               AND fact.source_end_offset = ?
+               AND fact.source_length = ?
+             ORDER BY
+               CASE
+                 WHEN fact.user_confirmed = 1 OR fact.origin = 'user' THEN 0
+                 WHEN fact.deprecated = 0 THEN 1
+                 ELSE 2
+               END,
+               fact.created_at,
+               fact.id`,
+            [
+              directLocalEvidence.projectId,
+              directLocalEvidence.factType,
+              directLocalEvidence.chapterId,
+              directLocalEvidence.versionId,
+              directLocalEvidence.startOffset,
+              directLocalEvidence.endOffset,
+              directLocalEvidence.sourceLength,
+            ],
+          );
+          let existing: StoryFact | undefined;
+          for (const row of existingRows) {
+            const candidate = hydrateFact(row);
+            const currentMatches = matchesDirectLocalPendingEvidence(
+              candidate.toSnapshot(),
+              directLocalEvidence,
+            );
+            const initialMatches = currentMatches
+              ? true
+              : matchesDirectLocalPendingEvidence(
+                  await selectInitialStoryFactSnapshot(transaction, candidate.id),
+                  directLocalEvidence,
+                );
+            if (initialMatches) {
+              existing = candidate;
+              break;
+            }
+          }
+          if (existing !== undefined) {
+            return Object.freeze({ fact: existing, created: false });
+          }
+        }
         const matchingRows = await transaction.select<StoryFactRow>(
           `${STORY_FACT_SELECT}
            WHERE fact.project_id = ?
@@ -1646,6 +1700,23 @@ function hydrateRevision(row: RevisionRow): StoryFactRevision {
     changeKind: row.change_kind as StoryFactRevisionChangeKind,
     recordedAt: fact.toSnapshot().updatedAt,
   });
+}
+
+async function selectInitialStoryFactSnapshot(
+  executor: StorySqlTransaction,
+  factId: UuidV7,
+): Promise<StoryFactSnapshot> {
+  const rows = await executor.select<RevisionRow>(
+    `SELECT fact_id, project_id, revision, change_kind, recorded_at, snapshot_json
+     FROM story_fact_revisions
+     WHERE fact_id = ? AND revision = 1`,
+    [factId],
+  );
+  const row = rows[0];
+  if (row === undefined || rows.length !== 1) {
+    abortCorruptSnapshot("STORY_FACT_INITIAL_REVISION_MISSING");
+  }
+  return hydrateRevision(row).fact.toSnapshot();
 }
 
 async function buildLegacyFormalFact(

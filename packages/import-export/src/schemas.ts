@@ -59,7 +59,7 @@ export const portableChapterV1Schema = z
       .min(0)
       .max(IMPORT_LIMITS.maximumChapters - 1),
     path: z.string().min(1).max(IMPORT_LIMITS.maximumRelativePathCharacters),
-    markdown: z.string().min(1).max(IMPORT_LIMITS.maximumChapterBytes),
+    markdown: z.string().max(IMPORT_LIMITS.maximumChapterBytes),
   })
   .strict();
 
@@ -81,7 +81,7 @@ export const portableManifestEntryV1Schema = z
       .max(IMPORT_LIMITS.maximumChapters - 1),
     path: z.string().min(1).max(IMPORT_LIMITS.maximumRelativePathCharacters),
     mediaType: z.literal("text/markdown"),
-    byteLength: z.number().int().min(1).max(IMPORT_LIMITS.maximumChapterBytes),
+    byteLength: z.number().int().min(0).max(IMPORT_LIMITS.maximumChapterBytes),
     checksum: sha256ChecksumSchema,
   })
   .strict();

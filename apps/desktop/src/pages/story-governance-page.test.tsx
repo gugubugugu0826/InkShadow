@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createStorySettingsTemplate, serializeStorySettings } from "@inkshadow/import-export/core";
-import { parseUuidV7, StoryCoreError } from "@inkshadow/story-core";
+import { parseUuidV7, StoryCoreError, StoryFact } from "@inkshadow/story-core";
 import { ToastProvider } from "@inkshadow/ui";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -255,7 +255,7 @@ describe("StoryGovernancePage", () => {
       throw new Error("找不到当前设定区域。");
     }
     expect(within(currentSectionBefore).getByText("灯塔 每晚只能亮一次。")).toBeVisible();
-    expect(within(currentSectionBefore).getByText("查看证据")).toBeVisible();
+    expect(within(currentSectionBefore).getByText("查看原文依据")).toBeVisible();
     const storyMain = screen.getByRole("main", { name: "设定" });
     expect(storyMain).not.toHaveTextContent(/AI|模型|调用|上下文|路由|令牌|追踪|候选|费用/u);
     expect(screen.queryByText("这条待确认内容不能出现在直接模式。")).toBeNull();
@@ -358,22 +358,22 @@ describe("StoryGovernancePage", () => {
     }
 
     const formalEvidenceButton = within(originalFactCard).getByRole("button", {
-      name: "查看证据",
+      name: "查看原文依据",
     });
     expect(formalEvidenceButton.tagName).toBe("BUTTON");
     expect(formalEvidenceButton).toHaveAttribute("aria-expanded", "false");
     formalEvidenceButton.focus();
     await user.keyboard(" ");
     expect(formalEvidenceButton).toHaveAttribute("aria-expanded", "true");
-    expect(formalEvidenceButton).toHaveAccessibleName("收起证据");
+    expect(formalEvidenceButton).toHaveAccessibleName("收起原文依据");
     expect(formalEvidenceButton).toHaveFocus();
-    expect(within(originalFactCard).getByRole("region", { name: "证据" })).toBeVisible();
+    expect(within(originalFactCard).getByRole("region", { name: "原文依据" })).toBeVisible();
     await user.pointer([
       { keys: "[TouchA>]", target: formalEvidenceButton },
       { keys: "[/TouchA]", target: formalEvidenceButton },
     ]);
     expect(formalEvidenceButton).toHaveAttribute("aria-expanded", "false");
-    expect(formalEvidenceButton).toHaveAccessibleName("查看证据");
+    expect(formalEvidenceButton).toHaveAccessibleName("查看原文依据");
     expect(formalEvidenceButton).toHaveFocus();
     formalEvidenceButton.blur();
     act(() => formalEvidenceButton.click());
@@ -452,6 +452,188 @@ describe("StoryGovernancePage", () => {
     expect(within(reopenedCurrentSection).getAllByText("灯塔 每晚只能亮一次。")).toHaveLength(1);
   });
 
+  it("shows one auditable item for historical duplicate pending local facts", async () => {
+    window.localStorage.clear();
+    seedWritingExperience("direct");
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "历史重复设定" });
+    if (!project.ok) throw project.error;
+    const parsedProjectId = parseUuidV7(project.value.id);
+    if (!parsedProjectId.ok) throw parsedProjectId.error;
+    const content = "那是我父亲留下的坐标。";
+    const sourceChapter = await runtime.useCases.createChapter.execute({
+      projectId: project.value.id,
+      title: "第一章",
+      content,
+    });
+    if (!sourceChapter.ok) throw sourceChapter.error;
+    const reference = "direct-local:inkshadow.direct-local-story-fact.v1:historical-duplicate";
+    const createHistoricalFact = () =>
+      StoryFact.create({
+        id: runtime.ids.next(),
+        projectId: project.value.id,
+        factType: "character_profile",
+        contentText: content,
+        structuredValue: {
+          schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+          payload: { schemaVersion: "inkshadow.direct-local-story-fact.v1" },
+        },
+        source: {
+          kind: "chapter_span",
+          reference,
+          chapterId: sourceChapter.value.chapter.id,
+          versionId: sourceChapter.value.chapter.currentVersionId,
+          startOffset: 0,
+          endOffset: content.length,
+          sourceLength: content.length,
+          excerpt: content,
+        },
+        confidence: 1,
+        status: "unconfirmed",
+        origin: "system",
+        needsReview: true,
+        humanConfirmed: false,
+        now: runtime.clock.now(),
+      });
+    const first = createHistoricalFact();
+    const second = createHistoricalFact();
+    if (!first.ok) throw first.error;
+    if (!second.ok) throw second.error;
+    const firstSaved = await runtime.story.facts.create(first.value);
+    const secondSaved = await runtime.story.facts.create(second.value);
+    if (!firstSaved.ok) throw firstSaved.error;
+    if (!secondSaved.ok) throw secondSaved.error;
+
+    renderRoute(runtime, "/projects/" + project.value.id + "/story");
+
+    const pendingSection = (
+      await screen.findByRole("heading", { name: "待确认设定", level: 2 })
+    ).closest("section");
+    if (!(pendingSection instanceof HTMLElement)) throw new Error("找不到待确认设定区域。");
+    expect(within(pendingSection).getAllByText(content)).toHaveLength(1);
+    expect(within(pendingSection).getAllByRole("button", { name: "查看原文依据" })).toHaveLength(1);
+    expect(screen.getByText("已隔离重复的待确认设定", { exact: true })).toBeVisible();
+    expect(screen.getByText(/1 条历史重复记录/u)).toBeVisible();
+    const persisted = await runtime.story.facts.listByProjectId(parsedProjectId.value);
+    if (!persisted.ok) throw persisted.error;
+    expect(persisted.value).toHaveLength(2);
+  });
+
+  it.each(["确认并保留", "修改", "放弃"] as const)(
+    "keeps a historical duplicate pending fact hidden after %s and reopening the page",
+    async (decision) => {
+      window.localStorage.clear();
+      seedWritingExperience("direct");
+      const runtime = createDevelopmentRuntime(window.localStorage);
+      const project = await runtime.useCases.createProject.execute({
+        name: `历史重复设定-${decision}`,
+      });
+      if (!project.ok) throw project.error;
+      const parsedProjectId = parseUuidV7(project.value.id);
+      if (!parsedProjectId.ok) throw parsedProjectId.error;
+      const content = "周望是钟楼的管理员。";
+      const editedContent = "周望担任钟楼管理员。";
+      const sourceChapter = await runtime.useCases.createChapter.execute({
+        projectId: project.value.id,
+        title: "钟楼旧事",
+        content,
+      });
+      if (!sourceChapter.ok) throw sourceChapter.error;
+      const createHistoricalFact = () =>
+        StoryFact.create({
+          id: runtime.ids.next(),
+          projectId: project.value.id,
+          factType: "character_profile",
+          contentText: content,
+          structuredValue: {
+            schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+            payload: { schemaVersion: "inkshadow.direct-local-story-fact.v1" },
+          },
+          source: {
+            kind: "chapter_span",
+            reference: "direct-local:inkshadow.direct-local-story-fact.v1:decided-duplicate",
+            chapterId: sourceChapter.value.chapter.id,
+            versionId: sourceChapter.value.chapter.currentVersionId,
+            startOffset: 0,
+            endOffset: content.length,
+            sourceLength: content.length,
+            excerpt: content,
+          },
+          confidence: 1,
+          status: "unconfirmed",
+          origin: "system",
+          needsReview: true,
+          humanConfirmed: false,
+          now: runtime.clock.now(),
+        });
+      const first = createHistoricalFact();
+      const second = createHistoricalFact();
+      if (!first.ok) throw first.error;
+      if (!second.ok) throw second.error;
+      const firstSaved = await runtime.story.facts.create(first.value);
+      const secondSaved = await runtime.story.facts.create(second.value);
+      if (!firstSaved.ok) throw firstSaved.error;
+      if (!secondSaved.ok) throw secondSaved.error;
+
+      const user = userEvent.setup();
+      const view = renderRoute(runtime, `/projects/${project.value.id}/story`);
+      const pendingSection = (
+        await screen.findByRole("heading", { name: "待确认设定", level: 2 })
+      ).closest("section");
+      if (!(pendingSection instanceof HTMLElement)) throw new Error("找不到待确认设定区域。");
+      expect(within(pendingSection).getAllByText(content)).toHaveLength(1);
+
+      if (decision === "修改") {
+        await user.click(within(pendingSection).getByRole("button", { name: "修改" }));
+        const dialog = screen.getByRole("dialog", { name: "修改设定" });
+        const input = within(dialog).getByRole("textbox", { name: "设定内容" });
+        await user.clear(input);
+        await user.type(input, editedContent);
+        await user.click(within(dialog).getByRole("button", { name: "保存修改并确认" }));
+      } else {
+        await user.click(within(pendingSection).getByRole("button", { name: decision }));
+      }
+
+      await waitFor(() =>
+        expect(screen.queryByRole("heading", { name: "待确认设定", level: 2 })).toBeNull(),
+      );
+      const decidedStatus = decision === "放弃" ? "deprecated" : "formal";
+      const afterDecision = await runtime.story.facts.listByProjectId(parsedProjectId.value);
+      if (!afterDecision.ok) throw afterDecision.error;
+      const afterDecisionSnapshots = afterDecision.value.map((fact) => fact.toSnapshot());
+      expect(afterDecisionSnapshots.filter(({ status }) => status === "unconfirmed")).toHaveLength(
+        1,
+      );
+      const decidedSnapshots = afterDecisionSnapshots.filter(
+        ({ status }) => status === decidedStatus,
+      );
+      expect(decidedSnapshots).toHaveLength(1);
+      expect(decidedSnapshots[0]).toMatchObject({
+        needsReview: false,
+        revision: 2,
+        userConfirmed: decision !== "放弃",
+      });
+
+      view.unmount();
+      const reopenedRuntime = createDevelopmentRuntime(window.localStorage);
+      renderRoute(reopenedRuntime, `/projects/${project.value.id}/story`);
+      expect(
+        await screen.findByRole("heading", { name: `历史重复设定-${decision}`, level: 1 }),
+      ).toBeVisible();
+      expect(screen.queryByRole("heading", { name: "待确认设定", level: 2 })).toBeNull();
+      expect(screen.getByText("已隔离重复的待确认设定", { exact: true })).toBeVisible();
+      expect(screen.getByText(/1 条历史重复记录/u)).toBeVisible();
+      if (decision === "修改") {
+        expect(screen.getByText(editedContent)).toBeVisible();
+        expect(screen.queryByText(content)).toBeNull();
+      } else if (decision === "确认并保留") {
+        expect(screen.getAllByText(content)).toHaveLength(1);
+      } else {
+        expect(screen.queryByText(content)).toBeNull();
+      }
+    },
+  );
+
   it("keeps structured facts out of plain-text edits and duplicate merging in direct mode", async () => {
     window.localStorage.clear();
     seedWritingExperience("direct");
@@ -498,12 +680,12 @@ describe("StoryGovernancePage", () => {
     for (const card of factCards as HTMLElement[]) {
       expect(
         within(card).getByText(
-          "结构化设定暂不支持直接改文字。你仍可查看证据、固定，或删除后恢复。",
+          "结构化设定暂不支持直接改文字。你仍可查看原文依据、固定，或删除后恢复。",
         ),
       ).toBeVisible();
       expect(within(card).getByRole("button", { name: "修改" })).toBeDisabled();
       expect(within(card).queryByRole("button", { name: "合并重复项" })).toBeNull();
-      expect(within(card).getByText("查看证据")).toBeVisible();
+      expect(within(card).getByText("查看原文依据")).toBeVisible();
     }
     expect(screen.queryByRole("button", { name: "合并重复项" })).toBeNull();
 

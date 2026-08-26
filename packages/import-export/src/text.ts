@@ -21,6 +21,7 @@ export interface MarkdownSanitizationResult {
 
 export interface MarkdownSanitizationOptions {
   readonly imageAssets?: readonly PublicationImageAsset[];
+  readonly allowEmpty?: boolean;
 }
 
 export interface ImportedTextDocument {
@@ -168,6 +169,9 @@ export function sanitizeMarkdown(
     markdown = markdown.replaceAll(placeholder, imageMarkdown);
   }
   if (markdown.length === 0) {
+    if (options.allowEmpty === true) {
+      return { markdown: "", issues };
+    }
     throw new ImportExportError(
       "MARKDOWN_EMPTY",
       "The imported document has no usable text.",
