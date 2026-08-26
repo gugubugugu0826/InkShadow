@@ -1,7 +1,7 @@
 # InkShadow 0.2.13 阻断缺陷修复与人工复测候选记录
 
 > 更新日期：2026-08-27  
-> 当前阶段：源码修复、桌面端全量、全仓测试、类型、规范、构建和正式网页端到端门禁已完成；唯一候选提交、完整未签名候选链、安装包与清理结果仍待本轮最终补录。  
+> 当前阶段：源码修复、桌面端全量、全仓测试、类型、规范、构建和正式网页端到端门禁已完成。首轮完整未签名候选链因正式前端载荷超出固定上限 670 字节而失败关闭，没有生成安装包；载荷已在不提高上限的前提下收敛，仍须从新的唯一干净提交完整重跑。  
 > 发布边界：0.2.13 只用于人工复测候选。在取得真实安装人工复测结果和单独发布指令前，不创建标签或 GitHub Release；已发布的 v0.2.12 标签、发布页、安装包和附件保持不可变。
 >
 > 本文只记录当前源码重新取得的证据。用户指令提到的两份 v0.2.12 真实安装测试报告原文、截图 M01–M10／N01–N24、现场数据库、完整支持编号、诊断包、调用栈和供应商响应均未在已提供附件、下载目录、桌面或仓库发布证据中找到，统一标记为“未取得”。现场现象仅按 0.2.13 指令中的摘要保留，不冒充现场复现。
@@ -54,41 +54,42 @@
 
 ## 四、修复前失败与当前聚焦证据
 
-| 精确命令或范围                                                                                                                               | 修复前                             | 修复后当前结果                                                        |
-| -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------- |
-| `pnpm --filter @inkshadow/desktop test -- src/pages/editor-candidate-route.test.tsx -t "older recovery draft\|non-current branched"`         | 2 失败、68 因筛选未运行            | 纳入编辑器完整组合                                                    |
-| `pnpm --filter @inkshadow/desktop test -- src/pages/editor-candidate-route.test.tsx src/pages/editor-version-restore-sqlite-reopen.test.tsx` | 不适用；真实文件重开是新增守恒测试 | 73 通过、0 失败、0 跳过                                               |
-| `pnpm --filter @inkshadow/story-core test -- story-fact-persistence.test.ts -t "reuses one pending local fact"`                              | 1 失败、19 因筛选未运行            | 1 通过、19 因筛选未运行                                               |
-| `pnpm --filter @inkshadow/desktop test -- src/infrastructure/direct-story-fact-organizer.test.ts -t "keeps one pending fact"`                | 1 失败、20 因筛选未运行            | 1 通过、20 因筛选未运行                                               |
-| `pnpm --filter @inkshadow/desktop test -- src/pages/story-governance-page.test.tsx -t "historical duplicate pending local facts"`            | 1 失败、29 因筛选未运行            | 1 通过、29 因筛选未运行                                               |
-| `pnpm --filter @inkshadow/story-core test -- tests/story-fact-persistence.test.ts`                                                           | —                                  | 1 个文件、20 通过、0 失败、0 跳过                                     |
-| 桌面设定存储、整理和设定页三个文件                                                                                                           | —                                  | 3 个文件、67 通过、0 失败、0 跳过                                     |
-| 设置、调查和设定交互三个文件                                                                                                                 | —                                  | 3 个文件、99 通过、0 失败、0 跳过                                     |
-| `pnpm --filter @inkshadow/import-export test`                                                                                                | 修复前 44 通过、5 失败             | 11 个文件、96 通过、0 失败、0 跳过                                    |
-| 桌面导出面板与开始页两个文件                                                                                                                 | 修复前 9 通过、2 失败              | 2 个文件、24 通过、0 失败、0 跳过                                     |
-| `pnpm --filter @inkshadow/data test`                                                                                                         | —                                  | 81 个文件、478 通过、0 失败、0 跳过                                   |
-| `pnpm --filter @inkshadow/story-core test`                                                                                                   | —                                  | 22 个文件、144 通过、0 失败、0 跳过                                   |
-| `pnpm --filter @inkshadow/application test`                                                                                                  | —                                  | 8 个文件、88 通过、0 失败、0 跳过                                     |
-| 数据迁移、连续升级、维护与备份恢复五文件聚焦                                                                                                 | —                                  | 5 个文件、62 通过、0 失败、0 跳过                                     |
-| `pnpm --filter @inkshadow/application test -- tests/chapter-version-restore.test.ts`                                                         | —                                  | 1 个文件、7 通过、0 失败、0 跳过                                      |
-| 故事设定守恒五文件聚焦                                                                                                                       | —                                  | 5 个文件、40 通过、0 失败、0 跳过                                     |
-| 桌面恢复与备份八文件聚焦                                                                                                                     | —                                  | 8 个文件、44 通过、0 失败、0 跳过                                     |
-| 设置锚点正式 Chromium 旅程                                                                                                                   | —                                  | 6 通过、0 失败、0 跳过；含键盘、深链、目标宽度和等效 200%             |
-| 设定证据正式 Chromium 重复运行                                                                                                               | —                                  | 2 通过、0 失败、0 跳过                                                |
-| 正式重排旅程                                                                                                                                 | —                                  | 4 通过、0 失败、0 跳过；含 1440／1280／1024／800、明暗主题与等效 200% |
-| `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check`                                                                     | —                                  | 通过                                                                  |
-| `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings`                                                | —                                  | 通过，0 警告                                                          |
-| `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`                                                                               | —                                  | 207 通过、0 失败、1 忽略；忽略项要求显式 Ollama                       |
-| `pnpm test:scripts`／`pnpm check:licenses`／`pnpm check:boundaries`                                                                          | —                                  | 分别 39／137／20 通过，0 失败、0 跳过                                 |
-| `pnpm check:secrets`／`pnpm check:desktop-release`／`pnpm lint`／`pnpm format:check`                                                         | —                                  | 均通过；没有读取真实凭据                                              |
-| `pnpm --filter @inkshadow/desktop test`（包含于全仓顺序运行）                                                                                | —                                  | 293 个文件、2,508 通过、0 失败、1 跳过                                |
-| `pnpm test`                                                                                                                                  | —                                  | 510 个文件通过、16 个文件跳过；3,889 通过、0 失败、65 跳过            |
-| `pnpm typecheck`／`pnpm lint`／`pnpm format:check`                                                                                           | —                                  | 20／21 个有脚本的工作区类型检查通过；规范与格式通过                   |
-| `pnpm build`                                                                                                                                 | —                                  | 20／21 个有脚本的工作区通过；桌面 2,306 模块，策略体积 7,340,007 字节 |
-| `pnpm test:e2e`                                                                                                                              | 首轮 24 通过、1 失败               | 准确项目包说明修复后定向 4／4，最终完整复跑 25／25                    |
-| `pnpm test:e2e:release`／`pnpm release:candidate:unsigned`                                                                                   | —                                  | 待本轮最终补录；只能在唯一干净提交上执行                              |
+| 精确命令或范围                                                                                                                               | 修复前                             | 修复后当前结果                                                                   |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------- |
+| `pnpm --filter @inkshadow/desktop test -- src/pages/editor-candidate-route.test.tsx -t "older recovery draft\|non-current branched"`         | 2 失败、68 因筛选未运行            | 纳入编辑器完整组合                                                               |
+| `pnpm --filter @inkshadow/desktop test -- src/pages/editor-candidate-route.test.tsx src/pages/editor-version-restore-sqlite-reopen.test.tsx` | 不适用；真实文件重开是新增守恒测试 | 73 通过、0 失败、0 跳过                                                          |
+| `pnpm --filter @inkshadow/story-core test -- story-fact-persistence.test.ts -t "reuses one pending local fact"`                              | 1 失败、19 因筛选未运行            | 1 通过、19 因筛选未运行                                                          |
+| `pnpm --filter @inkshadow/desktop test -- src/infrastructure/direct-story-fact-organizer.test.ts -t "keeps one pending fact"`                | 1 失败、20 因筛选未运行            | 1 通过、20 因筛选未运行                                                          |
+| `pnpm --filter @inkshadow/desktop test -- src/pages/story-governance-page.test.tsx -t "historical duplicate pending local facts"`            | 1 失败、29 因筛选未运行            | 1 通过、29 因筛选未运行                                                          |
+| `pnpm --filter @inkshadow/story-core test -- tests/story-fact-persistence.test.ts`                                                           | —                                  | 1 个文件、20 通过、0 失败、0 跳过                                                |
+| 桌面设定存储、整理和设定页三个文件                                                                                                           | —                                  | 3 个文件、67 通过、0 失败、0 跳过                                                |
+| 设置、调查和设定交互三个文件                                                                                                                 | —                                  | 3 个文件、99 通过、0 失败、0 跳过                                                |
+| `pnpm --filter @inkshadow/import-export test`                                                                                                | 修复前 44 通过、5 失败             | 11 个文件、96 通过、0 失败、0 跳过                                               |
+| 桌面导出面板与开始页两个文件                                                                                                                 | 修复前 9 通过、2 失败              | 2 个文件、24 通过、0 失败、0 跳过                                                |
+| `pnpm --filter @inkshadow/data test`                                                                                                         | —                                  | 81 个文件、478 通过、0 失败、0 跳过                                              |
+| `pnpm --filter @inkshadow/story-core test`                                                                                                   | —                                  | 22 个文件、144 通过、0 失败、0 跳过                                              |
+| `pnpm --filter @inkshadow/application test`                                                                                                  | —                                  | 8 个文件、88 通过、0 失败、0 跳过                                                |
+| 数据迁移、连续升级、维护与备份恢复五文件聚焦                                                                                                 | —                                  | 5 个文件、62 通过、0 失败、0 跳过                                                |
+| `pnpm --filter @inkshadow/application test -- tests/chapter-version-restore.test.ts`                                                         | —                                  | 1 个文件、7 通过、0 失败、0 跳过                                                 |
+| 故事设定守恒五文件聚焦                                                                                                                       | —                                  | 5 个文件、40 通过、0 失败、0 跳过                                                |
+| 桌面恢复与备份八文件聚焦                                                                                                                     | —                                  | 8 个文件、44 通过、0 失败、0 跳过                                                |
+| 设置锚点正式 Chromium 旅程                                                                                                                   | —                                  | 6 通过、0 失败、0 跳过；含键盘、深链、目标宽度和等效 200%                        |
+| 设定证据正式 Chromium 重复运行                                                                                                               | —                                  | 2 通过、0 失败、0 跳过                                                           |
+| 正式重排旅程                                                                                                                                 | —                                  | 4 通过、0 失败、0 跳过；含 1440／1280／1024／800、明暗主题与等效 200%            |
+| `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check`                                                                     | —                                  | 通过                                                                             |
+| `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings`                                                | —                                  | 通过，0 警告                                                                     |
+| `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`                                                                               | —                                  | 207 通过、0 失败、1 忽略；忽略项要求显式 Ollama                                  |
+| `pnpm test:scripts`／`pnpm check:licenses`／`pnpm check:boundaries`                                                                          | —                                  | 分别 39／137／20 通过，0 失败、0 跳过                                            |
+| `pnpm check:secrets`／`pnpm check:desktop-release`／`pnpm lint`／`pnpm format:check`                                                         | —                                  | 均通过；没有读取真实凭据                                                         |
+| `pnpm --filter @inkshadow/desktop test`（包含于全仓顺序运行）                                                                                | —                                  | 293 个文件、2,508 通过、0 失败、1 跳过                                           |
+| `pnpm test`                                                                                                                                  | —                                  | 510 个文件通过、16 个文件跳过；3,889 通过、0 失败、65 跳过                       |
+| `pnpm typecheck`／`pnpm lint`／`pnpm format:check`                                                                                           | —                                  | 20／21 个有脚本的工作区类型检查通过；规范与格式通过                              |
+| `pnpm build`                                                                                                                                 | —                                  | 20／21 个有脚本的工作区通过；载荷收敛后桌面 2,306 模块，正式目录 7,339,928 字节  |
+| `pnpm test:e2e`                                                                                                                              | 首轮 24 通过、1 失败               | 准确项目包说明修复后定向 4／4，最终完整复跑 25／25                               |
+| `pnpm release:candidate:unsigned` 首轮                                                                                                       | —                                  | 失败关闭：7,340,702／7,340,032 字节，超出 670 字节；没有进入正式候选端到端或打包 |
+| `pnpm test:e2e:release`／修复后完整候选链                                                                                                    | —                                  | 待新的唯一干净提交完整重跑                                                       |
 
-聚焦分组互有重叠，不相加为全仓总数。固定网页包体上限为 7,340,032 字节；本轮多次在不提高预算的前提下从超出 1,172 字节逐步收敛，当前策略体积为 7,340,007 字节，余量 25 字节。完整候选链会在唯一干净提交上再次执行全仓、原生和正式候选端到端门禁；候选提交、安装包和清理结果将在候选附件中按实际结果冻结。
+聚焦分组互有重叠，不相加为全仓总数。首轮完整候选链的正式前端载荷为 7,340,702／7,340,032 字节，超出固定上限 670 字节并停止；候选前单独构建的 7,340,007 字节不能替代该候选结果。修复只压缩重复中文错误文案和网页页签 SVG，没有提高预算或改变版本安全判断；修复后单独正式构建为 7,339,928／7,340,032 字节，余量 104 字节。该结果仍不是候选通过证明，必须在新的唯一干净提交上重新执行全仓、原生、正式候选端到端和打包门禁。
 
 ## 五、未取得与未执行
 
@@ -124,6 +125,6 @@
 
 ## 八、候选形成与发布结论
 
-当前不得建议发布。桌面端全量、全仓测试、类型、规范、构建和正式网页端到端已通过；唯一候选提交、完整未签名候选链、安装包来源指纹、大小、SHA-256、AMD64 架构、产品／文件版本、签名状态、工作区清理清单和人工复测步骤仍待本轮最终补录，未知值不预填。
+当前不得建议发布。首轮完整候选链已因正式前端载荷超限失败关闭，没有形成安装包；载荷修复后的唯一候选提交、完整未签名候选链、安装包来源指纹、大小、SHA-256、AMD64 架构、产品／文件版本、签名状态、工作区清理清单和人工复测步骤仍待本轮最终补录，未知值不预填。
 
 只有上述门禁全部通过，才能从唯一干净提交保留 0.2.13 人工复测安装包、来源清单、四行校验文件、中文验证报告和正式中文候选说明。候选完成后仍不得创建标签或 GitHub Release；必须等待 0.2.13 真实安装人工复测结果及用户单独发布指令。

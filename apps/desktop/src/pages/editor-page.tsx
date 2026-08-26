@@ -751,15 +751,13 @@ type ChapterVersionChainAnalysis =
       isolated: readonly ChapterVersionChainEntry[];
     }>
   | Readonly<{ ok: false; error: UiActionError }>;
-const VERSION_CHAIN_WRITE_STOP = "已停止写入。";
-const CURRENT_VERSION_READ_FAILURE = `当前版本无法安全读取。${VERSION_CHAIN_WRITE_STOP}`;
+const VERSION_CHAIN_READ_FAILURE = "版本历史无法安全读取，已停止写入。";
 
 function invalidChapterVersionChain(
   code: string,
-  message: string,
   entry?: ChapterVersionChainEntry,
 ): ChapterVersionChainAnalysis {
-  const error = new UiActionError(code, message);
+  const error = new UiActionError(code, VERSION_CHAIN_READ_FAILURE);
   return Object.freeze({
     ok: false as const,
     error:
@@ -777,11 +775,7 @@ function analyzeChapterVersionChain(
   const byId = new Map<string, ChapterVersionChainEntry>();
   for (const version of versions) {
     if (byId.has(version.id)) {
-      return invalidChapterVersionChain(
-        "VERSION_ID_DUPLICATED",
-        `版本标识重复。${VERSION_CHAIN_WRITE_STOP}`,
-        version,
-      );
+      return invalidChapterVersionChain("VERSION_ID_DUPLICATED", version);
     }
     byId.set(version.id, version);
   }
@@ -790,36 +784,20 @@ function analyzeChapterVersionChain(
   let cursor: ChapterVersionChainEntry = current;
   for (;;) {
     if (authorityIds.has(cursor.id)) {
-      return invalidChapterVersionChain(
-        "VERSION_PARENT_CHAIN_CYCLE",
-        `版本链循环。${VERSION_CHAIN_WRITE_STOP}`,
-        cursor,
-      );
+      return invalidChapterVersionChain("VERSION_PARENT_CHAIN_CYCLE", cursor);
     }
     authorityIds.add(cursor.id);
     if (cursor.sequence !== expectedSequence) {
-      return invalidChapterVersionChain(
-        "VERSION_SEQUENCE_CHAIN_INVALID",
-        `版本序号不连续。${VERSION_CHAIN_WRITE_STOP}`,
-        cursor,
-      );
+      return invalidChapterVersionChain("VERSION_SEQUENCE_CHAIN_INVALID", cursor);
     }
     const parentId = cursor.parentVersionId;
     if ((expectedSequence === 1) !== (parentId === null)) {
-      return invalidChapterVersionChain(
-        "VERSION_PARENT_CHAIN_INVALID",
-        `版本父链不完整。${VERSION_CHAIN_WRITE_STOP}`,
-        cursor,
-      );
+      return invalidChapterVersionChain("VERSION_PARENT_CHAIN_INVALID", cursor);
     }
     if (parentId === null) break;
     const parent = byId.get(parentId);
     if (parent === undefined) {
-      return invalidChapterVersionChain(
-        "VERSION_PARENT_MISSING",
-        `父版本缺失。${VERSION_CHAIN_WRITE_STOP}`,
-        cursor,
-      );
+      return invalidChapterVersionChain("VERSION_PARENT_MISSING", cursor);
     }
     expectedSequence -= 1;
     cursor = parent;
@@ -1303,7 +1281,7 @@ export function EditorPage() {
     (isolatedVersions: readonly ChapterVersionChainEntry[]) => {
       const cause = new UiActionError(
         "NON_CURRENT_VERSION_HISTORY_WRITE_BLOCKED",
-        "版本历史存在分叉，已停止写入。",
+        "版本分叉，已停止写入。",
       );
       const incident = recordEditorReadFailure("chapter_versions", cause, {
         rowReferences: isolatedVersions.map(chapterVersionDiagnosticReference),
@@ -1557,7 +1535,7 @@ export function EditorPage() {
     if (currentVersion === undefined) {
       failAuthorityRead(
         "chapter_versions",
-        new UiActionError("CURRENT_VERSION_MISSING", CURRENT_VERSION_READ_FAILURE),
+        new UiActionError("CURRENT_VERSION_MISSING", VERSION_CHAIN_READ_FAILURE),
       );
       return;
     }
@@ -5181,11 +5159,11 @@ export function EditorPage() {
         {readonly && (
           <InlineAlert
             tone="info"
-            title={versionReadWarning === null ? "只读模式" : "正文已以只读方式打开"}
+            title={versionReadWarning === null ? "只读模式" : "正文只读"}
             description={
               versionReadWarning === null
                 ? "项目已归档或位于回收站，正文保持可读但不会写入。"
-                : "版本历史待恢复；正文可读，写入均停止。"
+                : "版本待恢复，已停止写入。"
             }
           />
         )}
@@ -5199,12 +5177,12 @@ export function EditorPage() {
         {versionReadWarning !== null && (
           <InlineAlert
             tone="warning"
-            title="部分历史版本暂不可用"
+            title="版本历史需恢复"
             description={`${String(
               versionReadWarning.isolatedCount,
-            )} 条分叉版本已保留，正文只读。支持编号：${versionReadWarning.diagnosticId}。`}
+            )} 条分叉版本已保留。支持编号：${versionReadWarning.diagnosticId}`}
             action={{
-              label: "查看诊断与恢复",
+              label: "诊断与恢复",
               onClick: () => void navigate("/settings#diagnostics"),
             }}
           />

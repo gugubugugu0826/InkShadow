@@ -1922,8 +1922,8 @@ describe("editor candidate route selection", () => {
     const editor = await screen.findByRole("textbox", { name: "章节正文" });
     expect(editor).toHaveValue(saved.value.chapter.content);
     expect(editor).toHaveAttribute("readonly");
-    expect(await screen.findByText("部分历史版本暂不可用")).toBeVisible();
-    expect(screen.getByText(/1 条分叉版本已保留，正文只读/u)).toBeVisible();
+    expect(await screen.findByText("版本历史需恢复")).toBeVisible();
+    expect(screen.getByText(/1 条分叉版本已保留/u)).toBeVisible();
     expect(screen.getByRole("button", { name: "查看版本历史" })).toBeEnabled();
     const incident = readSafeUiRouteIncidents(runtime).find(
       ({ reasonCodeChain, recovered }) =>
