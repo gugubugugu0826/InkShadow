@@ -334,6 +334,7 @@ describe("content entities", () => {
       payload: "fragment",
       startUtf16: 2,
       endUtf16: 7,
+      selectionAction: "expand",
     } as const;
     const streaming = AiCandidate.createStreaming({
       id: CANDIDATE_ID,

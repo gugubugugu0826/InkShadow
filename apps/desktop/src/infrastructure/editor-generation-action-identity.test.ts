@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createDevelopmentRuntime, executeGenerationPlan, prepareGenerationPlan } from "./runtime";
 import {
   selectionWritingActionLabel,
+  selectionWritingActionFromIntent,
   selectionWritingModelTask,
 } from "./selection-rewrite-service";
 
@@ -52,6 +53,25 @@ describe("editor generation action identity", () => {
     ).resolves.toMatchObject({
       metadata: { modelTask: "prose_generation" },
     });
+  });
+
+  it.each([
+    [undefined, "selection_rewrite"],
+    ["selection_rewrite", "selection_rewrite"],
+    ["polish", "polish"],
+    ["expand", "expand"],
+    ["shorten", "shorten"],
+  ] as const)("restores persisted selection action %s as %s", (selectionAction, expected) => {
+    expect(
+      selectionWritingActionFromIntent({
+        task: "selection_rewrite",
+        application: "replace_selection",
+        payload: "fragment",
+        startUtf16: 1,
+        endUtf16: 2,
+        ...(selectionAction === undefined ? {} : { selectionAction }),
+      }),
+    ).toBe(expected);
   });
 
   it.each([

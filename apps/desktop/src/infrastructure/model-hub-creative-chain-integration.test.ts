@@ -1691,6 +1691,7 @@ describe("real creative chains use Model Hub routes", () => {
     const result = await createConfirmedSelectionRewriteCandidate(harness.runtime, {
       chapterId: chapter.id,
       baseVersionId: chapter.currentVersionId,
+      action: "expand",
       selection: {
         startUtf16,
         endUtf16,
@@ -1716,6 +1717,7 @@ describe("real creative chains use Model Hub routes", () => {
         payload: "fragment",
         startUtf16,
         endUtf16,
+        selectionAction: "expand",
       },
     });
     expect(harness.generate.mock.calls[0]?.[0]).toMatchObject({

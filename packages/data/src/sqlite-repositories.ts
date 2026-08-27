@@ -139,6 +139,7 @@ interface AiCandidateDbRow {
   payload_kind: string;
   anchor_start_utf16: number | null;
   anchor_end_utf16: number | null;
+  selection_action: string | null;
 }
 
 interface CountDbRow {
@@ -223,7 +224,8 @@ const CANDIDATE_COLUMNS = `
   application_mode,
   payload_kind,
   anchor_start_utf16,
-  anchor_end_utf16
+  anchor_end_utf16,
+  selection_action
 `;
 
 export class SqliteProjectRepository implements ProjectRepository {
@@ -1329,8 +1331,9 @@ async function insertCandidate(
       application_mode,
       payload_kind,
       anchor_start_utf16,
-      anchor_end_utf16
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      anchor_end_utf16,
+      selection_action
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       snapshot.id,
       snapshot.projectId,
@@ -1351,6 +1354,9 @@ async function insertCandidate(
       snapshot.applicationIntent?.payload ?? "full_document",
       snapshot.applicationIntent?.startUtf16 ?? null,
       snapshot.applicationIntent?.endUtf16 ?? null,
+      snapshot.applicationIntent?.task === "selection_rewrite"
+        ? (snapshot.applicationIntent.selectionAction ?? "selection_rewrite")
+        : null,
     ],
   );
 }
@@ -1516,6 +1522,9 @@ function rehydrateCandidateApplicationIntent(row: AiCandidateDbRow): AiCandidate
     payload: row.payload_kind,
     startUtf16: row.anchor_start_utf16,
     endUtf16: row.anchor_end_utf16,
+    ...(row.task_intent === "selection_rewrite" && row.selection_action !== null
+      ? { selectionAction: row.selection_action }
+      : {}),
   } as AiCandidateApplicationIntent;
 }
 

@@ -247,7 +247,9 @@ export function ContextHistoryPanel({ projectId, store, novelSkills }: ContextHi
                     </Badge>
                   </div>
                   <p>
-                    {entry.included ? entry.selectionReason : discardLabel(entry.discardedReason)}
+                    {entry.included
+                      ? adoptionReasonLabel(entry.selectionReason)
+                      : discardLabel(entry.discardedReason)}
                   </p>
                   <p>
                     <strong>资料：</strong>
@@ -309,6 +311,98 @@ function taskLabel(taskType: string): string {
     scene_breakdown: "拆分场景",
   };
   return labels[taskType] ?? "AI 创作";
+}
+
+function adoptionReasonLabel(reason: string): string {
+  const normalized = reason.trim();
+  const mergedSuffix = "Equivalent source evidence was merged.";
+  if (normalized.endsWith(mergedSuffix)) {
+    const base = normalized.slice(0, -mergedSuffix.length).trim();
+    const baseLabel = base.length === 0 ? "本次创作采用了这项资料。" : adoptionReasonLabel(base);
+    return `${baseLabel} 同一内容的其他来源依据已合并保留。`;
+  }
+  if (/explicitly selected this exact saved range/iu.test(normalized)) {
+    return "作者明确选中了这段已保存正文，并为本次处理给出了要求。";
+  }
+  if (/requested an opening for the empty chapter/iu.test(normalized)) {
+    return "作者明确要求为当前空白章节生成开头。";
+  }
+  if (/requested a continuation of the current chapter/iu.test(normalized)) {
+    return "作者明确要求继续创作当前章节。";
+  }
+  if (/requested this exact opening proposal/iu.test(normalized)) {
+    return "作者明确选择了这份开篇方案作为本次创作依据。";
+  }
+  if (/^The author explicitly requested\b/iu.test(normalized)) {
+    return "作者明确要求本次创作采用这项资料。";
+  }
+  if (/confirmed these prohibitions/iu.test(normalized)) {
+    return "作者已明确确认这些禁止项；它们是本次创作必须遵守的约束。";
+  }
+  const seedField = /confirmed this ([a-zA-Z]+) creation input/iu.exec(normalized)?.[1];
+  if (seedField !== undefined) {
+    const labels: Readonly<Record<string, string>> = {
+      premise: "创作起点",
+      genre: "小说类型",
+      tone: "故事基调",
+      characters: "人物资料",
+      relationships: "人物关系",
+      world: "世界背景",
+      conflict: "核心冲突",
+      style: "写作风格",
+      pov: "叙事视角",
+      currentDirection: "当前剧情方向",
+      initialOutline: "初步大纲",
+      rewriteRules: "改写规则",
+    };
+    return `作者已确认这项${labels[seedField] ?? "创建资料"}；采用时仍可追溯到项目创作种子。`;
+  }
+  if (/confirmed and locked this fact/iu.test(normalized)) {
+    return "作者已确认并锁定这项设定，因此本次创作必须遵守。";
+  }
+  if (/authored this fact for the selected branch/iu.test(normalized)) {
+    return "这项设定由作者为当前选定分支填写，只在该分支的资料范围内采用。";
+  }
+  if (/system-derived .* explicitly reversible/iu.test(normalized)) {
+    return "这项本地整理资料可以撤销，仅作为辅助资料采用，不会成为作者确认的正式设定。";
+  }
+  if (/fact is formal only after explicit user confirmation/iu.test(normalized)) {
+    return "这项设定已经作者明确确认，并按其资料类别用于本次创作。";
+  }
+  if (/current saved chapter is the immediate continuity source/iu.test(normalized)) {
+    return "当前已保存章节是保持前后连续的直接依据。";
+  }
+  if (/most recent saved chapter tail is the immediate continuity source/iu.test(normalized)) {
+    return "采用当前章节最近的已保存内容以保持连续；较早正文未纳入本次资料。";
+  }
+  if (/local FTS\/keyword baseline found/iu.test(normalized)) {
+    return "本地关键词检索在当前已接受资料中找到与任务相关的内容。";
+  }
+  if (/optional local vector index supplemented/iu.test(normalized)) {
+    return "本地语义索引补充了与任务相关的当前已接受资料。";
+  }
+  if (/local deterministic evidence reranker/iu.test(normalized)) {
+    return "本地证据排序认为这项当前资料与任务相关，因此作为补充采用。";
+  }
+  if (/explicit Alibaba Qwen remote reranker/iu.test(normalized)) {
+    return "经作者另行授权的远程资料复核选择了这项补充资料。";
+  }
+  if (/local read model requested a governed projection/iu.test(normalized)) {
+    return "本地故事资料视图按当前任务的治理范围提供了这项资料。";
+  }
+  if (/bounded causal-neighbor recovery/iu.test(normalized)) {
+    return "本地因果关系补充了与当前任务直接相邻的已确认事件。";
+  }
+  if (/scoped local retrieval step/iu.test(normalized)) {
+    return "本地资料检索在当前项目、版本与隐私范围内选择了这项资料。";
+  }
+  if (/StoryMemoryReadModel/iu.test(normalized)) {
+    return "本地故事记忆视图按当前资料范围提供了这项只读参考。";
+  }
+  if (/^[^A-Za-z_]+$/u.test(normalized) && /[\u3400-\u9fff]/u.test(normalized)) {
+    return normalized;
+  }
+  return "本次创作按当前任务与资料范围采用了这项资料。";
 }
 
 function layerLabel(layer: ContextCompilationTrace["entries"][number]["layer"]): string {

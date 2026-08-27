@@ -514,7 +514,11 @@ describe("unified story fact context adapter", () => {
       }),
     ).toMatchObject({
       included: true,
-      candidate: { layer: "locked_hard_rules", priority: 1_000 },
+      candidate: {
+        layer: "locked_hard_rules",
+        priority: 1_000,
+        evidence: [expect.objectContaining({ sourceType: "story_rule" })],
+      },
     });
   });
 

@@ -32,6 +32,7 @@ import {
   type ReviewItemType,
   type ReviewSeverity,
   type StoryFact,
+  type StoryFactEvidenceSnapshot,
   type StoryFactSnapshot,
   type StoryFactRevision,
   type StoryValue,
@@ -147,6 +148,262 @@ function EvidenceDisclosure({
   );
 }
 
+function storyFactEvidenceForPresentation(
+  snapshot: StoryFactSnapshot,
+  storedEvidence: readonly StoryFactEvidenceSnapshot[] | undefined,
+): readonly StoryFactEvidenceSnapshot[] {
+  if (storedEvidence !== undefined && storedEvidence.length > 0) return storedEvidence;
+  const source = snapshot.source;
+  if (
+    source.kind !== "chapter_span" ||
+    source.chapterId === null ||
+    source.versionId === null ||
+    source.startOffset === null ||
+    source.endOffset === null ||
+    source.sourceLength === null ||
+    source.excerpt === null
+  ) {
+    return [];
+  }
+  return [
+    {
+      factId: String(snapshot.id),
+      projectId: String(snapshot.projectId),
+      reference: source.reference,
+      chapterId: String(source.chapterId),
+      versionId: String(source.versionId),
+      startOffset: source.startOffset,
+      endOffset: source.endOffset,
+      sourceLength: source.sourceLength,
+      excerpt: source.excerpt,
+      recordedAt: String(snapshot.updatedAt),
+    },
+  ];
+}
+
+function StoryFactEvidenceDetails({
+  evidence,
+  chapters,
+  sourceVersions,
+}: Readonly<{
+  evidence: readonly StoryFactEvidenceSnapshot[];
+  chapters: readonly Chapter[];
+  sourceVersions: readonly ChapterVersion[];
+}>) {
+  if (evidence.length === 0) {
+    return <blockquote className="story-source-quote">这条设定没有可显示的原文片段。</blockquote>;
+  }
+  return (
+    <>
+      {evidence.length > 1 && <p>共 {String(evidence.length)} 处原文依据</p>}
+      {evidence.map((item, index) => {
+        const sourceChapter = chapters.find((chapter) => String(chapter.id) === item.chapterId);
+        const sourceVersion = sourceVersions.find(
+          (version) => String(version.id) === item.versionId,
+        );
+        return (
+          <div className="story-governance-evidence-entry" key={item.reference}>
+            {evidence.length > 1 && <p>原文依据 {String(index + 1)}</p>}
+            <dl>
+              <div>
+                <dt>来源章节</dt>
+                <dd>
+                  {sourceChapter === undefined
+                    ? "已保存章节（名称暂不可用）"
+                    : "《" + sourceChapter.title + "》"}
+                </dd>
+              </div>
+              <div>
+                <dt>保存版本</dt>
+                <dd>
+                  {sourceVersion === undefined
+                    ? "不可变版本详情暂不可用"
+                    : "第 " + String(sourceVersion.sequence) + " 个不可变版本"}
+                </dd>
+              </div>
+              <div>
+                <dt>字符范围</dt>
+                <dd>
+                  第 {String(item.startOffset + 1)} 至 {String(item.endOffset)} 个字符
+                </dd>
+              </div>
+            </dl>
+            <blockquote className="story-source-quote">{item.excerpt}</blockquote>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+function PendingFactsSection({
+  id,
+  title,
+  description,
+  facts,
+  evidenceByFactId,
+  chapters,
+  sourceVersions,
+  disabled,
+  onConfirm,
+  onEdit,
+  onDiscard,
+}: Readonly<{
+  id: string;
+  title: string;
+  description: string;
+  facts: readonly StoryFact[];
+  evidenceByFactId: ReadonlyMap<string, readonly StoryFactEvidenceSnapshot[]>;
+  chapters: readonly Chapter[];
+  sourceVersions: readonly ChapterVersion[];
+  disabled: boolean;
+  onConfirm: (fact: StoryFact) => void;
+  onEdit: (fact: StoryFact) => void;
+  onDiscard: (fact: StoryFact) => void;
+}>) {
+  if (facts.length === 0) return null;
+  return (
+    <section aria-labelledby={id}>
+      <div className="section-heading">
+        <div>
+          <h2 id={id}>{title}</h2>
+          <p>{description}</p>
+        </div>
+        <Badge>{String(facts.length)} 条</Badge>
+      </div>
+      <div className="story-governance-grid">
+        {facts.map((fact) => {
+          const snapshot = fact.toSnapshot();
+          const fromSetup = userDraftFactIdentity(snapshot) !== null;
+          return (
+            <Card key={fact.id}>
+              <CardHeader>
+                <div className="card-heading-row">
+                  <div>
+                    <CardTitle>{factTypeLabel(snapshot.factType)}</CardTitle>
+                    <CardDescription>
+                      {fromSetup ? "来自专业创作输入" : "从正文原文整理"}，等待你的决定。
+                    </CardDescription>
+                  </div>
+                  <Badge tone="warning">待确认</Badge>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <p className="story-governance-copy">{storyFactContent(snapshot)}</p>
+                <EvidenceDisclosure
+                  className="story-governance-evidence"
+                  label={fromSetup ? "查看输入来源" : "查看原文依据"}
+                >
+                  {fromSetup ? (
+                    <>
+                      <dl>
+                        <div>
+                          <dt>来源</dt>
+                          <dd>专业创作表单</dd>
+                        </div>
+                        <div>
+                          <dt>保存位置</dt>
+                          <dd>本地项目资料</dd>
+                        </div>
+                      </dl>
+                      <blockquote>{snapshot.contentText ?? "输入内容暂不可用"}</blockquote>
+                    </>
+                  ) : (
+                    <StoryFactEvidenceDetails
+                      evidence={storyFactEvidenceForPresentation(
+                        snapshot,
+                        evidenceByFactId.get(String(fact.id)),
+                      )}
+                      chapters={chapters}
+                      sourceVersions={sourceVersions}
+                    />
+                  )}
+                </EvidenceDisclosure>
+              </CardContent>
+              <CardFooter>
+                <Button size="sm" disabled={disabled} onClick={() => onConfirm(fact)}>
+                  确认并保留
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={disabled}
+                  onClick={() => onEdit(fact)}
+                >
+                  修改
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={disabled}
+                  onClick={() => onDiscard(fact)}
+                >
+                  放弃
+                </Button>
+              </CardFooter>
+            </Card>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function FactEditDialog({
+  fact,
+  content,
+  busy,
+  onClose,
+  onChange,
+  onSubmit,
+}: Readonly<{
+  fact: StoryFact | null;
+  content: string;
+  busy: boolean;
+  onClose: () => void;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+}>) {
+  const pending = fact !== null && isPendingAuthorReviewFact(fact.toSnapshot());
+  return (
+    <Dialog
+      open={fact !== null}
+      onOpenChange={(open) => {
+        if (!open && !busy) onClose();
+      }}
+      title="修改设定"
+      description={
+        pending
+          ? "保存修改会同时确认这条内容，并把它加入正式设定；原始来源和每个旧版本都会保留。"
+          : "只修改设定内容；原始来源和每个旧版本都会保留。固定的设定需先取消固定。"
+      }
+      footer={
+        <>
+          <Button variant="secondary" disabled={busy} onClick={onClose}>
+            取消
+          </Button>
+          <Button loading={busy} disabled={content.trim().length === 0} onClick={onSubmit}>
+            {pending ? "保存修改并确认" : "保存修改"}
+          </Button>
+        </>
+      }
+    >
+      <FormField label="设定内容" required>
+        {(fieldProps) => (
+          <Textarea
+            {...fieldProps}
+            value={content}
+            maxLength={10_000}
+            currentLength={content.length}
+            rows={7}
+            onChange={(event) => onChange(event.currentTarget.value)}
+          />
+        )}
+      </FormField>
+    </Dialog>
+  );
+}
+
 const FACT_TYPE_OPTIONS = [
   { value: "character_identity", label: "人物身份" },
   { value: "character_state", label: "人物当前状态" },
@@ -199,6 +456,9 @@ export function StoryGovernancePage() {
   const [facts, setFacts] = useState<readonly StoryFact[]>([]);
   const [directInitialEvidenceByFactId, setDirectInitialEvidenceByFactId] = useState<
     ReadonlyMap<string, DirectLocalPendingEvidenceIdentity>
+  >(new Map());
+  const [storyFactEvidenceByFactId, setStoryFactEvidenceByFactId] = useState<
+    ReadonlyMap<string, readonly StoryFactEvidenceSnapshot[]>
   >(new Map());
   const [policy, setPolicy] = useState<MemoryPolicy | null>(null);
   const [memories, setMemories] = useState<readonly MemoryRecord[]>([]);
@@ -351,6 +611,7 @@ export function StoryGovernancePage() {
     setPageState("loading");
     setSourceVersions([]);
     setDirectInitialEvidenceByFactId(new Map());
+    setStoryFactEvidenceByFactId(new Map());
     const [
       projectResult,
       factResult,
@@ -445,6 +706,33 @@ export function StoryGovernancePage() {
     for (const { factId, identity } of directInitialEvidenceEntries) {
       if (identity !== null) initialEvidenceByFactId.set(factId, identity);
     }
+    const evidenceReader = runtime.story.facts.listEvidenceByFactId?.bind(runtime.story.facts);
+    const storyFactEvidenceEntries =
+      evidenceReader === undefined
+        ? []
+        : await Promise.all(
+            factResult.value.map(async (fact) => {
+              const evidenceResult = await evidenceReader(fact.id);
+              return evidenceResult.ok
+                ? ({
+                    factId: String(fact.id),
+                    evidence: evidenceResult.value,
+                    error: null,
+                  } as const)
+                : ({ factId: String(fact.id), evidence: [], error: evidenceResult.error } as const);
+            }),
+          );
+    if (!isCurrentLoad()) return;
+    const storyFactEvidenceFailure = storyFactEvidenceEntries.find(
+      ({ error: evidenceError }) => evidenceError !== null,
+    )?.error;
+    if (storyFactEvidenceFailure !== undefined && storyFactEvidenceFailure !== null) {
+      derivedFailures.push({ section: "设定原文依据", cause: storyFactEvidenceFailure });
+    }
+    const evidenceByFactId = new Map<string, readonly StoryFactEvidenceSnapshot[]>();
+    for (const { factId, evidence, error: evidenceError } of storyFactEvidenceEntries) {
+      if (evidenceError === null) evidenceByFactId.set(factId, evidence);
+    }
     if (!memoryPromotionResult.ok) {
       derivedFailures.push({ section: "旧记忆整理", cause: memoryPromotionResult.error });
     }
@@ -461,13 +749,16 @@ export function StoryGovernancePage() {
       derivedFailures.push({ section: "一致性审查", cause: consistencyResult.error });
     }
     const sourceVersionIds = Array.from(
-      new Set(
-        factResult.value
+      new Set([
+        ...factResult.value
           .filter((fact) => directLocalPendingEvidenceIdentity(fact.toSnapshot()) !== null)
           .map((fact) => fact.toSnapshot().source.versionId)
           .filter((versionId): versionId is NonNullable<typeof versionId> => versionId !== null)
           .map(String),
-      ),
+        ...Array.from(evidenceByFactId.values())
+          .flat()
+          .map(({ versionId }) => versionId),
+      ]),
     );
     let sourceVersionFailure: unknown = null;
     const loadedSourceVersions = (
@@ -497,6 +788,7 @@ export function StoryGovernancePage() {
     setProject(projectResult.value);
     setFacts(factResult.value);
     setDirectInitialEvidenceByFactId(initialEvidenceByFactId);
+    setStoryFactEvidenceByFactId(evidenceByFactId);
     setRecords(recordResult.value);
     setPolicy(policyResult.value);
     setMemories(memoryResult.value);
@@ -575,6 +867,9 @@ export function StoryGovernancePage() {
     [directInitialEvidenceByFactId, facts],
   );
   const directPendingLocalFacts = directPendingLocalFactPresentation.visibleFacts;
+  const professionalSetupPendingFacts = directPendingLocalFacts.filter(
+    (fact) => userDraftFactIdentity(fact.toSnapshot()) !== null,
+  );
   const isolatedDirectPendingDuplicateCount =
     directPendingLocalFactPresentation.isolatedDuplicateCount;
   const directDeprecatedFacts = useMemo(
@@ -1722,103 +2017,19 @@ export function StoryGovernancePage() {
               ),
           }}
         >
-          {directPendingLocalFacts.length > 0 && (
-            <section aria-labelledby="direct-pending-story-facts-title">
-              <div className="section-heading">
-                <div>
-                  <h2 id="direct-pending-story-facts-title">待确认设定</h2>
-                  <p>这些内容只在本机从已保存正文中整理；确认前不会成为正式设定。</p>
-                </div>
-                <Badge>{String(directPendingLocalFacts.length)} 条</Badge>
-              </div>
-              <div className="story-governance-grid">
-                {directPendingLocalFacts.map((fact) => {
-                  const snapshot = fact.toSnapshot();
-                  const sourceChapter = chapters.find(
-                    (chapter) => String(chapter.id) === String(snapshot.source.chapterId),
-                  );
-                  const sourceVersion = sourceVersions.find(
-                    (version) => String(version.id) === String(snapshot.source.versionId),
-                  );
-                  const sourceStart = snapshot.source.startOffset;
-                  const sourceEnd = snapshot.source.endOffset;
-                  const sourceChapterLabel =
-                    sourceChapter === undefined
-                      ? "已保存章节（名称暂不可用）"
-                      : "《" + sourceChapter.title + "》";
-                  const sourceVersionLabel =
-                    sourceVersion === undefined
-                      ? "不可变版本详情暂不可用"
-                      : "第 " + String(sourceVersion.sequence) + " 个不可变版本";
-                  const readableSourceRange =
-                    sourceStart === null || sourceEnd === null
-                      ? "字符范围暂不可用"
-                      : "第 " + String(sourceStart + 1) + " 至 " + String(sourceEnd) + " 个字符";
-                  return (
-                    <Card key={fact.id}>
-                      <CardHeader>
-                        <div className="card-heading-row">
-                          <div>
-                            <CardTitle>{factTypeLabel(snapshot.factType)}</CardTitle>
-                            <CardDescription>从正文原文整理，等待你的决定。</CardDescription>
-                          </div>
-                          <Badge tone="warning">待确认</Badge>
-                        </div>
-                      </CardHeader>
-                      <CardContent>
-                        <p className="story-governance-copy">{storyFactContent(snapshot)}</p>
-                        <EvidenceDisclosure
-                          className="story-governance-evidence"
-                          label="查看原文依据"
-                        >
-                          <dl>
-                            <div>
-                              <dt>来源章节</dt>
-                              <dd>{sourceChapterLabel}</dd>
-                            </div>
-                            <div>
-                              <dt>保存版本</dt>
-                              <dd>{sourceVersionLabel}</dd>
-                            </div>
-                            <div>
-                              <dt>字符范围</dt>
-                              <dd>{readableSourceRange}</dd>
-                            </div>
-                          </dl>
-                          <blockquote>{snapshot.source.excerpt ?? "原文片段暂不可用"}</blockquote>
-                        </EvidenceDisclosure>
-                      </CardContent>
-                      <CardFooter>
-                        <Button
-                          size="sm"
-                          disabled={readonly || busy}
-                          onClick={() => void confirmFact(fact)}
-                        >
-                          确认并保留
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          disabled={readonly || busy}
-                          onClick={() => openEditFact(fact)}
-                        >
-                          修改
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={readonly || busy}
-                          onClick={() => void deprecateFact(fact)}
-                        >
-                          放弃
-                        </Button>
-                      </CardFooter>
-                    </Card>
-                  );
-                })}
-              </div>
-            </section>
-          )}
+          <PendingFactsSection
+            id="direct-pending-story-facts-title"
+            title="待确认设定"
+            description="这些内容来自专业创作输入或本机正文整理；确认前不会成为正式设定。"
+            facts={directPendingLocalFacts}
+            evidenceByFactId={storyFactEvidenceByFactId}
+            chapters={chapters}
+            sourceVersions={sourceVersions}
+            disabled={readonly || busy}
+            onConfirm={(fact) => void confirmFact(fact)}
+            onEdit={openEditFact}
+            onDiscard={(fact) => void deprecateFact(fact)}
+          />
 
           <section aria-labelledby="direct-story-facts-title">
             <div className="section-heading">
@@ -1848,6 +2059,10 @@ export function StoryGovernancePage() {
               <div className="story-governance-grid">
                 {directFormalFacts.map((fact) => {
                   const snapshot = fact.toSnapshot();
+                  const visibleEvidence = storyFactEvidenceForPresentation(
+                    snapshot,
+                    storyFactEvidenceByFactId.get(String(fact.id)),
+                  );
                   const needsCheck =
                     snapshot.status !== "formal" ||
                     storyFactNeedsEntityAliasResolution(snapshot) ||
@@ -1883,9 +2098,11 @@ export function StoryGovernancePage() {
                           </p>
                         )}
                         <EvidenceDisclosure label="查看原文依据">
-                          <blockquote className="story-source-quote">
-                            {snapshot.source.excerpt ?? "这条设定没有可显示的原文片段。"}
-                          </blockquote>
+                          <StoryFactEvidenceDetails
+                            evidence={visibleEvidence}
+                            chapters={chapters}
+                            sourceVersions={sourceVersions}
+                          />
                         </EvidenceDisclosure>
                       </CardContent>
                       <CardFooter>
@@ -2070,59 +2287,17 @@ export function StoryGovernancePage() {
           </div>
         </Dialog>
 
-        <Dialog
-          open={editingFact !== null}
-          onOpenChange={(open) => {
-            if (!open && !busy) {
-              setEditingFact(null);
-              setEditingFactContent("");
-            }
+        <FactEditDialog
+          fact={editingFact}
+          content={editingFactContent}
+          busy={busy}
+          onClose={() => {
+            setEditingFact(null);
+            setEditingFactContent("");
           }}
-          title="修改设定"
-          description={
-            editingFact !== null &&
-            directLocalPendingEvidenceIdentity(editingFact.toSnapshot()) !== null
-              ? "保存修改会同时确认这条内容，并把它加入正式设定；原始来源和每个旧版本都会保留。"
-              : "只修改设定内容；原始来源和每个旧版本都会保留。固定的设定需先取消固定。"
-          }
-          footer={
-            <>
-              <Button
-                variant="secondary"
-                disabled={busy}
-                onClick={() => {
-                  setEditingFact(null);
-                  setEditingFactContent("");
-                }}
-              >
-                取消
-              </Button>
-              <Button
-                loading={busy}
-                disabled={editingFactContent.trim().length === 0}
-                onClick={() => void submitFactEdit()}
-              >
-                {editingFact !== null &&
-                directLocalPendingEvidenceIdentity(editingFact.toSnapshot()) !== null
-                  ? "保存修改并确认"
-                  : "保存修改"}
-              </Button>
-            </>
-          }
-        >
-          <FormField label="设定内容" required>
-            {(fieldProps) => (
-              <Textarea
-                {...fieldProps}
-                value={editingFactContent}
-                maxLength={10_000}
-                currentLength={editingFactContent.length}
-                rows={7}
-                onChange={(event) => setEditingFactContent(event.currentTarget.value)}
-              />
-            )}
-          </FormField>
-        </Dialog>
+          onChange={setEditingFactContent}
+          onSubmit={() => void submitFactEdit()}
+        />
 
         <Dialog
           open={historyFact !== null}
@@ -2320,6 +2495,19 @@ export function StoryGovernancePage() {
         }}
       >
         <>
+          <PendingFactsSection
+            id="professional-setup-pending-title"
+            title="专业创作待确认设定"
+            description="这些人物、关系和世界资料已保存在本地；只有你确认后才会成为正式设定。"
+            facts={professionalSetupPendingFacts}
+            evidenceByFactId={storyFactEvidenceByFactId}
+            chapters={chapters}
+            sourceVersions={sourceVersions}
+            disabled={readonly || busy}
+            onConfirm={(fact) => void confirmFact(fact)}
+            onEdit={openEditFact}
+            onDiscard={(fact) => void deprecateFact(fact)}
+          />
           <StorySettingsTools
             runtime={runtime}
             projectId={projectIdParameter}
@@ -3441,6 +3629,18 @@ export function StoryGovernancePage() {
           })()}
       </Drawer>
 
+      <FactEditDialog
+        fact={editingFact}
+        content={editingFactContent}
+        busy={busy}
+        onClose={() => {
+          setEditingFact(null);
+          setEditingFactContent("");
+        }}
+        onChange={setEditingFactContent}
+        onSubmit={() => void submitFactEdit()}
+      />
+
       <Dialog
         open={memoryPromotionDialog !== null}
         onOpenChange={(open) => {
@@ -4291,11 +4491,19 @@ function isolateHistoricalDirectPendingDuplicates(
     const snapshot = fact.toSnapshot();
     const currentIdentity = directLocalPendingEvidenceIdentity(snapshot);
     const identity = initialIdentityByFactId.get(fact.id) ?? currentIdentity;
-    if (identity === null) continue;
-    const group = groups.get(identity.key) ?? { pending: [], hasAuthorDecision: false };
-    if (currentIdentity === null) group.hasAuthorDecision = true;
+    const userDraftIdentity = userDraftFactIdentity(snapshot);
+    const identityKey = userDraftIdentity ?? identity?.key ?? null;
+    if (identityKey === null) continue;
+    const group = groups.get(identityKey) ?? { pending: [], hasAuthorDecision: false };
+    if (userDraftIdentity !== null) {
+      if (snapshot.status === "unconfirmed" && snapshot.needsReview && !snapshot.userConfirmed) {
+        group.pending.push(fact);
+      } else {
+        group.hasAuthorDecision = true;
+      }
+    } else if (currentIdentity === null) group.hasAuthorDecision = true;
     else group.pending.push(fact);
-    groups.set(identity.key, group);
+    groups.set(identityKey, group);
   }
   const visibleFacts: StoryFact[] = [];
   for (const group of groups.values()) {
@@ -4319,6 +4527,24 @@ function isolateHistoricalDirectPendingDuplicates(
     visibleFacts: Object.freeze(visibleFacts),
     isolatedDuplicateCount,
   });
+}
+
+function userDraftFactIdentity(snapshot: StoryFactSnapshot): string | null {
+  if (
+    snapshot.origin !== "user" ||
+    snapshot.source.kind !== "user_statement" ||
+    !snapshot.source.reference.startsWith("user-statement:draft:")
+  ) {
+    return null;
+  }
+  return `user-draft:${snapshot.source.reference}`;
+}
+
+function isPendingAuthorReviewFact(snapshot: StoryFactSnapshot): boolean {
+  return (
+    directLocalPendingEvidenceIdentity(snapshot) !== null ||
+    userDraftFactIdentity(snapshot) !== null
+  );
 }
 
 function factTypeLabel(factType: string): string {

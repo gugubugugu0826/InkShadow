@@ -2,13 +2,22 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { NovelSkillDefinition, ProjectNovelSkillBinding } from "@inkshadow/ai-core";
-import { createProjectSeed, ok, parseUuidV7, updateProjectSeedField } from "@inkshadow/domain";
+import {
+  createProjectSeed,
+  deriveProfessionalProjectSeed,
+  ok,
+  parseUuidV7,
+  updateProjectSeedField,
+} from "@inkshadow/domain";
 import type { HybridSearchHit } from "@inkshadow/search-core";
 
 import { parseContinuationDirectionOptions } from "./continuation-direction-options";
 import { ModelCenterError } from "./model-center-store";
 import { DEVELOPMENT_DATABASE_KEY } from "./development-storage";
-import { DEVELOPMENT_GENERATION_GOVERNANCE_KEY } from "./generation-governance-store";
+import {
+  DEVELOPMENT_GENERATION_GOVERNANCE_KEY,
+  GenerationGovernanceError,
+} from "./generation-governance-store";
 import {
   readSafeGenerationErrorCodes,
   readSafeGenerationPreflightForScope,
@@ -119,6 +128,58 @@ describe("governed generation runtime", () => {
       vectorStatus: "optional_not_needed",
       remoteRerankStatus: "optional_skipped",
     });
+  });
+
+  it("sends each confirmed professional writing constraint once with both audit sources", async () => {
+    const { runtime, chapterId } = await createNativeRuntime();
+    const chapter = await runtime.repositories.chapters.findById(chapterId);
+    if (!chapter.ok || chapter.value === null) {
+      throw new Error("Expected the generated test chapter.");
+    }
+    const now = runtime.clock.now();
+    const seed = deriveProfessionalProjectSeed({
+      seedId: runtime.ids.next(),
+      projectName: "专业创作约束测试",
+      storyDirection: "守塔人调查倒转的钟摆。",
+      outlineSynopsis: "周望在旧城钟楼发现钟摆倒转，并追查留下的坐标。",
+      protagonist: "周望",
+      relationship: "周望和赵伯是多年的老邻居。",
+      worldBackground: "钟楼位于旧城。",
+      pov: "第三人称限知",
+      style: "克制写实",
+      boundaries: "不新增超自然力量",
+      otherConstraints: "每章保持单一视角",
+      now,
+    });
+    await runtime.projectSeeds.saveForProject(chapter.value.projectId, seed);
+    const fact = await runtime.story.factService.createFormalUserFact({
+      projectId: chapter.value.projectId,
+      factType: "writing_constraint",
+      contentText: "禁止项：不新增超自然力量\n其他创作约束：每章保持单一视角",
+      actorId: runtime.story.actorId,
+      humanConfirmed: true,
+      lock: true,
+    });
+    if (!fact.ok) throw fact.error;
+
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const matchingEntries =
+      plan.contextCompilation?.compiled.entries.filter(
+        ({ content, included, layer }) =>
+          included &&
+          layer === "locked_hard_rules" &&
+          content.includes("禁止项：不新增超自然力量") &&
+          content.includes("其他创作约束：每章保持单一视角"),
+      ) ?? [];
+    expect(matchingEntries).toHaveLength(1);
+    expect(matchingEntries[0]?.evidence).toHaveLength(2);
+    const prompt = plan.messages.map(({ content }) => content).join("\n");
+    expect(prompt.split("禁止项：不新增超自然力量")).toHaveLength(2);
+    expect(prompt.split("其他创作约束：每章保持单一视角")).toHaveLength(2);
   });
 
   it("keeps an empty chapter on the opening route through messages, retrieval, Skill, trace, task and invocation", async () => {
@@ -953,6 +1014,505 @@ describe("governed generation runtime", () => {
       state: "cancelled",
       candidateId: result.value.candidate.id,
     });
+  });
+
+  it("retains visible output from an ordinary provider failure as an incomplete isolated candidate", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>((request) => {
+      request.onDelta?.("供应商断开前已经收到的可见片段");
+      return Promise.reject(
+        new ModelCenterError("MODEL_CONNECTION_FAILED", "simulated provider disconnect", true),
+      );
+    });
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_CONNECTION_FAILED" } });
+    expect(generate).toHaveBeenCalledOnce();
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapterId);
+    if (!candidates.ok) throw candidates.error;
+    expect(candidates.value).toHaveLength(1);
+    const candidate = candidates.value[0];
+    if (candidate === undefined) throw new Error("Expected the preserved partial candidate.");
+    expect(candidate.toSnapshot().incomplete).toBe(true);
+    expect(candidate.content).toContain("供应商断开前已经收到的可见片段");
+    await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
+      state: "failed_final",
+      candidateId: candidates.value[0]?.id,
+      failureCode: "MODEL_CONNECTION_FAILED",
+    });
+  });
+
+  it("reports an unsafe cancellation when received partial output cannot be persisted", async () => {
+    let rejectGeneration: ((error: ModelCenterError) => void) | null = null;
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(
+      (request) =>
+        new Promise<Awaited<ReturnType<NativeModelGatewayClient["generate"]>>>(
+          (_resolve, reject) => {
+            request.onDelta?.("必须保留但暂时无法落盘的片段");
+            rejectGeneration = reject;
+          },
+        ),
+    );
+    const cancelGeneration = vi.fn<NativeModelGatewayClient["cancelGeneration"]>(() => {
+      rejectGeneration?.(
+        new ModelCenterError("MODEL_GENERATION_CANCELLED", "Model generation was cancelled.", true),
+      );
+      return Promise.resolve(true);
+    });
+    const { runtime, chapterId } = await createNativeRuntime(generate, cancelGeneration);
+    vi.spyOn(runtime.contextTraceOutputs, "commit").mockRejectedValue(
+      new Error("simulated candidate transaction failure"),
+    );
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const execution = executeGenerationPlan(runtime, plan);
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    await expect(cancelGenerationPlan(runtime, plan)).resolves.toBe(true);
+    const result = await execution;
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "CONTEXT_TRACE_UNAVAILABLE" },
+    });
+    await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
+      state: "cancelled",
+      candidateId: null,
+      failureCode: "CONTEXT_TRACE_UNAVAILABLE",
+    });
+    await expect(runtime.taskCenter.load()).resolves.toMatchObject({
+      tasks: [{ id: plan.taskId, status: "cancelled" }],
+    });
+  });
+
+  it("settles a context trace persistence failure before dispatch", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult("绝不能发送的候选。", 80, 20)),
+    );
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    vi.spyOn(runtime.contextTraces, "save").mockRejectedValueOnce(
+      new ModelCenterError(
+        "CONTEXT_TRACE_UNAVAILABLE",
+        "无法保存本次挑选的故事资料记录，因此没有发送。",
+        false,
+      ),
+    );
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "CONTEXT_TRACE_UNAVAILABLE" },
+    });
+    expect(generate).not.toHaveBeenCalled();
+    await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
+      state: "failed_final",
+      candidateId: null,
+      failureCode: "CONTEXT_TRACE_UNAVAILABLE",
+      incurredCostMicros: "0",
+    });
+    await expect(
+      runtime.taskCenter.findTaskByIdempotencyKey(plan.idempotencyKey),
+    ).resolves.toMatchObject({
+      id: plan.taskId,
+      status: "failed",
+      failure: {
+        code: "CONTEXT_TRACE_UNAVAILABLE",
+        retryable: false,
+      },
+    });
+  });
+
+  it("cancels the queued task when generation-run creation fails before a lease is acquired", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult("绝不能发送的候选。", 80, 20)),
+    );
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    vi.spyOn(runtime.generationGovernance, "createRun").mockRejectedValueOnce(
+      new Error("simulated generation-run creation failure"),
+    );
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_GENERATION_FAILED" } });
+    expect(generate).not.toHaveBeenCalled();
+    await expect(
+      runtime.taskCenter.findTaskByIdempotencyKey(plan.idempotencyKey),
+    ).resolves.toMatchObject({ id: plan.taskId, status: "cancelled" });
+    await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toBeNull();
+  });
+
+  it("settles the queued run when consuming a deferred request fails before dispatch", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult("绝不能发送的延期候选。", 80, 20)),
+    );
+    const { runtime, chapterId } = await createRemoteRuntime({ generate });
+    const offlinePlan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: false,
+    });
+    const deferred = await saveDeferredGenerationPlan(runtime, offlinePlan);
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+    expect(plan.deferredRequest?.id).toBe(deferred.id);
+    vi.spyOn(runtime.generationGovernance, "transitionDeferredRequest").mockRejectedValueOnce(
+      new Error("simulated deferred-request consumption failure"),
+    );
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_GENERATION_FAILED" } });
+    expect(generate).not.toHaveBeenCalled();
+    await expect(
+      runtime.taskCenter.findTaskByIdempotencyKey(plan.idempotencyKey),
+    ).resolves.toMatchObject({ id: plan.taskId, status: "cancelled" });
+    await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
+      state: "cancelled",
+      candidateId: null,
+      failureCode: "MODEL_GENERATION_FAILED",
+    });
+  });
+
+  it("settles a progress failure after preserving the isolated candidate", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>((request) => {
+      request.onDelta?.("已经返回并隔离保存的候选。 ");
+      return Promise.resolve(generationResult("已经返回并隔离保存的候选。", 80, 20));
+    });
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    const reportTaskProgress = runtime.taskCenter.reportTaskProgress.bind(runtime.taskCenter);
+    vi.spyOn(runtime.taskCenter, "reportTaskProgress").mockImplementation(
+      (taskId, leaseToken, step, completedUnits, totalUnits) => {
+        if (step === "candidate.persisted") {
+          return Promise.reject(new Error("simulated progress persistence failure"));
+        }
+        return reportTaskProgress(taskId, leaseToken, step, completedUnits, totalUnits);
+      },
+    );
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_GENERATION_FAILED" } });
+    expect(generate).toHaveBeenCalledOnce();
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapterId);
+    if (!candidates.ok || candidates.value.length !== 1 || candidates.value[0] === undefined) {
+      throw new Error("Expected the isolated candidate to remain available.");
+    }
+    const candidate = candidates.value[0];
+    expect(candidate.content).toContain("已经返回并隔离保存的候选");
+    await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
+      state: "failed_final",
+      candidateId: candidate.id,
+      failureCode: "MODEL_GENERATION_FAILED",
+    });
+    await expect(runtime.generationGovernance.listAttemptUsage(plan.runId)).resolves.toEqual([
+      expect.objectContaining({ attempt: 1, source: "provider_reported" }),
+    ]);
+    await expect(
+      runtime.taskCenter.findTaskByIdempotencyKey(plan.idempotencyKey),
+    ).resolves.toMatchObject({
+      id: plan.taskId,
+      status: "failed",
+      attempt: 1,
+      maxAttempts: 1,
+      failure: { code: "MODEL_GENERATION_FAILED", retryable: false },
+    });
+  });
+
+  it("lets a cancellation request win a later local failure while retaining candidate evidence", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>((request) => {
+      request.onDelta?.("已经安全隔离的取消竞态候选。 ");
+      return Promise.resolve(generationResult("已经安全隔离的取消竞态候选。", 80, 20));
+    });
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    const reportTaskProgress = runtime.taskCenter.reportTaskProgress.bind(runtime.taskCenter);
+    let markProgressReached!: () => void;
+    const progressReached = new Promise<void>((resolve) => {
+      markProgressReached = resolve;
+    });
+    let rejectProgress!: () => void;
+    vi.spyOn(runtime.taskCenter, "reportTaskProgress").mockImplementation(
+      (taskId, leaseToken, step, completedUnits, totalUnits) => {
+        if (step === "candidate.validating") {
+          markProgressReached();
+          return new Promise((_, reject) => {
+            rejectProgress = () => reject(new Error("simulated local validation progress failure"));
+          });
+        }
+        return reportTaskProgress(taskId, leaseToken, step, completedUnits, totalUnits);
+      },
+    );
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const execution = executeGenerationPlan(runtime, plan);
+    await progressReached;
+    await expect(cancelGenerationPlan(runtime, plan)).resolves.toBe(true);
+    rejectProgress();
+    const result = await execution;
+
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_GENERATION_FAILED" } });
+    expect(generate).toHaveBeenCalledOnce();
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapterId);
+    if (!candidates.ok || candidates.value.length !== 1 || candidates.value[0] === undefined) {
+      throw new Error("Expected the cancellation-race candidate to remain isolated.");
+    }
+    const candidate = candidates.value[0];
+    await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
+      state: "cancelled",
+      candidateId: candidate.id,
+      failureCode: "MODEL_GENERATION_FAILED",
+    });
+    await expect(runtime.generationGovernance.listAttemptUsage(plan.runId)).resolves.toEqual([
+      expect.objectContaining({
+        attempt: 1,
+        source: "provider_reported",
+        inputTokens: 80,
+        outputTokens: 20,
+      }),
+    ]);
+    await expect(
+      runtime.taskCenter.findTaskByIdempotencyKey(plan.idempotencyKey),
+    ).resolves.toMatchObject({ status: "cancelled", attempt: 1, maxAttempts: 1 });
+  });
+
+  it("converges an ordinary unexpected-terminal write failure after the task is already terminal", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>((request) => {
+      request.onDelta?.("终态首次写入失败时仍已隔离的候选。 ");
+      return Promise.resolve(generationResult("终态首次写入失败时仍已隔离的候选。", 80, 20));
+    });
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    const reportTaskProgress = runtime.taskCenter.reportTaskProgress.bind(runtime.taskCenter);
+    vi.spyOn(runtime.taskCenter, "reportTaskProgress").mockImplementation(
+      (taskId, leaseToken, step, completedUnits, totalUnits) =>
+        step === "candidate.persisted"
+          ? Promise.reject(new Error("simulated progress persistence failure"))
+          : reportTaskProgress(taskId, leaseToken, step, completedUnits, totalUnits),
+    );
+    const transitionRun = runtime.generationGovernance.transitionRun.bind(
+      runtime.generationGovernance,
+    );
+    let rejectedTerminalWrite = false;
+    const transition = vi
+      .spyOn(runtime.generationGovernance, "transitionRun")
+      .mockImplementation((input) => {
+        if (input.state === "failed_final" && !rejectedTerminalWrite) {
+          rejectedTerminalWrite = true;
+          return Promise.reject(new Error("simulated ordinary terminal write failure"));
+        }
+        return transitionRun(input);
+      });
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_GENERATION_FAILED" } });
+    expect(generate).toHaveBeenCalledOnce();
+    expect(transition.mock.calls.filter(([input]) => input.state === "failed_final")).toHaveLength(
+      2,
+    );
+    const settledRun = await runtime.generationGovernance.findRunById(plan.runId);
+    expect(settledRun?.state).toBe("failed_final");
+    expect(settledRun?.candidateId).not.toBeNull();
+    expect(settledRun?.failureCode).toBe("MODEL_GENERATION_FAILED");
+    await expect(
+      runtime.taskCenter.findTaskByIdempotencyKey(plan.idempotencyKey),
+    ).resolves.toMatchObject({ status: "failed" });
+  });
+
+  it("recovers a lost unexpected-terminal receipt and still publishes the settled outcome", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>((request) => {
+      request.onDelta?.("终态回执丢失时仍已隔离的候选。 ");
+      return Promise.resolve(generationResult("终态回执丢失时仍已隔离的候选。", 80, 20));
+    });
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    const reportTaskProgress = runtime.taskCenter.reportTaskProgress.bind(runtime.taskCenter);
+    vi.spyOn(runtime.taskCenter, "reportTaskProgress").mockImplementation(
+      (taskId, leaseToken, step, completedUnits, totalUnits) =>
+        step === "candidate.persisted"
+          ? Promise.reject(new Error("simulated progress persistence failure"))
+          : reportTaskProgress(taskId, leaseToken, step, completedUnits, totalUnits),
+    );
+    const transitionRun = runtime.generationGovernance.transitionRun.bind(
+      runtime.generationGovernance,
+    );
+    let lostTerminalReceipt = false;
+    const transition = vi
+      .spyOn(runtime.generationGovernance, "transitionRun")
+      .mockImplementation(async (input) => {
+        const persisted = await transitionRun(input);
+        if (input.state === "failed_final" && !lostTerminalReceipt) {
+          lostTerminalReceipt = true;
+          throw new Error("simulated lost unexpected-terminal receipt");
+        }
+        return persisted;
+      });
+    const publishNotification = vi.spyOn(runtime.taskCenter, "publishNotification");
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_GENERATION_FAILED" } });
+    expect(generate).toHaveBeenCalledOnce();
+    expect(transition.mock.calls.filter(([input]) => input.state === "failed_final")).toHaveLength(
+      1,
+    );
+    const settledRun = await runtime.generationGovernance.findRunById(plan.runId);
+    expect(settledRun?.state).toBe("failed_final");
+    expect(settledRun?.candidateId).not.toBeNull();
+    expect(settledRun?.failureCode).toBe("MODEL_GENERATION_FAILED");
+    const terminalNotification = publishNotification.mock.calls.find(
+      ([input]) => input.dedupeKey === `notification:${plan.taskId}:failed`,
+    )?.[0];
+    const terminalMetadata = terminalNotification?.metadata;
+    const terminalReasonCode =
+      typeof terminalMetadata === "object" && terminalMetadata !== null
+        ? (terminalMetadata as Readonly<Record<string, unknown>>).reasonCode
+        : null;
+    expect(terminalReasonCode).toBe("MODEL_GENERATION_FAILED");
+  });
+
+  it("converges a first completion revision conflict without redispatching", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult("只允许发送一次的候选。", 80, 20)),
+    );
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    const transitionRun = runtime.generationGovernance.transitionRun.bind(
+      runtime.generationGovernance,
+    );
+    let rejectedCompletion = false;
+    const transition = vi
+      .spyOn(runtime.generationGovernance, "transitionRun")
+      .mockImplementation((input) => {
+        if (input.state === "completed" && !rejectedCompletion) {
+          rejectedCompletion = true;
+          return Promise.reject(
+            new GenerationGovernanceError(
+              "AI_GENERATION_REVISION_CONFLICT",
+              "simulated first completion revision conflict",
+              true,
+            ),
+          );
+        }
+        return transitionRun(input);
+      });
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({ ok: true, value: { cancelled: false, reused: false } });
+    expect(generate).toHaveBeenCalledOnce();
+    expect(transition.mock.calls.filter(([input]) => input.state === "completed")).toHaveLength(2);
+    await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
+      state: "completed",
+    });
+    await expect(
+      runtime.taskCenter.findTaskByIdempotencyKey(plan.idempotencyKey),
+    ).resolves.toMatchObject({ status: "succeeded", attempt: 1, maxAttempts: 1 });
+  });
+
+  it("retries one ordinary completion write failure without redispatching", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult("普通写入失败也只能发送一次。", 80, 20)),
+    );
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    const transitionRun = runtime.generationGovernance.transitionRun.bind(
+      runtime.generationGovernance,
+    );
+    let rejectedCompletion = false;
+    const transition = vi
+      .spyOn(runtime.generationGovernance, "transitionRun")
+      .mockImplementation((input) => {
+        if (input.state === "completed" && !rejectedCompletion) {
+          rejectedCompletion = true;
+          return Promise.reject(new Error("simulated ordinary completion write failure"));
+        }
+        return transitionRun(input);
+      });
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({ ok: true, value: { cancelled: false, reused: false } });
+    expect(generate).toHaveBeenCalledOnce();
+    expect(transition.mock.calls.filter(([input]) => input.state === "completed")).toHaveLength(2);
+    await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
+      state: "completed",
+    });
+    await expect(
+      runtime.taskCenter.findTaskByIdempotencyKey(plan.idempotencyKey),
+    ).resolves.toMatchObject({ status: "succeeded", attempt: 1, maxAttempts: 1 });
+  });
+
+  it("recovers a lost completion receipt without redispatching or rewriting the terminal run", async () => {
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(() =>
+      Promise.resolve(generationResult("完成回执丢失也只能发送一次。", 80, 20)),
+    );
+    const { runtime, chapterId } = await createNativeRuntime(generate);
+    const transitionRun = runtime.generationGovernance.transitionRun.bind(
+      runtime.generationGovernance,
+    );
+    let lostCompletionReceipt = false;
+    const transition = vi
+      .spyOn(runtime.generationGovernance, "transitionRun")
+      .mockImplementation(async (input) => {
+        const persisted = await transitionRun(input);
+        if (input.state === "completed" && !lostCompletionReceipt) {
+          lostCompletionReceipt = true;
+          throw new Error("simulated lost completion receipt");
+        }
+        return persisted;
+      });
+    const plan = await prepareGenerationPlan(runtime, chapterId, {
+      chapterSaved: true,
+      networkAvailable: true,
+    });
+
+    const result = await executeGenerationPlan(runtime, plan);
+
+    expect(result).toMatchObject({ ok: true, value: { cancelled: false, reused: false } });
+    expect(generate).toHaveBeenCalledOnce();
+    expect(transition.mock.calls.filter(([input]) => input.state === "completed")).toHaveLength(1);
+    await expect(runtime.generationGovernance.findRunById(plan.runId)).resolves.toMatchObject({
+      state: "completed",
+    });
+    await expect(
+      runtime.taskCenter.findTaskByIdempotencyKey(plan.idempotencyKey),
+    ).resolves.toMatchObject({ status: "succeeded", attempt: 1, maxAttempts: 1 });
   });
 
   it("does not hide a second Provider call behind reasoning-only truncation", async () => {

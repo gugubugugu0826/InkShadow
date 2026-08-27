@@ -51,6 +51,10 @@ const migration = [
     new URL("../migrations/0074_chapter_version_story_fact_responsibility.sql", import.meta.url),
     "utf8",
   ),
+  readFileSync(
+    new URL("../migrations/0080_candidate_selection_action.sql", import.meta.url),
+    "utf8",
+  ),
 
   `ALTER TABLE chapters ADD COLUMN privacy_mode TEXT NOT NULL DEFAULT 'standard'
      CHECK (privacy_mode IN ('standard', 'local_only'));
@@ -779,6 +783,46 @@ describe("SQLite repositories with node:sqlite", () => {
     expect(
       expectOk(await reopenedRepositories.chapterVersions.listByChapterId(fixture.chapter.id)),
     ).toHaveLength(1);
+  });
+
+  it("reloads all four exact selection actions from SQLite", async () => {
+    const fixture = await createChapterFixture();
+    const actions = ["selection_rewrite", "polish", "expand", "shorten"] as const;
+    for (const [index, selectionAction] of actions.entries()) {
+      const streaming = expectOk(
+        AiCandidate.createStreaming({
+          id: uuid(40 + index),
+          projectId: fixture.project.id,
+          chapterId: fixture.chapter.id,
+          source: "polish",
+          baseVersionId: fixture.initialVersion.id,
+          now: atMinute(2),
+          applicationIntent: {
+            task: "selection_rewrite",
+            application: "replace_selection",
+            payload: "fragment",
+            startUtf16: 1,
+            endUtf16: 4,
+            selectionAction,
+          },
+        }),
+      );
+      const ready = expectOk(
+        streaming.markReady(`动作${String(index)}`, checksum(`动作${String(index)}`), atMinute(3)),
+      );
+      expectOk(await repositories.aiCandidates.create(ready));
+    }
+
+    const reopened = createSqliteRepositories(executor);
+    for (const [index, selectionAction] of actions.entries()) {
+      const candidate = expectPresent(
+        expectOk(await reopened.aiCandidates.findById(uuid(40 + index))),
+      );
+      expect(candidate.applicationIntent).toMatchObject({
+        task: "selection_rewrite",
+        selectionAction,
+      });
+    }
   });
 
   it("isolates one malformed optional candidate without changing a forty-thousand-character authority", async () => {

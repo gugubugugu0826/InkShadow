@@ -23,7 +23,7 @@ describe("CausalFactAuthoringPanel explicit knowledge gains", () => {
     await fillRequiredEventFields(user);
 
     await user.click(screen.getByText("补充参与人物与知情范围"));
-    expect(screen.getByText(/还没有记录明确知识获得.*不会授权任何 POV 知识取得/u)).toBeVisible();
+    expect(screen.getByText(/还没有记录明确知识获得.*不会授权任何视角人物取得知识/u)).toBeVisible();
     await user.click(
       within(screen.getByRole("group", { name: "事件后已经知道此事的人物" })).getByRole(
         "checkbox",

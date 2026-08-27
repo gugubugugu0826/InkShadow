@@ -5,6 +5,7 @@ import {
   MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES,
   StoryCoreError,
   StoryFact,
+  directLocalFactSemanticIdentity,
   directLocalPendingEvidenceIdentity,
   isRebuildableStoryFactType,
   FormalStoryRecord,
@@ -33,6 +34,7 @@ import {
   type StoryFactRevision,
   type StoryFactRevisionChangeKind,
   type StoryFactSnapshot,
+  type StoryFactEvidenceSnapshot,
   type StoryFactStore,
   type StoryFactSupplementalResolutionUndoFence,
   type FormalStoryRecordSnapshot,
@@ -57,10 +59,11 @@ interface StoredRevision {
 }
 
 interface BrowserStoryFactDatabase {
-  readonly schemaVersion: 2;
+  readonly schemaVersion: 3;
   facts: Record<string, StoryFactSnapshot>;
   revisions: Record<string, readonly StoredRevision[]>;
   routeReceipts: Record<string, ContinuousStoryStateRouteReceipt>;
+  evidence: Record<string, readonly StoryFactEvidenceSnapshot[]>;
 }
 
 interface DevelopmentChapterAuthority {
@@ -571,7 +574,7 @@ function compareDirectLocalEvidenceSurvivor(
   right: StoryFactSnapshot,
 ): number {
   const preference = (snapshot: StoryFactSnapshot): number =>
-    snapshot.userConfirmed || snapshot.origin === "user" ? 0 : snapshot.deprecated ? 2 : 1;
+    snapshot.userConfirmed || snapshot.origin === "user" ? 0 : snapshot.deprecated ? 1 : 2;
   return (
     preference(left) - preference(right) ||
     left.createdAt.localeCompare(right.createdAt) ||
@@ -684,6 +687,7 @@ export class BrowserDevelopmentStoryFactStore
           snapshot,
         }),
       ]);
+      appendBrowserEvidence(database, snapshot.id, snapshot);
       return ok(undefined);
     });
   }
@@ -781,7 +785,34 @@ export class BrowserDevelopmentStoryFactStore
           })
           .sort(compareDirectLocalEvidenceSurvivor)[0];
         if (existingEvidence !== undefined) {
+          appendBrowserEvidence(database, existingEvidence.id, snapshot);
           return ok(Object.freeze({ fact: requireFact(existingEvidence), created: false }));
+        }
+        const semanticIdentity = directLocalFactSemanticIdentity(snapshot);
+        if (semanticIdentity !== null) {
+          const semanticMatch = Object.values(database.facts)
+            .filter(
+              (candidate) =>
+                candidate.projectId === snapshot.projectId &&
+                candidate.factType === snapshot.factType,
+            )
+            .sort(compareDirectLocalEvidenceSurvivor)
+            .find((candidate) => {
+              const current = directLocalFactSemanticIdentity(candidate);
+              const initial = database.revisions[candidate.id]?.find(
+                ({ snapshot: revisionSnapshot }) => revisionSnapshot.revision === 1,
+              )?.snapshot;
+              return (
+                (
+                  current ??
+                  (initial === undefined ? null : directLocalFactSemanticIdentity(initial))
+                )?.key === semanticIdentity.key
+              );
+            });
+          if (semanticMatch !== undefined) {
+            appendBrowserEvidence(database, semanticMatch.id, snapshot);
+            return ok(Object.freeze({ fact: requireFact(semanticMatch), created: false }));
+          }
         }
       }
       if (supplementalIdentity !== null) {
@@ -823,6 +854,7 @@ export class BrowserDevelopmentStoryFactStore
           snapshot,
         }),
       ]);
+      appendBrowserEvidence(database, snapshot.id, snapshot);
       return ok(Object.freeze({ fact, created: true }));
     });
   }
@@ -916,6 +948,7 @@ export class BrowserDevelopmentStoryFactStore
           snapshot,
         }),
       ]);
+      appendBrowserEvidence(database, snapshot.id, snapshot);
       return ok(
         Object.freeze({
           fact,
@@ -1039,6 +1072,12 @@ export class BrowserDevelopmentStoryFactStore
           }),
       );
     });
+  }
+
+  public listEvidenceByFactId(
+    factId: UuidV7,
+  ): Promise<Result<readonly StoryFactEvidenceSnapshot[], StoryCoreError>> {
+    return this.readResult((database) => Object.freeze([...(database.evidence[factId] ?? [])]));
   }
 
   public save(fact: StoryFact, expectedRevision: number): Promise<Result<void, StoryCoreError>> {
@@ -1399,6 +1438,7 @@ export class BrowserDevelopmentStoryFactStore
             snapshot,
           }),
         ]);
+        appendBrowserEvidence(database, snapshot.id, snapshot);
         committedFacts.push(fact);
       }
       const receipt: ContinuousStoryStateRouteReceipt = Object.freeze({
@@ -1455,29 +1495,34 @@ export class BrowserDevelopmentStoryFactStore
   private read(): BrowserStoryFactDatabase {
     const serialized = this.storage.getItem(DEVELOPMENT_STORY_FACT_STORE_KEY);
     if (serialized === null) {
-      return { schemaVersion: 2, facts: {}, revisions: {}, routeReceipts: {} };
+      return { schemaVersion: 3, facts: {}, revisions: {}, routeReceipts: {}, evidence: {} };
     }
     try {
       const parsed: unknown = JSON.parse(serialized);
       if (
         !isPlainObject(parsed) ||
-        (parsed.schemaVersion !== 1 && parsed.schemaVersion !== 2) ||
+        (parsed.schemaVersion !== 1 && parsed.schemaVersion !== 2 && parsed.schemaVersion !== 3) ||
         !isPlainObject(parsed.facts) ||
         !isPlainObject(parsed.revisions) ||
-        (parsed.schemaVersion === 2 && !isPlainObject(parsed.routeReceipts)) ||
+        (parsed.schemaVersion >= 2 && !isPlainObject(parsed.routeReceipts)) ||
+        (parsed.schemaVersion === 3 && !isPlainObject(parsed.evidence)) ||
         hasProhibitedKey(parsed)
       ) {
         throw corruptStore();
       }
       const cloned = structuredClone(parsed);
       const database: BrowserStoryFactDatabase = {
-        schemaVersion: 2,
+        schemaVersion: 3,
         facts: cloned.facts as Record<string, StoryFactSnapshot>,
         revisions: cloned.revisions as Record<string, readonly StoredRevision[]>,
         routeReceipts:
-          cloned.schemaVersion === 2
+          parsed.schemaVersion >= 2
             ? (cloned.routeReceipts as Record<string, ContinuousStoryStateRouteReceipt>)
             : {},
+        evidence:
+          parsed.schemaVersion === 3
+            ? (cloned.evidence as Record<string, readonly StoryFactEvidenceSnapshot[]>)
+            : backfillBrowserEvidence(cloned.facts as Record<string, StoryFactSnapshot>),
       };
       for (const [factId, snapshot] of Object.entries(database.facts)) {
         const fact = requireFact(snapshot);
@@ -1504,6 +1549,9 @@ export class BrowserDevelopmentStoryFactStore
           throw corruptStore();
         }
       }
+      for (const [factId, evidence] of Object.entries(database.evidence)) {
+        if (database.facts[factId] === undefined || !Array.isArray(evidence)) throw corruptStore();
+      }
       for (const [key, receipt] of Object.entries(database.routeReceipts)) {
         requireStoredContinuousRouteReceipt(receipt);
         if (key !== continuousRouteKey(receipt)) {
@@ -1526,6 +1574,59 @@ function requireContinuousRouteIdentity(identity: ContinuousStoryStateRouteIdent
   ) {
     throw validationFailure("Continuous story-state route scope is invalid.");
   }
+}
+
+function appendBrowserEvidence(
+  database: BrowserStoryFactDatabase,
+  factId: string,
+  snapshot: StoryFactSnapshot,
+): void {
+  const evidence = browserEvidenceFromSnapshot(factId, snapshot);
+  if (evidence === null) return;
+  const existing = database.evidence[factId] ?? [];
+  if (existing.some(({ reference }) => reference === evidence.reference)) return;
+  database.evidence[factId] = Object.freeze([...existing, evidence]);
+}
+
+function backfillBrowserEvidence(
+  facts: Readonly<Record<string, StoryFactSnapshot>>,
+): Record<string, readonly StoryFactEvidenceSnapshot[]> {
+  const evidence: Record<string, readonly StoryFactEvidenceSnapshot[]> = {};
+  for (const [factId, snapshot] of Object.entries(facts)) {
+    const primary = browserEvidenceFromSnapshot(factId, snapshot);
+    if (primary !== null) evidence[factId] = Object.freeze([primary]);
+  }
+  return evidence;
+}
+
+function browserEvidenceFromSnapshot(
+  factId: string,
+  snapshot: StoryFactSnapshot,
+): StoryFactEvidenceSnapshot | null {
+  const source = snapshot.source;
+  if (
+    source.kind !== "chapter_span" ||
+    source.chapterId === null ||
+    source.versionId === null ||
+    source.startOffset === null ||
+    source.endOffset === null ||
+    source.sourceLength === null ||
+    source.excerpt === null
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    factId,
+    projectId: snapshot.projectId,
+    reference: source.reference,
+    chapterId: source.chapterId,
+    versionId: source.versionId,
+    startOffset: source.startOffset,
+    endOffset: source.endOffset,
+    sourceLength: source.sourceLength,
+    excerpt: source.excerpt,
+    recordedAt: snapshot.updatedAt,
+  });
 }
 
 function requireContinuousRouteCommit(command: ContinuousStoryStateRouteCommit): void {

@@ -2242,6 +2242,38 @@ describe("SettingsPage model routing", () => {
     }
   });
 
+  it("runs the active quick jump again when the same settings link is selected", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const user = userEvent.setup();
+    const originalDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      renderRoute(runtime, "/settings#data-transfer");
+      const link = await screen.findByRole("link", { name: "导入与导出" });
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+
+      screen.getByRole("heading", { name: "全局设置", level: 1 }).focus();
+      const callsBeforeRepeat = scrollIntoView.mock.calls.length;
+      await user.click(link);
+
+      await waitFor(() =>
+        expect(scrollIntoView.mock.calls.length).toBeGreaterThan(callsBeforeRepeat),
+      );
+      expect(screen.getByRole("heading", { name: "导入与导出", level: 2 })).toHaveFocus();
+    } finally {
+      if (originalDescriptor === undefined) {
+        Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+      } else {
+        Object.defineProperty(Element.prototype, "scrollIntoView", originalDescriptor);
+      }
+    }
+  });
+
   it("restores the import and export section from a direct deep link", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const originalDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");

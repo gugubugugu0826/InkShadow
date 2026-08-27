@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { StoryFact } from "../src/index.js";
+import { StoryFact, directLocalFactSemanticIdentity } from "../src/index.js";
 import { unwrap, uuid } from "./helpers.js";
 
 const T0 = "2026-08-01T00:00:00.000Z";
@@ -8,6 +8,112 @@ const T1 = "2026-08-01T00:01:00.000Z";
 const T2 = "2026-08-01T00:02:00.000Z";
 
 describe("unified story facts", () => {
+  it("scopes ambiguous direct-local prose to its chapter while sharing proven named semantics", () => {
+    const staged = (
+      sequence: number,
+      chapterId: string,
+      versionId: string,
+      factType: string,
+      contentText: string,
+      payload: Readonly<Record<string, string>>,
+    ) =>
+      unwrap(
+        StoryFact.create({
+          id: uuid(sequence),
+          projectId: uuid(90),
+          factType,
+          contentText,
+          structuredValue: {
+            schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+            payload: { schemaVersion: "inkshadow.direct-local-story-fact.v1", ...payload },
+          },
+          source: {
+            kind: "chapter_span",
+            reference: `direct-local:inkshadow.direct-local-story-fact.v1:${String(sequence)}`,
+            chapterId,
+            versionId,
+            startOffset: 0,
+            endOffset: contentText.length,
+            sourceLength: contentText.length,
+            excerpt: contentText,
+          },
+          confidence: 0.9,
+          status: "unconfirmed",
+          origin: "system",
+          needsReview: true,
+          humanConfirmed: false,
+          now: T0,
+        }),
+      );
+
+    const fatherFirst = staged(
+      91,
+      uuid(92),
+      uuid(93),
+      "core_relationship",
+      "那是我父亲留下的坐标。",
+      {
+        kind: "explicit_important_setting",
+      },
+    );
+    const fatherLaterSameChapter = staged(
+      94,
+      uuid(92),
+      uuid(95),
+      "core_relationship",
+      "那是我父亲留下的坐标。",
+      {
+        kind: "explicit_important_setting",
+      },
+    );
+    const fatherOtherChapter = staged(
+      96,
+      uuid(97),
+      uuid(98),
+      "core_relationship",
+      "那是我父亲留下的坐标。",
+      {
+        kind: "explicit_important_setting",
+      },
+    );
+    expect(directLocalFactSemanticIdentity(fatherFirst.toSnapshot())?.key).toBe(
+      directLocalFactSemanticIdentity(fatherLaterSameChapter.toSnapshot())?.key,
+    );
+    expect(directLocalFactSemanticIdentity(fatherFirst.toSnapshot())?.key).not.toBe(
+      directLocalFactSemanticIdentity(fatherOtherChapter.toSnapshot())?.key,
+    );
+
+    const pronounEvent = staged(99, uuid(92), uuid(93), "event_category", "是我找到了入口。", {
+      kind: "explicit_completed_narrative_event",
+      actor: "是我",
+      action: "找到了",
+      object: "入口",
+    });
+    expect(directLocalFactSemanticIdentity(pronounEvent.toSnapshot())?.scope).toBe("chapter");
+    const namedEvent = staged(100, uuid(92), uuid(93), "event_category", "周望找到了入口。", {
+      kind: "explicit_completed_narrative_event",
+      actor: "周望",
+      action: "找到了",
+      object: "入口",
+    });
+    const namedOtherChapter = staged(
+      101,
+      uuid(97),
+      uuid(98),
+      "event_category",
+      "周望找到了入口。",
+      {
+        kind: "explicit_completed_narrative_event",
+        actor: "周望",
+        action: "找到了",
+        object: "入口",
+      },
+    );
+    expect(directLocalFactSemanticIdentity(namedEvent.toSnapshot())?.scope).toBe("chapter");
+    expect(directLocalFactSemanticIdentity(namedEvent.toSnapshot())?.key).not.toBe(
+      directLocalFactSemanticIdentity(namedOtherChapter.toSnapshot())?.key,
+    );
+  });
   it("never lets an AI inference arrive as a formal fact", () => {
     const directFormal = StoryFact.create({
       id: uuid(1),

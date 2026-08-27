@@ -232,6 +232,47 @@ describe("layered context compiler", () => {
     ).toHaveLength(1);
   });
 
+  it("deduplicates a professional constraint carried by both ProjectSeed and a locked fact", () => {
+    const seedContent =
+      "[用户已确认的作者明确禁止项]\n- 禁止项：不新增超自然力量\n- 其他创作约束：每章保持单一视角";
+    const factContent =
+      "[已确认并锁定的规则]\n类型：writing_constraint\n内容：禁止项：不新增超自然力量\n其他创作约束：每章保持单一视角";
+    const compiled = compileContext({
+      maximumContextTokens: 20,
+      candidates: [
+        candidate("current_task", "task", 1),
+        sourceCandidate(
+          "locked_hard_rules",
+          "seed-constraint",
+          seedContent,
+          "story_rule",
+          "project-1",
+          "seed-r1",
+        ),
+        sourceCandidate(
+          "locked_hard_rules",
+          "fact-constraint",
+          factContent,
+          "story_rule",
+          "fact-1",
+          null,
+        ),
+      ],
+      tokenEstimator: { source: "custom", estimateTokens: () => 1 },
+    });
+
+    const included = compiled.entries.filter(
+      ({ included, layer }) => included && layer === "locked_hard_rules",
+    );
+    expect(included).toHaveLength(1);
+    expect(included[0]?.evidence).toHaveLength(2);
+    expect(
+      compiledContextToPromptSections(compiled).filter(({ text }) =>
+        text.includes("不新增超自然力量"),
+      ),
+    ).toHaveLength(1);
+  });
+
   it("never removes the current task when another source repeats its wording", () => {
     const sharedContent = "继续写出雨夜重逢后的第一场对话。";
     const compiled = compileContext({

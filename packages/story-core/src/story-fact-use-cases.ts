@@ -83,6 +83,16 @@ export interface CreateFormalUserFactCommand {
   readonly humanConfirmed: boolean;
 }
 
+export interface StageUserDraftFactCommand {
+  readonly projectId: string;
+  readonly factType: string;
+  readonly contentText?: string | null;
+  readonly structuredValue?: unknown;
+  readonly effectiveAt?: string | null;
+  readonly invalidatedAt?: string | null;
+  readonly actorId: string;
+}
+
 export interface StageAutomaticFactCommand {
   readonly projectId: string;
   readonly factType: string;
@@ -131,6 +141,41 @@ export class StoryFactApplicationService {
     command: CreateFormalUserFactCommand,
   ): Promise<Result<StoryFact, StoryCoreError>> {
     const created = this.buildFormalUserFact(command);
+    if (!created.ok) return created;
+    const saved = await this.options.facts.create(created.value);
+    return saved.ok ? ok(created.value) : saved;
+  }
+
+  /**
+   * Persists an author's own setting as a visible draft. Supplying text is not
+   * itself the separate decision that promotes the setting into formal truth.
+   */
+  public async stageUserDraftFact(
+    command: StageUserDraftFactCommand,
+  ): Promise<Result<StoryFact, StoryCoreError>> {
+    const id = this.options.ids.next();
+    const created = StoryFact.create({
+      id,
+      projectId: command.projectId,
+      factType: command.factType,
+      ...(command.contentText === undefined ? {} : { contentText: command.contentText }),
+      ...(command.structuredValue === undefined
+        ? {}
+        : { structuredValue: command.structuredValue }),
+      source: {
+        kind: "user_statement",
+        reference: `user-statement:draft:${command.actorId}:${id}`,
+      },
+      ...(command.effectiveAt === undefined ? {} : { effectiveAt: command.effectiveAt }),
+      ...(command.invalidatedAt === undefined ? {} : { invalidatedAt: command.invalidatedAt }),
+      confidence: 1,
+      status: "unconfirmed",
+      origin: "user",
+      needsReview: true,
+      locked: false,
+      humanConfirmed: false,
+      now: this.options.clock.now(),
+    });
     if (!created.ok) return created;
     const saved = await this.options.facts.create(created.value);
     return saved.ok ? ok(created.value) : saved;

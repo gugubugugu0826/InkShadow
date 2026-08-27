@@ -75,9 +75,15 @@ import {
   createSelectionRewriteCandidate,
   MAXIMUM_SELECTION_REWRITE_CHARACTERS,
   prepareSelectionRewrite,
+  selectionWritingActionFromIntent,
   type SelectionRewriteDisclosure,
 } from "../infrastructure/selection-rewrite-service";
+import { ModelCenterError } from "../infrastructure/model-center-store";
 import { recordSafeOperationIncident } from "../infrastructure/safe-operation-diagnostics";
+import {
+  beginGenerationNavigationSession,
+  type GenerationNavigationSession,
+} from "../infrastructure/generation-navigation-lifecycle";
 import type { StoryContextCompilationReceipt } from "../infrastructure/story-context-runtime";
 import {
   normalizeUiError,
@@ -221,6 +227,7 @@ const EDITOR_ASSISTANT_MAX_WIDTH_PX = 560;
 const EDITOR_WRITING_MIN_WIDTH_PX = 320;
 const EDITOR_ASSISTANT_KEYBOARD_STEP_PX = 8;
 const EDITOR_ASSISTANT_KEYBOARD_LARGE_STEP_PX = 32;
+const GENERATION_NAVIGATION_SETTLEMENT_TIMEOUT_MS = 15_000;
 const COMPACT_ASSISTANT_FOCUSABLE_SELECTOR = [
   "a[href]",
   "button:not([disabled])",
@@ -348,7 +355,7 @@ function generationActionFromCandidate(
   versions: readonly ChapterVersion[],
 ): EditorGenerationAction | null {
   const intent = candidate.applicationIntent;
-  if (intent.task === "selection_rewrite") return "selection_rewrite";
+  if (intent.task === "selection_rewrite") return selectionWritingActionFromIntent(intent);
   if (intent.task !== "continuation") return null;
   const baseVersion =
     candidate.baseVersionId === null
@@ -1043,6 +1050,10 @@ export function EditorPage() {
     "idle" | "preparing" | "awaiting_decision" | "executing" | "deferring"
   >("idle");
   const activeGenerationPlanRef = useRef<PreparedGenerationPlan | null>(null);
+  const activeGenerationNavigationRef = useRef<{
+    readonly id: string;
+    readonly session: GenerationNavigationSession;
+  } | null>(null);
   const directionCandidateRef = useRef<AiCandidate | null>(null);
   const generationEstimate = generationPlan?.preflight.estimate ?? null;
   const returnedFromAiSettings = searchParams.get("aiSettings") === "returned";
@@ -1147,12 +1158,11 @@ export function EditorPage() {
     let resetCancelled = false;
     candidateGenerationFlightRef.current = "idle";
     const activePlan = activeGenerationPlanRef.current;
-    activeGenerationPlanRef.current = null;
     if (
       activePlan !== null &&
       (activePlan.projectId !== projectId || activePlan.chapterId !== chapterId)
     ) {
-      void cancelGenerationPlan(runtime, activePlan).catch(() => undefined);
+      void activeGenerationNavigationRef.current?.session.stopAndPreserve().catch(() => undefined);
     }
     queueMicrotask(() => {
       if (resetCancelled) return;
@@ -1180,21 +1190,13 @@ export function EditorPage() {
       candidateGenerationFlightRef.current = "idle";
       loadOperationRevisionRef.current += 1;
       generationOperationRevisionRef.current += 1;
-      const pendingPlan = activeGenerationPlanRef.current;
-      activeGenerationPlanRef.current = null;
-      if (pendingPlan !== null) {
-        void cancelGenerationPlan(runtime, pendingPlan).catch(() => undefined);
-      }
+      void activeGenerationNavigationRef.current?.session.stopAndPreserve().catch(() => undefined);
     };
   }, [chapterId, editorRouteKey, projectId, runtime]);
 
   useEffect(() => {
     candidateGenerationFlightRef.current = "idle";
-    const activePlan = activeGenerationPlanRef.current;
-    activeGenerationPlanRef.current = null;
-    if (activePlan !== null) {
-      void cancelGenerationPlan(runtime, activePlan).catch(() => undefined);
-    }
+    void activeGenerationNavigationRef.current?.session.stopAndPreserve().catch(() => undefined);
     const clearStaleModeState = () => {
       setGenerationPlan(null);
       setPreflightOpen(false);
@@ -1214,6 +1216,94 @@ export function EditorPage() {
     const revision = generationOperationRevisionRef.current + 1;
     generationOperationRevisionRef.current = revision;
     return Object.freeze({ revision, routeKey: editorRouteKey });
+  }
+
+  function registerPlanGenerationNavigationGuard(
+    plan: PreparedGenerationPlan,
+  ): GenerationNavigationSession {
+    activeGenerationNavigationRef.current?.session.release();
+    const session = beginGenerationNavigationSession({
+      id: plan.requestId,
+      actionLabel: plan.actionLabel,
+      stop: () => cancelGenerationPlan(runtime, plan),
+      timeoutMs: GENERATION_NAVIGATION_SETTLEMENT_TIMEOUT_MS,
+    });
+    activeGenerationPlanRef.current = plan;
+    activeGenerationNavigationRef.current = { id: plan.requestId, session };
+    return session;
+  }
+
+  function stopGenerationForNavigation(plan: PreparedGenerationPlan): Promise<void> {
+    const active = activeGenerationNavigationRef.current;
+    return active?.id === plan.requestId
+      ? active.session.stopAndPreserve()
+      : cancelGenerationPlan(runtime, plan).then(() => undefined);
+  }
+
+  async function reconcileGenerationNavigationSafety(
+    plan: PreparedGenerationPlan,
+    cause: unknown,
+    receivedVisibleText: string,
+  ): Promise<unknown> {
+    if (cause === null || receivedVisibleText.trim().length === 0) return null;
+    try {
+      const [run, task] = await Promise.all([
+        runtime.generationGovernance.findRunById(plan.runId),
+        runtime.taskCenter.findTaskByIdempotencyKey(plan.idempotencyKey),
+      ]);
+      if (
+        run === null ||
+        task === null ||
+        run.taskId !== plan.taskId ||
+        run.idempotencyKey !== plan.idempotencyKey ||
+        !["completed", "cancelled", "failed_final"].includes(run.state) ||
+        !["succeeded", "cancelled", "failed"].includes(task.status) ||
+        run.candidateId === null
+      ) {
+        return cause;
+      }
+      const candidateId = parseUuidV7(run.candidateId);
+      if (!candidateId.ok) return cause;
+      const loaded = await runtime.repositories.aiCandidates.findById(candidateId.value);
+      if (!loaded.ok) return cause;
+      const recoveredCandidate = loaded.value;
+      if (recoveredCandidate === null) return cause;
+      if (
+        recoveredCandidate.projectId !== plan.projectId ||
+        recoveredCandidate.chapterId !== plan.chapterId ||
+        recoveredCandidate.baseVersionId !== plan.baseVersionId
+      ) {
+        return cause;
+      }
+      if (recoveredCandidate.purpose !== "continuation_directions") {
+        setCandidate(recoveredCandidate);
+        setGenerationReceipt(run);
+        setGenerationAttemptUsage(await runtime.generationGovernance.listAttemptUsage(plan.runId));
+        setEditorNotice(
+          "已收到的内容已安全保留为隔离的未完成建议。正文和版本没有改变，你可以查看后再决定是否使用。",
+        );
+      }
+      return null;
+    } catch {
+      return cause;
+    }
+  }
+
+  function releaseUnsafeGenerationPreview(): void {
+    activeGenerationNavigationRef.current?.session.release();
+    activeGenerationNavigationRef.current = null;
+    activeGenerationPlanRef.current = null;
+    setGenerationPreview("");
+  }
+
+  async function copyUnsafeGenerationPreview(): Promise<void> {
+    try {
+      await window.navigator.clipboard.writeText(generationPreview);
+      releaseUnsafeGenerationPreview();
+      setEditorNotice("这段未保存内容已复制到剪贴板；现在可以安全离开当前页面。");
+    } catch {
+      setEditorNotice("复制没有完成。页面仍会保留并保护这段内容，请允许剪贴板访问后重试。");
+    }
   }
 
   function isCurrentGenerationOperation(
@@ -3306,6 +3396,9 @@ export function EditorPage() {
     setCandidateBusy(true);
     setDirectionError(null);
     let executionRequested = false;
+    let navigationSettlement: GenerationNavigationSession | null = null;
+    let navigationCause: unknown = null;
+    let receivedVisibleText = "";
     try {
       const [authorityBeforeDispatch, currentChapterResult] = await Promise.all([
         runtime.writingExperience.getOrInitialize(),
@@ -3330,15 +3423,26 @@ export function EditorPage() {
       if (!isCurrentGenerationOperation(operation)) return;
 
       executionRequested = true;
-      const result = await executeGenerationPlan(runtime, pending.plan, undefined, {
-        generationRetryLimit: 0,
-      });
+      navigationSettlement = registerPlanGenerationNavigationGuard(pending.plan);
+      const result = await executeGenerationPlan(
+        runtime,
+        pending.plan,
+        (next) => {
+          receivedVisibleText = next;
+        },
+        {
+          generationRetryLimit: 0,
+        },
+      );
       const generatedCandidate = result.ok ? result.value.candidate : null;
       if (!isCurrentGenerationOperation(operation)) {
         await rejectDirectionCandidateSafely(generatedCandidate);
         return;
       }
       if (!result.ok || generatedCandidate === null) {
+        navigationCause = result.ok
+          ? new UiActionError("DIRECTION_RESULT_MISSING", "创作服务没有返回可用的方向结果。")
+          : result.error;
         setPreparedDirections(null);
         reportDirectionFailure({
           stage: "provider_dispatch",
@@ -3407,6 +3511,7 @@ export function EditorPage() {
         await rejectDirectionCandidateSafely(previousDirectionCandidate);
       }
     } catch (cause: unknown) {
+      if (executionRequested) navigationCause = cause;
       if (isCurrentGenerationOperation(operation)) {
         setPreparedDirections(null);
         reportDirectionFailure({
@@ -3419,6 +3524,23 @@ export function EditorPage() {
         });
       }
     } finally {
+      if (navigationSettlement !== null) {
+        const safeCause = await reconcileGenerationNavigationSafety(
+          pending.plan,
+          navigationCause,
+          receivedVisibleText,
+        );
+        navigationSettlement.settle(safeCause);
+        if (safeCause === null) {
+          if (activeGenerationPlanRef.current === pending.plan) {
+            activeGenerationPlanRef.current = null;
+          }
+          if (activeGenerationNavigationRef.current?.session === navigationSettlement) {
+            navigationSettlement.release();
+            activeGenerationNavigationRef.current = null;
+          }
+        }
+      }
       if (isCurrentGenerationOperation(operation)) {
         setDirectionBusy(false);
         setCandidateBusy(false);
@@ -3475,6 +3597,12 @@ export function EditorPage() {
     setCandidateQualityGate(null);
     setError(null);
     setGenerationError(null);
+    let selectionRequestId: string | null = null;
+    let receivedVisibleText = "";
+    let candidatePersisted = false;
+    let selectionSettlementCause: unknown = null;
+    let selectionSession: GenerationNavigationSession | null = null;
+    let retainUnsafeSelectionPreview = false;
     try {
       const selectedText = stableChapter.content.slice(selection.start, selection.end);
       const selectedHash = await runtime.hasher.sha256(selectedText);
@@ -3510,6 +3638,30 @@ export function EditorPage() {
         setEditorNotice("写作方式已经变化；本次没有调用 AI，请重新查看发送信息。");
         return;
       }
+      const selectionNavigationId = runtime.ids.next();
+      activeGenerationNavigationRef.current?.session.release();
+      selectionSession = beginGenerationNavigationSession({
+        id: selectionNavigationId,
+        actionLabel: selectionRewriteActionLabel(selectionAction),
+        timeoutMs: GENERATION_NAVIGATION_SETTLEMENT_TIMEOUT_MS,
+        stop: async () => {
+          if (selectionRequestId !== null) {
+            await runtime.modelGateway.cancelGeneration(selectionRequestId).catch(() => false);
+          }
+        },
+      });
+      activeGenerationNavigationRef.current = {
+        id: selectionNavigationId,
+        session: selectionSession,
+      };
+      const assertNotStopped = (): void => {
+        if (!selectionSession?.stopRequested()) return;
+        throw new ModelCenterError(
+          "MODEL_GENERATION_CANCELLED",
+          "已在发送前安全停止，本次没有调用模型。",
+          true,
+        );
+      };
       const result = await createSelectionRewriteCandidate(runtime, {
         chapterId: stableChapter.id,
         baseVersionId: stableChapter.currentVersionId,
@@ -3522,10 +3674,17 @@ export function EditorPage() {
         instruction: rewriteInstruction,
         disclosureFingerprint: activeDisclosure.fingerprint,
         humanConfirmed: true,
+        onBeforeDispatch: ({ requestId }) => {
+          selectionRequestId = requestId;
+          assertNotStopped();
+        },
+        assertBeforeProviderDispatch: assertNotStopped,
         onDelta: (next) => {
+          receivedVisibleText = next;
           if (isCurrentGenerationOperation(operation)) setGenerationPreview(next);
         },
       });
+      candidatePersisted = true;
       if (!isCurrentGenerationOperation(operation)) return;
       setSelectionRewriteDisclosure(null);
       const previousCandidate = candidate;
@@ -3546,15 +3705,32 @@ export function EditorPage() {
         professionalNotice: `已生成 ${String(result.rewrittenSelection.length)} 个字符的${selectionRewriteActionLabel(selectionAction)}建议。正文尚未改变，请先比较再决定是否创建新版本。`,
       });
     } catch (cause: unknown) {
+      selectionSettlementCause = cause;
       if (isCurrentGenerationOperation(operation)) {
         setSelectionRewriteDisclosure(null);
         setGenerationError(selectionRewriteUiError(cause));
       }
     } finally {
+      if (selectionSession !== null) {
+        const safeCause =
+          candidatePersisted || receivedVisibleText.trim().length === 0
+            ? null
+            : (selectionSettlementCause ??
+              new Error("已收到的内容尚未安全保存，请先复制或明确放弃。"));
+        retainUnsafeSelectionPreview = safeCause !== null;
+        selectionSession.settle(safeCause);
+        if (
+          safeCause === null &&
+          activeGenerationNavigationRef.current?.session === selectionSession
+        ) {
+          selectionSession.release();
+          activeGenerationNavigationRef.current = null;
+        }
+      }
       if (isCurrentGenerationOperation(operation)) {
         setSelectionRewriteBusy(false);
         setCandidateBusy(false);
-        setGenerationPreview("");
+        if (!retainUnsafeSelectionPreview) setGenerationPreview("");
       }
     }
   }
@@ -3731,7 +3907,9 @@ export function EditorPage() {
     setGenerationPreview("");
     setError(null);
     setGenerationError(null);
-    activeGenerationPlanRef.current = plan;
+    const settlement = registerPlanGenerationNavigationGuard(plan);
+    let settlementCause: unknown = null;
+    let receivedVisibleText = "";
     try {
       const directExecution = directGenerationRequestIdsRef.current.has(plan.requestId);
       const generationAction: EditorGenerationAction =
@@ -3739,9 +3917,10 @@ export function EditorPage() {
       if (directExecution) {
         const currentAuthority = await runtime.writingExperience.getOrInitialize();
         if (currentAuthority.mode !== "direct") {
-          setGenerationError(
-            new Error("直接模式授权已经撤销；本次没有调用 AI，正文和版本保持不变。"),
+          settlementCause = new Error(
+            "直接模式授权已经撤销；本次没有调用 AI，正文和版本保持不变。",
           );
+          setGenerationError(settlementCause);
           return;
         }
       }
@@ -3749,6 +3928,7 @@ export function EditorPage() {
         runtime,
         plan,
         (next) => {
+          receivedVisibleText = next;
           if (isCurrentGenerationOperation(operation)) setGenerationPreview(next);
         },
         { generationRetryLimit: 0 },
@@ -3764,6 +3944,7 @@ export function EditorPage() {
         setDeferredGeneration(deferred);
       }
       if (!result.ok) {
+        settlementCause = result.error;
         setGenerationError(result.error);
         return;
       }
@@ -3801,19 +3982,33 @@ export function EditorPage() {
             : "建议已生成并保持隔离；正文和版本没有改变，请查看后决定是否使用。",
       });
     } catch (cause: unknown) {
+      settlementCause = cause;
       if (isCurrentGenerationOperation(operation)) setGenerationError(cause);
     } finally {
-      if (activeGenerationPlanRef.current === plan) {
+      const navigationCause = await reconcileGenerationNavigationSafety(
+        plan,
+        settlementCause,
+        receivedVisibleText,
+      );
+      if (navigationCause === null && activeGenerationPlanRef.current === plan) {
         activeGenerationPlanRef.current = null;
       }
       if (isCurrentGenerationOperation(operation)) {
         directGenerationRequestIdsRef.current.delete(plan.requestId);
         setCandidateBusy(false);
         setCancelBusy(false);
-        setGenerationPreview("");
+        if (navigationCause === null) setGenerationPreview("");
         setGenerationStage("preparing");
         candidateGenerationFlightRef.current = "idle";
       }
+      if (
+        navigationCause === null &&
+        activeGenerationNavigationRef.current?.session === settlement
+      ) {
+        settlement.release();
+        activeGenerationNavigationRef.current = null;
+      }
+      settlement.settle(navigationCause);
     }
   }
 
@@ -3938,7 +4133,7 @@ export function EditorPage() {
     }
     setCancelBusy(true);
     try {
-      await cancelGenerationPlan(runtime, activePlan);
+      await stopGenerationForNavigation(activePlan);
     } catch (cause: unknown) {
       setGenerationError(cause);
       setCancelBusy(false);
@@ -5767,6 +5962,25 @@ export function EditorPage() {
                     onStop={() => void cancelActiveGeneration()}
                   />
                 )
+              ) : generationPreview.length > 0 && generationError !== null ? (
+                <div className="candidate-content" role="status">
+                  <div className="candidate-content__meta">
+                    <Badge tone="warning">尚未安全保存</Badge>
+                    <span>{generationPreview.length} 字符</span>
+                  </div>
+                  <pre>{generationPreview}</pre>
+                  <p className="candidate-panel__hint">
+                    已收到的片段仍保留在当前页面，尚未写入正文或建议版本。离开保护会继续生效，直到你明确复制或放弃这段内容。
+                  </p>
+                  <div className="candidate-actions">
+                    <Button variant="secondary" onClick={() => void copyUnsafeGenerationPreview()}>
+                      复制片段并允许离开
+                    </Button>
+                    <Button variant="ghost" onClick={releaseUnsafeGenerationPreview}>
+                      放弃片段并允许离开
+                    </Button>
+                  </div>
+                </div>
               ) : candidate === null ? (
                 <div className="candidate-content">
                   <EmptyState
@@ -7137,6 +7351,28 @@ export function EditorPage() {
                 </p>
               </section>
             )}
+
+            {generationPlan.contextCompilation !== null &&
+              generationPlan.contextCompilation.compiled.entries.some(
+                ({ included, layer }) => included && layer === "locked_hard_rules",
+              ) && (
+                <section
+                  className="generation-preflight__confirmation-memory"
+                  aria-labelledby="generation-confirmed-constraints-heading"
+                >
+                  <h3 id="generation-confirmed-constraints-heading">本次必须遵守的创作约束</h3>
+                  <p>以下内容会随本次任务发送给上方列明的模型服务；未列出的资料不会因此加入。</p>
+                  <ul>
+                    {generationPlan.contextCompilation.compiled.entries
+                      .filter(({ included, layer }) => included && layer === "locked_hard_rules")
+                      .map((entry) => (
+                        <li key={`confirmed-constraint:${entry.id}`}>
+                          <blockquote>{entry.content}</blockquote>
+                        </li>
+                      ))}
+                  </ul>
+                </section>
+              )}
 
             <details>
               <summary>创作任务安排与隐私详情（高级）</summary>

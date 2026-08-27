@@ -755,6 +755,11 @@ function evidenceSourceType(
   snapshot: StoryFactSnapshot,
   layer: ContextLayer,
 ): ContextEvidenceSourceType {
+  // Once an author explicitly locks a fact it is a governed story rule, even
+  // when its original provenance was a user statement. Keeping that semantic
+  // source type lets an identical ProjectSeed constraint merge without losing
+  // either audit reference.
+  if (layer === "locked_hard_rules") return "story_rule";
   switch (snapshot.source.kind) {
     case "chapter_span":
       return "chapter";

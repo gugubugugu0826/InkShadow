@@ -23,7 +23,7 @@ type ProtectedTable = (typeof PROTECTED_TABLES)[number];
 type ProtectedColumns = Readonly<Record<ProtectedTable, readonly string[]>>;
 
 describe("released v0.2.3 continuous database upgrade", () => {
-  it("applies every forward migration through 0078 without changing authoritative content", () => {
+  it("applies every forward migration through 0080 without changing authoritative content", () => {
     const dataMigrationNames = readdirSync(MIGRATION_DIRECTORY)
       .filter((name) => /^\d{4}_.+\.sql$/u.test(name))
       .sort();
@@ -38,7 +38,7 @@ describe("released v0.2.3 continuous database upgrade", () => {
     ];
     const v023HeadIndex = migrations.findIndex(({ name }) => name === V023_SCHEMA_HEAD);
     expect(v023HeadIndex).toBeGreaterThanOrEqual(0);
-    expect(migrations.at(-1)?.name).toBe("0078_generation_attempt_prose_invocation.sql");
+    expect(migrations.at(-1)?.name).toBe("0080_candidate_selection_action.sql");
 
     const database = new DatabaseSync(":memory:");
     for (const migration of migrations.slice(0, v023HeadIndex + 1)) {

@@ -1,14 +1,14 @@
 # 墨影 InkShadow 文档入口
 
-> 当前源码快照应用清单版本：`0.2.13`；本轮仅形成未签名人工复测候选，精确状态以当次验证报告和 GitHub Releases 为准  
+> 当前发布目标：`0.2.14`；版本清单、源码自动化与桌面正式构建已通过，干净来源候选链、真实安装人工验收和五个发布附件尚未完成  
 > 设计基线（Design Baseline）：`DESIGN v0.3.1b`  
-> 最近治理复核：2026-08-26  
+> 最近治理复核：2026-08-27  
 > 公开版本的精确状态以 [GitHub Releases](https://github.com/gugubugugu0826/InkShadow/releases) 为准；既有 `v0.2.12` 及更早标签、Release 与附件保持不可变。  
 > 注意：设计版本用于界面与交互验收，不会自动改变应用版本。
 
-`v0.2.12` 已发布且保持不可变；当前 0.2.13 修复历史版本恢复、设置深链、重复待确认设定、凭据隔离说明、证据术语和导出安全边界，没有新增或修改数据库迁移。
-当前缺陷矩阵、门禁、失败修复链和未执行边界见
-[`execution/2026-08-26-V0213-BLOCKERS-REMEDIATION.md`](execution/2026-08-26-V0213-BLOCKERS-REMEDIATION.md)。
+0.2.14 当前处理专业创建资料语义、跨版本待确认设定去重、四项选区技能人工闭环、设置跳转、普通界面中文展示和生成中切页保护。当前只向前新增 Data `0079`–`0080`／Tauri `82`–`83`；UI 42／42、全仓 3,945 项、Rust 207 项、桌面正式构建与生产 Chromium 26／26 已通过。正式前端为 7,337,824／7,340,032 字节，余量 2,208 字节。首次完整发布检查因误删 `.ink-prose` 合同而停止，恢复后相关分项分别重跑通过，但尚未取得修复后单次完整退出 0 的记录；正式发布端到端又按设计拒绝未提交工作区并在启动旅程前停止，完整候选链未运行。三份测试结果原件以及 Q01–Q11、P02–P10、R05–R14 原始材料未取得；真实模型、真人和真实安装验证未执行，因此远端发布动作继续阻断。
+当前缺陷矩阵、已执行命令、未执行人工项和发布边界见
+[`execution/2026-08-27-V0214-RELEASE-BLOCKERS.md`](execution/2026-08-27-V0214-RELEASE-BLOCKERS.md)。0.2.13 记录作为冻结历史保留。
 `0.2.11` 人工复测候选的缺陷矩阵与证据边界继续作为历史记录保留，见
 [`execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md`](execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md)。
 
@@ -46,7 +46,8 @@
 | `EVIDENCE_CURRENT`      | [`execution/CURRENT_STATUS.md`](execution/CURRENT_STATUS.md)                                                                               | 当前执行状态；必须同时核对其中绑定的提交与运行日期 |
 | `EVIDENCE_CURRENT`      | [`execution/TEST_RESULTS.md`](execution/TEST_RESULTS.md)                                                                                   | 当前和历史测试证据；失败不得省略                   |
 | `EVIDENCE_CURRENT`      | [`execution/RELEASE_CHECKLIST.md`](execution/RELEASE_CHECKLIST.md)                                                                         | 当前版本的构建、打包、发布与外部门禁               |
-| `EVIDENCE_CURRENT`      | [`execution/2026-08-26-V0213-BLOCKERS-REMEDIATION.md`](execution/2026-08-26-V0213-BLOCKERS-REMEDIATION.md)                                 | 0.2.13 阻断缺陷、人工复测候选与证据边界           |
+| `EVIDENCE_CURRENT`      | [`execution/2026-08-27-V0214-RELEASE-BLOCKERS.md`](execution/2026-08-27-V0214-RELEASE-BLOCKERS.md)                                         | 0.2.14 上线阻断、当前证据与人工发布门禁           |
+| `HISTORICAL`            | [`execution/2026-08-26-V0213-BLOCKERS-REMEDIATION.md`](execution/2026-08-26-V0213-BLOCKERS-REMEDIATION.md)                                 | 0.2.13 修复与人工候选冻结证据                     |
 | `EVIDENCE_CURRENT`      | [`execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md`](execution/2026-08-24-V0211-BLOCKERS-UI-REMEDIATION.md)                         | 0.2.11 阻断缺陷、数据兼容与界面修复门禁           |
 | `HISTORICAL`            | [`execution/2026-08-25-V0212-RETEST-RELEASE.md`](execution/2026-08-25-V0212-RETEST-RELEASE.md)                                               | 0.2.12 缺陷、门禁与发布历史                       |
 | `HISTORICAL`            | [`execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md`](execution/2026-08-21-V026-REAL-DEVICE-DEFECT-REMEDIATION.md)                 | v0.2.6 发布前修复与真机聚焦历史证据                |

@@ -458,6 +458,8 @@ function canonicalContextContent(content: string): string {
     .replace(/\r\n?/gu, "\n")
     .trim()
     .replace(/^(?:\[[^\]\r\n]{1,200}\]|【[^】\r\n]{1,200}】)\s*\n+/u, "")
+    .replace(/^类型[:：]writing_constraint[ \t]*\n内容[:：]/u, "")
+    .replace(/(^|\n)-[ \t]+/gu, "$1")
     .replace(/\s+/gu, " ");
 }
 

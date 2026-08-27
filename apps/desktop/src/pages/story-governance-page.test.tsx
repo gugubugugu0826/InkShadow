@@ -452,6 +452,249 @@ describe("StoryGovernancePage", () => {
     expect(within(reopenedCurrentSection).getAllByText("灯塔 每晚只能亮一次。")).toHaveLength(1);
   });
 
+  it("shows professional setup drafts and preserves explicit confirm, edit, and discard decisions", async () => {
+    window.localStorage.clear();
+    seedWritingExperience("professional");
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const generate = vi.spyOn(runtime.modelGateway, "generate");
+    const project = await runtime.useCases.createProject.execute({ name: "专业创作设定" });
+    if (!project.ok) throw project.error;
+    const projectId = parseUuidV7(project.value.id);
+    if (!projectId.ok) throw projectId.error;
+    const drafts = await Promise.all([
+      runtime.story.factService.stageUserDraftFact({
+        projectId: projectId.value,
+        factType: "character_profile",
+        contentText: "主角：林舟，沉默的转学生",
+        actorId: runtime.story.actorId,
+      }),
+      runtime.story.factService.stageUserDraftFact({
+        projectId: projectId.value,
+        factType: "core_relationship",
+        contentText: "人物关系：林舟与夏遥互相试探",
+        actorId: runtime.story.actorId,
+      }),
+      runtime.story.factService.stageUserDraftFact({
+        projectId: projectId.value,
+        factType: "world_rule",
+        contentText: "世界背景：现代临海小城",
+        actorId: runtime.story.actorId,
+      }),
+    ]);
+    for (const draft of drafts) if (!draft.ok) throw draft.error;
+
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+    const pendingSection = (
+      await screen.findByRole("heading", { name: "专业创作待确认设定", level: 2 })
+    ).closest("section");
+    if (!(pendingSection instanceof HTMLElement)) throw new Error("找不到待确认设定区域。");
+    expect(within(pendingSection).getAllByText(/来自专业创作输入，等待你的决定/u)).toHaveLength(3);
+    const characterCard = within(pendingSection)
+      .getByText("主角：林舟，沉默的转学生")
+      .closest(".ink-card");
+    if (!(characterCard instanceof HTMLElement)) throw new Error("找不到人物待确认卡片。");
+    const sourceButton = within(characterCard).getByRole("button", { name: "查看输入来源" });
+    await user.click(sourceButton);
+    expect(sourceButton).toHaveAttribute("aria-expanded", "true");
+    expect(within(characterCard).getByText("专业创作表单")).toBeVisible();
+    expect(within(characterCard).queryByText(/来源章节|保存版本|字符范围/u)).toBeNull();
+    await user.click(within(characterCard).getByRole("button", { name: "确认并保留" }));
+    await waitFor(() => {
+      const remaining = screen
+        .getByRole("heading", { name: "专业创作待确认设定", level: 2 })
+        .closest("section");
+      expect(remaining).not.toHaveTextContent("主角：林舟，沉默的转学生");
+    });
+
+    const pendingAfterCharacter = screen
+      .getByRole("heading", { name: "专业创作待确认设定", level: 2 })
+      .closest("section");
+    if (!(pendingAfterCharacter instanceof HTMLElement)) {
+      throw new Error("人物确认后找不到其余待确认设定。");
+    }
+    await waitFor(() => {
+      const currentPendingSection = screen
+        .getByRole("heading", { name: "专业创作待确认设定", level: 2 })
+        .closest("section");
+      if (!(currentPendingSection instanceof HTMLElement)) {
+        throw new Error("找不到当前待确认设定区域。");
+      }
+      const currentRelationshipCard = within(currentPendingSection)
+        .getByText("人物关系：林舟与夏遥互相试探")
+        .closest(".ink-card");
+      if (!(currentRelationshipCard instanceof HTMLElement)) {
+        throw new Error("找不到关系待确认卡片。");
+      }
+      expect(within(currentRelationshipCard).getByRole("button", { name: "修改" })).toBeEnabled();
+    });
+    const currentPendingSection = screen
+      .getByRole("heading", { name: "专业创作待确认设定", level: 2 })
+      .closest("section");
+    if (!(currentPendingSection instanceof HTMLElement)) {
+      throw new Error("找不到当前待确认设定区域。");
+    }
+    const currentRelationshipCard = within(currentPendingSection)
+      .getByText("人物关系：林舟与夏遥互相试探")
+      .closest(".ink-card");
+    if (!(currentRelationshipCard instanceof HTMLElement)) {
+      throw new Error("找不到关系待确认卡片。");
+    }
+    await user.click(within(currentRelationshipCard).getByRole("button", { name: "修改" }));
+    const editDialog = await screen.findByRole("dialog", { name: "修改设定" });
+    const editInput = within(editDialog).getByRole("textbox", { name: "设定内容" });
+    await user.clear(editInput);
+    await user.type(editInput, "人物关系：林舟与夏遥是共同调查者");
+    await user.click(within(editDialog).getByRole("button", { name: "保存修改并确认" }));
+    await waitFor(() => {
+      const remaining = screen
+        .getByRole("heading", { name: "专业创作待确认设定", level: 2 })
+        .closest("section");
+      expect(remaining).not.toHaveTextContent("人物关系：林舟与夏遥互相试探");
+    });
+
+    const pendingAfterRelationship = screen
+      .getByRole("heading", { name: "专业创作待确认设定", level: 2 })
+      .closest("section");
+    if (!(pendingAfterRelationship instanceof HTMLElement)) {
+      throw new Error("关系确认后找不到其余待确认设定。");
+    }
+    const worldCard = within(pendingAfterRelationship)
+      .getByText("世界背景：现代临海小城")
+      .closest(".ink-card");
+    if (!(worldCard instanceof HTMLElement)) throw new Error("找不到世界待确认卡片。");
+    const discardButton = within(worldCard).getByRole("button", { name: "放弃" });
+    await waitFor(() => expect(discardButton).toBeEnabled());
+    await user.click(discardButton);
+    await waitFor(() =>
+      expect(screen.queryByRole("heading", { name: "专业创作待确认设定", level: 2 })).toBeNull(),
+    );
+
+    const persisted = await runtime.story.facts.listByProjectId(projectId.value);
+    if (!persisted.ok) throw persisted.error;
+    expect(
+      persisted.value.map((fact) => ({
+        status: fact.toSnapshot().status,
+        content: fact.toSnapshot().contentText,
+        source: fact.toSnapshot().source.kind,
+      })),
+    ).toEqual(
+      expect.arrayContaining([
+        {
+          status: "formal",
+          content: "主角：林舟，沉默的转学生",
+          source: "user_statement",
+        },
+        {
+          status: "formal",
+          content: "人物关系：林舟与夏遥是共同调查者",
+          source: "user_statement",
+        },
+        {
+          status: "deprecated",
+          content: "世界背景：现代临海小城",
+          source: "user_statement",
+        },
+      ]),
+    );
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it("shows every retained immutable正文 citation for one governed setting", async () => {
+    window.localStorage.clear();
+    seedWritingExperience("direct");
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const project = await runtime.useCases.createProject.execute({ name: "多处原文依据" });
+    if (!project.ok) throw project.error;
+    const content = "周望是钟楼管理员。后来，周望五十七岁。";
+    const chapter = await runtime.useCases.createChapter.execute({
+      projectId: project.value.id,
+      title: "钟楼旧事",
+      content,
+    });
+    if (!chapter.ok) throw chapter.error;
+    const parsedProjectId = parseUuidV7(project.value.id);
+    if (!parsedProjectId.ok) throw parsedProjectId.error;
+    const firstExcerpt = "周望是钟楼管理员。";
+    const secondExcerpt = "周望五十七岁。";
+    const staged = await runtime.story.factService.stageAutomaticFact({
+      projectId: parsedProjectId.value,
+      factType: "character_profile",
+      contentText: "周望是钟楼管理员",
+      structuredValue: {
+        schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+        payload: {
+          schemaVersion: "inkshadow.direct-local-story-fact.v1",
+          kind: "explicit_narrative_character_profile",
+          character: "周望",
+          detail: "钟楼管理员",
+        },
+      },
+      source: {
+        kind: "chapter_span",
+        reference: "direct-local:inkshadow.direct-local-story-fact.v1:first",
+        chapterId: chapter.value.chapter.id,
+        versionId: chapter.value.chapter.currentVersionId,
+        startOffset: 0,
+        endOffset: firstExcerpt.length,
+        sourceLength: content.length,
+        excerpt: firstExcerpt,
+      },
+      confidence: 1,
+      origin: "system",
+      requireHumanReview: true,
+    });
+    if (!staged.ok) throw staged.error;
+    if (runtime.story.facts.listEvidenceByFactId === undefined) {
+      throw new Error("故事事实存储没有多证据读取能力。");
+    }
+    vi.spyOn(runtime.story.facts, "listEvidenceByFactId").mockResolvedValue({
+      ok: true,
+      value: [
+        {
+          factId: staged.value.fact.id,
+          projectId: project.value.id,
+          reference: "direct-local:inkshadow.direct-local-story-fact.v1:first",
+          chapterId: chapter.value.chapter.id,
+          versionId: chapter.value.chapter.currentVersionId,
+          startOffset: 0,
+          endOffset: firstExcerpt.length,
+          sourceLength: content.length,
+          excerpt: firstExcerpt,
+          recordedAt: "2026-08-27T00:00:00.000Z",
+        },
+        {
+          factId: staged.value.fact.id,
+          projectId: project.value.id,
+          reference: "direct-local:inkshadow.direct-local-story-fact.v1:second",
+          chapterId: chapter.value.chapter.id,
+          versionId: chapter.value.chapter.currentVersionId,
+          startOffset: content.indexOf(secondExcerpt),
+          endOffset: content.indexOf(secondExcerpt) + secondExcerpt.length,
+          sourceLength: content.length,
+          excerpt: secondExcerpt,
+          recordedAt: "2026-08-27T00:01:00.000Z",
+        },
+      ],
+    });
+
+    const user = userEvent.setup();
+    renderRoute(runtime, `/projects/${project.value.id}/story`);
+    const pendingSection = (
+      await screen.findByRole("heading", { name: "待确认设定", level: 2 })
+    ).closest("section");
+    if (!(pendingSection instanceof HTMLElement)) throw new Error("找不到待确认设定区域。");
+    await user.click(within(pendingSection).getByRole("button", { name: "查看原文依据" }));
+
+    const evidenceRegion = within(pendingSection).getByRole("region", { name: "原文依据" });
+    expect(within(evidenceRegion).getByText("共 2 处原文依据")).toBeVisible();
+    expect(within(evidenceRegion).getByText("原文依据 1")).toBeVisible();
+    expect(within(evidenceRegion).getByText("原文依据 2")).toBeVisible();
+    expect(within(evidenceRegion).getByText(firstExcerpt)).toBeVisible();
+    expect(within(evidenceRegion).getByText(secondExcerpt)).toBeVisible();
+    expect(within(evidenceRegion).getAllByText("《钟楼旧事》")).toHaveLength(2);
+  });
+
   it("shows one auditable item for historical duplicate pending local facts", async () => {
     window.localStorage.clear();
     seedWritingExperience("direct");

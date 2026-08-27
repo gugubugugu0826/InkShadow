@@ -360,6 +360,12 @@ export async function organizeDirectStoryFacts(
       }
       throw staged.error;
     }
+    if (staged.value.fact.toSnapshot().source.reference !== reference) {
+      existingEvidence.add(referenceIdentity);
+      activeDirectEvidence.add(currentEvidenceIdentity);
+      alreadyOrganizedCount += 1;
+      continue;
+    }
     existingEvidence.add(referenceIdentity);
     activeDirectEvidence.add(currentEvidenceIdentity);
     if (candidate.kind === "ordinary") organizedCount += 1;

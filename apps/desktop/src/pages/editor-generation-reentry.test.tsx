@@ -1,18 +1,22 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
-import type { Chapter, Project } from "@inkshadow/domain";
+import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router-dom";
+import { deriveProfessionalProjectSeed, type Chapter, type Project } from "@inkshadow/domain";
 import { ToastProvider } from "@inkshadow/ui";
 import { describe, expect, it, vi } from "vitest";
 
 import { DesktopRoutes } from "../app";
 import { AppErrorBoundary } from "../components/app-error-boundary";
 import { ComponentOwnershipBoundary } from "../components/component-ownership-path";
-import { DesktopPersistenceBoundary } from "../components/desktop-persistence-boundary";
+import {
+  DesktopPersistenceBoundary,
+  PersistenceRouteBoundary,
+} from "../components/desktop-persistence-boundary";
 import {
   createDevelopmentRuntime,
   type DesktopRuntime,
   type NativeModelGatewayClient,
 } from "../infrastructure/runtime";
+import { ModelCenterError } from "../infrastructure/model-center-store";
 import { RuntimeProvider } from "../runtime-context";
 
 describe("editor generation reentry", () => {
@@ -44,6 +48,21 @@ describe("editor generation reentry", () => {
       } satisfies NativeModelGatewayClient,
     });
     const { chapter, project } = await seedChapter(runtime);
+    const professionalSeed = deriveProfessionalProjectSeed({
+      seedId: runtime.ids.next(),
+      projectName: project.name,
+      storyDirection: "调查旧钟楼",
+      outlineSynopsis: "从倒转钟摆开始调查。",
+      protagonist: "周望",
+      relationship: "",
+      worldBackground: "旧城",
+      pov: "第三人称限知",
+      style: "克制写实",
+      boundaries: "不新增超自然力量",
+      otherConstraints: "每章保持单一视角",
+      now: runtime.clock.now(),
+    });
+    await runtime.projectSeeds.saveForProject(project.id, professionalSeed);
     const recoverExpiredTasks = vi.spyOn(runtime.taskCenter, "recoverExpiredTasks");
     renderEditor(runtime, project, chapter);
     const generateButton = await screen.findByRole("button", { name: "生成续写建议" });
@@ -55,6 +74,11 @@ describe("editor generation reentry", () => {
     fireEvent.click(generateButton);
 
     expect(preflight).toBeVisible();
+    expect(
+      within(preflight).getByRole("heading", { name: "本次必须遵守的创作约束" }),
+    ).toBeVisible();
+    expect(within(preflight).getByText(/禁止项：不新增超自然力量/u)).toBeVisible();
+    expect(within(preflight).getByText(/其他创作约束：每章保持单一视角/u)).toBeVisible();
     expect(screen.getAllByRole("dialog", { name: "生成续写建议前检查" })).toHaveLength(1);
     expect(recoverExpiredTasks).toHaveBeenCalledTimes(1);
     expect(generate).not.toHaveBeenCalled();
@@ -273,6 +297,234 @@ describe("editor generation reentry", () => {
       }
     }
   });
+
+  it("warns before leaving an editor whose confirmed generation is still running", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
+    await seedRemoteContinuationRoute(runtime);
+    let rejectGeneration: ((cause: ModelCenterError) => void) | null = null;
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(
+      (request) =>
+        new Promise((_resolve, reject) => {
+          request.onDelta?.("页面离开前必须先安全保存的片段");
+          rejectGeneration = reject;
+        }),
+    );
+    const cancelGeneration = vi.fn(() => {
+      rejectGeneration?.(
+        new ModelCenterError("MODEL_GENERATION_CANCELLED", "generation cancelled", true),
+      );
+      return Promise.resolve(true);
+    });
+    Object.assign(runtime, {
+      mode: "tauri" as const,
+      modelGateway: {
+        available: true,
+        listModels: () =>
+          Promise.resolve({
+            provider: "open_ai_compatible" as const,
+            models: [{ id: "direct-writer", displayName: "Direct writer" }],
+          }),
+        checkConnection: () => Promise.reject(new Error("not used")),
+        embed: () => Promise.reject(new Error("not used")),
+        generate,
+        cancelGeneration,
+      } satisfies NativeModelGatewayClient,
+    });
+    const { chapter, project } = await seedChapter(runtime);
+    const originalCommit = runtime.contextTraceOutputs.commit.bind(runtime.contextTraceOutputs);
+    let releaseCandidateCommit!: () => void;
+    let candidateCommitStarted = false;
+    const candidateCommitGate = new Promise<void>((resolve) => {
+      releaseCandidateCommit = resolve;
+    });
+    vi.spyOn(runtime.contextTraceOutputs, "commit").mockImplementation(async (input) => {
+      candidateCommitStarted = true;
+      await candidateCommitGate;
+      return originalCommit(input);
+    });
+    const cancelTask = vi.spyOn(runtime.taskCenter, "cancelTask");
+    const router = renderEditorWithNavigationBoundary(runtime, project, chapter);
+
+    fireEvent.click(await screen.findByRole("button", { name: "生成续写建议" }));
+    const preflight = await screen.findByRole("dialog", { name: "生成续写建议前检查" });
+    fireEvent.click(
+      within(preflight).getByRole("button", {
+        name: /确认并生成续写建议|使用安全默认值并生成续写建议/u,
+      }),
+    );
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+
+    const panelStop = screen.getByRole("button", { name: "停止生成" });
+    const projectsLink = screen.getByRole("link", { name: "作品库" });
+    act(() => {
+      panelStop.click();
+      panelStop.click();
+      projectsLink.click();
+    });
+
+    const firstWarning = await screen.findByRole("dialog", {
+      name: "停止本次生成并离开？",
+    });
+    expect(firstWarning).toBeVisible();
+    await waitFor(() => expect(cancelGeneration).toHaveBeenCalledTimes(1));
+    expect(cancelTask).toHaveBeenCalledTimes(1);
+    expect(router.state.location.pathname).toBe(`/projects/${project.id}/chapters/${chapter.id}`);
+
+    fireEvent.click(within(firstWarning).getByRole("button", { name: "留在当前页面" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "停止本次生成并离开？" })).toBeNull(),
+    );
+    expect(cancelGeneration).toHaveBeenCalledTimes(1);
+    expect(cancelTask).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("link", { name: "作品库" }));
+    const secondWarning = await screen.findByRole("dialog", {
+      name: "停止本次生成并离开？",
+    });
+    fireEvent.click(within(secondWarning).getByRole("button", { name: "停止生成并离开" }));
+    await waitFor(() => expect(cancelGeneration).toHaveBeenCalledTimes(1));
+    expect(cancelTask).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(candidateCommitStarted).toBe(true));
+    expect(router.state.location.pathname).toBe(`/projects/${project.id}/chapters/${chapter.id}`);
+
+    releaseCandidateCommit();
+    await waitFor(() => expect(router.state.location.pathname).toBe("/projects"));
+
+    const candidates = await runtime.repositories.aiCandidates.listByChapterId(chapter.id);
+    expect(candidates.ok).toBe(true);
+    if (!candidates.ok) throw candidates.error;
+    expect(candidates.value).toHaveLength(1);
+    const candidate = candidates.value[0];
+    if (candidate === undefined) throw new Error("Expected the preserved partial candidate.");
+    expect(candidate.toSnapshot().incomplete).toBe(true);
+    expect(candidate.content).toContain("页面离开前必须先安全保存的片段");
+    await expect(runtime.taskCenter.load()).resolves.toMatchObject({
+      tasks: [expect.objectContaining({ status: "cancelled" })],
+    });
+    await expect(runtime.generationGovernance.listRunsByProjectId(project.id)).resolves.toEqual([
+      expect.objectContaining({
+        state: "cancelled",
+        candidateId: candidates.value[0]?.id,
+      }),
+    ]);
+  });
+
+  it("guards navigation while confirmed direction generation is running", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    await runtime.writingExperience.authorizeDirectMode(1);
+    await seedRemoteContinuationRoute(runtime);
+    let rejectGeneration: ((cause: ModelCenterError) => void) | null = null;
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(
+      (request) =>
+        new Promise((_resolve, reject) => {
+          request.onDelta?.("方向一：尚未完成但已经收到的方向片段");
+          rejectGeneration = reject;
+        }),
+    );
+    const cancelGeneration = vi.fn(() => {
+      rejectGeneration?.(
+        new ModelCenterError("MODEL_GENERATION_CANCELLED", "generation cancelled", true),
+      );
+      return Promise.resolve(true);
+    });
+    Object.assign(runtime, {
+      mode: "tauri" as const,
+      modelGateway: {
+        available: true,
+        listModels: () => Promise.resolve({ provider: "open_ai_compatible" as const, models: [] }),
+        checkConnection: () => Promise.reject(new Error("not used")),
+        embed: () => Promise.reject(new Error("not used")),
+        generate,
+        cancelGeneration,
+      } satisfies NativeModelGatewayClient,
+    });
+    const { chapter, project } = await seedChapter(runtime);
+    const router = renderEditorWithNavigationBoundary(runtime, project, chapter);
+
+    fireEvent.click(await screen.findByRole("button", { name: "选择方向" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认并生成三个方向" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("link", { name: "作品库" }));
+
+    const warning = await screen.findByRole("dialog", { name: "停止本次生成并离开？" });
+    fireEvent.click(within(warning).getByRole("button", { name: "停止生成并离开" }));
+
+    await waitFor(() => expect(cancelGeneration).toHaveBeenCalledOnce());
+    await waitFor(() => expect(router.state.location.pathname).toBe("/projects"));
+    expect(generate).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an unpersisted selection fragment guarded until the author explicitly abandons it", async () => {
+    window.localStorage.clear();
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const preference = await runtime.writingExperience.getOrInitialize();
+    await runtime.writingExperience.switchMode("professional", preference.revision);
+    await seedRemoteContinuationRoute(runtime);
+    await runtime.modelHub.saveTaskRoute({
+      task: "rewrite",
+      primaryCatalogEntryId: "continuation-reentry-catalog",
+      privacyPolicy: "cloud_allowed",
+      failurePolicy: "stop",
+      routeOrigin: "user",
+      expectedRevision: null,
+    });
+    let rejectGeneration: ((cause: ModelCenterError) => void) | null = null;
+    const generate = vi.fn<NativeModelGatewayClient["generate"]>(
+      (request) =>
+        new Promise((_resolve, reject) => {
+          request.onDelta?.("尚未落盘的局部改写片段");
+          rejectGeneration = reject;
+        }),
+    );
+    const cancelGeneration = vi.fn(() => {
+      rejectGeneration?.(
+        new ModelCenterError("MODEL_GENERATION_CANCELLED", "generation cancelled", true),
+      );
+      return Promise.resolve(true);
+    });
+    Object.assign(runtime, {
+      mode: "tauri" as const,
+      modelGateway: {
+        available: true,
+        listModels: () => Promise.resolve({ provider: "open_ai_compatible" as const, models: [] }),
+        checkConnection: () => Promise.reject(new Error("not used")),
+        embed: () => Promise.reject(new Error("not used")),
+        generate,
+        cancelGeneration,
+      } satisfies NativeModelGatewayClient,
+    });
+    const { chapter, project } = await seedChapter(runtime);
+    const router = renderEditorWithNavigationBoundary(runtime, project, chapter);
+    const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "章节正文",
+    });
+    editor.focus();
+    editor.setSelectionRange(0, 2);
+    fireEvent.select(editor);
+    fireEvent.click(screen.getByRole("button", { name: "改写" }));
+    expect(await screen.findByText("确认本次改写")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "确认并生成改写结果" }));
+    await waitFor(() => expect(generate).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole("link", { name: "作品库" }));
+    const warning = await screen.findByRole("dialog", { name: "停止本次生成并离开？" });
+    fireEvent.click(within(warning).getByRole("button", { name: "停止生成并离开" }));
+    await waitFor(() => expect(cancelGeneration).toHaveBeenCalledOnce());
+    expect(router.state.location.pathname).toBe(`/projects/${project.id}/chapters/${chapter.id}`);
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "停止本次生成并离开？" })).toBeNull(),
+    );
+    expect(await screen.findByText("尚未落盘的局部改写片段")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "放弃片段并允许离开" }));
+    fireEvent.click(screen.getByRole("link", { name: "作品库" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/projects"));
+    expect(generate).toHaveBeenCalledOnce();
+  });
 });
 
 function renderEditor(runtime: DesktopRuntime, project: Project, chapter: Chapter): void {
@@ -292,6 +544,41 @@ function renderEditor(runtime: DesktopRuntime, project: Project, chapter: Chapte
       </RuntimeProvider>
     </MemoryRouter>,
   );
+}
+
+function renderEditorWithNavigationBoundary(
+  runtime: DesktopRuntime,
+  project: Project,
+  chapter: Chapter,
+): ReturnType<typeof createMemoryRouter> {
+  const pathname = `/projects/${project.id}/chapters/${chapter.id}`;
+  const router = createMemoryRouter(
+    [
+      {
+        path: "*",
+        element: (
+          <PersistenceRouteBoundary>
+            <DesktopRoutes />
+          </PersistenceRouteBoundary>
+        ),
+      },
+    ],
+    { initialEntries: [pathname] },
+  );
+  render(
+    <RuntimeProvider runtime={runtime}>
+      <ToastProvider>
+        <ComponentOwnershipBoundary name="EditorGenerationNavigationTestHost">
+          <AppErrorBoundary>
+            <DesktopPersistenceBoundary>
+              <RouterProvider router={router} />
+            </DesktopPersistenceBoundary>
+          </AppErrorBoundary>
+        </ComponentOwnershipBoundary>
+      </ToastProvider>
+    </RuntimeProvider>,
+  );
+  return router;
 }
 
 async function seedChapter(

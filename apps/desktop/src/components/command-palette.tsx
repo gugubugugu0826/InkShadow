@@ -291,7 +291,7 @@ function createCommands(projectId: string | null): readonly CommandDefinition[] 
         "command-checks",
         "检查",
         "查看矛盾、视角、声纹和节奏问题",
-        ["矛盾", "POV", "审稿"],
+        ["矛盾", "视角", "审稿"],
         `/projects/${projectId}/checks`,
         "项目",
       ),

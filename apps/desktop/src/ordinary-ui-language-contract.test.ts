@@ -49,6 +49,8 @@ describe("ordinary UI language contract", () => {
   it("keeps implementation terminology out of ordinary model and creation flows", () => {
     const ordinarySources = [
       "src/components/consistency-investigation-panel.tsx",
+      "src/components/causal-fact-authoring-panel.tsx",
+      "src/components/command-palette.tsx",
       "src/components/data-transfer-panel.tsx",
       "src/components/generation-progress-panel.tsx",
       "src/components/model-hub-selectable-catalog-browser.tsx",
@@ -64,6 +66,7 @@ describe("ordinary UI language contract", () => {
       "src/infrastructure/quick-model-connection-service.ts",
       "src/infrastructure/ui-error.ts",
       "src/pages/editor-page.tsx",
+      "src/pages/project-checks-page.tsx",
       "src/pages/settings-page.tsx",
       "src/pages/story-governance-page.tsx",
       "src/pages/task-center-page.tsx",
@@ -73,5 +76,6 @@ describe("ordinary UI language contract", () => {
     expect(combined).not.toMatch(
       /Endpoint ID|Workspace ID|Base URL|认证 Header|Header 值|固定能力验证|固定探针|发送边界|AI 连接与分工|当前分工|自定义分工|旧版兼容分工|自动分工|任务路由事务|JSON 探针|翻译探针|原因码|整理上下文|构建向量索引|候选正文|可编辑候选|待导入候选|剧情规划分工|安全预检|发送前预检/u,
     );
+    expect(combined).not.toMatch(/\bPOV\b/u);
   });
 });

@@ -152,7 +152,7 @@ interface ProductionLongFormBenchmarkReport {
   readonly evaluatedAtK: number;
   readonly execution: Readonly<{
     readonly database: "temporary_file_backed_node_sqlite";
-    readonly schemaHead: "0076_direct_local_story_fact_author_revision.sql";
+    readonly schemaHead: "0080_candidate_selection_action.sql";
     readonly searchPath: "LocalProjectSearchService.searchFtsOnly+TauriProjectSearchSnapshotStore";
     readonly storyMemoryPath: "CompositeStoryMemoryReadModel+SQLite_authority_repositories";
     readonly agentPath: "ConsistencyInvestigationService+ConsistencyInvestigationToolRegistry";
@@ -524,7 +524,7 @@ async function runProductionLongFormBenchmark(
       evaluatedAtK: BENCHMARK_K,
       execution: Object.freeze({
         database: "temporary_file_backed_node_sqlite",
-        schemaHead: "0076_direct_local_story_fact_author_revision.sql",
+        schemaHead: "0080_candidate_selection_action.sql",
         searchPath: "LocalProjectSearchService.searchFtsOnly+TauriProjectSearchSnapshotStore",
         storyMemoryPath: "CompositeStoryMemoryReadModel+SQLite_authority_repositories",
         agentPath: "ConsistencyInvestigationService+ConsistencyInvestigationToolRegistry",
@@ -1703,16 +1703,20 @@ function writeRawBenchmarkReport(report: ProductionLongFormBenchmarkReport): str
 function readCurrentLocalSchema(workspaceRoot: string): string {
   const dataDirectory = path.join(workspaceRoot, "packages", "data", "migrations");
   const dataMigrations = readdirSync(dataDirectory)
-    .filter((name) => /^(?:00(?:0[1-9]|[1-6][0-9]|7[0-6]))_.*\.sql$/u.test(name))
+    .filter((name) => /^\d{4}_.*\.sql$/u.test(name))
     .sort();
   if (
-    dataMigrations.length !== 76 ||
+    dataMigrations.length !== 80 ||
     dataMigrations[0] !== "0001_core.sql" ||
-    dataMigrations.at(-3) !== "0074_chapter_version_story_fact_responsibility.sql" ||
-    dataMigrations.at(-2) !== "0075_generation_attempt_privacy_snapshot.sql" ||
-    dataMigrations.at(-1) !== "0076_direct_local_story_fact_author_revision.sql"
+    dataMigrations.at(-7) !== "0074_chapter_version_story_fact_responsibility.sql" ||
+    dataMigrations.at(-6) !== "0075_generation_attempt_privacy_snapshot.sql" ||
+    dataMigrations.at(-5) !== "0076_direct_local_story_fact_author_revision.sql" ||
+    dataMigrations.at(-4) !== "0077_project_display_identities.sql" ||
+    dataMigrations.at(-3) !== "0078_generation_attempt_prose_invocation.sql" ||
+    dataMigrations.at(-2) !== "0079_story_fact_evidence.sql" ||
+    dataMigrations.at(-1) !== "0080_candidate_selection_action.sql"
   ) {
-    throw new Error("The production benchmark expected the exact Data 0001-0076 migration chain.");
+    throw new Error("The production benchmark expected the exact Data 0001-0080 migration chain.");
   }
   const sql: string[] = [];
   for (const fileName of dataMigrations) {

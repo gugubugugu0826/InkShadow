@@ -389,6 +389,9 @@ export const aiCandidates = sqliteTable(
       .default("full_document"),
     anchorStartUtf16: integer("anchor_start_utf16"),
     anchorEndUtf16: integer("anchor_end_utf16"),
+    selectionAction: text("selection_action", {
+      enum: ["selection_rewrite", "polish", "expand", "shorten"],
+    }),
   },
   (table) => [
     check(

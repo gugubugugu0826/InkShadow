@@ -5,6 +5,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { AppearancePreferenceProvider } from "./appearance-preference";
 import { saveExportArtifact } from "./infrastructure/export-artifact-download";
 import type { DesktopRuntime } from "./infrastructure/runtime";
+import { closeCurrentWindow } from "./infrastructure/tauri-current-window";
 import {
   clearStartupFailure,
   collectStartupDiagnosticArtifact,
@@ -164,8 +165,7 @@ function RuntimeProviderContent({
   const exitAfterMigrationFailure = async () => {
     if (isTauri()) {
       try {
-        const { getCurrentWindow } = await import("@tauri-apps/api/window");
-        await getCurrentWindow().close();
+        await closeCurrentWindow();
         return;
       } catch {
         setDiagnosticExportStatus("无法自动退出，请关闭当前窗口。");

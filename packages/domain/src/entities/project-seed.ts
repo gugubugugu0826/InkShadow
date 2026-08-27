@@ -266,6 +266,7 @@ export function deriveProfessionalProjectSeed(
     pov: string;
     style: string;
     boundaries: string;
+    otherConstraints?: string;
     now: string;
     existing?: ProjectSeed | null;
   }>,
@@ -296,7 +297,6 @@ export function deriveProfessionalProjectSeed(
     ["world", input.worldBackground, "professional_setup.world"],
     ["pov", input.pov, "professional_setup.pov"],
     ["style", input.style, "professional_setup.style"],
-    ["boundaries", input.boundaries, "professional_setup.boundaries"],
   ];
   for (const [field, value, origin] of values) {
     const normalized = normalizeText(value);
@@ -308,7 +308,24 @@ export function deriveProfessionalProjectSeed(
       updatedAt: input.now,
     });
   }
+  const boundaryValues = uniqueTexts([
+    labelProfessionalConstraint("禁止项", input.boundaries),
+    labelProfessionalConstraint("其他创作约束", input.otherConstraints ?? ""),
+  ]);
+  seed = updateProjectSeedField(seed, "boundaries", {
+    values: boundaryValues,
+    source: boundaryValues.length === 0 ? null : "professional_setup",
+    confirmation: boundaryValues.length === 0 ? "unconfirmed" : "confirmed",
+    origin: boundaryValues.length === 0 ? null : "professional_setup.boundaries",
+    updatedAt: input.now,
+  });
   return seed;
+}
+
+function labelProfessionalConstraint(label: string, value: string): string {
+  const normalized = normalizeText(value);
+  if (normalized.length === 0) return "";
+  return normalized.startsWith(`${label}：`) ? normalized : `${label}：${normalized}`;
 }
 
 export function parseProjectSeed(value: unknown): ProjectSeed | null {

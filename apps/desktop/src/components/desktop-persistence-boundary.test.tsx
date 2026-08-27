@@ -8,13 +8,38 @@ import {
   useNavigate,
 } from "react-router-dom";
 import { ToastProvider } from "@inkshadow/ui";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   desktopPersistenceLifecycle,
   type PersistenceFlushContext,
 } from "../infrastructure/persistence-lifecycle";
-import { PersistenceRouteBoundary } from "./desktop-persistence-boundary";
+import {
+  currentGenerationNavigationGuard,
+  registerGenerationNavigationGuard,
+} from "../infrastructure/generation-navigation-lifecycle";
+import { createDevelopmentRuntime } from "../infrastructure/runtime";
+import { RuntimeProvider } from "../runtime-context";
+import {
+  DesktopPersistenceBoundary,
+  PersistenceRouteBoundary,
+} from "./desktop-persistence-boundary";
+
+const nativeWindowHarness = vi.hoisted(() => ({
+  closeHandler: null as null | ((event: { preventDefault(): void }) => void),
+  destroy: vi.fn(() => Promise.resolve()),
+  unlisten: vi.fn(),
+}));
+
+vi.mock("../infrastructure/tauri-current-window", () => ({
+  destroyCurrentWindow: nativeWindowHarness.destroy,
+  listenCurrentWindowCloseRequested: (
+    handler: (event: { preventDefault(): void }) => void,
+  ): Promise<() => void> => {
+    nativeWindowHarness.closeHandler = handler;
+    return Promise.resolve(nativeWindowHarness.unlisten);
+  },
+}));
 
 describe("PersistenceRouteBoundary", () => {
   it("flushes before Link, navigate, browser back, and browser forward transitions", async () => {
@@ -134,6 +159,66 @@ describe("PersistenceRouteBoundary", () => {
     } finally {
       unregister();
     }
+  });
+});
+
+describe("DesktopPersistenceBoundary", () => {
+  let releaseGuard: (() => void) | null = null;
+
+  beforeEach(() => {
+    nativeWindowHarness.closeHandler = null;
+    nativeWindowHarness.destroy.mockClear();
+    nativeWindowHarness.unlisten.mockClear();
+  });
+
+  afterEach(() => {
+    releaseGuard?.();
+    releaseGuard = null;
+  });
+
+  it("requires the active generation to settle before a native window close", async () => {
+    const runtime = createDevelopmentRuntime(window.localStorage);
+    const closeRuntime = vi.fn(() => Promise.resolve());
+    Object.assign(runtime, { mode: "tauri" as const, close: closeRuntime });
+    let releaseStop!: () => void;
+    const stopGate = new Promise<void>((resolve) => {
+      releaseStop = resolve;
+    });
+    const stopAndPreserve = vi.fn(() => stopGate);
+    releaseGuard = registerGenerationNavigationGuard({
+      id: "native-close-generation",
+      actionLabel: "续写",
+      stopAndPreserve,
+    });
+    expect(currentGenerationNavigationGuard()).not.toBeNull();
+
+    render(
+      <RuntimeProvider runtime={runtime}>
+        <ToastProvider>
+          <DesktopPersistenceBoundary>
+            <main>正文编辑器</main>
+          </DesktopPersistenceBoundary>
+        </ToastProvider>
+      </RuntimeProvider>,
+    );
+    await waitFor(() => expect(nativeWindowHarness.closeHandler).not.toBeNull());
+    const preventDefault = vi.fn();
+
+    act(() => nativeWindowHarness.closeHandler?.({ preventDefault }));
+
+    expect(preventDefault).toHaveBeenCalledOnce();
+    const dialog = await screen.findByRole("dialog", { name: "停止本次生成并关闭？" });
+    expect(closeRuntime).not.toHaveBeenCalled();
+    expect(nativeWindowHarness.destroy).not.toHaveBeenCalled();
+
+    screen.getByRole("button", { name: "停止生成并关闭" }).click();
+    await waitFor(() => expect(stopAndPreserve).toHaveBeenCalledOnce());
+    expect(closeRuntime).not.toHaveBeenCalled();
+    releaseStop();
+
+    await waitFor(() => expect(closeRuntime).toHaveBeenCalledOnce());
+    await waitFor(() => expect(nativeWindowHarness.destroy).toHaveBeenCalledOnce());
+    expect(dialog).not.toBeVisible();
   });
 });
 

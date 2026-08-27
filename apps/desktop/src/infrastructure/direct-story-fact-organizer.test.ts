@@ -910,7 +910,7 @@ describe("direct local story-fact organization", () => {
     expect(generate).not.toHaveBeenCalled();
   });
 
-  it("scans only the accepted delta and rebuilds moved evidence for the current version", async () => {
+  it("scans only the accepted delta without restaging a fact retained by a later version", async () => {
     const runtime = createDevelopmentRuntime(window.localStorage);
     const generate = vi.spyOn(runtime.modelGateway, "generate");
     const project = expectOk(await runtime.useCases.createProject.execute({ name: "跨版本去重" }));
@@ -975,17 +975,24 @@ describe("direct local story-fact organization", () => {
     });
 
     expect(receipt).toEqual({
-      organizedCount: 2,
+      organizedCount: 1,
       importantReviewCount: 0,
-      alreadyOrganizedCount: 0,
+      alreadyOrganizedCount: 1,
       sourceWasCurrent: true,
     });
     const snapshots = expectStoryOk(
       await runtime.story.facts.listByProjectId(expectStoryUuid(project.id)),
     ).map((fact) => fact.toSnapshot());
-    expect(snapshots).toHaveLength(6);
+    expect(snapshots).toHaveLength(5);
     const settings = snapshots.filter(({ factType }) => factType !== "chapter_summary");
     expect(settings.filter((snapshot) => snapshot.contentText === "林澈出现在钟楼")).toHaveLength(
+      1,
+    );
+    const retained = settings.find((snapshot) => snapshot.contentText === "林澈出现在钟楼");
+    if (retained === undefined || runtime.story.facts.listEvidenceByFactId === undefined) {
+      throw new Error("跨版本事实没有可审计的多证据读取能力。");
+    }
+    expect(expectStoryOk(await runtime.story.facts.listEvidenceByFactId(retained.id))).toHaveLength(
       2,
     );
     expect(
@@ -1069,6 +1076,16 @@ describe("direct local story-fact organization", () => {
       expect.objectContaining({
         startOffset: content.indexOf(lastSentence),
         endOffset: content.length,
+      }),
+    ]);
+    if (runtime.story.facts.listEvidenceByFactId === undefined) {
+      throw new Error("本地摘要没有可审计的证据读取能力。");
+    }
+    expect(expectStoryOk(await runtime.story.facts.listEvidenceByFactId(firstSummary.id))).toEqual([
+      expect.objectContaining({
+        factId: firstSummary.id,
+        versionId: firstVersion.id,
+        excerpt: firstSentence,
       }),
     ]);
 
@@ -1155,6 +1172,19 @@ describe("direct local story-fact organization", () => {
       contentText: "夜色覆盖旧城。 林澈终于看见晨光。",
       source: { versionId: currentVersion.id, sourceLength: updatedContent.length },
     });
+    const currentSummary = summaries.find((fact) => fact.toSnapshot().status === "temporary");
+    if (currentSummary === undefined || reopened.story.facts.listEvidenceByFactId === undefined) {
+      throw new Error("替换后的本地摘要没有可审计的证据读取能力。");
+    }
+    expect(
+      expectStoryOk(await reopened.story.facts.listEvidenceByFactId(currentSummary.id)),
+    ).toEqual([
+      expect.objectContaining({
+        factId: currentSummary.id,
+        versionId: currentVersion.id,
+        excerpt: `${updatedContent.split("。")[0] ?? ""}。`,
+      }),
+    ]);
     expect(generate).not.toHaveBeenCalled();
     expect(reopenedGenerate).not.toHaveBeenCalled();
   });

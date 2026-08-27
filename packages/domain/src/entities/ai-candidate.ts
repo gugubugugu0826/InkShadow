@@ -47,6 +47,8 @@ export type AiCandidateApplicationIntent =
       payload: "fragment";
       startUtf16: number;
       endUtf16: number;
+      /** Optional only for Candidates saved before exact selection-action identity. */
+      selectionAction?: "selection_rewrite" | "polish" | "expand" | "shorten";
     }>;
 
 const LEGACY_FULL_DOCUMENT_INTENT: AiCandidateApplicationIntent = Object.freeze({
@@ -188,6 +190,7 @@ function validateApplicationIntent(
     payload: unknown;
     startUtf16: unknown;
     endUtf16: unknown;
+    selectionAction?: unknown;
   }>;
   const invalid = (): Result<AiCandidateApplicationIntent, AppError> =>
     err(
@@ -238,7 +241,12 @@ function validateApplicationIntent(
     raw.payload === "fragment" &&
     validUtf16Offset(raw.startUtf16) &&
     validUtf16Offset(raw.endUtf16) &&
-    raw.endUtf16 > raw.startUtf16
+    raw.endUtf16 > raw.startUtf16 &&
+    (raw.selectionAction === undefined ||
+      raw.selectionAction === "selection_rewrite" ||
+      raw.selectionAction === "polish" ||
+      raw.selectionAction === "expand" ||
+      raw.selectionAction === "shorten")
   ) {
     return ok(
       Object.freeze({
@@ -247,6 +255,7 @@ function validateApplicationIntent(
         payload: "fragment",
         startUtf16: raw.startUtf16,
         endUtf16: raw.endUtf16,
+        ...(raw.selectionAction === undefined ? {} : { selectionAction: raw.selectionAction }),
       }),
     );
   }

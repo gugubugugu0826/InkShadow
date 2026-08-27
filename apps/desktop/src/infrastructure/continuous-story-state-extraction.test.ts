@@ -155,6 +155,16 @@ describe("ContinuousStoryStateExtractionService", () => {
       },
     });
     expect(snapshot.source.reference).toContain(`:${ids.version1}:sha256:`);
+    expect(await harness.store.listEvidenceByFactId(firstFact.id)).toEqual({
+      ok: true,
+      value: [
+        expect.objectContaining({
+          factId: firstFact.id,
+          versionId: ids.version1,
+          excerpt: harness.content,
+        }),
+      ],
+    });
     expect(snapshot.structuredValue).toMatchObject({
       schemaVersion: "inkshadow.continuous-story-state.v2",
       payload: {

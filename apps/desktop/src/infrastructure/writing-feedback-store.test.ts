@@ -367,6 +367,54 @@ describe("writing feedback learning", () => {
     expect(await store.listPreferences(PROJECT_ID)).toHaveLength(0);
   });
 
+  it("converges recoverable setup preferences without overwriting later author decisions", async () => {
+    const first = await service.ensureManualPreference(
+      PROJECT_ID,
+      "professional_setup.pov",
+      "叙事视角：第三人称限知",
+    );
+    const repeated = await service.ensureManualPreference(
+      PROJECT_ID,
+      "professional_setup.pov",
+      "叙事视角：第三人称限知",
+    );
+    expect(repeated).toEqual(first);
+    expect(await store.listPreferences(PROJECT_ID)).toHaveLength(1);
+
+    const edited = await service.editPreference(first, "叙事视角：第一人称");
+    const afterEdit = await service.ensureManualPreference(
+      PROJECT_ID,
+      "professional_setup.pov",
+      "叙事视角：第三人称限知",
+    );
+    expect(afterEdit).toEqual(edited);
+
+    const disabled = await service.setPreferenceEnabled(edited, false);
+    const afterDisable = await service.ensureManualPreference(
+      PROJECT_ID,
+      "professional_setup.pov",
+      "叙事视角：第三人称限知",
+    );
+    expect(afterDisable).toEqual(disabled);
+
+    const deleted = await service.deletePreference(disabled);
+    const afterDelete = await service.ensureManualPreference(
+      PROJECT_ID,
+      "professional_setup.pov",
+      "叙事视角：第三人称限知",
+    );
+    expect(afterDelete).toEqual(deleted);
+    expect(afterDelete).toMatchObject({
+      id: first.id,
+      preferenceText: "叙事视角：第一人称",
+      revision: 4,
+      enabled: false,
+      deletedAt: expect.any(String) as string,
+    });
+    expect(await store.listPreferences(PROJECT_ID)).toHaveLength(0);
+    expect(await store.listPreferences(PROJECT_ID, true)).toHaveLength(1);
+  });
+
   it("uses compare-and-swap when toggling policy", async () => {
     const initial = await store.getPolicy(PROJECT_ID);
     await service.setLearningEnabled(initial, false);

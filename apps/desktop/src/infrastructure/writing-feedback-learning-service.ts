@@ -135,6 +135,46 @@ export class WritingFeedbackLearningService {
     });
   }
 
+  /**
+   * Creates one visible manual preference for a recoverable setup step. The
+   * stable identity makes retries and application restarts converge on the
+   * same row instead of duplicating the author's preference.
+   */
+  public async ensureManualPreference(
+    projectId: string,
+    idempotencyIdentity: string,
+    preferenceText: string,
+  ): Promise<WritingPreference> {
+    const normalizedText = preferenceText.trim();
+    const preferenceId = await stableManualPreferenceId(projectId, idempotencyIdentity);
+    const existing = (await this.store.listPreferences(projectId, true)).find(
+      ({ id }) => id === preferenceId,
+    );
+    if (existing !== undefined) {
+      // The setup step has already succeeded. A later edit, disable or delete
+      // is an author decision and recovery must never overwrite it.
+      return existing;
+    }
+
+    try {
+      return await this.store.createPreference({
+        id: preferenceId,
+        projectId,
+        preferenceText: normalizedText,
+        source: "manual",
+        now: this.clock.now(),
+      });
+    } catch (cause: unknown) {
+      // Two copies of the same recovery step may race. Re-read the stable row
+      // and accept it only when it represents the exact same author input.
+      const raced = (await this.store.listPreferences(projectId, true)).find(
+        ({ id }) => id === preferenceId,
+      );
+      if (raced !== undefined) return raced;
+      throw cause;
+    }
+  }
+
   public async editPreference(
     preference: WritingPreference,
     preferenceText: string,
@@ -209,20 +249,40 @@ async function explicitFeedbackIdempotencyHash(
   projectId: string,
   identity: string,
 ): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(
-      `inkshadow/writing-feedback-explicit/v1\u0000${projectId}\u0000${identity}`,
-    ),
-  );
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(`inkshadow/writing-feedback-explicit/v1\u0000${projectId}\u0000${identity}`);
 }
 
 async function customFeedbackHash(value: string): Promise<string> {
-  const clusterIdentity = value.toLocaleLowerCase("zh-CN");
-  const digest = await globalThis.crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(clusterIdentity),
+  return sha256Hex(value.toLocaleLowerCase("zh-CN"));
+}
+
+async function stableManualPreferenceId(projectId: string, identity: string): Promise<string> {
+  const normalizedProjectId = projectId.trim().toLowerCase();
+  const normalizedIdentity = identity.normalize("NFKC").trim();
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      normalizedProjectId,
+    ) ||
+    normalizedIdentity.length < 1 ||
+    normalizedIdentity.length > 200 ||
+    normalizedIdentity.includes("\0")
+  ) {
+    throw new WritingFeedbackStoreError("WRITING_FEEDBACK_INVALID", "可恢复写作偏好的身份无效。");
+  }
+  const hash = await sha256Hex(
+    `inkshadow/manual-writing-preference/v1\u0000${normalizedProjectId}\u0000${normalizedIdentity}`,
   );
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const projectHex = normalizedProjectId.replaceAll("-", "");
+  return [
+    projectHex.slice(0, 8),
+    projectHex.slice(8, 12),
+    `7${hash.slice(0, 3)}`,
+    `a${hash.slice(3, 6)}`,
+    hash.slice(6, 18),
+  ].join("-");
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

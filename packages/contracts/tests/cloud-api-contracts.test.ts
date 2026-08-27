@@ -39,6 +39,19 @@ const LATER = "2026-07-27T01:00:00.000Z";
 const RETAIN_UNTIL = "2027-07-27T00:00:00.000Z";
 
 describe("cloud API contract", () => {
+  it("materializes the compact operation table byte-for-byte without changing the public contract", async () => {
+    const serialized = JSON.stringify(CLOUD_API_OPERATIONS);
+    const serializedBytes = new TextEncoder().encode(serialized);
+    const digest = await crypto.subtle.digest("SHA-256", serializedBytes);
+    const fingerprint = Array.from(new Uint8Array(digest), (value) =>
+      value.toString(16).padStart(2, "0"),
+    ).join("");
+
+    expect(serializedBytes.byteLength).toBe(35_987);
+    expect(fingerprint).toBe("38afca50acf2864cf3bd0f146c63d5ec5fb295595071492adc7dc30cec424610");
+    expect(CLOUD_API_OPERATIONS.every((operation) => Object.isFrozen(operation))).toBe(true);
+  });
+
   it("keeps document generation behind the explicit OpenAPI subpath", async () => {
     const runtimeContracts = await import("../src/index.js");
 

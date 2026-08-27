@@ -353,6 +353,9 @@ function SettingsSectionNavigation({
             data-active={active}
             aria-current={active ? "location" : undefined}
             to={`/settings#${id}`}
+            onClick={() => {
+              if (active) focusSettingsSection(id);
+            }}
           >
             {linkLabel}
           </Link>
@@ -1131,20 +1134,7 @@ export function SettingsPage() {
         }
         return;
       }
-      const reduceMotion =
-        typeof window.matchMedia === "function" &&
-        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      if (typeof target.scrollIntoView === "function") {
-        target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
-      }
-      const focusTarget =
-        target.querySelector<HTMLElement>(
-          "[data-settings-anchor-focus], h1, h2, h3, h4, h5, h6, button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])",
-        ) ?? target;
-      if (!focusTarget.hasAttribute("tabindex")) {
-        focusTarget.setAttribute("tabindex", "-1");
-      }
-      focusTarget.focus({ preventScroll: true });
+      focusSettingsSection(resolvedTargetId);
     };
     timeout = window.setTimeout(focusRequestedSection, 0);
     return () => {
@@ -7380,6 +7370,26 @@ export function SettingsPage() {
   );
 }
 
+function focusSettingsSection(targetId: string): boolean {
+  const target = document.getElementById(targetId);
+  if (target === null) return false;
+  const reduceMotion =
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (typeof target.scrollIntoView === "function") {
+    target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+  }
+  const focusTarget =
+    target.querySelector<HTMLElement>(
+      "[data-settings-anchor-focus], h1, h2, h3, h4, h5, h6, button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])",
+    ) ?? target;
+  if (!focusTarget.hasAttribute("tabindex")) {
+    focusTarget.setAttribute("tabindex", "-1");
+  }
+  focusTarget.focus({ preventScroll: true });
+  return true;
+}
+
 function projectDirectSettingsPage(writingExperience: ReturnType<typeof useWritingExperience>) {
   if (writingExperience.preference === null) {
     return (
@@ -8589,7 +8599,7 @@ function novelAiTaskLabel(task: NovelAiTask): string {
     character_extraction: "人物提取",
     world_extraction: "世界设定提取",
     contradiction_check: "矛盾检查",
-    pov_check: "POV 检查",
+    pov_check: "叙事视角检查",
     character_voice_check: "人物声纹检查",
     content_quality_check: "内容质量复核",
     what_if_simulation: "剧情试演",

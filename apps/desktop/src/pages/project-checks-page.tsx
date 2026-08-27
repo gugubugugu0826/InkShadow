@@ -121,7 +121,7 @@ const coverageCategoryLabels: Readonly<Record<ChapterValidationCoverageCategory,
   item_ownership: "物品归属",
   ability_state: "人物能力",
   world_property: "世界设定与硬规则",
-  character_knowledge: "人物知情范围与 POV",
+  character_knowledge: "人物知情范围与叙事视角",
 };
 
 interface SupplementalFindingActionProps {

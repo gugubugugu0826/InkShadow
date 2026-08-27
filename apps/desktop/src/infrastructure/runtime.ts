@@ -151,7 +151,7 @@ import {
   type WhatIfPromotionUnitOfWork,
   type WhatIfRepository,
 } from "@inkshadow/story-core";
-import { TaskEngineError } from "@inkshadow/task-engine";
+import { TaskEngineError, type TaskSnapshot } from "@inkshadow/task-engine";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -2232,7 +2232,7 @@ async function readTauriRuntimeInformation(): Promise<RuntimeInformation> {
 
 function readBrowserRuntimeInformation(): Promise<RuntimeInformation> {
   return Promise.resolve({
-    appVersion: "0.2.13",
+    appVersion: "0.2.14",
     platform: "browser",
     architecture: "web",
     environment: "development",
@@ -3950,6 +3950,18 @@ export async function executeGenerationPlan(
     }
   }
 
+  let providerResultReceived = false;
+  let persistedCandidateId: string | null = null;
+  let attemptPrivacySnapshot = generationAttemptPrivacySnapshot(plan);
+  let attemptUsage: GenerationAttemptUsageInput = {
+    source: "provider_unavailable",
+    inputTokens: null,
+    outputTokens: null,
+    cachedInputTokens: null,
+    usagePricedEstimateMicros: null,
+    ...attemptPrivacySnapshot,
+  };
+
   try {
     const enqueued = await runtime.taskCenter.enqueueTask({
       id: plan.taskId,
@@ -4107,15 +4119,6 @@ export async function executeGenerationPlan(
     let accumulated = "";
     let candidate!: AiCandidate;
     const activeExecutionPlan = plan;
-    let attemptPrivacySnapshot = generationAttemptPrivacySnapshot(plan);
-    let attemptUsage: GenerationAttemptUsageInput = {
-      source: "provider_unavailable",
-      inputTokens: null,
-      outputTokens: null,
-      cachedInputTokens: null,
-      usagePricedEstimateMicros: null,
-      ...attemptPrivacySnapshot,
-    };
     try {
       if (runtime.mode === "browser-development") {
         await assertGenerationProjectActive(runtime, plan.projectId);
@@ -4272,6 +4275,7 @@ export async function executeGenerationPlan(
           );
         };
         const generated = await executeProviderAttempt(activeExecutionPlan, false);
+        providerResultReceived = true;
         let currentChapter: Chapter;
         try {
           currentChapter = await assertPreparedGenerationTargetCurrent(
@@ -4313,12 +4317,17 @@ export async function executeGenerationPlan(
         candidate = built.value;
       }
       await commitPreparedContextOutputCandidate(runtime, activeExecutionPlan, candidate);
+      persistedCandidateId = candidate.id;
     } catch (cause: unknown) {
       attemptUsage = Object.freeze({ ...attemptUsage, ...attemptPrivacySnapshot });
       const normalized = normalizeGovernedGenerationError(cause);
       recordSafeGenerationErrorCode(runtime, normalized.code);
       let recoveredTruncation = false;
-      if (normalized.code === "MODEL_OUTPUT_TRUNCATED") {
+      let recoveredFailureCandidate: AiCandidate | null = null;
+      if (
+        normalized.code !== "MODEL_GENERATION_CANCELLED" &&
+        normalized.code !== "CONTEXT_TRACE_UNAVAILABLE"
+      ) {
         const visible = recoverVisiblePartialOutput(accumulated);
         if (visible.preserved) {
           const built = await buildGeneratedCandidate(
@@ -4331,13 +4340,19 @@ export async function executeGenerationPlan(
           );
           if (built.ok) {
             await commitPreparedContextOutputCandidate(runtime, activeExecutionPlan, built.value);
-            candidate = built.value;
-            recoveredTruncation = true;
+            persistedCandidateId = built.value.id;
+            if (normalized.code === "MODEL_OUTPUT_TRUNCATED") {
+              candidate = built.value;
+              recoveredTruncation = true;
+            } else {
+              recoveredFailureCandidate = built.value;
+            }
           }
         }
       }
       if (normalized.code === "MODEL_GENERATION_CANCELLED") {
         let partialCandidate: AiCandidate | null = null;
+        let partialPersistenceFailure: GovernedGenerationError | null = null;
         const visible = recoverVisiblePartialOutput(accumulated);
         if (visible.preserved) {
           const built = await buildGeneratedCandidate(
@@ -4352,8 +4367,35 @@ export async function executeGenerationPlan(
             try {
               await commitPreparedContextOutputCandidate(runtime, activeExecutionPlan, built.value);
               partialCandidate = built.value;
-            } catch {}
+              persistedCandidateId = built.value.id;
+            } catch (partialCause: unknown) {
+              partialPersistenceFailure = normalizeGovernedGenerationError(partialCause);
+              recordSafeGenerationErrorCode(runtime, partialPersistenceFailure.code);
+            }
           }
+        }
+        if (partialPersistenceFailure !== null) {
+          run = await runtime.generationGovernance.transitionRun({
+            runId: run.id,
+            expectedRevision: run.revision,
+            state: "cancelled",
+            candidateId: null,
+            failureCode: safeFailureCode(partialPersistenceFailure.code),
+            addIncurredCost: true,
+            attemptUsage,
+          });
+          await runtime.taskCenter.cancelTask(plan.taskId).catch(() => undefined);
+          await runtime.taskCenter
+            .acknowledgeTaskCancellation(plan.taskId, plan.leaseToken)
+            .catch(() => undefined);
+          await publishGenerationNotification(
+            runtime,
+            plan,
+            "cancelled",
+            run.attempt,
+            safeFailureCode(partialPersistenceFailure.code),
+          );
+          return err(partialPersistenceFailure);
         }
         run = await runtime.generationGovernance.transitionRun({
           runId: run.id,
@@ -4388,6 +4430,7 @@ export async function executeGenerationPlan(
           runId: run.id,
           expectedRevision: run.revision,
           state: "failed_final",
+          candidateId: recoveredFailureCandidate?.id ?? null,
           failureCode: safeFailureCode(normalized.code),
           addIncurredCost: true,
           attemptUsage,
@@ -4486,12 +4529,7 @@ export async function executeGenerationPlan(
       }
       throw cause;
     }
-    run = await runtime.generationGovernance.transitionRun({
-      runId: run.id,
-      expectedRevision: run.revision,
-      state: "completed",
-      candidateId: candidate.id,
-    });
+    run = await transitionCompletedGenerationRunWithConflictRecovery(runtime, run, candidate.id);
     await publishGenerationNotification(
       runtime,
       plan,
@@ -4510,10 +4548,194 @@ export async function executeGenerationPlan(
   } catch (cause: unknown) {
     const normalized = normalizeGovernedGenerationError(cause);
     recordSafeGenerationErrorCode(runtime, normalized.code);
+    try {
+      await settleUnexpectedGenerationExecutionFailure(runtime, plan, normalized, {
+        providerResultReceived,
+        persistedCandidateId,
+        attemptUsage,
+      });
+    } catch (settlementCause: unknown) {
+      recordSafeGenerationErrorCode(
+        runtime,
+        normalizeGovernedGenerationError(settlementCause).code,
+      );
+    }
     return err(normalized);
   } finally {
     clearGenerationTaskCancellation(runtime, plan.taskId);
   }
+}
+
+interface UnexpectedGenerationSettlementContext {
+  readonly providerResultReceived: boolean;
+  readonly persistedCandidateId: string | null;
+  readonly attemptUsage: GenerationAttemptUsageInput;
+}
+
+async function transitionCompletedGenerationRunWithConflictRecovery(
+  runtime: DesktopRuntime,
+  current: GenerationRun,
+  candidateId: string,
+): Promise<GenerationRun> {
+  return convergeGenerationRun(
+    runtime,
+    current,
+    (run) =>
+      runtime.generationGovernance.transitionRun({
+        runId: run.id,
+        expectedRevision: run.revision,
+        state: "completed",
+        candidateId,
+      }),
+    (run) => run.state === "completed" && run.candidateId === candidateId,
+    (run) => run.state === "candidate_ready" && run.candidateId === candidateId,
+  );
+}
+
+async function settleUnexpectedGenerationExecutionFailure(
+  runtime: DesktopRuntime,
+  plan: PreparedGenerationPlan,
+  failure: GovernedGenerationError,
+  context: UnexpectedGenerationSettlementContext,
+): Promise<void> {
+  const [task, initialRun] = await Promise.all([
+    runtime.taskCenter.findTaskByIdempotencyKey(plan.idempotencyKey),
+    runtime.generationGovernance.findRunById(plan.runId),
+  ]);
+  if (task?.id !== plan.taskId) return;
+  if (initialRun !== null && !sameGenerationRunIdentity(initialRun, plan)) return;
+
+  if (task.status === "succeeded") {
+    if (
+      initialRun !== null &&
+      initialRun.state === "candidate_ready" &&
+      initialRun.candidateId !== null
+    ) {
+      await transitionCompletedGenerationRunWithConflictRecovery(
+        runtime,
+        initialRun,
+        initialRun.candidateId,
+      );
+    }
+    return;
+  }
+
+  const failureCode = safeFailureCode(failure.code);
+  const settledTask = await settleUnexpectedGenerationTask(runtime, plan, task, failureCode);
+  const terminalState = settledTask.status === "cancelled" ? "cancelled" : "failed_final";
+  if (settledTask.status !== "cancelled" && settledTask.status !== "failed") return;
+  if (initialRun === null) return;
+
+  const settledRun = await transitionGenerationRunToUnexpectedTerminal(
+    runtime,
+    initialRun,
+    terminalState,
+    failureCode,
+    context,
+  );
+  const outcome = settledRun.state === "cancelled" ? "cancelled" : "failed";
+  if (settledRun.state !== "completed")
+    await publishGenerationNotification(runtime, plan, outcome, settledRun.attempt, failureCode);
+}
+
+async function settleUnexpectedGenerationTask(
+  runtime: DesktopRuntime,
+  plan: PreparedGenerationPlan,
+  task: TaskSnapshot,
+  failureCode: string,
+): Promise<TaskSnapshot> {
+  if (task.status === "queued" || task.status === "waiting_retry" || task.status === "paused") {
+    return runtime.taskCenter.cancelTask(plan.taskId);
+  }
+  if (task.status !== "running") return task;
+  if (task.lease?.token !== plan.leaseToken) return task;
+  if (task.cancelRequestedAt !== null) {
+    return runtime.taskCenter.acknowledgeTaskCancellation(plan.taskId, plan.leaseToken);
+  }
+  return runtime.taskCenter.failTask(
+    plan.taskId,
+    plan.leaseToken,
+    {
+      code: failureCode,
+      retryable: false,
+      actions: ["SWITCH_MODEL", "REDUCE_CONTEXT", "EXPORT_DIAGNOSTICS"],
+      requestId: plan.requestId,
+    },
+    null,
+  );
+}
+
+async function transitionGenerationRunToUnexpectedTerminal(
+  runtime: DesktopRuntime,
+  initial: GenerationRun,
+  terminalState: "failed_final" | "cancelled",
+  failureCode: string,
+  context: UnexpectedGenerationSettlementContext,
+): Promise<GenerationRun> {
+  if (isTerminalGenerationRun(initial)) return initial;
+  return convergeGenerationRun(
+    runtime,
+    initial,
+    (current) =>
+      runtime.generationGovernance.transitionRun({
+        runId: current.id,
+        expectedRevision: current.revision,
+        state: terminalState,
+        candidateId: context.persistedCandidateId ?? current.candidateId,
+        failureCode,
+        ...(context.providerResultReceived && current.state !== "candidate_ready"
+          ? { addIncurredCost: true, attemptUsage: context.attemptUsage }
+          : {}),
+      }),
+    isTerminalGenerationRun,
+    (run) => !isTerminalGenerationRun(run),
+  );
+}
+
+async function convergeGenerationRun(
+  runtime: DesktopRuntime,
+  initial: GenerationRun,
+  transition: (run: GenerationRun) => Promise<GenerationRun>,
+  settled: (run: GenerationRun) => boolean,
+  retryable: (run: GenerationRun) => boolean,
+): Promise<GenerationRun> {
+  let current = initial;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await transition(current);
+    } catch (cause: unknown) {
+      let latest: GenerationRun | null;
+      try {
+        latest = await runtime.generationGovernance.findRunById(initial.id);
+      } catch {
+        throw cause;
+      }
+      if (latest === null || !sameGenerationRunIdentity(initial, latest)) throw cause;
+      if (settled(latest)) return latest;
+      if (attempt === 1 || !retryable(latest)) throw cause;
+      current = latest;
+    }
+  }
+}
+
+function isTerminalGenerationRun(run: GenerationRun): boolean {
+  return run.state === "completed" || run.state === "cancelled" || run.state === "failed_final";
+}
+
+function sameGenerationRunIdentity(
+  left: GenerationRun,
+  right: GenerationRun | PreparedGenerationPlan,
+): boolean {
+  return (
+    left.id === ("runId" in right ? right.runId : right.id) &&
+    left.taskId === right.taskId &&
+    left.idempotencyKey === right.idempotencyKey &&
+    left.projectId === right.projectId &&
+    left.chapterId === right.chapterId &&
+    left.baseVersionId === right.baseVersionId &&
+    left.providerId === right.providerId &&
+    left.modelId === right.modelId
+  );
 }
 
 export async function cancelGenerationPlan(
@@ -4587,20 +4809,28 @@ async function persistPreparedContextTrace(
       true,
     );
   }
-  await runtime.contextTraces.save(
-    createContextCompilationTrace({
-      id: plan.contextTraceId,
-      projectId: plan.projectId,
-      chapterId: plan.chapterId,
-      taskType: plan.modelTask,
-      compiled: plan.contextCompilation.compiled,
-      createdAt: runtime.clock.now(),
-      execution: {
-        generationId: plan.generationId,
-        generationRunId: plan.runId,
-      },
-    }),
-  );
+  try {
+    await runtime.contextTraces.save(
+      createContextCompilationTrace({
+        id: plan.contextTraceId,
+        projectId: plan.projectId,
+        chapterId: plan.chapterId,
+        taskType: plan.modelTask,
+        compiled: plan.contextCompilation.compiled,
+        createdAt: runtime.clock.now(),
+        execution: {
+          generationId: plan.generationId,
+          generationRunId: plan.runId,
+        },
+      }),
+    );
+  } catch {
+    throw new ModelCenterError(
+      "CONTEXT_TRACE_UNAVAILABLE",
+      "无法保存本次挑选的故事资料记录，因此没有调用模型。正文和已有 AI 建议版本均未改变。",
+      true,
+    );
+  }
 }
 
 async function linkPreparedContextModelInvocation(

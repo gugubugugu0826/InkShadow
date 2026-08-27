@@ -198,6 +198,7 @@ const RESTORABLE_TABLES = [
   "story_timeline_state",
   "story_review_items",
   "story_facts",
+  "story_fact_evidence",
   "story_fact_revisions",
   "story_fact_legacy_links",
   "authoritative_story_graph_state",
@@ -289,6 +290,7 @@ const RESTORABLE_TABLES = [
 const LEGACY_OPTIONAL_RESTORABLE_TABLES = new Set<string>([
   "project_display_identities",
   "project_display_identity_revisions",
+  "story_fact_evidence",
 ]);
 
 // Search snapshots are derived projections, not backup authority. Clearing
@@ -367,6 +369,7 @@ const RESTORE_DELETE_ORDER = [
   "fine_tuning_datasets",
   "story_fact_legacy_links",
   "story_fact_revisions",
+  "story_fact_evidence",
   "story_facts",
   "authoritative_extraction_decision_claims",
   "authoritative_extraction_candidates",
@@ -479,6 +482,7 @@ const RESTORE_DELETE_ORDER = [
 ] as const;
 
 const AUTHORIZED_RESTORE_GUARDS = [
+  "ai_candidate_selection_action_insert_guard",
   "ai_generation_attempt_usage_privacy_insert_guard",
   "novel_skill_evaluation_review_receipt_delete_guard",
   "novel_skill_evaluation_review_item_delete_guard",
@@ -646,6 +650,7 @@ const RESTORE_INSERT_ORDER = [
   "story_memory_records",
   "story_memory_governance_events",
   "story_facts",
+  "story_fact_evidence",
   "story_fact_revisions",
   "story_fact_legacy_links",
   "story_what_if_branches",
@@ -1219,6 +1224,13 @@ export class DatabaseMaintenanceService {
           await transaction.execute(`DELETE FROM main.${table}`);
         }
         for (const table of RESTORE_INSERT_ORDER) {
+          if (
+            table !== "story_fact_evidence" &&
+            !sourceTables.has(table) &&
+            LEGACY_OPTIONAL_RESTORABLE_TABLES.has(table)
+          ) {
+            continue;
+          }
           if (table === "authoritative_story_graph_state") {
             // The authority epoch belongs to the restored source history, but
             // the published graph receipt does not: GraphRAG tables are
@@ -1272,6 +1284,29 @@ export class DatabaseMaintenanceService {
                       display_kind, provenance, recorded_at
                FROM restore_source.project_display_identity_revisions`,
             );
+          } else if (table === "story_fact_evidence") {
+            if (sourceTables.has(table)) {
+              await transaction.execute(
+                `INSERT INTO main.story_fact_evidence
+                 SELECT * FROM restore_source.story_fact_evidence`,
+              );
+            } else {
+              // Backups created before 0079 retain their authoritative citation
+              // on story_facts. Rebuild that primary evidence in the same restore
+              // transaction so the receipt never claims a skipped evidence table.
+              await transaction.execute(
+                `INSERT OR IGNORE INTO main.story_fact_evidence (
+                   fact_id, project_id, evidence_reference, source_chapter_id,
+                   source_version_id, source_start_offset, source_end_offset,
+                   source_length, source_excerpt, recorded_at
+                 )
+                 SELECT id, project_id, evidence_reference, source_chapter_id,
+                        source_version_id, source_start_offset, source_end_offset,
+                        source_length, source_excerpt, created_at
+                 FROM main.story_facts
+                 WHERE source_kind = 'chapter_span'`,
+              );
+            }
           } else if (table === "fine_tuning_jobs") {
             // A completed source job points at its artifact, while the artifact
             // insertion authority requires that job to be running. Restore a
@@ -1360,17 +1395,19 @@ export class DatabaseMaintenanceService {
                  id, project_id, chapter_id, source, base_version_id,
                  content, content_checksum, status, incomplete,
                  created_at, updated_at, decided_at,
-                 task_intent, application_mode, payload_kind,
-                 anchor_start_utf16, anchor_end_utf16, revision, purpose
+                  task_intent, application_mode, payload_kind,
+                  anchor_start_utf16, anchor_end_utf16, revision, purpose,
+                  selection_action
                )
                SELECT
                  id, project_id, chapter_id, source, base_version_id,
                  content, content_checksum, status, incomplete,
                  created_at, updated_at, decided_at,
                  task_intent, application_mode, payload_kind,
-                 anchor_start_utf16, anchor_end_utf16, revision,
-                 ${sourceCandidateColumns.has("purpose") ? "purpose" : "'prose'"}
-               FROM restore_source.ai_candidates`,
+                  anchor_start_utf16, anchor_end_utf16, revision,
+                  ${sourceCandidateColumns.has("purpose") ? "purpose" : "'prose'"},
+                  ${sourceCandidateColumns.has("selection_action") ? "selection_action" : "NULL"}
+                FROM restore_source.ai_candidates`,
             );
           } else if (table === "ai_generation_attempt_usage") {
             // Privacy snapshots were added after the released backup contract.
@@ -1436,6 +1473,8 @@ export class DatabaseMaintenanceService {
             await transaction.execute(FINE_TUNING_JOB_FINALIZE);
           }
         }
+        await auditRestoredCandidateSelectionActions(transaction);
+        await auditRestoredStoryFactEvidence(transaction);
         await auditRestoredNovelSkillEvaluationLedger(transaction);
         for (const { sql } of evaluationDeleteGuards) {
           if (sql === null) {
@@ -1498,6 +1537,93 @@ interface RestoredEvaluationRunAuditRow {
   readonly observation_count: number;
   readonly score_count: number;
   readonly started_attempt_count: number;
+}
+
+interface RestoredStoryFactEvidenceAuditRow {
+  readonly fact_id: string;
+  readonly project_id: string;
+  readonly source_chapter_id: string;
+  readonly source_version_id: string;
+  readonly source_start_offset: number;
+  readonly source_end_offset: number;
+  readonly source_length: number;
+  readonly source_excerpt: string;
+  readonly fact_project_id: string | null;
+  readonly version_project_id: string | null;
+  readonly version_chapter_id: string | null;
+  readonly version_content: string | null;
+}
+
+interface RestoredCandidateSelectionActionAuditRow {
+  readonly task_intent: string;
+  readonly selection_action: string | null;
+}
+
+async function auditRestoredCandidateSelectionActions(
+  transaction: TransactionExecutor,
+): Promise<void> {
+  const rows = await transaction.select<RestoredCandidateSelectionActionAuditRow>(
+    "SELECT task_intent, selection_action FROM main.ai_candidates",
+  );
+  const allowedActions = new Set(["selection_rewrite", "polish", "expand", "shorten"]);
+  for (const row of rows) {
+    if (row.task_intent === "selection_rewrite") {
+      // NULL remains the explicit compatibility marker for a Candidate that
+      // predates 0080. The live insert trigger requires every newly created
+      // selection Candidate to store one of the four actions.
+      if (row.selection_action !== null && !allowedActions.has(row.selection_action)) {
+        throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
+      }
+    } else if (row.selection_action !== null) {
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
+    }
+  }
+}
+
+async function auditRestoredStoryFactEvidence(transaction: TransactionExecutor): Promise<void> {
+  const countRows = await transaction.select<{ readonly count: number }>(
+    "SELECT COUNT(*) AS count FROM main.story_fact_evidence",
+  );
+  const rows = await transaction.select<RestoredStoryFactEvidenceAuditRow>(
+    `SELECT evidence.fact_id, evidence.project_id,
+            evidence.source_chapter_id, evidence.source_version_id,
+            evidence.source_start_offset, evidence.source_end_offset,
+            evidence.source_length, evidence.source_excerpt,
+            fact.project_id AS fact_project_id,
+            version.project_id AS version_project_id,
+            version.chapter_id AS version_chapter_id,
+            version.content AS version_content
+     FROM main.story_fact_evidence AS evidence
+     LEFT JOIN main.story_facts AS fact ON fact.id = evidence.fact_id
+     LEFT JOIN main.chapter_versions AS version ON version.id = evidence.source_version_id
+     ORDER BY evidence.fact_id, evidence.evidence_reference`,
+  );
+  if (countRows.length !== 1 || countRows[0]?.count !== rows.length) {
+    throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
+  }
+  for (const row of rows) {
+    const sourceContent = row.version_content;
+    if (
+      row.fact_project_id !== row.project_id ||
+      row.version_project_id !== row.project_id ||
+      row.version_chapter_id !== row.source_chapter_id ||
+      sourceContent === null ||
+      !Number.isSafeInteger(row.source_start_offset) ||
+      !Number.isSafeInteger(row.source_end_offset) ||
+      !Number.isSafeInteger(row.source_length) ||
+      row.source_start_offset < 0 ||
+      row.source_end_offset <= row.source_start_offset ||
+      row.source_length < 1 ||
+      row.source_length > 5_000_000 ||
+      row.source_end_offset > row.source_length ||
+      sourceContent.length !== row.source_length ||
+      row.source_excerpt.length < 1 ||
+      row.source_excerpt.length > 2_000 ||
+      sourceContent.slice(row.source_start_offset, row.source_end_offset) !== row.source_excerpt
+    ) {
+      throw restoreError(BACKUP_INCOMPATIBLE_OPERATION);
+    }
+  }
 }
 
 interface RestoredEvaluationCellAuditRow {

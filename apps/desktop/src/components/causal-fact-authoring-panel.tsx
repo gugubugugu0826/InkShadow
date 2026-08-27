@@ -879,7 +879,7 @@ export function CausalFactAuthoringPanel(props: CausalFactAuthoringPanelProps) {
                 </div>
                 {knowledgeGains.length === 0 ? (
                   <p role="status">
-                    还没有记录明确知识获得。可以直接保存事件；这时事件不会授权任何 POV 知识取得。
+                    还没有记录明确知识获得。可以直接保存事件；这时事件不会授权任何视角人物取得知识。
                   </p>
                 ) : (
                   knowledgeGains.map((draft, index) => {

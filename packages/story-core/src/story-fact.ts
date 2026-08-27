@@ -237,6 +237,9 @@ export interface StoryFactStore {
     projectId: UuidV7,
     filter?: StoryFactListFilter,
   ): Promise<Result<readonly StoryFact[], StoryCoreError>>;
+  listEvidenceByFactId?(
+    factId: UuidV7,
+  ): Promise<Result<readonly StoryFactEvidenceSnapshot[], StoryCoreError>>;
   save(fact: StoryFact, expectedRevision: number): Promise<Result<void, StoryCoreError>>;
   /**
    * Commits both sides of an explicit duplicate merge in one persistence
@@ -916,6 +919,26 @@ export interface DirectLocalPendingEvidenceIdentity {
   readonly key: string;
 }
 
+export interface DirectLocalFactSemanticIdentity {
+  readonly projectId: string;
+  readonly factType: string;
+  readonly scope: "project" | "chapter";
+  readonly key: string;
+}
+
+export interface StoryFactEvidenceSnapshot {
+  readonly factId: string;
+  readonly projectId: string;
+  readonly reference: string;
+  readonly chapterId: string;
+  readonly versionId: string;
+  readonly startOffset: number;
+  readonly endOffset: number;
+  readonly sourceLength: number;
+  readonly excerpt: string;
+  readonly recordedAt: string;
+}
+
 type DirectLocalReviewDraftSnapshot = StoryFactSnapshot &
   Readonly<{
     contentText: string;
@@ -998,6 +1021,71 @@ export function matchesDirectLocalPendingEvidence(
 ): boolean {
   const candidate = directLocalPendingEvidenceIdentity(snapshot);
   return candidate?.key === identity.key;
+}
+
+/** Conservative semantic identity: ambiguous prose remains chapter-scoped. */
+export function directLocalFactSemanticIdentity(
+  snapshot: StoryFactSnapshot,
+): DirectLocalFactSemanticIdentity | null {
+  if (!isDirectLocalReviewDraft(snapshot)) return null;
+  const structured = snapshot.structuredValue;
+  if (!isStoryValueRecord(structured)) return null;
+  const payload = isStoryValueRecord(structured.payload) ? structured.payload : null;
+  if (payload === null) return null;
+  const kind = typeof payload.kind === "string" ? payload.kind : null;
+  if (kind === null) {
+    return null;
+  }
+  const stableParts = directLocalStableSemanticParts(kind, payload);
+  const scope = stableParts === null ? "chapter" : "project";
+  const semanticParts = stableParts ?? [
+    "exact",
+    normalizeDirectLocalEvidenceText(snapshot.contentText),
+  ];
+  return Object.freeze({
+    projectId: snapshot.projectId,
+    factType: snapshot.factType,
+    scope,
+    key: JSON.stringify([
+      snapshot.projectId,
+      snapshot.factType,
+      scope === "chapter" ? snapshot.source.chapterId : null,
+      kind,
+      ...semanticParts,
+    ]),
+  });
+}
+
+function directLocalStableSemanticParts(
+  kind: string,
+  payload: Readonly<Record<string, StoryValue>>,
+): readonly string[] | null {
+  const fieldsByKind: Readonly<Record<string, readonly string[]>> = {
+    explicit_narrative_character_profile: ["character", "detail"],
+    explicit_narrative_character_tenure: ["character", "detail"],
+    explicit_narrative_location: ["location", "relation", "position"],
+    explicit_narrative_tenure_location: ["location", "detail"],
+    explicit_narrative_relationship: ["from", "to", "relationship"],
+    explicit_narrative_organization: ["member", "organization", "relation"],
+    explicit_narrative_item_ownership: ["item", "holder"],
+    explicit_narrative_goal: ["character", "goal"],
+    explicit_narrative_motivation: ["character", "goal", "motive"],
+  };
+  const fields = fieldsByKind[kind];
+  if (fields === undefined) return null;
+  const values: string[] = [];
+  for (const field of fields) {
+    const value = payload[field];
+    if (typeof value !== "string") return null;
+    const normalized = normalizeDirectLocalEvidenceText(value);
+    if (normalized.length === 0 || directLocalEntityIsAmbiguous(normalized)) return null;
+    values.push(field, normalized);
+  }
+  return Object.freeze(values);
+}
+
+function directLocalEntityIsAmbiguous(value: string): boolean {
+  return /^(?:我|你|他|她|它|我们|你们|他们|她们|它们|是我|那|这|此人)$/u.test(value);
 }
 
 function normalizeDirectLocalEvidenceText(value: string): string {

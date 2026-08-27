@@ -679,6 +679,16 @@ pub(crate) fn local_migrator() -> Migrator {
                     "../../../../packages/data/migrations/0078_generation_attempt_prose_invocation.sql"
                 ),
             ),
+            migration(
+                82,
+                "retain multiple immutable evidence spans for one story fact",
+                include_str!("../../../../packages/data/migrations/0079_story_fact_evidence.sql"),
+            ),
+            migration(
+                83,
+                "persist exact selection skill identity on AI candidates",
+                include_str!("../../../../packages/data/migrations/0080_candidate_selection_action.sql"),
+            ),
         ]),
         ignore_missing: false,
         locking: true,
@@ -1019,8 +1029,8 @@ mod tests {
     };
 
     use super::{
-        local_migrator, migration_subset, published_v029_manifest_digest,
-        run_foreign_key_disabled_migration, run_local_migrations,
+        latest_local_migration_version, local_migrator, migration_subset,
+        published_v029_manifest_digest, run_foreign_key_disabled_migration, run_local_migrations,
         MODEL_CAPABILITY_PROBE_LEDGER_MIGRATION_VERSION,
         MODEL_HUB_CONTENT_QUALITY_TASK_MIGRATION_VERSION, PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION,
         PUBLISHED_V029_MIGRATION_MANIFEST_SHA384, ZHIPU_GLM_MIGRATION_VERSION,
@@ -1051,6 +1061,7 @@ mod tests {
     const SYNTHETIC_V029_VERSION_COUNT: i64 = 36;
     const SYNTHETIC_V029_CANDIDATE_COUNT: i64 = 18;
     const SYNTHETIC_V029_CHAPTER_CHARACTER_COUNT: i64 = 115_000;
+    const SYNTHETIC_V029_CHAPTER_SPAN_FACT_COUNT: i64 = 1;
     const SYNTHETIC_V029_APPLICATION_TABLE_COUNT: usize = 190;
     const REQUIRED_V029_CREATIVE_AND_TRACE_TABLES: &[&str] = &[
         "projects",
@@ -1374,6 +1385,36 @@ mod tests {
         }
     }
 
+    fn assert_v029_author_data_unchanged(
+        before: &PublishedLibrarySnapshot,
+        after: &PublishedLibrarySnapshot,
+    ) {
+        assert_eq!(after.projects, before.projects);
+        assert_eq!(after.chapters, before.chapters);
+        assert_eq!(after.chapter_versions, before.chapter_versions);
+        assert_eq!(after.candidates, before.candidates);
+        assert_eq!(
+            after.chapter_character_count,
+            before.chapter_character_count
+        );
+        assert_eq!(after.chapter_body_sha256, before.chapter_body_sha256);
+
+        for (table_name, before_table) in &before.protected_tables {
+            let after_table = after
+                .protected_tables
+                .get(table_name)
+                .unwrap_or_else(|| panic!("upgrade removed protected table {table_name}"));
+            if table_name == "ai_candidates" {
+                assert_eq!(after_table.row_count, before_table.row_count);
+            } else {
+                assert_eq!(
+                    after_table, before_table,
+                    "upgrade changed protected rows in {table_name}"
+                );
+            }
+        }
+    }
+
     fn synthetic_project_id(project_index: usize) -> String {
         format!("synthetic-v029-project-{project_index:02}")
     }
@@ -1690,11 +1731,14 @@ mod tests {
                id, project_id, fact_type, content_text, value_json, source_kind,
                evidence_reference, confidence, status, origin, user_confirmed, locked,
                deprecated, needs_review, confirmed_by_actor_id, confirmed_at,
-               revision, created_at, updated_at
+               revision, created_at, updated_at, source_chapter_id, source_version_id,
+               source_start_offset, source_end_offset, source_length, source_excerpt
              ) VALUES (
                'synthetic-v029-pending-fact', ?, 'place.location',
-               '钟楼位于旧城', NULL, 'system_derivation', '本地整理后等待作者确认',
-               0.8, 'unconfirmed', 'ai_extraction', 0, 0, 0, 1, NULL, NULL, 1, ?, ?
+               '钟楼位于旧城', NULL, 'chapter_span', '第 1 章的原文依据',
+               0.8, 'unconfirmed', 'ai_extraction', 0, 0, 0, 1, NULL, NULL, 1, ?, ?,
+               'synthetic-v029-chapter-00', 'synthetic-v029-version-00-2',
+               0, 1, 6053, '墨'
              )",
         )
         .bind(&first_project)
@@ -1976,6 +2020,20 @@ mod tests {
         .expect("apply remaining v0.2.3 history");
     }
 
+    async fn apply_published_v029_history(connection: &mut SqliteConnection) {
+        apply_published_v023_history(connection).await;
+        let full = local_migrator();
+        let v024_through_v029 = migration_subset(&full, |migration| {
+            migration.version > PUBLISHED_V023_MAXIMUM_MIGRATION_VERSION
+                && migration.version <= PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION
+        });
+        assert_eq!(v024_through_v029.iter().count(), 13);
+        v024_through_v029
+            .run_direct(connection)
+            .await
+            .expect("apply the remaining exact v0.2.9 migration history");
+    }
+
     #[test]
     fn preserves_the_published_sync_access_migration_checksum() {
         let migrator = local_migrator();
@@ -2018,9 +2076,7 @@ mod tests {
         let mut connection = SqliteConnection::connect("sqlite::memory:")
             .await
             .expect("open sqlite");
-        run_local_migrations(&mut connection)
-            .await
-            .expect("apply published history");
+        apply_published_v029_history(&mut connection).await;
         let before: Vec<(i64, String, i64, Vec<u8>)> = sqlx::query_as(
             "SELECT version, description, success, checksum
              FROM _sqlx_migrations ORDER BY version",
@@ -2039,8 +2095,15 @@ mod tests {
         .fetch_all(&mut connection)
         .await
         .expect("read accepted receipts");
-        assert_eq!(before, after);
-        assert_eq!(before.len(), 81);
+        assert_eq!(
+            before.len(),
+            PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION as usize
+        );
+        assert_eq!(&after[..before.len()], before.as_slice());
+        assert_eq!(
+            after.len(),
+            latest_local_migration_version(&local_migrator()) as usize
+        );
     }
 
     #[tokio::test]
@@ -2048,9 +2111,7 @@ mod tests {
         let mut connection = SqliteConnection::connect("sqlite::memory:")
             .await
             .expect("open legacy receipt fixture");
-        run_local_migrations(&mut connection)
-            .await
-            .expect("create canonical published history");
+        apply_published_v029_history(&mut connection).await;
         replace_published_v029_receipts_with_legacy_windows_checksums(&mut connection).await;
         let before: Vec<(i64, String, i64, Vec<u8>)> = sqlx::query_as(
             "SELECT version, description, success, checksum
@@ -2070,16 +2131,22 @@ mod tests {
         .fetch_all(&mut connection)
         .await
         .expect("read accepted legacy receipts");
-        assert_eq!(after, before);
+        assert_eq!(
+            before.len(),
+            PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION as usize
+        );
+        assert_eq!(&after[..before.len()], before.as_slice());
+        assert_eq!(
+            after.len(),
+            latest_local_migration_version(&local_migrator()) as usize
+        );
     }
 
     #[tokio::test]
     async fn preserves_a_v029_scale_library_across_upgrade_and_restart() {
         let database = PublishedLibraryDatabase::create();
         let mut published = database.open().await;
-        run_local_migrations(&mut published)
-            .await
-            .expect("create the exact published v0.2.9 migration history");
+        apply_published_v029_history(&mut published).await;
         seed_v029_scale_library(&mut published).await;
         replace_published_v029_receipts_with_legacy_windows_checksums(&mut published).await;
 
@@ -2097,7 +2164,10 @@ mod tests {
             SYNTHETIC_V029_CHAPTER_CHARACTER_COUNT
         );
         assert_eq!(before.chapter_body_sha256.len(), 64);
-        assert_eq!(before.migration_receipts.len(), 81);
+        assert_eq!(
+            before.migration_receipts.len(),
+            PUBLISHED_V029_MAXIMUM_MIGRATION_VERSION as usize
+        );
         published.close().await.expect("close published database");
 
         let mut upgraded = database.open().await;
@@ -2105,7 +2175,23 @@ mod tests {
             .await
             .expect("accept and upgrade the published v0.2.9 database");
         let after_upgrade = published_library_snapshot(&mut upgraded).await;
-        assert_eq!(after_upgrade, before);
+        assert_v029_author_data_unchanged(&before, &after_upgrade);
+        assert_eq!(
+            &after_upgrade.migration_receipts[..before.migration_receipts.len()],
+            before.migration_receipts.as_slice()
+        );
+        assert_eq!(
+            after_upgrade.migration_receipts.len(),
+            latest_local_migration_version(&local_migrator()) as usize
+        );
+        assert_eq!(
+            after_upgrade.protected_tables.len(),
+            before.protected_tables.len() + 1
+        );
+        assert_eq!(
+            after_upgrade.protected_tables["story_fact_evidence"].row_count,
+            SYNTHETIC_V029_CHAPTER_SPAN_FACT_COUNT
+        );
         upgraded.close().await.expect("close upgraded database");
 
         let mut restarted = database.open().await;
@@ -2113,7 +2199,7 @@ mod tests {
             .await
             .expect("reopen the upgraded database without rewriting it");
         let after_restart = published_library_snapshot(&mut restarted).await;
-        assert_eq!(after_restart, before);
+        assert_eq!(after_restart, after_upgrade);
         restarted.close().await.expect("close restarted database");
     }
 
@@ -2121,9 +2207,7 @@ mod tests {
     async fn preserves_the_complete_v029_creative_and_trace_chain() {
         let database = PublishedLibraryDatabase::create();
         let mut connection = database.open().await;
-        run_local_migrations(&mut connection)
-            .await
-            .expect("create the published v0.2.9 history");
+        apply_published_v029_history(&mut connection).await;
         seed_v029_scale_library(&mut connection).await;
         let snapshot = published_library_snapshot(&mut connection).await;
 
@@ -2187,7 +2271,39 @@ mod tests {
         .await
         .expect("count retained historical candidates");
         assert_eq!(historical_candidates, 4);
-        connection.close().await.expect("close protected fixture");
+        connection.close().await.expect("close published fixture");
+
+        let mut upgraded = database.open().await;
+        run_local_migrations(&mut upgraded)
+            .await
+            .expect("upgrade the complete v0.2.9 creative and trace chain");
+        let upgraded_snapshot = published_library_snapshot(&mut upgraded).await;
+        assert_v029_author_data_unchanged(&snapshot, &upgraded_snapshot);
+        assert_eq!(
+            &upgraded_snapshot.migration_receipts[..snapshot.migration_receipts.len()],
+            snapshot.migration_receipts.as_slice()
+        );
+        assert_eq!(
+            upgraded_snapshot.migration_receipts.len(),
+            latest_local_migration_version(&local_migrator()) as usize
+        );
+        assert_eq!(
+            upgraded_snapshot.protected_tables.len(),
+            snapshot.protected_tables.len() + 1
+        );
+        assert_eq!(
+            upgraded_snapshot.protected_tables["story_fact_evidence"].row_count,
+            SYNTHETIC_V029_CHAPTER_SPAN_FACT_COUNT
+        );
+        let migrated_historical_selection_actions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ai_candidates
+             WHERE task_intent = 'selection_rewrite' AND selection_action IS NOT NULL",
+        )
+        .fetch_one(&mut upgraded)
+        .await
+        .expect("verify historical selection candidates retain the migration fallback");
+        assert_eq!(migrated_historical_selection_actions, 0);
+        upgraded.close().await.expect("close upgraded fixture");
     }
 
     #[tokio::test]
@@ -2236,7 +2352,10 @@ mod tests {
         .fetch_all(&mut upgraded)
         .await
         .expect("read upgraded receipts");
-        assert_eq!(upgraded_receipts.len(), 81);
+        assert_eq!(
+            upgraded_receipts.len(),
+            latest_local_migration_version(&local_migrator()) as usize
+        );
         assert_eq!(
             &upgraded_receipts[..published_receipts.len()],
             published_receipts.as_slice()
@@ -3897,7 +4016,7 @@ mod tests {
             .fetch_one(&mut connection)
             .await
             .expect("maximum migration version");
-        assert_eq!(maximum_version, 81);
+        assert_eq!(maximum_version, 83);
         let forbidden_columns: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)
              FROM pragma_table_info('novel_skill_evaluation_predispatch_authority_snapshots')

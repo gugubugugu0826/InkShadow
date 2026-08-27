@@ -21,7 +21,7 @@ const ALLOWED_TRANSITIONS = {
   retrieving: ["generating", "failed_retryable", "failed_final", "cancelled"],
   generating: ["validating", "failed_retryable", "failed_final", "cancelled"],
   validating: ["candidate_ready", "failed_retryable", "failed_final", "cancelled"],
-  candidate_ready: ["completed", "failed_retryable", "cancelled"],
+  candidate_ready: ["completed", "failed_retryable", "failed_final", "cancelled"],
   failed_retryable: ["queued", "failed_final", "cancelled"],
   failed_final: [],
   cancelled: [],

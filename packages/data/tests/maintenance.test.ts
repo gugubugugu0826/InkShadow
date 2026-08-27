@@ -35,6 +35,10 @@ const corruptedBackupPath = path.join(
   `inkshadow-maintenance-corrupted-${process.pid}.db`,
 );
 const historicalV73BackupPath = path.join(tmpdir(), `inkshadow-maintenance-v73-${process.pid}.db`);
+const candidateSelectionBackupPath = path.join(
+  tmpdir(),
+  `inkshadow-maintenance-selection-action-${process.pid}.db`,
+);
 const HISTORICAL_V73_RESTORE_TIMEOUT_MS = 30_000;
 const capabilityProbeInvocationLedgerMigration = readFileSync(
   new URL("../migrations/0071_model_capability_probe_invocation_ledger.sql", import.meta.url),
@@ -66,6 +70,14 @@ const projectDisplayIdentityMigration = readFileSync(
 );
 const proseInvocationPrivacyMigration = readFileSync(
   new URL("../migrations/0078_generation_attempt_prose_invocation.sql", import.meta.url),
+  "utf8",
+);
+const storyFactEvidenceMigration = readFileSync(
+  new URL("../migrations/0079_story_fact_evidence.sql", import.meta.url),
+  "utf8",
+);
+const candidateSelectionActionMigration = readFileSync(
+  new URL("../migrations/0080_candidate_selection_action.sql", import.meta.url),
   "utf8",
 );
 const inkShadowMigration = [
@@ -285,6 +297,8 @@ const inkShadowMigration = [
   directLocalAuthorRevisionMigration,
   projectDisplayIdentityMigration,
   proseInvocationPrivacyMigration,
+  storyFactEvidenceMigration,
+  candidateSelectionActionMigration,
 ].join("\n");
 const inkShadowMigrationV73 = inkShadowMigration
   .replace(capabilityProbeInvocationLedgerMigration, "")
@@ -294,7 +308,9 @@ const inkShadowMigrationV73 = inkShadowMigration
   .replace(generationAttemptPrivacyMigration, "")
   .replace(directLocalAuthorRevisionMigration, "")
   .replace(projectDisplayIdentityMigration, "")
-  .replace(proseInvocationPrivacyMigration, "");
+  .replace(proseInvocationPrivacyMigration, "")
+  .replace(storyFactEvidenceMigration, "")
+  .replace(candidateSelectionActionMigration, "");
 const BACKUP_PROJECT_ID = "019f9f4a-b3c7-7350-9226-000000000001";
 const BACKUP_ACCOUNT_ID = "019f9f4a-b3c7-7350-9226-000000000101";
 const BACKUP_OBJECT_ID = "019f9f4a-b3c7-7350-9226-000000000102";
@@ -329,6 +345,7 @@ afterEach(() => {
   rmSync(incompatibleBackupPath, { force: true });
   rmSync(corruptedBackupPath, { force: true });
   rmSync(historicalV73BackupPath, { force: true });
+  rmSync(candidateSelectionBackupPath, { force: true });
 });
 
 describe("DatabaseMaintenanceService", () => {
@@ -436,7 +453,7 @@ describe("DatabaseMaintenanceService", () => {
         value: {
           sourceKind: "user_selected_file",
           integrityVerified: true,
-          restoredTableCount: 174,
+          restoredTableCount: 175,
         },
       });
       await expect(
@@ -444,6 +461,43 @@ describe("DatabaseMaintenanceService", () => {
           "SELECT COUNT(*) AS count FROM pragma_foreign_key_check",
         ),
       ).resolves.toEqual([{ count: 0 }]);
+      await expect(
+        current.select<{
+          readonly factId: string;
+          readonly versionId: string;
+          readonly startOffset: number;
+          readonly endOffset: number;
+          readonly sourceLength: number;
+          readonly excerpt: string;
+        }>(
+          `SELECT fact_id AS factId, source_version_id AS versionId,
+                  source_start_offset AS startOffset, source_end_offset AS endOffset,
+                  source_length AS sourceLength, source_excerpt AS excerpt
+           FROM story_fact_evidence
+           WHERE fact_id = '019f9f4a-b3c7-7350-9226-000000000739'`,
+        ),
+      ).resolves.toEqual([
+        {
+          factId: "019f9f4a-b3c7-7350-9226-000000000739",
+          versionId: "019f9f4a-b3c7-7350-9226-000000000073",
+          startOffset: 0,
+          endOffset: 4,
+          sourceLength: 13,
+          excerpt: "七十三版",
+        },
+      ]);
+      await expect(
+        current.select<{ readonly taskIntent: string; readonly selectionAction: string | null }>(
+          `SELECT task_intent AS taskIntent, selection_action AS selectionAction
+           FROM ai_candidates
+           WHERE id = '019f9f4a-b3c7-7350-9226-000000000075'`,
+        ),
+      ).resolves.toEqual([
+        {
+          taskIntent: "selection_rewrite",
+          selectionAction: null,
+        },
+      ]);
       await expect(
         current.select<{
           readonly privacySnapshotVersion: number | null;
@@ -507,7 +561,8 @@ describe("DatabaseMaintenanceService", () => {
              ON invocation.id = 'maintenance-v73-invocation'
            INNER JOIN model_capability_scans AS scan
              ON scan.id = 'maintenance-v73-scan'
-           WHERE project.id = '019f9f4a-b3c7-7350-9226-000000000071'`,
+           WHERE project.id = '019f9f4a-b3c7-7350-9226-000000000071'
+             AND candidate.id = '019f9f4a-b3c7-7350-9226-000000000074'`,
         ),
       ).resolves.toEqual([
         {
@@ -530,6 +585,96 @@ describe("DatabaseMaintenanceService", () => {
       await current.close();
     },
     HISTORICAL_V73_RESTORE_TIMEOUT_MS,
+  );
+
+  fileSqliteIt(
+    "restores an upgraded historical selection Candidate beside a new explicit selection action",
+    async () => {
+      const executor = new NodeSqliteExecutor(
+        inkShadowMigration.replace(candidateSelectionActionMigration, ""),
+      );
+      const now = "2026-08-27T00:00:00.000Z";
+      const projectId = "019f9f4a-b3c7-7350-9226-000000000801";
+      const chapterId = "019f9f4a-b3c7-7350-9226-000000000802";
+      const versionId = "019f9f4a-b3c7-7350-9226-000000000803";
+      await insertProject(executor, projectId, "选区动作兼容恢复");
+      await executor.transaction(async (transaction) => {
+        await transaction.execute(
+          `INSERT INTO chapters (
+             id, project_id, title, content, status, revision,
+             current_version_id, created_at, updated_at, trashed_at
+           ) VALUES (?, ?, '第一章', '旧句等待改写。', 'active', 1, ?, ?, ?, NULL)`,
+          [chapterId, projectId, versionId, now, now],
+        );
+        await transaction.execute(
+          `INSERT INTO chapter_versions (
+             id, project_id, chapter_id, parent_version_id, sequence, content,
+             content_checksum, reason, source_candidate_id, created_at
+           ) VALUES (?, ?, ?, NULL, 1, '旧句等待改写。', ?, 'created', NULL, ?)`,
+          [versionId, projectId, chapterId, "8".repeat(64), now],
+        );
+      });
+      await executor.execute(
+        `INSERT INTO ai_candidates (
+           id, project_id, chapter_id, source, base_version_id, content,
+           content_checksum, status, incomplete, created_at, updated_at, decided_at,
+           task_intent, application_mode, payload_kind,
+           anchor_start_utf16, anchor_end_utf16
+         ) VALUES (
+           'maintenance-historical-selection-candidate', ?, ?, 'polish', ?,
+           '历史改写结果', ?, 'ready', 0, ?, ?, NULL,
+           'selection_rewrite', 'replace_selection', 'fragment', 0, 2
+         )`,
+        [projectId, chapterId, versionId, "9".repeat(64), now, now],
+      );
+      executor.database.exec(candidateSelectionActionMigration);
+      await executor.execute(
+        `INSERT INTO ai_candidates (
+           id, project_id, chapter_id, source, base_version_id, content,
+           content_checksum, status, incomplete, created_at, updated_at, decided_at,
+           task_intent, application_mode, payload_kind,
+           anchor_start_utf16, anchor_end_utf16, selection_action
+         ) VALUES (
+           'maintenance-current-selection-candidate', ?, ?, 'polish', ?,
+           '新扩写结果', ?, 'ready', 0, ?, ?, NULL,
+           'selection_rewrite', 'replace_selection', 'fragment', 0, 2, 'expand'
+         )`,
+        [projectId, chapterId, versionId, "a".repeat(64), now, now],
+      );
+      const service = new DatabaseMaintenanceService(executor);
+      expect(await service.createConsistentBackup(candidateSelectionBackupPath)).toMatchObject({
+        ok: true,
+      });
+      await executor.execute("DELETE FROM ai_candidates WHERE id IN (?, ?)", [
+        "maintenance-historical-selection-candidate",
+        "maintenance-current-selection-candidate",
+      ]);
+
+      expect(await service.restoreConsistentBackup(candidateSelectionBackupPath)).toMatchObject({
+        ok: true,
+      });
+      await expect(
+        executor.select<{ readonly id: string; readonly selectionAction: string | null }>(
+          `SELECT id, selection_action AS selectionAction
+           FROM ai_candidates
+           WHERE id IN (
+             'maintenance-historical-selection-candidate',
+             'maintenance-current-selection-candidate'
+           )
+           ORDER BY id`,
+        ),
+      ).resolves.toEqual([
+        {
+          id: "maintenance-current-selection-candidate",
+          selectionAction: "expand",
+        },
+        {
+          id: "maintenance-historical-selection-candidate",
+          selectionAction: null,
+        },
+      ]);
+      await executor.close();
+    },
   );
 
   fileSqliteIt("restores a historical story-state receipt after its chapter advances", async () => {
@@ -621,6 +766,26 @@ describe("DatabaseMaintenanceService", () => {
         "2026-07-27T00:00:01.000Z",
       ],
     );
+    await executor.execute(
+      `INSERT INTO ai_candidates (
+         id, project_id, chapter_id, source, base_version_id, content,
+         content_checksum, status, incomplete, created_at, updated_at, decided_at,
+         task_intent, application_mode, payload_kind,
+         anchor_start_utf16, anchor_end_utf16, purpose, selection_action
+       ) VALUES (
+         'maintenance-selection-action-candidate', ?, ?, 'polish', ?,
+         '扩写后的隔离选区', ?, 'ready', 0, ?, ?, NULL,
+         'selection_rewrite', 'replace_selection', 'fragment', 0, 2, 'prose', 'expand'
+       )`,
+      [
+        BACKUP_PROJECT_ID,
+        BACKUP_CHAPTER_ID,
+        BACKUP_CURRENT_CHAPTER_VERSION_ID,
+        "3".repeat(64),
+        "2026-07-27T00:00:02.000Z",
+        "2026-07-27T00:00:02.000Z",
+      ],
+    );
     await insertContinuousStoryStateRouteReceipt(executor);
     await insertChapterValidationSnapshots(executor);
     await executor.execute(
@@ -671,6 +836,9 @@ describe("DatabaseMaintenanceService", () => {
       ),
     ).resolves.toEqual([{ count: 1 }]);
     await backupInspection.close();
+    await executor.execute(
+      "DELETE FROM ai_candidates WHERE id = 'maintenance-selection-action-candidate'",
+    );
     await executor.execute("DELETE FROM project_remote_dispatch_leases");
     await executor.execute(
       `UPDATE writing_experience_preferences
@@ -885,7 +1053,7 @@ describe("DatabaseMaintenanceService", () => {
       value: {
         sourceKind: "user_selected_file",
         integrityVerified: true,
-        restoredTableCount: 174,
+        restoredTableCount: 175,
       },
     });
     await expect(
@@ -955,6 +1123,24 @@ describe("DatabaseMaintenanceService", () => {
         [BACKUP_CURRENT_CHAPTER_VERSION_ID],
       ),
     ).resolves.toEqual([{ organizeLocalStoryFacts: 1 }]);
+    await expect(
+      executor.select<{
+        taskIntent: string;
+        applicationMode: string;
+        selectionAction: string | null;
+      }>(
+        `SELECT task_intent AS taskIntent, application_mode AS applicationMode,
+                selection_action AS selectionAction
+         FROM ai_candidates
+         WHERE id = 'maintenance-selection-action-candidate'`,
+      ),
+    ).resolves.toEqual([
+      {
+        taskIntent: "selection_rewrite",
+        applicationMode: "replace_selection",
+        selectionAction: "expand",
+      },
+    ]);
     await expect(
       executor.select<{
         privacySnapshotVersion: number;
@@ -1619,6 +1805,14 @@ describe("DatabaseMaintenanceService", () => {
       schemaVersion: "inkshadow.rebuildable-system-fact.v1",
       payload: { schemaVersion: "inkshadow.direct-local-story-fact.v1" },
     });
+    await expect(
+      executor.select<{ count: number }>(
+        `SELECT COUNT(*) AS count
+         FROM story_fact_evidence
+         WHERE fact_id = ? AND source_version_id = ? AND source_excerpt = '备份'`,
+        [BACKUP_DIRECT_LOCAL_STORY_FACT_ID, BACKUP_CHAPTER_VERSION_ID],
+      ),
+    ).resolves.toEqual([{ count: 1 }]);
     await expect(
       executor.select<{ count: number }>(
         `SELECT COUNT(*) AS count FROM story_fact_revisions WHERE fact_id = ?`,
@@ -2805,6 +2999,23 @@ async function insertHistoricalV73CapabilityRestoreScenario(
          'created', NULL, ?)`,
       [versionId, projectId, chapterId, "7".repeat(64), now],
     );
+    await transaction.execute(
+      `INSERT INTO story_facts (
+         id, project_id, fact_type, content_text, value_json,
+         source_kind, evidence_reference, source_chapter_id, source_version_id,
+         source_start_offset, source_end_offset, source_length, source_excerpt,
+         effective_at, invalidated_at, branch_id, confidence, status, origin,
+         user_confirmed, locked, deprecated, needs_review,
+         confirmed_by_actor_id, confirmed_at, revision, created_at, updated_at
+       ) VALUES (
+         '019f9f4a-b3c7-7350-9226-000000000739', ?, 'world_setting',
+         '七十三版正文有一处可审计原文。', NULL,
+         'chapter_span', 'chapter-version:v73:0:4', ?, ?, 0, 4, 13, '七十三版',
+         NULL, NULL, NULL, 0.9, 'unconfirmed', 'system',
+         0, 0, 0, 1, NULL, NULL, 1, ?, ?
+       )`,
+      [projectId, chapterId, versionId, now, now],
+    );
   });
   await executor.execute(
     `INSERT INTO ai_candidates (
@@ -2815,6 +3026,19 @@ async function insertHistoricalV73CapabilityRestoreScenario(
        '隔离中的 AI 建议草稿', ?, 'ready', 0, ?, ?, NULL
      )`,
     [projectId, chapterId, versionId, "8".repeat(64), now, now],
+  );
+  await executor.execute(
+    `INSERT INTO ai_candidates (
+       id, project_id, chapter_id, source, base_version_id, content,
+       content_checksum, status, incomplete, created_at, updated_at, decided_at,
+       task_intent, application_mode, payload_kind,
+       anchor_start_utf16, anchor_end_utf16
+     ) VALUES (
+       '019f9f4a-b3c7-7350-9226-000000000075', ?, ?, 'polish', ?,
+       '历史选区改写候选', ?, 'ready', 0, ?, ?, NULL,
+       'selection_rewrite', 'replace_selection', 'fragment', 0, 4
+     )`,
+    [projectId, chapterId, versionId, "9".repeat(64), now, now],
   );
   await executor.execute(
     `INSERT INTO background_tasks (
@@ -3443,6 +3667,8 @@ async function insertUnifiedStoryFact(executor: NodeSqliteExecutor): Promise<voi
 
 async function insertDirectLocalReviewStoryFact(executor: NodeSqliteExecutor): Promise<void> {
   const now = "2026-07-27T00:00:00.000Z";
+  const evidenceReference =
+    "direct-local:inkshadow.direct-local-story-fact.v1:" + BACKUP_CHAPTER_VERSION_ID + ":0:2";
   const valueJson = JSON.stringify({
     schemaVersion: "inkshadow.rebuildable-system-fact.v1",
     payload: {
@@ -3470,7 +3696,7 @@ async function insertDirectLocalReviewStoryFact(executor: NodeSqliteExecutor): P
       BACKUP_DIRECT_LOCAL_STORY_FACT_ID,
       BACKUP_PROJECT_ID,
       valueJson,
-      "direct-local:inkshadow.direct-local-story-fact.v1:" + BACKUP_CHAPTER_VERSION_ID + ":0:2",
+      evidenceReference,
       BACKUP_CHAPTER_ID,
       BACKUP_CHAPTER_VERSION_ID,
       now,
@@ -3486,6 +3712,20 @@ async function insertDirectLocalReviewStoryFact(executor: NodeSqliteExecutor): P
       BACKUP_PROJECT_ID,
       now,
       JSON.stringify({ revision: 1, status: "temporary", origin: "system" }),
+    ],
+  );
+  await executor.execute(
+    `INSERT INTO story_fact_evidence (
+       fact_id, project_id, evidence_reference, source_chapter_id, source_version_id,
+       source_start_offset, source_end_offset, source_length, source_excerpt, recorded_at
+     ) VALUES (?, ?, ?, ?, ?, 0, 2, 5, '备份', ?)`,
+    [
+      BACKUP_DIRECT_LOCAL_STORY_FACT_ID,
+      BACKUP_PROJECT_ID,
+      evidenceReference,
+      BACKUP_CHAPTER_ID,
+      BACKUP_CHAPTER_VERSION_ID,
+      now,
     ],
   );
 }

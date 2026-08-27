@@ -49,6 +49,48 @@ describe("StoryFactApplicationService", () => {
     expect(unwrap(await store.listByProjectId(parse(PROJECT_ID)))).toHaveLength(1);
   });
 
+  it("stages an author statement as a review draft and preserves its source through confirmation", async () => {
+    const { service, store } = harness();
+    const draft = unwrap(
+      await service.stageUserDraftFact({
+        projectId: PROJECT_ID,
+        factType: "world_rule",
+        contentText: "潮门只在月落时开启。",
+        actorId: ACTOR_ID,
+      }),
+    );
+    const source = draft.toSnapshot().source;
+    expect(draft.toSnapshot()).toMatchObject({
+      status: "unconfirmed",
+      origin: "user",
+      userConfirmed: false,
+      needsReview: true,
+      locked: false,
+      source: {
+        kind: "user_statement",
+        reference: expect.stringMatching(/^user-statement:draft:/u),
+      },
+    });
+    expect(unwrap(await store.listByProjectId(parse(PROJECT_ID)))).toHaveLength(1);
+
+    const confirmed = unwrap(
+      await service.confirm({
+        factId: draft.id,
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 1,
+      }),
+    );
+    expect(confirmed.toSnapshot()).toMatchObject({
+      status: "formal",
+      origin: "user",
+      userConfirmed: true,
+      needsReview: false,
+      revision: 2,
+      source,
+    });
+  });
+
   it("keeps critical AI extraction unconfirmed until an explicit user decision", async () => {
     const { service } = harness();
     const staged = unwrap(

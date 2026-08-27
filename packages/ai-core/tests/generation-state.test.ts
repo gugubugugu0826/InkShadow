@@ -38,6 +38,10 @@ describe("generation state machine", () => {
     expect(transitionGenerationState("candidate_ready", "cancelled")).toBe("cancelled");
   });
 
+  it("allows a locally persisted candidate to reach a final failure without pretending cancellation", () => {
+    expect(transitionGenerationState("candidate_ready", "failed_final")).toBe("failed_final");
+  });
+
   it("rejects direct completion and all transitions from terminal states", () => {
     expect(() => transitionGenerationState("generating", "completed")).toThrow(
       IllegalGenerationTransitionError,

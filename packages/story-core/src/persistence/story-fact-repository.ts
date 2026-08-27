@@ -5,6 +5,7 @@ import type { Result } from "../result.js";
 import {
   StoryFact,
   CONTINUOUS_STORY_STATE_ROUTE_TASKS,
+  directLocalFactSemanticIdentity,
   directLocalPendingEvidenceIdentity,
   isRebuildableStoryFactType,
   MAXIMUM_STORY_FACT_AUTHORITY_REFERENCES,
@@ -23,6 +24,7 @@ import {
   type StoryFactRevision,
   type StoryFactRevisionChangeKind,
   type StoryFactSnapshot,
+  type StoryFactEvidenceSnapshot,
   type StoryFactStatus,
   type StoryFactStore,
 } from "../story-fact.js";
@@ -296,6 +298,7 @@ export class SqliteStoryFactStore implements StoryFactStore, LegacyStoryFactComp
         await assertChapterEvidence(transaction, snapshot);
         await insertFact(transaction, snapshot);
         await insertInitialRevision(transaction, snapshot, "created");
+        await insertStoryFactEvidence(transaction, snapshot.id, snapshot);
       });
     });
   }
@@ -454,7 +457,38 @@ export class SqliteStoryFactStore implements StoryFactStore, LegacyStoryFactComp
             }
           }
           if (existing !== undefined) {
+            await insertStoryFactEvidence(transaction, existing.id, snapshot);
             return Object.freeze({ fact: existing, created: false });
+          }
+          const semanticIdentity = directLocalFactSemanticIdentity(snapshot);
+          if (semanticIdentity !== null) {
+            const semanticRows = await transaction.select<StoryFactRow>(
+              `${STORY_FACT_SELECT}
+               WHERE fact.project_id = ?
+                 AND fact.fact_type = ?
+                 AND fact.source_kind = 'chapter_span'
+               ORDER BY
+                 CASE
+                   WHEN fact.user_confirmed = 1 OR fact.origin = 'user' THEN 0
+                   WHEN fact.deprecated = 1 THEN 1
+                   ELSE 2
+                 END,
+                 fact.created_at,
+                 fact.id`,
+              [semanticIdentity.projectId, semanticIdentity.factType],
+            );
+            for (const row of semanticRows) {
+              const candidate = hydrateFact(row);
+              const currentIdentity = directLocalFactSemanticIdentity(candidate.toSnapshot());
+              const initialIdentity =
+                currentIdentity ??
+                directLocalFactSemanticIdentity(
+                  await selectInitialStoryFactSnapshot(transaction, candidate.id),
+                );
+              if (initialIdentity?.key !== semanticIdentity.key) continue;
+              await insertStoryFactEvidence(transaction, candidate.id, snapshot);
+              return Object.freeze({ fact: candidate, created: false });
+            }
           }
         }
         const matchingRows = await transaction.select<StoryFactRow>(
@@ -498,6 +532,7 @@ export class SqliteStoryFactStore implements StoryFactStore, LegacyStoryFactComp
         }
         await insertFact(transaction, snapshot);
         await insertInitialRevision(transaction, snapshot, "created");
+        await insertStoryFactEvidence(transaction, snapshot.id, snapshot);
         return Object.freeze({ fact, created: true });
       }),
     );
@@ -569,6 +604,7 @@ export class SqliteStoryFactStore implements StoryFactStore, LegacyStoryFactComp
 
         await insertFact(transaction, snapshot);
         await insertInitialRevision(transaction, snapshot, "created");
+        await insertStoryFactEvidence(transaction, snapshot.id, snapshot);
         return Object.freeze({
           fact,
           replacedFactIds: Object.freeze(replacedFactIds),
@@ -1069,6 +1105,7 @@ export class SqliteStoryFactStore implements StoryFactStore, LegacyStoryFactComp
           const snapshot = fact.toSnapshot();
           await insertFact(transaction, snapshot);
           await insertInitialRevision(transaction, snapshot, "created");
+          await insertStoryFactEvidence(transaction, snapshot.id, snapshot);
           committedFacts.push(fact);
         }
         const receipt: ContinuousStoryStateRouteReceipt = Object.freeze({
@@ -1195,6 +1232,88 @@ export class SqliteStoryFactStore implements StoryFactStore, LegacyStoryFactComp
       return Object.freeze(rows.map(hydrateLegacyLink));
     });
   }
+
+  public listEvidenceByFactId(
+    factId: UuidV7,
+  ): Promise<Result<readonly StoryFactEvidenceSnapshot[], StoryCoreError>> {
+    return runPersistence(async () => {
+      const rows = await this.executor.select<StoryFactEvidenceRow>(
+        `SELECT fact_id, project_id, evidence_reference, source_chapter_id,
+                source_version_id, source_start_offset, source_end_offset,
+                source_length, source_excerpt, recorded_at
+         FROM story_fact_evidence
+         WHERE fact_id = ?
+         ORDER BY recorded_at, source_version_id, source_start_offset, evidence_reference`,
+        [factId],
+      );
+      return Object.freeze(rows.map(hydrateStoryFactEvidence));
+    });
+  }
+}
+
+interface StoryFactEvidenceRow {
+  readonly fact_id: string;
+  readonly project_id: string;
+  readonly evidence_reference: string;
+  readonly source_chapter_id: string;
+  readonly source_version_id: string;
+  readonly source_start_offset: number;
+  readonly source_end_offset: number;
+  readonly source_length: number;
+  readonly source_excerpt: string;
+  readonly recorded_at: string;
+}
+
+function hydrateStoryFactEvidence(row: StoryFactEvidenceRow): StoryFactEvidenceSnapshot {
+  return Object.freeze({
+    factId: row.fact_id,
+    projectId: row.project_id,
+    reference: row.evidence_reference,
+    chapterId: row.source_chapter_id,
+    versionId: row.source_version_id,
+    startOffset: row.source_start_offset,
+    endOffset: row.source_end_offset,
+    sourceLength: row.source_length,
+    excerpt: row.source_excerpt,
+    recordedAt: row.recorded_at,
+  });
+}
+
+async function insertStoryFactEvidence(
+  transaction: StorySqlTransaction,
+  factId: string,
+  snapshot: StoryFactSnapshot,
+): Promise<void> {
+  const source = snapshot.source;
+  if (
+    source.kind !== "chapter_span" ||
+    source.chapterId === null ||
+    source.versionId === null ||
+    source.startOffset === null ||
+    source.endOffset === null ||
+    source.sourceLength === null ||
+    source.excerpt === null
+  ) {
+    return;
+  }
+  await transaction.execute(
+    `INSERT OR IGNORE INTO story_fact_evidence (
+       fact_id, project_id, evidence_reference, source_chapter_id, source_version_id,
+       source_start_offset, source_end_offset, source_length, source_excerpt, recorded_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      factId,
+      snapshot.projectId,
+      source.reference,
+      source.chapterId,
+      source.versionId,
+      source.startOffset,
+      source.endOffset,
+      source.sourceLength,
+      source.excerpt,
+      snapshot.updatedAt,
+    ],
+  );
 }
 
 async function insertFact(
@@ -1229,6 +1348,7 @@ export async function insertNewStoryFact(
   await assertChapterEvidence(transaction, snapshot);
   await insertFact(transaction, snapshot);
   await insertInitialRevision(transaction, snapshot, changeKind);
+  await insertStoryFactEvidence(transaction, snapshot.id, snapshot);
 }
 
 async function insertInitialRevision(

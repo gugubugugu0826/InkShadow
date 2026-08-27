@@ -1,11 +1,5 @@
 import { parseUuidV7 as parseDomainUuidV7 } from "@inkshadow/domain";
-import {
-  createStoryValue,
-  parseUuidV7 as parseStoryUuidV7,
-  type FormalRecordKind,
-  type FormalStoryRecord,
-  type StoryFact,
-} from "@inkshadow/story-core";
+import { parseUuidV7 as parseStoryUuidV7, type StoryFact } from "@inkshadow/story-core";
 import { Badge, Button, FormField, InlineAlert, Input, Textarea } from "@inkshadow/ui";
 import { useEffect, useState, type SyntheticEvent } from "react";
 import { Link } from "react-router-dom";
@@ -13,6 +7,7 @@ import { Link } from "react-router-dom";
 import {
   deriveProfessionalProjectSeed,
   parseProjectSeed,
+  updateProjectSeedField,
   type ProjectSeed,
 } from "../infrastructure/project-seed";
 import { projectOrdinaryUiError } from "../infrastructure/ui-error";
@@ -30,6 +25,7 @@ interface ProfessionalSetupDraft {
   readonly pov: string;
   readonly style: string;
   readonly boundaries: string;
+  readonly otherConstraints: string;
 }
 
 type ProfessionalSetupField = keyof ProfessionalSetupDraft;
@@ -62,10 +58,81 @@ const EMPTY_DRAFT: ProfessionalSetupDraft = Object.freeze({
   pov: "",
   style: "",
   boundaries: "",
+  otherConstraints: "",
 });
 
-const CHARACTER_RECORD_KEY = "professional_setup.character";
-const RULE_RECORD_KEY = "professional_setup.rules";
+const OPTIONAL_SETUP_SECTIONS = [
+  {
+    summary: "故事方向与大纲",
+    fields: [
+      {
+        field: "storyDirection",
+        label: "故事方向",
+        hint: "一句话说明这部作品准备往哪里发展。",
+        maximum: 1_000,
+        placeholder: "例如：两个互相误解的人在共同调查旧校舍传闻时逐渐靠近。",
+      },
+      {
+        field: "outlineSynopsis",
+        label: "大纲简介",
+        hint: "可以只写关键冲突、结局方向或已有章节计划。",
+        maximum: 2_800,
+      },
+    ],
+  },
+  {
+    summary: "人物与世界",
+    fields: [
+      {
+        field: "protagonist",
+        label: "主角",
+        hint: "姓名、身份、目标或性格，写多少都可以。",
+        maximum: 2_000,
+      },
+      {
+        field: "relationship",
+        label: "人物关系",
+        hint: "填写后会先保存为待确认设定，由你稍后确认、修改或放弃。",
+        maximum: 2_000,
+      },
+      {
+        field: "worldBackground",
+        label: "世界背景",
+        hint: "时代、地点、社会或能力体系等内容会先保存为待确认设定。",
+        maximum: 4_000,
+      },
+    ],
+  },
+  {
+    summary: "视角、风格与创作约束",
+    fields: [
+      {
+        field: "pov",
+        label: "叙事视角",
+        hint: "例如：第一人称，或第三人称限知。",
+        maximum: 1_000,
+      },
+      {
+        field: "style",
+        label: "风格样例或说明",
+        hint: "可写风格要求，也可粘贴一小段你认可的样例。",
+        maximum: 2_000,
+      },
+      {
+        field: "boundaries",
+        label: "禁止项",
+        hint: "不希望出现的情节、表达和内容边界。",
+        maximum: 2_000,
+      },
+      {
+        field: "otherConstraints",
+        label: "其他创作约束",
+        hint: "例如章节视角、时间写法、篇幅或结构要求；会与禁止项分开保存。",
+        maximum: 2_000,
+      },
+    ],
+  },
+] as const;
 
 export function ProfessionalCreatePage() {
   const runtime = useRuntime();
@@ -74,7 +141,7 @@ export function ProfessionalCreatePage() {
   const [projectSeed, setProjectSeed] = useState<ProjectSeed>(
     () =>
       initialRecovery?.projectSeed ??
-      deriveProfessionalProjectSeed({
+      deriveProfessionalSetupSeed({
         seedId: "professional:recovery",
         ...EMPTY_DRAFT,
         now: runtime.clock.now(),
@@ -110,7 +177,7 @@ export function ProfessionalCreatePage() {
     const now = runtime.clock.now();
     setDraft(nextDraft);
     setProjectSeed((current) =>
-      deriveProfessionalProjectSeed({
+      deriveProfessionalSetupSeed({
         seedId: current.seedId,
         ...nextDraft,
         now,
@@ -150,7 +217,7 @@ export function ProfessionalCreatePage() {
         setPendingProjectId(projectId);
         setPendingProjectCreatedAt(projectCreatedAt);
         const normalizedDraft = { ...draft, projectName };
-        const normalizedSeed = deriveProfessionalProjectSeed({
+        const normalizedSeed = deriveProfessionalSetupSeed({
           seedId: projectSeed.seedId,
           ...normalizedDraft,
           now: runtime.clock.now(),
@@ -222,7 +289,7 @@ export function ProfessionalCreatePage() {
             <div className="section-heading">
               <div>
                 <h2 id="create-empty-project-heading">先给作品起个名字</h2>
-                <p>系统会真实创建空白第一章、项目规划，以及你明确填写的正式设定。</p>
+                <p>系统会真实创建空白第一章和项目规划；人物与世界设定会先等待你确认。</p>
               </div>
             </div>
 
@@ -254,129 +321,35 @@ export function ProfessionalCreatePage() {
             <div className="section-heading">
               <div>
                 <h2 id="optional-preparation-heading">需要时再准备</h2>
-                <p>所有字段都可留空。填写的内容会进入真实规划或正式设定，不会只停留在表单里。</p>
+                <p>
+                  所有字段都可留空。填写的内容会完整保存在本地，并按规划、待确认设定或写作约束分别使用。
+                </p>
               </div>
               <Badge tone="neutral">全部可选</Badge>
             </div>
 
-            <details>
-              <summary>故事方向与大纲</summary>
-              <div className="secret-settings">
-                <FormField label="故事方向" hint="一句话说明这部作品准备往哪里发展。">
-                  {(fieldProps) => (
-                    <Textarea
-                      {...fieldProps}
-                      disabled={submitting}
-                      maxLength={1_000}
-                      currentLength={draft.storyDirection.length}
-                      value={draft.storyDirection}
-                      placeholder="例如：两个互相误解的人在共同调查旧校舍传闻时逐渐靠近。"
-                      onChange={(event) => updateField("storyDirection", event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-                <FormField label="大纲简介" hint="可以只写关键冲突、结局方向或已有章节计划。">
-                  {(fieldProps) => (
-                    <Textarea
-                      {...fieldProps}
-                      disabled={submitting}
-                      maxLength={2_800}
-                      currentLength={draft.outlineSynopsis.length}
-                      value={draft.outlineSynopsis}
-                      onChange={(event) =>
-                        updateField("outlineSynopsis", event.currentTarget.value)
-                      }
-                    />
-                  )}
-                </FormField>
-              </div>
-            </details>
-
-            <details>
-              <summary>人物与世界</summary>
-              <div className="secret-settings">
-                <FormField label="主角" hint="姓名、身份、目标或性格，写多少都可以。">
-                  {(fieldProps) => (
-                    <Textarea
-                      {...fieldProps}
-                      disabled={submitting}
-                      maxLength={2_000}
-                      currentLength={draft.protagonist.length}
-                      value={draft.protagonist}
-                      onChange={(event) => updateField("protagonist", event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-                <FormField label="人物关系" hint="只填写已经确定、愿意作为正式设定保存的关系。">
-                  {(fieldProps) => (
-                    <Textarea
-                      {...fieldProps}
-                      disabled={submitting}
-                      maxLength={2_000}
-                      currentLength={draft.relationship.length}
-                      value={draft.relationship}
-                      onChange={(event) => updateField("relationship", event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-                <FormField label="世界背景" hint="时代、地点、社会或能力体系等已确认内容。">
-                  {(fieldProps) => (
-                    <Textarea
-                      {...fieldProps}
-                      disabled={submitting}
-                      maxLength={4_000}
-                      currentLength={draft.worldBackground.length}
-                      value={draft.worldBackground}
-                      onChange={(event) =>
-                        updateField("worldBackground", event.currentTarget.value)
-                      }
-                    />
-                  )}
-                </FormField>
-              </div>
-            </details>
-
-            <details>
-              <summary>视角、风格与禁止项</summary>
-              <div className="secret-settings">
-                <FormField label="POV / 叙事视角" hint="例如：第一人称，或第三人称限知。">
-                  {(fieldProps) => (
-                    <Textarea
-                      {...fieldProps}
-                      disabled={submitting}
-                      maxLength={1_000}
-                      currentLength={draft.pov.length}
-                      value={draft.pov}
-                      onChange={(event) => updateField("pov", event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-                <FormField label="风格样例或说明" hint="可写风格要求，也可粘贴一小段你认可的样例。">
-                  {(fieldProps) => (
-                    <Textarea
-                      {...fieldProps}
-                      disabled={submitting}
-                      maxLength={2_000}
-                      currentLength={draft.style.length}
-                      value={draft.style}
-                      onChange={(event) => updateField("style", event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-                <FormField label="禁止项" hint="不希望出现的情节、表达和内容边界。">
-                  {(fieldProps) => (
-                    <Textarea
-                      {...fieldProps}
-                      disabled={submitting}
-                      maxLength={2_000}
-                      currentLength={draft.boundaries.length}
-                      value={draft.boundaries}
-                      onChange={(event) => updateField("boundaries", event.currentTarget.value)}
-                    />
-                  )}
-                </FormField>
-              </div>
-            </details>
+            {OPTIONAL_SETUP_SECTIONS.map((section) => (
+              <details key={section.summary}>
+                <summary>{section.summary}</summary>
+                <div className="secret-settings">
+                  {section.fields.map(({ field, label, hint, maximum, ...optional }) => (
+                    <FormField key={field} label={label} hint={hint}>
+                      {(fieldProps) => (
+                        <Textarea
+                          {...fieldProps}
+                          {...optional}
+                          disabled={submitting}
+                          maxLength={maximum}
+                          currentLength={draft[field].length}
+                          value={draft[field]}
+                          onChange={(event) => updateField(field, event.currentTarget.value)}
+                        />
+                      )}
+                    </FormField>
+                  ))}
+                </div>
+              </details>
+            ))}
 
             <details>
               <summary>创作任务安排、上下文与自动检查</summary>
@@ -410,7 +383,7 @@ export function ProfessionalCreatePage() {
           <InlineAlert
             tone="info"
             title="专业项目已准备好"
-            description={`“${createdProject.name}”已创建空白第一章和项目规划；你填写的人物与规则已作为本人确认的正式设定保存。`}
+            description={`“${createdProject.name}”已创建空白第一章和项目规划；人物与世界内容已保存为待确认设定，写作偏好和禁止项已分别保存。`}
           />
           <h2 id="professional-created-heading">下一步</h2>
           <nav className="settings-actions" aria-label="进入新项目">
@@ -512,158 +485,141 @@ async function provisionProfessionalWorkspace(
     }
   }
 
-  const records = await runtime.story.formalRecords.listByProjectId(storyProjectId.value);
-  if (!records.ok) {
-    throw records.error;
-  }
   const facts = await runtime.story.facts.listByProjectId(storyProjectId.value);
   if (!facts.ok) {
     throw facts.error;
   }
 
-  const characterDescription = labeledLines([
-    ["主角", draft.protagonist],
-    ["人物关系", draft.relationship],
-  ]);
-  if (characterDescription.length > 0) {
-    await createFormalRecordIfMissing(runtime, records.value, {
-      projectId,
-      kind: "character",
-      recordKey: CHARACTER_RECORD_KEY,
-      value: {
-        title: "专业创建：人物设定",
-        description: characterDescription,
-        protagonist: draft.protagonist.trim(),
-        relationship: draft.relationship.trim(),
-        origin: "professional_setup",
-        userConfirmed: true,
-      },
-    });
-  }
-  await createStoryFactIfMissing(runtime, facts.value, {
+  await ensureStoryFact(runtime, facts.value, {
     projectId,
-    factType: "character_identity",
+    factType: "character_profile",
     contentText: labeledLines([["主角", draft.protagonist]]),
+    pending: true,
   });
-  await createStoryFactIfMissing(runtime, facts.value, {
+  await ensureStoryFact(runtime, facts.value, {
     projectId,
-    factType: "relationship",
+    factType: "core_relationship",
     contentText: labeledLines([["人物关系", draft.relationship]]),
+    pending: true,
   });
-
-  const ruleDescription = labeledLines([
-    ["世界背景", draft.worldBackground],
-    ["POV / 叙事视角", draft.pov],
-    ["风格", draft.style],
-    ["禁止项", draft.boundaries],
-  ]);
-  if (ruleDescription.length > 0) {
-    await createFormalRecordIfMissing(runtime, records.value, {
-      projectId,
-      kind: "world_rule",
-      recordKey: RULE_RECORD_KEY,
-      value: {
-        title: "专业创建：世界与写作规则",
-        description: ruleDescription,
-        worldBackground: draft.worldBackground.trim(),
-        pov: draft.pov.trim(),
-        style: draft.style.trim(),
-        boundaries: draft.boundaries.trim(),
-        origin: "professional_setup",
-        userConfirmed: true,
-      },
-    });
-  }
-  await createStoryFactIfMissing(runtime, facts.value, {
+  await ensureStoryFact(runtime, facts.value, {
     projectId,
-    factType: "world_setting",
+    factType: "world_rule",
     contentText: labeledLines([["世界背景", draft.worldBackground]]),
+    pending: true,
   });
-  await createStoryFactIfMissing(runtime, facts.value, {
+  if (draft.pov.trim().length > 0) {
+    await ensureProfessionalPreference(
+      runtime,
+      projectId,
+      "professional_setup.pov",
+      "叙事视角",
+      draft.pov,
+    );
+  }
+  if (draft.style.trim().length > 0) {
+    await ensureProfessionalPreference(
+      runtime,
+      projectId,
+      "professional_setup.style",
+      "写作风格",
+      draft.style,
+    );
+  }
+  await ensureStoryFact(runtime, facts.value, {
     projectId,
-    factType: "writing_rule",
+    factType: "writing_constraint",
     contentText: labeledLines([
-      ["叙事视角", draft.pov],
-      ["写作风格", draft.style],
+      ["禁止项", draft.boundaries],
+      ["其他创作约束", draft.otherConstraints],
     ]),
-  });
-  await createStoryFactIfMissing(runtime, facts.value, {
-    projectId,
-    factType: "writing_rule",
-    contentText: labeledLines([["禁止项", draft.boundaries]]),
     lock: true,
   });
 }
 
-async function createFormalRecordIfMissing(
+async function ensureProfessionalPreference(
   runtime: ReturnType<typeof useRuntime>,
-  existingRecords: readonly FormalStoryRecord[],
-  input: Readonly<{
-    projectId: string;
-    kind: FormalRecordKind;
-    recordKey: string;
-    value: unknown;
-  }>,
+  projectId: string,
+  identity: string,
+  label: string,
+  rawValue: string,
 ): Promise<void> {
-  const existing = existingRecords.find(
-    (record) => record.toSnapshot().recordKey === input.recordKey,
-  );
-  if (existing !== undefined) {
-    return;
-  }
-
-  const parsedValue = createStoryValue(input.value);
-  if (!parsedValue.ok) {
-    throw parsedValue.error;
-  }
-  const created = await runtime.story.formalRecordService.create({
-    projectId: input.projectId,
-    kind: input.kind,
-    recordKey: input.recordKey,
-    value: parsedValue.value,
-    actorId: runtime.story.actorId,
-    humanConfirmed: true,
-  });
-  if (!created.ok) {
-    throw created.error;
+  const value = rawValue.trim();
+  if (value.length === 0) return;
+  const chunks = splitPreferenceText(value, 440);
+  for (const [index, chunk] of chunks.entries()) {
+    const segmented = chunks.length > 1;
+    await runtime.story.writingFeedback.ensureManualPreference(
+      projectId,
+      segmented ? `${identity}.part.${String(index + 1)}` : identity,
+      segmented
+        ? `${label}（第 ${String(index + 1)}/${String(chunks.length)} 段）：${chunk}`
+        : `${label}：${chunk}`,
+    );
   }
 }
 
-async function createStoryFactIfMissing(
+function splitPreferenceText(value: string, maximumUtf16Length: number): readonly string[] {
+  const chunks: string[] = [];
+  let offset = 0;
+  while (offset < value.length) {
+    let end = Math.min(value.length, offset + maximumUtf16Length);
+    if (end < value.length && /[\uD800-\uDBFF]/u.test(value.charAt(end - 1))) end -= 1;
+    chunks.push(value.slice(offset, end));
+    offset = end;
+  }
+  return Object.freeze(chunks);
+}
+
+async function ensureStoryFact(
   runtime: ReturnType<typeof useRuntime>,
   existingFacts: readonly StoryFact[],
   input: Readonly<{
     projectId: string;
     factType: string;
     contentText: string;
+    pending?: boolean;
     lock?: boolean;
   }>,
 ): Promise<void> {
-  if (input.contentText.length === 0) {
-    return;
-  }
+  if (input.contentText.length === 0) return;
   const exists = existingFacts.some((fact) => {
     const snapshot = fact.toSnapshot();
-    return (
-      snapshot.status !== "deprecated" &&
-      snapshot.factType === input.factType &&
-      snapshot.contentText === input.contentText
-    );
+    return snapshot.factType === input.factType && snapshot.contentText === input.contentText;
   });
-  if (exists) {
-    return;
-  }
-  const created = await runtime.story.factService.createFormalUserFact({
+  if (exists) return;
+  const command = {
     projectId: input.projectId,
     factType: input.factType,
     contentText: input.contentText,
     actorId: runtime.story.actorId,
-    lock: input.lock ?? false,
-    humanConfirmed: true,
-  });
-  if (!created.ok) {
-    throw created.error;
+  };
+  const result = input.pending
+    ? await runtime.story.factService.stageUserDraftFact(command)
+    : await runtime.story.factService.createFormalUserFact({
+        ...command,
+        lock: input.lock ?? false,
+        humanConfirmed: true,
+      });
+  if (!result.ok) throw result.error;
+}
+
+function deriveProfessionalSetupSeed(
+  input: Parameters<typeof deriveProfessionalProjectSeed>[0],
+): ProjectSeed {
+  let seed = deriveProfessionalProjectSeed(input);
+  for (const key of ["characters", "relationships", "world"] as const) {
+    const field = seed[key];
+    if (field.values.length === 0) continue;
+    seed = updateProjectSeedField(seed, key, {
+      values: field.values,
+      source: field.source,
+      confirmation: "unconfirmed",
+      origin: field.origin,
+      updatedAt: input.now,
+    });
   }
+  return seed;
 }
 
 function buildOutlineSynopsis(draft: ProfessionalSetupDraft): string {
@@ -772,23 +728,26 @@ function readRecovery(): ProfessionalCreateRecovery | null {
     if (fields.some((field) => typeof draft[field] !== "string")) {
       return null;
     }
-    const recoveredDraft = Object.freeze(
-      Object.fromEntries(
-        fields.map((field) => [field, draft[field]]),
-      ) as unknown as ProfessionalSetupDraft,
-    );
+    const recoveredDraft = Object.freeze({
+      ...(Object.fromEntries(fields.map((field) => [field, draft[field]])) as Omit<
+        ProfessionalSetupDraft,
+        "otherConstraints"
+      >),
+      otherConstraints: typeof draft.otherConstraints === "string" ? draft.otherConstraints : "",
+    });
+    const recoveredSeed = parseProjectSeed(value.projectSeed);
+    const recoveryTime = new Date().toISOString();
     return {
       version: 1,
       projectId,
       projectCreatedAt,
       draft: recoveredDraft,
-      projectSeed:
-        parseProjectSeed(value.projectSeed) ??
-        deriveProfessionalProjectSeed({
-          seedId: `professional:${projectId ?? "recovery"}`,
-          ...recoveredDraft,
-          now: new Date().toISOString(),
-        }),
+      projectSeed: deriveProfessionalSetupSeed({
+        seedId: recoveredSeed?.seedId ?? `professional:${projectId ?? "recovery"}`,
+        ...recoveredDraft,
+        now: recoveryTime,
+        ...(recoveredSeed === null ? {} : { existing: recoveredSeed }),
+      }),
     };
   } catch {
     return null;

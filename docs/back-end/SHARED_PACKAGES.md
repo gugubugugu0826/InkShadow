@@ -1,14 +1,14 @@
 # InkShadow 共享核心包逐文件指引
 
-> 基于源码快照：2026-08-26  
+> 基于源码快照：2026-08-27  
 > 文档状态：`SUPPORTING_CURRENT`  
-> 桌面端应用清单版本：`0.2.13`（未签名人工复测候选；未打标签、未发布）；v0.2.12 及更早发布证据保持不可变；设计基线：`DESIGN v0.3.1b`  
-> 覆盖范围：`packages/*/src` 的 17 个工作区包，以及 `packages/data/migrations` 的 78 个本地数据库迁移（当前与已发布前向上限均为 `0078`）
+> 当前发布目标：`0.2.14`；0.2.13 候选与 v0.2.12 及更早发布证据保持不可变；设计基线：`DESIGN v0.3.1b`  
+> 覆盖范围：`packages/*/src` 的 17 个工作区包，以及 `packages/data/migrations` 的 80 个本地数据库迁移（当前工作树前向上限为 `0080`，已发布上限仍为 `0078`）
 
 `0071` 已随 `v0.2.6` 工程预发布冻结；`0072`–`0075` 已随 `v0.2.7` 最终候选冻结：
 `0074` 冻结不可变章节版本的本地故事资料整理责任，`0075` 保存生成尝试隐私快照及同一次调用标识。
 `0076`–`0077` / Tauri `79`–`80` 已随 `v0.2.9` 来源提交 `54d9647031bb97b4fc9f021d3b1acca7f6d25c47` 冻结；0.2.10 与 0.2.11 均没有新增迁移。
-`0078_generation_attempt_prose_invocation.sql` / Tauri `81` 已随 v0.2.12 冻结。当前 0.2.13 不新增或修改迁移；设定精确幂等继续使用现有事实修订审计，不删除历史重复行。
+`0078_generation_attempt_prose_invocation.sql` / Tauri `81` 已随 v0.2.12 冻结。0.2.14 当前只向前新增 `0079_story_fact_evidence.sql`／Tauri `82` 和 `0080_candidate_selection_action.sql`／Tauri `83`。前者以追加关系保存同一事实的多处不可变依据，历史重复行不删除、不改写；后者为新选区隔离结果冻结准确动作，历史空值保持兼容且不得伪造。迁移、维护和备份恢复自动化已经通过；正式构建、最终候选和人工安装门禁尚未完成。
 既有版本的最终候选、远端门禁、未签名打包和公开预发行事实保持不变；真实供应商和最终安装程序真机仍未完成，且不能借此改写
 `v0.2.9`、`v0.2.7`、`v0.2.6` 及更早标签、迁移校验值和制品证据。
 
@@ -144,31 +144,31 @@
 
 ## 7. `data`：Desktop SQLite 适配层
 
-| 文件                                                              | 内容                                                                                                                                                                                  |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/data/src/access-sqlite-store.ts`                        | 本地账户、权益、设备、会话和访问状态 SQLite 存储。                                                                                                                                    |
-| `packages/data/src/cloud-deletion-journal-sqlite-store.ts`        | 云删除请求的本地耐久日志和重试状态。                                                                                                                                                  |
-| `packages/data/src/executor.ts`                                   | 参数化 SQL 执行器、事务和结果类型端口。                                                                                                                                               |
-| `packages/data/src/fine-tuning-governance-sqlite-store.ts`        | 为 Story Core 微调仓储提供 `SqlExecutor` 适配外壳；真正的领域校验和编排位于 `story-core`。                                                                                            |
-| `packages/data/src/governed-creative-extension-sqlite-store.ts`   | 翻译/短剧等受治理候选和应用记录存储。                                                                                                                                                 |
-| `packages/data/src/governed-extension-provider-url.ts`            | 对 provider URL 做确定性分类和比较；它明确不是完整 SSRF 防护，最终 DNS/IP/连接限制由 Rust 原生网关执行。                                                                              |
-| `packages/data/src/graph-rag-sqlite-store.ts`                     | Graph RAG 来源、节点、边、投影 epoch 和权威状态存储。                                                                                                                                 |
-| `packages/data/src/index.ts`                                      | 包的公开导出入口。                                                                                                                                                                    |
-| `packages/data/src/maintenance.ts`                                | integrity/FK 检查、`VACUUM INTO` 备份、172 张权威表 allowlist 恢复、4 个派生根表清空和 schema 恢复契约；兼容旧 Tauri `73` 能力扫描列，173 张应用表中的 1 张临时远程派发租约表不恢复。 |
-| `packages/data/src/multi-agent-review-sqlite-store.ts`            | 多智能体评审任务、结论、证据和候选记录存储。                                                                                                                                          |
-| `packages/data/src/project-key-sqlite-store.ts`                   | 项目密钥版本、发布检查点和团队信封回执存储。                                                                                                                                          |
-| `packages/data/src/project-seed-sqlite-store.ts`                  | 新手创建旅程的 ProjectSeed、恢复点和一次性物化回执存储。                                                                                                                              |
-| `packages/data/src/schema.ts`                                     | 核心写作、AI 治理、搜索、Graph RAG、多智能体和创意扩展的 Drizzle 表声明；迁移清单权威在 Rust `local_migrations.rs`。                                                                  |
-| `packages/data/src/search-vector-sqlite-store.ts`                 | 搜索向量、嵌入来源和索引元数据存储。                                                                                                                                                  |
-| `packages/data/src/sqlite-repositories.ts`                        | 应用层项目、章节、版本、草稿、候选和导入仓储的 SQLite 实现。                                                                                                                          |
-| `packages/data/src/sync-access-schema.ts`                         | 同步身份、访问和本地账户权威表的 schema 辅助定义。                                                                                                                                    |
-| `packages/data/src/sync-incremental-settlement-sqlite-store.ts`   | 增量同步 terminal observation 和结算进度存储。                                                                                                                                        |
-| `packages/data/src/sync-materialization-sqlite-store.ts`          | 同步对象落地到本地领域表的幂等物化存储。                                                                                                                                              |
-| `packages/data/src/sync-snapshot-materialization-sqlite-store.ts` | 云快照暂存、验证、提交和物化回执存储。                                                                                                                                                |
-| `packages/data/src/sync-sqlite-store.ts`                          | 同步出站/入站操作、游标、tombstone、chunk 和传输台账存储。                                                                                                                            |
-| `packages/data/src/task-sqlite-repositories.ts`                   | 任务、租约、进度、失败、通知和任务日志仓储实现。                                                                                                                                      |
-| `packages/data/src/tauri-sqlite.ts`                               | 把 Tauri command 封装为参数化 SQLite executor；先进先出串行根操作、有界等待、迟到操作取消，并区分未开始与写入/提交结果待核对。                                                        |
-| `packages/data/src/team-template-application-sqlite-store.ts`     | 团队模板应用计划、执行状态和本地回执存储。                                                                                                                                            |
+| 文件                                                              | 内容                                                                                                                                                                              |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/data/src/access-sqlite-store.ts`                        | 本地账户、权益、设备、会话和访问状态 SQLite 存储。                                                                                                                                |
+| `packages/data/src/cloud-deletion-journal-sqlite-store.ts`        | 云删除请求的本地耐久日志和重试状态。                                                                                                                                              |
+| `packages/data/src/executor.ts`                                   | 参数化 SQL 执行器、事务和结果类型端口。                                                                                                                                           |
+| `packages/data/src/fine-tuning-governance-sqlite-store.ts`        | 为 Story Core 微调仓储提供 `SqlExecutor` 适配外壳；真正的领域校验和编排位于 `story-core`。                                                                                        |
+| `packages/data/src/governed-creative-extension-sqlite-store.ts`   | 翻译/短剧等受治理候选和应用记录存储。                                                                                                                                             |
+| `packages/data/src/governed-extension-provider-url.ts`            | 对 provider URL 做确定性分类和比较；它明确不是完整 SSRF 防护，最终 DNS/IP/连接限制由 Rust 原生网关执行。                                                                          |
+| `packages/data/src/graph-rag-sqlite-store.ts`                     | Graph RAG 来源、节点、边、投影 epoch 和权威状态存储。                                                                                                                             |
+| `packages/data/src/index.ts`                                      | 包的公开导出入口。                                                                                                                                                                |
+| `packages/data/src/maintenance.ts`                                | integrity/FK 检查、`VACUUM INTO` 备份、175 张可恢复表、4 个派生根表清空和 schema 恢复契约；兼容旧 Tauri `73` 能力扫描列以及缺少故事事实证据表的旧备份，临时远程派发租约表不恢复。 |
+| `packages/data/src/multi-agent-review-sqlite-store.ts`            | 多智能体评审任务、结论、证据和候选记录存储。                                                                                                                                      |
+| `packages/data/src/project-key-sqlite-store.ts`                   | 项目密钥版本、发布检查点和团队信封回执存储。                                                                                                                                      |
+| `packages/data/src/project-seed-sqlite-store.ts`                  | 新手创建旅程的 ProjectSeed、恢复点和一次性物化回执存储。                                                                                                                          |
+| `packages/data/src/schema.ts`                                     | 核心写作、AI 治理、搜索、Graph RAG、多智能体和创意扩展的 Drizzle 表声明；迁移清单权威在 Rust `local_migrations.rs`。                                                              |
+| `packages/data/src/search-vector-sqlite-store.ts`                 | 搜索向量、嵌入来源和索引元数据存储。                                                                                                                                              |
+| `packages/data/src/sqlite-repositories.ts`                        | 应用层项目、章节、版本、草稿、候选和导入仓储的 SQLite 实现。                                                                                                                      |
+| `packages/data/src/sync-access-schema.ts`                         | 同步身份、访问和本地账户权威表的 schema 辅助定义。                                                                                                                                |
+| `packages/data/src/sync-incremental-settlement-sqlite-store.ts`   | 增量同步 terminal observation 和结算进度存储。                                                                                                                                    |
+| `packages/data/src/sync-materialization-sqlite-store.ts`          | 同步对象落地到本地领域表的幂等物化存储。                                                                                                                                          |
+| `packages/data/src/sync-snapshot-materialization-sqlite-store.ts` | 云快照暂存、验证、提交和物化回执存储。                                                                                                                                            |
+| `packages/data/src/sync-sqlite-store.ts`                          | 同步出站/入站操作、游标、tombstone、chunk 和传输台账存储。                                                                                                                        |
+| `packages/data/src/task-sqlite-repositories.ts`                   | 任务、租约、进度、失败、通知和任务日志仓储实现。                                                                                                                                  |
+| `packages/data/src/tauri-sqlite.ts`                               | 把 Tauri command 封装为参数化 SQLite executor；先进先出串行根操作、有界等待、迟到操作取消，并区分未开始与写入/提交结果待核对。                                                    |
+| `packages/data/src/team-template-application-sqlite-store.ts`     | 团队模板应用计划、执行状态和本地回执存储。                                                                                                                                        |
 
 ### 7.1 本地数据库迁移
 
@@ -254,6 +254,8 @@
 | `packages/data/migrations/0076_direct_local_story_fact_author_revision.sql`          | 为直接模式本地故事事实增加带审计的作者修订，不改变权威正文和不可变版本。                                                                                                       |
 | `packages/data/migrations/0077_project_display_identities.sql`                       | 保存不含作品内容、可撤销且带修订历史的项目显示身份。                                                                                                                           |
 | `packages/data/migrations/0078_generation_attempt_prose_invocation.sql`              | 不新增字段或表，只扩展不可变生成尝试隐私守卫，使续写与开头生成均可绑定精确 Model Hub 调用标识。                                                                                |
+| `packages/data/migrations/0079_story_fact_evidence.sql`                              | 为一条受治理故事事实追加多处不可变正文依据，保留原始来源、作者决定和历史重复行。                                                                                               |
+| `packages/data/migrations/0080_candidate_selection_action.sql`                       | 为新选区隔离结果冻结改写、润色、扩写或缩写的准确动作；历史记录允许空值并走明确兼容分支。                                                                                       |
 
 当前六张写作体验/调查权威表全部进入既有备份删除与恢复顺序；`planned_invocation_id` 随
 `consistency_investigation_steps` 整表恢复。当前恢复断言为 172 张表；唯一排除项仍是 1 张不含用户

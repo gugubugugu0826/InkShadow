@@ -1,4 +1,10 @@
-import { AiCandidate, AppError, type Chapter, type UuidV7 } from "@inkshadow/domain";
+import {
+  AiCandidate,
+  AppError,
+  type AiCandidateApplicationIntent,
+  type Chapter,
+  type UuidV7,
+} from "@inkshadow/domain";
 
 import { createContextCompilationTrace } from "./context-compilation-trace-store";
 import { ModelCenterError } from "./model-center-store";
@@ -61,6 +67,7 @@ export interface SelectionRewriteCandidateInput {
       modelId: string;
     }>,
   ) => void | Promise<void>;
+  readonly assertBeforeProviderDispatch?: () => void;
 }
 
 export interface SelectionRewriteDisclosure extends ProviderActionDisclosure {
@@ -112,6 +119,13 @@ export function selectionWritingModelTask(
 
 function selectionWritingAction(input: SelectionRewriteCandidateInput): SelectionWritingAction {
   return input.action ?? "selection_rewrite";
+}
+
+export function selectionWritingActionFromIntent(
+  intent: AiCandidateApplicationIntent,
+): SelectionWritingAction | null {
+  if (intent.task !== "selection_rewrite") return null;
+  return intent.selectionAction ?? "selection_rewrite";
 }
 
 /**
@@ -210,6 +224,7 @@ export async function createSelectionRewriteCandidate(
           }
           throw cause;
         }
+        input.assertBeforeProviderDispatch?.();
       },
       ...(input.onDelta === undefined ? {} : { onDelta: input.onDelta }),
     });
@@ -232,6 +247,7 @@ export async function createSelectionRewriteCandidate(
     latest.chapter,
     rewrittenSelection,
     input.selection,
+    selectionWritingAction(input),
   );
   try {
     await runtime.contextTraceOutputs.commit({
@@ -644,6 +660,7 @@ async function buildSelectionCandidate(
   chapter: Chapter,
   content: string,
   selection: SelectionRewriteAnchor,
+  action: SelectionWritingAction,
 ): Promise<AiCandidate> {
   const streaming = AiCandidate.createStreaming({
     id: runtime.ids.next(),
@@ -658,6 +675,7 @@ async function buildSelectionCandidate(
       payload: "fragment",
       startUtf16: selection.startUtf16,
       endUtf16: selection.endUtf16,
+      selectionAction: action,
     },
   });
   if (!streaming.ok) {

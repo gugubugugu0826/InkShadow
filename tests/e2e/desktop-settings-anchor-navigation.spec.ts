@@ -155,6 +155,54 @@ test("keeps direct writing settings targets reachable at every accepted width", 
   }
 });
 
+test("keeps direct writing transfer and diagnostics reachable at equivalent 150%", async ({
+  browser,
+  browserName,
+}) => {
+  expect(browserName).toBe("chromium");
+  const context = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    colorScheme: "light",
+    locale: "zh-CN",
+    reducedMotion: "reduce",
+  });
+  const zoomPage = await context.newPage();
+  const cdp = await context.newCDPSession(zoomPage);
+
+  try {
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+      width: 960,
+      height: 600,
+      screenWidth: 1440,
+      screenHeight: 900,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    await zoomPage.goto("http://127.0.0.1:1420/#/start");
+    await zoomPage.evaluate(() => window.localStorage.clear());
+    await zoomPage.goto("http://127.0.0.1:1420/#/settings#data-transfer");
+    expect(
+      await zoomPage.evaluate(() => ({
+        innerWidth,
+        innerHeight,
+        screenWidth: screen.width,
+        screenHeight: screen.height,
+      })),
+    ).toEqual({ innerWidth: 960, innerHeight: 600, screenWidth: 1440, screenHeight: 900 });
+
+    await expect(zoomPage.getByRole("heading", { level: 2, name: "导入与导出" })).toBeFocused();
+    await expectNoHorizontalPageOverflow(zoomPage);
+
+    await zoomPage.goto("http://127.0.0.1:1420/#/settings#diagnostics");
+    await expect(zoomPage.getByRole("heading", { level: 2, name: "脱敏诊断包" })).toBeFocused();
+    await expect(zoomPage.getByRole("button", { name: "下载脱敏诊断包" })).toBeVisible();
+    await expectNoHorizontalPageOverflow(zoomPage);
+  } finally {
+    await cdp.detach().catch(() => undefined);
+    await context.close();
+  }
+});
+
 test("keeps direct writing transfer and diagnostics reachable at equivalent 200%", async ({
   browser,
   browserName,

@@ -126,6 +126,71 @@ describe("browser development Candidate revision authority", () => {
     expect(persistedChapter.toSnapshot()).toMatchObject({ content: "stable", revision: 1 });
     expect(versions.map((version) => version.sequence)).toEqual([1]);
   });
+
+  it("reloads all four exact selection actions after a browser repository restart", async () => {
+    const first = createDevelopmentRepositories(window.localStorage);
+    const project = expectOk(Project.create({ id: PROJECT_ID, name: "Selection", now: NOW }));
+    expectOk(await first.projects.create(project));
+    const chapter = expectOk(
+      Chapter.create({
+        id: CHAPTER_ID,
+        projectId: PROJECT_ID,
+        title: "Chapter",
+        content: "稳定选区正文",
+        initialVersionId: INITIAL_VERSION_ID,
+        now: NOW,
+      }),
+    );
+    expectOk(
+      await first.contentCommits.createChapter({
+        chapter,
+        initialVersion: createVersion({
+          id: INITIAL_VERSION_ID,
+          chapter,
+          parentVersionId: null,
+          sequence: 1,
+          content: chapter.content,
+          reason: "created",
+          candidateId: null,
+        }),
+      }),
+    );
+    const actions = ["selection_rewrite", "polish", "expand", "shorten"] as const;
+    for (const [index, selectionAction] of actions.entries()) {
+      const streaming = expectOk(
+        AiCandidate.createStreaming({
+          id: uuid(40 + index),
+          projectId: PROJECT_ID,
+          chapterId: CHAPTER_ID,
+          source: "polish",
+          baseVersionId: INITIAL_VERSION_ID,
+          now: NOW,
+          applicationIntent: {
+            task: "selection_rewrite",
+            application: "replace_selection",
+            payload: "fragment",
+            startUtf16: 2,
+            endUtf16: 6,
+            selectionAction,
+          },
+        }),
+      );
+      expectOk(
+        await first.aiCandidates.create(expectOk(streaming.markReady("隔离片段", checksum(), NOW))),
+      );
+    }
+
+    const reopened = createDevelopmentRepositories(window.localStorage);
+    for (const [index, selectionAction] of actions.entries()) {
+      const candidate = expectPresent(
+        expectOk(await reopened.aiCandidates.findById(uuid(40 + index))),
+      );
+      expect(candidate.applicationIntent).toMatchObject({
+        task: "selection_rewrite",
+        selectionAction,
+      });
+    }
+  });
 });
 
 function createVersion(

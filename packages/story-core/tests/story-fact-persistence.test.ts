@@ -57,6 +57,10 @@ const directLocalAuthorRevisionMigration = readFileSync(
   ),
   "utf8",
 );
+const storyFactEvidenceMigration = readFileSync(
+  new URL("../../data/migrations/0079_story_fact_evidence.sql", import.meta.url),
+  "utf8",
+);
 const migration = [
   baseMigration,
   aliasResolutionMigration,
@@ -64,6 +68,7 @@ const migration = [
   historicalContinuousRouteReceiptMigration,
   userRevisionMigration,
   directLocalAuthorRevisionMigration,
+  storyFactEvidenceMigration,
 ].join("\n");
 const T0 = "2026-08-01T00:00:00.000Z";
 const T1 = "2026-08-01T00:01:00.000Z";
@@ -584,7 +589,7 @@ describe("unified story fact SQLite store", () => {
     const store = new SqliteStoryFactStore(executor);
     const chapterId = uuid(20);
     const versionId = uuid(21);
-    const content = "0123成为盟友89";
+    const content = "🌙0123成为盟友89";
     seedChapter(executor, chapterId, versionId, content);
 
     const mismatched = unwrap(
@@ -595,11 +600,11 @@ describe("unified story fact SQLite store", () => {
         contentText: "林遥和苏晚成为敌人。",
         source: {
           kind: "chapter_span",
-          reference: `chapter-version:${versionId}#4:8`,
+          reference: `chapter-version:${versionId}#6:10`,
           chapterId,
           versionId,
-          startOffset: 4,
-          endOffset: 8,
+          startOffset: 6,
+          endOffset: 10,
           sourceLength: content.length,
           excerpt: "成为敌人",
         },
@@ -627,11 +632,11 @@ describe("unified story fact SQLite store", () => {
         structuredValue: mismatched.toSnapshot().structuredValue,
         source: {
           kind: "chapter_span",
-          reference: `chapter-version:${versionId}#4:8`,
+          reference: `chapter-version:${versionId}#6:10`,
           chapterId,
           versionId,
-          startOffset: 4,
-          endOffset: 8,
+          startOffset: 6,
+          endOffset: 10,
           sourceLength: content.length,
           excerpt: "成为盟友",
         },
@@ -642,6 +647,52 @@ describe("unified story fact SQLite store", () => {
       }),
     );
     expect((await store.create(exact)).ok).toBe(true);
+  });
+
+  it("persists several exact UTF-16 evidence spans against an approximately forty-thousand-character version", async () => {
+    const executor = createExecutor();
+    const store = new SqliteStoryFactStore(executor);
+    const chapterId = uuid(230);
+    const versionId = uuid(231);
+    const content = `${"长".repeat(40_935)}🌙结尾`;
+    seedChapter(executor, chapterId, versionId, content);
+    const spans = [
+      { start: 0, excerpt: "长长长长" },
+      { start: 20_000, excerpt: "长长长长" },
+      { start: 40_935, excerpt: "🌙结尾" },
+    ] as const;
+    const startedAt = performance.now();
+    for (const [index, span] of spans.entries()) {
+      const fact = unwrap(
+        StoryFact.create({
+          id: uuid(232 + index),
+          projectId: PROJECT_ID,
+          factType: "world_setting",
+          contentText: `长篇原文依据 ${String(index + 1)}`,
+          source: {
+            kind: "chapter_span",
+            reference: `chapter-version:${versionId}#${String(span.start)}:${String(
+              span.start + span.excerpt.length,
+            )}`,
+            chapterId,
+            versionId,
+            startOffset: span.start,
+            endOffset: span.start + span.excerpt.length,
+            sourceLength: content.length,
+            excerpt: span.excerpt,
+          },
+          confidence: 1,
+          status: "unconfirmed",
+          origin: "system",
+          needsReview: true,
+          humanConfirmed: false,
+          now: T0,
+        }),
+      );
+      expect((await store.create(fact)).ok).toBe(true);
+      expect(unwrap(await store.listEvidenceByFactId(fact.id))).toHaveLength(1);
+    }
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
   });
 
   it("persists a narrowly governed entity-alias resolution before separate confirmation", async () => {
@@ -1636,6 +1687,114 @@ describe("unified story fact SQLite store", () => {
     );
   });
 
+  it("keeps one semantic fact across versions while retaining each immutable evidence span", async () => {
+    const executor = createExecutor();
+    const chapterId = uuid(130);
+    const firstVersionId = uuid(131);
+    const secondVersionId = uuid(132);
+    const sentence = "周望来到钟楼。";
+    seedChapter(executor, chapterId, firstVersionId, sentence);
+    const createPending = (id: string, versionId: string, reference: string) =>
+      unwrap(
+        StoryFact.create({
+          id,
+          projectId: PROJECT_ID,
+          factType: "scene_tag",
+          contentText: "周望出现在钟楼",
+          structuredValue: {
+            schemaVersion: "inkshadow.rebuildable-system-fact.v1",
+            replacementKey: `direct-local:${chapterId}:scene_tag:${"d".repeat(64)}`,
+            payload: {
+              schemaVersion: "inkshadow.direct-local-story-fact.v1",
+              kind: "character_location_occurrence",
+              character: "周望",
+              location: "钟楼",
+              evidence: { excerptDigest: "d".repeat(64) },
+            },
+          },
+          source: {
+            kind: "chapter_span",
+            reference,
+            chapterId,
+            versionId,
+            startOffset: 0,
+            endOffset: sentence.length,
+            sourceLength: sentence.length,
+            excerpt: sentence,
+          },
+          confidence: 0.98,
+          status: "unconfirmed",
+          origin: "system",
+          needsReview: true,
+          humanConfirmed: false,
+          now: T0,
+        }),
+      );
+    const store = new SqliteStoryFactStore(executor);
+    const first = createPending(
+      uuid(133),
+      firstVersionId,
+      "direct-local:inkshadow.direct-local-story-fact.v1:first",
+    );
+    const firstReceipt = unwrap(
+      await store.createWithAuthorityFence(first, {
+        chapterId,
+        expectedCurrentVersionId: firstVersionId,
+      }),
+    );
+    expect(firstReceipt.created).toBe(true);
+    const authorRevision = unwrap(
+      firstReceipt.fact.editStagedAsUser({
+        contentText: "周望在钟楼值守",
+        actorId: ACTOR_ID,
+        humanConfirmed: true,
+        expectedRevision: 1,
+        now: T1,
+      }),
+    );
+    expect((await store.save(authorRevision, 1)).ok).toBe(true);
+
+    executor.database
+      .prepare(
+        `INSERT INTO chapter_versions (
+           id, project_id, chapter_id, parent_version_id, sequence,
+           content, content_checksum, reason, source_candidate_id, created_at
+         ) VALUES (?, ?, ?, ?, 2, ?, ?, 'manual', NULL, ?)`,
+      )
+      .run(secondVersionId, PROJECT_ID, chapterId, firstVersionId, sentence, "b".repeat(64), T1);
+    executor.database
+      .prepare("UPDATE chapters SET current_version_id = ? WHERE id = ?")
+      .run(secondVersionId, chapterId);
+
+    const later = createPending(
+      uuid(134),
+      secondVersionId,
+      "direct-local:inkshadow.direct-local-story-fact.v1:later",
+    );
+    const left = await new SqliteStoryFactStore(executor).createWithAuthorityFence(later, {
+      chapterId,
+      expectedCurrentVersionId: secondVersionId,
+    });
+    const right = await new SqliteStoryFactStore(executor).createWithAuthorityFence(
+      createPending(
+        uuid(135),
+        secondVersionId,
+        "direct-local:inkshadow.direct-local-story-fact.v1:later",
+      ),
+      { chapterId, expectedCurrentVersionId: secondVersionId },
+    );
+    expect(unwrap(left)).toMatchObject({
+      created: false,
+      fact: { id: first.id, revision: 2 },
+    });
+    expect(unwrap(right)).toMatchObject({
+      created: false,
+      fact: { id: first.id, revision: 2 },
+    });
+    expect(unwrap(await store.listByProjectId(unwrap(parseUuidV7(PROJECT_ID))))).toHaveLength(1);
+    expect(unwrap(await store.listEvidenceByFactId(first.id))).toHaveLength(2);
+  });
+
   it("atomically undoes supplemental dispositions, recovers retries, and fails closed on stale authority", async () => {
     const executor = createExecutor();
     const store = new SqliteStoryFactStore(executor);
@@ -1806,6 +1965,13 @@ describe("unified story fact SQLite store", () => {
         }),
       ).replacedFactIds,
     ).toEqual([]);
+    expect(unwrap(await store.listEvidenceByFactId(first.id))).toEqual([
+      expect.objectContaining({
+        factId: first.id,
+        versionId: firstVersionId,
+        excerpt: firstContent,
+      }),
+    ]);
 
     executor.database
       .prepare(
@@ -1862,6 +2028,13 @@ describe("unified story fact SQLite store", () => {
       deprecated: false,
       revision: 1,
     });
+    expect(unwrap(await store.listEvidenceByFactId(current.id))).toEqual([
+      expect.objectContaining({
+        factId: current.id,
+        versionId: secondVersionId,
+        excerpt: secondContent,
+      }),
+    ]);
   });
   it("holds the BEGIN IMMEDIATE writer lock from authority checks through fact insertion", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "inkshadow-story-fence-"));
@@ -2110,6 +2283,13 @@ describe("unified story fact SQLite store", () => {
       receipt: { createdFactCount: 1, retiredFactCount: 1 },
       retiredFactIds: [oldProjection.id],
     });
+    expect(unwrap(await store.listEvidenceByFactId(currentProjection.id))).toEqual([
+      expect.objectContaining({
+        factId: currentProjection.id,
+        versionId,
+        excerpt: content,
+      }),
+    ]);
     expect(unwrap(await store.findById(oldProjection.id))?.toSnapshot()).toMatchObject({
       status: "deprecated",
       revision: 2,

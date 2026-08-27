@@ -1,9 +1,9 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { useRuntime } from "../runtime-context";
+import { closeCurrentWindow } from "../infrastructure/tauri-current-window";
 
 const STRESS_CHARACTER_COUNT = 5_000_000;
 const COMPOSITION_HOLD_MS = 65_000;
@@ -341,7 +341,5 @@ function visibleFailure(failure: unknown): string {
 
 async function closeQaWindow(): Promise<void> {
   await new Promise((resolve) => window.setTimeout(resolve, 500));
-  await getCurrentWindow()
-    .close()
-    .catch(() => undefined);
+  await closeCurrentWindow().catch(() => undefined);
 }

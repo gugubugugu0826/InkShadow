@@ -187,6 +187,68 @@ describe("context history panel", () => {
     expect(screen.queryByText("019a1f9f-4ab3-7000-8000-000000000006")).toBeNull();
   });
 
+  it("projects current and unknown historical adoption reasons into natural Chinese", async () => {
+    const user = userEvent.setup();
+    const [baseEntry] = makeTrace().entries;
+    if (baseEntry === undefined) throw new Error("Expected a baseline context entry.");
+    const trace: ContextCompilationTrace = {
+      ...makeTrace(),
+      entries: [
+        {
+          ...baseEntry,
+          contextCandidateId: "english-reason",
+          selectionReason: "The author explicitly requested this source for the current task.",
+        },
+        {
+          ...baseEntry,
+          contextCandidateId: "unknown-reason",
+          selectionReason: "legacy_internal_selection_reason",
+        },
+        {
+          ...baseEntry,
+          contextCandidateId: "locked-rule-reason",
+          selectionReason:
+            "The user confirmed and locked this fact, so it is a required hard constraint.",
+        },
+        {
+          ...baseEntry,
+          contextCandidateId: "project-seed-reason",
+          selectionReason:
+            "The author confirmed this currentDirection creation input; it remains traceable to the project seed.",
+        },
+        {
+          ...baseEntry,
+          contextCandidateId: "selection-range-reason",
+          selectionReason:
+            "The author explicitly selected this exact saved range and supplied a rewrite instruction.",
+        },
+      ],
+    };
+    const store = makeStore({
+      listByProjectId: vi.fn(() => Promise.resolve([makeSummary(trace)])),
+      findById: vi.fn(() => Promise.resolve(trace)),
+    });
+
+    render(
+      <ContextHistoryPanel
+        projectId={PROJECT_ID}
+        store={store}
+        novelSkills={makeUnavailableNovelSkills()}
+      />,
+    );
+    await user.click(await screen.findByRole("button", { name: "查看采用与舍弃原因" }));
+
+    expect(await screen.findByText("作者明确要求本次创作采用这项资料。")).toBeTruthy();
+    expect(screen.getByText("本次创作按当前任务与资料范围采用了这项资料。")).toBeTruthy();
+    expect(screen.getByText("作者已确认并锁定这项设定，因此本次创作必须遵守。")).toBeTruthy();
+    expect(
+      screen.getByText("作者已确认这项当前剧情方向；采用时仍可追溯到项目创作种子。"),
+    ).toBeTruthy();
+    expect(screen.getByText("作者明确选中了这段已保存正文，并为本次处理给出了要求。")).toBeTruthy();
+    expect(screen.queryByText(/The author explicitly requested/u)).toBeNull();
+    expect(screen.queryByText("legacy_internal_selection_reason")).toBeNull();
+  });
+
   it("uses a safe explanation when an older trace contains an unknown discard reason", async () => {
     const user = userEvent.setup();
     const base = makeTrace();

@@ -54,11 +54,20 @@ export function selectProjectSeedContextCandidates(
     if (field.confirmation !== "confirmed" || field.values.length === 0) {
       continue;
     }
+    // Professional creation persists POV/style in ProjectSeed for recovery and
+    // separately exposes them through the editable writing-preference system.
+    // The dedicated preference is the generation source, so do not send the
+    // same instruction twice from this recovery record.
+    if ((key === "pov" || key === "style") && field.source === "professional_setup") {
+      continue;
+    }
     const layer = FIELD_LAYERS[key];
     const sourceType: ContextEvidenceSourceType =
-      field.source === "imported_text" || field.source === "import_analysis"
-        ? "import"
-        : "user_input";
+      key === "boundaries"
+        ? "story_rule"
+        : field.source === "imported_text" || field.source === "import_analysis"
+          ? "import"
+          : "user_input";
     candidates.push(
       Object.freeze({
         id: `project-seed:${record.projectId}:${key}:r${String(record.revision)}`,

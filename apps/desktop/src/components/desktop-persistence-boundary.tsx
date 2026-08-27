@@ -1,6 +1,6 @@
-import { useToast } from "@inkshadow/ui";
+import { Button, Dialog, InlineAlert, useToast } from "@inkshadow/ui";
 import { useBlocker } from "react-router-dom";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
   DesktopCloseCoordinator,
@@ -10,6 +10,16 @@ import {
   desktopPersistenceLifecycle,
   type PersistenceFlushOutcome,
 } from "../infrastructure/persistence-lifecycle";
+import {
+  destroyCurrentWindow,
+  listenCurrentWindowCloseRequested,
+} from "../infrastructure/tauri-current-window";
+import {
+  currentGenerationNavigationGuard,
+  hasActiveGenerationNavigationGuard,
+  subscribeGenerationNavigationGuard,
+  type ActiveGenerationNavigationGuard,
+} from "../infrastructure/generation-navigation-lifecycle";
 import { useRuntime } from "../runtime-context";
 import { ComponentOwnershipBoundary } from "./component-ownership-path";
 
@@ -19,10 +29,14 @@ export function DesktopPersistenceBoundary({ children }: { readonly children: Re
   const runtime = useRuntime();
   const { toast } = useToast();
   const closeListenerActiveRef = useRef<boolean>(false);
+  const closeCoordinatorRef = useRef<DesktopCloseCoordinator | null>(null);
+  const [nativeCloseGuard, setNativeCloseGuard] = useState<ActiveGenerationNavigationGuard | null>(
+    null,
+  );
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent): void => {
-      if (!desktopPersistenceLifecycle.hasPendingWork()) {
+      if (!desktopPersistenceLifecycle.hasPendingWork() && !hasActiveGenerationNavigationGuard()) {
         return;
       }
       event.preventDefault();
@@ -39,22 +53,27 @@ export function DesktopPersistenceBoundary({ children }: { readonly children: Re
 
     closeListenerActiveRef.current = true;
     let unlisten: (() => void) | null = null;
-    void import("@tauri-apps/api/window")
-      .then(async ({ getCurrentWindow }) => {
+    void Promise.resolve()
+      .then(async () => {
         if (isListenerInactive(closeListenerActiveRef)) {
           return;
         }
-        const appWindow = getCurrentWindow();
         const coordinator = new DesktopCloseCoordinator({
           persistence: desktopPersistenceLifecycle,
           closeRuntime: () => runtime.close(),
-          destroyWindow: () => appWindow.destroy(),
+          destroyWindow: destroyCurrentWindow,
           reportPersistentNotice: (notice) => showPersistentNotice(toast, notice),
         });
-        const stopListening = await appWindow.onCloseRequested((event) => {
+        closeCoordinatorRef.current = coordinator;
+        const stopListening = await listenCurrentWindowCloseRequested((event) => {
           // Tauri requires this to happen synchronously in the callback. The
           // coordinator destroys the window only after every bounded gate.
           event.preventDefault();
+          const guard = currentGenerationNavigationGuard();
+          if (guard !== null) {
+            setNativeCloseGuard(guard);
+            return;
+          }
           void coordinator.requestClose();
         });
         unlisten = stopListening;
@@ -74,6 +93,7 @@ export function DesktopPersistenceBoundary({ children }: { readonly children: Re
 
     return () => {
       closeListenerActiveRef.current = false;
+      closeCoordinatorRef.current = null;
       unlisten?.();
     };
   }, [runtime, toast]);
@@ -81,6 +101,19 @@ export function DesktopPersistenceBoundary({ children }: { readonly children: Re
   return (
     <ComponentOwnershipBoundary name="DesktopPersistenceBoundary">
       {children}
+      {nativeCloseGuard !== null && (
+        <GenerationExitDialog
+          guard={nativeCloseGuard}
+          destination="关闭"
+          onStay={() => setNativeCloseGuard(null)}
+          onStopped={async () => {
+            const coordinator = closeCoordinatorRef.current;
+            if (coordinator !== null && (await coordinator.requestClose()).status === "destroyed") {
+              setNativeCloseGuard(null);
+            }
+          }}
+        />
+      )}
     </ComponentOwnershipBoundary>
   );
 }
@@ -97,16 +130,32 @@ function isListenerInactive(activeRef: Readonly<{ current: boolean }>): boolean 
 export function PersistenceRouteBoundary({ children }: { readonly children: ReactNode }) {
   const { toast } = useToast();
   const processingRef = useRef<Promise<void> | null>(null);
+  const [generationGuard, setGenerationGuard] = useState<ActiveGenerationNavigationGuard | null>(
+    currentGenerationNavigationGuard,
+  );
+
+  useEffect(
+    () =>
+      subscribeGenerationNavigationGuard(() => {
+        setGenerationGuard(currentGenerationNavigationGuard());
+      }),
+    [],
+  );
+
   const blocker = useBlocker(
     ({ currentLocation, nextLocation }) =>
-      desktopPersistenceLifecycle.hasPendingWork() &&
+      (desktopPersistenceLifecycle.hasPendingWork() || hasActiveGenerationNavigationGuard()) &&
       (currentLocation.pathname !== nextLocation.pathname ||
         currentLocation.search !== nextLocation.search ||
         currentLocation.hash !== nextLocation.hash),
   );
 
   useEffect(() => {
-    if (blocker.state !== "blocked" || processingRef.current !== null) {
+    if (
+      blocker.state !== "blocked" ||
+      processingRef.current !== null ||
+      currentGenerationNavigationGuard() !== null
+    ) {
       return;
     }
 
@@ -131,7 +180,28 @@ export function PersistenceRouteBoundary({ children }: { readonly children: Reac
   return (
     <>
       {children}
-      {blocker.state === "blocked" && (
+      {blocker.state === "blocked" && generationGuard !== null && (
+        <GenerationExitDialog
+          guard={generationGuard}
+          destination="离开"
+          onStay={() => blocker.reset()}
+          onFailure={() => blocker.reset()}
+          onStopped={async () => {
+            const cycle = desktopPersistenceLifecycle.flush("route-change", ROUTE_FLUSH_TIMEOUT_MS);
+            processingRef.current = cycle.then(() => undefined);
+            const outcome = await cycle.finally(() => {
+              processingRef.current = null;
+            });
+            if (outcome.status !== "success") {
+              showRouteFlushFailure(toast, outcome);
+              blocker.reset();
+              return;
+            }
+            blocker.proceed();
+          }}
+        />
+      )}
+      {blocker.state === "blocked" && generationGuard === null && (
         <div
           className="ink-navigation-save-status"
           role="status"
@@ -144,6 +214,68 @@ export function PersistenceRouteBoundary({ children }: { readonly children: Reac
         </div>
       )}
     </>
+  );
+}
+
+function GenerationExitDialog({
+  guard,
+  destination,
+  onStay,
+  onFailure,
+  onStopped,
+}: {
+  readonly guard: ActiveGenerationNavigationGuard;
+  readonly destination: "关闭" | "离开";
+  readonly onStay: () => void;
+  readonly onFailure?: () => void;
+  readonly onStopped: () => Promise<void>;
+}) {
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+  const closing = destination === "关闭";
+  const stop = (): void => {
+    if (busy) return;
+    setBusy(true);
+    void guard
+      .stopAndPreserve()
+      .then(onStopped)
+      .catch(() => {
+        toast({
+          title: `尚不能安全${destination}`,
+          description: `本次生成没有完成安全结算。${closing ? "应用" : "页面"}仍保持打开，请稍后重试或先保存可见内容。`,
+          tone: "error",
+          duration: null,
+        });
+        onFailure?.();
+      })
+      .finally(() => setBusy(false));
+  };
+  return (
+    <Dialog
+      open
+      dismissible={!busy}
+      onOpenChange={(open) => {
+        if (!open) onStay();
+      }}
+      title={`停止本次生成并${destination}？`}
+      description={`${closing ? "关闭应用" : "离开"}将停止本次${guard.actionLabel}。你也可以留在${closing ? "应用中" : "当前页面"}继续等待。`}
+      footer={
+        <>
+          <Button variant="secondary" disabled={busy} onClick={onStay}>
+            留在{closing ? "应用" : "当前页面"}
+          </Button>
+          <Button loading={busy} onClick={stop}>
+            停止生成并{destination}
+          </Button>
+        </>
+      }
+    >
+      <InlineAlert
+        tone="warning"
+        title="请求已经开始，停止不代表从未发送"
+        description="墨影会先结算本次请求；已收到的内容会保持为隔离的未完成建议，正文不会改变，也不会自动重发。"
+      />
+    </Dialog>
   );
 }
 

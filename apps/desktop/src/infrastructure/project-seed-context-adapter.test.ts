@@ -1,4 +1,8 @@
-import { createProjectSeed, updateProjectSeedField } from "@inkshadow/domain";
+import {
+  createProjectSeed,
+  deriveProfessionalProjectSeed,
+  updateProjectSeedField,
+} from "@inkshadow/domain";
 import { describe, expect, it } from "vitest";
 
 import { selectProjectSeedContextCandidates } from "./project-seed-context-adapter";
@@ -54,12 +58,42 @@ describe("project seed context adapter", () => {
       priority: 1_000,
       evidence: [
         {
-          sourceType: "user_input",
+          sourceType: "story_rule",
           sourceId: PROJECT_ID,
           sourceVersionId: "seed-r4",
           locator: "project-seed:boundaries",
         },
       ],
     });
+  });
+
+  it("keeps professional POV and style for recovery but delegates generation to visible preferences", () => {
+    const seed = deriveProfessionalProjectSeed({
+      seedId: "018f0f00-0000-7000-8000-000000000002",
+      projectName: "专业项目",
+      storyDirection: "调查旧钟楼",
+      outlineSynopsis: "从倒转钟摆开始调查。",
+      protagonist: "周望",
+      relationship: "",
+      worldBackground: "旧城",
+      pov: "第三人称限知",
+      style: "克制写实",
+      boundaries: "不新增超自然力量",
+      now: "2026-08-08T00:00:00.000Z",
+    });
+
+    const candidates = selectProjectSeedContextCandidates({
+      projectId: PROJECT_ID,
+      seed,
+      revision: 1,
+      createdAt: seed.createdAt,
+      updatedAt: seed.updatedAt,
+    });
+    const content = candidates.map((candidate) => candidate.content).join("\n");
+    expect(seed.pov.values).toEqual(["第三人称限知"]);
+    expect(seed.style.values).toEqual(["克制写实"]);
+    expect(content).not.toContain("第三人称限知");
+    expect(content).not.toContain("克制写实");
+    expect(content).toContain("不新增超自然力量");
   });
 });
