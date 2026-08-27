@@ -4526,8 +4526,7 @@ async function connectOllamaAfterDirectOpeningFailure(
   await user.click(screen.getByRole("radio", { name: /Ollama/u }));
   await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
   await screen.findByText("连接成功 · 已找到模型");
-  await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
-  await user.click(screen.getByRole("button", { name: "确认 1 次固定验证并继续" }));
+  await reviewAndConfirmFixedProbe(user);
   await waitFor(() => {
     expect(screen.queryByRole("heading", { name: "连接你的 AI" })).not.toBeInTheDocument();
   });
@@ -4546,11 +4545,22 @@ async function connectOllamaForAiOpening(user: ReturnType<typeof userEvent.setup
   await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
   await screen.findByText("连接成功 · 已找到模型");
   await user.click(screen.getByRole("radio", { name: /让 AI 起个头/u }));
-  await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
-  await user.click(screen.getByRole("button", { name: "确认 1 次固定验证并继续" }));
+  await reviewAndConfirmFixedProbe(user);
   await waitFor(() => {
     expect(screen.queryByRole("heading", { name: "连接你的 AI" })).not.toBeInTheDocument();
   });
+}
+
+async function reviewAndConfirmFixedProbe(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
+  expect(await screen.findByText("发送固定验证前确认", undefined, ASYNC_UI_TIMEOUT)).toBeVisible();
+  const confirm = await screen.findByRole(
+    "button",
+    { name: "确认 1 次固定验证并继续" },
+    ASYNC_UI_TIMEOUT,
+  );
+  await waitFor(() => expect(confirm).toBeEnabled(), ASYNC_UI_TIMEOUT);
+  await user.click(confirm);
 }
 
 async function confirmOpeningProviderAction(

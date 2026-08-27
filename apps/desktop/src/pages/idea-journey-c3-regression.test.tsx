@@ -22,6 +22,8 @@ import {
 import { RuntimeProvider } from "../runtime-context";
 import { IdeaJourneyPage } from "./idea-journey-page";
 
+const ASYNC_UI_TIMEOUT = Object.freeze({ timeout: 15_000 });
+
 describe("C3 opening journey durability regressions", () => {
   beforeEach(() => {
     window.localStorage.clear();
@@ -2094,7 +2096,14 @@ async function connectOllama(user: ReturnType<typeof userEvent.setup>): Promise<
   await screen.findByText("连接成功 · 已找到模型");
   await user.click(screen.getByRole("radio", { name: /让 AI 起个头/u }));
   await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
-  await user.click(screen.getByRole("button", { name: "确认 1 次固定验证并继续" }));
+  expect(await screen.findByText("发送固定验证前确认", undefined, ASYNC_UI_TIMEOUT)).toBeVisible();
+  const confirm = await screen.findByRole(
+    "button",
+    { name: "确认 1 次固定验证并继续" },
+    ASYNC_UI_TIMEOUT,
+  );
+  await waitFor(() => expect(confirm).toBeEnabled(), ASYNC_UI_TIMEOUT);
+  await user.click(confirm);
   await waitFor(() => {
     expect(screen.queryByRole("heading", { name: "连接你的 AI" })).not.toBeInTheDocument();
   });

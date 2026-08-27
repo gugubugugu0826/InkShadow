@@ -370,7 +370,9 @@ describe("quick AI connection drawer", () => {
 
     expect(await screen.findByLabelText("开书使用的模型")).toHaveDisplayValue("deepseek-v4-flash");
     await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
-    expect(screen.getByText(/“deepseek-v4-flash”发送固定短句/u)).toBeVisible();
+    expect(
+      await screen.findByText(/“deepseek-v4-flash”发送固定短句/u, undefined, ASYNC_UI_TIMEOUT),
+    ).toBeVisible();
     expect(screen.queryByText(/“deepseek-v4-flash-vision-exp”发送固定短句/u)).toBeNull();
   }, 30_000);
 
@@ -405,7 +407,13 @@ describe("quick AI connection drawer", () => {
     await user.click(screen.getByRole("button", { name: "测试连接并查找模型" }));
     await screen.findByText("连接成功 · 已找到模型", {}, ASYNC_UI_TIMEOUT);
     await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
-    await user.click(screen.getByRole("button", { name: "确认 1 次固定验证并继续" }));
+    const confirm = await screen.findByRole(
+      "button",
+      { name: "确认 1 次固定验证并继续" },
+      ASYNC_UI_TIMEOUT,
+    );
+    await waitFor(() => expect(confirm).toBeEnabled(), ASYNC_UI_TIMEOUT);
+    await user.click(confirm);
 
     expect(
       await screen.findByRole("heading", { name: "模型能力检查未发送" }, ASYNC_UI_TIMEOUT),
@@ -436,7 +444,12 @@ describe("quick AI connection drawer", () => {
     await screen.findByText("连接成功 · 已找到模型", {}, ASYNC_UI_TIMEOUT);
     await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
 
-    const confirm = screen.getByRole("button", { name: "确认 1 次固定验证并继续" });
+    const confirm = await screen.findByRole(
+      "button",
+      { name: "确认 1 次固定验证并继续" },
+      ASYNC_UI_TIMEOUT,
+    );
+    await waitFor(() => expect(confirm).toBeEnabled(), ASYNC_UI_TIMEOUT);
     fireEvent.click(confirm);
     fireEvent.click(confirm);
 
@@ -465,7 +478,13 @@ describe("quick AI connection drawer", () => {
     await screen.findByText("连接成功 · 已找到模型", {}, ASYNC_UI_TIMEOUT);
 
     await user.click(screen.getByRole("button", { name: "查看固定验证说明" }));
-    await user.click(screen.getByRole("button", { name: "确认 1 次固定验证并继续" }));
+    const confirm = await screen.findByRole(
+      "button",
+      { name: "确认 1 次固定验证并继续" },
+      ASYNC_UI_TIMEOUT,
+    );
+    await waitFor(() => expect(confirm).toBeEnabled(), ASYNC_UI_TIMEOUT);
+    await user.click(confirm);
 
     expect(
       await screen.findByRole("heading", { name: "模型能力检查结果待核对" }, ASYNC_UI_TIMEOUT),

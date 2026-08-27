@@ -37,7 +37,7 @@ it("restores a historical version, closes production SQLite, reopens it, and ren
   let reopenedExecutor: NodeSqliteExecutor | null = null;
   try {
     const baseRuntime = createDevelopmentRuntime(window.localStorage);
-    executor = new NodeSqliteExecutor(readCurrentLocalSchema(), databasePath);
+    executor = await createMigratedFileExecutor(databasePath);
     const repositories = createSqliteRepositories(executor, {
       acceptedVersionTaskFactory: createAcceptedVersionTaskFactory(baseRuntime.ids),
     });
@@ -262,6 +262,19 @@ function readCurrentLocalSchema(): string {
     }
   }
   return sql.join("\n");
+}
+
+async function createMigratedFileExecutor(databasePath: string): Promise<NodeSqliteExecutor> {
+  // Apply the complete schema in memory, then materialize one real file. This
+  // preserves the production file close/reopen boundary without making every
+  // historical DDL statement contend with Windows temporary-storage latency.
+  const template = new NodeSqliteExecutor(readCurrentLocalSchema());
+  try {
+    await template.execute("VACUUM INTO ?", [databasePath]);
+  } finally {
+    await template.close();
+  }
+  return new NodeSqliteExecutor("PRAGMA foreign_keys = ON;", databasePath);
 }
 
 function findWorkspaceRoot(): string {

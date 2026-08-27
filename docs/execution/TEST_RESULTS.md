@@ -4,6 +4,25 @@
 
 > 当前发布目标：`0.2.14`。本节只记录已经运行的本轮命令；历史数字不得替代当前结果，最终发布文案提交仍须重新运行完整候选链。
 
+## 2026-08-28 第二次远端同源门禁失败与稳定化
+
+提交 `400120f643f9fccfe929560a39e79f263a384b1d` 已从干净来源完成本地未签名候选并推送到 `main`。GitHub 持续集成运行 `33107276512` 中，`Cloud PostgreSQL and forced RLS` 与 `Windows native shell` 均成功；后者完整通过 Rust 格式、严格静态检查、测试、正式前端演练和未签名 NSIS 打包。`Type, lint, test and web build` 的构建、类型和规范检查成功，但桌面测试有两项失败，因此没有创建标签或 Release。
+
+第一项失败位于开书“说明准备失败”回归的共享连接辅助函数。测试点击“查看固定验证说明”后立即同步寻找确认按钮；产品此时正确处于防重复的“正在处理”状态，异步读取发送路线并计算披露指纹，完成后才会显示可用确认按钮。`user.click` 不会等待组件中被 `void` 启动的异步链，因此慢调度暴露了测试竞态。修复只让测试有界等待“发送固定验证前确认”出现且确认按钮可用，再执行明确确认；产品忙碌、禁用、确认前零发送和防双击逻辑均未修改。同型开书、C3 与快速连接测试一并采用相同等待合同。
+
+第二项失败位于真实文件 SQLite 版本恢复重开测试。旧夹具把 84 份当前迁移、约 672,898 字节 SQL 同步逐条写入 Windows 临时文件；结合该同步实现与修复前后对照，判定 Windows 临时存储上的同步迁移是主要耗时来源。该测试文件总耗时 107,674 毫秒，20 秒测试计时器只能在阻塞调用返回后报告超时。没有断言不匹配、文件权限错误或生产恢复死锁。修复沿用仓库既有模式：完整迁移先在内存执行，再用 `VACUUM INTO` 一次性物化空的真实文件；随后全部创建、编辑、保存、原子版本恢复、关闭、重开、正文、恢复稿和三代不可变版本断言保持原样，20 秒测试上限未放宽。
+
+| 范围                | 准确命令                                                                                                                                                                                                                                                            |  通过 | 失败 | 跳过 | 当前结果                                                  |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----: | ---: | ---: | --------------------------------------------------------- |
+| 四组直接回归        | `pnpm --filter @inkshadow/desktop exec vitest run src/pages/idea-journey-page.test.tsx src/pages/idea-journey-c3-regression.test.tsx src/components/quick-ai-connection-drawer.test.tsx src/pages/editor-version-restore-sqlite-reopen.test.tsx --reporter=verbose` |   124 |    0 |    0 | 开书 73、C3 30、连接抽屉 20、真实 SQLite 重开 1，全部通过 |
+| SQLite 重开连续验证 | 连续 10 次运行 `pnpm --filter @inkshadow/desktop exec vitest run src/pages/editor-version-restore-sqlite-reopen.test.tsx --reporter=dot`                                                                                                                            |    10 |    0 |    0 | 每轮测试主体约 2.25–2.95 秒；20 秒上限保持原值            |
+| 应用层版本恢复      | `pnpm --filter @inkshadow/application test -- tests/chapter-version-restore.test.ts`                                                                                                                                                                                |     7 |    0 |    0 | 原子恢复合同通过                                          |
+| 数据仓储与适配器    | `pnpm --filter @inkshadow/data test -- tests/sqlite-repositories.test.ts tests/tauri-sqlite.test.ts`                                                                                                                                                                |    52 |    0 |    0 | SQLite 仓储与 Tauri 适配合同通过                          |
+| 桌面端完整测试      | `pnpm --filter @inkshadow/desktop test`                                                                                                                                                                                                                             | 2,554 |    0 |    1 | 296 个文件；约 1,237.64 秒                                |
+| 桌面类型检查        | `pnpm --filter @inkshadow/desktop typecheck`                                                                                                                                                                                                                        |     1 |    0 |    0 | 通过                                                      |
+
+上述结果是修复后的本地证据。新的唯一提交仍须重新完成完整未签名候选链，并由该提交触发三项远端作业全部成功；运行 `33107276512` 保留为失败记录，不得用重新运行或旧安装包覆盖。
+
 ## 2026-08-28 首轮远端同源门禁失败与稳定化
 
 干净提交 `bd7e3cb96c970eb7c0bba53944401ee8dbcafc04` 的完整本地 `pnpm release:candidate:unsigned` 退出码为 0，随后安全推送到远端 `main`。同一提交的 GitHub 持续集成运行 `33101514463` 中，`Cloud PostgreSQL and forced RLS` 成功，但 `Type, lint, test and web build` 在数据维护套件失败，因此该提交停止在标签和 Release 之前。
